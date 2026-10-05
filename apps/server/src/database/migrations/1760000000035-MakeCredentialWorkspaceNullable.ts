@@ -1,9 +1,9 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Make `credentials.workspace_id` nullable so a NULL marks a GLOBAL
+ * Make `credentials.account_id` nullable so a NULL marks a GLOBAL
  * (instance-level) credential shared across every workspace (ticket
- * b00bff52). Mirrors the Agent.workspace_id nullable transition
+ * b00bff52). Mirrors the Agent.account_id nullable transition
  * (migrations 018/019).
  *
  * SQLite (dev) picks the nullable column up via synchronize=true on the
@@ -11,7 +11,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (production), where the documented risk is that synchronize won't issue
  * `DROP NOT NULL` against an existing column (see database.module.ts).
  *
- * Non-destructive: every existing row already carries a workspace_id, so
+ * Non-destructive: every existing row already carries a account_id, so
  * dropping the NOT NULL constraint changes no data. Idempotent — DROP NOT
  * NULL on an already-nullable column is a no-op.
  */
@@ -22,7 +22,7 @@ export class MakeCredentialWorkspaceNullable1760000000035 implements MigrationIn
     const isPostgres = queryRunner.connection.options.type === 'postgres';
     if (!isPostgres) return;
     await queryRunner.query(
-      'ALTER TABLE credentials ALTER COLUMN workspace_id DROP NOT NULL'
+      'ALTER TABLE credentials ALTER COLUMN account_id DROP NOT NULL'
     );
   }
 
@@ -32,9 +32,9 @@ export class MakeCredentialWorkspaceNullable1760000000035 implements MigrationIn
     // Re-asserting NOT NULL would fail if any global credential exists; drop
     // those rows first so the inverse is at least applicable. Global
     // credentials have no faithful per-workspace home to restore.
-    await queryRunner.query('DELETE FROM credentials WHERE workspace_id IS NULL');
+    await queryRunner.query('DELETE FROM credentials WHERE account_id IS NULL');
     await queryRunner.query(
-      'ALTER TABLE credentials ALTER COLUMN workspace_id SET NOT NULL'
+      'ALTER TABLE credentials ALTER COLUMN account_id SET NOT NULL'
     );
   }
 }

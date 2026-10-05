@@ -26,7 +26,7 @@ interface ViewerEntry {
   type: 'user' | 'agent';
   id: string;
   name: string;
-  workspace_id?: string;
+  account_id?: string;
   lastSeen: number;
 }
 
@@ -68,7 +68,7 @@ export class PresenceService implements OnModuleDestroy {
   }
 
   /** Heartbeat — refresh viewer's lastSeen, emitting only if this is a new viewer. */
-  ping(ticketId: string, viewer: { type: 'user' | 'agent'; id: string; name: string; workspaceId?: string }): void {
+  ping(ticketId: string, viewer: { type: 'user' | 'agent'; id: string; name: string; accountId?: string }): void {
     const key = `${viewer.type}:${viewer.id}`;
     let viewers = this.viewers.get(ticketId);
     const isNew = !viewers || !viewers.has(key);
@@ -80,7 +80,7 @@ export class PresenceService implements OnModuleDestroy {
       type: viewer.type,
       id: viewer.id,
       name: viewer.name,
-      workspace_id: viewer.workspaceId,
+      account_id: viewer.accountId,
       lastSeen: Date.now(),
     });
     if (isNew) this.emitFor(ticketId);
@@ -124,13 +124,13 @@ export class PresenceService implements OnModuleDestroy {
 
   private emitFor(ticketId: string): void {
     const viewers = this.viewers.get(ticketId);
-    // Pick a workspace_id from the first viewer if available — needed by the
+    // Pick a account_id from the first viewer if available — needed by the
     // event scope for client-side filtering. All viewers on the same ticket
     // are by definition in the same workspace, so any one works.
-    const workspaceId = viewers ? Array.from(viewers.values())[0]?.workspace_id : undefined;
+    const accountId = viewers ? Array.from(viewers.values())[0]?.account_id : undefined;
     activityEvents.emit('ticket_presence', {
       ticket_id: ticketId,
-      workspace_id: workspaceId,
+      account_id: accountId,
       viewers: viewers
         ? Array.from(viewers.values()).map(v => ({ type: v.type, id: v.id, name: v.name }))
         : [],

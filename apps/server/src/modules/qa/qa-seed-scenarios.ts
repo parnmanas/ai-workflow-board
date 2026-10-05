@@ -89,7 +89,7 @@ const BROWSER_DRIVER = 'browser';
  * `start_url` is env-specific (placeholder). `auth` documents how the driver gets a
  * session before navigating to authenticated routes — the reference helper logs in via
  * POST /api/auth/login and injects the returned token into localStorage (`auth_token`
- * + `currentWorkspaceId`) so the SPA boots authenticated. Routes use `{{placeholder}}`
+ * + `currentAccountId`) so the SPA boots authenticated. Routes use `{{placeholder}}`
  * tokens the agent fills from the run context. See apps/server/scripts/qa-visual-capture.mjs.
  */
 function browserDriverConfig(extra: Record<string, any> = {}): Record<string, any> {
@@ -101,7 +101,7 @@ function browserDriverConfig(extra: Record<string, any> = {}): Record<string, an
     auth: {
       method: 'token-inject',
       login_endpoint: '/api/auth/login',
-      local_storage_keys: ['auth_token', 'currentWorkspaceId'],
+      local_storage_keys: ['auth_token', 'currentAccountId'],
     },
     capture_helper: 'apps/server/scripts/qa-visual-capture.mjs',
     mimetypes: { screenshot: 'image/png', video: 'video/mp4' },
@@ -130,7 +130,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['lifecycle', 'tickets', 'status'],
     steps: [
-      step(0, 'Create an unassigned root ticket in To Do', 'Ticket created with status=todo, assignee=null, terminal_entered_at=null', 'create_ticket', { workspace_id: '{{workspace_id}}', status: 'todo', title: 'QA lifecycle probe' }),
+      step(0, 'Create an unassigned root ticket in To Do', 'Ticket created with status=todo, assignee=null, terminal_entered_at=null', 'create_ticket', { account_id: '{{account_id}}', status: 'todo', title: 'QA lifecycle probe' }),
       step(1, 'Read the ticket back', 'status == todo; tags/project_id echo what was sent', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
       step(2, 'Move the ticket to In Progress', 'Move succeeds; status == in_progress (no agent_trigger — there is no assignee)', 'move_ticket', { ticket_id: '{{ticket_id}}', status: 'in_progress' }),
       step(3, 'Move the ticket to Review', 'status == review', 'move_ticket', { ticket_id: '{{ticket_id}}', status: 'review' }),
@@ -152,12 +152,12 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['chat-rooms', 'attachments', 'pagination', 'search'],
     steps: [
-      step(0, 'Create a group chat room', 'Room created with the caller as participant', 'create_chat_room', { workspace_id: '{{workspace_id}}', type: 'group', name: 'QA chat probe' }),
+      step(0, 'Create a group chat room', 'Room created with the caller as participant', 'create_chat_room', { account_id: '{{account_id}}', type: 'group', name: 'QA chat probe' }),
       step(1, 'Add a second participant', 'Participant added; non-members must NOT receive room SSE', 'add_chat_participants', { room_id: '{{room_id}}', participants: [{ participant_type: 'agent', participant_id: '{{assignee_agent_id}}' }] }),
       step(2, 'Send a handful of messages so history is pageable', 'Each send returns a message id; last_message_at advances', 'send_chat_room_message', { room_id: '{{room_id}}', content: 'QA message {{n}}' }),
       step(3, 'Upload an evidence Resource then attach it to a message', 'Attachment owner transitions to chat_message; appears in history projection', 'add_chat_message_attachment', { room_id: '{{room_id}}', resource_id: '{{attachment_resource_id}}' }),
       step(4, 'Page the newest N messages then fetch older with a before-cursor', 'Pagination returns disjoint pages in order (dynamic loading)', 'get_chat_room_messages', { room_id: '{{room_id}}', limit: 3, before: '{{cursor}}' }),
-      step(5, 'Search the room for a keyword', 'Search returns only matching messages within the room scope', 'search_chat_messages', { workspace_id: '{{workspace_id}}', query: 'QA message' }),
+      step(5, 'Search the room for a keyword', 'Search returns only matching messages within the room scope', 'search_chat_messages', { account_id: '{{account_id}}', query: 'QA message' }),
     ],
   },
 
@@ -174,8 +174,8 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig({ requires_live_agent: true }),
     tags: ['mcp', 'sse', 'agent', 'roundtrip'],
     steps: [
-      step(0, 'Subscribe to events so the trigger and the agent reaction are observable', 'SSE stream open', 'subscribe_events', { workspace_id: '{{workspace_id}}' }),
-      step(1, 'Create a ticket in To Do assigned to a live agent runtime', 'Ticket exists with assignee set; the assignee is online', 'create_ticket', { workspace_id: '{{workspace_id}}', status: 'todo', title: 'QA roundtrip probe', prompt_text: 'Leave a short note, then move me to review.', assignee: '{{assignee_runtime}}' }),
+      step(0, 'Subscribe to events so the trigger and the agent reaction are observable', 'SSE stream open', 'subscribe_events', { account_id: '{{account_id}}' }),
+      step(1, 'Create a ticket in To Do assigned to a live agent runtime', 'Ticket exists with assignee set; the assignee is online', 'create_ticket', { account_id: '{{account_id}}', status: 'todo', title: 'QA roundtrip probe', prompt_text: 'Leave a short note, then move me to review.', assignee: '{{assignee_runtime}}' }),
       step(2, 'Confirm the dispatcher started it', 'Within a few seconds status == in_progress and an agent_trigger was delivered to the assignee', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
       step(3, 'Wait for the agent to react via MCP', 'A new comment from the agent appears AND status == review (SSE→MCP loop closed)', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
@@ -193,10 +193,10 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['actions', 'dispatch'],
     steps: [
-      step(0, 'Create an Action targeting the QA agent', 'Action persisted, enabled', 'save_action', { workspace_id: '{{workspace_id}}', name: 'QA probe action', target_agent_id: '{{assignee_agent_id}}', prompt: 'QA: respond with OK.' }),
+      step(0, 'Create an Action targeting the QA agent', 'Action persisted, enabled', 'save_action', { account_id: '{{account_id}}', name: 'QA probe action', target_agent_id: '{{assignee_agent_id}}', prompt: 'QA: respond with OK.' }),
       step(1, 'Read it back', 'get_action returns the saved definition', 'get_action', { action_id: '{{action_id}}' }),
       step(2, 'Run the action', 'run_action returns a run_id + room_id; first message posted to the room', 'run_action', { action_id: '{{action_id}}' }),
-      step(3, 'List run history', 'The new run is present, newest first, capped at max_runs', 'list_action_runs', { action_id: '{{action_id}}', workspace_id: '{{workspace_id}}' }),
+      step(3, 'List run history', 'The new run is present, newest first, capped at max_runs', 'list_action_runs', { action_id: '{{action_id}}', account_id: '{{account_id}}' }),
     ],
   },
 
@@ -211,10 +211,10 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['archive', 'tickets'],
     steps: [
-      step(0, 'Create a ticket to archive', 'Ticket exists', 'create_ticket', { workspace_id: '{{workspace_id}}', status: 'todo', title: 'QA archive probe' }),
+      step(0, 'Create a ticket to archive', 'Ticket exists', 'create_ticket', { account_id: '{{account_id}}', status: 'todo', title: 'QA archive probe' }),
       step(1, 'Archive it', 'archived_at stamped', 'archive_ticket', { ticket_id: '{{ticket_id}}' }),
-      step(2, 'List archived tickets', 'Ticket appears in the archived list', 'list_archived_tickets', { workspace_id: '{{workspace_id}}' }),
-      step(3, 'Confirm it is excluded from the live ticket list', 'list_tickets (archived excluded by default) no longer returns it', 'list_tickets', { workspace_id: '{{workspace_id}}', query: 'QA archive probe' }),
+      step(2, 'List archived tickets', 'Ticket appears in the archived list', 'list_archived_tickets', { account_id: '{{account_id}}' }),
+      step(3, 'Confirm it is excluded from the live ticket list', 'list_tickets (archived excluded by default) no longer returns it', 'list_tickets', { account_id: '{{account_id}}', query: 'QA archive probe' }),
       step(4, 'Unarchive it', 'archived_at cleared; ticket back in the pool', 'unarchive_ticket', { ticket_id: '{{ticket_id}}' }),
       step(5, 'Confirm restoration', 'get_ticket shows the ticket live again', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
@@ -232,7 +232,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['resources', 'attachments', 'media'],
     steps: [
-      step(0, 'Save a comment_attachment Resource in the workspace', 'Resource created with type=comment_attachment', 'save_resource', { workspace_id: '{{workspace_id}}', type: 'comment_attachment', name: 'qa-evidence.txt' }),
+      step(0, 'Save a comment_attachment Resource in the workspace', 'Resource created with type=comment_attachment', 'save_resource', { account_id: '{{account_id}}', type: 'comment_attachment', name: 'qa-evidence.txt' }),
       step(1, 'Read the resource back', 'get_resource returns metadata (id, mimetype, size)', 'get_resource', { resource_id: '{{resource_id}}' }),
       step(2, 'Attach it to a comment', 'add_comment with attachment_resource_ids succeeds', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: evidence attached', attachment_resource_ids: ['{{resource_id}}'] }),
       step(3, 'Reload the ticket', 'get_ticket shows the comment with its attachment hydrated', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
@@ -247,19 +247,19 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       'Drive the real AWB client UI with a headless-Chrome (browser) driver and capture a '
       + 'screenshot of each core screen as image/png evidence: the login page, the ticket pool, '
       + 'a ticket detail panel with comments, a chat room, the QA manager (table view), the '
-      + 'Workspace resource menus and the projects page. Unlike the awb-mcp scenarios this leaves real '
+      + 'Account resource menus and the projects page. Unlike the awb-mcp scenarios this leaves real '
       + 'pixels in the QA detail Gallery/Lightbox. Capture recipe: apps/server/scripts/qa-visual-capture.mjs.',
     qa_driver: BROWSER_DRIVER,
     qa_driver_config: browserDriverConfig(),
     tags: ['visual', 'ui', 'screenshots', 'gallery'],
     steps: [
       step(0, 'Navigate to the AWB login page and screenshot it', 'Login card ("Welcome Back" / email + password) renders; save as image/png', 'browser_screenshot', { route: '{{awb_base_url}}/', name: 'login.png', mimetype: 'image/png' }),
-      step(1, 'Log in, then screenshot the ticket pool (status lanes + ticket cards)', 'Tickets page shows the status lanes (Backlog…Done) and ticket cards', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets', name: 'tickets.png', mimetype: 'image/png' }),
-      step(2, 'Open a ticket detail panel (deep-link ?ticket=) and screenshot it', 'Ticket panel shows title, description, and comment thread', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets?ticket={{ticket_id}}', name: 'ticket-detail.png', mimetype: 'image/png' }),
-      step(3, 'Open the chat room view and screenshot it', 'Chat room list + message thread render', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/chat', name: 'chat.png', mimetype: 'image/png' }),
-      step(4, 'Open the Workspace QA page and screenshot it', 'QA scenario table shows Workspace and Global scenarios with last-run / pass-rate columns', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/qa', name: 'qa-manager.png', mimetype: 'image/png' }),
-      step(5, 'Open the Workspace Resources page and screenshot it', 'Resources grid renders Global and Workspace entries together', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/resources', name: 'resources.png', mimetype: 'image/png' }),
-      step(6, 'Open the Projects page and screenshot it', 'Project list renders with each project\'s repository and per-host folders', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/projects', name: 'projects.png', mimetype: 'image/png' }),
+      step(1, 'Log in, then screenshot the ticket pool (status lanes + ticket cards)', 'Tickets page shows the status lanes (Backlog…Done) and ticket cards', 'browser_screenshot', { route: '{{awb_base_url}}/tickets', name: 'tickets.png', mimetype: 'image/png' }),
+      step(2, 'Open a ticket detail panel (deep-link ?ticket=) and screenshot it', 'Ticket panel shows title, description, and comment thread', 'browser_screenshot', { route: '{{awb_base_url}}/tickets?ticket={{ticket_id}}', name: 'ticket-detail.png', mimetype: 'image/png' }),
+      step(3, 'Open the chat room view and screenshot it', 'Chat room list + message thread render', 'browser_screenshot', { route: '{{awb_base_url}}/chat', name: 'chat.png', mimetype: 'image/png' }),
+      step(4, 'Open the Account QA page and screenshot it', 'QA scenario table shows Account and Global scenarios with last-run / pass-rate columns', 'browser_screenshot', { route: '{{awb_base_url}}/qa', name: 'qa-manager.png', mimetype: 'image/png' }),
+      step(5, 'Open the Account Resources page and screenshot it', 'Resources grid renders Global and Account entries together', 'browser_screenshot', { route: '{{awb_base_url}}/resources', name: 'resources.png', mimetype: 'image/png' }),
+      step(6, 'Open the Projects page and screenshot it', 'Project list renders with each project\'s repository and per-host folders', 'browser_screenshot', { route: '{{awb_base_url}}/projects', name: 'projects.png', mimetype: 'image/png' }),
     ],
   },
 
@@ -277,9 +277,9 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     tags: ['visual', 'ui', 'video', 'screencast'],
     steps: [
       step(0, 'Launch headless Chrome and start screencast recording', 'CDP screencast started; frames accumulating', 'browser_start_video', { fps: 8 }),
-      step(1, 'Log in and land on the tickets page', 'Ticket pool renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets' }),
-      step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets?ticket={{ticket_id}}' }),
-      step(3, 'Visit the Workspace QA page', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/qa' }),
+      step(1, 'Log in and land on the tickets page', 'Ticket pool renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/tickets' }),
+      step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/tickets?ticket={{ticket_id}}' }),
+      step(3, 'Visit the Account QA page', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/qa' }),
       step(4, 'Stop recording, encode mp4, and record it as THIS step\'s artifact', 'Journey saved as a Resource (file_mimetype=video/mp4) and recorded via record_qa_step on this step so the inline-video tile renders (per-step, not run-level)', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4', record_on_step: 4 }),
     ],
   },
@@ -324,7 +324,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
 ];
 
 export interface BuildScenarioOptions {
-  workspace_id: string;
+  account_id: string;
   target_runtime: Record<string, any>;
   created_by?: string;
   /** Only seed scenarios whose `key` is in this list (default: all). */
@@ -396,7 +396,7 @@ export function buildScenarioCreatePayloads(opts: BuildScenarioOptions): Array<C
     : opts.on_failure_ticket;
   return QA_SEED_SCENARIOS.filter((s) => !wanted || wanted.has(s.key)).map((s) => ({
     _key: s.key,
-    workspace_id: opts.workspace_id,
+    account_id: opts.account_id,
     name: s.name,
     description: s.description,
     steps: s.steps,

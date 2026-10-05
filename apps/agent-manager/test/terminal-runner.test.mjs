@@ -12,7 +12,7 @@ import test from 'node:test';
 
 import { TerminalRunner } from '../dist/lib/terminal-runner.js';
 
-const CONFIG = { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' };
+const CONFIG = { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' };
 
 /** 서버 호출을 가로채 (url, body) 를 모은다. */
 function stubFetch(t) {

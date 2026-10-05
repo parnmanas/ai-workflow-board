@@ -11,10 +11,10 @@ export class ArtifactRefsController {
 
   @Post('resolve')
   resolve(
-    @Body() body: { workspace_id?: string; refs?: Array<{ type: ArtifactRefType; id: string }> },
+    @Body() body: { account_id?: string; refs?: Array<{ type: ArtifactRefType; id: string }> },
     @Req() req: Request,
   ) {
     const user = (req as any).currentUser as { id: string; role: string };
-    return this.refs.resolveMany(user, body?.workspace_id || '', body?.refs || []);
+    return this.refs.resolveMany(user, body?.account_id || '', body?.refs || []);
   }
 }

@@ -98,7 +98,7 @@ test('graph_ + native 호출이 섞인 턴 종료 시 집계된 카운트 하나
 
   await withFetch(fetch, async () => {
     mgr._onStdoutParsed(sess, toolUseLine([
-      { name: 'mcp__awb__graph_status', input: { workspace_id: 'w', resource_id: 'r' } },
+      { name: 'mcp__awb__graph_status', input: { account_id: 'w', resource_id: 'r' } },
       { name: 'Read', input: { file_path: '/x.ts' } },
       { name: 'Grep', input: { pattern: 'foo' } },
     ]), '');

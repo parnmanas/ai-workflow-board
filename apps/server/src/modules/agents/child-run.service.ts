@@ -34,24 +34,24 @@ export class ChildRunService {
     @InjectRepository(ChildRun) private readonly childRuns: Repository<ChildRun>,
   ) {}
 
-  list(workspaceId: string, parentRunId: string): Promise<ChildRun[]> {
+  list(accountId: string, parentRunId: string): Promise<ChildRun[]> {
     return this.childRuns.find({
-      where: { workspace_id: workspaceId, parent_run_id: parentRunId },
+      where: { account_id: accountId, parent_run_id: parentRunId },
       order: { started_at: 'ASC' },
       take: 250,
     });
   }
 
-  listForAgent(workspaceId: string, agentId: string): Promise<ChildRun[]> {
+  listForAgent(accountId: string, agentId: string): Promise<ChildRun[]> {
     return this.childRuns.find({
-      where: { workspace_id: workspaceId, parent_agent_id: agentId },
+      where: { account_id: accountId, parent_agent_id: agentId },
       order: { started_at: 'DESC' },
       take: 250,
     });
   }
 
   async start(args: {
-    workspaceId: string;
+    accountId: string;
     parentRunId: string;
     parentAgentId: string;
     childId: string;
@@ -62,11 +62,11 @@ export class ChildRunService {
     metadata?: unknown;
   }): Promise<ChildRun> {
     const identity = {
-      workspace_id: boundedText(args.workspaceId, 128),
+      account_id: boundedText(args.accountId, 128),
       parent_run_id: boundedText(args.parentRunId, 256),
       runtime_child_id: boundedText(args.childId, 160),
     };
-    if (!identity.workspace_id || !identity.parent_run_id || !identity.runtime_child_id) {
+    if (!identity.account_id || !identity.parent_run_id || !identity.runtime_child_id) {
       throw Object.assign(new Error('ChildRun identity is required'), {
         status: 400,
         code: 'child_run_identity_required',
@@ -90,7 +90,7 @@ export class ChildRunService {
   }
 
   async finish(args: {
-    workspaceId: string;
+    accountId: string;
     parentRunId: string;
     childId: string;
     status: 'completed' | 'failed' | 'cancelled';
@@ -99,7 +99,7 @@ export class ChildRunService {
   }): Promise<ChildRun> {
     const child = await this.childRuns.findOne({
       where: {
-        workspace_id: args.workspaceId,
+        account_id: args.accountId,
         parent_run_id: args.parentRunId,
         runtime_child_id: args.childId,
       },

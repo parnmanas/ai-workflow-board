@@ -15,12 +15,12 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * commit the reused exe corresponded to.
  *
  * Conventions match the rest of the entity layer (QaRun/QaScenario):
- *   - uuid PK, varchar workspace_id, @Create/@UpdateDateColumn.
+ *   - uuid PK, varchar account_id, @Create/@UpdateDateColumn.
  *   - `status` is a plain varchar + a TS union alias (NOT a TypeORM enum column),
  *     so sqlite (dev) and Postgres (prod) stay schema-sync-safe under
  *     `synchronize: true` (db.ts D-01).
  *
- * Lookup identity is `(workspace_id, repo_key, target, commit_sha[, host])`.
+ * Lookup identity is `(account_id, repo_key, target, commit_sha[, host])`.
  * `repo_key` is a normalized repo identity (see buildRepoKey in
  * common/build-artifact-options.ts) so artifacts are SHARED across scenarios /
  * profiles that point at the same repo — the same-machine reuse ticket item (#5).
@@ -29,15 +29,15 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  */
 @Entity('build_artifacts')
 // Freshness lookup — "do I have an artifact for THIS commit+target?"
-@Index(['workspace_id', 'repo_key', 'target', 'commit_sha'])
+@Index(['account_id', 'repo_key', 'target', 'commit_sha'])
 // Latest-ok lookup — newest usable artifact for a repo+target.
-@Index(['workspace_id', 'repo_key', 'target', 'status', 'built_at'])
+@Index(['account_id', 'repo_key', 'target', 'status', 'built_at'])
 export class BuildArtifact {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // Normalized repo identity — the SHARE key. Derived at write time from
   // repo_resource_id || repo_url via buildRepoKey(). Two scenarios pointing at

@@ -480,7 +480,7 @@ test('agent-manager package.json declares the repository provenance verifies aga
 // ─────────────────────────────────────────────────────────────────────────────
 
 // 루트는 `private: true` 지만 `server` / `client` 워크스페이스는 아무 표시가
-// 없었다. `npm publish --workspaces` 한 번이면(또는 워크스페이스 안에서 무심코
+// 없었다. `npm publish --accounts` 한 번이면(또는 워크스페이스 안에서 무심코
 // 친 `npm publish` 한 번이면) 발행 의도가 없는 두 패키지가 공개 레지스트리로
 // 나간다 — 둘 다 `files` 필드도 없어 tarball 은 디렉터리 전체가 된다.
 // `private: true` 는 npm 이 publish 를 하드 거부하게 만드는 유일한 in-repo 통제라,

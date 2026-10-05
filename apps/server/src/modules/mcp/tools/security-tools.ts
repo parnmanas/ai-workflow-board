@@ -37,7 +37,7 @@ import type { ToolContext } from './context';
 function profileToJson(p: SecurityProfile) {
   return {
     id: p.id,
-    workspace_id: p.workspace_id,
+    account_id: p.account_id,
     name: p.name,
     description: p.description,
     checklist: p.checklist ?? [],
@@ -68,7 +68,7 @@ function runToJson(r: SecurityRun) {
   return {
     id: r.id,
     profile_id: r.profile_id,
-    workspace_id: r.workspace_id,
+    account_id: r.account_id,
     status: r.status,
     room_id: r.room_id,
     findings: r.findings ?? [],
@@ -90,7 +90,7 @@ function batchToJson(b: SecurityRunBatch) {
   const ids = b.profile_ids ?? [];
   return {
     id: b.id,
-    workspace_id: b.workspace_id,
+    account_id: b.account_id,
     profile_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -153,12 +153,12 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'list_security_profiles',
     'List reusable security-inspection profiles in a workspace.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ workspace_id }) => {
+    async ({ account_id }) => {
       const repo = dataSource.getRepository(SecurityProfile);
       const qb = repo.createQueryBuilder('p')
-        .where('p.workspace_id = :ws', { ws: workspace_id });
+        .where('p.account_id = :ws', { ws: account_id });
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return ok(rows.map(profileToJson));
     },
@@ -185,7 +185,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'baseline so the next run only diffs baseline..HEAD. `target_resource_id` points at a repo ' +
     'Resource to inspect, or omit for AWB\'s own codebase.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       name: z.string().describe('Profile name (required)'),
       description: z.string().optional(),
       checklist: z.array(checklistItemSchema).optional().describe('Checklist items to inspect against'),
@@ -209,7 +209,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       const caller = getCallerAgent(extra);
       try {
         const row = await securityProfileService.create({
-          workspace_id: args.workspace_id,
+          account_id: args.account_id,
           name: args.name,
           description: args.description,
           checklist: args.checklist,
@@ -238,12 +238,12 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'update_security_profile',
-    'Update a security-inspection profile. Only the provided fields change. `workspace_id` is ' +
+    'Update a security-inspection profile. Only the provided fields change. `account_id` is ' +
     'required for scope safety. Pass `last_passed_commit: ""` to reset the incremental baseline ' +
     '(force a full re-scan on the next run).',
     {
       profile_id: z.string().describe('SecurityProfile ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       name: z.string().optional(),
       description: z.string().optional(),
       checklist: z.array(checklistItemSchema).optional(),
@@ -263,10 +263,10 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),
     },
-    async ({ profile_id, workspace_id, ...patch }) => {
+    async ({ profile_id, account_id, ...patch }) => {
       if (!securityProfileService) return err('security profile service unavailable in this MCP context');
       try {
-        const row = await securityProfileService.update(profile_id, workspace_id, patch as any);
+        const row = await securityProfileService.update(profile_id, account_id, patch as any);
         return ok(profileToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to update security profile');
@@ -279,12 +279,12 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'Delete a security-inspection profile and cascade-delete all its runs (and the chat room each run created).',
     {
       profile_id: z.string().describe('SecurityProfile ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ profile_id, workspace_id }) => {
+    async ({ profile_id, account_id }) => {
       if (!securityProfileService) return err('security profile service unavailable in this MCP context');
       try {
-        await securityProfileService.remove(profile_id, workspace_id);
+        await securityProfileService.remove(profile_id, account_id);
         return ok({ success: true, id: profile_id });
       } catch (e: any) {
         return err(e?.message || 'Failed to delete security profile');
@@ -351,13 +351,13 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'with save_resource + attach_security_artifact.',
     {
       run_id: z.string().describe('SecurityRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       finding: findingSchema.describe('The finding to record'),
     },
-    async ({ run_id, workspace_id, finding }) => {
+    async ({ run_id, account_id, finding }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       try {
-        const row = await securityRunService.recordFindings(run_id, workspace_id, [finding]);
+        const row = await securityRunService.recordFindings(run_id, account_id, [finding]);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to record security finding');
@@ -370,13 +370,13 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'Attach one or more artifact Resource ids (report/SBOM/dump) to a SecurityRun at the run level.',
     {
       run_id: z.string().describe('SecurityRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       resource_ids: z.array(z.string()).describe('Resource ids to attach'),
     },
-    async ({ run_id, workspace_id, resource_ids }) => {
+    async ({ run_id, account_id, resource_ids }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       try {
-        const row = await securityRunService.attachArtifact(run_id, workspace_id, resource_ids);
+        const row = await securityRunService.attachArtifact(run_id, account_id, resource_ids);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to attach security artifact');
@@ -393,16 +393,16 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'from incremental). Stamps finished_at.',
     {
       run_id: z.string().describe('SecurityRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       status: z.enum(['passed', 'failed', 'error']).describe('Final run status'),
       scanned_commit: z.string().optional().describe('Worktree HEAD SHA inspected (becomes the new baseline on a PASS)'),
       scope_used: z.enum(['incremental', 'full']).optional().describe('Scope actually used (report "full" if promoted)'),
       summary: z.string().optional().describe('Human-readable run summary (counts by severity + headline risks)'),
     },
-    async ({ run_id, workspace_id, status, scanned_commit, scope_used, summary }) => {
+    async ({ run_id, account_id, status, scanned_commit, scope_used, summary }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       try {
-        const row = await securityRunService.completeRun(run_id, workspace_id, status, {
+        const row = await securityRunService.completeRun(run_id, account_id, status, {
           summary,
           scannedCommit: scanned_commit,
           scopeUsed: scope_used,
@@ -420,13 +420,13 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'findings, scanned_commit/baseline_commit/scope_used for comparison across re-runs.',
     {
       profile_id: z.string().describe('SecurityProfile ID'),
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       limit: z.number().optional().describe('Max rows (default 20, cap 100)'),
     },
-    async ({ profile_id, workspace_id, limit }) => {
+    async ({ profile_id, account_id, limit }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       try {
-        const rows = await securityRunService.listRuns(profile_id, workspace_id, limit ?? 20);
+        const rows = await securityRunService.listRuns(profile_id, account_id, limit ?? 20);
         return ok(rows.map(runToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list security runs');
@@ -439,12 +439,12 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'Get a single security run with its findings and accumulated artifact_resource_ids.',
     {
       run_id: z.string().describe('SecurityRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ run_id, workspace_id }) => {
+    async ({ run_id, account_id }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       try {
-        const row = await securityRunService.getRun(run_id, workspace_id);
+        const row = await securityRunService.getRun(run_id, account_id);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'security run not found');
@@ -458,23 +458,23 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'start_security_batch',
     'Start a SEQUENTIAL batch of several security inspections ("수동 전체 점검") — profile N+1 only ' +
     'dispatches after profile N reaches a terminal status (passed/failed/error), never all at once. ' +
-    'Pass an ordered `profile_ids` list, OR `all: true` to expand to every enabled profile in the Workspace ' +
+    'Pass an ordered `profile_ids` list, OR `all: true` to expand to every enabled profile in the Account ' +
     'RESOLVED AT DISPATCH TIME (so ' +
     'profile add/remove is reflected automatically). `stop_on_fail` (default false) halts the batch on ' +
     'the first non-passed run. Returns the batch with current_index/total + pass/fail rollup; poll ' +
     'get_security_batch for progress.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       profile_ids: z.array(z.string()).optional().describe('Ordered profile ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled profile in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
     },
-    async ({ workspace_id, profile_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+    async ({ account_id, profile_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const batch = await securityRunService.startBatch({
-          workspaceId: workspace_id,
+          accountId: account_id,
           profileIds: profile_ids,
           all: !!all,
           stopOnFail: !!stop_on_fail,
@@ -494,12 +494,12 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'status (running/done/aborted), and the passed/failed/errored rollup.',
     {
       batch_id: z.string().describe('SecurityRunBatch ID'),
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ batch_id, workspace_id }) => {
+    async ({ batch_id, account_id }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       try {
-        const batch = await securityRunService.getBatch(batch_id, workspace_id);
+        const batch = await securityRunService.getBatch(batch_id, account_id);
         return ok(batchToJson(batch));
       } catch (e: any) {
         return err(e?.message || 'security batch not found');

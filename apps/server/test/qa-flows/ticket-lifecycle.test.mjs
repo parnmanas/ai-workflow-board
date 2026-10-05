@@ -24,7 +24,7 @@ import {
   createAgent,
   createApiKey,
   createUser,
-  createWorkspace,
+  createAccount,
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
@@ -34,7 +34,7 @@ const gdst = modules.getDataSourceToken;
 const ds = app.get(gdst());
 const ticketRepo = ds.getRepository('Ticket');
 
-const ws = await createWorkspace(app, gdst, 'lifecycle');
+const ws = await createAccount(app, gdst, 'lifecycle');
 const user = await createUser(app, gdst, { name: 'driver' });
 const token = app.get(modules.AuthService).createSession(user.id);
 
@@ -44,7 +44,7 @@ const worker = await createAgent(app, gdst, ws.id, { name: 'worker', runtime: tr
 const planner = await createAgent(app, gdst, ws.id, { name: 'planner', runtime: true });
 
 const makeAgent = async (name, agent) => {
-  const key = await createApiKey(app, gdst, agent.id, { workspaceId: ws.id, label: name });
+  const key = await createApiKey(app, gdst, agent.id, { accountId: ws.id, label: name });
   return new VirtualAgent({
     name,
     agentId: agent.id,
@@ -70,7 +70,7 @@ test.after(async () => {
 async function api(method, path, body) {
   const res = await fetch(`http://localhost:${port}/api${path}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': ws.id },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -81,14 +81,14 @@ async function api(method, path, body) {
 
 const settle = (ms = 400) => new Promise((r) => setTimeout(r, ms));
 const row = (id) => ticketRepo.findOneBy({ id });
-const listIds = async (query = '') => (await api('GET', `/workspaces/${ws.id}/tickets${query}`)).body.tickets.map((t) => t.id);
+const listIds = async (query = '') => (await api('GET', `/accounts/${ws.id}/tickets${query}`)).body.tickets.map((t) => t.id);
 
 let ticket;
 let children;
 
 test('REST: a backlog ticket with subtasks is created and never dispatched', async () => {
-  step('POST /workspaces/:wsId/tickets in backlog');
-  const res = await api('POST', `/workspaces/${ws.id}/tickets`, {
+  step('POST /accounts/:wsId/tickets in backlog');
+  const res = await api('POST', `/accounts/${ws.id}/tickets`, {
     title: 'Lifecycle test ticket',
     prompt_text: 'Please progress me through the statuses.',
     status: 'backlog',
@@ -227,7 +227,7 @@ test('MCP: an agent creates, starts, finishes, archives and restores its own tic
   });
   assert.ok(!created.isError, JSON.stringify(created));
   assert.equal(created.status, 'backlog');
-  assert.equal(created.workspace_id, ws.id, 'defaults to the caller workspace');
+  assert.equal(created.account_id, ws.id, 'defaults to the caller workspace');
   assert.equal(created.assignee_key, plannerKey);
   assert.deepEqual(created.tags, ['lifecycle', 'mcp']);
   assert.deepEqual(created.children.map((c) => c.title), ['investigate']);

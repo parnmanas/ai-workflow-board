@@ -22,7 +22,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
-import { createUser, createWorkspace, createApiKey } from '../helpers/fixtures.mjs';
+import { createUser, createAccount, createApiKey } from '../helpers/fixtures.mjs';
+import { ReBACService } from '../../dist/services/rebac.service.js';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -68,14 +69,19 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   const runner = app.get(services.OrchestrationRunnerService);
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'mission-reopen');
-  const other = await createWorkspace(app, getDataSourceToken, 'mission-reopen-other');
+  const ws = await createAccount(app, getDataSourceToken, 'mission-reopen');
+  const other = await createAccount(app, getDataSourceToken, 'mission-reopen-other');
   const operator = await createUser(app, getDataSourceToken, { name: 'reopen-operator' });
   const token = app.get(AuthService).createSession(operator.id);
-  const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id };
+  const deniedUser = await createUser(app, getDataSourceToken, { name: 'other-account-only', role: 'user' });
+  await ds.getRepository('User').update(deniedUser.id, { permissions: JSON.stringify(['admin.actions']) });
+  await app.get(ReBACService).grant({ type: 'user', id: deniedUser.id }, 'member', { type: 'account', id: other.id });
+  const deniedAuthorization = `Bearer ${app.get(AuthService).createSession(deniedUser.id)}`;
+
+  const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': ws.id };
 
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Reopen squad',
     team: { max_parallel_steps: 2, created_by: HUMAN.id },
     members: [{ role_label: 'builder' }],
@@ -83,8 +89,8 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   const lead = squad.orchestrator;
   const worker = squad.member('builder');
 
-  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label: 'lead' });
-  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { workspaceId: ws.id, label: 'worker' });
+  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label: 'lead' });
+  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { accountId: ws.id, label: 'worker' });
   const leadMcp = new McpClient({ baseUrl: base, apiKey: leadKey.raw_key });
   const workerMcp = new McpClient({ baseUrl: base, apiKey: workerKey.raw_key });
   t.after(() => {
@@ -94,7 +100,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
 
   logStep('미션을 한 라운드 돌려 실제로 완료시킨다');
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Reopen mission',
     objective: 'ship v1',
@@ -137,7 +143,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   await fetch(`${base}/api/orchestration/missions/${mission.id}/join-conversation`, {
     method: 'POST',
     headers: H,
-    body: JSON.stringify({ workspace_id: ws.id }),
+    body: JSON.stringify({ account_id: ws.id }),
   });
   const said = await fetch(`${base}/api/chat-rooms/${detail.room_id}/messages`, {
     method: 'POST',
@@ -214,7 +220,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
 
   logStep('취소된 미션도 되살아나지만, 취소된 라운드의 좀비는 여전히 보고할 수 없다');
   const cancelled = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Cancelled mission',
     objective: 'stop halfway',
@@ -246,7 +252,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   const restReopen = await fetch(`${base}/api/orchestration/missions/${cancelled.id}/reopen`, {
     method: 'POST',
     headers: H,
-    body: JSON.stringify({ workspace_id: ws.id, reason: '사람이 직접 되살린다' }),
+    body: JSON.stringify({ account_id: ws.id, reason: '사람이 직접 되살린다' }),
   });
   // 형제 라우트(cancel/pause/resume)와 같은 Nest 기본 201 — res.json() 이 상태를 바꾸지 않는다.
   assert.equal(restReopen.status, 201);
@@ -255,14 +261,14 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   await runner.completeMission(cancelled.id, { agentId: lead.id }, { status: 'failed', summary: '다시 접는다' });
   const wrongWs = await fetch(`${base}/api/orchestration/missions/${cancelled.id}/reopen`, {
     method: 'POST',
-    headers: { ...H, 'X-Workspace-Id': other.id },
-    body: JSON.stringify({ workspace_id: other.id }),
+    headers: { ...H, Authorization: deniedAuthorization, 'X-Account-Id': other.id },
+    body: JSON.stringify({ account_id: other.id }),
   });
-  assert.equal(wrongWs.status, 404, '다른 워크스페이스에서는 미션 자체가 보이지 않는다');
+  assert.equal(wrongWs.status, 403, '실제 소유 계정에 접근할 수 없는 사용자는 미션을 재개할 수 없다');
   const anon = await fetch(`${base}/api/orchestration/missions/${cancelled.id}/reopen`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace_id: ws.id }),
+    body: JSON.stringify({ account_id: ws.id }),
   });
   assert.ok(anon.status === 401 || anon.status === 403, `인증 없이는 되살릴 수 없다 (got ${anon.status})`);
 

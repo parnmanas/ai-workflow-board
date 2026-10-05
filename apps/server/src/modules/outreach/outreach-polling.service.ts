@@ -5,14 +5,14 @@
  * OnModuleInit, torn down in OnModuleDestroy, with an env on/off switch and a
  * clamped cadence, and `runOnce(now)` exposed as the deterministic test seam.
  *
- * D2 rejected WorkspaceSchedule/Action cron for this: both hard-code their
+ * D2 rejected AutomationSchedule/Action cron for this: both hard-code their
  * dispatch as "create a chat room → seat an agent → sendMessage", with no path
  * to call a plain deterministic server method — which is what a fast,
  * cursor-based, unit-testable poll needs (this is the SAME reason
  * QaSchedule/SecuritySchedule roll their own tick loop instead of reusing
  * those two). So OutreachChannel carries its own cursor columns directly
  * (poll_interval_ms/poll_cron/next_poll_at/last_poll_at) rather than pointing
- * at a WorkspaceSchedule row, and this service's ONLY job is scheduling —
+ * at a AutomationSchedule row, and this service's ONLY job is scheduling —
  * every actual poll is one call to OutreachIngestService.pollChannel.
  */
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';

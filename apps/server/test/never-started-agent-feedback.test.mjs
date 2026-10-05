@@ -225,7 +225,7 @@ test('maybeHandleUnreachableTicket — reachable agent dispatches normally (no f
     agentStatus: agentStatusFake(), activity, roomMessaging: roomMessagingFake(),
     connectivity: connectivityOf([HOST_BOB]),
   });
-  const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', workspace_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
+  const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', account_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
   assert.equal(handled, false, 'reachable agent → not handled → caller emits normally');
   assert.equal(activity.logged.length, 0, 'no dispatch_deferred for a reachable agent');
 });
@@ -238,7 +238,7 @@ test('classify — live-instance-supervised identity with no connectivity is rea
   });
   const cls = await svc.classify(HOST_BOB);
   assert.equal(cls.reachable, true, 'a supervising live instance makes it reachable');
-  const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', workspace_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
+  const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', account_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
   assert.equal(handled, false, 'reachable → caller dispatches normally, no feedback');
   assert.equal(activity.logged.length, 0, 'no dispatch_deferred for a supervised identity');
 });
@@ -251,7 +251,7 @@ test('maybeHandleUnreachableTicket — offline Host: classified-failure feedback
       hosts: [{ id: HOST_BOB, name: 'Rolf' }], instances: [],
       agentStatus, activity, roomMessaging: roomMessagingFake(),
     });
-    const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', workspace_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
+    const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', account_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
     assert.equal(handled, true, 'unreachable → feedback handled (emit still proceeds additively)');
   });
   assert.equal(cmds.length, 0, 'this layer never emits spawn_agent');
@@ -274,7 +274,7 @@ test('maybeHandleUnreachableTicket — unknown identity: handled, silent (nothin
     hosts: [], instances: [],
     agentStatus, activity, roomMessaging: roomMessagingFake(),
   });
-  const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', workspace_id: 'w' }, agentId: UNKNOWN_ID, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
+  const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', account_id: 'w' }, agentId: UNKNOWN_ID, role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
   assert.equal(handled, true, 'vanished identity → handled (skip), no target to start');
   assert.equal(agentStatus.getStartError(UNKNOWN_ID), undefined, 'no marker for a non-existent identity');
   assert.equal(activity.logged.length, 0, 'no feedback when there is nothing to start');
@@ -287,7 +287,7 @@ test('ticket feedback is debounced (supervisor/reconciler re-push does not spam)
     hosts: [{ id: HOST_BOB, name: 'Rolf' }], instances: [],
     agentStatus, activity, roomMessaging: roomMessagingFake(),
   });
-  const args = { ticket: { id: 't1', workspace_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'supervisor', triggeredBy: 'system' };
+  const args = { ticket: { id: 't1', account_id: 'w' }, agentId: HOST_BOB, role: 'assignee', triggerSource: 'supervisor', triggeredBy: 'system' };
   await svc.maybeHandleUnreachableTicket(args);
   await svc.maybeHandleUnreachableTicket(args); // immediate re-push
   await svc.maybeHandleUnreachableTicket(args);
@@ -309,7 +309,7 @@ test('chat path — unreachable identity gets a room system message with the rea
     });
     svc.onModuleInit();
     // Fire the internal signal RoomMessagingService emits and let the handler run.
-    activityEvents.emit(AGENT_AUTOSTART_REQUESTED, { agent_id: HOST_BOB, agent_name: 'Rolf', room_id: 'room-1', workspace_id: 'w', source: 'chat' });
+    activityEvents.emit(AGENT_AUTOSTART_REQUESTED, { agent_id: HOST_BOB, agent_name: 'Rolf', room_id: 'room-1', account_id: 'w', source: 'chat' });
     await new Promise((r) => setTimeout(r, 20)); // handler is async off the bus
     svc.onModuleDestroy();
   });
@@ -332,7 +332,7 @@ test('chat path — reachable agent produces NO system message (no false noise)'
     connectivity: connectivityOf([HOST_BOB]),
   });
   svc.onModuleInit();
-  activityEvents.emit(AGENT_AUTOSTART_REQUESTED, { agent_id: HOST_BOB, agent_name: 'Rolf', room_id: 'room-1', workspace_id: 'w', source: 'chat' });
+  activityEvents.emit(AGENT_AUTOSTART_REQUESTED, { agent_id: HOST_BOB, agent_name: 'Rolf', room_id: 'room-1', account_id: 'w', source: 'chat' });
   await new Promise((r) => setTimeout(r, 20));
   svc.onModuleDestroy();
   assert.equal(roomMessaging.sent.length, 0, 'reachable agent → the hub stays silent (classify is the authority)');

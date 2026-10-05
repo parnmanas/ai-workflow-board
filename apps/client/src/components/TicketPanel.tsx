@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Ticket, TicketCard, TicketStatus, RuntimeParticipant, Channel, ActivityLog, Comment, CommentType, User, Resource, TicketPrerequisiteRow, Action } from '../types';
-import { api, getActiveWorkspaceId, rawResourceUrl } from '../api';
+import { api, getActiveAccountId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
@@ -40,7 +40,7 @@ export interface TicketPanelProps {
   /** Root tickets of the workspace pool currently loaded by the page — next-ticket/prerequisite/"link existing subtask" pickers + tag suggestions. */
   workspaceTickets?: TicketCard[];
   typingIndicators: Record<string, string | null>;
-  workspaceId?: string;
+  accountId?: string;
   onClose: () => void;
   // May be sync or async. Used as the Save fallback when onSaveDraft is absent.
   onUpdate: (id: string, data: Record<string, any>) => void | Promise<void>;
@@ -135,7 +135,7 @@ type StagedAttachment = {
 };
 
 export default function TicketPanel({
-  ticket, agents, channels, workspaceTickets, typingIndicators, workspaceId,
+  ticket, agents, channels, workspaceTickets, typingIndicators, accountId,
   onClose, onUpdate, onMove, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
   scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
@@ -271,7 +271,7 @@ export default function TicketPanel({
     setNavStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
   }, []);
 
-  const wsId = workspaceId || activeTicket.workspace_id || getActiveWorkspaceId() || '';
+  const wsId = activeTicket.account_id || accountId || getActiveAccountId() || '';
   const isRoot = activeTicket.depth === 0 && !activeTicket.parent_id;
 
   // In-flight flags below are keyed by ticket id: the panel is reused across
@@ -701,7 +701,7 @@ export default function TicketPanel({
   }, [requestClose]);
 
   // Load the Action candidates for the "Run on Done" picker. Reusable Actions
-  // are Workspace-scoped, and per-ticket dispatch checks workspace + enabled.
+  // are Account-scoped, and per-ticket dispatch checks workspace + enabled.
   useEffect(() => {
     if (!wsId) {
       setActionOptions([]);
@@ -771,14 +771,14 @@ export default function TicketPanel({
     setResourcePickerOpen(true);
     setResourcePickerLoading(true);
     setResourcePickerError(null);
-    const ws = (activeTicket as any).workspace_id || workspaceId;
+    const ws = (activeTicket as any).account_id || accountId;
     if (!ws) {
-      setResourcePickerError('워크스페이스를 확인할 수 없습니다.');
+      setResourcePickerError('소유 계정을 확인할 수 없습니다.');
       setResourcePickerLoading(false);
       return;
     }
     try {
-      // Workspace files first, then existing comment attachments — de-duped
+      // Account files first, then existing comment attachments — de-duped
       // by id, files with bytes only.
       const wsRes = await api.listResources(ws).catch(() => [] as Resource[]);
       const seen = new Set<string>();
@@ -793,7 +793,7 @@ export default function TicketPanel({
     } finally {
       setResourcePickerLoading(false);
     }
-  }, [activeTicket, workspaceId]);
+  }, [activeTicket, accountId]);
 
   const addResourceReference = (r: Resource) => {
     setCommentAttachments(prev => {
@@ -963,15 +963,15 @@ export default function TicketPanel({
     // the staged items so the user can retry instead of losing the comment.
     let resourceIds: string[] = [];
     if (commentAttachments.length > 0) {
-      const ws = (activeTicket as any).workspace_id || workspaceId;
-      if (!ws) { showToast('워크스페이스를 확인할 수 없어 첨부를 업로드할 수 없습니다.', 'error'); return; }
+      const ws = (activeTicket as any).account_id || accountId;
+      if (!ws) { showToast('소유 계정을 확인할 수 없어 첨부를 업로드할 수 없습니다.', 'error'); return; }
       setCommentSending(true);
       try {
         for (const att of commentAttachments) {
           if (att.resourceId) { resourceIds.push(att.resourceId); continue; }
           if (att.file) {
             const uploaded = await api.uploadResourceFile(att.file, {
-              workspace_id: ws,
+              account_id: ws,
               type: 'comment_attachment',
             });
             resourceIds.push(uploaded.id);
@@ -1090,10 +1090,10 @@ export default function TicketPanel({
     const onUnload = () => {
       try {
         const token = localStorage.getItem('auth_token');
-        const wsId = getActiveWorkspaceId();
+        const wsId = activeTicket.account_id || accountId || getActiveAccountId();
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers.Authorization = `Bearer ${token}`;
-        if (wsId) headers['X-Workspace-Id'] = wsId;
+        if (wsId) headers['X-Account-Id'] = wsId;
         const baseUrl = window.location.hostname === 'localhost'
           ? `${window.location.protocol}//${window.location.hostname}:7701`
           : '';
@@ -1678,7 +1678,7 @@ export default function TicketPanel({
                   assignee={draftAssignee}
                   unsaved={!!draft.assignee && !runtimeSpecEqual(draft.assignee.value, activeTicket.assignee)}
                   project={draftProject}
-                  workspaceId={wsId}
+                  accountId={wsId}
                   disabled={savingDraft}
                   onChange={(next: RuntimeSpecDraft | null) => setDraftField('assignee', { value: next })}
                   runNote={runNote}

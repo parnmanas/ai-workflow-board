@@ -62,7 +62,7 @@ async function fixture(t) {
     },
   };
   const key = await keys.save(keys.create({ name: 'agent-manager:legacy', key: randomUUID(),
-    agent_id: MANAGER_ID, workspace_id: 'ws-1' }));
+    agent_id: MANAGER_ID, account_id: 'ws-1' }));
   const child = await keys.save(keys.create({ name: 'child', key: randomUUID(), agent_id: 'child' }));
   return { ds, runner, keys, key, child };
 }
@@ -74,7 +74,7 @@ test('Agent deletion preserves pre-P0 manager identity and key without promoting
   assert.equal(await runner.hasTable('agents'), false);
   const host = await ds.getRepository(RuntimeHost).findOneByOrFail({ id: MANAGER_ID });
   assert.equal(host.name, 'Legacy manager');
-  assert.equal(host.workspace_id, 'ws-1');
+  assert.equal(host.account_id, 'ws-1');
   assert.equal((await keys.findOneByOrFail({ id: key.id })).host_id, host.id);
   assert.equal((await keys.findOneByOrFail({ id: child.id })).host_id, null);
   await migration.up(runner);

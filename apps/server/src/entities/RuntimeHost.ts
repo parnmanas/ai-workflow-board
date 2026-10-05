@@ -17,7 +17,7 @@ export class RuntimeHost {
   // 페어링 당시 workspace — ApiKey 스탬프와 같은 bookkeeping 용도이며 권한
   // 경계가 아니다. Host 키는 AgentAuthGuard에서 full-scope로 취급한다.
   @Column({ type: 'varchar', nullable: true, default: null })
-  workspace_id: string | null;
+  account_id: string | null;
 
   @Column({ type: 'int', default: 1 })
   is_active: number;

@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { api } from '../../api';
 import type { TicketCreateInput } from '../../api';
-import type { Ticket, TicketCard, Workspace } from '../../types';
+import type { Ticket, TicketCard, Account } from '../../types';
 import { tokens } from '../../tokens';
 import { useToast } from '../../contexts/ToastContext';
 import { useLoading } from '../../contexts/LoadingContext';
@@ -35,7 +35,7 @@ function storage(): Storage | null {
 }
 
 /**
- * Tickets — the workspace's one ticket pool (docs/tickets.md). Replaces boards:
+ * Tickets — all accessible tickets (docs/tickets.md). Replaces boards:
  * a fixed status lifecycle instead of columns, tags + project instead of "which
  * board", one assignee spec instead of role routing.
  *
@@ -46,7 +46,8 @@ function storage(): Storage | null {
  * filters hide it.
  */
 export default function TicketsPage() {
-  const { wsId = '' } = useParams<{ wsId: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const [searchParams, setSearchParams] = useSearchParams();
   const { showToast } = useToast();
   const { withLoading } = useLoading();
@@ -69,13 +70,13 @@ export default function TicketsPage() {
   const hostNames = useHostNames();
   const projectNames = useMemo(() => Object.fromEntries(projects.map((p) => [p.id, p.name])), [projects]);
 
-  // ── Workspace (dispatch pause banner) ──────────────────────────────
-  const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const loadWorkspace = useCallback(() => {
+  // ── Account (dispatch pause banner) ──────────────────────────────
+  const [account, setAccount] = useState<Account | null>(null);
+  const loadAccount = useCallback(() => {
     if (!wsId) return;
-    api.getWorkspace(wsId).then(setWorkspace).catch(() => setWorkspace(null));
+    api.getAccount(wsId).then(setAccount).catch(() => setAccount(null));
   }, [wsId]);
-  useEffect(() => { loadWorkspace(); }, [loadWorkspace]);
+  useEffect(() => { loadAccount(); }, [loadAccount]);
 
   // ── Filters ⇄ URL ──────────────────────────────────────────────────
   const setFilters = useCallback((next: TicketFilters) => {
@@ -156,7 +157,7 @@ export default function TicketsPage() {
         if (cancelled || panelErrorNotified.current === openTicketId) return;
         panelErrorNotified.current = openTicketId;
         showToast(err?.status === 404
-          ? '링크된 티켓을 찾을 수 없습니다 (삭제되었거나 다른 워크스페이스의 티켓입니다)'
+          ? '링크된 티켓을 찾을 수 없습니다 (삭제되었거나 접근 권한이 없습니다)'
           : `티켓을 열 수 없습니다: ${err?.message || '네트워크 오류'}`, 'error');
         if (err?.status === 404 || err?.status === 403) closeTicketRef.current();
       });
@@ -244,9 +245,9 @@ export default function TicketsPage() {
 
   const canAdmin = hasPermission('admin.access');
   const handleResumeDispatch = useCallback(() => wrapAction(async () => {
-    await api.updateWorkspace(wsId, { dispatch_paused_at: null });
-    loadWorkspace();
-  }, '티켓 디스패치를 재개했습니다'), [wrapAction, wsId, loadWorkspace]);
+    await api.updateAccount(wsId, { dispatch_paused_at: null });
+    loadAccount();
+  }, '티켓 디스패치를 재개했습니다'), [wrapAction, wsId, loadAccount]);
 
   // ── Kanban drag & drop ─────────────────────────────────────────────
   const lanes = useMemo(() => groupByStatus(data.tickets), [data.tickets]);
@@ -330,7 +331,7 @@ export default function TicketsPage() {
         channels={data.channels}
         workspaceTickets={data.tickets}
         typingIndicators={data.typingIndicators}
-        workspaceId={wsId}
+        accountId={wsId}
         onClose={closeTicket}
         onUpdate={(id, fields) => wrapAction(() => data.updateTicket(id, fields))}
         onMove={handleMove}
@@ -372,13 +373,13 @@ export default function TicketsPage() {
         title="Tickets"
         description={filters.archived
           ? `보관된 티켓 ${rootCount}개`
-          : `워크스페이스 티켓 ${rootCount}개 — 상태·태그·프로젝트로 분류하고, 담당자 한 명이 끝까지 처리합니다.`}
+          : `티켓 ${rootCount}개 — 상태·태그·프로젝트로 분류하고, 담당자 한 명이 끝까지 처리합니다.`}
         actions={
           <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>+ New ticket</Button>
         }
       />
 
-      {workspace?.dispatch_paused_at && (
+      {account?.dispatch_paused_at && (
         <div
           role="status"
           data-testid="dispatch-paused-banner"
@@ -390,8 +391,8 @@ export default function TicketsPage() {
         >
           <span aria-hidden="true" style={{ fontSize: 16 }}>⏸</span>
           <span style={{ flex: 1 }}>
-            <strong>티켓 디스패치가 일시정지되어 있습니다</strong> ({new Date(workspace.dispatch_paused_at).toLocaleString()} 부터).
-            에이전트에게 새 작업이 전달되지 않습니다 — 편집·코멘트·이동은 그대로 가능합니다.
+            <strong>{account.name}의 티켓 디스패치가 일시정지되어 있습니다</strong> ({new Date(account.dispatch_paused_at).toLocaleString()} 부터).
+            이 소유 계정의 새 작업이 에이전트에게 전달되지 않습니다 — 편집·코멘트·이동은 그대로 가능합니다.
           </span>
           {canAdmin && (
             <button
@@ -459,7 +460,7 @@ export default function TicketsPage() {
 
       <CreateTicketForm
         isOpen={createOpen}
-        workspaceId={wsId}
+        accountId={wsId}
         projects={projects}
         knownTags={data.tagCounts}
         initialProjectId={filters.projectId || undefined}

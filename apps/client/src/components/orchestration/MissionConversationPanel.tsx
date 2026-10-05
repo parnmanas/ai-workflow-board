@@ -99,7 +99,7 @@ export function buildConversationTracks(
 interface MissionConversationPanelProps {
   missionId: string;
   /** 이벤트 커서 조회에 필요한 workspace 스코프. */
-  workspaceId: string;
+  accountId: string;
   /** orchestrator 대화가 오가는 ChatRoom. null 이면 미션이 아직 시작되지 않은 것이다. */
   roomId: string | null;
   /** 실행 trace — 대화와 시간순으로 엮어 보여준다. */
@@ -118,7 +118,7 @@ interface MissionConversationPanelProps {
 
 export default function MissionConversationPanel({
   missionId,
-  workspaceId,
+  accountId,
   roomId,
   events,
   live,
@@ -306,11 +306,11 @@ export default function MissionConversationPanel({
   }, [events]);
 
   const loadOlderEvents = useCallback(async () => {
-    if (!workspaceId || loadingEventsRef.current || !hasMoreEvents || !eventCursor) return;
+    if (!accountId || loadingEventsRef.current || !hasMoreEvents || !eventCursor) return;
     const issuedFor = `${missionId}|${roomId ?? ''}`;
     loadingEventsRef.current = true;
     try {
-      const page = await api.listOrchestrationMissionEvents(missionId, workspaceId, {
+      const page = await api.listOrchestrationMissionEvents(missionId, accountId, {
         limit: EVENT_PAGE_SIZE,
         before_at: eventCursor.at,
         before_seq: eventCursor.seq,
@@ -335,7 +335,7 @@ export default function MissionConversationPanel({
     } finally {
       loadingEventsRef.current = false;
     }
-  }, [missionId, workspaceId, hasMoreEvents, eventCursor]);
+  }, [missionId, accountId, hasMoreEvents, eventCursor]);
 
   const loadOlderBoth = useCallback(() => {
     void loadOlder();
@@ -408,18 +408,18 @@ export default function MissionConversationPanel({
    * 입력창만 열린다.
    */
   const join = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!accountId) return;
     setJoining(true);
     setJoinError(null);
     try {
-      await api.joinOrchestrationMissionConversation(missionId, workspaceId);
+      await api.joinOrchestrationMissionConversation(missionId, accountId);
       await load();
     } catch (e: any) {
       setJoinError(e?.message || '대화에 참여하지 못했습니다');
     } finally {
       setJoining(false);
     }
-  }, [missionId, workspaceId, load]);
+  }, [missionId, accountId, load]);
 
   /**
    * 왜 발화가 막혀 있는가 — 없으면 발화 가능(티켓 9cfd8161, 요구사항 C).

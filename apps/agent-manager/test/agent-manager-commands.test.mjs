@@ -85,6 +85,25 @@ function registryStub() {
   };
 }
 
+test('refresh_mcp_config reads the existing scoped key from legacy command args', async () => {
+  const agentId = 'legacy-owner-command';
+  const accountId = 'original-account-uuid';
+  await writeApiKey(agentId, 'fixture-scoped-key', accountId);
+  const handler = new AgentManagerCommandHandler(
+    { url: 'https://awb.command.example', apiKey: 'manager-key', delegation: {} },
+    { getInstanceId: () => 'instance-1', registry: registryStub(), contextRegistry: { get: () => null } },
+  );
+  await handler.handle(JSON.stringify({
+    command_id: 'legacy-owner-refresh', command: 'refresh_mcp_config',
+    args: { agent_id: agentId, workspace_id: accountId },
+  }));
+  const config = JSON.parse(await fsp.readFile(mcpConfigPathFor(agentId, accountId), 'utf8'));
+  assert.equal(config.mcpServers.awb.headers.Authorization, 'Bearer fixture-scoped-key');
+  assert.equal(await readApiKey(agentId), null, 'the command used the persisted scope rather than an unscoped key');
+  const ack = requests.find((request) => request.url.endsWith('/command/ack'));
+  assert.equal(JSON.parse(ack.init.body).status, 'ok');
+});
+
 test('refresh_mcp_config refreshes Codex native config without persisting the API key', async () => {
   const agentId = 'codex-agent-1';
   const apiKey = 'sk-refresh-secret';

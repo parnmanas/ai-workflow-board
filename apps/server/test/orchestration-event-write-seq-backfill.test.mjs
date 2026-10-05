@@ -62,7 +62,7 @@ let eventRepo;
 async function seedMission(title) {
   const missionRepo = dataSource.getRepository(OrchestrationMission);
   return missionRepo.save(missionRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     team_id: 'team-1',
     title,
     objective: 'backfill fixture',
@@ -80,10 +80,10 @@ async function seedEvent(missionId, createdAt, writeSeq, message, id) {
   let rowId = id;
   if (rowId) {
     // 명시 id 는 `insert()` 로 넣는다 — `save()` 는 PK 가 있으면 조회 후 갱신을 시도한다.
-    await eventRepo.insert({ id: rowId, mission_id: missionId, workspace_id: WS, type: 'note', message });
+    await eventRepo.insert({ id: rowId, mission_id: missionId, account_id: WS, type: 'note', message });
   } else {
     rowId = (await eventRepo.save(eventRepo.create({
-      mission_id: missionId, workspace_id: WS, type: 'note', message,
+      mission_id: missionId, account_id: WS, type: 'note', message,
     }))).id;
   }
   await dataSource.query(

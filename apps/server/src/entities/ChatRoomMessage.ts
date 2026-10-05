@@ -1,6 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
-@Index(['workspace_id', 'created_at'])
+@Index(['account_id', 'created_at'])
 @Index(['room_id', 'type', 'created_at'])
 @Entity('chat_room_messages')
 export class ChatRoomMessage {
@@ -11,9 +11,9 @@ export class ChatRoomMessage {
   @Column({ type: 'varchar' })
   room_id: string;
 
-  // Redundant but stored for direct workspace-scoped queries (matches ChatMessage pattern)
+  // Redundant but stored for direct account-scoped queries (matches ChatMessage pattern)
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // 'user' | 'agent' — Phase 8 @mention routing compatible
   @Column({ type: 'varchar' })

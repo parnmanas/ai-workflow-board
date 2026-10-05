@@ -70,8 +70,8 @@ test('confirm 라우트가 POST steps/:stepId/confirm 으로 등록돼 있다', 
 test('body 의 verdict/feedback/visit 과 세션 사용자가 그대로 서비스로 전달된다', async () => {
   const calls = [];
   const controller = controllerWith({
-    async submitConfirmDecision(stepId, workspaceId, actor, input) {
-      calls.push({ stepId, workspaceId, actor, input });
+    async submitConfirmDecision(stepId, accountId, actor, input) {
+      calls.push({ stepId, accountId, actor, input });
       return {
         step: { id: stepId, step_key: 'gate', status: 'done', confirm_decision: { verdict: input.verdict } },
         already_decided: false,
@@ -85,14 +85,14 @@ test('body 의 verdict/feedback/visit 과 세션 사용자가 그대로 서비�
   const res = fakeRes();
   await controller.confirmStep(
     'step-1',
-    { workspace_id: 'ws-1', verdict: 'fail', feedback: 'the footer overlaps', visit: 3 },
+    { account_id: 'ws-1', verdict: 'fail', feedback: 'the footer overlaps', visit: 3 },
     fakeReq({ id: 'user-9', name: 'Operator' }),
     res,
   );
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].stepId, 'step-1');
-  assert.equal(calls[0].workspaceId, 'ws-1');
+  assert.equal(calls[0].accountId, 'ws-1');
   assert.deepEqual(calls[0].actor, { type: 'user', id: 'user-9', name: 'Operator' }, '판정자는 세션 사용자다');
   assert.equal(calls[0].input.verdict, 'fail');
   assert.equal(calls[0].input.feedback, 'the footer overlaps');
@@ -125,7 +125,7 @@ test('이미 판정된 재제출은 already_decided 를 그대로 노출한다(�
     },
   });
   const res = fakeRes();
-  await controller.confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'pass', visit: 1 }, fakeReq({}), res);
+  await controller.confirmStep('step-1', { account_id: 'ws-1', verdict: 'pass', visit: 1 }, fakeReq({}), res);
   assert.equal(res.out.statusCode, 200, '중복 제출은 에러가 아니다 — 사용자는 이미 답했다');
   assert.equal(res.out.body.already_decided, true);
 });
@@ -139,7 +139,7 @@ test('서비스가 던진 status 가 HTTP status 로 그대로 나간다', async
     },
   });
   const res = fakeRes();
-  await controller.confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'pass', visit: 1 }, fakeReq({}), res);
+  await controller.confirmStep('step-1', { account_id: 'ws-1', verdict: 'pass', visit: 1 }, fakeReq({}), res);
   // 409 가 400 으로 뭉개지면 화면이 "잘못된 입력"과 "화면이 낡음"을 구분할 수 없다.
   assert.equal(res.out.statusCode, 409);
   assert.match(res.out.body.error, /stale confirmation/);
@@ -150,7 +150,7 @@ test('세션 사용자가 없어도 500 으로 터지지 않고 서비스까지 
   // 크래시할 이유가 아니다.
   let seen = null;
   const controller = controllerWith({
-    async submitConfirmDecision(stepId, workspaceId, actor) {
+    async submitConfirmDecision(stepId, accountId, actor) {
       seen = actor;
       return {
         step: { id: stepId, step_key: 'gate', status: 'done', confirm_decision: null },
@@ -162,7 +162,7 @@ test('세션 사용자가 없어도 500 으로 터지지 않고 서비스까지 
     },
   });
   const res = fakeRes();
-  await controller.confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'pass', visit: 1 }, {}, res);
+  await controller.confirmStep('step-1', { account_id: 'ws-1', verdict: 'pass', visit: 1 }, {}, res);
   assert.deepEqual(seen, { type: 'user', id: '', name: '' });
   assert.equal(res.out.statusCode, 200);
 });
@@ -209,7 +209,7 @@ for (const [label, body] of visitRejections) {
     const res = fakeRes();
     await controller.confirmStep(
       'step-1',
-      { workspace_id: 'ws-1', verdict: 'pass', ...body },
+      { account_id: 'ws-1', verdict: 'pass', ...body },
       fakeReq({ id: 'u1', name: 'Operator' }),
       res,
     );
@@ -224,7 +224,7 @@ test('POST steps/:id/confirm — 유효한 visit 은 검증을 통과해 조회 
   const controller = controllerWith(realValidationRunner());
   const res = fakeRes();
   return controller
-    .confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'pass', visit: 2 }, fakeReq({}), res)
+    .confirmStep('step-1', { account_id: 'ws-1', verdict: 'pass', visit: 2 }, fakeReq({}), res)
     .then(() => {
       assert.equal(res.out.statusCode, 599, '검증을 지나 step 조회까지 도달해야 한다');
       assert.match(res.out.body.error, /REACHED_LOOKUP/);
@@ -234,7 +234,7 @@ test('POST steps/:id/confirm — 유효한 visit 은 검증을 통과해 조회 
 test('POST steps/:id/confirm — verdict 도 같은 자리에서 강제된다', async () => {
   const controller = controllerWith(realValidationRunner());
   const res = fakeRes();
-  await controller.confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'maybe', visit: 1 }, fakeReq({}), res);
+  await controller.confirmStep('step-1', { account_id: 'ws-1', verdict: 'maybe', visit: 1 }, fakeReq({}), res);
   assert.equal(res.out.statusCode, 400);
   assert.match(res.out.body.error, /verdict must be one of/);
 });

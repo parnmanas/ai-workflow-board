@@ -13,15 +13,15 @@ export interface LogActivityParams {
   // 'board' | 'agent' added for cross-workspace move (WorkspaceMoveService):
   // a board/agent move is not tied to a single ticket, so entity_type widens
   // beyond the ticket/comment pair and `ticket_id` is passed as '' for them.
-  // 'workspace' added (ticket 1fcba693) for the workspace config-change audit —
-  // a settings PATCH (e.g. supervisor_stale_ms) is workspace-scoped, not tied to
-  // a ticket, so `ticket_id` is '' and `workspace_id` carries the scope.
+  // 'account' added (ticket 1fcba693) for the workspace config-change audit —
+  // a settings PATCH (e.g. supervisor_stale_ms) is account-scoped, not tied to
+  // a ticket, so `ticket_id` is '' and `account_id` carries the scope.
   // 'migration' (ticket 0f638509, 리뷰 라운드1 P3) — 소스 서버의 live pull
   // import export 표면(GET /api/migration/export/*) 접근 감사. 이 표면은
-  // 전 워크스페이스의 크리덴셜을 평문으로 반환할 수 있는 표면이라 workspace_id
+  // 전 워크스페이스의 크리덴셜을 평문으로 반환할 수 있는 표면이라 account_id
   // 하나로 스코프되지 않는다 — entity_id가 대신 "무엇을"(엔티티명 또는
   // 'meta') 나타낸다.
-  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'workspace' | 'credential' | 'migration';
+  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'account' | 'credential' | 'migration';
   entity_id: string | number;
   // The three `respawn_*` actions are first-class events written by
   // RespawnStormDetectorService (ticket ab06eac2). ActivityLog.action is a bare
@@ -36,7 +36,7 @@ export interface LogActivityParams {
     | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent'
     | 'config_changed' | 'credential_revealed' | 'credential_reveal_denied'
     // 'credential_scope_changed': an operator moved a Credential between
-    // global (instance-wide) and Workspace scope. Who can read the secret
+    // global (instance-wide) and Account scope. Who can read the secret
     // changes with it, so old_value/new_value carry the scope either side
     // ('global' | 'workspace:<id>') — never the secret itself.
     | 'credential_scope_changed'
@@ -67,7 +67,7 @@ export interface LogActivityParams {
   actor_id?: string;
   actor_name?: string;
   ticket_id: string;
-  workspace_id?: string;   // scope for non-ticket entities (workspace config); '' if omitted
+  account_id?: string;   // scope for non-ticket entities (workspace config); '' if omitted
   role?: string;           // agent role; written as '' if omitted
   trigger_source?: string; // 'agent_trigger' | 'manual' | ''; written as '' if omitted
 }
@@ -127,7 +127,7 @@ export class ActivityService {
       actor_id: params.actor_id || '',
       actor_name: params.actor_name || '',
       ticket_id: params.ticket_id,
-      workspace_id: params.workspace_id || '',
+      account_id: params.account_id || '',
       role: params.role || '',
       trigger_source: params.trigger_source || this.triggerSourceContext.getStore() || '',
     });

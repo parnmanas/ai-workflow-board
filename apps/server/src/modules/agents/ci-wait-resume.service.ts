@@ -96,7 +96,7 @@
  * degraded to "no token" (`isGitHubDegradableError` → `getWorkflowRun`
  * returns null) and looked EXACTLY like "still queued" — six real tickets
  * sat parked for 1-2h before a human noticed. `_resolveCredentialId` reads
- * the ticket's project (`Ticket.project_id`, workspace-scope checked) →
+ * the ticket's project (`Ticket.project_id`, account-scope checked) →
  * `Project.credential_id` — the same project dispatch ships as the ticket's
  * `base_repo`. Degrades to null when the ticket has no project — never
  * blocks the sweep.
@@ -362,8 +362,8 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
    * poll-failure alert below instead of looking like "still queued".
    */
   private async _resolveCredentialId(ticket: Ticket): Promise<string | null> {
-    if (!ticket.workspace_id || !ticket.project_id) return null;
-    const project = await this.projects.getInWorkspace(ticket.project_id, ticket.workspace_id);
+    if (!ticket.account_id || !ticket.project_id) return null;
+    const project = await this.projects.getInWorkspace(ticket.project_id, ticket.account_id);
     return project?.credential_id || null;
   }
 
@@ -445,7 +445,7 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
         .into(Comment)
         .values({
           ticket_id: ticket.id,
-          workspace_id: ticket.workspace_id || '',
+          account_id: ticket.account_id || '',
           author_type: 'system',
           author_id: '',
           author: 'CiWaitResumeService',
@@ -502,7 +502,7 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
           .into(Comment)
           .values({
             ticket_id: ticket.id,
-            workspace_id: ticket.workspace_id || '',
+            account_id: ticket.account_id || '',
             author_type: 'system',
             author_id: '',
             author: 'CiWaitResumeService',

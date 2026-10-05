@@ -40,7 +40,7 @@ function flush() {
 }
 
 function heartbeatConfig() {
-  return { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' };
+  return { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' };
 }
 
 // ─── 1) 열거의 best-effort 계약 ────────────────────────────────────────────

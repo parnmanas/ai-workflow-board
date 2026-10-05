@@ -44,12 +44,11 @@ export function shouldSpeakAnnouncement(viewingTarget: boolean, needsDecision: b
   return !viewingTarget || needsDecision;
 }
 
-/** 알림이 가리키는 화면 경로. 세션 경로에는 지금 워크스페이스가 필요하다(세션은 워크스페이스에 매이지 않는다). */
-export function announcementPath(target: VoiceAnnouncementTarget | null | undefined, workspaceId: string | null): string | null {
+/** Stable work URLs do not include the default ownership account. */
+export function announcementPath(target: VoiceAnnouncementTarget | null | undefined, accountId: string | null): string | null {
   if (!target) return null;
-  if (target.type === 'mission') return `/ws/${target.workspace_id}/orchestration/missions/${target.mission_id}`;
-  if (!workspaceId) return null;
-  return `/ws/${workspaceId}/sessions/${encodeURIComponent(target.manager_id)}/${encodeURIComponent(target.cli)}/${encodeURIComponent(target.session_id)}`;
+  if (target.type === 'mission') return `/missions/${target.mission_id}`;
+  return `/sessions/${encodeURIComponent(target.manager_id)}/${encodeURIComponent(target.cli)}/${encodeURIComponent(target.session_id)}`;
 }
 
 export interface ClaimStorage {

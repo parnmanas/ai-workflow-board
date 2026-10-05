@@ -77,7 +77,7 @@ const TAG_QUERY_SOURCE: Partial<Record<ExtractionLang, string>> = {
 
 function grammarDir(): string {
   // node_modules/tree-sitter-wasms/out/*.wasm — 워크스페이스 루트에
-  // 호이스트된 node_modules를 따라간다(npm workspaces 기본 동작).
+  // 호이스트된 node_modules를 따라간다(npm accounts 기본 동작).
   return path.join(require.resolve('tree-sitter-wasms/package.json'), '..', 'out');
 }
 

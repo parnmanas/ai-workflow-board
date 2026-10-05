@@ -748,7 +748,7 @@ function collectFetch(t) {
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-const heartbeatConfig = () => ({ url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' });
+const heartbeatConfig = () => ({ url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' });
 
 test('하트비트는 cliVersionsProvider 를 매 tick 다시 읽는다 — update_cli 결과가 재시작 없이 실린다', async (t) => {
   const bodies = collectFetch(t);

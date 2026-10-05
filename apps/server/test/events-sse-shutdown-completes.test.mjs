@@ -50,6 +50,7 @@ function buildController(EventsController) {
     /* ticketRepo */ noopRepo(), dataSource,
     /* hostRepo (P4c-4) */ noopRepo(), /* apiKeyRepo (P4c-4) */ noopRepo(),
     authService, apiKeyService, logService, instanceRegistry, connectivity, metrics,
+    { async accessibleIds() { return []; } },
   );
 }
 

@@ -65,26 +65,26 @@ function page(rows, hasMore = false, nextCursor = null) {
 test('1. calling _pullEntity twice with the same page never duplicates rows (orIgnore idempotency)', async () => {
   const run = await newRun();
   const rows = [
-    { id: 'ws-idem-1', name: 'Workspace A', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-    { id: 'ws-idem-2', name: 'Workspace B', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    { id: 'ws-idem-1', name: 'Account A', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    { id: 'ws-idem-2', name: 'Account B', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
   ];
   const client = { getTablePage: async () => page(rows) };
   const progress = {};
 
-  await svc._pullEntity(run.id, client, 'Workspace', null, progress);
-  const afterFirst = await ds.getRepository('Workspace').count();
+  await svc._pullEntity(run.id, client, 'Account', null, progress);
+  const afterFirst = await ds.getRepository('Account').count();
   assert.equal(afterFirst, 2, 'first pull inserts both rows');
-  assert.equal(progress.Workspace.pulled, 2);
-  assert.equal(progress.Workspace.done, true);
+  assert.equal(progress.Account.pulled, 2);
+  assert.equal(progress.Account.done, true);
 
   // Simulate a crash-and-resume: re-run the exact same page (as a resumed
   // loop re-fetching from the same cursor would).
-  await svc._pullEntity(run.id, client, 'Workspace', null, progress);
-  const afterSecond = await ds.getRepository('Workspace').count();
+  await svc._pullEntity(run.id, client, 'Account', null, progress);
+  const afterSecond = await ds.getRepository('Account').count();
   assert.equal(afterSecond, 2, 'second identical pull must NOT duplicate rows');
 
   const reloaded = await runRepo.findOne({ where: { id: run.id } });
-  assert.equal(reloaded.current_entity, 'Workspace');
+  assert.equal(reloaded.current_entity, 'Account');
   assert.equal(reloaded.cursor, null, 'single-page pull with has_more=false clears the cursor');
 });
 

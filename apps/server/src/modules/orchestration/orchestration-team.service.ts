@@ -32,7 +32,7 @@ import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { LogService } from '../../services/log.service';
 import { CLI_RUNTIME_NONE } from '../../common/cli-runtime-profiles';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
@@ -100,10 +100,10 @@ export interface TeamMemberView {
 
 export interface TeamView {
   id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   is_global: boolean;
-  owner_workspace_id: string | null;
-  allowed_workspace_ids: string[];
+  owner_account_id: string | null;
+  allowed_account_ids: string[];
   name: string;
   description: string;
   orchestrator_agent_id: string | null;
@@ -128,7 +128,7 @@ export class OrchestrationTeamService {
     @InjectRepository(OrchestrationMission) private readonly missionRepo: Repository<OrchestrationMission>,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
-    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
+    @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
     private readonly hosts: OrchestrationHostsService,
     private readonly logService: LogService,
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -140,15 +140,15 @@ export class OrchestrationTeamService {
   ) {}
 
   /** Runtime Hosts + their CLI / model / working-folder candidates (team editor). */
-  listRuntimeHosts(workspaceId: string): Promise<RuntimeHostView[]> {
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
-    return this.hosts.listRuntimeHosts(workspaceId);
+  listRuntimeHosts(accountId: string): Promise<RuntimeHostView[]> {
+    if (!accountId) throw orchestrationError(400, 'account_id is required');
+    return this.hosts.listRuntimeHosts(accountId);
   }
 
   /** Re-enumerate one host's per-CLI model lists (slot editor's model dropdown). */
-  refreshRuntimeHostModels(managerAgentId: string, workspaceId: string): Promise<RuntimeHostView | null> {
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
-    return this.hosts.refreshHostModels(managerAgentId, workspaceId);
+  refreshRuntimeHostModels(managerAgentId: string, accountId: string): Promise<RuntimeHostView | null> {
+    if (!accountId) throw orchestrationError(400, 'account_id is required');
+    return this.hosts.refreshHostModels(managerAgentId, accountId);
   }
 
   /**
@@ -175,7 +175,7 @@ export class OrchestrationTeamService {
   }
 
   /**
-   * `allowed_workspace_ids`가 실존하는 workspace만 가리키도록 원자적으로 검증한다.
+   * `allowed_account_ids`가 실존하는 workspace만 가리키도록 원자적으로 검증한다.
    * 정규화(중복/공백 제거)만으로는 REST 호출자가 임의 UUID를 허용목록에 저장하는 걸
    * 막지 못한다 — `createMission`은 이 목록에 대해 문자열 포함 여부만 확인하므로,
    * 존재하지 않는 workspace를 대상으로 미션(그리고 그 budget/room)이 생성되어 고아
@@ -183,11 +183,11 @@ export class OrchestrationTeamService {
    */
   private async assertWorkspacesExist(ids: string[] | null): Promise<void> {
     if (!ids || ids.length === 0) return;
-    const found = await this.workspaceRepo.find({ where: { id: In(ids) }, select: { id: true } });
+    const found = await this.accountRepo.find({ where: { id: In(ids) }, select: { id: true } });
     const foundIds = new Set(found.map((w) => w.id));
     const missing = ids.filter((id) => !foundIds.has(id));
     if (missing.length > 0) {
-      throw orchestrationError(400, `allowed_workspace_ids references workspace(s) that do not exist: ${missing.join(', ')}`);
+      throw orchestrationError(400, `allowed_account_ids references workspace(s) that do not exist: ${missing.join(', ')}`);
     }
   }
 
@@ -199,7 +199,7 @@ export class OrchestrationTeamService {
    * dispatch resolves the key without one (registry tuple match, else
    * auto-provision on first dispatch).
    *
-   * `teamWorkspaceId` must be the TEAM's own workspace_id, never the editing
+   * `teamAccountId` must be the TEAM's own account_id, never the editing
    * caller's — they differ for a global team (the team is workspace-less while
    * the editor acts from the owning workspace) and the credential-visibility
    * rule below is scoped to the team's scope.
@@ -208,13 +208,13 @@ export class OrchestrationTeamService {
    * same reason the old provisioner did: a silently-ignored typo surfaces much
    * later as a mysterious spawn failure on somebody else's machine.
    */
-  private async resolveSlotAgentId(spec: TeamAgentSpec, teamWorkspaceId: string | null): Promise<string> {
+  private async resolveSlotAgentId(spec: TeamAgentSpec, teamAccountId: string | null): Promise<string> {
     // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 행 없음).
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
     if (!host) throw orchestrationError(400, `Runtime Host ${spec.manager_agent_id} does not exist`);
     if (spec.credential_id) {
       const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id } });
-      if (!cred || (cred.workspace_id !== null && cred.workspace_id !== teamWorkspaceId)) {
+      if (!cred || (cred.account_id !== null && cred.account_id !== teamAccountId)) {
         throw orchestrationError(400, `credential ${spec.credential_id} is not available to this team`);
       }
     }
@@ -250,7 +250,7 @@ export class OrchestrationTeamService {
     before: TeamAgentSpec | null,
     previousAgentId: string | null,
     merged: TeamAgentSpec,
-    teamWorkspaceId: string | null,
+    teamAccountId: string | null,
   ): Promise<void> {
     if (!this.commands) return;
     if (!previousAgentId) return;
@@ -269,23 +269,23 @@ export class OrchestrationTeamService {
       await this.commands.issue(
         inst,
         'restart_agent',
-        { agent_id: previousAgentId, workspace_id: teamWorkspaceId ?? undefined },
+        { agent_id: previousAgentId, account_id: teamAccountId ?? undefined },
         'system:orchestration-roster',
       );
     } catch (e: any) {
       this.logService.warn('Orchestration',
         `restart_agent dispatch failed for ${String(previousAgentId).slice(0, 11)}`,
-        { workspace_id: teamWorkspaceId ?? undefined, error: e?.message });
+        { account_id: teamAccountId ?? undefined, error: e?.message });
     }
   }
 
   // ── Reads ─────────────────────────────────────────────────────────────────
 
   /** 이 workspace 소유 팀 + 모든 글로벌 팀(티켓 1b62b437). */
-  async listTeams(workspaceId: string): Promise<TeamView[]> {
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+  async listTeams(accountId: string): Promise<TeamView[]> {
+    if (!accountId) throw orchestrationError(400, 'account_id is required');
     const teams = await this.teamRepo.find({
-      where: visibleScopeWhere<OrchestrationTeam>(workspaceId),
+      where: visibleScopeWhere<OrchestrationTeam>(accountId),
       order: { created_at: 'DESC' },
     });
     if (teams.length === 0) return [];
@@ -294,7 +294,7 @@ export class OrchestrationTeamService {
 
   /**
    * Teams an agent belongs to, as orchestrator or member — the agent-scoped
-   * counterpart to `listTeams` (workspace-scoped, human/REST use). No
+   * counterpart to `listTeams` (account-scoped, human/REST use). No
    * workspace filter: orchestrator/member agents are frequently workspace-less
    * manager identities (visible everywhere by design, see
    * `requireWorkspaceAgent`), so scoping by the caller's own workspace would
@@ -313,8 +313,8 @@ export class OrchestrationTeamService {
     return this.projectTeams(teams);
   }
 
-  async getTeam(teamId: string, workspaceId: string): Promise<TeamView> {
-    const team = await this.requireTeam(teamId, workspaceId);
+  async getTeam(teamId: string, accountId: string): Promise<TeamView> {
+    const team = await this.requireTeam(teamId, accountId);
     const [view] = await this.projectTeams([team]);
     return view;
   }
@@ -326,10 +326,10 @@ export class OrchestrationTeamService {
    * 이 뒤에 `assertTeamWritable`을 따로 호출하며, "글로벌 팀의 로스터/설정은 소유
    * workspace만 편집 가능"을 강제하는 건 그쪽이다.
    */
-  async requireTeam(teamId: string, workspaceId: string): Promise<OrchestrationTeam> {
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+  async requireTeam(teamId: string, accountId: string): Promise<OrchestrationTeam> {
+    if (!accountId) throw orchestrationError(400, 'account_id is required');
     const team = await this.teamRepo.findOne({
-      where: visibleScopeWhere<OrchestrationTeam>(workspaceId, { id: teamId }),
+      where: visibleScopeWhere<OrchestrationTeam>(accountId, { id: teamId }),
     });
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
     return team;
@@ -338,13 +338,13 @@ export class OrchestrationTeamService {
   /**
    * `requireTeam`으로 이미 조회된 팀에 대한 WRITE 레벨 게이트. workspace 종속 팀은
    * 항상 자기 workspace에서 쓸 수 있다(`requireTeam`의 매칭이 이미 그걸 증명했다).
-   * 글로벌 팀은 `owner_workspace_id` — 만든 workspace — 에서만 쓸 수 있다. 그렇지
+   * 글로벌 팀은 `owner_account_id` — 만든 workspace — 에서만 쓸 수 있다. 그렇지
    * 않으면 `requireTeam` 만으로는 MANAGE_ACTIONS을 가진 아무 workspace나 공유
    * 로스터를 편집할 수 있게 되어버린다 — workspace 종속이 아니게 된 그 순간부터
    * (OrchestrationTeam 문서 참고).
    */
-  private assertTeamWritable(team: OrchestrationTeam, workspaceId: string): void {
-    if (team.workspace_id === null && team.owner_workspace_id !== workspaceId) {
+  private assertTeamWritable(team: OrchestrationTeam, accountId: string): void {
+    if (team.account_id === null && team.owner_account_id !== accountId) {
       throw orchestrationError(
         403,
         `orchestration team "${team.name}" is a global team owned by a different workspace — only the ` +
@@ -354,9 +354,9 @@ export class OrchestrationTeamService {
   }
 
   /**
-   * Workspace-unscoped team lookup for the agent-created mission path
+   * Account-unscoped team lookup for the agent-created mission path
    * (`create_orchestration_mission`), which — like the other 9 orchestration
-   * MCP tools — never takes a workspace_id input. The ownership check the
+   * MCP tools — never takes a account_id input. The ownership check the
    * caller must still pass (team.orchestrator_agent_id === callerAgentId) is
    * a strictly stronger scope than a workspace match would add.
    */
@@ -495,10 +495,10 @@ export class OrchestrationTeamService {
 
       return {
         id: t.id,
-        workspace_id: t.workspace_id,
-        is_global: t.workspace_id === null,
-        owner_workspace_id: t.owner_workspace_id,
-        allowed_workspace_ids: Array.isArray(t.allowed_workspace_ids) ? t.allowed_workspace_ids : [],
+        account_id: t.account_id,
+        is_global: t.account_id === null,
+        owner_account_id: t.owner_account_id,
+        allowed_account_ids: Array.isArray(t.allowed_account_ids) ? t.allowed_account_ids : [],
         name: t.name,
         description: t.description,
         orchestrator_agent_id: t.orchestrator_agent_id,
@@ -538,7 +538,7 @@ export class OrchestrationTeamService {
   // ── Writes ────────────────────────────────────────────────────────────────
 
   async createTeam(input: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     description?: string;
     /**
@@ -555,36 +555,36 @@ export class OrchestrationTeamService {
     /** 글로벌 팀으로 생성(티켓 1b62b437). 기본 false — 기존 호출자는 영향 없음. */
     is_global?: boolean;
     /** 글로벌 팀 전용: 이 팀의 orchestrator가 create_orchestration_mission으로 지정 가능한 workspace 목록. */
-    allowed_workspace_ids?: string[];
+    allowed_account_ids?: string[];
   }): Promise<TeamView> {
     // 실행/생성 주체 workspace — 글로벌 팀이어도 항상 필수다: 이후 팀을 편집할 수
-    // 있는 유일한 값인 owner_workspace_id가 된다(assertTeamWritable). "글로벌"은
+    // 있는 유일한 값인 owner_account_id가 된다(assertTeamWritable). "글로벌"은
     // 로스터가 workspace 비종속이라는 뜻일 뿐, 생성 자체에 workspace 컨텍스트가
     // 필요 없다는 뜻이 아니다.
-    const callerWorkspaceId = (input.workspace_id || '').trim();
+    const callerAccountId = (input.account_id || '').trim();
     const name = (input.name || '').trim();
-    if (!callerWorkspaceId) throw orchestrationError(400, 'workspace_id is required');
+    if (!callerAccountId) throw orchestrationError(400, 'account_id is required');
     if (!name) throw orchestrationError(400, 'name is required');
 
     const isGlobal = !!input.is_global;
-    const teamWorkspaceId: string | null = isGlobal ? null : callerWorkspaceId;
+    const teamAccountId: string | null = isGlobal ? null : callerAccountId;
 
     const orchestratorSpec = this.parseSpecInput(input.orchestrator, 'orchestrator');
 
-    const allowedWorkspaceIds = isGlobal ? normalizeWorkspaceIds(input.allowed_workspace_ids) : null;
-    await this.assertWorkspacesExist(allowedWorkspaceIds);
+    const allowedAccountIds = isGlobal ? normalizeAccountIds(input.allowed_account_ids) : null;
+    await this.assertWorkspacesExist(allowedAccountIds);
 
     // Resolve the orchestrator identity BEFORE inserting the team: a team row
     // with no orchestrator cannot run a mission, so a half-applied create must
     // leave nothing behind rather than an unusable team the operator has to
     // notice and clean up.
-    const orchestratorAgentId = await this.resolveSlotAgentId(orchestratorSpec, teamWorkspaceId);
+    const orchestratorAgentId = await this.resolveSlotAgentId(orchestratorSpec, teamAccountId);
 
     const team = await this.teamRepo.save(
       this.teamRepo.create({
-        workspace_id: teamWorkspaceId,
-        owner_workspace_id: callerWorkspaceId,
-        allowed_workspace_ids: allowedWorkspaceIds,
+        account_id: teamAccountId,
+        owner_account_id: callerAccountId,
+        allowed_account_ids: allowedAccountIds,
         name,
         description: (input.description || '').trim(),
         orchestrator_agent_id: orchestratorAgentId,
@@ -597,16 +597,16 @@ export class OrchestrationTeamService {
       }),
     );
     this.logService.info('Orchestration', `team created ${team.id} (${team.name})`, {
-      workspace_id: teamWorkspaceId,
-      owner_workspace_id: callerWorkspaceId,
+      account_id: teamAccountId,
+      owner_account_id: callerAccountId,
       orchestrator_agent_id: orchestratorAgentId,
     });
-    return this.getTeam(team.id, callerWorkspaceId);
+    return this.getTeam(team.id, callerAccountId);
   }
 
   async updateTeam(
     teamId: string,
-    workspaceId: string,
+    accountId: string,
     patch: {
       name?: string;
       description?: string;
@@ -617,11 +617,11 @@ export class OrchestrationTeamService {
       max_open_missions?: number;
       enabled?: boolean;
       /** 글로벌 팀 전용: workspace 허용목록을 통째로 교체한다. */
-      allowed_workspace_ids?: string[];
+      allowed_account_ids?: string[];
     },
   ): Promise<TeamView> {
-    const team = await this.requireTeam(teamId, workspaceId);
-    this.assertTeamWritable(team, workspaceId);
+    const team = await this.requireTeam(teamId, accountId);
+    this.assertTeamWritable(team, accountId);
     let orchRuntimeEdited: { before: TeamAgentSpec | null; previousAgentId: string | null; merged?: TeamAgentSpec } | null = null;
 
     if (patch.name !== undefined) {
@@ -645,7 +645,7 @@ export class OrchestrationTeamService {
       const merged = this.mergeSpecInput(orchRuntimeEdited.before, patch.orchestrator, 'orchestrator');
       // P4c-2b: 구 Agent 행은 정리하지 않는다 — 미션 이력이 참조할 수 있어
       // 남겨둔다 (P4c-4에서 무참조 행을 일괄 정리).
-      team.orchestrator_agent_id = await this.resolveSlotAgentId(merged, team.workspace_id);
+      team.orchestrator_agent_id = await this.resolveSlotAgentId(merged, team.account_id);
       team.orchestrator_spec = merged as unknown as Record<string, any>;
       orchRuntimeEdited.merged = merged;
     }
@@ -654,23 +654,23 @@ export class OrchestrationTeamService {
     // assertTeamWritable)과 동일하게. workspace 종속 팀은 허용목록을 쓸 데가
     // 없으므로(createMission이 그 팀에는 이 값을 참조하지 않는다) 여기서 조용히
     // 저장해봤자 아무도 손댈 수 없는 죽은 데이터가 된다.
-    if (patch.allowed_workspace_ids !== undefined && team.workspace_id === null) {
-      const normalized = normalizeWorkspaceIds(patch.allowed_workspace_ids);
+    if (patch.allowed_account_ids !== undefined && team.account_id === null) {
+      const normalized = normalizeAccountIds(patch.allowed_account_ids);
       await this.assertWorkspacesExist(normalized);
-      team.allowed_workspace_ids = normalized;
+      team.allowed_account_ids = normalized;
     }
 
     await this.teamRepo.save(team);
     if (orchRuntimeEdited?.merged) {
       await this.notifySlotRuntimeChanged(
-        orchRuntimeEdited.before, orchRuntimeEdited.previousAgentId, orchRuntimeEdited.merged, team.workspace_id);
+        orchRuntimeEdited.before, orchRuntimeEdited.previousAgentId, orchRuntimeEdited.merged, team.account_id);
     }
-    return this.getTeam(team.id, workspaceId);
+    return this.getTeam(team.id, accountId);
   }
 
-  async deleteTeam(teamId: string, workspaceId: string): Promise<void> {
-    const team = await this.requireTeam(teamId, workspaceId);
-    this.assertTeamWritable(team, workspaceId);
+  async deleteTeam(teamId: string, accountId: string): Promise<void> {
+    const team = await this.requireTeam(teamId, accountId);
+    this.assertTeamWritable(team, accountId);
     const live = await this.missionRepo.count({
       where: { team_id: team.id, status: Not(In(TERMINAL_MISSION_STATUSES as unknown as string[])) },
     });
@@ -684,12 +684,12 @@ export class OrchestrationTeamService {
     await this.teamRepo.delete({ id: team.id });
     // P4c-2b: Agent 행을 정리하지 않는다 — runtime identity는 행이 없고, 구
     // provisioned 행은 미션 이력이 참조할 수 있다 (P4c-4에서 일괄 정리).
-    this.logService.info('Orchestration', `team deleted ${team.id}`, { workspace_id: workspaceId });
+    this.logService.info('Orchestration', `team deleted ${team.id}`, { account_id: accountId });
   }
 
   async addMember(
     teamId: string,
-    workspaceId: string,
+    accountId: string,
     input: {
       /** Runtime spec for the new slot — Runtime Host / CLI / model / working folder. */
       runtime?: unknown;
@@ -711,8 +711,8 @@ export class OrchestrationTeamService {
       max_concurrent?: number;
     },
   ): Promise<TeamView> {
-    const team = await this.requireTeam(teamId, workspaceId);
-    this.assertTeamWritable(team, workspaceId);
+    const team = await this.requireTeam(teamId, accountId);
+    this.assertTeamWritable(team, accountId);
 
     let spec: TeamAgentSpec | null;
     let agentId: string;
@@ -726,7 +726,7 @@ export class OrchestrationTeamService {
       spec = this.parseSpecInput(input.runtime, 'runtime');
       // 편집 호출자가 아니라 팀 자신의 workspace를 기준으로 스코핑한다 — updateTeam의
       // orchestrator 교체 분기와 같은 이유.
-      agentId = await this.resolveSlotAgentId(spec, team.workspace_id);
+      agentId = await this.resolveSlotAgentId(spec, team.account_id);
     }
 
     // P4c-3b: 같은 runtime identity를 두 슬롯이 공유할 수 있다 (shared 폴더
@@ -736,7 +736,7 @@ export class OrchestrationTeamService {
     await this.memberRepo.save(
       this.memberRepo.create({
         team_id: team.id,
-        workspace_id: team.workspace_id,
+        account_id: team.account_id,
         agent_id: agentId,
         spec: (spec as unknown as Record<string, any>) ?? null,
         role_label: (input.role_label || '').trim(),
@@ -745,12 +745,12 @@ export class OrchestrationTeamService {
         position: count,
       }),
     );
-    return this.getTeam(team.id, workspaceId);
+    return this.getTeam(team.id, accountId);
   }
 
   async updateMember(
     teamId: string,
-    workspaceId: string,
+    accountId: string,
     memberId: string,
     patch: {
       /** Partial patch over the slot's stored runtime spec. Absent = unchanged. */
@@ -761,8 +761,8 @@ export class OrchestrationTeamService {
       position?: number;
     },
   ): Promise<TeamView> {
-    const team = await this.requireTeam(teamId, workspaceId);
-    this.assertTeamWritable(team, workspaceId);
+    const team = await this.requireTeam(teamId, accountId);
+    this.assertTeamWritable(team, accountId);
     const member = await this.memberRepo.findOne({ where: { id: memberId, team_id: team.id } });
     if (!member) throw orchestrationError(404, 'team member not found');
 
@@ -788,28 +788,28 @@ export class OrchestrationTeamService {
       const previousAgentId = member.agent_id;
       const merged = this.mergeSpecInput(before, patch.runtime, 'runtime');
       // P4c-3b: identity가 바뀌어도 중복 검사는 하지 않는다 (addMember와 동일 이유).
-      member.agent_id = await this.resolveSlotAgentId(merged, team.workspace_id);
+      member.agent_id = await this.resolveSlotAgentId(merged, team.account_id);
       member.spec = merged as unknown as Record<string, any>;
       await this.memberRepo.save(member);
       // 슬롯이 가리키던 worker(교체 전 키)의 살아있는 세션을 새 스펙으로
       // 갈아태운다. cli/dir 가 바뀌면 키도 바뀌어 새 worker 는 깨끗이 뜨지만,
       // 묵은 키의 세션은 예전 launch context 로 계속 돌기 때문이다.
-      await this.notifySlotRuntimeChanged(before, previousAgentId, merged, team.workspace_id);
-      return this.getTeam(team.id, workspaceId);
+      await this.notifySlotRuntimeChanged(before, previousAgentId, merged, team.account_id);
+      return this.getTeam(team.id, accountId);
     }
 
     await this.memberRepo.save(member);
-    return this.getTeam(team.id, workspaceId);
+    return this.getTeam(team.id, accountId);
   }
 
-  async removeMember(teamId: string, workspaceId: string, memberId: string): Promise<TeamView> {
-    const team = await this.requireTeam(teamId, workspaceId);
-    this.assertTeamWritable(team, workspaceId);
+  async removeMember(teamId: string, accountId: string, memberId: string): Promise<TeamView> {
+    const team = await this.requireTeam(teamId, accountId);
+    this.assertTeamWritable(team, accountId);
     const member = await this.memberRepo.findOne({ where: { id: memberId, team_id: team.id } });
     if (!member) throw orchestrationError(404, 'team member not found');
     await this.memberRepo.delete({ id: member.id });
     // P4c-2b: Agent 행을 정리하지 않는다 (deleteTeam과 동일).
-    return this.getTeam(team.id, workspaceId);
+    return this.getTeam(team.id, accountId);
   }
 
 }
@@ -856,7 +856,7 @@ function clampOpenMissions(value: any): number {
 /** 중복 제거 + 빈 값 제거; 결과가 비면 []이 아니라 null — OrchestrationTeam.allowed_workspace_ids가
  *  다른 곳에서도 동일하게 그렇듯(빈 목록과 "한 번도 설정 안 함"은 둘 다 같은 deny-by-default를
  *  의미하므로) simple-json으로 그대로 왕복시키기 위함. */
-function normalizeWorkspaceIds(value: unknown): string[] | null {
+function normalizeAccountIds(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   const ids = Array.from(new Set(value.map((v) => String(v ?? '').trim()).filter(Boolean)));
   return ids.length ? ids : null;

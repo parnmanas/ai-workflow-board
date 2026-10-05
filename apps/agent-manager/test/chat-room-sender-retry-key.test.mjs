@@ -3,7 +3,7 @@
 //
 // chat 세션의 per-agent 키(_effectiveApiKey)는 spawn 시점에 한 번만 캡처되어
 // 세션 수명 내내 재사용된다. 세션 도중 stale 해지거나 스코프를 벗어나면 AWB
-// 서버의 AgentAuthGuard/workspace-scope 체크가 401 또는 403 으로 거부하는데,
+// 서버의 AgentAuthGuard/account-scope 체크가 401 또는 403 으로 거부하는데,
 // classifyHttpSendFailure 는 둘 다 'permanent' 로 분류해 이후 버퍼링/재시도를
 // 하지 않는다 — 그 결과 session-status ping 과 턴 실패 fallback 메시지가
 // 사용자에게 아무 설명도 없이 조용히 사라진다. AwbConfig.retryApiKey 는 이

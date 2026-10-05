@@ -72,7 +72,7 @@ test('isTicketStatusMove recognizes column moves and board-less status changes o
 
 test('contract: status payload without column fields derives the column and omits boardId', () => {
   const contract = buildAgentContextContract({
-    ticket: { id: TICKET_ID, workspace_id: 'ws-1', project_id: 'project-1', __awb_status: 'in_progress' },
+    ticket: { id: TICKET_ID, account_id: 'ws-1', project_id: 'project-1', __awb_status: 'in_progress' },
     role: 'assignee',
   });
   assert.equal(contract.version, '1.3');
@@ -201,8 +201,8 @@ test('repository credential asks /projects/:id first and falls back to /resource
   const legacy = await fetchRepositoryCredentialStatus(config, 'repo-1', 'agent-1', 'ws-1');
   assert.deepEqual(legacy, { credential: { username: 'bot', token: 'tok' }, failure: null });
   assert.deepEqual(seen, [
-    'http://awb.test/api/agent-manager/projects/repo-1/git-credential?agent_id=agent-1&workspace_id=ws-1',
-    'http://awb.test/api/agent-manager/resources/repo-1/git-credential?agent_id=agent-1&workspace_id=ws-1',
+    'http://awb.test/api/agent-manager/projects/repo-1/git-credential?agent_id=agent-1&account_id=ws-1',
+    'http://awb.test/api/agent-manager/resources/repo-1/git-credential?agent_id=agent-1&account_id=ws-1',
   ]);
 
   seen.length = 0;
@@ -229,7 +229,7 @@ const AGENT = 'agent-boardless';
 function agentContext() {
   return {
     agent_id: AGENT, name: 'Boardless', cli: 'claude', working_dir: '/workspace',
-    mcp_config_path: '/config/mcp.json', api_key: 'agent-key', workspace_id: 'ws-1',
+    mcp_config_path: '/config/mcp.json', api_key: 'agent-key', account_id: 'ws-1',
     cli_home_dir: '/cli-home', extra_env: {}, credential_provider: null, model: null,
     runtime_config: null,
   };
@@ -243,7 +243,7 @@ function boardlessTrigger(overrides = {}) {
     actor_name: AGENT,
     field_changed: 'trigger-1',
     trigger_source: 'dispatch',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     status: 'in_progress',
     project: PROJECT,
     current_column_id: 'status:in_progress',
@@ -269,7 +269,7 @@ function harness({ persistent }) {
     if (target.includes('/api/agent/tickets/')) {
       // Board-less REST ticket: no board_id, no column — `status` is authoritative.
       return Response.json({
-        id: TICKET_ID, title: 'Fix login', description: 'Users cannot log in.', workspace_id: 'ws-1',
+        id: TICKET_ID, title: 'Fix login', description: 'Users cannot log in.', account_id: 'ws-1',
         status: 'in_progress', project_id: 'project-1', comments: [],
         base_repo: { id: 'project-1', name: 'Web', url: 'https://github.com/acme/web.git', default_branch: 'main' },
       });
@@ -371,6 +371,20 @@ test('dispatcher: status trigger one-shot prompt and runtime effort (effort_pres
   assert.equal(spawn.agentContext.runtime_config.extra.effort, 'high');
   assert.match(spawn.taskText, /"effort": "high"/);
 });
+
+for (const persistent of [true, false]) {
+  test(`dispatcher: legacy owner field preserves project credential scope (${persistent ? 'persistent' : 'one-shot'})`, async () => {
+    const { dispatcher, calls } = harness({ persistent });
+    await dispatcher.handleTrigger(boardlessTrigger({ account_id: undefined, workspace_id: 'ws-1' }));
+    assert.equal(await waitFor(() => (persistent ? calls.tsm : calls.spawn).length === 1), true, JSON.stringify(calls.acks));
+    assert.ok(calls.credential.length > 0);
+    for (const url of calls.credential) {
+      assert.equal(new URL(url).searchParams.get('account_id'), 'ws-1');
+      assert.equal(new URL(url).searchParams.has('workspace_id'), false);
+    }
+    assert.deepEqual(calls.acks.map((ack) => ack.outcome), ['processed']);
+  });
+}
 
 test('dispatcher: an old board trigger (no status) keeps the column contract', async () => {
   const { dispatcher, calls } = harness({ persistent: false });

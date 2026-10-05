@@ -108,7 +108,7 @@ export class TicketPrerequisitesService {
       const row = await prereqRepo.findOne({ where: { id: pid } });
       if (!row) throw badRequest(`Prerequisite ticket not found: ${pid}`);
       if (row.archived_at) throw badRequest(`Prerequisite ticket is archived: ${pid}`);
-      if (ticket.workspace_id && row.workspace_id && row.workspace_id !== ticket.workspace_id) {
+      if (ticket.account_id && row.account_id && row.account_id !== ticket.account_id) {
         throw badRequest(`Prerequisite must be in the same workspace: ${pid}`);
       }
       validated.push({ id: pid, row });

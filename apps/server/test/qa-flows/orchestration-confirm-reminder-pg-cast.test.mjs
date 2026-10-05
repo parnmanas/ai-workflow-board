@@ -122,14 +122,14 @@ test('confirm reminder sweep joins uuid mission PK to varchar mission_id and pic
   const overdue = new Date(now.getTime() - 10 * 60_000);
 
   const running = await missionRepo.save(missionRepo.create({
-    workspace_id: ws, team_id: team, title: 'running mission', status: 'running',
+    account_id: ws, team_id: team, title: 'running mission', status: 'running',
   }));
   const paused = await missionRepo.save(missionRepo.create({
-    workspace_id: ws, team_id: team, title: 'paused mission', status: 'paused',
+    account_id: ws, team_id: team, title: 'paused mission', status: 'paused',
   }));
 
   const gate = (missionId, key, extra) => stepRepo.create({
-    mission_id: missionId, workspace_id: ws, team_id: team, step_key: key, title: key,
+    mission_id: missionId, account_id: ws, team_id: team, step_key: key, title: key,
     status: 'awaiting_user', visit: 1, dispatched_at: overdue, ...extra,
   });
 

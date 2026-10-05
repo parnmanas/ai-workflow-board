@@ -227,17 +227,17 @@ export class AgentUsageService {
    * 필요한 호출부는 대신 `getTokenUsageStats`의 윈도우 쿼리를 쓸 것(100%
    * live-table 기반이라 롤업이 관여하지 않으므로 day-정렬 제약도 없다).
    *
-   * workspace 스코프만 지원한다: 롤업 grain이 (workspace_id, usage_date,
+   * workspace 스코프만 지원한다: 롤업 grain이 (account_id, usage_date,
    * agent_id)라 ticket 차원이 없다 (8d5c6f5d에서의 planner 판단 — 그쪽은
    * 위 `top_tickets`처럼 live-window 전용으로 남는다). `from` 생략 =
    * all-time(하한 없음).
    */
   async getLongTermUsageStats(opts: {
-    workspaceId: string;
+    accountId: string;
     from?: Date;
     to?: Date;
   }): Promise<LongTermUsageStats> {
-    const { workspaceId } = opts;
+    const { accountId } = opts;
     const toDay = (opts.to ?? new Date()).toISOString().slice(0, 10);
     const fromDay = opts.from ? opts.from.toISOString().slice(0, 10) : null;
 
@@ -257,7 +257,7 @@ export class AgentUsageService {
       .addSelect('COALESCE(SUM(r.cache_read_input_tokens), 0)', 'cache_read_input_tokens')
       .addSelect('COALESCE(SUM(r.cache_creation_input_tokens), 0)', 'cache_creation_input_tokens')
       .addSelect('COALESCE(SUM(r.total_cost_usd), 0)', 'total_cost_usd')
-      .where('r.workspace_id = :workspaceId', { workspaceId })
+      .where('r.account_id = :accountId', { accountId })
       .andWhere('r.usage_date <= :toDay', { toDay });
     if (fromDay) rollupQb.andWhere('r.usage_date >= :fromDay', { fromDay });
     const rollupRow = await rollupQb.getRawOne<Record<string, string | number>>();
@@ -273,7 +273,7 @@ export class AgentUsageService {
       .addSelect('COALESCE(SUM(s.cache_read_input_tokens), 0)', 'cache_read_input_tokens')
       .addSelect('COALESCE(SUM(s.cache_creation_input_tokens), 0)', 'cache_creation_input_tokens')
       .addSelect('COALESCE(SUM(s.total_cost_usd), 0)', 'total_cost_usd')
-      .where('s.workspace_id = :workspaceId', { workspaceId })
+      .where('s.account_id = :accountId', { accountId })
       .andWhere('s.started_at >= :liveLowerBound', { liveLowerBound })
       .andWhere('s.started_at <= :liveUpperBound', { liveUpperBound })
       .getRawOne<Record<string, string | number>>();

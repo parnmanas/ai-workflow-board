@@ -69,9 +69,9 @@ test('GeneralizeAttachmentsForChat migration backfills owner_type/owner_id from 
 test('RoomMessagingService._validatePendingAttachments enforces room + workspace + sender match', () => {
   const code = stripComments(read('modules/chat-rooms/room-messaging.service.ts'));
   assert.match(code, /_validatePendingAttachments/, 'helper must exist so every send_message caller funnels through one guard');
-  // Workspace scope check — required so a pending upload in workspace A
+  // Account scope check — required so a pending upload in workspace A
   // can't be smuggled into a message in workspace B.
-  assert.match(code, /row\.workspace_id\s*!==\s*workspaceId/, 'pending attachment must reject ids that belong to a different workspace');
+  assert.match(code, /row\.account_id\s*!==\s*accountId/, 'pending attachment must reject ids that belong to a different workspace');
   // Uploader identity — required so a co-participant can't attach another
   // user / agent's pending file to their own message.
   assert.match(code, /row\.uploaded_by_type\s*!==\s*senderType[\s\S]{0,80}uploaded_by_id\s*!==\s*senderId/, 'pending attachment must reject ids uploaded by a different sender');

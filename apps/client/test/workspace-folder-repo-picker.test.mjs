@@ -33,7 +33,7 @@ import SecurityManager from '../src/components/admin/SecurityManager.tsx';
 const WS = 'ws-1';
 
 const project = (id, name, repo_url, default_branch) => ({
-  id, workspace_id: WS, name, description: '', repo_url, default_branch, credential_id: null,
+  id, account_id: WS, name, description: '', repo_url, default_branch, credential_id: null,
   clone_policy: null, use_pr: false, instructions: '', default_assignee: null, host_folders: [],
   created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(),
 });
@@ -144,7 +144,7 @@ async function renderActions(t, {
     createAction: async (payload) => { created.push(payload); return { ...payload, id: 'new-action' }; },
     updateAction: async (id, payload) => { updated.push({ id, payload }); return { ...payload, id }; },
   });
-  const view = mount(React.createElement(ActionManager, { workspaceId: WS }));
+  const view = mount(React.createElement(ActionManager, { accountId: WS }));
   await flush();
   t.after(() => { view.unmount(); dom.cleanup(); });
   return { container: view.container, created, updated };
@@ -152,7 +152,7 @@ async function renderActions(t, {
 
 function makeAction(overrides = {}) {
   return {
-    id: 'action-1', workspace_id: WS, name: '배포', description: '', prompt: 'deploy',
+    id: 'action-1', account_id: WS, name: '배포', description: '', prompt: 'deploy',
     target_agent_id: 'agent-1', schedule_cron: '', trigger: '', trigger_label: '',
     enabled: true, max_runs: 10, last_run_at: null, run_count: 0,
     workspace_folder: '', repo_ref: null, checkout_mode: 'reuse',
@@ -395,7 +395,7 @@ test('QA 시나리오 폼도 같은 드롭다운으로 프로젝트를 지정하
   const dom = setupDom();
   const updated = [];
   const scenario = {
-    id: 'qa-1', workspace_id: WS, name: '로그인 시나리오', description: '',
+    id: 'qa-1', account_id: WS, name: '로그인 시나리오', description: '',
     target_agent_id: 'rt-0123456789abcdef', target_runtime: { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/repo', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, qa_driver: 'browser', qa_driver_config: {}, steps: [], tags: [],
     enabled: true, target_environment: '', on_failure_ticket: null, qa_phases: null,
     workspace_folder: '', repo_ref: { project_id: 'repo-deleted' },
@@ -412,7 +412,7 @@ test('QA 시나리오 폼도 같은 드롭다운으로 프로젝트를 지정하
     listProjectBranches: async () => BRANCHES,
     updateQaScenario: async (id, payload) => { updated.push({ id, payload }); return { ...scenario, ...payload }; },
   });
-  const view = mount(React.createElement(QaManager, { workspaceId: WS }));
+  const view = mount(React.createElement(QaManager, { accountId: WS }));
   await flush();
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;
@@ -440,7 +440,7 @@ test('Security 프로파일 폼도 같은 드롭다운으로 프로젝트·브�
   const dom = setupDom();
   const updated = [];
   const profile = {
-    id: 'sec-1', workspace_id: WS, name: '월간 감사', description: '',
+    id: 'sec-1', account_id: WS, name: '월간 감사', description: '',
     target_agent_id: 'rt-0123456789abcdef', target_runtime: { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/repo', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, target_resource_id: null, scan_driver: 'code-audit',
     scan_driver_config: {}, scope_mode: 'incremental', checklist: [], tags: [],
     enabled: true, max_runs: 20, on_failure_ticket: null,
@@ -458,7 +458,7 @@ test('Security 프로파일 폼도 같은 드롭다운으로 프로젝트·브�
     listProjectBranches: async () => BRANCHES,
     updateSecurityProfile: async (id, payload) => { updated.push({ id, payload }); return { ...profile, ...payload }; },
   });
-  const view = mount(React.createElement(SecurityManager, { workspaceId: WS }));
+  const view = mount(React.createElement(SecurityManager, { accountId: WS }));
   await flush();
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;

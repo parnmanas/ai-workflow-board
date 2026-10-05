@@ -6,7 +6,7 @@ import { Repository, DataSource, EntityManager, IsNull, MoreThanOrEqual } from '
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
@@ -57,8 +57,8 @@ export class AgentApiController {
   ) {
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    const workspaceId = await this.resolveTicketWorkspaceId(this.dataSource, ticketId);
-    if (this.scopeRejects(req, workspaceId)) return this.denyScope(res);
+    const accountId = await this.resolveTicketAccountId(this.dataSource, ticketId);
+    if (this.scopeRejects(req, accountId)) return this.denyScope(res);
     const triggerId = typeof body?.cycle_trigger_id === 'string' ? body.cycle_trigger_id : '';
     const agentId = typeof body?.agent_id === 'string' ? body.agent_id : '';
     const attempt = Number(body?.attempt ?? 0);
@@ -67,7 +67,7 @@ export class AgentApiController {
     }
     // P4c-4: Agent 행 대신 Host/링크 해소.
     const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
-    if (!workspaceId || !agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
+    if (!accountId || !agent || !agentIsVisibleInWorkspace(agent.account_id, accountId)) {
       return res.status(400).json({ error: 'agent does not belong to ticket workspace' });
     }
     const familyKey = `${triggerId}:${agentId}`;
@@ -84,7 +84,7 @@ export class AgentApiController {
       });
       if (existing) return existing;
       return repo.save(repo.create({
-        workspace_id: workspaceId || '',
+        account_id: accountId || '',
         entity_type: 'ticket',
         entity_id: ticketId,
         ticket_id: ticketId,
@@ -114,8 +114,8 @@ export class AgentApiController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const workspaceId = await this.resolveTicketWorkspaceId(this.dataSource, ticketId);
-    if (this.scopeRejects(req, workspaceId)) return this.denyScope(res);
+    const accountId = await this.resolveTicketAccountId(this.dataSource, ticketId);
+    if (this.scopeRejects(req, accountId)) return this.denyScope(res);
     const outcome = await this.dataSource.transaction(async (manager) => {
       await lockTicketCommentWrites(manager, ticketId);
       const activityRepo = manager.getRepository(ActivityLog);
@@ -184,7 +184,7 @@ export class AgentApiController {
         };
         if (!claimed) {
           await activityRepo.save(activityRepo.create({
-            workspace_id: marker.workspace_id,
+            account_id: marker.account_id,
             entity_type: 'ticket',
             entity_id: ticketId,
             ticket_id: ticketId,
@@ -202,7 +202,7 @@ export class AgentApiController {
         result = { decision: 'failed', attempt: 1, reason: 'silent_exit_retry_exhausted', audit_comment_count: 0, entity_change_count: 0 };
       }
       await activityRepo.save(activityRepo.create({
-        workspace_id: marker.workspace_id,
+        account_id: marker.account_id,
         entity_type: 'ticket',
         entity_id: ticketId,
         ticket_id: ticketId,
@@ -228,8 +228,8 @@ export class AgentApiController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const workspaceId = await this.resolveTicketWorkspaceId(this.dataSource, ticketId);
-    if (this.scopeRejects(req, workspaceId)) return this.denyScope(res);
+    const accountId = await this.resolveTicketAccountId(this.dataSource, ticketId);
+    if (this.scopeRejects(req, accountId)) return this.denyScope(res);
     const outcome = await this.dataSource.transaction(async (manager) => {
       await lockTicketCommentWrites(manager, ticketId);
       const repo = manager.getRepository(ActivityLog);
@@ -246,7 +246,7 @@ export class AgentApiController {
       });
       if (!existing) {
         await repo.save(repo.create({
-          workspace_id: marker.workspace_id,
+          account_id: marker.account_id,
           entity_type: 'ticket',
           entity_id: ticketId,
           ticket_id: ticketId,
@@ -271,9 +271,9 @@ export class AgentApiController {
     return res.json(outcome);
   }
 
-  // ── Workspace-scoping guards (security finding: authz / cross-workspace IDOR)
+  // ── Account-scoping guards (security finding: authz / cross-workspace IDOR)
   //
-  // AgentAuthGuard stamps request.currentWorkspaceId from the presented DB API
+  // AgentAuthGuard stamps request.currentAccountId from the presented DB API
   // key (env/admin keys → null; the dev-mode bypass also → null). A null scope
   // is treated as full-scope and allowed everywhere — it covers env/admin keys
   // and workspace-less manager keys that legitimately operate across the
@@ -282,7 +282,7 @@ export class AgentApiController {
   // tickets / boards / chat.
 
   private requestScope(req: Request): string | null {
-    const raw = (req as any).currentWorkspaceId as string | null | undefined;
+    const raw = (req as any).currentAccountId as string | null | undefined;
     return raw ? raw : null;
   }
 
@@ -295,7 +295,7 @@ export class AgentApiController {
 
   // Resolve the owning workspace for a ticket id, climbing child → root (the
   // root row is authoritative for workspace membership).
-  private async resolveTicketWorkspaceId(
+  private async resolveTicketAccountId(
     db: DataSource | EntityManager,
     ticketId: string,
   ): Promise<string | null> {
@@ -305,28 +305,28 @@ export class AgentApiController {
     while (t && t.parent_id && guard++ < 20) {
       t = await tRepo.findOne({ where: { id: t.parent_id } });
     }
-    return t?.workspace_id || null;
+    return t?.account_id || null;
   }
 
-  private async resolveRoomWorkspaceId(roomId: string): Promise<string | null> {
+  private async resolveRoomAccountId(roomId: string): Promise<string | null> {
     const room = await this.dataSource.getRepository(ChatRoom).findOne({ where: { id: roomId } });
-    return room?.workspace_id ?? null;
+    return room?.account_id ?? null;
   }
 
   // Returns true when the request's scoped key may NOT touch the given target
   // workspace. A scoped key against an unresolvable workspace (null) is also
   // rejected — fail closed rather than leak across tenants.
-  private scopeRejects(req: Request, targetWorkspaceId: string | null): boolean {
+  private scopeRejects(req: Request, targetAccountId: string | null): boolean {
     const scope = this.requestScope(req);
     if (!scope) return false;
-    return targetWorkspaceId !== scope;
+    return targetAccountId !== scope;
   }
 
   @Get('tickets/:id')
   async getTicket(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     const ticket = await loadTicketFull(this.dataSource, id);
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    if (this.scopeRejects(req, await this.resolveTicketWorkspaceId(this.dataSource, id))) {
+    if (this.scopeRejects(req, await this.resolveTicketAccountId(this.dataSource, id))) {
       return this.denyScope(res);
     }
     return res.json(ticket);
@@ -359,7 +359,7 @@ export class AgentApiController {
   ) {
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    if (this.scopeRejects(req, await this.resolveTicketWorkspaceId(this.dataSource, ticketId))) {
+    if (this.scopeRejects(req, await this.resolveTicketAccountId(this.dataSource, ticketId))) {
       return this.denyScope(res);
     }
     // Archived tickets are read-only — refuse so manager retries don't pile
@@ -595,11 +595,11 @@ export class AgentApiController {
   @Post('operational-capability-ticket')
   async operationalCapabilityTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const scope = this.requestScope(req);
-    const workspaceId = String(body.workspace_id || scope || '');
-    if (!workspaceId || !body.dedupe_key || !body.operation || !body.missing_capability) {
-      return res.status(400).json({ error: 'workspace_id, dedupe_key, operation and missing_capability are required' });
+    const accountId = String(body.account_id || scope || '');
+    if (!accountId || !body.dedupe_key || !body.operation || !body.missing_capability) {
+      return res.status(400).json({ error: 'account_id, dedupe_key, operation and missing_capability are required' });
     }
-    if (scope && scope !== workspaceId) return this.denyScope(res);
+    if (scope && scope !== accountId) return this.denyScope(res);
     const dedupeKey = String(body.dedupe_key);
     const recurrenceKey = createHash('sha256').update(
       `${dedupeKey}\n${String(body.room_id || '')}\n${String(body.message_id || '')}`,
@@ -622,7 +622,7 @@ export class AgentApiController {
       return res.status(200).json({ id: found.id, title: found.title, reused: true });
     }
     try {
-      const { ticket } = await this.tickets.create(workspaceId, {
+      const { ticket } = await this.tickets.create(accountId, {
         title: `[운영 자동화] ${String(body.operation).slice(0, 120)}용 MCP/Action capability 추가`,
         description: `원 요청: ${body.original_request || body.operation}\n정규화 operation: ${body.operation}\n누락 capability: ${body.missing_capability}\nsource room/message: ${body.room_id || ''}/${body.message_id || ''}\n\nAction 검색 후에도 실행 수단이 없었습니다. capability 구현 후 원 대화에 결과를 회신하고, 안전·권한 조건을 포함한 idempotent Action으로 등록합니다.`,
         tags: ['automation', 'mcp', 'mcp-missing', 'source:chat'],
@@ -645,18 +645,18 @@ export class AgentApiController {
   @Post('ordinary-work-ticket')
   async ordinaryWorkTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const scope = this.requestScope(req);
-    const workspaceId = String(body.workspace_id || scope || '');
+    const accountId = String(body.account_id || scope || '');
     const roomId = String(body.room_id || '');
     const messageId = String(body.message_id || '');
     const dedupeKey = `ordinary:${String(body.dedupe_key || '')}`;
-    if (!workspaceId || !roomId || !messageId || !body.title || dedupeKey === 'ordinary:') {
-      return res.status(400).json({ error: 'workspace_id, room_id, message_id, dedupe_key and title are required' });
+    if (!accountId || !roomId || !messageId || !body.title || dedupeKey === 'ordinary:') {
+      return res.status(400).json({ error: 'account_id, room_id, message_id, dedupe_key and title are required' });
     }
-    if (scope && scope !== workspaceId) return this.denyScope(res);
+    if (scope && scope !== accountId) return this.denyScope(res);
     const projectId = body.project_id ? String(body.project_id) : '';
     if (projectId) {
       const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId } });
-      if (!project || project.workspace_id !== workspaceId) return res.status(404).json({ error: 'project not found in this workspace' });
+      if (!project || project.account_id !== accountId) return res.status(404).json({ error: 'project not found in this workspace' });
     }
     const existingOpen = () => this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
     const reply = (ticket: Ticket, reused: boolean) => res.status(reused ? 200 : 201).json({
@@ -665,7 +665,7 @@ export class AgentApiController {
     const found = await existingOpen();
     if (found) return reply(found, true);
     try {
-      const { ticket } = await this.tickets.create(workspaceId, {
+      const { ticket } = await this.tickets.create(accountId, {
         title: String(body.title).trim().slice(0, 200),
         description: String(body.description || body.original_request || '').trim(),
         tags: normalizeTags([...(Array.isArray(body.tags) ? body.tags : []), 'source:chat']),
@@ -687,14 +687,14 @@ export class AgentApiController {
   @Get('ordinary-work-candidates')
   async ordinaryWorkCandidates(@Req() req: Request, @Res() res: Response) {
     const scope = this.requestScope(req);
-    const workspaceId = String(req.query.workspace_id || scope || '');
-    if (!workspaceId) return res.status(400).json({ error: 'workspace scope is required' });
-    if (scope && scope !== workspaceId) return this.denyScope(res);
+    const accountId = String(req.query.account_id || scope || '');
+    if (!accountId) return res.status(400).json({ error: 'workspace scope is required' });
+    if (scope && scope !== accountId) return this.denyScope(res);
     const projects = await this.dataSource.getRepository(Project).find({
-      where: { workspace_id: workspaceId },
+      where: { account_id: accountId },
       order: { name: 'ASC' },
     });
-    const tags = await this.tickets.tagSuggestions(workspaceId);
+    const tags = await this.tickets.tagSuggestions(accountId);
     return res.json({
       projects: projects.map((p) => ({ id: p.id, name: p.name, repo_url: p.repo_url })),
       tags: tags.slice(0, 50),
@@ -731,7 +731,7 @@ export class AgentApiController {
             id: keyHostId,
             name: 'awb-agent-manager',
             hostname: 'unknown',
-            workspace_id: apiKey?.workspace_id ?? null,
+            account_id: apiKey?.account_id ?? null,
             is_active: 1,
           }));
           this.logService.warn(
@@ -764,7 +764,7 @@ export class AgentApiController {
   async setChatRoomTyping(@Body() body: any, @Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response) {
     const { agent_id, agent_name, is_typing, status } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    if (this.scopeRejects(req, await this.resolveRoomAccountId(roomId))) return this.denyScope(res);
     // Resolve canonical Manager/Agent display server-side so the typing
     // indicator label matches the rest of the chat UI even when the
     // subagent posts a bare name (or no name at all).
@@ -790,7 +790,7 @@ export class AgentApiController {
   async setChatRoomSessionStatus(@Body() body: any, @Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response) {
     const { agent_id, keep_alive_until_ms, background_task_count } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    if (this.scopeRejects(req, await this.resolveRoomAccountId(roomId))) return this.denyScope(res);
     // Same display-name resolution as setChatRoomTyping — the badge must be
     // attributed to the responding agent's resolved `<Manager>/<Agent>` name.
     const resolvedName =
@@ -824,7 +824,7 @@ export class AgentApiController {
   async sendChatRoomMessage(@Body() body: any, @Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response) {
     const { agent_id, content } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    if (this.scopeRejects(req, await this.resolveRoomAccountId(roomId))) return this.denyScope(res);
     const attachmentIds = Array.isArray(body.attachment_ids) ? body.attachment_ids : [];
     // Empty content is valid when attachments carry the payload — service
     // enforces the "content OR attachment_ids" rule consistently.
@@ -850,7 +850,7 @@ export class AgentApiController {
 
     const msg = await this.messaging.sendMessage(
       roomId,
-      room.workspace_id,
+      room.account_id,
       'agent',
       agent_id,
       agentName,
@@ -868,7 +868,7 @@ export class AgentApiController {
 
   @Get('chat-rooms/:roomId/messages')
   async getChatRoomMessages(@Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response, @Query('limit') limitStr?: string) {
-    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    if (this.scopeRejects(req, await this.resolveRoomAccountId(roomId))) return this.denyScope(res);
     const limit = Math.min(parseInt(limitStr || '50', 10) || 50, 200);
     // Chat history feeding back into a spawned CLI must NOT include the
     // manager's own progress narration — `excludeProgress` drops type='progress'
@@ -895,7 +895,7 @@ export class AgentApiController {
   ) {
     const agentId = (req as any).currentAgentId as string | undefined;
     if (!agentId) return res.status(403).json({ error: 'Agent identity required' });
-    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    if (this.scopeRejects(req, await this.resolveRoomAccountId(roomId))) return this.denyScope(res);
     try {
       await this.membership.requireActiveParticipant(roomId, agentId, 'agent');
       const row = await this.dataSource.getRepository(TicketAttachment).findOne({

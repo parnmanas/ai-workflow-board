@@ -25,7 +25,7 @@ import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
   createAgent,
   createApiKey,
-  createWorkspace,
+  createAccount,
 } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 import { evaluateManagerCapability } from '../dist/common/manager-capability-gate.js';
@@ -51,7 +51,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'list-for-agent');
+  const workspace = await createAccount(app, getDataSourceToken, 'list-for-agent');
   // The manager's OWN identity — distinct from any agent it supervises.
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'list-for-agent-manager',
@@ -63,7 +63,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
     name: 'list-for-agent-target',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'list-for-agent',
   });
 
@@ -72,7 +72,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
     agent_id: manager.id,
     host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
     agent_ids: [target.id],
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     mode: 'manager',
     hostname: 'test-host',
     plugin_version: '1.6.30', // predates capability reporting
@@ -109,7 +109,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
     agent_id: manager.id,
     host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
     agent_ids: [target.id],
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     mode: 'manager',
     hostname: 'test-host',
     plugin_version: '1.6.94',

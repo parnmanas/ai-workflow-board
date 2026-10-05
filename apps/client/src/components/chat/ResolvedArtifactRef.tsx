@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
-import { ArtifactRefType, workspaceIdFromPath } from '../../utils/artifactRef';
+import { ArtifactRefType } from '../../utils/artifactRef';
 
 const ICON: Record<ArtifactRefType, string> = {
   ticket: '🎫', agent: '🤖', action: '▶️', function: 'ƒ', schedule: '🗓️',
@@ -13,19 +13,18 @@ type Resolution = {
   available: boolean;
   label: string;
   deepLink: string | null;
-  workspaceName?: string;
+  accountName?: string;
   reason?: string;
 };
 
 const REASON: Record<string, string> = {
   malformed_id: '잘못된 UUID',
-  workspace_access_denied: 'workspace 접근 권한 없음',
+  account_access_denied: '소유 계정 접근 권한 없음',
   not_found: '존재하지 않음',
-  outside_workspace: '다른 workspace의 엔터티',
+  outside_account: '다른 소유 계정의 엔터티',
   no_detail_surface: '상세 화면 없음',
   resolving: '확인 중',
   resolver_failed: '확인 실패',
-  workspace_context_missing: 'workspace context 없음',
 };
 
 export default function ResolvedArtifactRef({
@@ -35,14 +34,12 @@ export default function ResolvedArtifactRef({
   id: string;
   claimedLabel: string;
 }) {
-  const workspaceId = typeof window === 'undefined' ? '' : workspaceIdFromPath(window.location.pathname);
   const [resolved, setResolved] = useState<Resolution | null>(null);
-  const [failure, setFailure] = useState(workspaceId ? 'resolving' : 'workspace_context_missing');
+  const [failure, setFailure] = useState('resolving');
 
   useEffect(() => {
     let active = true;
-    if (!workspaceId) return;
-    api.resolveArtifactRefs(workspaceId, [{ type, id }])
+    api.resolveArtifactRefs('', [{ type, id }])
       .then(rows => {
         if (!active) return;
         setResolved(rows[0] || null);
@@ -50,14 +47,14 @@ export default function ResolvedArtifactRef({
       })
       .catch(() => active && setFailure('resolver_failed'));
     return () => { active = false; };
-  }, [workspaceId, type, id]);
+  }, [type, id]);
 
   const common = {
     'data-entity-ref': `${type}:${id}`,
     'data-artifact-state': resolved?.available ? 'available' : failure,
     title: [
       resolved?.label || claimedLabel,
-      resolved?.workspaceName,
+      resolved?.accountName,
       id,
     ].filter(Boolean).join(' · '),
     style: {
@@ -69,7 +66,7 @@ export default function ResolvedArtifactRef({
   };
 
   if (resolved?.available && resolved.deepLink) {
-    const context = resolved.workspaceName || '';
+    const context = resolved.accountName || '';
     return (
       <a {...common} href={resolved.deepLink} aria-label={`${type} 열기: ${resolved.label}`}>
         {ICON[type]} {resolved.label}{context ? ` · ${context}` : ''}
@@ -77,7 +74,7 @@ export default function ResolvedArtifactRef({
     );
   }
   const reason = REASON[resolved?.reason || failure] || resolved?.reason || failure;
-  const context = resolved?.workspaceName || '';
+  const context = resolved?.accountName || '';
   return (
     <span {...common} aria-disabled="true">
       {ICON[type]} {type} · {resolved?.label || claimedLabel || type}

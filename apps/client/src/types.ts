@@ -100,7 +100,7 @@ export interface RuntimeParticipant {
   lifecycle_state?: AgentLifecycleState; // 5-state process lifecycle (ticket bfdd80b7)
   lifecycle_detail?: string;   // concrete reason when lifecycle_state==='error' (ticket 1f750878)
   manager_agent_id?: string | null;
-  workspace_id?: string | null;
+  account_id?: string | null;
   manager_name?: string;
   live_instance?: AgentLiveInstance;
   subagents?: AgentSubagentRollup;
@@ -134,11 +134,11 @@ export interface AgentSubagentRollup {
   recent: SubagentSummary[];
 }
 
-export type CatalogScope = 'global' | 'workspace';
+export type CatalogScope = 'global' | 'account';
 
 /**
- * Project / Workspace 의 clone 정책(ticket bddb63ee). 모든 키가 optional 이며
- * 지정하지 않은 키는 Project → Workspace → 시스템 기본값 순으로 흘러내린다.
+ * Project / Account 의 clone 정책(ticket bddb63ee). 모든 키가 optional 이며
+ * 지정하지 않은 키는 Project → Account → 시스템 기본값 순으로 흘러내린다.
  */
 export interface ClonePolicy {
   /** clone 전체 wall-clock 예산(초). 60~86400. 시스템 기본값 3600(60분). */
@@ -155,7 +155,7 @@ export interface ClonePolicy {
 
 export interface Resource {
   id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   scope: CatalogScope;
   credential_id: string | null;
   name: string;
@@ -271,7 +271,7 @@ export interface RepoFileContent {
 // the agent's reply (and any follow-ups) live in that room.
 export interface Action {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   description: string;
   prompt: string;
@@ -306,7 +306,7 @@ export interface Action {
 export interface ActionRun {
   id: string;
   action_id: string;
-  workspace_id: string;
+  account_id: string;
   /**
    * 이 run 을 수행한 에이전트 (티켓 fc3906c5). fan-out 이전에 만들어진 run 은
    * '' 다 — 그 시점의 대상은 이후 편집됐을 수 있어 소급 백필하지 않는다.
@@ -345,7 +345,7 @@ export type WorkflowFunctionRisk = 'read' | 'write' | 'destructive' | 'high_impa
 
 export interface WorkflowFunction {
   id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   scope: CatalogScope;
   key: string;
   version: number;
@@ -371,7 +371,7 @@ export interface WorkflowFunctionRun {
   function_id: string;
   function_key: string;
   function_version: number;
-  workspace_id: string;
+  account_id: string;
   ticket_id: string | null;
   parent_run_id: string | null;
   actor_type: string;
@@ -480,7 +480,7 @@ export interface QaPhaseHistoryEntry {
 
 export interface QaScenario {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   description: string;
   steps: QaScenarioStep[];
@@ -519,7 +519,7 @@ export interface QaScenario {
  */
 export interface Deployment {
   id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   environment: string;
   base_url: string;
   repo_resource_id: string;
@@ -555,7 +555,7 @@ export interface QaStepResult {
 export interface QaRun {
   id: string;
   scenario_id: string;
-  workspace_id: string;
+  account_id: string;
   status: QaRunStatus;
   room_id: string;
   step_results: QaStepResult[];
@@ -596,7 +596,7 @@ export type QaRunBatchStatus = 'running' | 'done' | 'aborted';
  */
 export interface QaRunBatch {
   id: string;
-  workspace_id: string;
+  account_id: string;
   scenario_ids: string[];
   run_ids: string[];
   current_index: number;
@@ -625,7 +625,7 @@ export type QaScheduleScope = 'all' | 'selected';
  */
 export interface QaSchedule {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   scope: QaScheduleScope;
   scenario_ids: string[];
@@ -643,7 +643,7 @@ export interface QaSchedule {
 }
 
 /**
- * WorkspaceSchedule — general-purpose "dispatch this task to one agent on this
+ * AutomationSchedule — general-purpose "dispatch this task to one agent on this
  * cadence" trigger (ticket 8845be79 foundation; this UI = ticket 1927ed4a). When
  * due, the server opens a FRESH chat room, seats `target_agent_id`, and sends
  * `task_prompt` as the opening message (the QA/Security RUN dispatch shape).
@@ -655,9 +655,9 @@ export interface QaSchedule {
  * `next_run_at`/`last_run_at`/`last_room_id` track firing; `last_room_id`
  * deep-links to the most recent dispatched conversation.
  */
-export interface WorkspaceSchedule {
+export interface AutomationSchedule {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   target_agent_id: string;
   task_prompt: string;
@@ -675,7 +675,7 @@ export interface WorkspaceSchedule {
   updated_at: string;
 }
 
-export interface WorkspaceScheduleDispatch {
+export interface AutomationScheduleDispatch {
   schedule_id: string;
   room_id: string;
   agent_id: string;
@@ -726,7 +726,7 @@ export interface SecurityOnFailureTicketConfig {
 
 export interface SecurityProfile {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   description: string;
   checklist: SecurityChecklistItem[] | null;
@@ -787,7 +787,7 @@ export interface SecurityFinding {
 export interface SecurityRun {
   id: string;
   profile_id: string;
-  workspace_id: string;
+  account_id: string;
   status: SecurityRunStatus;
   room_id: string;
   findings: SecurityFinding[] | null;
@@ -818,7 +818,7 @@ export type SecurityRunBatchStatus = 'running' | 'done' | 'aborted';
  */
 export interface SecurityRunBatch {
   id: string;
-  workspace_id: string;
+  account_id: string;
   profile_ids: string[];
   run_ids: string[];
   current_index: number;
@@ -853,7 +853,7 @@ export type SecurityScheduleKind = 'scan' | 'checklist_refresh';
  */
 export interface SecuritySchedule {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   kind: SecurityScheduleKind;
   scope: SecurityScheduleScope;
@@ -873,9 +873,9 @@ export interface SecuritySchedule {
 
 export interface Credential {
   id: string;
-  // null = global (instance-level) credential shared across all workspaces.
-  workspace_id: string | null;
-  // 'global' credentials are inherited by every workspace; 'workspace' ones are
+  // null = global (instance-level) credential shared across all accounts.
+  account_id: string | null;
+  // 'global' credentials are inherited by every workspace; 'account' ones are
   // owned by the active workspace. Unlike the other catalog kinds this is
   // mutable in place — the Edit dialog lets a holder of
   // admin.global_credentials move a credential either way, and everyone else
@@ -895,7 +895,7 @@ export interface Credential {
 export interface CliLoginInstanceOption {
   instance_id: string;
   hostname: string;
-  workspace_id: string | null;
+  account_id: string | null;
   /** Per-CLI install/health keyed by catalog CLI id — the shape new servers
    *  send alongside the legacy flat keys below. Readers check this first. */
   clis?: Record<string, { installed: boolean; healthy: boolean }>;
@@ -919,7 +919,7 @@ export type CliLoginSessionStatus =
 
 export interface CliLoginSession {
   id: string;
-  workspace_id: string;
+  account_id: string;
   is_global: boolean;
   cli: string;
   /** opencode 전용 — 어느 provider 로, 어느 방식으로 로그인했는지(`-p`/`-m`). 다른 CLI 는 ''. */
@@ -1004,7 +1004,7 @@ export interface CommentAttachment {
 // `file_data` to keep payloads small; the dedicated GET endpoint returns it.
 export interface TicketAttachmentMeta {
   id: string;
-  workspace_id: string;
+  account_id: string;
   ticket_id: string;
   file_name: string;
   file_mimetype: string;
@@ -1065,7 +1065,7 @@ export interface TicketProjectSummary {
 // ONE assignee RuntimeSpec that does the whole ticket. Children (sub-tasks) are
 // a checklist the assignee works through — they have no assignee of their own.
 export interface Ticket {
-  workspace_id?: string;
+  account_id?: string;
   id: string; // GUID
   parent_id: string | null; // GUID — references parent Ticket.id
   depth: number; // 0=root, 1=subtask, 2=sub-subtask
@@ -1151,7 +1151,7 @@ export interface Ticket {
   updated_at: string;
 }
 
-// ─── Ticket list rows (GET /workspaces/:wsId/tickets) ──────────────────────
+// ─── Ticket list rows (GET /accounts/:wsId/tickets) ──────────────────────
 // The list ships a lightened row per root ticket: the comment relation is
 // projected to what a card renders (count + stale-open-question badge) and
 // children are nested two levels. The detail panel re-fetches the full Ticket
@@ -1161,7 +1161,7 @@ export type TicketCardComment = Pick<Comment, 'id' | 'type' | 'status' | 'create
 
 export interface TicketCard {
   id: string;
-  workspace_id?: string;
+  account_id?: string;
   parent_id: string | null;
   depth?: number;
   title: string;
@@ -1209,7 +1209,7 @@ export interface ProjectHostFolder {
 
 export interface Project {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   description: string;
   repo_url: string;
@@ -1226,7 +1226,7 @@ export interface Project {
   updated_at: string;
 }
 
-/** Body of POST /workspaces/:wsId/projects and PATCH /projects/:id. */
+/** Body of POST /accounts/:wsId/projects and PATCH /projects/:id. */
 export interface ProjectInput {
   name?: string;
   repo_url?: string;
@@ -1248,7 +1248,7 @@ export interface ProjectTestConnectionResult {
 
 // Agent harness configuration (ticket 7122600c). Mirror of the server-side
 // zod schema in apps/server/src/common/harness-config.ts — keep in sync.
-// Stored JSON-encoded in Workspace.harness_config (shipped on every ticket
+// Stored JSON-encoded in Account.harness_config (shipped on every ticket
 // dispatch of the workspace).
 export interface HarnessConfig {
   system_prompt_append?: string; // merged into subagent --append-system-prompt
@@ -1289,14 +1289,14 @@ export interface RuntimeProfileConfig {
   };
 }
 
-export interface Workspace {
+export interface Account {
   id: string; // GUID
   name: string;
   description: string;
-  // Workspace-wide agent harness, shipped on every ticket dispatch. Raw JSON
+  // Account-wide agent harness, shipped on every ticket dispatch. Raw JSON
   // string of HarnessConfig.
   harness_config?: string | null;
-  // Workspace 기본 repo clone 정책(ticket bddb63ee). harness_config 와 같이 원문
+  // Account 기본 repo clone 정책(ticket bddb63ee). harness_config 와 같이 원문
   // JSON 문자열로 내려오며, Project 가 키 단위로 덮는다.
   clone_policy?: string | null;
   // ─── Ticket dispatch settings (moved from boards — docs/tickets.md) ───
@@ -1308,9 +1308,9 @@ export interface Workspace {
   auto_archive_days?: number | null;
   // Non-null = ticket dispatch is paused for the whole workspace (ISO timestamp).
   dispatch_paused_at?: string | null;
-  // GET /workspaces list rows: number of tickets in the pool.
+  // GET /accounts list rows: number of tickets in the pool.
   ticket_count?: number;
-  // GET /workspaces/:id: tickets per status.
+  // GET /accounts/:id: tickets per status.
   ticket_counts?: Partial<Record<TicketStatus, number>>;
   created_at: string;
   updated_at: string;
@@ -1324,7 +1324,7 @@ export interface ClaudeBackendProfile extends RuntimeProfileConfig {
 // Phase 2 chat types — backed by server ChatMessage entity and ChatService aggregations.
 export interface ChatMessage {
   id: string; // GUID
-  workspace_id: string; // GUID — references Workspace.id
+  account_id: string; // GUID — references Account.id
   agent_id: string; // GUID — references Agent.id
   sender_type: 'user' | 'agent';
   sender_id: string; // GUID — User.id or Agent.id
@@ -1380,7 +1380,7 @@ export interface DashboardAgent {
   // Concrete reason when lifecycle_state==='error' (ticket 1f750878) — the card
   // shows it as a tooltip on the 오류 badge. Absent for non-error states.
   lifecycle_detail?: string;
-  workspace_id: string;
+  account_id: string;
   pending_trigger_count: number;
   // Legacy singular — most-recently-claimed task. Prefer active_tasks; kept for
   // back-compat with the pre-multi-task server.
@@ -1476,7 +1476,7 @@ export interface ChatRoomDetail {
   // Partner display name for DMs (per-viewer); null for group rooms or when
   // the viewer is the only active participant.
   dm_partner_name?: string | null;
-  workspace_id: string;
+  account_id: string;
   last_message_at?: string | null;
   created_at: string;
   participants: ChatRoomParticipantInfo[];
@@ -1496,7 +1496,7 @@ export interface ChatRoomParticipantInfo {
 export interface ChatAttachment {
   id: string;
   attachment_id?: string;
-  workspace_id?: string;
+  account_id?: string;
   room_id?: string;
   message_id?: string;
   filename: string;
@@ -1581,7 +1581,7 @@ export interface AgentErrorLog {
   id: string;
   agent_id: string;
   agent_name?: string;  // joined from Agent table (server may populate)
-  workspace_id: string | null;
+  account_id: string | null;
   occurred_at: string;   // ISO
   level: 'error' | 'warn' | 'fatal';
   category: string;      // 'crash' | 'sse' | 'presence' | 'subagent' | 'ipc' | 'misc'
@@ -1697,7 +1697,7 @@ export type SubagentKind = 'chat' | 'ticket' | 'oneshot';
 export interface SubagentSummary {
   subagent_id: string;
   agent_id: string;
-  workspace_id: string;
+  account_id: string;
   kind: SubagentKind;
   session_key: string;
   pid: number;
@@ -1855,7 +1855,7 @@ export interface AcpAdapterReport {
  */
 export interface PrivilegedCommandRequest {
   request_id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   agent_id: string;
   agent_name: string;
   instance_id: string;
@@ -1898,7 +1898,7 @@ export interface AgentManagerInstance {
   instance_id: string;
   host_id?: string | null;
   agent_id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   mode: 'manager';
   hostname: string;
   plugin_version: string;
@@ -2030,7 +2030,7 @@ export interface RuntimeHealth {
 
 export interface SkillVersion {
   id: string;
-  workspace_id: string;
+  account_id: string;
   skill_id: string;
   version: number;
   body: string;
@@ -2044,9 +2044,9 @@ export interface SkillVersion {
 export interface Skill {
   id: string;
   /** null = global (inherited by every workspace). See docs/catalog-scopes.md. */
-  workspace_id: string | null;
-  /** Server-computed from workspace_id — render this rather than re-deriving. */
-  scope?: 'global' | 'workspace';
+  account_id: string | null;
+  /** Server-computed from account_id — render this rather than re-deriving. */
+  scope?: 'global' | 'account';
   /** true when this GLOBAL row is overridden by a workspace fork of the same
    *  slug. Only present with `?include_shadowed=1`. */
   shadowed?: boolean;
@@ -2100,7 +2100,7 @@ export interface SkillDetail extends Skill {
 
 export interface SkillProposal {
   id: string;
-  workspace_id: string;
+  account_id: string;
   skill_id: string;
   title: string;
   body: string;
@@ -2118,7 +2118,7 @@ export interface SkillProposal {
 
 export interface HermesChildRun {
   id: string;
-  workspace_id: string;
+  account_id: string;
   parent_run_id: string;
   parent_agent_id: string;
   runtime_child_id: string;
@@ -2187,7 +2187,7 @@ export interface WorktreeStatusEntry {
 export interface PairingTokenSafe {
   id: string;
   code: string;
-  workspace_id: string;
+  account_id: string;
   created_by_user_id: string;
   agent_name?: string;
   created_at: string;
@@ -2259,7 +2259,7 @@ export interface ManagedAgentCreateBody {
   working_dir?: string;
   manager_agent_id: string;
   runtime_config: AgentRuntimeConfig;
-  workspace_id?: string | null;
+  account_id?: string | null;
   description?: string;
   /** Optional per-agent CLI credential — see Agent.credential_id. */
   credential_id?: string | null;
@@ -2410,13 +2410,13 @@ export interface OrchestrationTeamMember {
 
 export interface OrchestrationTeam {
   id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   /** workspace_id가 null이면 true — 모든 workspace에서 보이는 글로벌 팀. */
   is_global: boolean;
   /** 이 팀을 만든 workspace; 글로벌 팀을 편집할 수 있는 유일한 workspace. */
-  owner_workspace_id: string | null;
+  owner_account_id: string | null;
   /** 글로벌 팀 전용: orchestrator가 create_orchestration_mission으로 대상 지정 가능한 workspace 목록. */
-  allowed_workspace_ids: string[];
+  allowed_account_ids: string[];
   name: string;
   description: string;
   orchestrator_agent_id: string | null;
@@ -2504,7 +2504,7 @@ export interface OrchestrationConfirmDecision {
 
 export interface OrchestrationMissionListItem {
   id: string;
-  workspace_id: string;
+  account_id: string;
   team_id: string;
   team_name: string;
   title: string;
@@ -2776,7 +2776,7 @@ export interface OrchestrationRuntimeHost {
 export interface OrchestrationUpdateEvent {
   event_type: 'orchestration_update';
   mission_id: string;
-  workspace_id: string;
+  account_id: string;
   team_id: string;
   title: string;
   status: OrchestrationMissionStatus;
@@ -2866,7 +2866,7 @@ export interface OntologyGraphSnapshotResponse {
  *  배선은 이미 완료돼 있음, 이 타입만 신규(ticket d22b83b4). */
 export interface OntologyGraphProgressEvent {
   event_type: 'ontology_graph_progress';
-  workspace_id: string;
+  account_id: string;
   graph_id: string;
   resource_id: string;
   job_id: string;
@@ -2953,7 +2953,7 @@ export interface AgentSessionCredentialRef {
   id: string;
   name: string;
   provider: string;
-  scope: 'global' | 'workspace';
+  scope: 'global' | 'account';
 }
 
 /** 세션을 열 수 있는 Runtime Host 한 대. */
@@ -3090,7 +3090,7 @@ export interface VoiceConfigView {
 /** 음성 알림(`voice_announcement` SSE) — 서버 `VoiceAnnouncementPayload` 와 같은 모양. */
 export type VoiceAnnouncementTarget =
   | { type: 'session'; manager_id: string; cli: string; session_id: string }
-  | { type: 'mission'; workspace_id: string; mission_id: string };
+  | { type: 'mission'; account_id: string; mission_id: string };
 
 export interface VoiceAnnouncementEvent {
   event_type: 'voice_announcement';

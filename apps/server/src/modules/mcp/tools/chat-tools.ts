@@ -24,7 +24,7 @@ import { resolveCallerIdentityRow } from '../shared/authz';
 import type { McpAgentContext } from '../internal/session-store';
 import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
-import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
+import { normalizeAgentAccountId } from '../../../common/agent-account-scope';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 
 /**
@@ -36,24 +36,24 @@ import { resolveAgentDisplayName } from '../../../utils/agent-name';
 async function resolveChatCaller(
   dataSource: import('typeorm').DataSource,
   caller: McpAgentContext | undefined,
-): Promise<{ agentId: string; agentName: string; workspaceId: string } | { error: string }> {
+): Promise<{ agentId: string; agentName: string; accountId: string } | { error: string }> {
   if (!caller?.agentId && !caller?.runtimeKey) {
     return { error: 'Unauthorized: agent identity required' };
   }
   if (caller?.runtimeKey) {
-    if (!caller.workspaceId) return { error: 'Could not resolve workspace from caller API key' };
+    if (!caller.accountId) return { error: 'Could not resolve workspace from caller API key' };
     return {
       agentId: caller.runtimeKey,
       agentName: caller.agentName || caller.runtimeKey.slice(0, 11),
-      workspaceId: caller.workspaceId,
+      accountId: caller.accountId,
     };
   }
   // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
   const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
   if (!agent) return { error: 'Agent identity not found for this session' };
-  const workspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-  if (!workspaceId) return { error: 'Could not resolve workspace from caller API key' };
-  return { agentId: agent.id, agentName: agent.name, workspaceId };
+  const accountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+  if (!accountId) return { error: 'Could not resolve workspace from caller API key' };
+  return { agentId: agent.id, agentName: agent.name, accountId };
 }
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
@@ -131,8 +131,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
       const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
-      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!callerAccountId) return err('Could not resolve workspace from caller API key');
 
       try {
         // P4c-4: rt- 슬롯 세션은 runtimeKey 로 방에 앉아 있다 (agent.id 는 Host).
@@ -143,7 +143,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         ]);
         if (!room) return err('Chat room not found');
         if (!ticket) return err('Ticket not found');
-        if (room.workspace_id !== callerWorkspaceId || ticket.workspace_id !== room.workspace_id) {
+        if (room.account_id !== callerAccountId || ticket.account_id !== room.account_id) {
           return err('Ticket and chat room must belong to the caller workspace');
         }
         if (!ticket.pending_user_action) {
@@ -152,7 +152,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
 
         const msg = await roomMessagingService.sendMessage(
           room_id,
-          room.workspace_id,
+          room.account_id,
           'agent',
           agent.id,
           agent.name,
@@ -213,18 +213,18 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
       const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
-      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!callerAccountId) return err('Could not resolve workspace from caller API key');
 
       try {
         // Strip harness markers (see comment-tools.ts add_comment for context
         // — ticket ce6c8d58). A chat reply with a leaked `<system-reminder>`
         // block surfaces it verbatim in the room timeline; same root cause.
         const cleanContent = sanitizeHarnessMarkers(content, { logger, toolName: 'send_chat_room_message', fieldName: 'content', agentId: agent.id });
-        // agent.workspace_id is nullable now (manager identities carry NULL).
+        // agent.account_id is nullable now (manager identities carry NULL).
         // A workspace-less manager posting via MCP is theoretical — it would
-        // need an apiKey with workspace_id='', and the chat domain is
-        // workspace-scoped — but fall back to '' so the typed contract holds.
+        // need an apiKey with account_id='', and the chat domain is
+        // account-scoped — but fall back to '' so the typed contract holds.
         const pendingTicketRefs = ctx.pendingTicketRefs?.drain() ?? [];
         let messagePersisted = false;
         let persistedMessageId: string | undefined;
@@ -233,7 +233,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           // P4c-4: rt- 슬롯 세션은 runtimeKey 로 발화한다 — 방 참여자 행이 그 키로 있다.
           msg = await roomMessagingService.sendMessage(
             room_id,
-            callerWorkspaceId,
+            callerAccountId,
             'agent',
             caller.runtimeKey ?? agent.id,
             agent.name,
@@ -326,8 +326,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
       const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
-      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!callerAccountId) return err('Could not resolve workspace from caller API key');
 
       const size = approxBase64Size(file_data);
       if (size > MAX_TICKET_ATTACHMENT_SIZE) {
@@ -363,7 +363,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           owner_id: room_id,
           ticket_id: null,
           room_id,
-          workspace_id: callerWorkspaceId,
+          account_id: callerAccountId,
           file_name,
           file_mimetype: verifiedMime,
           file_data,
@@ -440,11 +440,11 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       // 경계가 지속되지 않는다: `chat_room_participants` 행은 한 번 생기면 남으므로,
       // 지난/다른 워크스페이스 방의 행을 들고 있는 에이전트에게 그 방의 이름과 마지막
       // 활동 시각이 계속 실렸다. 같은 "내 방 목록"의 REST 형제 경로인
-      // RoomCrudService.listRooms 는 이미 `r.workspace_id = :wsId` 를 1급 조건으로 걸고
+      // RoomCrudService.listRooms 는 이미 `r.account_id = :wsId` 를 1급 조건으로 걸고
       // 있으므로, 두 표면이 같은 질문에 같은 답을 내도록 맞춘다. 해석 방식은 이 파일의
       // 다른 툴들과 같다 — 세션 키의 workspace, 없으면 에이전트 자신의 workspace.
-      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!callerAccountId) return err('Could not resolve workspace from caller API key');
 
       const rooms = await dataSource.getRepository(ChatRoomParticipant)
         .createQueryBuilder('p')
@@ -457,7 +457,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // (chat-room-join-cast-guard.test.mjs 가 명시한 규약과 같다). 위 관계 조인도
         // 양쪽이 uuid 라 캐스팅 대상이 아니다 — participants.room_id 는 선언은 varchar
         // 지만 @ManyToOne(ChatRoom) FK 라 스키마 동기화가 uuid 로 만든다.
-        .andWhere('r.workspace_id = :wsId', { wsId: callerWorkspaceId })
+        .andWhere('r.account_id = :wsId', { wsId: callerAccountId })
         .orderBy('r.last_message_at', 'DESC', 'NULLS LAST')
         .getMany();
 
@@ -492,7 +492,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       }
       const chatCaller = await resolveChatCaller(dataSource, getCallerAgent(extra));
       if ('error' in chatCaller) return err(chatCaller.error);
-      const callerWorkspaceId = chatCaller.workspaceId;
+      const callerAccountId = chatCaller.accountId;
       const agent = { id: chatCaller.agentId, name: chatCaller.agentName };
       // caller 등급(에이전트 신원)과 workspace 권한은 별개다(티켓 5a95315f). 참여자 행만
       // 보면 경계가 지속되지 않는다 — `chat_room_participants` 행은 한 번 생기면 남으므로,
@@ -509,7 +509,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // 방과 같은 메시지로 수렴시켜, 남의 워크스페이스 room_id 로는 방의 존재조차 확인할
         // 수 없게 한다.
         const room = await dataSource.getRepository(ChatRoom).findOne({ where: { id: room_id } });
-        if (!room || room.workspace_id !== callerWorkspaceId) return err('Chat room not found');
+        if (!room || room.account_id !== callerAccountId) return err('Chat room not found');
         // Mirror the agent-api GET /chat-rooms/:roomId/messages path
         // (agent-api.controller): enforce the agent participant gate
         // explicitly, then read in `observer` mode so the service's own
@@ -557,8 +557,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
       const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
-      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!callerAccountId) return err('Could not resolve workspace from caller API key');
 
       try {
         // participantType='agent' so the participant-scoping subquery matches
@@ -566,7 +566,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // see RoomMessagingService.searchMessages. Results are bounded to the
         // agent's own workspace, so cross-workspace history never leaks.
         const results = await roomMessagingService.searchMessages(
-          callerWorkspaceId,
+          callerAccountId,
           agent.id,
           query.trim(),
           Math.min(limit ?? 20, 50),
@@ -600,11 +600,11 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
       const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
-      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!callerAccountId) return err('Could not resolve workspace from caller API key');
       try {
         const result = await roomCrudService.createRoom(
-          callerWorkspaceId,
+          callerAccountId,
           { type: 'agent', id: caller.agentId },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
           name,
@@ -641,14 +641,14 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!roomCrudService) return err('Chat room rename is unavailable in this MCP context');
       const chatCaller = await resolveChatCaller(dataSource, getCallerAgent(extra));
       if ('error' in chatCaller) return err(chatCaller.error);
-      const callerWorkspaceId = chatCaller.workspaceId;
+      const callerAccountId = chatCaller.accountId;
       const agent = { id: chatCaller.agentId, name: chatCaller.agentName };
       // caller 등급(에이전트 신원)과 **workspace 권한은 별개**다(티켓 de4d27e9) — 신원만
       // 확인하고 room_id 를 그대로 넘기면, 지난/다른 워크스페이스 방의 참여자 행을 들고
       // 있는 에이전트가 지금 API key 가 묶인 스코프 밖의 방 이름을 바꿀 수 있다. 이 파일의
       // 다른 툴들과 같은 방식으로 호출자의 워크스페이스를 해석해 함께 넘긴다.
       try {
-        await roomCrudService.renameRoom(room_id, callerWorkspaceId, agent.id, name, 'agent');
+        await roomCrudService.renameRoom(room_id, callerAccountId, agent.id, name, 'agent');
         return ok({ room_id, name: name.trim() });
       } catch (e: any) {
         return err(e?.message || 'Failed to set chat room name');
@@ -671,7 +671,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
       const chatCaller = await resolveChatCaller(dataSource, getCallerAgent(extra));
       if ('error' in chatCaller) return err(chatCaller.error);
-      const callerWorkspaceId = chatCaller.workspaceId;
+      const callerAccountId = chatCaller.accountId;
       const agent = { id: chatCaller.agentId, name: chatCaller.agentName };
       // caller 등급(에이전트 신원)과 **workspace 권한은 별개**다 — 신원만 확인하고
       // room_id 를 그대로 넘기면, 다른/지난 워크스페이스 방의 참여자 행을 들고 있는
@@ -680,7 +680,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       try {
         await roomMembershipService.addParticipants(
           room_id,
-          callerWorkspaceId,
+          callerAccountId,
           { type: 'agent', id: agent.id },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
         );

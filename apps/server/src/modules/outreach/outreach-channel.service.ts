@@ -18,7 +18,7 @@ import { Project } from '../../entities/Project';
 import { normalizeTags } from '../tickets/ticket.service';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { isValidCron } from '../qa/qa-cron';
 import { OutreachPollingService } from './outreach-polling.service';
 
@@ -35,7 +35,7 @@ const DEFAULT_POLL_INTERVAL_MS = 3_600_000;
 const MIN_POLL_INTERVAL_MS = 60_000; // 1 minute — a channel polling faster than this is almost certainly a misconfiguration
 
 export interface CreateChannelInput {
-  workspaceId: string;
+  accountId: string;
   kind: OutreachChannelKind;
   name: string;
   targets?: string[];
@@ -58,7 +58,7 @@ export interface CreateChannelInput {
   closeOnResolve?: boolean;
 }
 
-export type UpdateChannelInput = Partial<Omit<CreateChannelInput, 'workspaceId'>>;
+export type UpdateChannelInput = Partial<Omit<CreateChannelInput, 'accountId'>>;
 
 export interface ChannelStatus {
   channel_id: string;
@@ -85,33 +85,33 @@ export class OutreachChannelService {
     private readonly pollingService: OutreachPollingService,
   ) {}
 
-  async list(workspaceId: string): Promise<OutreachChannel[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return this.channelRepo.find({ where: { workspace_id: workspaceId }, order: { created_at: 'DESC' } });
+  async list(accountId: string): Promise<OutreachChannel[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return this.channelRepo.find({ where: { account_id: accountId }, order: { created_at: 'DESC' } });
   }
 
-  async get(id: string, workspaceId: string): Promise<OutreachChannel> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+  async get(id: string, accountId: string): Promise<OutreachChannel> {
+    if (!accountId) throw makeError(400, 'account_id is required');
     return findOrFail(
       this.channelRepo,
-      { where: { id, workspace_id: workspaceId } },
+      { where: { id, account_id: accountId } },
       'Outreach channel not found in workspace',
     );
   }
 
   async create(input: CreateChannelInput): Promise<OutreachChannel> {
-    if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!input.accountId) throw makeError(400, 'account_id is required');
     if (!VALID_KINDS.includes(input.kind)) throw makeError(400, `kind must be one of: ${VALID_KINDS.join(', ')}`);
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    await this._assertCredentialScope(input.credentialId ?? null, input.workspaceId);
-    const targetProjectId = await this._assertProjectScope(input.targetProjectId ?? null, input.workspaceId);
-    const classifierRuntime = await this._validateClassifierRuntime(input.classifierRuntime ?? null, input.workspaceId);
+    await this._assertCredentialScope(input.credentialId ?? null, input.accountId);
+    const targetProjectId = await this._assertProjectScope(input.targetProjectId ?? null, input.accountId);
+    const classifierRuntime = await this._validateClassifierRuntime(input.classifierRuntime ?? null, input.accountId);
     const deployPostMode = this._validateDeployPostMode(input.deployPostMode);
     const replyThreadRef = this._sanitizeThreadRef(input.replyThreadRef);
     this._assertReplyThreadRefPresence(deployPostMode, replyThreadRef);
 
     const draft = this.channelRepo.create({
-      workspace_id: input.workspaceId,
+      account_id: input.accountId,
       kind: input.kind,
       name: input.name.trim(),
       targets: this._sanitizeTargets(input.targets),
@@ -138,8 +138,8 @@ export class OutreachChannelService {
     return this.channelRepo.save(draft);
   }
 
-  async update(id: string, workspaceId: string, patch: UpdateChannelInput): Promise<OutreachChannel> {
-    const channel = await this.get(id, workspaceId);
+  async update(id: string, accountId: string, patch: UpdateChannelInput): Promise<OutreachChannel> {
+    const channel = await this.get(id, accountId);
 
     if (patch.kind !== undefined) {
       if (!VALID_KINDS.includes(patch.kind)) throw makeError(400, `kind must be one of: ${VALID_KINDS.join(', ')}`);
@@ -151,18 +151,18 @@ export class OutreachChannelService {
     }
     if (patch.targets !== undefined) channel.targets = this._sanitizeTargets(patch.targets);
     if (patch.credentialId !== undefined) {
-      await this._assertCredentialScope(patch.credentialId || null, channel.workspace_id);
+      await this._assertCredentialScope(patch.credentialId || null, channel.account_id);
       channel.credential_id = patch.credentialId || null;
     }
     if (patch.targetTags !== undefined) channel.target_tags = normalizeTags(patch.targetTags ?? []);
     if (patch.targetProjectId !== undefined) {
-      channel.target_project_id = await this._assertProjectScope(patch.targetProjectId || null, channel.workspace_id);
+      channel.target_project_id = await this._assertProjectScope(patch.targetProjectId || null, channel.account_id);
     }
     if (patch.publishPolicy !== undefined) channel.publish_policy = this._validatePolicy(patch.publishPolicy);
     if (patch.rateLimitPerHour !== undefined) channel.rate_limit_per_hour = this._validateRateLimit(patch.rateLimitPerHour);
     if (patch.classifyThreshold !== undefined) channel.classify_threshold = this._validateThreshold(patch.classifyThreshold);
     if (patch.classifierRuntime !== undefined) {
-      channel.classifier_runtime = await this._validateClassifierRuntime(patch.classifierRuntime || null, channel.workspace_id);
+      channel.classifier_runtime = await this._validateClassifierRuntime(patch.classifierRuntime || null, channel.account_id);
     }
     if (patch.deployPostMode !== undefined) channel.deploy_post_mode = this._validateDeployPostMode(patch.deployPostMode);
     if (patch.replyThreadRef !== undefined) channel.reply_thread_ref = this._sanitizeThreadRef(patch.replyThreadRef);
@@ -193,16 +193,16 @@ export class OutreachChannelService {
     return this.channelRepo.save(channel);
   }
 
-  async remove(id: string, workspaceId: string): Promise<void> {
-    const channel = await this.get(id, workspaceId);
+  async remove(id: string, accountId: string): Promise<void> {
+    const channel = await this.get(id, accountId);
     await this.channelRepo.delete({ id: channel.id });
   }
 
   /** last/next poll timestamps + a per-status count rollup of this channel's
    *  OutreachInboundItem rows — the "채널 등록/상태 확인" REST surface the
    *  ticket's 범위 asks for. */
-  async status(id: string, workspaceId: string): Promise<ChannelStatus> {
-    const channel = await this.get(id, workspaceId);
+  async status(id: string, accountId: string): Promise<ChannelStatus> {
+    const channel = await this.get(id, accountId);
     const rows = await this.itemRepo
       .createQueryBuilder('i')
       .select('i.status', 'status')
@@ -232,22 +232,22 @@ export class OutreachChannelService {
   }
 
   /** Mirrors ResourcesController.assertCredentialScope — a GLOBAL credential
-   *  (workspace_id=null) or one scoped to the SAME workspace is available; a
+   *  (account_id=null) or one scoped to the SAME workspace is available; a
    *  cross-workspace credential is rejected. */
-  private async _assertCredentialScope(credentialId: string | null, workspaceId: string): Promise<void> {
+  private async _assertCredentialScope(credentialId: string | null, accountId: string): Promise<void> {
     if (!credentialId) return;
     const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
     if (!credential) throw makeError(400, 'credential not found');
-    const available = credential.workspace_id === null || credential.workspace_id === workspaceId;
+    const available = credential.account_id === null || credential.account_id === accountId;
     if (!available) throw makeError(400, 'credential is not available in this workspace scope');
   }
 
   /** A configured target_project_id must resolve inside the channel's own
    *  workspace — caught here at save time instead of every filed ticket
    *  failing project validation later. */
-  private async _assertProjectScope(projectId: string | null, workspaceId: string): Promise<string | null> {
+  private async _assertProjectScope(projectId: string | null, accountId: string): Promise<string | null> {
     if (!projectId) return null;
-    const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId, workspace_id: workspaceId } });
+    const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId, account_id: accountId } });
     if (!project) throw makeError(400, 'target_project_id must reference a project in this workspace');
     return project.id;
   }
@@ -256,16 +256,16 @@ export class OutreachChannelService {
    *  workspace — same "caught at save time, not silently ignored" contract
    *  as _assertProjectScope, reusing the same agent-workspace-visibility rule
    *  SecurityProfile.target_agent_id (and 15+ other call sites) already
-   *  standardize on: a workspace-scoped agent must match, but a global
-   *  agent (workspace_id null/'') is visible everywhere. */
+   *  standardize on: a account-scoped agent must match, but a global
+   *  agent (account_id null/'') is visible everywhere. */
   // P4c-4: Host/링크 해소 (Agent 행 없음).
-  private async _validateClassifierRuntime(input: unknown, workspaceId: string): Promise<Record<string, any> | null> {
+  private async _validateClassifierRuntime(input: unknown, accountId: string): Promise<Record<string, any> | null> {
     if (input == null) return null;
     let spec;
     try { spec = normalizeRuntimeSpec(input, 'classifier_runtime'); }
     catch (error) { throw makeError(400, (error as Error).message); }
     if (!await this.dataSource.getRepository(RuntimeHost).existsBy({ id: spec.manager_agent_id })) throw makeError(400, 'Runtime Host not found');
-    await this._assertCredentialScope(spec.credential_id, workspaceId);
+    await this._assertCredentialScope(spec.credential_id, accountId);
     return { ...spec };
   }
 

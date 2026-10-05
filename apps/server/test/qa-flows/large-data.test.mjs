@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createUser,
   runtimeHostKeyForAgent,
@@ -38,7 +38,7 @@ test(`Large-data: ${N_TICKETS} queued tickets, ${N_TICKETS} activities — one s
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'large');
+  const ws = await createAccount(app, getDataSourceToken, 'large');
   const user = await createUser(app, getDataSourceToken, { name: 'bulk' });
   const workerAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'bulk-worker', runtime: true });
   const spec = workerAgent.runtime_spec;
@@ -51,7 +51,7 @@ test(`Large-data: ${N_TICKETS} queued tickets, ${N_TICKETS} activities — one s
   for (let i = 0; i < N_TICKETS; i++) {
     rows.push(
       ticketRepo.create({
-        workspace_id: ws.id,
+        account_id: ws.id,
         title: `bulk-${i}`,
         status: 'todo',
         tags: '[]',
@@ -90,7 +90,7 @@ test(`Large-data: ${N_TICKETS} queued tickets, ${N_TICKETS} activities — one s
       old_value: 'medium',
       new_value: 'medium',
       ticket_id: row.id,
-      workspace_id: ws.id,
+      account_id: ws.id,
       actor_id: user.id,
       actor_name: user.name,
     });
@@ -120,7 +120,7 @@ test(`Large-data: ${N_TICKETS} queued tickets, ${N_TICKETS} activities — one s
   assert.equal(tr.trigger_source, 'start');
 
   const counts = {};
-  for (const row of await ticketRepo.find({ where: { workspace_id: ws.id }, select: ['id', 'status'] })) {
+  for (const row of await ticketRepo.find({ where: { account_id: ws.id }, select: ['id', 'status'] })) {
     counts[row.status] = (counts[row.status] || 0) + 1;
   }
   assert.deepEqual(counts, { in_progress: 1, todo: N_TICKETS - 1 }, 'one started, the rest stay queued');

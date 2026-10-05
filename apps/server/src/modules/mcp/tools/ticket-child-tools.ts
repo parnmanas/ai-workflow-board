@@ -51,13 +51,13 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const child = await ticketRepo.save(ticketRepo.create({
         parent_id, depth: newDepth, title, description, priority, status,
         tags: JSON.stringify(normalizeTags(tags)), channel_ids: '[]', position,
-        workspace_id: parent.workspace_id || '',
+        account_id: parent.account_id || '',
         created_by: creatorName, created_by_type: 'agent', created_by_id: creatorId,
       }));
 
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: child.id, action: 'created',
-        new_value: child.title, ticket_id: parent_id, workspace_id: child.workspace_id,
+        new_value: child.title, ticket_id: parent_id, account_id: child.account_id,
         actor_id: creatorId || undefined, actor_name: creatorName,
       });
 
@@ -103,13 +103,13 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
         await activityService.logActivity({
           entity_type: 'ticket', entity_id: ticket.id, action: 'status_changed',
           field_changed: 'status', old_value: oldStatus, new_value: ticket.status,
-          ticket_id: ticket.parent_id || ticket.id, workspace_id: ticket.workspace_id,
+          ticket_id: ticket.parent_id || ticket.id, account_id: ticket.account_id,
           actor_id: caller?.runtimeKey || caller?.agentId, actor_name: caller?.agentName,
         });
       } else {
         await activityService.logActivity({
           entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          ticket_id: ticket.parent_id || ticket.id, workspace_id: ticket.workspace_id,
+          ticket_id: ticket.parent_id || ticket.id, account_id: ticket.account_id,
           actor_id: caller?.runtimeKey || caller?.agentId, actor_name: caller?.agentName,
         });
       }

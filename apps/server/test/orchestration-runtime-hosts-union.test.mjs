@@ -5,7 +5,7 @@ import { bootApp } from './helpers/boot.mjs';
 import {
   createAgent,
   createApiKey,
-  createWorkspace,
+  createAccount,
 } from './helpers/fixtures.mjs';
 import { OrchestrationHostsService } from '../dist/modules/orchestration/orchestration-hosts.service.js';
 
@@ -22,7 +22,7 @@ test('Host catalog returns one host-keyed row without retired Agent aliases', as
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createWorkspace(app, getDataSourceToken, 'hosts-union');
+  const workspace = await createAccount(app, getDataSourceToken, 'hosts-union');
 
   // P4c-4: createAgent(type manager)는 Host 행을 직접 만든다 — dual-write
   // 쌍을 흉내내려면 키에 구 agent uuid 바인딩을 얹는다 (평문 컬럼, FK 없음).
@@ -33,7 +33,7 @@ test('Host catalog returns one host-keyed row without retired Agent aliases', as
   const host = manager;
   const legacyAgentId = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
   await createApiKey(app, getDataSourceToken, legacyAgentId, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'hosts-union',
     hostId: host.id,
   });
@@ -51,13 +51,13 @@ test('Host without an Agent row still appears, keyed by host id', async (t) => {
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createWorkspace(app, getDataSourceToken, 'hosts-orphan');
+  const workspace = await createAccount(app, getDataSourceToken, 'hosts-orphan');
 
   const host = await ds.getRepository('RuntimeHost').save(
     ds.getRepository('RuntimeHost').create({
       name: 'orphan-host',
       hostname: 'orphan',
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       is_active: 1,
     }),
   );
@@ -74,7 +74,7 @@ test('Host rows created by pairing appear keyed by host id', async (t) => {
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  await createWorkspace(app, getDataSourceToken, 'hosts-legacy');
+  await createAccount(app, getDataSourceToken, 'hosts-legacy');
 
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'legacy-only-manager',

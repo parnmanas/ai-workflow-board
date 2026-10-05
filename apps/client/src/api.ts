@@ -16,8 +16,8 @@ import type {
   MigrationRun,
   QaSchedule,
   QaScheduleScope,
-  WorkspaceSchedule,
-  WorkspaceScheduleDispatch,
+  AutomationSchedule,
+  AutomationScheduleDispatch,
   SecurityProfile,
   SecurityProfileListItem,
   SecurityRun,
@@ -71,7 +71,7 @@ import type {
   ProjectInput,
   ProjectTestConnectionResult,
   RepoBranch,
-  Workspace,
+  Account,
   RepoRefs,
   RepoCommitSummary,
   RepoCommitDetail,
@@ -106,52 +106,32 @@ import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
 
-// ─── Active workspace (per-tab) ────────────────────────────────
-// `localStorage.currentWorkspaceId` is shared across browser tabs, which
-// caused cross-workspace data leaks: switching workspace in Tab A would
-// silently change the X-Workspace-Id header that Tab B sent on its next
-// request, so Tab B (still showing workspace A on screen) would receive
-// agents/tickets/etc. from workspace B. Symptom: "agent role list shows
-// agents from another workspace, content of other workspaces leaks in".
-//
-// Fix: hold the active workspace in a per-tab module variable, persisted
-// to sessionStorage (per-tab) and bootstrapped from the URL when present.
-// localStorage is still written by AppLayout for new-tab default, but it
-// is NEVER consulted at request time — each tab is self-contained.
-const SESSION_WS_KEY = 'awb.activeWorkspaceId';
+// The default ownership account is per-tab. Work URLs do not select it.
+const SESSION_ACCOUNT_KEY = 'awb.activeAccountId';
 
-// Exported so AppLayout's initial state and AuthContext.resolveWorkspaceState
-// resolve the same per-tab candidate instead of each reading localStorage
-// directly — that split let a tab's boot state disagree with the sessionStorage
-// value this module already uses for X-Workspace-Id, and the disagreement then
-// got "fixed" by overwriting sessionStorage with the wrong (shared) value
-// (ticket dc5c0813).
-export function bootstrapActiveWorkspaceId(): string | null {
+export function bootstrapActiveAccountId(): string | null {
   if (typeof window === 'undefined') return null;
-  // 1) URL — most accurate, per-tab, survives initial render before AppLayout mounts.
-  const m = window.location.pathname.match(/^\/ws\/([^/]+)/);
-  if (m && m[1]) return m[1];
-  // 2) sessionStorage — per-tab, survives reload of the same tab.
+  // Restore this tab's settings selection before the new-tab default.
   try {
-    const ss = sessionStorage.getItem(SESSION_WS_KEY);
+    const ss = sessionStorage.getItem(SESSION_ACCOUNT_KEY);
     if (ss) return ss;
   } catch { /* ignore */ }
-  // 3) localStorage — last-resort default for a new tab with no URL hint.
-  try { return localStorage.getItem('currentWorkspaceId'); } catch { return null; }
+  // Last-resort default for a new tab.
+  try { return localStorage.getItem('currentAccountId'); } catch { return null; }
 }
 
-let _activeWorkspaceId: string | null = bootstrapActiveWorkspaceId();
+let _activeAccountId: string | null = bootstrapActiveAccountId();
 
-export function setActiveWorkspaceId(id: string | null): void {
-  _activeWorkspaceId = id;
+export function setActiveAccountId(id: string | null): void {
+  _activeAccountId = id;
   try {
-    if (id) sessionStorage.setItem(SESSION_WS_KEY, id);
-    else sessionStorage.removeItem(SESSION_WS_KEY);
+    if (id) sessionStorage.setItem(SESSION_ACCOUNT_KEY, id);
+    else sessionStorage.removeItem(SESSION_ACCOUNT_KEY);
   } catch { /* ignore */ }
 }
 
-export function getActiveWorkspaceId(): string | null {
-  return _activeWorkspaceId;
+export function getActiveAccountId(): string | null {
+  return _activeAccountId;
 }
 
 // Build a URL for the binary streaming endpoint (GET /api/resources/:id/raw).
@@ -174,8 +154,8 @@ function getAuthHeaders(): Record<string, string> {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  if (_activeWorkspaceId) {
-    headers['X-Workspace-Id'] = _activeWorkspaceId;
+  if (_activeAccountId) {
+    headers['X-Account-Id'] = _activeAccountId;
   }
   return headers;
 }
@@ -210,12 +190,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 /**
- * Headers for a `/workspaces/:wsId/...` call: the server requires the path and
- * X-Workspace-Id to name the same workspace, so the call carries its own.
+ * Headers for a `/accounts/:wsId/...` call: the server requires the path and
+ * X-Account-Id to name the same workspace, so the call carries its own.
  * Callers are `async` so a failure here rejects like request() does.
  */
-function workspaceHeaders(wsId: string): Record<string, string> {
-  return { ...getAuthHeaders(), 'X-Workspace-Id': wsId };
+function accountHeaders(wsId: string): Record<string, string> {
+  return { ...getAuthHeaders(), 'X-Account-Id': wsId };
 }
 
 /** Error thrown by `request` — `code` is the server slug, `body` the parsed JSON error body. */
@@ -254,14 +234,14 @@ async function fetchOk(path: string, init: RequestInit & { contentType?: string 
 
 export const api = {
   resolveArtifactRefs: (
-    workspaceId: string,
+    accountId: string,
     refs: Array<{ type: ArtifactRefType; id: string }>,
   ) => request<Array<{
     type: ArtifactRefType; id: string; available: boolean; label: string; deepLink: string | null;
-    workspaceName?: string; reason?: string;
+    accountName?: string; reason?: string;
   }>>('/artifact-refs/resolve', {
     method: 'POST',
-    body: JSON.stringify({ workspace_id: workspaceId, refs }),
+    body: JSON.stringify({ refs }),
   }),
 
   // ─── Auth ──────────────────────────────────────────────
@@ -280,14 +260,14 @@ export const api = {
   setup: (data: { name: string; email: string; password: string }) =>
     request<any>('/auth/setup', { method: 'POST', body: JSON.stringify(data) }),
 
-  register: (name: string, email: string, password: string, requestedWorkspaceId?: string) =>
+  register: (name: string, email: string, password: string, requestedAccountId?: string) =>
     request<{ success: boolean; message: string }>('/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ name, email, password, requested_workspace_id: requestedWorkspaceId }),
+      body: JSON.stringify({ name, email, password, requested_account_id: requestedAccountId }),
     }),
 
-  getPublicWorkspaces: () =>
-    request<{ id: string; name: string; slug: string }[]>('/auth/public-workspaces'),
+  getPublicAccounts: () =>
+    request<{ id: string; name: string; slug: string }[]>('/auth/public-accounts'),
 
   // ─── Admin Pending Users ────────────────────────────────
   getPendingUsers: () =>
@@ -302,47 +282,47 @@ export const api = {
       body: JSON.stringify({ reason }),
     }),
 
-  assignUserWorkspace: (userId: string, workspaceId: string, relation: string = 'member') =>
+  assignUserAccount: (userId: string, accountId: string, relation: string = 'member') =>
     request<any>(`/admin/pending-users/${userId}/assign`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId, relation }),
+      body: JSON.stringify({ account_id: accountId, relation }),
     }),
 
   getPermissionsMeta: () =>
     request<{ permissions: Record<string, { label: string; description: string; group: string }>; role_defaults: Record<string, string[]> }>('/auth/permissions'),
 
-  // ─── Workspaces ────────────────────────────────────────
-  getWorkspaces: () => request<Workspace[]>('/workspaces'),
-  getWorkspace: (id: string) => request<Workspace>(`/workspaces/${id}`),
-  createWorkspace: (data: { name: string; description?: string }) =>
-    request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspace: (id: string, data: {
+  // ─── Accounts ────────────────────────────────────────
+  getAccounts: () => request<Account[]>('/accounts'),
+  getAccount: (id: string) => request<Account>(`/accounts/${id}`),
+  createAccount: (data: { name: string; description?: string }) =>
+    request<any>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  updateAccount: (id: string, data: {
     name?: string;
     description?: string;
     harness_config?: HarnessConfig | null;
     clone_policy?: ClonePolicy | null;
-    // Ticket dispatch settings (docs/tickets.md → Workspace settings).
+    // Ticket dispatch settings (docs/tickets.md → Account settings).
     language?: string | null;
     max_concurrent_tickets_per_agent?: number;
     auto_archive_days?: number | null;
     /** ISO timestamp pauses all ticket dispatch in the workspace; null resumes. */
     dispatch_paused_at?: string | null;
   }) =>
-    request<Workspace>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteWorkspace: (id: string) =>
-    request<any>(`/workspaces/${id}`, { method: 'DELETE' }),
-  getWorkspaceMembers: (wsId: string) =>
-    request<any[]>(`/workspaces/${wsId}/members`),
-  addWorkspaceMember: (wsId: string, userId: string, relation: string = 'member') =>
-    request<any>(`/workspaces/${wsId}/members`, {
+    request<Account>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAccount: (id: string) =>
+    request<any>(`/accounts/${id}`, { method: 'DELETE' }),
+  getAccountMembers: (wsId: string) =>
+    request<any[]>(`/accounts/${wsId}/members`),
+  addAccountMember: (wsId: string, userId: string, relation: string = 'member') =>
+    request<any>(`/accounts/${wsId}/members`, {
       method: 'POST', body: JSON.stringify({ user_id: userId, relation }),
     }),
-  updateWorkspaceMemberRole: (wsId: string, userId: string, relation: string) =>
-    request<any>(`/workspaces/${wsId}/members/${userId}`, {
+  updateAccountMemberRole: (wsId: string, userId: string, relation: string) =>
+    request<any>(`/accounts/${wsId}/members/${userId}`, {
       method: 'PATCH', body: JSON.stringify({ relation }),
     }),
-  removeWorkspaceMember: (wsId: string, userId: string) =>
-    request<any>(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
+  removeAccountMember: (wsId: string, userId: string) =>
+    request<any>(`/accounts/${wsId}/members/${userId}`, { method: 'DELETE' }),
   // 프로필 핀 드롭다운용 전역 카탈로그(티켓 e616dbfc). 프로필은 인스턴스
   // 전역이라 워크스페이스 인자가 없다. getClaudeBackendProfiles 는 관리자
   // 전용 라우트라 비관리자에게는 빈 목록이 되므로 읽기는 이쪽을 쓴다.
@@ -367,17 +347,16 @@ export const api = {
   listTickets: async (wsId: string, filters: TicketListQuery = {}) => {
     const qs = ticketListQueryString(filters);
     return request<TicketListResponse>(
-      `/workspaces/${encodeURIComponent(wsId)}/tickets${qs ? `?${qs}` : ''}`,
-      { headers: workspaceHeaders(wsId) },
+      `/tickets${qs ? `?${qs}` : ''}`,
     );
   },
   /** Tag suggestions across the whole workspace pool (tag picker), most used first. */
   listTicketTags: async (wsId: string) =>
-    request<{ tags: TicketTagCount[] }>(`/workspaces/${encodeURIComponent(wsId)}/ticket-tags`, { headers: workspaceHeaders(wsId) }),
+    request<{ tags: TicketTagCount[] }>('/ticket-tags'),
   createTicket: async (wsId: string, data: TicketCreateInput) =>
-    request<Ticket>(`/workspaces/${encodeURIComponent(wsId)}/tickets`, {
+    request<Ticket>('/tickets', {
       method: 'POST',
-      headers: workspaceHeaders(wsId),
+      headers: accountHeaders(wsId),
       body: JSON.stringify(data),
     }),
   archiveTicket: async (ticketId: string) =>
@@ -539,8 +518,8 @@ export const api = {
     }),
 
   // ─── Users ─────────────────────────────────────────────
-  getUsers: (workspaceId?: string) =>
-    request<any[]>(workspaceId ? `/users?workspace_id=${encodeURIComponent(workspaceId)}` : '/users'),
+  getUsers: (accountId?: string) =>
+    request<any[]>(accountId ? `/users?account_id=${encodeURIComponent(accountId)}` : '/users'),
   createUser: (data: { name: string; email?: string; role?: string; discord_user_id?: string; password?: string; permissions?: string[] }) =>
     request<any>('/users', { method: 'POST', body: JSON.stringify(data) }),
   updateUser: (id: string, data: Record<string, any>) =>
@@ -549,8 +528,8 @@ export const api = {
     request<any>(`/users/${id}`, { method: 'DELETE' }),
 
   // ─── Agents ────────────────────────────────────────────
-  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
-  // see getChannels above for why callers reacting to a workspaceId prop change
+  // accountId overrides the ambient X-Account-Id header for this one call —
+  // see getChannels above for why callers reacting to a accountId prop change
   // need this instead of relying on the ambient header.
   // P4c-4: Agent listing/detail/activity endpoints removed server-side
   // (Agent 테이블 삭제). 실행 주체는 runtime-hosts 카탈로그에서 고른다
@@ -586,26 +565,26 @@ export const api = {
       body: JSON.stringify({ path, name }),
     }),
   // ─── Subagent monitor (v0.32) ─────────────────────────────
-  listSubagents: (workspaceId: string): Promise<SubagentSummary[]> =>
-    request<SubagentSummary[]>(`/subagent-monitor/workspaces/${encodeURIComponent(workspaceId)}`),
-  getSubagentTranscript: (subagentId: string, workspaceId: string): Promise<SubagentTranscript> => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  listSubagents: (accountId: string): Promise<SubagentSummary[]> =>
+    request<SubagentSummary[]>(`/subagent-monitor/accounts/${encodeURIComponent(accountId)}`),
+  getSubagentTranscript: (subagentId: string, accountId: string): Promise<SubagentTranscript> => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<SubagentTranscript>(`/subagent-monitor/${encodeURIComponent(subagentId)}?${params.toString()}`);
   },
-  // The server reads X-Workspace-Id from the header set by getAuthHeaders(),
+  // The server reads X-Account-Id from the header set by getAuthHeaders(),
   // which now pulls from the per-tab active workspace. The caller can still
-  // pass `workspaceId` explicitly to override (e.g., admin tools acting on a
+  // pass `accountId` explicitly to override (e.g., admin tools acting on a
   // workspace other than the one the tab is currently viewing).
   // P4c-3b: agent write endpoints removed server-side (POST/PATCH/DELETE /agents).
 
   // ─── Channels ──────────────────────────────────────────
-  // workspaceId overrides the ambient X-Workspace-Id header for this one call
+  // accountId overrides the ambient X-Account-Id header for this one call
   // (same pattern as createAgent below) — callers that re-fetch the instant a
-  // workspaceId prop changes can't rely on the ambient header having caught up
+  // accountId prop changes can't rely on the ambient header having caught up
   // yet (it's synced from a sibling effect that may run after theirs).
-  getChannels: (workspaceId?: string) => {
+  getChannels: (accountId?: string) => {
     const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    if (accountId) init.headers = { ...getAuthHeaders(), 'X-Account-Id': accountId };
     return request<any[]>('/channels', init);
   },
   createChannel: (data: {
@@ -643,12 +622,12 @@ export const api = {
     request<{ success: boolean; error?: string }>(`/me/channels/${id}/test`, { method: 'POST' }),
 
   // ─── API Keys ──────────────────────────────────────────
-  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
-  // see getChannels above for why callers reacting to a workspaceId prop change
+  // accountId overrides the ambient X-Account-Id header for this one call —
+  // see getChannels above for why callers reacting to a accountId prop change
   // need this instead of relying on the ambient header.
-  getApiKeys: (workspaceId?: string) => {
+  getApiKeys: (accountId?: string) => {
     const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    if (accountId) init.headers = { ...getAuthHeaders(), 'X-Account-Id': accountId };
     return request<any[]>('/keys', init);
   },
   getApiKey: (id: string) => request<any>(`/keys/${id}`),
@@ -663,12 +642,12 @@ export const api = {
 
   // ─── Resources ─────────────────────────────────────────
   listResources: (
-    workspaceId: string,
+    accountId: string,
     type?: string,
     sort?: { by?: string; order?: 'asc' | 'desc' },
     includeAllScopes = false,
   ) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+    const params = new URLSearchParams({ account_id: accountId });
     if (type) params.set('type', type);
     if (sort?.by) params.set('sort_by', sort.by);
     if (sort?.order) params.set('sort_order', sort.order);
@@ -683,9 +662,9 @@ export const api = {
   // and rendered through the /raw streaming endpoint (ticket ff3e7337).
   uploadResourceFile: async (
     file: File,
-    opts: { workspace_id: string; type?: string },
+    opts: { account_id: string; type?: string },
   ): Promise<{ id: string; file_name: string; file_mimetype: string; size: number }> => {
-    const params = new URLSearchParams({ workspace_id: opts.workspace_id });
+    const params = new URLSearchParams({ account_id: opts.account_id });
     params.set('type', opts.type || 'comment_attachment');
     const token = (() => { try { return localStorage.getItem('auth_token'); } catch { return null; } })();
     const headers: Record<string, string> = {
@@ -693,7 +672,7 @@ export const api = {
       'X-File-Name': encodeURIComponent(file.name),
     };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (_activeWorkspaceId) headers['X-Workspace-Id'] = _activeWorkspaceId;
+    if (_activeAccountId) headers['X-Account-Id'] = _activeAccountId;
     const res = await fetch(`${BASE}/resources/upload?${params.toString()}`, {
       method: 'POST',
       headers,
@@ -710,8 +689,8 @@ export const api = {
     return res.json();
   },
   createResource: (data: {
-    workspace_id?: string | null;
-    scope?: 'global' | 'workspace';
+    account_id?: string | null;
+    scope?: 'global' | 'account';
     credential_id?: string | null;
     name: string;
     description?: string;
@@ -727,8 +706,8 @@ export const api = {
   updateResource: (
     id: string,
     data: {
-      workspace_id?: string | null;
-      scope?: 'global' | 'workspace';
+      account_id?: string | null;
+      scope?: 'global' | 'account';
       name?: string;
       description?: string;
       type?: string;
@@ -742,20 +721,20 @@ export const api = {
     },
   ) =>
     request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteResource: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  deleteResource: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
   },
   // ─── Projects (docs/tickets.md → Project) ─────────────
   // One git repository + what every feature needs to work on it. Replaces
   // repository Resources (same ids after migration).
   listProjects: async (wsId: string) =>
-    request<Project[]>(`/workspaces/${encodeURIComponent(wsId)}/projects`, { headers: workspaceHeaders(wsId) }),
+    request<Project[]>('/projects'),
   getProject: (id: string) => request<Project>(`/projects/${encodeURIComponent(id)}`),
   createProject: async (wsId: string, data: ProjectInput & { name: string; repo_url: string }) =>
-    request<Project>(`/workspaces/${encodeURIComponent(wsId)}/projects`, {
+    request<Project>('/projects', {
       method: 'POST',
-      headers: workspaceHeaders(wsId),
+      headers: accountHeaders(wsId),
       body: JSON.stringify(data),
     }),
   updateProject: (id: string, data: ProjectInput) =>
@@ -778,7 +757,7 @@ export const api = {
   listProjectBranches: (id: string) =>
     request<{ branches: RepoBranch[]; default_branch: string }>(`/projects/${encodeURIComponent(id)}/branches`),
   /** Probe a repo URL (+ credential) before saving — returns its branches on success. */
-  testProjectConnection: (data: { repo_url: string; credential_id?: string | null; workspace_id: string }) =>
+  testProjectConnection: (data: { repo_url: string; credential_id?: string | null; account_id: string }) =>
     request<ProjectTestConnectionResult>('/projects/test-connection', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -787,52 +766,49 @@ export const api = {
   // ─── project git reading (history / diff / file tree) ──────────────
   // Read from the server's per-project bare blobless cache clone. SSH-only URLs
   // come back as HTTP 422 (code 'ssh_unsupported') — `request` throws the error
-  // message, which the panel renders as a degrade notice. `workspace_id` rides
+  // message, which the panel renders as a degrade notice. `account_id` rides
   // along as before (same query params as the old resource repo browser).
-  getProjectRefs: (id: string, workspaceId: string, refresh = false) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getProjectRefs: (id: string, accountId: string, refresh = false) => {
+    const params = new URLSearchParams({ account_id: accountId });
     if (refresh) params.set('refresh', 'true');
     return request<RepoRefs>(`/projects/${encodeURIComponent(id)}/refs?${params.toString()}`);
   },
   // Cursor pagination: pass the last shown sha as `before` to load older commits.
   listProjectCommits: (
     id: string,
-    workspaceId: string,
+    accountId: string,
     opts?: { ref?: string; limit?: number; before?: string; refresh?: boolean },
   ) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+    const params = new URLSearchParams({ account_id: accountId });
     if (opts?.ref) params.set('ref', opts.ref);
     if (opts?.limit) params.set('limit', String(opts.limit));
     if (opts?.before) params.set('before', opts.before);
     if (opts?.refresh) params.set('refresh', 'true');
     return request<{ commits: RepoCommitSummary[] }>(`/projects/${encodeURIComponent(id)}/commits?${params.toString()}`);
   },
-  getProjectCommit: (id: string, workspaceId: string, sha: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getProjectCommit: (id: string, accountId: string, sha: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<RepoCommitDetail>(`/projects/${encodeURIComponent(id)}/commits/${encodeURIComponent(sha)}?${params.toString()}`);
   },
-  getProjectTree: (id: string, workspaceId: string, opts?: { ref?: string; path?: string }) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getProjectTree: (id: string, accountId: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ account_id: accountId });
     if (opts?.ref) params.set('ref', opts.ref);
     if (opts?.path) params.set('path', opts.path);
     return request<{ ref: string; path: string; entries: RepoTreeEntry[] }>(
       `/projects/${encodeURIComponent(id)}/tree?${params.toString()}`,
     );
   },
-  getProjectFile: (id: string, workspaceId: string, filePath: string, ref?: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId, path: filePath });
+  getProjectFile: (id: string, accountId: string, filePath: string, ref?: string) => {
+    const params = new URLSearchParams({ account_id: accountId, path: filePath });
     if (ref) params.set('ref', ref);
     return request<RepoFileContent>(`/projects/${encodeURIComponent(id)}/file?${params.toString()}`);
   },
 
   // ─── Actions ──────────────────────────────────────────
-  listActions: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<Action[]>(`/actions?${params.toString()}`);
-  },
+  listActions: (_accountId: string) => request<Action[]>('/actions'),
   getAction: (id: string) => request<Action>(`/actions/${id}`),
   createAction: (data: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     description?: string;
     prompt?: string;
@@ -855,7 +831,7 @@ export const api = {
   updateAction: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       description?: string;
       prompt?: string;
@@ -875,8 +851,8 @@ export const api = {
     },
   ) =>
     request<Action>(`/actions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteAction: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  deleteAction: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/actions/${id}?${params.toString()}`, { method: 'DELETE' });
   },
   // fan-out (티켓 fc3906c5): run_id/room_id/prompt 는 첫 run 을 가리키고,
@@ -890,19 +866,19 @@ export const api = {
       runs: Array<{ run_id: string; agent_id: string; room_id: string }>;
       failures: Array<{ agent_id: string; error: string }>;
     }>(`/actions/${id}/run`, { method: 'POST', body: '{}' }),
-  listActionRuns: (id: string, workspaceId: string, limit = 20) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
+  listActionRuns: (id: string, accountId: string, limit = 20) => {
+    const params = new URLSearchParams({ account_id: accountId, limit: String(limit) });
     return request<ActionRun[]>(`/actions/${id}/runs?${params.toString()}`);
   },
-  getActionRun: (runId: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getActionRun: (runId: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<ActionRun>(`/actions/runs/${runId}?${params.toString()}`);
   },
 
-  // Functions: workspace_id omitted means global definitions only.
-  listFunctions: (workspaceId?: string | null, includeShadowed = false) => {
+  // Functions: account_id omitted means global definitions only.
+  listFunctions: (accountId?: string | null, includeShadowed = false) => {
     const params = new URLSearchParams();
-    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (accountId) params.set('account_id', accountId);
     if (includeShadowed) params.set('include_shadowed', 'true');
     const query = params.toString();
     return request<WorkflowFunction[]>(`/functions${query ? `?${query}` : ''}`);
@@ -915,23 +891,20 @@ export const api = {
     request<{ success: true; id: string }>(`/functions/${id}`, { method: 'DELETE' }),
   runFunction: (
     id: string,
-    data: { workspace_id: string; ticket_id?: string; inputs?: Record<string, any>; idempotency_key?: string },
+    data: { account_id: string; ticket_id?: string; inputs?: Record<string, any>; idempotency_key?: string },
   ) => request<WorkflowFunctionRun>(`/functions/${id}/run`, { method: 'POST', body: JSON.stringify(data) }),
-  listFunctionRuns: (workspaceId: string, options?: { functionId?: string; ticketId?: string; limit?: number }) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(options?.limit || 50) });
+  listFunctionRuns: (accountId: string, options?: { functionId?: string; ticketId?: string; limit?: number }) => {
+    const params = new URLSearchParams({ account_id: accountId, limit: String(options?.limit || 50) });
     if (options?.functionId) params.set('function_id', options.functionId);
     if (options?.ticketId) params.set('ticket_id', options.ticketId);
     return request<WorkflowFunctionRun[]>(`/functions/runs?${params.toString()}`);
   },
 
   // ─── Scenario-based QA (ticket 3c655d20) ──────────────
-  listQaScenarios: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<QaScenarioListItem[]>(`/qa/scenarios?${params.toString()}`);
-  },
+  listQaScenarios: (_accountId: string) => request<QaScenarioListItem[]>('/qa/scenarios'),
   getQaScenario: (id: string) => request<QaScenario>(`/qa/scenarios/${id}`),
   createQaScenario: (data: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     description?: string;
     steps?: QaScenario['steps'];
@@ -956,7 +929,7 @@ export const api = {
   updateQaScenario: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       description?: string;
       steps?: QaScenario['steps'];
@@ -979,50 +952,47 @@ export const api = {
       qa_phases?: QaPhasesConfig | null;
     },
   ) => request<QaScenario>(`/qa/scenarios/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteQaScenario: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  deleteQaScenario: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/qa/scenarios/${id}?${params.toString()}`, { method: 'DELETE' });
   },
   runQaScenario: (id: string) =>
     request<{ run_id: string; room_id: string; prompt: string }>(`/qa/scenarios/${id}/run`, { method: 'POST', body: '{}' }),
-  listQaRuns: (id: string, workspaceId: string, limit = 20) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
+  listQaRuns: (id: string, accountId: string, limit = 20) => {
+    const params = new URLSearchParams({ account_id: accountId, limit: String(limit) });
     return request<QaRun[]>(`/qa/scenarios/${id}/runs?${params.toString()}`);
   },
-  getQaRun: (runId: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getQaRun: (runId: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<QaRun>(`/qa/runs/${runId}?${params.toString()}`);
   },
   // ─── Deployment awareness (ticket 8ce72b18) ──────────
   // The current live commit per environment visible to a workspace (its own
   // environments + all global ones). Powers the QA "live commit" badge.
-  listDeployments: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  listDeployments: (accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<Deployment[]>(`/deployments?${params.toString()}`);
   },
   // ─── Sequential QA batches (ticket daf06262) ──────────
   // scenario_ids[] OR all (→ enabled scenarios in scope). Only the first
   // scenario dispatches now; the rest run one-at-a-time as each finalizes.
   startQaBatch: (data: {
-    workspace_id: string;
+    account_id: string;
     scenario_ids?: string[];
     all?: boolean;
     stop_on_fail?: boolean;
   }) => request<QaRunBatch>('/qa/batches', { method: 'POST', body: JSON.stringify(data) }),
-  getQaBatch: (batchId: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getQaBatch: (batchId: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<QaRunBatch>(`/qa/batches/${batchId}?${params.toString()}`);
   },
 
   // ─── QA schedules (ticket b6bb7efd) ──────────────────
   // Automatic trigger layer: when due, the server kicks a sequential batch via
   // the same orchestrator as startQaBatch. Exactly one of cron / interval_ms.
-  listQaSchedules: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<QaSchedule[]>(`/qa/schedules?${params.toString()}`);
-  },
+  listQaSchedules: (_accountId: string) => request<QaSchedule[]>('/qa/schedules'),
   createQaSchedule: (data: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     scope?: QaScheduleScope;
     scenario_ids?: string[];
@@ -1034,7 +1004,7 @@ export const api = {
   updateQaSchedule: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       scope?: QaScheduleScope;
       scenario_ids?: string[];
@@ -1044,26 +1014,23 @@ export const api = {
       stop_on_fail?: boolean;
     },
   ) => request<QaSchedule>(`/qa/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteQaSchedule: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  deleteQaSchedule: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/qa/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
   },
-  runQaScheduleNow: (id: string, workspaceId: string) =>
+  runQaScheduleNow: (id: string, accountId: string) =>
     request<{ schedule: QaSchedule; batch: QaRunBatch }>(`/qa/schedules/${id}/run-now`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
 
-  // ─── Workspace schedules (ticket 8845be79 foundation / 1927ed4a UI) ──────────
+  // ─── Account schedules (ticket 8845be79 foundation / 1927ed4a UI) ──────────
   // General-purpose agent-task scheduler: when due, the server opens a fresh chat
   // room and sends `task_prompt` to `target_agent_id`. Exactly one of cron /
-  // interval_ms. Workspace-scoped only.
-  listWorkspaceSchedules: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<WorkspaceSchedule[]>(`/workspace-schedules?${params.toString()}`);
-  },
-  createWorkspaceSchedule: (data: {
-    workspace_id: string;
+  // interval_ms. Account-scoped only.
+  listAutomationSchedules: (_accountId: string) => request<AutomationSchedule[]>('/automation-schedules'),
+  createAutomationSchedule: (data: {
+    account_id: string;
     name: string;
     target_agent_id?: string;
     /** P4c-3b: spec-direct target. */
@@ -1074,11 +1041,11 @@ export const api = {
     cron?: string | null;
     interval_ms?: number | null;
     enabled?: boolean;
-  }) => request<WorkspaceSchedule>('/workspace-schedules', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspaceSchedule: (
+  }) => request<AutomationSchedule>('/automation-schedules', { method: 'POST', body: JSON.stringify(data) }),
+  updateAutomationSchedule: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       target_agent_id?: string;
       /** P4c-3b: spec-direct target. */
@@ -1090,28 +1057,25 @@ export const api = {
       interval_ms?: number | null;
       enabled?: boolean;
     },
-  ) => request<WorkspaceSchedule>(`/workspace-schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteWorkspaceSchedule: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<{ success: true; id: string }>(`/workspace-schedules/${id}?${params.toString()}`, { method: 'DELETE' });
+  ) => request<AutomationSchedule>(`/automation-schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAutomationSchedule: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
+    return request<{ success: true; id: string }>(`/automation-schedules/${id}?${params.toString()}`, { method: 'DELETE' });
   },
-  runWorkspaceScheduleNow: (id: string, workspaceId: string) =>
-    request<{ schedule: WorkspaceSchedule; dispatch: WorkspaceScheduleDispatch }>(`/workspace-schedules/${id}/run-now`, {
+  runAutomationScheduleNow: (id: string, accountId: string) =>
+    request<{ schedule: AutomationSchedule; dispatch: AutomationScheduleDispatch }>(`/automation-schedules/${id}/run-now`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
 
   // ─── Security inspection (보안 점검 — ticket cfd74638 foundation) ──────────
   // Sibling of scenario QA: profile CRUD + run dispatch + history + sequential
   // batches + schedules. Run-result recording (findings, complete) is agent-only
   // via MCP, so it is intentionally not exposed over REST.
-  listSecurityProfiles: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<SecurityProfileListItem[]>(`/security/profiles?${params.toString()}`);
-  },
+  listSecurityProfiles: (_accountId: string) => request<SecurityProfileListItem[]>('/security/profiles'),
   getSecurityProfile: (id: string) => request<SecurityProfile>(`/security/profiles/${id}`),
   createSecurityProfile: (data: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     description?: string;
     checklist?: SecurityProfile['checklist'];
@@ -1134,7 +1098,7 @@ export const api = {
   updateSecurityProfile: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       description?: string;
       checklist?: SecurityProfile['checklist'];
@@ -1155,8 +1119,8 @@ export const api = {
       build_mode?: SecurityProfile['build_mode'];
     },
   ) => request<SecurityProfile>(`/security/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteSecurityProfile: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  deleteSecurityProfile: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/security/profiles/${id}?${params.toString()}`, { method: 'DELETE' });
   },
   // Dispatch a "refresh the checklist with the latest security info" task — no
@@ -1165,32 +1129,29 @@ export const api = {
     request<{ profile_id: string; room_id: string; prompt: string }>(`/security/profiles/${id}/refresh-checklist`, { method: 'POST', body: '{}' }),
   runSecurityProfile: (id: string) =>
     request<{ run_id: string; room_id: string; prompt: string }>(`/security/profiles/${id}/run`, { method: 'POST', body: '{}' }),
-  listSecurityRuns: (id: string, workspaceId: string, limit = 20) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
+  listSecurityRuns: (id: string, accountId: string, limit = 20) => {
+    const params = new URLSearchParams({ account_id: accountId, limit: String(limit) });
     return request<SecurityRun[]>(`/security/profiles/${id}/runs?${params.toString()}`);
   },
-  getSecurityRun: (runId: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getSecurityRun: (runId: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<SecurityRun>(`/security/runs/${runId}?${params.toString()}`);
   },
   // ─── Sequential security batches ──────────────────────
   startSecurityBatch: (data: {
-    workspace_id: string;
+    account_id: string;
     profile_ids?: string[];
     all?: boolean;
     stop_on_fail?: boolean;
   }) => request<SecurityRunBatch>('/security/batches', { method: 'POST', body: JSON.stringify(data) }),
-  getSecurityBatch: (batchId: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  getSecurityBatch: (batchId: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<SecurityRunBatch>(`/security/batches/${batchId}?${params.toString()}`);
   },
   // ─── Security schedules ───────────────────────────────
-  listSecuritySchedules: (workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<SecuritySchedule[]>(`/security/schedules?${params.toString()}`);
-  },
+  listSecuritySchedules: (_accountId: string) => request<SecuritySchedule[]>('/security/schedules'),
   createSecuritySchedule: (data: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     kind?: SecurityScheduleKind;
     scope?: SecurityScheduleScope;
@@ -1203,7 +1164,7 @@ export const api = {
   updateSecuritySchedule: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       kind?: SecurityScheduleKind;
       scope?: SecurityScheduleScope;
@@ -1214,13 +1175,13 @@ export const api = {
       stop_on_fail?: boolean;
     },
   ) => request<SecuritySchedule>(`/security/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteSecuritySchedule: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  deleteSecuritySchedule: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/security/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
   },
   // run-now is kind-discriminated: kind='scan' → `batch` set / `refreshes` null;
   // kind='checklist_refresh' → `batch` null / `refreshes` the per-profile dispatches.
-  runSecurityScheduleNow: (id: string, workspaceId: string) =>
+  runSecurityScheduleNow: (id: string, accountId: string) =>
     request<{
       schedule: SecuritySchedule;
       kind: SecurityScheduleKind;
@@ -1228,15 +1189,15 @@ export const api = {
       refreshes: { profile_id: string; room_id: string }[] | null;
     }>(`/security/schedules/${id}/run-now`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
 
   // ─── Credentials ──────────────────────────────────────
   // A workspace list also returns inherited global credentials (scope:'global').
-  // Pass scope:'global' (no workspace_id) for the Admin global-credentials page.
-  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global'; includeAllScopes?: boolean }) => {
+  // Pass scope:'global' (no account_id) for the Admin global-credentials page.
+  listCredentials: (accountId?: string, opts?: { provider?: string; scope?: 'global'; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams();
-    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (accountId) params.set('account_id', accountId);
     if (opts?.provider) params.set('provider', opts.provider);
     if (opts?.scope) params.set('scope', opts.scope);
     if (opts?.includeAllScopes) params.set('include_all_scopes', 'true');
@@ -1254,10 +1215,10 @@ export const api = {
       },
     ),
   createCredential: (data: {
-    // Omit workspace_id and pass scope:'global' to create an instance-level
+    // Omit account_id and pass scope:'global' to create an instance-level
     // credential (requires the MANAGE_GLOBAL_CREDENTIALS permission).
-    workspace_id?: string;
-    scope?: 'global' | 'workspace';
+    account_id?: string;
+    scope?: 'global' | 'account';
     name: string;
     description?: string;
     provider: string;
@@ -1267,8 +1228,8 @@ export const api = {
   updateCredential: (
     id: string,
     data: {
-      workspace_id?: string | null;
-      scope?: 'global' | 'workspace';
+      account_id?: string | null;
+      scope?: 'global' | 'account';
       name?: string;
       description?: string;
       provider?: string;
@@ -1276,9 +1237,9 @@ export const api = {
     },
   ) =>
     request<Credential>(`/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteCredential: (id: string, workspaceId?: string) => {
+  deleteCredential: (id: string, accountId?: string) => {
     const params = new URLSearchParams();
-    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (accountId) params.set('account_id', accountId);
     const qs = params.toString();
     return request<{ success: true; id: string }>(`/credentials/${id}${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
   },
@@ -1289,15 +1250,15 @@ export const api = {
 
   // 티켓 b2e79108 — CLI 자동 로그인(device-auth). 터미널·파일 업로드 없이
   // Codex 로그인 세션을 시작하고 진행 상태를 폴링/SSE로 추적한다.
-  listCliLoginInstances: (workspaceId?: string) => {
+  listCliLoginInstances: (accountId?: string) => {
     const params = new URLSearchParams();
-    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (accountId) params.set('account_id', accountId);
     const qs = params.toString();
     return request<CliLoginInstanceOption[]>(`/credentials/cli-login/instances${qs ? `?${qs}` : ''}`);
   },
   startCliLogin: (data: {
-    workspace_id?: string;
-    scope?: 'global' | 'workspace';
+    account_id?: string;
+    scope?: 'global' | 'account';
     cli: string;
     /** opencode 전용 — `opencode auth login -p <cli_provider> -m <cli_method>`. */
     cli_provider?: string;
@@ -1305,39 +1266,39 @@ export const api = {
     credential_name: string;
     instance_id: string;
   }) => request<CliLoginSession>('/credentials/cli-login/start', { method: 'POST', body: JSON.stringify(data) }),
-  getCliLoginSession: (sessionId: string, workspaceId?: string) => {
+  getCliLoginSession: (sessionId: string, accountId?: string) => {
     const params = new URLSearchParams();
-    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (accountId) params.set('account_id', accountId);
     const qs = params.toString();
     return request<CliLoginSession>(`/credentials/cli-login/${sessionId}${qs ? `?${qs}` : ''}`);
   },
-  cancelCliLogin: (sessionId: string, workspaceId?: string) =>
+  cancelCliLogin: (sessionId: string, accountId?: string) =>
     request<CliLoginSession>(`/credentials/cli-login/${sessionId}/cancel`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
 
   // ─── Chat (Phase 2) ────────────────────────────────────
-  // Workspace context is read from the per-tab active workspace (see
-  // getActiveWorkspaceId) so multi-tab use never leaks across workspaces.
+  // Account context is read from the per-tab active workspace (see
+  // getActiveAccountId) so multi-tab use never leaks across accounts.
   listChatThreads: () => {
-    const workspace_id = getActiveWorkspaceId() || '';
-    const params = new URLSearchParams({ workspace_id });
+    const account_id = getActiveAccountId() || '';
+    const params = new URLSearchParams({ account_id });
     return request<ChatThread[]>(`/chat/threads?${params.toString()}`);
   },
   listChatMessages: (params: { agent_id: string; ticket_id?: string | null; limit?: number }) => {
-    const workspace_id = getActiveWorkspaceId() || '';
-    const qs = new URLSearchParams({ workspace_id, agent_id: params.agent_id });
+    const account_id = getActiveAccountId() || '';
+    const qs = new URLSearchParams({ account_id, agent_id: params.agent_id });
     if (params.ticket_id) qs.set('ticket_id', params.ticket_id);
     if (params.limit) qs.set('limit', String(params.limit));
     return request<ChatMessage[]>(`/chat/messages?${qs.toString()}`);
   },
   sendChatMessage: (params: { agent_id: string; content: string; ticket_id?: string | null }) => {
-    const workspace_id = getActiveWorkspaceId() || '';
+    const account_id = getActiveAccountId() || '';
     return request<ChatMessage>('/chat/messages', {
       method: 'POST',
       body: JSON.stringify({
-        workspace_id,
+        account_id,
         agent_id: params.agent_id,
         content: params.content,
         ticket_id: params.ticket_id || undefined,
@@ -1379,14 +1340,14 @@ export const api = {
   updateAgentTemplate: (id: string, value: Partial<Omit<AgentTemplate, 'id' | 'created_at' | 'updated_at'>>) =>
     request<AgentTemplate>(`/agent-templates/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) }),
   deleteAgentTemplate: (id: string) => request(`/agent-templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  validateRuntimeSpec: (workspace_id: string | null, spec: Record<string, any>) =>
+  validateRuntimeSpec: (account_id: string | null, spec: Record<string, any>) =>
     request<{ ok: boolean; spec?: Record<string, any>; error?: string }>('/runtime-specs/validate', {
       method: 'POST',
-      body: JSON.stringify({ workspace_id, spec }),
+      body: JSON.stringify({ account_id, spec }),
     }),
-  listAgentManagerInstances: (workspaceId?: string) => {
+  listAgentManagerInstances: (accountId?: string) => {
     const qs = new URLSearchParams();
-    if (workspaceId) qs.set('workspace_id', workspaceId);
+    if (accountId) qs.set('account_id', accountId);
     const q = qs.toString();
     return request<AgentManagerInstance[]>(`/admin/agent-manager/instances${q ? '?' + q : ''}`);
   },
@@ -1487,9 +1448,9 @@ export const api = {
   // CLI_TYPES whitelist (common/types/cli-types.ts), (2) manager_agent_id is sanity-
   // checked (existence + type='manager'); the manager itself can live in a
   // different workspace from the new agent — managers are paired globally
-  // by an admin and supervise children across workspaces.
+  // by an admin and supervise children across accounts.
   //
-  // Optional `workspaceId` lets callers (e.g. the workspace AI Agents page)
+  // Optional `accountId` lets callers (e.g. the workspace AI Agents page)
   // pin the request to the URL's wsId rather than relying on the per-tab
   // active workspace — same defensive override as createAgent.
   // P4c-3b: managed-agent creation removed server-side (spec-direct instead).
@@ -1499,7 +1460,7 @@ export const api = {
   // in workspace B can be attached to a manager paired in workspace A.
   // MANAGE_AGENTS-gated; returns one row per Agent with type='manager'.
   listAgentManagers: () =>
-    request<Array<{ id: string; name: string; description: string; workspace_id: string | null; is_active: number }>>(
+    request<Array<{ id: string; name: string; description: string; account_id: string | null; is_active: number }>>(
       '/admin/agent-manager/managers',
     ),
 
@@ -1509,24 +1470,24 @@ export const api = {
   // Governed, immutable skill catalog and bounded Hermes ChildRuns.
   /** Global + this workspace's skills. `includeShadowed` also returns global
    *  rows a workspace fork overrides, each flagged `shadowed: true`. */
-  listSkills: (workspaceId: string, includeShadowed = false) =>
+  listSkills: (accountId: string, includeShadowed = false) =>
     request<Skill[]>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills`
+      `/accounts/${encodeURIComponent(accountId)}/skills`
       + (includeShadowed ? '?include_shadowed=1' : ''),
     ),
   /** Copy a global skill into this workspace, where it shadows the global by
    *  slug while the global keeps receiving upstream updates. */
-  forkSkill: (workspaceId: string, skillId: string, skillVersionId?: string) =>
+  forkSkill: (accountId: string, skillId: string, skillVersionId?: string) =>
     request<Skill>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/fork`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/${encodeURIComponent(skillId)}/fork`,
       { method: 'POST', body: JSON.stringify({ skill_version_id: skillVersionId || '' }) },
     ),
-  getSkill: (workspaceId: string, skillId: string) =>
+  getSkill: (accountId: string, skillId: string) =>
     request<SkillDetail>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/${encodeURIComponent(skillId)}`,
     ),
   createSkill: (
-    workspaceId: string,
+    accountId: string,
     body: {
       slug: string;
       name: string;
@@ -1536,20 +1497,20 @@ export const api = {
     },
   ) =>
     request<Skill & { version: SkillVersion }>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills`,
+      `/accounts/${encodeURIComponent(accountId)}/skills`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
   publishSkillVersion: (
-    workspaceId: string,
+    accountId: string,
     skillId: string,
     body: { body: string; support_files?: Array<{ path: string; content: string }> },
   ) =>
     request<SkillVersion>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/versions`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/${encodeURIComponent(skillId)}/versions`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
   assignSkill: (
-    workspaceId: string,
+    accountId: string,
     skillId: string,
     body: {
       skill_version_id: string;
@@ -1557,12 +1518,12 @@ export const api = {
     },
   ) =>
     request<unknown>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/assignments`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/${encodeURIComponent(skillId)}/assignments`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
-  quarantineSkill: (workspaceId: string, skillId: string) =>
+  quarantineSkill: (accountId: string, skillId: string) =>
     request<Skill>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/quarantine`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/${encodeURIComponent(skillId)}/quarantine`,
       { method: 'PATCH' },
     ),
   // ─── Skill registry (admin — global scope + git taps) ────
@@ -1613,25 +1574,25 @@ export const api = {
     }),
 
   listSkillProposals: (
-    workspaceId: string,
+    accountId: string,
     status?: 'pending' | 'approved' | 'rejected',
   ) =>
     request<SkillProposal[]>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/proposals${status ? `?status=${status}` : ''}`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/proposals${status ? `?status=${status}` : ''}`,
     ),
   reviewSkillProposal: (
-    workspaceId: string,
+    accountId: string,
     proposalId: string,
     decision: 'approve' | 'reject',
     body: { note?: string; skill_id?: string },
   ) =>
     request<{ proposal: SkillProposal; version: SkillVersion | null }>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/skills/proposals/${encodeURIComponent(proposalId)}/${decision}`,
+      `/accounts/${encodeURIComponent(accountId)}/skills/proposals/${encodeURIComponent(proposalId)}/${decision}`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
-  listAgentChildRuns: (workspaceId: string, agentId: string) =>
+  listAgentChildRuns: (accountId: string, agentId: string) =>
     request<HermesChildRun[]>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/child-runs`,
+      `/accounts/${encodeURIComponent(accountId)}/agents/${encodeURIComponent(agentId)}/child-runs`,
     ),
 
   getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {
@@ -1692,7 +1653,7 @@ export const api = {
     request<WorkflowHealthRollup>('/admin/workflow-health'),
 
   // All-time/장기 구간 누적 (ticket 090abc77) — workspace는 getAuthHeaders()의
-  // ambient X-Workspace-Id 헤더로 해결되므로 여기서 별도로 넘기지 않는다.
+  // ambient X-Account-Id 헤더로 해결되므로 여기서 별도로 넘기지 않는다.
   // 별도 엔드포인트로 둔 이유는 getWorkflowHealth의 15초 폴링에 all-time
   // 집계까지 얹지 않기 위함(컨트롤러 docstring 참고) — 호출부가 직접
   // 원하는 시점에만 불러야 한다.
@@ -1705,15 +1666,15 @@ export const api = {
   },
 
   // ── Phase 7: Chat Rooms ─────────────────────────
-  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
-  // see getChannels above for why callers reacting to a workspaceId prop change
+  // accountId overrides the ambient X-Account-Id header for this one call —
+  // see getChannels above for why callers reacting to a accountId prop change
   // need this instead of relying on the ambient header.
   // ─── Agent Sessions (CLI 직접 세션) ────────────────────────────────────
   // 서버: apps/server/src/modules/agent-sessions. 모든 경로가 (Runtime Host, CLI)
   // 아래에 있고, 목록/기록은 매니저 장비의 CLI 홈에서 reverse RPC 로 온다.
-  listAgentSessionHosts: (workspaceId?: string) => {
+  listAgentSessionHosts: (accountId?: string) => {
     const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    if (accountId) init.headers = { ...getAuthHeaders(), 'X-Account-Id': accountId };
     return request<AgentSessionHost[]>('/agent-sessions/hosts', init);
   },
   getHostCliSettings: (managerId: string, cli: string) =>
@@ -1881,9 +1842,9 @@ export const api = {
   // ─── Terminals (Runtime Host 셸) ──────────────────────────────────────
   // 서버: apps/server/src/modules/terminals. 살아 있는 터미널만 다룬다 — 기록이 없으므로
   // 목록에 죽은 것은 나오지 않고, 스크롤백은 attach 가 한 번 넘겨준다.
-  listTerminalHosts: (workspaceId?: string) => {
+  listTerminalHosts: (accountId?: string) => {
     const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    if (accountId) init.headers = { ...getAuthHeaders(), 'X-Account-Id': accountId };
     return request<TerminalHost[]>('/terminals/hosts', init);
   },
   listHostTerminals: (managerId: string) =>
@@ -1915,10 +1876,10 @@ export const api = {
       { method: 'POST' },
     ),
 
-  listChatRooms: (scope?: 'workspace', workspaceId?: string) => {
+  listChatRooms: (scope?: 'account', accountId?: string) => {
     const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    return request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms', init);
+    if (accountId) init.headers = { ...getAuthHeaders(), 'X-Account-Id': accountId };
+    return request<ChatRoomListItem[]>(scope === 'account' ? '/chat-rooms?scope=account' : '/chat-rooms', init);
   },
 
   // Server returns `{ room: ChatRoomDetail, existing: boolean }` — unwrap so
@@ -2068,22 +2029,22 @@ export const api = {
       method: 'DELETE',
     }),
 
-  searchChatMessages: (workspaceId: string, query: string): Promise<any[]> =>
-    request<any[]>(`/chat-rooms/search?q=${encodeURIComponent(query)}&workspace_id=${encodeURIComponent(workspaceId)}`),
+  searchChatMessages: (_accountId: string, query: string): Promise<any[]> =>
+    request<any[]>(`/chat-rooms/search?q=${encodeURIComponent(query)}`),
 
   // ─── @-Mentions ─────────────────────────────────────────
   getMentionCandidates: (
-    workspaceId: string,
+    accountId: string,
     ticketId?: string,
   ): Promise<MentionCandidatesResponse> => {
     const qs = ticketId ? `?ticket_id=${encodeURIComponent(ticketId)}` : '';
     return request<MentionCandidatesResponse>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/mention-candidates${qs}`,
+      `/accounts/${encodeURIComponent(accountId)}/mention-candidates${qs}`,
     );
   },
 
-  getUnreadMentions: (workspaceId: string): Promise<UnreadMentionsResponse> =>
-    request<UnreadMentionsResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/mentions/unread`),
+  getUnreadMentions: (_accountId?: string): Promise<UnreadMentionsResponse> =>
+    request<UnreadMentionsResponse>('/mentions/unread'),
 
   markMentionRead: (mentionId: string): Promise<UserMentionItem> =>
     request<UserMentionItem>(`/mentions/${encodeURIComponent(mentionId)}/read`, { method: 'POST' }),
@@ -2110,17 +2071,15 @@ export const api = {
       body: JSON.stringify({ ids }),
     }),
 
-  markAllMentionsRead: (workspaceId: string): Promise<{ updated: number }> =>
+  markAllMentionsRead: (_accountId?: string): Promise<{ updated: number }> =>
     request<{ updated: number }>(
-      `/workspaces/${encodeURIComponent(workspaceId)}/mentions/read-all`,
+      '/mentions/read-all',
       { method: 'POST' },
     ),
 
   // ─── Badge count endpoints ───────────────────────────────
-  // Lightweight counts used by the sidebar NotificationContext. Workspace
-  // scope is resolved server-side from the X-Workspace-Id header, which
-  // getAuthHeaders() pulls from localStorage — no explicit workspaceId
-  // parameter is needed here. Each endpoint returns `{ count }` or
+  // Lightweight counts across the caller's accessible accounts, used by
+  // the sidebar NotificationContext. Each endpoint returns `{ count }` or
   // `{ total, perX }` so the client bookkeeping stays uniform.
   getChatUnreadCounts: (): Promise<{ total: number; perRoom: Record<string, number> }> =>
     request<{ total: number; perRoom: Record<string, number> }>('/chat-rooms/unread-counts'),
@@ -2129,7 +2088,7 @@ export const api = {
     request<{ total: number; perTicket: Record<string, number> }>('/tickets/unread-counts'),
   // 티켓 코멘트 일괄 읽음 처리 — markAllMentionsRead와 같은 아이디어를,
   // UserMention 행 대신 TicketReadState에 upsert하는 방식으로 적용한다.
-  // 현재 워크스페이스(X-Workspace-Id 헤더)의 관여 티켓 전체를 읽음 처리한다.
+  // 접근 가능한 모든 account의 관여 티켓을 읽음 처리한다.
   markAllTicketsRead: (): Promise<{ updated: number }> =>
     request<{ updated: number }>('/tickets/read-all', {
       method: 'POST',
@@ -2147,12 +2106,12 @@ export const api = {
   // is no client call that assigns or completes a STEP — the plan belongs to
   // the orchestrator agent and is only mutated through its MCP tools. Human
   // intervention is start / pause / resume / cancel / nudge.
-  listOrchestrationTeams: (workspaceId: string) =>
-    request<OrchestrationTeam[]>(`/orchestration/teams?workspace_id=${encodeURIComponent(workspaceId)}`),
-  getOrchestrationTeam: (id: string, workspaceId: string) =>
-    request<OrchestrationTeam>(`/orchestration/teams/${id}?workspace_id=${encodeURIComponent(workspaceId)}`),
+  listOrchestrationTeams: (_accountId: string) =>
+    request<OrchestrationTeam[]>('/orchestration/teams'),
+  getOrchestrationTeam: (id: string, accountId: string) =>
+    request<OrchestrationTeam>(`/orchestration/teams/${id}?account_id=${encodeURIComponent(accountId)}`),
   createOrchestrationTeam: (data: {
-    workspace_id: string;
+    account_id: string;
     name: string;
     description?: string;
     /** Orchestrator runtime spec — Runtime Host / CLI / model / working folder. */
@@ -2163,12 +2122,12 @@ export const api = {
     /** 글로벌(workspace 비종속) 팀으로 생성. 기본값 false. */
     is_global?: boolean;
     /** 글로벌 팀 전용: orchestrator가 미션을 만들 수 있는 workspace 목록. */
-    allowed_workspace_ids?: string[];
+    allowed_account_ids?: string[];
   }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeam: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       name?: string;
       description?: string;
       /** Partial patch over the orchestrator's stored runtime spec. */
@@ -2178,18 +2137,18 @@ export const api = {
       max_open_missions?: number;
       enabled?: boolean;
       /** 글로벌 팀 전용: workspace 허용목록을 통째로 교체한다. */
-      allowed_workspace_ids?: string[];
+      allowed_account_ids?: string[];
     },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteOrchestrationTeam: (id: string, workspaceId: string) =>
+  deleteOrchestrationTeam: (id: string, accountId: string) =>
     request<{ success: true; id: string }>(
-      `/orchestration/teams/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      `/orchestration/teams/${id}?account_id=${encodeURIComponent(accountId)}`,
       { method: 'DELETE' },
     ),
   addOrchestrationTeamMember: (
     teamId: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       /** Runtime spec for the new slot. There is no agent to pick — it is provisioned from this. */
       runtime?: OrchestrationSlotSpecInput;
       /** Put the orchestrator itself on the roster as an executing member (ignores `runtime`). */
@@ -2203,7 +2162,7 @@ export const api = {
     teamId: string,
     memberId: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       /** Partial patch over the slot's stored runtime spec. Omit to leave it unchanged. */
       runtime?: Partial<OrchestrationSlotSpecInput>;
       role_label?: string;
@@ -2216,29 +2175,29 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
-  removeOrchestrationTeamMember: (teamId: string, memberId: string, workspaceId: string) =>
+  removeOrchestrationTeamMember: (teamId: string, memberId: string, accountId: string) =>
     request<OrchestrationTeam>(
-      `/orchestration/teams/${teamId}/members/${memberId}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      `/orchestration/teams/${teamId}/members/${memberId}?account_id=${encodeURIComponent(accountId)}`,
       { method: 'DELETE' },
     ),
   /** Runtime Hosts + their CLI / model / working-folder candidates for the team editor. */
-  listOrchestrationRuntimeHosts: (workspaceId: string) =>
+  listOrchestrationRuntimeHosts: (accountId: string) =>
     request<OrchestrationRuntimeHost[]>(
-      `/orchestration/runtime-hosts?workspace_id=${encodeURIComponent(workspaceId)}`,
+      `/orchestration/runtime-hosts?account_id=${encodeURIComponent(accountId)}`,
     ),
   /**
    * Make a Runtime Host re-list its per-CLI models and return its refreshed row.
    * The server issues the command and awaits the host's ack before replying, so
    * this resolves with a list that is already current.
    */
-  refreshOrchestrationRuntimeHostModels: (managerAgentId: string, workspaceId: string) =>
+  refreshOrchestrationRuntimeHostModels: (managerAgentId: string, accountId: string) =>
     request<OrchestrationRuntimeHost>(
       `/orchestration/runtime-hosts/${encodeURIComponent(managerAgentId)}/refresh-models`,
-      { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) },
+      { method: 'POST', body: JSON.stringify({ account_id: accountId }) },
     ),
 
-  listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+  listOrchestrationMissions: (_accountId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
+    const params = new URLSearchParams();
     if (opts?.teamId) params.set('team_id', opts.teamId);
     if (opts?.status) params.set('status', opts.status);
     if (opts?.limit) params.set('limit', String(opts.limit));
@@ -2251,27 +2210,27 @@ export const api = {
    */
   getOrchestrationStepSession: (
     stepId: string,
-    workspaceId: string,
+    accountId: string,
     opts?: { limit?: number; beforeId?: string },
   ) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+    const params = new URLSearchParams({ account_id: accountId });
     if (opts?.limit) params.set('limit', String(opts.limit));
     if (opts?.beforeId) params.set('before_id', opts.beforeId);
     return request<OrchestrationStepSession>(`/orchestration/steps/${stepId}/session?${params.toString()}`);
   },
   /** step 방 첨부 하나(바이트 포함). 썸네일·플레이어·다운로드가 Blob 으로 바꿔 쓴다. */
-  getOrchestrationStepAttachment: (stepId: string, workspaceId: string, attachmentId: string) =>
+  getOrchestrationStepAttachment: (stepId: string, accountId: string, attachmentId: string) =>
     request<OrchestrationStepAttachment & { file_data: string; truncated?: boolean }>(
-      `/orchestration/steps/${stepId}/attachments/${attachmentId}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      `/orchestration/steps/${stepId}/attachments/${attachmentId}?account_id=${encodeURIComponent(accountId)}`,
     ),
   /** 미션의 검증 증거 갤러리 — 모든 step 방과 미션 방의 이미지·동영상, 최신순. */
-  listOrchestrationMissionEvidence: (missionId: string, workspaceId: string, limit = 200) =>
+  listOrchestrationMissionEvidence: (missionId: string, accountId: string, limit = 200) =>
     request<{ mission_id: string; items: OrchestrationEvidenceItem[] }>(
-      `/orchestration/missions/${missionId}/evidence?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`,
+      `/orchestration/missions/${missionId}/evidence?account_id=${encodeURIComponent(accountId)}&limit=${limit}`,
     ),
-  getOrchestrationMission: (id: string, workspaceId: string) =>
+  getOrchestrationMission: (id: string, accountId: string) =>
     request<OrchestrationMissionDetail>(
-      `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      `/orchestration/missions/${id}?account_id=${encodeURIComponent(accountId)}`,
     ),
   /**
    * 미션 타임라인 커서 페이지네이션(티켓 4d065f82). `getOrchestrationMission` 은 최신
@@ -2284,10 +2243,10 @@ export const api = {
    */
   listOrchestrationMissionEvents: (
     id: string,
-    workspaceId: string,
+    accountId: string,
     opts?: { limit?: number; before_at?: string; before_seq?: number; before_id?: string },
   ) => {
-    const parts = [`workspace_id=${encodeURIComponent(workspaceId)}`];
+    const parts = [`account_id=${encodeURIComponent(accountId)}`];
     if (opts?.limit) parts.push(`limit=${opts.limit}`);
     if (opts?.before_at) parts.push(`before_at=${encodeURIComponent(opts.before_at)}`);
     if (opts?.before_seq !== undefined) parts.push(`before_seq=${opts.before_seq}`);
@@ -2300,7 +2259,7 @@ export const api = {
   },
 
   createOrchestrationMission: (data: {
-    workspace_id: string;
+    account_id: string;
     team_id: string;
     title: string;
     objective: string;
@@ -2327,7 +2286,7 @@ export const api = {
   updateOrchestrationMission: (
     id: string,
     data: {
-      workspace_id: string;
+      account_id: string;
       title?: string;
       objective?: string;
       context?: string;
@@ -2357,30 +2316,30 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
-  deleteOrchestrationMission: (id: string, workspaceId: string) =>
+  deleteOrchestrationMission: (id: string, accountId: string) =>
     request<{ success: true; id: string }>(
-      `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      `/orchestration/missions/${id}?account_id=${encodeURIComponent(accountId)}`,
       { method: 'DELETE' },
     ),
-  startOrchestrationMission: (id: string, workspaceId: string) =>
+  startOrchestrationMission: (id: string, accountId: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/start`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
-  pauseOrchestrationMission: (id: string, workspaceId: string) =>
+  pauseOrchestrationMission: (id: string, accountId: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/pause`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
-  resumeOrchestrationMission: (id: string, workspaceId: string) =>
+  resumeOrchestrationMission: (id: string, accountId: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/resume`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
-  cancelOrchestrationMission: (id: string, workspaceId: string, reason?: string) =>
+  cancelOrchestrationMission: (id: string, accountId: string, reason?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/cancel`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId, reason: reason || '' }),
+      body: JSON.stringify({ account_id: accountId, reason: reason || '' }),
     }),
   /**
    * confirm 노드에 Pass/Fail 판정을 제출한다(티켓 5dbe4aa2).
@@ -2391,7 +2350,7 @@ export const api = {
    */
   submitOrchestrationStepConfirm: (
     stepId: string,
-    data: { workspace_id: string; verdict: 'pass' | 'fail'; visit: number; feedback?: string },
+    data: { account_id: string; verdict: 'pass' | 'fail'; visit: number; feedback?: string },
   ) =>
     request<{
       already_decided: boolean;
@@ -2407,53 +2366,53 @@ export const api = {
    * 종료된 미션을 다시 연다(운영자 입구). orchestrator 는 같은 전이를
    * `reopen_orchestration_mission` MCP 툴로 스스로 부르므로, 대화만으로도 이어서 진행된다.
    */
-  reopenOrchestrationMission: (id: string, workspaceId: string, reason?: string) =>
+  reopenOrchestrationMission: (id: string, accountId: string, reason?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/reopen`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId, reason }),
+      body: JSON.stringify({ account_id: accountId, reason }),
     }),
-  nudgeOrchestrationMission: (id: string, workspaceId: string, note?: string) =>
+  nudgeOrchestrationMission: (id: string, accountId: string, note?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId, note: note || '' }),
+      body: JSON.stringify({ account_id: accountId, note: note || '' }),
     }),
   /**
    * 미션 대화방에 참여한다(티켓 f6a0de0e). 멱등하므로 이미 참여 중인지 몰라도 부를 수
    * 있고, `joined` 로 이번 호출이 실제로 넣었는지 구분한다.
    */
-  joinOrchestrationMissionConversation: (id: string, workspaceId: string) =>
+  joinOrchestrationMissionConversation: (id: string, accountId: string) =>
     request<{ room_id: string; joined: boolean }>(`/orchestration/missions/${id}/join-conversation`, {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ account_id: accountId }),
     }),
 
   // ─── Ontology Graph (ticket d22b83b4) ─────────────────────
   getOntologyGraphStatus: (
-    workspaceId: string,
+    accountId: string,
     ref: { graphId?: string; resourceId?: string; folderPath?: string },
   ): Promise<OntologyGraphStatusResponse> => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
+    const params = new URLSearchParams({ account_id: accountId });
     if (ref.graphId) params.set('graph_id', ref.graphId);
     if (ref.resourceId) params.set('resource_id', ref.resourceId);
     if (ref.folderPath !== undefined) params.set('folder_path', ref.folderPath);
     return request<OntologyGraphStatusResponse>(`/ontology/status?${params.toString()}`);
   },
   logOntologyGraphViewOpened: (
-    workspaceId: string,
+    accountId: string,
     ref: { resourceId?: string; folderPath?: string },
   ): Promise<{ ok: true }> =>
     request<{ ok: true }>('/ontology/view-opened', {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId, resource_id: ref.resourceId, folder_path: ref.folderPath }),
+      body: JSON.stringify({ account_id: accountId, resource_id: ref.resourceId, folder_path: ref.folderPath }),
     }),
-  refreshOntologyGraph: (workspaceId: string, graphId: string): Promise<OntologyGraphRefreshResponse> =>
+  refreshOntologyGraph: (accountId: string, graphId: string): Promise<OntologyGraphRefreshResponse> =>
     request<OntologyGraphRefreshResponse>('/ontology/refresh', {
       method: 'POST',
-      body: JSON.stringify({ workspace_id: workspaceId, graph_id: graphId }),
+      body: JSON.stringify({ account_id: accountId, graph_id: graphId }),
     }),
-  getOntologyGraph: (workspaceId: string, graphId: string): Promise<OntologyGraphSnapshotResponse> =>
+  getOntologyGraph: (accountId: string, graphId: string): Promise<OntologyGraphSnapshotResponse> =>
     request<OntologyGraphSnapshotResponse>(
-      `/ontology/graph?workspace_id=${encodeURIComponent(workspaceId)}&graph_id=${encodeURIComponent(graphId)}`,
+      `/ontology/graph?account_id=${encodeURIComponent(accountId)}&graph_id=${encodeURIComponent(graphId)}`,
     ),
 };
 
@@ -2469,7 +2428,7 @@ export interface TicketListQuery {
   archived_only?: boolean;
 }
 
-/** Query string for GET /workspaces/:wsId/tickets (pure — unit tested). */
+/** Query string for GET /accounts/:wsId/tickets (pure — unit tested). */
 export function ticketListQueryString(filters: TicketListQuery): string {
   const qs = new URLSearchParams();
   if (filters.status && filters.status.length) qs.set('status', filters.status.join(','));
@@ -2529,7 +2488,7 @@ export interface MentionCandidatesResponse {
 export interface UserMentionItem {
   id: string;
   user_id: string;
-  workspace_id: string;
+  account_id: string;
   source_type: 'comment' | 'chat_message';
   source_id: string;
   // Comment mentions deep-link via ticket_id (Tickets page `?ticket=`), chat

@@ -36,16 +36,16 @@ test.beforeAll(async () => {
     role: 'admin',
     status: 'active',
   });
-  workspace = await dataSource.getRepository('Workspace').save({
+  workspace = await dataSource.getRepository('Account').save({
     name: 'Ontology smoke workspace',
     description: 'Bounded browser smoke fixture',
   });
   await dataSource.getRepository('RelationTuple').save({
     subject_type: 'user', subject_id: user.id, relation: 'admin',
-    object_type: 'workspace', object_id: workspace.id,
+    object_type: 'account', object_id: workspace.id,
   });
   project = await dataSource.getRepository('Project').save({
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     name: 'AWB ontology smoke fixture',
     description: 'Two-file repository fixture',
     repo_url: 'https://github.com/parnmanas/ai-workflow-board.git',
@@ -71,10 +71,10 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  await page.addInitScript(({ authToken, workspaceId }) => {
+  await page.addInitScript(({ authToken, accountId }) => {
     localStorage.setItem('auth_token', authToken);
-    localStorage.setItem('currentWorkspaceId', workspaceId);
-  }, { authToken: token, workspaceId: workspace.id });
+    localStorage.setItem('currentAccountId', accountId);
+  }, { authToken: token, accountId: workspace.id });
 
   const statuses = [];
   let snapshotLoads = 0;
@@ -86,7 +86,7 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
     if (url.pathname === '/api/ontology/graph' && response.ok()) snapshotLoads += 1;
   });
 
-  await page.goto(`/ws/${workspace.id}/ontology-graph`);
+  await page.goto(`/ontology-graph`);
   await page.getByPlaceholder('repo root').fill(FIXTURE_FOLDER);
   await page.locator('select').filter({ has: page.locator(`option[value="${project.id}"]`) }).selectOption(project.id);
 

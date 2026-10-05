@@ -152,7 +152,7 @@ export interface InstanceRecord {
   // redeem dual-write 이후 키/바디에 stamped 되어 온다. null = 구버전
   // 매니저/키 (host 바인딩 없음, agent 행으로만 식별).
   host_id?: string | null;
-  workspace_id: string | null;
+  account_id: string | null;
   mode: 'manager';
   hostname: string;
   plugin_version: string;
@@ -472,8 +472,8 @@ export class InstanceRegistryService implements OnModuleDestroy {
     });
   }
 
-  listForWorkspace(workspaceId: string): InstanceRecord[] {
-    return this.list().filter((i) => i.workspace_id === workspaceId);
+  listForWorkspace(accountId: string): InstanceRecord[] {
+    return this.list().filter((i) => i.account_id === accountId);
   }
 
   /** Live instances currently supervising `agentId` (ticket c3b767c6 —

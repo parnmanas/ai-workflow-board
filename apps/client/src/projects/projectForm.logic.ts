@@ -112,19 +112,19 @@ export function isProjectFormDirty(form: ProjectFormState, project: Project | nu
 
 /**
  * Credentials a project may use: global ones plus this workspace's own — the
- * same rule ResourceManager applies to workspace-scoped resources. A credential
+ * same rule ResourceManager applies to account-scoped resources. A credential
  * the project already points at stays selectable even if it would no longer be
  * listed (moved scope / other workspace) so editing never silently drops it.
  */
 export function projectCredentialChoices(
   credentials: Credential[],
-  workspaceId: string,
+  accountId: string,
   currentId?: string | null,
 ): Credential[] {
   return credentials.filter((c) => (
     c.scope === 'global'
-    || c.workspace_id == null
-    || c.workspace_id === workspaceId
+    || c.account_id == null
+    || c.account_id === accountId
     || (!!currentId && c.id === currentId)
   ));
 }
@@ -236,7 +236,7 @@ const USAGE_LABELS: Record<string, string> = {
   missions: '미션',
   orchestration_missions: '미션',
   schedules: '스케줄',
-  workspace_schedules: '스케줄',
+  automation_schedules: '스케줄',
   ontology_graphs: '온톨로지 그래프',
   references: 'QA·보안·Action·미션·outreach 설정',
 };

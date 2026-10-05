@@ -1,5 +1,6 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import type { Credential, Project } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
@@ -20,7 +21,7 @@ import ProjectDetailPanel from './ProjectDetailPanel';
  * it (docs/tickets.md → Project). Replaces repository Resources (same ids).
  * Master/detail like ResourceManager: list on the left, the selected project
  * (settings · host folders · branches/history/files) on the right. Route
- * `/ws/:wsId/projects` (`?project=<id>` preselects one).
+ * `/projects` (`?project=<id>` preselects one).
  */
 
 // 이 폭 미만이면 리스트만 보여주고 detail 은 풀폭 오버레이로 띄운다(ResourceManager 와 같은 기준).
@@ -28,7 +29,8 @@ const NARROW_BREAKPOINT = 720;
 const NEW = '__new__';
 
 export default function ProjectsPage() {
-  const { wsId = '' } = useParams<{ wsId: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const [searchParams] = useSearchParams();
   const { showToast } = useToast();
   const { projects: listed, loading, error, reload } = useProjects(wsId);
@@ -44,6 +46,8 @@ export default function ProjectsPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get('project'));
   const [query, setQuery] = useState('');
+  const selectedProject = selectedId && selectedId !== NEW ? projects.find((p) => p.id === selectedId) || null : null;
+  const detailAccountId = selectedProject?.account_id || wsId;
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [hosts, setHosts] = useState<Array<{ id: string; name: string }>>([]);
   const [hostsLoading, setHostsLoading] = useState(true);
@@ -66,13 +70,13 @@ export default function ProjectsPage() {
   }, []);
 
   useEffect(() => {
-    if (!wsId) return;
+    if (!detailAccountId) return;
     let cancelled = false;
-    api.listCredentials(wsId)
+    api.listCredentials(detailAccountId)
       .then((rows) => { if (!cancelled) setCredentials(rows || []); })
       .catch(() => { if (!cancelled) setCredentials([]); });
     return () => { cancelled = true; };
-  }, [wsId]);
+  }, [detailAccountId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,14 +130,13 @@ export default function ProjectsPage() {
   const visible = q
     ? projects.filter((p) => p.name.toLocaleLowerCase().includes(q) || (p.repo_url || '').toLocaleLowerCase().includes(q))
     : projects;
-  const selectedProject = selectedId && selectedId !== NEW ? projects.find((p) => p.id === selectedId) || null : null;
   const showDetail = selectedId === NEW || !!selectedProject;
 
   const detail = showDetail ? (
     <ProjectDetailPanel
       key={selectedId === NEW ? NEW : selectedProject!.id}
       project={selectedId === NEW ? null : selectedProject}
-      workspaceId={wsId}
+      accountId={detailAccountId}
       credentials={credentials}
       hosts={hosts}
       hostsLoading={hostsLoading}

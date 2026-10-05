@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createAccount } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.HOST_MODELS_SINGLE_SOURCE_PORT || '0';
 
@@ -35,9 +35,9 @@ test('한 호스트의 모델 목록은 mission / session / Agent 다이얼로�
   const base = `http://127.0.0.1:${port}`;
   const { AuthService, getDataSourceToken } = modules;
 
-  const workspace = await createWorkspace(app, getDataSourceToken, 'single-source');
+  const workspace = await createAccount(app, getDataSourceToken, 'single-source');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'rolf', type: 'manager' });
-  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: workspace.id, label: 'rolf-key' });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'rolf-key' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
   const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -66,7 +66,7 @@ test('한 호스트의 모델 목록은 mission / session / Agent 다이얼로�
     return JSON.parse(text);
   };
   const rosterModels = async () => {
-    const hosts = await json(`${base}/api/orchestration/runtime-hosts?workspace_id=${workspace.id}`);
+    const hosts = await json(`${base}/api/orchestration/runtime-hosts?account_id=${workspace.id}`);
     const row = hosts.find((h) => h.manager_agent_id === manager.id);
     assert.ok(row, '로스터에 이 호스트가 있어야 한다');
     return row.available_models.opencode ?? [];
@@ -128,18 +128,18 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
   const { AuthService, getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const workspace = await createWorkspace(app, getDataSourceToken, 'reported-models');
+  const workspace = await createAccount(app, getDataSourceToken, 'reported-models');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'ralf', type: 'manager' });
-  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: workspace.id, label: 'ralf-key' });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'ralf-key' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin2', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
   const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
   // 같은 host×cli 의 **옛** 보고(다른 워크스페이스, 옛 어댑터) — 더 많이 알아도 최신 보고를 이기면 안 된다.
   const settingsRepo = ds.getRepository('AgentSessionCliSetting');
-  const oldWorkspace = await createWorkspace(app, getDataSourceToken, 'reported-models-old');
+  const oldWorkspace = await createAccount(app, getDataSourceToken, 'reported-models-old');
   const oldRow = await settingsRepo.save(settingsRepo.create({
-    workspace_id: oldWorkspace.id,
+    account_id: oldWorkspace.id,
     manager_id: manager.id,
     cli: 'opencode',
     credential_id: null,
@@ -157,7 +157,7 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
   // ACP 보고(영속) — 운영 DB 행과 같은 모양의 config option JSON.
   const REPORTED = ['opencode-go/glm-5.3', 'opencode-go/gpt-6-luna', 'opencode/big-pickle'];
   await settingsRepo.save(settingsRepo.create({
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     manager_id: manager.id,
     cli: 'opencode',
     credential_id: null,
@@ -199,14 +199,14 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
   // 다르게 보였다. 이름이 id 와 같은 항목은 싣지 않는다(화면은 id 로 떨어진다).
   assert.deepEqual(view.labels?.opencode, { 'opencode-go/glm-5.3': 'GLM 5.3' });
 
-  const hosts = await json(`${base}/api/orchestration/runtime-hosts?workspace_id=${workspace.id}`);
+  const hosts = await json(`${base}/api/orchestration/runtime-hosts?account_id=${workspace.id}`);
   const roster = hosts.find((h) => h.manager_agent_id === manager.id)?.available_models.opencode;
   assert.deepEqual(roster, expected, 'mission 팀 슬롯이 보는 목록 — 세션 화면과 같아야 한다');
 
   // 세션 화면의 CLI 설정 응답도 같은 집합을 본다(순서 규칙이 ACP 먼저라 동일하다).
   const cliSettings = await json(
     `${base}/api/agent-sessions/hosts/${manager.id}/opencode/settings`,
-    { 'X-Workspace-Id': workspace.id },
+    { 'X-Account-Id': workspace.id },
   );
   const sessionModels = (cliSettings.known_config_options ?? [])
     .filter((o) => o.category === 'model')
@@ -225,12 +225,12 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
   const { AuthService, getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const workspace = await createWorkspace(app, getDataSourceToken, 'ragnar-claude');
+  const workspace = await createAccount(app, getDataSourceToken, 'ragnar-claude');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'Ragnar', type: 'manager' });
-  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: workspace.id, label: 'ragnar-key' });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'ragnar-key' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin3', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
-  const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': workspace.id };
+  const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': workspace.id };
 
   // 운영 DB 의 ragnar 행 그대로.
   const ADAPTER = [
@@ -239,7 +239,7 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
   ];
   const settingsRepo = ds.getRepository('AgentSessionCliSetting');
   await settingsRepo.save(settingsRepo.create({
-    workspace_id: workspace.id, manager_id: manager.id, cli: 'claude', credential_id: null, default_config: '{}',
+    account_id: workspace.id, manager_id: manager.id, cli: 'claude', credential_id: null, default_config: '{}',
     known_config_options: JSON.stringify([
       { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'sonnet',
         options: ADAPTER.map(([value, name]) => ({ value, name })) },
@@ -273,7 +273,7 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
   assert.ok(!view.models.claude.includes('claude-sonnet-5-5'), '바이너리 스캔 id 가 새어 들어오면 세션 안과 달라진다');
   assert.equal(view.labels.claude.sonnet, 'Sonnet 5.5');
 
-  const hosts = await json(`${base}/api/orchestration/runtime-hosts?workspace_id=${workspace.id}`);
+  const hosts = await json(`${base}/api/orchestration/runtime-hosts?account_id=${workspace.id}`);
   assert.deepEqual(hosts.find((h) => h.manager_agent_id === manager.id)?.available_models.claude, expected, 'mission 로스터');
 
   const settings = await json(`${base}/api/agent-sessions/hosts/${manager.id}/claude/settings`);

@@ -42,7 +42,7 @@ export type PrivilegedCommandStatus =
 
 export interface PrivilegedCommandRequest {
   request_id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   /** 요청한 agent. 결과를 받아 갈 수 있는 유일한 주체이기도 하다. */
   agent_id: string;
   agent_name: string;
@@ -106,7 +106,7 @@ export class PrivilegedCommandService implements OnModuleDestroy {
   }
 
   create(input: {
-    workspace_id: string | null;
+    account_id: string | null;
     agent_id: string;
     agent_name: string;
     instance_id: string;
@@ -149,12 +149,12 @@ export class PrivilegedCommandService implements OnModuleDestroy {
   }
 
   /** 운영자 화면이 읽는 목록. 워크스페이스로 좁힌다. */
-  listPending(workspace_id: string | null): PrivilegedCommandRequest[] {
+  listPending(account_id: string | null): PrivilegedCommandRequest[] {
     const out: PrivilegedCommandRequest[] = [];
     for (const req of this.requests.values()) {
       const live = this.get(req.request_id);
       if (!live || live.status !== 'pending') continue;
-      if (workspace_id && live.workspace_id && live.workspace_id !== workspace_id) continue;
+      if (account_id && live.account_id && live.account_id !== account_id) continue;
       out.push(live);
     }
     return out.sort((a, b) => a.created_at.localeCompare(b.created_at));

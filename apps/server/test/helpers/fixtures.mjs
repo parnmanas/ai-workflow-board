@@ -32,7 +32,7 @@ export function runtimeHostKeyForAgent(agentId) {
  */
 // P4c-4: Agent 테이블 없음 — synthetic child id → host 매핑은 createAgent 가
 // 채운다. 매핑에 없는 id 면 새 Host + 키를 만들어 매핑한다.
-export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '', hostId = null, runtime = null } = {}) {
+export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { accountId = '', hostId = null, runtime = null } = {}) {
   if (runtime) { runtimeSpecsById.set(agentId, runtime); hostId ||= runtime.manager_agent_id; }
   if (!agentId || runtimeHostKeysByAgent.has(agentId)) return runtimeHostKeysByAgent.get(agentId) ?? null;
   const ds = app.get(getDataSourceToken());
@@ -40,12 +40,12 @@ export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId
     ds.getRepository('RuntimeHost').create({
       name: `runtime-host-${agentId.slice(0, 8)}`,
       hostname: 'fixture',
-      workspace_id: workspaceId || null,
+      account_id: accountId || null,
       is_active: 1,
     }),
   );
   const minted = await createApiKey(app, getDataSourceToken, null, {
-    workspaceId,
+    accountId,
     label: `runtime-host-${agentId.slice(0, 8)}`,
     hostId: host.id,
   });
@@ -54,11 +54,11 @@ export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId
   return minted.raw_key;
 }
 
-export async function createWorkspace(app, getDataSourceToken, name = 'qa') {
+export async function createAccount(app, getDataSourceToken, name = 'qa') {
   const ds = app.get(getDataSourceToken());
-  const repo = ds.getRepository('Workspace');
+  const repo = ds.getRepository('Account');
   const row = await repo.save(repo.create({ name: `ws-${name}-${stamp()}`, description: 'qa workspace' }));
-  traceEvent('fixture', { kind: 'workspace', id: row.id, name: row.name });
+  traceEvent('fixture', { kind: 'account', id: row.id, name: row.name });
   return row;
 }
 
@@ -86,7 +86,7 @@ export async function createUser(
 export async function createAgent(
   app,
   getDataSourceToken,
-  workspaceId,
+  accountId,
   { name = 'agent', rolePrompt, type = 'custom', hosted = true, runtime = false } = {},
 ) {
   const ds = app.get(getDataSourceToken());
@@ -96,18 +96,18 @@ export async function createAgent(
       ds.getRepository('RuntimeHost').create({
         name: agentName,
         hostname: 'fixture',
-        workspace_id: null,
+        account_id: null,
         is_active: 1,
       }),
     );
     const hostKey = await createApiKey(app, getDataSourceToken, null, {
-      workspaceId: workspaceId || '',
+      accountId: accountId || '',
       label: `runtime-host-${name}`,
       hostId: host.id,
     });
     runtimeHostKeysByAgent.set(host.id, hostKey.raw_key);
     hostKeysByHost.set(host.id, hostKey.raw_key);
-    traceEvent('fixture', { kind: 'agent', id: host.id, name: host.name, workspace_id: null });
+    traceEvent('fixture', { kind: 'agent', id: host.id, name: host.name, account_id: null });
     return {
       id: host.id,
       name: host.name,
@@ -115,7 +115,7 @@ export async function createAgent(
       type: 'manager',
       is_active: 1,
       is_online: 0,
-      workspace_id: null,
+      account_id: null,
       role_prompt: rolePrompt || '',
     };
   }
@@ -127,7 +127,7 @@ export async function createAgent(
       ds.getRepository('RuntimeHost').create({
         name: agentName,
         hostname: 'fixture',
-        workspace_id: workspaceId || null,
+        account_id: accountId || null,
         is_active: 1,
       }),
     );
@@ -143,7 +143,7 @@ export async function createAgent(
     id = runtime ? runtimeIdentityKey(spec) : host.id;
     if (runtime) runtimeSpecsById.set(id, spec);
     const hostKey = await createApiKey(app, getDataSourceToken, null, {
-      workspaceId: workspaceId || '',
+      accountId: accountId || '',
       label: `runtime-host-${name}`,
       hostId: host.id,
     });
@@ -151,7 +151,7 @@ export async function createAgent(
     hostKeysByHost.set(host.id, hostKey.raw_key);
     // Provision the same Host-bound runtime credential used by real dispatch.
     await createApiKey(app, getDataSourceToken, id, {
-      workspaceId: workspaceId || '',
+      accountId: accountId || '',
       label: `link-${name}`,
       hostId: host.id,
     });
@@ -163,7 +163,7 @@ export async function createAgent(
     type,
     is_active: 1,
     is_online: 0,
-    workspace_id: workspaceId,
+    account_id: accountId,
     role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
     manager_agent_id: managerAgentId,
     runtime_spec: executionSpec,
@@ -171,7 +171,7 @@ export async function createAgent(
       ? { strategy: 'single', permission_mode: 'strict' }
       : null,
   };
-  traceEvent('fixture', { kind: 'agent', id: row.id, name: row.name, workspace_id: workspaceId });
+  traceEvent('fixture', { kind: 'agent', id: row.id, name: row.name, account_id: accountId });
   return row;
 }
 
@@ -179,7 +179,7 @@ export async function createApiKey(
   app,
   getDataSourceToken,
   agentId,
-  { workspaceId = '', scope = 'full', label = 'key', hostId = null } = {},
+  { accountId = '', scope = 'full', label = 'key', hostId = null } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('ApiKey');
@@ -201,7 +201,7 @@ export async function createApiKey(
       ...(hostId ? { host_id: hostId } : {}),
       scope,
       is_active: 1,
-      workspace_id: workspaceId,
+      account_id: accountId,
     }),
   );
   row.raw_key = rawKey;
@@ -216,13 +216,13 @@ export async function createApiKey(
 export async function createProject(
   app,
   getDataSourceToken,
-  workspaceId,
+  accountId,
   { name = 'project', repoUrl = 'https://github.com/example/repo.git', defaultBranch = 'main', usePr = false, instructions = '', defaultAssignee = null, hostFolders = [] } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Project');
   const row = await repo.save(repo.create({
-    workspace_id: workspaceId,
+    account_id: accountId,
     name: `${name}-${stamp()}`,
     description: '',
     repo_url: repoUrl,
@@ -238,7 +238,7 @@ export async function createProject(
       project_id: row.id, host_id: folder.hostId, path: folder.path,
     }));
   }
-  traceEvent('fixture', { kind: 'project', id: row.id, name: row.name, workspace_id: workspaceId });
+  traceEvent('fixture', { kind: 'project', id: row.id, name: row.name, account_id: accountId });
   return row;
 }
 
@@ -251,7 +251,7 @@ export async function createTicket(
   app,
   getDataSourceToken,
   {
-    workspaceId,
+    accountId,
     title,
     status = 'todo',
     assignee = null,
@@ -270,7 +270,7 @@ export async function createTicket(
   const spec = assignee ? (assignee.runtime_spec || (assignee.manager_agent_id && assignee.cli ? assignee : runtimeSpecsById.get(assignee.id)) || null) : null;
   const row = await repo.save(
     repo.create({
-      workspace_id: workspaceId,
+      account_id: accountId,
       title,
       prompt_text: promptText,
       priority,

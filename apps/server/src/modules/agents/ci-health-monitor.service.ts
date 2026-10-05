@@ -48,7 +48,7 @@
  * 카운터로만 관측된다. 같은 run의 재실행 flip(run id 동일)은 진짜 복구이므로 통과시킨다.
  *
  * Ticket idempotency: the auto-created ticket (tags `ci-red`, `auto-generated`)
- * carries `operational_dedupe_key = "ci_red:{workspace_id}:{repo}:{branch}:{workflow_id}"`
+ * carries `operational_dedupe_key = "ci_red:{account_id}:{repo}:{branch}:{workflow_id}"`
  * under Ticket's pre-existing `uq_tickets_operational_dedupe_open` unique
  * index — INSERT-first, unique-violation-caught, winner-reused (never a
  * pre-SELECT check), mirroring `OutreachIngestService._createTicket` /
@@ -94,7 +94,7 @@ import { CiRedAlert } from '../../entities/CiRedAlert';
 import { Comment } from '../../entities/Comment';
 import { Project } from '../../entities/Project';
 import { Ticket } from '../../entities/Ticket';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { isDoneStatus, type TicketStatus } from '../../common/ticket-status';
 import { LogService } from '../../services/log.service';
 import { compareRunIds, GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl, sortWorkflowRunsNewestFirst } from '../../services/github-connector.service';
@@ -319,9 +319,9 @@ function isUniqueConstraintError(error: unknown): boolean {
  * 티켓을 가리키면 그 workspace 에서 열 수도 dispatch 할 수도 없다.
  */
 export function ciIncidentDedupeKey(
-  workspaceId: string, repoFullName: string, branch: string, workflowId: string,
+  accountId: string, repoFullName: string, branch: string, workflowId: string,
 ): string {
-  return `ci_red:${workspaceId}:${repoFullName}:${branch}:${workflowId}`;
+  return `ci_red:${accountId}:${repoFullName}:${branch}:${workflowId}`;
 }
 
 interface MonitorTarget {
@@ -525,7 +525,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
    * nobody named, so it stays unwatched.
    */
   private _resolveMonitorTarget(project: Project): MonitorTarget | null {
-    if (!project.workspace_id) return null;
+    if (!project.account_id) return null;
     const url = (project.repo_url || '').trim();
     const branch = (project.default_branch || '').trim();
     if (!url || !branch) return null;
@@ -596,7 +596,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     if (!row) {
       row = alertRepo.create({
         project_id: project.id,
-        workspace_id: project.workspace_id,
+        account_id: project.account_id,
         repo_full_name: target.repoFullName,
         branch: target.branch,
         workflow_id: workflow.id,
@@ -671,7 +671,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     evalResult: RedStreakResult,
     now: Date,
   ): Promise<boolean> {
-    const roomId = await this._resolveAlertRoomId(project.workspace_id);
+    const roomId = await this._resolveAlertRoomId(project.account_id);
     if (!roomId) {
       this.logService.warn('CI', 'no chat room available for CI-red alert — will retry next sweep', {
         project_id: project.id, repo: target.repoFullName,
@@ -699,10 +699,10 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       `연속 ${row.streak}회 실패 · 최초 실패 후 ${ageH.toFixed(1)}시간 경과`,
       failedJobs.length > 0 ? `실패한 잡: ${failedJobs.join(', ')}` : '',
       evalResult.lastRun?.html_url ? `[최신 run 보기](${evalResult.lastRun.html_url})` : '',
-      row.created_ticket_id ? `추적 티켓: [열기](/ws/${project.workspace_id}/tickets?ticket=${row.created_ticket_id})` : '',
+      row.created_ticket_id ? `추적 티켓: [열기](/tickets?ticket=${row.created_ticket_id})` : '',
     ].filter(Boolean);
     try {
-      await this.messaging.sendSystemMessage(roomId, project.workspace_id, lines.join('\n\n'));
+      await this.messaging.sendSystemMessage(roomId, project.account_id, lines.join('\n\n'));
       this.logService.info('CI', 'CI-red alert posted', {
         project_id: project.id, repo: target.repoFullName, streak: row.streak,
       });
@@ -735,14 +735,14 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     row: CiRedAlert,
     stats: CiSweepStats,
   ): Promise<void> {
-    const roomId = await this._resolveAlertRoomId(project.workspace_id);
+    const roomId = await this._resolveAlertRoomId(project.account_id);
     if (roomId) {
       const lines = [
         `✅ **CI 복구** — \`${target.repoFullName}@${target.branch}\` · ${workflow.name}`,
         `연속 ${row.streak}회 실패 후 최신 run이 성공으로 복구됐습니다.`,
       ];
       try {
-        await this.messaging.sendSystemMessage(roomId, project.workspace_id, lines.join('\n\n'));
+        await this.messaging.sendSystemMessage(roomId, project.account_id, lines.join('\n\n'));
         this.logService.info('CI', 'CI recovery posted', { project_id: project.id, repo: target.repoFullName });
       } catch (e) {
         this.logService.warn('CI', 'CI recovery post failed (row still cleared)', {
@@ -762,7 +762,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         const commentRepo = this.dataSource.getRepository(Comment);
         await commentRepo.save(commentRepo.create({
           ticket_id: row.created_ticket_id,
-          workspace_id: project.workspace_id,
+          account_id: project.account_id,
           author_type: 'system',
           author_id: '',
           author: 'CiHealthMonitor',
@@ -780,20 +780,20 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Resolve the chat room to publish into for a workspace. Order:
-   *   1. Workspace.alerts_chat_room_id, if set and the room exists.
+   *   1. Account.alerts_chat_room_id, if set and the room exists.
    *   2. Oldest chat room in the workspace by `created_at ASC`.
    */
-  private async _resolveAlertRoomId(workspaceId: string): Promise<string | null> {
-    if (!workspaceId) return null;
-    const ws = await this.dataSource.getRepository(Workspace).findOne({ where: { id: workspaceId } });
+  private async _resolveAlertRoomId(accountId: string): Promise<string | null> {
+    if (!accountId) return null;
+    const ws = await this.dataSource.getRepository(Account).findOne({ where: { id: accountId } });
     const roomRepo = this.dataSource.getRepository(ChatRoom);
     if (ws?.alerts_chat_room_id) {
-      const configured = await roomRepo.findOne({ where: { id: ws.alerts_chat_room_id, workspace_id: workspaceId } });
+      const configured = await roomRepo.findOne({ where: { id: ws.alerts_chat_room_id, account_id: accountId } });
       if (configured) return configured.id;
     }
     const fallback = await roomRepo
       .createQueryBuilder('r')
-      .where('r.workspace_id = :wsId', { wsId: workspaceId })
+      .where('r.account_id = :wsId', { wsId: accountId })
       .orderBy('r.created_at', 'ASC')
       .limit(1)
       .getOne();
@@ -835,7 +835,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     evalResult: RedStreakResult,
   ): Promise<IncidentTicketOutcome> {
     const now = new Date();
-    const dedupeKey = ciIncidentDedupeKey(project.workspace_id, target.repoFullName, target.branch, workflow.id);
+    const dedupeKey = ciIncidentDedupeKey(project.account_id, target.repoFullName, target.branch, workflow.id);
     const title = `CI red: ${target.repoFullName}@${target.branch} — ${workflow.name}`;
     const description = this._buildTicketDescription(target, workflow, evalResult, now);
     try {
@@ -900,7 +900,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       const commentRepo = this.dataSource.getRepository(Comment);
       await commentRepo.save(commentRepo.create({
         ticket_id: ticketId,
-        workspace_id: project.workspace_id,
+        account_id: project.account_id,
         author_type: 'system',
         author_id: '',
         author: 'CiHealthMonitor',
@@ -924,7 +924,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
    * key propagates to the caller — that is the INSERT-first race signal.
    */
   private async _insertTicket(project: Project, dedupeKey: string, title: string, description: string): Promise<string> {
-    const { ticket } = await this.tickets.create(project.workspace_id, {
+    const { ticket } = await this.tickets.create(project.account_id, {
       title,
       description,
       priority: 'high',

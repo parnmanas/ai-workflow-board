@@ -38,13 +38,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * the JSON projection (scheduleToJson) so older rows render cleanly.
  */
 @Entity('security_schedules')
-@Index(['workspace_id', 'enabled'])
+@Index(['account_id', 'enabled'])
 export class SecuritySchedule {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   name: string;

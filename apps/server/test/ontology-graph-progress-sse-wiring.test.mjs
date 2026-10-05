@@ -34,7 +34,7 @@ test('ontology_graph_progress 정의가 registry에 존재하고 map/filter/flat
 
 test('map()이 실제 emit 페이로드를 workspace 스코프 + 필드 그대로의 payload로 변환한다', () => {
   const emitted = {
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     graph_id: 'g-1',
     resource_id: 'r-1',
     job_id: 'job-1',
@@ -49,18 +49,18 @@ test('map()이 실제 emit 페이로드를 workspace 스코프 + 필드 그대�
     timestamp: '2026-08-22T00:00:00.000Z',
   };
   const envelope = def.map(emitted);
-  assert.equal(envelope.payload.workspace_id, 'ws-1');
+  assert.equal(envelope.payload.account_id, 'ws-1');
   assert.equal(envelope.payload.graph_id, 'g-1');
   assert.equal(envelope.payload.phase, 'phase_b');
   assert.equal(envelope.payload.graph_status, 'building');
   assert.equal(envelope.payload.edges_extracted, 12);
   assert.equal(envelope.payload.short_circuited, false);
-  assert.deepEqual(envelope.scope, { workspace_id: 'ws-1' });
+  assert.deepEqual(envelope.scope, { account_id: 'ws-1' });
 });
 
 test('flatten()은 payload 필드를 top-level로 노출한다(envelope 키가 아니라)', () => {
   const emitted = {
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     graph_id: 'g-1',
     resource_id: 'r-1',
     job_id: 'job-1',
@@ -83,8 +83,8 @@ test('flatten()은 payload 필드를 top-level로 노출한다(envelope 키가 �
 });
 
 test('filter()는 UI 전용(agent-manager 비소비) — orchestration_update/consensus_update와 같은 user-only 자세', () => {
-  assert.equal(def.filter({ scope: { workspace_id: 'ws-1' } }, { type: 'user', userId: 'u-1' }), true);
-  assert.equal(def.filter({ scope: { workspace_id: 'ws-1' } }, { type: 'agent', agentId: 'a-1' }), false);
+  assert.equal(def.filter({ scope: { account_id: 'ws-1' } }, { type: 'user', userId: 'u-1' }), true);
+  assert.equal(def.filter({ scope: { account_id: 'ws-1' } }, { type: 'agent', agentId: 'a-1' }), false);
 });
 
 test('클라이언트(BoardStreamContext.tsx)에 ontology_graph_progress 유니온 리터럴 + connect() 리스너가 실존한다(server+client 같은 PR)', () => {

@@ -46,7 +46,7 @@ const adminControllerSource = await readFile(
   'utf8',
 );
 const workspaceControllerSource = await readFile(
-  join(here, '..', 'src', 'modules', 'workspaces', 'workspaces.controller.ts'),
+  join(here, '..', 'src', 'modules', 'accounts', 'accounts.controller.ts'),
   'utf8',
 );
 
@@ -283,7 +283,7 @@ test('global CRUD is AdminGuard-protected and referenced deletion is transaction
 // 티켓 e616dbfc — 워크스페이스 배정/기본값 표면은 제거됐다. 예전 단언(소유자
 // 검사·allow-set 검증·publicProfile 매핑)은 그 표면이 존재한다는 전제였으므로,
 // 표면이 되살아나는 것 자체를 잡는 방향으로 뒤집는다.
-test('workspaces controller no longer exposes any claude-backend-profile surface', () => {
+test('accounts controller no longer exposes any claude-backend-profile surface', () => {
   assert.doesNotMatch(workspaceControllerSource, /claude-backend-profiles/);
   assert.doesNotMatch(workspaceControllerSource, /WorkspaceClaudeBackendProfile/);
   assert.doesNotMatch(workspaceControllerSource, /allowed_profile_ids/);

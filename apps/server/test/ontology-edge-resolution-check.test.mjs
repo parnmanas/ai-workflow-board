@@ -50,7 +50,7 @@ const { OntologyEdge, ONTOLOGY_EDGE_RESOLUTION_VALUES } = await import(
 
 function makeEdgeRow(overrides = {}) {
   return {
-    workspace_id: 'ws-check-test',
+    account_id: 'ws-check-test',
     graph_id: 'graph-check-test',
     src_id: 'node-a',
     dst_id: 'node-b',
@@ -105,7 +105,7 @@ describe('OntologyEdge.resolution — DB-level closed-vocabulary enforcement (ti
       () =>
         AppOntologyDataSource.query(
           `INSERT INTO ontology_edges ` +
-            `(id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, resolution) ` +
+            `(id, account_id, graph_id, src_id, dst_id, type, layer, confidence, resolution) ` +
             `VALUES ('11111111-1111-1111-1111-111111111111', 'ws', 'g', 'a', 'b', 'CALLS', 'structural', 1.0, 'bogus_value')`,
         ),
       /CHECK constraint failed/,

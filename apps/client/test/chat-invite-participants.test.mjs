@@ -19,7 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
-import { api, getActiveWorkspaceId, setActiveWorkspaceId } from '../src/api.ts';
+import { api, getActiveAccountId, setActiveAccountId } from '../src/api.ts';
 import { RoomHeaderActions } from '../src/components/chat/RoomDetailPanel.tsx';
 import ParticipantPicker from '../src/components/chat/ParticipantPicker.tsx';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
@@ -187,9 +187,9 @@ function mountPicker(props) {
       credential_id: null, label: '초대봇', role_prompt: '',
     },
   });
-  // DeclareRuntimeSection 은 workspaceId 가 있어야 Host 목록을 로드한다.
-  const prevWs = getActiveWorkspaceId();
-  setActiveWorkspaceId('ws-1');
+  // DeclareRuntimeSection 은 accountId 가 있어야 Host 목록을 로드한다.
+  const prevWs = getActiveAccountId();
+  setActiveAccountId('ws-1');
   const mounted = mount(
     React.createElement(AuthProvider, null,
       React.createElement(ParticipantPicker, {
@@ -200,7 +200,7 @@ function mountPicker(props) {
       })),
   );
   // api 복원은 호출자가 finally 에서 한다 — 전역이라 남겨 두면 다음 테스트를 오염시킨다.
-  mounted.restore = () => { Object.assign(api, originals); setActiveWorkspaceId(prevWs); };
+  mounted.restore = () => { Object.assign(api, originals); setActiveAccountId(prevWs); };
   return mounted;
 }
 

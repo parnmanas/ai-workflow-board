@@ -12,7 +12,7 @@ const SECRET = 'sk-ant-oat-test-secret-value';
 const PASSWORD = 'correct horse battery staple';
 const credential = {
   id: 'credential-1',
-  workspace_id: 'workspace-1',
+  account_id: 'workspace-1',
   board_id: null,
   name: 'OAuth',
   description: '',
@@ -155,7 +155,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
     const auth = app.get(AuthService);
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
-    const workspaceRepo = dataSource.getRepository('Workspace');
+    const accountRepo = dataSource.getRepository('Account');
     const credentialRepo = dataSource.getRepository('Credential');
     const routedSecret = `routed-${SECRET}-${randomUUID()}`;
     const adminPassword = `admin-${PASSWORD}-${randomUUID()}`;
@@ -175,9 +175,9 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
       permissions: JSON.stringify(['admin.credentials']),
       password_hash: await auth.hashPassword('user-password'),
     }));
-    const workspace = await workspaceRepo.save(workspaceRepo.create({ name: 'Reveal Workspace' }));
+    const workspace = await accountRepo.save(accountRepo.create({ name: 'Reveal Account' }));
     const routedCredential = await credentialRepo.save(credentialRepo.create({
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       board_id: null,
       name: 'Routed OAuth',
       description: '',
@@ -186,7 +186,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
     }));
     const nonOAuthSecret = `routed-api-key-${randomUUID()}`;
     const nonOAuthCredential = await credentialRepo.save(credentialRepo.create({
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       board_id: null,
       name: 'Routed API Key',
       description: '',
@@ -221,7 +221,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
     assert.equal(nonOAuthReveal.status, 400);
     assert.doesNotMatch(nonOAuthRevealBody, new RegExp(nonOAuthSecret));
 
-    const list = await fetch(`${baseUrl}?workspace_id=${workspace.id}`, {
+    const list = await fetch(`${baseUrl}?account_id=${workspace.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     const listBody = await list.json();

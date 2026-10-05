@@ -36,7 +36,7 @@ export class SecurityRun {
   profile_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // pending → running → passed | failed | error
   @Column({ type: 'varchar', default: 'pending' })

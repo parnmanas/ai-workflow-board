@@ -13,7 +13,7 @@ export class Comment {
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: '' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   ticket_id: string;

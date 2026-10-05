@@ -79,7 +79,7 @@ describe('scheduleFileChange — 디바운스가 연속 저장을 하나의 Phas
     const donePromise = waitForProgress((p) => p.graph_id === GRAPH_ID && p.graph_status === 'ready');
 
     svc.scheduleFileChange({
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       graphId: GRAPH_ID,
@@ -89,7 +89,7 @@ describe('scheduleFileChange — 디바운스가 연속 저장을 하나의 Phas
       commit: 'c1',
     });
     svc.scheduleFileChange({
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       graphId: GRAPH_ID,
@@ -99,7 +99,7 @@ describe('scheduleFileChange — 디바운스가 연속 저장을 하나의 Phas
       commit: 'c1',
     });
     svc.scheduleFileChange({
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       graphId: GRAPH_ID,
@@ -126,7 +126,7 @@ describe('scheduleFileChange — 디바운스가 연속 저장을 하나의 Phas
   it('runFileChange를 직접 호출하면(디바운스 우회) 즉시 shortCircuit 결과와 함께 progress를 emit한다', async () => {
     const donePromise = waitForProgress((p) => p.graph_id === GRAPH_ID && p.short_circuited === true);
     const result = await svc.runFileChange({
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       graphId: GRAPH_ID,

@@ -87,7 +87,7 @@ export function canonicalizeRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
 
 export interface PersistInput {
   graphId: string;
-  workspaceId: string;
+  accountId: string;
   resourceId: string;
   folderPath: string;
   /** 이 추출 실행이 대상으로 삼은 커밋 sha — 없으면 ''(예: 로컬 작업 트리
@@ -238,7 +238,7 @@ export async function persistFactBundles(dataSource: DataSource | EntityManager,
   let declaresEdges = 0;
 
   const baseNodeFields = (commit: string) => ({
-    workspace_id: input.workspaceId,
+    account_id: input.accountId,
     resource_id: input.resourceId,
     folder_path: input.folderPath,
     graph_id: input.graphId,
@@ -255,7 +255,7 @@ export async function persistFactBundles(dataSource: DataSource | EntityManager,
     pagerank: 0,
   });
   const baseEdgeFields = (commit: string) => ({
-    workspace_id: input.workspaceId,
+    account_id: input.accountId,
     graph_id: input.graphId,
     layer: 'structural' as const,
     confidence: 1.0,

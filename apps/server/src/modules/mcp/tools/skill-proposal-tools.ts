@@ -7,7 +7,7 @@ import { canonicalizeSkillContent } from '../../skills/skill-validation';
 import { err, ok } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
-import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
+import { normalizeAgentAccountId } from '../../../common/agent-account-scope';
 
 export function registerSkillProposalTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
@@ -36,11 +36,11 @@ export function registerSkillProposalTools(server: McpServer, ctx: ToolContext):
       // P4: runtime child identity 는 Agent 행 또는 Host 행이다.
       const agent = await resolveCallerIdentityRow(ctx.dataSource, caller.agentId);
       if (!agent) return err('The runtime Agent identity was not found.');
-      const workspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
-      if (!workspaceId) return err('The runtime API key is not scoped to a workspace.');
+      const accountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
+      if (!accountId) return err('The runtime API key is not scoped to a workspace.');
       if (skill_id) {
         const target = await ctx.dataSource.getRepository(Skill).findOne({
-          where: { id: skill_id, workspace_id: workspaceId },
+          where: { id: skill_id, account_id: accountId },
         });
         if (!target) return err('Target skill does not exist in the runtime Agent workspace.');
       }
@@ -48,7 +48,7 @@ export function registerSkillProposalTools(server: McpServer, ctx: ToolContext):
         const canonical = canonicalizeSkillContent(body, support_files);
         const repo = ctx.dataSource.getRepository(SkillProposal);
         const proposal = await repo.save(repo.create({
-          workspace_id: workspaceId,
+          account_id: accountId,
           skill_id: skill_id || '',
           title: title.trim().slice(0, 200),
           body: canonical.body,

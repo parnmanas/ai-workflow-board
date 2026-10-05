@@ -80,7 +80,7 @@ const BASELINE_CHECKLIST: SecurityChecklistItem[] = [
     severity_hint: 'high',
     guidance:
       'Every controller route and MCP tool that mutates or reads scoped data must go through the ' +
-      'guard chain (AuthGuard/PermissionGuard/AgentAuthGuard) or an explicit workspace_id scope ' +
+      'guard chain (AuthGuard/PermissionGuard/AgentAuthGuard) or an explicit account_id scope ' +
       'check. Flag endpoints that trust a client-supplied id without verifying workspace ownership ' +
       '(e.g. a *_id from the body used in a query with no workspace match).',
     source: 'https://owasp.org/Top10/A01_2021-Broken_Access_Control/',
@@ -94,7 +94,7 @@ const BASELINE_CHECKLIST: SecurityChecklistItem[] = [
     guidance:
       'Password hashing goes through bcryptjs with SALT_ROUNDS (services/auth.service.ts) — never ' +
       'store/compare plaintext. Agent calls authenticate via AgentAuthGuard (X-Agent-Key) and MCP ' +
-      'via MCP_API_KEYS; verify keys are validated and workspace-scoped. Flag any new route that ' +
+      'via MCP_API_KEYS; verify keys are validated and account-scoped. Flag any new route that ' +
       'skips the guard, and confirm dev bypasses (AGENT_DEV_MODE / MCP_DEV_MODE) cannot be reached ' +
       'in production.',
     source: 'https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/',
@@ -256,7 +256,7 @@ const BASELINE_CHECKLIST: SecurityChecklistItem[] = [
     severity_hint: 'medium',
     guidance:
       'API responses must not leak password hashes, full credential rows, or other ' +
-      "users'/workspaces' data. Flag entity rows returned without field projection (a *toJson* that " +
+      "users'/accounts' data. Flag entity rows returned without field projection (a *toJson* that " +
       'spreads the whole row) and cross-workspace data reachable without a scope check.',
     source: 'https://cwe.mitre.org/data/definitions/200.html',
     added_at: SEED_ADDED_AT,
@@ -292,7 +292,7 @@ export const SECURITY_SEED_PROFILES: SeedProfile[] = [
 ];
 
 export interface BuildProfileOptions {
-  workspace_id: string;
+  account_id: string;
   target_agent_id: string;
   /** <uuid> → inspect that Project; omit → AWB's own codebase. */
   target_resource_id?: string | null;
@@ -316,7 +316,7 @@ export function buildProfileCreatePayloads(opts: BuildProfileOptions): Array<Cre
   const wanted = opts.only && opts.only.length ? new Set(opts.only) : null;
   return SECURITY_SEED_PROFILES.filter((p) => !wanted || wanted.has(p.key)).map((p) => ({
     _key: p.key,
-    workspace_id: opts.workspace_id,
+    account_id: opts.account_id,
     name: p.name,
     description: p.description,
     checklist: p.checklist,

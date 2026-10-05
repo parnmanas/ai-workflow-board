@@ -36,11 +36,11 @@ export interface MissionProject {
  */
 export async function loadMissionProject(
   projects: ProjectsService,
-  mission: Pick<OrchestrationMission, 'workspace_id' | 'repo_ref'>,
+  mission: Pick<OrchestrationMission, 'account_id' | 'repo_ref'>,
 ): Promise<MissionProject | null> {
   const ref = normalizeRepoRef(mission.repo_ref);
   if (!ref?.project_id) return null;
-  const project = await projects.getInWorkspace(ref.project_id, mission.workspace_id);
+  const project = await projects.getInWorkspace(ref.project_id, mission.account_id);
   if (!project) return null;
   return {
     id: project.id,

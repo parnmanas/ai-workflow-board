@@ -79,7 +79,7 @@ before(async () => {
   ({ user: member, token: memberToken } = await createUser('profile-member'));
   ({ token: outsiderToken } = await createUser('profile-outsider'));
 
-  workspace = await ds.getRepository('Workspace').save(ds.getRepository('Workspace').create({
+  workspace = await ds.getRepository('Account').save(ds.getRepository('Account').create({
     name: 'Profile integration workspace',
     cli_runtime_profiles: JSON.stringify([{
       id: 'legacy-profile',
@@ -89,17 +89,17 @@ before(async () => {
       model: 'legacy-model',
     }]),
   }));
-  await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: workspace.id });
-  await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'workspace', id: workspace.id });
+  await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'account', id: workspace.id });
+  await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'account', id: workspace.id });
 
   // RuntimeSpec 검증(POST /runtime-specs/validate)은 Host 존재부터 본다.
   host = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({
-    name: 'profiles-host', hostname: 'fixture', workspace_id: workspace.id, is_active: 1,
+    name: 'profiles-host', hostname: 'fixture', account_id: workspace.id, is_active: 1,
   }));
 
   await ds.getRepository('Credential').save(ds.getRepository('Credential').create({
     id: secretCredentialId,
-    workspace_id: null,
+    account_id: null,
     name: 'secret credential',
     provider: 'anthropic',
     encrypted_data: 'TOP-SECRET-CIPHERTEXT',
@@ -160,7 +160,7 @@ describe('Claude backend profile integration', () => {
       runtime_config: { strategy: 'single', permission_mode: 'strict' },
     });
     const denied = await apiRequest(baseUrl, '/runtime-specs/validate', {
-      token: adminToken, method: 'POST', body: { workspace_id: workspace.id, spec: spec('legacy-profile') },
+      token: adminToken, method: 'POST', body: { account_id: workspace.id, spec: spec('legacy-profile') },
     });
     assert.equal(denied.status, 400, JSON.stringify(denied.data));
     assert.match(denied.data.error, /does not exist$/, '에러 문구에 워크스페이스 스코프가 남으면 안 됩니다.');
@@ -169,7 +169,7 @@ describe('Claude backend profile integration', () => {
     // 검증은 로그인만 요구하므로 워크스페이스 멤버도 같은 판정을 받는다.
     for (const token of [adminToken, memberToken]) {
       const accepted = await apiRequest(baseUrl, '/runtime-specs/validate', {
-        token, method: 'POST', body: { workspace_id: workspace.id, spec: spec(profileB.id) },
+        token, method: 'POST', body: { account_id: workspace.id, spec: spec(profileB.id) },
       });
       assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
       assert.equal(accepted.data.spec.cli_runtime_profile, profileB.id);
@@ -201,7 +201,7 @@ describe('Claude backend profile integration', () => {
     const replacementCredentialId = randomUUID();
     await ds.getRepository('Credential').save(ds.getRepository('Credential').create({
       id: replacementCredentialId,
-      workspace_id: null,
+      account_id: null,
       name: 'replacement credential',
       provider: 'anthropic',
       encrypted_data: 'REPLACEMENT-CIPHERTEXT',

@@ -68,38 +68,38 @@ async function writeLegacyDb(file) {
   const db = new SQL.Database();
   const now = "datetime('now')";
   db.run(`
-    CREATE TABLE workspaces (id varchar PRIMARY KEY NOT NULL, name varchar NOT NULL, description varchar NOT NULL DEFAULT '',
+    CREATE TABLE accounts (id varchar PRIMARY KEY NOT NULL, name varchar NOT NULL, description varchar NOT NULL DEFAULT '',
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
-    CREATE TABLE boards (id varchar PRIMARY KEY NOT NULL, workspace_id varchar, name varchar NOT NULL,
+    CREATE TABLE boards (id varchar PRIMARY KEY NOT NULL, account_id varchar, name varchar NOT NULL,
       environment_config text, language varchar, auto_archive_days integer, max_concurrent_tickets_per_agent integer NOT NULL DEFAULT 1,
       use_pr boolean NOT NULL DEFAULT 0, archived_at datetime, created_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE columns (id varchar PRIMARY KEY NOT NULL, board_id varchar NOT NULL, name varchar NOT NULL, position integer NOT NULL,
       is_terminal boolean NOT NULL DEFAULT 0, kind varchar NOT NULL DEFAULT '');
-    CREATE TABLE workspace_roles (id varchar PRIMARY KEY NOT NULL, workspace_id varchar NOT NULL, slug varchar NOT NULL, name varchar NOT NULL);
+    CREATE TABLE workspace_roles (id varchar PRIMARY KEY NOT NULL, account_id varchar NOT NULL, slug varchar NOT NULL, name varchar NOT NULL);
     CREATE TABLE ticket_role_assignments (id varchar PRIMARY KEY NOT NULL, ticket_id varchar NOT NULL, role_id varchar NOT NULL,
       agent_id varchar, user_id varchar, holder_key varchar NOT NULL DEFAULT '', runtime_spec text, created_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE board_lessons (id varchar PRIMARY KEY NOT NULL, board_id varchar NOT NULL, body text NOT NULL DEFAULT '');
-    CREATE TABLE resources (id varchar PRIMARY KEY NOT NULL, workspace_id varchar, board_id varchar, credential_id varchar,
+    CREATE TABLE resources (id varchar PRIMARY KEY NOT NULL, account_id varchar, board_id varchar, credential_id varchar,
       name varchar NOT NULL, description varchar NOT NULL DEFAULT '', type varchar NOT NULL DEFAULT 'link', url varchar NOT NULL DEFAULT '',
       default_branch varchar NOT NULL DEFAULT '', clone_policy text, content text NOT NULL DEFAULT '', file_data text NOT NULL DEFAULT '',
       file_name varchar NOT NULL DEFAULT '', file_mimetype varchar NOT NULL DEFAULT '', tags varchar NOT NULL DEFAULT '[]',
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
-    CREATE TABLE tickets (id varchar PRIMARY KEY NOT NULL, workspace_id varchar DEFAULT '', column_id varchar, parent_id varchar,
+    CREATE TABLE tickets (id varchar PRIMARY KEY NOT NULL, account_id varchar DEFAULT '', column_id varchar, parent_id varchar,
       depth integer NOT NULL DEFAULT 0, title varchar NOT NULL, description varchar NOT NULL DEFAULT '', priority varchar NOT NULL DEFAULT 'medium',
       labels varchar NOT NULL DEFAULT '[]', position integer NOT NULL DEFAULT 0, status varchar NOT NULL DEFAULT 'todo',
       base_repo_resource_id varchar NOT NULL DEFAULT '', base_branch varchar NOT NULL DEFAULT '', archived_at datetime,
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}), version integer NOT NULL DEFAULT 1);
-    CREATE TABLE workflow_functions (id varchar PRIMARY KEY NOT NULL, workspace_id varchar, board_id varchar, key varchar NOT NULL,
+    CREATE TABLE workflow_functions (id varchar PRIMARY KEY NOT NULL, account_id varchar, board_id varchar, key varchar NOT NULL,
       name varchar NOT NULL, created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
-    CREATE UNIQUE INDEX uq_workflow_functions_workspace_key ON workflow_functions (workspace_id, key)
-      WHERE workspace_id IS NOT NULL AND board_id IS NULL;
+    CREATE UNIQUE INDEX uq_workflow_functions_workspace_key ON workflow_functions (account_id, key)
+      WHERE account_id IS NOT NULL AND board_id IS NULL;
     CREATE UNIQUE INDEX uq_workflow_functions_board_key ON workflow_functions (board_id, key) WHERE board_id IS NOT NULL;
   `);
   const run = (sql, params) => db.run(sql, params);
-  run('INSERT INTO workspaces (id, name) VALUES (?, ?)', [WS, 'legacy']);
-  run('INSERT INTO boards (id, workspace_id, name, environment_config, language, auto_archive_days, max_concurrent_tickets_per_agent, use_pr) VALUES (?,?,?,?,?,?,?,?)',
+  run('INSERT INTO accounts (id, name) VALUES (?, ?)', [WS, 'legacy']);
+  run('INSERT INTO boards (id, account_id, name, environment_config, language, auto_archive_days, max_concurrent_tickets_per_agent, use_pr) VALUES (?,?,?,?,?,?,?,?)',
     [BOARD, WS, 'GameClient', JSON.stringify({ repositories: [{ resource_id: ENV_REPO }] }), 'Korean', 14, 2, 1]);
-  run('INSERT INTO boards (id, workspace_id, name, archived_at) VALUES (?,?,?,?)', [ARCHIVED_BOARD, WS, 'Old Board', '2026-01-01 00:00:00']);
+  run('INSERT INTO boards (id, account_id, name, archived_at) VALUES (?,?,?,?)', [ARCHIVED_BOARD, WS, 'Old Board', '2026-01-01 00:00:00']);
   const cols = [
     [COL.backlog, BOARD, 'Backlog', 0, 0, 'intake'],
     [COL.todo, BOARD, 'To Do', 1, 0, 'active'],
@@ -111,14 +111,14 @@ async function writeLegacyDb(file) {
     [COL.archivedTodo, ARCHIVED_BOARD, 'To Do', 0, 0, 'active'],
   ];
   for (const c of cols) run('INSERT INTO columns (id, board_id, name, position, is_terminal, kind) VALUES (?,?,?,?,?,?)', c);
-  run('INSERT INTO workspace_roles (id, workspace_id, slug, name) VALUES (?,?,?,?)', [ROLE_ASSIGNEE, WS, 'assignee', 'Assignee']);
-  run('INSERT INTO workspace_roles (id, workspace_id, slug, name) VALUES (?,?,?,?)', [ROLE_REVIEWER, WS, 'reviewer', 'Reviewer']);
+  run('INSERT INTO workspace_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_ASSIGNEE, WS, 'assignee', 'Assignee']);
+  run('INSERT INTO workspace_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_REVIEWER, WS, 'reviewer', 'Reviewer']);
   run('INSERT INTO board_lessons (id, board_id, body) VALUES (?,?,?)', ['l1', BOARD, 'lesson']);
-  run("INSERT INTO resources (id, workspace_id, name, type, url, default_branch, clone_policy, credential_id) VALUES (?,?,?,?,?,?,?,?)",
+  run("INSERT INTO resources (id, account_id, name, type, url, default_branch, clone_policy, credential_id) VALUES (?,?,?,?,?,?,?,?)",
     [REPO, WS, 'GameClient Repository', 'repository', 'https://github.com/example/gameclient', 'master', '{"clone_depth":1}', null]);
-  run("INSERT INTO resources (id, workspace_id, name, type, url, default_branch) VALUES (?,?,?,?,?,?)",
+  run("INSERT INTO resources (id, account_id, name, type, url, default_branch) VALUES (?,?,?,?,?,?)",
     [ENV_REPO, WS, 'Env Repo', 'repository', 'https://github.com/example/env', 'main']);
-  run("INSERT INTO resources (id, workspace_id, name, type, url) VALUES (?,?,?,?,?)",
+  run("INSERT INTO resources (id, account_id, name, type, url) VALUES (?,?,?,?,?)",
     ['77777777-7777-4777-8777-777777777777', WS, 'Design doc', 'link', 'https://example.com/doc']);
   const tickets = [
     [T(1), COL.backlog, 'backlog ticket', '["bug"]', ''],
@@ -130,9 +130,9 @@ async function writeLegacyDb(file) {
     [T(7), COL.archivedTodo, 'archived board ticket', '[]', ''],
   ];
   for (const [id, col, title, labels, repo] of tickets) {
-    run('INSERT INTO tickets (id, workspace_id, column_id, title, labels, base_repo_resource_id) VALUES (?,?,?,?,?,?)', [id, WS, col, title, labels, repo]);
+    run('INSERT INTO tickets (id, account_id, column_id, title, labels, base_repo_resource_id) VALUES (?,?,?,?,?,?)', [id, WS, col, title, labels, repo]);
   }
-  run('INSERT INTO tickets (id, workspace_id, column_id, parent_id, depth, title, status) VALUES (?,?,?,?,?,?,?)',
+  run('INSERT INTO tickets (id, account_id, column_id, parent_id, depth, title, status) VALUES (?,?,?,?,?,?,?)',
     [T(8), WS, null, T(3), 1, 'child item', 'done']);
   run('INSERT INTO ticket_role_assignments (id, ticket_id, role_id, agent_id, holder_key, runtime_spec) VALUES (?,?,?,?,?,?)',
     ['ra1', T(3), ROLE_ASSIGNEE, null, 'runtime:x', JSON.stringify(SPEC)]);
@@ -142,12 +142,12 @@ async function writeLegacyDb(file) {
   // A legacy agent-uuid holder without a spec stays unassigned.
   run('INSERT INTO ticket_role_assignments (id, ticket_id, role_id, agent_id, holder_key) VALUES (?,?,?,?,?)',
     ['ra3', T(5), ROLE_ASSIGNEE, '88888888-8888-4888-8888-888888888888', 'agent:88888888']);
-  // Workspace row + a board row with the same key (collides → dropped), a board
+  // Account row + a board row with the same key (collides → dropped), a board
   // row with a free key (kept as a workspace row) and a second board's copy of
   // that key (collides with the kept one → dropped).
   for (const [id, board, key] of [[FN.ws, null, 'custom.deploy'], [FN.boardDup, BOARD, 'custom.deploy'],
     [FN.boardFree, BOARD, 'custom.lint'], [FN.otherBoardDup, ARCHIVED_BOARD, 'custom.lint']]) {
-    run('INSERT INTO workflow_functions (id, workspace_id, board_id, key, name) VALUES (?,?,?,?,?)', [id, WS, board, key, key]);
+    run('INSERT INTO workflow_functions (id, account_id, board_id, key, name) VALUES (?,?,?,?,?)', [id, WS, board, key, key]);
   }
   fs.writeFileSync(file, Buffer.from(db.export()));
   db.close();
@@ -203,7 +203,7 @@ test('repository resources become projects with the same id and leave resources'
   assert.equal(repo.repo_url, 'https://github.com/example/gameclient');
   assert.equal(repo.default_branch, 'master');
   assert.equal(repo.clone_policy, '{"clone_depth":1}');
-  assert.equal(repo.workspace_id, WS);
+  assert.equal(repo.account_id, WS);
   // The board used PRs, so its environment repo's project does too.
   assert.ok(Number(projects.find((p) => p.id === ENV_REPO).use_pr) === 1 || projects.find((p) => p.id === ENV_REPO).use_pr === true);
   const remaining = await ds.query('SELECT id, type FROM resources');
@@ -233,14 +233,14 @@ test('tickets of an archived board are archived', async () => {
 });
 
 test('board settings move to the workspace', async () => {
-  const [ws] = await ds.query('SELECT * FROM workspaces WHERE id = ?', [WS]);
+  const [ws] = await ds.query('SELECT * FROM accounts WHERE id = ?', [WS]);
   assert.equal(ws.language, 'Korean');
   assert.equal(Number(ws.auto_archive_days), 14);
   assert.equal(Number(ws.max_concurrent_tickets_per_agent), 2);
 });
 
 test('board-scoped workflow functions fold into the workspace without key collisions', async () => {
-  const rows = await ds.query("SELECT id, key FROM workflow_functions WHERE workspace_id = ? ORDER BY key", [WS]);
+  const rows = await ds.query("SELECT id, key FROM workflow_functions WHERE account_id = ? ORDER BY key", [WS]);
   assert.deepEqual(rows.map((r) => [r.key, r.id]), [['custom.deploy', FN.ws], ['custom.lint', FN.boardFree]]);
   const indexes = (await ds.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'workflow_functions'")).map((r) => r.name);
   assert.ok(indexes.includes('uq_workflow_functions_workspace_key'), indexes.join(', '));

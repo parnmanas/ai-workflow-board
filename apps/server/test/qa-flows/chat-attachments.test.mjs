@@ -28,7 +28,7 @@ const __testDbName = `qa-chat-attachments-${Date.now()}-${process.pid}.db`;
 process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), __testDbName);
 
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createUser } from '../helpers/fixtures.mjs';
+import { createAccount, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_CHAT_ATTACH_PORT || '0';
 
@@ -47,7 +47,7 @@ async function createDmRoom(app, getDataSourceToken, { wsId, userA, userB }) {
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: wsId,
+    account_id: wsId,
     type: 'dm',
     name: '',
   }));
@@ -68,7 +68,7 @@ function authHeaders(token, wsId) {
   return {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${token}`,
-    'X-Workspace-Id': wsId,
+    'X-Account-Id': wsId,
   };
 }
 
@@ -77,7 +77,7 @@ test('chat-room attachment lifecycle: upload → send → history → download a
   t.after(() => { void app.close().catch(() => {}); });
   const { AuthService, getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-attach');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-attach');
   const sender = await createUser(app, getDataSourceToken, { name: 'sender' });
   const peer = await createUser(app, getDataSourceToken, { name: 'peer' });
   const outsider = await createUser(app, getDataSourceToken, { name: 'outsider' });

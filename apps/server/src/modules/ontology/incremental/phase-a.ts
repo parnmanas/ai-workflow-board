@@ -31,7 +31,7 @@ const EDGE_CHUNK_SIZE = 500;
 
 export interface PhaseAInput {
   graphId: string;
-  workspaceId: string;
+  accountId: string;
   resourceId: string;
   folderPath: string;
   /** 이 Phase A 실행이 대상으로 삼은 커밋 sha(또는 로컬 작업 트리 직접
@@ -64,7 +64,7 @@ export interface PhaseAResult {
 
 function baseFileFields(input: PhaseAInput) {
   return {
-    workspace_id: input.workspaceId,
+    account_id: input.accountId,
     resource_id: input.resourceId,
     folder_path: input.folderPath,
     graph_id: input.graphId,
@@ -84,7 +84,7 @@ function baseFileFields(input: PhaseAInput) {
 // 그래프가 불일치했음).
 function baseEdgeFields(input: PhaseAInput) {
   return {
-    workspace_id: input.workspaceId,
+    account_id: input.accountId,
     graph_id: input.graphId,
     layer: 'structural' as const,
     confidence: 1.0,

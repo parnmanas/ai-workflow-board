@@ -2,12 +2,12 @@
 
 Run a saved **Action** automatically the moment a ticket enters the `done`
 status, with the finished ticket injected into the prompt. This is the
-event-driven complement to the other ways an Action starts (a Workspace Schedule
+event-driven complement to the other ways an Action starts (an Automation Schedule
 pointing at it with `action_id`, or a manual `run_action`): some "continuous"
 work is tied to *a ticket finishing*, not to a clock.
 
-> 크론은 더 이상 Action 에 없다 — `actions.schedule_cron` 은 Workspace Schedule 로
-> 옮겼다(`docs/workspace-schedules.md`). Action 은 "무엇을 · 누가 · 어디서" 만
+> 크론은 더 이상 Action 에 없다 — `actions.schedule_cron` 은 Automation Schedule 로
+> 옮겼다(`docs/automation-schedules.md`). Action 은 "무엇을 · 누가 · 어디서" 만
 > 정의하고 "언제" 는 Schedule 이 정한다. 반대로 이 on-ticket-done 트리거는 시각이
 > 아니라 **무엇에 반응하는가**라서 Action 에 그대로 남아 있다.
 
@@ -41,7 +41,7 @@ still works).
 
 A JSON array of Action ids on the ticket itself. Fires those Actions, in array
 order, when *this specific ticket* reaches `done`, regardless of the Action's own
-`trigger` field (the Action must be in the ticket's workspace and enabled). Set
+`trigger` field (the Action must be in the ticket's account and enabled). Set
 it via `update_ticket` (or `PATCH /api/tickets/:id`):
 
 ```jsonc
@@ -53,18 +53,18 @@ Good for one-off "when this particular ticket ships, do X".
 ### (b) Tag policy — `Action.trigger='on_ticket_done'`
 
 Opt the Action into the hook and scope which finished tickets trigger it. The
-policy is workspace-wide; the only narrowing is by tag:
+policy is account-wide; the only narrowing is by tag:
 
 | field | meaning |
 | --- | --- |
-| `trigger` | `'on_ticket_done'` to enable the hook (`''` = manual / Workspace Schedule only) |
-| `trigger_label` | empty = any finished ticket in the workspace; else the ticket's `tags` must include this exact tag (the field keeps its historical name) |
+| `trigger` | `'on_ticket_done'` to enable the hook (`''` = manual / Automation Schedule only) |
+| `trigger_label` | empty = any finished ticket in the account; else the ticket's `tags` must include this exact tag (the field keeps its historical name) |
 
 Set it via `save_action`:
 
 ```jsonc
 save_action({
-  workspace_id, name: "Test gate",
+  account_id, name: "Test gate",
   target_runtimes: [<RuntimeSpec>],
   trigger: "on_ticket_done",
   trigger_label: "feature",      // optional tag scope
@@ -75,7 +75,7 @@ save_action({
 Policy Actions fire after the ticket's explicit `on_done_action_ids` (an Action
 named by both fires once, in the explicit position).
 
-Good for workspace-wide policy ("every `feature` ticket that ships gets a
+Good for account-wide policy ("every `feature` ticket that ships gets a
 test-gate check").
 
 ## Prompt context — `{{ticket.*}}`
@@ -96,8 +96,10 @@ Pre-board-removal spellings still render so saved prompts keep working:
 `{{ticket.project_id}}`. Board/column/reporter tokens (`{{ticket.board_id}}`,
 `{{ticket.column_id}}`, `{{ticket.reporter}}`, `{{board.*}}`) render empty.
 
-The standard `{{action.*}}`, `{{run.*}}`, `{{workspace.*}}`, `{{agent.*}}`,
+The standard `{{action.*}}`, `{{run.*}}`, `{{account.*}}`, `{{agent.*}}`,
 `{{date}}`/`{{time}}`/`{{datetime}}` tokens still apply.
+`{{account.name}}` and `{{account.id}}` are canonical; saved
+`{{workspace.name}}` / `{{workspace.id}}` templates remain aliases.
 
 ## Guarantees
 

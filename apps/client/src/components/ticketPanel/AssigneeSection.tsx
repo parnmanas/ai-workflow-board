@@ -14,7 +14,7 @@ interface AssigneeSectionProps {
   unsaved: boolean;
   /** The ticket's (draft) project — its folder on the chosen host prefills working_dir. */
   project: ProjectFolderSource | null;
-  workspaceId: string;
+  accountId: string;
   disabled?: boolean;
   /** Puts the validated spec (or null = clear) into the Save draft. */
   onChange(next: RuntimeSpecDraft | null): void;
@@ -38,7 +38,7 @@ const btn = (variant: 'primary' | 'plain' | 'danger', disabled = false): React.C
  * Save draft — nothing is written until the footer Save.
  */
 export default function AssigneeSection({
-  assignee, unsaved, project, workspaceId, disabled, onChange, runNote, labelStyle,
+  assignee, unsaved, project, accountId, disabled, onChange, runNote, labelStyle,
 }: AssigneeSectionProps) {
   const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
@@ -86,7 +86,7 @@ export default function AssigneeSection({
     setValidating(true);
     setError(null);
     try {
-      const result = await api.validateRuntimeSpec(workspaceId || null, editorDraft);
+      const result = await api.validateRuntimeSpec(accountId || null, editorDraft);
       if (!result.ok || !result.spec) throw new Error(result.error || 'Invalid runtime');
       onChange(toEditableSpec(result.spec));
       setEditing(false);
@@ -153,7 +153,7 @@ export default function AssigneeSection({
               value={editorDraft}
               onChange={handleEditorChange}
               hosts={hosts}
-              workspaceId={workspaceId}
+              accountId={accountId}
               disabled={validating || disabled}
             />
             {error && (

@@ -28,7 +28,7 @@ export class TicketReadState {
   // Denormalized so a global "all unread for me in workspace W" query
   // can be answered without joining tickets.
   @Column({ type: 'varchar', nullable: true, default: '' })
-  workspace_id: string;
+  account_id: string;
 
   // ISO-style timestamp the user last acknowledged. NULL means never read
   // — equivalent to "everything is unread", same as legacy rows that get

@@ -26,7 +26,7 @@ import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
-import { Workspace } from '../dist/entities/Workspace.js';
+import { Account } from '../dist/entities/Account.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
@@ -43,7 +43,7 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Ticket, Comment, Credential, Deployment, OutreachChannel, OutreachInboundItem, OutreachOutboundPost],
+    entities: [Account, Ticket, Comment, Credential, Deployment, OutreachChannel, OutreachInboundItem, OutreachOutboundPost],
     synchronize: true,
     logging: false,
   });
@@ -52,7 +52,7 @@ async function setupDb() {
 }
 
 async function seedWorkspace(dataSource) {
-  const wsRepo = dataSource.getRepository(Workspace);
+  const wsRepo = dataSource.getRepository(Account);
   await wsRepo.save(wsRepo.create({ id: 'ws-1', name: 'ws-1' }));
 }
 
@@ -60,7 +60,7 @@ async function seedDoneTicket(dataSource, over = {}) {
   const repo = dataSource.getRepository(Ticket);
   return repo.save(repo.create({
     status: 'done',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     title: 'Fixed the reported bug',
     description: 'desc',
     priority: 'medium',
@@ -84,7 +84,7 @@ function movedToDone(ticketId, from = 'review') {
 async function seedCredential(dataSource) {
   const repo = dataSource.getRepository(Credential);
   return repo.save(repo.create({
-    workspace_id: null, name: 'bot', description: '', provider: 'reddit',
+    account_id: null, name: 'bot', description: '', provider: 'reddit',
     encrypted_data: JSON.stringify({ token: 'refresh-tok', client_id: 'cid', client_secret: 'csecret' }),
   }));
 }
@@ -92,7 +92,7 @@ async function seedCredential(dataSource) {
 async function seedChannel(dataSource, credentialId, over = {}) {
   const repo = dataSource.getRepository(OutreachChannel);
   return repo.save(repo.create({
-    workspace_id: 'ws-1', kind: 'reddit', name: 'ch', targets: ['awb'], credential_id: credentialId,
+    account_id: 'ws-1', kind: 'reddit', name: 'ch', targets: ['awb'], credential_id: credentialId,
     enabled: true, publish_policy: 'approval', rate_limit_per_hour: 0, target_tags: [], target_project_id: null,
     poll_interval_ms: 3600000, poll_cron: null, next_poll_at: null, last_poll_at: null,
     since_cursor: '', classify_threshold: 70, deploy_post_mode: 'off', reply_thread_ref: null,
@@ -104,7 +104,7 @@ async function seedChannel(dataSource, credentialId, over = {}) {
 async function seedInboundItem(dataSource, channel, ticketId, over = {}) {
   const repo = dataSource.getRepository(OutreachInboundItem);
   return repo.save(repo.create({
-    workspace_id: 'ws-1', channel_id: channel.id, external_item_id: 't1_origcomment',
+    account_id: 'ws-1', channel_id: channel.id, external_item_id: 't1_origcomment',
     classification: 'bug', confidence: 90, status: 'ticketed', ticket_id: ticketId,
     claimed_at: null, permalink: 'https://reddit.com/r/awb/comments/x/y/origcomment', author: 'reporter',
     collected_at: new Date('2026-06-25T10:00:00Z'),
@@ -115,7 +115,7 @@ async function seedInboundItem(dataSource, channel, ticketId, over = {}) {
 async function seedGithubCredential(dataSource) {
   const repo = dataSource.getRepository(Credential);
   return repo.save(repo.create({
-    workspace_id: null, name: 'gh-bot', description: '', provider: 'github',
+    account_id: null, name: 'gh-bot', description: '', provider: 'github',
     encrypted_data: JSON.stringify({ token: 'ghp_test123' }),
   }));
 }
@@ -123,7 +123,7 @@ async function seedGithubCredential(dataSource) {
 async function seedDeployment(dataSource, over = {}) {
   const repo = dataSource.getRepository(Deployment);
   return repo.save(repo.create({
-    workspace_id: 'ws-1', environment: 'prod', base_url: '', repo_resource_id: '',
+    account_id: 'ws-1', environment: 'prod', base_url: '', repo_resource_id: '',
     deployed_commit_sha: 'a'.repeat(40), ancestor_shas: null, source: 'manual', reported_by: '',
     deployed_at: new Date('2026-06-25T13:00:00Z'),
     ...over,
@@ -437,7 +437,7 @@ test('github kind, NO fix-commit tag: a deployment at/after Done does NOT satisf
 
       // A LATER deployment event for the same environment must not retroactively
       // accept the same unproven timing match either.
-      await notifier._onDeploymentReported({ workspace_id: 'ws-1', environment: 'prod', deployed_commit_sha: 'b'.repeat(40) });
+      await notifier._onDeploymentReported({ account_id: 'ws-1', environment: 'prod', deployed_commit_sha: 'b'.repeat(40) });
       rows = await dataSource.getRepository(OutreachOutboundPost).find();
       assert.equal(rows.length, 0, 'still no ledger row after a reconcile pass — remains a human-confirm candidate forever without a fix-commit tag');
       assert.equal(fake.comment, 0);
@@ -503,7 +503,7 @@ test('github kind: a deployment reported AFTER the ticket reached Done fires the
       assert.equal(rows.length, 0, 'still no evidence yet');
 
       await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
-      await notifier._onDeploymentReported({ workspace_id: 'ws-1', environment: 'prod', deployed_commit_sha: fixSha });
+      await notifier._onDeploymentReported({ account_id: 'ws-1', environment: 'prod', deployed_commit_sha: fixSha });
 
       rows = await dataSource.getRepository(OutreachOutboundPost).find();
       assert.equal(rows.length, 1, 'the reconcile pass fired once the matching deployment landed');

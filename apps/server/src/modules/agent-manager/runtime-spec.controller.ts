@@ -34,8 +34,8 @@ export class RuntimeSpecController {
 
   @Post('validate')
   async validate(@Body() body: any, @Res() res: Response) {
-    const workspaceId = typeof body?.workspace_id === 'string' && body.workspace_id.trim()
-      ? body.workspace_id.trim()
+    const accountId = typeof body?.account_id === 'string' && body.account_id.trim()
+      ? body.account_id.trim()
       : null;
     let spec;
     try {
@@ -52,7 +52,7 @@ export class RuntimeSpecController {
 
     if (spec.credential_id) {
       const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id } });
-      if (!cred || (cred.workspace_id !== null && cred.workspace_id !== workspaceId)) {
+      if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
         return res.status(400).json({ ok: false, error: `credential ${spec.credential_id} is not available to this workspace` });
       }
     }

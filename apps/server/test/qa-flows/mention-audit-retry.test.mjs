@@ -24,7 +24,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'Audit Agent' });
   const ticket = await createTicket(app, getDataSourceToken, {
     columnId: columns.inProgress.id,
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'mention retry',
   });
   const trigger = `mention:comment-1:${agent.id}`;
@@ -69,14 +69,14 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(success.body.audit_comment_count, 1);
 
   const mutationTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'mutation only',
+    columnId: columns.inProgress.id, accountId: ws.id, title: 'mutation only',
   });
   const mutationTrigger = `mention:comment-2:${agent.id}`;
   const mutationRun = await post(port, `/api/agent/tickets/${mutationTicket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: mutationTrigger, agent_id: agent.id, role: 'assignee', attempt: 0,
   });
   await ds.getRepository('ActivityLog').save({
-    workspace_id: ws.id, entity_type: 'ticket', entity_id: mutationTicket.id,
+    account_id: ws.id, entity_type: 'ticket', entity_id: mutationTicket.id,
     ticket_id: mutationTicket.id, action: 'updated', field_changed: 'title',
     old_value: 'before', new_value: 'after', actor_id: agent.id,
     actor_name: agent.name, role: 'assignee', trigger_source: mutationRun.body.run_token,
@@ -90,7 +90,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(mutationSuccess.body.entity_change_count, 1);
 
   const exhaustedTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'retry exhausted',
+    columnId: columns.inProgress.id, accountId: ws.id, title: 'retry exhausted',
   });
   const exhausted = await post(port, `/api/agent/tickets/${exhaustedTicket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: `mention:comment-3:${agent.id}`, agent_id: agent.id,
@@ -105,7 +105,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(exhaustedResult.body.reason, 'silent_exit_retry_exhausted');
 
   const spawnFailedTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'retry spawn failed',
+    columnId: columns.inProgress.id, accountId: ws.id, title: 'retry spawn failed',
   });
   const spawnFailed = await post(port, `/api/agent/tickets/${spawnFailedTicket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: `mention:comment-4:${agent.id}`, agent_id: agent.id,

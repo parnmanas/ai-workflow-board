@@ -1,4 +1,4 @@
-// Workspace config-change audit (ticket 1fcba693).
+// Account config-change audit (ticket 1fcba693).
 //
 // The incident's 4 h supervisor_stale_ms was applied at runtime with NO audit
 // trail — workspace updates were never recorded, so the change's actor / time /
@@ -7,7 +7,7 @@
 // knob now writes a grep-able `config_changed` ActivityLog row carrying
 // actor + old→new + source, so a value like that can never again land silently.
 //
-// Real boot: drive the actual WorkspacesController.update() (REST path) and
+// Real boot: drive the actual AccountsController.update() (REST path) and
 // assert the persisted audit rows. A static guard pins the MCP write path.
 
 import { test } from 'node:test';
@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { bootApp } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,14 +32,14 @@ test('workspace config-change audit: cadence PATCH writes config_changed rows wi
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
 
-  const { WorkspacesController } = await loadDist('modules', 'workspaces', 'workspaces.controller.js');
-  const controller = app.get(WorkspacesController);
+  const { AccountsController } = await loadDist('modules', 'accounts', 'accounts.controller.js');
+  const controller = app.get(AccountsController);
   const activityRepo = ds.getRepository('ActivityLog');
 
-  const ws = await createWorkspace(app, modules.getDataSourceToken, { name: 'audit-target' });
+  const ws = await createAccount(app, modules.getDataSourceToken, { name: 'audit-target' });
   const user = { id: 'user-parn', name: 'Parn', email: 'parn@x', role: 'admin', permissions: [] };
   const auditRows = async () => activityRepo.find({
-    where: { entity_type: 'workspace', entity_id: ws.id, action: 'config_changed' },
+    where: { entity_type: 'account', entity_id: ws.id, action: 'config_changed' },
     order: { created_at: 'ASC' },
   });
 
@@ -57,7 +57,7 @@ test('workspace config-change audit: cadence PATCH writes config_changed rows wi
   assert.equal(r0.actor_id, 'user-parn', 'actor id captured from @CurrentUser');
   assert.equal(r0.actor_name, 'Parn', 'actor name captured');
   assert.equal(r0.trigger_source, 'rest', 'source = rest');
-  assert.equal(r0.workspace_id, ws.id, 'workspace-scoped');
+  assert.equal(r0.account_id, ws.id, 'account-scoped');
   assert.equal(r0.ticket_id, '', 'not tied to a ticket');
 
   // 2) A no-op PATCH (same value) writes NO new row.
@@ -85,18 +85,18 @@ test('workspace config-change audit: cadence PATCH writes config_changed rows wi
   const activityService = app.get(modules.ActivityService);
   const origTx = activityService.logActivityTx.bind(activityService);
   activityService.logActivityTx = async () => { throw new Error('audit boom'); };
-  const beforeVal = (await ds.getRepository('Workspace').findOne({ where: { id: ws.id } })).supervisor_stale_ms;
+  const beforeVal = (await ds.getRepository('Account').findOne({ where: { id: ws.id } })).supervisor_stale_ms;
   const rowsBefore = (await auditRows()).length;
   const failRes = fakeRes();
   await controller.update(ws.id, { supervisor_stale_ms: 999_000 }, failRes, user);
   assert.equal(failRes._status, 500, 'audit-write failure fails the PATCH (fail-closed, not swallowed)');
   activityService.logActivityTx = origTx; // restore before re-reading / other tests
-  const afterVal = (await ds.getRepository('Workspace').findOne({ where: { id: ws.id } })).supervisor_stale_ms;
+  const afterVal = (await ds.getRepository('Account').findOne({ where: { id: ws.id } })).supervisor_stale_ms;
   assert.equal(afterVal, beforeVal, 'settings change rolled back — no cadence value persisted without its audit row');
   assert.equal((await auditRows()).length, rowsBefore, 'no config_changed row persisted on a rolled-back audit');
 });
 
-test('MCP update_workspace: writes config_changed (source=mcp, caller actor) AND is atomic on audit failure', async (t) => {
+test('MCP update_account: writes config_changed (source=mcp, caller actor) AND is atomic on audit failure', async (t) => {
   // Real MCP round-trip (not a static regex guard): drive the live tools/call
   // surface so the caller-actor resolution, source=mcp stamping, AND the
   // audit-or-nothing transaction are all exercised end-to-end on the non-REST
@@ -106,12 +106,12 @@ test('MCP update_workspace: writes config_changed (source=mcp, caller actor) AND
   const ds = app.get(modules.getDataSourceToken());
   const activityRepo = ds.getRepository('ActivityLog');
 
-  const ws = await createWorkspace(app, modules.getDataSourceToken, 'audit-mcp');
+  const ws = await createAccount(app, modules.getDataSourceToken, 'audit-mcp');
   const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'cadence-editor' });
-  const key = await createApiKey(app, modules.getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'cadence' });
+  const key = await createApiKey(app, modules.getDataSourceToken, agent.id, { accountId: ws.id, label: 'cadence' });
 
   const auditRows = async () => activityRepo.find({
-    where: { entity_type: 'workspace', entity_id: ws.id, action: 'config_changed' },
+    where: { entity_type: 'account', entity_id: ws.id, action: 'config_changed' },
     order: { created_at: 'ASC' },
   });
 
@@ -120,8 +120,8 @@ test('MCP update_workspace: writes config_changed (source=mcp, caller actor) AND
   assert.ok(mcp.sessionId, 'mcp session established');
 
   // Happy path: the MCP write path audits with source=mcp + the caller agent.
-  const okRes = await mcp.callTool('update_workspace', { workspace_id: ws.id, supervisor_stale_ms: 14_400_000 });
-  assert.ok(!okRes?.isError, `update_workspace should succeed: ${JSON.stringify(okRes)}`);
+  const okRes = await mcp.callTool('update_account', { account_id: ws.id, supervisor_stale_ms: 14_400_000 });
+  assert.ok(!okRes?.isError, `update_account should succeed: ${JSON.stringify(okRes)}`);
   assert.equal(okRes.supervisor_stale_ms, 14_400_000, 'value applied');
   let rows = await auditRows();
   assert.equal(rows.length, 1, 'one config_changed row from the MCP path');
@@ -131,11 +131,11 @@ test('MCP update_workspace: writes config_changed (source=mcp, caller actor) AND
   assert.equal(rows[0].trigger_source, 'mcp', 'source = mcp');
   assert.equal(rows[0].actor_id, agent.id, 'actor id = the MCP caller agent');
   assert.ok(rows[0].actor_name, 'actor name captured from the session');
-  assert.equal(rows[0].workspace_id, ws.id, 'workspace-scoped');
+  assert.equal(rows[0].account_id, ws.id, 'account-scoped');
   assert.equal(rows[0].ticket_id, '', 'not tied to a ticket');
 
   // No-op: same value → no duplicate row.
-  await mcp.callTool('update_workspace', { workspace_id: ws.id, supervisor_stale_ms: 14_400_000 });
+  await mcp.callTool('update_account', { account_id: ws.id, supervisor_stale_ms: 14_400_000 });
   assert.equal((await auditRows()).length, 1, 'unchanged value → no duplicate MCP audit row');
 
   // Audit ATOMICITY on the MCP path: a config_changed write failure rolls the
@@ -143,10 +143,10 @@ test('MCP update_workspace: writes config_changed (source=mcp, caller actor) AND
   const activityService = app.get(modules.ActivityService);
   const origTx = activityService.logActivityTx.bind(activityService);
   activityService.logActivityTx = async () => { throw new Error('audit boom'); };
-  const failRes = await mcp.callTool('update_workspace', { workspace_id: ws.id, supervisor_stale_ms: 600_000 });
+  const failRes = await mcp.callTool('update_account', { account_id: ws.id, supervisor_stale_ms: 600_000 });
   assert.ok(failRes?.isError, 'audit-write failure makes the MCP tool return an error (fail-closed)');
   activityService.logActivityTx = origTx;
-  const persisted = (await ds.getRepository('Workspace').findOne({ where: { id: ws.id } })).supervisor_stale_ms;
+  const persisted = (await ds.getRepository('Account').findOne({ where: { id: ws.id } })).supervisor_stale_ms;
   assert.equal(persisted, 14_400_000, 'settings change rolled back — MCP path never persists a cadence value without its audit');
   assert.equal((await auditRows()).length, 1, 'no config_changed row persisted on a rolled-back MCP audit');
 

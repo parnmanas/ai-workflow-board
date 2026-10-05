@@ -8,7 +8,7 @@ MCP `qa-tools.ts`) shipped with an empty catalogue — `list_qa_scenarios` retur
 
 The catalogue itself is data, defined once in
 [`apps/server/src/modules/qa/qa-seed-scenarios.ts`](../apps/server/src/modules/qa/qa-seed-scenarios.ts)
-and seeded into a live workspace with
+and seeded into an owning account with
 [`apps/server/scripts/seed-qa-scenarios.mjs`](../apps/server/scripts/seed-qa-scenarios.mjs).
 
 > **Driver.** Most starter scenarios use the `awb-mcp` driver (the two `visual-*`
@@ -46,7 +46,7 @@ scenario). Listed so the gap is explicit, not silently dropped:
 - `mcp-schema-version`, `mcp-tools-surface` — MCP protocol surface.
 
 Most other `test/qa-flows/*` files (orchestration, QA/Security batches,
-workspace schedules, Postgres race tests …) are service-level regressions rather
+automation schedules, Postgres race tests …) are service-level regressions rather
 than user journeys.
 
 ## Seeding (reproducibility)
@@ -59,7 +59,7 @@ compiled catalogue exists, then run the seeder against a live AWB:
 
 node apps/server/scripts/seed-qa-scenarios.mjs \
   --base-url http://localhost:7701 \
-  --workspace <workspace_id> \
+  --workspace <account_id> \
   --runtime <runtime-spec.json>   # the QA agent's RuntimeSpec (target_runtime)
   # --api-key <agent_key>         # or run against MCP_DEV_MODE
   # --only ticket-lifecycle,chat-room-messaging
@@ -69,13 +69,16 @@ node apps/server/scripts/seed-qa-scenarios.mjs \
 The seeder is **idempotent**: each scenario carries a stable `key:<key>` tag, so
 re-running matches the existing row and `update_qa_scenario`s it in place rather
 than duplicating. `--dry-run` prints the CREATE/UPDATE plan without writing.
+The seeder's `--workspace` flag is its retained compatibility name for an account
+UUID; new MCP calls use `account_id`. The QA work list aggregates accessible
+accounts and de-duplicates Global scenarios by ID.
 
 ### Documented MCP-call bundle (manual alternative)
 
 Without the script, the same result is a loop of MCP calls — for each catalogue
-entry: `list_qa_scenarios(workspace_id)` to find a row whose `tags`
+entry: `list_qa_scenarios(account_id)` to find a row whose `tags`
 contain `key:<key>`, then `update_qa_scenario(scenario_id, …)` if found else
-`create_qa_scenario(workspace_id, name, description, steps, target_runtime, qa_driver, qa_driver_config, tags, max_runs)`.
+`create_qa_scenario(account_id, name, description, steps, target_runtime, qa_driver, qa_driver_config, tags, max_runs)`.
 The `steps`, `tags`, and `qa_driver*` values come straight from
 `QA_SEED_SCENARIOS` in `qa-seed-scenarios.ts`.
 

@@ -43,7 +43,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { DONE_STATUS } from '../../common/ticket-status';
 import { Ticket } from '../../entities/Ticket';
 import { ActivityService } from '../../services/activity.service';
@@ -95,26 +95,26 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
    * admin endpoint can drive it deterministically without waiting for the
    * setInterval. Returns the per-workspace archive counts.
    */
-  async runOnce(): Promise<{ archived_total: number; per_workspace: Array<{ workspace_id: string; count: number }> }> {
-    const workspaces = await this.dataSource.getRepository(Workspace).createQueryBuilder('w')
+  async runOnce(): Promise<{ archived_total: number; per_workspace: Array<{ account_id: string; count: number }> }> {
+    const accounts = await this.dataSource.getRepository(Account).createQueryBuilder('w')
       .where('w.auto_archive_days IS NOT NULL')
       .getMany();
-    const perWorkspace: Array<{ workspace_id: string; count: number }> = [];
+    const perWorkspace: Array<{ account_id: string; count: number }> = [];
     let total = 0;
-    for (const ws of workspaces) {
+    for (const ws of accounts) {
       try {
         const count = await this.archiveWorkspace(ws);
-        perWorkspace.push({ workspace_id: ws.id, count });
+        perWorkspace.push({ account_id: ws.id, count });
         total += count;
       } catch (e) {
         this.logService.error('Archiver', 'workspace archive failed (continuing)', {
-          err: String(e), workspace_id: ws.id,
+          err: String(e), account_id: ws.id,
         });
       }
     }
     if (total > 0) {
       this.logService.info('Archiver', 'tick complete', {
-        workspaces_processed: workspaces.length,
+        workspaces_processed: accounts.length,
         archived_total: total,
         per_workspace: perWorkspace,
       });
@@ -122,13 +122,13 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
     return { archived_total: total, per_workspace: perWorkspace };
   }
 
-  private async archiveWorkspace(ws: Workspace): Promise<number> {
+  private async archiveWorkspace(ws: Account): Promise<number> {
     const days = ws.auto_archive_days;
     if (days === null || days === undefined) return 0;
     const cutoff = new Date(Date.now() - days * 86_400_000);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const candidates = await ticketRepo.createQueryBuilder('t')
-      .where('t.workspace_id = :ws', { ws: ws.id })
+      .where('t.account_id = :ws', { ws: ws.id })
       .andWhere('t.status = :done', { done: DONE_STATUS })
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.parent_id IS NULL')
@@ -156,7 +156,7 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
           entity_id: t.id,
           action: 'archived',
           ticket_id: t.id,
-          workspace_id: t.workspace_id,
+          account_id: t.account_id,
           // Sentinel actor so the audit row is greppable and distinguishable
           // from manual archives.
           actor_id: 'system',
@@ -167,12 +167,12 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
         });
       } catch (e) {
         this.logService.warn('Archiver', 'per-ticket archive failed (continuing)', {
-          err: String(e), ticket_id: t.id, workspace_id: ws.id,
+          err: String(e), ticket_id: t.id, account_id: ws.id,
         });
       }
     }
     this.logService.info('Archiver', 'workspace sweep archived tickets', {
-      workspace_id: ws.id,
+      account_id: ws.id,
       auto_archive_days: days,
       archived: candidates.length,
       hit_batch_limit: candidates.length >= ARCHIVER_BATCH_LIMIT,

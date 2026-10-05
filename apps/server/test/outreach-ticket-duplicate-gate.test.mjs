@@ -52,16 +52,16 @@ test('parseProvenance는 chat 외 explicit outreach kind(reddit/github)를 그�
 });
 
 test('assess()는 outreach kind에서도 이중 게이트를 통과하고 동일 kind끼리만 매칭한다', async () => {
-  const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws-outreach-gate' });
+  const workspace = await ds.getRepository(entities.Account).save({ name: 'ws-outreach-gate' });
   const anchor = randomUUID();
 
   const redditCanonical = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, status: 'todo',
+    account_id: workspace.id, status: 'todo',
     title: 'Artifact pipeline regression',
     source_kind: 'reddit', related_ticket_id: anchor,
   });
   const githubDecoy = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, status: 'todo',
+    account_id: workspace.id, status: 'todo',
     title: 'Artifact pipeline regression',
     source_kind: 'github', related_ticket_id: anchor,
   });
@@ -95,13 +95,13 @@ test('assess()는 outreach kind에서도 이중 게이트를 통과하고 동일
 });
 
 test('same_channel 앵커: 실제 outreach 생성 조건(동일 채널, 빈 related_ticket_id, 다른 문구)은 60점 후보로만 잡히고 자동링크되지 않는다', async () => {
-  const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws-outreach-channel' });
+  const workspace = await ds.getRepository(entities.Account).save({ name: 'ws-outreach-channel' });
   const channelId = randomUUID();
 
   // OutreachIngestService._createTicket이 실제로 채우는 필드(source_kind,
   // 'outreach'/'source:<kind>' 태그, 채널 id를 담은 source_chat_room_id)만 시딩한다.
   const candidate = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, status: 'todo',
+    account_id: workspace.id, status: 'todo',
     title: 'App crashes immediately on launch',
     source_kind: 'reddit', source_chat_room_id: channelId,
     tags: JSON.stringify(['outreach', 'source:reddit']),
@@ -127,11 +127,11 @@ test('same_channel 앵커: 실제 outreach 생성 조건(동일 채널, 빈 rela
 });
 
 test('same_channel + provenance 태그를 제외하고도 실질적으로 겹치는 태그가 있으면 여전히 100점 자동링크된다', async () => {
-  const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws-outreach-channel-corroborated' });
+  const workspace = await ds.getRepository(entities.Account).save({ name: 'ws-outreach-channel-corroborated' });
   const channelId = randomUUID();
 
   const candidate = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, status: 'todo',
+    account_id: workspace.id, status: 'todo',
     title: 'App crashes immediately on launch',
     source_kind: 'reddit', source_chat_room_id: channelId,
     tags: JSON.stringify(['outreach', 'source:reddit', 'crash-on-launch']),

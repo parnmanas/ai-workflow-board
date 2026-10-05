@@ -67,7 +67,7 @@ export const PERMISSION_LABELS: Record<string, { label: string; description: str
   [PERMISSIONS.MANAGE_ACTIONS]: { label: 'Manage Actions', description: 'Create, edit, delete and run workspace actions', group: 'Admin' },
   [PERMISSIONS.MANAGE_FUNCTIONS]: { label: 'Manage Functions', description: 'Create, edit, delete and execute global or workspace Functions', group: 'Admin' },
   [PERMISSIONS.MANAGE_CREDENTIALS]: { label: 'Manage Credentials', description: 'Create, edit, delete workspace credentials', group: 'Admin' },
-  [PERMISSIONS.MANAGE_GLOBAL_CREDENTIALS]: { label: 'Manage Global Credentials', description: 'Create, edit, delete instance-level credentials shared across all workspaces', group: 'Admin' },
+  [PERMISSIONS.MANAGE_GLOBAL_CREDENTIALS]: { label: 'Manage Global Credentials', description: 'Create, edit, delete instance-level credentials shared across all accounts', group: 'Admin' },
   [PERMISSIONS.MANAGE_BOARDS]: { label: 'Manage Boards', description: 'Create, edit, delete boards and columns', group: 'Boards' },
   [PERMISSIONS.CREATE_TICKETS]: { label: 'Create Tickets', description: 'Create new tickets and subtasks', group: 'Tickets' },
   [PERMISSIONS.EDIT_TICKETS]: { label: 'Edit Tickets', description: 'Edit tickets, subtasks, and comments', group: 'Tickets' },

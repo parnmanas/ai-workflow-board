@@ -10,11 +10,11 @@ test('boot migration promotes board catalog rows and preserves conflicting Funct
   try {
     await runner.query(
       'CREATE TABLE "workflow_functions" (' +
-      '"id" varchar PRIMARY KEY, "workspace_id" varchar NULL, "board_id" varchar NULL, "key" varchar NOT NULL)',
+      '"id" varchar PRIMARY KEY, "account_id" varchar NULL, "board_id" varchar NULL, "key" varchar NOT NULL)',
     );
     await runner.query(
       'CREATE UNIQUE INDEX "uq_workflow_functions_workspace_key" ' +
-      'ON "workflow_functions" ("workspace_id", "key") WHERE "workspace_id" IS NOT NULL AND "board_id" IS NULL',
+      'ON "workflow_functions" ("account_id", "key") WHERE "account_id" IS NOT NULL AND "board_id" IS NULL',
     );
     await runner.query(
       'CREATE UNIQUE INDEX "uq_workflow_functions_board_key" ' +
@@ -29,12 +29,12 @@ test('boot migration promotes board catalog rows and preserves conflicting Funct
       'qa_schedules',
       'security_profiles',
       'security_schedules',
-      'workspace_schedules',
+      'automation_schedules',
     ];
     for (const table of catalogTables) {
       await runner.query(
         `CREATE TABLE "${table}" (` +
-        '"id" varchar PRIMARY KEY, "workspace_id" varchar NULL, "board_id" varchar NULL, "name" varchar NOT NULL)',
+        '"id" varchar PRIMARY KEY, "account_id" varchar NULL, "board_id" varchar NULL, "name" varchar NOT NULL)',
       );
     }
     await runner.query(
@@ -52,10 +52,10 @@ test('boot migration promotes board catalog rows and preserves conflicting Funct
     await new PromoteBoardCatalogScopes1760000000069().up(runner);
 
     const functions = await runner.query(
-      'SELECT "id", "workspace_id", "board_id", "key" FROM "workflow_functions" ORDER BY "id"',
+      'SELECT "id", "account_id", "board_id", "key" FROM "workflow_functions" ORDER BY "id"',
     );
     assert.equal(functions.length, 3);
-    assert.equal(functions.every((row) => row.workspace_id === 'ws-1' && row.board_id === null), true);
+    assert.equal(functions.every((row) => row.account_id === 'ws-1' && row.board_id === null), true);
     assert.equal(new Set(functions.map((row) => row.key)).size, 3);
     assert.equal(functions.find((row) => row.id === 'workspace-fn').key, 'deploy');
     assert.match(functions.find((row) => row.id === 'board-fn-a').key, /^deploy-board-/);
@@ -66,8 +66,8 @@ test('boot migration promotes board catalog rows and preserves conflicting Funct
     assert.deepEqual(legacyBoardIndexes, [], 'legacy Board Function index removed');
 
     for (const table of catalogTables) {
-      const rows = await runner.query(`SELECT "workspace_id", "board_id" FROM "${table}"`);
-      assert.deepEqual(rows, [{ workspace_id: 'ws-1', board_id: null }], `${table} promoted`);
+      const rows = await runner.query(`SELECT "account_id", "board_id" FROM "${table}"`);
+      assert.deepEqual(rows, [{ account_id: 'ws-1', board_id: null }], `${table} promoted`);
     }
 
     await new PromoteBoardCatalogScopes1760000000069().up(runner);
@@ -89,15 +89,15 @@ test('boot migration preserves QA and Security failure-ticket Board targets', as
     for (const table of ['qa_scenarios', 'security_profiles']) {
       await runner.query(
         `CREATE TABLE "${table}" (` +
-        '"id" varchar PRIMARY KEY, "workspace_id" varchar NOT NULL, "board_id" varchar NULL, ' +
+        '"id" varchar PRIMARY KEY, "account_id" varchar NOT NULL, "board_id" varchar NULL, ' +
         '"on_failure_ticket" text NULL)',
       );
       await runner.query(
-        `INSERT INTO "${table}" ("id", "workspace_id", "board_id", "on_failure_ticket") VALUES (?, ?, ?, ?)`,
+        `INSERT INTO "${table}" ("id", "account_id", "board_id", "on_failure_ticket") VALUES (?, ?, ?, ?)`,
         [`${table}-fallback`, 'ws-1', 'source-board', JSON.stringify({ enabled: true, column_name: 'Todo' })],
       );
       await runner.query(
-        `INSERT INTO "${table}" ("id", "workspace_id", "board_id", "on_failure_ticket") VALUES (?, ?, ?, ?)`,
+        `INSERT INTO "${table}" ("id", "account_id", "board_id", "on_failure_ticket") VALUES (?, ?, ?, ?)`,
         [`${table}-explicit`, 'ws-1', 'source-board', JSON.stringify({
           enabled: true,
           board_id: 'explicit-target',
@@ -125,21 +125,21 @@ test('boot migration preserves QA and Security failure-ticket Board targets', as
   }
 });
 
-test('boot migration recovers missing Workspace ownership from the source Board', async () => {
+test('boot migration recovers missing Account ownership from the source Board', async () => {
   const dataSource = new DataSource({ type: 'sqljs', entities: [], synchronize: false });
   await dataSource.initialize();
   const runner = dataSource.createQueryRunner();
   try {
-    await runner.query('CREATE TABLE "boards" ("id" varchar PRIMARY KEY, "workspace_id" varchar NOT NULL)');
+    await runner.query('CREATE TABLE "boards" ("id" varchar PRIMARY KEY, "account_id" varchar NOT NULL)');
     await runner.query(`INSERT INTO "boards" VALUES ('source-board', 'recovered-workspace')`);
     await runner.query(
       'CREATE TABLE "actions" (' +
-      '"id" varchar PRIMARY KEY, "workspace_id" varchar NULL, "board_id" varchar NULL, "name" varchar NOT NULL)',
+      '"id" varchar PRIMARY KEY, "account_id" varchar NULL, "board_id" varchar NULL, "name" varchar NOT NULL)',
     );
     await runner.query(`INSERT INTO "actions" VALUES ('recoverable', NULL, 'source-board', 'Recovered')`);
     await new PromoteBoardCatalogScopes1760000000069().up(runner);
-    const rows = await runner.query('SELECT "workspace_id", "board_id" FROM "actions"');
-    assert.deepEqual(rows, [{ workspace_id: 'recovered-workspace', board_id: null }]);
+    const rows = await runner.query('SELECT "account_id", "board_id" FROM "actions"');
+    assert.deepEqual(rows, [{ account_id: 'recovered-workspace', board_id: null }]);
   } finally {
     await runner.release();
     await dataSource.destroy();
@@ -151,10 +151,10 @@ test('boot migration refuses an unresolvable Board without partially promoting o
   await dataSource.initialize();
   const runner = dataSource.createQueryRunner();
   try {
-    await runner.query('CREATE TABLE "boards" ("id" varchar PRIMARY KEY, "workspace_id" varchar NOT NULL)');
+    await runner.query('CREATE TABLE "boards" ("id" varchar PRIMARY KEY, "account_id" varchar NOT NULL)');
     await runner.query(
       'CREATE TABLE "actions" (' +
-      '"id" varchar PRIMARY KEY, "workspace_id" varchar NULL, "board_id" varchar NULL, "name" varchar NOT NULL)',
+      '"id" varchar PRIMARY KEY, "account_id" varchar NULL, "board_id" varchar NULL, "name" varchar NOT NULL)',
     );
     await runner.query(
       `INSERT INTO "actions" VALUES
@@ -165,10 +165,10 @@ test('boot migration refuses an unresolvable Board without partially promoting o
       new PromoteBoardCatalogScopes1760000000069().up(runner),
       /refusing to guess a destination/,
     );
-    const rows = await runner.query('SELECT "id", "workspace_id", "board_id" FROM "actions" ORDER BY "id"');
+    const rows = await runner.query('SELECT "id", "account_id", "board_id" FROM "actions" ORDER BY "id"');
     assert.deepEqual(rows, [
-      { id: 'orphan', workspace_id: null, board_id: 'missing-board' },
-      { id: 'valid', workspace_id: 'workspace-1', board_id: 'valid-board' },
+      { id: 'orphan', account_id: null, board_id: 'missing-board' },
+      { id: 'valid', account_id: 'workspace-1', board_id: 'valid-board' },
     ]);
   } finally {
     await runner.release();

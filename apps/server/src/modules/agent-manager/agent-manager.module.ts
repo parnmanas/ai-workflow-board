@@ -7,12 +7,12 @@ import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { AgentsModule } from '../agents/agents.module';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
-import { WorkspaceGuard } from '../../common/guards/workspace.guard';
+import { AccountGuard } from '../../common/guards/account.guard';
 import { AgentManagerController } from './agent-manager.controller';
 import { RuntimeSpecController } from './runtime-spec.controller';
 import { InstanceRegistryModule } from './instance-registry.module';
@@ -51,7 +51,7 @@ import { SkillsModule } from '../skills/skills.module';
     SkillsModule,
     // AgentSessionCliSetting: HostModelsService 가 ACP 가 보고한 모델 목록(영속)을 읽는다 —
     // 모델 목록의 단일 출처가 재시작 후에도 같은 답을 하게 하는 데 필요하다.
-    TypeOrmModule.forFeature([AgentTemplate, RuntimeHost, AgentSessionCliSetting, ApiKey, Credential, Ticket, Workspace]),
+    TypeOrmModule.forFeature([AgentTemplate, RuntimeHost, AgentSessionCliSetting, ApiKey, Credential, Ticket, Account]),
   ],
   controllers: [AgentTemplatesController, AgentManagerController, HostModelsController, RuntimeSpecController],
   providers: [
@@ -70,7 +70,7 @@ import { SkillsModule } from '../skills/skills.module';
     AgentAuthGuard,
     AuthGuard,
     PermissionGuard,
-    WorkspaceGuard,
+    AccountGuard,
   ],
   exports: [
     PairingService,

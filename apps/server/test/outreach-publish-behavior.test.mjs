@@ -28,14 +28,14 @@
 //   • deploy_post_mode='reply_to_existing' always replies to the fixed
 //     reply_thread_ref; 'auto' posts new on the first release and replies on
 //     a later one still inside auto_reuse_window_days.
-//   • a GLOBAL deployment (workspace_id=null) never publishes anywhere
+//   • a GLOBAL deployment (account_id=null) never publishes anywhere
 //     (fail-closed).
 
 import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
-import { Workspace } from '../dist/entities/Workspace.js';
+import { Account } from '../dist/entities/Account.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
@@ -49,7 +49,7 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Ticket, Comment, Credential, OutreachChannel, OutreachOutboundPost],
+    entities: [Account, Ticket, Comment, Credential, OutreachChannel, OutreachOutboundPost],
     synchronize: true,
     logging: false,
   });
@@ -60,7 +60,7 @@ async function setupDb() {
 async function seedCredential(dataSource, over = {}) {
   const repo = dataSource.getRepository(Credential);
   return repo.save(repo.create({
-    workspace_id: null,
+    account_id: null,
     name: 'reddit bot',
     description: '',
     provider: 'reddit',
@@ -72,7 +72,7 @@ async function seedCredential(dataSource, over = {}) {
 async function seedChannel(dataSource, credentialId, over = {}) {
   const repo = dataSource.getRepository(OutreachChannel);
   return repo.save(repo.create({
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     kind: 'reddit',
     name: 'test channel',
     targets: ['awb'],
@@ -102,7 +102,7 @@ function makeService(dataSource) {
 function signal(over = {}) {
   return {
     deployment_id: 'dep-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     environment: 'production',
     deployed_commit_sha: 'sha-aaa',
     deployed_at: new Date('2026-06-25T12:00:00Z'),
@@ -227,7 +227,7 @@ test('approve() on a draft calls the connector exactly once and lands published'
     const fake = installFakeRedditFetch();
     let approved;
     try {
-      approved = await svc.approve(draft.id, channel.id, channel.workspace_id);
+      approved = await svc.approve(draft.id, channel.id, channel.account_id);
     } finally { restoreFetch(); }
 
     assert.equal(approved.status, 'published');
@@ -249,8 +249,8 @@ test('two CONCURRENT approve() calls for the same post result in exactly one ext
     let settled;
     try {
       settled = await Promise.allSettled([
-        svc.approve(draft.id, channel.id, channel.workspace_id),
-        svc.approve(draft.id, channel.id, channel.workspace_id),
+        svc.approve(draft.id, channel.id, channel.account_id),
+        svc.approve(draft.id, channel.id, channel.account_id),
       ]);
     } finally { restoreFetch(); }
 
@@ -274,7 +274,7 @@ test('approve() when the connector call fails lands the post as failed with the 
     await svc._onDeploymentReported(signal());
     const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
 
-    const approved = await svc.approve(draft.id, channel.id, channel.workspace_id);
+    const approved = await svc.approve(draft.id, channel.id, channel.account_id);
     assert.equal(approved.status, 'failed');
     assert.ok(approved.error.length > 0);
   } finally { await dataSource.destroy(); }
@@ -289,12 +289,12 @@ test('reject() is terminal — a later approve() attempt is rejected, connector 
     await svc._onDeploymentReported(signal());
     const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
 
-    const rejected = await svc.reject(draft.id, channel.id, channel.workspace_id);
+    const rejected = await svc.reject(draft.id, channel.id, channel.account_id);
     assert.equal(rejected.status, 'rejected');
 
     const fake = installFakeRedditFetch();
     try {
-      await assert.rejects(svc.approve(draft.id, channel.id, channel.workspace_id), (err) => err.status === 409);
+      await assert.rejects(svc.approve(draft.id, channel.id, channel.account_id), (err) => err.status === 409);
     } finally { restoreFetch(); }
     assert.equal(fake.callCount(), 0);
   } finally { await dataSource.destroy(); }
@@ -343,7 +343,7 @@ test('deploy_post_mode=auto posts new on the first release, replies on a later o
   } finally { await dataSource.destroy(); }
 });
 
-test('a GLOBAL deployment (workspace_id=null) never publishes to any workspace channel (fail-closed)', async () => {
+test('a GLOBAL deployment (account_id=null) never publishes to any workspace channel (fail-closed)', async () => {
   const dataSource = await setupDb();
   try {
     const cred = await seedCredential(dataSource);
@@ -351,7 +351,7 @@ test('a GLOBAL deployment (workspace_id=null) never publishes to any workspace c
     const svc = makeService(dataSource);
     const fake = installFakeRedditFetch();
     try {
-      await svc._onDeploymentReported(signal({ workspace_id: null }));
+      await svc._onDeploymentReported(signal({ account_id: null }));
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
@@ -471,7 +471,7 @@ test('approve() with a MISMATCHED channelId 404s and makes ZERO connector calls'
     const fake = installFakeRedditFetch();
     try {
       await assert.rejects(
-        svc.approve(draft.id, otherChannel.id, channel.workspace_id),
+        svc.approve(draft.id, otherChannel.id, channel.account_id),
         (err) => err.status === 404,
       );
     } finally { restoreFetch(); }
@@ -494,7 +494,7 @@ test('reject() with a MISMATCHED channelId 404s and leaves the draft untouched',
     assert.equal(draft.channel_id, channel.id);
 
     await assert.rejects(
-      svc.reject(draft.id, otherChannel.id, channel.workspace_id),
+      svc.reject(draft.id, otherChannel.id, channel.account_id),
       (err) => err.status === 404,
     );
 
@@ -515,7 +515,7 @@ test('approve()/reject() with the CORRECT channelId still work (positive control
     const fake = installFakeRedditFetch();
     let approved;
     try {
-      approved = await svc.approve(draft.id, channel.id, channel.workspace_id);
+      approved = await svc.approve(draft.id, channel.id, channel.account_id);
     } finally { restoreFetch(); }
     assert.equal(approved.status, 'published');
     assert.equal(fake.callCount(), 1);

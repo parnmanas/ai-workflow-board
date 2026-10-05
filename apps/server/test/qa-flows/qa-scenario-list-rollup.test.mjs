@@ -45,7 +45,7 @@ test('QA scenario list attaches last-run rollup', async (t) => {
 
   step('Seed three scenarios (name-ASC: A disabled, B, C no-runs)');
   const mkScenario = async (name, enabled) => scenarioRepo.save(scenarioRepo.create({
-    workspace_id: ws, board_id: null, name, description: '', steps: [],
+    account_id: ws, board_id: null, name, description: '', steps: [],
     target_agent_id: agentId, qa_driver: 'browser', qa_driver_config: null,
     enabled, tags: [], created_by: '', max_runs: 20,
   }));
@@ -57,7 +57,7 @@ test('QA scenario list attaches last-run rollup', async (t) => {
   const mkRun = async (scenarioId, status, ageMs, { started = true, finished } = {}) => {
     const at = new Date(Date.now() - ageMs);
     const run = await runRepo.save(runRepo.create({
-      id: randomUUID(), scenario_id: scenarioId, workspace_id: ws, board_id: null,
+      id: randomUUID(), scenario_id: scenarioId, account_id: ws, board_id: null,
       status, room_id: '', step_results: [], artifact_resource_ids: [], summary: '',
       triggered_by_type: 'user', triggered_by_id: '',
       started_at: started ? at : null,

@@ -133,14 +133,14 @@ test('waiting for the user is announced once per burst', async (t) => {
 
 test('missions: terminal and decision events only, to the human owner or else the workspace owners', async (t) => {
   const missions = {
-    m1: { id: 'm1', workspace_id: 'w1', title: '음성 게이트웨이', created_by_type: 'user', created_by: 'u7', result_summary: '세 단계 모두 끝났고 PR #23 을 열었어요.' },
-    m2: { id: 'm2', workspace_id: 'w1', title: '야간 점검', created_by_type: 'agent', created_by: 'agent-1', result_summary: '' },
+    m1: { id: 'm1', account_id: 'w1', title: '음성 게이트웨이', created_by_type: 'user', created_by: 'u7', result_summary: '세 단계 모두 끝났고 PR #23 을 열었어요.' },
+    m2: { id: 'm2', account_id: 'w1', title: '야간 점검', created_by_type: 'agent', created_by: 'agent-1', result_summary: '' },
   };
   const steps = { 'm2/approve': { title: '배포 승인' } };
   const { heard, teardown } = setup(TTS_READY, { missions, steps, owners: [{ type: 'user', id: 'owner-1' }, { type: 'agent', id: 'x' }] });
   t.after(teardown);
   const missionUpdate = (mission_id, type, extra = {}) => activityEvents.emit('orchestration_update', {
-    mission_id, workspace_id: 'w1', title: missions[mission_id].title, status: 'running',
+    mission_id, account_id: 'w1', title: missions[mission_id].title, status: 'running',
     counts: { total: 3, done: 3, failed: 0 }, last_event: { type, message: '', step_key: extra.step_key || '' },
   });
   missionUpdate('m1', 'step_completed');
@@ -150,7 +150,7 @@ test('missions: terminal and decision events only, to the human owner or else th
   assert.equal(heard.length, 2, 'step progress is not announced');
   assert.equal(heard[0].user_id, 'u7');
   assert.equal(heard[0].text, "'음성 게이트웨이' 미션이 끝났어요. 단계 3개 중 3개가 끝났어요. 세 단계 모두 끝났고 PR #23 을 열었어요.");
-  assert.deepEqual(heard[0].target, { type: 'mission', workspace_id: 'w1', mission_id: 'm1' });
+  assert.deepEqual(heard[0].target, { type: 'mission', account_id: 'w1', mission_id: 'm1' });
   assert.equal(heard[1].user_id, 'owner-1', 'agent-created mission → workspace owners (users only)');
   assert.equal(heard[1].text, "'야간 점검' 미션에서 결정이 필요해요. 단계: 배포 승인.");
 });

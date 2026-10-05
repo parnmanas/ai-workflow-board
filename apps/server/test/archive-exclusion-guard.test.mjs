@@ -43,7 +43,7 @@ const ACTIVE_TICKET_SOURCES = [
   ],
   [
     'modules/tickets/ticket.service.ts',
-    'GET /api/workspaces/:wsId/tickets + MCP list_tickets must exclude archived tickets by default (include_archived / archived_only opt-in only)',
+    'GET /api/accounts/:wsId/tickets + MCP list_tickets must exclude archived tickets by default (include_archived / archived_only opt-in only)',
   ],
 ];
 
@@ -137,7 +137,7 @@ test('ticket.service.ts stamps terminal_entered_at on create and move, and rejec
 // would skip the rest of that batch when a page boundary lands inside it.
 // MCP list_archived_tickets must order on (archived_at, id) and carry both in
 // next_cursor so same-timestamp ties pass through stably. (The REST archive
-// view is now `GET /api/workspaces/:wsId/tickets?archived_only=1` — a filter
+// view is now `GET /api/accounts/:wsId/tickets?archived_only=1` — a filter
 // on the ticket list, not a cursor-paged endpoint.)
 const COMPOUND_CURSOR_SOURCES = [
   [
@@ -228,7 +228,7 @@ test('archive cursor helpers round-trip + accept legacy bare-timestamp', async (
 // Review-bounce guards (2026-05-25). Reviewer flagged surfaces that either
 // still scanned/mutated archived tickets or silently leaked them:
 //
-//   1. Workspace REST + MCP get_workspace (default-exclusion violation)
+//   1. Account REST + MCP get_account (default-exclusion violation)
 //   2. Create-directly-in-done missing terminal_entered_at stamp
 //
 // (The third, StuckTicketDetector, was removed with the board model.)
@@ -237,12 +237,12 @@ test('archive cursor helpers round-trip + accept legacy bare-timestamp', async (
 
 const REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES = [
   [
-    'modules/workspaces/workspaces.controller.ts',
-    'GET /api/workspaces/:id is an active snapshot — archived tickets must not silently inflate its per-status ticket_counts (use the archive filters for archive-inclusive reads)',
+    'modules/accounts/accounts.controller.ts',
+    'GET /api/accounts/:id is an active snapshot — archived tickets must not silently inflate its per-status ticket_counts (use the archive filters for archive-inclusive reads)',
   ],
   [
-    'modules/mcp/tools/workspace-tools.ts',
-    'MCP get_workspace per-status ticket_counts is the same active surface as the REST workspace get — archived rows must not be counted',
+    'modules/mcp/tools/account-tools.ts',
+    'MCP get_account per-status ticket_counts is the same active surface as the REST workspace get — archived rows must not be counted',
   ],
 ];
 for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
@@ -267,7 +267,7 @@ for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
 const TERMINAL_STAMP_CREATE_SOURCES = [
   [
     'modules/tickets/tickets.controller.ts',
-    'POST /api/workspaces/:wsId/tickets must create through TicketService — otherwise an operator-created Done ticket never auto-archives',
+    'POST /api/accounts/:wsId/tickets must create through TicketService — otherwise an operator-created Done ticket never auto-archives',
   ],
   [
     'modules/mcp/tools/ticket-crud-tools.ts',

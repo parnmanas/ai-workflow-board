@@ -1,5 +1,6 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import type {
   ClaudeBackendProfile,
@@ -53,7 +54,8 @@ function broadcastTeamsChanged() {
 }
 
 export default function OrchestrationTeamsPage() {
-  const { wsId = '' } = useParams<{ wsId: string }>();
+  const { currentAccountId, availableAccounts } = useAuth();
+  const wsId = currentAccountId || '';
   const { showToast } = useToast();
 
   const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
@@ -64,7 +66,7 @@ export default function OrchestrationTeamsPage() {
   const [hosts, setHosts] = useState<OrchestrationRuntimeHost[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [backendProfiles, setBackendProfiles] = useState<ClaudeBackendProfile[]>([]);
-  const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[]>([]);
+  const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<OrchestrationTeam | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -80,18 +82,18 @@ export default function OrchestrationTeamsPage() {
     if (!wsId) return;
     setLoading(true);
     try {
-      const [teamList, hostList, credentialList, profileList, workspaceList] = await Promise.all([
+      const [teamList, hostList, credentialList, profileList, accountList] = await Promise.all([
         api.listOrchestrationTeams(wsId),
         api.listOrchestrationRuntimeHosts(wsId).catch(() => [] as OrchestrationRuntimeHost[]),
         api.listCredentials(wsId, { includeAllScopes: true }).catch(() => [] as Credential[]),
         api.listClaudeBackendProfiles().then((r) => r.profiles).catch(() => [] as ClaudeBackendProfile[]),
-        api.getWorkspaces().catch(() => [] as any[]),
+        api.getAccounts().catch(() => [] as any[]),
       ]);
       setTeams(teamList);
       setHosts(hostList);
       setCredentials(credentialList);
       setBackendProfiles(profileList);
-      setWorkspaces(workspaceList.map((w: any) => ({ id: w.id, name: w.name })));
+      setAccounts(accountList.map((w: any) => ({ id: w.id, name: w.name })));
     } catch (e: any) {
       showToast(e?.message || 'Failed to load teams', 'error');
     } finally {
@@ -99,8 +101,8 @@ export default function OrchestrationTeamsPage() {
     }
   }, [wsId, showToast]);
 
-  /** 글로벌 팀은 소유 workspace만, workspace 종속 팀은 자기 workspace만 편집할 수 있다. */
-  const canWrite = (team: OrchestrationTeam) => !team.is_global || team.owner_workspace_id === wsId;
+  /** 글로벌 팀은 소유 account만, account 종속 팀은 자기 account만 편집할 수 있다. */
+  const canWrite = (team: OrchestrationTeam) => !team.is_global || availableAccounts.some((account) => account.id === team.owner_account_id);
 
   useEffect(() => {
     load();
@@ -208,8 +210,8 @@ export default function OrchestrationTeamsPage() {
                         <span
                           title={
                             canWrite(team)
-                              ? 'Global team — visible from every workspace; this workspace created it and may edit it'
-                              : 'Global team — visible from every workspace; only the workspace that created it may edit it'
+                              ? 'Global team — visible from every account; this account created it and may edit it'
+                              : 'Global team — visible from every account; only the account that created it may edit it'
                           }
                           style={{
                             fontSize: 10,
@@ -244,7 +246,7 @@ export default function OrchestrationTeamsPage() {
                     variant="secondary"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'Only the workspace that created this global team may edit it'}
+                    title={canWrite(team) ? undefined : 'Only the account that created this global team may edit it'}
                     onClick={() => { setEditing(team); setShowForm(true); }}
                   >
                     Edit
@@ -253,7 +255,7 @@ export default function OrchestrationTeamsPage() {
                     variant="secondary"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'Only the workspace that created this global team may edit its roster'}
+                    title={canWrite(team) ? undefined : 'Only the account that created this global team may edit its roster'}
                     onClick={() => setMemberTarget(team)}
                   >
                     Add member
@@ -262,7 +264,7 @@ export default function OrchestrationTeamsPage() {
                     variant="danger"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'Only the workspace that created this global team may delete it'}
+                    title={canWrite(team) ? undefined : 'Only the account that created this global team may delete it'}
                     onClick={() => setDeleteTarget(team)}
                   >
                     Delete
@@ -288,8 +290,8 @@ export default function OrchestrationTeamsPage() {
                     <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
                       · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel ·{' '}
                       {team.max_open_missions > 0
-                        ? `up to ${team.max_open_missions} self-created mission(s) open at once per workspace` +
-                          (team.is_global ? ` (× ${team.allowed_workspace_ids.length || 0} allowed workspace(s))` : '')
+                        ? `up to ${team.max_open_missions} self-created mission(s) open at once per account` +
+                          (team.is_global ? ` (× ${team.allowed_account_ids.length || 0} allowed account(s))` : '')
                         : 'agent-created missions disabled'}
                     </span>
                   </div>
@@ -345,7 +347,7 @@ export default function OrchestrationTeamsPage() {
                           <MemberEditButton
                             team={team}
                             member={m}
-                            wsId={wsId}
+                            wsId={team.owner_account_id || team.account_id || wsId}
                             hosts={hosts}
                             onHostRefreshed={replaceHost}
                             credentials={credentials}
@@ -357,7 +359,7 @@ export default function OrchestrationTeamsPage() {
                             variant="ghost"
                             size="sm"
                             disabled={!canWrite(team)}
-                            title={canWrite(team) ? undefined : 'Only the workspace that created this global team may edit its roster'}
+                            title={canWrite(team) ? undefined : 'Only the account that created this global team may edit its roster'}
                             onClick={() => removeMember(team, m.id)}
                           >
                             Remove
@@ -376,12 +378,12 @@ export default function OrchestrationTeamsPage() {
 
       <TeamFormModal
         isOpen={showForm}
-        wsId={wsId}
+        wsId={editing?.owner_account_id || editing?.account_id || wsId}
         hosts={hosts}
         onHostRefreshed={replaceHost}
         credentials={credentials}
         backendProfiles={backendProfiles}
-        workspaces={workspaces}
+        accounts={accounts}
         team={editing}
         onClose={() => setShowForm(false)}
         onSaved={(team) => {
@@ -392,7 +394,7 @@ export default function OrchestrationTeamsPage() {
 
       <AddMemberModal
         team={memberTarget}
-        wsId={wsId}
+        wsId={memberTarget?.owner_account_id || memberTarget?.account_id || wsId}
         hosts={hosts}
         onHostRefreshed={replaceHost}
         credentials={credentials}
@@ -496,7 +498,7 @@ export function TeamFormModal({
   credentials,
   backendProfiles,
   onHostRefreshed,
-  workspaces,
+  accounts,
   team,
   onClose,
   onSaved,
@@ -507,7 +509,7 @@ export function TeamFormModal({
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
   onHostRefreshed(host: OrchestrationRuntimeHost): void;
-  workspaces: { id: string; name: string }[];
+  accounts: { id: string; name: string }[];
   team: OrchestrationTeam | null;
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
@@ -520,23 +522,23 @@ export function TeamFormModal({
   const [parallel, setParallel] = useState(3);
   const [openMissionsCap, setOpenMissionsCap] = useState(1);
   const [enabled, setEnabled] = useState(true);
-  // 스코프는 생성 시점에만 정해진다 — 기존 팀의 workspace_id는 절대 바뀌지 않으므로
+  // 스코프는 생성 시점에만 정해진다 — 기존 팀의 account_id는 절대 바뀌지 않으므로
   // 이 상태는 새 팀(`!team`) UI에서만 의미가 있다.
   const [isGlobal, setIsGlobal] = useState(false);
-  const [allowedWorkspaceIds, setAllowedWorkspaceIds] = useState<string[]>([]);
+  const [allowedAccountIds, setAllowedAccountIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   const effectiveGlobal = team ? team.is_global : isGlobal;
   const orchestratorProblem = slotDraftProblem(orchestrator);
 
   // 편집 모달의 읽기 전용 스코프 표시용 — 생성 Select의 global 옵션 라벨과 문구를 맞춰
-  // 완료 조건("생성/편집 표기 통일")을 만족시킨다. workspace 이름 해석에 실패해도
+  // 완료 조건("생성/편집 표기 통일")을 만족시킨다. account 이름 해석에 실패해도
   // "(undefined)" 같은 값이 나오지 않도록 이름이 없으면 접미사를 붙이지 않는다.
   const scopeLabel = (() => {
     if (!team) return null;
-    if (team.is_global) return 'Global — visible to every workspace';
-    const wsName = workspaces.find((w) => w.id === team.workspace_id)?.name;
-    return wsName ? `This workspace (${wsName})` : 'This workspace';
+    if (team.is_global) return 'Global — visible to every account';
+    const wsName = accounts.find((w) => w.id === team.account_id)?.name;
+    return wsName ? `This account (${wsName})` : 'This account';
   })();
 
   useEffect(() => {
@@ -548,12 +550,12 @@ export function TeamFormModal({
     setOpenMissionsCap(team?.max_open_missions ?? 1);
     setEnabled(team?.enabled ?? true);
     setIsGlobal(team?.is_global ?? false);
-    setAllowedWorkspaceIds(team?.allowed_workspace_ids ?? []);
+    setAllowedAccountIds(team?.allowed_account_ids ?? []);
     setOrchestrator(slotDraftFromRuntime(team?.orchestrator_runtime ?? null));
   }, [isOpen, team]);
 
-  const toggleAllowedWorkspace = (id: string) => {
-    setAllowedWorkspaceIds((prev) => (prev.includes(id) ? prev.filter((w) => w !== id) : [...prev, id]));
+  const toggleAllowedAccount = (id: string) => {
+    setAllowedAccountIds((prev) => (prev.includes(id) ? prev.filter((w) => w !== id) : [...prev, id]));
   };
 
   const submit = async () => {
@@ -569,7 +571,7 @@ export function TeamFormModal({
     try {
       const saved = team
         ? await api.updateOrchestrationTeam(team.id, {
-            workspace_id: wsId,
+            account_id: wsId,
             name: name.trim(),
             description: description.trim(),
             orchestrator: slotDraftToSpec(orchestrator),
@@ -577,10 +579,10 @@ export function TeamFormModal({
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
             enabled,
-            ...(team.is_global ? { allowed_workspace_ids: allowedWorkspaceIds } : {}),
+            ...(team.is_global ? { allowed_account_ids: allowedAccountIds } : {}),
           })
         : await api.createOrchestrationTeam({
-            workspace_id: wsId,
+            account_id: wsId,
             name: name.trim(),
             description: description.trim(),
             orchestrator: slotDraftToSpec(orchestrator),
@@ -588,7 +590,7 @@ export function TeamFormModal({
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
             is_global: isGlobal,
-            ...(isGlobal ? { allowed_workspace_ids: allowedWorkspaceIds } : {}),
+            ...(isGlobal ? { allowed_account_ids: allowedAccountIds } : {}),
           });
       showToast(team ? 'Team updated' : 'Team created', 'success');
       onSaved(saved);
@@ -648,10 +650,10 @@ export function TeamFormModal({
           <Select
             label="Scope"
             options={[
-              { value: 'workspace', label: 'This workspace' },
-              { value: 'global', label: 'Global — visible to every workspace' },
+              { value: 'account', label: 'This account' },
+              { value: 'global', label: 'Global — visible to every account' },
             ]}
-            value={isGlobal ? 'global' : 'workspace'}
+            value={isGlobal ? 'global' : 'account'}
             onChange={(e) => setIsGlobal(e.target.value === 'global')}
           />
         )}
@@ -667,7 +669,7 @@ export function TeamFormModal({
             credentials={credentials}
             backendProfiles={backendProfiles}
             onHostRefreshed={onHostRefreshed}
-            workspaceId={wsId}
+            accountId={wsId}
             neighbours={neighboursOf(team, { orchestrator: true })}
           />
         </SlotSection>
@@ -695,29 +697,29 @@ export function TeamFormModal({
           onChange={(e) => setOpenMissionsCap(Number(e.target.value))}
         />
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -8 }}>
-          How many missions this team&apos;s orchestrator may have open at once per workspace via
+          How many missions this team&apos;s orchestrator may have open at once per account via
           create_orchestration_mission. Set to 0 to forbid the orchestrator from self-creating missions for this
           team entirely.
         </div>
         {effectiveGlobal && (
           <div>
             <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
-              Allowed workspaces
+              Allowed accounts
             </div>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 8 }}>
-              Which workspace&apos;s run-budget this team&apos;s orchestrator may bill a self-created mission to.
-              Empty means the orchestrator cannot create missions at all until a workspace is checked here.
+              Which account&apos;s run-budget this team&apos;s orchestrator may bill a self-created mission to.
+              Empty means the orchestrator cannot create missions at all until a account is checked here.
             </div>
-            {workspaces.length === 0 ? (
-              <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No workspaces found.</div>
+            {accounts.length === 0 ? (
+              <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No accounts found.</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
-                {workspaces.map((w) => (
+                {accounts.map((w) => (
                   <label key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
                     <input
                       type="checkbox"
-                      checked={allowedWorkspaceIds.includes(w.id)}
-                      onChange={() => toggleAllowedWorkspace(w.id)}
+                      checked={allowedAccountIds.includes(w.id)}
+                      onChange={() => toggleAllowedAccount(w.id)}
                     />
                     {w.name}
                   </label>
@@ -828,7 +830,7 @@ function AddMemberModal({
     setSaving(true);
     try {
       const saved = await api.addOrchestrationTeamMember(team.id, {
-        workspace_id: wsId,
+        account_id: wsId,
         ...(asOrchestrator ? { as_orchestrator: true } : { runtime: slotDraftToSpec(draft) }),
         role_label: roleLabel.trim(),
         capabilities: capabilities.trim(),
@@ -911,7 +913,7 @@ function AddMemberModal({
               credentials={credentials}
               backendProfiles={backendProfiles}
               onHostRefreshed={onHostRefreshed}
-              workspaceId={wsId}
+              accountId={wsId}
               neighbours={neighboursOf(team)}
             />
           </SlotSection>
@@ -969,7 +971,7 @@ function MemberEditButton({
     setSaving(true);
     try {
       const saved = await api.updateOrchestrationTeamMember(team.id, member.id, {
-        workspace_id: wsId,
+        account_id: wsId,
         ...(isOrchestratorRow ? {} : { runtime: slotDraftToSpec(draft) }),
         role_label: roleLabel.trim(),
         capabilities: capabilities.trim(),
@@ -990,7 +992,7 @@ function MemberEditButton({
         variant="ghost"
         size="sm"
         disabled={disabled}
-        title={disabled ? 'Only the workspace that created this global team may edit its roster' : undefined}
+        title={disabled ? 'Only the account that created this global team may edit its roster' : undefined}
         onClick={() => setOpen(true)}
       >
         Edit
@@ -1047,7 +1049,7 @@ function MemberEditButton({
                 credentials={credentials}
                 backendProfiles={backendProfiles}
                 onHostRefreshed={onHostRefreshed}
-                workspaceId={wsId}
+                accountId={wsId}
                 neighbours={neighboursOf(team, { memberId: member.id })}
               />
             </SlotSection>

@@ -102,7 +102,7 @@ async function withSlot(t, { storeModels, storeLabels, managerId, slotOverrides 
   api.refreshHostModels = async () => { throw new Error('이 테스트는 refresh 를 기대하지 않는다'); };
 
   const view = mount(h(TeamSlotRuntimeFields, {
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     value: slot,
     onChange: () => {},
     hosts: [rosterHost],

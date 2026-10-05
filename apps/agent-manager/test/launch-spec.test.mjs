@@ -26,7 +26,7 @@ const SECRET = 'sk-ant-api03-SUPERSECRETVALUE';
 function ctx(over = {}) {
   return {
     agent_id: 'agent-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     name: '테스트 에이전트',
     cli: 'claude',
     working_dir: '/srv/work',

@@ -235,7 +235,7 @@ test('Pass 제출 — verdict/visit 이 그대로 실려 나가고, 빈 피드�
 
   assert.equal(calls.length, 1, '한 번만 전송된다');
   assert.equal(calls[0].stepId, 'step-gate');
-  assert.equal(calls[0].data.workspace_id, 'ws-1');
+  assert.equal(calls[0].data.account_id, 'ws-1');
   assert.equal(calls[0].data.verdict, 'pass');
   // visit 이 빠지면 서버의 stale-화면 대조가 통째로 무력해진다.
   assert.equal(calls[0].data.visit, 3, '화면이 본 pass 번호가 그대로 실려야 한다');

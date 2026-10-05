@@ -23,7 +23,7 @@ function makeScenario() {
   return {
     id: 'scn-1',
     name: 'INV-VIS',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     board_id: null,
     // uuid-shaped: P4c-3b 이후 startQaRun 은 uuid 가 아니면 Agent 조회를
     // 건너뛰고 rt- 키도 아니면 400 으로 거부한다.
@@ -52,7 +52,7 @@ function makeScenario() {
 const dataSource = {
   getRepository: (entity) => {
     if (entity?.name === 'RuntimeHost') {
-      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', workspace_id: 'ws-1' }; }, async find() { return []; } };
+      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', account_id: 'ws-1' }; }, async find() { return []; } };
     }
     return { findOne: async () => { throw new Error('no repo'); } };
   },

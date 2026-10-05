@@ -80,5 +80,5 @@ test('decodeBase64 round-trips raw bytes (UTF-8 is xterm\'s job, not ours)', () 
 });
 
 test('terminalPath', () => {
-  assert.equal(terminalPath('ws1', 'm1', 't1'), '/ws/ws1/terminals/m1/t1');
+  assert.equal(terminalPath('ws1', 'm1', 't1'), '/terminals/m1/t1');
 });

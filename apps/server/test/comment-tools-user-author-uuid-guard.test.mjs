@@ -117,7 +117,7 @@ function registerTools() {
 
 async function makeTicket(title = 'T') {
   return ticketRepo.save(ticketRepo.create({
-    title, workspace_id: 'w1', pending_user_action: false,
+    title, account_id: 'w1', pending_user_action: false,
   }));
 }
 function parse(res) {

@@ -63,7 +63,7 @@ let warned;
 async function seedMission(title) {
   const missionRepo = dataSource.getRepository(OrchestrationMission);
   return missionRepo.save(missionRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     team_id: 'team-1',
     title,
     objective: 'fail-open cursor fixture',

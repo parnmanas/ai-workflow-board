@@ -18,6 +18,7 @@ import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { AGENT_PATH, CONFIG_PATH } from './constants.js';
+import { normalizeAccountScope } from './account-scope.js';
 
 export interface SetupOptions {
   /** Override config.json target path. Default: $AWB_AGENT_MANAGER_HOME/config.json */
@@ -40,7 +41,7 @@ export interface SetupResult {
   ok: true;
   configPath: string;
   agentId: string;
-  workspaceId: string;
+  accountId: string;
 }
 
 const DEFAULT_URL_HINT = 'https://awb.example.com:7700';
@@ -87,7 +88,7 @@ interface RedeemResponse {
   agent_id: string;
   /** P4c-2b: P0 redeem이 함께 돌려주는 Runtime Host id. 구 서버에는 없어 optional. */
   host_id?: string;
-  workspace_id: string;
+  account_id: string;
 }
 
 async function redeem(url: string, token: string, instanceId: string): Promise<RedeemResponse> {
@@ -109,7 +110,7 @@ async function redeem(url: string, token: string, instanceId: string): Promise<R
     }
     throw new Error(`pair/redeem ${resp.status} ${resp.statusText}: ${detail || '(empty body)'}`);
   }
-  const body = (await resp.json()) as RedeemResponse;
+  const body = normalizeAccountScope(await resp.json()) as RedeemResponse;
   if (!body?.api_key || !body?.agent_id) {
     throw new Error(`pair/redeem returned malformed body: ${JSON.stringify(body)}`);
   }
@@ -174,7 +175,7 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
       if (!url) url = await prompt.ask('AWB server URL', DEFAULT_URL_HINT);
       if (!token) {
         token = await prompt.ask(
-          'Pairing token (paste from AWB Workspace → AI Agents → Agent Manager Runtime → Pair manager…)',
+          'Pairing token (paste from AWB Hosts → Pair manager…)',
         );
       }
       // ST-7: CLI is per-managed-agent now (set in AWB UI when creating
@@ -205,7 +206,7 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
   const configBody = {
     url,
     apiKey: issued.api_key,
-    workspace_id: issued.workspace_id,
+    account_id: issued.account_id,
     agent_id: issued.agent_id,
     host_id: issued.host_id ?? null,
   };
@@ -230,7 +231,7 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
 
   process.stderr.write(`  ✓ paired\n`);
   process.stderr.write(`    agent_id     ${issued.agent_id}\n`);
-  process.stderr.write(`    workspace_id ${issued.workspace_id}\n`);
+  process.stderr.write(`    account_id ${issued.account_id}\n`);
   process.stderr.write(`    apiKey       ${maskKey(issued.api_key)}\n`);
   process.stderr.write(`  ✓ wrote ${targetPath} (mode 0600)\n`);
   process.stderr.write(`  ✓ wrote ${agentPath} (mode 0600)\n\n`);
@@ -240,6 +241,6 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
     ok: true,
     configPath: targetPath,
     agentId: issued.agent_id,
-    workspaceId: issued.workspace_id,
+    accountId: issued.account_id,
   };
 }

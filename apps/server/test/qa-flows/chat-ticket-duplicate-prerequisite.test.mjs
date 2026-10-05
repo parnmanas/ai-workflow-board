@@ -9,14 +9,14 @@
 // resolves its duplicates without firing the duplicates' own done hooks.
 //
 // Board removal: tickets are created through the real REST intake
-// (POST /api/workspaces/:wsId/tickets → TicketService.create) and dispatch is
+// (POST /api/accounts/:wsId/tickets → TicketService.create) and dispatch is
 // TicketDispatchService. The old role-assignment child checks went away with
 // workspace roles.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createTicket, createUser, createWorkspace, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
+import { createAgent, createTicket, createUser, createAccount, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_CHAT_DUPLICATE_PORT || '0';
@@ -51,7 +51,7 @@ const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
 async function rest(method, path, wsId, body) {
   const response = await fetch(`http://localhost:${port}/api${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': wsId },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}`, 'X-Account-Id': wsId },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await response.text();
@@ -62,17 +62,17 @@ async function rest(method, path, wsId, body) {
 
 /** Real REST intake (TicketService.create incl. duplicate assessment). */
 async function intake(wsId, body) {
-  const res = await rest('POST', `/workspaces/${wsId}/tickets`, wsId, body);
+  const res = await rest('POST', `/accounts/${wsId}/tickets`, wsId, body);
   if (res.status !== 201) assert.fail(`REST ticket intake failed (${res.status}): ${JSON.stringify(res.body)}`);
   return res.body;
 }
 
 /** A workspace + an assignee agent whose Runtime Host stream a VirtualAgent listens on. */
 async function scene(name, { capacity = 10 } = {}) {
-  const ws = await createWorkspace(app, gdst, name);
+  const ws = await createAccount(app, gdst, name);
   // Capacity is raised so "the agent is busy" can never be why a duplicate
   // stayed quiet — the duplicate gate itself must be.
-  await ds.getRepository('Workspace').update({ id: ws.id }, { max_concurrent_tickets_per_agent: capacity });
+  await ds.getRepository('Account').update({ id: ws.id }, { max_concurrent_tickets_per_agent: capacity });
   const assignee = await createAgent(app, gdst, ws.id, { name: `${name}-assignee`, runtime: true });
   const va = new VirtualAgent({ name: assignee.name, agentId: assignee.id, apiKey: runtimeHostKeyForAgent(assignee.id), port });
   await va.start();
@@ -88,8 +88,8 @@ const CHAT_REPORT = {
 };
 
 test('chat intake auto-links an equivalent report to its canonical ticket and records the audit trail', async () => {
-  const ws = await createWorkspace(app, gdst, 'chat-dedupe-intake');
-  const prerequisite = await createTicket(app, gdst, { workspaceId: ws.id, status: 'backlog', title: 'Prerequisite' });
+  const ws = await createAccount(app, gdst, 'chat-dedupe-intake');
+  const prerequisite = await createTicket(app, gdst, { accountId: ws.id, status: 'backlog', title: 'Prerequisite' });
 
   step('Create canonical A through REST');
   // backlog keeps dispatch out of this test — it is about intake linking.
@@ -148,7 +148,7 @@ test('chat intake auto-links an equivalent report to its canonical ticket and re
   step('Completing a prerequisite flips the linked duplicate\'s pending flag exactly once');
   await ticketRepo.update(duplicate.id, { pending_on_tickets: true });
   await prereqRepo.save(prereqRepo.create({
-    ticket_id: duplicate.id, prerequisite_ticket_id: prerequisite.id, workspace_id: ws.id,
+    ticket_id: duplicate.id, prerequisite_ticket_id: prerequisite.id, account_id: ws.id,
   }));
   await ticketRepo.update(prerequisite.id, { status: 'done', terminal_entered_at: new Date() });
   assert.deepEqual(await prerequisites.onPrerequisiteReached(prerequisite.id), [duplicate.id]);
@@ -187,8 +187,8 @@ test('a linked duplicate is never dispatched on its own', async () => {
 // canonical ticket ('resolved_from_canonical'); the duplicates' own done hooks
 // (next ticket, dependents) stay silent.
 test('completing the canonical ticket resolves its duplicates exactly once without their done hooks', async () => {
-  const ws = await createWorkspace(app, gdst, 'chat-dedupe-resolve');
-  const nextTicket = await createTicket(app, gdst, { workspaceId: ws.id, status: 'backlog', title: 'Must not wake after duplicate resolution' });
+  const ws = await createAccount(app, gdst, 'chat-dedupe-resolve');
+  const nextTicket = await createTicket(app, gdst, { accountId: ws.id, status: 'backlog', title: 'Must not wake after duplicate resolution' });
   const canonical = await intake(ws.id, { ...CHAT_REPORT, status: 'backlog' });
   const duplicate = await intake(ws.id, {
     ...CHAT_REPORT, title: '[Bug] Artifact pipeline regression', status: 'backlog', next_ticket_id: nextTicket.id,
@@ -221,7 +221,7 @@ test('ambiguous decisions only link offered candidates, pending projection is ca
   // room matches both at medium confidence.
   const rootOne = await intake(ws.id, { title: 'Upload button broken', source_kind: 'chat', source_chat_room_id: 'room-r', status: 'backlog' });
   const rootTwo = await intake(ws.id, { title: 'Login page slow', source_kind: 'chat', source_chat_room_id: 'room-r', status: 'backlog' });
-  const unrelated = await createTicket(app, gdst, { workspaceId: ws.id, status: 'backlog', title: 'Not a candidate' });
+  const unrelated = await createTicket(app, gdst, { accountId: ws.id, status: 'backlog', title: 'Not a candidate' });
 
   step('Ambiguous decisions only link offered candidates');
   const linkAssessment = await duplicateService.assess(ws.id, {
@@ -230,7 +230,7 @@ test('ambiguous decisions only link offered candidates, pending projection is ca
   assert.ok(linkAssessment.candidates.length >= 2, 'ambiguous report must expose multiple medium-confidence roots');
   assert.equal(linkAssessment.ambiguous, true);
   const ambiguousLink = await createTicket(app, gdst, {
-    workspaceId: ws.id, status: 'in_progress', title: 'Different symptom one', assignee,
+    accountId: ws.id, status: 'in_progress', title: 'Different symptom one', assignee,
   });
   await ticketRepo.update(ambiguousLink.id, {
     source_kind: 'chat', source_chat_room_id: 'room-r', pending_user_action: true,
@@ -260,7 +260,7 @@ test('ambiguous decisions only link offered candidates, pending projection is ca
   });
   assert.ok(keepAssessment.candidates.some(c => c.ticket_id === rootTwo.id));
   const independent = await createTicket(app, gdst, {
-    workspaceId: ws.id, status: 'in_progress', title: 'Different symptom two', assignee,
+    accountId: ws.id, status: 'in_progress', title: 'Different symptom two', assignee,
   });
   await ticketRepo.update(independent.id, {
     source_kind: 'chat', source_chat_room_id: 'room-r', pending_user_action: true,

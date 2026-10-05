@@ -15,7 +15,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { QaRun } from '../../entities/QaRun';
 import { QaScenario } from '../../entities/QaScenario';
 import { LogService } from '../../services/log.service';
@@ -120,7 +120,7 @@ export const CURRENT_TASK_STALE_MS = 15 * 60_000;
 // the map stays bounded.
 //
 // The effective TTL is NOT a fixed constant — it is derived every sweep as
-// clamp(MAX(Workspace.supervisor_stale_ms), FLOOR, CEILING). Why: the
+// clamp(MAX(Account.supervisor_stale_ms), FLOOR, CEILING). Why: the
 // TicketSupervisor force-suppression gate compares a strand's output age
 // against that workspace's supervisor_stale_ms. If retention were a fixed 6 h
 // but an operator raised supervisor_stale_ms above it (a real incident-response
@@ -137,7 +137,7 @@ export const OUTPUT_LIVENESS_TTL_CEILING_MS = 24 * 60 * 60_000;  // 24 h — har
 
 /**
  * Effective output-liveness retention TTL (ticket 47a72129), derived from the
- * largest supervisor_stale_ms across workspaces so the supervisor's force-gate
+ * largest supervisor_stale_ms across accounts so the supervisor's force-gate
  * window (which compares output age against supervisor_stale_ms) is always
  * backed by a still-present entry. Pure + exported for unit testing.
  *   - maxStaleMs <= FLOOR (normal config) → FLOOR (unchanged 6 h behavior)
@@ -1062,7 +1062,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     void seen;
 
     // Refresh the effective output-liveness retention TTL (ticket 47a72129)
-    // from the largest supervisor_stale_ms across workspaces, so retention is
+    // from the largest supervisor_stale_ms across accounts, so retention is
     // always >= any workspace's force-gate window (up to the CEILING).
     this.outputLivenessTtlMs = await this._resolveOutputLivenessTtlMs();
 
@@ -1079,7 +1079,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Derive the effective output-liveness retention TTL (ticket 47a72129) from
-   * the largest Workspace.supervisor_stale_ms. A single cheap aggregate per 30s
+   * the largest Account.supervisor_stale_ms. A single cheap aggregate per 30s
    * sweep. On any failure returns the CURRENT TTL — never shrinks retention on a
    * transient DB blip, since a shrink is exactly what would re-open the
    * exit-143 deathloop.
@@ -1087,7 +1087,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   private async _resolveOutputLivenessTtlMs(): Promise<number> {
     try {
       const row = await this.dataSource
-        .getRepository(Workspace)
+        .getRepository(Account)
         .createQueryBuilder('ws')
         .select('MAX(ws.supervisor_stale_ms)', 'max')
         .getRawOne<{ max: number | string | null }>();

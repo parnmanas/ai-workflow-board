@@ -1,12 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-import { Action, Ticket, WorkflowFunction, Workspace, WorkspaceSchedule } from '../../entities';
+import { Action, Ticket, WorkflowFunction, Account, AutomationSchedule } from '../../entities';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
   ARTIFACT_REF_TYPES, ArtifactRefType, UUID_RE, formatArtifactRef, formatUnavailableArtifact, ticketPath,
 } from '../../common/artifact-ref';
 import { ReBACService } from '../../services/rebac.service';
+import { AccountAccessService } from '../../services/account-access.service';
 
 export interface ResolvedArtifactRef {
   type: ArtifactRefType;
@@ -14,8 +15,8 @@ export interface ResolvedArtifactRef {
   available: boolean;
   label: string;
   deepLink: string | null;
-  workspaceName?: string;
-  reason?: 'malformed_id' | 'workspace_access_denied' | 'not_found' | 'outside_workspace' | 'no_detail_surface';
+  accountName?: string;
+  reason?: 'malformed_id' | 'account_access_denied' | 'not_found' | 'outside_account' | 'no_detail_surface';
 }
 
 @Injectable()
@@ -25,28 +26,24 @@ export class ArtifactRefsService {
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(Action) private readonly actions: Repository<Action>,
     @InjectRepository(WorkflowFunction) private readonly functions: Repository<WorkflowFunction>,
-    @InjectRepository(WorkspaceSchedule) private readonly schedules: Repository<WorkspaceSchedule>,
-    @InjectRepository(Workspace) private readonly workspaces: Repository<Workspace>,
+    @InjectRepository(AutomationSchedule) private readonly schedules: Repository<AutomationSchedule>,
+    @InjectRepository(Account) private readonly accounts: Repository<Account>,
     private readonly rebac: ReBACService,
+    private readonly access: AccountAccessService,
   ) {}
 
   async resolveMany(
     user: { id: string; role: string },
-    workspaceId: string,
+    accountId: string,
     refs: Array<{ type: ArtifactRefType; id: string }>,
   ): Promise<ResolvedArtifactRef[]> {
-    const allowed = !!workspaceId && (user.role === 'admin' ||
-      await this.rebac.check({ type: 'user', id: user.id }, 'owner', { type: 'workspace', id: workspaceId }) ||
-      await this.rebac.check({ type: 'user', id: user.id }, 'member', { type: 'workspace', id: workspaceId }));
-    const workspace = allowed
-      ? await this.workspaces.findOne({ where: { id: workspaceId } })
-      : null;
+    const allowedIds = await this.access.accessibleIds(user);
     return Promise.all(refs.slice(0, 100).map(ref =>
-      this.resolveOne(ref, workspaceId, allowed, workspace?.name),
+      this.resolveOne(ref, accountId, true, undefined, allowedIds),
     ));
   }
 
-  async normalizeStoredOutput(workspaceId: string, text: string): Promise<string> {
+  async normalizeStoredOutput(accountId: string, text: string): Promise<string> {
     const tokenLike = /#\[(ticket|agent|action|function|schedule):([^|\]\r\n]+)\|([^\]\r\n]+)\]/gi;
     const matches = [...text.matchAll(tokenLike)];
     if (matches.length === 0) return text;
@@ -56,7 +53,7 @@ export class ArtifactRefsService {
       output += text.slice(cursor, match.index);
       const type = match[1].toLowerCase() as ArtifactRefType;
       const id = match[2].trim();
-      const resolved = await this.resolveOne({ type, id }, workspaceId, true);
+      const resolved = await this.resolveOne({ type, id }, accountId, true);
       output += resolved.available
         ? formatArtifactRef(type, id, resolved.label)
         : formatUnavailableArtifact(type, id, match[3], resolved.reason || '존재하지 않거나 권한 없음');
@@ -71,14 +68,15 @@ export class ArtifactRefsService {
 
   private async resolveOne(
     ref: { type: ArtifactRefType; id: string },
-    workspaceId: string,
+    accountId: string,
     workspaceAllowed: boolean,
-    workspaceName?: string,
+    accountName?: string,
+    allowedAccountIds?: string[],
   ): Promise<ResolvedArtifactRef> {
     if (!ARTIFACT_REF_TYPES.includes(ref.type) || !UUID_RE.test(ref.id)) {
       return this.unavailable(ref.type, ref.id, 'malformed_id');
     }
-    if (!workspaceAllowed) return this.unavailable(ref.type, ref.id, 'workspace_access_denied');
+    if (!workspaceAllowed) return this.unavailable(ref.type, ref.id, 'account_access_denied');
 
     let entity: any = null;
     let entityWorkspace: string | null = null;
@@ -86,31 +84,34 @@ export class ArtifactRefsService {
     let deepLink: string | null = null;
     if (ref.type === 'ticket') {
       entity = await this.tickets.findOne({ where: { id: ref.id } });
-      entityWorkspace = entity?.workspace_id ?? null;
+      entityWorkspace = entity?.account_id ?? null;
       label = entity?.title || '';
-      deepLink = entity ? ticketPath(workspaceId, entity.id) : null;
+      deepLink = entity ? ticketPath(accountId, entity.id) : null;
     } else if (ref.type === 'agent') {
       // P4c-4: Host/링크 해소 (Agent 테이블 없음, agents UI 제거 — 딥링크 없음).
       const identity = await resolveCallerIdentityRow(this.dataSource, ref.id);
       entity = identity as any;
-      entityWorkspace = identity?.workspace_id ?? workspaceId;
+      entityWorkspace = identity?.account_id ?? accountId;
       label = identity?.name || '';
       deepLink = null;
     } else {
       const repo = ref.type === 'action' ? this.actions : ref.type === 'function' ? this.functions : this.schedules;
       entity = await repo.findOne({ where: { id: ref.id } as any });
-      entityWorkspace = entity?.workspace_id ?? (ref.type === 'function' && entity ? workspaceId : null);
+      entityWorkspace = entity?.account_id ?? null;
       label = entity?.name || entity?.key || '';
       const surface = ref.type === 'action' ? 'actions' : ref.type === 'function' ? 'functions' : 'schedules';
-      deepLink = entity ? `/ws/${workspaceId}/${surface}?artifact=${entity.id}` : null;
+      deepLink = entity ? `/${surface}?artifact=${entity.id}` : null;
     }
     if (!entity) return this.unavailable(ref.type, ref.id, 'not_found');
-    if (entityWorkspace !== workspaceId) {
-      return this.unavailable(ref.type, ref.id, 'outside_workspace');
+    if (allowedAccountIds) {
+      if (entityWorkspace && !allowedAccountIds.includes(entityWorkspace)) return this.unavailable(ref.type, ref.id, 'account_access_denied');
+      if (entityWorkspace) accountName = (await this.accounts.findOne({ where: { id: entityWorkspace } }))?.name;
+    } else if (entityWorkspace !== accountId && !(ref.type === 'function' && entityWorkspace === null)) {
+      return this.unavailable(ref.type, ref.id, 'outside_account');
     }
     if (!deepLink) {
-      return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label, workspaceName };
+      return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label, accountName };
     }
-    return { type: ref.type, id: ref.id, available: true, label, deepLink, workspaceName };
+    return { type: ref.type, id: ref.id, available: true, label, deepLink, accountName };
   }
 }

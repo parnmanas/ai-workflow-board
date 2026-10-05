@@ -307,7 +307,7 @@ export interface InstanceHeartbeatPayload {
   // 필드(없으면 키의 host_id 바인딩)로 runtime_hosts 에서 정체성을 먼저
   // 해소하고, Agent 행은 best-effort 로만 읽는다.
   host_id?: string | null;
-  workspace_id: string | null;
+  account_id: string | null;
   mode: InstanceMode;
   hostname: string;
   plugin_version: string;
@@ -638,7 +638,7 @@ export class InstanceHeartbeat {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
         ...(this.#hostId ? { host_id: this.#hostId } : {}),
-        workspace_id: (config?.workspace_id as string) || null,
+        account_id: (config?.account_id as string) || null,
         mode: meta?.mode === 'manager' ? 'manager' : 'manager',
         hostname: hostname() || 'unknown',
         plugin_version: String(meta?.version || 'unknown'),

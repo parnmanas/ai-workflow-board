@@ -349,7 +349,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       try {
         await this.runner.nudgeOrchestrator(
           mission.id,
-          mission.workspace_id,
+          mission.account_id,
           { type: 'system', id: '', name: 'Reaper' },
           `No plan has been submitted for this mission yet (${Math.round(
             (nowMs - new Date(baseline).getTime()) / 60_000,
@@ -454,7 +454,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       try {
         await this.runner.nudgeOrchestrator(
           mission.id,
-          mission.workspace_id,
+          mission.account_id,
           { type: 'system', id: '', name: 'Reaper' },
           `No step has been in flight for ${Math.round(
             (nowMs - baselineMs) / 60_000,

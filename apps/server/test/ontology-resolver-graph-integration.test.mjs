@@ -120,7 +120,7 @@ before(async () => {
 
   await persistFactBundles(AppOntologyDataSource, {
     graphId: GRAPH_ID,
-    workspaceId: 'resolver-integration-ws',
+    accountId: 'resolver-integration-ws',
     resourceId: 'resolver-integration-resource',
     folderPath: '',
     commit: 'resolver-integration-commit',
@@ -131,7 +131,7 @@ before(async () => {
 
   summary = await resolveCrossFileEdges(AppOntologyDataSource, {
     graphId: GRAPH_ID,
-    workspaceId: 'resolver-integration-ws',
+    accountId: 'resolver-integration-ws',
     commit: 'resolver-integration-commit',
     extractionRunId: 'resolver-integration-resolve-run-1',
   });
@@ -235,7 +235,7 @@ describe('resolveCrossFileEdges — 재시도·중복 입력 멱등성', () => {
     const firstReverse = await reverseIndexRepo.find({ where: { graph_id: GRAPH_ID }, order: { id: 'ASC' } });
     const input = {
       graphId: GRAPH_ID,
-      workspaceId: 'resolver-integration-ws',
+      accountId: 'resolver-integration-ws',
       commit: 'resolver-integration-commit',
       extractionRunId: 'resolver-integration-retry',
     };
@@ -284,7 +284,7 @@ describe('resolveCrossFileEdges — 리뷰 지적(1라운드, 블로커): 이 �
     }
     await persistFactBundles(AppOntologyDataSource, {
       graphId: SCIP_GRAPH_ID,
-      workspaceId: 'resolver-scip-ws',
+      accountId: 'resolver-scip-ws',
       resourceId: 'resolver-scip-resource',
       folderPath: '',
       commit: 'scip-commit',
@@ -306,7 +306,7 @@ describe('resolveCrossFileEdges — 리뷰 지적(1라운드, 블로커): 이 �
     scipCallsEdgeId = randomUUID();
     await edgeRepo.save({
       id: scipCallsEdgeId,
-      workspace_id: 'resolver-scip-ws',
+      account_id: 'resolver-scip-ws',
       graph_id: SCIP_GRAPH_ID,
       src_id: subFile.id,
       dst_id: baseRender.id,
@@ -333,7 +333,7 @@ describe('resolveCrossFileEdges — 리뷰 지적(1라운드, 블로커): 이 �
 
     scipSummary = await resolveCrossFileEdges(AppOntologyDataSource, {
       graphId: SCIP_GRAPH_ID,
-      workspaceId: 'resolver-scip-ws',
+      accountId: 'resolver-scip-ws',
       commit: 'scip-commit',
       extractionRunId: 'scip-resolve-run-1',
     });
@@ -369,7 +369,7 @@ describe('resolveCrossFileEdges — 리뷰 지적(2라운드, 블로커1): remov
   function edgeRow(overrides) {
     return {
       id: randomUUID(),
-      workspace_id: 'resolver-status-filter-ws',
+      account_id: 'resolver-status-filter-ws',
       graph_id: STATUS_GRAPH_ID,
       layer: 'structural',
       confidence: 0.95,
@@ -429,7 +429,7 @@ describe('resolveCrossFileEdges — 리뷰 지적(2라운드, 블로커1): remov
 
     await resolveCrossFileEdges(AppOntologyDataSource, {
       graphId: STATUS_GRAPH_ID,
-      workspaceId: 'resolver-status-filter-ws',
+      accountId: 'resolver-status-filter-ws',
       commit: 'c1',
       extractionRunId: 'status-filter-resolve-run',
     });
@@ -463,7 +463,7 @@ describe('updateChunked — 리뷰 지적(2라운드, 블로커2): 대량 CALLS 
       callIds.push(id);
       await edgeRepo.save({
         id,
-        workspace_id: 'resolver-chunk-ws',
+        account_id: 'resolver-chunk-ws',
         graph_id: CHUNK_GRAPH_ID,
         src_id: randomUUID(),
         dst_id: randomUUID(),

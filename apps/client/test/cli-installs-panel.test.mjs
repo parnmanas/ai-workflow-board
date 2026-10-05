@@ -27,7 +27,7 @@ const { InstalledCliVersions } = await import('../src/components/admin/AgentMana
 const BASE = {
   instance_id: 'inst-1',
   agent_id: 'mgr-1',
-  workspace_id: 'ws-1',
+  account_id: 'ws-1',
   mode: 'manager',
   hostname: 'ragnar',
   plugin_version: '1.0.0',

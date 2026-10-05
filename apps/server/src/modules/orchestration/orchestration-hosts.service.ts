@@ -81,11 +81,11 @@ export class OrchestrationHostsService {
    *
    * Deliberately NOT narrowed by workspace. A Runtime Host is a machine, not a
    * workspace member — managers are paired once by an admin and legitimately run
-   * slots for several workspaces (the cross-workspace `listManagers` endpoint
+   * slots for several accounts (the cross-workspace `listManagers` endpoint
    * takes the same position). The workspace scope that matters is stamped onto
    * the slot's credential visibility check at roster-write time.
    */
-  async listRuntimeHosts(_workspaceId: string): Promise<RuntimeHostView[]> {
+  async listRuntimeHosts(_accountId: string): Promise<RuntimeHostView[]> {
     // P4 (manager identity → RuntimeHost): 카탈로그의 원천을 runtime_hosts 로
     // 옮긴다. manager Agent 행은 legacy 별칭으로만 남는다 (같은 페어링의
     // dual-write 쌍은 api_keys 의 agent_id/host_id 쌍으로 묶어 하나로 합친다).
@@ -193,7 +193,7 @@ export class OrchestrationHostsService {
    * error — the command is already dispatched, so a late enumeration still
    * arrives on the next heartbeat; the caller just gets the current list back.
    */
-  async refreshHostModels(managerAgentId: string, workspaceId: string): Promise<RuntimeHostView | null> {
+  async refreshHostModels(managerAgentId: string, accountId: string): Promise<RuntimeHostView | null> {
     // 재열거 + ack 대기는 HostModelsService 가 한다 — Agent 다이얼로그 · 세션 설정과
     // 같은 경로. 여기서는 그 결과에 이 로스터 화면 고유의 병합(agent 행에 핀된 모델)만 얹는다.
     let id: string;
@@ -203,7 +203,7 @@ export class OrchestrationHostsService {
       if (err instanceof HostModelsError) throw orchestrationError(err.status, err.message);
       throw err;
     }
-    const hosts = await this.listRuntimeHosts(workspaceId);
+    const hosts = await this.listRuntimeHosts(accountId);
     return hosts.find((h) => h.manager_agent_id === id) ?? null;
   }
 

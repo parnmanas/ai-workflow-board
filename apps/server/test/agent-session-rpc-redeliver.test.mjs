@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 process.env.AGENT_DEV_MODE = 'false';
@@ -46,9 +46,9 @@ test('스트림이 없을 때 보낸 list 는 매니저 스트림이 붙으면 �
   const { AgentConnectivityRegistry } = await import('../dist/services/agent-connectivity.registry.js');
   const connectivity = app.get(AgentConnectivityRegistry);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'session-redeliver');
+  const ws = await createAccount(app, getDataSourceToken, 'session-redeliver');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
-  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Workspace-Id': ws.id };
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': ws.id };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };

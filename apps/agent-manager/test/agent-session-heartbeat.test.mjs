@@ -32,7 +32,7 @@ function stubFetch(t, { capture = () => {} } = {}) {
 }
 
 function heartbeatWith(meta) {
-  return new InstanceHeartbeat({ url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' }, 'manager-1', {
+  return new InstanceHeartbeat({ url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' }, 'manager-1', {
     mode: 'manager', version: 'test', cli: 'mixed', cliAdapters: [], ...meta,
   });
 }

@@ -1,4 +1,4 @@
-// Environment Setup simplification (ticket 8fbe90e9): Board/Workspace
+// Environment Setup simplification (ticket 8fbe90e9): Board/Account
 // environment_config is now a repository-Resource picker only. This guards the
 // three contracts the change rests on:
 //

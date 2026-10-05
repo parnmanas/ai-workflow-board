@@ -7,7 +7,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * `AgentUsageService.getTokenUsageStats()`는 `subagents`를 직접 읽지만, ended
  * row는 종료 후 `SUBAGENT_ENDED_RETENTION_HOURS`(기본 48h) 지나면 reap되므로
  * (`SubagentMonitorService._sweepEnded()`) 그 메서드는 retention 이내의 윈도우
- * 질의만 안전하다. 이 테이블이 영속 쪽을 맡는다: (workspace_id, usage_date,
+ * 질의만 안전하다. 이 테이블이 영속 쪽을 맡는다: (account_id, usage_date,
  * agent_id) 당 1행이며, sweep이 원본 row를 지우는 것과 **같은 트랜잭션**에서
  * 배치의 usage를 여기 접어 넣는다 — 별도 cron 없음. 그래서 어떤 row도
  * `subagents`에 "live"로 있으면서 동시에 여기 "rolled up"으로 있을 수 없고
@@ -45,14 +45,14 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * 에서는 절대 재현되지 않는다 — 탐지 경로는 테스트가 아니라 sweep 로그다.
  */
 @Entity('agent_usage_daily_rollups')
-@Unique('uq_agent_usage_rollup_ws_date_agent', ['workspace_id', 'usage_date', 'agent_id'])
-@Index(['workspace_id', 'usage_date'])
+@Unique('uq_agent_usage_rollup_ws_date_agent', ['account_id', 'usage_date', 'agent_id'])
+@Index(['account_id', 'usage_date'])
 export class AgentUsageDailyRollup {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // 롤업된 run들의 `started_at`이 속하는 UTC 달력 날짜, 'YYYY-MM-DD'.
   // `date` 컬럼이 아니라 plain varchar인 이유: sqlite엔 애초에 네이티브 date

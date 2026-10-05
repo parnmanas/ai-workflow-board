@@ -42,7 +42,7 @@ process.env.SQLJS_DB_PATH = DB_FILE;
 process.env.NODE_ENV = 'test';
 
 const dbUrl = 'file://' + path.join(DIST_ROOT, 'db.js');
-const wsUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'Workspace.js');
+const wsUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'Account.js');
 
 const {
   buildDataSourceOptions,
@@ -52,7 +52,7 @@ const {
   isSqljsBackend,
   SqljsWriteSubscriber,
 } = await import(dbUrl);
-const { Workspace } = await import(wsUrl);
+const { Account } = await import(wsUrl);
 const { DataSource } = await import('typeorm');
 
 /** Count rows by opening a *fresh* DataSource on the same file — a "reboot". */
@@ -60,7 +60,7 @@ async function countAfterReboot() {
   const ds = new DataSource(buildDataSourceOptions());
   await ds.initialize();
   try {
-    return await ds.getRepository(Workspace).count();
+    return await ds.getRepository(Account).count();
   } finally {
     await ds.destroy();
   }
@@ -103,7 +103,7 @@ describe('sql.js batched flush (ticket d5a8594a)', () => {
   });
 
   it('write amplification: N writes → exactly ONE saveDatabase per flush', async () => {
-    const repo = AppDataSource.getRepository(Workspace);
+    const repo = AppDataSource.getRepository(Account);
 
     // Five writes, no flush in between.
     saveSpy = 0;
@@ -127,7 +127,7 @@ describe('sql.js batched flush (ticket d5a8594a)', () => {
   });
 
   it('data integrity: flushed rows survive a reboot; unflushed rows are the loss window', async () => {
-    const repo = AppDataSource.getRepository(Workspace);
+    const repo = AppDataSource.getRepository(Account);
 
     // Baseline: everything written so far is flushed.
     await flushSqljs(AppDataSource, true);
@@ -171,7 +171,7 @@ describe('sql.js batched flush (ticket d5a8594a)', () => {
   // there is no "next tick" on shutdown. The fix: force=true awaits the in-flight
   // flush and re-exports.
   it('forced flush supersedes an in-flight periodic flush (no lost last batch on shutdown)', async () => {
-    const repo = AppDataSource.getRepository(Workspace);
+    const repo = AppDataSource.getRepository(Account);
     await flushSqljs(AppDataSource, true);
     const beforeCount = await countAfterReboot();
 

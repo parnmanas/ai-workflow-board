@@ -31,7 +31,7 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
 }
 
 export interface CreateSecurityScheduleInput {
-  workspaceId: string;
+  accountId: string;
   name: string;
   kind?: SecurityScheduleKind;
   scope?: SecurityScheduleScope;
@@ -44,7 +44,7 @@ export interface CreateSecurityScheduleInput {
   createdBy?: string;
 }
 
-export type UpdateSecurityScheduleInput = Partial<Omit<CreateSecurityScheduleInput, 'workspaceId' | 'createdBy'>>;
+export type UpdateSecurityScheduleInput = Partial<Omit<CreateSecurityScheduleInput, 'accountId' | 'createdBy'>>;
 
 /**
  * Result of a manual run-now. Discriminated by `kind`: a 'scan' schedule kicks a
@@ -135,20 +135,20 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string): Promise<SecuritySchedule[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+  async list(accountId: string): Promise<SecuritySchedule[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.workspace_id = :ws', { ws: workspaceId });
+      .where('s.account_id = :ws', { ws: accountId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
-  async get(id: string, workspaceId: string): Promise<SecuritySchedule> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.scheduleRepo, { where: { id, workspace_id: workspaceId } }, 'security schedule not found in workspace');
+  async get(id: string, accountId: string): Promise<SecuritySchedule> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'security schedule not found in workspace');
   }
 
   async create(input: CreateSecurityScheduleInput): Promise<SecuritySchedule> {
-    if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!input.accountId) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
 
     const kind = normalizeScheduleKind(input.kind);
@@ -158,7 +158,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     const enabled = input.enabled !== false;
 
     const draft = this.scheduleRepo.create({
-      workspace_id: input.workspaceId,
+      account_id: input.accountId,
       name: input.name.trim(),
       kind,
       scope,
@@ -177,8 +177,8 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     return this.scheduleRepo.save(draft);
   }
 
-  async update(id: string, workspaceId: string, patch: UpdateSecurityScheduleInput): Promise<SecuritySchedule> {
-    const schedule = await this.get(id, workspaceId);
+  async update(id: string, accountId: string, patch: UpdateSecurityScheduleInput): Promise<SecuritySchedule> {
+    const schedule = await this.get(id, accountId);
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -215,8 +215,8 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     return this.scheduleRepo.save(schedule);
   }
 
-  async remove(id: string, workspaceId: string): Promise<void> {
-    const schedule = await this.get(id, workspaceId);
+  async remove(id: string, accountId: string): Promise<void> {
+    const schedule = await this.get(id, accountId);
     await this.scheduleRepo.delete({ id: schedule.id });
   }
 
@@ -230,8 +230,8 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
    * 'checklist_refresh' dispatches a refresh per in-scope profile (no batch, so
    * last_batch_id is left untouched).
    */
-  async runNow(id: string, workspaceId: string, triggeredById: string): Promise<RunSecurityScheduleNowResult> {
-    const schedule = await this.get(id, workspaceId);
+  async runNow(id: string, accountId: string, triggeredById: string): Promise<RunSecurityScheduleNowResult> {
+    const schedule = await this.get(id, accountId);
 
     if (normalizeScheduleKind(schedule.kind) === 'checklist_refresh') {
       const refreshes = await this._dispatchChecklistRefresh(schedule, triggeredById);
@@ -356,7 +356,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       const ids = Array.isArray(schedule.profile_ids) ? schedule.profile_ids : [];
       if (ids.length === 0) throw makeError(400, 'selected schedule has no profile_ids');
       return this.runService.startBatch({
-        workspaceId: schedule.workspace_id,
+        accountId: schedule.account_id,
         profileIds: ids,
         stopOnFail: schedule.stop_on_fail,
         triggeredByType: 'system',
@@ -366,7 +366,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     // scope='all' → resolve every enabled profile in the workspace AT DISPATCH
     // TIME (no id snapshot), so profile add/remove is reflected automatically.
     return this.runService.startBatch({
-      workspaceId: schedule.workspace_id,
+      accountId: schedule.account_id,
       all: true,
       stopOnFail: schedule.stop_on_fail,
       triggeredByType: 'system',
@@ -387,7 +387,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       const ids = Array.isArray(schedule.profile_ids) ? schedule.profile_ids : [];
       if (ids.length === 0) throw makeError(400, 'selected schedule has no profile_ids');
       return this.runService.refreshChecklistsForScope({
-        workspaceId: schedule.workspace_id,
+        accountId: schedule.account_id,
         profileIds: ids,
         triggeredByType: 'system',
         triggeredById,
@@ -396,7 +396,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     // scope='all' → resolve every enabled profile in the workspace AT DISPATCH
     // TIME (no id snapshot).
     return this.runService.refreshChecklistsForScope({
-      workspaceId: schedule.workspace_id,
+      accountId: schedule.account_id,
       all: true,
       triggeredByType: 'system',
       triggeredById,

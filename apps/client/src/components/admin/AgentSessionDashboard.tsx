@@ -11,7 +11,7 @@ interface AgentSessionRow {
   is_online: boolean;
   last_seen_at: string | null;
   connected_at: string | null;
-  workspace_id: string;
+  account_id: string;
   pending_trigger_count: number;
 }
 
@@ -21,20 +21,20 @@ export default function AgentSessionDashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const workspaceId: string = (user as any)?.workspace_id ?? '';
+  const accountId: string = (user as any)?.account_id ?? '';
 
   // P4c-4: Agent 대시보드 제거 — Host 카탈로그를 행으로 매핑한다.
   const load = async () => {
-    if (!workspaceId) return;
+    if (!accountId) return;
     try {
-      const hosts = await api.listOrchestrationRuntimeHosts(workspaceId);
+      const hosts = await api.listOrchestrationRuntimeHosts(accountId);
       setRows((hosts as any[]).map((h: any) => ({
         id: h.manager_agent_id,
         name: h.manager_name,
         is_online: !!h.is_online,
         last_seen_at: h.last_seen_at,
         connected_at: null,
-        workspace_id: workspaceId,
+        account_id: accountId,
         pending_trigger_count: 0,
       })));
       setLastRefresh(new Date());
@@ -49,7 +49,7 @@ export default function AgentSessionDashboard() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [workspaceId]);
+  }, [accountId]);
 
   const formatTime = (iso: string | null): string => {
     if (!iso) return '—';

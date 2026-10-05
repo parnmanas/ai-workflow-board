@@ -28,7 +28,7 @@ export class BackfillAgentRuntimeConfig1760000000067 implements MigrationInterfa
       const runtimeId = agent.type.trim().toLowerCase();
 
       if (runtimeId === 'manager') {
-        agent.workspace_id = null;
+        agent.account_id = null;
         agent.manager_agent_id = null;
         agent.runtime_config = null;
         await agents.save(agent);

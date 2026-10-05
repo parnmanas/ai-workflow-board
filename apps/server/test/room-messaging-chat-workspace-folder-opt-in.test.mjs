@@ -58,9 +58,9 @@ function makeSvc({ room, workspace }) {
     async findOne() { return room; }, // _handleDmAgentRequest(room.type 체크)와 roomForName 양쪽에서 함께 쓰인다
     async update() {},
   };
-  const workspaceRepo = {
+  const accountRepo = {
     calls: 0,
-    async findOne() { workspaceRepo.calls++; return workspace; },
+    async findOne() { accountRepo.calls++; return workspace; },
   };
   const messageRepo = {
     createQueryBuilder: makeQueryBuilder,
@@ -100,9 +100,9 @@ function makeSvc({ room, workspace }) {
     roomRepo, {}, messageRepo, {}, {}, {},
     // dataSource (티켓 7d8ea7c9): _resolveChatRuntimeProfile 전용이며, 이 파일의
     // 시나리오는 전부 group room(@mention 없음, DM 아님)이라 도달하지 않는다.
-    workspaceRepo, {}, noopLog, membership, mentionService, {}, undefined,
+    accountRepo, {}, noopLog, membership, mentionService, {}, undefined,
   );
-  return { svc, workspaceRepo };
+  return { svc, accountRepo };
 }
 
 function captureEmit() {
@@ -140,21 +140,21 @@ test('opted-in workspace + plain chat room: emitted chat_room_message carries a 
 });
 
 test('NOT opted in (default): no run_provision at all — byte-identical to pre-ticket wire shape', async () => {
-  const { svc, workspaceRepo } = makeSvc({ room: plainRoom, workspace: optedOutWs });
+  const { svc, accountRepo } = makeSvc({ room: plainRoom, workspace: optedOutWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
     const payload = capture.get();
     assert.ok(payload);
     assert.ok(!('run_provision' in payload), 'the key itself must be absent, not just falsy');
-    assert.equal(workspaceRepo.calls, 1, 'the flag WAS looked up (opt-out is a real decision, not a skipped check)');
+    assert.equal(accountRepo.calls, 1, 'the flag WAS looked up (opt-out is a real decision, not a skipped check)');
   } finally {
     capture.off();
   }
 });
 
 test('Action Run room: no fallback provision even when the workspace opted in (Actions supply their own via opts.runProvision)', async () => {
-  const { svc, workspaceRepo } = makeSvc({ room: actionRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: actionRoom, workspace: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -162,14 +162,14 @@ test('Action Run room: no fallback provision even when the workspace opted in (A
     assert.ok(!('run_provision' in payload), 'action_id room is excluded from the chat fallback');
     // is_action_room은 이 티켓과 무관하게 독립적으로 계속 동작한다(티켓 e6d32e9d).
     assert.equal(payload.is_action_room, true);
-    assert.equal(workspaceRepo.calls, 0, 'the flag lookup itself is skipped for an action room — no wasted query');
+    assert.equal(accountRepo.calls, 0, 'the flag lookup itself is skipped for an action room — no wasted query');
   } finally {
     capture.off();
   }
 });
 
 test('QA run room: no fallback provision on a FOLLOW-UP message even when the workspace opted in (review follow-up — a later status update must not override the run\'s real .awb/qa/<scenario> provision with a bogus .awb/chat/<room> one)', async () => {
-  const { svc, workspaceRepo } = makeSvc({ room: qaRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: qaRoom, workspace: optedInWs });
   const capture = captureEmit();
   try {
     // 여기서는 opts.runProvision을 넘기지 않는다 — 방 안의 나중 메시지를
@@ -178,30 +178,30 @@ test('QA run room: no fallback provision on a FOLLOW-UP message even when the wo
     await svc.sendMessage('room-1', 'ws-1', 'agent', 'agent-1', 'QA Bot', 'checked step 3, moving to step 4');
     const payload = capture.get();
     assert.ok(!('run_provision' in payload), 'run_kind room is excluded from the chat fallback');
-    assert.equal(workspaceRepo.calls, 0, 'the flag lookup itself is skipped for a run_kind room — no wasted query');
+    assert.equal(accountRepo.calls, 0, 'the flag lookup itself is skipped for a run_kind room — no wasted query');
   } finally {
     capture.off();
   }
 });
 
 test('Orchestration Mission room: no fallback provision (Mission steps use the ticket worktree instead)', async () => {
-  const { svc, workspaceRepo } = makeSvc({ room: missionRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: missionRoom, workspace: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
     const payload = capture.get();
     assert.ok(!('run_provision' in payload));
-    assert.equal(workspaceRepo.calls, 0);
+    assert.equal(accountRepo.calls, 0);
   } finally {
     capture.off();
   }
 });
 
 test('caller-supplied runProvision (Action/QA/security dispatch) always wins — the chat fallback never overwrites it', async () => {
-  const { svc, workspaceRepo } = makeSvc({ room: plainRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: plainRoom, workspace: optedInWs });
   const capture = captureEmit();
   const callerProvision = {
-    kind: 'qa', run_id: 'run-9', workspace_id: 'ws-1',
+    kind: 'qa', run_id: 'run-9', account_id: 'ws-1',
     workspace_folder: '.awb/qa/scenario1', checkout_mode: 'reuse', repo: null,
   };
   try {
@@ -211,20 +211,20 @@ test('caller-supplied runProvision (Action/QA/security dispatch) always wins —
     );
     const payload = capture.get();
     assert.deepEqual(payload.run_provision, callerProvision);
-    assert.equal(workspaceRepo.calls, 0, 'no flag lookup needed — the caller already decided');
+    assert.equal(accountRepo.calls, 0, 'no flag lookup needed — the caller already decided');
   } finally {
     capture.off();
   }
 });
 
 test('progress heartbeat: no fallback provision, and the workspace flag is never looked up (hot-path cost guard)', async () => {
-  const { svc, workspaceRepo } = makeSvc({ room: plainRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: plainRoom, workspace: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'agent', 'agent-1', 'Builder', 'reading files…', undefined, undefined, 'progress');
     const payload = capture.get();
     assert.ok(!('run_provision' in payload));
-    assert.equal(workspaceRepo.calls, 0, 'progress heartbeats must never spend a Workspace lookup');
+    assert.equal(accountRepo.calls, 0, 'progress heartbeats must never spend a Account lookup');
   } finally {
     capture.off();
   }

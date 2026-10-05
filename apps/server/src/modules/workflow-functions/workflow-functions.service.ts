@@ -36,7 +36,7 @@ function stringifyJson(value: unknown): string {
 export interface FunctionExecutionArgs {
   functionId?: string;
   functionKey?: string;
-  workspaceId: string;
+  accountId: string;
   ticketId?: string;
   inputs?: Record<string, any>;
   idempotencyKey?: string;
@@ -106,12 +106,12 @@ export class WorkflowFunctionsService implements OnModuleInit {
     const repo = this.dataSource.getRepository(WorkflowFunction);
     // A retired built-in has no handler left, so its seeded row would stay
     // listed yet always fail — and users cannot delete built-ins themselves.
-    await repo.delete({ workspace_id: IsNull(), builtin: true, key: In(RETIRED_BUILTIN_KEYS) });
+    await repo.delete({ account_id: IsNull(), builtin: true, key: In(RETIRED_BUILTIN_KEYS) });
     for (const definition of BUILTIN_DEFINITIONS) {
-      const existing = await repo.findOne({ where: { workspace_id: IsNull(), key: definition.key } });
+      const existing = await repo.findOne({ where: { account_id: IsNull(), key: definition.key } });
       if (existing) continue;
       await repo.save(repo.create({
-        workspace_id: null,
+        account_id: null,
         version: 1,
         description: '',
         executor_type: 'builtin',
@@ -150,26 +150,26 @@ export class WorkflowFunctionsService implements OnModuleInit {
   }
 
   async list(
-    workspaceId?: string | null,
+    accountId?: string | null,
     includeShadowed = false,
   ): Promise<Record<string, any>[]> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
-    if (!workspaceId) {
-      const rows = await repo.find({ where: { workspace_id: IsNull() }, order: { key: 'ASC' } });
+    if (!accountId) {
+      const rows = await repo.find({ where: { account_id: IsNull() }, order: { key: 'ASC' } });
       return rows.map(row => this.toView(row));
     }
     const rows = await repo.createQueryBuilder('f')
-      .where('f.workspace_id IS NULL OR f.workspace_id = :workspaceId', { workspaceId })
+      .where('f.account_id IS NULL OR f.account_id = :accountId', { accountId })
       .orderBy('f.key', 'ASC')
-      .addOrderBy('f.workspace_id', 'ASC')
+      .addOrderBy('f.account_id', 'ASC')
       .getMany();
     if (includeShadowed) return rows.map(row => this.toView(row));
     const resolved = new Map<string, WorkflowFunction>();
     for (const row of rows) {
-      if (!canUseCatalogItem(row, workspaceId)) continue;
-      const rank = row.workspace_id ? 1 : 0;
+      if (!canUseCatalogItem(row, accountId)) continue;
+      const rank = row.account_id ? 1 : 0;
       const current = resolved.get(row.key);
-      const currentRank = current ? (current.workspace_id ? 1 : 0) : -1;
+      const currentRank = current ? (current.account_id ? 1 : 0) : -1;
       if (rank > currentRank) resolved.set(row.key, row);
     }
     return Array.from(resolved.values()).sort((a, b) => a.key.localeCompare(b.key)).map(row => this.toView(row));
@@ -181,11 +181,11 @@ export class WorkflowFunctionsService implements OnModuleInit {
     return this.toView(row);
   }
 
-  async resolve(key: string, workspaceId: string): Promise<WorkflowFunction> {
+  async resolve(key: string, accountId: string): Promise<WorkflowFunction> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
-    const local = await repo.findOne({ where: { key, workspace_id: workspaceId } });
+    const local = await repo.findOne({ where: { key, account_id: accountId } });
     if (local) return local;
-    const global = await repo.findOne({ where: { key, workspace_id: IsNull() } });
+    const global = await repo.findOne({ where: { key, account_id: IsNull() } });
     if (!global) throw httpError(404, `Function "${key}" not found`);
     return global;
   }
@@ -228,7 +228,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     const normalized = this.normalize(input);
     const duplicate = await repo.findOne({
       where: {
-        workspace_id: scope.workspace_id === null ? IsNull() : scope.workspace_id,
+        account_id: scope.account_id === null ? IsNull() : scope.account_id,
         key: normalized.key!,
       },
     });
@@ -247,7 +247,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     const current = await repo.findOne({ where: { id } });
     if (!current) throw httpError(404, 'Function not found');
     if (
-      (input.workspace_id !== undefined && (input.workspace_id || null) !== current.workspace_id)
+      (input.account_id !== undefined && (input.account_id || null) !== current.account_id)
       || (input.scope !== undefined && input.scope !== catalogScopeOf(current))
     ) {
       throw httpError(400, 'Function scope cannot be changed; create a new override instead');
@@ -256,7 +256,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (normalized.key !== current.key) {
       const duplicate = await repo.findOne({
         where: {
-          workspace_id: current.workspace_id === null ? IsNull() : current.workspace_id,
+          account_id: current.account_id === null ? IsNull() : current.account_id,
           key: normalized.key!,
         },
       });
@@ -298,13 +298,13 @@ export class WorkflowFunctionsService implements OnModuleInit {
   }
 
   async execute(args: FunctionExecutionArgs): Promise<Record<string, any>> {
-    if (!args.workspaceId) throw httpError(400, 'workspace_id is required to execute a Function');
+    if (!args.accountId) throw httpError(400, 'account_id is required to execute a Function');
     if ((args.depth || 0) > 20) throw httpError(400, 'Function pipeline depth exceeded');
     const fn = args.functionId
       ? await this.dataSource.getRepository(WorkflowFunction).findOne({ where: { id: args.functionId } })
-      : await this.resolve(String(args.functionKey || ''), args.workspaceId);
+      : await this.resolve(String(args.functionKey || ''), args.accountId);
     if (!fn) throw httpError(404, 'Function not found');
-    if (fn.workspace_id !== null && fn.workspace_id !== args.workspaceId) {
+    if (fn.account_id !== null && fn.account_id !== args.accountId) {
       throw httpError(403, 'Function belongs to a different workspace');
     }
     if (!fn.enabled) throw httpError(409, 'Function is disabled');
@@ -317,7 +317,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (fn.idempotency_mode === 'key') {
       if (!idempotencyKey) throw httpError(400, 'idempotency_key is required for this Function');
       const existing = await this.dataSource.getRepository(WorkflowFunctionRun).findOne({
-        where: { function_id: fn.id, workspace_id: args.workspaceId, idempotency_key: idempotencyKey },
+        where: { function_id: fn.id, account_id: args.accountId, idempotency_key: idempotencyKey },
         order: { created_at: 'DESC' },
       });
       if (existing && ['running', 'succeeded'].includes(existing.status)) {
@@ -330,7 +330,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
       function_id: fn.id,
       function_key: fn.key,
       function_version: fn.version,
-      workspace_id: args.workspaceId,
+      account_id: args.accountId,
       ticket_id: args.ticketId || null,
       parent_run_id: args.parentRunId || null,
       actor_type: args.actorType || 'system',
@@ -476,7 +476,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (!args.ticketId) throw httpError(400, `${handler} requires ticket_id`);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const ticket = await ticketRepo.findOne({ where: { id: args.ticketId } });
-    if (!ticket || ticket.workspace_id !== args.workspaceId) throw httpError(404, 'Ticket not found in workspace');
+    if (!ticket || ticket.account_id !== args.accountId) throw httpError(404, 'Ticket not found in workspace');
     if (handler === 'workflow.ticket_snapshot') {
       return {
         ticket: {
@@ -484,7 +484,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
           title: ticket.title,
           status: ticket.status,
           is_done: isDoneStatus(ticket.status),
-          workspace_id: ticket.workspace_id,
+          account_id: ticket.account_id,
           project_id: ticket.project_id,
           parent_id: ticket.parent_id,
           version: ticket.version,
@@ -505,7 +505,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
       const runRepo = this.dataSource.getRepository(WorkflowFunctionRun);
       for (const key of required) {
         const found = await runRepo.findOne({
-          where: { workspace_id: args.workspaceId, ticket_id: ticket.id, function_key: key, status: 'succeeded' },
+          where: { account_id: args.accountId, ticket_id: ticket.id, function_key: key, status: 'succeeded' },
           order: { created_at: 'DESC' },
         });
         if (!found) missing.push(key);
@@ -516,17 +516,17 @@ export class WorkflowFunctionsService implements OnModuleInit {
     throw httpError(400, `Unknown built-in handler: ${handler}`);
   }
 
-  async listRuns(workspaceId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {
+  async listRuns(accountId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {
     const qb = this.dataSource.getRepository(WorkflowFunctionRun).createQueryBuilder('r')
-      .where('r.workspace_id = :workspaceId', { workspaceId });
+      .where('r.account_id = :accountId', { accountId });
     if (functionId) qb.andWhere('r.function_id = :functionId', { functionId });
     if (ticketId) qb.andWhere('r.ticket_id = :ticketId', { ticketId });
     const rows = await qb.orderBy('r.created_at', 'DESC').take(Math.max(1, Math.min(200, limit))).getMany();
     return rows.map(row => this.runToView(row));
   }
 
-  async getRun(id: string, workspaceId: string): Promise<Record<string, any>> {
-    const row = await this.dataSource.getRepository(WorkflowFunctionRun).findOne({ where: { id, workspace_id: workspaceId } });
+  async getRun(id: string, accountId: string): Promise<Record<string, any>> {
+    const row = await this.dataSource.getRepository(WorkflowFunctionRun).findOne({ where: { id, account_id: accountId } });
     if (!row) throw httpError(404, 'Function run not found');
     return this.runToView(row);
   }

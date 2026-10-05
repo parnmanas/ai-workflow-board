@@ -20,7 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_MCP_TOOL_PROFILE_PORT || '0';
@@ -36,7 +36,7 @@ const FULL_FLOOR = 150;
 const COMPACT_CEILING = 50;
 // A tool every full session registers but COMPACT_TOOL_ALLOWLIST omits — the
 // marker that tells the two cached bodies apart.
-const COMPACT_OMITTED_TOOL = 'update_workspace';
+const COMPACT_OMITTED_TOOL = 'update_account';
 
 async function makeClient(baseUrl, apiKey, extraHeaders) {
   const client = new McpClient({ baseUrl, apiKey, extraHeaders });
@@ -49,10 +49,10 @@ test('MCP tool profile: compact/full tools/list cache keying survives alternatin
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'tool-profile');
+  const ws = await createAccount(app, getDataSourceToken, 'tool-profile');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'tool-profile-tester' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'tool-profile-tester',
   });
   const baseUrl = `http://localhost:${port}`;
@@ -104,7 +104,7 @@ test('MCP tool profile: compact/full tools/list cache keying survives alternatin
   assert.ok(!compactTools2.some((tl) => tl.name === COMPACT_OMITTED_TOOL), `compact session (reversed order) never sees ${COMPACT_OMITTED_TOOL}`);
 
   step('an allowlist-omitted tool call on a compact session gets a clean "not found" error');
-  const omittedResult = await compact2.callTool(COMPACT_OMITTED_TOOL, { workspace_id: 'does-not-matter' });
+  const omittedResult = await compact2.callTool(COMPACT_OMITTED_TOOL, { account_id: 'does-not-matter' });
   assert.equal(omittedResult?.isError, true, 'calling a compact-omitted tool must be an error result, not a silent success');
   const omittedMessage = omittedResult?.raw || JSON.stringify(omittedResult?.error || '');
   assert.match(omittedMessage, /not found/i, 'the SDK-level "not found" error, since the tool was never registered — not an AWB handler error');

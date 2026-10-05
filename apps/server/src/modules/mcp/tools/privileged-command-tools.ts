@@ -69,7 +69,7 @@ export function registerPrivilegedCommandTools(server: McpServer, ctx: ToolConte
       }
 
       const created = svc.create({
-        workspace_id: inst.workspace_id ?? null,
+        account_id: inst.account_id ?? null,
         agent_id: caller.agentId,
         agent_name: caller.agentName || caller.agentId,
         instance_id: inst.instance_id,

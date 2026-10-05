@@ -29,9 +29,9 @@ export class CliLoginSession {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
-  // true면 완료 시 생성되는 Credential.workspace_id=null (전역 공유).
+  // true면 완료 시 생성되는 Credential.account_id=null (전역 공유).
   @Column({ type: 'boolean', default: false })
   is_global: boolean;
 

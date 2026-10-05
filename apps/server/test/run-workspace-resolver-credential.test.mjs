@@ -29,8 +29,8 @@ import { encrypt } from '../dist/services/encryption.service.js';
 
 // --- fake DataSource --------------------------------------------------------
 // getRepository(Entity) dispatches by the compiled class name; findOne matches
-// every key in `where` (id / workspace_id), mirroring the real TypeORM calls
-// resolveRunRepo makes (Project via ProjectsService / Credential / Workspace).
+// every key in `where` (id / account_id), mirroring the real TypeORM calls
+// resolveRunRepo makes (Project via ProjectsService / Credential / Account).
 
 function makeRepo(rows) {
   return {
@@ -44,11 +44,11 @@ function makeRepo(rows) {
   };
 }
 
-function makeDataSource({ projects = [], credentials = [], workspaces = [{ id: 'ws-1', clone_policy: null }] }) {
+function makeDataSource({ projects = [], credentials = [], accounts = [{ id: 'ws-1', clone_policy: null }] }) {
   const repos = {
     Project: makeRepo(projects),
     Credential: makeRepo(credentials),
-    Workspace: makeRepo(workspaces),
+    Account: makeRepo(accounts),
   };
   return {
     getRepository(entity) {
@@ -64,7 +64,7 @@ function credRow(over = {}) {
   const fields = over.fields || { username: 'x-access-token', token: 'ghp_SECRET_TOKEN' };
   return {
     id: over.id || 'cred-1',
-    workspace_id: 'workspace_id' in over ? over.workspace_id : 'ws-1',
+    account_id: 'account_id' in over ? over.account_id : 'ws-1',
     encrypted_data: 'encrypted_data' in over ? over.encrypted_data : encrypt(JSON.stringify(fields)),
   };
 }
@@ -72,7 +72,7 @@ function credRow(over = {}) {
 function projectRow(over = {}) {
   return {
     id: over.id || 'proj-1',
-    workspace_id: 'workspace_id' in over ? over.workspace_id : 'ws-1',
+    account_id: 'account_id' in over ? over.account_id : 'ws-1',
     repo_url: 'repo_url' in over ? over.repo_url : 'https://github.com/parnmanas/private.git',
     default_branch: over.default_branch || 'main',
     credential_id: 'credential_id' in over ? over.credential_id : 'cred-1',
@@ -84,7 +84,7 @@ const baseInput = {
   kind: 'qa',
   id: 'scenario-1234',
   runId: 'run-1',
-  workspaceId: 'ws-1',
+  accountId: 'ws-1',
   workspaceFolder: null,
   checkoutMode: 'reuse',
 };
@@ -165,10 +165,10 @@ test('project path: branch falls back to the project default_branch; explicit re
   assert.equal(explicit.repo.branch, 'feature-x', 'explicit ref.branch overrides the project default');
 });
 
-test('global credential (workspace_id = null) is accepted (instance-wide shared)', async () => {
-  // resolveGitCredential accepts a GLOBAL credential (workspace_id null); the
+test('global credential (account_id = null) is accepted (instance-wide shared)', async () => {
+  // resolveGitCredential accepts a GLOBAL credential (account_id null); the
   // run-provision path must ship it too, not treat null as foreign-workspace.
-  const ds = makeDataSource({ projects: [projectRow()], credentials: [credRow({ workspace_id: null })] });
+  const ds = makeDataSource({ projects: [projectRow()], credentials: [credRow({ account_id: null })] });
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: { project_id: 'proj-1' } });
 
   assert.deepEqual(rp.repo.credential, { username: 'x-access-token', token: 'ghp_SECRET_TOKEN' });
@@ -209,7 +209,7 @@ test('foreign-workspace credential degrades to anonymous (run still dispatches)'
   // resolveRepoCredential swallows to null → repo keeps its url, drops auth.
   const ds = makeDataSource({
     projects: [projectRow()],
-    credentials: [credRow({ workspace_id: 'ws-OTHER' })],
+    credentials: [credRow({ account_id: 'ws-OTHER' })],
   });
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: { project_id: 'proj-1' } });
 
@@ -232,8 +232,8 @@ test('undecryptable credential blob degrades to anonymous', async () => {
 
 test('a project of ANOTHER workspace never ships its url or credential (repo: null, run still provisions)', async () => {
   const ds = makeDataSource({
-    projects: [projectRow({ workspace_id: 'ws-OTHER' })],
-    credentials: [credRow({ workspace_id: 'ws-OTHER' })],
+    projects: [projectRow({ account_id: 'ws-OTHER' })],
+    credentials: [credRow({ account_id: 'ws-OTHER' })],
   });
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: { project_id: 'proj-1' } });
 

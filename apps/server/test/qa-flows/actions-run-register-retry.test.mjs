@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createTicket,
 } from '../helpers/fixtures.mjs';
@@ -47,7 +47,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   const ds = app.get(getDataSourceToken());
   const actions = app.get(ActionsService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'actions');
+  const ws = await createAccount(app, getDataSourceToken, 'actions');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer' });
   // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
   const RUNTIME_SPEC = {
@@ -59,7 +59,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   // ── 신규 Action 등록 ──────────────────────────────────────────────
   step('Register a new Action');
   const created = await actions.create({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Deploy prod',
     prompt: 'Deploy {{workspace.name}} to production.',
     target_runtimes: [RUNTIME_SPEC],
@@ -126,8 +126,8 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   );
   assert.match(
     res1.prompt,
-    new RegExp(`workspace_id="${ws.id}"`),
-    'the standalone completion contract carries the correct workspace_id',
+    new RegExp(`account_id="${ws.id}"`),
+    'the standalone completion contract carries the correct account_id',
   );
   assert.doesNotMatch(
     res1.prompt,
@@ -186,14 +186,14 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   // ── pend 게이트 스코프 + 판정 (실 DataSource end-to-end) ───────────
   step('Pend gate: scope query surfaces only enabled, in-scope Actions');
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'blocked on deploy',
     status: 'in_progress',
   });
 
   // A disabled Action must NOT count (scheduler-off = gate-off)…
   await actions.create({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Disabled deploy',
     prompt: 'x',
     target_runtimes: [RUNTIME_SPEC],
@@ -201,9 +201,9 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   });
   // …and another workspace's Action must NOT count either — the workspace is
   // the only scope an Action has.
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'actions-other');
+  const otherWs = await createAccount(app, getDataSourceToken, 'actions-other');
   await actions.create({
-    workspace_id: otherWs.id,
+    account_id: otherWs.id,
     name: 'Other workspace deploy',
     prompt: 'x',
     target_runtimes: [RUNTIME_SPEC],
@@ -235,7 +235,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   const staleAt = new Date(Date.now() - 3 * 60 * 60_000); // 3시간 전 > 기본 2시간 TTL
   const postFixStandalone = await runRepo.save(runRepo.create({
     action_id: created.id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     room_id: randomUUID(),
     triggered_by_type: 'user',
     source_ticket_id: '',
@@ -245,7 +245,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   }));
   const preFixOrphan = await runRepo.save(runRepo.create({
     action_id: created.id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     room_id: randomUUID(),
     triggered_by_type: 'user',
     source_ticket_id: '',

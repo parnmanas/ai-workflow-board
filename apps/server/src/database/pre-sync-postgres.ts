@@ -30,8 +30,8 @@
  * Before the cast we drop every FK constraint in the schema. Without
  * this, PG aborts the ALTER with "foreign key constraint <name> cannot
  * be implemented" whenever the referenced column type doesn't match
- * the new type (e.g., `agents.workspace_id` cast to varchar while
- * `workspaces.id` stays uuid). The drop is bounded to this transaction
+ * the new type (e.g., `agents.account_id` cast to varchar while
+ * `accounts.id` stays uuid). The drop is bounded to this transaction
  * — TypeORM's synchronize re-creates declared FKs from @ManyToOne
  * decorators immediately after, and FKs that existed in the DB without
  * an entity-level declaration are cruft from a previous schema state
@@ -140,7 +140,7 @@ const UUID_REGEX = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
  * the dependents must also go — otherwise we leave rows pointing at
  * a parent that no longer exists.
  *
- * Currently only chat_rooms.workspace_id has dependents under this
+ * Currently only chat_rooms.account_id has dependents under this
  * scheme. New parent/dependent relationships go here.
  */
 interface CascadeSpec {
@@ -152,7 +152,7 @@ interface CascadeSpec {
 const CASCADE_PARENTS: ReadonlyArray<CascadeSpec> = [
   {
     table: 'chat_rooms',
-    column: 'workspace_id',
+    column: 'account_id',
     dependentBy: [
       { table: 'chat_room_messages',     column: 'room_id' },
       { table: 'chat_room_participants', column: 'room_id' },
@@ -164,7 +164,7 @@ const CASCADE_PARENTS: ReadonlyArray<CascadeSpec> = [
  * NOT-NULL column discovered by walking @Column / @PrimaryColumn
  * decorator metadata across every loaded entity. Hand-maintained
  * lists kept getting whacked by the next column the operator hadn't
- * thought of (chat_rooms.workspace_id → chat_room_participants.
+ * thought of (chat_rooms.account_id → chat_room_participants.
  * participant_id → comments.ticket_id → comments.author_id …); this
  * walk replaces the list with reflection over the same source of
  * truth TypeORM itself reads.
@@ -402,6 +402,8 @@ export async function preSyncPostgres(): Promise<void> {
 
   const startedAt = Date.now();
   logLine('starting');
+  const schema = process.env.DB_SCHEMA || undefined;
+  if (schema && !/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error(`Invalid DB_SCHEMA identifier: ${schema}`);
 
   const client = new Client({
     host:     process.env.DB_HOST || 'localhost',
@@ -409,6 +411,7 @@ export async function preSyncPostgres(): Promise<void> {
     user:     process.env.DB_USER || 'postgres',
     password: process.env.DB_PASS || '',
     database: process.env.DB_NAME || 'ai_workflow',
+    ...(schema ? { options: `-c search_path=${schema},public` } : {}),
   });
 
   try {
@@ -427,11 +430,12 @@ export async function preSyncPostgres(): Promise<void> {
 
   try {
     await client.query('BEGIN');
+    if (schema) await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
 
     // 1. Drop every FK constraint first. PG rejects ALTER COLUMN TYPE
     //    with "foreign key constraint <name> cannot be implemented"
     //    whenever the cast would leave referrer/referenced types out
-    //    of sync (e.g., agents.workspace_id varchar vs workspaces.id
+    //    of sync (e.g., agents.account_id varchar vs accounts.id
     //    uuid). TypeORM synchronize re-creates declared FKs from
     //    @ManyToOne decorators immediately after this returns.
     fksDropped = await dropAllForeignKeys(client);
@@ -451,7 +455,7 @@ export async function preSyncPostgres(): Promise<void> {
     // 4. Cascade pass — parents with hand-listed dependents pinned by
     //    FK column (plain FK, no DB-side ON DELETE CASCADE). Runs before
     //    the generic discovery loop so dependents are removed by room_id
-    //    rather than only by their own (denormalised) workspace_id.
+    //    rather than only by their own (denormalised) account_id.
     for (const spec of CASCADE_PARENTS) {
       if (!(await tableExists(client, spec.table))) continue;
       const badRows = await client.query<{ id: string }>(

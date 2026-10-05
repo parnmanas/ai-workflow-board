@@ -100,7 +100,7 @@ function boardUpdateDef() {
 function mapCtx(agentRepo) {
   return {
     resolveTicketSnapshot: async () => ({
-      root_id: TICKET_ID, workspace_id: WORKSPACE_ID, status: 'done', project_id: PROJECT_ID,
+      root_id: TICKET_ID, account_id: WORKSPACE_ID, status: 'done', project_id: PROJECT_ID,
     }),
     resolveActorDisplayName: (actorId) => resolveAgentDisplayName(asScope(agentRepo), actorId),
   };
@@ -134,7 +134,7 @@ test('sentinel actor 의 board_update 프레임이 살아남고 저장된 actor_
     const mapped = await def.map(sentinelActivity(actorId, action), mapCtx(pgLikeAgentRepo(calls)));
 
     assert.ok(mapped, `'${actorId}' / ${action} 의 프레임이 발행되어야 한다 (null 이면 유실)`);
-    assert.equal(mapped.scope.workspace_id, WORKSPACE_ID);
+    assert.equal(mapped.scope.account_id, WORKSPACE_ID);
     assert.equal(mapped.payload.actor_id, actorId);
     assert.equal(
       mapped.payload.actor_name, actorId,
@@ -192,7 +192,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
   };
   const ticketRepo = {
     async findOne() {
-      return { id: TICKET_ID, status: 'done', parent_id: null, workspace_id: WORKSPACE_ID, project_id: PROJECT_ID };
+      return { id: TICKET_ID, status: 'done', parent_id: null, account_id: WORKSPACE_ID, project_id: PROJECT_ID };
     },
   };
   const emptyRepo = { async findOne() { return null; }, async find() { return []; }, async count() { return 0; } };
@@ -211,6 +211,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
     { async register() {}, async unregister() {}, async touch() {}, async listForAgent() { return []; }, list() { return []; } },
     { noteConnected() {}, noteDisconnected() {}, isConnected() { return false; } },
     /* MemoryMetricsRegistry */ { register() {} },
+    { async accessibleIds() { return [WORKSPACE_ID]; } },
   );
 
   const observable = await controller.stream(fakeReq());
@@ -239,7 +240,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
   const frame = received.find((m) => m.type === 'board_update');
   assert.ok(frame, 'agents 조회가 던져도 board_update 프레임은 발행되어야 한다');
   assert.equal(frame.data.ticket_id, TICKET_ID);
-  assert.equal(frame.data.workspace_id, WORKSPACE_ID);
+  assert.equal(frame.data.account_id, WORKSPACE_ID);
   assert.equal(frame.data.action, 'moved');
   // 구버전 매니저의 terminal 회수가 읽는 컬럼 투영은 status 에서 파생된다.
   assert.equal(frame.data.status, 'done');

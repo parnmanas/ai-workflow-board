@@ -176,7 +176,7 @@ export class RoomMembershipService {
    */
   async addParticipants(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     caller: { type: 'user' | 'agent'; id: string } | string,
     newParticipants: { participant_type: string; participant_id: string; runtime?: unknown }[],
   ): Promise<void> {
@@ -196,7 +196,7 @@ export class RoomMembershipService {
     // ② 참여자 자격 — 그 다음. 시스템 방 판정보다 **먼저** 둬서 비참여자가 400/403 의
     //    차이로 방의 종류를 알아내지 못하게 한다.
     // ③ 시스템 소유 방 — 마지막. 여기까지 온 호출자는 이미 그 방의 참여자다.
-    if (!room || room.workspace_id !== workspaceId) {
+    if (!room || room.account_id !== accountId) {
       throw makeError(404, 'Room not found');
     }
 
@@ -748,18 +748,18 @@ export class RoomMembershipService {
    * `observer` (the workspace-wide monitoring view, same bypass `getRoom`
    * grants via `?observer=true`) — 403 unless userId is an active participant.
    * `getRoomDetail` intentionally tolerates a non-member viewer for that same
-   * observer flow but never checked workspace_id at all; this helper is the
+   * observer flow but never checked account_id at all; this helper is the
    * one used by endpoints that need the workspace boundary actually enforced
    * (ticket e18be8ff review round 2, P1 #1).
    */
   async requireRoomAccess(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     userId: string,
     opts: { observer?: boolean } = {},
   ): Promise<void> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    if (!room || room.workspace_id !== workspaceId) {
+    if (!room || room.account_id !== accountId) {
       throw makeError(404, 'Room not found');
     }
     if (!opts.observer) {

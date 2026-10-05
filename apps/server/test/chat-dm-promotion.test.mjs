@@ -48,7 +48,7 @@ async function seedRoom(overrides = {}, participants = []) {
   const roomRepo = dataSource.getRepository(ChatRoom);
   const partRepo = dataSource.getRepository(ChatRoomParticipant);
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     type: 'dm',
     name: '',
     last_message_at: null,
@@ -71,7 +71,7 @@ async function seedMessage(roomId, content = 'hello') {
   const msgRepo = dataSource.getRepository(ChatRoomMessage);
   const saved = await msgRepo.save(msgRepo.create({
     room_id: roomId,
-    workspace_id: WS,
+    account_id: WS,
     sender_type: 'user',
     sender_id: ALICE,
     type: 'message',
@@ -104,8 +104,8 @@ function captureRoomUpdates() {
   return seen;
 }
 
-const invite = (roomId, callerId, participants, callerType = 'user', workspaceId = WS) =>
-  membership.addParticipants(roomId, workspaceId, { type: callerType, id: callerId }, participants);
+const invite = (roomId, callerId, participants, callerType = 'user', accountId = WS) =>
+  membership.addParticipants(roomId, accountId, { type: callerType, id: callerId }, participants);
 
 const asUser = (id) => ({ participant_type: 'user', participant_id: id });
 const asAgent = (id) => ({ participant_type: 'agent', participant_id: id });
@@ -159,7 +159,7 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
       empty,             // userMentionRepo
       empty,             // attachmentRepo
       // 성공 경로는 커밋 뒤 chat_workspace_folder_enabled 를 읽는다 — "설정 없음"으로 답한다.
-      { async findOne() { return null; } }, // workspaceRepo
+      { async findOne() { return null; } }, // accountRepo
       dataSource,        // dataSource
       capturingLog,      // logService
       membership,        // membership
@@ -434,7 +434,7 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     // participant 행은 한 번 생기면 남는다. 그래서 "이 방의 참여자인가"만으로는 경계가
     // 지속되지 않는다 — 지난/다른 워크스페이스 방의 행을 들고 있는 호출자가 지금
     // 바인딩된 스코프 밖의 방을 승격시킬 수 있었다.
-    const room = await seedRoom({ workspace_id: OTHER_WS }, [
+    const room = await seedRoom({ account_id: OTHER_WS }, [
       { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
     ]);
 
@@ -454,7 +454,7 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     // 없는 방과 **같은 404** 여야 한다 — 다르면 남의 워크스페이스 room_id 를 넣어보는
     // 것만으로 방의 존재를 확인할 수 있다. 시스템 소유 방이어도 400 이 아니라 404 다
     // (워크스페이스 검사가 시스템 방 판정보다 먼저 돌기 때문).
-    const foreignSystemDm = await seedRoom({ workspace_id: OTHER_WS, run_kind: 'qa' }, [
+    const foreignSystemDm = await seedRoom({ account_id: OTHER_WS, run_kind: 'qa' }, [
       { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
     ]);
 

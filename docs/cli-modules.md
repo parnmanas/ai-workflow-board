@@ -97,7 +97,7 @@ Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모�
 
 1. 지금 살아 있는 세션의 ACP 보고 (`noteObservedModels()`, TTL 24시간) — 가장 최신.
 2. 영속된 ACP 보고 — 세션이 열릴 때 `agent_session_cli_settings.known_config_options` 에
-   저장된 목록. 워크스페이스마다 행이 있으면 **가장 최근에 갱신된 행**. 서버 재시작 뒤에도
+   저장된 목록. 계정마다 행이 있으면 **가장 최근에 갱신된 행**. 서버 재시작 뒤에도
    유효하며, `onModuleInit` + 스냅샷 조회(60초 간격)로 읽는다.
 3. 하트비트 `available_models[cli]` — 그 host×cli 로 세션을 한 번도 연 적이 없을 때만.
 

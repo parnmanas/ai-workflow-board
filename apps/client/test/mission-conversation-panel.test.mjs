@@ -107,10 +107,10 @@ async function withPanel(
       eventPageCalls.push(opts);
       return { events: [], has_more: false, next_cursor: null };
     });
-  api.joinOrchestrationMissionConversation = async (missionId, workspaceId) => {
-    joinCalls.push({ missionId, workspaceId });
+  api.joinOrchestrationMissionConversation = async (missionId, accountId) => {
+    joinCalls.push({ missionId, accountId });
     if (!joinConversation) throw new Error('join stub not provided');
-    return joinConversation({ missionId, workspaceId });
+    return joinConversation({ missionId, accountId });
   };
 
   try {
@@ -145,7 +145,7 @@ test('대화 메시지와 실행 이벤트가 서로 다른 렌더러로 시간�
     {
       props: {
         missionId: 'mission-1',
-        workspaceId: 'ws-1',
+        accountId: 'ws-1',
         roomId: ROOM,
         live: true,
         events: [
@@ -185,7 +185,7 @@ test('대화 메시지와 실행 이벤트가 서로 다른 렌더러로 시간�
 test('POST 응답과 SSE 브로드캐스트로 같은 메시지가 두 번 와도 한 번만 그려진다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [],
     },
     async ({ view, es }) => {
@@ -212,7 +212,7 @@ test('POST 응답과 SSE 브로드캐스트로 같은 메시지가 두 번 와�
 test('다른 방의 SSE 메시지는 이 패널에 새지 않는다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [],
     },
     async ({ view, es }) => {
@@ -234,7 +234,7 @@ test('참여자가 아니면 observer 로 강등되고 입력창 대신 사유�
   const observerFlags = [];
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
         observerFlags.push(!!observer);
         if (!observer) throw new Error('not a participant of this room');
@@ -273,7 +273,7 @@ test('시스템 nudge 와 사람 발화가 한 스트림에서 구분돼 보인�
     {
       props: {
         missionId: 'mission-1',
-        workspaceId: 'ws-1',
+        accountId: 'ws-1',
         roomId: ROOM,
         live: true,
         events: [],
@@ -316,7 +316,7 @@ test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다
   let joined = false;
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
         // 서버가 참여자로 인정하기 전까지만 거부한다 — join 이 실제로 상태를 바꿨는지가
         // 이 스텁의 분기로 드러난다.
@@ -338,7 +338,7 @@ test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다
 
       assert.deepEqual(
         joinCalls,
-        [{ missionId: 'mission-1', workspaceId: 'ws-1' }],
+        [{ missionId: 'mission-1', accountId: 'ws-1' }],
         '패널이 받은 미션·워크스페이스로 참여를 요청해야 한다',
       );
       assert.ok(
@@ -357,7 +357,7 @@ test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다
 test('참여가 거부되면 사유가 보이고 입력창은 열리지 않는다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
         if (!observer) throw new Error('not a participant of this room');
         return [];
@@ -388,7 +388,7 @@ test('참여가 거부되면 사유가 보이고 입력창은 열리지 않는�
 test('종료된 미션의 관전 상태에는 참여 버튼이 걸린다 — 참여하면 실제로 말할 수 있다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: false, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: false, events: [] },
       getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
         if (!observer) throw new Error('not a participant of this room');
         return [msg('m1', '종료된 미션의 기록')];
@@ -416,7 +416,7 @@ test('종료된 미션은 입력창을 열어 두고, 되살리는 길을 함께
     {
       props: {
         missionId: 'mission-1',
-        workspaceId: 'ws-1',
+        accountId: 'ws-1',
         roomId: ROOM,
         live: false,
         events: [],
@@ -451,7 +451,7 @@ test('아직 시작되지 않은 미션은 조회를 시도하지 않고 안내�
   let called = 0;
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: null, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: null, live: true, events: [] },
       getChatRoomMessages: async () => {
         called += 1;
         return [];
@@ -471,7 +471,7 @@ test('긴 실행 로그는 창 크기까지만 DOM 에 유지한다', async () =
 
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: many },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: many },
       getChatRoomMessages: async () => [],
     },
     async ({ view }) => {
@@ -502,7 +502,7 @@ test('위로 스크롤하면 커서로 과거 실행 이벤트를 이어 붙인�
 
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: firstPage },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: firstPage },
       getChatRoomMessages: async () => [],
       // 서버는 최신 → 과거 순으로 돌려준다.
       listOrchestrationMissionEvents: async (id, ws, opts) => {
@@ -562,7 +562,7 @@ test('과거 페이지를 여러 장 넘겨도 가장 오래된 페이지가 실
 
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: firstPage },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: firstPage },
       getChatRoomMessages: async () => [],
       listOrchestrationMissionEvents: async () => {
         const page = pages[served] ?? [];
@@ -616,7 +616,7 @@ test('첫 페이지가 창보다 작으면 과거를 더 부르지 않는다', a
     {
       props: {
         missionId: 'mission-1',
-        workspaceId: 'ws-1',
+        accountId: 'ws-1',
         roomId: ROOM,
         live: true,
         events: [evt('only-1', 'note', '유일한 이벤트', '2026-06-01T00:00:00.000Z')],
@@ -645,7 +645,7 @@ test('참여자 로스터가 있어야 bare 멘션이 pill 로 해석된다', as
   // 아무것도 지키지 못한다(실제로 그렇게 썼다가 변이 검증에서 걸렀다).
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [msg('m1', '@jeongmin 이 부분 확인 부탁해요')],
       getChatRoom: async () => ({
         participants: [
@@ -668,7 +668,7 @@ test('참여자 로스터가 있어야 bare 멘션이 pill 로 해석된다', as
 test('참여자로 열면 읽음 처리하고, 관전자는 남의 방 읽음을 건드리지 않는다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [],
     },
     async ({ view, es, readCalls }) => {
@@ -685,7 +685,7 @@ test('참여자로 열면 읽음 처리하고, 관전자는 남의 방 읽음을
 
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async (_r, _l, _b, observer) => {
         if (!observer) throw new Error('not a participant');
         return [];
@@ -721,7 +721,7 @@ test('미션을 바꾸면 이전 미션의 대화·실행 이력이 한 프레�
 
   await withPanel(
     {
-      props: { missionId: 'mission-A', workspaceId: 'ws-1', roomId: 'room-a', live: true, events: aEvents },
+      props: { missionId: 'mission-A', accountId: 'ws-1', roomId: 'room-a', live: true, events: aEvents },
       getChatRoomMessages: async (roomId) => messagesByRoom[roomId] ?? [],
       listOrchestrationMissionEvents: async (id) => {
         pageCalls.push(id);
@@ -751,7 +751,7 @@ test('미션을 바꾸면 이전 미션의 대화·실행 이력이 한 프레�
       view.rerender(
         create(Component, {
           missionId: 'mission-B',
-          workspaceId: 'ws-1',
+          accountId: 'ws-1',
           roomId: 'room-b',
           live: true,
           events: bEvents,
@@ -789,7 +789,7 @@ test('미션 A 의 늦은 응답이 B 의 화면을 덮어쓰지 않는다', asy
 
   await withPanel(
     {
-      props: { missionId: 'mission-A', workspaceId: 'ws-1', roomId: 'room-a', live: true, events: [] },
+      props: { missionId: 'mission-A', accountId: 'ws-1', roomId: 'room-a', live: true, events: [] },
       getChatRoomMessages: async (roomId) => {
         if (roomId === 'room-a') return aPending; // 사용자가 옮길 때까지 응답하지 않는다
         return [msg('b-msg', 'B 미션의 대화', { room_id: 'room-b' })];
@@ -800,7 +800,7 @@ test('미션 A 의 늦은 응답이 B 의 화면을 덮어쓰지 않는다', asy
       view.rerender(
         create(Component, {
           missionId: 'mission-B',
-          workspaceId: 'ws-1',
+          accountId: 'ws-1',
           roomId: 'room-b',
           live: true,
           events: [],
@@ -858,7 +858,7 @@ function meWith(permissions) {
     role: permissions.length ? 'admin' : 'user',
     resolved_permissions: permissions,
     status: 'active',
-    workspaces: [{ id: 'ws-1', name: 'WS', slug: 'ws', relations: ['member'] }],
+    accounts: [{ id: 'ws-1', name: 'WS', slug: 'ws', relations: ['member'] }],
   };
 }
 
@@ -868,7 +868,7 @@ test('chat 옵션이 off 면 권한이 있어도 읽기 전용이고, 사유가 
   await withPanel(
     {
       props: {
-        missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [],
+        missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [],
         userChatMode: 'off',
       },
       me: meWith(['admin.actions']),
@@ -903,7 +903,7 @@ test('MANAGE_ACTIONS 가 없으면 "참여자 아님"이 아니라 권한 부족
   await withPanel(
     {
       props: {
-        missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [],
+        missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [],
         userChatMode: 'open',
       },
       me: meWith([]), // 로그인은 됐지만 MANAGE_ACTIONS 가 없다
@@ -938,7 +938,7 @@ test('권한이 있고 옵션이 열려 있으면 참여자가 아니어도 입�
   await withPanel(
     {
       props: {
-        missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [],
+        missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [],
         userChatMode: 'open',
       },
       me: meWith(['admin.actions']),

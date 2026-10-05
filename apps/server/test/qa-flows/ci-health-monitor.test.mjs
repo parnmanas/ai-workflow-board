@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createProject } from '../helpers/fixtures.mjs';
+import { createAccount, createProject } from '../helpers/fixtures.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
@@ -188,10 +188,10 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   const logService = app.get(LogService);
 
   step('Seed workspace + alerts room + project watching an env-token GitHub repo');
-  const ws = await createWorkspace(app, getDataSourceToken, 'ci-health');
+  const ws = await createAccount(app, getDataSourceToken, 'ci-health');
   const roomRepo = ds.getRepository('ChatRoom');
-  const room = await roomRepo.save(roomRepo.create({ workspace_id: ws.id, type: 'group', name: 'qa-alerts' }));
-  await ds.getRepository('Workspace').update(ws.id, { alerts_chat_room_id: room.id });
+  const room = await roomRepo.save(roomRepo.create({ account_id: ws.id, type: 'group', name: 'qa-alerts' }));
+  await ds.getRepository('Account').update(ws.id, { alerts_chat_room_id: room.id });
 
   const project = await watchProject(app, getDataSourceToken, ds, ws.id, {
     name: 'widgets', repoUrl: 'https://github.com/acme/widgets',
@@ -402,7 +402,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     try {
       const credentialRepo = ds.getRepository('Credential');
       const credential = await credentialRepo.save(credentialRepo.create({
-        workspace_id: ws.id, name: 'gizmos cred', provider: 'github',
+        account_id: ws.id, name: 'gizmos cred', provider: 'github',
         encrypted_data: encrypt(JSON.stringify({ token: 'cred-only-token' })),
       }));
 
@@ -471,11 +471,11 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   await t.test('6. two projects watch the SAME owner/repo/branch with DIFFERENT credentials: an invalid credential on one project must not poison the sweep for the other project\'s valid credential (review blocker #3 — per-sweep cache keys must include credentialId)', async () => {
     const credentialRepo = ds.getRepository('Credential');
     const badCred = await credentialRepo.save(credentialRepo.create({
-      workspace_id: ws.id, name: 'shared repo bad cred', provider: 'github',
+      account_id: ws.id, name: 'shared repo bad cred', provider: 'github',
       encrypted_data: encrypt(JSON.stringify({ token: 'shared-bad-token' })),
     }));
     const goodCred = await credentialRepo.save(credentialRepo.create({
-      workspace_id: ws.id, name: 'shared repo good cred', provider: 'github',
+      account_id: ws.id, name: 'shared repo good cred', provider: 'github',
       encrypted_data: encrypt(JSON.stringify({ token: 'shared-good-token' })),
     }));
 

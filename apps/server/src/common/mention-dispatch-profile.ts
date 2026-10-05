@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { Ticket } from '../entities/Ticket';
-import { Workspace } from '../entities/Workspace';
+import { Account } from '../entities/Account';
 import { appendBoardLanguageInstruction, parseHarnessConfig, HarnessConfig } from './harness-config';
 import { cliDescriptor } from './cli-catalog';
 import { CliRuntimeProfile } from './cli-runtime-profiles';
@@ -39,7 +39,7 @@ export interface DispatchAgentLike {
  */
 export async function resolveMentionDispatchExtras(
   dataSource: DataSource,
-  ticket: Pick<Ticket, 'workspace_id'>,
+  ticket: Pick<Ticket, 'account_id'>,
   agent: DispatchAgentLike,
 ): Promise<MentionDispatchExtras> {
   let extras: MentionDispatchExtras = {
@@ -50,8 +50,8 @@ export async function resolveMentionDispatchExtras(
     worktree_mode: DEFAULT_WORKTREE_MODE,
   };
   try {
-    const workspace = ticket.workspace_id
-      ? await dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+    const workspace = ticket.account_id
+      ? await dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } })
       : null;
     const env = parseEnvironmentConfig(workspace?.environment_config);
     extras = {
@@ -71,7 +71,7 @@ export async function resolveMentionDispatchExtras(
     ]);
   } catch (error) {
     console.warn('[MentionDispatch] Claude runtime profile 해석 실패 — comment_mention dispatch를 중단합니다.', {
-      workspace_id: ticket.workspace_id,
+      account_id: ticket.account_id,
       error: String(error),
     });
     throw error;
@@ -101,7 +101,7 @@ export interface MentionTarget {
 
 export async function resolveMentionTarget(
   dataSource: DataSource,
-  ticket: Pick<Ticket, 'id' | 'workspace_id' | 'assignee' | 'assignee_key'>,
+  ticket: Pick<Ticket, 'id' | 'account_id' | 'assignee' | 'assignee_key'>,
   memberId: string,
 ): Promise<MentionTarget | null> {
   if (!isRuntimeIdentityKey(memberId) || memberId !== ticket.assignee_key) return null;

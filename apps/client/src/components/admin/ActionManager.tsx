@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import type { Action, ActionRun, ChatRoomMessageItem } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -97,12 +97,12 @@ export function groupRunsIntoBatches(runs: ActionRun[]): RunBatch[] {
 }
 
 interface ActionManagerProps {
-  workspaceId?: string;
+  accountId?: string;
 }
 
-export default function ActionManager({ workspaceId }: ActionManagerProps) {
+export default function ActionManager({ accountId }: ActionManagerProps) {
   const { showToast } = useToast();
-  const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
+  const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
   const [actions, setActions] = useState<Action[]>([]);
   // P4c-4: Agent 목록 없음 — 대상은 runtime spec 으로만 선언한다.
@@ -130,21 +130,21 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const [formErrors, setFormErrors] = useState<{ name?: string; agent?: string }>({});
 
   const loadActions = useCallback(async () => {
-    if (!effectiveWorkspaceId) {
+    if (!effectiveAccountId) {
       setActions([]);
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const list = await api.listActions(effectiveWorkspaceId);
+      const list = await api.listActions(effectiveAccountId);
       setActions(list);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load actions', 'error');
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, showToast]);
+  }, [effectiveAccountId, showToast]);
 
   useEffect(() => { loadActions(); }, [loadActions]);
 
@@ -221,7 +221,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
       const { build_mode: _buildMode, ...folderPayload } = buildWorkspaceFolderPayload(formFolder);
       if (editAction) {
         const updated = await api.updateAction(editAction.id, {
-          workspace_id: effectiveWorkspaceId,
+          account_id: effectiveAccountId,
           name: formName.trim(),
           description: formDescription,
           prompt: formPrompt,
@@ -237,7 +237,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
         if (selected?.id === updated.id) setSelected(updated);
       } else {
         await api.createAction({
-          workspace_id: effectiveWorkspaceId,
+          account_id: effectiveAccountId,
           name: formName.trim(),
           description: formDescription,
           prompt: formPrompt,
@@ -263,7 +263,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteAction(deleteTarget.id, effectiveWorkspaceId);
+      await api.deleteAction(deleteTarget.id, effectiveAccountId);
       showToast('Action deleted', 'success');
       if (selected?.id === deleteTarget.id) setSelected(null);
       setDeleteTarget(null);
@@ -309,7 +309,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     return (
       <ActionDetail
         action={selected}
-        workspaceId={effectiveWorkspaceId}
+        accountId={selected.account_id || effectiveAccountId}
         onBack={() => setSelected(null)}
         onEdit={() => startEdit(selected)}
         onDelete={() => setDeleteTarget(selected)}
@@ -492,7 +492,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
             {/* P4c-4: runtime 선언 → spec 보관 후 저장 시 동봉. */}
             <div style={{ marginTop: 8 }}>
               <DeclareRuntimeSection
-                workspaceId={effectiveWorkspaceId}
+                accountId={editAction?.account_id || effectiveAccountId}
                 onResolved={(spec) => {
                   if (spec) {
                     setPendingSpecs((prev) => {
@@ -523,7 +523,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
                 fontFamily: 'inherit',
               }}
             >
-              <option value="">Manual (예약은 Workspace Schedules)</option>
+              <option value="">Manual (예약은 Account Schedules)</option>
               <option value="on_ticket_done">On Ticket Done</option>
             </select>
           </div>
@@ -545,7 +545,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               value={formPrompt}
               onChange={(e) => setFormPrompt(e.target.value)}
               rows={6}
-              placeholder="git commit & push the current changes in {{workspace.name}}"
+              placeholder="git commit & push the current changes in {{account.name}}"
               style={{
                 width: '100%',
                 resize: 'vertical',
@@ -560,7 +560,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               }}
             />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4 }}>
-              Variables: <code>{`{{action.name}}`}</code> <code>{`{{run.id}}`}</code> <code>{`{{workspace.name}}`}</code> <code>{`{{user.name}}`}</code> <code>{`{{agent.name}}`}</code> <code>{`{{date}}`}</code> <code>{`{{time}}`}</code> <code>{`{{datetime}}`}</code>
+              Variables: <code>{`{{action.name}}`}</code> <code>{`{{run.id}}`}</code> <code>{`{{account.name}}`}</code> <code>{`{{user.name}}`}</code> <code>{`{{agent.name}}`}</code> <code>{`{{date}}`}</code> <code>{`{{time}}`}</code> <code>{`{{datetime}}`}</code>
             </div>
           </div>
           <WorkspaceFolderOptions
@@ -568,7 +568,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
             state={formFolder}
             onChange={(patch) => setFormFolder((s) => ({ ...s, ...patch }))}
             showBuildMode={false}
-            workspaceId={effectiveWorkspaceId}
+            accountId={editAction?.account_id || effectiveAccountId}
           />
           <div style={{ display: 'flex', gap: 12 }}>
             <Input
@@ -613,7 +613,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
 
 interface ActionDetailProps {
   action: Action;
-  workspaceId: string;
+  accountId: string;
   onBack: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -621,7 +621,7 @@ interface ActionDetailProps {
   running: boolean;
 }
 
-function ActionDetail({ action, workspaceId, onBack, onEdit, onDelete, onRun, running }: ActionDetailProps) {
+function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, running }: ActionDetailProps) {
   const { user } = useAuth();
   const [runs, setRuns] = useState<ActionRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -638,11 +638,11 @@ function ActionDetail({ action, workspaceId, onBack, onEdit, onDelete, onRun, ru
     // 비례해 늘려 배치 단위가 온전히 들어오게 한다(서버가 100 으로 캡한다).
     const targetCount = Math.max(1, actionTargets(action).length);
     const limit = Math.min(100, 20 * targetCount);
-    const list = await api.listActionRuns(action.id, workspaceId, limit);
+    const list = await api.listActionRuns(action.id, accountId, limit);
     setRuns(list);
     // Default selection: the most recent run.
     setActiveRunId((cur) => cur ?? (list[0]?.id ?? null));
-  }, [action, workspaceId]);
+  }, [action, accountId]);
 
   const activeRun = runs.find((r) => r.id === activeRunId) || null;
   const roomId = activeRun?.room_id || null;

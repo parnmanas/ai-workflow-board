@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
@@ -46,12 +46,12 @@ test('terminals relay: hosts → RPC list/open/attach → input/resize → outpu
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'terminals');
+  const ws = await createAccount(app, getDataSourceToken, 'terminals');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const plainUser = await createUser(app, getDataSourceToken, { name: 'plain', role: 'user' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
   const plainToken = app.get(AuthService).createSession(plainUser.id);
-  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
@@ -259,10 +259,10 @@ test('terminals: a live row the heartbeat no longer reports is retired', async (
   const { getDataSourceToken, AuthService, activityEvents } = modules;
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'terminals-ghost');
+  const ws = await createAccount(app, getDataSourceToken, 'terminals-ghost');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
-  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;

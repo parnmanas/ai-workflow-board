@@ -21,7 +21,7 @@ import { OntologyResolverService } from './ontology-resolver.service';
 
 // outreach-ingest.service.ts의 isUniqueConstraintError()와 동일한 패턴(운영
 // 교훈: 외부 입력 idempotency는 부수효과 전에 DB 유니크 제약으로 선점) —
-// (workspace_id, resource_id, folder_path) 유니크 인덱스가 동시 최초-참조
+// (account_id, resource_id, folder_path) 유니크 인덱스가 동시 최초-참조
 // 호출 중 정확히 하나만 승자가 되게 강제한다.
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as {
@@ -50,7 +50,7 @@ export class GraphRefResolutionError extends Error {
 }
 
 export interface GraphRefInput {
-  workspaceId: string;
+  accountId: string;
   graphId?: string;
   /** Project id. 그래프 테이블 컬럼 이름(`resource_id`)을 따르지만 값은 저장소
    *  Resource 가 같은 id 로 이관된 Project 의 id 다(docs/tickets.md). */
@@ -74,15 +74,15 @@ export class OntologyLifecycleService {
   }
 
   /**
-   * (workspace_id, resource_id, folder_path) 당 정확히 하나의 OntologyGraph
+   * (account_id, resource_id, folder_path) 당 정확히 하나의 OntologyGraph
    * 행을 보장한다. 먼저 조회하고, 없으면 INSERT를 시도한다 — 동시 호출이
    * 경쟁하면 유니크 인덱스가 패자의 INSERT를 거부하므로, 패자는 승자가
    * 만든 행을 그대로 재조회해서 돌려준다(둘 다 같은 graph_id를 본다).
    * `created=true`인 호출자만 최초 빌드를 킥오프해야 한다.
    */
-  async getOrCreateGraph(input: { workspaceId: string; resourceId: string; folderPath: string }): Promise<{ graph: OntologyGraph; created: boolean }> {
+  async getOrCreateGraph(input: { accountId: string; resourceId: string; folderPath: string }): Promise<{ graph: OntologyGraph; created: boolean }> {
     const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
-    const where = { workspace_id: input.workspaceId, resource_id: input.resourceId, folder_path: input.folderPath };
+    const where = { account_id: input.accountId, resource_id: input.resourceId, folder_path: input.folderPath };
     const existing = await repo.findOne({ where });
     if (existing) return { graph: existing, created: false };
 
@@ -110,7 +110,7 @@ export class OntologyLifecycleService {
     const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
     if (input.graphId) {
       const graph = await repo.findOne({ where: { id: input.graphId } });
-      if (!graph || graph.workspace_id !== input.workspaceId) {
+      if (!graph || graph.account_id !== input.accountId) {
         throw new GraphRefResolutionError('Ontology graph not found in this workspace', 'not_found');
       }
       return graph;
@@ -119,7 +119,7 @@ export class OntologyLifecycleService {
       throw new GraphRefResolutionError('Provide graph_id, or resource_id (optionally with folder_path)', 'missing_ref');
     }
     const { graph, created } = await this.getOrCreateGraph({
-      workspaceId: input.workspaceId,
+      accountId: input.accountId,
       resourceId: input.resourceId,
       folderPath: input.folderPath ?? '',
     });
@@ -162,7 +162,7 @@ export class OntologyLifecycleService {
       await dataSource.transaction(async (manager) => {
         await this.clearExistingGraphRows(graph.id, manager);
         const extractResult = await this.extractionService.extractRepo({
-          workspaceId: graph.workspace_id,
+          accountId: graph.account_id,
           resourceId: graph.resource_id,
           folderPath: graph.folder_path,
           graphId: graph.id,
@@ -170,7 +170,7 @@ export class OntologyLifecycleService {
         });
         const resolveResult = await this.resolverService.resolveGraph({
           graphId: graph.id,
-          workspaceId: graph.workspace_id,
+          accountId: graph.account_id,
           commit: extractResult.commit,
           extractionRunId: randomUUID(),
         }, manager);
@@ -252,10 +252,10 @@ export class OntologyLifecycleService {
    * 리뷰 코멘트 참고) — undefined/null이면 승자가 아니라고 fail-closed
    * 처리(?? 0).
    */
-  async forceRebuild(input: { graphId: string; workspaceId: string }): Promise<{ graph: OntologyGraph; started: boolean }> {
+  async forceRebuild(input: { graphId: string; accountId: string }): Promise<{ graph: OntologyGraph; started: boolean }> {
     const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
     const graph = await repo.findOne({ where: { id: input.graphId } });
-    if (!graph || graph.workspace_id !== input.workspaceId) {
+    if (!graph || graph.account_id !== input.accountId) {
       throw new GraphRefResolutionError('Ontology graph not found in this workspace', 'not_found');
     }
 

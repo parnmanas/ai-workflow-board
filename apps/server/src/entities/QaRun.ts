@@ -20,7 +20,7 @@ export class QaRun {
   scenario_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // pending → running → passed | failed | error | build_failed
   // `build_failed` is a first-class build death (ticket 80d52250): the build step

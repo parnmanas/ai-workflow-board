@@ -87,12 +87,12 @@ function logServiceStub() {
 
 function liveInstance(overrides = {}) {
   return {
-    // 이 워크스페이스는 이 파일의 나머지 테스트가 두루 쓰는 workspaceId:'w1'
+    // 이 워크스페이스는 이 파일의 나머지 테스트가 두루 쓰는 accountId:'w1'
     // 과 일치해야 한다 — startSession의 workspace-visibility 검증(리뷰
     // 지적 round 1)이 서로 다른 값이면 403으로 막기 때문.
     instance_id: 'inst-1',
     agent_id: 'manager-agent-1',
-    workspace_id: 'w1',
+    account_id: 'w1',
     mode: 'manager',
     hostname: 'host-1',
     ...overrides,
@@ -118,7 +118,7 @@ function service({ instances = [liveInstance()], issueImpl, sessions, creds } = 
 test('startSession rejects an unsupported cli before touching the registry/command service', async () => {
   const { instance, commandService } = service();
   await assert.rejects(
-    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'gemini', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
+    () => instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'gemini', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
     /Unsupported cli "gemini"/,
   );
   assert.equal(commandService.calls.length, 0);
@@ -128,7 +128,7 @@ test('startSession rejects an unsupported cli before touching the registry/comma
 test('startSession happy path for claude: creates a starting session, issues cli_login_start with cli=claude', async () => {
   const { instance, commandService, sessionRepo } = service();
   const session = await instance.startSession({
-    workspaceId: 'w1',
+    accountId: 'w1',
     isGlobal: false,
     cli: 'claude',
     credentialName: 'My Claude',
@@ -146,7 +146,7 @@ test('startSession happy path for claude: creates a starting session, issues cli
 test('startSession rejects a missing credential name', async () => {
   const { instance } = service();
   await assert.rejects(
-    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: '  ', instanceId: 'inst-1', triggeredById: 'u1' }),
+    () => instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: '  ', instanceId: 'inst-1', triggeredById: 'u1' }),
     /credential_name is required/,
   );
 });
@@ -154,7 +154,7 @@ test('startSession rejects a missing credential name', async () => {
 test('startSession rejects when no live manager instance matches instanceId', async () => {
   const { instance } = service({ instances: [] });
   await assert.rejects(
-    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'Codex', instanceId: 'inst-missing', triggeredById: 'u1' }),
+    () => instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'Codex', instanceId: 'inst-missing', triggeredById: 'u1' }),
     /not currently online/,
   );
 });
@@ -162,7 +162,7 @@ test('startSession rejects when no live manager instance matches instanceId', as
 test('startSession happy path: creates a starting session, issues cli_login_start, stamps the returned command_id', async () => {
   const { instance, commandService, sessionRepo } = service();
   const session = await instance.startSession({
-    workspaceId: 'w1',
+    accountId: 'w1',
     isGlobal: false,
     cli: 'codex',
     credentialName: 'My Codex',
@@ -189,24 +189,24 @@ test('startSession happy path: creates a starting session, issues cli_login_star
 // 리뷰 지적(round 1): instance_id는 클라이언트가 직접 제출하는 값이라,
 // 그 instance가 실제로 요청 workspace에 속하는지 서버가 검증하지 않으면
 // 다른 workspace의 instance_id를 그대로 넣어 명령을 보낼 수 있었다.
-test('review-fix: startSession rejects a workspace-scoped request whose instance belongs to a DIFFERENT workspace', async () => {
-  const { instance, commandService } = service({ instances: [liveInstance({ workspace_id: 'other-workspace' })] });
+test('review-fix: startSession rejects a account-scoped request whose instance belongs to a DIFFERENT workspace', async () => {
+  const { instance, commandService } = service({ instances: [liveInstance({ account_id: 'other-workspace' })] });
   await assert.rejects(
-    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
+    () => instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
     (err) => err.status === 403 && /not available in this workspace/.test(err.message),
   );
   assert.equal(commandService.calls.length, 0, 'must reject before ever issuing the command');
 });
 
-test('review-fix: startSession allows a workspace-scoped request against a GLOBAL (workspace_id=null) instance', async () => {
-  const { instance } = service({ instances: [liveInstance({ workspace_id: null })] });
-  const session = await instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' });
+test('review-fix: startSession allows a account-scoped request against a GLOBAL (account_id=null) instance', async () => {
+  const { instance } = service({ instances: [liveInstance({ account_id: null })] });
+  const session = await instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' });
   assert.equal(session.status, 'starting');
 });
 
 test('review-fix: startSession for a GLOBAL session may target an instance from ANY workspace (matches listCliLoginInstances\' own no-workspace-filter behavior for global admins)', async () => {
-  const { instance } = service({ instances: [liveInstance({ workspace_id: 'some-other-workspace' })] });
-  const session = await instance.startSession({ workspaceId: '', isGlobal: true, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'admin-1' });
+  const { instance } = service({ instances: [liveInstance({ account_id: 'some-other-workspace' })] });
+  const session = await instance.startSession({ accountId: '', isGlobal: true, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'admin-1' });
   assert.equal(session.status, 'starting');
   assert.equal(session.is_global, true);
 });
@@ -216,7 +216,7 @@ test('review-fix: startSession for a GLOBAL session may target an instance from 
 async function seededStarting(overrides = {}) {
   const s = service();
   const session = await s.instance.startSession({
-    workspaceId: 'w1',
+    accountId: 'w1',
     isGlobal: false,
     cli: 'codex',
     credentialName: 'My Codex',
@@ -380,7 +380,7 @@ test('applyProgress: succeeded encrypts + stores a codex_subscription credential
   assert.ok(updated.created_credential_id);
   assert.equal(credRepo.saved.length, 1);
   assert.equal(credRepo.saved[0].provider, 'codex_subscription');
-  assert.equal(credRepo.saved[0].workspace_id, 'w1');
+  assert.equal(credRepo.saved[0].account_id, 'w1');
   assert.notEqual(credRepo.saved[0].encrypted_data, JSON.stringify({ auth_json: JSON.stringify({ access_token: SECRET }) }));
   assert.match(credRepo.saved[0].encrypted_data, /^enc:/);
 
@@ -394,7 +394,7 @@ test('applyProgress: succeeded encrypts + stores a codex_subscription credential
 test('applyProgress: succeeded requires credential_fields.credentials_json for a claude session', async () => {
   const s = service();
   const session = await s.instance.startSession({
-    workspaceId: 'w1',
+    accountId: 'w1',
     isGlobal: false,
     cli: 'claude',
     credentialName: 'My Claude',
@@ -410,7 +410,7 @@ test('applyProgress: succeeded requires credential_fields.credentials_json for a
 test('applyProgress: succeeded encrypts + stores a claude_subscription credential and never echoes the raw secret back', async () => {
   const s = service();
   const session = await s.instance.startSession({
-    workspaceId: 'w1',
+    accountId: 'w1',
     isGlobal: false,
     cli: 'claude',
     credentialName: 'My Claude',
@@ -434,10 +434,10 @@ test('applyProgress: succeeded encrypts + stores a claude_subscription credentia
   assert.doesNotMatch(JSON.stringify(updated), new RegExp(SECRET));
 });
 
-test('applyProgress: succeeded on a GLOBAL session creates a workspace_id=null credential', async () => {
+test('applyProgress: succeeded on a GLOBAL session creates a account_id=null credential', async () => {
   const s = service();
   const session = await s.instance.startSession({
-    workspaceId: '',
+    accountId: '',
     isGlobal: true,
     cli: 'codex',
     credentialName: 'Global Codex',
@@ -451,7 +451,7 @@ test('applyProgress: succeeded on a GLOBAL session creates a workspace_id=null c
     status: 'succeeded',
     credentialFields: { auth_json: '{}' },
   });
-  assert.equal(s.credRepo.saved[0].workspace_id, null);
+  assert.equal(s.credRepo.saved[0].account_id, null);
 });
 
 for (const status of ['failed', 'timed_out', 'cancelled']) {
@@ -493,7 +493,7 @@ test('cancelSession dispatches cli_login_cancel best-effort and marks the sessio
 test('reapStale marks every non-terminal session it is handed as timed_out', async () => {
   const sessionRepo = sessionRepoStub();
   const old = sessionRepo.create({
-    workspace_id: 'w1',
+    account_id: 'w1',
     is_global: false,
     cli: 'codex',
     credential_name: 'x',
@@ -605,7 +605,10 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const auth = app.get(AuthService);
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
-    const workspaceRepo = dataSource.getRepository('Workspace');
+    const accountRepo = dataSource.getRepository('Account');
+    // Make the automatic default differ deterministically from the manager's
+    // owner; Global administration must still list that manager.
+    const unrelatedDefault = await accountRepo.save(accountRepo.create({ name: 'Unrelated Default Account', created_at: new Date('2000-01-01T00:00:00Z') }));
 
     const admin = await userRepo.save(userRepo.create({
       name: 'Login Admin',
@@ -622,7 +625,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
       permissions: JSON.stringify(['admin.credentials']),
       password_hash: await auth.hashPassword('user-password'),
     }));
-    const workspace = await workspaceRepo.save(workspaceRepo.create({ name: 'Login Workspace' }));
+    const workspace = await accountRepo.save(accountRepo.create({ name: 'Login Account' }));
 
     const registry = app.get(InstanceRegistryService);
     const instanceId = `inst-${randomUUID()}`;
@@ -630,7 +633,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     registry.upsert({
       instance_id: instanceId,
       agent_id: managerAgentId,
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       mode: 'manager',
       hostname: 'test-host',
       plugin_version: '1.0.0',
@@ -650,7 +653,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
 
     // The instance picker route surfaces the fake manager with its
     // capability report.
-    const instancesRes = await fetch(`${baseUrl}/cli-login/instances?workspace_id=${workspace.id}`, {
+    const instancesRes = await fetch(`${baseUrl}/cli-login/instances?account_id=${workspace.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     const instancesBody = await instancesRes.json();
@@ -676,7 +679,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const missingInstance = await fetch(`${baseUrl}/cli-login/start`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace_id: workspace.id, cli: 'codex', credential_name: 'x', instance_id: 'does-not-exist' }),
+      body: JSON.stringify({ account_id: workspace.id, cli: 'codex', credential_name: 'x', instance_id: 'does-not-exist' }),
     });
     assert.equal(missingInstance.status, 404);
 
@@ -688,7 +691,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const started = await fetch(`${baseUrl}/cli-login/start`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace_id: workspace.id, cli: 'codex', credential_name: 'My Codex', instance_id: instanceId }),
+      body: JSON.stringify({ account_id: workspace.id, cli: 'codex', credential_name: 'My Codex', instance_id: instanceId }),
     });
     const startedBody = await started.json();
     assert.equal(started.status, 201);
@@ -702,7 +705,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     assert.equal(capturedCommand.args.cli, 'codex');
 
     // GET reflects the same session back to the same workspace.
-    const fetched = await fetch(`${baseUrl}/cli-login/${startedBody.id}?workspace_id=${workspace.id}`, {
+    const fetched = await fetch(`${baseUrl}/cli-login/${startedBody.id}?account_id=${workspace.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     const fetchedBody = await fetched.json();
@@ -710,14 +713,14 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     assert.equal(fetchedBody.id, startedBody.id);
     assert.equal(fetchedBody.status, 'starting');
 
-    // 리뷰 지적(round 1): listCliLoginInstances를 workspace_id 없이 부르면
+    // 리뷰 지적(round 1): listCliLoginInstances를 account_id 없이 부르면
     // "전역" 조회이므로 credential 생성과 동일한 게이트가 필요하다.
     const globalInstancesDenied = await fetch(`${baseUrl}/cli-login/instances`, {
       headers: { Authorization: `Bearer ${nonAdminToken}` },
     });
     assert.equal(globalInstancesDenied.status, 403);
     const globalInstancesAllowed = await fetch(`${baseUrl}/cli-login/instances`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
+      headers: { Authorization: `Bearer ${adminToken}`, 'X-Account-Id': unrelatedDefault.id },
     });
     assert.equal(globalInstancesAllowed.status, 200);
     const globalInstancesBody = await globalInstancesAllowed.json();
@@ -772,14 +775,14 @@ test('startSession for opencode: requires cli_provider + cli_method and forwards
   const { instance, commandService } = service();
   await assert.rejects(
     () => instance.startSession({
-      workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
+      accountId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
       instanceId: 'inst-1', triggeredById: 'user-1',
     }),
     /cli_provider and cli_method/,
   );
   await assert.rejects(
     () => instance.startSession({
-      workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
+      accountId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
       cliProvider: 'openai', instanceId: 'inst-1', triggeredById: 'user-1',
     }),
     /cli_provider and cli_method/,
@@ -788,7 +791,7 @@ test('startSession for opencode: requires cli_provider + cli_method and forwards
   assert.equal(commandService.calls.length, 0, 'nothing is dispatched until the pair is complete');
 
   const session = await instance.startSession({
-    workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
+    accountId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
     cliProvider: 'openai', cliMethod: 'ChatGPT Pro/Plus (headless)',
     instanceId: 'inst-1', triggeredById: 'user-1',
   });
@@ -806,7 +809,7 @@ test('startSession for opencode: requires cli_provider + cli_method and forwards
 test('applyProgress: succeeded stores an opencode_auth credential from auth_json and never echoes the secret back', async () => {
   const s = service();
   const session = await s.instance.startSession({
-    workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'Opencode (openai)',
+    accountId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'Opencode (openai)',
     cliProvider: 'openai', cliMethod: 'ChatGPT Pro/Plus (headless)',
     instanceId: 'inst-1', triggeredById: 'user-1',
   });
@@ -822,7 +825,7 @@ test('applyProgress: succeeded stores an opencode_auth credential from auth_json
   assert.equal(updated.status, 'succeeded');
   assert.equal(s.credRepo.saved.length, 1);
   assert.equal(s.credRepo.saved[0].provider, 'opencode_auth');
-  assert.equal(s.credRepo.saved[0].workspace_id, 'w1');
+  assert.equal(s.credRepo.saved[0].account_id, 'w1');
   // 어느 provider 로 만든 credential 인지는 설명문에 남는다 — auth.json 자체는
   // 여러 provider 를 담을 수 있어 이름만으로는 구분이 안 된다.
   assert.match(s.credRepo.saved[0].description, /opencode \/ openai/);
@@ -833,7 +836,7 @@ test('applyProgress: succeeded stores an opencode_auth credential from auth_json
 test('applyProgress: an opencode session without auth_json fails instead of creating an empty credential', async () => {
   const s = service();
   const session = await s.instance.startSession({
-    workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'Opencode',
+    accountId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'Opencode',
     cliProvider: 'openai', cliMethod: 'M', instanceId: 'inst-1', triggeredById: 'user-1',
   });
   await assert.rejects(

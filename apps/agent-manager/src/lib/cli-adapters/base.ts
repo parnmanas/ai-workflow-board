@@ -44,7 +44,7 @@ export const PARSE_STAGE = Object.freeze({
 
 export type ParseStage = (typeof PARSE_STAGE)[keyof typeof PARSE_STAGE];
 
-/** Board/workspace harness override shipped on `agent_trigger` (the server's
+/** Account harness override shipped on `agent_trigger` (the server's
  *  resolved `harness_config`, ticket e9c7a896). Every key is optional; a
  *  null/absent harness means "spawn exactly as before". `model` is folded
  *  into the spec's `model` field by spawn sites (harness wins over the
@@ -273,7 +273,7 @@ export function pickEffortSlice(
 }
 
 /** One-line summary of an applied harness for spawn-site logs — the
- *  operator-visible proof (acceptance criterion of e9c7a896) that a workspace's
+ *  operator-visible proof (acceptance criterion of e9c7a896) that an account's
  *  harness actually reached the CLI flags. */
 export function describeHarness(harness: HarnessSpec): string {
   const parts: string[] = [];
@@ -444,7 +444,7 @@ export interface OneshotSpec {
    *  (current behaviour). Resolved from Agent.model at spawn time; a
    *  harness `model` override is folded in here by the spawn site. */
   model?: string | null;
-  /** Board/workspace harness, pre-filtered to this adapter's supported keys
+  /** Account harness, pre-filtered to this adapter's supported keys
    *  via partitionHarness(). Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
   /** Ticket-level effort preset, resolved to this CLI's slice at the spawn
@@ -480,7 +480,7 @@ export interface SessionSpec {
   sessionId?: string;
   /** Per-agent default model — see OneshotSpec.model. */
   model?: string | null;
-  /** Board/workspace harness — see OneshotSpec.harness. */
+  /** Account harness — see OneshotSpec.harness. */
   harness?: HarnessSpec | null;
   /** Ticket-level effort preset slice — see OneshotSpec.effort. Applied at
    *  session creation only. */

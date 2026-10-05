@@ -32,9 +32,9 @@ export class User {
   @Column({ type: 'varchar', nullable: true, default: null })
   google_id: string | null;
 
-  // Workspace the user selected during signup; set by Plan 03 auth flow
+  // Account the user selected during signup; set by Plan 03 auth flow
   @Column({ type: 'varchar', nullable: true, default: null })
-  requested_workspace_id: string | null;
+  requested_account_id: string | null;
 
   @CreateDateColumn()
   created_at: Date;

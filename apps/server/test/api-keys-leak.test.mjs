@@ -4,14 +4,14 @@
 //
 // Purpose: Verify that workspace A's API keys cannot be accessed by users belonging only to
 // workspace B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
-// when WorkspaceGuard is applied to ApiKeysController.
+// when AccountGuard is applied to ApiKeysController.
 //
 // Current state (Phase 5):
 //   - ApiKeysController uses PermissionGuard + MANAGE_API_KEYS — no workspace scoping.
-//   - GET /api/keys returns ALL keys across all workspaces (no workspace_id filter).
-//   - Cross-workspace isolation is NOT enforced until Phase 6 adds WorkspaceGuard + workspace_id to ApiKey.
+//   - GET /api/keys returns ALL keys across all accounts (no account_id filter).
+//   - Cross-workspace isolation is NOT enforced until Phase 6 adds AccountGuard + account_id to ApiKey.
 //
-// Tests marked it.todo() will pass after Phase 6 applies WorkspaceGuard to ApiKeysController.
+// Tests marked it.todo() will pass after Phase 6 applies AccountGuard to ApiKeysController.
 //
 // Design (mirrors proxy-passthrough.test.mjs):
 //   - Boots NestJS app in-process from compiled dist/.
@@ -81,7 +81,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
     const authService = app.get(AuthService);
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
-    const wsRepo = dataSource.getRepository('Workspace');
+    const wsRepo = dataSource.getRepository('Account');
 
     // ─── Create admin user directly via TypeORM ────────────────────────────────
     const adminUser = await userRepo.save(userRepo.create({
@@ -92,9 +92,9 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
     }));
     adminToken = authService.createSession(adminUser.id);
 
-    // ─── Create two workspaces directly ───────────────────────────────────────
-    wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (api-keys)', description: 'Leak test' }));
-    wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (api-keys)', description: 'Leak test' }));
+    // ─── Create two accounts directly ───────────────────────────────────────
+    wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (api-keys)', description: 'Leak test', created_at: new Date('2001-01-01T00:00:00Z') }));
+    wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (api-keys)', description: 'Leak test', created_at: new Date('2000-01-01T00:00:00Z') }));
 
     // ─── Create user B and assign to workspace B ──────────────────────────────
     const userBRec = await userRepo.save(userRepo.create({
@@ -108,17 +108,17 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
     await rebacRepo.save(rebacRepo.create({
       subject_type: 'user', subject_id: userBRec.id,
       relation: 'member',
-      object_type: 'workspace', object_id: wsB.id,
+      object_type: 'account', object_id: wsB.id,
     }));
 
     // ─── Create an API key in workspace A via HTTP ─────────────────────────────
-    // Phase 6+: ApiKeysController.create persists workspace_id from the
-    // X-Workspace-Id header, and list/get/revoke are workspace-scoped. Create
+    // Phase 6+: ApiKeysController.create persists account_id from the
+    // X-Account-Id header, and list/get/revoke are account-scoped. Create
     // key A scoped to ws_a so the scoped controls below can find it.
     const keyRes = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
       method: 'POST',
-      workspaceId: wsA.id,
+      accountId: wsA.id,
       body: {
         name: `Leak API Key WS-A ${randomUUID()}`,
         scope: 'full',
@@ -155,11 +155,11 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
   });
 
   it('admin can list API keys and sees the created key (control)', async () => {
-    // API keys are workspace-scoped — the admin must supply the ws_a header to
+    // API keys are account-scoped — the admin must supply the ws_a header to
     // see ws_a's keys (an admin with no workspace context gets an empty list).
     const res = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
-      workspaceId: wsA.id,
+      accountId: wsA.id,
     });
     assert.equal(res.status, 200);
     const keys = Array.isArray(res.data) ? res.data : [];
@@ -169,6 +169,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
   it('admin can retrieve API key A by ID (control)', async () => {
     const res = await apiRequest(BASE_URL, `/keys/${apiKeyA.id}`, {
       token: adminToken,
+      accountId: wsB.id,
     });
     assert.equal(res.status, 200);
     assert.equal(res.data.id, apiKeyA.id);
@@ -192,16 +193,16 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
   });
 
   // ─── Phase 6 isolation contract ───────────────────────────────────────────
-  // The following tests document the EXPECTED behavior once WorkspaceGuard is applied
-  // to ApiKeysController in Phase 6. Phase 6 must add workspace_id to ApiKey entity
-  // and filter keys by the X-Workspace-Id header.
+  // The following tests document the EXPECTED behavior once AccountGuard is applied
+  // to ApiKeysController in Phase 6. Phase 6 must add account_id to ApiKey entity
+  // and filter keys by the X-Account-Id header.
 
-  it('user in ws_b with X-Workspace-Id: ws_b cannot list ws_a API keys — returns empty after Phase 6', async () => {
-    // User B is a member of ws_b — WorkspaceGuard passes, but list is scoped to ws_b
-    // apiKeyA was created without workspace_id, so it should not appear under ws_b scope
+  it('user in ws_b with X-Account-Id: ws_b cannot list ws_a API keys — returns empty after Phase 6', async () => {
+    // User B is a member of ws_b — AccountGuard passes, but list is scoped to ws_b
+    // apiKeyA was created without account_id, so it should not appear under ws_b scope
     const res = await apiRequest(BASE_URL, '/keys', {
       token: tokenB,
-      workspaceId: wsB.id,
+      accountId: wsB.id,
     });
     assert.ok(
       res.status === 200 || res.status === 403,
@@ -212,42 +213,42 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
       assert.equal(
         keys.filter(k => k.id === apiKeyA.id).length,
         0,
-        'Workspace A API key must not appear in workspace B listing',
+        'Account A API key must not appear in workspace B listing',
       );
     }
   });
 
-  it('user in ws_b with X-Workspace-Id: ws_a cannot access ws_a keys — returns 403 after Phase 6 WorkspaceGuard', async () => {
-    // User B is NOT a member of ws_a — WorkspaceGuard should reject with 403
+  it('user in ws_b with X-Account-Id: ws_a cannot access ws_a keys — returns 403 after Phase 6 AccountGuard', async () => {
+    // User B is NOT a member of ws_a — AccountGuard should reject with 403
     const res = await apiRequest(BASE_URL, '/keys', {
       token: tokenB,
-      workspaceId: wsA.id,
+      accountId: wsA.id,
     });
     assert.equal(res.status, 403, `Expected 403 for cross-workspace key access, got ${res.status}: ${JSON.stringify(res.data)}`);
   });
 
-  it('admin with X-Workspace-Id: ws_a can list only ws_a API keys — Phase 6 workspace-scoped key query', async () => {
-    // Admin bypasses WorkspaceGuard membership check — access should succeed
+  it('admin with X-Account-Id: ws_a can list only ws_a API keys — Phase 6 account-scoped key query', async () => {
+    // Admin bypasses AccountGuard membership check — access should succeed
     const res = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
-      workspaceId: wsA.id,
+      accountId: wsA.id,
     });
     assert.equal(res.status, 200, `Admin should be able to list keys with ws_a header, got ${res.status}`);
     assert.ok(Array.isArray(res.data), 'Response should be an array');
   });
 
-  it('admin with X-Workspace-Id: ws_b gets empty list (no keys in ws_b) — Phase 6', async () => {
-    // Admin bypasses WorkspaceGuard — verify no ws_a keys bleed into ws_b listing
+  it('admin with X-Account-Id: ws_b gets empty list (no keys in ws_b) — Phase 6', async () => {
+    // Admin bypasses AccountGuard — verify no ws_a keys bleed into ws_b listing
     const res = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
-      workspaceId: wsB.id,
+      accountId: wsB.id,
     });
     assert.equal(res.status, 200);
     const keys = Array.isArray(res.data) ? res.data : [];
     assert.equal(
       keys.filter(k => k.id === apiKeyA.id).length,
       0,
-      'Workspace A API key must not appear in workspace B listing',
+      'Account A API key must not appear in workspace B listing',
     );
   });
 });

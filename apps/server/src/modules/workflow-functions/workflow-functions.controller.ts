@@ -24,12 +24,12 @@ export class WorkflowFunctionsController {
 
   @Get()
   async list(
-    @Query('workspace_id') workspaceId: string | undefined,
+    @Query('account_id') accountId: string | undefined,
     @Query('include_shadowed') shadowed: string,
     @Res() res: Response,
   ) {
     try {
-      return res.json(await this.functions.list(workspaceId || null, shadowed === 'true'));
+      return res.json(await this.functions.list(accountId || null, shadowed === 'true'));
     } catch (error) {
       return this.fail(res, error, 'Failed to list Functions');
     }
@@ -37,24 +37,24 @@ export class WorkflowFunctionsController {
 
   @Get('runs')
   async listRuns(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('function_id') functionId: string | undefined,
     @Query('ticket_id') ticketId: string | undefined,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
   ) {
     try {
-      if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-      return res.json(await this.functions.listRuns(workspaceId, functionId, ticketId, Number(limit || 50)));
+      if (!accountId) return res.status(400).json({ error: 'account_id is required' });
+      return res.json(await this.functions.listRuns(accountId, functionId, ticketId, Number(limit || 50)));
     } catch (error) {
       return this.fail(res, error, 'Failed to list Function runs');
     }
   }
 
   @Get('runs/:runId')
-  async getRun(@Param('runId') runId: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getRun(@Param('runId') runId: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.functions.getRun(runId, workspaceId));
+      return res.json(await this.functions.getRun(runId, accountId));
     } catch (error) {
       return this.fail(res, error, 'Function run not found');
     }
@@ -72,7 +72,7 @@ export class WorkflowFunctionsController {
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      if ((body?.scope === 'global' || !body?.workspace_id) && !this.isAdmin(req)) {
+      if ((body?.scope === 'global' || !body?.account_id) && !this.isAdmin(req)) {
         return res.status(403).json({ error: 'Only admins can create Global Functions' });
       }
       return res.status(201).json(await this.functions.create(body));
@@ -85,7 +85,7 @@ export class WorkflowFunctionsController {
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const current = await this.functions.get(id);
-      if (current.workspace_id === null && !this.isAdmin(req)) {
+      if (current.account_id === null && !this.isAdmin(req)) {
         return res.status(403).json({ error: 'Only admins can update Global Functions' });
       }
       return res.json(await this.functions.update(id, body));
@@ -98,7 +98,7 @@ export class WorkflowFunctionsController {
   async remove(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       const current = await this.functions.get(id);
-      if (current.workspace_id === null && !this.isAdmin(req)) {
+      if (current.account_id === null && !this.isAdmin(req)) {
         return res.status(403).json({ error: 'Only admins can delete Global Functions' });
       }
       await this.functions.remove(id);
@@ -114,7 +114,7 @@ export class WorkflowFunctionsController {
       const user = (req as any).currentUser || {};
       const run = await this.functions.execute({
         functionId: id,
-        workspaceId: body.workspace_id,
+        accountId: body.account_id,
         ticketId: body.ticket_id,
         inputs: body.inputs,
         idempotencyKey: body.idempotency_key,

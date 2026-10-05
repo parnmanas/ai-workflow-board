@@ -35,7 +35,7 @@ async function loadService() {
 
 const MISSION = {
   id: 'mission-1',
-  workspace_id: 'ws-1',
+  account_id: 'ws-1',
   title: 'Ship the landing page',
   created_by_type: 'user',
   created_by: 'user-owner',
@@ -142,7 +142,7 @@ test('알림 payload 에 미션명·질문·판정 화면 링크가 모두 들�
     );
     assert.equal(
       payload.url,
-      'https://awb.example.com/ws/ws-1/orchestration/missions/mission-1',
+      'https://awb.example.com/missions/mission-1',
       '판정 화면 딥링크는 클라이언트 라우트와 같아야 한다',
     );
   } finally {

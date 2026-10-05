@@ -24,7 +24,7 @@ import type { ExtractionLang } from './extraction/types';
 const DEFAULT_DEBOUNCE_MS = 1500;
 
 export interface ScheduleFileChangeInput {
-  workspaceId: string;
+  accountId: string;
   resourceId: string;
   folderPath: string;
   graphId: string;
@@ -73,7 +73,7 @@ export class OntologyIncrementalSchedulerService {
   }
 
   private emitProgress(payload: {
-    workspaceId: string;
+    accountId: string;
     graphId: string;
     resourceId: string;
     jobId: string;
@@ -87,7 +87,7 @@ export class OntologyIncrementalSchedulerService {
     error: string | null;
   }): void {
     activityEvents.emit('ontology_graph_progress', {
-      workspace_id: payload.workspaceId,
+      account_id: payload.accountId,
       graph_id: payload.graphId,
       resource_id: payload.resourceId,
       job_id: payload.jobId,
@@ -118,7 +118,7 @@ export class OntologyIncrementalSchedulerService {
       this.runFileChange(input).catch((e: unknown) => {
         this.logService.error('Ontology', 'incremental file-change job failed', { path: input.newPath, err: String(e) });
         this.emitProgress({
-          workspaceId: input.workspaceId,
+          accountId: input.accountId,
           graphId: input.graphId,
           resourceId: input.resourceId,
           jobId: randomUUID(),
@@ -145,7 +145,7 @@ export class OntologyIncrementalSchedulerService {
     const extractionRunId = randomUUID();
 
     this.emitProgress({
-      workspaceId: input.workspaceId,
+      accountId: input.accountId,
       graphId: input.graphId,
       resourceId: input.resourceId,
       jobId,
@@ -164,7 +164,7 @@ export class OntologyIncrementalSchedulerService {
         ? await runPhaseADeletion(dataSource, { graphId: input.graphId, commit: input.commit, filePath: input.newPath })
         : await runPhaseA(dataSource, {
             graphId: input.graphId,
-            workspaceId: input.workspaceId,
+            accountId: input.accountId,
             resourceId: input.resourceId,
             folderPath: input.folderPath,
             commit: input.commit,
@@ -179,7 +179,7 @@ export class OntologyIncrementalSchedulerService {
       ? null
       : await runPhaseB(dataSource, {
           graphId: input.graphId,
-          workspaceId: input.workspaceId,
+          accountId: input.accountId,
           commit: input.commit,
           extractionRunId,
           changedFilePath: input.newPath,
@@ -197,7 +197,7 @@ export class OntologyIncrementalSchedulerService {
     const phaseC = await runPhaseC(dataSource, input.graphId);
 
     this.emitProgress({
-      workspaceId: input.workspaceId,
+      accountId: input.accountId,
       graphId: input.graphId,
       resourceId: input.resourceId,
       jobId,
@@ -223,12 +223,12 @@ export class OntologyIncrementalSchedulerService {
    * Phase A/B를 돌고 배치 끝에 Phase C까지 한 번 실행한다.
    */
   async runGitDiffBatch(
-    input: GitDiffBatchInput & { workspaceId: string },
+    input: GitDiffBatchInput & { accountId: string },
   ): Promise<GitDiffBatchResult> {
     const dataSource = this.resolveOntologyDataSource();
     const jobId = randomUUID();
     this.emitProgress({
-      workspaceId: input.workspaceId,
+      accountId: input.accountId,
       graphId: input.graphId,
       resourceId: input.resourceId,
       jobId,
@@ -245,7 +245,7 @@ export class OntologyIncrementalSchedulerService {
     const result = await runGitDiffScopedBatch(dataSource, input);
 
     this.emitProgress({
-      workspaceId: input.workspaceId,
+      accountId: input.accountId,
       graphId: input.graphId,
       resourceId: input.resourceId,
       jobId,

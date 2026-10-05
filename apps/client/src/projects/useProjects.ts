@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import type { Project } from '../types';
 
-// Workspace project list shared by the Tickets page, the ticket form/panel,
+// Account project list shared by the Tickets page, the ticket form/panel,
 // the Projects page and every "use project folder" helper. One in-flight
 // request per workspace is shared; `notifyProjectsChanged()` (called after a
 // project write) makes every mounted consumer refetch.

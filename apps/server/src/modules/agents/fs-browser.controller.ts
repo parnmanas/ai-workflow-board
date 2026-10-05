@@ -177,7 +177,7 @@ export class FsBrowserController {
   private resolveAgentFromRequest(req: Request): string | null {
     // AgentAuthGuard loaded apiKey with .agent relation; pull the id off it.
     // Keeping the lookup synchronous here avoids another DB hit since the
-    // guard already did the work. Fallback to currentWorkspaceId style
+    // guard already did the work. Fallback to currentAccountId style
     // properties the guard attaches in case future refactors move things.
     const auth = (req as any).apiKey;
     if (auth?.agent_id) return auth.agent_id;

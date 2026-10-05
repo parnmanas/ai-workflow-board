@@ -1,10 +1,11 @@
+import { normalizeAccountScope } from './account-scope.js';
 import { REQUEST_TIMEOUT_MS } from './constants.js';
 import { log } from './logging.js';
 
 export interface AwbConfig {
   url: string;
   apiKey: string;
-  workspace_id?: string;
+  account_id?: string;
   agent_id?: string;
   cli?: string;
   /** Override for `hasAuditTrailSince`'s grace delay (ticket 2fd06686).
@@ -130,7 +131,7 @@ export async function fetchTicketContext(
       log(`Ticket fetch failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`);
       return null;
     }
-    return await resp.json();
+    return normalizeAccountScope(await resp.json());
   } catch (err: any) {
     log(`Ticket fetch error: ${err?.message ?? err} (ticket=${ticketId})`);
     return null;
@@ -260,7 +261,7 @@ export interface OrdinaryWorkBoardCandidate {
 }
 
 /** Board-less ticket destinations for chat "ordinary work" (docs/tickets.md):
- *  projects + the workspace's tags. `boards` is set only when the server predates
+ *  projects + the account's tags. `boards` is set only when the server predates
  *  the board-less model (its candidate endpoint 404s) — the prompt then keeps the
  *  legacy "pick an existing board" wording. */
 export interface OrdinaryWorkCandidates {
@@ -279,10 +280,10 @@ export async function fetchOrdinaryWorkCandidates(
   config: AwbConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<OrdinaryWorkCandidates> {
-  const workspaceQuery = config.workspace_id
-    ? `?workspace_id=${encodeURIComponent(config.workspace_id)}`
+  const accountQuery = config.account_id
+    ? `?account_id=${encodeURIComponent(config.account_id)}`
     : '';
-  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-candidates${workspaceQuery}`;
+  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-candidates${accountQuery}`;
   const resp = await fetchImpl(url, {
     headers: { 'X-Agent-Key': config.apiKey },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -322,10 +323,10 @@ export async function fetchOrdinaryWorkBoardCandidates(
   config: AwbConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<OrdinaryWorkBoardCandidate[]> {
-  const workspaceQuery = config.workspace_id
-    ? `?workspace_id=${encodeURIComponent(config.workspace_id)}`
+  const accountQuery = config.account_id
+    ? `?account_id=${encodeURIComponent(config.account_id)}`
     : '';
-  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-board-candidates${workspaceQuery}`;
+  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-board-candidates${accountQuery}`;
   const resp = await fetchImpl(url, {
     headers: { 'X-Agent-Key': config.apiKey },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -732,7 +733,7 @@ export async function fetchAgentRecord(
       log(`agent fetch failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
       return null;
     }
-    return (await resp.json()) as any;
+    return normalizeAccountScope(await resp.json()) as any;
   } catch (err: any) {
     log(`agent fetch error: ${err?.message ?? err} (agent=${agentId})`);
     return null;
@@ -758,11 +759,11 @@ export async function fetchAgentRecord(
 export async function fetchAgentCredential(
   config: AwbConfig,
   agentId: string,
-  workspaceId?: string,
+  accountId?: string,
 ): Promise<{ credential_id: string; provider: string; fields: Record<string, string> } | null> {
   if (!agentId) return null;
   try {
-    const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : '';
     const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/credential${query}`;
     const resp = await fetch(url, {
       headers: {
@@ -794,9 +795,9 @@ export async function fetchRepositoryCredential(
   config: AwbConfig,
   resourceId: string,
   agentId: string,
-  workspaceId?: string,
+  accountId?: string,
 ): Promise<{ username?: string; token: string } | null> {
-  return (await fetchRepositoryCredentialStatus(config, resourceId, agentId, workspaceId)).credential;
+  return (await fetchRepositoryCredentialStatus(config, resourceId, agentId, accountId)).credential;
 }
 
 export interface RepositoryCredentialStatus {
@@ -814,13 +815,13 @@ export async function fetchRepositoryCredentialStatus(
   config: AwbConfig,
   resourceId: string,
   agentId: string,
-  workspaceId?: string,
+  accountId?: string,
 ): Promise<RepositoryCredentialStatus> {
   if (!resourceId || !agentId) return { credential: null, failure: 'credential_lookup_not_applicable' };
   try {
-    const workspaceQuery = workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    const accountQuery = accountId ? `&account_id=${encodeURIComponent(accountId)}` : '';
     const credentialUrl = (collection: 'projects' | 'resources') =>
-      `${trimSlash(config.url)}/api/agent-manager/${collection}/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${workspaceQuery}`;
+      `${trimSlash(config.url)}/api/agent-manager/${collection}/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${accountQuery}`;
     const request = (url: string) => fetch(url, {
       headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -1151,11 +1152,11 @@ export async function postSilentExitSystemCommentRaw(
 export async function provisionManagedAgentApiKey(
   config: AwbConfig,
   agentId: string,
-  workspaceId?: string,
-): Promise<{ raw_key: string; key_id: string; agent_id: string; workspace_id: string } | null> {
+  accountId?: string,
+): Promise<{ raw_key: string; key_id: string; agent_id: string; account_id: string } | null> {
   if (!agentId) return null;
   try {
-    const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : '';
     const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/apikey/provision${query}`;
     const resp = await fetch(url, {
       method: 'POST',
@@ -1169,7 +1170,7 @@ export async function provisionManagedAgentApiKey(
       log(`apiKey provision failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
       return null;
     }
-    return (await resp.json()) as any;
+    return normalizeAccountScope(await resp.json()) as any;
   } catch (err: any) {
     log(`apiKey provision error: ${err?.message ?? err} (agent=${agentId})`);
     return null;
@@ -1177,7 +1178,7 @@ export async function provisionManagedAgentApiKey(
 }
 
 /**
- * P4c-2a: issue a workspace-scoped API key bound to a runtime tuple identity
+ * P4c-2a: issue an account-scoped API key bound to a runtime tuple identity
  * (`rt-<hex16}`, no Agent row). The server binds it to this host (host_id from
  * our own pairing-time key) and returns the raw key once; the manager persists
  * it under the runtime key dir like a per-agent key. Returns null on any
@@ -1186,10 +1187,10 @@ export async function provisionManagedAgentApiKey(
 export async function provisionRuntimeApiKey(
   config: AwbConfig,
   key: string,
-  workspaceId: string,
+  accountId: string,
   label?: string,
-): Promise<{ raw_key: string; key_id: string; key: string; workspace_id: string } | null> {
-  if (!key || !workspaceId) return null;
+): Promise<{ raw_key: string; key_id: string; key: string; account_id: string } | null> {
+  if (!key || !accountId) return null;
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/runtime-keys/provision`;
     const resp = await fetch(url, {
@@ -1199,14 +1200,14 @@ export async function provisionRuntimeApiKey(
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({ key, workspace_id: workspaceId, label: (label || '').slice(0, 80) || undefined }),
+      body: JSON.stringify({ key, account_id: accountId, label: (label || '').slice(0, 80) || undefined }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!resp.ok) {
       log(`runtime key provision failed: ${resp.status} ${resp.statusText} (key=${key})`);
       return null;
     }
-    return (await resp.json()) as any;
+    return normalizeAccountScope(await resp.json()) as any;
   } catch (err: any) {
     log(`runtime key provision error: ${err?.message ?? err} (key=${key})`);
     return null;
@@ -1503,11 +1504,11 @@ export async function fetchSessionCredential(
   config: AwbConfig,
   managerId: string,
   credentialId: string,
-  workspaceId: string,
+  accountId: string,
 ): Promise<{ credential_id: string; provider: string; fields: Record<string, string> } | null> {
   if (!credentialId) return null;
   try {
-    const qs = new URLSearchParams({ workspace_id: workspaceId || '', manager_id: managerId });
+    const qs = new URLSearchParams({ account_id: accountId || '', manager_id: managerId });
     const url = `${trimSlash(config.url)}/api/agent/sessions/credential/${encodeURIComponent(credentialId)}?${qs}`;
     const resp = await fetch(url, {
       method: 'GET',

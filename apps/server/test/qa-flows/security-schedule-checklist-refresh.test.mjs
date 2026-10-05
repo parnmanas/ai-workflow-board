@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,9 +34,9 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'sec-sched-refresh');
+  const ws = await createAccount(app, getDataSourceToken, 'sec-sched-refresh');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'inspector' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'inspector' });
 
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
@@ -51,7 +51,7 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
   step('two enabled profiles + one disabled — scope=all must skip the disabled one');
   const mkProfile = async (name, enabled) => {
     const p = await mcp.callTool('create_security_profile', {
-      workspace_id: ws.id,
+      account_id: ws.id,
       name,
       target_runtime: agent.runtime_spec,
       scan_driver: 'code-review',
@@ -67,7 +67,7 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
 
   step('create a kind=checklist_refresh schedule, scope=all');
   const sched = await mcp.callTool('create_security_schedule', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'weekly-checklist-refresh',
     kind: 'checklist_refresh',
     scope: 'all',
@@ -86,7 +86,7 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
 
   step('refresh creates NO SecurityRun rows for any profile (scan history untouched)');
   for (const p of [pA, pB, pDisabled]) {
-    const runs = await mcp.callTool('list_security_runs', { profile_id: p.id, workspace_id: ws.id });
+    const runs = await mcp.callTool('list_security_runs', { profile_id: p.id, account_id: ws.id });
     assert.ok(Array.isArray(runs) && runs.length === 0, `profile ${p.name} must have zero runs after a refresh`);
   }
 
@@ -95,7 +95,7 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
   // bootApp forces DB_TYPE=sqlite, so use sqlite (?) placeholders.
   const ds = app.get(getDataSourceToken());
   const rooms = await ds.query(
-    `SELECT name FROM chat_rooms WHERE workspace_id = ? AND name LIKE 'Security checklist refresh:%'`,
+    `SELECT name FROM chat_rooms WHERE account_id = ? AND name LIKE 'Security checklist refresh:%'`,
     [ws.id],
   );
   const roomNames = rooms.map((r) => r.name).sort();
@@ -111,7 +111,7 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
 
   step("scope='selected' run-now: kind-discriminated result, batch=null, refreshes lists the selected profile");
   const selSched = await mcp.callTool('create_security_schedule', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'selected-refresh',
     kind: 'checklist_refresh',
     scope: 'selected',
@@ -120,19 +120,19 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
     enabled: false, // run-now ignores enabled
   });
   assert.ok(!selSched.isError, `create selected schedule failed: ${JSON.stringify(selSched)}`);
-  const selRun = await mcp.callTool('run_security_schedule_now', { schedule_id: selSched.id, workspace_id: ws.id });
+  const selRun = await mcp.callTool('run_security_schedule_now', { schedule_id: selSched.id, account_id: ws.id });
   assert.ok(!selRun.isError, `run-now failed: ${JSON.stringify(selRun)}`);
   assert.equal(selRun.kind, 'checklist_refresh');
   assert.equal(selRun.batch, null, 'no batch for a checklist_refresh run-now');
   assert.ok(Array.isArray(selRun.refreshes) && selRun.refreshes.length === 1, 'one profile refreshed');
   assert.equal(selRun.refreshes[0].profile_id, pA.id, 'exactly the selected profile');
   // still no runs
-  const runsA = await mcp.callTool('list_security_runs', { profile_id: pA.id, workspace_id: ws.id });
+  const runsA = await mcp.callTool('list_security_runs', { profile_id: pA.id, account_id: ws.id });
   assert.equal(runsA.length, 0, 'selected refresh still creates no run row');
 
   step('regression: a kind=scan schedule run-now still kicks a batch (kind=scan, batch set, refreshes null)');
   const scanSched = await mcp.callTool('create_security_schedule', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'scan-sched',
     kind: 'scan',
     scope: 'selected',
@@ -142,13 +142,13 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
   });
   assert.ok(!scanSched.isError, `create scan schedule failed: ${JSON.stringify(scanSched)}`);
   assert.equal(scanSched.kind, 'scan', 'default/explicit scan kind');
-  const scanRun = await mcp.callTool('run_security_schedule_now', { schedule_id: scanSched.id, workspace_id: ws.id });
+  const scanRun = await mcp.callTool('run_security_schedule_now', { schedule_id: scanSched.id, account_id: ws.id });
   assert.ok(!scanRun.isError, `scan run-now failed: ${JSON.stringify(scanRun)}`);
   assert.equal(scanRun.kind, 'scan');
   assert.equal(scanRun.refreshes, null, 'scan run-now has no refreshes');
   assert.ok(scanRun.batch && scanRun.batch.id, 'scan run-now kicks a batch');
   // the scan batch DID stack a run for pA (the regression: scan path still works)
-  const runsAfterScan = await mcp.callTool('list_security_runs', { profile_id: pA.id, workspace_id: ws.id });
+  const runsAfterScan = await mcp.callTool('list_security_runs', { profile_id: pA.id, account_id: ws.id });
   assert.ok(runsAfterScan.length >= 1, 'scan batch stacked a SecurityRun (scan path intact)');
 
   await mcp.close();

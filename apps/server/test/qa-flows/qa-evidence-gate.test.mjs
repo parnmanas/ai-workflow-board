@@ -19,14 +19,14 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_EVIDENCE_GATE_PORT || '0';
 
 async function makeScenario(mcp, seedKey, { ws, agent, seed }) {
   const [payload] = seed.buildScenarioCreatePayloads({
-    workspace_id: ws.id,
+    account_id: ws.id,
     target_runtime: agent.runtime_spec,
     only: [seedKey],
   });
@@ -46,9 +46,9 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   const DIST = path.join(__dirname, '..', '..', 'dist');
   const seed = await import(pathToFileURL(path.join(DIST, 'modules', 'qa', 'qa-seed-scenarios.js')).href);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'qa-evidence');
+  const ws = await createAccount(app, getDataSourceToken, 'qa-evidence');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-evidence-runner' });
-  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
+  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { accountId: ws.id, label: 'qa' });
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
 
@@ -66,12 +66,12 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   // non-empty. This is the exact "증거 없는 PASSED" shape.
   for (const s of visual.steps) {
     await mcp.callTool('record_qa_step', {
-      run_id: r1.run_id, workspace_id: ws.id, idx: s.idx, status: 'passed',
+      run_id: r1.run_id, account_id: ws.id, idx: s.idx, status: 'passed',
       log: 'ok', artifact_resource_ids: [`not-a-resource-${s.idx}`],
     });
   }
   const done1 = await mcp.callTool('complete_qa_run', {
-    run_id: r1.run_id, workspace_id: ws.id, status: 'passed', summary: 'all green (agent self-report)',
+    run_id: r1.run_id, account_id: ws.id, status: 'passed', summary: 'all green (agent self-report)',
   });
   assert.ok(!done1?.isError, `complete: ${JSON.stringify(done1)}`);
   assert.equal(done1.status, 'failed', 'visual PASSED with no image/video evidence is downgraded');
@@ -83,7 +83,7 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   const ds = app.get(getDataSourceToken());
   const resourceRepo = ds.getRepository('Resource');
   const shot = await resourceRepo.save(resourceRepo.create({
-    workspace_id: ws.id, name: 'login.png', type: 'image',
+    account_id: ws.id, name: 'login.png', type: 'image',
     file_name: 'login.png', file_mimetype: 'image/png', file_data: 'ZmFrZQ==',
   }));
 
@@ -91,16 +91,16 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   assert.ok(!r2?.isError && r2.run_id, `start#2: ${JSON.stringify(r2)}`);
   for (const s of visual.steps) {
     await mcp.callTool('record_qa_step', {
-      run_id: r2.run_id, workspace_id: ws.id, idx: s.idx, status: 'passed', log: 'ok',
+      run_id: r2.run_id, account_id: ws.id, idx: s.idx, status: 'passed', log: 'ok',
     });
   }
   // Attach the real image at the run level.
   const att = await mcp.callTool('attach_qa_artifact', {
-    run_id: r2.run_id, workspace_id: ws.id, resource_ids: [shot.id],
+    run_id: r2.run_id, account_id: ws.id, resource_ids: [shot.id],
   });
   assert.ok(!att?.isError, `attach: ${JSON.stringify(att)}`);
   const done2 = await mcp.callTool('complete_qa_run', {
-    run_id: r2.run_id, workspace_id: ws.id, status: 'passed', summary: 'evidenced run',
+    run_id: r2.run_id, account_id: ws.id, status: 'passed', summary: 'evidenced run',
   });
   assert.ok(!done2?.isError, `complete#2: ${JSON.stringify(done2)}`);
   assert.equal(done2.status, 'passed', 'visual run with real image evidence stays passed');
@@ -115,11 +115,11 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   assert.ok(!r3?.isError && r3.run_id, `start#3: ${JSON.stringify(r3)}`);
   for (const s of mcpScenario.steps) {
     await mcp.callTool('record_qa_step', {
-      run_id: r3.run_id, workspace_id: ws.id, idx: s.idx, status: 'passed', log: 'ok',
+      run_id: r3.run_id, account_id: ws.id, idx: s.idx, status: 'passed', log: 'ok',
     });
   }
   const done3 = await mcp.callTool('complete_qa_run', {
-    run_id: r3.run_id, workspace_id: ws.id, status: 'passed', summary: 'mcp run ok',
+    run_id: r3.run_id, account_id: ws.id, status: 'passed', summary: 'mcp run ok',
   });
   assert.ok(!done3?.isError, `complete#3: ${JSON.stringify(done3)}`);
   assert.equal(done3.status, 'passed', 'non-visual run is exempt from the evidence gate');

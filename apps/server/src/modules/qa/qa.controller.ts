@@ -111,7 +111,7 @@ export class QaController {
     const warnings: string[] = [];
     if (dbType !== 'sqlite' && dbType !== 'sqljs') {
       warnings.push(
-        `Flow tests are sharing the live ${dbType} database; test data (workspaces/agents/tickets with UUID names) will remain unless you clean up manually.`,
+        `Flow tests are sharing the live ${dbType} database; test data (accounts/agents/tickets with UUID names) will remain unless you clean up manually.`,
       );
     }
 

@@ -71,12 +71,12 @@ test('two Postgres connections race confirmed-link correction → exactly one wi
   await ds1.initialize();
   await ds2.initialize();
 
-  const ws = await ds1.getRepository(entities.Workspace).save({ name: `correction-${randomUUID()}` });
+  const ws = await ds1.getRepository(entities.Account).save({ name: `correction-${randomUUID()}` });
   const canonical = await ds1.getRepository(entities.Ticket).save({
-    workspace_id: ws.id, status: 'in_progress', title: 'canonical',
+    account_id: ws.id, status: 'in_progress', title: 'canonical',
   });
   const report = await ds1.getRepository(entities.Ticket).save({
-    workspace_id: ws.id, status: 'done', title: 'independent', canonical_ticket_id: canonical.id,
+    account_id: ws.id, status: 'done', title: 'independent', canonical_ticket_id: canonical.id,
   });
 
   const results = await Promise.allSettled([

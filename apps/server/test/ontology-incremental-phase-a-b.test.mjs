@@ -76,7 +76,7 @@ async function seedGraph(graphId, fixtures, commit) {
   }
   await persistFactBundles(AppOntologyDataSource, {
     graphId,
-    workspaceId: WORKSPACE_ID,
+    accountId: WORKSPACE_ID,
     resourceId: RESOURCE_ID,
     folderPath: '',
     commit,
@@ -86,7 +86,7 @@ async function seedGraph(graphId, fixtures, commit) {
   });
   return resolveCrossFileEdges(AppOntologyDataSource, {
     graphId,
-    workspaceId: WORKSPACE_ID,
+    accountId: WORKSPACE_ID,
     commit,
     extractionRunId: `${graphId}-resolve-1`,
   });
@@ -148,7 +148,7 @@ export function trigger() {
   it('body만 바뀐 재파싱 결과는 content_hash는 바뀌고 signature_hash는 그대로다', async () => {
     const phaseA = await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-2',
@@ -174,7 +174,7 @@ export function trigger() {
   it('Phase A가 shortCircuit이면 Phase B를 호출해도 아무 파일도 건드리지 않는다 — caller.ts의 CALLS 엣지가 그대로다', async () => {
     const phaseA = await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-3',
@@ -189,7 +189,7 @@ export function trigger() {
 
     const phaseB = await runPhaseB(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       commit: 'commit-3',
       extractionRunId: 'phase-a-run-2',
       changedFilePath: BASE_PATH,
@@ -241,7 +241,7 @@ export function trigger() {
   it('파라미터 추가(시그니처 변경)는 changedSymbolIds를 채우고, Phase B가 caller2.ts를 재해소 대상으로 찾는다', async () => {
     const phaseA = await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-2',
@@ -256,7 +256,7 @@ export function trigger() {
 
     const phaseB = await runPhaseB(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       commit: 'commit-2',
       extractionRunId: 'sig-run-1',
       changedFilePath: BASE_PATH,
@@ -312,7 +312,7 @@ export function run() {
 
     const phaseA = await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-2',
@@ -342,7 +342,7 @@ export function run() {
 
     const phaseB = await runPhaseB(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       commit: 'commit-2',
       extractionRunId: 'rename-run-1',
       changedFilePath: CONSUMER_NEW_PATH,
@@ -427,7 +427,7 @@ export function helper() {
   it('(a) 기존 파일에 top-level def(helper)와 nested def(Widget.extra) 추가 시 CONTAINS/DECLARES가 active로 새로 생긴다', async () => {
     const phaseA = await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-2',
@@ -458,7 +458,7 @@ export function helper() {
   it('(b) def 삭제(Widget.render 제거) 시 그 def를 향하던 DECLARES 엣지가 removed 처리된다', async () => {
     await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-3',
@@ -515,7 +515,7 @@ export class Foo {
   it('그래프에 전혀 없던 파일을 Phase A로 처음 넣으면 CONTAINS/DECLARES가 active로 생긴다', async () => {
     const phaseA = await runPhaseA(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       resourceId: RESOURCE_ID,
       folderPath: '',
       commit: 'commit-1',
@@ -553,7 +553,7 @@ describe('durability pre-filter — volatile 변경은 stable/frozen 파티션�
   function fileNodeRow(p, durability) {
     return {
       id: randomUUID(),
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: `file:${p}`,
       type: 'File',
@@ -649,7 +649,7 @@ describe('리뷰 지적(차단2) — resolve.ts의 scopeFilePaths 정리가 청�
 
     const fileRow = {
       id: fileId,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: `file:${FILE_PATH}`,
       type: 'File',
@@ -663,7 +663,7 @@ describe('리뷰 지적(차단2) — resolve.ts의 scopeFilePaths 정리가 청�
     };
     const dstRow = {
       id: dstId,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: 'def:target#shared',
       type: 'Callable',
@@ -676,7 +676,7 @@ describe('리뷰 지적(차단2) — resolve.ts의 scopeFilePaths 정리가 청�
     };
     const defRows = defIds.map((id, i) => ({
       id,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: `def:${FILE_PATH}#fn${i}`,
       type: 'Callable',
@@ -692,7 +692,7 @@ describe('리뷰 지적(차단2) — resolve.ts의 scopeFilePaths 정리가 청�
 
     const edgeRows = defIds.map((srcId) => ({
       id: randomUUID(),
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       src_id: srcId,
       dst_id: dstId,
@@ -707,7 +707,7 @@ describe('리뷰 지적(차단2) — resolve.ts의 scopeFilePaths 정리가 청�
 
     await resolveCrossFileEdges(AppOntologyDataSource, {
       graphId: GRAPH_ID,
-      workspaceId: WORKSPACE_ID,
+      accountId: WORKSPACE_ID,
       commit: 'c2',
       extractionRunId: 'chunk-run-1',
       scopeFilePaths: new Set([FILE_PATH]),

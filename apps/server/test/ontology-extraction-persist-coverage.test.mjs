@@ -106,7 +106,7 @@ before(async () => {
 
   decoratorSummary = await persistFactBundles(AppOntologyDataSource, {
     graphId: 'persist-coverage-graph',
-    workspaceId: 'persist-coverage-ws',
+    accountId: 'persist-coverage-ws',
     resourceId: 'persist-coverage-resource',
     folderPath: '',
     commit: 'persist-coverage-commit',
@@ -188,7 +188,7 @@ describe('canonical natural key 중복 제거', () => {
     const facts = extractDecoratorFacts(DECORATOR_COVERAGE_PATH, DECORATOR_COVERAGE_SRC, 'typescript');
     const input = {
       graphId,
-      workspaceId: 'persist-coverage-ws',
+      accountId: 'persist-coverage-ws',
       resourceId: 'persist-coverage-resource',
       folderPath: '',
       commit: 'persist-coverage-commit',

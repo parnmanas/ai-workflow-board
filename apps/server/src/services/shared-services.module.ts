@@ -22,6 +22,7 @@ import { AgentConnectivityRegistry } from './agent-connectivity.registry';
 import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
+import { AccountAccessService } from './account-access.service';
 import { MentionService } from './mention.service';
 import { PresenceService } from './presence.service';
 import { SqljsFlushService } from './sqljs-flush.service';
@@ -72,6 +73,7 @@ import {
     NotificationService,
     SystemCommentService,
     ReBACService,
+    AccountAccessService,
     MentionService,
     PresenceService,
     DiscordUserProvider,
@@ -90,6 +92,7 @@ import {
     MemoryMetricsRegistry,
     AgentConnectivityRegistry,
     ReBACService,
+    AccountAccessService,
     MentionService,
     PresenceService,
     NotificationProviderRegistry,

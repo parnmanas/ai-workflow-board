@@ -71,13 +71,13 @@ export class TicketDuplicateService {
     return { source_kind: kind, source_chat_room_id: room, related_ticket_id: related };
   }
 
-  async assess(workspaceId: string, input: DuplicateIntake): Promise<DuplicateAssessment> {
+  async assess(accountId: string, input: DuplicateIntake): Promise<DuplicateAssessment> {
     const provenance = this.parseProvenance(input);
-    if (!workspaceId || !provenance.source_kind) {
+    if (!accountId || !provenance.source_kind) {
       return { ...provenance, canonical_ticket_id: null, ambiguous: false, candidates: [] };
     }
     const tickets = await this.dataSource.getRepository(Ticket).find({
-      where: { workspace_id: workspaceId, parent_id: IsNull(), archived_at: IsNull(), canonical_ticket_id: IsNull() },
+      where: { account_id: accountId, parent_id: IsNull(), archived_at: IsNull(), canonical_ticket_id: IsNull() },
       order: { created_at: 'ASC' },
     });
     const normalized = this.normalizeTitle(input.title);
@@ -160,7 +160,7 @@ export class TicketDuplicateService {
     if (!assessment.candidates.length) return;
     const repo = manager.getRepository(TicketDuplicateDecision);
     await repo.save(assessment.candidates.map(candidate => repo.create({
-      workspace_id: ticket.workspace_id,
+      account_id: ticket.account_id,
       report_ticket_id: ticket.id,
       candidate_ticket_id: candidate.ticket_id,
       outcome: assessment.canonical_ticket_id === candidate.ticket_id ? 'auto_linked' : 'ambiguous_pending',
@@ -173,11 +173,11 @@ export class TicketDuplicateService {
       const comments = manager.getRepository(Comment);
       await comments.save([
         comments.create({
-          workspace_id: ticket.workspace_id, ticket_id: ticket.id, author_type: 'system', author: 'Duplicate intake',
+          account_id: ticket.account_id, ticket_id: ticket.id, author_type: 'system', author: 'Duplicate intake',
           content: `Linked to canonical ticket ${assessment.canonical_ticket_id}; independent dispatch is suppressed.`, type: 'system',
         }),
         comments.create({
-          workspace_id: ticket.workspace_id, ticket_id: assessment.canonical_ticket_id, author_type: 'system', author: 'Duplicate intake',
+          account_id: ticket.account_id, ticket_id: assessment.canonical_ticket_id, author_type: 'system', author: 'Duplicate intake',
           content: `Duplicate report ${ticket.id} was linked to this canonical ticket.`, type: 'system',
         }),
       ]);
@@ -204,7 +204,7 @@ export class TicketDuplicateService {
           },
         });
         if (!pendingCandidate) throw new Error('Canonical candidate was not offered for this duplicate decision');
-        canonical = await tickets.findOne({ where: { id: candidateId, workspace_id: report.workspace_id, canonical_ticket_id: IsNull() } });
+        canonical = await tickets.findOne({ where: { id: candidateId, account_id: report.account_id, canonical_ticket_id: IsNull() } });
         if (!canonical || canonical.id === report.id) throw new Error('Invalid canonical candidate');
       }
       report.canonical_ticket_id = canonical?.id || null;
@@ -221,7 +221,7 @@ export class TicketDuplicateService {
         { outcome: 'rejected', actor_name: actorName, actor_id: actorId },
       );
       await decisions.save(decisions.create({
-        workspace_id: report.workspace_id,
+        account_id: report.account_id,
         report_ticket_id: report.id,
         candidate_ticket_id: canonical?.id || candidateId || report.id,
         outcome: canonical ? 'confirmed_link' : 'rejected',
@@ -234,17 +234,17 @@ export class TicketDuplicateService {
       if (canonical) {
         await comments.save([
           comments.create({
-            workspace_id: report.workspace_id, ticket_id: report.id, author_type: 'system', author: 'Duplicate decision',
+            account_id: report.account_id, ticket_id: report.id, author_type: 'system', author: 'Duplicate decision',
             content: `Confirmed duplicate of canonical ticket ${canonical.id}; independent dispatch remains suppressed.`, type: 'system',
           }),
           comments.create({
-            workspace_id: report.workspace_id, ticket_id: canonical.id, author_type: 'system', author: 'Duplicate decision',
+            account_id: report.account_id, ticket_id: canonical.id, author_type: 'system', author: 'Duplicate decision',
             content: `Report ${report.id} was confirmed as a duplicate of this ticket.`, type: 'system',
           }),
         ]);
       } else {
         await comments.save(comments.create({
-          workspace_id: report.workspace_id, ticket_id: report.id, author_type: 'system', author: 'Duplicate decision',
+          account_id: report.account_id, ticket_id: report.id, author_type: 'system', author: 'Duplicate decision',
           content: 'Duplicate suggestion rejected; this ticket will continue independently.', type: 'system',
         }));
       }
@@ -273,7 +273,7 @@ export class TicketDuplicateService {
       if (!report.canonical_ticket_id) throw new Error('Ticket has no confirmed canonical link to correct');
       const previousCanonicalId = report.canonical_ticket_id;
       const canonical = await tickets.findOne({ where: { id: previousCanonicalId } });
-      if (!canonical || canonical.workspace_id !== report.workspace_id || canonical.id === report.id) {
+      if (!canonical || canonical.account_id !== report.account_id || canonical.id === report.id) {
         throw new Error('Confirmed canonical link is invalid or outside the ticket workspace');
       }
       // PostgreSQL READ COMMITTED 에서는 두 호출이 기존 canonical 을 함께 읽을 수
@@ -287,7 +287,7 @@ export class TicketDuplicateService {
       }
       const saved = await tickets.findOneByOrFail({ id: report.id });
       await manager.getRepository(TicketDuplicateDecision).save({
-        workspace_id: report.workspace_id,
+        account_id: report.account_id,
         report_ticket_id: report.id,
         candidate_ticket_id: previousCanonicalId,
         outcome: 'corrected_independent',
@@ -297,7 +297,7 @@ export class TicketDuplicateService {
         actor_id: actorId,
       });
       await manager.getRepository(Comment).save({
-        workspace_id: report.workspace_id,
+        account_id: report.account_id,
         ticket_id: report.id,
         author_type: 'system',
         author: 'Duplicate correction',
@@ -305,7 +305,7 @@ export class TicketDuplicateService {
         type: 'system',
       });
       await manager.getRepository(ActivityLog).save({
-        workspace_id: report.workspace_id,
+        account_id: report.account_id,
         entity_type: 'ticket',
         entity_id: report.id,
         action: 'duplicate_link_corrected',

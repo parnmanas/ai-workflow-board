@@ -1,5 +1,5 @@
-// Resources live in exactly two catalog layers — Global (`workspace_id NULL`)
-// and one Workspace (common/catalog-scope.ts). The Board layer and its dead
+// Resources live in exactly two catalog layers — Global (`account_id NULL`)
+// and one Account (common/catalog-scope.ts). The Board layer and its dead
 // `board_id` column are gone with boards, and repository Resources became
 // Projects (same id). Resource CRUD is implemented directly in the controller
 // with no separate service, so — following credentials-reveal.test.mjs — the
@@ -23,7 +23,7 @@ function response() {
 const adminReq = { currentUser: { id: 'u-admin', role: 'admin' } };
 const memberReq = { currentUser: { id: 'u-member', role: 'user' } };
 
-describe('Resources scope contract (Global / Workspace)', () => {
+describe('Resources scope contract (Global / Account)', () => {
   let dataSource;
   let controller;
 
@@ -47,18 +47,18 @@ describe('Resources scope contract (Global / Workspace)', () => {
   it('rejects a Board scope — it is just an unknown scope now', async () => {
     const res = response();
     await controller.create(
-      { scope: 'board', workspace_id: 'workspace-a', name: 'Board resource', type: 'link', url: 'https://example.test' },
+      { scope: 'board', account_id: 'workspace-a', name: 'Board resource', type: 'link', url: 'https://example.test' },
       memberReq,
       res,
     );
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /scope must be 'global' or 'workspace'/);
+    assert.match(res.body.error, /scope must be 'global' or 'account'/);
   });
 
   it('refuses a repository Resource — repositories are Projects now', async () => {
     const res = response();
     await controller.create(
-      { workspace_id: 'workspace-a', name: 'Repo', type: 'repository', url: 'https://github.com/o/r.git' },
+      { account_id: 'workspace-a', name: 'Repo', type: 'repository', url: 'https://github.com/o/r.git' },
       memberReq,
       res,
     );
@@ -72,10 +72,10 @@ describe('Resources scope contract (Global / Workspace)', () => {
     assert.equal(res.statusCode, 403);
   });
 
-  it('list() returns the Workspace own Resources plus inherited globals, never another Workspace', async () => {
+  it('list() returns the Account own Resources plus inherited globals, never another Account', async () => {
     for (const [body, req] of [
-      [{ workspace_id: 'workspace-a', name: 'Workspace resource', type: 'link', url: 'https://a.test' }, memberReq],
-      [{ workspace_id: 'workspace-b', name: 'Other workspace resource', type: 'link', url: 'https://b.test' }, memberReq],
+      [{ account_id: 'workspace-a', name: 'Account resource', type: 'link', url: 'https://a.test' }, memberReq],
+      [{ account_id: 'workspace-b', name: 'Other workspace resource', type: 'link', url: 'https://b.test' }, memberReq],
       [{ scope: 'global', name: 'Global resource', type: 'link', url: 'https://g.test' }, adminReq],
     ]) {
       const res = response();
@@ -85,16 +85,16 @@ describe('Resources scope contract (Global / Workspace)', () => {
 
     const listRes = response();
     await controller.list('workspace-a', undefined, 'name', 'asc', undefined, listRes);
-    assert.deepEqual(listRes.body.map((row) => row.name), ['Global resource', 'Workspace resource']);
-    assert.deepEqual(listRes.body.map((row) => row.scope), ['global', 'workspace']);
+    assert.deepEqual(listRes.body.map((row) => row.name), ['Account resource', 'Global resource']);
+    assert.deepEqual(listRes.body.map((row) => row.scope), ['account', 'global']);
     // The row shape carries no Board layer at all.
     assert.ok(listRes.body.every((row) => !('board_id' in row)));
   });
 
-  it('get() hides another Workspace Resource even by direct id lookup, but serves globals', async () => {
+  it('get() hides another Account Resource even by direct id lookup, but serves globals', async () => {
     const repo = dataSource.getRepository(Resource);
-    const foreign = await repo.save(repo.create({ workspace_id: 'workspace-b', name: 'Direct-lookup foreign resource' }));
-    const global = await repo.save(repo.create({ workspace_id: null, name: 'Direct-lookup global resource' }));
+    const foreign = await repo.save(repo.create({ account_id: 'workspace-b', name: 'Direct-lookup foreign resource' }));
+    const global = await repo.save(repo.create({ account_id: null, name: 'Direct-lookup global resource' }));
 
     const hidden = response();
     await controller.get(foreign.id, 'workspace-a', hidden);

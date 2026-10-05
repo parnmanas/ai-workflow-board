@@ -8,7 +8,7 @@ import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeHostChoice, type Runti
 import { isRuntimeSpecComplete } from '../../runtime/runtimeSpec';
 
 interface DeclareRuntimeSectionProps {
-  workspaceId: string;
+  accountId: string;
   initialValue?: Record<string, any> | null;
   onResolved(spec: Record<string, any>): void;
 }
@@ -19,7 +19,7 @@ interface DeclareRuntimeSectionProps {
  * Runtime 선언 → validate → 정규화 spec 을 호출자에게 돌려준다 (spec-direct,
  * Agent 행 없음). Host 후보는 runtime-hosts 카탈로그에서 직접 읽는다.
  */
-export default function DeclareRuntimeSection({ workspaceId, onResolved, initialValue }: DeclareRuntimeSectionProps) {
+export default function DeclareRuntimeSection({ accountId, onResolved, initialValue }: DeclareRuntimeSectionProps) {
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<RuntimeSpecDraft>(() => ({ ...emptyRuntimeSpec(), ...initialValue }));
@@ -27,7 +27,7 @@ export default function DeclareRuntimeSection({ workspaceId, onResolved, initial
   const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
 
   useEffect(() => {
-    if (!open || !workspaceId) return;
+    if (!open || !accountId) return;
     let cancelled = false;
     api.listTemplateHosts()
       .then((rows) => {
@@ -39,7 +39,7 @@ export default function DeclareRuntimeSection({ workspaceId, onResolved, initial
       })
       .catch(() => { if (!cancelled) setHosts([]); });
     return () => { cancelled = true; };
-  }, [open, workspaceId]);
+  }, [open, accountId]);
 
   const handleResolve = async () => {
     if (!isRuntimeSpecComplete(draft)) {
@@ -48,7 +48,7 @@ export default function DeclareRuntimeSection({ workspaceId, onResolved, initial
     }
     setResolving(true);
     try {
-      const result = await api.validateRuntimeSpec(workspaceId, draft);
+      const result = await api.validateRuntimeSpec(accountId, draft);
       if (!result.ok || !result.spec) throw new Error(result.error || 'Invalid runtime');
       onResolved(result.spec);
     } catch (err: any) {
@@ -70,7 +70,7 @@ export default function DeclareRuntimeSection({ workspaceId, onResolved, initial
             value={draft}
             onChange={setDraft}
             hosts={hosts}
-            workspaceId={workspaceId}
+            accountId={accountId}
             disabled={resolving}
           />
           <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>

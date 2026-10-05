@@ -10,11 +10,11 @@ import { z } from 'zod';
  * 저장 위치는 `harness_config` / `environment_config` 관례를 그대로 따른다 —
  * JSON text 컬럼 한 개:
  *   - `Resource.clone_policy`  (type='repository' 에서만 의미 있음) = repo 별 override
- *   - `Workspace.clone_policy`                                     = workspace 기본값
+ *   - `Account.clone_policy`                                     = workspace 기본값
  *
- * 우선순위는 **키 단위**로 Repo Resource → Workspace → 시스템 기본값이다
- * (`resolveClonePolicy`). Resource 가 timeout 만 지정하면 나머지 키는 Workspace 값,
- * Workspace 에도 없으면 시스템 기본값이 채워진다.
+ * 우선순위는 **키 단위**로 Repo Resource → Account → 시스템 기본값이다
+ * (`resolveClonePolicy`). Resource 가 timeout 만 지정하면 나머지 키는 Account 값,
+ * Account 에도 없으면 시스템 기본값이 채워진다.
  *
  * 하위 호환: 두 컬럼 모두 nullable 이고 기본 null 이다. 둘 다 비어 있으면
  * `resolveClonePolicy` 가 null 을 돌려주고, 그 경우 SSE payload 에서도 필드가
@@ -37,7 +37,7 @@ export const DEFAULT_CLONE_TIMEOUT_SECONDS = 3600;
  * 동안처럼 **정상인데 진행률이 오래 멈추는** 구간에서 멀쩡한 clone 이 끊길 수 있다.
  * 그 구간이 바로 이 티켓이 살리려는 대형 저장소 시나리오다.
  *
- * 따라서 idle 은 Workspace/Repo 가 **명시적으로 지정했을 때만** 켜진다. 켜면 clone 이
+ * 따라서 idle 은 Account/Repo 가 **명시적으로 지정했을 때만** 켜진다. 켜면 clone 이
  * 아무 진행 출력도 내지 않은 채 그 시간을 넘길 때 정지(stall)로 보고 회수한다.
  */
 export const DEFAULT_CLONE_IDLE_TIMEOUT_SECONDS = 0;
@@ -126,7 +126,7 @@ export function serializeClonePolicy(value: ClonePolicy | null | undefined): str
 }
 
 /**
- * Repo Resource → Workspace → 시스템 기본값을 **키 단위**로 합친다.
+ * Repo Resource → Account → 시스템 기본값을 **키 단위**로 합친다.
  *
  * 두 레이어 모두 비어 있으면 null 을 돌려준다 — 호출자는 이를 "override 없음"
  * 으로 흘려보내고 agent-manager 가 자신의 기본값(= 여기 시스템 기본값과 동일)을

@@ -19,13 +19,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * `scenario_ids[i]` (empty until that index is reached).
  */
 @Entity('qa_run_batches')
-@Index(['workspace_id', 'created_at'])
+@Index(['account_id', 'created_at'])
 export class QaRunBatch {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // Ordered scenario ids to run, one after another.
   @Column({ type: 'simple-json', nullable: true, default: null })

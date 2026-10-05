@@ -53,7 +53,7 @@ export class OutreachOutboundPost {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   channel_id: string;

@@ -30,13 +30,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * editor state — all wired, just without manual JSON.stringify/parse.
  */
 @Entity('qa_schedules')
-@Index(['workspace_id', 'enabled'])
+@Index(['account_id', 'enabled'])
 export class QaSchedule {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   name: string;

@@ -429,19 +429,19 @@ test('BaseSessionManager#_spawnSession: CONCURRENT full + compact spawns for the
   assert.notEqual(fullCap.mcpConfigPath, compactCap.mcpConfigPath, 'the two profiles must resolve to DIFFERENT config paths');
 });
 
-// ─── Workspace isolation (review round 3) ───────────────────────────────
+// ─── Account isolation (review round 3) ───────────────────────────────
 //
 // Round 2's profile-specific path fix (mcpConfigPathFor(..., profile))
 // closed the profile dimension but dropped the workspace dimension —
-// both managers passed `undefined` for workspaceId regardless of what
-// agentContext/ctx actually carried. Two workspaces sharing an agent id
+// both managers passed `undefined` for accountId regardless of what
+// agentContext/ctx actually carried. Two accounts sharing an agent id
 // would converge on the SAME unscoped path: whichever workspace's session
 // spawned first "wins" the file (via the existsSync reuse fast path), and
 // the other silently reuses it — wrong Authorization for that workspace,
-// or a stale one, instead of getting its own workspace-scoped config.
+// or a stale one, instead of getting its own account-scoped config.
 //
 // Deliberately sequential, not concurrent: this is a pure path-computation
-// check on (agentId, workspaceId, profile). The concurrency dimension is
+// check on (agentId, accountId, profile). The concurrency dimension is
 // already covered by the CONCURRENT tests above for the profile axis; nothing
 // here depends on timing, so a race would only add noise.
 
@@ -453,11 +453,11 @@ test('SubagentManager#spawn: same agent id, different workspace ids resolve to d
   const manager = new SubagentManager({ ...baseConfig, delegation: { ...baseConfig.delegation, claudeBin } });
   const waitForPidExit = installExitRouter(manager);
 
-  async function step(workspaceId, apiKey, label) {
+  async function step(accountId, apiKey, label) {
     const captureFile = join(fixtureRoot, `sm-ws-iso-${label}.json`);
     const agentContext = {
-      agent_id: agentId, workspace_id: workspaceId, api_key: apiKey, cwd,
-      mcp_config_path: mcpConfigPathFor(agentId, workspaceId), cli: 'claude',
+      agent_id: agentId, account_id: accountId, api_key: apiKey, cwd,
+      mcp_config_path: mcpConfigPathFor(agentId, accountId), cli: 'claude',
     };
     await spawnSubagentAndAwaitExit(manager, waitForPidExit, {
       agentContext, triggerId: `trigger-sm-ws-iso-${label}`,
@@ -484,11 +484,11 @@ test('BaseSessionManager#_spawnSession: same agent id, different workspace ids r
     { keyField: 'sessionKey', logTag: '[test-bsm-ws-iso]', cfgPrefix: 'bsm-ws-iso-', kindLabel: 'chat_session' },
   );
 
-  async function step(workspaceId, apiKey, label) {
+  async function step(accountId, apiKey, label) {
     const captureFile = join(fixtureRoot, `bsm-ws-iso-${label}.json`);
     const agentContext = {
-      agent_id: agentId, workspace_id: workspaceId, api_key: apiKey, cwd,
-      mcp_config_path: mcpConfigPathFor(agentId, workspaceId), cli: 'claude',
+      agent_id: agentId, account_id: accountId, api_key: apiKey, cwd,
+      mcp_config_path: mcpConfigPathFor(agentId, accountId), cli: 'claude',
     };
     await spawnBaseSessionAndAwaitExit(manager, {
       agentContext, sessionKey: `sess-bsm-ws-iso-${label}`,

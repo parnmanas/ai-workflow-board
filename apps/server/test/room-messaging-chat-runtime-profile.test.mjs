@@ -106,7 +106,7 @@ function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
       };
     },
   };
-  const workspaceRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return workspace; } };
   const messageRepo = {
     createQueryBuilder: makeQueryBuilder,
     manager: {
@@ -147,7 +147,7 @@ function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
   // workspace, dataSource, log, membership, mention, connectivity) — agentRepo 없음.
   const svc = new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, {}, {}, {},
-    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
   );
   return svc;
 }
@@ -289,7 +289,7 @@ function makeGroupSvc({ agents, workspace, onSpecRead, profiles = [LOCAL_PROFILE
   // stub이면 충분하다(getOne() -> null이면 markRead가 participant 체크
   // 직후 바로 리턴한다, DM 테스트에서 허용한 markRead no-op과 동일).
   const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
-  const workspaceRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return workspace; } };
   const messageRepo = {
     createQueryBuilder: () => ({ ...makeQueryBuilder(), async getOne() { return null; } }),
     manager: {
@@ -325,7 +325,7 @@ function makeGroupSvc({ agents, workspace, onSpecRead, profiles = [LOCAL_PROFILE
   // P4c-4: agentRepo 없음 — 위 specs 맵이 정본이다.
   const svc = new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, {}, {}, {},
-    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
   );
   return svc;
 }

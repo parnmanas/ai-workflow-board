@@ -13,7 +13,7 @@ import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
 import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
 
 const ticket = {
-  id: 'ticket-1', workspace_id: 'workspace-1', board_id: 'board-1',
+  id: 'ticket-1', account_id: 'workspace-1', board_id: 'board-1',
   current_column_id: 'column-1', current_column_name: 'In Progress', current_column_kind: 'active',
   comments: [{ created_at: '2026-08-27', author: 'Agent', content: '조사 완료; 다음은 테스트' }],
 };

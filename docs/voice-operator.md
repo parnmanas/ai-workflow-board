@@ -135,7 +135,7 @@ agent-manager 가 맡는 것은 **operator 세션의 실행**뿐이다(아래 Op
 | 응답 | ACP 스트림 그대로 — 문장 단위 낭독 가능 | `send_chat_room_message` 호출 단위 |
 | 위험 작업 확인 | `session/request_permission` 이 사용자에게 릴레이된다 → 음성 확인으로 잇기 쉽다 | 어댑터 tier 로 사전 결정 |
 | 기록 | CLI 홈(호스트) | AWB DB |
-| 실행 identity | 장비 운영자의 CLI 로그인(구독) | 격리 cli-home |
+| 실행 identity | 운영자 로그인 또는 고정된 credential | 격리 cli-home |
 
 CLI 선택·권한 릴레이·스트리밍이 이미 있고 chat 모드의 기본 표면이다. 기록이 호스트에 있다는 약점은 operator 를
 서버와 같은 상시 장비(rolf)에 두어 상쇄한다. operator 는 admin 전용이다(사이트 권한을 가진 에이전트이므로).
@@ -177,15 +177,16 @@ AGENTS.md 를 덮어쓰면 안 되고, 예전 지침 파일은 새로 써야 이
 ### 권한 — 사이트 전체 (P3 구현)
 
 세션의 AWB MCP 는 매니저 키로 주입되고(`apps/agent-manager/src/lib/agent-session-runner.ts` `#defaultMcpServers`),
-매니저 키는 페어링 때 한 워크스페이스에 묶인다(`mcp/shared/authz.ts` `callerCanAccessWorkspace`). 그대로면 operator 는
-한 워크스페이스만 관리한다.
+일반 Account-scoped MCP 연결은 그 계정 범위로 제한된다(`mcp/shared/authz.ts`의 역사적 helper 이름
+`callerCanAccessWorkspace`). Host는 장비 신원이고, 페어링 키의 `account_id` stamp만으로
+Host의 실행 접근 범위를 정하지 않는다.
 
 **operator 로 등록된 세션의 MCP 연결만 그 묶음을 푼다**(`modules/voice/operator-config.ts` `isOperatorConnection`,
 `mcp.controller.ts`). 조건은 셋이 다: ① 매니저가 Agent Session 에 주입한 연결(`X-AWB-Client-Type: agent-session`),
 ② `X-AWB-Session-Id` 가 등록된 operator 세션 중 하나(새로 만든 세션의 연결은 세션 id 대신 매니저가 정한 참조값을 싣고,
 하트비트 `agent_sessions[].mcp_session_ref` 가 알려 준 대응으로 바꿔 본다 — 예전 매니저는 `'new'` 를 실어 operator 가 Restart
 전까지 인식되지 않았다), ③ 키가 그 operator Host 의 full 키. 풀린 연결은 Host 신원(장비 단위,
-워크스페이스 없음)으로 판정된다. 판정은 요청마다 다시 한다 — 이미 열린 MCP 세션도 지정·해제 직후의 요청부터 맞는
+계정 scope 없음)으로 판정된다. 판정은 요청마다 다시 한다 — 이미 열린 MCP 세션도 지정·해제 직후의 요청부터 맞는
 범위로 돈다(지정값은 5초 캐시, 지정·해제 때 즉시 버림).
 
 - 처음에는 agent-manager 를 바꾸지 않는 방식으로 만들었지만, 새 세션의 연결이 `'new'` 를 싣는다는 것을 운영에서 발견해
@@ -295,7 +296,8 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
 - 받을 operator 는 `routeOperators()`(`modules/voice/operator-report.ts`). "대화" 는 사용자가 시작한 operator 턴이다 —
   AWB 가 보낸 보고 턴은 세지 않는다. 시각은 `OperatorEntry.last_conversation_at` 에 1분 간격으로 남는다(재시작 뒤에도).
 - 보고는 `AgentSessionsService.promptOnBehalf()` — 화면이 보낸 것처럼 driver 의 라이브 전사에 프롬프트 행도 흘린다.
-  워크스페이스는 등록 때 화면의 것(`OperatorEntry.workspace_id`, 그 워크스페이스의 CLI 설정·credential 로 연다).
+  소유 계정은 `OperatorEntry.account_id`와 해당 세션의 `AgentSessionExecution`에서 해소한다.
+  재개는 고정된 credential/config/backend를 사용하며 화면의 계정 힌트나 나중에 바꾼 기본값으로 대체하지 않는다.
   전사는 보고 프롬프트를 "📋 AWB 작업 보고 · n건" 으로 접는다.
 - **조용히 버리지 않는다.** operator 에게 닿지 못하면(호스트 꺼짐) 다음 후보로, 아무도 안 되거나 operator 가 보고 턴을
   실패·10분 무응답하면, 승인·질문 보고가 바쁜 operator 를 2분 넘게 기다리면(요청은 15분이면 취소된다), 나머지는
@@ -472,7 +474,7 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
 |---|---|---|
 | 감지 | `VoiceAnnouncerService` 가 activity 이벤트를 듣는다 — `agent_session_update`(turn_finished · turn_failed · 권한/질문 대기), `agent_session_event`(답의 첫머리를 모은다), `orchestration_update` 의 `last_event.type`(mission_completed · mission_failed · mission_cancelled · confirm_notified) | `modules/voice/voice-announcer.service.ts` |
 | 문장 | 템플릿(ko/en — `voice.stt.languages` 첫 언어). 답·요약이 있으면 `toSpeakable` 로 160자까지 덧붙인다. 조사는 고정 명사 뒤에만 단다(제목 받침과 무관하게 맞게) | `modules/voice/announcement-text.ts` |
-| 대상 | 세션 → driver. 미션 → 사람이 만들었으면 그 사람, 에이전트가 만들었으면 워크스페이스 owner(소리는 member 전원까지 넓히지 않는다) | 같은 서비스 |
+| 대상 | 세션 → driver. 미션 → 사람이 만들었으면 그 사람, 에이전트가 만들었으면 소유 계정 owner(소리는 member 전원까지 넓히지 않는다) | 같은 서비스 |
 | 발행 | SSE `voice_announcement`(user-only, 받는 사용자만 — agent-manager 무관). 작업 소식은 TTS 없이도 전달, `operator_reply`만 TTS 필요 | `event-registry.ts` |
 | 소리 | 작업 소식은 브라우저에서 짧은 WAV 알림음 생성. `operator_reply`는 `GET /api/voice/announcements/:id/audio`로 받는 사람만 요청하며 한 번 합성 | `voice/notificationSound.ts`, `voice.controller.ts` |
 | 화면 | `VoiceAnnouncer`(AppLayout): 토스트 + 알림음, 상세를 요청한 operator 답변은 TTS. VOICE 또는 알림 옵션에서 Chime/Bell/Soft 선택·미리듣기(단말별). 한 탭만 재생하고 보고 있는 세션은 억제하며, 대화 낭독과 같은 큐를 사용한다 | `voice/VoiceAnnouncer.tsx`, `voice/announcements.ts`, `voice/speechPlayer.ts` |

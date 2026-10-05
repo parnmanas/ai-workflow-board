@@ -231,7 +231,7 @@ function makeSetPhaseService(run) {
 
 test('(g) setPhase stamps current phase, appends history, closes the prior left_at', async () => {
   const run = {
-    id: 'r1', workspace_id: 'w1', status: 'running',
+    id: 'r1', account_id: 'w1', status: 'running',
     current_phase: null, current_phase_at: null, phase_history: null,
   };
   const svc = makeSetPhaseService(run);
@@ -252,12 +252,12 @@ test('(g) setPhase stamps current phase, appends history, closes the prior left_
 });
 
 test('(g2) setPhase rejects a terminal run and an empty phase', async () => {
-  const terminal = { id: 'r2', workspace_id: 'w1', status: 'passed', phase_history: null };
+  const terminal = { id: 'r2', account_id: 'w1', status: 'passed', phase_history: null };
   await assert.rejects(
     () => makeSetPhaseService(terminal).setPhase('r2', 'w1', 'build'),
     /already 'passed'/,
   );
-  const live = { id: 'r3', workspace_id: 'w1', status: 'running', phase_history: null };
+  const live = { id: 'r3', account_id: 'w1', status: 'running', phase_history: null };
   await assert.rejects(
     () => makeSetPhaseService(live).setPhase('r3', 'w1', '  '),
     /phase is required/,

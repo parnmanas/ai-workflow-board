@@ -2,7 +2,7 @@
 //
 // 2026-09-04, main 을 포함한 모든 CI 가 red 가 됐다. 원인은 취약점이 아니라 npm
 // 클라이언트의 폴백 정책이었다: bulk advisory 엔드포인트가 흔들리면 npm 10 이
-// **은퇴 대상인 quick 엔드포인트로 폴백**하는데, 그쪽은 이 저장소의 workspaces
+// **은퇴 대상인 quick 엔드포인트로 폴백**하는데, 그쪽은 이 저장소의 accounts
 // lockfile 에 400 Invalid package tree 를 돌려준다 — 폴백이 성공할 수 있는 경우가
 // 없어서, bulk 가 한 번 흔들리면 잡이 확정적으로 죽는다.
 //

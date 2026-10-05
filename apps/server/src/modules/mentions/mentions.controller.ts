@@ -17,24 +17,25 @@ import { MentionsService } from './mentions.service';
 export class MentionsController {
   constructor(private readonly mentionsService: MentionsService) {}
 
-  @Get('workspaces/:wsId/mentions/unread')
+  @Get(['mentions/unread', 'accounts/:wsId/mentions/unread'])
   async listUnread(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const ids = wsId ? [wsId] : ((req as any).accessibleAccountIds || []);
 
     const [items, count] = await Promise.all([
-      this.mentionsService.listUnread(wsId, currentUser.id),
-      this.mentionsService.countUnread(wsId, currentUser.id),
+      this.mentionsService.listUnread(ids, currentUser.id),
+      this.mentionsService.countUnread(ids, currentUser.id),
     ]);
     return res.json({ count, items });
   }
 
-  @Post('workspaces/:wsId/mentions/read-all')
+  @Post(['mentions/read-all', 'accounts/:wsId/mentions/read-all'])
   async markAllRead(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
-    const updated = await this.mentionsService.markAllRead(wsId, currentUser.id);
+    const updated = await this.mentionsService.markAllRead(wsId ? [wsId] : ((req as any).accessibleAccountIds || []), currentUser.id);
     return res.json({ updated });
   }
 

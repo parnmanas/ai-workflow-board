@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatRoomMessageItem } from '../../types';
 import { MentionTextarea, MentionCandidate, MentionTextareaHandle } from '../common/MentionTextarea';
@@ -91,12 +91,12 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   // ticket context we don't have in a free-form chat room, so they're
   // intentionally omitted here.
   useEffect(() => {
-    const workspaceId = getActiveWorkspaceId() || '';
-    if (!workspaceId) {
+    const accountId = getActiveAccountId() || '';
+    if (!accountId) {
       setMentionCandidates([]);
       return;
     }
-    api.getMentionCandidates(workspaceId)
+    api.getMentionCandidates(accountId)
       .then(data => {
         setMentionCandidates([
           ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),

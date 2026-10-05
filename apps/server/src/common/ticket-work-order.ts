@@ -9,7 +9,7 @@
  * older managers show it as the "column workflow guide", newer ones as the
  * work order.
  *
- * Workspace / project specifics are not written here: the workspace harness
+ * Account / project specifics are not written here: the workspace harness
  * (`system_prompt_append`, language) and the project's `instructions` ride
  * alongside on the same payload.
  */

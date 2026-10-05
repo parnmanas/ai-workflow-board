@@ -113,7 +113,7 @@ function makeQaRunService(batches, { resumeOutcome = 'done' } = {}) {
 function makeSchedule(over = {}) {
   return {
     id: 'sch-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     name: 'nightly',
     scope: 'all',
     scenario_ids: null,

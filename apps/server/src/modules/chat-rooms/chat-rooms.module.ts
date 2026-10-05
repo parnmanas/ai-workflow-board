@@ -7,7 +7,7 @@ import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 // 발화 게이트가 미션의 `user_chat_mode` 를 직접 읽는다(티켓 9cfd8161). 엔티티 저장소만
 // 가져오므로 OrchestrationModule(이미 ChatRoomsModule 을 import 한다)과 순환하지 않는다.
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
@@ -22,7 +22,7 @@ import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Ticket, UserMention, TicketAttachment, Workspace, OrchestrationMission]),
+    TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Ticket, UserMention, TicketAttachment, Account, OrchestrationMission]),
     SharedServicesModule,
     ArtifactRefsModule,
   ],

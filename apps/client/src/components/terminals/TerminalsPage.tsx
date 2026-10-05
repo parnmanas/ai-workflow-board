@@ -1,3 +1,4 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
@@ -14,9 +15,9 @@ import { describeTerminalStatus, isLiveTerminal, terminalDisplayTitle, upsertTer
 
 /**
  * Terminals — Runtime Host 셸 표면.
- *   /ws/:wsId/terminals                      터미널을 띄울 수 있는 Runtime Host 목록
- *   /ws/:wsId/terminals/:managerId           그 장비에 **살아 있는** 터미널 목록
- *   /ws/:wsId/terminals/:managerId/:id       xterm 화면
+ *   /terminals                      터미널을 띄울 수 있는 Runtime Host 목록
+ *   /terminals/:managerId           그 장비에 **살아 있는** 터미널 목록
+ *   /terminals/:managerId/:id       xterm 화면
  *
  * Agent Session 과 표면은 닮았지만 데이터 수명이 다르다: 터미널은 프로세스가 곧 존재라서
  * 기록이 없고, 그래서 목록에 죽은 행이 없다(docs/terminals.md).
@@ -98,7 +99,7 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
                   <button
                     type="button"
-                    onClick={() => navigate(`/ws/${wsId}/terminals/${host.manager_id}`)}
+                    onClick={() => navigate(`/terminals/${host.manager_id}`)}
                     style={{
                       border: `1px solid ${tokens.colors.accent}66`, background: 'transparent', color: tokens.colors.accentSubtle,
                       borderRadius: tokens.radii.md, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
@@ -159,7 +160,7 @@ function HostTerminals({ wsId, host, terminals, loading, error, onReload, onNew,
               >
                 <button
                   type="button"
-                  onClick={() => navigate(`/ws/${wsId}/terminals/${terminal.manager_id}/${terminal.terminal_id}`)}
+                  onClick={() => navigate(`/terminals/${terminal.manager_id}/${terminal.terminal_id}`)}
                   style={{ flex: 1, minWidth: 0, textAlign: 'left', background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit' }}
                 >
                   <div style={{ fontSize: 13.5, fontWeight: 600, color: tokens.colors.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -183,7 +184,9 @@ function HostTerminals({ wsId, host, terminals, loading, error, onReload, onNew,
 // ─── 페이지 ────────────────────────────────────────────────────────────────
 
 export default function TerminalsPage() {
-  const { wsId = '', managerId = '', terminalId = '' } = useParams();
+  const { managerId = '', terminalId = '' } = useParams();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { showToast } = useToast();
@@ -264,7 +267,7 @@ export default function TerminalsPage() {
     closeModal();
     setTerminals((prev) => upsertTerminal(prev, terminal));
     void loadHosts();
-    navigate(`/ws/${wsId}/terminals/${terminal.manager_id}/${terminal.terminal_id}`);
+    navigate(`/terminals/${terminal.manager_id}/${terminal.terminal_id}`);
   }, [closeModal, loadHosts, navigate, wsId]);
 
   const closeTerminal = useCallback(async (terminal: TerminalSummary) => {
@@ -278,7 +281,7 @@ export default function TerminalsPage() {
     try {
       await api.closeHostTerminal(terminal.manager_id, terminal.terminal_id);
       setTerminals((prev) => prev.filter((t) => t.terminal_id !== terminal.terminal_id));
-      if (terminalId === terminal.terminal_id) navigate(`/ws/${wsId}/terminals/${terminal.manager_id}`);
+      if (terminalId === terminal.terminal_id) navigate(`/terminals/${terminal.manager_id}`);
     } catch (err: any) {
       showToast(err?.message || 'Failed to close the terminal', 'error');
     }
@@ -304,7 +307,7 @@ export default function TerminalsPage() {
           actions={(
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {current && <StatusPill status={current.status} />}
-              <Button variant="secondary" size="sm" onClick={() => navigate(`/ws/${wsId}/terminals/${managerId}`)}>All terminals</Button>
+              <Button variant="secondary" size="sm" onClick={() => navigate(`/terminals/${managerId}`)}>All terminals</Button>
               {current && isLiveTerminal(current) && (
                 <Button variant="secondary" size="sm" onClick={() => void closeTerminal(current)}>Close</Button>
               )}

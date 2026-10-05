@@ -17,7 +17,7 @@ const runtimeHost = {
   instance_id: 'runtime-instance-codex',
   agent_id: 'runtime-host-codex',
   agent_name: 'Codex Runtime Host',
-  workspace_id: workspace.id,
+  account_id: workspace.id,
   mode: 'manager',
   hostname: 'codex-host.test',
   plugin_version: '1.0.0',
@@ -34,10 +34,10 @@ const runtimeHost = {
 };
 
 async function stubApi(page) {
-  await page.addInitScript(({ workspaceId }) => {
+  await page.addInitScript(({ accountId }) => {
     localStorage.setItem('auth_token', 'e2e-token');
-    localStorage.setItem('currentWorkspaceId', workspaceId);
-  }, { workspaceId: workspace.id });
+    localStorage.setItem('currentAccountId', accountId);
+  }, { accountId: workspace.id });
 
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname.replace(/^\/api/, '');
@@ -45,11 +45,11 @@ async function stubApi(page) {
     if (path === '/auth/me') {
       body = {
         id: 'user-e2e', name: 'E2E 관리자', email: 'e2e@example.test', role: 'admin',
-        status: 'active', permissions: '["admin.access"]', resolved_permissions: ['admin.access'], workspaces: [workspace],
+        status: 'active', permissions: '["admin.access"]', resolved_permissions: ['admin.access'], accounts: [workspace],
       };
-    } else if (path === '/workspaces') {
+    } else if (path === '/accounts') {
       body = [workspace];
-    } else if (path === `/workspaces/${workspace.id}`) {
+    } else if (path === `/accounts/${workspace.id}`) {
       body = workspace;
     } else if (path === '/admin/claude-backend-profiles') {
       body = { profiles: [profile], default_profile_id: profile.id };
@@ -62,12 +62,12 @@ async function stubApi(page) {
     } else if (path === '/agents/dashboard') {
       body = [];
     } else if (path === '/admin/agent-manager/managers') {
-      body = [{ id: runtimeHost.agent_id, name: runtimeHost.agent_name, workspace_id: workspace.id, is_active: 1 }];
+      body = [{ id: runtimeHost.agent_id, name: runtimeHost.agent_name, account_id: workspace.id, is_active: 1 }];
     } else if (path === '/admin/agent-manager/instances') {
       body = [runtimeHost];
-    } else if (path === `/workspaces/${workspace.id}/credentials`) {
+    } else if (path === `/accounts/${workspace.id}/credentials`) {
       body = [];
-    } else if (path === `/workspaces/${workspace.id}/mentions/unread`) {
+    } else if (path === `/accounts/${workspace.id}/mentions/unread`) {
       body = { items: [], total: 0 };
     } else if (path.includes('unread') || path.includes('counts')) {
       body = { count: 0, total: 0, per_room: {}, per_ticket: {}, per_board: {} };
@@ -77,7 +77,7 @@ async function stubApi(page) {
 }
 
 async function openCliReference(page) {
-  await page.goto(`/ws/${workspace.id}/agents`);
+  await page.goto(`/agents`);
   await page.getByRole('button', { name: '+ New Agent', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'New Managed Agent' });
   await expect(dialog).toBeVisible();
@@ -137,7 +137,7 @@ function expectSharedControls(claude, cli) {
 
 async function openProfiles(page) {
   await stubApi(page);
-  await page.goto(`/ws/${workspace.id}/settings/claude-profiles`);
+  await page.goto(`/settings/claude-profiles`);
   await expect(page.getByTestId('claude-profile-manager')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Claude Backend Profiles', exact: true })).toBeVisible();
 }

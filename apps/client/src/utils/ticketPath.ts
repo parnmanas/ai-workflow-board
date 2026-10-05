@@ -1,11 +1,6 @@
-// Ticket deep links (docs/tickets.md). Tickets live in one workspace pool, so a
-// ticket is addressed by workspace + id alone — the Tickets page opens the
-// detail panel from `?ticket=<id>` (and scrolls to `?comment=<id>` when given).
-// Replaces the old board deep link (`/ws/:wsId/boards/:boardId?ticket=`), which
-// needed a board id the client often did not have.
-
+// Stable work links address tickets by id. Ownership is enforced by the server.
 export function ticketsPagePath(wsId: string): string {
-  return `/ws/${wsId}/tickets`;
+  return `/tickets`;
 }
 
 export function ticketPath(
@@ -19,7 +14,7 @@ export function ticketPath(
   return `${ticketsPagePath(wsId)}?${qs.toString()}`;
 }
 
-/** A ticket reference is openable when both halves of its address are known. */
-export function canOpenTicket(t: { id?: string | null; workspace_id?: string | null } | null | undefined): boolean {
-  return !!t?.id && !!t?.workspace_id;
+/** Ownership metadata is not required to follow a ticket id. */
+export function canOpenTicket(t: { id?: string | null; account_id?: string | null } | null | undefined): boolean {
+  return !!t?.id;
 }

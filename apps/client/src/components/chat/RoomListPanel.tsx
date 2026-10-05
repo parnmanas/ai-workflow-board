@@ -15,10 +15,10 @@ export interface ChatRoomListPanelProps {
   activeRoomId: string | null;
   onSelectRoom: (id: string) => void;
   onNewChat: () => void;
-  workspaceId: string;
+  accountId: string;
   onNavigateToMessage: (roomId: string, messageId: string) => void;
-  // v0.32: workspace-wide observer toggle. When true, the list shows every
-  // active room in the workspace including agent-to-agent rooms the user
+  // v0.32: account observer toggle. When true, the list shows every
+  // active room in the account including agent-to-agent rooms the user
   // isn't a participant in. Optional so legacy callers compile unchanged.
   showAllRooms?: boolean;
   onToggleShowAllRooms?: (next: boolean) => void;
@@ -34,7 +34,7 @@ export default function ChatRoomListPanel({
   activeRoomId,
   onSelectRoom,
   onNewChat,
-  workspaceId,
+  accountId,
   onNavigateToMessage,
   showAllRooms,
   onToggleShowAllRooms,
@@ -49,7 +49,7 @@ export default function ChatRoomListPanel({
 
   // Always-visible top filter (separate from the magnifier-overlay search).
   // Filters the room list by participant / room name client-side, and — when
-  // the text reaches ≥ 2 chars — additionally fires the same workspace
+  // the text reaches ≥ 2 chars — additionally fires the same conversation
   // message search so users can find a thread by something said inside it.
   const [filterQuery, setFilterQuery] = useState('');
   const [messageHits, setMessageHits] = useState<any[]>([]);
@@ -67,7 +67,7 @@ export default function ChatRoomListPanel({
     }
     setSearchLoading(true);
     debounceRef.current = setTimeout(() => {
-      api.searchChatMessages(workspaceId, searchQuery)
+      api.searchChatMessages(accountId, searchQuery)
         .then((results) => setSearchResults(results))
         .catch(() => setSearchResults([]))
         .finally(() => setSearchLoading(false));
@@ -75,7 +75,7 @@ export default function ChatRoomListPanel({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [searchQuery, isSearching, workspaceId]);
+  }, [searchQuery, isSearching, accountId]);
 
   // Debounced message search for the always-visible filter input. Reuses the
   // 300 ms cadence + searchChatMessages endpoint that powers the overlay.
@@ -89,7 +89,7 @@ export default function ChatRoomListPanel({
     }
     setMessageHitsLoading(true);
     filterDebounceRef.current = setTimeout(() => {
-      api.searchChatMessages(workspaceId, q)
+      api.searchChatMessages(accountId, q)
         .then((results) => setMessageHits(results))
         .catch(() => setMessageHits([]))
         .finally(() => setMessageHitsLoading(false));
@@ -97,7 +97,7 @@ export default function ChatRoomListPanel({
     return () => {
       if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
     };
-  }, [filterQuery, workspaceId]);
+  }, [filterQuery, accountId]);
 
   // Client-side room filter — matches the trimmed query against the room's
   // displayName, every active participant name, and the DM partner snapshot.
@@ -179,7 +179,7 @@ export default function ChatRoomListPanel({
       {!isSearching ? (
         <PageHeader
           title="Chat"
-          description="Workspace messaging"
+          description="Conversations"
           actions={
             <div style={{ display: 'flex', gap: tokens.spacing.xs, alignItems: 'center' }}>
               <button
@@ -200,7 +200,7 @@ export default function ChatRoomListPanel({
               {onToggleShowAllRooms && (
                 <button
                   onClick={() => onToggleShowAllRooms(!showAllRooms)}
-                  title={showAllRooms ? 'Showing every workspace room (incl. agent-to-agent). Click for "my rooms" only.' : 'Click to also show rooms you are not a participant in.'}
+                  title={showAllRooms ? 'Showing every accessible room (incl. agent-to-agent). Click for "my rooms" only.' : 'Click to also show rooms you are not a participant in.'}
                   style={{
                     background: showAllRooms ? tokens.colors.accent : 'transparent',
                     color: showAllRooms ? 'white' : tokens.colors.textSecondary,

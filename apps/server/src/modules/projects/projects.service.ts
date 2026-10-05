@@ -27,7 +27,7 @@ export interface ProjectHostFolderView {
 
 export interface ProjectView {
   id: string;
-  workspace_id: string;
+  account_id: string;
   name: string;
   description: string;
   repo_url: string;
@@ -65,9 +65,9 @@ function str(value: unknown): string {
 export class ProjectsService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
-  async list(workspaceId: string): Promise<ProjectView[]> {
+  async list(accountId: string): Promise<ProjectView[]> {
     const projects = await this.dataSource.getRepository(Project).find({
-      where: { workspace_id: workspaceId },
+      where: { account_id: accountId },
       order: { name: 'ASC' },
     });
     return this.views(projects);
@@ -79,10 +79,10 @@ export class ProjectsService {
   }
 
   /** The project when it exists AND belongs to the workspace — the only lookup write paths may use. */
-  async getInWorkspace(id: string, workspaceId: string, scope: Scope = this.dataSource): Promise<Project | null> {
-    if (!id || !workspaceId) return null;
+  async getInWorkspace(id: string, accountId: string, scope: Scope = this.dataSource): Promise<Project | null> {
+    if (!id || !accountId) return null;
     const project = await scope.getRepository(Project).findOne({ where: { id } });
-    return project && project.workspace_id === workspaceId ? project : null;
+    return project && project.account_id === accountId ? project : null;
   }
 
   async view(project: Project): Promise<ProjectView> {
@@ -101,7 +101,7 @@ export class ProjectsService {
     const hostName = new Map(hosts.map((h) => [h.id, h.name]));
     return projects.map((p) => ({
       id: p.id,
-      workspace_id: p.workspace_id,
+      account_id: p.account_id,
       name: p.name,
       description: p.description,
       repo_url: p.repo_url,
@@ -125,11 +125,11 @@ export class ProjectsService {
     return { id: project.id, name: project.name, repo_url: project.repo_url, default_branch: project.default_branch };
   }
 
-  async create(workspaceId: string, body: any): Promise<ProjectView> {
-    if (!workspaceId) throw new ProjectInputError('workspace_id is required');
+  async create(accountId: string, body: any): Promise<ProjectView> {
+    if (!accountId) throw new ProjectInputError('account_id is required');
     const repo = this.dataSource.getRepository(Project);
     const entity = repo.create({
-      workspace_id: workspaceId,
+      account_id: accountId,
       name: '',
       description: '',
       repo_url: '',
@@ -145,8 +145,8 @@ export class ProjectsService {
     return this.view(saved);
   }
 
-  async update(id: string, workspaceId: string, body: any): Promise<ProjectView> {
-    const project = await this.getInWorkspace(id, workspaceId);
+  async update(id: string, accountId: string, body: any): Promise<ProjectView> {
+    const project = await this.getInWorkspace(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     await this.applyFields(project, body, false);
     const saved = await this.dataSource.getRepository(Project).save(project);
@@ -167,7 +167,7 @@ export class ProjectsService {
     if (body.instructions !== undefined) project.instructions = body.instructions == null ? '' : String(body.instructions);
     if (body.credential_id !== undefined) {
       const credentialId = str(body.credential_id) || null;
-      if (credentialId) await this.assertCredentialVisible(credentialId, project.workspace_id);
+      if (credentialId) await this.assertCredentialVisible(credentialId, project.account_id);
       project.credential_id = credentialId;
     }
     if (body.clone_policy !== undefined) {
@@ -193,10 +193,10 @@ export class ProjectsService {
     }
   }
 
-  private async assertCredentialVisible(credentialId: string, workspaceId: string): Promise<void> {
+  private async assertCredentialVisible(credentialId: string, accountId: string): Promise<void> {
     const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: credentialId } });
     if (!credential) throw new ProjectInputError('credential not found');
-    if (credential.workspace_id !== null && credential.workspace_id !== workspaceId) {
+    if (credential.account_id !== null && credential.account_id !== accountId) {
       throw new ProjectInputError('credential is not available in this workspace');
     }
   }
@@ -221,8 +221,8 @@ export class ProjectsService {
     return { tickets, references };
   }
 
-  async remove(id: string, workspaceId: string, force: boolean): Promise<void> {
-    const project = await this.getInWorkspace(id, workspaceId);
+  async remove(id: string, accountId: string, force: boolean): Promise<void> {
+    const project = await this.getInWorkspace(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     if (!force) {
       const usage = await this.usage(id);
@@ -245,8 +245,8 @@ export class ProjectsService {
     });
   }
 
-  async setHostFolder(id: string, workspaceId: string, hostId: string, rawPath: unknown): Promise<ProjectView> {
-    const project = await this.getInWorkspace(id, workspaceId);
+  async setHostFolder(id: string, accountId: string, hostId: string, rawPath: unknown): Promise<ProjectView> {
+    const project = await this.getInWorkspace(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     const path = str(rawPath);
     if (!path) throw new ProjectInputError('path is required');
@@ -264,8 +264,8 @@ export class ProjectsService {
     return this.view(project);
   }
 
-  async clearHostFolder(id: string, workspaceId: string, hostId: string): Promise<ProjectView> {
-    const project = await this.getInWorkspace(id, workspaceId);
+  async clearHostFolder(id: string, accountId: string, hostId: string): Promise<ProjectView> {
+    const project = await this.getInWorkspace(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     await this.dataSource.getRepository(ProjectHostFolder).delete({ project_id: id, host_id: hostId });
     return this.view(project);

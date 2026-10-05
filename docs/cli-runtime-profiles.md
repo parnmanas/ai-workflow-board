@@ -10,9 +10,15 @@ Profiles are one instance-wide list (`ClaudeBackendProfile`, managed on the
 the run's RuntimeSpec pin (`cli_runtime_profile` on a ticket assignee, chat
 participant, mention target, …), then the instance default
 (`claude_backend_profiles.default` system setting). There is no Board or
-Workspace layer. `none` explicitly keeps Claude's normal Anthropic configuration. A selected
+Account layer. `none` explicitly keeps Claude's normal Anthropic configuration. A selected
 profile is a public declarative snapshot on SSE; `credential_ref` is an id and
 the referenced secret is resolved only on the manager host.
+
+Agent Sessions select their initial backend from Account × Runtime Host × CLI
+settings, then persist that public `runtime_profile` in `AgentSessionExecution`.
+Later settings or profile defaults do not replace an existing session's pinned
+execution snapshot. Its transcript remains in the native CLI store. See
+[agent-sessions.md](agent-sessions.md).
 
 ## Anthropic-compatible endpoint
 
@@ -138,7 +144,7 @@ carry it split into two roles:
 Set `env` to override any of those variables individually (e.g. a genuinely
 multi-model backend).
 
-The workspace harness `fallback_models` (a model-retry chain for transient
+The account harness `fallback_models` (a model-retry chain for transient
 usage-limit / model-unavailable deaths) is ignored while a profile is bound:
 the profile serves exactly one model behind one endpoint, so there is nothing
 else on that backend to fall back to, and those entries were never validated

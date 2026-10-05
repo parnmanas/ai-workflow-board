@@ -25,7 +25,7 @@ export class CreateAgentErrorLogs1760000000005 implements MigrationInterface {
       CREATE TABLE IF NOT EXISTS agent_error_logs (
         id UUID PRIMARY KEY,
         agent_id VARCHAR NOT NULL,
-        workspace_id VARCHAR NULL,
+        account_id VARCHAR NULL,
         occurred_at TIMESTAMP NOT NULL,
         level VARCHAR NOT NULL,
         category VARCHAR NOT NULL,

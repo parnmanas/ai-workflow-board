@@ -30,7 +30,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -86,8 +86,8 @@ async function workOrdersFor(ds, stepId) {
   return out.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 }
 
-async function readSteps(missions, missionId, workspaceId) {
-  const detail = await missions.getMissionDetail(missionId, workspaceId);
+async function readSteps(missions, missionId, accountId) {
+  const detail = await missions.getMissionDetail(missionId, accountId);
   return { detail, byKey: Object.fromEntries(detail.steps.map((s) => [s.step_key, s])) };
 }
 
@@ -108,10 +108,10 @@ async function stage(t, { label, confirmPolicy = 'auto', graphEnabled = true } =
   const runner = app.get(services.OrchestrationRunnerService);
   const reaper = app.get(services.OrchestrationReaperService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, `orch-cf-${label}`);
+  const ws = await createAccount(app, getDataSourceToken, `orch-cf-${label}`);
 
   const mcpFor = async (agent, name) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: name });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: name });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => {
       void client.close().catch(() => {});
@@ -122,7 +122,7 @@ async function stage(t, { label, confirmPolicy = 'auto', graphEnabled = true } =
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: `Confirm squad ${label}`,
     team: { max_parallel_steps: 1, created_by: HUMAN.id },
     members: [{ role_label: 'builder', capabilities: 'builds things', max_concurrent: 4 }],
@@ -132,7 +132,7 @@ async function stage(t, { label, confirmPolicy = 'auto', graphEnabled = true } =
   const worker = squad.member('builder');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: `Confirm mission ${label}`,
     objective: 'Exercise the human confirmation gate end to end.',

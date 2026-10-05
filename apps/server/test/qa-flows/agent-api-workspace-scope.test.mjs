@@ -1,7 +1,7 @@
 // Regression — security finding (authz): the legacy /api/agent/* surface never
-// enforced workspace scoping, so a workspace-scoped API key could read/mutate
+// enforced workspace scoping, so a account-scoped API key could read/mutate
 // tickets and chat in ANY workspace (cross-workspace IDOR). The fix
-// stamps request.currentWorkspaceId from the presented DB key and rejects a
+// stamps request.currentAccountId from the presented DB key and rejects a
 // scoped key whose workspace doesn't match the target resource.
 //
 // This flow drives the REST endpoints directly with `fetch`. Crucially it
@@ -16,7 +16,7 @@ process.env.AGENT_DEV_MODE = 'false';
 
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createTicket,
   createAgent,
   createApiKey,
@@ -33,17 +33,17 @@ test('agent-api enforces workspace scoping on the legacy /api/agent surface', as
   t.after(() => closeTestApp(app));
   const { getDataSourceToken } = modules;
 
-  // Two isolated workspaces; the target ticket lives in ws_a.
-  const wsA = await createWorkspace(app, getDataSourceToken, 'scope-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'scope-b');
+  // Two isolated accounts; the target ticket lives in ws_a.
+  const wsA = await createAccount(app, getDataSourceToken, 'scope-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'scope-b');
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: wsA.id, title: 'secret ticket', status: 'todo',
+    accountId: wsA.id, title: 'secret ticket', status: 'todo',
   });
 
-  const keyA = await createApiKey(app, getDataSourceToken, null, { workspaceId: wsA.id, label: 'a' });
-  const keyB = await createApiKey(app, getDataSourceToken, null, { workspaceId: wsB.id, label: 'b' });
-  // workspaceId '' → guard resolves scope to null → full-scope (env/admin/manager).
-  const keyGlobal = await createApiKey(app, getDataSourceToken, null, { workspaceId: '', label: 'global' });
+  const keyA = await createApiKey(app, getDataSourceToken, null, { accountId: wsA.id, label: 'a' });
+  const keyB = await createApiKey(app, getDataSourceToken, null, { accountId: wsB.id, label: 'b' });
+  // accountId '' → guard resolves scope to null → full-scope (env/admin/manager).
+  const keyGlobal = await createApiKey(app, getDataSourceToken, null, { accountId: '', label: 'global' });
 
   step('a key scoped to the ticket\'s own workspace can read it (200)');
   const sameWs = await getTicket(port, ticket.id, keyA.raw_key);
@@ -63,9 +63,9 @@ test('agent-api enforces workspace scoping on the legacy /api/agent surface', as
 
   // Regression — daemon "Ticket/Chat history/fallback POST 403" (ticket
   // 2f13e3d7): pair/redeem mints the manager's key scoped to its pairing
-  // workspace, but the manager supervises children across ALL workspaces and
+  // workspace, but the manager supervises children across ALL accounts and
   // fetches their tickets/chat over /api/agent/*. Once AgentApiController added
-  // workspace-scope guards, that scoped key 403'd every cross-workspace fetch.
+  // account-scope guards, that scoped key 403'd every cross-workspace fetch.
   // AgentAuthGuard now treats a manager-owned key as full-scope, matching the
   // "workspace-less manager keys" invariant the IDOR fix documents.
   step('a manager-owned key scoped to a DIFFERENT workspace still reads cross-workspace (200)');
@@ -75,10 +75,10 @@ test('agent-api enforces workspace scoping on the legacy /api/agent surface', as
   // Scoped to wsB on the row, but owned by a manager → guard resolves full-scope.
   // P4c-4: manager 판정은 host 바인딩만 본다 — agent_id 만으로는 부족하다.
   const keyManager = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: wsB.id, label: 'mgr', hostId: manager.id,
+    accountId: wsB.id, label: 'mgr', hostId: manager.id,
   });
   const mgrCross = await getTicket(port, ticket.id, keyManager.raw_key);
-  assert.equal(mgrCross.status, 200, 'manager key must reach across workspaces');
+  assert.equal(mgrCross.status, 200, 'manager key must reach across accounts');
   const mgrBody = await mgrCross.json();
   assert.equal(mgrBody.id, ticket.id, 'returns the cross-workspace ticket payload');
 

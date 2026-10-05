@@ -27,7 +27,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createTicket,
   createApiKey,
@@ -53,7 +53,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const { getDataSourceToken, ActionsService, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'actresume');
+  const ws = await createAccount(app, getDataSourceToken, 'actresume');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer', runtime: true });
   // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
   const RUNTIME_SPEC = {
@@ -68,10 +68,10 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   await vagent.start();
   t.after(() => vagent.stop());
   const blockedTicket = (title, extra = {}) => createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id, title, status: 'in_progress', assignee: agent, ...extra,
+    accountId: ws.id, title, status: 'in_progress', assignee: agent, ...extra,
   });
 
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, scope: 'full' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, scope: 'full' });
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 
@@ -88,12 +88,12 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
 
   // POST /api/actions/:id/approvals as a human. `token=null` omits the
   // Authorization header (unauthenticated). Returns { status, body }.
-  async function approveViaRest({ actionId, workspaceId, sourceTicketId, token, ttlMinutes }) {
+  async function approveViaRest({ actionId, accountId, sourceTicketId, token, ttlMinutes }) {
     const res = await fetch(`http://localhost:${port}/api/actions/${actionId}/approvals`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({
-        workspace_id: workspaceId,
+        account_id: accountId,
         source_ticket_id: sourceTicketId,
         ...(ttlMinutes ? { ttl_minutes: ttlMinutes } : {}),
       }),
@@ -111,7 +111,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ticket auto-resumes" path. Deliberately NOT named deploy/publish/release so
   // it is not escalated by the high-impact name heuristic (that path is CASE 6+).
   const existing = await mcp.callTool('save_action', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Reindex search',
     prompt: 'reindex {{workspace.name}}',
     target_runtimes: [RUNTIME_SPEC],
@@ -129,7 +129,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.equal(run1.source_ticket_id, ticket1.id, 'the run preserves source_ticket_id (reviewer req 1)');
 
   // The dispatched prompt must carry the server-injected completion contract.
-  const runsList1 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: existing.id });
+  const runsList1 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: existing.id });
   const runRow1 = findRun(runsList1, run1.run_id);
   assert.ok(runRow1, 'run is listed');
   assert.equal(runRow1.source_ticket_id, ticket1.id, 'list_action_runs surfaces source_ticket_id');
@@ -138,7 +138,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
 
   const done1 = await mcp.callTool('complete_action_run', {
     run_id: run1.run_id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     status: 'succeeded',
     summary: 'reindexed 1.2M docs',
   });
@@ -149,7 +149,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.ok(done1.resume_emitted >= 1, 'resume actually re-dispatched the assignee (emitted >= 1)');
 
   // Run is now terminal.
-  const runsList1b = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: existing.id });
+  const runsList1b = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: existing.id });
   assert.equal(findRun(runsList1b, run1.run_id).status, 'succeeded', 'run status transitioned to succeeded');
 
   // Result reflected on the ticket audit trail — comment + activity row.
@@ -162,14 +162,14 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.ok(acts1.length >= 1, 'action_run_completed audit row written on the source ticket');
   assert.match(acts1[0].new_value, /succeeded/, 'audit row records the succeeded outcome');
   // Reviewer req 3 — the audit row is stamped with the source workspace so the
-  // workspace-scoped activity feed surfaces it (previously defaulted to '').
-  assert.equal(acts1[0].workspace_id, ws.id, 'audit row records the source workspace_id');
+  // account-scoped activity feed surfaces it (previously defaulted to '').
+  assert.equal(acts1[0].account_id, ws.id, 'audit row records the source account_id');
 
   // Idempotency (scope-5 safety) — re-completing is a no-op, no second resume.
   step('CASE 1b — idempotency: re-completing a terminal run is a no-op');
   const dup1 = await mcp.callTool('complete_action_run', {
     run_id: run1.run_id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     status: 'succeeded',
     summary: 'duplicate call',
   });
@@ -186,7 +186,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 2 — newly registered Action: register → run → complete → resume');
   const fresh = await mcp.callTool('save_action', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Regenerate sitemap',
     prompt: 'regenerate',
     target_runtimes: [RUNTIME_SPEC],
@@ -196,7 +196,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const run2 = await mcp.callTool('run_action', { action_id: fresh.id, source_ticket_id: ticket2.id });
   const done2 = await mcp.callTool('complete_action_run', {
     run_id: run2.run_id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     status: 'succeeded',
     summary: 'regenerated sitemap',
   });
@@ -210,7 +210,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 3 — failure: bounded auto-retry, then surface + resume at the cap');
   const flaky = await mcp.callTool('save_action', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Flaky sync',
     prompt: 'sync-maybe',
     target_runtimes: [RUNTIME_SPEC],
@@ -219,14 +219,14 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // Attempt 1 fails → server re-dispatches attempt 2 (no resume yet).
   const r3a = await mcp.callTool('run_action', { action_id: flaky.id, source_ticket_id: ticket3.id });
   const f3a = await mcp.callTool('complete_action_run', {
-    run_id: r3a.run_id, workspace_id: ws.id, status: 'failed', summary: 'network blip',
+    run_id: r3a.run_id, account_id: ws.id, status: 'failed', summary: 'network blip',
   });
   assert.equal(f3a.status, 'failed', 'attempt 1 recorded failed');
   assert.equal(f3a.retried, true, 'a failure under the cap auto-retries (reviewer req 3)');
   assert.ok(f3a.retry_run_id, 'retry produced a fresh run id');
   assert.equal(f3a.resumed, false, 'the ticket is NOT resumed while a retry is pending');
 
-  const runsList3 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: flaky.id });
+  const runsList3 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: flaky.id });
   const retryRow = findRun(runsList3, f3a.retry_run_id);
   assert.ok(retryRow, 'the retry run is listed');
   assert.equal(retryRow.attempt, 2, 'retry run carries attempt=2');
@@ -234,14 +234,14 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
 
   // Attempt 2 fails → attempt 3.
   const f3b = await mcp.callTool('complete_action_run', {
-    run_id: f3a.retry_run_id, workspace_id: ws.id, status: 'failed', summary: 'still failing',
+    run_id: f3a.retry_run_id, account_id: ws.id, status: 'failed', summary: 'still failing',
   });
   assert.equal(f3b.retried, true, 'attempt 2 failure retries again (still under cap of 3)');
   assert.equal(f3b.resumed, false, 'still not resumed at attempt 2');
 
   // Attempt 3 fails → cap reached → exhausted → surface + resume.
   const f3c = await mcp.callTool('complete_action_run', {
-    run_id: f3b.retry_run_id, workspace_id: ws.id, status: 'failed', summary: 'gave up',
+    run_id: f3b.retry_run_id, account_id: ws.id, status: 'failed', summary: 'gave up',
   });
   assert.equal(f3c.retried, false, 'at the cap there is no further retry');
   assert.equal(f3c.exhausted, true, 'retry cap reached is reported as exhausted');
@@ -268,9 +268,9 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // A ticket in a DIFFERENT workspace must be rejected — otherwise one
   // workspace's Action run could be linked to another workspace's ticket and,
   // via complete_action_run, drive cross-workspace comments / re-dispatch.
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'foreignws');
+  const otherWs = await createAccount(app, getDataSourceToken, 'foreignws');
   const foreignTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: otherWs.id, title: 'foreign ticket', status: 'in_progress',
+    accountId: otherWs.id, title: 'foreign ticket', status: 'in_progress',
   });
   const crossRun = await mcp.callTool('run_action', {
     action_id: existing.id,            // action lives in `ws`
@@ -279,7 +279,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.equal(crossRun.isError, true, 'run_action rejects a cross-workspace source ticket');
   assert.match(JSON.stringify(crossRun.error), /different workspace/i, 'rejection names the workspace boundary');
   // No run row leaked for `existing` beyond the legitimate CASE-1 run.
-  const existingRuns = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: existing.id });
+  const existingRuns = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: existing.id });
   assert.equal(existingRuns.length, 1, 'rejected dispatches created no ActionRun row');
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -291,7 +291,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   step('CASE 5 — concurrent completion is atomic (exactly-once audit + resume)');
   const svc = app.get(ActionsService);
   const conc = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Concurrent sync', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
+    account_id: ws.id, name: 'Concurrent sync', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
   });
   const ticket5 = await blockedTicket('blocked concurrent');
   const run5 = await mcp.callTool('run_action', { action_id: conc.id, source_ticket_id: ticket5.id });
@@ -317,7 +317,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 6 — high-impact failure surfaces (no auto-retry) + stable idempotency key');
   const hi = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Prod release', prompt: 'release', target_runtimes: [RUNTIME_SPEC], high_impact: true,
+    account_id: ws.id, name: 'Prod release', prompt: 'release', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
   assert.ok(!hi.isError && hi.id, 'high-impact Action registered');
   assert.equal(hi.high_impact, true, 'high_impact flag round-trips through save_action');
@@ -326,26 +326,26 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // 8-13); here an admin approves via the HUMAN REST path, then the agent runs
   // (no approver param) and the server consumes the grant — so we can exercise
   // the no-auto-retry-on-failure path on an actually-executed run.
-  const appr6 = await approveViaRest({ actionId: hi.id, workspaceId: ws.id, sourceTicketId: ticket6.id, token: adminToken });
+  const appr6 = await approveViaRest({ actionId: hi.id, accountId: ws.id, sourceTicketId: ticket6.id, token: adminToken });
   assert.equal(appr6.status, 201, 'admin approval grant created via the human endpoint');
   const run6 = await mcp.callTool('run_action', {
     action_id: hi.id, source_ticket_id: ticket6.id,
   });
   assert.ok(!run6.isError, 'approved high-impact run is dispatched (server consumed the grant)');
   // The run carries a minted idempotency key surfaced in the prompt contract.
-  const runs6 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: hi.id });
+  const runs6 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: hi.id });
   const row6 = findRun(runs6, run6.run_id);
   assert.ok(row6.idempotency_key, 'ticket-driven run mints a run-level idempotency key');
   assert.match(row6.prompt_rendered, /Idempotency key/, 'prompt surfaces the idempotency key');
   assert.match(row6.prompt_rendered, /HIGH-IMPACT/, 'prompt tells the agent the server will not auto-retry');
   // First failure is NOT retried — surfaced + resumed immediately.
   const f6 = await mcp.callTool('complete_action_run', {
-    run_id: run6.run_id, workspace_id: ws.id, status: 'failed', summary: 'deploy 500',
+    run_id: run6.run_id, account_id: ws.id, status: 'failed', summary: 'deploy 500',
   });
   assert.equal(f6.retried, false, 'high-impact failure is NOT auto-retried');
   assert.equal(f6.exhausted, true, 'high-impact failure is surfaced immediately');
   assert.equal(f6.resumed, true, 'high-impact failure resumes the ticket for a human decision');
-  const runs6b = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: hi.id });
+  const runs6b = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: hi.id });
   assert.equal(runs6b.length, 1, 'no retry run was spawned for the high-impact Action');
   const t6full = await mcp.callTool('get_ticket', { ticket_id: ticket6.id });
   assert.ok(
@@ -359,18 +359,18 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 7 — idempotency key stable across the retry chain');
   const keyed = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Keyed retry', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
+    account_id: ws.id, name: 'Keyed retry', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
   });
   const ticket7 = await blockedTicket('blocked keyed');
   const r7a = await mcp.callTool('run_action', { action_id: keyed.id, source_ticket_id: ticket7.id });
-  const runs7a = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: keyed.id });
+  const runs7a = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: keyed.id });
   const key7 = findRun(runs7a, r7a.run_id).idempotency_key;
   assert.ok(key7, 'attempt 1 has an idempotency key');
   const f7 = await mcp.callTool('complete_action_run', {
-    run_id: r7a.run_id, workspace_id: ws.id, status: 'failed', summary: 'retry me',
+    run_id: r7a.run_id, account_id: ws.id, status: 'failed', summary: 'retry me',
   });
   assert.equal(f7.retried, true, 'non-high-impact failure retries');
-  const runs7b = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: keyed.id });
+  const runs7b = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: keyed.id });
   const retryKey = findRun(runs7b, f7.retry_run_id).idempotency_key;
   assert.equal(retryKey, key7, 'the retry run reuses the same idempotency key');
 
@@ -380,7 +380,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 8 — unapproved high-impact ticket-driven run is rejected + parks the ticket');
   const gated = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Ship release to production', prompt: 'ship', target_runtimes: [RUNTIME_SPEC], high_impact: true,
+    account_id: ws.id, name: 'Ship release to production', prompt: 'ship', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
   assert.ok(!gated.isError && gated.id, 'high-impact Action registered');
   const ticket8 = await blockedTicket('blocked on ship');
@@ -388,7 +388,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.equal(gatedRun.isError, true, 'high-impact run without approval is rejected BEFORE execution');
   assert.match(JSON.stringify(gatedRun.error), /approval/i, 'rejection explains approval is required');
   // No run row — the reject happens before any dispatch/side effect.
-  const gatedRuns = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  const gatedRuns = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: gated.id });
   assert.equal(gatedRuns.length, 0, 'no ActionRun row created for the rejected high-impact run');
   // The source ticket is parked for a human (완료 기준: 승인 필요 → Pending).
   const t8 = await mcp.callTool('get_ticket', { ticket_id: ticket8.id });
@@ -415,7 +415,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // (b) An admin approves via the SESSION-authenticated endpoint. The approver is
   // taken from the session — the request body has no approver field — so this is
   // evidence an agent cannot forge.
-  const appr9 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket9.id, token: adminToken });
+  const appr9 = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket9.id, token: adminToken });
   assert.equal(appr9.status, 201, 'admin session creates the approval grant');
   assert.equal(appr9.body.approved_by, admin.id, 'the grant records the SESSION admin as approver (not a body value)');
   assert.equal(appr9.body.status, 'pending', 'a fresh grant is pending (unconsumed)');
@@ -434,7 +434,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const approvedRun = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket9.id });
   assert.ok(!approvedRun.isError, 'the run executes once a matching grant exists');
   assert.ok(approvedRun.run_id, 'the approved run has an id');
-  const runs9 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  const runs9 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: gated.id });
   const row9 = findRun(runs9, approvedRun.run_id);
   assert.equal(row9.approved_by, admin.id, 'the run copies the approver id FROM the grant');
   assert.ok(row9.approved_at, 'the run records the approval time');
@@ -458,10 +458,10 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const memberToken = authService.createSession(member.id);
   const ticket10 = await blockedTicket('blocked unauth approve');
   // A non-admin authenticated user cannot approve.
-  const memberAppr = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket10.id, token: memberToken });
+  const memberAppr = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket10.id, token: memberToken });
   assert.equal(memberAppr.status, 403, 'a non-admin session cannot create an approval');
   // No Authorization header at all → unauthenticated.
-  const anonAppr = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket10.id, token: null });
+  const anonAppr = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket10.id, token: null });
   assert.equal(anonAppr.status, 401, 'an unauthenticated request cannot create an approval');
   // The agent (MCP) still cannot self-run: there is no approver parameter and no
   // grant exists, so a high-impact run is rejected + parks the ticket.
@@ -471,7 +471,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const grants10 = await ds.getRepository('ActionApproval').find({ where: { source_ticket_id: ticket10.id } });
   assert.equal(grants10.length, 0, 'no approval grant exists after the rejected attempts');
   // … and no run row beyond CASE 9's single approved run on `gated`.
-  const gatedRuns2 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  const gatedRuns2 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: gated.id });
   assert.equal(gatedRuns2.length, 1, 'unauthorized approval attempts created no ActionRun row');
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -481,7 +481,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 11 — a deploy-named Action with high_impact=false is still gated');
   const misclassified = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Deploy to production', prompt: 'deploy', target_runtimes: [RUNTIME_SPEC],
+    account_id: ws.id, name: 'Deploy to production', prompt: 'deploy', target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!misclassified.isError, 'misclassified action saves (high_impact omitted → false)');
   assert.equal(misclassified.high_impact, false, 'it is stored NOT explicitly flagged high_impact');
@@ -498,7 +498,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 12 — an approval grant is one-time: a reused grant is rejected');
   const ticket12 = await blockedTicket('blocked one-time');
-  const appr12 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket12.id, token: adminToken });
+  const appr12 = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket12.id, token: adminToken });
   assert.equal(appr12.status, 201, 'grant created for (gated, ticket12)');
   // First run consumes the grant and executes.
   const run12a = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket12.id });
@@ -512,7 +512,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.match(JSON.stringify(run12b.error), /approval/i, 'the reuse rejection names the approval requirement');
   const t12 = await mcp.callTool('get_ticket', { ticket_id: ticket12.id });
   assert.equal(t12.pending_user_action, true, 'the reused-grant rejection re-parks the ticket');
-  const runs12 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  const runs12 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: gated.id });
   assert.equal(runs12.filter((r) => r.source_ticket_id === ticket12.id).length, 1, 'exactly one run executed under the one-time grant');
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -524,9 +524,9 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const ticket13b = await blockedTicket('blocked bound unapproved');
   // A second high-impact action to prove action-binding.
   const otherHi = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Publish to production', prompt: 'publish', target_runtimes: [RUNTIME_SPEC], high_impact: true,
+    account_id: ws.id, name: 'Publish to production', prompt: 'publish', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
-  const appr13 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket13a.id, token: adminToken });
+  const appr13 = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket13a.id, token: adminToken });
   assert.equal(appr13.status, 201, 'grant created for (gated, ticket13a)');
   // Same action, DIFFERENT ticket → not authorized.
   const wrongTicket = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket13b.id });
@@ -549,7 +549,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 14 — an expired approval grant is rejected + retired');
   const ticket14 = await blockedTicket('blocked expired grant');
-  const appr14 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket14.id, token: adminToken });
+  const appr14 = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket14.id, token: adminToken });
   assert.equal(appr14.status, 201, 'grant created for (gated, ticket14)');
   // Age it into the past (a real standing approval that timed out before use).
   await ds.getRepository('ActionApproval').update({ id: appr14.body.id }, { expires_at: new Date(Date.now() - 60_000) });
@@ -574,7 +574,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // it is unambiguously the OLDEST pending grant the ASC-ordered consume sees first.
   // (created_at is second-precision on sqlite, so without back-dating A and B could
   // tie and the buggy path would flake instead of failing deterministically.)
-  const apprA = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket15.id, token: adminToken });
+  const apprA = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket15.id, token: adminToken });
   assert.equal(apprA.status, 201, 'grant A created for (gated, ticket15)');
   await ds.getRepository('ActionApproval').update(
     { id: apprA.body.id },
@@ -583,7 +583,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // Grant B — a fresh, still-valid approval for the SAME (action, ticket) pair (the
   // admin re-approved after A timed out). Newer than A, so the old query never
   // reached it.
-  const apprB = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket15.id, token: adminToken });
+  const apprB = await approveViaRest({ actionId: gated.id, accountId: ws.id, sourceTicketId: ticket15.id, token: adminToken });
   assert.equal(apprB.status, 201, 'valid grant B created for the same (action, ticket)');
   // Guard the test's own premise: A must be strictly older than B (so the buggy
   // path really did hit the expired A first and bail).
@@ -606,7 +606,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const grantB15 = await ds.getRepository('ActionApproval').findOne({ where: { id: apprB.body.id } });
   assert.equal(grantB15.status, 'consumed', 'the newer valid grant B is the one consumed');
   assert.equal(grantB15.consumed_by_run_id, run15.run_id, 'grant B records the consuming run');
-  const runs15 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  const runs15 = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: gated.id });
   assert.equal(findRun(runs15, run15.run_id).approved_by, admin.id, 'the run copies the approver id from the consumed grant');
   // The (retired) expired grant did NOT re-park the ticket — the whole point.
   const t15 = await mcp.callTool('get_ticket', { ticket_id: ticket15.id });

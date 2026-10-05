@@ -29,7 +29,7 @@ const WORKING_DIR = '/tmp/awb-test-comment-mention-agent-a1';
 const MANAGED_AGENT_CONTEXTS = new Map([
   [AGENT_ID, {
     agent_id: AGENT_ID,
-    workspace_id: 'W1',
+    account_id: 'W1',
     api_key: 'test-key',
     working_dir: WORKING_DIR,
     mcp_config_path: '/tmp/awb-test-comment-mention-mcp.json',
@@ -158,7 +158,7 @@ const HERMES_WORKING_DIR = '/tmp/awb-test-comment-mention-agent-h1';
 const HERMES_MANAGED_AGENT_CONTEXTS = new Map([
   [HERMES_AGENT_ID, {
     agent_id: HERMES_AGENT_ID,
-    workspace_id: 'W1',
+    account_id: 'W1',
     api_key: 'test-key',
     working_dir: HERMES_WORKING_DIR,
     mcp_config_path: '/tmp/awb-test-comment-mention-hermes-mcp.json',

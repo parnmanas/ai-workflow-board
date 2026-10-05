@@ -8,7 +8,7 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
@@ -29,7 +29,7 @@ import { AgentsModule } from '../agents/agents.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Action, ActionRun, ActionApproval, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Workspace, User, Ticket, Comment, ActivityLog]),
+    TypeOrmModule.forFeature([Action, ActionRun, ActionApproval, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Account, User, Ticket, Comment, ActivityLog]),
     ChatRoomsModule,
     SharedServicesModule,
     AgentsModule,

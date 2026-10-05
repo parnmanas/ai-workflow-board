@@ -145,7 +145,7 @@ function context(permissionMode, cliHomeDir) {
     working_dir: '/workspace',
     mcp_config_path: '/config/mcp.json',
     api_key: 'agent-api-key',
-    workspace_id: 'txiv-board-workspace',
+    account_id: 'txiv-board-workspace',
     cli_home_dir: cliHomeDir,
     extra_env: {},
     credential_provider: null,
@@ -311,7 +311,7 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
   const wire = JSON.stringify({
     event_type: 'agent_trigger', ticket_id: TICKET, action: 'assignee',
     actor_name: AGENT, field_changed: 'txiv-trigger', trigger_source: 'column_move',
-    workspace_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
+    account_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
     base_repo: {
       id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
       default_branch: 'master',
@@ -347,12 +347,12 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
   // repository resource); a 200 there means the legacy alias is never needed.
   assert.equal(repositoryCredentialRequests.length, 1);
   assert.match(repositoryCredentialRequests[0], /\/api\/agent-manager\/projects\/gameclient-resource\/git-credential/);
-  assert.match(repositoryCredentialRequests[0], /workspace_id=txiv-board-workspace/);
+  assert.match(repositoryCredentialRequests[0], /account_id=txiv-board-workspace/);
   assert.deepEqual(dispatchAcks.map((ack) => ack.outcome), ['processed']);
 });
 
 test('wire consumer: flattened event 의 clone_policy 가 worktree bootstrap clone 까지 전달된다', async (t) => {
-  // ticket bddb63ee — 서버가 Repo Resource ⊕ Workspace 로 해석해 실어 보낸 clone
+  // ticket bddb63ee — 서버가 Repo Resource ⊕ Account 로 해석해 실어 보낸 clone
   // 정책이 flattened agent_trigger 에서 bootstrapRepo 까지 살아 있어야 한다. 이
   // 홉이 끊기면 repo별 timeout/전략이 조용히 사라지고 모든 저장소가 매니저
   // 기본값으로만 clone 된다(증상이 clone 실패로만 보여 진단이 어렵다).
@@ -380,7 +380,7 @@ test('wire consumer: flattened event 의 clone_policy 가 worktree bootstrap clo
   const wire = JSON.stringify({
     event_type: 'agent_trigger', ticket_id: TICKET, action: 'assignee',
     actor_name: AGENT, field_changed: 'clone-policy-trigger', trigger_source: 'column_move',
-    workspace_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
+    account_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
     base_repo: {
       id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
       default_branch: 'master',

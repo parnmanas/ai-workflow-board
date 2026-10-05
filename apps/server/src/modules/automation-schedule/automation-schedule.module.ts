@@ -1,0 +1,37 @@
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { AutomationSchedule } from '../../entities/AutomationSchedule';
+import { Action } from '../../entities/Action';
+import { ChatRoom } from '../../entities/ChatRoom';
+import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { WorkspaceScheduleService } from './automation-schedule.service';
+import { WorkspaceScheduleController } from './automation-schedule.controller';
+import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { ActionsModule } from '../actions/actions.module';
+import { SharedServicesModule } from '../../services/shared-services.module';
+import { AuthGuard } from '../../common/guards/auth.guard';
+import { PermissionGuard } from '../../common/guards/permission.guard';
+
+/**
+ * General-purpose agent-task scheduler (ticket 8845be79). Owns AutomationSchedule
+ * CRUD + the background tick that dispatches due tasks to a single target agent
+ * via a fresh chat room (QA/Security RUN dispatch shape). ChatRoomsModule is
+ * imported for RoomMessagingService; the MCP module imports this to expose the
+ * schedule tools. The REST controller (ticket 1927ed4a) backs the Account
+ * Settings editor UI — same CRUD surface, admin-gated.
+ */
+@Module({
+  imports: [
+    TypeOrmModule.forFeature([AutomationSchedule, ChatRoom, ChatRoomParticipant, RuntimeHost, Action]),
+    ChatRoomsModule,
+    // Action 형태 스케줄이 ActionsService.dispatch 로 발화한다. 단방향 —
+    // ActionsModule 은 이 모듈을 import 하지 않는다.
+    ActionsModule,
+    SharedServicesModule,
+  ],
+  controllers: [WorkspaceScheduleController],
+  providers: [WorkspaceScheduleService, AuthGuard, PermissionGuard],
+  exports: [WorkspaceScheduleService],
+})
+export class WorkspaceScheduleModule {}

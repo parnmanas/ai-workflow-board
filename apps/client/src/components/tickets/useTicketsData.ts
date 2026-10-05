@@ -8,7 +8,7 @@ import { filtersToQuery, filtersToSearch, type TicketFilters } from '../../ticke
 import { applyMove } from '../../tickets/kanban';
 
 /**
- * Tickets page data — the workspace pool for the current filters, kept live
+ * Tickets page data — accessible tickets for the current filters, kept live
  * from the `board_update` SSE event (the ticket-change event kept its name,
  * docs/tickets.md), plus the per-ticket typing indicators the detail panel
  * shows and the users/channels it needs for mentions and notifications.
@@ -78,8 +78,6 @@ export function useTicketsData(wsId: string, filters: TicketFilters) {
     if (!wsId) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const unsubUpdate = subscribe('board_update', (data: any) => {
-      // The stream is app-wide (one EventSource for every workspace).
-      if (data?.workspace_id && data.workspace_id !== wsId) return;
       if (localActionCount.current > 0) return;
       // Coalesce bursts (an agent move + comment + field change arrive together).
       if (timer) clearTimeout(timer);

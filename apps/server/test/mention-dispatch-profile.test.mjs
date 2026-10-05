@@ -31,7 +31,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', 'dist');
 const { resolveMentionDispatchExtras, resolveMentionTarget } = await import(
   'file://' + path.join(DIST_ROOT, 'common', 'mention-dispatch-profile.js')
 );
-const { Workspace, ClaudeBackendProfile } = await import(
+const { Account, ClaudeBackendProfile } = await import(
   'file://' + path.join(DIST_ROOT, 'entities', 'index.js')
 );
 const { runtimeIdentityKey } = await import(
@@ -61,7 +61,7 @@ const WORKSPACE = {
   harness_config: JSON.stringify({ system_prompt_append: 'Respond in Korean.' }),
   environment_config: JSON.stringify({ env_vars: { MY_WS_VAR: 'hello' } }),
 };
-const TICKET = { id: 'ticket-1', workspace_id: 'ws-1' };
+const TICKET = { id: 'ticket-1', account_id: 'ws-1' };
 
 // 엔티티 클래스로 분기하는 stub. 프로필은 인스턴스 전역이라(티켓 e616dbfc)
 // 해석기가 claude_backend_profiles 를 통째로 읽는다. SystemSetting
@@ -71,7 +71,7 @@ function makeDataSource({ workspace = WORKSPACE, profiles = [LOCAL_PROFILE], thr
   return {
     getRepository(entity) {
       if (throwOn === entity) throw new Error('simulated DataSource failure');
-      if (entity === Workspace) return { async findOne() { return workspace; } };
+      if (entity === Account) return { async findOne() { return workspace; } };
       if (entity === ClaudeBackendProfile) return { async find() { return rows; }, async findOne() { return null; } };
       return { async findOne() { return null; }, async find() { return []; } };
     },
@@ -138,7 +138,7 @@ test('resolveMentionDispatchExtras: a runtime profile DataSource failure rejects
 });
 
 test('resolveMentionDispatchExtras: a workspace lookup failure degrades to defaults (the mention still dispatches)', async () => {
-  const dataSource = makeDataSource({ throwOn: Workspace });
+  const dataSource = makeDataSource({ throwOn: Account });
   const extras = await resolveMentionDispatchExtras(
     dataSource, TICKET, { type: 'claude', cli_runtime_profile: 'local-anthropic', credential_id: null },
   );

@@ -7,12 +7,12 @@
 // 의 용도상 대화 주제를 담고, `last_message_at` 은 타 워크스페이스의 활동 시각이다.
 //
 // 같은 "내 방 목록"의 REST 형제 경로인 RoomCrudService.listRooms 는 이미
-// `r.workspace_id = :wsId` 를 1급 조건으로 걸고 있었다 — MCP 쪽만 빠져 있어 같은
+// `r.account_id = :wsId` 를 1급 조건으로 걸고 있었다 — MCP 쪽만 빠져 있어 같은
 // 질문에 두 표면의 답이 갈렸다. 형제 툴 get_chat_room_messages(티켓 5a95315f)와 같은
 // 결함 계급이다.
 //
 // 실제 sql.js DataSource 위에서 진짜 쿼리를 돌린다(chat-messages-workspace-boundary.
-// test.mjs 선례). 검증 대상이 "조인된 방 행의 workspace_id 가 실제로 대조되는가" 자체
+// test.mjs 선례). 검증 대상이 "조인된 방 행의 account_id 가 실제로 대조되는가" 자체
 // 라 스텁으로는 아무것도 안 잡힌다 — 조건을 통째로 빼도 스텁 테스트는 통과한다.
 //
 // 공개 경로가 MCP 툴 하나뿐이라 **그 진입점에서** 돈다: 진짜 `registerChatTools` 가
@@ -40,7 +40,7 @@ const WS = '11111111-1111-4111-8111-111111111111';
 const OTHER_WS = '22222222-2222-4222-8222-222222222222';
 /** WS 소속 에이전트 — 정상 목록과 타 워크스페이스 배제를 함께 본다. */
 const BOT = '33333333-3333-4333-8333-333333333333';
-/** workspace_id 가 없는(global) 에이전트 — 해석 실패 경로와 세션 스코프 판정용. */
+/** account_id 가 없는(global) 에이전트 — 해석 실패 경로와 세션 스코프 판정용. */
 const GLOBAL_BOT = '55555555-5555-4555-8555-555555555555';
 /** 사람 참여자 — participant_type 이 실제로 걸러지는지 볼 때 쓴다. */
 const ALICE = '66666666-6666-4666-8666-666666666666';
@@ -55,7 +55,7 @@ async function seedRoom(overrides = {}, participants = []) {
   const roomRepo = dataSource.getRepository(ChatRoom);
   const partRepo = dataSource.getRepository(ChatRoomParticipant);
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     type: 'group',
     name: '방',
     last_message_at: null,
@@ -75,14 +75,14 @@ async function seedRoom(overrides = {}, participants = []) {
 }
 
 /**
- * MCP `list_chat_rooms` 한 번. `sessionWorkspaceId` 는 caller 세션(= API key)이 들고
- * 있는 값이고, 비워 두면 에이전트 자신의 workspace_id 로 떨어지는 폴백을 탄다.
+ * MCP `list_chat_rooms` 한 번. `sessionAccountId` 는 caller 세션(= API key)이 들고
+ * 있는 값이고, 비워 두면 에이전트 자신의 account_id 로 떨어지는 폴백을 탄다.
  */
-async function mcpList(agentId, sessionWorkspaceId) {
+async function mcpList(agentId, sessionAccountId) {
   const sessionId = `session-${randomUUID()}`;
   sessionStore.register(sessionId, { close: async () => {} }, {}, {
     agentId,
-    workspaceId: sessionWorkspaceId,
+    accountId: sessionAccountId,
     scope: 'full',
     source: 'db',
   });
@@ -127,8 +127,8 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
 
     const hostRepo = dataSource.getRepository(RuntimeHost); // P4c-4
     await hostRepo.save([
-      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
-      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
+      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', account_id: WS }),
+      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', account_id: null }),
     ]);
   });
 
@@ -148,7 +148,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 워크스페이스가 아니면 뺀다.
     const mine = await seedRoom({ name: '우리 방' }, [{ type: 'agent', id: BOT }]);
     await seedRoom(
-      { workspace_id: OTHER_WS, name: '남의 워크스페이스 배포 논의' },
+      { account_id: OTHER_WS, name: '남의 워크스페이스 배포 논의' },
       [{ type: 'agent', id: BOT }],
     );
 
@@ -166,7 +166,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
   it('타 워크스페이스 방만 들고 있으면 빈 목록이 된다', async () => {
     // 부분 필터가 아니라 전량 배제인지 — 방 이름도 활동 시각도 나가면 안 된다.
     await seedRoom(
-      { workspace_id: OTHER_WS, last_message_at: new Date('2026-01-01T00:00:00.000Z') },
+      { account_id: OTHER_WS, last_message_at: new Date('2026-01-01T00:00:00.000Z') },
       [{ type: 'agent', id: BOT }],
     );
 
@@ -176,9 +176,9 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     assert.deepEqual(res.payload, []);
   });
 
-  it('세션에 workspace 가 없으면 에이전트 자신의 workspace_id 로 판정한다', async () => {
+  it('세션에 workspace 가 없으면 에이전트 자신의 account_id 로 판정한다', async () => {
     const mine = await seedRoom({}, [{ type: 'agent', id: BOT }]);
-    await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
 
     const res = await mcpList(BOT, undefined);
 
@@ -187,7 +187,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
   });
 
   it('workspace 를 해석할 수 없으면(전역 에이전트 + 스코프 없는 세션) 거부한다', async () => {
-    // 전역 에이전트는 workspace_id 가 null 이라 폴백도 비고, 세션 키에도 스코프가 없다.
+    // 전역 에이전트는 account_id 가 null 이라 폴백도 비고, 세션 키에도 스코프가 없다.
     await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
 
     const res = await mcpList(GLOBAL_BOT, undefined);
@@ -197,7 +197,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
 
   it('전역 에이전트도 세션 키의 workspace 밖 방은 목록에서 빠진다', async () => {
     const mine = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
-    await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
+    await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
 
     const res = await mcpList(GLOBAL_BOT, WS);
 

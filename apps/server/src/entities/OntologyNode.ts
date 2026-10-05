@@ -30,7 +30,7 @@ export type OntologyDurability = 'volatile' | 'stable' | 'frozen';
 // 선례(scout-server.md §1)를 따름 — plain 컬럼, DB 레벨 FK 없음, 애플리케이션
 // 코드에서 해석.
 //
-// `graph_id`는 각 행을 (workspace_id, resource_id, folder_path) 그래프에
+// `graph_id`는 각 행을 (account_id, resource_id, folder_path) 그래프에
 // 스코프하지만 아직 OntologyGraph 테이블은 없다 — 그 lifecycle 엔티티는
 // ticket #6의 범위(graph_status가 자동 프로비저닝)라, graph_id도 다른 모든
 // 컬럼과 같은 "관례상 FK" 자세를 취하는 bare 컬럼이다.
@@ -52,7 +52,7 @@ export class OntologyNode {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // 이 노드가 추출된 repo resource — Ticket.base_repo_resource_id의 "plain
   // varchar, FK 없음" 선례(scout-server.md §1)를 따름.

@@ -3,7 +3,7 @@ import { HarnessConfig } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input, Select } from './common';
 
-// Agent harness editor (ticket 7122600c), rendered by Workspace Settings —
+// Agent harness editor (ticket 7122600c), rendered by Account Settings —
 // the workspace harness is shipped on every ticket dispatch in the workspace.
 // The raw harness_config JSON string from the server is parsed here; saving
 // hands the structured object (or null when every field is empty) to the
@@ -12,7 +12,7 @@ import { Button, Input, Select } from './common';
 // entered one-per-line / comma-separated and parsed to string[]).
 
 interface HarnessConfigEditorProps {
-  /** Raw harness_config JSON string from the Workspace row. */
+  /** Raw harness_config JSON string from the Account row. */
   raw: string | null | undefined;
   title: string;
   description: React.ReactNode;

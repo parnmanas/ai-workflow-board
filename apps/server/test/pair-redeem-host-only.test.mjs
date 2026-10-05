@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp } from './helpers/boot.mjs';
-import { createWorkspace } from './helpers/fixtures.mjs';
+import { createAccount } from './helpers/fixtures.mjs';
 import { PairingService } from '../dist/modules/agent-manager/pairing.service.js';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
@@ -18,11 +18,11 @@ test('pair/redeem mints a host-only identity with no Agent row', async (t) => {
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createWorkspace(app, getDataSourceToken, 'redeem-cutover');
+  const workspace = await createAccount(app, getDataSourceToken, 'redeem-cutover');
 
   const pairing = app.get(PairingService);
   const rec = pairing.mint({
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     created_by_user_id: 'test-admin',
     agent_name: 'cutover-host',
   });

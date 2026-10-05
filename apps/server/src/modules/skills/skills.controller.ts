@@ -11,7 +11,7 @@ import { SkillsService } from './skills.service';
 @ApiBearerAuth('user-session')
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
-@Controller('api/workspaces/:workspaceId/skills')
+@Controller('api/accounts/:accountId/skills')
 export class SkillsController {
   constructor(private readonly service: SkillsService) {}
 
@@ -21,14 +21,14 @@ export class SkillsController {
    * which the management UI needs to explain "why isn't the built-in applying".
    */
   @Get()
-  async list(@Param('workspaceId') workspaceId: string, @Req() req: Request, @Res() res: Response) {
+  async list(@Param('accountId') accountId: string, @Req() req: Request, @Res() res: Response) {
     const includeShadowed = String((req.query as any)?.include_shadowed || '') === '1';
-    return res.json(await this.service.list(workspaceId, { includeShadowed }));
+    return res.json(await this.service.list(accountId, { includeShadowed }));
   }
 
   @Get('proposals')
   async listProposals(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -36,31 +36,31 @@ export class SkillsController {
     const status = raw === 'pending' || raw === 'approved' || raw === 'rejected'
       ? raw
       : undefined;
-    return res.json(await this.service.listProposals(workspaceId, status));
+    return res.json(await this.service.listProposals(accountId, status));
   }
 
   @Get(':skillId')
   async get(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('skillId') skillId: string,
     @Res() res: Response,
   ) {
-    return this.respond(res, () => this.service.get(workspaceId, skillId));
+    return this.respond(res, () => this.service.get(accountId, skillId));
   }
 
   @Post()
   async create(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Body() body: any,
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    // Workspace route → workspace scope, always. Creating a GLOBAL skill goes
-    // through the admin registry controller, so a workspace-scoped caller can
+    // Account route → workspace scope, always. Creating a GLOBAL skill goes
+    // through the admin registry controller, so a account-scoped caller can
     // never mint a definition every other workspace inherits.
     return this.respond(
       res,
-      () => this.service.create(workspaceId, body, (req as any).currentUser?.id || '', 'workspace'),
+      () => this.service.create(accountId, body, (req as any).currentUser?.id || '', 'account'),
       201,
     );
   }
@@ -72,7 +72,7 @@ export class SkillsController {
    */
   @Post(':skillId/fork')
   async fork(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('skillId') skillId: string,
     @Body() body: any,
     @Req() req: Request,
@@ -81,7 +81,7 @@ export class SkillsController {
     return this.respond(
       res,
       () => this.service.fork(
-        workspaceId,
+        accountId,
         skillId,
         (req as any).currentUser?.id || '',
         String(body?.skill_version_id || ''),
@@ -92,7 +92,7 @@ export class SkillsController {
 
   @Post(':skillId/versions')
   async publish(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('skillId') skillId: string,
     @Body() body: any,
     @Req() req: Request,
@@ -100,14 +100,14 @@ export class SkillsController {
   ) {
     return this.respond(
       res,
-      () => this.service.publish(workspaceId, skillId, body, (req as any).currentUser?.id || ''),
+      () => this.service.publish(accountId, skillId, body, (req as any).currentUser?.id || ''),
       201,
     );
   }
 
   @Post(':skillId/assignments')
   async assign(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('skillId') skillId: string,
     @Body() body: any,
     @Req() req: Request,
@@ -115,21 +115,21 @@ export class SkillsController {
   ) {
     return this.respond(
       res,
-      () => this.service.assign(workspaceId, skillId, body, (req as any).currentUser?.id || ''),
+      () => this.service.assign(accountId, skillId, body, (req as any).currentUser?.id || ''),
       201,
     );
   }
 
   @Post('proposals')
   async propose(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Body() body: any,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     return this.respond(
       res,
-      () => this.service.propose(workspaceId, body, {
+      () => this.service.propose(accountId, body, {
         agentId: '',
         runId: String(body.source_run_id || ''),
       }),
@@ -139,14 +139,14 @@ export class SkillsController {
 
   @Post('proposals/:proposalId/approve')
   async approve(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('proposalId') proposalId: string,
     @Body() body: any,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     return this.respond(res, () => this.service.review(
-      workspaceId,
+      accountId,
       proposalId,
       'approve',
       (req as any).currentUser?.id || '',
@@ -157,14 +157,14 @@ export class SkillsController {
 
   @Post('proposals/:proposalId/reject')
   async reject(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('proposalId') proposalId: string,
     @Body() body: any,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     return this.respond(res, () => this.service.review(
-      workspaceId,
+      accountId,
       proposalId,
       'reject',
       (req as any).currentUser?.id || '',
@@ -174,11 +174,11 @@ export class SkillsController {
 
   @Patch(':skillId/quarantine')
   async quarantine(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('skillId') skillId: string,
     @Res() res: Response,
   ) {
-    return this.respond(res, () => this.service.quarantine(workspaceId, skillId));
+    return this.respond(res, () => this.service.quarantine(accountId, skillId));
   }
 
   private async respond(res: Response, operation: () => Promise<unknown>, status = 200) {

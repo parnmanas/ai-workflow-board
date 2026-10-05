@@ -1,5 +1,5 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
 import { api } from '../../api';
 import type { OntologyGraphProgressEvent, OntologyGraphSnapshotResponse, OntologyGraphStatusResponse } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
@@ -34,7 +34,8 @@ const POLL_MS = 3000;
  * 자리에 project.id 를 그대로 넘긴다.
  */
 export default function OntologyGraphPage() {
-  const { wsId = '' } = useParams<{ wsId: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const { showToast } = useToast();
 
   const { projects } = useProjects(wsId);
@@ -146,7 +147,7 @@ export default function OntologyGraphPage() {
   // 코멘트 참고)이 이 그래프를 건드리면 즉시(디바운스) 재조회한다 —
   // MissionDetailPage.tsx의 scheduleRefresh와 같은 패턴.
   useBoardStreamEvent('ontology_graph_progress', (data: OntologyGraphProgressEvent) => {
-    if (!data || data.workspace_id !== wsId || !statusResp || data.graph_id !== statusResp.graph_id) return;
+    if (!data || data.account_id !== wsId || !statusResp || data.graph_id !== statusResp.graph_id) return;
     if (refreshTimer.current) clearTimeout(refreshTimer.current);
     refreshTimer.current = setTimeout(() => void load({ silent: true }), 400);
   });

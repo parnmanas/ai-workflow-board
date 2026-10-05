@@ -12,19 +12,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
-test('registered operator sessions manage other workspaces; nothing else on the host does', async (t) => {
+test('registered operator sessions manage other accounts; nothing else on the host does', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService } = modules;
   const base = `http://localhost:${port}`;
 
-  const home = await createWorkspace(app, getDataSourceToken, 'pairing-home');
-  const other = await createWorkspace(app, getDataSourceToken, 'other');
+  const home = await createAccount(app, getDataSourceToken, 'pairing-home');
+  const other = await createAccount(app, getDataSourceToken, 'other');
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const adminHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(admin.id)}`, 'Content-Type': 'application/json' };
   const manager = await createAgent(app, getDataSourceToken, home.id, { name: 'rolf', type: 'manager' });
@@ -38,7 +38,7 @@ test('registered operator sessions manage other workspaces; nothing else on the 
   });
   const operator = sessionClient('s-operator');
   const bystander = sessionClient('s-other');
-  const touchOther = (client, description) => client.callTool('update_workspace', { workspace_id: other.id, description });
+  const touchOther = (client, description) => client.callTool('update_account', { account_id: other.id, description });
   const denied = (r) => JSON.stringify(r).includes('does not belong to this workspace');
 
   // 1. 지정 전: 페어링 워크스페이스 밖은 못 다룬다.
@@ -53,7 +53,7 @@ test('registered operator sessions manage other workspaces; nothing else on the 
   assert.equal(jarvis.status, 201);
   const lifted = await touchOther(operator, 'set by the operator');
   assert.ok(!denied(lifted), `operator may manage another workspace: ${JSON.stringify(lifted)}`);
-  const ws = await app.get(getDataSourceToken()).getRepository('Workspace').findOneBy({ id: other.id });
+  const ws = await app.get(getDataSourceToken()).getRepository('Account').findOneBy({ id: other.id });
   assert.equal(ws.description, 'set by the operator');
 
   // 3. 같은 키, 다른 세션 — 여전히 묶여 있다.

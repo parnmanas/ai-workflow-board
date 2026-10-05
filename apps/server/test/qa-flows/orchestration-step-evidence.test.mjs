@@ -17,7 +17,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
-import { createUser, createWorkspace, createApiKey } from '../helpers/fixtures.mjs';
+import { createUser, createAccount, createApiKey } from '../helpers/fixtures.mjs';
+import { ReBACService } from '../../dist/services/rebac.service.js';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -65,14 +66,19 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   const runner = app.get(services.OrchestrationRunnerService);
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'step-evidence');
-  const other = await createWorkspace(app, getDataSourceToken, 'step-evidence-other');
+  const ws = await createAccount(app, getDataSourceToken, 'step-evidence');
+  const other = await createAccount(app, getDataSourceToken, 'step-evidence-other');
   const operator = await createUser(app, getDataSourceToken, { name: 'evidence-operator' });
   const token = app.get(AuthService).createSession(operator.id);
-  const H = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id };
+  const deniedUser = await createUser(app, getDataSourceToken, { name: 'other-account-only', role: 'user' });
+  await ds.getRepository('User').update(deniedUser.id, { permissions: JSON.stringify(['admin.actions']) });
+  await app.get(ReBACService).grant({ type: 'user', id: deniedUser.id }, 'member', { type: 'account', id: other.id });
+  const deniedAuthorization = `Bearer ${app.get(AuthService).createSession(deniedUser.id)}`;
+
+  const H = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id };
 
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Evidence squad',
     team: { max_parallel_steps: 3, created_by: HUMAN.id },
     members: [{ role_label: 'builder', max_concurrent: 2 }],
@@ -81,7 +87,7 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   const worker = squad.member('builder');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Evidence mission',
     objective: 'ship it with proof',
@@ -89,11 +95,11 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 
-  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label: 'lead' });
+  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label: 'lead' });
   // P4c-4: worker 는 rt- 슬롯 identity — 증거 업로드(chat tools)는 runtime-tuple
   // 키(`runtime:<label>:<rt-key>`, host 바인딩)로 인증한다.
   const workerHostId = squad.team.members.find((m) => m.agent_id === worker.id)?.runtime?.manager_agent_id;
-  const workerKeyRow = await createApiKey(app, getDataSourceToken, null, { workspaceId: ws.id, label: 'worker-tuple', hostId: workerHostId });
+  const workerKeyRow = await createApiKey(app, getDataSourceToken, null, { accountId: ws.id, label: 'worker-tuple', hostId: workerHostId });
   await ds.getRepository('ApiKey').update({ id: workerKeyRow.id }, { name: `runtime:builder:${worker.id}` });
   const workerKey = workerKeyRow;
   const leadMcp = new McpClient({ baseUrl: base, apiKey: leadKey.raw_key });
@@ -175,7 +181,7 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   });
 
   logStep('step 세션 항목에 첨부 메타가 실리고 바이트는 실리지 않는다');
-  const session = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}`, { headers: H }).then((r) => r.json());
+  const session = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${ws.id}`, { headers: H }).then((r) => r.json());
   const withMedia = session.items.find((i) => (i.attachments ?? []).some((a) => a.file_name === 'result.png'));
   assert.ok(withMedia, '스크린샷이 묶인 메시지가 세션에 있다');
   assert.equal(withMedia.kind, 'agent');
@@ -188,26 +194,26 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   assert.equal(withLog.attachments[0].is_media, false, '로그 파일은 미디어가 아니다');
 
   logStep('바이트는 step 첨부 경로로만 읽히고, 방 앵커와 워크스페이스 경계를 지킨다');
-  const bytes = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?workspace_id=${ws.id}`, { headers: H });
+  const bytes = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?account_id=${ws.id}`, { headers: H });
   assert.equal(bytes.status, 200);
   const body = await bytes.json();
   assert.equal(body.file_data, PNG_1PX, '올린 바이트가 그대로 돌아온다');
   assert.equal(body.mime_type, 'image/png');
   assert.equal(body.is_media, true);
 
-  const crossStep = await fetch(`${base}/api/orchestration/steps/${steps.other.id}/attachments/${pngId}?workspace_id=${ws.id}`, { headers: H });
+  const crossStep = await fetch(`${base}/api/orchestration/steps/${steps.other.id}/attachments/${pngId}?account_id=${ws.id}`, { headers: H });
   assert.equal(crossStep.status, 404, '다른 step 의 id 로는 못 읽는다 — 첨부는 자기 방에 앵커된다');
-  const crossWs = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?workspace_id=${other.id}`, {
-    headers: { ...H, 'X-Workspace-Id': other.id },
+  const crossWs = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?account_id=${other.id}`, {
+    headers: { ...H, Authorization: deniedAuthorization, 'X-Account-Id': other.id },
   });
-  assert.equal(crossWs.status, 404);
-  const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?workspace_id=${ws.id}`);
+  assert.equal(crossWs.status, 403, '실제 소유 계정에 접근할 수 없는 사용자는 증거를 읽을 수 없다');
+  const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?account_id=${ws.id}`);
   assert.ok(anon.status === 401 || anon.status === 403);
   const viaChat = await fetch(`${base}/api/chat-rooms/${buildRoom.id}/attachments/${pngId}`, { headers: H });
   assert.ok(viaChat.status === 403 || viaChat.status === 404, `채팅 경로는 참여자 게이트라 사람이 못 읽는다 (got ${viaChat.status}) — 그래서 step 경로가 필요하다`);
 
   logStep('미션 증거 갤러리는 미디어만 step_key 와 함께 최신순으로');
-  const gallery = await fetch(`${base}/api/orchestration/missions/${mission.id}/evidence?workspace_id=${ws.id}`, { headers: H }).then((r) => r.json());
+  const gallery = await fetch(`${base}/api/orchestration/missions/${mission.id}/evidence?account_id=${ws.id}`, { headers: H }).then((r) => r.json());
   assert.equal(gallery.mission_id, mission.id);
   assert.deepEqual(gallery.items.map((i) => i.file_name).sort(), ['playtest.webm', 'result.png'], '로그 파일은 갤러리에 없다');
   assert.ok(gallery.items.every((i) => i.step_id === steps.build.id && i.step_key === 'build'), '어느 step 의 증거인지 알 수 있다');

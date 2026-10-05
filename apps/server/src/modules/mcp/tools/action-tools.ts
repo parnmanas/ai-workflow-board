@@ -31,7 +31,7 @@ import type { ToolContext } from './context';
 function actionToJson(a: Action) {
   return withArtifactRef('action', {
     id: a.id,
-    workspace_id: a.workspace_id,
+    account_id: a.account_id,
     name: a.name,
     description: a.description,
     prompt: a.prompt,
@@ -62,12 +62,12 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'list_actions',
     'List reusable Actions in a workspace.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ workspace_id }) => {
+    async ({ account_id }) => {
       const repo = dataSource.getRepository(Action);
       const qb = repo.createQueryBuilder('a')
-        .where('a.workspace_id = :ws', { ws: workspace_id });
+        .where('a.account_id = :ws', { ws: account_id });
       const rows = await qb.orderBy('a.name', 'ASC').getMany();
       return ok(rows.map(actionToJson));
     },
@@ -95,7 +95,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'enabled=false skips the hook too (manual run_action only). ' +
     'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,user,agent,ticket,date,time,datetime}.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       id: z.string().optional().describe('Action ID — omit to create, provide to update'),
       name: z.string().describe('Action name'),
       description: z.string().optional().describe('Short description'),
@@ -113,11 +113,11 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       repo_ref: repoRefSchema.nullable().optional().describe('Repo to check out into the Run folder. Omit/null → no clone, the provisioner just ensures the folder exists.'),
       checkout_mode: checkoutModeSchema.optional(),
     },
-    async ({ workspace_id, id, name, description, prompt, target_agent_id, target_agent_ids, target_runtimes, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs, workspace_folder, repo_ref, checkout_mode }) => {
+    async ({ account_id, id, name, description, prompt, target_agent_id, target_agent_ids, target_runtimes, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs, workspace_folder, repo_ref, checkout_mode }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         if (id) {
-          const updated = await actionsService.update(id, workspace_id, {
+          const updated = await actionsService.update(id, account_id, {
             name,
             description,
             prompt,
@@ -143,7 +143,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           return err('target_agent_id (or target_agent_ids / target_runtimes) is required when creating an action');
         }
         const created = await actionsService.create({
-          workspace_id,
+          account_id,
           name,
           description: description ?? '',
           prompt: prompt ?? '',
@@ -171,13 +171,13 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'delete_action',
     'Delete an action and all its run history (rooms + messages + runs).',
     {
-      workspace_id: z.string().describe('Workspace ID (scope boundary)'),
+      account_id: z.string().describe('Account ID (scope boundary)'),
       id: z.string().describe('Action ID'),
     },
-    async ({ workspace_id, id }) => {
+    async ({ account_id, id }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
-        await actionsService.remove(id, workspace_id);
+        await actionsService.remove(id, account_id);
         return ok({ success: true, id });
       } catch (e: any) {
         return err(e?.message || 'Failed to delete action');
@@ -260,15 +260,15 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'Idempotent: a second call on an already-completed run is a no-op (no double resume/retry).',
     {
       run_id: z.string().describe('Run ID (from run_action / list_action_runs)'),
-      workspace_id: z.string().describe('Workspace ID (scope boundary)'),
+      account_id: z.string().describe('Account ID (scope boundary)'),
       status: z.enum(['succeeded', 'failed']).describe("'succeeded' → resume the source ticket; 'failed' → retry (bounded), then surface + resume"),
       summary: z.string().optional().describe('What you did and the outcome, or why it failed. Mirrored into the source ticket audit comment.'),
     },
-    async ({ run_id, workspace_id, status, summary }, extra: { sessionId?: string }) => {
+    async ({ run_id, account_id, status, summary }, extra: { sessionId?: string }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
-        const result = await actionsService.completeRun(run_id, workspace_id, {
+        const result = await actionsService.completeRun(run_id, account_id, {
           status,
           summary,
           actorType: caller?.agentId ? 'agent' : 'system',
@@ -325,14 +325,14 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'an empty agent_id/batch_id (not backfilled: the Action\'s target may have been edited ' +
     'since, so any value would be invented rather than recorded).',
     {
-      workspace_id: z.string().describe('Workspace ID (scope boundary)'),
+      account_id: z.string().describe('Account ID (scope boundary)'),
       action_id: z.string().describe('Action ID'),
       limit: z.number().optional().default(20).describe('Max runs to return (default 20, cap 100)'),
     },
-    async ({ workspace_id, action_id, limit }) => {
+    async ({ account_id, action_id, limit }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
-        const runs = await actionsService.listRuns(action_id, workspace_id, limit ?? 20);
+        const runs = await actionsService.listRuns(action_id, account_id, limit ?? 20);
         // `<Manager>/<Agent>` 표시명은 배치로 한 번에 해석한다
         // (docs/runbooks/agent-display-name.md — bare name 은 계약 위반이다:
         // 같은 leaf 이름이 여러 매니저 아래 존재할 수 있어서, 접두사가 없으면
@@ -344,7 +344,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
         return ok(runs.map((r: ActionRun) => ({
           id: r.id,
           action_id: r.action_id,
-          workspace_id: r.workspace_id,
+          account_id: r.account_id,
           agent_id: r.agent_id || '',
           agent_name: agentNames.get(r.agent_id || '') || '',
           batch_id: r.batch_id || '',
@@ -373,14 +373,14 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'Text search across action name, description, and prompt template within a workspace. ' +
     'Case-insensitive substring match. Returns up to `limit` results.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       query: z.string().min(1).describe('Search query'),
       limit: z.number().optional().default(20),
     },
-    async ({ workspace_id, query, limit }) => {
+    async ({ account_id, query, limit }) => {
       const repo = dataSource.getRepository(Action);
       const qb = repo.createQueryBuilder('a')
-        .where('a.workspace_id = :ws', { ws: workspace_id });
+        .where('a.account_id = :ws', { ws: account_id });
       const pattern = `%${query.toLowerCase()}%`;
       qb.andWhere('(LOWER(a.name) LIKE :q OR LOWER(a.description) LIKE :q OR LOWER(a.prompt) LIKE :q)', { q: pattern });
       qb.orderBy('a.name', 'ASC').limit(Math.min(limit ?? 20, 100));

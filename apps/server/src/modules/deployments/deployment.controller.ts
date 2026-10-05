@@ -10,7 +10,7 @@ export function deploymentToJson(d: Deployment | null) {
   if (!d) return null;
   return {
     id: d.id,
-    workspace_id: d.workspace_id,
+    account_id: d.account_id,
     environment: d.environment,
     base_url: d.base_url,
     repo_resource_id: d.repo_resource_id,
@@ -39,8 +39,8 @@ export class DeploymentController {
 
   /** Current live deployment per environment visible to a workspace (+ globals). */
   @Get()
-  async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
-    const rows = await this.deployments.listForWorkspace(workspaceId || null);
+  async list(@Query('account_id') accountId: string, @Res() res: Response) {
+    const rows = await this.deployments.listForWorkspace(accountId || null);
     return res.json(rows.map(deploymentToJson));
   }
 
@@ -49,7 +49,7 @@ export class DeploymentController {
   async report(@Body() body: any, @Res() res: Response) {
     try {
       const row = await this.deployments.report({
-        workspaceId: body.workspace_id ?? null,
+        accountId: body.account_id ?? null,
         environment: body.environment,
         deployedCommitSha: body.deployed_commit_sha ?? body.commit_sha,
         baseUrl: body.base_url,

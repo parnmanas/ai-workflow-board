@@ -47,11 +47,11 @@ function validateJsonFile(contents: string): string | null {
 }
 
 export default function CliCredentialImport({
-  workspaceId,
-  createScope = 'workspace',
+  accountId,
+  createScope = 'account',
   onCreated,
 }: {
-  workspaceId: string;
+  accountId: string;
   createScope?: CatalogScope;
   onCreated?: () => void | Promise<void>;
 }) {
@@ -118,16 +118,16 @@ export default function CliCredentialImport({
       setError(jsonError);
       return;
     }
-    if (createScope !== 'global' && !workspaceId) {
-      setError('Select a workspace first.');
+    if (createScope !== 'global' && !accountId) {
+      setError('Ownership defaults are unavailable.');
       return;
     }
 
     setSaving(true);
     try {
       await api.createCredential({
-        scope: createScope === 'global' ? 'global' : 'workspace',
-        workspace_id: createScope === 'global' ? undefined : workspaceId,
+        scope: createScope === 'global' ? 'global' : 'account',
+        account_id: createScope === 'global' ? undefined : accountId,
         name: name.trim(),
         description: `Imported from ${details.file} after ${details.command}.`,
         provider: details.provider,

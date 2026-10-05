@@ -35,7 +35,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -84,14 +84,14 @@ async function roomCountFor(ds, stepId) {
  * 쓴다 — `step_key`는 행에 저장되는 값이 아니라 이 투영이 step_id로부터 파생하는
  * 값이라, UI가 실제로 렌더링하는 것과 같은 경로로 확인해야 의미가 있다.
  */
-async function eventsOf(missions, missionId, workspaceId) {
-  const detail = await missions.getMissionDetail(missionId, workspaceId);
+async function eventsOf(missions, missionId, accountId) {
+  const detail = await missions.getMissionDetail(missionId, accountId);
   return detail.events;
 }
 
 /** 미션 상세를 step_key로 색인해서 돌려준다. */
-async function readSteps(missions, missionId, workspaceId) {
-  const detail = await missions.getMissionDetail(missionId, workspaceId);
+async function readSteps(missions, missionId, accountId) {
+  const detail = await missions.getMissionDetail(missionId, accountId);
   return { detail, byKey: Object.fromEntries(detail.steps.map((s) => [s.step_key, s])) };
 }
 
@@ -107,9 +107,9 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
   const missions = app.get(services.OrchestrationMissionService);
   const runner = app.get(services.OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, `orch-${label}`);
+  const ws = await createAccount(app, getDataSourceToken, `orch-${label}`);
   const mcpFor = async (agent, name) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: name });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: name });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -122,7 +122,7 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
   // (api ‖ ui)를 맡기므로 올려두지 않으면 member 상한에서 직렬화돼 fan-out
   // 자체를 검증할 수 없다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: `Graph squad ${label}`,
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [
@@ -139,7 +139,7 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
   const critic = squad.member('reviewer');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: `Graph mission ${label}`,
     objective: 'Exercise the execution graph end to end.',
@@ -152,7 +152,7 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
 
   return {
     app,
-    // createWorkspace/createAgent 등 fixture 헬퍼가 요구하는 DataSource 토큰 게터.
+    // createAccount/createAgent 등 fixture 헬퍼가 요구하는 DataSource 토큰 게터.
     getDataSourceToken,
     ds,
     ws,
@@ -643,8 +643,8 @@ test('디스패치 실패 시 예산: work order 전송 전에 실패하면 예�
   // 이 검사는 room 생성과 예산 커밋보다 **앞**이므로, 이 실패는 subagent를 띄운 적이
   // 없고 따라서 예산도 쓰지 않아야 한다(정책: 예산은 "떴을 수 있는가" 기준).
   // P4c-4: 검사는 member 행 스냅샷을 본다 (Agent 행 없음).
-  const other = await createWorkspace(app, getDataSourceToken, 'orch-elsewhere');
-  await ds.getRepository('OrchestrationTeamMember').update({ agent_id: critic.id }, { workspace_id: other.id });
+  const other = await createAccount(app, getDataSourceToken, 'orch-elsewhere');
+  await ds.getRepository('OrchestrationTeamMember').update({ agent_id: critic.id }, { account_id: other.id });
 
   step('entry 2개 중 하나는 정상 디스패치, 하나는 전송 전 실패');
   const submitted = await leadMcp.callTool('submit_orchestration_plan', {

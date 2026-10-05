@@ -20,7 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SILENT_EXIT_PORT || '0';
@@ -43,9 +43,9 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'silent-exit-dedupe');
+  const ws = await createAccount(app, getDataSourceToken, 'silent-exit-dedupe');
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     status: 'in_progress',
     title: 'silent-exit dedupe test',
   });
@@ -134,7 +134,7 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
 
   step('A persisted exact-trigger agent comment suppresses the conditional warning');
   const raceTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     status: 'in_progress',
     title: 'silent-exit grace race test',
   });
@@ -214,13 +214,13 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
   // key, which is what the manager sends back as the silent-exit `agent_id`.
   const typedAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'typed-race-agent', runtime: true });
   const typedTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     status: 'in_progress',
     title: 'typed comment silent-exit race test',
     assignee: typedAgent,
   });
   const typedKey = await createApiKey(app, getDataSourceToken, typedAgent.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'typed-race-agent',
   });
   const typedTrigger = 'trigger-typed-race';

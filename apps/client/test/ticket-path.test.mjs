@@ -12,14 +12,14 @@ import assert from 'node:assert/strict';
 import { canOpenTicket, ticketPath, ticketsPagePath } from '../src/utils/ticketPath.ts';
 
 test('ticketPath: /ws/<ws>/tickets?ticket=<id>', () => {
-  assert.equal(ticketPath('w1', 't1'), '/ws/w1/tickets?ticket=t1');
-  assert.equal(ticketsPagePath('w1'), '/ws/w1/tickets');
+  assert.equal(ticketPath('w1', 't1'), '/tickets?ticket=t1');
+  assert.equal(ticketsPagePath('w1'), '/tickets');
 });
 
 test('ticketPath: comment 가 있으면 함께 싣고, 비어 있으면 뺀다', () => {
-  assert.equal(ticketPath('w1', 't1', { commentId: 'c9' }), '/ws/w1/tickets?ticket=t1&comment=c9');
-  assert.equal(ticketPath('w1', 't1', { commentId: null }), '/ws/w1/tickets?ticket=t1');
-  assert.equal(ticketPath('w1', 't1', { commentId: '' }), '/ws/w1/tickets?ticket=t1');
+  assert.equal(ticketPath('w1', 't1', { commentId: 'c9' }), '/tickets?ticket=t1&comment=c9');
+  assert.equal(ticketPath('w1', 't1', { commentId: null }), '/tickets?ticket=t1');
+  assert.equal(ticketPath('w1', 't1', { commentId: '' }), '/tickets?ticket=t1');
 });
 
 test('ticketPath: id 는 쿼리 인코딩된다', () => {
@@ -28,10 +28,10 @@ test('ticketPath: id 는 쿼리 인코딩된다', () => {
   assert.equal(url.searchParams.has('x'), false);
 });
 
-test('canOpenTicket: workspace 와 id 가 모두 있어야 열 수 있다 (보관 여부는 무관)', () => {
-  assert.equal(canOpenTicket({ id: 't1', workspace_id: 'w1' }), true);
-  assert.equal(canOpenTicket({ id: 't1', workspace_id: 'w1', archived_at: '2026-01-01' }), true);
-  assert.equal(canOpenTicket({ id: 't1' }), false);
-  assert.equal(canOpenTicket({ workspace_id: 'w1' }), false);
+test('canOpenTicket: ticket id만 있으면 열 수 있다', () => {
+  assert.equal(canOpenTicket({ id: 't1', account_id: 'w1' }), true);
+  assert.equal(canOpenTicket({ id: 't1', account_id: 'w1', archived_at: '2026-01-01' }), true);
+  assert.equal(canOpenTicket({ id: 't1' }), true);
+  assert.equal(canOpenTicket({ account_id: 'w1' }), false);
   assert.equal(canOpenTicket(null), false);
 });

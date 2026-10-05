@@ -71,7 +71,7 @@ const RESOURCE_ID = 'gf-resource-missing'; // 의도적으로 projects 테이블
 
 function edge(id, graphId, overrides = {}) {
   return {
-    id, workspace_id: WORKSPACE_ID, graph_id: graphId, src_id: `${id}-src`, dst_id: `${id}-dst`,
+    id, account_id: WORKSPACE_ID, graph_id: graphId, src_id: `${id}-src`, dst_id: `${id}-dst`,
     type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active',
     ...overrides,
   };
@@ -79,7 +79,7 @@ function edge(id, graphId, overrides = {}) {
 
 function node(id, graphId, symbolId, overrides = {}) {
   return {
-    id, workspace_id: WORKSPACE_ID, graph_id: graphId, symbol_id: symbolId,
+    id, account_id: WORKSPACE_ID, graph_id: graphId, symbol_id: symbolId,
     type: 'Callable', layer: 'structural', name: symbolId, confidence: 1, status: 'active',
     ...overrides,
   };
@@ -129,18 +129,18 @@ after(async () => {
 
 describe('OntologyLifecycleService.computeDirtyRatio', () => {
   it('엣지가 하나도 없으면 null(측정 불가 ≠ 0%)', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'r-empty', folder_path: '', status: 'ready' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'r-empty', folder_path: '', status: 'ready' }));
     assert.equal(await lifecycleService.computeDirtyRatio(graph.id), null);
   });
 
   it('전부 active면 dirty_ratio=0', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'r-clean', folder_path: '', status: 'ready' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'r-clean', folder_path: '', status: 'ready' }));
     await edgeRepo.save([edge('e1', graph.id), edge('e2', graph.id), edge('e3', graph.id)]);
     assert.equal(await lifecycleService.computeDirtyRatio(graph.id), 0);
   });
 
   it('active/stale 혼합이면 stale/(active+stale) 비율을 정확히 반환한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'r-mixed', folder_path: '', status: 'ready' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'r-mixed', folder_path: '', status: 'ready' }));
     await edgeRepo.save([
       edge('m1', graph.id, { status: 'active' }),
       edge('m2', graph.id, { status: 'active' }),
@@ -151,7 +151,7 @@ describe('OntologyLifecycleService.computeDirtyRatio', () => {
   });
 
   it('removed/quarantined 엣지는 분모에서 제외한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'r-removed', folder_path: '', status: 'ready' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'r-removed', folder_path: '', status: 'ready' }));
     await edgeRepo.save([
       edge('x1', graph.id, { status: 'active' }),
       edge('x2', graph.id, { status: 'stale' }),
@@ -165,7 +165,7 @@ describe('OntologyLifecycleService.computeDirtyRatio', () => {
 
 describe('OntologyController.graph — 브라우저 렌더링 스냅샷', () => {
   it('ready 그래프의 활성 노드와 양 끝이 선택된 활성 엣지를 반환한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-ready', folder_path: '', status: 'ready' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'render-ready', folder_path: '', status: 'ready' }));
     const [a, b] = await nodeRepo.save([
       node('render-node-a', graph.id, 'render/a', { name: 'a', degree: 2, pagerank: 0.8 }),
       node('render-node-b', graph.id, 'render/b', { name: 'b', degree: 1, pagerank: 0.4 }),
@@ -183,7 +183,7 @@ describe('OntologyController.graph — 브라우저 렌더링 스냅샷', () => 
   });
 
   it('선택 밖 고신뢰 엣지가 30,000개를 넘어도 선택 노드 사이 엣지를 반환한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-large-edge-distribution', folder_path: '', status: 'ready' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'render-large-edge-distribution', folder_path: '', status: 'ready' }));
     const [a, b] = await nodeRepo.save([
       node('render-large-a', graph.id, 'render/large-a', { degree: 2, pagerank: 0.8 }),
       node('render-large-b', graph.id, 'render/large-b', { degree: 1, pagerank: 0.4 }),
@@ -210,7 +210,7 @@ describe('OntologyController.graph — 브라우저 렌더링 스냅샷', () => 
   });
 
   it('building 그래프는 불완전 스냅샷 대신 409를 반환한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-building', folder_path: '', status: 'building' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'render-building', folder_path: '', status: 'building' }));
     const res = fakeRes();
     await controller.graph(WORKSPACE_ID, graph.id, res);
     assert.equal(res._status, 409);
@@ -260,11 +260,11 @@ describe('countBehindAhead — 컨트롤러가 실제로 쓰는 (repoPath, \'HEA
 });
 
 describe('OntologyController.status', () => {
-  it('workspace_id 누락 시 400', async () => {
+  it('account_id 누락 시 400', async () => {
     const res = fakeRes();
     await controller.status(undefined, undefined, RESOURCE_ID, undefined, res);
     assert.equal(res._status, 400);
-    assert.match(res._body.error, /workspace_id/);
+    assert.match(res._body.error, /account_id/);
   });
 
   it('graph_id/resource_id 둘 다 없으면 400', async () => {
@@ -291,7 +291,7 @@ describe('OntologyController.status', () => {
     // resolveOrProvision으로 그래프를 만든 뒤, runInitialBuild가 하는 것처럼
     // DB를 직접 ready+commit으로 갱신 — 이 그래프의 resource_id(= project id)는
     // projects 테이블에 실존하지 않는다(RESOURCE_ID 상수 자체가 그 목적).
-    const { graph } = await lifecycleService.getOrCreateGraph({ workspaceId: WORKSPACE_ID, resourceId: RESOURCE_ID, folderPath: '' });
+    const { graph } = await lifecycleService.getOrCreateGraph({ accountId: WORKSPACE_ID, resourceId: RESOURCE_ID, folderPath: '' });
     await graphRepo.update({ id: graph.id }, { status: 'ready', indexed_at: new Date(), commit: 'deadbeefcafe' });
     await edgeRepo.save([edge('fe1', graph.id, { status: 'active' }), edge('fe2', graph.id, { status: 'stale' })]);
 
@@ -307,7 +307,7 @@ describe('OntologyController.status', () => {
   });
 
   it('다른 workspace 소유 graph_id를 조회하면 404(존재 유출 없이 not_found)', async () => {
-    const { graph } = await lifecycleService.getOrCreateGraph({ workspaceId: WORKSPACE_ID, resourceId: 'r-cross-ws', folderPath: '' });
+    const { graph } = await lifecycleService.getOrCreateGraph({ accountId: WORKSPACE_ID, resourceId: 'r-cross-ws', folderPath: '' });
     const res = fakeRes();
     await controller.status(OTHER_WORKSPACE_ID, graph.id, undefined, undefined, res);
     assert.equal(res._status, 404);
@@ -316,7 +316,7 @@ describe('OntologyController.status', () => {
 });
 
 describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레메트리', () => {
-  it('workspace_id 누락 시 400, 로깅 없음', async () => {
+  it('account_id 누락 시 400, 로깅 없음', async () => {
     const before = logs.length;
     const res = fakeRes();
     await controller.viewOpened({}, { currentUser: { id: 'u1' } }, res);
@@ -328,7 +328,7 @@ describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레
     const before = logs.length;
     const res = fakeRes();
     await controller.viewOpened(
-      { workspace_id: WORKSPACE_ID, resource_id: 'r-view', folder_path: 'apps/server' },
+      { account_id: WORKSPACE_ID, resource_id: 'r-view', folder_path: 'apps/server' },
       { currentUser: { id: 'u1' } },
       res,
     );
@@ -337,7 +337,7 @@ describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레
     const entry = logs[logs.length - 1];
     assert.equal(entry.cat, 'Ontology');
     assert.match(entry.msg, /graph view opened/);
-    assert.equal(entry.meta.workspace_id, WORKSPACE_ID);
+    assert.equal(entry.meta.account_id, WORKSPACE_ID);
     assert.equal(entry.meta.resource_id, 'r-view');
     assert.equal(entry.meta.folder_path, 'apps/server');
     assert.equal(entry.meta.user_id, 'u1');
@@ -353,7 +353,7 @@ describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레
 
 describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리뷰 지적의 근본 원인)', () => {
   it('전체 빌드 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'r-flush-overlap', folder_path: '', status: 'building' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: WORKSPACE_ID, resource_id: 'r-flush-overlap', folder_path: '', status: 'building' }));
     let releaseBuild;
     const buildGate = new Promise((resolve) => { releaseBuild = resolve; });
     let inserted;
@@ -384,7 +384,7 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
 
   it('두 번째 실행이 첫 번째 실행의 노드/엣지/역방향색인을 정확히 교체한다 — 중복 적재도, unique 제약 위반도 없어야 한다', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-idempotent', folder_path: '', status: 'ready',
+      account_id: WORKSPACE_ID, resource_id: 'r-idempotent', folder_path: '', status: 'ready',
     }));
     const nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
     const reverseRepo = AppOntologyDataSource.getRepository(OntologyReverseEdgeIndex);
@@ -448,7 +448,7 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
 
   it('교체 도중 추출이 실패하면 트랜잭션이 기존 ready 스냅샷을 보존한다', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-rollback', folder_path: '', status: 'ready', commit: 'stable-commit',
+      account_id: WORKSPACE_ID, resource_id: 'r-rollback', folder_path: '', status: 'ready', commit: 'stable-commit',
     }));
     const nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
     const original = node('rollback-old', graph.id, 'sym:stable');
@@ -479,18 +479,18 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
 describe('OntologyLifecycleService.forceRebuild — "Refresh Graph" 액션의 실제 재시작', () => {
   it('ready 그래프를 refresh하면 building으로 전환되고 started=true', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-ready', folder_path: '', status: 'ready', commit: 'oldsha', indexed_at: new Date(),
+      account_id: WORKSPACE_ID, resource_id: 'r-refresh-ready', folder_path: '', status: 'ready', commit: 'oldsha', indexed_at: new Date(),
     }));
-    const result = await lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID });
+    const result = await lifecycleService.forceRebuild({ graphId: graph.id, accountId: WORKSPACE_ID });
     assert.equal(result.started, true);
     assert.equal(result.graph.status, 'building');
   });
 
   it('error 그래프를 refresh하면 error 필드가 비워지고 building으로 전환된다 — "영구 재시도 불가" 버그의 정확한 회귀', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-error', folder_path: '', status: 'error', error: 'boom: previous failure',
+      account_id: WORKSPACE_ID, resource_id: 'r-refresh-error', folder_path: '', status: 'error', error: 'boom: previous failure',
     }));
-    const result = await lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID });
+    const result = await lifecycleService.forceRebuild({ graphId: graph.id, accountId: WORKSPACE_ID });
     assert.equal(result.started, true);
     assert.equal(result.graph.status, 'building');
     assert.equal(result.graph.error, '');
@@ -498,20 +498,20 @@ describe('OntologyLifecycleService.forceRebuild — "Refresh Graph" 액션의 �
 
   it('이미 building 중인 그래프를 refresh하면 새 빌드를 킥오프하지 않는다(started=false)', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-building', folder_path: '', status: 'building',
+      account_id: WORKSPACE_ID, resource_id: 'r-refresh-building', folder_path: '', status: 'building',
     }));
-    const result = await lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID });
+    const result = await lifecycleService.forceRebuild({ graphId: graph.id, accountId: WORKSPACE_ID });
     assert.equal(result.started, false);
     assert.equal(result.graph.status, 'building');
   });
 
   it('동시 두 번의 refresh 요청(중복 클릭) 중 정확히 하나만 승자가 된다 — 원자적 단일-승자 UPDATE(actions.service.ts와 같은 패턴)', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-race', folder_path: '', status: 'ready',
+      account_id: WORKSPACE_ID, resource_id: 'r-refresh-race', folder_path: '', status: 'ready',
     }));
     const [a, b] = await Promise.all([
-      lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID }),
-      lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID }),
+      lifecycleService.forceRebuild({ graphId: graph.id, accountId: WORKSPACE_ID }),
+      lifecycleService.forceRebuild({ graphId: graph.id, accountId: WORKSPACE_ID }),
     ]);
     const startedCount = [a.started, b.started].filter(Boolean).length;
     assert.equal(startedCount, 1, '정확히 하나만 started=true여야 한다(둘 다 true면 병렬 빌드, 둘 다 false면 아무도 재시작 안 됨)');
@@ -519,24 +519,24 @@ describe('OntologyLifecycleService.forceRebuild — "Refresh Graph" 액션의 �
 
   it('존재하지 않는 graph_id는 not_found', async () => {
     await assert.rejects(
-      () => lifecycleService.forceRebuild({ graphId: 'gf-does-not-exist', workspaceId: WORKSPACE_ID }),
+      () => lifecycleService.forceRebuild({ graphId: 'gf-does-not-exist', accountId: WORKSPACE_ID }),
       (e) => e instanceof GraphRefResolutionError && e.code === 'not_found',
     );
   });
 
   it('다른 workspace 소유 그래프는 not_found(존재 유출 없음)', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-cross-ws', folder_path: '', status: 'ready',
+      account_id: WORKSPACE_ID, resource_id: 'r-refresh-cross-ws', folder_path: '', status: 'ready',
     }));
     await assert.rejects(
-      () => lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: OTHER_WORKSPACE_ID }),
+      () => lifecycleService.forceRebuild({ graphId: graph.id, accountId: OTHER_WORKSPACE_ID }),
       (e) => e instanceof GraphRefResolutionError && e.code === 'not_found',
     );
   });
 });
 
 describe('OntologyController.refresh — "Refresh Graph" 커맨드 엔드포인트(조회 GET과 분리된 POST)', () => {
-  it('workspace_id 누락 시 400', async () => {
+  it('account_id 누락 시 400', async () => {
     const res = fakeRes();
     await controller.refresh({ graph_id: 'x' }, res);
     assert.equal(res._status, 400);
@@ -544,31 +544,31 @@ describe('OntologyController.refresh — "Refresh Graph" 커맨드 엔드포인�
 
   it('graph_id 누락 시 400', async () => {
     const res = fakeRes();
-    await controller.refresh({ workspace_id: WORKSPACE_ID }, res);
+    await controller.refresh({ account_id: WORKSPACE_ID }, res);
     assert.equal(res._status, 400);
   });
 
   it('존재하지 않는 graph_id는 404', async () => {
     const res = fakeRes();
-    await controller.refresh({ workspace_id: WORKSPACE_ID, graph_id: 'gf-ctrl-does-not-exist' }, res);
+    await controller.refresh({ account_id: WORKSPACE_ID, graph_id: 'gf-ctrl-does-not-exist' }, res);
     assert.equal(res._status, 404);
     assert.equal(res._body.code, 'not_found');
   });
 
   it('ready 그래프를 refresh하면 200 + started=true + status=building, 곧바로 재호출하면 started=false(중복 킥오프 방지가 컨트롤러 계층까지 이어진다)', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      workspace_id: WORKSPACE_ID, resource_id: 'r-ctrl-refresh', folder_path: '', status: 'ready',
+      account_id: WORKSPACE_ID, resource_id: 'r-ctrl-refresh', folder_path: '', status: 'ready',
     }));
 
     const res = fakeRes();
-    await controller.refresh({ workspace_id: WORKSPACE_ID, graph_id: graph.id }, res);
+    await controller.refresh({ account_id: WORKSPACE_ID, graph_id: graph.id }, res);
     assert.equal(res._status, 200);
     assert.equal(res._body.started, true);
     assert.equal(res._body.status, 'building');
     assert.equal(res._body.graph_id, graph.id);
 
     const res2 = fakeRes();
-    await controller.refresh({ workspace_id: WORKSPACE_ID, graph_id: graph.id }, res2);
+    await controller.refresh({ account_id: WORKSPACE_ID, graph_id: graph.id }, res2);
     assert.equal(res2._status, 200);
     assert.equal(res2._body.started, false);
     assert.equal(res2._body.status, 'building');

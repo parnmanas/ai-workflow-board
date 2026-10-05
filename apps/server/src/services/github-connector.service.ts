@@ -331,7 +331,7 @@ export interface GitHubApiCallOptions {
  * below stays as-is for the credential_id-resolving MCP tools
  * (fetch_github_info/search_github/sync_github_resource); this is the same
  * REST surface, parameterized by a raw token for a caller (the outreach
- * GitHubConnector) that resolves auth through a different, workspace-scope-
+ * GitHubConnector) that resolves auth through a different, account-scope-
  * checked path (outreach-credential.ts) and must never touch the Credential
  * table itself (connectors/types.ts's documented connector boundary).
  *

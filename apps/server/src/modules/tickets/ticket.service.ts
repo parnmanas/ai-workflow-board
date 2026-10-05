@@ -127,7 +127,7 @@ export class TicketService {
    * this workspace cannot use — the same checks team slots and
    * /runtime-specs/validate apply.
    */
-  async normalizeAssignee(input: unknown, workspaceId: string): Promise<{ assignee: RuntimeSpec | null; assignee_key: string }> {
+  async normalizeAssignee(input: unknown, accountId: string): Promise<{ assignee: RuntimeSpec | null; assignee_key: string }> {
     if (input === null || input === undefined || input === '') return { assignee: null, assignee_key: '' };
     let spec: RuntimeSpec;
     try {
@@ -140,7 +140,7 @@ export class TicketService {
     if (!profile.ok) throw new TicketInputError(profile.error);
     if (spec.credential_id) {
       const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: spec.credential_id } });
-      if (!credential || (credential.workspace_id !== null && credential.workspace_id !== workspaceId)) {
+      if (!credential || (credential.account_id !== null && credential.account_id !== accountId)) {
         throw new TicketInputError(`credential ${spec.credential_id} is not available to this workspace`);
       }
     }
@@ -161,19 +161,19 @@ export class TicketService {
     return p === 'urgent' ? 'critical' : p;
   }
 
-  private async resolveProject(workspaceId: string, projectId: unknown, scope: DataSource | EntityManager = this.dataSource): Promise<Project | null> {
+  private async resolveProject(accountId: string, projectId: unknown, scope: DataSource | EntityManager = this.dataSource): Promise<Project | null> {
     const id = str(projectId);
     if (!id) return null;
-    const project = await this.projects.getInWorkspace(id, workspaceId, scope);
+    const project = await this.projects.getInWorkspace(id, accountId, scope);
     if (!project) throw new TicketInputError(`project ${id} not found in this workspace`, 400, 'project_not_found');
     return project;
   }
 
-  private async nextPosition(scope: DataSource | EntityManager, workspaceId: string, status: TicketStatus): Promise<number> {
+  private async nextPosition(scope: DataSource | EntityManager, accountId: string, status: TicketStatus): Promise<number> {
     const row = await scope.getRepository(Ticket)
       .createQueryBuilder('t')
       .select('MAX(t.position)', 'max')
-      .where('t.workspace_id = :ws AND t.status = :status AND t.parent_id IS NULL', { ws: workspaceId, status })
+      .where('t.account_id = :ws AND t.status = :status AND t.parent_id IS NULL', { ws: accountId, status })
       .getRawOne();
     const max = Number(row?.max);
     return Number.isFinite(max) ? max + 1 : 0;
@@ -181,8 +181,8 @@ export class TicketService {
 
   // ── create ────────────────────────────────────────────────────────────
 
-  async create(workspaceId: string, body: any, actor: TicketActor): Promise<{ ticket: Ticket; duplicate_candidates: any[] }> {
-    if (!workspaceId) throw new TicketInputError('workspace_id is required');
+  async create(accountId: string, body: any, actor: TicketActor): Promise<{ ticket: Ticket; duplicate_candidates: any[] }> {
+    if (!accountId) throw new TicketInputError('account_id is required');
     body = body || {};
     const title = str(body.title);
     if (!title) throw new TicketInputError('title is required');
@@ -191,22 +191,22 @@ export class TicketService {
       : this.parseStatusInput(body.status);
     const priority = this.parsePriority(body.priority);
     const tags = normalizeTags(body.tags ?? body.labels);
-    const project = await this.resolveProject(workspaceId, body.project_id);
+    const project = await this.resolveProject(accountId, body.project_id);
 
     // Explicit `assignee: null` means "nobody"; omitted means "the project's default".
     const assigneeInput = body.assignee !== undefined ? body.assignee : (project?.default_assignee ?? null);
-    const { assignee, assignee_key } = await this.normalizeAssignee(assigneeInput, workspaceId);
+    const { assignee, assignee_key } = await this.normalizeAssignee(assigneeInput, accountId);
 
     let nextTicketId: string | null = null;
     if (body.next_ticket_id !== undefined) {
       try {
-        nextTicketId = await validateNextTicketId(this.dataSource, body.next_ticket_id, null, workspaceId);
+        nextTicketId = await validateNextTicketId(this.dataSource, body.next_ticket_id, null, accountId);
       } catch (e: any) {
         throw new TicketInputError(e?.message || 'next_ticket_id rejected');
       }
     }
 
-    const duplicateAssessment = await this.duplicates.assess(workspaceId, {
+    const duplicateAssessment = await this.duplicates.assess(accountId, {
       title,
       description: str(body.description),
       tags,
@@ -232,9 +232,9 @@ export class TicketService {
       const repo = manager.getRepository(Ticket);
       const position = typeof body.position === 'number' && Number.isFinite(body.position)
         ? Math.max(0, Math.floor(body.position))
-        : await this.nextPosition(manager, workspaceId, status);
+        : await this.nextPosition(manager, accountId, status);
       const saved = await repo.save(repo.create({
-        workspace_id: workspaceId,
+        account_id: accountId,
         title: title.slice(0, 500),
         description: body.description == null ? '' : String(body.description),
         prompt_text: body.prompt_text == null ? '' : String(body.prompt_text),
@@ -267,7 +267,7 @@ export class TicketService {
       }));
       await this.duplicates.recordTx(manager, saved, duplicateAssessment, actor.name, actor.id);
       created = await this.activityService.logActivityTx(manager, {
-        entity_type: 'ticket', entity_id: saved.id, ticket_id: saved.id, workspace_id: workspaceId,
+        entity_type: 'ticket', entity_id: saved.id, ticket_id: saved.id, account_id: accountId,
         action: 'created', actor_id: actor.id || undefined, actor_name: actor.name,
       });
       return saved;
@@ -317,7 +317,7 @@ export class TicketService {
       set('tags', JSON.stringify(normalizeTags(body.tags ?? body.labels)));
     }
     if (body.project_id !== undefined) {
-      const project = await this.resolveProject(ticket.workspace_id, body.project_id);
+      const project = await this.resolveProject(ticket.account_id, body.project_id);
       set('project_id', project?.id ?? null);
     }
     if (body.base_branch !== undefined) set('base_branch', str(body.base_branch));
@@ -327,14 +327,14 @@ export class TicketService {
     }
     if (body.next_ticket_id !== undefined) {
       try {
-        set('next_ticket_id', await validateNextTicketId(this.dataSource, body.next_ticket_id, ticket.id, ticket.workspace_id));
+        set('next_ticket_id', await validateNextTicketId(this.dataSource, body.next_ticket_id, ticket.id, ticket.account_id));
       } catch (e: any) {
         throw new TicketInputError(e?.message || 'next_ticket_id rejected');
       }
     }
     let assigneeChanged = false;
     if (body.assignee !== undefined) {
-      const { assignee, assignee_key } = await this.normalizeAssignee(body.assignee, ticket.workspace_id);
+      const { assignee, assignee_key } = await this.normalizeAssignee(body.assignee, ticket.account_id);
       if (assignee_key !== ticket.assignee_key || JSON.stringify(assignee) !== JSON.stringify(ticket.assignee)) {
         const prevLabel = parseRuntimeSpec(ticket.assignee)?.label || '';
         ticket.assignee = assignee as any;
@@ -349,7 +349,7 @@ export class TicketService {
       await repo.save(ticket);
       for (const change of changes) {
         await this.activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+          entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
           action: 'updated', field_changed: change.field, old_value: change.old.slice(0, 500), new_value: change.next.slice(0, 500),
           actor_id: actor.id || undefined, actor_name: actor.name,
         });
@@ -380,7 +380,7 @@ export class TicketService {
         ticket.status = childStatus;
         await repo.save(ticket);
         await this.activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+          entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
           action: 'status_changed', field_changed: 'status', old_value: prev, new_value: childStatus,
           actor_id: actor.id || undefined, actor_name: actor.name,
         });
@@ -400,7 +400,7 @@ export class TicketService {
     }
 
     ticket.status = status;
-    ticket.position = position ?? await this.nextPosition(this.dataSource, ticket.workspace_id, status);
+    ticket.position = position ?? await this.nextPosition(this.dataSource, ticket.account_id, status);
     ticket.terminal_entered_at = status === 'done' ? new Date() : null;
     // A finished ticket stops answering for its dedupe key, so the next
     // request with that key files fresh work instead of folding into this one.
@@ -409,7 +409,7 @@ export class TicketService {
     await repo.save(ticket);
     if (position !== null) await this.reposition(ticket, status, position);
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
       action: 'moved', field_changed: 'status', old_value: prev, new_value: status,
       actor_id: actor.id || undefined, actor_name: actor.name,
     });
@@ -425,7 +425,7 @@ export class TicketService {
   private async reposition(ticket: Ticket, status: TicketStatus, position: number): Promise<void> {
     const repo = this.dataSource.getRepository(Ticket);
     const lane = await repo.find({
-      where: { workspace_id: ticket.workspace_id, status, parent_id: IsNull(), archived_at: IsNull(), id: Not(ticket.id) },
+      where: { account_id: ticket.account_id, status, parent_id: IsNull(), archived_at: IsNull(), id: Not(ticket.id) },
       order: { position: 'ASC', created_at: 'ASC' },
       select: ['id', 'position'],
     });
@@ -451,7 +451,7 @@ export class TicketService {
     ticket.pending_set_by = actor.name;
     await repo.save(ticket);
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
       action: 'updated', field_changed: 'pending_user_action', old_value: String(was), new_value: 'true',
       actor_id: actor.id || undefined, actor_name: actor.name,
     });
@@ -471,7 +471,7 @@ export class TicketService {
     ticket.supervisor_redispatches = 0;
     await repo.save(ticket);
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
       action: 'updated', field_changed: 'pending_user_action', old_value: 'true', new_value: 'false',
       actor_id: actor.id || undefined, actor_name: actor.name,
     });
@@ -484,10 +484,12 @@ export class TicketService {
   // ── read ──────────────────────────────────────────────────────────────
 
   /** Root tickets of a workspace for the Tickets page / list_tickets. */
-  async list(workspaceId: string, filter: TicketListFilter = {}): Promise<{ tickets: any[]; tags: Array<{ tag: string; count: number }> }> {
+  async list(accountId: string | string[], filter: TicketListFilter = {}): Promise<{ tickets: any[]; tags: Array<{ tag: string; count: number }> }> {
+    const accountIds = Array.isArray(accountId) ? accountId : [accountId];
+    if (!accountIds.length) return { tickets: [], tags: [] };
     const repo = this.dataSource.getRepository(Ticket);
     const qb = repo.createQueryBuilder('t')
-      .where('t.workspace_id = :ws', { ws: workspaceId })
+      .where('t.account_id IN (:...accountIds)', { accountIds })
       .andWhere('t.parent_id IS NULL');
     if (filter.archived_only) qb.andWhere('t.archived_at IS NOT NULL');
     else if (!filter.include_archived) qb.andWhere('t.archived_at IS NULL');
@@ -605,10 +607,12 @@ export class TicketService {
   }
 
   /** Distinct tags in use across the workspace — the tag picker's suggestions. */
-  async tagSuggestions(workspaceId: string): Promise<Array<{ tag: string; count: number }>> {
+  async tagSuggestions(accountId: string | string[]): Promise<Array<{ tag: string; count: number }>> {
+    const accountIds = Array.isArray(accountId) ? accountId : [accountId];
+    if (!accountIds.length) return [];
     const rows = await this.dataSource.getRepository(Ticket).find({
       select: ['id', 'tags'],
-      where: { workspace_id: workspaceId, archived_at: IsNull() },
+      where: { account_id: In(accountIds), archived_at: IsNull() },
     });
     const counts = new Map<string, { tag: string; count: number }>();
     for (const row of rows) {

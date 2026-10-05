@@ -85,11 +85,11 @@ function defaultCredentialName(cli: string): string {
 }
 
 export default function CliAutoLogin({
-  workspaceId,
-  createScope = 'workspace',
+  accountId,
+  createScope = 'account',
   onCreated,
 }: {
-  workspaceId: string;
+  accountId: string;
   createScope?: CatalogScope;
   onCreated?: () => void | Promise<void>;
 }) {
@@ -122,7 +122,7 @@ export default function CliAutoLogin({
   const loadInstances = useCallback(async () => {
     setInstancesLoading(true);
     try {
-      const list = await api.listCliLoginInstances(isGlobal ? undefined : workspaceId);
+      const list = await api.listCliLoginInstances(isGlobal ? undefined : accountId);
       setInstances(list);
       if (list.length > 0 && !instanceId) setInstanceId(list[0].instance_id);
     } catch (err: any) {
@@ -131,7 +131,7 @@ export default function CliAutoLogin({
       setInstancesLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isGlobal, workspaceId]);
+  }, [isGlobal, accountId]);
 
   useEffect(() => {
     if (open && !session) void loadInstances();
@@ -182,8 +182,8 @@ export default function CliAutoLogin({
     setError('');
     try {
       const started = await api.startCliLogin({
-        scope: isGlobal ? 'global' : 'workspace',
-        workspace_id: isGlobal ? undefined : workspaceId,
+        scope: isGlobal ? 'global' : 'account',
+        account_id: isGlobal ? undefined : accountId,
         cli: provider,
         ...(providerScoped ? { cli_provider: scopedProvider, cli_method: scopedMethod } : {}),
         credential_name: credentialName.trim(),
@@ -200,7 +200,7 @@ export default function CliAutoLogin({
   const cancel = async () => {
     if (!session) return;
     try {
-      const cancelled = await api.cancelCliLogin(session.id, isGlobal ? undefined : workspaceId);
+      const cancelled = await api.cancelCliLogin(session.id, isGlobal ? undefined : accountId);
       setSession(cancelled);
     } catch (err: any) {
       showToast(err?.message || 'Failed to cancel login.', 'error');
@@ -234,14 +234,14 @@ export default function CliAutoLogin({
     const sessionId = session.id;
     const timer = setInterval(async () => {
       try {
-        const fresh = await api.getCliLoginSession(sessionId, isGlobal ? undefined : workspaceId);
+        const fresh = await api.getCliLoginSession(sessionId, isGlobal ? undefined : accountId);
         setSession(fresh);
       } catch {
         // best-effort — SSE or the next tick will catch up
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [session?.id, session?.status, isGlobal, workspaceId]);
+  }, [session?.id, session?.status, isGlobal, accountId]);
 
   // succeeded → refresh the credentials list once so the new row appears
   // without the user having to close the modal first.

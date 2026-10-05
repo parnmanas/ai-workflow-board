@@ -5,6 +5,7 @@ import { In, IsNull, Like, Repository, DataSource } from 'typeorm';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
+import { AgentSessionExecution } from '../../entities/AgentSessionExecution';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
 import { profileEntityToRuntime } from '../../common/claude-backend-registry';
@@ -59,7 +60,7 @@ export interface AgentSessionCredentialRef {
   id: string;
   name: string;
   provider: string;
-  scope: 'global' | 'workspace';
+  scope: 'global' | 'account';
 }
 
 /** 세션을 열 수 있는 Runtime Host 한 대 (+ 그 장비에서 세션이 되는 CLI). */
@@ -408,13 +409,13 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   // ─── Hosts ──────────────────────────────────────────────────────────────
 
-  /** 매니저 identity 는 워크스페이스에 속하지 않는다(하트비트가 workspace_id:null 로
+  /** 매니저 identity 는 워크스페이스에 속하지 않는다(하트비트가 account_id:null 로
    *  등록). 세션은 장비의 것이므로 살아 있는 모든 Runtime Host 를 보여준다. */
   private managerRecords(): InstanceRecord[] {
     return this.registry.list().filter((r) => r.mode === 'manager');
   }
 
-  async listHosts(workspaceId: string): Promise<AgentSessionHost[]> {
+  async listHosts(accountId: string): Promise<AgentSessionHost[]> {
     const records = this.managerRecords();
     const ids = Array.from(new Set(records.map((r) => r.agent_id)));
     const names = new Map<string, string>();
@@ -425,7 +426,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         if (h.name && !names.has(h.id)) names.set(h.id, h.name);
       }
     }
-    const settingsByHost = await this.cliSettingsMap(workspaceId, ids);
+    const settingsByHost = await this.cliSettingsMap(accountId, ids);
     // 같은 매니저 identity 로 여러 프로세스가 떠 있어도 host 는 하나로 보여준다.
     const byManager = new Map<string, AgentSessionHost>();
     for (const rec of records) {
@@ -460,7 +461,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     return Array.from(new Set(base.filter((cli) => ACP_SESSION_CLIS.has(cli))));
   }
 
-  private requireHost(_workspaceId: string, managerId: string, cli: string): InstanceRecord {
+  private requireHost(_accountId: string, managerId: string, cli: string): InstanceRecord {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
     const rec = this.managerRecords().find((r) => r.agent_id === managerId);
     if (!rec) throw new AgentSessionError(404, 'host_offline', 'This Runtime Host is not connected right now.');
@@ -494,6 +495,53 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   // ─── CLI 설정 (credential 바인딩) ──────────────────────────────────────
+
+  private async executionFor(accountId: string, managerId: string, cli: string, sessionId?: string | null) {
+    const repo = this.dataSource.getRepository(AgentSessionExecution);
+    const existing = sessionId ? await repo.findOne({ where: { manager_id: managerId, cli, session_id: sessionId } }) : null;
+    if (existing && existing.account_id !== accountId) throw new AgentSessionError(403, 'account_access_denied');
+    if (existing) return {
+      account_id: existing.account_id,
+      credential_id: existing.credential_id,
+      config_defaults: this.parseDefaults(existing.config_defaults),
+      runtime_profile: existing.runtime_profile ? JSON.parse(existing.runtime_profile) as CliRuntimeProfile : null,
+    };
+    const execution = {
+      account_id: accountId,
+      credential_id: await this.boundCredentialId(accountId, managerId, cli),
+      config_defaults: await this.configDefaultsFor(accountId, managerId, cli) || {},
+      runtime_profile: await this.backendProfileFor(accountId, managerId, cli),
+    };
+    if (sessionId) {
+      await this.pinExecution(managerId, cli, sessionId, execution);
+      // Concurrent opens must use the settings of the first successful claim.
+      return this.executionFor(accountId, managerId, cli, sessionId);
+    }
+    return execution;
+  }
+
+  private async pinExecution(managerId: string, cli: string, sessionId: string, execution: {
+    account_id: string; credential_id: string | null; config_defaults: Record<string, string | boolean>; runtime_profile: CliRuntimeProfile | null;
+  }): Promise<void> {
+    await this.dataSource.getRepository(AgentSessionExecution).createQueryBuilder().insert().values({
+      manager_id: managerId, cli, session_id: sessionId, account_id: execution.account_id,
+      credential_id: execution.credential_id, config_defaults: JSON.stringify(execution.config_defaults),
+      runtime_profile: execution.runtime_profile ? JSON.stringify(execution.runtime_profile) : null,
+    }).orIgnore().execute();
+  }
+
+  private async rememberExecutionOption(managerId: string, cli: string, sessionId: string, key: string, value: string | boolean): Promise<void> {
+    await this.dataSource.transaction(async manager => {
+      const binding = await manager.getRepository(AgentSessionExecution).findOne({
+        where: { manager_id: managerId, cli, session_id: sessionId },
+        ...(this.dataSource.options.type === 'postgres' ? { lock: { mode: 'pessimistic_write' as const } } : {}),
+      });
+      if (!binding) return;
+      const defaults = this.parseDefaults(binding.config_defaults);
+      defaults[key] = value;
+      await manager.getRepository(AgentSessionExecution).update(binding.id, { config_defaults: JSON.stringify(defaults) });
+    });
+  }
 
   /** `default_config` 컬럼 파싱 — 형식이 깨졌으면 빈 값으로 본다(설정 하나 때문에 세션을 막지 않는다). */
   private parseDefaults(raw: string | null | undefined): Record<string, string | boolean> {
@@ -545,9 +593,9 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 이 호스트×CLI 에 고른 backend profile. **전역 기본값으로 떨어지지 않는다** — 세션은 장비의 CLI 를
    * 그대로 모는 표면이라, 고르지 않았는데 다른 엔드포인트로 조용히 돌아가면 안 된다(디스패치 경로와 다른 점).
    */
-  private async backendProfileFor(workspaceId: string, managerId: string, cli: string): Promise<CliRuntimeProfile | null> {
+  private async backendProfileFor(accountId: string, managerId: string, cli: string): Promise<CliRuntimeProfile | null> {
     if (!BACKEND_PROFILE_CLIS.has(cli)) return null;
-    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     const pinned = row?.backend_profile_id;
     if (!pinned) return null;
     const found = (await this.backendProfileList()).find((p) => p.runtime.id === pinned);
@@ -559,8 +607,8 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /** 이 호스트×CLI 의 기억된 설정. 세션을 열 때 payload 에 실어 매니저가 다시 건다. */
-  private async configDefaultsFor(workspaceId: string, managerId: string, cli: string): Promise<Record<string, string | boolean> | undefined> {
-    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+  private async configDefaultsFor(accountId: string, managerId: string, cli: string): Promise<Record<string, string | boolean> | undefined> {
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     const defaults = this.parseDefaults(row?.default_config);
     return Object.keys(defaults).length ? defaults : undefined;
   }
@@ -569,8 +617,8 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 사용자가 고른 설정을 기억한다 — 어댑터 프로세스는 유휴 회수·재시작마다 기본값으로 돌아가므로,
    * 기억해 두지 않으면 "갔다가 돌아오면 또 default" 가 된다. row 가 없으면 만든다(credential 없이도 유효).
    */
-  private async rememberDefault(workspaceId: string, managerId: string, cli: string, key: string, value: string | boolean, userId: string): Promise<void> {
-    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+  private async rememberDefault(accountId: string, managerId: string, cli: string, key: string, value: string | boolean, userId: string): Promise<void> {
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     const next = { ...this.parseDefaults(row?.default_config), [key]: value };
     if (row) {
       row.default_config = JSON.stringify(next);
@@ -579,7 +627,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       return;
     }
     await this.settings.save(this.settings.create({
-      workspace_id: workspaceId, manager_id: managerId, cli, credential_id: null,
+      account_id: accountId, manager_id: managerId, cli, credential_id: null,
       default_config: JSON.stringify(next), known_config_options: '[]', updated_by: userId,
     }));
   }
@@ -597,27 +645,27 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   private credentialRef(cred: Credential): AgentSessionCredentialRef {
-    return { id: cred.id, name: cred.name, provider: cred.provider, scope: cred.workspace_id === null ? 'global' : 'workspace' };
+    return { id: cred.id, name: cred.name, provider: cred.provider, scope: cred.account_id === null ? 'global' : 'account' };
   }
 
   /** 워크스페이스에서 보이는(자기 것 + global) credential 중 이 CLI 와 호환되는 것. */
-  private async candidateCredentials(workspaceId: string, cli: string): Promise<Credential[]> {
+  private async candidateCredentials(accountId: string, cli: string): Promise<Credential[]> {
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
     if (!prefix) return [];
     const rows = await this.credentials.find({
       where: [
-        { workspace_id: workspaceId, provider: Like(`${prefix}%`) },
-        { workspace_id: IsNull(), provider: Like(`${prefix}%`) },
+        { account_id: accountId, provider: Like(`${prefix}%`) },
+        { account_id: IsNull(), provider: Like(`${prefix}%`) },
       ],
       order: { name: 'ASC' },
     });
     return rows;
   }
 
-  private async cliSettingsMap(workspaceId: string, managerIds: string[]): Promise<Map<string, Record<string, AgentSessionCredentialRef | null>>> {
+  private async cliSettingsMap(accountId: string, managerIds: string[]): Promise<Map<string, Record<string, AgentSessionCredentialRef | null>>> {
     const out = new Map<string, Record<string, AgentSessionCredentialRef | null>>();
     if (!managerIds.length) return out;
-    const rows = await this.settings.find({ where: { workspace_id: workspaceId, manager_id: In(managerIds) } });
+    const rows = await this.settings.find({ where: { account_id: accountId, manager_id: In(managerIds) } });
     const credIds = Array.from(new Set(rows.map((r) => r.credential_id).filter((x): x is string => !!x)));
     const creds = new Map<string, Credential>();
     if (credIds.length) {
@@ -639,11 +687,11 @@ export class AgentSessionsService implements OnModuleDestroy {
     throw new AgentSessionError(404, 'host_unknown', 'No Runtime Host with this id.');
   }
 
-  async getCliSettings(workspaceId: string, managerId: string, cli: string): Promise<AgentSessionCliSettings> {
+  async getCliSettings(accountId: string, managerId: string, cli: string): Promise<AgentSessionCliSettings> {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
     await this.requireManagerAgent(managerId);
-    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
-    const candidates = await this.candidateCredentials(workspaceId, cli);
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
+    const candidates = await this.candidateCredentials(accountId, cli);
     const current = row?.credential_id ? candidates.find((c) => c.id === row.credential_id) ?? null : null;
     const cached = this.parseKnownOptions(row?.known_config_options);
     const supportsBackend = BACKEND_PROFILE_CLIS.has(cli);
@@ -673,7 +721,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   async setCliSettings(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
@@ -688,7 +736,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (credentialId) {
       if (!prefix) throw new AgentSessionError(409, 'credential_unsupported', `${cli} sessions cannot take an AWB credential yet.`);
       const cred = await this.credentials.findOne({ where: { id: credentialId } });
-      if (!cred || (cred.workspace_id !== null && cred.workspace_id !== workspaceId)) {
+      if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
         throw new AgentSessionError(404, 'credential_not_found', 'Credential not found in this workspace.');
       }
       if (!cred.provider.startsWith(prefix)) {
@@ -707,7 +755,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         backendProfileId = raw;
       }
     }
-    const existing = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    const existing = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     // `default_config` 는 **부분 갱신**이다 — 모달이 approval 모드만 보내도 기억된 모델 선택이 날아가면 안 된다.
     // 값이 null 이면 그 키를 지운다(= 어댑터 기본값으로 되돌린다).
     const patch = defaultConfigInput && typeof defaultConfigInput === 'object' && !Array.isArray(defaultConfigInput)
@@ -733,13 +781,13 @@ export class AgentSessionsService implements OnModuleDestroy {
       await this.settings.save(existing);
     } else {
       await this.settings.save(this.settings.create({
-        workspace_id: workspaceId, manager_id: managerId, cli, credential_id: credentialId,
+        account_id: accountId, manager_id: managerId, cli, credential_id: credentialId,
         backend_profile_id: backendProfileId ?? null,
         default_config: mergeDefaults('{}'), known_config_options: '[]', updated_by: userId,
       }));
     }
     this.logService.info('AgentSession', `cli settings ${managerId.slice(0, 8)}/${cli}: credential=${credentialId ? credentialId.slice(0, 8) : 'none'} by ${userId.slice(0, 8)}`);
-    return this.getCliSettings(workspaceId, managerId, cli);
+    return this.getCliSettings(accountId, managerId, cli);
   }
 
   /** 지금 살아 있는 이 호스트×CLI 세션 중 가장 최근 것이 아는 설정 선택지. */
@@ -806,8 +854,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     return best?.config_options ?? [];
   }
 
-  private async boundCredentialId(workspaceId: string, managerId: string, cli: string): Promise<string | null> {
-    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+  private async boundCredentialId(accountId: string, managerId: string, cli: string): Promise<string | null> {
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     return row?.credential_id ?? null;
   }
 
@@ -815,13 +863,16 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 매니저 → 서버: CLI 설정으로 이 매니저에 묶인 credential 만 복호화해 준다.
    * (managed-agent 의 `/api/agent-manager/managed-agents/:id/credential` 와 같은 복호화·503 규약.)
    */
-  async getSessionCredential(managerId: string, credentialId: string, workspaceId: string): Promise<{ credential_id: string; provider: string; fields: Record<string, string> }> {
-    if (!workspaceId) throw new AgentSessionError(400, 'workspace_required');
-    const binding = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, credential_id: credentialId } });
-    if (!binding) throw new AgentSessionError(403, 'credential_not_bound', 'This credential is not assigned to this Runtime Host in the workspace CLI settings.');
+  async getSessionCredential(managerId: string, credentialId: string, accountId: string): Promise<{ credential_id: string; provider: string; fields: Record<string, string> }> {
+    if (!accountId) throw new AgentSessionError(400, 'account_required');
+    const binding = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, credential_id: credentialId } });
+    const execution = binding ? null : await this.dataSource.getRepository(AgentSessionExecution).findOne({
+      where: { account_id: accountId, manager_id: managerId, credential_id: credentialId },
+    });
+    if (!binding && !execution) throw new AgentSessionError(403, 'credential_not_bound', 'This credential is not assigned to this Runtime Host by account defaults or an existing session.');
     const cred = await this.credentials.findOne({ where: { id: credentialId } });
     if (!cred) throw new AgentSessionError(404, 'credential_not_found');
-    if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) throw new AgentSessionError(403, 'credential_not_bound');
+    if (cred.account_id !== null && cred.account_id !== accountId) throw new AgentSessionError(403, 'credential_not_bound');
     const ciphertext = cred.encrypted_data || '';
     const plaintext = ciphertext ? decrypt(ciphertext) : '';
     if (ciphertext.startsWith('enc:') && !plaintext) {
@@ -861,7 +912,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       const timer = this.armRpcTimer(requestId, op, managerId, cli, timeoutMs);
       this.pending.set(requestId, { manager_id: managerId, op, created_at: Date.now(), resolve, timer });
     });
-    const request = { manager_id: managerId, workspace_id: '', cli, op, request_id: requestId, driver_user_id: driverUserId, ...args };
+    const request = { manager_id: managerId, account_id: '', cli, op, request_id: requestId, driver_user_id: driverUserId, ...args };
     // 스트림이 없는 매니저에게 보낸 이벤트는 사라진다 — 붙으면 다시 보내도록 표시해 둔다(onManagerReachable).
     if (REDELIVERABLE_OPS.has(op) && !this.connectivity.isReachable(managerId)) {
       const entry = this.pending.get(requestId);
@@ -905,14 +956,21 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   // ─── 사용자 읽기 ───────────────────────────────────────────────────────
 
-  async listSessions(workspaceId: string, userId: string, managerId: string, cli: string): Promise<AgentSessionSummary[]> {
-    this.requireHost(workspaceId, managerId, cli);
-    const result = await this.rpc<{ sessions?: unknown }>(managerId, cli, 'list', { workspace_id: workspaceId }, userId);
+  async listSessions(accountId: string, userId: string, managerId: string, cli: string, accessibleAccountIds: readonly string[] = [accountId]): Promise<AgentSessionSummary[]> {
+    this.requireHost(accountId, managerId, cli);
+    const result = await this.rpc<{ sessions?: unknown }>(managerId, cli, 'list', { account_id: accountId }, userId);
     const list = Array.isArray(result?.sessions) ? result.sessions : [];
+    const bindings = await this.dataSource.getRepository(AgentSessionExecution).find({
+      where: { manager_id: managerId, cli }, select: ['session_id', 'account_id'],
+    });
+    const owners = new Map(bindings.map(binding => [binding.session_id, binding.account_id]));
+    const allowed = new Set(accessibleAccountIds);
     const out: AgentSessionSummary[] = [];
     for (const raw of list as any[]) {
       const s = this.normalizeSummary(cli, raw);
       if (!s) continue;
+      const owner = owners.get(s.session_id);
+      if (owner && !allowed.has(owner)) continue;
       // 매니저가 세션마다 실어 보내는 live_status 가 진실이다(프로세스는 거기 있다). 서버
       // 메모리는 그 답에 맞춰 고친다 — 매니저가 "없다" 고 하면 진행 중 상태를 idle 로.
       const reported = typeof raw?.live_status === 'string' && STATUS_SET.has(raw.live_status) ? (raw.live_status as string) : null;
@@ -925,15 +983,15 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   async getSession(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
     sessionId: string,
   ): Promise<{ session: AgentSessionSummary | null; live: AgentSessionLiveSnapshot; events: AgentSessionEventRecord[] }> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+    const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
-    const result = await this.rpc<{ session?: unknown; events?: unknown; live?: unknown }>(managerId, cli, 'history', { workspace_id: workspaceId, session_id: sessionId }, userId);
+    const result = await this.rpc<{ session?: unknown; events?: unknown; live?: unknown }>(managerId, cli, 'history', { account_id: accountId, session_id: sessionId }, userId);
     const summary = this.normalizeSummary(cli, result?.session);
     const events = Array.isArray(result?.events)
       ? result.events.map((e: any, i: number) => this.normalizeEvent(e, i)).filter((e): e is AgentSessionEventRecord => !!e)
@@ -981,14 +1039,14 @@ export class AgentSessionsService implements OnModuleDestroy {
    * `{image_ref, mime_type, size}` 만 싣고, 상한에 걸려 이미지가 조용히 사라지는 일이 없다.
    */
   async readImage(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
     sessionId: string,
     imageRef: string,
   ): Promise<Buffer> {
-    this.requireHost(workspaceId, managerId, cli);
+    this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     if (!/^[A-Za-z0-9-]{1,80}$/.test(imageRef)) throw new AgentSessionError(400, 'image_ref_invalid');
     const result = await this.rpc<{ base64?: string }>(managerId, cli, 'image', { session_id: sessionId, image_ref: imageRef }, userId);
@@ -1006,7 +1064,7 @@ export class AgentSessionsService implements OnModuleDestroy {
    * `cwd` 는 상대 경로의 기준(살아 있는 세션이 있으면 매니저가 그쪽 cwd 를 쓴다).
    */
   async readLocalImage(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
@@ -1014,7 +1072,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     imagePath: string,
     cwd: string,
   ): Promise<{ bytes: Buffer; mimeType: string }> {
-    this.requireHost(workspaceId, managerId, cli);
+    this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const path = String(imagePath ?? '').trim();
     if (!path || path.length > 4096) throw new AgentSessionError(400, 'image_path_invalid');
@@ -1044,22 +1102,24 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   async openSession(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
     input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean },
   ): Promise<AgentSessionLiveSnapshot> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+    const rec = this.requireHost(accountId, managerId, cli);
     const sessionId = input.session_id ? String(input.session_id) : null;
     if (sessionId) this.assertSessionId(sessionId);
     const cwd = String(input.cwd ?? '').trim();
     if (cwd.length > CWD_MAX) throw new AgentSessionError(400, 'cwd_too_long');
     if (!sessionId && !cwd) throw new AgentSessionError(400, 'cwd_required', 'A working directory is required for a new session.');
     const title = String(input.title ?? '').trim().slice(0, TITLE_MAX);
-    const credentialId = await this.boundCredentialId(workspaceId, managerId, cli);
-    const configDefaults = await this.configDefaultsFor(workspaceId, managerId, cli);
-    const runtimeProfile = await this.backendProfileFor(workspaceId, managerId, cli);
+    const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    accountId = execution.account_id;
+    const credentialId = execution.credential_id;
+    const configDefaults = execution.config_defaults;
+    const runtimeProfile = execution.runtime_profile;
     // `open` RPC 는 최대 2분까지 걸린다. 그 사이 이 세션의 상태는 매니저가 밀어 주는
     // 이벤트 패치로 얼마든지 앞서 나간다(프롬프트가 들어와 busy 가 되는 등). 그래서
     // RPC 가 돌아온 뒤 open 결과의 status 를 **무조건** 쓰면 그보다 최신인 상태를 과거로
@@ -1069,7 +1129,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const generationBefore = stateBefore?.updated_at ?? null;
     let result: Record<string, any>;
     try {
-      result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile, force: input.force === true }, userId);
+      result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { account_id: accountId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile, force: input.force === true }, userId);
     } catch (err: any) {
       // 실패 사유를 세션 상태에 남긴다.
       //
@@ -1099,6 +1159,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
     if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
+    await this.pinExecution(managerId, cli, openedId, execution);
     // seedState 는 있으면 그대로 돌려주므로, "RPC 중에 생겼는가" 는 그 호출 **전에** 봐야 한다.
     const stateExistedBeforeSeed = this.live.has(liveKey(managerId, cli, openedId));
     const state = await this.seedState(rec, managerId, cli, openedId, {
@@ -1132,13 +1193,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     });
     state.driver_user_id = userId;
     // 선택지를 이 워크스페이스에 남긴다(best-effort) — 다음에 새 세션 모달이 세션 없이도 고를 수 있게.
-    await this.persistKnownOptions(workspaceId, managerId, cli, state.config_options)
+    await this.persistKnownOptions(accountId, managerId, cli, state.config_options)
       .catch((err) => this.logService.debug('AgentSession', `known config options persist failed: ${err?.message ?? err}`));
     return this.emitUpdate(state, 'opened');
   }
 
   async prompt(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
@@ -1146,7 +1207,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     textInput: unknown,
     imagesInput?: unknown,
   ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+    const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const text = typeof textInput === 'string' ? textInput : '';
     if (text.length > AGENT_SESSION_PROMPT_MAX_CHARS) throw new AgentSessionError(413, 'text_too_long');
@@ -1179,6 +1240,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (!agentSessionAcceptsPrompt(state.status)) {
       throw new AgentSessionError(409, 'session_busy', 'A turn is already in progress. Cancel it or wait for it to finish.');
     }
+    const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    accountId = execution.account_id;
     const turnId = randomUUID();
     state.driver_user_id = userId;
     state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
@@ -1190,7 +1253,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const live = this.emitUpdate(state, 'prompt');
     this.emitRequest({
       manager_id: managerId,
-      workspace_id: workspaceId,
+      account_id: accountId,
       cli,
       op: 'prompt',
       session_id: sessionId,
@@ -1199,10 +1262,10 @@ export class AgentSessionsService implements OnModuleDestroy {
       turn_id: turnId,
       text,
       ...(images.length ? { images } : {}),
-      credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
+      credential_id: execution.credential_id,
       // prompt 도 세션을 (재)열 수 있는 경로다 — 기억된 설정과 backend 를 같이 보낸다.
-      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
-      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
+      config_defaults: execution.config_defaults,
+      runtime_profile: execution.runtime_profile,
       driver_user_id: userId,
     });
     return { turn_id: turnId, live };
@@ -1214,14 +1277,14 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 전사에 프롬프트 행을 같이 흘려 보낸다(매니저는 라이브 프롬프트를 되돌려 보내지 않는다 — 기록에는 남는다).
    */
   async promptOnBehalf(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
     sessionId: string,
     text: string,
   ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
-    const result = await this.prompt(workspaceId, userId, managerId, cli, sessionId, text);
+    const result = await this.prompt(accountId, userId, managerId, cli, sessionId, text);
     const createdAt = new Date().toISOString();
     activityEvents.emit('agent_session_event', {
       manager_id: managerId,
@@ -1235,7 +1298,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   async decidePermission(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
@@ -1243,7 +1306,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     requestIdInput: unknown,
     optionIdInput: unknown,
   ): Promise<AgentSessionLiveSnapshot> {
-    this.requireHost(workspaceId, managerId, cli);
+    this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const requestId = typeof requestIdInput === 'string' ? requestIdInput.trim() : '';
     if (!requestId) throw new AgentSessionError(400, 'request_id_required');
@@ -1256,7 +1319,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.updated_at = Date.now();
     const live = this.emitUpdate(state, 'permission');
     this.emitRequest({
-      manager_id: managerId, workspace_id: workspaceId, cli, op: 'permission', session_id: sessionId,
+      manager_id: managerId, account_id: accountId, cli, op: 'permission', session_id: sessionId,
       permission_request_id: requestId, option_id: optionId, driver_user_id: userId,
     });
     return live;
@@ -1267,7 +1330,7 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 매니저가 어댑터의 `elicitation/create` 요청을 이 답으로 푼다.
    */
   async answerElicitation(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     cli: string,
@@ -1276,7 +1339,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     actionInput: unknown,
     contentInput: unknown,
   ): Promise<AgentSessionLiveSnapshot> {
-    this.requireHost(workspaceId, managerId, cli);
+    this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const elicitationId = typeof elicitationIdInput === 'string' ? elicitationIdInput.trim() : '';
     if (!elicitationId) throw new AgentSessionError(400, 'elicitation_id_required');
@@ -1300,15 +1363,15 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.updated_at = Date.now();
     const live = this.emitUpdate(state, 'elicitation');
     this.emitRequest({
-      manager_id: managerId, workspace_id: workspaceId, cli, op: 'elicitation', session_id: sessionId,
+      manager_id: managerId, account_id: accountId, cli, op: 'elicitation', session_id: sessionId,
       elicitation_id: elicitationId, elicitation_action: action, elicitation_content: content, driver_user_id: userId,
     });
     return live;
   }
 
   /** ACP session config option(모델·reasoning 등)을 바꾼다 — 매니저가 `session/set_config_option` 을 부르고 전체 목록을 다시 보낸다. */
-  async setConfigOption(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string, configIdInput: unknown, valueInput: unknown): Promise<AgentSessionLiveSnapshot> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+  async setConfigOption(accountId: string, userId: string, managerId: string, cli: string, sessionId: string, configIdInput: unknown, valueInput: unknown): Promise<AgentSessionLiveSnapshot> {
+    const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const configId = typeof configIdInput === 'string' ? configIdInput.trim() : '';
     if (!configId || configId.length > CONFIG_ID_MAX) throw new AgentSessionError(400, 'config_id_required');
@@ -1319,42 +1382,50 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (option && option.type === 'select' && typeof valueInput === 'string' && option.options.length && !option.options.some((o) => o.value === valueInput)) {
       throw new AgentSessionError(400, 'config_value_invalid', `"${valueInput}" is not one of the offered values for ${option.name}.`);
     }
+    const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    accountId = execution.account_id;
     const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
     // 고른 값을 기억한다 — 어댑터는 프로세스가 회수되면 기본값으로 돌아간다.
-    await this.rememberDefault(workspaceId, managerId, cli, configId, valueInput, userId);
+    await this.rememberDefault(accountId, managerId, cli, configId, valueInput, userId);
+    await this.rememberExecutionOption(managerId, cli, sessionId, configId, valueInput);
+    execution.config_defaults[configId] = valueInput;
     this.emitRequest({
-      manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput,
-      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
-      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
-      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
+      manager_id: managerId, account_id: accountId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput,
+      cwd: state.cwd, title: state.title, credential_id: execution.credential_id,
+      config_defaults: execution.config_defaults,
+      runtime_profile: execution.runtime_profile,
       driver_user_id: userId,
     });
     return this.snapshot(state);
   }
 
-  async cancel(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
-    this.requireHost(workspaceId, managerId, cli);
+  async cancel(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+    this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const state = this.live.get(liveKey(managerId, cli, sessionId));
     if (!state) throw new AgentSessionError(409, 'session_not_live');
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'cancel', session_id: sessionId, driver_user_id: userId });
+    this.emitRequest({ manager_id: managerId, account_id: accountId, cli, op: 'cancel', session_id: sessionId, driver_user_id: userId });
     return this.snapshot(state);
   }
 
-  async setMode(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string, modeIdInput: unknown): Promise<AgentSessionLiveSnapshot> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+  async setMode(accountId: string, userId: string, managerId: string, cli: string, sessionId: string, modeIdInput: unknown): Promise<AgentSessionLiveSnapshot> {
+    const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const modeId = typeof modeIdInput === 'string' ? modeIdInput.trim() : '';
     if (!modeId) throw new AgentSessionError(400, 'mode_id_required');
     // 살아 있지 않은 세션도 받는다 — 매니저가 먼저 열고(prompt 와 같은 경로) 모드를 적용한다.
+    const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    accountId = execution.account_id;
     const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
     // 레거시 modes 전용 어댑터를 위해 예약 키로 기억한다(config option 으로 오는 어댑터는 그쪽 id 로 기억된다).
-    await this.rememberDefault(workspaceId, managerId, cli, AGENT_SESSION_MODE_DEFAULT_KEY, modeId, userId);
+    await this.rememberDefault(accountId, managerId, cli, AGENT_SESSION_MODE_DEFAULT_KEY, modeId, userId);
+    await this.rememberExecutionOption(managerId, cli, sessionId, AGENT_SESSION_MODE_DEFAULT_KEY, modeId);
+    execution.config_defaults[AGENT_SESSION_MODE_DEFAULT_KEY] = modeId;
     this.emitRequest({
-      manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId,
-      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
-      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
-      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
+      manager_id: managerId, account_id: accountId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId,
+      cwd: state.cwd, title: state.title, credential_id: execution.credential_id,
+      config_defaults: execution.config_defaults,
+      runtime_profile: execution.runtime_profile,
       driver_user_id: userId,
     });
     return this.snapshot(state);
@@ -1387,10 +1458,10 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 하는데 선택지는 어댑터가 살아 있어야 알 수 있기 때문이다. row 가 없으면 만든다 — credential 을 한 번도
    * 묶지 않은 호스트에는 row 자체가 없어서, 예전엔 캐시가 영영 비어 있었고 모달에 아무 선택기도 뜨지 않았다.
    */
-  private async persistKnownOptions(workspaceId: string, managerId: string, cli: string, options: AgentSessionConfigOption[]): Promise<void> {
+  private async persistKnownOptions(accountId: string, managerId: string, cli: string, options: AgentSessionConfigOption[]): Promise<void> {
     if (!options.length) return;
     const serialized = JSON.stringify(options);
-    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     if (row) {
       if (row.known_config_options === serialized) return;
       row.known_config_options = serialized;
@@ -1398,13 +1469,13 @@ export class AgentSessionsService implements OnModuleDestroy {
       return;
     }
     await this.settings.save(this.settings.create({
-      workspace_id: workspaceId, manager_id: managerId, cli, credential_id: null,
+      account_id: accountId, manager_id: managerId, cli, credential_id: null,
       default_config: '{}', known_config_options: serialized, updated_by: '',
     }));
   }
 
-  async close(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+  async close(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+    const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'closed', driver_user_id: userId });
@@ -1412,7 +1483,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.driver_user_id = userId;
     state.updated_at = Date.now();
     this.awaiting.delete(liveKey(managerId, cli, sessionId));
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'close', session_id: sessionId, driver_user_id: userId });
+    this.emitRequest({ manager_id: managerId, account_id: accountId, cli, op: 'close', session_id: sessionId, driver_user_id: userId });
     return this.emitUpdate(state, 'closed');
   }
 
@@ -1424,9 +1495,11 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 지금 당장 살아 있는 새 프로세스다. 상태를 `starting` 으로 먼저 옮겨 두면 그 사이에
    * 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt).
    */
-  async restart(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
-    const rec = this.requireHost(workspaceId, managerId, cli);
+  async restart(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+    const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
+    const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    accountId = execution.account_id;
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'starting', driver_user_id: userId });
     state.status = 'starting';
@@ -1438,10 +1511,10 @@ export class AgentSessionsService implements OnModuleDestroy {
     // 바뀌면서 모델 목록도 함께 바뀌어, 방금 고른 모델이 사라지고 설정이 실패한다
     // (실측: restart 직후 Fable 5.1 이 보였다가 고르면 Internal error 로 떨어졌다).
     this.emitRequest({
-      manager_id: managerId, workspace_id: workspaceId, cli, op: 'restart', session_id: sessionId,
-      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
-      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
-      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
+      manager_id: managerId, account_id: accountId, cli, op: 'restart', session_id: sessionId,
+      cwd: state.cwd, title: state.title, credential_id: execution.credential_id,
+      config_defaults: execution.config_defaults,
+      runtime_profile: execution.runtime_profile,
       driver_user_id: userId,
     });
     return this.emitUpdate(state, 'restart');

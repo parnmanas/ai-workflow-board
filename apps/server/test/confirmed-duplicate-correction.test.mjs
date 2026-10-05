@@ -31,12 +31,12 @@ after(async () => {
 // the caller's job (TicketDispatchService.resumeTicket) — see
 // qa-flows/confirmed-duplicate-correction-wire.test.mjs.
 test('확정 오탐 정정은 관계를 원자적으로 해제하고 감사 기록을 남기며 재실행은 거절한다', async () => {
-  const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws' });
+  const workspace = await ds.getRepository(entities.Account).save({ name: 'ws' });
   const canonical = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, status: 'done', title: '무관한 완료 티켓',
+    account_id: workspace.id, status: 'done', title: '무관한 완료 티켓',
   });
   const report = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, status: 'in_progress', title: '독립 작업 티켓',
+    account_id: workspace.id, status: 'in_progress', title: '독립 작업 티켓',
     canonical_ticket_id: canonical.id,
   });
 

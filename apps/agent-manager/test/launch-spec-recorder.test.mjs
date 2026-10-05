@@ -19,7 +19,7 @@ const SECRET = 'sk-ant-api03-RECORDER-SECRET';
 
 function ctx(over = {}) {
   return {
-    agent_id: 'agent-rec', workspace_id: 'ws', name: 'T', cli: 'claude',
+    agent_id: 'agent-rec', account_id: 'ws', name: 'T', cli: 'claude',
     working_dir: '/srv/work', mcp_config_path: '/cfg/mcp.json', api_key: 'k',
     subagent_log_path: '/l', cli_home_dir: '/home/a/cli-home', model: 'claude-opus-5',
     runtime_config: { strategy: 'single', permission_mode: 'trusted' },

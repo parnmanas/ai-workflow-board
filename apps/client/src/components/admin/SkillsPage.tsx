@@ -20,7 +20,7 @@ const textareaStyle: React.CSSProperties = {
 };
 
 export default function SkillsPage() {
-  const { currentWorkspaceId } = useAuth();
+  const { currentAccountId } = useAuth();
   const { showToast } = useToast();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [proposals, setProposals] = useState<SkillProposal[]>([]);
@@ -39,7 +39,7 @@ export default function SkillsPage() {
   const [forking, setForking] = useState(false);
 
   const load = useCallback(async () => {
-    if (!currentWorkspaceId) {
+    if (!currentAccountId) {
       setLoading(false);
       return;
     }
@@ -48,13 +48,13 @@ export default function SkillsPage() {
       const [skillRows, proposalRows] = await Promise.all([
         // include_shadowed: an overridden global must stay visible, otherwise
         // "why isn't the built-in applying" has no answer in the UI.
-        api.listSkills(currentWorkspaceId, true),
-        api.listSkillProposals(currentWorkspaceId),
+        api.listSkills(currentAccountId, true),
+        api.listSkillProposals(currentAccountId),
       ]);
       setSkills(skillRows);
       setProposals(proposalRows);
       if (selected) {
-        const fresh = await api.getSkill(currentWorkspaceId, selected.id);
+        const fresh = await api.getSkill(currentAccountId, selected.id);
         setSelected(fresh);
         setAssignmentVersion(fresh.versions[0]?.id || '');
       }
@@ -63,18 +63,18 @@ export default function SkillsPage() {
     } finally {
       setLoading(false);
     }
-  }, [currentWorkspaceId, selected?.id, showToast]);
+  }, [currentAccountId, selected?.id, showToast]);
 
-  useEffect(() => { void load(); }, [currentWorkspaceId]);
+  useEffect(() => { void load(); }, [currentAccountId]);
 
   // Global skills are inherited by every workspace; publishing/quarantining
   // one from a workspace is refused server-side, so the UI offers Fork instead.
-  const isGlobal = !!selected && !selected.workspace_id;
+  const isGlobal = !!selected && !selected.account_id;
 
   const openSkill = async (skill: Skill) => {
-    if (!currentWorkspaceId) return;
+    if (!currentAccountId) return;
     try {
-      const detail = await api.getSkill(currentWorkspaceId, skill.id);
+      const detail = await api.getSkill(currentAccountId, skill.id);
       setSelected(detail);
       setNewVersionBody(detail.versions[0]?.body || '# Skill\n');
       setAssignmentVersion(detail.versions[0]?.id || '');
@@ -85,10 +85,10 @@ export default function SkillsPage() {
   };
 
   const create = async () => {
-    if (!currentWorkspaceId || !slug.trim() || !body.trim()) return;
+    if (!currentAccountId || !slug.trim() || !body.trim()) return;
     setSaving(true);
     try {
-      await api.createSkill(currentWorkspaceId, {
+      await api.createSkill(currentAccountId, {
         slug: slug.trim(),
         name: name.trim() || slug.trim(),
         description,
@@ -109,10 +109,10 @@ export default function SkillsPage() {
   };
 
   const publish = async () => {
-    if (!currentWorkspaceId || !selected || !newVersionBody.trim()) return;
+    if (!currentAccountId || !selected || !newVersionBody.trim()) return;
     setSaving(true);
     try {
-      await api.publishSkillVersion(currentWorkspaceId, selected.id, {
+      await api.publishSkillVersion(currentAccountId, selected.id, {
         body: newVersionBody,
       });
       showToast('New immutable skill version published', 'success');
@@ -125,10 +125,10 @@ export default function SkillsPage() {
   };
 
   const assign = async () => {
-    if (!currentWorkspaceId || !selected || !assignmentRuntime || !assignmentVersion) return;
+    if (!currentAccountId || !selected || !assignmentRuntime || !assignmentVersion) return;
     setSaving(true);
     try {
-      await api.assignSkill(currentWorkspaceId, selected.id, {
+      await api.assignSkill(currentAccountId, selected.id, {
         skill_version_id: assignmentVersion,
         runtime: assignmentRuntime,
       });
@@ -140,8 +140,8 @@ export default function SkillsPage() {
     }
   };
 
-  if (!currentWorkspaceId) {
-    return <div style={{ color: tokens.colors.textMuted }}>Select a workspace to manage skills.</div>;
+  if (!currentAccountId) {
+    return <div style={{ color: tokens.colors.textMuted }}>Ownership defaults are unavailable.</div>;
   }
 
   return (
@@ -169,7 +169,7 @@ export default function SkillsPage() {
           {proposals.map((proposal) => (
             <SkillProposalReview
               key={proposal.id}
-              workspaceId={currentWorkspaceId}
+              accountId={currentAccountId}
               proposal={proposal}
               skills={skills}
               onReviewed={() => void load()}
@@ -202,14 +202,14 @@ export default function SkillsPage() {
                 <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                   {/* Scope is the first thing to know about a row: a global
                       skill is read-only here and is edited by forking. */}
-                  <Badge variant={skill.workspace_id ? 'info' : 'neutral'} size="sm">
-                    {skill.workspace_id ? 'workspace' : 'global'}
+                  <Badge variant={skill.account_id ? 'info' : 'neutral'} size="sm">
+                    {skill.account_id ? 'account' : 'global'}
                   </Badge>
                   {skill.source_kind && skill.source_kind !== 'local' && (
                     <Badge variant="neutral" size="sm">{skill.source_kind}</Badge>
                   )}
                   {skill.shadowed && (
-                    <span title="A workspace skill with this slug overrides it">
+                    <span title="An account skill with this slug overrides it">
                       <Badge variant="warning" size="sm">shadowed</Badge>
                     </span>
                   )}
@@ -235,8 +235,8 @@ export default function SkillsPage() {
                         onClick={async () => {
                           setForking(true);
                           try {
-                            await api.forkSkill(currentWorkspaceId, selected.id, selected.versions[0]?.id);
-                            showToast('Forked into this workspace — it now shadows the global skill', 'success');
+                            await api.forkSkill(currentAccountId, selected.id, selected.versions[0]?.id);
+                            showToast('Forked into this account — it now shadows the global skill', 'success');
                             setSelected(null);
                             await load();
                           } catch (error: any) {
@@ -246,14 +246,14 @@ export default function SkillsPage() {
                           }
                         }}
                       >
-                        Fork into workspace
+                        Fork into account
                       </Button>
                     ) : selected.status === 'active' && (
                       <Button
                         variant="danger"
                         size="sm"
                         onClick={async () => {
-                          await api.quarantineSkill(currentWorkspaceId, selected.id);
+                          await api.quarantineSkill(currentAccountId, selected.id);
                           showToast('Skill quarantined for future snapshots', 'success');
                           await load();
                         }}
@@ -297,7 +297,7 @@ export default function SkillsPage() {
 
               <Card style={{ display: 'grid', gap: 10 }}>
                 <strong style={{ color: tokens.colors.textPrimary }}>Pin assignment</strong>
-                <DeclareRuntimeSection workspaceId={currentWorkspaceId || ''} onResolved={setAssignmentRuntime} />
+                <DeclareRuntimeSection accountId={currentAccountId || ''} onResolved={setAssignmentRuntime} />
                 {assignmentRuntime && <span>{assignmentRuntime.label || assignmentRuntime.cli} · {assignmentRuntime.working_dir}</span>}
                 <select value={assignmentVersion} onChange={(event) => setAssignmentVersion(event.target.value)} style={textareaStyle}>
                   {selected.versions.map((version) => (

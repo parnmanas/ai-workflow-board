@@ -2,7 +2,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 
 @Entity('workflow_function_runs')
 @Index(['function_id', 'created_at'])
-@Index(['workspace_id', 'ticket_id', 'created_at'])
+@Index(['account_id', 'ticket_id', 'created_at'])
 export class WorkflowFunctionRun {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -17,7 +17,7 @@ export class WorkflowFunctionRun {
   function_version: number;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   ticket_id: string | null;

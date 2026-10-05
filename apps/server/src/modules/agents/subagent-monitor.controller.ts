@@ -25,11 +25,11 @@ export class SubagentMonitorController {
   // ─── User-facing ──────────────────────────────────────────────────
 
   @ApiBearerAuth('user-session')
-  @Get('api/subagent-monitor/workspaces/:workspaceId')
+  @Get('api/subagent-monitor/accounts/:accountId')
   @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'List active + recently-ended subagents in a workspace' })
-  async listForWorkspace(@Param('workspaceId') workspaceId: string, @Res() res: Response) {
-    const list = await this.svc.listForWorkspace(workspaceId);
+  async listForWorkspace(@Param('accountId') accountId: string, @Res() res: Response) {
+    const list = await this.svc.listForWorkspace(accountId);
     return res.json(list);
   }
 
@@ -39,11 +39,11 @@ export class SubagentMonitorController {
   @ApiOperation({ summary: 'Get a subagent\'s recorded transcript (full DB-backed log)' })
   async getTranscript(
     @Param('subagentId') subagentId: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const t = await this.svc.getTranscript(subagentId, workspaceId);
+    if (!accountId) return res.status(400).json({ error: 'account_id is required' });
+    const t = await this.svc.getTranscript(subagentId, accountId);
     if (!t) return res.status(404).json({ error: 'Subagent not found in this workspace' });
     return res.json(t);
   }
@@ -58,16 +58,16 @@ export class SubagentMonitorController {
     if (!agentId) return res.status(401).json({ error: 'Could not resolve agent from API key' });
 
     const { subagent_id, kind, session_key, pid, started_at, label, ticket_id, ticket_title, role } = body || {};
-    // workspace_id falls back to the API key's bound workspace when the
+    // account_id falls back to the API key's bound workspace when the
     // plugin doesn't pass it explicitly (the plugin doesn't always know it).
-    const workspaceId = body?.workspace_id || (req as any).currentWorkspaceId;
-    if (!subagent_id || !kind || !workspaceId) {
-      return res.status(400).json({ error: 'subagent_id, kind, and workspace_id (or workspace-bound key) are required' });
+    const accountId = body?.account_id || (req as any).currentAccountId;
+    if (!subagent_id || !kind || !accountId) {
+      return res.status(400).json({ error: 'subagent_id, kind, and account_id (or workspace-bound key) are required' });
     }
     const rec = await this.svc.register({
       subagent_id,
       agent_id: agentId,
-      workspace_id: workspaceId,
+      account_id: accountId,
       kind,
       session_key: session_key || '',
       pid: pid || 0,

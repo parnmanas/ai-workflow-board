@@ -32,7 +32,7 @@ test('MANAGER_CAPABILITIES declares context_window_clamp — this build must sel
 test('instance heartbeat publishes manager_capabilities on the wire when passed', async (t) => {
   const payloadPromise = stubFetch(t);
   const heartbeat = new InstanceHeartbeat(
-    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' },
     'manager-1',
     {
       mode: 'manager',
@@ -55,7 +55,7 @@ test('instance heartbeat publishes manager_capabilities on the wire when passed'
 test('instance heartbeat omits manager_capabilities entirely when not passed (legacy wire shape, not an empty array)', async (t) => {
   const payloadPromise = stubFetch(t);
   const heartbeat = new InstanceHeartbeat(
-    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' },
     'manager-2',
     {
       mode: 'manager',

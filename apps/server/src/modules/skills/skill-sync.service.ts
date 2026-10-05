@@ -42,7 +42,7 @@ export function emptySummary(): SyncSummary {
  *     a tap cannot hijack the slug of a built-in or of a hand-authored global
  *     skill, and two taps cannot fight over one slug.
  *
- * Workspace skills are never touched: a workspace fork shadows the global by
+ * Account skills are never touched: a workspace fork shadows the global by
  * slug, so the fork keeps winning while the global underneath keeps updating.
  */
 @Injectable()
@@ -62,7 +62,7 @@ export class SkillSyncService {
     for (const item of loaded) {
       try {
         const existing = await this.skills.findOne({
-          where: { workspace_id: IsNull(), slug: item.slug },
+          where: { account_id: IsNull(), slug: item.slug },
         });
 
         if (existing && existing.status === 'quarantined') {
@@ -131,7 +131,7 @@ export class SkillSyncService {
       const skillRepo = manager.getRepository(Skill);
       const versionRepo = manager.getRepository(SkillVersion);
       const skill = await skillRepo.save(skillRepo.create({
-        workspace_id: null,
+        account_id: null,
         slug: item.slug,
         name: item.frontmatter.name || item.slug,
         description: item.frontmatter.description,
@@ -144,7 +144,7 @@ export class SkillSyncService {
         source_author: item.frontmatter.author,
       }));
       await versionRepo.save(versionRepo.create({
-        workspace_id: null,
+        account_id: null,
         skill_id: skill.id,
         version: 1,
         body: item.body,
@@ -168,7 +168,7 @@ export class SkillSyncService {
     const revert = await this.versions.findOne({ where: { skill_id: skill.id, digest: item.digest } });
     if (!revert) {
       await this.versions.save(this.versions.create({
-        workspace_id: null,
+        account_id: null,
         skill_id: skill.id,
         version: nextVersion,
         body: item.body,

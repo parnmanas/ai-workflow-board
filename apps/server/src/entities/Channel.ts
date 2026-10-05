@@ -6,7 +6,7 @@ export class Channel {
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: '' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   name: string;

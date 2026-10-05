@@ -13,7 +13,7 @@
 //   3. 다른 세션에서 emit 된 ticket_reads_cleared SSE 를 받으면 재조회 없이
 //      로컬 카운트가 수렴한다
 //   4. user_id 불일치(다른 사용자) 이벤트는 무시한다
-//   5. workspace_id 불일치(다른 워크스페이스) 이벤트는 무시한다
+//   5. account_id 불일치(다른 워크스페이스) 이벤트는 무시한다
 //
 // 실행: node --import tsx --test apps/client/test/ticket-unread-read-all-sync.test.mjs
 import test from 'node:test';
@@ -74,7 +74,7 @@ async function mountHarness(t, { ticketCounts } = {}) {
     role: 'user',
     status: 'active',
     permissions: [],
-    workspaces: [{ id: WS_ID, name: 'Workspace', slug: null, relations: [] }],
+    accounts: [{ id: WS_ID, name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.getUnreadMentions = async () => ({ count: 0, items: [] });
@@ -138,7 +138,7 @@ test('다른 세션에서 emit 된 ticket_reads_cleared 수신 시 재조회 없
   await act(async () => {
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
-      workspace_id: WS_ID,
+      account_id: WS_ID,
       updated: 5,
       read_at: new Date().toISOString(),
     });
@@ -159,7 +159,7 @@ test('예전 서버가 보내던 board_id 가 실려 와도 워크스페이스 �
   await act(async () => {
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
-      workspace_id: WS_ID,
+      account_id: WS_ID,
       board_id: 'board-a',
       updated: 8,
       read_at: new Date().toISOString(),
@@ -179,7 +179,7 @@ test('다른 사용자(user_id 불일치)의 ticket_reads_cleared 는 무시한�
   await act(async () => {
     es.emit('ticket_reads_cleared', {
       user_id: 'someone-else',
-      workspace_id: WS_ID,
+      account_id: WS_ID,
       updated: 5,
       read_at: new Date().toISOString(),
     });
@@ -189,7 +189,7 @@ test('다른 사용자(user_id 불일치)의 ticket_reads_cleared 는 무시한�
   assert.equal(capture.current.counts.tickets.total, 5, '다른 사용자의 read-all 이 내 뱃지를 지우면 안 된다');
 });
 
-test('다른 워크스페이스(workspace_id 불일치)의 ticket_reads_cleared 는 무시한다', async (t) => {
+test('read-all from another ownership account clears the integrated user badge', async (t) => {
   const { capture, FakeEventSource } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
 
@@ -197,12 +197,12 @@ test('다른 워크스페이스(workspace_id 불일치)의 ticket_reads_cleared 
   await act(async () => {
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
-      workspace_id: 'other-workspace',
+      account_id: 'other-workspace',
       updated: 5,
       read_at: new Date().toISOString(),
     });
     await Promise.resolve();
   });
 
-  assert.equal(capture.current.counts.tickets.total, 5, '지금 보고 있는 워크스페이스가 아니면 무시해야 한다');
+  assert.equal(capture.current.counts.tickets.total, 0, 'the user inbox is independent of default creation ownership');
 });

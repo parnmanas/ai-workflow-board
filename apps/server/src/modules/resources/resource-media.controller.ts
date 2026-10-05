@@ -27,7 +27,7 @@ import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
  *      just admins — otherwise a non-admin attaching a file gets 403 and the
  *      comment never sends (ticket ff3e7337 review blocker 2). So these routes
  *      authorize by workspace membership (ReBAC member/owner, admin bypass),
- *      mirroring WorkspaceGuard, instead of inheriting the admin permission.
+ *      mirroring AccountGuard, instead of inheriting the admin permission.
  *
  * Routes:
  *   GET  /api/resources/:id/raw  (two path segments, so it never collides with
@@ -56,22 +56,22 @@ export class ResourceMediaController {
     return this.authService.getSessionUser(token);
   }
 
-  // Authorize workspace access the same way WorkspaceGuard does: admins bypass,
+  // Authorize workspace access the same way AccountGuard does: admins bypass,
   // everyone else must hold member OR owner on the workspace. This is the
   // isolation boundary the rest of the app enforces on every ticket read.
-  private async canAccessWorkspace(user: User, workspaceId: string | null | undefined): Promise<boolean> {
-    if (!workspaceId) return false;
+  private async canAccessWorkspace(user: User, accountId: string | null | undefined): Promise<boolean> {
+    if (!accountId) return false;
     if (user.role === 'admin') return true;
     const isMember = await this.rebacService.check(
       { type: 'user', id: user.id },
       'member',
-      { type: 'workspace', id: workspaceId },
+      { type: 'account', id: accountId },
     );
     if (isMember) return true;
     return this.rebacService.check(
       { type: 'user', id: user.id },
       'owner',
-      { type: 'workspace', id: workspaceId },
+      { type: 'account', id: accountId },
     );
   }
 
@@ -88,15 +88,15 @@ export class ResourceMediaController {
   // attach files to comments.
   @Post('upload')
   async upload(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('type') type: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     const user = await this.resolveUser(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    if (!(await this.canAccessWorkspace(user, workspaceId))) {
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
+    if (!(await this.canAccessWorkspace(user, accountId))) {
       return res.status(403).json({ error: 'workspace_access_denied' });
     }
     const buf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
@@ -116,7 +116,7 @@ export class ResourceMediaController {
       : (inferResourceMimetype(fileData, fileName) || headerMime || 'application/octet-stream');
     const resource = await this.resourceRepo.save(
       this.resourceRepo.create({
-        workspace_id: workspaceId,
+        account_id: accountId,
         credential_id: null,
         name: fileName,
         description: '',
@@ -133,7 +133,7 @@ export class ResourceMediaController {
     // response by ~33% and defeats the point of the streaming /raw endpoint).
     return res.status(201).json({
       id: resource.id,
-      workspace_id: resource.workspace_id,
+      account_id: resource.account_id,
       name: resource.name,
       type: resource.type,
       file_name: resource.file_name,
@@ -166,10 +166,10 @@ export class ResourceMediaController {
 
     // Authorize: only members of the resource's workspace (admin bypass) may
     // stream its bytes. Without this, any authenticated user could read any
-    // resource by UUID across workspaces (ticket ff3e7337 review blocker 1) —
+    // resource by UUID across accounts (ticket ff3e7337 review blocker 1) —
     // the one resource-read path that would otherwise ignore the isolation
-    // boundary WorkspaceGuard enforces everywhere else.
-    if (!(await this.canAccessWorkspace(user, resource.workspace_id))) {
+    // boundary AccountGuard enforces everywhere else.
+    if (!(await this.canAccessWorkspace(user, resource.account_id))) {
       return res.status(403).json({ error: 'workspace_access_denied' });
     }
 

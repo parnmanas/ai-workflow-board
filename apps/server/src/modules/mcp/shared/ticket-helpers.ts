@@ -162,7 +162,7 @@ export async function resolveAgentIdAndName(
  *
  * `currentTicketId` is the ticket being updated (or null when creating, in
  * which case the self-link check is skipped — a new ticket can't reference
- * itself before it has an id). `currentWorkspaceId` is the workspace the
+ * itself before it has an id). `currentAccountId` is the workspace the
  * link is being established in; when empty, only the existence + self-link
  * checks run.
  */
@@ -170,7 +170,7 @@ export async function validateNextTicketId(
   scope: RepoScope,
   raw: unknown,
   currentTicketId: string | null,
-  currentWorkspaceId: string,
+  currentAccountId: string,
 ): Promise<string | null> {
   if (raw === undefined || raw === null) return null;
   const candidate = String(raw).trim();
@@ -182,7 +182,7 @@ export async function validateNextTicketId(
   if (!target) {
     throw new Error('next_ticket_id not found');
   }
-  if (currentWorkspaceId && target.workspace_id && target.workspace_id !== currentWorkspaceId) {
+  if (currentAccountId && target.account_id && target.account_id !== currentAccountId) {
     throw new Error('next_ticket_id must point to a ticket in the same workspace');
   }
   return candidate;
@@ -317,7 +317,7 @@ export function projectTicketAttachment(
   const { includeData = false } = options;
   const out: any = {
     id: row.id,
-    workspace_id: row.workspace_id,
+    account_id: row.account_id,
     ticket_id: row.ticket_id,
     file_name: row.file_name,
     file_mimetype: row.file_mimetype,
@@ -351,7 +351,7 @@ export function projectChatAttachment(
   const out: any = {
     id: row.id,
     attachment_id: row.id,
-    workspace_id: row.workspace_id,
+    account_id: row.account_id,
     room_id: row.room_id,
     message_id: row.owner_type === 'chat_message' ? row.owner_id : '',
     filename: row.file_name,

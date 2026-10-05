@@ -12,7 +12,7 @@ import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ApiKey } from '../../entities/ApiKey';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { Project } from '../../entities/Project';
 import { User } from '../../entities/User';
 import { Comment } from '../../entities/Comment';
@@ -22,7 +22,7 @@ import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { prependBoardLanguageInstruction } from '../../common/harness-config';
 import { isDoneStatus } from '../../common/ticket-status';
 import { ProjectsService } from '../projects/projects.service';
@@ -64,14 +64,14 @@ function makeError(status: number, message: string): Error & { status: number } 
 interface DispatchPseudoAgent {
   id: string;
   name: string;
-  workspace_id: string;
+  account_id: string;
 }
-function pseudoAgentForSpec(id: string, spec: Record<string, any>, workspaceId: string): DispatchPseudoAgent {
+function pseudoAgentForSpec(id: string, spec: Record<string, any>, accountId: string): DispatchPseudoAgent {
   const s = spec as any;
   return {
     id,
     name: String(s.label || s.cli || id.slice(0, 11)),
-    workspace_id: workspaceId,
+    account_id: accountId,
   };
 }
 
@@ -132,7 +132,7 @@ export function isHighImpactAction(
  */
 function renderCompletionContract(
   runId: string,
-  workspaceId: string,
+  accountId: string,
   sourceTicketId: string,
   idempotencyKey: string,
   highImpact: boolean,
@@ -155,7 +155,7 @@ function renderCompletionContract(
     '```\n' +
     `mcp__awb__complete_action_run(\n` +
     `  run_id="${runId}",\n` +
-    `  workspace_id="${workspaceId}",\n` +
+    `  account_id="${accountId}",\n` +
     `  status="succeeded" | "failed",\n` +
     `  summary="<what you did and the outcome, or why it failed>"\n` +
     `)\n` +
@@ -176,7 +176,7 @@ function renderCompletionContract(
  * `completeRun`의 자동 재시도도 없으므로(해당 분기는 `!sourceTicketId`일 때
  * 조기 반환한다) 재개/재시도 문구는 넣지 않는다.
  */
-function renderStandaloneCompletionContract(runId: string, workspaceId: string): string {
+function renderStandaloneCompletionContract(runId: string, accountId: string): string {
   return (
     `\n\n---\n` +
     `## Report your result (required — this keeps the run's status accurate)\n\n` +
@@ -185,7 +185,7 @@ function renderStandaloneCompletionContract(runId: string, workspaceId: string):
     '```\n' +
     `mcp__awb__complete_action_run(\n` +
     `  run_id="${runId}",\n` +
-    `  workspace_id="${workspaceId}",\n` +
+    `  account_id="${accountId}",\n` +
     `  status="succeeded" | "failed",\n` +
     `  summary="<what you did and the outcome, or why it failed>"\n` +
     `)\n` +
@@ -196,12 +196,12 @@ function renderStandaloneCompletionContract(runId: string, workspaceId: string):
 }
 
 /**
- * `schedule_cron` 은 Action 에서 Workspace Schedule 로 옮겼다. 저장 시도를 조용히
+ * `schedule_cron` 은 Action 에서 Account Schedule 로 옮겼다. 저장 시도를 조용히
  * 무시하면 운영자는 예약이 걸린 줄 알고 그 Action 이 영영 돌지 않는다.
  */
 const SCHEDULE_CRON_MOVED =
-  'schedule_cron has moved off Action — create a Workspace Schedule with action_id pointing at this Action '
-  + '(POST /api/workspace-schedules, or the create_workspace_schedule MCP tool). Cron there is UTC.';
+  'schedule_cron has moved off Action — create a Account Schedule with action_id pointing at this Action '
+  + '(POST /api/automation-schedules, or the create_automation_schedule MCP tool). Cron there is UTC.';
 
 export interface DispatchActionArgs {
   actionId: string;
@@ -259,7 +259,7 @@ export interface DispatchActionArgs {
 // agent/request input. An agent has no session, so it cannot reach this path.
 export interface CreateApprovalArgs {
   actionId: string;
-  workspaceId: string;
+  accountId: string;
   // The ticket the grant authorises the Action to run for (the binding).
   sourceTicketId: string;
   // Identity of the authenticated approver, taken from the session.
@@ -378,7 +378,7 @@ export class ActionsService {
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
-    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
+    @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(ActivityLog) private readonly activityRepo: Repository<ActivityLog>,
@@ -392,10 +392,10 @@ export class ActionsService {
 
   // ── CRUD ────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string): Promise<Action[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+  async list(accountId: string): Promise<Action[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.actionRepo.createQueryBuilder('a')
-      .where('a.workspace_id = :ws', { ws: workspaceId });
+      .where('a.account_id = :ws', { ws: accountId });
     return qb.orderBy('a.name', 'ASC').getMany();
   }
 
@@ -403,14 +403,14 @@ export class ActionsService {
     return findOrFail(this.actionRepo, { where: { id } }, 'Action not found');
   }
 
-  async create(input: Partial<Action> & { workspace_id: string; name: string; target_agent_id?: string }): Promise<Action> {
-    if (!input.workspace_id) throw makeError(400, 'workspace_id is required');
+  async create(input: Partial<Action> & { account_id: string; name: string; target_agent_id?: string }): Promise<Action> {
+    if (!input.account_id) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
 
     const specTargets = normalizeSpecTargets(input.target_runtimes);
     if (!specTargets?.length) throw makeError(400, 'target_runtimes is required; Agent references are no longer supported');
 
-    // 크론은 더 이상 Action 이 들고 있지 않다 — Workspace Schedule 이 `action_id` 로
+    // 크론은 더 이상 Action 이 들고 있지 않다 — Account Schedule 이 `action_id` 로
     // 이 Action 을 가리켜 예약한다. 조용히 무시하면 "예약했는데 안 돈다" 가 되므로
     // 거부하고 갈 곳을 알려 준다.
     if (input.schedule_cron && input.schedule_cron.trim()) {
@@ -421,12 +421,12 @@ export class ActionsService {
       throw makeError(400, "trigger must be '' (cron/manual) or 'on_ticket_done'");
     }
 
-    const resolved = await this._resolveSpecTargets(specTargets, input.workspace_id);
+    const resolved = await this._resolveSpecTargets(specTargets, input.account_id);
     const targetIds = resolved.map((r) => r.key);
     const targetRuntimes = resolved.map((r) => ({ ...r.spec }));
 
     const created = this.actionRepo.create({
-      workspace_id: input.workspace_id,
+      account_id: input.account_id,
       name: input.name.trim(),
       description: input.description ?? '',
       prompt: input.prompt ?? '',
@@ -447,9 +447,9 @@ export class ActionsService {
     return this.actionRepo.save(created);
   }
 
-  async update(id: string, workspaceId: string, patch: Partial<Action>): Promise<Action> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const existing = await findOrFail(this.actionRepo, { where: { id, workspace_id: workspaceId } }, 'Action not found in workspace');
+  async update(id: string, accountId: string, patch: Partial<Action>): Promise<Action> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    const existing = await findOrFail(this.actionRepo, { where: { id, account_id: accountId } }, 'Action not found in workspace');
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -460,7 +460,7 @@ export class ActionsService {
     if (patch.target_runtimes !== undefined) {
       const specs = normalizeSpecTargets(patch.target_runtimes);
       if (!specs?.length) throw makeError(400, 'at least one target runtime is required');
-      existing.target_runtimes = (await this._resolveSpecTargets(specs, workspaceId)).map((r) => ({ ...r.spec }));
+      existing.target_runtimes = (await this._resolveSpecTargets(specs, accountId)).map((r) => ({ ...r.spec }));
     } else if (patch.target_agent_id !== undefined || patch.target_agent_ids !== undefined) {
       throw makeError(400, 'Use target_runtimes; Agent references are no longer supported');
     }
@@ -498,7 +498,7 @@ export class ActionsService {
    */
   private async _resolveSpecTargets(
     specs: RuntimeSpec[],
-    workspaceId: string,
+    accountId: string,
   ): Promise<Array<{ key: string; spec: RuntimeSpec }>> {
     const seen = new Set<string>();
     const out: Array<{ key: string; spec: RuntimeSpec }> = [];
@@ -517,32 +517,32 @@ export class ActionsService {
     return out;
   }
 
-  async remove(id: string, workspaceId: string): Promise<void> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const existing = await this.actionRepo.findOne({ where: { id, workspace_id: workspaceId } });
+  async remove(id: string, accountId: string): Promise<void> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    const existing = await this.actionRepo.findOne({ where: { id, account_id: accountId } });
     if (!existing) throw makeError(404, 'Action not found in workspace');
     // Cascade: delete every Run (and the room each Run created) before the
     // action row goes. Otherwise the chat list ends up with orphan rooms
     // pointing at a non-existent action_id.
     await this._deleteRunsForAction(id);
-    await this.actionRepo.delete({ id, workspace_id: workspaceId });
+    await this.actionRepo.delete({ id, account_id: accountId });
   }
 
   // ── Runs ───────────────────────────────────────────────────────────────
 
-  async listRuns(actionId: string, workspaceId: string, limit = 20): Promise<ActionRun[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    await findOrFail(this.actionRepo, { where: { id: actionId, workspace_id: workspaceId } }, 'Action not found in workspace');
+  async listRuns(actionId: string, accountId: string, limit = 20): Promise<ActionRun[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    await findOrFail(this.actionRepo, { where: { id: actionId, account_id: accountId } }, 'Action not found in workspace');
     return this.runRepo.find({
-      where: { action_id: actionId, workspace_id: workspaceId },
+      where: { action_id: actionId, account_id: accountId },
       order: { created_at: 'DESC' },
       take: Math.min(limit, 100),
     });
   }
 
-  async getRun(runId: string, workspaceId: string): Promise<ActionRun> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.runRepo, { where: { id: runId, workspace_id: workspaceId } }, 'Run not found in workspace');
+  async getRun(runId: string, accountId: string): Promise<ActionRun> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'Run not found in workspace');
   }
 
   /**
@@ -573,14 +573,14 @@ export class ActionsService {
    * service free of a cross-module dispatch dependency. This method returns
    * `shouldResume` telling the caller whether to fire that resume.
    */
-  async completeRun(runId: string, workspaceId: string, args: CompleteRunArgs): Promise<CompleteRunResult> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+  async completeRun(runId: string, accountId: string, args: CompleteRunArgs): Promise<CompleteRunResult> {
+    if (!accountId) throw makeError(400, 'account_id is required');
     if (args.status !== 'succeeded' && args.status !== 'failed') {
       throw makeError(400, "status must be 'succeeded' or 'failed'");
     }
     const run = await findOrFail(
       this.runRepo,
-      { where: { id: runId, workspace_id: workspaceId } },
+      { where: { id: runId, account_id: accountId } },
       'Run not found in workspace',
     );
 
@@ -612,7 +612,7 @@ export class ActionsService {
       .update(ActionRun)
       .set({ status: args.status, result_summary: summary, completed_at: completedAt, retry_pending: willRetry })
       .where('id = :id', { id: run.id })
-      .andWhere('workspace_id = :ws', { ws: workspaceId })
+      .andWhere('account_id = :ws', { ws: accountId })
       .andWhere("status = 'running'")
       .execute();
     // Fail-closed single-winner (reviewer non-blocker note): only a positive
@@ -629,7 +629,7 @@ export class ActionsService {
       // Lost the race (or a sequential duplicate on an already-terminal run).
       // Report the recorded state without any side effect. Re-read so the
       // status reflects the winner's outcome, not our stale 'running' snapshot.
-      const current = await this.runRepo.findOne({ where: { id: run.id, workspace_id: workspaceId } });
+      const current = await this.runRepo.findOne({ where: { id: run.id, account_id: accountId } });
       const settled = current || run;
       this.logService.info('Actions', `completeRun no-op — run ${run.id} already ${settled.status}`);
       return {
@@ -687,7 +687,7 @@ export class ActionsService {
           shouldResume: false,
         };
       }
-      await this._postRunComment(sourceTicketId, run.workspace_id, actor, gate.comment);
+      await this._postRunComment(sourceTicketId, run.account_id, actor, gate.comment);
       return {
         run, sourceTicketId, status: 'succeeded',
         previouslyCompleted: false, retried: false, retryRunId: '', exhausted: false,
@@ -746,7 +746,7 @@ export class ActionsService {
       run.retry_pending = false;
       if (retryRunId) {
         await this._postRunComment(
-          sourceTicketId, run.workspace_id, actor,
+          sourceTicketId, run.account_id, actor,
           `⚠️ Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed` +
           `${summary ? ` — ${summary}` : ''}. Retrying (attempt ${nextAttempt}/${ActionsService.MAX_RUN_ATTEMPTS}, run \`${retryRunId.slice(0, 8)}\`).`,
         );
@@ -780,7 +780,7 @@ export class ActionsService {
         shouldResume: false,
       };
     }
-    await this._postRunComment(sourceTicketId, run.workspace_id, actor, gate.comment);
+    await this._postRunComment(sourceTicketId, run.account_id, actor, gate.comment);
     return {
       run, sourceTicketId, status: 'failed',
       previouslyCompleted: false, retried: false, retryRunId: '', exhausted: true,
@@ -821,7 +821,7 @@ export class ActionsService {
     if (!batchId) return { shouldResume: true, comment: soloComment };
 
     const siblings = await this.runRepo.find({
-      where: { batch_id: batchId, workspace_id: run.workspace_id },
+      where: { batch_id: batchId, account_id: run.account_id },
     });
     // 배치를 못 찾거나 나 혼자면 단일 run과 동일하게 처리한다.
     const agentIds = new Set(siblings.map((r) => r.agent_id || ''));
@@ -840,7 +840,7 @@ export class ActionsService {
       const who = await this._agentLabel(run.agent_id);
       const icon = run.status === 'succeeded' ? '✅' : '❌';
       await this._postRunComment(
-        sourceTicketId, run.workspace_id, actor,
+        sourceTicketId, run.account_id, actor,
         `${icon} Action **${actionName}** — ${who} ${run.status === 'succeeded' ? '성공' : '실패'}` +
         `${run.result_summary ? ` — ${run.result_summary}` : ''}. ` +
         `배치의 남은 ${stillRunning.length}건이 끝나면 결과를 모아 이 티켓을 재개합니다.`,
@@ -854,7 +854,7 @@ export class ActionsService {
       .update(ActionRun)
       .set({ batch_resume_claimed: true })
       .where('batch_id = :b', { b: batchId })
-      .andWhere('workspace_id = :ws', { ws: run.workspace_id })
+      .andWhere('account_id = :ws', { ws: run.account_id })
       .andWhere('batch_resume_claimed = :claimed', { claimed: false })
       .execute();
     if ((claim.affected ?? 0) <= 0) {
@@ -961,13 +961,13 @@ export class ActionsService {
   /** Post a `note` comment on the source ticket recording a run outcome. */
   private async _postRunComment(
     ticketId: string,
-    workspaceId: string,
+    accountId: string,
     actor: { type: string; id: string; name: string },
     content: string,
   ): Promise<void> {
     try {
       await this.commentRepo.save(this.commentRepo.create({
-        workspace_id: workspaceId,
+        account_id: accountId,
         ticket_id: ticketId,
         author_type: actor.type === 'user' ? 'user' : 'agent',
         author_id: actor.id || '',
@@ -1000,8 +1000,8 @@ export class ActionsService {
         // Source workspace (reviewer req 3) — the run's workspace is the source
         // ticket's workspace (enforced at dispatch), so the audit row is visible
         // in the workspace activity feed instead of defaulting to '' (which hid
-        // it from every workspace-scoped query).
-        workspace_id: run.workspace_id,
+        // it from every account-scoped query).
+        account_id: run.account_id,
         entity_type: 'ticket',
         entity_id: ticketId,
         ticket_id: ticketId,
@@ -1057,7 +1057,7 @@ export class ActionsService {
         },
       );
       await this.activityRepo.save(this.activityRepo.create({
-        workspace_id: action.workspace_id,
+        account_id: action.account_id,
         entity_type: 'ticket',
         entity_id: ticketId,
         ticket_id: ticketId,
@@ -1083,7 +1083,7 @@ export class ActionsService {
   ): Promise<void> {
     try {
       await this.activityRepo.save(this.activityRepo.create({
-        workspace_id: action.workspace_id,
+        account_id: action.account_id,
         entity_type: 'ticket',
         entity_id: ticketId,
         ticket_id: ticketId,
@@ -1120,11 +1120,11 @@ export class ActionsService {
    * can resume and re-run the Action (which now finds & consumes this grant).
    */
   async createApproval(args: CreateApprovalArgs): Promise<ActionApproval> {
-    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!args.accountId) throw makeError(400, 'account_id is required');
     if (!args.sourceTicketId) throw makeError(400, 'source_ticket_id is required');
     // Defence in depth: the REST guard already requires an admin session, but we
     // re-assert here so no future caller of the service can mint a grant as a
-    // non-admin. Approval authority = admin role (workspace-scoped membership /
+    // non-admin. Approval authority = admin role (account-scoped membership /
     // per-Action RBAC is an explicit follow-up, per the reviewer).
     if (!args.approverUserId) throw makeError(401, 'an authenticated approver is required');
     if (args.approverRole !== 'admin') {
@@ -1133,7 +1133,7 @@ export class ActionsService {
 
     const action = await findOrFail(
       this.actionRepo,
-      { where: { id: args.actionId, workspace_id: args.workspaceId } },
+      { where: { id: args.actionId, account_id: args.accountId } },
       'Action not found in workspace',
     );
     // Only high-impact Actions are gated, so only they need a grant. Rejecting an
@@ -1147,7 +1147,7 @@ export class ActionsService {
     // Bind to a real ticket in the same workspace (mirrors the dispatch boundary).
     const ticket = await this.ticketRepo.findOne({ where: { id: args.sourceTicketId } });
     if (!ticket) throw makeError(404, 'source ticket not found');
-    if (ticket.workspace_id !== action.workspace_id) {
+    if (ticket.account_id !== action.account_id) {
       throw makeError(400, 'source ticket belongs to a different workspace than the action');
     }
 
@@ -1156,7 +1156,7 @@ export class ActionsService {
       : ActionsService.APPROVAL_TTL_MINUTES;
     const now = new Date();
     const grant = await this.approvalRepo.save(this.approvalRepo.create({
-      workspace_id: action.workspace_id,
+      account_id: action.account_id,
       action_id: action.id,
       source_ticket_id: args.sourceTicketId,
       approved_by: args.approverUserId,
@@ -1171,7 +1171,7 @@ export class ActionsService {
     // approver, so "an admin approved X for ticket Y at T" is reconstructable.
     try {
       await this.activityRepo.save(this.activityRepo.create({
-        workspace_id: action.workspace_id,
+        account_id: action.account_id,
         entity_type: 'ticket',
         entity_id: args.sourceTicketId,
         ticket_id: args.sourceTicketId,
@@ -1207,11 +1207,11 @@ export class ActionsService {
   }
 
   /** List approval grants for an action (most recent first) — audit visibility. */
-  async listApprovals(actionId: string, workspaceId: string, limit = 20): Promise<ActionApproval[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    await findOrFail(this.actionRepo, { where: { id: actionId, workspace_id: workspaceId } }, 'Action not found in workspace');
+  async listApprovals(actionId: string, accountId: string, limit = 20): Promise<ActionApproval[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    await findOrFail(this.actionRepo, { where: { id: actionId, account_id: accountId } }, 'Action not found in workspace');
     return this.approvalRepo.find({
-      where: { action_id: actionId, workspace_id: workspaceId },
+      where: { action_id: actionId, account_id: accountId },
       order: { created_at: 'DESC' },
       take: Math.min(limit, 100),
     });
@@ -1230,7 +1230,7 @@ export class ActionsService {
    */
   private async _consumeApproval(
     actionId: string,
-    workspaceId: string,
+    accountId: string,
     sourceTicketId: string,
     runId: string,
   ): Promise<{ userId: string; userName: string; at: Date } | null> {
@@ -1249,7 +1249,7 @@ export class ActionsService {
     const MAX_GRANT_SCAN = 100; // safety bound; a real (action,ticket) pair has very few grants
     for (let i = 0; i < MAX_GRANT_SCAN; i++) {
       const candidate = await this.approvalRepo.findOne({
-        where: { action_id: actionId, workspace_id: workspaceId, source_ticket_id: sourceTicketId, status: 'pending' },
+        where: { action_id: actionId, account_id: accountId, source_ticket_id: sourceTicketId, status: 'pending' },
         order: { created_at: 'ASC' },
       });
       if (!candidate) return null; // no pending grant left → unapproved
@@ -1285,7 +1285,7 @@ export class ActionsService {
   async dispatch(args: DispatchActionArgs): Promise<DispatchActionResult> {
     const action = await findOrFail(this.actionRepo, { where: { id: args.actionId } }, 'Action not found');
     // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
-    // before any side effect below. Workspace-scoped; throws 429 on breach.
+    // before any side effect below. Account-scoped; throws 429 on breach.
     // Placed INSIDE dispatch() (not around the retry call site in
     // completeRun) so a retry that trips this guard is naturally caught by
     // completeRun's existing try/catch and treated as exhaustion — no
@@ -1300,7 +1300,7 @@ export class ActionsService {
     await enforceRunBudget(
       { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
       'action',
-      action.workspace_id,
+      action.account_id,
     );
 
     // ── 대상 해석 (티켓 fc3906c5) ────────────────────────────────────────
@@ -1342,7 +1342,7 @@ export class ActionsService {
         }
       });
       if (spec) {
-        agents.push(pseudoAgentForSpec(agentId, spec, action.workspace_id));
+        agents.push(pseudoAgentForSpec(agentId, spec, action.account_id));
         continue;
       }
       missingTargets.push(agentId);
@@ -1362,7 +1362,7 @@ export class ActionsService {
     if (sourceTicketId) {
       const sourceTicket = await this.ticketRepo.findOne({ where: { id: sourceTicketId } });
       if (!sourceTicket) throw makeError(404, 'source ticket not found');
-      if (sourceTicket.workspace_id !== action.workspace_id) {
+      if (sourceTicket.account_id !== action.account_id) {
         throw makeError(400, 'source ticket belongs to a different workspace than the action');
       }
     }
@@ -1410,7 +1410,7 @@ export class ActionsService {
     const highImpact = isHighImpactAction(action);
     let approval: { userId: string; userName: string; at: Date } | null = null;
     if (sourceTicketId && highImpact && args.triggeredByType !== 'user') {
-      approval = await this._consumeApproval(action.id, action.workspace_id, sourceTicketId, runIds[0]);
+      approval = await this._consumeApproval(action.id, action.account_id, sourceTicketId, runIds[0]);
       if (!approval) {
         await this._parkForApproval(sourceTicketId, action, args.triggeredById);
         throw makeError(
@@ -1438,11 +1438,11 @@ export class ActionsService {
     // optional pieces best-effort — missing fields render as empty string in
     // the template, which is friendlier than failing the whole Run.
     // 배치 공통 조각이라 루프 밖에서 한 번만 읽는다(대상 N개여도 쿼리는 1회씩).
-    const workspace = await this.workspaceRepo.findOne({ where: { id: action.workspace_id } });
+    const workspace = await this.accountRepo.findOne({ where: { id: action.account_id } });
     // The finished ticket's project, for `{{project.*}}` on hook runs. Scoped to
     // the Action's workspace so a foreign id never leaks another workspace's repo.
     const project = args.ticketContext?.project_id
-      ? await this.projects.getInWorkspace(args.ticketContext.project_id, action.workspace_id)
+      ? await this.projects.getInWorkspace(args.ticketContext.project_id, action.account_id)
       : null;
     const user = args.triggeredByType === 'user' && args.triggeredById
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })
@@ -1556,7 +1556,7 @@ export class ActionsService {
       await this.runRepo.save(this.runRepo.create({
         id: randomUUID(),
         action_id: action.id,
-        workspace_id: action.workspace_id,
+        account_id: action.account_id,
         agent_id: agentId,
         batch_id: batchId,
         room_id: null,
@@ -1594,7 +1594,7 @@ export class ActionsService {
     action: Action;
     agent: DispatchPseudoAgent;
     args: DispatchActionArgs;
-    workspace: Workspace | null;
+    workspace: Account | null;
     project: Project | null;
     user: User | null;
     runId: string;
@@ -1616,7 +1616,7 @@ export class ActionsService {
     await enforceRunBudget(
       { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
       'action',
-      action.workspace_id,
+      action.account_id,
     );
 
     const ctx = buildRenderContext({
@@ -1651,7 +1651,7 @@ export class ActionsService {
       kind: 'action',
       id: action.id,
       runId,
-      workspaceId: action.workspace_id,
+      accountId: action.account_id,
       workspaceFolder,
       repoRef: action.repo_ref,
       checkoutMode: action.checkout_mode,
@@ -1687,8 +1687,8 @@ export class ActionsService {
       : '';
     const idempotencyKey = sourceTicketId ? inheritedKey || randomUUID() : '';
     const rendered = sourceTicketId
-      ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId, idempotencyKey, highImpact)}`
-      : `${withLanguage}${renderStandaloneCompletionContract(runId, action.workspace_id)}`;
+      ? `${withLanguage}${renderCompletionContract(runId, action.account_id, sourceTicketId, idempotencyKey, highImpact)}`
+      : `${withLanguage}${renderStandaloneCompletionContract(runId, action.account_id)}`;
 
     // Create the room. We use 'group' as the underlying type so the chat
     // controller's existing rules (rename, multi-participant, etc.) apply.
@@ -1696,7 +1696,7 @@ export class ActionsService {
     // chat groups in the list view. Created BEFORE the run row so we have
     // a real room.id to stamp on it.
     const room = await this.roomRepo.save(this.roomRepo.create({
-      workspace_id: action.workspace_id,
+      account_id: action.account_id,
       type: 'group',
       name: `Action: ${action.name} · ${runId.slice(0, 8)}`,
       action_id: action.id,
@@ -1708,7 +1708,7 @@ export class ActionsService {
     const tempRun = await this.runRepo.save(this.runRepo.create({
       id: runId,
       action_id: action.id,
-      workspace_id: action.workspace_id,
+      account_id: action.account_id,
       // 에이전트별 감사 + 배치 묶음 (티켓 fc3906c5). 재시도 run은 호출자가
       // 같은 batchId를 넘겨주므로 원래 배치를 승계한다.
       agent_id: agent.id,
@@ -1805,7 +1805,7 @@ export class ActionsService {
     try {
       await this.messaging.sendMessage(
         room.id,
-        action.workspace_id,
+        action.account_id,
         senderType,
         senderId,
         senderName,

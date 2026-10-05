@@ -8,7 +8,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { TerminalError, TerminalsService } from './terminals.service';
 
 /**
- * 사용자 표면. 워크스페이스는 agent-sessions 와 같은 `X-Workspace-Id` 헤더 규약.
+ * 사용자 표면. 워크스페이스는 agent-sessions 와 같은 `X-Account-Id` 헤더 규약.
  * 모든 경로가 Runtime Host 아래에 있다 — 터미널은 AWB 의 것이 아니라 그 장비의 셸이다.
  */
 @ApiBearerAuth('user-session')
@@ -19,11 +19,11 @@ import { TerminalError, TerminalsService } from './terminals.service';
 export class TerminalsController {
   constructor(private readonly terminals: TerminalsService) {}
 
-  private workspaceId(req: Request, res: Response): string | null {
-    const raw = req.headers['x-workspace-id'];
+  private accountId(req: Request, res: Response): string | null {
+    const raw = req.headers['x-account-id'];
     const value = Array.isArray(raw) ? raw[0] : raw;
     if (!value) {
-      res.status(400).json({ error: 'workspace_required', message: 'X-Workspace-Id header is required' });
+      res.status(400).json({ error: 'workspace_required', message: 'X-Account-Id header is required' });
       return null;
     }
     return String(value);
@@ -47,7 +47,7 @@ export class TerminalsController {
   /** 터미널을 띄울 수 있는 Runtime Host 와 그 장비의 셸 목록. */
   @Get('hosts')
   async hosts(@Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.terminals.listHosts(ws));
   }
@@ -55,7 +55,7 @@ export class TerminalsController {
   /** 지금 살아 있는 터미널만. 죽은 것은 기록이 없으므로 아예 나오지 않는다. */
   @Get('hosts/:managerId/terminals')
   async list(@Param('managerId') managerId: string, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.terminals.listTerminals(ws, this.userId(req), managerId));
   }
@@ -63,7 +63,7 @@ export class TerminalsController {
   /** `{ shell?, cwd?, title?, cols?, rows? }` — 새 PTY. */
   @Post('hosts/:managerId/terminals')
   async open(@Param('managerId') managerId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 201, () => this.terminals.openTerminal(ws, this.userId(req), managerId, {
       shell: typeof body?.shell === 'string' ? body.shell : null,
@@ -84,7 +84,7 @@ export class TerminalsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.terminals.attach(ws, this.userId(req), managerId, terminalId, { cols, rows }));
   }
@@ -98,7 +98,7 @@ export class TerminalsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 202, () => this.terminals.write(ws, this.userId(req), managerId, terminalId, body?.data));
   }
@@ -111,7 +111,7 @@ export class TerminalsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.terminals.resize(ws, this.userId(req), managerId, terminalId, body?.cols, body?.rows));
   }
@@ -123,7 +123,7 @@ export class TerminalsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.terminals.close(ws, this.userId(req), managerId, terminalId));
   }

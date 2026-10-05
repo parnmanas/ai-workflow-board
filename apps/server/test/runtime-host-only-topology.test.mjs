@@ -8,7 +8,7 @@ import {
   createAgent,
   createApiKey,
   createUser,
-  createWorkspace,
+  createAccount,
 } from './helpers/fixtures.mjs';
 import { AgentStatusService } from '../dist/modules/agents/agent-status.service.js';
 import { AgentManagerCommandService } from '../dist/modules/agent-manager/agent-manager-command.service.js';
@@ -23,7 +23,7 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
   t.after(async () => { await app.close(); });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'runtime-host-only');
+  const workspace = await createAccount(app, getDataSourceToken, 'runtime-host-only');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host',
     type: 'manager',
@@ -43,11 +43,11 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
   void hosted;
 
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'runtime-host',
   });
   const detachedKey = await createApiKey(app, getDataSourceToken, detached.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'detached',
   });
 

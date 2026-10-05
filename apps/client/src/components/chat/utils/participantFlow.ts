@@ -70,10 +70,10 @@ export function canInviteToRoom(
  * 스코프마다 다른 프로젝션을 손으로 만들어 필드 이름이 갈린다:
  *   - 내 방 (`GET /chat-rooms` → `listRooms`)
  *       `{ participant_type, participant_id, name }`
- *   - 워크스페이스 관전 (`?scope=workspace` → `listAllWorkspaceRooms`)
+ *   - Account 관전 (`?scope=account` → `listAllWorkspaceRooms`)
  *       `{ type, id, name }`
  *
- * `api.listChatRooms('workspace')` 도 같은 타입을 돌려주므로 **tsc 는 이 불일치를
+ * `api.listChatRooms('account')` 도 같은 타입을 돌려주므로 **tsc 는 이 불일치를
  * 잡지 못한다** — 관전 모드에서 `p.participant_id` 를 읽으면 조용히 undefined 가 되어
  * 참여자 요약이 빈 문자열로 무너진다. 그래서 읽는 쪽이 방어적으로 정규화한다.
  * (방 **상세**(getChatRoom)는 별개다 — 그쪽은 `RoomDetailParticipantWire` 한 가지다.)
@@ -269,15 +269,7 @@ export interface ChatRoomUpdateDispatchDeps {
   setRooms: ChatRoomListSetter;
   /** makeRefreshActiveRoomParticipants 가 만든 활성 방 로스터 재조회 함수. */
   refreshActiveRoomParticipants: (roomId: string) => void;
-  /**
-   * 지금 보고 있는 워크스페이스 id (ticket 995a9519).
-   *
-   * `open_join_changed` 는 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 나가는
-   * 유일한 chat_room_update 다(서버 `chatRoomUpdateFilter`). 이 스택에서 users 는
-   * 워크스페이스에 소속되지 않아 서버 필터가 스코프를 판정할 근거가 없으므로, 대조는
-   * 여기서 한다 — 남의 워크스페이스에서 난 변경으로 내 방 목록을 재조회하면 안 된다.
-   */
-  getCurrentWorkspaceId: () => string | null;
+
 }
 
 /**
@@ -325,10 +317,7 @@ export function dispatchChatRoomUpdate(
   } else if (payload.update_type === 'open_join_changed' && payload.room_id) {
     // 자유 참여 토글 (ticket 995a9519, 리뷰 라운드1 P1-2).
     //
-    // 이 이벤트는 워크스페이스의 모든 사용자에게 나가므로 **스코프를 여기서 좁힌다**:
-    // 남의 워크스페이스에서 난 변경은 버린다(서버가 판정할 수 없는 이유는 deps 의
-    // getCurrentWorkspaceId 주석 참조).
-    if (payload.workspace_id && payload.workspace_id !== deps.getCurrentWorkspaceId()) return;
+    // 서버가 접근 가능한 account의 이벤트만 보내며, 방 목록은 통합 조회한다.
 
     // 목록을 **재조회**한다. 플래그만 갱신하면 부족하다 — 이 이벤트의 핵심 수신자는
     // 아직 참여하지 않은 사용자이고, 그들에게 필요한 것은 방이 목록에 **새로 나타나거나

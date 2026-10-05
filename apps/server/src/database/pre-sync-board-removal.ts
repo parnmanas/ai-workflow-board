@@ -81,7 +81,7 @@ async function snapshot(runner: QueryRunner): Promise<boolean> {
         name: BOARD_REMOVAL_REPO_SNAPSHOT,
         columns: [
           { name: 'id', type: key, isPrimary: true },
-          { name: 'workspace_id', type: key, isNullable: true },
+          { name: 'account_id', type: key, isNullable: true },
           { name: 'credential_id', type: key, isNullable: true },
           { name: 'name', type: key, isNullable: true },
           { name: 'description', type: text, isNullable: true },
@@ -91,8 +91,8 @@ async function snapshot(runner: QueryRunner): Promise<boolean> {
         ],
       }));
       await runner.query(
-        `INSERT INTO "${BOARD_REMOVAL_REPO_SNAPSHOT}" (id, workspace_id, credential_id, name, description, url, default_branch, clone_policy) ` +
-        `SELECT CAST(id AS VARCHAR), workspace_id, credential_id, name, description, url, default_branch, ${hasPolicy ? 'clone_policy' : 'NULL'} ` +
+        `INSERT INTO "${BOARD_REMOVAL_REPO_SNAPSHOT}" (id, account_id, credential_id, name, description, url, default_branch, clone_policy) ` +
+        `SELECT CAST(id AS VARCHAR), account_id, credential_id, name, description, url, default_branch, ${hasPolicy ? 'clone_policy' : 'NULL'} ` +
         `FROM resources WHERE type = 'repository'`,
       );
       await runner.commitTransaction();
@@ -138,7 +138,7 @@ async function snapshot(runner: QueryRunner): Promise<boolean> {
     await runner.query(
       `DELETE FROM workflow_functions WHERE COALESCE(board_id, '') <> '' AND EXISTS (` +
       `SELECT 1 FROM workflow_functions o WHERE o.id <> workflow_functions.id AND o.key = workflow_functions.key ` +
-      `AND COALESCE(o.workspace_id, '') = COALESCE(workflow_functions.workspace_id, '') ` +
+      `AND COALESCE(o.account_id, '') = COALESCE(workflow_functions.account_id, '') ` +
       `AND (COALESCE(o.board_id, '') = '' OR CAST(o.id AS VARCHAR) < CAST(workflow_functions.id AS VARCHAR)))`,
     );
     await runner.query('DROP INDEX IF EXISTS "uq_workflow_functions_global_key"');

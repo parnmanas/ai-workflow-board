@@ -19,7 +19,7 @@
 //   5. 마크 후 GET unread-counts 를 다시 부르면 뱃지가 정확히 0 이 된다
 //      ("unread-counts 응답 → 뱃지 감소" 경로)
 //   6. read-all 이 실제로 뭔가 지웠으면 SSE `ticket_reads_cleared` 를 정확한
-//      { user_id, workspace_id, updated, read_at } 로 emit 한다(다른 탭/
+//      { user_id, account_id, updated, read_at } 로 emit 한다(다른 탭/
 //      기기 동기화 계약) — 지운 게 0건이면 emit 하지 않는다
 
 import { describe, it, before, after } from 'node:test';
@@ -105,7 +105,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     const rebacService = app.get(ReBACService);
     const ds = app.get(getDataSourceToken());
     userRepo = ds.getRepository('User');
-    const wsRepo = ds.getRepository('Workspace');
+    const wsRepo = ds.getRepository('Account');
     const ticketRepo = ds.getRepository('Ticket');
     const commentRepo = ds.getRepository('Comment');
     readStateRepo = ds.getRepository('TicketReadState');
@@ -119,10 +119,10 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     viewerToken = authService.createSession(viewer.id);
 
     ws = await wsRepo.save(wsRepo.create({ name: 'Unread Badge WS', description: 'ticket 628f4b39' }));
-    await rebacService.grant({ type: 'user', id: viewer.id }, 'member', { type: 'workspace', id: ws.id });
+    await rebacService.grant({ type: 'user', id: viewer.id }, 'member', { type: 'account', id: ws.id });
 
     const mk = (title, extra = {}) => ticketRepo.save(ticketRepo.create({
-      title, workspace_id: ws.id, status: 'todo', ...extra,
+      title, account_id: ws.id, status: 'todo', ...extra,
     }));
     // viewer is "involved" through both paths on purpose — the involvement
     // query unions created-by and read-state, and a bug narrowing it to just
@@ -138,8 +138,8 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
 
     const anHourAgo = new Date(Date.now() - 60 * 60_000);
     await readStateRepo.save([
-      readStateRepo.create({ user_id: viewer.id, ticket_id: readB.id, workspace_id: ws.id, last_read_at: anHourAgo }),
-      readStateRepo.create({ user_id: viewer.id, ticket_id: readArchived.id, workspace_id: ws.id, last_read_at: anHourAgo }),
+      readStateRepo.create({ user_id: viewer.id, ticket_id: readB.id, account_id: ws.id, last_read_at: anHourAgo }),
+      readStateRepo.create({ user_id: viewer.id, ticket_id: readArchived.id, account_id: ws.id, last_read_at: anHourAgo }),
     ]);
 
     const c = (ticket_id, extra) => commentRepo.create({ ticket_id, content: 'hi', ...extra });
@@ -166,7 +166,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
   });
 
   it('unread-counts: rolls up per-ticket, excludes own/already-read comments, archived and uninvolved tickets', async () => {
-    const res = await apiRequest(BASE_URL, '/tickets/unread-counts', { token: viewerToken, workspaceId: ws.id });
+    const res = await apiRequest(BASE_URL, '/tickets/unread-counts', { token: viewerToken, accountId: ws.id });
     assert.equal(res.status, 200);
     const { total, perTicket } = res.data;
 
@@ -179,7 +179,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
   it('read-all: clears every involved ticket workspace-wide, including already-read ones, and emits ticket_reads_cleared', async () => {
     const emitted = captureNextTicketReadsCleared(activityEvents);
     const res = await apiRequest(BASE_URL, '/tickets/read-all', {
-      token: viewerToken, workspaceId: ws.id, method: 'POST', body: {},
+      token: viewerToken, accountId: ws.id, method: 'POST', body: {},
     });
     // NestJS defaults POST handlers to 201 unless @HttpCode()/res.status()
     // overrides it — this controller's other @Res()-style POST endpoints
@@ -200,7 +200,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     assert.equal(byTicket.has(uninvolved.id), false, '관여하지 않은 티켓에 read-state 행을 만들면 안 된다');
     assert.equal(byTicket.has(ownArchived.id), false, '아카이브된 티켓은 read-all 대상이 아니다');
 
-    const after = await apiRequest(BASE_URL, '/tickets/unread-counts', { token: viewerToken, workspaceId: ws.id });
+    const after = await apiRequest(BASE_URL, '/tickets/unread-counts', { token: viewerToken, accountId: ws.id });
     assert.equal(after.data.total, 0);
     assert.deepEqual(after.data.perTicket, {});
 
@@ -209,7 +209,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     // (BroadcastChannel 은 같은 브라우저 프로필의 탭에만 닿는다).
     const payload = await emitted;
     assert.equal(payload.user_id, viewer.id);
-    assert.equal(payload.workspace_id, ws.id);
+    assert.equal(payload.account_id, ws.id);
     assert.equal(payload.updated, 3);
     assert.ok(payload.read_at, 'read_at 이 있어야 한다');
   });
@@ -227,7 +227,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     activityEvents.on('ticket_reads_cleared', handler);
     try {
       const res = await apiRequest(BASE_URL, '/tickets/read-all', {
-        token: bystanderToken, workspaceId: ws.id, method: 'POST', body: {},
+        token: bystanderToken, accountId: ws.id, method: 'POST', body: {},
       });
       assert.ok(res.status === 200 || res.status === 201, `read-all must succeed, got ${res.status}`);
       assert.equal(res.data.updated, 0);

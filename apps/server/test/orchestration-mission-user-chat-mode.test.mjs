@@ -53,7 +53,7 @@ async function seedMission(missionOverrides = {}, roomOverrides = {}) {
   const roomRepo = dataSource.getRepository(ChatRoom);
 
   const mission = await missionRepo.save(missionRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     team_id: 'team-1',
     title: 'Ship the export',
     objective: 'Add a CSV export.',
@@ -64,7 +64,7 @@ async function seedMission(missionOverrides = {}, roomOverrides = {}) {
   }));
 
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     type: 'group',
     name: `Mission: ${mission.title}`,
     last_message_at: null,
@@ -175,7 +175,7 @@ before(async () => {
   await userRepo.save(userRepo.create({
     id: PLAIN, email: 'plain@x', name: 'Plain', password: 'x', role: 'user', permissions: '[]',
   }));
-  await hostRepo.save(hostRepo.create({ id: AGENT, name: 'Orchestrator', hostname: 'orch-host', workspace_id: WS }));
+  await hostRepo.save(hostRepo.create({ id: AGENT, name: 'Orchestrator', hostname: 'orch-host', account_id: WS }));
 
   membership = new RoomMembershipService(roomRepo, partRepo, userRepo, dataSource, missionRepo); // P4c-4
 
@@ -244,7 +244,7 @@ describe('미션 chat 옵션이 발화를 지배한다', () => {
   it("off 여도 읽기는 그대로 열려 있다", async () => {
     const { room } = await seedMission({ user_chat_mode: 'off' }, { open_join: false });
     // 엔진이 남긴 기록이 있다고 가정하고 관전으로 읽는다.
-    const rows = await messaging.getMessages(room.id, ADMIN, 50, undefined, { observer: true, workspaceId: WS });
+    const rows = await messaging.getMessages(room.id, ADMIN, 50, undefined, { observer: true, accountId: WS });
     assert.ok(Array.isArray(rows), 'off 는 읽기 전용(관전)만 허용하는 모드다 — 읽기까지 막으면 요구를 넘어선다');
   });
 
@@ -442,7 +442,7 @@ describe('미션 chat 옵션이 발화를 지배한다', () => {
     const { mission } = await seedMission({ user_chat_mode: 'off' }, { open_join: false });
     const roomRepo = dataSource.getRepository(ChatRoom);
     const stepRoom = await roomRepo.save(roomRepo.create({
-      workspace_id: WS,
+      account_id: WS,
       type: 'group',
       name: 'Step: build',
       last_message_at: null,
@@ -507,7 +507,7 @@ describe('백필 마이그레이션', () => {
     const { mission } = await seedMission({ user_chat_mode: '' }, { open_join: false });
     const roomRepo = dataSource.getRepository(ChatRoom);
     const stepRoom = await roomRepo.save(roomRepo.create({
-      workspace_id: WS,
+      account_id: WS,
       type: 'group',
       name: 'Step: build',
       last_message_at: null,
@@ -585,7 +585,7 @@ describe('백필 마이그레이션', () => {
     // ⓔ 아직 시작되지 않은 draft → started 에서 빠지고 방 관련 축에도 안 잡힌다.
     const missionRepo = dataSource.getRepository(OrchestrationMission);
     await missionRepo.save(missionRepo.create({
-      workspace_id: WS, team_id: 'team-1', title: 'draft', objective: 'x',
+      account_id: WS, team_id: 'team-1', title: 'draft', objective: 'x',
       status: 'draft', created_by_type: 'user', created_by: ADMIN,
     }));
 
@@ -626,7 +626,7 @@ describe('백필 마이그레이션', () => {
     // 여기서는 그 성질을 엔티티 경로로 재현한다 — 값을 주지 않아도 'open' 이 들어간다.
     const missionRepo = dataSource.getRepository(OrchestrationMission);
     const viaEntity = await missionRepo.save(missionRepo.create({
-      workspace_id: WS, team_id: 'team-1', title: 'via entity', objective: 'x',
+      account_id: WS, team_id: 'team-1', title: 'via entity', objective: 'x',
       status: 'draft', created_by_type: 'user', created_by: ADMIN,
     }));
     assert.equal(viaEntity.user_chat_mode, 'open', '엔티티 default 가 채워진다');

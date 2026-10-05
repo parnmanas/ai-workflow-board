@@ -254,7 +254,7 @@ test('login dialog helpers: command templating, default CLI, host label from key
   assert.equal(cliLoginCommand('opencode', '', ''), 'opencode auth login -p <provider> -m "<method>"');
   assert.equal(cliLoginCommand('future-cli', '', ''), '');
 
-  const legacy = { instance_id: 'i', hostname: 'host', workspace_id: null, codex_installed: true, codex_healthy: true, claude_installed: true, claude_healthy: false };
+  const legacy = { instance_id: 'i', hostname: 'host', account_id: null, codex_installed: true, codex_healthy: true, claude_installed: true, claude_healthy: false };
   assert.equal(instanceLabel(legacy, 'codex'), 'host');
   assert.equal(instanceLabel(legacy, 'claude'), 'host (claude code installed, health unknown)');
   assert.equal(instanceLabel(legacy, 'opencode'), 'host (opencode not detected — may still work)');

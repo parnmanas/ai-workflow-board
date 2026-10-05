@@ -17,7 +17,7 @@ export class AgentAuthGuard implements CanActivate {
       !process.env.AGENT_API_KEY &&
       process.env.AGENT_DEV_MODE === 'true'
     ) {
-      request.currentWorkspaceId = null;
+      request.currentAccountId = null;
       return true;
     }
 
@@ -26,17 +26,17 @@ export class AgentAuthGuard implements CanActivate {
       throw new UnauthorizedException('Missing X-Agent-Key header');
     }
 
-    // Try DB key first — provides workspace_id scoping
+    // Try DB key first — provides account_id scoping
     try {
       const dbResult = await this.apiKeyService.validateApiKey(providedKey);
       if (dbResult.valid && dbResult.apiKey) {
         const apiKey = dbResult.apiKey;
-        // Paired Hosts supervise executions across workspaces; ordinary keys
+        // Paired Hosts supervise executions across accounts; ordinary keys
         // retain their workspace scope.
         const runtimeKey = apiKey.host_id ? /^runtime:.*:(rt-[0-9a-f]{16})$/.exec(apiKey.name || '')?.[1] : undefined;
         const isManagerKey = !!apiKey.host_id && !runtimeKey;
-        // Inject workspace_id from the API key record for workspace-scoped queries
-        request.currentWorkspaceId = isManagerKey ? null : apiKey.workspace_id || null;
+        // Inject account_id from the API key record for account-scoped queries
+        request.currentAccountId = isManagerKey ? null : apiKey.account_id || null;
         // Also expose the resolved ApiKey row + caller identity so
         // downstream controllers (e.g. fs-browser response receiver) can
         // identify WHICH host/agent is calling without a second lookup.
@@ -53,7 +53,7 @@ export class AgentAuthGuard implements CanActivate {
     // Fall back to static ENV key — no workspace scoping (dev/legacy usage)
     const envKey = process.env.AGENT_API_KEY;
     if (envKey && providedKey === envKey) {
-      request.currentWorkspaceId = null;
+      request.currentAccountId = null;
       return true;
     }
 

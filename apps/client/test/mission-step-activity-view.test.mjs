@@ -219,7 +219,7 @@ test('구 서버 응답(activity 필드 없음)에서도 카드가 깨지지 않
 
 const mission = (overrides = {}) => ({
   id: 'mission-1',
-  workspace_id: 'ws-1',
+  account_id: 'ws-1',
   team_id: 'team-1',
   team_name: 'EmberDelve',
   title: 'emberdelve 제작',

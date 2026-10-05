@@ -15,7 +15,7 @@ import { NotifyPayload } from './types';
 interface UserMentionEvent {
   mention_id: string;
   user_id: string;
-  workspace_id: string;
+  account_id: string;
   source_type: 'comment' | 'chat_message';
   source_id: string;
   ticket_id: string | null;
@@ -29,7 +29,7 @@ interface UserMentionEvent {
 
 interface ChatRoomMessageEvent {
   room_id: string;
-  workspace_id: string;
+  account_id: string;
   message_id: string;
   sender_type: 'user' | 'agent';
   sender_id: string;
@@ -202,7 +202,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     if (!ambientContent) return;
 
     const url = process.env.AWB_PUBLIC_URL
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/ws/${ev.workspace_id}/chat/${ev.room_id}?message=${ev.message_id}`
+      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/chat/${ev.room_id}?message=${ev.message_id}`
       : undefined;
 
     const payload: NotifyPayload = {
@@ -248,8 +248,8 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     const userIds = participants.filter((id) => id !== log.actor_id);
     if (userIds.length === 0) return;
 
-    const url = process.env.AWB_PUBLIC_URL && ticket.workspace_id
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}${ticketPath(ticket.workspace_id, ticketId)}`
+    const url = process.env.AWB_PUBLIC_URL && ticket.account_id
+      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}${ticketPath(ticket.account_id, ticketId)}`
       : undefined;
 
     const action = log.action.replace('_', ' ');
@@ -302,10 +302,10 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     if (!base) return null;
     if (ev.source_type === 'chat_message' && ev.room_id) {
       const params = new URLSearchParams({ room: ev.room_id, message: ev.source_id });
-      return `${base}/ws/${ev.workspace_id}/chat?${params.toString()}`;
+      return `${base}/chat?${params.toString()}`;
     }
     if (ev.ticket_id) {
-      return `${base}${ticketPath(ev.workspace_id, ev.ticket_id, { comment: ev.source_id })}`;
+      return `${base}${ticketPath(ev.account_id, ev.ticket_id, { comment: ev.source_id })}`;
     }
     return null;
   }

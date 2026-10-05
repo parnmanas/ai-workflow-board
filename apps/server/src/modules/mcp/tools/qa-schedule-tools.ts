@@ -27,7 +27,7 @@ import type { ToolContext } from './context';
 function scheduleToJson(s: QaSchedule) {
   return {
     id: s.id,
-    workspace_id: s.workspace_id,
+    account_id: s.account_id,
     name: s.name,
     scope: s.scope,
     scenario_ids: s.scenario_ids ?? [],
@@ -49,7 +49,7 @@ function batchToJson(b: QaRunBatch) {
   const ids = b.scenario_ids ?? [];
   return {
     id: b.id,
-    workspace_id: b.workspace_id,
+    account_id: b.account_id,
     scenario_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -70,12 +70,12 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
     'list_qa_schedules',
     'List reusable QA schedules in a workspace.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ workspace_id }) => {
+    async ({ account_id }) => {
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       try {
-        const rows = await qaScheduleService.list(workspace_id);
+        const rows = await qaScheduleService.list(account_id);
         return ok(rows.map(scheduleToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list QA schedules');
@@ -88,12 +88,12 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
     'Get a single QA schedule by id (scope, cadence, next/last run, last batch id).',
     {
       schedule_id: z.string().describe('QaSchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ schedule_id, workspace_id }) => {
+    async ({ schedule_id, account_id }) => {
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       try {
-        return ok(scheduleToJson(await qaScheduleService.get(schedule_id, workspace_id)));
+        return ok(scheduleToJson(await qaScheduleService.get(schedule_id, account_id)));
       } catch (e: any) {
         return err(e?.message || 'QA schedule not found');
       }
@@ -103,11 +103,11 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
   server.tool(
     'create_qa_schedule',
     'Create a QA schedule — an automatic trigger that kicks a SEQUENTIAL batch (start_qa_batch) when ' +
-    'due. `scope="all"` runs every enabled scenario in the Workspace at dispatch time — no id snapshot, so scenario add/remove is ' +
+    'due. `scope="all"` runs every enabled scenario in the Account at dispatch time — no id snapshot, so scenario add/remove is ' +
     'reflected automatically. `scope="selected"` runs the ordered `scenario_ids`. Set EXACTLY ONE of ' +
     '`cron` (5 UTC fields, e.g. "0 3 * * *") or `interval_ms`. `enabled` defaults true.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       name: z.string().describe('Schedule name (required)'),
       scope: z.enum(['all', 'selected']).optional().describe("'all' (default) or 'selected'"),
       scenario_ids: z.array(z.string()).optional().describe("Ordered scenario ids — required when scope='selected'"),
@@ -121,7 +121,7 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
       const caller = getCallerAgent(extra);
       try {
         const row = await qaScheduleService.create({
-          workspaceId: args.workspace_id,
+          accountId: args.account_id,
           name: args.name,
           scope: args.scope,
           scenarioIds: args.scenario_ids,
@@ -140,11 +140,11 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'update_qa_schedule',
-    'Update a QA schedule. Only the provided fields change. `workspace_id` is required for scope ' +
+    'Update a QA schedule. Only the provided fields change. `account_id` is required for scope ' +
     'safety. Toggling `enabled`, or changing `cron`/`interval_ms`, recomputes next_run_at.',
     {
       schedule_id: z.string().describe('QaSchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       name: z.string().optional(),
       scope: z.enum(['all', 'selected']).optional(),
       scenario_ids: z.array(z.string()).optional(),
@@ -153,10 +153,10 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
       enabled: z.boolean().optional(),
       stop_on_fail: z.boolean().optional(),
     },
-    async ({ schedule_id, workspace_id, ...patch }) => {
+    async ({ schedule_id, account_id, ...patch }) => {
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       try {
-        const row = await qaScheduleService.update(schedule_id, workspace_id, {
+        const row = await qaScheduleService.update(schedule_id, account_id, {
           name: patch.name,
           scope: patch.scope,
           scenarioIds: patch.scenario_ids,
@@ -177,12 +177,12 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
     'Delete a QA schedule. Does NOT touch the QaRunBatches it already started.',
     {
       schedule_id: z.string().describe('QaSchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ schedule_id, workspace_id }) => {
+    async ({ schedule_id, account_id }) => {
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       try {
-        await qaScheduleService.remove(schedule_id, workspace_id);
+        await qaScheduleService.remove(schedule_id, account_id);
         return ok({ success: true, id: schedule_id });
       } catch (e: any) {
         return err(e?.message || 'Failed to delete QA schedule');
@@ -196,13 +196,13 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
     'automatic next_run_at). Returns the schedule + the started batch — poll get_qa_batch for progress.',
     {
       schedule_id: z.string().describe('QaSchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ schedule_id, workspace_id }, extra: { sessionId?: string }) => {
+    async ({ schedule_id, account_id }, extra: { sessionId?: string }) => {
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
-        const { schedule, batch } = await qaScheduleService.runNow(schedule_id, workspace_id, caller?.agentId ?? '');
+        const { schedule, batch } = await qaScheduleService.runNow(schedule_id, account_id, caller?.agentId ?? '');
         return ok({ schedule: scheduleToJson(schedule), batch: batchToJson(batch) });
       } catch (e: any) {
         return err(e?.message || 'Failed to run QA schedule');

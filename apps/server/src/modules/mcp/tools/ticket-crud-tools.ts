@@ -72,7 +72,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'list_tickets',
     'List root tickets of a workspace, filtered by status / tags (AND) / project / assignee / text. Returns `{ tickets, tags }` where `tags` counts each tag across the filtered set. Use this to find related or duplicate work before starting.',
     {
-      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
       status: z.array(z.string()).optional().describe(`Statuses to include (${TICKET_STATUSES.join(', ')}); omit for all`),
       tags: z.array(z.string()).optional().describe('Every listed tag must be present (case-insensitive)'),
       project_id: z.string().optional(),
@@ -81,10 +81,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       include_archived: z.boolean().optional().default(false),
       limit: z.number().int().min(1).max(500).optional().default(100),
     },
-    async ({ workspace_id, status, tags, project_id, assignee_key, query, include_archived, limit }, extra: { sessionId?: string }) => {
+    async ({ account_id, status, tags, project_id, assignee_key, query, include_archived, limit }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const ws = workspace_id || caller?.workspaceId || '';
-      if (!ws) return err('workspace_id is required');
+      const ws = account_id || caller?.accountId || '';
+      if (!ws) return err('account_id is required');
       const statuses: TicketStatus[] = [];
       for (const raw of status || []) {
         const parsed = parseTicketStatus(raw);
@@ -114,7 +114,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'Status defaults to `todo`, which queues it for the assignee immediately — use `backlog` for work that is not ready. ' +
     'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket.',
     {
-      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
       title: z.string().describe('Ticket title'),
       description: z.string().optional().default('').describe('Ticket description'),
       prompt_text: z.string().optional().describe('Extra instructions for the agent (shown in the work order)'),
@@ -133,8 +133,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     },
     async (args, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const ws = args.workspace_id || caller?.workspaceId || '';
-      if (!ws) return err('workspace_id is required');
+      const ws = args.account_id || caller?.accountId || '';
+      if (!ws) return err('account_id is required');
       const description = sanitizeHarnessMarkers(args.description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: caller?.agentId });
       try {
         const { ticket, duplicate_candidates } = await ticketService.create(ws, {
@@ -149,7 +149,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           if (!title) continue;
           await repo.save(repo.create({
             parent_id: ticket.id, depth: 1, title, status: 'todo', position: i,
-            workspace_id: ticket.workspace_id, tags: '[]', channel_ids: '[]',
+            account_id: ticket.account_id, tags: '[]', channel_ids: '[]',
             created_by: caller?.agentName || '', created_by_type: 'agent', created_by_id: caller?.runtimeKey || caller?.agentId || '',
           }));
         }
@@ -302,7 +302,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           await activityService.logActivity({
             entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
             field_changed: 'pend_no_action_reason', old_value: '', new_value: noActionReason,
-            ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+            ticket_id: ticket.id, account_id: ticket.account_id,
             actor_id: caller?.agentId, actor_name: caller?.agentName,
           });
         }
@@ -337,7 +337,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         return err(`canonical_has_duplicates: ${linkedDuplicates} linked report(s) must be relinked first`);
       }
       const caller = getCallerAgent(extra);
-      const { position, parent_id: parentId, workspace_id: workspaceId } = ticket;
+      const { position, parent_id: parentId, account_id: accountId } = ticket;
       // Prereq cascade (ticket 48d14fff): re-evaluate dependents BEFORE the row
       // is removed — the FK ON DELETE CASCADE would wipe the link rows first.
       let unblockedDependents: string[] = [];
@@ -353,7 +353,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (parentId) await shiftTicketPositions(ticketRepo, { parent_id: parentId }, position, -1);
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket_id, action: 'deleted',
-        ticket_id, workspace_id: workspaceId, actor_id: caller?.agentId, actor_name: caller?.agentName,
+        ticket_id, account_id: accountId, actor_id: caller?.agentId, actor_name: caller?.agentName,
       });
       for (const depId of unblockedDependents) {
         try {
@@ -370,15 +370,15 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'get_my_tickets',
     'Tickets assigned to the calling agent (its runtime identity), newest first. Archived tickets are excluded.',
     {
-      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
       status: z.string().optional().describe(`Filter by status. ${STATUS_HELP}`),
       assignee_key: z.string().optional().describe('Runtime identity key to look up instead of the caller (rt-…)'),
     },
-    async ({ workspace_id, status, assignee_key }, extra: { sessionId?: string }) => {
+    async ({ account_id, status, assignee_key }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const key = assignee_key || caller?.runtimeKey || '';
       if (!key) return err('This session has no runtime identity — pass assignee_key');
-      const ws = workspace_id || caller?.workspaceId || '';
+      const ws = account_id || caller?.accountId || '';
       let statuses: TicketStatus[] = [];
       if (status) {
         const parsed = parseTicketStatus(status);
@@ -389,7 +389,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         .where('t.assignee_key = :key', { key })
         .andWhere('t.archived_at IS NULL')
         .andWhere('t.parent_id IS NULL');
-      if (ws) qb.andWhere('t.workspace_id = :ws', { ws });
+      if (ws) qb.andWhere('t.account_id = :ws', { ws });
       if (statuses.length) qb.andWhere('t.status IN (:...statuses)', { statuses });
       const rows = await qb.orderBy('t.updated_at', 'DESC').take(200).getMany();
       return ok((await ticketService.cards(rows)).map((t: any) => withArtifactRef('ticket', {

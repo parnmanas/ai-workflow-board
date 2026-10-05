@@ -69,7 +69,7 @@ function makeRepo(rows) {
 function makeMission(overrides = {}) {
   return {
     id: 'mission-1',
-    workspace_id: WS,
+    account_id: WS,
     team_id: 'team-1',
     title: 'Ship the nav',
     status: 'completed',
@@ -142,7 +142,7 @@ test('deleteMission() 은 deleted=true 인 orchestration_update 를 실제로 �
   const frame = frames[0];
   assert.equal(frame.deleted, true);
   assert.equal(frame.mission_id, mission.id);
-  assert.equal(frame.workspace_id, WS);
+  assert.equal(frame.account_id, WS);
   // 소비자가 워크스페이스 필터에 쓰는 필드들이 삭제 프레임에도 실려야 한다.
   assert.equal(frame.team_id, 'team-1');
   assert.equal(typeof frame.timestamp, 'string');
@@ -170,7 +170,7 @@ test('삭제 프레임의 최종 SSE 바이트에 deleted=true 가 살아남는�
   assert.equal(wire.event_type, 'orchestration_update');
   assert.equal(wire.deleted, true, 'event-registry map() 이 deleted 를 떨어뜨렸다');
   assert.equal(wire.mission_id, mission.id);
-  assert.equal(wire.workspace_id, WS);
+  assert.equal(wire.account_id, WS);
   // 소비자가 실제로 읽는 키들이 그대로 있어야 한다.
   assert.equal(typeof wire.title, 'string');
   assert.ok(wire.counts, 'counts 가 wire 에서 사라졌다');

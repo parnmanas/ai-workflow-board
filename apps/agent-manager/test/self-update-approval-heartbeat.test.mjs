@@ -69,7 +69,7 @@ async function checkerAt(
 
 function heartbeatFor(t, checker, instanceId) {
   const heartbeat = new InstanceHeartbeat(
-    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' },
     instanceId,
     { mode: 'manager', version: 'test', cli: 'mixed', cliAdapters: [], updateChecker: checker },
   );
@@ -129,7 +129,7 @@ test('승인이 기록돼 개시로 넘어가면 대기 신호가 하트비트�
 test('updateChecker 없이 구성된 하트비트는 이 필드를 아예 보내지 않는다 (구버전 와이어 모양)', async (t) => {
   const payloadPromise = stubFetch(t);
   const heartbeat = new InstanceHeartbeat(
-    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' },
     'approval-pending-4',
     { mode: 'manager', version: 'test', cli: 'mixed', cliAdapters: [] },
   );

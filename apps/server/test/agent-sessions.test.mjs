@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
@@ -45,12 +45,12 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const plainUser = await createUser(app, getDataSourceToken, { name: 'plain', role: 'user' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
   const plainToken = app.get(AuthService).createSession(plainUser.id);
-  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   // 가짜 Runtime Host — createAgent 가 만든 manager identity + 그 키로 하트비트를 친다.
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
@@ -295,11 +295,11 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'cli-settings');
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'cli-settings-other');
+  const ws = await createAccount(app, getDataSourceToken, 'cli-settings');
+  const otherWs = await createAccount(app, getDataSourceToken, 'cli-settings-other');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
@@ -313,7 +313,7 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const strangerKey = runtimeHostKeyForAgent(stranger.id);
 
   const credRepo = ds.getRepository('Credential');
-  const mkCred = (workspace_id, name, provider, fields) => credRepo.save(credRepo.create({ workspace_id, name, description: '', provider, encrypted_data: encrypt(JSON.stringify(fields)) }));
+  const mkCred = (account_id, name, provider, fields) => credRepo.save(credRepo.create({ account_id, name, description: '', provider, encrypted_data: encrypt(JSON.stringify(fields)) }));
   // 줄바꿈이 섞인 채 저장된 토큰(정규화 이전 row) — 서버가 정리해 보낸다
   const claudeToken = await mkCred(ws.id, 'rolf oauth token', 'claude_oauth_token', { oauth_token: 'sk-ant-oat-sec\n ret' });
   const globalClaude = await mkCred(null, 'shared claude key', 'claude_api_key', { api_key: 'sk-global' });
@@ -356,7 +356,7 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   assert.equal(host.cli_settings.claude.name, 'rolf oauth token');
   assert.equal(host.cli_settings.codex, undefined);
 
-  // open / prompt requests carry workspace_id + credential_id; list/history carry workspace_id only
+  // open / prompt requests carry account_id + credential_id; list/history carry account_id only
   const requests = [];
   const onRequest = (p) => requests.push(p);
   activityEvents.on('agent_session_request', onRequest);
@@ -365,7 +365,7 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   await waitFor(() => requests.some((r) => r.op === 'open'), 'open rpc');
   const openReq = requests.find((r) => r.op === 'open');
   assert.equal(openReq.credential_id, claudeToken.id);
-  assert.equal(openReq.workspace_id, ws.id);
+  assert.equal(openReq.account_id, ws.id);
   await call(`${base}/api/agent/sessions/rpc/${openReq.request_id}`, { method: 'POST', headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ manager_id: managerId, ok: true, result: { session_id: 'sess-cred', cwd: '/home/parn/repo', status: 'ready' } }) });
   assert.equal((await openCall).status, 201);
   const prompt = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/prompt`, { method: 'POST', headers, body: JSON.stringify({ text: 'hi' }) });
@@ -380,18 +380,18 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const restartReq = requests.find((r) => r.op === 'restart');
   assert.ok(restartReq, 'restart 요청이 나가야 한다');
   assert.equal(restartReq.credential_id, claudeToken.id, 'restart 는 세션이 쓰던 계정 그대로 다시 열어야 한다');
-  assert.equal(restartReq.workspace_id, ws.id);
+  assert.equal(restartReq.account_id, ws.id);
   assert.equal(restartReq.cwd, '/home/parn/repo', '다시 열 때 cwd 도 함께 실어야 한다');
 
   // manager fetches the decrypted material — only for a bound credential, only as the bound manager
-  const fetched = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  const fetched = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?account_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(fetched.status, 200, fetched.text);
   assert.equal(fetched.body.provider, 'claude_oauth_token');
   assert.deepEqual(fetched.body.fields, { oauth_token: 'sk-ant-oat-secret' }, 'interior whitespace is stripped before the token reaches the manager');
   assert.equal(fetched.body.fields.oauth_token.includes('\n'), false);
-  const unbound = await call(`${base}/api/agent/sessions/credential/${globalClaude.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  const unbound = await call(`${base}/api/agent/sessions/credential/${globalClaude.id}?account_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(unbound.status, 403, 'a credential that is not bound in CLI settings is not served');
-  const otherManager = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': strangerKey } });
+  const otherManager = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?account_id=${ws.id}`, { headers: { 'X-Agent-Key': strangerKey } });
   assert.equal(otherManager.status, 403, 'another Runtime Host cannot read this binding');
   const noWs = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(noWs.status, 400);
@@ -399,8 +399,8 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   // clearing the binding
   const cleared = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: null }) });
   assert.equal(cleared.body.credential, null);
-  const afterClear = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
-  assert.equal(afterClear.status, 403);
+  const afterClear = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?account_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  assert.equal(afterClear.status, 200, 'existing sessions retain their pinned credential after account defaults are cleared');
 });
 
 // ─── 유령 상태: 매니저 답(list live_status / history live)과 매니저 재시작이 진행 중 상태를 되돌린다 ──
@@ -416,10 +416,10 @@ test('ghost in-flight state is reconciled with the manager answer and cleared wh
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-ghost');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-ghost');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner-ghost', role: 'admin' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
-  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-ghost', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
@@ -541,10 +541,10 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-interactive');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-interactive');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner-interactive', role: 'admin' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
-  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-interactive', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
@@ -727,8 +727,8 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const settingsUrl = `${base}/api/agent-sessions/hosts/${managerId}/codex/settings`;
   // credential 을 한 번도 묶지 않은 호스트에도 선택지 캐시가 남아야 한다 — row 가 없다고 비워 두면
   // 새 세션 모달에 아무 선택기도 뜨지 않는다(그 호스트는 row 자체가 없다).
-  const freshWs = await createWorkspace(app, getDataSourceToken, 'agent-sessions-fresh');
-  const freshHeaders = { ...ownerHeaders, 'X-Workspace-Id': freshWs.id };
+  const freshWs = await createAccount(app, getDataSourceToken, 'agent-sessions-fresh');
+  const freshHeaders = { ...ownerHeaders, 'X-Account-Id': freshWs.id };
   const freshSettings = await call(`${base}/api/agent-sessions/hosts/${managerId}/codex/settings`, { headers: freshHeaders });
   assert.equal(freshSettings.status, 200, freshSettings.text);
   assert.deepEqual(freshSettings.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'a workspace with no settings row still sees what the live session offers');
@@ -836,10 +836,10 @@ test('세션 CLI 설정: 세션을 연 적 없는 호스트×CLI 도 하트비�
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'model-fallback');
+  const ws = await createAccount(app, getDataSourceToken, 'model-fallback');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const token = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
@@ -894,10 +894,10 @@ test('세션 CLI 설정: ACP 캐시가 있어도 하트비트가 더 아는 모�
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'model-union');
+  const ws = await createAccount(app, getDataSourceToken, 'model-union');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const token = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'opencode' });
   const managerId = agent.manager_agent_id;
@@ -905,7 +905,7 @@ test('세션 CLI 설정: ACP 캐시가 있어도 하트비트가 더 아는 모�
 
   // ACP 가 보고한 선택지가 캐시돼 있다(세션을 한 번 연 상태).
   await ds.getRepository('AgentSessionCliSetting').save({
-    workspace_id: ws.id, manager_id: managerId, cli: 'opencode', credential_id: null,
+    account_id: ws.id, manager_id: managerId, cli: 'opencode', credential_id: null,
     default_config: '{}', backend_profile_id: null, updated_by: owner.id,
     known_config_options: JSON.stringify([{
       config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'opencode/big-pickle',
@@ -949,10 +949,10 @@ test('server restart: reading the session re-claims the driver so the live strea
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-redriver');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-redriver');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner-redriver', role: 'admin' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
-  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-redriver', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
@@ -1032,9 +1032,9 @@ test('local image: 경로를 매니저에 묻고 바이트를 그 mime 으로, �
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
   const base = `http://localhost:${port}`;
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-local-image');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-local-image');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner-li', role: 'admin' });
-  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Workspace-Id': ws.id };
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': ws.id };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-li', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
@@ -1099,9 +1099,9 @@ test('prompt with images forwards bytes to the manager; bad input is rejected wi
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
   const base = `http://localhost:${port}`;
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-prompt-images');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-prompt-images');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner-pi', role: 'admin' });
-  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-pi', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };

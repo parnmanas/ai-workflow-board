@@ -20,7 +20,7 @@ test('sidebar keeps the chat-first category order', () => {
   }
 
   const chatSectionIndex = sidebarSource.indexOf('<section aria-labelledby="sidebar-chat-heading"');
-  const featureSectionsIndex = sidebarSource.indexOf('workspaceSections.map');
+  const featureSectionsIndex = sidebarSource.indexOf('featureSections.map');
   const operationsIndex = sidebarSource.indexOf('<span id="sidebar-operations">Operations</span>');
   assert.ok(chatSectionIndex >= 0 && chatSectionIndex < featureSectionsIndex);
   assert.ok(featureSectionsIndex < operationsIndex);
@@ -42,11 +42,11 @@ test('sidebar nav is a single scroll container (no nested chat-room scroll area)
   // 갖지 않는다. <nav> 하나가 Chat 섹션 + Work/Automation/... 섹션을 함께 스크롤한다.
   assert.doesNotMatch(sidebarSource, /maxHeight:\s*220/);
   assert.match(sidebarSource, /aria-label="Primary navigation"[\s\S]*?overflowY:\s*'auto'/);
-  assert.match(sidebarSource, /const roomPath = `\$\{workspaceBase\}\/chat\/\$\{room\.id\}`/);
+  assert.match(sidebarSource, /const roomPath = `\$\{basePath\}\/chat\/\$\{room\.id\}`/);
   assert.match(sidebarSource, /aria-label="New chat"/);
-  assert.match(sidebarSource, /`\$\{workspaceBase\}\/chat\?new=1`/);
+  assert.match(sidebarSource, /`\$\{basePath\}\/chat\?new=1`/);
   assert.match(appSource, /path="chat\/:roomId" element=\{<ChatPage \/>\}/);
-  assert.match(chatPageSource, /navigate\(`\/ws\/\$\{wsId\}\/chat\/\$\{roomId\}`/);
+  assert.match(chatPageSource, /navigate\(`\/chat\/\$\{roomId\}`/);
 });
 
 test('sidebar chat rooms paginate 5-at-a-time with a load-more/collapse toggle', () => {
@@ -66,7 +66,7 @@ test('the main chat surface does not duplicate the sidebar room list', () => {
 
 test('settings remain one click away and own canonical nested routes', () => {
   for (const segment of [
-    'workspace',
+    'ownership',
     'members',
     'credentials',
     'channels',
@@ -80,7 +80,7 @@ test('settings remain one click away and own canonical nested routes', () => {
   assert.match(sidebarSource, /label:\s*'User Administration'/);
   assert.match(sidebarSource, /label:\s*'System Settings'/);
 
-  // Workspace roles 는 보드와 함께 없어졌다(docs/tickets.md) — 메뉴도 라우트도 없다.
+  // Account roles 는 보드와 함께 없어졌다(docs/tickets.md) — 메뉴도 라우트도 없다.
   assert.doesNotMatch(sidebarSource, /settings\/roles/);
   assert.doesNotMatch(appSource, /path="settings\/roles"/);
   assert.doesNotMatch(appSource, /WorkspaceRolesPage/);
@@ -96,9 +96,9 @@ test('WORK 은 Tickets / Teams / Orchestrations 를 독립 라우트로 갖고 �
   // 렌더 계약은 sidebar-work-hierarchy.test.mjs 가 실제 마운트로 검증하고,
   // 여기서는 라우트 "등록" 자체(그 테스트가 볼 수 없는 부분)를 고정한다.
   assert.match(appSource, /path="teams" element=\{<OrchestrationTeamsPage \/>\}/);
-  assert.match(appSource, /path="orchestration" element=\{<OrchestrationPage \/>\}/);
-  assert.match(appSource, /path="orchestration\/teams" element=\{<LegacyOrchestrationTeamsRedirect \/>\}/);
-  assert.match(appSource, /path="orchestration\/missions\/:missionId" element=\{<MissionDetailPage \/>\}/);
+  assert.match(appSource, /path="missions" element=\{<OrchestrationPage \/>\}/);
+  assert.match(appSource, /path="orchestration\/\*" element=\{<LegacyWorkspaceRedirect \/>\}/);
+  assert.match(appSource, /path="missions\/:missionId" element=\{<MissionDetailPage \/>\}/);
 
   // 사이드바에는 단수 'Orchestration' 라벨이 남지 않는다.
   assert.doesNotMatch(sidebarSource, /label: 'Orchestration'/);
@@ -113,7 +113,7 @@ test('보드가 없어졌다: /tickets · /projects 라우트가 있고 예전 /
     assert.doesNotMatch(appSource, new RegExp(gone), `${gone} 라우트가 남아 있다`);
   }
   // 사이드바: Knowledge 에 Projects, Prompt Templates 는 없다.
-  assert.match(sidebarSource, /key: 'projects', path: `\$\{workspaceBase\}\/projects`/);
+  assert.match(sidebarSource, /key: 'projects', path: `\$\{basePath\}\/projects`/);
   assert.doesNotMatch(sidebarSource, /Prompt Templates/);
   // 워크스페이스를 바꿀 때 섹션이 없으면 기본 랜딩(sessions)으로 간다 — 'boards' 가 아니다.
   assert.doesNotMatch(appLayoutSource, /\/boards/);

@@ -11,7 +11,7 @@ import { MONO, ErrorBox } from './repoTabCommon';
 
 interface RepoFilesTabProps {
   projectId: string;
-  workspaceId: string;
+  accountId: string;
   refKey: string;
 }
 
@@ -23,7 +23,7 @@ function formatBytes(bytes: number): string {
   return `${value >= 100 || i === 0 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
 }
 
-export default function RepoFilesTab({ projectId, workspaceId, refKey }: RepoFilesTabProps) {
+export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFilesTabProps) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<RepoTreeEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -42,7 +42,7 @@ export default function RepoFilesTab({ projectId, workspaceId, refKey }: RepoFil
     setLoading(true);
     setError(null);
     try {
-      const res = await api.getProjectTree(projectId, workspaceId, { ref: refKey, path: p });
+      const res = await api.getProjectTree(projectId, accountId, { ref: refKey, path: p });
       setEntries(res.entries);
     } catch (err: any) {
       setError(err?.message || '파일 트리를 불러오지 못했습니다.');
@@ -50,7 +50,7 @@ export default function RepoFilesTab({ projectId, workspaceId, refKey }: RepoFil
     } finally {
       setLoading(false);
     }
-  }, [projectId, workspaceId, refKey]);
+  }, [projectId, accountId, refKey]);
 
   useEffect(() => { loadTree(path); }, [loadTree, path]);
 
@@ -60,14 +60,14 @@ export default function RepoFilesTab({ projectId, workspaceId, refKey }: RepoFil
     setFileError(null);
     setFileLoading(true);
     try {
-      const res = await api.getProjectFile(projectId, workspaceId, entry.path, refKey);
+      const res = await api.getProjectFile(projectId, accountId, entry.path, refKey);
       setFile(res);
     } catch (err: any) {
       setFileError(err?.message || '파일을 불러오지 못했습니다.');
     } finally {
       setFileLoading(false);
     }
-  }, [projectId, workspaceId, refKey]);
+  }, [projectId, accountId, refKey]);
 
   // breadcrumb 세그먼트 — 클릭 시 해당 깊이로 이동.
   const segments = path ? path.split('/') : [];

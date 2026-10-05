@@ -75,7 +75,7 @@ export interface MissionCounts {
 
 export interface MissionListItem {
   id: string;
-  workspace_id: string;
+  account_id: string;
   team_id: string;
   team_name: string;
   title: string;
@@ -356,17 +356,17 @@ export class OrchestrationMissionService {
 
   // ── Lookups ───────────────────────────────────────────────────────────────
 
-  async requireMission(missionId: string, workspaceId?: string): Promise<OrchestrationMission> {
+  async requireMission(missionId: string, accountId?: string): Promise<OrchestrationMission> {
     const where: any = { id: missionId };
-    if (workspaceId) where.workspace_id = workspaceId;
+    if (accountId) where.account_id = accountId;
     const mission = await this.missionRepo.findOne({ where });
     if (!mission) throw orchestrationError(404, 'mission not found');
     return mission;
   }
 
-  async requireStep(stepId: string, workspaceId?: string): Promise<OrchestrationStep> {
+  async requireStep(stepId: string, accountId?: string): Promise<OrchestrationStep> {
     const where: any = { id: stepId };
-    if (workspaceId) where.workspace_id = workspaceId;
+    if (accountId) where.account_id = accountId;
     const step = await this.stepRepo.findOne({ where });
     if (!step) throw orchestrationError(404, 'step not found');
     return step;
@@ -418,7 +418,7 @@ export class OrchestrationMissionService {
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
   async createMission(input: {
-    workspace_id: string;
+    account_id: string;
     team_id: string;
     title: string;
     objective?: string;
@@ -457,9 +457,9 @@ export class OrchestrationMissionService {
      */
     orchestrator_agent_id?: string;
   }): Promise<OrchestrationMission> {
-    const workspaceId = (input.workspace_id || '').trim();
+    const accountId = (input.account_id || '').trim();
     const title = (input.title || '').trim();
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+    if (!accountId) throw orchestrationError(400, 'account_id is required');
     if (!title) throw orchestrationError(400, 'title is required');
 
     // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
@@ -468,13 +468,13 @@ export class OrchestrationMissionService {
     // contract is "never sends a chat message" (that's the runner's job), so
     // a breach still rejects/logs via logService but skips the optional chat
     // alert rather than crossing that boundary for one notify call.
-    await enforceRunBudget({ dataSource: this.dataSource, logger: this.logService }, 'orchestration', workspaceId);
+    await enforceRunBudget({ dataSource: this.dataSource, logger: this.logService }, 'orchestration', accountId);
 
     // 이 workspace 소유 팀 OR 글로벌 팀(티켓 1b62b437)에 매칭된다 — 글로벌 팀의
     // 로스터는 workspace 비종속이지만, 이 팀이 실행하는 MISSION은 여전히 호출자가
     // 해석한 workspace에 귀속/과금된다.
     const team = await this.teamRepo.findOne({
-      where: visibleScopeWhere<OrchestrationTeam>(workspaceId, { id: input.team_id }),
+      where: visibleScopeWhere<OrchestrationTeam>(accountId, { id: input.team_id }),
     });
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
     if (!team.orchestrator_agent_id) {
@@ -486,17 +486,17 @@ export class OrchestrationMissionService {
     // 아니라 여기에도 있어야, team-scope 검사가 따로 없는 REST/human 경로
     // (POST /orchestration/missions)에도 똑같이 적용된다 — 안 그러면 그 컨트롤러는
     // 글로벌 팀에 대해 호출자가 준 workspace_id를 아무 검증 없이 그대로 통과시킨다.
-    if (team.workspace_id === null) {
-      const allowed = Array.isArray(team.allowed_workspace_ids) ? team.allowed_workspace_ids : [];
+    if (team.account_id === null) {
+      const allowed = Array.isArray(team.allowed_account_ids) ? team.allowed_account_ids : [];
       if (allowed.length === 0) {
         throw orchestrationError(
           409,
-          `team "${team.name}" is global but has no allowed workspaces configured — a human operator must ` +
+          `team "${team.name}" is global but has no allowed accounts configured — a human operator must ` +
             `set the team's workspace allow-list before it can create missions.`,
         );
       }
-      if (!allowed.includes(workspaceId)) {
-        throw orchestrationError(400, `workspace_id "${workspaceId}" is not on team "${team.name}"'s allowed workspace list.`);
+      if (!allowed.includes(accountId)) {
+        throw orchestrationError(400, `account_id "${accountId}" is not on team "${team.name}"'s allowed workspace list.`);
       }
     }
     if (input.orchestrator_agent_id && input.orchestrator_agent_id !== team.orchestrator_agent_id) {
@@ -513,7 +513,7 @@ export class OrchestrationMissionService {
 
     const mission = await this.missionRepo.save(
       this.missionRepo.create({
-        workspace_id: workspaceId,
+        account_id: accountId,
         team_id: team.id,
         title,
         objective,
@@ -556,7 +556,7 @@ export class OrchestrationMissionService {
 
   async updateMission(
     missionId: string,
-    workspaceId: string,
+    accountId: string,
     patch: {
       title?: string;
       objective?: string;
@@ -577,7 +577,7 @@ export class OrchestrationMissionService {
       user_chat_mode?: string;
     },
   ): Promise<OrchestrationMission> {
-    const mission = await this.requireMission(missionId, workspaceId);
+    const mission = await this.requireMission(missionId, accountId);
     if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
       // 예외 하나: `user_chat_mode` 만 담긴 패치는 종료된 미션에도 허용한다. 끝난 미션의
       // 대화는 이어서 진행하는 입구로 살아 있으므로(되살리기), 그 방에서 누가 말할 수
@@ -719,8 +719,8 @@ export class OrchestrationMissionService {
     await em.update(ChatRoom, room.id, { open_join: desired });
   }
 
-  async deleteMission(missionId: string, workspaceId: string): Promise<void> {
-    const mission = await this.requireMission(missionId, workspaceId);
+  async deleteMission(missionId: string, accountId: string): Promise<void> {
+    const mission = await this.requireMission(missionId, accountId);
     if (!(TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status) && mission.status !== 'draft') {
       throw orchestrationError(409, `mission is ${mission.status} — cancel it before deleting`);
     }
@@ -728,17 +728,19 @@ export class OrchestrationMissionService {
     await this.eventRepo.delete({ mission_id: mission.id });
     await this.missionRepo.delete({ id: mission.id });
     this.emitDeleted(mission);
-    this.logService.info('Orchestration', `mission deleted ${mission.id}`, { workspace_id: workspaceId });
+    this.logService.info('Orchestration', `mission deleted ${mission.id}`, { account_id: accountId });
   }
 
   // ── Projections ───────────────────────────────────────────────────────────
 
   async listMissions(
-    workspaceId: string,
+    accountId: string | string[],
     opts?: { teamId?: string; status?: string; limit?: number },
   ): Promise<MissionListItem[]> {
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
-    const where: any = { workspace_id: workspaceId };
+    if (!accountId) throw orchestrationError(400, 'account_id is required');
+    const ids = Array.isArray(accountId) ? accountId : [accountId];
+    if (!ids.length) return [];
+    const where: any = { account_id: In(ids) };
     if (opts?.teamId) where.team_id = opts.teamId;
     if (opts?.status === 'active') where.status = Not(In(TERMINAL_MISSION_STATUSES as unknown as string[]));
     else if (opts?.status) where.status = opts.status;
@@ -753,8 +755,8 @@ export class OrchestrationMissionService {
 
   /**
    * Missions an agent belongs to, as orchestrator or team member — the
-   * agent-scoped counterpart to `listMissions` (workspace-scoped, human/REST
-   * use). No workspace_id input, same rationale as `listTeamsForAgent`: the
+   * agent-scoped counterpart to `listMissions` (account-scoped, human/REST
+   * use). No account_id input, same rationale as `listTeamsForAgent`: the
    * caller may be a workspace-less manager identity. Defaults to non-terminal
    * missions only (an orchestrator recovering a lost mission_id cares about
    * what's still open); pass status to widen it.
@@ -826,7 +828,7 @@ export class OrchestrationMissionService {
 
     return missions.map((m) => ({
       id: m.id,
-      workspace_id: m.workspace_id,
+      account_id: m.account_id,
       team_id: m.team_id,
       team_name: teamById.get(m.team_id)?.name ?? '(deleted team)',
       title: m.title,
@@ -852,8 +854,8 @@ export class OrchestrationMissionService {
     }));
   }
 
-  async getMissionDetail(missionId: string, workspaceId: string, eventLimit = 200): Promise<MissionDetail> {
-    const mission = await this.requireMission(missionId, workspaceId);
+  async getMissionDetail(missionId: string, accountId: string, eventLimit = 200): Promise<MissionDetail> {
+    const mission = await this.requireMission(missionId, accountId);
     const steps = await this.listSteps(mission.id);
     const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
 
@@ -905,7 +907,7 @@ export class OrchestrationMissionService {
 
     return {
       id: mission.id,
-      workspace_id: mission.workspace_id,
+      account_id: mission.account_id,
       team_id: mission.team_id,
       team_name: team?.name ?? '(deleted team)',
       title: mission.title,
@@ -1104,7 +1106,7 @@ export class OrchestrationMissionService {
    */
   async getStepSession(
     stepId: string,
-    workspaceId: string,
+    accountId: string,
     opts?: { limit?: number; beforeId?: string },
   ): Promise<{
     step_id: string;
@@ -1114,7 +1116,7 @@ export class OrchestrationMissionService {
     has_more: boolean;
     next_before_id: string | null;
   }> {
-    const step = await this.requireStep(stepId, workspaceId);
+    const step = await this.requireStep(stepId, accountId);
     const take = Math.min(Math.max(opts?.limit ?? 60, 1), 200);
     const empty = {
       step_id: step.id,
@@ -1204,10 +1206,10 @@ export class OrchestrationMissionService {
    */
   async getStepAttachment(
     stepId: string,
-    workspaceId: string,
+    accountId: string,
     attachmentId: string,
   ): Promise<StepAttachmentMeta & { file_data: string; truncated: boolean }> {
-    const step = await this.requireStep(stepId, workspaceId);
+    const step = await this.requireStep(stepId, accountId);
     if (!step.room_id) throw orchestrationError(404, 'attachment not found');
     const row = await this.dataSource.getRepository(TicketAttachment).findOne({
       where: { id: attachmentId, room_id: step.room_id },
@@ -1230,10 +1232,10 @@ export class OrchestrationMissionService {
    */
   async listMissionEvidence(
     missionId: string,
-    workspaceId: string,
+    accountId: string,
     limit = 200,
   ): Promise<{ mission_id: string; items: MissionEvidenceItem[] }> {
-    const mission = await this.requireMission(missionId, workspaceId);
+    const mission = await this.requireMission(missionId, accountId);
     const steps = await this.listSteps(mission.id);
     const stepByRoom = new Map<string, OrchestrationStep>();
     for (const s of steps) if (s.room_id) stepByRoom.set(s.room_id, s);
@@ -1464,7 +1466,7 @@ export class OrchestrationMissionService {
     }
     const row = {
       mission_id: mission.id,
-      workspace_id: mission.workspace_id,
+      account_id: mission.account_id,
       step_id: input.step_id ?? null,
       type: input.type,
       actor_type: input.actor_type || 'system',
@@ -1555,7 +1557,7 @@ export class OrchestrationMissionService {
    */
   async listMissionEvents(
     missionId: string,
-    workspaceId: string,
+    accountId: string,
     opts?: { limit?: number; before_at?: string; before_seq?: number; before_id?: string },
   ): Promise<{
     events: OrchestrationEvent[];
@@ -1563,7 +1565,7 @@ export class OrchestrationMissionService {
     next_cursor: { at: string; seq: number; id: string } | null;
   }> {
     const mission = await this.requireMission(missionId);
-    if (workspaceId && mission.workspace_id !== workspaceId) {
+    if (accountId && mission.account_id !== accountId) {
       throw orchestrationError(404, 'mission not found in this workspace');
     }
     const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
@@ -1713,7 +1715,7 @@ export class OrchestrationMissionService {
       .then((steps) => {
         activityEvents.emit('orchestration_update', {
           mission_id: mission.id,
-          workspace_id: mission.workspace_id,
+          account_id: mission.account_id,
           team_id: mission.team_id,
           title: mission.title,
           status: mission.status,
@@ -1744,7 +1746,7 @@ export class OrchestrationMissionService {
   private emitDeleted(mission: OrchestrationMission): void {
     activityEvents.emit('orchestration_update', {
       mission_id: mission.id,
-      workspace_id: mission.workspace_id,
+      account_id: mission.account_id,
       team_id: mission.team_id,
       title: mission.title,
       status: mission.status,

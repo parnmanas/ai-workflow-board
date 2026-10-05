@@ -5,11 +5,18 @@
 **"업무 하나를 팀에 통째로 맡기면, 오케스트레이터 Agent 가 런타임에 계획을 세우고
 팀원에게 나눠 실행한다"** 는 모델이다.
 
-- UI: `/ws/:wsId/orchestration` (Missions) · `/ws/:wsId/teams` (Teams; 예전
-  `/ws/:wsId/orchestration/teams` 는 redirect)
+- UI: `/missions` (Missions) · `/teams` (Teams; 예전
+  `/missions/teams` 는 redirect)
 - 서버: `apps/server/src/modules/orchestration/`
 - MCP 툴: `apps/server/src/modules/mcp/tools/orchestration-tools.ts`
 - 테스트: `test/orchestration-plan-dag.test.mjs`, `test/qa-flows/orchestration-lifecycle.test.mjs`
+
+`/missions`는 접근 가능한 Account의 미션을 합쳐 보여주며 소유 계정 전환기가 없다.
+Account는 membership·credential·정책·예산의 경계다. 계정 소유 Team을 선택하면
+새 미션은 그 Team의 계정에 귀속되고, Project를 지정한 생성은 그 Project의 소유권을
+따른다. Global Team을 사용한 독립 미션은 기본 접근 계정을 사용한다.
+미션·Step 상세와 수정, artifact ref와 SSE는 실제 소유 계정으로 접근을 검사한다.
+요청의 `account_id`는 실제 객체 소유권을 덮어쓰지 않는다([ownership.md](ownership.md)).
 
 ---
 
@@ -240,7 +247,7 @@ node/edge 는 거부된다.
 네 개를 전부 띄움). `slots` 는 병렬 상한이지 예산이 아니다.
 
 **디스패치 실패와 예산**: 예산은 work order 를 room 에 올리기 **직전**에 커밋된다.
-따라서 그 지점 전에 던진 실패(assignee 가 사라졌거나 다른 workspace 로 옮겨진
+따라서 그 지점 전에 던진 실패(assignee 가 사라졌거나 다른 account 로 옮겨진
 경우)는 예산을 쓰지 않고, 그 뒤의 실패는 이미 쓴 것으로 남는다 — "subagent 가
 떴을 수 있는가"를 기준으로 보수적으로 센다. 루프가 예산을 미리 깎지 않고 매
 반복 실측을 다시 읽는 이유가 이 구분을 보존하기 위해서다.
@@ -395,7 +402,7 @@ Mm` 을 나란히 그려 운영자가 그 결말을 미리 볼 수 있게 한다
 읽기 경로가 따로 필요한 이유는 세션 전사와 같다: 채팅의 `chat-rooms/:room/attachments/:id` 는
 참여자 게이트이고 step 방에는 사람이 없다. 그래서
 - `GET /api/orchestration/steps/:id/attachments/:attId` — 바이트. **첨부가 그 step 의 방에
-  속하는지**를 앵커로 잡는다(다른 step 의 id 로는 404, 워크스페이스 경계는 step 조회가 강제).
+  속하는지**를 앵커로 잡는다(다른 step 의 id 로는 404, 실제 소유 계정의 접근 경계는 step 조회가 강제).
 - `GET /api/orchestration/missions/:id/evidence` — 갤러리 목록(메타만, 최신순, 상한 있음).
   `(room_id, created_at)` 인덱스를 타는 한 쿼리다. 미션 방 항목(`step_id: null`)의 바이트는
   채팅 경로로 읽는다 — 사람이 그 방의 참여자다.
@@ -715,7 +722,7 @@ verdict 어휘는 `pass` / `fail` 고정.
 | --- | --- |
 | 열림 | step 이 `awaiting_user` 로 전이. 만족된 상류 edge 의 `artifacts`(스크린샷·동영상·URL·경로)를 **복사**해 판정 근거로 붙이고 `confirm_requested` 이벤트를 남긴다. subagent 는 뜨지 않지만 `total_visits` 를 1 소모한다 — 예산은 node 실행 횟수이지 스폰 횟수가 아니다 |
 | 대기 | subagent 를 띄우지 않는다. **병렬 슬롯을 쓰지 않으므로** 다른 분기는 계속 진행된다. 타임아웃도 없다 |
-| 판정 | `POST /api/orchestration/steps/:stepId/confirm` (사용자 세션 전용, body `{ workspace_id, verdict, visit, feedback? }`). verdict 를 `verdict` 컬럼에 실어 기존 edge 판정 기계를 그대로 태우고, `confirm_decided` 이벤트를 남긴 뒤 `reportStep` 과 **같은** 전이/차단/디스패치/wake 경로로 이어간다 |
+| 판정 | `POST /api/orchestration/steps/:stepId/confirm` (사용자 세션 전용, body `{ account_id, verdict, visit, feedback? }`). verdict 를 `verdict` 컬럼에 실어 기존 edge 판정 기계를 그대로 태우고, `confirm_decided` 이벤트를 남긴 뒤 `reportStep` 과 **같은** 전이/차단/디스패치/wake 경로로 이어간다 |
 
 `awaiting_user` 는 `IN_FLIGHT_STEP_STATUSES` 에도 `TERMINAL_STEP_STATUSES` 에도 **없다**.
 in-flight 로 두면 병렬 슬롯을 먹고 `reapStuckSteps` 가 사람을 기다리는 노드를
@@ -763,7 +770,7 @@ confirm 은 "가만히 두면 언젠가 진행된다" 가 성립하지 않는 �
 
 | 언제 | 무엇이 나가는가 |
 | --- | --- |
-| 게이트가 열릴 때 | `(step, visit)` 당 **1회**. 제목에 미션명, 본문에 step 제목 + 질문(`instructions`), 링크는 판정 화면(`/ws/<ws>/orchestration/missions/<id>`) |
+| 게이트가 열릴 때 | `(step, visit)` 당 **1회**. 제목에 미션명, 본문에 step 제목 + 질문(`instructions`), 링크는 판정 화면(`/missions/<id>`) |
 | N시간 무응답 | 같은 pass 에 **1회** 리마인더(`ORCHESTRATION_CONFIRM_REMINDER_MS`, 기본 24시간, `0` = 끔) |
 | 판정 이후 | 없음 — `awaiting_user` 가 아니면 리마인더 대상이 아니다 |
 
@@ -776,7 +783,7 @@ confirm 은 "가만히 두면 언젠가 진행된다" 가 성립하지 않는 �
 해당한다.
 
 **수신자** — 미션 소유자(`created_by_type='user'` 인 미션의 `created_by`)가 1순위다. 에이전트가
-`create_orchestration_mission` 으로 만든 미션은 사람 소유자가 없으므로 워크스페이스의
+`create_orchestration_mission` 으로 만든 미션은 사람 소유자가 없으므로 소유 계정의
 owner/member 로 넓힌다. 넓혀도 실제 소음은 작다 — 채널 바인딩이 없는 사용자는 팬아웃이
 그 자리에서 no-op 이다. `AWB_PUBLIC_URL` 이 없으면 링크 없이 나간다(무엇이 왜 멈췄는지는
 여전히 전달된다).
@@ -868,7 +875,7 @@ graph 모드에서만 만들 수 있고 `graph_enabled` 기본값이 `false` 이
 
 | 값 | 의미 |
 | --- | --- |
-| `open` | 워크스페이스 운영자면 참여자로 등록되지 않았어도 바로 발화 |
+| `open` | 소유 계정에 접근할 수 있는 운영자면 참여자로 등록되지 않았어도 바로 발화 |
 | `participants_only` | 참여자 명단에 있는 사람만 발화 |
 | `off` | 사람은 아무도 발화 불가 — 읽기 전용(관전) |
 
@@ -905,7 +912,7 @@ auto-join 이 그 플래그를 보기 때문이고, 방 생성·옵션 변경·�
 `mission.room_id` 뿐이라 step 방에는 구조적으로 닿지 않는다. 재실행 안전 — 값이 같은 방은
 쓰지 않고, 참여자는 (room, user) 행 **존재 여부**로 판정한다(활성 여부로 보면 의도적으로
 나간 사람을 매 실행마다 되돌린다). 같은 순회에서 미션 chat 상태 전수 조사 결과를 한 줄
-로그로 남긴다 — 워크스페이스 전체 미션을 열어 주는 표면이 에이전트 쪽에 없어 조사를 여기에
+로그로 남긴다 — 계정 전체 미션을 열어 주는 표면이 에이전트 쪽에 없어 조사를 여기에
 얹었다.
 
 조사는 요구된 세 축을 **변경 전 값으로** 찍는다: 방 `open_join` 분포, 활성 **사람** 참여자

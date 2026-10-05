@@ -14,9 +14,9 @@ test.use({ launchOptions: {
 
 const workspace = { id: 'ws-voice-test', name: 'Voice Test', relations: ['admin'] };
 const operator = { id: 'op-test', name: 'Jarvis', aliases: [], manager_id: 'host-test', cli: 'claude', session_id: 'operator-session', cwd: '/tmp', title: 'Operator' };
-const operatorPath = `/ws/${workspace.id}/sessions/${operator.manager_id}/${operator.cli}/${operator.session_id}`;
+const operatorPath = `/sessions/${operator.manager_id}/${operator.cli}/${operator.session_id}`;
 
-async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${workspace.id}/sessions`,
+async function fixture(page, suspendOnPermission = false, initialPath = `/sessions`,
   { autoMic = true, blockCue = false, wakeEnabled = false, cloudStt = false } = {}) {
   const prompts = [];
   const transcripts = [];
@@ -24,9 +24,9 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
   let recognizeReport = true;
   page.on('pageerror', (error) => errors.push(error.message));
   await page.context().grantPermissions(['microphone']);
-  await page.addInitScript(({ workspaceId, suspendOnPermission, autoMic, blockCue, wakeEnabled }) => {
+  await page.addInitScript(({ accountId, suspendOnPermission, autoMic, blockCue, wakeEnabled }) => {
     localStorage.setItem('auth_token', 'voice-test-token');
-    localStorage.setItem('currentWorkspaceId', workspaceId);
+    localStorage.setItem('currentAccountId', accountId);
     localStorage.setItem('awb.voice.wake', wakeEnabled ? '1' : '0');
     localStorage.setItem('awb.notifications.prefs', JSON.stringify({ audio: true, voice: true, listenAfterWorkSound: autoMic }));
     if (blockCue) HTMLMediaElement.prototype.play = () => Promise.reject(new Error('cue playback blocked for test'));
@@ -51,7 +51,7 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
     };
     window.__voiceAnnouncement = (data) => sources.filter((source) => source.readyState === 1)
       .forEach((source) => source.dispatchEvent(new MessageEvent('voice_announcement', { data: JSON.stringify(data) })));
-  }, { workspaceId: workspace.id, suspendOnPermission, autoMic, blockCue, wakeEnabled });
+  }, { accountId: workspace.id, suspendOnPermission, autoMic, blockCue, wakeEnabled });
   const live = { manager_id: operator.manager_id, cli: operator.cli, session_id: operator.session_id, status: 'ready',
     title: 'Operator', cwd: '/tmp', available_modes: [], current_mode: null, config_options: [], available_commands: [],
     updated_at: new Date().toISOString(), driver_user_id: 'user-test' };
@@ -68,10 +68,10 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
       prompts.push({ path, ...JSON.parse(req.postData()) });
       body = { turn_id: `turn-${prompts.length}`, live: { ...live, status: 'busy' } };
     } else if (path === '/auth/me') body = { id: 'user-test', name: 'Test', role: 'admin', status: 'active', permissions: [],
-      resolved_permissions: ['admin.access', 'agent_sessions.use', 'voice.use'], workspaces: [workspace] };
+      resolved_permissions: ['admin.access', 'agent_sessions.use', 'voice.use'], accounts: [workspace] };
     else if (path === '/auth/setup-status') body = { needs_setup: false };
-    else if (path === '/workspaces') body = [workspace];
-    else if (path === `/workspaces/${workspace.id}`) body = workspace;
+    else if (path === '/accounts') body = [workspace];
+    else if (path === `/accounts/${workspace.id}`) body = workspace;
     else if (path === '/voice/config') body = { stt: { provider: cloudStt ? 'openai' : 'local', ready: true }, tts: { provider: 'none', ready: false }, wake: { ready: !cloudStt } };
     else if (path === '/voice/operators') body = { operators: [operator] };
     else if (path.includes('unread') || path.includes('count') || path.includes('mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };

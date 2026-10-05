@@ -19,7 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { createUser, createTicket, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createTicket, createAccount } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_MEDIA_PORT || '0';
 
@@ -29,13 +29,13 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const { getDataSourceToken, AuthService } = modules;
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'media-e2e');
+  const ws = await createAccount(app, getDataSourceToken, 'media-e2e');
   const user = await createUser(app, getDataSourceToken, { name: 'media-user' });
   const token = app.get(AuthService).createSession(user.id);
   const authHeaders = { Authorization: `Bearer ${token}` };
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'media e2e ticket',
   });
 
@@ -45,7 +45,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const SIZE = 15 * 1024 * 1024;
   const big = Buffer.alloc(SIZE);
   for (let i = 0; i < SIZE; i++) big[i] = i % 251; // 251 prime → no 256-alignment
-  const upRes = await fetch(`${base}/api/resources/upload?workspace_id=${ws.id}&type=comment_attachment`, {
+  const upRes = await fetch(`${base}/api/resources/upload?account_id=${ws.id}&type=comment_attachment`, {
     method: 'POST',
     headers: {
       ...authHeaders,
@@ -118,18 +118,18 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const noAuthRes = await fetch(`${base}/api/resources/${uploaded.id}/raw`);
   assert.equal(noAuthRes.status, 401, 'unauthenticated raw fetch rejected');
 
-  // ── 4f. Workspace authorization (ticket ff3e7337 review blockers 1 & 2).
+  // ── 4f. Account authorization (ticket ff3e7337 review blockers 1 & 2).
   //       The above ran as an ADMIN (createUser defaults role='admin'), which
   //       bypasses every workspace gate — so it could never have caught the
   //       two authz holes the reviewer found. Exercise them with real,
   //       non-admin identities here.
   const ds = app.get(getDataSourceToken());
   const tupleRepo = ds.getRepository('RelationTuple');
-  const grantMember = (userId, workspaceId) =>
+  const grantMember = (userId, accountId) =>
     tupleRepo.save(tupleRepo.create({
       subject_type: 'user', subject_id: userId,
       relation: 'member',
-      object_type: 'workspace', object_id: workspaceId,
+      object_type: 'account', object_id: accountId,
     }));
 
   // A non-admin MEMBER of the resource's workspace.
@@ -141,7 +141,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   // Blocker 2: a non-admin member must be able to UPLOAD (the old endpoint
   // inherited admin-only MANAGE_RESOURCES → every non-admin attach 403'd).
   const small = Buffer.from('a non-admin member uploaded this image', 'utf8');
-  const memberUp = await fetch(`${base}/api/resources/upload?workspace_id=${ws.id}&type=comment_attachment`, {
+  const memberUp = await fetch(`${base}/api/resources/upload?account_id=${ws.id}&type=comment_attachment`, {
     method: 'POST',
     headers: { ...memberHeaders, 'Content-Type': 'image/png', 'X-File-Name': encodeURIComponent('member.png') },
     body: small,
@@ -150,11 +150,11 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const memberRes = await memberUp.json();
   assert.ok(memberRes.id, 'member upload returns a resource id');
 
-  // …and reference it from a comment (WorkspaceGuard needs the workspace id +
+  // …and reference it from a comment (AccountGuard needs the workspace id +
   // membership; the member tuple above satisfies it).
   const memberComment = await fetch(`${base}/api/tickets/${ticket.id}/comments`, {
     method: 'POST',
-    headers: { ...memberHeaders, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id },
+    headers: { ...memberHeaders, 'Content-Type': 'application/json', 'X-Account-Id': ws.id },
     body: JSON.stringify({ content: 'member attaches', attachment_resource_ids: [memberRes.id] }),
   });
   assert.equal(memberComment.status, 201, `non-admin member comment attach should succeed, got ${memberComment.status}`);
@@ -167,7 +167,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   // Blocker 1: a user who is authenticated but NOT a member of the resource's
   // workspace must be REFUSED (403, not 401) — no cross-workspace byte access.
   const outsider = await createUser(app, getDataSourceToken, { name: 'media-outsider', role: 'user' });
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'media-other');
+  const otherWs = await createAccount(app, getDataSourceToken, 'media-other');
   await grantMember(outsider.id, otherWs.id); // member of a DIFFERENT workspace
   const outsiderToken = app.get(AuthService).createSession(outsider.id);
   const outsiderHeaders = { Authorization: `Bearer ${outsiderToken}` };
@@ -180,7 +180,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   assert.equal(outsiderTok.status, 403, 'non-member ?token raw fetch also refused');
 
   // …and a non-member cannot upload into a workspace they don't belong to.
-  const outsiderUp = await fetch(`${base}/api/resources/upload?workspace_id=${ws.id}&type=comment_attachment`, {
+  const outsiderUp = await fetch(`${base}/api/resources/upload?account_id=${ws.id}&type=comment_attachment`, {
     method: 'POST',
     headers: { ...outsiderHeaders, 'Content-Type': 'image/png', 'X-File-Name': 'evil.png' },
     body: Buffer.from('nope', 'utf8'),

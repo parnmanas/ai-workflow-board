@@ -5,7 +5,7 @@
  *        graph_neighbors, graph_blast_radius, graph_call_path
  *
  * 조회 도구 6개는 caller 권한으로 호출하되 resolveGraph()에서
- * workspace_id/graph_id 경계를 검증한다. graph_refresh는 기존 데이터를
+ * account_id/graph_id 경계를 검증한다. graph_refresh는 기존 데이터를
  * 교체하므로 full-scope API 키와 티켓 담당자(assignee)·프로젝트 범위를 추가
  * 검증한다. 조회 도구는 이전 graph_status 호출에서 받은 graph_id 또는
  * (resource_id, folder_path)를 받아 동일한 프로비저닝 경로를 사용한다.
@@ -32,7 +32,7 @@ const UNAVAILABLE_MESSAGE =
   'Ontology graph tools are unavailable in standalone MCP server mode — use the NestJS-integrated server.';
 
 const WORKSPACE_SCOPE_ERROR =
-  'Unauthorized: the caller is not a member of this workspace_id — cross-workspace graph access is denied.';
+  'Unauthorized: the caller is not a member of this account_id — cross-workspace graph access is denied.';
 
 const GRAPH_REFRESH_SCOPE_ERROR =
   '권한 거부: graph_refresh는 이 티켓의 담당자(assignee) 에이전트의 full-scope API 키가 필요하며, 그래프의 프로젝트는 티켓의 프로젝트(같은 워크스페이스)여야 합니다.';
@@ -48,26 +48,26 @@ const GRAPH_REFRESH_SCOPE_ERROR =
 // 기동시킬 수 있었다. workflow-function-tools.ts의 scopeAllowed() 선례를
 // 그대로 따른다 — 매 핸들러 진입에서 검증하고, 실패하면 어떤 DB 조회도
 // 실행하기 전에 즉시 거부한다.
-async function checkWorkspaceScope(ctx: ToolContext, extra: { sessionId?: string }, workspaceId: string): Promise<ReturnType<typeof err> | null> {
+async function checkWorkspaceScope(ctx: ToolContext, extra: { sessionId?: string }, accountId: string): Promise<ReturnType<typeof err> | null> {
   const caller = getCallerAgent(extra);
-  const allowed = await callerCanAccessWorkspace(ctx.dataSource, caller, workspaceId);
+  const allowed = await callerCanAccessWorkspace(ctx.dataSource, caller, accountId);
   return allowed ? null : err(WORKSPACE_SCOPE_ERROR);
 }
 
 async function checkGraphRefreshScope(
   ctx: ToolContext,
   extra: { sessionId?: string },
-  input: { workspaceId: string; ticketId: string; graph: OntologyGraph },
+  input: { accountId: string; ticketId: string; graph: OntologyGraph },
 ): Promise<ReturnType<typeof err> | null> {
   const caller = getCallerAgent(extra);
   if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
   if (!caller?.subagentTicketId || caller.subagentTicketId !== input.ticketId) return err(GRAPH_REFRESH_SCOPE_ERROR);
-  if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, input.workspaceId))) return err(GRAPH_REFRESH_SCOPE_ERROR);
+  if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, input.accountId))) return err(GRAPH_REFRESH_SCOPE_ERROR);
 
   // graph.resource_id 는 Project id 다(저장소 Resource 가 같은 id 로 이관됐다).
   const [ticket, project] = await Promise.all([
     ctx.dataSource.getRepository(Ticket).findOne({ where: { id: input.ticketId } }),
-    ctx.projectsService.getInWorkspace(input.graph.resource_id, input.workspaceId),
+    ctx.projectsService.getInWorkspace(input.graph.resource_id, input.accountId),
   ]);
   // 예전에는 TicketRoleAssignment 행(역할 무관)으로 "이 티켓을 맡은 에이전트인가"를
   // 확인했다. 티켓을 맡는 역할이 담당자(assignee) 하나로 줄었으므로 같은 질문은
@@ -76,7 +76,7 @@ async function checkGraphRefreshScope(
   // 막는 것이 이 게이트의 목적이다).
   const isAssignee = !!ticket && callerHoldsId(caller, ticket.assignee_key);
   const ticketMatches = ticket
-    && ticket.workspace_id === input.workspaceId
+    && ticket.account_id === input.accountId
     && !ticket.archived_at
     && !!ticket.project_id
     && ticket.project_id === input.graph.resource_id;
@@ -111,7 +111,7 @@ function logGraphToolCall(ctx: ToolContext, extra: { sessionId?: string }, tool:
 }
 
 interface GraphRefArgs {
-  workspace_id: string;
+  account_id: string;
   graph_id?: string;
   resource_id?: string;
   /** resource_id 의 별칭 — 둘 다 같은 Project id. */
@@ -125,11 +125,11 @@ type ResolveGraphResult =
 
 async function resolveGraph(ctx: ToolContext, extra: { sessionId?: string }, args: GraphRefArgs): Promise<ResolveGraphResult> {
   if (!ctx.ontologyLifecycleService) return { ok: false, response: err(UNAVAILABLE_MESSAGE) };
-  const scopeError = await checkWorkspaceScope(ctx, extra, args.workspace_id);
+  const scopeError = await checkWorkspaceScope(ctx, extra, args.account_id);
   if (scopeError) return { ok: false, response: scopeError };
   try {
     const graph = await ctx.ontologyLifecycleService.resolveOrProvision({
-      workspaceId: args.workspace_id,
+      accountId: args.account_id,
       graphId: args.graph_id,
       resourceId: args.resource_id || args.project_id,
       folderPath: args.folder_path,
@@ -177,21 +177,21 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'This is the entry point every other graph_ tool\'s graph_id ultimately comes from: pass its graph_id to them, ' +
     'or just pass the same (resource_id, folder_path) and they resolve it the same way internally.',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       resource_id: z.string().optional().describe(`${RESOURCE_ID_HELP} The project to build/inspect the graph for (required unless project_id is given).`),
       project_id: z.string().optional().describe('Alias of resource_id (the same Project id). Pass one of the two.'),
       folder_path: z.string().optional().default('').describe('Folder scope within the repo (empty = repo root)'),
     },
-    async ({ workspace_id, resource_id: resourceIdArg, project_id, folder_path }, extra) => {
+    async ({ account_id, resource_id: resourceIdArg, project_id, folder_path }, extra) => {
       if (!ctx.ontologyLifecycleService) return err(UNAVAILABLE_MESSAGE);
       const resource_id = resourceIdArg || project_id;
       if (!resource_id) return err('resource_id (the Project id) is required', { code: 'missing_ref' });
-      const scopeError = await checkWorkspaceScope(ctx, extra, workspace_id);
+      const scopeError = await checkWorkspaceScope(ctx, extra, account_id);
       if (scopeError) return scopeError;
       const graph = await ctx.ontologyLifecycleService.resolveOrProvision({
-        workspaceId: workspace_id, resourceId: resource_id, folderPath: folder_path,
+        accountId: account_id, resourceId: resource_id, folderPath: folder_path,
       });
-      logGraphToolCall(ctx, extra, 'graph_status', { workspace_id, resource_id, folder_path, graph_id: graph.id, status: graph.status });
+      logGraphToolCall(ctx, extra, 'graph_status', { account_id, resource_id, folder_path, graph_id: graph.id, status: graph.status });
       return ok({
         graph_id: graph.id,
         status: graph.status,
@@ -211,28 +211,28 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     '그래프가 이미 building이면 bounded no-op으로 즉시 started=false를 반환합니다. ' +
     '후속 읽기 전용 graph_status 호출로 확인할 수 있도록 graph_id/status를 반환합니다.',
     {
-      workspace_id: z.string().describe('워크스페이스 ID'),
+      account_id: z.string().describe('워크스페이스 ID'),
       ticket_id: z.string().describe('배정된 에이전트가 재빌드를 요청하는 티켓 ID'),
       graph_id: z.string().describe('graph_status에서 얻은 기존 그래프 ID'),
     },
-    async ({ workspace_id, ticket_id, graph_id }, extra) => {
+    async ({ account_id, ticket_id, graph_id }, extra) => {
       if (!ctx.ontologyLifecycleService) return err(UNAVAILABLE_MESSAGE);
       const caller = getCallerAgent(extra);
       if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
-      if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, workspace_id))) return err(GRAPH_REFRESH_SCOPE_ERROR);
+      if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, account_id))) return err(GRAPH_REFRESH_SCOPE_ERROR);
       let graph: OntologyGraph;
       try {
-        graph = await ctx.ontologyLifecycleService.resolveOrProvision({ workspaceId: workspace_id, graphId: graph_id });
+        graph = await ctx.ontologyLifecycleService.resolveOrProvision({ accountId: account_id, graphId: graph_id });
       } catch (e) {
         if (e instanceof GraphRefResolutionError) return err(e.message, { code: e.code });
         throw e;
       }
-      const scopeError = await checkGraphRefreshScope(ctx, extra, { workspaceId: workspace_id, ticketId: ticket_id, graph });
+      const scopeError = await checkGraphRefreshScope(ctx, extra, { accountId: account_id, ticketId: ticket_id, graph });
       if (scopeError) return scopeError;
 
-      const result = await ctx.ontologyLifecycleService.forceRebuild({ graphId: graph.id, workspaceId: workspace_id });
+      const result = await ctx.ontologyLifecycleService.forceRebuild({ graphId: graph.id, accountId: account_id });
       logGraphToolCall(ctx, extra, 'graph_refresh', {
-        workspace_id, ticket_id, resource_id: graph.resource_id,
+        account_id, ticket_id, resource_id: graph.resource_id,
         graph_id: result.graph.id, status: result.graph.status, started: result.started,
       });
       return ok({ graph_id: result.graph.id, status: result.graph.status, started: result.started });
@@ -247,19 +247,19 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'node_id for graph_neighbors/graph_blast_radius — the usual next step. Provide graph_id (from graph_status) ' +
     'or resource_id/folder_path (auto-provisions like graph_status if the graph does not exist yet).',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       ...GRAPH_REF_PARAMS,
       name: z.string().describe('Symbol name, qualified name, or a fragment to fuzzy-match'),
       confidence_min: z.number().min(0).max(1).optional().describe('Minimum edge/node confidence to include (default 0.75)'),
     },
-    async ({ workspace_id, graph_id, resource_id, project_id, folder_path, name, confidence_min }, extra) => {
-      const resolved = await resolveGraph(ctx, extra, { workspace_id, graph_id, resource_id, project_id, folder_path });
+    async ({ account_id, graph_id, resource_id, project_id, folder_path, name, confidence_min }, extra) => {
+      const resolved = await resolveGraph(ctx, extra, { account_id, graph_id, resource_id, project_id, folder_path });
       if (!resolved.ok) return resolved.response;
       if (!ctx.ontologyQueryService) return err(UNAVAILABLE_MESSAGE);
       const { graph } = resolved;
 
       const result = await ctx.ontologyQueryService.findSymbol({ graphId: graph.id, name, confidenceMin: confidence_min });
-      logGraphToolCall(ctx, extra, 'graph_find_symbol', { workspace_id, graph_id: graph.id, name, match_count: result.matches.length });
+      logGraphToolCall(ctx, extra, 'graph_find_symbol', { account_id, graph_id: graph.id, name, match_count: result.matches.length });
 
       const matches = result.matches.map((m) => ({ ...toSymbolRef(m.node, graph), match_kind: m.matchKind }));
       const response: Record<string, unknown> = { matches, unique: result.unique, confidence_min: result.confidenceMin };
@@ -275,8 +275,8 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
         const nodeId = result.matches[0].node.id;
         response.detail = matches[0];
         response.suggested_next_calls = [
-          { tool: 'graph_neighbors', args: { workspace_id, graph_id: graph.id, node_id: nodeId } },
-          { tool: 'graph_blast_radius', args: { workspace_id, graph_id: graph.id, node_id: nodeId } },
+          { tool: 'graph_neighbors', args: { account_id, graph_id: graph.id, node_id: nodeId } },
+          { tool: 'graph_blast_radius', args: { account_id, graph_id: graph.id, node_id: nodeId } },
         ];
       }
       return ok(response);
@@ -290,20 +290,20 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'Read-only, any authenticated agent may call. Provide graph_id or ' +
     'resource_id/folder_path (auto-provisions if needed, same as graph_status).',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       ...GRAPH_REF_PARAMS,
       path: z.string().describe('Directory/module/file path to summarize, relative to repo root (empty string = whole repo)'),
       confidence_min: z.number().min(0).max(1).optional().describe('Minimum edge confidence for dependency/dependent aggregation (default 0.75)'),
       top_n: z.number().optional().describe('Max top symbols to return by centrality (default 20, max 50)'),
     },
-    async ({ workspace_id, graph_id, resource_id, project_id, folder_path, path, confidence_min, top_n }, extra) => {
-      const resolved = await resolveGraph(ctx, extra, { workspace_id, graph_id, resource_id, project_id, folder_path });
+    async ({ account_id, graph_id, resource_id, project_id, folder_path, path, confidence_min, top_n }, extra) => {
+      const resolved = await resolveGraph(ctx, extra, { account_id, graph_id, resource_id, project_id, folder_path });
       if (!resolved.ok) return resolved.response;
       if (!ctx.ontologyQueryService) return err(UNAVAILABLE_MESSAGE);
       const { graph } = resolved;
 
       const result = await ctx.ontologyQueryService.moduleSummary({ graphId: graph.id, path, confidenceMin: confidence_min, topN: top_n });
-      logGraphToolCall(ctx, extra, 'graph_module_summary', { workspace_id, graph_id: graph.id, path, symbol_count: result.symbolCount });
+      logGraphToolCall(ctx, extra, 'graph_module_summary', { account_id, graph_id: graph.id, path, symbol_count: result.symbolCount });
 
       return ok({
         path: result.path,
@@ -326,7 +326,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'target only reachable via reflection/DI edges below the default confidence floor). Provide graph_id or ' +
     'resource_id/folder_path.',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       ...GRAPH_REF_PARAMS,
       node_id: z.string().describe('OntologyNode id to start from (e.g. from graph_find_symbol)'),
       edge_types: z.array(z.string()).optional().describe('Restrict traversal to these edge types (e.g. ["CALLS"])'),
@@ -334,8 +334,8 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       confidence_min: z.number().min(0).max(1).optional().describe('Minimum edge confidence to traverse (default 0.75)'),
       row_cap: z.number().optional().describe('Max rows returned (default 1000, hard ceiling 5000)'),
     },
-    async ({ workspace_id, graph_id, resource_id, project_id, folder_path, node_id, edge_types, max_depth, confidence_min, row_cap }, extra) => {
-      const resolved = await resolveGraph(ctx, extra, { workspace_id, graph_id, resource_id, project_id, folder_path });
+    async ({ account_id, graph_id, resource_id, project_id, folder_path, node_id, edge_types, max_depth, confidence_min, row_cap }, extra) => {
+      const resolved = await resolveGraph(ctx, extra, { account_id, graph_id, resource_id, project_id, folder_path });
       if (!resolved.ok) return resolved.response;
       if (!ctx.ontologyQueryService) return err(UNAVAILABLE_MESSAGE);
       const { graph } = resolved;
@@ -343,7 +343,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       const result = await ctx.ontologyQueryService.neighbors({
         graphId: graph.id, nodeId: node_id, edgeTypes: edge_types, maxDepth: max_depth, confidenceMin: confidence_min, rowCap: row_cap,
       });
-      logGraphToolCall(ctx, extra, 'graph_neighbors', { workspace_id, graph_id: graph.id, node_id, result_count: result.rows.length });
+      logGraphToolCall(ctx, extra, 'graph_neighbors', { account_id, graph_id: graph.id, node_id, result_count: result.rows.length });
 
       return ok({
         matches: result.rows.map((r) => ({ ...toSymbolRef(r.node, graph), depth: r.depth })),
@@ -363,7 +363,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     '("complete"/"incomplete"/"no_assertion") — see graph_neighbors for what that distinguishes. Provide graph_id ' +
     'or resource_id/folder_path.',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       ...GRAPH_REF_PARAMS,
       node_id: z.string().describe('OntologyNode id to start from (e.g. from graph_find_symbol)'),
       edge_types: z.array(z.string()).optional().describe('Restrict traversal to these edge types (e.g. ["CALLS"])'),
@@ -371,8 +371,8 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       confidence_min: z.number().min(0).max(1).optional().describe('Minimum edge confidence to traverse (default 0.75)'),
       row_cap: z.number().optional().describe('Max rows returned (default 1000, hard ceiling 5000)'),
     },
-    async ({ workspace_id, graph_id, resource_id, project_id, folder_path, node_id, edge_types, max_depth, confidence_min, row_cap }, extra) => {
-      const resolved = await resolveGraph(ctx, extra, { workspace_id, graph_id, resource_id, project_id, folder_path });
+    async ({ account_id, graph_id, resource_id, project_id, folder_path, node_id, edge_types, max_depth, confidence_min, row_cap }, extra) => {
+      const resolved = await resolveGraph(ctx, extra, { account_id, graph_id, resource_id, project_id, folder_path });
       if (!resolved.ok) return resolved.response;
       if (!ctx.ontologyQueryService) return err(UNAVAILABLE_MESSAGE);
       const { graph } = resolved;
@@ -380,7 +380,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       const result = await ctx.ontologyQueryService.blastRadius({
         graphId: graph.id, nodeId: node_id, edgeTypes: edge_types, maxDepth: max_depth, confidenceMin: confidence_min, rowCap: row_cap,
       });
-      logGraphToolCall(ctx, extra, 'graph_blast_radius', { workspace_id, graph_id: graph.id, node_id, result_count: result.rows.length });
+      logGraphToolCall(ctx, extra, 'graph_blast_radius', { account_id, graph_id: graph.id, node_id, result_count: result.rows.length });
 
       return ok({
         matches: result.rows.map((r) => ({ ...toSymbolRef(r.node, graph), depth: r.depth })),
@@ -400,7 +400,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'Returns a single labelled path_confidence (min-along-path — never multiplied) instead of per-edge confidence ' +
     'an agent would have to roll up itself. Provide graph_id or resource_id/folder_path.',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       ...GRAPH_REF_PARAMS,
       from_id: z.string().describe('OntologyNode id to start from'),
       to_id: z.string().describe('OntologyNode id to reach'),
@@ -408,8 +408,8 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       confidence_min: z.number().min(0).max(1).optional().describe('Minimum edge confidence to traverse (default 0.75)'),
       max_hops: z.number().optional().describe('Max total path length (default/hard ceiling 10)'),
     },
-    async ({ workspace_id, graph_id, resource_id, project_id, folder_path, from_id, to_id, edge_types, confidence_min, max_hops }, extra) => {
-      const resolved = await resolveGraph(ctx, extra, { workspace_id, graph_id, resource_id, project_id, folder_path });
+    async ({ account_id, graph_id, resource_id, project_id, folder_path, from_id, to_id, edge_types, confidence_min, max_hops }, extra) => {
+      const resolved = await resolveGraph(ctx, extra, { account_id, graph_id, resource_id, project_id, folder_path });
       if (!resolved.ok) return resolved.response;
       if (!ctx.ontologyQueryService) return err(UNAVAILABLE_MESSAGE);
       const { graph } = resolved;
@@ -417,7 +417,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       const result = await ctx.ontologyQueryService.callPath({
         graphId: graph.id, fromId: from_id, toId: to_id, edgeTypes: edge_types, confidenceMin: confidence_min, maxHops: max_hops,
       });
-      logGraphToolCall(ctx, extra, 'graph_call_path', { workspace_id, graph_id: graph.id, from_id, to_id, found: result.found });
+      logGraphToolCall(ctx, extra, 'graph_call_path', { account_id, graph_id: graph.id, from_id, to_id, found: result.found });
 
       // path:line 그라운딩(DESIGN.md 축 6 mandatory-bound (1)) — path steps는
       // edge 양끝 id만 갖고 있으므로, 관련된 모든 노드를 한 번에 하이드레이트한다.

@@ -42,7 +42,7 @@ export class AgentLogsService {
 
   async ingestEntries(
     agentId: string,
-    workspaceId: string | null,
+    accountId: string | null,
     pluginVersion: string | null,
     entries: IncomingEntry[],
   ): Promise<{ accepted: number; uploaded_at: string; last_occurred_at: string | null }> {
@@ -76,7 +76,7 @@ export class AgentLogsService {
       }
       rows.push({
         agent_id: agentId,
-        workspace_id: workspaceId,
+        account_id: accountId,
         occurred_at: occurredAt,
         level: String(e.level),
         category: String(e.category),
@@ -124,7 +124,7 @@ export class AgentLogsService {
       id: r.id,
       agent_id: r.agent_id,
       agent_name: agentNameMap.get(r.agent_id) || null,
-      workspace_id: r.workspace_id,
+      account_id: r.account_id,
       occurred_at: r.occurred_at,
       level: r.level,
       category: r.category,

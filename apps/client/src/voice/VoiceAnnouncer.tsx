@@ -25,13 +25,13 @@ export default function VoiceAnnouncer() {
   const config = useVoiceConfig();
   const { prefs } = useNotifications();
   const { showToast } = useToast();
-  const { currentWorkspaceId } = useAuth();
+  const { currentAccountId } = useAuth();
   const navigate = useNavigate();
   const speech = useSpeechState();
   useVoiceOperators(!!config);
 
-  const latest = useRef({ ready: false, enabled: true, audio: true, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId });
-  latest.current = { ready: !!config?.tts.ready, enabled: prefs.voice, audio: prefs.audio, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId };
+  const latest = useRef({ ready: false, enabled: true, audio: true, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, accountId: currentAccountId });
+  latest.current = { ready: !!config?.tts.ready, enabled: prefs.voice, audio: prefs.audio, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, accountId: currentAccountId };
 
   useEffect(() => {
     if (!prefs.voice || !prefs.audio || !prefs.listenAfterWorkSound) {
@@ -53,7 +53,7 @@ export default function VoiceAnnouncer() {
   }, []);
 
   useBoardStreamEvent('voice_announcement', useCallback((data: VoiceAnnouncementEvent) => {
-    const { ready, enabled, audio, sound, workspaceId } = latest.current;
+    const { ready, enabled, audio, sound, accountId } = latest.current;
     const playback = announcementPlayback(data?.kind || '');
     if (!data?.id || !data.text || !enabled || (playback === 'speech' && !ready)) return;
     const visible = document.visibilityState === 'visible';
@@ -63,7 +63,7 @@ export default function VoiceAnnouncer() {
       // All tabs retain the report address; only one claims and plays the cue.
       if (playback === 'cue' && data.operator && shouldSpeakAnnouncement(viewing, !!data.needs_decision)) wakeStore.rememberReportOperator(data.operator.id);
       if (!(await claimAnnouncement(data.id, visible)) || !shouldSpeakAnnouncement(viewing, !!data.needs_decision)) return;
-      const path = announcementPath(data.target, workspaceId);
+      const path = announcementPath(data.target, accountId);
       // operator 가 쓴 글이면(작업 보고 요약 · operator 의 답) 누가 말하는지 붙인다.
       const text = data.operator ? `🎙 ${data.operator.name}: ${data.text}` : data.text;
       showToast(text, 'info', {
@@ -85,14 +85,14 @@ export default function VoiceAnnouncer() {
         }
         const now = latest.current;
         if (!now.enabled || !now.audio || !now.listen) return;
-        if (!operator || !now.workspaceId || !voiceConfig?.stt.ready) {
+        if (!operator || !now.accountId || !voiceConfig?.stt.ready) {
           showToast('오퍼레이터의 마이크를 켜지 못했습니다 — 오퍼레이터 등록과 음성 입력 설정을 확인해 주세요.', 'error');
           return;
         }
         // Open the actual composer before the user speaks. Cue playback can be blocked;
         // microphone startup must not depend on an audio completion callback.
         wakeStore.wake(operator.id, null, 'notification');
-        navigate(sessionPath(`/ws/${now.workspaceId}`, operator.manager_id, operator.cli, operator.session_id));
+        navigate(sessionPath(``, operator.manager_id, operator.cli, operator.session_id));
       }
     })();
   }, [navigate, showToast]));

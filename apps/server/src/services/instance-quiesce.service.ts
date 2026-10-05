@@ -12,7 +12,7 @@ const QUIESCED_REASON_KEY = 'instance.quiesced_reason';
 /**
  * 인스턴스 전역 fleet-dispatch quiesce 플래그 (ticket 0f638509 — live pull
  * import). true인 동안 트리거 발행(TriggerLoopService._emitTrigger), backlog
- * 승격(BacklogPromotionService.tryPromote), QA/Security/Workspace 스케줄
+ * 승격(BacklogPromotionService.tryPromote), QA/Security/Account 스케줄
  * 틱, AgentAutostartService 기동을 전부 no-op으로 만든다 — 막 import된 도착지가
  * 아직 살아있는 소스와 동시에 같은 에이전트 fleet에 디스패치해 티켓을 중복
  * 처리하는 것을 막기 위함(설계 스케치 "quiesced 부팅" 참고).

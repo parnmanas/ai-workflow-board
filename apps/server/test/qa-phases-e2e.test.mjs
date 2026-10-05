@@ -66,7 +66,7 @@ function makeSharedRunRepo(rows) {
       return rows.filter((r) => statuses.includes(r.status)).slice(0, take ?? rows.length);
     },
     async findOne({ where }) {
-      return rows.find((r) => r.id === where.id && r.workspace_id === where.workspace_id) ?? null;
+      return rows.find((r) => r.id === where.id && r.account_id === where.account_id) ?? null;
     },
     async save(row) {
       this.saved.push(row.id);
@@ -79,7 +79,7 @@ function makeRun(id, overrides = {}) {
   const base = new Date('2026-06-28T12:00:00Z');
   return {
     id,
-    workspace_id: 'w1',
+    account_id: 'w1',
     scenario_id: 'sc-ph',
     status: 'running',
     started_at: base,

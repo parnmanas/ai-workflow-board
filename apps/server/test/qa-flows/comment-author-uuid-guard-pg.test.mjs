@@ -132,7 +132,7 @@ test('비-uuid user author_id 는 real Postgres 의 users.id(uuid) 조회에 닿
   );
   const parse = (res) => JSON.parse(res.content[0].text);
   const makeTicket = (title) => ticketRepo.save(ticketRepo.create({
-    title, workspace_id: 'ws-comment-author-uuid', pending_user_action: false,
+    title, account_id: 'ws-comment-author-uuid', pending_user_action: false,
   }));
 
   // ── 가드 경로: add_comment ─────────────────────────────────────────────

@@ -17,7 +17,7 @@ export interface PairingToken {
   id: string;
   token: string;             // raw bearer the manager sends back on redeem
   code: string;              // 6-char human-readable display code (admin reads aloud / pastes)
-  workspace_id: string;
+  account_id: string;
   created_by_user_id: string;
   // Optional: when set, the redeemed agent identity is created with this
   // name. Otherwise the manager picks (e.g. hostname-derived).
@@ -52,7 +52,7 @@ export class PairingService implements OnModuleDestroy {
     this.timer = null;
   }
 
-  mint(params: { workspace_id: string; created_by_user_id: string; agent_name?: string }): PairingToken {
+  mint(params: { account_id: string; created_by_user_id: string; agent_name?: string }): PairingToken {
     const id = randomBytes(8).toString('hex');
     const token = 'pair_' + randomBytes(20).toString('hex');
     // 6-char alphanumeric — humans paste this into the manager CLI. Drop
@@ -67,7 +67,7 @@ export class PairingService implements OnModuleDestroy {
       id,
       token,
       code,
-      workspace_id: params.workspace_id,
+      account_id: params.account_id,
       created_by_user_id: params.created_by_user_id,
       agent_name: params.agent_name,
       created_at: now.toISOString(),
@@ -76,7 +76,7 @@ export class PairingService implements OnModuleDestroy {
       redeemed_instance_id: null,
     };
     this.tokens.set(token, rec);
-    this.logService.info('AgentManager', `Minted pairing token id=${id} ws=${params.workspace_id}`);
+    this.logService.info('AgentManager', `Minted pairing token id=${id} ws=${params.account_id}`);
     return rec;
   }
 
@@ -103,10 +103,10 @@ export class PairingService implements OnModuleDestroy {
    * the bearer. The display code is what the human types into the manager;
    * the raw token is returned ONCE on mint() and then never again.
    */
-  listForWorkspace(workspaceId: string): Array<Omit<PairingToken, 'token'>> {
+  listForWorkspace(accountId: string): Array<Omit<PairingToken, 'token'>> {
     const out: Array<Omit<PairingToken, 'token'>> = [];
     for (const rec of this.tokens.values()) {
-      if (rec.workspace_id !== workspaceId) continue;
+      if (rec.account_id !== accountId) continue;
       const { token: _t, ...safe } = rec;
       out.push(safe);
     }
@@ -129,10 +129,10 @@ export class PairingService implements OnModuleDestroy {
     return null;
   }
 
-  revoke(id: string, workspaceId: string): boolean {
+  revoke(id: string, accountId: string): boolean {
     for (const [token, rec] of this.tokens) {
       if (rec.id !== id) continue;
-      if (rec.workspace_id !== workspaceId) return false;
+      if (rec.account_id !== accountId) return false;
       this.tokens.delete(token);
       return true;
     }

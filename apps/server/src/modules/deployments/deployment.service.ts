@@ -21,7 +21,7 @@ function makeError(status: number, message: string): Error & { status: number } 
 
 export interface ReportDeploymentInput {
   /** null / omitted = a GLOBAL (shared) environment. */
-  workspaceId?: string | null;
+  accountId?: string | null;
   environment: string;
   deployedCommitSha: string;
   baseUrl?: string;
@@ -43,7 +43,7 @@ export const DEPLOYMENT_REPORTED_EVENT = 'deployment_reported';
 
 export interface DeploymentReportedSignal {
   deployment_id: string;
-  workspace_id: string | null;
+  account_id: string | null;
   environment: string;
   deployed_commit_sha: string;
   deployed_at: Date | null;
@@ -54,7 +54,7 @@ export interface DeploymentReportedSignal {
  * 8ce72b18). Stateless over the DataSource (mirrors BuildArtifactService), so the
  * standalone MCP context can `new DeploymentService(dataSource, log)` without DI.
  *
- * `report()` UPSERTs one row per (workspace_id, environment) — the current live
+ * `report()` UPSERTs one row per (account_id, environment) — the current live
  * commit, not a history log — then emits DEPLOYMENT_REPORTED_EVENT so a pending
  * deployment-gated rerun re-evaluates and fires the moment the deploy that
  * includes the fix lands.
@@ -77,7 +77,7 @@ export class DeploymentService {
     const deployedCommitSha = (input.deployedCommitSha || '').trim();
     if (!deployedCommitSha) throw makeError(400, 'deployed_commit_sha is required');
 
-    const workspaceId = input.workspaceId ? String(input.workspaceId).trim() || null : null;
+    const accountId = input.accountId ? String(input.accountId).trim() || null : null;
     const source: DeploymentSource = DEPLOYMENT_SOURCES.includes(input.source as DeploymentSource)
       ? (input.source as DeploymentSource)
       : 'manual';
@@ -87,15 +87,15 @@ export class DeploymentService {
       ? input.ancestorShas.map((s) => normalizeSha(s)).filter(Boolean).slice(0, 500)
       : undefined;
 
-    // UPSERT by identity (workspace_id, environment). Null workspace uses IsNull()
-    // so the global row is matched (a plain `{ workspace_id: null }` where works in
+    // UPSERT by identity (account_id, environment). Null workspace uses IsNull()
+    // so the global row is matched (a plain `{ account_id: null }` where works in
     // TypeORM but IsNull() is explicit + index-friendly).
     const existing = await this.repo.findOne({
-      where: { environment, workspace_id: workspaceId === null ? IsNull() : workspaceId },
+      where: { environment, account_id: accountId === null ? IsNull() : accountId },
     });
 
     const patch: Partial<Deployment> = {
-      workspace_id: workspaceId,
+      account_id: accountId,
       environment,
       base_url: (input.baseUrl ?? existing?.base_url ?? '').trim(),
       repo_resource_id: (input.repoResourceId ?? existing?.repo_resource_id ?? '').trim(),
@@ -116,7 +116,7 @@ export class DeploymentService {
 
     this.logService.info(
       'Deploy',
-      `deployment recorded — env=${environment}${workspaceId ? ` ws=${workspaceId}` : ' (global)'} commit=${deployedCommitSha.slice(0, 12)} source=${source}`,
+      `deployment recorded — env=${environment}${accountId ? ` ws=${accountId}` : ' (global)'} commit=${deployedCommitSha.slice(0, 12)} source=${source}`,
       { id: row.id },
     );
 
@@ -124,7 +124,7 @@ export class DeploymentService {
     // the report. QaRerunOnFixService picks this up to re-evaluate waiting reruns.
     const signal: DeploymentReportedSignal = {
       deployment_id: row.id,
-      workspace_id: row.workspace_id,
+      account_id: row.account_id,
       environment: row.environment,
       deployed_commit_sha: row.deployed_commit_sha,
       deployed_at: row.deployed_at,
@@ -139,8 +139,8 @@ export class DeploymentService {
   }
 
   /** The current live deployment for an environment as a given workspace sees it. */
-  async getLatest(workspaceId: string | null | undefined, environment: string): Promise<Deployment | null> {
-    return findLatestDeployment(this.repo, workspaceId ?? null, environment);
+  async getLatest(accountId: string | null | undefined, environment: string): Promise<Deployment | null> {
+    return findLatestDeployment(this.repo, accountId ?? null, environment);
   }
 
   /**
@@ -148,12 +148,12 @@ export class DeploymentService {
    * (its own environments + all global ones). One row per environment name (the
    * freshest). Powers the board/QA "live commit" badge (DoD item 5).
    */
-  async listForWorkspace(workspaceId: string | null | undefined): Promise<Deployment[]> {
+  async listForWorkspace(accountId: string | null | undefined): Promise<Deployment[]> {
     const qb = this.repo.createQueryBuilder('d');
-    if (workspaceId) {
-      qb.where('(d.workspace_id = :ws OR d.workspace_id IS NULL)', { ws: workspaceId });
+    if (accountId) {
+      qb.where('(d.account_id = :ws OR d.account_id IS NULL)', { ws: accountId });
     } else {
-      qb.where('d.workspace_id IS NULL');
+      qb.where('d.account_id IS NULL');
     }
     qb.orderBy('d.deployed_at', 'DESC').addOrderBy('d.created_at', 'DESC');
     const rows = await qb.getMany();
@@ -187,7 +187,7 @@ export class DeploymentService {
     const ancestorShas = this._parseAncestorsEnv(env.AWB_BUILD_ANCESTORS);
     try {
       return await this.report({
-        workspaceId: null,
+        accountId: null,
         environment,
         deployedCommitSha: commit,
         baseUrl: (env.AWB_SELF_BASE_URL || '').trim(),

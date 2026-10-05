@@ -20,7 +20,7 @@ export interface McpAuthInfo {
   agentId?: string;
   keyId?: string;
   scope?: string;
-  workspaceId?: string;
+  accountId?: string;
   source: 'db' | 'env' | 'dev-mode';
   /** P4c-2b: parsed from `runtime-provisioned:<rtKey>` key names (else undefined). */
   runtimeKey?: string;
@@ -77,7 +77,7 @@ export async function authenticateMcpRequest(
         // P4c-2b: runtime-tuple keys (host-bound, no Agent row). agentId is
         // the HOST uuid — stable across rotations and uuid-shaped, so every
         // Postgres uuid-column lookup against it degrades to null instead of
-        // throwing. Workspace scoping rides the key row's workspace_id (set
+        // throwing. Account scoping rides the key row's account_id (set
         // per scope at provision), so authz needs no agent lookup. The rtKey
         // (parsed from the provisioned name) is what orchestration gates
         // compare against stored rt- assignee/orchestrator ids.
@@ -96,7 +96,7 @@ export async function authenticateMcpRequest(
           runtimeKey,
           keyId: ak.id,
           scope: ak.scope,
-          workspaceId: ak.workspace_id || undefined,
+          accountId: ak.account_id || undefined,
           source: 'db',
         };
       }

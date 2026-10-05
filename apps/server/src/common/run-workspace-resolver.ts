@@ -24,7 +24,7 @@
 // `resolveRepoCredential`).
 
 import { DataSource } from 'typeorm';
-import { Workspace } from '../entities/Workspace';
+import { Account } from '../entities/Account';
 import { Credential } from '../entities/Credential';
 import { ProjectsService } from '../modules/projects/projects.service';
 import { resolveGitCredential } from '../modules/mcp/shared/git-branches';
@@ -45,7 +45,7 @@ export interface BuildRunProvisionInput {
   /** scenario / profile / action / room id — 결정론적 기본 폴더 계산에 사용된다. */
   id: string;
   runId: string;
-  workspaceId: string;
+  accountId: string;
   workspaceFolder: string | null | undefined;
   repoRef: WorkspaceFolderRepoRef | null | undefined;
   checkoutMode: CheckoutMode | null | undefined;
@@ -71,7 +71,7 @@ export async function buildRunProvision(
   return {
     kind: input.kind,
     run_id: input.runId,
-    workspace_id: input.workspaceId,
+    account_id: input.accountId,
     workspace_folder,
     checkout_mode,
     repo,
@@ -89,16 +89,16 @@ async function resolveRunRepo(
     return { url: ref.url, branch: ref.branch || undefined };
   }
 
-  // 2. Project — workspace-scoped, so a stale id pointing at another
+  // 2. Project — account-scoped, so a stale id pointing at another
   //    workspace's project never gets its url (or credential) shipped.
   //    ProjectsService is stateless over the DataSource, so this plain helper
   //    builds one instead of threading DI through every caller.
   if (!ref?.project_id) return null;
-  const project = await new ProjectsService(ds).getInWorkspace(ref.project_id, input.workspaceId);
+  const project = await new ProjectsService(ds).getInWorkspace(ref.project_id, input.accountId);
   const url = (project?.repo_url || '').trim();
   if (!project || !url) return null;
-  const credential = await resolveRepoCredential(ds, project.credential_id, input.workspaceId);
-  const clone_policy = await resolveRunClonePolicy(ds, project.clone_policy, input.workspaceId);
+  const credential = await resolveRepoCredential(ds, project.credential_id, input.accountId);
+  const clone_policy = await resolveRunClonePolicy(ds, project.clone_policy, input.accountId);
   return {
     url,
     branch: ref.branch || (project.default_branch || '').trim() || undefined,
@@ -108,17 +108,17 @@ async function resolveRunRepo(
 }
 
 /**
- * Project → Workspace 순으로 clone 정책을 합친다(ticket bddb63ee). 조회 실패는
+ * Project → Account 순으로 clone 정책을 합친다(ticket bddb63ee). 조회 실패는
  * 정책 없음(null)으로 degrade — 이 resolver 의 다른 lookup 과 동일하게
  * availability-first 다.
  */
 async function resolveRunClonePolicy(
   ds: DataSource,
   projectRaw: string | null | undefined,
-  workspaceId: string,
+  accountId: string,
 ) {
   try {
-    const ws = await ds.getRepository(Workspace).findOne({ where: { id: workspaceId } });
+    const ws = await ds.getRepository(Account).findOne({ where: { id: accountId } });
     return resolveClonePolicy(projectRaw, ws?.clone_policy);
   } catch {
     return resolveClonePolicy(projectRaw, null);
@@ -138,11 +138,11 @@ async function resolveRunClonePolicy(
 async function resolveRepoCredential(
   ds: DataSource,
   credentialId: string | null | undefined,
-  workspaceId: string,
+  accountId: string,
 ): Promise<{ username?: string; token: string } | null> {
   if (!credentialId) return null;
   try {
-    const cred = await resolveGitCredential(ds.getRepository(Credential), credentialId, workspaceId);
+    const cred = await resolveGitCredential(ds.getRepository(Credential), credentialId, accountId);
     if (cred && cred.token) {
       return cred.username ? { username: cred.username, token: cred.token } : { token: cred.token };
     }

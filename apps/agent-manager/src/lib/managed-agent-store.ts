@@ -24,13 +24,14 @@ import { MANAGED_AGENTS_DIR } from './constants.js';
 import { resolveSelfCommand } from './self-path.js';
 import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 import { normalizeCredentialFields } from './credential-fields.js';
+import { normalizeAccountScope } from './account-scope.js';
 
 export interface ManagedAgentDiskConfig {
   agent_id: string;
   name: string;
   cli: string;
   working_dir: string;
-  workspace_id?: string;
+  account_id?: string;
   /** Per-agent default model (Agent.model). Persisted so a manager restart
    *  rehydrates the same model without re-fetching from AWB. */
   model?: string | null;
@@ -48,13 +49,13 @@ export function configPathFor(agentId: string): string {
   return join(managedAgentDir(agentId), 'config.json');
 }
 
-function workspaceSuffix(workspaceId?: string): string {
-  const scope = String(workspaceId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+function accountSuffix(accountId?: string): string {
+  const scope = String(accountId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
   return scope ? `.${scope}` : '';
 }
 
-export function apiKeyPathFor(agentId: string, workspaceId?: string): string {
-  return join(managedAgentDir(agentId), `apikey${workspaceSuffix(workspaceId)}`);
+export function apiKeyPathFor(agentId: string, accountId?: string): string {
+  return join(managedAgentDir(agentId), `apikey${accountSuffix(accountId)}`);
 }
 
 // Ticket ee26302d review round 2 (P1): 'compact' gets its own path so two
@@ -84,10 +85,10 @@ function profileSuffix(profile?: 'full' | 'compact'): string {
  * of DIFFERENT profiles for the same agent can never collide on one file.
  * Two concurrent spawns of the SAME profile can still both decide "doesn't
  * exist yet" and both write — harmless, since both write byte-identical
- * content for the same (agentId, workspaceId, profile).
+ * content for the same (agentId, accountId, profile).
  */
-export function mcpConfigPathFor(agentId: string, workspaceId?: string, profile?: 'full' | 'compact'): string {
-  return join(managedAgentDir(agentId), `mcp-config${workspaceSuffix(workspaceId)}${profileSuffix(profile)}.json`);
+export function mcpConfigPathFor(agentId: string, accountId?: string, profile?: 'full' | 'compact'): string {
+  return join(managedAgentDir(agentId), `mcp-config${accountSuffix(accountId)}${profileSuffix(profile)}.json`);
 }
 
 export function credentialPathFor(agentId: string): string {
@@ -181,7 +182,7 @@ export async function readManagedAgentConfig(agentId: string): Promise<ManagedAg
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     if (raw && typeof raw === 'object' && raw.agent_id === agentId) {
-      return raw as ManagedAgentDiskConfig;
+      return normalizeAccountScope(raw) as ManagedAgentDiskConfig;
     }
   } catch {
     // Treat malformed config as "no config" — caller will rewrite.
@@ -191,11 +192,11 @@ export async function readManagedAgentConfig(agentId: string): Promise<ManagedAg
 
 export async function writeManagedAgentConfig(cfg: ManagedAgentDiskConfig): Promise<void> {
   await ensureManagedAgentDir(cfg.agent_id);
-  await fsp.writeFile(configPathFor(cfg.agent_id), JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  await fsp.writeFile(configPathFor(cfg.agent_id), JSON.stringify(normalizeAccountScope(cfg), null, 2), { mode: 0o600 });
 }
 
-export async function readApiKey(agentId: string, workspaceId?: string): Promise<string | null> {
-  const path = apiKeyPathFor(agentId, workspaceId);
+export async function readApiKey(agentId: string, accountId?: string): Promise<string | null> {
+  const path = apiKeyPathFor(agentId, accountId);
   if (!existsSync(path)) return null;
   try {
     const raw = readFileSync(path, 'utf8').trim();
@@ -206,32 +207,32 @@ export async function readApiKey(agentId: string, workspaceId?: string): Promise
 }
 
 /**
- * Read the workspace-scoped key used during managed-agent rehydration.
+ * Read the account-scoped key used during managed-agent rehydration.
  *
- * Versions before workspace-scoped global agents stored the only key at
+ * Versions before account-scoped global agents stored the only key at
  * `apikey`. During the first restart after upgrading, config.json already has
- * a workspace_id but the scoped key does not exist yet. Treat that unscoped
- * key as belonging to the persisted workspace and copy it forward. This is
- * intentionally separate from readApiKey(): normal cross-workspace dispatch
+ * a account_id but the scoped key does not exist yet. Treat that unscoped
+ * key as belonging to the persisted account and copy it forward. This is
+ * intentionally separate from readApiKey(): normal cross-account dispatch
  * must provision a new key instead of reusing the legacy credential.
  */
 export async function readApiKeyForRehydrate(
   agentId: string,
-  workspaceId?: string,
+  accountId?: string,
 ): Promise<string | null> {
-  const scoped = await readApiKey(agentId, workspaceId);
-  if (scoped || !workspaceId) return scoped;
+  const scoped = await readApiKey(agentId, accountId);
+  if (scoped || !accountId) return scoped;
 
   const legacy = await readApiKey(agentId);
   if (!legacy) return null;
 
-  await writeApiKey(agentId, legacy, workspaceId);
+  await writeApiKey(agentId, legacy, accountId);
   return legacy;
 }
 
-export async function writeApiKey(agentId: string, raw: string, workspaceId?: string): Promise<void> {
+export async function writeApiKey(agentId: string, raw: string, accountId?: string): Promise<void> {
   await ensureManagedAgentDir(agentId);
-  await fsp.writeFile(apiKeyPathFor(agentId, workspaceId), raw, { mode: 0o600 });
+  await fsp.writeFile(apiKeyPathFor(agentId, accountId), raw, { mode: 0o600 });
 }
 
 /**
@@ -264,7 +265,7 @@ export async function writeMcpConfig(
   agentId: string,
   awbUrl: string,
   rawApiKey: string,
-  workspaceId?: string,
+  accountId?: string,
   // Ticket ee26302d: extra MCP session headers, e.g.
   // resolveToolProfileHeader(claudeRuntimeProfile)'s `{'X-AWB-Tool-Profile':
   // 'compact'}` for a small-context Claude backend. Omitted by every caller
@@ -277,7 +278,7 @@ export async function writeMcpConfig(
   // mcpConfigPathFor's doc comment) — derived from extraHeaders so callers
   // don't have to separately track/pass the profile.
   const profile = extraHeaders?.['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
-  const path = mcpConfigPathFor(agentId, workspaceId, profile);
+  const path = mcpConfigPathFor(agentId, accountId, profile);
   const self = resolveSelfCommand();
   const body = {
     mcpServers: {

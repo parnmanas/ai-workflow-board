@@ -13,17 +13,17 @@ const empty = (): ClaudeBackendProfile => ({
 /** 삭제 확인 다이얼로그에 넣을 참조 요약. 서버 impact 응답을 사람이 읽는 문장으로.
  *  보드가 없어졌으므로 보드 참조 수는 세지 않는다(서버가 아직 보내더라도 무시). */
 function impactSummary(impact: {
-  workspaces?: unknown[]; agents?: unknown[]; runs?: unknown[]; global_default?: boolean;
+  accounts?: unknown[]; agents?: unknown[]; runs?: unknown[]; global_default?: boolean;
 }): string {
   const parts = [
-    `워크스페이스 ${impact.workspaces?.length ?? 0}개`,
+    `계정 ${impact.accounts?.length ?? 0}개`,
     `에이전트 ${impact.agents?.length ?? 0}개`,
     `티켓 재정의 ${impact.runs?.length ?? 0}건`,
   ];
   return impact.global_default ? `전역 기본값 · ${parts.join(' · ')}` : parts.join(' · ');
 }
 
-export default function ClaudeBackendProfilesManager({ workspaceId }: { workspaceId: string }) {
+export default function ClaudeBackendProfilesManager({ accountId }: { accountId: string }) {
   const { showToast } = useToast();
   const [profiles, setProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [defaultId, setDefaultId] = useState('');
@@ -55,14 +55,14 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
     setCredentialsLoading(true);
     setCredentialsError('');
     try {
-      setCredentials(await api.listCredentials(workspaceId));
+      setCredentials(await api.listCredentials(accountId));
     } catch (error: any) {
       setCredentials([]);
       setCredentialsError(error.message || 'Credential 목록을 불러오지 못했습니다.');
     } finally {
       setCredentialsLoading(false);
     }
-  }, [workspaceId]);
+  }, [accountId]);
   useEffect(() => { loadCredentials(); }, [loadCredentials]);
 
   const edit = (profile?: ClaudeBackendProfile) => {
@@ -146,7 +146,7 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
         <h3 style={{ margin: 0, color: tokens.colors.textStrong }}>Claude backend 프로필</h3>
         <p style={{ margin: `${tokens.spacing.xs}px 0 0`, color: tokens.colors.textMuted, fontSize: tokens.typography.fontSizeMd }}>
           Claude CLI의 도구 흐름을 유지하면서 모델 요청을 호환 endpoint로 연결합니다.
-          프로필은 인스턴스 전역이라 모든 워크스페이스가 같은 목록을 봅니다.
+          프로필은 인스턴스 전역이라 모든 계정이 같은 목록을 봅니다.
         </p>
       </div>
       <div data-layout="responsive-profile-columns" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: tokens.spacing.lg }}>
@@ -167,7 +167,7 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
             {profilesError
               ? <ErrorState message={profilesError} onRetry={() => { load(); }} />
               : profiles.length === 0
-                ? <EmptyState title="등록된 프로필이 없습니다" description="새 프로필을 만들면 모든 워크스페이스에서 선택할 수 있습니다." />
+                ? <EmptyState title="등록된 프로필이 없습니다" description="새 프로필을 만들면 모든 계정에서 선택할 수 있습니다." />
                 : null}
             {profiles.map(profile => (
               <Card key={profile.id} selected={!isNew && editing.id === profile.id} padding="10px 12px" style={{ boxShadow: 'none' }}>
@@ -201,8 +201,8 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
                 ]} onChange={e => setEditing({ ...editing, credential_ref: e.target.value || undefined })} />
                 {credentialsLoading && <small style={{ color: tokens.colors.textMuted }}>Credential 목록을 불러오는 중…</small>}
                 {credentialsError && <small style={{ color: tokens.colors.danger }}>Credential 목록을 불러오지 못했습니다. 기존 선택값은 변경되지 않습니다. <button type="button" onClick={loadCredentials}>다시 시도</button></small>}
-                {invalidCredentialRef && <small style={{ color: tokens.colors.danger }}>저장된 Credential을 현재 workspace에서 찾을 수 없습니다. 다른 Credential을 선택하거나 해제하세요.</small>}
-                {!credentialsLoading && !credentialsError && credentials.length === 0 && <small style={{ color: tokens.colors.textMuted }}>현재 workspace에서 선택 가능한 Credential이 없습니다.</small>}
+                {invalidCredentialRef && <small style={{ color: tokens.colors.danger }}>저장된 Credential을 현재 소유 계정에서 찾을 수 없습니다. 다른 Credential을 선택하거나 해제하세요.</small>}
+                {!credentialsLoading && !credentialsError && credentials.length === 0 && <small style={{ color: tokens.colors.textMuted }}>현재 소유 계정에서 선택 가능한 Credential이 없습니다.</small>}
               </div>
             </div>
           </section>
@@ -240,7 +240,7 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
           <>
             <strong>{deleteTarget?.name}</strong> 프로필을 삭제합니다. 현재 참조: {deleteSummary}.
             {'\n\n'}
-            참조하던 워크스페이스·에이전트·티켓은 핀이 해제되어 전역 기본값을 상속합니다.
+            참조하던 계정·에이전트·티켓은 핀이 해제되어 전역 기본값을 상속합니다.
           </>
         }
         onConfirm={confirmRemove}

@@ -25,14 +25,14 @@ export class UsersController {
   ) {}
 
   @Get()
-  async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async list(@Query('account_id') accountId: string, @Res() res: Response) {
     let users: User[];
 
-    if (workspaceId) {
-      // Workspace-scoped: get members via ReBAC tuples
+    if (accountId) {
+      // Account-scoped: get members via ReBAC tuples
       const [members, owners] = await Promise.all([
-        this.rebacService.listSubjects({ type: 'workspace', id: workspaceId }, 'member'),
-        this.rebacService.listSubjects({ type: 'workspace', id: workspaceId }, 'owner'),
+        this.rebacService.listSubjects({ type: 'account', id: accountId }, 'member'),
+        this.rebacService.listSubjects({ type: 'account', id: accountId }, 'owner'),
       ]);
       const userIds = [...new Set(
         [...members, ...owners].filter(s => s.type === 'user').map(s => s.id),

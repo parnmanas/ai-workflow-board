@@ -16,15 +16,15 @@ interface PendingUser {
   name: string;
   email: string;
   status: 'pending';
-  requested_workspace_name: string | null;
+  requested_account_name: string | null;
   created_at: string;
 }
 
-export default function UserManager({ workspaceId }: { workspaceId?: string } = {}) {
+export default function UserManager({ accountId }: { accountId?: string } = {}) {
   const confirm = useConfirm();
   const [users, setUsers] = useState<User[]>([]);
   const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
-  const [workspaces, setWorkspaces] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -33,15 +33,15 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
   });
   const [permInfo, setPermInfo] = useState<PermissionInfo | null>(null);
   const [showPerms, setShowPerms] = useState(false);
-  // Track which approved users are showing workspace assignment UI
-  const [assigningWorkspace, setAssigningWorkspace] = useState<Record<string, string>>({});
+  // Track which approved users are showing account assignment UI
+  const [assigningAccount, setAssigningAccount] = useState<Record<string, string>>({});
 
   const load = async () => {
-    const [usersData, permData, pendingData, workspacesData] = await Promise.all([
-      api.getUsers(workspaceId),
+    const [usersData, permData, pendingData, accountsData] = await Promise.all([
+      api.getUsers(accountId),
       api.getPermissionsMeta(),
-      workspaceId ? Promise.resolve([]) : api.getPendingUsers(),
-      api.getWorkspaces(),
+      accountId ? Promise.resolve([]) : api.getPendingUsers(),
+      api.getAccounts(),
     ]);
     setUsers(usersData);
     setPermInfo(permData);
@@ -50,7 +50,7 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
     // "Pending Approval" section never renders even when accounts await
     // approval. api.getPendingUsers is typed as `any` so TS doesn't catch it.
     setPendingUsers(Array.isArray(pendingData) ? pendingData : (pendingData?.users ?? []));
-    setWorkspaces(workspacesData);
+    setAccounts(accountsData);
   };
 
   // The pending-users badge is a live count of accounts still awaiting a
@@ -59,7 +59,7 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
   // was still full. It now clears only when the queue actually empties, which
   // the approve/reject handlers force via refreshBadges().
   const { refresh: refreshBadges } = useNotifications();
-  useEffect(() => { load(); }, [workspaceId]);
+  useEffect(() => { load(); }, [accountId]);
 
   const resetForm = () => {
     setForm({ name: '', email: '', role: 'user', discord_user_id: '', password: '', permissions: [] });
@@ -117,10 +117,10 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
     refreshBadges();
   };
 
-  const handleAssignWorkspace = async (userId: string, workspaceId: string) => {
-    if (!workspaceId) return;
-    await api.assignUserWorkspace(userId, workspaceId);
-    setAssigningWorkspace(prev => {
+  const handleAssignAccount = async (userId: string, accountId: string) => {
+    if (!accountId) return;
+    await api.assignUserAccount(userId, accountId);
+    setAssigningAccount(prev => {
       const next = { ...prev };
       delete next[userId];
       return next;
@@ -166,18 +166,18 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
             {user.email || 'No email'} &middot; {new Date(user.created_at).toLocaleDateString()}
           </div>
           <div style={{ fontSize: '11px', color: tokens.colors.textSecondary, marginTop: 2 }}>
-            Requested workspace: <span style={{ color: user.requested_workspace_name ? tokens.colors.textStrong : tokens.colors.borderStrong }}>
-              {user.requested_workspace_name || 'None'}
+            Requested account: <span style={{ color: user.requested_account_name ? tokens.colors.textStrong : tokens.colors.borderStrong }}>
+              {user.requested_account_name || 'None'}
             </span>
           </div>
         </div>
         <Badge variant="warning">{user.status}</Badge>
-        {/* Workspace assignment dropdown for approve flow */}
+        {/* Account assignment dropdown for approve flow */}
         <Select
-          value={assigningWorkspace[user.id] || ''}
-          onChange={e => setAssigningWorkspace(prev => ({ ...prev, [user.id]: (e.target as HTMLSelectElement).value }))}
-          placeholder="Assign workspace..."
-          options={workspaces.map((ws: any) => ({ value: ws.id, label: ws.name }))}
+          value={assigningAccount[user.id] || ''}
+          onChange={e => setAssigningAccount(prev => ({ ...prev, [user.id]: (e.target as HTMLSelectElement).value }))}
+          placeholder="Assign account..."
+          options={accounts.map((ws: any) => ({ value: ws.id, label: ws.name }))}
           style={{ width: 160 }}
         />
         <Button
@@ -185,8 +185,8 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
           size="sm"
           onClick={async () => {
             await handleApprove(user.id);
-            if (assigningWorkspace[user.id]) {
-              await handleAssignWorkspace(user.id, assigningWorkspace[user.id]);
+            if (assigningAccount[user.id]) {
+              await handleAssignAccount(user.id, assigningAccount[user.id]);
             }
           }}
         >Approve</Button>
@@ -229,7 +229,7 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
         <Button variant="primary" size="md" onClick={() => { resetForm(); setShowForm(true); }}>+ Add User</Button>
       </div>
 
-      {/* Pending Users Section — dedicated API call for requested_workspace_name */}
+      {/* Pending Users Section — dedicated API call for requested_account_name */}
       {pendingUsers.length > 0 && (
         <div style={{ marginBottom: 20 }}>
           <h4 style={{

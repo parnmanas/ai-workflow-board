@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -65,8 +65,8 @@ async function roomCountFor(ds, stepId) {
   return ds.getRepository('ChatRoom').count({ where: { orchestration_step_id: stepId } });
 }
 
-async function readSteps(missions, missionId, workspaceId) {
-  const detail = await missions.getMissionDetail(missionId, workspaceId);
+async function readSteps(missions, missionId, accountId) {
+  const detail = await missions.getMissionDetail(missionId, accountId);
   return { detail, byKey: Object.fromEntries(detail.steps.map((s) => [s.step_key, s])) };
 }
 
@@ -87,9 +87,9 @@ async function stage(t, { label }) {
   const runner = app.get(services.OrchestrationRunnerService);
   const reaper = app.get(services.OrchestrationReaperService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, `rec-${label}`);
+  const ws = await createAccount(app, getDataSourceToken, `rec-${label}`);
   const mcpFor = async (agent, name) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: name });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: name });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => {
       void client.close().catch(() => {});
@@ -100,7 +100,7 @@ async function stage(t, { label }) {
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: `Recovery squad ${label}`,
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [{ role_label: 'builder', capabilities: 'builds things', max_concurrent: 4 }],
@@ -110,7 +110,7 @@ async function stage(t, { label }) {
   const worker = squad.member('builder');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: `Recovery mission ${label}`,
     objective: 'ship the thing',
@@ -483,7 +483,7 @@ test('미션 room 의 대화는 저장돼 다시 읽어도 그대로 남는다',
   await messageRepo.save(
     messageRepo.create({
       room_id: detail.room_id,
-      workspace_id: ws.id,
+      account_id: ws.id,
       sender_type: 'user',
       sender_id: HUMAN.id,
       sender_name: HUMAN.name,
@@ -555,13 +555,13 @@ async function driveManualRecovery(t, { label, graphEnabled }) {
   const runner = app.get(services.OrchestrationRunnerService);
   const reaper = app.get(services.OrchestrationReaperService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, `rec-${label}`);
+  const ws = await createAccount(app, getDataSourceToken, `rec-${label}`);
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
   // 팀을 먼저 만든다 — orchestrator 정체성이 팀 생성의 결과물이라 그 api key 는
   // 그 뒤에야 만들 수 있다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: `Recovery squad ${label}`,
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [{ role_label: 'builder', capabilities: 'builds', max_concurrent: 4 }],
@@ -569,13 +569,13 @@ async function driveManualRecovery(t, { label, graphEnabled }) {
   const team = squad.team;
   const lead = squad.orchestrator;
   const worker = squad.member('builder');
-  const key = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label });
+  const key = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label });
   const leadMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => {
     void leadMcp.close().catch(() => {});
   });
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: `Recovery mission ${label}`,
     objective: 'ship it',

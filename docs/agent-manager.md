@@ -16,15 +16,16 @@ context, and fallback rules.
 The Runtime Host owns the resources that must live on an execution machine:
 
 - the authenticated SSE/REST connection to AWB;
-- one isolated working environment and credential boundary per AWB Agent;
+- isolated working environments and credentials per runtime identity, plus native CLI sessions;
 - runtime process lifecycle, cancellation, recovery, and health reporting;
 - delivery of immutable skill snapshots;
 - protocol adapters, including Hermes over ACP stdio;
 - bounded ChildRun telemetry for runtime-native collaboration.
 
-AWB remains the control plane. It owns Agent identity, authorization, work
-state, audit history, runtime selection, collaboration policy, and governed
-skills.
+AWB remains the control plane. It owns account authorization, work state,
+audit history, runtime selection, collaboration policy, and governed skills.
+Agent Session transcripts remain native to the CLI; AWB persists their account
+ownership and execution settings separately.
 
 See [Hermes runtime](hermes-runtime.md) for Hermes installation and policy
 examples.
@@ -34,14 +35,14 @@ examples.
 | Concept | Lifetime | Purpose |
 |---|---|---|
 | Runtime Host | machine/process | Executes configured runtimes and reports capabilities |
-| AWB Agent | durable database identity | Owns responsibilities, permissions, assignments, and history |
+| Runtime identity | derived from RuntimeSpec | Addresses ticket, chat, mission, and automation execution |
+| Agent Session | native CLI session id | Carries a pinned account/credential/config/backend binding |
 | Hermes ChildRun | bounded child of one parent run | Performs temporary delegated or swarm work |
 
-A ChildRun is never promoted to an AWB Agent. Create another AWB Agent only
-when the participant needs durable responsibility, separate authorization, an
-independent queue, or long-lived history.
+A ChildRun stays within its parent run. New executable selections use
+RuntimeSpec; there is no Agent create/edit surface or Agent database row.
 
-Every executable Agent must have:
+Every executable RuntimeSpec must have:
 
 1. a `manager_agent_id` identifying its Runtime Host;
 2. an explicit runtime id (`type`);
@@ -51,21 +52,37 @@ There is no default runtime, default strategy, or fallback to an editor/plugin
 session. A missing, unknown, unavailable, or invalid runtime fails with a
 typed error instead of silently changing execution semantics.
 
+## Account ownership compatibility
+
+Work pages use `/sessions`, `/tickets`, `/projects`, and `/missions` without an
+owner switch. The manager receives canonical `account_id` on work and session
+requests. Server SSE also carries the old `workspace_id` alias so existing
+installations keep running; new managers normalize old SSE and saved config to
+`account_id`. New config writes contain only the canonical owner field.
+
+The owner UUID stays the same. Existing `apikey.<UUID>`,
+`mcp-config.<UUID>[.compact].json`, managed runtime homes, credential session
+homes, and native CLI history retain their paths. `--account` is an optional
+manual override; `--workspace` / `-w` remain deprecated aliases. Pairing and
+normal work do not require selecting a workspace. Filesystem `workspace_folder`,
+RunWorkspace, CLI workspace trust, and Codex `workspace-write` retain their
+working-directory meanings.
+
 ## Host topology
 
 ```text
 AWB server (control plane)
-  ├─ Agent/runtime configuration
+  ├─ Account policy and RuntimeSpec
   ├─ events, permissions, audit, skills
   └─ Runtime Host API + SSE
              │
              ▼
 awb-agent-manager (execution plane)
   ├─ capability heartbeat
-  ├─ managed Agent isolation
+  ├─ runtime identity isolation
   ├─ classic CLI adapters
   └─ Hermes ACP process owner
-       ├─ one process per durable AWB Agent
+       ├─ one process per active runtime identity
        ├─ resumable session per AWB run
        └─ bounded ChildRuns
 ```
@@ -133,7 +150,7 @@ edited data reaches the host.
 ### Permission tier → CLI flags (ticket 5851e435)
 
 `runtime_config.permission_mode` (Agent trust) is the **source of truth** for
-execution privilege on every runtime, not just Hermes. The workspace
+execution privilege on every runtime, not just Hermes. The account
 harness `permission_mode` is a second, older layer; the two are folded into one
 effective policy by `resolveEffectivePermissionPolicy()`
 (`apps/agent-manager/src/lib/permission-policy.ts`), which every dispatch entry
@@ -224,9 +241,9 @@ managed-agent runtime-config form.
 
 Pending is never created for a CLI-internal permission/trust dialog. Claude's
 workspace-trust preflight (ticket 48aeab6e) now blocks only when the
-workspace harness explicitly asked for a non-bypass mode **and** Agent trust did
+account harness explicitly asked for a non-bypass mode **and** Agent trust did
 not override it to `trusted` — an agent whose trust alone is `approve`/`strict`
-in a workspace that never configured a harness is not gated.
+under an account that never configured a harness is not gated.
 
 The effective policy and the spawned argv are written to the manager log on
 every spawn. Argv redaction decides by **position, then schema** — never by the
@@ -254,11 +271,11 @@ guarantee) and the raw string is not kept on the policy object at all.
 
 ## Harness config
 
-`harness_config` is a **workspace** setting (schema:
-`apps/server/src/common/harness-config.ts`; set via `PATCH /api/workspaces/:id`
-or the MCP `update_workspace` tool). There is no board layer any more — the
-workspace value is the whole harness. Ticket dispatch ships it on every
-`agent_trigger`, with the workspace `language` instruction appended to
+`harness_config` is an **account** setting (schema:
+`apps/server/src/common/harness-config.ts`; set via `PATCH /api/accounts/:id`
+or the MCP `update_account` tool). There is no board layer any more — the
+account value is the whole harness. Ticket dispatch ships it on every
+`agent_trigger`, with the account `language` instruction appended to
 `system_prompt_append`. A null harness means "spawn exactly as before".
 
 | key | how the manager applies it |
@@ -609,7 +626,7 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
 
 | 항목 | 결정 |
 |---|---|
-| 승인 주체 | 기존에 `update_manager` 명령을 낼 수 있는 workspace admin. **새 권한 축을 만들지 않는다** |
+| 승인 주체 | 기존에 `update_manager` 명령을 낼 수 있는 account administrator. **새 권한 축을 만들지 않는다** |
 | 승인 단위 | **(호스트 × 대상 버전) 1회성.** 한 호스트에서 v1.6.185 를 승인해도 v1.6.186 이나 다른 호스트에는 적용되지 않는다 |
 | 요청 시점 | 유지보수 창에 진입했고, 실제로 새 버전이 있고, provenance 검증을 통과했을 때 |
 | 미승인 시 | **아무 일도 일어나지 않는다.** 요청은 다음 창에 다시 표면화된다. 시간이 지난다고 무인 실행으로 승격되지 않는다 |
@@ -689,7 +706,7 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
 3. **self-update 로 끊긴 세션은 즉시 재개되지 않는다.** 예전의 `DispatchReconcilerService`
    (컬럼 진입 이후 응답한 role holder 는 재시드하지 않던 경로)는 보드와 함께 제거됐다. 지금
    `in_progress` 티켓은 `TicketDispatchService` 의 supervisor 가 맡는다 — 살아 있는 strand 도
-   활동도 없이 `workspace.supervisor_stale_ms`(기본 30분)가 지나면 force respawn 으로
+   활동도 없이 `account.supervisor_stale_ms`(기본 30분)가 지나면 force respawn 으로
    재전송하고, 진전 없이 3회(`MAX_SUPERVISOR_REDISPATCHES`) 재전송하면 사람에게 넘긴다(pend).
    따라서 끊긴 티켓 세션은 최대 그 시간만큼 멈춰 있다가 재개된다.
 
@@ -751,7 +768,7 @@ and audit trail.
 
 Hosts → Agent 템플릿 → 템플릿 등록 stores reusable launch preferences: name, Host, CLI,
 model, effort and execution strategy/permissions. A template has no working
-folder, workspace ownership, lifecycle, API key or dispatch identity. Selecting
+folder, account ownership, lifecycle, API key or dispatch identity. Selecting
 one copies its settings into the current form; edits and deletion never rewrite
 existing executions. Sessions, chat participants, ticket assignees, team slots
 and Action/QA/Security/Schedule editors share `RuntimeSelectionFields`. Model lists

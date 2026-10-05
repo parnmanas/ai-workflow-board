@@ -78,9 +78,9 @@ export function parseOperationalFallback(text: string): OperationalFallbackReque
   }
 }
 
-export function operationalDedupeKey(workspaceId: string, request: OperationalFallbackRequest): string {
+export function operationalDedupeKey(accountId: string, request: OperationalFallbackRequest): string {
   return createHash('sha256')
-    .update(`${workspaceId.trim()}\n${request.operation}\n${request.missing_capability}`)
+    .update(`${accountId.trim()}\n${request.operation}\n${request.missing_capability}`)
     .digest('hex');
 }
 
@@ -92,13 +92,13 @@ export async function ensureOperationalFallbackTicket(
   source: OperationalFallbackSource,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: string; title: string; reused: boolean }> {
-  const workspaceId = String(config.workspace_id || '');
-  const key = operationalDedupeKey(workspaceId, request);
+  const accountId = String(config.account_id || '');
+  const key = operationalDedupeKey(accountId, request);
   const url = `${String(config.url).replace(/\/$/, '')}/api/agent/operational-capability-ticket`;
   const response = await fetchImpl(url, {
     method: 'POST',
     headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ workspace_id: workspaceId, dedupe_key: key, ...request, ...source }),
+    body: JSON.stringify({ account_id: accountId, dedupe_key: key, ...request, ...source }),
   });
   if (!response.ok) {
     const detail = (await response.text().catch(() => '')).slice(0, 500);
@@ -116,15 +116,15 @@ export async function ensureOrdinaryWorkFallbackTicket(
   source: Pick<OperationalFallbackSource, 'room_id' | 'message_id'>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: string; title: string; reused: boolean }> {
-  const workspaceId = String(config.workspace_id || '');
+  const accountId = String(config.account_id || '');
   const dedupeKey = createHash('sha256')
-    .update(`${workspaceId.trim()}\n${source.room_id}\n${source.message_id}`)
+    .update(`${accountId.trim()}\n${source.room_id}\n${source.message_id}`)
     .digest('hex');
   const url = `${String(config.url).replace(/\/$/, '')}/api/agent/ordinary-work-ticket`;
   const response = await fetchImpl(url, {
     method: 'POST',
     headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ workspace_id: workspaceId, dedupe_key: dedupeKey, ...request, ...source }),
+    body: JSON.stringify({ account_id: accountId, dedupe_key: dedupeKey, ...request, ...source }),
   });
   if (!response.ok) {
     const detail = (await response.text().catch(() => '')).slice(0, 500);

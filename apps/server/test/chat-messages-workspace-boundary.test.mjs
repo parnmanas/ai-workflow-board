@@ -8,7 +8,7 @@
 // per-user `cleared_at` 컷까지 지나친다.
 //
 // 실제 sql.js DataSource 위에서 진짜 쿼리를 돌린다(chat-open-join.test.mjs 선례).
-// 검증 대상이 "방 행의 workspace_id 와 호출자의 workspace 가 실제로 대조되는가"
+// 검증 대상이 "방 행의 account_id 와 호출자의 workspace 가 실제로 대조되는가"
 // 자체라 스텁으로는 아무것도 안 잡힌다 — 조건을 통째로 빼도 스텁 테스트는 통과한다.
 //
 // 공개 경로가 MCP 툴 하나뿐이라 **그 진입점에서** 돈다: 진짜 `registerChatTools` 가
@@ -43,7 +43,7 @@ const OTHER_WS = '22222222-2222-4222-8222-222222222222';
 const BOT = '33333333-3333-4333-8333-333333333333';
 /** 같은 워크스페이스의 비참여자 — 경계를 고쳐도 참여자 게이트가 그대로인지 본다. */
 const OUTSIDER_BOT = '44444444-4444-4444-8444-444444444444';
-/** workspace_id 가 없는(global) 에이전트 — 워크스페이스 해석 실패 경로용. */
+/** account_id 가 없는(global) 에이전트 — 워크스페이스 해석 실패 경로용. */
 const GLOBAL_BOT = '55555555-5555-4555-8555-555555555555';
 /** 사람 발신자 — 방 대화에 섞여 있는 쪽이 실제 방에 가깝다. */
 const ALICE = '66666666-6666-4666-8666-666666666666';
@@ -62,7 +62,7 @@ async function seedRoom(overrides = {}, participants = []) {
   const roomRepo = dataSource.getRepository(ChatRoom);
   const partRepo = dataSource.getRepository(ChatRoomParticipant);
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     type: 'group',
     name: '방',
     last_message_at: null,
@@ -92,7 +92,7 @@ async function seedMessages(room, rows) {
     const r = rows[i];
     saved.push(await msgRepo.save(msgRepo.create({
       room_id: room.id,
-      workspace_id: room.workspace_id,
+      account_id: room.account_id,
       sender_type: r.sender_type || 'user',
       sender_id: r.sender_id || ALICE,
       type: r.type || 'message',
@@ -105,14 +105,14 @@ async function seedMessages(room, rows) {
 }
 
 /**
- * MCP `get_chat_room_messages` 한 번. `sessionWorkspaceId` 는 caller 세션(= API key)이
- * 들고 있는 값이고, 비워 두면 에이전트 자신의 workspace_id 로 떨어지는 폴백을 탄다.
+ * MCP `get_chat_room_messages` 한 번. `sessionAccountId` 는 caller 세션(= API key)이
+ * 들고 있는 값이고, 비워 두면 에이전트 자신의 account_id 로 떨어지는 폴백을 탄다.
  */
-async function mcpRead(roomId, agentId, sessionWorkspaceId, args = {}) {
+async function mcpRead(roomId, agentId, sessionAccountId, args = {}) {
   const sessionId = `session-${randomUUID()}`;
   sessionStore.register(sessionId, { close: async () => {} }, {}, {
     agentId,
-    workspaceId: sessionWorkspaceId,
+    accountId: sessionAccountId,
     scope: 'full',
     source: 'db',
   });
@@ -167,7 +167,7 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
       empty,                                      // ticketRepo (P4c-4: agentRepo 삭제)
       empty,                                      // userMentionRepo
       { async find() { return []; } },            // attachmentRepo
-      { async findOne() { return null; } },       // workspaceRepo
+      { async findOne() { return null; } },       // accountRepo
       dataSource,                                 // dataSource
       noopLog,                                    // logService
       membership,                                 // membership
@@ -193,9 +193,9 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
       userRepo.create({ id: ALICE, name: 'Alice', email: 'alice@example.com' }),
     ]);
     await hostRepo.save([
-      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
-      hostRepo.create({ id: OUTSIDER_BOT, name: 'Outsider bot', type: 'claude', workspace_id: WS }),
-      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
+      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', account_id: WS }),
+      hostRepo.create({ id: OUTSIDER_BOT, name: 'Outsider bot', type: 'claude', account_id: WS }),
+      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', account_id: null }),
     ]);
   });
 
@@ -214,7 +214,7 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
 
   it('타 워크스페이스 방은 active 참여자여도 거부되고 메시지가 한 건도 나가지 않는다', async () => {
     // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 워크스페이스가 아니면 거부다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
     await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
 
     const res = await mcpRead(foreign.id, BOT, WS);
@@ -225,7 +225,7 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
 
   it('없는 방과 타 워크스페이스 방의 응답이 완전히 같다', async () => {
     // 다르면 남의 워크스페이스 room_id 를 넣어보는 것만으로 방의 존재를 확인할 수 있다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
     await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
 
     const foreignRes = await mcpRead(foreign.id, BOT, WS);
@@ -239,8 +239,8 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
   it('타 워크스페이스 방은 참여자 행 유무로도 응답이 갈리지 않는다', async () => {
     // 워크스페이스 대조를 참여자 게이트 **뒤에** 두면 참여자 행이 있을 때와 없을 때의
     // 에러가 갈려, 남의 워크스페이스 방의 참여자 구성이 응답만으로 드러난다.
-    const joined = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
-    const notJoined = await seedRoom({ workspace_id: OTHER_WS }, []);
+    const joined = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const notJoined = await seedRoom({ account_id: OTHER_WS }, []);
 
     const joinedRes = await mcpRead(joined.id, BOT, WS);
     const notJoinedRes = await mcpRead(notJoined.id, BOT, WS);
@@ -249,10 +249,10 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     assert.deepEqual(joinedRes.payload, notJoinedRes.payload, '참여자 행 유무가 응답으로 새어 나갔다');
   });
 
-  it('세션에 workspace 가 없으면 에이전트 자신의 workspace_id 로 판정한다', async () => {
-    // caller.workspaceId 가 비면 normalizeAgentWorkspaceId(agent.workspace_id) 로 떨어진다.
+  it('세션에 workspace 가 없으면 에이전트 자신의 account_id 로 판정한다', async () => {
+    // caller.accountId 가 비면 normalizeAgentAccountId(agent.account_id) 로 떨어진다.
     // BOT 은 WS 소속이므로 OTHER_WS 방은 여전히 거부되고, 자기 WS 방은 읽힌다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
     await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
     const own = await seedRoom({}, [{ type: 'agent', id: BOT }]);
     await seedMessages(own, [{ content: '내 워크스페이스 대화' }]);
@@ -281,7 +281,7 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
   it('전역 에이전트도 세션 키의 workspace 밖 방은 읽지 못한다', async () => {
     // global 이라고 전 워크스페이스가 열리지는 않는다 — 판정 기준은 어디까지나 지금
     // 바인딩된 스코프다. 같은 읽기의 형제 경로인 agent-api REST 도 키 스코프로 막는다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
     await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
     const own = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
     await seedMessages(own, [{ content: '내 워크스페이스 대화' }]);

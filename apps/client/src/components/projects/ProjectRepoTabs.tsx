@@ -17,11 +17,11 @@ export type ProjectRepoTab = 'branches' | 'history' | 'files';
 
 interface ProjectRepoTabsProps {
   project: Project;
-  workspaceId: string;
+  accountId: string;
   tab: ProjectRepoTab;
 }
 
-export default function ProjectRepoTabs({ project, workspaceId, tab }: ProjectRepoTabsProps) {
+export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepoTabsProps) {
   // Branches 탭 상태 — 마운트 시 1회 + 새로고침.
   const [branchLoading, setBranchLoading] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
@@ -63,7 +63,7 @@ export default function ProjectRepoTabs({ project, workspaceId, tab }: ProjectRe
     setRefsError(null);
     setRefsErrorSshOnly(false);
     try {
-      const result = await api.getProjectRefs(project.id, workspaceId, refresh);
+      const result = await api.getProjectRefs(project.id, accountId, refresh);
       setRefs(result);
       // 기본 선택 = 원격 HEAD, 없으면 첫 브랜치, 그것도 없으면 빈 값(서버가 HEAD).
       setSelectedRef((prev) => prev || result.head || result.branches[0] || '');
@@ -74,7 +74,7 @@ export default function ProjectRepoTabs({ project, workspaceId, tab }: ProjectRe
     } finally {
       setRefsLoading(false);
     }
-  }, [project.id, workspaceId]);
+  }, [project.id, accountId]);
 
   useEffect(() => {
     if ((tab === 'history' || tab === 'files') && !refs && !refsLoading && !refsError) void loadRefs();
@@ -247,8 +247,8 @@ export default function ProjectRepoTabs({ project, workspaceId, tab }: ProjectRe
         </Button>
       </div>
       {tab === 'history'
-        ? <RepoHistoryTab projectId={project.id} workspaceId={workspaceId} refKey={selectedRef} />
-        : <RepoFilesTab projectId={project.id} workspaceId={workspaceId} refKey={selectedRef} />}
+        ? <RepoHistoryTab projectId={project.id} accountId={accountId} refKey={selectedRef} />
+        : <RepoFilesTab projectId={project.id} accountId={accountId} refKey={selectedRef} />}
     </div>
   );
 }

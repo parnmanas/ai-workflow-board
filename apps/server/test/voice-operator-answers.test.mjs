@@ -20,7 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
@@ -50,11 +50,11 @@ test('a spoken choice reaches the waiting session only from a turn the user star
   const { getDataSourceToken, AuthService, activityEvents } = modules;
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'voice-answers');
+  const ws = await createAccount(app, getDataSourceToken, 'voice-answers');
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const other = await createUser(app, getDataSourceToken, { name: 'other-admin', role: 'admin' });
   const headersFor = (user) => ({
-    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json',
+    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json',
   });
   const userHeaders = headersFor(admin);
   // 소리를 낼 수 있어야 요약이 알림으로 간다(엔진에 닿을 필요는 없다 — 소리는 화면이 요청할 때 합성한다).
@@ -96,7 +96,7 @@ test('a spoken choice reaches the waiting session only from a turn the user star
     body: JSON.stringify({ name: 'Jarvis', manager_id: host.id, cli: 'claude', session_id: 'op-1', title: 'Jarvis' }),
   });
   assert.equal(registered.status, 201, registered.text);
-  assert.equal(registered.body.operator.workspace_id, ws.id, 'the workspace the operator was registered from is kept');
+  assert.equal(registered.body.operator.account_id, ws.id, 'the workspace the operator was registered from is kept');
 
   const mcp = (sessionId) => new McpClient({
     baseUrl: base, apiKey: hostKey, clientInfo: { name: 'claude-agent-acp', version: 'test' },
@@ -127,7 +127,7 @@ test('a spoken choice reaches the waiting session only from a turn the user star
   assert.match(report.text, /요청: Run npm publish/);
   assert.match(report.text, /선택지: 1\) Allow once {2}2\) Reject/);
   assert.ok(report.text.includes(`answer_session_permission(manager_id="${host.id}", cli="codex", session_id="sess-work", request_id="r1", option_id=1)"allow_once" 2)"reject")`), report.text);
-  assert.equal(report.workspace_id, ws.id, 'the operator session opens with the workspace it was registered from');
+  assert.equal(report.account_id, ws.id, 'the operator session opens with the workspace it was registered from');
 
   // 2. operator 는 미결 요청을 본다.
   const listed = await operator.callTool('list_pending_session_requests', {});

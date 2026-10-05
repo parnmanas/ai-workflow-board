@@ -16,15 +16,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createAccount } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
-async function seedGroupRoom(ds, { workspaceId, participants }) {
+async function seedGroupRoom(ds, { accountId, participants }) {
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: workspaceId,
+    account_id: accountId,
     type: 'group',
     name: 'session-status snapshot room',
     created_by_type: 'user',
@@ -48,20 +48,20 @@ test('GET session-status: a live push is visible on the next room entry without 
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-session-status-snapshot');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-session-status-snapshot');
   const user = await createUser(app, getDataSourceToken, { name: 'viewer' });
   const userToken = app.get(AuthService).createSession(user.id);
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
-  const agentKey = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'status-poster' });
+  const agentKey = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'status-poster' });
 
   const room = await seedGroupRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'user', id: user.id }, { type: 'agent', id: agent.id }],
   });
 
   // GET before any push — nothing has ever been posted, must be an empty snapshot.
   const beforeRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Account-Id': ws.id },
   });
   assert.equal(beforeRes.status, 200);
   assert.deepEqual(await beforeRes.json(), [], 'no session-status has ever been posted for this room yet');
@@ -78,7 +78,7 @@ test('GET session-status: a live push is visible on the next room entry without 
   // A user who was NOT subscribed to any SSE stream (simulates opening the
   // room fresh, e.g. after a page reload) must still see the live state.
   const afterRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Account-Id': ws.id },
   });
   assert.equal(afterRes.status, 200);
   const afterBody = await afterRes.json();
@@ -99,7 +99,7 @@ test('GET session-status: a live push is visible on the next room entry without 
   assert.ok(notLiveRes.ok);
 
   const clearedRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Account-Id': ws.id },
   });
   assert.deepEqual(await clearedRes.json(), [],
     'an expired-deadline / no-background-task push must clear the room snapshot, not persist a stale "0분" entry');
@@ -125,16 +125,16 @@ test('GET session-status: rejects a foreign-workspace roomId and a same-workspac
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-session-status-access-a');
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'chat-session-status-access-b');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-session-status-access-a');
+  const otherWs = await createAccount(app, getDataSourceToken, 'chat-session-status-access-b');
   const member = await createUser(app, getDataSourceToken, { name: 'member' });
   const outsider = await createUser(app, getDataSourceToken, { name: 'outsider' });
   const outsiderToken = app.get(AuthService).createSession(outsider.id);
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
-  const agentKey = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'status-poster' });
+  const agentKey = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'status-poster' });
 
   const room = await seedGroupRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'user', id: member.id }, { type: 'agent', id: agent.id }],
   });
 
@@ -152,15 +152,15 @@ test('GET session-status: rejects a foreign-workspace roomId and a same-workspac
   // genuinely-missing room so a foreign-workspace roomId can't even be
   // confirmed to exist.
   const crossWorkspaceRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
-    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Workspace-Id': otherWs.id },
+    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': otherWs.id },
   });
-  assert.equal(crossWorkspaceRes.status, 404,
-    'a room UUID from another workspace must not leak session-status, not even a 403 that would confirm existence');
+  assert.equal(crossWorkspaceRes.status, 403,
+    'the actual room owner is authorized independently of the ambient account, but a non-participant still cannot read session status');
 
   // Same outsider, now correctly scoped to the room's own workspace via the
   // header — but still not a participant, and not asking as an observer.
   const sameWorkspaceNonMemberRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
-    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': ws.id },
   });
   assert.equal(sameWorkspaceNonMemberRes.status, 403,
     'a same-workspace non-participant must be rejected unless asking as an explicit observer');
@@ -169,7 +169,7 @@ test('GET session-status: rejects a foreign-workspace roomId and a same-workspac
   // getRoom / getChatRoomMessages already grant a workspace-wide monitor —
   // must still work so this fix doesn't regress that feature.
   const observerRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status?observer=true`, {
-    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': ws.id },
   });
   assert.equal(observerRes.status, 200, 'the observer bypass must still work for a genuine same-workspace monitor');
   const observerBody = await observerRes.json();

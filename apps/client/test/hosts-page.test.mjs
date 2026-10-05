@@ -12,7 +12,7 @@ import HostsPage from '../src/components/HostsPage.tsx';
 
 const host = {
   instance_id: 'instance-host', host_id: 'runtime-host', agent_id: 'legacy-manager',
-  agent_name: 'Build host', hostname: 'machine', workspace_id: null,
+  agent_name: 'Build host', hostname: 'machine', account_id: null,
   mode: 'manager', cli: 'mixed', cli_adapters: ['codex'], pid: 123,
   plugin_version: '1.0.0', started_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
   working_dirs: ['/legacy/agent-folder'], agent_ids: ['retired-agent'],
@@ -20,7 +20,7 @@ const host = {
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const button = label => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === label);
 
-async function renderHosts(t, { width = 1280, admin = true, entry = '/ws/w/hosts' } = {}) {
+async function renderHosts(t, { width = 1280, admin = true, entry = '/hosts' } = {}) {
   const dom = setupDom({ width });
   const previousStorage = globalThis.localStorage;
   const previousAudio = globalThis.Audio;
@@ -28,7 +28,7 @@ async function renderHosts(t, { width = 1280, admin = true, entry = '/ws/w/hosts
   globalThis.localStorage = window.localStorage;
   localStorage.setItem('auth_token', 'hosts-test');
   const { uninstall } = installFakeEventSource();
-  t.mock.method(api, 'getMe', async () => ({ id: 'u', status: 'active', resolved_permissions: admin ? ['admin.access'] : [], workspaces: [{ id: 'w', name: 'Workspace' }] }));
+  t.mock.method(api, 'getMe', async () => ({ id: 'u', status: 'active', resolved_permissions: admin ? ['admin.access'] : [], accounts: [{ id: 'w', name: 'Account' }] }));
   t.mock.method(api, 'getCliCatalog', async () => ({ clis: cliCatalog() }));
   const list = t.mock.method(api, 'listAgentManagerInstances', async () => [host]);
   const legacy = t.mock.method(api, 'getAgentManagerInstanceSubagents', async () => []);
@@ -81,14 +81,14 @@ test('mobile Hosts returns from details to the Host list and pairing uses Host t
 });
 
 test('Hosts retains its admin permission boundary even on the template URL', async (t) => {
-  const { list } = await renderHosts(t, { admin: false, entry: '/ws/w/hosts?tab=templates' });
+  const { list } = await renderHosts(t, { admin: false, entry: '/hosts?tab=templates' });
   assert.equal(document.querySelectorAll('[role="tab"]').length, 0);
   assert.ok(document.body.textContent.includes('관리자 권한이 필요합니다'));
   assert.equal(list.mock.callCount(), 0);
 });
 
 test('template tab can be opened directly without mounting the Runtime Hosts console', async (t) => {
-  const { list } = await renderHosts(t, { entry: '/ws/w/hosts?tab=templates' });
+  const { list } = await renderHosts(t, { entry: '/hosts?tab=templates' });
   assert.equal(document.querySelector('[role="tab"][aria-selected="true"]').textContent, 'Agent 템플릿');
   assert.equal(Boolean(button('템플릿 등록')), true);
   assert.equal(list.mock.callCount(), 0);

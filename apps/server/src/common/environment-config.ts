@@ -1,12 +1,12 @@
 import { z } from 'zod';
 
 /**
- * Board / Workspace environment setup configuration (ticket 354d336b).
+ * Board / Account environment setup configuration (ticket 354d336b).
  *
  * Describes the working environment an agent needs BEFORE it starts a ticket on
  * a board: git repositories to clone/prepare under the agent home, non-secret
  * env vars to inject into the subagent, and bootstrap commands to run once.
- * Stored as a JSON text column on both Workspace (`environment_config` =
+ * Stored as a JSON text column on both Account (`environment_config` =
  * workspace-wide default) and Board (`environment_config` = per-board override),
  * mirroring the `Board.harness_config` / `Board.effort_presets` convention.
  *
@@ -234,7 +234,7 @@ export function deriveRepoDirName(url: string): string {
 /**
  * Resolve a merged EnvironmentConfig into the concrete form shipped on the SSE
  * payload. `repoLookup` expands a repository's resource_id into { url,
- * default_branch } (the dispatch path passes a workspace-scoped Resource
+ * default_branch } (the dispatch path passes a account-scoped Resource
  * lookup). A repository whose resource_id can't be resolved AND has no direct
  * url is dropped (logged by the caller) rather than shipping an un-cloneable
  * entry. Returns null when nothing actionable remains.

@@ -36,7 +36,7 @@ function context() {
     working_dir: '/workspace',
     mcp_config_path: '/config/mcp.json',
     api_key: 'agent-api-key',
-    workspace_id: 'workspace-1',
+    account_id: 'workspace-1',
     cli_home_dir: '/cli-home',
     extra_env: {},
     credential_provider: null,

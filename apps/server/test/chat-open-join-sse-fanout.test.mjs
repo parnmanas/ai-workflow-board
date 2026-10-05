@@ -13,7 +13,7 @@
 // 워크스페이스 대조는 서버가 아니라 수신 측이 한다. 이 스택에서 users 는 워크스페이스에
 // 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다) SSE identity 에도 워크스페이스가 없어
 // 동기 필터가 판정할 근거가 없기 때문이다. 그래서 이 파일은 두 겹을 나눠 검증한다:
-//   1) 서버 — 이 update type 이 방 구성원 밖의 user 에게도 나가고, workspace_id 를
+//   1) 서버 — 이 update type 이 방 구성원 밖의 user 에게도 나가고, account_id 를
 //      함께 싣는다(수신 측이 대조할 근거). 에이전트에게는 나가지 않는다.
 //   2) 클라이언트 — 같은 워크스페이스면 목록을 재조회하고, 다른 워크스페이스면 버린다.
 //      (2) 는 apps/client/test/chat-participants.test.mjs 가 담당한다.
@@ -59,7 +59,7 @@ const openJoinEvent = (openJoin) => ({
   room_id: ROOM,
   update_type: 'open_join_changed',
   open_join: openJoin,
-  workspace_id: WS,
+  account_id: WS,
   member_ids: new Set([MEMBER]),
   agent_member_ids: new Set([AGENT_MEMBER]),
 });
@@ -89,19 +89,19 @@ test('OFF 전환도 같은 범위로 나간다 — 사이드바에서 지울 사
   assert.equal(envelope.payload.open_join, false, '새 값이 그대로 실린다');
 });
 
-test('open_join_changed 는 수신 측이 스코프를 판정할 workspace_id 를 싣는다', () => {
+test('open_join_changed 는 수신 측이 스코프를 판정할 account_id 를 싣는다', () => {
   const { envelope } = envelopeFor(openJoinEvent(true));
 
   assert.equal(
-    envelope.payload.workspace_id,
+    envelope.payload.account_id,
     WS,
     'users 는 워크스페이스에 소속되지 않아 서버 필터가 판정할 수 없다 — 대조 근거를 실어 보내야 한다',
   );
-  assert.equal(envelope.scope.workspace_id, WS, '봉투 scope 에도 실린다');
+  assert.equal(envelope.scope.account_id, WS, '봉투 scope 에도 실린다');
 
   // 최종 wire bytes 에도 남아야 한다(flatten 이 payload 를 그대로 내보낸다).
   const wire = JSON.stringify(chatRoomUpdateDef().flatten(envelope));
-  assert.match(wire, /"workspace_id":"ws-1"/, '직렬화 뒤에도 workspace_id 가 남는다');
+  assert.match(wire, /"account_id":"ws-1"/, '직렬화 뒤에도 account_id 가 남는다');
   assert.match(wire, /"open_join":true/, '직렬화 뒤에도 open_join 이 남는다');
 });
 

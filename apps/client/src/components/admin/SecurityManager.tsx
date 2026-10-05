@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
+import { api, getActiveAccountId, rawResourceUrl } from '../../api';
 import type {
   SecurityProfile, SecurityProfileListItem, SecurityRun, SecurityFinding,
   SecurityChecklistItem, SecurityOnFailureTicketConfig, SecurityRunBatch,
@@ -27,7 +27,7 @@ import {
 type SecAgent = { id: string; name: string; manager_name?: string };
 
 interface SecurityManagerProps {
-  workspaceId?: string;
+  accountId?: string;
   allScopes?: boolean;
 }
 
@@ -124,9 +124,9 @@ interface ProfileRow extends SecurityProfileListItem {
  * pass-rate), runs them (single or sequential batch), and visualizes each run's
  * findings grouped by severity with evidence galleries + auto-fix-ticket links.
  */
-export default function SecurityManager({ workspaceId, allScopes = false }: SecurityManagerProps) {
+export default function SecurityManager({ accountId, allScopes = false }: SecurityManagerProps) {
   const { showToast } = useToast();
-  const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
+  const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
   const [agents, setAgents] = useState<SecAgent[]>([]);
@@ -146,12 +146,12 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
   const [confirmDeleteSchedule, setConfirmDeleteSchedule] = useState<SecuritySchedule | null>(null);
 
   const load = useCallback(async () => {
-    if (!effectiveWorkspaceId) { setProfiles([]); setSchedules([]); return; }
+    if (!effectiveAccountId) { setProfiles([]); setSchedules([]); return; }
     try {
       const [list, agentList, scheduleList] = await Promise.all([
-        api.listSecurityProfiles(effectiveWorkspaceId),
+        api.listSecurityProfiles(effectiveAccountId),
         Promise.resolve([]),
-        api.listSecuritySchedules(effectiveWorkspaceId).catch(() => []),
+        api.listSecuritySchedules(effectiveAccountId).catch(() => []),
       ]);
       // Enrich each profile with pass_rate + worst severity from its run history.
       // The list projection carries the last-run rollup but not these two; we
@@ -159,7 +159,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
       const rows: ProfileRow[] = await Promise.all((list as SecurityProfileListItem[]).map(async (p) => {
         if (!p.run_count) return { ...p, pass_rate: null, highest_severity: null };
         try {
-          const runs = await api.listSecurityRuns(p.id, effectiveWorkspaceId, 30);
+          const runs = await api.listSecurityRuns(p.id, effectiveAccountId, 30);
           const finished = runs.filter((r) => r.status === 'passed' || r.status === 'failed' || r.status === 'error');
           const passRate = finished.length
             ? Math.round((finished.filter((r) => r.status === 'passed').length / finished.length) * 100)
@@ -177,7 +177,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     } catch (err: any) {
       showToast(err?.message || 'Failed to load security profiles', 'error');
     }
-  }, [effectiveWorkspaceId, allScopes, showToast]);
+  }, [effectiveAccountId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -242,7 +242,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     setBatchStarting(true);
     try {
       const batch = await api.startSecurityBatch({
-        workspace_id: effectiveWorkspaceId,
+        account_id: effectiveAccountId,
         ...payload,
       });
       setActiveBatch(batch);
@@ -252,7 +252,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     } finally {
       setBatchStarting(false);
     }
-  }, [effectiveWorkspaceId, showToast]);
+  }, [effectiveAccountId, showToast]);
 
   // Poll the active batch while it's running (dispatch is server-driven, one run
   // at a time).
@@ -261,7 +261,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     let cancelled = false;
     const tick = async () => {
       try {
-        const fresh = await api.getSecurityBatch(activeBatch.id, effectiveWorkspaceId);
+        const fresh = await api.getSecurityBatch(activeBatch.id, effectiveAccountId);
         if (cancelled) return;
         setActiveBatch(fresh);
         if (fresh.status !== 'running') load();
@@ -269,11 +269,11 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     };
     const h = setInterval(tick, 4000);
     return () => { cancelled = true; clearInterval(h); };
-  }, [activeBatch, effectiveWorkspaceId, load]);
+  }, [activeBatch, effectiveAccountId, load]);
 
   const handleDelete = async (p: SecurityProfile) => {
     try {
-      await api.deleteSecurityProfile(p.id, effectiveWorkspaceId);
+      await api.deleteSecurityProfile(p.id, effectiveAccountId);
       showToast('보안 프로파일 삭제됨', 'success');
       setConfirmDelete(null);
       if (selected?.id === p.id) setSelected(null);
@@ -285,7 +285,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
 
   const handleScheduleRunNow = async (s: SecuritySchedule) => {
     try {
-      const { kind, batch, refreshes } = await api.runSecurityScheduleNow(s.id, effectiveWorkspaceId);
+      const { kind, batch, refreshes } = await api.runSecurityScheduleNow(s.id, effectiveAccountId);
       if (kind === 'checklist_refresh') {
         // No batch — a refresh updates checklists, not findings. Surface how many
         // profiles got a refresh dispatched.
@@ -303,7 +303,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
 
   const handleScheduleToggle = async (s: SecuritySchedule) => {
     try {
-      await api.updateSecuritySchedule(s.id, { workspace_id: effectiveWorkspaceId, enabled: !s.enabled });
+      await api.updateSecuritySchedule(s.id, { account_id: effectiveAccountId, enabled: !s.enabled });
       await load();
     } catch (err: any) {
       showToast(err?.message || 'Failed to toggle schedule', 'error');
@@ -312,7 +312,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
 
   const handleScheduleDelete = async (s: SecuritySchedule) => {
     try {
-      await api.deleteSecuritySchedule(s.id, effectiveWorkspaceId);
+      await api.deleteSecuritySchedule(s.id, effectiveAccountId);
       showToast('스케줄 삭제됨', 'success');
       setConfirmDeleteSchedule(null);
       await load();
@@ -321,8 +321,8 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     }
   };
 
-  if (!effectiveWorkspaceId) {
-    return <div style={{ color: tokens.colors.textSecondary }}>No workspace selected.</div>;
+  if (!effectiveAccountId) {
+    return <div style={{ color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>;
   }
 
   // Editor + delete-confirm modals are rendered once so they are reachable from
@@ -332,7 +332,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
       {editing && (
         <ProfileEditor
           profile={editing === 'new' ? null : editing}
-          workspaceId={effectiveWorkspaceId}
+          accountId={editing === 'new' ? effectiveAccountId : editing.account_id || effectiveAccountId}
           agents={agents}
 
           onClose={() => setEditing(null)}
@@ -356,7 +356,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
       {editingSchedule && (
         <ScheduleEditor
           schedule={editingSchedule === 'new' ? null : editingSchedule}
-          workspaceId={effectiveWorkspaceId}
+          accountId={editingSchedule === 'new' ? effectiveAccountId : editingSchedule.account_id || effectiveAccountId}
           profiles={profiles}
           onClose={() => setEditingSchedule(null)}
           onSaved={async () => { setEditingSchedule(null); await load(); }}
@@ -380,7 +380,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
       <>
         <ProfileDetail
           profile={selected}
-          workspaceId={effectiveWorkspaceId}
+          accountId={selected.account_id || effectiveAccountId}
           agentName={agentName}
           onBack={() => { setSelected(null); load(); }}
           onRun={() => handleRun(selected)}
@@ -823,7 +823,7 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
 
 interface ProfileDetailProps {
   profile: SecurityProfile;
-  workspaceId: string;
+  accountId: string;
   agentName: (id: string, spec?: any) => string;
   onBack: () => void;
   onRun: () => void;
@@ -831,7 +831,7 @@ interface ProfileDetailProps {
   onEdit: () => void;
 }
 
-function ProfileDetail({ profile, workspaceId, agentName, onBack, onRun, running, onEdit }: ProfileDetailProps) {
+function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, onEdit }: ProfileDetailProps) {
   const { showToast } = useToast();
   const [runs, setRuns] = useState<SecurityRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -839,13 +839,13 @@ function ProfileDetail({ profile, workspaceId, agentName, onBack, onRun, running
 
   const loadRuns = useCallback(async () => {
     try {
-      const list = await api.listSecurityRuns(profile.id, workspaceId, 30);
+      const list = await api.listSecurityRuns(profile.id, accountId, 30);
       setRuns(list);
       setActiveRunId((cur) => cur ?? (list[0]?.id ?? null));
     } catch (err: any) {
       showToast(err?.message || 'Failed to load runs', 'error');
     }
-  }, [profile.id, workspaceId, showToast]);
+  }, [profile.id, accountId, showToast]);
 
   useEffect(() => { loadRuns(); }, [loadRuns]);
 
@@ -998,7 +998,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
   const grouped = SEVERITY_ORDER.map((sev) => ({ sev, items: findings.filter((f) => f.severity === sev) }))
     .filter((g) => g.items.length > 0);
   const ticketRef = run.auto_ticket_id
-    ? { id: run.auto_ticket_id, workspace_id: run.workspace_id }
+    ? { id: run.auto_ticket_id, account_id: run.account_id }
     : null;
 
   return (
@@ -1012,7 +1012,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
         {ticketRef && (
           canOpenTicket(ticketRef) ? (
             <a
-              href={ticketPath(ticketRef.workspace_id, ticketRef.id)}
+              href={ticketPath(ticketRef.account_id, ticketRef.id)}
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
               title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
             >
@@ -1021,7 +1021,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
           ) : (
             <span
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="이 티켓의 워크스페이스를 알 수 없어 이동할 수 없습니다"
+              title="티켓 정보를 확인할 수 없습니다"
             >
               티켓 #{ticketRef.id.slice(0, 8)}
             </span>
@@ -1175,7 +1175,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 interface ProfileEditorProps {
   profile: SecurityProfile | null;
-  workspaceId: string;
+  accountId: string;
   agents: SecAgent[];
   /** P4b: runtime 선언 → 매칭용 full 행. */
 
@@ -1183,7 +1183,7 @@ interface ProfileEditorProps {
   onSaved: (p: SecurityProfile) => void;
 }
 
-function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: ProfileEditorProps) {
+function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: ProfileEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(profile?.name ?? '');
   const [description, setDescription] = useState(profile?.description ?? '');
@@ -1192,7 +1192,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
   // Which repo to inspect: '' = AWB itself (self), else a Project id (projects
   // keep the ids of the old repository Resources, so the field name stays).
   const [targetResourceId, setTargetResourceId] = useState(profile?.target_resource_id ?? '');
-  const { projects, loading: projectsLoading } = useProjects(workspaceId);
+  const { projects, loading: projectsLoading } = useProjects(accountId);
   const [scanDriver, setScanDriver] = useState(profile?.scan_driver ?? 'code-review');
   const [scopeMode, setScopeMode] = useState<SecurityScopeMode>(profile?.scope_mode ?? 'incremental');
   const [enabled, setEnabled] = useState(profile?.enabled ?? true);
@@ -1240,9 +1240,9 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
         ...buildWorkspaceFolderPayload(wf),
       };
       if (profile) {
-        saved = await api.updateSecurityProfile(profile.id, { workspace_id: workspaceId, ...common });
+        saved = await api.updateSecurityProfile(profile.id, { account_id: accountId, ...common });
       } else {
-        saved = await api.createSecurityProfile({ workspace_id: workspaceId, ...common });
+        saved = await api.createSecurityProfile({ account_id: accountId, ...common });
       }
       showToast(`프로파일 ${profile ? '수정' : '생성'}됨`, 'success');
       onSaved(saved);
@@ -1278,7 +1278,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
         <Input label="Description" value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
         <DeclareRuntimeSection
           initialValue={pendingSpec}
-          workspaceId={workspaceId}
+          accountId={accountId}
 
           onResolved={(spec) => {
             setPendingSpec(spec);
@@ -1335,7 +1335,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
         </label>
 
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
-        <WorkspaceFolderOptions kind="security" state={wf} onChange={patchWf} workspaceId={workspaceId} />
+        <WorkspaceFolderOptions kind="security" state={wf} onChange={patchWf} accountId={accountId} />
 
         {/* 실패 시 → 티켓 생성 (severity-gated on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
@@ -1355,13 +1355,13 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
                 onChange={(e) => setOftMinSeverity((e.target as HTMLSelectElement).value as SecuritySeverity)}
               />
               <OnFailureTicketTargetFields
-                workspaceId={workspaceId}
+                accountId={accountId}
                 form={oftForm}
                 onChange={patchOft}
                 defaultTagsHint="비우면 서버 기본 태그로 생성됩니다."
               />
               <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)</div>
-              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
+              <DeclareRuntimeSection accountId={accountId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
               {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>초기화</button></div>}
             </div>
           )}
@@ -1375,13 +1375,13 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
 
 interface ScheduleEditorProps {
   schedule: SecuritySchedule | null;
-  workspaceId: string;
+  accountId: string;
   profiles: SecurityProfileListItem[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function ScheduleEditor({ schedule, workspaceId, profiles, onClose, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   const [kind, setKind] = useState<SecurityScheduleKind>(schedule?.kind ?? 'scan');
@@ -1429,7 +1429,7 @@ function ScheduleEditor({ schedule, workspaceId, profiles, onClose, onSaved }: S
     }
 
     const base = {
-      workspace_id: workspaceId,
+      account_id: accountId,
       name: name.trim(),
       kind,
       scope,

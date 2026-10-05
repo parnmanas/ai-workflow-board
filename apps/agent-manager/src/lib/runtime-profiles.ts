@@ -233,7 +233,7 @@ export function resolveClaudeExecutionEffort(
 //     this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment
 //     variable.").
 // 실제 사고: vLLM 백엔드(context 65,536)에 첫 채팅 메시지가 system
-// prompt+AWB/agent/board/workspace instructions+MCP tool schema+session
+// prompt+AWB/agent/account instructions+MCP tool schema+session
 // metadata 만으로 33,537 input tokens 가 됐고, 여기에 CLI 의 고정
 // max_output_tokens(관측값 32,000)를 더하면 65,537 로 정확히 1 token
 // 초과해 vLLM 이 요청을 거부했다(HTTP 500).

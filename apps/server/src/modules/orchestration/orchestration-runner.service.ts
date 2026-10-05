@@ -208,9 +208,9 @@ export class OrchestrationRunnerService {
    * rolls back to `draft`) rather than an orphaned room with no mission
    * pointing at it.
    */
-  async startMission(missionId: string, workspaceId: string, actor: ActorRef): Promise<OrchestrationMission> {
+  async startMission(missionId: string, accountId: string, actor: ActorRef): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
-      const mission = await this.missions.requireMission(missionId, workspaceId);
+      const mission = await this.missions.requireMission(missionId, accountId);
       if (mission.status !== 'draft') {
         throw orchestrationError(409, `mission is already ${mission.status}`);
       }
@@ -258,7 +258,7 @@ export class OrchestrationRunnerService {
 
       const room = await this.roomRepo.save(
         this.roomRepo.create({
-          workspace_id: mission.workspace_id,
+          account_id: mission.account_id,
           type: 'group',
           name: `Mission: ${mission.title} · ${mission.id.slice(0, 8)}`,
           last_message_at: null,
@@ -306,7 +306,7 @@ export class OrchestrationRunnerService {
       });
 
       try {
-        await this.postToRoom(room.id, mission.workspace_id, prompt);
+        await this.postToRoom(room.id, mission.account_id, prompt);
       } catch (e: any) {
         mission.status = 'draft';
         mission.room_id = null;
@@ -329,16 +329,16 @@ export class OrchestrationRunnerService {
         data: { room_id: room.id, orchestrator_agent_id: orchestratorId },
       });
       this.logService.info('Orchestration', `mission ${mission.id} started → orchestrator ${orchestratorId}`, {
-        workspace_id: mission.workspace_id,
+        account_id: mission.account_id,
         room_id: room.id,
       });
       return mission;
     });
   }
 
-  async pauseMission(missionId: string, workspaceId: string, actor: ActorRef): Promise<OrchestrationMission> {
+  async pauseMission(missionId: string, accountId: string, actor: ActorRef): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
-      const mission = await this.missions.requireMission(missionId, workspaceId);
+      const mission = await this.missions.requireMission(missionId, accountId);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is ${mission.status}`);
       }
@@ -358,9 +358,9 @@ export class OrchestrationRunnerService {
     });
   }
 
-  async resumeMission(missionId: string, workspaceId: string, actor: ActorRef): Promise<OrchestrationMission> {
+  async resumeMission(missionId: string, accountId: string, actor: ActorRef): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
-      const mission = await this.missions.requireMission(missionId, workspaceId);
+      const mission = await this.missions.requireMission(missionId, accountId);
       if (mission.status !== 'paused') throw orchestrationError(409, `mission is ${mission.status}, not paused`);
       // A mission paused before its first plan landed goes back to `planning`;
       // otherwise it returns to `running` and the pump picks the plan back up.
@@ -380,12 +380,12 @@ export class OrchestrationRunnerService {
 
   async cancelMission(
     missionId: string,
-    workspaceId: string,
+    accountId: string,
     actor: ActorRef,
     reason: string,
   ): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
-      const mission = await this.missions.requireMission(missionId, workspaceId);
+      const mission = await this.missions.requireMission(missionId, accountId);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is already ${mission.status}`);
       }
@@ -447,12 +447,12 @@ export class OrchestrationRunnerService {
    */
   async reopenMission(
     missionId: string,
-    workspaceId: string | undefined,
+    accountId: string | undefined,
     actor: ActorRef,
     opts?: { reason?: string },
   ): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
-      const mission = await this.missions.requireMission(missionId, workspaceId);
+      const mission = await this.missions.requireMission(missionId, accountId);
       if (actor.type === 'agent') this.requireOrchestrator(mission, { agentId: actor.id, runtimeKey: actor.runtimeKey });
       if (!(TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(
@@ -517,7 +517,7 @@ export class OrchestrationRunnerService {
       // 사실과 직전 라운드의 결론이 그 히스토리에 있어야 다음 판단을 할 수 있다.
       await this.postToRoom(
         mission.room_id,
-        mission.workspace_id,
+        mission.account_id,
         renderWakePrompt({
           mission,
           reason: 'reopened',
@@ -609,7 +609,7 @@ export class OrchestrationRunnerService {
         data: { counts: countSteps(await this.missions.listSteps(mission.id)) },
       });
       this.logService.info('Orchestration', `mission ${mission.id} ${input.status}`, {
-        workspace_id: mission.workspace_id,
+        account_id: mission.account_id,
       });
       // 완료 후 Action을 발화한다(티켓 2dc3c62f). 이 기능 전체에서 유일한
       // 호출 지점이다 — cancelMission(운영자 중단)과 reaper의
@@ -810,7 +810,7 @@ export class OrchestrationRunnerService {
       try {
         const action = await this.actionRepo.findOne({ where: { id: pa.action_id } });
         if (!action) throw new Error(`action ${pa.action_id} not found`);
-        if (action.workspace_id !== mission.workspace_id) {
+        if (action.account_id !== mission.account_id) {
           throw new Error(`action ${pa.action_id} belongs to a different workspace`);
         }
         const result = await this.actionsService.dispatch({
@@ -1061,7 +1061,7 @@ export class OrchestrationRunnerService {
           toSave.push(
             this.stepRepo.create({
               mission_id: mission.id,
-              workspace_id: mission.workspace_id,
+              account_id: mission.account_id,
               team_id: mission.team_id,
               step_key: key,
               title: String(s.title).trim(),
@@ -2061,7 +2061,7 @@ export class OrchestrationRunnerService {
     this.logService.info(
       'Orchestration',
       `confirm gate opened for step ${step.step_key} (visit ${step.visit ?? 1})`,
-      { mission_id: mission.id, workspace_id: mission.workspace_id },
+      { mission_id: mission.id, account_id: mission.account_id },
     );
 
     // 화면을 연 사람에게만 보이는 배지로는 부족하다 — 게이트 대기 사실을 기존 사용자
@@ -2100,7 +2100,7 @@ export class OrchestrationRunnerService {
    */
   async submitConfirmDecision(
     stepId: string,
-    workspaceId: string,
+    accountId: string,
     actor: ActorRef,
     input: { verdict: string; feedback?: string; visit: number },
   ): Promise<{
@@ -2135,7 +2135,7 @@ export class OrchestrationRunnerService {
       // lock 안에서 다시 읽는다 — 동시 제출의 두 번째는 첫 번째가 커밋한 상태를 봐야
       // idempotent 분기로 떨어진다.
       const step = await this.missions.requireStep(stepId);
-      const mission = await this.missions.requireMission(step.mission_id, workspaceId);
+      const mission = await this.missions.requireMission(step.mission_id, accountId);
 
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is ${mission.status} — this decision is no longer being collected`);
@@ -2512,7 +2512,7 @@ export class OrchestrationRunnerService {
       ?? parseTeamAgentSpec(memberRowForAgent?.spec)?.cli
       ?? agentId.slice(0, 11);
     // P4c-4: Agent 행 없음 — workspace 소속 검사는 member 행 스냅샷으로만 한다.
-    if (memberRowForAgent && memberRowForAgent.workspace_id && memberRowForAgent.workspace_id !== mission.workspace_id) {
+    if (memberRowForAgent && memberRowForAgent.account_id && memberRowForAgent.account_id !== mission.account_id) {
       throw orchestrationError(
         400,
         `assignee slot ${agentLabel} no longer belongs to this mission's workspace — refusing to dispatch`,
@@ -2535,7 +2535,7 @@ export class OrchestrationRunnerService {
     // 이미 auto-join 된 참여자 행이 남아 되돌려도 깨끗해지지 않는다.
     const room = await this.roomRepo.save(
       this.roomRepo.create({
-        workspace_id: mission.workspace_id,
+        account_id: mission.account_id,
         type: 'group',
         name: `Step: ${step.step_key} · ${mission.title.slice(0, 40)} · ${randomUUID().slice(0, 6)}`,
         last_message_at: null,
@@ -2646,7 +2646,7 @@ export class OrchestrationRunnerService {
           kind: 'orchestration',
           id: step.id,
           runId: step.id,
-          workspaceId: mission.workspace_id,
+          accountId: mission.account_id,
           workspaceFolder: stepWorkspaceFolder,
           repoRef: mission.repo_ref,
           checkoutMode: mission.checkout_mode,
@@ -2717,7 +2717,7 @@ export class OrchestrationRunnerService {
         : null,
     });
 
-    await this.postToRoom(room.id, mission.workspace_id, prompt, runProvision ?? undefined);
+    await this.postToRoom(room.id, mission.account_id, prompt, runProvision ?? undefined);
 
     await this.missions.recordEvent(mission, {
       type: 'step_dispatched',
@@ -2735,7 +2735,7 @@ export class OrchestrationRunnerService {
     this.logService.info(
       'Orchestration',
       `step ${step.step_key} dispatched → agent ${agentId} room ${room.id}`,
-      { mission_id: mission.id, workspace_id: mission.workspace_id },
+      { mission_id: mission.id, account_id: mission.account_id },
     );
   }
 
@@ -2901,7 +2901,7 @@ export class OrchestrationRunnerService {
     const prompt = renderWakePrompt({ mission, reason, detail, counts });
     if (!mission.room_id) return false;
     try {
-      await this.postToRoom(mission.room_id, mission.workspace_id, prompt);
+      await this.postToRoom(mission.room_id, mission.account_id, prompt);
     } catch (e: any) {
       this.logService.error(
         'Orchestration',
@@ -2934,13 +2934,13 @@ export class OrchestrationRunnerService {
    */
   async nudgeOrchestrator(
     missionId: string,
-    workspaceId: string,
+    accountId: string,
     actor: ActorRef,
     note: string,
     reasonTag: string = 'manual',
   ): Promise<void> {
     return this.withMissionLock(missionId, async () => {
-      const mission = await this.missions.requireMission(missionId, workspaceId);
+      const mission = await this.missions.requireMission(missionId, accountId);
       if (!mission.room_id) throw orchestrationError(409, 'mission has not been started yet');
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is ${mission.status}`);
@@ -2954,7 +2954,7 @@ export class OrchestrationRunnerService {
           : 'An operator asked you to reassess this mission and take the next action.',
         counts: countSteps(steps),
       });
-      await this.postToRoom(mission.room_id, mission.workspace_id, prompt);
+      await this.postToRoom(mission.room_id, mission.account_id, prompt);
       await this.missions.recordEvent(mission, {
         type: 'orchestrator_woken',
         message: `Orchestrator nudged by ${actor.name || actor.type}${note ? `: ${note.slice(0, 200)}` : ''}`,
@@ -2977,7 +2977,7 @@ export class OrchestrationRunnerService {
    *
    * 권한: 이 메서드에 도달했다는 것 자체가 컨트롤러의 `MANAGE_ACTIONS` 게이트를 이미
    * 통과했다는 뜻이고(팀·미션을 만들고 nudge/cancel 하는 것과 같은 관객), 여기서
-   * `requireMission(missionId, workspaceId)` 이 workspace 경계를 한 번 더 강제한다.
+   * `requireMission(missionId, accountId)` 이 workspace 경계를 한 번 더 강제한다.
    * `RoomMembershipService.ensureActiveParticipant` 는 호출자 자격을 검사하지 않으므로
    * 그 앞의 이 두 겹이 유일한 방어선이다 — 이 메서드를 다른 곳에서 재사용할 때는 그
    * 사실을 먼저 확인할 것.
@@ -2988,13 +2988,13 @@ export class OrchestrationRunnerService {
    */
   async joinMissionConversation(
     missionId: string,
-    workspaceId: string,
+    accountId: string,
     actor: ActorRef,
   ): Promise<{ room_id: string; joined: boolean }> {
     if (actor.type !== 'user' || !actor.id) {
       throw orchestrationError(400, 'only a signed-in user can join the mission conversation');
     }
-    const mission = await this.missions.requireMission(missionId, workspaceId);
+    const mission = await this.missions.requireMission(missionId, accountId);
     if (!mission.room_id) {
       throw orchestrationError(409, 'mission has not been started yet — there is no conversation room');
     }
@@ -3110,7 +3110,7 @@ export class OrchestrationRunnerService {
           try {
             await this.postToRoom(
               step.room_id,
-              mission.workspace_id,
+              mission.account_id,
               renderLeaseRecoveryNudge({ step, silentMs, graceMs }),
             );
           } catch (e: any) {
@@ -3437,8 +3437,8 @@ export class OrchestrationRunnerService {
         if ((h as any).name) hostNameById.set(h.id, (h as any).name);
       }
       try {
-        const team = await this.teamRepo.findOne({ where: { id: teamId }, select: { id: true, workspace_id: true } as any });
-        const views = await this.teams.listRuntimeHosts((team as any)?.workspace_id ?? '');
+        const team = await this.teamRepo.findOne({ where: { id: teamId }, select: { id: true, account_id: true } as any });
+        const views = await this.teams.listRuntimeHosts((team as any)?.account_id ?? '');
         for (const v of views) {
           if (v.is_online) {
             hostOnline.add(v.manager_agent_id);
@@ -3635,10 +3635,10 @@ export class OrchestrationRunnerService {
    * step의 격리된 작업폴더를 프로비저닝하도록 알려준다 — QA/Action run
    * 디스패치와 정확히 동일하다.
    */
-  private postToRoom(roomId: string, workspaceId: string, content: string, runProvision?: RunProvision): Promise<any> {
+  private postToRoom(roomId: string, accountId: string, content: string, runProvision?: RunProvision): Promise<any> {
     return this.messaging.sendMessage(
       roomId,
-      workspaceId,
+      accountId,
       'user',
       SYSTEM_SENDER_ID,
       SYSTEM_SENDER_NAME,

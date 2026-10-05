@@ -1,7 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from '../../entities/User';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { DiagnosticsController, PublicDiagnosticsController } from './diagnostics.controller';
 import { LogsController } from './logs.controller';
@@ -17,7 +17,7 @@ import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, Workspace, SystemSetting, ClaudeBackendProfile]),
+    TypeOrmModule.forFeature([User, Account, SystemSetting, ClaudeBackendProfile]),
     // AgentsModule exports AgentUsageService, which the workflow-health
     // controller reads. forwardRef defends against any future cycle if
     // AgentsModule starts importing AdminModule symbols.

@@ -27,25 +27,25 @@ export class RunSkillSnapshotService {
   ) {}
 
   async resolve(args: {
-    workspaceId: string;
+    accountId: string;
     runId: string;
     agentId: string;
   }): Promise<RunSkillSnapshot> {
     const existing = await this.snapshots.findOne({
-      where: { workspace_id: args.workspaceId, run_id: args.runId },
+      where: { account_id: args.accountId, run_id: args.runId },
     });
     if (existing) return existing;
 
     // Assignments are keyed by (workspace, runtime identity, skill) only — the
     // board / role narrowing went away with boards.
     const assignments = await this.assignments.find({
-      where: { workspace_id: args.workspaceId, runtime_key: args.agentId },
+      where: { account_id: args.accountId, runtime_key: args.agentId },
     });
     const versionIds = assignments.map((assignment) => assignment.skill_version_id);
-    // Scope-free lookup by id. The assignment row is already workspace-scoped
+    // Scope-free lookup by id. The assignment row is already account-scoped
     // and its skill_version_id was validated at assign time, so re-filtering by
     // workspace here adds no authorization — it only DROPS global skills
-    // (workspace_id NULL) out of the manifest, which silently ships a run
+    // (account_id NULL) out of the manifest, which silently ships a run
     // without the built-in skills the operator assigned to that agent.
     const versions = versionIds.length
       ? await this.versions.find({ where: { id: In(versionIds) } })
@@ -69,7 +69,7 @@ export class RunSkillSnapshotService {
     const digest = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
     try {
       return await this.snapshots.save(this.snapshots.create({
-        workspace_id: args.workspaceId,
+        account_id: args.accountId,
         run_id: args.runId,
         agent_id: args.agentId,
         manifest,
@@ -82,16 +82,16 @@ export class RunSkillSnapshotService {
       // (workspace, run) boundary chooses the winner; every loser must reuse
       // that exact immutable snapshot instead of calculating a replacement.
       const winner = await this.snapshots.findOne({
-        where: { workspace_id: args.workspaceId, run_id: args.runId },
+        where: { account_id: args.accountId, run_id: args.runId },
       });
       if (winner) return winner;
       throw error;
     }
   }
 
-  async lock(workspaceId: string, runId: string): Promise<void> {
+  async lock(accountId: string, runId: string): Promise<void> {
     await this.snapshots.update(
-      { workspace_id: workspaceId, run_id: runId, status: 'pinned' },
+      { account_id: accountId, run_id: runId, status: 'pinned' },
       { status: 'locked', locked_at: new Date() },
     );
   }

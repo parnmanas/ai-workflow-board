@@ -50,7 +50,7 @@ async function loadDist(relParts) {
 function makeService(MonitorClass, RegistryClass) {
   const subagents = {
     async findOne({ where: { subagent_id } }) {
-      return { subagent_id, agent_id: 'agentX', workspace_id: 'wsX', line_count: 0 };
+      return { subagent_id, agent_id: 'agentX', account_id: 'wsX', line_count: 0 };
     },
     async update() {},
     async find() {

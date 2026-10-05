@@ -5,15 +5,15 @@ import type { TicketStatus } from '../common/ticket-status';
 // A ticket lives in one workspace pool, classified by `tags` and an optional
 // `project_id`, and is worked end-to-end by ONE assignee agent (docs/tickets.md).
 // Indexes cover the hot reads: the Tickets page lists root tickets by
-// (workspace_id, status), child lookups filter by parent_id, the dispatcher
+// (account_id, status), child lookups filter by parent_id, the dispatcher
 // scans in_progress/todo per workspace, the archiver filters archived_at.
 @Entity('tickets')
-@Index('idx_tickets_ws_status', ['workspace_id', 'status'])
+@Index('idx_tickets_ws_status', ['account_id', 'status'])
 @Index('idx_tickets_parent', ['parent_id'])
 @Index('idx_tickets_project', ['project_id'])
 @Index('idx_tickets_archived', ['archived_at'])
 @Index('idx_tickets_canonical', ['canonical_ticket_id'])
-@Index('idx_tickets_chat_source', ['workspace_id', 'source_kind', 'source_chat_room_id'])
+@Index('idx_tickets_chat_source', ['account_id', 'source_kind', 'source_chat_room_id'])
 export class Ticket {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -35,7 +35,7 @@ export class Ticket {
   related_ticket_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: '' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   parent_id: string | null;

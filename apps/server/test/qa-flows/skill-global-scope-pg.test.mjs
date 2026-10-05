@@ -1,6 +1,6 @@
 // Postgres-only: the GLOBAL skill slug constraint.
 //
-// `Skill` keeps `@Index(['workspace_id','slug'], {unique:true})` for the sql.js
+// `Skill` keeps `@Index(['account_id','slug'], {unique:true})` for the sql.js
 // dev backend, but on Postgres that index does NOT constrain global rows —
 // `NULL != NULL` there, so it would happily accept ten global skills sharing a
 // slug, and `list()` would then return duplicates that shadow each other
@@ -17,7 +17,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { createWorkspace } from '../helpers/fixtures.mjs';
+import { createAccount } from '../helpers/fixtures.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_SKILL_PG_PORT || '0', 10);
 
@@ -42,7 +42,7 @@ test('two global skills cannot share a slug (partial unique index)', { skip: !is
   );
 
   const rows = await ds.query(
-    'SELECT count(*)::int AS n FROM skills WHERE slug = $1 AND workspace_id IS NULL',
+    'SELECT count(*)::int AS n FROM skills WHERE slug = $1 AND account_id IS NULL',
     [slug],
   );
   assert.equal(rows[0].n, 1, 'exactly one global row may exist for a slug');
@@ -56,41 +56,41 @@ test('the partial unique indexes exist and are scoped as documented', { skip: !i
   const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
   assert.ok(byName.has('uq_skills_global_slug'), 'the Skill entity must declare uq_skills_global_slug');
   assert.ok(byName.has('uq_skills_workspace_slug'), 'the Skill entity must declare uq_skills_workspace_slug');
-  assert.match(byName.get('uq_skills_global_slug'), /WHERE .*workspace_id IS NULL/i);
-  assert.match(byName.get('uq_skills_workspace_slug'), /WHERE .*workspace_id IS NOT NULL/i);
+  assert.match(byName.get('uq_skills_global_slug'), /WHERE .*account_id IS NULL/i);
+  assert.match(byName.get('uq_skills_workspace_slug'), /WHERE .*account_id IS NOT NULL/i);
 });
 
 test('a workspace MAY reuse a global slug — that is the fork path, not a conflict', { skip: !isPostgres && 'postgres only' }, async () => {
-  const ws = await createWorkspace(app, modules.getDataSourceToken, `pgfork-${stamp}`);
+  const ws = await createAccount(app, modules.getDataSourceToken, `pgfork-${stamp}`);
   const slug = `pg-fork-${stamp}`;
   await skills.create('', { slug, name: 'Global', body: '# global\n' }, 'admin', 'global');
-  const fork = await skills.create(ws.id, { slug, name: 'Fork', body: '# fork\n' }, 'tester', 'workspace');
-  assert.equal(fork.workspace_id, ws.id);
+  const fork = await skills.create(ws.id, { slug, name: 'Fork', body: '# fork\n' }, 'tester', 'account');
+  assert.equal(fork.account_id, ws.id);
 
   // ...but only once per workspace.
   await assert.rejects(
-    () => skills.create(ws.id, { slug, name: 'Again', body: '# again\n' }, 'tester', 'workspace'),
+    () => skills.create(ws.id, { slug, name: 'Again', body: '# again\n' }, 'tester', 'account'),
     'a workspace may not hold two skills with the same slug',
   );
 
   const visible = await skills.list(ws.id);
   const matches = visible.filter((s) => s.slug === slug);
   assert.equal(matches.length, 1, 'shadowing must collapse to one row');
-  assert.equal(matches[0].workspace_id, ws.id, 'the workspace fork must win');
+  assert.equal(matches[0].account_id, ws.id, 'the workspace fork must win');
 });
 
-test('a global skill\'s versions are stored with workspace_id NULL', { skip: !isPostgres && 'postgres only' }, async () => {
+test('a global skill\'s versions are stored with account_id NULL', { skip: !isPostgres && 'postgres only' }, async () => {
   const created = await skills.create(
     '', { slug: `pg-ver-${stamp}`, name: 'Versions', body: '# v1\n' }, 'admin', 'global',
   );
   await skills.publish('', created.id, { body: '# v2\n' }, 'admin');
   const rows = await ds.query(
-    'SELECT version, workspace_id FROM skill_versions WHERE skill_id = $1 ORDER BY version',
+    'SELECT version, account_id FROM skill_versions WHERE skill_id = $1 ORDER BY version',
     [created.id],
   );
   assert.equal(rows.length, 2, 'publishing must append, not replace');
   assert.deepEqual(rows.map((r) => r.version), [1, 2], 'version numbering must continue on a global skill');
-  assert.ok(rows.every((r) => r.workspace_id === null), 'versions of a global skill must be global too');
+  assert.ok(rows.every((r) => r.account_id === null), 'versions of a global skill must be global too');
 });
 
 exitAfterTests();

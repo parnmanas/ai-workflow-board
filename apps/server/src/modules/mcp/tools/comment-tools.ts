@@ -29,7 +29,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { resolveCallerIdentityRow } from '../shared/authz';
 import { RuntimeHost } from '../../../entities/RuntimeHost';
 import { resolveAgentDisplayName, isUuidShapedId } from '../../../utils/agent-name';
-import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-account-scope';
 import { resolveAuthorRole, mergeAuthorRoleIntoMetadata } from './author-role';
 import { TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
@@ -161,8 +161,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // log line so we know which agent is leaking.
       const __callerForSanitize = getCallerAgent(extra);
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'add_comment', fieldName: 'content', agentId: __callerForSanitize?.agentId });
-      if (artifactRefsService && ticket.workspace_id) {
-        content = await artifactRefsService.normalizeStoredOutput(ticket.workspace_id, content);
+      if (artifactRefsService && ticket.account_id) {
+        content = await artifactRefsService.normalizeStoredOutput(ticket.account_id, content);
       }
 
       // 리뷰 라운드2(ticket e341bcc2): 아래 dedupe 옵트인 판정과 파일 하단의
@@ -236,7 +236,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         for (const rid of resolvedAttachmentIds) {
           const r = found.get(rid);
           if (!r) return err(`attachment_resource_ids contains unknown id: ${rid}`);
-          if (r.workspace_id !== ticket.workspace_id) return err(`attachment resource ${rid} belongs to a different workspace`);
+          if (r.account_id !== ticket.account_id) return err(`attachment resource ${rid} belongs to a different workspace`);
           if (r.type !== 'comment_attachment') return err(`attachment resource ${rid} is type=${r.type}; expected comment_attachment`);
         }
       }
@@ -435,7 +435,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id,
                 comment_id: comment.id,
-                workspace_id: ticket.workspace_id,
+                account_id: ticket.account_id,
                 agent_id: target.agentId,
                 actor_id: resolvedAuthorId,
                 actor_type: resolvedAuthorType,
@@ -460,7 +460,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
                 user_id: m.id,
-                workspace_id: ticket.workspace_id,
+                account_id: ticket.account_id,
                 source_type: 'comment',
                 source_id: comment.id,
                 ticket_id: ticket.id,
@@ -473,7 +473,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               activityEvents.emit('user_mention', {
                 mention_id: row.id,
                 user_id: row.user_id,
-                workspace_id: row.workspace_id,
+                account_id: row.account_id,
                 source_type: 'comment',
                 source_id: comment.id,
                 ticket_id: ticket.id,
@@ -641,7 +641,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               if (!target) continue;
               const { extras } = target;
               activityEvents.emit('comment_mention', {
-                ticket_id: ticket.id, comment_id: comment.id, workspace_id: ticket.workspace_id,
+                ticket_id: ticket.id, comment_id: comment.id, account_id: ticket.account_id,
                 agent_id: target.agentId,
                 actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
                 content, role_prompt: target.rolePrompt,
@@ -658,14 +658,14 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               });
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
-                user_id: m.id, workspace_id: ticket.workspace_id,
+                user_id: m.id, account_id: ticket.account_id,
                 source_type: 'comment', source_id: comment.id,
                 ticket_id: ticket.id, room_id: null,
                 actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
                 preview,
               }));
               activityEvents.emit('user_mention', {
-                mention_id: row.id, user_id: row.user_id, workspace_id: row.workspace_id,
+                mention_id: row.id, user_id: row.user_id, account_id: row.account_id,
                 source_type: 'comment', source_id: comment.id,
                 ticket_id: ticket.id, room_id: null,
                 actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,

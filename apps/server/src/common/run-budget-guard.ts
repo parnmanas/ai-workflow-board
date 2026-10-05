@@ -6,7 +6,7 @@
  * docs/catalog-scopes.md) no board_id either — so there is nothing to pend
  * and no board to resolve config from. This module instead counts NEW-RUN
  * creations inside a rolling window, scoped to the WORKSPACE
- * (`Workspace.hard_budget_config`'s `max_runs_per_window` key,
+ * (`Account.hard_budget_config`'s `max_runs_per_window` key,
  * common/hard-budget-config.ts's (d) axis) and independently per run type
  * (a QA storm must not starve Action, and vice versa).
  *
@@ -30,7 +30,7 @@ import type { DataSource, Repository } from 'typeorm';
 import { OrchestrationMission } from '../entities/OrchestrationMission';
 import { QaRun } from '../entities/QaRun';
 import { ActionRun } from '../entities/ActionRun';
-import { Workspace } from '../entities/Workspace';
+import { Account } from '../entities/Account';
 import { ChatRoom } from '../entities/ChatRoom';
 import type { RoomMessagingService } from '../modules/chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from './hard-budget-config';
@@ -52,7 +52,7 @@ export interface RunBudgetGuardDeps {
 
 /** Minimal shape every run-kind entity has: workspace scope + creation timestamp. */
 interface RunRow {
-  workspace_id: string;
+  account_id: string;
   created_at: Date;
 }
 
@@ -75,23 +75,23 @@ function runRepo(dataSource: DataSource, kind: RunBudgetKind): Repository<RunRow
  */
 export async function resolveHardBudgetForWorkspace(
   dataSource: DataSource,
-  workspaceId: string,
+  accountId: string,
 ): Promise<ResolvedHardBudget> {
-  const ws = workspaceId
-    ? await dataSource.getRepository(Workspace).findOne({ where: { id: workspaceId } })
+  const ws = accountId
+    ? await dataSource.getRepository(Account).findOne({ where: { id: accountId } })
     : null;
   return resolveHardBudgetConfig(ws?.hard_budget_config ?? null, hardBudgetDefaultsFromEnv());
 }
 
-/** Count of `kind` runs created in `workspaceId` at/after `since`. */
+/** Count of `kind` runs created in `accountId` at/after `since`. */
 export async function countRunsInWindow(
   dataSource: DataSource,
   kind: RunBudgetKind,
-  workspaceId: string,
+  accountId: string,
   since: Date,
 ): Promise<number> {
   return runRepo(dataSource, kind).createQueryBuilder('r')
-    .where('r.workspace_id = :wsId', { wsId: workspaceId })
+    .where('r.account_id = :wsId', { wsId: accountId })
     .andWhere('r.created_at >= :since', { since: sinceBoundaryParam(dataSource, since) })
     .getCount();
 }
@@ -111,11 +111,11 @@ export async function countRunsInWindow(
 async function oldestRunAt(
   dataSource: DataSource,
   kind: RunBudgetKind,
-  workspaceId: string,
+  accountId: string,
   since: Date,
 ): Promise<Date | null> {
   const oldest = await runRepo(dataSource, kind).createQueryBuilder('r')
-    .where('r.workspace_id = :wsId', { wsId: workspaceId })
+    .where('r.account_id = :wsId', { wsId: accountId })
     .andWhere('r.created_at >= :since', { since: sinceBoundaryParam(dataSource, since) })
     .orderBy('r.created_at', 'ASC')
     .limit(1)
@@ -124,35 +124,35 @@ async function oldestRunAt(
 }
 
 /** Configured alerts room → oldest room in the workspace. Mirrors hard-budget-guard.ts's resolveAlertRoomId. */
-async function resolveAlertRoomId(dataSource: DataSource, workspaceId: string): Promise<string | null> {
-  if (!workspaceId) return null;
-  const ws = await dataSource.getRepository(Workspace).findOne({ where: { id: workspaceId } });
+async function resolveAlertRoomId(dataSource: DataSource, accountId: string): Promise<string | null> {
+  if (!accountId) return null;
+  const ws = await dataSource.getRepository(Account).findOne({ where: { id: accountId } });
   const roomRepo = dataSource.getRepository(ChatRoom);
   if (ws?.alerts_chat_room_id) {
-    const configured = await roomRepo.findOne({ where: { id: ws.alerts_chat_room_id, workspace_id: workspaceId } });
+    const configured = await roomRepo.findOne({ where: { id: ws.alerts_chat_room_id, account_id: accountId } });
     if (configured) return configured.id;
   }
   const fallback = await roomRepo.createQueryBuilder('r')
-    .where('r.workspace_id = :wsId', { wsId: workspaceId })
+    .where('r.account_id = :wsId', { wsId: accountId })
     .orderBy('r.created_at', 'ASC')
     .limit(1)
     .getOne();
   return fallback?.id ?? null;
 }
 
-/** Best-effort chat alert — never throws, never blocks the caller. Workspace-scoped analogue of hard-budget-guard.ts's postHardBudgetAlert (no ticket to hang the alert off of here). */
+/** Best-effort chat alert — never throws, never blocks the caller. Account-scoped analogue of hard-budget-guard.ts's postHardBudgetAlert (no ticket to hang the alert off of here). */
 export async function postRunBudgetAlert(
   deps: RunBudgetGuardDeps,
-  workspaceId: string,
+  accountId: string,
   content: string,
 ): Promise<void> {
   if (!deps.roomMessagingService) return;
   try {
-    const roomId = await resolveAlertRoomId(deps.dataSource, workspaceId);
+    const roomId = await resolveAlertRoomId(deps.dataSource, accountId);
     if (!roomId) return;
-    await deps.roomMessagingService.sendSystemMessage(roomId, workspaceId, content);
+    await deps.roomMessagingService.sendSystemMessage(roomId, accountId, content);
   } catch (e) {
-    deps.logger?.warn('HardBudget', 'run-budget alert post failed (non-fatal)', { err: String(e), workspace_id: workspaceId });
+    deps.logger?.warn('HardBudget', 'run-budget alert post failed (non-fatal)', { err: String(e), account_id: accountId });
   }
 }
 
@@ -172,8 +172,8 @@ export async function postRunBudgetAlert(
  */
 const lastAlertSentAt = new Map<string, number>();
 
-function shouldSendRunBudgetAlert(kind: RunBudgetKind, workspaceId: string, windowMs: number, now: number): boolean {
-  const key = `${workspaceId}|${kind}`;
+function shouldSendRunBudgetAlert(kind: RunBudgetKind, accountId: string, windowMs: number, now: number): boolean {
+  const key = `${accountId}|${kind}`;
   const last = lastAlertSentAt.get(key);
   if (last !== undefined && now - last < windowMs) return false;
   lastAlertSentAt.set(key, now);
@@ -185,14 +185,14 @@ export class RunBudgetExceededError extends Error {
   status = 429;
   constructor(
     public readonly kind: RunBudgetKind,
-    public readonly workspaceId: string,
+    public readonly accountId: string,
     public readonly count: number,
     public readonly limit: number,
     public readonly windowMinutes: number,
     public readonly retryAt: Date,
   ) {
     super(
-      `${kind} run budget exceeded for workspace ${workspaceId}: ${count}/${limit} runs started in the last ${windowMinutes} minute(s). ` +
+      `${kind} run budget exceeded for workspace ${accountId}: ${count}/${limit} runs started in the last ${windowMinutes} minute(s). ` +
       `Earliest retry: ${retryAt.toISOString()}.`,
     );
     this.name = 'RunBudgetExceededError';
@@ -222,40 +222,40 @@ export class RunBudgetExceededError extends Error {
 export async function enforceRunBudget(
   deps: RunBudgetGuardDeps,
   kind: RunBudgetKind,
-  workspaceId: string,
+  accountId: string,
 ): Promise<void> {
   let breach: { count: number; cfg: ResolvedHardBudget; windowMin: number; since: Date } | null = null;
   try {
-    const cfg = await resolveHardBudgetForWorkspace(deps.dataSource, workspaceId);
+    const cfg = await resolveHardBudgetForWorkspace(deps.dataSource, accountId);
     if (!cfg.enabled) return;
 
     const now = new Date();
     const since = new Date(now.getTime() - cfg.windowMs);
-    const count = await countRunsInWindow(deps.dataSource, kind, workspaceId, since);
+    const count = await countRunsInWindow(deps.dataSource, kind, accountId, since);
     if (count < cfg.maxRunsPerWindow) return;
 
     breach = { count, cfg, windowMin: Math.round(cfg.windowMs / 60_000), since };
   } catch (e) {
     deps.logger?.warn('HardBudget', 'run-budget evaluation failed (fail-open, run allowed)', {
-      err: String(e), workspace_id: workspaceId, kind,
+      err: String(e), account_id: accountId, kind,
     });
     return;
   }
 
   const { count, cfg, windowMin, since } = breach;
-  const oldest = await oldestRunAt(deps.dataSource, kind, workspaceId, since).catch(() => null);
+  const oldest = await oldestRunAt(deps.dataSource, kind, accountId, since).catch(() => null);
   const retryAt = new Date((oldest ?? new Date()).getTime() + cfg.windowMs);
 
   deps.logger?.warn('HardBudget', `run budget exceeded — ${kind} run rejected`, {
-    workspace_id: workspaceId, kind, count, limit: cfg.maxRunsPerWindow, window_minutes: windowMin,
+    account_id: accountId, kind, count, limit: cfg.maxRunsPerWindow, window_minutes: windowMin,
   });
-  if (cfg.notify && shouldSendRunBudgetAlert(kind, workspaceId, cfg.windowMs, Date.now())) {
-    await postRunBudgetAlert(deps, workspaceId, [
+  if (cfg.notify && shouldSendRunBudgetAlert(kind, accountId, cfg.windowMs, Date.now())) {
+    await postRunBudgetAlert(deps, accountId, [
       `🚦 **Hard budget 초과 (run 생성 빈도)** — kind=\`${kind}\``,
-      `워크스페이스: \`${workspaceId}\``,
+      `워크스페이스: \`${accountId}\``,
       `누적 생성: ${count}건 / ${windowMin}분 (상한 ${cfg.maxRunsPerWindow})`,
       `가장 이른 재시도 가능 시각: ${retryAt.toISOString()}`,
     ].join('\n\n'));
   }
-  throw new RunBudgetExceededError(kind, workspaceId, count, cfg.maxRunsPerWindow, windowMin, retryAt);
+  throw new RunBudgetExceededError(kind, accountId, count, cfg.maxRunsPerWindow, windowMin, retryAt);
 }

@@ -31,7 +31,7 @@ export type SubagentKind = 'chat' | 'ticket' | 'oneshot';
 export interface SubagentSummary {
   subagent_id: string;
   agent_id: string;
-  workspace_id: string;
+  account_id: string;
   kind: SubagentKind;
   session_key: string;
   pid: number;
@@ -133,7 +133,7 @@ export class SubagentMonitorService {
   async register(input: {
     subagent_id: string;
     agent_id: string;
-    workspace_id: string;
+    account_id: string;
     kind: SubagentKind;
     session_key: string;
     pid: number;
@@ -155,7 +155,7 @@ export class SubagentMonitorService {
     const row = this.subagents.create({
       subagent_id: input.subagent_id,
       agent_id: input.agent_id,
-      workspace_id: input.workspace_id,
+      account_id: input.account_id,
       kind: input.kind,
       session_key: input.session_key || '',
       pid: input.pid || 0,
@@ -216,7 +216,7 @@ export class SubagentMonitorService {
         activityEvents.emit('subagent_log', {
           subagent_id: rec.subagent_id,
           agent_id: rec.agent_id,
-          workspace_id: rec.workspace_id,
+          account_id: rec.account_id,
           direction: evt.direction,
           line: evt.line,
           ts: evt.ts,
@@ -263,7 +263,7 @@ export class SubagentMonitorService {
     activityEvents.emit('subagent_ended', {
       subagent_id: rec.subagent_id,
       agent_id: rec.agent_id,
-      workspace_id: rec.workspace_id,
+      account_id: rec.account_id,
       exit_code: rec.exit_code,
       signal: rec.signal,
       duration_ms: durationMs,
@@ -309,7 +309,7 @@ export class SubagentMonitorService {
       activityEvents.emit('subagent_ended', {
         subagent_id: rec.subagent_id,
         agent_id: rec.agent_id,
-        workspace_id: rec.workspace_id,
+        account_id: rec.account_id,
         exit_code: null,
         signal: 'disappeared',
         duration_ms: durationMs,
@@ -325,9 +325,9 @@ export class SubagentMonitorService {
   }
 
   /** All current records (active + recently-ended) for a workspace. */
-  async listForWorkspace(workspaceId: string): Promise<SubagentSummary[]> {
+  async listForWorkspace(accountId: string): Promise<SubagentSummary[]> {
     const rows = await this.subagents.find({
-      where: { workspace_id: workspaceId },
+      where: { account_id: accountId },
       order: { started_at: 'DESC' },
     });
     return rows.map((r) => this._summary(r));
@@ -335,10 +335,10 @@ export class SubagentMonitorService {
 
   async getTranscript(
     subagentId: string,
-    workspaceId: string,
+    accountId: string,
   ): Promise<{ summary: SubagentSummary; lines: SubagentLogLineDto[] } | null> {
     const rec = await this.subagents.findOne({ where: { subagent_id: subagentId } });
-    if (!rec || rec.workspace_id !== workspaceId) return null;
+    if (!rec || rec.account_id !== accountId) return null;
     const lineRows = await this.lines.find({
       where: { subagent_id: subagentId },
       order: { seq: 'ASC' },
@@ -395,7 +395,7 @@ export class SubagentMonitorService {
     return {
       subagent_id: r.subagent_id,
       agent_id: r.agent_id,
-      workspace_id: r.workspace_id,
+      account_id: r.account_id,
       kind: r.kind as SubagentKind,
       session_key: r.session_key || '',
       pid: r.pid,
@@ -442,7 +442,7 @@ export class SubagentMonitorService {
   /**
    * 재진입 가드 — 한 번의 실행이 5분 tick 주기를 넘기면 다음 setInterval
    * 콜백이 겹쳐 발동할 수 있다(ticket 3c6422f1, 8d5c6f5d 리뷰 관찰). insert
-   * 경로는 롤업 테이블의 `(workspace_id, usage_date, agent_id)` unique
+   * 경로는 롤업 테이블의 `(account_id, usage_date, agent_id)` unique
    * 제약이 막아주지만(경합한 쪽이 충돌로 롤백 후 다음 tick이 재시도 —
    * 시끄럽지만 무손실), update 경로(같은 grain에 기존 row가 있을 때
    * `_rollupBeforeDelete`의 read-modify-write 증분)는 두 트랜잭션이 동시에
@@ -467,7 +467,7 @@ export class SubagentMonitorService {
       const stale = await this.subagents.find({
         where: { expires_at: LessThan(now) },
         select: [
-          'subagent_id', 'workspace_id', 'agent_id', 'started_at',
+          'subagent_id', 'account_id', 'agent_id', 'started_at',
           'input_tokens', 'output_tokens', 'cache_read_input_tokens',
           'cache_creation_input_tokens', 'total_cost_usd',
         ],
@@ -498,7 +498,7 @@ export class SubagentMonitorService {
   }
 
   /**
-   * 곧 reap될 배치를 (workspace_id, usage_date, agent_id)로 묶는다 —
+   * 곧 reap될 배치를 (account_id, usage_date, agent_id)로 묶는다 —
    * `usage_date`는 `started_at`의 UTC 달력 날짜 — 그리고 각 그룹의 합계를
    * `AgentUsageDailyRollup`에 접어 넣는다(기존 row가 있으면 증분, 없으면
    * 신규 삽입). 배치의 delete와 같은 트랜잭션 안에서 호출된다(`_sweepEnded`
@@ -516,13 +516,13 @@ export class SubagentMonitorService {
     manager: EntityManager,
     rows: Array<Pick<
       Subagent,
-      | 'workspace_id' | 'agent_id' | 'started_at'
+      | 'account_id' | 'agent_id' | 'started_at'
       | 'input_tokens' | 'output_tokens'
       | 'cache_read_input_tokens' | 'cache_creation_input_tokens' | 'total_cost_usd'
     >>,
   ): Promise<void> {
     interface Group {
-      workspace_id: string;
+      account_id: string;
       usage_date: string;
       agent_id: string;
       runs_total: number;
@@ -537,11 +537,11 @@ export class SubagentMonitorService {
     const groups = new Map<string, Group>();
     for (const r of rows) {
       const usageDate = r.started_at.toISOString().slice(0, 10);
-      const key = `${r.workspace_id}|${usageDate}|${r.agent_id}`;
+      const key = `${r.account_id}|${usageDate}|${r.agent_id}`;
       let g = groups.get(key);
       if (!g) {
         g = {
-          workspace_id: r.workspace_id, usage_date: usageDate, agent_id: r.agent_id,
+          account_id: r.account_id, usage_date: usageDate, agent_id: r.agent_id,
           runs_total: 0, runs_with_usage: 0, priced_runs: 0,
           input_tokens: 0, output_tokens: 0,
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
@@ -563,7 +563,7 @@ export class SubagentMonitorService {
     const rollupRepo = manager.getRepository(AgentUsageDailyRollup);
     for (const g of groups.values()) {
       const existing = await rollupRepo.findOne({
-        where: { workspace_id: g.workspace_id, usage_date: g.usage_date, agent_id: g.agent_id },
+        where: { account_id: g.account_id, usage_date: g.usage_date, agent_id: g.agent_id },
       });
       if (existing) {
         existing.runs_total += g.runs_total;

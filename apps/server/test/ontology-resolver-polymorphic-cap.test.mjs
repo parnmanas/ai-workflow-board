@@ -27,7 +27,7 @@ const { deriveOverridesAndCapDynamicDispatch } = await import(
 );
 
 const BASE = {
-  workspace_id: 'ws-poly-test',
+  account_id: 'ws-poly-test',
   graph_id: 'graph-poly-test',
   layer: 'structural',
   confidence_method: 'constant',

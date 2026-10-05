@@ -14,7 +14,7 @@
 //      거절된다(새 동작 — 이전에는 team_id 조회 자체가 일치를 요구해서 애초에 조용히
 //      불가능했다).
 //   4. 글로벌 팀은 모든 workspace에서 보이지만(listTeams), 만든 workspace
-//      (owner_workspace_id)만 쓸 수 있다.
+//      (owner_account_id)만 쓸 수 있다.
 //   5. max_open_missions는 팀 단위가 아니라 (팀, workspace) 단위로 강제된다 —
 //      글로벌 팀의 workspace A 캡이 workspace B의 슬롯을 소비하지 않는다.
 //   6. dispatchStep은 디스패치 시점에 assignee의 workspace를 재검증한다 — 팀 가입
@@ -28,7 +28,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam, createRuntimeHost, slotSpec } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -68,19 +68,19 @@ async function sharedApp(t) {
 }
 
 async function mcpForAgent(app, getDataSourceToken, port, agent, label, t) {
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: agent.workspace_id || '', label });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: agent.account_id || '', label });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => { void client.close().catch(() => {}); });
   return client;
 }
 
-// The old form of this test asserted that a workspace-scoped AGENT is rejected
+// The old form of this test asserted that a account-scoped AGENT is rejected
 // from a global team's roster. That rule no longer has an input to reject: a
 // slot names a machine, and the provisioner stamps the identity it creates with
 // the TEAM's own scope. So the guarantee is now structural, and this test
 // asserts the structure instead of the rejection — the property that matters
 // downstream is unchanged (dispatchStep must never hand a global team's mission
-// room to a workspace-scoped worker).
+// room to a account-scoped worker).
 test('Orchestration Team: global roster integrity — a global team provisions workspace-less identities', async (t) => {
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
@@ -90,101 +90,101 @@ test('Orchestration Team: global roster integrity — a global team provisions w
   // P4c-4: workspace 귀속은 member 행이 진다 (Agent 행 없음).
   const memberRepo = ds.getRepository('OrchestrationTeamMember');
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'roster-integrity');
+  const ws = await createAccount(app, getDataSourceToken, 'roster-integrity');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'roster-host' });
 
   step('A global team is stamped with the creating workspace as owner and no workspace of its own');
   const team = await teams.createTeam({
-    workspace_id: ws.id,
+    account_id: ws.id,
     is_global: true,
     name: 'Global squad',
     orchestrator: slotSpec(host.id),
     created_by: HUMAN.id,
-    allowed_workspace_ids: [ws.id],
+    allowed_account_ids: [ws.id],
   });
   assert.equal(team.is_global, true);
-  assert.equal(team.workspace_id, null);
-  assert.equal(team.owner_workspace_id, ws.id);
-  assert.deepEqual(team.allowed_workspace_ids, [ws.id]);
+  assert.equal(team.account_id, null);
+  assert.equal(team.owner_account_id, ws.id);
+  assert.deepEqual(team.allowed_account_ids, [ws.id]);
 
   step('Its orchestrator identity is workspace-less, not stamped with the creating workspace');
   // P4c-4: orchestrator identity 는 rt- 키라 행이 없다 — 팀 행의 null workspace +
   // 아래 member 행 단언이 귀속을 커버한다.
-  assert.equal(team.workspace_id, null, 'global team row carries no workspace');
+  assert.equal(team.account_id, null, 'global team row carries no workspace');
 
   step('So is every member identity it provisions');
   const withMember = await teams.addMember(team.id, ws.id, { runtime: slotSpec(host.id), role_label: 'builder' });
   assert.equal(withMember.members.length, 1);
   const memberRow = await memberRepo.findOne({ where: { team_id: team.id, agent_id: withMember.members[0].agent_id } });
-  assert.equal(memberRow.workspace_id, null);
+  assert.equal(memberRow.account_id, null);
 
-  step('A workspace-scoped team stamps its workspace onto the identities instead');
+  step('A account-scoped team stamps its workspace onto the identities instead');
   const scopedTeam = await teams.createTeam({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Scoped squad',
     orchestrator: slotSpec(host.id),
     created_by: HUMAN.id,
   });
   // P4c-4: orchestrator 는 member 행이 없다 — 팀 행 + 아래 member 행 귀속이 귀속을 커버한다.
-  assert.equal(scopedTeam.workspace_id, ws.id);
+  assert.equal(scopedTeam.account_id, ws.id);
 });
 
-test('Orchestration Team: allowed_workspace_ids is validated against real workspace rows, not just normalized', async (t) => {
+test('Orchestration Team: allowed_account_ids is validated against real workspace rows, not just normalized', async (t) => {
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'allowlist-fk');
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'allowlist-fk-other');
+  const ws = await createAccount(app, getDataSourceToken, 'allowlist-fk');
+  const otherWs = await createAccount(app, getDataSourceToken, 'allowlist-fk-other');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'allowlist-fk-host' });
-  const bogusWorkspaceId = '00000000-0000-4000-8000-000000000000';
+  const bogusAccountId = '00000000-0000-4000-8000-000000000000';
 
-  step('createTeam rejects an allowed_workspace_ids entry that is not a real workspace row — 400, no orphan team persisted');
+  step('createTeam rejects an allowed_account_ids entry that is not a real workspace row — 400, no orphan team persisted');
   await assert.rejects(
     () => teams.createTeam({
-      workspace_id: ws.id,
+      account_id: ws.id,
       is_global: true,
       name: 'Bogus allow-list team',
       orchestrator: slotSpec(host.id),
       created_by: HUMAN.id,
-      allowed_workspace_ids: [ws.id, bogusWorkspaceId],
+      allowed_account_ids: [ws.id, bogusAccountId],
     }),
     (e) => {
       assert.equal(e.status, 400);
-      assert.match(e.message, new RegExp(bogusWorkspaceId));
+      assert.match(e.message, new RegExp(bogusAccountId));
       return true;
     },
   );
   const ds = app.get(getDataSourceToken());
   const orphan = await ds.getRepository('OrchestrationTeam').findOne({ where: { name: 'Bogus allow-list team' } });
-  assert.equal(orphan, null, 'a team with an unvalidated allowed_workspace_ids entry must not be persisted');
+  assert.equal(orphan, null, 'a team with an unvalidated allowed_account_ids entry must not be persisted');
 
-  step('createTeam accepts allowed_workspace_ids once every entry is a real workspace');
+  step('createTeam accepts allowed_account_ids once every entry is a real workspace');
   const team = await teams.createTeam({
-    workspace_id: ws.id,
+    account_id: ws.id,
     is_global: true,
     name: 'Valid allow-list team',
     orchestrator: slotSpec(host.id),
     created_by: HUMAN.id,
-    allowed_workspace_ids: [ws.id, otherWs.id],
+    allowed_account_ids: [ws.id, otherWs.id],
   });
-  assert.deepEqual(new Set(team.allowed_workspace_ids), new Set([ws.id, otherWs.id]));
+  assert.deepEqual(new Set(team.allowed_account_ids), new Set([ws.id, otherWs.id]));
 
   step('updateTeam rejects the same bogus id on the allow-list-replace path — 400, previous allow-list untouched');
   await assert.rejects(
-    () => teams.updateTeam(team.id, ws.id, { allowed_workspace_ids: [bogusWorkspaceId] }),
+    () => teams.updateTeam(team.id, ws.id, { allowed_account_ids: [bogusAccountId] }),
     (e) => {
       assert.equal(e.status, 400);
-      assert.match(e.message, new RegExp(bogusWorkspaceId));
+      assert.match(e.message, new RegExp(bogusAccountId));
       return true;
     },
   );
   const unchanged = await teams.getTeam(team.id, ws.id);
-  assert.deepEqual(new Set(unchanged.allowed_workspace_ids), new Set([ws.id, otherWs.id]));
+  assert.deepEqual(new Set(unchanged.allowed_account_ids), new Set([ws.id, otherWs.id]));
 });
 
-test('Orchestration Team: create_orchestration_mission for a global team — workspace_id required + allow-listed', async (t) => {
+test('Orchestration Team: create_orchestration_mission for a global team — account_id required + allow-listed', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
@@ -192,12 +192,12 @@ test('Orchestration Team: create_orchestration_mission for a global team — wor
   const teams = app.get(OrchestrationTeamService);
   const missions = app.get(OrchestrationMissionService);
 
-  const wsA = await createWorkspace(app, getDataSourceToken, 'global-mission-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'global-mission-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'global-mission-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'global-mission-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: wsA.id,
+    accountId: wsA.id,
     name: 'Global mission squad',
-    team: { is_global: true, created_by: HUMAN.id, allowed_workspace_ids: [wsA.id] },
+    team: { is_global: true, created_by: HUMAN.id, allowed_account_ids: [wsA.id] },
     members: [{ role_label: 'builder' }],
   });
   const team = squad.team;
@@ -205,16 +205,16 @@ test('Orchestration Team: create_orchestration_mission for a global team — wor
   const member = squad.member('builder');
   const orchMcp = await mcpForAgent(app, getDataSourceToken, port, orch, 'gm-orch', t);
 
-  step('workspace_id is required for a global team');
+  step('account_id is required for a global team');
   const missing = await orchMcp.callTool('create_orchestration_mission', {
     team_id: team.id, title: 'no ws', objective: 'no ws',
   });
   assert.equal(missing.isError, true);
-  assert.match(missing.error.error, /workspace_id is required/);
+  assert.match(missing.error.error, /account_id is required/);
 
-  step('An out-of-allow-list workspace_id is rejected');
+  step('An out-of-allow-list account_id is rejected');
   const notAllowed = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'wrong ws', objective: 'wrong ws', workspace_id: wsB.id,
+    team_id: team.id, title: 'wrong ws', objective: 'wrong ws', account_id: wsB.id,
   });
   assert.equal(notAllowed.isError, true);
   assert.match(notAllowed.error.error, /not on team .* allowed workspace/i);
@@ -222,40 +222,40 @@ test('Orchestration Team: create_orchestration_mission for a global team — wor
   step('The allow-list is enforced by createMission itself, not just the MCP tool — a direct/REST-style call is rejected too (would otherwise bypass the whitelist via POST /api/orchestration/missions)');
   await assert.rejects(
     () => missions.createMission({
-      workspace_id: wsB.id, team_id: team.id, title: 'REST bypass attempt', objective: 'REST bypass attempt',
+      account_id: wsB.id, team_id: team.id, title: 'REST bypass attempt', objective: 'REST bypass attempt',
       created_by_type: 'user', created_by: HUMAN.id,
     }),
     (e) => { assert.equal(e.status, 400); assert.match(e.message, /not on team .* allowed workspace/i); return true; },
   );
 
-  step('An empty allow-list denies by default, even with a real workspace_id');
+  step('An empty allow-list denies by default, even with a real account_id');
   // 이 팀은 자기 orchestrator 정체성을 따로 갖는다(슬롯 하나 = 정체성 하나)
   // — `create_orchestration_mission` 의 소유권 검사가 호출자를 그 팀의
   // orchestrator 와 대조하므로, 그 정체성의 키로 호출해야 allow-list 분기까지
   // 도달한다.
   const noListSquad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: wsA.id,
+    accountId: wsA.id,
     name: 'No allow-list team',
     team: { is_global: true, created_by: HUMAN.id },
   });
   const noListTeam = noListSquad.team;
   const noListMcp = await mcpForAgent(app, getDataSourceToken, port, noListSquad.orchestrator, 'gm-orch-nolist', t);
-  assert.deepEqual(noListTeam.allowed_workspace_ids, []);
+  assert.deepEqual(noListTeam.allowed_account_ids, []);
   const denied = await noListMcp.callTool('create_orchestration_mission', {
-    team_id: noListTeam.id, title: 'no list', objective: 'no list', workspace_id: wsA.id,
+    team_id: noListTeam.id, title: 'no list', objective: 'no list', account_id: wsA.id,
   });
   assert.equal(denied.isError, true);
-  assert.match(denied.error.error, /no allowed workspaces configured/);
+  assert.match(denied.error.error, /no allowed accounts configured/);
 
-  step('An allow-listed workspace_id succeeds and the mission is fully scoped to it');
+  step('An allow-listed account_id succeeds and the mission is fully scoped to it');
   const created = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'Global mission', objective: 'Prove global team missions are workspace-scoped.',
-    workspace_id: wsA.id,
+    team_id: team.id, title: 'Global mission', objective: 'Prove global team missions are account-scoped.',
+    account_id: wsA.id,
   });
   assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
   assert.equal(created.status, 'planning');
   const detail = await missions.getMissionDetail(created.mission_id, wsA.id);
-  assert.equal(detail.workspace_id, wsA.id, 'the mission is billed to the workspace the orchestrator chose');
+  assert.equal(detail.account_id, wsA.id, 'the mission is billed to the workspace the orchestrator chose');
 
   step('The dispatched step + its room are ALSO stamped with that workspace, not the (null) team workspace');
   const plan = await orchMcp.callTool('submit_orchestration_plan', {
@@ -265,21 +265,21 @@ test('Orchestration Team: create_orchestration_mission for a global team — wor
   assert.ok(!plan.isError, `plan failed: ${JSON.stringify(plan)}`);
   assert.deepEqual(plan.dispatched_now, ['only']);
   const step1 = (await missions.listSteps(created.mission_id))[0];
-  assert.equal(step1.workspace_id, wsA.id);
+  assert.equal(step1.account_id, wsA.id);
   const room = await ds.getRepository('ChatRoom').findOne({ where: { id: step1.room_id } });
-  assert.equal(room.workspace_id, wsA.id);
+  assert.equal(room.account_id, wsA.id);
 });
 
-test('Orchestration Team: workspace-scoped team behavior is unchanged by the global-team feature', async (t) => {
+test('Orchestration Team: account-scoped team behavior is unchanged by the global-team feature', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const wsA = await createWorkspace(app, getDataSourceToken, 'scoped-unchanged-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'scoped-unchanged-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'scoped-unchanged-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'scoped-unchanged-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: wsA.id,
+    accountId: wsA.id,
     name: 'Scoped-as-before squad',
     team: { created_by: HUMAN.id },
   });
@@ -287,32 +287,32 @@ test('Orchestration Team: workspace-scoped team behavior is unchanged by the glo
   const orch = squad.orchestrator;
   const orchMcp = await mcpForAgent(app, getDataSourceToken, port, orch, 'su-orch', t);
   assert.equal(team.is_global, false);
-  assert.equal(team.workspace_id, wsA.id);
+  assert.equal(team.account_id, wsA.id);
 
-  step('Omitting workspace_id still defaults to the team\'s own workspace (existing behavior, untouched)');
+  step('Omitting account_id still defaults to the team\'s own workspace (existing behavior, untouched)');
   const omitted = await orchMcp.callTool('create_orchestration_mission', {
     team_id: team.id, title: 'default ws', objective: 'default ws', start: false,
   });
   assert.ok(!omitted.isError, `create failed: ${JSON.stringify(omitted)}`);
   const missionsSvc = app.get(services.OrchestrationMissionService);
   const detail = await missionsSvc.getMissionDetail(omitted.mission_id, wsA.id);
-  assert.equal(detail.workspace_id, wsA.id);
+  assert.equal(detail.account_id, wsA.id);
   await app.get(services.OrchestrationRunnerService).completeMission(omitted.mission_id, { agentId: orch.id }, {
     status: 'failed', summary: 'cleanup',
   });
 
-  step('An explicit workspace_id matching the team\'s own workspace is accepted (no-op)');
+  step('An explicit account_id matching the team\'s own workspace is accepted (no-op)');
   const matching = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'matching ws', objective: 'matching ws', workspace_id: wsA.id, start: false,
+    team_id: team.id, title: 'matching ws', objective: 'matching ws', account_id: wsA.id, start: false,
   });
   assert.ok(!matching.isError, `create failed: ${JSON.stringify(matching)}`);
   await app.get(services.OrchestrationRunnerService).completeMission(matching.mission_id, { agentId: orch.id }, {
     status: 'failed', summary: 'cleanup',
   });
 
-  step('An explicit workspace_id that disagrees with the team\'s own workspace is rejected — new protection');
+  step('An explicit account_id that disagrees with the team\'s own workspace is rejected — new protection');
   const mismatched = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'mismatched ws', objective: 'mismatched ws', workspace_id: wsB.id,
+    team_id: team.id, title: 'mismatched ws', objective: 'mismatched ws', account_id: wsB.id,
   });
   assert.equal(mismatched.isError, true);
   assert.match(mismatched.error.error, /does not match this team's own workspace/);
@@ -324,12 +324,12 @@ test('Orchestration Team: global team visibility + owner-only write permission',
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const owner = await createWorkspace(app, getDataSourceToken, 'perm-owner');
-  const other = await createWorkspace(app, getDataSourceToken, 'perm-other');
+  const owner = await createAccount(app, getDataSourceToken, 'perm-owner');
+  const other = await createAccount(app, getDataSourceToken, 'perm-other');
   const host = await createRuntimeHost(app, getDataSourceToken, owner.id, { name: 'perm-host' });
 
   const team = await teams.createTeam({
-    workspace_id: owner.id,
+    account_id: owner.id,
     is_global: true,
     name: 'Owner-guarded team',
     orchestrator: slotSpec(host.id),
@@ -371,16 +371,16 @@ test('Orchestration Team: max_open_missions is enforced per (team, workspace), n
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const wsA = await createWorkspace(app, getDataSourceToken, 'cap-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'cap-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'cap-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'cap-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: wsA.id,
+    accountId: wsA.id,
     name: 'Cap-per-workspace squad',
     team: {
       is_global: true,
       created_by: HUMAN.id,
       max_open_missions: 1,
-      allowed_workspace_ids: [wsA.id, wsB.id],
+      allowed_account_ids: [wsA.id, wsB.id],
     },
   });
   const team = squad.team;
@@ -388,20 +388,20 @@ test('Orchestration Team: max_open_missions is enforced per (team, workspace), n
 
   step('First mission in workspace A succeeds');
   const firstA = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'A-1', objective: 'A-1', workspace_id: wsA.id, start: false,
+    team_id: team.id, title: 'A-1', objective: 'A-1', account_id: wsA.id, start: false,
   });
   assert.ok(!firstA.isError, `create failed: ${JSON.stringify(firstA)}`);
 
   step('A second mission in workspace A is capped (limit 1 already open in A)');
   const secondA = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'A-2', objective: 'A-2', workspace_id: wsA.id, start: false,
+    team_id: team.id, title: 'A-2', objective: 'A-2', account_id: wsA.id, start: false,
   });
   assert.equal(secondA.isError, true);
   assert.equal(secondA.error.existing_mission_id, firstA.mission_id);
 
   step('A mission in workspace B succeeds anyway — B has its own independent slot');
   const firstB = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'B-1', objective: 'B-1', workspace_id: wsB.id, start: false,
+    team_id: team.id, title: 'B-1', objective: 'B-1', account_id: wsB.id, start: false,
   });
   assert.ok(!firstB.isError, `B slot should be independent of A's cap: ${JSON.stringify(firstB)}`);
   assert.notEqual(firstB.mission_id, firstA.mission_id);
@@ -416,10 +416,10 @@ test('Orchestration Team: dispatchStep re-validates workspace legality — a mem
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const wsA = await createWorkspace(app, getDataSourceToken, 'move-bug-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'move-bug-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'move-bug-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'move-bug-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: wsA.id,
+    accountId: wsA.id,
     name: 'Move-bug squad',
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [{ role_label: 'stayer' }, { role_label: 'mover' }],
@@ -432,14 +432,14 @@ test('Orchestration Team: dispatchStep re-validates workspace legality — a mem
   step('mover joins while still in workspace A, then its membership goes stale in workspace B');
   // P4c-4: agent 이동 retired — stale membership 을 member 행 직접 수정으로 재현한다.
   await ds.getRepository('OrchestrationTeamMember').update(
-    { team_id: team.id, agent_id: mover.id }, { workspace_id: wsB.id },
+    { team_id: team.id, agent_id: mover.id }, { account_id: wsB.id },
   );
   const staleMembership = await ds.getRepository('OrchestrationTeamMember').findOne({ where: { team_id: team.id, agent_id: mover.id } });
   assert.ok(staleMembership, 'the membership row carries the stale workspace — this is the gap dispatchStep must catch');
 
   step('Start a mission and submit a plan with one step per member, both dependency-free');
   const mission = await missions.createMission({
-    workspace_id: wsA.id, team_id: team.id, title: 'Move-bug mission', objective: 'Prove stale membership cannot be dispatched to.',
+    account_id: wsA.id, team_id: team.id, title: 'Move-bug mission', objective: 'Prove stale membership cannot be dispatched to.',
     created_by_type: 'user', created_by: HUMAN.id,
   });
   const started = await runner.startMission(mission.id, wsA.id, HUMAN);
@@ -482,10 +482,10 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const wsA = await createWorkspace(app, getDataSourceToken, 'double-wake-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'double-wake-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'double-wake-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'double-wake-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: wsA.id,
+    accountId: wsA.id,
     name: 'Double-wake squad',
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [{ role_label: 'first' }, { role_label: 'second' }],
@@ -496,10 +496,10 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const second = squad.member('second');
   // P4c-4: agent 이동 retired — stale membership 을 member 행 직접 수정으로 재현한다 (move-bug 테스트와 동일).
   await ds.getRepository('OrchestrationTeamMember').update(
-    { team_id: team.id, agent_id: second.id }, { workspace_id: wsB.id },
+    { team_id: team.id, agent_id: second.id }, { account_id: wsB.id },
   );
   const mission = await missions.createMission({
-    workspace_id: wsA.id, team_id: team.id, title: 'Double-wake mission',
+    account_id: wsA.id, team_id: team.id, title: 'Double-wake mission',
     objective: 'Prove one pump-time dispatch failure yields exactly one wake.',
     created_by_type: 'user', created_by: HUMAN.id,
   });

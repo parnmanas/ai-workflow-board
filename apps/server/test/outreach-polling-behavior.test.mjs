@@ -97,7 +97,7 @@ function makeIngestService(failMap = {}) {
 function makeChannel(over = {}) {
   return {
     id: 'ch-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     // A generic, deliberately-unimplemented kind — resolveChannelConnector's
     // catch-all FakeOutreachConnector fallback, so tests that aren't about
     // connector selection itself don't need a credential/targets fixture.
@@ -208,7 +208,7 @@ test('computeNextPoll: cron overrides interval_ms; falls back to interval_ms oth
 test('kind=reddit with a valid credential + targets resolves to a real RedditConnector', async () => {
   const ch = makeChannel({ kind: 'reddit', credential_id: 'cred-1', targets: ['awb'] });
   const credentialRows = [{
-    id: 'cred-1', workspace_id: null,
+    id: 'cred-1', account_id: null,
     encrypted_data: JSON.stringify({ token: 'refresh-tok', client_id: 'cid', client_secret: 'csecret' }),
   }];
   const { svc, ingestService } = svcWith([ch], {}, credentialRows);
@@ -233,7 +233,7 @@ test('kind=discord (or any not-specially-handled kind) still resolves to FakeOut
 test('kind=reddit with an EMPTY target whitelist fails closed — no collection, never falls back to discovery', async () => {
   const ch = makeChannel({ kind: 'reddit', credential_id: 'cred-1', targets: [] });
   const credentialRows = [{
-    id: 'cred-1', workspace_id: null,
+    id: 'cred-1', account_id: null,
     encrypted_data: JSON.stringify({ token: 'refresh-tok', client_id: 'cid', client_secret: 'csecret' }),
   }];
   const { svc, ingestService } = svcWith([ch], {}, credentialRows);
@@ -252,7 +252,7 @@ test('kind=reddit with an EMPTY target whitelist fails closed — no collection,
 test('kind=github with a valid credential + targets resolves to a real GitHubConnector', async () => {
   const ch = makeChannel({ kind: 'github', credential_id: 'cred-gh', targets: ['x/y'] });
   const credentialRows = [{
-    id: 'cred-gh', workspace_id: null,
+    id: 'cred-gh', account_id: null,
     encrypted_data: JSON.stringify({ token: 'ghp_test123' }),
   }];
   const { svc, ingestService } = svcWith([ch], {}, credentialRows);
@@ -268,7 +268,7 @@ test('kind=github with a valid credential + targets resolves to a real GitHubCon
 test('kind=github with an EMPTY target whitelist fails closed — no collection, never falls back to discovery', async () => {
   const ch = makeChannel({ kind: 'github', credential_id: 'cred-gh', targets: [] });
   const credentialRows = [{
-    id: 'cred-gh', workspace_id: null,
+    id: 'cred-gh', account_id: null,
     encrypted_data: JSON.stringify({ token: 'ghp_test123' }),
   }];
   const { svc, ingestService } = svcWith([ch], {}, credentialRows);

@@ -142,7 +142,7 @@ export function decidePushReadiness(input: PushReadinessInput): PushReadinessDec
 //     harness `permission_mode` makes that trust dialog load-bearing (see
 //     CliAdapter.requiresWorkspaceTrust — the common `--dangerously-skip-
 //     permissions` default bypasses the dialog entirely, so this only bites
-//     workspaces that opt into a stricter mode);
+//     accounts that opt into a stricter mode);
 //   - the CLI's OAuth session already expired and carries no refresh_token,
 //     so it cannot self-heal on the next spawn.
 // Both are OPERATOR-fixable and never self-heal on their own, so — like the

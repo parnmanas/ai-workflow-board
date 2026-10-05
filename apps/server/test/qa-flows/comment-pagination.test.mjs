@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { createAccount, createTicket, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_PAGINATION_PORT || '0';
 
@@ -28,13 +28,13 @@ test('comment dynamic loading: bounded detail GET + cursor pagination', async (t
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'comment-pagination');
+  const ws = await createAccount(app, getDataSourceToken, 'comment-pagination');
   const user = await createUser(app, getDataSourceToken, { name: 'reader' });
   const token = app.get(AuthService).createSession(user.id);
   const authHeaders = { Authorization: `Bearer ${token}` };
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'pagination ticket',
   });
 
@@ -46,7 +46,7 @@ test('comment dynamic loading: bounded detail GET + cursor pagination', async (t
     let ms = base + i * 1000;
     if (i === 61 || i === 62) ms = base + 60 * 1000;
     await commentRepo.save(commentRepo.create({
-      ticket_id: ticket.id, workspace_id: ws.id, author: 'U', author_type: 'user',
+      ticket_id: ticket.id, account_id: ws.id, author: 'U', author_type: 'user',
       author_id: 'u1', content: `c${i}`, type: 'note', status: null,
       attachment_resource_ids: '[]', metadata: '{}', created_at: new Date(ms),
     }));

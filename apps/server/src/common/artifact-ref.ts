@@ -37,9 +37,9 @@ function cleanLabel(value: string): string {
  * ticket's detail panel open. `extra` adds query params (e.g. `comment`).
  * Relative; prefix AWB_PUBLIC_URL for links that leave the app.
  */
-export function ticketPath(workspaceId: string, ticketId: string, extra: Record<string, string> = {}): string {
+export function ticketPath(accountId: string, ticketId: string, extra: Record<string, string> = {}): string {
   const params = new URLSearchParams({ ticket: ticketId, ...extra });
-  return `/ws/${workspaceId}/tickets?${params.toString()}`;
+  return `/tickets?${params.toString()}`;
 }
 
 export function formatArtifactRef(type: ArtifactRefType, id: string, name: string): string {

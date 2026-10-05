@@ -2,8 +2,8 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AdminGuard } from '../../common/guards/admin.guard';
-import { WorkspaceGuard } from '../../common/guards/workspace.guard';
-import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
+import { AccountGuard } from '../../common/guards/account.guard';
+import { CurrentAccountId } from '../../common/decorators/current-account.decorator';
 import { AgentUsageService } from '../agents/agent-usage.service';
 
 /**
@@ -28,15 +28,15 @@ import { AgentUsageService } from '../agents/agent-usage.service';
  * poll cadence, so it stays a standalone on-demand endpoint.
  *
  * Shares the AdminGuard used by the rest of the /api/admin/* surface.
- * `long-term-usage` additionally needs WorkspaceGuard (`getLongTermUsageStats`
- * is workspace-scoped, unlike the rest of this controller) — admins get the
+ * `long-term-usage` additionally needs AccountGuard (`getLongTermUsageStats`
+ * is account-scoped, unlike the rest of this controller) — admins get the
  * guard's bypass branch, so it still resolves purely from the ambient
- * `X-Workspace-Id` header / `?workspace_id=` without a membership check.
+ * `X-Account-Id` header / `?account_id=` without a membership check.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('admin')
 @Controller('api/admin/workflow-health')
-@UseGuards(AdminGuard, WorkspaceGuard)
+@UseGuards(AdminGuard, AccountGuard)
 export class WorkflowHealthController {
   constructor(private readonly usage: AgentUsageService) {}
 
@@ -58,13 +58,13 @@ export class WorkflowHealthController {
 
   @Get('long-term-usage')
   async longTermUsage(
-    @CurrentWorkspaceId() workspaceId: string | null,
+    @CurrentAccountId() accountId: string | null,
     @Query('from') from: string | undefined,
     @Query('to') to: string | undefined,
     @Res() res: Response,
   ): Promise<Response> {
-    if (!workspaceId) {
-      return res.status(400).json({ error: 'workspace_id required (X-Workspace-Id header or ?workspace_id=)' });
+    if (!accountId) {
+      return res.status(400).json({ error: 'account_id required (X-Account-Id header or ?account_id=)' });
     }
     const fromDate = from ? new Date(from) : undefined;
     if (fromDate && Number.isNaN(fromDate.getTime())) {
@@ -74,7 +74,7 @@ export class WorkflowHealthController {
     if (toDate && Number.isNaN(toDate.getTime())) {
       return res.status(400).json({ error: 'to must be a valid date (YYYY-MM-DD)' });
     }
-    const stats = await this.usage.getLongTermUsageStats({ workspaceId, from: fromDate, to: toDate });
+    const stats = await this.usage.getLongTermUsageStats({ accountId, from: fromDate, to: toDate });
     return res.json(stats);
   }
 }

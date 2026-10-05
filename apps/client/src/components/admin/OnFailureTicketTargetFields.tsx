@@ -18,15 +18,15 @@ import {
 // project.
 
 interface Props {
-  workspaceId: string;
+  accountId: string;
   form: OnFailureTicketForm;
   onChange: (patch: Partial<OnFailureTicketForm>) => void;
   /** Shown under the tags input — what the server files when tags are empty. */
   defaultTagsHint: string;
 }
 
-export default function OnFailureTicketTargetFields({ workspaceId, form, onChange, defaultTagsHint }: Props) {
-  const { projects, loading, error } = useProjects(workspaceId);
+export default function OnFailureTicketTargetFields({ accountId, form, onChange, defaultTagsHint }: Props) {
+  const { projects, loading, error } = useProjects(accountId);
   const projectOptions = projectSelectOptions(projects, form.projectId, loading ? '(불러오는 중…)' : '(프로젝트 없음)');
 
   return (

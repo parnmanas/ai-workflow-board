@@ -37,9 +37,9 @@ function deferred() {
 const credentials = [
   {
     id: 'credential-a',
-    workspace_id: 'workspace-1',
+    account_id: 'workspace-1',
     board_id: null,
-    scope: 'workspace',
+    scope: 'account',
     name: 'Credential A',
     description: '',
     provider: 'claude_oauth_token',
@@ -50,9 +50,9 @@ const credentials = [
   },
   {
     id: 'credential-b',
-    workspace_id: 'workspace-1',
+    account_id: 'workspace-1',
     board_id: null,
-    scope: 'workspace',
+    scope: 'account',
     name: 'Credential B',
     description: '',
     provider: 'claude_oauth_token',
@@ -63,9 +63,9 @@ const credentials = [
   },
   {
     id: 'credential-api-key',
-    workspace_id: 'workspace-1',
+    account_id: 'workspace-1',
     board_id: null,
-    scope: 'workspace',
+    scope: 'account',
     name: 'Non OAuth API Key',
     description: '',
     provider: 'openai',
@@ -98,13 +98,13 @@ async function mountCredentialManager(t) {
     role: 'admin',
     status: 'active',
     permissions: [],
-    workspaces: [{ id: 'workspace-1', name: 'Workspace', slug: null, relations: [] }],
+    accounts: [{ id: 'workspace-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => credentials;
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
+    React.createElement(CredentialManager, { accountId: 'workspace-1' }),
   );
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 

@@ -29,7 +29,7 @@ const GIT_TIMEOUT_MS = 20_000;
 // ── clone 정책 (ticket bddb63ee) ─────────────────────────────────────────────
 //
 // 대형 저장소의 첫 clone 이 고정 20분 wall-clock 에 걸려 프로비저닝이 통째로
-// 실패하던 문제를 없앤다. 예산과 clone 전략은 서버가 Repo Resource ⊕ Workspace
+// 실패하던 문제를 없앤다. 예산과 clone 전략은 서버가 Repo Resource ⊕ Account
 // 기본값으로 해석해 `clone_policy` 로 실어 보내고, 여기서 clone argv + 타이머로
 // 번역된다. 정책이 없으면(구버전 서버, 미설정 저장소) 아래 시스템 기본값이
 // 그대로 적용되므로 **설정이 전혀 없는 기존 저장소는 60분 wall-clock 하나만** 받는다
@@ -141,7 +141,7 @@ interface GitRun {
 /**
  * 토큰을 argv나 origin URL에 넣지 않고 clone하고, 성공한 repo에 영구 helper를 설치한다.
  *
- * clone 예산/전략은 `policy`(서버가 Repo Resource ⊕ Workspace 로 해석해 실어보낸
+ * clone 예산/전략은 `policy`(서버가 Repo Resource ⊕ Account 로 해석해 실어보낸
  * 값)에서 나오며, 없으면 시스템 기본값(60분 wall-clock / idle 비활성 / 전체 clone)이
  * 적용된다. `timeoutMs` 를 명시하면 정책의 wall-clock 예산을 덮어쓴다(호출자 전용
  * escape hatch).

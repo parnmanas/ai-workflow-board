@@ -8,11 +8,11 @@ import {
 } from 'typeorm';
 
 @Entity('child_runs')
-@Index(['workspace_id', 'parent_run_id', 'runtime_child_id'], { unique: true })
-@Index(['workspace_id', 'parent_run_id', 'status'])
+@Index(['account_id', 'parent_run_id', 'runtime_child_id'], { unique: true })
+@Index(['account_id', 'parent_run_id', 'status'])
 export class ChildRun {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column({ type: 'varchar' }) workspace_id: string;
+  @Column({ type: 'varchar' }) account_id: string;
   @Column({ type: 'varchar' }) parent_run_id: string;
   @Column({ type: 'varchar' }) parent_agent_id: string;
   @Column({ type: 'varchar' }) runtime_child_id: string;

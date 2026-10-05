@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { RelationTuple } from '../entities/RelationTuple';
 import { LogService } from './log.service';
+import { activityEvents } from './activity.service';
 
 @Injectable()
 export class ReBACService {
@@ -36,6 +37,9 @@ export class ReBACService {
       object_id: object.id,
     });
     await this.tupleRepo.save(tuple);
+    if (subject.type === 'user' && object.type === 'account' && ['member', 'owner'].includes(relation)) {
+      activityEvents.emit('account_membership_changed', { user_id: subject.id, account_id: object.id });
+    }
     this.logService.info('ReBAC', 'grant', { subject, relation, object });
   }
 
@@ -52,6 +56,9 @@ export class ReBACService {
       object_type: object.type,
       object_id: object.id,
     });
+    if (subject.type === 'user' && object.type === 'account' && ['member', 'owner'].includes(relation)) {
+      activityEvents.emit('account_membership_changed', { user_id: subject.id, account_id: object.id });
+    }
   }
 
   // Check if a specific relation tuple exists.

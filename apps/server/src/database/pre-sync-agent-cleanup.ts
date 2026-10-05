@@ -8,7 +8,7 @@ export async function preSyncAgentCleanup(options: DataSourceOptions): Promise<v
   try {
     const runner = source.createQueryRunner();
     try {
-      if (!await runner.hasTable('agents') && !await runner.hasColumn('api_keys', 'agent_id') && !await runner.hasColumn('workspaces', 'assistant_agent_id')
+      if (!await runner.hasTable('agents') && !await runner.hasColumn('api_keys', 'agent_id') && !await runner.hasColumn('accounts', 'assistant_agent_id')
         && !await runner.hasTable('agent_skill_assignments')
         && !await runner.hasColumn('outreach_channels', 'classifier_agent_id')) return;
       await runner.startTransaction();

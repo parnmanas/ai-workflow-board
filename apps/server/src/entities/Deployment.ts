@@ -12,9 +12,9 @@ import { DeploymentSource } from '../common/deployment-options';
  * server gate that automation on the DEPLOYMENT FACT (the live commit) instead of
  * a best-effort time delay.
  *
- * Identity = (workspace_id, environment). We UPSERT one row per environment (the
+ * Identity = (account_id, environment). We UPSERT one row per environment (the
  * "current live commit"), not a history log — the badge + gate only ever need the
- * latest. `workspace_id` is NULLABLE: null = a GLOBAL/shared environment (the AWB
+ * latest. `account_id` is NULLABLE: null = a GLOBAL/shared environment (the AWB
  * server self-report is global — the running server is one process, not per-
  * workspace), visible to every workspace's scenarios; a non-null row is a
  * workspace-private environment.
@@ -26,16 +26,16 @@ import { DeploymentSource } from '../common/deployment-options';
  */
 @Entity('deployments')
 // Current-live lookup — "what commit is live for this env in this workspace / globally?"
-@Index(['workspace_id', 'environment'])
+@Index(['account_id', 'environment'])
 @Index(['environment', 'deployed_at'])
 export class Deployment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // null = GLOBAL environment (shared across workspaces — e.g. the AWB server
+  // null = GLOBAL environment (shared across accounts — e.g. the AWB server
   // self-report); <uuid> = a workspace-private environment.
   @Column({ type: 'varchar', nullable: true, default: null })
-  workspace_id: string | null;
+  account_id: string | null;
 
   // Logical environment name — free-text, the join key a QaScenario points at via
   // `target_environment` (e.g. 'awb-server', 'production', 'staging'). A new

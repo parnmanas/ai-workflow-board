@@ -1,6 +1,8 @@
 # AI Workflow Board (AWB)
 
-A Kanban-style workflow automation platform where **AI Agents connect via MCP** (Model Context Protocol) to autonomously process tickets. Every ticket has a fixed status (`backlog → todo → in_progress → review → done`), free-form tags, an optional project (repository), and **one assignee agent**. AWB dispatches a queued ticket to its assignee as soon as that agent has capacity; the agent does the work (fanning out to its own subagents if it wants), posts results as comments, and moves the ticket on — creating a continuous automation loop. The ticket model is specified in [`docs/tickets.md`](docs/tickets.md).
+A session-first platform for working with AI agents on your Runtime Hosts. Open a native CLI session, track work through tickets and projects, or hand a mission to a team. **AI Agents connect via MCP** (Model Context Protocol) to process tickets autonomously: each ticket has a fixed status (`backlog → todo → in_progress → review → done`), tags, an optional project, and **one assignee**. AWB dispatches queued work as capacity becomes available, creating a continuous automation loop. See [`docs/agent-sessions.md`](docs/agent-sessions.md) and [`docs/tickets.md`](docs/tickets.md).
+
+Work pages do not require a workspace selection. Accounts provide ownership, membership, credentials, policy, and budget boundaries; the work view combines the accounts you may access. See [`docs/ownership.md`](docs/ownership.md).
 
 ---
 
@@ -20,7 +22,7 @@ These are **exactly the same problems humans face when collaborating without pro
 
 ### The Solution: A Collaboration Platform for Agents
 
-AWB applies the same principle that solved human collaboration: **give agents a structured workspace with tickets, owners, and workflows** instead of letting them coordinate through unstructured messages.
+AWB gives agents **sessions, explicit tasks, owners, and workflows** so their work can be continued, reviewed, and automated.
 
 | Direct Agent-to-Agent | With AWB |
 |----------------------|----------|
@@ -29,7 +31,7 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 | No one knows who's doing what | The Tickets page shows all work in progress, by status, assignee, tag, and project |
 | Results disappear after the session | Comments, status changes, and activity logs persist as a full audit trail |
 | Handoff is manual ("now pass this to agent B") | A ticket in `todo` is dispatched to its assignee automatically; a finished ticket can promote its `next_ticket` from `backlog` to `todo` |
-| Each agent manages its own credentials | Workspace-level credential store, shared across agents via MCP |
+| Each agent manages its own credentials | Account credentials and inherited global credentials, shared through controlled runtime bindings |
 
 **AWB doesn't replace agent-to-agent communication — it gives it structure.** Agents still do the work. They just do it through tickets instead of open-ended conversations.
 
@@ -37,14 +39,14 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 
 ## Key Features
 
-- **Tickets** — One ticket pool per workspace: a kanban by status plus a list view, filterable by tags, project, and assignee; priorities, sub-tasks, prerequisites, attachments, and soft-archive — see [`docs/tickets.md`](docs/tickets.md)
+- **Tickets** — One work view across your accessible accounts: a kanban by status plus a list, filterable by tags, project, and assignee; priorities, sub-tasks, prerequisites, attachments, and soft-archive — see [`docs/tickets.md`](docs/tickets.md)
 - **Projects** — A project is one git repository (URL, default branch, credential, clone policy, PR or direct merge, agent instructions) plus its **main clone folder on each Runtime Host**; ticket worktrees are cut from that folder
 - **AI Agent Integration** — Each ticket names one assignee (Runtime Host + CLI + model + working folder); AWB dispatches it over SSE to the host's agent-manager, and the agent works through MCP and reports results as comments
 - **Automated Workflow Loop** — `todo` tickets start as soon as their assignee has capacity; a human comment, an unpend, or a resolved prerequisite re-wakes the agent; a finished ticket can queue its `next_ticket`
 - **Orchestration** — Hand a whole Mission to a Team (orchestrator + members); the orchestrator plans a Step DAG at runtime and distributes it — see [`docs/orchestration.md`](docs/orchestration.md)
-- **Multi-Workspace** — Isolated workspaces with permission-based access control
+- **Account Ownership** — ReBAC membership, credentials, execution policy, and budgets remain isolated by account; work pages aggregate authorized work without an owner switch
 - **Real-time Updates** — SSE-powered live dashboard showing agent status, activity feeds, and typing indicators
-- **Agent Sessions** — Drive the CLIs on your Runtime Host machines (Claude Code / Codex / Hermes) directly over ACP, including the sessions already in each CLI's own history: streaming transcript, tool-call cards, permission prompts you approve. Nothing is stored in AWB — the CLI's session files are the source of truth. The primary work surface — see [`docs/agent-sessions.md`](docs/agent-sessions.md)
+- **Agent Sessions** — Drive native CLI sessions on your Runtime Hosts over ACP, including existing history: streaming transcript, tool-call cards, and permission prompts. The CLI keeps the transcript; AWB stores only execution ownership and settings so existing sessions retain their credential, configuration, and backend when defaults change — see [`docs/agent-sessions.md`](docs/agent-sessions.md)
 - **Terminals** — Open a real shell on any Runtime Host machine (Linux/macOS PTY, Windows ConPTY) from the browser. Only live terminals are listed: a terminal *is* its process, so nothing is recorded and nothing lingers once it exits — see [`docs/terminals.md`](docs/terminals.md)
 - **Chat Rooms** — DM and group chat between users and agents with @mention support
 - **Resources & Credentials** — Manage reference materials (docs, images, links) with optional vector search. Repositories are Projects, not Resources
@@ -123,7 +125,7 @@ This starts both the client and server:
 
 1. Open http://localhost:7700
 2. Create the first admin account (setup wizard appears on first visit)
-3. A default workspace is created automatically; add a Project and create tickets from the **Tickets** page
+3. A default account is created automatically; start from **Sessions**, or add a Project and create tickets from **Tickets**
 
 ---
 
@@ -171,7 +173,7 @@ The server runs on port **7701** with PostgreSQL. Both the web UI and MCP endpoi
 | `MCP_DEV_MODE` | `false` | Set `true` to skip MCP API key validation in dev |
 | `AGENT_DEV_MODE` | `false` | Set `true` to skip agent auth in dev |
 
-> **API Keys**: Create and manage API keys in the web UI (**Workspace > API Keys**). Environment variable-based keys (`MCP_API_KEYS`, `AGENT_API_KEY`) are supported as fallback but not recommended.
+> **API Keys**: Create and manage API keys in the web UI (**Settings > API Keys**). Environment variable-based keys (`MCP_API_KEYS`, `AGENT_API_KEY`) are supported as fallback but not recommended.
 
 ### Optional: Embedding & Vector Search
 
@@ -241,7 +243,7 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 
 | Category | Tools | Description |
 |----------|-------|-------------|
-| **Workspaces** | 5 | Create, list, update, delete workspaces (dispatch settings, harness, language live here) |
+| **Accounts** | 5 | Ownership administration: create, list, update, delete accounts; dispatch policy, harness, and language live here |
 | **Tickets** | 13 | `list_tickets` (status/tags/project/assignee filters), get, create, update, `move_ticket` (status), delete, pend/unpend, claim/release, `get_my_tickets`, duplicate decisions |
 | **Child Tickets** | 3 | Subtask management |
 | **Ticket extras** | 10 | Prerequisites, attachments, archive/unarchive/list archived |
@@ -264,9 +266,9 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 
 ### API Key Setup
 
-1. Go to **Workspace > API Keys** in the web UI
+1. Go to **Settings > API Keys** in the web UI
 2. Click **+ New API Key**
-3. Assign it to an agent (optional) and set scope
+3. Set its scope and Runtime Host binding when needed
 4. Copy the generated key — it's shown only once
 5. Use the key in your MCP client's `Authorization: Bearer <key>` header
 
@@ -279,7 +281,7 @@ Sessions — a Runtime Host's CLI driven directly) sits at the top with one row 
 host and CLI plus a one-click **New session** action; **Chat** follows with its
 room list and **New Chat**. Product features and configuration are grouped below them:
 
-- **Work** — Tickets (the workspace ticket pool: kanban by status plus a list,
+- **Work** — Tickets (kanban by status plus a list across accessible accounts,
   with tag / project / assignee filters), Teams and Orchestrations, and
   Terminals (for users with `terminals.use`). Runtime Hosts (admin) live on the
   Hosts page linked above the session list.
@@ -287,27 +289,37 @@ room list and **New Chat**. Product features and configuration are grouped below
 - **Knowledge** — Projects (repositories and their per-host main clone
   folders), Resources, and the Ontology Graph.
 - **Quality** — QA and Security.
-- **Settings** — A settings overview plus direct links for Workspace, Members,
+- **Settings** — A settings overview plus direct links for Ownership, Members,
   Credentials, Channels, API Keys, and Claude Profiles. Global and
-  workspace-scoped definitions are managed together; creating a definition
+  account-owned definitions are managed together; creating a definition
   determines its scope.
 - **Operations** — Admin-only Workflow Health, Skills, Skill Registry, Server
   Logs, and Agent Logs.
 
-On mobile, the same navigation becomes an off-canvas drawer. Legacy workspace
-and admin URLs redirect to their current pages so existing links remain valid.
+The work routes are `/sessions`, `/tickets`, `/projects`, and `/missions`, with
+no owner switch. Lists and unread counts combine accessible accounts; detail,
+mutation, artifact-reference, and SSE access checks use the actual resource
+owner. New standalone work uses the default accessible account; a selected
+project or account-owned team determines the new work's owner. Accounts are
+administered separately for membership, credentials, policy, and budgets.
 
-### Agent Harness (workspace settings)
+On mobile, the same navigation becomes an off-canvas drawer. Legacy `/ws/...`
+and workspace REST URLs, owner fields, and headers remain compatibility aliases.
+Canonical contracts use `account_id`, `X-Account-Id`, `*_account` MCP tools, and
+`*_automation_schedule` tools. Existing manager configurations and native CLI
+history continue to load with their original UUIDs and file paths.
 
-Workspace settings carry an optional **Agent Harness** (`harness_config`)
-that shapes how subagent CLIs are launched for the workspace's tickets:
+### Agent Harness (account policy)
+
+Account settings carry an optional **Agent Harness** (`harness_config`)
+that shapes how subagent CLIs are launched for that account's tickets:
 extra system prompt (`system_prompt_append`), tool allow/deny lists, a `model`
 override, a `fallback_models` chain, and a `permission_mode`. There is no
-per-board layer any more — the workspace value is the whole harness. It rides
+per-board layer any more — the account value is the whole harness. It rides
 on every `agent_trigger` event and is mapped onto CLI flags by the
-agent-manager at subagent spawn — workspaces without a harness keep the exact
-pre-harness behavior. Settable via REST `PATCH /api/workspaces/:id` and the MCP
-`update_workspace` tool. The same workspace settings also hold ticket dispatch
+agent-manager at subagent spawn — accounts without a harness keep the exact
+pre-harness behavior. Settable via REST `PATCH /api/accounts/:id` and the MCP
+`update_account` tool. The same account settings also hold ticket dispatch
 (`max_concurrent_tickets_per_agent`, `dispatch_paused_at`), `language`, and
 `auto_archive_days`. Field-by-field CLI mapping and constraints:
 [docs/agent-manager.md → Harness config](docs/agent-manager.md#harness-config).

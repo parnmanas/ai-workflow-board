@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.AGENT_SESSION_OPEN_RACE_PORT || '0';
 
@@ -50,10 +50,10 @@ async function setup(t) {
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
   const base = `http://localhost:${port}`;
-  const ws = await createWorkspace(app, getDataSourceToken, 'open-status-race');
+  const ws = await createAccount(app, getDataSourceToken, 'open-status-race');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const token = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };

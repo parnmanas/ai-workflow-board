@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Backfill: set `workspace_id = NULL` on every `type='manager'` Agent row.
+ * Backfill: set `account_id = NULL` on every `type='manager'` Agent row.
  *
  * Migration 18 (MakeManagerAgentsWorkspaceless) previously normalised them
  * to the empty string '' because the column was declared NOT NULL DEFAULT ''.
@@ -16,7 +16,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   TypeORM's `synchronize: true` rewrites the column shape before this
  *   migration runs. We only touch row values.
  * - Repository API for portability across sqlite/mysql/postgres.
- * - Idempotent — if every manager already has NULL workspace_id, this is
+ * - Idempotent — if every manager already has NULL account_id, this is
  *   a no-op. Re-running touches zero rows.
  *
  * down() is intentionally a no-op: there is no faithful inverse — the
@@ -31,10 +31,10 @@ export class NullManagerAgentWorkspace1760000000019 implements MigrationInterfac
     if (!(await queryRunner.hasTable('agents'))) return;
     const agentRepo = queryRunner.manager.getRepository('agents');
     const managers = await agentRepo.find({ where: { type: 'manager' } });
-    const orphaned = managers.filter((a) => a.workspace_id !== null);
+    const orphaned = managers.filter((a) => a.account_id !== null);
     if (orphaned.length === 0) return;
     for (const agent of orphaned) {
-      agent.workspace_id = null;
+      agent.account_id = null;
       await agentRepo.save(agent);
     }
   }

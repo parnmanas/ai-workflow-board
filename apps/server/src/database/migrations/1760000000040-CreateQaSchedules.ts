@@ -23,7 +23,7 @@ export class CreateQaSchedules1760000000040 implements MigrationInterface {
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS qa_schedules (
         id UUID PRIMARY KEY,
-        workspace_id VARCHAR NOT NULL,
+        account_id VARCHAR NOT NULL,
         board_id VARCHAR NULL,
         name VARCHAR NOT NULL,
         scope VARCHAR NOT NULL DEFAULT 'all',
@@ -42,7 +42,7 @@ export class CreateQaSchedules1760000000040 implements MigrationInterface {
       )
     `);
     await queryRunner.query(
-      'CREATE INDEX IF NOT EXISTS idx_qa_schedules_ws_enabled ON qa_schedules(workspace_id, enabled)'
+      'CREATE INDEX IF NOT EXISTS idx_qa_schedules_ws_enabled ON qa_schedules(account_id, enabled)'
     );
   }
 

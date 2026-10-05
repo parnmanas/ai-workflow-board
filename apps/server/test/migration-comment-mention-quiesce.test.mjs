@@ -70,7 +70,7 @@ async function makeAssignedTicket(overrides = {}) {
     runtime_config: { strategy: 'single', permission_mode: 'strict' },
   };
   return ticketRepo.save(ticketRepo.create({
-    title: 'T', workspace_id: 'w1', status: 'in_progress', pending_user_action: false,
+    title: 'T', account_id: 'w1', status: 'in_progress', pending_user_action: false,
     assignee, assignee_key: runtimeIdentityKey(assignee), ...overrides,
   }));
 }

@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api';
 import { tokens } from '../tokens';
@@ -7,19 +6,9 @@ import { tokens } from '../tokens';
 type Mode = 'login' | 'setup' | 'register';
 
 export default function LoginPage() {
-  const { login, setup, needsSetup, userStatus, availableWorkspaces, currentWorkspaceId, setCurrentWorkspace } = useAuth();
-  const navigate = useNavigate();
-  // Picking a workspace must drive the URL too. Without an explicit navigate,
-  // a stale `/ws/<old>/...` URL (e.g. left over from an expired session)
-  // wins the next AppLayout sync and silently swaps in the wrong workspace.
-  const pickWorkspace = (wsId: string) => {
-    setCurrentWorkspace(wsId);
-    navigate(`/ws/${wsId}/sessions`, { replace: true });
-  };
+  const { login, setup, needsSetup, userStatus, availableAccounts } = useAuth();
   const [mode, setMode] = useState<Mode>(needsSetup ? 'setup' : 'login');
   const [form, setForm] = useState({ name: '', email: '', password: '' });
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('');
-  const [publicWorkspaces, setPublicWorkspaces] = useState<{ id: string; name: string; slug: string }[]>([]);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
@@ -51,13 +40,6 @@ export default function LoginPage() {
       .then((data: any) => setGoogleEnabled(!!data?.google?.enabled))
       .catch(() => setGoogleEnabled(false));
   }, []);
-
-  // Load public workspaces when register tab is active
-  useEffect(() => {
-    if (mode === 'register') {
-      api.getPublicWorkspaces().then(setPublicWorkspaces).catch(() => setPublicWorkspaces([]));
-    }
-  }, [mode]);
 
   // Show pending approval screen
   if (userStatus === 'pending') {
@@ -99,8 +81,8 @@ export default function LoginPage() {
     );
   }
 
-  // Show awaiting workspace assignment screen (active user, no workspaces)
-  if (userStatus === 'active' && availableWorkspaces.length === 0) {
+  // Active sign-in without an ownership account: allow provisioning to finish.
+  if (userStatus === 'active' && availableAccounts.length === 0) {
     return (
       <div style={{
         minHeight: '100vh',
@@ -122,7 +104,7 @@ export default function LoginPage() {
             Account Approved
           </h1>
           <p style={{ fontSize: '14px', color: tokens.colors.textSecondary, lineHeight: 1.6, marginBottom: 24 }}>
-            Your account is approved. Waiting for admin to assign a workspace. Please refresh to check status.
+            Your sign-in is approved. Access is being prepared. Please refresh to continue.
           </p>
           <button
             onClick={() => window.location.reload()}
@@ -134,60 +116,6 @@ export default function LoginPage() {
           >
             Refresh
           </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Show workspace picker for multi-workspace users
-  if (userStatus === 'active' && availableWorkspaces.length > 1 && !currentWorkspaceId) {
-    return (
-      <div style={{
-        minHeight: '100vh',
-        background: tokens.gradients.surfacePage,
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-      }}>
-        <div style={{
-          width: '100%', maxWidth: 440, background: tokens.colors.surfaceCard, borderRadius: 16,
-          border: `1px solid ${tokens.colors.border}`, boxShadow: tokens.shadows.overlay, padding: 32,
-        }}>
-          <div style={{ textAlign: 'center', marginBottom: 28 }}>
-            <div style={{
-              width: 56, height: 56, borderRadius: 14,
-              background: tokens.gradients.accent,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '28px', fontWeight: 700, color: 'white', marginBottom: 16,
-            }}>W</div>
-            <h1 style={{ fontSize: '20px', fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 4 }}>
-              Select Workspace
-            </h1>
-            <p style={{ fontSize: '13px', color: tokens.colors.textMuted }}>
-              Choose a workspace to continue
-            </p>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {availableWorkspaces.map(ws => (
-              <button
-                key={ws.id}
-                onClick={() => pickWorkspace(ws.id)}
-                style={{
-                  padding: '14px 18px', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: 10, color: tokens.colors.textStrong, cursor: 'pointer', textAlign: 'left',
-                  transition: 'border-color 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.borderColor = tokens.colors.accent)}
-                onMouseLeave={e => (e.currentTarget.style.borderColor = tokens.colors.border)}
-              >
-                <div style={{ fontSize: '14px', fontWeight: 600 }}>{ws.name}</div>
-                {ws.slug && (
-                  <div style={{ fontSize: '12px', color: tokens.colors.textMuted, marginTop: 2 }}>/{ws.slug}</div>
-                )}
-                <div style={{ fontSize: '11px', color: tokens.colors.borderStrong, marginTop: 4 }}>
-                  {ws.relations.join(', ')}
-                </div>
-              </button>
-            ))}
-          </div>
         </div>
       </div>
     );
@@ -218,10 +146,9 @@ export default function LoginPage() {
           setLoading(false);
           return;
         }
-        const result = await api.register(form.name, form.email, form.password, selectedWorkspaceId || undefined);
+        const result = await api.register(form.name, form.email, form.password);
         setSuccess(result.message);
         setForm({ name: '', email: '', password: '' });
-        setSelectedWorkspaceId('');
       } else {
         if (!form.email.trim() || !form.password.trim()) {
           setError('Email and password are required');
@@ -242,7 +169,6 @@ export default function LoginPage() {
     setError('');
     setSuccess('');
     setForm({ name: '', email: '', password: '' });
-    setSelectedWorkspaceId('');
   };
 
   const showNameField = mode === 'setup' || mode === 'register';
@@ -392,30 +318,6 @@ export default function LoginPage() {
               }}
             />
           </div>
-
-          {/* Workspace dropdown — register only */}
-          {mode === 'register' && (
-            <div>
-              <label style={{
-                fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600,
-                textTransform: 'uppercase', display: 'block', marginBottom: 6,
-              }}>Workspace (optional)</label>
-              <select
-                value={selectedWorkspaceId}
-                onChange={e => setSelectedWorkspaceId(e.target.value)}
-                style={{
-                  width: '100%', padding: '10px 14px', background: tokens.colors.surface,
-                  border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg, color: tokens.colors.textStrong,
-                  fontSize: '14px', outline: 'none', boxSizing: 'border-box',
-                }}
-              >
-                <option value="">-- Select a workspace --</option>
-                {publicWorkspaces.map(ws => (
-                  <option key={ws.id} value={ws.id}>{ws.name}</option>
-                ))}
-              </select>
-            </div>
-          )}
 
           <button
             type="submit"

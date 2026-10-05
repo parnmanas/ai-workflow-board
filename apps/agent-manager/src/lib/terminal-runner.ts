@@ -26,7 +26,7 @@ import { defaultTerminalCwd, detectTerminalShells, type TerminalShell } from './
 /** 서버 payload (apps/server/src/common/types/stream-events.ts TerminalRequestPayload). */
 export interface TerminalRequest {
   manager_id: string;
-  workspace_id?: string;
+  account_id?: string;
   /** 서버의 `TERMINAL_REQUEST_OPS`(apps/server/src/common/types/terminals.ts)를 그대로
    *  비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이 불가피하다
    *  — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */

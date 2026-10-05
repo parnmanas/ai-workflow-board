@@ -1,10 +1,10 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 @Entity('skill_proposals')
-@Index(['workspace_id', 'status'])
+@Index(['account_id', 'status'])
 export class SkillProposal {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column({ type: 'varchar' }) workspace_id: string;
+  @Column({ type: 'varchar' }) account_id: string;
   @Column({ type: 'varchar', default: '' }) skill_id: string;
   @Column({ type: 'varchar' }) title: string;
   @Column({ type: 'text' }) body: string;

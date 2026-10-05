@@ -17,7 +17,7 @@ interface UseMentionsResult {
 
 /**
  * Subscribes to `user_mention` SSE events + fetches the unread list for the
- * current workspace.
+ * signed-in user across accessible accounts.
  *
  * The COUNT is not owned here — it comes from NotificationContext, which is
  * the single source of truth for every badge. This hook used to keep its own
@@ -26,23 +26,23 @@ interface UseMentionsResult {
  * inbox: the list is capped at 50 rows while the count is not, and the two
  * decremented on different events.
  */
-export function useMentions(workspaceId: string | null): UseMentionsResult {
+export function useMentions(accountId: string | null): UseMentionsResult {
   const [unreadItems, setUnreadItems] = useState<UserMentionItem[]>([]);
   const notifications = useNotifications();
   const unreadCount = notifications.counts.mentions;
 
   const refresh = useCallback(async () => {
-    if (!workspaceId) {
+    if (!accountId) {
       setUnreadItems([]);
       return;
     }
     try {
-      const data = await api.getUnreadMentions(workspaceId);
+      const data = await api.getUnreadMentions(accountId);
       setUnreadItems(data.items);
     } catch {
       // Tolerate transient failures — next SSE push will reconcile.
     }
-  }, [workspaceId]);
+  }, [accountId]);
 
   useEffect(() => {
     refresh();
@@ -56,14 +56,11 @@ export function useMentions(workspaceId: string | null): UseMentionsResult {
     // and let the next REST refresh supply the real row rather than putting a
     // "someone · Invalid Date · (no preview)" line in front of the user.
     if (!data.mention_id) return;
-    // Ignore events for other workspaces (the server already filters by user,
-    // but a user can belong to multiple workspaces).
-    if (workspaceId && data.workspace_id && data.workspace_id !== workspaceId) return;
 
     const item: UserMentionItem = {
       id: data.mention_id,
       user_id: data.user_id,
-      workspace_id: data.workspace_id,
+      account_id: data.account_id,
       source_type: data.source_type,
       source_id: data.source_id,
       ticket_id: data.ticket_id ?? null,
@@ -99,17 +96,17 @@ export function useMentions(workspaceId: string | null): UseMentionsResult {
   }, [unreadItems, notifications]);
 
   const markAllRead = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!accountId) return;
     const prevItems = unreadItems;
     setUnreadItems([]);
     notifications.markRead('mentions');
     try {
-      await api.markAllMentionsRead(workspaceId);
+      await api.markAllMentionsRead(accountId);
     } catch {
       setUnreadItems(prevItems);
       notifications.refresh();
     }
-  }, [workspaceId, unreadItems, notifications]);
+  }, [accountId, unreadItems, notifications]);
 
   return {
     unreadCount,

@@ -10,13 +10,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * ProjectHostFolder — one main clone per (project, host).
  */
 @Entity('projects')
-@Index('idx_projects_workspace', ['workspace_id'])
+@Index('idx_projects_workspace', ['account_id'])
 export class Project {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   name: string;

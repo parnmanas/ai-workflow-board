@@ -196,7 +196,7 @@ export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDes
       const environment = channel.target_environment || '';
       const fixCommitSha = resolveFixCommitLabel(ticket.tags);
       const dep = environment
-        ? await findLatestDeployment(this.dataSource.getRepository(Deployment), channel.workspace_id, environment)
+        ? await findLatestDeployment(this.dataSource.getRepository(Deployment), channel.account_id, environment)
         : null;
       if (!dep || !this._deploymentSatisfies(dep, fixCommitSha)) {
         this.logService.info('Outreach', 'resolve notify waiting for deployment evidence — never auto-fires without a fix-commit:<sha> tag match', {
@@ -298,7 +298,7 @@ export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDes
     let claimed: OutreachOutboundPost;
     try {
       claimed = await postRepo.save(postRepo.create({
-        workspace_id: channel.workspace_id,
+        account_id: channel.account_id,
         channel_id: channel.id,
         dedupe_key: dedupeKey,
         kind: 'resolve',

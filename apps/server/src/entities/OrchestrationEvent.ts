@@ -60,7 +60,7 @@ export class OrchestrationEvent {
   mission_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   /** Null for mission-level events (plan submitted, mission completed). */
   @Column({ type: 'varchar', nullable: true, default: null })

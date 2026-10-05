@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import type { TicketTagCount } from '../types';
 
-// Workspace-wide tag suggestions (GET /workspaces/:wsId/ticket-tags) for the
+// Account-wide tag suggestions (GET /accounts/:wsId/ticket-tags) for the
 // tag pickers — the Tickets list facet only covers the current filter, this
 // covers the whole pool. Fetched when `enabled` (e.g. a form opens); a failed
 // fetch just leaves the other suggestion sources.

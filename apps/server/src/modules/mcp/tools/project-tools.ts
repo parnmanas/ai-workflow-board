@@ -22,11 +22,11 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
   server.tool(
     'list_projects',
     'List the projects (repositories) of a workspace, each with its main clone folder per Runtime Host (`host_folders`).',
-    { workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)') },
-    async ({ workspace_id }, extra: { sessionId?: string }) => {
+    { account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)') },
+    async ({ account_id }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const ws = workspace_id || caller?.workspaceId || '';
-      if (!ws) return err('workspace_id is required');
+      const ws = account_id || caller?.accountId || '';
+      if (!ws) return err('account_id is required');
       if (!(await callerCanAccessWorkspace(dataSource, caller, ws))) return err('Unauthorized: caller does not belong to this workspace');
       return ok(await projectsService.list(ws));
     },
@@ -40,7 +40,7 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
     async ({ project_id }, extra: { sessionId?: string }) => {
       const project = await projectsService.get(project_id);
       if (!project) return err('Project not found');
-      if (!(await callerCanAccessWorkspace(dataSource, getCallerAgent(extra), project.workspace_id))) {
+      if (!(await callerCanAccessWorkspace(dataSource, getCallerAgent(extra), project.account_id))) {
         return err('Project not found');
       }
       return ok(await projectsService.view(project));
@@ -53,7 +53,7 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
     '(absolute path on that host; an empty path removes the entry). Requires access to the project\'s workspace.',
     {
       project_id: z.string().optional().describe('Omit to create'),
-      workspace_id: z.string().optional().describe('Workspace for a new project (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account for a new project (defaults to the caller\'s workspace)'),
       name: z.string().optional(),
       description: z.string().optional(),
       repo_url: z.string().optional(),
@@ -68,23 +68,23 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
     async (args, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       try {
-        let workspaceId: string;
+        let accountId: string;
         let projectId: string;
         if (args.project_id) {
           const existing = await projectsService.get(args.project_id);
           if (!existing) return err('Project not found');
-          workspaceId = existing.workspace_id;
-          if (!(await callerCanAccessWorkspace(dataSource, caller, workspaceId))) return err('Project not found');
-          projectId = (await projectsService.update(args.project_id, workspaceId, args)).id;
+          accountId = existing.account_id;
+          if (!(await callerCanAccessWorkspace(dataSource, caller, accountId))) return err('Project not found');
+          projectId = (await projectsService.update(args.project_id, accountId, args)).id;
         } else {
-          workspaceId = args.workspace_id || caller?.workspaceId || '';
-          if (!workspaceId) return err('workspace_id is required');
-          if (!(await callerCanAccessWorkspace(dataSource, caller, workspaceId))) return err('Unauthorized: caller does not belong to this workspace');
-          projectId = (await projectsService.create(workspaceId, args)).id;
+          accountId = args.account_id || caller?.accountId || '';
+          if (!accountId) return err('account_id is required');
+          if (!(await callerCanAccessWorkspace(dataSource, caller, accountId))) return err('Unauthorized: caller does not belong to this workspace');
+          projectId = (await projectsService.create(accountId, args)).id;
         }
         for (const folder of args.host_folders || []) {
-          if (folder.path.trim()) await projectsService.setHostFolder(projectId, workspaceId, folder.host_id, folder.path);
-          else await projectsService.clearHostFolder(projectId, workspaceId, folder.host_id);
+          if (folder.path.trim()) await projectsService.setHostFolder(projectId, accountId, folder.host_id, folder.path);
+          else await projectsService.clearHostFolder(projectId, accountId, folder.host_id);
         }
         const project = await projectsService.get(projectId);
         return ok(project ? await projectsService.view(project) : null);

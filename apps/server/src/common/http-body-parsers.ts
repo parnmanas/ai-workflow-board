@@ -1,5 +1,6 @@
 import { json, urlencoded, raw } from 'express';
 import type { INestApplication } from '@nestjs/common';
+import { normalizeOwnershipFields, withLegacyOwnershipFields } from './ownership-contract';
 
 // Shared HTTP body-parser wiring for the Express adapter.
 //
@@ -30,6 +31,35 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   // cross 100KB; the default silently bounced them as Express catch-all 404s.
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ limit: '10mb', extended: true }));
+
+  app.use((req: any, res: any, next: any) => {
+    const legacyHeader = req.headers['x-workspace-id'];
+    const query = req.query || {};
+    const legacy = !!legacyHeader || query.workspace_id !== undefined || req.body?.workspace_id !== undefined
+      || !!req.headers['x-agent-key'] || req.path === '/api/agent-manager/pair/redeem';
+    if (!req.headers['x-account-id'] && legacyHeader) req.headers['x-account-id'] = legacyHeader;
+    req.body = normalizeOwnershipFields(req.body);
+    if (req.body?.method === 'tools/call' && req.body.params) {
+      const params = req.body.params;
+      params.arguments = normalizeOwnershipFields(params.arguments);
+      const aliases: Record<string, string> = {
+        list_workspaces: 'list_accounts', get_workspace: 'get_account', create_workspace: 'create_account',
+        update_workspace: 'update_account', delete_workspace: 'delete_account',
+        list_workspace_schedules: 'list_automation_schedules', get_workspace_schedule: 'get_automation_schedule',
+        create_workspace_schedule: 'create_automation_schedule', update_workspace_schedule: 'update_automation_schedule',
+        delete_workspace_schedule: 'delete_automation_schedule', run_workspace_schedule_now: 'run_automation_schedule_now',
+      };
+      if (aliases[params.name]) params.name = aliases[params.name];
+    }
+    Object.defineProperty(req, 'query', { value: normalizeOwnershipFields(query), configurable: true, writable: true });
+    req.url = req.url.replace(/^\/api\/workspaces(?=\/|\?|$)/, '/api/accounts')
+      .replace(/^\/api\/workspace-schedules(?=\/|\?|$)/, '/api/automation-schedules');
+    if (legacy) {
+      const json = res.json.bind(res);
+      res.json = (value: any) => json(Array.isArray(value) ? value.map(withLegacyOwnershipFields) : withLegacyOwnershipFields(value));
+    }
+    next();
+  });
 
   // Body-parser errors (e.g. PayloadTooLargeError / `entity.too.large` when a
   // body exceeds the limit above) are thrown from Express MIDDLEWARE — they

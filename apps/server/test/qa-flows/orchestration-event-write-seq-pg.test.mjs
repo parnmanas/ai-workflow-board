@@ -158,7 +158,7 @@ async function bootService() {
 
 function newMission(missionRepo, title) {
   return missionRepo.save(missionRepo.create({
-    workspace_id: WS, team_id: TEAM, title, status: 'running',
+    account_id: WS, team_id: TEAM, title, status: 'running',
   }));
 }
 
@@ -365,7 +365,7 @@ test('Postgres: 이벤트 write_seq 가 1 에 고정되지 않고 단조 증가�
     const seeded = [];
     for (const seq of [1, 2, 3]) {
       const row = await eventRepo.save(eventRepo.create({
-        mission_id: mission.id, workspace_id: WS, type: 'note',
+        mission_id: mission.id, account_id: WS, type: 'note',
         actor_type: 'system', message: `심어둔 ${seq}`, write_seq: seq,
       }));
       seeded.push(row.id);
@@ -396,7 +396,7 @@ test('Postgres: 커서 페이지네이션이 같은 밀리초 burst 를 건너�
   const tied = [];
   for (const seq of [1, 2, 3, 4, 5]) {
     const row = await eventRepo.save(eventRepo.create({
-      mission_id: mission.id, workspace_id: WS, type: 'note',
+      mission_id: mission.id, account_id: WS, type: 'note',
       actor_type: 'system', message: `burst-${seq}`, write_seq: seq,
     }));
     tied.push(row.id);
@@ -404,7 +404,7 @@ test('Postgres: 커서 페이지네이션이 같은 밀리초 burst 를 건너�
   const older = [];
   for (const seq of [1, 2, 3]) {
     const row = await eventRepo.save(eventRepo.create({
-      mission_id: mission.id, workspace_id: WS, type: 'note',
+      mission_id: mission.id, account_id: WS, type: 'note',
       actor_type: 'system', message: `older-${seq}`, write_seq: seq,
     }));
     older.push(row.id);

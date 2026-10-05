@@ -496,7 +496,7 @@ export type ChatReplyMode = boolean | 'agent_manager_delivers';
 function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom = false, legacyBoards = false): string[] {
   const operationalPolicy = [
     '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
-    '- For an operational request, first search workspace Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
+    '- For an operational request, first search available Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
     '- If no Action matches but a relevant MCP/tool exists, perform the operation with that tool. For safe repeatable work, register a narrow idempotent Action with `save_action` and run it. Ask for user input only when a concrete permission, approval, secret, or irreversible-risk gate requires it, and request only that minimum input.',
     '- If the required MCP/tool itself is unavailable, create one AWB capability ticket (title prefix `[운영 자동화]`; labels `automation`, `mcp`, `mcp-missing`, `source:chat`) instead of delegating work to the user. Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
     '- REPEATED-TURN RULE: inspect conversation history for an existing run id or open capability ticket for the same normalized operation. Reuse it and report its current state; do not create a duplicate run/ticket. Re-check Actions on a later turn so a newly registered Action can supersede an earlier missing-capability result.',
@@ -507,7 +507,7 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     '- Use direct chat only for these exceptions: (1) genuinely small one-off work, (2) work for which no suitable existing board exists, or (3) work the user explicitly asks you to perform directly in chat. Do not create a new board merely to avoid the boardless exception.',
     '- When creating the ticket, pass this chat room id as `source_chat_room_id`, leave roles unset for board defaults, and create only one focused ticket for the request. Do not split it into speculative or duplicate tickets.',
   ] : [
-    '- ORDINARY WORK ROUTING: ticket-first is the default for ordinary implementation, bug-fix, refactor, configuration, and other change requests. File exactly one focused AWB ticket for the request — classify it with `tags` (kind / area; prefer tags the workspace already uses) and, when the work concerns a repository, the matching project (`project_id` from the project candidates or `mcp__awb__list_projects`) — and carry out the work through that ticket.',
+    '- ORDINARY WORK ROUTING: ticket-first is the default for ordinary implementation, bug-fix, refactor, configuration, and other change requests. File exactly one focused AWB ticket for the request — classify it with `tags` (kind / area; prefer existing tags) and, when the work concerns a repository, the matching project (`project_id` from the project candidates or `mcp__awb__list_projects`) — and carry out the work through that ticket.',
     '- A ticket-first request is not satisfied by merely proposing, describing, or promising future work. Treat user language expressing future intent (for example, "I want to add", "we should change", or "please implement") as a request to create and execute the ticket now unless the user is only asking a question or explicitly asks for planning/advice only.',
     '- Use direct chat only for these exceptions: (1) genuinely small one-off work, or (2) work the user explicitly asks you to perform directly in chat.',
     '- When creating the ticket, pass this chat room id as `source_chat_room_id`, leave the assignee unset unless the user named one (the project default assignee applies), and create only one focused ticket for the request. Do not split it into speculative or duplicate tickets.',
@@ -557,7 +557,7 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     lines.push(...ordinaryWorkPolicy);
     lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it.');
     lines.push(legacyBoards
-      ? '- For ticket-first ordinary work, select the suitable existing board from the available workspace context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.'
+      ? '- For ticket-first ordinary work, on a legacy server, select the suitable existing board from the available context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.'
       : '- For ticket-first ordinary work, end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"title":"<focused ticket title>","description":"<acceptance criteria and context>","tags":["<tag>"],"project_id":"<project UUID from the candidates, or null>","original_request":"<request>"}`. Choose tags that classify the work and a project only from the listed candidates. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.');
   }
   lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
@@ -584,10 +584,10 @@ export function composeChatPrompt(
   newMessage: string,
   roomId = '',
   usesNativeMcp: ChatReplyMode = true,
-  // ticket 9fd27487 — 대상 workspace가 chat_workspace_folder_enabled를 켰고
+  // ticket 9fd27487 — 대상 account가 chat_workspace_folder_enabled를 켰고
   // 프로비저닝까지 성공했을 때의 절대경로 `.awb/chat/<room8>` cwd. '' (기본값) →
   // 폴더 경계 블록 없음, 그리고 아래 injectWorkFolder는 byte-identity no-op이
-  // 되므로 opt-in하지 않은 workspace로 가는 DM은 이 티켓 이전과 완전히 동일하게
+  // 되므로 opt-in하지 않은 account로 가는 DM은 이 티켓 이전과 완전히 동일하게
   // 렌더링된다.
   workFolder = '',
 ): string {
@@ -686,9 +686,9 @@ export function composeChatRoomPrompt(
   isActionRoom = false,
   // ticket 9fd27487 — 이번 턴이 실제로 프로비저닝된 절대경로 cwd:
   // Action Run이면 `.awb/act/<action8>` (opt-in 없이 항상 프로비저닝됨),
-  // 일반 채팅방이면 `.awb/chat/<room8>` (workspace가 chat_workspace_folder_enabled를
+  // 일반 채팅방이면 `.awb/chat/<room8>` (account가 chat_workspace_folder_enabled를
   // 켠 경우에만). '' → 폴더 경계 블록 없음, 그리고 아래 injectWorkFolder는
-  // byte-identity no-op이 되므로 opt-in하지 않은 workspace/QA-security 디스패치
+  // byte-identity no-op이 되므로 opt-in하지 않은 account/QA-security 디스패치
   // (별도로 자기만의 프롬프트를 조립하는 경로)는 영향받지 않는다.
   workFolder = '',
   // 일반 작업 티켓 후보(non-native 채팅만): board-less 서버는 projects + tags,
@@ -803,7 +803,7 @@ function ordinaryWorkCandidateLines(c: OrdinaryWorkCandidates): string[] {
     .filter((t) => t && typeof t.tag === 'string' && t.tag)
     .slice(0, 100)
     .map((t) => (typeof t.count === 'number' ? `${t.tag} (${t.count})` : t.tag));
-  lines.push(`Tags already used in this workspace: ${tags.length > 0 ? tags.join(', ') : '(none yet)'}`);
+  lines.push(`Existing tags: ${tags.length > 0 ? tags.join(', ') : '(none yet)'}`);
   return lines;
 }
 

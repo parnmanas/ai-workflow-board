@@ -1,6 +1,6 @@
 // Behavioral tests for OutreachIngestService.pollChannel (ticket 2500fea3) —
 // covers the ticket's completion criteria directly against a real in-memory
-// sqljs DataSource (Workspace/Project/Ticket/OutreachChannel/OutreachInboundItem)
+// sqljs DataSource (Account/Project/Ticket/OutreachChannel/OutreachInboundItem)
 // with a stub connector + stub classifier injected (no tick loop, no HTTP).
 // Tickets are filed through a real TicketService (docs/tickets.md — the one
 // ticket-write path), with only its ActivityService/dispatcher stubbed.
@@ -45,7 +45,7 @@ import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
-import { Workspace } from '../dist/entities/Workspace.js';
+import { Account } from '../dist/entities/Account.js';
 import { Project } from '../dist/entities/Project.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
@@ -131,7 +131,7 @@ function item(over = {}) {
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Project, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
+    entities: [Account, Project, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
     synchronize: true,
     logging: false,
   });
@@ -139,20 +139,20 @@ async function setupDb() {
   return dataSource;
 }
 
-async function seedWorkspace(dataSource, workspaceId) {
-  const wsRepo = dataSource.getRepository(Workspace);
-  return wsRepo.save(wsRepo.create({ id: workspaceId, name: workspaceId }));
+async function seedWorkspace(dataSource, accountId) {
+  const wsRepo = dataSource.getRepository(Account);
+  return wsRepo.save(wsRepo.create({ id: accountId, name: accountId }));
 }
 
-async function seedProject(dataSource, workspaceId, over = {}) {
+async function seedProject(dataSource, accountId, over = {}) {
   const repo = dataSource.getRepository(Project);
-  return repo.save(repo.create({ workspace_id: workspaceId, name: 'outreach project', ...over }));
+  return repo.save(repo.create({ account_id: accountId, name: 'outreach project', ...over }));
 }
 
 async function seedChannel(dataSource, over = {}) {
   const repo = dataSource.getRepository(OutreachChannel);
   return repo.save(repo.create({
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     kind: 'github',
     name: 'test channel',
     targets: [],
@@ -569,7 +569,7 @@ test('ticket creation colliding with an existing open ticket for the same dedupe
     const ticketRepo = dataSource.getRepository(Ticket);
     const preExisting = await ticketRepo.save(ticketRepo.create({
       status: 'todo',
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       title: 'pre-existing ticket for this external item',
       operational_dedupe_key: `outreach:${channel.id}:gh-collide`,
     }));
@@ -617,7 +617,7 @@ test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key r
     const ticketRepo = dataSource.getRepository(Ticket);
     const archivedHolder = await ticketRepo.save(ticketRepo.create({
       status: 'todo',
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       title: 'archived ticket still holding the dedupe key',
       operational_dedupe_key: `outreach:${channel.id}:gh-archived-collide`,
       archived_at: new Date('2026-06-25T11:00:00Z'),
@@ -669,7 +669,7 @@ test('two pollChannel sweeps racing on the SAME archived-holder collision still 
     const ticketRepo = dataSource.getRepository(Ticket);
     await ticketRepo.save(ticketRepo.create({
       status: 'todo',
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       title: 'archived ticket still holding the dedupe key',
       operational_dedupe_key: `outreach:${channel.id}:gh-archived-race`,
       archived_at: new Date('2026-06-25T09:00:00Z'),
@@ -743,7 +743,7 @@ test('an item whose original ticket was archived (dedupe key already cleared) re
     const ticketRepo = dataSource.getRepository(Ticket);
     const archivedTicket = await ticketRepo.save(ticketRepo.create({
       status: 'todo',
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       title: 'orphan-linked ticket, later archived',
       operational_dedupe_key: null,
       archived_at: new Date('2026-06-25T11:00:00Z'),
@@ -751,7 +751,7 @@ test('an item whose original ticket was archived (dedupe key already cleared) re
 
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     await itemRepo.save(itemRepo.create({
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       channel_id: channel.id,
       external_item_id: 'gh-reopen',
       classification: 'bug',
@@ -925,7 +925,7 @@ test('a stale ticket_id=null claim from before this fix is reclaimed and tickete
     // UPDATE the old two-step design relied on).
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     await itemRepo.save(itemRepo.create({
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       channel_id: channel.id,
       external_item_id: 'gh-1',
       classification: 'bug',
@@ -1462,10 +1462,10 @@ test('an issue-update compared against a parent with no recorded content_hash (l
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     const ticketRepo = dataSource.getRepository(Ticket);
     const legacyTicket = await ticketRepo.save(ticketRepo.create({
-      status: 'todo', workspace_id: 'ws-1', title: 'pre-existing legacy ticket',
+      status: 'todo', account_id: 'ws-1', title: 'pre-existing legacy ticket',
     }));
     await itemRepo.save(itemRepo.create({
-      workspace_id: 'ws-1', channel_id: channel.id, external_item_id: 'issue:x/y#1',
+      account_id: 'ws-1', channel_id: channel.id, external_item_id: 'issue:x/y#1',
       classification: 'bug', confidence: 90, status: 'ticketed', ticket_id: legacyTicket.id,
       permalink: 'https://github.com/x/y/issues/1', author: 'reporter1', collected_at: new Date('2026-06-25T10:00:00Z'),
       content_hash: null,

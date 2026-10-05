@@ -8,38 +8,38 @@ AWB의 skill은 **거버넌스가 붙은 불변 프롬프트 자산**이다. 에
 
 `docs/catalog-scopes.md`의 카탈로그 모델을 그대로 따른다.
 
-| Scope | `workspace_id` | 우선순위 |
+| Scope | `account_id` | 우선순위 |
 | --- | --- | --- |
 | Global | `NULL` | 1 (fallback) |
-| Workspace | workspace UUID | 2 (global을 shadow) |
+| Account | account UUID | 2 (global을 shadow) |
 
-- Workspace에서 조회하면 **global + 해당 workspace** 행이 함께 나온다.
-- 같은 `slug`가 양쪽에 있으면 workspace가 이긴다(Function의 key와 같은 규칙).
+- Account context에서 조회하면 **global + 해당 account** 행이 함께 나온다.
+- 같은 `slug`가 양쪽에 있으면 account가 이긴다(Function의 key와 같은 규칙).
 - 관리 UI는 `?include_shadowed=1` 로 가려진 global 행까지 받아
   `shadowed: true` 로 표시한다. 이게 없으면 "built-in이 왜 안 먹지"에 답할 수 없다.
 
 ### 쓰기 권한
 
-| 대상 | Workspace 사용자 (`MANAGE_AGENTS`) | Admin (`ADMIN_ACCESS`) |
+| 대상 | Account 사용자 (`MANAGE_AGENTS`) | Admin (`ADMIN_ACCESS`) |
 | --- | --- | --- |
-| Workspace skill | 생성 / publish / assign / quarantine | 동일 |
+| Account skill | 생성 / publish / assign / quarantine | 동일 |
 | Global skill | **읽기 + assign 만** | 생성 / publish / quarantine |
 
-Global 정의는 모든 workspace가 상속하므로, 한 테넌트가 전 테넌트의 정의를 바꿀 수
-없어야 한다. Workspace 라우트에서 global에 publish/quarantine을 시도하면 403
+Global 정의는 모든 account가 상속하므로, 한 테넌트가 전 테넌트의 정의를 바꿀 수
+없어야 한다. Account 라우트에서 global에 publish/quarantine을 시도하면 403
 (`skill_scope_readonly`)이고, 안내는 "fork 해서 쓰라"이다.
 
 ### Fork
 
-`POST /api/workspaces/:wsId/skills/:skillId/fork` 는 global skill을 같은 slug로
-workspace에 복사한다. 그 순간부터 fork가 shadow하고, **그 아래의 global은 업스트림
+`POST /api/accounts/:wsId/skills/:skillId/fork` 는 global skill을 같은 slug로
+account에 복사한다. 그 순간부터 fork가 shadow하고, **그 아래의 global은 업스트림
 갱신을 계속 받는다.** global을 직접 고치는 것이 아니라 이게 커스터마이즈 경로다.
 
 ## 불변성과 런 고정
 
 - `SkillVersion`은 불변이다. 변경은 **새 버전 append**이며 기존 버전을 수정하거나
   삭제하지 않는다.
-- `RuntimeSkillAssignment`(workspace × runtime identity key)는 특정 `skill_version_id`를 **핀** 한다.
+- `RuntimeSkillAssignment`(account × runtime identity key)는 특정 `skill_version_id`를 **핀** 한다.
 - 런 시작 시 `RunSkillSnapshot`이 manifest를 고정(pinned → locked)한다.
 
 따라서 **어떤 동기화도 이미 배정된 에이전트가 읽는 내용을 바꾸지 못한다.** 새
@@ -95,7 +95,7 @@ Docker 이미지는 `COPY skills ./skills` 로 팩을 함께 담는다.
 | 다른 소스가 소유한 slug | **conflict 보고 후 무시.** tap이 built-in이나 손으로 만든 global의 slug를 가로챌 수 없다 |
 | `source_kind: 'local'` | 영구히 동기화 대상 아님 |
 
-Workspace skill은 어떤 경우에도 건드리지 않는다.
+Account skill은 어떤 경우에도 건드리지 않는다.
 
 ## SKILL.md 형식
 
@@ -127,7 +127,7 @@ key·custom tag가 포함된 임의 YAML을 실행할 이유가 없다. 최상�
 | 조정 규칙 | `.../skill-sync.service.ts` |
 | 내장 팩 시드 | `.../builtin-skill-pack.service.ts` |
 | tap 동기화 | `.../skill-tap.service.ts` |
-| Workspace REST | `.../skills.controller.ts` |
+| Account REST | `.../skills.controller.ts` |
 | Admin REST | `.../skill-registry.controller.ts` |
 | 런 manifest 고정 | `.../run-skill-snapshot.service.ts` |
 | 유일성 | `apps/server/src/entities/Skill.ts` 의 부분 유니크 인덱스 `uq_skills_global_slug` / `uq_skills_workspace_slug` (엔티티에 선언해야 synchronize 가 지우지 않는다) |

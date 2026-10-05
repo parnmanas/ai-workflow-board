@@ -12,8 +12,8 @@ import {
 // Repo clone 정책 에디터 (ticket bddb63ee).
 //
 // 두 표면이 **같은 ClonePolicy 형태**를 편집한다 — Project 설정(프로젝트별 override)과
-// Workspace Settings(워크스페이스 기본값) — 저장 대상만 다르다. 그래서 ProjectForm
-// 는 필드 그리드(ClonePolicyFields)를, WorkspaceSettingsPage 는 저장 버튼까지 포함한
+// Account Settings(워크스페이스 기본값) — 저장 대상만 다르다. 그래서 ProjectForm
+// 는 필드 그리드(ClonePolicyFields)를, AccountSettingsPage 는 저장 버튼까지 포함한
 // 기본 export 를 쓴다. 폼 매핑·검증은 clonePolicy.logic.ts 가 소유한다(jsdom 없이
 // 단위 테스트하기 위한 분리 — environmentConfig.logic.ts 와 같은 관례).
 
@@ -56,7 +56,7 @@ export function ClonePolicyFields({ value, onChange, error }: ClonePolicyFieldsP
   return (
     <div>
       <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: tokens.spacing.sm }}>
-        {`비워두면 상위 기본값으로 흘러내립니다 (Project → Workspace → 시스템 기본값: clone timeout 3600초, idle 감시 없음, 전체 clone). 대형 저장소는 timeout을 늘리거나 depth/filter/single-branch로 clone 자체를 줄이세요. idle timeout은 값을 넣었을 때만 켜집니다 — 진행 출력이 그 시간만큼 완전히 끊긴 clone을 정지로 보고 회수합니다.`}
+        {`비워두면 상위 기본값으로 흘러내립니다 (Project → Account → 시스템 기본값: clone timeout 3600초, idle 감시 없음, 전체 clone). 대형 저장소는 timeout을 늘리거나 depth/filter/single-branch로 clone 자체를 줄이세요. idle timeout은 값을 넣었을 때만 켜집니다 — 진행 출력이 그 시간만큼 완전히 끊긴 clone을 정지로 보고 회수합니다.`}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: tokens.spacing.sm }}>
         {fields.map((field) => (
@@ -101,7 +101,7 @@ interface ClonePolicyEditorProps {
   onSave(next: ClonePolicy | null): Promise<void>;
 }
 
-/** 자체 저장 버튼을 가진 독립 섹션 — Workspace Settings 용(HarnessConfigEditor 와 같은 모양). */
+/** 자체 저장 버튼을 가진 독립 섹션 — Account Settings 용(HarnessConfigEditor 와 같은 모양). */
 export default function ClonePolicyEditor({ raw, title, description, onSave }: ClonePolicyEditorProps) {
   const [form, setForm] = useState<ClonePolicyFormState>(() => clonePolicyFormFromRaw(raw));
   const [error, setError] = useState<string | undefined>(undefined);

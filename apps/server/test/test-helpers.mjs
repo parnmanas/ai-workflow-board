@@ -18,21 +18,21 @@ export function makeBaseUrl(port) {
 }
 
 /**
- * Make an authenticated API request with optional X-Workspace-Id header.
+ * Make an authenticated API request with optional X-Account-Id header.
  *
  * @param {string} baseUrl - Server base URL built from the actual bound port,
  *   e.g. makeBaseUrl(app.getHttpServer().address().port)
  * @param {string} path - API path without /api prefix, e.g. '/auth/login'
  * @param {object} opts
  * @param {string} [opts.token] - Bearer token
- * @param {string} [opts.workspaceId] - Workspace ID for X-Workspace-Id header
+ * @param {string} [opts.accountId] - Account ID for X-Account-Id header
  * @param {string} [opts.method='GET'] - HTTP method
  * @param {object} [opts.body] - Request body (will be JSON stringified)
  */
-export async function apiRequest(baseUrl, path, { token, workspaceId, method = 'GET', body } = {}) {
+export async function apiRequest(baseUrl, path, { token, accountId, method = 'GET', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  if (workspaceId) headers['X-Workspace-Id'] = workspaceId;
+  if (accountId) headers['X-Account-Id'] = accountId;
 
   const res = await fetch(`${baseUrl}/api${path}`, {
     method,
@@ -66,11 +66,11 @@ export async function loginAs(baseUrl, email, password) {
  *
  * @param {string} baseUrl
  * @param {string} adminToken
- * @param {string} name - Workspace name
+ * @param {string} name - Account name
  * @returns {Promise<object|null>}
  */
 export async function createTestWorkspace(baseUrl, adminToken, name) {
-  const { data, status } = await apiRequest(baseUrl, '/workspaces', {
+  const { data, status } = await apiRequest(baseUrl, '/accounts', {
     token: adminToken,
     method: 'POST',
     body: { name, description: 'Leak test workspace' },
@@ -130,14 +130,14 @@ export async function approveUser(baseUrl, adminToken, userId) {
  * @param {string} baseUrl
  * @param {string} adminToken
  * @param {string} userId
- * @param {string} workspaceId
+ * @param {string} accountId
  * @param {string} [relation='member']
  */
-export async function assignToWorkspace(baseUrl, adminToken, userId, workspaceId, relation = 'member') {
+export async function assignToWorkspace(baseUrl, adminToken, userId, accountId, relation = 'member') {
   const { data, status } = await apiRequest(baseUrl, `/admin/pending-users/${userId}/assign`, {
     token: adminToken,
     method: 'POST',
-    body: { workspace_id: workspaceId, relation },
+    body: { account_id: accountId, relation },
   });
   if (status !== 200) {
     throw new Error(`assignToWorkspace failed (${status}): ${JSON.stringify(data)}`);

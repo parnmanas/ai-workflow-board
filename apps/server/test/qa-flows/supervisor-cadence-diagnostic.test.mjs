@@ -1,6 +1,6 @@
 // Per-workspace supervisor cadence / liveness diagnostic (ticket 1fcba693).
 //
-// The staleMsElevated gauge only counts HOW MANY workspaces are mis-set. This
+// The staleMsElevated gauge only counts HOW MANY accounts are mis-set. This
 // endpoint answers WHICH one and by how much: configured vs default vs effective
 // cadence + source + elevated flag + the recovery thresholds/bounds a value
 // implies. So the incident's 4 h supervisor_stale_ms is visible at the source,
@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { bootApp } from '../helpers/boot.mjs';
-import { createWorkspace } from '../helpers/fixtures.mjs';
+import { createAccount } from '../helpers/fixtures.mjs';
 
 const FOUR_H = 4 * 60 * 60_000;
 const FIVE_MIN = 5 * 60_000; // stale window SMALLER than the 15 min current_task TTL
@@ -24,14 +24,14 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
 
-  const wsDefault = await createWorkspace(app, modules.getDataSourceToken, { name: 'cadence-default' });
-  const wsIncident = await createWorkspace(app, modules.getDataSourceToken, { name: 'cadence-incident' });
+  const wsDefault = await createAccount(app, modules.getDataSourceToken, { name: 'cadence-default' });
+  const wsIncident = await createAccount(app, modules.getDataSourceToken, { name: 'cadence-incident' });
   // stale window SMALLER than the current_task TTL — the case the old
   // Math.min(stale, TTL) leaked-bound under-reported (reviewer blocker).
-  const wsShort = await createWorkspace(app, modules.getDataSourceToken, { name: 'cadence-short' });
+  const wsShort = await createAccount(app, modules.getDataSourceToken, { name: 'cadence-short' });
   // Reproduce the incident band-aid on one workspace.
-  await ds.getRepository('Workspace').update(wsIncident.id, { supervisor_stale_ms: FOUR_H });
-  await ds.getRepository('Workspace').update(wsShort.id, { supervisor_stale_ms: FIVE_MIN });
+  await ds.getRepository('Account').update(wsIncident.id, { supervisor_stale_ms: FOUR_H });
+  await ds.getRepository('Account').update(wsShort.id, { supervisor_stale_ms: FIVE_MIN });
 
   const resp = await fetch(`http://127.0.0.1:${port}/api/diagnostics/supervisor-cadence`);
   assert.equal(resp.status, 200, 'public endpoint reachable without auth');
@@ -54,7 +54,7 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   assert.equal(body.liveness_floor.effective_ms, FLOOR);
   assert.equal(body.liveness_floor.source, 'default');
 
-  const byId = Object.fromEntries(body.workspaces.map((w) => [w.workspace_id, w]));
+  const byId = Object.fromEntries(body.accounts.map((w) => [w.account_id, w]));
 
   // Incident workspace: the 4 h value is visible, flagged, with its provenance.
   const inc = byId[wsIncident.id];
@@ -121,7 +121,7 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   // With a 5 min window the output gate (min(5 min, 6 h) = 5 min) is BELOW the
   // 15 min TTL, so the TTL dominates the max() → leaked_with_output = 15 min TTL
   // (here it coincides with leaked_current_task; they diverge only when the
-  // window exceeds the TTL, as on the incident/default workspaces above).
+  // window exceeds the TTL, as on the incident/default accounts above).
   assert.equal(short.recovery_thresholds_ms.leaked_with_output, TTL, 'leaked_with_output = max(15 min TTL, 5 min gate) = 15 min TTL');
   assert.equal(short.recovery_bounds_ms.leaked_current_task, TTL + TICK, 'leaked bound = 15 min TTL + one tick, not 5 min + tick');
   assert.equal(short.recovery_bounds_ms.leaked_with_output, TTL + TICK, 'leaked_with_output bound = 15 min TTL + one tick');

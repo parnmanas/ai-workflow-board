@@ -12,7 +12,7 @@ import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ApiKey } from '../../entities/ApiKey';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { Credential } from '../../entities/Credential';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
@@ -58,7 +58,7 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
       ApiKey,
       Action,
       ActionRun,
-      Workspace,
+      Account,
       // Credential: the roster provisioner validates a slot's optional per-agent
       // CLI credential before stamping it onto the identity it creates.
       Credential,

@@ -25,7 +25,7 @@ export class CreateActionApprovals1760000000056 implements MigrationInterface {
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS action_approvals (
         id UUID PRIMARY KEY,
-        workspace_id VARCHAR NOT NULL,
+        account_id VARCHAR NOT NULL,
         action_id VARCHAR NOT NULL,
         source_ticket_id VARCHAR NOT NULL,
         approved_by VARCHAR NOT NULL,

@@ -268,7 +268,7 @@ test('MessageList 는 동영상 첨부를 인라인 플레이어로 그린다', 
       currentUserId: 'me',
       messages: [
         {
-          id: 'msg-1', room_id: 'room-m', workspace_id: 'ws', sender_type: 'user', sender_id: 'parn', sender_name: 'parn',
+          id: 'msg-1', room_id: 'room-m', account_id: 'ws', sender_type: 'user', sender_id: 'parn', sender_name: 'parn',
           content: '플레이 녹화', images: [], type: 'message', created_at: iso(1000),
           attachments: [{ id: 'v1', room_id: 'room-m', filename: 'demo.webm', mime_type: 'video/webm', size_bytes: 1, download_url: '' }],
         },

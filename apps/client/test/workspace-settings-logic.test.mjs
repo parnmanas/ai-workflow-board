@@ -1,11 +1,11 @@
-// Workspace "Ticket dispatch" settings (docs/tickets.md → Workspace settings).
+// Account "Ticket dispatch" settings (docs/tickets.md → Account settings).
 // The settings moved here from boards: language, max concurrent tickets per
 // agent, done-ticket auto-archive and the dispatch pause switch.
 //
-// Pins the PATCH /workspaces/:id body the section sends: only changed keys,
+// Pins the PATCH /accounts/:id body the section sends: only changed keys,
 // blank language / auto-archive → null, validation (int ≥ 1, 1..365), and the
 // pause switch stamping an ISO "now" / null. The last test mounts the real
-// section and checks what reaches api.updateWorkspace.
+// section and checks what reaches api.updateAccount.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,10 +15,10 @@ import {
   dispatchSettingsToForm,
   isDispatchPaused,
   validateDispatchSettings,
-} from '../src/components/workspaceSettings.logic.ts';
+} from '../src/components/accountSettings.logic.ts';
 import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
 import { api } from '../src/api.ts';
-import { TicketDispatchSettings } from '../src/components/WorkspaceSettingsPage.tsx';
+import { TicketDispatchSettings } from '../src/components/AccountSettingsPage.tsx';
 
 const STORED = {
   language: 'Korean',
@@ -112,13 +112,13 @@ function inputByLabel(root, text) {
 test('Ticket dispatch section PATCHes only the changed keys and the pause switch on its own', async (t) => {
   const dom = setupDom();
   const calls = [];
-  const original = api.updateWorkspace;
-  api.updateWorkspace = async (id, data) => { calls.push({ id, data }); return { ...workspace, ...data }; };
-  t.after(() => { api.updateWorkspace = original; });
+  const original = api.updateAccount;
+  api.updateAccount = async (id, data) => { calls.push({ id, data }); return { ...workspace, ...data }; };
+  t.after(() => { api.updateAccount = original; });
 
   const workspace = { id: 'ws-1', name: 'W', description: '', created_at: '', updated_at: '', ...STORED };
   let current = workspace;
-  const view = mount(React.createElement(TicketDispatchSettings, { workspace, onSaved: (next) => { current = next; } }));
+  const view = mount(React.createElement(TicketDispatchSettings, { account: workspace, onSaved: (next) => { current = next; } }));
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;
 
@@ -149,12 +149,12 @@ test('Ticket dispatch section PATCHes only the changed keys and the pause switch
 test('invalid input blocks the save and shows the error', async (t) => {
   const dom = setupDom();
   const calls = [];
-  const original = api.updateWorkspace;
-  api.updateWorkspace = async (id, data) => { calls.push({ id, data }); return null; };
-  t.after(() => { api.updateWorkspace = original; });
+  const original = api.updateAccount;
+  api.updateAccount = async (id, data) => { calls.push({ id, data }); return null; };
+  t.after(() => { api.updateAccount = original; });
 
   const workspace = { id: 'ws-1', name: 'W', description: '', created_at: '', updated_at: '', ...STORED };
-  const view = mount(React.createElement(TicketDispatchSettings, { workspace, onSaved: () => {} }));
+  const view = mount(React.createElement(TicketDispatchSettings, { account: workspace, onSaved: () => {} }));
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;
 

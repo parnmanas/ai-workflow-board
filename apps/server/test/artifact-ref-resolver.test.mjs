@@ -17,15 +17,16 @@ const repo = (rows) => ({
 });
 
 function service(access = true) {
-  const hosts = repo([{ id: ids.agent, workspace_id: ws, name: 'Same name' }]);
+  const hosts = repo([{ id: ids.agent, account_id: ws, name: 'Same name' }]);
   return new ArtifactRefsService(
-    repo([{ id: ids.ticket, workspace_id: ws, status: 'todo', title: 'Same name' }]),
+    repo([{ id: ids.ticket, account_id: ws, status: 'todo', title: 'Same name' }]),
     { getRepository: () => hosts },
-    repo([{ id: ids.action, workspace_id: ws, name: 'Same name' }]),
-    repo([{ id: ids.function, workspace_id: ws, name: 'Same name' }]),
-    repo([{ id: ids.schedule, workspace_id: ws, name: 'Same name' }]),
-    repo([{ id: ws, name: 'Primary workspace' }]),
+    repo([{ id: ids.action, account_id: ws, name: 'Same name' }]),
+    repo([{ id: ids.function, account_id: ws, name: 'Same name' }]),
+    repo([{ id: ids.schedule, account_id: ws, name: 'Same name' }]),
+    repo([{ id: ws, name: 'Primary account' }]),
     { check: async () => access },
+    { accessibleIds: async () => access ? [ws] : [] },
   );
 }
 
@@ -40,12 +41,11 @@ test('resolves exact ids and keeps retired Agent detail links unavailable', asyn
   assert.equal(host.reason, 'no_detail_surface');
   assert.equal(host.deepLink, null);
   assert.equal(new Set(rows.map(row => row.id)).size, 5);
-  // Tickets open in the workspace ticket pool (no board in the path any more).
-  assert.equal(rows.find(row => row.type === 'ticket').deepLink, `/ws/${ws}/tickets?ticket=${ids.ticket}`);
-  assert.equal(rows.find(row => row.type === 'action').deepLink, `/ws/${ws}/actions?artifact=${ids.action}`);
-  assert.equal(rows.find(row => row.type === 'function').deepLink, `/ws/${ws}/functions?artifact=${ids.function}`);
-  assert.equal(rows.find(row => row.type === 'schedule').deepLink, `/ws/${ws}/schedules?artifact=${ids.schedule}`);
-  assert.ok(rows.every(row => row.workspaceName === 'Primary workspace'));
+  assert.equal(rows.find(row => row.type === 'ticket').deepLink, `/tickets?ticket=${ids.ticket}`);
+  assert.equal(rows.find(row => row.type === 'action').deepLink, `/actions?artifact=${ids.action}`);
+  assert.equal(rows.find(row => row.type === 'function').deepLink, `/functions?artifact=${ids.function}`);
+  assert.equal(rows.find(row => row.type === 'schedule').deepLink, `/schedules?artifact=${ids.schedule}`);
+  assert.ok(rows.every(row => row.accountName === 'Primary account'));
   assert.ok(rows.every(row => !('boardName' in row)), 'no board context is reported any more');
 });
 
@@ -63,7 +63,7 @@ test('permission denial and missing ids never return links', async () => {
     { id: 'user', role: 'user' }, ws, [{ type: 'ticket', id: ids.ticket }],
   );
   assert.equal(denied[0].available, false);
-  assert.equal(denied[0].reason, 'workspace_access_denied');
+  assert.equal(denied[0].reason, 'account_access_denied');
   assert.equal(denied[0].deepLink, null);
 
   const missingId = '77777777-7777-4777-8777-777777777777';
@@ -74,7 +74,7 @@ test('permission denial and missing ids never return links', async () => {
   assert.equal(missing[0].deepLink, null);
 });
 
-test('no-detail fallback preserves canonical label and workspace context', async () => {
+test('no-detail fallback preserves canonical label and ownership context', async () => {
   // Every ticket now has a detail surface (the ticket pool), so the no-detail
   // fallback is the Runtime Host identity behind an `agent` ref.
   const [row] = await service().resolveMany(
@@ -83,11 +83,11 @@ test('no-detail fallback preserves canonical label and workspace context', async
   assert.equal(row.available, false);
   assert.equal(row.reason, 'no_detail_surface');
   assert.equal(row.label, 'Same name');
-  assert.equal(row.workspaceName, 'Primary workspace');
+  assert.equal(row.accountName, 'Primary account');
   assert.equal(row.deepLink, null);
 });
 
-test('outside-workspace targets never expose canonical labels, context, or links', async () => {
+test('targets without membership never expose canonical labels, context, or links', async () => {
   const foreignWorkspace = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   const instance = service();
   for (const repository of [
@@ -100,7 +100,7 @@ test('outside-workspace targets never expose canonical labels, context, or links
     const originalFindOne = repository.findOne;
     repository.findOne = async (query) => {
       const entity = await originalFindOne(query);
-      return entity ? { ...entity, workspace_id: foreignWorkspace } : null;
+      return entity ? { ...entity, account_id: foreignWorkspace } : null;
     };
   }
 
@@ -110,9 +110,9 @@ test('outside-workspace targets never expose canonical labels, context, or links
   assert.equal(rows.length, refs.length);
   for (const row of rows) {
     assert.equal(row.available, false);
-    assert.equal(row.reason, 'outside_workspace');
+    assert.equal(row.reason, 'account_access_denied');
     assert.equal(row.label, row.type);
-    assert.equal(row.workspaceName, undefined);
+    assert.equal(row.accountName, undefined);
     assert.equal(row.deepLink, null);
   }
 });

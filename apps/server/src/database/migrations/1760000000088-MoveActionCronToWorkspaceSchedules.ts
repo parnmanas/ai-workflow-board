@@ -3,11 +3,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 import { bindParams, localCronToUtc } from '../action-cron-timezone';
 
 /**
- * `actions.schedule_cron` → `workspace_schedules` 이관.
+ * `actions.schedule_cron` → `automation_schedules` 이관.
  *
  * 왜: 크론 구현이 두 벌이었다. Action 쪽(`modules/actions/cron.ts`)은 **로컬시간**
  * tick-match 라 그 1분에 서버가 죽어 있으면 그날 실행이 조용히 사라졌고, `*`/정수만
- * 받았다. Workspace Schedule 쪽(`modules/qa/qa-cron.ts`)은 **UTC** 이고 `next_run_at`
+ * 받았다. Account Schedule 쪽(`modules/qa/qa-cron.ts`)은 **UTC** 이고 `next_run_at`
  * 커서를 써서 놓친 실행을 따라잡으며 범위·목록도 받는다. 한쪽으로 모으면서 남긴 것은
  * 따라잡는 쪽이다. 이관 뒤 Action 은 "무엇을 · 누가 · 어디서" 만 정의하고, "언제" 는
  * 전부 Schedule 이 정한다.
@@ -54,13 +54,13 @@ export class MoveActionCronToWorkspaceSchedules1760000000088 implements Migratio
 
     // ── 스키마 (sqlite 는 synchronize 가 이미 만든다) ──
     if (isPostgres) {
-      await queryRunner.query('ALTER TABLE workspace_schedules ADD COLUMN IF NOT EXISTS action_id VARCHAR');
+      await queryRunner.query('ALTER TABLE automation_schedules ADD COLUMN IF NOT EXISTS action_id VARCHAR');
       // Action 형태 스케줄은 이 두 값을 비워 둔다 — NOT NULL 이면 삽입이 막힌다.
     }
 
-    const rows: Array<{ id: string; workspace_id: string; name: string; schedule_cron: string; enabled: any }> =
+    const rows: Array<{ id: string; account_id: string; name: string; schedule_cron: string; enabled: any }> =
       await queryRunner.query(
-        "SELECT id, workspace_id, name, schedule_cron, enabled FROM actions WHERE schedule_cron IS NOT NULL AND schedule_cron <> ''",
+        "SELECT id, account_id, name, schedule_cron, enabled FROM actions WHERE schedule_cron IS NOT NULL AND schedule_cron <> ''",
       );
     if (!rows.length) return;
 
@@ -68,7 +68,7 @@ export class MoveActionCronToWorkspaceSchedules1760000000088 implements Migratio
     const offsetMinutes = -new Date().getTimezoneOffset();
 
     for (const action of rows) {
-      const existing = await bindParams(queryRunner, 'SELECT id FROM workspace_schedules WHERE action_id = ?', [action.id]);
+      const existing = await bindParams(queryRunner, 'SELECT id FROM automation_schedules WHERE action_id = ?', [action.id]);
       if (existing.length) continue;
 
       const converted = localCronToUtc(action.schedule_cron, offsetMinutes);
@@ -83,14 +83,14 @@ export class MoveActionCronToWorkspaceSchedules1760000000088 implements Migratio
 
       await bindParams(
         queryRunner,
-        `INSERT INTO workspace_schedules
-           (id, workspace_id, board_id, name, task_prompt, action_id,
+        `INSERT INTO automation_schedules
+           (id, account_id, board_id, name, task_prompt, action_id,
             cron, interval_ms, enabled, next_run_at, last_run_at, last_room_id,
             triggered_by_type, created_by)
          VALUES (?, ?, NULL, ?, '', ?, ?, NULL, ?, NULL, NULL, NULL, 'system', '')`,
         [
           randomUUID(),
-          action.workspace_id,
+          action.account_id,
           action.name,
           action.id,
           // 옮길 수 없는 식은 원문 그대로 남기고 위에서 꺼 둔다 — 운영자가 무엇을

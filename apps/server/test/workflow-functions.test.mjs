@@ -32,23 +32,23 @@ describe('Workflow Functions', () => {
 
   it('resolves global Functions and lets workspace definitions override the same key', async () => {
     const globalRows = await service.list(null);
-    assert.ok(globalRows.some(row => row.key === 'system.noop' && row.workspace_id === null));
+    assert.ok(globalRows.some(row => row.key === 'system.noop' && row.account_id === null));
 
     await service.create({
-      workspace_id: 'workspace-a',
+      account_id: 'workspace-a',
       key: 'system.noop',
-      name: 'Workspace echo',
+      name: 'Account echo',
       executor_type: 'builtin',
       config: { handler: 'system.noop' },
     });
 
     const workspaceRows = await service.list('workspace-a');
     const resolved = workspaceRows.find(row => row.key === 'system.noop');
-    assert.equal(resolved.workspace_id, 'workspace-a');
-    assert.equal(resolved.name, 'Workspace echo');
+    assert.equal(resolved.account_id, 'workspace-a');
+    assert.equal(resolved.name, 'Account echo');
 
     const otherWorkspaceRows = await service.list('workspace-b');
-    assert.equal(otherWorkspaceRows.find(row => row.key === 'system.noop').workspace_id, null);
+    assert.equal(otherWorkspaceRows.find(row => row.key === 'system.noop').account_id, null);
   });
 
   // prompt_audit.measure_effect computed its report from board columns and was
@@ -57,14 +57,14 @@ describe('Workflow Functions', () => {
   // stays listed with no handler behind it and every execute() fails.
   it('deletes a previously seeded retired built-in on boot instead of listing a Function with no handler', async () => {
     const repo = dataSource.getRepository(WorkflowFunction);
-    const source = await repo.findOneByOrFail({ key: 'system.noop', workspace_id: null });
+    const source = await repo.findOneByOrFail({ key: 'system.noop', account_id: null });
     await repo.save(repo.create({
       ...source,
       id: undefined,
       key: 'prompt_audit.measure_effect',
       name: 'Prompt audit effect (retired)',
       builtin: true,
-      workspace_id: null,
+      account_id: null,
     }));
     assert.ok((await service.list(null)).some(row => row.key === 'prompt_audit.measure_effect'), 'precondition: stale seeded row present');
 
@@ -77,7 +77,7 @@ describe('Workflow Functions', () => {
 
   it('deduplicates key-idempotent executions and persists structured output', async () => {
     const fn = await service.create({
-      workspace_id: 'workspace-a',
+      account_id: 'workspace-a',
       key: 'test.idempotent',
       name: 'Idempotent echo',
       executor_type: 'builtin',
@@ -87,13 +87,13 @@ describe('Workflow Functions', () => {
 
     const first = await service.execute({
       functionId: fn.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       inputs: { value: 42 },
       idempotencyKey: 'same-operation',
     });
     const second = await service.execute({
       functionId: fn.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       inputs: { value: 999 },
       idempotencyKey: 'same-operation',
     });
@@ -106,7 +106,7 @@ describe('Workflow Functions', () => {
 
   it('executes a pipeline as child Function runs with parent linkage', async () => {
     const pipeline = await service.create({
-      workspace_id: 'workspace-a',
+      account_id: 'workspace-a',
       key: 'test.pipeline',
       name: 'Echo pipeline',
       executor_type: 'pipeline',
@@ -120,7 +120,7 @@ describe('Workflow Functions', () => {
 
     const run = await service.execute({
       functionId: pipeline.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       inputs: { shared: true },
     });
     assert.equal(run.status, 'succeeded');
@@ -134,14 +134,14 @@ describe('Workflow Functions', () => {
 
   it('rejects execution across workspace boundaries', async () => {
     const fn = await service.create({
-      workspace_id: 'workspace-a',
+      account_id: 'workspace-a',
       key: 'test.private',
       name: 'Private Function',
       executor_type: 'builtin',
       config: { handler: 'system.noop' },
     });
     await assert.rejects(
-      service.execute({ functionId: fn.id, workspaceId: 'workspace-b', inputs: {} }),
+      service.execute({ functionId: fn.id, accountId: 'workspace-b', inputs: {} }),
       /different workspace/,
     );
   });
@@ -160,14 +160,14 @@ describe('Workflow Functions', () => {
     const port = server.address().port;
     try {
       const fn = await service.create({
-        workspace_id: 'workspace-a',
+        account_id: 'workspace-a',
         key: 'test.ssrf-loopback',
         name: 'SSRF loopback probe',
         executor_type: 'http',
         config: { url: `http://127.0.0.1:${port}/secret`, method: 'GET' },
       });
       await assert.rejects(
-        service.execute({ functionId: fn.id, workspaceId: 'workspace-a', inputs: {} }),
+        service.execute({ functionId: fn.id, accountId: 'workspace-a', inputs: {} }),
         /not an allowed outbound target/,
       );
       const runs = await dataSource.getRepository(WorkflowFunctionRun).find({ where: { function_id: fn.id } });
@@ -181,14 +181,14 @@ describe('Workflow Functions', () => {
 
   it('rejects the http executor for a cloud-metadata-style link-local target', async () => {
     const fn = await service.create({
-      workspace_id: 'workspace-a',
+      account_id: 'workspace-a',
       key: 'test.ssrf-metadata',
       name: 'SSRF metadata probe',
       executor_type: 'http',
       config: { url: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/', method: 'GET' },
     });
     await assert.rejects(
-      service.execute({ functionId: fn.id, workspaceId: 'workspace-a', inputs: {} }),
+      service.execute({ functionId: fn.id, accountId: 'workspace-a', inputs: {} }),
       /not an allowed outbound target/,
     );
   });

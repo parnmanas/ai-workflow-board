@@ -48,7 +48,7 @@ process.env.NODE_ENV = 'test';
 const { persistFactBundles } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/persist.js'));
 const { AppDataSource, AppOntologyDataSource, initOntologyDb, flushSqljs, flushOntologySqljs } =
   await import('file://' + path.join(DIST_ROOT, 'db.js'));
-const { Workspace } = await import('file://' + path.join(DIST_ROOT, 'entities/Workspace.js'));
+const { Account } = await import('file://' + path.join(DIST_ROOT, 'entities/Account.js'));
 
 // NODE_CHUNK_SIZE/EDGE_CHUNK_SIZE(persist.ts)가 둘 다 500이므로, 청크 수를
 // 확실히 여러 개(2개 이상씩) 만들려면 파일당 defs를 500 넘게 잡는다 —
@@ -129,7 +129,7 @@ describe('population non-blocking contract (ticket e14ef1c9, 1/7 리뷰 인계 �
     // 아니라 setImmediate 큐의 FIFO 등록 순서로 결정되는 구조적 사실이다.
     const primaryWritePromise = new Promise((resolve) => {
       setImmediate(async () => {
-        const repo = AppDataSource.getRepository(Workspace);
+        const repo = AppDataSource.getRepository(Account);
         await repo.save(repo.create({ name: 'nonblocking-probe', description: 'concurrent primary write during ontology population' }));
         primaryWriteCompletedAtChunkCount = chunksSoFar;
         resolve();
@@ -138,7 +138,7 @@ describe('population non-blocking contract (ticket e14ef1c9, 1/7 리뷰 인계 �
 
     const persistPromise = persistFactBundles(AppOntologyDataSource, {
       graphId: 'nonblocking-graph',
-      workspaceId: 'nonblocking-ws',
+      accountId: 'nonblocking-ws',
       resourceId: 'nonblocking-resource',
       folderPath: '',
       commit: 'nonblocking-commit',
@@ -189,7 +189,7 @@ describe('population non-blocking contract (ticket e14ef1c9, 1/7 리뷰 인계 �
     }
 
     // ── primary DataSource가 실제로 그 쓰기를 받았는지(가짜 신호가 아님) ──
-    const wsRepo = AppDataSource.getRepository(Workspace);
+    const wsRepo = AppDataSource.getRepository(Account);
     const found = await wsRepo.findOne({ where: { name: 'nonblocking-probe' } });
     assert.ok(found, '동시 primary 쓰기가 실제로 커밋됐어야 한다');
   });

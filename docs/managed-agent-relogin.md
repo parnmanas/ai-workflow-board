@@ -5,6 +5,17 @@ agent-manager spawns each managed agent's `claude` CLI under an isolated
 never reaches the right place. This doc covers two supported re-login
 flows and when to use which.
 
+`agents/<id>/cli-home` is a retained runtime storage path, not an Agent CRUD
+surface. Work now uses RuntimeSpec and native Sessions; owner metadata is
+`account_id`. Old `workspace_id` config is still read, and the original runtime
+UUIDs, credential homes, and CLI history paths stay intact.
+
+For native Agent Sessions, `AgentSessionExecution` pins the credential id on
+first execution. Changing Host × CLI defaults applies to new sessions. To renew
+an existing pinned credential, update that credential's secret and reconnect;
+selecting another default does not silently change existing sessions. See
+[agent-sessions.md](agent-sessions.md).
+
 > **An empty per-agent `credential_id` does not by itself prove a missing
 > credential.** When an agent has no per-agent credential attached, the adapter
 > falls back to the login already on the **manager host** ("operator HOME") — for
@@ -23,7 +34,7 @@ flows and when to use which.
 
 Symptoms that say a re-login is overdue:
 
-- **AWB Workspace → AI Agents → Agent Manager Runtime** shows a yellow/red
+- **AWB Hosts → Runtime Host** shows a yellow/red
   badge next to the agent (`expires in <N>h`, `expired`, `no refresh`,
   `no credential`). The badge is driven by the manager heartbeat reading
   `agents/<id>/cli-home/.credentials.json` every 30s; a yellow badge means
@@ -41,11 +52,11 @@ Layout reference:
 ```
 $AWB_AGENT_MANAGER_HOME/                       # %APPDATA%\awb-agent-manager (Windows)
                                                # ~/.config/awb-agent-manager (Linux/macOS)
-├── config.json                                # manager identity (manager apiKey, workspace)
+├── config.json                                # manager identity (manager apiKey, account_id)
 ├── agent-manager.log                          # rotating log
 └── agents/
     └── <agent_id>/
-        ├── config.json                        # name, cli, working_dir, workspace_id
+        ├── config.json                        # name, cli, working_dir, account_id
         └── cli-home/                          # CLAUDE_CONFIG_DIR for this agent
             └── .credentials.json              # ← what re-login writes
 ```
@@ -85,7 +96,7 @@ The script:
 After the script finishes, restart the agent in AWB so the running
 subagent loop picks up the new token:
 
-> Workspace → AI Agents → \<agent\> → **Restart**
+> Hosts → 해당 Runtime Host → 실행 제어에서 해당 runtime 재기동
 
 (Background: agent-manager re-runs `prepareCliHome` on every spawn, so
 any new spawn after the file was rewritten picks up the new token.
@@ -115,19 +126,20 @@ Steps:
 
 2. **Save it as a Credential in AWB.**
    `Settings → Credentials → New`
-   - Workspace: the agent's workspace
+   - Account: the runtime's owning account
    - Provider: `Claude (Subscription)`
    - Name: anything memorable (e.g. `claude-gameclient-2026-05`)
    - `credentials_json`: paste the entire JSON
    - Save.
 
-3. **Attach the credential to the agent.**
-   `Workspace → AI Agents → <agent> → Edit → CLI credential` → pick the
-   credential saved in step 2 → Save.
+3. **Attach the credential to the runtime selection.**
+   Pick the credential saved in step 2 in the ticket assignee, team slot, chat
+   participant, or automation RuntimeSpec. For new native sessions, set it in
+   Sessions → Host × CLI → CLI settings.
 
 4. **Restart the agent.**
-   `Workspace → AI Agents → <agent> → Restart` (sends
-   `agent_manager_command: restart_agent` over SSE).
+   Use the Runtime Host's runtime controls (`agent_manager_command: restart_agent`
+   over SSE), or reconnect the native session after updating its existing credential.
 
 5. agent-manager's `restart_agent` handler stops the running CLI, then
    `prepareCliHome` overwrites `cli-home/.credentials.json` from the
@@ -163,25 +175,24 @@ Steps:
 
 2. **Save it as a Credential in AWB.**
    `Settings → Credentials → New`
-   - Workspace: the agents' workspace
+   - Account: the runtimes' owning account
    - Provider: `Claude (OAuth Token)`
    - Name: e.g. `claude-shared-oauth-2026`
    - `oauth_token`: paste the `sk-ant-oat...` value
    - Save.
 
-3. **Attach to each agent.**
-   `Workspace → AI Agents → <agent> → Edit → CLI credential` → pick the
-   credential from step 2 → Save. The same credential can back any number
-   of agents.
+3. **Attach to each runtime selection.**
+   Pick the credential from step 2 in each RuntimeSpec, or in Host × CLI settings
+   for new native sessions. The same credential can back multiple runtimes.
 
-4. **Propagate.** `Workspace → AI Agents → Agent Manager Runtime → Restart all agents` — agents
+4. **Propagate.** Reconnect the affected native sessions or restart the affected runtimes from Hosts — runtimes
    re-fetch the credential on the next spawn and inject
    `CLAUDE_CODE_OAUTH_TOKEN`. No `.credentials.json` is written, so there
    is nothing to rotate and no daily logout.
 
 **Renewal** (once a ~year): re-run `claude setup-token`, paste the new
 value into the existing credential record's `oauth_token` field and Save,
-then **Restart all agents**. UI-only, no shell, all machines at once.
+then reconnect/restart the affected executions. No shell access is needed for renewal.
 
 > Quick host-only workaround (no AWB record): set
 > `CLAUDE_CODE_OAUTH_TOKEN=<setup-token>` in the agent-manager process

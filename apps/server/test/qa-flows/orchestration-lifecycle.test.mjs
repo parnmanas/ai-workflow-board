@@ -30,7 +30,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -103,9 +103,9 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orchestration');
+  const ws = await createAccount(app, getDataSourceToken, 'orchestration');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -118,7 +118,7 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   // P4c-4: identity 는 spec 내용 주소다 — 서로 다른 worker 가 필요하면
   // working_dir 가 달라야 한다 (같은 폴더·CLI·credential 은 같은 worker).
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Platform squad',
     team: {
       orchestrator_prompt: 'Always ask for tests.',
@@ -175,7 +175,7 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   // ── 2. Mission + start ────────────────────────────────────────────────────
   step('Create a mission and brief the orchestrator');
   const created = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Ship the billing export',
     objective: 'Add a CSV export of monthly invoices behind the existing feature flag.',
@@ -400,9 +400,9 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orchestration-fail');
+  const ws = await createAccount(app, getDataSourceToken, 'orchestration-fail');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -411,7 +411,7 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Solo squad',
     team: { max_parallel_steps: 3 },
     members: [{ role_label: 'worker', capabilities: 'does everything' }],
@@ -423,7 +423,7 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
   const workerMcp = await mcpFor(worker, 'worker');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Migrate the ledger',
     objective: 'Move the ledger to the new schema.',
@@ -522,11 +522,11 @@ test('Orchestration: parallelism is capped by the mission setting', async (t) =>
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orchestration-parallel');
+  const ws = await createAccount(app, getDataSourceToken, 'orchestration-parallel');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Wide squad',
     team: { max_parallel_steps: 2 },
     members: ['a', 'b', 'c'].map((role_label) => ({ role_label, capabilities: 'generalist' })),
@@ -537,12 +537,12 @@ test('Orchestration: parallelism is capped by the mission setting', async (t) =>
   const b = squad.member('b');
   const c = squad.member('c');
 
-  const key = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label: 'lead' });
+  const key = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label: 'lead' });
   const leadMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => { void leadMcp.close().catch(() => {}); });
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Three independent chores',
     objective: 'Do three unrelated things.',
@@ -580,9 +580,9 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
   const teams = app.get(OrchestrationTeamService);
   const missions = app.get(OrchestrationMissionService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-discovery');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-discovery');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -598,7 +598,7 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Discovery squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'member' }],
@@ -621,7 +621,7 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
 
   step('Create a mission; only the orchestrator/member see it via list_orchestration_missions');
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Discovery mission',
     objective: 'Prove discovery tools are scoped correctly.',
@@ -658,9 +658,9 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   const teams = app.get(OrchestrationTeamService);
   const missions = app.get(OrchestrationMissionService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-create');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-create');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -668,7 +668,7 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Create-mission squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'member' }],
@@ -679,7 +679,7 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   // A second team with its own orchestrator — `orch` must not be able to create
   // missions for it.
   const otherSquad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'A team orch does not run',
     team: { created_by: HUMAN.id },
   });
@@ -783,7 +783,7 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   // AGENT holding in-flight work, not on the target team's own open-mission cap
   // (team3 has zero open missions of its own, so only guard (b) can be firing).
   const team3Squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Second team orch also runs',
     team: { created_by: HUMAN.id },
   });
@@ -797,7 +797,7 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   await ds.getRepository('OrchestrationStep').save(
     ds.getRepository('OrchestrationStep').create({
       mission_id: retried.mission_id,
-      workspace_id: ws.id,
+      account_id: ws.id,
       team_id: team.id,
       step_key: 'busy-work',
       title: 'Busy work',
@@ -826,19 +826,19 @@ test('Orchestration: create_orchestration_mission — max_open_missions = 0 forb
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-cap-zero');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-cap-zero');
   step('A team created with max_open_missions: 0 persists the deliberate zero, not the ?? 1 default');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Cap-zero squad',
     team: { max_open_missions: 0, created_by: HUMAN.id },
   });
   const team = squad.team;
   const orch = squad.orchestrator;
 
-  const key = await createApiKey(app, getDataSourceToken, orch.id, { workspaceId: ws.id, label: 'cap-zero-orch' });
+  const key = await createApiKey(app, getDataSourceToken, orch.id, { accountId: ws.id, label: 'cap-zero-orch' });
   const orchMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => { void orchMcp.close().catch(() => {}); });
   assert.equal(team.max_open_missions, 0, 'createTeam must not silently promote an explicit 0 to the default 1');
@@ -868,18 +868,18 @@ test('Orchestration: create_orchestration_mission — max_open_missions = 2 allo
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-cap-two');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-cap-two');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Cap-two squad',
     team: { max_open_missions: 2, created_by: HUMAN.id },
   });
   const team = squad.team;
   const orch = squad.orchestrator;
 
-  const key = await createApiKey(app, getDataSourceToken, orch.id, { workspaceId: ws.id, label: 'cap-two-orch' });
+  const key = await createApiKey(app, getDataSourceToken, orch.id, { accountId: ws.id, label: 'cap-two-orch' });
   const orchMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => { void orchMcp.close().catch(() => {}); });
   assert.equal(team.max_open_missions, 2);
@@ -924,9 +924,9 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-self-assign');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-self-assign');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -936,7 +936,7 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Self-assign squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'helper' }],
@@ -955,7 +955,7 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   const orchMcp = await mcpFor(orch, 'self-assign-orch');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Fan out then roll up',
     objective: 'A helper reports, the orchestrator rolls the result up itself.',
@@ -1018,9 +1018,9 @@ test('Orchestration: a draft mission is never an unrecoverable wedge (review rou
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-draft-wedge');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-draft-wedge');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -1028,7 +1028,7 @@ test('Orchestration: a draft mission is never an unrecoverable wedge (review rou
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Draft-wedge squad',
     team: { created_by: HUMAN.id },
   });
@@ -1083,9 +1083,9 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-contract');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-contract');
   const mcpFor = async (agent, label) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => { void client.close().catch(() => {}); });
     return client;
@@ -1093,7 +1093,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Contract squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'member' }],
@@ -1106,7 +1106,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
 
   step('완료 후 실행될 실제 Action을 등록한다("always" 성공 케이스)');
   const notifyAction = await actions.create({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Notify on mission end',
     prompt: 'The mission ended — post a summary.',
     target_runtimes: [member.runtime_spec],
@@ -1115,7 +1115,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   step('구조화된 완료 조건, 커스텀 workspace 루트, post_actions 2개(실재/댕글링)를 갖는 미션');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Contract-gated mission',
     objective: 'Ship one thing and prove the execution contract holds.',
@@ -1223,11 +1223,11 @@ test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pendin
   const missions = app.get(OrchestrationMissionService);
   const reaper = app.get(OrchestrationReaperService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-crash-recovery');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-crash-recovery');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Crash-recovery squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'member' }],
@@ -1238,7 +1238,7 @@ test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pendin
 
   step('실제로 디스패치 가능한 Action을 등록한다');
   const recoveryAction = await actions.create({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Crash-recovery notify',
     prompt: 'Recovered after a simulated crash.',
     target_runtimes: [member.runtime_spec],
@@ -1247,7 +1247,7 @@ test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pendin
 
   step('completeMission()이 terminal status를 저장한 직후 프로세스가 죽은 상황을 직접 시뮬레이션한다 — post_actions는 손대지 않은 채로 둔다');
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Crash-window mission',
     objective: 'Prove post-actions survive a crash between terminal-status save and runPostActions.',
@@ -1313,11 +1313,11 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
   const missions = app.get(OrchestrationMissionService);
   const reaper = app.get(OrchestrationReaperService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-crash-linkage');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-crash-linkage');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Crash-linkage squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'member' }],
@@ -1328,7 +1328,7 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
 
   step('실제로 디스패치 가능한 Action을 등록한다');
   const recoveryAction = await actions.create({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Crash-linkage notify',
     prompt: 'Already dispatched before the simulated crash.',
     target_runtimes: [member.runtime_spec],
@@ -1336,7 +1336,7 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
 
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Crash-linkage mission',
     objective: 'Prove a successfully-dispatched post-action survives a crash before its run_id is saved.',
@@ -1350,7 +1350,7 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
   const realRoomId = randomUUID();
   const realRun = await runRepo.save(runRepo.create({
     action_id: recoveryAction.id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     room_id: realRoomId,
     triggered_by_type: 'system',
     triggered_by_id: triggerId,
@@ -1409,11 +1409,11 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
   const missions = app.get(OrchestrationMissionService);
   const reaper = app.get(OrchestrationReaperService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'orch-starvation');
+  const ws = await createAccount(app, getDataSourceToken, 'orch-starvation');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Starvation squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'member' }],
@@ -1423,7 +1423,7 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
   const member = squad.member('member');
 
   const recoveryAction = await actions.create({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Starvation-regression notify',
     prompt: 'Old mission, should still be recovered.',
     target_runtimes: [member.runtime_spec],
@@ -1436,7 +1436,7 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
   for (let i = 0; i < 120; i++) {
     await missionRepo.save(
       missionRepo.create({
-        workspace_id: ws.id,
+        account_id: ws.id,
         team_id: team.id,
         title: `Noise mission ${i}`,
         status: 'completed',
@@ -1455,7 +1455,7 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
 
   step('그보다 훨씬 먼저 끝났고, 아직 미확정 post-action이 남아있는 미션 1개를 만든다');
   const oldMission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Old unresolved mission',
     objective: 'Finished long ago but still has an unresolved post-action.',

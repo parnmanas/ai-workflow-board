@@ -55,7 +55,7 @@ function makeRepo(rows) {
 function makeMission(id, overrides = {}) {
   return {
     id,
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     team_id: 'team-1',
     title: `Mission ${id}`,
     status: 'running',

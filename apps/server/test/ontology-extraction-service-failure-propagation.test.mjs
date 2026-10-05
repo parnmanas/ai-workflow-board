@@ -38,14 +38,14 @@ const { OntologyExtractionService } = await import(
 
 // 그래프의 `resourceId` 는 이름만 남은 것이고 값은 Project id 다 — 저장소
 // Resource 가 같은 id 로 Project 로 이관됐다(docs/tickets.md). 서비스는
-// ProjectsService.getInWorkspace(id, workspaceId) 로 저장소를 해소한다.
+// ProjectsService.getInWorkspace(id, accountId) 로 저장소를 해소한다.
 function fakeProjectsService() {
   return {
-    async getInWorkspace(id, workspaceId) {
-      if (id !== 'res-1' || workspaceId !== 'ws-1') return null;
+    async getInWorkspace(id, accountId) {
+      if (id !== 'res-1' || accountId !== 'ws-1') return null;
       return {
         id: 'res-1',
-        workspace_id: 'ws-1',
+        account_id: 'ws-1',
         name: 'fake-repo',
         description: '',
         repo_url: 'https://example.invalid/fake-repo.git',
@@ -150,7 +150,7 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
       },
     });
 
-    const result = await svc.extractRepo({ workspaceId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
 
     assert.equal(result.filesDiscovered, 2, '두 파일 다 발견은 됐다');
     assert.equal(result.filesFailedExtraction, 1, '워커 실패 1건이 카운트에 반영돼야 한다');
@@ -168,7 +168,7 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
       poolResults: (tasks) => tasks.map((t) => ({ path: t.path, bundle: makeBundle(t.path), decoratorFacts: [], error: null })),
     });
 
-    const result = await svc.extractRepo({ workspaceId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
 
     assert.equal(result.filesFailedExtraction, 0);
     assert.deepEqual(result.extractionFailures, []);
@@ -181,7 +181,7 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
       poolResults: (tasks) => tasks.map((t) => ({ path: t.path, bundle: null, decoratorFacts: [], error: longError })),
     });
 
-    const result = await svc.extractRepo({ workspaceId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
 
     assert.equal(result.filesFailedExtraction, 2);
     assert.equal(result.extractionFailures.length, 2);

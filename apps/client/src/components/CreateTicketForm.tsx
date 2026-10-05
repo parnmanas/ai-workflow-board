@@ -22,7 +22,7 @@ import {
 
 interface CreateTicketFormProps {
   isOpen: boolean;
-  workspaceId: string;
+  accountId: string;
   projects: Project[];
   /** Known tags (facet counts from the list) for the tag input suggestions. */
   knownTags?: ReadonlyArray<TicketTagCount | string>;
@@ -44,7 +44,7 @@ const labelStyle: React.CSSProperties = {
 };
 
 // Atomic ticket creation — every field captured together and POSTed once to
-// POST /workspaces/:wsId/tickets. Before this modal, a stub row with title-only
+// POST /accounts/:wsId/tickets. Before this modal, a stub row with title-only
 // was written immediately and the description followed as a separate PATCH;
 // the assignee picked up the empty stub before the human finished typing.
 // Requiring description here gives "done composing" an unambiguous signal.
@@ -56,7 +56,7 @@ const labelStyle: React.CSSProperties = {
 // default (or leaves the ticket unassigned — never dispatched).
 export default function CreateTicketForm({
   isOpen,
-  workspaceId,
+  accountId,
   projects,
   knownTags = [],
   initialStatus,
@@ -84,7 +84,7 @@ export default function CreateTicketForm({
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) || null, [projects, projectId]);
   // Whole-workspace tags (not just the current filter's facet).
-  const workspaceTags = useTicketTags(workspaceId, isOpen);
+  const workspaceTags = useTicketTags(accountId, isOpen);
   const tagSuggestions = useMemo(() => mergeTagSuggestions(workspaceTags, knownTags), [workspaceTags, knownTags]);
 
   useEffect(() => {
@@ -164,7 +164,7 @@ export default function CreateTicketForm({
     try {
       let spec: Record<string, any> | null | undefined;
       if (wantsAssignee) {
-        const result = await api.validateRuntimeSpec(workspaceId, assignee);
+        const result = await api.validateRuntimeSpec(accountId, assignee);
         if (!result.ok || !result.spec) {
           setErrors({ assignee: result.error || '담당자 설정이 올바르지 않습니다.' });
           return;
@@ -325,7 +325,7 @@ export default function CreateTicketForm({
           )}
           {assigneeOn && (
             <div style={{ marginTop: 10 }}>
-              <RuntimeSpecEditor value={assignee} onChange={handleAssigneeChange} hosts={hosts} workspaceId={workspaceId} disabled={submitting} />
+              <RuntimeSpecEditor value={assignee} onChange={handleAssigneeChange} hosts={hosts} accountId={accountId} disabled={submitting} />
             </div>
           )}
           {errors.assignee && (

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import type { CatalogScope, Resource, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -37,7 +37,7 @@ function typeLabel(type: string): string {
 }
 
 interface ResourceManagerProps {
-  workspaceId?: string;
+  accountId?: string;
   catalogMode?: boolean;
   createScope?: CatalogScope;
   allScopes?: boolean;
@@ -45,9 +45,9 @@ interface ResourceManagerProps {
 }
 
 export default function ResourceManager({
-  workspaceId,
+  accountId,
   catalogMode = false,
-  createScope = 'workspace',
+  createScope = 'account',
   allScopes = false,
   canManageGlobal = false,
 }: ResourceManagerProps) {
@@ -93,10 +93,10 @@ export default function ResourceManager({
     return () => ro.disconnect();
   }, []);
 
-  const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
+  const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
   const loadResources = useCallback(async () => {
-    if (!effectiveWorkspaceId) {
+    if (!effectiveAccountId) {
       setResources([]);
       setLoading(false);
       return;
@@ -105,12 +105,12 @@ export default function ResourceManager({
     try {
       const [list, creds] = await Promise.all([
         api.listResources(
-          effectiveWorkspaceId,
+          effectiveAccountId,
           filterType || undefined,
           { by: sortBy, order: sortOrder },
           catalogMode && allScopes,
         ),
-        api.listCredentials(effectiveWorkspaceId, {
+        api.listCredentials(effectiveAccountId, {
           includeAllScopes: catalogMode && allScopes,
         }).catch(() => [] as Credential[]),
       ]);
@@ -121,7 +121,7 @@ export default function ResourceManager({
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
+  }, [effectiveAccountId, catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
 
   useEffect(() => {
     loadResources();
@@ -247,8 +247,8 @@ export default function ResourceManager({
       setFormErrors(errors);
       return;
     }
-    if (!effectiveWorkspaceId) {
-      showToast('Select a workspace first.', 'error');
+    if (!effectiveAccountId) {
+      showToast('Ownership defaults are unavailable.', 'error');
       return;
     }
 
@@ -262,7 +262,7 @@ export default function ResourceManager({
       if (editResource) {
         await api.updateResource(editResource.id, {
           scope: editResource.scope,
-          workspace_id: editResource.workspace_id,
+          account_id: editResource.account_id,
           name: formName.trim(),
           description: formDescription,
           type: formType,
@@ -278,7 +278,7 @@ export default function ResourceManager({
       } else {
         await api.createResource({
           scope: createScope,
-          workspace_id: createScope === 'global' ? null : effectiveWorkspaceId,
+          account_id: createScope === 'global' ? null : effectiveAccountId,
           credential_id: formCredentialId || null,
           name: formName.trim(),
           description: formDescription,
@@ -305,7 +305,7 @@ export default function ResourceManager({
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteResource(deleteTarget.id, effectiveWorkspaceId);
+      await api.deleteResource(deleteTarget.id, effectiveAccountId);
       showToast('Resource deleted.', 'success');
       if (selectedId === deleteTarget.id) setSelectedId(null);
       setDeleteTarget(null);
@@ -315,9 +315,9 @@ export default function ResourceManager({
     }
   };
 
-  if (!effectiveWorkspaceId) {
+  if (!effectiveAccountId) {
     return (
-      <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Select a workspace first.</div>
+      <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>
     );
   }
 
@@ -468,10 +468,10 @@ export default function ResourceManager({
     credential.scope === 'global'
     || (
       resourceFormScope !== 'global'
-      && credential.workspace_id === effectiveWorkspaceId
+      && credential.account_id === effectiveAccountId
     )
   );
-  const projectsHref = effectiveWorkspaceId ? `/ws/${encodeURIComponent(effectiveWorkspaceId)}/projects` : '';
+  const projectsHref = effectiveAccountId ? `/projects` : '';
 
   return (
     <div ref={containerRef}>

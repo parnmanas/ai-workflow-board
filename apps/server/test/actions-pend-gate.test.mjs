@@ -80,7 +80,7 @@ test('multiple candidates are all reflected in the count', () => {
   assert.equal(r.candidateCount, 2);
   assert.match(r.message, /\bA\b/);
   assert.match(r.message, /\bB\b/);
-  // Every candidate is workspace-scope only (board-scope Actions were removed
+  // Every candidate is account-scope only (board-scope Actions were removed
   // by 65adf0b) — the message no longer carries a per-candidate scope label.
   assert.doesNotMatch(r.message, /scope:/);
 });

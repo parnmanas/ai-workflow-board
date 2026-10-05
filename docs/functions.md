@@ -12,16 +12,16 @@ They complement Actions:
 
 ## Scope
 
-Functions use one database model. There are no separate Global and Workspace
+Functions use one database model. There are no separate Global and Account
 Function types, and there is no Board layer (boards were removed — see
 [`tickets.md`](tickets.md)).
 
-| `workspace_id` | Meaning | Management surface |
+| `account_id` | Meaning | Management surface |
 |---|---|---|
-| `NULL` | Global, inherited by every workspace | Functions menu |
-| workspace UUID | Available only in that workspace | Functions menu |
+| `NULL` | Global, inherited by every account | Functions menu |
+| account UUID | Available only in that account | Functions menu |
 
-Resolution is by stable `key`: Workspace overrides Global. Scope cannot be moved in place; create/delete an override
+Resolution is by stable `key`: Account overrides Global. Scope cannot be moved in place; create/delete an override
 instead so run history remains unambiguous.
 
 ## Definition contract
@@ -70,8 +70,8 @@ run user-authored shell text.
 ## Function catalogue
 
 Function definitions use the shared catalog scope described in
-[`catalog-scopes.md`](catalog-scopes.md). A key resolves in Workspace → Global
-order. The Workspace Functions page requests `include_shadowed=true` so an
+[`catalog-scopes.md`](catalog-scopes.md). A key resolves in Account → Global
+order. The Functions page for that ownership context requests `include_shadowed=true` so an
 operator can inspect and edit every definition instead of seeing only the
 effective winner.
 
@@ -128,7 +128,7 @@ after an Agent says it merged.
 - `workflow.recover_interrupted_run`
 - `workflow.expire_stale_approval`
 
-### P2 — agent and workspace operations
+### P2 — runtime, repository, and credential operations
 
 - `agent.spawn`
 - `agent.stop`
@@ -149,7 +149,7 @@ after an Agent says it merged.
 The durable target is a Function binding layer:
 
 - event: `manual`, `before_transition`, `after_transition`, or `schedule`;
-- workspace / tag / project / source-status / destination-status filters;
+- account / tag / project / source-status / destination-status filters;
 - blocking or asynchronous mode;
 - optional condition;
 - `required_for_transition`.
@@ -165,11 +165,11 @@ not diverge by caller.
 
 - `list_functions`
 - `get_function`
-- `save_function` (Workspace scope only)
-- `delete_function` (caller Workspace-authored only)
+- `save_function` (Account scope only)
+- `delete_function` (caller Account-authored only)
 - `execute_function`
 - `list_function_runs`
 
 Global authoring stays on the authenticated admin REST/UI path inside the
-Functions menu. MCP API keys
-bound to a workspace cannot manage or execute another workspace's Functions.
+Functions menu. Account-scoped MCP API keys cannot manage or execute another
+account's Functions.

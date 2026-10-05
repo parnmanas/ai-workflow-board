@@ -50,7 +50,7 @@ export class OntologyEdge {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   graph_id: string;

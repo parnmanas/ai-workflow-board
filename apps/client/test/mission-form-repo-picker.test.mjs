@@ -29,7 +29,7 @@ import { MissionFormModal } from '../src/components/orchestration/OrchestrationP
 const WS = 'ws-1';
 
 const project = (id, name, repo_url, default_branch) => ({
-  id, workspace_id: WS, name, description: '', repo_url, default_branch, credential_id: null,
+  id, account_id: WS, name, description: '', repo_url, default_branch, credential_id: null,
   clone_policy: null, use_pr: false, instructions: '', default_assignee: null, host_folders: [],
   created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(),
 });
@@ -72,7 +72,7 @@ function selectedLabel(select) {
 function baseMission(overrides) {
   return {
     id: 'mission-1',
-    workspace_id: WS,
+    account_id: WS,
     team_id: 'team-1',
     team_name: 'Platform squad',
     title: 'Ship the billing export',
@@ -118,10 +118,10 @@ function baseMission(overrides) {
 const TEAMS = [
   {
     id: 'team-1',
-    workspace_id: WS,
+    account_id: WS,
     is_global: false,
-    owner_workspace_id: WS,
-    allowed_workspace_ids: [],
+    owner_account_id: WS,
+    allowed_account_ids: [],
     name: 'Platform squad',
     description: '',
     orchestrator_agent_id: 'agent-1',

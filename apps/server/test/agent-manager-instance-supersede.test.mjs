@@ -6,7 +6,7 @@ function record(overrides = {}) {
   return {
     instance_id: 'instance-old',
     agent_id: 'manager-agent',
-    workspace_id: 'workspace',
+    account_id: 'account',
     mode: 'manager',
     hostname: 'PARN-HOME',
     plugin_version: '1.6.73',

@@ -1,5 +1,6 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, Optional } from '@nestjs/common';
 import { AuthService } from '../../services/auth.service';
+import { AccountAccessService } from '../../services/account-access.service';
 
 function parsePermissions(raw: string): string[] {
   if (!raw) return [];
@@ -8,7 +9,7 @@ function parsePermissions(raw: string): string[] {
 
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService, @Optional() private readonly accounts?: AccountAccessService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
@@ -30,6 +31,8 @@ export class AuthGuard implements CanActivate {
       role: user.role,
       permissions: parsePermissions((user as any).permissions || ''),
     };
+
+    if (this.accounts) await this.accounts.bindRequest(request);
 
     return true;
   }

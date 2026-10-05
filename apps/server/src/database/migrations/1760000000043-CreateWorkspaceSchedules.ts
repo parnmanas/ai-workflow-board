@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Creates workspace_schedules (general-purpose agent-task scheduler — ticket
+ * Creates automation_schedules (general-purpose agent-task scheduler — ticket
  * 8845be79). Same shape/rationale as CreateQaSchedules: in dev (sql.js)
  * synchronize:true auto-creates the table from the entity, so this only runs DDL
  * on Postgres (production). All statements are IF NOT EXISTS so they are harmless
@@ -20,9 +20,9 @@ export class CreateWorkspaceSchedules1760000000043 implements MigrationInterface
     }
 
     await queryRunner.query(`
-      CREATE TABLE IF NOT EXISTS workspace_schedules (
+      CREATE TABLE IF NOT EXISTS automation_schedules (
         id UUID PRIMARY KEY,
-        workspace_id VARCHAR NOT NULL,
+        account_id VARCHAR NOT NULL,
         board_id VARCHAR NULL,
         name VARCHAR NOT NULL,
         target_agent_id VARCHAR NOT NULL,
@@ -40,7 +40,7 @@ export class CreateWorkspaceSchedules1760000000043 implements MigrationInterface
       )
     `);
     await queryRunner.query(
-      'CREATE INDEX IF NOT EXISTS idx_workspace_schedules_ws_enabled ON workspace_schedules(workspace_id, enabled)'
+      'CREATE INDEX IF NOT EXISTS idx_automation_schedules_ws_enabled ON automation_schedules(account_id, enabled)'
     );
   }
 

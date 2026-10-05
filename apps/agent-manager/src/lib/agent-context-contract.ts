@@ -144,7 +144,7 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
     version: AGENT_CONTEXT_VERSION,
     authority: ['system_policy', 'role_instructions', 'project_instructions', 'task', 'prior_progress'],
     assignment: {
-      workspaceId: compact(ticket.workspace_id, 256),
+      accountId: compact(ticket.account_id, 256),
       // board-less 서버의 REST 티켓에는 board_id 가 없다 — 빈 값을 싣지 않고 생략한다.
       ...(boardId ? { boardId } : {}),
       ticketId: compact(ticket.id, 256),

@@ -7,8 +7,8 @@ export function sortSessionsByActivity(list: AgentSessionSummary[]): AgentSessio
   return [...list].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
 }
 
-export function sessionPath(workspaceBase: string, managerId: string, cli: string, sessionId: string): string {
-  return `${workspaceBase}/sessions/${managerId}/${cli}/${encodeURIComponent(sessionId)}`;
+export function sessionPath(basePath: string, managerId: string, cli: string, sessionId: string): string {
+  return `/sessions/${managerId}/${cli}/${encodeURIComponent(sessionId)}`;
 }
 
 /** 새 세션 cwd 기억 — 호스트×CLI 별 localStorage 키. */

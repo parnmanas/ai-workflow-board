@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeAgentWorkspaceId,
+  normalizeAgentAccountId,
   agentIsVisibleInWorkspace,
   agentWorkspaceWhere,
-} from '../dist/common/agent-workspace-scope.js';
+} from '../dist/common/agent-account-scope.js';
 
 test('agent workspace normalization persists global scope as null', () => {
   for (const value of [null, undefined, '', '   ']) {
-    assert.equal(normalizeAgentWorkspaceId(value), null);
+    assert.equal(normalizeAgentAccountId(value), null);
   }
-  assert.equal(normalizeAgentWorkspaceId(' workspace-a '), 'workspace-a');
+  assert.equal(normalizeAgentAccountId(' workspace-a '), 'workspace-a');
 });
 
 test('global agents are visible in every workspace while foreign agents are not', () => {
@@ -24,7 +24,7 @@ test('global agents are visible in every workspace while foreign agents are not'
 test('agent workspace query includes local, legacy-empty, and null-global rows', () => {
   const where = agentWorkspaceWhere('workspace-a');
   assert.equal(where.length, 3);
-  assert.equal(where[0].workspace_id, 'workspace-a');
-  assert.equal(where[1].workspace_id, '');
-  assert.equal(where[2].workspace_id._type, 'isNull');
+  assert.equal(where[0].account_id, 'workspace-a');
+  assert.equal(where[1].account_id, '');
+  assert.equal(where[2].account_id._type, 'isNull');
 });

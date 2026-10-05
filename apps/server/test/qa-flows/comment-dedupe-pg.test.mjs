@@ -58,7 +58,7 @@ function writeSeq(metadata) {
 
 test('Postgres: 같은 dedupe_key 자동 알림은 순차·동시 어느 쪽으로 와도 한 행으로 합쳐진다', { skip: SKIP }, async (t) => {
   const { bootApp, step } = await import('../helpers/boot.mjs');
-  const { createWorkspace, createTicket } = await import('../helpers/fixtures.mjs');
+  const { createAccount, createTicket } = await import('../helpers/fixtures.mjs');
 
   step('Boot NestJS app on Postgres (isolated schema)');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
@@ -93,8 +93,8 @@ test('Postgres: 같은 dedupe_key 자동 알림은 순차·동시 어느 쪽으�
   // 부팅된 앱의 DataSource 를 그대로 쓰므로 엔티티는 등록된 이름으로 집는다.
   const commentRepo = ds.getRepository('Comment');
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'pgdedupe');
-  const makeTicket = (title) => createTicket(app, getDataSourceToken, { workspaceId: ws.id, title });
+  const ws = await createAccount(app, getDataSourceToken, 'pgdedupe');
+  const makeTicket = (title) => createTicket(app, getDataSourceToken, { accountId: ws.id, title });
   const notice = (ticketId, attempt) => addComment({
     ...AUTHOR,
     ticket_id: ticketId,

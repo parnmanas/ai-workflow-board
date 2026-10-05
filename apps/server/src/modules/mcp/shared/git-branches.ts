@@ -26,20 +26,20 @@ export class GitCredentialResolutionError extends Error {
 }
 
 /** Decrypt a workspace Credential row into the `{username, token}` shape
- *  `applyCredential` expects. Accepts a GLOBAL credential (workspace_id=NULL,
- *  shared instance-wide) or one scoped to `workspaceId`; an out-of-workspace
+ *  `applyCredential` expects. Accepts a GLOBAL credential (account_id=NULL,
+ *  shared instance-wide) or one scoped to `accountId`; an out-of-workspace
  *  credential resolves to null. Also returns null if the row is missing or
  *  fails to decrypt — callers should treat that as "no auth available" and let
  *  `git ls-remote` decide whether the repo is reachable anonymously. */
 export async function resolveGitCredential(
   credRepo: Repository<Credential>,
   credentialId: string | null | undefined,
-  workspaceId: string,
+  accountId: string,
 ): Promise<{ username?: string; token?: string } | null> {
   if (!credentialId) return null;
   const cred = await credRepo.findOne({ where: { id: credentialId } });
   if (!cred) throw new GitCredentialResolutionError(`Selected credential ${credentialId} does not exist`);
-  if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
+  if (cred.account_id !== null && cred.account_id !== accountId) {
     throw new GitCredentialResolutionError('Selected credential belongs to a different workspace');
   }
   try {

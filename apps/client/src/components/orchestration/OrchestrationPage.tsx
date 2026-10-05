@@ -1,5 +1,6 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import type {
   Action,
@@ -30,7 +31,8 @@ import { RepoRefPicker, buildRepoRefPayload, repoRefProjectId } from '../admin/W
  * the detail view, which refetches on the same signal.
  */
 export default function OrchestrationPage() {
-  const { wsId = '' } = useParams<{ wsId: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const navigate = useNavigate();
   const { showToast } = useToast();
 
@@ -65,7 +67,7 @@ export default function OrchestrationPage() {
   // busy mission emits an update per step transition and a full reload per
   // frame would thrash the list while the user is reading it.
   useBoardStreamEvent('orchestration_update', (data: OrchestrationUpdateEvent) => {
-    if (!data || data.workspace_id !== wsId) return;
+    if (!data) return;
     // 삭제된 미션은 제자리 패치가 아니라 목록에서 빼야 한다 — 아래 분기는
     // "아는 미션이면 패치"라서, 그대로 두면 사라진 미션이 행으로 남는다.
     if (data.deleted) {
@@ -105,7 +107,7 @@ export default function OrchestrationPage() {
       {/* 진행 중 step 점의 맥박. MissionDetailPage 와 같은 이름/정의를 쓴다 — 여기에
           없으면 목록 카드의 점만 조용히 정적으로 굳는다(애니메이션은 실패해도 조용하다). */}
       <PageHeader
-        title="Orchestrations"
+        title="Missions"
         description="Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back."
         actions={
           <>
@@ -132,7 +134,7 @@ export default function OrchestrationPage() {
           <EmptyState
             title="No teams yet"
             description="A mission runs on a team: one orchestrator agent that plans, plus the members it delegates to. Create a team first."
-            action={<Button variant="primary" onClick={() => navigate(`/ws/${wsId}/teams`)}>Create a team</Button>}
+            action={<Button variant="primary" onClick={() => navigate(`/teams`)}>Create a team</Button>}
           />
         ) : visible.length === 0 ? (
           <EmptyState
@@ -146,7 +148,7 @@ export default function OrchestrationPage() {
               <MissionRow
                 key={mission.id}
                 mission={mission}
-                onOpen={() => navigate(`/ws/${wsId}/orchestration/missions/${mission.id}`)}
+                onOpen={() => navigate(`/missions/${mission.id}`)}
               />
             ))}
           </div>
@@ -161,7 +163,7 @@ export default function OrchestrationPage() {
         onClose={() => setShowCreate(false)}
         onSaved={(mission) => {
           setShowCreate(false);
-          navigate(`/ws/${wsId}/orchestration/missions/${mission.id}`);
+          navigate(`/missions/${mission.id}`);
         }}
       />
     </div>
@@ -412,7 +414,7 @@ export function MissionFormModal({
     try {
       const saved = mission
         ? await api.updateOrchestrationMission(mission.id, {
-            workspace_id: wsId,
+            account_id: wsId,
             title: title.trim(),
             objective: objective.trim(),
             context: context.trim(),
@@ -428,7 +430,7 @@ export function MissionFormModal({
             user_chat_mode: userChatMode,
           })
         : await api.createOrchestrationMission({
-            workspace_id: wsId,
+            account_id: wsId,
             team_id: teamId,
             title: title.trim(),
             objective: objective.trim(),
@@ -536,7 +538,7 @@ export function MissionFormModal({
             padding: 0,
           }}
         >
-          {showAdvanced ? '▾' : '▸'} Advanced — execution contract & workspace
+          {showAdvanced ? '▾' : '▸'} Advanced — execution contract & working folder
         </button>
 
         {showAdvanced && (
@@ -713,7 +715,7 @@ export function MissionFormModal({
             </div>
             <div>
               <Input
-                label="Workspace folder root (optional)"
+                label="Account folder root (optional)"
                 value={workspaceFolder}
                 onChange={(e) => setWorkspaceFolder(e.target.value)}
                 placeholder=".awb/orch/<mission id> (default)"
@@ -740,7 +742,7 @@ export function MissionFormModal({
                   프로젝트 드롭다운 + 브랜치 드롭다운, 목록에 없는 id 보존, 조회 실패 시
                   수동 입력 폴백까지 그대로 승계한다. 여기만 별도 입력을 두면 같은
                   화면이 또 갈라진다. */}
-              <RepoRefPicker workspaceId={wsId} state={repoRefState} onChange={patchRepoRef} />
+              <RepoRefPicker accountId={wsId} state={repoRefState} onChange={patchRepoRef} />
             </div>
           </div>
         )}

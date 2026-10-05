@@ -25,7 +25,7 @@ import React, {
  * Design notes:
  * - Opens ONE stream without a per-entity filter (app-level subscription), so
  *   workspace switches do NOT require reconnecting the EventSource.
- *   Consumers filter by `data.workspace_id` / `data.ticket_id` client-side.
+ *   Consumers filter by `data.account_id` / `data.ticket_id` client-side.
  *   (`board_update` keeps its name — it is the ticket-change event.)
  * - Uses EventTarget as an internal pub/sub to broadcast received events to
  *   all hook subscribers without re-rendering the provider itself.

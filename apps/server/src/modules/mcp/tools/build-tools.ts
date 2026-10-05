@@ -27,7 +27,7 @@ function buildArtifactToJson(a: BuildArtifact | null) {
   if (!a) return null;
   return {
     id: a.id,
-    workspace_id: a.workspace_id,
+    account_id: a.account_id,
     repo_key: a.repo_key,
     repo_resource_id: a.repo_resource_id,
     repo_url: a.repo_url,
@@ -59,16 +59,16 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
     'commit (provenance / fallback). Pass `host` to scope reuse to your machine (a Windows exe is ' +
     'only reusable on the machine that built it); legacy unscoped rows still match.',
     {
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       repo: buildRepoRefSchema,
       target: z.string().describe('Build target (platform/config), e.g. "StandaloneWindows64/Release". Must match what register used.'),
       commit_sha: z.string().optional().describe('The repo HEAD SHA you are about to test. Omit to just get the latest build. When set, is_fresh=true means this exact commit is already built.'),
       host: z.string().optional().describe('Your machine hostname — scopes reuse to artifacts built on this host (recommended).'),
     },
-    async ({ workspace_id, repo, target, commit_sha, host }) => {
+    async ({ account_id, repo, target, commit_sha, host }) => {
       if (!buildArtifactService) return err('Build artifact service unavailable in this MCP context');
       try {
-        const res = await buildArtifactService.getLatest({ workspaceId: workspace_id, repo, target, commitSha: commit_sha, host });
+        const res = await buildArtifactService.getLatest({ accountId: account_id, repo, target, commitSha: commit_sha, host });
         return ok({
           artifact: buildArtifactToJson(res.artifact),
           commit_match: buildArtifactToJson(res.commit_match),
@@ -87,7 +87,7 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
     'Upserts by (workspace, repo, target, commit_sha, host) — a rebuild of the same commit updates ' +
     'the existing row. Default status is `ok`; pass status `building` to claim an in-flight build.',
     {
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       repo: buildRepoRefSchema,
       target: z.string().describe('Build target (platform/config), e.g. "StandaloneWindows64/Release". Keep it stable across runs so artifacts share.'),
       commit_sha: z.string().describe('The exact repo commit SHA this artifact was built from (git rev-parse HEAD).'),
@@ -99,12 +99,12 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
       run_id: z.string().optional().describe('Optional linked QaRun id that produced this build.'),
       status: z.enum(['building', 'ok', 'failed']).optional().describe('Default "ok". Use "building" to claim an in-flight build; "failed" is better done via report_build_failure.'),
     },
-    async ({ workspace_id, repo, target, commit_sha, artifact_path, artifact_hash, artifact_resource_id, host, log_summary, run_id, status }, extra: { sessionId?: string }) => {
+    async ({ account_id, repo, target, commit_sha, artifact_path, artifact_hash, artifact_resource_id, host, log_summary, run_id, status }, extra: { sessionId?: string }) => {
       if (!buildArtifactService) return err('Build artifact service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const row = await buildArtifactService.register({
-          workspaceId: workspace_id,
+          accountId: account_id,
           repo,
           target,
           commitSha: commit_sha,
@@ -131,7 +131,7 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
     'status (never a phantom `running` or a generic `error`) that files the build log onto the ' +
     'auto-created fix ticket. Call this INSTEAD of complete_qa_run when the build itself failed.',
     {
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       repo: buildRepoRefSchema,
       target: z.string().describe('Build target (platform/config) that failed to build.'),
       log_summary: z.string().describe('The build error / log tail (~last 40 lines). Required — this is the evidence carried onto the fix ticket.'),
@@ -139,12 +139,12 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
       host: z.string().optional().describe('Machine hostname where the build failed.'),
       run_id: z.string().optional().describe('The QaRun id to finalize as build_failed. Omit for a standalone (non-run) build failure.'),
     },
-    async ({ workspace_id, repo, target, log_summary, commit_sha, host, run_id }, extra: { sessionId?: string }) => {
+    async ({ account_id, repo, target, log_summary, commit_sha, host, run_id }, extra: { sessionId?: string }) => {
       if (!buildArtifactService) return err('Build artifact service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const artifact = await buildArtifactService.reportFailure({
-          workspaceId: workspace_id,
+          accountId: account_id,
           repo,
           target,
           commitSha: commit_sha,
@@ -167,7 +167,7 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
           } else {
             try {
               const summary = `빌드 실패 (build_failed) — target=${target}${commit_sha ? ` commit=${commit_sha}` : ''}\n\n\`\`\`\n${log_summary}\n\`\`\``;
-              run = await qaRunService.completeRun(run_id, workspace_id, 'build_failed', summary);
+              run = await qaRunService.completeRun(run_id, account_id, 'build_failed', summary);
               run_finalized = true;
             } catch (e: any) {
               run_note = `artifact recorded, but finalizing run ${run_id} failed: ${e?.message || e}`;

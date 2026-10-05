@@ -41,7 +41,7 @@ const PARTICIPANT_CAP = 50;
 
 test('Postgres: DM 초대의 동시 실행이 중복 참여자도 cap 초과도 만들지 않는다', { skip: SKIP }, async (t) => {
   const { bootApp, step } = await import('../helpers/boot.mjs');
-  const { createWorkspace, createUser, createAgent } = await import('../helpers/fixtures.mjs');
+  const { createAccount, createUser, createAgent } = await import('../helpers/fixtures.mjs');
 
   step('Boot NestJS app on Postgres (isolated schema)');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
@@ -62,7 +62,7 @@ test('Postgres: DM 초대의 동시 실행이 중복 참여자도 cap 초과도 
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'pgchatinvite');
+  const ws = await createAccount(app, getDataSourceToken, 'pgchatinvite');
   const alice = await createUser(app, getDataSourceToken, { name: 'alice' });
   const bob = await createUser(app, getDataSourceToken, { name: 'bob' });
   const carol = await createUser(app, getDataSourceToken, { name: 'carol' });
@@ -71,7 +71,7 @@ test('Postgres: DM 초대의 동시 실행이 중복 참여자도 cap 초과도 
   /** DM 방 하나를 만들고 주어진 참여자를 active 로 넣는다. */
   async function seedDm(participants) {
     const room = await roomRepo.save(roomRepo.create({
-      workspace_id: ws.id, type: 'dm', name: '', last_message_at: null,
+      account_id: ws.id, type: 'dm', name: '', last_message_at: null,
     }));
     for (const p of participants) {
       await partRepo.save(partRepo.create({
@@ -141,7 +141,7 @@ test('Postgres: DM 초대의 동시 실행이 중복 참여자도 cap 초과도 
   step('49인 방에 서로 다른 신규 1명씩 동시 초대 — cap 50 을 넘기면 안 된다');
   {
     const room = await roomRepo.save(roomRepo.create({
-      workspace_id: ws.id, type: 'group', name: 'cap-race', last_message_at: null,
+      account_id: ws.id, type: 'group', name: 'cap-race', last_message_at: null,
     }));
     await partRepo.save(partRepo.create({
       room_id: room.id, participant_type: 'user', participant_id: alice.id,

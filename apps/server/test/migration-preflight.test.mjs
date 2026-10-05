@@ -39,7 +39,7 @@ process.env.NODE_ENV = 'test';
 
 const { buildDataSourceOptions } = await import(modPath('db.js'));
 const { MigrationRun } = await import(modPath('entities', 'MigrationRun.js'));
-const { Workspace } = await import(modPath('entities', 'Workspace.js'));
+const { Account } = await import(modPath('entities', 'Account.js'));
 const { MigrationRunService } = await import(modPath('modules', 'migration', 'migration-run.service.js'));
 const { MigrationExportController } = await import(modPath('modules', 'migration', 'migration-export.controller.js'));
 const { computeSchemaFingerprint } = await import(modPath('modules', 'migration', 'migration-crypto.js'));
@@ -138,7 +138,7 @@ test('3. entity missing on source is surfaced as a diagnostic reason alongside t
 });
 
 test('4. a non-empty destination is rejected without allow_merge, and accepted with it', async () => {
-  const wsRepo = ds.getRepository(Workspace);
+  const wsRepo = ds.getRepository(Account);
   await wsRepo.save(wsRepo.create({ name: 'pre-existing workspace' }));
 
   const svc = new TestableMigrationRunService(ds, runRepo, logStub, quiesceStub);

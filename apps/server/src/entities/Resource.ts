@@ -1,6 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
-// Resource pickers list by workspace_id on every open; the table holds large
+// Resource pickers list by account_id on every open; the table holds large
 // file_data/content blobs so an unindexed scan is expensive — perf ticket
 // b3812637.
 //
@@ -8,13 +8,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 // to Projects (entities/Project.ts) with the same id, and the controller/MCP
 // reject new ones.
 @Entity('resources')
-@Index('idx_resources_workspace', ['workspace_id'])
+@Index('idx_resources_workspace', ['account_id'])
 export class Resource {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
-  workspace_id: string | null;
+  account_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;

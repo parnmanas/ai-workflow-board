@@ -5,13 +5,13 @@
 //
 // Role holders are gone with the board model (docs/tickets.md): a ticket has
 // one assignee, a RuntimeSpec whose `manager_agent_id` names the Runtime Host.
-// The property survives unchanged — Runtime Hosts carry a `workspace_id`, so
+// The property survives unchanged — Runtime Hosts carry a `account_id`, so
 // the client's workspace-filtered host list cannot name a host paired in a
 // different workspace, and the server must resolve it by id with NO workspace
 // filter. Both projections do that independently, so both are covered:
 //
 //   1. Full ticket (GET /tickets/:id → loadTicketFull — also MCP get_ticket).
-//   2. Ticket cards (GET /workspaces/:wsId/tickets → TicketService.cards).
+//   2. Ticket cards (GET /accounts/:wsId/tickets → TicketService.cards).
 //
 // A spec whose host no longer exists falls back to the spec's label — still
 // never the raw id (docs/runbooks/agent-display-name.md).
@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createUser,
   createTicket,
@@ -39,13 +39,13 @@ test('cross-workspace assignee host → <Host>/<label>, never a raw id', async (
   // The ticket lives in WS_TICKETS; the assignee's Runtime Host is registered
   // in a DISTINCT workspace (WS_HOST) — the exact shape a workspace-filtered
   // host list cannot resolve.
-  const wsTickets = await createWorkspace(app, getDataSourceToken, 'xws-tickets');
-  const wsHost = await createWorkspace(app, getDataSourceToken, 'xws-host');
+  const wsTickets = await createAccount(app, getDataSourceToken, 'xws-tickets');
+  const wsHost = await createAccount(app, getDataSourceToken, 'xws-host');
 
   const crossAgent = await createAgent(app, getDataSourceToken, wsHost.id, { name: 'CoderX', runtime: true });
   const crossSpec = { ...crossAgent.runtime_spec, label: 'CoderX' };
   const crossHost = await ds.getRepository('RuntimeHost').findOneBy({ id: crossSpec.manager_agent_id });
-  assert.equal(crossHost.workspace_id, wsHost.id, 'precondition: the host belongs to the OTHER workspace');
+  assert.equal(crossHost.account_id, wsHost.id, 'precondition: the host belongs to the OTHER workspace');
   const expectedCross = `${crossHost.name}/CoderX`;
 
   // Same-workspace assignee → no regression.
@@ -58,7 +58,7 @@ test('cross-workspace assignee host → <Host>/<label>, never a raw id', async (
 
   // backlog: never dispatched, so the fixture rows stay exactly as written.
   const make = (title, assignee) => createTicket(app, getDataSourceToken, {
-    workspaceId: wsTickets.id, title, status: 'backlog', assignee,
+    accountId: wsTickets.id, title, status: 'backlog', assignee,
   });
   const crossTicket = await make('cross-ws assignee', crossSpec);
   const localTicket = await make('local assignee', localSpec);
@@ -68,7 +68,7 @@ test('cross-workspace assignee host → <Host>/<label>, never a raw id', async (
   const token = app.get(AuthService).createSession(admin.id);
   const api = async (path) => {
     const res = await fetch(`http://127.0.0.1:${port}/api${path}`, {
-      headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': wsTickets.id },
+      headers: { Authorization: `Bearer ${token}`, 'X-Account-Id': wsTickets.id },
     });
     const body = await res.json().catch(() => null);
     assert.equal(res.status, 200, `GET ${path} → ${res.status} ${JSON.stringify(body)}`);
@@ -90,8 +90,8 @@ test('cross-workspace assignee host → <Host>/<label>, never a raw id', async (
   });
 
   // ── Path 2: ticket cards (Tickets page list) ──────────────────────────────
-  await t.test('GET /workspaces/:wsId/tickets cards return the canonical assignee_name', async () => {
-    const { tickets } = await api(`/workspaces/${wsTickets.id}/tickets`);
+  await t.test('GET /accounts/:wsId/tickets cards return the canonical assignee_name', async () => {
+    const { tickets } = await api(`/accounts/${wsTickets.id}/tickets`);
     const names = new Map(tickets.map((c) => [c.id, c.assignee_name]));
     assert.equal(names.get(crossTicket.id), expectedCross,
       `card cross-ws assignee must be "${expectedCross}", got "${names.get(crossTicket.id)}"`);

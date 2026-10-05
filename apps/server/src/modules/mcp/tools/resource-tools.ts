@@ -1,5 +1,5 @@
 /**
- * Resource (Global/Workspace document & embedding) MCP tools.
+ * Resource (Global/Account document & embedding) MCP tools.
  *
  * Tools: list_resources, get_resource, save_resource, delete_resource,
  *        search_resources, embed_resources, list_repo_branches
@@ -26,17 +26,17 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'list_resources',
-    'List inherited Global and Workspace resources. ' +
+    'List inherited Global and Account resources. ' +
     'Types: document, image, link, comment_attachment (auto-managed, hidden from default UI). ' +
     'Repositories are Projects — use list_projects.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       type: z.string().optional().describe('Filter by resource type: document, image, link, comment_attachment'),
     },
-    async ({ workspace_id, type }) => {
+    async ({ account_id, type }) => {
       const repo = dataSource.getRepository(Resource);
       const qb = repo.createQueryBuilder('r')
-        .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspace_id });
+        .where('(r.account_id IS NULL OR r.account_id = :ws)', { ws: account_id });
       if (type) qb.andWhere('r.type = :t', { t: type });
       else qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
       const resources = await qb.orderBy('r.name', 'ASC').getMany();
@@ -48,13 +48,13 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'get_resource',
     'Get one inherited resource by ID with full content (including file_data if present).',
     {
-      workspace_id: z.string().describe('Workspace scope boundary'),
+      account_id: z.string().describe('Account scope boundary'),
       id: z.string().describe('Resource ID'),
     },
-    async ({ workspace_id, id }) => {
+    async ({ account_id, id }) => {
       const repo = dataSource.getRepository(Resource);
       const resource = await repo.findOne({ where: { id } });
-      if (!resource || !canUseCatalogItem(resource, workspace_id)) return err('Resource not found in scope');
+      if (!resource || !canUseCatalogItem(resource, account_id)) return err('Resource not found in scope');
       return ok({
         ...resource,
         tags: parseResourceTags(resource),
@@ -70,7 +70,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'To attach a file to a comment from MCP: (1) call save_resource with type="comment_attachment" + file_data (base64) + file_name + file_mimetype, scoped to the same workspace as the target ticket; (2) pass the returned id in add_comment.attachment_resource_ids. Images render inline; videos render with an inline player; everything else renders as a download chip. ' +
     'Resources are automatically embedded for vector search when an embedding API is configured.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       id: z.string().optional().describe('Resource ID — omit to create, provide to update'),
       name: z.string().describe('Resource name'),
       description: z.string().optional().describe('Short description'),
@@ -84,12 +84,12 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       file_mimetype: z.string().optional().describe('File MIME type'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
     },
-    async ({ workspace_id, id, name, description, type, url, content, file_data, file_name, file_mimetype, tags }) => {
+    async ({ account_id, id, name, description, type, url, content, file_data, file_name, file_mimetype, tags }) => {
       const repo = dataSource.getRepository(Resource);
       if (type === 'repository') return err(REPOSITORY_RESOURCE_REJECTION);
       if (!name || !name.trim()) return err('Resource name is required');
       if (id) {
-        const existing = await repo.findOne({ where: { id, workspace_id } });
+        const existing = await repo.findOne({ where: { id, account_id } });
         if (!existing) return err('Resource not found in workspace');
         existing.name = name.trim();
         if (description !== undefined) existing.description = description;
@@ -117,7 +117,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         ? file_mimetype
         : (effectiveFileData ? inferResourceMimetype(effectiveFileData, effectiveFileName || name) : '');
       const created = repo.create({
-        workspace_id,
+        account_id,
         name: name.trim(),
         description: description ?? '',
         type: type ?? 'link',
@@ -139,23 +139,23 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'List branches of a Project\'s repository via `git ls-remote --heads`. The Project must carry a repo_url. ' +
     'Branches sort with the Project\'s `default_branch` (when set) pinned to the top. Used to verify a base_branch exists upstream before pinning it on a ticket.',
     {
-      workspace_id: z.string().describe('Workspace ID — scope boundary so the project lookup is workspace-bounded'),
+      account_id: z.string().describe('Account ID — scope boundary so the project lookup is workspace-bounded'),
       project_id: z.string().optional().describe('Project ID'),
       // Old prompts still say resource_id. Repository Resources were migrated
       // to Projects with the same id, so the value resolves unchanged.
       resource_id: z.string().optional().describe('Deprecated alias of project_id'),
     },
-    async ({ workspace_id, project_id, resource_id }) => {
+    async ({ account_id, project_id, resource_id }) => {
       const id = (project_id || resource_id || '').trim();
       if (!id) return err('project_id is required');
-      const project = await dataSource.getRepository(Project).findOne({ where: { id, workspace_id } });
+      const project = await dataSource.getRepository(Project).findOne({ where: { id, account_id } });
       if (!project) return err('Project not found in workspace');
       if (!project.repo_url) return err("project has no repo_url — set the repository's URL before listing branches");
       try {
         const credential = await resolveGitCredential(
           dataSource.getRepository(Credential),
           project.credential_id,
-          workspace_id,
+          account_id,
         );
         const branches = await listRepoBranches({
           url: project.repo_url,
@@ -173,14 +173,14 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'delete_resource',
     'Delete a resource by ID. Also removes its vector embedding if one exists.',
     {
-      workspace_id: z.string().describe('Workspace ID (required — scope boundary)'),
+      account_id: z.string().describe('Account ID (required — scope boundary)'),
       id: z.string().describe('Resource ID'),
     },
-    async ({ workspace_id, id }) => {
+    async ({ account_id, id }) => {
       const repo = dataSource.getRepository(Resource);
-      const existing = await repo.findOne({ where: { id, workspace_id } });
+      const existing = await repo.findOne({ where: { id, account_id } });
       if (!existing) return err('Resource not found in workspace');
-      await repo.delete({ id, workspace_id });
+      await repo.delete({ id, account_id });
       const embRepo = dataSource.getRepository(ResourceEmbedding);
       await embRepo.delete({ resource_id: id });
       return ok({ success: true, id });
@@ -192,15 +192,15 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'Search resources using semantic vector similarity (when embedding API configured) or text matching (fallback). ' +
     'Returns resources ranked by relevance. Use this to find relevant documents, images, or links.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       query: z.string().describe('Natural language search query'),
       type: z.string().optional().describe('Filter by resource type'),
       limit: z.number().optional().default(10).describe('Max results to return (default: 10)'),
     },
-    async ({ workspace_id, query, type, limit }) => {
+    async ({ account_id, query, type, limit }) => {
       const repo = dataSource.getRepository(Resource);
       const qb = repo.createQueryBuilder('r')
-        .where('(r.workspace_id IS NULL OR r.workspace_id = :workspaceId)', { workspaceId: workspace_id });
+        .where('(r.account_id IS NULL OR r.account_id = :accountId)', { accountId: account_id });
       if (type) qb.andWhere('r.type = :type', { type });
       const resources = await qb.orderBy('r.name', 'ASC').getMany();
 
@@ -276,14 +276,14 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'Requires EMBEDDING_PROVIDER and OPENAI_API_KEY environment variables to be configured. ' +
     'Returns the count of newly embedded resources.',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
     },
-    async ({ workspace_id }) => {
+    async ({ account_id }) => {
       if (!(await embeddingService.isEnabled())) {
         return err('Embedding not configured. Set EMBEDDING_PROVIDER=openai and OPENAI_API_KEY env vars.');
       }
       const repo = dataSource.getRepository(Resource);
-      const resources = await repo.find({ where: { workspace_id } });
+      const resources = await repo.find({ where: { account_id } });
       let embedded = 0;
       for (const resource of resources) {
         try {

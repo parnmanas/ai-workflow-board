@@ -71,7 +71,7 @@ function pgUuidRepo(rows, calls) {
 
 function makeService(calls) {
   const rooms = [
-    { id: ROOM_QA, type: 'group', name: 'QA: probe · abcdef01', workspace_id: WS, action_id: null, last_message_at: new Date() },
+    { id: ROOM_QA, type: 'group', name: 'QA: probe · abcdef01', account_id: WS, action_id: null, last_message_at: new Date() },
   ];
   // A QA-run room's participants: the QA agent, a real user, and the synthetic
   // 'system' user that qa-run.service seeds.
