@@ -241,11 +241,11 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       durationMs = startedAt === undefined ? null : now - startedAt;
       kind = reason === 'turn_finished' ? 'finished' : 'failed';
       detail = reason === 'turn_finished' ? (finished?.answer || '') : (session.last_error || '');
-    } else if (session.status === 'awaiting_permission' || session.status === 'awaiting_input') {
+    } else if (reason === 'async_question' || session.status === 'awaiting_permission' || session.status === 'awaiting_input') {
       const last = this.#lastNeedsInputAt.get(key) ?? 0;
-      if (now - last < NEEDS_INPUT_COOLDOWN_MS) return;
+      if (reason !== 'async_question' && now - last < NEEDS_INPUT_COOLDOWN_MS) return;
       this.#lastNeedsInputAt.set(key, now);
-      kind = session.status === 'awaiting_permission' ? 'needs_permission' : 'needs_input';
+      kind = reason !== 'async_question' && session.status === 'awaiting_permission' ? 'needs_permission' : 'needs_input';
       const lang = announcementLanguage((await loadVoiceConfig(this.dataSource)).stt.languages);
       const pending = this.#pendingRequest.get(key);
       detail = !pending ? ''

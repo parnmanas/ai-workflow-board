@@ -42,7 +42,7 @@ export const AGENT_SESSION_EVENT_TYPES = [
   'tool_update',          // { tool_call_id, status?, output? }
   'permission_request',   // { request_id, tool_call_id, title?, description?, kind?, options: [{ option_id, name, kind }] }
   'permission_decision',  // { request_id, outcome, option_id?, decided_by: 'user'|'policy'|'timeout'|'system' } — system: 프로세스 종료/close 로 매니저가 취소
-  'elicitation_request',  // { elicitation_id, mode: 'form'|'url', message, schema? (ACP ElicitationSchema), url?, tool_call_id? } — 에이전트의 질문/폼
+  'elicitation_request',  // { elicitation_id, mode: 'form'|'url', message, schema?, url?, tool_call_id?, async?: true } — async questions survive turn end
   'elicitation_decision', // { elicitation_id, action: 'accept'|'decline'|'cancel', content?, decided_by: 'user'|'agent'|'system' }
   'plan',                 // { entries: [{ content, priority, status }] } — 같은 turn 의 최신 plan 이 이전 것을 대체한다
   // { input_tokens, output_tokens, cached_read_tokens, cache_write_tokens,

@@ -314,6 +314,13 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
 
 ### 말로 답하기 — 승인·선택지를 듣고 말로 고른다 (2026-10-04)
 
+Codex의 `request_user_input_async`도 질문으로 전달한다. 이 도구는 ACP elicitation 대신 네이티브 rollout의
+`AgentMessage(delivery=async, questions)`를 남기므로, Codex 모듈이 새 기록만 읽어 `elicitation_request(async=true)`로 중계한다.
+서버는 `async_question` 상태 변경의 보고를 보낸다(작업은 계속 `busy`/`ready`일 수 있다). 질문을 낸 턴이 끝나도 미결 질문은 유지한다.
+사용자가 오퍼레이터나 질문 카드로 답하면 원래 세션에 답변 프롬프트를 보내며, 진행 중인 턴이 있으면 그 턴이 끝난 뒤 전달한다.
+ACP 질문·승인과 동일하게 사용자 턴·driver·선택값 검증을 거치며, 보고 턴은 답을 대신 정하지 않는다.
+매니저 프로세스 종료·세션 종료·질문 타임아웃에서 미결 질문을 닫는다. 새 매니저로 재시작해야 이 중계가 적용된다.
+
 세션이 승인이나 답을 기다리면 먼저 알림음만 낸다. 사용자가 상세를 요청하면 operator 가 선택지를 번호와 함께 읽어 주고, 사용자가 말로 고르면 operator 가 그 세션에
 대신 답을 전한다.
 

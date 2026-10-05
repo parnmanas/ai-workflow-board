@@ -300,6 +300,12 @@ export class AgentSessionStore {
     return bound.driver.findSessionFile(bound.ctx, sessionId);
   }
 
+  async watchAsyncQuestions(cli: string, sessionId: string, receive: (question: import('./clis/cli-module.js').CliAsyncQuestion) => void) {
+    if (!SESSION_ID_RE.test(sessionId)) return null;
+    const bound = this.#driverFor(cli);
+    return bound?.driver.watchAsyncQuestions?.(bound.ctx, sessionId, receive) ?? null;
+  }
+
   /**
    * 이 세션에서 마지막으로 기록된 토큰 사용량. 라이브 턴이 끝났는데 ACP 어댑터가
    * usage 를 주지 않은 경우의 메꿈용이다 — CLI 자신의 기록이 권위 있는 출처다.

@@ -627,6 +627,17 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.equal(declined.status, 200);
   assert.equal(requests.filter((r) => r.op === 'elicitation').at(-1).elicitation_content, null);
 
+  const { AgentSessionsService: AsyncSessionsService } = await import(new URL('../dist/modules/agent-sessions/agent-sessions.service.js', import.meta.url));
+  const service = app.get(AsyncSessionsService);
+  await relay({ events: [{ id: 'async-question', seq: 12, turn_id: 'async-turn', type: 'elicitation_request', payload: {
+    elicitation_id: 'async-1', mode: 'form', async: true, message: 'Summary?', schema: { type: 'object', properties: { q_1: { type: 'string' } }, required: ['q_1'] },
+  } }], state: { status: 'busy', reason: 'async_question' } });
+  await relay({ events: [{ id: 'async-finished', seq: 13, turn_id: 'async-turn', type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' } }], state: { status: 'ready', reason: 'turn_finished' } });
+  assert.equal(service.pendingInteractions(managerId, 'codex', sid).find((r) => r.id === 'async-1').async, true, 'a nonblocking question survives the originating turn');
+  const asyncAnswered = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'async-1', action: 'accept', content: { q_1: 'brief' } }) });
+  assert.equal(asyncAnswered.status, 200);
+  assert.equal(service.pendingInteractions(managerId, 'codex', sid).some((r) => r.id === 'async-1'), false);
+
   // 3. plan / elicitation_decision 도 중계되는 타입이고, history 답의 live 가 설정·명령을 되살린다
   const more = await relay({ events: [
     { id: `${sid}:live:10`, seq: 10, turn_id: prompt.body.turn_id, type: 'plan', payload: { entries: [{ content: 'Deploy', priority: 'high', status: 'in_progress' }] }, created_at: new Date().toISOString() },

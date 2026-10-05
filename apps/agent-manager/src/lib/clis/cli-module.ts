@@ -178,7 +178,20 @@ export interface CliSessionStoreContext {
   readonly storeImage?: (sessionId: string, base64: string) => Promise<{ ref: string; size: number } | null>;
 }
 
+export interface CliAsyncQuestion {
+  id: string;
+  message: string;
+  schema: Record<string, unknown>;
+}
+
+export interface CliAsyncQuestionWatcher {
+  poll(): Promise<void>;
+  close(): void;
+}
+
 export interface CliSessionStoreDriver {
+  /** Native nonblocking questions omitted by the ACP adapter. Only new records are delivered. */
+  watchAsyncQuestions?(ctx: CliSessionStoreContext, sessionId: string, receive: (question: CliAsyncQuestion) => void): Promise<CliAsyncQuestionWatcher>;
   /** Optional native failure evidence for this turn only; null if unavailable or stale. */
   readTurnFailure?(ctx: CliSessionStoreContext, sessionId: string, startedAt: number): Promise<import('../session-failure.js').SessionFailureDetails | null>;
   /** CLI 자체 기록에서 세션을 열거한다(AWB 인덱스는 호출자가 합친다). 절대 throw 하지

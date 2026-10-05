@@ -172,6 +172,8 @@ export interface PendingSessionInteraction {
   options: Array<{ option_id: string; name: string; kind: string }>;
   /** 질문(form)의 JSON Schema. */
   schema: Record<string, unknown> | null;
+  /** Nonblocking native question; survives the turn that presented it. */
+  async?: boolean;
   created_at: string;
 }
 
@@ -1523,6 +1525,7 @@ export class AgentSessionsService implements OnModuleDestroy {
           description: '',
           options: [],
           schema: p.schema && typeof p.schema === 'object' ? p.schema : null,
+          ...(p.async === true ? { async: true } : {}),
           created_at: ev.created_at,
         });
       } else if (ev.type === 'permission_decision' && typeof p.request_id === 'string') {
@@ -1530,7 +1533,10 @@ export class AgentSessionsService implements OnModuleDestroy {
       } else if (ev.type === 'elicitation_decision' && typeof p.elicitation_id === 'string') {
         this.awaiting.get(key)?.delete(p.elicitation_id);
       } else if (ev.type === 'turn' && p.phase === 'finished') {
-        this.awaiting.delete(key); // 턴이 끝났으면 기다리던 것도 없다
+        const pending = this.awaiting.get(key);
+        if (pending) for (const [id, request] of pending) {
+          if (!request.async) pending.delete(id);
+        }
       }
     }
     if (this.awaiting.get(key)?.size === 0) this.awaiting.delete(key);

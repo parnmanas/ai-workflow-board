@@ -19,6 +19,7 @@ import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './age
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { describeSessionFailure } from './session-failure.js';
 import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
+import type { CliAsyncQuestion, CliAsyncQuestionWatcher } from './clis/cli-module.js';
 import { findOnPath } from './find-on-path.js';
 import { describeHolders, findLockHolders, killHolder, selectKillTargets, type LockHolder } from './file-lock-holders.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
@@ -224,6 +225,9 @@ interface LiveSession {
   loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
   pendingElicitations: Map<string, PendingElicitation>;
+  asyncQuestions: Map<string, { question: CliAsyncQuestion; event: StampedEvent; timer: NodeJS.Timeout }>;
+  asyncQuestionWatcher: CliAsyncQuestionWatcher | null;
+  queuedQuestionAnswers: Array<{ turnId: string; text: string }>;
   /** 세션 id 를 알기 전(session/new 응답 전)에 어댑터가 보낸 행 — 열리는 즉시 순서대로 흘려보낸다. */
   preSessionEvents: AgentSessionEventInput[];
   /** 어댑터가 준 세션 설정(모델·reasoning …)·slash command·모드 — history RPC 의 `live` 로 서버가 다시 받는다. */
@@ -676,7 +680,7 @@ export class AgentSessionRunner {
           // 다시 열거나 새로고침한 사용자가 "Needs your approval" 만 보고 카드는 못 보는 일이
           // 없도록 기록 끝에 다시 실어 보낸다 — id 가 같아 라이브로 이미 받은 행과 겹치지 않는다.
           const pending = live
-            ? [...Array.from(live.pendingPermissions.values()), ...Array.from(live.pendingElicitations.values())].map((p) => p.event)
+            ? [...live.pendingPermissions.values(), ...live.pendingElicitations.values(), ...live.asyncQuestions.values()].map((p) => p.event)
             : [];
           const events = pending.length
             ? [...history.events, ...pending.map((e, i) => ({ ...e, seq: history.events.length + i + 1 }))]
@@ -830,6 +834,9 @@ export class AgentSessionRunner {
         loading: false,
         pendingPermissions: new Map(),
         pendingElicitations: new Map(),
+        asyncQuestions: new Map(),
+        asyncQuestionWatcher: null,
+        queuedQuestionAnswers: [],
         preSessionEvents: [],
         configOptions: [],
         availableCommands: [],
@@ -893,6 +900,9 @@ export class AgentSessionRunner {
       }
       const key = this.#key(cli, live.sessionId);
       this.#live.set(key, live);
+      live.asyncQuestionWatcher = await this.#store.watchAsyncQuestions(cli, live.sessionId, (question) => {
+        if (live && !live.closing && !live.exited) this.#onAsyncQuestion(live, question);
+      }).catch(() => null);
       client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
       if (live.preSessionEvents.length) {
         const buffered = live.preSessionEvents.splice(0);
@@ -928,6 +938,7 @@ export class AgentSessionRunner {
       this.#touch(live);
       return live;
     } catch (err) {
+      if (live) this.#closeAsyncQuestions(live);
       const child = client.process;
       client.close();
       if (child?.pid) await terminateDetachedProcessTree(child.pid, 250, { child }).catch(() => undefined);
@@ -1459,6 +1470,7 @@ export class AgentSessionRunner {
         events.push({ type: 'usage', payload: usageEventPayload(fallbackUsage), turn_id: turnId });
       }
       events.push({ type: 'turn', payload: { phase: 'finished', stop_reason: response?.stopReason || 'end_turn' }, turn_id: turnId });
+      await live.asyncQuestionWatcher?.poll();
       this.#enqueue(live, events, { status: 'ready', last_error: null, reason: 'turn_finished' });
       await this.#store.touchAwbSession(live.cli, live.sessionId).catch(() => undefined);
     } catch (err: any) {
@@ -1476,6 +1488,8 @@ export class AgentSessionRunner {
       live.turn = null;
       this.#touch(live);
       await live.postChain;
+      const answer = live.queuedQuestionAnswers.shift();
+      if (answer && !live.closing && !live.exited) await this.#runPrompt(live, answer.turnId, answer.text);
     }
   }
 
@@ -1782,6 +1796,21 @@ export class AgentSessionRunner {
   #resolveElicitation(cli: string, sessionId: string, elicitationId: string, action: 'accept' | 'decline' | 'cancel', content: Record<string, unknown> | null): void {
     const live = this.#live.get(this.#key(cli, sessionId));
     if (!live) return;
+    const asyncQuestion = live.asyncQuestions.get(elicitationId);
+    if (asyncQuestion) {
+      clearTimeout(asyncQuestion.timer);
+      live.asyncQuestions.delete(elicitationId);
+      const payload = { elicitation_id: elicitationId, action, ...(action === 'accept' ? { content: boundedValue(content ?? {}) } : {}), decided_by: 'user' };
+      this.#enqueue(live, [{ type: 'elicitation_decision', payload, turn_id: live.turn?.turnId }], { status: this.#statusOf(live), reason: `elicitation_${action}` });
+      if (action === 'accept') {
+        const text = `User answer to your asynchronous question (${elicitationId}):\n${asyncQuestion.question.message}\n${JSON.stringify(content ?? {})}`;
+        const answer = { turnId: randomUUID(), text };
+        this.#enqueue(live, [{ type: 'user_prompt', payload: { text, queued: !!live.turn }, turn_id: answer.turnId }]);
+        if (live.turn) live.queuedQuestionAnswers.push(answer);
+        else void this.#runPrompt(live, answer.turnId, answer.text);
+      }
+      return;
+    }
     const pending = live.pendingElicitations.get(elicitationId);
     if (!pending) {
       log(`[agent-session ${cli} ${sessionId.slice(0, 8)}] elicitation ${elicitationId.slice(0, 8)} not pending (late or duplicate answer)`);
@@ -1795,6 +1824,22 @@ export class AgentSessionRunner {
       turn_id: live.turn?.turnId,
     }], { status: live.pendingPermissions.size > 0 ? 'awaiting_permission' : 'busy', reason: `elicitation_${action}` });
     pending.resolve(action === 'accept' ? { action: 'accept', content: content ?? {} } : { action });
+  }
+
+  #onAsyncQuestion(live: LiveSession, question: CliAsyncQuestion): void {
+    if (live.asyncQuestions.has(question.id)) return;
+    this.#flushBuffers(live, live.turn?.turnId);
+    const [event] = this.#enqueue(live, [{
+      type: 'elicitation_request',
+      payload: { elicitation_id: question.id, mode: 'form', message: question.message, schema: question.schema, async: true },
+      turn_id: live.turn?.turnId,
+    }], { status: this.#statusOf(live), reason: 'async_question' });
+    const timer = setTimeout(() => {
+      live.asyncQuestions.delete(question.id);
+      this.#enqueue(live, [{ type: 'elicitation_decision', payload: { elicitation_id: question.id, action: 'cancel', decided_by: 'timeout' } }]);
+    }, this.#options.permissionTimeoutMs);
+    timer.unref();
+    live.asyncQuestions.set(question.id, { question, event, timer });
   }
 
   #resolvePermission(cli: string, sessionId: string, requestId: string, optionId: string | null): void {
@@ -2033,7 +2078,7 @@ export class AgentSessionRunner {
   async #reapIfIdle(live: LiveSession, freshMs: number): Promise<void> {
     if (live.closing || live.exited) return;
     // 턴·승인 대기는 gate 를 돌릴 필요도 없는 확정 신호다.
-    if (live.turn || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0) {
+    if (live.turn || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0 || live.asyncQuestions.size > 0) {
       this.#touch(live);
       return;
     }
@@ -2071,6 +2116,7 @@ export class AgentSessionRunner {
     const live = this.#live.get(key);
     if (!live) return;
     live.exited = true;
+    this.#closeAsyncQuestions(live);
     this.#clearIdle(live);
     if (live.closing) {
       this.#cancelPendingPermissions(live);
@@ -2096,6 +2142,7 @@ export class AgentSessionRunner {
     const live = this.#live.get(key);
     if (!live) return;
     live.closing = true;
+    this.#closeAsyncQuestions(live);
     this.#clearIdle(live);
     this.#cancelPendingPermissions(live);
     if (live.turn) await live.client.cancel(live.sessionId).catch(() => undefined);
@@ -2117,5 +2164,16 @@ export class AgentSessionRunner {
           : `Agent process stopped (${reason}). The next prompt reopens the session.`;
     this.#enqueue(live, [{ type: 'system', payload: { text } }], { status: finalStatus, reason });
     await live.postChain;
+  }
+
+  #closeAsyncQuestions(live: LiveSession): void {
+    live.asyncQuestionWatcher?.close();
+    live.asyncQuestionWatcher = null;
+    for (const [id, pending] of live.asyncQuestions) {
+      clearTimeout(pending.timer);
+      this.#enqueue(live, [{ type: 'elicitation_decision', payload: { elicitation_id: id, action: 'cancel', decided_by: 'system' } }]);
+    }
+    live.asyncQuestions.clear();
+    live.queuedQuestionAnswers = [];
   }
 }

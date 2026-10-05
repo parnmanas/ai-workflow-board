@@ -24,6 +24,7 @@ import {
 } from '../../agent-session-history.js';
 import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+import { watchCodexAsyncQuestions } from './async-questions.js';
 
 /**
  * codex `token_count` / `token_usage_record` payload → 공용 계약.
@@ -119,6 +120,7 @@ async function findSessionFile(ctx: CliSessionStoreContext, sessionId: string): 
 
 export const codexSessionStore: CliSessionStoreDriver = {
   findSessionFile,
+  watchAsyncQuestions: (ctx, sessionId, receive) => watchCodexAsyncQuestions(() => findSessionFile(ctx, sessionId), receive),
 
   /** 파일 꼬리에서 마지막 token_count 를 읽는다(ACP 어댑터가 usage 를 안 줄 때의 메꿈). */
   async readLatestUsage(ctx, sessionId) {

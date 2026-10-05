@@ -94,6 +94,23 @@ const event = (s, type, payload, turnId) => activityEvents.emit('agent_session_e
   manager_id: s.manager_id, cli: s.cli, session_id: s.session_id, driver_user_id: 'u1',
   event: { id: `${type}-${Math.random()}`, seq: 0, turn_id: turnId, type, payload, created_at: new Date().toISOString() },
 });
+
+test('nonblocking Codex questions reach the operator while the source session remains busy', async (t) => {
+  const { prompts, heard, teardown } = setup([operator('Jarvis', 'host-rolf')]);
+  t.after(teardown);
+  const source = session('host-rolf', 'async-source', { status: 'busy' });
+  event(source, 'elicitation_request', {
+    elicitation_id: 'async-q', mode: 'form', async: true, message: '어떤 설명을 먼저 듣고 싶으세요?',
+    schema: { type: 'object', properties: { q_1: { type: 'string', oneOf: [{ const: '짧은 요약', title: '짧은 요약' }, { const: '자세한 설명', title: '자세한 설명' }] } }, required: ['q_1'] },
+  }, 'source-turn');
+  update(source, 'async_question');
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0].text.includes('어떤 설명을 먼저 듣고 싶으세요?'));
+  assert.ok(prompts[0].text.includes('짧은 요약'));
+  assert.ok(prompts[0].text.includes('answer_session_question'));
+  assert.equal(heard.length, 0, 'cue follows the operator summary');
+});
 /** 세션 턴 하나를 끝낸다(답 → 끝). */
 function finishTurn(s, turnId, answer) {
   event(s, 'text', { text: answer }, turnId);

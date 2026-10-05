@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 
 import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
 import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
+import { watchCodexAsyncQuestions } from '../dist/lib/clis/codex/async-questions.js';
+import { appendFile } from 'node:fs/promises';
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const MANAGER = 'manager-1';
@@ -701,6 +703,42 @@ test('closing a session while a question is pending cancels it with a system dec
   assert.equal(decision.payload.decided_by, 'system');
   assert.equal(server.states(sid).at(-1).status, 'closed');
   assert.equal(runner._snapshot().length, 0);
+});
+
+test('native async questions are reported while work continues, replay after turn end, and deliver one answer prompt', async (t) => {
+  const { root, cwd, store, server, runner } = await harness(t);
+  const path = join(root, 'native.jsonl');
+  await writeFile(path, '');
+  let watcherClosed = false;
+  store.watchAsyncQuestions = async (_cli, _id, receive) => {
+    const watcher = await watchCodexAsyncQuestions(async () => path, receive);
+    return { poll: () => watcher.poll(), close: () => { watcherClosed = true; watcher.close(); } };
+  };
+  await runner.handle(request('open', { request_id: 'async-open', session_id: null, cwd }));
+  const sid = server.rpc('async-open').result.session_id;
+  await appendFile(path, JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', item: {
+    type: 'AgentMessage', id: 'native-q', delivery: 'async', questions: [{ title: '요약 방식?', options: ['짧게', '자세히'] }],
+  } } }) + '\n');
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 'original-turn', text: 'continue working' }));
+  const asked = server.events(sid).find((e) => e.type === 'elicitation_request');
+  assert.equal(asked.payload.async, true);
+  assert.equal(asked.state.reason, 'async_question');
+  assert.equal(server.states(sid).at(-1).status, 'ready', 'the question does not block a turn');
+  await runner.handle(request('history', { request_id: 'async-history', session_id: sid }));
+  assert.ok(server.rpc('async-history').result.events.some((e) => e.payload?.elicitation_id === 'native-q'));
+  const inProgress = runner.handle(request('prompt', { session_id: sid, turn_id: 'blocked-turn', text: 'ELICIT_TEST still working' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'elicitation_request' && !e.payload.async), 'blocking request');
+  const blocking = server.events(sid).find((e) => e.type === 'elicitation_request' && !e.payload.async);
+  await runner.handle(request('elicitation', { session_id: sid, elicitation_id: 'native-q', elicitation_action: 'accept', elicitation_content: { q_1: '짧게' } }));
+  assert.equal(server.events(sid).filter((e) => e.type === 'turn' && e.payload.phase === 'started').length, 2, 'the answer waits instead of starting a concurrent turn');
+  await runner.handle(request('elicitation', { session_id: sid, elicitation_id: blocking.payload.elicitation_id, elicitation_action: 'accept', elicitation_content: { env: 'dev' } }));
+  await inProgress;
+  await waitFor(() => server.events(sid).filter((e) => e.type === 'turn' && e.payload.phase === 'finished').length === 3, 'queued answer prompt finished');
+  assert.equal(server.events(sid).filter((e) => e.type === 'user_prompt' && e.payload.text.includes('짧게')).length, 1);
+  await runner.handle(request('elicitation', { session_id: sid, elicitation_id: 'native-q', elicitation_action: 'accept', elicitation_content: { q_1: '자세히' } }));
+  assert.equal(server.events(sid).filter((e) => e.type === 'user_prompt').length, 1, 'a duplicate answer does not prompt twice');
+  await runner.handle(request('close', { session_id: sid }));
+  assert.equal(watcherClosed, true);
 });
 
 // codex-acp 는 MCP 서버 연결을 `mcp_startup.<server>` 라는 update 없는 한 번짜리 tool_call 로 알리고,
