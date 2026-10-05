@@ -16,7 +16,7 @@ const workspace = { id: 'ws-voice-test', name: 'Voice Test', relations: ['admin'
 const operator = { id: 'op-test', name: 'Jarvis', aliases: [], manager_id: 'host-test', cli: 'claude', session_id: 'operator-session', cwd: '/tmp', title: 'Operator' };
 const operatorPath = `/ws/${workspace.id}/sessions/${operator.manager_id}/${operator.cli}/${operator.session_id}`;
 
-async function fixture(page, suspendOnPermission = false) {
+async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${workspace.id}/sessions`) {
   const prompts = [];
   const transcripts = [];
   const errors = [];
@@ -78,7 +78,7 @@ async function fixture(page, suspendOnPermission = false) {
     };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  await page.goto(`/ws/${workspace.id}/sessions`);
+  await page.goto(initialPath);
   await expect(page.locator('[data-wake-listener]')).toHaveAttribute('data-wake-listener', 'off');
   await page.mouse.click(650, 350); // Genuine user activation; autoplay restrictions remain enabled.
   const announce = () => page.evaluate(({ operator }) => window.__voiceAnnouncement({ id: `notice-${Date.now()}`,
@@ -130,5 +130,27 @@ test('after automatic input times out, manually enabling the microphone accepts 
   expect(f.prompts[0].path).toContain('/claude/sessions/operator-session/prompt');
   expect(f.prompts[0].text).toContain('보고해');
   await expect(page).toHaveURL(new RegExp(`${operatorPath}$`));
+  expect(f.errors).toEqual([]);
+});
+
+test('the operator composer microphone resumes audio, explains speaker rejection and sends 보고해 directly', async ({ page }) => {
+  test.setTimeout(45_000);
+  const f = await fixture(page, true, operatorPath);
+  f.rejectSpeaker();
+  await page.getByRole('button', { name: 'Start conversation mode', exact: true }).click();
+  await expect(page.locator('[data-conversation-phase]')).toHaveAttribute('data-conversation-phase', 'listening', { timeout: 15_000 });
+  const rejection = page.getByRole('status').filter({ hasText: /등록한 내 목소리와 일치하지 않아/ });
+  await expect(rejection).toBeVisible({ timeout: 15_000 });
+  expect(f.prompts).toHaveLength(0);
+  expect(f.transcripts.every((transcript) => transcript.purpose === null)).toBe(true, 'the composer uses utterance STT, not sidebar name calling');
+  await expect(page.locator('[data-wake-listener]')).toHaveAttribute('data-wake-listener', 'off');
+  f.acceptSpeaker();
+  await expect.poll(() => f.prompts.length, { timeout: 15_000 }).toBe(1);
+  expect(f.prompts[0].path).toContain('/claude/sessions/operator-session/prompt');
+  expect(f.prompts[0].text).toBe('보고해');
+  await expect(rejection).toHaveCount(0);
+  await page.getByRole('button', { name: 'Stop conversation mode', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Start conversation mode', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__voiceStreams.every((stream) => stream.getTracks().every((track) => track.readyState === 'ended')))).toBe(true);
   expect(f.errors).toEqual([]);
 });
