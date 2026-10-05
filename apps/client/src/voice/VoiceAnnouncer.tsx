@@ -8,9 +8,11 @@ import { useToast } from '../contexts/ToastContext';
 import type { VoiceAnnouncementEvent } from '../types';
 import { announcementPath, announcementPlayback, claimAnnouncement, isViewingTarget, shouldSpeakAnnouncement } from './announcements';
 import { speechPlayer } from './speechPlayer';
-import { useSpeechState, useVoiceConfig } from './useVoice';
+import { loadVoiceConfig, useSpeechState, useVoiceConfig } from './useVoice';
 import { notificationSoundClip } from './notificationSound';
 import { wakeStore } from './wakeState';
+import { announceOperatorsChanged, loadVoiceOperators, useVoiceOperators } from './operator';
+import { sessionPath } from '../components/sessions/sessionList.logic';
 
 const KEY_PREFIX = 'announcement:';
 
@@ -26,12 +28,16 @@ export default function VoiceAnnouncer() {
   const { currentWorkspaceId } = useAuth();
   const navigate = useNavigate();
   const speech = useSpeechState();
+  useVoiceOperators(!!config);
 
-  const latest = useRef({ ready: false, wakeReady: false, enabled: true, audio: true, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId });
-  latest.current = { ready: !!config?.tts.ready, wakeReady: !!config?.wake.ready, enabled: prefs.voice, audio: prefs.audio, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId };
+  const latest = useRef({ ready: false, enabled: true, audio: true, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId });
+  latest.current = { ready: !!config?.tts.ready, enabled: prefs.voice, audio: prefs.audio, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId };
 
   useEffect(() => {
-    if (!prefs.voice || !prefs.audio || !prefs.listenAfterWorkSound) wakeStore.closeNotificationFollowUp();
+    if (!prefs.voice || !prefs.audio || !prefs.listenAfterWorkSound) {
+      wakeStore.closeNotificationFollowUp();
+      if (wakeStore.state.source === 'notification') wakeStore.sleep();
+    }
   }, [prefs.voice, prefs.audio, prefs.listenAfterWorkSound]);
 
   // 알림은 사용자 제스처 없이 나온다 — 앱에서 처음 누르는 순간 재생 요소를 깨워 둔다
@@ -68,12 +74,25 @@ export default function VoiceAnnouncer() {
       if (playback === 'speech') {
         speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), key);
       } else if (audio) {
-        speechPlayer.enqueueClip(async () => notificationSoundClip(sound), key, () => {
-          const now = latest.current;
-          if (data.operator && now.wakeReady && now.enabled && now.audio && now.listen) {
-            wakeStore.openNotificationFollowUp(data.operator.id);
-          }
-        });
+        speechPlayer.enqueueClip(async () => notificationSoundClip(sound), key);
+        if (!data.operator || !latest.current.listen) return;
+        const operatorId = data.operator.id;
+        const [operators, voiceConfig] = await Promise.all([loadVoiceOperators(), loadVoiceConfig()]);
+        let operator = operators.find((op) => op.id === operatorId);
+        if (!operator) {
+          announceOperatorsChanged();
+          operator = (await loadVoiceOperators()).find((op) => op.id === operatorId);
+        }
+        const now = latest.current;
+        if (!now.enabled || !now.audio || !now.listen) return;
+        if (!operator || !now.workspaceId || !voiceConfig?.stt.ready) {
+          showToast('오퍼레이터의 마이크를 켜지 못했습니다 — 오퍼레이터 등록과 음성 입력 설정을 확인해 주세요.', 'error');
+          return;
+        }
+        // Open the actual composer before the user speaks. Cue playback can be blocked;
+        // microphone startup must not depend on an audio completion callback.
+        wakeStore.wake(operator.id, null, 'notification');
+        navigate(sessionPath(`/ws/${now.workspaceId}`, operator.manager_id, operator.cli, operator.session_id));
       }
     })();
   }, [navigate, showToast]));

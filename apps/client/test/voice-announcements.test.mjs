@@ -99,8 +99,8 @@ test('a viewed session stays quiet unless it awaits a decision cue', () => {
   assert.equal(shouldSpeakAnnouncement(true, true), true, 'a cue invites a request for details and choices');
 });
 
-test('receiving a work-report SSE queues the selected cue without requesting announcement TTS', async (t) => {
-  const { setupDom, React, act } = await import('./helpers/jsdom.mjs');
+test('a work/question SSE focuses the operator and starts its composer before any speech or cue completion', async (t) => {
+  const { setupDom, React, act, assertFocused } = await import('./helpers/jsdom.mjs');
   const { installFakeEventSource, mountWithBoardStream } = await import('./helpers/boardStream.mjs');
   const { MemoryRouter, useLocation } = await import('react-router-dom');
   const { NotificationProvider } = await import('../src/contexts/NotificationContext.tsx');
@@ -108,7 +108,8 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   const { speechPlayer } = await import('../src/voice/speechPlayer.ts');
   const { loadVoiceConfig } = await import('../src/voice/useVoice.ts');
   const { setNotificationPref, getNotificationPrefs } = await import('../src/contexts/notificationPrefs.ts');
-  const { wakeStore } = await import('../src/voice/wakeState.ts');
+  const { wakeStore, useWakeState } = await import('../src/voice/wakeState.ts');
+  const { default: SessionComposer } = await import('../src/components/sessions/SessionComposer.tsx');
   const { default: VoiceAnnouncer } = await import('../src/voice/VoiceAnnouncer.tsx');
   const { default: WakeListener } = await import('../src/voice/WakeListener.tsx');
   const dom = setupDom();
@@ -152,12 +153,25 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   api.getTicketUnreadCounts = async () => ({ total: 0, perTicket: {} });
   api.getVoiceAnnouncementAudio = async () => { ttsCalls++; throw new Error('work reports must not call TTS'); };
   api.listVoiceOperators = async () => ({ operators: [{ id: 'op', name: 'Jarvis', aliases: [], manager_id: 'm1', cli: 'codex', session_id: 'operator-session' }] });
-  api.transcribeVoice = async (_wav, purpose) => { assert.equal(purpose, 'wake'); return { text: '보고해' }; };
+  const purposes = [];
+  const prompts = [];
+  api.transcribeVoice = async (_wav, purpose) => { purposes.push(purpose); return { text: '보고해' }; };
   speechPlayer.enqueueClip = (fetchClip, key, onEnded) => queued.push({ fetchClip, key, onEnded });
   await loadVoiceConfig(true);
   const h = React.createElement;
   let currentPath;
-  function RouteProbe() { currentPath = useLocation().pathname; return null; }
+  function RouteProbe() {
+    currentPath = useLocation().pathname;
+    const wake = useWakeState();
+    const here = currentPath === '/ws/w1/sessions/m1/codex/operator-session';
+    React.useEffect(() => here ? wakeStore.attach('op') : undefined, [here]);
+    return here ? h(SessionComposer, { disabled: false, busy: false, placeholder: 'Operator prompt',
+      onSend: (prompt) => prompts.push(prompt), onCancel: () => {},
+      voiceInput: { liveCaptions: false, wake: { name: 'Jarvis', awake: wake.mode === 'awake' && wake.operatorId === 'op',
+        activationKey: wake.wokeAt, takeFirstPrompt: () => wakeStore.takeFirstPrompt('op'),
+        transformUtterance: (text) => text, onSleep: () => wakeStore.sleep('op') } },
+    }) : null;
+  }
   const view = mountWithBoardStream(h(NotificationProvider, null, h(React.Fragment, null,
     h(VoiceAnnouncer), h(WakeListener), h(RouteProbe))), { wrap: (tree) => h(MemoryRouter, null, tree) });
   t.after(() => {
@@ -180,24 +194,22 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   act(() => source.emit('voice_announcement', event));
   await flush();
   assert.equal(queued.length, 1, 'work cues also work with TTS off');
-  assert.equal(wakeStore.state.followUp, null, 'wait until the cue actually ends');
-  assert.equal(microphoneStarts, 0, 'name calling off and a playing cue do not open the microphone');
+  assert.equal(wakeStore.state.followUp, null, 'the actual composer replaces background notification input');
+  assert.equal(wakeStore.state.enabled, false, 'do not enable persistent name calling');
+  assert.equal(wakeStore.state.mode, 'awake');
+  assert.equal(wakeStore.state.operatorId, 'op');
+  assert.equal(currentPath, '/ws/w1/sessions/m1/codex/operator-session', 'open the operator, not the source session');
+  assert.equal(microphoneStarts, 1, 'open the actual composer without waiting for cue completion');
+  assertFocused(view.container.querySelector('textarea'), 'focus the operator input before speaking');
+  assert.deepEqual(prompts, [], 'opening input must not fabricate a user request or answer');
   const actual = Buffer.from(await (await queued[0].fetchClip()).arrayBuffer());
   const expected = Buffer.from(await notificationSoundClip('bell').arrayBuffer());
   assert.deepEqual(actual, expected);
   assert.equal(ttsCalls, 0);
-  act(() => queued[0].onEnded());
-  assert.equal(wakeStore.activeFollowUp(), 'op', 'listen to this operator without persistent name calling');
-  assert.equal(wakeStore.state.enabled, false, 'a notification does not enable persistent listening');
-  assert.equal(wakeStore.state.mode, 'sleeping');
-  await flush();
-  assert.equal(microphoneStarts, 1, 'the cue opens the actual listening controller');
   act(() => { vadOptions.onSpeechStart(); vadOptions.onSpeechEnd(new Float32Array(16000)); });
   await flush();
-  assert.equal(wakeStore.state.mode, 'awake');
-  assert.equal(wakeStore.state.operatorId, 'op');
-  assert.equal(wakeStore.takeFirstPrompt('op'), '보고해', 'a request without a name is handed to the notified operator');
-  assert.equal(currentPath, '/ws/w1/sessions/m1/codex/operator-session', 'open the operator, not the source session');
+  assert.deepEqual(prompts.map((prompt) => [prompt.text, prompt.spoken]), [['보고해', true]]);
+  assert.deepEqual(purposes, [undefined], 'direct operator input uses utterance STT');
   act(() => wakeStore.setEnabled(false));
   await flush();
   act(() => source.emit('voice_announcement', event));
@@ -212,28 +224,21 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   await flush();
   assert.equal(queued.length, 2, 'viewed decisions still cue without reading choices');
   assert.equal(ttsCalls, 0);
-  act(() => queued[1].onEnded());
-  assert.equal(wakeStore.activeFollowUp(), 'op', 'question cues also open report-request input');
+  assert.equal(wakeStore.state.mode, 'awake', 'questions also open the operator composer immediately');
+  assert.equal(wakeStore.state.source, 'notification');
+  assertFocused(view.container.querySelector('textarea'));
   act(() => setNotificationPref('listenAfterWorkSound', false));
   await flush();
-  assert.equal(wakeStore.activeFollowUp(), null, 'turning the option off closes the input window');
-  act(() => queued[1].onEnded());
-  assert.equal(wakeStore.activeFollowUp(), null, 'a queued completion respects the latest opt-out');
-  const crossTabCue = (operatorId) => window.dispatchEvent(new window.StorageEvent('storage', {
-    key: 'awb.voice.notification-listen', newValue: JSON.stringify({ operatorId, until: Date.now() + 15_000 }),
-  }));
-  act(() => crossTabCue('op'));
-  assert.equal(wakeStore.activeFollowUp(), null, 'a cue in another tab respects the same input opt-out');
-  act(() => setNotificationPref('listenAfterWorkSound', true));
-  act(() => crossTabCue('unregistered-operator'));
-  assert.equal(wakeStore.activeFollowUp(), null, 'a storage notice cannot target an unregistered operator');
-  act(() => crossTabCue('op'));
-  assert.equal(wakeStore.activeFollowUp(), 'op', 'the tab owning the microphone can receive another tab\'s cue');
-  act(() => wakeStore.setEnabled(false));
+  assert.equal(wakeStore.state.mode, 'off', 'turning the option off closes automatically opened input');
+  assert.equal(wakeStore.state.micClaims, 0);
+  act(() => source.emit('voice_announcement', { ...event, id: 'opted-out-question' }));
   await flush();
+  assert.equal(queued.length, 3, 'the cue remains enabled when automatic microphone input is off');
+  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(prompts.length, 1);
   act(() => source.emit('voice_announcement', { ...event, id: 'reply-with-tts-off', kind: 'operator_reply' }));
   await flush();
-  assert.equal(queued.length, 2, 'conversation replies still require TTS');
+  assert.equal(queued.length, 3, 'conversation replies still require TTS');
 
   // The user may enable name calling after the short input window has closed.
   act(() => source.emit('voice_announcement', { ...event, id: 'manual-report' }));
@@ -253,7 +258,7 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   api.transcribeVoice = async () => ({ text: '보고해' });
   act(speech); await flush();
   assert.equal(wakeStore.state.mode, 'awake', 'manually enabling the microphone still accepts 보고해');
-  assert.equal(wakeStore.takeFirstPrompt('op'), '보고해');
+  assert.equal(prompts.at(-1).text, '보고해', 'manual name calling still delivers the request once');
   assert.equal(currentPath, '/ws/w1/sessions/m1/codex/operator-session');
 });
 

@@ -7,8 +7,8 @@ import { useEffect, useState } from 'react';
  *   sleeping  — 켜져 있고 아무도 깨어 있지 않다. 상시 청취(WakeListener)가 이름을 기다린다.
  *   awake     — operator 하나가 불려 깨어 있다. 그 세션 화면의 대화 모드가 마이크를 쓰고, 상시 청취는 쉰다.
  *
- * 켜기는 단말의 선택이라 localStorage 에 두고 탭 사이에 맞춘다. 깨어 있음은 그 탭의 것이다 — 마이크를
- * 쥔 탭(Web Lock, WakeListener)에서만 깨어난다.
+ * 켜기는 단말의 선택이라 localStorage 에 두고 탭 사이에 맞춘다. 깨어 있음은 그 탭의 것이다.
+ * 이름을 부르면 상시 청취 탭에서, 알림이 오면 알림을 집은 탭에서 operator의 대화 모드를 연다.
  */
 
 export type WakeMode = 'off' | 'sleeping' | 'awake';
@@ -33,10 +33,13 @@ export interface WakeSnapshot {
   operatorId: string | null;
   /** 깨어난 시각(ms) — 깨어날 때마다 바뀐다. 한 번 깨어 있는 동안을 가리키는 키로 쓴다. */
   wokeAt: number;
+  source: 'call' | 'notification' | null;
   listener: WakeListenerStatus;
   error: string | null;
   /** 마이크를 쓰는 대화 모드 수 — 0 일 때만 상시 청취가 마이크를 연다. */
   micClaims: number;
+  /** Another tab has an operator/composer microphone open. Pause background name calling. */
+  micElsewhere: boolean;
   /**
    * 알림음 뒤의 보고 요청 또는 선택지 설명 뒤의 답변을 이름 없이 듣는 짧은 창.
    * 상시 이름 부르기를 꺼 두어도 알림음 뒤에는 잠깐 마이크를 연다.
@@ -54,6 +57,9 @@ const REPORT_TARGET_MS = 10 * 60_000;
 const ENABLED_KEY = 'awb.voice.wake';
 /** 깨어났는데 그 operator 의 화면이 이만큼 안에 열리지 않으면(이동 실패) 다시 잠든다. */
 const ATTACH_GRACE_MS = 10_000;
+const CONVERSATION_MIC_KEY = 'awb.voice.conversation-mic';
+const MIC_LEASE_MS = 15_000;
+const MIC_REFRESH_MS = 5_000;
 
 type Listener = (state: WakeSnapshot) => void;
 
@@ -63,7 +69,7 @@ function readEnabled(): boolean {
 
 class WakeStore {
   #state: WakeSnapshot = {
-    enabled: false, mode: 'off', operatorId: null, wokeAt: 0, listener: 'idle', error: null, micClaims: 0, followUp: null,
+    enabled: false, mode: 'off', operatorId: null, wokeAt: 0, source: null, listener: 'idle', error: null, micClaims: 0, micElsewhere: false, followUp: null,
   };
   #followUpTimer: ReturnType<typeof setTimeout> | null = null;
   #followUpRevision = 0;
@@ -73,6 +79,9 @@ class WakeStore {
   #reportTarget: { operatorId: string; until: number } | null = null;
   #attached = new Map<string, number>();
   #attachTimer: ReturnType<typeof setTimeout> | null = null;
+  #tabId = Math.random().toString(36).slice(2);
+  #micLeaseTimer: ReturnType<typeof setTimeout> | null = null;
+  #foreignMicTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -80,7 +89,9 @@ class WakeStore {
     this.#state = { ...this.#state, enabled, mode: enabled ? 'sleeping' : 'off' };
     window.addEventListener('storage', (e) => {
       if (e.key === ENABLED_KEY) this.#applyEnabled(e.newValue === '1');
+      if (e.key === CONVERSATION_MIC_KEY) this.#readForeignMic();
     });
+    this.#readForeignMic();
   }
 
   get state(): WakeSnapshot {
@@ -104,7 +115,7 @@ class WakeStore {
     else {
       this.#firstPrompt = null;
       this.#clearFollowUp();
-      this.#set({ enabled, mode: 'off', operatorId: null, listener: 'idle', error: null });
+      this.#set({ enabled, mode: 'off', operatorId: null, source: null, listener: 'idle', error: null });
     }
   }
 
@@ -114,11 +125,11 @@ class WakeStore {
   }
 
   /** `operatorId` 가 불렸다. `firstPrompt` 는 이름 뒤에 이어 한 말(없으면 null). */
-  wake(operatorId: string, firstPrompt: string | null): void {
+  wake(operatorId: string, firstPrompt: string | null, source: 'call' | 'notification' = 'call'): void {
     if (this.#reportTarget?.operatorId === operatorId) this.#reportTarget = null;
     this.#clearFollowUp();
     this.#firstPrompt = firstPrompt ? { operatorId, text: firstPrompt } : null;
-    this.#set({ mode: 'awake', operatorId, wokeAt: Date.now(), error: null });
+    this.#set({ mode: 'awake', operatorId, wokeAt: Date.now(), source, error: null });
     if (this.#attachTimer) clearTimeout(this.#attachTimer);
     this.#attachTimer = setTimeout(() => {
       this.#attachTimer = null;
@@ -139,7 +150,7 @@ class WakeStore {
     if (this.#state.mode !== 'awake') return;
     if (operatorId && this.#state.operatorId !== operatorId) return;
     this.#firstPrompt = null;
-    this.#set({ mode: this.#state.enabled ? 'sleeping' : 'off', operatorId: null });
+    this.#set({ mode: this.#state.enabled ? 'sleeping' : 'off', operatorId: null, source: null });
   }
 
   /**
@@ -164,7 +175,7 @@ class WakeStore {
     return this.#openFollowUp(operatorId, ms, 'decision');
   }
 
-  /** A cue opens a temporary input window without enabling persistent name calling. */
+  /** Legacy cross-tab cue handoff; current announcements open the actual operator composer. */
   openNotificationFollowUp(operatorId: string, ms = NOTIFICATION_FOLLOW_UP_MS, broadcast = true): boolean {
     if (this.#state.mode === 'awake' || this.#state.micClaims > 0) return false;
     if (!this.#openFollowUp(operatorId, ms, 'notification')) return false;
@@ -251,14 +262,48 @@ class WakeStore {
     this.#set({ listener, error });
   }
 
+  #readForeignMic(): void {
+    if (this.#foreignMicTimer) clearTimeout(this.#foreignMicTimer);
+    this.#foreignMicTimer = null;
+    let remaining = 0;
+    try {
+      const lease = JSON.parse(localStorage.getItem(CONVERSATION_MIC_KEY) || 'null');
+      if (typeof lease?.owner === 'string' && lease.owner !== this.#tabId) {
+        const ms = Number(lease.until) - Date.now();
+        if (ms > 0 && ms <= MIC_LEASE_MS) remaining = ms;
+      }
+    } catch { /* storage unavailable */ }
+    this.#set({ micElsewhere: remaining > 0 });
+    // A closed/crashed tab cannot keep other tabs' microphones parked forever.
+    if (remaining) this.#foreignMicTimer = setTimeout(() => this.#readForeignMic(), remaining + 1);
+  }
+
+  #publishMicLease(): void {
+    try {
+      localStorage.setItem(CONVERSATION_MIC_KEY, JSON.stringify({ owner: this.#tabId, until: Date.now() + MIC_LEASE_MS }));
+    } catch { /* same-tab micClaims still protects the microphone */ }
+    this.#micLeaseTimer = setTimeout(() => this.#publishMicLease(), MIC_REFRESH_MS);
+  }
+
+  #releaseMicLease(): void {
+    if (this.#micLeaseTimer) clearTimeout(this.#micLeaseTimer);
+    this.#micLeaseTimer = null;
+    try {
+      const lease = JSON.parse(localStorage.getItem(CONVERSATION_MIC_KEY) || 'null');
+      if (lease?.owner === this.#tabId) localStorage.removeItem(CONVERSATION_MIC_KEY);
+    } catch { /* storage unavailable */ }
+  }
+
   /** 대화 모드가 마이크를 쓰는 동안 잡아 둔다 — 상시 청취가 같은 마이크를 따로 열지 않게. */
   claimMic(): () => void {
     this.#set({ micClaims: this.#state.micClaims + 1 });
+    if (this.#state.micClaims === 1 && typeof window !== 'undefined') this.#publishMicLease();
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.#set({ micClaims: Math.max(0, this.#state.micClaims - 1) });
+      if (!this.#state.micClaims) this.#releaseMicLease();
     };
   }
 }

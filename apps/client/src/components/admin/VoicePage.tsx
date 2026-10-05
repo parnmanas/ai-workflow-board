@@ -597,7 +597,7 @@ export default function VoicePage() {
           <Button size="sm" variant="ghost" onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>Preview</Button>
           <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.voice} onChange={(e) => setPref('voice', e.target.checked)} /> Work updates</label>
           <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.audio} onChange={(e) => setPref('audio', e.target.checked)} /> Audio cues</label>
-          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.listenAfterWorkSound} onChange={(e) => setPref('listenAfterWorkSound', e.target.checked)} /> Listen after work sound</label>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.listenAfterWorkSound} onChange={(e) => setPref('listenAfterWorkSound', e.target.checked)} /> Open operator and microphone on notification</label>
         </div>
       </Card>
 

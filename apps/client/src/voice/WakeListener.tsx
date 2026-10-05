@@ -46,7 +46,8 @@ export default function WakeListener() {
   const [hasLock, setHasLock] = useState(false);
   const cancelFollowUpSpeech = useRef<() => void>(() => {});
 
-  const wanted = !!config?.wake.ready && operators.length > 0 && voiceRecordingSupported() && (wake.enabled || !!wake.followUp);
+  const wanted = !!config?.wake.ready && operators.length > 0 && voiceRecordingSupported()
+    && wake.mode !== 'awake' && wake.micClaims === 0 && !wake.micElsewhere && (wake.enabled || !!wake.followUp);
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
@@ -91,7 +92,7 @@ export default function WakeListener() {
   }, [wanted]);
 
   // 2. 잠든 동안, 마이크를 대화 모드가 쓰지 않을 때만 듣는다.
-  const listen = hasLock && wake.mode === 'sleeping' && wake.micClaims === 0;
+  const listen = wanted && hasLock && wake.mode === 'sleeping';
   useEffect(() => {
     if (!listen) return;
     const run = { cancelled: false };

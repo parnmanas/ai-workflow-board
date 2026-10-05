@@ -3102,7 +3102,7 @@ export interface VoiceAnnouncementEvent {
   target: VoiceAnnouncementTarget;
   /** operator 가 쓴 글이면 그 operator. */
   operator?: { id: string; name: string };
-  /** 사용자의 결정(승인·답)을 기다리는 보고 — 다 읽은 뒤 잠깐 이름 없이 답을 듣는다. */
+  /** 사용자의 결정(승인·답)을 기다리는 보고 — 알림음을 내고 사용자가 설명을 요청하면 선택지를 읽는다. */
   needs_decision?: boolean;
   created_at: string;
 }

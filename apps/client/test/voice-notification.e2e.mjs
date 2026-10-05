@@ -16,17 +16,20 @@ const workspace = { id: 'ws-voice-test', name: 'Voice Test', relations: ['admin'
 const operator = { id: 'op-test', name: 'Jarvis', aliases: [], manager_id: 'host-test', cli: 'claude', session_id: 'operator-session', cwd: '/tmp', title: 'Operator' };
 const operatorPath = `/ws/${workspace.id}/sessions/${operator.manager_id}/${operator.cli}/${operator.session_id}`;
 
-async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${workspace.id}/sessions`) {
+async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${workspace.id}/sessions`,
+  { autoMic = true, blockCue = false, wakeEnabled = false, cloudStt = false } = {}) {
   const prompts = [];
   const transcripts = [];
   const errors = [];
   let recognizeReport = true;
   page.on('pageerror', (error) => errors.push(error.message));
   await page.context().grantPermissions(['microphone']);
-  await page.addInitScript(({ workspaceId, suspendOnPermission }) => {
+  await page.addInitScript(({ workspaceId, suspendOnPermission, autoMic, blockCue, wakeEnabled }) => {
     localStorage.setItem('auth_token', 'voice-test-token');
     localStorage.setItem('currentWorkspaceId', workspaceId);
-    localStorage.setItem('awb.voice.wake', '0');
+    localStorage.setItem('awb.voice.wake', wakeEnabled ? '1' : '0');
+    localStorage.setItem('awb.notifications.prefs', JSON.stringify({ audio: true, voice: true, listenAfterWorkSound: autoMic }));
+    if (blockCue) HTMLMediaElement.prototype.play = () => Promise.reject(new Error('cue playback blocked for test'));
     window.__voiceStreams = [];
     window.__voiceContexts = [];
     const NativeAudioContext = window.AudioContext;
@@ -48,7 +51,7 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
     };
     window.__voiceAnnouncement = (data) => sources.filter((source) => source.readyState === 1)
       .forEach((source) => source.dispatchEvent(new MessageEvent('voice_announcement', { data: JSON.stringify(data) })));
-  }, { workspaceId: workspace.id, suspendOnPermission });
+  }, { workspaceId: workspace.id, suspendOnPermission, autoMic, blockCue, wakeEnabled });
   const live = { manager_id: operator.manager_id, cli: operator.cli, session_id: operator.session_id, status: 'ready',
     title: 'Operator', cwd: '/tmp', available_modes: [], current_mode: null, config_options: [], available_commands: [],
     updated_at: new Date().toISOString(), driver_user_id: 'user-test' };
@@ -69,7 +72,7 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
     else if (path === '/auth/setup-status') body = { needs_setup: false };
     else if (path === '/workspaces') body = [workspace];
     else if (path === `/workspaces/${workspace.id}`) body = workspace;
-    else if (path === '/voice/config') body = { stt: { provider: 'local', ready: true }, tts: { provider: 'none', ready: false }, wake: { ready: true } };
+    else if (path === '/voice/config') body = { stt: { provider: cloudStt ? 'openai' : 'local', ready: true }, tts: { provider: 'none', ready: false }, wake: { ready: !cloudStt } };
     else if (path === '/voice/operators') body = { operators: [operator] };
     else if (path.includes('unread') || path.includes('count') || path.includes('mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     else if (path === '/agent-sessions/hosts') body = [{ manager_id: operator.manager_id, name: 'Test', connected: true, clis: ['claude'], acp_session_clis: ['claude'], cli_settings: {} }];
@@ -79,7 +82,8 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
   await page.goto(initialPath);
-  await expect(page.locator('[data-wake-listener]')).toHaveAttribute('data-wake-listener', 'off');
+  await expect(page.locator('[data-wake-listener]')).toBeVisible();
+  if (!wakeEnabled) await expect(page.locator('[data-wake-listener]')).toHaveAttribute('data-wake-listener', 'off');
   await page.mouse.click(650, 350); // Genuine user activation; autoplay restrictions remain enabled.
   const announce = () => page.evaluate(({ operator }) => window.__voiceAnnouncement({ id: `notice-${Date.now()}`,
     user_id: 'user-test', kind: 'operator_report', text: 'A question is ready', operator: { id: operator.id, name: operator.name },
@@ -88,7 +92,7 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/ws/${w
   return { prompts, transcripts, errors, announce, rejectSpeaker: () => { recognizeReport = false; }, acceptSpeaker: () => { recognizeReport = true; } };
 }
 
-test('a cue starts the microphone after a 20-second cold model load and 보고해 reaches the operator', async ({ page }) => {
+test('a question immediately focuses and enables the operator composer before speech, even with a 20-second cold model load', async ({ page }) => {
   test.setTimeout(75_000);
   const f = await fixture(page, true);
   let modelRequested = false;
@@ -100,11 +104,18 @@ test('a cue starts the microphone after a 20-second cold model load and 보고�
     await route.continue();
   });
   await f.announce();
+  await expect(page).toHaveURL(new RegExp(`${operatorPath}$`));
+  await expect(page.getByRole('button', { name: 'Stop conversation mode', exact: true })).toBeVisible();
+  await expect(page.locator('textarea')).toBeFocused();
+  expect(f.prompts).toHaveLength(0);
+  expect(f.transcripts).toHaveLength(0);
   await expect.poll(() => modelRequested).toBe(true);
   await page.waitForTimeout(16_000);
-  await expect(page.locator('[data-wake-listener]')).not.toHaveAttribute('data-wake-listener', 'off');
+  await expect(page.getByRole('button', { name: 'Stop conversation mode', exact: true })).toBeVisible();
+  expect(f.prompts).toHaveLength(0);
+  expect(f.transcripts).toHaveLength(0);
   await expect.poll(() => f.prompts.length, { timeout: 35_000 }).toBe(1);
-  expect(f.transcripts[0].purpose).toBe('wake');
+  expect(f.transcripts.every((transcript) => transcript.purpose === null)).toBe(true);
   expect(f.transcripts[0].bytes).toBeGreaterThan(1000);
   expect(f.prompts[0].path).toContain('/claude/sessions/operator-session/prompt');
   expect(f.prompts[0].text).toContain('보고해');
@@ -114,22 +125,25 @@ test('a cue starts the microphone after a 20-second cold model load and 보고�
   expect(f.errors).toEqual([]);
 });
 
-test('after automatic input times out, manually enabling the microphone accepts 보고해 and exposes speaker rejection', async ({ page }) => {
-  test.setTimeout(75_000);
-  const f = await fixture(page);
+test('blocked cue playback and cloud STT still open the actual operator microphone and explain speaker rejection', async ({ page }) => {
+  test.setTimeout(45_000);
+  const f = await fixture(page, true, undefined, { blockCue: true, cloudStt: true });
   f.rejectSpeaker();
   await f.announce();
-  await expect.poll(() => f.transcripts.length, { timeout: 25_000 }).toBeGreaterThan(0);
-  await expect(page.locator('[data-wake-listener]')).toHaveAttribute('aria-label', /등록한 내 목소리/);
-  await expect(page.locator('[data-wake-listener]')).toHaveAttribute('data-wake-listener', 'off', { timeout: 25_000 });
+  await expect(page).toHaveURL(new RegExp(`${operatorPath}$`));
+  await expect(page.getByRole('button', { name: 'Stop conversation mode', exact: true })).toBeVisible();
+  await expect(page.locator('textarea')).toBeFocused();
   expect(f.prompts).toHaveLength(0);
-  await expect.poll(() => page.evaluate(() => window.__voiceStreams.every((stream) => stream.getTracks().every((track) => track.readyState === 'ended')))).toBe(true);
+  const rejection = page.getByRole('status').filter({ hasText: /등록한 내 목소리와 일치하지 않아/ });
+  await expect(rejection).toBeVisible({ timeout: 15_000 });
+  expect(f.prompts).toHaveLength(0);
+  expect(f.transcripts.every((transcript) => transcript.purpose === null)).toBe(true);
   f.acceptSpeaker();
-  await page.locator('[data-wake-listener]').click();
   await expect.poll(() => f.prompts.length, { timeout: 20_000 }).toBe(1);
   expect(f.prompts[0].path).toContain('/claude/sessions/operator-session/prompt');
   expect(f.prompts[0].text).toContain('보고해');
-  await expect(page).toHaveURL(new RegExp(`${operatorPath}$`));
+  await page.getByRole('button', { name: 'Stop conversation mode', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__voiceStreams.every((stream) => stream.getTracks().every((track) => track.readyState === 'ended')))).toBe(true);
   expect(f.errors).toEqual([]);
 });
 
@@ -152,5 +166,39 @@ test('the operator composer microphone resumes audio, explains speaker rejection
   await page.getByRole('button', { name: 'Stop conversation mode', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Start conversation mode', exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__voiceStreams.every((stream) => stream.getTracks().every((track) => track.readyState === 'ended')))).toBe(true);
+  expect(f.errors).toEqual([]);
+});
+
+
+test('a notification parks background listening in another tab until the operator microphone closes', async ({ page, context }) => {
+  test.setTimeout(45_000);
+  const f = await fixture(page, false, undefined, { wakeEnabled: true });
+  f.rejectSpeaker();
+  await expect(page.locator('[data-wake-listener]')).toHaveAttribute('data-wake-listener', 'listening', { timeout: 15_000 });
+  await expect.poll(() => page.evaluate(() => window.__voiceStreams.some((stream) => stream.getTracks().some((track) => track.readyState === 'live')))).toBe(true);
+  const operatorTab = await context.newPage();
+  const op = await fixture(operatorTab, false, undefined, { wakeEnabled: true });
+  op.rejectSpeaker();
+  await op.announce();
+  await expect(operatorTab).toHaveURL(new RegExp(`${operatorPath}$`));
+  await expect(operatorTab.getByRole('button', { name: 'Stop conversation mode', exact: true })).toBeVisible();
+  await expect(operatorTab.locator('textarea')).toBeFocused();
+  await expect.poll(() => page.evaluate(() => window.__voiceStreams.every((stream) => stream.getTracks().every((track) => track.readyState === 'ended')))).toBe(true);
+  await expect(operatorTab.locator('[data-conversation-phase]')).toHaveAttribute('data-conversation-phase', 'listening', { timeout: 15_000 });
+  expect(op.prompts).toHaveLength(0);
+  await operatorTab.getByRole('button', { name: 'Stop conversation mode', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__voiceStreams.some((stream) => stream.getTracks().some((track) => track.readyState === 'live')))).toBe(true);
+  expect(f.errors).toEqual([]);
+  expect(op.errors).toEqual([]);
+});
+
+test('turning off automatic microphone input leaves a question cue without navigating or recording', async ({ page }) => {
+  const f = await fixture(page, false, undefined, { autoMic: false });
+  const initialPath = new URL(page.url()).pathname;
+  await f.announce();
+  await expect(page.getByText('A question is ready', { exact: false })).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe(initialPath);
+  expect(await page.evaluate(() => window.__voiceStreams.length)).toBe(0);
+  expect(f.prompts).toHaveLength(0);
   expect(f.errors).toEqual([]);
 });

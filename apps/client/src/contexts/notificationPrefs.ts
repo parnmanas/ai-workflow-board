@@ -32,6 +32,7 @@ export interface NotificationPrefs {
    */
   voice: boolean;
   workSound: NotificationSound;
+  /** Focus the notified operator and turn on its composer microphone. */
   listenAfterWorkSound: boolean;
 }
 

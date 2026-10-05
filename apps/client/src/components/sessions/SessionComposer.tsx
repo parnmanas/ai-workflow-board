@@ -79,6 +79,8 @@ export interface VoiceWakeBinding {
   name: string;
   /** 깨어 있다. true 가 되면 대화 모드를 켜고, false 가 되면(잠듦) 끈다. */
   awake: boolean;
+  /** A fresh notification can focus an already awake operator again. */
+  activationKey?: number;
   /** 부르는 말에 이어 한 말 — 대화 모드가 켜지면 곧바로 보낸다. 한 번만 준다. */
   takeFirstPrompt(): string | null;
   /** 들은 말 → 보낼 글. 부르는 말을 떼고, 다른 operator 를 부르면 그리로 넘긴다. null 이면 보내지 않는다. */
@@ -302,6 +304,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   useEffect(() => {
     if (!showMic) return;
     if (awake) {
+      ref.current?.focus();
       if (!startedByWakeRef.current) {
         startedByWakeRef.current = true;
         void startConversation(false);
@@ -312,7 +315,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       startedByWakeRef.current = false;
       stopConversation();
     }
-  }, [awake, showMic, startConversation, stopConversation]);
+  }, [awake, wake?.activationKey, showMic, startConversation, stopConversation]);
 
   // 깨어 있는데 대화 모드가 꺼졌다(사용자가 🎙 를 껐거나 마이크를 못 열었다) — 잠든다.
   const prevPhaseRef = useRef(conversation.phase);

@@ -668,6 +668,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     return {
       name: thisOperator.name,
       awake: awakeHere,
+      activationKey: wake.wokeAt,
       takeFirstPrompt: () => wakeStore.takeFirstPrompt(id),
       transformUtterance: (heard) => {
         if (isFillerUtterance(heard)) return null;
@@ -689,7 +690,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         wakeStore.sleep(id);
       },
     };
-  }, [thisOperator, awakeHere, navigate, wsId]);
+  }, [thisOperator, awakeHere, wake.wokeAt, navigate, wsId]);
 
   const decide = useCallback(async (requestId: string, optionId: string | null) => {
     setDecidingRequestId(requestId);
