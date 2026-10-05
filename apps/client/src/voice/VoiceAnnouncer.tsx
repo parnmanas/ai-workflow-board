@@ -54,6 +54,8 @@ export default function VoiceAnnouncer() {
     void (async () => {
       // Claim viewed updates too, so another tab cannot announce them.
       const viewing = isViewingTarget(data.target, visible);
+      // All tabs retain the report address; only one claims and plays the cue.
+      if (playback === 'cue' && data.operator && shouldSpeakAnnouncement(viewing, !!data.needs_decision)) wakeStore.rememberReportOperator(data.operator.id);
       if (!(await claimAnnouncement(data.id, visible)) || !shouldSpeakAnnouncement(viewing, !!data.needs_decision)) return;
       const path = announcementPath(data.target, workspaceId);
       // operator 가 쓴 글이면(작업 보고 요약 · operator 의 답) 누가 말하는지 붙인다.

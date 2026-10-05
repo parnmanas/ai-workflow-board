@@ -41,13 +41,15 @@ export interface WakeSnapshot {
    * 알림음 뒤의 보고 요청 또는 선택지 설명 뒤의 답변을 이름 없이 듣는 짧은 창.
    * 상시 이름 부르기를 꺼 두어도 알림음 뒤에는 잠깐 마이크를 연다.
    */
-  followUp: { operatorId: string; until: number; source: 'decision' | 'notification' } | null;
+  followUp: { operatorId: string; until: number; source: 'decision' | 'notification'; ready: boolean; durationMs: number } | null;
 }
 
 /** 결정이 필요한 보고를 읽은 뒤 이름 없이 답을 기다리는 시간. */
 export const FOLLOW_UP_MS = 8_000;
 export const NOTIFICATION_FOLLOW_UP_MS = 15_000;
+export const NOTIFICATION_STARTUP_MS = 90_000;
 export const NOTIFICATION_FOLLOW_UP_KEY = 'awb.voice.notification-listen';
+const REPORT_TARGET_MS = 10 * 60_000;
 
 const ENABLED_KEY = 'awb.voice.wake';
 /** 깨어났는데 그 operator 의 화면이 이만큼 안에 열리지 않으면(이동 실패) 다시 잠든다. */
@@ -68,6 +70,7 @@ class WakeStore {
   #followUpHolds = 0;
   #listeners = new Set<Listener>();
   #firstPrompt: { operatorId: string; text: string } | null = null;
+  #reportTarget: { operatorId: string; until: number } | null = null;
   #attached = new Map<string, number>();
   #attachTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -112,6 +115,7 @@ class WakeStore {
 
   /** `operatorId` 가 불렸다. `firstPrompt` 는 이름 뒤에 이어 한 말(없으면 null). */
   wake(operatorId: string, firstPrompt: string | null): void {
+    if (this.#reportTarget?.operatorId === operatorId) this.#reportTarget = null;
     this.#clearFollowUp();
     this.#firstPrompt = firstPrompt ? { operatorId, text: firstPrompt } : null;
     this.#set({ mode: 'awake', operatorId, wokeAt: Date.now(), error: null });
@@ -164,10 +168,11 @@ class WakeStore {
   openNotificationFollowUp(operatorId: string, ms = NOTIFICATION_FOLLOW_UP_MS, broadcast = true): boolean {
     if (this.#state.mode === 'awake' || this.#state.micClaims > 0) return false;
     if (!this.#openFollowUp(operatorId, ms, 'notification')) return false;
+    this.rememberReportOperator(operatorId);
     if (broadcast) {
       // The tab playing the cue can differ from the tab that owns the microphone lock.
       try {
-        localStorage.setItem(NOTIFICATION_FOLLOW_UP_KEY, JSON.stringify({ operatorId, until: this.#state.followUp!.until }));
+        localStorage.setItem(NOTIFICATION_FOLLOW_UP_KEY, JSON.stringify({ operatorId, until: Date.now() + ms }));
         localStorage.removeItem(NOTIFICATION_FOLLOW_UP_KEY);
       } catch { /* this tab still listens if storage is unavailable */ }
     }
@@ -178,13 +183,29 @@ class WakeStore {
     if (this.#followUpHolds > 0) return false; // Keep an utterance with the operator it started addressing.
     if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
     this.#followUpRevision += 1;
+    const ready = source === 'decision' || this.#state.listener === 'listening';
+    const timeout = ready ? ms : NOTIFICATION_STARTUP_MS;
+    this.#scheduleFollowUp(timeout);
+    this.#set({ mode: 'sleeping', followUp: { operatorId, until: Date.now() + timeout, source, ready, durationMs: ms } });
+    return true;
+  }
+
+  #scheduleFollowUp(ms: number): void {
+    if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
     this.#followUpTimer = setTimeout(() => {
       this.#followUpTimer = null;
       if (!this.#followUpHolds) this.#clearFollowUp();
       else this.#followUpTimer = setTimeout(() => this.#clearFollowUp(), 60_000);
     }, ms);
-    this.#set({ mode: 'sleeping', followUp: { operatorId, until: Date.now() + ms, source } });
-    return true;
+  }
+
+  /** Keep the reporting operator available when the user enables the microphone later. */
+  rememberReportOperator(operatorId: string): void {
+    this.#reportTarget = { operatorId, until: Date.now() + REPORT_TARGET_MS };
+  }
+
+  reportOperator(now = Date.now()): string | null {
+    return this.#reportTarget && now < this.#reportTarget.until ? this.#reportTarget.operatorId : null;
   }
 
   /** Keep a started utterance alive through the deadline and its STT request. */
@@ -222,6 +243,11 @@ class WakeStore {
   }
 
   setListener(listener: WakeListenerStatus, error: string | null = null): void {
+    const followUp = this.#state.followUp;
+    if (listener === 'listening' && followUp && !followUp.ready) {
+      this.#scheduleFollowUp(followUp.durationMs);
+      this.#set({ followUp: { ...followUp, ready: true, until: Date.now() + followUp.durationMs } });
+    }
     this.#set({ listener, error });
   }
 

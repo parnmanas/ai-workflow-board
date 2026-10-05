@@ -240,5 +240,10 @@ export function isFillerUtterance(text: string): boolean {
   return !key || FILLERS.has(key);
 }
 
+/** Outside the short input window only an explicit report request uses the last notification's operator. */
+export function isReportRequest(text: string): boolean {
+  return /^(보고해(?:줘|주세요|줄래)?|보고(?:해|해줘|해주세요|해줄래|부탁해)|알림(?:내용)?(?:알려줘|설명해줘)|무슨(?:일이야|일있어|작업이끝났어)|report(?:please)?|givemeareport|whathappened)$/i.test(compactKey(text));
+}
+
 /** 깨어 있다가 아무 말이 없으면 이만큼 뒤에 잠든다(답을 기다리거나 읽는 동안은 세지 않는다). */
 export const WAKE_IDLE_SLEEP_MS = 60_000;

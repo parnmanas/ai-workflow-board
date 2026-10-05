@@ -5,6 +5,7 @@ import { speechPlayer, type SpeechState } from './speechPlayer';
 import { voiceRecordingSupported } from './recorder';
 import { startHandsFree, type HandsFreeSession } from './handsFree';
 import { wakeStore } from './wakeState';
+import { transcriptionFeedback } from './transcriptionFeedback';
 
 /**
  * 음성 설정은 서버가 정한다(엔진·키). 화면은 "쓸 수 있는가" 만 알면 된다 — 한 번 받아 두고 1분 동안
@@ -54,6 +55,7 @@ export function useReadRepliesSetting(): [boolean, (next: boolean) => void] {
 export type ConversationPhase =
   | 'off'
   | 'starting'
+  | 'waiting-gesture'
   /** 마이크가 켜져 있고 말을 기다린다. */
   | 'listening'
   /** 말하는 중이다(실시간 자막이 쌓인다). */
@@ -85,6 +87,7 @@ export function useHandsFreeConversation(
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
   const sessionRef = useRef<HandsFreeSession | null>(null);
+  const startupRef = useRef<AbortController | null>(null);
   const phaseRef = useRef<ConversationPhase>('off');
   const pendingRef = useRef(0);
   const captionBusyRef = useRef(false);
@@ -109,9 +112,11 @@ export function useHandsFreeConversation(
   }, []);
 
   const stop = useCallback(() => {
+    startupRef.current?.abort();
+    startupRef.current = null;
     const session = sessionRef.current;
     sessionRef.current = null;
-    void session?.destroy();
+    void session?.destroy().catch(() => undefined);
     releaseMic();
     setCaption('');
     setLevel(0);
@@ -128,10 +133,14 @@ export function useHandsFreeConversation(
     }
     releaseMicRef.current ??= wakeStore.claimMic();
     setPhase('starting');
+    const startup = new AbortController();
+    startupRef.current = startup;
     try {
       const session = await startHandsFree({
+        onWaitingForGesture: () => { if (!startup.signal.aborted) setPhase('waiting-gesture'); },
+        onAudioRunning: () => { if (!startup.signal.aborted) setPhase('starting'); },
         onSpeechStart: () => {
-          if (phaseRef.current === 'off') return;
+          if (startup.signal.aborted || phaseRef.current === 'off') return;
           setCaption('');
           setPhase('hearing');
         },
@@ -158,25 +167,29 @@ export function useHandsFreeConversation(
           setPhase('transcribing');
           api.transcribeVoice(wav)
             .then((t) => {
+              if (startup.signal.aborted) return;
               const text = (t.text || '').trim();
-              if (text) onTextRef.current(text);
+              if (text) { setError(null); onTextRef.current(text); }
+              else setError(transcriptionFeedback(t));
             })
-            .catch((err: any) => setError(err?.message || '전사에 실패했습니다'))
+            .catch((err: any) => { if (!startup.signal.aborted) setError(err?.message || '전사에 실패했습니다'); })
             .finally(() => {
               pendingRef.current -= 1;
+              if (startup.signal.aborted) return;
               setCaption('');
               if (pendingRef.current === 0 && phaseRef.current === 'transcribing') setPhase('listening');
             });
         },
-      });
+      }, { signal: startup.signal });
       if (phaseRef.current === 'off') {
-        void session.destroy(); // 켜는 동안 꺼졌다(마이크 잡기는 stop 이 이미 풀었다)
+        void session.destroy().catch(() => undefined); // 켜는 동안 꺼졌다(마이크 잡기는 stop 이 이미 풀었다)
         return;
       }
       sessionRef.current = session;
       setPhase(speechPlayer.state.speaking ? 'paused-for-reply' : 'listening');
       if (speechPlayer.state.speaking) void session.pause();
     } catch (err: any) {
+      if (startup.signal.aborted) return;
       sessionRef.current = null;
       releaseMic();
       setPhase('off');
@@ -191,6 +204,15 @@ export function useHandsFreeConversation(
     else stop();
   }, [start, stop]);
 
+  const resumeSession = useCallback((session: HandsFreeSession) => {
+    void session.resume().then(() => {
+      if (sessionRef.current !== session || speechPlayer.state.speaking) return;
+      if (['paused-for-reply', 'waiting-gesture'].includes(phaseRef.current)) setPhase('listening');
+    }).catch((err) => {
+      if (sessionRef.current === session) setError(err?.message || '마이크를 다시 열지 못했습니다');
+    });
+  }, [setPhase]);
+
   // 답을 읽는 동안 듣지 않는다 — 끝나면 다시 듣는다.
   useEffect(() => {
     const session = sessionRef.current;
@@ -200,10 +222,9 @@ export function useHandsFreeConversation(
       setCaption('');
       setPhase('paused-for-reply');
     } else if (!speech.speaking && phaseRef.current === 'paused-for-reply') {
-      void session.resume();
-      setPhase('listening');
+      resumeSession(session);
     }
-  }, [speech.speaking, setPhase]);
+  }, [speech.speaking, setPhase, resumeSession]);
 
   // 탭이 숨으면 멈췄다가 돌아오면 다시 듣는다(모바일은 백그라운드에서 마이크를 어차피 끊는다).
   useEffect(() => {
@@ -211,15 +232,17 @@ export function useHandsFreeConversation(
       const session = sessionRef.current;
       if (!session || keepHiddenRef.current) return;
       if (document.visibilityState === 'hidden') void session.pause();
-      else if (!speechPlayer.state.speaking) void session.resume();
+      else if (!speechPlayer.state.speaking) resumeSession(session);
     };
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, []);
+  }, [resumeSession]);
 
   // 화면을 떠나면 마이크를 닫는다.
   useEffect(() => () => {
-    void sessionRef.current?.destroy();
+    startupRef.current?.abort();
+    startupRef.current = null;
+    void sessionRef.current?.destroy().catch(() => undefined);
     sessionRef.current = null;
     phaseRef.current = 'off';
     releaseMicRef.current?.();

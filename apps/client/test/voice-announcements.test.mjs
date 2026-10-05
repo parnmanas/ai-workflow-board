@@ -114,6 +114,11 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   const dom = setupDom();
   const { MicVAD } = await import('@ricky0123/vad-web');
   const originalVadNew = MicVAD.new;
+  const originalAudioContext = globalThis.AudioContext;
+  globalThis.AudioContext = class {
+    state = 'running';
+    async close() { this.state = 'closed'; }
+  };
   const previousMedia = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
   window.MediaRecorder = class {};
   let microphoneStarts = 0;
@@ -157,9 +162,10 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
     h(VoiceAnnouncer), h(WakeListener), h(RouteProbe))), { wrap: (tree) => h(MemoryRouter, null, tree) });
   t.after(() => {
     setViewingSession(null);
-    wakeStore.setEnabled(false);
-    view.unmount(); uninstall(); dom.cleanup();
+    act(() => { wakeStore.setEnabled(false); view.unmount(); });
+    uninstall(); dom.cleanup();
     MicVAD.new = originalVadNew;
+    globalThis.AudioContext = originalAudioContext;
     if (previousMedia) Object.defineProperty(navigator, 'mediaDevices', previousMedia);
     else delete navigator.mediaDevices;
     for (const [key, value] of Object.entries(originals)) { if (key === 'enqueueClip') speechPlayer[key] = value; else api[key] = value; }
@@ -228,6 +234,27 @@ test('receiving a work-report SSE queues the selected cue without requesting ann
   act(() => source.emit('voice_announcement', { ...event, id: 'reply-with-tts-off', kind: 'operator_reply' }));
   await flush();
   assert.equal(queued.length, 2, 'conversation replies still require TTS');
+
+  // The user may enable name calling after the short input window has closed.
+  act(() => source.emit('voice_announcement', { ...event, id: 'manual-report' }));
+  await flush();
+  assert.equal(wakeStore.reportOperator(), 'op');
+  act(() => wakeStore.setEnabled(true));
+  await flush();
+  assert.equal(wakeStore.state.followUp, null);
+  const speech = () => { vadOptions.onSpeechStart(); vadOptions.onSpeechEnd(new Float32Array(16000)); };
+  api.transcribeVoice = async () => ({ text: '', ignored: 'speaker_mismatch' });
+  act(speech); await flush();
+  assert.equal(wakeStore.state.listener, 'error');
+  assert.match(wakeStore.state.error, /등록한 내 목소리/);
+  api.transcribeVoice = async () => ({ text: '커피' });
+  act(speech); await flush();
+  assert.equal(wakeStore.state.mode, 'sleeping', 'unrelated speech does not address a stale notification');
+  api.transcribeVoice = async () => ({ text: '보고해' });
+  act(speech); await flush();
+  assert.equal(wakeStore.state.mode, 'awake', 'manually enabling the microphone still accepts 보고해');
+  assert.equal(wakeStore.takeFirstPrompt('op'), '보고해');
+  assert.equal(currentPath, '/ws/w1/sessions/m1/codex/operator-session');
 });
 
 test('audio completion callbacks run after successful playback, never after interruption or failure', async (t) => {

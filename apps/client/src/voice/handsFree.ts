@@ -16,6 +16,9 @@ const SAMPLE_RATE = 16_000;
 export const END_OF_SPEECH_SILENCE_MS = 1100;
 
 export interface HandsFreeCallbacks {
+  /** 오디오 처리가 브라우저에 막혔다 — 실제로 듣기 전에 사용자 동작을 기다린다. */
+  onWaitingForGesture?(): void;
+  onAudioRunning?(): void;
   /** 말이 시작됐다(아직 오인일 수 있다). */
   onSpeechStart?(): void;
   /** 말하는 동안의 입력 크기(0..1) — 듣고 있다는 표시용. */
@@ -84,67 +87,126 @@ function rmsLevel(frame: Float32Array): number {
 /** 실시간 자막을 너무 자주 만들지 않는다 — 발화가 이만큼 자랄 때마다 한 번. */
 const SPEECH_SO_FAR_EVERY_MS = 1500;
 
-export async function startHandsFree(cb: HandsFreeCallbacks): Promise<HandsFreeSession> {
-  const { MicVAD } = await import('@ricky0123/vad-web');
-  let speaking = false;
-  let frames: Float32Array[] = [];
-  let lastSoFarAt = 0;
-
-  const vad = await MicVAD.new({
-    model: 'v6',
-    baseAssetPath: VAD_ASSET_PATH,
-    onnxWASMBasePath: VAD_ASSET_PATH,
-    positiveSpeechThreshold: 0.6,
-    negativeSpeechThreshold: 0.4,
-    redemptionMs: END_OF_SPEECH_SILENCE_MS,
-    preSpeechPadMs: 300,
-    minSpeechMs: 400,
-    submitUserSpeechOnPause: false,
-    getStream: () => navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    }),
-    onSpeechStart: () => {
-      speaking = true;
-      frames = [];
-      lastSoFarAt = 0;
-      cb.onSpeechStart?.();
-    },
-    onFrameProcessed: (_probabilities, frame) => {
-      cb.onLevel?.(rmsLevel(frame));
-      if (!speaking) return;
-      frames.push(frame.slice());
-      const heardMs = (frames.reduce((n, f) => n + f.length, 0) / SAMPLE_RATE) * 1000;
-      if (cb.onSpeechSoFar && heardMs - lastSoFarAt >= SPEECH_SO_FAR_EVERY_MS) {
-        lastSoFarAt = heardMs;
-        cb.onSpeechSoFar(encodeWav(concatFrames(frames)), heardMs);
-      }
-    },
-    onVADMisfire: () => {
-      speaking = false;
-      frames = [];
-      cb.onMisfire?.();
-    },
-    onSpeechEnd: (audio: Float32Array) => {
-      speaking = false;
-      frames = [];
-      cb.onUtterance(encodeWav(audio), (audio.length / SAMPLE_RATE) * 1000);
-    },
+/** Resume inside the gesture, before model loading can consume transient activation. */
+export function ensureAudioRunning(context: AudioContext, signal?: AbortSignal, onWaiting?: () => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      context.removeEventListener('statechange', changed);
+      document.removeEventListener('pointerdown', resume, { capture: true });
+      document.removeEventListener('keydown', resume, { capture: true });
+      signal?.removeEventListener('abort', aborted);
+    };
+    const finish = (error?: unknown) => { cleanup(); error ? reject(error) : resolve(); };
+    const aborted = () => finish(new DOMException('마이크 시작이 취소됐습니다', 'AbortError'));
+    const changed = () => {
+      if (context.state === 'running') finish();
+      else if (context.state === 'closed') finish(new Error('오디오 입력이 닫혔습니다'));
+    };
+    const resume = () => { try { void context.resume().then(changed, finish); } catch (error) { finish(error); } };
+    if (signal?.aborted) { aborted(); return; }
+    if (context.state === 'closed') { finish(new Error('오디오 입력이 닫혔습니다')); return; }
+    const isRunning = () => context.state === 'running';
+    if (isRunning()) { resolve(); return; }
+    context.addEventListener('statechange', changed);
+    document.addEventListener('pointerdown', resume, true);
+    document.addEventListener('keydown', resume, true);
+    signal?.addEventListener('abort', aborted, { once: true });
+    resume();
+    if (!isRunning()) onWaiting?.();
   });
-  await vad.start();
+}
 
-  return {
-    pause: async () => {
-      speaking = false;
-      frames = [];
-      await vad.pause();
-    },
-    resume: async () => {
-      await vad.start();
-    },
-    destroy: async () => {
-      speaking = false;
-      frames = [];
-      await vad.destroy();
-    },
+export async function startHandsFree(cb: HandsFreeCallbacks, options: { signal?: AbortSignal } = {}): Promise<HandsFreeSession> {
+  const context = new AudioContext();
+  let stream: MediaStream | null = null;
+  let vad: Awaited<ReturnType<(typeof import('@ricky0123/vad-web'))['MicVAD']['new']>> | null = null;
+  const checkCancelled = () => options.signal?.throwIfAborted();
+  const close = async () => {
+    stream?.getTracks().forEach((track) => track.stop());
+    await context.close().catch(() => undefined);
   };
+  try {
+    await ensureAudioRunning(context, options.signal, cb.onWaitingForGesture);
+    cb.onAudioRunning?.();
+    checkCancelled();
+    const { MicVAD } = await import('@ricky0123/vad-web');
+    let speaking = false;
+    let frames: Float32Array[] = [];
+    let lastSoFarAt = 0;
+
+    vad = await MicVAD.new({
+      audioContext: context,
+      startOnLoad: false,
+      model: 'v6',
+      baseAssetPath: VAD_ASSET_PATH,
+      onnxWASMBasePath: VAD_ASSET_PATH,
+      positiveSpeechThreshold: 0.6,
+      negativeSpeechThreshold: 0.4,
+      redemptionMs: END_OF_SPEECH_SILENCE_MS,
+      preSpeechPadMs: 300,
+      minSpeechMs: 400,
+      submitUserSpeechOnPause: false,
+      getStream: async () => {
+        checkCancelled();
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        if (options.signal?.aborted) { stream.getTracks().forEach((track) => track.stop()); checkCancelled(); }
+        return stream;
+      },
+      onSpeechStart: () => {
+        speaking = true;
+        frames = [];
+        lastSoFarAt = 0;
+        cb.onSpeechStart?.();
+      },
+      onFrameProcessed: (_probabilities, frame) => {
+        cb.onLevel?.(rmsLevel(frame));
+        if (!speaking) return;
+        frames.push(frame.slice());
+        const heardMs = (frames.reduce((n, f) => n + f.length, 0) / SAMPLE_RATE) * 1000;
+        if (cb.onSpeechSoFar && heardMs - lastSoFarAt >= SPEECH_SO_FAR_EVERY_MS) {
+          lastSoFarAt = heardMs;
+          cb.onSpeechSoFar(encodeWav(concatFrames(frames)), heardMs);
+        }
+      },
+      onVADMisfire: () => {
+        speaking = false;
+        frames = [];
+        cb.onMisfire?.();
+      },
+      onSpeechEnd: (audio: Float32Array) => {
+        speaking = false;
+        frames = [];
+        cb.onUtterance(encodeWav(audio), (audio.length / SAMPLE_RATE) * 1000);
+      },
+    });
+    checkCancelled();
+    await vad.start();
+    // Permission dialogs/device changes can suspend audio again while the model is loading.
+    await ensureAudioRunning(context, options.signal, cb.onWaitingForGesture);
+    checkCancelled();
+    const activeVad = vad;
+
+    return {
+      pause: async () => {
+        speaking = false;
+        frames = [];
+        await activeVad.pause();
+      },
+      resume: async () => {
+        await ensureAudioRunning(context, options.signal, cb.onWaitingForGesture);
+        await activeVad.start();
+      },
+      destroy: async () => {
+        speaking = false;
+        frames = [];
+        try { await activeVad.destroy(); } finally { await close(); }
+      },
+    };
+  } catch (error) {
+    await vad?.destroy().catch(() => undefined);
+    await close();
+    throw error;
+  }
 }

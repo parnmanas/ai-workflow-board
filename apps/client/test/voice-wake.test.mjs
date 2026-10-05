@@ -18,6 +18,7 @@ import {
   editDistance,
   heardName,
   isFillerUtterance,
+  isReportRequest,
   matchWake,
   splitSleepMarker,
   stripWakeNote,
@@ -247,6 +248,7 @@ test('a notification temporarily listens with name calling off and closes on sil
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   wakeStore.setEnabled(false);
   assert.equal(wakeStore.openNotificationFollowUp('j'), true);
+  wakeStore.setListener('listening');
   assert.equal(wakeStore.state.enabled, false);
   assert.equal(wakeStore.state.mode, 'sleeping');
   assert.equal(wakeStore.activeFollowUp(), 'j');
@@ -259,6 +261,7 @@ test('a started report request survives timeout and STT without switching operat
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   wakeStore.setEnabled(false);
   wakeStore.openNotificationFollowUp('j');
+  wakeStore.setListener('listening');
   t.mock.timers.tick(14_000);
   const utterance = wakeStore.holdFollowUp();
   assert.equal(utterance.operatorId, 'j');
@@ -280,6 +283,7 @@ test('temporary input expires after an ignored utterance; manual off cancels pen
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   wakeStore.setEnabled(false);
   wakeStore.openNotificationFollowUp('j');
+  wakeStore.setListener('listening');
   const utterance = wakeStore.holdFollowUp();
   t.mock.timers.tick(15_001);
   utterance.release(); utterance.release();
@@ -294,4 +298,44 @@ test('temporary input expires after an ignored utterance; manual off cancels pen
   wakeStore.openNotificationFollowUp('f');
   assert.equal(wakeStore.activeFollowUp(), 'f', 'the old lease cannot close a later notification');
   wakeStore.closeNotificationFollowUp();
+});
+
+test('notification input gets fifteen seconds after slow microphone setup and a user gesture', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  wakeStore.setEnabled(false);
+  wakeStore.openNotificationFollowUp('j');
+  wakeStore.setListener('starting');
+  t.mock.timers.tick(20_000);
+  assert.equal(wakeStore.activeFollowUp(), 'j', 'cold model loading must not use up the response window');
+  assert.equal(wakeStore.state.followUp.ready, false);
+  wakeStore.setListener('waiting-gesture');
+  t.mock.timers.tick(20_000);
+  wakeStore.setListener('listening');
+  assert.equal(wakeStore.state.followUp.ready, true);
+  t.mock.timers.tick(14_999);
+  assert.equal(wakeStore.activeFollowUp(), 'j');
+  t.mock.timers.tick(2);
+  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(wakeStore.reportOperator(), 'j', 'manual listening can still address the reporting operator');
+  wakeStore.setEnabled(true);
+  assert.equal(wakeStore.reportOperator(), 'j');
+  wakeStore.wake('j', '보고해');
+  assert.equal(wakeStore.reportOperator(), null, 'consume the report target on entering its conversation');
+  wakeStore.setEnabled(false);
+});
+
+test('a microphone that never becomes ready is cancelled without persistent listening', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  wakeStore.setEnabled(false);
+  wakeStore.openNotificationFollowUp('j');
+  t.mock.timers.tick(90_001);
+  assert.equal(wakeStore.state.followUp, null);
+  assert.equal(wakeStore.state.mode, 'off');
+  t.mock.timers.tick(10 * 60_000);
+  assert.equal(wakeStore.reportOperator(), null, 'report context also has a bounded lifetime');
+});
+
+test('only an explicit request for a report uses the remembered notification outside its input window', () => {
+  for (const text of ['보고해', '보고 해 줘.', '보고해주세요', '무슨 일이야?', '무슨 작업이 끝났어?', 'report please']) assert.equal(isReportRequest(text), true, text);
+  for (const text of ['네', '1번', '커피', '아무 말', '오늘 일정 알려줘', '보고해야 하나']) assert.equal(isReportRequest(text), false, text);
 });

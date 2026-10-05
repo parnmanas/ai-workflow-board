@@ -97,6 +97,7 @@ function awakePhaseLabel(phase: ConversationPhase, name: string): string {
 const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
   off: '',
   starting: '마이크 준비 중… (처음 한 번은 음성 감지 모델을 받느라 몇 초 걸립니다)',
+  'waiting-gesture': '화면을 한 번 누르면 마이크 소리를 듣기 시작합니다',
   listening: '🎙 듣는 중 — 말을 멈추면 자동으로 보냅니다',
   hearing: '🔴 말하는 중…',
   transcribing: '보내는 중…',

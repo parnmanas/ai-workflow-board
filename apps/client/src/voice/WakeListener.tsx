@@ -10,7 +10,8 @@ import { useVoiceOperators } from './operator';
 import { voiceRecordingSupported } from './recorder';
 import { speechPlayer } from './speechPlayer';
 import { useSpeechState, useVoiceConfig } from './useVoice';
-import { isFillerUtterance, matchWake } from './wake.logic';
+import { isFillerUtterance, isReportRequest, matchWake } from './wake.logic';
+import { transcriptionFeedback } from './transcriptionFeedback';
 import { NOTIFICATION_FOLLOW_UP_KEY, NOTIFICATION_FOLLOW_UP_MS, useWakeState, wakeStore } from './wakeState';
 
 /** 한 단말에서 한 탭만 이름을 듣는다 — 탭마다 마이크를 열면 같은 부름에 여러 탭이 깨어난다. */
@@ -101,11 +102,18 @@ export default function WakeListener() {
     let followUpAtSpeechStart: ReturnType<typeof wakeStore.holdFollowUp> = null;
     const cancelFollowUp = () => { followUpAtSpeechStart?.release(); followUpAtSpeechStart = null; };
     cancelFollowUpSpeech.current = cancelFollowUp;
-    const onSpeechStart = () => { cancelFollowUp(); followUpAtSpeechStart = wakeStore.holdFollowUp(); };
+    let reportOperatorAtSpeechStart: string | null = null;
+    const onSpeechStart = () => {
+      cancelFollowUp();
+      followUpAtSpeechStart = wakeStore.holdFollowUp();
+      reportOperatorAtSpeechStart = wakeStore.reportOperator();
+    };
     const onUtterance = (wav: Blob) => {
       if (run.cancelled) return;
       const followUp = followUpAtSpeechStart ?? wakeStore.holdFollowUp();
       const followUpOperatorId = followUp?.operatorId;
+      const reportOperatorId = reportOperatorAtSpeechStart;
+      reportOperatorAtSpeechStart = null;
       followUpAtSpeechStart = null;
       checking += 1;
       wakeStore.setListener('checking');
@@ -115,12 +123,15 @@ export default function WakeListener() {
           if (run.cancelled || wakeStore.state.mode !== 'sleeping') return;
           const { operators: list, workspaceId, navigate: go } = latest.current;
           const text = (t.text || '').trim();
+          if (!text) { failure = transcriptionFeedback(t); return; }
           const match = matchWake(text, list);
           // Name calling wins; otherwise send the report request to the operator whose cue just played.
           const answering = !match && followUpOperatorId && followUp?.isValid() && !isFillerUtterance(text)
             ? list.find((op) => op.id === followUpOperatorId) ?? null
             : null;
-          const operator = match?.operator ?? answering;
+          const reporting = !match && !followUp && !answering && isReportRequest(text) && reportOperatorId === wakeStore.reportOperator()
+            ? list.find((op) => op.id === reportOperatorId) ?? null : null;
+          const operator = match?.operator ?? answering ?? reporting;
           if (!operator) return;
           if (!workspaceId) {
             failure = `"${operator.name}" 을(를) 들었지만 열 워크스페이스가 없습니다 — 워크스페이스를 한 번 연 뒤에 다시 불러 주세요.`;
@@ -152,9 +163,12 @@ export default function WakeListener() {
       }
       wakeStore.setListener('starting');
       try {
-        const session = await startHandsFree({ onSpeechStart, onUtterance, onMisfire: cancelFollowUp });
+        const session = await startHandsFree({ onSpeechStart, onUtterance, onMisfire: cancelFollowUp,
+          onWaitingForGesture: () => { if (!run.cancelled) wakeStore.setListener('waiting-gesture'); },
+          onAudioRunning: () => { if (!run.cancelled) wakeStore.setListener('starting'); },
+        }, { signal: gesture.signal });
         if (run.cancelled) {
-          void session.destroy();
+          void session.destroy().catch(() => undefined);
           return;
         }
         sessionRef.current = session;
@@ -174,7 +188,7 @@ export default function WakeListener() {
       gesture.abort();
       const session = sessionRef.current;
       sessionRef.current = null;
-      void session?.destroy();
+      void session?.destroy().catch(() => undefined);
     };
   }, [listen]);
 
@@ -183,7 +197,11 @@ export default function WakeListener() {
     const session = sessionRef.current;
     if (!session) return;
     if (speech.speaking) { cancelFollowUpSpeech.current(); void session.pause(); }
-    else void session.resume();
+    else void session.resume().then(() => {
+      if (sessionRef.current === session && wakeStore.state.mode === 'sleeping') wakeStore.setListener('listening');
+    }).catch((err) => {
+      if (sessionRef.current === session) wakeStore.setListener('error', err?.message || '마이크를 다시 열지 못했습니다');
+    });
   }, [speech.speaking]);
 
   return null;
