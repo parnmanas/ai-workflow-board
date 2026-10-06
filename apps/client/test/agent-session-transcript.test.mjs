@@ -651,3 +651,26 @@ test('received time converts the reported UTC record to the browser timezone onc
     else process.env.TZ = originalTz;
   }
 });
+
+test('automatic continuation notices have their own block, preserving text and turn identity', () => {
+  const notice = '[Your previous response had no visible output. Please continue and produce a user-visible response.]';
+  const automatic = ev('user_prompt', { text: `  ${notice}\n` }, 'automatic-turn');
+  const blocks = buildTranscript([automatic]);
+  assert.equal(blocks[0].kind, 'automatic_prompt');
+  assert.equal(blocks[0].text, automatic.payload.text);
+  assert.equal(blocks[0].turnId, 'automatic-turn');
+  assert.equal(blocks[0].createdAt, automatic.created_at);
+  assert.equal(buildTranscript([ev('user_prompt', { text: notice.replace(' Please', '\nPlease') })])[0].kind, 'automatic_prompt');
+});
+
+test('ordinary continuation requests, quoted notices and known user echoes stay user prompts', () => {
+  const notice = '[Your previous response had no visible output. Please continue and produce a user-visible response.]';
+  const events = [
+    ev('user_prompt', { text: 'Please continue.' }),
+    ev('user_prompt', { text: `Why do I see ${notice}?` }),
+    ev('user_prompt', { text: `> ${notice}` }),
+    ev('user_prompt', { text: `${notice} Explain this.` }),
+    { ...ev('user_prompt', { text: notice }), id: 'local:user-turn' },
+  ];
+  assert.deepEqual(buildTranscript(events).map((b) => b.kind), events.map(() => 'prompt'));
+});

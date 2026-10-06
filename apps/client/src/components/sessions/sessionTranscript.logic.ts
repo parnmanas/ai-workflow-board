@@ -146,6 +146,7 @@ export type TranscriptBlock =
    * `report` — 사람이 아니라 AWB 가 operator 에게 보낸 작업 보고(접어서 보여 준다).
    */
   | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean; report?: boolean }
+  | { kind: 'automatic_prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'assistant'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'reasoning'; key: string; seq: number; turnId: string; text: string }
   | {
@@ -283,6 +284,13 @@ export function normalizeElicitationSchema(raw: unknown): ElicitationSchemaView 
   return { title: str(schema.title), description: str(schema.description), fields };
 }
 
+/** Legacy CLI histories encode this continuation request as a user message without sender metadata.
+ * Match only the complete known notice; quotations and ordinary requests to continue stay user input.
+ */
+function isAutomaticContinuation(text: string): boolean {
+  return text.trim().replace(/\s+/g, ' ') === '[Your previous response had no visible output. Please continue and produce a user-visible response.]';
+}
+
 export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   const toolIndex = new Map<string, number>();
@@ -298,6 +306,12 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     switch (ev.type) {
       case 'user_prompt': {
         const { text, noted } = stripWakeNote(str(p.text));
+        // Local echoes and voice wake requests are known user input.
+        const automatic = !noted && !ev.id.startsWith('local:') && isAutomaticContinuation(text);
+        if (automatic) {
+          blocks.push({ kind: 'automatic_prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at });
+          break;
+        }
         blocks.push({
           kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at,
           ...(noted ? { voice: true } : {}),

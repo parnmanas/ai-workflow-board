@@ -157,6 +157,36 @@ function PromptBlock({ text, voice }: { text: string; voice?: boolean }) {
   );
 }
 
+function AutomaticPromptBlock({ text }: { text: string }) {
+  return (
+    <aside
+      data-block="automatic-prompt"
+      role="note"
+      aria-label="자동 이어쓰기"
+      style={{
+        maxWidth: 860,
+        alignSelf: 'flex-start',
+        padding: '9px 13px',
+        borderRadius: tokens.radii.md,
+        borderLeft: `3px solid ${tokens.colors.warningLight}`,
+        background: tokens.colors.surfaceSubtle,
+        color: tokens.colors.textSecondary,
+        fontSize: 12,
+        lineHeight: 1.6,
+      }}
+    >
+      <div style={{ color: tokens.colors.warningLight, fontWeight: 600 }}>
+        <span aria-hidden="true">↻ </span>자동 이어쓰기
+      </div>
+      <div>표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다.</div>
+      <details style={{ marginTop: 4 }}>
+        <summary style={{ cursor: 'pointer' }}>전송된 원문 보기</summary>
+        <div style={{ marginTop: 4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</div>
+      </details>
+    </aside>
+  );
+}
+
 function AssistantBlock({ text, loadLocalImage }: { text: string; loadLocalImage?: (path: string) => Promise<Blob> }) {
   // 공통 렌더러는 이미지·파일 문법을 모른다 — 미리보기 자리만 먼저 떼어 내고 나머지 글은 그대로 그린다.
   // 이미지와 로컬 html/md 는 같은 통(`local_image` RPC)으로 받으므로 로더도 하나를 공유한다.
@@ -949,6 +979,8 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             return block.report
               ? <ReportPromptBlock key={block.key} text={block.text} />
               : <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
+          case 'automatic_prompt':
+            return <AutomaticPromptBlock key={block.key} text={block.text} />;
           case 'assistant':
             return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} />;
           case 'reasoning':
