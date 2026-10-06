@@ -7,6 +7,7 @@ import {
   createAgent,
   createApiKey,
   createAccount,
+  createUser,
 } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
@@ -137,4 +138,50 @@ test('Hostless heartbeat is rejected (P4c-4: host identity required)', async (t)
     agent_id: 'cccccccc-3333-4333-8333-cccccccccccc',
   }));
   assert.equal(status, 403);
+});
+
+test('Host rename is admin-only, validates names, and preserves pairing through later heartbeats', async (t) => {
+  const { app, port, modules } = await bootApp({ port: 0 });
+  t.after(async () => { await app.close(); });
+  const { getDataSourceToken, AuthService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const account = await createAccount(app, getDataSourceToken, 'host-rename');
+  const hosts = ds.getRepository('RuntimeHost');
+  const host = await hosts.save(hosts.create({ name: 'Original host', hostname: 'physical-machine', account_id: account.id }));
+  const runtimeId = randomUUID();
+  const key = await createApiKey(app, getDataSourceToken, runtimeId, { accountId: account.id, hostId: host.id, label: 'host-rename' });
+  const heartbeat = () => postHeartbeat(port, key.raw_key, baseBody({
+    instance_id: 'rename-instance', agent_id: runtimeId, host_id: host.id, hostname: host.hostname,
+  }));
+  assert.equal((await heartbeat()).status, 201);
+  const admin = await createUser(app, getDataSourceToken, { name: 'rename-admin' });
+  const member = await createUser(app, getDataSourceToken, { name: 'rename-member', role: 'member' });
+  const token = app.get(AuthService).createSession(admin.id);
+  const memberToken = app.get(AuthService).createSession(member.id);
+  const rename = (body, auth = token, id = host.id) => fetch(`http://127.0.0.1:${port}/api/admin/agent-manager/hosts/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: `Bearer ${auth}` } : {}) },
+    body: JSON.stringify(body),
+  });
+  assert.equal((await rename({ name: 'Denied' }, null)).status, 401);
+  assert.equal((await rename({ name: 'Denied' }, memberToken)).status, 403);
+  for (const body of [{ name: '   ' }, { name: 'x'.repeat(201) }, { name: 42 }, { name: 'No', hostname: 'new-machine' }]) {
+    assert.equal((await rename(body)).status, 400);
+  }
+  assert.equal((await rename({ name: 'Missing' }, token, randomUUID())).status, 404);
+  const response = await rename({ name: '  Ralf  ' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { id: host.id, name: 'Ralf' });
+  assert.equal((await heartbeat()).status, 201, 'existing paired key still authenticates');
+  const saved = await hosts.findOneBy({ id: host.id });
+  assert.equal(saved.name, 'Ralf', 'heartbeat never replaces the configured name');
+  assert.equal(saved.hostname, host.hostname);
+  assert.equal(saved.account_id, account.id);
+  const pairedKey = await ds.getRepository('ApiKey').findOneBy({ id: key.id });
+  assert.equal(pairedKey.host_id, host.id);
+  const listed = await fetch(`http://127.0.0.1:${port}/api/admin/agent-manager/instances`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(listed.status, 200);
+  const instance = (await listed.json()).find((row) => row.instance_id === 'rename-instance');
+  assert.equal(instance.agent_name, 'Ralf', 'names resolve from host_id even when agent_id is a runtime key');
 });

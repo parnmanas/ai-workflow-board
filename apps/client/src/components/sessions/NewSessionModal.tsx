@@ -2,7 +2,7 @@ import RuntimeSelectionFields, { emptyRuntimeSelection, type RuntimeSelectionVal
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
-import type { AgentSessionConfigOption, AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
+import type { AgentSessionCliSettings, AgentSessionConfigOption, AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
 import { Button, Input, Modal } from '../common';
 import DirectoryPicker from '../admin/DirectoryPicker';
 import { lastCwdStorageKey } from './sessionList.logic';
@@ -13,7 +13,7 @@ import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 /**
  * 새 Agent Session — Runtime Host 와 CLI 를 고르고 작업 폴더를 준다. Chat 의
  * NewChatModal(참여자 여러 명, DM/그룹)과 의도적으로 다른 모양이다. 세션은 AWB Agent 가
- * 아니라 그 장비의 CLI(운영자 홈)로 열린다.
+ * 아니라 그 장비의 CLI로 열고, 선택한 credential 또는 장비 자체 로그인으로 인증한다.
  */
 export interface NewSessionModalProps {
   open: boolean;
@@ -73,6 +73,11 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   // 캐시해 준다 — 그래서 세션을 열기 전에도 고를 수 있다. 고른 값은 호스트×CLI 에 기억되고,
   // 이 세션을 포함해 이후 열리는 모든 세션에 다시 걸린다(프로세스가 회수돼도 유지된다).
   const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
+  const [credentialId, setCredentialId] = useState('');
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsRefresh, setSettingsRefresh] = useState(0);
+  const settingsKey = useRef('');
   const [knownOptions, setKnownOptions] = useState<AgentSessionConfigOption[]>([]);
   const [chosenConfig, setChosenConfig] = useState<Record<string, string | boolean>>({});
 
@@ -110,21 +115,38 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   // 호스트/CLI 가 정해지면 그 조합의 기억된 설정과 선택지를 불러온다.
   useEffect(() => {
     if (!open || !managerId || !cli) {
+      settingsKey.current = '';
+      setSettings(null);
+      setCredentialId('');
+      setSettingsError(null);
+      setSettingsLoading(false);
       setKnownOptions([]);
       setChosenConfig({});
       return;
     }
     let cancelled = false;
+    const key = `${managerId}/${cli}`;
+    const reset = settingsKey.current !== key;
     setSettingsLoading(true);
-    setKnownOptions([]);
-    setChosenConfig({});
+    setSettingsError(null);
+    if (reset) {
+      setSettings(null);
+      setCredentialId('');
+      setKnownOptions([]);
+      setChosenConfig({});
+    }
     void (async () => {
       try {
         const settings = await api.getHostCliSettings(managerId, cli);
         if (cancelled) return;
+        settingsKey.current = key;
+        setSettings(settings);
         setKnownOptions(settings.known_config_options ?? []);
-        setChosenConfig(settings.default_config ?? {});
-        if (!selectionEdited.current) {
+        if (reset) {
+          setCredentialId(settings.credential_id ?? settings.credential?.id ?? '');
+          setChosenConfig(settings.default_config ?? {});
+        }
+        if (reset && !selectionEdited.current) {
           const model = settings.known_config_options?.find((o) => o.category === 'model');
           const effort = settings.known_config_options?.find((o) => o.category === 'thought_level');
           setSelection((prev) => ({ ...prev,
@@ -132,15 +154,14 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
             effort: effort ? String(settings.default_config?.[effort.config_id] || '') || null : null,
           }));
         }
-      } catch {
+      } catch (err: any) {
         if (cancelled) return;
-        // 설정을 못 읽어도 세션은 열 수 있어야 한다 — 선택기만 감춘다.
-        setKnownOptions([]);
-        setChosenConfig({});
+        setSettingsError(err?.message || 'Failed to load CLI settings. Refresh before starting the session.');
+        settingsKey.current = '';
       } finally { if (!cancelled) setSettingsLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [open, managerId, cli]);
+  }, [open, managerId, cli, settingsRefresh]);
 
   // 모델 목록은 모든 화면이 공유하는 스토어에서 온다(src/cli/hostModels.ts) — 오래된/빈
   // 목록은 열릴 때 재열거된다. 어댑터가 보고한 목록이 있으면 스토어도 그것만 준다(세션 안과 같은 목록).
@@ -155,6 +176,8 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
   // 하트비트 TTL 사이에 잠깐 목록에서 빠진 호스트는 선택을 유지한다(다음 하트비트에 돌아온다).
   const selectedHostMissing = !!managerId && !host;
+  const credentialUnavailable = !!credentialId && !!settings
+    && !settings.candidates.some((candidate) => candidate.id === credentialId);
 
   useEffect(() => {
     if (!host) return;
@@ -166,7 +189,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   }, [managerId, cli]);
 
   const create = async () => {
-    if (!managerId || !cli || creating || settingsLoading) return;
+    if (!managerId || !cli || creating || settingsLoading || !settings || settingsError || credentialUnavailable) return;
     const trimmed = cwd.trim();
     if (!trimmed) {
       setError('A working directory on the Runtime Host is required.');
@@ -191,8 +214,9 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       if (!selection.effort && selectionEdited.current) {
         for (const option of knownOptions.filter((o) => o.category === 'thought_level')) changed[option.config_id] = null;
       }
-      if (Object.keys(changed).length) {
-        await api.setHostCliSettings(managerId, cli, host?.cli_settings?.[cli]?.id ?? null, changed);
+      const credentialChanged = credentialId !== (settings.credential_id ?? settings.credential?.id ?? '');
+      if (Object.keys(changed).length || credentialChanged) {
+        await api.setHostCliSettings(managerId, cli, credentialId || null, changed);
       }
       const live = await api.openHostSession(managerId, cli, { cwd: trimmed, title: title.trim() });
       rememberCwd(managerId, cli, trimmed);
@@ -213,7 +237,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       footer={(
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="secondary" onClick={onClose} disabled={creating}>Cancel</Button>
-          <Button variant="primary" onClick={() => void create()} disabled={!managerId || !cli || creating || settingsLoading} loading={creating}>
+          <Button variant="primary" onClick={() => void create()} disabled={!managerId || !cli || creating || settingsLoading || !settings || !!settingsError || credentialUnavailable} loading={creating}>
             Start session
           </Button>
         </div>
@@ -221,8 +245,8 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <p style={{ margin: 0, fontSize: 12.5, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          Opens the CLI on that machine with its own login and history — the same session you would
-          see in a terminal there. Output streams here and tool permissions are yours to approve.
+          Choose how the CLI signs in on the Runtime Host. Its session history stays on that machine,
+          and output streams here with tool permissions for you to approve.
         </p>
 
         <RuntimeSelectionFields session idPrefix="new-session"
@@ -237,6 +261,43 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
             setManagerId(next.host_id); setCli(next.cli);
           }}
         />
+
+        {managerId && cli && (
+          <div>
+            {settingsLoading && <div role="status" style={labelStyle}>Loading CLI settings…</div>}
+            {settings?.supports_credential && (
+              <>
+                <label htmlFor="new-session-credential" style={labelStyle}>Credential</label>
+                <select id="new-session-credential" aria-label="Session credential" style={selectStyle}
+                  value={credentialId} disabled={creating || settingsLoading}
+                  onChange={(e) => setCredentialId(e.target.value)}>
+                  <option value="">Host&apos;s own login (no AWB credential)</option>
+                  {credentialUnavailable && <option value={credentialId} disabled>Unavailable credential · {credentialId.slice(0, 8)}</option>}
+                  {settings.candidates.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.name} · {candidate.provider}{candidate.scope === 'global' ? ' · global' : ''}
+                    </option>
+                  ))}
+                </select>
+                <p style={{ ...labelStyle, marginTop: 6, lineHeight: 1.5 }}>
+                  {credentialUnavailable
+                    ? 'The saved credential is unavailable. Choose another credential or the host’s own login.'
+                    : credentialId
+                    ? 'Remembered for new sessions on this host and CLI. Existing sessions keep their saved login.'
+                    : 'The host must already be signed in. On a new host, select an AWB credential or add one below.'}
+                </p>
+                <a href="/settings/credentials" target="_blank" rel="noopener noreferrer"
+                  style={{ fontSize: 12, color: tokens.colors.accent }}>Add / manage credentials ↗</a>
+              </>
+            )}
+            {settings && !settings.supports_credential && (
+              <p style={labelStyle}>{runtimeLabel(cli)} uses the host&apos;s own login. Sign in on the host before starting.</p>
+            )}
+            {settingsError && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{settingsError}</div>}
+            <Button variant="ghost" size="sm" disabled={creating || settingsLoading}
+              onClick={() => setSettingsRefresh((value) => value + 1)}>Refresh credentials</Button>
+          </div>
+        )}
 
         <div>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>

@@ -1262,6 +1262,25 @@ export class AgentManagerController {
   // ─── Admin → Server (instances) ──────────────────────────────────────────
 
   @ApiBearerAuth('user-session')
+  @Patch('api/admin/agent-manager/hosts/:id')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: 'Change the display name of a Runtime Host' })
+  async renameHost(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).some((key) => key !== 'name') || !name || name.length > 200) {
+      return res.status(400).json({ error: 'A Host name of 1–200 characters is required; only name may be changed.' });
+    }
+    // Update only the display name: pairing identity, hostname and ownership stay pinned.
+    if (!(await this.hostRepo.update({ id }, { name })).affected) {
+      return res.status(404).json({ error: 'Runtime Host not found' });
+    }
+    this.logService.info('System', `Runtime Host renamed to "${name}"`, { host_id: id });
+    return res.json({ id, name });
+  }
+
+  @ApiBearerAuth('user-session')
   @Get('api/admin/agent-manager/instances')
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
@@ -1273,7 +1292,7 @@ export class AgentManagerController {
     // render the configured identity instead of the OS hostname. Fallback to
     // hostname when the Host row is missing — keeps the previous default
     // behavior for stale rows.
-    const agentIds = Array.from(new Set(data.flatMap((i) => [i.agent_id, ...(i.agent_ids ?? [])]).filter(Boolean)));
+    const agentIds = Array.from(new Set(data.map((i) => i.host_id || i.agent_id).filter(Boolean)));
     const nameMap = new Map<string, string>();
     if (agentIds.length > 0) {
       const hosts = await this.hostRepo.find({ where: { id: In(agentIds) } });
@@ -1303,7 +1322,7 @@ export class AgentManagerController {
     }
     const enriched = data.map((inst) => ({
       ...inst,
-      agent_name: nameMap.get(inst.agent_id) || null,
+      agent_name: nameMap.get(inst.host_id || inst.agent_id) || null,
       // P4c-4: last_error_upload_at 는 Agent 행과 함께 제거 (에러 로그 본문은
       // agent-logs 표면에 남아 있다).
       last_error_upload_at: null,

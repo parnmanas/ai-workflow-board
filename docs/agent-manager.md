@@ -789,6 +789,11 @@ refresh and logs) from **Agent 템플릿** using tabs. Host details no longer di
 the retired Agent directory/identity roster, Agent lifecycle status or restart-all
 Agent controls. Execution folders and sessions are managed on their work surfaces.
 
+Runtime Host details include **이름 변경** to edit the display name after pairing.
+The admin-only `PATCH /api/admin/agent-manager/hosts/:id` accepts a `name` of
+1–200 characters. It keeps the Host id, physical hostname, ownership and paired
+key intact; a later heartbeat preserves the chosen name.
+
 Execution folders belong to the session or inline RuntimeSpec. The old
 `set_working_dir` manager command has been removed from both contracts. CLI
 capabilities govern effort availability; explicit runtime effort reaches both

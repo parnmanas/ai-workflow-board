@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, act, click, React } from './helpers/jsdom.mjs';
+import { setupDom, mount, act, click, typeInto, React } from './helpers/jsdom.mjs';
 import { MemoryRouter } from 'react-router-dom';
 import { installFakeEventSource } from './helpers/boardStream.mjs';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
@@ -9,6 +9,7 @@ import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import { api } from '../src/api.ts';
 import { cliCatalog } from '../src/cli/catalog.ts';
 import HostsPage from '../src/components/HostsPage.tsx';
+import { useHostNames } from '../src/runtime/useHostNames.ts';
 
 const host = {
   instance_id: 'instance-host', host_id: 'runtime-host', agent_id: 'legacy-manager',
@@ -95,4 +96,49 @@ test('template tab can be opened directly without mounting the Runtime Hosts con
   assert.equal(document.querySelector('[role="tab"][aria-selected="true"]').textContent, 'Agent 템플릿');
   assert.equal(Boolean(button('템플릿 등록')), true);
   assert.equal(list.mock.callCount(), 0);
+});
+
+test('renaming a Host updates the list and details using host_id without restarting it', async (t) => {
+  let catalogName = host.agent_name;
+  const rename = t.mock.method(api, 'renameRuntimeHost', async (id, name) => { catalogName = name; return { id, name }; });
+  const restart = t.mock.method(api, 'restartAgentManagerInstance', async () => ({}));
+  await renderHosts(t);
+  api.listTemplateHosts = async () => [{ id: host.host_id, name: catalogName }];
+  function HostLabel() {
+    const names = useHostNames();
+    return React.createElement('span', { 'data-testid': 'cached-host-name' }, names[host.host_id]);
+  }
+  const labelView = mount(React.createElement(HostLabel));
+  try {
+    await flush();
+    assert.equal(document.querySelector('[data-testid="cached-host-name"]').textContent, 'Build host');
+    click(button('이름 변경'));
+    typeInto(document.querySelector('input[aria-label="Host 이름"]'), '  Ralf  ');
+    click(button('저장'));
+    await flush();
+    assert.deepEqual(rename.mock.calls[0].arguments, ['runtime-host', 'Ralf']);
+    assert.equal(document.querySelector('h2').textContent, 'Ralf');
+    assert.ok(document.querySelector('[data-testid="runtime-hosts-list"]').textContent.includes('Ralf'));
+    assert.equal(document.querySelector('[data-testid="cached-host-name"]').textContent, 'Ralf');
+    assert.equal(Boolean(document.querySelector('input[aria-label="Host 이름"]')), false,
+      [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent).join('\n'));
+    assert.equal(restart.mock.callCount(), 0);
+  } finally { labelView.unmount(); }
+});
+
+test('Host rename can be cancelled and keeps the draft visible when saving fails', async (t) => {
+  const rename = t.mock.method(api, 'renameRuntimeHost', async () => { throw new Error('Host rename failed'); });
+  await renderHosts(t);
+  click(button('이름 변경'));
+  typeInto(document.querySelector('input[aria-label="Host 이름"]'), 'cancelled');
+  click(button('취소'));
+  assert.equal(rename.mock.callCount(), 0);
+  assert.equal(document.querySelector('h2').textContent, 'Build host');
+  click(button('이름 변경'));
+  typeInto(document.querySelector('input[aria-label="Host 이름"]'), 'retry me');
+  click(button('저장'));
+  await flush();
+  assert.equal(document.querySelector('input[aria-label="Host 이름"]').value, 'retry me');
+  assert.ok(document.querySelector('[role="alert"]').textContent.includes('Host rename failed'));
+  assert.equal(document.querySelector('h2').textContent, 'Build host');
 });

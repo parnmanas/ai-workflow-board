@@ -44,6 +44,13 @@ backend, 모델·승인 모드를 바꿔도 기존 세션의 snapshot은 바뀌�
 해당 세션에서 명시적으로 바꾼 mode/config는 snapshot에 기록하여 재개할 때 유지한다.
 기존 CLI 전사, 세션 id, credential 전용 홈과 기록 링크는 이 소유권 이관으로 이동하지 않는다.
 
+**New session**에서 credential을 직접 선택할 수 있다. 선택한 인증과 모델 기본값은
+세션을 열기 전에 저장하며, 현재 CLI 설정에서 읽은 credential을 그대로 사용한다.
+아직 credential이 없으면 **Add / manage credentials**로 등록한 뒤 **Refresh credentials**를
+누른다. 새 호스트에서 **Host's own login**을 쓰려면 먼저 그 호스트의 CLI에 로그인해야 한다.
+삭제된 기본 credential이나 설정 조회 실패는 시작 전에 표시하고, 인증을 선택하거나 조회를
+다시 성공시키기 전까지 세션 생성을 막는다. 기존 세션의 인증 snapshot은 바꾸지 않는다.
+
 CLI 설정이나 기존 세션이 참조하는 credential은 삭제할 수 없다(409). 이미 삭제된
 credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using CLI settings`로
 복구할 수 있다(`POST …/sessions/:sessionId/repair-credential`). 사용자가 명시적으로

@@ -262,3 +262,135 @@ test('switching to an unreported model clears remembered effort before starting 
   assert.deepEqual(calls.put[0].defaultConfig, { model: 'gpt-b', reasoning: null });
   assert.equal(calls.open.length, 1);
 });
+
+const CREDENTIAL = { id: 'codex-login', name: 'Codex account', provider: 'codex_subscription', scope: 'global' };
+const credentialSelect = () => document.querySelector('#new-session-credential');
+const startButton = () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Start session');
+const refreshCredentialsButton = () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Refresh credentials');
+
+test('a new host can select a credential without cached config and saves it before opening the session', async (t) => {
+  const dom = setupDom();
+  const calls = stubSettingsApi(t, { settings: { ...SETTINGS, candidates: [CREDENTIAL], default_config: {}, known_config_options: [] } });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  assert.equal(credentialSelect().value, '');
+  assert.ok(credentialSelect().textContent.includes('Codex account'));
+  change(credentialSelect(), CREDENTIAL.id);
+  typeInto(cwdInput(), '/srv/fresh-host');
+  let saved = false;
+  api.setHostCliSettings = async (...args) => { calls.put.push(args); saved = true; return SETTINGS; };
+  api.openHostSession = async (...args) => { assert.equal(saved, true); calls.open.push(args); return { session_id: 'new' }; };
+  click(startButton());
+  await flush();
+  assert.deepEqual(calls.put[0], ['m-rolf', 'codex', CREDENTIAL.id, {}]);
+  assert.equal(calls.open.length, 1);
+});
+
+test('model changes preserve the credential from current settings when the hosts list is stale', async (t) => {
+  const dom = setupDom();
+  const calls = stubSettingsApi(t, { settings: { ...SETTINGS, credential_id: CREDENTIAL.id, credential: CREDENTIAL, candidates: [CREDENTIAL] } });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  assert.equal(credentialSelect().value, CREDENTIAL.id);
+  change(document.querySelector('select[data-config-id="model"]'), 'gpt-b');
+  typeInto(cwdInput(), '/srv/app');
+  click(startButton());
+  await flush();
+  assert.equal(calls.put[0].credentialId, CREDENTIAL.id);
+  assert.equal(calls.open.length, 1);
+});
+
+test('an empty credential catalog offers setup and can refresh without resetting the session draft', async (t) => {
+  const dom = setupDom();
+  stubSettingsApi(t);
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  assert.equal(document.querySelector('a[href="/settings/credentials"]').target, '_blank');
+  assert.ok(document.body.textContent.includes('On a new host'));
+  typeInto(cwdInput(), '/srv/draft');
+  typeInto(titleInput(), 'Keep my draft');
+  change(document.querySelector('select[data-config-id="model"]'), 'gpt-b');
+  api.getHostCliSettings = async () => ({ ...SETTINGS, candidates: [CREDENTIAL] });
+  click(refreshCredentialsButton());
+  await flush();
+  assert.ok(credentialSelect().textContent.includes('Codex account'));
+  assert.equal(cwdInput().value, '/srv/draft');
+  assert.equal(titleInput().value, 'Keep my draft');
+  assert.equal(document.querySelector('select[data-config-id="model"]').value, 'gpt-b');
+  change(credentialSelect(), CREDENTIAL.id);
+  view.rerender(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  assert.equal(credentialSelect().value, CREDENTIAL.id, 'a heartbeat does not reset the chosen credential');
+});
+
+test('an unavailable saved credential blocks creation until the user explicitly selects a login', async (t) => {
+  const dom = setupDom();
+  const calls = stubSettingsApi(t, { settings: { ...SETTINGS, credential_id: 'deleted-login', default_config: {}, known_config_options: [] } });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  typeInto(cwdInput(), '/srv/app');
+  assert.equal(credentialSelect().value, 'deleted-login');
+  assert.equal(startButton().disabled, true);
+  change(credentialSelect(), '');
+  assert.equal(startButton().disabled, false);
+  click(startButton());
+  await flush();
+  assert.equal(calls.put[0].credentialId, null);
+  assert.equal(calls.open.length, 1);
+});
+
+test('switching hosts loads their own credential and discards the outgoing selection', async (t) => {
+  const dom = setupDom();
+  stubSettingsApi(t);
+  const other = { ...CREDENTIAL, id: 'other-login', name: 'Other account' };
+  api.getHostCliSettings = async (id) => ({ ...SETTINGS, credential_id: id === 'm-rolf' ? CREDENTIAL.id : other.id,
+    credential: id === 'm-rolf' ? CREDENTIAL : other, candidates: [CREDENTIAL, other] });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  assert.equal(credentialSelect().value, CREDENTIAL.id);
+  change(hostSelect(), 'm-ragnar');
+  await flush();
+  assert.equal(credentialSelect().value, other.id);
+});
+
+test('settings load errors stay visible and prevent starting until a successful retry', async (t) => {
+  const dom = setupDom();
+  const calls = stubSettingsApi(t);
+  api.getHostCliSettings = async () => { throw new Error('Cannot load credentials'); };
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  assert.equal(startButton().disabled, true);
+  assert.ok([...document.querySelectorAll('[role="alert"]')].some((node) => node.textContent.includes('Cannot load credentials')));
+  assert.equal(calls.open.length, 0);
+  api.getHostCliSettings = async () => SETTINGS;
+  click(refreshCredentialsButton());
+  await flush();
+  assert.equal(startButton().disabled, false);
+});
+
+test('a credential save failure leaves the new session unopened', async (t) => {
+  const dom = setupDom();
+  const calls = stubSettingsApi(t, { settings: { ...SETTINGS, candidates: [CREDENTIAL] } });
+  api.setHostCliSettings = async () => { throw new Error('Credential save failed'); };
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  change(credentialSelect(), CREDENTIAL.id);
+  typeInto(cwdInput(), '/srv/app');
+  click(startButton());
+  await flush();
+  assert.equal(calls.open.length, 0);
+  assert.ok([...document.querySelectorAll('[role="alert"]')].some((node) => node.textContent.includes('Credential save failed')));
+});

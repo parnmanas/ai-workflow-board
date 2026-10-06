@@ -1351,6 +1351,10 @@ export const api = {
     const q = qs.toString();
     return request<AgentManagerInstance[]>(`/admin/agent-manager/instances${q ? '?' + q : ''}`);
   },
+  renameRuntimeHost: (hostId: string, name: string) =>
+    request<{ id: string; name: string }>(`/admin/agent-manager/hosts/${encodeURIComponent(hostId)}`, {
+      method: 'PATCH', body: JSON.stringify({ name }),
+    }),
   getAgentManagerInstanceSubagents: (instanceId: string) =>
     request<SubagentSummary[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/subagents`),
   getAgentManagerInstanceLogs: (instanceId: string, limit = 200) =>

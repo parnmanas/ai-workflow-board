@@ -20,6 +20,8 @@ import { refreshHostModels, summarizeHostModels } from '../../cli/hostModels';
 import { reloadInstance, waitForCommandAck } from './agentManagerModelRefresh';
 import { INSTANCE_OP, finishInstanceOp, pendingAdapterClis, pendingInstallKeys, startInstanceOp, useInstanceOps } from './instanceOps';
 import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersions';
+import { AGENT_SESSIONS_CHANGED_EVENT } from '../../hooks/useAgentSessionsNav';
+import { invalidateHostNames } from '../../runtime/useHostNames';
 
 /**
  * Runtime Host administration and observability.
@@ -173,7 +175,7 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
 /** 회귀 테스트가 Details 진입 경로를 실제로 마운트해 검증할 수 있도록 노출한다
  *  (ticket 20fff298). 페이지 전체를 띄우지 않고 이 컴포넌트만 렌더하면 되므로,
  *  버튼 렌더 조건을 소스 정규식이 아니라 실제 DOM 으로 단언할 수 있다. */
-export function InstanceDetail({ inst }: { inst: AgentManagerInstance }) {
+export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance; onRenamed?: (hostId: string, name: string) => void }) {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const degraded = degradedReason(inst);
@@ -462,6 +464,8 @@ export function InstanceDetail({ inst }: { inst: AgentManagerInstance }) {
           <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: tokens.colors.textPrimary }}>
             {inst.agent_name || inst.hostname}
           </h2>
+          <HostNameEditor key={inst.host_id || inst.agent_id} hostId={inst.host_id || inst.agent_id}
+            name={inst.agent_name || inst.hostname} onRenamed={onRenamed} />
           {inst.agent_name && inst.agent_name !== inst.hostname && (
             <span
               style={{ fontSize: 12, color: tokens.colors.textMuted }}
@@ -813,6 +817,44 @@ export function InstanceDetail({ inst }: { inst: AgentManagerInstance }) {
   );
 }
 
+function HostNameEditor({ hostId, name, onRenamed }: {
+  hostId: string; name: string; onRenamed?: (hostId: string, name: string) => void;
+}) {
+  const { showToast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    if (saving || !draft.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const renamed = await api.renameRuntimeHost(hostId, draft.trim());
+      onRenamed?.(renamed.id, renamed.name);
+      invalidateHostNames();
+      window.dispatchEvent(new window.Event(AGENT_SESSIONS_CHANGED_EVENT));
+      setEditing(false);
+      showToast('Host 이름을 변경했습니다.', 'success');
+    } catch (err: any) {
+      setError(err?.message || 'Host 이름을 변경하지 못했습니다.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (!editing) return <Button variant="ghost" size="sm" onClick={() => {
+    setDraft(name); setError(null); setEditing(true);
+  }}>이름 변경</Button>;
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); void save(); }} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: '100%' }}>
+      <Input label="Host 이름" aria-label="Host 이름" value={draft} maxLength={200} disabled={saving} onChange={(e) => setDraft(e.target.value)} />
+      <Button type="submit" variant="primary" size="sm" disabled={saving || !draft.trim() || draft.trim() === name} loading={saving}>저장</Button>
+      <Button type="button" variant="secondary" size="sm" disabled={saving} onClick={() => setEditing(false)}>취소</Button>
+      {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>}
+    </form>
+  );
+}
+
 export default function AgentManagerPage() {
   const isMobile = useMediaQuery('(max-width: 1100px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
@@ -980,6 +1022,8 @@ export default function AgentManagerPage() {
           {selected ? (
             <InstanceDetail
               inst={selected}
+              onRenamed={(hostId, name) => setInstances((current) => current.map((inst) =>
+                (inst.host_id || inst.agent_id) === hostId ? { ...inst, agent_name: name } : inst))}
             />
           ) : (
             <div
