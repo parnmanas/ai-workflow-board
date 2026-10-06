@@ -884,10 +884,8 @@ test('세션 CLI 설정: 세션을 연 적 없는 호스트×CLI 도 하트비�
   assert.equal(unknown.known_config_options.some((o) => o.category === 'model'), false);
 });
 
-// 세션이 한 번 열려 ACP 가 보고한 목록이 캐시된 뒤에도, 호스트가 **그 뒤에** 알게 된 모델
-// (provider 를 새로 로그인한 경우 등)은 세션을 다시 열지 않아도 dropdown 에 따라와야 한다.
-// 예전에는 캐시가 있으면 하트비트를 아예 보지 않아 옛 목록에 머물렀다.
-test('세션 CLI 설정: ACP 캐시가 있어도 하트비트가 더 아는 모델은 덧붙인다 (표시 이름·현재값은 유지)', async (t) => {
+// A session adapter report is authoritative; inventory-only IDs cannot enter New session.
+test('세션 CLI 설정: ACP 보고가 있으면 하트비트 모델을 덧붙이지 않는다', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService } = modules;
@@ -925,14 +923,16 @@ test('세션 CLI 설정: ACP 캐시가 있어도 하트비트가 더 아는 모�
     }),
   });
 
+  const { HostModelsService } = await import('../dist/modules/agent-manager/host-models.service.js');
+  await app.get(HostModelsService).reloadReportedModels();
+
   const resp = await call(`${base}/api/agent-sessions/hosts/${managerId}/opencode/settings`, { headers });
   assert.equal(resp.status, 200, resp.text);
   const modelOption = resp.body.known_config_options.find((o) => o.category === 'model');
   assert.equal(modelOption.current_value, 'opencode/big-pickle', 'ACP 가 준 현재값은 유지');
   assert.deepEqual(modelOption.options, [
     { value: 'opencode/big-pickle', name: 'Big Pickle' },
-    { value: 'opencode-go/glm-5.3', name: 'opencode-go/glm-5.3' },
-  ], 'ACP 표시 이름은 그대로, 호스트만 아는 id 는 덧붙는다');
+  ], 'the exact ACP report is used; inventory-only models are excluded');
 });
 
 // ─── 서버 재시작: 세션을 읽는 것이 driver 를 되찾는다 ────────────────────────────────

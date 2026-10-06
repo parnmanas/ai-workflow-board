@@ -246,6 +246,15 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
     ]),
     updated_by: admin.id,
   }));
+  const oldAccount = await createAccount(app, getDataSourceToken, 'old-model-cache');
+  await settingsRepo.save(settingsRepo.create({
+    account_id: oldAccount.id, manager_id: manager.id, cli: 'claude', credential_id: null, default_config: '{}',
+    known_config_options: JSON.stringify([
+      { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'sonnet',
+        options: [{ value: 'retired-model', name: 'Retired' }, { value: 'sonnet', name: 'Old name' }] },
+    ]),
+    updated_at: new Date(Date.now() - 86_400_000), updated_by: admin.id,
+  }));
   const resp = await fetch(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST',
     headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
@@ -280,6 +289,22 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
   const newSession = settings.known_config_options.find((o) => o.category === 'model').options;
   assert.deepEqual(newSession.map((o) => o.value), expected, '새 세션 모달 — 덧붙는 하트비트 id 가 없다');
   assert.deepEqual(newSession.map((o) => o.name), ADAPTER.map(([, name]) => name), '이름도 세션 안과 같다');
+
+  const oldSettingsResponse = await fetch(`${base}/api/agent-sessions/hosts/${manager.id}/claude/settings`, {
+    headers: { ...userHeaders, 'X-Account-Id': oldAccount.id },
+  });
+  assert.equal(oldSettingsResponse.status, 200);
+  const oldOptions = (await oldSettingsResponse.json()).known_config_options.find((option) => option.category === 'model');
+  assert.deepEqual(oldOptions.options.map((option) => [option.value, option.name]), ADAPTER,
+    'an older account cache cannot add retired IDs or override names and order');
+
+  const changedReport = [['haiku', 'Haiku current'], ['sonnet', 'Sonnet current']];
+  hostModels.noteObservedModels(manager.id, 'claude', changedReport.map(([id]) => id), Object.fromEntries(changedReport));
+  const changedSnapshot = await json(`${base}/api/agent-manager/hosts/${manager.id}/models`);
+  const changedSettings = await json(`${base}/api/agent-sessions/hosts/${manager.id}/claude/settings`);
+  assert.deepEqual(changedSnapshot.models.claude, changedReport.map(([id]) => id));
+  assert.deepEqual(changedSettings.known_config_options.find((option) => option.category === 'model').options
+    .map((option) => [option.value, option.name]), changedReport, 'live removals and renaming replace cached choices');
 });
 
 test('effort enumeration isolates models and CLIs, reads persisted ACP reports and replaces live choices', async () => {

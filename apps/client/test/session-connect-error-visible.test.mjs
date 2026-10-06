@@ -38,7 +38,8 @@ test('오류 배너가 서버가 남긴 사유와 방금 실패한 사유를 모
   );
   assert.match(
     source,
-    /role="alert"[\s\S]*?\{\(status === 'error' && live\?\.last_error\) \|\| connectError\}/,
+    // Missing credentials have a recovery message; other failures still show the original reason.
+    /role="alert"[\s\S]*?\{missingCredential\s*\?[\s\S]*?: \(status === 'error' && live\?\.last_error\) \|\| connectError\}/,
   );
 });
 

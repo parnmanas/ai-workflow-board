@@ -6,6 +6,7 @@ import { cliEffortKeys } from '../../cli/catalog';
 import { cliModelChoices, loadHostModels, useHostModels } from '../../cli/hostModels';
 import { Button, Input, Select } from '../common';
 import RuntimeConfigFields, { buildRuntimeConfig, runtimeSelectionFromAgent } from '../admin/RuntimeConfigFields';
+import SessionModelSelect from '../sessions/SessionModelSelect';
 
 export interface RuntimeSelectionValue {
   host_id: string;
@@ -114,7 +115,11 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
           }} />}
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
         <div style={{ flex: 1 }}>
-          {hostModels.models.length ? <Select data-config-id={modelConfigId} label="Model" value={value.model || ''} disabled={disabled || !value.cli} options={[
+          {session ? <SessionModelSelect models={hostModels.models} labels={hostModels.labels}
+            label="Model" data-config-id={modelConfigId} value={value.model} disabled={disabled || !value.cli}
+            style={{ width: '100%', padding: '8px 10px' }}
+            onChange={(model) => set({ model: model || null, effort: null })} /> :
+            hostModels.models.length ? <Select data-config-id={modelConfigId} label="Model" value={value.model || ''} disabled={disabled || !value.cli} options={[
             { value: '', label: 'Default — CLI' }, ...cliModelChoices(hostModels.models, hostModels.labels, value.model),
             ...(value.model && !hostModels.models.includes(value.model) ? [{ value: value.model, label: `${value.model} (not listed by this host)` }] : []),
           ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ model: e.target.value || null, effort: null })} /> :

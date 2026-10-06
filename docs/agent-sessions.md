@@ -51,6 +51,12 @@ backend, 모델·승인 모드를 바꿔도 기존 세션의 snapshot은 바뀌�
 삭제된 기본 credential이나 설정 조회 실패는 시작 전에 표시하고, 인증을 선택하거나 조회를
 다시 성공시키기 전까지 세션 생성을 막는다. 기존 세션의 인증 snapshot은 바꾸지 않는다.
 
+새 세션의 모델 선택기와 생성 후 헤더는 같은 `SessionModelSelect`를 사용한다.
+모델 id·표시 이름·순서·기본 선택지까지 동일하며, 라이브 ACP 보고를 브라우저의
+호스트 모델 스토어에 즉시 반영한다. 오래된 계정 설정의 모델은 최신 목록에 합치지 않는다.
+ACP의 `default` 항목은 그대로 표시하고, 그 항목이 없는 CLI만 공통 `CLI default` 선택지를
+표시한다(라이브 헤더에서는 기본값 안내용이며 어댑터에 빈 id를 보내지 않는다).
+
 CLI 설정이나 기존 세션이 참조하는 credential은 삭제할 수 없다(409). 이미 삭제된
 credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using CLI settings`로
 복구할 수 있다(`POST …/sessions/:sessionId/repair-credential`). 사용자가 명시적으로

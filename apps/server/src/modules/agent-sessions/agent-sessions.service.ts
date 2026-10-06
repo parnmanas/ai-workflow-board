@@ -801,8 +801,8 @@ export class AgentSessionsService implements OnModuleDestroy {
    * claude `opus/sonnet/haiku`, codex `gpt-6-astra…`, opencode `opencode/big-pickle`). 그래서
    * 여기서 합성한 값을 그대로 `session/set_config_option` 에 넘겨도 어댑터가 받아들인다.
    *
-   * 덧붙이기만 하고 **덮어쓰지 않는다** — 실제 세션이 보고한 목록이 항상 더 정확하다
-   * (표시 이름·현재 선택값·CLI 가 실제로 허용하는 부분집합).
+   * Model choices and names come exclusively from HostModelsService. An older
+   * account's cached option must not add retired choices or change their order.
    */
   private withModelFallback(
     options: AgentSessionConfigOption[],
@@ -815,21 +815,15 @@ export class AgentSessionsService implements OnModuleDestroy {
     const choice = (value: string) => ({ value, name: labels[value] ?? value });
     const idx = options.findIndex((o) => o.category === 'model');
     if (idx !== -1) {
-      // ACP 가 보고한 목록은 그대로 두고(표시 이름·현재값), 호스트가 **그 뒤에** 알게 된
-      // 모델만 덧붙인다 — provider 를 새로 로그인한 뒤 세션을 다시 열지 않아도 dropdown 이
-      // 따라온다. 이전에는 캐시가 있으면 하트비트를 아예 보지 않아 옛 목록에 머물렀다.
       const existing = options[idx];
-      const known = new Set(existing.options.map((o) => o.value));
-      const extra = models.filter((m) => !known.has(m)).map(choice);
-      if (!extra.length) return options;
-      return options.map((o, i) => (i === idx ? { ...o, options: [...o.options, ...extra] } : o));
+      return options.map((o, i) => (i === idx ? { ...existing, options: models.map(choice) } : o));
     }
     return [
       ...options,
       {
         config_id: 'model',
         name: 'Model',
-        description: 'Reported by this Runtime Host; the session may refine the list once it opens.',
+        description: 'Models reported by this Runtime Host’s session adapter.',
         category: 'model',
         type: 'select',
         current_value: null,

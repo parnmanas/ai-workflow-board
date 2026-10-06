@@ -2,7 +2,7 @@ import type { HostEffortReport } from './hostEfforts';
 // Runtime Host 별 CLI 모델 목록 — 모델이 보이는 모든 화면이 쓰는 하나의 스토어.
 //
 // 원칙: 모델 dropdown 은 **항상 최신이거나, 그 자리에서 새로고침할 수 있다.**
-//   - 읽기는 `GET /api/agent-manager/hosts/:id/models`(하트비트 스냅샷).
+//   - 읽기는 `GET /api/agent-manager/hosts/:id/models`(ACP 보고 우선, 없으면 하트비트).
 //   - 갱신은 `POST …/models/refresh` — 서버가 호스트에 재열거를 시키고 ack 까지 기다린
 //     뒤 새 목록을 돌려주므로 브라우저는 폴링하지 않는다.
 //   - 훅이 마운트될 때 목록이 비었거나(host×cli 당 한 번만 시도 — 모델 개념이 없는 CLI
@@ -41,6 +41,7 @@ interface HostEntry {
   /** 이 페이지 로드에서 마지막으로 재열거를 시킨 시각 — 시각을 안 싣는 구버전 매니저를 매 마운트마다 두드리지 않기 위한 하한. */
   lastRefreshAt: number;
   error: string | null;
+  modelRevision: number;
 }
 
 const entries = new Map<string, HostEntry>();
@@ -50,7 +51,7 @@ let version = 0;
 function entry(id: string): HostEntry {
   let e = entries.get(id);
   if (!e) {
-    e = { view: null, loadedAt: 0, loading: null, refreshing: null, probed: new Set(), lastRefreshAt: 0, error: null };
+    e = { view: null, loadedAt: 0, loading: null, refreshing: null, probed: new Set(), lastRefreshAt: 0, error: null, modelRevision: 0 };
     entries.set(id, e);
   }
   return e;
@@ -76,9 +77,11 @@ async function apiModule() {
 export function loadHostModels(managerAgentId: string): Promise<HostModelsView | null> {
   const e = entry(managerAgentId);
   if (e.loading) return e.loading;
+  const revision = e.modelRevision;
   e.loading = apiModule()
     .then((api) => api.getHostModels(managerAgentId))
     .then((view) => {
+      if (e.modelRevision !== revision) return e.view;
       e.view = view;
       e.loadedAt = Date.now();
       e.error = null;
@@ -100,10 +103,12 @@ export function loadHostModels(managerAgentId: string): Promise<HostModelsView |
 export function refreshHostModels(managerAgentId: string): Promise<HostModelsView | null> {
   const e = entry(managerAgentId);
   if (e.refreshing) return e.refreshing;
+  const revision = e.modelRevision;
   e.lastRefreshAt = Date.now();
   e.refreshing = apiModule()
     .then((api) => api.refreshHostModels(managerAgentId))
     .then((view) => {
+      if (e.modelRevision !== revision) return e.view;
       e.view = view;
       e.loadedAt = Date.now();
       e.error = null;
@@ -129,6 +134,32 @@ export function hostModelsFor(managerAgentId: string | null | undefined, cli: st
 }
 
 const NO_LABELS: Record<string, string> = Object.freeze({}) as Record<string, string>;
+
+/** A live ACP report replaces the browser cache; inventory scans never widen its choices. */
+export function noteHostSessionModels(managerAgentId: string, cli: string, options: AgentSessionConfigOption[]): void {
+  const model = options.find((option) => option.category === 'model' && option.type === 'select');
+  if (!model?.options.length) return;
+  const e = entry(managerAgentId);
+  const models = model.options.map((choice) => choice.value);
+  const labels = Object.fromEntries(model.options.map((choice) => [choice.value, choice.name]));
+  // Even an unchanged live report supersedes an older request still in flight.
+  e.modelRevision += 1;
+  e.loadedAt = Date.now();
+  if (JSON.stringify(e.view?.models[cli]) === JSON.stringify(models)
+    && JSON.stringify(e.view?.labels?.[cli]) === JSON.stringify(labels)) return;
+  const view = e.view ?? { manager_agent_id: managerAgentId, manager_name: '', is_online: true,
+    instance_id: null, refreshed_at: null, models: {} };
+  e.view = { ...view, models: { ...view.models, [cli]: models }, labels: { ...view.labels, [cli]: labels } };
+  notify();
+}
+
+/** Sessions preserve every ACP choice, including `default`, with one shared placeholder. */
+export function sessionModelChoices(models: readonly string[], labels: Record<string, string>): Array<{ value: string; label: string }> {
+  return [
+    ...(models.includes('default') ? [] : [{ value: '', label: 'CLI default' }]),
+    ...models.map((model) => ({ value: model, label: labels[model] ?? model })),
+  ];
+}
 
 /** 이 host×cli 의 모델 이름(id → 이름). 모르면 빈 객체 — 화면은 id 를 그대로 쓴다. */
 export function hostModelLabelsFor(
@@ -256,10 +287,8 @@ export function summarizeHostModels(view: HostModelsView | null): string {
 }
 
 /**
- * 세션 설정/새 세션의 선택지에 호스트 모델 목록을 합친다. ACP 가 보고한 `model` 옵션이
- * 있으면 그 표시 이름·현재값을 그대로 두고 호스트만 아는 id 를 덧붙이고, 없으면 옵션을
- * 합성한다(서버 `withModelFallback` 과 같은 규칙 — 클라이언트는 방금 새로고침한 값을 서버
- * 왕복 없이 바로 반영하기 위해 같은 병합을 한 번 더 한다).
+ * Model choices come only from the shared catalog. Keep the ACP setting id/current value,
+ * replace obsolete choices and labels, and synthesize the setting only when it is missing.
  */
 export function withHostModelOption(
   options: AgentSessionConfigOption[],
@@ -275,7 +304,7 @@ export function withHostModelOption(
       {
         config_id: 'model',
         name: 'Model',
-        description: 'Reported by this Runtime Host; the session may refine the list once it opens.',
+        description: 'Models reported by this Runtime Host’s session adapter.',
         category: 'model',
         type: 'select',
         current_value: null,
@@ -284,8 +313,5 @@ export function withHostModelOption(
     ];
   }
   const existing = options[idx];
-  const known = new Set(existing.options.map((o) => o.value));
-  const extra = models.filter((m) => !known.has(m)).map(choice);
-  if (!extra.length) return options;
-  return options.map((o, i) => (i === idx ? { ...o, options: [...o.options, ...extra] } : o));
+  return options.map((o, i) => (i === idx ? { ...existing, options: models.map(choice) } : o));
 }

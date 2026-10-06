@@ -20,6 +20,8 @@ import { ActivityPill, Button, EmptyState, ErrorState } from '../common';
 import PageHeader from '../PageHeader';
 import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
+import SessionModelSelect from './SessionModelSelect';
+import { noteHostSessionModels } from '../../cli/hostModels';
 import SessionComposer from './SessionComposer';
 import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
@@ -623,14 +625,12 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     () => describeSessionAuth(live?.auth, host?.cli_settings?.[cli]?.name),
     [live?.auth, host, cli],
   );
-  // **살아 있는 어댑터가 보고한 것만** 쓴다. 호스트가 아는 모델을 여기에 덧붙이면 안
-  // 된다 — 이 드롭다운은 목록이 아니라 **조작기**이고, 고른 값은 그대로 ACP
-  // `session/set_config_option` 으로 가서 어댑터가 모르는 id 면 거절당한다(실측:
-  // 덧붙인 claude-opus-5-5 를 고르면 에러). 새 세션 대화상자가 호스트 전체 합집합을
-  // 보여주는 것은 거기서는 "무엇으로 띄울지" 를 고르는 것이라 옳고, 이 둘이 다른 것은
-  // 결함이 아니다. 두 화면의 목록이 어긋나 보였던 진짜 원인은 호스트 열거 쪽이었다
-  // (Windows shim 스캔 + 하드코딩 폴백, 커밋 cc3dd106).
+  // The live adapter is authoritative. Publish its exact choices to the shared catalog
+  // so New session immediately uses the same list, without widening this control.
   const configOptions = live?.config_options ?? [];
+  useEffect(() => {
+    if (live) noteHostSessionModels(managerId, cli, live.config_options ?? []);
+  }, [managerId, cli, live?.config_options]);
   const commands = live?.available_commands ?? [];
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
   const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
@@ -928,6 +928,14 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
             );
           }
           if (option.type !== 'select') return null;
+          if (option.category === 'model') {
+            return <SessionModelSelect key={option.config_id} data-config-id={option.config_id}
+              title={option.description || option.name} models={option.options.map((choice) => choice.value)}
+              labels={Object.fromEntries(option.options.map((choice) => [choice.value, choice.name]))}
+              value={typeof option.current_value === 'string' ? option.current_value : null}
+              disabled={controlsDisabled} defaultDisabled style={{ maxWidth: 220 }}
+              onChange={(model) => void setConfigOption(option.config_id, model)} />;
+          }
           const groups = new Map<string, typeof option.options>();
           for (const o of option.options) {
             const g = o.group || '';
