@@ -109,6 +109,37 @@ test('codex: lists rollouts with the first real user prompt and parses function 
   assert.equal(history.events[0].turn_id, 'turn-1');
 });
 
+test('codex: delegated children stay out of the picker while standalone forks and child history remain available', async (t) => {
+  const home = await seedHome(t);
+  const dir = join(home.codexHome, 'sessions', '2026', '09', '18');
+  await mkdir(dir, { recursive: true });
+  const childIds = [
+    '01a10e53-a26c-7f41-bd6a-6aa368e9b95c',
+    '01a10e53-a26c-7f41-bd6a-6aa368e9b95d',
+    '01a10e53-a26c-7f41-bd6a-6aa368e9b95e',
+  ];
+  const sources = [
+    { subagent: { thread_spawn: { parent_thread_id: CODEX_ID, depth: 1, agent_path: '/root/growth_proof' } } },
+    { subagent: 'compact' },
+    'subagent',
+  ];
+  const forkId = '01a10e53-a26c-7f41-bd6a-6aa368e9b95f';
+  const entries = [...childIds.map((id, i) => ({ id, source: sources[i] })), { id: forkId, source: 'cli' }];
+  for (const entry of entries) {
+    await writeFile(join(dir, `rollout-2026-09-18T10-00-00-${entry.id}.jsonl`), jsonl([
+      { type: 'session_meta', payload: { ...entry, cwd: '/tmp/work/codex', forked_from_id: CODEX_ID } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the growth proof' }] } },
+    ]));
+  }
+  const store = new AgentSessionStore({ ...home, listLimit: 2 });
+  assert.deepEqual(new Set((await store.listSessions('codex')).map((session) => session.session_id)), new Set([CODEX_ID, forkId]));
+  for (const childId of childIds) {
+    const history = await store.readHistory('codex', childId);
+    assert.equal(history.session.session_id, childId, 'filtering the picker must preserve native child transcripts');
+    assert.equal(history.events[0].payload.text, 'Check the growth proof');
+  }
+});
+
 test('awb index: hermes sessions only exist in the index; an indexed claude session keeps its AWB title and source', async (t) => {
   const home = await seedHome(t);
   const store = new AgentSessionStore(home);

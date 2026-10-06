@@ -28,6 +28,10 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 
 ## 소유권과 실행 설정 고정
 
+Codex의 위임된 subagent rollout은 부모가 제어하므로 독립 세션 목록에서 제외한다.
+목록은 일반 세션과 독립 fork를 유지하며, 하위 세션의 원본 기록은 그대로 읽을 수 있다.
+Codex v2가 하위 세션 단독 재개를 거절하면 부모 세션에서 이어서 작업한다.
+
 전사는 계속 CLI가 보관한다. AWB DB의 `AgentSessionExecution`은
 `(manager_id, cli, session_id)`별 소유 `account_id`, `credential_id`,
 `config_defaults`, `runtime_profile`만 저장한다. 새 독립 세션은 기본 접근 계정을

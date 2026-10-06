@@ -93,6 +93,9 @@ async function codexMeta(path: string, size: number): Promise<{ sessionId: strin
   for (const rec of head) {
     const payload = isRecord(rec.payload) ? rec.payload : {};
     if (rec.type === 'session_meta') {
+      // Child rollouts share the sessions directory but are controlled by their
+      // parent. Codex v2 refuses to resume them as standalone ACP sessions.
+      if (payload.source === 'subagent' || (isRecord(payload.source) && 'subagent' in payload.source)) return null;
       sessionId = typeof payload.id === 'string' ? payload.id : sessionId;
       cwd = typeof payload.cwd === 'string' ? payload.cwd : cwd;
       createdAt = typeof payload.timestamp === 'string' ? payload.timestamp : createdAt;
