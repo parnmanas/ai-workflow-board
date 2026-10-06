@@ -40,6 +40,15 @@ backend, 모델·승인 모드를 바꿔도 기존 세션의 snapshot은 바뀌�
 해당 세션에서 명시적으로 바꾼 mode/config는 snapshot에 기록하여 재개할 때 유지한다.
 기존 CLI 전사, 세션 id, credential 전용 홈과 기록 링크는 이 소유권 이관으로 이동하지 않는다.
 
+CLI 설정이나 기존 세션이 참조하는 credential은 삭제할 수 없다(409). 이미 삭제된
+credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using CLI settings`로
+복구할 수 있다(`POST …/sessions/:sessionId/repair-credential`). 사용자가 명시적으로
+요청한 경우에만 세션 소유 계정의 현재 CLI credential(또는 호스트 자체 로그인)으로
+인증 참조를 바꾸고 같은 세션을 재시작한다. 기존 credential이 유효하거나 세션이
+실행 중이면 거절하며, 소유권·모델 설정·backend snapshot은 유지한다. 고정 backend가
+삭제된 credential을 요구하면 복구를 거절한다. CLI 설정 응답의 `credential_id`는
+대상이 없어도 유지되어, 화면에서 잘못된 기본 연결을 명시적으로 해제할 수 있다.
+
 ## 왜 Chat 을 개편하지 않고 따로 두는가
 
 | | Chat (ChatRoom) | Agent Session |

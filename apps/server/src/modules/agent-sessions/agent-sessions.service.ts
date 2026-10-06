@@ -82,6 +82,8 @@ export interface AgentSessionCliSettings {
   cli: string;
   /** 이 CLI 가 AWB credential 을 받을 수 있는가(hermes 는 아직 아니다). */
   supports_credential: boolean;
+  /** Keep an unavailable binding visible so the user can explicitly replace it. */
+  credential_id: string | null;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
   /** 이 CLI 가 backend profile 을 받을 수 있는가(Claude backend profile 이라 claude 뿐). */
@@ -703,6 +705,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       manager_id: managerId,
       cli,
       supports_credential: !!SESSION_CLI_CREDENTIAL_PREFIX[cli],
+      credential_id: row?.credential_id ?? null,
       credential: current ? this.credentialRef(current) : null,
       candidates: candidates.map((c) => this.credentialRef(c)),
       supports_backend: supportsBackend,
@@ -856,7 +859,47 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   private async boundCredentialId(accountId: string, managerId: string, cli: string): Promise<string | null> {
     const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
-    return row?.credential_id ?? null;
+    const credentialId = row?.credential_id ?? null;
+    if (!credentialId) return null;
+    const cred = await this.credentials.findOne({ where: { id: credentialId } });
+    if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
+      throw new AgentSessionError(404, 'credential_not_found', 'The credential selected in CLI settings is unavailable. Select an available credential or the host\'s own login, then save the settings.');
+    }
+    const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
+    if (!prefix || !cred.provider.startsWith(prefix)) {
+      throw new AgentSessionError(400, 'credential_provider_mismatch', 'The credential selected in CLI settings no longer matches this CLI. Select a matching credential and save the settings.');
+    }
+    return credentialId;
+  }
+
+  /** Explicit recovery only: valid execution snapshots keep their original login. */
+  async repairCredential(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+    this.requireHost(accountId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const repo = this.dataSource.getRepository(AgentSessionExecution);
+    const execution = await repo.findOne({ where: { manager_id: managerId, cli, session_id: sessionId } });
+    // A native session can fail on an unavailable default before its first
+    // execution is pinned. Once the default is fixed, a normal open claims it.
+    if (!execution) return this.openSession(accountId, userId, managerId, cli, { session_id: sessionId });
+    if (execution.account_id !== accountId) throw new AgentSessionError(403, 'account_access_denied');
+    if (!execution.credential_id || await this.credentials.findOne({ where: { id: execution.credential_id } })) {
+      throw new AgentSessionError(409, 'credential_still_available', 'This session\'s login is still available and cannot be replaced by credential recovery.');
+    }
+    const state = this.live.get(liveKey(managerId, cli, sessionId));
+    if (state && !agentSessionAcceptsPrompt(state.status)) {
+      throw new AgentSessionError(409, 'session_busy', 'Wait for the session to stop before replacing its missing credential.');
+    }
+    const credentialId = await this.boundCredentialId(accountId, managerId, cli);
+    const profile = execution.runtime_profile ? JSON.parse(execution.runtime_profile) as CliRuntimeProfile : null;
+    if (profile?.credential_ref && profile.credential_ref !== credentialId) {
+      throw new AgentSessionError(409, 'backend_credential_mismatch', 'The saved backend requires the missing credential. Create a new session with a matching credential and backend selected in CLI settings.');
+    }
+    // Compare the old binding so simultaneous recovery cannot overwrite another choice.
+    // Only authentication changes; ownership, model settings and backend stay pinned.
+    const updated = await repo.update({ id: execution.id, credential_id: execution.credential_id }, { credential_id: credentialId });
+    if (updated.affected !== 1) throw new AgentSessionError(409, 'credential_binding_changed', 'The session login changed. Reload the session before trying again.');
+    this.logService.info('AgentSession', `credential recovery ${managerId.slice(0, 8)}/${cli}/${sessionId.slice(0, 8)}: ${execution.credential_id.slice(0, 8)} → ${credentialId ? credentialId.slice(0, 8) : 'operator-login'} by ${userId.slice(0, 8)}`);
+    return this.restart(accountId, userId, managerId, cli, sessionId);
   }
 
   /**

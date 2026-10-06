@@ -51,7 +51,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
     try {
       const data = await api.getHostCliSettings(managerId, cli);
       setSettings(data);
-      setSelected(data.credential?.id || '');
+      setSelected(data.credential_id ?? data.credential?.id ?? '');
       setDefaults(defaultsOf(data));
       setBackend(data.backend?.id || '');
       setError(null);
@@ -73,7 +73,8 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
   const defaultOptions = withHostModelOption(settings?.known_config_options ?? [], hostModels.models, hostModels.labels)
     .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0);
   const savedDefaults = defaultsOf(settings);
-  const dirty = (settings?.credential?.id || '') !== selected
+  const missingCredential = !!settings?.credential_id && !settings.credential;
+  const dirty = (settings?.credential_id ?? settings?.credential?.id ?? '') !== selected
     || (settings?.backend?.id || '') !== backend
     || defaultOptions.some((o) => (defaults[o.config_id] || '') !== (savedDefaults[o.config_id] || ''));
 
@@ -97,7 +98,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
         backendChanged ? (backend || null) : undefined,
       );
       setSettings(next);
-      setSelected(next.credential?.id || '');
+      setSelected(next.credential_id ?? next.credential?.id ?? '');
       setDefaults(defaultsOf(next));
       setBackend(next.backend?.id || '');
       onChanged?.(next);
@@ -158,10 +159,18 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
             onChange={(e) => setSelected(e.target.value)}
           >
             <option value="">Host&apos;s own login (no AWB credential)</option>
+            {missingCredential && (
+              <option value={settings.credential_id!} disabled>Unavailable credential · {settings.credential_id!.slice(0, 8)}</option>
+            )}
             {settings.candidates.map((c) => (
               <option key={c.id} value={c.id}>{c.name} · {c.provider}{c.scope === 'global' ? ' · global' : ''}</option>
             ))}
           </select>
+          {missingCredential && (
+            <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
+              The saved credential is unavailable. Select a login and save. For an existing session, use Reconnect using CLI settings in its error message.
+            </span>
+          )}
           {settings.candidates.length === 0 && (
             <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
               No {runtimeLabel(cli)} credential in this workspace yet. Add one in Settings → Credentials, or log in on the host itself.

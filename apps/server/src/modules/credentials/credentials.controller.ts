@@ -537,6 +537,13 @@ export class CredentialsController {
       if (!accountId) return res.status(400).json({ error: 'account_id is required' });
       if (cred.account_id !== accountId) return res.status(404).json({ error: 'Credential not found' });
     }
+    // These are bare IDs, not foreign keys. Deleting a bound credential would
+    // otherwise strand the session with credential_not_found on its next open.
+    for (const entity of [AgentSessionCliSetting, AgentSessionExecution]) {
+      if (await this.dataSource.getRepository<AgentSessionCliSetting | AgentSessionExecution>(entity).count({ where: { credential_id: id } })) {
+        return res.status(409).json({ error: 'Cannot delete a credential referenced by CLI settings or saved sessions. Change CLI defaults first; keep credentials used by existing sessions and update them in place.' });
+      }
+    }
     await this.credRepo.delete({ id });
     return res.json({ success: true, id });
   }

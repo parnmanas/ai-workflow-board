@@ -545,6 +545,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // has an active writer` 라고 정확히 알려 주는데도 화면에는 그 말이 없었다). 서버도 같은
   // 사유를 세션 상태에 적지만, SSE 가 늦거나 유실돼도 눈에 남도록 여기서도 들고 있는다.
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectErrorCode, setConnectErrorCode] = useState<string | null>(null);
   // 잠금을 쥔 **외부** 프로세스를 매니저가 특정한 경우에만 켜진다(`resume_locked_external`).
   // 그때만 "강제로 열기" 를 내놓는다 — 주인을 모르는 채로 강제 버튼을 보여 주면 눌러도
   // 아무 일이 없거나, 무엇을 죽이는지 말해 주지 못한 채 죽이게 된다.
@@ -556,12 +557,14 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const connect = useCallback(async (force = false) => {
     setConnecting(true);
     setConnectError(null);
+    setConnectErrorCode(null);
     setLockedByExternal(null);
     try {
       setLive(await api.openHostSession(managerId, cli, { session_id: sessionId, ...(force ? { force: true } : {}) }));
     } catch (err: any) {
       const message = err?.message || 'Failed to connect to the session on the Runtime Host';
       setConnectError(message);
+      setConnectErrorCode(err?.code ?? null);
       if (err?.code === 'resume_locked_external') setLockedByExternal(message);
       showToast(message, 'error');
     } finally {
@@ -760,6 +763,22 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       showToast('Restarting the session process…', 'info');
     } catch (err: any) {
       showToast(err?.message || 'Failed to restart', 'error');
+    }
+  }, [managerId, cli, sessionId, showToast]);
+
+  const missingCredential = (status === 'error' && live?.last_error_code === 'credential_not_found')
+    || connectErrorCode === 'credential_not_found';
+  const repairCredential = useCallback(async () => {
+    setConnecting(true);
+    try {
+      setLive(await api.repairHostSessionCredential(managerId, cli, sessionId));
+      setConnectError(null);
+      setConnectErrorCode(null);
+      showToast('Reconnecting with the current CLI login settings…', 'info');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to replace the missing credential', 'error');
+    } finally {
+      setConnecting(false);
     }
   }, [managerId, cli, sessionId, showToast]);
 
@@ -1003,8 +1022,15 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       {/* 오류 배너 — 서버가 상태에 적어 둔 사유(last_error)와, 그게 도착하기 전의
           연결 실패 사유(connectError) 중 있는 것을 보여 준다. 둘 다 비어 있을 때만 숨긴다. */}
       {((status === 'error' && live?.last_error) || connectError) && (
-        <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ flex: 1, minWidth: 0 }}>{(status === 'error' && live?.last_error) || connectError}</span>
+        <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}`, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{missingCredential
+            ? 'This session\'s saved credential no longer exists. Choose a login in CLI settings, then reconnect using those settings.'
+            : (status === 'error' && live?.last_error) || connectError}</span>
+          {missingCredential && (
+            <Button variant="secondary" size="sm" disabled={connecting || !canPrompt(status)} onClick={() => void repairCredential()}>
+              Reconnect using CLI settings
+            </Button>
+          )}
           {canForceOpen && !connecting && (
             <Button variant="secondary" size="sm" onClick={() => void forceConnect()} title="잠금을 쥔 프로세스를 종료하고 이 세션을 엽니다">
               강제로 열기…

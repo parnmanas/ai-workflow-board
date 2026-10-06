@@ -2982,6 +2982,8 @@ export interface AgentSessionCliSettings {
   manager_id: string;
   cli: string;
   supports_credential: boolean;
+  /** Optional for compatibility with servers that only return the resolved ref. */
+  credential_id?: string | null;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
   /** 이 CLI 가 backend profile 을 받을 수 있는가(Claude backend profile 이라 claude 뿐). */

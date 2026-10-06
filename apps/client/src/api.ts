@@ -1759,6 +1759,11 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/restart`,
       { method: 'POST' },
     ),
+  repairHostSessionCredential: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/repair-credential`,
+      { method: 'POST' },
+    ),
   setHostSessionMode: (managerId: string, cli: string, sessionId: string, modeId: string) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/mode`,
