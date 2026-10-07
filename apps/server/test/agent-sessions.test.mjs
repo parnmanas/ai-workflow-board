@@ -401,6 +401,45 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   assert.equal(cleared.body.credential, null);
   const afterClear = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?account_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(afterClear.status, 200, 'existing sessions retain their pinned credential after account defaults are cleared');
+
+  // 명시적 restart 는 소유 계정의 **현재** CLI 설정 credential 로 다시 묶는다 — usage limit 에 걸린
+  // credential 을 호스트 설정에서 바꾸고 재시작했는데 옛 계정으로 다시 열리던 문제(2026-10-07, Ralf codex).
+  // 바뀌는 것은 인증뿐이다: 기본 설정을 바꿔도 세션의 config snapshot 은 그대로다.
+  const execRepo = ds.getRepository('AgentSessionExecution');
+  const pinnedExec = await execRepo.findOne({ where: { manager_id: managerId, cli: 'claude', session_id: 'sess-cred' } });
+  const switched = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: globalClaude.id, default_config: { model: 'opus' } }) });
+  assert.equal(switched.status, 200, switched.text);
+  const restartsBefore = requests.filter((r) => r.op === 'restart').length;
+  const restartSwitched = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/restart`, { method: 'POST', headers });
+  assert.equal(restartSwitched.status, 202, restartSwitched.text);
+  const switchedReq = requests.filter((r) => r.op === 'restart')[restartsBefore];
+  assert.equal(switchedReq.credential_id, globalClaude.id, 'restart reopens on the credential now selected in CLI settings');
+  assert.deepEqual(switchedReq.config_defaults, JSON.parse(pinnedExec.config_defaults), 'model/mode choices stay pinned to the session');
+  const reboundExec = await execRepo.findOne({ where: { manager_id: managerId, cli: 'claude', session_id: 'sess-cred' } });
+  assert.equal(reboundExec.credential_id, globalClaude.id, 'the execution snapshot follows, so later prompts reopen on the same login');
+  assert.equal(reboundExec.config_defaults, pinnedExec.config_defaults);
+  const fetchedNew = await call(`${base}/api/agent/sessions/credential/${globalClaude.id}?account_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  assert.equal(fetchedNew.status, 200, 'the manager can fetch the newly bound credential');
+  await call(`${base}/api/agent/sessions/${managerId}/claude/sess-cred`, { method: 'PATCH', headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ manager_id: managerId, status: 'ready' }) });
+  const promptAfter = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/prompt`, { method: 'POST', headers, body: JSON.stringify({ text: 'continue' }) });
+  assert.equal(promptAfter.status, 202, promptAfter.text);
+  assert.equal(requests.filter((r) => r.op === 'prompt').at(-1).credential_id, globalClaude.id);
+
+  // 세션 backend 가 원래 credential 을 요구하면 조용히 다른 키로 붙이지 않고 거절한다.
+  await execRepo.update({ id: reboundExec.id }, { runtime_profile: JSON.stringify({ id: 'gw', kind: 'claude-backend', credential_ref: globalClaude.id }) });
+  await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
+  const mismatched = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/restart`, { method: 'POST', headers });
+  assert.equal(mismatched.status, 409);
+  assert.equal(mismatched.body.error, 'backend_credential_mismatch');
+  assert.equal((await execRepo.findOne({ where: { id: reboundExec.id } })).credential_id, globalClaude.id, 'a refused restart leaves the binding alone');
+  await execRepo.update({ id: reboundExec.id }, { runtime_profile: null });
+
+  // 설정을 비우면(호스트 자체 로그인) restart 도 운영자 로그인으로 다시 연다.
+  await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: null }) });
+  const restartOperator = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/restart`, { method: 'POST', headers });
+  assert.equal(restartOperator.status, 202, restartOperator.text);
+  assert.equal(requests.filter((r) => r.op === 'restart').at(-1).credential_id, null);
+  assert.equal((await execRepo.findOne({ where: { id: reboundExec.id } })).credential_id, null);
 });
 
 // ─── 유령 상태: 매니저 답(list live_status / history live)과 매니저 재시작이 진행 중 상태를 되돌린다 ──

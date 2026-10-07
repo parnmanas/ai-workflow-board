@@ -866,7 +866,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     return credentialId;
   }
 
-  /** Explicit recovery only: valid execution snapshots keep their original login. */
+  /** Recovery for a deleted credential; the rebinding itself is the one `restart` does. */
   async repairCredential(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
     this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
@@ -883,17 +883,48 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (state && !agentSessionAcceptsPrompt(state.status)) {
       throw new AgentSessionError(409, 'session_busy', 'Wait for the session to stop before replacing its missing credential.');
     }
-    const credentialId = await this.boundCredentialId(accountId, managerId, cli);
-    const profile = execution.runtime_profile ? JSON.parse(execution.runtime_profile) as CliRuntimeProfile : null;
-    if (profile?.credential_ref && profile.credential_ref !== credentialId) {
-      throw new AgentSessionError(409, 'backend_credential_mismatch', 'The saved backend requires the missing credential. Create a new session with a matching credential and backend selected in CLI settings.');
-    }
-    // Compare the old binding so simultaneous recovery cannot overwrite another choice.
-    // Only authentication changes; ownership, model settings and backend stay pinned.
-    const updated = await repo.update({ id: execution.id, credential_id: execution.credential_id }, { credential_id: credentialId });
-    if (updated.affected !== 1) throw new AgentSessionError(409, 'credential_binding_changed', 'The session login changed. Reload the session before trying again.');
-    this.logService.info('AgentSession', `credential recovery ${managerId.slice(0, 8)}/${cli}/${sessionId.slice(0, 8)}: ${execution.credential_id.slice(0, 8)} → ${credentialId ? credentialId.slice(0, 8) : 'operator-login'} by ${userId.slice(0, 8)}`);
     return this.restart(accountId, userId, managerId, cli, sessionId);
+  }
+
+  /**
+   * An explicit restart is where a session takes the owner's *current* CLI login.
+   *
+   * Changing account defaults never touches a running session on its own, but the
+   * operator who switches the Host credential (typically because the old one hit a
+   * usage limit) and presses Restart means "come back on that login" — keeping the
+   * pinned one made Restart reopen the exhausted account forever (2026-10-07, Ralf
+   * codex). Only authentication changes; ownership, model/mode choices and backend
+   * stay pinned, and the transcript follows because every credential home links the
+   * CLI history directory to the operator home.
+   */
+  private async rebindCredentialForRestart(
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    execution: { account_id: string; credential_id: string | null; runtime_profile: CliRuntimeProfile | null },
+  ): Promise<string | null> {
+    const credentialId = await this.boundCredentialId(execution.account_id, managerId, cli);
+    if (credentialId === execution.credential_id) return credentialId;
+    if (execution.runtime_profile?.credential_ref && execution.runtime_profile.credential_ref !== credentialId) {
+      throw new AgentSessionError(409, 'backend_credential_mismatch', 'This session\'s backend requires its original credential. Select that credential in CLI settings, or create a new session with a matching credential and backend.');
+    }
+    const repo = this.dataSource.getRepository(AgentSessionExecution);
+    // Compare the old binding so simultaneous restarts cannot overwrite another choice.
+    const updated = await repo.update(
+      { manager_id: managerId, cli, session_id: sessionId, credential_id: execution.credential_id ?? IsNull() },
+      { credential_id: credentialId },
+    );
+    if (updated.affected !== 1) {
+      const current = await repo.findOne({ where: { manager_id: managerId, cli, session_id: sessionId } });
+      if ((current?.credential_id ?? null) !== credentialId) {
+        throw new AgentSessionError(409, 'credential_binding_changed', 'The session login changed. Reload the session before trying again.');
+      }
+      return credentialId;
+    }
+    const label = (id: string | null) => (id ? id.slice(0, 8) : 'operator-login');
+    this.logService.info('AgentSession', `credential rebind on restart ${managerId.slice(0, 8)}/${cli}/${sessionId.slice(0, 8)}: ${label(execution.credential_id)} → ${label(credentialId)} by ${userId.slice(0, 8)}`);
+    return credentialId;
   }
 
   /**
@@ -1531,12 +1562,16 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는 것은
    * 지금 당장 살아 있는 새 프로세스다. 상태를 `starting` 으로 먼저 옮겨 두면 그 사이에
    * 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt).
+   *
+   * 인증은 이때 소유 계정의 현재 CLI 설정으로 다시 묶는다(rebindCredentialForRestart) —
+   * usage limit 에 걸린 credential 을 호스트 설정에서 바꾸고 재시작하는 것이 정식 경로다.
    */
   async restart(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
     const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     const execution = await this.executionFor(accountId, managerId, cli, sessionId);
     accountId = execution.account_id;
+    const credentialId = await this.rebindCredentialForRestart(userId, managerId, cli, sessionId, execution);
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'starting', driver_user_id: userId });
     state.status = 'starting';
@@ -1549,7 +1584,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     // (실측: restart 직후 Fable 5.1 이 보였다가 고르면 Internal error 로 떨어졌다).
     this.emitRequest({
       manager_id: managerId, account_id: accountId, cli, op: 'restart', session_id: sessionId,
-      cwd: state.cwd, title: state.title, credential_id: execution.credential_id,
+      cwd: state.cwd, title: state.title, credential_id: credentialId,
       config_defaults: execution.config_defaults,
       runtime_profile: execution.runtime_profile,
       driver_user_id: userId,

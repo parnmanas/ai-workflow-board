@@ -888,6 +888,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
               ? '이미 프로세스를 여는 중입니다.'
               : '세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ' +
                 '새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ' +
+                '인증은 지금 CLI 설정에 고른 credential 로 다시 묶입니다 — usage limit 에 걸렸으면 CLI 설정에서 바꾼 뒤 누르세요. ' +
                 '진행 중인 턴이 있으면 끊깁니다.'
           }
           style={{

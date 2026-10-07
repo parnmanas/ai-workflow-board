@@ -42,6 +42,13 @@ Codex v2가 하위 세션 단독 재개를 거절하면 부모 세션에서 이�
 Account × Runtime Host × CLI 설정은 새 실행의 기본값이다. 이후 기본 credential,
 backend, 모델·승인 모드를 바꿔도 기존 세션의 snapshot은 바뀌지 않는다. 사용자가
 해당 세션에서 명시적으로 바꾼 mode/config는 snapshot에 기록하여 재개할 때 유지한다.
+예외는 **Restart** 하나다: 명시적 재시작은 세션 소유 계정의 현재 CLI 설정 credential
+(비었으면 호스트 자체 로그인)로 snapshot의 `credential_id`를 다시 묶고 그 로그인으로 연다.
+usage limit에 걸린 credential을 호스트 CLI 설정에서 바꾼 뒤 재시작하는 것이 정식 경로다
+(예전엔 고정된 옛 credential로 다시 열려 재시작이 아무것도 바꾸지 못했다 — 2026-10-07, Ralf codex).
+바뀌는 것은 인증뿐이고 소유권·mode/config·backend snapshot은 유지한다. 모든 credential 전용 홈은
+기록 디렉터리를 운영자 홈으로 링크하므로 대화는 이어진다. 고정 backend가 옛 credential을
+요구하면(`credential_ref`) 다른 키로 붙이지 않고 409 `backend_credential_mismatch`로 거절한다.
 기존 CLI 전사, 세션 id, credential 전용 홈과 기록 링크는 이 소유권 이관으로 이동하지 않는다.
 
 **New session**에서 credential을 직접 선택할 수 있다. 선택한 인증과 모델 기본값은
@@ -49,7 +56,7 @@ backend, 모델·승인 모드를 바꿔도 기존 세션의 snapshot은 바뀌�
 아직 credential이 없으면 **Add / manage credentials**로 등록한 뒤 **Refresh credentials**를
 누른다. 새 호스트에서 **Host's own login**을 쓰려면 먼저 그 호스트의 CLI에 로그인해야 한다.
 삭제된 기본 credential이나 설정 조회 실패는 시작 전에 표시하고, 인증을 선택하거나 조회를
-다시 성공시키기 전까지 세션 생성을 막는다. 기존 세션의 인증 snapshot은 바꾸지 않는다.
+다시 성공시키기 전까지 세션 생성을 막는다. 기존 세션의 인증 snapshot은 그 세션을 Restart할 때만 바뀐다.
 
 새 세션의 모델 선택기와 생성 후 헤더는 같은 `SessionModelSelect`를 사용한다.
 모델 id·표시 이름·순서·기본 선택지까지 동일하며, 라이브 ACP 보고를 브라우저의
@@ -60,10 +67,8 @@ ACP의 `default` 항목은 그대로 표시하고, 그 항목이 없는 CLI만 �
 CLI 설정이나 기존 세션이 참조하는 credential은 삭제할 수 없다(409). 이미 삭제된
 credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using CLI settings`로
 복구할 수 있다(`POST …/sessions/:sessionId/repair-credential`). 사용자가 명시적으로
-요청한 경우에만 세션 소유 계정의 현재 CLI credential(또는 호스트 자체 로그인)으로
-인증 참조를 바꾸고 같은 세션을 재시작한다. 기존 credential이 유효하거나 세션이
-실행 중이면 거절하며, 소유권·모델 설정·backend snapshot은 유지한다. 고정 backend가
-삭제된 credential을 요구하면 복구를 거절한다. CLI 설정 응답의 `credential_id`는
+요청한 경우에만 같은 세션을 재시작하며, 인증 참조를 다시 묶는 것은 위 Restart와 같은 경로다.
+기존 credential이 유효하거나(그때는 그냥 Restart) 세션이 실행 중이면 거절한다. CLI 설정 응답의 `credential_id`는
 대상이 없어도 유지되어, 화면에서 잘못된 기본 연결을 명시적으로 해제할 수 있다.
 
 ## 왜 Chat 을 개편하지 않고 따로 두는가
@@ -571,6 +576,8 @@ cache_write` 로 계산한다.
   누르는 이유는 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는
   것은 지금 살아 있는 새 프로세스다.
 - 기록은 CLI 홈에 있으므로 **대화는 이어진다**. 죽는 것은 프로세스뿐이다.
+- 인증은 이때 소유 계정의 **현재 CLI 설정 credential** 로 다시 묶인다(위 실행 고정의 유일한 예외) —
+  restart 가 싣는 `credential_id` 는 그렇게 갱신된 snapshot 값이고, 이후 prompt 도 같은 로그인으로 다시 연다.
 - 서버는 요청 즉시 상태를 `starting` 으로 옮긴다 — 그 사이 프롬프트가 끼어들지 못하게
   하는 것이 `agentSessionAcceptsPrompt` 의 기존 계약이다.
 - 진행 중인 턴이 있으면 끊긴다. UI 는 `starting` 일 때만 버튼을 잠근다: 턴 중이라도
