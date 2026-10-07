@@ -38,7 +38,7 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - tsx 4.19.0 - TypeScript executor (server dev)
 - @nestjs/serve-static 5.0.0 - Serves client dist from server
 ## Key Dependencies
-- @modelcontextprotocol/sdk 1.29.0 - MCP server implementation (core feature)
+- @modelcontextprotocol/sdk 1.32 (floor ^1.31.0 — GHSA-6qxp-vccf-f47h) - MCP server implementation (core feature)
 - TypeORM 0.3 - ORM for database abstraction
 - pg 8.20.0 - PostgreSQL client driver
 - sql.js 1.12.0 - SQLite (for embedded database mode)

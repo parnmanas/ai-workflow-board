@@ -89,7 +89,8 @@ test('buildOneshotSpawn adds ticket attribution as a self-contained TOML config 
   assert.ok(override.startsWith(prefix));
   const table = parse(`awb = ${override.slice(prefix.length)}`).awb;
   assert.equal(table.url, 'https://awb.example/mcp');
-  assert.deepEqual(table.http_headers, {
+  // smol-toml >=1.9 returns null-prototype tables; compare the contents, not the prototype.
+  assert.deepEqual({ ...table.http_headers }, {
     'X-AWB-Client-Type': 'managed-subagent',
     'X-AWB-Subagent-Ticket-Id': 'ticket-123',
     'X-AWB-Subagent-Role': 'reviewer',
