@@ -253,7 +253,7 @@ test('a spoken choice reaches the waiting session only from a turn the user star
   const fresh = mcp('pending-7f3a9c2e-0000-4000-8000-000000000001');
   const unknown = await fresh.callTool('list_pending_session_requests', {});
   assert.equal(unknown.error.code, 'session_unidentified', JSON.stringify(unknown));
-  assert.match(unknown.error.error, /⟳ Restart/);
+  assert.match(unknown.error.error, /⟳ Restart process/);
   const mapped = await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({

@@ -16,6 +16,7 @@
 import type {
   AgentSessionAuth,
   AgentSessionCommand,
+  AgentSessionConfigOption,
   AgentSessionEventRecord,
   AgentSessionLiveSnapshot,
   AgentSessionStatus,
@@ -734,6 +735,35 @@ export function describeSessionAuth(auth: AgentSessionAuth | null | undefined, c
       : `Uses the Runtime Host's own CLI login${org ? ` (${org})` : ''}`,
     tone: auth.kind === 'none' ? 'danger' : 'muted',
   };
+}
+
+/**
+ * 세션 헤더에 늘 보이는 설정 — 매 턴 신경 쓰는 승인 mode · 모델 · effort 만, 이 순서로.
+ * 나머지(collaboration mode, fast 같은 boolean …)는 헤더 메뉴로 접는다. 어댑터마다 option 이름과
+ * id 가 달라서(`effort` / `reasoning_effort`, "Mode" / "Session Mode") ACP category 로만 고른다.
+ */
+export const SESSION_HEADER_CATEGORIES = ['mode', 'model', 'thought_level'] as const;
+const SESSION_HEADER_LABELS: Record<(typeof SESSION_HEADER_CATEGORIES)[number], string> = {
+  mode: 'Mode',
+  model: 'Model',
+  thought_level: 'Effort',
+};
+
+export function splitHeaderConfigOptions(options: readonly AgentSessionConfigOption[]): {
+  primary: AgentSessionConfigOption[];
+  secondary: AgentSessionConfigOption[];
+} {
+  const primary: AgentSessionConfigOption[] = [];
+  for (const category of SESSION_HEADER_CATEGORIES) {
+    const found = options.find((o) => o.category === category && o.type === 'select');
+    if (found) primary.push(found);
+  }
+  return { primary, secondary: options.filter((o) => !primary.includes(o)) };
+}
+
+/** 헤더 컨트롤 위의 짧은 이름 — 어댑터가 준 긴 이름 대신 category 마다 고정된 낱말을 쓴다. */
+export function headerControlLabel(option: Pick<AgentSessionConfigOption, 'category' | 'name'>): string {
+  return SESSION_HEADER_LABELS[option.category as keyof typeof SESSION_HEADER_LABELS] ?? option.name;
 }
 
 /** 사용자 결정을 기다리는 상태(permission / 질문·폼). */

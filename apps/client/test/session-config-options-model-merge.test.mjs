@@ -21,6 +21,7 @@ const fixtures = {
 const choices = (select) => [...select.options].map((option) => [option.value, option.textContent]);
 const modelSelect = (scope = document) => scope.querySelector('select[data-config-category="model"]');
 const button = (label) => [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === label);
+const menuItem = (label) => [...document.querySelectorAll('.awb-session-menu-item')].find((node) => node.textContent.includes(label));
 async function settle() {
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise((done) => setTimeout(done, 0)); });
 }
@@ -93,7 +94,14 @@ for (const [cli, initialChoices] of Object.entries(fixtures)) {
     act(() => FakeEventSource.instances.at(-1).emit('agent_session_update', { session: live }));
     await settle();
     const updatedHeader = choices(modelSelect());
-    click(button('New'));
+    // 헤더에는 폴더·세션 id 가 없고, 햄버거 메뉴를 열어야 보인다. New 도 메뉴 안에 있다.
+    const bar = document.querySelector('.awb-session-bar');
+    assert.ok(bar.querySelector('.awb-session-controls select[data-config-category="model"]'), 'model stays in the header');
+    assert.ok(!bar.textContent.includes('/srv/app'), 'the folder is not in the header bar');
+    click(document.querySelector('button[aria-label="Session menu"]'));
+    const panel = document.querySelector('.awb-session-menu-panel');
+    assert.ok(panel.textContent.includes('/srv/app') && panel.textContent.includes('created'), 'folder and session id live in the menu');
+    click(menuItem('New session'));
     await settle();
     const nextDialog = document.querySelector('[role="dialog"]');
     assert.deepEqual(choices(modelSelect(nextDialog)), updatedHeader,

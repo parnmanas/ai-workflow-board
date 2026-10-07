@@ -143,8 +143,8 @@ CLI 선택·권한 릴레이·스트리밍이 이미 있고 chat 모드의 기�
 ### 설정 — 여러 operator, 이름 (P3 구현)
 
 operator 를 고르는 화면을 따로 만들지 않는다 — **세션을 여는 화면이 이미 Host · CLI · 모델 · 작업 폴더를 고른다**
-(새 세션 대화상자의 `RuntimeSelectionFields`, 실행은 agent-manager). 원하는 조합으로 세션을 연 뒤 세션 헤더의
-**☆ Operator** 를 누르고 **이름**을 붙이면 그 세션이 operator 가 된다(admin). 등록과 함께 operator 지침(아래)을 그
+(새 세션 대화상자의 `RuntimeSelectionFields`, 실행은 agent-manager). 원하는 조합으로 세션을 연 뒤 세션 헤더 ☰ 메뉴의
+**☆ Make operator…** 를 누르고 **이름**을 붙이면 그 세션이 operator 가 된다(admin). 등록과 함께 operator 지침(아래)을 그
 세션의 다음 프롬프트로 보낸다. operator 는 **여러 개** 둘 수 있다(예: rolf 의 Claude "자비스", ragnar 의 Codex
 "프라이데이") — 사이드바 맨 위의 **OPERATORS** 가 어디서든 각 세션을 연다.
 
@@ -433,7 +433,7 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
 | 낭독 정리 | `toSpeakable()`(코드·표·URL·식별자 제거, 경로는 마지막 조각) + `splitSpeakable()`(문장 경계 조각, 첫 조각은 짧게) | `modules/voice/speakable.ts` |
 | REST (`voice.use`, 기본 admin) | `GET /api/voice/config` · `POST /api/voice/transcribe`(raw 오디오 본문) · `POST /api/voice/speakable` · `POST /api/voice/speech` | `modules/voice/voice.controller.ts` |
 | REST (admin) | Voice lab — `POST /api/voice/lab/transcribe?provider=` · `POST /api/voice/lab/speech` · `GET /api/voice/lab/voices?provider=` | 같은 파일 |
-| 화면 — 세션 | 컴포저 🎙 = **대화 모드**(아래), 헤더 "Read aloud"(턴이 끝나면 최종 답 낭독). **말로 물은 답은 Read aloud 가 꺼져 있어도 읽는다**(voice in → voice out). 보고 있는(visible) 화면에서만 읽고, 세션 화면을 떠나면 멈춘다 | `components/sessions/*`, `voice/*` |
+| 화면 — 세션 | 컴포저 🎙 = **대화 모드**(아래), 헤더 ☰ 메뉴의 "Read replies aloud"(턴이 끝나면 최종 답 낭독). **말로 물은 답은 Read aloud 가 꺼져 있어도 읽는다**(voice in → voice out). 보고 있는(visible) 화면에서만 읽고, 세션 화면을 떠나면 멈춘다 | `components/sessions/*`, `voice/*` |
 | 화면 — Admin → Voice | 엔진 설정 + STT 비교(같은 발화를 모든 공급자에, 정답을 적으면 CER) + TTS 블라인드 테스트(문장마다 다시 섞은 A/B/C, 평점 뒤 공개, "Use this voice") | `components/admin/VoicePage.tsx` |
 
 - 한 턴의 "읽을 답" 은 마지막 도구·권한·질문·plan 뒤의 텍스트 덩어리다(`voice/turnAnswer.logic.ts`). 답 뒤에

@@ -2,12 +2,51 @@
 .awb-session-composer { container-type: inline-size; min-width: 0; overflow-wrap: anywhere; padding-bottom: max(12px, env(safe-area-inset-bottom)) !important; }
 .awb-composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .awb-composer-row > button { flex-shrink: 0; }
-.awb-session-identity { display: flex; align-items: center; gap: 10px; flex: 1 1 320px; min-width: 0; }
+/* Session header: identity · status · Mode/Model/Effort · connect actions + menu.
+   One row on a wide header, two rows (controls below) on a narrow one. The break is
+   measured on the header itself, so an open sidebar or artifact panel folds it the
+   same way a small screen does. Control widths are fixed, so the bar keeps its shape
+   whatever the title, folder or option names are. */
+.awb-session-header { container-type: inline-size; }
+.awb-session-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "identity controls actions"; align-items: center; column-gap: 14px; row-gap: 8px; }
+.awb-session-identity { grid-area: identity; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .awb-session-identity > button { flex-shrink: 0; }
-.awb-session-settings { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; max-width: 100%; }
-.awb-session-settings[hidden] { display: none; }
-.awb-session-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.awb-session-context { display: flex; flex-direction: column; gap: 4px; width: 100%; min-width: 0; font-size: 11px; overflow-wrap: anywhere; }
+.awb-session-heading { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.awb-session-title { font-size: 15px; font-weight: 700; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.awb-session-subtitle { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11.5px; line-height: 1.3; white-space: nowrap; }
+.awb-session-subtitle > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.awb-session-status { flex-shrink: 0; display: inline-flex; }
+.awb-session-controls { grid-area: controls; display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.awb-session-control { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.awb-session-control > span { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; line-height: 1.2; white-space: nowrap; }
+.awb-session-control select { width: 100%; min-width: 0; max-width: none !important; text-overflow: ellipsis; }
+.awb-session-control[data-category="mode"] { width: 150px; }
+.awb-session-control[data-category="model"] { width: 190px; }
+.awb-session-control[data-category="thought_level"] { width: 104px; }
+.awb-session-actions { grid-area: actions; display: flex; align-items: center; gap: 8px; }
+.awb-session-actions > * { flex-shrink: 0; white-space: nowrap; }
+.awb-session-menu { position: relative; display: inline-flex; }
+.awb-session-menu-trigger { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 30px; padding: 0; font-size: 16px; line-height: 1; cursor: pointer; font-family: inherit; }
+.awb-session-menu-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 60; width: min(380px, calc(100vw - 24px)); max-height: min(560px, 75dvh); overflow-y: auto; overflow-wrap: anywhere; white-space: normal; }
+.awb-session-menu-section { padding: 10px 12px; }
+.awb-session-menu-section:last-child { border-bottom: none !important; }
+.awb-session-menu-section > h3 { margin: 0 0 6px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.awb-session-menu-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 12px; line-height: 1.4; }
+.awb-session-menu-facts dd { margin: 0; min-width: 0; }
+.awb-session-menu-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); align-items: center; gap: 10px; padding: 3px 0; font-size: 12px; }
+.awb-session-menu-field > label:only-child { grid-column: 1 / -1; }
+.awb-session-menu-field select { width: 100%; min-width: 0; max-width: none !important; }
+.awb-session-menu-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border: none; border-radius: 6px; background: transparent; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.awb-session-menu-item:hover:not(:disabled), .awb-session-menu-item:focus-visible { background: rgba(127, 127, 127, 0.14); }
+.awb-session-menu-item:disabled { cursor: not-allowed; }
+.awb-session-menu-icon { width: 18px; flex-shrink: 0; text-align: center; }
+@container (max-width: 900px) {
+  .awb-session-bar { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "identity actions" "controls controls"; }
+  .awb-session-control { flex: 3 1 0; }
+  .awb-session-control[data-category] { width: auto; }
+  .awb-session-control[data-category="model"] { flex-grow: 4; }
+  .awb-session-control[data-category="thought_level"] { flex-grow: 2.5; }
+}
 .awb-session-transcript { overflow-wrap: anywhere; }
 .awb-page-actions > * { max-width: 100%; }
 
@@ -20,15 +59,10 @@
 }
 
 @media (max-width: 1100px), (max-height: 500px) {
-  .awb-session-header { gap: 8px !important; }
-  .awb-session-identity { flex-basis: 100%; }
-  .awb-session-extra { display: none !important; }
   .awb-session-identity > button { min-width: 36px; min-height: 36px; }
-  .awb-session-settings { width: 100%; max-height: min(240px, 32dvh); overflow-y: auto; padding: 8px 0; border-bottom: 1px solid var(--awb-border); }
-  .awb-session-settings select { min-height: 40px; min-width: 0; max-width: 100% !important; font-size: 16px !important; }
-  .awb-session-settings label { min-height: 40px; }
-  .awb-session-settings button, .awb-session-actions button { min-height: 36px; }
-  .awb-session-actions { width: 100%; justify-content: space-between; }
+  .awb-session-control select, .awb-session-menu-field select { min-height: 36px; }
+  .awb-session-actions button, .awb-session-menu-trigger { min-height: 36px; }
+  .awb-session-menu-item { min-height: 40px; }
 }
 
 @media (max-width: 767px) {

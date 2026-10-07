@@ -45,7 +45,7 @@ export interface PendingSessionView {
 }
 
 const NOT_AN_OPERATOR = 'Only a registered AWB operator session can use this tool — register the session as an operator '
-  + '(AWB → the session header → ☆ Operator).';
+  + '(AWB → the session header menu ☰ → ☆ Make operator…).';
 
 /**
  * 말로 답하기(docs/voice-operator.md "말로 답하기") — 사용자가 operator 에게 말로 고른 것을, 승인이나 답을
@@ -86,7 +86,7 @@ export class OperatorDecisionService {
         throw new OperatorDecisionError('session_unidentified',
           `${NOT_AN_OPERATOR} AWB cannot tell which session this connection belongs to yet (it was opened as a new session`
           + `${sessionId === 'new' ? ' by an older agent-manager' : ' and the Runtime Host has not reported it — wait ~30 s'}). `
-          + 'If you are the operator, ask the user to restart this session once (session header → ⟳ Restart).');
+          + 'If you are the operator, ask the user to restart this session once (session header menu ☰ → ⟳ Restart process).');
       }
       throw new OperatorDecisionError('not_an_operator', NOT_AN_OPERATOR);
     }

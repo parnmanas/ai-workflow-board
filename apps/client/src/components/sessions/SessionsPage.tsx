@@ -5,10 +5,10 @@ import { useBoardStream, useBoardStreamEvent } from '../../contexts/BoardStreamC
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { AGENT_SESSIONS_CHANGED_EVENT, useAgentSessionsNav } from '../../hooks/useAgentSessionsNav';
-import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useConversationScroll } from '../../hooks/useConversationScroll';
 import { tokens } from '../../tokens';
 import type {
+  AgentSessionConfigOption,
   AgentSessionEventEvent,
   AgentSessionEventRecord,
   AgentSessionHost,
@@ -21,6 +21,7 @@ import PageHeader from '../PageHeader';
 import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionModelSelect from './SessionModelSelect';
+import SessionHeaderMenu, { SessionMenuItem, SessionMenuSection } from './SessionHeaderMenu';
 import { noteHostSessionModels } from '../../cli/hostModels';
 import SessionComposer from './SessionComposer';
 import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
@@ -45,12 +46,14 @@ import {
   canPrompt,
   describeSessionAuth,
   describeSessionStatus,
+  headerControlLabel,
   isWaitingStatus,
   mergeLiveSnapshot,
   pendingInteraction,
   runtimeLabel,
   sessionDisplayTitle,
   shouldAutoConnect,
+  splitHeaderConfigOptions,
 } from './sessionTranscript.logic';
 
 /**
@@ -88,6 +91,24 @@ function CliBadge({ cli }: { cli: string }) {
     >
       {runtimeLabel(cli)}
     </span>
+  );
+}
+
+/** 세션 메뉴의 정보 한 줄(이름 · 값). 긴 폴더 경로나 세션 id 도 잘리지 않고 줄바꿈된다. */
+function MenuFact({ term, mono, tone, title, children, ...rest }: {
+  term: string; mono?: boolean; tone?: 'muted' | 'danger'; title?: string; children: React.ReactNode; 'data-session-auth'?: string;
+}) {
+  return (
+    <>
+      <dt style={{ color: tokens.colors.textMuted }}>{term}</dt>
+      <dd
+        {...rest}
+        title={title}
+        style={{ color: tone === 'danger' ? tokens.colors.dangerLight : tokens.colors.textPrimary, fontFamily: mono ? MONO : undefined }}
+      >
+        {children}
+      </dd>
+    </>
   );
 }
 
@@ -378,8 +399,6 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   wsId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
 }) {
   const navigate = useNavigate();
-  const compact = useMediaQuery('(max-width: 1100px), (max-height: 500px)');
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [summary, setSummary] = useState<AgentSessionSummary | null>(null);
@@ -823,208 +842,217 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         ? `Last error: ${live.last_error}`
         : null;
 
+  const displayTitle = sessionDisplayTitle({ title, cli, session_id: sessionId });
+  const hostName = host?.name || live?.manager_name || managerId.slice(0, 8);
+  const { primary: headerOptions, secondary: menuOptions } = splitHeaderConfigOptions(configOptions);
+  // 여는 중(starting)에만 잠근다. 턴 중이나 승인 대기 중에도 어댑터는 변경을 받아들이고,
+  // 오히려 그때가 가장 바꾸고 싶은 순간이다(계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우).
+  const controlsDisabled = status === 'starting';
+  const selectStyle: React.CSSProperties = {
+    padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`,
+    background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12,
+  };
+  // 어댑터가 준 세션 설정(모델·reasoning·mode …) — 헤더와 메뉴가 같은 컨트롤을 쓴다.
+  const renderConfigControl = (option: AgentSessionConfigOption) => {
+    if (option.type === 'boolean') {
+      return (
+        <label title={option.description} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textSecondary, cursor: controlsDisabled ? 'not-allowed' : 'pointer' }}>
+          <input
+            type="checkbox"
+            aria-label={option.name}
+            data-config-id={option.config_id}
+            checked={option.current_value === true}
+            disabled={controlsDisabled}
+            onChange={(e) => void setConfigOption(option.config_id, e.target.checked)}
+          />
+          {option.name}
+        </label>
+      );
+    }
+    if (option.type !== 'select') return null;
+    if (option.category === 'model') {
+      return <SessionModelSelect data-config-id={option.config_id}
+        title={option.description || option.name} models={option.options.map((choice) => choice.value)}
+        labels={Object.fromEntries(option.options.map((choice) => [choice.value, choice.name]))}
+        value={typeof option.current_value === 'string' ? option.current_value : null}
+        disabled={controlsDisabled} defaultDisabled
+        onChange={(model) => void setConfigOption(option.config_id, model)} />;
+    }
+    const groups = new Map<string, typeof option.options>();
+    for (const o of option.options) {
+      const g = o.group || '';
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g)!.push(o);
+    }
+    const renderOptions = (list: typeof option.options) => list.map((o) => <option key={o.value} value={o.value} title={o.description}>{o.name}</option>);
+    return (
+      <select
+        aria-label={option.name}
+        title={option.description || option.name}
+        data-config-id={option.config_id}
+        data-config-category={option.category}
+        value={typeof option.current_value === 'string' ? option.current_value : ''}
+        disabled={controlsDisabled}
+        onChange={(e) => void setConfigOption(option.config_id, e.target.value)}
+        style={selectStyle}
+      >
+        {typeof option.current_value !== 'string' && <option value="">{option.name}…</option>}
+        {Array.from(groups.entries()).map(([group, list]) => (group
+          ? <optgroup key={group} label={group}>{renderOptions(list)}</optgroup>
+          : renderOptions(list)))}
+      </select>
+    );
+  };
+
   return (
     <>
       <header
         className="awb-session-header"
-        style={{
-          background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}`, padding: '10px 16px',
-          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0,
-        }}
+        style={{ background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}`, padding: '8px 16px', flexShrink: 0 }}
       >
-        <div className="awb-session-identity">
-        <button
-          type="button"
-          onClick={() => navigate(`/sessions/${managerId}`)}
-          aria-label="Back to sessions"
-          title="Back to sessions"
-          style={{ border: 'none', background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 16, padding: '0 4px' }}
-        >
-          ←
-        </button>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <span style={{ color: tokens.colors.textPrimary, fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {sessionDisplayTitle({ title, cli, session_id: sessionId })}
-          </span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, color: tokens.colors.textSecondary, flexWrap: 'wrap' }}>
-            <span>{host?.name || live?.manager_name || managerId.slice(0, 8)}</span>
-            <CliBadge cli={cli} />
-            <span className="awb-session-extra" style={{ fontFamily: MONO, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }} title={cwd}>
-              {cwd || '(cwd unknown)'}
-            </span>
-            <span className="awb-session-extra" style={{ fontFamily: MONO, color: tokens.colors.textMuted }} title={sessionId}>{sessionId.slice(0, 8)}</span>
-            {/* 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 줄 때만 나온다(모르면 아무것도 그리지 않는다) */}
-            {authView && (
-              <span
-                className="awb-session-extra"
-                data-session-auth={live?.auth?.source ?? ''}
-                title={authView.title}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 4, maxWidth: 320, overflow: 'hidden',
-                  textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  color: authView.tone === 'danger' ? tokens.colors.dangerLight : tokens.colors.textMuted,
-                }}
-              >
-                <span aria-hidden="true">{live?.auth?.source === 'credential' ? '🔑' : '👤'}</span>
-                {authView.text}
+        {/* 늘 보이는 것은 정체(제목 · 호스트 · CLI) · 상태 · mode/model/effort · 연결 동작뿐이다.
+            폴더 · 세션 id · 로그인 · 덜 쓰는 설정과 동작은 햄버거 메뉴로 접는다 — 폭은 화면이 아니라
+            헤더 자신의 폭(container query)으로 판단해 사이드바·패널이 열려도 같은 규칙으로 접힌다. */}
+        <div className="awb-session-bar">
+          <div className="awb-session-identity">
+            <button
+              type="button"
+              onClick={() => navigate(`/sessions/${managerId}`)}
+              aria-label="Back to sessions"
+              title="Back to sessions"
+              style={{ border: 'none', background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 16, padding: '0 4px' }}
+            >
+              ←
+            </button>
+            <div className="awb-session-heading">
+              <span className="awb-session-title" style={{ color: tokens.colors.textPrimary }} title={displayTitle}>{displayTitle}</span>
+              <span className="awb-session-subtitle" style={{ color: tokens.colors.textSecondary }}>
+                <span title={hostName}>{hostName}</span>
+                <CliBadge cli={cli} />
               </span>
-            )}
+            </div>
+            <span className="awb-session-status"><StatusPill status={status} /></span>
           </div>
-        </div>
-        <StatusPill status={status} />
-        </div>
-        <div id="session-settings" className="awb-session-settings" hidden={compact && !settingsOpen}>
-          {compact && <div className="awb-session-context"><span title={cwd}>{cwd || '(cwd unknown)'}</span><span>{sessionId.slice(0, 8)}{authView ? ` · ${authView.text}` : ''}</span></div>}
-        {/* 프로세스만 다시 띄운다. CLI 를 올린 뒤 새 모델·기능이 보이지 않을 때 쓰는
-            정식 경로다 — 살아 있는 프로세스는 기동 시점의 CLI 를 계속 물고 있다.
-            여는 중(starting)에만 잠근다: 턴 중이라도 운영자가 일부러 죽이려는 것일 수
-            있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다. */}
-        <button
-          type="button"
-          onClick={() => void restart()}
-          disabled={status === 'starting'}
-          title={
-            status === 'starting'
-              ? '이미 프로세스를 여는 중입니다.'
-              : '세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ' +
-                '새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ' +
-                '인증은 지금 CLI 설정에 고른 credential 로 다시 묶입니다 — usage limit 에 걸렸으면 CLI 설정에서 바꾼 뒤 누르세요. ' +
-                '진행 중인 턴이 있으면 끊깁니다.'
-          }
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 4,
-            padding: '3px 8px',
-            fontSize: 11.5,
-            background: 'transparent',
-            color: tokens.colors.textSecondary,
-            border: `1px solid ${tokens.colors.border}`,
-            borderRadius: tokens.radii.sm,
-            cursor: status === 'starting' ? 'not-allowed' : 'pointer',
-            opacity: status === 'starting' ? 0.5 : 1,
-            fontFamily: 'inherit',
-          }}
-        >
-          <span aria-hidden="true">⟳</span> Restart
-        </button>
-        {/* 어댑터가 준 세션 설정(모델·reasoning·mode …) — 살아 있는 세션에서만 바꿀 수 있다 */}
-        {configOptions.map((option) => {
-          // 여는 중(starting)에만 잠근다. 턴 중이나 승인 대기 중에도 어댑터는 변경을 받아들이고,
-          // 오히려 그때가 가장 바꾸고 싶은 순간이다(계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우).
-          const controlsDisabled = status === 'starting';
-          if (option.type === 'boolean') {
-            return (
-              <label key={option.config_id} title={option.description} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: tokens.colors.textSecondary, cursor: controlsDisabled ? 'not-allowed' : 'pointer' }}>
-                <input
-                  type="checkbox"
-                  aria-label={option.name}
-                  data-config-id={option.config_id}
-                  checked={option.current_value === true}
-                  disabled={controlsDisabled}
-                  onChange={(e) => void setConfigOption(option.config_id, e.target.checked)}
-                />
-                {option.name}
-              </label>
-            );
-          }
-          if (option.type !== 'select') return null;
-          if (option.category === 'model') {
-            return <SessionModelSelect key={option.config_id} data-config-id={option.config_id}
-              title={option.description || option.name} models={option.options.map((choice) => choice.value)}
-              labels={Object.fromEntries(option.options.map((choice) => [choice.value, choice.name]))}
-              value={typeof option.current_value === 'string' ? option.current_value : null}
-              disabled={controlsDisabled} defaultDisabled style={{ maxWidth: 220 }}
-              onChange={(model) => void setConfigOption(option.config_id, model)} />;
-          }
-          const groups = new Map<string, typeof option.options>();
-          for (const o of option.options) {
-            const g = o.group || '';
-            if (!groups.has(g)) groups.set(g, []);
-            groups.get(g)!.push(o);
-          }
-          const renderOptions = (list: typeof option.options) => list.map((o) => <option key={o.value} value={o.value} title={o.description}>{o.name}</option>);
-          return (
-            <select
-              key={option.config_id}
-              aria-label={option.name}
-              title={option.description || option.name}
-              data-config-id={option.config_id}
-              data-config-category={option.category}
-              value={typeof option.current_value === 'string' ? option.current_value : ''}
-              disabled={controlsDisabled}
-              onChange={(e) => void setConfigOption(option.config_id, e.target.value)}
-              style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, maxWidth: 220 }}
-            >
-              {typeof option.current_value !== 'string' && <option value="">{option.name}…</option>}
-              {Array.from(groups.entries()).map(([group, list]) => (group
-                ? <optgroup key={group} label={group}>{renderOptions(list)}</optgroup>
-                : renderOptions(list)))}
-            </select>
-          );
-        })}
-        {showLegacyModeSelect && live && (
-          <select
-            aria-label="Session mode"
-            value={live.current_mode || ''}
-            disabled={status === 'starting'}
-            onChange={(e) => void setMode(e.target.value)}
-            style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12 }}
-          >
-            {!live.current_mode && <option value="">mode…</option>}
-            {live.available_modes.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.name}</option>)}
-          </select>
-        )}
-        <div className="awb-session-secondary-actions" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {canManageOperators && (
-            <Button
-              variant={thisOperator ? 'secondary' : 'ghost'}
-              size="sm"
-              aria-pressed={!!thisOperator}
-              disabled={!thisOperator && busy}
-              onClick={() => setOperatorDialogOpen(true)}
-              title={thisOperator
-                ? `이 세션은 operator "${thisOperator.name}" 입니다 — 이름·별칭을 고치거나 해제합니다`
-                : busy ? '턴이 끝난 뒤에 등록할 수 있습니다(지침을 다음 프롬프트로 보냅니다)' : '이 세션에 이름을 붙여 operator 로 등록합니다 — "헤이 <이름>" 으로 부르면 깨어납니다'}
-            >
-              {thisOperator ? `★ ${thisOperator.name}` : '☆ Operator'}
-            </Button>
+          {(headerOptions.length > 0 || showLegacyModeSelect) && (
+            <div className="awb-session-controls">
+              {showLegacyModeSelect && live && (
+                <label className="awb-session-control" data-category="mode">
+                  <span style={{ color: tokens.colors.textMuted }}>Mode</span>
+                  <select
+                    aria-label="Session mode"
+                    value={live.current_mode || ''}
+                    disabled={controlsDisabled}
+                    onChange={(e) => void setMode(e.target.value)}
+                    style={selectStyle}
+                  >
+                    {!live.current_mode && <option value="">mode…</option>}
+                    {live.available_modes.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.name}</option>)}
+                  </select>
+                </label>
+              )}
+              {headerOptions.map((option) => (
+                <label key={option.config_id} className="awb-session-control" data-category={option.category}>
+                  <span style={{ color: tokens.colors.textMuted }}>{headerControlLabel(option)}</span>
+                  {renderConfigControl(option)}
+                </label>
+              ))}
+            </div>
           )}
-          {ttsReady && (
-            <Button
-              variant={readReplies || speakingHere ? 'secondary' : 'ghost'}
-              size="sm"
-              aria-pressed={readReplies}
-              onClick={() => {
-                if (speakingHere) { speechPlayer.stop(); return; }
-                const next = !readReplies;
-                setReadReplies(next);
-                // 이 클릭이 사용자 제스처다 — 나중에(턴이 끝났을 때) 제스처 없이 재생할 수 있게 깨워 둔다.
-                if (next) speechPlayer.unlock();
-              }}
-              title={speakingHere
-                ? '지금 읽는 것을 멈춥니다'
-                : readReplies
-                  ? '턴이 끝나면 답을 소리로 읽습니다 — 누르면 끕니다'
-                  : '턴이 끝나면 답을 소리로 읽게 합니다 — 꺼져 있어도 🎙 로 물은 답은 읽습니다'}
-            >
-              {speakingHere ? '■ Stop reading' : readReplies ? '🔊 Read aloud' : '🔈 Read aloud'}
-            </Button>
-          )}
-          <Button variant="ghost" size="sm" onClick={() => void load()} title="Reload the transcript from the Runtime Host">Reload</Button>
-          <Button variant="ghost" size="sm" onClick={onNew}>New</Button>
-
-        </div>
-        </div>
-        <div className="awb-session-actions">
-          {compact && <Button variant="secondary" size="sm" aria-expanded={settingsOpen} aria-controls="session-settings" onClick={() => setSettingsOpen((open) => !open)}>Settings {settingsOpen ? '▴' : '▾'}</Button>}
-          {canConnect(status) && !connecting && (
-            <Button variant="primary" size="sm" onClick={() => void connect(false)} title="Start the CLI process for this session on the Runtime Host and load its settings">
-              {status === 'error' ? 'Reconnect' : 'Connect'}
-            </Button>
-          )}
-          {(connecting || status === 'starting') && <Button variant="secondary" size="sm" disabled loading>Connecting…</Button>}
-          {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>Stop</Button>}
+          <div className="awb-session-actions">
+            {speakingHere && (
+              <Button variant="secondary" size="sm" onClick={() => speechPlayer.stop()} title="지금 읽는 것을 멈춥니다">■ Stop reading</Button>
+            )}
+            {canConnect(status) && !connecting && (
+              <Button variant="primary" size="sm" onClick={() => void connect(false)} title="Start the CLI process for this session on the Runtime Host and load its settings">
+                {status === 'error' ? 'Reconnect' : 'Connect'}
+              </Button>
+            )}
+            {(connecting || status === 'starting') && <Button variant="secondary" size="sm" disabled loading>Connecting…</Button>}
+            {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>Stop</Button>}
+            <SessionHeaderMenu>
+              {(closeMenu) => (
+                <>
+                  <SessionMenuSection title="Session">
+                    <dl className="awb-session-menu-facts">
+                      <MenuFact term="Host">{hostName}</MenuFact>
+                      <MenuFact term="CLI">{runtimeLabel(cli)}</MenuFact>
+                      <MenuFact term="Folder" mono>{cwd || '(cwd unknown)'}</MenuFact>
+                      <MenuFact term="Session" mono>{sessionId}</MenuFact>
+                      {/* 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 줄 때만 나온다(모르면 아무것도 그리지 않는다) */}
+                      {authView && (
+                        <MenuFact term="Login" title={authView.title} tone={authView.tone} data-session-auth={live?.auth?.source ?? ''}>
+                          <span aria-hidden="true">{live?.auth?.source === 'credential' ? '🔑 ' : '👤 '}</span>{authView.text}
+                        </MenuFact>
+                      )}
+                      {thisOperator && <MenuFact term="Operator">★ {thisOperator.name}</MenuFact>}
+                    </dl>
+                  </SessionMenuSection>
+                  {menuOptions.length > 0 && (
+                    <SessionMenuSection title="Settings">
+                      {menuOptions.map((option) => (option.type === 'boolean'
+                        ? <div key={option.config_id} className="awb-session-menu-field">{renderConfigControl(option)}</div>
+                        : (
+                          <label key={option.config_id} className="awb-session-menu-field" style={{ color: tokens.colors.textSecondary }}>
+                            <span>{option.name}</span>
+                            {renderConfigControl(option)}
+                          </label>
+                        )))}
+                    </SessionMenuSection>
+                  )}
+                  <SessionMenuSection title="Actions">
+                    {/* 프로세스만 다시 띄운다. CLI 를 올린 뒤 새 모델·기능이 보이지 않을 때 쓰는
+                        정식 경로다 — 살아 있는 프로세스는 기동 시점의 CLI 를 계속 물고 있다.
+                        여는 중(starting)에만 잠근다: 턴 중이라도 운영자가 일부러 죽이려는 것일 수
+                        있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다. */}
+                    <SessionMenuItem
+                      icon="⟳"
+                      label="Restart process"
+                      disabled={status === 'starting'}
+                      title={
+                        status === 'starting'
+                          ? '이미 프로세스를 여는 중입니다.'
+                          : '세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ' +
+                            '새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ' +
+                            '인증은 지금 CLI 설정에 고른 credential 로 다시 묶입니다 — usage limit 에 걸렸으면 CLI 설정에서 바꾼 뒤 누르세요. ' +
+                            '진행 중인 턴이 있으면 끊깁니다.'
+                      }
+                      onSelect={() => { closeMenu(); void restart(); }}
+                    />
+                    <SessionMenuItem icon="↻" label="Reload transcript" title="Reload the transcript from the Runtime Host" onSelect={() => { closeMenu(); void load(); }} />
+                    <SessionMenuItem icon="＋" label="New session" onSelect={() => { closeMenu(); onNew(); }} />
+                    {ttsReady && (
+                      <SessionMenuItem
+                        icon={readReplies ? '🔊' : '🔈'}
+                        label={readReplies ? 'Read replies aloud: on' : 'Read replies aloud: off'}
+                        pressed={readReplies}
+                        title={readReplies
+                          ? '턴이 끝나면 답을 소리로 읽습니다 — 누르면 끕니다'
+                          : '턴이 끝나면 답을 소리로 읽게 합니다 — 꺼져 있어도 🎙 로 물은 답은 읽습니다'}
+                        onSelect={() => {
+                          const next = !readReplies;
+                          setReadReplies(next);
+                          // 이 클릭이 사용자 제스처다 — 나중에(턴이 끝났을 때) 제스처 없이 재생할 수 있게 깨워 둔다.
+                          if (next) speechPlayer.unlock();
+                        }}
+                      />
+                    )}
+                    {canManageOperators && (
+                      <SessionMenuItem
+                        icon={thisOperator ? '★' : '☆'}
+                        label={thisOperator ? `Operator "${thisOperator.name}"…` : 'Make operator…'}
+                        pressed={!!thisOperator}
+                        disabled={!thisOperator && busy}
+                        title={thisOperator
+                          ? `이 세션은 operator "${thisOperator.name}" 입니다 — 이름·별칭을 고치거나 해제합니다`
+                          : busy ? '턴이 끝난 뒤에 등록할 수 있습니다(지침을 다음 프롬프트로 보냅니다)' : '이 세션에 이름을 붙여 operator 로 등록합니다 — "헤이 <이름>" 으로 부르면 깨어납니다'}
+                        onSelect={() => { closeMenu(); setOperatorDialogOpen(true); }}
+                      />
+                    )}
+                  </SessionMenuSection>
+                </>
+              )}
+            </SessionHeaderMenu>
+          </div>
         </div>
       </header>
 

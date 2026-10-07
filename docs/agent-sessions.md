@@ -12,11 +12,21 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 소유 계정 전환기가 없다. Account는 세션의 소유권·접근 권한·credential·기본 실행 정책을
 정하는 관리 경계다([ownership.md](ownership.md)).
 
+## 세션 헤더
+
+- 헤더에는 늘 같은 것만 보인다: 제목(호스트 · CLI) · 상태 · **Mode · Model · Effort** 셀렉트 ·
+  Connect/Stop · **☰ 메뉴**. 셀렉트는 ACP category(`mode` / `model` / `thought_level`)로 고르고
+  폭이 고정이라, 제목·폴더·옵션 이름 길이와 상관없이 헤더 모양이 같다.
+- **☰ 메뉴**에 나머지를 둔다 — 정보(Host · CLI · 작업 폴더 · 세션 id · 로그인 · operator),
+  그 밖의 설정(Collaboration mode · Fast mode 같은 boolean 등), 동작(Restart process ·
+  Reload transcript · New session · Read replies aloud · Operator). 낭독 중에만 헤더에
+  "■ Stop reading" 이 나온다.
+
 ## 작은 화면에서 사용하기
 
-- 좁은 화면과 낮은 가로 화면에서는 **Settings**를 눌러 모델·권한·effort·Fast mode,
-  Restart, Operator, Read aloud, Reload, New를 펼친다. 상태와 Connect/Stop은 바로 보인다.
-  작업 폴더·세션 id·인증 정보도 펼친 설정에서 확인한다.
+- 헤더 자신의 폭이 좁으면(container query, 900px 이하) Mode · Model · Effort 가 제목 아래 한 줄로
+  내려가 그 폭을 나눠 쓴다. 사이드바나 Artifact 패널로 본문이 좁아져도 같은 규칙이다.
+  상태 · Connect/Stop · ☰ 메뉴는 제목 줄에 그대로 있다.
 - 입력 영역 자체의 폭이 좁으면 프롬프트가 전체 너비를 차지하고, 명령·첨부·마이크와
   Send/Queue/Cancel은 그 아래 행으로 내려간다. 사이드바나 Artifact 패널로 본문이 좁아져도
   같은 배치를 적용한다. 실행 중 입력은 계속 가능하며 Queue로 다음 턴에 보낼 수 있다.
@@ -172,11 +182,11 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 
 | ACP | AWB 상태/이벤트 | 사용자 조작 |
 |---|---|---|
-| `session/new`·`load` 응답의 `configOptions`, `config_option_update` | 스냅샷 `config_options[]` (`config_id, name, category, type: select\|boolean, current_value, options[]`) | 헤더의 셀렉트/체크박스 → `POST …/config-option {config_id, value}` → op `set_config_option` → `session/set_config_option` → 어댑터가 준 전체 목록으로 갱신 + system 행 |
+| `session/new`·`load` 응답의 `configOptions`, `config_option_update` | 스냅샷 `config_options[]` (`config_id, name, category, type: select\|boolean, current_value, options[]`) | 헤더의 Mode·Model·Effort 셀렉트, 그 밖의 것은 ☰ 메뉴의 셀렉트/체크박스 → `POST …/config-option {config_id, value}` → op `set_config_option` → `session/set_config_option` → 어댑터가 준 전체 목록으로 갱신 + system 행 |
 | `available_commands_update` | 스냅샷 `available_commands[]` (`name, description, input_hint?`) | 컴포저에서 `/` 를 치면 자동완성(↑/↓, Enter/Tab 선택, Esc). 선택은 텍스트만 채우고 전송하지 않는다. 명령은 프롬프트 텍스트로 그대로 간다 |
 | `session/request_permission` (`title`/`description`/`toolCall`, claude 의 `_meta.permission`) | `permission_request` 행 + `awaiting_permission` | 권한 카드 → `POST …/permission` |
 | `elicitation/create` (form: JSON Schema, url) — claude 의 AskUserQuestion 등 | `elicitation_request` 행 + **`awaiting_input`** (form 만). url 은 링크 카드만 남기고 바로 accept, 완료는 `elicitation/complete` → `elicitation_decision{decided_by:'agent'}` | 폼 카드(문자열/숫자/불리언/단일·다중 선택, required 검사) → `POST …/elicitation {elicitation_id, action: accept\|decline\|cancel, content}` → op `elicitation` |
-| `_auth/status_update` (claude-agent-acp · codex-acp 공통 `_meta` 확장, push 전용) | 스냅샷 `auth` — 어댑터가 준 신원(`kind`/`label`/`detail`/`account`)에 매니저가 아는 **출처**(`source`: 계정 Credential 인지 장비 운영자 로그인인지)를 더한 것 | 세션 헤더에 한 줄로 표시(🔑 = credential, 👤 = 운영자 로그인). 어댑터가 알려 주지 않으면 **아무것도 그리지 않는다** — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다 |
+| `_auth/status_update` (claude-agent-acp · codex-acp 공통 `_meta` 확장, push 전용) | 스냅샷 `auth` — 어댑터가 준 신원(`kind`/`label`/`detail`/`account`)에 매니저가 아는 **출처**(`source`: 계정 Credential 인지 장비 운영자 로그인인지)를 더한 것 | 세션 헤더 ☰ 메뉴의 Login 줄에 표시(🔑 = credential, 👤 = 운영자 로그인). 어댑터가 알려 주지 않으면 **아무것도 그리지 않는다** — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다 |
 | `plan` / `plan_update` | `plan` 행(`entries[{content, priority, status}]`) — 같은 turn 의 최신 것이 이전 것을 대체 | 체크리스트 카드 |
 | `session_info_update` | 제목 패치 | — |
 
