@@ -131,5 +131,7 @@ export { MigrationRun } from './MigrationRun';
 // Auto-DDL'd by TypeORM `synchronize` (D-01).
 export { AgentSessionCliSetting } from './AgentSessionCliSetting';
 export { AgentSessionExecution } from './AgentSessionExecution';
+// operator 가 다른 세션에 시키자고 제안한 프롬프트 — 사용자가 승인해야 보낸다(docs/voice-operator.md "작업 제안").
+export { AgentSessionPromptProposal } from './AgentSessionPromptProposal';
 
 export { AgentTemplate } from './AgentTemplate';

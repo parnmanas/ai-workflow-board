@@ -146,7 +146,7 @@ export type TranscriptBlock =
    * `voice` — 이름을 불러 깨운 뒤의 첫 요청(앞에 붙은 음성 대화 안내 한 줄을 떼고 보여 준다).
    * `report` — 사람이 아니라 AWB 가 operator 에게 보낸 작업 보고(접어서 보여 준다).
    */
-  | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean; report?: boolean }
+  | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean; report?: boolean; operatorTask?: string }
   | { kind: 'automatic_prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'assistant'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'reasoning'; key: string; seq: number; turnId: string; text: string }
@@ -313,10 +313,12 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           blocks.push({ kind: 'automatic_prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at });
           break;
         }
+        const task = parseOperatorTaskPrompt(text);
         blocks.push({
-          kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at,
+          kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text: task ? task.text : text, createdAt: ev.created_at,
           ...(noted ? { voice: true } : {}),
           ...(isOperatorReportPrompt(text) ? { report: true } : {}),
+          ...(task ? { operatorTask: task.operator } : {}),
         });
         break;
       }
@@ -735,6 +737,18 @@ export function describeSessionAuth(auth: AgentSessionAuth | null | undefined, c
       : `Uses the Runtime Host's own CLI login${org ? ` (${org})` : ''}`,
     tone: auth.kind === 'none' ? 'danger' : 'muted',
   };
+}
+
+/**
+ * operator 가 제안하고 사용자가 승인해 AWB 가 보낸 작업(docs/voice-operator.md "작업 제안"). 첫 줄이 출처다 —
+ * server `modules/voice/operator-proposal.ts` 의 `composeOperatorTaskPrompt` 와 같은 모양(바꾸면 같이).
+ */
+export const OPERATOR_TASK_PREFIX = '[AWB 오퍼레이터 작업]';
+const OPERATOR_TASK_RE = /^\[AWB 오퍼레이터 작업\] (.+?) — 사용자 승인\n([\s\S]*)$/;
+
+export function parseOperatorTaskPrompt(text: string): { operator: string; text: string } | null {
+  const m = OPERATOR_TASK_RE.exec(text || '');
+  return m ? { operator: m[1], text: m[2] } : null;
 }
 
 /**

@@ -320,7 +320,7 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
   맞춰 글로 만든다.
 - 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림음만 낸다), 깨어 있는 대화를 맡은
   화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
-- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기").
+- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기"). 이어서 시킬 일은 **제안**만 하고, 보내는 것은 사용자가 승인한 뒤다(아래 "작업 제안"). 그래서 보고마다 세션 참조(`manager_id` · `cli` · `session_id`)와 제안 도구 안내 한 줄이 실린다.
 - **SSE 전달 목록(event-registry)은 필드를 골라 담는다** — `voice_announcement` 에 필드를 더하면 `map()` 에도 더할 것
   (`operator` 가 빠져 화면에 안 갔던 것을 `event-registry-payload-parity-guard` 가 잡았다).
 - 회귀: `apps/server/test/voice-operator-reports.test.mjs`(라우팅 · 보고 문장 · 요약 전달 · 보고 있음 · 바쁨/묶음 ·
@@ -369,6 +369,47 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
   이름 없이 계속 이어진다. 선택지를 설명하기 전에 숫자만 들으면 먼저 선택지를 설명하고 확인한다.
 - 회귀: `apps/server/test/voice-operator-answers.test.mjs`(보고 문장 · 목록 · 보고 턴 거절 · 사용자 턴 전달 · 한 번만 ·
   비operator · 다른 사용자 · 질문 값 검증 · 턴이 끝나면 다시 막힘 · SSE 필드), `apps/client/test/voice-wake.test.mjs`(답 창).
+
+### 작업 제안 — operator 가 다른 세션에 일을 시킨다 (2026-10-07)
+
+operator 는 보고를 보고 다음 일을 떠올리지만, 보고는 다른 세션이 쓴 글(믿을 수 없는 입력)이다. 그 글만으로 다른 세션을
+움직이게 두면 한 세션의 문장이 다른 세션에 대한 명령이 된다. 그래서 operator 는 **제안만** 남기고(어느 턴에서든), 보내는
+것은 사람이 정한다(2026-10-07 사용자 결정: "자율 위임 + 사용자 확인").
+
+```
+세션 A 턴 종료 → 작업 보고(세션 참조 · 제안 도구 안내)
+   ▼ operator 보고 턴: propose_session_prompt(A, text, reason) — 아무것도 보내지 않는다
+AgentSessionPromptProposal(pending) → SSE agent_session_proposal → 토스트 · 세션 화면의 제안 카드
+   ▼ 사용자 승인: 화면 Send(REST) 또는 "응 보내" → 사용자가 시작한 operator 턴에서 send_session_prompt_proposal
+queued → 대상이 한가하면 바로, 턴 중이면 그 턴이 끝날 때 promptOnBehalf(A, "[AWB 오퍼레이터 작업] <이름> — 사용자 승인\n<text>")
+   ▼ sent — A 의 턴이 끝나면 다시 보고 → 루프
+```
+
+- 저장: `AgentSessionPromptProposal`(`agent_session_prompt_proposals`). 사용자 승인을 기다리는 상태라 메모리가 아니라 DB 에
+  둔다 — 메모리였다면 배포(서버 재시작)마다 승인 대기 제안이 조용히 사라진다. status: `pending` → `queued` → `sent` | `failed`,
+  또는 `dismissed`(사용자) · `withdrawn`(operator) · `superseded`(같은 operator 가 같은 세션에 새 제안 — 마지막 생각만 남긴다).
+- MCP(`mcp/tools/operator-tools.ts`, 티어 `full`): `propose_session_prompt` · `send_session_prompt_proposal` ·
+  `withdraw_session_prompt_proposal` · `list_session_prompt_proposals`. 서비스는 `voice/operator-proposal.service.ts`.
+- REST(사용자, 권한 `agent_sessions.use` — 보내는 것은 그 세션에 프롬프트를 넣는 일이다): `GET /api/voice/proposals`,
+  `POST /api/voice/proposals/:id/send`, `POST /api/voice/proposals/:id/dismiss`. 제안은 **승인할 사용자에게만** 보이고 그 사용자만
+  정한다(보고 턴이면 그 보고를 받는 사용자, 사용자 턴이면 지금 operator 와 대화하는 사람).
+- 조건(서버가 확인한다):
+  1. 제안은 등록된 operator 연결만(말로 답하기와 같은 `operatorFor`).
+  2. **operator 세션은 대상이 될 수 없다** — 승인된 글로 시작한 턴이 그 operator 의 "사용자 턴" 으로 세어져, 승인 권한을
+     얻는 길이 생기기 때문이다.
+  3. 다른 사람이 모는 세션에는 제안하지 않는다(`not_this_user`), AWB 가 모르는 세션도(`session_unknown`).
+  4. 음성 승인은 **사용자가 시작한 operator 턴**에서만(`not_user_turn`). 보고 턴에서 operator 가 스스로 보내지 못한다.
+  5. 이미 정해진 제안은 다시 정하지 않는다(`proposal_closed`). 실패한 것만 다시 보낼 수 있다(Retry).
+- 출처 줄 `[AWB 오퍼레이터 작업] <이름> — 사용자 승인` 은 server(`voice/operator-proposal.ts`)·client
+  (`sessionTranscript.logic.ts` `OPERATOR_TASK_PREFIX`) 계약이다 — 받는 세션은 누가 시켰고 사람이 승인했다는 것을 알고,
+  화면은 그 프롬프트를 "🧭 <이름> 제안 · 사용자 승인" 으로 그린다.
+- 화면: 새 제안은 어느 화면에서든 토스트(누르면 그 세션으로), 세션 화면 위에 제안 카드(글 원문 · Send · Dismiss, 대기 중이면
+  Cancel, 실패면 Retry). operator 세션 화면에도 그 operator 가 낸 제안이 대상과 함께 보인다.
+- 지침(`operatorBrief`)이 제안 방법을 가르친다. 지침은 등록할 때 한 번 보내므로, 이미 등록된 operator 는 **보고 프롬프트의 안내
+  한 줄**과 도구 설명으로 배운다.
+- 회귀: `apps/server/test/voice-operator-proposals.test.mjs`(보고의 세션 참조 · 보고 턴 제안 · 거절 조건 · 보고 턴 자기 전송 거절 ·
+  superseded · 화면 승인 → 턴 끝나면 전송 · 음성 승인 · 거둠/거절), `apps/client/test/session-proposals.test.mjs`(목록 규칙 · 화면별
+  필터 · 전사 라벨 · 카드 동작).
 
 ### 출처 이벤트 (기본값)
 

@@ -374,7 +374,8 @@ test('the report prompt is bounded and speaks English when configured', () => {
   }], 'en');
   assert.ok(text.startsWith(`${OPERATOR_REPORT_PREFIX} 1 update(s)`));
   assert.match(text, /1\. finished — rolf \/ Claude Code · "Deploy" · 2 min/);
-  assert.ok(text.length < 2000, 'details are clipped');
+  // 머리말(작업 제안 안내 포함)과 세션 참조를 더해도 5000자 상세가 잘려 한 화면 남짓에 머문다.
+  assert.ok(text.length < 2300, 'details are clipped');
   assert.match(text, /…\(truncated\)/);
 });
 

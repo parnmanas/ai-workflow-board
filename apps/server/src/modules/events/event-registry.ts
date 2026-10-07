@@ -45,6 +45,7 @@ import {
   TerminalUpdatePayload,
   TerminalOutputPayload,
   VoiceAnnouncementPayload,
+  AgentSessionProposalPayload,
 } from '../../common/types/stream-events';
 import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
@@ -1550,6 +1551,27 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'voice_announcement', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── agent_session_proposal ─────────
+  // operator 의 작업 제안(docs/voice-operator.md "작업 제안") — 생김/정해짐. UI 전용, 승인할 사용자에게만.
+  // agent-manager 는 구독하지 않는다 — SSE contract 무관.
+  {
+    eventType: 'agent_session_proposal',
+    emitterEvent: 'agent_session_proposal',
+    map(event: any) {
+      const payload: AgentSessionProposalPayload = {
+        proposal: event.proposal,
+        reason: event.reason || 'updated',
+      };
+      return {
+        payload,
+        scope: { user_id: event.user_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'agent_session_proposal', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
 ];

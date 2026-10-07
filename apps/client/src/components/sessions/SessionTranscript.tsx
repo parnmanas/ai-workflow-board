@@ -128,6 +128,16 @@ function ReportPromptBlock({ text }: { text: string }) {
   );
 }
 
+/** operator 가 제안하고 사용자가 승인한 작업 — 누가 시켰는지 한 줄을 단 프롬프트. */
+function OperatorTaskPromptBlock({ text, operator }: { text: string; operator: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+      <span data-block="operator-task-label" style={{ fontSize: 11, color: tokens.colors.textMuted }}>🧭 {operator} 제안 · 사용자 승인</span>
+      <PromptBlock text={text} />
+    </div>
+  );
+}
+
 function PromptBlock({ text, voice }: { text: string; voice?: boolean }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -978,7 +988,9 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'prompt':
             return block.report
               ? <ReportPromptBlock key={block.key} text={block.text} />
-              : <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
+              : block.operatorTask
+                ? <OperatorTaskPromptBlock key={block.key} text={block.text} operator={block.operatorTask} />
+                : <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
           case 'automatic_prompt':
             return <AutomaticPromptBlock key={block.key} text={block.text} />;
           case 'assistant':

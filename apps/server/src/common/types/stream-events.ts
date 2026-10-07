@@ -11,6 +11,7 @@ import type { WorktreeMode } from '../worktree-config';
 import type { TicketStatus } from '../ticket-status';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
 import type { TerminalOutputChunk, TerminalSummary } from './terminals';
+import type { SessionProposalView } from './agent-sessions';
 import type { RuntimeSpec } from '../runtime-spec';
 import type {
   AgentSessionAuth,
@@ -51,7 +52,8 @@ export type StreamEventType =
   | 'terminal_request'       // Terminal(Runtime Host 셸): 서버 → agent-manager 제어(open/attach/input/resize/close) — 대상 agent 스코프
   | 'terminal_update'        // Terminal: 라이브 터미널 상태 변경(status/cwd/title/크기) — UI 전용, driver 만
   | 'terminal_output'        // Terminal: PTY 출력 청크 — UI 전용, driver 만
-  | 'voice_announcement';    // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
+  | 'voice_announcement'     // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
+  | 'agent_session_proposal'; // Voice: operator 의 작업 제안이 생기거나 바뀌었다 — UI 전용, 승인할 사용자만
 
 export interface StreamEventScope {
   /** Legacy scope key — only `__trigger__`-style sentinels on flattened events still carry it. */
@@ -1147,4 +1149,16 @@ export interface VoiceAnnouncementPayload {
    */
   needs_decision?: boolean;
   created_at: string;
+}
+
+// ─── Operator 작업 제안 (docs/voice-operator.md "작업 제안") ──────────────────
+
+/**
+ * UI 전용(승인할 사용자만). operator 가 다른 세션에 시키자고 남긴 제안이 생기거나(proposed) 정해졌다
+ * (approved · sent · failed · dismissed · withdrawn · superseded). `proposal` 은 `SessionProposalView`
+ * (`modules/voice/operator-proposal.ts`). agent-manager 는 구독하지 않는다.
+ */
+export interface AgentSessionProposalPayload {
+  proposal: SessionProposalView;
+  reason: string;
 }

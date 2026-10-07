@@ -226,6 +226,7 @@ test/voice-announcer.test.mjs
 test/voice-gateway.test.mjs
 test/voice-http.test.mjs
 test/voice-operator-answers.test.mjs
+test/voice-operator-proposals.test.mjs
 test/voice-operator-reports.test.mjs
 test/voice-operator-scope.test.mjs
 test/voice-operators.test.mjs

@@ -54,6 +54,7 @@ for (const [cli, initialChoices] of Object.entries(fixtures)) {
     t.mock.method(api, 'listAgentTemplates', async () => []);
     t.mock.method(api, 'listAgentSessionHosts', async () => [host]);
     t.mock.method(api, 'getVoiceConfig', async () => null);
+    t.mock.method(api, 'listSessionProposals', async () => ({ proposals: [] }));
     t.mock.method(api, 'getHostModels', async () => ({ manager_agent_id: hostId, is_online: true, refreshed_at: new Date().toISOString(),
       models: { [cli]: catalogChoices.map(([id]) => id) }, labels: { [cli]: Object.fromEntries(catalogChoices) } }));
     t.mock.method(api, 'getHostCliSettings', async () => ({ manager_id: hostId, cli, supports_credential: true, credential: null,

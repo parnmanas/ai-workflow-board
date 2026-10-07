@@ -3089,6 +3089,32 @@ export interface VoiceConfigView {
   lab?: { stt: string[]; tts: string[] };
 }
 
+/**
+ * operator 의 작업 제안(docs/voice-operator.md "작업 제안") — 서버 `SessionProposalView` 와 같은 모양.
+ * status: pending(승인 대기) · queued(승인됨, 대상의 턴이 끝나면 보낸다) · sent · failed · dismissed · withdrawn · superseded.
+ */
+export interface SessionProposal {
+  id: string;
+  operator: { id: string; name: string };
+  origin: string;
+  target: { manager_id: string; manager_name: string; cli: string; cli_label: string; session_id: string; title: string };
+  text: string;
+  reason: string;
+  status: string;
+  error: string | null;
+  decided_via: string | null;
+  delivered_turn_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface SessionProposalEvent {
+  event_type: 'agent_session_proposal';
+  proposal: SessionProposal;
+  /** proposed · approved · sent · failed · dismissed · withdrawn · superseded */
+  reason: string;
+}
+
 /** 음성 알림(`voice_announcement` SSE) — 서버 `VoiceAnnouncementPayload` 와 같은 모양. */
 export type VoiceAnnouncementTarget =
   | { type: 'session'; manager_id: string; cli: string; session_id: string }

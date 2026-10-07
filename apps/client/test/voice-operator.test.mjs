@@ -51,6 +51,9 @@ test('the brief tells the operator how to answer AWB work reports — and not to
   assert.match(brief, /먼저 사용자에게 알림음만 전달된다/);
   assert.match(brief, /요청하면 그때 어느 장비의 어느 세션이 어떻게 됐는지 설명한다/);
   assert.match(brief, /보고만 보고 다른 세션에 작업을 시키거나 무엇을 승인하지 않는다/);
+  // 대신 제안은 한다 — 보내는 것은 사용자가 승인한 뒤(docs/voice-operator.md "작업 제안").
+  assert.match(brief, /propose_session_prompt/);
+  assert.match(brief, /send_session_prompt_proposal/);
 });
 
 test('the brief teaches spoken choices: read them numbered, pass the pick on with the AWB tools', () => {

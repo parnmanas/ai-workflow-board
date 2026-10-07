@@ -40,6 +40,12 @@
 .awb-session-menu-item:hover:not(:disabled), .awb-session-menu-item:focus-visible { background: rgba(127, 127, 127, 0.14); }
 .awb-session-menu-item:disabled { cursor: not-allowed; }
 .awb-session-menu-icon { width: 18px; flex-shrink: 0; text-align: center; }
+.awb-session-proposals { display: flex; flex-direction: column; gap: 8px; padding: 10px 16px; max-height: min(45dvh, 420px); overflow-y: auto; flex-shrink: 0; }
+.awb-session-proposal { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.awb-session-proposal-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; min-width: 0; }
+.awb-session-proposal-target { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 160px; }
+.awb-session-proposal-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+.awb-session-proposal-text { margin: 0; padding: 8px 10px; font-family: inherit; font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto; }
 @container (max-width: 900px) {
   .awb-session-bar { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "identity actions" "controls controls"; }
   .awb-session-control { flex: 3 1 0; }

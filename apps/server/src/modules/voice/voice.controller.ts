@@ -11,6 +11,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { VoiceError, VoiceService } from './voice.service';
 import { VoiceAnnouncerService } from './voice-announcer.service';
 import { VoicePresenceService } from './voice-presence.service';
+import { OperatorProposalError, OperatorProposalService } from './operator-proposal.service';
 import {
   OperatorInputError,
   createOperatorEntry,
@@ -247,5 +248,48 @@ export class VoiceOperatorsController {
       const next = list.filter((op) => op.id !== id);
       return { next, result: { operators: next } };
     }));
+  }
+}
+
+/**
+ * 작업 제안(docs/voice-operator.md "작업 제안") — operator 가 다른 세션에 시키자고 남긴 프롬프트를 사용자가 보거나
+ * 보내거나 거절한다. 보내는 것은 그 세션에 프롬프트를 넣는 일이라 음성 권한이 아니라 세션 권한으로 막는다.
+ * 제안은 그것을 승인할 사용자에게만 보이고 그 사용자만 정한다.
+ */
+@ApiBearerAuth('user-session')
+@ApiTags('voice')
+@Controller('api/voice/proposals')
+@UseGuards(AuthGuard, PermissionGuard)
+@RequirePermission(PERMISSIONS.USE_AGENT_SESSIONS)
+export class VoiceProposalsController {
+  constructor(private readonly proposals: OperatorProposalService) {}
+
+  private userId(req: Request): string {
+    return (req as any).currentUser.id as string;
+  }
+
+  private async run(res: Response, fn: () => Promise<unknown>) {
+    try {
+      return res.status(200).json(await fn());
+    } catch (err) {
+      if (err instanceof OperatorProposalError) return res.status(err.status).json({ error: err.code, message: err.message });
+      throw err;
+    }
+  }
+
+  @Get()
+  async list(@Req() req: Request, @Res() res: Response) {
+    return this.run(res, async () => ({ proposals: await this.proposals.listForUser(this.userId(req)) }));
+  }
+
+  /** 승인 — 대상 세션이 한가하면 바로 보내고, 턴 중이면 그 턴이 끝날 때 보낸다(status `queued`). */
+  @Post(':id/send')
+  async send(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    return this.run(res, async () => ({ proposal: await this.proposals.sendByUser(this.userId(req), id) }));
+  }
+
+  @Post(':id/dismiss')
+  async dismiss(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    return this.run(res, async () => ({ proposal: await this.proposals.dismiss(this.userId(req), id) }));
   }
 }

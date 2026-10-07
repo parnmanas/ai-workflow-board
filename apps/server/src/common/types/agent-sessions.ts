@@ -199,3 +199,21 @@ export const AGENT_SESSION_PROMPT_MAX_IMAGES = 5;
 export const AGENT_SESSION_PROMPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 export const AGENT_SESSION_EVENT_BATCH_MAX = 200;
 export const AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS = 256_000;
+
+// ─── Operator 작업 제안 (docs/voice-operator.md "작업 제안") ───────────────
+
+/** operator 가 다른 세션에 시키자고 남긴 제안 한 건 — 화면·MCP·SSE `agent_session_proposal` 이 같은 모양을 본다. */
+export interface SessionProposalView {
+  id: string;
+  operator: { id: string; name: string };
+  origin: string;
+  target: { manager_id: string; manager_name: string; cli: string; cli_label: string; session_id: string; title: string };
+  text: string;
+  reason: string;
+  status: string;
+  error: string | null;
+  decided_via: string | null;
+  delivered_turn_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+}

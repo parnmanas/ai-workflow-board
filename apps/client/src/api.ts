@@ -101,7 +101,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -1820,6 +1820,12 @@ export const api = {
   synthesizeVoice: async (text: string): Promise<Blob> =>
     (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
   /** Operators(이름 붙은 Agent Session) — 등록·수정·해제는 admin 만. */
+  // operator 의 작업 제안(docs/voice-operator.md "작업 제안") — 내가 정할 것만 온다. 보내는 것은 그 세션에 프롬프트를 넣는 일이다.
+  listSessionProposals: () => request<{ proposals: SessionProposal[] }>('/voice/proposals'),
+  sendSessionProposal: (id: string) =>
+    request<{ proposal: SessionProposal }>(`/voice/proposals/${encodeURIComponent(id)}/send`, { method: 'POST' }),
+  dismissSessionProposal: (id: string) =>
+    request<{ proposal: SessionProposal }>(`/voice/proposals/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }),
   listVoiceOperators: () => request<{ operators: VoiceOperator[] }>('/voice/operators'),
   createVoiceOperator: (input: { name: string; aliases: string[]; manager_id: string; cli: string; session_id: string; cwd?: string; title?: string }) =>
     request<{ operator: VoiceOperator }>('/voice/operators', { method: 'POST', body: JSON.stringify(input) }),

@@ -141,6 +141,10 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
       + (spoken.length < reports.length ? ' Leave out the ones marked "viewed" — the user already sees them on screen (just take note).' : '')
       + (decisions ? ' When asked for details, explain what needs a decision and the numbered choices. Do not approve or answer anything in this report. If the user gives only a number before hearing the choices, explain them and confirm first. Pass an explicit user choice on in that user turn with the tool under "Answer with" (AWB refuses it in this report turn).' : ''));
   }
+  // 작업 제안(docs/voice-operator.md "작업 제안") — 보고를 보고 다음 일을 떠올리면 제안만 한다. 보내는 것은 사용자다.
+  lines[0] += lang === 'ko'
+    ? ' 어떤 세션에 이어서 시킬 일이 있으면 propose_session_prompt 로 제안하세요 — 사용자가 승인해야 전달됩니다.'
+    : ' To have a session do follow-up work, propose it with propose_session_prompt — it is sent only after the user approves.';
   reports.forEach((r, i) => {
     const s = r.session;
     const title = s.title ? (lang === 'ko' ? ` · '${s.title}'` : ` · "${s.title}"`) : '';
@@ -148,6 +152,8 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
     const viewed = r.viewed ? (lang === 'ko' ? ' · 보고 있음' : ' · viewed') : '';
     lines.push(`${i + 1}. ${KIND_LABEL[lang][r.kind]} — ${s.manager_name} / ${s.cli_label}${title}${r.kind === 'finished' ? minutes(r.duration_ms, lang) : ''}${viewed}`);
     if (s.cwd) lines.push(`   ${lang === 'ko' ? '작업 폴더' : 'Folder'}: ${s.cwd}`);
+    // 승인·질문은 답 전하기 줄이 같은 값을 싣는다. 그 밖의 보고에도 제안할 때 쓸 세션 참조를 단다.
+    if (!r.request) lines.push(`   ${lang === 'ko' ? '세션' : 'Session'}: manager_id="${s.manager_id}", cli="${s.cli}", session_id="${s.session_id}"`);
     if (r.request) {
       lines.push(...requestLines(r, lang));
       return;

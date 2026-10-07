@@ -51,7 +51,8 @@ type StreamNamedEventType =
   | 'agent_session_event'    // Agent Session — 트랜스크립트 이벤트 1건(소유자만)
   | 'terminal_update'        // Terminal(Runtime Host 셸) — 라이브 터미널 상태 변경(driver 만)
   | 'terminal_output'        // Terminal — PTY 출력 청크(driver 만)
-  | 'voice_announcement';    // Voice — 일이 끝났다는 음성 알림 한 줄(받는 사용자만)
+  | 'voice_announcement'     // Voice — 일이 끝났다는 음성 알림 한 줄(받는 사용자만)
+  | 'agent_session_proposal'; // Voice — operator 의 작업 제안이 생기거나 정해졌다(승인할 사용자만)
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -266,6 +267,10 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // VoiceAnnouncer 가 /api/voice/announcements/:id/audio 로 받아 한 탭에서만 읽는다.
       eventSource.addEventListener('voice_announcement', (event: MessageEvent) => {
         dispatch('voice_announcement', event.data);
+      });
+      // operator 의 작업 제안(docs/voice-operator.md "작업 제안") — 승인할 사용자에게만 온다.
+      eventSource.addEventListener('agent_session_proposal', (event: MessageEvent) => {
+        dispatch('agent_session_proposal', event.data);
       });
 
       eventSource.onerror = () => {

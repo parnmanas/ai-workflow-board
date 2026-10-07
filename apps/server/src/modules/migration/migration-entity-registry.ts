@@ -105,6 +105,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   // Account·RuntimeHost·Credential 이 모두 앞에 있으니 여기 둔다.
   'AgentSessionCliSetting',
   'AgentSessionExecution',
+  'AgentSessionPromptProposal',
   'ResourceEmbedding', // (연성) Resource 의존, 위에서 이미 삽입됨
 
   // Skill 체인 / 배치-런

@@ -94,7 +94,7 @@ export class OperatorDecisionService {
   }
 
   /** 지금 이 operator 와 대화하는 사람 — operator 세션의 driver. */
-  private userOf(operator: OperatorEntry): string {
+  userOf(operator: OperatorEntry): string {
     const live = this.sessions.liveSnapshot(operator.manager_id, operator.cli, operator.session_id);
     if (!live?.driver_user_id) {
       throw new OperatorDecisionError('user_unknown', 'AWB does not know who is talking with you right now — ask the user to say it again.');
@@ -102,7 +102,8 @@ export class OperatorDecisionService {
     return live.driver_user_id;
   }
 
-  private requireUserTurn(operator: OperatorEntry): string {
+  /** 사용자가 시작한 operator 턴 id — 아니면 던진다(보고 턴 · 모르는 턴). 작업 제안의 음성 승인도 같은 문을 지난다. */
+  requireUserTurn(operator: OperatorEntry): string {
     const turnId = this.reports.userTurnInProgress(operator.id);
     if (!turnId) {
       throw new OperatorDecisionError('not_user_turn',

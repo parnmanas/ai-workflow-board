@@ -22,6 +22,8 @@ import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionModelSelect from './SessionModelSelect';
 import SessionHeaderMenu, { SessionMenuItem, SessionMenuSection } from './SessionHeaderMenu';
+import SessionProposalCards from './SessionProposalCards';
+import { proposalsForSession, useSessionProposals } from './sessionProposals';
 import { noteHostSessionModels } from '../../cli/hostModels';
 import SessionComposer from './SessionComposer';
 import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
@@ -437,6 +439,12 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const canManageOperators = !!voiceConfig && hasPermission('admin.access');
   const operators = useVoiceOperators(!!voiceConfig);
   const thisOperator = operatorForSession(operators, managerId, cli, sessionId);
+  // operator 의 작업 제안 — 이 세션에 시키자는 것과, 이 세션이 operator 면 그 operator 가 낸 것.
+  const allProposals = useSessionProposals();
+  const proposals = useMemo(
+    () => proposalsForSession(allProposals, { manager_id: managerId, cli, session_id: sessionId }, thisOperator?.id ?? null),
+    [allProposals, managerId, cli, sessionId, thisOperator?.id],
+  );
   const [operatorDialogOpen, setOperatorDialogOpen] = useState(false);
   const wake = useWakeState();
   const awakeHere = !!thisOperator && wake.mode === 'awake' && wake.operatorId === thisOperator.id;
@@ -1075,6 +1083,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           )}
         </div>
       )}
+
+      <SessionProposalCards
+        proposals={proposals}
+        showTarget={(p) => !(p.target.manager_id === managerId && p.target.cli === cli && p.target.session_id === sessionId)}
+      />
 
       <div className="awb-session-transcript" ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
         {loading && events.length === 0 ? (

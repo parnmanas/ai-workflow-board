@@ -223,6 +223,12 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   list_pending_session_requests: 'full',
   answer_session_permission: 'full',
   answer_session_question: 'full',
+  // 작업 제안(docs/voice-operator.md "작업 제안") — 같은 하한(OperatorDecisionService.operatorFor). 보내는 도구는
+  // 그 위에 "사용자가 시작한 턴" · "그 사용자가 정할 미결 제안" 을 서비스가 본다.
+  propose_session_prompt: 'full',
+  send_session_prompt_proposal: 'full',
+  withdraw_session_prompt_proposal: 'full',
+  list_session_prompt_proposals: 'full',
 };
 
 /**

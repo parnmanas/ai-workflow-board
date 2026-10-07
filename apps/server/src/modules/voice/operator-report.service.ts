@@ -119,6 +119,13 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
     return turnId && !this.#reportTurns.has(turnId) ? turnId : null;
   }
 
+  /** 지금 operator 가 AWB 의 보고 턴을 돌고 있으면 그 보고를 받는 사용자(작업 제안을 승인할 사람). */
+  reportTurnUser(operatorId: string): string | null {
+    const turnId = this.#currentTurn.get(operatorId);
+    const inflight = this.#inflight.get(operatorId);
+    return turnId && inflight && inflight.turnId === turnId ? inflight.userId : null;
+  }
+
   /** 사용자가 이 operator 와 대화했다 — 보고 받을 operator 를 고를 때 "가장 최근" 의 근거. */
   noteConversation(operatorId: string, at = Date.now()): void {
     this.#lastConversation.set(operatorId, at);

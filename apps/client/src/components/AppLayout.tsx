@@ -11,6 +11,7 @@ import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { TicketMetaProvider } from '../contexts/TicketMetaContext';
 import VoiceAnnouncer from '../voice/VoiceAnnouncer';
+import { SessionProposalNotifier } from './sessions/SessionProposalCards';
 import WakeListener from '../voice/WakeListener';
 import { useAuth } from '../contexts/AuthContext';
 import { NotificationMuteButton } from '../contexts/ToastContext';
@@ -137,6 +138,8 @@ export default function AppLayout() {
     {/* 음성 알림 · 이름 부르기 — 화면을 그리지 않고 모든 화면에서 산다(docs/voice-operator.md). */}
     <VoiceAnnouncer />
     <WakeListener />
+    {/* operator 의 작업 제안 — 새 제안을 알리고 목록을 따라간다(docs/voice-operator.md "작업 제안"). */}
+    <SessionProposalNotifier />
     <ArtifactPanelProvider>
     <TicketMetaProvider>
     <TicketArtifactController>

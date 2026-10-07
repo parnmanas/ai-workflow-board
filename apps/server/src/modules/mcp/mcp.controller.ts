@@ -53,6 +53,7 @@ import { ClassificationBridgeService } from '../outreach/classifier/classificati
 import { OntologyLifecycleService } from '../ontology/ontology-lifecycle.service';
 import { OntologyQueryService } from '../ontology/ontology-query.service';
 import { OperatorDecisionService } from '../voice/operator-decision.service';
+import { OperatorProposalService } from '../voice/operator-proposal.service';
 import { AgentSessionsService } from '../agent-sessions/agent-sessions.service';
 
 // Module-level log reference, set from McpController.onModuleInit
@@ -173,6 +174,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly instanceQuiesceService: InstanceQuiesceService,
     // 말로 답하기 — operator-tools.ts (VoiceModule).
     private readonly operatorDecisionService: OperatorDecisionService,
+    // 작업 제안 — operator 가 다른 세션에 시킬 일을 제안하고, 사용자 승인 뒤 보낸다(VoiceModule).
+    private readonly operatorProposalService: OperatorProposalService,
     // operator 세션의 연결을 알아본다 — 새로 만든 세션의 MCP 참조값 → 세션 id.
     private readonly agentSessionsService: AgentSessionsService,
   ) {}
@@ -277,6 +280,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       ontologyLifecycleService: this.ontologyLifecycleService,
       ontologyQueryService: this.ontologyQueryService,
       operatorDecisionService: this.operatorDecisionService,
+      operatorProposalService: this.operatorProposalService,
     };
   }
 
