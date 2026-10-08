@@ -125,13 +125,13 @@ class SpeechPlayer {
    * `text`(화면용 답 그대로)를 읽는다. 앞의 낭독은 끊는다. 읽을 것이 없으면 조용히 끝난다.
    * 실패는 상태(error)로 남기고 던지지 않는다 — 낭독 실패가 대화를 막으면 안 된다.
    */
-  async speak(text: string, key: string): Promise<void> {
+  async speak(text: string, key: string, options: { summary?: boolean } = {}): Promise<void> {
     this.#interrupt();
     const generation = this.#generation;
     this.#set({ speaking: true, key, error: null });
     const stale = () => generation !== this.#generation;
     try {
-      const { chunks } = await api.voiceSpeakable(text);
+      const { chunks } = await api.voiceSpeakable(text, options.summary === true);
       if (stale()) return;
       const fetchChunk = (i: number): Promise<Blob> | null => {
         if (i >= chunks.length) return null;

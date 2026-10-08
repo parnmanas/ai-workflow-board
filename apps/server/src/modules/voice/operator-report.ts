@@ -34,6 +34,15 @@ export interface ReportedRequest {
   fields: QuestionField[];
 }
 
+/** operator 가 시킨 작업 — 누가 무엇을 시켰는지. */
+export interface ReportedDelegation {
+  proposal_id: string;
+  operator_id: string;
+  operator_name: string;
+  /** 보낸 프롬프트(출처 줄 없이). */
+  task: string;
+}
+
 /** 턴 안에서 정해진 것 — 권한 요청의 선택 · 질문의 답(누가 정했는지 포함). 끝난 턴의 보고에 실린다. */
 export interface ReportedDecision {
   kind: 'permission' | 'question';
@@ -56,6 +65,11 @@ export interface SessionReport {
   decisions?: ReportedDecision[];
   /** 승인·질문이면 그 요청 — operator 가 선택지를 읽어 주고, 사용자가 고르면 이것으로 답을 전한다. */
   request?: ReportedRequest;
+  /**
+   * 이 턴이 operator 가 제안하고 사용자가 승인한 작업이었다(docs/voice-operator.md "작업 제안") — 그 결과는
+   * 제안한 operator 에게 간다(같은 호스트·최근 대화 순서보다 먼저). 소리 설정과 무관하게 보고한다.
+   */
+  delegated?: ReportedDelegation;
   /** 소식을 들을 사람 — 그 세션의 driver. */
   user_id: string;
   session: ReportedSession;
@@ -85,11 +99,15 @@ export function routeOperators(operators: readonly OperatorEntry[], managerId: s
   return [...ordered.filter((op) => op.manager_id === managerId), ...ordered.filter((op) => op.manager_id !== managerId)];
 }
 
-/** 같은 세션의 보고가 쌓이면 새것이 옛것을 대신한다(끝난 뒤의 "대기" 보고는 의미가 없다). */
+/**
+ * 같은 세션의 보고가 쌓이면 새것이 옛것을 대신한다(끝난 뒤의 "대기" 보고는 의미가 없다). operator 가 시킨 작업의
+ * 결과만은 대신하지 않는다 — 그 뒤에 사용자가 같은 세션에 다른 일을 시켜도 operator 는 자기가 시킨 일의 결과를 받아야 한다.
+ */
 export function mergeReport(queue: readonly SessionReport[], next: SessionReport): SessionReport[] {
   const same = (r: SessionReport) => r.session.manager_id === next.session.manager_id
     && r.session.cli === next.session.cli && r.session.session_id === next.session.session_id;
-  return [...queue.filter((r) => !same(r)), next];
+  const kept = (r: SessionReport) => !same(r) || (!!r.delegated && (r.kind === 'finished' || r.kind === 'failed') && r.delegated.proposal_id !== next.delegated?.proposal_id);
+  return [...queue.filter(kept), next];
 }
 
 /** 보고 한 건에 싣는 상세의 상한 — operator 가 요약할 거리는 되지만 프롬프트를 덮지는 않게. */
@@ -145,13 +163,26 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
   lines[0] += lang === 'ko'
     ? ' 어떤 세션에 이어서 시킬 일이 있으면 propose_session_prompt 로 제안하세요 — 사용자가 승인해야 전달됩니다.'
     : ' To have a session do follow-up work, propose it with propose_session_prompt — it is sent only after the user approves.';
+  if (reports.some((r) => r.delegated)) {
+    lines[0] += lang === 'ko'
+      ? ' "네가 시킨 작업" 표시가 붙은 건은 네가 제안하고 사용자가 승인한 작업의 결과입니다 — 결과를 그대로 옮기지 말고 무엇이 됐는지 1~2문장으로 요약하세요.'
+      : ' Items marked "your task" are results of work you proposed and the user approved — do not copy the result; summarise what happened in one or two sentences.';
+  }
+  // 소리로 읽히는 것은 답의 첫 문단뿐이다(speakable.ts toSpokenSummary) — 이미 등록된 operator 도 여기서 배운다.
+  lines[0] += lang === 'ko'
+    ? ' 사용자에게 소리로 답할 때는 첫 문단만 읽힙니다 — 첫 문단은 결과를 그대로 옮기지 말고 1~2문장 요약으로 쓰세요.'
+    : ' When you answer the user aloud only your first paragraph is read — make it a one- or two-sentence summary, not the raw result.';
   reports.forEach((r, i) => {
     const s = r.session;
     const title = s.title ? (lang === 'ko' ? ` · '${s.title}'` : ` · "${s.title}"`) : '';
     lines.push('');
-    const viewed = r.viewed ? (lang === 'ko' ? ' · 보고 있음' : ' · viewed') : '';
+    const viewed = (r.viewed ? (lang === 'ko' ? ' · 보고 있음' : ' · viewed') : '')
+      + (r.delegated ? (lang === 'ko' ? ' · 네가 시킨 작업' : ' · your task') : '');
     lines.push(`${i + 1}. ${KIND_LABEL[lang][r.kind]} — ${s.manager_name} / ${s.cli_label}${title}${r.kind === 'finished' ? minutes(r.duration_ms, lang) : ''}${viewed}`);
     if (s.cwd) lines.push(`   ${lang === 'ko' ? '작업 폴더' : 'Folder'}: ${s.cwd}`);
+    if (r.delegated) {
+      lines.push(`   ${lang === 'ko' ? `네가 시킨 작업(${r.delegated.operator_name}, 사용자 승인)` : `Your task (${r.delegated.operator_name}, user-approved)`}: "${clip(r.delegated.task, 300, lang)}"`);
+    }
     // 승인·질문은 답 전하기 줄이 같은 값을 싣는다. 그 밖의 보고에도 제안할 때 쓸 세션 참조를 단다.
     if (!r.request) lines.push(`   ${lang === 'ko' ? '세션' : 'Session'}: manager_id="${s.manager_id}", cli="${s.cli}", session_id="${s.session_id}"`);
     if (r.request) {

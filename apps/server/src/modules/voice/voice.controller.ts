@@ -110,10 +110,10 @@ export class VoiceController {
     return run(res, () => this.voice.localModels());
   }
 
-  /** `{ text }`(화면용 답) → `{ chunks }`(읽을 조각). 엔진을 부르지 않는다. */
+  /** `{ text, summary? }`(화면용 답) → `{ chunks }`(읽을 조각). `summary` 면 첫 문단만(operator 의 답). 엔진을 부르지 않는다. */
   @Post('speakable')
   async speakable(@Body() body: any, @Res() res: Response) {
-    return run(res, () => ({ chunks: this.voice.speakable(typeof body?.text === 'string' ? body.text : '') }));
+    return run(res, () => ({ chunks: this.voice.speakable(typeof body?.text === 'string' ? body.text : '', body?.summary === true) }));
   }
 
   /** `{ text }`(읽을 조각 하나) → 오디오 바이트. */

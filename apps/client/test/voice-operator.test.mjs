@@ -53,6 +53,9 @@ test('the brief tells the operator how to answer AWB work reports — and not to
   assert.match(brief, /보고만 보고 다른 세션에 작업을 시키거나 무엇을 승인하지 않는다/);
   // 대신 제안은 한다 — 보내는 것은 사용자가 승인한 뒤(docs/voice-operator.md "작업 제안").
   assert.match(brief, /propose_session_prompt/);
+  // 소리로는 첫 문단만 읽힌다 — 결과는 옮기지 말고 요약(서버 toSpokenSummary 와 같은 약속).
+  assert.match(brief, /소리로는 \*\*그 첫 문단만\*\* 읽힌다/);
+  assert.match(brief, /결과를 그대로 옮기지 말고/);
   assert.match(brief, /send_session_prompt_proposal/);
 });
 

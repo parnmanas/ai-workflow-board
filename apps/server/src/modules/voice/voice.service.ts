@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { LogService } from '../../services/log.service';
-import { splitSpeakable, toSpeakable } from './speakable';
+import { splitSpeakable, toSpeakable, toSpokenSummary } from './speakable';
 import {
   STT_PROVIDERS,
   TTS_PROVIDERS,
@@ -333,12 +333,13 @@ export class VoiceService {
   }
 
   /** 화면용 답 → 읽을 조각들. 읽을 것이 없으면 빈 배열(호출자는 말하지 않는다). */
-  speakable(text: string): string[] {
+  /** `summary` — operator 의 답: 첫 문단(귀로 들을 요약)만 읽는다(`toSpokenSummary`). */
+  speakable(text: string, summary = false): string[] {
     if (typeof text !== 'string') return [];
     if (text.length > MAX_SPEAKABLE_INPUT_CHARS) {
       throw new VoiceError(413, 'voice_text_too_long', `Text is longer than ${MAX_SPEAKABLE_INPUT_CHARS} characters.`);
     }
-    return splitSpeakable(toSpeakable(text));
+    return splitSpeakable(summary ? toSpokenSummary(text) : toSpeakable(text));
   }
 
   /** 읽을 문장 → 소리. 입력은 이미 speakable 을 거친 조각이라고 본다(여기서 다시 다듬지 않는다). */

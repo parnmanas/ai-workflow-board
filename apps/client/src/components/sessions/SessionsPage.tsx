@@ -523,7 +523,8 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     const prefs = speakPrefsRef.current;
     const speak = prefs.ttsReady && shouldSpeakFinishedTurn({ ...finished, answer })
       && (awake || ((prefs.readReplies || lastPromptSpokenRef.current) && document.visibilityState === 'visible'));
-    if (speak) void speechPlayer.speak(answer, `${speechKeyPrefix}${finished.turnId}`).then(goToSleep);
+    // operator 의 답은 첫 문단(귀로 들을 요약)만 읽는다 — 작업 결과를 통째로 옮긴 답은 길고 장황하다.
+    if (speak) void speechPlayer.speak(answer, `${speechKeyPrefix}${finished.turnId}`, { summary: !!op }).then(goToSleep);
     else goToSleep();
   }, [matches, speechKeyPrefix]));
 

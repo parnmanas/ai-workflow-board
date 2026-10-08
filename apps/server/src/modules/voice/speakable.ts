@@ -15,6 +15,12 @@
 /** 한 번에 읽어 줄 최대 길이. 이보다 긴 답은 문장 경계에서 자른다 — 상세는 화면에 있다. */
 export const DEFAULT_MAX_SPEAKABLE_CHARS = 1500;
 
+/**
+ * operator 의 답에서 소리로 읽는 첫 문단의 상한 — 1~3문장. 지침(`operatorBrief` "말하는 방식")이 답의 맨 앞에
+ * 귀로 들을 요약을 쓰고 상세는 빈 줄 뒤에 화면용으로 덧붙이게 한다.
+ */
+export const SPOKEN_SUMMARY_CHARS = 300;
+
 /** 합성 요청 한 번에 싣는 최대 길이. 짧을수록 첫 소리가 빨리 나온다. */
 export const DEFAULT_SPEECH_CHUNK_CHARS = 220;
 
@@ -106,6 +112,24 @@ export function toSpeakable(markdown: string, maxChars: number = DEFAULT_MAX_SPE
     sentences.push(hasTerminalPunctuation(line) ? line : `${line}.`);
   }
   return truncateAtSentence(sentences.join(' '), maxChars);
+}
+
+/**
+ * operator 의 답 → 귀로 들을 요약. **첫 문단만** 읽는다(빈 줄까지). 제목·표·가로줄·코드만 있는 문단은 건너뛰고,
+ * 첫 문단도 상한에서 문장 경계로 자른다 — 작업 결과를 통째로 옮겨 적은 답을 그대로 읽으면 길고 장황하다
+ * (2026-10-08 사용자 지적). 문장 다듬기는 `toSpeakable` 과 같은 규칙이다.
+ */
+export function toSpokenSummary(markdown: string, maxChars: number = SPOKEN_SUMMARY_CHARS): string {
+  if (!markdown) return '';
+  const text = stripFencedCode(markdown.replace(/\r\n?/g, '\n').replace(SLEEP_MARKER_RE, ''));
+  for (const block of text.split(/\n[ \t]*\n/)) {
+    const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    if (lines.every((l) => /^#{1,6}\s/.test(l) || isTableLine(l) || /^([-*_]\s*){3,}$/.test(l))) continue;
+    const spoken = toSpeakable(block, maxChars);
+    if (spoken) return spoken;
+  }
+  return '';
 }
 
 function truncateAtSentence(text: string, maxChars: number): string {

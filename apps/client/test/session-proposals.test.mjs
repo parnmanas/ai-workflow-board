@@ -74,3 +74,11 @@ test('Send and Dismiss decide one proposal and update the list at once', async (
   assert.deepEqual(dismissed.mock.calls.map((c) => c.arguments[0]), ['p2']);
   assert.deepEqual(sessionProposalStore.get().map((p) => p.id), ['p1'], 'dismissed leaves the list');
 });
+
+test('an operator session reads only the spoken summary of its answers', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const page = await readFile(new URL('../src/components/sessions/SessionsPage.tsx', import.meta.url), 'utf8');
+  assert.match(page, /speechPlayer\.speak\(answer, `\$\{speechKeyPrefix\}\$\{finished\.turnId\}`, \{ summary: !!op \}\)/);
+  const player = await readFile(new URL('../src/voice/speechPlayer.ts', import.meta.url), 'utf8');
+  assert.match(player, /api\.voiceSpeakable\(text, options\.summary === true\)/);
+});

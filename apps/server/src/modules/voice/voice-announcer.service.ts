@@ -23,12 +23,13 @@ import {
   permissionDetail,
   questionFields,
   type ReportedDecision,
+  type ReportedDelegation,
   type ReportedRequest,
   type SessionReport,
   type SessionReportKind,
 } from './operator-report';
 import { OperatorReportService, type OperatorSummary } from './operator-report.service';
-import { toSpeakable } from './speakable';
+import { SPOKEN_SUMMARY_CHARS, toSpokenSummary } from './speakable';
 import { VoicePresenceService } from './voice-presence.service';
 
 /**
@@ -48,8 +49,8 @@ import { VoicePresenceService } from './voice-presence.service';
 
 /** operator 가 없을 때의 직접 알림에서, 이보다 짧은 턴은 알리지 않는다 — 짧은 문답은 대개 화면을 보며 기다린 것이다. */
 export const MIN_ANNOUNCED_TURN_MS = 30_000;
-/** operator 의 요약을 알림 글로 옮길 때의 상한(말로 들을 길이). 상세는 operator 세션 화면에 있다. */
-export const OPERATOR_SUMMARY_CHARS = 600;
+/** operator 의 답을 알림 글로 옮길 때의 상한 — 첫 문단(요약)만, 이 길이까지. 상세는 operator 세션 화면에 있다. */
+export const OPERATOR_SUMMARY_CHARS = SPOKEN_SUMMARY_CHARS;
 /** 같은 세션의 "확인 필요" 를 이보다 자주 말하지 않는다(권한 요청이 연달아 올 때). */
 const NEEDS_INPUT_COOLDOWN_MS = 60_000;
 const ANNOUNCEMENT_TTL_MS = 2 * 60 * 60 * 1000;
@@ -106,6 +107,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   /** 세션 → 방금 끝난 턴의 답(같은 배치의 상태 패치가 곧바로 뒤따른다). */
   #finishedTurn = new Map<string, FinishedTurnAnswer>();
   #turnStartedAt = new Map<string, number>();
+  /** 세션 → 지금(또는 방금) 도는 턴 id — operator 가 시킨 작업의 턴인지 알아보는 데 쓴다. */
+  #turnIds = new Map<string, string>();
   #lastNeedsInputAt = new Map<string, number>();
   /** 세션 → 지금 사용자를 기다리는 요청(권한·질문)의 내용 — 보고에 무엇을 정해야 하는지 싣는다. */
   #pendingRequest = new Map<string, { type: string; payload: any }>();
@@ -177,6 +180,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     }
     const finished = this.#answers.push(ev);
     if (finished) this.#finishedTurn.set(key, finished);
+    if (ev.type === 'turn' && ev.payload?.phase === 'started' && ev.turn_id) this.#turnIds.set(key, ev.turn_id);
     // operator 세션의 턴 — 지금 무슨 턴인지 기록하고(말로 받은 답을 전하는 도구의 근거), 사용자가 시작한 턴이면
     // "가장 최근에 대화한" 의 근거로 남긴다(AWB 가 보낸 보고 턴은 대화가 아니다).
     const phase = ev.type === 'turn' ? ev.payload?.phase : null;
@@ -211,11 +215,14 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     let durationMs: number | null = null;
     let request: ReportedRequest | undefined;
     let decisions: ReportedDecision[] = [];
+    let turnId: string | null = null;
     if (reason === 'turn_finished' || reason === 'turn_failed') {
       const startedAt = this.#turnStartedAt.get(key);
       this.#turnStartedAt.delete(key);
       const finished = this.#finishedTurn.get(key) ?? null;
       this.#finishedTurn.delete(key);
+      turnId = finished?.turnId ?? this.#turnIds.get(key) ?? null;
+      this.#turnIds.delete(key);
       this.#pendingRequest.delete(key);
       this.#requests.delete(key);
       decisions = this.#decisions.get(key) ?? [];
@@ -251,6 +258,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       detail = !pending ? ''
         : pending.type === 'permission_request' ? permissionDetail(pending.payload, lang) : elicitationDetail(pending.payload, lang);
       request = pending ? reportedRequest(pending) : undefined;
+      turnId = this.#turnIds.get(key) ?? null;
       if (operator) {
         // operator 자신이 사용자의 승인을 기다린다 — 다른 operator 를 거치지 않고 직접 알린다.
         if (!viewing()) await this.announceReportsDirectly([this.toReport(kind, userId, session, detail, null, now)]);
@@ -258,6 +266,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       }
     } else if (reason === 'closed' || reason === 'process_exit' || reason === 'host_offline') {
       this.#turnStartedAt.delete(key);
+      this.#turnIds.delete(key);
       this.#lastNeedsInputAt.delete(key);
       this.#pendingRequest.delete(key);
       this.#requests.delete(key);
@@ -274,16 +283,32 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     // 알게. 보고 있었다는 표시(viewed)가 붙은 보고는 소리로 전하지 않는다(사용자는 이미 보고 있다). 단 승인·질문은
     // 보고 있어도 알림음을 낸다. 선택지 설명과 음성 답변은 사용자가 자세한 내용을 요청한 뒤 시작한다.
     const decisionAwaited = kind === 'needs_permission' || kind === 'needs_input';
+    // operator 가 시킨 작업의 턴이면 그 결과(또는 그 턴의 승인·질문)는 시킨 operator 에게 간다.
+    const delegated = turnId ? await this.delegationFor(session, turnId) : undefined;
     const report: SessionReport = {
       ...this.toReport(kind, userId, session, detail, durationMs, now),
       ...(request ? { request } : {}),
       ...(decisions.length ? { decisions } : {}),
       ...(!decisionAwaited && viewing() ? { viewed: true } : {}),
+      ...(delegated ? { delegated } : {}),
     };
     if (await this.reports.submit(report)) return;
     // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(보고 있는 것·짧은 턴은 말하지 않는다).
     if (report.viewed || (kind === 'finished' && durationMs !== null && durationMs < MIN_ANNOUNCED_TURN_MS)) return;
     await this.announceReportsDirectly([report]);
+  }
+
+  /** 이 턴이 operator 가 제안하고 사용자가 승인해 보낸 작업이었나(docs/voice-operator.md "작업 제안"). */
+  private async delegationFor(session: any, turnId: string): Promise<ReportedDelegation | undefined> {
+    try {
+      const row: any = await this.dataSource.getRepository('AgentSessionPromptProposal').findOne({
+        where: { manager_id: session.manager_id, cli: session.cli, session_id: session.session_id, delivered_turn_id: turnId },
+      });
+      return row ? { proposal_id: row.id, operator_id: row.operator_id, operator_name: row.operator_name, task: row.text } : undefined;
+    } catch (err: any) {
+      this.logService.debug('Voice', `delegated-task lookup failed: ${err?.message ?? err}`);
+      return undefined;
+    }
   }
 
   /** 결정 행 → 무엇을 정했는지. 요청 행을 못 봤으면(서버 재시작) 제목 없이 결과만. */
@@ -350,7 +375,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       this.logService.debug('Voice', `operator "${summary.operator.name}" took note of ${summary.reports.length} viewed report(s) — not spoken`);
       return;
     }
-    if (!toSpeakable(summary.answer, OPERATOR_SUMMARY_CHARS)) {
+    if (!toSpokenSummary(summary.answer, OPERATOR_SUMMARY_CHARS)) {
       await this.announceReportsDirectly(unseen); // 읽을 말이 없는 답(코드뿐) — 템플릿으로
       return;
     }
@@ -368,7 +393,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     needsDecision = false,
   ): Promise<void> {
     if (kind === 'operator_reply' && !(await this.ttsReady())) return;
-    const text = toSpeakable(answer, OPERATOR_SUMMARY_CHARS);
+    // operator 의 답은 첫 문단(귀로 들을 요약)만 — 결과를 통째로 읽으면 길고 장황하다.
+    const text = toSpokenSummary(answer, OPERATOR_SUMMARY_CHARS);
     if (!text) return;
     this.announce(userIds, kind, text, target, { id: operator.id, name: operator.name }, needsDecision);
   }

@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { splitSpeakable, toSpeakable } from '../dist/modules/voice/speakable.js';
+import { SPOKEN_SUMMARY_CHARS, splitSpeakable, toSpeakable, toSpokenSummary } from '../dist/modules/voice/speakable.js';
 
 test('drops code, tables, URLs, images and identifiers; keeps the sentences', () => {
   const md = [
@@ -89,4 +89,18 @@ test("the operator's sleep marker is a signal for the screen, never something to
 test('splitSpeakable of nothing is nothing', () => {
   assert.deepEqual(splitSpeakable(''), []);
   assert.deepEqual(splitSpeakable('   '), []);
+});
+
+// operator 의 답은 첫 문단(귀로 들을 요약)만 읽는다 — 작업 결과를 통째로 옮긴 답을 그대로 읽으면 길고 장황하다(2026-10-08).
+test('an operator answer is read only up to its first paragraph, cut short at a sentence', () => {
+  const answer = '롤프 Codex 세션이 테스트를 다 돌렸고 280개 모두 통과했어요. 실패는 없습니다.\n\n## 상세\n- tests: 280\n- `src/foo.ts` 수정\n\n| a | b |\n|---|---|';
+  assert.equal(toSpokenSummary(answer), '롤프 Codex 세션이 테스트를 다 돌렸고 280개 모두 통과했어요. 실패는 없습니다.');
+  assert.equal(toSpokenSummary('## 결과\n\n빌드를 고쳤어요.\n\n자세한 로그는 아래에.'), '빌드를 고쳤어요.', 'a heading-only block is skipped');
+  assert.equal(toSpokenSummary('```\ncode only\n```\n\n이제 배포만 남았어요.'), '이제 배포만 남았어요.', 'code-only blocks are skipped');
+  assert.equal(toSpokenSummary('끝났어요. [[sleep]]'), '끝났어요.');
+  const long = Array.from({ length: 40 }, (_, i) => `${i + 1}번째 결과 문장입니다.`).join(' ');
+  const spoken = toSpokenSummary(long);
+  assert.ok(spoken.length <= SPOKEN_SUMMARY_CHARS && spoken.endsWith('.'), 'one long paragraph is still cut at a sentence');
+  assert.ok(toSpeakable(long).length > spoken.length, 'ordinary reading keeps the longer limit');
+  assert.equal(toSpokenSummary('```\nonly code\n```'), '', 'nothing to say stays empty');
 });

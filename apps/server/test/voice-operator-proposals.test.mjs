@@ -177,16 +177,21 @@ test('an operator proposes work for a session; it reaches the session only after
   assert.equal(third.isError, undefined, JSON.stringify(third));
   // 앞의 작업들이 끝나며 operator 에게 보고가 줄을 섰다 — 보고 턴을 모두 끝내 두고 사용자 턴을 연다.
   const finishedReports = new Set([report.turn_id]);
+  const reportTexts = [];
   for (let quiet = 0; quiet < 3;) {
     const open = requests.filter((x) => x.op === 'prompt' && x.session_id === 'op-1' && !finishedReports.has(x.turn_id));
     if (!open.length) { quiet += 1; await new Promise((r) => setTimeout(r, 60)); continue; }
     quiet = 0;
     for (const r of open) {
       finishedReports.add(r.turn_id);
+      reportTexts.push(r.text);
       await relay('claude', 'op-1', [{ type: 'turn', payload: { phase: 'started' }, turn_id: r.turn_id }], { status: 'busy', reason: 'turn_started' });
       await finish('claude', 'op-1', r.turn_id, '알겠어요.');
     }
   }
+  // 시킨 작업이 끝나자 그 결과가 시킨 operator 에게 "네가 시킨 작업" 으로 보고됐다.
+  assert.ok(reportTexts.some((text) => text.includes('네가 시킨 작업(Jarvis, 사용자 승인): "전체 테스트를 돌리고 실패를 고쳐 줘"') && text.includes('테스트 다 통과해요.')),
+    reportTexts.join('\n---\n'));
   const spoken = await prompt(admin, 'claude', 'op-1', '응, 커밋하라고 보내');
   assert.equal(spoken.status, 202, spoken.text);
   await relay('claude', 'op-1', [{ type: 'turn', payload: { phase: 'started' }, turn_id: spoken.body.turn_id }], { status: 'busy', reason: 'turn_started' });

@@ -27,7 +27,7 @@ import { VoiceAnnouncerService } from '../dist/modules/voice/voice-announcer.ser
 import { OperatorReportService, URGENT_REPORT_WAIT_MS } from '../dist/modules/voice/operator-report.service.js';
 import { VoicePresenceService } from '../dist/modules/voice/voice-presence.service.js';
 import { OPERATORS_SETTING_KEY, invalidateOperatorCache } from '../dist/modules/voice/operator-config.js';
-import { OPERATOR_REPORT_PREFIX, composeReportPrompt, routeOperators } from '../dist/modules/voice/operator-report.js';
+import { OPERATOR_REPORT_PREFIX, composeReportPrompt, mergeReport, routeOperators } from '../dist/modules/voice/operator-report.js';
 
 process.env.ENCRYPTION_KEY ??= 'voice-operator-reports-test-key';
 
@@ -36,7 +36,7 @@ const operator = (id, managerId, over = {}) => ({
   account_id: 'ws-1', last_conversation_at: '', created_at: '', created_by: 'u1', updated_at: '', ...over,
 });
 
-function setup(operators, { prompt } = {}) {
+function setup(operators, { prompt, proposals = [] } = {}) {
   const settings = {
     'voice.tts.provider': 'openai',
     'voice.openai.api_key': 'sk-test',
@@ -53,6 +53,10 @@ function setup(operators, { prompt } = {}) {
       remove: async (row) => { stored.delete(row.key); return row; },
     },
     AgentSessionCliSetting: { findOne: async () => null },
+    // 작업 제안 — 어느 턴이 operator 가 시킨 것인지(delivered_turn_id).
+    AgentSessionPromptProposal: {
+      findOne: async ({ where }) => proposals.find((p) => Object.entries(where).every(([k, v]) => p[k] === v)) ?? null,
+    },
   };
   const dataSource = { getRepository: (name) => repos[name] };
   const log = { warn() {}, error() {}, info() {}, debug() {} };
@@ -424,4 +428,41 @@ test('a viewed question still invites a cue, with choices explained on request',
   await flush();
   assert.equal(heard.length, 1, 'decision cues reach the user even when that session is visible');
   assert.equal(heard[0].needs_decision, true);
+});
+
+// 작업 제안 — operator 가 시킨 작업의 결과는 시킨 operator 에게 간다(같은 호스트에 더 최근에 대화한 operator 가 있어도).
+test('the result of a delegated turn goes back to the operator that proposed it, marked as its task', async (t) => {
+  const jarvis = operator('Jarvis', 'host-rolf', { created_by: 'u1' });
+  const friday = operator('Friday', 'host-rolf', { last_conversation_at: new Date().toISOString() });
+  const proposals = [{ id: 'prop-1', manager_id: 'host-rolf', cli: 'codex', session_id: 's-work', delivered_turn_id: 'delegated-turn', operator_id: 'Jarvis', operator_name: 'Jarvis', text: '전체 테스트를 돌려 줘' }];
+  const { prompts, teardown } = setup([jarvis, friday], { proposals });
+  t.after(teardown);
+  const s = session('host-rolf', 's-work');
+  event(s, 'turn', { phase: 'started' }, 'delegated-turn');
+  finishTurn(s, 'delegated-turn', '테스트 280개가 모두 통과했어요.');
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].sessionId, 'op-Jarvis', 'not Friday, although Friday is on the same host and was talked to more recently');
+  assert.match(prompts[0].text, /완료 — rolf \/ Codex · '배포 정리'.* · 네가 시킨 작업/);
+  assert.match(prompts[0].text, /네가 시킨 작업\(Jarvis, 사용자 승인\): "전체 테스트를 돌려 줘"/);
+  assert.match(prompts[0].text, /결과를 그대로 옮기지 말고/);
+  assert.match(prompts[0].text, /첫 문단만 읽힙니다/);
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '테스트가 다 통과했어요.');
+  await flush();
+
+  // 그 밖의 턴은 평소 순서(같은 호스트 · 최근 대화 → Friday)로 간다.
+  event(s, 'turn', { phase: 'started' }, 'own-turn');
+  finishTurn(s, 'own-turn', '다른 일도 끝났어요.');
+  await flush();
+  assert.equal(prompts.at(-1).sessionId, 'op-Friday');
+  assert.doesNotMatch(prompts.at(-1).text, /네가 시킨 작업\(/);
+});
+
+test('a later report for the same session does not swallow a delegated result still waiting', () => {
+  const sess = { manager_id: 'h', manager_name: 'rolf', cli: 'codex', cli_label: 'Codex', session_id: 's', title: '', cwd: '' };
+  const base = { user_id: 'u1', session: sess, detail: '', duration_ms: null, at: 0 };
+  const delegated = { ...base, kind: 'finished', delegated: { proposal_id: 'p1', operator_id: 'Jarvis', operator_name: 'Jarvis', task: 't' } };
+  const queue = mergeReport(mergeReport([], delegated), { ...base, kind: 'needs_input' });
+  assert.deepEqual(queue.map((r) => r.kind), ['finished', 'needs_input'], 'the delegated result stays queued');
+  assert.deepEqual(mergeReport([{ ...base, kind: 'needs_input' }], { ...base, kind: 'finished' }).map((r) => r.kind), ['finished'], 'ordinary reports still replace each other');
 });

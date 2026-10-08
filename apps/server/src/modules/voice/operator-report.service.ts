@@ -142,8 +142,10 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
 
   private async enqueue(report: QueuedReport): Promise<boolean> {
     const operators = await cachedOperators(this.dataSource);
-    const [operator] = routeOperators(operators, report.session.manager_id, this.#lastConversation)
+    const candidates = routeOperators(operators, report.session.manager_id, this.#lastConversation)
       .filter((op) => !report.tried.includes(op.id));
+    // operator 가 시킨 작업의 결과는 시킨 operator 에게 먼저 — 닿지 못하면 평소 순서의 다음 후보로.
+    const operator = (report.delegated && candidates.find((op) => op.id === report.delegated!.operator_id)) || candidates[0];
     if (!operator) return false;
     // 그 세션의 driver 를 모르면(서버 재시작 뒤 아무도 다시 열지 않았다) operator 를 등록한 사용자에게 간다.
     const queued: QueuedReport = report.user_id ? report : { ...report, user_id: operator.created_by };

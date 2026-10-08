@@ -1813,9 +1813,12 @@ export const api = {
    */
   transcribeVoice: async (audio: Blob, purpose: 'utterance' | 'wake' = 'utterance'): Promise<VoiceTranscript> =>
     (await fetchOk(`/voice/transcribe${purpose === 'wake' ? '?purpose=wake' : ''}`, { method: 'POST', body: audio, contentType: audio.type || 'application/octet-stream' })).json(),
-  /** 화면용 답 → 읽을 조각들(서버의 toSpeakable + splitSpeakable). 읽을 것이 없으면 빈 배열. */
-  voiceSpeakable: (text: string) =>
-    request<{ chunks: string[] }>('/voice/speakable', { method: 'POST', body: JSON.stringify({ text }) }),
+  /**
+   * 화면용 답 → 읽을 조각들(서버의 toSpeakable + splitSpeakable). 읽을 것이 없으면 빈 배열.
+   * `summary` — operator 의 답: 첫 문단(귀로 들을 요약)만 읽는다(서버 toSpokenSummary).
+   */
+  voiceSpeakable: (text: string, summary = false) =>
+    request<{ chunks: string[] }>('/voice/speakable', { method: 'POST', body: JSON.stringify(summary ? { text, summary: true } : { text }) }),
   /** 이미 읽을 문장으로 다듬은 조각 하나를 소리로. */
   synthesizeVoice: async (text: string): Promise<Blob> =>
     (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
