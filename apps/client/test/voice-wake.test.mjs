@@ -244,22 +244,25 @@ test('after a decision is read out, a short window takes the answer without the 
   assert.equal(wakeStore.openFollowUp('j'), false, 'name calling off: the mic is not ours to open');
 });
 
-test('a notification temporarily listens with name calling off and closes on silence', (t) => {
+test('a notification does not listen with name calling off; with it on the window closes on silence', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   wakeStore.setEnabled(false);
+  assert.equal(wakeStore.openNotificationFollowUp('j'), false, 'name calling off: no notification input');
+  assert.equal(wakeStore.state.followUp, null);
+  wakeStore.setEnabled(true);
   assert.equal(wakeStore.openNotificationFollowUp('j'), true);
   wakeStore.setListener('listening');
-  assert.equal(wakeStore.state.enabled, false);
+  assert.equal(wakeStore.state.enabled, true);
   assert.equal(wakeStore.state.mode, 'sleeping');
   assert.equal(wakeStore.activeFollowUp(), 'j');
   t.mock.timers.tick(15_001);
   assert.equal(wakeStore.state.followUp, null);
-  assert.equal(wakeStore.state.mode, 'off', 'persistent microphone remains off');
+  assert.equal(wakeStore.state.mode, 'sleeping', 'persistent listening stays on');
 });
 
 test('a started report request survives timeout and STT without switching operator', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  wakeStore.setEnabled(false);
+  wakeStore.setEnabled(true);
   wakeStore.openNotificationFollowUp('j');
   wakeStore.setListener('listening');
   t.mock.timers.tick(14_000);
@@ -276,18 +279,18 @@ test('a started report request survives timeout and STT without switching operat
   assert.equal(wakeStore.state.mode, 'awake');
   assert.equal(wakeStore.openNotificationFollowUp('f'), false, 'do not interrupt an ongoing conversation');
   wakeStore.sleep('j');
-  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(wakeStore.state.mode, 'sleeping');
 });
 
 test('temporary input expires after an ignored utterance; manual off cancels pending recognition', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  wakeStore.setEnabled(false);
+  wakeStore.setEnabled(true);
   wakeStore.openNotificationFollowUp('j');
   wakeStore.setListener('listening');
   const utterance = wakeStore.holdFollowUp();
   t.mock.timers.tick(15_001);
   utterance.release(); utterance.release();
-  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(wakeStore.state.mode, 'sleeping');
   wakeStore.openNotificationFollowUp('j');
   const pending = wakeStore.holdFollowUp();
   wakeStore.setEnabled(false);
@@ -295,14 +298,14 @@ test('temporary input expires after an ignored utterance; manual off cancels pen
   assert.equal(wakeStore.state.mode, 'off');
   assert.equal(pending.isValid(), false, 'a cancelled transcription cannot route an unnamed request');
   pending.release();
-  wakeStore.openNotificationFollowUp('f');
-  assert.equal(wakeStore.activeFollowUp(), 'f', 'the old lease cannot close a later notification');
+  assert.equal(wakeStore.openNotificationFollowUp('f'), false, 'name calling off: no new notification input');
+  assert.equal(wakeStore.activeFollowUp(), null);
   wakeStore.closeNotificationFollowUp();
 });
 
 test('notification input gets fifteen seconds after slow microphone setup and a user gesture', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  wakeStore.setEnabled(false);
+  wakeStore.setEnabled(true);
   wakeStore.openNotificationFollowUp('j');
   wakeStore.setListener('starting');
   t.mock.timers.tick(20_000);
@@ -315,7 +318,7 @@ test('notification input gets fifteen seconds after slow microphone setup and a 
   t.mock.timers.tick(14_999);
   assert.equal(wakeStore.activeFollowUp(), 'j');
   t.mock.timers.tick(2);
-  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(wakeStore.state.mode, 'sleeping');
   assert.equal(wakeStore.reportOperator(), 'j', 'manual listening can still address the reporting operator');
   wakeStore.setEnabled(true);
   assert.equal(wakeStore.reportOperator(), 'j');

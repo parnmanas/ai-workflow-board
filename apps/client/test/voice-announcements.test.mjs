@@ -191,15 +191,30 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.ok(source, 'an authenticated SSE connection must exist');
   const event = { id: 'report-new', user_id: 'u1', kind: 'operator_report', text: 'Work finished',
     operator: { id: 'op', name: 'Jarvis' }, target: { type: 'session', manager_id: 'm1', cli: 'codex', session_id: 's1' }, needs_decision: true };
-  act(() => source.emit('voice_announcement', event));
+  // 이름부르기 OFF: 토스트+알림음까지만 받고 operator 로 끌려가지 않는다.
+  act(() => source.emit('voice_announcement', { ...event, id: 'report-wake-off' }));
   await flush();
   assert.equal(queued.length, 1, 'work cues also work with TTS off');
-  assert.equal(wakeStore.state.followUp, null, 'the actual composer replaces background notification input');
+  assert.equal(wakeStore.state.followUp, null, 'no background notification input without name calling');
   assert.equal(wakeStore.state.enabled, false, 'do not enable persistent name calling');
+  assert.equal(wakeStore.state.mode, 'off', 'wake-off must not wake the operator');
+  assert.equal(wakeStore.state.operatorId, null);
+  assert.notEqual(currentPath, '/sessions/m1/codex/operator-session', 'stay where you are when name calling is off');
+  assert.equal(view.container.querySelector('textarea'), null, 'no operator composer is opened');
+  assert.equal(microphoneStarts, 0, 'no microphone without name calling');
+  assert.equal(wakeStore.reportOperator(), 'op', 'the reporter is still remembered for a later manual listen');
+  assert.equal(ttsCalls, 0);
+  // 이름부르기 ON: 기존 동작 — operator 로 이동하고 입력창을 연다.
+  act(() => wakeStore.setEnabled(true));
+  await flush();
+  act(() => source.emit('voice_announcement', event));
+  await flush();
+  assert.equal(queued.length, 2, 'the wake-on report cues again');
+  assert.equal(wakeStore.state.followUp, null, 'the actual composer replaces background notification input');
   assert.equal(wakeStore.state.mode, 'awake');
   assert.equal(wakeStore.state.operatorId, 'op');
   assert.equal(currentPath, '/sessions/m1/codex/operator-session', 'open the operator, not the source session');
-  assert.equal(microphoneStarts, 1, 'open the actual composer without waiting for cue completion');
+  assert.ok(microphoneStarts >= 1, 'open the actual composer without waiting for cue completion');
   assertFocused(view.container.querySelector('textarea'), 'focus the operator input before speaking');
   assert.deepEqual(prompts, [], 'opening input must not fabricate a user request or answer');
   const actual = Buffer.from(await (await queued[0].fetchClip()).arrayBuffer());
@@ -214,31 +229,33 @@ test('a work/question SSE focuses the operator and starts its composer before an
   await flush();
   act(() => source.emit('voice_announcement', event));
   await flush();
-  assert.equal(queued.length, 1, 'the same SSE is claimed once');
+  assert.equal(queued.length, 2, 'the same SSE is claimed once');
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
   setViewingSession(sessionTargetKey('m1', 'codex', 's1'));
   act(() => source.emit('voice_announcement', { ...event, id: 'viewed-completion', needs_decision: false }));
   await flush();
-  assert.equal(queued.length, 1, 'ordinary viewed updates stay quiet');
+  assert.equal(queued.length, 2, 'ordinary viewed updates stay quiet');
+  act(() => wakeStore.setEnabled(true));
+  await flush();
   act(() => source.emit('voice_announcement', { ...event, id: 'viewed-question' }));
   await flush();
-  assert.equal(queued.length, 2, 'viewed decisions still cue without reading choices');
+  assert.equal(queued.length, 3, 'viewed decisions still cue without reading choices');
   assert.equal(ttsCalls, 0);
   assert.equal(wakeStore.state.mode, 'awake', 'questions also open the operator composer immediately');
   assert.equal(wakeStore.state.source, 'notification');
   assertFocused(view.container.querySelector('textarea'));
   act(() => setNotificationPref('listenAfterWorkSound', false));
   await flush();
-  assert.equal(wakeStore.state.mode, 'off', 'turning the option off closes automatically opened input');
+  assert.equal(wakeStore.state.mode, 'sleeping', 'turning the option off closes automatically opened input');
   assert.equal(wakeStore.state.micClaims, 0);
   act(() => source.emit('voice_announcement', { ...event, id: 'opted-out-question' }));
   await flush();
-  assert.equal(queued.length, 3, 'the cue remains enabled when automatic microphone input is off');
-  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(queued.length, 4, 'the cue remains enabled when automatic microphone input is off');
+  assert.equal(wakeStore.state.mode, 'sleeping');
   assert.equal(prompts.length, 1);
   act(() => source.emit('voice_announcement', { ...event, id: 'reply-with-tts-off', kind: 'operator_reply' }));
   await flush();
-  assert.equal(queued.length, 3, 'conversation replies still require TTS');
+  assert.equal(queued.length, 4, 'conversation replies still require TTS');
 
   // The user may enable name calling after the short input window has closed.
   act(() => source.emit('voice_announcement', { ...event, id: 'manual-report' }));

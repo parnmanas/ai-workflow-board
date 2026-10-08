@@ -75,7 +75,9 @@ export default function VoiceAnnouncer() {
         speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), key);
       } else if (audio) {
         speechPlayer.enqueueClip(async () => notificationSoundClip(sound), key);
-        if (!data.operator || !latest.current.listen) return;
+        // 이름부르기가 꺼져 있으면 받지 않는다 — 토스트+알림음까지만 내고 operator 세션으로
+        // 끌고 가지 않는다(이 단말의 선택이라 서버가 아닌 화면이 막는다).
+        if (!data.operator || !latest.current.listen || !wakeStore.state.enabled) return;
         const operatorId = data.operator.id;
         const [operators, voiceConfig] = await Promise.all([loadVoiceOperators(), loadVoiceConfig()]);
         let operator = operators.find((op) => op.id === operatorId);

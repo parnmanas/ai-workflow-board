@@ -42,7 +42,7 @@ export interface WakeSnapshot {
   micElsewhere: boolean;
   /**
    * 알림음 뒤의 보고 요청 또는 선택지 설명 뒤의 답변을 이름 없이 듣는 짧은 창.
-   * 상시 이름 부르기를 꺼 두어도 알림음 뒤에는 잠깐 마이크를 연다.
+   * 이름 부르기가 켜져 있을 때만 열린다 — 꺼져 있으면 알림은 토스트+알림음까지만 받는다.
    */
   followUp: { operatorId: string; until: number; source: 'decision' | 'notification'; ready: boolean; durationMs: number } | null;
 }
@@ -177,6 +177,8 @@ class WakeStore {
 
   /** Legacy cross-tab cue handoff; current announcements open the actual operator composer. */
   openNotificationFollowUp(operatorId: string, ms = NOTIFICATION_FOLLOW_UP_MS, broadcast = true): boolean {
+    // 이름부르기가 꺼져 있으면 받지 않는다 — 다른 탭의 알림 때문에 이 단말이 마이크를 열지 않게.
+    if (!this.#state.enabled) return false;
     if (this.#state.mode === 'awake' || this.#state.micClaims > 0) return false;
     if (!this.#openFollowUp(operatorId, ms, 'notification')) return false;
     this.rememberReportOperator(operatorId);
