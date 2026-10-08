@@ -54,7 +54,7 @@ export const sessionProposalStore = {
   /** 서버의 목록으로 맞춘다 — SSE 가 끊겼던 동안 놓친 변화도 여기서 따라잡는다. */
   load(): Promise<void> {
     loading ??= api.listSessionProposals()
-      .then(({ proposals }) => setState([...proposals].sort(byCreated)))
+      .then((res) => setState(Array.isArray(res?.proposals) ? [...res.proposals].sort(byCreated) : []))
       .catch(() => undefined)
       .finally(() => { loading = null; });
     return loading;

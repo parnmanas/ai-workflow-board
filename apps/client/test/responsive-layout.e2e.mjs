@@ -10,7 +10,8 @@ const cwd = '/repository/' + 'a-long-directory-name/'.repeat(8);
 const commands = [{ name: 'review', description: 'Review the working tree', input_hint: 'optional focus' }, { name: 'a-very-long-command-name-for-testing', description: 'A long command description' }];
 const live = { manager_id: host.manager_id, manager_name: host.name, cli: 'codex', session_id: 'session-responsive', title, cwd, status: 'ready', available_modes: [], current_mode: null, available_commands: commands,
   config_options: [
-    ...[['access', 'Access', 'Full access'], ['mode', 'Mode', 'Default'], ['model', 'Model', '6.1 Sol'], ['effort', 'Effort', 'Ultra']].map(([config_id, name, value]) => ({ config_id, name, type: 'select', category: config_id, current_value: value, options: [{ value, name: value }] })),
+    // Categories as adapters report them (ACP): effort is `thought_level`; `access` is an extra option the header folds into its menu.
+    ...[['access', 'Access', 'Full access', 'access'], ['mode', 'Mode', 'Default', 'mode'], ['model', 'Model', '6.1 Sol', 'model'], ['effort', 'Effort', 'Ultra', 'thought_level']].map(([config_id, name, value, category]) => ({ config_id, name, type: 'select', category, current_value: value, options: [{ value, name: value }] })),
     { config_id: 'fast', name: 'Fast mode', type: 'boolean', current_value: false },
   ], auth: { source: 'credential', credential_name: 'ChatGPT Pro', account_email: 'long-account-name@example.test' }, updated_at: new Date().toISOString() };
 const events = Array.from({ length: 16 }, (_, i) => ({ id: `event-${i}`, seq: i + 1, type: i % 2 ? 'text' : 'user_prompt', turn_id: `turn-${i}`, created_at: live.updated_at, payload: { text: i % 2 ? '작업 내용을 확인했습니다.\n\n```ts\nconst example = "a very long line of code that should scroll within its own container";\n```' : '모바일 화면에서 세션 UI를 확인해 주세요.' } }));
@@ -135,25 +136,37 @@ test(`main pages and new-session dialog fit width ${width}`, async ({ page }, te
 }
 
 
-test('mobile settings are reachable and resizing preserves the draft', async ({ page }, testInfo) => {
+test('mobile header keeps Mode/Model/Effort visible, folds the rest into the menu, and resizing preserves the draft', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const f = await fixture(page);
   await page.goto(sessionPath);
   const input = page.getByRole('textbox', { name: 'Prompt', exact: true });
   await input.fill('회전해도 작성 중인 내용은 유지합니다');
-  const settings = page.getByRole('button', { name: 'Settings' });
-  await expect(settings).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeHidden();
-  await settings.click();
-  await expect(settings).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
+  // 매 턴 보는 설정은 토글 없이 헤더에 있다.
+  for (const name of ['Mode', 'Model', 'Effort']) await expect(page.getByRole('combobox', { name, exact: true })).toBeVisible();
   await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('6.1 Sol');
+  // 폴더 · 세션 정보 · 그 밖의 설정 · 동작은 햄버거 메뉴에 있다.
+  await expect(page.getByText(cwd, { exact: true })).toBeHidden();
+  const menu = page.getByRole('button', { name: 'Session menu', exact: true });
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await menu.click();
+  await expect(menu).toHaveAttribute('aria-expanded', 'true');
+  const panel = page.locator('.awb-session-menu-panel');
+  await expect(panel.getByText(cwd, { exact: true })).toBeVisible();
+  await expect(panel.getByRole('combobox', { name: 'Access', exact: true })).toBeVisible();
+  await expect(panel.getByRole('checkbox', { name: 'Fast mode', exact: true })).toBeVisible();
+  await expect(panel.getByRole('button', { name: /Restart process/ })).toBeVisible();
+  const panelBox = await panel.boundingBox();
+  expect(panelBox.x).toBeGreaterThanOrEqual(0);
+  expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(390);
   await expectFits(page);
-  await page.screenshot({ path: testInfo.outputPath('settings-expanded.png') });
-  await settings.click();
+  await page.screenshot({ path: testInfo.outputPath('session-menu-open.png') });
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
   for (const size of [{ width: 667, height: 375 }, { width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(size);
     await expect(input).toHaveValue('회전해도 작성 중인 내용은 유지합니다');
+    await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
     await expectFits(page);
     const box = await input.boundingBox();
     expect(box.y + box.height).toBeLessThanOrEqual(size.height);
