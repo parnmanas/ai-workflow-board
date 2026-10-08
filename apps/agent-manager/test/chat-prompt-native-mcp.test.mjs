@@ -161,6 +161,8 @@ test('ordinary chat routes change requests ticket-first with narrow direct-chat 
     assert.ok(!/existing board/.test(p), 'board-less prompt must not ask for a board');
     assert.ok(p.includes('genuinely small one-off work'));
     assert.ok(p.includes('explicitly asks you to perform directly in chat'));
+    assert.ok(p.includes('in this session without a ticket'), 'session-direct request must count as a direct-chat exception');
+    assert.ok(p.includes('do NOT file a ticket'), 'session-direct work must not file a ticket');
     assert.ok(p.includes('For a direct-chat exception, perform the requested work now'));
     assert.ok(
       !p.includes('an AWB ticket is optional, not the default for every request'),
@@ -209,6 +211,7 @@ test('persistent follow-up policy preserves run/ticket dedupe and rechecks Actio
   assert.ok(p.includes('re-checking whether a matching Action has since appeared'));
   assert.ok(p.includes('apply ticket-first routing again'));
   assert.ok(p.includes('small one-off'));
+  assert.ok(p.includes('directly in chat/session without a ticket'), 'follow-up policy must honor session-direct requests');
   assert.ok(p.includes('Future-intent wording is still actionable'));
   assert.ok(p.includes('source_chat_room_id'));
   assert.ok(!p.includes('ask the user'));

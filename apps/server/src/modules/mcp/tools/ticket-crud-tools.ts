@@ -112,7 +112,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'Create a ticket. A ticket is done end-to-end by ONE agent (`assignee`); classify it with free-form `tags` and, when it is about a repository, a `project_id`. ' +
     'Omitting `assignee` applies the project\'s default assignee (if any); pass `assignee: null` for an unassigned ticket. ' +
     'Status defaults to `todo`, which queues it for the assignee immediately — use `backlog` for work that is not ready. ' +
-    'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket.',
+    'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket. ' +
+    'Do NOT create a ticket when the user asked to do the work directly in chat/session without a ticket — do the work directly instead.',
     {
       account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
       title: z.string().describe('Ticket title'),
