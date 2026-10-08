@@ -47,6 +47,13 @@ const SYSTEM_DISPATCH_CONTENT_MAX = 100000;
 // loop because the plugin caps long before this many turns.
 const AGENT_CHAIN_LOOKBACK = 8;
 
+// Targeted agent dispatch (agent @-mention / DM auto-route) stops once the
+// back-and-forth chain reaches this depth — mirrors the agent-manager's
+// AGENT_CHAIN_DEPTH_CAP (event-dispatcher.ts), which enforces the same bound
+// on the broadcast path. Keep the two in sync: both read the same
+// agent_chain_depth derivation, so an A↔B chain terminates on every path.
+const AGENT_DISPATCH_DEPTH_CAP = 3;
+
 /**
  * RFC-4122 shape — sibling services keep the same guard (room-crud,
  * room-membership). 여기서 쓰는 곳은 자유 참여(open_join) 완화 하나다: 의사 user
@@ -680,12 +687,31 @@ export class RoomMessagingService {
       }
     }
 
-    // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
+    // Trailing consecutive agent-sender count INCLUDING the just-saved
+    // message (moved up from below so the targeted dispatch below shares the
+    // loop guard the manager enforces on the broadcast path).
+    const agentChainDepth = await this._computeAgentChainDepth(roomId);
+
+    // CHAT-18: user messages get full mention + DM dispatch. Agent messages
+    // additionally get the *agent-mention* branch (session-to-session
+    // requests): an agent's `@[agent:<rt-key>]` of a participant wakes that
+    // participant via chat_request, and an agent's DM message auto-routes to
+    // the DM peer — both stop once the back-and-forth chain hits
+    // AGENT_DISPATCH_DEPTH_CAP, so an A↔B reply chain auto-terminates instead
+    // of ping-ponging forever. Agents never write UserMention rows (no
+    // user-spam loops); unresolvable mentions are reported back as warnings
+    // instead of failing silently.
     let explicitDispatchAgentIds: string[] = [];
+    let sendWarnings: string[] = [];
     if (isRealMessage && senderType === 'user') {
       const dispatched = await this._processMentions(roomId, accountId, senderId, senderName, trimmed, savedMsg, effectiveRunProvision);
-      await this._handleDmAgentRequest(roomId, accountId, senderId, trimmed, savedMsg, dispatched, effectiveRunProvision);
+      await this._handleDmAgentRequest(roomId, accountId, senderId, trimmed, savedMsg, dispatched, effectiveRunProvision, senderType);
       explicitDispatchAgentIds = Array.from(dispatched);
+    } else if (isRealMessage && senderType === 'agent' && agentChainDepth < AGENT_DISPATCH_DEPTH_CAP) {
+      const agentDispatched = await this._processAgentMentions(roomId, accountId, senderId, trimmed, savedMsg);
+      await this._handleDmAgentRequest(roomId, accountId, senderId, trimmed, savedMsg, agentDispatched.dispatched, null, senderType);
+      explicitDispatchAgentIds = Array.from(agentDispatched.dispatched);
+      sendWarnings = agentDispatched.warnings;
     }
 
     // Get active member IDs for SSE filtering (CRITICAL Pitfall 1)
@@ -727,13 +753,9 @@ export class RoomMessagingService {
       }
     }
 
-    // Trailing consecutive agent-sender count in this room INCLUDING the
-    // just-saved message. Plugin uses it to short-circuit dispatch once
-    // agents have been talking to each other for too many turns. Always
-    // computed (cheap query) so the field is consistent on every emit.
-    // Progress rows are excluded from the lookback inside _computeAgentChainDepth
-    // so a chatty tool-narration burst never inflates the chain.
-    const agentChainDepth = await this._computeAgentChainDepth(roomId);
+    // agentChainDepth was computed above (before the mention/DM dispatch
+    // gate) so targeted dispatch shares the value stamped on the broadcast
+    // below. See the gate comment for the loop-termination contract.
 
     // ticket 9e2fc33d: capability 비호환으로 agent_member_ids 에서 빠진 멤버는
     // runtime 맵에서도 함께 뺀다 — 맵에 남으면 구버전 매니저가 자기 멤버 spec 을
@@ -822,6 +844,10 @@ export class RoomMessagingService {
       metadata: sanitizedMeta ?? undefined,
       created_at: savedMsg.created_at,
       updated_at: savedMsg.updated_at,
+      // Session-to-session feedback: unresolvable agent mentions on an
+      // agent-sent message are reported here instead of failing silently
+      // (empty = every mention dispatched or there were no mentions).
+      warnings: sendWarnings,
     };
   }
 
@@ -1384,6 +1410,217 @@ export class RoomMessagingService {
   }
 
   /**
+   * Resolve an `@[agent:<rt-key>]` mention to a dispatchable runtime: the
+   * ticket's assignee spec in ticket rooms, otherwise the participant row's
+   * runtime_spec snapshot. Shared by the user path (_processMentions) and the
+   * agent path (_processAgentMentions) so both agree on what "mentionable"
+   * means. Returns null when there is no spec to dispatch with.
+   */
+  private async _resolveRtMentionTarget(
+    roomId: string,
+    ticket: Ticket | null,
+    mentionId: string,
+  ): Promise<{
+    rtRuntime: Record<string, any>;
+    rtName: string;
+    rtRolePrompt: string;
+    rtProfile: CliRuntimeProfile | null;
+  } | null> {
+    const fromTicket = ticket
+      ? await resolveMentionTarget(this.dataSource, ticket, mentionId)
+      : null;
+    if (fromTicket?.runtime) {
+      return {
+        rtRuntime: { ...fromTicket.runtime },
+        rtName: fromTicket.displayName,
+        rtRolePrompt: fromTicket.rolePrompt,
+        rtProfile: fromTicket.extras.cli_runtime_profile ?? null,
+      };
+    }
+    const part = await this.participantRepo.findOne({
+      where: { room_id: roomId, participant_type: 'agent', participant_id: mentionId },
+    });
+    const spec = (part as any)?.runtime_spec as Record<string, any> | null;
+    if (spec && typeof spec === 'object') {
+      return {
+        rtRuntime: { ...spec },
+        rtName: (String(spec.label || '').trim() || mentionId.slice(0, 11)),
+        rtRolePrompt: (spec.role_prompt as string | undefined) || '',
+        rtProfile: (spec.cli_runtime_profile ?? null) as CliRuntimeProfile | null,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Post a room-visible failure instead of a silent skip when a mention names
+   * a runtime whose manager cannot run it (capability mismatch). Shared by
+   * both mention paths. Returns true when dispatch must stop.
+   */
+  private async _blockMentionOnCapability(
+    rtName: string,
+    rtProfile: CliRuntimeProfile | null,
+    rtManagerId: string,
+    roomId: string,
+    accountId: string,
+  ): Promise<boolean> {
+    if (!rtProfile) return false;
+    const capability = requiredManagerCapability(rtProfile);
+    if (!capability) return false;
+    const instances = this.instanceRegistry?.listForAgent(rtManagerId) ?? [];
+    const verdict = evaluateManagerCapability(instances, capability);
+    if (verdict.ok) return false;
+    await this.sendSystemMessage(roomId, accountId,
+      `⚠️ **${rtName}**에게 dispatch할 수 없습니다 — ${verdict.detail} ` +
+      '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.');
+    return true;
+  }
+
+  /**
+   * Session-to-session requests: parse `@[agent:…]` tokens from an AGENT
+   * message and dispatch them as chat_request events — the same event the
+   * user path emits, so the target's manager wakes it identically.
+   *
+   * Differences from _processMentions (deliberate, loop-safety):
+   * - `@[user:…]` tokens are ignored — agents never write UserMention rows,
+   *   so a pair of agents cannot spam a human's mention inbox by quoting
+   *   each other.
+   * - The sender itself is always excluded (resolveMentions excludeActor).
+   * - A KNOWN participant (row exists) always emits, with a runtime snapshot
+   *   when one is stored, bare otherwise: the hosting manager resolves a
+   *   bare id from its live registry, and other managers silently ignore it
+   *   as 'unmanaged'. Unknown ids (no participant row) become warnings so
+   *   the sender learns the correct token shape instead of facing a silent
+   *   no-response. rt-… keys dispatch reliably; legacy/host UUIDs are
+   *   best-effort (they work only when the target's manager hosts that
+   *   identity).
+   *
+   * The caller gates on AGENT_DISPATCH_DEPTH_CAP, so an A↔B mention chain
+   * terminates with the broadcast loop guard instead of ping-ponging.
+   */
+  private async _processAgentMentions(
+    roomId: string,
+    accountId: string,
+    senderId: string,
+    content: string,
+    savedMessage: ChatRoomMessage,
+  ): Promise<{ dispatched: Set<string>; warnings: string[] }> {
+    const dispatched = new Set<string>();
+    const warnings: string[] = [];
+    const refs = this.mentionService.parseMentions(content);
+    if (refs.length === 0) return { dispatched, warnings };
+
+    let ticket: Ticket | null = null;
+    const room = await this.roomRepo.findOne({ where: { id: roomId } });
+    if (room?.ticket_id) {
+      ticket = await this.ticketRepo.findOne({ where: { id: room.ticket_id } });
+    }
+    const resolved: ResolvedMention[] = await this.mentionService.resolveMentions(refs, ticket, {
+      excludeActor: { type: 'agent', id: senderId },
+    });
+    if (resolved.length === 0) return { dispatched, warnings };
+
+    const ts = savedMessage.created_at.toISOString();
+    for (const m of resolved) {
+      if (m.type !== 'agent') continue;
+      if (!isRuntimeIdentityKey(m.id)) {
+        // Legacy/host UUIDs have no spec to dispatch with, but a KNOWN room
+        // participant is still reachable best-effort: emit bare and let the
+        // hosting manager resolve it from its live registry (same shape as
+        // the DM uuid branch below — unmanaged managers ignore it silently).
+        const knownUuid = await this.participantRepo.findOne({
+          where: { room_id: roomId, participant_type: 'agent', participant_id: m.id },
+        });
+        if (knownUuid) {
+          activityEvents.emit('chat_request', {
+            agent_id: m.id,
+            user_id: senderId,
+            message_id: savedMessage.id,
+            ticket_id: ticket?.id ?? null,
+            role_prompt: '',
+            new_message: content,
+            history: [],
+            timestamp: ts,
+            mention_depth: 1,
+            room_id: roomId,
+          });
+          dispatched.add(m.id);
+          this.logService.info(
+            'ChatRooms',
+            `@mention routed to participant ${m.id} in room ${roomId} without a runtime snapshot (agent sender — manager resolves)`,
+          );
+          this._flagUnreachableAgent({ id: m.id, name: m.id.slice(0, 11) }, roomId, accountId);
+          continue;
+        }
+        warnings.push(
+          `@[agent:${m.id}] did not wake anyone — not a participant of this room. ` +
+          'Copy the exact token from list_chat_room_participants (rt-… keys dispatch reliably).',
+        );
+        continue;
+      }
+      const target = await this._resolveRtMentionTarget(roomId, ticket, m.id);
+      if (target) {
+        const blocked = await this._blockMentionOnCapability(
+          target.rtName, target.rtProfile,
+          String((target.rtRuntime as any).manager_agent_id || ''),
+          roomId, accountId,
+        );
+        if (blocked) continue;
+        activityEvents.emit('chat_request', {
+          agent_id: m.id,
+          runtime: target.rtRuntime,
+          user_id: senderId,
+          message_id: savedMessage.id,
+          ticket_id: ticket?.id ?? null,
+          role_prompt: target.rtRolePrompt,
+          new_message: content,
+          history: [],
+          timestamp: ts,
+          mention_depth: 1,
+          room_id: roomId,
+          ...(target.rtProfile ? { cli_runtime_profile: target.rtProfile } : {}),
+        });
+        dispatched.add(m.id);
+        this.logService.info(
+          'ChatRooms',
+          `@mention routed to runtime ${target.rtName} (${m.id}) in room ${roomId} (agent sender)`,
+        );
+        continue;
+      }
+      const known = await this.participantRepo.findOne({
+        where: { room_id: roomId, participant_type: 'agent', participant_id: m.id },
+      });
+      if (!known) {
+        warnings.push(
+          `@[agent:${m.id}] did not wake anyone — not a participant of this room` +
+          (ticket ? ' nor its ticket assignee' : '') +
+          '. Check list_chat_room_participants for the correct token.',
+        );
+        continue;
+      }
+      activityEvents.emit('chat_request', {
+        agent_id: m.id,
+        user_id: senderId,
+        message_id: savedMessage.id,
+        ticket_id: ticket?.id ?? null,
+        role_prompt: '',
+        new_message: content,
+        history: [],
+        timestamp: ts,
+        mention_depth: 1,
+        room_id: roomId,
+      });
+      dispatched.add(m.id);
+      this.logService.info(
+        'ChatRooms',
+        `@mention routed to participant ${m.id} in room ${roomId} without a runtime snapshot (agent sender — manager resolves)`,
+      );
+      this._flagUnreachableAgent({ id: m.id, name: m.id.slice(0, 11) }, roomId, accountId);
+    }
+    return { dispatched, warnings };
+  }
+
+  /**
    * Parse structured @[type:id|name] tokens from a user message, dispatch
    * agent mentions as chat_request events, and persist user mentions for the
    * sidebar unread badge.
@@ -1439,42 +1676,15 @@ export class RoomMessagingService {
         // P4c-4: spec-direct (rt-) 멘션 — Agent 행 없이 스냅샷으로 dispatch.
         // 티켓 방의 assignee 는 티켓의 assignee 스펙, 그 밖은 참가자 행 스냅샷.
         if (isRuntimeIdentityKey(m.id)) {
-          let rtRuntime: Record<string, any> | null = null;
-          let rtName = m.id.slice(0, 11);
-          let rtRolePrompt = '';
-          let rtProfile: CliRuntimeProfile | null = null;
-          const fromTicket = ticket
-            ? await resolveMentionTarget(this.dataSource, ticket, m.id)
-            : null;
-          if (fromTicket?.runtime) {
-            rtRuntime = { ...fromTicket.runtime };
-            rtName = fromTicket.displayName;
-            rtRolePrompt = fromTicket.rolePrompt;
-            rtProfile = fromTicket.extras.cli_runtime_profile ?? null;
-          } else {
-            const part = await this.participantRepo.findOne({
-              where: { room_id: roomId, participant_type: 'agent', participant_id: m.id },
-            });
-            const spec = (part as any)?.runtime_spec as Record<string, any> | null;
-            if (spec && typeof spec === 'object') {
-              rtRuntime = { ...spec };
-              rtName = (String(spec.label || '').trim() || m.id.slice(0, 11));
-              rtRolePrompt = (spec.role_prompt as string | undefined) || '';
-              rtProfile = (spec.cli_runtime_profile ?? null) as CliRuntimeProfile | null;
-            }
-          }
-          if (!rtRuntime) continue;
-          const rtCapability = requiredManagerCapability(rtProfile);
-          if (rtCapability) {
-            const rtInstances = this.instanceRegistry?.listForAgent(String((rtRuntime as any).manager_agent_id || '')) ?? [];
-            const rtVerdict = evaluateManagerCapability(rtInstances, rtCapability);
-            if (!rtVerdict.ok) {
-              await this.sendSystemMessage(roomId, accountId,
-                `⚠️ **${rtName}**에게 dispatch할 수 없습니다 — ${rtVerdict.detail} ` +
-                '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.');
-              continue;
-            }
-          }
+          const target = await this._resolveRtMentionTarget(roomId, ticket, m.id);
+          if (!target) continue;
+          const { rtRuntime, rtName, rtRolePrompt, rtProfile } = target;
+          const blocked = await this._blockMentionOnCapability(
+            rtName, rtProfile,
+            String((rtRuntime as any).manager_agent_id || ''),
+            roomId, accountId,
+          );
+          if (blocked) continue;
           activityEvents.emit('chat_request', {
             agent_id: m.id,
             runtime: rtRuntime,
@@ -1602,6 +1812,10 @@ export class RoomMessagingService {
     // 바로 이 값이 정말로 필요했던 주된 경로다: DM은 티켓의 리스크 섹션이
     // 명시적으로 이름 붙인 "manager 에이전트 자신의 운영용 채팅" 시나리오다.
     runProvision: RunProvision | null = null,
+    // Session-to-session DMs: an agent sender auto-routes to the OTHER agent
+    // participant (never itself). Defaults to 'user' so existing user-path
+    // callers keep the first-agent-participant behavior unchanged.
+    senderType = 'user',
   ): Promise<void> {
     // Look up the room to confirm it's a DM
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
@@ -1609,13 +1823,26 @@ export class RoomMessagingService {
 
     // Find the agent participant in this DM room (active row only — a stale
     // left_at-set row would otherwise mis-route to an agent who already left).
-    const otherParticipant = await this.participantRepo.findOne({
-      where: {
-        room_id: roomId,
-        participant_type: 'agent',
-        left_at: IsNull(),
-      },
-    });
+    // An agent sender must not route to itself: pick another agent member.
+    let otherParticipant: ChatRoomParticipant | null = null;
+    if (senderType === 'agent') {
+      const agents = await this.participantRepo.find({
+        where: {
+          room_id: roomId,
+          participant_type: 'agent',
+          left_at: IsNull(),
+        },
+      });
+      otherParticipant = agents.find((p) => p.participant_id !== senderId) ?? null;
+    } else {
+      otherParticipant = await this.participantRepo.findOne({
+        where: {
+          room_id: roomId,
+          participant_type: 'agent',
+          left_at: IsNull(),
+        },
+      });
+    }
     if (!otherParticipant) return; // DM is user-to-user, not user-to-agent
 
     // P4c-4: spec-direct (rt-) DM 상대 — Agent 행 없이 참가자 스냅샷으로 route.

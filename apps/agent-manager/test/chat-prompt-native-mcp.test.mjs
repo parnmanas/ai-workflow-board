@@ -173,6 +173,23 @@ test('ordinary chat routes change requests ticket-first with narrow direct-chat 
   assert.ok(native.includes('use `mcp__awb__create_ticket` with `title`, `description`, `tags`'));
 });
 
+test('ordinary chat teaches session-to-session requests; Action rooms stay direct', () => {
+  for (const usesNativeMcp of [true, false]) {
+    const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
+    assert.ok(p.includes('SESSION-TO-SESSION REQUESTS'));
+    assert.ok(p.includes('@[agent:<rt-key>|Name]'));
+    assert.ok(p.includes('open a fresh DM instead of reusing an unrelated dormant room'));
+  }
+  const native = composeChatRoomPrompt(ROOM, [], MSG, undefined, true);
+  assert.ok(native.includes('list_chat_room_participants'));
+  const nonNative = composeChatRoomPrompt(ROOM, [], MSG, undefined, false);
+  assert.ok(!nonNative.includes('list_chat_room_participants'), 'adapters without MCP must not be told to call tools');
+  for (const usesNativeMcp of [true, false]) {
+    const action = composeChatRoomPrompt(ROOM, [], ACTION_MSG, undefined, usesNativeMcp, undefined, '', true);
+    assert.ok(!action.includes('SESSION-TO-SESSION REQUESTS'), 'an Action run is the work itself, not a chat');
+  }
+});
+
 test('ticket-first routing treats future intent as actionable and preserves one room-linked ticket', () => {
   for (const usesNativeMcp of [true, false]) {
     const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);

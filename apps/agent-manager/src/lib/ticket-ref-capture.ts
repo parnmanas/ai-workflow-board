@@ -348,7 +348,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_automation_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
   list_api_keys: 'read', list_archived_tickets: 'read',
   list_channels: 'read',
-  list_chat_rooms: 'read', list_claude_backend_profiles: 'read',
+  list_chat_rooms: 'read', list_chat_room_participants: 'read', list_claude_backend_profiles: 'read',
   list_function_runs: 'read',
   list_functions: 'read',
   list_qa_runs: 'read', list_qa_scenarios: 'read', list_qa_schedules: 'read',

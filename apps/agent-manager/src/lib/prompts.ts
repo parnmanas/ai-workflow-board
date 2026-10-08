@@ -493,6 +493,21 @@ export type ChatReplyMode = boolean | 'agent_manager_delivers';
  *
  *  `legacyBoards` 는 board-less 이전 서버(후보 API 가 보드 목록을 돌려준 경우)에서만
  *  켜진다 — 그때는 종전 "기존 보드 선택" 문구와 `board_id` 마커를 그대로 쓴다. */
+/** How to reach ANOTHER agent session from chat (session-to-session requests).
+ *  `withTools` is false for adapters without MCP: they can still write the
+ *  token they see (their own history shows sender ids) but cannot call the
+ *  discovery tool. Action rooms never get this block — the run IS the work. */
+function sessionReachPolicy(withTools: boolean): string[] {
+  const lines = [
+    '- SESSION-TO-SESSION REQUESTS: to ask another agent session for work, @-mention it with its exact `@[agent:<rt-key>|Name]` token — the mention wakes that session (its manager starts or continues it for this room). A display name never wakes anyone; an agent UUID reaches only a known room participant (best-effort) — prefer `rt-…`. For a NEW 1:1 request, open a fresh DM instead of reusing an unrelated dormant room; writing in the DM wakes the peer even without a mention.',
+  ];
+  if (withTools) {
+    lines.push(
+      '- Copy the exact token from `list_chat_room_participants` instead of guessing it, and read `warnings` in the `send_chat_room_message` result — mentions that cannot dispatch are reported there, so never assume the target was reached.',
+    );
+  }
+  return lines;
+}
 function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom = false, legacyBoards = false): string[] {
   const operationalPolicy = [
     '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
@@ -537,6 +552,7 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     } else {
       lines.push(...operationalPolicy);
       lines.push(...ordinaryWorkPolicy);
+      lines.push(...sessionReachPolicy(true));
       lines.push(legacyBoards
         ? '- For ticket-first work, use `mcp__awb__create_ticket` with the suitable existing board and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.'
         : '- For ticket-first work, use `mcp__awb__create_ticket` with `title`, `description`, `tags`, the matching `project_id` when it concerns a repository, and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.');
@@ -555,6 +571,7 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
   } else {
     lines.push(...operationalPolicy);
     lines.push(...ordinaryWorkPolicy);
+    lines.push(...sessionReachPolicy(false));
     lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it.');
     lines.push(legacyBoards
       ? '- For ticket-first ordinary work, on a legacy server, select the suitable existing board from the available context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.'

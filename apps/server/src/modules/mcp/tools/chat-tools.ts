@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { IsNull } from 'typeorm';
 import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
+import { User } from '../../../entities/User';
 import { Ticket } from '../../../entities/Ticket';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { activityEvents } from '../../../services/activity.service';
@@ -26,6 +27,7 @@ import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } f
 import type { ToolContext } from './context';
 import { normalizeAgentAccountId } from '../../../common/agent-account-scope';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
+import { isRuntimeIdentityKey } from '../../../common/runtime-spec';
 
 /**
  * P4c-3b: chat-tool caller resolution shared by every tool below. Uuid agent
@@ -186,7 +188,15 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'send_chat_room_message',
     'Send a message to a chat room. The agent must be an active participant in the room. ' +
-    'Messages are persisted and delivered to all room participants via SSE.\n\n' +
+    'Messages are persisted and delivered to all room participants via SSE. ' +
+    'To request work from ANOTHER agent session: @-mention them with their exact token from ' +
+    '`list_chat_room_participants` — the mention wakes them (their manager starts or continues ' +
+    'their session for this room). A plain name never wakes anyone; an agent UUID reaches only a ' +
+    'known room participant (best-effort), so prefer `rt-…` tokens. ' +
+    'In a DM, the peer agent is woken even without a mention. Mentions that cannot dispatch ' +
+    'are returned in `warnings` — read them instead of assuming the target was reached. ' +
+    'Targeted wake-ups stop once the back-and-forth chain gets too long, so an A↔B reply chain ' +
+    'always terminates.\n\n' +
     MENTION_SYNTAX_DOC,
     {
       room_id: z.string().describe('Chat room ID to send the message to'),
@@ -299,6 +309,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           attachments: msg.attachments || [],
           metadata: msg.metadata,
           created_at: msg.created_at,
+          // Mentions that could not dispatch (unknown id, non-rt-key, loop cap).
+          // Empty = every mention reached its target or there were no mentions.
+          warnings: msg.warnings ?? [],
         });
       } catch (e: any) {
         return err(e?.message || 'Failed to send chat room message');
@@ -536,6 +549,86 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   );
 
   server.tool(
+    'list_chat_room_participants',
+    'List the participants of a chat room the agent participates in, with the exact mention token ' +
+    'that reaches each of them. Use this BEFORE mentioning someone: `@[agent:<rt-key>|Name]` wakes a ' +
+    'participant agent reliably (the manager starts or continues its session for this room); ' +
+    '`@[user:<uuid>|Name]` notifies a workspace user. A legacy/host agent UUID reaches a known room ' +
+    'participant best-effort only (it works when the target\'s manager hosts that identity). ' +
+    'The agent must be an active participant of a room ' +
+    'inside the caller\'s own workspace — rooms in any other workspace fail the same way a non-existent ' +
+    'room does.',
+    {
+      room_id: z.string().describe('Chat room ID to list participants for'),
+    },
+    async ({ room_id }, extra: { sessionId?: string }) => {
+      const chatCaller = await resolveChatCaller(dataSource, getCallerAgent(extra));
+      if ('error' in chatCaller) return err(chatCaller.error);
+      const callerAccountId = chatCaller.accountId;
+      try {
+        // Same ordering as get_chat_room_messages: workspace check first so a
+        // foreign-workspace room_id reveals nothing about its membership.
+        const room = await dataSource.getRepository(ChatRoom).findOne({ where: { id: room_id } });
+        if (!room || room.account_id !== callerAccountId) return err('Chat room not found');
+        if (!roomMembershipService) {
+          return err('list_chat_room_participants is unavailable in this MCP context (no chat services)');
+        }
+        await roomMembershipService.requireActiveParticipant(room_id, chatCaller.agentId, 'agent');
+        const rows = await dataSource.getRepository(ChatRoomParticipant).find({
+          where: { room_id, left_at: IsNull() },
+          order: { joined_at: 'ASC' },
+        });
+        const userIds = rows.filter((r) => r.participant_type === 'user').map((r) => r.participant_id);
+        const userNames = new Map<string, string>();
+        if (userIds.length > 0) {
+          const users = await dataSource.getRepository(User).find({
+            where: userIds.map((id) => ({ id })),
+          });
+          for (const u of users) userNames.set(u.id, u.name || u.id.slice(0, 8));
+        }
+        const participants = rows.map((r) => {
+          if (r.participant_type === 'user') {
+            const name = userNames.get(r.participant_id) || r.participant_id.slice(0, 8);
+            return {
+              participant_type: r.participant_type,
+              participant_id: r.participant_id,
+              name,
+              mention_token: `@[user:${r.participant_id}|${name}]`,
+              joined_at: r.joined_at,
+            };
+          }
+          const spec = (r as any).runtime_spec as Record<string, any> | null;
+          const label = (spec && typeof spec === 'object' && String(spec.label || '').trim())
+            || r.participant_id.slice(0, 11);
+          if (isRuntimeIdentityKey(r.participant_id)) {
+            return {
+              participant_type: r.participant_type,
+              participant_id: r.participant_id,
+              name: label,
+              mention_token: `@[agent:${r.participant_id}|${label}]`,
+              has_runtime_snapshot: !!(spec && typeof spec === 'object'),
+              joined_at: r.joined_at,
+            };
+          }
+          return {
+            participant_type: r.participant_type,
+            participant_id: r.participant_id,
+            name: label,
+            mention_token: `@[agent:${r.participant_id}|${label}]`,
+            has_runtime_snapshot: false,
+            note: 'Best-effort only: wakes this participant only when their manager hosts this identity. ' +
+              'Prefer an rt-… token when one exists.',
+            joined_at: r.joined_at,
+          };
+        });
+        return ok({ room_id, type: room.type, count: participants.length, participants });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to list chat room participants');
+      }
+    },
+  );
+
+  server.tool(
     'search_chat_messages',
     'Full-text search chat messages across the workspace, scoped to rooms the agent actively participates in. ' +
     'Case-insensitive substring match on message content. Returns up to 20 matches, newest first, ' +
@@ -584,7 +677,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // creator is auto-included; pass at least one OTHER participant.
   server.tool(
     'create_chat_room',
-    'Create a chat room (DM or group) with the given participants. Caller is auto-included so you only list the OTHER members. Two participants total → DM; three+ → group. Same-member DMs are not deduped — calling this twice with the same two participants creates two distinct rooms (useful for topic-tagged threads).',
+    'Create a chat room (DM or group) with the given participants. Caller is auto-included so you only list the OTHER members. Two participants total → DM; three+ → group. Same-member DMs are not deduped — calling this twice with the same two participants creates two distinct rooms (useful for topic-tagged threads). ' +
+    'To start a NEW 1:1 request with another agent session, create a FRESH DM with them — do NOT reuse an unrelated dormant group room. An agent participant is woken when you write in the DM (no mention needed) or when you @-mention them in any shared room. Pass agent participants by their runtime identity key (`rt-…`, from `list_chat_room_participants` or the `sender_id` of their messages) — a display name or agent UUID cannot be resolved.',
     {
       participants: z.array(z.object({
         type: z.enum(['user', 'agent']).describe("Participant kind"),

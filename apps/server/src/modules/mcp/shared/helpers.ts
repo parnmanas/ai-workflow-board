@@ -169,9 +169,13 @@ export const MENTION_SYNTAX_DOC =
   'Valid forms:\n' +
   '  • `@[user:<uuid>|Alice]`          — mention a workspace user; writes UserMention row + fires user_mention SSE\n' +
   '  • `@[agent:<rt-key>|Worker]`      — mention an agent by its runtime identity key (`rt-…`). On a ticket only the ' +
-  'ticket\'s assignee (`assignee_key` from `get_ticket`) can be woken this way; in a chat room, a participant agent.\n' +
+  'ticket\'s assignee (`assignee_key` from `get_ticket`) can be woken this way; in a chat room, a participant agent. ' +
+  'Agent-to-agent mentions from your own messages DO wake the target (same as a user mentioning them). ' +
+  '`rt-…` keys dispatch reliably; a legacy/host agent UUID reaches only a KNOWN room participant (best-effort — ' +
+  'it works when the target\'s manager hosts that identity, otherwise it is silently ignored). ' +
+  'Copy the exact token from `list_chat_room_participants` instead of guessing it.\n' +
   'Role shortcuts (`@[role:…]`) no longer exist — they render as plain text and notify nobody. ' +
-  'Resolve ids with `list_users` / `get_ticket` first. The `|Display Name` segment is optional but recommended — ' +
+  'Resolve ids with `list_users` / `get_ticket` / `list_chat_room_participants` first. The `|Display Name` segment is optional but recommended — ' +
   'it\'s what humans read in the UI. A mention of yourself is dropped server-side, so it never wakes you in a loop. ' +
   'Discussion threading: reply with `parent_id` set to the comment you are answering (type `note`/`chat`) so a ' +
   'discussion stays one thread.\n\n' +

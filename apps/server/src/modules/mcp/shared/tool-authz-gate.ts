@@ -174,6 +174,14 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // to protect, only a resolvable caller requirement.
   keep_chat_session_alive: 'caller',
 
+  // Session-to-session requests: new tool, not in KNOWN_EXISTING_TOOLS.
+  // 'caller' mirrors what the handler already enforces on its own — a
+  // resolvable caller, same-workspace room (checked before membership so a
+  // foreign room_id reveals nothing), and requireActiveParticipant on the
+  // room. Read-only: it exposes only rooms the caller already participates
+  // in, so there is no cross-agent surface for a stricter tier to protect.
+  list_chat_room_participants: 'caller',
+
   // ticket 778b6dc7: new tools, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors
   // what the handler already enforces on its own — getCallerAgent requires a
   // resolvable authenticated agent session; the real scoping is "does this

@@ -27,6 +27,7 @@ document uses boards, configurable columns, workspace navigation, or Agent rows.
 | [Ownership](ownership.md) | Accessible-account lists, actual-owner authorization, creation defaults, session bindings, and compatibility. |
 | [Tickets & Projects](tickets.md) | Fixed statuses, queue/dispatch, prerequisites, repository worktrees, REST/MCP, and server/manager events. |
 | [Agent Sessions](agent-sessions.md) | Native history, live turns, credentials/config, interaction, images, restart, and session recovery. |
+| [Chat between sessions](chat.md) | Rooms/DMs, waking another session via mention or DM, token discovery, and loop guards. |
 | [Orchestration](orchestration.md) | Team slots, missions, step plans, graph execution, confirmations, leases, and evidence. |
 | [Catalog scopes](catalog-scopes.md) | Global/Account definitions, shadowing, scope changes, and credential visibility. |
 | [Entity references](entity-references.md) | Canonical `#[type:id|name]` references in comments/chat and MCP results. |
