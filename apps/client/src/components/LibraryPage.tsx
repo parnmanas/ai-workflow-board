@@ -5,6 +5,7 @@ import { useToast } from '../contexts/ToastContext';
 import type { LibraryItem } from '../types';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
+import GithubApkCard from './GithubApkCard';
 
 function formatSize(bytes: number): string {
   if (!bytes) return '—';
@@ -112,6 +113,7 @@ export default function LibraryPage() {
       <PageHeader title="Library" description="Installable apps and shared files for this account" />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         <div style={{ maxWidth: 880, display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <GithubApkCard />
           <section style={{
             background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
             borderRadius: tokens.radii.lg, padding: 16,
