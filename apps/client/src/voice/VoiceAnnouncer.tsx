@@ -55,7 +55,9 @@ export default function VoiceAnnouncer() {
   useBoardStreamEvent('voice_announcement', useCallback((data: VoiceAnnouncementEvent) => {
     const { ready, enabled, audio, sound, accountId } = latest.current;
     const playback = announcementPlayback(data?.kind || '');
-    if (!data?.id || !data.text || !enabled || (playback === 'speech' && !ready)) return;
+    // 음성 지원이 꺼져 있으면 operator 의 내용을 읽지 않는다 — TTS가 준비됐어도
+    // 대화 답(speech)은 건너뛴다. 토스트·알림음(cue)은 알림 설정대로 그대로 둔다.
+    if (!data?.id || !data.text || !enabled || (playback === 'speech' && (!ready || !wakeStore.state.enabled))) return;
     const visible = document.visibilityState === 'visible';
     void (async () => {
       // Claim viewed updates too, so another tab cannot announce them.
@@ -75,7 +77,7 @@ export default function VoiceAnnouncer() {
         speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), key);
       } else if (audio) {
         speechPlayer.enqueueClip(async () => notificationSoundClip(sound), key);
-        // 이름부르기가 꺼져 있으면 받지 않는다 — 토스트+알림음까지만 내고 operator 세션으로
+        // 음성 지원이 꺼져 있으면 받지 않는다 — 토스트+알림음까지만 내고 operator 세션으로
         // 끌고 가지 않는다(이 단말의 선택이라 서버가 아닌 화면이 막는다).
         if (!data.operator || !latest.current.listen || !wakeStore.state.enabled) return;
         const operatorId = data.operator.id;

@@ -434,7 +434,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const speechKeyPrefix = `${managerId}/${cli}/${sessionId}:`;
   const speakingHere = speech.speaking && !!speech.key?.startsWith(speechKeyPrefix);
   // Operator — 이 세션에 이름을 붙여 사이트 관리 에이전트로 등록한다(admin). 사이드바 OPERATORS 가
-  // 여기를 열고, "헤이 <이름>" 으로 부르면 여기서 깨어난다(docs/voice-operator.md "이름 부르기 · 잠들기").
+  // 여기를 열고, "헤이 <이름>" 으로 부르면 여기서 깨어난다(docs/voice-operator.md "음성 지원 · 잠들기").
   const { hasPermission } = useAuth();
   const canManageOperators = !!voiceConfig && hasPermission('admin.access');
   const operators = useVoiceOperators(!!voiceConfig);
@@ -536,7 +536,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       wakeStore.sleep(op.id);
     };
     const prefs = speakPrefsRef.current;
-    const speak = prefs.ttsReady && shouldSpeakFinishedTurn({ ...finished, answer })
+    // 음성 지원이 꺼져 있으면 읽지 않는다 — "답을 소리로 읽기" 설정이나 말로 한
+    // 요청(voice in → voice out)과 무관하게 이 단말에서는 낭독하지 않는다.
+    const speak = wakeStore.state.enabled && prefs.ttsReady && shouldSpeakFinishedTurn({ ...finished, answer })
       && (awake || ((prefs.readReplies || lastPromptSpokenRef.current) && document.visibilityState === 'visible'));
     // operator 의 답은 첫 문단(귀로 들을 요약)만 읽는다 — 작업 결과를 통째로 옮긴 답은 길고 장황하다.
     if (speak) void speechPlayer.speak(answer, `${speechKeyPrefix}${finished.turnId}`, { summary: !!op }).then(goToSleep);

@@ -149,7 +149,7 @@ export default function Sidebar({
   const canUseSessions = hasPermission('agent_sessions.use');
   const canUseTerminals = hasPermission('terminals.use');
   // Operators(이름 붙은 Agent Session) — 등록돼 있으면 맨 위에서 어디서든 바로 연다. 머리의 스위치가
-  // 이름 부르기("헤이 <이름>")를 켠다(docs/voice-operator.md "이름 부르기 · 잠들기").
+  // 음성 지원("헤이 <이름>" 듣기 + 답 낭독)을 켠다(docs/voice-operator.md "음성 지원 · 잠들기").
   const operators = useVoiceOperators(canUseSessions && hasPermission('voice.use'));
   const wake = useWakeState();
   const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);

@@ -6,6 +6,7 @@
 //   2. 집은 표시는 쌓이지 않는다 — 하루 지난 표시는 다음 집기 때 치운다.
 //   3. 보고 있는(visible) 그 세션을 가리키는 알림만 "보고 있음" 이다 — 숨은 탭이나 다른 세션은 아니다.
 //   4. 알림을 누르면 가는 곳: 미션은 그 워크스페이스, 세션은 지금 워크스페이스 아래.
+//   5. 음성 지원이 꺼져 있으면 operator 의 내용을 읽지 않는다 — TTS 준비와 무관.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -191,7 +192,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.ok(source, 'an authenticated SSE connection must exist');
   const event = { id: 'report-new', user_id: 'u1', kind: 'operator_report', text: 'Work finished',
     operator: { id: 'op', name: 'Jarvis' }, target: { type: 'session', manager_id: 'm1', cli: 'codex', session_id: 's1' }, needs_decision: true };
-  // 이름부르기 OFF: 토스트+알림음까지만 받고 operator 로 끌려가지 않는다.
+  // 음성 지원 OFF: 토스트+알림음까지만 받고 operator 로 끌려가지 않는다.
   act(() => source.emit('voice_announcement', { ...event, id: 'report-wake-off' }));
   await flush();
   assert.equal(queued.length, 1, 'work cues also work with TTS off');
@@ -204,7 +205,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.equal(microphoneStarts, 0, 'no microphone without name calling');
   assert.equal(wakeStore.reportOperator(), 'op', 'the reporter is still remembered for a later manual listen');
   assert.equal(ttsCalls, 0);
-  // 이름부르기 ON: 기존 동작 — operator 로 이동하고 입력창을 연다.
+  // 음성 지원 ON: 기존 동작 — operator 로 이동하고 입력창을 연다.
   act(() => wakeStore.setEnabled(true));
   await flush();
   act(() => source.emit('voice_announcement', event));
@@ -277,6 +278,68 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.equal(wakeStore.state.mode, 'awake', 'manually enabling the microphone still accepts 보고해');
   assert.equal(prompts.at(-1).text, '보고해', 'manual name calling still delivers the request once');
   assert.equal(currentPath, '/sessions/m1/codex/operator-session');
+});
+
+test('voice support off skips reading operator content; on reads it', async (t) => {
+  const { setupDom, React, act } = await import('./helpers/jsdom.mjs');
+  const { installFakeEventSource, mountWithBoardStream } = await import('./helpers/boardStream.mjs');
+  const { MemoryRouter } = await import('react-router-dom');
+  const { NotificationProvider } = await import('../src/contexts/NotificationContext.tsx');
+  const { api } = await import('../src/api.ts');
+  const { speechPlayer } = await import('../src/voice/speechPlayer.ts');
+  const { loadVoiceConfig } = await import('../src/voice/useVoice.ts');
+  const { setNotificationPref, getNotificationPrefs } = await import('../src/contexts/notificationPrefs.ts');
+  const { wakeStore } = await import('../src/voice/wakeState.ts');
+  const { default: VoiceAnnouncer } = await import('../src/voice/VoiceAnnouncer.tsx');
+  const dom = setupDom();
+  const { FakeEventSource, uninstall } = installFakeEventSource();
+  globalThis.localStorage = dom.window.localStorage;
+  localStorage.setItem('auth_token', 'test-token');
+  const previousPrefs = { ...getNotificationPrefs() };
+  setNotificationPref('voice', true); setNotificationPref('audio', true);
+  wakeStore.setEnabled(false);
+  const originals = { getMe: api.getMe, getSetupStatus: api.getSetupStatus, getVoiceConfig: api.getVoiceConfig,
+    getUnreadMentions: api.getUnreadMentions, getChatUnreadCounts: api.getChatUnreadCounts, getTicketUnreadCounts: api.getTicketUnreadCounts,
+    getVoiceAnnouncementAudio: api.getVoiceAnnouncementAudio, enqueueClip: speechPlayer.enqueueClip,
+    listVoiceOperators: api.listVoiceOperators };
+  const queued = [];
+  let ttsCalls = 0;
+  api.getMe = async () => ({ id: 'u1', name: 'User', role: 'user', status: 'active', permissions: ['voice.use'], accounts: [{ id: 'w1', name: 'Work', slug: null, relations: [] }] });
+  api.getSetupStatus = async () => ({ needs_setup: false });
+  api.getVoiceConfig = async () => ({ stt: { provider: 'local', ready: true }, tts: { provider: 'local', ready: true }, wake: { ready: true } });
+  api.getUnreadMentions = async () => ({ count: 0, items: [] });
+  api.getChatUnreadCounts = async () => ({ total: 0, perRoom: {} });
+  api.getTicketUnreadCounts = async () => ({ total: 0, perTicket: {} });
+  api.getVoiceAnnouncementAudio = async () => { ttsCalls++; return new Blob(['tts-audio'], { type: 'audio/x-wav' }); };
+  api.listVoiceOperators = async () => ({ operators: [] });
+  speechPlayer.enqueueClip = (fetchClip, key, onEnded) => queued.push({ fetchClip, key, onEnded });
+  await loadVoiceConfig(true);
+  const h = React.createElement;
+  const view = mountWithBoardStream(h(NotificationProvider, null, h(VoiceAnnouncer)),
+    { wrap: (tree) => h(MemoryRouter, null, tree) });
+  t.after(() => {
+    act(() => { wakeStore.setEnabled(false); view.unmount(); });
+    uninstall(); dom.cleanup();
+    for (const [key, value] of Object.entries(originals)) { if (key === 'enqueueClip') speechPlayer[key] = value; else api[key] = value; }
+    for (const [key, value] of Object.entries(previousPrefs)) setNotificationPref(key, value);
+  });
+  const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
+  await flush();
+  const source = FakeEventSource.instances[0];
+  assert.ok(source, 'an authenticated SSE connection must exist');
+  const reply = (id) => ({ id, user_id: 'u1', kind: 'operator_reply', text: '작업이 끝났습니다',
+    operator: { id: 'op', name: 'Jarvis' }, target: { type: 'session', manager_id: 'm1', cli: 'codex', session_id: 's1' } });
+  act(() => source.emit('voice_announcement', reply('tts-off')));
+  await flush();
+  assert.equal(queued.length, 0, 'voice support off: operator content is not read');
+  assert.equal(ttsCalls, 0, 'voice support off: TTS audio is not even fetched');
+  act(() => wakeStore.setEnabled(true));
+  await flush();
+  act(() => source.emit('voice_announcement', reply('tts-on')));
+  await flush();
+  assert.equal(queued.length, 1, 'voice support on: the reply is read');
+  await queued[0].fetchClip();
+  assert.equal(ttsCalls, 1);
 });
 
 test('audio completion callbacks run after successful playback, never after interruption or failure', async (t) => {

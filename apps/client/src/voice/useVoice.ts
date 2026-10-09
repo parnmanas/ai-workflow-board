@@ -75,7 +75,7 @@ export type ConversationPhase =
  *   더 부르므로 무료인 셀프호스팅 엔진에서만 켠다).
  * - 화면을 떠나면 마이크를 닫는다. 탭이 숨으면 멈췄다가 돌아오면 다시 듣는다 — 단, 이름을 불러 깨운
  *   대화(`keepListeningWhenHidden`)는 숨어 있어도 듣는다. 켜 둔 단말을 스피커처럼 쓰는 경우다.
- * - 켜져 있는 동안 마이크를 잡아 둔다(`wakeStore.claimMic`) — 이름 부르기의 상시 청취가 같은 마이크를
+ * - 켜져 있는 동안 마이크를 잡아 둔다(`wakeStore.claimMic`) — 음성 지원의 상시 청취가 같은 마이크를
  *   따로 열지 않게.
  */
 export function useHandsFreeConversation(
@@ -123,7 +123,7 @@ export function useHandsFreeConversation(
     setPhase('off');
   }, [setPhase, releaseMic]);
 
-  /** `fromGesture` — 사용자가 눌러서 켠다(그 제스처로 낭독기를 깨운다). 이름 부르기로 켜질 때는 아니다. */
+  /** `fromGesture` — 사용자가 눌러서 켠다(그 제스처로 낭독기를 깨운다). 음성 지원으로 켜질 때는 아니다. */
   const start = useCallback(async (fromGesture = true) => {
     if (sessionRef.current || phaseRef.current !== 'off') return;
     setError(null);

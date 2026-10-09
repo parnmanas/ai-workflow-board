@@ -22,7 +22,7 @@ function hasUserActivation(): boolean {
 }
 
 /**
- * 이름 부르기의 상시 청취(docs/voice-operator.md "이름 부르기"). 화면을 그리지 않는다 — AppLayout 에 한 번
+ * 음성 지원의 상시 청취(docs/voice-operator.md "음성 지원"). 화면을 그리지 않는다 — AppLayout 에 한 번
  * 붙어 모든 화면에서 산다. 상태는 사이드바의 OPERATORS 가 보여 준다.
  *
  * 잠든 동안 들린 발화마다(브라우저 안의 VAD 가 말의 시작과 끝을 가른다) 자체 호스팅 STT 로 받아 적고,

@@ -135,7 +135,7 @@ export default function AppLayout() {
     // 하나만 마운트해 채팅 카드(S2/S3)가 우측 패널을 구동하게 한다.
     <BoardStreamProvider>
     <NotificationProvider>
-    {/* 음성 알림 · 이름 부르기 — 화면을 그리지 않고 모든 화면에서 산다(docs/voice-operator.md). */}
+    {/* 음성 알림 · 음성 지원 — 화면을 그리지 않고 모든 화면에서 산다(docs/voice-operator.md). */}
     <VoiceAnnouncer />
     <WakeListener />
     {/* operator 의 작업 제안 — 새 제안을 알리고 목록을 따라간다(docs/voice-operator.md "작업 제안"). */}

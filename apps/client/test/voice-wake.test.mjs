@@ -1,4 +1,4 @@
-// 이름 부르기(웨이크워드)·잠들기 규칙 회귀 테스트 — docs/voice-operator.md "이름 부르기 · 잠들기".
+// 음성 지원(웨이크워드)·잠들기 규칙 회귀 테스트 — docs/voice-operator.md "음성 지원 · 잠들기".
 // 실행: node --import tsx --test apps/client/test/voice-wake.test.mjs
 //
 // 고정하는 것:

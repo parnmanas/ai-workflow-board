@@ -148,7 +148,7 @@ export default function SettingsOverviewPage() {
               }}>
                 <PwaInstallButton />
                 <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                  알림은 사이드바 🔔에서, 이름 부르기(보이스 wake)는 OPERATORS 👂에서 켭니다.
+                  알림은 사이드바 🔔에서, 음성 지원은 OPERATORS 👂에서 켭니다.
                   화면이 꺼지면 마이크도 멈추니 웨이크용 단말은 충전기에 꽂아 두세요.
                 </span>
               </div>

@@ -71,7 +71,7 @@ export interface SessionComposerProps {
 }
 
 /**
- * 이름 부르기(docs/voice-operator.md "이름 부르기 · 잠들기")와 컴포저의 연결. 깨어 있는 동안 대화 모드를
+ * 음성 지원(docs/voice-operator.md "음성 지원 · 잠들기")과 컴포저의 연결. 깨어 있는 동안 대화 모드를
  * 켜 두고, 사용자가 마이크를 끄거나 오래 조용하면 잠든다.
  */
 export interface VoiceWakeBinding {

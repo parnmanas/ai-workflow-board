@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 
 /**
- * 이름 부르기의 탭 상태(docs/voice-operator.md "이름 부르기 · 잠들기").
+ * 음성 지원의 탭 상태(docs/voice-operator.md "음성 지원 · 잠들기").
  *
- *   off       — 이 단말에서 이름 부르기를 켜지 않았다.
+ *   off       — 이 단말에서 음성 지원을 켜지 않았다. 듣지도 읽지도 않는다.
  *   sleeping  — 켜져 있고 아무도 깨어 있지 않다. 상시 청취(WakeListener)가 이름을 기다린다.
  *   awake     — operator 하나가 불려 깨어 있다. 그 세션 화면의 대화 모드가 마이크를 쓰고, 상시 청취는 쉰다.
  *
@@ -42,7 +42,7 @@ export interface WakeSnapshot {
   micElsewhere: boolean;
   /**
    * 알림음 뒤의 보고 요청 또는 선택지 설명 뒤의 답변을 이름 없이 듣는 짧은 창.
-   * 이름 부르기가 켜져 있을 때만 열린다 — 꺼져 있으면 알림은 토스트+알림음까지만 받는다.
+   * 음성 지원이 켜져 있을 때만 열린다 — 꺼져 있으면 알림은 토스트+알림음까지만 받는다.
    */
   followUp: { operatorId: string; until: number; source: 'decision' | 'notification'; ready: boolean; durationMs: number } | null;
 }
@@ -167,7 +167,7 @@ class WakeStore {
   }
 
   /**
-   * operator 가 결정이 필요한 보고를 막 읽어 줬다 — 잠깐 이름 없이 답을 듣는다. 이름 부르기가 켜져 있고 잠든
+   * operator 가 결정이 필요한 보고를 막 읽어 줬다 — 잠깐 이름 없이 답을 듣는다. 음성 지원이 켜져 있고 잠든
    * 동안에만 연다(깨어 있으면 이미 이름 없이 듣고 있다).
    */
   openFollowUp(operatorId: string, ms = FOLLOW_UP_MS): boolean {
@@ -177,7 +177,7 @@ class WakeStore {
 
   /** Legacy cross-tab cue handoff; current announcements open the actual operator composer. */
   openNotificationFollowUp(operatorId: string, ms = NOTIFICATION_FOLLOW_UP_MS, broadcast = true): boolean {
-    // 이름부르기가 꺼져 있으면 받지 않는다 — 다른 탭의 알림 때문에 이 단말이 마이크를 열지 않게.
+    // 음성 지원이 꺼져 있으면 받지 않는다 — 다른 탭의 알림 때문에 이 단말이 마이크를 열지 않게.
     if (!this.#state.enabled) return false;
     if (this.#state.mode === 'awake' || this.#state.micClaims > 0) return false;
     if (!this.#openFollowUp(operatorId, ms, 'notification')) return false;

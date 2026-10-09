@@ -37,7 +37,7 @@ export function useVoiceOperators(enabled = true): VoiceOperator[] {
     };
     load();
     const onChanged = () => load();
-    // 이름 부르기는 이 목록으로 듣는다 — 다른 단말에서 등록한 이름도 새로고침 없이 알아듣게.
+    // 음성 지원은 이 목록으로 듣는다 — 다른 단말에서 등록한 이름도 새로고침 없이 알아듣게.
     const onVisible = () => {
       if (document.visibilityState === 'visible' && Date.now() - loadedAt > REFRESH_ON_VISIBLE_MS) announceOperatorsChanged();
     };

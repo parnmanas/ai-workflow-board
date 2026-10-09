@@ -22,20 +22,21 @@ export function describeWake(state: WakeSnapshot, operators: readonly VoiceOpera
   }
   const reporting = operators.find((op) => op.id === reportOperatorId);
   if (!state.enabled) return reporting ? `마이크 꺼짐 — 누르면 "보고해"로 ${reporting.name}의 알림 내용을 들을 수 있습니다`
-    : '이름 부르기 꺼짐 — 누르면 "헤이 <이름>" 을 듣기 시작합니다';
+    : '음성 지원 꺼짐 — 누르면 켜집니다 ("헤이 <이름>" 듣기 + 답 낭독)';
   switch (state.listener) {
     case 'waiting-gesture': return '화면을 한 번 누르면 듣기 시작합니다(브라우저가 사용자 동작 전에는 마이크 소리를 막습니다)';
     case 'other-tab': return '다른 탭이 듣고 있습니다';
     case 'starting': return '마이크 여는 중…';
     case 'checking': return '들은 말이 이름인지 확인하는 중…';
-    case 'error': return `이름 부르기 오류: ${state.error || '알 수 없음'}`;
+    case 'error': return `음성 지원 오류: ${state.error || '알 수 없음'}`;
     case 'listening': return `듣는 중 — ${names}${reporting ? ` 또는 "보고해" (${reporting.name})` : ''}`;
     default: return state.micClaims > 0 ? '대화 모드가 마이크를 쓰는 동안 쉽니다' : `켜짐 — ${names}`;
   }
 }
 
 /**
- * 이름 부르기 켜기/끄기(사이드바 OPERATORS 머리). 단말마다 따로 켠다 — 상시 청취는 그 단말의 마이크다.
+ * 음성 지원 켜기/끄기(사이드바 OPERATORS 머리). 단말마다 따로 켠다 — 상시 청취는 그 단말의 마이크다.
+ * 꺼져 있으면 듣지도 읽지도 않는다(알림 TTS·세션 종료 낭독 건너뜀).
  * 누르는 동작이 사용자 제스처라, 나중에 제스처 없이 낼 소리(답 낭독)를 여기서 깨워 둔다.
  */
 export default function WakeToggle({ operators }: { operators: readonly VoiceOperator[] }) {
