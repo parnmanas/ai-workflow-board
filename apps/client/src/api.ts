@@ -1870,6 +1870,12 @@ export const api = {
   reportVoicePresence: async (input: { tab_id: string; session: { manager_id: string; cli: string; session_id: string } | null; visible: boolean }): Promise<void> => {
     await fetchOk('/voice/presence', { method: 'PUT', body: JSON.stringify(input), contentType: 'application/json' });
   },
+  /**
+   * 이 단말의 음성 지원 스위치. 사용자의 단말이 모두 꺼져 있으면 서버가 세션 완료를 operator 에게 보고하지 않는다.
+   * 답의 `operator_reports` — 알린 뒤에도 보고가 계속되는가(다른 단말이 켜져 있으면 true).
+   */
+  reportVoiceSupport: (input: { device_id: string; enabled: boolean }) =>
+    request<{ operator_reports: boolean }>('/voice/support', { method: 'PUT', body: JSON.stringify(input) }),
   /** 음성 알림의 소리 — 받는 사람만, 서버가 처음 요청될 때 합성한다. */
   getVoiceAnnouncementAudio: async (id: string): Promise<Blob> =>
     (await fetchOk(`/voice/announcements/${encodeURIComponent(id)}/audio`)).blob(),

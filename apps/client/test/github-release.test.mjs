@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import {
   GITHUB_ANDROID_APK_URL,
   GITHUB_ANDROID_ASSET_NAME,
+  checkLatestApk,
   formatApkSize,
   pickApkAsset,
 } from '../src/githubRelease.ts';
@@ -63,4 +64,34 @@ test('용량 표기', () => {
 
 test('자료실 최상단에 APK 카드가 있다', () => {
   assert.match(read('src/components/LibraryPage.tsx'), /<GithubApkCard \/>/);
+});
+
+test('미게시(404)와 API 실패를 구분한다 — 실패를 "없음"으로 말하지 않는다', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => releaseJson,
+    });
+    assert.deepEqual(await checkLatestApk(), {
+      status: 'ready',
+      app: {
+        tag: 'android-v1.0', name: 'awb-android.apk', size: 11289870,
+        publishedAt: '2026-10-09T12:01:00Z', downloadUrl: 'https://example.test/awb-android.apk',
+      },
+    });
+
+    globalThis.fetch = async () => ({ ok: false, status: 404 });
+    assert.deepEqual(await checkLatestApk(), { status: 'none' });
+
+    // 레이트리밋·차단은 unreachable — 호출 쪽이 고정 링크 버튼을 그대로 둔다.
+    globalThis.fetch = async () => ({ ok: false, status: 403 });
+    assert.deepEqual(await checkLatestApk(), { status: 'unreachable' });
+    globalThis.fetch = async () => ({ ok: false, status: 429 });
+    assert.deepEqual(await checkLatestApk(), { status: 'unreachable' });
+    globalThis.fetch = async () => { throw new Error('blocked'); };
+    assert.deepEqual(await checkLatestApk(), { status: 'unreachable' });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

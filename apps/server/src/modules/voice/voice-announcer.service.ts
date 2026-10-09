@@ -20,6 +20,7 @@ import { cachedOperators, type OperatorEntry } from './operator-config';
 import {
   elicitationDetail,
   isUrgentReport,
+  routeOperators,
   permissionDetail,
   questionFields,
   type ReportedDecision,
@@ -31,6 +32,7 @@ import {
 import { OperatorReportService, type OperatorSummary } from './operator-report.service';
 import { SPOKEN_SUMMARY_CHARS, toSpokenSummary } from './speakable';
 import { VoicePresenceService } from './voice-presence.service';
+import { VoiceSupportService } from './voice-support.service';
 
 /**
  * 작업 알림(docs/voice-operator.md) — 작업 보고는 알림음, 사용자 대화 답변은 TTS.
@@ -125,6 +127,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     private readonly rebac: ReBACService,
     private readonly reports: OperatorReportService,
     private readonly presence: VoicePresenceService,
+    private readonly support: VoiceSupportService,
   ) {}
 
   onModuleInit(): void {
@@ -292,6 +295,18 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       ...(!decisionAwaited && viewing() ? { viewed: true } : {}),
       ...(delegated ? { delegated } : {}),
     };
+    // 음성 지원 스위치가 그 사용자의 모든 단말에서 꺼져 있으면 세션 완료·오류를 operator 를 통해 전하지 않는다
+    // (직접 알림으로 돌리지도 않는다 — 결과를 전하는 기능 자체를 끈 것이다). 예외 둘: operator 가 시킨 작업의 결과는
+    // 그 operator 의 일이라 보내고(소리와 무관하게 받기로 한 것), 승인·질문 대기는 놓치면 15분 뒤 취소되므로 보낸다.
+    // operator 가 없으면 스위치도 보이지 않는다 — 그때의 직접 알림은 이 스위치와 무관하다.
+    const operators = !decisionAwaited && !delegated ? await cachedOperators(this.dataSource) : [];
+    if (operators.length) {
+      const who = userId || routeOperators(operators, session.manager_id)[0]?.created_by || '';
+      if (who && !(await this.support.reportsEnabledFor(who))) {
+        this.logService.debug('Voice', `voice support is off on every device of ${who.slice(0, 8)} — ${kind} of ${session.manager_id?.slice?.(0, 8)}/${session.cli}/${String(session.session_id).slice(0, 8)} not reported`);
+        return;
+      }
+    }
     if (await this.reports.submit(report)) return;
     // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(보고 있는 것·짧은 턴은 말하지 않는다).
     if (report.viewed || (kind === 'finished' && durationMs !== null && durationMs < MIN_ANNOUNCED_TURN_MS)) return;

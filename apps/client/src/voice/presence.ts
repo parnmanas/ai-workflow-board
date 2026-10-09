@@ -56,3 +56,28 @@ export function reportViewingSession(session: PresenceSession | null, handlesWhi
     document.addEventListener('visibilitychange', onVisibility);
   }
 }
+
+// ─── 음성 지원 스위치 ───────────────────────────────────────────────────────
+
+const DEVICE_ID_KEY = 'awb.voice.device-id';
+
+/** 이 단말(브라우저 저장소)의 고정 id — 스위치는 단말마다 따로라 서버가 단말을 구분해야 한다. */
+export function voiceDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_KEY);
+    if (existing) return existing;
+    localStorage.setItem(DEVICE_ID_KEY, TAB_ID);
+    return TAB_ID;
+  } catch {
+    return TAB_ID;
+  }
+}
+
+/**
+ * 이 단말의 음성 지원 스위치를 서버에 알린다(켤 때 · 끌 때 · 앱이 열릴 때). 사용자의 단말이 모두 꺼져 있으면
+ * 서버가 세션 완료를 operator 에게 보고하지 않는다(docs/voice-operator.md "음성 지원 · 잠들기"). 실패는 조용히
+ * 넘긴다 — 다음에 열릴 때 다시 알린다.
+ */
+export function reportVoiceSupport(enabled: boolean): void {
+  api.reportVoiceSupport({ device_id: voiceDeviceId(), enabled }).catch(() => undefined);
+}

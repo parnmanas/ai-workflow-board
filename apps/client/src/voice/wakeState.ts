@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { reportVoiceSupport } from './presence';
 
 /**
  * 음성 지원의 탭 상태(docs/voice-operator.md "음성 지원 · 잠들기").
@@ -122,6 +123,8 @@ class WakeStore {
   setEnabled(enabled: boolean): void {
     try { localStorage.setItem(ENABLED_KEY, enabled ? '1' : '0'); } catch { /* private mode */ }
     this.#applyEnabled(enabled);
+    // 서버도 안다 — 사용자의 단말이 모두 꺼지면 세션 완료를 operator 에게 보고하지 않는다.
+    reportVoiceSupport(enabled);
   }
 
   /** `operatorId` 가 불렸다. `firstPrompt` 는 이름 뒤에 이어 한 말(없으면 null). */

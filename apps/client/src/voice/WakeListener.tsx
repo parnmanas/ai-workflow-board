@@ -12,6 +12,7 @@ import { useSpeechState, useVoiceConfig } from './useVoice';
 import { isFillerUtterance, isReportRequest, matchWake } from './wake.logic';
 import { transcriptionFeedback } from './transcriptionFeedback';
 import { NOTIFICATION_FOLLOW_UP_KEY, NOTIFICATION_FOLLOW_UP_MS, useWakeState, wakeStore } from './wakeState';
+import { reportVoiceSupport } from './presence';
 
 /** 한 단말에서 한 탭만 이름을 듣는다 — 탭마다 마이크를 열면 같은 부름에 여러 탭이 깨어난다. */
 const WAKE_LOCK = 'awb-voice-wake-listener';
@@ -63,6 +64,12 @@ export default function WakeListener() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, [config?.wake.ready, operators]);
+
+  // 앱이 열리면 이 단말의 스위치 상태를 서버에 한 번 알린다(끄고 켠 것은 setEnabled 가 그때그때 알린다).
+  const voiceAvailable = !!config;
+  useEffect(() => {
+    if (voiceAvailable) reportVoiceSupport(wakeStore.state.enabled);
+  }, [voiceAvailable]);
 
   // 1. 이 단말의 듣는 탭이 된다.
   useEffect(() => {

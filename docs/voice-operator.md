@@ -272,6 +272,16 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 사용자의 승인·답을 기다리면, **AWB 가 그것을 알아채 operator 에게 보고**하고, operator 가 쓴 요약이 사용자에게
 선택한 알림음(+토스트)으로 간다. 자세한 설명은 사용자가 operator 에게 요청한 뒤 TTS 로 듣는다.
 
+**음성 지원 스위치로 끈다(2026-10-09 사용자 요청).** 사이드바 OPERATORS 의 👂 스위치는 단말마다 따로라, 화면이 켤 때 ·
+끌 때 · 앱이 열릴 때 `PUT /api/voice/support { device_id, enabled }` 로 서버에 알린다(`VoiceSupportService`, SystemSettings
+`operator.voice_support_devices` — 배포 재시작에도 남는다). 그 사용자의 **단말이 모두 꺼져 있으면** 세션 턴 종료 · 오류를
+operator 에게 보고하지 않고 직접 알림으로 돌리지도 않는다(결과를 전하는 기능 자체를 끈 것). 단말이 하나라도 켜져 있으면
+보고한다 — 일주일 넘게 소식 없는 단말은 이 판단에서 빠지고, 남은 단말이 없으면 마지막 선택을 따르며, 한 번도 알려 온 적이
+없으면 예전처럼 보고한다. 꺼져 있어도 보내는 것 둘: **승인 · 질문 대기**(놓치면 15분 뒤 취소된다)와 **operator 가 시킨 작업의
+결과**(아래 "작업 제안" — 그 operator 의 일이다). operator 가 하나도 없으면 스위치도 보이지 않으므로 그때의 직접 알림은 그대로다.
+회귀: `apps/server/test/voice-support-switch.test.mjs`(HTTP 로 끄고 켜서 보고가 멈추고 다시 가는지),
+`voice-operator-reports.test.mjs`(단말 OR 규칙 · 예외 둘 · 재시작 뒤 기억 · operator 없을 때), `apps/client/test/voice-support-switch.test.mjs`.
+
 ```
 세션 턴 종료 · 오류 · 승인/질문 대기 (agent_session_update/event — 서버가 이미 안다)
    │  사용자가 그 세션 화면을 보고 있어도 보고한다 — "보고 있음" 표시(VoicePresenceService, 화면이 30초마다 알린다)

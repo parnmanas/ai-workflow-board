@@ -19,6 +19,7 @@ import { VoiceService } from '../dist/modules/voice/voice.service.js';
 import { VoiceAnnouncerService } from '../dist/modules/voice/voice-announcer.service.js';
 import { OperatorReportService } from '../dist/modules/voice/operator-report.service.js';
 import { VoicePresenceService } from '../dist/modules/voice/voice-presence.service.js';
+import { VoiceSupportService } from '../dist/modules/voice/voice-support.service.js';
 import { invalidateOperatorCache } from '../dist/modules/voice/operator-config.js';
 import { missionAnnouncementText, sessionAnnouncementText } from '../dist/modules/voice/announcement-text.js';
 
@@ -52,7 +53,7 @@ function setup(settings = TTS_READY, { missions = {}, steps = {}, owners = [] } 
   const rebac = { listSubjects: async () => owners };
   invalidateOperatorCache();
   const reports = new OperatorReportService(dataSource, { promptOnBehalf: async () => { throw new Error('no operator to prompt'); } }, log);
-  const announcer = new VoiceAnnouncerService(dataSource, voice, log, rebac, reports, new VoicePresenceService());
+  const announcer = new VoiceAnnouncerService(dataSource, voice, log, rebac, reports, new VoicePresenceService(), new VoiceSupportService(dataSource, log));
   announcer.onModuleInit();
   const heard = [];
   const onAnnounce = (p) => heard.push(p);

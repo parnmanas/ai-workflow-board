@@ -26,6 +26,7 @@ import { VoiceService } from '../dist/modules/voice/voice.service.js';
 import { VoiceAnnouncerService } from '../dist/modules/voice/voice-announcer.service.js';
 import { OperatorReportService, URGENT_REPORT_WAIT_MS } from '../dist/modules/voice/operator-report.service.js';
 import { VoicePresenceService } from '../dist/modules/voice/voice-presence.service.js';
+import { VoiceSupportService, operatorReportsEnabled } from '../dist/modules/voice/voice-support.service.js';
 import { OPERATORS_SETTING_KEY, invalidateOperatorCache } from '../dist/modules/voice/operator-config.js';
 import { OPERATOR_REPORT_PREFIX, composeReportPrompt, mergeReport, routeOperators } from '../dist/modules/voice/operator-report.js';
 
@@ -75,7 +76,8 @@ function setup(operators, { prompt, proposals = [] } = {}) {
   };
   const presence = new VoicePresenceService();
   const reports = new OperatorReportService(dataSource, prompter, log);
-  const announcer = new VoiceAnnouncerService(dataSource, voice, log, { listSubjects: async () => [] }, reports, presence);
+  const support = new VoiceSupportService(dataSource, log);
+  const announcer = new VoiceAnnouncerService(dataSource, voice, log, { listSubjects: async () => [] }, reports, presence, support);
   announcer.onModuleInit();
   const heard = [];
   const onAnnounce = (p) => heard.push(p);
@@ -85,7 +87,7 @@ function setup(operators, { prompt, proposals = [] } = {}) {
     activityEvents.removeListener('voice_announcement', onAnnounce);
   };
   const storedOperators = () => JSON.parse(stored.get(OPERATORS_SETTING_KEY).value);
-  return { heard, prompts, presence, reports, teardown, storedOperators };
+  return { heard, prompts, presence, reports, support, dataSource, log, teardown, storedOperators };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 30));
@@ -465,4 +467,96 @@ test('a later report for the same session does not swallow a delegated result st
   const queue = mergeReport(mergeReport([], delegated), { ...base, kind: 'needs_input' });
   assert.deepEqual(queue.map((r) => r.kind), ['finished', 'needs_input'], 'the delegated result stays queued');
   assert.deepEqual(mergeReport([{ ...base, kind: 'needs_input' }], { ...base, kind: 'finished' }).map((r) => r.kind), ['finished'], 'ordinary reports still replace each other');
+});
+
+// 음성 지원 스위치(사이드바 OPERATORS 의 👂) — 사용자의 단말이 모두 꺼져 있으면 세션 완료·오류를 operator 를 통해
+// 전하지 않는다(2026-10-09 사용자 요청). 단말이 하나라도 켜져 있으면 전한다.
+test('voice support off on every device stops completion reports to the operator; on resumes them', async (t) => {
+  const jarvis = operator('Jarvis', 'host-rolf');
+  const { prompts, heard, support, dataSource, log, teardown } = setup([jarvis]);
+  t.after(teardown);
+  const s = session('host-rolf', 's1');
+  let turn = 0;
+  const finish = async (answer = '끝났어요.') => {
+    const id = `t-${++turn}`;
+    event(s, 'turn', { phase: 'started' }, id);
+    finishTurn(s, id, answer);
+    await flush();
+  };
+  // 한 번도 알려 온 적이 없으면 예전처럼 보고한다.
+  await finish();
+  assert.equal(prompts.length, 1, 'never reported — reported as before');
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '끝났대요.');
+  await flush();
+
+  assert.equal(await support.report('u1', 'laptop', false), false, 'the only device is off — reports stop');
+  await finish('꺼 둔 동안 끝난 일');
+  assert.equal(prompts.length, 1, 'OFF: nothing reaches the operator');
+  const heardWhileOff = heard.length;
+  await finish('오류는?');
+  assert.equal(heard.length, heardWhileOff, 'OFF: no direct announcement either');
+
+  // 다른 단말이 켜져 있으면 보고한다(OR), 그 단말도 끄면 다시 멈춘다.
+  assert.equal(await support.report('u1', 'phone', true), true);
+  await finish('폰이 켜져 있을 때');
+  assert.equal(prompts.length, 2, 'another device is on — reported');
+  finishTurn(opSession(jarvis), prompts[1].turn_id, '알겠어요.');
+  await flush();
+  await support.report('u1', 'phone', false);
+  await finish();
+  assert.equal(prompts.length, 2, 'all devices off again — stopped');
+
+  // 서버가 다시 떠도(배포) 끈 상태를 기억한다.
+  const restarted = new VoiceSupportService(dataSource, log);
+  assert.equal(await restarted.reportsEnabledFor('u1'), false, 'the switch state survives a restart');
+
+  // 켜면 다시 보고한다.
+  await support.report('u1', 'laptop', true);
+  await finish('다시 켠 뒤');
+  assert.equal(prompts.length, 3, 'ON: reports resume');
+  assert.match(prompts[2].text, /다시 켠 뒤/);
+});
+
+test('with voice support off, approvals/questions and results of the operator\'s own tasks still reach it', async (t) => {
+  const jarvis = operator('Jarvis', 'host-rolf');
+  const proposals = [{ id: 'prop-1', manager_id: 'host-rolf', cli: 'codex', session_id: 's-task', delivered_turn_id: 'task-turn', operator_id: 'Jarvis', operator_name: 'Jarvis', text: '테스트 돌려 줘' }];
+  const { prompts, support, teardown } = setup([jarvis], { proposals });
+  t.after(teardown);
+  await support.report('u1', 'laptop', false);
+  // 승인 대기 — 놓치면 15분 뒤 취소되므로 꺼져 있어도 보고한다.
+  const waiting = session('host-rolf', 's-wait');
+  event(waiting, 'permission_request', { request_id: 'r1', title: 'Run npm publish', options: [{ option_id: 'ok', name: 'Allow once', kind: 'allow_once' }] }, 'w1');
+  update({ ...waiting, status: 'awaiting_permission' }, 'permission');
+  await flush();
+  assert.equal(prompts.length, 1, 'an approval wait is still reported');
+  assert.match(prompts[0].text, /Run npm publish/);
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '승인 대기가 있어요.');
+  await flush();
+  // operator 가 시킨 작업의 결과 — 그 operator 의 일이라 꺼져 있어도 보낸다.
+  const task = session('host-rolf', 's-task');
+  event(task, 'turn', { phase: 'started' }, 'task-turn');
+  finishTurn(task, 'task-turn', '테스트가 다 통과했어요.');
+  await flush();
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1].text, /네가 시킨 작업\(Jarvis, 사용자 승인\)/);
+});
+
+test('without an operator the switch does not touch direct announcements', async (t) => {
+  const { heard, support, teardown } = setup([]);
+  t.after(teardown);
+  await support.report('u1', 'laptop', false);
+  const s = session('host-rolf', 's-direct');
+  finishTurn(s, 'd1', '배포가 끝났어요.');
+  await flush();
+  assert.equal(heard.length, 1, 'no operator registered — the direct announcement is unchanged');
+});
+
+test('switch rule: any live device on; stale devices drop out; the last choice decides when none is live', () => {
+  const now = Date.parse('2026-10-09T12:00:00.000Z');
+  const day = 24 * 60 * 60_000;
+  assert.equal(operatorReportsEnabled(undefined, now), true, 'never reported');
+  assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now } }, now), false);
+  assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now }, b: { enabled: true, at: now - day } }, now), true);
+  assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now }, b: { enabled: true, at: now - 8 * day } }, now), false, 'a device silent for over a week drops out');
+  assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now - 9 * day }, b: { enabled: true, at: now - 8 * day } }, now), true, 'none live — the latest choice decides');
 });

@@ -11,6 +11,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { VoiceError, VoiceService } from './voice.service';
 import { VoiceAnnouncerService } from './voice-announcer.service';
 import { VoicePresenceService } from './voice-presence.service';
+import { VoiceSupportService } from './voice-support.service';
 import { OperatorProposalError, OperatorProposalService } from './operator-proposal.service';
 import {
   OperatorInputError,
@@ -64,6 +65,7 @@ export class VoiceController {
     private readonly voice: VoiceService,
     private readonly announcer: VoiceAnnouncerService,
     private readonly presence: VoicePresenceService,
+    private readonly support: VoiceSupportService,
   ) {}
 
   /** 엔진이 켜져 있고 쓸 수 있는가. admin 에게는 Voice lab 이 비교할 공급자 목록도 준다. */
@@ -138,6 +140,19 @@ export class VoiceController {
       : null;
     this.presence.update((req as any).currentUser.id, tabId, session, body?.visible !== false);
     return res.status(204).end();
+  }
+
+  /**
+   * 이 단말의 음성 지원 스위치 — `{ device_id, enabled }`. 켤 때 · 끌 때 · 앱이 열릴 때 온다. 사용자의 단말이 모두
+   * 꺼져 있으면 세션 완료를 operator 에게 보고하지 않는다(`VoiceSupportService`). 답: `{ operator_reports }`.
+   */
+  @Put('support')
+  async reportSupport(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const deviceId = typeof body?.device_id === 'string' ? body.device_id.trim().slice(0, 64) : '';
+    if (!deviceId) return res.status(400).json({ error: 'device_id_required', message: 'device_id is required.' });
+    if (typeof body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled_required', message: 'enabled must be true or false.' });
+    const operatorReports = await this.support.report((req as any).currentUser.id, deviceId, body.enabled);
+    return res.status(200).json({ operator_reports: operatorReports });
   }
 
   /** 음성 알림(`voice_announcement`)의 소리 — 받는 사람만. 처음 요청될 때 합성한다. */
