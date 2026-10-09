@@ -6,6 +6,7 @@ import React, {
   useCallback,
   useState,
 } from 'react';
+import { getServerBaseUrl } from '../serverConfig';
 
 /**
  * BoardStreamContext — AppLayout-level single EventSource lifecycle.
@@ -126,10 +127,14 @@ export function BoardStreamProvider({ children }: ProviderProps) {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
 
+    // PWA 서버 설정이 있으면 그 서버의 스트림을, 없으면 기존 규칙(same-origin,
+    // 로컬 dev는 :7701 직결 — Vite 프록시의 SSE 버퍼링 회피)을 쓴다.
+    const customBase = getServerBaseUrl();
     const baseUrl =
-      window.location.hostname === 'localhost'
+      customBase ||
+      (window.location.hostname === 'localhost'
         ? `${window.location.protocol}//${window.location.hostname}:7701`
-        : '';
+        : '');
     // NOTE: no filter query param — this is a workspace-agnostic subscription.
     // Consumers filter board_update (ticket-change) events client-side.
     const url = `${baseUrl}/api/events/stream?token=${encodeURIComponent(token)}`;

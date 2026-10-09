@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { canonicalWorkPath } from './utils/workRoutes';
 import { ToastProvider, useToast } from './contexts/ToastContext';
@@ -16,7 +16,7 @@ import { tokens } from './tokens';
 const TicketsPage = lazy(() => import('./components/tickets/TicketsPage'));
 // Projects — 저장소 + Host 별 메인 클론 폴더(repository Resource 를 대체).
 const ProjectsPage = lazy(() => import('./components/projects/ProjectsPage'));
-const AdminPage = lazy(() => import('./components/admin/AdminPage'));
+const LibraryPage = lazy(() => import('./components/LibraryPage'));const AdminPage = lazy(() => import('./components/admin/AdminPage'));
 const ChatPage = lazy(() => import('./components/ChatPage'));
 const AccountUsersPage = lazy(() => import('./components/AccountUsersPage'));
 const AccountChannelsPage = lazy(() => import('./components/AccountChannelsPage'));
@@ -79,6 +79,26 @@ function AppContent() {
   const { isAuthenticated, isLoading, serverUnavailable } = useAuth();
   const { showToast } = useToast();
   const wasAuthenticated = useRef(false);
+  const navigate = useNavigate();
+
+  // 네이티브 앱 딥링크(awb://sessions/…?say=…) — 백그라운드 wake 알림 탭이 여기로 온다.
+  // 웹에서는 isNativeApp()이 false라 리스너를 달지 않는다.
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    void (async () => {
+      const { isNativeApp, parseAwbDeepLink } = await import('./native/backgroundWake');
+      if (!isNativeApp()) return;
+      const { App } = await import('@capacitor/app');
+      const sub = await App.addListener('appUrlOpen', (event) => {
+        const path = parseAwbDeepLink(event.url);
+        if (path) navigate(path);
+      });
+      cleanup = () => {
+        void sub.remove().catch(() => undefined);
+      };
+    })().catch(() => undefined);
+    return () => cleanup?.();
+  }, [navigate]);
 
   // Show toast when auth state transitions from authenticated → not authenticated
   useEffect(() => {
@@ -199,6 +219,7 @@ function AppContent() {
             <Route path="chat/:roomId" element={<ChatPage />} />
             <Route path="projects" element={<ProjectsPage />} />
             <Route path="resources" element={<AccountManagementPage kind="resources" />} />
+            <Route path="library" element={<LibraryPage />} />
             <Route path="ontology-graph" element={<OntologyGraphPage />} />
             <Route path="actions" element={<AccountManagementPage kind="actions" />} />
             <Route path="functions" element={<AccountManagementPage kind="functions" />} />

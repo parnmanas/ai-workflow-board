@@ -142,18 +142,42 @@ interface NotiRequest {
   body: string;
   tag: string;
   onClick?: () => void;
+  /** 앱 내 경로(/chat/… 등) — SW 알림 클릭 시 이동 목표. 외부 URL은 SW가 무시한다. */
+  url?: string;
 }
 
-function fireBrowserNotification(req: NotiRequest) {
+// PWA 알림 아이콘 — NotificationContext가 쓰던 /favicon.svg는 존재하지 않아
+// 404였다. PWA 아이콘으로 교체한다.
+const NOTI_ICON = '/icons/icon-192.png';
+
+async function fireBrowserNotification(req: NotiRequest) {
   if (typeof window === 'undefined') return;
   if (!('Notification' in window)) return;
   if (Notification.permission !== 'granted') return;
   if (!document.hidden) return;
+  // 1순위: 서비스워커 경유 — PWA가 백그라운드에 있어도 알림이 남고,
+  // 클릭하면 SW가 앱 창을 살려 data.url로 이동시킨다. Android Chrome은
+  // SW 없는 `new Notification()`을 막기도 한다.
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification(req.title, {
+        body: req.body,
+        tag: req.tag,
+        icon: NOTI_ICON,
+        badge: NOTI_ICON,
+        data: { url: req.url || '/' },
+      });
+      return;
+    }
+  } catch {
+    /* SW 미등록·대기 실패 — 아래 레거시 경로로 */
+  }
   try {
     const n = new Notification(req.title, {
       body: req.body,
       tag: req.tag,
-      icon: '/favicon.svg',
+      icon: NOTI_ICON,
     });
     if (req.onClick) {
       n.onclick = () => {
@@ -456,7 +480,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       if (!prefsRef.current[opts.source]) return;
       const go = opts.navigateTo ? () => navigate(opts.navigateTo!) : undefined;
       if (document.hidden) {
-        fireBrowserNotification({ title: opts.title, body: opts.body, tag: opts.tag, onClick: go });
+        // fire-and-forget — SW showNotification은 비동기라 기다리지 않는다.
+        void fireBrowserNotification({ title: opts.title, body: opts.body, tag: opts.tag, onClick: go, url: opts.navigateTo });
       } else {
         const text = opts.body ? `${opts.title}: ${opts.body}` : opts.title;
         showToast(text, 'info', { onClick: go });

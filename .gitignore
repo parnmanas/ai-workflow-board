@@ -54,3 +54,12 @@ apps/client/playwright-report/
 
 # Voice-activity-detection runtime, copied from node_modules at build time (apps/client/scripts/copy-vad-assets.mjs).
 apps/client/public/vad/
+
+# Capacitor Android (apps/client/android) — 스캐폴딩·네이티브 코드는 추적하고,
+# 빌드 산출물과 `npx cap sync` 재생성물(assets/)은 제외한다.
+apps/client/android/.gradle/
+apps/client/android/app/build/
+apps/client/android/app/src/main/assets/
+apps/client/android/local.properties
+*.apk
+*.aab

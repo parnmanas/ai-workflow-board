@@ -19,6 +19,7 @@ import {
   readOperators,
   updateOperators,
 } from './operator-config';
+import { matchWakeOperator, toWakeMatchResponse } from './wake-match';
 
 async function run(res: Response, fn: () => Promise<unknown> | unknown) {
   try {
@@ -212,6 +213,18 @@ export class VoiceOperatorsController {
   @Get()
   async list(@Res() res: Response) {
     return res.json({ operators: await readOperators(this.dataSource) });
+  }
+
+  /**
+   * `{ text }`(STT 글자) → 부르는 말이면 `{ operator, heard, rest, distance, form }`,
+   * 아니면 `{ operator: null }`. Android 백그라운드 wake(네이티브 포그라운드 서비스)가
+   * `transcribe?purpose=wake` 뒤에 부른다 — 판정 규칙은 `wake-match.ts`, 화면의
+   * `wake.logic.ts`와 같은 규칙이다.
+   */
+  @Post('match')
+  async matchWake(@Body() body: any, @Res() res: Response) {
+    const text = typeof body?.text === 'string' ? body.text.slice(0, 500) : '';
+    return this.write(res, async () => toWakeMatchResponse(matchWakeOperator(text, await readOperators(this.dataSource))));
   }
 
   /** `{ name, aliases?, manager_id, cli, session_id, cwd?, title? }` — 이 세션을 이 이름의 operator 로 등록한다. */

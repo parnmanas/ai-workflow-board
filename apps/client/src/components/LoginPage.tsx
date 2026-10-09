@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api';
+import { getServerUrl } from '../serverConfig';
 import { tokens } from '../tokens';
+import ServerConfigField from './ServerConfigField';
 
 type Mode = 'login' | 'setup' | 'register';
 
@@ -33,9 +35,9 @@ export default function LoginPage() {
     }
   }, []);
 
-  // Fetch Google OAuth config
+  // Fetch Google OAuth config (PWA 커스텀 서버 대응 — same-origin 고정 금지)
   useEffect(() => {
-    fetch('/api/auth/oauth/config')
+    fetch(getServerUrl('/api/auth/oauth/config'))
       .then(r => r.json())
       .then((data: any) => setGoogleEnabled(!!data?.google?.enabled))
       .catch(() => setGoogleEnabled(false));
@@ -352,7 +354,7 @@ export default function LoginPage() {
               <div style={{ flex: 1, height: 1, background: tokens.colors.border }} />
             </div>
             <a
-              href="/api/auth/oauth/google/start"
+              href={getServerUrl('/api/auth/oauth/google/start')}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
                 width: '100%', padding: '11px 14px',
@@ -397,6 +399,19 @@ export default function LoginPage() {
             </button>
           </div>
         )}
+
+        {/* PWA: 다른 AWB 서버를 바라볼 때만 펼친다 — 기본은 same-origin */}
+        <details style={{ marginTop: 20 }}>
+          <summary style={{
+            fontSize: 12, color: tokens.colors.textMuted, cursor: 'pointer',
+            fontWeight: 600,
+          }}>
+            다른 서버에 연결
+          </summary>
+          <div style={{ marginTop: 10 }}>
+            <ServerConfigField />
+          </div>
+        </details>
       </div>
     </div>
   );

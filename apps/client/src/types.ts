@@ -172,6 +172,23 @@ export interface Resource {
   updated_at: string;
 }
 
+// 자료실 항목 — 바이트는 Resource에, 겉장만 여기. 다운로드는 rawResourceUrl 그대로.
+export interface LibraryItem {
+  id: string;
+  account_id: string | null;
+  resource_id: string;
+  title: string;
+  description: string;
+  version: string;
+  kind: 'app' | 'file';
+  file_name: string;
+  file_mimetype: string;
+  size: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // One "blocked-by another ticket" link (ticket 48d14fff). The dependent
 // ticket (`ticket_id`) stays parked until `prerequisite_ticket_id` is `done`. `prerequisite` is the server-hydrated snapshot used by the
 // detail panel to render a status pill without a second round-trip; it is

@@ -114,6 +114,22 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 
+// PWA 서비스워커 — 운영 빌드에서만 등록한다. dev(Vite)에서는 등록하지 않는다:
+// HMR 자산을 SW가 캐시하면 개발 중 stale 화면만 양산한다. HTTPS 또는
+// localhost에서만 동작하고(마이크·알림과 같은 secure-context 조건),
+// 실패는 조용히 무시한다(오프라인 셸은 점진적 향상이지 필수 경로가 아니다).
+// tsconfig에 vite/client 타입이 없어 최소 선언만 둔다(tsconfig 무수정).
+declare global {
+  interface ImportMeta {
+    readonly env: { readonly PROD: boolean };
+  }
+}
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+  });
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>

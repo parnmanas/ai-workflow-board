@@ -85,6 +85,7 @@ test/host-models-single-source.test.mjs
 test/host-models.test.mjs
 test/inflight-strand-output-liveness.test.mjs
 test/instance-registry-list-for-agent.test.mjs
+test/library.test.mjs
 test/lockfile-advisory-audit-guard.test.mjs
 test/manager-capabilities-heartbeat.test.mjs
 test/manager-capability-gate.test.mjs
@@ -231,6 +232,7 @@ test/voice-operator-reports.test.mjs
 test/voice-operator-scope.test.mjs
 test/voice-operators.test.mjs
 test/voice-speakable.test.mjs
+test/voice-wake-match.test.mjs
 test/workspace-folder-traversal-guard.test.mjs
 test/workspace-schedule-action-dispatch.test.mjs
 test/workspace-schedule-behavior.test.mjs

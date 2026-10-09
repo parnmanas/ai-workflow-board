@@ -80,6 +80,8 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   // 독립 루트
   'Account', 'User', 'SystemSetting', 'ClaudeBackendProfile', 'SkillTap', 'Skill',
   'Channel', 'Credential', 'WorkflowFunction', 'Resource',
+  // (연성) Resource 의존 — 바이트는 Resource에 두고 겉장만 얹는다.
+  'LibraryItem',
   // (연성) Account·Credential 의존. 옛 저장소 Resource 와 같은 id 로 이관된 행.
   'Project',
 

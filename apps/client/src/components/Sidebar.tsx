@@ -211,6 +211,8 @@ export default function Sidebar({
         // 저장소(repository) — 티켓/미션/QA 가 가리키는 프로젝트와 Host 별 메인 클론 폴더.
         { key: 'projects', path: `${basePath}/projects`, label: 'Projects', icon: 'P' },
         { key: 'resources', path: `${basePath}/resources`, label: 'Resources', icon: 'R' },
+        // 설치물(APK)·공유 파일 자료실 — 바이트는 Resource, 겉장은 LibraryItem.
+        { key: 'library', path: `${basePath}/library`, label: 'Library', icon: 'L' },
         {
           key: 'ontology-graph',
           path: `${basePath}/ontology-graph`,

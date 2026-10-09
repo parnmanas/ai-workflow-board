@@ -101,10 +101,16 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
+import { getApiBase } from './serverConfig';
 
-const BASE = '/api';
+// API 베이스는 PWA 서버 설정에 따라 바뀐다 — same-origin이면 '/api',
+// 앱에서 다른 서버 주소를 입력했으면 '<base>/api'. 모듈 상수가 아니라
+// 호출 시점에 읽는다(서버 전환 후 reload 없이도 다음 요청부터 반영).
+function apiBase(): string {
+  return getApiBase();
+}
 
 // The default ownership account is per-tab. Work URLs do not select it.
 const SESSION_ACCOUNT_KEY = 'awb.activeAccountId';
@@ -145,7 +151,7 @@ export function rawResourceUrl(id: string, opts?: { download?: boolean }): strin
   if (token) params.set('token', token);
   if (opts?.download) params.set('download', '1');
   const qs = params.toString();
-  return `${BASE}/resources/${id}/raw${qs ? `?${qs}` : ''}`;
+  return `${apiBase()}/resources/${id}/raw${qs ? `?${qs}` : ''}`;
 }
 
 function getAuthHeaders(): Record<string, string> {
@@ -161,7 +167,7 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     headers: getAuthHeaders(),
     ...options,
   });
@@ -209,7 +215,7 @@ async function fetchOk(path: string, init: RequestInit & { contentType?: string 
   const { contentType, ...rest } = init;
   const headers = getAuthHeaders();
   if (contentType) headers['Content-Type'] = contentType;
-  const res = await fetch(`${BASE}${path}`, { ...rest, headers: { ...headers, ...(rest.headers as Record<string, string> | undefined) } });
+  const res = await fetch(`${apiBase()}${path}`, { ...rest, headers: { ...headers, ...(rest.headers as Record<string, string> | undefined) } });
   if (!res.ok) {
     if (res.status === 401) {
       localStorage.removeItem('auth_token');
@@ -673,7 +679,7 @@ export const api = {
     };
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (_activeAccountId) headers['X-Account-Id'] = _activeAccountId;
-    const res = await fetch(`${BASE}/resources/upload?${params.toString()}`, {
+    const res = await fetch(`${apiBase()}/resources/upload?${params.toString()}`, {
       method: 'POST',
       headers,
       body: file,
@@ -724,6 +730,30 @@ export const api = {
   deleteResource: (id: string, accountId: string) => {
     const params = new URLSearchParams({ account_id: accountId });
     return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  // ─── Library (자료실) ────────────────────────────────────
+  // 바이트는 uploadResourceFile(type 'library_file')로 먼저 올리고 여기서 묶는다.
+  // 다운로드는 rawResourceUrl(resource_id, { download: true }) 그대로 — /raw가
+  // APK를 attachment로 내린다. 404 latest는 body.code 'no_app_published'로 구분한다.
+  listLibraryItems: (accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
+    return request<{ items: LibraryItem[] }>(`/library?${params.toString()}`);
+  },
+  createLibraryItem: (data: {
+    account_id: string;
+    resource_id: string;
+    title: string;
+    description?: string;
+    version?: string;
+    kind?: 'app' | 'file';
+  }) => request<LibraryItem>('/library', { method: 'POST', body: JSON.stringify(data) }),
+  deleteLibraryItem: (id: string, accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
+    return request<{ success: true; id: string }>(`/library/${encodeURIComponent(id)}?${params.toString()}`, { method: 'DELETE' });
+  },
+  getLatestApp: (accountId: string) => {
+    const params = new URLSearchParams({ account_id: accountId });
+    return request<LibraryItem>(`/library/apps/latest?${params.toString()}`);
   },
   // ─── Projects (docs/tickets.md → Project) ─────────────
   // One git repository + what every feature needs to work on it. Replaces
@@ -1962,7 +1992,7 @@ export const api = {
   ): Promise<ChatAttachment> => {
     return new Promise<ChatAttachment>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${BASE}/chat-rooms/${roomId}/attachments`);
+      xhr.open('POST', `${apiBase()}/chat-rooms/${roomId}/attachments`);
       const headers = getAuthHeaders();
       for (const [k, v] of Object.entries(headers)) {
         try { xhr.setRequestHeader(k, v); } catch { /* ignore */ }

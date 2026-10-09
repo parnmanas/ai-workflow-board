@@ -91,7 +91,39 @@ export default function WakeListener() {
 
   // 2. 잠든 동안, 마이크를 대화 모드가 쓰지 않을 때만 듣는다.
   const listen = wanted && hasLock && wake.mode === 'sleeping';
+
+  // 2b. PWA/모바일: 화면이 꺼지면 마이크가 끊겨 상시 청취가 죽는다.
+  // 듣는 동안만 Screen Wake Lock을 잡아 화면 꺼짐을 막는다 — 웨이크용 단말을
+  // 스피커처럼 쓸 때의 전제다. 미지원·거부는 조용히 무시(기능 저하 없음).
+  // 백그라운드(앱을 닫거나 화면을 끈 상태)의 마이크는 OS가 허락하지 않으므로
+  // SW로도 구현할 수 없다 — 설정 화면에 그 점을 안내한다.
   useEffect(() => {
+    if (!listen) return;
+    const wl = (navigator as any).wakeLock;
+    if (!wl?.request) return;
+    let lock: { release: () => Promise<void> } | null = null;
+    let cancelled = false;
+    const request = async () => {
+      try {
+        lock = await wl.request('screen');
+      } catch {
+        lock = null;
+      }
+    };
+    void request();
+    const onVisible = () => {
+      if (!cancelled && document.visibilityState === 'visible' && !lock) void request();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      try {
+        void lock?.release();
+      } catch { /* ignore */ }
+      lock = null;
+    };
+  }, [listen]);  useEffect(() => {
     if (!listen) return;
     const run = { cancelled: false };
     const gesture = new AbortController();

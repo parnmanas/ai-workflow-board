@@ -1,0 +1,52 @@
+{
+  "primary": [
+    {
+      "table": "accounts",
+      "retained": 1,
+      "total": 1
+    },
+    {
+      "table": "tickets",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "credentials",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "api_keys",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "users",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "relation_tuples",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "agent_session_cli_settings",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "chat_rooms",
+      "retained": 0,
+      "total": 0
+    },
+    {
+      "table": "automation_schedules",
+      "retained": 0,
+      "total": 0
+    }
+  ],
+  "integrity": "ok",
+  "ontology": "ok",
+  "migration": "AccountOwnership1760000000092"
+}

@@ -15,6 +15,7 @@ export { ChatRoom } from './ChatRoom';
 export { ChatRoomParticipant } from './ChatRoomParticipant';
 export { ChatRoomMessage } from './ChatRoomMessage';
 export { Resource } from './Resource';
+export { LibraryItem } from './LibraryItem';
 export { ResourceEmbedding } from './ResourceEmbedding';
 export { SystemSetting } from './SystemSetting';
 export { Credential } from './Credential';

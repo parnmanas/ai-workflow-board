@@ -453,6 +453,21 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // 이 operator 의 화면이 열려 있는 동안 등록한다 — 떠나면 잠든다.
   const thisOperatorId = thisOperator?.id ?? null;
   useEffect(() => (thisOperatorId ? wakeStore.attach(thisOperatorId) : undefined), [thisOperatorId]);
+  // Android 백그라운드 wake 딥링크(?say=…) — 콜드스타트에서도 부른 말 뒤의 첫 요청을
+  // 보낸다. wakeStore가 기억해 컴포저가 깨어나자마자 전송한다. URL에서는 지워 새로고침
+  // 때 다시 보내지 않게 한다.
+  const [detailParams, setDetailParams] = useSearchParams();
+  const sayConsumedRef = useRef(false);
+  useEffect(() => {
+    if (sayConsumedRef.current || !thisOperatorId) return;
+    const say = detailParams.get('say');
+    if (!say) return;
+    sayConsumedRef.current = true;
+    wakeStore.wake(thisOperatorId, say, 'notification');
+    const next = new URLSearchParams(detailParams);
+    next.delete('say');
+    setDetailParams(next, { replace: true });
+  }, [thisOperatorId, detailParams, setDetailParams]);
   // 다른 화면으로 가면 이 세션의 낭독을 멈춘다 — 무엇을 읽는지 보이지 않는 소리는 소음이다.
   useEffect(() => () => {
     if (speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();

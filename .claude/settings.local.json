@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s https://awb.parnmanas.com/api/health)",
+      "Bash(curl -s -X POST https://awb.parnmanas.com/mcp -H \"Content-Type: application/json\" -H \"Accept: application/json, text/event-stream\" -d '{\"\"\"\"jsonrpc\"\"\"\":\"\"\"\"2.0\"\"\"\",\"\"\"\"id\"\"\"\":1,\"\"\"\"method\"\"\"\":\"\"\"\"initialize\"\"\"\",\"\"\"\"params\"\"\"\":{\"\"\"\"protocolVersion\"\"\"\":\"\"\"\"2025-06-18\"\"\"\",\"\"\"\"capabilities\"\"\"\":{},\"\"\"\"clientInfo\"\"\"\":{\"\"\"\"name\"\"\"\":\"\"\"\"test\"\"\"\",\"\"\"\"version\"\"\"\":\"\"\"\"1\"\"\"\"}}}' --max-time 10)",
+      "Bash(npx tsc:*)",
+      "Bash(python3 -)",
+      "Bash(timeout 200 node --test test/acp-client.test.mjs)",
+      "Bash(echo \"--- fleet manager versions ---\"; npm ls -g awb-agent-manager --depth=0 2>/dev/null | tail -1; echo \"--- latest published ---\"; npm view awb-agent-manager version --prefer-online 2>/dev/null; echo \"--- deploy log tail ---\"; tail -3 /mnt/data/awb-data/deploy.log)",
+      "Bash(grep -n \"auth.label\\\\|label: 'operator-login'\\\\|label: \\\\`credential\" apps/agent-manager/src/lib/agent-session-runner.ts)",
+      "Bash(timeout 200 node --import tsx --test test/agent-session-transcript.test.mjs)",
+      "Bash(timeout 590 node --test 'test/*.test.mjs')",
+      "Bash(echo \"manager tests exit=$?\")",
+      "Read(//tmp/**)",
+      "Bash(timeout 300 node --import tsx --test test/session-interactive-ui.test.mjs test/new-session-modal-host-refresh.test.mjs test/sessions-navigation.test.mjs test/dom-node-assert-guard.test.mjs test/test-registration-guard.test.mjs)",
+      "Bash(echo \"root build exit=$?\")",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git rebase *)",
+      "Bash(git push *)",
+      "Bash(gh run *)",
+      "Bash(journalctl --user -u awb-agent-manager --since \"-24 h\" --no-pager)"
+    ]
+  }
+}

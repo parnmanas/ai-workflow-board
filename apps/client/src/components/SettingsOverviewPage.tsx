@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
+import ServerConfigField, { PwaInstallButton } from './ServerConfigField';
+import BackgroundWakeCard from './BackgroundWakeCard';
+import ApkDownloadButton from './ApkDownloadButton';
 
 interface SettingsDestination {
   title: string;
@@ -119,6 +122,45 @@ export default function SettingsOverviewPage() {
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         <div style={{ maxWidth: 1040, display: 'flex', flexDirection: 'column', gap: 28 }}>
+          {/* PWA 기기 설정 — 계정 소유와 무관한 이 단말만의 선택 */}
+          <section aria-labelledby="settings-device">
+            <h2
+              id="settings-device"
+              style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
+            >
+              Device
+            </h2>
+            <p style={{ margin: '4px 0 12px', fontSize: 12, color: tokens.colors.textMuted }}>
+              이 기기에서 여는 AWB 서버와 앱 설치 — 계정이 아니라 단말 설정이라 다른 탭·기기에 영향이 없습니다.
+            </p>
+            <div style={{
+              background: tokens.colors.surfaceCard,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.lg,
+              padding: 16,
+              display: 'flex', flexDirection: 'column', gap: 12,
+              maxWidth: 560,
+            }}>
+              <ServerConfigField />
+              <div style={{
+                borderTop: `1px solid ${tokens.colors.border}`,
+                paddingTop: 12, display: 'flex', alignItems: 'center', gap: 12,
+              }}>
+                <PwaInstallButton />
+                <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+                  알림은 사이드바 🔔에서, 이름 부르기(보이스 wake)는 OPERATORS 👂에서 켭니다.
+                  화면이 꺼지면 마이크도 멈추니 웨이크용 단말은 충전기에 꽂아 두세요.
+                </span>
+              </div>
+              <div style={{
+                borderTop: `1px solid ${tokens.colors.border}`,
+                paddingTop: 12,
+              }}>
+                <ApkDownloadButton />
+              </div>
+            </div>
+            <BackgroundWakeCard />
+          </section>
           {visibleGroups.map((group) => (
             <section key={group.title} aria-labelledby={`settings-${group.title.replace(/\W+/g, '-').toLowerCase()}`}>
               <h2
