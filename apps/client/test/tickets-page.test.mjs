@@ -54,7 +54,7 @@ const TICKETS = [
 function fullTicket(id) {
   const row = TICKETS.find((t) => t.id === id) || TICKETS[0];
   return {
-    ...row, description: 'desc', depth: 0, channel_ids: [], comments: [], children: [], attachments: [],
+    ...row, id, description: 'desc', depth: 0, channel_ids: [], comments: [], children: [], attachments: [],
     prerequisites: [], on_done_action_ids: [], next_ticket_id: null, created_by: 'Tester',
     created_by_type: 'user', created_by_id: 'u1', project: null,
   };
@@ -216,6 +216,29 @@ test('③-b 카드를 누르면 ?ticket= 이 붙는다', async (t) => {
   click(cardEl);
   await flush();
   assert.equal(new URLSearchParams(probe.search).get('ticket'), 't3');
+});
+
+test('③-c 패널 헤더는 짧고 Run/Archive/Delete는 햄버거 메뉴에 있다', async (t) => {
+  const longId = 'abc123def4567890';
+  const { view } = await mountPage(t, { entry: `${BASE}/tickets?ticket=${longId}` });
+  const header = view.container.querySelector('.awb-ticket-header');
+  assert.ok(header, 'ticket header');
+  // 긴 ID는 8자로 줄여 보이고 전체 ID는 title/aria에 남는다.
+  assert.ok(header.textContent.includes('#abc123de'), 'short id chip, got: ' + header.textContent.slice(0, 120));
+  assert.ok(!header.textContent.includes(longId), 'full id must not stretch the header');
+  // 동작 버튼은 헤더에 직접 없고 메뉴 안에 있다.
+  assert.ok(!header.textContent.includes('Delete'), 'no direct Delete button');
+  const trigger = header.querySelector('[aria-label="Ticket menu"]');
+  assert.ok(trigger, 'hamburger trigger');
+  click(trigger);
+  await flush();
+  const panel = view.container.querySelector('.awb-session-menu-panel');
+  assert.ok(panel, 'menu opens');
+  assert.match(panel.textContent, /Run/);
+  assert.match(panel.textContent, /Archive/);
+  assert.match(panel.textContent, /Delete/);
+  assert.ok(panel.textContent.includes(longId), 'full id copyable from menu');
+  assert.ok(header.querySelector('[aria-label="Close ticket"]'), 'close stays visible');
 });
 
 test('④ dispatch_paused_at 이면 일시정지 배너', async (t) => {

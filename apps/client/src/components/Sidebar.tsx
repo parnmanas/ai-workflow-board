@@ -2,7 +2,8 @@ import React from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
-import { useToast } from '../contexts/ToastContext';
+import { NotificationMuteButton, useToast } from '../contexts/ToastContext';
+import { ArtifactToggleButton } from './ArtifactPanel';
 import { api } from '../api';
 import type { AgentSessionUpdateEvent, AgentSessionHost, AgentSessionSummary, ChatRoomListItem } from '../types';
 import { tokens } from '../tokens';
@@ -801,6 +802,10 @@ export default function Sidebar({
         </div>
         <MentionInboxBadge accountId={wsId} />
         <NotificationSettingsPanel />
+        {/* Former main-frame header buttons — the desktop AWB brand bar is
+            gone, so mute/artifact toggles live here now (drawer too). */}
+        <NotificationMuteButton />
+        <ArtifactToggleButton />
       </div>
 
       <nav

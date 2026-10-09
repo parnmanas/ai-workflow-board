@@ -27,6 +27,7 @@ import AssigneeSection from './ticketPanel/AssigneeSection';
 import OnDoneActionsField from './ticketPanel/OnDoneActionsField';
 import PrerequisitesField from './ticketPanel/PrerequisitesField';
 import TicketAttachmentsSection from './ticketPanel/TicketAttachmentsSection';
+import SessionHeaderMenu, { SessionMenuItem, SessionMenuSection } from './sessions/SessionHeaderMenu';
 import {
   TicketDraft, collectTagPool, computeDirtyTicketFields, draftFromTicket, effectiveAssignee, effectiveTags,
   openPrerequisiteCount, runtimeSpecEqual, settleSavedDraft,
@@ -1421,7 +1422,7 @@ export default function TicketPanel({
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCopyId(); }
             }}
-            title={idCopied ? '복사됨!' : '클릭하여 Ticket ID 복사'}
+            title={idCopied ? '복사됨!' : `클릭하여 Ticket ID 복사 (${activeTicket.id})`}
             aria-label={`Ticket ID ${activeTicket.id}, 클릭하여 클립보드에 복사`}
             style={{
               fontSize: '11px', padding: '3px 8px', borderRadius: 4,
@@ -1430,7 +1431,7 @@ export default function TicketPanel({
               cursor: 'pointer', userSelect: 'none',
               transition: 'background 0.15s ease, color 0.15s ease',
             }}
-          >#{activeTicket.id}</span>
+          >#{activeTicket.id.slice(0, 8)}</span>
           <span style={{
             display: 'inline-flex', alignItems: 'center', gap: 5,
             fontSize: '11px', padding: '3px 8px', borderRadius: 4,
@@ -1495,50 +1496,53 @@ export default function TicketPanel({
         {/* 진행 상태 — 보드 카드·미션·세션·채팅이 공유하는 어휘(src/activity.ts).
             오른쪽 프레임 헤더는 점 대신 라벨까지 보여 준다. */}
         <ActivityPill view={ticketActivity(activeTicket)} />
-        <div style={{ display: 'flex', gap: 8, position: 'relative' }}>
-          {/* Run — root tickets only; children are a checklist the parent's
-              assignee works through and are never dispatched themselves. */}
-          {isRoot && (
-            <button
-              onClick={handleRun}
-              disabled={running || !activeTicket.assignee}
-              title={activeTicket.assignee
-                ? 'Send this ticket to its assignee now'
-                : '담당자가 없어 실행할 수 없습니다 — Detail 탭에서 담당자를 지정하고 저장하세요'}
-              style={{
-                background: tokens.colors.surfaceCard,
-                color: activeTicket.assignee ? tokens.colors.accentMid : tokens.colors.textMuted,
-                border: `1px solid ${tokens.colors.border}`,
-                borderRadius: tokens.radii.md,
-                padding: '4px 12px',
-                fontSize: '12px',
-                cursor: running || !activeTicket.assignee ? 'not-allowed' : 'pointer',
-                opacity: running || !activeTicket.assignee ? 0.6 : 1,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-              }}
-            >
-              <span>▶</span>
-              <span>{running ? 'Running…' : 'Run'}</span>
-            </button>
-          )}
-          {isRoot && (
-            <button
-              onClick={handleToggleArchive}
-              disabled={archiveBusy}
-              title={activeTicket.archived_at ? 'Restore this ticket to the pool' : 'Archive this ticket (and its subtasks)'}
-              style={{
-                background: tokens.colors.surfaceCard, color: tokens.colors.textSecondary,
-                border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                padding: '4px 12px', fontSize: '12px', cursor: archiveBusy ? 'not-allowed' : 'pointer',
-              }}
-            >{activeTicket.archived_at ? 'Unarchive' : 'Archive'}</button>
-          )}
-          <button onClick={() => { onDelete(activeTicket.id); onClose(); }} style={{
-            background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
-            padding: '4px 12px', fontSize: '12px', cursor: 'pointer',
-          }}>Delete</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', position: 'relative' }}>
+          {/* Run / Archive / Delete live in the hamburger menu — the header
+              keeps only the close button so the row stays short. */}
+          <SessionHeaderMenu label="Ticket menu">
+            {(close) => (
+              <>
+                <SessionMenuSection title="Actions">
+                  {/* Run — root tickets only; children are a checklist the parent's
+                      assignee works through and are never dispatched themselves. */}
+                  {isRoot && (
+                    <SessionMenuItem
+                      icon="▶"
+                      label={running ? 'Running…' : 'Run'}
+                      title={activeTicket.assignee
+                        ? 'Send this ticket to its assignee now'
+                        : '담당자가 없어 실행할 수 없습니다 — Detail 탭에서 담당자를 지정하고 저장하세요'}
+                      disabled={running || !activeTicket.assignee}
+                      onSelect={() => { close(); void handleRun(); }}
+                    />
+                  )}
+                  {isRoot && (
+                    <SessionMenuItem
+                      icon="🗄"
+                      label={activeTicket.archived_at ? 'Unarchive' : 'Archive'}
+                      title={activeTicket.archived_at ? 'Restore this ticket to the pool' : 'Archive this ticket (and its subtasks)'}
+                      disabled={archiveBusy}
+                      onSelect={() => { close(); void handleToggleArchive(); }}
+                    />
+                  )}
+                  <SessionMenuItem
+                    icon="🗑"
+                    label="Delete"
+                    title="Delete this ticket"
+                    onSelect={() => { onDelete(activeTicket.id); onClose(); }}
+                  />
+                </SessionMenuSection>
+                <SessionMenuSection title="Ticket">
+                  <SessionMenuItem
+                    icon="#"
+                    label={activeTicket.id}
+                    title="Click to copy full ticket ID"
+                    onSelect={() => { close(); void handleCopyId(); }}
+                  />
+                </SessionMenuSection>
+              </>
+            )}
+          </SessionHeaderMenu>
           <button aria-label="Close ticket" onClick={requestClose} style={{
             background: tokens.colors.border, color: tokens.colors.textStrong, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '16px', cursor: 'pointer',

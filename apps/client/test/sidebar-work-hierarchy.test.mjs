@@ -30,6 +30,7 @@ import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { NotificationProvider } from '../src/contexts/NotificationContext.tsx';
+import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx';
 import Sidebar from '../src/components/Sidebar.tsx';
 import { MISSIONS_CHANGED_EVENT, TEAMS_CHANGED_EVENT } from '../src/components/workNavigation.ts';
 import { LegacyOrchestrationTeamsRedirect } from '../src/App.tsx';
@@ -185,16 +186,20 @@ async function mountSidebar(t, options = {}) {
               NotificationProvider,
               null,
               h(LocationProbe),
-              h(Sidebar, {
-                overlay,
-                isOpen: overlay,
-                onClose: () => {
-                  closed.count += 1;
-                },
-                wsId: WS_ID,
-                rooms: [],
-                roomsLoading: false,
-              }),
+              h(
+                ArtifactPanelProvider,
+                null,
+                h(Sidebar, {
+                  overlay,
+                  isOpen: overlay,
+                  onClose: () => {
+                    closed.count += 1;
+                  },
+                  wsId: WS_ID,
+                  rooms: [],
+                  roomsLoading: false,
+                }),
+              ),
             ),
           ),
         ),

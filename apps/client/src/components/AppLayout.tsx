@@ -187,36 +187,14 @@ export default function AppLayout() {
                 <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
               </div>
             </button>
-            <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
             <div style={{ flex: 1 }} />
             <NotificationMuteButton />
             <ArtifactToggleButton />
           </div>
         )}
 
-        {/* Work navigation is global; ownership is managed in Settings. */}
-        {!drawerMode && (
-          <div
-            data-testid="app-header"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              padding: '8px 24px',
-              borderBottom: `1px solid ${tokens.colors.border}`,
-              background: tokens.colors.surface,
-              flexShrink: 0,
-              justifyContent: 'space-between',
-              gap: 12,
-            }}
-          >
-            <span style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <NotificationMuteButton />
-              <ArtifactToggleButton />
-            </div>
-          </div>
-        )}
-
+        {/* The desktop AWB brand bar is gone — Sidebar already carries the
+            brand, and its header now holds the mute/artifact buttons. */}
         <main className="awb-content">
           <Outlet />
         </main>

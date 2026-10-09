@@ -33,6 +33,7 @@ import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { NotificationProvider } from '../src/contexts/NotificationContext.tsx';
+import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx';
 import Sidebar from '../src/components/Sidebar.tsx';
 
 const h = React.createElement;
@@ -187,14 +188,18 @@ async function mountSidebar(t, options = {}) {
               NotificationProvider,
               null,
               h(LocationProbe),
-              h(Sidebar, {
-                overlay: false,
-                isOpen: false,
-                onClose: () => {},
-                wsId: WS_ID,
-                rooms: [],
-                roomsLoading: false,
-              }),
+              h(
+                ArtifactPanelProvider,
+                null,
+                h(Sidebar, {
+                  overlay: false,
+                  isOpen: false,
+                  onClose: () => {},
+                  wsId: WS_ID,
+                  rooms: [],
+                  roomsLoading: false,
+                }),
+              ),
             ),
           ),
         ),
