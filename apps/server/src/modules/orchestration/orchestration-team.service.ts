@@ -279,6 +279,40 @@ export class OrchestrationTeamService {
     }
   }
 
+  // ── Slot provisioning ───────────────────────────────────────────────────
+
+  /**
+   * Materialize one slot identity on its host right after it is authored.
+   *
+   * Dispatch alone never writes the slot's CLI credential files (the manager
+   * only prepares an empty cli-home for unknown identities), so an identity
+   * that never went through `spawn_agent` runs credential-less no matter what
+   * credential the slot names. A fresh member — and any cli/dir/credential
+   * edit, which mints a NEW identity key while `restart_agent` only reaps the
+   * previous one — would otherwise first fail with "Not logged in" at
+   * dispatch time. Best-effort: offline hosts and issue failures only log;
+   * the mission-start hook retries.
+   */
+  private async provisionSlotBestEffort(
+    spec: TeamAgentSpec,
+    ownerAccountId: string | null,
+    label: string,
+  ): Promise<void> {
+    if (!this.commands) return;
+    try {
+      await this.commands.provisionSlotIdentity(spec, {
+        accountId: ownerAccountId || '',
+        label,
+        issuedBy: 'system:orchestration-roster',
+      });
+    } catch (e: any) {
+      this.logService.warn('Orchestration', `slot provision dispatch failed for ${label}`, {
+        account_id: ownerAccountId ?? undefined,
+        error: e?.message,
+      });
+    }
+  }
+
   // ── Reads ─────────────────────────────────────────────────────────────────
 
   /** 이 workspace 소유 팀 + 모든 글로벌 팀(티켓 1b62b437). */
@@ -664,6 +698,15 @@ export class OrchestrationTeamService {
     if (orchRuntimeEdited?.merged) {
       await this.notifySlotRuntimeChanged(
         orchRuntimeEdited.before, orchRuntimeEdited.previousAgentId, orchRuntimeEdited.merged, team.account_id);
+      // 멤버 슬롯과 같은 회전 함정: orchestrator 스펙 변경이 새 identity를
+      // 민 경우 restart는 이전 키에만 가므로 새 키를 프로비저닝한다.
+      if (team.orchestrator_agent_id && team.orchestrator_agent_id !== orchRuntimeEdited.previousAgentId) {
+        await this.provisionSlotBestEffort(
+          orchRuntimeEdited.merged,
+          team.account_id ?? team.owner_account_id,
+          `${team.name}/orchestrator`,
+        );
+      }
     }
     return this.getTeam(team.id, accountId);
   }
@@ -745,6 +788,16 @@ export class OrchestrationTeamService {
         position: count,
       }),
     );
+    // 새로 만든 identity는 아직 어느 호스트에도 materialize된 적 없다 — 지금
+    // 프로비저닝하지 않으면 첫 디스패치가 빈 cli-home으로 나가 "Not logged in"이
+    // 된다. 실패해도 저장은 유효하고 미션 시작 훅이 재시도한다.
+    if (spec) {
+      await this.provisionSlotBestEffort(
+        spec,
+        team.account_id ?? team.owner_account_id,
+        `${team.name}/${input.role_label || spec.cli || agentId.slice(0, 8)}`,
+      );
+    }
     return this.getTeam(team.id, accountId);
   }
 
@@ -795,6 +848,16 @@ export class OrchestrationTeamService {
       // 갈아태운다. cli/dir 가 바뀌면 키도 바뀌어 새 worker 는 깨끗이 뜨지만,
       // 묵은 키의 세션은 예전 launch context 로 계속 돌기 때문이다.
       await this.notifySlotRuntimeChanged(before, previousAgentId, merged, team.account_id);
+      // credential 변경도 identity를 회전시킨다 — restart는 이전 키에만 가므로
+      // 새 키를 여기서 프로비저닝하지 않으면 새 identity가 빈 cli-home으로
+      // 디스패치돼 "Not logged in"이 된다.
+      if (member.agent_id !== previousAgentId) {
+        await this.provisionSlotBestEffort(
+          merged,
+          team.account_id ?? team.owner_account_id,
+          `${team.name}/${member.role_label || merged.cli || member.agent_id.slice(0, 8)}`,
+        );
+      }
       return this.getTeam(team.id, accountId);
     }
 

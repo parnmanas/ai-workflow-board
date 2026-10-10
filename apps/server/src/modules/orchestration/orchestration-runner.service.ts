@@ -51,6 +51,7 @@ import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService, countSteps, readExcludedMemberIds, readExtraMembers } from './orchestration-mission.service';
 import { OrchestrationTeamService } from './orchestration-team.service';
+import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { orchestrationError } from './orchestration-errors';
 import { isUuidShapedId, resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
@@ -181,6 +182,9 @@ export class OrchestrationRunnerService {
     // 역시 맨 뒤(docs/tickets.md) — 미션 프로젝트와 Host 별 main clone 폴더를 브리프·
     // work order 에 적는다. 프로젝트가 있는 미션에서만 쓰이므로 스텁 생성자는 비워 둬도 된다.
     private readonly projects: ProjectsService,
+    // 역시 맨 뒤 — 미션 시작 시 effective roster 의 credential materialization
+    // (아래 provisionMissionRoster). 스텁 생성자는 비워 두면 훅이 조용히 건너뛴다.
+    private readonly commands?: AgentManagerCommandService,
   ) {}
 
   /** Run `fn` with exclusive access to this mission's state machine. */
@@ -240,6 +244,13 @@ export class OrchestrationRunnerService {
             `and no ad-hoc member was added. Include at least one member or add an ad-hoc member.`,
         );
       }
+      // Effective roster의 credential materialization — 브리핑 전에 best-effort로.
+      // 디스패치만으로는 슬롯 credential 파일이 절대 써지지 않으므로(매니저는 빈
+      // cli-home만 준비한다), 프로비저닝된 적 없는 identity는 여기서라도
+      // spawn_agent를 거쳐야 "Not logged in"이 나지 않는다. fire-and-forget:
+      // 실패해도 미션 시작은 계속되고, heartbeat-skip 덕분에 정상 상태에선
+      // 조용하다.
+      void this.provisionMissionRoster(mission, team).catch(() => undefined);
       const briefProject = project
         ? {
             id: project.id,
@@ -3598,6 +3609,60 @@ export class OrchestrationRunnerService {
         spec: e.spec,
       })),
     });
+  }
+
+  /**
+   * 미션 시작 시 orchestrator + effective roster 전원의 slot identity를
+   * best-effort로 프로비저닝한다 (`spawn_agent` 경유 — 슬롯 credential 파일을
+   * cli-home에 materialize하는 유일한 경로).
+   *
+   * fire-and-forget + 개별 settled: 한 슬롯의 실패(호스트 오프라인 등)가 미션
+   * 시작을 막지 않는다. heartbeat-skip(`already_materialized`) 덕분에 이미
+   * 갖춰진 팀은 조용히 넘어간다.
+   */
+  private async provisionMissionRoster(mission: OrchestrationMission, team: OrchestrationTeam): Promise<void> {
+    if (!this.commands) return;
+    const targets: Array<{ spec: TeamAgentSpec; label: string }> = [];
+    const orchSpec = parseTeamAgentSpec((team as any)?.orchestrator_spec);
+    if (orchSpec) targets.push({ spec: orchSpec, label: `${team.name}/orchestrator` });
+    const excluded = new Set(readExcludedMemberIds(mission));
+    const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
+    for (const m of members) {
+      if (excluded.has(m.agent_id)) continue;
+      const spec = parseTeamAgentSpec((m as any)?.spec);
+      if (!spec) continue;
+      targets.push({ spec, label: `${team.name}/${m.role_label || spec.cli || m.agent_id.slice(0, 8)}` });
+    }
+    for (const extra of readExtraMembers(mission)) {
+      const spec = parseTeamAgentSpec(extra?.spec);
+      if (!spec) continue;
+      targets.push({ spec, label: `${team.name}/ad-hoc:${extra.role_label || spec.cli || extra.agent_id.slice(0, 8)}` });
+    }
+    if (targets.length === 0) return;
+    const results = await Promise.allSettled(
+      targets.map((t) =>
+        this.commands!.provisionSlotIdentity(t.spec, {
+          accountId: mission.account_id,
+          label: t.label,
+          issuedBy: 'system:mission-start',
+        }),
+      ),
+    );
+    const failures = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    );
+    const unprovisioned = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<AgentManagerCommandService['provisionSlotIdentity']>>> =>
+        r.status === 'fulfilled' && !r.value.ok,
+    );
+    if (failures.length > 0 || unprovisioned.length > 0) {
+      this.logService.warn(
+        'Orchestration',
+        `mission ${mission.id} roster provision: ${targets.length - failures.length - unprovisioned.length}/${targets.length} ok ` +
+          `(${unprovisioned.map((r) => r.value.reason).join(',') || ''}${failures.length ? `,${failures.length} errors` : ''})`,
+        { mission_id: mission.id },
+      );
+    }
   }
 
   /**

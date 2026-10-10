@@ -14,6 +14,7 @@ import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { AgentStatusService } from './agent-status.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
@@ -101,6 +102,12 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     private readonly runSkillSnapshots: RunSkillSnapshotService,
     private readonly prerequisites: TicketPrerequisitesService,
     private readonly projects: ProjectsService,
+    // 미션/팀과 같은 credential materialization 함정: assignee spec의 credential
+    // 파일은 spawn_agent 경로에서만 쓰이므로, 프로비저닝된 적 없는 identity는
+    // 여기서 best-effort로 확보한다. 스텁 생성자는 비워 두면 훅이 건너뛴다.
+    // (AgentsModule ↔ AgentManagerModule 순환은 모듈 레벨 forwardRef로 해소돼
+    //  있으므로, 같은 모듈의 autostart 서비스와 같이 plain 주입한다.)
+    private readonly commands?: AgentManagerCommandService,
   ) {}
 
   onModuleInit(): void {
@@ -410,6 +417,20 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (!this.isHostReachable(spec)) {
       await this.noteOffline(ticket, spec);
       return { dispatched: false, reason: 'host_offline' };
+    }
+
+    // Assignee identity의 credential materialization — 팀/미션과 같은 함정:
+    // 디스패치만으로는 슬롯 credential 파일이 절대 써지지 않으므로,
+    // 프로비저닝된 적 없는 identity는 여기서 best-effort로 확보한다.
+    // fire-and-forget: 실패해도 디스패치는 예전대로 진행한다.
+    if (this.commands) {
+      void this.commands
+        .provisionSlotIdentity(spec, {
+          accountId: ticket.account_id,
+          label: `ticket:${ticket.id.slice(0, 8)}/${(spec as any)?.cli || 'agent'}`,
+          issuedBy: 'system:ticket-dispatch',
+        })
+        .catch(() => undefined);
     }
 
     let payload: AgentTriggerPayload & Record<string, unknown>;

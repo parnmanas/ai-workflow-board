@@ -46,6 +46,10 @@ import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../comm
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
 import { agentIsVisibleInWorkspace, normalizeAgentAccountId } from '../../common/agent-account-scope';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
+import {
+  resolveSlotCredentialSources,
+  type SlotCredentialSource,
+} from './slot-credential-resolver';
 
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
@@ -1993,12 +1997,164 @@ export class AgentManagerController {
     try {
       const fields = normalizeCredentialFields(JSON.parse(plaintext));
       const token = fields.token || fields.api_key || '';
-      if (!token) return res.status(422).json({ error: 'repository credential has no token/api_key' });
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ username: fields.username || 'x-access-token', token });
+    if (!token) return res.status(422).json({ error: 'repository credential has no token/api_key' });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ username: fields.username || 'x-access-token', token });
     } catch {
       return res.status(503).json({ error: 'credential_payload_invalid' });
     }
+  }
+
+  /**
+   * Manager → server: read the decrypted CLI credential for a runtime
+   * identity the manager owns. Same auth model as the git-credential route
+   * (AgentAuthGuard + Runtime Host ownership).
+   *
+   * P4c-4 deleted this route together with the Agent table
+   * (`GET api/agent-manager/managed-agents/:id/credential` resolved through
+   * the Agent row) while the manager kept calling it from `spawn_agent` /
+   * `restart_agent` — so since then every such fetch 404s and every
+   * slot-declared credential silently degrades to the operator-HOME fallback.
+   * This restores it with slot resolution instead of the Agent row
+   * (`slot-credential-resolver.ts`): the slot holding an identity IS the
+   * credential grant a human made when they built the roster.
+   *
+   * Returned payload carries provider + raw credential fields so the manager
+   * can write a credential file into per-agent cli-home (subscription kind)
+   * or set the matching env var at spawn (api_key kind). 204 when the slot
+   * names no credential — the manager treats that as "fall back to operator
+   * HOME" (legacy behaviour).
+   */
+  @ApiSecurity('agent-api-key')
+  @Get('api/agent-manager/managed-agents/:id/credential')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Manager → server: fetch the decrypted CLI credential for a runtime identity it owns' })
+  async getManagedAgentCredential(
+    @Param('id') targetAgentId: string,
+    @Query('account_id') requestedAccountId: string | undefined,
+    @Query('workspace_id') requestedWorkspaceId: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const agentId = String(targetAgentId || '').trim();
+    if (!agentId) return res.status(400).json({ error: 'agent id is required' });
+    const callerHostId = String((req as any).currentHostId || '').trim();
+    if (!callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
+
+    // The identity hash carries no host, so the same spec can exist on
+    // several machines — only a slot on the CALLING host authorizes it.
+    // The credential_id is functionally determined by the key (it is a hash
+    // input), so every same-host match agrees on it; first one wins.
+    let source: SlotCredentialSource | undefined;
+    try {
+      const candidates = await resolveSlotCredentialSources(this.dataSource, agentId);
+      source = candidates.find((c) => c.manager_agent_id === callerHostId);
+      if (!source && candidates.length > 0) {
+        this.logService.warn(
+          'AgentManager',
+          `Refused credential fetch: caller host=${callerHostId.slice(0, 8)} does not own identity=${agentId.slice(0, 11)} ` +
+            `(known on ${candidates.map((c) => c.manager_agent_id.slice(0, 8)).join(',')})`,
+        );
+        return res.status(403).json({ error: 'caller is not the owning host for this identity' });
+      }
+    } catch (e: any) {
+      this.logService.error('AgentManager', `Slot credential resolution failed for ${agentId.slice(0, 11)}`, {
+        error: e?.message,
+      });
+      return res.status(500).json({ error: 'slot credential resolution failed' });
+    }
+    if (!source) return res.status(404).json({ error: 'no slot addresses this identity' });
+
+    // Scope check: the fetch must serve the identity's own owner scope, so a
+    // cross-account binding can't leak secrets (mirrors the git-credential
+    // route's workspace guard).
+    const ownerAccountId = String(source.account_id || '').trim();
+    const requested = String(requestedAccountId || requestedWorkspaceId || '').trim();
+    if (requested && ownerAccountId && requested !== ownerAccountId) {
+      return res.status(403).json({ error: 'identity is outside the requested account' });
+    }
+
+    if (!source.credential_id) return res.status(204).send();
+
+    const cred = await this.credentialRepo.findOne({ where: { id: source.credential_id } });
+    if (!cred) {
+      this.logService.warn(
+        'AgentManager',
+        `Slot credential ${source.credential_id.slice(0, 8)} not found for identity=${agentId.slice(0, 11)} (${source.label}) — falling back to none`,
+      );
+      return res.status(404).json({ error: 'credential not found' });
+    }
+    if (cred.account_id !== null && cred.account_id !== ownerAccountId) {
+      this.logService.warn(
+        'AgentManager',
+        `Refused credential fetch: cred=${cred.id.slice(0, 8)} (account=${(cred.account_id || '').slice(0, 8)}) ` +
+          `is neither global nor owned by identity=${agentId.slice(0, 11)} (account=${ownerAccountId.slice(0, 8) || 'global'})`,
+      );
+      return res.status(403).json({ error: 'credential belongs to another account' });
+    }
+
+    // Disambiguate "stored fields legitimately empty" from "decrypt silently
+    // failed" (restored P4c-4-era guard): encryption.service.decrypt()
+    // returns '' on key mismatch — serving that as 200 OK with fields={}
+    // would run the slot with no auth at all. Surface 503 so the operator
+    // re-edits the credential instead.
+    const ciphertext = cred.encrypted_data || '';
+    const plaintext = ciphertext ? decrypt(ciphertext) : '';
+    if (ciphertext.startsWith('enc:') && !plaintext) {
+      this.logService.error(
+        'AgentManager',
+        `Credential decrypt failed for cred=${cred.id.slice(0, 8)} (provider=${cred.provider}). ` +
+          `Likely cause: ENCRYPTION_KEY env / .encryption_key file changed since the credential was saved. ` +
+          `Operator must re-edit the credential in Settings → Credentials to re-encrypt it under the current key.`,
+      );
+      return res.status(503).json({
+        error: 'credential_decrypt_failed',
+        credential_id: cred.id,
+        provider: cred.provider,
+        detail:
+          'Server failed to decrypt the stored credential. The encryption key may have changed since ' +
+          'the credential was saved. Re-edit the credential in Settings → Credentials to re-encrypt it.',
+      });
+    }
+
+    let fields: Record<string, string> = {};
+    if (plaintext) {
+      try {
+        const decoded = JSON.parse(plaintext);
+        if (decoded && typeof decoded === 'object') {
+          // Heal paste damage on the way out too, not only on write: a row
+          // stored by an older build can carry a hard line break inside the
+          // secret, which the manager would export verbatim and every spawn
+          // on that credential would fail auth.
+          const raw = decoded as Record<string, string>;
+          fields = normalizeCredentialFields(raw);
+          const repaired = Object.keys(fields).filter((k) => fields[k] !== raw[k]);
+          if (repaired.length > 0) {
+            this.logService.warn(
+              'AgentManager',
+              `Credential cred=${cred.id.slice(0, 8)} (provider=${cred.provider}) had whitespace inside ` +
+                `field(s) ${repaired.join(',')} — served normalized. Re-save it in Settings → Credentials ` +
+                `to fix it at rest.`,
+            );
+          }
+        }
+      } catch {
+        // Plaintext didn't parse as JSON — treat as empty fields and warn.
+        // Caller (manager) already handles the empty-fields case with its own
+        // explicit ERROR log so the operator sees what's mis-configured.
+        this.logService.warn(
+          'AgentManager',
+          `Credential plaintext is not valid JSON for cred=${cred.id.slice(0, 8)}`,
+        );
+      }
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      credential_id: cred.id,
+      provider: cred.provider,
+      fields,
+    });
   }
 
   @Post('api/agent-manager/runtime/child-runs/start')

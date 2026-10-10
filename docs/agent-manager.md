@@ -57,6 +57,28 @@ There is no default runtime, default strategy, or fallback to an editor/plugin
 session. A missing, unknown, unavailable, or invalid runtime fails with a
 typed error instead of silently changing execution semantics.
 
+### Slot credentials are materialized only by spawn_agent / restart_agent
+
+A roster slot (or ticket assignee) naming a `credential_id` does NOT get that
+credential applied by dispatch alone: the dispatch path only prepares an empty
+cli-home plus the MCP/apiKey pair, and the CLI then fails with "Not logged
+in". The credential files (or env injection) are written exclusively by the
+`spawn_agent` / `restart_agent` command path, which fetches them from
+`GET /api/agent-manager/managed-agents/:id/credential` (resolved through the
+slot holding that identity — team slot, mission ad-hoc member, ticket
+assignee, or chat participant spec — never through an Agent row).
+
+Consequences the server enforces so this never goes stale silently:
+
+- A brand-new slot identity, and any cli/dir/credential edit (which mints a
+  NEW identity key while `restart_agent` only reaps the previous one), is
+  `spawn_agent`-provisioned best-effort right at authoring time
+  (`addMember` / `updateMember` / orchestrator edit).
+- Every mission start provisions its orchestrator + effective roster
+  best-effort, and every ticket dispatch provisions its assignee the same
+  way. Steady state stays silent: identities the host already reports as
+  `subscription` / `api_key` are skipped.
+
 ## Account ownership compatibility
 
 Work pages use `/sessions`, `/tickets`, `/projects`, and `/missions` without an
