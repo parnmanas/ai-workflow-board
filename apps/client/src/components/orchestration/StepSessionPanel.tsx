@@ -104,7 +104,7 @@ export default function StepSessionPanel({
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState<string | null>(null);
   const [showOrder, setShowOrder] = useState(false);
-  const [lightbox, setLightbox] = useState<{ meta: EvidenceMediaMeta; url: string } | null>(null);
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** 이미지가 나중에 디코딩되며 높이가 자랄 때 바닥을 유지하기 위한 내용 래퍼. */
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -168,6 +168,17 @@ export default function StepSessionPanel({
 
   const stepEvents = useMemo(() => events.filter((e) => e.step_id === step.id), [events, step.id]);
   const rows = useMemo(() => buildStepSessionRows(items, stepEvents), [items, stepEvents]);
+  // step 전체 미디어 갤러리 — 썸네일 클릭은 다운로드가 아니라 팝업 + prev/next.
+  const flatMedia = useMemo(() => {
+    const out: EvidenceMediaMeta[] = [];
+    for (const row of rows) {
+      if (row.kind !== 'item') continue;
+      for (const att of row.item.attachments ?? []) {
+        if (isEvidenceMedia(att)) out.push(att);
+      }
+    }
+    return out;
+  }, [rows]);
 
   // 스크롤 규칙은 chat 방·미션 대화·세션 전사와 같은 훅이 맡는다. step 을 바꾸면
   // 새 전사를 다시 바닥에서 열어야 하므로 resetKey 가 step.id 다.
@@ -428,7 +439,7 @@ export default function StepSessionPanel({
                   mediaUrls={media.urls}
                   mediaPartial={media.partial}
                   onEnsureMedia={media.ensure}
-                  onOpenMedia={(meta, url) => setLightbox({ meta, url })}
+                  onOpenMedia={(meta) => setLightboxId(meta.id)}
                   onDownload={loadAttachment}
                 />
               ),
@@ -452,7 +463,34 @@ export default function StepSessionPanel({
         않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.
       </div>
 
-      {lightbox && <EvidenceLightbox meta={lightbox.meta} url={lightbox.url} onClose={() => setLightbox(null)} />}
+      {(() => {
+        if (!lightboxId) return null;
+        const idx = flatMedia.findIndex((m) => m.id === lightboxId);
+        if (idx < 0) return null;
+        const meta = flatMedia[idx];
+        const url = media.urls[meta.id];
+        if (!url) return null;
+        const go = (next: number) => {
+          const wrapped = (next + flatMedia.length) % flatMedia.length;
+          const target = flatMedia[wrapped];
+          if (!media.urls[target.id]) {
+            media.ensure(target);
+            return;
+          }
+          setLightboxId(target.id);
+        };
+        return (
+          <EvidenceLightbox
+            meta={meta}
+            url={url}
+            partial={media.partial[meta.id]}
+            counter={flatMedia.length > 1 ? `${idx + 1} / ${flatMedia.length}` : undefined}
+            onPrev={flatMedia.length > 1 ? () => go(idx - 1) : undefined}
+            onNext={flatMedia.length > 1 ? () => go(idx + 1) : undefined}
+            onClose={() => setLightboxId(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

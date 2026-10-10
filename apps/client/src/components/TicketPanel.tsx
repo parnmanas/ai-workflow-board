@@ -8,6 +8,7 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import ChildTicketList from './SubtaskList';
 import CommentList from './CommentList';
+import MediaLightbox from './common/MediaLightbox';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
@@ -2358,26 +2359,19 @@ export default function TicketPanel({
         </div>
       )}
 
-      {/* Image / video preview modal */}
+      {/* Image / video preview modal — 레거시 폴백(갤러리에 없는 단건). 갤러리를 가진
+          CommentList·TicketAttachmentsSection 은 각자 MediaLightbox 를 띄우므로 여기로 안 온다. */}
       {imagePreview && (
-        <div onClick={() => setImagePreview(null)} style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, cursor: 'pointer',
-        }}>
-          {imagePreview.mimetype?.startsWith('video/') ? (
-            // Stop bubbling so clicking the controls doesn't close the modal —
-            // backdrop click still does.
-            <video
-              src={imagePreview.src}
-              controls
-              autoPlay
-              onClick={(e) => e.stopPropagation()}
-              style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8, background: '#000' }}
-            />
-          ) : (
-            <img src={imagePreview.src} alt="Preview" style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8 }} />
-          )}
-        </div>
+        <MediaLightbox
+          items={[{
+            src: imagePreview.src,
+            kind: imagePreview.mimetype?.startsWith('video/') ? 'video' : 'image',
+            caption: 'Preview',
+          }]}
+          index={0}
+          onIndexChange={() => {}}
+          onClose={() => setImagePreview(null)}
+        />
       )}
     </div>
   );

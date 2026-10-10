@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { api } from '../../api';
 import type { OrchestrationStep, OrchestrationStepArtifact } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button } from '../common';
+import MediaLightbox from '../common/MediaLightbox';
 
 /**
  * 사람이 Pass/Fail 을 답하는 화면(티켓 5dbe4aa2).
@@ -40,6 +41,18 @@ function mediaKindOf(artifact: OrchestrationStepArtifact): 'image' | 'video' | '
 }
 
 function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const gallery = useMemo(() => {
+    return artifacts
+      .map((a, i) => ({ artifact: a, index: i }))
+      .filter(({ artifact }) => mediaKindOf(artifact) === 'image' || mediaKindOf(artifact) === 'video')
+      .map(({ artifact }) => ({
+        src: String(artifact.ref || ''),
+        kind: (mediaKindOf(artifact) === 'video' ? 'video' : 'image') as 'image' | 'video',
+        caption: artifact.label || String(artifact.ref || ''),
+      }))
+      .filter((g) => !!g.src);
+  }, [artifacts]);
   if (artifacts.length === 0) {
     return (
       <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
@@ -53,6 +66,7 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
       {artifacts.map((a, i) => {
         const media = mediaKindOf(a);
         const caption = a.label || a.ref;
+        const galleryIndex = gallery.findIndex((g) => g.src === String(a.ref || '') && (g.caption === caption || g.src === String(a.ref || '')));
         return (
           <div key={`${a.kind}-${a.ref}-${i}`} data-testid="confirm-artifact" data-media={media}>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
@@ -60,30 +74,54 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
               {a.label ? ` — ${a.label}` : ''}
             </div>
             {media === 'image' && (
-              <img
-                src={a.ref}
-                alt={caption}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: 420,
-                  borderRadius: 6,
-                  border: `1px solid ${tokens.colors.border}`,
-                  display: 'block',
-                }}
-              />
+              <button
+                type="button"
+                onClick={() => galleryIndex >= 0 && setLightboxIndex(galleryIndex)}
+                title="클릭하면 크게 보기 (← → 로 넘기기)"
+                style={{ padding: 0, border: 'none', background: 'transparent', cursor: galleryIndex >= 0 ? 'zoom-in' : 'default', display: 'block', maxWidth: '100%' }}
+              >
+                <img
+                  src={a.ref}
+                  alt={caption}
+                  style={{
+                    maxWidth: '100%',
+                    maxHeight: 420,
+                    borderRadius: 6,
+                    border: `1px solid ${tokens.colors.border}`,
+                    display: 'block',
+                  }}
+                />
+              </button>
             )}
             {media === 'video' && (
-              <video
-                src={a.ref}
-                controls
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: 420,
-                  borderRadius: 6,
-                  border: `1px solid ${tokens.colors.border}`,
-                  display: 'block',
-                }}
-              />
+              <div style={{ position: 'relative', display: 'inline-block', maxWidth: '100%' }}>
+                <video
+                  src={a.ref}
+                  controls
+                  style={{
+                    maxWidth: '100%',
+                    maxHeight: 420,
+                    borderRadius: 6,
+                    border: `1px solid ${tokens.colors.border}`,
+                    display: 'block',
+                  }}
+                />
+                {galleryIndex >= 0 && (
+                  <button
+                    type="button"
+                    title="크게 보기 (갤러리)"
+                    aria-label="Expand video"
+                    onClick={() => setLightboxIndex(galleryIndex)}
+                    style={{
+                      position: 'absolute', top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
+                      border: '1px solid rgba(255,255,255,0.35)', background: 'rgba(0,0,0,0.6)',
+                      color: '#fff', fontSize: 14, cursor: 'pointer', lineHeight: 1,
+                    }}
+                  >
+                    ⤢
+                  </button>
+                )}
+              </div>
             )}
             {media === 'link' && (
               <a
@@ -103,6 +141,14 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
           </div>
         );
       })}
+      {lightboxIndex !== null && gallery[lightboxIndex] && (
+        <MediaLightbox
+          items={gallery}
+          index={lightboxIndex}
+          onIndexChange={(next) => setLightboxIndex(next)}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
     </div>
   );
 }

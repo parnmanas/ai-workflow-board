@@ -5,6 +5,7 @@ import type { CatalogScope, Resource, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
+import MediaLightbox from '../common/MediaLightbox';
 import { relativeTime } from '../../utils/time';
 import ResourceDetailPanel from './ResourceDetailPanel';
 
@@ -784,79 +785,12 @@ export default function ResourceManager({
       />
 
       {lightboxImage && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={lightboxImage.alt}
-          onClick={() => setLightboxImage(null)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.92)',
-            zIndex: 10000,
-            overflow: 'auto',
-            cursor: 'zoom-out',
-          }}
-        >
-          <div style={{ minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
-            {lightboxImage.kind === 'video' ? (
-              <video
-                src={lightboxImage.src}
-                controls
-                autoPlay
-                playsInline
-                onClick={(e) => e.stopPropagation()}
-                style={{ cursor: 'default', maxWidth: '90vw', maxHeight: '85vh', background: '#000', borderRadius: tokens.radii.sm, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}
-              />
-            ) : (
-              <img
-                src={lightboxImage.src}
-                alt={lightboxImage.alt}
-                onClick={(e) => e.stopPropagation()}
-                style={{ cursor: 'default', background: '#fff', borderRadius: tokens.radii.sm, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}
-              />
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setLightboxImage(null); }}
-            style={{
-              position: 'fixed',
-              top: 12,
-              right: 16,
-              background: 'rgba(255, 255, 255, 0.18)',
-              color: '#fff',
-              border: 'none',
-              borderRadius: tokens.radii.sm,
-              padding: '8px 14px',
-              cursor: 'pointer',
-              fontSize: 13,
-              fontWeight: 600,
-            }}
-          >
-            Close (Esc)
-          </button>
-          <div
-            style={{
-              position: 'fixed',
-              bottom: 16,
-              left: '50%',
-              transform: 'translateX(-50%)',
-              background: 'rgba(0, 0, 0, 0.6)',
-              color: '#fff',
-              padding: '6px 12px',
-              borderRadius: tokens.radii.sm,
-              fontSize: 12,
-              maxWidth: '80vw',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              pointerEvents: 'none',
-            }}
-          >
-            {lightboxImage.alt}
-          </div>
-        </div>
+        <MediaLightbox
+          items={[{ src: lightboxImage.src, kind: lightboxImage.kind, caption: lightboxImage.alt, filename: lightboxImage.alt }]}
+          index={0}
+          onIndexChange={() => {}}
+          onClose={() => setLightboxImage(null)}
+        />
       )}
     </div>
   );

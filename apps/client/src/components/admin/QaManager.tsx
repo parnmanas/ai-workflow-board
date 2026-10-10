@@ -8,6 +8,7 @@ import { relativeTime } from '../../utils/time';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError, formatDuration } from '../QaPhasesEditor';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
+import MediaLightbox from '../common/MediaLightbox';
 import { canOpenTicket, ticketPath } from '../../utils/ticketPath';
 import OnFailureTicketTargetFields from './OnFailureTicketTargetFields';
 import { onFailureTicketFromForm, onFailureTicketToForm, type OnFailureTicketForm } from './onFailureTicket.logic';
@@ -711,7 +712,7 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
   const { showToast } = useToast();
   const [runs, setRuns] = useState<QaRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [lightbox, setLightbox] = useState<{ src: string; kind: 'image' | 'video' } | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; kind: 'image' | 'video'; gallery?: Array<{ src: string; kind: 'image' | 'video' }> } | null>(null);
 
   // Phases are defined on the scenario only (null = legacy single timeout).
   const resolvedPhases = parseQaPhasesValue(scenario.qa_phases);
@@ -794,7 +795,15 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
                   <img
                     src={rawResourceUrl(thumbId)}
                     alt={`step ${step.idx}`}
-                    onClick={() => setLightbox({ src: rawResourceUrl(thumbId), kind: 'image' })}
+                    onClick={() => {
+                      // 시나리오 썸네일 갤러리 — 전 step 썸네일을 prev/next 로 넘긴다.
+                      const gallery = (scenario.steps ?? [])
+                        .map((s) => stepResultFor(latestRun, s.idx)?.artifact_resource_ids?.[0])
+                        .filter((id): id is string => !!id)
+                        .map((id) => ({ src: rawResourceUrl(id), kind: 'image' as const }));
+                      const src = rawResourceUrl(thumbId);
+                      setLightbox({ src, kind: 'image', gallery: gallery.length > 1 ? gallery : undefined });
+                    }}
                     style={{ marginTop: 8, width: '100%', height: 90, objectFit: 'cover', borderRadius: tokens.radii.sm, cursor: 'pointer', border: `1px solid ${tokens.colors.border}` }}
                   />
                 )}
@@ -839,7 +848,9 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
         </div>
       </div>
 
-      {lightbox && <Lightbox {...lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <ScenarioLightbox lightbox={lightbox} onClose={() => setLightbox(null)} />
+      )}
     </div>
   );
 }
@@ -1009,16 +1020,46 @@ function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | n
 }
 
 function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  // 갤러리 내 prev/next — 클릭은 다운로드가 아니라 팝업. kind 는 썸네일 probe 가 채운다.
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [kinds, setKinds] = useState<Record<string, 'image' | 'video'>>({});
+  const srcs = ids.map((id) => rawResourceUrl(id));
+  const items = srcs.map((src) => ({
+    src,
+    kind: kinds[src] || ('image' as const),
+    caption: src,
+  }));
   return (
-    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-      {ids.map((id) => {
-        const src = rawResourceUrl(id);
-        // We don't know the mimetype here without a fetch; render an <img> and
-        // fall back to a video thumbnail-style tile by attempting both. A plain
-        // <img> that fails to load is swapped for a video element via onError.
-        return <MediaThumb key={id} src={src} onClick={(kind) => onPreview(src, kind)} />;
-      })}
-    </div>
+    <>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {ids.map((id) => {
+          const src = rawResourceUrl(id);
+          // We don't know the mimetype here without a fetch; render an <img> and
+          // fall back to a video thumbnail-style tile by attempting both. A plain
+          // <img> that fails to load is swapped for a video element via onError.
+          return (
+            <MediaThumb
+              key={id}
+              src={src}
+              onClick={(kind) => {
+                setKinds((prev) => (prev[src] ? prev : { ...prev, [src]: kind }));
+                const idx = srcs.indexOf(src);
+                if (idx >= 0) setLightboxIndex(idx);
+                else onPreview(src, kind);
+              }}
+            />
+          );
+        })}
+      </div>
+      {lightboxIndex !== null && items[lightboxIndex] && (
+        <MediaLightbox
+          items={items}
+          index={lightboxIndex}
+          onIndexChange={(next) => setLightboxIndex(next)}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
+    </>
   );
 }
 
@@ -1060,21 +1101,28 @@ function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | '
   );
 }
 
-function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+function ScenarioLightbox({ lightbox, onClose }: { lightbox: { src: string; kind: 'image' | 'video'; gallery?: Array<{ src: string; kind: 'image' | 'video' }> }; onClose: () => void }) {
+  const gallery = lightbox.gallery && lightbox.gallery.length > 1 ? lightbox.gallery : [{ src: lightbox.src, kind: lightbox.kind }];
+  const initial = Math.max(0, gallery.findIndex((g) => g.src === lightbox.src));
+  const [index, setIndex] = useState(initial);
   return (
-    <div role="dialog" aria-modal="true" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40, cursor: 'zoom-out' }}>
-      {kind === 'video' ? (
-        <video src={src} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: '90vw', maxHeight: '85vh', background: '#000', borderRadius: tokens.radii.sm }} />
-      ) : (
-        <img src={src} alt="preview" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: tokens.radii.sm }} />
-      )}
-      <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ position: 'fixed', top: 12, right: 16, background: 'rgba(255,255,255,0.18)', color: '#fff', border: 'none', borderRadius: tokens.radii.sm, padding: '8px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>Close (Esc)</button>
-    </div>
+    <MediaLightbox
+      items={gallery.map((g) => ({ src: g.src, kind: g.kind, caption: g.src }))}
+      index={index}
+      onIndexChange={setIndex}
+      onClose={onClose}
+    />
+  );
+}
+
+function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'; onClose: () => void }) {
+  return (
+    <MediaLightbox
+      items={[{ src, kind, caption: src }]}
+      index={0}
+      onIndexChange={() => {}}
+      onClose={onClose}
+    />
   );
 }
 

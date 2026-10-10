@@ -11,6 +11,7 @@ import { Button, Input, Select, Modal, Card, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
+import MediaLightbox from '../common/MediaLightbox';
 import { canOpenTicket, ticketPath } from '../../utils/ticketPath';
 import { useProjects } from '../../projects/useProjects';
 import OnFailureTicketTargetFields from './OnFailureTicketTargetFields';
@@ -1101,13 +1102,42 @@ function FindingCard({ f }: { f: SecurityFinding }) {
 }
 
 function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [kinds, setKinds] = useState<Record<string, 'image' | 'video'>>({});
+  const srcs = ids.map((id) => rawResourceUrl(id));
+  const items = srcs.map((src) => ({
+    src,
+    kind: kinds[src] || ('image' as const),
+    caption: src,
+  }));
   return (
-    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-      {ids.map((id) => {
-        const src = rawResourceUrl(id);
-        return <MediaThumb key={id} src={src} onClick={(kind) => onPreview(src, kind)} />;
-      })}
-    </div>
+    <>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {ids.map((id) => {
+          const src = rawResourceUrl(id);
+          return (
+            <MediaThumb
+              key={id}
+              src={src}
+              onClick={(kind) => {
+                setKinds((prev) => (prev[src] ? prev : { ...prev, [src]: kind }));
+                const idx = srcs.indexOf(src);
+                if (idx >= 0) setLightboxIndex(idx);
+                else onPreview(src, kind);
+              }}
+            />
+          );
+        })}
+      </div>
+      {lightboxIndex !== null && items[lightboxIndex] && (
+        <MediaLightbox
+          items={items}
+          index={lightboxIndex}
+          onIndexChange={(next) => setLightboxIndex(next)}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
+    </>
   );
 }
 
@@ -1150,20 +1180,13 @@ function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | '
 }
 
 function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
   return (
-    <div role="dialog" aria-modal="true" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40, cursor: 'zoom-out' }}>
-      {kind === 'video' ? (
-        <video src={src} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: '90vw', maxHeight: '85vh', background: '#000', borderRadius: tokens.radii.sm }} />
-      ) : (
-        <img src={src} alt="preview" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: tokens.radii.sm }} />
-      )}
-      <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ position: 'fixed', top: 12, right: 16, background: 'rgba(255,255,255,0.18)', color: '#fff', border: 'none', borderRadius: tokens.radii.sm, padding: '8px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>Close (Esc)</button>
-    </div>
+    <MediaLightbox
+      items={[{ src, kind, caption: src }]}
+      index={0}
+      onIndexChange={() => {}}
+      onClose={onClose}
+    />
   );
 }
 

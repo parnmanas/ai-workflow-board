@@ -241,29 +241,41 @@ export function EvidenceThumb({
   );
 }
 
-/** 전체 화면 미리보기 — 이미지는 원본 크기, 동영상은 컨트롤 달린 플레이어. */
+/** 전체 화면 미리보기 — 이미지는 원본 크기, 동영상은 컨트롤 달린 플레이어. prev/next 로 갤러리를 넘긴다. */
 export function EvidenceLightbox({
   meta,
   url,
   caption,
   partial,
   onClose,
+  onPrev,
+  onNext,
+  counter,
 }: {
   meta: EvidenceMediaMeta;
   url: string;
   caption?: string;
   partial?: boolean;
   onClose: () => void;
+  onPrev?: () => void;
+  onNext?: () => void;
+  counter?: string;
 }) {
   const [broken, setBroken] = useState(false);
   useEffect(() => {
+    setBroken(false);
+  }, [url]);
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') onPrev?.();
+      else if (e.key === 'ArrowRight') onNext?.();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, onPrev, onNext]);
   const video = isVideoMime(meta.mime_type);
+  const canNav = !!(onPrev && onNext);
   return (
     <div
       role="dialog"
@@ -283,7 +295,25 @@ export function EvidenceLightbox({
         gap: 10,
       }}
     >
-      {broken ? (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', maxWidth: '94vw', width: '100%' }}
+      >
+        {canNav && (
+          <button
+            type="button"
+            aria-label="Previous"
+            onClick={onPrev}
+            style={{
+              position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', zIndex: 2,
+              width: 40, height: 56, borderRadius: 8, border: '1px solid rgba(255,255,255,0.25)',
+              background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 22, cursor: 'pointer', lineHeight: 1,
+            }}
+          >
+            ‹
+          </button>
+        )}
+        {broken ? (
         <div
           data-testid="evidence-lightbox-broken"
           onClick={(e) => e.stopPropagation()}
@@ -306,22 +336,39 @@ export function EvidenceLightbox({
         </div>
       ) : video ? (
         <video
+          key={url}
           src={url}
           controls
           autoPlay
           onError={() => setBroken(true)}
-          style={{ maxWidth: '92vw', maxHeight: '82vh', borderRadius: 6, background: '#000' }}
+          style={{ maxWidth: '88vw', maxHeight: '78vh', borderRadius: 6, background: '#000' }}
           onClick={(e) => e.stopPropagation()}
         />
       ) : (
         <img
+          key={url}
           src={url}
           alt={meta.file_name}
           onError={() => setBroken(true)}
-          style={{ maxWidth: '92vw', maxHeight: '82vh', borderRadius: 6 }}
+          style={{ maxWidth: '88vw', maxHeight: '78vh', borderRadius: 6 }}
           onClick={(e) => e.stopPropagation()}
         />
       )}
+        {canNav && (
+          <button
+            type="button"
+            aria-label="Next"
+            onClick={onNext}
+            style={{
+              position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', zIndex: 2,
+              width: 40, height: 56, borderRadius: 8, border: '1px solid rgba(255,255,255,0.25)',
+              background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 22, cursor: 'pointer', lineHeight: 1,
+            }}
+          >
+            ›
+          </button>
+        )}
+      </div>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -338,6 +385,9 @@ export function EvidenceLightbox({
         }}
       >
         <span>{caption || meta.file_name}</span>
+        {counter && (
+          <span style={{ color: '#aaa', fontVariantNumeric: 'tabular-nums' }}>{counter}</span>
+        )}
         {partial && (
           <span data-testid="evidence-lightbox-partial" style={{ color: tokens.colors.warningLight }}>
             ⚠ 끝까지 도착하지 않은 파일입니다 — 아래쪽 빈 부분은 처음부터 오지 않았습니다.

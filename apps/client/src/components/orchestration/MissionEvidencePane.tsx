@@ -32,7 +32,7 @@ export default function MissionEvidencePane({
 }) {
   const [items, setItems] = useState<OrchestrationEvidenceItem[] | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const [lightbox, setLightbox] = useState<{ meta: EvidenceMediaMeta; caption: string; url: string } | null>(null);
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -138,7 +138,7 @@ export default function MissionEvidencePane({
                   url={media.urls[item.id]}
                   partial={media.partial[item.id]}
                   onEnsure={media.ensure}
-                  onOpen={(meta, url) => setLightbox({ meta, url, caption: `${group.title} · ${item.uploaded_by}` })}
+                  onOpen={() => setLightboxId(item.id)}
                   size={150}
                 />
                 <figcaption style={{ fontSize: 10.5, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
@@ -154,15 +154,41 @@ export default function MissionEvidencePane({
           </div>
         </div>
       ))}
-      {lightbox && (
-        <EvidenceLightbox
-          meta={lightbox.meta}
-          url={lightbox.url}
-          caption={lightbox.caption}
-          partial={media.partial[lightbox.meta.id]}
-          onClose={() => setLightbox(null)}
-        />
-      )}
+      {(() => {
+        const flat = ordered.flatMap(([, group]) => group.items.map((item) => ({
+          item,
+          groupTitle: group.title,
+        })));
+        const idx = lightboxId ? flat.findIndex((f) => f.item.id === lightboxId) : -1;
+        if (idx < 0) return null;
+        const entry = flat[idx];
+        const url = media.urls[entry.item.id];
+        if (!url) return null;
+        const go = (next: number) => {
+          const wrapped = (next + flat.length) % flat.length;
+          // 다음 항목의 바이트가 아직 없으면 먼저 받아 둔다 — URL 이 생기면 그때 넘어간다.
+          const target = flat[wrapped];
+          if (!media.urls[target.item.id]) {
+            media.ensure(target.item);
+            // 로딩 중에는 제자리 — URL 이 도착하면 썸네일과 함께 다시 렌더되므로
+            // 사용자는 한 번 더 눌러 넘기면 된다(빈 화면으로 점프하지 않기 위해).
+            return;
+          }
+          setLightboxId(target.item.id);
+        };
+        return (
+          <EvidenceLightbox
+            meta={entry.item}
+            url={url}
+            caption={`${entry.groupTitle} · ${entry.item.uploaded_by}`}
+            partial={media.partial[entry.item.id]}
+            counter={flat.length > 1 ? `${idx + 1} / ${flat.length}` : undefined}
+            onPrev={flat.length > 1 ? () => go(idx - 1) : undefined}
+            onNext={flat.length > 1 ? () => go(idx + 1) : undefined}
+            onClose={() => setLightboxId(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

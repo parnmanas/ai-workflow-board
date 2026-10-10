@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatAttachment, ChatRoomMessageItem } from '../../types';
@@ -8,6 +8,7 @@ import { base64ToBlob, formatBytes, isImageMime, isVideoMime, triggerBlobDownloa
 import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';
 import TicketUnpendActionCard from './TicketUnpendActionCard';
+import MediaLightbox from '../common/MediaLightbox';
 
 // ─── MessageList ──────────────────────────────────────────────────────────────
 
@@ -19,7 +20,9 @@ export interface MessageListProps {
 }
 
 export default function MessageList({ messages, participantCount, participants = [], currentUserId }: MessageListProps) {
-  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  // 갤러리 라이트박스 — 클릭이 곧 다운로드가 아니라 팝업 + prev/next.
+  // key 기반이라 썸네일 로딩이 늦어 갤러리가 커져도 열린 위치가 흔들리지 않는다.
+  const [lightboxKey, setLightboxKey] = useState<string | null>(null);
   // Object URL cache keyed by attachment id. We never put base64 data URLs in
   // <img src> because that re-renders the entire base64 string on every diff;
   // the Blob → ObjectURL indirection lets the browser cache the decoded bytes
@@ -36,15 +39,7 @@ export default function MessageList({ messages, participantCount, participants =
     };
   }, []);
 
-  // Close lightbox on Escape key
-  useEffect(() => {
-    if (!lightboxImage) return;
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setLightboxImage(null);
-    }
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [lightboxImage]);
+  // Close lightbox on Escape key — handled inside MediaLightbox (Esc/←→).
 
   function ensureImagePreview(att: ChatAttachment) {
     const id = att.id || att.attachment_id || '';
@@ -85,6 +80,46 @@ export default function MessageList({ messages, participantCount, participants =
       // button stays clickable so the user can retry.
     }
   }
+
+  // 방 전체 미디어 갤러리 — 이미지·영상 클릭은 다운로드가 아니라 팝업 + prev/next.
+  // 로딩 전 썸네일은 갤러리에서 빠진다(열 수 없는 항목을 prev/next 로 밟지 않기 위해).
+  const gallery = useMemo(() => {
+    const out: Array<{ key: string; src: string; kind: 'image' | 'video'; caption?: string; filename?: string }> = [];
+    for (const msg of messages) {
+      if (msg.images) {
+        try {
+          const parsed = typeof msg.images === 'string' ? JSON.parse(msg.images) : msg.images;
+          if (Array.isArray(parsed)) {
+            parsed.forEach((img: any, idx: number) => {
+              if (!img?.data) return;
+              out.push({
+                key: `legacy:${msg.id}:${idx}`,
+                src: `data:${img.mimetype || 'image/png'};base64,${img.data}`,
+                kind: 'image',
+                caption: img.filename || `Image ${idx + 1}`,
+                filename: img.filename,
+              });
+            });
+          }
+        } catch { /* malformed — skip */ }
+      }
+      const atts: ChatAttachment[] = Array.isArray(msg.attachments) ? msg.attachments : [];
+      for (const att of atts) {
+        const id = att.id || att.attachment_id || '';
+        const url = id ? previewUrls[id] : undefined;
+        if (!id || !url) continue;
+        const mime = att.mime_type || (att as any).file_mimetype || '';
+        if (isImageMime(mime)) {
+          out.push({ key: id, src: url, kind: 'image', caption: att.filename || (att as any).file_name, filename: att.filename || (att as any).file_name });
+        } else if (isVideoMime(mime)) {
+          out.push({ key: id, src: url, kind: 'video', caption: att.filename || (att as any).file_name, filename: att.filename || (att as any).file_name });
+        }
+      }
+    }
+    return out;
+  }, [messages, previewUrls]);
+
+  const lightboxIndex = lightboxKey ? gallery.findIndex((g) => g.key === lightboxKey) : -1;
 
   const rendered: React.ReactNode[] = [];
 
@@ -385,12 +420,12 @@ export default function MessageList({ messages, participantCount, participants =
                       cursor: 'pointer',
                       border: `1px solid ${tokens.colors.border}`,
                     }}
-                    onClick={() => setLightboxImage(`data:${img.mimetype};base64,${img.data}`)}
+                    onClick={() => setLightboxKey(`legacy:${msg.id}:${idx}`)}
                   />
                 ))}
               </div>
             )}
-            {/* Image attachments — fetched on demand into a Blob URL. */}
+            {/* Image attachments — 클릭은 다운로드가 아니라 팝업 + prev/next. */}
             {imageAttachments.length > 0 && (
               <div style={{ display: 'flex', gap: tokens.spacing.sm, marginTop: tokens.spacing.sm, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
                 {imageAttachments.map((att) => {
@@ -413,7 +448,7 @@ export default function MessageList({ messages, participantCount, participants =
                         alignItems: 'center',
                         justifyContent: 'center',
                       }}
-                      onClick={() => { if (url) setLightboxImage(url); }}
+                      onClick={() => { if (url) setLightboxKey(id); }}
                     >
                       {url ? (
                         <img
@@ -429,7 +464,7 @@ export default function MessageList({ messages, participantCount, participants =
                 })}
               </div>
             )}
-            {/* Video attachments — inline player, fetched on demand like images. */}
+            {/* Video attachments — 인라인 재생은 유지하고, ⤢ 버튼으로 팝업 갤러리(prev/next)를 연다. */}
             {videoAttachments.length > 0 && (
               <div style={{ display: 'flex', gap: tokens.spacing.sm, marginTop: tokens.spacing.sm, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
                 {videoAttachments.map((att) => {
@@ -437,15 +472,41 @@ export default function MessageList({ messages, participantCount, participants =
                   const url = previewUrls[id];
                   if (!url) ensureImagePreview(att);
                   return url ? (
-                    <video
-                      key={id}
-                      data-testid="chat-video-attachment"
-                      src={url}
-                      controls
-                      preload="metadata"
-                      title={att.filename}
-                      style={{ maxWidth: 360, maxHeight: 240, borderRadius: tokens.radii.sm, background: '#000' }}
-                    />
+                    <div key={id} style={{ position: 'relative', display: 'inline-block', maxWidth: 360 }}>
+                      <video
+                        data-testid="chat-video-attachment"
+                        src={url}
+                        controls
+                        preload="metadata"
+                        title={att.filename}
+                        style={{ maxWidth: 360, maxHeight: 240, borderRadius: tokens.radii.sm, background: '#000', display: 'block' }}
+                      />
+                      <button
+                        type="button"
+                        title="크게 보기 (갤러리)"
+                        aria-label={`Expand ${att.filename || 'video'}`}
+                        onClick={() => setLightboxKey(id)}
+                        style={{
+                          position: 'absolute',
+                          top: 6,
+                          right: 6,
+                          width: 28,
+                          height: 28,
+                          borderRadius: 6,
+                          border: '1px solid rgba(255,255,255,0.35)',
+                          background: 'rgba(0,0,0,0.6)',
+                          color: '#fff',
+                          fontSize: 14,
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          lineHeight: 1,
+                        }}
+                      >
+                        ⤢
+                      </button>
+                    </div>
                   ) : (
                     <div
                       key={id}
@@ -522,30 +583,17 @@ export default function MessageList({ messages, participantCount, participants =
   return (
     <>
       <div>{rendered}</div>
-      {/* Image lightbox */}
-      {lightboxImage && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Image preview"
-          onClick={() => setLightboxImage(null)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: tokens.overlays.scrimStrong,
-            zIndex: 2000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
+      {/* 미디어 라이트박스 — 이미지·영상 팝업 + prev/next, 다운로드는 팝업 안 부차 버튼 */}
+      {lightboxIndex >= 0 && gallery[lightboxIndex] && (
+        <MediaLightbox
+          items={gallery}
+          index={lightboxIndex}
+          onIndexChange={(next) => {
+            const item = gallery[next];
+            if (item) setLightboxKey(item.key);
           }}
-        >
-          <img
-            src={lightboxImage}
-            alt="Full size preview"
-            style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: tokens.radii.sm }}
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
+          onClose={() => setLightboxKey(null)}
+        />
       )}
     </>
   );

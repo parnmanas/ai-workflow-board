@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import { renderMarkdown } from '../chat/utils/markdown';
 import { formatReceivedAt, usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
 import { splitMarkdownImages } from './markdownImages';
+import MediaLightbox, { type MediaLightboxItem } from '../common/MediaLightbox';
 
 /**
  * Agent Session 트랜스크립트 렌더러. Chat 의 MessageList 와 달리 말풍선 목록이
@@ -197,7 +198,7 @@ function AutomaticPromptBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBlock({ text, loadLocalImage }: { text: string; loadLocalImage?: (path: string) => Promise<Blob> }) {
+function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string) => Promise<Blob>; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
   // 공통 렌더러는 이미지·파일 문법을 모른다 — 미리보기 자리만 먼저 떼어 내고 나머지 글은 그대로 그린다.
   // 이미지와 로컬 html/md 는 같은 통(`local_image` RPC)으로 받으므로 로더도 하나를 공유한다.
   const nodes = useMemo(
@@ -206,9 +207,9 @@ function AssistantBlock({ text, loadLocalImage }: { text: string; loadLocalImage
       if (seg.kind === 'file') {
         return <MarkdownFile key={i} alt={seg.alt} target={seg.target} fileKind={seg.fileKind} loadLocalFile={loadLocalImage} />;
       }
-      return <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} />;
+      return <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} registerMedia={registerMedia} openMedia={openMedia} />;
     }),
-    [text, loadLocalImage],
+    [text, loadLocalImage, registerMedia, openMedia],
   );
   return (
     <div
@@ -679,14 +680,20 @@ function Note({ children, tone, multiline = false }: { children: React.ReactNode
 function ImageBlock({
   block,
   loadImage,
+  registerMedia,
+  openMedia,
 }: {
   block: Extract<TranscriptBlock, { kind: 'image' }>;
   loadImage?: (imageRef: string) => Promise<Blob>;
+  registerMedia?: (key: string, item: MediaLightboxItem) => void;
+  openMedia?: (key: string) => void;
 }) {
   const [url, setUrl] = useState<string>(block.uri || '');
   const [error, setError] = useState<string | null>(null);
 
   const [attempt, setAttempt] = useState(0);
+  const mediaKey = `img:${block.imageRef || block.uri || ''}`;
+  const isVideo = (block.mimeType || '').toLowerCase().startsWith('video/');
 
   useEffect(() => {
     setUrl(block.uri || '');
@@ -711,6 +718,17 @@ function ImageBlock({
     };
   }, [block.uri, block.imageRef, loadImage, attempt]);
 
+  useEffect(() => {
+    if (url && registerMedia && (block.imageRef || block.uri)) {
+      registerMedia(mediaKey, {
+        src: url,
+        kind: isVideo ? 'video' : 'image',
+        caption: `agent ${isVideo ? 'video' : 'image'} (${block.mimeType || ''})`,
+        filename: isVideo ? 'video' : 'image',
+      });
+    }
+  }, [url, registerMedia, mediaKey, isVideo, block.mimeType, block.imageRef, block.uri]);
+
   const sizeLabel = block.size ? `, ${Math.round(block.size / 1024)}KB` : '';
   if (error) {
     return (
@@ -729,12 +747,52 @@ function ImageBlock({
       </div>
     );
   }
+  if (isVideo) {
+    return (
+      <div data-block="image" style={{ position: 'relative', display: 'inline-block', maxWidth: '100%' }}>
+        <video
+          src={url}
+          controls
+          preload="metadata"
+          style={{
+            maxWidth: '100%',
+            maxHeight: 420,
+            borderRadius: tokens.radii.md,
+            border: `1px solid ${tokens.colors.border}`,
+            background: '#000',
+            display: 'block',
+          }}
+        />
+        {openMedia && (
+          <button
+            type="button"
+            title="크게 보기 (갤러리)"
+            aria-label="Expand video"
+            onClick={() => openMedia(mediaKey)}
+            style={{
+              position: 'absolute', top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
+              border: '1px solid rgba(255,255,255,0.35)', background: 'rgba(0,0,0,0.6)',
+              color: '#fff', fontSize: 14, cursor: 'pointer', lineHeight: 1,
+            }}
+          >
+            ⤢
+          </button>
+        )}
+      </div>
+    );
+  }
   return (
-    <a data-block="image" href={url} target="_blank" rel="noreferrer" style={{ display: 'block', maxWidth: '100%' }}>
+    <button
+      type="button"
+      data-block="image"
+      onClick={() => openMedia?.(mediaKey)}
+      title="클릭하면 크게 보기 (← → 로 넘기기)"
+      style={{ display: 'block', maxWidth: '100%', padding: 0, border: 'none', background: 'transparent', cursor: openMedia ? 'zoom-in' : 'default' }}
+    >
       <img
         src={url}
         alt={`agent image (${block.mimeType})`}
-        // 전사 폭을 넘지 않게만 제한한다 — 원본은 새 탭에서 본다.
+        // 전사 폭을 넘지 않게만 제한한다 — 원본은 팝업 갤러리에서 본다(새 탭·다운로드 아님).
         style={{
           maxWidth: '100%',
           maxHeight: 420,
@@ -742,9 +800,10 @@ function ImageBlock({
           borderRadius: tokens.radii.md,
           border: `1px solid ${tokens.colors.border}`,
           background: tokens.colors.surface,
+          display: 'block',
         }}
       />
-    </a>
+    </button>
   );
 }
 
@@ -760,16 +819,21 @@ function MarkdownImage({
   target,
   source,
   loadLocalImage,
+  registerMedia,
+  openMedia,
 }: {
   alt: string;
   target: string;
   source: 'local' | 'remote';
   loadLocalImage?: (path: string) => Promise<Blob>;
+  registerMedia?: (key: string, item: MediaLightboxItem) => void;
+  openMedia?: (key: string) => void;
 }) {
   const [url, setUrl] = useState<string>(source === 'remote' ? target : '');
   const [error, setError] = useState<string | null>(null);
 
   const [attempt, setAttempt] = useState(0);
+  const mediaKey = `md:${source}:${target}`;
 
   useEffect(() => {
     if (source !== 'local' || !loadLocalImage) return;
@@ -792,6 +856,17 @@ function MarkdownImage({
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [source, target, loadLocalImage, attempt]);
+
+  useEffect(() => {
+    if (url && registerMedia) {
+      registerMedia(mediaKey, {
+        src: url,
+        kind: 'image',
+        caption: alt ? `${alt} — ${target}` : target,
+        filename: target.split(/[\\/]/).pop()?.split(/[?#]/)[0] || 'image',
+      });
+    }
+  }, [url, registerMedia, mediaKey, alt, target]);
 
   const caption = (
     <span style={{ fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' }} title={target}>
@@ -821,7 +896,12 @@ function MarkdownImage({
   }
   return (
     <figure data-block="markdown-image" style={{ margin: '6px 0', whiteSpace: 'normal' }}>
-      <a href={url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', maxWidth: '100%' }}>
+      <button
+        type="button"
+        onClick={() => openMedia?.(mediaKey)}
+        title="클릭하면 크게 보기 (← → 로 넘기기)"
+        style={{ display: 'inline-block', maxWidth: '100%', padding: 0, border: 'none', background: 'transparent', cursor: openMedia ? 'zoom-in' : 'default' }}
+      >
         <img
           src={url}
           alt={alt || target}
@@ -837,7 +917,7 @@ function MarkdownImage({
             background: tokens.colors.surface,
           }}
         />
-      </a>
+      </button>
       <figcaption style={{ marginTop: 2 }}>{caption}</figcaption>
     </figure>
   );
@@ -981,6 +1061,21 @@ function MarkdownFile({
 }
 
 export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage }: SessionTranscriptProps) {
+  // 전사 전체 이미지 갤러리 — 새 탭/다운로드 대신 팝업 + prev/next.
+  // 각 이미지 블록이 URL 을 resolve 한 뒤 registerMedia 로 등록한다.
+  const [galleryMap, setGalleryMap] = useState<Record<string, MediaLightboxItem>>({});
+  const [lightboxKey, setLightboxKey] = useState<string | null>(null);
+  const registerMedia = useCallback((key: string, item: MediaLightboxItem) => {
+    setGalleryMap((prev) => {
+      const cur = prev[key];
+      if (cur && cur.src === item.src && cur.kind === item.kind) return prev;
+      return { ...prev, [key]: item };
+    });
+  }, []);
+  const openMedia = useCallback((key: string) => setLightboxKey(key), []);
+  const galleryKeys = useMemo(() => Object.keys(galleryMap), [galleryMap]);
+  const galleryItems = useMemo(() => galleryKeys.map((k) => galleryMap[k]), [galleryKeys, galleryMap]);
+  const lightboxIndex = lightboxKey ? galleryKeys.indexOf(lightboxKey) : -1;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {blocks.map((block) => {
@@ -994,7 +1089,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'automatic_prompt':
             return <AutomaticPromptBlock key={block.key} text={block.text} />;
           case 'assistant':
-            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} />;
+            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} registerMedia={registerMedia} openMedia={openMedia} />;
           case 'reasoning':
             return <ReasoningBlock key={block.key} text={block.text} />;
           case 'tool':
@@ -1022,7 +1117,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'plan':
             return <PlanBlock key={block.key} block={block} />;
           case 'image':
-            return <ImageBlock key={block.key} block={block} loadImage={loadImage} />;
+            return <ImageBlock key={block.key} block={block} loadImage={loadImage} registerMedia={registerMedia} openMedia={openMedia} />;
           case 'usage': {
             const parts = usageSummaryParts(block);
             // 조각이 하나도 없으면(모두 0) 아무것도 그리지 않는다 — "0 tokens" 는
@@ -1070,6 +1165,17 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             return null;
         }
       })}
+      {lightboxIndex >= 0 && galleryItems[lightboxIndex] && (
+        <MediaLightbox
+          items={galleryItems}
+          index={lightboxIndex}
+          onIndexChange={(next) => {
+            const key = galleryKeys[next];
+            if (key) setLightboxKey(key);
+          }}
+          onClose={() => setLightboxKey(null)}
+        />
+      )}
     </div>
   );
 }

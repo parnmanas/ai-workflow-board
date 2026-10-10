@@ -1,4 +1,4 @@
-import React, { useRef, useMemo, useCallback, useEffect } from 'react';
+import React, { useRef, useMemo, useCallback, useEffect, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment, CommentType } from '../types';
 import { rawResourceUrl } from '../api';
@@ -8,6 +8,7 @@ import { effectiveMime } from './chat/utils/attachments';
 import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
 import { useMentionViewportReader } from '../hooks/useMentionViewportReader';
 import { useNotifications } from '../contexts/NotificationContext';
+import MediaLightbox from './common/MediaLightbox';
 
 interface CommentListProps {
   comments: Comment[];
@@ -53,6 +54,39 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
   const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
   const { noteMentionsCleared } = useNotifications();
   const parentRef = useRef<HTMLDivElement>(null);
+  // 댓글 전체 미디어 갤러리 — 클릭은 다운로드가 아니라 팝업 + prev/next.
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
+
+  const gallery = useMemo(() => {
+    const out: Array<{ key: string; src: string; kind: 'image' | 'video'; caption?: string; filename?: string }> = [];
+    for (const c of comments) {
+      for (const att of c.attachments || []) {
+        const mt = effectiveMime(att.file_mimetype, att.file_name);
+        if (!mt.startsWith('image/') && !mt.startsWith('video/')) continue;
+        out.push({
+          key: att.id,
+          src: rawResourceUrl(att.id),
+          kind: mt.startsWith('video/') ? 'video' : 'image',
+          caption: att.file_name,
+          filename: att.file_name,
+        });
+      }
+    }
+    return out;
+  }, [comments]);
+  const lightboxIndex = lightboxId ? gallery.findIndex((g) => g.key === lightboxId) : -1;
+  const openPreview = useCallback((src: string, mimetype?: string) => {
+    const found = gallery.find((g) => g.src === src);
+    if (found) {
+      setLightboxId(found.key);
+      return;
+    }
+    // 갤러리에 없는 src(레거시 경로) — 부모 폴백이 있으면 위임, 없으면 단건 팝업.
+    if (onImagePreview) {
+      onImagePreview(src, mimetype);
+      return;
+    }
+  }, [gallery, onImagePreview]);
 
   // Phase 2D — visual threading. Comments arrive newest-first from the server.
   // We split them into top-level (no parent_id) and replies (parent_id set),
@@ -440,29 +474,26 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                           key={att.id}
                           src={src}
                           alt={att.file_name}
-                          onClick={() => onImagePreview?.(src, mt)}
-                          title={att.file_name}
+                          onClick={() => openPreview(src, mt)}
+                          title={`${att.file_name} — 클릭하면 크게 보기`}
                           style={{
                             width: 70, height: 70, objectFit: 'cover', borderRadius: tokens.radii.sm,
-                            cursor: onImagePreview ? 'pointer' : 'default',
+                            cursor: 'pointer',
                             border: `1px solid ${tokens.colors.border}`,
                           }}
                         />
                       );
                     }
                     if (isVideo) {
-                      // Inline <video> preview — agents and users get the same
-                      // first-class playback affordance as images, no download
-                      // round-trip. Click-through opens the modal viewer for
-                      // a larger surface.
+                      // 썸네일 클릭은 다운로드가 아니라 팝업 갤러리(큰 재생 + prev/next).
                       return (
                         <div
                           key={att.id}
-                          onClick={() => onImagePreview?.(src, mt)}
-                          title={att.file_name}
+                          onClick={() => openPreview(src, mt)}
+                          title={`${att.file_name} — 클릭하면 크게 보기`}
                           style={{
                             width: 120, height: 70, borderRadius: tokens.radii.sm,
-                            cursor: onImagePreview ? 'pointer' : 'default',
+                            cursor: 'pointer',
                             border: `1px solid ${tokens.colors.border}`,
                             overflow: 'hidden', position: 'relative',
                             background: '#000',
@@ -567,6 +598,17 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
         }}>
           Loading older comments…
         </div>
+      )}
+      {lightboxIndex >= 0 && gallery[lightboxIndex] && (
+        <MediaLightbox
+          items={gallery}
+          index={lightboxIndex}
+          onIndexChange={(next) => {
+            const item = gallery[next];
+            if (item) setLightboxId(item.key);
+          }}
+          onClose={() => setLightboxId(null)}
+        />
       )}
     </div>
   );

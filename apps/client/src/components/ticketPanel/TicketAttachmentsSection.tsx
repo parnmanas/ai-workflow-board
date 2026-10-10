@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import type { Ticket, TicketAttachmentMeta } from '../../types';
+import MediaLightbox from '../common/MediaLightbox';
 
 interface TicketAttachmentsSectionProps {
   ticket: Pick<Ticket, 'id' | 'attachments' | 'updated_at'>;
@@ -29,7 +30,8 @@ function fileToBase64(file: File): Promise<string> {
  * through the Resource indirection the comment composer uses. Render keyed by
  * ticket id so busy/error state never bleeds across tickets.
  */
-export default function TicketAttachmentsSection({ ticket, onPreview, labelStyle }: TicketAttachmentsSectionProps) {
+export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview, labelStyle }: TicketAttachmentsSectionProps) {
+  void _onPreview;
   const confirm = useConfirm();
   // Ticket-level attachments — file_data is fetched on demand (download/preview)
   // so the metadata list can stay cheap. Seeded from the ticket payload, then
@@ -38,6 +40,67 @@ export default function TicketAttachmentsSection({ ticket, onPreview, labelStyle
   const [ticketAttachments, setTicketAttachments] = useState<TicketAttachmentMeta[]>(ticket.attachments || []);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  // 티켓 첨부 갤러리 — 클릭은 다운로드가 아니라 팝업 + prev/next.
+  // 바이트는 열릴 때만 받는다(목록 단계에서 20개 전부를 base64 로 받으면 탭이 무거워진다).
+  // 현재 + 양옆 1장씩만 캐시해 prev/next 가 끊기지 않게 한다.
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
+  const [lightboxSrcs, setLightboxSrcs] = useState<Record<string, string>>({});
+
+  const mediaOrder = useMemo(() => {
+    return ticketAttachments
+      .filter((att) => {
+        const mt = att.file_mimetype || '';
+        return mt.startsWith('image/') || mt.startsWith('video/');
+      })
+      .map((att) => att.id);
+  }, [ticketAttachments]);
+  const mediaById = useMemo(() => new Map(ticketAttachments.map((a) => [a.id, a])), [ticketAttachments]);
+
+  const ensureLightboxSrc = useCallback(async (id: string) => {
+    if (!id) return;
+    let cached = false;
+    setLightboxSrcs((prev) => {
+      cached = !!prev[id];
+      return prev;
+    });
+    if (cached) return;
+    try {
+      const full = await api.getTicketAttachment(ticket.id, id);
+      if (full?.file_data) {
+        const src = `data:${full.file_mimetype};base64,${full.file_data}`;
+        setLightboxSrcs((prev) => (prev[id] ? prev : { ...prev, [id]: src }));
+      }
+    } catch {
+      // 실패는 라이트박스의 broken 표시로 — 여기서 에러 박스를 띄우지 않는다.
+    }
+  }, [ticket.id]);
+
+  useEffect(() => {
+    if (!lightboxId) return;
+    void ensureLightboxSrc(lightboxId);
+    const idx = mediaOrder.indexOf(lightboxId);
+    if (idx >= 0) {
+      const prev = mediaOrder[idx - 1];
+      const next = mediaOrder[idx + 1];
+      if (prev) void ensureLightboxSrc(prev);
+      if (next) void ensureLightboxSrc(next);
+    }
+  }, [lightboxId, mediaOrder, ensureLightboxSrc]);
+
+  const galleryItems = useMemo(() => {
+    return mediaOrder.map((id) => {
+      const att = mediaById.get(id);
+      const mt = att?.file_mimetype || '';
+      return {
+        key: id,
+        src: lightboxSrcs[id] || '',
+        kind: (mt.startsWith('video/') ? 'video' : 'image') as 'image' | 'video',
+        caption: att?.file_name,
+        filename: att?.file_name,
+      };
+    });
+  }, [mediaOrder, mediaById, lightboxSrcs]);
+  const lightboxIndex = lightboxId ? mediaOrder.indexOf(lightboxId) : -1;
 
   // The attachment list is an authoritative server-side fact with no draft
   // concept — keep refreshing it on updated_at. Seed from the ticket payload
@@ -163,16 +226,12 @@ export default function TicketAttachmentsSection({ ticket, onPreview, labelStyle
       handleDownloadTicketAttachment(attachment);
       return;
     }
+    // 내부 갤러리로 연다 — 부모 모달(onPreview)로 위임하지 않아 중복 팝업을 막는다.
+    // src 는 effect 에서 resolve 되므로 여기서 기다리지 않고 바로 연다.
     setAttachmentError(null);
-    try {
-      const full = await api.getTicketAttachment(ticket.id, attachment.id);
-      if (full?.file_data) {
-        onPreview(`data:${full.file_mimetype};base64,${full.file_data}`, full.file_mimetype);
-      }
-    } catch (err: any) {
-      setAttachmentError(err?.message || 'Preview failed');
-    }
-  }, [ticket.id, handleDownloadTicketAttachment, onPreview]);
+    setLightboxId(attachment.id);
+    void ensureLightboxSrc(attachment.id);
+  }, [handleDownloadTicketAttachment, ensureLightboxSrc]);
 
   return (
     <div style={{ marginBottom: 14 }}>
@@ -278,6 +337,25 @@ export default function TicketAttachmentsSection({ ticket, onPreview, labelStyle
             );
           })}
         </div>
+      )}
+      {lightboxId && lightboxIndex >= 0 && (
+        <MediaLightbox
+          items={galleryItems.map((g) => ({
+            src: g.src || '',
+            kind: g.kind,
+            caption: g.caption,
+            filename: g.filename,
+          }))}
+          index={lightboxIndex}
+          onIndexChange={(next) => {
+            const id = mediaOrder[next];
+            if (id) {
+              setLightboxId(id);
+              void ensureLightboxSrc(id);
+            }
+          }}
+          onClose={() => setLightboxId(null)}
+        />
       )}
     </div>
   );
