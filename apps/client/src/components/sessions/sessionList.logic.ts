@@ -16,12 +16,39 @@ export function lastCwdStorageKey(managerId: string, cli: string): string {
   return `awb.sessions.lastCwd.${managerId}.${cli}`;
 }
 
-/** cwd 의 마지막 경로 요소 (표시용). 절대경로·상대경로 모두 처리. */
+/** cwd 의 마지막 경로 요소 (표시용). 절대경로·상대경로·혼합 구분자 모두 처리. */
 export function cwdBaseName(cwd: string): string {
   if (!cwd) return '(unknown)';
   const normalized = cwd.replace(/[\\/]+$/, '');
-  const sep = normalized.includes('/') ? '/' : '\\';
-  return normalized.split(sep).filter(Boolean).pop() ?? cwd;
+  return normalized.split(/[/\\]+/).filter(Boolean).pop() ?? cwd;
+}
+
+/**
+ * 그룹핑용 cwd 정규화 — 표기만 다른 같은 폴더가 그룹을 가르지 않게 한다.
+ *
+ * Windows CLI/어댑터는 같은 폴더를 `C:\foo\bar`, `C:/foo/bar`, `c:\FOO\bar\` 처럼
+ * 제각각 적는다(구분자·대소문자·후행 구분자). Linux(POSIX) 경로는 대소문자를
+ * 구분하므로 소문자화는 Windows 모양(드라이브 문자·백슬래시·UNC)일 때만 한다.
+ * 빈 문자열은 그대로 둔다 — "모른다" 그룹의 키다.
+ */
+export function normalizeCwdKey(cwd: string): string {
+  if (!cwd) return '';
+  const hadBackslash = cwd.includes('\\');
+  // 1. 구분자 통일
+  let p = cwd.replace(/\\/g, '/');
+  // 2. 중복 슬래시 접기 — UNC 선행 `//` 는 의미가 있어 보존한다.
+  const unc = p.startsWith('//');
+  p = p.replace(/\/{2,}/g, '/');
+  if (unc) p = `/${p}`;
+  // 3. Windows 경로는 대소문자를 무시한다 (드라이브 문자·UNC·백슬래시 출처).
+  const windowsLike = hadBackslash || /^[A-Za-z]:/.test(p) || unc;
+  if (windowsLike) p = p.toLowerCase();
+  // 4. 후행 슬래시 제거 — 루트(`/`, `C:/`, `//srv/share`)는 유지한다.
+  if (p.length > 1 && p !== '//' && !/^[A-Za-z]:\/$/.test(p)) {
+    p = p.replace(/\/+$/, '');
+    if (p === '') p = '/';
+  }
+  return p;
 }
 
 /**
@@ -84,6 +111,8 @@ export interface CwdGroup {
 
 /**
  * 여러 CLI 에서 가져온 세션을 cwd 별로 묶는다.
+ * 그룹 키는 정규화(normalizeCwdKey)한다 — `C:\a\b` 와 `C:/a/b/` 는 같은 그룹이다.
+ * 표시용 `cwd`/`cwdLabel` 은 처음 본 원문을 쓴다(Windows 표기가 `/` 로 바뀌어 보이지 않게).
  * 그룹 순서는 각 그룹 내 가장 최근 세션 기준(최신 그룹 먼저).
  */
 export function groupSessionsByCwd(sessionsByCli: Record<string, AgentSessionSummary[]>): CwdGroup[] {
@@ -94,9 +123,10 @@ export function groupSessionsByCwd(sessionsByCli: Record<string, AgentSessionSum
 
   const groups = new Map<string, CwdGroup>();
   for (const s of flat) {
-    const key = s.cwd || '';
+    const key = normalizeCwdKey(s.cwd || '');
     if (!groups.has(key)) {
-      groups.set(key, { cwd: key, cwdLabel: cwdBaseName(key), sessions: [] });
+      const raw = s.cwd || '';
+      groups.set(key, { cwd: raw, cwdLabel: cwdBaseName(raw), sessions: [] });
     }
     groups.get(key)!.sessions.push(s);
   }

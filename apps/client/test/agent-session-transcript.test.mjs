@@ -25,6 +25,7 @@ import {
 import {
   cwdBaseName,
   groupSessionsByCwd,
+  normalizeCwdKey,
   sessionPath,
   sortSessionsByActivity,
   splitRecentCwdGroups,
@@ -133,6 +134,8 @@ test('cwdBaseName 은 표시용 마지막 경로 요소를 뽑는다 — POSIX·
   assert.equal(cwdBaseName('a/b'), 'b', '상대 경로도 마지막 요소를 뽑는다');
   assert.equal(cwdBaseName('C:\\a\\b'), 'b', 'Windows 구분자');
   assert.equal(cwdBaseName('C:\\a\\b\\'), 'b', 'Windows 후행 구분자');
+  assert.equal(cwdBaseName('C:/a\\b'), 'b', '혼합 구분자도 마지막 요소를 뽑는다');
+  assert.equal(cwdBaseName('C:\\a/b\\'), 'b', '혼합 구분자 + 후행 구분자');
   assert.equal(cwdBaseName('project'), 'project', '구분자가 없으면 입력이 곧 이름이다');
   // 루트는 후행 구분자를 떼고 나면 남는 요소가 없어 cwd 원문으로 되돌아간다.
   // '(unknown)' 이 아니라 '/' 인 것이 이 폴백의 유일한 관측 지점이다.
@@ -179,6 +182,48 @@ test('groupSessionsByCwd 는 cwd 가 빈 문자열이거나 없는 세션을 하
   assert.equal(unknown.length, 1, '빈 cwd 와 누락 cwd 가 그룹을 나눠 가지면 안 된다');
   assert.equal(unknown[0].cwdLabel, '(unknown)');
   assert.deepEqual(unknown[0].sessions.map((s) => s.session_id), ['blank-cwd', 'no-cwd']);
+});
+
+function winSess(session_id, cwd, updated_at) {
+  return { cli: 'claude', session_id, cwd, title: session_id, created_at: null, updated_at, source: 'cli' };
+}
+
+test('normalizeCwdKey 는 Windows 표기 차이(구분자·대소문자·후행 슬래시)를 통일한다', () => {
+  const key = normalizeCwdKey('C:\\proj\\app');
+  assert.equal(key, 'c:/proj/app');
+  assert.equal(normalizeCwdKey('C:/proj/app'), key, '/ 와 \\ 는 같다');
+  assert.equal(normalizeCwdKey('c:\\PROJ\\app\\'), key, '대소문자·후행 슬래시도 같다');
+  assert.equal(normalizeCwdKey('C:/proj//app'), key, '중복 슬래시도 같다');
+});
+
+test('normalizeCwdKey 는 POSIX 경로의 대소문자를 보존한다', () => {
+  assert.equal(normalizeCwdKey('/repo/Alpha'), '/repo/Alpha', 'Linux 는 대소문자를 구분한다');
+  assert.equal(normalizeCwdKey('/repo/alpha/'), '/repo/alpha', '후행 슬래시만 걷어 낸다');
+  assert.equal(normalizeCwdKey(''), '', '빈 cwd 는 그대로 둔다');
+});
+
+test('groupSessionsByCwd 는 표기만 다른 같은 Windows 폴더를 한 그룹으로 묶는다', () => {
+  const groups = groupSessionsByCwd({
+    claude: [
+      winSess('w-back', 'C:\\proj\\app', '2026-09-10T00:00:00Z'),
+      winSess('w-fwd', 'C:/proj/app', '2026-09-09T00:00:00Z'),
+    ],
+    codex: [
+      { ...winSess('w-case', 'c:\\PROJ\\app\\', '2026-09-08T00:00:00Z'), cli: 'codex' },
+    ],
+  });
+  assert.equal(groups.length, 1, '구분자·대소문자·후행 슬래시가 달라도 한 그룹이다');
+  assert.deepEqual(groups[0].sessions.map((s) => s.session_id), ['w-back', 'w-fwd', 'w-case']);
+});
+
+test('groupSessionsByCwd 는 POSIX 경로의 대소문자는 다른 폴더로 본다', () => {
+  const groups = groupSessionsByCwd({
+    claude: [
+      winSess('upper', '/repo/Alpha', '2026-09-10T00:00:00Z'),
+      winSess('lower', '/repo/alpha', '2026-09-09T00:00:00Z'),
+    ],
+  });
+  assert.equal(groups.length, 2, 'Linux 에서는 대소문자가 다른 폴더이다');
 });
 
 // ─── 질문/폼(elicitation) · plan · slash command ────────────────────────────────
