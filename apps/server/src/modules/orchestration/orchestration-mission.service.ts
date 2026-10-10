@@ -12,7 +12,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager, Repository, In, Not } from 'typeorm';
-import { OrchestrationMission } from '../../entities/OrchestrationMission';
+import { OrchestrationMission, MissionExtraMember } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
@@ -21,6 +21,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
+import { Credential } from '../../entities/Credential';
 import { repairTruncatedMediaForRead } from '../mcp/shared/ticket-helpers';
 import { resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
@@ -59,6 +60,21 @@ import {
   normalizeWorkspaceFolder,
   resolveWorkspaceFolder,
 } from '../../common/workspace-folder-options';
+import { CLI_RUNTIME_NONE } from '../../common/cli-runtime-profiles';
+import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
+import { runtimeIdentityKey } from '../../common/runtime-spec';
+import {
+  TeamAgentSpecError,
+  normalizeTeamAgentSpec,
+} from '../../common/orchestration-member-spec';
+
+export interface MissionExtraMemberInput {
+  /** 팀 슬롯과 같은 runtime spec — Runtime Host / CLI / model / working folder. */
+  runtime: unknown;
+  role_label?: string;
+  capabilities?: string;
+  max_concurrent?: number;
+}
 
 export interface MissionCounts {
   total: number;
@@ -297,6 +313,16 @@ export interface MissionDetail extends MissionListItem {
   method: string;
   completion_criteria: MissionCompletionCriterion[];
   post_actions: MissionPostAction[];
+  /**
+   * 이번 미션에서만 제외한 팀 멤버의 agent_id 목록. `[]` = 제외 없음.
+   * 팀 로스터 자체는 그대로이며, 실행 엔진이 effective roster 를 만들 때 뺀다.
+   */
+  excluded_member_ids: string[];
+  /**
+   * 이번 미션에서만 함께 쓰는 임시 멤버. 팀 로스터에 기록되지 않는다.
+   * `[]` = 추가 없음.
+   */
+  extra_members: MissionExtraMember[];
   /** 해석 완료된 working_dir-relative 루트(절대 ''가 아님) — `.awb/orch/<leaf>`. */
   resolved_workspace_folder: string;
   workspace_folder: string;
@@ -443,6 +469,16 @@ export class OrchestrationMissionService {
     created_by_type?: string;
     created_by?: string;
     /**
+     * 이번 미션에서만 제외할 팀 멤버의 agent_id 목록. 팀 로스터는 그대로이며
+     * 실행 엔진이 effective roster 에서 뺀다. 존재하지 않는 id 가 있으면 400.
+     */
+    excluded_member_ids?: unknown;
+    /**
+     * 이번 미션에서만 함께 쓸 임시 멤버. 팀 로스터에 기록되지 않는다.
+     * 각 항목은 { runtime, role_label?, capabilities?, max_concurrent? }.
+     */
+    extra_members?: unknown;
+    /**
      * Stamp the orchestrator at creation time rather than leaving it null
      * until startMission runs (ticket b7127aae review round 2). Without this,
      * a mission that is left `draft` (start:false, or startMission throwing
@@ -511,6 +547,25 @@ export class OrchestrationMissionService {
     const postActionsResult = normalizePostActions(input.post_actions);
     if ('error' in postActionsResult) throw orchestrationError(400, postActionsResult.error);
 
+    // ── 미션별 로스터 오버라이드 ──────────────────────────────────────────
+    // 팀을 고른 뒤 이번 미션에서만 멤버를 빼거나 임시 멤버를 얹는 값이다.
+    // 팀 로스터 자체는 건드리지 않으므로 다음 미션에 영향을 주지 않는다.
+    const excludedIds = normalizeExcludedMemberIds(input.excluded_member_ids);
+    if (excludedIds.length > 0) {
+      const teamMemberIds = new Set(
+        (await this.memberRepo.find({ where: { team_id: team.id }, select: ['agent_id'] as any }))
+          .map((m) => m.agent_id),
+      );
+      const unknown = excludedIds.filter((id) => !teamMemberIds.has(id));
+      if (unknown.length > 0) {
+        throw orchestrationError(
+          400,
+          `excluded_member_ids references members that are not on team "${team.name}": ${unknown.join(', ')}`,
+        );
+      }
+    }
+    const extraMembers = await this.normalizeExtraMembers(input.extra_members, accountId);
+
     const mission = await this.missionRepo.save(
       this.missionRepo.create({
         account_id: accountId,
@@ -531,6 +586,8 @@ export class OrchestrationMissionService {
         checkout_mode: normalizeCheckoutMode(input.checkout_mode),
         status: 'draft',
         orchestrator_agent_id: input.orchestrator_agent_id || null,
+        excluded_member_ids: excludedIds.length ? excludedIds : null,
+        extra_member_specs: extraMembers.length ? extraMembers : null,
         max_parallel_steps: clampInt(input.max_parallel_steps, team.max_parallel_steps, 1, MAX_PARALLEL_CEILING),
         max_steps: clampInt(input.max_steps, 60, 1, MAX_STEPS_CEILING),
         max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),
@@ -575,6 +632,8 @@ export class OrchestrationMissionService {
       graph_enabled?: boolean;
       confirm_policy?: string;
       user_chat_mode?: string;
+      excluded_member_ids?: unknown;
+      extra_members?: unknown;
     },
   ): Promise<OrchestrationMission> {
     const mission = await this.requireMission(missionId, accountId);
@@ -624,7 +683,12 @@ export class OrchestrationMissionService {
       // 정책대로 그래프를 짜므로, 미션이 시작된 뒤 조이면 이미 확정된 confirm 노드가
       // 실행 규칙과 어긋나고, 풀면 orchestrator 는 게이트를 쓸 수 있다는 사실을 들은 적이
       // 없어 정책이 아무 효과도 내지 못한다.
-      patch.confirm_policy !== undefined;
+      patch.confirm_policy !== undefined ||
+      // 로스터 오버라이드도 브리핑 계약이다: 브리핑의 "Your team" 로스터가 이 값으로
+      // 렌더링되므로, 시작 뒤 바꾸면 orchestrator 가 들은 멤버와 실제 검증·디스패치
+      // 대상이 어긋난다. draft 에서만 편집하고, 실행 중 변경은 새 미션으로.
+      patch.excluded_member_ids !== undefined ||
+      patch.extra_members !== undefined;
     // `user_chat_mode` 는 **의도적으로 이 목록에 없다**(티켓 9cfd8161). 위 필드들이 잠기는
     // 이유는 전부 "orchestrator 가 브리핑에서 들은 내용과 어긋난다" 인데, 이 옵션은
     // orchestrator 가 들은 내용을 바꾸지 않는다 — 사람이 이 방에서 말할 수 있는지만
@@ -680,6 +744,32 @@ export class OrchestrationMissionService {
     if (patch.step_timeout_minutes !== undefined) {
       mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
     }
+    if (patch.excluded_member_ids !== undefined || patch.extra_members !== undefined) {
+      // draft 잠금은 위 touchesBrief 에서 이미 강제했다 — 여기서는 값만 검증·반영한다.
+      const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
+      if (!team) throw orchestrationError(404, 'orchestration team not found');
+      if (patch.excluded_member_ids !== undefined) {
+        const excludedIds = normalizeExcludedMemberIds(patch.excluded_member_ids);
+        if (excludedIds.length > 0) {
+          const teamMemberIds = new Set(
+            (await this.memberRepo.find({ where: { team_id: team.id }, select: ['agent_id'] as any }))
+              .map((m) => m.agent_id),
+          );
+          const unknown = excludedIds.filter((id) => !teamMemberIds.has(id));
+          if (unknown.length > 0) {
+            throw orchestrationError(
+              400,
+              `excluded_member_ids references members that are not on team "${team.name}": ${unknown.join(', ')}`,
+            );
+          }
+        }
+        mission.excluded_member_ids = excludedIds.length ? excludedIds : null;
+      }
+      if (patch.extra_members !== undefined) {
+        const extraMembers = await this.normalizeExtraMembers(patch.extra_members, mission.account_id);
+        mission.extra_member_specs = extraMembers.length ? extraMembers : null;
+      }
+    }
 
     // 미션 저장과 파생 캐시(방 플래그) 갱신을 **한 트랜잭션**으로 묶는다
     // (티켓 9cfd8161 리뷰 지적 3). 예전에는 미션을 먼저 커밋하고 방을 따로 갱신해서,
@@ -717,6 +807,71 @@ export class OrchestrationMissionService {
     const room = await em.getRepository(ChatRoom).findOne({ where: { id: mission.room_id } });
     if (!room || room.open_join === desired) return;
     await em.update(ChatRoom, room.id, { open_join: desired });
+  }
+
+  /**
+   * 이번 미션에서만 함께 쓸 임시 멤버 목록을 검증·정규화한다.
+   *
+   * 팀 슬롯과 같은 shape 검사 + 참조 검사를 수행한다: Host 실존, credential이
+   * 미션 workspace 에서 보이는지, backend profile 실존. 실행 identity
+   * (`agent_id`)는 여기서 확정해 저장하므로, 이후 검증·디스패치는 팀 멤버와
+   * 같은 코드로 탄다. 미션 workspace 기준으로 검사하는 이유: 글로벌 팀의
+   * 미션은 호출자가 해석한 workspace 에 귀속되므로, 그 workspace 의 credential
+   * 을 쓰는 임시 멤버가 정당하다(팀 슬롯의 team-scope 검사와 다른 지점이다).
+   */
+  private async normalizeExtraMembers(input: unknown, missionAccountId: string): Promise<MissionExtraMember[]> {
+    if (input === undefined || input === null) return [];
+    if (!Array.isArray(input)) throw orchestrationError(400, 'extra_members must be an array');
+    if (input.length > 20) throw orchestrationError(400, 'extra_members is limited to 20 entries');
+    const out: MissionExtraMember[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < input.length; i++) {
+      const raw = input[i] as Record<string, any>;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw orchestrationError(400, `extra_members[${i}]: { runtime, role_label?, capabilities?, max_concurrent? } is required`);
+      }
+      let spec: Record<string, any>;
+      try {
+        spec = normalizeTeamAgentSpec((raw as any).runtime, `extra_members[${i}].runtime`) as unknown as Record<string, any>;
+      } catch (e) {
+        if (e instanceof TeamAgentSpecError) throw orchestrationError(400, e.message);
+        throw e;
+      }
+      const host = await this.dataSource.getRepository(RuntimeHost).findOne({
+        where: { id: (spec as any).manager_agent_id },
+      });
+      if (!host) throw orchestrationError(400, `extra_members[${i}]: Runtime Host ${(spec as any).manager_agent_id} does not exist`);
+      const credentialId = String((spec as any).credential_id || '');
+      if (credentialId) {
+        const cred = await this.dataSource.getRepository(Credential).findOne({ where: { id: credentialId } });
+        if (!cred || (cred.account_id !== null && cred.account_id !== missionAccountId)) {
+          throw orchestrationError(400, `extra_members[${i}]: credential ${credentialId} is not available to this mission's workspace`);
+        }
+      }
+      const profileId = String((spec as any).cli_runtime_profile || '');
+      if (profileId && profileId !== CLI_RUNTIME_NONE) {
+        const profiles = await globalRuntimeProfiles(this.dataSource);
+        if (!profiles.some((p) => p.id === profileId)) {
+          throw orchestrationError(400, `extra_members[${i}]: cli_runtime_profile "${profileId}" does not exist`);
+        }
+      }
+      const agentId = runtimeIdentityKey(spec as any);
+      if (seen.has(agentId)) {
+        throw orchestrationError(400, `extra_members[${i}]: duplicate runtime spec (same execution identity ${agentId})`);
+      }
+      seen.add(agentId);
+      const maxConcurrentRaw = Number((raw as any).max_concurrent);
+      out.push({
+        agent_id: agentId,
+        role_label: String((raw as any).role_label || '').trim(),
+        capabilities: String((raw as any).capabilities || '').trim(),
+        max_concurrent: Number.isFinite(maxConcurrentRaw)
+          ? Math.min(MAX_PARALLEL_CEILING, Math.max(1, Math.floor(maxConcurrentRaw)))
+          : 1,
+        spec,
+      });
+    }
+    return out;
   }
 
   async deleteMission(missionId: string, accountId: string): Promise<void> {
@@ -941,6 +1096,8 @@ export class OrchestrationMissionService {
       method: mission.method,
       completion_criteria: Array.isArray(mission.completion_criteria) ? mission.completion_criteria : [],
       post_actions: Array.isArray(mission.post_actions) ? mission.post_actions : [],
+      excluded_member_ids: readExcludedMemberIds(mission),
+      extra_members: readExtraMembers(mission),
       resolved_workspace_folder: resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id),
       workspace_folder: mission.workspace_folder,
       repo_ref: mission.repo_ref,
@@ -1379,6 +1536,12 @@ export class OrchestrationMissionService {
         ? 'complete_orchestration_mission(status:"completed") is BLOCKED until every entry here has met:true — use update_orchestration_criteria to flip one.'
         : 'No structured completion criteria defined — acceptance_criteria (prose) is the only definition of done.',
       post_actions: Array.isArray(mission.post_actions) ? mission.post_actions : [],
+      excluded_member_ids: readExcludedMemberIds(mission),
+      extra_members: readExtraMembers(mission),
+      roster_note:
+        'Only the assignees listed in your mission brief ("Your team") are valid — the team may have been ' +
+        'adjusted for this mission (members excluded, ad-hoc members added). If you lost the brief, ask the ' +
+        'operator for the current roster; a rejected assignee error also lists the valid ids.',
       plan_version: mission.plan_version,
       plan_summary: mission.plan_summary,
       limits: {
@@ -1778,4 +1941,53 @@ function clampInt(value: any, fallback: number, min: number, max: number): numbe
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+/**
+ * `excluded_member_ids` 입력 정규화 — 중복·공백 제거. `[]`/null/undefined =
+ * 제외 없음. 배열이 아니면 400. 개별 id 검증(팀 소속 여부)은 호출자가 팀을
+ * 안 뒤에 수행한다.
+ */
+function normalizeExcludedMemberIds(input: unknown): string[] {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) throw orchestrationError(400, 'excluded_member_ids must be an array');
+  const ids = Array.from(new Set(
+    input.map((v) => String(v ?? '').trim()).filter(Boolean),
+  ));
+  if (ids.length > 100) throw orchestrationError(400, 'excluded_member_ids is limited to 100 entries');
+  return ids;
+}
+
+/** 저장된 오버라이드 읽기 — simple-json 컬럼이 문자열·null·배열 어느 모양이어도 안전하게. */
+export function readExcludedMemberIds(mission: { excluded_member_ids?: unknown }): string[] {
+  const v = (mission as any)?.excluded_member_ids;
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map((x) => String(x ?? '').trim()).filter(Boolean);
+  if (typeof v === 'string') {
+    try {
+      const parsed = JSON.parse(v);
+      if (Array.isArray(parsed)) return parsed.map((x) => String(x ?? '').trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** 저장된 임시 멤버 읽기 — 깨진 행은 버리고 정상 항목만. */
+export function readExtraMembers(mission: { extra_member_specs?: unknown }): MissionExtraMember[] {
+  const v = (mission as any)?.extra_member_specs;
+  if (!v) return [];
+  let arr: unknown = v;
+  if (typeof arr === 'string') {
+    try {
+      arr = JSON.parse(arr);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  return (arr as any[]).filter(
+    (e) => e && typeof e === 'object' && typeof (e as any).agent_id === 'string' && (e as any).spec && typeof (e as any).spec === 'object',
+  ) as MissionExtraMember[];
 }

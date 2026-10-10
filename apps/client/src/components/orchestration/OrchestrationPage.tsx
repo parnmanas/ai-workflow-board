@@ -4,11 +4,15 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import type {
   Action,
+  ClaudeBackendProfile,
+  Credential,
   OrchestrationMissionDetail,
+  OrchestrationMissionExtraMemberInput,
   OrchestrationMissionListItem,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
   OrchestrationPostActionCondition,
+  OrchestrationRuntimeHost,
   OrchestrationTeam,
   OrchestrationUpdateEvent,
 } from '../../types';
@@ -21,6 +25,13 @@ import { relativeTime, shortDuration } from '../../utils/time';
 import { missionStyle, progressPercent } from './status';
 import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
 import { RepoRefPicker, buildRepoRefPayload, repoRefProjectId } from '../admin/WorkspaceFolderOptions';
+import TeamSlotRuntimeFields, {
+  emptySlotDraft,
+  slotDraftFromRuntime,
+  slotDraftProblem,
+  slotDraftToSpec,
+  type SlotDraft,
+} from './TeamSlotRuntimeFields';
 
 /**
  * Mission list — the landing surface of Orchestration mode.
@@ -355,6 +366,21 @@ export function MissionFormModal({
   const [repoUrl, setRepoUrl] = useState('');
   const [repoBranch, setRepoBranch] = useState('');
   const [actions, setActions] = useState<Action[]>([]);
+  // ── 미션별 로스터 오버라이드 ──────────────────────────────────────────
+  // 팀을 고른 뒤 이번 미션에서만 빼고 쓸 멤버(excludedIds)와 임시로 얹을
+  // 멤버(extraMembers)다. 팀 로스터 자체는 건드리지 않으므로 다음 미션에
+  // 영향을 주지 않는다 — usage limit 에 걸린 모델 슬롯을 빼고 돌리는 용도다.
+  const [excludedIds, setExcludedIds] = useState<string[]>([]);
+  const [extraMembers, setExtraMembers] = useState<OrchestrationMissionExtraMemberInput[]>([]);
+  const [showAdHocForm, setShowAdHocForm] = useState(false);
+  const [adHocDraft, setAdHocDraft] = useState<SlotDraft>(emptySlotDraft);
+  const [adHocRole, setAdHocRole] = useState('');
+  const [adHocCapabilities, setAdHocCapabilities] = useState('');
+  const [adHocMaxConcurrent, setAdHocMaxConcurrent] = useState(1);
+  const [hosts, setHosts] = useState<OrchestrationRuntimeHost[]>([]);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [backendProfiles, setBackendProfiles] = useState<ClaudeBackendProfile[]>([]);
+  const [hostsLoading, setHostsLoading] = useState(false);
 
   // RepoRefPicker 는 평면 상태 + patch 한 벌로 말한다. 저장소를 바꿀 때
   // { repoProjectId, repoBranch } 처럼 두 필드를 한 번에 보내므로 개별로 반영한다.
@@ -390,13 +416,69 @@ export function MissionFormModal({
     setRepoUrl(mission?.repo_ref?.url || '');
     setRepoBranch(mission?.repo_ref?.branch || '');
     setTeamId(mission?.team_id || teams.find((t) => t.enabled && t.members.length > 0)?.id || teams[0]?.id || '');
+    // 편집(draft) 모드에서는 저장된 오버라이드를 복원하고, 생성 모드에서는 빈 값으로 시작한다.
+    setExcludedIds(mission?.excluded_member_ids ?? []);
+    setExtraMembers(
+      (mission?.extra_members ?? []).map((e) => ({
+        runtime: { ...e.spec },
+        role_label: e.role_label,
+        capabilities: e.capabilities,
+        max_concurrent: e.max_concurrent,
+      })),
+    );
+    setShowAdHocForm(false);
+    setAdHocDraft(emptySlotDraft());
+    setAdHocRole('');
+    setAdHocCapabilities('');
+    setAdHocMaxConcurrent(1);
   }, [isOpen, mission, teams, wsId]);
 
   const selectedTeam = teams.find((t) => t.id === teamId) || null;
 
+  // 팀이 바뀌면 제외 목록에서 더 이상 그 팀에 없는 id 는 걷어낸다 — 다른 팀의
+  // 제외를 들고 있으면 제출 때 서버가 400 으로 거부한다. 임시 멤버는 팀과
+  // 무관하므로 유지한다.
+  const handleTeamChange = useCallback((nextTeamId: string) => {
+    setTeamId(nextTeamId);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedTeam) return;
+    setExcludedIds((prev) => {
+      const valid = new Set(selectedTeam.members.map((m) => m.agent_id));
+      const pruned = prev.filter((id) => valid.has(id));
+      return pruned.length === prev.length ? prev : pruned;
+    });
+  }, [selectedTeam]);
+
+  // 임시 멤버 폼을 열 때만 호스트·인증 정보를 가져온다 — 미션 모달을 열 때마다
+  // 무겁게 들고 있지 않기 위함이다. 팀 편집 화면과 같은 피드다.
+  const ensureHostsLoaded = useCallback(async () => {
+    if (hosts.length > 0 || hostsLoading) return;
+    setHostsLoading(true);
+    try {
+      const [hostList, credentialList, profileList] = await Promise.all([
+        api.listOrchestrationRuntimeHosts(wsId).catch(() => [] as OrchestrationRuntimeHost[]),
+        api.listCredentials(wsId, { includeAllScopes: true }).catch(() => [] as Credential[]),
+        api.listClaudeBackendProfiles().then((r) => r.profiles).catch(() => [] as ClaudeBackendProfile[]),
+      ]);
+      setHosts(hostList);
+      setCredentials(credentialList);
+      setBackendProfiles(profileList);
+    } finally {
+      setHostsLoading(false);
+    }
+  }, [hosts.length, hostsLoading, wsId]);
+
+  const includedCount = (selectedTeam?.members.filter((m) => !excludedIds.includes(m.agent_id)).length ?? 0) + extraMembers.length;
+
   const submit = async () => {
     if (!title.trim() || !objective.trim() || !teamId) {
       showToast('Title, objective and team are required', 'error');
+      return;
+    }
+    if (selectedTeam && selectedTeam.members.length > 0 && includedCount === 0) {
+      showToast('All members are excluded — include at least one member or add an ad-hoc member', 'error');
       return;
     }
     const cleanCriteria = completionCriteria
@@ -428,6 +510,8 @@ export function MissionFormModal({
             graph_enabled: graphEnabled,
             confirm_policy: confirmPolicy,
             user_chat_mode: userChatMode,
+            excluded_member_ids: excludedIds,
+            extra_members: extraMembers,
           })
         : await api.createOrchestrationMission({
             account_id: wsId,
@@ -445,6 +529,8 @@ export function MissionFormModal({
             graph_enabled: graphEnabled,
             confirm_policy: confirmPolicy,
             user_chat_mode: userChatMode,
+            excluded_member_ids: excludedIds.length ? excludedIds : undefined,
+            extra_members: extraMembers.length ? extraMembers : undefined,
             start: startNow,
           });
       if (!mission && saved.start_error) {
@@ -493,12 +579,68 @@ export function MissionFormModal({
               (t.enabled ? '' : ' (disabled)'),
           }))}
           value={teamId}
-          onChange={(e) => setTeamId(e.target.value)}
+          onChange={(e) => handleTeamChange(e.target.value)}
         />
-        {selectedTeam && selectedTeam.members.length === 0 && (
+        {selectedTeam && selectedTeam.members.length === 0 && extraMembers.length === 0 && (
           <div style={{ fontSize: 11, color: tokens.colors.warningLight }}>
-            This team has no members — the orchestrator will have nobody to delegate to.
+            This team has no members — add an ad-hoc member below so the orchestrator has somebody to delegate to.
           </div>
+        )}
+
+        {selectedTeam && (
+          <MissionRosterAdjust
+            team={selectedTeam}
+            excludedIds={excludedIds}
+            onToggleExclude={(agentId, exclude) =>
+              setExcludedIds((prev) => (exclude ? [...prev, agentId] : prev.filter((id) => id !== agentId)))
+            }
+            extraMembers={extraMembers}
+            onRemoveExtra={(idx) => setExtraMembers((prev) => prev.filter((_, i) => i !== idx))}
+            showAdHocForm={showAdHocForm}
+            onToggleAdHocForm={() => {
+              if (!showAdHocForm) {
+                void ensureHostsLoaded();
+                if (selectedTeam.orchestrator_runtime) {
+                  setAdHocDraft(slotDraftFromRuntime(selectedTeam.orchestrator_runtime));
+                }
+              }
+              setShowAdHocForm((v) => !v);
+            }}
+            hosts={hosts}
+            hostsLoading={hostsLoading}
+            credentials={credentials}
+            backendProfiles={backendProfiles}
+            wsId={wsId}
+            adHocDraft={adHocDraft}
+            onAdHocDraftChange={setAdHocDraft}
+            adHocRole={adHocRole}
+            onAdHocRoleChange={setAdHocRole}
+            adHocCapabilities={adHocCapabilities}
+            onAdHocCapabilitiesChange={setAdHocCapabilities}
+            adHocMaxConcurrent={adHocMaxConcurrent}
+            onAdHocMaxConcurrentChange={setAdHocMaxConcurrent}
+            onAddAdHoc={() => {
+              const problem = slotDraftProblem(adHocDraft);
+              if (problem) {
+                showToast(problem, 'error');
+                return;
+              }
+              setExtraMembers((prev) => [
+                ...prev,
+                {
+                  runtime: slotDraftToSpec(adHocDraft),
+                  role_label: adHocRole.trim(),
+                  capabilities: adHocCapabilities.trim(),
+                  max_concurrent: adHocMaxConcurrent,
+                },
+              ]);
+              setShowAdHocForm(false);
+              setAdHocDraft(emptySlotDraft());
+              setAdHocRole('');
+              setAdHocCapabilities('');
+              setAdHocMaxConcurrent(1);
+            }}
+          />
         )}
 
         <LabeledTextarea
@@ -755,6 +897,223 @@ export function MissionFormModal({
         )}
       </div>
     </Modal>
+  );
+}
+
+/**
+ * 팀을 고른 뒤 이번 미션에서만 쓸 멤버를 정하는 섹션.
+ *
+ * 새 팀을 만들지 않고 usage limit 에 걸린 모델 슬롯을 빼거나 임시 멤버를 얹는
+ * 입구다. 팀 로스터 자체는 건드리지 않으므로 다음 미션에 영향을 주지 않는다.
+ * 체크 해제 = 이번 미션에서 제외, 임시 멤버 = 팀에 없는 슬롯을 이번에만 추가.
+ */
+function MissionRosterAdjust({
+  team,
+  excludedIds,
+  onToggleExclude,
+  extraMembers,
+  onRemoveExtra,
+  showAdHocForm,
+  onToggleAdHocForm,
+  hosts,
+  hostsLoading,
+  credentials,
+  backendProfiles,
+  wsId,
+  adHocDraft,
+  onAdHocDraftChange,
+  adHocRole,
+  onAdHocRoleChange,
+  adHocCapabilities,
+  onAdHocCapabilitiesChange,
+  adHocMaxConcurrent,
+  onAdHocMaxConcurrentChange,
+  onAddAdHoc,
+}: {
+  team: OrchestrationTeam;
+  excludedIds: string[];
+  onToggleExclude(agentId: string, exclude: boolean): void;
+  extraMembers: OrchestrationMissionExtraMemberInput[];
+  onRemoveExtra(idx: number): void;
+  showAdHocForm: boolean;
+  onToggleAdHocForm(): void;
+  hosts: OrchestrationRuntimeHost[];
+  hostsLoading: boolean;
+  credentials: Credential[];
+  backendProfiles: ClaudeBackendProfile[];
+  wsId: string;
+  adHocDraft: SlotDraft;
+  onAdHocDraftChange(next: SlotDraft): void;
+  adHocRole: string;
+  onAdHocRoleChange(v: string): void;
+  adHocCapabilities: string;
+  onAdHocCapabilitiesChange(v: string): void;
+  adHocMaxConcurrent: number;
+  onAdHocMaxConcurrentChange(v: number): void;
+  onAddAdHoc(): void;
+}) {
+  const included = team.members.filter((m) => !excludedIds.includes(m.agent_id));
+  const adHocProblem = showAdHocForm ? slotDraftProblem(adHocDraft) : null;
+  return (
+    <div
+      style={{
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: 8,
+        padding: '10px 12px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      }}
+    >
+      <div>
+        <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}>
+          Members for this mission — {included.length + extraMembers.length} of {team.members.length + extraMembers.length} participating
+        </span>
+        <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.4 }}>
+          Uncheck a member to exclude it from this mission only (e.g. a model on usage limit).
+          The team itself is unchanged — the next mission still sees everybody.
+        </span>
+      </div>
+      {team.members.length === 0 && (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+          No team members to choose from.
+        </div>
+      )}
+      {team.members.map((m) => {
+        const excluded = excludedIds.includes(m.agent_id);
+        const rt = m.runtime;
+        const detail = [
+          m.role_label || rt?.cli || m.agent_type,
+          rt?.model || '',
+        ].filter(Boolean).join(' · ');
+        return (
+          <label
+            key={m.id}
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              fontSize: 12,
+              color: excluded ? tokens.colors.textMuted : tokens.colors.textSecondary,
+              cursor: 'pointer',
+              opacity: excluded ? 0.65 : 1,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={!excluded}
+              onChange={(e) => onToggleExclude(m.agent_id, !e.target.checked)}
+              style={{ marginTop: 2 }}
+            />
+            <span style={{ minWidth: 0 }}>
+              <span style={{ display: 'block', color: tokens.colors.textStrong, textDecoration: excluded ? 'line-through' : 'none' }}>
+                {m.agent_name}
+                {!m.is_online && <span style={{ color: tokens.colors.textMuted }}> (offline)</span>}
+              </span>
+              {detail && (
+                <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>{detail}</span>
+              )}
+            </span>
+          </label>
+        );
+      })}
+      {extraMembers.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textStrong }}>
+            Ad-hoc members for this mission ({extraMembers.length})
+          </span>
+          {extraMembers.map((e, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                fontSize: 12,
+                color: tokens.colors.textSecondary,
+                border: `1px dashed ${tokens.colors.border}`,
+                borderRadius: 6,
+                padding: '6px 8px',
+              }}
+            >
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block', color: tokens.colors.textStrong }}>
+                  {e.role_label || e.runtime.cli}{e.runtime.model ? ` · ${e.runtime.model}` : ''}
+                </span>
+                <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>
+                  {e.runtime.cli} · {e.runtime.working_dir}
+                </span>
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => onRemoveExtra(i)}>
+                Remove
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {!showAdHocForm ? (
+        <Button variant="secondary" size="sm" onClick={onToggleAdHocForm}>
+          + Add ad-hoc member for this mission
+        </Button>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
+          <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
+            A slot used only by this mission — it is not added to the team.
+            Seed from the orchestrator; usually only the model needs changing.
+          </span>
+          <Input
+            label="Role label"
+            value={adHocRole}
+            onChange={(e) => onAdHocRoleChange(e.target.value)}
+            placeholder="backend / reviewer / researcher"
+          />
+          <LabeledTextarea
+            label="Capabilities"
+            hint="The orchestrator reads this verbatim when deciding who gets which step."
+            value={adHocCapabilities}
+            onChange={onAdHocCapabilitiesChange}
+            rows={2}
+          />
+          <Input
+            label="Max concurrent steps"
+            type="number"
+            min={1}
+            max={12}
+            value={adHocMaxConcurrent}
+            onChange={(e) => onAdHocMaxConcurrentChange(Number(e.target.value))}
+          />
+          {hostsLoading ? (
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading Runtime Hosts…</div>
+          ) : (
+            <TeamSlotRuntimeFields
+              accountId={wsId}
+              value={adHocDraft}
+              onChange={onAdHocDraftChange}
+              hosts={hosts}
+              credentials={credentials}
+              backendProfiles={backendProfiles}
+              neighbours={team.members.map((m) => ({
+                label: m.agent_name,
+                manager_agent_id: m.runtime?.manager_agent_id ?? '',
+                working_dir: m.runtime?.working_dir ?? '',
+                folder_scope: m.runtime?.folder_scope ?? 'shared',
+              }))}
+            />
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button variant="secondary" size="sm" onClick={onToggleAdHocForm}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="sm" onClick={onAddAdHoc} disabled={!!adHocProblem}>
+              Add to this mission
+            </Button>
+          </div>
+          {adHocProblem && (
+            <div style={{ fontSize: 11, color: tokens.colors.warningLight }}>{adHocProblem}</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

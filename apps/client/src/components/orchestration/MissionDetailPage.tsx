@@ -401,7 +401,7 @@ export default function MissionDetailPage() {
               </div>
             ) : (
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>
-                <BriefPane mission={mission} />
+                <BriefPane mission={mission} teams={teams} />
               </div>
             )}
           </div>
@@ -684,9 +684,34 @@ function Prose({ text, muted }: { text: string; muted?: boolean }) {
  * 절반을 차지하고 있어서, 지금 움직이는 것을 보려면 매번 지나쳐 스크롤해야 했다.
  * 필요할 때 한 번 읽는 자료는 한 번에 찾을 수 있는 자리에 모아 두는 편이 낫다.
  */
-function BriefPane({ mission }: { mission: OrchestrationMissionDetail }) {
+function BriefPane({ mission, teams }: { mission: OrchestrationMissionDetail; teams: OrchestrationTeam[] }) {
+  const excluded = mission.excluded_member_ids ?? [];
+  const extras = mission.extra_members ?? [];
+  const team = teams.find((t) => t.id === mission.team_id) || null;
+  const excludedNames = excluded.map((id) => team?.members.find((m) => m.agent_id === id)?.agent_name || id.slice(0, 11));
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820 }}>
+      {(excluded.length > 0 || extras.length > 0) && (
+        <Section title={`Team roster for this mission — ${team?.name ?? mission.team_name}`}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
+              Adjusted for this mission only — the team itself is unchanged.
+            </div>
+            {excluded.length > 0 && (
+              <div>
+                <span style={{ color: tokens.colors.textStrong }}>Excluded ({excluded.length}): </span>
+                {excludedNames.join(', ')}
+              </div>
+            )}
+            {extras.length > 0 && (
+              <div>
+                <span style={{ color: tokens.colors.textStrong }}>Ad-hoc ({extras.length}): </span>
+                {extras.map((e) => `${e.role_label || e.spec.cli}${e.spec.model ? ` (${e.spec.model})` : ''}`).join(', ')}
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
       <Section title="Objective">
         <Prose text={mission.objective} />
         {mission.context && (

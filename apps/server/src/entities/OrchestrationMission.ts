@@ -4,6 +4,20 @@ import { MissionCompletionCriterion, MissionPostAction } from '../modules/orches
 import { GraphSpec } from '../modules/orchestration/orchestration-graph';
 
 /**
+ * 이번 미션에서만 함께 쓰는 임시 멤버 한 자리. 팀 슬롯과 같은 runtime spec 에
+ * 표시용 라벨을 얹은 형태이며, `agent_id` 는 spec 에서 계산된 runtime identity
+ * key 로 확정해 저장한다.
+ */
+export interface MissionExtraMember {
+  /** spec 에서 계산된 runtime identity key — step assignee 로 지목되는 값. */
+  agent_id: string;
+  role_label: string;
+  capabilities: string;
+  max_concurrent: number;
+  spec: Record<string, any>;
+}
+
+/**
  * A unit of work handed to an OrchestrationTeam.
  *
  * A Mission is deliberately NOT a board Ticket: a ticket's lifecycle is driven
@@ -202,6 +216,28 @@ export class OrchestrationMission {
   /** Snapshot of team.orchestrator_agent_id taken at start. */
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestrator_agent_id: string | null;
+
+  /**
+   * 미션별 로스터 오버라이드 — 팀을 고른 뒤 이번 미션에서만 빼고 쓸 멤버.
+   *
+   * usage limit 등으로 특정 모델 슬롯을 이번 실행에서만 제외해야 할 때 새 팀을
+   * 만들지 않고 진행하기 위한 값이다. 팀 로스터 자체는 건드리지 않으며,
+   * 실행 엔진은 팀 멤버에서 이 목록을 뺀 effective roster 로 브리핑·검증·
+   * 디스패치를 수행한다. `[]`/null = 제외 없음(기존 Mission 전부 이 상태).
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  excluded_member_ids: string[] | null;
+
+  /**
+   * 미션별 로스터 오버라이드 — 팀에 없지만 이번 미션에서만 함께 쓸 임시 멤버.
+   *
+   * 각 항목은 팀 슬롯과 같은 runtime spec + 표시용 라벨이다. 실행 identity
+   * (`agent_id`)는 spec 에서 계산된 runtime key 로 확정해 저장하므로, 팀 멤버와
+   * 같은 방식으로 브리핑·검증·디스패치된다. 팀 로스터에는 기록되지 않아 다음
+   * 미션에 영향을 주지 않는다. `[]`/null = 추가 없음.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  extra_member_specs: MissionExtraMember[] | null;
 
   /**
    * Snapshot of team.orchestrator_spec taken at start (P1). Dual-write와 함께

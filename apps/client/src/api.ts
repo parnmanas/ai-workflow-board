@@ -97,6 +97,7 @@ import type {
   OntologyGraphRefreshResponse,
   OntologyGraphSnapshotResponse,
   OrchestrationPostActionCondition,
+  OrchestrationMissionExtraMemberInput,
   OrchestrationRepoRef,
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
@@ -2334,6 +2335,15 @@ export const api = {
     confirm_policy?: OrchestrationConfirmPolicy;
     /** 미션 대화에서 사람이 발화할 수 있는가(티켓 9cfd8161). 기본 'open'. */
     user_chat_mode?: OrchestrationUserChatMode;
+    /**
+     * 이번 미션에서만 제외할 팀 멤버의 agent_id 목록. 팀 로스터는 그대로이며
+     * 실행 엔진이 effective roster 에서 뺀다.
+     */
+    excluded_member_ids?: string[];
+    /**
+     * 이번 미션에서만 함께 쓸 임시 멤버. 팀 로스터에 기록되지 않는다.
+     */
+    extra_members?: OrchestrationMissionExtraMemberInput[];
     /** Brief the orchestrator immediately instead of leaving the mission a draft. */
     start?: boolean;
   }) => request<OrchestrationMissionDetail>('/orchestration/missions', { method: 'POST', body: JSON.stringify(data) }),
@@ -2364,6 +2374,12 @@ export const api = {
        * running 미션에서는 그쪽이 409 를 내므로, 실행 중 변경은 이 필드만 보낼 것.
        */
       user_chat_mode?: OrchestrationUserChatMode;
+      /**
+       * 이번 미션에서만 제외할 팀 멤버(draft 에서만 편집 가능 — 브리핑 계약이다).
+       */
+      excluded_member_ids?: string[];
+      /** 이번 미션에서만 함께 쓸 임시 멤버(draft 에서만 편집 가능). */
+      extra_members?: OrchestrationMissionExtraMemberInput[];
     },
   ) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}`, {

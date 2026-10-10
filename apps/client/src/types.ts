@@ -2425,6 +2425,27 @@ export interface OrchestrationTeamMember {
   runtime: OrchestrationSlotRuntime | null;
 }
 
+/**
+ * 이번 미션에서만 함께 쓰는 임시 멤버 — 팀 로스터에 기록되지 않는다.
+ * 서버의 MissionExtraMember 와 같은 모양이다.
+ */
+export interface OrchestrationMissionExtraMember {
+  /** spec 에서 계산된 runtime identity key — step assignee 로 지목되는 값. */
+  agent_id: string;
+  role_label: string;
+  capabilities: string;
+  max_concurrent: number;
+  spec: OrchestrationSlotSpecInput;
+}
+
+/** 새 미션에 얹을 임시 멤버 입력 — 저장 전이라 agent_id 가 아직 없다. */
+export interface OrchestrationMissionExtraMemberInput {
+  runtime: OrchestrationSlotSpecInput;
+  role_label?: string;
+  capabilities?: string;
+  max_concurrent?: number;
+}
+
 export interface OrchestrationTeam {
   id: string;
   account_id: string | null;
@@ -2723,6 +2744,16 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   method: string;
   completion_criteria: OrchestrationCompletionCriterion[];
   post_actions: OrchestrationPostAction[];
+  /**
+   * 이번 미션에서만 제외된 팀 멤버의 agent_id 목록. `[]` = 제외 없음.
+   * 구 서버 응답에는 없으므로 옵셔널 — 없을 때는 제외 없음으로 취급한다.
+   */
+  excluded_member_ids?: string[];
+  /**
+   * 이번 미션에서만 함께 쓰는 임시 멤버. 팀 로스터에 기록되지 않는다.
+   * 구 서버 응답에는 없으므로 옵셔널 — 없을 때는 추가 없음으로 취급한다.
+   */
+  extra_members?: OrchestrationMissionExtraMember[];
   resolved_workspace_folder: string;
   workspace_folder: string;
   repo_ref: OrchestrationRepoRef | null;

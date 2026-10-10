@@ -49,7 +49,7 @@ import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
-import { OrchestrationMissionService, countSteps } from './orchestration-mission.service';
+import { OrchestrationMissionService, countSteps, readExcludedMemberIds, readExtraMembers } from './orchestration-mission.service';
 import { OrchestrationTeamService } from './orchestration-team.service';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { orchestrationError } from './orchestration-errors';
@@ -232,11 +232,12 @@ export class OrchestrationRunnerService {
         ?? orchestratorId.slice(0, 11);
 
       const project = await this.missionProject(mission);
-      const roster = await this.buildRoster(team.id, project);
+      const roster = await this.buildRosterForMission(mission, project);
       if (roster.length === 0) {
         throw orchestrationError(
           400,
-          `team "${team.name}" has no members — add at least one agent for the orchestrator to delegate to`,
+          `team "${team.name}" has no members available for this mission — every member is excluded ` +
+            `and no ad-hoc member was added. Include at least one member or add an ad-hoc member.`,
         );
       }
       const briefProject = project
@@ -322,11 +323,24 @@ export class OrchestrationRunnerService {
 
       await this.missions.recordEvent(mission, {
         type: 'mission_started',
-        message: `Mission briefed to orchestrator ${orchestratorLabel} (${roster.length} member(s) available)`,
+        message: (() => {
+          const excluded = readExcludedMemberIds(mission).length;
+          const extra = readExtraMembers(mission).length;
+          const overrideNote =
+            excluded + extra > 0
+              ? ` (roster adjusted for this mission: ${excluded} excluded, ${extra} ad-hoc)`
+              : '';
+          return `Mission briefed to orchestrator ${orchestratorLabel} (${roster.length} member(s) available)${overrideNote}`;
+        })(),
         actor_type: actor.type,
         actor_id: actor.id,
         actor_name: actor.name,
-        data: { room_id: room.id, orchestrator_agent_id: orchestratorId },
+        data: {
+          room_id: room.id,
+          orchestrator_agent_id: orchestratorId,
+          excluded_member_ids: readExcludedMemberIds(mission),
+          extra_member_count: readExtraMembers(mission).length,
+        },
       });
       this.logService.info('Orchestration', `mission ${mission.id} started → orchestrator ${orchestratorId}`, {
         account_id: mission.account_id,
@@ -1026,14 +1040,14 @@ export class OrchestrationRunnerService {
         }
       }
 
-      const roster = await this.buildRoster(mission.team_id);
+      const roster = await this.buildRosterForMission(mission);
       const rosterIds = new Set(roster.map((r) => r.agent_id));
       for (const s of input.steps) {
         const assignee = (s.assignee_agent_id || '').trim();
         if (assignee && !rosterIds.has(assignee)) {
           throw orchestrationError(
             400,
-            `step "${s.step_key}": agent ${assignee} is not a member of this team. ` +
+            `step "${s.step_key}": agent ${assignee} is not available for this mission. ` +
               `Valid assignees: ${roster.map((r) => `${r.agent_name} (${r.agent_id})`).join(', ')}`,
           );
         }
@@ -1044,10 +1058,17 @@ export class OrchestrationRunnerService {
       const updated: string[] = [];
       const toSave: OrchestrationStep[] = [];
       // P1 dual-write: assignee 스펙 스냅샷용 member spec 맵 (raw 복사).
+      // 미션 임시 멤버(extra)도 같은 맵에 얹는다 — step 행의 스냅샷이 그 뒤의
+      // 디스패치·재배정에서 팀 멤버와 동일하게 해소되기 위함이다.
       const specByAgent = new Map(
         (await this.memberRepo.find({ where: { team_id: mission.team_id } }))
           .map((m) => [m.agent_id, m.spec ?? null] as const),
       );
+      for (const extra of readExtraMembers(mission)) {
+        if (extra?.agent_id && !specByAgent.has(extra.agent_id)) {
+          specByAgent.set(extra.agent_id, (extra.spec ?? null) as any);
+        }
+      }
 
       validated.steps.forEach((s, index) => {
         const key = String(s.step_key).trim();
@@ -1319,9 +1340,9 @@ export class OrchestrationRunnerService {
       const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
 
       if (input.assignee_agent_id) {
-        const roster = await this.buildRoster(mission.team_id);
+        const roster = await this.buildRosterForMission(mission);
         if (!roster.some((r) => r.agent_id === input.assignee_agent_id)) {
-          throw orchestrationError(400, `agent ${input.assignee_agent_id} is not a member of this team`);
+          throw orchestrationError(400, `agent ${input.assignee_agent_id} is not available for this mission`);
         }
       }
 
@@ -1417,7 +1438,7 @@ export class OrchestrationRunnerService {
           }
           if (input.assignee_agent_id) {
             fresh.assignee_agent_id = input.assignee_agent_id;
-            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id);
+            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id, mission);
           }
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
@@ -1437,7 +1458,7 @@ export class OrchestrationRunnerService {
             throw orchestrationError(409, `step "${fresh.step_key}" is in flight — cannot reassign mid-execution`);
           }
           fresh.assignee_agent_id = input.assignee_agent_id;
-          fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id);
+          fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id, mission);
           if (isTerminalStepStatus(fresh.status)) fresh.status = 'pending';
           // 재배정은 needs_recovery 를 벗어나는 명시적 조치다 — 사유를 남겨두면
           // UI 가 이미 처리된 복구 요청을 계속 띄운다.
@@ -1479,7 +1500,7 @@ export class OrchestrationRunnerService {
           }
           if (input.assignee_agent_id) {
             fresh.assignee_agent_id = input.assignee_agent_id;
-            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id);
+            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id, mission);
           }
           fresh.status = 'pending';
           fresh.finished_at = null;
@@ -2510,6 +2531,7 @@ export class OrchestrationRunnerService {
     const agentLabel = agentName
       ?? (agentSpec as any)?.label
       ?? parseTeamAgentSpec(memberRowForAgent?.spec)?.cli
+      ?? parseTeamAgentSpec(agentSpec as any)?.cli
       ?? agentId.slice(0, 11);
     // P4c-4: Agent 행 없음 — workspace 소속 검사는 member 행 스냅샷으로만 한다.
     if (memberRowForAgent && memberRowForAgent.account_id && memberRowForAgent.account_id !== mission.account_id) {
@@ -2696,7 +2718,7 @@ export class OrchestrationRunnerService {
             // 이 트리를 같이 쓰는 같은 팀의 다른 슬롯들. 프롬프트가 이름을 불러
             // 주지 않으면 담당자는 자기 폴더가 사유지라고 가정하고 서로의 파일을
             // 덮어쓴다 — 공유는 알려줘야 협업이 되고, 모르면 사고가 된다.
-            shared_with: await this.folderMates(mission.team_id, slotSpec, agentId, memberRow?.id ?? null),
+            shared_with: await this.folderMates(mission.team_id, slotSpec, agentId, memberRow?.id ?? `extra:${agentId}`, mission),
           }
         : null,
       graphNode: graphNode
@@ -3405,12 +3427,43 @@ export class OrchestrationRunnerService {
    * `project` (start-of-mission brief only) adds each member's main clone
    * folder for the mission's project on that member's host. The other callers
    * only validate assignee ids and leave it out.
+   *
+   * When `excludedIds` / `extraMembers` are given, the team roster is adjusted
+   * to this mission's effective roster: excluded team slots are dropped and
+   * ad-hoc slots are appended. Callers that validate or brief a specific
+   * mission must go through `buildRosterForMission` so the orchestrator only
+   * ever sees — and can only assign — what this mission may actually use.
    */
-  private async buildRoster(teamId: string, project: MissionProject | null = null): Promise<RosterEntry[]> {
+  private async buildRoster(
+    teamId: string,
+    project: MissionProject | null = null,
+    overrides?: { excludedIds?: string[]; extraMembers?: Array<{ agent_id: string; role_label: string; capabilities: string; max_concurrent: number; spec: Record<string, any> }> },
+  ): Promise<RosterEntry[]> {
     const members = await this.teams.listMembers(teamId);
+    const excluded = new Set((overrides?.excludedIds ?? []).map((id) => String(id)));
+    const live = excluded.size > 0 ? members.filter((m) => !excluded.has(m.agent_id)) : members;
     // P4c-2b: Agent 행이 없는 rt- 슬롯도 로스터에 포함된다 — spec이 있으면 된다.
-    const specsAll = new Map(members.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]));
-    const present = members.filter((m) => m.agent || specsAll.get(m.agent_id));
+    const specsAll = new Map<string, ReturnType<typeof parseTeamAgentSpec>>(
+      live.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]),
+    );
+    type PresentRow = { id: string; agent_id: string; role_label: string; capabilities: string; max_concurrent: number; agent: null };
+    const present: PresentRow[] = live
+      .filter((m) => (m as any).agent || specsAll.get(m.agent_id))
+      .map((m) => ({ id: m.id, agent_id: m.agent_id, role_label: m.role_label, capabilities: m.capabilities, max_concurrent: m.max_concurrent, agent: null }));
+    for (const extra of overrides?.extraMembers ?? []) {
+      if (!extra?.agent_id || !extra.spec || typeof extra.spec !== 'object') continue;
+      const parsed = parseTeamAgentSpec(extra.spec);
+      if (!parsed) continue;
+      specsAll.set(extra.agent_id, parsed);
+      present.push({
+        id: `extra:${extra.agent_id}`,
+        agent_id: extra.agent_id,
+        role_label: extra.role_label || parsed.cli || '',
+        capabilities: extra.capabilities || '',
+        max_concurrent: Number.isFinite(extra.max_concurrent) && extra.max_concurrent >= 1 ? Math.floor(extra.max_concurrent) : 1,
+        agent: null,
+      });
+    }
     // The roster is what the orchestrator reads in its brief prompt, so it must
     // carry the same full name the operator sees in the UI — otherwise two
     // managers running an agent with the same short name are indistinguishable
@@ -3504,15 +3557,47 @@ export class OrchestrationRunnerService {
   /**
    * P1 dual-write helper: member 슬롯의 raw spec 스냅샷. 복사본을 돌려준다 —
    * step 행에 박히는 시점 이후의 로스터 편집이 과거 스냅샷을 오염시키지 않게.
+   * 미션 임시 멤버(extra)도 먼저 본다 — 팀 멤버와 같은 코드로 디스패치되기 위함이다.
    * 멤버가 없으면 null (dispatch는 당분간 agent_id를 읽으므로 무해).
    */
-  private async assigneeSpecSnapshot(teamId: string, agentId: string): Promise<Record<string, any> | null> {
+  private async assigneeSpecSnapshot(
+    teamId: string,
+    agentId: string,
+    mission?: OrchestrationMission | { extra_member_specs?: unknown },
+  ): Promise<Record<string, any> | null> {
     const id = (agentId || '').trim();
     if (!id) return null;
+    if (mission) {
+      const extra = readExtraMembers(mission as any).find((e) => e.agent_id === id);
+      if (extra?.spec && typeof extra.spec === 'object' && !Array.isArray(extra.spec)) {
+        return { ...(extra.spec as Record<string, any>) };
+      }
+    }
     const row = await this.memberRepo.findOne({ where: { team_id: teamId, agent_id: id } });
     const spec = row?.spec;
     if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
     return { ...(spec as Record<string, any>) };
+  }
+
+  /**
+   * 특정 미션의 effective roster — 팀 로스터에서 제외 목록을 빼고 임시 멤버를 얹는다.
+   * 브리핑·계획 검증·재배정 검증은 전부 이 경로를 타야 orchestrator 가 볼 수 있는
+   * 멤버와 서버가 허용하는 멤버가 갈리지 않는다.
+   */
+  private buildRosterForMission(
+    mission: OrchestrationMission,
+    project: MissionProject | null = null,
+  ): Promise<RosterEntry[]> {
+    return this.buildRoster(mission.team_id, project, {
+      excludedIds: readExcludedMemberIds(mission),
+      extraMembers: readExtraMembers(mission).map((e) => ({
+        agent_id: e.agent_id,
+        role_label: e.role_label,
+        capabilities: e.capabilities,
+        max_concurrent: e.max_concurrent,
+        spec: e.spec,
+      })),
+    });
   }
 
   /**
@@ -3526,12 +3611,24 @@ export class OrchestrationRunnerService {
     spec: TeamAgentSpec,
     selfAgentId: string,
     selfMemberId: string | null = null,
+    mission?: OrchestrationMission | { extra_member_specs?: unknown; excluded_member_ids?: unknown },
   ): Promise<string[]> {
     const members = await this.memberRepo.find({ where: { team_id: teamId } });
-    const mates = members.filter((m) => {
+    const excluded = mission ? new Set(readExcludedMemberIds(mission as any)) : new Set<string>();
+    type MateRow = { id: string; agent_id: string; role_label: string; spec: unknown };
+    const rows: MateRow[] = members
+      .filter((m) => !excluded.has(m.agent_id))
+      .map((m) => ({ id: m.id, agent_id: m.agent_id, role_label: m.role_label, spec: m.spec }));
+    if (mission) {
+      for (const extra of readExtraMembers(mission as any)) {
+        if (!extra?.agent_id || !extra.spec) continue;
+        rows.push({ id: `extra:${extra.agent_id}`, agent_id: extra.agent_id, role_label: extra.role_label || '', spec: extra.spec });
+      }
+    }
+    const mates = rows.filter((m) => {
       // P4c-4: 쌍둥이 슬롯은 agent_id 가 같아 id 로는 자기를 가릴 수 없다 —
-      // 호출자가 먼저 온 행(position ASC)을 자기라고 지목한다. legacy 호출
-      // (selfMemberId null)은 예전처럼 agent_id 로 제외한다.
+      // 호출자가 먼저 온 행(position ASC)을 자기라고 지목한다. 임시 멤버(extra)는
+      // 행 id 가 `extra:<agent_id>` 이므로 같은 규칙으로 자기를 가린다.
       if (selfMemberId ? m.id === selfMemberId : m.agent_id === selfAgentId) return false;
       const other = parseTeamAgentSpec(m.spec);
       return !!other
