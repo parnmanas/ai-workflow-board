@@ -12,8 +12,12 @@
 #   collapse 될 것도 없다. package.json 의 version 은 '최초 배포 seed floor' 로만
 #   남는다(이미 npm 에 올라간 뒤에는 참조되지 않음).
 #
-# Auth: NPM_TOKEN (npm *Automation* token — 2FA bypass 필수, 아니면 publish 가
-#   OTP 를 물어 hang) 을 repo Actions secret 으로 저장.
+# Auth: npm Trusted Publishing (OIDC). 저장된 토큰이 없다 — publish 순간 npm CLI 가
+#   이 잡의 GitHub OIDC 토큰(permissions.id-token)을 레지스트리에서 단명 publish
+#   토큰으로 교환한다. npmjs.com 의 awb-agent-manager → Settings → Trusted Publisher
+#   에 이 저장소 + 이 워크플로 파일이 등록돼 있어야 한다. 예전 NPM_TOKEN secret 은
+#   쓰기 토큰 최대 수명(90일)을 넘겨 2026-10-11 에 만료됐고, npm 은 그걸 PUT 404 로
+#   답해 "패키지가 없다" 처럼 보였다 — 토큰이 없으면 만료될 것도 없다.
 #
 # 트리거 (loop 방지 — reviewer guard #4):
 #   - push to `main` 이되 **agent-manager 산출물/publish 기계**를 건드린 push 로만
@@ -54,9 +58,9 @@ on:
   workflow_dispatch:
 
 # "Record release tag" 단계가 GITHUB_TOKEN 으로 경량 태그를 push 한다.
-# id-token:write 는 npm provenance(--provenance) 전용 — npm CLI 가 이 OIDC 토큰으로
-# Sigstore 에 "이 tarball 은 이 repo/워크플로/커밋에서 빌드됐다"는 서명된 증명을
-# 남긴다. 없으면 provenance 생성이 조용히 실패하는 게 아니라 publish 자체가 실패한다.
+# id-token:write 는 두 가지에 쓰인다: Trusted Publishing 의 토큰 교환(인증 자체)과
+# npm provenance(--provenance) — npm CLI 가 이 OIDC 토큰으로 Sigstore 에 "이 tarball 은
+# 이 repo/워크플로/커밋에서 빌드됐다"는 서명된 증명을 남긴다. 없으면 publish 자체가 실패한다.
 permissions:
   contents: write
   id-token: write
@@ -91,6 +95,11 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing 은 npm CLI ≥ 11.5.1 에서만 동작한다(Node 22 번들은 10.x).
+      # 루트 package.json 의 packageManager(npm@11.6.1)와 같은 버전으로 맞춘다.
+      - name: Use the repository's npm
+        run: npm install -g npm@11.6.1
 
       # 버전 계산 + 액션 결정 (순수 로직은 단위 테스트, 여기선 npm/git 실호출).
       # 출력: version, action(publish|recover-tag|noop), reason.
@@ -159,15 +168,14 @@ jobs:
       # --provenance: tarball 과 함께 Sigstore 서명 증명을 publish 한다. 소비자(=이
       # 저장소의 live host 들, `npm i -g awb-agent-manager`)가 `npm audit signatures`
       # 로 "레지스트리의 이 버전이 정말 parnmanas/ai-workflow-board 의 이 커밋에서
-      # 이 워크플로로 빌드됐는지" 검증할 수 있다. 없으면 NPM_TOKEN 이 유출됐을 때
-      # 공격자가 임의 tarball 을 같은 이름으로 올려도 구분할 방법이 없다.
+      # 이 워크플로로 빌드됐는지" 검증할 수 있다. 없으면 어디선가 publish 권한 토큰이
+      # 유출됐을 때 공격자가 임의 tarball 을 같은 이름으로 올려도 구분할 방법이 없다.
+      # 인증은 Trusted Publishing(OIDC) — NODE_AUTH_TOKEN 을 넘기지 않는다.
       # 전제조건(모두 충족 확인함): repo public, package.json.repository 가 실제
       # 저장소를 가리킴, GitHub Actions 에서 publish, permissions.id-token=write.
       - name: Publish to npm
         if: steps.plan.outputs.action == 'publish'
         run: npm publish -w awb-agent-manager --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # 릴리스 태그 기록 — publish 직후(fresh) 또는 "npm 엔 있고 tag 만 없음" 복구
       # (recover-tag). HEAD 를 가리키는 경량 태그. GITHUB_TOKEN 태그 push 는 이

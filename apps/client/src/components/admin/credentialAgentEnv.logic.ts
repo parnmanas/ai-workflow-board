@@ -9,16 +9,20 @@
  */
 
 /** Providers whose fields may be exposed as env — the non-CLI ones. */
-export const AGENT_ENV_PROVIDERS: ReadonlySet<string> = new Set(['github', 'gitlab', 'openai', 'google_oauth', 'git_http', 'custom']);
+export const AGENT_ENV_PROVIDERS: ReadonlySet<string> = new Set(['github', 'gitlab', 'openai', 'google_oauth', 'git_http', 'npm', 'custom']);
 
 /** A git host is handed to agents' git as a credential helper; it gets env vars only with a prefix. */
 export const GIT_HOST_PROVIDER = 'git_http';
+/** An npm registry token authenticates agents' npm directly; env vars only with a prefix. */
+export const NPM_PROVIDER = 'npm';
+export const DEFAULT_NPM_REGISTRY = 'https://registry.npmjs.org/';
 
 /** Suggested prefix when exposure is switched on. */
 export const DEFAULT_AGENT_ENV_PREFIX: Readonly<Record<string, string>> = {
   google_oauth: 'GOOGLE',
   github: 'GITHUB',
   gitlab: 'GITLAB',
+  npm: 'NPM',
 };
 
 /** Custom key/value keys: something an env var or a JSON consumer can name. */
@@ -35,8 +39,23 @@ export function agentEnvName(prefix: string, field: string): string {
 }
 
 export function agentEnvNames(provider: string, prefix: string, fieldKeys: readonly string[]): string[] {
-  if (provider === GIT_HOST_PROVIDER && !normalizeAgentEnvPrefix(prefix)) return [];
+  if ((provider === GIT_HOST_PROVIDER || provider === NPM_PROVIDER) && !normalizeAgentEnvPrefix(prefix)) return [];
   return fieldKeys.map((k) => agentEnvName(prefix, k));
+}
+
+/** Registry npm keys auth by (slash-terminated); empty → the public registry; null if not http(s). Mirrors the server. */
+export function npmRegistryUrl(raw: string): string | null {
+  const text = String(raw ?? '').trim() || DEFAULT_NPM_REGISTRY;
+  try {
+    const url = new URL(text);
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname) return null;
+    url.search = '';
+    url.hash = '';
+    if (!url.pathname.endsWith('/')) url.pathname += '/';
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 /** `https://lfs.example.com/org/repo.git/info/lfs` → `https://lfs.example.com`; null if not http(s). Mirrors the server. */

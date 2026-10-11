@@ -17,6 +17,8 @@ import {
   customRowsProblem,
   gitHostOrigin,
   GIT_HOST_PROVIDER,
+  npmRegistryUrl,
+  NPM_PROVIDER,
   normalizeAgentEnvPrefix,
   parseGoogleOAuthJson,
   type CustomRow,
@@ -110,6 +112,15 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
       url: { label: 'Host URL', placeholder: 'https://lfs.example.com — any URL on the host works (e.g. the .lfsconfig url)' },
       username: { label: 'Username', placeholder: 'Account the token belongs to' },
       token: { label: 'Access token', placeholder: 'Personal access token (used as the password)' },
+    },
+  },
+  {
+    value: 'npm',
+    label: 'npm registry',
+    icon: 'N',
+    fields: {
+      token: { label: 'Access token', placeholder: 'npm_... — granular access token from npmjs.com' },
+      registry: { label: 'Registry (optional)', placeholder: 'https://registry.npmjs.org/ (default)' },
     },
   },
   // Custom renders a key/value editor instead of these fields; `token` is the
@@ -575,6 +586,7 @@ export default function CredentialManager({
                           style={{ marginLeft: 6 }}
                           title={[
                             c.agent_git_host ? `Agents' git authenticates to ${c.agent_git_host}` : '',
+                            c.agent_npm_registry ? `Agents' npm authenticates to ${c.agent_npm_registry}` : '',
                             (c.agent_env_names ?? []).length ? `Env: ${(c.agent_env_names ?? []).join(', ')}` : '',
                           ].filter(Boolean).join(' · ') || '—'}
                         >
@@ -870,12 +882,23 @@ export default function CredentialManager({
                       {' '}with this token — so does the Runtime Host when it prepares their worktrees.
                     </div>
                   )}
+                  {formProvider === NPM_PROVIDER && (
+                    <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
+                      Agents' npm authenticates to{' '}
+                      <code style={{ color: tokens.colors.textStrong }}>
+                        {npmRegistryUrl(formFields.registry || '') || editCred?.agent_npm_registry || '(enter a valid registry URL)'}
+                      </code>
+                      {' '}with this token (npm publish, private installs) — no .npmrc needed.
+                    </div>
+                  )}
                   <Input
-                    label={formProvider === GIT_HOST_PROVIDER ? 'Env prefix (optional)' : 'Env prefix'}
+                    label={formProvider === GIT_HOST_PROVIDER || formProvider === NPM_PROVIDER ? 'Env prefix (optional)' : 'Env prefix'}
                     value={formEnvPrefix}
                     onChange={(e) => setFormEnvPrefix(e.target.value.toUpperCase())}
                     placeholder={formProvider === GIT_HOST_PROVIDER
                       ? 'e.g. FORGEJO — also export the token as env vars; blank = git only'
+                      : formProvider === NPM_PROVIDER
+                      ? 'e.g. NPM — also export NPM_TOKEN for .npmrc ${NPM_TOKEN}; blank = npm auth only'
                       : 'e.g. GOOGLE — blank uses the keys as-is'}
                   />
                   <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>

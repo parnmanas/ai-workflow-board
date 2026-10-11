@@ -19,6 +19,7 @@ import { DataSource } from 'typeorm';
 
 import {
   agentEnvName,
+  npmRegistryUrl,
   resolveAgentEnv,
   validateAgentEnvConfig,
 } from '../dist/common/credential-agent-env.js';
@@ -62,6 +63,28 @@ test('a git host needs a real URL plus username and token; env vars only with a 
   assert.match(validateAgentEnvConfig('git_http', '', { ...lfs, url: 'lfs.parnmanas.com' }), /http\(s\) URL/);
   assert.match(validateAgentEnvConfig('git_http', '', { ...lfs, username: '' }), /username and token/);
   assert.match(validateAgentEnvConfig('git_http', '', { url: lfs.url, username: 'u' }), /username and token/);
+});
+
+test('an npm registry needs a token; registry defaults to the public one and is slash-terminated', () => {
+  assert.equal(validateAgentEnvConfig('npm', '', { token: 'npm_x' }), null, 'no prefix → npm auth only');
+  assert.equal(validateAgentEnvConfig('npm', 'NPM', { token: 'npm_x' }), null);
+  assert.match(validateAgentEnvConfig('npm', '', { registry: 'https://registry.npmjs.org/' }), /no fields|needs a token/);
+  assert.match(validateAgentEnvConfig('npm', '', { token: 't', registry: 'registry.npmjs.org' }), /http\(s\) URL/);
+  assert.equal(npmRegistryUrl(''), 'https://registry.npmjs.org/');
+  assert.equal(npmRegistryUrl('https://npm.pkg.github.com'), 'https://npm.pkg.github.com/');
+  assert.equal(npmRegistryUrl('https://x.example/api/npm/repo?a=1'), 'https://x.example/api/npm/repo/');
+});
+
+test('npm registries resolve per registry; env vars only with a prefix', () => {
+  const resolved = resolveAgentEnv([
+    { id: 'n', name: 'npm publish', provider: 'npm', account_id: null, env_prefix: '', fields: { token: 'npm_global' } },
+    { id: 'p', name: 'npm with env', provider: 'npm', account_id: null, env_prefix: 'NPM', fields: { token: 'npm_other', registry: 'https://npm.pkg.github.com' } },
+  ]);
+  assert.deepEqual(resolved.npm_registries.map((r) => [r.credential_id, r.registry, r.token]), [
+    ['n', 'https://registry.npmjs.org/', 'npm_global'],
+    ['p', 'https://npm.pkg.github.com/', 'npm_other'],
+  ]);
+  assert.deepEqual(resolved.env, { NPM_TOKEN: 'npm_other', NPM_REGISTRY: 'https://npm.pkg.github.com' });
 });
 
 test('git hosts resolve to origins; account shadows global per origin', () => {
@@ -171,6 +194,23 @@ describe('credential agent env — REST', () => {
     });
     assert.deepEqual(res.body.skipped, []);
     assert.deepEqual(res.body.git_credentials, []);
+    assert.deepEqual(res.body.npm_registries, []);
+  });
+
+  it('an exposed npm token comes back as an npm registry and the list shows which', async () => {
+    const created = await create({
+      scope: 'global',
+      name: 'npm publish',
+      provider: 'npm',
+      credentials: { token: 'npm_abcdefghijklmnop' },
+      agent_env: true,
+    });
+    assert.equal(created.statusCode, 201, JSON.stringify(created.body));
+    assert.equal(created.body.agent_npm_registry, 'https://registry.npmjs.org/');
+    assert.deepEqual(created.body.agent_env_names, []);
+    const res = await fetchEnv(hostReq, 'acc-1');
+    assert.deepEqual(res.body.npm_registries.map((r) => [r.registry, r.token]), [['https://registry.npmjs.org/', 'npm_abcdefghijklmnop']]);
+    assert.deepEqual(res.body.env, {});
   });
 
   it('an exposed git host comes back as a git credential (origin) and the list shows where', async () => {

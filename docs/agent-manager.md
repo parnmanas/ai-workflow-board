@@ -325,7 +325,7 @@ An operator can hand a stored secret to agents as process env — the case it
 was built for is a Google OAuth client (`google_oauth` provider: `client_id`,
 `client_secret`, optional `refresh_token`; the form fills them from the
 Cloud Console JSON or an authorized-user JSON). Any non-CLI credential
-(`github`, `gitlab`, `openai`, `google_oauth`, `git_http`, `custom` with its own
+(`github`, `gitlab`, `openai`, `google_oauth`, `git_http`, `npm`, `custom` with its own
 key/value rows) can opt in with **Expose to agents as environment
 variables** (`Credential.agent_env` + `env_prefix`).
 
@@ -365,6 +365,20 @@ variables** (`Credential.agent_env` + `env_prefix`).
 - Note that client_id/client_secret alone cannot call a Google API — the agent
   has no browser for the consent screen. Store a `refresh_token` obtained once
   (or an authorized-user JSON) for headless use.
+
+### npm registries (`npm`)
+
+Same shape as git hosts: an exposed `npm` credential (`token`, optional
+`registry`, default `https://registry.npmjs.org/`) comes back as
+`npm_registries` and the manager sets npm's own per-registry auth for the
+agent process — one env var, `npm_config_//<registry host+path>/:_authToken`,
+which @npmcli/config reads without normalizing the `//…` key and ranks above
+the user's `~/.npmrc` (`npm-registry-env.ts`). `npm_config_registry` is never
+set. With a prefix it also exports `<PREFIX>_TOKEN` / `<PREFIX>_REGISTRY` for a
+project `.npmrc` that reads `${NPM_TOKEN}`. Real-npm regression:
+`apps/agent-manager/test/npm-registry-env.test.mjs`. (Publishing
+awb-agent-manager itself does not use this — CI publishes through npm Trusted
+Publishing, see `docs/runbooks/agent-manager-release.md`.)
 
 ### Git hosts (`git_http`)
 

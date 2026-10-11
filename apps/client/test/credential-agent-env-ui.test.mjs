@@ -16,6 +16,7 @@ import {
   agentEnvNames,
   customRowsProblem,
   gitHostOrigin,
+  npmRegistryUrl,
   parseGoogleOAuthJson,
 } from '../src/components/admin/credentialAgentEnv.logic.ts';
 
@@ -28,7 +29,7 @@ test('env name preview matches the server rule', () => {
 });
 
 test('only non-CLI providers offer exposure', () => {
-  assert.deepEqual([...AGENT_ENV_PROVIDERS].sort(), ['custom', 'git_http', 'github', 'gitlab', 'google_oauth', 'openai']);
+  assert.deepEqual([...AGENT_ENV_PROVIDERS].sort(), ['custom', 'git_http', 'github', 'gitlab', 'google_oauth', 'npm', 'openai']);
 });
 
 test('a git host previews its origin, and env vars only once a prefix is given', () => {
@@ -37,6 +38,14 @@ test('a git host previews its origin, and env vars only once a prefix is given',
   assert.deepEqual(agentEnvNames('git_http', '', ['url', 'username', 'token']), []);
   assert.deepEqual(agentEnvNames('git_http', 'forgejo', ['token']), ['FORGEJO_TOKEN']);
   assert.deepEqual(agentEnvNames('custom', '', ['TOKEN']), ['TOKEN']);
+});
+
+test('an npm token previews its registry (public by default) and env vars only with a prefix', () => {
+  assert.equal(npmRegistryUrl(''), 'https://registry.npmjs.org/');
+  assert.equal(npmRegistryUrl('https://npm.pkg.github.com'), 'https://npm.pkg.github.com/');
+  assert.equal(npmRegistryUrl('npm.pkg.github.com'), null);
+  assert.deepEqual(agentEnvNames('npm', '', ['token']), []);
+  assert.deepEqual(agentEnvNames('npm', 'NPM', ['token', 'registry']), ['NPM_TOKEN', 'NPM_REGISTRY']);
 });
 
 test('Cloud Console download (installed / web) fills client id + secret', () => {

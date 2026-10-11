@@ -25,6 +25,9 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   // self-hosted LFS store (`.lfsconfig` url). Exposed to agents it becomes a git
   // credential helper for that host, not just env (git-lfs never reads env).
   git_http: { label: 'Git (HTTPS host)', fields: ['url', 'username', 'token'] },
+  // npm registry token (registry optional, default registry.npmjs.org). Exposed
+  // to agents it authenticates their npm for that registry directly.
+  npm: { label: 'npm registry', fields: ['token', 'registry'] },
   // `token` is the default key; the client lets the operator add more
   // key/value pairs (any field map is accepted on write).
   custom: { label: 'Custom', fields: ['token'] },

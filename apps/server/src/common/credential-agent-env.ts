@@ -16,6 +16,8 @@
  * authenticate through credential helpers, so an exposed git host is returned
  * as `git_credentials` (origin + username + token) and the manager turns it into
  * a helper for that host. It also gets env vars only when a prefix is set.
+ * `npm` works the same way: returned as `npm_registries` (registry + token)
+ * and installed as npm's own per-registry `_authToken` config.
  *
  * CLI login credentials (claude_* / codex_* / …) are excluded: they are
  * applied through CLI settings into a per-agent cli-home, and dumping a
@@ -42,12 +44,17 @@ const BLOCKED_ENV_NAMES = new Set([
 const BLOCKED_ENV_PREFIXES = ['AWB_', 'ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'OPENCODE_', 'GEMINI_', 'DYLD_', 'GIT_CONFIG_'];
 
 const GIT_HOST_PROVIDER = 'git_http';
+const NPM_PROVIDER = 'npm';
+/** Providers the manager delivers natively (git helper / npm auth config). */
+const NATIVE_DELIVERY_PROVIDERS = new Set([GIT_HOST_PROVIDER, NPM_PROVIDER]);
+export const DEFAULT_NPM_REGISTRY = 'https://registry.npmjs.org/';
 
 /** Suggested prefix per provider — the client pre-fills it, nothing derives from it. */
 export const DEFAULT_AGENT_ENV_PREFIX: Readonly<Record<string, string>> = {
   google_oauth: 'GOOGLE',
   github: 'GITHUB',
   gitlab: 'GITLAB',
+  npm: 'NPM',
 };
 
 export function agentEnvSupported(provider: string): boolean {
@@ -72,10 +79,27 @@ export function agentEnvNameProblem(name: string): string | null {
   return null;
 }
 
-/** A git host credential emits env vars only when given a prefix — its
- *  bare field names (URL, USERNAME, TOKEN) would be meaningless or collide. */
+/** A natively delivered credential (git host, npm registry) emits env vars
+ *  only when given a prefix — its bare field names (URL, USERNAME, TOKEN)
+ *  would be meaningless or collide. */
 function emitsEnv(provider: string, prefix: string): boolean {
-  return provider !== GIT_HOST_PROVIDER || !!prefix;
+  return !NATIVE_DELIVERY_PROVIDERS.has(provider) || !!prefix;
+}
+
+/** Registry URL npm keys auth by, always ending in `/`; null if not http(s).
+ *  Empty means the public registry. */
+export function npmRegistryUrl(raw: unknown): string | null {
+  const text = String(raw ?? '').trim() || DEFAULT_NPM_REGISTRY;
+  try {
+    const url = new URL(text);
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname) return null;
+    url.search = '';
+    url.hash = '';
+    if (!url.pathname.endsWith('/')) url.pathname += '/';
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 /** Env var names a credential produces (values are never needed). */
@@ -117,6 +141,10 @@ export function validateAgentEnvConfig(provider: string, prefix: string, fields:
     if (!gitHostOrigin(fields.url)) return 'url must be an http(s) URL such as https://git.example.com';
     if (!fields.username || !fields.token) return 'a git host needs both username and token';
   }
+  if (provider === NPM_PROVIDER) {
+    if (!fields.token) return 'an npm registry credential needs a token';
+    if (!npmRegistryUrl(fields.registry)) return 'registry must be an http(s) URL such as https://registry.npmjs.org/';
+  }
   if (!emitsEnv(provider, prefix)) return null;
   const seen = new Map<string, string>();
   for (const field of fieldKeys) {
@@ -143,7 +171,9 @@ export interface ResolvedAgentEnv {
   env: Record<string, string>;
   /** Exposed git hosts — the manager installs a credential helper per origin. */
   git_credentials: Array<{ credential_id: string; name: string; url: string; username: string; password: string }>;
-  sources: Array<{ credential_id: string; name: string; scope: 'global' | 'account'; env_names: string[]; git_host?: string }>;
+  /** Exposed npm registries — the manager sets npm's per-registry _authToken. */
+  npm_registries: Array<{ credential_id: string; name: string; registry: string; token: string }>;
+  sources: Array<{ credential_id: string; name: string; scope: 'global' | 'account'; env_names: string[]; git_host?: string; npm_registry?: string }>;
   skipped: Array<{ credential_id: string; name: string; reason: string }>;
 }
 
@@ -154,9 +184,10 @@ export interface ResolvedAgentEnv {
  * loser is reported — never silently dropped.
  */
 export function resolveAgentEnv(sources: readonly AgentEnvSource[]): ResolvedAgentEnv {
-  const out: ResolvedAgentEnv = { env: {}, git_credentials: [], sources: [], skipped: [] };
+  const out: ResolvedAgentEnv = { env: {}, git_credentials: [], npm_registries: [], sources: [], skipped: [] };
   const owner = new Map<string, { scope: 'global' | 'account'; name: string }>();
   const gitOwner = new Map<string, { scope: 'global' | 'account'; name: string }>();
+  const npmOwner = new Map<string, { scope: 'global' | 'account'; name: string }>();
   const ordered = [...sources].sort((a, b) => {
     const rank = (s: AgentEnvSource) => (s.account_id === null ? 1 : 0);
     return rank(a) - rank(b) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
@@ -185,6 +216,23 @@ export function resolveAgentEnv(sources: readonly AgentEnvSource[]): ResolvedAge
         gitHost = origin;
       }
     }
+    let npmRegistry: string | undefined;
+    if (src.provider === NPM_PROVIDER) {
+      const registry = npmRegistryUrl(src.fields.registry);
+      const token = typeof src.fields.token === 'string' ? src.fields.token : '';
+      const taken = registry ? npmOwner.get(registry) : undefined;
+      if (!registry || !token) {
+        out.skipped.push({ credential_id: src.id, name: src.name, reason: 'npm registry needs a token and an http(s) registry URL' });
+      } else if (taken) {
+        if (!(taken.scope === 'account' && scope === 'global')) {
+          out.skipped.push({ credential_id: src.id, name: src.name, reason: `npm registry ${registry} is already set by ${taken.name}` });
+        }
+      } else {
+        npmOwner.set(registry, { scope, name: src.name });
+        out.npm_registries.push({ credential_id: src.id, name: src.name, registry, token });
+        npmRegistry = registry;
+      }
+    }
     const names: string[] = [];
     for (const [field, value] of Object.entries(emitsEnv(src.provider, src.env_prefix) ? src.fields : {})) {
       if (typeof value !== 'string' || !value) continue;
@@ -205,8 +253,15 @@ export function resolveAgentEnv(sources: readonly AgentEnvSource[]): ResolvedAge
       out.env[envName] = value;
       names.push(envName);
     }
-    if (names.length || gitHost) {
-      out.sources.push({ credential_id: src.id, name: src.name, scope, env_names: names, ...(gitHost ? { git_host: gitHost } : {}) });
+    if (names.length || gitHost || npmRegistry) {
+      out.sources.push({
+        credential_id: src.id,
+        name: src.name,
+        scope,
+        env_names: names,
+        ...(gitHost ? { git_host: gitHost } : {}),
+        ...(npmRegistry ? { npm_registry: npmRegistry } : {}),
+      });
     }
   }
   return out;

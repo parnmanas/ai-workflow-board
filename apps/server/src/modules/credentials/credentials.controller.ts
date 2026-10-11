@@ -18,6 +18,7 @@ import {
   agentEnvNames,
   agentEnvSupported,
   gitHostOrigin,
+  npmRegistryUrl,
   normalizeAgentEnvPrefix,
   validateAgentEnvConfig,
 } from '../../common/credential-agent-env';
@@ -114,13 +115,15 @@ function serializeCliLoginSession(s: CliLoginSession) {
 function serializeCred(c: Credential) {
   let credentialFields: Record<string, string> = {};
   let credentialStatus: 'ok' | 'unreadable' = 'ok';
-  // Origin only, never the token — a git host's address is not a secret and
-  // the list should say where agents' git will authenticate.
+  // Address only, never the token — a git host / npm registry is not a secret
+  // and the list should say where agents will authenticate.
   let gitHost: string | null = null;
+  let npmRegistry: string | null = null;
   try {
     const plaintext = decryptStrict(c.encrypted_data);
     credentialFields = maskCredentialData(plaintext);
     if (c.agent_env && c.provider === 'git_http') gitHost = gitHostOrigin(JSON.parse(plaintext)?.url);
+    if (c.agent_env && c.provider === 'npm') npmRegistry = npmRegistryUrl(JSON.parse(plaintext)?.registry);
   } catch {
     credentialStatus = 'unreadable';
   }
@@ -140,6 +143,7 @@ function serializeCred(c: Credential) {
       ? agentEnvNames(c.provider, c.env_prefix || '', Object.keys(credentialFields).filter((k) => credentialFields[k]))
       : [],
     agent_git_host: gitHost,
+    agent_npm_registry: npmRegistry,
     created_at: c.created_at,
     updated_at: c.updated_at,
   };

@@ -910,6 +910,8 @@ export interface Credential {
   agent_env_names?: string[];
   // git_http only: the origin agents' git authenticates to.
   agent_git_host?: string | null;
+  // npm only: the registry agents' npm authenticates to.
+  agent_npm_registry?: string | null;
   created_at: string;
   updated_at: string;
 }

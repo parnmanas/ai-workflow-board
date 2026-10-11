@@ -18,19 +18,22 @@
  * vars the server's list has not caught up with.
  *
  * Exposed git hosts (`git_credentials`) become a credential helper per host —
- * see git-host-env.ts. The same response feeds the dispatcher's provisioning
+ * see git-host-env.ts. Exposed npm registries (`npm_registries`) become npm's
+ * per-registry `_authToken` config — see npm-registry-env.ts. The same response feeds the dispatcher's provisioning
  * git (`agentGitEnvFor`), so one dispatch reads it twice; a 5s per-account
  * cache keeps that to one request without making an edit wait long.
  */
 import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
 import { gitCredentialEnv, type GitHostCredential } from './git-host-env.js';
+import { npmRegistryEnv, type NpmRegistryCredential } from './npm-registry-env.js';
 
 export type AgentEnvFetcher = (config: AwbConfig, accountId: string) => Promise<AgentEnvResponse>;
 
 export interface AgentEnvResponse {
   env: Record<string, string>;
   git_credentials?: GitHostCredential[];
+  npm_registries?: NpmRegistryCredential[];
   skipped: Array<{ credential_id?: string; name?: string; reason?: string }>;
 }
 
@@ -71,6 +74,7 @@ async function fetchAgentEnv(config: AwbConfig, accountId: string): Promise<Agen
   return {
     env: body?.env && typeof body.env === 'object' ? body.env : {},
     git_credentials: Array.isArray(body?.git_credentials) ? body.git_credentials : [],
+    npm_registries: Array.isArray(body?.npm_registries) ? body.npm_registries : [],
     skipped: Array.isArray(body?.skipped) ? body.skipped : [],
   };
 }
@@ -107,7 +111,8 @@ export function filterAgentEnv(
     if (typeof value !== 'string') continue;
     const upper = name.toUpperCase();
     // GIT_CONFIG_* is how git hosts are installed; a stray value would shift the indexes.
-    if (upper.startsWith('AWB_') || upper.startsWith('GIT_CONFIG_') || owned.has(upper)) {
+    // npm_config_* is npm's own config channel (registry auth is installed through it).
+    if (upper.startsWith('AWB_') || upper.startsWith('GIT_CONFIG_') || upper.startsWith('NPM_CONFIG_') || owned.has(upper)) {
       dropped.push(name);
       continue;
     }
@@ -140,7 +145,9 @@ export async function agentCredentialEnvFor(
   if (names.length) log(`${tag} credential env: ${names.join(', ')}`);
   const gitEnv = gitCredentialEnv(response.git_credentials ?? []);
   if (Object.keys(gitEnv).length) log(`${tag} git hosts: ${(response.git_credentials ?? []).map((c) => c.url).join(', ')}`);
-  return { ...env, ...gitEnv };
+  const npmEnv = npmRegistryEnv(response.npm_registries ?? []);
+  if (Object.keys(npmEnv).length) log(`${tag} npm registries: ${(response.npm_registries ?? []).map((r) => r.registry).join(', ')}`);
+  return { ...env, ...gitEnv, ...npmEnv };
 }
 
 /** Git host config only — for the manager's own provisioning git (clone,
