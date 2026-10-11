@@ -75,6 +75,7 @@ test/credentials-scope.test.mjs
 test/cron-coverage-guard.test.mjs
 test/cross-account-holder-name.test.mjs
 test/deploy-branch-audit-guard.test.mjs
+test/drop-workspace-claude-backend-profiles-migration.test.mjs
 test/environment-config-repo-only.test.mjs
 test/event-registry-chat-runtime-profile-wire.test.mjs
 test/event-registry-payload-parity-guard.test.mjs
