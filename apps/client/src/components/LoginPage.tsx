@@ -1,9 +1,34 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api';
-import { getServerUrl } from '../serverConfig';
+import { getServerUrl, getServerBaseUrl } from '../serverConfig';
+import { isNativeApp } from '../native/backgroundWake';
 import { tokens } from '../tokens';
 import ServerConfigField from './ServerConfigField';
+
+function ServerConnectDetails() {
+  // 네이티브 앱 + 미설정이면 펼친 채로 — 접힌 채로는 없는 것이나 같다(이번 장애).
+  const [open, setOpen] = useState(() => {
+    try {
+      return isNativeApp() && !getServerBaseUrl();
+    } catch {
+      return false;
+    }
+  });
+  return (
+    <details style={{ marginTop: 20 }} open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary style={{
+        fontSize: 12, color: tokens.colors.textMuted, cursor: 'pointer',
+        fontWeight: 600,
+      }}>
+        다른 서버에 연결
+      </summary>
+      <div style={{ marginTop: 10 }}>
+        <ServerConfigField />
+      </div>
+    </details>
+  );
+}
 
 type Mode = 'login' | 'setup' | 'register';
 
@@ -400,18 +425,9 @@ export default function LoginPage() {
           </div>
         )}
 
-        {/* PWA: 다른 AWB 서버를 바라볼 때만 펼친다 — 기본은 same-origin */}
-        <details style={{ marginTop: 20 }}>
-          <summary style={{
-            fontSize: 12, color: tokens.colors.textMuted, cursor: 'pointer',
-            fontWeight: 600,
-          }}>
-            다른 서버에 연결
-          </summary>
-          <div style={{ marginTop: 10 }}>
-            <ServerConfigField />
-          </div>
-        </details>
+        {/* PWA: 다른 AWB 서버를 바라볼 때만 펼친다 — 기본은 same-origin.
+            네이티브 앱은 번들에 서버가 없어 첫 실행부터 펼쳐 둔다. */}
+        <ServerConnectDetails />
       </div>
     </div>
   );

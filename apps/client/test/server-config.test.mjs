@@ -7,11 +7,17 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   normalizeServerUrl,
   isMixedContentRisk,
 } from '../src/serverConfig.ts';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
 test('빈 입력은 same-origin("")이다', () => {
   assert.equal(normalizeServerUrl(''), '');
@@ -37,4 +43,15 @@ test('https 페이지에서 http 서버는 mixed-content 위험이다', () => {
   assert.equal(isMixedContentRisk('http://192.168.1.10:7701', 'https:'), true);
   assert.equal(isMixedContentRisk('https://awb.example.com', 'https:'), false);
   assert.equal(isMixedContentRisk('http://192.168.1.10:7701', 'http:'), false);
+});
+
+test('서버 불가 화면에 서버 입력이 있다 — 로그인 화면이 안 뜰 때의 막다른 해소', () => {
+  const app = read('src/App.tsx');
+  assert.match(app, /if \(serverUnavailable\)/);
+  assert.match(app, /<ServerConfigField \/>/);
+});
+
+test('네이티브 앱은 로그인 화면에서 서버 입력을 펼친 채로 시작한다', () => {
+  const login = read('src/components/LoginPage.tsx');
+  assert.match(login, /isNativeApp\(\) && !getServerBaseUrl\(\)/);
 });

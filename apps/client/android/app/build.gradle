@@ -9,7 +9,8 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         // 디버그 서명(versionCode 1)과 릴리즈 서명은 다르다 — 서명을 바꾸면 기존 설치와
         // 업데이트가 안 맞으므로 릴리즈는 2부터. 기기를 옮길 땐 기존 앱을 지우고 깐다.
-        versionCode 2
+        // 3: 서버 미도달 화면의 막다른 해소(서버 입력 상시 표시).
+        versionCode 3
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {

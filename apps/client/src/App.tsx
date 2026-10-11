@@ -9,6 +9,7 @@ import LoginPage from './components/LoginPage';
 import AppLayout from './components/AppLayout';
 import { ChunkLoadErrorBoundary } from './components/common';
 import { tokens } from './tokens';
+import ServerConfigField from './components/ServerConfigField';
 
 // 라우트 단위 코드 스플리팅: 무거운 페이지 컴포넌트를 지연 로드해 초기 번들을
 // 작게 유지한다 (티켓 33a8ccc4 — 1.18MB 단일 청크 경고 해소).
@@ -182,6 +183,14 @@ function AppContent() {
           >
             Retry
           </button>
+          {/* 막다른 해소: 서버에 못 닿아 로그인 화면조차 안 뜰 때 여기서 주소를 바꾼다.
+              네이티브 앱은 첫 실행이 항상 이 화면이다(번들 오리진에 서버가 없으므로). */}
+          <div style={{
+            width: '100%', marginTop: 8, paddingTop: 16,
+            borderTop: `1px solid ${tokens.colors.border}`, textAlign: 'left',
+          }}>
+            <ServerConfigField />
+          </div>
         </div>
       </div>
     );
