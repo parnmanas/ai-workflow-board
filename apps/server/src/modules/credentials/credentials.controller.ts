@@ -17,6 +17,7 @@ import { PROVIDER_FIELDS, REVEALABLE_OAUTH_FIELDS } from '../../common/credentia
 import {
   agentEnvNames,
   agentEnvSupported,
+  gitHostOrigin,
   normalizeAgentEnvPrefix,
   validateAgentEnvConfig,
 } from '../../common/credential-agent-env';
@@ -113,8 +114,13 @@ function serializeCliLoginSession(s: CliLoginSession) {
 function serializeCred(c: Credential) {
   let credentialFields: Record<string, string> = {};
   let credentialStatus: 'ok' | 'unreadable' = 'ok';
+  // Origin only, never the token — a git host's address is not a secret and
+  // the list should say where agents' git will authenticate.
+  let gitHost: string | null = null;
   try {
-    credentialFields = maskCredentialData(decryptStrict(c.encrypted_data));
+    const plaintext = decryptStrict(c.encrypted_data);
+    credentialFields = maskCredentialData(plaintext);
+    if (c.agent_env && c.provider === 'git_http') gitHost = gitHostOrigin(JSON.parse(plaintext)?.url);
   } catch {
     credentialStatus = 'unreadable';
   }
@@ -131,8 +137,9 @@ function serializeCred(c: Credential) {
     env_prefix: c.env_prefix || '',
     // Names only — what an agent run will see, so the list can show it.
     agent_env_names: c.agent_env
-      ? agentEnvNames(c.env_prefix || '', Object.keys(credentialFields).filter((k) => credentialFields[k]))
+      ? agentEnvNames(c.provider, c.env_prefix || '', Object.keys(credentialFields).filter((k) => credentialFields[k]))
       : [],
+    agent_git_host: gitHost,
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
@@ -140,30 +147,25 @@ function serializeCred(c: Credential) {
 
 /**
  * Reads `agent_env` / `env_prefix` from a create/update body on top of the
- * stored values and checks them against the field keys that will be stored.
+ * stored values and checks them against the fields that will be stored.
  * Turning exposure off never fails — that is the way out of a bad config.
  */
 function resolveAgentEnvSettings(
   body: any,
   current: { agent_env: boolean; env_prefix: string },
   provider: string,
-  fieldKeys: string[],
+  fields: Record<string, unknown>,
 ): { agent_env: boolean; env_prefix: string } | { error: string } {
   const agentEnv = body.agent_env === undefined ? current.agent_env : body.agent_env === true;
   const envPrefix = body.env_prefix === undefined ? current.env_prefix : normalizeAgentEnvPrefix(body.env_prefix);
   if (agentEnv) {
-    const problem = validateAgentEnvConfig(provider, envPrefix, fieldKeys);
+    const problem = validateAgentEnvConfig(provider, envPrefix, fields);
     if (problem) return { error: problem };
   } else if (!agentEnvSupported(provider)) {
     // Keep a CLI credential from carrying a stale prefix it can never use.
     return { agent_env: false, env_prefix: '' };
   }
   return { agent_env: agentEnv, env_prefix: envPrefix };
-}
-
-/** Non-empty string field keys of a field map — what exposure would emit. */
-function presentFieldKeys(fields: Record<string, unknown>): string[] {
-  return Object.keys(fields).filter((k) => typeof fields[k] === 'string' && fields[k] !== '');
 }
 
 @ApiBearerAuth('user-session')
@@ -449,7 +451,7 @@ export class CredentialsController {
     // Strip paste damage (a wrapped terminal copy puts a newline inside the
     // token) before it ever reaches storage — see credential-fields.ts.
     const normalized = normalizeCredentialFields(credData);
-    const agentEnv = resolveAgentEnvSettings(body, { agent_env: false, env_prefix: '' }, provider, presentFieldKeys(normalized));
+    const agentEnv = resolveAgentEnvSettings(body, { agent_env: false, env_prefix: '' }, provider, normalized);
     if ('error' in agentEnv) return res.status(400).json({ error: agentEnv.error });
     const plaintext = JSON.stringify(normalized);
     const encrypted = encrypt(plaintext);
@@ -549,7 +551,7 @@ export class CredentialsController {
       body,
       { agent_env: !!cred.agent_env, env_prefix: cred.env_prefix || '' },
       cred.provider,
-      presentFieldKeys(storedFields),
+      storedFields,
     );
     if ('error' in agentEnv) return res.status(400).json({ error: agentEnv.error });
     if (fieldsChanged) cred.encrypted_data = encrypt(JSON.stringify(storedFields));

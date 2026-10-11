@@ -15,6 +15,8 @@ import {
   DEFAULT_AGENT_ENV_PREFIX,
   agentEnvNames,
   customRowsProblem,
+  gitHostOrigin,
+  GIT_HOST_PROVIDER,
   normalizeAgentEnvPrefix,
   parseGoogleOAuthJson,
   type CustomRow,
@@ -89,6 +91,16 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
         label: 'Refresh token (optional)',
         placeholder: '1//... — without it an agent cannot call Google APIs (no browser for the consent screen)',
       },
+    },
+  },
+  {
+    value: 'git_http',
+    label: 'Git (HTTPS host)',
+    icon: 'G',
+    fields: {
+      url: { label: 'Host URL', placeholder: 'https://lfs.example.com — any URL on the host works (e.g. the .lfsconfig url)' },
+      username: { label: 'Username', placeholder: 'Account the token belongs to' },
+      token: { label: 'Access token', placeholder: 'Personal access token (used as the password)' },
     },
   },
   // Custom renders a key/value editor instead of these fields; `token` is the
@@ -558,7 +570,10 @@ export default function CredentialManager({
                       {c.agent_env && (
                         <span
                           style={{ marginLeft: 6 }}
-                          title={`Agents get: ${(c.agent_env_names ?? []).join(', ') || '—'}`}
+                          title={[
+                            c.agent_git_host ? `Agents' git authenticates to ${c.agent_git_host}` : '',
+                            (c.agent_env_names ?? []).length ? `Env: ${(c.agent_env_names ?? []).join(', ')}` : '',
+                          ].filter(Boolean).join(' · ') || '—'}
                         >
                           <Badge variant="success">agent env</Badge>
                         </span>
@@ -826,16 +841,27 @@ export default function CredentialManager({
               </div>
               {formAgentEnv && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+                  {formProvider === GIT_HOST_PROVIDER && (
+                    <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
+                      Agents' git and git-lfs authenticate to{' '}
+                      <code style={{ color: tokens.colors.textStrong }}>
+                        {gitHostOrigin(formFields.url || '') || editCred?.agent_git_host || '(enter the host URL)'}
+                      </code>
+                      {' '}with this token — so does the Runtime Host when it prepares their worktrees.
+                    </div>
+                  )}
                   <Input
-                    label="Env prefix"
+                    label={formProvider === GIT_HOST_PROVIDER ? 'Env prefix (optional)' : 'Env prefix'}
                     value={formEnvPrefix}
                     onChange={(e) => setFormEnvPrefix(e.target.value.toUpperCase())}
-                    placeholder="e.g. GOOGLE — blank uses the keys as-is"
+                    placeholder={formProvider === GIT_HOST_PROVIDER
+                      ? 'e.g. FORGEJO — also export the token as env vars; blank = git only'
+                      : 'e.g. GOOGLE — blank uses the keys as-is'}
                   />
                   <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
-                    Agents see:{' '}
+                    Env vars:{' '}
                     <code style={{ color: tokens.colors.textStrong }}>
-                      {agentEnvNames(formEnvPrefix, previewFieldKeys).join(', ') || '—'}
+                      {agentEnvNames(formProvider, formEnvPrefix, previewFieldKeys).join(', ') || '—'}
                     </code>
                   </div>
                 </div>

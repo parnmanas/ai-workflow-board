@@ -12,6 +12,11 @@
  * The manager fetches the resolved map at spawn time
  * (`GET /api/agent-manager/agent-env`) — the values never ride an SSE payload.
  *
+ * `git_http` is the exception to "fields become env": git and git-lfs only
+ * authenticate through credential helpers, so an exposed git host is returned
+ * as `git_credentials` (origin + username + token) and the manager turns it into
+ * a helper for that host. It also gets env vars only when a prefix is set.
+ *
  * CLI login credentials (claude_* / codex_* / …) are excluded: they are
  * applied through CLI settings into a per-agent cli-home, and dumping a
  * `.credentials.json` blob into env would only leak it wider.
@@ -23,6 +28,9 @@ const ENV_PREFIX_RE = /^[A-Z][A-Z0-9_]*$/;
 /** Names the manager sets itself or that change how the child process loads. */
 const BLOCKED_ENV_NAMES = new Set([
   'PATH', 'HOME', 'USERPROFILE', 'NODE_OPTIONS', 'LD_PRELOAD', 'LD_LIBRARY_PATH',
+  'USER', 'USERNAME', 'LOGNAME',
+  // Re-point git itself; GIT_CONFIG_* is also how the manager installs git hosts.
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_ASKPASS',
   // CLI direct-key auth the adapters strip from the operator env (antigravity, opencode).
   'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY',
 ]);
@@ -31,7 +39,9 @@ const BLOCKED_ENV_NAMES = new Set([
  *  credential must not silently re-point which account or backend a CLI uses.
  *  The manager re-checks against each adapter's authEnvKeys() at spawn time;
  *  this list exists so the operator hears about it when saving, not later. */
-const BLOCKED_ENV_PREFIXES = ['AWB_', 'ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'OPENCODE_', 'GEMINI_', 'DYLD_'];
+const BLOCKED_ENV_PREFIXES = ['AWB_', 'ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'OPENCODE_', 'GEMINI_', 'DYLD_', 'GIT_CONFIG_'];
+
+const GIT_HOST_PROVIDER = 'git_http';
 
 /** Suggested prefix per provider — the client pre-fills it, nothing derives from it. */
 export const DEFAULT_AGENT_ENV_PREFIX: Readonly<Record<string, string>> = {
@@ -62,23 +72,52 @@ export function agentEnvNameProblem(name: string): string | null {
   return null;
 }
 
-/** Env var names for a credential's field keys (values are never needed). */
-export function agentEnvNames(prefix: string, fieldKeys: readonly string[]): string[] {
-  return fieldKeys.map((k) => agentEnvName(prefix, k));
+/** A git host credential emits env vars only when given a prefix — its
+ *  bare field names (URL, USERNAME, TOKEN) would be meaningless or collide. */
+function emitsEnv(provider: string, prefix: string): boolean {
+  return provider !== GIT_HOST_PROVIDER || !!prefix;
+}
+
+/** Env var names a credential produces (values are never needed). */
+export function agentEnvNames(provider: string, prefix: string, fieldKeys: readonly string[]): string[] {
+  return emitsEnv(provider, prefix) ? fieldKeys.map((k) => agentEnvName(prefix, k)) : [];
+}
+
+/** `https://lfs.example.com/org/repo.git/info/lfs` → `https://lfs.example.com`;
+ *  null for anything that is not an http(s) URL with a host. git matches
+ *  `credential.<url>.*` by host, so the origin is the whole key. */
+export function gitHostOrigin(raw: unknown): string | null {
+  try {
+    const url = new URL(String(raw ?? '').trim());
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function presentKeys(fields: Record<string, unknown>): string[] {
+  return Object.keys(fields).filter((k) => typeof fields[k] === 'string' && fields[k] !== '');
 }
 
 /**
  * Write-time check for `agent_env: true`. Returns the first problem, or null.
- * `fieldKeys` are the keys that will be stored after the write.
+ * `fields` is the field map that will be stored after the write.
  */
-export function validateAgentEnvConfig(provider: string, prefix: string, fieldKeys: readonly string[]): string | null {
+export function validateAgentEnvConfig(provider: string, prefix: string, fields: Record<string, unknown>): string | null {
   if (!agentEnvSupported(provider)) {
     return `${provider} credentials are CLI logins — bind them in CLI settings instead of exposing them as environment variables`;
   }
   if (prefix && !ENV_PREFIX_RE.test(prefix)) {
     return `env prefix ${prefix} must start with a letter and use only A-Z, 0-9 and _`;
   }
+  const fieldKeys = presentKeys(fields);
   if (fieldKeys.length === 0) return 'credential has no fields to expose';
+  if (provider === GIT_HOST_PROVIDER) {
+    if (!gitHostOrigin(fields.url)) return 'url must be an http(s) URL such as https://git.example.com';
+    if (!fields.username || !fields.token) return 'a git host needs both username and token';
+  }
+  if (!emitsEnv(provider, prefix)) return null;
   const seen = new Map<string, string>();
   for (const field of fieldKeys) {
     const name = agentEnvName(prefix, field);
@@ -102,7 +141,9 @@ export interface AgentEnvSource {
 
 export interface ResolvedAgentEnv {
   env: Record<string, string>;
-  sources: Array<{ credential_id: string; name: string; scope: 'global' | 'account'; env_names: string[] }>;
+  /** Exposed git hosts — the manager installs a credential helper per origin. */
+  git_credentials: Array<{ credential_id: string; name: string; url: string; username: string; password: string }>;
+  sources: Array<{ credential_id: string; name: string; scope: 'global' | 'account'; env_names: string[]; git_host?: string }>;
   skipped: Array<{ credential_id: string; name: string; reason: string }>;
 }
 
@@ -113,8 +154,9 @@ export interface ResolvedAgentEnv {
  * loser is reported — never silently dropped.
  */
 export function resolveAgentEnv(sources: readonly AgentEnvSource[]): ResolvedAgentEnv {
-  const out: ResolvedAgentEnv = { env: {}, sources: [], skipped: [] };
+  const out: ResolvedAgentEnv = { env: {}, git_credentials: [], sources: [], skipped: [] };
   const owner = new Map<string, { scope: 'global' | 'account'; name: string }>();
+  const gitOwner = new Map<string, { scope: 'global' | 'account'; name: string }>();
   const ordered = [...sources].sort((a, b) => {
     const rank = (s: AgentEnvSource) => (s.account_id === null ? 1 : 0);
     return rank(a) - rank(b) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
@@ -125,8 +167,26 @@ export function resolveAgentEnv(sources: readonly AgentEnvSource[]): ResolvedAge
       out.skipped.push({ credential_id: src.id, name: src.name, reason: `${src.provider} cannot be exposed as env` });
       continue;
     }
+    let gitHost: string | undefined;
+    if (src.provider === GIT_HOST_PROVIDER) {
+      const origin = gitHostOrigin(src.fields.url);
+      const username = typeof src.fields.username === 'string' ? src.fields.username : '';
+      const password = typeof src.fields.token === 'string' ? src.fields.token : '';
+      const taken = origin ? gitOwner.get(origin) : undefined;
+      if (!origin || !username || !password) {
+        out.skipped.push({ credential_id: src.id, name: src.name, reason: 'git host needs an http(s) url, username and token' });
+      } else if (taken) {
+        if (!(taken.scope === 'account' && scope === 'global')) {
+          out.skipped.push({ credential_id: src.id, name: src.name, reason: `git host ${origin} is already set by ${taken.name}` });
+        }
+      } else {
+        gitOwner.set(origin, { scope, name: src.name });
+        out.git_credentials.push({ credential_id: src.id, name: src.name, url: origin, username, password });
+        gitHost = origin;
+      }
+    }
     const names: string[] = [];
-    for (const [field, value] of Object.entries(src.fields)) {
+    for (const [field, value] of Object.entries(emitsEnv(src.provider, src.env_prefix) ? src.fields : {})) {
       if (typeof value !== 'string' || !value) continue;
       const envName = agentEnvName(src.env_prefix, field);
       const problem = agentEnvNameProblem(envName);
@@ -145,7 +205,9 @@ export function resolveAgentEnv(sources: readonly AgentEnvSource[]): ResolvedAge
       out.env[envName] = value;
       names.push(envName);
     }
-    if (names.length) out.sources.push({ credential_id: src.id, name: src.name, scope, env_names: names });
+    if (names.length || gitHost) {
+      out.sources.push({ credential_id: src.id, name: src.name, scope, env_names: names, ...(gitHost ? { git_host: gitHost } : {}) });
+    }
   }
   return out;
 }

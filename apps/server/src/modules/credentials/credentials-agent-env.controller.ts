@@ -42,8 +42,9 @@ export async function loadAgentEnvForAccount(credRepo: Pick<Repository<Credentia
   return { ...resolved, skipped: [...unreadable, ...resolved.skipped] };
 }
 
-// Manager → server: the env vars every agent run of `account_id` gets from
-// credentials opted in with `agent_env`. Fetched at spawn time so secrets
+// Manager → server: the env vars (and git host credentials) every agent run of
+// `account_id` gets from credentials opted in with `agent_env`. Fetched at
+// spawn and provisioning time so secrets
 // never ride an SSE payload; contract shared with
 // apps/agent-manager/src/lib/agent-env-credentials.ts.
 //

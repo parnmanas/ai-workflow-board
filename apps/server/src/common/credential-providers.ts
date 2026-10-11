@@ -21,6 +21,10 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   // an agent cannot call a Google API with the client pair alone — it needs a
   // token obtained once through the consent screen.
   google_oauth: { label: 'Google OAuth', fields: ['client_id', 'client_secret', 'refresh_token'] },
+  // A git server reached over HTTPS that is not a project's own remote — e.g. a
+  // self-hosted LFS store (`.lfsconfig` url). Exposed to agents it becomes a git
+  // credential helper for that host, not just env (git-lfs never reads env).
+  git_http: { label: 'Git (HTTPS host)', fields: ['url', 'username', 'token'] },
   // `token` is the default key; the client lets the operator add more
   // key/value pairs (any field map is accepted on write).
   custom: { label: 'Custom', fields: ['token'] },

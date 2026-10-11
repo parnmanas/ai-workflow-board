@@ -57,6 +57,8 @@ import type {
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 import { ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import { createRuntimeCliAdapter, getRuntimeDescriptor } from './runtime/runtime-registry.js';
+import { agentGitEnvFor } from './agent-env-credentials.js';
+import { withGitHostEnv } from './git-host-env.js';
 import {
   parseRunProvision,
   provisionRunWorkspace,
@@ -1478,14 +1480,18 @@ export class EventDispatcher {
       // server flattened onto the trigger (board-less: always per_ticket; older
       // board servers may send shared). poolSize (규약 ⑥, shared mode only) = the
       // concurrency the server also flattened on — N = max_concurrent_tickets_per_agent.
-      const res = await this.#worktreeManager.resolveCwd({
+      // Clone / fetch / `worktree add` run LFS smudge — give them the account's
+      // exposed git hosts (a repo's .lfsconfig may point at one).
+      const gitEnv = await agentGitEnvFor(this.#config, agentContext.account_id, `[worktree] ticket=${ticketId.slice(0, 8)}`);
+      const worktreeManager = this.#worktreeManager;
+      const res = await withGitHostEnv(gitEnv, () => worktreeManager.resolveCwd({
         baseWorkingDir: agentContext.cwd,
         ticketId,
         role,
         mode,
         poolSize,
         bootstrapRepo,
-      });
+      }));
       if (res.isWorktree) {
         log(
           `[worktree] ticket=${ticketId.slice(0, 8)} role=${role} agent=${agentContext.agent_id.slice(0, 8)} mode=${res.mode ?? mode ?? 'per_ticket'} cwd=${res.cwd}${res.reused ? ' (reused)' : ' (new)'}`,
@@ -3512,9 +3518,11 @@ export class EventDispatcher {
       // A main clone is the operator's checkout and may push over its own remote
       // (e.g. ssh) — probe what the worktree will actually push to (its origin),
       // not the project's https URL, or an ssh-only host is falsely blocked.
-      const readiness = await this.#worktreeManager.verifyPushReadiness(
-        agentContext.cwd,
-        selectedRepo.mainCloneDir ? undefined : selectedRepo.url,
+      const worktreeManager = this.#worktreeManager;
+      const pushCwd = agentContext.cwd;
+      const readiness = await withGitHostEnv(
+        await agentGitEnvFor(this.#config, agentContext.account_id, `[push-readiness] ticket=${ev.ticket_id.slice(0, 8)}`),
+        () => worktreeManager.verifyPushReadiness(pushCwd, selectedRepo.mainCloneDir ? undefined : selectedRepo.url),
       );
       if (!readiness.ok) {
         const blockerKind = readiness.reason || 'push_credential_unavailable';
@@ -4196,7 +4204,10 @@ export class EventDispatcher {
     let provisionedWorkFolder = '';
     const runProvision = parseRunProvision(payload.run_provision);
     if (runProvision && agentContext) {
-      const result = await provisionRunWorkspace(runProvision, agentContext.cwd);
+      const result = await withGitHostEnv(
+        await agentGitEnvFor(this.#config, agentContext.account_id, '[run-provision]'),
+        () => provisionRunWorkspace(runProvision, agentContext.cwd),
+      );
       if (result.ok) {
         runContext = { ...agentContext, cwd: result.dir };
         provisionedWorkFolder = result.dir;
@@ -5197,7 +5208,10 @@ export class EventDispatcher {
           }
         }
       }
-      const result = await provisionRunWorkspace(runProvision, baseWorkingDir);
+      const result = await withGitHostEnv(
+        await agentGitEnvFor(this.#config, runProvision.account_id || p.account_id || agentContext?.account_id, '[run-provision]'),
+        () => provisionRunWorkspace(runProvision, baseWorkingDir),
+      );
       if (!result.ok) {
         const responder = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
         if (p.room_id && responder) {

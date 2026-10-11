@@ -31,6 +31,7 @@ import { join, dirname, resolve, relative, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
+import { gitProcessEnv } from './git-host-env.js';
 import { recordRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
   cloneWithRepoCredential,
@@ -151,7 +152,7 @@ function git(args: string[], timeoutMs: number): Promise<ExecResult> {
     execFile(
       'git',
       args,
-      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: gitProcessEnv() },
       (err, stdout, stderr) => {
         resolve({
           ok: !err,

@@ -9,7 +9,10 @@
  */
 
 /** Providers whose fields may be exposed as env — the non-CLI ones. */
-export const AGENT_ENV_PROVIDERS: ReadonlySet<string> = new Set(['github', 'gitlab', 'openai', 'google_oauth', 'custom']);
+export const AGENT_ENV_PROVIDERS: ReadonlySet<string> = new Set(['github', 'gitlab', 'openai', 'google_oauth', 'git_http', 'custom']);
+
+/** A git host is handed to agents' git as a credential helper; it gets env vars only with a prefix. */
+export const GIT_HOST_PROVIDER = 'git_http';
 
 /** Suggested prefix when exposure is switched on. */
 export const DEFAULT_AGENT_ENV_PREFIX: Readonly<Record<string, string>> = {
@@ -31,8 +34,20 @@ export function agentEnvName(prefix: string, field: string): string {
   return p ? `${p}_${key}` : key;
 }
 
-export function agentEnvNames(prefix: string, fieldKeys: readonly string[]): string[] {
+export function agentEnvNames(provider: string, prefix: string, fieldKeys: readonly string[]): string[] {
+  if (provider === GIT_HOST_PROVIDER && !normalizeAgentEnvPrefix(prefix)) return [];
   return fieldKeys.map((k) => agentEnvName(prefix, k));
+}
+
+/** `https://lfs.example.com/org/repo.git/info/lfs` → `https://lfs.example.com`; null if not http(s). Mirrors the server. */
+export function gitHostOrigin(raw: string): string | null {
+  try {
+    const url = new URL(String(raw ?? '').trim());
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
 export type GoogleOAuthImport =

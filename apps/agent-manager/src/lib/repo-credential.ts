@@ -23,6 +23,7 @@ import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { terminateDetachedProcessTree } from './process-tree.js';
+import { gitProcessEnv } from './git-host-env.js';
 
 const GIT_TIMEOUT_MS = 20_000;
 
@@ -234,6 +235,7 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
       detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: gitProcessEnv(),
     });
 
     const clearTimers = () => {
@@ -353,7 +355,7 @@ function runGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promis
     execFile(
       'git',
       ['-C', cwd, ...args],
-      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: gitProcessEnv() },
       (err, stdout, stderr) => {
         resolve({
           ok: !err,

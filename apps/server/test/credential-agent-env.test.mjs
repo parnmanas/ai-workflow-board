@@ -41,16 +41,42 @@ test('field names become <PREFIX>_<FIELD>, upper-cased', () => {
 });
 
 test('write-time validation refuses what would break or hijack a run', () => {
-  const google = ['client_id', 'client_secret', 'refresh_token'];
+  const google = { client_id: 'i', client_secret: 's', refresh_token: 'r' };
   assert.equal(validateAgentEnvConfig('google_oauth', 'GOOGLE', google), null);
-  assert.match(validateAgentEnvConfig('claude_api_key', 'X', ['api_key']), /CLI logins/);
-  assert.match(validateAgentEnvConfig('custom', '', ['ANTHROPIC_BASE_URL']), /reserved/);
-  assert.match(validateAgentEnvConfig('custom', '', ['AWB_API_KEY']), /reserved/);
-  assert.match(validateAgentEnvConfig('openai', 'OPENAI', ['api_key']), /reserved/);
-  assert.match(validateAgentEnvConfig('custom', '', ['PATH']), /reserved/);
-  assert.match(validateAgentEnvConfig('custom', '1BAD', ['token']), /prefix/);
-  assert.match(validateAgentEnvConfig('custom', 'X', ['client-id', 'client_id']), /both become X_CLIENT_ID/);
-  assert.match(validateAgentEnvConfig('custom', 'X', []), /no fields/);
+  assert.match(validateAgentEnvConfig('claude_api_key', 'X', { api_key: 'k' }), /CLI logins/);
+  assert.match(validateAgentEnvConfig('custom', '', { ANTHROPIC_BASE_URL: 'u' }), /reserved/);
+  assert.match(validateAgentEnvConfig('custom', '', { AWB_API_KEY: 'k' }), /reserved/);
+  assert.match(validateAgentEnvConfig('openai', 'OPENAI', { api_key: 'k' }), /reserved/);
+  assert.match(validateAgentEnvConfig('custom', '', { PATH: 'p' }), /reserved/);
+  assert.match(validateAgentEnvConfig('custom', '', { USERNAME: 'u' }), /reserved/);
+  assert.match(validateAgentEnvConfig('custom', '', { GIT_CONFIG_COUNT: '1' }), /reserved/);
+  assert.match(validateAgentEnvConfig('custom', '1BAD', { token: 't' }), /prefix/);
+  assert.match(validateAgentEnvConfig('custom', 'X', { 'client-id': 'a', client_id: 'b' }), /both become X_CLIENT_ID/);
+  assert.match(validateAgentEnvConfig('custom', 'X', {}), /no fields/);
+});
+
+test('a git host needs a real URL plus username and token; env vars only with a prefix', () => {
+  const lfs = { url: 'https://lfs.parnmanas.com', username: 'parnmanas', token: 't' };
+  assert.equal(validateAgentEnvConfig('git_http', '', lfs), null, 'no prefix → git credential only, nothing to name-check');
+  assert.equal(validateAgentEnvConfig('git_http', 'FORGEJO', lfs), null);
+  assert.match(validateAgentEnvConfig('git_http', '', { ...lfs, url: 'lfs.parnmanas.com' }), /http\(s\) URL/);
+  assert.match(validateAgentEnvConfig('git_http', '', { ...lfs, username: '' }), /username and token/);
+  assert.match(validateAgentEnvConfig('git_http', '', { url: lfs.url, username: 'u' }), /username and token/);
+});
+
+test('git hosts resolve to origins; account shadows global per origin', () => {
+  const resolved = resolveAgentEnv([
+    { id: 'g', name: 'global lfs', provider: 'git_http', account_id: null, env_prefix: '', fields: { url: 'https://lfs.parnmanas.com/txiv/emberdelve.git/info/lfs', username: 'g', token: 'gt' } },
+    { id: 'a', name: 'account lfs', provider: 'git_http', account_id: 'acc-1', env_prefix: 'FORGEJO', fields: { url: 'https://lfs.parnmanas.com', username: 'parnmanas', token: 'at' } },
+    { id: 'b', name: 'broken', provider: 'git_http', account_id: 'acc-1', env_prefix: '', fields: { url: 'not a url', username: 'u', token: 't' } },
+  ]);
+  assert.deepEqual(resolved.git_credentials.map((c) => [c.credential_id, c.url, c.username, c.password]), [
+    ['a', 'https://lfs.parnmanas.com', 'parnmanas', 'at'],
+  ]);
+  assert.deepEqual(resolved.env, { FORGEJO_URL: 'https://lfs.parnmanas.com', FORGEJO_USERNAME: 'parnmanas', FORGEJO_TOKEN: 'at' });
+  assert.deepEqual(resolved.skipped.map((s) => s.credential_id), ['b']);
+  assert.equal(resolved.sources.find((s) => s.credential_id === 'a').git_host, 'https://lfs.parnmanas.com');
+  assert.equal(resolved.sources.some((s) => s.credential_id === 'g'), false, 'global loses to the account row for the same origin');
 });
 
 test('account credentials shadow globals; same-scope collisions are reported', () => {
@@ -144,6 +170,25 @@ describe('credential agent env — REST', () => {
       GOOGLE_REFRESH_TOKEN: '1//rt',
     });
     assert.deepEqual(res.body.skipped, []);
+    assert.deepEqual(res.body.git_credentials, []);
+  });
+
+  it('an exposed git host comes back as a git credential (origin) and the list shows where', async () => {
+    const created = await create({
+      account_id: 'acc-1',
+      name: 'Forgejo LFS',
+      provider: 'git_http',
+      credentials: { url: 'https://lfs.parnmanas.com/txiv/emberdelve.git/info/lfs', username: 'parnmanas', token: 'tok-123456789' },
+      agent_env: true,
+    });
+    assert.equal(created.statusCode, 201, JSON.stringify(created.body));
+    assert.equal(created.body.agent_git_host, 'https://lfs.parnmanas.com');
+    assert.deepEqual(created.body.agent_env_names, [], 'no prefix → no env vars');
+    const res = await fetchEnv(hostReq, 'acc-1');
+    assert.deepEqual(res.body.env, {});
+    assert.deepEqual(res.body.git_credentials.map((c) => [c.url, c.username, c.password]), [
+      ['https://lfs.parnmanas.com', 'parnmanas', 'tok-123456789'],
+    ]);
   });
 
   it('a global exposed credential reaches every account; another account never sees account-owned ones', async () => {

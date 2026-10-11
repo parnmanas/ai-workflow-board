@@ -68,6 +68,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
+import { gitProcessEnv } from './git-host-env.js';
 import { readRunWorkspaceLeaves, forgetRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
   decidePushReadiness,
@@ -296,7 +297,8 @@ function git(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<G
     execFile(
       'git',
       ['-C', cwd, ...args],
-      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      // Exposed git hosts (e.g. an LFS store) while the dispatcher provisions.
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: gitProcessEnv() },
       (err, stdout, stderr) => {
         resolve({
           ok: !err,
@@ -1114,12 +1116,11 @@ export class WorktreeManager {
           timeout: PUSH_PROBE_TIMEOUT_MS,
           maxBuffer: 8 * 1024 * 1024,
           windowsHide: true,
-          env: {
-            ...process.env,
+          env: gitProcessEnv({
             GIT_TERMINAL_PROMPT: '0',
             GIT_ASKPASS: '',
             GCM_INTERACTIVE: 'never',
-          },
+          }),
         },
         (err, stdout, stderr) => resolve({
           ok: !err,

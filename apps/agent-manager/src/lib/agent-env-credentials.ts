@@ -16,27 +16,37 @@
  * here: AWB_* and the CLI adapter's own auth vars (authEnvKeys()). The server
  * already refuses those at save time; this is the guard for a CLI whose auth
  * vars the server's list has not caught up with.
+ *
+ * Exposed git hosts (`git_credentials`) become a credential helper per host —
+ * see git-host-env.ts. The same response feeds the dispatcher's provisioning
+ * git (`agentGitEnvFor`), so one dispatch reads it twice; a 5s per-account
+ * cache keeps that to one request without making an edit wait long.
  */
 import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
+import { gitCredentialEnv, type GitHostCredential } from './git-host-env.js';
 
 export type AgentEnvFetcher = (config: AwbConfig, accountId: string) => Promise<AgentEnvResponse>;
 
 export interface AgentEnvResponse {
   env: Record<string, string>;
+  git_credentials?: GitHostCredential[];
   skipped: Array<{ credential_id?: string; name?: string; reason?: string }>;
 }
 
 // Shorter than the general REST timeout: this sits in front of every spawn.
 const AGENT_ENV_TIMEOUT_MS = 5_000;
+const CACHE_TTL_MS = 5_000;
 
 let fetcherOverride: AgentEnvFetcher | null = null;
 let missingRouteLogged = false;
+const cache = new Map<string, { at: number; response: Promise<AgentEnvResponse | null> }>();
 
 /** Test seam — spawn tests must not reach for a real AWB server. */
 export function setAgentEnvFetcherForTests(fetcher: AgentEnvFetcher | null): void {
   fetcherOverride = fetcher;
   missingRouteLogged = false;
+  cache.clear();
 }
 
 async function fetchAgentEnv(config: AwbConfig, accountId: string): Promise<AgentEnvResponse | null> {
@@ -60,8 +70,29 @@ async function fetchAgentEnv(config: AwbConfig, accountId: string): Promise<Agen
   const body = await resp.json();
   return {
     env: body?.env && typeof body.env === 'object' ? body.env : {},
+    git_credentials: Array.isArray(body?.git_credentials) ? body.git_credentials : [],
     skipped: Array.isArray(body?.skipped) ? body.skipped : [],
   };
+}
+
+/** Cached per account for CACHE_TTL_MS; a failure is not cached. Never throws. */
+async function loadAgentEnv(config: AwbConfig, account: string, tag: string): Promise<AgentEnvResponse | null> {
+  const key = `${config.url}|${account}`;
+  const hit = cache.get(key);
+  let pending: Promise<AgentEnvResponse | null>;
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    pending = hit.response;
+  } else {
+    pending = fetcherOverride ? fetcherOverride(config, account) : fetchAgentEnv(config, account);
+    cache.set(key, { at: Date.now(), response: pending });
+  }
+  try {
+    return await pending;
+  } catch (err: any) {
+    if (cache.get(key)?.response === pending) cache.delete(key);
+    log(`${tag} credential env fetch failed for account ${account.slice(0, 8)}: ${err?.message ?? err} — continuing without it`);
+    return null;
+  }
 }
 
 /** Drop what the spawn owns, keep only string values. */
@@ -74,7 +105,9 @@ export function filterAgentEnv(
   const dropped: string[] = [];
   for (const [name, value] of Object.entries(env)) {
     if (typeof value !== 'string') continue;
-    if (name.toUpperCase().startsWith('AWB_') || owned.has(name.toUpperCase())) {
+    const upper = name.toUpperCase();
+    // GIT_CONFIG_* is how git hosts are installed; a stray value would shift the indexes.
+    if (upper.startsWith('AWB_') || upper.startsWith('GIT_CONFIG_') || owned.has(upper)) {
       dropped.push(name);
       continue;
     }
@@ -96,13 +129,7 @@ export async function agentCredentialEnvFor(
 ): Promise<Record<string, string>> {
   const account = String(accountId || '').trim();
   if (!account || !config?.url || !config?.apiKey) return {};
-  let response: AgentEnvResponse | null;
-  try {
-    response = fetcherOverride ? await fetcherOverride(config, account) : await fetchAgentEnv(config, account);
-  } catch (err: any) {
-    log(`${tag} credential env fetch failed for account ${account.slice(0, 8)}: ${err?.message ?? err} — spawning without it`);
-    return {};
-  }
+  const response = await loadAgentEnv(config, account, tag);
   if (!response) return {};
   for (const s of response.skipped) {
     log(`${tag} credential env skipped ${s.name ?? s.credential_id ?? '?'}: ${s.reason ?? 'unknown reason'}`);
@@ -111,5 +138,20 @@ export async function agentCredentialEnvFor(
   if (dropped.length) log(`${tag} credential env dropped spawn-owned names: ${dropped.join(', ')}`);
   const names = Object.keys(env);
   if (names.length) log(`${tag} credential env: ${names.join(', ')}`);
-  return env;
+  const gitEnv = gitCredentialEnv(response.git_credentials ?? []);
+  if (Object.keys(gitEnv).length) log(`${tag} git hosts: ${(response.git_credentials ?? []).map((c) => c.url).join(', ')}`);
+  return { ...env, ...gitEnv };
+}
+
+/** Git host config only — for the manager's own provisioning git (clone,
+ *  fetch, worktree add), which needs the LFS host but none of the env vars. */
+export async function agentGitEnvFor(
+  config: AwbConfig,
+  accountId: string | null | undefined,
+  tag: string,
+): Promise<Record<string, string>> {
+  const account = String(accountId || '').trim();
+  if (!account || !config?.url || !config?.apiKey) return {};
+  const response = await loadAgentEnv(config, account, tag);
+  return gitCredentialEnv(response?.git_credentials ?? []);
 }

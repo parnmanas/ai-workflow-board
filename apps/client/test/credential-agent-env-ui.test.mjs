@@ -13,7 +13,9 @@ import { readFileSync } from 'node:fs';
 import {
   AGENT_ENV_PROVIDERS,
   agentEnvName,
+  agentEnvNames,
   customRowsProblem,
+  gitHostOrigin,
   parseGoogleOAuthJson,
 } from '../src/components/admin/credentialAgentEnv.logic.ts';
 
@@ -26,7 +28,15 @@ test('env name preview matches the server rule', () => {
 });
 
 test('only non-CLI providers offer exposure', () => {
-  assert.deepEqual([...AGENT_ENV_PROVIDERS].sort(), ['custom', 'github', 'gitlab', 'google_oauth', 'openai']);
+  assert.deepEqual([...AGENT_ENV_PROVIDERS].sort(), ['custom', 'git_http', 'github', 'gitlab', 'google_oauth', 'openai']);
+});
+
+test('a git host previews its origin, and env vars only once a prefix is given', () => {
+  assert.equal(gitHostOrigin('https://lfs.parnmanas.com/txiv/emberdelve.git/info/lfs'), 'https://lfs.parnmanas.com');
+  assert.equal(gitHostOrigin('lfs.parnmanas.com'), null);
+  assert.deepEqual(agentEnvNames('git_http', '', ['url', 'username', 'token']), []);
+  assert.deepEqual(agentEnvNames('git_http', 'forgejo', ['token']), ['FORGEJO_TOKEN']);
+  assert.deepEqual(agentEnvNames('custom', '', ['TOKEN']), ['TOKEN']);
 });
 
 test('Cloud Console download (installed / web) fills client id + secret', () => {

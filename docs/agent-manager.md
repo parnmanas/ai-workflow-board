@@ -325,7 +325,7 @@ An operator can hand a stored secret to agents as process env — the case it
 was built for is a Google OAuth client (`google_oauth` provider: `client_id`,
 `client_secret`, optional `refresh_token`; the form fills them from the
 Cloud Console JSON or an authorized-user JSON). Any non-CLI credential
-(`github`, `gitlab`, `openai`, `google_oauth`, `custom` with its own
+(`github`, `gitlab`, `openai`, `google_oauth`, `git_http`, `custom` with its own
 key/value rows) can opt in with **Expose to agents as environment
 variables** (`Credential.agent_env` + `env_prefix`).
 
@@ -340,8 +340,9 @@ variables** (`Credential.agent_env` + `env_prefix`).
 - **Refused at save** (400 with the reason): CLI login providers (those go
   through CLI settings into a cli-home), names starting `AWB_`, the CLI
   login/endpoint families (`ANTHROPIC_`, `CLAUDE_`, `CODEX_`, `OPENAI_`,
-  `OPENCODE_`, `GEMINI_`, `GOOGLE_API_KEY`, …) and process-loading names
-  (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, …).
+  `OPENCODE_`, `GEMINI_`, `GOOGLE_API_KEY`, …), process-loading names
+  (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, …), login identity (`USER`,
+  `USERNAME`, `LOGNAME`) and git re-pointing (`GIT_CONFIG_*`, `GIT_DIR`, …).
 - **Delivery**: values never ride an SSE payload. Every spawn site — one-shot
   subagent, persistent ticket/chat session, Agent Session — calls
   `GET /api/agent-manager/agent-env?account_id=` with the Host key
@@ -364,6 +365,34 @@ variables** (`Credential.agent_env` + `env_prefix`).
 - Note that client_id/client_secret alone cannot call a Google API — the agent
   has no browser for the consent screen. Store a `refresh_token` obtained once
   (or an authorized-user JSON) for headless use.
+
+### Git hosts (`git_http`)
+
+git and git-lfs never read a token from env — they ask credential helpers. A
+`git_http` credential (`url`, `username`, `token`; e.g. a self-hosted Forgejo
+that a repo's `.lfsconfig` names as its LFS store) is therefore delivered as
+`git_credentials` (origin + username + token) and turned into command-scope git
+config by `git-host-env.ts`:
+
+```
+GIT_CONFIG_KEY_n   = credential.https://lfs.example.com.helper   GIT_CONFIG_VALUE_n   = ""
+GIT_CONFIG_KEY_n+1 = credential.https://lfs.example.com.helper   GIT_CONFIG_VALUE_n+1 = !f() { … }; f
+```
+
+The empty entry resets the helper list **for that host only** — command scope
+is read last, so without it the host's own helpers (Windows GCM would pop a
+login, a stale `store`) answer first. The helper prints the username/token from
+`AWB_GIT_CRED_<i>_*` vars, so the secret is never in config text. Indexes start
+after any `GIT_CONFIG_COUNT` already inherited.
+
+It reaches two places: the agent's process env (all spawn sites above) and the
+manager's own provisioning git — clone, fetch, `worktree add` and the push
+probe all run LFS smudge/pre-push. The dispatcher wraps those calls in
+`withGitHostEnv()` and every provisioning git runner (`worktree-manager`,
+`run-provisioner`, `repo-credential`) asks `gitProcessEnv()`, an
+AsyncLocalStorage scope, so concurrent dispatches of different accounts never
+see each other's hosts. Env vars (`<PREFIX>_URL/_USERNAME/_TOKEN`) are added
+only when a prefix is set. Real-git regression: `apps/agent-manager/test/git-host-env.test.mjs`.
 
 ## Capability and health reporting
 
