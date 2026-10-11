@@ -691,7 +691,10 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       text = withWakeNote(text);
     }
     const images = prompt.images.map(({ base64, mime_type }) => ({ base64, mime_type }));
-    const optimisticText = text || (images.length ? `[${images.length} image(s)]` : '');
+    // 낙관적 에코는 텍스트만 싣는다 — 이미지는 턴이 열리면 매니저가 image 이벤트로 되돌려 준다.
+    // 텍스트와 함께 보냈을 때 이미지가 있다는 사실이 사라지면 "보냈는데 안 보인다"가 되므로 장수를 함께 적는다.
+    const imageNote = images.length ? `🖼 ${images.length}장 첨부` : '';
+    const optimisticText = text && imageNote ? `${text}\n${imageNote}` : text || (imageNote ? `${imageNote} 전송` : '');
     try {
       const result = await api.promptHostSession(managerId, cli, sessionId, text, images);
       ownTurnIdsRef.current.add(result.turn_id);

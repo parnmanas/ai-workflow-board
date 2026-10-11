@@ -31,6 +31,7 @@ import {
   splitRecentCwdGroups,
   splitRecentSessions,
 } from '../src/components/sessions/sessionList.logic.ts';
+import { withWakeNote } from '../src/voice/wake.logic.ts';
 
 let seq = 0;
 function ev(type, payload, turn_id = 't1') {
@@ -718,4 +719,52 @@ test('ordinary continuation requests, quoted notices and known user echoes stay 
     { ...ev('user_prompt', { text: notice }), id: 'local:user-turn' },
   ];
   assert.deepEqual(buildTranscript(events).map((b) => b.kind), events.map(() => 'prompt'));
+});
+
+// ─── 프롬프트 출처 구분 — 직접 입력과 시스템·다른 세션을 같은 말풍선으로 그리지 않는다 ──
+
+test('user_prompt 는 출처별로 origin 을 갖는다 — 직접 입력과 자동·다른 세션 보고를 구분한다', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('user_prompt', { text: 'hello' }, 't1'),
+    ev('user_prompt', { text: '[AWB 작업 보고] 다른 세션 소식 1건입니다.\n\n1. 완료' }, 't2'),
+    ev('user_prompt', { text: '[AWB 오퍼레이터 작업] Jarvis — 사용자 승인\n테스트 돌려줘' }, 't3'),
+    ev('user_prompt', { text: 'User answer to your asynchronous question (abc):\nQ\n{"a":1}' }, 't4'),
+  ]);
+  assert.deepEqual(blocks.map((b) => b.origin), ['user', 'operator-report', 'operator-task', 'async-answer']);
+  assert.equal(blocks[1].report, true);
+  assert.equal(blocks[2].operatorTask, 'Jarvis');
+  assert.equal(blocks[2].text, '테스트 돌려줘', 'operator 작업은 앞머리를 떼고 본문만 둔다');
+});
+
+test('음성으로 깨워서 보낸 첫 요청은 voice origin 이다', () => {
+  seq = 0;
+  const blocks = buildTranscript([ev('user_prompt', { text: withWakeNote('안녕') }, 't1')]);
+  assert.equal(blocks[0].kind, 'prompt');
+  assert.equal(blocks[0].origin, 'voice');
+  assert.equal(blocks[0].voice, true);
+  assert.equal(blocks[0].text, '안녕');
+});
+
+test('이미지는 턴 안의 위치로 보낸 주체를 단다 — 프롬프트 전은 내가 보낸 것, 답 뒤는 에이전트 것', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('user_prompt', { text: '봐줘' }, 't1'),
+    ev('image', { image_ref: 'r1', mime_type: 'image/png', size: 10 }, 't1'),
+    ev('text', { text: '응' }, 't1'),
+    ev('image', { image_ref: 'r2', mime_type: 'image/png', size: 10 }, 't1'),
+    ev('image', { image_ref: 'r3', mime_type: 'image/png', size: 10 }, 't2'),
+  ]);
+  assert.deepEqual(blocks.map((b) => [b.kind, b.from ?? b.origin ?? '']), [
+    ['prompt', 'user'], ['image', 'user'], ['assistant', ''], ['image', 'agent'], ['image', 'agent'],
+  ]);
+});
+
+test('payload 에 명시된 이미지 출처는 추정을 덮어쓰지 않는다', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('user_prompt', { text: '봐줘' }, 't1'),
+    ev('image', { image_ref: 'r1', mime_type: 'image/png', size: 10, from: 'agent' }, 't1'),
+  ]);
+  assert.equal(blocks.find((b) => b.kind === 'image').from, 'agent');
 });

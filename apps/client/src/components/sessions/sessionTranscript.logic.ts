@@ -141,12 +141,26 @@ export interface PlanEntryView {
   status: 'pending' | 'in_progress' | 'completed' | string;
 }
 
+export type PromptOrigin =
+  /** 사용자가 직접 입력 (컴포저 · 음성 전사 포함). 오른쪽 파란 말풍선. */
+  | 'user'
+  /** 음성으로 깨워서 보낸 첫 요청 — 사용자 직접 입력이지만 🎙 표시를 단다. */
+  | 'voice'
+  /** AWB 가 operator 에게 보낸 작업 보고 — 다른 세션 소식. 왼쪽 회색 카드. */
+  | 'operator-report'
+  /** operator 가 제안하고 사용자가 승인한 작업 — 왼쪽 주황 카드. */
+  | 'operator-task'
+  /** 에이전트의 비동기 질문에 사용자가 폼으로 답한 것을 시스템이 전달 — 왼쪽 회색 카드. */
+  | 'async-answer';
+
 export type TranscriptBlock =
   /**
    * `voice` — 이름을 불러 깨운 뒤의 첫 요청(앞에 붙은 음성 대화 안내 한 줄을 떼고 보여 준다).
    * `report` — 사람이 아니라 AWB 가 operator 에게 보낸 작업 보고(접어서 보여 준다).
+   * `origin` — 말풍선 색·정렬을 정하는 출처. 기존 flag 와 같은 정보를 한 곳에 모은 것으로,
+   *   둘 중 하나만 봐도 같은 결론이 나게 유지한다 (flag 는 구 렌더러·테스트 호환용).
    */
-  | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean; report?: boolean; operatorTask?: string }
+  | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean; report?: boolean; operatorTask?: string; origin: PromptOrigin }
   | { kind: 'automatic_prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'assistant'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'reasoning'; key: string; seq: number; turnId: string; text: string }
@@ -219,6 +233,9 @@ export type TranscriptBlock =
    * 에이전트가 내보낸 이미지 한 장. **바이트는 여기 없다** — `imageRef` 로 전용
    * 엔드포인트에서 받는다(이벤트에 base64 를 실으면 payload 상한에 걸려 조용히 사라진다).
    * `uri` 는 어댑터가 URL 로 준 경우(외부 이미지) — 그때는 ref 가 비어 있다.
+   * `from` — 누가 보낸 그림인가. `user` 는 프롬프트에 첨부해 보낸 그림(오른쪽),
+   *   `agent` 는 에이전트가 보여 준 그림(왼쪽). 기록·라이브에 출처가 없어 턴 안의
+   *   위치로 추정한 값이다 (아래 tagImageSenders).
    */
   | {
       kind: 'image';
@@ -229,6 +246,7 @@ export type TranscriptBlock =
       mimeType: string;
       size: number;
       uri: string;
+      from: 'user' | 'agent';
     }
   | { kind: 'system'; key: string; seq: number; text: string };
 
@@ -292,12 +310,76 @@ function isAutomaticContinuation(text: string): boolean {
   return text.trim().replace(/\s+/g, ' ') === '[Your previous response had no visible output. Please continue and produce a user-visible response.]';
 }
 
+/**
+ * 에이전트의 비동기 질문에 사용자가 폼으로 답하면 매니저가 그 답을 새 턴의 프롬프트로
+ * 전달한다 (`agent-session-runner.ts` #resolveElicitation async 분기). 사람이 직접 친 말이
+ * 아니라서 사용자 말풍선과 같은 UI 를 쓰면 헷갈린다 — 앞머리 한 줄로 알아보고 따로 그린다.
+ */
+export const ASYNC_ANSWER_PREFIX = 'User answer to your asynchronous question';
+
+export function isAsyncAnswerPrompt(text: string): boolean {
+  return (text || '').startsWith(ASYNC_ANSWER_PREFIX);
+}
+
+/** user_prompt 한 건의 출처 — payload 에 명시(origin)가 있으면 그것을 믿고, 없으면 텍스트 앞머리로 안다. */
+export function resolvePromptOrigin(rawText: string, noted: boolean, payloadOrigin: unknown): { text: string; origin: PromptOrigin; report: boolean; operatorTask: string | null } {
+  const text = rawText;
+  const task = parseOperatorTaskPrompt(text);
+  if (typeof payloadOrigin === 'string') {
+    const o = payloadOrigin.trim().toLowerCase();
+    if (o === 'voice' || (o === 'user' && noted)) return { text, origin: 'voice', report: false, operatorTask: null };
+    if (o === 'operator-report' || o === 'report') return { text, origin: 'operator-report', report: true, operatorTask: null };
+    if (o === 'operator-task' || (o === 'server' && task)) return { text: task ? task.text : text, origin: 'operator-task', report: false, operatorTask: task ? task.operator : '' };
+    if (o === 'async-answer') return { text, origin: 'async-answer', report: false, operatorTask: null };
+    if (o === 'user' || o === 'server') return { text: task ? task.text : text, origin: task ? 'operator-task' : (isOperatorReportPrompt(text) ? 'operator-report' : 'user'), report: isOperatorReportPrompt(text), operatorTask: task ? task.operator : null };
+  }
+  if (task) return { text: task.text, origin: 'operator-task', report: false, operatorTask: task.operator };
+  if (isOperatorReportPrompt(text)) return { text, origin: 'operator-report', report: true, operatorTask: null };
+  if (isAsyncAnswerPrompt(text)) return { text, origin: 'async-answer', report: false, operatorTask: null };
+  if (noted) return { text, origin: 'voice', report: false, operatorTask: null };
+  return { text, origin: 'user', report: false, operatorTask: null };
+}
+
+/**
+ * 이미지 블록에 보낸 주체를 단다. 기록·라이브 이벤트에는 출처가 없어 턴 안의 위치로 추정한다:
+ * 같은 턴에서 assistant/reasoning/tool 보다 앞에 나온 이미지는 프롬프트에 첨부해 보낸 것(사용자),
+ * 그 뒤는 에이전트가 보여 준 것이다. opencode 기록처럼 턴이 메시지 단위면 사용자 턴에는
+ * assistant 가 없어 전부 사용자로 잡히고, 에이전트 턴에는 프롬프트가 없어 전부 에이전트로 잡힌다.
+ */
+export function tagImageSenders(blocks: TranscriptBlock[], explicitKeys?: Set<string>): void {
+  const firstAgentIndexByTurn = new Map<string, number>();
+  blocks.forEach((b, i) => {
+    if ((b.kind === 'assistant' || b.kind === 'reasoning' || b.kind === 'tool') && 'turnId' in b) {
+      const turn = (b as { turnId: string }).turnId;
+      if (!firstAgentIndexByTurn.has(turn)) firstAgentIndexByTurn.set(turn, i);
+    }
+  });
+  const hasPromptByTurn = new Set<string>();
+  for (const b of blocks) {
+    if ((b.kind === 'prompt' || b.kind === 'automatic_prompt') && 'turnId' in b) {
+      hasPromptByTurn.add((b as { turnId: string }).turnId);
+    }
+  }
+  for (let i = 0; i < blocks.length; i += 1) {
+    const b = blocks[i];
+    if (b.kind !== 'image') continue;
+    // payload 에 명시(from/sender)가 있던 블록은 스캐너가 준 값을 믿는다 — 추정은 건너뛴다.
+    if (explicitKeys?.has(b.key)) continue;
+    const firstAgent = firstAgentIndexByTurn.get(b.turnId);
+    if (firstAgent !== undefined && i < firstAgent && hasPromptByTurn.has(b.turnId)) b.from = 'user';
+    else if (firstAgent === undefined && hasPromptByTurn.has(b.turnId)) b.from = 'user';
+    else b.from = 'agent';
+  }
+}
+
 export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   const toolIndex = new Map<string, number>();
   const permissionIndex = new Map<string, number>();
   const elicitationIndex = new Map<string, number>();
   const planIndex = new Map<string, number>();
+  /** payload 에 출처가 명시된 이미지 블록 — 턴 위치 추정을 건너뛴다. */
+  const explicitImageKeys = new Set<string>();
   /** 턴 → 그 턴의 usage 블록(마지막 값). 흐름에 끼우지 않고 끝에서 배치한다. */
   const usageByTurn = new Map<string, Extract<TranscriptBlock, { kind: 'usage' }>>();
   for (const ev of events) {
@@ -306,19 +388,20 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     const last = blocks[blocks.length - 1];
     switch (ev.type) {
       case 'user_prompt': {
-        const { text, noted } = stripWakeNote(str(p.text));
+        const { text: stripped, noted } = stripWakeNote(str(p.text));
         // Local echoes and voice wake requests are known user input.
-        const automatic = !noted && !ev.id.startsWith('local:') && isAutomaticContinuation(text);
+        const automatic = !noted && !ev.id.startsWith('local:') && isAutomaticContinuation(stripped);
         if (automatic) {
-          blocks.push({ kind: 'automatic_prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at });
+          blocks.push({ kind: 'automatic_prompt', key: ev.id, seq: ev.seq, turnId, text: stripped, createdAt: ev.created_at });
           break;
         }
-        const task = parseOperatorTaskPrompt(text);
+        const resolved = resolvePromptOrigin(stripped, noted, (p as Record<string, unknown>).origin ?? (p as Record<string, unknown>).from);
         blocks.push({
-          kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text: task ? task.text : text, createdAt: ev.created_at,
-          ...(noted ? { voice: true } : {}),
-          ...(isOperatorReportPrompt(text) ? { report: true } : {}),
-          ...(task ? { operatorTask: task.operator } : {}),
+          kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text: resolved.text, createdAt: ev.created_at,
+          origin: resolved.origin,
+          ...(resolved.origin === 'voice' ? { voice: true } : {}),
+          ...(resolved.report ? { report: true } : {}),
+          ...(resolved.operatorTask ? { operatorTask: resolved.operatorTask } : {}),
         });
         break;
       }
@@ -466,7 +549,10 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         }
         break;
       }
-      case 'image':
+      case 'image': {
+        const explicitRaw = str((p as Record<string, unknown>).from) || str((p as Record<string, unknown>).sender);
+        const explicit = explicitRaw.trim().toLowerCase();
+        const hasExplicit = explicit === 'user' || explicit === 'agent';
         blocks.push({
           kind: 'image',
           key: ev.id,
@@ -476,8 +562,12 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           mimeType: str(p.mime_type) || 'application/octet-stream',
           size: num(p.size),
           uri: str(p.uri),
+          // 출처는 아래 tagImageSenders 가 턴 위치로 메꾼다 — 명시가 있으면 그것을 쓴다.
+          from: hasExplicit ? (explicit as 'user' | 'agent') : 'agent',
         });
+        if (hasExplicit) explicitImageKeys.add(ev.id);
         break;
+      }
       case 'usage':
         // **대화 흐름에 끼워 넣지 않는다.** usage 는 턴 단위 메타데이터인데, 예전에는
         // 도착 순서대로 블록을 push 했다. 그러면 스트리밍 중인 텍스트 사이에 끼어
@@ -524,6 +614,8 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
   }
   // operator 의 잠들기 표시는 화면이 읽는 신호다 — 보여 주지 않는다(docs/voice-operator.md "잠들기").
   for (const b of blocks) if (b.kind === 'assistant') b.text = splitSleepMarker(b.text).text;
+  // 이미지 출처를 단다 — usage 를 붙이기 전에 해야 턴 끝 위치가 어긋나지 않는다.
+  tagImageSenders(blocks, explicitImageKeys);
   if (usageByTurn.size === 0) return blocks;
   // usage 를 각 턴의 **마지막 블록 뒤에** 한 번만 놓는다. 흐름 중간에 끼우지 않으므로
   // 스트리밍 텍스트가 쪼개지지 않고, 턴당 하나뿐이라 토큰 줄이 중복되지 않는다.

@@ -361,7 +361,7 @@ test('automatic continuation is a labelled note with a distinct appearance and e
     const user = document.querySelector('[data-block="prompt"]');
     const automatic = document.querySelector('[data-block="automatic-prompt"]');
     assert.equal(document.querySelectorAll('[data-block="prompt"]').length, 1);
-    assert.equal(user.textContent, 'Continue my task');
+    assert.match(user.textContent, /Continue my task/);
     assert.equal(automatic.getAttribute('role'), 'note');
     assert.equal(automatic.getAttribute('aria-label'), '자동 이어쓰기');
     assert.match(automatic.textContent, /표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다/);
@@ -372,6 +372,49 @@ test('automatic continuation is a labelled note with a distinct appearance and e
     click(details.querySelector('summary'));
     assert.equal(details.open, true);
     assert.ok(details.textContent.includes(notice), 'the sent prompt remains inspectable');
+    view.unmount();
+  } finally { dom.cleanup(); }
+});
+
+test('transcript: 직접 입력과 시스템·다른 세션·이미지 발신자가 눈에 띄게 구분된다', () => {
+  const dom = setupDom();
+  try {
+    const blocks = buildTranscript([
+      { id: 'p1', seq: 1, turn_id: 't1', type: 'user_prompt', created_at: '2026-10-11T12:00:00.000Z', payload: { text: 'hello' } },
+      { id: 'p2', seq: 2, turn_id: 't2', type: 'user_prompt', created_at: '2026-10-11T12:01:00.000Z', payload: { text: '[AWB 작업 보고] 다른 세션 소식 1건입니다.\n\n1. 완료' } },
+      { id: 'p3', seq: 3, turn_id: 't3', type: 'user_prompt', created_at: '2026-10-11T12:02:00.000Z', payload: { text: '[AWB 오퍼레이터 작업] Jarvis — 사용자 승인\n테스트 돌려줘' } },
+      { id: 'p4', seq: 4, turn_id: 't4', type: 'user_prompt', created_at: '2026-10-11T12:03:00.000Z', payload: { text: 'User answer to your asynchronous question (x):\nQ' } },
+      { id: 'i1', seq: 5, turn_id: 't1', type: 'image', created_at: '2026-10-11T12:00:01.000Z', payload: { image_ref: '', mime_type: 'image/png', size: 10, uri: 'https://example.com/a.png' } },
+      { id: 'a1', seq: 6, turn_id: 't1', type: 'text', created_at: '2026-10-11T12:00:02.000Z', payload: { text: 'reply' } },
+      { id: 'i2', seq: 7, turn_id: 't1', type: 'image', created_at: '2026-10-11T12:00:03.000Z', payload: { image_ref: '', mime_type: 'image/png', size: 10, uri: 'https://example.com/b.png' } },
+    ]);
+    const view = mount(h(SessionTranscript, { blocks, decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {} }));
+    const user = document.querySelector('[data-block="prompt"][data-origin="user"]');
+    assert.ok(user, '직접 입력은 data-origin=user 파란 말풍선이다');
+    assert.match(user.parentElement.parentElement.textContent, /직접 입력/);
+
+    const report = document.querySelector('[data-block="operator-report"]');
+    assert.ok(report, '다른 세션 보고는 별도 블록이다');
+    assert.match(report.parentElement.textContent, /다른 세션 소식/);
+    assert.notEqual(report.style.background, user.style.background, '직접 입력과 배경이 다르다');
+
+    const task = document.querySelector('[data-block="operator-task"]');
+    assert.ok(task, 'operator 작업은 별도 블록이다');
+    assert.match(task.parentElement.textContent, /제안 · 사용자 승인/);
+
+    const async = document.querySelector('[data-block="async-answer"]');
+    assert.ok(async, '비동기 답변 전달은 별도 블록이다');
+    assert.match(async.parentElement.textContent, /자동 전달/);
+
+    // 직접 입력 말풍선은 오른쪽, 시스템·다른 세션은 왼쪽이다
+    const userCol = user.closest('div[style]').parentElement;
+    const reportCol = report.closest('div[style]').parentElement;
+    assert.notEqual(userCol?.outerHTML, reportCol?.outerHTML);
+
+    const images = [...document.querySelectorAll('[data-block="image"]')];
+    assert.deepEqual(images.map((el) => el.getAttribute('data-from')), ['user', 'agent'], '보낸 그림과 받은 그림을 구분한다');
+    assert.match(images[0].parentElement.textContent, /보낸 이미지/);
+    assert.match(images[1].parentElement.textContent, /에이전트 이미지/);
     view.unmount();
   } finally { dom.cleanup(); }
 });

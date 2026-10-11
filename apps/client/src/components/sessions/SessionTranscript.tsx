@@ -110,40 +110,114 @@ const summaryStyle: React.CSSProperties = {
   userSelect: 'none',
 };
 
-/** AWB 가 operator 에게 보낸 작업 보고 — 사람이 쓴 말이 아니라서 접어 두고, 펼치면 원문을 보여 준다. */
-function ReportPromptBlock({ text }: { text: string }) {
-  const count = (text.match(/^\d+\. /gm) || []).length;
+function promptTime(iso: string): string {
+  if (!iso) return '';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+/** 말풍선 위에 붙는 출처 한 줄 — 누가 보낸 말인지(직접 입력 · 음성 · 다른 세션 · 시스템)를 글자로 못 박는다. */
+function SenderLabel({ align, children }: { align: 'left' | 'right'; children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+    <span
+      data-sender-label={align}
+      style={{
+        fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4,
+        alignSelf: align === 'right' ? 'flex-end' : 'flex-start',
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** AWB 가 operator 에게 보낸 작업 보고 — 사람이 쓴 말이 아니라서 접어 두고, 펼치면 원문을 보여 준다. */
+function ReportPromptBlock({ text, createdAt }: { text: string; createdAt?: string }) {
+  const count = (text.match(/^\d+\. /gm) || []).length;
+  const time = createdAt ? promptTime(createdAt) : '';
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
+      <SenderLabel align="left">📋 다른 세션 소식 · AWB 자동{time ? ` · ${time}` : ''}</SenderLabel>
       <details
         data-block="operator-report"
+        data-origin="operator-report"
         style={{
-          maxWidth: 'min(760px, 85%)', padding: '6px 11px', borderRadius: tokens.radii.lg, fontSize: 12.5,
-          background: tokens.colors.surface, border: `1px dashed ${tokens.colors.border}`, color: tokens.colors.textSecondary,
+          maxWidth: 860, padding: '8px 12px', borderRadius: tokens.radii.md, fontSize: 12.5,
+          background: tokens.colors.surfaceSubtle, border: `1px dashed ${tokens.colors.accent}`,
+          borderLeft: `3px solid ${tokens.colors.accent}`,
+          color: tokens.colors.textSecondary, alignSelf: 'flex-start',
         }}
       >
-        <summary style={{ cursor: 'pointer' }}>📋 AWB 작업 보고{count ? ` · ${count}건` : ''}</summary>
+        <summary style={{ cursor: 'pointer' }}>다른 세션에서 받은 자동 보고{count ? ` · ${count}건` : ''} — 내가 쓴 말이 아닙니다</summary>
         <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, color: tokens.colors.textMuted }}>{text}</div>
       </details>
     </div>
   );
 }
 
-/** operator 가 제안하고 사용자가 승인한 작업 — 누가 시켰는지 한 줄을 단 프롬프트. */
-function OperatorTaskPromptBlock({ text, operator }: { text: string; operator: string }) {
+/** operator 가 제안하고 사용자가 승인한 작업 — 왼쪽 주황 카드로 그려 사용자 직접 입력과 구분한다. */
+function OperatorTaskPromptBlock({ text, operator, createdAt }: { text: string; operator: string; createdAt?: string }) {
+  const time = createdAt ? promptTime(createdAt) : '';
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
-      <span data-block="operator-task-label" style={{ fontSize: 11, color: tokens.colors.textMuted }}>🧭 {operator} 제안 · 사용자 승인</span>
-      <PromptBlock text={text} />
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
+      <SenderLabel align="left">🧭 {operator} 제안 · 사용자 승인 — 내가 쓴 말이 아닙니다{time ? ` · ${time}` : ''}</SenderLabel>
+      <div
+        data-block="operator-task"
+        data-origin="operator-task"
+        style={{
+          maxWidth: 860, alignSelf: 'flex-start',
+          padding: '9px 13px', borderRadius: tokens.radii.md,
+          border: `1px solid ${tokens.colors.warning}`,
+          borderLeft: `3px solid ${tokens.colors.warningLight}`,
+          background: tokens.colors.warningBg,
+          color: tokens.colors.textPrimary, fontSize: 13.5, lineHeight: 1.5,
+          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        }}
+      >
+        {text}
+      </div>
     </div>
   );
 }
 
-function PromptBlock({ text, voice }: { text: string; voice?: boolean }) {
+/** 에이전트의 비동기 질문에 사용자가 폼으로 답한 것을 시스템이 전달 — 직접 입력과 구분한다. */
+function AsyncAnswerPromptBlock({ text, createdAt }: { text: string; createdAt?: string }) {
+  const time = createdAt ? promptTime(createdAt) : '';
+  const lines = text.split('\n');
+  const body = lines.length > 1 ? lines.slice(1).join('\n').trim() : text;
   return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
+      <SenderLabel align="left">💬 질문 답변 자동 전달 · 시스템{time ? ` · ${time}` : ''}</SenderLabel>
+      <div
+        data-block="async-answer"
+        data-origin="async-answer"
+        style={{
+          maxWidth: 860, alignSelf: 'flex-start',
+          padding: '8px 12px', borderRadius: tokens.radii.md,
+          border: `1px solid ${tokens.colors.border}`,
+          borderLeft: `3px solid ${tokens.colors.accent}`,
+          background: tokens.colors.surfaceSubtle,
+          color: tokens.colors.textSecondary, fontSize: 12.5, lineHeight: 1.6,
+          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        }}
+      >
+        {body || text}
+      </div>
+    </div>
+  );
+}
+
+function PromptBlock({ text, voice, createdAt }: { text: string; voice?: boolean; createdAt?: string }) {
+  const time = createdAt ? promptTime(createdAt) : '';
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+      <SenderLabel align="right">{voice ? '🎙 음성으로 입력' : '👤 직접 입력'}{time ? ` · ${time}` : ''}</SenderLabel>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
       <div
         data-block="prompt"
+        data-origin={voice ? 'voice' : 'user'}
         style={{
           maxWidth: 'min(760px, 85%)',
           padding: '9px 13px',
@@ -163,6 +237,7 @@ function PromptBlock({ text, voice }: { text: string; voice?: boolean }) {
           </div>
         )}
         {text}
+      </div>
       </div>
     </div>
   );
@@ -212,18 +287,21 @@ function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { te
     [text, loadLocalImage, registerMedia, openMedia],
   );
   return (
-    <div
-      data-block="assistant"
-      style={{
-        maxWidth: 860,
-        color: tokens.colors.textPrimary,
-        fontSize: 13.5,
-        lineHeight: 1.6,
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
-      }}
-    >
-      {nodes}
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
+      <SenderLabel align="left">🤖 에이전트</SenderLabel>
+      <div
+        data-block="assistant"
+        style={{
+          maxWidth: 860,
+          color: tokens.colors.textPrimary,
+          fontSize: 13.5,
+          lineHeight: 1.6,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      >
+        {nodes}
+      </div>
     </div>
   );
 }
@@ -688,6 +766,7 @@ function ImageBlock({
   registerMedia?: (key: string, item: MediaLightboxItem) => void;
   openMedia?: (key: string) => void;
 }) {
+  const fromUser = (block as { from?: string }).from === 'user';
   const [url, setUrl] = useState<string>(block.uri || '');
   const [error, setError] = useState<string | null>(null);
 
@@ -723,42 +802,52 @@ function ImageBlock({
       registerMedia(mediaKey, {
         src: url,
         kind: isVideo ? 'video' : 'image',
-        caption: `agent ${isVideo ? 'video' : 'image'} (${block.mimeType || ''})`,
+        caption: `${fromUser ? 'sent' : 'agent'} ${isVideo ? 'video' : 'image'} (${block.mimeType || ''})`,
         filename: isVideo ? 'video' : 'image',
       });
     }
-  }, [url, registerMedia, mediaKey, isVideo, block.mimeType, block.imageRef, block.uri]);
+  }, [url, registerMedia, mediaKey, isVideo, block.mimeType, block.imageRef, block.uri, fromUser]);
 
   const sizeLabel = block.size ? `, ${Math.round(block.size / 1024)}KB` : '';
+  const align = fromUser ? 'flex-end' : 'flex-start';
+  const label = fromUser ? '🖼 보낸 이미지 · 내가 첨부' : '🖼 에이전트 이미지';
   if (error) {
     return (
-      <div data-block="image" style={{ fontSize: 11.5, color: tokens.colors.warning }}>
-        이미지를 가져오지 못했습니다 — {error}
-        {loadImage && block.imageRef && !block.uri && (
-          <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>다시 시도</button>
-        )}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
+        <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
+        <div data-block="image" data-from={fromUser ? 'user' : 'agent'} style={{ fontSize: 11.5, color: tokens.colors.warning }}>
+          이미지를 가져오지 못했습니다 — {error}
+          {loadImage && block.imageRef && !block.uri && (
+            <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>다시 시도</button>
+          )}
+        </div>
       </div>
     );
   }
   if (!url) {
     return (
-      <div data-block="image" style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-        이미지 불러오는 중… ({block.mimeType}{sizeLabel})
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
+        <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
+        <div data-block="image" data-from={fromUser ? 'user' : 'agent'} style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
+          이미지 불러오는 중… ({block.mimeType}{sizeLabel})
+        </div>
       </div>
     );
   }
   if (isVideo) {
     return (
-      <div data-block="image" style={{ position: 'relative', display: 'inline-block', maxWidth: '100%' }}>
-        <video
-          src={url}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
+        <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
+        <div data-block="image" data-from={fromUser ? 'user' : 'agent'} style={{ position: 'relative', display: 'inline-block', maxWidth: '100%', alignSelf: align }}>
+          <video
+            src={url}
           controls
           preload="metadata"
           style={{
             maxWidth: '100%',
             maxHeight: 420,
             borderRadius: tokens.radii.md,
-            border: `1px solid ${tokens.colors.border}`,
+            border: `1px solid ${fromUser ? tokens.colors.accent : tokens.colors.border}`,
             background: '#000',
             display: 'block',
           }}
@@ -778,32 +867,37 @@ function ImageBlock({
             ⤢
           </button>
         )}
+        </div>
       </div>
     );
   }
   return (
-    <button
-      type="button"
-      data-block="image"
-      onClick={() => openMedia?.(mediaKey)}
-      title="클릭하면 크게 보기 (← → 로 넘기기)"
-      style={{ display: 'block', maxWidth: '100%', padding: 0, border: 'none', background: 'transparent', cursor: openMedia ? 'zoom-in' : 'default' }}
-    >
-      <img
-        src={url}
-        alt={`agent image (${block.mimeType})`}
-        // 전사 폭을 넘지 않게만 제한한다 — 원본은 팝업 갤러리에서 본다(새 탭·다운로드 아님).
-        style={{
-          maxWidth: '100%',
-          maxHeight: 420,
-          objectFit: 'contain',
-          borderRadius: tokens.radii.md,
-          border: `1px solid ${tokens.colors.border}`,
-          background: tokens.colors.surface,
-          display: 'block',
-        }}
-      />
-    </button>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
+      <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
+      <button
+        type="button"
+        data-block="image"
+        data-from={fromUser ? 'user' : 'agent'}
+        onClick={() => openMedia?.(mediaKey)}
+        title="클릭하면 크게 보기 (← → 로 넘기기)"
+        style={{ display: 'block', maxWidth: '100%', padding: 0, border: 'none', background: 'transparent', cursor: openMedia ? 'zoom-in' : 'default', alignSelf: align }}
+      >
+        <img
+          src={url}
+          alt={`${fromUser ? 'sent' : 'agent'} image (${block.mimeType})`}
+          // 전사 폭을 넘지 않게만 제한한다 — 원본은 팝업 갤러리에서 본다(새 탭·다운로드 아님).
+          style={{
+            maxWidth: '100%',
+            maxHeight: 420,
+            objectFit: 'contain',
+            borderRadius: tokens.radii.md,
+            border: `1px solid ${fromUser ? tokens.colors.accent : tokens.colors.border}`,
+            background: tokens.colors.surface,
+            display: 'block',
+          }}
+        />
+      </button>
+    </div>
   );
 }
 
@@ -1080,12 +1174,20 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {blocks.map((block) => {
         switch (block.kind) {
-          case 'prompt':
-            return block.report
-              ? <ReportPromptBlock key={block.key} text={block.text} />
-              : block.operatorTask
-                ? <OperatorTaskPromptBlock key={block.key} text={block.text} operator={block.operatorTask} />
-                : <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
+          case 'prompt': {
+            const origin = (block as { origin?: string }).origin
+              ?? (block.report ? 'operator-report' : block.operatorTask ? 'operator-task' : block.voice ? 'voice' : 'user');
+            if (origin === 'operator-report' || block.report) {
+              return <ReportPromptBlock key={block.key} text={block.text} createdAt={block.createdAt} />;
+            }
+            if (origin === 'operator-task' || block.operatorTask) {
+              return <OperatorTaskPromptBlock key={block.key} text={block.text} operator={block.operatorTask || ''} createdAt={block.createdAt} />;
+            }
+            if (origin === 'async-answer') {
+              return <AsyncAnswerPromptBlock key={block.key} text={block.text} createdAt={block.createdAt} />;
+            }
+            return <PromptBlock key={block.key} text={block.text} voice={block.voice || origin === 'voice'} createdAt={block.createdAt} />;
+          }
           case 'automatic_prompt':
             return <AutomaticPromptBlock key={block.key} text={block.text} />;
           case 'assistant':
