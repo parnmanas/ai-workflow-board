@@ -72,6 +72,17 @@ Claude Backend Profile은 인스턴스 전역 단일 목록인 별도 모델(Acc
   반환한다.
 - Resource/Credential은 ID 참조형이므로 자동으로 같은 이름을 덮어쓰지 않고
   적용 가능한 행을 합쳐서 보여준다.
+- 목록 REST(`GET /api/functions`, `/api/credentials`, `/api/resources`)는 두 모드다
+  (`catalogListAccountIds()`, `common/catalog-scope.ts`). `account_id`를 **명시**하면
+  그 Account + Global 단일 뷰 — CLI 세션 설정 · Project · 런타임 슬롯의 credential
+  picker, 티켓의 resource picker처럼 한 Account의 작업에 묶는 선택기가 쓴다.
+  명시하지 않으면 접근 가능한 모든 Account + Global 행을 합친다(관리 화면).
+  `bindRequest`가 `query.account_id`를 생성 기본 계정으로 덮어쓰므로 "명시"는
+  `req.requestedAccountId`로 판정한다 — 기본 계정이 목록 필터가 되면 안 된다.
+  여러 Account를 합친 Function 목록은 shadow를 한 우선순위로 합치지 않는다:
+  `include_shadowed` 없이는 각 Account의 해소 결과의 합집합(모든 Account 행 +
+  아직 상속하는 Account가 하나라도 있는 Global 행)이다. 회귀:
+  `apps/server/test/catalog-list-aggregation.test.mjs`.
 
 ## UI
 
@@ -79,11 +90,20 @@ Function, Credential, Resource, Action, QA, Security, Schedule은 각각 독립�
 메뉴와 전역 URL(`/functions`, `/resources`, `/actions`, `/qa`, `/security`, `/schedules` 등)을
 사용한다. 중간 Automation Catalog 화면은 두지 않는다.
 
-계정 선택은 소유권 관리와 새 정의의 귀속을 정하는 곳에만 둔다. Actions,
-Automation Schedules, QA Scenarios/Schedules, Security Profiles/Schedules의 목록은
-접근 가능한 계정을 합친다. QA Scenario는 Account 전용이며 합산 과정에서 ID로 중복을 제거한다.
-Global을 지원하는 정의의 생성 시 계정을 비워 두면 Global, 계정을 지정하면 Account 전용으로 저장한다.
-상세·수정 권한은 선택한 계정이나 화면 경로 대신 해당 행의 실제 소유 계정으로 검사한다.
+계정 선택은 소유권 관리와 새 정의의 귀속을 정하는 곳에만 둔다. Functions,
+Credentials, Resources, Actions, Automation Schedules, QA Scenarios/Schedules,
+Security Profiles/Schedules의 목록은 접근 가능한 계정을 합친다(Global을 지원하는
+타입은 Global 행도 함께). QA Scenario는 Account 전용이며 합산 과정에서 ID로 중복을 제거한다.
+화면에 숨은 "현재 계정"은 없다 — Functions / Credentials / Resources는 행마다 소유
+계정 이름 또는 `Global`을 보여 주고(Owner), 상단 "Account for new item"은 Global(그
+타입의 Global 쓰기 권한이 있을 때만) + 접근 가능한 모든 계정을 이름으로 제시한다.
+기본값은 허용되면 Global, 아니면 첫 번째 접근 계정이다. Global을 지원하는 정의의
+생성 시 계정을 비워 두면 Global, 계정을 지정하면 Account 전용으로 저장한다.
+상세·수정·삭제는 선택한 계정이나 화면 경로 대신 해당 행의 실제 소유 계정으로
+요청하고 검사한다. Global Function의 실행 계정은 Functions 화면의 "Run Global
+Functions in"이 정한다(Account Function은 항상 소유 계정에서 실행). owner 표시 ·
+선택 규칙은 `apps/client/src/components/admin/catalogOwner.logic.ts` 한 곳에 있다
+(회귀: `apps/client/test/catalog-owner.test.mjs`).
 
 기존 `/catalog` URL은 북마크 호환을 위해 Functions 메뉴로 redirect한다.
 
@@ -125,7 +145,11 @@ Outreach 채널을 전부 손으로 다시 지정해야 한다. 그래서
   runs").
 
 생성 시 scope 는 페이지 상단 "Account for new item" 선택이 정하고,
-Edit 다이얼로그의 scope 선택기는 기존 행에만 나온다. 회귀 테스트는
+Edit 다이얼로그의 scope 선택기는 기존 행에만 나온다. 선택기는 위 규칙을 그대로
+보여 준다 — Global credential 에는 Global + 접근 가능한 모든 Account(고른 Account 가
+body `account_id` 로 가는 목적지), Account credential 에는 Global + 자기 소유
+Account 만(다른 Account 로 바로 옮기는 선택지는 없다). Account credential 의
+`account_id` 는 언제나 그 행의 소유 계정이다. 회귀 테스트는
 `apps/server/test/credentials-scope-switch.test.mjs` 와
 `apps/client/test/credential-scope-switch-ui.test.mjs`.
 
@@ -142,7 +166,8 @@ Edit 다이얼로그의 scope 선택기는 기존 행에만 나온다. 회귀 �
 3. Global 쓰기는 admin 권한으로 제한하고 Account 간 read/write를 거부한다.
 4. REST와 MCP가 같은 상속 범위를 사용하게 한다.
 5. Sidebar에 타입별 전역 메뉴를 추가하고, Global 전용 중복 메뉴는
-   만들지 않는다. 같은 화면에서 Global + 선택한 소유 계정의 정의를 관리한다.
+   만들지 않는다. 같은 화면에서 Global + 접근 가능한 모든 계정의 정의를 함께
+   관리하고(행마다 소유 계정 표시), 새 정의의 소유 계정은 화면에서 명시적으로 고른다.
 6. Global/Account 경계(접근 권한 없는 Account 행 거부, scope 변경 거부)를 회귀
    테스트로 고정한다(예: `workflow-functions.test.mjs`, `actions-scope.test.mjs`
    패턴).

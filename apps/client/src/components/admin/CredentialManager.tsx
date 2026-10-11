@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { api, getActiveAccountId } from '../../api';
-import type { CatalogScope, Credential } from '../../types';
+import { api } from '../../api';
+import type { Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
@@ -21,6 +21,15 @@ import {
   parseGoogleOAuthJson,
   type CustomRow,
 } from './credentialAgentEnv.logic';
+import {
+  agentEnvOwnerLabel,
+  catalogOwnerLabel,
+  credentialScopeOptions,
+  credentialUpdateScope,
+  ownerToSelectValue,
+  selectValueToOwner,
+  type OwnerAccount,
+} from './catalogOwner.logic';
 
 export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
@@ -168,22 +177,22 @@ function cliProviderFieldDefs(provider: FlattenedCredentialProvider): Record<str
 }
 
 export default function CredentialManager({
-  accountId,
-  accountName,
   globalMode = false,
   catalogMode = false,
-  createScope = 'account',
+  createAccountId = null,
+  accounts = [],
   allScopes = false,
   canManageGlobal = false,
 }: {
-  accountId?: string;
-  /** Names the destination in the Edit dialog's scope picker — moving a global
-   *  credential down lands it in the Account currently being viewed, and
-   *  "Current Account" is not a good enough label for that. */
-  accountName?: string;
+  /** Global credentials only — listing and creating. */
   globalMode?: boolean;
   catalogMode?: boolean;
-  createScope?: CatalogScope;
+  /** Owner of new credentials: an Account id, or null for Global. The list
+   *  itself is never filtered by it — it shows every accessible Account's
+   *  credentials plus Global ones. */
+  createAccountId?: string | null;
+  /** Accessible Accounts — names the Owner column and the scope picker. */
+  accounts?: OwnerAccount[];
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }) {
@@ -215,7 +224,8 @@ export default function CredentialManager({
   const [formDescription, setFormDescription] = useState('');
   const [formProvider, setFormProvider] = useState('github');
   const [formFields, setFormFields] = useState<Record<string, string>>({});
-  const [formScope, setFormScope] = useState<CatalogScope>('account');
+  // Edit dialog: the credential's owner after saving (null = Global).
+  const [formOwner, setFormOwner] = useState<string | null>(null);
   const [storedFieldPreviews, setStoredFieldPreviews] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string; fields?: string }>({});
   const [formAgentEnv, setFormAgentEnv] = useState(false);
@@ -225,16 +235,15 @@ export default function CredentialManager({
   const [removedFields, setRemovedFields] = useState<string[]>([]);
   const [googleJson, setGoogleJson] = useState('');
 
-  const effectiveWsId = globalMode ? '' : (accountId || (getActiveAccountId() || ''));
-  const effectiveCreateScope: CatalogScope = globalMode ? 'global' : createScope;
+  const effectiveCreateOwner: string | null = globalMode ? null : createAccountId;
 
   const loadCredentials = useCallback(async () => {
-    if (!globalMode && !effectiveWsId) { setCredentials([]); setLoading(false); return; }
     setLoading(true);
     try {
+      // No account_id: the server lists every accessible Account + Global.
       const list = globalMode
         ? await api.listCredentials(undefined, { scope: 'global' })
-        : await api.listCredentials(effectiveWsId, {
+        : await api.listCredentials(undefined, {
             includeAllScopes: catalogMode && allScopes,
           });
       setCredentials(list);
@@ -243,7 +252,7 @@ export default function CredentialManager({
     } finally {
       setLoading(false);
     }
-  }, [globalMode, catalogMode, effectiveWsId, allScopes, showToast]);
+  }, [globalMode, catalogMode, allScopes, showToast]);
 
   useEffect(() => { loadCredentials(); }, [loadCredentials]);
 
@@ -335,7 +344,7 @@ export default function CredentialManager({
     setFormProvider('github');
     resetProviderInputs('github');
     setFormAgentEnv(false);
-    setFormScope(effectiveCreateScope);
+    setFormOwner(effectiveCreateOwner);
     setFormErrors({});
     setEditCred(null);
     setShowForm(true);
@@ -355,7 +364,7 @@ export default function CredentialManager({
     setGoogleJson('');
     setFormAgentEnv(!!cred.agent_env);
     setFormEnvPrefix(cred.env_prefix || '');
-    setFormScope(cred.scope ?? (cred.account_id ? 'account' : 'global'));
+    setFormOwner(cred.account_id ?? null);
     setFormErrors({});
     setEditCred(cred);
     setShowForm(true);
@@ -372,9 +381,10 @@ export default function CredentialManager({
     ...Object.keys(formFields).filter((k) => formFields[k]),
     ...(isCustom ? customRows.filter((r) => r.key.trim() && r.value).map((r) => r.key.trim()) : []),
   ]));
-  const agentEnvScopeLabel = (editCred ? formScope : effectiveCreateScope) === 'global'
-    ? 'every Account'
-    : (accountName || 'this Account');
+  // The owner the exposure will actually apply to once saved.
+  const agentEnvScopeLabel = agentEnvOwnerLabel(editCred ? formOwner : effectiveCreateOwner, accounts);
+  const scopeOptions = editCred ? credentialScopeOptions(editCred.account_id ?? null, accounts) : [];
+  const formOwnerLabel = catalogOwnerLabel(formOwner, accounts);
 
   const applyGoogleJson = () => {
     const parsed = parseGoogleOAuthJson(googleJson);
@@ -395,7 +405,6 @@ export default function CredentialManager({
     const customProblem = isCustom ? customRowsProblem(customRows, keptStoredKeys) : null;
     if (customProblem) errors.fields = customProblem;
     if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-    if (!globalMode && !effectiveWsId) { showToast('Ownership defaults are unavailable.', 'error'); return; }
     const credentials: Record<string, string> = { ...formFields };
     if (isCustom) {
       for (const row of customRows) {
@@ -410,11 +419,10 @@ export default function CredentialManager({
     try {
       if (editCred) {
         await api.updateCredential(editCred.id, {
-          scope: formScope,
-          // Doubles as the ownership proof for a account credential and the
-          // destination when a global one is narrowed — see the server's
-          // update() doc comment.
-          account_id: editCred.account_id ?? effectiveWsId,
+          // account_id is the row's own owner (the ownership proof) for an
+          // Account credential and the destination when a global one is
+          // narrowed — see the server's update() doc comment.
+          ...credentialUpdateScope(editCred.account_id ?? null, formOwner),
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -425,8 +433,8 @@ export default function CredentialManager({
         showToast('Credential updated.', 'success');
       } else {
         await api.createCredential({
-          scope: effectiveCreateScope,
-          account_id: effectiveCreateScope === 'global' ? undefined : effectiveWsId,
+          scope: effectiveCreateOwner === null ? 'global' : 'account',
+          account_id: effectiveCreateOwner ?? undefined,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -448,7 +456,8 @@ export default function CredentialManager({
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteCredential(deleteTarget.id, deleteTarget.account_id === null ? undefined : effectiveWsId);
+      // The row's own owner — never the page's owner for new items.
+      await api.deleteCredential(deleteTarget.id, deleteTarget.account_id ?? undefined);
       showToast('Credential deleted.', 'success');
       setDeleteTarget(null);
       await loadCredentials();
@@ -457,23 +466,19 @@ export default function CredentialManager({
     }
   };
 
-  if (!globalMode && !effectiveWsId) {
-    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>;
-  }
-
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} credentials</span>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <CliAutoLogin
-            accountId={effectiveWsId}
-            createScope={effectiveCreateScope}
+            accountId={effectiveCreateOwner ?? ''}
+            createScope={effectiveCreateOwner === null ? 'global' : 'account'}
             onCreated={loadCredentials}
           />
           <CliCredentialImport
-            accountId={effectiveWsId}
-            createScope={effectiveCreateScope}
+            accountId={effectiveCreateOwner ?? ''}
+            createScope={effectiveCreateOwner === null ? 'global' : 'account'}
             onCreated={loadCredentials}
           />
           <Button variant="primary" size="md" onClick={startCreate}>+ New Credential</Button>
@@ -511,6 +516,7 @@ export default function CredentialManager({
               >
                 <th style={listHeadStyle('left')}>Name</th>
                 <th style={listHeadStyle('left')}>Provider</th>
+                {!globalMode && <th style={listHeadStyle('left')}>Owner</th>}
                 <th style={listHeadStyle('left')}>Description</th>
                 <th style={listHeadStyle('left')}>Fields</th>
                 <th style={listHeadStyle('left')}>Updated</th>
@@ -564,9 +570,6 @@ export default function CredentialManager({
                     </td>
                     <td style={listCellStyle('left')}>
                       <Badge variant="neutral">{c.provider}</Badge>
-                      {!globalMode && c.scope && (
-                        <span style={{ marginLeft: 6 }}><Badge variant="info">{c.scope}</Badge></span>
-                      )}
                       {c.agent_env && (
                         <span
                           style={{ marginLeft: 6 }}
@@ -579,6 +582,14 @@ export default function CredentialManager({
                         </span>
                       )}
                     </td>
+                    {!globalMode && (
+                      <td
+                        style={{ ...listCellStyle('left'), whiteSpace: 'nowrap', color: tokens.colors.textSecondary }}
+                        data-testid={`credential-owner-${c.id}`}
+                      >
+                        {catalogOwnerLabel(c.account_id, accounts)}
+                      </td>
+                    )}
                     <td
                       style={{
                         ...listCellStyle('left'),
@@ -671,30 +682,39 @@ export default function CredentialManager({
           </div>
           <Input label="Description" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Optional note" />
 
-          {/* Scope is fixed at create time by the page-level "Account for new
+          {/* The owner of a new credential is the page-level "Account for new
               item" picker; on an existing credential it is switchable, because
               the alternative is re-pasting a secret and re-pointing every
-              binding by hand. Non-admins get the control read-only: the Actions
-              column already hides Edit for inherited globals, so for them this
-              row only ever states which Account owns the row. */}
+              binding by hand. A Global credential can be narrowed to any
+              accessible Account; an Account credential only widens to Global
+              (the server refuses Account → other Account — widen first, then
+              narrow). Non-admins get the control read-only: the Actions column
+              already hides Edit for inherited globals, so for them this row
+              only ever states which Account owns the row. */}
           {editCred && !globalMode && (
             <div>
               <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Scope</label>
               <select
-                value={formScope}
+                value={ownerToSelectValue(formOwner)}
                 disabled={!canManageGlobal}
-                onChange={(e) => setFormScope(e.target.value as CatalogScope)}
+                onChange={(e) => setFormOwner(selectValueToOwner(e.target.value))}
                 style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: canManageGlobal ? tokens.colors.textStrong : tokens.colors.textMuted, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
               >
-                <option value="global">Not set (Global — every Account)</option>
-                <option value="account">{accountName || 'Current Account'}</option>
+                {scopeOptions.map((option) => (
+                  <option key={ownerToSelectValue(option.accountId)} value={ownerToSelectValue(option.accountId)}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
                 {!canManageGlobal
                   ? 'Only an administrator can share a credential across Accounts.'
-                  : formScope === 'global'
+                  : formOwner === null
                   ? 'Readable from every Account on this instance.'
-                  : `Readable only from ${accountName || 'this Account'}. Agents, resources, CLI session settings and outreach channels elsewhere that use it must be re-pointed first.`}
+                  : `Readable only from ${formOwnerLabel}. Agents, resources, CLI session settings and outreach channels elsewhere that use it must be re-pointed first.`}
+                {canManageGlobal && editCred.account_id
+                  ? ' To move it to another Account, widen it to Global first, then narrow it.'
+                  : ''}
               </div>
             </div>
           )}

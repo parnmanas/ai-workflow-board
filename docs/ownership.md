@@ -17,6 +17,11 @@ choose the owner of new work.
 
 Canonical work list endpoints aggregate accessible accounts: tickets, projects,
 chat rooms, teams, missions, actions, automation schedules, QA and Security.
+The Function, Credential and Resource catalog pages do the same and add the
+Global rows; each row names its owning account (or Global), and new items take
+the owner picked on the page. An explicit `account_id` on those list endpoints
+keeps the single-account view (that account + Global) that pickers binding one
+account's work rely on (see [catalog scopes](catalog-scopes.md)).
 Unread counters and mention inboxes use the same accessible ownership set.
 ID-addressed requests resolve the actual resource owner and check membership;
 a page's default account cannot grant access or change an existing owner.

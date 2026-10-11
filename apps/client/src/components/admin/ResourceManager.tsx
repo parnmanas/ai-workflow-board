@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { api, getActiveAccountId } from '../../api';
-import type { CatalogScope, Resource, Credential } from '../../types';
+import { api } from '../../api';
+import type { Resource, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
 import MediaLightbox from '../common/MediaLightbox';
 import { relativeTime } from '../../utils/time';
 import ResourceDetailPanel from './ResourceDetailPanel';
+import { catalogOwnerLabel, credentialsUsableBy, type OwnerAccount } from './catalogOwner.logic';
 
 // master/detail 레이아웃: 이 폭 미만이면 리스트만 보여주고 detail 은
 // 풀폭 오버레이로 전환한다(반응형). 24px 패딩 컨테이너 안에서 리스트(좌)와
@@ -38,17 +39,19 @@ function typeLabel(type: string): string {
 }
 
 interface ResourceManagerProps {
-  accountId?: string;
   catalogMode?: boolean;
-  createScope?: CatalogScope;
+  /** Owner of new Resources: an Account id, or null for Global. Never a list filter. */
+  createAccountId?: string | null;
+  /** Accessible Accounts — owner names. */
+  accounts?: OwnerAccount[];
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }
 
 export default function ResourceManager({
-  accountId,
   catalogMode = false,
-  createScope = 'account',
+  createAccountId = null,
+  accounts = [],
   allScopes = false,
   canManageGlobal = false,
 }: ResourceManagerProps) {
@@ -94,24 +97,19 @@ export default function ResourceManager({
     return () => ro.disconnect();
   }, []);
 
-  const effectiveAccountId = accountId || (getActiveAccountId() || '');
-
   const loadResources = useCallback(async () => {
-    if (!effectiveAccountId) {
-      setResources([]);
-      setLoading(false);
-      return;
-    }
     setLoading(true);
     try {
+      // No account_id: every accessible Account + Global, for both lists. The
+      // credential picker narrows to what the edited Resource's owner can bind.
       const [list, creds] = await Promise.all([
         api.listResources(
-          effectiveAccountId,
+          undefined,
           filterType || undefined,
           { by: sortBy, order: sortOrder },
           catalogMode && allScopes,
         ),
-        api.listCredentials(effectiveAccountId, {
+        api.listCredentials(undefined, {
           includeAllScopes: catalogMode && allScopes,
         }).catch(() => [] as Credential[]),
       ]);
@@ -122,7 +120,7 @@ export default function ResourceManager({
     } finally {
       setLoading(false);
     }
-  }, [effectiveAccountId, catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
+  }, [catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
 
   useEffect(() => {
     loadResources();
@@ -248,10 +246,6 @@ export default function ResourceManager({
       setFormErrors(errors);
       return;
     }
-    if (!effectiveAccountId) {
-      showToast('Ownership defaults are unavailable.', 'error');
-      return;
-    }
 
     const parsedTags = formTags
       .split(',')
@@ -278,8 +272,8 @@ export default function ResourceManager({
         showToast('Resource updated.', 'success');
       } else {
         await api.createResource({
-          scope: createScope,
-          account_id: createScope === 'global' ? null : effectiveAccountId,
+          scope: createAccountId === null ? 'global' : 'account',
+          account_id: createAccountId,
           credential_id: formCredentialId || null,
           name: formName.trim(),
           description: formDescription,
@@ -306,7 +300,8 @@ export default function ResourceManager({
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteResource(deleteTarget.id, effectiveAccountId);
+      // The row's own owner — never the page's owner for new items.
+      await api.deleteResource(deleteTarget.id, deleteTarget.account_id);
       showToast('Resource deleted.', 'success');
       if (selectedId === deleteTarget.id) setSelectedId(null);
       setDeleteTarget(null);
@@ -315,12 +310,6 @@ export default function ResourceManager({
       showToast(err?.message || 'Failed to delete resource', 'error');
     }
   };
-
-  if (!effectiveAccountId) {
-    return (
-      <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>
-    );
-  }
 
   // Shared style for the toolbar filter/sort selects — keeps type filter and
   // the new sort controls visually uniform (티켓 통일감 요구).
@@ -418,7 +407,7 @@ export default function ResourceManager({
               whiteSpace: 'nowrap',
             }}
           >
-            {catalogMode ? `${r.scope.toUpperCase()} · ` : ''}{typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
+            {catalogMode ? `${catalogOwnerLabel(r.account_id, accounts)} · ` : ''}{typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
           </div>
         </div>
       </div>
@@ -459,20 +448,16 @@ export default function ResourceManager({
       onClose={isNarrow ? () => setSelectedId(null) : undefined}
       showToast={showToast}
       canManage={selectedResource.scope !== 'global' || canManageGlobal}
+      ownerLabel={catalogOwnerLabel(selectedResource.account_id, accounts)}
     />
   ) : (
     emptyDetail
   );
 
-  const resourceFormScope = editResource?.scope || createScope;
-  const availableCredentials = credentials.filter(credential =>
-    credential.scope === 'global'
-    || (
-      resourceFormScope !== 'global'
-      && credential.account_id === effectiveAccountId
-    )
-  );
-  const projectsHref = effectiveAccountId ? `/projects` : '';
+  // The Resource's owner after saving: the row's own for an edit, the owner
+  // picked for new items otherwise.
+  const resourceFormOwner = editResource ? editResource.account_id : createAccountId;
+  const availableCredentials = credentialsUsableBy(credentials, resourceFormOwner);
 
   return (
     <div ref={containerRef}>
@@ -514,12 +499,10 @@ export default function ResourceManager({
         <Button variant="primary" size="md" onClick={startCreate}>+ New Resource</Button>
       </div>
 
-      {projectsHref && (
-        <div data-testid="resource-projects-hint" style={{ fontSize: 12, color: tokens.colors.textMuted, marginBottom: 12 }}>
-          Git 저장소는 Resource 가 아니라 <Link to={projectsHref} style={{ color: tokens.colors.accent }}>Projects</Link> 에서
-          관리합니다 (브랜치·히스토리·파일, Host 별 클론 폴더 포함).
-        </div>
-      )}
+      <div data-testid="resource-projects-hint" style={{ fontSize: 12, color: tokens.colors.textMuted, marginBottom: 12 }}>
+        Git 저장소는 Resource 가 아니라 <Link to="/projects" style={{ color: tokens.colors.accent }}>Projects</Link> 에서
+        관리합니다 (브랜치·히스토리·파일, Host 별 클론 폴더 포함).
+      </div>
 
       {loading ? (
         <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>
@@ -759,7 +742,7 @@ export default function ResourceManager({
               >
                 <option value="">None</option>
                 {availableCredentials.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name} ({c.provider}, {c.scope})</option>
+                  <option key={c.id} value={c.id}>{c.name} ({c.provider}, {catalogOwnerLabel(c.account_id, accounts)})</option>
                 ))}
               </select>
             </div>

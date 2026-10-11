@@ -104,7 +104,7 @@ async function mountCredentialManager(t) {
   api.listCredentials = async () => credentials;
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { accountId: 'account-1' }),
+    React.createElement(CredentialManager, { createAccountId: 'account-1' }),
   );
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 

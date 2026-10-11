@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { CatalogScope, Account } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
@@ -13,6 +12,13 @@ import SecurityManager from './admin/SecurityManager';
 import AutomationSchedulesEditor from './AutomationSchedulesEditor';
 import ClaudeBackendProfilesManager from './admin/ClaudeBackendProfilesManager';
 import { PermissionNotice } from './common';
+import {
+  createOwnerOptions,
+  ownerToSelectValue,
+  resolveCreateOwner,
+  selectValueToOwner,
+  type OwnerAccount,
+} from './admin/catalogOwner.logic';
 
 export type AccountManagementKind =
   | 'functions'
@@ -25,9 +31,9 @@ export type AccountManagementKind =
   | 'claude-backend-profiles';
 
 const PAGE_INFO: Record<AccountManagementKind, { title: string; description: string; scopedDefinition?: boolean }> = {
-  functions: { title: 'Functions', description: 'Global and current Account function definitions.', scopedDefinition: true },
-  credentials: { title: 'Credentials', description: 'Global and current Account credentials.', scopedDefinition: true },
-  resources: { title: 'Resources', description: 'Global and current Account resources.', scopedDefinition: true },
+  functions: { title: 'Functions', description: 'Global function definitions and those of every Account you can access.', scopedDefinition: true },
+  credentials: { title: 'Credentials', description: 'Global credentials and those of every Account you can access.', scopedDefinition: true },
+  resources: { title: 'Resources', description: 'Global resources and those of every Account you can access.', scopedDefinition: true },
   actions: { title: 'Actions', description: 'Actions across your accessible accounts.' },
   qa: { title: 'QA', description: 'QA scenarios and schedules across your accessible accounts.' },
   security: { title: 'Security', description: 'Security profiles and schedules across your accessible accounts.' },
@@ -36,17 +42,26 @@ const PAGE_INFO: Record<AccountManagementKind, { title: string; description: str
 };
 
 export default function AccountManagementPage({ kind }: { kind: AccountManagementKind }) {
-  const { currentAccountId } = useAuth();
+  // The creation default only feeds the kinds below that still take one
+  // account. The catalog kinds (scopedDefinition) list every accessible
+  // Account + Global and name the owner of a new item explicitly.
+  const { currentAccountId, availableAccounts, hasPermission } = useAuth();
   const accountId = currentAccountId || '';
-  const { hasPermission } = useAuth();
-  const [account, setAccount] = useState<Account | null>(null);
-  const [createScope, setCreateScope] = useState<CatalogScope>('account');
   const info = PAGE_INFO[kind];
 
+  // Owner names come with the signed-in user's accounts; fetch them only when
+  // that list arrived without names.
+  const [fetchedAccounts, setFetchedAccounts] = useState<OwnerAccount[] | null>(null);
+  const namesMissing = availableAccounts.length === 0 || availableAccounts.some((a) => !a.name);
   useEffect(() => {
-    if (!accountId) return;
-    api.getAccount(accountId).then(setAccount).catch(() => setAccount(null));
-  }, [accountId]);
+    if (!info.scopedDefinition || !namesMissing) return;
+    let cancelled = false;
+    api.getAccounts()
+      .then((rows) => { if (!cancelled) setFetchedAccounts((rows || []).map((a) => ({ id: a.id, name: a.name }))); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [info.scopedDefinition, namesMissing]);
+  const ownerAccounts: OwnerAccount[] = namesMissing && fetchedAccounts ? fetchedAccounts : availableAccounts;
 
   // Credentials are the one catalog kind whose server-side global writes sit
   // behind a dedicated permission (admin.global_credentials — see
@@ -59,10 +74,15 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
     ? hasPermission('admin.global_credentials')
     : hasPermission('admin.access');
 
+  // undefined = not picked yet → Global when permitted, else the first account.
+  const [pickedOwner, setPickedOwner] = useState<string | null | undefined>(undefined);
+  const createAccountId = resolveCreateOwner(pickedOwner, ownerAccounts, canManageGlobalHere);
+  const ownerOptions = createOwnerOptions(ownerAccounts, canManageGlobalHere);
+
   const definitionProps = {
-    accountId: accountId,
     catalogMode: true,
-    createScope,
+    createAccountId,
+    accounts: ownerAccounts,
     allScopes: false,
     canManageGlobal: canManageGlobalHere,
   } as const;
@@ -72,7 +92,7 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
       case 'functions':
         return <FunctionManager {...definitionProps} />;
       case 'credentials':
-        return <CredentialManager {...definitionProps} accountName={account?.name} />;
+        return <CredentialManager {...definitionProps} />;
       case 'resources':
         return <ResourceManager {...definitionProps} />;
       case 'actions':
@@ -116,8 +136,8 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
           <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
             Account for new item
             <select
-              value={createScope}
-              onChange={(event) => setCreateScope(event.target.value as CatalogScope)}
+              value={ownerToSelectValue(createAccountId)}
+              onChange={(event) => setPickedOwner(selectValueToOwner(event.target.value))}
               style={{
                 display: 'block',
                 minWidth: 280,
@@ -129,8 +149,12 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
                 color: tokens.colors.textPrimary,
               }}
             >
-              {canManageGlobalHere && <option value="global">Not set (Global)</option>}
-              <option value="account">{account?.name || 'Current Account'}</option>
+              {/* Global only when canManageGlobalHere, then every accessible Account. */}
+              {ownerOptions.map((option) => (
+                <option key={ownerToSelectValue(option.accountId)} value={ownerToSelectValue(option.accountId)}>
+                  {option.label}
+                </option>
+              ))}
             </select>
           </label>
         </div>

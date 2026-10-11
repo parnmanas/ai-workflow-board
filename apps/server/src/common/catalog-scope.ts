@@ -35,3 +35,27 @@ export function canUseCatalogItem(row: CatalogScoped, accountId: string): boolea
   if (row.account_id === null) return true;
   return row.account_id === accountId;
 }
+
+/**
+ * The Accounts whose rows a catalog list (Function / Credential / Resource)
+ * covers, Global rows aside — see docs/ownership.md.
+ *
+ * - An explicit `account_id` keeps the single-Account view: pickers that bind
+ *   a definition to one Account's work (CLI settings, projects, runtime slots)
+ *   must only offer what that Account can read.
+ * - Without one the list aggregates every Account the caller can access. The
+ *   page's default account is a creation default, never a filter.
+ *
+ * AccountAccessService.bindRequest rewrites `query.account_id` to that default,
+ * so on a bound request the explicit value is `req.requestedAccountId`. An
+ * unbound call (no request, as in direct controller tests) treats the query
+ * value as explicit. Returns null when there is nothing to scope by.
+ */
+export function catalogListAccountIds(req: any, queryAccountId: string | null | undefined): string[] | null {
+  if (Array.isArray(req?.accessibleAccountIds)) {
+    const requested = String(req.requestedAccountId || '').trim();
+    return requested ? [requested] : [...req.accessibleAccountIds];
+  }
+  const explicit = String(queryAccountId || '').trim();
+  return explicit ? [explicit] : null;
+}

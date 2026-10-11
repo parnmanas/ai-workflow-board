@@ -175,6 +175,32 @@ export class WorkflowFunctionsService implements OnModuleInit {
     return Array.from(resolved.values()).sort((a, b) => a.key.localeCompare(b.key)).map(row => this.toView(row));
   }
 
+  /**
+   * The list across several Accounts (the Functions page). Rows of different
+   * Accounts are never merged under one key — shadowing is resolved per
+   * execution Account (resolve()). Without include_shadowed this is the union
+   * of each Account's own resolved view: every Account row, plus a Global row
+   * while at least one of the Accounts still inherits it.
+   */
+  async listForAccounts(accountIds: readonly string[], includeShadowed = false): Promise<Record<string, any>[]> {
+    const ids = Array.from(new Set(accountIds));
+    if (ids.length === 0) return this.list(null);
+    if (ids.length === 1) return this.list(ids[0], includeShadowed);
+    const rows = await this.dataSource.getRepository(WorkflowFunction).createQueryBuilder('f')
+      .where('f.account_id IS NULL OR f.account_id IN (:...ids)', { ids })
+      .orderBy('f.key', 'ASC')
+      .addOrderBy('f.account_id', 'ASC')
+      .getMany();
+    if (includeShadowed) return rows.map(row => this.toView(row));
+    const overriddenBy = new Map<string, number>();
+    for (const row of rows) {
+      if (row.account_id) overriddenBy.set(row.key, (overriddenBy.get(row.key) || 0) + 1);
+    }
+    return rows
+      .filter(row => row.account_id !== null || (overriddenBy.get(row.key) || 0) < ids.length)
+      .map(row => this.toView(row));
+  }
+
   async get(id: string): Promise<Record<string, any>> {
     const row = await this.dataSource.getRepository(WorkflowFunction).findOne({ where: { id } });
     if (!row) throw httpError(404, 'Function not found');
@@ -516,9 +542,12 @@ export class WorkflowFunctionsService implements OnModuleInit {
     throw httpError(400, `Unknown built-in handler: ${handler}`);
   }
 
-  async listRuns(accountId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {
+  /** `accountId` may list several Accounts (the Functions page's recent runs). */
+  async listRuns(accountId: string | readonly string[], functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {
+    const accountIds = typeof accountId === 'string' ? [accountId] : Array.from(accountId);
+    if (accountIds.length === 0) return [];
     const qb = this.dataSource.getRepository(WorkflowFunctionRun).createQueryBuilder('r')
-      .where('r.account_id = :accountId', { accountId });
+      .where('r.account_id IN (:...accountIds)', { accountIds });
     if (functionId) qb.andWhere('r.function_id = :functionId', { functionId });
     if (ticketId) qb.andWhere('r.ticket_id = :ticketId', { ticketId });
     const rows = await qb.orderBy('r.created_at', 'DESC').take(Math.max(1, Math.min(200, limit))).getMany();

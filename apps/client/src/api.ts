@@ -648,13 +648,16 @@ export const api = {
     request<any>(`/keys/${id}`, { method: 'DELETE' }),
 
   // ─── Resources ─────────────────────────────────────────
+  // An explicit accountId lists that Account + Global; omitted lists every
+  // accessible Account + Global (the Resources page).
   listResources: (
-    accountId: string,
+    accountId?: string | null,
     type?: string,
     sort?: { by?: string; order?: 'asc' | 'desc' },
     includeAllScopes = false,
   ) => {
-    const params = new URLSearchParams({ account_id: accountId });
+    const params = new URLSearchParams();
+    if (accountId) params.set('account_id', accountId);
     if (type) params.set('type', type);
     if (sort?.by) params.set('sort_by', sort.by);
     if (sort?.order) params.set('sort_order', sort.order);
@@ -728,9 +731,12 @@ export const api = {
     },
   ) =>
     request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteResource: (id: string, accountId: string) => {
-    const params = new URLSearchParams({ account_id: accountId });
-    return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
+  // accountId = the resource's own owner (omit for a Global resource).
+  deleteResource: (id: string, accountId?: string | null) => {
+    const params = new URLSearchParams();
+    if (accountId) params.set('account_id', accountId);
+    const qs = params.toString();
+    return request<{ success: true; id: string }>(`/resources/${id}${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
   },
   // ─── Library (자료실) ────────────────────────────────────
   // 바이트는 uploadResourceFile(type 'library_file')로 먼저 올리고 여기서 묶는다.
@@ -906,7 +912,8 @@ export const api = {
     return request<ActionRun>(`/actions/runs/${runId}?${params.toString()}`);
   },
 
-  // Functions: account_id omitted means global definitions only.
+  // Functions: an explicit accountId resolves that Account's view (+ Global);
+  // omitted lists every accessible Account + Global (the Functions page).
   listFunctions: (accountId?: string | null, includeShadowed = false) => {
     const params = new URLSearchParams();
     if (accountId) params.set('account_id', accountId);
@@ -924,8 +931,10 @@ export const api = {
     id: string,
     data: { account_id: string; ticket_id?: string; inputs?: Record<string, any>; idempotency_key?: string },
   ) => request<WorkflowFunctionRun>(`/functions/${id}/run`, { method: 'POST', body: JSON.stringify(data) }),
-  listFunctionRuns: (accountId: string, options?: { functionId?: string; ticketId?: string; limit?: number }) => {
-    const params = new URLSearchParams({ account_id: accountId, limit: String(options?.limit || 50) });
+  // accountId omitted → runs of every accessible Account.
+  listFunctionRuns: (accountId?: string | null, options?: { functionId?: string; ticketId?: string; limit?: number }) => {
+    const params = new URLSearchParams({ limit: String(options?.limit || 50) });
+    if (accountId) params.set('account_id', accountId);
     if (options?.functionId) params.set('function_id', options.functionId);
     if (options?.ticketId) params.set('ticket_id', options.ticketId);
     return request<WorkflowFunctionRun[]>(`/functions/runs?${params.toString()}`);
@@ -1224,8 +1233,10 @@ export const api = {
     }),
 
   // ─── Credentials ──────────────────────────────────────
-  // A account list also returns inherited global credentials (scope:'global').
-  // Pass scope:'global' (no account_id) for the Admin global-credentials page.
+  // An explicit accountId lists that Account's credentials plus inherited
+  // globals (scope:'global') — what a picker binding one Account's work needs.
+  // Omitted lists every accessible Account + Global (the Credentials page).
+  // Pass scope:'global' (no account_id) for globals only.
   listCredentials: (accountId?: string, opts?: { provider?: string; scope?: 'global'; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams();
     if (accountId) params.set('account_id', accountId);

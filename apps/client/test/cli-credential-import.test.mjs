@@ -123,7 +123,7 @@ async function mountCredentialManagerForImport(t) {
   };
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { accountId: 'account-1' }),
+    React.createElement(CredentialManager, { createAccountId: 'account-1' }),
   );
   await flush();
 

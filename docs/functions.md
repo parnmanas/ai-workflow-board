@@ -71,9 +71,12 @@ run user-authored shell text.
 
 Function definitions use the shared catalog scope described in
 [`catalog-scopes.md`](catalog-scopes.md). A key resolves in Account → Global
-order. The Functions page for that ownership context requests `include_shadowed=true` so an
+order. The Functions page lists every accessible account's definitions plus
+Global ones (no account filter) and requests `include_shadowed=true` so an
 operator can inspect and edit every definition instead of seeing only the
-effective winner.
+effective winner; each row names its owner. An Account Function runs in its
+owner; a Global one runs in the account picked under "Run Global Functions in".
+Recent runs cover every accessible account.
 
 The following operations should move out of prompts. The implementation order
 is based on failure impact and how often prompt-only behavior has left branches,

@@ -9,7 +9,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
-import { canUseCatalogItem, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
+import { canUseCatalogItem, catalogListAccountIds, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
 import { inferResourceMimetype, REPOSITORY_RESOURCE_REJECTION } from '../mcp/shared/resource-helpers';
 
 @ApiBearerAuth('user-session')
@@ -57,12 +57,20 @@ export class ResourcesController {
     @Query('sort_order') sortOrder: string | undefined,
     @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
+    @Req() req?: Request,
   ) {
-    if (!accountId) {
+    // An explicit account_id lists that Account + Global (the ticket resource
+    // picker); without one, every accessible Account + Global (Resources page).
+    const ownerIds = catalogListAccountIds(req, accountId);
+    if (!ownerIds) {
       return res.status(400).json({ error: 'account_id query parameter is required' });
     }
-    const qb = this.resourceRepo.createQueryBuilder('r')
-      .where('(r.account_id IS NULL OR r.account_id = :account)', { account: accountId });
+    const qb = this.resourceRepo.createQueryBuilder('r');
+    if (ownerIds.length) {
+      qb.where('(r.account_id IS NULL OR r.account_id IN (:...accounts))', { accounts: ownerIds });
+    } else {
+      qb.where('r.account_id IS NULL');
+    }
     if (type) {
       qb.andWhere('r.type = :t', { t: type });
     }

@@ -2,7 +2,7 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, In, IsNull } from 'typeorm';
 import { DataSource } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Credential } from '../../entities/Credential';
@@ -23,7 +23,7 @@ import {
 } from '../../common/credential-agent-env';
 import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
-import { catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
+import { catalogListAccountIds, catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
 import { Resource } from '../../entities/Resource';
 import { Project } from '../../entities/Project';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
@@ -109,8 +109,8 @@ function serializeCliLoginSession(s: CliLoginSession) {
 }
 
 // Shared response shape. `scope` lets the client tell account credentials
-// apart from inherited global ones. Write permissions are enforced per row in
-// the current Account management page.
+// apart from inherited global ones. Write permissions are enforced per row,
+// against the row's own owner.
 function serializeCred(c: Credential) {
   let credentialFields: Record<string, string> = {};
   let credentialStatus: 'ok' | 'unreadable' = 'ok';
@@ -216,16 +216,20 @@ export class CredentialsController {
     @Query('scope') scope: string | undefined,
     @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
+    @Req() req?: Request,
   ) {
-    // scope=global → globals only (legacy callers). Otherwise a
-    // account view returns its own credentials PLUS inherited globals.
+    // scope=global → globals only (legacy callers). An explicit account_id →
+    // that Account's own credentials PLUS inherited globals (credential
+    // pickers bound to one Account). Neither → every accessible Account's
+    // credentials plus globals (the Credentials page).
     let where: any[];
     if (scope === 'global') {
       where = [{ account_id: IsNull() }];
     } else {
-      if (!accountId) return res.status(400).json({ error: 'account_id is required' });
+      const ownerIds = catalogListAccountIds(req, accountId);
+      if (!ownerIds) return res.status(400).json({ error: 'account_id is required' });
       where = [
-        { account_id: accountId },
+        ...(ownerIds.length ? [{ account_id: In(ownerIds) }] : []),
         { account_id: IsNull() },
       ];
     }

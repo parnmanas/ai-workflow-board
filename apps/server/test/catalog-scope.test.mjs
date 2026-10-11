@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  catalogListAccountIds,
   catalogScopeOf,
   normalizeCatalogScope,
   canUseCatalogItem,
@@ -42,7 +43,20 @@ test('scope labels and visibility use Global and Account boundaries only', () =>
   assert.equal(canUseCatalogItem({ account_id: 'other' }, 'ws'), false);
 });
 
-test('client exposes direct management routes with Global/current-Account catalog ownership', () => {
+// Catalog lists aggregate accessible Accounts unless an account_id is
+// explicit; bindRequest's rewritten query.account_id (the creation default)
+// must not count as explicit. Controller coverage: catalog-list-aggregation.
+test('catalog lists scope by an explicit account only, never by the default one', () => {
+  const bound = (requestedAccountId) => ({ accessibleAccountIds: ['a', 'b'], requestedAccountId });
+  assert.deepEqual(catalogListAccountIds(bound(null), 'a'), ['a', 'b']);
+  assert.deepEqual(catalogListAccountIds(bound('b'), 'b'), ['b']);
+  assert.deepEqual(catalogListAccountIds({ accessibleAccountIds: [], requestedAccountId: null }, undefined), []);
+  // Unbound (direct calls): the query value is the only signal.
+  assert.deepEqual(catalogListAccountIds(undefined, 'a'), ['a']);
+  assert.equal(catalogListAccountIds(undefined, ''), null);
+});
+
+test('client exposes direct management routes with Global + accessible-Account catalog ownership', () => {
   const app = fs.readFileSync(path.join(ROOT, 'App.tsx'), 'utf8');
   const sidebar = fs.readFileSync(path.join(ROOT, 'components', 'Sidebar.tsx'), 'utf8');
   const management = fs.readFileSync(path.join(ROOT, 'components', 'AccountManagementPage.tsx'), 'utf8');
@@ -59,9 +73,13 @@ test('client exposes direct management routes with Global/current-Account catalo
   assert.doesNotMatch(sidebar, /label: 'Automation Catalog'/);
   assert.doesNotMatch(sidebar, /label: 'Global Functions'/);
   assert.doesNotMatch(sidebar, /label: 'Global Credentials'/);
+  const ownerLogic = fs.readFileSync(path.join(ROOT, 'components', 'admin', 'catalogOwner.logic.ts'), 'utf8');
   assert.match(management, /Account for new item/);
-  assert.match(management, /<option value="global">Not set \(Global\)<\/option>/);
-  assert.match(management, /<option value="account">/);
+  // Global (when permitted) + every accessible account — not a single hidden
+  // "current account" option.
+  assert.match(management, /createOwnerOptions\(ownerAccounts, canManageGlobalHere\)/);
+  assert.match(ownerLogic, /label: 'Not set \(Global\)'/);
+  assert.doesNotMatch(management, /<option value="account">/);
   assert.doesNotMatch(management, /boardScoped|boardId/);
   // Boards are gone, so no catalog page may hang off a board route.
   assert.doesNotMatch(app, /boards\/:boardId/);

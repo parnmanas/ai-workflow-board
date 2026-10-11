@@ -14,6 +14,8 @@ interface ResourceDetailPanelProps {
   onEdit: (r: Resource) => void;
   onDelete: (r: Resource) => void;
   canManage?: boolean;
+  // 소유 계정 이름 또는 "Global" — 목록이 접근 가능한 계정을 합치므로 행마다 밝힌다.
+  ownerLabel?: string;
   // 이미지/비디오는 라이트박스, 파일은 새 탭/다운로드 — ResourceManager 의
   // openResourceFile 을 그대로 위임받아 카드 시절 동작을 유지한다.
   onPreview: (r: Resource) => void;
@@ -62,6 +64,7 @@ export default function ResourceDetailPanel({
   onEdit,
   onDelete,
   canManage = true,
+  ownerLabel,
   onPreview,
   onClose,
   showToast,
@@ -164,6 +167,12 @@ export default function ResourceDetailPanel({
 
       {/* 메타 행 */}
       <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginTop: 12 }}>
+        {ownerLabel && (
+          <div>
+            <div style={LABEL_STYLE}>Owner</div>
+            <div style={{ fontSize: 13, color: tokens.colors.textStrong, marginTop: 2 }}>{ownerLabel}</div>
+          </div>
+        )}
         {linkedCredential && (
           <div>
             <div style={LABEL_STYLE}>Credential</div>

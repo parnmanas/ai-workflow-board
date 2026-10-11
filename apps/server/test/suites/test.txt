@@ -40,6 +40,7 @@ test/board-update-sentinel-actor-frame.test.mjs
 test/boot-concurrent-sessions.test.mjs
 test/boot-helper-port-isolation.test.mjs
 test/boot-port-guard.test.mjs
+test/catalog-list-aggregation.test.mjs
 test/channels-leak.test.mjs
 test/chat-attachments-guard.test.mjs
 test/chat-dm-promotion.test.mjs

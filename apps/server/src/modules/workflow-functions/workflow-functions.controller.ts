@@ -4,6 +4,7 @@ import { Request, Response } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
+import { catalogListAccountIds } from '../../common/catalog-scope';
 import { WorkflowFunctionsService } from './workflow-functions.service';
 
 @ApiBearerAuth('user-session')
@@ -22,14 +23,19 @@ export class WorkflowFunctionsController {
     return (req as any).currentUser?.role === 'admin';
   }
 
+  // An explicit account_id resolves that Account's view (+ Global); without
+  // one the list covers every accessible Account + Global (Functions page).
+  // Unbound with no account_id → Global only.
   @Get()
   async list(
     @Query('account_id') accountId: string | undefined,
     @Query('include_shadowed') shadowed: string,
     @Res() res: Response,
+    @Req() req?: Request,
   ) {
     try {
-      return res.json(await this.functions.list(accountId || null, shadowed === 'true'));
+      const ownerIds = catalogListAccountIds(req, accountId) || [];
+      return res.json(await this.functions.listForAccounts(ownerIds, shadowed === 'true'));
     } catch (error) {
       return this.fail(res, error, 'Failed to list Functions');
     }
@@ -42,10 +48,12 @@ export class WorkflowFunctionsController {
     @Query('ticket_id') ticketId: string | undefined,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
+    @Req() req?: Request,
   ) {
     try {
-      if (!accountId) return res.status(400).json({ error: 'account_id is required' });
-      return res.json(await this.functions.listRuns(accountId, functionId, ticketId, Number(limit || 50)));
+      const ownerIds = catalogListAccountIds(req, accountId);
+      if (!ownerIds) return res.status(400).json({ error: 'account_id is required' });
+      return res.json(await this.functions.listRuns(ownerIds, functionId, ticketId, Number(limit || 50)));
     } catch (error) {
       return this.fail(res, error, 'Failed to list Function runs');
     }
