@@ -110,8 +110,11 @@ export function registerOperatorTools(server: McpServer, ctx: ToolContext): void
     'call send_session_prompt_proposal in that turn). Approved prompts reach the session with a first line naming you ' +
     'and saying the user approved it; if the session is mid-turn, AWB sends it when that turn ends. Write the prompt ' +
     'exactly as the session should receive it, and tell the user in one sentence what you proposed and why. A newer ' +
-    'proposal of yours for the same session replaces your older one that is still waiting. Operator sessions cannot ' +
-    'be targets, and only sessions driven by the user you work for. Use manager_id / cli / session_id from a work report.',
+    'proposal of yours for the same session replaces your older one that is still waiting. Operator sessions can ' +
+    'also be targets (same host or another) — their answer comes back to you as a work report, and a turn opened ' +
+    'by your approved task never counts as anyone\'s user turn, so no approval powers leak. Only sessions driven ' +
+    'by the user you work for. Use manager_id / cli / session_id from a work report. ' +
+    'Sessions on other hosts are fine targets too — use their manager_id as reported.',
     {
       manager_id: z.string().describe('Runtime Host id of the target session (from the work report)'),
       cli: z.string().describe('CLI of the target session (e.g. claude, codex)'),

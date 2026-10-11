@@ -27,7 +27,7 @@ export function composeOperatorTaskPrompt(operatorName: string, text: string): s
 
 export function proposalView(
   row: AgentSessionPromptProposal,
-  names: { manager_name: string; cli_label: string },
+  names: { manager_name: string; cli_label: string; target_is_operator?: boolean },
 ): SessionProposalView {
   return {
     id: row.id,
@@ -37,6 +37,7 @@ export function proposalView(
       manager_id: row.manager_id, manager_name: names.manager_name, cli: row.cli, cli_label: names.cli_label,
       session_id: row.session_id, title: row.target_title,
     },
+    target_is_operator: names.target_is_operator ?? false,
     text: row.text,
     reason: row.reason,
     status: row.status,

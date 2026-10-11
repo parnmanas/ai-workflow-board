@@ -191,7 +191,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       const operator = findOperator(await cachedOperators(this.dataSource), e);
       if (operator) {
         this.reports.noteOperatorTurn(operator.id, ev.turn_id, phase);
-        if (phase === 'started' && !this.reports.isReportTurn(ev.turn_id)) this.reports.noteConversation(operator.id);
+        // 보고 턴도, 다른 operator 가 시킨 작업 턴도 대화가 아니다 — "가장 최근 대화" 근거에서 뺀다.
+        if (phase === 'started' && !this.reports.isReportTurn(ev.turn_id) && !this.reports.isOperatorTaskTurn(ev.turn_id)) this.reports.noteConversation(operator.id);
       }
     }
   }
@@ -233,7 +234,20 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       if (operator) {
         // operator 자신의 턴 — 보고 턴이면 그 답이 요약으로 나간다. 사용자와의 대화 턴이면, 사용자가 그 화면을
         // 떠나 있을 때 operator 의 답을 그대로 들려준다(operator 는 보고하지 않는다 — 그것이 보고 받는 쪽이다).
+        // 단 다른 operator 가 시킨 작업 턴이면 답·실패 모두 시킨 쪽에만 돌려준다 — B 사용자에게 묻지도 않은 답을
+        // 들려주지 않고, 시킨 쪽(A)의 문맥에만 결과가 들어간다.
         if (await this.reports.handleOperatorUpdate(operator, reason, finished)) return;
+        if (reason === 'turn_finished' || reason === 'turn_failed') {
+          const delegated = turnId ? await this.delegationFor(session, turnId) : undefined;
+          if (delegated) {
+            if (reason === 'turn_failed') {
+              await this.reports.submit({ ...this.toReport('failed', userId, session, session.last_error || '', null, now), ...(viewing() ? { viewed: true } : {}), delegated });
+            } else if (finished && finished.stopReason !== 'cancelled' && finished.answer) {
+              await this.reports.submit({ ...this.toReport('finished', userId, session, finished.answer, null, now), ...(viewing() ? { viewed: true } : {}), delegated });
+            }
+            return;
+          }
+        }
         if (viewing()) return;
         if (reason === 'turn_finished') {
           if (finished && finished.stopReason !== 'cancelled' && finished.answer) {

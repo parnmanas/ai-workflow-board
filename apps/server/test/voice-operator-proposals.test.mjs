@@ -124,9 +124,13 @@ test('an operator proposes work for a session; it reaches the session only after
   assert.equal(framed.reason, 'proposed', 'the approving user hears about it at once');
   assert.equal(promptsTo('sess-work').length, 1, 'nothing reached the session — only the user\'s own prompt so far');
 
-  // 3. 거절되는 제안들.
+  // 3. 거절되는 제안들 + operator 세션 대상은 허용되되 표시된다(작업 턴으로 Subject 분리).
   assert.equal((await bystander.callTool('propose_session_prompt', { ...target, text: 'x' })).error.code, 'not_an_operator');
-  assert.equal((await operator.callTool('propose_session_prompt', { manager_id: host.id, cli: 'claude', session_id: 'op-1', text: 'x' })).error.code, 'target_is_operator');
+  const toOp = await operator.callTool('propose_session_prompt', { manager_id: host.id, cli: 'claude', session_id: 'op-1', text: 'x' });
+  assert.equal(toOp.isError, undefined, JSON.stringify(toOp));
+  assert.equal(toOp.proposal.status, 'pending');
+  assert.equal(toOp.proposal.target_is_operator, true, 'the card knows the target is an operator');
+  assert.equal((await operator.callTool('withdraw_session_prompt_proposal', { proposal_id: toOp.proposal.id })).proposal.status, 'withdrawn');
   assert.equal((await operator.callTool('propose_session_prompt', { ...target, session_id: 'never-seen', text: 'x' })).error.code, 'session_unknown');
   const theirs = await prompt(other, 'codex', 'sess-theirs', '다른 사람 일');
   assert.equal(theirs.status, 202, theirs.text);
@@ -223,4 +227,153 @@ test('an operator proposes work for a session; it reaches the session only after
 test('the screen recognises the same operator-task prefix the server sends', () => {
   const client = readFileSync(new URL('../../client/src/components/sessions/sessionTranscript.logic.ts', import.meta.url), 'utf8');
   assert.ok(client.includes(`export const OPERATOR_TASK_PREFIX = '${OPERATOR_TASK_PREFIX}';`), 'client labels operator tasks by this exact prefix');
+});
+
+test('cross-host proposals: an operator on one host can task an ordinary session on another', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const base = `http://localhost:${port}`;
+
+  const ws = await createAccount(app, getDataSourceToken, 'voice-proposals-xhost');
+  const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
+  const headersFor = (user) => ({
+    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json',
+  });
+  const userHeaders = headersFor(admin);
+
+  // 호스트 두 대 — operator 는 hostA, 일 시킬 세션은 hostB.
+  const hostA = await createAgent(app, getDataSourceToken, ws.id, { name: 'laptop', type: 'manager' });
+  const hostB = await createAgent(app, getDataSourceToken, ws.id, { name: 'ragnar', type: 'manager' });
+  const keyFor = (host) => runtimeHostKeyForAgent(host.id);
+  const beat = (host, hostname) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: { 'X-Agent-Key': keyFor(host), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: `inst-${hostname}`, agent_id: host.id, host_id: host.id, mode: 'manager', hostname, plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude', 'codex'], acp_session_clis: ['claude', 'codex'], pid: 4242, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok((await beat(hostA, 'laptop')).status < 300);
+  assert.ok((await beat(hostB, 'ragnar')).status < 300);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const relay = (host, cli, sessionId, events, state) => call(`${base}/api/agent/sessions/${host.id}/${cli}/${sessionId}/events`, {
+    method: 'POST', headers: { 'X-Agent-Key': keyFor(host), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manager_id: host.id, events, ...(state ? { state } : {}) }),
+  });
+  const prompt = (host, user, cli, sessionId, text) => call(`${base}/api/agent-sessions/hosts/${host.id}/${cli}/sessions/${sessionId}/prompt`, {
+    method: 'POST', headers: headersFor(user), body: JSON.stringify({ text }),
+  });
+  const finish = (host, cli, sessionId, turnId, text = '끝났어요.') => relay(host, cli, sessionId, [
+    { type: 'text', payload: { text }, turn_id: turnId },
+    { type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, turn_id: turnId },
+  ], { status: 'ready', reason: 'turn_finished' });
+  const promptsTo = (hostId, sessionId) => requests.filter((r) => r.op === 'prompt' && r.manager_id === hostId && r.session_id === sessionId);
+
+  const registered = await call(`${base}/api/voice/operators`, {
+    method: 'POST', headers: userHeaders,
+    body: JSON.stringify({ name: 'Hal', manager_id: hostA.id, cli: 'claude', session_id: 'op-a', title: 'Hal' }),
+  });
+  assert.equal(registered.status, 201, registered.text);
+  const mcp = (host, sessionId) => new McpClient({
+    baseUrl: base, apiKey: keyFor(host), clientInfo: { name: 'claude-agent-acp', version: 'test' },
+    extraHeaders: { 'X-AWB-Client-Type': 'agent-session', 'X-AWB-Session-Id': sessionId },
+  });
+  const operator = mcp(hostA, 'op-a');
+
+  // operator 세션에 운전자(같은 사용자)를 붙인다 — 제안의 승인자를 정할 수 있게.
+  // hello 턴은 끝내 둔다(시작만 한 세션에는 보고 프롬프트를 넣지 않는다).
+  const hello = await prompt(hostA, admin, 'claude', 'op-a', '안녕');
+  assert.equal(hello.status, 202, hello.text);
+  await relay(hostA, 'claude', 'op-a', [{ type: 'turn', payload: { phase: 'started' }, turn_id: hello.body.turn_id }], { status: 'busy', reason: 'turn_started' });
+  await finish(hostA, 'claude', 'op-a', hello.body.turn_id, '안녕하세요.');
+  // hostB 의 일반 세션을 연다(같은 사용자가 모는 세션). 턴을 끝내 ready 로 둔다 —
+  // 막 열린 세션(starting)에는 프롬프트를 받지 않는다(바쁜 턴과 같은 취급).
+  const work = await prompt(hostB, admin, 'codex', 'sess-remote', 'hostB 에서 빌드해 줘');
+  assert.equal(work.status, 202, work.text);
+  await relay(hostB, 'codex', 'sess-remote', [{ type: 'turn', payload: { phase: 'started' }, turn_id: work.body.turn_id }], { status: 'busy', reason: 'turn_started' });
+  await finish(hostB, 'codex', 'sess-remote', work.body.turn_id, 'hostB 빌드 시작해요.');
+
+  // 첫 턴의 보고가 Hal 에게 와 있다 — 보고 턴을 끝내 비워 둔다. operator 의 보고는 한 번에
+  // 하나씩만 나가므로(Inflight), 열어 두면 뒤의 "네가 시킨 작업" 결과가 줄 서서 기다린다.
+  const finishedOpA = new Set();
+  for (let quiet = 0; quiet < 3;) {
+    const open = requests.filter((x) => x.op === 'prompt' && x.manager_id === hostA.id && x.session_id === 'op-a' && !finishedOpA.has(x.turn_id));
+    if (!open.length) { quiet += 1; await new Promise((r) => setTimeout(r, 60)); continue; }
+    quiet = 0;
+    for (const r of open) {
+      finishedOpA.add(r.turn_id);
+      await relay(hostA, 'claude', 'op-a', [{ type: 'turn', payload: { phase: 'started' }, turn_id: r.turn_id }], { status: 'busy', reason: 'turn_started' });
+      await finish(hostA, 'claude', 'op-a', r.turn_id, '알겠어요.');
+    }
+  }
+
+  // 1. 다른 호스트의 일반 세션에는 제안할 수 있다.
+  const target = { manager_id: hostB.id, cli: 'codex', session_id: 'sess-remote' };
+  const first = await operator.callTool('propose_session_prompt', { ...target, text: '테스트 돌려 줘', reason: 'hostB 일감' });
+  assert.equal(first.isError, undefined, JSON.stringify(first));
+  assert.equal(first.proposal.status, 'pending');
+  assert.equal(first.proposal.target.manager_id, hostB.id, 'the card names the other host');
+
+  // 2. 다른 호스트의 operator 세션에도 제안·질문할 수 있다 — 답은 시킨 쪽으로 돌아온다.
+  //    작업 턴은 "사용자 턴" 으로 세어지지 않으므로, 그 턴에서 말로 승인·전달하는 힘은 생기지 않는다.
+  const registeredB = await call(`${base}/api/voice/operators`, {
+    method: 'POST', headers: userHeaders,
+    body: JSON.stringify({ name: 'Ada', manager_id: hostB.id, cli: 'codex', session_id: 'op-b', title: 'Ada' }),
+  });
+  assert.equal(registeredB.status, 201, registeredB.text);
+  const opB = mcp(hostB, 'op-b');
+  // op-b 세션을 열어 둔다(모르는 세션에는 제안하지 않는다 — 같은 규칙).
+  // hello 턴은 끝내 ready 로 둔다. 그 보고는 Ada(같은 호스트)에게 간다.
+  const helloB = await prompt(hostB, admin, 'codex', 'op-b', '안녕');
+  assert.equal(helloB.status, 202, helloB.text);
+  await relay(hostB, 'codex', 'op-b', [{ type: 'turn', payload: { phase: 'started' }, turn_id: helloB.body.turn_id }], { status: 'busy', reason: 'turn_started' });
+  await finish(hostB, 'codex', 'op-b', helloB.body.turn_id, '안녕하세요.');
+  const toOp = await operator.callTool('propose_session_prompt', { manager_id: hostB.id, cli: 'codex', session_id: 'op-b', text: 'ragnar 쪽 상태 알려 줘' });
+  assert.equal(toOp.isError, undefined, JSON.stringify(toOp));
+  assert.equal(toOp.proposal.status, 'pending');
+  assert.equal(toOp.proposal.target_is_operator, true, 'the card knows the target is an operator');
+  // 미끼: op-b 가 자기 제안을 하나 남겨 둔다 — 작업 턴 중에 말로 보내려 하면 거절돼야 한다.
+  const bait = await opB.callTool('propose_session_prompt', { ...target, text: '나중에 로그 정리해 줘' });
+  assert.equal(bait.isError, undefined, JSON.stringify(bait));
+  const approvedOp = await call(`${base}/api/voice/proposals/${toOp.proposal.id}/send`, { method: 'POST', headers: userHeaders });
+  assert.equal(approvedOp.status, 200, approvedOp.text);
+  const deliveredOp = await waitFor(() => promptsTo(hostB.id, 'op-b').find((r) => r.text?.startsWith(OPERATOR_TASK_PREFIX)), 'the approved prompt reaches the other operator');
+  assert.equal(deliveredOp.text, `${OPERATOR_TASK_PREFIX} Hal — 사용자 승인\nragnar 쪽 상태 알려 줘`);
+  // 작업 턴 진행 중에는 그 operator 의 말로 승인·전달이 막힌다(승인 권한 누수 없음).
+  await relay(hostB, 'codex', 'op-b', [{ type: 'turn', payload: { phase: 'started' }, turn_id: deliveredOp.turn_id }], { status: 'busy', reason: 'turn_started' });
+  assert.equal((await opB.callTool('send_session_prompt_proposal', { proposal_id: bait.proposal.id })).error.code, 'not_user_turn');
+  // 작업 턴이 끝나면 답이 시킨 쪽(Hal)에만 돌아온다 — 받는 쪽(Ada) 사용자에게는 알리지 않는다.
+  await finish(hostB, 'codex', 'op-b', deliveredOp.turn_id, 'ragnar 정상이에요.');
+  const answerBack = await waitFor(() => promptsTo(hostA.id, 'op-a').find((r) => r.text?.includes('네가 시킨 작업(Hal, 사용자 승인)')), 'the other operator\'s answer returns to the requester');
+  assert.ok(answerBack.text.includes('ragnar 정상이에요.'), answerBack.text.slice(0, 500));
+  assert.equal(promptsTo(hostB.id, 'op-b').filter((r) => r.text?.startsWith(OPERATOR_TASK_PREFIX)).length, 1, 'only the approved task reached op-b as work');
+  await opB.callTool('withdraw_session_prompt_proposal', { proposal_id: bait.proposal.id });
+  // Hal 의 보고 턴을 끝내 비워 둔다 — 열어 두면 뒤의 "네가 시킨 작업" 결과가 줄 서서 기다린다.
+  await relay(hostA, 'claude', 'op-a', [{ type: 'turn', payload: { phase: 'started' }, turn_id: answerBack.turn_id }], { status: 'busy', reason: 'turn_started' });
+  await finish(hostA, 'claude', 'op-a', answerBack.turn_id, '알겠어요.');
+
+  // 3. 화면 승인 → hostB 세션에 출처 줄을 단 프롬프트가 간다.
+  const approved = await call(`${base}/api/voice/proposals/${first.proposal.id}/send`, { method: 'POST', headers: userHeaders });
+  assert.equal(approved.status, 200, approved.text);
+  const delivered = await waitFor(() => promptsTo(hostB.id, 'sess-remote').find((r) => r.text?.startsWith(OPERATOR_TASK_PREFIX)), 'the approved prompt reaches the other host');
+  assert.equal(delivered.text, `${OPERATOR_TASK_PREFIX} Hal — 사용자 승인\n테스트 돌려 줘`);
+  assert.equal(delivered.manager_id, hostB.id);
+  assert.equal(delivered.driver_user_id, admin.id);
+  const sent = await waitFor(async () => {
+    const mine = await operator.callTool('list_session_prompt_proposals', {});
+    return mine.proposals?.find((p) => p.id === first.proposal.id && p.status === 'sent');
+  }, 'the operator sees it was sent');
+  assert.ok(sent.delivered_turn_id);
+
+  // 4. hostB 턴이 끝나면 결과("네가 시킨 작업")가 hostA 의 operator 에게 돌아온다.
+  //    이미 본 보고 턴은 제외한다 — 묵은 보고를 다시 잡으면 안 된다.
+  const seenOpA = new Set(promptsTo(hostA.id, 'op-a').map((r) => r.turn_id));
+  await relay(hostB, 'codex', 'sess-remote', [{ type: 'turn', payload: { phase: 'started' }, turn_id: delivered.turn_id }], { status: 'busy', reason: 'turn_started' });
+  await finish(hostB, 'codex', 'sess-remote', delivered.turn_id, '테스트 다 통과해요.');
+  const reportBack = await waitFor(() => promptsTo(hostA.id, 'op-a').find((r) => !seenOpA.has(r.turn_id) && r.text?.includes('네가 시킨 작업(Hal, 사용자 승인)')), 'the delegated result returns to the proposing operator');
+  assert.ok(reportBack.text.includes('테스트 다 통과해요.'), reportBack.text.slice(0, 500));
 });

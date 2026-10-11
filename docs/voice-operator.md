@@ -412,11 +412,19 @@ queued → 대상이 한가하면 바로, 턴 중이면 그 턴이 끝날 때 pr
   정한다(보고 턴이면 그 보고를 받는 사용자, 사용자 턴이면 지금 operator 와 대화하는 사람).
 - 조건(서버가 확인한다):
   1. 제안은 등록된 operator 연결만(말로 답하기와 같은 `operatorFor`).
-  2. **operator 세션은 대상이 될 수 없다** — 승인된 글로 시작한 턴이 그 operator 의 "사용자 턴" 으로 세어져, 승인 권한을
-     얻는 길이 생기기 때문이다.
-  3. 다른 사람이 모는 세션에는 제안하지 않는다(`not_this_user`), AWB 가 모르는 세션도(`session_unknown`).
-  4. 음성 승인은 **사용자가 시작한 operator 턴**에서만(`not_user_turn`). 보고 턴에서 operator 가 스스로 보내지 못한다.
-  5. 이미 정해진 제안은 다시 정하지 않는다(`proposal_closed`). 실패한 것만 다시 보낼 수 있다(Retry).
+  2. 다른 사람이 모는 세션에는 제안하지 않는다(`not_this_user`), AWB 가 모르는 세션도(`session_unknown`).
+  3. 음성 승인은 **사용자가 시작한 operator 턴**에서만(`not_user_turn`). 보고 턴에서 operator 가 스스로 보내지 못한다.
+  4. 이미 정해진 제안은 다시 정하지 않는다(`proposal_closed`). 실패한 것만 다시 보낼 수 있다(Retry).
+- 대상이 operator 세션이어도 된다(같은 호스트든 다른 호스트든 — ralf 가 ragnar 에게 일을 시키거나 질문하고 답을 받는
+  식). 승인되면 출처 줄을 단 프롬프트가 가고, 그 턴은 **작업 턴으로 표시**돼 그 operator 의 "사용자 턴" 으로 세어지지
+  않으므로, 승인된 글로 승인 권한(말로 보내기·말로 답하기)을 얻는 길은 생기지 않는다. 끝난 답·실패는 `delegated` 로
+  시킨 operator 에게만 돌아가고, 받는 쪽 사용자에게는 굳이 알리지 않는다(화면 전사에는 그대로 보인다). operator 가
+  시킨 작업이 또 다른 operator 에게 이어지려면 매번 새 제안 + 사용자 승인이 필요하므로, 사람 확인 없이 operator 끼리
+  일을 주고받는 고리는 생기지 않는다.
+- 다른 호스트의 일반 세션에도 제안할 수 있다 — 보고에 적힌 `manager_id`를 그대로 쓰면 된다. 승인되면 그 호스트에
+  프롬프트가 가고(`promptOnBehalf`), 결과는 `delegated`로 제안한 operator 에게 돌아온다(호스트 무관). 대상 호스트가
+  꺼져 있으면 배달이 실패(`failed`)로 남고, 켜진 뒤 Retry로 다시 보낼 수 있다. 회귀:
+  `apps/server/test/voice-operator-proposals.test.mjs` "cross-host proposals".
 - 출처 줄 `[AWB 오퍼레이터 작업] <이름> — 사용자 승인` 은 server(`voice/operator-proposal.ts`)·client
   (`sessionTranscript.logic.ts` `OPERATOR_TASK_PREFIX`) 계약이다 — 받는 세션은 누가 시켰고 사람이 승인했다는 것을 알고,
   화면은 그 프롬프트를 "🧭 <이름> 제안 · 사용자 승인" 으로 그린다.

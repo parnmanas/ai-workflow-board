@@ -46,8 +46,9 @@ const targetKey = (r: { manager_id: string; cli: string; session_id: string }) =
  *   - 화면: 로그인한 사용자가 제안 카드의 Send 를 누른다(REST).
  *   - 음성: 사용자가 operator 에게 "보내" 라고 말한 턴 — 말로 답하기와 같은 문(등록된 operator 연결 · 사용자가
  *     시작한 턴 · 같은 사용자, OperatorDecisionService)을 지난다.
- * 대상이 턴 중이면 승인된 채 기다렸다가(queued) 그 턴이 끝나면 보낸다. operator 세션은 대상이 될 수 없다 —
- * 승인된 글로 시작한 턴이 다른 operator 의 "사용자 턴" 으로 세어져 승인 권한을 얻는 길이 생긴다.
+ * 대상이 턴 중이면 승인된 채 기다렸다가(queued) 그 턴이 끝나면 보낸다. 대상이 operator 세션이어도 된다 —
+ * 그때 열린 턴은 작업 턴으로 표시돼 그 operator 의 "사용자 턴" 으로 세어지지 않으므로, 승인된 글로 승인 권한을
+ * 얻는 길은 생기지 않는다. 답은 `delegated` 로 시킨 operator 에게 돌아간다.
  */
 @Injectable()
 export class OperatorProposalService implements OnModuleInit, OnModuleDestroy {
@@ -110,11 +111,8 @@ export class OperatorProposalService implements OnModuleInit, OnModuleDestroy {
     }
     const { manager_id: managerId, cli, session_id: sessionId } = input;
     if (!managerId || !cli || !sessionId) throw new OperatorProposalError(400, 'target_required', 'manager_id, cli and session_id are required.');
-    const operators = await cachedOperators(this.dataSource);
-    if (operators.some((op) => op.manager_id === managerId && op.cli === cli && op.session_id === sessionId)) {
-      throw new OperatorProposalError(409, 'target_is_operator',
-        'Operator sessions talk with the user, not with each other — propose work only for ordinary sessions.');
-    }
+    // 대상이 operator 세션이어도 된다(같은 호스트든 다른 호스트든) — 배달 때 그 턴을 작업 턴으로 표시해
+    // "사용자 턴" 으로 세어지지 않게 한다. 답은 시킨 operator 에게 돌아간다.
     const live = this.sessions.liveSnapshot(managerId, cli, sessionId);
     const execution = await this.dataSource.getRepository(AgentSessionExecution).findOne({ where: { manager_id: managerId, cli, session_id: sessionId } });
     if (!live && !execution) {
@@ -265,6 +263,11 @@ export class OperatorProposalService implements OnModuleInit, OnModuleDestroy {
           fresh.account_id, fresh.user_id, fresh.manager_id, fresh.cli, fresh.session_id,
           composeOperatorTaskPrompt(fresh.operator_name, fresh.text),
         );
+        // 대상이 operator 세션이면 이 턴을 작업 턴으로 표시 — 그 operator 의 "사용자 턴" 으로 세어져
+        // 말로 승인·전달하는 힘이 새지 않게 한다(배달에 성공해 턴이 생겼을 때만 표시한다).
+        const targetIsOperator = (await cachedOperators(this.dataSource).catch(() => []))
+          .some((op) => op.manager_id === fresh.manager_id && op.cli === fresh.cli && op.session_id === fresh.session_id);
+        if (targetIsOperator) this.reports.noteOperatorTaskTurn(turn_id);
         await this.repo.update({ id: fresh.id, status: 'queued' }, { status: 'sent', delivered_turn_id: turn_id });
         this.logService.info('Voice', `sent an approved operator proposal to its session`, {
           proposal_id: fresh.id, operator: fresh.operator_name, turn_id,
@@ -319,7 +322,9 @@ export class OperatorProposalService implements OnModuleInit, OnModuleDestroy {
       const host = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: row.manager_id } }).catch(() => null);
       managerName = host?.name || row.manager_id.slice(0, 8);
     }
-    return proposalView(row, { manager_name: managerName, cli_label: cliDescriptor(row.cli)?.label || row.cli });
+    const targetIsOperator = (await cachedOperators(this.dataSource).catch(() => []))
+      .some((op) => op.manager_id === row.manager_id && op.cli === row.cli && op.session_id === row.session_id);
+    return proposalView(row, { manager_name: managerName, cli_label: cliDescriptor(row.cli)?.label || row.cli, target_is_operator: targetIsOperator });
   }
 
   /** 화면에 알린다(SSE `agent_session_proposal`, 승인할 사용자에게만). */

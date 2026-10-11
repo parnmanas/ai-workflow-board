@@ -3151,6 +3151,8 @@ export interface SessionProposal {
   operator: { id: string; name: string };
   origin: string;
   target: { manager_id: string; manager_name: string; cli: string; cli_label: string; session_id: string; title: string };
+  /** 대상이 operator 세션인가 — 그때 열린 턴은 작업 턴으로 표시돼 "사용자 턴" 으로 세어지지 않는다. */
+  target_is_operator: boolean;
   text: string;
   reason: string;
   status: string;

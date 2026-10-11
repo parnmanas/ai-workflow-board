@@ -52,7 +52,7 @@ export default function SessionProposalCards({ proposals, showTarget }: {
           <section key={p.id} className="awb-session-proposal" data-proposal-status={p.status} aria-label={`Proposal from ${p.operator.name}`}>
             <div className="awb-session-proposal-head">
               <span style={{ color: tokens.colors.textPrimary, fontWeight: 600 }}>🧭 {p.operator.name} proposes</span>
-              {showTarget(p) && <span className="awb-session-proposal-target" style={{ color: tokens.colors.textSecondary }} title={target}>→ {target}</span>}
+              {showTarget(p) && <span className="awb-session-proposal-target" style={{ color: tokens.colors.textSecondary }} title={target}>→ {target}{p.target_is_operator ? ' · operator' : ''}</span>}
               <span className="awb-session-proposal-actions">
                 {p.status === 'pending' && (
                   <>

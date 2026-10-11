@@ -161,8 +161,8 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
   }
   // 작업 제안(docs/voice-operator.md "작업 제안") — 보고를 보고 다음 일을 떠올리면 제안만 한다. 보내는 것은 사용자다.
   lines[0] += lang === 'ko'
-    ? ' 어떤 세션에 이어서 시킬 일이 있으면 propose_session_prompt 로 제안하세요 — 사용자가 승인해야 전달됩니다.'
-    : ' To have a session do follow-up work, propose it with propose_session_prompt — it is sent only after the user approves.';
+    ? ' 어떤 세션에 이어서 시킬 일이 있으면 propose_session_prompt 로 제안하세요 — 사용자가 승인해야 전달됩니다. 다른 장비의 세션에도 제안할 수 있습니다(보고에 적힌 manager_id를 그대로 쓰세요).'
+    : ' To have a session do follow-up work, propose it with propose_session_prompt — it is sent only after the user approves. Sessions on other hosts are fine targets too (use their manager_id as reported).';
   if (reports.some((r) => r.delegated)) {
     lines[0] += lang === 'ko'
       ? ' "네가 시킨 작업" 표시가 붙은 건은 네가 제안하고 사용자가 승인한 작업의 결과입니다 — 결과를 그대로 옮기지 말고 무엇이 됐는지 1~2문장으로 요약하세요.'

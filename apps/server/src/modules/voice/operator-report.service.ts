@@ -22,6 +22,8 @@ export const REPORT_TURN_TIMEOUT_MS = 10 * 60_000;
 export const URGENT_REPORT_WAIT_MS = 2 * 60_000;
 /** 그 밖의 보고를 기다리는 한도. */
 export const REPORT_WAIT_MS = 20 * 60_000;
+/** operator 작업 턴 표시의 보관 한도 — 끝남 표시를 놓쳐도 여기까지만 기억한다. */
+const OPERATOR_TASK_TURN_TTL_MS = 24 * 60 * 60_000;
 const SWEEP_MS = 30_000;
 
 /** 대신 보내는 프롬프트 — 테스트가 가짜를 끼운다. */
@@ -67,6 +69,11 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
   #lastConversation = new Map<string, number>();
   /** operator → 지금 돌고 있는 턴. 말로 받은 답을 전하는 도구가 "사용자가 시작한 턴인가" 를 여기서 본다. */
   #currentTurn = new Map<string, string>();
+  /**
+   * 다른 operator 가 시켜서 도는 작업 턴(승인된 제안으로 열린 턴 id → 받은 시각). 사용자와의 대화가
+   * 아니라서 `userTurnInProgress` 에서 뺀다 — 이 턴에서 말로 승인·전달하면 승인 권한이 새는 길이 된다.
+   */
+  #operatorTaskTurns = new Map<string, number>();
   #summaryListeners: SummaryListener[] = [];
   #undeliverableListeners: UndeliverableListener[] = [];
   #timer: NodeJS.Timeout | null = null;
@@ -108,15 +115,30 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
   noteOperatorTurn(operatorId: string, turnId: string, phase: 'started' | 'finished'): void {
     if (phase === 'started') this.#currentTurn.set(operatorId, turnId);
     else if (this.#currentTurn.get(operatorId) === turnId) this.#currentTurn.delete(operatorId);
+    if (phase === 'finished') this.#operatorTaskTurns.delete(turnId);
   }
 
   /**
-   * 지금 이 operator 가 **사용자가 시작한 턴**을 돌고 있으면 그 턴 id. AWB 가 보낸 보고 턴이거나, 턴을 모르면
-   * (서버가 턴 도중에 다시 떴다) null — 그때는 사람이 이 턴에서 무엇을 말했는지 AWB 가 알 수 없다.
+   * 승인된 operator 작업으로 열린 턴을 표시한다 — 제안 배달(`promptOnBehalf` 성공) 직후에 부른다.
+   * 표시된 턴은 사용자와의 대화가 아니므로 말로 승인·전달하는 도구가 쓸 수 없다.
+   */
+  noteOperatorTaskTurn(turnId: string): void {
+    if (turnId) this.#operatorTaskTurns.set(turnId, Date.now());
+  }
+
+  /** 승인된 operator 작업으로 열린 턴인가. */
+  isOperatorTaskTurn(turnId: string): boolean {
+    return !!turnId && this.#operatorTaskTurns.has(turnId);
+  }
+
+  /**
+   * 지금 이 operator 가 **사용자가 시작한 턴**을 돌고 있으면 그 턴 id. AWB 가 보낸 보고 턴, 다른 operator 가
+   * 시킨 작업 턴이거나, 턴을 모르면(서버가 턴 도중에 다시 떴다) null — 그때는 사람이 이 턴에서 무엇을 말했는지
+   * AWB 가 알 수 없다.
    */
   userTurnInProgress(operatorId: string): string | null {
     const turnId = this.#currentTurn.get(operatorId);
-    return turnId && !this.#reportTurns.has(turnId) ? turnId : null;
+    return turnId && !this.#reportTurns.has(turnId) && !this.#operatorTaskTurns.has(turnId) ? turnId : null;
   }
 
   /** 지금 operator 가 AWB 의 보고 턴을 돌고 있으면 그 보고를 받는 사용자(작업 제안을 승인할 사람). */
@@ -251,6 +273,11 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
    * 경우를 위해 줄 선 보고를 다시 보내 본다.
    */
   async sweep(now = Date.now()): Promise<void> {
+    if (this.#operatorTaskTurns.size) {
+      for (const [turnId, at] of [...this.#operatorTaskTurns]) {
+        if (now - at >= OPERATOR_TASK_TURN_TTL_MS) this.#operatorTaskTurns.delete(turnId);
+      }
+    }
     const operators = await cachedOperators(this.dataSource).catch(() => [] as OperatorEntry[]);
     for (const [operatorId, inflight] of [...this.#inflight]) {
       if (now - inflight.sentAt < REPORT_TURN_TIMEOUT_MS) continue;
