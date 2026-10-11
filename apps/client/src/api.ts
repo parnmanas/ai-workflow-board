@@ -1254,6 +1254,8 @@ export const api = {
     description?: string;
     provider: string;
     credentials: Record<string, string>;
+    agent_env?: boolean;
+    env_prefix?: string;
   }) =>
     request<Credential>('/credentials', { method: 'POST', body: JSON.stringify(data) }),
   updateCredential: (
@@ -1265,6 +1267,10 @@ export const api = {
       description?: string;
       provider?: string;
       credentials?: Record<string, string>;
+      // Keys to delete — a blank value means "keep", so removal is explicit.
+      remove_fields?: string[];
+      agent_env?: boolean;
+      env_prefix?: string;
     },
   ) =>
     request<Credential>(`/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

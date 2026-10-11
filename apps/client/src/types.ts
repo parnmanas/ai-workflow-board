@@ -903,6 +903,11 @@ export interface Credential {
   provider: string;
   credential_fields: Record<string, string>;
   credential_status?: 'ok' | 'unreadable';
+  // Exposed to agent runs as `<env_prefix>_<FIELD>` env vars (non-CLI
+  // providers only); agent_env_names lists what an agent will see.
+  agent_env?: boolean;
+  env_prefix?: string;
+  agent_env_names?: string[];
   created_at: string;
   updated_at: string;
 }

@@ -4,6 +4,7 @@ import { Credential } from '../../entities/Credential';
 import { CliLoginSession } from '../../entities/CliLoginSession';
 import { CredentialsController } from './credentials.controller';
 import { CliLoginAgentController } from './cli-login-agent.controller';
+import { CredentialsAgentEnvController } from './credentials-agent-env.controller';
 import { CliLoginSessionService } from './cli-login-session.service';
 import { CliLoginSessionReaperService } from './cli-login-session-reaper.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -18,7 +19,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
   // the existing agent_manager_command SSE channel) — CliLoginSessionService
   // needs both to dispatch a device-auth login to a specific manager instance.
   imports: [TypeOrmModule.forFeature([Credential, CliLoginSession]), AgentManagerModule],
-  controllers: [CredentialsController, CliLoginAgentController],
+  controllers: [CredentialsController, CliLoginAgentController, CredentialsAgentEnvController],
   providers: [
     AuthGuard,
     PermissionGuard,

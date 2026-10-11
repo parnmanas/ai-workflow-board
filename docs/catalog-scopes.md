@@ -119,6 +119,10 @@ Outreach 채널을 전부 손으로 다시 지정해야 한다. 그래서
 - **흔적을 남긴다**: 비밀값을 읽을 수 있는 범위가 바뀌는 일이므로 reveal 과
   같은 급의 감사 항목(`credential_scope_changed`)에 이전·새 범위를 남긴다.
   값 자체는 절대 담지 않는다.
+- **agent env 도 같이 넓어진다**: "Expose to agents as environment variables"
+  (`agent_env`)가 켜진 credential 을 global 로 넓히면 모든 계정의 에이전트
+  실행이 그 env 를 받는다(`docs/agent-manager.md` → "Credential env for agent
+  runs").
 
 생성 시 scope 는 페이지 상단 "Account for new item" 선택이 정하고,
 Edit 다이얼로그의 scope 선택기는 기존 행에만 나온다. 회귀 테스트는

@@ -319,6 +319,52 @@ Each adapter declares the keys it can express in `harnessKeys()`
 never a reason to refuse the spawn. Adding or renaming a key is a server ↔
 agent-manager contract change — same PR on both sides.
 
+## Credential env for agent runs
+
+An operator can hand a stored secret to agents as process env — the case it
+was built for is a Google OAuth client (`google_oauth` provider: `client_id`,
+`client_secret`, optional `refresh_token`; the form fills them from the
+Cloud Console JSON or an authorized-user JSON). Any non-CLI credential
+(`github`, `gitlab`, `openai`, `google_oauth`, `custom` with its own
+key/value rows) can opt in with **Expose to agents as environment
+variables** (`Credential.agent_env` + `env_prefix`).
+
+- **Naming**: `<env_prefix>_<FIELD>` upper-cased — `GOOGLE` + `client_id` →
+  `GOOGLE_CLIENT_ID`. An empty prefix uses the key as-is (Custom keys that are
+  already env names). Rule: `apps/server/src/common/credential-agent-env.ts`;
+  the client preview copies it and both tests pin the same examples.
+- **Who gets it**: every run whose execution account can read the credential —
+  its own account, or every account for a global one. Account credentials
+  shadow globals for the same variable; a same-scope collision is reported,
+  not resolved silently.
+- **Refused at save** (400 with the reason): CLI login providers (those go
+  through CLI settings into a cli-home), names starting `AWB_`, the CLI
+  login/endpoint families (`ANTHROPIC_`, `CLAUDE_`, `CODEX_`, `OPENAI_`,
+  `OPENCODE_`, `GEMINI_`, `GOOGLE_API_KEY`, …) and process-loading names
+  (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, …).
+- **Delivery**: values never ride an SSE payload. Every spawn site — one-shot
+  subagent, persistent ticket/chat session, Agent Session — calls
+  `GET /api/agent-manager/agent-env?account_id=` with the Host key
+  (`agent-env-credentials.ts`). Auth matches the project git-credential route:
+  a Host key names the account, an account-scoped runtime key only gets its
+  own. Response: `{ env, sources, skipped }`, `Cache-Control: no-store`.
+- **Merge order**: right after the base env (next to the account
+  `environment_config.env_vars`), below `AWB_API_KEY`, cli-home, the per-agent
+  CLI credential and harness env — so it cannot shadow them. The manager also
+  drops `AWB_*` and the adapter's own `authEnvKeys()`, which covers a CLI the
+  server-side list has not caught up with.
+- **Failure**: a failed or missing route (an older server answers 404) is
+  logged and the run spawns without the env; the agent then sees the variable
+  missing. A credential that cannot be decrypted is listed in `skipped` and
+  logged on both sides.
+- **Timing**: a process keeps the env it started with. An edited credential
+  reaches a persistent ticket/chat session or an Agent Session the next time
+  that process starts. Hermes (one long-lived process per agent) is not
+  covered.
+- Note that client_id/client_secret alone cannot call a Google API — the agent
+  has no browser for the consent screen. Store a `refresh_token` obtained once
+  (or an authorized-user JSON) for headless use.
+
 ## Capability and health reporting
 
 The Runtime Host heartbeat advertises each runtime's protocol, session mode,

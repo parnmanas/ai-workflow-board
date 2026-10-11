@@ -72,16 +72,14 @@ test('normalizeCredentialFields maps a whole credential and leaves non-strings a
 
 test('credential create and update both normalize before encrypting', () => {
   const src = read('modules/credentials/credentials.controller.ts');
+  assert.match(src, /const normalized = normalizeCredentialFields\(credData\)/, 'POST /api/credentials must normalize before encrypt');
+  assert.match(src, /const plaintext = JSON\.stringify\(normalized\)/, 'POST /api/credentials must encrypt the normalized map');
   assert.match(
     src,
-    /const plaintext = JSON\.stringify\(normalizeCredentialFields\(credData\)\)/,
-    'POST /api/credentials must normalize before encrypt',
-  );
-  assert.match(
-    src,
-    /encrypt\(JSON\.stringify\(normalizeCredentialFields\(merged\)\)\)/,
+    /storedFields = normalizeCredentialFields\(merged\)/,
     'PATCH /api/credentials/:id must normalize the merged map, so an edit also heals a stored value',
   );
+  assert.match(src, /encrypt\(JSON\.stringify\(storedFields\)\)/, 'PATCH /api/credentials/:id must encrypt the normalized map');
 });
 
 test('CLI auto-login normalizes captured fields before the required-field check', () => {

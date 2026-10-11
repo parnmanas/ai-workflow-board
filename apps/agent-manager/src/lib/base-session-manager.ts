@@ -40,6 +40,7 @@ import {
   resolveModelChain,
 } from './cli-adapters/base.js';
 import { recordActualLaunch } from './launch-spec-recorder.js';
+import { agentCredentialEnvFor } from './agent-env-credentials.js';
 import {
   decideApproveDispatch,
   describePermissionPolicy,
@@ -1008,14 +1009,20 @@ export class BaseSessionManager {
       // (ticket 20fff298) — 실행 사양 기록에 spawn 과 **완전히 같은** 값을 넘겨,
       // 기록용 재조립이 실제와 갈라지지 않게 한다.
       const spawnCwd = claudeRuntimeProfile?.cwd || effectiveCwd;
+      // Credentials the account exposed to agent runs (agent-env-credentials.ts).
+      const agentCredentialEnv = await agentCredentialEnvFor(
+        this._config, agentContext?.account_id, adapter.authEnvKeys(), `${this.#logTag} ${this.#keyField}=${sessionKey}`,
+      );
       // harnessEnv merges LAST — see SubagentManager.spawn for why a
       // per-dispatch harness model must beat the per-agent extra_env.
       // Board env_vars (ticket 354d336b) merge right after baseEnv so they
       // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
       // / cli-home / per-agent credential / harness env layered on top.
+      // Credential env sits in the same band, just above them.
       const spawnEnv = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
         ...baseEnv,
         ...(envVars ?? {}),
+        ...agentCredentialEnv,
         AWB_API_KEY: effectiveApiKey,
         ...cliHomeEnv,
         ...credentialEnv,

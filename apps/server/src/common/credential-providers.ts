@@ -17,6 +17,12 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   github: { label: 'GitHub', fields: ['token'] },
   gitlab: { label: 'GitLab', fields: ['token'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
+  // OAuth 2.0 client from Google Cloud Console. refresh_token is optional but
+  // an agent cannot call a Google API with the client pair alone — it needs a
+  // token obtained once through the consent screen.
+  google_oauth: { label: 'Google OAuth', fields: ['client_id', 'client_secret', 'refresh_token'] },
+  // `token` is the default key; the client lets the operator add more
+  // key/value pairs (any field map is accepted on write).
   custom: { label: 'Custom', fields: ['token'] },
 };
 

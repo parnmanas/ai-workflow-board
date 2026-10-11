@@ -41,6 +41,7 @@ import {
   resolveModelChain,
 } from './cli-adapters/base.js';
 import { recordActualLaunch } from './launch-spec-recorder.js';
+import { agentCredentialEnvFor } from './agent-env-credentials.js';
 import {
   decideApproveDispatch,
   describePermissionPolicy,
@@ -1007,6 +1008,10 @@ export class SubagentManager implements SubagentManagerContract {
       // 기록용으로 다시 조립해야 하고, 그러면 두 조립이 갈라져 화면이 실제와
       // 다른 env 를 주장하게 된다.
       const spawnCwd = claudeRuntimeProfile?.cwd || effectiveCwd;
+      // Credentials the account exposed to agent runs (agent-env-credentials.ts).
+      const agentCredentialEnv = await agentCredentialEnvFor(
+        this.#config, ctx?.account_id, adapter.authEnvKeys(), `[subagent] agent=${spec.agentId.slice(0, 8)}`,
+      );
       // harnessEnv merges LAST: a per-dispatch harness model must beat the
       // per-agent extra_env baked at spawn_agent time (deepseek's
       // ANTHROPIC_MODEL — flag/env agreement, see DeepSeekCliAdapter).
@@ -1014,8 +1019,10 @@ export class SubagentManager implements SubagentManagerContract {
         ...baseEnv,
         // Board env_vars (ticket 354d336b) merge right after baseEnv so they
         // set non-secret config but never shadow AWB_API_KEY / cli-home /
-        // per-agent credential / harness env layered on top.
+        // per-agent credential / harness env layered on top. Credential env
+        // sits in the same band, just above them.
         ...(spec.envVars ?? {}),
+        ...agentCredentialEnv,
         AWB_API_KEY: effectiveApiKey,
         ...cliHomeEnv,
         ...credentialEnv,

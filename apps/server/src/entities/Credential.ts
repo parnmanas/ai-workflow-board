@@ -24,6 +24,15 @@ export class Credential {
   @Column({ type: 'text' })
   encrypted_data: string;
 
+  // Opt-in: hand every stored field to agent runs of the readable account(s)
+  // as `<env_prefix>_<FIELD>` env vars. Non-CLI providers only — see
+  // common/credential-agent-env.ts.
+  @Column({ type: 'boolean', default: false })
+  agent_env: boolean;
+
+  @Column({ type: 'varchar', default: '' })
+  env_prefix: string;
+
   @CreateDateColumn()
   created_at: Date;
 

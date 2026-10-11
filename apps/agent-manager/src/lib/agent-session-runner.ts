@@ -42,6 +42,7 @@ import {
   type AwbConfig,
 } from './rest.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
+import { agentCredentialEnvFor } from './agent-env-credentials.js';
 import {
   runtimeCredentialEnv,
   startRuntimeProfile,
@@ -178,7 +179,7 @@ export function redactSecrets(text: string): string {
     .replace(/Bearer\s+[^\s"'`]+/gi, 'Bearer <redacted>')
     .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-<redacted>')
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-<redacted>')
-    .replace(/(api[_-]?key|oauth[_-]?token|access[_-]?token|refresh[_-]?token)(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, '$1$2<redacted>');
+    .replace(/(api[_-]?key|oauth[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret)(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, '$1$2<redacted>');
 }
 
 interface SessionAuth {
@@ -769,9 +770,10 @@ export class AgentSessionRunner {
     const { command, args } = await resolver(cli);
     const auth = await this.#prepareAuth(cli, cwd, request);
     log(`${tag} spawning ACP adapter cmd=${command} ${args.join(' ')} cwd=${cwd} auth=${auth.label}`);
+    const agentEnv = await agentCredentialEnvFor(this.#config, request.account_id, this.#authEnvKeys(cli), tag);
 
     let live: LiveSession | null = null;
-    const env = this.#buildEnv(cli, requestedSessionId || 'new', auth);
+    const env = this.#buildEnv(cli, requestedSessionId || 'new', auth, agentEnv);
     const client = await AcpClient.spawn({
       command,
       args,
@@ -949,12 +951,15 @@ export class AgentSessionRunner {
     }
   }
 
-  #buildEnv(cli: string, sessionId: string, auth: SessionAuth): NodeJS.ProcessEnv {
+  #buildEnv(cli: string, sessionId: string, auth: SessionAuth, agentEnv: Record<string, string> = {}): NodeJS.ProcessEnv {
     // 기본은 운영자의 CLI 홈 그대로 — 장비에 이미 있는 세션을 그 CLI 로 이어 쓰는 것이
     // 목적이다. CLI 설정에 credential 이 묶여 있으면 세션 전용 cli-home(기록 디렉터리만
     // 운영자 홈으로 링크)과 credential env 로 바꿔 끼운다.
     const env: NodeJS.ProcessEnv = { ...(this.#options.baseEnv ?? process.env) };
     for (const key of auth.stripEnvKeys) delete env[key];
+    // 계정이 에이전트에게 노출한 credential env(agent-env-credentials.ts) — CLI 인증과
+    // AWB_* 변수 아래에 깔아서 그것들을 덮지 못하게 한다.
+    Object.assign(env, agentEnv);
     Object.assign(env, auth.env);
     env.AWB_URL = this.#config.url;
     // 세션 홈의 `config.toml` 은 awb MCP 서버를 `bearer_token_env_var = "AWB_API_KEY"` 로 적고
@@ -969,6 +974,15 @@ export class AgentSessionRunner {
     // CLI 별 env 보정(codex-acp 의 NO_BROWSER 등)은 모듈이 선언한다.
     cliSessions(cli)?.adjustEnv?.(env as Record<string, string>);
     return env;
+  }
+
+  /** 그 CLI 어댑터가 스스로 쓰는 인증 env 이름 — credential env 가 가로채면 안 된다. */
+  #authEnvKeys(cli: string): string[] {
+    try {
+      return createRuntimeCliAdapter(cli).authEnvKeys();
+    } catch {
+      return [];
+    }
   }
 
   /**

@@ -10,6 +10,15 @@ import CliCredentialImport from './CliCredentialImport';
 import CliAutoLogin from './CliAutoLogin';
 import { cliCredentialProviders, useCliCatalog, type FlattenedCredentialProvider } from '../../cli/catalog';
 import { providerColor, providerIcon } from '../../cli/presentation';
+import {
+  AGENT_ENV_PROVIDERS,
+  DEFAULT_AGENT_ENV_PREFIX,
+  agentEnvNames,
+  customRowsProblem,
+  normalizeAgentEnvPrefix,
+  parseGoogleOAuthJson,
+  type CustomRow,
+} from './credentialAgentEnv.logic';
 
 export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
@@ -18,6 +27,30 @@ const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   padding: '8px 12px',
   fontWeight: 600,
 });
+
+const fieldLabelStyle: React.CSSProperties = {
+  fontSize: tokens.typography.fontSizeXs,
+  fontWeight: tokens.typography.fontWeightSemibold,
+  color: tokens.colors.textMuted,
+  textTransform: 'uppercase',
+  display: 'block',
+  marginBottom: tokens.spacing.xs,
+};
+
+const fieldHintStyle: React.CSSProperties = { fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 };
+
+const secretInputStyle: React.CSSProperties = {
+  width: '100%',
+  background: tokens.colors.surface,
+  border: `1px solid ${tokens.colors.border}`,
+  borderRadius: tokens.radii.md,
+  padding: '8px 10px',
+  color: tokens.colors.textStrong,
+  fontSize: '13px',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  boxSizing: 'border-box',
+  outline: 'none',
+};
 
 const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   textAlign: align,
@@ -45,6 +78,21 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
   { value: 'github', label: 'GitHub', icon: 'G', fields: { token: { label: 'Personal Access Token', placeholder: 'ghp_...' } } },
   { value: 'gitlab', label: 'GitLab', icon: 'L', fields: { token: { label: 'Access Token', placeholder: 'glpat-...' } } },
   { value: 'openai', label: 'OpenAI', icon: 'O', fields: { api_key: { label: 'API Key', placeholder: 'sk-...' } } },
+  {
+    value: 'google_oauth',
+    label: 'Google OAuth',
+    icon: 'G',
+    fields: {
+      client_id: { label: 'Client ID', placeholder: '1234567890-abc.apps.googleusercontent.com' },
+      client_secret: { label: 'Client secret', placeholder: 'GOCSPX-...' },
+      refresh_token: {
+        label: 'Refresh token (optional)',
+        placeholder: '1//... — without it an agent cannot call Google APIs (no browser for the consent screen)',
+      },
+    },
+  },
+  // Custom renders a key/value editor instead of these fields; `token` is the
+  // first row's default key (what outreach/resources read).
   { value: 'custom', label: 'Custom', icon: 'C', fields: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } } },
 ];
 
@@ -157,7 +205,13 @@ export default function CredentialManager({
   const [formFields, setFormFields] = useState<Record<string, string>>({});
   const [formScope, setFormScope] = useState<CatalogScope>('account');
   const [storedFieldPreviews, setStoredFieldPreviews] = useState<Record<string, string>>({});
-  const [formErrors, setFormErrors] = useState<{ name?: string }>({});
+  const [formErrors, setFormErrors] = useState<{ name?: string; fields?: string }>({});
+  const [formAgentEnv, setFormAgentEnv] = useState(false);
+  const [formEnvPrefix, setFormEnvPrefix] = useState('');
+  // Custom provider: new key/value rows, and stored keys marked for deletion.
+  const [customRows, setCustomRows] = useState<CustomRow[]>([]);
+  const [removedFields, setRemovedFields] = useState<string[]>([]);
+  const [googleJson, setGoogleJson] = useState('');
 
   const effectiveWsId = globalMode ? '' : (accountId || (getActiveAccountId() || ''));
   const effectiveCreateScope: CatalogScope = globalMode ? 'global' : createScope;
@@ -253,13 +307,23 @@ export default function CredentialManager({
       ?? NON_CLI_PROVIDERS.find((p) => p.value === 'custom')!.fields;
   };
 
+  const resetProviderInputs = (provider: string) => {
+    setFormFields({});
+    setStoredFieldPreviews({});
+    setCustomRows(provider === 'custom' ? [{ key: 'token', value: '' }] : []);
+    setRemovedFields([]);
+    setGoogleJson('');
+    setFormEnvPrefix(DEFAULT_AGENT_ENV_PREFIX[provider] ?? '');
+    if (!AGENT_ENV_PROVIDERS.has(provider)) setFormAgentEnv(false);
+  };
+
   const startCreate = () => {
     setFormName('');
     setFormDescription('');
     setFormProvider('github');
-    setFormFields({});
+    resetProviderInputs('github');
+    setFormAgentEnv(false);
     setFormScope(effectiveCreateScope);
-    setStoredFieldPreviews({});
     setFormErrors({});
     setEditCred(null);
     setShowForm(true);
@@ -274,6 +338,11 @@ export default function CredentialManager({
     // the purpose of showing an identifying prefix/suffix.
     setStoredFieldPreviews({ ...cred.credential_fields });
     setFormFields({});
+    setCustomRows([]);
+    setRemovedFields([]);
+    setGoogleJson('');
+    setFormAgentEnv(!!cred.agent_env);
+    setFormEnvPrefix(cred.env_prefix || '');
     setFormScope(cred.scope ?? (cred.account_id ? 'account' : 'global'));
     setFormErrors({});
     setEditCred(cred);
@@ -282,11 +351,48 @@ export default function CredentialManager({
 
   const cancelForm = () => { setShowForm(false); setEditCred(null); };
 
+  const isCustom = formProvider === 'custom';
+  const storedKeys = Object.keys(storedFieldPreviews);
+  const keptStoredKeys = storedKeys.filter((k) => !removedFields.includes(k));
+  // Keys that will hold a value after saving — what the env preview names.
+  const previewFieldKeys = Array.from(new Set([
+    ...keptStoredKeys.filter((k) => storedFieldPreviews[k]),
+    ...Object.keys(formFields).filter((k) => formFields[k]),
+    ...(isCustom ? customRows.filter((r) => r.key.trim() && r.value).map((r) => r.key.trim()) : []),
+  ]));
+  const agentEnvScopeLabel = (editCred ? formScope : effectiveCreateScope) === 'global'
+    ? 'every Account'
+    : (accountName || 'this Account');
+
+  const applyGoogleJson = () => {
+    const parsed = parseGoogleOAuthJson(googleJson);
+    if (!parsed.ok) { showToast(parsed.error, 'error'); return; }
+    setFormFields((prev) => ({ ...prev, ...parsed.fields }));
+    setGoogleJson('');
+    showToast(
+      parsed.fields.refresh_token
+        ? 'Filled client ID, client secret and refresh token.'
+        : 'Filled client ID and client secret. Add a refresh token for agents to call Google APIs.',
+      'success',
+    );
+  };
+
   const handleSave = async () => {
-    const errors: { name?: string } = {};
+    const errors: { name?: string; fields?: string } = {};
     if (!formName.trim()) errors.name = 'Name is required.';
+    const customProblem = isCustom ? customRowsProblem(customRows, keptStoredKeys) : null;
+    if (customProblem) errors.fields = customProblem;
     if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
     if (!globalMode && !effectiveWsId) { showToast('Ownership defaults are unavailable.', 'error'); return; }
+    const credentials: Record<string, string> = { ...formFields };
+    if (isCustom) {
+      for (const row of customRows) {
+        if (row.key.trim() && row.value) credentials[row.key.trim()] = row.value;
+      }
+    }
+    const agentEnvFields = AGENT_ENV_PROVIDERS.has(formProvider)
+      ? { agent_env: formAgentEnv, env_prefix: normalizeAgentEnvPrefix(formEnvPrefix) }
+      : { agent_env: false };
 
     setSaving(true);
     try {
@@ -300,7 +406,9 @@ export default function CredentialManager({
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
-          credentials: formFields,
+          credentials,
+          ...(removedFields.length ? { remove_fields: removedFields } : {}),
+          ...agentEnvFields,
         });
         showToast('Credential updated.', 'success');
       } else {
@@ -310,7 +418,8 @@ export default function CredentialManager({
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
-          credentials: formFields,
+          credentials,
+          ...agentEnvFields,
         });
         showToast('Credential created.', 'success');
       }
@@ -446,6 +555,14 @@ export default function CredentialManager({
                       {!globalMode && c.scope && (
                         <span style={{ marginLeft: 6 }}><Badge variant="info">{c.scope}</Badge></span>
                       )}
+                      {c.agent_env && (
+                        <span
+                          style={{ marginLeft: 6 }}
+                          title={`Agents get: ${(c.agent_env_names ?? []).join(', ') || '—'}`}
+                        >
+                          <Badge variant="success">agent env</Badge>
+                        </span>
+                      )}
                     </td>
                     <td
                       style={{
@@ -530,7 +647,7 @@ export default function CredentialManager({
               <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Provider</label>
               <select
                 value={formProvider}
-                onChange={(e) => { setFormProvider(e.target.value); setFormFields({}); setStoredFieldPreviews({}); }}
+                onChange={(e) => { setFormProvider(e.target.value); resetProviderInputs(e.target.value); }}
                 style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
               >
                 {providerOptions.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
@@ -567,7 +684,98 @@ export default function CredentialManager({
             </div>
           )}
 
-          {Object.entries(getFieldDefs(formProvider)).map(([fieldKey, fieldDef]) => (
+          {formProvider === 'google_oauth' && (
+            <div>
+              <label style={fieldLabelStyle}>Import from JSON (optional)</label>
+              <div style={fieldHintStyle}>
+                Paste the client JSON downloaded from Google Cloud Console, or an authorized-user JSON that also
+                carries a refresh_token. Only client_id, client_secret and refresh_token are kept.
+              </div>
+              <textarea
+                value={googleJson}
+                onChange={(e) => setGoogleJson(e.target.value)}
+                placeholder='{"installed": {"client_id": "…", "client_secret": "…"}}'
+                rows={4}
+                style={{ ...secretInputStyle, fontSize: '12px', resize: 'vertical' }}
+              />
+              <div style={{ marginTop: 6 }}>
+                <Button variant="secondary" size="sm" onClick={applyGoogleJson} disabled={!googleJson.trim()}>
+                  Fill fields from JSON
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {isCustom && (
+            <div>
+              <label style={fieldLabelStyle}>Fields</label>
+              <div style={fieldHintStyle}>
+                Encrypted at rest (AES-256-GCM). One secret per key — e.g. CLIENT_ID and CLIENT_SECRET.
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {storedKeys.map((key) => {
+                  const removed = removedFields.includes(key);
+                  return (
+                    <div key={`stored-${key}`} style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr auto', gap: 6, alignItems: 'center' }}>
+                      <code style={{ fontSize: 12, color: removed ? tokens.colors.textMuted : tokens.colors.textStrong, textDecoration: removed ? 'line-through' : 'none' }}>
+                        {key}
+                      </code>
+                      {removed ? (
+                        <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>Removed on save</span>
+                      ) : (
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={formFields[key] || ''}
+                          onChange={(e) => setFormFields((prev) => ({ ...prev, [key]: e.target.value }))}
+                          placeholder={`Stored: ${storedFieldPreviews[key] || '(empty)'} — blank keeps it`}
+                          style={secretInputStyle}
+                        />
+                      )}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setRemovedFields((prev) => (removed ? prev.filter((k) => k !== key) : [...prev, key]))}
+                      >
+                        {removed ? 'Undo' : 'Remove'}
+                      </Button>
+                    </div>
+                  );
+                })}
+                {customRows.map((row, index) => (
+                  <div key={`new-${index}`} style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr auto', gap: 6, alignItems: 'center' }}>
+                    <input
+                      value={row.key}
+                      onChange={(e) => setCustomRows((prev) => prev.map((r, i) => (i === index ? { ...r, key: e.target.value } : r)))}
+                      placeholder="KEY"
+                      style={secretInputStyle}
+                    />
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={row.value}
+                      onChange={(e) => setCustomRows((prev) => prev.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)))}
+                      placeholder="Secret value"
+                      style={secretInputStyle}
+                    />
+                    <Button variant="secondary" size="sm" onClick={() => setCustomRows((prev) => prev.filter((_, i) => i !== index))}>
+                      ×
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 6 }}>
+                <Button variant="secondary" size="sm" onClick={() => setCustomRows((prev) => [...prev, { key: '', value: '' }])}>
+                  + Add field
+                </Button>
+              </div>
+              {formErrors.fields && (
+                <div style={{ fontSize: '12px', color: tokens.colors.danger, marginTop: 6 }}>{formErrors.fields}</div>
+              )}
+            </div>
+          )}
+
+          {!isCustom && Object.entries(getFieldDefs(formProvider)).map(([fieldKey, fieldDef]) => (
             <div key={fieldKey}>
               <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>
                 {fieldDef.label}
@@ -598,6 +806,42 @@ export default function CredentialManager({
               )}
             </div>
           ))}
+
+          {AGENT_ENV_PROVIDERS.has(formProvider) && (
+            <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: tokens.colors.textStrong, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={formAgentEnv}
+                  onChange={(e) => {
+                    setFormAgentEnv(e.target.checked);
+                    if (e.target.checked && !formEnvPrefix) setFormEnvPrefix(DEFAULT_AGENT_ENV_PREFIX[formProvider] ?? '');
+                  }}
+                />
+                Expose to agents as environment variables
+              </label>
+              <div style={{ ...fieldHintStyle, marginTop: 4 }}>
+                Every agent run in {agentEnvScopeLabel} gets these on its CLI process — tickets, missions, chat and
+                sessions. A session that is already running picks a change up when it next starts.
+              </div>
+              {formAgentEnv && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+                  <Input
+                    label="Env prefix"
+                    value={formEnvPrefix}
+                    onChange={(e) => setFormEnvPrefix(e.target.value.toUpperCase())}
+                    placeholder="e.g. GOOGLE — blank uses the keys as-is"
+                  />
+                  <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
+                    Agents see:{' '}
+                    <code style={{ color: tokens.colors.textStrong }}>
+                      {agentEnvNames(formEnvPrefix, previewFieldKeys).join(', ') || '—'}
+                    </code>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </Modal>
 

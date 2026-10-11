@@ -14,6 +14,12 @@ import { encrypt, decrypt, decryptStrict } from '../../services/encryption.servi
 import { maskSecret } from '../../common/mask';
 import { normalizeCredentialFields } from '../../common/credential-fields';
 import { PROVIDER_FIELDS, REVEALABLE_OAUTH_FIELDS } from '../../common/credential-providers';
+import {
+  agentEnvNames,
+  agentEnvSupported,
+  normalizeAgentEnvPrefix,
+  validateAgentEnvConfig,
+} from '../../common/credential-agent-env';
 import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
 import { catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
@@ -121,9 +127,43 @@ function serializeCred(c: Credential) {
     provider: c.provider,
     credential_fields: credentialFields,
     credential_status: credentialStatus,
+    agent_env: !!c.agent_env,
+    env_prefix: c.env_prefix || '',
+    // Names only — what an agent run will see, so the list can show it.
+    agent_env_names: c.agent_env
+      ? agentEnvNames(c.env_prefix || '', Object.keys(credentialFields).filter((k) => credentialFields[k]))
+      : [],
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
+}
+
+/**
+ * Reads `agent_env` / `env_prefix` from a create/update body on top of the
+ * stored values and checks them against the field keys that will be stored.
+ * Turning exposure off never fails — that is the way out of a bad config.
+ */
+function resolveAgentEnvSettings(
+  body: any,
+  current: { agent_env: boolean; env_prefix: string },
+  provider: string,
+  fieldKeys: string[],
+): { agent_env: boolean; env_prefix: string } | { error: string } {
+  const agentEnv = body.agent_env === undefined ? current.agent_env : body.agent_env === true;
+  const envPrefix = body.env_prefix === undefined ? current.env_prefix : normalizeAgentEnvPrefix(body.env_prefix);
+  if (agentEnv) {
+    const problem = validateAgentEnvConfig(provider, envPrefix, fieldKeys);
+    if (problem) return { error: problem };
+  } else if (!agentEnvSupported(provider)) {
+    // Keep a CLI credential from carrying a stale prefix it can never use.
+    return { agent_env: false, env_prefix: '' };
+  }
+  return { agent_env: agentEnv, env_prefix: envPrefix };
+}
+
+/** Non-empty string field keys of a field map — what exposure would emit. */
+function presentFieldKeys(fields: Record<string, unknown>): string[] {
+  return Object.keys(fields).filter((k) => typeof fields[k] === 'string' && fields[k] !== '');
 }
 
 @ApiBearerAuth('user-session')
@@ -408,7 +448,10 @@ export class CredentialsController {
 
     // Strip paste damage (a wrapped terminal copy puts a newline inside the
     // token) before it ever reaches storage — see credential-fields.ts.
-    const plaintext = JSON.stringify(normalizeCredentialFields(credData));
+    const normalized = normalizeCredentialFields(credData);
+    const agentEnv = resolveAgentEnvSettings(body, { agent_env: false, env_prefix: '' }, provider, presentFieldKeys(normalized));
+    if ('error' in agentEnv) return res.status(400).json({ error: agentEnv.error });
+    const plaintext = JSON.stringify(normalized);
     const encrypted = encrypt(plaintext);
     if (decryptStrict(encrypted) !== plaintext) {
       return res.status(500).json({ error: 'Credential encryption verification failed; credential was not saved' });
@@ -420,6 +463,7 @@ export class CredentialsController {
       description,
       provider,
       encrypted_data: encrypted,
+      ...agentEnv,
     });
     const cred = await this.credRepo.save(credential);
 
@@ -483,16 +527,34 @@ export class CredentialsController {
     if (body.description !== undefined) cred.description = body.description;
     if (body.provider !== undefined) cred.provider = body.provider;
 
-    if (body.credentials && typeof body.credentials === 'object') {
-      const existing = (() => { try { return JSON.parse(decrypt(cred.encrypted_data)); } catch { return {}; } })();
+    const removeFields = Array.isArray(body.remove_fields)
+      ? body.remove_fields.map((k: unknown) => String(k)).filter(Boolean)
+      : [];
+    const fieldsChanged = (body.credentials && typeof body.credentials === 'object') || removeFields.length > 0;
+    const existing = (() => { try { return JSON.parse(decrypt(cred.encrypted_data)); } catch { return {}; } })();
+    let storedFields: Record<string, unknown> = existing;
+    if (fieldsChanged) {
       const merged: Record<string, string> = { ...existing };
-      for (const [key, value] of Object.entries(body.credentials) as [string, string][]) {
+      // Blank/masked values mean "keep" — so removing a key (a Custom
+      // key/value row) has to be said explicitly.
+      for (const key of removeFields) delete merged[key];
+      for (const [key, value] of Object.entries(body.credentials ?? {}) as [string, string][]) {
         if (value && !isMaskedValue(value)) merged[key] = value;
       }
       // Normalize the merged map, not just the incoming keys: an edit is also
       // the operator's chance to heal a value stored damaged by an older build.
-      cred.encrypted_data = encrypt(JSON.stringify(normalizeCredentialFields(merged)));
+      storedFields = normalizeCredentialFields(merged);
     }
+    const agentEnv = resolveAgentEnvSettings(
+      body,
+      { agent_env: !!cred.agent_env, env_prefix: cred.env_prefix || '' },
+      cred.provider,
+      presentFieldKeys(storedFields),
+    );
+    if ('error' in agentEnv) return res.status(400).json({ error: agentEnv.error });
+    if (fieldsChanged) cred.encrypted_data = encrypt(JSON.stringify(storedFields));
+    cred.agent_env = agentEnv.agent_env;
+    cred.env_prefix = agentEnv.env_prefix;
 
     if (scopeChanged) {
       cred.account_id = targetScope === 'global' ? null : actingAccountId;
