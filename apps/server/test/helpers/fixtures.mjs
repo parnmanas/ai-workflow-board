@@ -1,5 +1,5 @@
 // DB fixture factories for QA tests. Uses TypeORM repositories directly so
-// tests don't depend on admin REST plumbing (permissions, workspace guards,
+// tests don't depend on admin REST plumbing (permissions, account guards,
 // ReBAC) that the existing leak-test helpers exercise.
 //
 // Every factory accepts (app, getDataSourceToken, ...) so tests can reuse a
@@ -57,7 +57,7 @@ export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId
 export async function createAccount(app, getDataSourceToken, name = 'qa') {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Account');
-  const row = await repo.save(repo.create({ name: `ws-${name}-${stamp()}`, description: 'qa workspace' }));
+  const row = await repo.save(repo.create({ name: `ws-${name}-${stamp()}`, description: 'qa account' }));
   traceEvent('fixture', { kind: 'account', id: row.id, name: row.name });
   return row;
 }
@@ -210,7 +210,7 @@ export async function createApiKey(
 }
 
 /**
- * A project (repository) in a workspace, optionally with main clone folders
+ * A project (repository) in a account, optionally with main clone folders
  * per Runtime Host: `hostFolders` = [{ hostId, path }].
  */
 export async function createProject(

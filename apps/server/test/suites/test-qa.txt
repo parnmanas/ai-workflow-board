@@ -1,12 +1,17 @@
 # test:qa 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
 # 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
 # 자리가 헷갈리면 아무 데나 넣고 apps/server 에서 npm run test:suites:sort 를 돌려라.
+test/qa-flows/account-assistant-agent.test.mjs
+test/qa-flows/account-config-audit.test.mjs
 test/qa-flows/action-run-budget-exhaustion.test.mjs
 test/qa-flows/action-run-resume-mcp.test.mjs
 test/qa-flows/actions-run-register-retry.test.mjs
-test/qa-flows/agent-api-workspace-scope.test.mjs
+test/qa-flows/agent-api-account-scope.test.mjs
 test/qa-flows/agent-usage-stats.test.mjs
 test/qa-flows/archive-edge-paths.test.mjs
+test/qa-flows/automation-schedule-e2e.test.mjs
+test/qa-flows/automation-schedule-mcp.test.mjs
+test/qa-flows/automation-schedule-rest.test.mjs
 test/qa-flows/chat-attachment-security.test.mjs
 test/qa-flows/chat-attachments.test.mjs
 test/qa-flows/chat-message-read.test.mjs
@@ -61,8 +66,3 @@ test/qa-flows/silent-exit-dedupe.test.mjs
 test/qa-flows/supervisor-cadence-diagnostic.test.mjs
 test/qa-flows/ticket-lifecycle.test.mjs
 test/qa-flows/workflow-health-long-term-usage.test.mjs
-test/qa-flows/workspace-assistant-agent.test.mjs
-test/qa-flows/workspace-config-audit.test.mjs
-test/qa-flows/workspace-schedule-e2e.test.mjs
-test/qa-flows/workspace-schedule-mcp.test.mjs
-test/qa-flows/workspace-schedule-rest.test.mjs

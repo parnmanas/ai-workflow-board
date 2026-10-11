@@ -30,7 +30,7 @@ export type RunFreshness = 'cold' | 'warm';
 
 /**
  * Where to get the repo for a run. When null the run has NO repo — the
- * provisioner only ensures the folder exists (there is no board/workspace repo
+ * provisioner only ensures the folder exists (there is no board/account repo
  * to inherit any more, docs/tickets.md).
  *  - project_id: a Project id (preferred — url, default branch, credential and
  *                clone policy come from the Project).
@@ -230,7 +230,7 @@ export interface RunRepoSpec {
   credential?: { username?: string; token: string } | null;
   /**
    * Resolved clone policy for this repo (ticket bddb63ee) — the Project's
-   * `clone_policy` merged over the workspace default. Only a Project-sourced
+   * `clone_policy` merged over the account default. Only a Project-sourced
    * repo can carry one (a direct url has no Project row to read it from), and
    * it is absent/null when neither layer configures anything, in which case
    * agent-manager falls back to its own system defaults (clone timeout 60분).

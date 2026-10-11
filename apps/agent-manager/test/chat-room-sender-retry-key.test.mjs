@@ -7,7 +7,7 @@
 // classifyHttpSendFailure 는 둘 다 'permanent' 로 분류해 이후 버퍼링/재시도를
 // 하지 않는다 — 그 결과 session-status ping 과 턴 실패 fallback 메시지가
 // 사용자에게 아무 설명도 없이 조용히 사라진다. AwbConfig.retryApiKey 는 이
-// 두 전송 함수가 포기하기 전에 매니저 자체의 항상 유효하고 workspace 에
+// 두 전송 함수가 포기하기 전에 매니저 자체의 항상 유효하고 account 에
 // 종속되지 않는 키로 한 번 더 재시도하게 한다.
 
 import { mkdtempSync } from 'node:fs';

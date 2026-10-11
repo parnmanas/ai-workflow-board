@@ -18,7 +18,7 @@ export interface AgentSessionsNav {
   reload: () => void;
 }
 
-export function useAgentSessionsNav(wsId: string | null): AgentSessionsNav {
+export function useAgentSessionsNav(accountId: string | null): AgentSessionsNav {
   const [hosts, setHosts] = useState<AgentSessionHost[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,23 +43,23 @@ export function useAgentSessionsNav(wsId: string | null): AgentSessionsNav {
   useEffect(() => {
     const generation = generationRef.current + 1;
     generationRef.current = generation;
-    if (!wsId) {
+    if (!accountId) {
       setHosts([]);
       setLoading(false);
       return;
     }
-    void fetchHosts(wsId, generation);
-  }, [wsId, fetchHosts]);
+    void fetchHosts(accountId, generation);
+  }, [accountId, fetchHosts]);
 
   useEffect(() => {
-    if (!wsId) return;
-    const reload = () => void fetchHosts(wsId, generationRef.current);
+    if (!accountId) return;
+    const reload = () => void fetchHosts(accountId, generationRef.current);
     window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, reload);
     return () => window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, reload);
-  }, [wsId, fetchHosts]);
+  }, [accountId, fetchHosts]);
 
   useBoardStreamEvent('agent_instance_update', () => {
-    if (wsId) void fetchHosts(wsId, generationRef.current);
+    if (accountId) void fetchHosts(accountId, generationRef.current);
   });
 
   // 이 브라우저의 SSE 가 다시 붙으면(대개 서버 재시작) 그 사이의 매니저 등록 이벤트를 놓쳤다 — 다시 받는다.
@@ -71,12 +71,12 @@ export function useAgentSessionsNav(wsId: string | null): AgentSessionsNav {
     const reconnected = isConnected && !st.was && st.ever;
     st.was = isConnected;
     if (isConnected) st.ever = true;
-    if (reconnected && wsId) void fetchHosts(wsId, generationRef.current);
-  }, [isConnected, wsId, fetchHosts]);
+    if (reconnected && accountId) void fetchHosts(accountId, generationRef.current);
+  }, [isConnected, accountId, fetchHosts]);
 
   const reload = useCallback(() => {
-    if (wsId) void fetchHosts(wsId, generationRef.current);
-  }, [wsId, fetchHosts]);
+    if (accountId) void fetchHosts(accountId, generationRef.current);
+  }, [accountId, fetchHosts]);
 
   return { hosts, loading, error, reload };
 }

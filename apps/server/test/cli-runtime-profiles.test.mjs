@@ -45,7 +45,7 @@ const adminControllerSource = await readFile(
   join(here, '..', 'src', 'modules', 'admin', 'claude-backend-profiles.controller.ts'),
   'utf8',
 );
-const workspaceControllerSource = await readFile(
+const accountControllerSource = await readFile(
   join(here, '..', 'src', 'modules', 'accounts', 'accounts.controller.ts'),
   'utf8',
 );
@@ -280,17 +280,17 @@ test('global CRUD is AdminGuard-protected and referenced deletion is transaction
   assert.match(adminControllerSource, /delete merged\.credential_ref/);
 });
 
-// 티켓 e616dbfc — 워크스페이스 배정/기본값 표면은 제거됐다. 예전 단언(소유자
+// 티켓 e616dbfc — 계정 배정/기본값 표면은 제거됐다. 예전 단언(소유자
 // 검사·allow-set 검증·publicProfile 매핑)은 그 표면이 존재한다는 전제였으므로,
 // 표면이 되살아나는 것 자체를 잡는 방향으로 뒤집는다.
 test('accounts controller no longer exposes any claude-backend-profile surface', () => {
-  assert.doesNotMatch(workspaceControllerSource, /claude-backend-profiles/);
-  assert.doesNotMatch(workspaceControllerSource, /WorkspaceClaudeBackendProfile/);
-  assert.doesNotMatch(workspaceControllerSource, /allowed_profile_ids/);
-  assert.doesNotMatch(workspaceControllerSource, /default_claude_backend_profile_id/);
+  assert.doesNotMatch(accountControllerSource, /claude-backend-profiles/);
+  assert.doesNotMatch(accountControllerSource, /AccountClaudeBackendProfile/);
+  assert.doesNotMatch(accountControllerSource, /allowed_profile_ids/);
+  assert.doesNotMatch(accountControllerSource, /default_claude_backend_profile_id/);
   // 레거시 JSON 컬럼은 dormant 로 남지만 쓰기 경로는 사라져야 한다.
-  assert.doesNotMatch(workspaceControllerSource, /ws\.cli_runtime_profiles =/);
-  assert.doesNotMatch(workspaceControllerSource, /ws\.default_cli_runtime_profile =/);
+  assert.doesNotMatch(accountControllerSource, /ws\.cli_runtime_profiles =/);
+  assert.doesNotMatch(accountControllerSource, /ws\.default_cli_runtime_profile =/);
 });
 
 // 새 비관리자 읽기 표면 — 관리자 전용 라우트를 그대로 갈아끼우면 비관리자

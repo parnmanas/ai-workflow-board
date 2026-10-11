@@ -299,13 +299,13 @@ describe('chat 방 자유 참여(open_join)', () => {
     assert.equal((await activeRows(room.id, AGENT)).length, 0);
   });
 
-  it('옵션 ON: 다른 워크스페이스의 호출은 완화되지 않는다', async () => {
+  it('옵션 ON: 다른 계정의 호출은 완화되지 않는다', async () => {
     const room = await seedRoom({ open_join: true }, [{ type: 'user', id: MEMBER }]);
 
     await assert.rejects(
       () => sendAsUser(room.id, OTHER_WS, OUTSIDER),
       (e) => e.status === 403,
-      '"모든 유저"는 같은 워크스페이스 안의 유저를 뜻한다',
+      '"모든 유저"는 같은 계정 안의 유저를 뜻한다',
     );
     assert.equal((await activeRows(room.id, OUTSIDER)).length, 0);
   });
@@ -316,7 +316,7 @@ describe('chat 방 자유 참여(open_join)', () => {
     await assert.rejects(
       () => sendAsUser(room.id, '', OUTSIDER),
       (e) => e.status === 403,
-      '워크스페이스 경계를 확인할 수 없으면 완화하지 않는다',
+      '계정 경계를 확인할 수 없으면 완화하지 않는다',
     );
   });
 
@@ -369,7 +369,7 @@ describe('chat 방 자유 참여(open_join)', () => {
     await assert.rejects(
       () => messaging.getMessages(open.id, OUTSIDER, 50, undefined, { accountId: OTHER_WS }),
       (e) => e.status === 403,
-      '열린 방이어도 워크스페이스가 다르면 읽을 수 없다',
+      '열린 방이어도 계정가 다르면 읽을 수 없다',
     );
   });
 
@@ -407,10 +407,10 @@ describe('chat 방 자유 참여(open_join)', () => {
     assert.equal(mine.open_join, false);
   });
 
-  it('다른 워크스페이스의 자유 참여 방은 목록에 실리지 않는다', async () => {
+  it('다른 계정의 자유 참여 방은 목록에 실리지 않는다', async () => {
     const foreign = await seedRoom({ account_id: OTHER_WS, open_join: true }, []);
     const rooms = await crud.listRooms(WS, OUTSIDER);
-    assert.equal(rooms.find(r => r.id === foreign.id), undefined, '워크스페이스 경계는 옵션이 뚫지 않는다');
+    assert.equal(rooms.find(r => r.id === foreign.id), undefined, '계정 경계는 옵션이 뚫지 않는다');
   });
 
   it('mission / Action Run 방은 옵션이 켜져 있어도 일반 목록에서 제외된다', async () => {
@@ -511,12 +511,12 @@ describe('chat 방 자유 참여(open_join)', () => {
     }
   });
 
-  it('다른 워크스페이스의 방은 존재를 알려주지 않는다 (404)', async () => {
+  it('다른 계정의 방은 존재를 알려주지 않는다 (404)', async () => {
     const foreign = await seedRoom({ account_id: OTHER_WS, open_join: false }, [{ type: 'user', id: MEMBER }]);
     await assert.rejects(
       () => crud.setOpenJoin(foreign.id, WS, MEMBER, true),
       (e) => e.status === 404,
-      '워크스페이스 밖의 roomId 는 존재 확인조차 되면 안 된다',
+      '계정 밖의 roomId 는 존재 확인조차 되면 안 된다',
     );
   });
 });

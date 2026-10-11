@@ -83,16 +83,16 @@ Consequences the server enforces so this never goes stale silently:
 
 Work pages use `/sessions`, `/tickets`, `/projects`, and `/missions` without an
 owner switch. The manager receives canonical `account_id` on work and session
-requests. Server SSE also carries the old `workspace_id` alias so existing
+requests. Server SSE also carries the old `account_id` alias so existing
 installations keep running; new managers normalize old SSE and saved config to
 `account_id`. New config writes contain only the canonical owner field.
 
 The owner UUID stays the same. Existing `apikey.<UUID>`,
 `mcp-config.<UUID>[.compact].json`, managed runtime homes, credential session
 homes, and native CLI history retain their paths. `--account` is an optional
-manual override; `--workspace` / `-w` remain deprecated aliases. Pairing and
-normal work do not require selecting a workspace. Filesystem `workspace_folder`,
-RunWorkspace, CLI workspace trust, and Codex `workspace-write` retain their
+manual override; `--account` / `-w` remain deprecated aliases. Pairing and
+normal work do not require selecting a account. Filesystem `workspace_folder`,
+RunWorkspace, CLI account trust, and Codex `workspace-write` retain their
 working-directory meanings.
 
 ## Host topology
@@ -189,7 +189,7 @@ resolve the policy the same way.
 
 - Agent trust set → it decides the tier. The harness can no longer lower it, so
   a `trusted` agent never loses its max-privilege flag (and therefore never
-  falls back onto Claude's interactive workspace-trust dialog). Within the same
+  falls back onto Claude's interactive account-trust dialog). Within the same
   tier the harness still picks the exact CLI mode string.
 - Agent trust unset (legacy agent) → the harness string decides, exactly as
   before this ticket: unset/unrecognised/`bypassPermissions` → `trusted`,
@@ -267,7 +267,7 @@ instance heartbeat → server `RuntimeCapabilityDescriptor` → the
 managed-agent runtime-config form.
 
 Pending is never created for a CLI-internal permission/trust dialog. Claude's
-workspace-trust preflight (ticket 48aeab6e) now blocks only when the
+account-trust preflight (ticket 48aeab6e) now blocks only when the
 account harness explicitly asked for a non-bypass mode **and** Agent trust did
 not override it to `trusted` — an agent whose trust alone is `approve`/`strict`
 under an account that never configured a harness is not gated.
@@ -881,7 +881,7 @@ catalog's launch-effort capability. Ticket dispatch sends `effort_preset: null`;
 a ticket's effort rides its assignee spec (`runtime.runtime_config.extra.effort`).
 
 Migration `1760000000090` removes the legacy `agents` table (including
-`working_dir`), `api_keys.agent_id`, `workspaces.assistant_agent_id`, and duplicate
+`working_dir`), `api_keys.agent_id`, `accounts.assistant_agent_id`, and duplicate
 Agent target columns on Actions, QA, Security, Schedules and Features. Target
 identifiers in existing response/event contracts are computed from inline specs;
 run history, locks and in-flight runtime identifiers remain execution data.

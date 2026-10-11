@@ -79,8 +79,8 @@ test('idle 은 명시 지정했을 때만 켜진다 (opt-in)', () => {
 
 test('우선순위: Project 가 Account 기본값을 키 단위로 덮는다', () => {
   const project = JSON.stringify({ clone_timeout_seconds: 7200 });
-  const workspace = JSON.stringify({ clone_timeout_seconds: 1800, clone_depth: 50, single_branch: true });
-  const resolved = resolveClonePolicy(project, workspace);
+  const account = JSON.stringify({ clone_timeout_seconds: 1800, clone_depth: 50, single_branch: true });
+  const resolved = resolveClonePolicy(project, account);
   assert.equal(resolved.clone_timeout_seconds, 7200, 'Project 값이 이긴다');
   assert.equal(resolved.clone_depth, 50, 'Project 가 지정하지 않은 키는 Account 값을 상속한다');
   assert.equal(resolved.single_branch, true);
@@ -173,16 +173,16 @@ test('CLONE_POLICY_KEYS 는 요구된 5개 설정을 전부 담는다', () => {
 
 // ── (f) SSE 배선 정적 가드 ───────────────────────────────────────────────────
 
-test('SSE 배선: 티켓 dispatch 가 Project 의 정책을 workspace 기본값과 합쳐 emit 한다', () => {
+test('SSE 배선: 티켓 dispatch 가 Project 의 정책을 account 기본값과 합쳐 emit 한다', () => {
   // agent_trigger 를 만드는 곳은 TicketDispatchService 한 곳이다(docs/tickets.md).
   const src = fs.readFileSync(path.join(SRC, 'modules/agents/ticket-dispatch.service.ts'), 'utf8');
-  assert.match(src, /clone_policy: project \? resolveClonePolicy\(project\.clone_policy, ws\.clone_policy\) : null/,
+  assert.match(src, /clone_policy: project \? resolveClonePolicy\(project\.clone_policy, account\.clone_policy\) : null/,
     'Project ⊕ Account 병합 지점이 사라졌다 (project 가 없으면 null = override 없음)');
 });
 
 test('SSE 배선: QA/Action run 프로비저닝도 같은 정책을 실어 보낸다', () => {
   const src = fs.readFileSync(path.join(SRC, 'common/run-workspace-resolver.ts'), 'utf8');
-  assert.match(src, /resolveClonePolicy\(projectRaw, ws\?\.clone_policy\)/,
+  assert.match(src, /resolveClonePolicy\(projectRaw, account\?\.clone_policy\)/,
     'run 프로비저닝의 Project ⊕ Account 병합 지점이 사라졌다');
   assert.match(src, /clone_policy/, 'buildRunProvision 이 clone_policy 를 채우지 않는다');
 });

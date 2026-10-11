@@ -23,17 +23,17 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
   t.after(async () => { await app.close(); });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'runtime-host-only');
+  const account = await createAccount(app, getDataSourceToken, 'runtime-host-only');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host',
     type: 'manager',
   });
-  const hosted = await createAgent(app, getDataSourceToken, workspace.id, {
+  const hosted = await createAgent(app, getDataSourceToken, account.id, {
     name: 'hosted',
     type: 'hermes',
     hosted: false,
   });
-  const detached = await createAgent(app, getDataSourceToken, workspace.id, {
+  const detached = await createAgent(app, getDataSourceToken, account.id, {
     name: 'detached',
     type: 'claude',
     hosted: false,
@@ -43,11 +43,11 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
   void hosted;
 
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'runtime-host',
   });
   const detachedKey = await createApiKey(app, getDataSourceToken, detached.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'detached',
   });
 

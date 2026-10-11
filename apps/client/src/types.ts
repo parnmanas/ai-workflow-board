@@ -439,7 +439,7 @@ export interface WorkspaceFolderRepoRef {
 }
 
 // On-failure auto-ticket (docs/tickets.md → QA / Security failure tickets).
-// No board/column any more: the ticket lands in the workspace pool with
+// No board/column any more: the ticket lands in the account pool with
 // `status` (todo | backlog), `tags` and an optional `project_id`. Assignee:
 // `assignee_runtime` → else the scenario/profile target → else the project's
 // default_assignee. Stored rows may still carry the old `labels` key — read it
@@ -531,7 +531,7 @@ export interface QaScenario {
 /**
  * Deployment — server-authoritative "what commit is LIVE in this environment"
  * (ticket 8ce72b18). GET /api/deployments returns the current live row per
- * environment visible to a workspace; the QA screen renders it as a live-commit
+ * environment visible to a account; the QA screen renders it as a live-commit
  * badge and the run detail shows which commit a run tested against.
  */
 export interface Deployment {
@@ -892,8 +892,8 @@ export interface Credential {
   id: string;
   // null = global (instance-level) credential shared across all accounts.
   account_id: string | null;
-  // 'global' credentials are inherited by every workspace; 'account' ones are
-  // owned by the active workspace. Unlike the other catalog kinds this is
+  // 'global' credentials are inherited by every account; 'account' ones are
+  // owned by the active account. Unlike the other catalog kinds this is
   // mutable in place — the Edit dialog lets a holder of
   // admin.global_credentials move a credential either way, and everyone else
   // sees globals as read-only.
@@ -1082,7 +1082,7 @@ export interface TicketProjectSummary {
   host_folders?: ProjectHostFolder[];
 }
 
-// Board-less ticket (docs/tickets.md). One workspace-wide pool: a fixed
+// Board-less ticket (docs/tickets.md). One account-wide pool: a fixed
 // `status` instead of a column, free-form `tags`, an optional `project_id`, and
 // ONE assignee RuntimeSpec that does the whole ticket. Children (sub-tasks) are
 // a checklist the assignee works through — they have no assignee of their own.
@@ -1147,7 +1147,7 @@ export interface Ticket {
   prerequisites?: TicketPrerequisiteRow[];
   prerequisite_count?: number;
   // Server-hydrated snapshot of next_ticket_id (loadTicketFull only). null when
-  // unset or when the linked ticket is missing / lives in another workspace.
+  // unset or when the linked ticket is missing / lives in another account.
   next_ticket?: { id: string; title: string; status: TicketStatus } | null;
   created_by: string; // Name of the creator (user or agent)
   created_by_type: 'user' | 'agent' | ''; // Creator type
@@ -1173,7 +1173,7 @@ export interface Ticket {
   updated_at: string;
 }
 
-// ─── Ticket list rows (GET /accounts/:wsId/tickets) ──────────────────────
+// ─── Ticket list rows (GET /accounts/:accountId/tickets) ──────────────────────
 // The list ships a lightened row per root ticket: the comment relation is
 // projected to what a card renders (count + stale-open-question badge) and
 // children are nested two levels. The detail panel re-fetches the full Ticket
@@ -1237,7 +1237,7 @@ export interface Project {
   repo_url: string;
   default_branch: string;
   credential_id: string | null;
-  // Parsed object (project ⊕ workspace default at dispatch). null = no override.
+  // Parsed object (project ⊕ account default at dispatch). null = no override.
   clone_policy: ClonePolicy | null;
   use_pr: boolean;
   instructions: string;
@@ -1248,7 +1248,7 @@ export interface Project {
   updated_at: string;
 }
 
-/** Body of POST /accounts/:wsId/projects and PATCH /projects/:id. */
+/** Body of POST /accounts/:accountId/projects and PATCH /projects/:id. */
 export interface ProjectInput {
   name?: string;
   repo_url?: string;
@@ -1271,7 +1271,7 @@ export interface ProjectTestConnectionResult {
 // Agent harness configuration (ticket 7122600c). Mirror of the server-side
 // zod schema in apps/server/src/common/harness-config.ts — keep in sync.
 // Stored JSON-encoded in Account.harness_config (shipped on every ticket
-// dispatch of the workspace).
+// dispatch of the account).
 export interface HarnessConfig {
   system_prompt_append?: string; // merged into subagent --append-system-prompt
   allowed_tools?: string[];      // claude CLI --allowedTools
@@ -1328,7 +1328,7 @@ export interface Account {
   max_concurrent_tickets_per_agent?: number;
   // Done tickets idle for this many days are archived. null = disabled; 1..365.
   auto_archive_days?: number | null;
-  // Non-null = ticket dispatch is paused for the whole workspace (ISO timestamp).
+  // Non-null = ticket dispatch is paused for the whole account (ISO timestamp).
   dispatch_paused_at?: string | null;
   // GET /accounts list rows: number of tickets in the pool.
   ticket_count?: number;
@@ -1375,7 +1375,7 @@ export interface AgentCurrentTask {
   ticket_title: string;
   claimed_at: string; // ISO-8601
   // Role slug the subagent was spawned for (assignee/reporter/reviewer or
-  // workspace-custom). Optional — older plugins don't pin a role.
+  // account-custom). Optional — older plugins don't pin a role.
   role?: string;
   // Discriminates a board-ticket subagent task from a QA-run task. Absent on
   // the legacy singular current_task — treat absent as 'ticket'. For 'qa',
@@ -1471,7 +1471,7 @@ export interface ChatRoomListItem {
   // **필드 이름이 스코프마다 다르다** (티켓 70e62a9d 요구사항 6). 두 응답이 같은
   // `ChatRoomListItem[]` 로 오지만 서버가 프로젝션을 각각 손으로 만든다:
   //   - 내 방 (`listRooms`)                       `{ participant_type, participant_id }`
-  //   - 관전 (`?scope=workspace`, `listAllWorkspaceRooms`)  `{ type, id }`
+  //   - 관전 (`?scope=account`, `listAllAccountRooms`)  `{ type, id }`
   // 유니온으로 선언해 둔 이유는 한쪽 필드를 곧장 읽는 코드를 tsc 가 막게 하기
   // 위해서다 — 예전 선언은 앞의 shape 하나뿐이라 관전 모드에서 `participant_id` 가
   // 조용히 undefined 가 되는 것을 잡지 못했다. 읽을 때는
@@ -2065,11 +2065,11 @@ export interface SkillVersion {
 
 export interface Skill {
   id: string;
-  /** null = global (inherited by every workspace). See docs/catalog-scopes.md. */
+  /** null = global (inherited by every account). See docs/catalog-scopes.md. */
   account_id: string | null;
   /** Server-computed from account_id — render this rather than re-deriving. */
   scope?: 'global' | 'account';
-  /** true when this GLOBAL row is overridden by a workspace fork of the same
+  /** true when this GLOBAL row is overridden by a account fork of the same
    *  slug. Only present with `?include_shadowed=1`. */
   shadowed?: boolean;
   slug: string;
@@ -2454,11 +2454,11 @@ export interface OrchestrationMissionExtraMemberInput {
 export interface OrchestrationTeam {
   id: string;
   account_id: string | null;
-  /** workspace_id가 null이면 true — 모든 workspace에서 보이는 글로벌 팀. */
+  /** account_id가 null이면 true — 모든 account에서 보이는 글로벌 팀. */
   is_global: boolean;
-  /** 이 팀을 만든 workspace; 글로벌 팀을 편집할 수 있는 유일한 workspace. */
+  /** 이 팀을 만든 account; 글로벌 팀을 편집할 수 있는 유일한 account. */
   owner_account_id: string | null;
-  /** 글로벌 팀 전용: orchestrator가 create_orchestration_mission으로 대상 지정 가능한 workspace 목록. */
+  /** 글로벌 팀 전용: orchestrator가 create_orchestration_mission으로 대상 지정 가능한 account 목록. */
   allowed_account_ids: string[];
   name: string;
   description: string;
@@ -2530,7 +2530,7 @@ export type OrchestrationConfirmPolicy = 'none' | 'auto' | 'key_steps' | 'every_
 /**
  * 미션 대화에서 사람이 발화할 수 있는가 — 티켓 9cfd8161.
  *
- * `open`(기본) 워크스페이스 운영자면 참여자가 아니어도 발화 · `participants_only`
+ * `open`(기본) 계정 운영자면 참여자가 아니어도 발화 · `participants_only`
  * 참여자만 발화 · `off` 아무도 발화 불가(읽기 전용). 세 값 모두 읽기는 막지 않는다.
  */
 export type OrchestrationUserChatMode = 'open' | 'participants_only' | 'off';
@@ -2983,7 +2983,7 @@ export interface AgentSessionConfigOption {
 }
 
 /**
- * 이 세션이 어떤 계정으로 도는지. `source` 는 자격증명의 출처(워크스페이스 Credential vs 장비 운영자의
+ * 이 세션이 어떤 계정으로 도는지. `source` 는 자격증명의 출처(계정 Credential vs 장비 운영자의
  * CLI 로그인)로 매니저가 아는 사실이고, 나머지는 CLI 가 실제 쓰는 신원으로 어댑터가 알려 준다.
  */
 export interface AgentSessionAuth {
@@ -3018,7 +3018,7 @@ export interface AgentSessionHost {
   clis: string[];
   plugin_version: string;
   last_seen_at: string;
-  /** cli → 이 워크스페이스의 CLI 설정(credential). 없거나 null 이면 장비 운영자 로그인. */
+  /** cli → 이 계정의 CLI 설정(credential). 없거나 null 이면 장비 운영자 로그인. */
   cli_settings?: Record<string, AgentSessionCredentialRef | null>;
 }
 

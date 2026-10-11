@@ -6,7 +6,7 @@
 // 부재로 이 효과(React glue)를 실행하지 못했는데(composer-send.test 주석 참조),
 // F2-1 하네스로 실마운트해 "룸 전환 → 컴포저 draft 비워짐" 계약을 고정한다.
 //
-// 워크스페이스 미설정 시 멘션 후보 fetch 는 early-return 하므로 네트워크 없이 마운트된다.
+// 계정 미설정 시 멘션 후보 fetch 는 early-return 하므로 네트워크 없이 마운트된다.
 //
 // ChatMessageInput 은 현재 useBoardStream 을 쓰지 않지만, CredentialManager 가 그랬듯
 // SSE 구독이 나중에 추가되는 순간 provider 없이는 마운트 자체가 깨진다(티켓 474bc091).
@@ -26,7 +26,7 @@ const h = React.createElement;
 
 test('룸 전환 시 컴포저 draft 가 초기화된다(다중 작업 전환 리셋 계약)', () => {
   const dom = setupDom({ width: 1280 });
-  // 워크스페이스 미설정 → 멘션 후보 fetch 없음(네트워크 격리).
+  // 계정 미설정 → 멘션 후보 fetch 없음(네트워크 격리).
   globalThis.localStorage = dom.window.localStorage;
   // 첨부 미리보기 URL API — 마운트/리셋 경로에서 호출될 수 있어 no-op 스텁.
   dom.window.URL.createObjectURL = () => 'blob:stub';

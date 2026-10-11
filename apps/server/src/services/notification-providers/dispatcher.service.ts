@@ -52,7 +52,7 @@ interface ChatRoomMessageEvent {
  *
  * Sibling of NotificationService (which handles ticket-bound channel_ids ➜
  * Discord broadcast). The two are intentionally decoupled: this surface is
- * "AWB → user inbox", the legacy one is "ticket → workspace ops channel".
+ * "AWB → user inbox", the legacy one is "ticket → account ops channel".
  */
 @Injectable()
 export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestroy {

@@ -126,7 +126,7 @@ export class PresenceService implements OnModuleDestroy {
     const viewers = this.viewers.get(ticketId);
     // Pick a account_id from the first viewer if available — needed by the
     // event scope for client-side filtering. All viewers on the same ticket
-    // are by definition in the same workspace, so any one works.
+    // are by definition in the same account, so any one works.
     const accountId = viewers ? Array.from(viewers.values())[0]?.account_id : undefined;
     activityEvents.emit('ticket_presence', {
       ticket_id: ticketId,

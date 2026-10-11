@@ -738,7 +738,7 @@ test('crash recovery: outcome already recorded (phase 1 done, process died befor
 // (the same project dispatch ships as `base_repo`) — the old board
 // environment-repo fallback went away with boards. ────────────────────────
 
-test('sweep(): resolves credential_id from the ticket\'s project (same workspace) and passes it to getWorkflowRun', async () => {
+test('sweep(): resolves credential_id from the ticket\'s project (same account) and passes it to getWorkflowRun', async () => {
   const project = await projectRepo.save(projectRepo.create({
     account_id: 'w1', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-abc',
   }));
@@ -758,9 +758,9 @@ test('sweep(): resolves credential_id from the ticket\'s project (same workspace
   assert.equal(seenCredentialId, 'cred-abc', 'the project\'s credential_id must reach getWorkflowRun\'s 4th argument');
 });
 
-test('sweep(): a project in a DIFFERENT workspace never leaks its credential_id to this ticket\'s poll', async () => {
+test('sweep(): a project in a DIFFERENT account never leaks its credential_id to this ticket\'s poll', async () => {
   const project = await projectRepo.save(projectRepo.create({
-    account_id: 'other-workspace', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-should-not-leak',
+    account_id: 'other-account', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-should-not-leak',
   }));
   const ticket = await makeTicket({ account_id: 'w1', project_id: project.id });
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
@@ -775,7 +775,7 @@ test('sweep(): a project in a DIFFERENT workspace never leaks its credential_id 
   const resumer = makeResumer(githubStub, []);
   await resumer.sweep();
 
-  assert.equal(seenCredentialId, null, 'a cross-workspace project must never leak its credential_id into this poll');
+  assert.equal(seenCredentialId, null, 'a cross-account project must never leak its credential_id into this poll');
   await ciWaitService.cancelWait(ticket.id);
 });
 

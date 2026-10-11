@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { callerCanAccessWorkspace } from '../shared/authz';
+import { callerCanAccessAccount } from '../shared/authz';
 import type { ToolContext } from './context';
 
 async function scopeAllowed(
@@ -10,7 +10,7 @@ async function scopeAllowed(
   caller: ReturnType<typeof getCallerAgent>,
   accountId: string,
 ): Promise<boolean> {
-  return callerCanAccessWorkspace(ctx.dataSource, caller, accountId);
+  return callerCanAccessAccount(ctx.dataSource, caller, accountId);
 }
 
 export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContext): void {
@@ -43,7 +43,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
       if (!(await scopeAllowed(ctx, getCallerAgent(extra), account_id))) return err('Account scope mismatch');
       try {
         const view = await service.get(id);
-        if (view.account_id !== null && view.account_id !== account_id) return err('Function belongs to a different workspace');
+        if (view.account_id !== null && view.account_id !== account_id) return err('Function belongs to a different account');
         return ok(withArtifactRef('function', view, view.name));
       } catch (error: any) {
         return err(error?.message || 'Function not found');
@@ -87,14 +87,14 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'delete_function',
-    'Delete a workspace-authored Function. Built-in Functions cannot be deleted.',
+    'Delete a account-authored Function. Built-in Functions cannot be deleted.',
     { id: z.string(), account_id: z.string() },
     async ({ id, account_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
       if (!(await scopeAllowed(ctx, getCallerAgent(extra), account_id))) return err('Account scope mismatch');
       try {
         const view = await service.get(id);
-        if (view.account_id !== account_id) return err('Only Functions in the caller workspace can be deleted through MCP');
+        if (view.account_id !== account_id) return err('Only Functions in the caller account can be deleted through MCP');
         await service.remove(id);
         return ok({ success: true, id });
       } catch (error: any) {
@@ -139,7 +139,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'list_function_runs',
-    'List auditable Function execution records for a workspace, optionally filtered by Function or ticket.',
+    'List auditable Function execution records for a account, optionally filtered by Function or ticket.',
     {
       account_id: z.string(),
       function_id: z.string().optional(),

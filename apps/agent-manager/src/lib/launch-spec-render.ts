@@ -26,7 +26,7 @@ export type LaunchArgSource =
   | 'mcp'
   /** 세션 식별자를 싣는 인자 (session 모드 전용). */
   | 'session'
-  /** 보드·워크스페이스 harness(`harness_config`)가 만든 인자.
+  /** 보드·계정 harness(`harness_config`)가 만든 인자.
    *  **디스패치 시점 입력**이라 heartbeat 추정에는 나타날 수 없고, 실제 spawn
    *  기록에서만 귀속된다(ticket 20fff298 리뷰 3R). */
   | 'harness'

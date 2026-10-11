@@ -118,7 +118,7 @@ test('isProjectFormDirty — 편집하면 dirty, 새 프로젝트는 무엇이�
 
 // ── credentials ─────────────────────────────────────────────────────────────
 
-test('credential 후보는 global + 이 워크스페이스 것, 현재 값은 목록 밖이어도 남는다', () => {
+test('credential 후보는 global + 이 계정 것, 현재 값은 목록 밖이어도 남는다', () => {
   const creds = [
     { id: 'g', account_id: null, scope: 'global', name: 'G', provider: 'github' },
     { id: 'w', account_id: 'ws-1', scope: 'account', name: 'W', provider: 'github' },

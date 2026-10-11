@@ -38,7 +38,7 @@ export function registerTicketPrerequisiteTools(server: McpServer, ctx: ToolCont
     'Block this ticket until the specified prerequisite ticket(s) are done. ' +
       'Sets `pending_on_tickets=true` and AUTO-RESUMES (no human action needed) the moment every prereq is done — an in_progress dependent is re-sent to its assignee, a todo one re-enters the queue. ' +
       'Prefer this over `pend_ticket` whenever the blocker is another ticket rather than a human decision. ' +
-      'Guards: same-workspace only, no self-reference, no dependency cycle, no archived prereq. Idempotent per (ticket, prereq) pair.',
+      'Guards: same-account only, no self-reference, no dependency cycle, no archived prereq. Idempotent per (ticket, prereq) pair.',
     {
       ticket_id: z.string().describe('Ticket to block (the dependent)'),
       prerequisite_ticket_ids: z

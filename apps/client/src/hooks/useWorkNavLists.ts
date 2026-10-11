@@ -40,7 +40,7 @@ export interface WorkNavLists {
   missionsLoading: boolean;
 }
 
-export function useWorkNavLists(wsId: string | null): WorkNavLists {
+export function useWorkNavLists(accountId: string | null): WorkNavLists {
   const [teams, setTeams] = useState<WorkNavTeam[]>([]);
   const [missions, setMissions] = useState<WorkNavMission[]>([]);
   // SSE 핸들러가 "이미 아는 미션인가"를 **동기적으로** 판정해야 한다. setMissions
@@ -85,35 +85,35 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
   useEffect(() => {
     const generation = generationRef.current + 1;
     generationRef.current = generation;
-    if (!wsId) {
+    if (!accountId) {
       setTeams([]);
       setMissions([]);
       setTeamsLoading(false);
       setMissionsLoading(false);
       return;
     }
-    void fetchTeams(wsId, generation);
-    void fetchMissions(wsId, generation);
-  }, [wsId, fetchTeams, fetchMissions]);
+    void fetchTeams(accountId, generation);
+    void fetchMissions(accountId, generation);
+  }, [accountId, fetchTeams, fetchMissions]);
 
   // 페이지에서 팀/미션을 만들거나 지우면 곧바로 서브메뉴에 반영한다.
   useEffect(() => {
-    if (!wsId) return;
-    const reloadTeams = () => void fetchTeams(wsId, generationRef.current);
-    const reloadMissions = () => void fetchMissions(wsId, generationRef.current);
+    if (!accountId) return;
+    const reloadTeams = () => void fetchTeams(accountId, generationRef.current);
+    const reloadMissions = () => void fetchMissions(accountId, generationRef.current);
     window.addEventListener(TEAMS_CHANGED_EVENT, reloadTeams);
     window.addEventListener(MISSIONS_CHANGED_EVENT, reloadMissions);
     return () => {
       window.removeEventListener(TEAMS_CHANGED_EVENT, reloadTeams);
       window.removeEventListener(MISSIONS_CHANGED_EVENT, reloadMissions);
     };
-  }, [wsId, fetchTeams, fetchMissions]);
+  }, [accountId, fetchTeams, fetchMissions]);
 
   // 에이전트가 만든 미션도 새로고침 없이 나타나야 한다. 프레임이 title 을 실어
   // 오므로 이미 아는 미션은 제자리에서 이름만 고치고(바쁜 미션이 step 전이마다
   // 프레임을 쏘는데 그때마다 목록을 다시 받으면 낭비), 모르는 미션일 때만 재조회한다.
   useBoardStreamEvent('orchestration_update', (data: OrchestrationUpdateEvent) => {
-    if (!wsId || !data) return;
+    if (!accountId || !data) return;
     const known = missionsRef.current.find((mission) => mission.id === data.mission_id);
     if (known?.account_id && data.account_id && known.account_id !== data.account_id) return;
     // 삭제된 미션은 즉시 빼야 한다 — 남겨두면 없는 상세 화면으로 보내는 유령
@@ -123,7 +123,7 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
       return;
     }
     if (!missionsRef.current.some((mission) => mission.id === data.mission_id)) {
-      void fetchMissions(wsId, generationRef.current);
+      void fetchMissions(accountId, generationRef.current);
       return;
     }
     setMissions((prev) => {

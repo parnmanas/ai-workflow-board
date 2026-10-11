@@ -1,14 +1,14 @@
-// get_chat_room_messages 의 워크스페이스 경계 회귀 테스트 — 티켓 5a95315f.
+// get_chat_room_messages 의 계정 경계 회귀 테스트 — 티켓 5a95315f.
 //
-// 고치기 전에는 이 MCP 툴이 호출자의 워크스페이스를 해석하지 않고 **active 참여자
+// 고치기 전에는 이 MCP 툴이 호출자의 계정를 해석하지 않고 **active 참여자
 // 여부만** 봤다. `chat_room_participants` 행은 한 번 생기면 남으므로 그것만으로는
-// 경계가 지속되지 않는다 — 지난/다른 워크스페이스 방의 참여자 행을 들고 있는
+// 경계가 지속되지 않는다 — 지난/다른 계정 방의 참여자 행을 들고 있는
 // 에이전트가 지금 API key 가 묶인 스코프와 무관하게 그 방의 **대화 내용 전체**를
 // 읽을 수 있었다. `observer: true` 로 호출하므로 서비스 쪽 user-scoped 게이트와
 // per-user `cleared_at` 컷까지 지나친다.
 //
 // 실제 sql.js DataSource 위에서 진짜 쿼리를 돌린다(chat-open-join.test.mjs 선례).
-// 검증 대상이 "방 행의 account_id 와 호출자의 workspace 가 실제로 대조되는가"
+// 검증 대상이 "방 행의 account_id 와 호출자의 account 가 실제로 대조되는가"
 // 자체라 스텁으로는 아무것도 안 잡힌다 — 조건을 통째로 빼도 스텁 테스트는 통과한다.
 //
 // 공개 경로가 MCP 툴 하나뿐이라 **그 진입점에서** 돈다: 진짜 `registerChatTools` 가
@@ -18,7 +18,7 @@
 // 이 읽기 경로는 트랜잭션을 열지 않으므로 `serializeSqljsTransactions()` 는 걸지
 // 않는다(겹치는 transaction() 호출이 있는 스위트에만 필요하다 — ci-wait-resume 등).
 //
-// 실행: node --test --test-force-exit apps/server/test/chat-messages-workspace-boundary.test.mjs
+// 실행: node --test --test-force-exit apps/server/test/chat-messages-account-boundary.test.mjs
 //   (dist/ 를 import 하므로 `npm run build -w server` 가 선행되어야 한다)
 
 import assert from 'node:assert/strict';
@@ -39,15 +39,15 @@ import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 
 const WS = '11111111-1111-4111-8111-111111111111';
 const OTHER_WS = '22222222-2222-4222-8222-222222222222';
-/** WS 소속 에이전트 — 정상 경로와 타 워크스페이스 거부를 함께 본다. */
+/** WS 소속 에이전트 — 정상 경로와 타 계정 거부를 함께 본다. */
 const BOT = '33333333-3333-4333-8333-333333333333';
-/** 같은 워크스페이스의 비참여자 — 경계를 고쳐도 참여자 게이트가 그대로인지 본다. */
+/** 같은 계정의 비참여자 — 경계를 고쳐도 참여자 게이트가 그대로인지 본다. */
 const OUTSIDER_BOT = '44444444-4444-4444-8444-444444444444';
-/** account_id 가 없는(global) 에이전트 — 워크스페이스 해석 실패 경로용. */
+/** account_id 가 없는(global) 에이전트 — 계정 해석 실패 경로용. */
 const GLOBAL_BOT = '55555555-5555-4555-8555-555555555555';
 /** 사람 발신자 — 방 대화에 섞여 있는 쪽이 실제 방에 가깝다. */
 const ALICE = '66666666-6666-4666-8666-666666666666';
-/** 존재하지 않는 방 id — 타 워크스페이스 응답과 글자 단위로 대조할 기준값. */
+/** 존재하지 않는 방 id — 타 계정 응답과 글자 단위로 대조할 기준값. */
 const MISSING_ROOM = '77777777-7777-4777-8777-777777777777';
 
 let dataSource;
@@ -132,7 +132,7 @@ function assertNoMessagesLeaked(res) {
   assert.equal(res.payload.count, undefined, '거부 응답에 count 가 실렸다');
 }
 
-describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', () => {
+describe('get_chat_room_messages 계정 경계 (티켓 5a95315f)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
@@ -212,10 +212,10 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
 
   // ── 경계 ──────────────────────────────────────────────────────────────────
 
-  it('타 워크스페이스 방은 active 참여자여도 거부되고 메시지가 한 건도 나가지 않는다', async () => {
-    // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 워크스페이스가 아니면 거부다.
+  it('타 계정 방은 active 참여자여도 거부되고 메시지가 한 건도 나가지 않는다', async () => {
+    // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 계정가 아니면 거부다.
     const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
-    await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
+    await seedMessages(foreign, [{ content: '남의 계정 대화' }]);
 
     const res = await mcpRead(foreign.id, BOT, WS);
 
@@ -223,10 +223,10 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     assert.equal(res.payload.error, 'Chat room not found');
   });
 
-  it('없는 방과 타 워크스페이스 방의 응답이 완전히 같다', async () => {
-    // 다르면 남의 워크스페이스 room_id 를 넣어보는 것만으로 방의 존재를 확인할 수 있다.
+  it('없는 방과 타 계정 방의 응답이 완전히 같다', async () => {
+    // 다르면 남의 계정 room_id 를 넣어보는 것만으로 방의 존재를 확인할 수 있다.
     const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
-    await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
+    await seedMessages(foreign, [{ content: '남의 계정 대화' }]);
 
     const foreignRes = await mcpRead(foreign.id, BOT, WS);
     const missingRes = await mcpRead(MISSING_ROOM, BOT, WS);
@@ -236,9 +236,9 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     assert.equal(foreignRes.payload.error, 'Chat room not found');
   });
 
-  it('타 워크스페이스 방은 참여자 행 유무로도 응답이 갈리지 않는다', async () => {
-    // 워크스페이스 대조를 참여자 게이트 **뒤에** 두면 참여자 행이 있을 때와 없을 때의
-    // 에러가 갈려, 남의 워크스페이스 방의 참여자 구성이 응답만으로 드러난다.
+  it('타 계정 방은 참여자 행 유무로도 응답이 갈리지 않는다', async () => {
+    // 계정 대조를 참여자 게이트 **뒤에** 두면 참여자 행이 있을 때와 없을 때의
+    // 에러가 갈려, 남의 계정 방의 참여자 구성이 응답만으로 드러난다.
     const joined = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
     const notJoined = await seedRoom({ account_id: OTHER_WS }, []);
 
@@ -249,25 +249,25 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     assert.deepEqual(joinedRes.payload, notJoinedRes.payload, '참여자 행 유무가 응답으로 새어 나갔다');
   });
 
-  it('세션에 workspace 가 없으면 에이전트 자신의 account_id 로 판정한다', async () => {
+  it('세션에 account 가 없으면 에이전트 자신의 account_id 로 판정한다', async () => {
     // caller.accountId 가 비면 normalizeAgentAccountId(agent.account_id) 로 떨어진다.
     // BOT 은 WS 소속이므로 OTHER_WS 방은 여전히 거부되고, 자기 WS 방은 읽힌다.
     const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
-    await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
+    await seedMessages(foreign, [{ content: '남의 계정 대화' }]);
     const own = await seedRoom({}, [{ type: 'agent', id: BOT }]);
-    await seedMessages(own, [{ content: '내 워크스페이스 대화' }]);
+    await seedMessages(own, [{ content: '내 계정 대화' }]);
 
     const foreignRes = await mcpRead(foreign.id, BOT, undefined);
     const ownRes = await mcpRead(own.id, BOT, undefined);
 
     assertNoMessagesLeaked(foreignRes);
     assert.equal(foreignRes.payload.error, 'Chat room not found');
-    assert.equal(ownRes.isError, false, '자기 워크스페이스 방 읽기가 폴백에서 막혔다');
-    assert.deepEqual(ownRes.payload.messages.map(m => m.content), ['내 워크스페이스 대화']);
+    assert.equal(ownRes.isError, false, '자기 계정 방 읽기가 폴백에서 막혔다');
+    assert.deepEqual(ownRes.payload.messages.map(m => m.content), ['내 계정 대화']);
   });
 
-  it('workspace 를 해석할 수 없으면(전역 에이전트 + 스코프 없는 세션) 거부한다', async () => {
-    // 세션 키에도 workspace 가 없고 에이전트도 global 이면 대조할 기준이 없다 —
+  it('account 를 해석할 수 없으면(전역 에이전트 + 스코프 없는 세션) 거부한다', async () => {
+    // 세션 키에도 account 가 없고 에이전트도 global 이면 대조할 기준이 없다 —
     // 이 파일의 다른 툴들과 같은 방식으로 fail-closed 한다.
     const room = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
     await seedMessages(room, [{ content: '대화' }]);
@@ -275,16 +275,16 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     const res = await mcpRead(room.id, GLOBAL_BOT, undefined);
 
     assertNoMessagesLeaked(res);
-    assert.equal(res.payload.error, 'Could not resolve workspace from caller API key');
+    assert.equal(res.payload.error, 'Could not resolve account from caller API key');
   });
 
-  it('전역 에이전트도 세션 키의 workspace 밖 방은 읽지 못한다', async () => {
-    // global 이라고 전 워크스페이스가 열리지는 않는다 — 판정 기준은 어디까지나 지금
+  it('전역 에이전트도 세션 키의 account 밖 방은 읽지 못한다', async () => {
+    // global 이라고 전 계정가 열리지는 않는다 — 판정 기준은 어디까지나 지금
     // 바인딩된 스코프다. 같은 읽기의 형제 경로인 agent-api REST 도 키 스코프로 막는다.
     const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
-    await seedMessages(foreign, [{ content: '남의 워크스페이스 대화' }]);
+    await seedMessages(foreign, [{ content: '남의 계정 대화' }]);
     const own = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
-    await seedMessages(own, [{ content: '내 워크스페이스 대화' }]);
+    await seedMessages(own, [{ content: '내 계정 대화' }]);
 
     const foreignRes = await mcpRead(foreign.id, GLOBAL_BOT, WS);
     const ownRes = await mcpRead(own.id, GLOBAL_BOT, WS);
@@ -292,12 +292,12 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     assertNoMessagesLeaked(foreignRes);
     assert.equal(foreignRes.payload.error, 'Chat room not found');
     assert.equal(ownRes.isError, false, '세션 스코프 안의 방까지 막혔다');
-    assert.deepEqual(ownRes.payload.messages.map(m => m.content), ['내 워크스페이스 대화']);
+    assert.deepEqual(ownRes.payload.messages.map(m => m.content), ['내 계정 대화']);
   });
 
   // ── 무회귀 ────────────────────────────────────────────────────────────────
 
-  it('같은 워크스페이스 읽기는 시간순 전체 기록을 그대로 돌려준다', async () => {
+  it('같은 계정 읽기는 시간순 전체 기록을 그대로 돌려준다', async () => {
     // 참여자 행이 agent 타입 하나뿐인데 읽히는 것이 곧 observer 모드 무회귀다 —
     // `observer: true` 를 빼면 서비스가 participant_type='user' 로 게이트를 다시 걸어
     // (에이전트에게는 없는 행이라) 403 이 된다.
@@ -343,8 +343,8 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     assert.deepEqual(limited.payload.messages.map(m => m.content), ['둘', '셋'], '최신 2건이 시간순으로 나와야 한다');
   });
 
-  it('같은 워크스페이스라도 비참여자는 여전히 거부된다 (참여자 게이트 무회귀)', async () => {
-    // 워크스페이스가 통과한 뒤에도 참여자 게이트는 그대로 살아 있어야 한다.
+  it('같은 계정라도 비참여자는 여전히 거부된다 (참여자 게이트 무회귀)', async () => {
+    // 계정가 통과한 뒤에도 참여자 게이트는 그대로 살아 있어야 한다.
     const room = await seedRoom({}, [{ type: 'agent', id: BOT }]);
     await seedMessages(room, [{ content: '대화' }]);
 

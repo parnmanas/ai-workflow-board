@@ -76,7 +76,7 @@ export function MentionInboxBadge({ accountId }: Props) {
     }
 
     if (item.source_type === 'comment' && item.ticket_id && accountId) {
-      // Tickets live in one workspace pool, so the ticket id alone addresses
+      // Tickets live in one account pool, so the ticket id alone addresses
       // it — the Tickets page opens `?ticket=` (fetching it by id even when
       // the current filters hide it) and scrolls to `?comment=`.
       navigate(ticketPath(accountId, item.ticket_id, { commentId: item.source_id }));

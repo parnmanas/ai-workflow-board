@@ -4,7 +4,7 @@ import { In, IsNull, Repository } from 'typeorm';
 import { UserMention } from '../../entities/UserMention';
 
 // API surface. Comment-type rows carry `ticket_id`; the inbox links them to
-// `/ws/<wsId>/tickets?ticket=<id>&comment=<id>` (no board to resolve any more).
+// `/account/<accountId>/tickets?ticket=<id>&comment=<id>` (no board to resolve any more).
 // Chat-type rows carry `room_id`.
 export type UserMentionRow = UserMention;
 
@@ -14,7 +14,7 @@ export class MentionsService {
     @InjectRepository(UserMention) private readonly repo: Repository<UserMention>,
   ) {}
 
-  /** List the given user's unread mentions in one workspace, newest first. */
+  /** List the given user's unread mentions in one account, newest first. */
   async listUnread(accountId: string | string[], userId: string, limit = 50): Promise<UserMentionRow[]> {
     const ids = Array.isArray(accountId) ? accountId : [accountId];
     if (!ids.length) return [];
@@ -26,7 +26,7 @@ export class MentionsService {
   }
 
   /**
-   * Count the given user's unread mentions in one workspace.
+   * Count the given user's unread mentions in one account.
    */
   async countUnread(accountId: string | string[], userId: string): Promise<number> {
     const ids = Array.isArray(accountId) ? accountId : [accountId];
@@ -101,7 +101,7 @@ export class MentionsService {
   }
 
   /**
-   * Mark every unread mention in a workspace as read for this user.
+   * Mark every unread mention in a account as read for this user.
    * Returns the number of rows advanced.
    */
   async markAllRead(accountId: string | string[], userId: string): Promise<number> {

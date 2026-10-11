@@ -74,7 +74,7 @@ export interface StartQaRunResult {
 export interface StartBatchArgs {
   accountId: string;
   // Explicit ordered scenario ids, OR `all: true` to expand to every enabled
-  // scenario in the workspace. Exactly one is used —
+  // scenario in the account. Exactly one is used —
   // scenarioIds wins if both are given.
   scenarioIds?: string[];
   all?: boolean;
@@ -148,7 +148,7 @@ export class QaRunService {
 
   async listRuns(scenarioId: string, accountId: string, limit = 20): Promise<QaRun[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    await findOrFail(this.scenarioRepo, { where: { id: scenarioId, account_id: accountId } }, 'QA scenario not found in workspace');
+    await findOrFail(this.scenarioRepo, { where: { id: scenarioId, account_id: accountId } }, 'QA scenario not found in account');
     return this.runRepo.find({
       where: { scenario_id: scenarioId, account_id: accountId },
       order: { created_at: 'DESC' },
@@ -158,7 +158,7 @@ export class QaRunService {
 
   async getRun(runId: string, accountId: string): Promise<QaRun> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'QA run not found in workspace');
+    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'QA run not found in account');
   }
 
   // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -637,7 +637,7 @@ export class QaRunService {
 
   async getBatch(batchId: string, accountId: string): Promise<QaRunBatch> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.batchRepo, { where: { id: batchId, account_id: accountId } }, 'QA batch not found in workspace');
+    return findOrFail(this.batchRepo, { where: { id: batchId, account_id: accountId } }, 'QA batch not found in account');
   }
 
   /**
@@ -766,7 +766,7 @@ export class QaRunService {
   /** Resolve the ordered scenario id list for a new batch (explicit list, else all-in-scope). */
   private async _resolveBatchScenarioIds(args: StartBatchArgs): Promise<string[]> {
     // Explicit list wins. Preserve caller order; drop ids that aren't enabled
-    // scenarios in this workspace so a stale/foreign id can't wedge the batch.
+    // scenarios in this account so a stale/foreign id can't wedge the batch.
     if (Array.isArray(args.scenarioIds) && args.scenarioIds.length > 0) {
       const found = await this.scenarioRepo.find({
         where: { id: In(args.scenarioIds), account_id: args.accountId },
@@ -779,7 +779,7 @@ export class QaRunService {
     }
     if (args.all) {
       const qb = this.scenarioRepo.createQueryBuilder('s')
-        .where('s.account_id = :ws', { ws: args.accountId })
+        .where('s.account_id = :account', { account: args.accountId })
         .andWhere('s.enabled = :en', { en: true });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return rows.map((s) => s.id);

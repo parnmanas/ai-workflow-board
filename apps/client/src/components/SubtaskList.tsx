@@ -19,9 +19,9 @@ interface LinkableTicket {
 interface ChildTicketListProps {
   parentTicket: Ticket;
   maxDepth: number; // max allowed depth for this parent's children
-  // Root tickets of the loaded workspace pool, used by the "Link existing"
+  // Root tickets of the loaded account pool, used by the "Link existing"
   // picker. Self, current children and ancestors are filtered out.
-  workspaceTickets?: LinkableTicket[];
+  accountTickets?: LinkableTicket[];
   /** Tag suggestions for the create form (collectTagPool of the loaded pool). */
   tagPool?: Array<{ tag: string; count: number }>;
   // POST /tickets/:parentId/children — children carry no assignee of their
@@ -47,7 +47,7 @@ type AddMode = null | 'new' | 'link';
 const EMPTY_FORM = { title: '', description: '', tags: [] as string[] };
 
 export default function ChildTicketList({
-  parentTicket, maxDepth, workspaceTickets, tagPool, onCreateChild, onMoveChild, onDeleteChild, onReparentChild, onSelectChild,
+  parentTicket, maxDepth, accountTickets, tagPool, onCreateChild, onMoveChild, onDeleteChild, onReparentChild, onSelectChild,
 }: ChildTicketListProps) {
   const children = parentTicket.children || [];
   const [addMode, setAddMode] = useState<AddMode>(null);
@@ -60,16 +60,16 @@ export default function ChildTicketList({
   //   - exclude tickets already a direct child of this parent
   //   - exclude any of this ticket's ancestors (would create a cycle —
   //     server rejects too, but UX-wise we don't want to surface them)
-  // workspaceTickets is a list of root tickets with nested children; flatten
+  // accountTickets is a list of root tickets with nested children; flatten
   // so a leaf can also be promoted into another parent's subtask list.
   const linkCandidates = useMemo(() => {
-    if (!workspaceTickets || !onReparentChild) return [];
+    if (!accountTickets || !onReparentChild) return [];
     const flat: LinkableTicket[] = [];
     const walk = (t: LinkableTicket) => {
       flat.push(t);
       for (const c of (t.children || [])) walk(c);
     };
-    for (const t of workspaceTickets) walk(t);
+    for (const t of accountTickets) walk(t);
     const childIds = new Set(children.map(c => c.id));
     const subtreeIds = new Set<string>();
     const collect = (t: LinkableTicket) => {
@@ -89,7 +89,7 @@ export default function ChildTicketList({
       .filter(t => !containsParent(t))
       .filter(t => !q || t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
       .slice(0, 20);
-  }, [workspaceTickets, children, parentTicket, linkQuery, onReparentChild]);
+  }, [accountTickets, children, parentTicket, linkQuery, onReparentChild]);
 
   const doneCount = children.filter(c => c.status === DONE_STATUS).length;
   const progress = children.length > 0 ? (doneCount / children.length) * 100 : 0;
@@ -233,7 +233,7 @@ export default function ChildTicketList({
         })}
       </div>
 
-      {/* Link existing — picker over the flattened workspace pool. Distinct
+      {/* Link existing — picker over the flattened account pool. Distinct
          from the create form below: this re-parents an existing root/child
          ticket under this parent rather than minting a new one. Search filters
          by title or id; results are capped at 20 so the list stays compact. */}

@@ -87,7 +87,7 @@ let ticket;
 let children;
 
 test('REST: a backlog ticket with subtasks is created and never dispatched', async () => {
-  step('POST /accounts/:wsId/tickets in backlog');
+  step('POST /accounts/:accountId/tickets in backlog');
   const res = await api('POST', `/accounts/${ws.id}/tickets`, {
     title: 'Lifecycle test ticket',
     prompt_text: 'Please progress me through the statuses.',
@@ -227,7 +227,7 @@ test('MCP: an agent creates, starts, finishes, archives and restores its own tic
   });
   assert.ok(!created.isError, JSON.stringify(created));
   assert.equal(created.status, 'backlog');
-  assert.equal(created.account_id, ws.id, 'defaults to the caller workspace');
+  assert.equal(created.account_id, ws.id, 'defaults to the caller account');
   assert.equal(created.assignee_key, plannerKey);
   assert.deepEqual(created.tags, ['lifecycle', 'mcp']);
   assert.deepEqual(created.children.map((c) => c.title), ['investigate']);

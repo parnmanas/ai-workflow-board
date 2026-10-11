@@ -189,7 +189,7 @@ test('⑥ 왼쪽 프레임 — 돌고 있는 세션과 작업 중인 방에 같�
           h(BoardStreamProvider, null,
             h(NotificationProvider, null,
               h(Sidebar, {
-                overlay: false, isOpen: false, onClose: () => {}, wsId: WS_ID,
+                overlay: false, isOpen: false, onClose: () => {}, accountId: WS_ID,
                 rooms: [room], roomsLoading: false,
               }),
             ),

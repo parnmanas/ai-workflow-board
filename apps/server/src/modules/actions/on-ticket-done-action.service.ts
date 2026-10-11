@@ -45,7 +45,7 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  *
  * Binding (union of two methods, deduped by action id):
  *   (a) per-ticket — `Ticket.on_done_action_ids` lists explicit Action ids.
- *   (b) tag policy — `Action.trigger='on_ticket_done'`, workspace-wide, narrowed
+ *   (b) tag policy — `Action.trigger='on_ticket_done'`, account-wide, narrowed
  *       by `trigger_label` (empty = any ticket; else the finished ticket's tags
  *       must include that exact tag).
  *
@@ -122,7 +122,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     }
 
     // Collect eligible Actions BEFORE claiming so a ticket reaching Done with no
-    // bound hook doesn't churn a write on every completion in the workspace.
+    // bound hook doesn't churn a write on every completion in the account.
     const actions = await this._collectEligibleActions(ticket, tags);
     if (actions.length === 0) return;
 
@@ -199,7 +199,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
 
     // (a) Explicit per-ticket ids FIRST, in array order. These fire regardless
     // of the Action's own `trigger` field (the binding is the ticket's, not a
-    // policy), but still honour enabled=false and workspace scope.
+    // policy), but still honour enabled=false and account scope.
     const explicitIds = safeJsonParse<string[]>(ticket.on_done_action_ids, []);
     if (Array.isArray(explicitIds)) {
       for (const id of explicitIds) {
@@ -216,7 +216,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     // match in JS (tags live as a JSON string — keep the query DB-portable).
     const qb = actionRepo
       .createQueryBuilder('a')
-      .where('a.account_id = :ws', { ws: ticket.account_id })
+      .where('a.account_id = :account', { account: ticket.account_id })
       .andWhere('a.trigger = :trig', { trig: ON_TICKET_DONE_TRIGGER })
       .andWhere('a.enabled = :en', { en: true });
     const policyActions = await qb.getMany();

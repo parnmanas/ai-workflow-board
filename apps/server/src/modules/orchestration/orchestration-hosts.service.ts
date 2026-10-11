@@ -79,10 +79,10 @@ export class OrchestrationHostsService {
    * thing available with no heartbeat (model lists stay single-sourced from
    * HostModelsService and are simply absent offline).
    *
-   * Deliberately NOT narrowed by workspace. A Runtime Host is a machine, not a
-   * workspace member — managers are paired once by an admin and legitimately run
-   * slots for several accounts (the cross-workspace `listManagers` endpoint
-   * takes the same position). The workspace scope that matters is stamped onto
+   * Deliberately NOT narrowed by account. A Runtime Host is a machine, not a
+   * account member — managers are paired once by an admin and legitimately run
+   * slots for several accounts (the cross-account `listManagers` endpoint
+   * takes the same position). The account scope that matters is stamped onto
    * the slot's credential visibility check at roster-write time.
    */
   async listRuntimeHosts(_accountId: string): Promise<RuntimeHostView[]> {

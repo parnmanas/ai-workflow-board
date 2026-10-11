@@ -6,11 +6,11 @@ import { z } from 'zod';
  * A harness describes how a subagent CLI should be launched for tickets on a
  * board: extra system prompt, tool allow/deny lists, model and permission
  * mode. Stored as a JSON text column on both Account (`harness_config` =
- * workspace-wide default) and Board (`harness_config` = per-board override),
+ * account-wide default) and Board (`harness_config` = per-board override),
  * mirroring the `Board.routing_config` / `Board.column_prompts` convention.
  *
  * Resolution is KEY-LEVEL: a board only overrides the keys it sets; unset
- * keys fall through to the workspace default. Both unset → null, which every
+ * keys fall through to the account default. Both unset → null, which every
  * consumer must treat as "no harness — current behaviour" (null-safe
  * contract). The resolved object is what dispatch ships to agent-manager
  * (follow-up ticket e9c7a896); agent-manager maps the keys onto claude CLI
@@ -98,23 +98,23 @@ export function serializeHarnessConfig(value: HarnessConfig | null | undefined):
 }
 
 /**
- * Key-level merge of the workspace default with the board override. The
+ * Key-level merge of the account default with the board override. The
  * board wins per key it explicitly sets; keys it leaves unset inherit from
- * the workspace. Both null → null (caller keeps current behaviour).
+ * the account. Both null → null (caller keeps current behaviour).
  *
  * Shared resolve point for REST/MCP consumers and the dispatch path
  * (TriggerLoopService — follow-up ticket e9c7a896) so every reader agrees
  * on the same precedence.
  */
 export function resolveHarnessConfig(
-  workspaceRaw: string | null | undefined,
+  accountRaw: string | null | undefined,
   boardRaw: string | null | undefined,
 ): HarnessConfig | null {
-  const ws = parseHarnessConfig(workspaceRaw);
+  const account = parseHarnessConfig(accountRaw);
   const board = parseHarnessConfig(boardRaw);
-  if (!ws) return board;
-  if (!board) return ws;
-  const merged: HarnessConfig = { ...ws };
+  if (!account) return board;
+  if (!board) return account;
+  const merged: HarnessConfig = { ...account };
   for (const key of HARNESS_CONFIG_KEYS) {
     if (board[key] !== undefined) (merged as any)[key] = board[key];
   }

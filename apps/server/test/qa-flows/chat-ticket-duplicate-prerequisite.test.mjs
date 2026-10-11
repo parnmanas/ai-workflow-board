@@ -9,9 +9,9 @@
 // resolves its duplicates without firing the duplicates' own done hooks.
 //
 // Board removal: tickets are created through the real REST intake
-// (POST /api/accounts/:wsId/tickets → TicketService.create) and dispatch is
+// (POST /api/accounts/:accountId/tickets → TicketService.create) and dispatch is
 // TicketDispatchService. The old role-assignment child checks went away with
-// workspace roles.
+// account roles.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,10 +48,10 @@ test.after(async () => {
 
 const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function rest(method, path, wsId, body) {
+async function rest(method, path, accountId, body) {
   const response = await fetch(`http://localhost:${port}/api${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}`, 'X-Account-Id': wsId },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}`, 'X-Account-Id': accountId },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await response.text();
@@ -61,13 +61,13 @@ async function rest(method, path, wsId, body) {
 }
 
 /** Real REST intake (TicketService.create incl. duplicate assessment). */
-async function intake(wsId, body) {
-  const res = await rest('POST', `/accounts/${wsId}/tickets`, wsId, body);
+async function intake(accountId, body) {
+  const res = await rest('POST', `/accounts/${accountId}/tickets`, accountId, body);
   if (res.status !== 201) assert.fail(`REST ticket intake failed (${res.status}): ${JSON.stringify(res.body)}`);
   return res.body;
 }
 
-/** A workspace + an assignee agent whose Runtime Host stream a VirtualAgent listens on. */
+/** A account + an assignee agent whose Runtime Host stream a VirtualAgent listens on. */
 async function scene(name, { capacity = 10 } = {}) {
   const ws = await createAccount(app, gdst, name);
   // Capacity is raised so "the agent is busy" can never be why a duplicate
@@ -246,7 +246,7 @@ test('ambiguous decisions only link offered candidates, pending projection is ca
   await assert.rejects(
     duplicateService.confirm(ambiguousLink.id, unrelated.id, 'qa', 'qa'),
     /not offered/,
-    'shared confirmation mutation must reject arbitrary workspace tickets',
+    'shared confirmation mutation must reject arbitrary account tickets',
   );
   const linked = await duplicateService.confirm(ambiguousLink.id, rootOne.id, 'qa', 'qa');
   assert.equal(linked.canonical_ticket_id, rootOne.id);

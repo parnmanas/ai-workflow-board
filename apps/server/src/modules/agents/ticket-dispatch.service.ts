@@ -63,12 +63,12 @@ const NACK_RETRY_STALE_MS = 24 * 60 * 60_000;
  *
  *   - Queue: `todo` tickets with an assignee are started (moved to
  *     `in_progress` + dispatched) as soon as that agent identity has capacity
- *     (`workspace.max_concurrent_tickets_per_agent` non-pending in_progress
+ *     (`account.max_concurrent_tickets_per_agent` non-pending in_progress
  *     tickets). Ordered priority → position → created_at.
  *   - Re-wake: an `in_progress` ticket is re-sent on a human comment, unpend,
  *     prerequisites resolved, CI wait resolved, reassignment or manual Run.
  *   - Supervisor: an `in_progress` ticket whose agent shows no live strand and
- *     no activity for `workspace.supervisor_stale_ms` is re-sent (force
+ *     no activity for `account.supervisor_stale_ms` is re-sent (force
  *     respawn), then every `supervisor_resend_ms`, at most
  *     MAX_SUPERVISOR_REDISPATCHES times without progress; then it is parked
  *     for a human.
@@ -199,7 +199,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   // ── event handling ────────────────────────────────────────────────────
 
   private async onActivity(activity: ActivityLog): Promise<void> {
-    // Resuming a paused workspace (or raising its per-agent cap) can start
+    // Resuming a paused account (or raising its per-agent cap) can start
     // queued tickets right away instead of waiting for the sweep.
     if (activity?.entity_type === 'account' && activity.action === 'config_changed'
       && ['dispatch_paused_at', 'max_concurrent_tickets_per_agent'].includes(activity.field_changed || '')) {
@@ -228,7 +228,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     // resumeTicket()/dispatch() calls from the path that made the change —
     // inferring them from activity rows too would wake the agent twice.
     if (activity.action === 'moved' && ticket.status === 'done') await this.onDone(ticket);
-    // Any ticket change can open or fill a slot — re-pump the workspace.
+    // Any ticket change can open or fill a slot — re-pump the account.
     await this.startQueued({ accountId: ticket.account_id || undefined });
   }
 
@@ -336,9 +336,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     const running = await this.runningCounts([...new Set(queued.map((t) => t.assignee_key))]);
     let started = 0;
     for (const ticket of queued) {
-      const ws = accounts.get(ticket.account_id);
-      if (!ws || ws.dispatch_paused_at) continue;
-      const cap = Math.max(1, ws.max_concurrent_tickets_per_agent || 1);
+      const account = accounts.get(ticket.account_id);
+      if (!account || account.dispatch_paused_at) continue;
+      const cap = Math.max(1, account.max_concurrent_tickets_per_agent || 1);
       const inFlight = running.get(ticket.assignee_key) ?? 0;
       if (inFlight >= cap) continue;
       const spec = parseRuntimeSpec(ticket.assignee);
@@ -389,12 +389,12 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (isTicketPending(ticket)) return 'pending';
     if (ticket.archived_at) return 'archived';
     if (ticket.canonical_ticket_id) return 'duplicate';
-    const ws = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
-    if (ws?.dispatch_paused_at) return 'workspace_paused';
+    const account = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
+    if (account?.dispatch_paused_at) return 'account_paused';
     const spec = parseRuntimeSpec(ticket.assignee);
     if (!spec) return 'unassigned';
     if (!this.isHostReachable(spec)) return 'host_offline';
-    const cap = Math.max(1, ws?.max_concurrent_tickets_per_agent || 1);
+    const cap = Math.max(1, account?.max_concurrent_tickets_per_agent || 1);
     const inFlight = (await this.runningCounts([ticket.assignee_key])).get(ticket.assignee_key) ?? 0;
     if (inFlight >= cap) return 'agent_busy';
     return 'queued';
@@ -410,9 +410,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (ticket.status !== 'in_progress' && ticket.status !== 'todo') return { dispatched: false, reason: `status_${ticket.status}` };
     const spec = parseRuntimeSpec(ticket.assignee);
     if (!spec) return { dispatched: false, reason: 'unassigned' };
-    const ws = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
-    if (!ws) return { dispatched: false, reason: 'workspace_missing' };
-    if (ws.dispatch_paused_at) return { dispatched: false, reason: 'workspace_paused' };
+    const account = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
+    if (!account) return { dispatched: false, reason: 'account_missing' };
+    if (account.dispatch_paused_at) return { dispatched: false, reason: 'account_paused' };
     if (await this.instanceQuiesce.isQuiesced()) return { dispatched: false, reason: 'instance_quiesced' };
     if (!this.isHostReachable(spec)) {
       await this.noteOffline(ticket, spec);
@@ -435,7 +435,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
 
     let payload: AgentTriggerPayload & Record<string, unknown>;
     try {
-      payload = await this.buildPayload(ticket, spec, ws, source, opts.forceRespawn === true);
+      payload = await this.buildPayload(ticket, spec, account, source, opts.forceRespawn === true);
     } catch (err: any) {
       this.logService.error('Dispatch', 'trigger build failed; not emitted', { err: String(err?.message || err), ticket_id: ticket.id });
       await this.dataSource.getRepository(ActivityLog).save({
@@ -463,13 +463,13 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   private async buildPayload(
     ticket: Ticket,
     spec: RuntimeSpec,
-    ws: Account,
+    account: Account,
     source: DispatchSource,
     forceRespawn: boolean,
   ): Promise<AgentTriggerPayload & Record<string, unknown>> {
     const agentId = runtimeIdentityKey(spec);
     const status = (ticket.status === 'todo' ? 'in_progress' : ticket.status) as TicketStatus;
-    const project = ticket.project_id ? await this.projects.getInWorkspace(ticket.project_id, ticket.account_id) : null;
+    const project = ticket.project_id ? await this.projects.getInAccount(ticket.project_id, ticket.account_id) : null;
     const mainCloneDir = project ? await this.projects.hostFolder(project.id, spec.manager_agent_id) : null;
     const baseBranch = ticket.base_branch || '';
 
@@ -487,9 +487,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
         : null,
     });
 
-    const harness = appendBoardLanguageInstruction(parseHarnessConfig(ws.harness_config), ws.language);
-    const wsEnv = parseEnvironmentConfig(ws.environment_config);
-    // Repositories come from the ticket's project only — the workspace layer
+    const harness = appendBoardLanguageInstruction(parseHarnessConfig(account.harness_config), account.language);
+    const wsEnv = parseEnvironmentConfig(account.environment_config);
+    // Repositories come from the ticket's project only — the account layer
     // contributes env vars / setup, never an implicit repo.
     const environmentConfig = wsEnv ? resolveEnvironmentConfig({ ...wsEnv, repositories: [] }, () => null) : null;
 
@@ -531,9 +531,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
         ? { id: project.id, name: project.name, url: project.repo_url, default_branch: project.default_branch || '', main_clone_dir: mainCloneDir }
         : null,
       base_branch: baseBranch,
-      clone_policy: project ? resolveClonePolicy(project.clone_policy, ws.clone_policy) : null,
+      clone_policy: project ? resolveClonePolicy(project.clone_policy, account.clone_policy) : null,
       force_respawn: forceRespawn,
-      max_concurrent_tickets_per_agent: Math.max(1, ws.max_concurrent_tickets_per_agent || 1),
+      max_concurrent_tickets_per_agent: Math.max(1, account.max_concurrent_tickets_per_agent || 1),
       skill_snapshot: { run_id: snapshot.run_id, digest: snapshot.digest, manifest: snapshot.manifest as any },
       harness_config: harness,
       cli_runtime_profile: runtimeProfile,
@@ -598,8 +598,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     const accounts = await this.accountsById([...new Set(working.map((t) => t.account_id).filter(Boolean))]);
     const latestComment = await this.latestCommentAt(working.map((t) => t.id));
     for (const ticket of working) {
-      const ws = accounts.get(ticket.account_id);
-      if (!ws || ws.dispatch_paused_at) continue;
+      const account = accounts.get(ticket.account_id);
+      if (!account || account.dispatch_paused_at) continue;
 
       const nack = this.nackRetryAt.get(ticket.id);
       if (nack && nack.at <= now) {
@@ -618,8 +618,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       // First re-send after supervisor_stale_ms of silence; each further one
       // after supervisor_resend_ms (the agent already had its long chance).
       const waitMs = ticket.supervisor_redispatches > 0
-        ? Math.max(60_000, ws.supervisor_resend_ms || 300_000)
-        : Math.max(60_000, ws.supervisor_stale_ms || 1_800_000);
+        ? Math.max(60_000, account.supervisor_resend_ms || 300_000)
+        : Math.max(60_000, account.supervisor_stale_ms || 1_800_000);
       if (now - lastSignal < waitMs) continue;
 
       if (ticket.supervisor_redispatches >= MAX_SUPERVISOR_REDISPATCHES) {

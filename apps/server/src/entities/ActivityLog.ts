@@ -48,7 +48,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 // rather than just the window, on the SAME 15s-polled endpoint the P1 above
 // already flagged once.
 @Index('idx_activity_logs_ticket_created', ['ticket_id', 'created_at'])
-@Index('idx_activity_logs_workspace_created', ['account_id', 'created_at'])
+@Index('idx_activity_logs_account_created', ['account_id', 'created_at'])
 @Index('idx_activity_logs_entity', ['entity_type', 'entity_id', 'created_at'])
 @Index('idx_activity_logs_actor_created', ['actor_id', 'created_at'])
 @Index('idx_activity_logs_action_field', ['action', 'field_changed'])

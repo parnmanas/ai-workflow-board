@@ -286,7 +286,7 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   stream.close();
 });
 
-// ─── CLI 설정: Runtime Host × CLI 에 워크스페이스 Credential 바인딩 ──────────
+// ─── CLI 설정: Runtime Host × CLI 에 계정 Credential 바인딩 ──────────
 test('cli settings: candidates by provider prefix, validation, host listing, request payload, and manager-only credential fetch', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
@@ -320,12 +320,12 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const codexCred = await mkCred(ws.id, 'codex login', 'codex_subscription', { auth_json: '{}' });
   const foreignCred = await mkCred(otherWs.id, 'other ws claude', 'claude_api_key', { api_key: 'sk-other' });
 
-  // GET: candidates = workspace + global credentials whose provider matches the CLI
+  // GET: candidates = account + global credentials whose provider matches the CLI
   const initial = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { headers });
   assert.equal(initial.status, 200, initial.text);
   assert.equal(initial.body.supports_credential, true);
   assert.equal(initial.body.credential, null);
-  assert.deepEqual(initial.body.candidates.map((c) => c.id).sort(), [claudeToken.id, globalClaude.id].sort(), 'codex and other-workspace credentials are not offered');
+  assert.deepEqual(initial.body.candidates.map((c) => c.id).sort(), [claudeToken.id, globalClaude.id].sort(), 'codex and other-account credentials are not offered');
   assert.equal(initial.body.candidates.find((c) => c.id === globalClaude.id).scope, 'global');
   const hermes = await call(`${base}/api/agent-sessions/hosts/${managerId}/hermes/settings`, { headers });
   assert.equal(hermes.body.supports_credential, false);
@@ -770,7 +770,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const freshHeaders = { ...ownerHeaders, 'X-Account-Id': freshWs.id };
   const freshSettings = await call(`${base}/api/agent-sessions/hosts/${managerId}/codex/settings`, { headers: freshHeaders });
   assert.equal(freshSettings.status, 200, freshSettings.text);
-  assert.deepEqual(freshSettings.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'a workspace with no settings row still sees what the live session offers');
+  assert.deepEqual(freshSettings.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'a account with no settings row still sees what the live session offers');
   assert.deepEqual(freshSettings.body.default_config, {}, 'but nothing is remembered for it yet');
 
   const beforeRemember = await call(settingsUrl, { headers: ownerHeaders });

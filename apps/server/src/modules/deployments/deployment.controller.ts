@@ -37,10 +37,10 @@ export function deploymentToJson(d: Deployment | null) {
 export class DeploymentController {
   constructor(private readonly deployments: DeploymentService) {}
 
-  /** Current live deployment per environment visible to a workspace (+ globals). */
+  /** Current live deployment per environment visible to a account (+ globals). */
   @Get()
   async list(@Query('account_id') accountId: string, @Res() res: Response) {
-    const rows = await this.deployments.listForWorkspace(accountId || null);
+    const rows = await this.deployments.listForAccount(accountId || null);
     return res.json(rows.map(deploymentToJson));
   }
 

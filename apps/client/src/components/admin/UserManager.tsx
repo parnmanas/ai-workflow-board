@@ -177,7 +177,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
           value={assigningAccount[user.id] || ''}
           onChange={e => setAssigningAccount(prev => ({ ...prev, [user.id]: (e.target as HTMLSelectElement).value }))}
           placeholder="Assign account..."
-          options={accounts.map((ws: any) => ({ value: ws.id, label: ws.name }))}
+          options={accounts.map((account: any) => ({ value: account.id, label: account.name }))}
           style={{ width: 160 }}
         />
         <Button

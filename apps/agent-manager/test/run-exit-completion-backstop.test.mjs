@@ -1,4 +1,4 @@
-// Run-completion backstop (ticket 152e3606, 요구사항 3) — untrusted-workspace
+// Run-completion backstop (ticket 152e3606, 요구사항 3) — untrusted-account
 // 사고를 추적하다 발견한 간극을 다룬다: run에 묶인 세션이 턴 도중에 멈추면
 // (예: 비대화형 run에서 아무도 승인해줄 수 없는 permission 승인 대기에 영원히
 // 걸린 경우) 턴-종료 RESULT 라인을 절대 못 내므로, 기존 턴-종료 orphan sweep들
@@ -136,7 +136,7 @@ test('ChatSessionManager._onChildExit: 보통 세션(_run 없음)은 어떤 run-
   );
 });
 
-test("ChatSessionManager._onChildExit: CLI의 untrusted-workspace 경고를 실패 summary로 승격한다", async () => {
+test("ChatSessionManager._onChildExit: CLI의 untrusted-account 경고를 실패 summary로 승격한다", async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(40004, {
     _run: { run_id: 'run-untrusted', account_id: 'ws-1', kind: 'action' },
@@ -145,7 +145,7 @@ test("ChatSessionManager._onChildExit: CLI의 untrusted-workspace 경고를 실�
   // 운영에서는 stdio-capture 배선이 채운다)을 읽는다 — 그 필드를 클래스
   // 자신이 읽는 것과 동일하게 직접 시딩한다.
   mgr._outputRings.set(sess.pid, [
-    'Ignoring 22 permissions.allow entries from .claude/settings.json: this workspace has',
+    'Ignoring 22 permissions.allow entries from .claude/settings.json: this account has',
     'not been trusted. Run Claude Code interactively here once and accept the trust dialog.',
   ]);
   await mgr._onChildExit(sess, null, 'SIGTERM');
@@ -154,7 +154,7 @@ test("ChatSessionManager._onChildExit: CLI의 untrusted-workspace 경고를 실�
   assert.match(
     call.args.summary,
     /trust/i,
-    '캡처된 tail 속 untrusted-workspace 경고가 실패 summary에 구체적으로 언급돼야 한다',
+    '캡처된 tail 속 untrusted-account 경고가 실패 summary에 구체적으로 언급돼야 한다',
   );
 });
 
@@ -167,7 +167,7 @@ test('ChatSessionManager._onChildExit: 흔한 hang(tail에 trust 경고 없음)�
   await mgr._onChildExit(sess, null, 'SIGTERM');
   const call = mcpToolCalls.find((c) => c.name === 'complete_action_run' && c.args.run_id === 'run-generic-hang');
   assert.ok(call);
-  assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
+  assert.doesNotMatch(call.args.summary, /account trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
   // ticket b831b896 round 3: stopReason이 전혀 없는 경우(매니저가 죽인 게
   // 아닌 진짜 원인불명 종료) — 추측 문구 대신 정직하게 unknown이라고만
   // 기록해야 한다.
@@ -297,12 +297,12 @@ test('SubagentManager._runExitCompletionBackstop: run 바인딩이 없으면 아
   );
 });
 
-test('SubagentManager._runExitCompletionBackstop: tail 속 untrusted-workspace 경고를 감지해 summary에 명시한다', async () => {
+test('SubagentManager._runExitCompletionBackstop: tail 속 untrusted-account 경고를 감지해 summary에 명시한다', async () => {
   const mgr = new SubagentManager(makeConfig());
   const record = makeOneshotRunRecord({
     run: { run_id: 'oneshot-untrusted', account_id: 'ws-1', kind: 'action' },
     tailLines: [
-      'Ignoring 22 permissions.allow entries from .claude/settings.json: this workspace has',
+      'Ignoring 22 permissions.allow entries from .claude/settings.json: this account has',
       'not been trusted. Run Claude Code interactively here once and accept the trust dialog.',
     ],
   });
@@ -313,7 +313,7 @@ test('SubagentManager._runExitCompletionBackstop: tail 속 untrusted-workspace �
   assert.match(
     call.args.summary,
     /trust/i,
-    '캡처된 tail 속 untrusted-workspace 경고가 일반 메시지가 아니라 실패 summary에 명시돼야 한다',
+    '캡처된 tail 속 untrusted-account 경고가 일반 메시지가 아니라 실패 summary에 명시돼야 한다',
   );
 });
 
@@ -328,7 +328,7 @@ test('SubagentManager._runExitCompletionBackstop: 흔한 hang(tail에 trust 경�
   const call = mcpToolCalls.find((c) => c.name === 'complete_security_run');
   assert.ok(call);
   assert.equal(call.args.status, 'error');
-  assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
+  assert.doesNotMatch(call.args.summary, /account trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
   // ticket 6abe2b79 rebase 통합: stop()이 SIGTERM 전에 매니저發 kill마다
   // record.stopReason을 태그하므로(레코드 자체는 exit 핸들러가 정리),
   // 매니저發 kill은 이제 이 backstop에 정상 도달해 위 stopReason 분기로

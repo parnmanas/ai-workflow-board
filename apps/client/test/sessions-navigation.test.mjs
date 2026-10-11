@@ -27,7 +27,7 @@ test('routes: hosts index, host projects view, and session detail render Session
   assert.match(app, /path="sessions\/:managerId\/:cli\/:sessionId" element=\{<SessionsPage \/>\}/);
   assert.match(app, /<Route index element=\{<DefaultRedirect \/>\} \/>/);
   assert.match(app, /<GlobalRedirect to="sessions" \/>/);
-  assert.match(app, /path="ws\/:wsId\/\*" element=\{<LegacyWorkspaceRedirect \/>\}/);
+  assert.match(app, /path="ws\/:accountId\/\*" element=\{<LegacyPathRedirect \/>\}/);
   // Chat-first 홈은 사라지지 않는다 — Chat 섹션에서 여전히 도달 가능.
   assert.match(app, /path="assistant" element=\{<ChatFirstHome \/>\}/);
 });

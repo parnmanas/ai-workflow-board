@@ -22,7 +22,7 @@
  *
  * Permission: reuses MANAGE_ACTIONS, the same automation-authoring audience as
  * Actions / QA scenarios / Security profiles — orchestration is the same class
- * of capability (defining machine work that runs against the workspace), so it
+ * of capability (defining machine work that runs against the account), so it
  * gets the same gate rather than a new permission nobody's role grants yet.
  */
 
@@ -165,11 +165,11 @@ export class OrchestrationController {
    * working-folder candidates for each.
    *
    * Replaces the old `assignable-agents` picker feed. Nothing narrows by
-   * workspace the way that endpoint did (`global_only`): a Runtime Host is a
-   * machine, not a workspace member — the same one legitimately runs slots for
+   * account the way that endpoint did (`global_only`): a Runtime Host is a
+   * machine, not a account member — the same one legitimately runs slots for
    * several accounts, and the identity the slot gets is stamped with the
    * TEAM's scope by the provisioner rather than inherited from a pre-existing
-   * agent. So the workspace-vs-global roster split has nothing left to gate
+   * agent. So the account-vs-global roster split has nothing left to gate
    * here, and hiding a host would only make a team un-editable.
    */
   @Get('runtime-hosts')

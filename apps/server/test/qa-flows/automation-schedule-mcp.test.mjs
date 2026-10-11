@@ -1,7 +1,7 @@
 import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 // Account scheduler MCP tools (ticket 769eb260) — exercises the
 // create → run_now → list round-trip over the live MCP surface, on top of the
-// foundation WorkspaceScheduleService (ticket 8845be79). Verifies the 6 tools
+// foundation AutomationScheduleService (ticket 8845be79). Verifies the 6 tools
 // are wired end-to-end (DI → ToolContext → tool → service) and that run_now
 // opens a chat room without disturbing the automatic cadence.
 

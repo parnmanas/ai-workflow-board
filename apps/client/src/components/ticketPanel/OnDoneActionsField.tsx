@@ -8,7 +8,7 @@ interface OnDoneActionsFieldProps {
   /** Bound action ids in dispatch order (draft). */
   value: string[];
   onChange(update: (prev: string[]) => string[]): void;
-  /** Every Action in the workspace — also resolves names of already-bound ids. */
+  /** Every Action in the account — also resolves names of already-bound ids. */
   actions: Action[];
   agents: RuntimeParticipant[];
   labelStyle: React.CSSProperties;
@@ -115,7 +115,7 @@ export default function OnDoneActionsField({ value, onChange, actions, agents, l
 
         {value.length === 0 && candidates.length === 0 && (
           <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
-            No actions in this workspace yet — create one from the Actions menu to bind it here.
+            No actions in this account yet — create one from the Actions menu to bind it here.
           </div>
         )}
       </div>

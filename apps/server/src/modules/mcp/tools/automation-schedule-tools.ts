@@ -3,7 +3,7 @@
  * foundation 8845be79).
  *
  * A AutomationSchedule is a general-purpose "do this task at this time" trigger
- * for a SINGLE agent: when due, the background WorkspaceScheduleService opens a
+ * for a SINGLE agent: when due, the background AutomationScheduleService opens a
  * fresh chat room, seats `target_agent_id`, and sends `task_prompt` as the
  * opening message (the QA/Security RUN dispatch shape). These tools are the CRUD
  * + manual run-now surface over that service; the background tick lives in the
@@ -54,8 +54,8 @@ function dispatchToJson(d: DispatchResult) {
   };
 }
 
-export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolContext): void {
-  const { workspaceScheduleService } = ctx;
+export function registerAutomationScheduleTools(server: McpServer, ctx: ToolContext): void {
+  const { automationScheduleService } = ctx;
 
   server.tool(
     'list_automation_schedules',
@@ -64,27 +64,27 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       account_id: z.string().describe('Account ID (required)'),
     },
     async ({ account_id }) => {
-      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      if (!automationScheduleService) return err('Account schedule service unavailable in this MCP context');
       try {
-        const rows = await workspaceScheduleService.list(account_id);
+        const rows = await automationScheduleService.list(account_id);
         return ok(rows.map(scheduleToJson));
       } catch (e: any) {
-        return err(e?.message || 'Failed to list workspace schedules');
+        return err(e?.message || 'Failed to list account schedules');
       }
     },
   );
 
   server.tool(
     'get_automation_schedule',
-    'Get a single workspace schedule by id (target agent, task prompt, cadence, next/last run, last room id).',
+    'Get a single account schedule by id (target agent, task prompt, cadence, next/last run, last room id).',
     {
       schedule_id: z.string().describe('AutomationSchedule ID'),
       account_id: z.string().describe('Account ID (required, scope guard)'),
     },
     async ({ schedule_id, account_id }) => {
-      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      if (!automationScheduleService) return err('Account schedule service unavailable in this MCP context');
       try {
-        return ok(scheduleToJson(await workspaceScheduleService.get(schedule_id, account_id)));
+        return ok(scheduleToJson(await automationScheduleService.get(schedule_id, account_id)));
       } catch (e: any) {
         return err(e?.message || 'Account schedule not found');
       }
@@ -93,7 +93,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
 
   server.tool(
     'create_automation_schedule',
-    'Create a workspace schedule — a general-purpose "do this task at this time" trigger for ONE agent. ' +
+    'Create a account schedule — a general-purpose "do this task at this time" trigger for ONE agent. ' +
     '무엇을 할지는 둘 중 하나다 — `task_prompt`(+`target_agent_id`) 로 프롬프트를 직접 주거나, ' +
     '`action_id` 로 등록된 Action 을 실행한다. 정확히 하나만 설정할 것. ' +
     'Action 형태에서는 대상 에이전트·작업 폴더·승인(high_impact)·run 기록을 전부 Action 이 정의하고 ' +
@@ -113,10 +113,10 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       enabled: z.boolean().optional().describe('Default true'),
     },
     async (args, extra: { sessionId?: string }) => {
-      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      if (!automationScheduleService) return err('Account schedule service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
-        const row = await workspaceScheduleService.create({
+        const row = await automationScheduleService.create({
           accountId: args.account_id,
           name: args.name,
           targetAgentId: args.target_agent_id,
@@ -130,14 +130,14 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
         });
         return ok(scheduleToJson(row));
       } catch (e: any) {
-        return err(e?.message || 'Failed to create workspace schedule');
+        return err(e?.message || 'Failed to create account schedule');
       }
     },
   );
 
   server.tool(
     'update_automation_schedule',
-    'Update a workspace schedule. Only the provided fields change. `account_id` is required for scope ' +
+    'Update a account schedule. Only the provided fields change. `account_id` is required for scope ' +
     'safety. Toggling `enabled`, or changing `cron`/`interval_ms`, recomputes next_run_at.',
     {
       schedule_id: z.string().describe('AutomationSchedule ID'),
@@ -152,9 +152,9 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       enabled: z.boolean().optional(),
     },
     async ({ schedule_id, account_id, ...patch }) => {
-      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      if (!automationScheduleService) return err('Account schedule service unavailable in this MCP context');
       try {
-        const row = await workspaceScheduleService.update(schedule_id, account_id, {
+        const row = await automationScheduleService.update(schedule_id, account_id, {
           name: patch.name,
           targetAgentId: patch.target_agent_id,
           targetRuntime: (patch as any).target_runtime,
@@ -166,32 +166,32 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
         });
         return ok(scheduleToJson(row));
       } catch (e: any) {
-        return err(e?.message || 'Failed to update workspace schedule');
+        return err(e?.message || 'Failed to update account schedule');
       }
     },
   );
 
   server.tool(
     'delete_automation_schedule',
-    'Delete a workspace schedule. Does NOT touch the chat rooms it already opened.',
+    'Delete a account schedule. Does NOT touch the chat rooms it already opened.',
     {
       schedule_id: z.string().describe('AutomationSchedule ID'),
       account_id: z.string().describe('Account ID (required, scope guard)'),
     },
     async ({ schedule_id, account_id }) => {
-      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      if (!automationScheduleService) return err('Account schedule service unavailable in this MCP context');
       try {
-        await workspaceScheduleService.remove(schedule_id, account_id);
+        await automationScheduleService.remove(schedule_id, account_id);
         return ok({ success: true, id: schedule_id });
       } catch (e: any) {
-        return err(e?.message || 'Failed to delete workspace schedule');
+        return err(e?.message || 'Failed to delete account schedule');
       }
     },
   );
 
   server.tool(
     'run_automation_schedule_now',
-    'Manually dispatch a workspace schedule\'s task right now (ignores enabled; does NOT disturb the ' +
+    'Manually dispatch a account schedule\'s task right now (ignores enabled; does NOT disturb the ' +
     'automatic next_run_at). Returns the schedule + the dispatch result (schedule_id, room_id, agent_id) — ' +
     'the spawned conversation lives in that chat room.',
     {
@@ -199,13 +199,13 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       account_id: z.string().describe('Account ID (required, scope guard)'),
     },
     async ({ schedule_id, account_id }, extra: { sessionId?: string }) => {
-      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      if (!automationScheduleService) return err('Account schedule service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
-        const { schedule, dispatch } = await workspaceScheduleService.runNow(schedule_id, account_id, caller?.agentId ?? '');
+        const { schedule, dispatch } = await automationScheduleService.runNow(schedule_id, account_id, caller?.agentId ?? '');
         return ok({ schedule: scheduleToJson(schedule), dispatch: dispatchToJson(dispatch) });
       } catch (e: any) {
-        return err(e?.message || 'Failed to run workspace schedule');
+        return err(e?.message || 'Failed to run automation schedule');
       }
     },
   );

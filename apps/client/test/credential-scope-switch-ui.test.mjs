@@ -24,7 +24,7 @@ const pageSource = fs.readFileSync(
 function cred(overrides) {
   return {
     id: 'credential-ws',
-    account_id: 'workspace-1',
+    account_id: 'account-1',
     board_id: null,
     scope: 'account',
     name: 'Account PAT',
@@ -74,13 +74,13 @@ async function mountManager(t, { credentials, ...props }) {
   const originals = { getMe: api.getMe, getSetupStatus: api.getSetupStatus, listCredentials: api.listCredentials, updateCredential: api.updateCredential };
   api.getMe = async () => ({
     id: 'admin-1', name: 'Admin', email: 'admin@example.test', role: 'admin', status: 'active',
-    permissions: [], accounts: [{ id: 'workspace-1', name: 'Account One', slug: null, relations: [] }],
+    permissions: [], accounts: [{ id: 'account-1', name: 'Account One', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => credentials;
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { accountId: 'workspace-1', accountName: 'Account One', ...props }),
+    React.createElement(CredentialManager, { accountId: 'account-1', accountName: 'Account One', ...props }),
   );
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
@@ -115,7 +115,7 @@ test('an admin can widen a Account credential to global from the Edit dialog', a
   assert.equal(calls.length, 1);
   assert.equal(calls[0].id, 'credential-ws');
   assert.equal(calls[0].body.scope, 'global');
-  assert.equal(calls[0].body.account_id, 'workspace-1');
+  assert.equal(calls[0].body.account_id, 'account-1');
 });
 
 test('an admin narrowing a global credential sends the viewed Account as the destination', async (t) => {
@@ -133,7 +133,7 @@ test('an admin narrowing a global credential sends the viewed Account as the des
   assert.equal(calls[0].body.scope, 'account');
   assert.equal(
     calls[0].body.account_id,
-    'workspace-1',
+    'account-1',
     'a global credential has no account_id of its own — the viewed Account is the destination',
   );
 });
@@ -146,7 +146,7 @@ test('a scope-unchanged save keeps sending the credential’s own scope', async 
   openEdit(container, 'Account PAT');
   await act(async () => { click(buttonsByText(container, 'Save Credential')[0]); });
   assert.equal(calls[0].body.scope, 'account');
-  assert.equal(calls[0].body.account_id, 'workspace-1');
+  assert.equal(calls[0].body.account_id, 'account-1');
 });
 
 test('without global permission the picker is read-only and inherited globals stay uneditable', async (t) => {

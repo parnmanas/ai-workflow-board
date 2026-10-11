@@ -37,7 +37,7 @@ function deferred() {
 const credentials = [
   {
     id: 'credential-a',
-    account_id: 'workspace-1',
+    account_id: 'account-1',
     board_id: null,
     scope: 'account',
     name: 'Credential A',
@@ -50,7 +50,7 @@ const credentials = [
   },
   {
     id: 'credential-b',
-    account_id: 'workspace-1',
+    account_id: 'account-1',
     board_id: null,
     scope: 'account',
     name: 'Credential B',
@@ -63,7 +63,7 @@ const credentials = [
   },
   {
     id: 'credential-api-key',
-    account_id: 'workspace-1',
+    account_id: 'account-1',
     board_id: null,
     scope: 'account',
     name: 'Non OAuth API Key',
@@ -98,13 +98,13 @@ async function mountCredentialManager(t) {
     role: 'admin',
     status: 'active',
     permissions: [],
-    accounts: [{ id: 'workspace-1', name: 'Account', slug: null, relations: [] }],
+    accounts: [{ id: 'account-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => credentials;
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { accountId: 'workspace-1' }),
+    React.createElement(CredentialManager, { accountId: 'account-1' }),
   );
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 

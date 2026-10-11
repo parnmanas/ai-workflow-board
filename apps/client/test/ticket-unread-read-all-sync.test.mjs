@@ -13,7 +13,7 @@
 //   3. 다른 세션에서 emit 된 ticket_reads_cleared SSE 를 받으면 재조회 없이
 //      로컬 카운트가 수렴한다
 //   4. user_id 불일치(다른 사용자) 이벤트는 무시한다
-//   5. account_id 불일치(다른 워크스페이스) 이벤트는 무시한다
+//   5. account_id 불일치(다른 계정) 이벤트는 무시한다
 //
 // 실행: node --import tsx --test apps/client/test/ticket-unread-read-all-sync.test.mjs
 import test from 'node:test';
@@ -41,7 +41,7 @@ async function flush(times = 6) {
   }
 }
 
-const WS_ID = 'workspace-1';
+const WS_ID = 'account-1';
 const USER_ID = 'user-1';
 
 function makeInitialTicketCounts() {
@@ -149,7 +149,7 @@ test('다른 세션에서 emit 된 ticket_reads_cleared 수신 시 재조회 없
   assert.deepEqual(capture.current.counts.tickets.perTicket, {});
 });
 
-test('예전 서버가 보내던 board_id 가 실려 와도 워크스페이스 전체가 0이 된다', async (t) => {
+test('예전 서버가 보내던 board_id 가 실려 와도 계정 전체가 0이 된다', async (t) => {
   const { capture, FakeEventSource } = await mountHarness(t, {
     ticketCounts: { total: 8, perTicket: { t1: 5, t2: 3 } },
   });
@@ -197,7 +197,7 @@ test('read-all from another ownership account clears the integrated user badge',
   await act(async () => {
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
-      account_id: 'other-workspace',
+      account_id: 'other-account',
       updated: 5,
       read_at: new Date().toISOString(),
     });

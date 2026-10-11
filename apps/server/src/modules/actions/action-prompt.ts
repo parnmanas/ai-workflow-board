@@ -92,7 +92,7 @@ export function renderActionPrompt(template: string, ctx: ActionRenderContext): 
 // here so MCP `run_action` and the REST run endpoint produce identical output
 // for the same inputs.
 export function buildRenderContext(args: {
-  workspace?: { id?: string; name?: string } | null;
+  account?: { id?: string; name?: string } | null;
   project?: { id?: string; name?: string; repo_url?: string; default_branch?: string } | null;
   user?: { id?: string; name?: string; email?: string } | null;
   agent?: { id?: string; name?: string } | null;
@@ -104,8 +104,9 @@ export function buildRenderContext(args: {
   const now = args.now ?? new Date();
   const iso = now.toISOString();
   return {
-    account: args.workspace ? { id: args.workspace.id, name: args.workspace.name } : undefined,
-    workspace: args.workspace ? { id: args.workspace.id, name: args.workspace.name } : undefined,
+    account: args.account ? { id: args.account.id, name: args.account.name } : undefined,
+    // Compatibility for previously saved templates that still say `{{workspace.name}}`.
+    workspace: args.account ? { id: args.account.id, name: args.account.name } : undefined,
     project: args.project
       ? { id: args.project.id, name: args.project.name, repo_url: args.project.repo_url, default_branch: args.project.default_branch }
       : null,

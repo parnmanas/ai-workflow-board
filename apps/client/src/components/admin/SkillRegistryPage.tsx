@@ -118,9 +118,9 @@ export default function SkillRegistryPage() {
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <Card>
-        <strong style={{ color: tokens.colors.textPrimary }}>Global skills are inherited by every workspace</strong>
+        <strong style={{ color: tokens.colors.textPrimary }}>Global skills are inherited by every account</strong>
         <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>
-          A workspace can fork any of these; the fork shadows the global by slug while the global keeps
+          A account can fork any of these; the fork shadows the global by slug while the global keeps
           receiving upstream updates. Syncing is append-only and never changes what an already-assigned
           agent runs — assignments pin a specific version.
         </div>

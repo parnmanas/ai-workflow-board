@@ -24,9 +24,9 @@ process.env.PORT = process.env.QA_SECURITY_FAIL_PORT || '0';
 const SHA_BASE = 'b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0';
 const SHA_HEAD = 'c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1';
 
-async function countTicketsForProfile(ds, wsId, profileId) {
+async function countTicketsForProfile(ds, accountId, profileId) {
   const rows = await ds.getRepository('Ticket').createQueryBuilder('t')
-    .where('t.account_id = :ws', { ws: wsId })
+    .where('t.account_id = :ws', { ws: accountId })
     .andWhere('t.tags LIKE :marker', { marker: `%security-profile:${profileId}%` })
     .getMany();
   return rows;
@@ -103,7 +103,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   });
   await mcp.callTool('record_security_finding', {
     run_id: startC.run_id, account_id: ws.id,
-    finding: { id: 'h1', severity: 'high', title: 'Missing workspace scope check', category: 'authz',
+    finding: { id: 'h1', severity: 'high', title: 'Missing account scope check', category: 'authz',
       file: 'apps/server/src/modules/foo/foo.controller.ts', line: 42,
       evidence: 'findOne({ where: { id } }) with no account_id', remediation: 'add account_id to the where clause',
       checklist_item_id: 'authz' },
@@ -138,7 +138,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
 
   // Body has the evidence: finding, commit range, artifact link, gate.
   const body = ticket.description || '';
-  assert.match(body, /Missing workspace scope check/, 'body lists the high finding');
+  assert.match(body, /Missing account scope check/, 'body lists the high finding');
   assert.match(body, /foo\.controller\.ts:42/, 'body has file:line');
   assert.match(body, /add account_id to the where clause/, 'body has remediation');
   assert.match(body, new RegExp(SHA_HEAD), 'body has the scanned commit');

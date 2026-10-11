@@ -60,14 +60,14 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_actions',
-    'List reusable Actions in a workspace.',
+    'List reusable Actions in a account.',
     {
       account_id: z.string().describe('Account ID (required)'),
     },
     async ({ account_id }) => {
       const repo = dataSource.getRepository(Action);
       const qb = repo.createQueryBuilder('a')
-        .where('a.account_id = :ws', { ws: account_id });
+        .where('a.account_id = :account', { account: account_id });
       const rows = await qb.orderBy('a.name', 'ASC').getMany();
       return ok(rows.map(actionToJson));
     },
@@ -87,13 +87,13 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'save_action',
     'Create or update an action. Provide `id` to update an existing action; omit it to create. ' +
-    'The `target_agent_id` must reference an agent in the same workspace (or a global agent). ' +
+    'The `target_agent_id` must reference an agent in the same account (or a global agent). ' +
     '`schedule_cron` accepts a 5-field cron expression with `*` and integer values; leave empty for manual-only. ' +
     "`trigger='on_ticket_done'` opts the action into the lifecycle hook — it runs once when a ticket enters " +
-    "status 'done', scoped within the workspace and optionally narrowed by trigger_label " +
+    "status 'done', scoped within the account and optionally narrowed by trigger_label " +
     '(a ticket tag; empty = any ticket). The finished ticket is exposed to the prompt as {{ticket.id}}/{{ticket.title}}/{{ticket.status}} etc. ' +
     'enabled=false skips the hook too (manual run_action only). ' +
-    'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,user,agent,ticket,date,time,datetime}.',
+    'Prompt supports `{{var.path}}` interpolation against {action,run,account,user,agent,ticket,date,time,datetime}.',
     {
       account_id: z.string().describe('Account ID (required)'),
       id: z.string().optional().describe('Action ID — omit to create, provide to update'),
@@ -101,7 +101,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       description: z.string().optional().describe('Short description'),
       prompt: z.string().optional().describe('Prompt template with {{var}} interpolation'),
       target_agent_id: z.string().optional().describe('Single target agent ID. Legacy/compat form — prefer `target_agent_ids`. Required when creating unless `target_agent_ids`/`target_runtimes` is given.'),
-      target_agent_ids: z.array(z.string()).optional().describe('Target agent IDs. One trigger fans out to an INDEPENDENT run per agent, each in its own room. Takes precedence over `target_agent_id` when both are given; the first entry is mirrored back into `target_agent_id`. Every id must be an agent in this workspace (or a global agent) — one bad id rejects the whole save.'),
+      target_agent_ids: z.array(z.string()).optional().describe('Target agent IDs. One trigger fans out to an INDEPENDENT run per agent, each in its own room. Takes precedence over `target_agent_id` when both are given; the first entry is mirrored back into `target_agent_id`. Every id must be an agent in this account (or a global agent) — one bad id rejects the whole save.'),
       target_runtimes: z.array(z.record(z.string(), z.any())).optional().describe('RuntimeSpec array declaring execution without Agent rows (P4c-3b). Takes precedence over both id forms; each entry is normalized and identity-keyed.'),
       schedule_cron: z.string().optional().describe('5-field cron (e.g. "0 9 * * 1" for Mon 9am); empty = manual'),
       trigger: z.string().optional().describe("Lifecycle trigger: '' (cron/manual, default) or 'on_ticket_done' (run when a ticket enters status 'done')"),
@@ -203,7 +203,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'cron/manual/standalone runs that have no ticket to resume. ' +
     'HIGH-IMPACT Actions (deploy/publish/release, or any Action saved high_impact=true) ' +
     'CANNOT be auto-run by an agent for a ticket: the call is rejected and the ticket is ' +
-    'parked pending_user_action until a workspace ADMIN approves this exact (action, ticket) ' +
+    'parked pending_user_action until a account ADMIN approves this exact (action, ticket) ' +
     'pair through the human approval endpoint (POST /api/actions/{id}/approvals) or the Actions UI. ' +
     'You cannot approve your own run — there is no approver parameter here; the server consumes a ' +
     'human-created approval grant. After an admin approves, the ticket auto-resumes and re-running ' +
@@ -370,7 +370,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'search_actions',
-    'Text search across action name, description, and prompt template within a workspace. ' +
+    'Text search across action name, description, and prompt template within a account. ' +
     'Case-insensitive substring match. Returns up to `limit` results.',
     {
       account_id: z.string().describe('Account ID (required)'),
@@ -380,7 +380,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     async ({ account_id, query, limit }) => {
       const repo = dataSource.getRepository(Action);
       const qb = repo.createQueryBuilder('a')
-        .where('a.account_id = :ws', { ws: account_id });
+        .where('a.account_id = :account', { account: account_id });
       const pattern = `%${query.toLowerCase()}%`;
       qb.andWhere('(LOWER(a.name) LIKE :q OR LOWER(a.description) LIKE :q OR LOWER(a.prompt) LIKE :q)', { q: pattern });
       qb.orderBy('a.name', 'ASC').limit(Math.min(limit ?? 20, 100));

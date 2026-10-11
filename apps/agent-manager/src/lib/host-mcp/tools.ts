@@ -385,8 +385,8 @@ on findAndFocus(pat)
   tell application "System Events"
     set procs to (every process whose visible is true)
     repeat with p in procs
-      set ws to (every window of p)
-      repeat with w in ws
+      set account to (every window of p)
+      repeat with w in account
         try
           set t to name of w
         on error
@@ -414,8 +414,8 @@ findAndFocus("${args.title_pattern.replace(/"/g, '\\"')}")
   if (!line) {
     return { ok: false, error: `no window matched /${args.title_pattern}/i` };
   }
-  const [, , xs, ys, ws, hs] = line.split('|');
-  const x = parseInt(xs, 10), y = parseInt(ys, 10), w = parseInt(ws, 10), h = parseInt(hs, 10);
+  const [, , xs, ys, account, hs] = line.split('|');
+  const x = parseInt(xs, 10), y = parseInt(ys, 10), w = parseInt(account, 10), h = parseInt(hs, 10);
   if (!Number.isFinite(x) || !Number.isFinite(y) || w <= 0 || h <= 0) {
     return { ok: false, error: `osascript returned malformed window geometry: ${line}` };
   }
@@ -604,11 +604,11 @@ tell application "System Events"
     set pn to name of p
     set ppid to unix id of p
     try
-      set ws to every window of p
+      set account to every window of p
     on error
-      set ws to {}
+      set account to {}
     end try
-    repeat with w in ws
+    repeat with w in account
       try
         set t to name of w
       on error
@@ -632,7 +632,7 @@ return out
   for (const line of result.stdout.split('\n')) {
     const cols = line.split('\t');
     if (cols.length < 7) continue;
-    const [app, pidStr, title, xs, ys, ws, hs] = cols;
+    const [app, pidStr, title, xs, ys, account, hs] = cols;
     if (!app || !title) continue;
     out.push({
       app,
@@ -640,7 +640,7 @@ return out
       pid: parseInt(pidStr, 10) || undefined,
       x: parseInt(xs, 10) || 0,
       y: parseInt(ys, 10) || 0,
-      width: parseInt(ws, 10) || 0,
+      width: parseInt(account, 10) || 0,
       height: parseInt(hs, 10) || 0,
     });
   }
@@ -732,11 +732,11 @@ on doFocus(pat)
   tell application "System Events"
     repeat with p in (every process whose visible is true)
       try
-        set ws to (every window of p)
+        set account to (every window of p)
       on error
-        set ws to {}
+        set account to {}
       end try
-      repeat with w in ws
+      repeat with w in account
         try
           set t to name of w
         on error

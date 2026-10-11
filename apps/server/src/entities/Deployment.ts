@@ -16,8 +16,8 @@ import { DeploymentSource } from '../common/deployment-options';
  * "current live commit"), not a history log — the badge + gate only ever need the
  * latest. `account_id` is NULLABLE: null = a GLOBAL/shared environment (the AWB
  * server self-report is global — the running server is one process, not per-
- * workspace), visible to every workspace's scenarios; a non-null row is a
- * workspace-private environment.
+ * account), visible to every account's scenarios; a non-null row is a
+ * account-private environment.
  *
  * Conventions mirror BuildArtifact (ticket 80d52250): uuid PK, plain varchar +
  * TS-union for `source` (NOT a TypeORM enum, so sqlite/postgres stay schema-sync-
@@ -25,7 +25,7 @@ import { DeploymentSource } from '../common/deployment-options';
  * migration needed — synchronize creates the table from these decorators.
  */
 @Entity('deployments')
-// Current-live lookup — "what commit is live for this env in this workspace / globally?"
+// Current-live lookup — "what commit is live for this env in this account / globally?"
 @Index(['account_id', 'environment'])
 @Index(['environment', 'deployed_at'])
 export class Deployment {
@@ -33,7 +33,7 @@ export class Deployment {
   id: string;
 
   // null = GLOBAL environment (shared across accounts — e.g. the AWB server
-  // self-report); <uuid> = a workspace-private environment.
+  // self-report); <uuid> = a account-private environment.
   @Column({ type: 'varchar', nullable: true, default: null })
   account_id: string | null;
 

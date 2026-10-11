@@ -1230,7 +1230,7 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
   const patchWf = (patch: Partial<WorkspaceFolderFormState>) => setWf((prev) => ({ ...prev, ...patch }));
 
   // On-failure auto-ticket policy (실패 시 → 티켓 생성), severity-gated.
-  // The ticket joins the workspace ticket pool (status / tags / project).
+  // The ticket joins the account ticket pool (status / tags / project).
   const oft = profile?.on_failure_ticket ?? null;
   const [oftForm, setOftForm] = useState<OnFailureTicketForm>(() => onFailureTicketToForm(oft));
   const patchOft = (patch: Partial<OnFailureTicketForm>) => setOftForm((prev) => ({ ...prev, ...patch }));

@@ -105,7 +105,7 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     const url = req.originalUrl || req.url;
     const userId = (req as any).currentUser?.id || '-';
     const userName = (req as any).currentUser?.name || (req as any).currentUser?.email || '-';
-    const wsId = req.headers['x-account-id'] || '-';
+    const accountId = req.headers['x-account-id'] || '-';
     const start = Date.now();
     // Reveal accepts a re-authentication password and returns provider-defined
     // secret fields. Key-based sanitizing cannot safely cover arbitrary
@@ -128,7 +128,7 @@ export class RequestLoggerInterceptor implements NestInterceptor {
         this.logService.info('HTTP', `${method} ${url} → ${status} (${duration}ms)`, {
           user: userName,
           userId,
-          wsId,
+          accountId,
           status,
           duration,
           reqHeaders,
@@ -153,7 +153,7 @@ export class RequestLoggerInterceptor implements NestInterceptor {
         this.logService.log(level, 'HTTP', `${method} ${url} → ${status} (${duration}ms) — ${message}`, {
           user: userName,
           userId,
-          wsId,
+          accountId,
           status,
           duration,
           reqHeaders,

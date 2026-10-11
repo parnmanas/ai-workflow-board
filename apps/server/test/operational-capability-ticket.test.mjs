@@ -10,7 +10,7 @@ import { createProject, createTicket, createAccount } from './helpers/fixtures.m
 // 으로 덮는 대신 `port: 0` 으로 OS 에 빈 포트를 받아 쓴다 — bootApp() 이
 // 실제 바인딩된 포트를 돌려주므로 아래 URL 들은 그 값을 쓴다.
 //
-// 보드가 없어진 뒤(docs/tickets.md) 두 fallback 은 workspace 의 티켓 풀에
+// 보드가 없어진 뒤(docs/tickets.md) 두 fallback 은 account 의 티켓 풀에
 // tags / project_id 로 분류된 티켓을 TicketService 를 거쳐 만든다.
 
 async function bootCapabilityScene(t, name) {
@@ -108,7 +108,7 @@ test('ordinary work fallback creates one focused ticket with tags, project and c
   assert.equal(tickets[0].project_id, project.id, '선택한 project 로 분류한다');
   assert.deepEqual(JSON.parse(tickets[0].tags).sort(), ['bugfix', 'source:chat']);
 
-  // A project from another workspace is rejected instead of silently dropped.
+  // A project from another account is rejected instead of silently dropped.
   const otherWs = await createAccount(app, modules.getDataSourceToken, 'ordinary-work-other');
   const foreign = await createProject(app, modules.getDataSourceToken, otherWs.id, { name: 'foreign' });
   const rejected = await post({ ...payload, dedupe_key: 'foreign-project-key', project_id: foreign.id });
@@ -116,7 +116,7 @@ test('ordinary work fallback creates one focused ticket with tags, project and c
   assert.equal(await ds.getRepository('Ticket').count({ where: { operational_dedupe_key: 'ordinary:foreign-project-key' } }), 0);
 });
 
-test('ordinary work candidates list the workspace projects and its tag suggestions', async (t) => {
+test('ordinary work candidates list the account projects and its tag suggestions', async (t) => {
   const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const gdst = modules.getDataSourceToken;
@@ -133,7 +133,7 @@ test('ordinary work candidates list the workspace projects and its tag suggestio
   const response = await fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-candidates?account_id=${ws.id}`);
   assert.equal(response.status, 200);
   const candidates = await response.json();
-  assert.deepEqual(candidates.projects.map(p => p.id), [project.id], '다른 워크스페이스 project 는 후보가 아니다');
+  assert.deepEqual(candidates.projects.map(p => p.id), [project.id], '다른 계정 project 는 후보가 아니다');
   assert.equal(candidates.projects.some(p => p.id === foreign.id), false);
   assert.deepEqual(candidates.tags, [{ tag: 'terrain', count: 2 }, { tag: 'bug', count: 1 }],
     '활성 티켓의 tag 만, 많이 쓰인 순으로 제안한다');

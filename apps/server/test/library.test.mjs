@@ -1,9 +1,9 @@
 // 자료실(LibraryItem) — 파일 바이트는 Resource에, 겉장은 여기.
 //
 // 고정하는 것:
-//   1. 목록·생성·최신·삭제는 전부 워크스페이스 멤버십으로 막힌다 — 멤버가 아니면 403.
-//   2. 생성은 같은 워크스페이스의 업로드된 파일에만 묶인다. 남의 파일을 갖다 붙이면 400.
-//   3. kind 생략 시 .apk는 'app'이다. latest는 그 워크스페이스의 가장 최근 app 하나.
+//   1. 목록·생성·최신·삭제는 전부 계정 멤버십으로 막힌다 — 멤버가 아니면 403.
+//   2. 생성은 같은 계정의 업로드된 파일에만 묶인다. 남의 파일을 갖다 붙이면 400.
+//   3. kind 생략 시 .apk는 'app'이다. latest는 그 계정의 가장 최근 app 하나.
 //   4. 목록·생성 응답에 file_data는 절대 안 싣는다(크기만). 다운로드는 /raw?download=1.
 //   5. 삭제는 올린 본인 또는 admin만. 딸린 library_file Resource도 함께 거둔다.
 //
@@ -102,7 +102,7 @@ describe('Library (자료실)', () => {
     assert.equal(out.body.file_data, undefined);
   });
 
-  it('남의 워크스페이스 파일·없는 파일로는 묶지 못한다', async () => {
+  it('남의 계정 파일·없는 파일로는 묶지 못한다', async () => {
     const other = await makeResource(resRepo, 'ws-b', 'other.apk', 'x');
     const mismatch = response();
     await controller.create(

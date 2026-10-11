@@ -23,7 +23,7 @@ interface SettingsGroup {
 
 export default function SettingsOverviewPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const { hasPermission } = useAuth();
   const navigate = useNavigate();
   const isAdmin = hasPermission('admin.access');

@@ -36,7 +36,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     async ({ account_id, type }) => {
       const repo = dataSource.getRepository(Resource);
       const qb = repo.createQueryBuilder('r')
-        .where('(r.account_id IS NULL OR r.account_id = :ws)', { ws: account_id });
+        .where('(r.account_id IS NULL OR r.account_id = :account)', { account: account_id });
       if (type) qb.andWhere('r.type = :t', { t: type });
       else qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
       const resources = await qb.orderBy('r.name', 'ASC').getMany();
@@ -67,7 +67,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'Create or update a resource. If `id` is provided → update; otherwise → create. ' +
     'Supports four types: document (text content), image (base64 file or URL), link (general URLs), comment_attachment (file payload to be tagged into a comment). ' +
     'Repositories are not Resources — create/update them with save_project. ' +
-    'To attach a file to a comment from MCP: (1) call save_resource with type="comment_attachment" + file_data (base64) + file_name + file_mimetype, scoped to the same workspace as the target ticket; (2) pass the returned id in add_comment.attachment_resource_ids. Images render inline; videos render with an inline player; everything else renders as a download chip. ' +
+    'To attach a file to a comment from MCP: (1) call save_resource with type="comment_attachment" + file_data (base64) + file_name + file_mimetype, scoped to the same account as the target ticket; (2) pass the returned id in add_comment.attachment_resource_ids. Images render inline; videos render with an inline player; everything else renders as a download chip. ' +
     'Resources are automatically embedded for vector search when an embedding API is configured.',
     {
       account_id: z.string().describe('Account ID (required)'),
@@ -90,7 +90,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       if (!name || !name.trim()) return err('Resource name is required');
       if (id) {
         const existing = await repo.findOne({ where: { id, account_id } });
-        if (!existing) return err('Resource not found in workspace');
+        if (!existing) return err('Resource not found in account');
         existing.name = name.trim();
         if (description !== undefined) existing.description = description;
         if (type !== undefined) existing.type = type;
@@ -139,7 +139,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     'List branches of a Project\'s repository via `git ls-remote --heads`. The Project must carry a repo_url. ' +
     'Branches sort with the Project\'s `default_branch` (when set) pinned to the top. Used to verify a base_branch exists upstream before pinning it on a ticket.',
     {
-      account_id: z.string().describe('Account ID — scope boundary so the project lookup is workspace-bounded'),
+      account_id: z.string().describe('Account ID — scope boundary so the project lookup is account-bounded'),
       project_id: z.string().optional().describe('Project ID'),
       // Old prompts still say resource_id. Repository Resources were migrated
       // to Projects with the same id, so the value resolves unchanged.
@@ -149,7 +149,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       const id = (project_id || resource_id || '').trim();
       if (!id) return err('project_id is required');
       const project = await dataSource.getRepository(Project).findOne({ where: { id, account_id } });
-      if (!project) return err('Project not found in workspace');
+      if (!project) return err('Project not found in account');
       if (!project.repo_url) return err("project has no repo_url — set the repository's URL before listing branches");
       try {
         const credential = await resolveGitCredential(
@@ -179,7 +179,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     async ({ account_id, id }) => {
       const repo = dataSource.getRepository(Resource);
       const existing = await repo.findOne({ where: { id, account_id } });
-      if (!existing) return err('Resource not found in workspace');
+      if (!existing) return err('Resource not found in account');
       await repo.delete({ id, account_id });
       const embRepo = dataSource.getRepository(ResourceEmbedding);
       await embRepo.delete({ resource_id: id });
@@ -272,7 +272,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'embed_resources',
-    'Trigger embedding generation for all resources in a workspace that do not yet have embeddings. ' +
+    'Trigger embedding generation for all resources in a account that do not yet have embeddings. ' +
     'Requires EMBEDDING_PROVIDER and OPENAI_API_KEY environment variables to be configured. ' +
     'Returns the count of newly embedded resources.',
     {

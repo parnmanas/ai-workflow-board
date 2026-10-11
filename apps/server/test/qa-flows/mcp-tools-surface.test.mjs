@@ -19,7 +19,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_MCP_SURFACE_PORT || '0';
 
-// P4c-4: list_agents / ping / move_agent_to_workspace 삭제 (Agent 표면 없음).
+// P4c-4: list_agents / ping / move_agent_to_account 삭제 (Agent 표면 없음).
 const EXPECTED_TOOLS = [
   // Board-less tickets (docs/tickets.md → MCP).
   'list_tickets',
@@ -91,7 +91,7 @@ const EXPECTED_TOOLS = [
   'update_security_schedule',
   'delete_security_schedule',
   'run_security_schedule_now',
-  // Ticket 769eb260 — workspace scheduler (general-purpose agent-task trigger).
+  // Ticket 769eb260 — automation scheduler (general-purpose agent-task trigger).
   'list_automation_schedules',
   'get_automation_schedule',
   'create_automation_schedule',
@@ -120,7 +120,7 @@ const EXPECTED_TOOLS = [
 // batch_operations and get_board_summary.
 const REMOVED_TOOLS = [
   'list_boards', 'get_board', 'create_board', 'update_board', 'delete_board',
-  'get_board_summary', 'move_board_to_workspace', 'move_ticket_to_board',
+  'get_board_summary', 'move_board_to_account', 'move_ticket_to_board',
   'create_column', 'update_column', 'delete_column',
   'add_board_lesson', 'list_board_lessons', 'update_board_lesson',
   'list_prompt_templates', 'save_prompt_template', 'delete_prompt_template',

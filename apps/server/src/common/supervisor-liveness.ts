@@ -7,7 +7,7 @@
 // and of the fast re-dispatch floor.
 //
 // Why this exists — the incident (ticket 1fcba693):
-//   A workspace carried supervisor_stale_ms = 14_400_000 (4 h), written at
+//   A account carried supervisor_stale_ms = 14_400_000 (4 h), written at
 //   runtime as a one-off band-aid during the 2026-07-01 exit-143 deathloop and
 //   never reverted. Nothing in code ever produces that literal (entity +
 //   migration default is 30 min); it lived only in the DB row. With a 4 h
@@ -94,7 +94,7 @@ export type StaleMsTier = 'normal' | 'elevated';
 /**
  * Classify a supervisor_stale_ms for observability. `elevated` means it exceeds
  * the sane-max and an operator should confirm it's intentional. Pure — unit
- * tested; consumed by the supervisor's once-per-workspace warn + gauge.
+ * tested; consumed by the supervisor's once-per-account warn + gauge.
  */
 export function classifySupervisorStaleMs(
   staleMs: number,
@@ -116,7 +116,7 @@ export function classifySupervisorStaleMs(
  *     never-spawned session is re-dispatched in minutes, not the (possibly
  *     hours-long) stale window.
  *
- * Clamped so the floor never exceeds the workspace's own (possibly small)
+ * Clamped so the floor never exceeds the account's own (possibly small)
  * stale window — a tiny stale window must still win. Pure — unit tested like
  * decideForceRespawn.
  */
@@ -145,7 +145,7 @@ export function resolveFirstPushThresholdMs(opts: {
  *   - registry_absent  — no current_task at all (never spawned, or the manager
  *     cleared it on a clean exit / release). `absentStrand` is true immediately,
  *     so the first re-push fires at the fast liveness floor, clamped so it never
- *     exceeds the workspace's own (possibly smaller) stale window.
+ *     exceeds the account's own (possibly smaller) stale window.
  *   - leaked_current_task — a current_task LEAKED by a dirty death (SIGTERM
  *     self-update with no drain, respawn child with no release listener,
  *     reap-without-exit) WITHOUT any recent output-liveness. hasLiveRoleStrand

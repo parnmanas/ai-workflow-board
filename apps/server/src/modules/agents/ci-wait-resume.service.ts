@@ -352,9 +352,9 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
   /**
    * Resolve this ticket's GitHub credential from its project — the same
    * project dispatch hands the agent as `base_repo`, so this service and
-   * dispatch always agree on which repo a ticket works on. `getInWorkspace`
-   * rejects a project of another workspace, so a stale id can never leak that
-   * workspace's credential.
+   * dispatch always agree on which repo a ticket works on. `getInAccount`
+   * rejects a project of another account, so a stale id can never leak that
+   * account's credential.
    *
    * Degrades to null (→ GitHubConnectorService's env-token fallback) when the
    * ticket has no project or the project names no credential — never blocks
@@ -363,7 +363,7 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
    */
   private async _resolveCredentialId(ticket: Ticket): Promise<string | null> {
     if (!ticket.account_id || !ticket.project_id) return null;
-    const project = await this.projects.getInWorkspace(ticket.project_id, ticket.account_id);
+    const project = await this.projects.getInAccount(ticket.project_id, ticket.account_id);
     return project?.credential_id || null;
   }
 

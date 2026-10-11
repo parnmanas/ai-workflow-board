@@ -22,8 +22,8 @@
 // 이 가드는 registry 정의를 직접 실행해 실제 wire 객체를 만들고, 봉투 키가 아니라
 // payload 필드가 top-level 에 있는지 확인한다.
 //
-// 보드가 없어진 뒤(docs/tickets.md) 코멘트 멘션의 딥링크는 워크스페이스 + ticket_id
-// 만으로 만든다(`/ws/<wsId>/tickets?ticket=…`) — payload 에 board_id 는 더 이상 없다.
+// 보드가 없어진 뒤(docs/tickets.md) 코멘트 멘션의 딥링크는 계정 + ticket_id
+// 만으로 만든다(`/ws/<accountId>/tickets?ticket=…`) — payload 에 board_id 는 더 이상 없다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

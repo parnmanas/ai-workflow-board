@@ -8,7 +8,7 @@ import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, 
  * AWB, so this generalizes the proven QA/Security scheduler template
  * (QaSchedule b6bb7efd / SecuritySchedule 7c07c19d) into a content-agnostic one.
  *
- * What it does: when a schedule comes due, the background WorkspaceScheduleService
+ * What it does: when a schedule comes due, the background AutomationScheduleService
  * opens a FRESH chat room each run, drops the `target_agent_id` in, and sends
  * `task_prompt` as the opening message — exactly the QA/Security RUN dispatch
  * shape (qa-run.service.ts:198-245: create room → add agent + synthetic 'system'

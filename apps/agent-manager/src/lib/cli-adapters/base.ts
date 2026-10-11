@@ -429,7 +429,7 @@ export interface OneshotSpec {
   taskText: string;
   mcpConfigPath: string | null;
   /** Concrete process working directory selected for this run. Adapters with
-   *  their own workspace-root flag (notably Codex `--cd`) should pass the same
+   *  their own account-root flag (notably Codex `--cd`) should pass the same
    *  path explicitly so CLI-side root discovery cannot diverge from spawn cwd. */
   cwd?: string | null;
   /** Effective CLI home used by this spawn. Native-config adapters may read
@@ -776,7 +776,7 @@ export abstract class CliAdapter {
   }
 
   /**
-   * 이 디스패치에서 CLI 가 대화형 workspace-trust 대화상자를 띄우게 되는가
+   * 이 디스패치에서 CLI 가 대화형 account-trust 대화상자를 띄우게 되는가
    * (ticket 48aeab6e 의 dispatch preflight 가 {@link readTrustMeta} 의 I/O
    * 읽기를 쓰기 전에 이 값을 먼저 본다).
    *
@@ -946,7 +946,7 @@ export interface AgentCredentialMeta {
  * Dispatch-preflight-side trust snapshot. Produced by
  * `CliAdapter.readTrustMeta(cliHomeDir, cwd)` for the ticket 48aeab6e
  * dispatch gate — a single boolean, since (unlike credential expiry) there is
- * nothing else worth surfacing about a workspace-trust decision.
+ * nothing else worth surfacing about a account-trust decision.
  */
 export interface CliTrustMeta {
   /** hasTrustDialogAccepted for this exact cwd, per the CLI's own config. */

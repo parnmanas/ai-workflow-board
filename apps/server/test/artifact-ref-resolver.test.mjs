@@ -88,7 +88,7 @@ test('no-detail fallback preserves canonical label and ownership context', async
 });
 
 test('targets without membership never expose canonical labels, context, or links', async () => {
-  const foreignWorkspace = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const foreignAccount = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   const instance = service();
   for (const repository of [
     instance.tickets,
@@ -100,7 +100,7 @@ test('targets without membership never expose canonical labels, context, or link
     const originalFindOne = repository.findOne;
     repository.findOne = async (query) => {
       const entity = await originalFindOne(query);
-      return entity ? { ...entity, account_id: foreignWorkspace } : null;
+      return entity ? { ...entity, account_id: foreignAccount } : null;
     };
   }
 

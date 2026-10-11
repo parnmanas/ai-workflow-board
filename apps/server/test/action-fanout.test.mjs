@@ -121,7 +121,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     }
 
     // P4c-4: MGR_* 는 Host 행, AGENT_* 는 api_keys 페어링 링크다.
-    // AGENT_C 의 링크는 ws-other 소속이라 cross-workspace 거부 계약을 탄다.
+    // AGENT_C 의 링크는 ws-other 소속이라 cross-account 거부 계약을 탄다.
     const hostRepo = dataSource.getRepository(RuntimeHost);
     await hostRepo.save([
       hostRepo.create({ id: MGR_1, name: 'rolf', hostname: 'rolf', account_id: WS }),
@@ -186,14 +186,14 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       inertRepo(),                             // userRepo
       commentRepo,                             // commentRepo
       inertRepo(),                             // activityRepo
-      // dispatch 가 티켓에서 읽는 것은 워크스페이스 경계 검사용 findOne
+      // dispatch 가 티켓에서 읽는 것은 계정 경계 검사용 findOne
       // 하나뿐이라, 소스 티켓은 스텁 Map 으로 둔다 (행 전체를 심을 필요 없음).
       { findOne: async ({ where }) => tickets.get(where.id) ?? null, update: async () => ({ affected: 1 }) }, // ticketRepo
       dataSource,                              // dataSource
       {},                                      // membership
       messaging,                               // messaging
       logService,                              // logService
-      { getInWorkspace: async () => null },    // projects (훅 경로 전용)
+      { getInAccount: async () => null },    // projects (훅 경로 전용)
     );
   });
 
@@ -277,7 +277,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     // fan-out 이 자동으로 적용된다. 어느 한쪽이 자체 경로로 갈라지면 그 트리거만
     // 조용히 단일 대상으로 되돌아가므로 호출 형태를 고정한다.
     //
-    // 예약 경로는 ActionSchedulerService 가 아니라 WorkspaceScheduleService 다 —
+    // 예약 경로는 ActionSchedulerService 가 아니라 AutomationScheduleService 다 —
     // Action 의 cron 이 Account Schedule 로 옮겨 갔다(docs/automation-schedules.md).
     // 그 파일은 인라인 프롬프트 형태 때문에 방을 만드는 코드도 함께 갖고 있으므로,
     // Action 발화 함수(`#dispatchAction`) 안만 떼어 본다.

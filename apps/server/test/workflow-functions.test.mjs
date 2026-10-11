@@ -30,25 +30,25 @@ describe('Workflow Functions', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('resolves global Functions and lets workspace definitions override the same key', async () => {
+  it('resolves global Functions and lets account definitions override the same key', async () => {
     const globalRows = await service.list(null);
     assert.ok(globalRows.some(row => row.key === 'system.noop' && row.account_id === null));
 
     await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       key: 'system.noop',
       name: 'Account echo',
       executor_type: 'builtin',
       config: { handler: 'system.noop' },
     });
 
-    const workspaceRows = await service.list('workspace-a');
-    const resolved = workspaceRows.find(row => row.key === 'system.noop');
-    assert.equal(resolved.account_id, 'workspace-a');
+    const accountRows = await service.list('account-a');
+    const resolved = accountRows.find(row => row.key === 'system.noop');
+    assert.equal(resolved.account_id, 'account-a');
     assert.equal(resolved.name, 'Account echo');
 
-    const otherWorkspaceRows = await service.list('workspace-b');
-    assert.equal(otherWorkspaceRows.find(row => row.key === 'system.noop').account_id, null);
+    const otherAccountRows = await service.list('account-b');
+    assert.equal(otherAccountRows.find(row => row.key === 'system.noop').account_id, null);
   });
 
   // prompt_audit.measure_effect computed its report from board columns and was
@@ -77,7 +77,7 @@ describe('Workflow Functions', () => {
 
   it('deduplicates key-idempotent executions and persists structured output', async () => {
     const fn = await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       key: 'test.idempotent',
       name: 'Idempotent echo',
       executor_type: 'builtin',
@@ -87,13 +87,13 @@ describe('Workflow Functions', () => {
 
     const first = await service.execute({
       functionId: fn.id,
-      accountId: 'workspace-a',
+      accountId: 'account-a',
       inputs: { value: 42 },
       idempotencyKey: 'same-operation',
     });
     const second = await service.execute({
       functionId: fn.id,
-      accountId: 'workspace-a',
+      accountId: 'account-a',
       inputs: { value: 999 },
       idempotencyKey: 'same-operation',
     });
@@ -106,7 +106,7 @@ describe('Workflow Functions', () => {
 
   it('executes a pipeline as child Function runs with parent linkage', async () => {
     const pipeline = await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       key: 'test.pipeline',
       name: 'Echo pipeline',
       executor_type: 'pipeline',
@@ -120,7 +120,7 @@ describe('Workflow Functions', () => {
 
     const run = await service.execute({
       functionId: pipeline.id,
-      accountId: 'workspace-a',
+      accountId: 'account-a',
       inputs: { shared: true },
     });
     assert.equal(run.status, 'succeeded');
@@ -132,21 +132,21 @@ describe('Workflow Functions', () => {
     assert.ok(children.every(child => child.status === 'succeeded'));
   });
 
-  it('rejects execution across workspace boundaries', async () => {
+  it('rejects execution across account boundaries', async () => {
     const fn = await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       key: 'test.private',
       name: 'Private Function',
       executor_type: 'builtin',
       config: { handler: 'system.noop' },
     });
     await assert.rejects(
-      service.execute({ functionId: fn.id, accountId: 'workspace-b', inputs: {} }),
-      /different workspace/,
+      service.execute({ functionId: fn.id, accountId: 'account-b', inputs: {} }),
+      /different account/,
     );
   });
 
-  // 티켓 f177aeb3 H1 — executor_type:'http'는 config.url/headers를 워크스페이스
+  // 티켓 f177aeb3 H1 — executor_type:'http'는 config.url/headers를 계정
   // 스코프 에이전트가 자유롭게 지정하는 Function 정의에서 그대로 받는다. 이전에는
   // fetch()에 곧장 넘겨 응답 본문 전체를 반환했으므로(full-read SSRF), 실제
   // 로컬 리스너를 겨냥해도 이 실행 경로 전체(execute → executeOnce → guardedFetch)가
@@ -160,14 +160,14 @@ describe('Workflow Functions', () => {
     const port = server.address().port;
     try {
       const fn = await service.create({
-        account_id: 'workspace-a',
+        account_id: 'account-a',
         key: 'test.ssrf-loopback',
         name: 'SSRF loopback probe',
         executor_type: 'http',
         config: { url: `http://127.0.0.1:${port}/secret`, method: 'GET' },
       });
       await assert.rejects(
-        service.execute({ functionId: fn.id, accountId: 'workspace-a', inputs: {} }),
+        service.execute({ functionId: fn.id, accountId: 'account-a', inputs: {} }),
         /not an allowed outbound target/,
       );
       const runs = await dataSource.getRepository(WorkflowFunctionRun).find({ where: { function_id: fn.id } });
@@ -181,14 +181,14 @@ describe('Workflow Functions', () => {
 
   it('rejects the http executor for a cloud-metadata-style link-local target', async () => {
     const fn = await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       key: 'test.ssrf-metadata',
       name: 'SSRF metadata probe',
       executor_type: 'http',
       config: { url: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/', method: 'GET' },
     });
     await assert.rejects(
-      service.execute({ functionId: fn.id, accountId: 'workspace-a', inputs: {} }),
+      service.execute({ functionId: fn.id, accountId: 'account-a', inputs: {} }),
       /not an allowed outbound target/,
     );
   });

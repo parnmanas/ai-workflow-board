@@ -1,7 +1,7 @@
 // QA scenarios are Account-scoped definitions. The Board layer (and the
 // legacy board_id column it left behind) is gone with the board-less ticket
 // model (docs/tickets.md), so the only scope left to guard is the Account:
-// (1) create() refuses a scenario without a workspace, and (2) list() / update()
+// (1) create() refuses a scenario without a account, and (2) list() / update()
 // never cross into another Account's scenarios.
 
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { QaService } from '../dist/modules/qa/qa.service.js';
 
 const TARGET_RUNTIME = { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
 
-describe('QA Scenario workspace scope', () => {
+describe('QA Scenario account scope', () => {
   let dataSource;
   let service;
 
@@ -39,7 +39,7 @@ describe('QA Scenario workspace scope', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a QA scenario without a workspace', async () => {
+  it('rejects creating a QA scenario without a account', async () => {
     await assert.rejects(
       service.create({ name: 'Unscoped scenario', target_runtime: TARGET_RUNTIME }),
       /account_id is required/,
@@ -47,15 +47,15 @@ describe('QA Scenario workspace scope', () => {
   });
 
   it('list() and update() stay inside the requested Account', async () => {
-    const mine = await service.create({ account_id: 'workspace-a', name: 'Account A scenario', target_runtime: TARGET_RUNTIME });
-    const theirs = await service.create({ account_id: 'workspace-b', name: 'Account B scenario', target_runtime: TARGET_RUNTIME });
+    const mine = await service.create({ account_id: 'account-a', name: 'Account A scenario', target_runtime: TARGET_RUNTIME });
+    const theirs = await service.create({ account_id: 'account-b', name: 'Account B scenario', target_runtime: TARGET_RUNTIME });
 
-    const rows = await service.list('workspace-a');
+    const rows = await service.list('account-a');
     assert.ok(rows.some(row => row.id === mine.id));
     assert.equal(rows.some(row => row.id === theirs.id), false, 'another Account scenario never leaks in');
-    assert.ok(rows.every(row => row.account_id === 'workspace-a'));
+    assert.ok(rows.every(row => row.account_id === 'account-a'));
 
-    assert.equal((await service.update(mine.id, 'workspace-a', { description: 'mine' })).description, 'mine');
-    await assert.rejects(service.update(theirs.id, 'workspace-a', { description: 'hijack' }), /not found in workspace/);
+    assert.equal((await service.update(mine.id, 'account-a', { description: 'mine' })).description, 'mine');
+    await assert.rejects(service.update(theirs.id, 'account-a', { description: 'hijack' }), /not found in account/);
   });
 });

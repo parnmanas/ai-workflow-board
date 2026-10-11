@@ -4,7 +4,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { IsNull, Repository, DataSource } from 'typeorm';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { RuntimeSkillAssignment } from '../../entities/RuntimeSkillAssignment';
 import { Skill } from '../../entities/Skill';
 import { SkillProposal } from '../../entities/SkillProposal';
@@ -27,11 +27,11 @@ export class SkillsService {
   ) {}
 
   /**
-   * Skills usable from `accountId`: this workspace's rows PLUS every global
+   * Skills usable from `accountId`: this account's rows PLUS every global
    * row (docs/catalog-scopes.md — "조회는 Account context 하나뿐이다: Global +
    * 현재 Account 행을 반환한다").
    *
-   * By default a workspace skill SHADOWS a global one carrying the same slug,
+   * By default a account skill SHADOWS a global one carrying the same slug,
    * matching how WorkflowFunction resolves by key. The management UI passes
    * `includeShadowed` to render both rows so an operator can see what their
    * fork is overriding — without it a shadowed global is invisible and
@@ -61,7 +61,7 @@ export class SkillsService {
     return shadowBySlug(decorated).map((s) => ({ ...s, shadowed: false }));
   }
 
-  /** Global skills only — the admin registry view, workspace-independent. */
+  /** Global skills only — the admin registry view, account-independent. */
   async listGlobal() {
     const rows = await this.skills.find({ where: { account_id: IsNull() }, order: { name: 'ASC' } });
     return rows.map((skill) => ({ ...skill, scope: 'global' as const }));
@@ -82,7 +82,7 @@ export class SkillsService {
     const skill = await this.requireSkill(accountId, skillId);
     // Filter by skill_id alone: a version's scope always mirrors its parent's,
     // and re-asserting `account_id: accountId` here would return an EMPTY
-    // version list for a global skill viewed from a workspace.
+    // version list for a global skill viewed from a account.
     const versions = await this.versions.find({
       where: { skill_id: skillId },
       order: { version: 'DESC' },
@@ -105,7 +105,7 @@ export class SkillsService {
     return this.skills.manager.transaction(async (manager) => {
       const skillRepo = manager.getRepository(Skill);
       const versionRepo = manager.getRepository(SkillVersion);
-      // Scope-exact duplicate check. A workspace MAY reuse a global slug —
+      // Scope-exact duplicate check. A account MAY reuse a global slug —
       // that is the documented fork/shadow path, not a conflict — so this
       // deliberately does not look across scopes.
       const dup = await skillRepo.findOne({
@@ -140,7 +140,7 @@ export class SkillsService {
    * shadowing over in-place edits.
    */
   async fork(accountId: string, skillId: string, actorId: string, sourceVersionId = '') {
-    if (!accountId) throw httpError(400, 'workspace_required', 'Forking requires a workspace');
+    if (!accountId) throw httpError(400, 'account_required', 'Forking requires a account');
     const global = await this.skills.findOne({ where: { id: skillId, account_id: IsNull() } });
     if (!global) throw httpError(404, 'skill_not_found', 'Global skill not found');
     const source = sourceVersionId
@@ -162,7 +162,7 @@ export class SkillsService {
   }
 
   async publish(accountId: string, skillId: string, body: any, actorId: string, sourceProposalId = '') {
-    // Writable, not merely visible: a workspace may READ a global skill but may
+    // Writable, not merely visible: a account may READ a global skill but may
     // not publish into it (that would let one tenant edit every tenant's
     // definition). Global publishes come through the admin route, which passes
     // accountId=''.
@@ -172,7 +172,7 @@ export class SkillsService {
       throw httpError(409, 'skill_version_duplicate', 'Identical immutable version already exists');
     }
     // Scope-free max-version lookup: versions of a global skill carry
-    // account_id NULL, so filtering by the caller's workspace would restart
+    // account_id NULL, so filtering by the caller's account would restart
     // numbering at 1 and collide on the (skill_id, version) unique index.
     const latest = await this.versions.findOne({
       where: { skill_id: skillId },
@@ -191,7 +191,7 @@ export class SkillsService {
   }
 
   async assign(accountId: string, skillId: string, body: any, actorId: string) {
-    // Visible is enough here — assigning a GLOBAL skill to a workspace agent is
+    // Visible is enough here — assigning a GLOBAL skill to a account agent is
     // the primary way a built-in gets used. The assignment row itself stays
     // account-scoped (it owns execution, not a definition).
     await this.requireSkill(accountId, skillId);
@@ -206,7 +206,7 @@ export class SkillsService {
       throw httpError(404, 'host_not_found', 'Runtime Host not found');
     }
     const runtimeKey = runtimeIdentityKey(spec);
-    // One assignment per (workspace, runtime identity, skill) — re-assigning
+    // One assignment per (account, runtime identity, skill) — re-assigning
     // re-pins the version in place.
     const existing = await this.assignments.findOne({
       where: {
@@ -261,11 +261,11 @@ export class SkillsService {
         proposal.skill_id = targetSkillId;
       }
       if (!proposal.skill_id) throw httpError(400, 'skill_target_required', 'Approval requires a target skill');
-      // A proposal is authored inside a workspace, so approving it can only
-      // publish into that workspace. Targeting a global skill is refused here
+      // A proposal is authored inside a account, so approving it can only
+      // publish into that account. Targeting a global skill is refused here
       // with an actionable message rather than surfacing publish()'s generic
       // scope error: the operator's real option is to fork the global skill
-      // into this workspace and re-target the proposal at the fork.
+      // into this account and re-target the proposal at the fork.
       await this.requireWritableSkill(accountId, proposal.skill_id);
       version = await this.publish(accountId, proposal.skill_id, proposal, actorId, proposal.id);
     }
@@ -283,7 +283,7 @@ export class SkillsService {
     return this.skills.save(skill);
   }
 
-  /** Readable from `accountId`: the workspace's own rows plus every global row. */
+  /** Readable from `accountId`: the account's own rows plus every global row. */
   private async requireSkill(accountId: string, skillId: string) {
     const skill = await this.skills.findOne({
       where: visibleScopeWhere<Skill>(accountId, { id: skillId }),
@@ -293,11 +293,11 @@ export class SkillsService {
   }
 
   /**
-   * Writable from `accountId`. A caller scoped to a workspace can only mutate
-   * that workspace's skills; global skills are mutable only by an admin caller,
+   * Writable from `accountId`. A caller scoped to a account can only mutate
+   * that account's skills; global skills are mutable only by an admin caller,
    * which reaches this with an empty accountId. Without this split a member
-   * of any single workspace could republish or quarantine a definition every
-   * other workspace depends on.
+   * of any single account could republish or quarantine a definition every
+   * other account depends on.
    */
   private async requireWritableSkill(accountId: string, skillId: string) {
     const skill = await this.skills.findOne({ where: { id: skillId } });
@@ -308,8 +308,8 @@ export class SkillsService {
           403,
           'skill_scope_readonly',
           skill.account_id
-            ? 'Skill belongs to another workspace'
-            : 'Global skills are read-only from a workspace — fork it into this workspace instead',
+            ? 'Skill belongs to another account'
+            : 'Global skills are read-only from a account — fork it into this account instead',
         );
       }
     } else if (skill.account_id) {

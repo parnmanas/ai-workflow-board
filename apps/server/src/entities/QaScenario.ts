@@ -5,7 +5,7 @@ import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/works
 /**
  * QaScenario — a reusable, step-based QA scenario definition.
  *
- * Mirrors the `Action` entity (workspace scope + target_agent_id +
+ * Mirrors the `Action` entity (account scope + target_agent_id +
  * max_runs FIFO budget) but adds the scenario-specific pieces: an ordered
  * `steps[]` array (the source of the visualizer), a `qa_driver` selector and
  * its `qa_driver_config`, plus `tags`.

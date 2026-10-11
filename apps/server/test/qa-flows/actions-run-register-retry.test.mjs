@@ -4,7 +4,7 @@
 //   • 신규 Action 등록      — ActionsService.create → 영속 + enabled 기본값.
 //   • 기존 Action 실행      — ActionsService.dispatch → run + ChatRoom 생성, 프롬프트 렌더.
 //   • 실행 실패 / 재시도    — 없는 action id dispatch 는 loud 실패, 재실행은 독립 run.
-//   • pend 게이트 스코프    — 실 DataSource 로 enabled+workspace 스코프 후보를 뽑아
+//   • pend 게이트 스코프    — 실 DataSource 로 enabled+account 스코프 후보를 뽑아
 //                             evaluatePendActionGate 가 강제/허용하는지 end-to-end.
 //
 // 사람 개입 필요(no_action_reason) 판정 자체는 actions-pend-gate.test.mjs 가 순수
@@ -61,7 +61,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   const created = await actions.create({
     account_id: ws.id,
     name: 'Deploy prod',
-    prompt: 'Deploy {{workspace.name}} to production.',
+    prompt: 'Deploy {{account.name}} to production.',
     target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(created.id, 'new Action must persist with an id');
@@ -199,21 +199,21 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     target_runtimes: [RUNTIME_SPEC],
     enabled: false,
   });
-  // …and another workspace's Action must NOT count either — the workspace is
+  // …and another account's Action must NOT count either — the account is
   // the only scope an Action has.
   const otherWs = await createAccount(app, getDataSourceToken, 'actions-other');
   await actions.create({
     account_id: otherWs.id,
-    name: 'Other workspace deploy',
+    name: 'Other account deploy',
     prompt: 'x',
     target_runtimes: [RUNTIME_SPEC],
   });
 
   const candidates = await loadPendActionCandidates(ds, ticket);
   const names = candidates.map((c) => c.name);
-  assert.ok(names.includes('Deploy prod'), 'enabled workspace-level Action is a candidate');
+  assert.ok(names.includes('Deploy prod'), 'enabled account-level Action is a candidate');
   assert.ok(!names.includes('Disabled deploy'), 'disabled Action is excluded');
-  assert.ok(!names.includes('Other workspace deploy'), 'another workspace\'s Action is out of scope');
+  assert.ok(!names.includes('Other account deploy'), 'another account\'s Action is out of scope');
 
   step('Pend gate: blocks a bare pend, allows once a reason is supplied');
   const blocked = evaluatePendActionGate(candidates, undefined);

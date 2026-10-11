@@ -1,7 +1,7 @@
 // Security profiles are Account-scoped definitions. The Board layer (and the
 // legacy board_id column it left behind) is gone with the board-less ticket
 // model (docs/tickets.md), so the only scope left to guard is the Account:
-// (1) create() refuses a profile without a workspace, and (2) list() returns a
+// (1) create() refuses a profile without a account, and (2) list() returns a
 // Account's own profiles and never another Account's.
 
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { SecurityProfileService } from '../dist/modules/security/security-profil
 
 const TARGET_RUNTIME = { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
 
-describe('Security Profile workspace scope', () => {
+describe('Security Profile account scope', () => {
   let dataSource;
   let service;
 
@@ -39,7 +39,7 @@ describe('Security Profile workspace scope', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a Security profile without a workspace', async () => {
+  it('rejects creating a Security profile without a account', async () => {
     await assert.rejects(
       service.create({
         name: 'Unscoped profile',
@@ -52,21 +52,21 @@ describe('Security Profile workspace scope', () => {
 
   it('list() returns only the requested Account profiles', async () => {
     await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       name: 'Account A profile',
       target_runtime: TARGET_RUNTIME,
       scan_driver: 'code-review',
     });
     await service.create({
-      account_id: 'workspace-b',
+      account_id: 'account-b',
       name: 'Account B profile',
       target_runtime: TARGET_RUNTIME,
       scan_driver: 'code-review',
     });
 
-    const rows = await service.list('workspace-a');
+    const rows = await service.list('account-a');
     assert.ok(rows.some(row => row.name === 'Account A profile'));
     assert.equal(rows.some(row => row.name === 'Account B profile'), false, 'another Account profile never leaks in');
-    assert.ok(rows.every(row => row.account_id === 'workspace-a'));
+    assert.ok(rows.every(row => row.account_id === 'account-a'));
   });
 });

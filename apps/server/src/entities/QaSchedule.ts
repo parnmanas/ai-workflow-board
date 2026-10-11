@@ -9,7 +9,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *
  * Scope:
  *   - scope='all'      → at dispatch time, expand to every ENABLED scenario in
- *     the workspace.
+ *     the account.
  *     We deliberately store NO scenario id snapshot for 'all' so adding/removing
  *     a scenario is reflected automatically on the next run (the ticket's
  *     "id 스냅샷 말고 실행 시 resolve" requirement — handled by startBatch({all:true})).

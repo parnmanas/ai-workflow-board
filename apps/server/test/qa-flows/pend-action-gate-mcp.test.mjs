@@ -101,7 +101,7 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   // it gets a terminal check: a `done` ticket is never revisited by the
   // dispatcher, so parking it there would strand it invisibly. `no_action_reason` is
   // supplied so the CASE-above's "Deploy prod" Action (still registered on
-  // this same workspace) clears the Action gate first — the terminal gate
+  // this same account) clears the Action gate first — the terminal gate
   // runs "Action 게이트 직후" (right after), so it needs a clean pass through
   // that earlier gate to be observable on its own.
   step('Terminal gate — pend_ticket on a done ticket is rejected and does NOT park it');

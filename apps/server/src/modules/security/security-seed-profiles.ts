@@ -8,7 +8,7 @@ import type { CreateProfileInput } from './security-profile.service';
  * empty catalogue — `list_security_profiles` returns []. This module is the
  * single source of truth for a starter set; it mirrors qa-seed-scenarios.ts.
  *
- * Each entry is **scope-agnostic data** (no workspace/agent ids baked in):
+ * Each entry is **scope-agnostic data** (no account/agent ids baked in):
  * it carries the `checklist[]` rendered into the run prompt, a `scan_driver`, and
  * the `scope_mode`. buildProfileCreatePayloads() stamps the env-specific scope on
  * at seed time, so the catalogue is reproducible across environments.
@@ -20,7 +20,7 @@ import type { CreateProfileInput } from './security-profile.service';
  * exercisable end-to-end (run → findings → complete → baseline advance).
  *
  * Consumed by:
- *   - scripts/seed-security-profiles.mjs (idempotent upsert into a live workspace)
+ *   - scripts/seed-security-profiles.mjs (idempotent upsert into a live account)
  *
  * `target_resource_id` is omitted (null) so the inspection targets AWB's own
  * codebase (the agent's worktree).
@@ -81,8 +81,8 @@ const BASELINE_CHECKLIST: SecurityChecklistItem[] = [
     guidance:
       'Every controller route and MCP tool that mutates or reads scoped data must go through the ' +
       'guard chain (AuthGuard/PermissionGuard/AgentAuthGuard) or an explicit account_id scope ' +
-      'check. Flag endpoints that trust a client-supplied id without verifying workspace ownership ' +
-      '(e.g. a *_id from the body used in a query with no workspace match).',
+      'check. Flag endpoints that trust a client-supplied id without verifying account ownership ' +
+      '(e.g. a *_id from the body used in a query with no account match).',
     source: 'https://owasp.org/Top10/A01_2021-Broken_Access_Control/',
     added_at: SEED_ADDED_AT,
   },
@@ -257,7 +257,7 @@ const BASELINE_CHECKLIST: SecurityChecklistItem[] = [
     guidance:
       'API responses must not leak password hashes, full credential rows, or other ' +
       "users'/accounts' data. Flag entity rows returned without field projection (a *toJson* that " +
-      'spreads the whole row) and cross-workspace data reachable without a scope check.',
+      'spreads the whole row) and cross-account data reachable without a scope check.',
     source: 'https://cwe.mitre.org/data/definitions/200.html',
     added_at: SEED_ADDED_AT,
   },
@@ -307,7 +307,7 @@ export function keyTag(key: string): string {
 }
 
 /**
- * Stamp the env-specific scope (workspace/agent) onto each template and
+ * Stamp the env-specific scope (account/agent) onto each template and
  * return ready-to-create payloads. The stable `key` is preserved both as the
  * leading tag (`key:<key>`) and on `_key`, so an idempotent seeder can
  * match-and-update instead of duplicating.

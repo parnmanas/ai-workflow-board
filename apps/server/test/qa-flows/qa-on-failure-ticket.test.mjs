@@ -5,7 +5,7 @@
 // failed/error must auto-file a fix ticket carrying the failure evidence. This
 // test drives the full path over MCP HTTP and asserts:
 //
-//   1. failed run → fix ticket created in the run's workspace pool, queued as
+//   1. failed run → fix ticket created in the run's account pool, queued as
 //      `todo` for the configured assignee runtime, evidence in body (failed step
 //      log + artifact raw link + QA detail deep link), tags + priority + project
 //      from config, run.auto_ticket_id linked.

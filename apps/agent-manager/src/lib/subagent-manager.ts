@@ -1801,7 +1801,7 @@ export class SubagentManager implements SubagentManagerContract {
     const run = runOverride !== undefined ? runOverride : record.run;
     if (!run) return;
     const route = resolveRunCompletionRoute(run.kind);
-    // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-workspace 경고를
+    // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-account 경고를
     // (그냥 두면 아무도 안 읽는 stdout 속에 묻힌다) 진단 가능한 원인일 때
     // run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가 그냥
     // "결과 없음" 보다 낫다.
@@ -1811,7 +1811,7 @@ export class SubagentManager implements SubagentManagerContract {
     // 매니저 shutdown 킬도 여기까지 정상적으로 들어온다 — ticket b831b896
     // round 3 의 "manager-initiated kill 은 절대 이 backstop 에 못 닿는다"는
     // 전제는 더 이상 사실이 아니다. stopReason 이 있으면 그 정확한 사유를
-    // 그대로 보고하고(untrusted-workspace 탐지나 "TTL sweep/kill 때문일 수
+    // 그대로 보고하고(untrusted-account 탐지나 "TTL sweep/kill 때문일 수
     // 있다"는 추측은 둘 다 이 케이스엔 안 맞고, 후자는 이 티켓이 없애려는 바로
     // 그 추측성 문구다), stopReason 이 없을 때만(=진짜 원인불명 — crash, 승인
     // 대기 등) b831b896 round 3 이 정리한 정직한 "reason=unknown" 문구로
@@ -1819,7 +1819,7 @@ export class SubagentManager implements SubagentManagerContract {
     const summary = record.stopReason
       ? `agent-manager가 프로세스를 종료해 이 run이 결과 없이 중단됐습니다 (reason=${record.stopReason}).`
       : hasUntrustedWorkspaceWarning(tail)
-        ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
+        ? 'run 세션이 CLI account trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
           'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
           'cli-home의 .claude.json trust 시딩을 확인하세요.'
         : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}, reason=unknown) — ` +

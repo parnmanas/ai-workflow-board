@@ -3,7 +3,7 @@ import type { ActivityView } from '../activity';
 
 // 사이드바 WORK 섹션의 계층 모델 (티켓 03ca8b5b).
 //
-// WORK 는 맨 위에 평평한 Tickets 메뉴(워크스페이스 전체 티켓 풀 — 보드는 없어졌다,
+// WORK 는 맨 위에 평평한 Tickets 메뉴(계정 전체 티켓 풀 — 보드는 없어졌다,
 // docs/tickets.md) 하나와, Teams / Orchestrations 두 개의 계층형 최상위 메뉴를
 // 그 순서대로 노출한다. 계층형 메뉴는 해당 엔티티 목록을 서브메뉴로 편다. active
 // 판정을 이 순수 모듈로 뽑아낸 이유는 두 가지다:
@@ -80,7 +80,7 @@ function isUnder(pathname: string, path: string): boolean {
 }
 
 /**
- * WORK 맨 위의 평평한 Tickets 메뉴. 배지는 워크스페이스 전체 읽지 않은 티켓
+ * WORK 맨 위의 평평한 Tickets 메뉴. 배지는 계정 전체 읽지 않은 티켓
  * 코멘트 수다(보드별 롤업은 보드와 함께 없어졌다).
  */
 export interface TicketsNavItem {

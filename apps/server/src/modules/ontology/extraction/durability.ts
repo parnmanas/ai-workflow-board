@@ -3,7 +3,7 @@
 // ExternalPackage)은 이 코드베이스에 아직 외부 패키지 추출기가 없어
 // 이 분류기가 내지 않는다 — 열거값만 열어두고, 실제로 채우는 것은
 // 미래 티켓(DESIGN.md 축 1 "ExternalPackage" 확장) 몫이다. 여기서는
-// 워크스페이스 소스(`volatile`)와 vendored/generated 산출물(`frozen`)만
+// 계정 소스(`volatile`)와 vendored/generated 산출물(`frozen`)만
 // 경로 패턴으로 구분한다 — 실제 콘텐츠를 파싱하지 않는 값싼 사전 필터.
 import type { OntologyDurability } from '../../../entities/OntologyNode';
 

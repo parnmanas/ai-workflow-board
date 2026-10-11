@@ -6,7 +6,7 @@ import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
@@ -128,7 +128,7 @@ export interface CreateProfileInput {
 }
 
 /**
- * Owns SecurityProfile CRUD. Mirrors QaService's CRUD half (workspace scope
+ * Owns SecurityProfile CRUD. Mirrors QaService's CRUD half (account scope
  * checks, target-agent validation). Run dispatch + finding recording live
  * in SecurityRunService.
  */
@@ -145,7 +145,7 @@ export class SecurityProfileService {
   async list(accountId: string): Promise<SecurityProfileListItem[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.profileRepo.createQueryBuilder('p')
-      .where('p.account_id = :ws', { ws: accountId });
+      .where('p.account_id = :account', { account: accountId });
     const profiles = await qb.orderBy('p.name', 'ASC').getMany();
     return this._attachLastRun(profiles);
   }
@@ -256,7 +256,7 @@ export class SecurityProfileService {
 
   async update(id: string, accountId: string, patch: Partial<CreateProfileInput> & { last_passed_commit?: string | null }): Promise<SecurityProfile> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    const existing = await findOrFail(this.profileRepo, { where: { id, account_id: accountId } }, 'security profile not found in workspace');
+    const existing = await findOrFail(this.profileRepo, { where: { id, account_id: accountId } }, 'security profile not found in account');
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -299,7 +299,7 @@ export class SecurityProfileService {
   async remove(id: string, accountId: string): Promise<void> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const existing = await this.profileRepo.findOne({ where: { id, account_id: accountId } });
-    if (!existing) throw makeError(404, 'security profile not found in workspace');
+    if (!existing) throw makeError(404, 'security profile not found in account');
     // Cascade: tear down every run + the room each run created so the chat list
     // doesn't end up with orphan rooms pointing at a deleted profile.
     await this.runService.deleteRunsForProfile(id);

@@ -73,7 +73,7 @@ export interface AgentSessionHost {
   clis: string[];
   plugin_version: string;
   last_seen_at: string;
-  /** cli → 이 워크스페이스의 CLI 설정(credential). null = 장비 운영자 로그인 사용. */
+  /** cli → 이 계정의 CLI 설정(credential). null = 장비 운영자 로그인 사용. */
   cli_settings: Record<string, AgentSessionCredentialRef | null>;
 }
 
@@ -411,7 +411,7 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   // ─── Hosts ──────────────────────────────────────────────────────────────
 
-  /** 매니저 identity 는 워크스페이스에 속하지 않는다(하트비트가 account_id:null 로
+  /** 매니저 identity 는 계정에 속하지 않는다(하트비트가 account_id:null 로
    *  등록). 세션은 장비의 것이므로 살아 있는 모든 Runtime Host 를 보여준다. */
   private managerRecords(): InstanceRecord[] {
     return this.registry.list().filter((r) => r.mode === 'manager');
@@ -576,7 +576,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     return { id: profile.id, name, protocol: profile.protocol, model: profile.model, base_url: profile.base_url };
   }
 
-  /** 인스턴스 전역 backend profile 목록(워크스페이스 계층 없음 — claude-backend-registry 와 같은 규약). */
+  /** 인스턴스 전역 backend profile 목록(계정 계층 없음 — claude-backend-registry 와 같은 규약). */
   private async backendProfileList(): Promise<Array<{ runtime: CliRuntimeProfile; name: string }>> {
     const rows = await this.backendProfiles.find();
     const out: Array<{ runtime: CliRuntimeProfile; name: string }> = [];
@@ -650,7 +650,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     return { id: cred.id, name: cred.name, provider: cred.provider, scope: cred.account_id === null ? 'global' : 'account' };
   }
 
-  /** 워크스페이스에서 보이는(자기 것 + global) credential 중 이 CLI 와 호환되는 것. */
+  /** 계정에서 보이는(자기 것 + global) credential 중 이 CLI 와 호환되는 것. */
   private async candidateCredentials(accountId: string, cli: string): Promise<Credential[]> {
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
     if (!prefix) return [];
@@ -740,7 +740,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       if (!prefix) throw new AgentSessionError(409, 'credential_unsupported', `${cli} sessions cannot take an AWB credential yet.`);
       const cred = await this.credentials.findOne({ where: { id: credentialId } });
       if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
-        throw new AgentSessionError(404, 'credential_not_found', 'Credential not found in this workspace.');
+        throw new AgentSessionError(404, 'credential_not_found', 'Credential not found in this account.');
       }
       if (!cred.provider.startsWith(prefix)) {
         throw new AgentSessionError(400, 'credential_provider_mismatch', `A ${cli} session needs a ${prefix}* credential, got ${cred.provider}.`);
@@ -1260,7 +1260,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       last_error: null,
     });
     state.driver_user_id = userId;
-    // 선택지를 이 워크스페이스에 남긴다(best-effort) — 다음에 새 세션 모달이 세션 없이도 고를 수 있게.
+    // 선택지를 이 계정에 남긴다(best-effort) — 다음에 새 세션 모달이 세션 없이도 고를 수 있게.
     await this.persistKnownOptions(accountId, managerId, cli, state.config_options)
       .catch((err) => this.logService.debug('AgentSession', `known config options persist failed: ${err?.message ?? err}`));
     return this.emitUpdate(state, 'opened');
@@ -1522,7 +1522,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /**
-   * 어댑터가 알려 준 선택지를 이 워크스페이스에 남긴다. 세션 목록/모달은 세션이 열리기 **전에** 골라야
+   * 어댑터가 알려 준 선택지를 이 계정에 남긴다. 세션 목록/모달은 세션이 열리기 **전에** 골라야
    * 하는데 선택지는 어댑터가 살아 있어야 알 수 있기 때문이다. row 가 없으면 만든다 — credential 을 한 번도
    * 묶지 않은 호스트에는 row 자체가 없어서, 예전엔 캐시가 영영 비어 있었고 모달에 아무 선택기도 뜨지 않았다.
    */

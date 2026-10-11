@@ -55,7 +55,7 @@ function broadcastTeamsChanged() {
 
 export default function OrchestrationTeamsPage() {
   const { currentAccountId, availableAccounts } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const { showToast } = useToast();
 
   const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
@@ -79,13 +79,13 @@ export default function OrchestrationTeamsPage() {
   const selectedCardRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
-    if (!wsId) return;
+    if (!accountId) return;
     setLoading(true);
     try {
       const [teamList, hostList, credentialList, profileList, accountList] = await Promise.all([
-        api.listOrchestrationTeams(wsId),
-        api.listOrchestrationRuntimeHosts(wsId).catch(() => [] as OrchestrationRuntimeHost[]),
-        api.listCredentials(wsId, { includeAllScopes: true }).catch(() => [] as Credential[]),
+        api.listOrchestrationTeams(accountId),
+        api.listOrchestrationRuntimeHosts(accountId).catch(() => [] as OrchestrationRuntimeHost[]),
+        api.listCredentials(accountId, { includeAllScopes: true }).catch(() => [] as Credential[]),
         api.listClaudeBackendProfiles().then((r) => r.profiles).catch(() => [] as ClaudeBackendProfile[]),
         api.getAccounts().catch(() => [] as any[]),
       ]);
@@ -99,7 +99,7 @@ export default function OrchestrationTeamsPage() {
     } finally {
       setLoading(false);
     }
-  }, [wsId, showToast]);
+  }, [accountId, showToast]);
 
   /** 글로벌 팀은 소유 account만, account 종속 팀은 자기 account만 편집할 수 있다. */
   const canWrite = (team: OrchestrationTeam) => !team.is_global || availableAccounts.some((account) => account.id === team.owner_account_id);
@@ -134,7 +134,7 @@ export default function OrchestrationTeamsPage() {
 
   const removeMember = async (team: OrchestrationTeam, memberId: string) => {
     try {
-      replaceTeam(await api.removeOrchestrationTeamMember(team.id, memberId, wsId));
+      replaceTeam(await api.removeOrchestrationTeamMember(team.id, memberId, accountId));
     } catch (e: any) {
       showToast(e?.message || 'Failed to remove member', 'error');
     }
@@ -143,7 +143,7 @@ export default function OrchestrationTeamsPage() {
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteOrchestrationTeam(deleteTarget.id, wsId);
+      await api.deleteOrchestrationTeam(deleteTarget.id, accountId);
       commitTeams((prev) => prev.filter((t) => t.id !== deleteTarget.id));
       showToast('Team deleted', 'success');
     } catch (e: any) {
@@ -347,7 +347,7 @@ export default function OrchestrationTeamsPage() {
                           <MemberEditButton
                             team={team}
                             member={m}
-                            wsId={team.owner_account_id || team.account_id || wsId}
+                            accountId={team.owner_account_id || team.account_id || accountId}
                             hosts={hosts}
                             onHostRefreshed={replaceHost}
                             credentials={credentials}
@@ -378,7 +378,7 @@ export default function OrchestrationTeamsPage() {
 
       <TeamFormModal
         isOpen={showForm}
-        wsId={editing?.owner_account_id || editing?.account_id || wsId}
+        accountId={editing?.owner_account_id || editing?.account_id || accountId}
         hosts={hosts}
         onHostRefreshed={replaceHost}
         credentials={credentials}
@@ -394,7 +394,7 @@ export default function OrchestrationTeamsPage() {
 
       <AddMemberModal
         team={memberTarget}
-        wsId={memberTarget?.owner_account_id || memberTarget?.account_id || wsId}
+        accountId={memberTarget?.owner_account_id || memberTarget?.account_id || accountId}
         hosts={hosts}
         onHostRefreshed={replaceHost}
         credentials={credentials}
@@ -493,7 +493,7 @@ function OnlineDot({ online }: { online: boolean }) {
 
 export function TeamFormModal({
   isOpen,
-  wsId,
+  accountId,
   hosts,
   credentials,
   backendProfiles,
@@ -504,7 +504,7 @@ export function TeamFormModal({
   onSaved,
 }: {
   isOpen: boolean;
-  wsId: string;
+  accountId: string;
   hosts: OrchestrationRuntimeHost[];
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
@@ -571,7 +571,7 @@ export function TeamFormModal({
     try {
       const saved = team
         ? await api.updateOrchestrationTeam(team.id, {
-            account_id: wsId,
+            account_id: accountId,
             name: name.trim(),
             description: description.trim(),
             orchestrator: slotDraftToSpec(orchestrator),
@@ -582,7 +582,7 @@ export function TeamFormModal({
             ...(team.is_global ? { allowed_account_ids: allowedAccountIds } : {}),
           })
         : await api.createOrchestrationTeam({
-            account_id: wsId,
+            account_id: accountId,
             name: name.trim(),
             description: description.trim(),
             orchestrator: slotDraftToSpec(orchestrator),
@@ -669,7 +669,7 @@ export function TeamFormModal({
             credentials={credentials}
             backendProfiles={backendProfiles}
             onHostRefreshed={onHostRefreshed}
-            accountId={wsId}
+            accountId={accountId}
             neighbours={neighboursOf(team, { orchestrator: true })}
           />
         </SlotSection>
@@ -778,7 +778,7 @@ function SlotSection({
 
 function AddMemberModal({
   team,
-  wsId,
+  accountId,
   hosts,
   credentials,
   backendProfiles,
@@ -787,7 +787,7 @@ function AddMemberModal({
   onSaved,
 }: {
   team: OrchestrationTeam | null;
-  wsId: string;
+  accountId: string;
   hosts: OrchestrationRuntimeHost[];
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
@@ -830,7 +830,7 @@ function AddMemberModal({
     setSaving(true);
     try {
       const saved = await api.addOrchestrationTeamMember(team.id, {
-        account_id: wsId,
+        account_id: accountId,
         ...(asOrchestrator ? { as_orchestrator: true } : { runtime: slotDraftToSpec(draft) }),
         role_label: roleLabel.trim(),
         capabilities: capabilities.trim(),
@@ -913,7 +913,7 @@ function AddMemberModal({
               credentials={credentials}
               backendProfiles={backendProfiles}
               onHostRefreshed={onHostRefreshed}
-              accountId={wsId}
+              accountId={accountId}
               neighbours={neighboursOf(team)}
             />
           </SlotSection>
@@ -926,7 +926,7 @@ function AddMemberModal({
 function MemberEditButton({
   team,
   member,
-  wsId,
+  accountId,
   hosts,
   credentials,
   backendProfiles,
@@ -936,7 +936,7 @@ function MemberEditButton({
 }: {
   team: OrchestrationTeam;
   member: OrchestrationTeamMember;
-  wsId: string;
+  accountId: string;
   hosts: OrchestrationRuntimeHost[];
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
@@ -971,7 +971,7 @@ function MemberEditButton({
     setSaving(true);
     try {
       const saved = await api.updateOrchestrationTeamMember(team.id, member.id, {
-        account_id: wsId,
+        account_id: accountId,
         ...(isOrchestratorRow ? {} : { runtime: slotDraftToSpec(draft) }),
         role_label: roleLabel.trim(),
         capabilities: capabilities.trim(),
@@ -1049,7 +1049,7 @@ function MemberEditButton({
                 credentials={credentials}
                 backendProfiles={backendProfiles}
                 onHostRefreshed={onHostRefreshed}
-                accountId={wsId}
+                accountId={accountId}
                 neighbours={neighboursOf(team, { memberId: member.id })}
               />
             </SlotSection>

@@ -46,7 +46,7 @@ test('a credential owned by another Account fails closed', async () => {
     resolveGitCredential(repoWith({
       id: 'cred-other', account_id: 'ws-2', encrypted_data: JSON.stringify({ token: 'other-token' }),
     }), 'cred-other', 'ws-1'),
-    (err) => err instanceof GitCredentialResolutionError && /different workspace/.test(err.message),
+    (err) => err instanceof GitCredentialResolutionError && /different account/.test(err.message),
   );
 });
 
@@ -81,7 +81,7 @@ test('Git errors expose the cause without leaking registered credentials', () =>
 // Repositories are Projects now (docs/tickets.md); repository Resources were
 // migrated with the SAME id, so the old `/resources/:id/git-credential` path
 // is an alias that resolves a project by id. Boundary = the project's own
-// workspace.
+// account.
 test('GET /api/agent-manager/projects/:id/git-credential (and the /resources alias) serves the project credential', async (t) => {
   const { bootApp } = await import('./helpers/boot.mjs');
   const { createAccount, createAgent, createProject, runtimeHostKeyForAgent } = await import('./helpers/fixtures.mjs');
@@ -128,10 +128,10 @@ test('GET /api/agent-manager/projects/:id/git-credential (and the /resources ali
   assert.equal((await get(`/api/agent-manager/projects/${noCred.id}/git-credential`)).status, 204,
     'a project without a credential clones anonymously');
   assert.equal((await get(`/api/agent-manager/projects/${withCred.id}/git-credential?account_id=${otherWs.id}`)).status, 404,
-    'a account_id that is not the project workspace must not resolve it');
+    'a account_id that is not the project account must not resolve it');
   assert.equal((await get(`/api/agent-manager/projects/00000000-0000-0000-0000-000000000000/git-credential`)).status, 404);
   assert.equal((await get(`/api/agent-manager/projects/${foreign.id}/git-credential`)).status, 403,
-    'a credential from another workspace must never be served for this project');
+    'a credential from another account must never be served for this project');
 
   const anonymous = await fetch(`${base}/api/agent-manager/projects/${withCred.id}/git-credential`);
   assert.equal(anonymous.status, 401, 'a Runtime Host key is required');

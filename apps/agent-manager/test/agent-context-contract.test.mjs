@@ -13,7 +13,7 @@ import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
 import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
 
 const ticket = {
-  id: 'ticket-1', account_id: 'workspace-1', board_id: 'board-1',
+  id: 'ticket-1', account_id: 'account-1', board_id: 'board-1',
   current_column_id: 'column-1', current_column_name: 'In Progress', current_column_kind: 'active',
   comments: [{ created_at: '2026-08-27', author: 'Agent', content: '조사 완료; 다음은 테스트' }],
 };
@@ -124,7 +124,7 @@ test('전체 예산 안에서 비밀을 제거하고 높은 우선순위 항목�
       __awb_context_metadata: {
         relatedTickets: huge('related'), recentDecisions: huge('decision'),
         unresolvedQuestions: huge('question'),
-        verificationCommands: [...huge('verify'), 'npm test --workspace=apps/agent-manager'],
+        verificationCommands: [...huge('verify'), 'npm test --account=apps/agent-manager'],
       },
     }, role: 'assignee', repository,
   });
@@ -134,7 +134,7 @@ test('전체 예산 안에서 비밀을 제거하고 높은 우선순위 항목�
   assert.match(rendered, /\[REDACTED\]/);
   assert.equal(contract.priorProgress.length, 0);
   assert.equal(contract.relatedTickets.length, 0);
-  assert.match(rendered, /npm test --workspace=apps\/agent-manager/);
+  assert.match(rendered, /npm test --account=apps\/agent-manager/);
   const prompt = composeTriggerPrompt({
     ...decoratedTicket('stateless'),
     comments: [{ created_at: '2026-08-27', author: 'Agent', content: 'password=hunter2 Bearer abcdefghijklmnop' }],

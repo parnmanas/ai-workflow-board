@@ -43,7 +43,7 @@ import TeamSlotRuntimeFields, {
  */
 export default function OrchestrationPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const navigate = useNavigate();
   const { showToast } = useToast();
 
@@ -54,12 +54,12 @@ export default function OrchestrationPage() {
   const [showCreate, setShowCreate] = useState(false);
 
   const load = useCallback(async () => {
-    if (!wsId) return;
+    if (!accountId) return;
     setLoading(true);
     try {
       const [missionList, teamList] = await Promise.all([
-        api.listOrchestrationMissions(wsId),
-        api.listOrchestrationTeams(wsId).catch(() => [] as OrchestrationTeam[]),
+        api.listOrchestrationMissions(accountId),
+        api.listOrchestrationTeams(accountId).catch(() => [] as OrchestrationTeam[]),
       ]);
       setMissions(missionList);
       setTeams(teamList);
@@ -68,7 +68,7 @@ export default function OrchestrationPage() {
     } finally {
       setLoading(false);
     }
-  }, [wsId, showToast]);
+  }, [accountId, showToast]);
 
   useEffect(() => {
     load();
@@ -168,7 +168,7 @@ export default function OrchestrationPage() {
 
       <MissionFormModal
         isOpen={showCreate}
-        wsId={wsId}
+        accountId={accountId}
         teams={teams}
         mission={null}
         onClose={() => setShowCreate(false)}
@@ -330,14 +330,14 @@ export function MissionRow({
  */
 export function MissionFormModal({
   isOpen,
-  wsId,
+  accountId,
   teams,
   mission,
   onClose,
   onSaved,
 }: {
   isOpen: boolean;
-  wsId: string;
+  accountId: string;
   teams: OrchestrationTeam[];
   mission: OrchestrationMissionDetail | null;
   onClose: () => void;
@@ -396,7 +396,7 @@ export function MissionFormModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    api.listActions(wsId).then(setActions).catch(() => setActions([]));
+    api.listActions(accountId).then(setActions).catch(() => setActions([]));
     setTitle(mission?.title || '');
     setObjective(mission?.objective || '');
     setContext(mission?.context || '');
@@ -431,7 +431,7 @@ export function MissionFormModal({
     setAdHocRole('');
     setAdHocCapabilities('');
     setAdHocMaxConcurrent(1);
-  }, [isOpen, mission, teams, wsId]);
+  }, [isOpen, mission, teams, accountId]);
 
   const selectedTeam = teams.find((t) => t.id === teamId) || null;
 
@@ -458,8 +458,8 @@ export function MissionFormModal({
     setHostsLoading(true);
     try {
       const [hostList, credentialList, profileList] = await Promise.all([
-        api.listOrchestrationRuntimeHosts(wsId).catch(() => [] as OrchestrationRuntimeHost[]),
-        api.listCredentials(wsId, { includeAllScopes: true }).catch(() => [] as Credential[]),
+        api.listOrchestrationRuntimeHosts(accountId).catch(() => [] as OrchestrationRuntimeHost[]),
+        api.listCredentials(accountId, { includeAllScopes: true }).catch(() => [] as Credential[]),
         api.listClaudeBackendProfiles().then((r) => r.profiles).catch(() => [] as ClaudeBackendProfile[]),
       ]);
       setHosts(hostList);
@@ -468,7 +468,7 @@ export function MissionFormModal({
     } finally {
       setHostsLoading(false);
     }
-  }, [hosts.length, hostsLoading, wsId]);
+  }, [hosts.length, hostsLoading, accountId]);
 
   const includedCount = (selectedTeam?.members.filter((m) => !excludedIds.includes(m.agent_id)).length ?? 0) + extraMembers.length;
 
@@ -496,7 +496,7 @@ export function MissionFormModal({
     try {
       const saved = mission
         ? await api.updateOrchestrationMission(mission.id, {
-            account_id: wsId,
+            account_id: accountId,
             title: title.trim(),
             objective: objective.trim(),
             context: context.trim(),
@@ -514,7 +514,7 @@ export function MissionFormModal({
             extra_members: extraMembers,
           })
         : await api.createOrchestrationMission({
-            account_id: wsId,
+            account_id: accountId,
             team_id: teamId,
             title: title.trim(),
             objective: objective.trim(),
@@ -610,7 +610,7 @@ export function MissionFormModal({
             hostsLoading={hostsLoading}
             credentials={credentials}
             backendProfiles={backendProfiles}
-            wsId={wsId}
+            accountId={accountId}
             adHocDraft={adHocDraft}
             onAdHocDraftChange={setAdHocDraft}
             adHocRole={adHocRole}
@@ -884,7 +884,7 @@ export function MissionFormModal({
                   프로젝트 드롭다운 + 브랜치 드롭다운, 목록에 없는 id 보존, 조회 실패 시
                   수동 입력 폴백까지 그대로 승계한다. 여기만 별도 입력을 두면 같은
                   화면이 또 갈라진다. */}
-              <RepoRefPicker accountId={wsId} state={repoRefState} onChange={patchRepoRef} />
+              <RepoRefPicker accountId={accountId} state={repoRefState} onChange={patchRepoRef} />
             </div>
           </div>
         )}
@@ -919,7 +919,7 @@ function MissionRosterAdjust({
   hostsLoading,
   credentials,
   backendProfiles,
-  wsId,
+  accountId,
   adHocDraft,
   onAdHocDraftChange,
   adHocRole,
@@ -941,7 +941,7 @@ function MissionRosterAdjust({
   hostsLoading: boolean;
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
-  wsId: string;
+  accountId: string;
   adHocDraft: SlotDraft;
   onAdHocDraftChange(next: SlotDraft): void;
   adHocRole: string;
@@ -1086,7 +1086,7 @@ function MissionRosterAdjust({
             <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading Runtime Hosts…</div>
           ) : (
             <TeamSlotRuntimeFields
-              accountId={wsId}
+              accountId={accountId}
               value={adHocDraft}
               onChange={onAdHocDraftChange}
               hosts={hosts}

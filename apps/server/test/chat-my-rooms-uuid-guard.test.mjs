@@ -3,7 +3,7 @@
 // participant / sender.
 //
 // Ticket 7fa0e6d7, follow-up of 75a4c9f1. listRooms is the twin of
-// listAllWorkspaceRooms: it bulk-resolves participant + last-message-sender
+// listAllAccountRooms: it bulk-resolves participant + last-message-sender
 // names via `userRepo.findByIds([...])` / `agentRepo.findByIds([...])`.
 // participant_id / sender_id are plain varchar and can legitimately hold the
 // synthetic 'system' author QA/Action dispatch seeds (qa-run.service.ts:229-235),

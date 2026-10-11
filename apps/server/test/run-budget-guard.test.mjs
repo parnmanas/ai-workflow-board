@@ -7,7 +7,7 @@
 // sibling).
 //
 // Central behaviors this file pins:
-//   - the WORKSPACE is the only scope axis (no board layer — QaRun has a
+//   - the ACCOUNT is the only scope axis (no board layer — QaRun has a
 //     board_id but v1 deliberately does not count off it, ActionRun/
 //     OrchestrationMission have none at all; see hard-budget-config.ts's (d)
 //     doc and docs/catalog-scopes.md)
@@ -20,7 +20,7 @@
 //     spot (ticket 954259e6)
 //   - a confirmed breach always throws `RunBudgetExceededError` (429) with
 //     the self-escape material the ticket a51ec6d9 plan requires: kind,
-//     workspace, count/limit, window minutes, and the earliest retry time
+//     account, count/limit, window minutes, and the earliest retry time
 //
 // Runs against compiled dist/ (requires `npm run build`, satisfied by the
 // test script). Uses an isolated SQLJS_DB_PATH temp file so it never touches
@@ -50,7 +50,7 @@ const { ActionRun } = await import('file://' + path.join(DIST, 'entities', 'Acti
 const { OrchestrationMission } = await import('file://' + path.join(DIST, 'entities', 'OrchestrationMission.js'));
 const { hardBudgetDefaultsFromEnv } = await import('file://' + path.join(DIST, 'common', 'hard-budget-config.js'));
 const {
-  resolveHardBudgetForWorkspace,
+  resolveHardBudgetForAccount,
   countRunsInWindow,
   enforceRunBudget,
   RunBudgetExceededError,
@@ -67,7 +67,7 @@ const qaRunRepo = ds.getRepository(QaRun);
 const actionRunRepo = ds.getRepository(ActionRun);
 const missionRepo = ds.getRepository(OrchestrationMission);
 
-async function makeWorkspace(hardBudgetConfig) {
+async function makeAccount(hardBudgetConfig) {
   return wsRepo.save(wsRepo.create({ name: 'W', hard_budget_config: hardBudgetConfig ?? null }));
 }
 async function makeQaRun(accountId, overrides = {}) {
@@ -85,43 +85,43 @@ after(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// ── resolveHardBudgetForWorkspace ───────────────────────────────────────────
-test('resolveHardBudgetForWorkspace: no row / null config inherits the env baseline verbatim', async () => {
+// ── resolveHardBudgetForAccount ───────────────────────────────────────────
+test('resolveHardBudgetForAccount: no row / null config inherits the env baseline verbatim', async () => {
   const base = hardBudgetDefaultsFromEnv({});
-  assert.deepEqual(await resolveHardBudgetForWorkspace(ds, 'nonexistent-ws'), base);
-  const ws = await makeWorkspace(null);
-  assert.deepEqual(await resolveHardBudgetForWorkspace(ds, ws.id), base);
+  assert.deepEqual(await resolveHardBudgetForAccount(ds, 'nonexistent-ws'), base);
+  const ws = await makeAccount(null);
+  assert.deepEqual(await resolveHardBudgetForAccount(ds, ws.id), base);
 });
 
-test('resolveHardBudgetForWorkspace: a workspace override applies', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 2, window_minutes: 15 }));
-  const resolved = await resolveHardBudgetForWorkspace(ds, ws.id);
+test('resolveHardBudgetForAccount: a account override applies', async () => {
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 2, window_minutes: 15 }));
+  const resolved = await resolveHardBudgetForAccount(ds, ws.id);
   assert.equal(resolved.maxRunsPerWindow, 2);
   assert.equal(resolved.windowMs, 15 * 60_000);
 });
 
 // ── countRunsInWindow ────────────────────────────────────────────────────────
-test('countRunsInWindow: counts only the given kind + workspace at/after since', async () => {
-  const ws1 = await makeWorkspace(null);
-  const ws2 = await makeWorkspace(null);
+test('countRunsInWindow: counts only the given kind + account at/after since', async () => {
+  const ws1 = await makeAccount(null);
+  const ws2 = await makeAccount(null);
   const since = new Date(Date.now() - 1000);
   await makeQaRun(ws1.id);
   await makeQaRun(ws1.id);
-  await makeQaRun(ws2.id); // different workspace — must not count toward ws1
-  await makeActionRun(ws1.id); // different kind, same workspace — must not count toward 'qa'
+  await makeQaRun(ws2.id); // different account — must not count toward ws1
+  await makeActionRun(ws1.id); // different kind, same account — must not count toward 'qa'
   assert.equal(await countRunsInWindow(ds, 'qa', ws1.id, since), 2);
   assert.equal(await countRunsInWindow(ds, 'action', ws1.id, since), 1);
   assert.equal(await countRunsInWindow(ds, 'qa', ws2.id, since), 1);
 });
 
 test('countRunsInWindow: a future `since` sees nothing yet', async () => {
-  const ws = await makeWorkspace(null);
+  const ws = await makeAccount(null);
   await makeQaRun(ws.id);
   assert.equal(await countRunsInWindow(ds, 'qa', ws.id, new Date(Date.now() + 60_000)), 0);
 });
 
 test('countRunsInWindow: the orchestration kind counts OrchestrationMission rows', async () => {
-  const ws = await makeWorkspace(null);
+  const ws = await makeAccount(null);
   const since = new Date(Date.now() - 1000);
   await makeMission(ws.id);
   assert.equal(await countRunsInWindow(ds, 'orchestration', ws.id, since), 1);
@@ -129,13 +129,13 @@ test('countRunsInWindow: the orchestration kind counts OrchestrationMission rows
 
 // ── enforceRunBudget ─────────────────────────────────────────────────────────
 test('enforceRunBudget: under the cap does not throw', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 5, notify: false }));
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 5, notify: false }));
   await makeQaRun(ws.id);
   await assert.doesNotReject(() => enforceRunBudget(deps, 'qa', ws.id));
 });
 
-test('enforceRunBudget: at the cap throws RunBudgetExceededError carrying kind/workspace/count/limit/window (self-escape material)', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 2, window_minutes: 30, notify: false }));
+test('enforceRunBudget: at the cap throws RunBudgetExceededError carrying kind/account/count/limit/window (self-escape material)', async () => {
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 2, window_minutes: 30, notify: false }));
   await makeQaRun(ws.id);
   await makeQaRun(ws.id);
   await assert.rejects(
@@ -155,7 +155,7 @@ test('enforceRunBudget: at the cap throws RunBudgetExceededError carrying kind/w
 });
 
 test('enforceRunBudget: retryAt is the oldest counted run\'s created_at plus the window length', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, window_minutes: 30, notify: false }));
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 1, window_minutes: 30, notify: false }));
   const run = await makeQaRun(ws.id);
   let caught = null;
   try {
@@ -169,7 +169,7 @@ test('enforceRunBudget: retryAt is the oldest counted run\'s created_at plus the
 });
 
 test('enforceRunBudget: a run outside the window ages out automatically — no reaper dependency', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, window_minutes: 1, notify: false }));
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 1, window_minutes: 1, notify: false }));
   await makeQaRun(ws.id, { created_at: new Date(Date.now() - 5 * 60_000) }); // 5 min old, window is 1 min
   await assert.doesNotReject(
     () => enforceRunBudget(deps, 'qa', ws.id),
@@ -177,8 +177,8 @@ test('enforceRunBudget: a run outside the window ages out automatically — no r
   );
 });
 
-test('enforceRunBudget: run kinds are counted independently — a QA storm does not block Action in the same workspace', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: false }));
+test('enforceRunBudget: run kinds are counted independently — a QA storm does not block Action in the same account', async () => {
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 1, notify: false }));
   await makeQaRun(ws.id);
   await assert.rejects(() => enforceRunBudget(deps, 'qa', ws.id));
   await assert.doesNotReject(() => enforceRunBudget(deps, 'action', ws.id), 'action has its own independent counter');
@@ -186,13 +186,13 @@ test('enforceRunBudget: run kinds are counted independently — a QA storm does 
 });
 
 test('enforceRunBudget: enabled=false never throws regardless of count', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, enabled: false }));
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 1, enabled: false }));
   await makeQaRun(ws.id);
   await makeQaRun(ws.id);
   await assert.doesNotReject(() => enforceRunBudget(deps, 'qa', ws.id));
 });
 
-test('enforceRunBudget: an unconfigured workspace (no row) fails open against the env baseline', async () => {
+test('enforceRunBudget: an unconfigured account (no row) fails open against the env baseline', async () => {
   await assert.doesNotReject(() => enforceRunBudget(deps, 'qa', 'nonexistent-ws'));
 });
 
@@ -211,7 +211,7 @@ async function makeAlertsRoom(accountId) {
 }
 
 test('enforceRunBudget: repeated breaches in the same episode send only ONE chat alert', async () => {
-  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, window_minutes: 30, notify: true }));
+  const ws = await makeAccount(JSON.stringify({ max_runs_per_window: 1, window_minutes: 30, notify: true }));
   await makeAlertsRoom(ws.id);
   await makeQaRun(ws.id); // consumes the only slot in the window
 
@@ -231,8 +231,8 @@ test('enforceRunBudget: repeated breaches in the same episode send only ONE chat
 });
 
 test('enforceRunBudget: breaches in DIFFERENT accounts (or kinds) each get their own alert', async () => {
-  const wsA = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: true }));
-  const wsB = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: true }));
+  const wsA = await makeAccount(JSON.stringify({ max_runs_per_window: 1, notify: true }));
+  const wsB = await makeAccount(JSON.stringify({ max_runs_per_window: 1, notify: true }));
   await makeAlertsRoom(wsA.id);
   await makeAlertsRoom(wsB.id);
   await makeQaRun(wsA.id);
@@ -248,8 +248,8 @@ test('enforceRunBudget: breaches in DIFFERENT accounts (or kinds) each get their
   const notifyDeps = { dataSource: ds, roomMessagingService, logger: logStub };
 
   await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', wsA.id));
-  await assert.rejects(() => enforceRunBudget(notifyDeps, 'action', wsA.id)); // different kind, same workspace
-  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', wsB.id)); // different workspace
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'action', wsA.id)); // different kind, same account
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', wsB.id)); // different account
 
-  assert.equal(sent.length, 3, 'each distinct workspace|kind episode gets its own alert');
+  assert.equal(sent.length, 3, 'each distinct account|kind episode gets its own alert');
 });

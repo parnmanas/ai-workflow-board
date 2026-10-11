@@ -1,17 +1,17 @@
 // Stable work links address tickets by id. Ownership is enforced by the server.
-export function ticketsPagePath(wsId: string): string {
+export function ticketsPagePath(accountId: string): string {
   return `/tickets`;
 }
 
 export function ticketPath(
-  wsId: string,
+  accountId: string,
   ticketId: string,
   opts?: { commentId?: string | null },
 ): string {
   const qs = new URLSearchParams();
   qs.set('ticket', ticketId);
   if (opts?.commentId) qs.set('comment', opts.commentId);
-  return `${ticketsPagePath(wsId)}?${qs.toString()}`;
+  return `${ticketsPagePath(accountId)}?${qs.toString()}`;
 }
 
 /** Ownership metadata is not required to follow a ticket id. */

@@ -38,7 +38,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     role: 'admin',
     status: 'active',
     permissions: [],
-    accounts: [{ id: 'workspace-1', name: 'Account', slug: null, relations: [] }],
+    accounts: [{ id: 'account-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => [];
@@ -46,7 +46,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     {
       instance_id: 'inst-1',
       hostname: 'host-1',
-      account_id: 'workspace-1',
+      account_id: 'account-1',
       codex_installed: true,
       codex_healthy: true,
       claude_installed: true,
@@ -75,7 +75,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
   };
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { accountId: 'workspace-1' }),
+    React.createElement(CredentialManager, { accountId: 'account-1' }),
   );
   await flush();
 

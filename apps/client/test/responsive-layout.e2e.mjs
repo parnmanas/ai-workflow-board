@@ -37,7 +37,7 @@ async function fixture(page, { busy = false, withStep = false } = {}) {
     if (path === '/auth/me') body = { id: 'user-test', name: 'Test user', email: 'test@example.test', role: 'admin', status: 'active', permissions: [], resolved_permissions: ['admin.access', 'admin.actions', 'agent_sessions.use', 'voice.use'], accounts: [account] };
     else if (path === '/cli-catalog') body = { clis: cliCatalog() };
     else if (path === '/auth/setup-status') body = { needs_setup: false };
-    else if (path === '/accounts') body = [account];
+    else if (path === '/workspaces') body = [account];
     else if (path === `/accounts/${account.id}`) body = account;
     else if (path === '/admin/agent-manager/instances') body = [{ instance_id: 'instance', host_id: host.manager_id, agent_id: host.manager_id, agent_name: host.name, hostname: host.hostname, account_id: account.id, mode: 'manager', cli: 'mixed', cli_adapters: ['codex'], pid: 123, plugin_version: '1.0.0', started_at: live.updated_at, last_seen_at: live.updated_at, working_dirs: [], agent_ids: [] }];
     else if (path === '/voice/config') body = { stt: { provider: 'openai', ready: true }, tts: { provider: 'openai', ready: true }, wake: { ready: false } };

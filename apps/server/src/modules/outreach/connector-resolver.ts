@@ -23,7 +23,7 @@ import { OutreachConnector } from './connectors/types';
 // Reddit requires a descriptive, non-default User-Agent identifying the
 // client (ticket risk item: "봇 계정 규약 — User-Agent 명시"). Kept as a single
 // constant (not per-channel-configurable) since every AWB-operated Reddit
-// channel is the same bot software, regardless of which subreddits/workspace
+// channel is the same bot software, regardless of which subreddits/account
 // it's configured for.
 export const REDDIT_USER_AGENT = 'AwbOutreachBot/1.0 (by /u/awb-outreach-bot; automated release notes + feedback triage; github.com/parnmanas/ai-workflow-board)';
 

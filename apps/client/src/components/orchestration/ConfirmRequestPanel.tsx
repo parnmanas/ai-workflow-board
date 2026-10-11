@@ -155,11 +155,11 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
 
 function ConfirmCard({
   step,
-  wsId,
+  accountId,
   onDecided,
 }: {
   step: OrchestrationStep;
-  wsId: string;
+  accountId: string;
   onDecided: () => void;
 }) {
   const { showToast } = useToast();
@@ -172,7 +172,7 @@ function ConfirmCard({
     setSubmitting(verdict);
     try {
       const result = await api.submitOrchestrationStepConfirm(step.id, {
-        account_id: wsId,
+        account_id: accountId,
         verdict,
         visit: step.visit,
         feedback: feedback.trim() || undefined,
@@ -274,11 +274,11 @@ function ConfirmCard({
 
 export default function ConfirmRequestPanel({
   steps,
-  wsId,
+  accountId,
   onDecided,
 }: {
   steps: OrchestrationStep[];
-  wsId: string;
+  accountId: string;
   onDecided: () => void;
 }) {
   const waiting = steps.filter((s) => s.status === 'awaiting_user');
@@ -305,7 +305,7 @@ export default function ConfirmRequestPanel({
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {waiting.map((s) => (
-          <ConfirmCard key={s.id} step={s} wsId={wsId} onDecided={onDecided} />
+          <ConfirmCard key={s.id} step={s} accountId={accountId} onDecided={onDecided} />
         ))}
       </div>
     </section>

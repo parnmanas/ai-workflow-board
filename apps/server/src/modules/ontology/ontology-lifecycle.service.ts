@@ -99,8 +99,8 @@ export class OntologyLifecycleService {
 
   /**
    * graph_status와, (resource_id, folder_path)로 호출된 나머지 5개 그래프
-   * 툴이 공유하는 단일 해소 지점. graph_id가 주어지면 그 행을 workspace
-   * 경계까지 확인해 반환한다(다른 워크스페이스 소유 그래프는 not_found로
+   * 툴이 공유하는 단일 해소 지점. graph_id가 주어지면 그 행을 account
+   * 경계까지 확인해 반환한다(다른 계정 소유 그래프는 not_found로
    * 취급 — 존재 여부를 흘리지 않는다). graph_id가 없으면 resource_id(+
    * folder_path)로 찾거나-없으면-만든다 — 새로 만들어졌으면 최초 빌드를
    * fire-and-forget으로 킥오프한다(DESIGN.md A1: 이 경로 덕분에 어떤
@@ -111,7 +111,7 @@ export class OntologyLifecycleService {
     if (input.graphId) {
       const graph = await repo.findOne({ where: { id: input.graphId } });
       if (!graph || graph.account_id !== input.accountId) {
-        throw new GraphRefResolutionError('Ontology graph not found in this workspace', 'not_found');
+        throw new GraphRefResolutionError('Ontology graph not found in this account', 'not_found');
       }
       return graph;
     }
@@ -256,7 +256,7 @@ export class OntologyLifecycleService {
     const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
     const graph = await repo.findOne({ where: { id: input.graphId } });
     if (!graph || graph.account_id !== input.accountId) {
-      throw new GraphRefResolutionError('Ontology graph not found in this workspace', 'not_found');
+      throw new GraphRefResolutionError('Ontology graph not found in this account', 'not_found');
     }
 
     const claim = await repo

@@ -10,15 +10,15 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export const activityEvents = new EventEmitter();
 
 export interface LogActivityParams {
-  // 'board' | 'agent' added for cross-workspace move (WorkspaceMoveService):
+  // 'board' | 'agent' added for cross-account move (AccountMoveService):
   // a board/agent move is not tied to a single ticket, so entity_type widens
   // beyond the ticket/comment pair and `ticket_id` is passed as '' for them.
-  // 'account' added (ticket 1fcba693) for the workspace config-change audit —
+  // 'account' added (ticket 1fcba693) for the account config-change audit —
   // a settings PATCH (e.g. supervisor_stale_ms) is account-scoped, not tied to
   // a ticket, so `ticket_id` is '' and `account_id` carries the scope.
   // 'migration' (ticket 0f638509, 리뷰 라운드1 P3) — 소스 서버의 live pull
   // import export 표면(GET /api/migration/export/*) 접근 감사. 이 표면은
-  // 전 워크스페이스의 크리덴셜을 평문으로 반환할 수 있는 표면이라 account_id
+  // 전 계정의 크리덴셜을 평문으로 반환할 수 있는 표면이라 account_id
   // 하나로 스코프되지 않는다 — entity_id가 대신 "무엇을"(엔티티명 또는
   // 'meta') 나타낸다.
   entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'account' | 'credential' | 'migration';
@@ -28,7 +28,7 @@ export interface LogActivityParams {
   // varchar (no DB constraint) and the event-registry `board_update` entry
   // forwards `action` verbatim, so widening this union is the only step needed
   // for them to persist AND ride the live SSE stream like any other activity.
-  // 'config_changed' (ticket 1fcba693) is the grep-able workspace settings-change
+  // 'config_changed' (ticket 1fcba693) is the grep-able account settings-change
   // audit action (actor + old→new + source), so a value like the 4 h
   // supervisor_stale_ms band-aid can never again be applied without a trail.
   action:
@@ -38,7 +38,7 @@ export interface LogActivityParams {
     // 'credential_scope_changed': an operator moved a Credential between
     // global (instance-wide) and Account scope. Who can read the secret
     // changes with it, so old_value/new_value carry the scope either side
-    // ('global' | 'workspace:<id>') — never the secret itself.
+    // ('global' | 'account:<id>') — never the secret itself.
     | 'credential_scope_changed'
     // 'dispatch_deferred' (ticket bfdd80b7): a dispatch targeted an agent that
     // is not reachable (never-started / offline). Written via logActivity — NOT
@@ -67,7 +67,7 @@ export interface LogActivityParams {
   actor_id?: string;
   actor_name?: string;
   ticket_id: string;
-  account_id?: string;   // scope for non-ticket entities (workspace config); '' if omitted
+  account_id?: string;   // scope for non-ticket entities (account config); '' if omitted
   role?: string;           // agent role; written as '' if omitted
   trigger_source?: string; // 'agent_trigger' | 'manual' | ''; written as '' if omitted
 }
@@ -155,7 +155,7 @@ export class ActivityService {
    * caller's other writes, and returns it WITHOUT emitting the live SSE event.
    * The caller must call emitLogged() once the enclosing transaction commits, so
    * a row that ends up rolled back never rides the activity stream. Used by the
-   * workspace config-change audit, which must be atomic with the settings save:
+   * account config-change audit, which must be atomic with the settings save:
    * a cadence value (e.g. the incident's 4 h supervisor_stale_ms) can never
    * persist without its audit row — best-effort swallowing would re-open exactly
    * the "changed with no trail" gap this audit closes.

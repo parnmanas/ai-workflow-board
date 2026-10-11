@@ -84,7 +84,7 @@ export function registerBuildTools(server: McpServer, ctx: ToolContext) {
     'register_build_artifact',
     'Record a build in the registry so the next run (any scenario on the same repo+commit) can ' +
     'reuse it instead of rebuilding. Call this AFTER a successful build with the artifact path. ' +
-    'Upserts by (workspace, repo, target, commit_sha, host) — a rebuild of the same commit updates ' +
+    'Upserts by (account, repo, target, commit_sha, host) — a rebuild of the same commit updates ' +
     'the existing row. Default status is `ok`; pass status `building` to claim an in-flight build.',
     {
       account_id: z.string().describe('Account ID (required, scope guard)'),

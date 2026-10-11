@@ -44,7 +44,7 @@ const labelStyle: React.CSSProperties = {
 };
 
 // Atomic ticket creation — every field captured together and POSTed once to
-// POST /accounts/:wsId/tickets. Before this modal, a stub row with title-only
+// POST /accounts/:accountId/tickets. Before this modal, a stub row with title-only
 // was written immediately and the description followed as a separate PATCH;
 // the assignee picked up the empty stub before the human finished typing.
 // Requiring description here gives "done composing" an unambiguous signal.
@@ -83,9 +83,9 @@ export default function CreateTicketForm({
   const [errors, setErrors] = useState<{ title?: string; description?: string; assignee?: string }>({});
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) || null, [projects, projectId]);
-  // Whole-workspace tags (not just the current filter's facet).
-  const workspaceTags = useTicketTags(accountId, isOpen);
-  const tagSuggestions = useMemo(() => mergeTagSuggestions(workspaceTags, knownTags), [workspaceTags, knownTags]);
+  // Whole-account tags (not just the current filter's facet).
+  const accountTags = useTicketTags(accountId, isOpen);
+  const tagSuggestions = useMemo(() => mergeTagSuggestions(accountTags, knownTags), [accountTags, knownTags]);
 
   useEffect(() => {
     if (!isOpen) return;

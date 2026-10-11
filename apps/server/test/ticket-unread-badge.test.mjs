@@ -1,7 +1,7 @@
 // 사이드바 티켓 뱃지(99+/36) 근거 불투명 — 티켓 628f4b39.
 //
 // GET /tickets/unread-counts (per-ticket 집계)와 POST /tickets/read-all
-// (워크스페이스 단위 일괄 읽음)의 통합 회귀 테스트. tickets-leak.test.mjs 와
+// (계정 단위 일괄 읽음)의 통합 회귀 테스트. tickets-leak.test.mjs 와
 // 동일하게 컴파일된 dist/ 에서 NestJS 앱을 인프로세스로 부팅하고, 픽스처는
 // TypeORM 레포로 직접 심어 (코멘트 생성 HTTP 경로의 멘션/디스패치 부수효과를
 // 피하고) 엔드포인트만 실제 HTTP 로 구동한다.
@@ -64,7 +64,7 @@ async function loadServerModules() {
     return { NestFactory, AppModule, AuthService, ReBACService, activityEvents, getDataSourceToken };
   } catch (err) {
     throw new Error(
-      'ticket-unread-badge test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
+      'ticket-unread-badge test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message
     );
   }
 }
@@ -176,7 +176,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     assert.equal('ticketBoard' in res.data, false);
   });
 
-  it('read-all: clears every involved ticket workspace-wide, including already-read ones, and emits ticket_reads_cleared', async () => {
+  it('read-all: clears every involved ticket account-wide, including already-read ones, and emits ticket_reads_cleared', async () => {
     const emitted = captureNextTicketReadsCleared(activityEvents);
     const res = await apiRequest(BASE_URL, '/tickets/read-all', {
       token: viewerToken, accountId: ws.id, method: 'POST', body: {},

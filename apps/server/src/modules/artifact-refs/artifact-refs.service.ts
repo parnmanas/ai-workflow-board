@@ -69,44 +69,44 @@ export class ArtifactRefsService {
   private async resolveOne(
     ref: { type: ArtifactRefType; id: string },
     accountId: string,
-    workspaceAllowed: boolean,
+    accountAllowed: boolean,
     accountName?: string,
     allowedAccountIds?: string[],
   ): Promise<ResolvedArtifactRef> {
     if (!ARTIFACT_REF_TYPES.includes(ref.type) || !UUID_RE.test(ref.id)) {
       return this.unavailable(ref.type, ref.id, 'malformed_id');
     }
-    if (!workspaceAllowed) return this.unavailable(ref.type, ref.id, 'account_access_denied');
+    if (!accountAllowed) return this.unavailable(ref.type, ref.id, 'account_access_denied');
 
     let entity: any = null;
-    let entityWorkspace: string | null = null;
+    let entityAccount: string | null = null;
     let label = '';
     let deepLink: string | null = null;
     if (ref.type === 'ticket') {
       entity = await this.tickets.findOne({ where: { id: ref.id } });
-      entityWorkspace = entity?.account_id ?? null;
+      entityAccount = entity?.account_id ?? null;
       label = entity?.title || '';
       deepLink = entity ? ticketPath(accountId, entity.id) : null;
     } else if (ref.type === 'agent') {
       // P4c-4: Host/링크 해소 (Agent 테이블 없음, agents UI 제거 — 딥링크 없음).
       const identity = await resolveCallerIdentityRow(this.dataSource, ref.id);
       entity = identity as any;
-      entityWorkspace = identity?.account_id ?? accountId;
+      entityAccount = identity?.account_id ?? accountId;
       label = identity?.name || '';
       deepLink = null;
     } else {
       const repo = ref.type === 'action' ? this.actions : ref.type === 'function' ? this.functions : this.schedules;
       entity = await repo.findOne({ where: { id: ref.id } as any });
-      entityWorkspace = entity?.account_id ?? null;
+      entityAccount = entity?.account_id ?? null;
       label = entity?.name || entity?.key || '';
       const surface = ref.type === 'action' ? 'actions' : ref.type === 'function' ? 'functions' : 'schedules';
       deepLink = entity ? `/${surface}?artifact=${entity.id}` : null;
     }
     if (!entity) return this.unavailable(ref.type, ref.id, 'not_found');
     if (allowedAccountIds) {
-      if (entityWorkspace && !allowedAccountIds.includes(entityWorkspace)) return this.unavailable(ref.type, ref.id, 'account_access_denied');
-      if (entityWorkspace) accountName = (await this.accounts.findOne({ where: { id: entityWorkspace } }))?.name;
-    } else if (entityWorkspace !== accountId && !(ref.type === 'function' && entityWorkspace === null)) {
+      if (entityAccount && !allowedAccountIds.includes(entityAccount)) return this.unavailable(ref.type, ref.id, 'account_access_denied');
+      if (entityAccount) accountName = (await this.accounts.findOne({ where: { id: entityAccount } }))?.name;
+    } else if (entityAccount !== accountId && !(ref.type === 'function' && entityAccount === null)) {
       return this.unavailable(ref.type, ref.id, 'outside_account');
     }
     if (!deepLink) {

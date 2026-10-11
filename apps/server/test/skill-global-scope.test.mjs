@@ -6,14 +6,14 @@ import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 // unrepresentable. These tests lock the contract that replaced it:
 //
 //   1. Global (account_id NULL) + Account scope, per docs/catalog-scopes.md.
-//   2. A workspace skill SHADOWS a global one with the same slug (the
+//   2. A account skill SHADOWS a global one with the same slug (the
 //      precedence WorkflowFunction uses for its key), and forking is how a
-//      workspace diverges from a built-in.
-//   3. A workspace caller may READ and ASSIGN a global skill but never publish
+//      account diverges from a built-in.
+//   3. A account caller may READ and ASSIGN a global skill but never publish
 //      into it or quarantine it — those are admin/global operations.
 //   4. A run's pinned manifest includes global skills. This is the regression
 //      that would silently ship a run WITHOUT the built-in skills the operator
-//      assigned, because the old resolver filtered versions by workspace.
+//      assigned, because the old resolver filtered versions by account.
 //   5. The built-in pack seeds at boot, is idempotent, append-only, and treats
 //      quarantine as an operator veto.
 //
@@ -83,7 +83,7 @@ test('re-seeding is idempotent — identical content publishes no new version', 
 });
 
 // ─── 2. Scope, visibility, shadowing ─────────────────────────────────────────
-test('a workspace sees global + its own skills, and never another workspace\'s', async () => {
+test('a account sees global + its own skills, and never another account\'s', async () => {
   const mine = await skills.create(ws.id, {
     slug: `ws-only-${stamp}`, name: 'Account only', body: '# ws only\n',
   }, 'tester', 'account');
@@ -93,15 +93,15 @@ test('a workspace sees global + its own skills, and never another workspace\'s',
 
   const visible = await skills.list(ws.id);
   const slugs = new Set(visible.map((s) => s.slug));
-  assert.ok(slugs.has(`ws-only-${stamp}`), 'own workspace skill must be visible');
-  assert.ok(slugs.has('systematic-debugging'), 'global built-in must be visible from a workspace');
-  assert.ok(!slugs.has(`other-only-${stamp}`), "another workspace's skill must NOT leak in");
+  assert.ok(slugs.has(`ws-only-${stamp}`), 'own account skill must be visible');
+  assert.ok(slugs.has('systematic-debugging'), 'global built-in must be visible from a account');
+  assert.ok(!slugs.has(`other-only-${stamp}`), "another account's skill must NOT leak in");
 
   assert.equal(mine.scope, 'account');
   assert.equal(visible.find((s) => s.slug === 'systematic-debugging').scope, 'global');
 });
 
-test('a workspace skill shadows a global one with the same slug; include_shadowed reveals both', async () => {
+test('a account skill shadows a global one with the same slug; include_shadowed reveals both', async () => {
   const globalSkill = (await skills.listGlobal()).find((s) => s.slug === 'systematic-debugging');
   assert.ok(globalSkill, 'scene precondition: the built-in exists');
 
@@ -112,7 +112,7 @@ test('a workspace skill shadows a global one with the same slug; include_shadowe
   const shadowed = await skills.list(ws.id);
   const matches = shadowed.filter((s) => s.slug === 'systematic-debugging');
   assert.equal(matches.length, 1, 'default listing must return ONE row per slug');
-  assert.equal(matches[0].account_id, ws.id, 'the workspace fork must win over the global');
+  assert.equal(matches[0].account_id, ws.id, 'the account fork must win over the global');
 
   const all = await skills.list(ws.id, { includeShadowed: true });
   const both = all.filter((s) => s.slug === 'systematic-debugging');
@@ -120,35 +120,35 @@ test('a workspace skill shadows a global one with the same slug; include_shadowe
   const globalRow = both.find((s) => !s.account_id);
   assert.equal(globalRow.shadowed, true, 'the overridden global must be flagged shadowed');
 
-  // The other workspace has no fork, so it still resolves to the global.
+  // The other account has no fork, so it still resolves to the global.
   const elsewhere = await skills.list(other.id);
   const theirs = elsewhere.filter((s) => s.slug === 'systematic-debugging');
   assert.equal(theirs.length, 1);
-  assert.equal(theirs[0].account_id, null, 'a fork in one workspace must not affect another');
+  assert.equal(theirs[0].account_id, null, 'a fork in one account must not affect another');
 });
 
 // ─── 3. Write authorization ──────────────────────────────────────────────────
-test('a workspace caller cannot publish into or quarantine a global skill', async () => {
+test('a account caller cannot publish into or quarantine a global skill', async () => {
   const globalSkill = (await skills.listGlobal()).find((s) => s.slug === 'plan-before-building');
 
   await assert.rejects(
     () => skills.publish(ws.id, globalSkill.id, { body: '# hijacked\n' }, 'tester'),
     (err) => err.status === 403 && err.code === 'skill_scope_readonly',
-    'publishing into a global skill from a workspace must be refused — it is inherited by every workspace',
+    'publishing into a global skill from a account must be refused — it is inherited by every account',
   );
   await assert.rejects(
     () => skills.quarantine(ws.id, globalSkill.id),
     (err) => err.status === 403,
-    'quarantining a global skill from a workspace must be refused',
+    'quarantining a global skill from a account must be refused',
   );
 
-  // The admin path (empty workspace id) is allowed.
+  // The admin path (empty account id) is allowed.
   const published = await skills.publish('', globalSkill.id, { body: '# admin edit\n' }, 'admin');
   assert.equal(published.account_id, null, "a global skill's versions must stay global");
   assert.equal(published.version, 2, 'version numbering must continue across the global skill');
 });
 
-test('a workspace caller cannot publish into another workspace\'s skill', async () => {
+test('a account caller cannot publish into another account\'s skill', async () => {
   const theirs = await skills.create(other.id, {
     slug: `theirs-${stamp}`, name: 'Theirs', body: '# theirs\n',
   }, 'tester', 'account');
@@ -162,7 +162,7 @@ test('a workspace caller cannot publish into another workspace\'s skill', async 
 test('a run snapshot includes an assigned GLOBAL skill', async () => {
   const globalSkill = (await skills.listGlobal()).find((s) => s.slug === 'handoff-notes');
   const detail = await skills.get(ws.id, globalSkill.id);
-  assert.ok(detail.versions.length > 0, 'a global skill must expose its versions to a workspace reader');
+  assert.ok(detail.versions.length > 0, 'a global skill must expose its versions to a account reader');
 
   const runtime = { manager_agent_id: agent.manager_agent_id, cli: 'codex', working_dir: '/tmp/skills', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
   await skills.assign(ws.id, globalSkill.id, {

@@ -305,7 +305,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
       : await this.resolve(String(args.functionKey || ''), args.accountId);
     if (!fn) throw httpError(404, 'Function not found');
     if (fn.account_id !== null && fn.account_id !== args.accountId) {
-      throw httpError(403, 'Function belongs to a different workspace');
+      throw httpError(403, 'Function belongs to a different account');
     }
     if (!fn.enabled) throw httpError(409, 'Function is disabled');
     if (fn.approval_policy === 'admin' && args.actorRole !== 'admin') {
@@ -476,7 +476,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (!args.ticketId) throw httpError(400, `${handler} requires ticket_id`);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const ticket = await ticketRepo.findOne({ where: { id: args.ticketId } });
-    if (!ticket || ticket.account_id !== args.accountId) throw httpError(404, 'Ticket not found in workspace');
+    if (!ticket || ticket.account_id !== args.accountId) throw httpError(404, 'Ticket not found in account');
     if (handler === 'workflow.ticket_snapshot') {
       return {
         ticket: {

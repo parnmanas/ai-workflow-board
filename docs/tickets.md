@@ -3,7 +3,7 @@
 **When:** you touch ticket creation, ticket status, ticket dispatch to an agent,
 ticket filtering (tags / project), repositories, or a per-host working folder.
 
-The Board and workspace work-navigation concepts are gone. `/tickets` combines
+The Board and account work-navigation concepts are gone. `/tickets` combines
 the accounts the user may access, classified by **tags** and an optional
 **project**, and every ticket is done by **one agent**
 (the assignee), who may fan the work out to its own subagents.
@@ -119,7 +119,7 @@ aliases; new clients use the canonical account contract.
 | GET | `/tickets/:id` | | full ticket (as before + fields above, `project` summary, children, comments…) |
 | PATCH | `/tickets/:id` | any of `title, description, priority, tags, project_id, base_branch, assignee, prompt_text, pending_*, next_ticket_id, on_done_action_ids` | full ticket |
 | PATCH | `/tickets/:id/move` | `{ status, position? }` | full ticket |
-| POST | `/tickets/:id/trigger` | `{}` | `{ ok, dispatched, reason? }` — manual Run. `reason`: `unassigned`, `pending`, `archived`, `duplicate`, `workspace_paused`, `host_offline`, `agent_busy`, `queued`, `status_<s>` |
+| POST | `/tickets/:id/trigger` | `{}` | `{ ok, dispatched, reason? }` — manual Run. `reason`: `unassigned`, `pending`, `archived`, `duplicate`, `account_paused`, `host_offline`, `agent_busy`, `queued`, `status_<s>` |
 | POST | `/tickets/:parentId/children` | `{ title, description?, tags? }` | child |
 | POST | `/tickets/:id/archive` · `/unarchive` · DELETE `/tickets/:id` | | as before |
 | comments / attachments / prerequisites / read-state / presence / typing | unchanged paths | | |

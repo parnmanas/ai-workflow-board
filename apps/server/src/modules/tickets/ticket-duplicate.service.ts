@@ -274,7 +274,7 @@ export class TicketDuplicateService {
       const previousCanonicalId = report.canonical_ticket_id;
       const canonical = await tickets.findOne({ where: { id: previousCanonicalId } });
       if (!canonical || canonical.account_id !== report.account_id || canonical.id === report.id) {
-        throw new Error('Confirmed canonical link is invalid or outside the ticket workspace');
+        throw new Error('Confirmed canonical link is invalid or outside the ticket account');
       }
       // PostgreSQL READ COMMITTED 에서는 두 호출이 기존 canonical 을 함께 읽을 수
       // 있지만, 그 값을 NULL 로 바꾸는 호출은 하나뿐이어야 한다.

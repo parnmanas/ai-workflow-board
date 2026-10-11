@@ -30,10 +30,10 @@ const NEW = '__new__';
 
 export default function ProjectsPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const [searchParams] = useSearchParams();
   const { showToast } = useToast();
-  const { projects: listed, loading, error, reload } = useProjects(wsId);
+  const { projects: listed, loading, error, reload } = useProjects(accountId);
 
   // 마지막 쓰기 결과 — 공유 목록 재조회가 따라오기 전까지 화면에 먼저 반영한다.
   const [lastSaved, setLastSaved] = useState<Project | null>(null);
@@ -47,7 +47,7 @@ export default function ProjectsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get('project'));
   const [query, setQuery] = useState('');
   const selectedProject = selectedId && selectedId !== NEW ? projects.find((p) => p.id === selectedId) || null : null;
-  const detailAccountId = selectedProject?.account_id || wsId;
+  const detailAccountId = selectedProject?.account_id || accountId;
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [hosts, setHosts] = useState<Array<{ id: string; name: string }>>([]);
   const [hostsLoading, setHostsLoading] = useState(true);

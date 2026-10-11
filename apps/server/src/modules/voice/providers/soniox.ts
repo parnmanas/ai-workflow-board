@@ -39,21 +39,21 @@ export const sonioxStt: SttProvider = {
     return new Promise<string>((resolve, reject) => {
       const finals: string[] = [];
       let settled = false;
-      const ws = new WS(SONIOX_WS_URL);
-      ws.binaryType = 'arraybuffer';
+      const account = new WS(SONIOX_WS_URL);
+      account.binaryType = 'arraybuffer';
 
       const finish = (err: Error | null) => {
         if (settled) return;
         settled = true;
         ctx.signal?.removeEventListener('abort', onAbort);
-        try { ws.close(); } catch { /* already closed */ }
+        try { account.close(); } catch { /* already closed */ }
         if (err) reject(err);
         else resolve(finals.join(''));
       };
       const onAbort = () => finish(new Error('aborted'));
       ctx.signal?.addEventListener('abort', onAbort);
 
-      ws.onopen = () => {
+      account.onopen = () => {
         const config: Record<string, unknown> = {
           api_key: ctx.config.keys.soniox,
           model: input.model,
@@ -62,15 +62,15 @@ export const sonioxStt: SttProvider = {
         };
         if (input.languages.length) config.language_hints = input.languages;
         if (input.terms.length) config.context = { terms: input.terms };
-        ws.send(JSON.stringify(config));
+        account.send(JSON.stringify(config));
         for (let i = 0; i < input.audio.length; i += FRAME_BYTES) {
           const slice = input.audio.subarray(i, Math.min(i + FRAME_BYTES, input.audio.length));
-          ws.send(new Uint8Array(slice));
+          account.send(new Uint8Array(slice));
         }
-        ws.send(''); // 오디오 끝
+        account.send(''); // 오디오 끝
       };
 
-      ws.onmessage = (event: MessageEvent) => {
+      account.onmessage = (event: MessageEvent) => {
         let msg: SonioxMessage;
         try {
           msg = JSON.parse(typeof event.data === 'string' ? event.data : Buffer.from(event.data as ArrayBuffer).toString('utf8'));
@@ -87,8 +87,8 @@ export const sonioxStt: SttProvider = {
         if (msg.finished) finish(null);
       };
 
-      ws.onerror = () => finish(new Error('soniox connection failed'));
-      ws.onclose = (event: CloseEvent) => {
+      account.onerror = () => finish(new Error('soniox connection failed'));
+      account.onclose = (event: CloseEvent) => {
         if (!settled) finish(new Error(`soniox closed the connection before finishing (code ${event.code}${event.reason ? `: ${event.reason}` : ''})`));
       };
     });

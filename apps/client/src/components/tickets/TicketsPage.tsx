@@ -48,7 +48,7 @@ function storage(): Storage | null {
  */
 export default function TicketsPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const compact = useMediaQuery('(max-width: 1100px)');
   const [searchParams, setSearchParams] = useSearchParams();
   const { showToast } = useToast();
@@ -67,17 +67,17 @@ export default function TicketsPage() {
     writeTicketView(storage(), next);
   }, []);
 
-  const data = useTicketsData(wsId, filters);
-  const { projects } = useProjects(wsId);
+  const data = useTicketsData(accountId, filters);
+  const { projects } = useProjects(accountId);
   const hostNames = useHostNames();
   const projectNames = useMemo(() => Object.fromEntries(projects.map((p) => [p.id, p.name])), [projects]);
 
   // ── Account (dispatch pause banner) ──────────────────────────────
   const [account, setAccount] = useState<Account | null>(null);
   const loadAccount = useCallback(() => {
-    if (!wsId) return;
-    api.getAccount(wsId).then(setAccount).catch(() => setAccount(null));
-  }, [wsId]);
+    if (!accountId) return;
+    api.getAccount(accountId).then(setAccount).catch(() => setAccount(null));
+  }, [accountId]);
   useEffect(() => { loadAccount(); }, [loadAccount]);
 
   // ── Filters ⇄ URL ──────────────────────────────────────────────────
@@ -98,7 +98,7 @@ export default function TicketsPage() {
     setAssigneeOpts(assigneeOptions(data.tickets, hostNames));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.tickets, hostNames, filters.assigneeKey]);
-  useEffect(() => { setAssigneeOpts([]); }, [wsId]);
+  useEffect(() => { setAssigneeOpts([]); }, [accountId]);
 
   const facet = useMemo(
     () => tagFacet(data.tagCounts, data.tickets, filters.tags),
@@ -247,9 +247,9 @@ export default function TicketsPage() {
 
   const canAdmin = hasPermission('admin.access');
   const handleResumeDispatch = useCallback(() => wrapAction(async () => {
-    await api.updateAccount(wsId, { dispatch_paused_at: null });
+    await api.updateAccount(accountId, { dispatch_paused_at: null });
     loadAccount();
-  }, '티켓 디스패치를 재개했습니다'), [wrapAction, wsId, loadAccount]);
+  }, '티켓 디스패치를 재개했습니다'), [wrapAction, accountId, loadAccount]);
 
   // ── Kanban drag & drop ─────────────────────────────────────────────
   const lanes = useMemo(() => groupByStatus(data.tickets), [data.tickets]);
@@ -331,9 +331,9 @@ export default function TicketsPage() {
         agents={[]}
         users={data.users}
         channels={data.channels}
-        workspaceTickets={data.tickets}
+        accountTickets={data.tickets}
         typingIndicators={data.typingIndicators}
-        accountId={wsId}
+        accountId={accountId}
         onClose={closeTicket}
         onUpdate={(id, fields) => wrapAction(() => data.updateTicket(id, fields))}
         onMove={handleMove}
@@ -469,7 +469,7 @@ export default function TicketsPage() {
 
       <CreateTicketForm
         isOpen={createOpen}
-        accountId={wsId}
+        accountId={accountId}
         projects={projects}
         knownTags={data.tagCounts}
         initialProjectId={filters.projectId || undefined}

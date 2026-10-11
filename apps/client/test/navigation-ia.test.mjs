@@ -83,7 +83,7 @@ test('settings remain one click away and own canonical nested routes', () => {
   // Account roles 는 보드와 함께 없어졌다(docs/tickets.md) — 메뉴도 라우트도 없다.
   assert.doesNotMatch(sidebarSource, /settings\/roles/);
   assert.doesNotMatch(appSource, /path="settings\/roles"/);
-  assert.doesNotMatch(appSource, /WorkspaceRolesPage/);
+  assert.doesNotMatch(appSource, /AccountRolesPage/);
 });
 
 test('desktop always keeps the primary sidebar visible', () => {
@@ -97,7 +97,7 @@ test('WORK 은 Tickets / Teams / Orchestrations 를 독립 라우트로 갖고 �
   // 여기서는 라우트 "등록" 자체(그 테스트가 볼 수 없는 부분)를 고정한다.
   assert.match(appSource, /path="teams" element=\{<OrchestrationTeamsPage \/>\}/);
   assert.match(appSource, /path="missions" element=\{<OrchestrationPage \/>\}/);
-  assert.match(appSource, /path="orchestration\/\*" element=\{<LegacyWorkspaceRedirect \/>\}/);
+  assert.match(appSource, /path="orchestration\/\*" element=\{<LegacyPathRedirect \/>\}/);
   assert.match(appSource, /path="missions\/:missionId" element=\{<MissionDetailPage \/>\}/);
 
   // 사이드바에는 단수 'Orchestration' 라벨이 남지 않는다.
@@ -105,7 +105,7 @@ test('WORK 은 Tickets / Teams / Orchestrations 를 독립 라우트로 갖고 �
 });
 
 test('보드가 없어졌다: /tickets · /projects 라우트가 있고 예전 /boards/* 는 Tickets 로 리다이렉트된다', () => {
-  // docs/tickets.md — 워크스페이스 티켓 풀 하나 + 저장소는 Projects.
+  // docs/tickets.md — 계정 티켓 풀 하나 + 저장소는 Projects.
   assert.match(appSource, /path="tickets" element=\{<TicketsPage \/>\}/);
   assert.match(appSource, /path="projects" element=\{<ProjectsPage \/>\}/);
   assert.match(appSource, /path="boards\/\*" element=\{<LegacyBoardsRedirect \/>\}/);
@@ -115,6 +115,6 @@ test('보드가 없어졌다: /tickets · /projects 라우트가 있고 예전 /
   // 사이드바: Knowledge 에 Projects, Prompt Templates 는 없다.
   assert.match(sidebarSource, /key: 'projects', path: `\$\{basePath\}\/projects`/);
   assert.doesNotMatch(sidebarSource, /Prompt Templates/);
-  // 워크스페이스를 바꿀 때 섹션이 없으면 기본 랜딩(sessions)으로 간다 — 'boards' 가 아니다.
+  // 계정를 바꿀 때 섹션이 없으면 기본 랜딩(sessions)으로 간다 — 'boards' 가 아니다.
   assert.doesNotMatch(appLayoutSource, /\/boards/);
 });

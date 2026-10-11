@@ -135,10 +135,10 @@ export function decidePushReadiness(input: PushReadinessInput): PushReadinessDec
   return { ok: true };
 }
 
-// ── CLI workspace-trust / provider-auth preflight (ticket 48aeab6e) ─────────
+// ── CLI account-trust / provider-auth preflight (ticket 48aeab6e) ─────────
 //
 // Two more DOOMED-dispatch conditions, same family as push-credential above:
-//   - the checked-out CLI workspace was never trust-approved, and the workspace
+//   - the checked-out CLI account was never trust-approved, and the account
 //     harness `permission_mode` makes that trust dialog load-bearing (see
 //     CliAdapter.requiresWorkspaceTrust — the common `--dangerously-skip-
 //     permissions` default bypasses the dialog entirely, so this only bites
@@ -152,7 +152,7 @@ export function decidePushReadiness(input: PushReadinessInput): PushReadinessDec
 // probe shapes below are local mirrors (not imports) so this module stays
 // decoupled and unit-testable without touching an adapter.
 
-/** Facts the I/O shell (CliAdapter.readTrustMeta) observed about workspace
+/** Facts the I/O shell (CliAdapter.readTrustMeta) observed about account
  *  trust for one exact cwd. */
 export interface CliTrustProbe {
   /** hasTrustDialogAccepted for this exact cwd, per the CLI's own config. */
@@ -162,7 +162,7 @@ export interface CliTrustProbe {
 export interface CliTrustInput {
   /** CliAdapter.requiresWorkspaceTrust(harness) — false means this CLI/mode
    *  combination never surfaces an interactive trust dialog, so the probe is
-   *  irrelevant and this gate always passes (the common case: no workspace
+   *  irrelevant and this gate always passes (the common case: no account
    *  harness permission_mode override). */
   required: boolean;
   /** CliAdapter.readTrustMeta() result. Absent/null = the probe couldn't run
@@ -178,7 +178,7 @@ export interface CliTrustDecision {
   detail?: string;
 }
 
-/** Decide whether a dispatch may proceed w.r.t. CLI workspace trust. Blocks
+/** Decide whether a dispatch may proceed w.r.t. CLI account trust. Blocks
  *  ONLY when the trust dialog is load-bearing for this dispatch (`required`)
  *  AND the probe confidently shows the cwd is not trust-approved. Fails OPEN
  *  when the dialog is bypassed (the default) or the probe is ambiguous —
@@ -190,7 +190,7 @@ export function decideCliTrustReadiness(input: CliTrustInput): CliTrustDecision 
     ok: false,
     reason: 'cli_trust_required',
     detail:
-      'workspace trust not accepted for this checkout — the configured permission_mode requires an interactive trust dialog this dispatch cannot satisfy',
+      'account trust not accepted for this checkout — the configured permission_mode requires an interactive trust dialog this dispatch cannot satisfy',
   };
 }
 
@@ -481,7 +481,7 @@ export const DEFAULT_SPAWN_SUPPRESS_COOLDOWN_MS = 10 * 60_000;
 export const DEFAULT_PEND_AFTER_ABORTS = 3;
 
 /** Dispatch blocker `kind`s that an operator MUST fix by hand — a broken/empty/
- *  foreign checkout, a missing push credential, an unapproved CLI workspace
+ *  foreign checkout, a missing push credential, an unapproved CLI account
  *  trust dialog, an expired+unrenewable CLI OAuth session, or an unresolvable
  *  MCP transport in the CLI's own config never self-heals, so re-probing it
  *  only burns another CLI session and re-opens the live-twin window. Compared
@@ -497,7 +497,7 @@ const DURABLE_BLOCKER_REASONS = new Set<string>([
   'main_clone_not_git_repo',
   'main_clone_wrong_repository',
   'push_credential_unavailable', // remote auth rejected — operator must add a token
-  'cli_trust_required',          // workspace trust dialog unresolved (ticket 48aeab6e)
+  'cli_trust_required',          // account trust dialog unresolved (ticket 48aeab6e)
   'cli_credential_expired',      // OAuth session expired, no refresh token (ticket 48aeab6e)
   'invalid_mcp_transport',       // CLI config's mcp_servers.<name> has no resolvable transport (ticket da4358ee)
   // ticket 5851e435: Agent trust 가 approve 인데 런타임이 승인 요청을 만들 수

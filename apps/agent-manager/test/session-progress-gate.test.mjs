@@ -364,7 +364,7 @@ test('stale cli-home (no recent writes) does NOT count as progress (regression: 
 
 // ── 3c. P1 fix — signal 3 is SESSION-scoped, not agent-scoped (round-1 review) ──
 // Two sessions of the same agent normally run in two different cwds (each
-// ticket/room gets its own dedicated workspace folder), so they land in two
+// ticket/room gets its own dedicated account folder), so they land in two
 // different `projects/<encoded-cwd>/` subtrees under the SAME shared
 // cli-home root. Session B's writes must not read as session A's evidence.
 

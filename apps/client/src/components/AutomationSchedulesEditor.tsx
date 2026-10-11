@@ -391,11 +391,11 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
           <label style={fieldLabel}>무엇을 실행할까요</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
-              <input type="radio" name="ws-sched-target" checked={targetKind === 'prompt'} onChange={() => setTargetKind('prompt')} />
+              <input type="radio" name="account-sched-target" checked={targetKind === 'prompt'} onChange={() => setTargetKind('prompt')} />
               프롬프트 직접 입력
             </label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
-              <input type="radio" name="ws-sched-target" checked={targetKind === 'action'} onChange={() => setTargetKind('action')} />
+              <input type="radio" name="account-sched-target" checked={targetKind === 'action'} onChange={() => setTargetKind('action')} />
               등록된 Action 실행
             </label>
           </div>
@@ -446,11 +446,11 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
           <label style={fieldLabel}>실행 주기</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
-              <input type="radio" name="ws-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
+              <input type="radio" name="account-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
               주기 (interval)
             </label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
-              <input type="radio" name="ws-sched-cadence" checked={cadenceKind === 'cron'} onChange={() => setCadenceKind('cron')} />
+              <input type="radio" name="account-sched-cadence" checked={cadenceKind === 'cron'} onChange={() => setCadenceKind('cron')} />
               cron
             </label>
           </div>

@@ -1,10 +1,10 @@
 // Explicit provisioned-boundary index for `.awb/act` / `.awb/chat` run
-// workspaces (ticket 9fd27487, review round 3).
+// accounts (ticket 9fd27487, review round 3).
 //
 // worktree-manager's `#listRunWorkspaceLeaves` decides a directory is a leaf by
 // LOOKING AT ITS CONTENTS (a marker file, a `.git`, or plain files) and never
 // descends past a `.git` — anything under a checked-out repo is that repo's own
-// content, not a separate workspace boundary. That holds for the common case,
+// content, not a separate account boundary. That holds for the common case,
 // but nothing rejects a `workspace_folder` that is a PREFIX of another: Action A
 // (`workspace_folder='deploy'`, `repo_ref` set) provisions `.awb/act/deploy`
 // with its own `.git`; Action B (`workspace_folder='deploy/scripts'`)

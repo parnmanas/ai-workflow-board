@@ -10,8 +10,8 @@
 //   - repository Resources become Projects with the SAME id and leave
 //     `resources`;
 //   - tickets of an archived board are archived;
-//   - board settings with a workspace home move there;
-//   - board-scoped workflow functions become workspace rows unless that would
+//   - board settings with a account home move there;
+//   - board-scoped workflow functions become account rows unless that would
 //     collide, and the key indexes are rebuilt on the same boot;
 //   - the retired tables and the snapshots are dropped.
 
@@ -75,7 +75,7 @@ async function writeLegacyDb(file) {
       use_pr boolean NOT NULL DEFAULT 0, archived_at datetime, created_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE columns (id varchar PRIMARY KEY NOT NULL, board_id varchar NOT NULL, name varchar NOT NULL, position integer NOT NULL,
       is_terminal boolean NOT NULL DEFAULT 0, kind varchar NOT NULL DEFAULT '');
-    CREATE TABLE workspace_roles (id varchar PRIMARY KEY NOT NULL, account_id varchar NOT NULL, slug varchar NOT NULL, name varchar NOT NULL);
+    CREATE TABLE account_roles (id varchar PRIMARY KEY NOT NULL, account_id varchar NOT NULL, slug varchar NOT NULL, name varchar NOT NULL);
     CREATE TABLE ticket_role_assignments (id varchar PRIMARY KEY NOT NULL, ticket_id varchar NOT NULL, role_id varchar NOT NULL,
       agent_id varchar, user_id varchar, holder_key varchar NOT NULL DEFAULT '', runtime_spec text, created_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE board_lessons (id varchar PRIMARY KEY NOT NULL, board_id varchar NOT NULL, body text NOT NULL DEFAULT '');
@@ -91,7 +91,7 @@ async function writeLegacyDb(file) {
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}), version integer NOT NULL DEFAULT 1);
     CREATE TABLE workflow_functions (id varchar PRIMARY KEY NOT NULL, account_id varchar, board_id varchar, key varchar NOT NULL,
       name varchar NOT NULL, created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
-    CREATE UNIQUE INDEX uq_workflow_functions_workspace_key ON workflow_functions (account_id, key)
+    CREATE UNIQUE INDEX uq_workflow_functions_account_key ON workflow_functions (account_id, key)
       WHERE account_id IS NOT NULL AND board_id IS NULL;
     CREATE UNIQUE INDEX uq_workflow_functions_board_key ON workflow_functions (board_id, key) WHERE board_id IS NOT NULL;
   `);
@@ -111,8 +111,8 @@ async function writeLegacyDb(file) {
     [COL.archivedTodo, ARCHIVED_BOARD, 'To Do', 0, 0, 'active'],
   ];
   for (const c of cols) run('INSERT INTO columns (id, board_id, name, position, is_terminal, kind) VALUES (?,?,?,?,?,?)', c);
-  run('INSERT INTO workspace_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_ASSIGNEE, WS, 'assignee', 'Assignee']);
-  run('INSERT INTO workspace_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_REVIEWER, WS, 'reviewer', 'Reviewer']);
+  run('INSERT INTO account_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_ASSIGNEE, WS, 'assignee', 'Assignee']);
+  run('INSERT INTO account_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_REVIEWER, WS, 'reviewer', 'Reviewer']);
   run('INSERT INTO board_lessons (id, board_id, body) VALUES (?,?,?)', ['l1', BOARD, 'lesson']);
   run("INSERT INTO resources (id, account_id, name, type, url, default_branch, clone_policy, credential_id) VALUES (?,?,?,?,?,?,?,?)",
     [REPO, WS, 'GameClient Repository', 'repository', 'https://github.com/example/gameclient', 'master', '{"clone_depth":1}', null]);
@@ -143,7 +143,7 @@ async function writeLegacyDb(file) {
   run('INSERT INTO ticket_role_assignments (id, ticket_id, role_id, agent_id, holder_key) VALUES (?,?,?,?,?)',
     ['ra3', T(5), ROLE_ASSIGNEE, '88888888-8888-4888-8888-888888888888', 'agent:88888888']);
   // Account row + a board row with the same key (collides → dropped), a board
-  // row with a free key (kept as a workspace row) and a second board's copy of
+  // row with a free key (kept as a account row) and a second board's copy of
   // that key (collides with the kept one → dropped).
   for (const [id, board, key] of [[FN.ws, null, 'custom.deploy'], [FN.boardDup, BOARD, 'custom.deploy'],
     [FN.boardFree, BOARD, 'custom.lint'], [FN.otherBoardDup, ARCHIVED_BOARD, 'custom.lint']]) {
@@ -232,25 +232,25 @@ test('tickets of an archived board are archived', async () => {
   assert.ok(!(await ticket(T(2))).archived_at);
 });
 
-test('board settings move to the workspace', async () => {
+test('board settings move to the account', async () => {
   const [ws] = await ds.query('SELECT * FROM accounts WHERE id = ?', [WS]);
   assert.equal(ws.language, 'Korean');
   assert.equal(Number(ws.auto_archive_days), 14);
   assert.equal(Number(ws.max_concurrent_tickets_per_agent), 2);
 });
 
-test('board-scoped workflow functions fold into the workspace without key collisions', async () => {
+test('board-scoped workflow functions fold into the account without key collisions', async () => {
   const rows = await ds.query("SELECT id, key FROM workflow_functions WHERE account_id = ? ORDER BY key", [WS]);
   assert.deepEqual(rows.map((r) => [r.key, r.id]), [['custom.deploy', FN.ws], ['custom.lint', FN.boardFree]]);
   const indexes = (await ds.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'workflow_functions'")).map((r) => r.name);
-  assert.ok(indexes.includes('uq_workflow_functions_workspace_key'), indexes.join(', '));
+  assert.ok(indexes.includes('uq_workflow_functions_account_key'), indexes.join(', '));
   assert.ok(indexes.includes('uq_workflow_functions_global_key'), indexes.join(', '));
   assert.ok(!indexes.includes('uq_workflow_functions_board_key'));
 });
 
 test('retired tables and snapshots are dropped', async () => {
   const tables = (await ds.query("SELECT name FROM sqlite_master WHERE type = 'table'")).map((r) => r.name);
-  for (const gone of ['boards', 'columns', 'workspace_roles', 'ticket_role_assignments', 'board_lessons',
+  for (const gone of ['boards', 'columns', 'account_roles', 'ticket_role_assignments', 'board_lessons',
     'board_removal_ticket_snapshot', 'board_removal_repo_snapshot']) {
     assert.ok(!tables.includes(gone), `${gone} should be dropped`);
   }

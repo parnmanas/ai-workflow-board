@@ -98,7 +98,7 @@ export function buildConversationTracks(
 
 interface MissionConversationPanelProps {
   missionId: string;
-  /** 이벤트 커서 조회에 필요한 workspace 스코프. */
+  /** 이벤트 커서 조회에 필요한 account 스코프. */
   accountId: string;
   /** orchestrator 대화가 오가는 ChatRoom. null 이면 미션이 아직 시작되지 않은 것이다. */
   roomId: string | null;
@@ -458,7 +458,7 @@ export default function MissionConversationPanel({
       return {
         reason:
           'orchestration 대화에 발화하려면 Manage Actions 권한이 필요합니다. 참여자 등록 여부와는 ' +
-          '무관하며, 워크스페이스 관리자에게 권한을 요청해야 합니다. 읽기는 그대로 가능합니다.',
+          '무관하며, 계정 관리자에게 권한을 요청해야 합니다. 읽기는 그대로 가능합니다.',
         testId: 'mission-conversation-permission-notice',
         canJoin: false,
       };

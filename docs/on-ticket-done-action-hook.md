@@ -99,7 +99,7 @@ Pre-board-removal spellings still render so saved prompts keep working:
 The standard `{{action.*}}`, `{{run.*}}`, `{{account.*}}`, `{{agent.*}}`,
 `{{date}}`/`{{time}}`/`{{datetime}}` tokens still apply.
 `{{account.name}}` and `{{account.id}}` are canonical; saved
-`{{workspace.name}}` / `{{workspace.id}}` templates remain aliases.
+`{{account.name}}` / `{{account.id}}` templates remain aliases.
 
 ## Guarantees
 

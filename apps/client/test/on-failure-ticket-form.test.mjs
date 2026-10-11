@@ -1,6 +1,6 @@
 // QA / Security on_failure_ticket ⇄ editor form (docs/tickets.md → QA / Security
 // failure tickets). Boards are gone: the auto-filed fix ticket lands in the
-// workspace pool with a status, tags and an optional project.
+// account pool with a status, tags and an optional project.
 //
 // Pins:
 //   1. Stored rows written before the board removal still open correctly —

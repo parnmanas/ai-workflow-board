@@ -5,7 +5,7 @@
  * OrchestrationMission are not Tickets — no ticket_id, and (per
  * docs/catalog-scopes.md) no board_id either — so there is nothing to pend
  * and no board to resolve config from. This module instead counts NEW-RUN
- * creations inside a rolling window, scoped to the WORKSPACE
+ * creations inside a rolling window, scoped to the ACCOUNT
  * (`Account.hard_budget_config`'s `max_runs_per_window` key,
  * common/hard-budget-config.ts's (d) axis) and independently per run type
  * (a QA storm must not starve Action, and vice versa).
@@ -50,7 +50,7 @@ export interface RunBudgetGuardDeps {
   logger?: RunBudgetLogger | null;
 }
 
-/** Minimal shape every run-kind entity has: workspace scope + creation timestamp. */
+/** Minimal shape every run-kind entity has: account scope + creation timestamp. */
 interface RunRow {
   account_id: string;
   created_at: Date;
@@ -65,7 +65,7 @@ function runRepo(dataSource: DataSource, kind: RunBudgetKind): Repository<RunRow
 }
 
 /**
- * Resolve the effective run-budget config for a workspace: workspace
+ * Resolve the effective run-budget config for a account: account
  * override folded onto the env baseline. No board layer (see file header) —
  * this is deliberately NOT `resolveHardBudgetForTicket`'s board→env chain,
  * because none of the three run entities carry a board_id to resolve one
@@ -73,14 +73,14 @@ function runRepo(dataSource: DataSource, kind: RunBudgetKind): Repository<RunRow
  * interpreted at one scope be counted at another (the exact mismatch the
  * ticket a51ec6d9 plan calls out and rejects).
  */
-export async function resolveHardBudgetForWorkspace(
+export async function resolveHardBudgetForAccount(
   dataSource: DataSource,
   accountId: string,
 ): Promise<ResolvedHardBudget> {
-  const ws = accountId
+  const account = accountId
     ? await dataSource.getRepository(Account).findOne({ where: { id: accountId } })
     : null;
-  return resolveHardBudgetConfig(ws?.hard_budget_config ?? null, hardBudgetDefaultsFromEnv());
+  return resolveHardBudgetConfig(account?.hard_budget_config ?? null, hardBudgetDefaultsFromEnv());
 }
 
 /** Count of `kind` runs created in `accountId` at/after `since`. */
@@ -91,7 +91,7 @@ export async function countRunsInWindow(
   since: Date,
 ): Promise<number> {
   return runRepo(dataSource, kind).createQueryBuilder('r')
-    .where('r.account_id = :wsId', { wsId: accountId })
+    .where('r.account_id = :accountId', { accountId: accountId })
     .andWhere('r.created_at >= :since', { since: sinceBoundaryParam(dataSource, since) })
     .getCount();
 }
@@ -115,7 +115,7 @@ async function oldestRunAt(
   since: Date,
 ): Promise<Date | null> {
   const oldest = await runRepo(dataSource, kind).createQueryBuilder('r')
-    .where('r.account_id = :wsId', { wsId: accountId })
+    .where('r.account_id = :accountId', { accountId: accountId })
     .andWhere('r.created_at >= :since', { since: sinceBoundaryParam(dataSource, since) })
     .orderBy('r.created_at', 'ASC')
     .limit(1)
@@ -123,17 +123,17 @@ async function oldestRunAt(
   return oldest?.created_at ?? null;
 }
 
-/** Configured alerts room → oldest room in the workspace. Mirrors hard-budget-guard.ts's resolveAlertRoomId. */
+/** Configured alerts room → oldest room in the account. Mirrors hard-budget-guard.ts's resolveAlertRoomId. */
 async function resolveAlertRoomId(dataSource: DataSource, accountId: string): Promise<string | null> {
   if (!accountId) return null;
-  const ws = await dataSource.getRepository(Account).findOne({ where: { id: accountId } });
+  const account = await dataSource.getRepository(Account).findOne({ where: { id: accountId } });
   const roomRepo = dataSource.getRepository(ChatRoom);
-  if (ws?.alerts_chat_room_id) {
-    const configured = await roomRepo.findOne({ where: { id: ws.alerts_chat_room_id, account_id: accountId } });
+  if (account?.alerts_chat_room_id) {
+    const configured = await roomRepo.findOne({ where: { id: account.alerts_chat_room_id, account_id: accountId } });
     if (configured) return configured.id;
   }
   const fallback = await roomRepo.createQueryBuilder('r')
-    .where('r.account_id = :wsId', { wsId: accountId })
+    .where('r.account_id = :accountId', { accountId: accountId })
     .orderBy('r.created_at', 'ASC')
     .limit(1)
     .getOne();
@@ -158,7 +158,7 @@ export async function postRunBudgetAlert(
 
 /**
  * De-dupe key → last-alert epoch ms, one chat alert per breach EPISODE
- * (kind+workspace) rather than one per rejected dispatch. The ticket-scoped
+ * (kind+account) rather than one per rejected dispatch. The ticket-scoped
  * guard (hard-budget-guard.ts) gets this damping for free because a confirmed
  * breach there auto-pends the ticket, which cuts off further triggers; a run-
  * scoped reject is stateless, so a tight retry loop (QA batch walk-forward,
@@ -192,7 +192,7 @@ export class RunBudgetExceededError extends Error {
     public readonly retryAt: Date,
   ) {
     super(
-      `${kind} run budget exceeded for workspace ${accountId}: ${count}/${limit} runs started in the last ${windowMinutes} minute(s). ` +
+      `${kind} run budget exceeded for account ${accountId}: ${count}/${limit} runs started in the last ${windowMinutes} minute(s). ` +
       `Earliest retry: ${retryAt.toISOString()}.`,
     );
     this.name = 'RunBudgetExceededError';
@@ -226,7 +226,7 @@ export async function enforceRunBudget(
 ): Promise<void> {
   let breach: { count: number; cfg: ResolvedHardBudget; windowMin: number; since: Date } | null = null;
   try {
-    const cfg = await resolveHardBudgetForWorkspace(deps.dataSource, accountId);
+    const cfg = await resolveHardBudgetForAccount(deps.dataSource, accountId);
     if (!cfg.enabled) return;
 
     const now = new Date();
@@ -252,7 +252,7 @@ export async function enforceRunBudget(
   if (cfg.notify && shouldSendRunBudgetAlert(kind, accountId, cfg.windowMs, Date.now())) {
     await postRunBudgetAlert(deps, accountId, [
       `🚦 **Hard budget 초과 (run 생성 빈도)** — kind=\`${kind}\``,
-      `워크스페이스: \`${accountId}\``,
+      `계정: \`${accountId}\``,
       `누적 생성: ${count}건 / ${windowMin}분 (상한 ${cfg.maxRunsPerWindow})`,
       `가장 이른 재시도 가능 시각: ${retryAt.toISOString()}`,
     ].join('\n\n'));

@@ -44,7 +44,7 @@ function fieldByLabel(container, labelText, tag = 'input') {
   return field;
 }
 
-async function renderPage(t, { wsId, projects, stubs = {} }) {
+async function renderPage(t, { accountId, projects, stubs = {} }) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
@@ -52,7 +52,7 @@ async function renderPage(t, { wsId, projects, stubs = {} }) {
   let rows = projects;
   const originals = {};
   const all = {
-    getMe: async () => ({ id: 'u1', name: 'Tester', status: 'active', accounts: [{ id: wsId, name: 'Owner', slug: null, relations: ['owner'] }] }),
+    getMe: async () => ({ id: 'u1', name: 'Tester', status: 'active', accounts: [{ id: accountId, name: 'Owner', slug: null, relations: ['owner'] }] }),
     listProjects: async () => rows,
     listCredentials: async () => [],
     listTemplateHosts: async () => [{ id: 'host-rolf', name: 'rolf' }],
@@ -76,7 +76,7 @@ async function renderPage(t, { wsId, projects, stubs = {} }) {
 test('새 프로젝트 — 연결 테스트가 기본 브랜치를 채우고, 생성 payload 가 문서의 키로 나간다', async (t) => {
   const created = project({ id: 'p-new', name: 'Game', repo_url: 'https://github.com/o/game.git', default_branch: 'develop' });
   const { container, calls, setRows } = await renderPage(t, {
-    wsId: 'ws-create',
+    accountId: 'ws-create',
     projects: [],
     stubs: {
       testProjectConnection: async () => ({ ok: true, branches: [{ name: 'develop', sha: 'a' }, { name: 'main', sha: 'b' }], default_branch: 'develop' }),
@@ -118,7 +118,7 @@ test('새 프로젝트 — 연결 테스트가 기본 브랜치를 채우고, �
 test('Host 폴더 — 상대 경로는 막고, 절대 경로는 PUT 으로 저장, 목록에 없는 Host 폴더도 지운다', async (t) => {
   const p = project({ host_folders: [{ host_id: 'host-gone', path: '/old/awb', host_name: 'ralf' }] });
   const { container, calls } = await renderPage(t, {
-    wsId: 'ws-folders',
+    accountId: 'ws-folders',
     projects: [p],
     stubs: {
       setProjectHostFolder: async (id, hostId, path) => project({ host_folders: [...p.host_folders, { host_id: hostId, path }], updated_at: '2026-10-02T00:00:00.000Z' }),
@@ -160,7 +160,7 @@ test('Host 폴더 — 상대 경로는 막고, 절대 경로는 PUT 으로 저�
 test('삭제 — 409 project_in_use 면 참조 수를 보여주고 "강제 삭제" 로 force 재시도한다', async (t) => {
   const deletes = [];
   const { container } = await renderPage(t, {
-    wsId: 'ws-delete',
+    accountId: 'ws-delete',
     projects: [project()],
     stubs: {
       deleteProject: async (id, opts) => {
@@ -198,7 +198,7 @@ test('삭제 — 409 project_in_use 면 참조 수를 보여주고 "강제 삭�
 test('opening another account project uses its credentials without changing the creation default', async (t) => {
   const p = project({ account_id: 'organization' });
   const { container, calls } = await renderPage(t, {
-    wsId: 'personal', projects: [p],
+    accountId: 'personal', projects: [p],
     stubs: {
       getMe: async () => ({ id: 'u1', name: 'Tester', status: 'active', accounts: [
         { id: 'personal', name: 'Personal', slug: null, relations: ['owner'] },

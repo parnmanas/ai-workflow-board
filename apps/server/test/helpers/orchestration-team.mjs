@@ -16,7 +16,7 @@
 import { createAgent, createApiKey, registerRuntimeHostKeyFor } from './fixtures.mjs';
 
 /** Default working folder for a slot. Absolute, as the spec validator requires. */
-export const TEST_WORKING_DIR = '/srv/awb-test/workspace';
+export const TEST_WORKING_DIR = '/srv/awb-test/account';
 
 /**
  * A Runtime Host (manager identity) a slot can be placed on, plus its api key.

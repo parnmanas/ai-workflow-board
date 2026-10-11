@@ -70,7 +70,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   );
   const archiver = app.get(archiverModule.TicketArchiverService);
 
-  step('Seed workspace + driver agent + user session');
+  step('Seed account + driver agent + user session');
   const ws = await createAccount(app, getDataSourceToken, 'archive-edges');
   const driverAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'driver', runtime: true });
   const driverKey = await createApiKey(app, getDataSourceToken, driverAgent.id, {
@@ -107,7 +107,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   // would be started by the dispatcher, and these tests are about archiving,
   // not dispatch.
 
-  // ─── Subtest 1 — workspace REST + ticket list + MCP default exclusion ───
+  // ─── Subtest 1 — account REST + ticket list + MCP default exclusion ───
   await t.test('REST /api/accounts/:id, the ticket list and MCP get_account exclude archived tickets', async () => {
     step('Seed two tickets in the same status: one active, one archived');
     const activeRow = await createTicket(app, getDataSourceToken, {
@@ -120,12 +120,12 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
 
     step('REST GET /api/accounts/:id');
     const restRes = await rest('GET', `/accounts/${ws.id}`);
-    assert.equal(restRes.status, 200, `REST workspace fetch must return 200, got ${restRes.status}`);
+    assert.equal(restRes.status, 200, `REST account fetch must return 200, got ${restRes.status}`);
     const restBody = await restRes.json();
     assert.equal(restBody.ticket_counts.backlog, 1,
-      `REST workspace ticket_counts must reflect only the active ticket (got ${JSON.stringify(restBody.ticket_counts)})`);
+      `REST account ticket_counts must reflect only the active ticket (got ${JSON.stringify(restBody.ticket_counts)})`);
 
-    step('REST GET /api/accounts/:wsId/tickets');
+    step('REST GET /api/accounts/:accountId/tickets');
     const listRes = await rest('GET', `/accounts/${ws.id}/tickets?status=backlog`);
     assert.equal(listRes.status, 200);
     const listTitles = (await listRes.json()).tickets.map((row) => row.title);

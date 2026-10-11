@@ -8,7 +8,7 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ApiKey } from '../../entities/ApiKey';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { isUuidShapedId } from '../../utils/agent-name';
 import { LogService } from '../../services/log.service';
@@ -36,7 +36,7 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, raw));
 }
 
-export interface CreateWorkspaceScheduleInput {
+export interface CreateAutomationScheduleInput {
   accountId: string;
   name: string;
   /** 인라인 프롬프트 형태에서만. Action 형태에서는 Action 이 대상을 정한다. */
@@ -54,7 +54,7 @@ export interface CreateWorkspaceScheduleInput {
   createdBy?: string;
 }
 
-export type UpdateWorkspaceScheduleInput = Partial<Omit<CreateWorkspaceScheduleInput, 'accountId' | 'createdBy'>>;
+export type UpdateAutomationScheduleInput = Partial<Omit<CreateAutomationScheduleInput, 'accountId' | 'createdBy'>>;
 
 export interface DispatchResult {
   schedule_id: string;
@@ -65,9 +65,9 @@ export interface DispatchResult {
 }
 
 /**
- * WorkspaceScheduleService — general-purpose agent-task scheduler (ticket
+ * AutomationScheduleService — general-purpose agent-task scheduler (ticket
  * 8845be79). Owns AutomationSchedule CRUD plus a background tick that, every
- * WORKSPACE_SCHEDULER_TICK_MS, finds due schedules and dispatches each one's
+ * AUTOMATION_SCHEDULER_TICK_MS, finds due schedules and dispatches each one's
  * `task_prompt` to its `target_agent_id` by opening a FRESH chat room and
  * sending the prompt — the SAME create-room → seat-agent → sendMessage shape the
  * QA/Security RUN dispatch uses (qa-run.service.ts:198-245,
@@ -97,10 +97,10 @@ export interface DispatchResult {
  * RUNNING server. Keep the cadence coarser than your deploy lag.
  */
 @Injectable()
-export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
+export class AutomationScheduleService implements OnModuleInit, OnModuleDestroy {
   private tickHandle: NodeJS.Timeout | null = null;
-  private readonly tickMs = clampEnv('WORKSPACE_SCHEDULER_TICK_MS', DEFAULT_TICK_MS, MIN_TICK_MS, MAX_TICK_MS);
-  private readonly enabled = (process.env.WORKSPACE_SCHEDULER_ENABLED || 'true').toLowerCase() !== 'false';
+  private readonly tickMs = clampEnv('AUTOMATION_SCHEDULER_TICK_MS', DEFAULT_TICK_MS, MIN_TICK_MS, MAX_TICK_MS);
+  private readonly enabled = (process.env.AUTOMATION_SCHEDULER_ENABLED || 'true').toLowerCase() !== 'false';
 
   constructor(
     @InjectRepository(AutomationSchedule) private readonly scheduleRepo: Repository<AutomationSchedule>,
@@ -114,24 +114,24 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesce: InstanceQuiesceService,
     @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
-    // Action 형태 스케줄의 발화 경로. ActionsModule → WorkspaceScheduleModule
+    // Action 형태 스케줄의 발화 경로. ActionsModule → AutomationScheduleModule
     // 방향 import 가 없으므로 순환이 아니다.
     private readonly actions: ActionsService,
   ) {}
 
   onModuleInit(): void {
     if (!this.enabled) {
-      this.logService.info('WorkspaceScheduler', 'disabled via WORKSPACE_SCHEDULER_ENABLED=false');
+      this.logService.info('AutomationScheduler', 'disabled via AUTOMATION_SCHEDULER_ENABLED=false');
       return;
     }
     this.tickHandle = setInterval(() => {
       this.runOnce().catch((e: unknown) => {
-        this.logService.error('WorkspaceScheduler', 'tick failed', { err: String(e) });
+        this.logService.error('AutomationScheduler', 'tick failed', { err: String(e) });
       });
     }, this.tickMs);
     // Don't keep the event loop alive on the timer alone (mirrors the QA scheduler).
     this.tickHandle.unref?.();
-    this.logService.info('WorkspaceScheduler', 'Service initialized', { tick_ms: this.tickMs });
+    this.logService.info('AutomationScheduler', 'Service initialized', { tick_ms: this.tickMs });
   }
 
   onModuleDestroy(): void {
@@ -146,16 +146,16 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
   async list(accountId: string): Promise<AutomationSchedule[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.account_id = :ws', { ws: accountId });
+      .where('s.account_id = :account', { account: accountId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
   async get(id: string, accountId: string): Promise<AutomationSchedule> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'workspace schedule not found in workspace');
+    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'account schedule not found in account');
   }
 
-  async create(input: CreateWorkspaceScheduleInput): Promise<AutomationSchedule> {
+  async create(input: CreateAutomationScheduleInput): Promise<AutomationSchedule> {
     if (!input.accountId) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     const target = await this._validateTarget(input.accountId, input.targetAgentId, input.taskPrompt, input.actionId, input.targetRuntime);
@@ -184,7 +184,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     return this.scheduleRepo.save(draft);
   }
 
-  async update(id: string, accountId: string, patch: UpdateWorkspaceScheduleInput): Promise<AutomationSchedule> {
+  async update(id: string, accountId: string, patch: UpdateAutomationScheduleInput): Promise<AutomationSchedule> {
     const schedule = await this.get(id, accountId);
 
     if (patch.name !== undefined) {
@@ -250,7 +250,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     schedule.last_run_at = new Date();
     schedule.last_room_id = dispatch.room_id;
     const saved = await this.scheduleRepo.save(schedule);
-    this.logService.info('WorkspaceScheduler', 'run-now dispatched', { schedule_id: id, room_id: dispatch.room_id });
+    this.logService.info('AutomationScheduler', 'run-now dispatched', { schedule_id: id, room_id: dispatch.room_id });
     return { schedule: saved, dispatch };
   }
 
@@ -265,7 +265,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     // shared by the setInterval tick AND the manual run_automation_schedule_now
     // tool, both refused equally while quiesced.
     if (await this.instanceQuiesce.isQuiesced()) {
-      this.logService.info('WorkspaceScheduler', 'runOnce skipped (instance quiesced)');
+      this.logService.info('AutomationScheduler', 'runOnce skipped (instance quiesced)');
       return { dispatched: [] };
     }
 
@@ -299,21 +299,21 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
         schedule.last_room_id = dispatch.room_id;
         await this.scheduleRepo.save(schedule);
         dispatched.push(schedule.id);
-        this.logService.info('WorkspaceScheduler', 'dispatched task for schedule', {
+        this.logService.info('AutomationScheduler', 'dispatched task for schedule', {
           schedule_id: schedule.id, room_id: dispatch.room_id, agent_id: dispatch.agent_id,
           next_run_at: schedule.next_run_at,
         });
       } catch (e: any) {
         // A bad schedule (missing/disabled agent, etc.) must not stall the sweep.
         // next_run_at is already advanced, so it retries next occurrence.
-        this.logService.warn('WorkspaceScheduler', 'schedule dispatch failed (continuing)', {
+        this.logService.warn('AutomationScheduler', 'schedule dispatch failed (continuing)', {
           schedule_id: schedule.id, err: e?.message || String(e),
         });
       }
     }
 
     if (dispatched.length) {
-      this.logService.info('WorkspaceScheduler', 'sweep done', { dispatched: dispatched.length });
+      this.logService.info('AutomationScheduler', 'sweep done', { dispatched: dispatched.length });
     }
     return { dispatched };
   }
@@ -351,7 +351,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       schedule.enabled = false;
       schedule.next_run_at = null;
       await this.scheduleRepo.save(schedule);
-      this.logService.warn('WorkspaceScheduler', 'action was deleted — schedule disabled', {
+      this.logService.warn('AutomationScheduler', 'action was deleted — schedule disabled', {
         schedule_id: schedule.id, action_id: schedule.action_id,
       });
       throw makeError(400, `action not found: ${schedule.action_id}`);
@@ -361,7 +361,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       triggeredByType: 'system',
       triggeredById: '',
     });
-    this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → action ${action.id}`, {
+    this.logService.info('AutomationScheduler', `dispatched schedule ${schedule.id} → action ${action.id}`, {
       batch_id: result.batch_id, runs: result.runs.length,
     });
     return {
@@ -379,9 +379,9 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (!agent && !isRuntimeIdentityKey(schedule.target_agent_id)) {
       throw makeError(400, 'target agent not found');
     }
-    // Account-scope safety: never dispatch into an agent outside this workspace.
-    if (agent && !agentIsVisibleInWorkspace(agent.account_id, schedule.account_id)) {
-      throw makeError(400, 'target agent belongs to a different workspace');
+    // Account-scope safety: never dispatch into an agent outside this account.
+    if (agent && !agentIsVisibleInAccount(agent.account_id, schedule.account_id)) {
+      throw makeError(400, 'target agent belongs to a different account');
     }
 
     const room = await this.roomRepo.save(this.roomRepo.create({
@@ -425,10 +425,10 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
         schedule.task_prompt,
       );
     } catch (e: any) {
-      this.logService.warn('WorkspaceScheduler', `sendMessage failed for schedule ${schedule.id}: ${e?.message || e}`);
+      this.logService.warn('AutomationScheduler', `sendMessage failed for schedule ${schedule.id}: ${e?.message || e}`);
     }
 
-    this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → agent ${schedule.target_agent_id} room ${room.id}`);
+    this.logService.info('AutomationScheduler', `dispatched schedule ${schedule.id} → agent ${schedule.target_agent_id} room ${room.id}`);
     return { schedule_id: schedule.id, room_id: room.id, agent_id: schedule.target_agent_id };
   }
 
@@ -453,11 +453,11 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
 
     if (action) {
       if (prompt) throw makeError(400, 'set exactly one of task_prompt or action_id, not both');
-      // 워크스페이스 밖의 Action 을 예약하지 못하게 한다 — 스케줄은 자기 워크스페이스
+      // 계정 밖의 Action 을 예약하지 못하게 한다 — 스케줄은 자기 계정
       // 안에서만 무언가를 일으킨다.
       const row = await this.actionRepo.findOne({ where: { id: action } });
       if (!row) throw makeError(400, `action not found: ${action}`);
-      if (row.account_id !== accountId) throw makeError(400, 'action belongs to a different workspace');
+      if (row.account_id !== accountId) throw makeError(400, 'action belongs to a different account');
       // 대상·프롬프트는 Action 이 정의하므로 이쪽은 비운다. 남겨 두면 화면에
       // 실행되지 않을 값이 계속 보인다.
       return { targetAgentId: '', taskPrompt: '', actionId: action };

@@ -16,8 +16,8 @@ export class SkillsController {
   constructor(private readonly service: SkillsService) {}
 
   /**
-   * Global + this workspace's skills. `?include_shadowed=1` also returns the
-   * global rows a workspace fork is overriding (each flagged `shadowed: true`),
+   * Global + this account's skills. `?include_shadowed=1` also returns the
+   * global rows a account fork is overriding (each flagged `shadowed: true`),
    * which the management UI needs to explain "why isn't the built-in applying".
    */
   @Get()
@@ -55,9 +55,9 @@ export class SkillsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    // Account route → workspace scope, always. Creating a GLOBAL skill goes
+    // Account route → account scope, always. Creating a GLOBAL skill goes
     // through the admin registry controller, so a account-scoped caller can
-    // never mint a definition every other workspace inherits.
+    // never mint a definition every other account inherits.
     return this.respond(
       res,
       () => this.service.create(accountId, body, (req as any).currentUser?.id || '', 'account'),
@@ -66,7 +66,7 @@ export class SkillsController {
   }
 
   /**
-   * Fork a global skill into this workspace. The fork shadows the global by
+   * Fork a global skill into this account. The fork shadows the global by
    * slug while the global keeps receiving upstream updates — the supported way
    * to diverge from a built-in without freezing it.
    */

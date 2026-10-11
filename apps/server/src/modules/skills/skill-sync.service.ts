@@ -42,7 +42,7 @@ export function emptySummary(): SyncSummary {
  *     a tap cannot hijack the slug of a built-in or of a hand-authored global
  *     skill, and two taps cannot fight over one slug.
  *
- * Account skills are never touched: a workspace fork shadows the global by
+ * Account skills are never touched: a account fork shadows the global by
  * slug, so the fork keeps winning while the global underneath keeps updating.
  */
 @Injectable()

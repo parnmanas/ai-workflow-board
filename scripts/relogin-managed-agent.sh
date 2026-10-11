@@ -116,12 +116,13 @@ mapfile -t AGENT_DIRS < <(find "$AGENTS_DIR" -mindepth 1 -maxdepth 1 -type d | s
 
 list_agents() {
   for d in "${AGENT_DIRS[@]}"; do
-    local id name cli ws
+    local id name cli account
     id="$(basename "$d")"
     name="$(json_field "$d/config.json" name || echo '?')"
     cli="$(json_field "$d/config.json" cli || echo '?')"
-    ws="$(json_field "$d/config.json" workspace_id || echo '?')"
-    echo "  - $id  name=$name  cli=$cli  workspace=$ws"
+    account="$(json_field "$d/config.json" account_id || echo '')"
+    if [ -z "$account" ]; then account="$(json_field "$d/config.json" workspace_id || echo '?')"; fi
+    echo "  - $id  name=$name  cli=$cli  account=$account"
   done
 }
 
@@ -156,14 +157,15 @@ if [ "$CLI_TYPE" != "claude" ] && [ "$CLI_TYPE" != "?" ]; then
   exit 1
 fi
 AGENT_NAME="$(json_field "$AGENT_DIR/config.json" name || echo '?')"
-WS_ID="$(json_field "$AGENT_DIR/config.json" workspace_id || echo '?')"
+ACCOUNT_ID="$(json_field "$AGENT_DIR/config.json" account_id || echo '')"
+if [ -z "$ACCOUNT_ID" ]; then ACCOUNT_ID="$(json_field "$AGENT_DIR/config.json" workspace_id || echo '?')"; fi
 
 CLI_HOME="$AGENT_DIR/cli-home"
 CRED_PATH="$CLI_HOME/.credentials.json"
 
 echo
 echo "Selected agent     : $AGENT_NAME  ($AGENT_ID)"
-echo "Workspace          : $WS_ID"
+echo "Account            : $ACCOUNT_ID"
 echo "CLAUDE_CONFIG_DIR  : $CLI_HOME"
 echo
 
@@ -215,7 +217,7 @@ fi
 echo
 echo "Direct method (Method A) — done."
 echo "Restart the agent in AWB so the next subagent spawn picks up the new token:"
-echo "  AWB Workspace -> AI Agents -> $AGENT_NAME -> Restart"
+echo "  AWB Hosts -> Runtime Host -> $AGENT_NAME -> Restart"
 echo
 
 if [ "$SHOW_CRED" -eq 1 ]; then
@@ -226,7 +228,7 @@ if [ "$SHOW_CRED" -eq 1 ]; then
   echo
   echo '----- END credentials_json -----'
   echo
-  echo "After saving the credential, attach it to agent '$AGENT_NAME' in AWB Workspace -> AI Agents -> Edit -> CLI credential, then Restart."
+  echo "After saving the credential, attach it to agent '$AGENT_NAME' in AWB Hosts -> Runtime Host -> Edit -> CLI credential, then Restart."
 else
   echo '(re-run with --show-credential to also print the JSON for AWB Settings -> Credentials remote injection.)'
 fi

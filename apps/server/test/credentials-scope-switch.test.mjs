@@ -91,7 +91,7 @@ describe('Credential scope switch (update)', () => {
 
     const entry = audit.find((a) => a.action === 'credential_scope_changed');
     assert.ok(entry, 'scope change must leave an activity trail');
-    assert.equal(entry.old_value, 'workspace:ws-a');
+    assert.equal(entry.old_value, 'account:ws-a');
     assert.equal(entry.new_value, 'global');
     assert.equal(entry.actor_id, 'u-admin');
     // The audit row must never carry the secret itself.
@@ -224,11 +224,11 @@ describe('Credential scope switch (update)', () => {
       const cred = await seed(null);
       const resourceRepo = dataSource.getRepository(Resource);
       await resourceRepo.save(resourceRepo.create({
-        account_id: 'ws-a', credential_id: cred.id, name: 'Same-workspace repo',
+        account_id: 'ws-a', credential_id: cred.id, name: 'Same-account repo',
       }));
       const projectRepo = dataSource.getRepository(Project);
       await projectRepo.save(projectRepo.create({
-        account_id: 'ws-a', name: 'Same-workspace project', credential_id: cred.id,
+        account_id: 'ws-a', name: 'Same-account project', credential_id: cred.id,
       }));
       const settingRepo = dataSource.getRepository(AgentSessionCliSetting);
       await settingRepo.save(settingRepo.create({

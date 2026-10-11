@@ -14,7 +14,7 @@
 // it's on the wire with the agent in agent_member_ids, the live agent-manager
 // path takes over (already exercised by the QA executor E2E, fe297886).
 //
-// Drives the real scheduler sweep via WorkspaceScheduleService.runOnce(now) — the
+// Drives the real scheduler sweep via AutomationScheduleService.runOnce(now) — the
 // background tick body itself — rather than run_now, so this is the automatic
 // due→dispatch path, including the pre-advance idempotency guard under a second
 // sweep at the same `now`.
@@ -38,7 +38,7 @@ const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 // sweep — otherwise a 30s interval timer could fire mid-assertion and make the
 // idempotency / duplicate-room checks racy. The CRUD + runOnce methods work
 // regardless of the tick being planted.
-process.env.WORKSPACE_SCHEDULER_ENABLED = 'false';
+process.env.AUTOMATION_SCHEDULER_ENABLED = 'false';
 process.env.PORT = process.env.WS_SCHED_E2E_PORT || '0';
 
 const TASK_PROMPT = 'E2E: run the scheduled task.';
@@ -48,10 +48,10 @@ test('Account schedule E2E: scheduler tick → fresh room → task_prompt → sp
   t.after(() => closeTestApp(app));
   const { getDataSourceToken } = modules;
 
-  const { WorkspaceScheduleService } = await import(
+  const { AutomationScheduleService } = await import(
     'file://' + path.join(DIST_ROOT, 'modules', 'automation-schedule', 'automation-schedule.service.js')
   );
-  const svc = app.get(WorkspaceScheduleService);
+  const svc = app.get(AutomationScheduleService);
   const ds = app.get(getDataSourceToken());
 
   const ws = await createAccount(app, getDataSourceToken, 'ws-sched-e2e');
@@ -102,7 +102,7 @@ test('Account schedule E2E: scheduler tick → fresh room → task_prompt → sp
   const room = await ds.getRepository('ChatRoom').findOne({ where: { id: roomId } });
   assert.ok(room, 'room row persisted');
   assert.equal(room.name, `Schedule: ${schedule.name}`, 'room named after the schedule');
-  assert.equal(room.account_id, ws.id, 'room scoped to the workspace');
+  assert.equal(room.account_id, ws.id, 'room scoped to the account');
 
   const seats = (await ds.getRepository('ChatRoomParticipant').find({ where: { room_id: roomId } }))
     .map((p) => `${p.participant_type}:${p.participant_id}`)

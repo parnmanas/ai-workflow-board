@@ -1,13 +1,13 @@
 /**
  * Shared MCP tool authorization helpers.
  *
- * Ticket d6b56237 — user/api-key/agent/workspace MCP tools performed
+ * Ticket d6b56237 — user/api-key/agent/account MCP tools performed
  * destructive or privilege-changing writes without ever consulting the
  * caller's session identity. These helpers give every tool file a single,
  * fail-closed place to (a) require a DB-backed, full-scope caller bound to
  * a live Agent row (mirrors `requireAgentRegistryAccess` in
  * claude-backend-profile-tools.ts), and (b) resolve the caller's REAL
- * workspace (never trust a caller-supplied account_id) the same way
+ * account (never trust a caller-supplied account_id) the same way
  * chat-tools.ts already does at its `callerAccountId` call sites.
  */
 
@@ -47,14 +47,14 @@ export async function requireFullScopeCaller(
 }
 
 /**
- * Resolves the caller's REAL workspace: the workspace bound to the API key
- * session itself, falling back to the workspace on the caller's own Agent
+ * Resolves the caller's REAL account: the account bound to the API key
+ * session itself, falling back to the account on the caller's own Agent
  * row. Never trusts a request-supplied account_id parameter — that is
  * exactly the fail-open bug this helper replaces (previously
  * `!caller?.accountId || caller.accountId === accountId`, which
  * trusted an unbound caller's claimed account_id unconditionally).
  *
- * Returns null when no workspace can be resolved (unbound caller with no
+ * Returns null when no account can be resolved (unbound caller with no
  * Agent row) — callers must treat null as "deny", not "allow everything".
  */
 export async function resolveCallerAccountId(
@@ -71,7 +71,7 @@ export async function resolveCallerAccountId(
 
 /**
  * True when the caller may act within `targetAccountId`. A caller with an
- * explicitly bound workspace (session accountId, or its own Agent row's
+ * explicitly bound account (session accountId, or its own Agent row's
  * account_id) must match exactly — this is the fail-closed replacement for
  * the old `!caller?.accountId || caller.accountId === accountId`
  * pattern, which trusted an unbound caller's claimed account_id
@@ -79,27 +79,27 @@ export async function resolveCallerAccountId(
  *
  * The one deliberate escape hatch preserved from that prior behavior: a
  * genuinely GLOBAL full-scope Agent (DB row with account_id NULL/'') may
- * still reach every workspace, but only after a DB lookup proves the agent
+ * still reach every account, but only after a DB lookup proves the agent
  * really is global — never merely because the caller omitted accountId.
  * Every other unresolved case (no caller, no agentId, unknown agent) denies.
  *
  * A null `targetAccountId` (a genuinely global resource) is checked via
  * that same DB lookup FIRST, before ever consulting `caller.accountId` —
- * a workspace-bound ApiKey can never legitimately equal a null target by
+ * a account-bound ApiKey can never legitimately equal a null target by
  * definition, so short-circuiting on it there would reject every caller,
  * including a genuinely global Agent whose ApiKey row still carries a
  * non-null account_id from issuance context (ticket 9b7a5bb7).
  */
-export async function callerCanAccessWorkspace(
+export async function callerCanAccessAccount(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
   targetAccountId: string | null,
 ): Promise<boolean> {
   if (!caller) return false;
   // P4c-4: Host/링크 해소 (Agent 테이블 없음). Host 는 장비 단위라
-  // workspace-less manager 와 같은 full-scope 취급 — pairing workspace
+  // account-less manager 와 같은 full-scope 취급 — pairing account
   // 스탬프가 있어도 경계가 아니다.
-  const callerRowWorkspace = async (): Promise<string | null | undefined> => {
+  const callerRowAccount = async (): Promise<string | null | undefined> => {
     if (!caller.agentId) return undefined;
     const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
     if (!row) return undefined;
@@ -108,20 +108,20 @@ export async function callerCanAccessWorkspace(
   };
   if (targetAccountId === null) {
     if (!caller.agentId) return false;
-    const ws = await callerRowWorkspace();
-    if (ws === undefined) return false;
-    return ws === null && caller.scope === 'full';
+    const account = await callerRowAccount();
+    if (account === undefined) return false;
+    return account === null && caller.scope === 'full';
   }
   if (caller.accountId) {
     return normalizeAgentAccountId(caller.accountId) === targetAccountId;
   }
   if (!caller.agentId) return false;
-  const ws = await callerRowWorkspace();
-  if (ws === undefined) return false;
-  if (ws === null) {
+  const account = await callerRowAccount();
+  if (account === undefined) return false;
+  if (account === null) {
     return caller.scope === 'full';
   }
-  return ws === targetAccountId;
+  return account === targetAccountId;
 }
 
 /**
@@ -153,27 +153,27 @@ export async function resolveCallerIdentityRow(
   return null;
 }
 
-export const WORKSPACE_SCOPE_GATE_ERROR =
-  'Unauthorized: this operation requires a full-scope caller bound to (or a genuinely global Agent spanning) the target workspace.';
+export const ACCOUNT_SCOPE_GATE_ERROR =
+  'Unauthorized: this operation requires a full-scope caller bound to (or a genuinely global Agent spanning) the target account.';
 
 /**
- * Combines `requireFullScopeCaller` with a workspace-boundary check against
- * a specific target resource's workspace (ticket d6b56237 review round 2:
+ * Combines `requireFullScopeCaller` with a account-boundary check against
+ * a specific target resource's account (ticket d6b56237 review round 2:
  * `requireFullScopeCaller` alone only proves "some live, full-scope Agent
- * called this," never that the caller belongs to the workspace it's about
- * to mutate — so a full-scope key bound to workspace A could update/delete
- * an Agent in workspace B, or cascade-delete workspace B itself).
- * `targetAccountId` is the resource's OWN workspace (null for a genuinely
+ * called this," never that the caller belongs to the account it's about
+ * to mutate — so a full-scope key bound to account A could update/delete
+ * an Agent in account B, or cascade-delete account B itself).
+ * `targetAccountId` is the resource's OWN account (null for a genuinely
  * global resource) — never a caller-supplied parameter parroted back.
  * Returns an error string when either gate fails, or null when both pass.
  */
-export async function requireWorkspaceScopedFullAccess(
+export async function requireAccountScopedFullAccess(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
   targetAccountId: string | null,
 ): Promise<string | null> {
   const gateError = await requireFullScopeCaller(dataSource, caller);
   if (gateError) return gateError;
-  const allowed = await callerCanAccessWorkspace(dataSource, caller, targetAccountId);
-  return allowed ? null : WORKSPACE_SCOPE_GATE_ERROR;
+  const allowed = await callerCanAccessAccount(dataSource, caller, targetAccountId);
+  return allowed ? null : ACCOUNT_SCOPE_GATE_ERROR;
 }

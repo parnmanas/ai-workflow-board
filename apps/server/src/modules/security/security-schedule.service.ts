@@ -138,13 +138,13 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
   async list(accountId: string): Promise<SecuritySchedule[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.account_id = :ws', { ws: accountId });
+      .where('s.account_id = :account', { account: accountId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
   async get(id: string, accountId: string): Promise<SecuritySchedule> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'security schedule not found in workspace');
+    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'security schedule not found in account');
   }
 
   async create(input: CreateSecurityScheduleInput): Promise<SecuritySchedule> {
@@ -363,7 +363,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
         triggeredById,
       });
     }
-    // scope='all' → resolve every enabled profile in the workspace AT DISPATCH
+    // scope='all' → resolve every enabled profile in the account AT DISPATCH
     // TIME (no id snapshot), so profile add/remove is reflected automatically.
     return this.runService.startBatch({
       accountId: schedule.account_id,
@@ -393,7 +393,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
         triggeredById,
       });
     }
-    // scope='all' → resolve every enabled profile in the workspace AT DISPATCH
+    // scope='all' → resolve every enabled profile in the account AT DISPATCH
     // TIME (no id snapshot).
     return this.runService.refreshChecklistsForScope({
       accountId: schedule.account_id,

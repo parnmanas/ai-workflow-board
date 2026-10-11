@@ -156,7 +156,7 @@ export class HostModelsService implements OnModuleInit {
   /** 영속된 ACP 보고 목록을 다시 읽는다(부팅·스냅샷 조회 시). 실패는 조용히 접는다. */
   async reloadReportedModels(): Promise<void> {
     try {
-      // 같은 host×cli 행이 워크스페이스마다 있다. **가장 최근에 보고된 행**을 쓴다 — 어댑터를 올린 뒤
+      // 같은 host×cli 행이 계정마다 있다. **가장 최근에 보고된 행**을 쓴다 — 어댑터를 올린 뒤
       // 연 세션의 목록이 옛 어댑터의 목록을 이겨야 한다(예전엔 "가장 많이 아는 행" 이라 옛 목록이 남을 수 있었다).
       const rows = await this.cliSettings.find({ order: { updated_at: 'DESC' } });
       const efforts = new Map<string, HostEffortReport>();

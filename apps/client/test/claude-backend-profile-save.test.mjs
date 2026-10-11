@@ -5,8 +5,8 @@ import { api } from '../src/api.ts';
 import ClaudeBackendProfilesManager from '../src/components/admin/ClaudeBackendProfilesManager.tsx';
 
 const credentials = [
-  { id: 'credential-a', account_id: 'workspace-1', scope: 'account', name: '운영 Claude', provider: 'claude_oauth_token' },
-  { id: 'credential-b', account_id: 'workspace-1', scope: 'account', name: '개발 API', provider: 'anthropic' },
+  { id: 'credential-a', account_id: 'account-1', scope: 'account', name: '운영 Claude', provider: 'claude_oauth_token' },
+  { id: 'credential-b', account_id: 'account-1', scope: 'account', name: '개발 API', provider: 'anthropic' },
 ];
 const existingProfile = {
   id: 'profile-1', name: '기존 프로필', kind: 'claude-backend', protocol: 'anthropic-compatible',
@@ -48,7 +48,7 @@ async function renderManager(t, { profiles = [], listCredentials = async () => c
   api.listCredentials = listCredentials;
   api.createClaudeBackendProfile = async () => {};
   api.updateClaudeBackendProfile = async () => {};
-  const view = mount(React.createElement(ClaudeBackendProfilesManager, { accountId: 'workspace-1' }));
+  const view = mount(React.createElement(ClaudeBackendProfilesManager, { accountId: 'account-1' }));
   await flush();
   t.after(() => {
     view.unmount();
@@ -334,12 +334,12 @@ test('Adapter 설정은 공통 Textarea 로 렌더되어 가로 리사이즈를 
   assert.equal(textarea.style.boxSizing, 'border-box');
 });
 
-// ── 사라진 워크스페이스 스코프 문구 재등장 방지 (리뷰 지적 P1, 티켓 e616dbfc) ──
+// ── 사라진 계정 스코프 문구 재등장 방지 (리뷰 지적 P1, 티켓 e616dbfc) ──
 // 배정/상속 계층을 코드에서 지워도 사용자에게 보이는 설명이 남으면 화면이 거짓말을
 // 한다. 실제로 탭 설명은 "current Account assignment", 보드 셀렉트는 "Inherit
-// workspace" 로 남아 있었다. 렌더 트리 전체를 세우는 대신 소스 문자열을 직접
+// account" 로 남아 있었다. 렌더 트리 전체를 세우는 대신 소스 문자열을 직접
 // 단언한다 — 목적이 "이 문구가 다시 들어오지 않는 것" 자체이기 때문이다.
-test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화면에 남아 있지 않다', async () => {
+test('계정 배정/상속을 약속하는 문구가 프로필 화면에 남아 있지 않다', async () => {
   const { readFile } = await import('node:fs/promises');
   const { fileURLToPath } = await import('node:url');
   const { dirname, join } = await import('node:path');
@@ -349,7 +349,7 @@ test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화�
   const managementPage = await read('AccountManagementPage.tsx');
   assert.equal(
     managementPage.includes('current Account assignment'), false,
-    'Claude Backend Profiles 탭 설명이 사라진 워크스페이스 배정을 계속 약속하면 안 됩니다.',
+    'Claude Backend Profiles 탭 설명이 사라진 계정 배정을 계속 약속하면 안 됩니다.',
   );
   assert.match(managementPage, /Profiles are global/, '전역 단일 스코프임을 설명해야 합니다.');
 
@@ -362,7 +362,7 @@ test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화�
   ]) {
     assert.equal(
       /Inherit[^'"<]*[Ww]orkspace/.test(source), false,
-      `${label} 의 프로필 셀렉트가 워크스페이스 상속을 약속하면 안 됩니다.`,
+      `${label} 의 프로필 셀렉트가 계정 상속을 약속하면 안 됩니다.`,
     );
   }
 });

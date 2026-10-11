@@ -396,7 +396,7 @@ test('describeSessionAuth renders the account line, and says nothing when the ad
 
   const bound = describeSessionAuth({ source: 'credential', kind: 'api_key', label: 'Anthropic API key', detail: 'ANTHROPIC_API_KEY' }, 'team key');
   assert.equal(bound.text, 'Anthropic API key · ANTHROPIC_API_KEY', 'detail wins over the email for the second part');
-  assert.match(bound.title, /workspace credential "team key"/);
+  assert.match(bound.title, /account credential "team key"/);
 
   const loggedOut = describeSessionAuth({ source: 'operator', kind: 'none', label: 'Not logged in' });
   assert.equal(loggedOut.text, 'Not logged in');

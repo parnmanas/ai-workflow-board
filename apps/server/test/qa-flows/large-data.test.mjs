@@ -6,7 +6,7 @@
 //   1. The SSE stream survives the burst — the agent stays connected and still
 //      receives its trigger (the stream didn't disconnect / fall behind the
 //      keepalive under load).
-//   2. Capacity holds at scale: every activity re-pumps the workspace queue,
+//   2. Capacity holds at scale: every activity re-pumps the account queue,
 //      yet with `max_concurrent_tickets_per_agent` = 1 the N queued tickets
 //      start exactly ONE (todo → in_progress) and deliver exactly ONE trigger,
 //      NOT N. The started one is the queue head (priority → position →
@@ -81,7 +81,7 @@ test(`Large-data: ${N_TICKETS} queued tickets, ${N_TICKETS} activities — one s
   const started = Date.now();
   const activityService = app.get(ActivityService);
   for (const row of rows) {
-    // Every ticket activity re-pumps the workspace queue (TicketDispatchService).
+    // Every ticket activity re-pumps the account queue (TicketDispatchService).
     await activityService.logActivity({
       entity_type: 'ticket',
       entity_id: row.id,

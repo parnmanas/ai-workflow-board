@@ -53,7 +53,7 @@ import type { QaScheduleService } from '../../qa/qa-schedule.service';
 import type { SecurityProfileService } from '../../security/security-profile.service';
 import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
-import type { WorkspaceScheduleService } from '../../automation-schedule/automation-schedule.service';
+import type { AutomationScheduleService } from '../../automation-schedule/automation-schedule.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
 import { TicketService } from '../../tickets/ticket.service';
@@ -167,7 +167,7 @@ export interface ToolContext {
   // agent-task trigger layer. Required by the automation-schedule MCP tools (CRUD +
   // run-now). Standalone context omits it; the tools degrade to an explicit error
   // (no background tick in standalone mode).
-  workspaceScheduleService?: WorkspaceScheduleService;
+  automationScheduleService?: AutomationScheduleService;
   artifactRefsService?: ArtifactRefsService;
   // Ticket 48d14fff: prerequisite ("blocked-by ticket") mutations. Present in
   // both modes — the standalone builder constructs a thin instance directly

@@ -167,7 +167,7 @@ export const MENTION_SYNTAX_DOC =
   'MENTION SYNTAX — use structured `@[type:id|Display Name]` tokens so the server can notify the target. ' +
   'Plain `@Name`, `@Name#1234`, or markdown links do NOT fire notifications and render as raw text. ' +
   'Valid forms:\n' +
-  '  • `@[user:<uuid>|Alice]`          — mention a workspace user; writes UserMention row + fires user_mention SSE\n' +
+  '  • `@[user:<uuid>|Alice]`          — mention a account user; writes UserMention row + fires user_mention SSE\n' +
   '  • `@[agent:<rt-key>|Worker]`      — mention an agent by its runtime identity key (`rt-…`). On a ticket only the ' +
   'ticket\'s assignee (`assignee_key` from `get_ticket`) can be woken this way; in a chat room, a participant agent. ' +
   'Agent-to-agent mentions from your own messages DO wake the target (same as a user mentioning them). ' +

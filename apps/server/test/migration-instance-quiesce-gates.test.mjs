@@ -6,7 +6,7 @@
 // and BacklogPromotionService.tryPromote). Both services went away with the
 // board removal (docs/tickets.md): TicketDispatchService is now the ONE
 // ticket-dispatch path — its queue pump, its direct dispatch (right after the
-// workspace dispatch-pause check) and its supervisor re-send each check the
+// account dispatch-pause check) and its supervisor re-send each check the
 // quiesce flag, and each is covered below.
 //
 // Every chokepoint here is constructed directly (no NestJS DI) with
@@ -34,7 +34,7 @@ const modPath = (...p) => 'file://' + path.join(DIST, ...p);
 const { TicketDispatchService } = await import(modPath('modules', 'agents', 'ticket-dispatch.service.js'));
 const { QaScheduleService } = await import(modPath('modules', 'qa', 'qa-schedule.service.js'));
 const { SecurityScheduleService } = await import(modPath('modules', 'security', 'security-schedule.service.js'));
-const { WorkspaceScheduleService } = await import(modPath('modules', 'automation-schedule', 'automation-schedule.service.js'));
+const { AutomationScheduleService } = await import(modPath('modules', 'automation-schedule', 'automation-schedule.service.js'));
 const { AgentAutostartService } = await import(modPath('modules', 'agents', 'agent-autostart.service.js'));
 // Review round 1 P2 (blocking) — the paths the reviewer named as bypassing
 // quiesce entirely: ActionScheduler, OutreachPolling, OrchestrationReaper,
@@ -43,7 +43,7 @@ const { AgentAutostartService } = await import(modPath('modules', 'agents', 'age
 // feature-chain feature was removed with boards, so its gate went with it.)
 //
 // ActionSchedulerService 는 삭제됐다 — Action 의 cron 이 Account Schedule 로
-// 옮겨 갔기 때문이다. 그 게이트는 사라진 게 아니라 **WorkspaceScheduleService.runOnce
+// 옮겨 갔기 때문이다. 그 게이트는 사라진 게 아니라 **AutomationScheduleService.runOnce
 // 로 합쳐졌고**, 그쪽 케이스는 이 파일 위에 이미 있다. 예약 실행 경로가 quiesce 를
 // 우회하지 않는다는 이 파일의 계약은 그대로 지켜진다.
 const { OnTicketDoneActionService } = await import(modPath('modules', 'actions', 'on-ticket-done-action.service.js'));
@@ -74,7 +74,7 @@ test('TicketDispatchService.startQueued (todo queue pump) short-circuits while q
 });
 
 test('TicketDispatchService.dispatch refuses while quiesced, before the host reachability check or any agent_trigger', async () => {
-  // The workspace lookup (needed for the dispatch-pause check right before the
+  // The account lookup (needed for the dispatch-pause check right before the
   // gate) is the only repository read allowed; connectivity/instanceRegistry
   // are empty stubs, so passing the gate would throw.
   const dataSource = { getRepository: () => ({ findOne: async () => ({ id: 'w1', dispatch_paused_at: null }) }) };
@@ -113,8 +113,8 @@ test('SecurityScheduleService.runOnce short-circuits while quiesced, before touc
   assert.deepEqual(result, { dispatched: [], skipped: [] });
 });
 
-test('WorkspaceScheduleService.runOnce short-circuits while quiesced, before touching any schedule row', async () => {
-  const svc = new WorkspaceScheduleService(
+test('AutomationScheduleService.runOnce short-circuits while quiesced, before touching any schedule row', async () => {
+  const svc = new AutomationScheduleService(
     /* scheduleRepo */ {}, /* roomRepo */ {}, /* participantRepo */ {}, /* hostRepo */ {},
     /* dataSource */ {}, /* messaging */ {}, logStub, quiescedTrue, /* actionRepo */ {}, /* actions */ {},
   );

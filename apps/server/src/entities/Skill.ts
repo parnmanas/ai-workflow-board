@@ -7,10 +7,10 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  *
  *   | Scope     | account_id | Resolution priority |
  *   | Global    | NULL         | 1 (fallback)        |
- *   | Account | workspace id | 2 (shadows global)  |
+ *   | Account | account id | 2 (shadows global)  |
  *
  * A Account skill SHADOWS a Global skill carrying the same `slug`, exactly
- * like WorkflowFunction resolves by key. That is what lets a workspace fork a
+ * like WorkflowFunction resolves by key. That is what lets a account fork a
  * built-in skill without the operator having to delete the global one.
  *
  * NOTE on uniqueness: a plain `(account_id, slug)` unique index does NOT
@@ -27,11 +27,11 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  */
 @Entity('skills')
 @Index('uq_skills_global_slug', ['slug'], { unique: true, where: 'account_id IS NULL' })
-@Index('uq_skills_workspace_slug', ['account_id', 'slug'], { unique: true, where: 'account_id IS NOT NULL' })
+@Index('uq_skills_account_slug', ['account_id', 'slug'], { unique: true, where: 'account_id IS NOT NULL' })
 export class Skill {
   @PrimaryGeneratedColumn('uuid') id: string;
 
-  /** NULL = global (available to every workspace). */
+  /** NULL = global (available to every account). */
   @Column({ type: 'varchar', nullable: true, default: null }) account_id: string | null;
 
   @Column({ type: 'varchar' }) slug: string;

@@ -31,7 +31,7 @@ async function loadDist(relParts) {
     return await import(url);
   } catch (err) {
     throw new Error(
-      'This test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' +
+      'This test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' +
         err.message,
     );
   }
@@ -81,7 +81,7 @@ function activityFake() {
 
 function roomMessagingFake() {
   const sent = [];
-  return { sent, async sendSystemMessage(roomId, wsId, content) { sent.push({ roomId, wsId, content }); return { id: 'sys' }; } };
+  return { sent, async sendSystemMessage(roomId, accountId, content) { sent.push({ roomId, accountId, content }); return { id: 'sys' }; } };
 }
 
 async function buildCommandService(registry, { hosts = [], links = [] } = {}) {

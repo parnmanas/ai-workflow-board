@@ -87,7 +87,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
     inputHandleRef.current?.focus();
   }, [roomId, isMobile]);
 
-  // Pull workspace-wide mention candidates once. Role shortcuts require a
+  // Pull account-wide mention candidates once. Role shortcuts require a
   // ticket context we don't have in a free-form chat room, so they're
   // intentionally omitted here.
   useEffect(() => {

@@ -37,16 +37,16 @@ const PAGE_INFO: Record<AccountManagementKind, { title: string; description: str
 
 export default function AccountManagementPage({ kind }: { kind: AccountManagementKind }) {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const { hasPermission } = useAuth();
   const [account, setAccount] = useState<Account | null>(null);
   const [createScope, setCreateScope] = useState<CatalogScope>('account');
   const info = PAGE_INFO[kind];
 
   useEffect(() => {
-    if (!wsId) return;
-    api.getAccount(wsId).then(setAccount).catch(() => setAccount(null));
-  }, [wsId]);
+    if (!accountId) return;
+    api.getAccount(accountId).then(setAccount).catch(() => setAccount(null));
+  }, [accountId]);
 
   // Credentials are the one catalog kind whose server-side global writes sit
   // behind a dedicated permission (admin.global_credentials — see
@@ -60,7 +60,7 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
     : hasPermission('admin.access');
 
   const definitionProps = {
-    accountId: wsId,
+    accountId: accountId,
     catalogMode: true,
     createScope,
     allScopes: false,
@@ -76,20 +76,20 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
       case 'resources':
         return <ResourceManager {...definitionProps} />;
       case 'actions':
-        return <ActionManager accountId={wsId} />;
+        return <ActionManager accountId={accountId} />;
       case 'qa':
-        return <QaManager accountId={wsId} />;
+        return <QaManager accountId={accountId} />;
       case 'security':
-        return <SecurityManager accountId={wsId} />;
+        return <SecurityManager accountId={accountId} />;
       case 'schedules':
-        return <AutomationSchedulesEditor accountId={wsId} />;
+        return <AutomationSchedulesEditor accountId={accountId} />;
       case 'claude-backend-profiles':
         // 프로필은 인스턴스 전역이라 Account 배정/기본값 UI 가 없다
         // (티켓 e616dbfc). 관리는 관리자 전용이므로 비관리자에게는 탭을
         // 숨기는 대신 다른 탭과 같은 방식으로 권한 안내를 렌더한다 — 탭만
         // 사라지면 이 화면에서 유일하게 동작이 달라진다.
         return hasPermission('admin.access')
-          ? <ClaudeBackendProfilesManager accountId={wsId} />
+          ? <ClaudeBackendProfilesManager accountId={accountId} />
           : (
             <PermissionNotice
               title="관리자 권한이 필요합니다"

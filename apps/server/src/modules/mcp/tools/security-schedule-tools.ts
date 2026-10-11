@@ -76,7 +76,7 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'list_security_schedules',
-    'List reusable security schedules in a workspace.',
+    'List reusable security schedules in a account.',
     {
       account_id: z.string().describe('Account ID (required)'),
     },

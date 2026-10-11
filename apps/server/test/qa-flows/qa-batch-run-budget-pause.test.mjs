@@ -1,4 +1,4 @@
-// QA batch dispatch × workspace run-budget guard — review a51ec6d9 blocking #1.
+// QA batch dispatch × account run-budget guard — review a51ec6d9 blocking #1.
 //
 // _dispatchBatchIndex's walk-forward exists for a PERMANENT failure (a
 // scenario deleted/disabled since the batch was built): burn the index as
@@ -10,7 +10,7 @@
 // the whole tail burned as `errored`, with no documented recovery path for a
 // batch.
 //
-// This test drives a real 2-scenario batch over MCP HTTP, using a workspace
+// This test drives a real 2-scenario batch over MCP HTTP, using a account
 // run-budget tight enough that scenario 0's own run consumes the window's
 // only slot (same technique as action-run-budget-exhaustion.test.mjs), so
 // completing run 0 and advancing to scenario 1 trips the guard. It pins the
@@ -26,9 +26,9 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_PORT || '0';
 
-function scenarioPayload(wsId, agentId, name) {
+function scenarioPayload(accountId, agentId, name) {
   return {
-    account_id: wsId,
+    account_id: accountId,
     target_runtime: agentId,
     name,
     qa_driver: 'http-api',

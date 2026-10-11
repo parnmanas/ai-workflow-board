@@ -2,9 +2,9 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 
 // docs/ontology-graph/DESIGN.md 축 2 + 이 결정의 근거인 research-ontology.md
 // §8.5 property-set이 고정한 닫힌 어휘. `type`/`kind`는 의도적으로 union으로
-// 두지 않았다 — 축 2의 워크스페이스 확장성 모델(core@X.Y.Z + 추가적인
+// 두지 않았다 — 축 2의 계정 확장성 모델(core@X.Y.Z + 추가적인
 // workspace_profile@N)상 실제 type taxonomy는 고정 enum이 아니라 열린,
-// 워크스페이스별 설정 가능한 레지스트리이기 때문.
+// 계정별 설정 가능한 레지스트리이기 때문.
 //
 // OntologyEdge와 공유(그쪽에서 재export, 재정의 아님) — 두 테이블 모두 같은
 // layer/status/confidence-method 어휘를 쓴다.
@@ -13,7 +13,7 @@ export type OntologyStatus = 'active' | 'stale' | 'removed' | 'quarantined';
 export type OntologyConfidenceMethod = 'constant' | 'agreement' | 'support' | 'calibrated' | 'human';
 
 // ticket 964014f5(Ontology Graph 4/7), DESIGN.md 축 4 — durability tier.
-// `volatile`(워크스페이스 소스) / `stable`(lockfile-pinned deps, 아직 이
+// `volatile`(계정 소스) / `stable`(lockfile-pinned deps, 아직 이
 // 코드베이스엔 ExternalPackage 추출기가 없어 실제로는 채워지지 않음 —
 // 미래 티켓을 위해 어휘만 열어둠) / `frozen`(vendored/generated 경로,
 // extraction/durability.ts의 휴리스틱으로 판정). File 노드가 최초로 갖고,

@@ -2,14 +2,14 @@
 //
 // Cross-tenant leak test for the channels module.
 //
-// Purpose: Verify that workspace A's channels cannot be accessed by users belonging only to
-// workspace B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
+// Purpose: Verify that account A's channels cannot be accessed by users belonging only to
+// account B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
 // when AccountGuard is applied to ChannelsController.
 //
 // Current state (Phase 5):
-//   - ChannelsController uses PermissionGuard + MANAGE_CHANNELS — no workspace scoping.
+//   - ChannelsController uses PermissionGuard + MANAGE_CHANNELS — no account scoping.
 //   - GET /api/channels returns ALL channels across all accounts (no account_id filter).
-//   - Cross-workspace isolation is NOT enforced until Phase 6 adds AccountGuard.
+//   - Cross-account isolation is NOT enforced until Phase 6 adds AccountGuard.
 //
 // Tests marked it.todo() will pass after Phase 6 applies AccountGuard to ChannelsController.
 //
@@ -55,12 +55,12 @@ async function loadServerModules() {
     return { NestFactory, AppModule, AuthService, getDataSourceToken };
   } catch (err) {
     throw new Error(
-      'Leak test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
+      'Leak test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message
     );
   }
 }
 
-describe('channels-leak: cross-workspace channel isolation', async () => {
+describe('channels-leak: cross-account channel isolation', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -96,7 +96,7 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
     wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (channels)', description: 'Leak test' }));
     wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (channels)', description: 'Leak test' }));
 
-    // ─── Create user B and assign to workspace B ──────────────────────────────
+    // ─── Create user B and assign to account B ──────────────────────────────
     const userBRec = await userRepo.save(userRepo.create({
       name: 'channels-leak-user-b',
       email: USER_B_EMAIL,
@@ -112,7 +112,7 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
       object_type: 'account', object_id: wsB.id,
     }));
 
-    // ─── Create a channel in workspace A via HTTP ──────────────────────────────
+    // ─── Create a channel in account A via HTTP ──────────────────────────────
     // Phase 6+: the channels controller persists account_id from the
     // X-Account-Id header (ChannelsController.create → account_id: accountId).
     // Create channel A scoped to ws_a so the account-scoped list/get paths
@@ -150,7 +150,7 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
 
   it('admin can list channels and sees the created channel (control)', async () => {
     // Channels are account-scoped — the admin must supply the ws_a header to
-    // see ws_a's channels (an admin with no workspace context gets an empty list).
+    // see ws_a's channels (an admin with no account context gets an empty list).
     const res = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
       accountId: wsA.id,
@@ -202,7 +202,7 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
       assert.equal(
         channels.filter(ch => ch.id === channelA.id).length,
         0,
-        'Account A channel must not appear in workspace B listing',
+        'Account A channel must not appear in account B listing',
       );
     }
   });
@@ -213,11 +213,11 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
       token: tokenB,
       accountId: wsA.id,
     });
-    assert.equal(res.status, 403, `Expected 403 for cross-workspace channel access, got ${res.status}: ${JSON.stringify(res.data)}`);
+    assert.equal(res.status, 403, `Expected 403 for cross-account channel access, got ${res.status}: ${JSON.stringify(res.data)}`);
   });
 
   it('GET /api/channels with X-Account-Id: ws_b returns empty list when no channels in ws_b — Phase 6', async () => {
-    // Admin bypasses workspace guard membership check but we verify the result
+    // Admin bypasses account guard membership check but we verify the result
     // by checking ws_b has no channels (channelA was created without account_id)
     const res = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,

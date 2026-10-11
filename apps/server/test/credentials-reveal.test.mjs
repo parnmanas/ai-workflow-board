@@ -12,7 +12,7 @@ const SECRET = 'sk-ant-oat-test-secret-value';
 const PASSWORD = 'correct horse battery staple';
 const credential = {
   id: 'credential-1',
-  account_id: 'workspace-1',
+  account_id: 'account-1',
   board_id: null,
   name: 'OAuth',
   description: '',
@@ -175,9 +175,9 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
       permissions: JSON.stringify(['admin.credentials']),
       password_hash: await auth.hashPassword('user-password'),
     }));
-    const workspace = await accountRepo.save(accountRepo.create({ name: 'Reveal Account' }));
+    const account = await accountRepo.save(accountRepo.create({ name: 'Reveal Account' }));
     const routedCredential = await credentialRepo.save(credentialRepo.create({
-      account_id: workspace.id,
+      account_id: account.id,
       board_id: null,
       name: 'Routed OAuth',
       description: '',
@@ -186,7 +186,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
     }));
     const nonOAuthSecret = `routed-api-key-${randomUUID()}`;
     const nonOAuthCredential = await credentialRepo.save(credentialRepo.create({
-      account_id: workspace.id,
+      account_id: account.id,
       board_id: null,
       name: 'Routed API Key',
       description: '',
@@ -221,7 +221,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
     assert.equal(nonOAuthReveal.status, 400);
     assert.doesNotMatch(nonOAuthRevealBody, new RegExp(nonOAuthSecret));
 
-    const list = await fetch(`${baseUrl}?account_id=${workspace.id}`, {
+    const list = await fetch(`${baseUrl}?account_id=${account.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     const listBody = await list.json();
@@ -252,7 +252,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
 test('ordinary list response remains masked and never contains the OAuth token', async () => {
   const { instance } = controller();
   const res = response();
-  await instance.list('workspace-1', undefined, undefined, undefined, res);
+  await instance.list('account-1', undefined, undefined, undefined, res);
   assert.equal(res.statusCode, 200);
   assert.doesNotMatch(JSON.stringify(res.body), new RegExp(SECRET));
   assert.match(res.body[0].credential_fields.oauth_token, /••••/);
@@ -261,7 +261,7 @@ test('ordinary list response remains masked and never contains the OAuth token',
 test('ordinary detail/initial response remains masked and never contains the OAuth token', async () => {
   const { instance } = controller();
   const res = response();
-  await instance.get(credential.id, 'workspace-1', res);
+  await instance.get(credential.id, 'account-1', res);
   assert.equal(res.statusCode, 200);
   assert.doesNotMatch(JSON.stringify(res.body), new RegExp(SECRET));
   assert.match(res.body.credential_fields.oauth_token, /••••/);

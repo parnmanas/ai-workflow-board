@@ -122,7 +122,7 @@ const CLAUDE_TIER_MODE: Record<Exclude<PermissionTier, 'trusted'>, string> = {
  * bypassPermissions 를 핀하므로 `--permission-mode` 와 함께 쓰면 후자가
  * 무의미해진다 — 그래서 둘은 상호 배타적이다. 예전에는 harness
  * `permission_mode` 가 하나라도 걸려 있으면 무조건 스킵 플래그를 버렸는데,
- * 그 탓에 `trusted` 로 표시된 에이전트도 workspace trust 대화상자에 걸려
+ * 그 탓에 `trusted` 로 표시된 에이전트도 account trust 대화상자에 걸려
  * Pending 으로 떨어졌다.
  *
  * `approve`/`strict` 는 `--permission-mode` 로 내려간다. 보드 harness 가
@@ -570,13 +570,13 @@ export class ClaudeCliAdapter extends CliAdapter {
   /**
    * 위의 `permissionArgs()` 는 `trusted` 등급에 `--dangerously-skip-permissions`
    * 를 붙이는데, 이 플래그는 대화형 trust 대화상자까지 우회한다 — Claude Code
-   * 는 "this workspace has not been trusted" 경고만 찍고 그대로 진행한다
+   * 는 "this account has not been trusted" 경고만 찍고 그대로 진행한다
    * (ticket b2e88390 실측: 그 경고를 달고도 44턴을 완주했다). 다른 등급은
    * 대신 `--permission-mode` 를 내보내므로 대화상자가 load-bearing 이 되고,
    * 비대화형 spawn 은 그걸 만족시킬 방법이 없어 멈추거나 실패한다.
    *
    * ticket 5851e435 — 두 조건을 **모두** 만족할 때만 게이트를 건다:
-   *   (a) 보드/워크스페이스 harness 가 명시적으로 비-bypass 모드를 요구했다
+   *   (a) 보드/계정 harness 가 명시적으로 비-bypass 모드를 요구했다
    *       (= 운영자가 사람의 trust 승인을 원한다는 ticket 48aeab6e 의 계약),
    *   (b) 그 위의 Agent trust 가 그 요구를 `trusted` 로 뒤집지 않았다.
    * 따라서 `trusted` 에이전트는 harness 값과 무관하게 절대 이 게이트에 걸리지

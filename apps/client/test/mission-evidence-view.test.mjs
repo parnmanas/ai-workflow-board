@@ -91,7 +91,7 @@ test('Evidence 탭은 미디어를 step 별로 묶고 미션 방 항목을 맨 �
   const picked = [];
   const view = mount(
     React.createElement(MissionEvidencePane, {
-      missionId: 'm', wsId: 'ws', refreshKey: 1,
+      missionId: 'm', accountId: 'ws', refreshKey: 1,
       steps: [step('build', { position: 0 }), step('ship', { position: 1 })],
       onSelectStep: (id) => picked.push(id),
     }),
@@ -129,7 +129,7 @@ test('썸네일을 누르면 라이트박스 — 동영상은 <video controls>, 
       id, file_name: 'x', mime_type: id === 'att-2' ? 'video/webm' : 'image/png', size_bytes: 1, is_media: true, file_data: PNG,
     }),
   });
-  const view = mount(React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }));
+  const view = mount(React.createElement(MissionEvidencePane, { missionId: 'm', accountId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }));
   await settle();
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;
@@ -164,7 +164,7 @@ test('바이트는 왔는데 디코드가 안 되면 "깨진 파일"로 말한�
     }),
   });
   const view = mount(
-    React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
+    React.createElement(MissionEvidencePane, { missionId: 'm', accountId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
   );
   await settle();
   t.after(() => { view.unmount(); dom.cleanup(); });
@@ -196,7 +196,7 @@ test('잘린 파일은 남은 부분을 보여주되 "일부만" 이라고 말�
     }),
   });
   const view = mount(
-    React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
+    React.createElement(MissionEvidencePane, { missionId: 'm', accountId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
   );
   await settle();
   t.after(() => { view.unmount(); dom.cleanup(); });
@@ -214,7 +214,7 @@ test('잘린 파일은 남은 부분을 보여주되 "일부만" 이라고 말�
 test('증거가 없으면 어떻게 올리는지 안내한다', async (t) => {
   const dom = prepDom();
   stubApi(t, { listOrchestrationMissionEvidence: async () => ({ mission_id: 'm', items: [] }) });
-  const view = mount(React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [], onSelectStep: () => {} }));
+  const view = mount(React.createElement(MissionEvidencePane, { missionId: 'm', accountId: 'ws', refreshKey: 1, steps: [], onSelectStep: () => {} }));
   await settle();
   t.after(() => { view.unmount(); dom.cleanup(); });
   assert.ok(view.container.querySelector('[data-testid="evidence-empty"]'));
@@ -242,7 +242,7 @@ test('step 세션은 메시지 아래에 첨부를 그린다 — 미디어는 �
     }),
     getOrchestrationStepAttachment: async (_s, _w, id) => ({ id, file_name: 'x', mime_type: 'image/png', size_bytes: 1, is_media: true, file_data: PNG }),
   });
-  const view = mount(React.createElement(StepSessionPanel, { step: step('build', { status: 'running' }), wsId: 'ws', events: [], stepTimeoutMinutes: 90, onClose: () => {} }));
+  const view = mount(React.createElement(StepSessionPanel, { step: step('build', { status: 'running' }), accountId: 'ws', events: [], stepTimeoutMinutes: 90, onClose: () => {} }));
   await settle();
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;

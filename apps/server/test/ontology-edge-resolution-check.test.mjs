@@ -4,7 +4,7 @@
 // 있고 실제 컬럼은 DB 레벨 제약 없는 순수 `varchar`였다 — TypeScript
 // 타입은 런타임에 지워지고 어느 DB도 검사하지 않으므로 Postgres와 sql.js
 // 둘 다 임의 문자열을 조용히 저장할 수 있었다. DESIGN.md 축 2는
-// `resolution`을 (워크스페이스 확장 가능하도록 의도적으로 열어둔
+// `resolution`을 (계정 확장 가능하도록 의도적으로 열어둔
 // type/kind/layer와 달리) 진짜 CLOSED 어휘로 못박는다 — 티켓 원문도
 // 그대로 `resolution ENUM('exact','name_match','dynamic','unresolved')`로
 // 쓰고 있다.

@@ -18,13 +18,13 @@ import { EvidenceLightbox, EvidenceThumb, useEvidenceUrls, type EvidenceMediaMet
  */
 export default function MissionEvidencePane({
   missionId,
-  wsId,
+  accountId,
   steps,
   refreshKey,
   onSelectStep,
 }: {
   missionId: string;
-  wsId: string;
+  accountId: string;
   steps: OrchestrationStep[];
   /** 바뀌면 다시 읽는다 — 미션 상세가 갱신될 때 부모가 올려 준다. */
   refreshKey: string | number;
@@ -37,7 +37,7 @@ export default function MissionEvidencePane({
   useEffect(() => {
     let alive = true;
     api
-      .listOrchestrationMissionEvidence(missionId, wsId)
+      .listOrchestrationMissionEvidence(missionId, accountId)
       .then((res) => {
         if (alive) {
           setItems(res.items);
@@ -50,18 +50,18 @@ export default function MissionEvidencePane({
     return () => {
       alive = false;
     };
-  }, [missionId, wsId, refreshKey]);
+  }, [missionId, accountId, refreshKey]);
 
   const byId = useMemo(() => new Map((items ?? []).map((i) => [i.id, i])), [items]);
   const load = useCallback(
     async (meta: EvidenceMediaMeta) => {
       const item = byId.get(meta.id);
       if (!item) return null;
-      if (item.step_id) return api.getOrchestrationStepAttachment(item.step_id, wsId, item.id);
+      if (item.step_id) return api.getOrchestrationStepAttachment(item.step_id, accountId, item.id);
       const full = await api.getChatAttachment(item.room_id, item.id);
       return full ? { file_data: full.file_data, mime_type: full.mime_type, truncated: full.truncated } : null;
     },
-    [byId, wsId],
+    [byId, accountId],
   );
   const media = useEvidenceUrls(load);
 

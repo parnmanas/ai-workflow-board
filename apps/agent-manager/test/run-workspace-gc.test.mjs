@@ -1,4 +1,4 @@
-// Action Run / 채팅방 워크스페이스 루트 + 아이들 GC (ticket 9fd27487 — 티켓이 아닌
+// Action Run / 채팅방 계정 루트 + 아이들 GC (ticket 9fd27487 — 티켓이 아닌
 // 실행 경로에는 폴더 관례가 없었다). 다루는 범위:
 //   - actionWorkspaceRootFor / chatWorkspaceRootFor: runWorkspaceRootFor 와 대칭인
 //     고정 루트(`.awb/act`, `.awb/chat`)
@@ -41,7 +41,7 @@ async function makeBase() {
 const WELL_PAST_IDLE = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
 const WELL_WITHIN_IDLE = new Date(Date.now() - 60 * 1000).toISOString();
 
-async function plantWorkspace(root, leaf, { marker } = {}) {
+async function plantAccount(root, leaf, { marker } = {}) {
   const dir = join(root, leaf);
   await fsp.mkdir(dir, { recursive: true });
   if (marker !== undefined) {
@@ -63,7 +63,7 @@ test('actionWorkspaceRootFor / chatWorkspaceRootFor / orchestrationWorkspaceRoot
 test('sweepRunWorkspaces: a fresh marker is NOT reclaimed', async () => {
   const base = await makeBase();
   const actRoot = actionWorkspaceRootFor(base);
-  const dir = await plantWorkspace(actRoot, 'fresh-action', { marker: WELL_WITHIN_IDLE });
+  const dir = await plantAccount(actRoot, 'fresh-action', { marker: WELL_WITHIN_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
   assert.equal(removed, 0);
@@ -73,7 +73,7 @@ test('sweepRunWorkspaces: a fresh marker is NOT reclaimed', async () => {
 test('sweepRunWorkspaces: a marker past the idle bound IS reclaimed', async () => {
   const base = await makeBase();
   const chatRoot = chatWorkspaceRootFor(base);
-  const dir = await plantWorkspace(chatRoot, 'stale-room', { marker: WELL_PAST_IDLE });
+  const dir = await plantAccount(chatRoot, 'stale-room', { marker: WELL_PAST_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
   assert.equal(removed, 1);
@@ -85,7 +85,7 @@ test('sweepRunWorkspaces: a marker-less folder falls back to the directory mtime
   const actRoot = actionWorkspaceRootFor(base);
   // 마커가 기록되지 않음 — ticket 9fd27487 의 프로비저너 변경 이전 상태이거나,
   // 최초 프로비저닝이 마커를 touch 하기도 전에 죽은 경우다.
-  const dir = await plantWorkspace(actRoot, 'no-marker-action');
+  const dir = await plantAccount(actRoot, 'no-marker-action');
   const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
   await fsp.utimes(dir, old, old);
 
@@ -98,7 +98,7 @@ test('sweepRunWorkspaces: NEVER reclaims a folder a live process currently sits 
   if (process.platform !== 'linux') return; // /proc 기반 liveness 체크는 Linux 전용이다
   const base = await makeBase();
   const actRoot = actionWorkspaceRootFor(base);
-  const dir = await plantWorkspace(actRoot, 'live-action', { marker: WELL_PAST_IDLE });
+  const dir = await plantAccount(actRoot, 'live-action', { marker: WELL_PAST_IDLE });
 
   const child = spawn('sleep', ['5'], { cwd: dir, stdio: 'ignore' });
   try {
@@ -115,12 +115,12 @@ test('sweepRunWorkspaces: NEVER reclaims a folder a live process currently sits 
 
 test('sweepRunWorkspaces: 한 번의 호출에서 .awb/act, .awb/chat, .awb/orch를 독립적으로 sweep한다', async () => {
   const base = await makeBase();
-  const staleAction = await plantWorkspace(actionWorkspaceRootFor(base), 'stale-a', { marker: WELL_PAST_IDLE });
-  const freshAction = await plantWorkspace(actionWorkspaceRootFor(base), 'fresh-a', { marker: WELL_WITHIN_IDLE });
-  const staleChat = await plantWorkspace(chatWorkspaceRootFor(base), 'stale-c', { marker: WELL_PAST_IDLE });
-  const freshChat = await plantWorkspace(chatWorkspaceRootFor(base), 'fresh-c', { marker: WELL_WITHIN_IDLE });
-  const staleOrch = await plantWorkspace(orchestrationWorkspaceRootFor(base), 'stale-o', { marker: WELL_PAST_IDLE });
-  const freshOrch = await plantWorkspace(orchestrationWorkspaceRootFor(base), 'fresh-o', { marker: WELL_WITHIN_IDLE });
+  const staleAction = await plantAccount(actionWorkspaceRootFor(base), 'stale-a', { marker: WELL_PAST_IDLE });
+  const freshAction = await plantAccount(actionWorkspaceRootFor(base), 'fresh-a', { marker: WELL_WITHIN_IDLE });
+  const staleChat = await plantAccount(chatWorkspaceRootFor(base), 'stale-c', { marker: WELL_PAST_IDLE });
+  const freshChat = await plantAccount(chatWorkspaceRootFor(base), 'fresh-c', { marker: WELL_WITHIN_IDLE });
+  const staleOrch = await plantAccount(orchestrationWorkspaceRootFor(base), 'stale-o', { marker: WELL_PAST_IDLE });
+  const freshOrch = await plantAccount(orchestrationWorkspaceRootFor(base), 'fresh-o', { marker: WELL_WITHIN_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
   assert.equal(removed, 3);
@@ -140,8 +140,8 @@ test('sweepRunWorkspaces: an empty/absent baseWorkingDir, or roots that were nev
 
 test('snapshotRunWorkspaces: projects path/kind/leaf/lastUsedAt/live for the instance heartbeat', async () => {
   const base = await makeBase();
-  await plantWorkspace(actionWorkspaceRootFor(base), 'snap-action', { marker: WELL_WITHIN_IDLE });
-  await plantWorkspace(chatWorkspaceRootFor(base), 'snap-chat'); // 마커 없음 → lastUsedAt null
+  await plantAccount(actionWorkspaceRootFor(base), 'snap-action', { marker: WELL_WITHIN_IDLE });
+  await plantAccount(chatWorkspaceRootFor(base), 'snap-chat'); // 마커 없음 → lastUsedAt null
 
   const entries = await manager.snapshotRunWorkspaces(base);
   assert.equal(entries.length, 2);
@@ -170,8 +170,8 @@ test('snapshotRunWorkspaces: an empty baseWorkingDir yields [] (never throws)', 
 test('sweepRunWorkspaces: nested workspace_folder — a stale PARENT mtime does not sweep a fresh nested leaf', async () => {
   const base = await makeBase();
   const actRoot = actionWorkspaceRootFor(base);
-  const dir = await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
-  // plantWorkspace의 mkdir(recursive)가 만든 중간 디렉터리('deploy')는 방금
+  const dir = await plantAccount(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+  // plantAccount의 mkdir(recursive)가 만든 중간 디렉터리('deploy')는 방금
   // 생성되어 fresh하다 — 실제 버그 상황(오래전에 만들어진 뒤로 자식 git
   // 활동으로는 한 번도 갱신되지 않은 부모)을 재현하려면 인위적으로 되돌려야 한다.
   const parentDir = join(actRoot, 'deploy');
@@ -186,7 +186,7 @@ test('sweepRunWorkspaces: nested workspace_folder — a stale PARENT mtime does 
 test('sweepRunWorkspaces: nested workspace_folder — a stale marker on the final nested leaf IS reclaimed', async () => {
   const base = await makeBase();
   const chatRoot = chatWorkspaceRootFor(base);
-  const dir = await plantWorkspace(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
+  const dir = await plantAccount(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
   assert.equal(removed, 1, '최종 leaf 자체가 idle이면(부모가 아니라) 정확히 회수되어야 한다');
@@ -196,7 +196,7 @@ test('sweepRunWorkspaces: nested workspace_folder — a stale marker on the fina
 test('snapshotRunWorkspaces: nested workspace_folder projects leaf/path at the FINAL segment, not the parent container', async () => {
   const base = await makeBase();
   const actRoot = actionWorkspaceRootFor(base);
-  await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+  await plantAccount(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
 
   const entries = await manager.snapshotRunWorkspaces(base);
   assert.equal(entries.length, 1, '중첩 부모(deploy)를 별도 leaf로 이중 계산하면 안 된다');
@@ -218,8 +218,8 @@ test('snapshotRunWorkspaces: nested workspace_folder projects leaf/path at the F
 test('sweepRunWorkspaces: sibling markers in a prefix relationship — a stale ANCESTOR does not sweep a fresh/live descendant', async () => {
   const base = await makeBase();
   const actRoot = actionWorkspaceRootFor(base);
-  const parent = await plantWorkspace(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
-  const child = await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+  const parent = await plantAccount(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
+  const child = await plantAccount(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
   assert.equal(removed, 0, '자손이 살아남으면 조상도 함께 지우면 안 된다(재귀 삭제가 자손까지 날린다)');
@@ -230,8 +230,8 @@ test('sweepRunWorkspaces: sibling markers in a prefix relationship — a stale A
 test('sweepRunWorkspaces: sibling markers in a prefix relationship — a stale DESCENDANT is reclaimed independently of a fresh ancestor', async () => {
   const base = await makeBase();
   const chatRoot = chatWorkspaceRootFor(base);
-  const parent = await plantWorkspace(chatRoot, 'deploy', { marker: WELL_WITHIN_IDLE });
-  const child = await plantWorkspace(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
+  const parent = await plantAccount(chatRoot, 'deploy', { marker: WELL_WITHIN_IDLE });
+  const child = await plantAccount(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
   assert.equal(removed, 1, 'stale 자손은 fresh 조상과 무관하게 독립적으로 회수되어야 한다');
@@ -242,8 +242,8 @@ test('sweepRunWorkspaces: sibling markers in a prefix relationship — a stale D
 test('snapshotRunWorkspaces: sibling markers in a prefix relationship both report as independent boundaries', async () => {
   const base = await makeBase();
   const actRoot = actionWorkspaceRootFor(base);
-  await plantWorkspace(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
-  await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+  await plantAccount(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
+  await plantAccount(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
 
   const entries = await manager.snapshotRunWorkspaces(base);
   assert.equal(entries.length, 2, "'deploy'와 'deploy/scripts' 둘 다 독립 경계로 보고되어야 한다");
@@ -272,13 +272,13 @@ for (const gitAsFile of [false, true]) {
   test(`sweepRunWorkspaces + snapshotRunWorkspaces: repo-checkout 부모(${label}) 안에 manifest로 기록된 자식 — stale 부모는 fresh 자식과 함께 두 snapshot entry로 보고되고, 자식이 살아남으면 부모도 보존된다`, async () => {
     const base = await makeBase();
     const actRoot = actionWorkspaceRootFor(base);
-    const parent = await plantWorkspace(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
+    const parent = await plantAccount(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
     if (gitAsFile) {
       await fsp.writeFile(join(parent, '.git'), 'gitdir: /elsewhere/.git/worktrees/deploy\n');
     } else {
       await fsp.mkdir(join(parent, '.git'), { recursive: true });
     }
-    const child = await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+    const child = await plantAccount(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
     // provisionRunWorkspace가 Action B를 프로비저닝할 때마다 실제로 하는 일 —
     // 이 leaf를 manifest에 등록해서 부모의 `.git`이 하강을 막아도 독립 경계로
     // 남는다.
@@ -299,13 +299,13 @@ for (const gitAsFile of [false, true]) {
   test(`sweepRunWorkspaces: repo-checkout 부모(${label}) 안에 manifest로 기록된 자식 — fresh 부모와 무관하게 stale 자식은 독립적으로 회수된다`, async () => {
     const base = await makeBase();
     const chatRoot = chatWorkspaceRootFor(base);
-    const parent = await plantWorkspace(chatRoot, 'deploy', { marker: WELL_WITHIN_IDLE });
+    const parent = await plantAccount(chatRoot, 'deploy', { marker: WELL_WITHIN_IDLE });
     if (gitAsFile) {
       await fsp.writeFile(join(parent, '.git'), 'gitdir: /elsewhere/.git/worktrees/deploy\n');
     } else {
       await fsp.mkdir(join(parent, '.git'), { recursive: true });
     }
-    const child = await plantWorkspace(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
+    const child = await plantAccount(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
     await recordRunWorkspaceLeaf(chatRoot, 'deploy/scripts');
 
     const removed = await manager.sweepRunWorkspaces(base);

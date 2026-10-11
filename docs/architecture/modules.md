@@ -51,7 +51,7 @@ AppModule
 ├── MentionsModule              /api/mentions/*, /api/accounts/:accountId/mentions/*
 ├── AgentManagerModule          /api/agent-manager/*, /api/agent-templates, /api/runtime-specs   (+ @Global InstanceRegistryModule)
 ├── UserChannelsModule          /api/me/channels/*, /api/admin/users/:userId/channels
-├── WorkspaceScheduleModule     /api/automation-schedules/*
+├── AutomationScheduleModule     /api/automation-schedules/*
 ├── WorkflowFunctionsModule     /api/functions/*
 ├── SkillsModule                /api/accounts/:accountId/skills/*, /api/admin/skill-registry/*
 ├── ArtifactRefsModule          /api/artifact-refs
@@ -62,10 +62,10 @@ AppModule
 ```
 
 Canonical work lists aggregate accessible accounts; ID-addressed operations check
-the actual owner. The `/api/workspaces` routes/headers remain transport aliases,
+the actual owner. The `/api/accounts` routes/headers remain transport aliases,
 not separate work surfaces. See [ownership](../ownership.md).
 
-There is no Boards, Columns, PromptTemplates or WorkspaceRoles module any more —
+There is no Boards, Columns, PromptTemplates or AccountRoles module any more —
 boards, columns, prompt templates and ticket role assignments were removed (see
 [`docs/tickets.md`](../tickets.md)). Ticket writes live in `TicketService`, ticket
 dispatch in `TicketDispatchService`; both are provided by `AgentsModule`.
@@ -111,7 +111,7 @@ and events reach it without an import edge.
 
 | Imports | Controllers | Notes |
 |---|---|---|
-| `TypeOrmModule.forFeature([ApiKey])`, `AgentsModule`, `McpServicesModule`, `ChatRoomsModule`, `ActionsModule`, `QaScenarioModule`, `BuildsModule`, `DeploymentsModule`, `SecurityProfileModule`, `WorkspaceScheduleModule`, `WorkflowFunctionsModule`, `ArtifactRefsModule`, `OutreachModule`, `OrchestrationModule`, `AgentManagerModule`, `OntologyModule`, `VoiceModule`, `AgentSessionsModule` | `McpController` | Streamable HTTP transport at `/mcp`. Builds `ToolContext` with DI-injected services and hands it to `registerAllTools(server, ctx)`. |
+| `TypeOrmModule.forFeature([ApiKey])`, `AgentsModule`, `McpServicesModule`, `ChatRoomsModule`, `ActionsModule`, `QaScenarioModule`, `BuildsModule`, `DeploymentsModule`, `SecurityProfileModule`, `AutomationScheduleModule`, `WorkflowFunctionsModule`, `ArtifactRefsModule`, `OutreachModule`, `OrchestrationModule`, `AgentManagerModule`, `OntologyModule`, `VoiceModule`, `AgentSessionsModule` | `McpController` | Streamable HTTP transport at `/mcp`. Builds `ToolContext` with DI-injected services and hands it to `registerAllTools(server, ctx)`. |
 
 ### `McpServicesModule`
 
@@ -333,14 +333,14 @@ with the Agent table, P4c-4.)
 - Imports: `TypeOrmModule.forFeature([WorkflowFunction, WorkflowFunctionRun, Ticket])`, `ActionsModule`
 - Controllers: `WorkflowFunctionsController`; Providers/Exports: `WorkflowFunctionsService`
 
-### `WorkspaceScheduleModule`
+### `AutomationScheduleModule`
 
 The class/service/controller names are retained internal names. The entity is
 `AutomationSchedule`, the folder is `modules/automation-schedule`, and canonical
-REST/MCP names use automation schedules. Legacy workspace routes are aliases.
+REST/MCP names use automation schedules. Legacy account routes are aliases.
 
 - Imports: `TypeOrmModule.forFeature([AutomationSchedule, ChatRoom, ChatRoomParticipant, RuntimeHost, Action])`, `ChatRoomsModule`, `ActionsModule`, `SharedServicesModule`
-- Controllers: `WorkspaceScheduleController`; Providers/Exports: `WorkspaceScheduleService`
+- Controllers: `AutomationScheduleController`; Providers/Exports: `AutomationScheduleService`
 
 
 ---

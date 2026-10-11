@@ -648,7 +648,7 @@ export class ChatSessionManager
     if (sess._run) {
       const run = sess._run;
       const route = resolveRunCompletionRoute(run.kind);
-      // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-workspace 경고를
+      // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-account 경고를
       // (그냥 두면 아무도 안 읽는 stdout 속에 묻힌다) 진단 가능한 원인일
       // 때 run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가
       // 그냥 "결과 없음" 보다 낫다.
@@ -660,7 +660,7 @@ export class ChatSessionManager
       // canonical value list). No guessing left: either we know which of
       // those caused this exit, or we honestly don't and say so.
       const summary = hasUntrustedWorkspaceWarning(tail)
-        ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
+        ? 'run 세션이 CLI account trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
           'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
           'cli-home의 .claude.json trust 시딩을 확인하세요.'
         : sess.stopReason

@@ -33,7 +33,7 @@ function cleanLabel(value: string): string {
 }
 
 /**
- * In-app path that opens one ticket — the workspace ticket pool with the
+ * In-app path that opens one ticket — the account ticket pool with the
  * ticket's detail panel open. `extra` adds query params (e.g. `comment`).
  * Relative; prefix AWB_PUBLIC_URL for links that leave the app.
  */

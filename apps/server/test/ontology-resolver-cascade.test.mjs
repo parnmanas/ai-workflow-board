@@ -185,7 +185,7 @@ describe('cascade tier 3 — import-suffix (0.85)', () => {
 });
 
 describe('cascade tier 4 — unique-name (0.75)', () => {
-  it('import도 same-module도 아니지만 워크스페이스 전체에서 이름이 유일하면 해소된다', () => {
+  it('import도 same-module도 아니지만 계정 전체에서 이름이 유일하면 해소된다', () => {
     const index = new GraphSymbolIndex();
     const onlyDef = makeDef('src/only.ts', 'GloballyUniqueThing');
     index.addDef(onlyDef);

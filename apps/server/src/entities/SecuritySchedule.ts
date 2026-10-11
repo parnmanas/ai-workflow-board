@@ -11,7 +11,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *
  * Scope:
  *   - scope='all'      → at dispatch time, expand to every ENABLED profile in
- *     the workspace.
+ *     the account.
  *     We deliberately store NO profile id snapshot for 'all' so adding/removing a
  *     profile is reflected automatically on the next run (the ticket's
  *     "id 스냅샷 말고 실행 시 resolve" requirement — handled by startBatch({all:true})).

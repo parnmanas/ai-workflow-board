@@ -21,7 +21,7 @@ import { cliDescriptor } from '../../common/cli-catalog';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability, checkManagerCapabilityForDispatch } from '../../common/manager-capability-gate';
@@ -32,7 +32,7 @@ import { InstanceRegistryService } from '../agent-manager/instance-registry.serv
 const CONTENT_MAX = 10000;
 
 // Raised ceiling for in-process server-issued run dispatch (QA / security run
-// prompts). These are machine-rendered from a scenario/profile the workspace
+// prompts). These are machine-rendered from a scenario/profile the account
 // controls, not a human typing into a box, and can legitimately exceed the
 // interactive CONTENT_MAX (observed: a 10,257-char QA prompt 400-blocked at the
 // 10k cliff — ticket acd24e5d). Still bounded (not unlimited) so a pathological
@@ -267,7 +267,7 @@ export class RoomMessagingService {
     options?: { observer?: boolean; excludeProgress?: boolean; accountId?: string },
   ): Promise<any[]> {
     // v0.32: observer mode skips the active-participant gate so admins can
-    // read agent-to-agent rooms they're not a member of (workspace-wide chat
+    // read agent-to-agent rooms they're not a member of (account-wide chat
     // monitoring). Caller (controller) must enforce its own permission check
     // before passing observer=true; this service trusts that flag.
     //
@@ -276,7 +276,7 @@ export class RoomMessagingService {
     // 열고 읽기를 막으면 사용자는 빈 방을 보게 된다.
     //
     // `accountId` 를 받은 호출부에서만 완화한다. 참여자 행이 없어도 되게 만드는
-    // 순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, sendMessage 와 같은
+    // 순간 그 행이 대신 서 주던 계정 경계가 사라지므로, sendMessage 와 같은
     // 규칙으로 방의 account_id 를 직접 대조한다. 넘기지 않은 호출부(에이전트 경로
     // 등)는 완화 없이 예전 그대로 동작한다.
     let clearedAt: Date | null = null;
@@ -413,13 +413,13 @@ export class RoomMessagingService {
     //
     //   1. `open_join` 이 켜진 방일 것. 꺼진 방은 이 기능 도입 전과 완전히 같다.
     //   2. 발신자가 **유저**일 것. 에이전트는 기존대로 참여자 행을 요구한다 — 여기서
-    //      풀어주면 MCP `send_chat_room_message` 를 든 에이전트가 워크스페이스의 아무
+    //      풀어주면 MCP `send_chat_room_message` 를 든 에이전트가 계정의 아무
     //      열린 방에나 난입할 수 있다.
     //   3. 발신자 id 가 실제 uuid 일 것. 의사 user `system`(QA·orchestration 엔진 발화)
     //      은 자기 방에 이미 참여자로 seed 되어 있으므로 완화가 필요 없고, 완화 경로로
     //      흘리면 uuid 아닌 participant 행을 새로 만든다.
-    //   4. 방이 **호출자의 워크스페이스** 소속일 것. 참여자 행이 없어도 되게 만드는
-    //      순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, 여기서 직접
+    //   4. 방이 **호출자의 계정** 소속일 것. 참여자 행이 없어도 되게 만드는
+    //      순간 그 행이 대신 서 주던 계정 경계가 사라지므로, 여기서 직접
     //      대조한다. `accountId` 가 비어 들어오면(경계를 확인할 수 없으면) 완화하지
     //      않는다 — 모르면 닫는 쪽이 안전한 실패다.
     //
@@ -638,7 +638,7 @@ export class RoomMessagingService {
     // 호출자가 각자 사본을 들고 있을 필요가 없다. 티켓의 단계적 롤아웃
     // 권고에 따라 opt-in Account 플래그(기본값 OFF)로 게이팅한다: manager
     // 에이전트 자신의 운영용 채팅도 이 경로를 함께 타기 때문에, 폴더 고정
-    // (pinning) 동작 변경을 모든 워크스페이스에 조용히 강제해서는 안 된다.
+    // (pinning) 동작 변경을 모든 계정에 조용히 강제해서는 안 된다.
     // Action Run / Orchestration Mission / QA / security 방은 제외한다 —
     // 이미 자체 runProvision을 갖고 있거나(Action/QA/security, 방을 여는
     // 첫 전송에서만) 의도적으로 아예 없다(Mission step은 대신 티켓
@@ -661,7 +661,7 @@ export class RoomMessagingService {
     // `chat_request` 이벤트를 통해 디스패치되기 때문이다. `chat_room_message`
     // 쪽은 dispatch_agent_ids가 설정되면 handleChatRoomMessage가 건너뛴다
     // ("canonical execution path" 코멘트 참고). 두 헬퍼 모두 동일한
-    // provision을 그대로 전달받아야, 워크스페이스 자신의 운영용 에이전트에게
+    // provision을 그대로 전달받아야, 계정 자신의 운영용 에이전트에게
     // 보낸 DM도 — 티켓 9fd27487의 리스크 섹션이 이름으로 콕 짚은 시나리오다 —
     // 명시적 대상이 없는 그룹방 턴뿐 아니라 실제로 함께 고정(pin)된다.
     let effectiveRunProvision = opts?.runProvision ?? null;
@@ -672,8 +672,8 @@ export class RoomMessagingService {
       !roomForName?.orchestration_mission_id &&
       !roomForName?.run_kind
     ) {
-      const ws = await this.accountRepo.findOne({ where: { id: accountId } });
-      if (ws?.chat_workspace_folder_enabled) {
+      const account = await this.accountRepo.findOne({ where: { id: accountId } });
+      if (account?.chat_workspace_folder_enabled) {
         effectiveRunProvision = {
           kind: 'chat',
           run_id: roomId,
@@ -1080,7 +1080,7 @@ export class RoomMessagingService {
   }
 
   /**
-   * Search messages within a workspace, scoped to rooms the caller actively participates in.
+   * Search messages within a account, scoped to rooms the caller actively participates in.
    * Uses NFC normalization + LOWER LIKE for case-insensitive match (CHAT-15).
    * T-08-03-01/02: participant-scoped subquery; parameterized :pattern prevents injection.
    * T-08-03-03: LIMIT 20; minimum 2-char query enforced in controller.
@@ -1117,7 +1117,7 @@ export class RoomMessagingService {
         `${t('p.room_id')} = ${t('m.room_id')} AND p.participant_id = :callerId AND p.participant_type = :participantType AND p.left_at IS NULL`,
         { callerId, participantType },
       )
-      .where('m.account_id = :wsId', { wsId: accountId })
+      .where('m.account_id = :accountId', { accountId: accountId })
       .andWhere('LOWER(m.content) LIKE :pattern', { pattern })
       .orderBy('m.created_at', 'DESC')
       .limit(limit)
@@ -1211,7 +1211,7 @@ export class RoomMessagingService {
    * 이 방이 호출자에게 **자유 참여로 열려 있는가** (티켓 995a9519).
    *
    * `sendMessage` 의 완화 조건과 같은 두 축을 본다 — 방의 `open_join` 이 켜져 있고,
-   * 방이 호출자의 워크스페이스 소속일 것. `accountId` 를 모르면(넘기지 않은 호출부)
+   * 방이 호출자의 계정 소속일 것. `accountId` 를 모르면(넘기지 않은 호출부)
    * 경계를 확인할 수 없으므로 완화하지 않는다: 모르면 닫는 쪽이 안전한 실패다.
    *
    * 읽기 전용 판정이라 발신자 종류는 보지 않는다. 에이전트 호출부는 애초에 이
@@ -1246,7 +1246,7 @@ export class RoomMessagingService {
         throw makeError(400, `attachment ${id} is already attached`);
       }
       if (row.room_id !== roomId) throw makeError(400, `attachment ${id} belongs to a different room`);
-      if (row.account_id !== accountId) throw makeError(400, `attachment ${id} belongs to a different workspace`);
+      if (row.account_id !== accountId) throw makeError(400, `attachment ${id} belongs to a different account`);
       if (row.uploaded_by_type !== senderType || row.uploaded_by_id !== senderId) {
         throw makeError(403, `attachment ${id} was uploaded by a different sender`);
       }
@@ -1257,7 +1257,7 @@ export class RoomMessagingService {
   // --- Private helpers (mention dispatch) ---
 
   /**
-   * Resolve the agent > workspace Claude backend profile for a chat dispatch
+   * Resolve the agent > account Claude backend profile for a chat dispatch
    * (ticket 7d8ea7c9). Mirrors trigger-loop.service.ts's ticket-dispatch
    * resolution, but agent-only — a chat turn carries no ticket to layer
    * on top. Claude backend profiles must stay invisible to every non-Claude
@@ -1273,7 +1273,7 @@ export class RoomMessagingService {
    * 설정이 다르거나(또는 없을) 수 있기 때문이다. Claude-type 멤버마다 하나씩
    * agent_id로 키잉된 항목을 해석해서, 각 매니저 인스턴스(이 방의 agent
    * identity를 여럿 호스팅할 수도 있음)가 dispatch 시점에 자기 responder의
-   * 항목을 맵에서 직접 고를 수 있게 한다. workspace는 한 번만 가져와
+   * 항목을 맵에서 직접 고를 수 있게 한다. account는 한 번만 가져와
    * 멤버 전체에 재사용한다 — _resolveChatRuntimeProfile처럼 호출마다
    * 반복 조회하지 않는다.
    *
@@ -1639,7 +1639,7 @@ export class RoomMessagingService {
     // 티켓 9fd27487 — 호출자가 이미 해석해둔 chat run-workspace 힌트(또는
     // Action/QA/security가 제공한 값)를, 이 함수가 발생시키는 모든
     // chat_request에 그대로 전달해서 @멘션 디스패치도 그룹방 턴과 동일한
-    // cwd 고정(pinning)을 받게 한다. opt-in하지 않은 워크스페이스라면(또는
+    // cwd 고정(pinning)을 받게 한다. opt-in하지 않은 계정라면(또는
     // non-real/에이전트가 보낸 메시지에서 파싱된 멘션이라면) null이다.
     runProvision: RunProvision | null = null,
   ): Promise<Set<string>> {
@@ -1712,7 +1712,7 @@ export class RoomMessagingService {
         const legacy = ticket ? await resolveMentionTarget(this.dataSource, ticket, m.id) : null;
         if (!legacy) continue;
         // Account-scope safety: resolveMentionTarget 은 ticket 스코프
-        // assignment 또는 workspace-less Host/링크에서 해소하므로, ticket 방의
+        // assignment 또는 account-less Host/링크에서 해소하므로, ticket 방의
         // 멘션은 구조적으로 같은 티켓/방 경계 안에 있다. ticket 없는 방의 uuid
         // 멘션은 위에서 null 로 스킵된다.
         const cliRuntimeProfile = legacy.extras.cli_runtime_profile ?? null;
@@ -1781,7 +1781,7 @@ export class RoomMessagingService {
           source_type: 'chat_message',
           source_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
-          // Chat mentions deep-link to /ws/<wsId>/chat/<roomId>?message=<id>
+          // Chat mentions deep-link to /account/<accountId>/chat/<roomId>?message=<id>
           // even when the room is bound to a ticket.
           room_id: roomId,
           actor_id: senderId,

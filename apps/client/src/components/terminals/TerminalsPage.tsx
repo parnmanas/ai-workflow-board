@@ -49,8 +49,8 @@ function relativeTime(iso: string | null | undefined): string {
 
 // ─── Runtime Host 목록 ──────────────────────────────────────────────────────
 
-function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
-  wsId: string; hosts: TerminalHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
+function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
+  accountId: string; hosts: TerminalHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
 }) {
   const navigate = useNavigate();
   return (
@@ -122,8 +122,8 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
 
 // ─── 한 장비의 살아 있는 터미널 목록 ────────────────────────────────────────
 
-function HostTerminals({ wsId, host, terminals, loading, error, onReload, onNew, onClose }: {
-  wsId: string;
+function HostTerminals({ accountId, host, terminals, loading, error, onReload, onNew, onClose }: {
+  accountId: string;
   host: TerminalHost | null;
   terminals: TerminalSummary[];
   loading: boolean;
@@ -186,7 +186,7 @@ function HostTerminals({ wsId, host, terminals, loading, error, onReload, onNew,
 export default function TerminalsPage() {
   const { managerId = '', terminalId = '' } = useParams();
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { showToast } = useToast();
@@ -205,10 +205,10 @@ export default function TerminalsPage() {
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
 
   const loadHosts = useCallback(async () => {
-    if (!wsId) return;
+    if (!accountId) return;
     setHostsLoading(true);
     try {
-      const list = await api.listTerminalHosts(wsId);
+      const list = await api.listTerminalHosts(accountId);
       setHosts(Array.isArray(list) ? list : []);
       setHostsError(null);
     } catch (err: any) {
@@ -216,7 +216,7 @@ export default function TerminalsPage() {
     } finally {
       setHostsLoading(false);
     }
-  }, [wsId]);
+  }, [accountId]);
 
   const loadTerminals = useCallback(async (id: string) => {
     if (!id) return;
@@ -268,7 +268,7 @@ export default function TerminalsPage() {
     setTerminals((prev) => upsertTerminal(prev, terminal));
     void loadHosts();
     navigate(`/terminals/${terminal.manager_id}/${terminal.terminal_id}`);
-  }, [closeModal, loadHosts, navigate, wsId]);
+  }, [closeModal, loadHosts, navigate, accountId]);
 
   const closeTerminal = useCallback(async (terminal: TerminalSummary) => {
     const ok = await confirm({
@@ -285,7 +285,7 @@ export default function TerminalsPage() {
     } catch (err: any) {
       showToast(err?.message || 'Failed to close the terminal', 'error');
     }
-  }, [confirm, navigate, showToast, terminalId, wsId]);
+  }, [confirm, navigate, showToast, terminalId, accountId]);
 
   const modal = (
     <NewTerminalModal
@@ -324,7 +324,7 @@ export default function TerminalsPage() {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         <HostTerminals
-          wsId={wsId}
+          accountId={accountId}
           host={host}
           terminals={terminals}
           loading={listLoading}
@@ -341,7 +341,7 @@ export default function TerminalsPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <HostsIndex
-        wsId={wsId}
+        accountId={accountId}
         hosts={hosts}
         loading={hostsLoading}
         error={hostsError}

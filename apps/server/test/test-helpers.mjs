@@ -1,7 +1,7 @@
-// test-helpers.mjs — shared utilities for workspace isolation (leak) tests
+// test-helpers.mjs — shared utilities for account isolation (leak) tests
 //
 // Usage pattern:
-//   import { apiRequest, loginAs, createTestUser, createTestWorkspace, assignToWorkspace, approveUser } from './test-helpers.mjs';
+//   import { apiRequest, loginAs, createTestUser, createTestAccount, assignToAccount, approveUser } from './test-helpers.mjs';
 //
 // These helpers support the leak test suite (tickets-leak, channels-leak, api-keys-leak, agents-leak).
 // Each leak test boots a NestJS app in-process and uses these helpers to set up multi-tenant scenarios.
@@ -61,22 +61,22 @@ export async function loginAs(baseUrl, email, password) {
 }
 
 /**
- * Create a workspace via admin token.
- * Returns the workspace object { id, name, ... }.
+ * Create a account via admin token.
+ * Returns the account object { id, name, ... }.
  *
  * @param {string} baseUrl
  * @param {string} adminToken
  * @param {string} name - Account name
  * @returns {Promise<object|null>}
  */
-export async function createTestWorkspace(baseUrl, adminToken, name) {
-  const { data, status } = await apiRequest(baseUrl, '/accounts', {
+export async function createTestAccount(baseUrl, adminToken, name) {
+  const { data, status } = await apiRequest(baseUrl, '/workspaces', {
     token: adminToken,
     method: 'POST',
-    body: { name, description: 'Leak test workspace' },
+    body: { name, description: 'Leak test account' },
   });
   if (status !== 201) {
-    throw new Error(`createTestWorkspace failed (${status}): ${JSON.stringify(data)}`);
+    throw new Error(`createTestAccount failed (${status}): ${JSON.stringify(data)}`);
   }
   return data;
 }
@@ -125,7 +125,7 @@ export async function approveUser(baseUrl, adminToken, userId) {
 }
 
 /**
- * Assign a user to a workspace via ReBAC grant (admin only).
+ * Assign a user to a account via ReBAC grant (admin only).
  *
  * @param {string} baseUrl
  * @param {string} adminToken
@@ -133,14 +133,14 @@ export async function approveUser(baseUrl, adminToken, userId) {
  * @param {string} accountId
  * @param {string} [relation='member']
  */
-export async function assignToWorkspace(baseUrl, adminToken, userId, accountId, relation = 'member') {
+export async function assignToAccount(baseUrl, adminToken, userId, accountId, relation = 'member') {
   const { data, status } = await apiRequest(baseUrl, `/admin/pending-users/${userId}/assign`, {
     token: adminToken,
     method: 'POST',
     body: { account_id: accountId, relation },
   });
   if (status !== 200) {
-    throw new Error(`assignToWorkspace failed (${status}): ${JSON.stringify(data)}`);
+    throw new Error(`assignToAccount failed (${status}): ${JSON.stringify(data)}`);
   }
   return data;
 }

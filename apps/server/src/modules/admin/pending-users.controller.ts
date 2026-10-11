@@ -40,8 +40,8 @@ export class PendingUsersController {
       const u = user as any;
       let requested_account_name: string | null = null;
       if (u.requested_account_id) {
-        const ws = await this.accountRepo.findOne({ where: { id: u.requested_account_id } });
-        requested_account_name = ws?.name || null;
+        const account = await this.accountRepo.findOne({ where: { id: u.requested_account_id } });
+        requested_account_name = account?.name || null;
       }
       return {
         id: u.id,

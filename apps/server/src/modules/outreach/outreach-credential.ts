@@ -2,13 +2,13 @@
  * Resolve an OutreachChannel's credential into a decrypted token.
  *
  * Deliberately mirrors git-branches.ts's `resolveGitCredential` — NOT
- * GitHubConnectorService.getTokenForCredential, which has no workspace check
+ * GitHubConnectorService.getTokenForCredential, which has no account check
  * (bare `findOne({where:{id}})`), swallows failures, and falls back to
  * `process.env.GITHUB_TOKEN` (ticket 2500fea3 planning decision D1).
  * OutreachChannel is a account-scoped resource; a bare findOne() would let
- * workspace A's channel resolve workspace B's token. There is intentionally
+ * account A's channel resolve account B's token. There is intentionally
  * NO env-var fallback here — a missing/invalid credential must fail the poll
- * loudly, not silently degrade to anonymous access or another workspace's
+ * loudly, not silently degrade to anonymous access or another account's
  * identity.
  */
 import { Repository } from 'typeorm';
@@ -32,7 +32,7 @@ export interface OutreachCredential {
 
 /** Accepts a GLOBAL credential (account_id=NULL) or one scoped to
  *  `accountId`; throws (never silently degrades) for a missing row, a
- *  cross-workspace row, or an unreadable/empty token. Returns null only when `credentialId` itself is empty — "this
+ *  cross-account row, or an unreadable/empty token. Returns null only when `credentialId` itself is empty — "this
  *  channel has no credential configured" is a valid, callable-safe state. */
 export async function resolveOutreachCredential(
   credRepo: Repository<Credential>,
@@ -43,7 +43,7 @@ export async function resolveOutreachCredential(
   const cred = await credRepo.findOne({ where: { id: credentialId } });
   if (!cred) throw new OutreachCredentialResolutionError(`Selected credential ${credentialId} does not exist`);
   if (cred.account_id !== null && cred.account_id !== accountId) {
-    throw new OutreachCredentialResolutionError('Selected credential belongs to a different workspace');
+    throw new OutreachCredentialResolutionError('Selected credential belongs to a different account');
   }
   try {
     const data = JSON.parse(decryptStrict(cred.encrypted_data));

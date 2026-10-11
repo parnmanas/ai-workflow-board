@@ -132,7 +132,7 @@ test('runWorkspaceInstructions: action wording defers to a pre-existing folder t
   );
 });
 
-test('composeChatPrompt: byte-identical when workFolder is omitted (default OFF — non-opted-in workspace)', () => {
+test('composeChatPrompt: byte-identical when workFolder is omitted (default OFF — non-opted-in account)', () => {
   const withDefault = composeChatPrompt('', [], 'hello', 'room-1', true);
   const withExplicitEmpty = composeChatPrompt('', [], 'hello', 'room-1', true, '');
   assert.equal(withDefault, withExplicitEmpty);

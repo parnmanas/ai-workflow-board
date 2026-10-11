@@ -963,7 +963,7 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 쓰는 그대로 재사용한다. 구체적으로:
 
 - 룸은 `chat_rooms.orchestration_mission_id` / `orchestration_step_id` 로 표시되고,
-  일반 채팅 목록(`listRooms` / `listAllWorkspaceRooms`)에서 제외된다 — Action 룸과 같은 처리.
+  일반 채팅 목록(`listRooms` / `listAllAccountRooms`)에서 제외된다 — Action 룸과 같은 처리.
   이 제외는 **사람이 참여자가 된 뒤에도 유지된다**: 미션 하나가 step 룸을 수십 개 열기
   때문에, 접근 경로는 사이드바가 아니라 미션 상세 화면이어야 한다.
 - 같은 필드가 기존 `is_action_room` SSE 마커를 켠다. 오케스트레이션 룸은 대화가

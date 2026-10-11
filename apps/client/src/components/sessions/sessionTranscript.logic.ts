@@ -825,7 +825,7 @@ export function describeSessionAuth(auth: AgentSessionAuth | null | undefined, c
   return {
     text: [primary, secondary].filter(Boolean).join(' · '),
     title: auth.source === 'credential'
-      ? `Signed in with the workspace credential${credentialName ? ` "${credentialName}"` : ''}${org ? ` (${org})` : ''}`
+      ? `Signed in with the account credential${credentialName ? ` "${credentialName}"` : ''}${org ? ` (${org})` : ''}`
       : `Uses the Runtime Host's own CLI login${org ? ` (${org})` : ''}`,
     tone: auth.kind === 'none' ? 'danger' : 'muted',
   };

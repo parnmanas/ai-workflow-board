@@ -836,7 +836,7 @@ export class OrchestrationRunnerService {
         const action = await this.actionRepo.findOne({ where: { id: pa.action_id } });
         if (!action) throw new Error(`action ${pa.action_id} not found`);
         if (action.account_id !== mission.account_id) {
-          throw new Error(`action ${pa.action_id} belongs to a different workspace`);
+          throw new Error(`action ${pa.action_id} belongs to a different account`);
         }
         const result = await this.actionsService.dispatch({
           actionId: action.id,
@@ -2544,11 +2544,11 @@ export class OrchestrationRunnerService {
       ?? parseTeamAgentSpec(memberRowForAgent?.spec)?.cli
       ?? parseTeamAgentSpec(agentSpec as any)?.cli
       ?? agentId.slice(0, 11);
-    // P4c-4: Agent 행 없음 — workspace 소속 검사는 member 행 스냅샷으로만 한다.
+    // P4c-4: Agent 행 없음 — account 소속 검사는 member 행 스냅샷으로만 한다.
     if (memberRowForAgent && memberRowForAgent.account_id && memberRowForAgent.account_id !== mission.account_id) {
       throw orchestrationError(
         400,
-        `assignee slot ${agentLabel} no longer belongs to this mission's workspace — refusing to dispatch`,
+        `assignee slot ${agentLabel} no longer belongs to this mission's account — refusing to dispatch`,
       );
     }
 
@@ -3010,7 +3010,7 @@ export class OrchestrationRunnerService {
    *
    * 권한: 이 메서드에 도달했다는 것 자체가 컨트롤러의 `MANAGE_ACTIONS` 게이트를 이미
    * 통과했다는 뜻이고(팀·미션을 만들고 nudge/cancel 하는 것과 같은 관객), 여기서
-   * `requireMission(missionId, accountId)` 이 workspace 경계를 한 번 더 강제한다.
+   * `requireMission(missionId, accountId)` 이 account 경계를 한 번 더 강제한다.
    * `RoomMembershipService.ensureActiveParticipant` 는 호출자 자격을 검사하지 않으므로
    * 그 앞의 이 두 겹이 유일한 방어선이다 — 이 메서드를 다른 곳에서 재사용할 때는 그
    * 사실을 먼저 확인할 것.

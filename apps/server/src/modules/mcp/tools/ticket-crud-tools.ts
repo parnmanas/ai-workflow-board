@@ -70,9 +70,9 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'list_tickets',
-    'List root tickets of a workspace, filtered by status / tags (AND) / project / assignee / text. Returns `{ tickets, tags }` where `tags` counts each tag across the filtered set. Use this to find related or duplicate work before starting.',
+    'List root tickets of a account, filtered by status / tags (AND) / project / assignee / text. Returns `{ tickets, tags }` where `tags` counts each tag across the filtered set. Use this to find related or duplicate work before starting.',
     {
-      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s account)'),
       status: z.array(z.string()).optional().describe(`Statuses to include (${TICKET_STATUSES.join(', ')}); omit for all`),
       tags: z.array(z.string()).optional().describe('Every listed tag must be present (case-insensitive)'),
       project_id: z.string().optional(),
@@ -83,15 +83,15 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     },
     async ({ account_id, status, tags, project_id, assignee_key, query, include_archived, limit }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const ws = account_id || caller?.accountId || '';
-      if (!ws) return err('account_id is required');
+      const account = account_id || caller?.accountId || '';
+      if (!account) return err('account_id is required');
       const statuses: TicketStatus[] = [];
       for (const raw of status || []) {
         const parsed = parseTicketStatus(raw);
         if (!parsed) return err(`Unknown status "${raw}" — ${STATUS_HELP}`);
         statuses.push(parsed);
       }
-      const result = await ticketService.list(ws, {
+      const result = await ticketService.list(account, {
         status: statuses, tags, project_id, assignee_key, q: query, include_archived, limit,
       });
       // Compact rows — the full thread is get_ticket's job.
@@ -115,7 +115,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket. ' +
     'Do NOT create a ticket when the user asked to do the work directly in chat/session without a ticket — do the work directly instead.',
     {
-      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s account)'),
       title: z.string().describe('Ticket title'),
       description: z.string().optional().default('').describe('Ticket description'),
       prompt_text: z.string().optional().describe('Extra instructions for the agent (shown in the work order)'),
@@ -127,18 +127,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       assignee: RuntimeSpecInput.nullable().optional(),
       channel_ids: z.array(z.string()).optional().default([]).describe('Notification channel IDs'),
       subtasks: z.array(z.string()).optional().default([]).describe('Checklist items to create as child tickets'),
-      next_ticket_id: z.string().optional().describe('Ticket to move from backlog to todo once this one is done (same workspace)'),
+      next_ticket_id: z.string().optional().describe('Ticket to move from backlog to todo once this one is done (same account)'),
       source_kind: z.enum(['chat']).optional().describe('Durable source kind. Set for chat-originated reports.'),
       source_chat_room_id: z.string().optional().describe('Source chat room id for duplicate matching.'),
       related_ticket_id: z.string().optional().describe('Related/reproduced ticket id for duplicate matching.'),
     },
     async (args, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const ws = args.account_id || caller?.accountId || '';
-      if (!ws) return err('account_id is required');
+      const account = args.account_id || caller?.accountId || '';
+      if (!account) return err('account_id is required');
       const description = sanitizeHarnessMarkers(args.description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: caller?.agentId });
       try {
-        const { ticket, duplicate_candidates } = await ticketService.create(ws, {
+        const { ticket, duplicate_candidates } = await ticketService.create(account, {
           ...args,
           description,
           ...(args.assignee === undefined ? {} : { assignee: args.assignee }),
@@ -266,11 +266,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'Before parking for something an Action could do (deploy, publish, merge-to-production, run a scripted task), discover + run an Action instead (`list_actions` → `run_action`, or `save_action` → `run_action`) and resume the ticket in place. ' +
     'For waiting on another ticket, use `add_ticket_prerequisites` instead (it auto-resumes when the blocker is done — no human needed). ' +
     'Parks a ticket for user intervention: sets `pending_user_action=true` plus a `reason` rendered on the ticket panel. While pending the ticket is never dispatched and frees its agent\'s capacity slot; a human resumes it. ' +
-    'ACTION GATE (ticket 524bb434): while runnable Actions exist in this ticket\'s workspace, the call is REJECTED unless `no_action_reason` is supplied — the error lists the candidate Actions so you run/register one instead of parking.',
+    'ACTION GATE (ticket 524bb434): while runnable Actions exist in this ticket\'s account, the call is REJECTED unless `no_action_reason` is supplied — the error lists the candidate Actions so you run/register one instead of parking.',
     {
       ticket_id: z.string().describe('Ticket ID to park'),
       reason: z.string().describe('Why human intervention is needed. Keep it specific (e.g. "credentials needed for prod DB migration" beats "stuck").'),
-      no_action_reason: z.string().optional().describe('Why no registered Action can resolve this blocker. REQUIRED when runnable Actions exist in the ticket\'s workspace.'),
+      no_action_reason: z.string().optional().describe('Why no registered Action can resolve this blocker. REQUIRED when runnable Actions exist in the ticket\'s account.'),
     },
     async ({ ticket_id, reason, no_action_reason }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
@@ -371,7 +371,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'get_my_tickets',
     'Tickets assigned to the calling agent (its runtime identity), newest first. Archived tickets are excluded.',
     {
-      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s account)'),
       status: z.string().optional().describe(`Filter by status. ${STATUS_HELP}`),
       assignee_key: z.string().optional().describe('Runtime identity key to look up instead of the caller (rt-…)'),
     },
@@ -379,7 +379,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const caller = getCallerAgent(extra);
       const key = assignee_key || caller?.runtimeKey || '';
       if (!key) return err('This session has no runtime identity — pass assignee_key');
-      const ws = account_id || caller?.accountId || '';
+      const account = account_id || caller?.accountId || '';
       let statuses: TicketStatus[] = [];
       if (status) {
         const parsed = parseTicketStatus(status);
@@ -390,7 +390,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         .where('t.assignee_key = :key', { key })
         .andWhere('t.archived_at IS NULL')
         .andWhere('t.parent_id IS NULL');
-      if (ws) qb.andWhere('t.account_id = :ws', { ws });
+      if (account) qb.andWhere('t.account_id = :account', { account });
       if (statuses.length) qb.andWhere('t.status IN (:...statuses)', { statuses });
       const rows = await qb.orderBy('t.updated_at', 'DESC').take(200).getMany();
       return ok((await ticketService.cards(rows)).map((t: any) => withArtifactRef('ticket', {

@@ -21,7 +21,7 @@ import {
 import { ProjectInputError, ProjectsService } from './projects.service';
 
 /**
- * Projects REST surface (docs/tickets.md). Reading needs workspace membership;
+ * Projects REST surface (docs/tickets.md). Reading needs account membership;
  * writing needs MANAGE_RESOURCES — the permission that guarded repository
  * Resources before they became projects, so who could edit a repo is unchanged.
  */
@@ -48,22 +48,22 @@ export class ProjectsController {
     throw err;
   }
 
-  private workspaceOf(req: Request): string {
+  private accountOf(req: Request): string {
     return String((req as any).currentAccountId || req.headers['x-account-id'] || req.query['account_id'] || '');
   }
 
-  @Get(['projects', 'accounts/:wsId/projects'])
-  async list(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
-    const ids: string[] = wsId ? [wsId] : (req as any).accessibleAccountIds || [];
+  @Get(['projects', 'accounts/:accountId/projects'])
+  async list(@Param('accountId') accountId: string, @Req() req: Request, @Res() res: Response) {
+    const ids: string[] = accountId ? [accountId] : (req as any).accessibleAccountIds || [];
     const groups = await Promise.all(ids.map(id => this.projects.list(id)));
     return res.json(groups.flat().sort((a, b) => a.name.localeCompare(b.name)));
   }
 
-  @Post(['projects', 'accounts/:wsId/projects'])
-  async create(@Param('wsId') wsId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+  @Post(['projects', 'accounts/:accountId/projects'])
+  async create(@Param('accountId') accountId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     if (!this.canManage(req)) return res.status(403).json({ error: 'Missing permission: admin.resources' });
     try {
-      return res.status(201).json(await this.projects.create(wsId || this.workspaceOf(req), body));
+      return res.status(201).json(await this.projects.create(accountId || this.accountOf(req), body));
     } catch (err) {
       return this.fail(res, err);
     }
@@ -72,7 +72,7 @@ export class ProjectsController {
   // Literal path above `projects/:id` so `:id` never swallows it.
   @Post('projects/test-connection')
   async testConnection(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const accountId = String(body?.account_id || this.workspaceOf(req) || '');
+    const accountId = String(body?.account_id || this.accountOf(req) || '');
     const url = typeof body?.repo_url === 'string' ? body.repo_url.trim() : '';
     const defaultBranch = typeof body?.default_branch === 'string' ? body.default_branch : '';
     if (!accountId) return res.status(400).json({ error: 'account_id is required' });
@@ -89,7 +89,7 @@ export class ProjectsController {
 
   @Get('projects/:id')
   async get(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const project = await this.projects.getInWorkspace(id, this.workspaceOf(req));
+    const project = await this.projects.getInAccount(id, this.accountOf(req));
     if (!project) return res.status(404).json({ error: 'Project not found' });
     return res.json(await this.projects.view(project));
   }
@@ -98,7 +98,7 @@ export class ProjectsController {
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     if (!this.canManage(req)) return res.status(403).json({ error: 'Missing permission: admin.resources' });
     try {
-      return res.json(await this.projects.update(id, this.workspaceOf(req), body));
+      return res.json(await this.projects.update(id, this.accountOf(req), body));
     } catch (err) {
       return this.fail(res, err);
     }
@@ -108,7 +108,7 @@ export class ProjectsController {
   async remove(@Param('id') id: string, @Query('force') force: string, @Req() req: Request, @Res() res: Response) {
     if (!this.canManage(req)) return res.status(403).json({ error: 'Missing permission: admin.resources' });
     try {
-      await this.projects.remove(id, this.workspaceOf(req), force === '1' || force === 'true');
+      await this.projects.remove(id, this.accountOf(req), force === '1' || force === 'true');
       return res.json({ ok: true, id });
     } catch (err) {
       return this.fail(res, err);
@@ -119,7 +119,7 @@ export class ProjectsController {
   async setHostFolder(@Param('id') id: string, @Param('hostId') hostId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     if (!this.canManage(req)) return res.status(403).json({ error: 'Missing permission: admin.resources' });
     try {
-      return res.json(await this.projects.setHostFolder(id, this.workspaceOf(req), hostId, body?.path));
+      return res.json(await this.projects.setHostFolder(id, this.accountOf(req), hostId, body?.path));
     } catch (err) {
       return this.fail(res, err);
     }
@@ -129,7 +129,7 @@ export class ProjectsController {
   async clearHostFolder(@Param('id') id: string, @Param('hostId') hostId: string, @Req() req: Request, @Res() res: Response) {
     if (!this.canManage(req)) return res.status(403).json({ error: 'Missing permission: admin.resources' });
     try {
-      return res.json(await this.projects.clearHostFolder(id, this.workspaceOf(req), hostId));
+      return res.json(await this.projects.clearHostFolder(id, this.accountOf(req), hostId));
     } catch (err) {
       return this.fail(res, err);
     }
@@ -137,8 +137,8 @@ export class ProjectsController {
 
   @Get('projects/:id/branches')
   async branches(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const accountId = this.workspaceOf(req);
-    const project = await this.projects.getInWorkspace(id, accountId);
+    const accountId = this.accountOf(req);
+    const project = await this.projects.getInAccount(id, accountId);
     if (!project) return res.status(404).json({ error: 'Project not found' });
     if (!project.repo_url) {
       return res.status(400).json({ error: "project has no repository URL — set it before listing branches" });
@@ -160,7 +160,7 @@ export class ProjectsController {
   // 'ssh_unsupported'.
 
   private async prepRepo(id: string, accountId: string, forceFetch = false): Promise<string> {
-    const project = await this.projects.getInWorkspace(id, accountId);
+    const project = await this.projects.getInAccount(id, accountId);
     if (!project) throw Object.assign(new Error('Project not found'), { status: 404 });
     if (!project.repo_url) throw new BadRequestException("project has no repository URL — set it before reading git history");
     const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), project.credential_id, accountId);
@@ -180,7 +180,7 @@ export class ProjectsController {
   @Get('projects/:id/refs')
   async refs(@Param('id') id: string, @Query('refresh') refresh: string | undefined, @Req() req: Request, @Res() res: Response) {
     try {
-      const repoPath = await this.prepRepo(id, this.workspaceOf(req), refresh === 'true' || refresh === '1');
+      const repoPath = await this.prepRepo(id, this.accountOf(req), refresh === 'true' || refresh === '1');
       return res.json(await listRefs(repoPath));
     } catch (err) {
       return this.gitError(res, err);
@@ -198,7 +198,7 @@ export class ProjectsController {
     @Res() res: Response,
   ) {
     try {
-      const repoPath = await this.prepRepo(id, this.workspaceOf(req), refresh === 'true' || refresh === '1');
+      const repoPath = await this.prepRepo(id, this.accountOf(req), refresh === 'true' || refresh === '1');
       const parsedLimit = parseInt(limit ?? '', 10);
       const commits = await listCommits({
         repoPath,
@@ -215,7 +215,7 @@ export class ProjectsController {
   @Get('projects/:id/commits/:sha')
   async commitDetail(@Param('id') id: string, @Param('sha') sha: string, @Req() req: Request, @Res() res: Response) {
     try {
-      const repoPath = await this.prepRepo(id, this.workspaceOf(req));
+      const repoPath = await this.prepRepo(id, this.accountOf(req));
       return res.json(await getCommitDetail(repoPath, sha));
     } catch (err) {
       return this.gitError(res, err);
@@ -225,7 +225,7 @@ export class ProjectsController {
   @Get('projects/:id/tree')
   async tree(@Param('id') id: string, @Query('ref') ref: string | undefined, @Query('path') treePath: string | undefined, @Req() req: Request, @Res() res: Response) {
     try {
-      const repoPath = await this.prepRepo(id, this.workspaceOf(req));
+      const repoPath = await this.prepRepo(id, this.accountOf(req));
       const entries = await listTree(repoPath, ref || '', treePath || '');
       return res.json({ ref: ref || '', path: treePath || '', entries });
     } catch (err) {
@@ -237,7 +237,7 @@ export class ProjectsController {
   async file(@Param('id') id: string, @Query('ref') ref: string | undefined, @Query('path') filePath: string | undefined, @Req() req: Request, @Res() res: Response) {
     if (!filePath) return res.status(400).json({ error: 'path query parameter is required' });
     try {
-      const repoPath = await this.prepRepo(id, this.workspaceOf(req));
+      const repoPath = await this.prepRepo(id, this.accountOf(req));
       return res.json(await getFileContent(repoPath, ref || '', filePath));
     } catch (err) {
       return this.gitError(res, err);

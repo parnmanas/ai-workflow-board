@@ -10,7 +10,7 @@
 //
 //   1. A red streak (5 consecutive `failure` runs, ≥ CI_MONITOR_MIN_RUNS)
 //      trips on the first sweep: one `ci_red_alerts` row is written, one
-//      system chat alert is posted in the workspace's alerts room, and one
+//      system chat alert is posted in the account's alerts room, and one
 //      `todo` ticket (tags `ci-red`, project = the watched project) is
 //      auto-created through TicketService carrying the CI-red
 //      `operational_dedupe_key`.
@@ -150,8 +150,8 @@ function run(id, conclusion, isoTime, event = 'push') {
 /** A project the monitor watches: its own repo url on `main`, optionally
  *  authenticated with its own credential (the monitor reads
  *  Project.repo_url / default_branch / credential_id directly). */
-async function watchProject(app, getDataSourceToken, ds, wsId, { name, repoUrl, credentialId = null }) {
-  const project = await createProject(app, getDataSourceToken, wsId, { name, repoUrl, defaultBranch: 'main' });
+async function watchProject(app, getDataSourceToken, ds, accountId, { name, repoUrl, credentialId = null }) {
+  const project = await createProject(app, getDataSourceToken, accountId, { name, repoUrl, defaultBranch: 'main' });
   if (credentialId) {
     await ds.getRepository('Project').update(project.id, { credential_id: credentialId });
     project.credential_id = credentialId;
@@ -187,7 +187,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   const { LogService } = await import('file://' + path.join(DIST_ROOT, 'services', 'log.service.js'));
   const logService = app.get(LogService);
 
-  step('Seed workspace + alerts room + project watching an env-token GitHub repo');
+  step('Seed account + alerts room + project watching an env-token GitHub repo');
   const ws = await createAccount(app, getDataSourceToken, 'ci-health');
   const roomRepo = ds.getRepository('ChatRoom');
   const room = await roomRepo.save(roomRepo.create({ account_id: ws.id, type: 'group', name: 'qa-alerts' }));

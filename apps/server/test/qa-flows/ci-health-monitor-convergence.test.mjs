@@ -6,13 +6,13 @@
 // 시절, 같은 저장소를 감시하는 단위가 둘이면 같은 실패 run 에 대해 **실행 티켓이 2건**
 // 열렸다. 같은 assignee 가 양쪽에 붙어 같은 한 줄 수정을 두 번 dispatch 받았고, 사람이
 // 선행조건을 걸었다 풀었다 하며 손으로 조정해야 했다(실측: 같은 run 36399667881 로 쌍둥이
-// 티켓이 열렸다). 지금 감시 단위는 Project 이고 키는 workspace 스코프다.
+// 티켓이 열렸다). 지금 감시 단위는 Project 이고 키는 account 스코프다.
 //
 // 아래는 그 수렴을 **production 경로(`sweep()`)** 에서 본다 — DB 를 직접 만져 만든 상태가
 // 아니라, GitHub 응답만 가짜로 두고 실제 sweep 이 만들어 낸 행·티켓·코멘트·채팅 메시지로
 // 단언한다.
 //
-//   1. (수렴) 같은 workspace 의 프로젝트 2개가 같은 repo/branch/workflow 를 감시 →
+//   1. (수렴) 같은 account 의 프로젝트 2개가 같은 repo/branch/workflow 를 감시 →
 //      실행 티켓은 **1건**. 두 프로젝트의 `ci_red_alerts` 행은 모두 그 canonical 티켓을
 //      가리키고(관계), 두 프로젝트의 채팅 알림이 모두 그 티켓을 링크하며(알림 — 프로젝트별
 //      가시성 유지), 채택 사실이 canonical 티켓에 코멘트로 남는다. project default_assignee
@@ -98,7 +98,7 @@ test('CiHealthMonitorService — 교차 프로젝트 incident 수렴 / 비수렴
   );
   const ticketService = app.get(TicketService, { strict: false });
 
-  step('Seed workspace + alerts room + 같은 저장소를 보는 프로젝트 2개');
+  step('Seed account + alerts room + 같은 저장소를 보는 프로젝트 2개');
   const ws = await createAccount(app, getDataSourceToken, 'ci-converge');
   const roomRepo = ds.getRepository('ChatRoom');
   const room = await roomRepo.save(roomRepo.create({ account_id: ws.id, type: 'group', name: 'qa-alerts' }));
@@ -152,7 +152,7 @@ test('CiHealthMonitorService — 교차 프로젝트 incident 수렴 / 비수렴
   let reopenedId = '';
   let projectC = null;
 
-  await t.test('1. 같은 workspace 의 두 프로젝트가 같은 repo/branch/workflow 를 감시하면 실행 티켓은 1건이다', async () => {
+  await t.test('1. 같은 account 의 두 프로젝트가 같은 repo/branch/workflow 를 감시하면 실행 티켓은 1건이다', async () => {
     const stats = await monitor.sweep(NOW);
 
     assert.equal(stats.alerts_created, 2, '감시 행은 프로젝트별로 남는다 — 수렴은 티켓 쪽이지 감시 쪽이 아니다');
@@ -170,7 +170,7 @@ test('CiHealthMonitorService — 교차 프로젝트 incident 수렴 / 비수렴
       'canonical 은 두 프로젝트 중 한쪽에 filing 돼야 한다',
     );
 
-    // 이 workspace 를 통틀어 이 저장소의 CI-red 실행 티켓이 1건뿐이어야 한다 — 예전에는
+    // 이 account 를 통틀어 이 저장소의 CI-red 실행 티켓이 1건뿐이어야 한다 — 예전에는
     // 감시 단위마다 1건씩 2건이 열렸고 그게 이 티켓의 원인이다.
     const wsTickets = await ticketRepo.find({ where: { account_id: ws.id } });
     const convergeTickets = wsTickets.filter((tk) => tk.title.includes('acme/converge'));

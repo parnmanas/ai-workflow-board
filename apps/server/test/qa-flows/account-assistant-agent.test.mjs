@@ -4,7 +4,7 @@ import { bootApp } from '../helpers/boot.mjs';
 import { createAccount } from '../helpers/fixtures.mjs';
 import { AccountsController } from '../../dist/modules/accounts/accounts.controller.js';
 
-test('workspace updates no longer persist a saved assistant Agent binding', async (t) => {
+test('account updates no longer persist a saved assistant Agent binding', async (t) => {
   const { app, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());

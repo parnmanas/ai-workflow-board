@@ -1,11 +1,11 @@
 // Regression guard — the chat "All rooms" observer view must LOAD even when a
-// workspace room carries the synthetic 'system' participant.
+// account room carries the synthetic 'system' participant.
 //
 // Ticket 75a4c9f1 ("채팅 All rooms 보기 로드 실패"). Root cause: QaRunService
 // .startQaRun seeds every QA-run room with a synthetic participant
 // `('user', 'system')` (qa-run.service.ts:229-235; ActionsService does the same
 // for scheduler runs). Those rooms have action_id IS NULL, so the observer view
-// RoomCrudService.listAllWorkspaceRooms — unlike per-user listRooms — surfaces
+// RoomCrudService.listAllAccountRooms — unlike per-user listRooms — surfaces
 // them regardless of membership. It then bulk-resolved participant names via
 // `userRepo.findByIds([... , 'system'])`. users.id / agents.id are uuid columns,
 // so on Postgres `WHERE id IN (..., 'system')` aborted the WHOLE query with
@@ -111,13 +111,13 @@ function makeService(calls) {
   );
 }
 
-test('listAllWorkspaceRooms does not feed the synthetic "system" id to a uuid column', async () => {
+test('listAllAccountRooms does not feed the synthetic "system" id to a uuid column', async () => {
   const calls = { user: [], agent: [] };
   const svc = makeService(calls);
 
   // Before the fix this awaited userRepo.findByIds([USER_UUID, 'system']) and
   // the pg-uuid mock threw — the whole observer view 500'd.
-  const rooms = await svc.listAllWorkspaceRooms(WS);
+  const rooms = await svc.listAllAccountRooms(WS);
 
   assert.equal(rooms.length, 1, 'the QA room must still be returned');
   const flatUserIds = calls.user.flat();
@@ -128,7 +128,7 @@ test('listAllWorkspaceRooms does not feed the synthetic "system" id to a uuid co
 test("the synthetic 'system' participant + sender resolve to 'System', real members keep their names", async () => {
   const calls = { user: [], agent: [] };
   const svc = makeService(calls);
-  const [room] = await svc.listAllWorkspaceRooms(WS);
+  const [room] = await svc.listAllAccountRooms(WS);
 
   const names = room.participants.map((p) => p.name).sort();
   assert.deepEqual(names, ['Alice', 'BuildBot', 'System']);

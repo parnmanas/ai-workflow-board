@@ -4,7 +4,7 @@ import { Response, Request } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
-import { WorkspaceScheduleService, DispatchResult } from './automation-schedule.service';
+import { AutomationScheduleService, DispatchResult } from './automation-schedule.service';
 import { AutomationSchedule } from '../../entities/AutomationSchedule';
 
 /**
@@ -47,15 +47,15 @@ function dispatchToJson(d: DispatchResult) {
  *
  * Gated on ADMIN_ACCESS to match the admin-gated Account Settings page that
  * hosts the editor — a scheduled task dispatches an arbitrary prompt to any agent
- * in the workspace, an operator-level capability.
+ * in the account, an operator-level capability.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('automation-schedules')
 @Controller('api/automation-schedules')
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
-export class WorkspaceScheduleController {
-  constructor(private readonly scheduleService: WorkspaceScheduleService) {}
+export class AutomationScheduleController {
+  constructor(private readonly scheduleService: AutomationScheduleService) {}
 
   @Get()
   async list(
@@ -69,7 +69,7 @@ export class WorkspaceScheduleController {
       const rows = (await Promise.all(ids.map(id => this.scheduleService.list(id)))).flat();
       return res.json(rows.map(scheduleToJson));
     } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list workspace schedules' });
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list account schedules' });
     }
   }
 
@@ -100,7 +100,7 @@ export class WorkspaceScheduleController {
       });
       return res.status(201).json(scheduleToJson(row));
     } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to create workspace schedule' });
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to create account schedule' });
     }
   }
 
@@ -119,7 +119,7 @@ export class WorkspaceScheduleController {
       });
       return res.json(scheduleToJson(row));
     } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update workspace schedule' });
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update account schedule' });
     }
   }
 
@@ -129,7 +129,7 @@ export class WorkspaceScheduleController {
       await this.scheduleService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete workspace schedule' });
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete account schedule' });
     }
   }
 
@@ -143,7 +143,7 @@ export class WorkspaceScheduleController {
       const { schedule, dispatch } = await this.scheduleService.runNow(id, body?.account_id, user?.id || '');
       return res.status(201).json({ schedule: scheduleToJson(schedule), dispatch: dispatchToJson(dispatch) });
     } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to run workspace schedule' });
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to run automation schedule' });
     }
   }
 }

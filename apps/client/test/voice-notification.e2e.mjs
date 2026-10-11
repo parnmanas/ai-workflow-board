@@ -1,7 +1,7 @@
 // Real Chromium + getUserMedia + Silero VAD. STT and session APIs are stubbed:
 // this tests microphone readiness and routing, not recognition accuracy.
 // VOICE_TEST_WAV=/absolute/path/to/speech-with-silence.wav CHROME_PATH=/usr/bin/google-chrome
-// PLAYWRIGHT_TEST_MATCH=voice-notification.e2e.mjs npm --workspace client run test:e2e
+// PLAYWRIGHT_TEST_MATCH=voice-notification.e2e.mjs npm --account client run test:e2e
 import { test, expect } from '@playwright/test';
 
 const wav = process.env.VOICE_TEST_WAV;
@@ -12,7 +12,7 @@ test.use({ launchOptions: {
     `--use-file-for-fake-audio-capture=${wav}`, '--autoplay-policy=user-gesture-required'],
 } });
 
-const workspace = { id: 'ws-voice-test', name: 'Voice Test', relations: ['admin'] };
+const account = { id: 'ws-voice-test', name: 'Voice Test', relations: ['admin'] };
 const operator = { id: 'op-test', name: 'Jarvis', aliases: [], manager_id: 'host-test', cli: 'claude', session_id: 'operator-session', cwd: '/tmp', title: 'Operator' };
 const operatorPath = `/sessions/${operator.manager_id}/${operator.cli}/${operator.session_id}`;
 
@@ -51,7 +51,7 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/sessio
     };
     window.__voiceAnnouncement = (data) => sources.filter((source) => source.readyState === 1)
       .forEach((source) => source.dispatchEvent(new MessageEvent('voice_announcement', { data: JSON.stringify(data) })));
-  }, { accountId: workspace.id, suspendOnPermission, autoMic, blockCue, wakeEnabled });
+  }, { accountId: account.id, suspendOnPermission, autoMic, blockCue, wakeEnabled });
   const live = { manager_id: operator.manager_id, cli: operator.cli, session_id: operator.session_id, status: 'ready',
     title: 'Operator', cwd: '/tmp', available_modes: [], current_mode: null, config_options: [], available_commands: [],
     updated_at: new Date().toISOString(), driver_user_id: 'user-test' };
@@ -68,10 +68,10 @@ async function fixture(page, suspendOnPermission = false, initialPath = `/sessio
       prompts.push({ path, ...JSON.parse(req.postData()) });
       body = { turn_id: `turn-${prompts.length}`, live: { ...live, status: 'busy' } };
     } else if (path === '/auth/me') body = { id: 'user-test', name: 'Test', role: 'admin', status: 'active', permissions: [],
-      resolved_permissions: ['admin.access', 'agent_sessions.use', 'voice.use'], accounts: [workspace] };
+      resolved_permissions: ['admin.access', 'agent_sessions.use', 'voice.use'], accounts: [account] };
     else if (path === '/auth/setup-status') body = { needs_setup: false };
-    else if (path === '/accounts') body = [workspace];
-    else if (path === `/accounts/${workspace.id}`) body = workspace;
+    else if (path === '/workspaces') body = [account];
+    else if (path === `/accounts/${account.id}`) body = account;
     else if (path === '/voice/config') body = { stt: { provider: cloudStt ? 'openai' : 'local', ready: true }, tts: { provider: 'none', ready: false }, wake: { ready: !cloudStt } };
     else if (path === '/voice/operators') body = { operators: [operator] };
     else if (path.includes('unread') || path.includes('count') || path.includes('mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };

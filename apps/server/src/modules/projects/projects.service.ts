@@ -78,8 +78,8 @@ export class ProjectsService {
     return this.dataSource.getRepository(Project).findOne({ where: { id } });
   }
 
-  /** The project when it exists AND belongs to the workspace — the only lookup write paths may use. */
-  async getInWorkspace(id: string, accountId: string, scope: Scope = this.dataSource): Promise<Project | null> {
+  /** The project when it exists AND belongs to the account — the only lookup write paths may use. */
+  async getInAccount(id: string, accountId: string, scope: Scope = this.dataSource): Promise<Project | null> {
     if (!id || !accountId) return null;
     const project = await scope.getRepository(Project).findOne({ where: { id } });
     return project && project.account_id === accountId ? project : null;
@@ -146,7 +146,7 @@ export class ProjectsService {
   }
 
   async update(id: string, accountId: string, body: any): Promise<ProjectView> {
-    const project = await this.getInWorkspace(id, accountId);
+    const project = await this.getInAccount(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     await this.applyFields(project, body, false);
     const saved = await this.dataSource.getRepository(Project).save(project);
@@ -197,7 +197,7 @@ export class ProjectsService {
     const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: credentialId } });
     if (!credential) throw new ProjectInputError('credential not found');
     if (credential.account_id !== null && credential.account_id !== accountId) {
-      throw new ProjectInputError('credential is not available in this workspace');
+      throw new ProjectInputError('credential is not available in this account');
     }
   }
 
@@ -222,7 +222,7 @@ export class ProjectsService {
   }
 
   async remove(id: string, accountId: string, force: boolean): Promise<void> {
-    const project = await this.getInWorkspace(id, accountId);
+    const project = await this.getInAccount(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     if (!force) {
       const usage = await this.usage(id);
@@ -246,7 +246,7 @@ export class ProjectsService {
   }
 
   async setHostFolder(id: string, accountId: string, hostId: string, rawPath: unknown): Promise<ProjectView> {
-    const project = await this.getInWorkspace(id, accountId);
+    const project = await this.getInAccount(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     const path = str(rawPath);
     if (!path) throw new ProjectInputError('path is required');
@@ -265,7 +265,7 @@ export class ProjectsService {
   }
 
   async clearHostFolder(id: string, accountId: string, hostId: string): Promise<ProjectView> {
-    const project = await this.getInWorkspace(id, accountId);
+    const project = await this.getInAccount(id, accountId);
     if (!project) throw new ProjectInputError('Project not found', 404, 'project_not_found');
     await this.dataSource.getRepository(ProjectHostFolder).delete({ project_id: id, host_id: hostId });
     return this.view(project);

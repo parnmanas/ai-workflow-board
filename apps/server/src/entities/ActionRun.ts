@@ -166,7 +166,7 @@ export class ActionRun {
 
   // Human approval evidence for a high-impact run (ticket 524bb434, scope 5).
   // A high-impact Action dispatched by an agent to clear a ticket blocker only
-  // runs when a real workspace admin approved it; `approved_by` is that user id
+  // runs when a real account admin approved it; `approved_by` is that user id
   // and `approved_at` the approval time, recorded on the run so who/when is
   // reconstructable. '' / NULL for low-impact runs and for human-initiated
   // (UI) or scheduler/hook runs that never pass through the approval gate.

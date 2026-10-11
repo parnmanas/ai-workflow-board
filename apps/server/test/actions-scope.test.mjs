@@ -1,9 +1,9 @@
 // Actions are account-scoped catalog rows. Boards are gone (docs/tickets.md),
 // and with them Action.board_id — the board layer this file used to guard
 // (reject new board-scoped Actions, hide legacy board-only rows) no longer
-// exists. What survives is the workspace boundary: list() returns only the
-// workspace's own Actions, and a stale client that still sends `board_id`
-// gets an ordinary workspace Action rather than an error or a hidden row.
+// exists. What survives is the account boundary: list() returns only the
+// account's own Actions, and a stale client that still sends `board_id`
+// gets an ordinary account Action rather than an error or a hidden row.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -14,11 +14,11 @@ import { ApiKey } from '../dist/entities/ApiKey.js';
 import { ActionsService } from '../dist/modules/actions/actions.service.js';
 
 // P4c-4: 대상 검증은 Host 행으로 해소한다 (Agent 테이블 없음). 전역 스코프
-// 행이면 모든 워크스페이스에서 보인다.
+// 행이면 모든 계정에서 보인다.
 const HOST_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
 const TARGET = { manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
 
-describe('Actions workspace scope', () => {
+describe('Actions account scope', () => {
   let dataSource;
   let service;
 
@@ -36,7 +36,7 @@ describe('Actions workspace scope', () => {
     const actionRepo = dataSource.getRepository(Action);
     const stub = {};
     // (action, run, approval, room, participant, message, attachment, host,
-    // workspace, user, comment, activity, ticket, dataSource, membership,
+    // account, user, comment, activity, ticket, dataSource, membership,
     // messaging, logService, projects).
     const hostRepo = dataSource.getRepository(RuntimeHost);
     service = new ActionsService(
@@ -50,27 +50,27 @@ describe('Actions workspace scope', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('a stale board_id in the create payload yields a plain workspace Action', async () => {
+  it('a stale board_id in the create payload yields a plain account Action', async () => {
     const created = await service.create({
-      account_id: 'workspace-a',
+      account_id: 'account-a',
       board_id: 'board-a',
       name: 'Stale client action',
       target_runtimes: [TARGET],
     });
-    assert.equal(created.account_id, 'workspace-a');
+    assert.equal(created.account_id, 'account-a');
     assert.equal('board_id' in created, false, 'Action has no board layer to persist into');
-    const rows = await service.list('workspace-a');
-    assert.ok(rows.some((row) => row.id === created.id), 'the Action is listed in its workspace');
+    const rows = await service.list('account-a');
+    assert.ok(rows.some((row) => row.id === created.id), 'the Action is listed in its account');
   });
 
-  it('list() returns only the requested workspace\'s Actions', async () => {
-    await service.create({ account_id: 'workspace-a', name: 'Account A action', target_runtimes: [TARGET] });
-    await service.create({ account_id: 'workspace-b', name: 'Account B action', target_runtimes: [TARGET] });
+  it('list() returns only the requested account\'s Actions', async () => {
+    await service.create({ account_id: 'account-a', name: 'Account A action', target_runtimes: [TARGET] });
+    await service.create({ account_id: 'account-b', name: 'Account B action', target_runtimes: [TARGET] });
 
-    const rowsA = await service.list('workspace-a');
+    const rowsA = await service.list('account-a');
     assert.ok(rowsA.some((row) => row.name === 'Account A action'));
-    assert.ok(rowsA.every((row) => row.account_id === 'workspace-a'));
-    const rowsB = await service.list('workspace-b');
+    assert.ok(rowsA.every((row) => row.account_id === 'account-a'));
+    const rowsB = await service.list('account-b');
     assert.deepEqual(rowsB.map((row) => row.name), ['Account B action']);
   });
 });

@@ -10,7 +10,7 @@ import { z } from 'zod';
  * 저장 위치는 `harness_config` / `environment_config` 관례를 그대로 따른다 —
  * JSON text 컬럼 한 개:
  *   - `Resource.clone_policy`  (type='repository' 에서만 의미 있음) = repo 별 override
- *   - `Account.clone_policy`                                     = workspace 기본값
+ *   - `Account.clone_policy`                                     = account 기본값
  *
  * 우선순위는 **키 단위**로 Repo Resource → Account → 시스템 기본값이다
  * (`resolveClonePolicy`). Resource 가 timeout 만 지정하면 나머지 키는 Account 값,
@@ -135,13 +135,13 @@ export function serializeClonePolicy(value: ClonePolicy | null | undefined): str
  */
 export function resolveClonePolicy(
   resourceRaw: string | null | undefined,
-  workspaceRaw: string | null | undefined,
+  accountRaw: string | null | undefined,
 ): ResolvedClonePolicy | null {
   const resource = parseClonePolicy(resourceRaw);
-  const workspace = parseClonePolicy(workspaceRaw);
-  if (!resource && !workspace) return null;
+  const account = parseClonePolicy(accountRaw);
+  if (!resource && !account) return null;
   const pick = <K extends keyof ClonePolicy>(key: K): ClonePolicy[K] =>
-    resource?.[key] !== undefined ? resource[key] : workspace?.[key];
+    resource?.[key] !== undefined ? resource[key] : account?.[key];
   return {
     clone_timeout_seconds: pick('clone_timeout_seconds') ?? DEFAULT_CLONE_TIMEOUT_SECONDS,
     clone_idle_timeout_seconds: pick('clone_idle_timeout_seconds') ?? DEFAULT_CLONE_IDLE_TIMEOUT_SECONDS,

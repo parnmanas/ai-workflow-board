@@ -59,8 +59,8 @@ test('PermissionNotice: role=note + 기본 제목', () => {
 
 test('PermissionNotice: 커스텀 title/message (영문 화면 언어 보존)', () => {
   const html = render(
-    h(PermissionNotice, { title: 'Admin access required', message: 'Admin access is required to edit workspace settings.' }),
+    h(PermissionNotice, { title: 'Admin access required', message: 'Admin access is required to edit account settings.' }),
   );
   assert.match(html, /Admin access required/);
-  assert.match(html, /required to edit workspace settings/);
+  assert.match(html, /required to edit account settings/);
 });

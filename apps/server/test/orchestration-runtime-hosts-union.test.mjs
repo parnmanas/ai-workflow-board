@@ -13,7 +13,7 @@ import { OrchestrationHostsService } from '../dist/modules/orchestration/orchest
 // 원천 + manager Agent 행 legacy 별칭의 합집합이다. dual-write 쌍은 하나로
 // 합쳐지고 (키는 Host id), Agent 행 없는 Host 도 목록에 나온다.
 async function listHosts(app) {
-  return app.get(OrchestrationHostsService).listRuntimeHosts('any-workspace');
+  return app.get(OrchestrationHostsService).listRuntimeHosts('any-account');
 }
 
 test('Host catalog returns one host-keyed row without retired Agent aliases', async (t) => {
@@ -22,7 +22,7 @@ test('Host catalog returns one host-keyed row without retired Agent aliases', as
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createAccount(app, getDataSourceToken, 'hosts-union');
+  const account = await createAccount(app, getDataSourceToken, 'hosts-union');
 
   // P4c-4: createAgent(type manager)는 Host 행을 직접 만든다 — dual-write
   // 쌍을 흉내내려면 키에 구 agent uuid 바인딩을 얹는다 (평문 컬럼, FK 없음).
@@ -33,7 +33,7 @@ test('Host catalog returns one host-keyed row without retired Agent aliases', as
   const host = manager;
   const legacyAgentId = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
   await createApiKey(app, getDataSourceToken, legacyAgentId, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'hosts-union',
     hostId: host.id,
   });
@@ -51,13 +51,13 @@ test('Host without an Agent row still appears, keyed by host id', async (t) => {
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createAccount(app, getDataSourceToken, 'hosts-orphan');
+  const account = await createAccount(app, getDataSourceToken, 'hosts-orphan');
 
   const host = await ds.getRepository('RuntimeHost').save(
     ds.getRepository('RuntimeHost').create({
       name: 'orphan-host',
       hostname: 'orphan',
-      account_id: workspace.id,
+      account_id: account.id,
       is_active: 1,
     }),
   );

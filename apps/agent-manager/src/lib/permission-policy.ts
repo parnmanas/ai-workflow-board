@@ -6,12 +6,12 @@
 //      운영자가 admin UI 에서 에이전트별로 고르는 "신뢰 등급". 지금까지는
 //      Hermes(ACP) RuntimeSupervisor 만 이 값을 읽었고, CLI adapter 들은
 //      존재조차 몰랐다.
-//   2. account harness(구버전 서버: board ⊕ workspace) `permission_mode` — 자유 문자열(claude CLI 의
+//   2. account harness(구버전 서버: board ⊕ account) `permission_mode` — 자유 문자열(claude CLI 의
 //      `--permission-mode` 값)이며, CLI adapter 들이 실제 spawn 플래그를
 //      결정할 때 유일하게 보던 값.
 //
 // 그래서 `trusted` 로 표시된 에이전트라도 보드에 harness permission_mode 가
-// 하나 걸려 있으면 claude 는 `--dangerously-skip-permissions` 를 잃고 workspace
+// 하나 걸려 있으면 claude 는 `--dangerously-skip-permissions` 를 잃고 account
 // trust 대화상자가 다시 load-bearing 이 되어 dispatch 가 Pending 으로 떨어졌고,
 // codex 는 최고 권한 플래그 대신 제한 sandbox 로 내려갔다.
 //

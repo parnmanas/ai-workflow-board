@@ -67,7 +67,7 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
   const [editingSchedule, setEditingSchedule] = useState<QaSchedule | 'new' | null>(null);
   const [confirmDeleteSchedule, setConfirmDeleteSchedule] = useState<QaSchedule | null>(null);
   // Deployment-awareness live-commit badges (ticket 8ce72b18): current live commit
-  // per environment this workspace sees (its own + global). Best-effort read.
+  // per environment this account sees (its own + global). Best-effort read.
   const [deployments, setDeployments] = useState<Deployment[]>([]);
 
   const load = useCallback(async () => {
@@ -1195,7 +1195,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
   const patchWf = (patch: Partial<WorkspaceFolderFormState>) => setWf((prev) => ({ ...prev, ...patch }));
 
   // On-failure auto-ticket policy (실패 시 → 티켓 생성).
-  // The ticket joins the workspace ticket pool (status / tags / project).
+  // The ticket joins the account ticket pool (status / tags / project).
   const oft = scenario?.on_failure_ticket ?? null;
   const [oftForm, setOftForm] = useState<OnFailureTicketForm>(() => onFailureTicketToForm(oft));
   const patchOft = (patch: Partial<OnFailureTicketForm>) => setOftForm((prev) => ({ ...prev, ...patch }));

@@ -29,7 +29,7 @@ import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
 import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
 import { UserChannelsModule } from './modules/user-channels/user-channels.module';
-import { WorkspaceScheduleModule } from './modules/automation-schedule/automation-schedule.module';
+import { AutomationScheduleModule } from './modules/automation-schedule/automation-schedule.module';
 import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-functions.module';
 import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
@@ -106,7 +106,7 @@ import { VoiceModule } from './modules/voice/voice.module';
     MentionsModule,
     AgentManagerModule,
     UserChannelsModule,
-    WorkspaceScheduleModule,
+    AutomationScheduleModule,
     WorkflowFunctionsModule,
     SkillsModule,
     ArtifactRefsModule,

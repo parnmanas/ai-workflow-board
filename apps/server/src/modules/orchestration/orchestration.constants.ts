@@ -143,7 +143,7 @@ export function normalizeConfirmPolicy(value: unknown): ConfirmPolicy {
 /**
  * 이 미션의 **대화방에서 사람이 말할 수 있는가**를 정하는 미션 단위 옵션.
  *
- * - `open`(기본)        — 워크스페이스의 운영자면 참여자로 등록되지 않았어도 바로 발화.
+ * - `open`(기본)        — 계정의 운영자면 참여자로 등록되지 않았어도 바로 발화.
  * - `participants_only` — 참여자 명단에 있는 사람만 발화. 관전(읽기)은 그대로 열려 있다.
  * - `off`               — 사람은 아무도 발화할 수 없다. 읽기 전용(관전)만 허용.
  *
@@ -348,7 +348,7 @@ export type PostActionStatus = (typeof POST_ACTION_STATUSES)[number];
 export const POST_ACTION_STALE_IN_FLIGHT_MS = 2 * 60_000;
 
 export interface MissionPostAction {
-  /** Action.id — 대상 workspace 소속인지는 디스패치 시점에 재검증한다. */
+  /** Action.id — 대상 account 소속인지는 디스패치 시점에 재검증한다. */
   action_id: string;
   /** 오름차순 실행 순서. 동률이면 배열 원래 순서를 유지(안정 정렬). */
   order: number;

@@ -57,13 +57,13 @@ test('Heartbeat with host binding passes without an Agent row and stamps registr
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createAccount(app, getDataSourceToken, 'host-first');
+  const account = await createAccount(app, getDataSourceToken, 'host-first');
 
   const host = await ds.getRepository('RuntimeHost').save(
     ds.getRepository('RuntimeHost').create({
       name: 'host-first',
       hostname: 'host-first-test',
-      account_id: workspace.id,
+      account_id: account.id,
       is_active: 1,
     }),
   );
@@ -71,7 +71,7 @@ test('Heartbeat with host binding passes without an Agent row and stamps registr
   // P4c-4: Agent 행 없이 Host 바인딩 키로 하트비트한다.
   const phantomAgentId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
   const key = await createApiKey(app, getDataSourceToken, phantomAgentId, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'host-first',
     hostId: host.id,
   });
@@ -97,11 +97,11 @@ test('Heartbeat rejects host_id mismatch between body and key binding', async (t
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createAccount(app, getDataSourceToken, 'host-mismatch');
+  const account = await createAccount(app, getDataSourceToken, 'host-mismatch');
 
   const mkHost = (name) => ds.getRepository('RuntimeHost').save(
     ds.getRepository('RuntimeHost').create({
-      name, hostname: 'mismatch-test', account_id: workspace.id, is_active: 1,
+      name, hostname: 'mismatch-test', account_id: account.id, is_active: 1,
     }),
   );
   const hostA = await mkHost('host-a');
@@ -111,7 +111,7 @@ test('Heartbeat rejects host_id mismatch between body and key binding', async (t
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'host-mismatch',
     hostId: hostA.id,
   });
@@ -128,9 +128,9 @@ test('Hostless heartbeat is rejected (P4c-4: host identity required)', async (t)
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'host-legacy');
+  const account = await createAccount(app, getDataSourceToken, 'host-legacy');
   const key = await createApiKey(app, getDataSourceToken, 'cccccccc-3333-4333-8333-cccccccccccc', {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'host-legacy',
   });
 

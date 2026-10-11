@@ -128,8 +128,8 @@ function relativeTime(iso: string | null | undefined): string {
 
 // ─── Runtime Host 목록 ──────────────────────────────────────────────────────
 
-function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
-  wsId: string; hosts: AgentSessionHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
+function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
+  accountId: string; hosts: AgentSessionHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
 }) {
   const navigate = useNavigate();
   const catalog = useCliCatalog();
@@ -206,8 +206,8 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
 
 // ─── 호스트 세션 목록 — cwd 기준 그룹 ─────────────────────────────────────
 
-function CwdGroupCard({ group, wsId, managerId, onNew }: {
-  group: CwdGroup; wsId: string; managerId: string; onNew: (cwd: string) => void;
+function CwdGroupCard({ group, accountId, managerId, onNew }: {
+  group: CwdGroup; accountId: string; managerId: string; onNew: (cwd: string) => void;
 }) {
   const navigate = useNavigate();
   const [showOlder, setShowOlder] = useState(false);
@@ -285,8 +285,8 @@ function CwdGroupCard({ group, wsId, managerId, onNew }: {
   );
 }
 
-function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
-  wsId: string; managerId: string; host: AgentSessionHost | null; onNew: () => void; onNewWithCwd: (cwd: string) => void;
+function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
+  accountId: string; managerId: string; host: AgentSessionHost | null; onNew: () => void; onNewWithCwd: (cwd: string) => void;
 }) {
   const navigate = useNavigate();
   const [sessionsByCli, setSessionsByCli] = useState<Record<string, AgentSessionSummary[]>>({});
@@ -366,7 +366,7 @@ function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
       />
       {showSettings && (
         <div style={{ paddingTop: 12 }}>
-          <CliSettingsPanel wsId={wsId} managerId={managerId} cli={showSettings} hostName={hostName} onChanged={() => window.dispatchEvent(new Event(AGENT_SESSIONS_CHANGED_EVENT))} />
+          <CliSettingsPanel accountId={accountId} managerId={managerId} cli={showSettings} hostName={hostName} onChanged={() => window.dispatchEvent(new Event(AGENT_SESSIONS_CHANGED_EVENT))} />
         </div>
       )}
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
@@ -386,7 +386,7 @@ function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 960 }}>
             {groups.map((group) => (
-              <CwdGroupCard key={group.cwd} group={group} wsId={wsId} managerId={managerId} onNew={onNewWithCwd} />
+              <CwdGroupCard key={group.cwd} group={group} accountId={accountId} managerId={managerId} onNew={onNewWithCwd} />
             ))}
           </div>
         )}
@@ -397,8 +397,8 @@ function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
 
 // ─── 세션 뷰 ────────────────────────────────────────────────────────────────
 
-function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
-  wsId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
+function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
+  accountId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
 }) {
   const navigate = useNavigate();
   const { showToast } = useToast();
@@ -744,7 +744,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         wakeStore.sleep(id);
       },
     };
-  }, [thisOperator, awakeHere, wake.wokeAt, navigate, wsId]);
+  }, [thisOperator, awakeHere, wake.wokeAt, navigate, accountId]);
 
   const decide = useCallback(async (requestId: string, optionId: string | null) => {
     setDecidingRequestId(requestId);
@@ -1176,10 +1176,10 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
 export default function SessionsPage() {
   const { managerId, cli, sessionId } = useParams<{ managerId?: string; cli?: string; sessionId?: string }>();
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { hosts, loading, error, reload } = useAgentSessionsNav(wsId ?? null);
+  const { hosts, loading, error, reload } = useAgentSessionsNav(accountId ?? null);
   const [newOpen, setNewOpen] = useState(false);
   const [newInitialCwd, setNewInitialCwd] = useState<string | undefined>();
 
@@ -1194,17 +1194,17 @@ export default function SessionsPage() {
   const openNew = useCallback(() => { setNewInitialCwd(undefined); setNewOpen(true); }, []);
   const openNewWithCwd = useCallback((cwd: string) => { setNewInitialCwd(cwd); setNewOpen(true); }, []);
 
-  if (!wsId) return null;
+  if (!accountId) return null;
   const host = managerId ? hosts.find((h) => h.manager_id === managerId) ?? null : null;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {managerId && cli && sessionId ? (
-        <SessionView key={`${managerId}/${cli}/${sessionId}`} wsId={wsId} managerId={managerId} cli={cli} sessionId={sessionId} host={host} onNew={openNew} />
+        <SessionView key={`${managerId}/${cli}/${sessionId}`} accountId={accountId} managerId={managerId} cli={cli} sessionId={sessionId} host={host} onNew={openNew} />
       ) : managerId ? (
-        <HostProjectsView key={managerId} wsId={wsId} managerId={managerId} host={host} onNew={openNew} onNewWithCwd={openNewWithCwd} />
+        <HostProjectsView key={managerId} accountId={accountId} managerId={managerId} host={host} onNew={openNew} onNewWithCwd={openNewWithCwd} />
       ) : (
-        <HostsIndex wsId={wsId} hosts={hosts} loading={loading} error={error} onReload={reload} onNew={openNew} />
+        <HostsIndex accountId={accountId} hosts={hosts} loading={loading} error={error} onReload={reload} onNew={openNew} />
       )}
       <NewSessionModal
         open={newOpen}

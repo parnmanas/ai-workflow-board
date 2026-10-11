@@ -7,7 +7,7 @@ contracts from dated implementation plans and research.
 ## Current model
 
 - Work opens at `/sessions`, `/tickets`, `/projects`, `/teams`, `/missions`, and
-  `/chat`. Accessible accounts are combined; there is no workspace selector.
+  `/chat`. Accessible accounts are combined; there is no account selector.
 - Accounts own work and govern membership, credentials, execution policy, and
   budgets. New API integrations use `account_id` and `X-Account-Id`.
 - Tickets use fixed statuses, tags, an optional Project, and one RuntimeSpec
@@ -18,7 +18,7 @@ contracts from dated implementation plans and research.
   and execution settings separately. Terminals are live processes only.
 
 The ownership and ticket references below are the starting point when an older
-document uses boards, configurable columns, workspace navigation, or Agent rows.
+document uses boards, configurable columns, account navigation, or Agent rows.
 
 ## Work and ownership
 
@@ -104,7 +104,7 @@ apply an old plan as a new installation procedure.
 ## Keeping documentation current
 
 Update a feature's contract when its API, UI route, ownership, runtime selection,
-or wire behavior changes. Check commands against workspace scripts and flags,
+or wire behavior changes. Check commands against account scripts and flags,
 versions against manifests/lockfile, and URLs against controllers and `App.tsx`.
 Keep old migration/index/wire names only when they are actual compatibility
 contracts, and label them accordingly. Avoid fixed tool counts and duplicated

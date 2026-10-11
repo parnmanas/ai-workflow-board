@@ -7,7 +7,7 @@
 ## Procedure (in order)
 
 1. Modify `apps/agent-manager/src/`.
-2. Verify `npm run build` passes **from the workspace root** (turbo builds the whole monorepo — a green agent-manager-only build is not enough).
+2. Verify `npm run build` passes **from the account root** (turbo builds the whole monorepo — a green agent-manager-only build is not enough).
 3. Commit + push. **버전을 손으로 범프하지 마라** — publish 시점에 자동 계산된다(아래).
 
 > **버전은 publish 시점에 자동 계산된다 (ticket 433f6cbd, source c17a8a40).**

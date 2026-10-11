@@ -3,12 +3,12 @@
 // DataSource + the controller instantiated directly (no HTTP/NestJS module
 // boot), asserting on the plain status()/json() response mock.
 //
-//   • a credential from a DIFFERENT workspace is rejected on create.
-//   • a GLOBAL credential (account_id=null) is accepted from any workspace.
-//   • a target_project_id from a DIFFERENT workspace is rejected on create;
-//     a same-workspace project + target_tags are stored and echoed back.
-//   • a channel created in workspace A never appears listing workspace B.
-//   • get() 404s for a channel that exists but in a different workspace.
+//   • a credential from a DIFFERENT account is rejected on create.
+//   • a GLOBAL credential (account_id=null) is accepted from any account.
+//   • a target_project_id from a DIFFERENT account is rejected on create;
+//     a same-account project + target_tags are stored and echoed back.
+//   • a channel created in account A never appears listing account B.
+//   • get() 404s for a channel that exists but in a different account.
 //   • the response never carries `credential_id` (see outreach.controller.ts's
 //     channelToJson allowlist) — only a `has_credential` boolean.
 
@@ -40,7 +40,7 @@ function response() {
   };
 }
 
-describe('Outreach channels — workspace scope contract', () => {
+describe('Outreach channels — account scope contract', () => {
   let dataSource;
   let controller;
 
@@ -75,7 +75,7 @@ describe('Outreach channels — workspace scope contract', () => {
     return { manager_agent_id: host.id, cli: 'codex', working_dir: '/tmp/project', folder_scope: 'shared', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
   }
 
-  it('rejects creating a channel with a credential from a DIFFERENT workspace', async () => {
+  it('rejects creating a channel with a credential from a DIFFERENT account', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-a' }));
     const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-b' }));
@@ -87,10 +87,10 @@ describe('Outreach channels — workspace scope contract', () => {
     const res = response();
     await controller.create({ account_id: wsA.id, kind: 'github', name: 'channel a', credential_id: credB.id }, res);
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /not available in this workspace scope/);
+    assert.match(res.body.error, /not available in this account scope/);
   });
 
-  it('allows a GLOBAL credential (account_id=null) to attach to any workspace channel', async () => {
+  it('allows a GLOBAL credential (account_id=null) to attach to any account channel', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const ws = await wsRepo.save(wsRepo.create({ name: 'ws-global-test' }));
     const credRepo = dataSource.getRepository(Credential);
@@ -105,7 +105,7 @@ describe('Outreach channels — workspace scope contract', () => {
     assert.equal(res.body.credential_id, undefined, 'credential_id must never appear in the response');
   });
 
-  it('rejects a target_project_id belonging to a DIFFERENT workspace', async () => {
+  it('rejects a target_project_id belonging to a DIFFERENT account', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-project-a' }));
     const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-project-b' }));
@@ -117,10 +117,10 @@ describe('Outreach channels — workspace scope contract', () => {
       account_id: wsA.id, kind: 'github', name: 'channel project scope', target_project_id: projectB.id,
     }, res);
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /target_project_id must reference a project in this workspace/);
+    assert.match(res.body.error, /target_project_id must reference a project in this account/);
   });
 
-  it('stores a same-workspace target_project_id and normalized target_tags', async () => {
+  it('stores a same-account target_project_id and normalized target_tags', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const ws = await wsRepo.save(wsRepo.create({ name: 'ws-project-ok' }));
     const projectRepo = dataSource.getRepository(Project);
@@ -144,7 +144,7 @@ describe('Outreach channels — workspace scope contract', () => {
     assert.deepEqual(upd.body.target_tags, []);
   });
 
-  it('rejects a classifier runtime with a credential from another workspace', async () => {
+  it('rejects a classifier runtime with a credential from another account', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-runtime-a' }));
     const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-runtime-b' }));
@@ -154,7 +154,7 @@ describe('Outreach channels — workspace scope contract', () => {
     const res = response();
     await controller.create({ account_id: wsA.id, kind: 'github', name: 'scoped', classifier_runtime: runtime }, res);
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /not available in this workspace scope/);
+    assert.match(res.body.error, /not available in this account scope/);
   });
 
   it('saves a classifier runtime on a global Host without an Agent row', async () => {
@@ -177,7 +177,7 @@ describe('Outreach channels — workspace scope contract', () => {
     assert.equal(res.statusCode, 400);
   });
 
-  it('a channel created in workspace A is not visible when listing workspace B', async () => {
+  it('a channel created in account A is not visible when listing account B', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-list-a' }));
     const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-list-b' }));
@@ -189,14 +189,14 @@ describe('Outreach channels — workspace scope contract', () => {
     const listResB = response();
     await controller.list(wsB.id, listResB);
     assert.equal(listResB.statusCode, 200);
-    assert.equal(listResB.body.length, 0, 'workspace B sees no channels from workspace A');
+    assert.equal(listResB.body.length, 0, 'account B sees no channels from account A');
 
     const listResA = response();
     await controller.list(wsA.id, listResA);
-    assert.equal(listResA.body.some((c) => c.id === createRes.body.id), true, 'workspace A sees its own channel');
+    assert.equal(listResA.body.some((c) => c.id === createRes.body.id), true, 'account A sees its own channel');
   });
 
-  it('get() 404s for a channel that exists but in a different workspace', async () => {
+  it('get() 404s for a channel that exists but in a different account', async () => {
     const wsRepo = dataSource.getRepository(Account);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-get-a' }));
     const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-get-b' }));

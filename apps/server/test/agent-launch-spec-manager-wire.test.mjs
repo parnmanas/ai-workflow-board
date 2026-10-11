@@ -36,7 +36,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   // (workflow 파일에 빌드 스텝을 얹는 방법은 이 저장소의 push 자격증명에
   // `workflow` scope 이 없어 쓸 수 없다).
   if (!existsSync(MANAGER_DIST)) {
-    // 워크스페이스는 경로로 지정한다 — 패키지 이름은 `awb-agent-manager` 라
+    // 계정는 경로로 지정한다 — 패키지 이름은 `awb-agent-manager` 라
     // `-w agent-manager` 는 "No accounts found" 로 실패한다.
     execFileSync('npm', ['run', 'build', '-w', 'apps/agent-manager'], {
       cwd: REPO_ROOT,
@@ -98,12 +98,12 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'launch-spec-wire');
+  const account = await createAccount(app, getDataSourceToken, 'launch-spec-wire');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'launch-spec-wire', type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id, label: 'launch-spec-wire',
+    accountId: account.id, label: 'launch-spec-wire',
   });
 
   const res = await fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
@@ -113,7 +113,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
       instance_id: 'launch-spec-wire',
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
-      account_id: workspace.id,
+      account_id: account.id,
       mode: 'manager',
       hostname: 'test-host',
       plugin_version: 'test',

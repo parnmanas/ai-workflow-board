@@ -7,7 +7,7 @@
 // commits established — and which a future projection change could silently
 // re-break — is:
 //
-//   • GET /api/accounts/:wsId/tickets → card comments are the LIGHT
+//   • GET /api/accounts/:accountId/tickets → card comments are the LIGHT
 //     projection: exactly {id, ticket_id, type, status, created_at}. No
 //     content/author/author_type/parent_id/metadata. (perf must stay: card
 //     payloads never carry bodies.)
@@ -68,12 +68,12 @@ test('comment payload contract: card list GET light, ticket GET full thread', as
     parent_id: root.id, attachment_resource_ids: '[]', metadata: '{}',
   }));
 
-  step('GET /api/accounts/:wsId/tickets — card comments must be the light projection (no bodies)');
+  step('GET /api/accounts/:accountId/tickets — card comments must be the light projection (no bodies)');
   const listRes = await fetch(`http://localhost:${port}/api/accounts/${ws.id}/tickets`, { headers: authHeaders });
   assert.equal(listRes.status, 200, 'ticket list GET should succeed');
   const listJson = await listRes.json();
   const card = (listJson.tickets || []).find((tk) => tk.id === ticket.id);
-  assert.ok(card, 'ticket card present in the workspace list');
+  assert.ok(card, 'ticket card present in the account list');
   const cardComments = card.comments || [];
   assert.equal(cardComments.length, 2, 'card carries the comment rows (count, not bodies)');
   for (const cc of cardComments) {

@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const workspace = { id: 'ws-scroll', name: 'Scroll Test', slug: 'scroll-test', relations: ['admin'] };
+const account = { id: 'ws-scroll', name: 'Scroll Test', slug: 'scroll-test', relations: ['admin'] };
 
 function agentFixture(kind) {
   return {
@@ -25,7 +25,7 @@ async function stubApi(page, kind) {
   await page.addInitScript(({ accountId }) => {
     localStorage.setItem('auth_token', 'e2e-token');
     localStorage.setItem('currentAccountId', accountId);
-  }, { accountId: workspace.id });
+  }, { accountId: account.id });
 
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url());
@@ -39,10 +39,10 @@ async function stubApi(page, kind) {
         role: 'member',
         status: 'active',
         permissions: [],
-        accounts: [workspace],
+        accounts: [account],
       };
-    } else if (path === '/accounts') {
-      body = [workspace];
+    } else if (path === '/workspaces') {
+      body = [account];
     } else if (path === `/agents/agent-${kind}`) {
       body = agentFixture(kind);
     } else if (path === `/agents/agent-${kind}/activity`) {

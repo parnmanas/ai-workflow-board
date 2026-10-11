@@ -197,12 +197,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 /**
- * Headers for a `/accounts/:wsId/...` call: the server requires the path and
- * X-Account-Id to name the same workspace, so the call carries its own.
+ * Headers for a `/accounts/:accountId/...` call: the server requires the path and
+ * X-Account-Id to name the same account, so the call carries its own.
  * Callers are `async` so a failure here rejects like request() does.
  */
-function accountHeaders(wsId: string): Record<string, string> {
-  return { ...getAuthHeaders(), 'X-Account-Id': wsId };
+function accountHeaders(accountId: string): Record<string, string> {
+  return { ...getAuthHeaders(), 'X-Account-Id': accountId };
 }
 
 /** Error thrown by `request` — `code` is the server slug, `body` the parsed JSON error body. */
@@ -312,26 +312,26 @@ export const api = {
     language?: string | null;
     max_concurrent_tickets_per_agent?: number;
     auto_archive_days?: number | null;
-    /** ISO timestamp pauses all ticket dispatch in the workspace; null resumes. */
+    /** ISO timestamp pauses all ticket dispatch in the account; null resumes. */
     dispatch_paused_at?: string | null;
   }) =>
     request<Account>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: string) =>
     request<any>(`/accounts/${id}`, { method: 'DELETE' }),
-  getAccountMembers: (wsId: string) =>
-    request<any[]>(`/accounts/${wsId}/members`),
-  addAccountMember: (wsId: string, userId: string, relation: string = 'member') =>
-    request<any>(`/accounts/${wsId}/members`, {
+  getAccountMembers: (accountId: string) =>
+    request<any[]>(`/accounts/${accountId}/members`),
+  addAccountMember: (accountId: string, userId: string, relation: string = 'member') =>
+    request<any>(`/accounts/${accountId}/members`, {
       method: 'POST', body: JSON.stringify({ user_id: userId, relation }),
     }),
-  updateAccountMemberRole: (wsId: string, userId: string, relation: string) =>
-    request<any>(`/accounts/${wsId}/members/${userId}`, {
+  updateAccountMemberRole: (accountId: string, userId: string, relation: string) =>
+    request<any>(`/accounts/${accountId}/members/${userId}`, {
       method: 'PATCH', body: JSON.stringify({ relation }),
     }),
-  removeAccountMember: (wsId: string, userId: string) =>
-    request<any>(`/accounts/${wsId}/members/${userId}`, { method: 'DELETE' }),
+  removeAccountMember: (accountId: string, userId: string) =>
+    request<any>(`/accounts/${accountId}/members/${userId}`, { method: 'DELETE' }),
   // 프로필 핀 드롭다운용 전역 카탈로그(티켓 e616dbfc). 프로필은 인스턴스
-  // 전역이라 워크스페이스 인자가 없다. getClaudeBackendProfiles 는 관리자
+  // 전역이라 계정 인자가 없다. getClaudeBackendProfiles 는 관리자
   // 전용 라우트라 비관리자에게는 빈 목록이 되므로 읽기는 이쪽을 쓴다.
   listClaudeBackendProfiles: () =>
     request<{ profiles: ClaudeBackendProfile[]; default_profile_id: string | null }>('/claude-backend-profiles'),
@@ -349,21 +349,21 @@ export const api = {
     request<any>('/admin/claude-backend-profiles/default', { method: 'PATCH', body: JSON.stringify({ profile_id }) }),
 
   // ─── Tickets (docs/tickets.md) ─────────────────────────
-  // One workspace-wide pool. The list returns root tickets only (children are
+  // One account-wide pool. The list returns root tickets only (children are
   // nested two levels on each row) plus the tag counts of the matching set.
-  listTickets: async (wsId: string, filters: TicketListQuery = {}) => {
+  listTickets: async (accountId: string, filters: TicketListQuery = {}) => {
     const qs = ticketListQueryString(filters);
     return request<TicketListResponse>(
       `/tickets${qs ? `?${qs}` : ''}`,
     );
   },
-  /** Tag suggestions across the whole workspace pool (tag picker), most used first. */
-  listTicketTags: async (wsId: string) =>
+  /** Tag suggestions across the whole account pool (tag picker), most used first. */
+  listTicketTags: async (accountId: string) =>
     request<{ tags: TicketTagCount[] }>('/ticket-tags'),
-  createTicket: async (wsId: string, data: TicketCreateInput) =>
+  createTicket: async (accountId: string, data: TicketCreateInput) =>
     request<Ticket>('/tickets', {
       method: 'POST',
-      headers: accountHeaders(wsId),
+      headers: accountHeaders(accountId),
       body: JSON.stringify(data),
     }),
   archiveTicket: async (ticketId: string) =>
@@ -579,9 +579,9 @@ export const api = {
     return request<SubagentTranscript>(`/subagent-monitor/${encodeURIComponent(subagentId)}?${params.toString()}`);
   },
   // The server reads X-Account-Id from the header set by getAuthHeaders(),
-  // which now pulls from the per-tab active workspace. The caller can still
+  // which now pulls from the per-tab active account. The caller can still
   // pass `accountId` explicitly to override (e.g., admin tools acting on a
-  // workspace other than the one the tab is currently viewing).
+  // account other than the one the tab is currently viewing).
   // P4c-3b: agent write endpoints removed server-side (POST/PATCH/DELETE /agents).
 
   // ─── Channels ──────────────────────────────────────────
@@ -759,13 +759,13 @@ export const api = {
   // ─── Projects (docs/tickets.md → Project) ─────────────
   // One git repository + what every feature needs to work on it. Replaces
   // repository Resources (same ids after migration).
-  listProjects: async (wsId: string) =>
+  listProjects: async (accountId: string) =>
     request<Project[]>('/projects'),
   getProject: (id: string) => request<Project>(`/projects/${encodeURIComponent(id)}`),
-  createProject: async (wsId: string, data: ProjectInput & { name: string; repo_url: string }) =>
+  createProject: async (accountId: string, data: ProjectInput & { name: string; repo_url: string }) =>
     request<Project>('/projects', {
       method: 'POST',
-      headers: accountHeaders(wsId),
+      headers: accountHeaders(accountId),
       body: JSON.stringify(data),
     }),
   updateProject: (id: string, data: ProjectInput) =>
@@ -998,7 +998,7 @@ export const api = {
     return request<QaRun>(`/qa/runs/${runId}?${params.toString()}`);
   },
   // ─── Deployment awareness (ticket 8ce72b18) ──────────
-  // The current live commit per environment visible to a workspace (its own
+  // The current live commit per environment visible to a account (its own
   // environments + all global ones). Powers the QA "live commit" badge.
   listDeployments: (accountId: string) => {
     const params = new URLSearchParams({ account_id: accountId });
@@ -1224,7 +1224,7 @@ export const api = {
     }),
 
   // ─── Credentials ──────────────────────────────────────
-  // A workspace list also returns inherited global credentials (scope:'global').
+  // A account list also returns inherited global credentials (scope:'global').
   // Pass scope:'global' (no account_id) for the Admin global-credentials page.
   listCredentials: (accountId?: string, opts?: { provider?: string; scope?: 'global'; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams();
@@ -1316,7 +1316,7 @@ export const api = {
     }),
 
   // ─── Chat (Phase 2) ────────────────────────────────────
-  // Account context is read from the per-tab active workspace (see
+  // Account context is read from the per-tab active account (see
   // getActiveAccountId) so multi-tab use never leaks across accounts.
   listChatThreads: () => {
     const account_id = getActiveAccountId() || '';
@@ -1346,7 +1346,7 @@ export const api = {
   // ─── Activity ──────────────────────────────────────────
   getTicketActivity: (ticketId: string) => request<any[]>(`/tickets/${ticketId}/activity`),
   getActivity: () => request<any[]>('/activity'),
-  // Phase 3 Plan 03-02: workspace-wide recent activity feed (capped server-side to 1..200)
+  // Phase 3 Plan 03-02: account-wide recent activity feed (capped server-side to 1..200)
   getRecentActivity: (opts?: { limit?: number }): Promise<ActivityRow[]> => {
     const limit = opts?.limit ?? 50;
     return request<ActivityRow[]>(`/activity?limit=${limit}`);
@@ -1488,35 +1488,35 @@ export const api = {
   // generic POST /agents in two ways: (1) cli is validated against the
   // CLI_TYPES whitelist (common/types/cli-types.ts), (2) manager_agent_id is sanity-
   // checked (existence + type='manager'); the manager itself can live in a
-  // different workspace from the new agent — managers are paired globally
+  // different account from the new agent — managers are paired globally
   // by an admin and supervise children across accounts.
   //
-  // Optional `accountId` lets callers (e.g. the workspace AI Agents page)
-  // pin the request to the URL's wsId rather than relying on the per-tab
-  // active workspace — same defensive override as createAgent.
+  // Optional `accountId` lets callers (e.g. the account AI Agents page)
+  // pin the request to the URL's accountId rather than relying on the per-tab
+  // active account — same defensive override as createAgent.
   // P4c-3b: managed-agent creation removed server-side (spec-direct instead).
 
-  // Cross-workspace manager picker source — the workspace AI Agents tab
+  // Cross-account manager picker source — the account AI Agents tab
   // uses this to populate the required Runtime Host dropdown so an Agent
-  // in workspace B can be attached to a manager paired in workspace A.
+  // in account B can be attached to a manager paired in account A.
   // MANAGE_AGENTS-gated; returns one row per Agent with type='manager'.
   listAgentManagers: () =>
     request<Array<{ id: string; name: string; description: string; account_id: string | null; is_active: number }>>(
       '/admin/agent-manager/managers',
     ),
 
-  // P4c-4: managed-agent workspace move endpoint removed server-side.
+  // P4c-4: managed-agent account move endpoint removed server-side.
 
   // ─── Admin Logs ────────────────────────────────────────
   // Governed, immutable skill catalog and bounded Hermes ChildRuns.
-  /** Global + this workspace's skills. `includeShadowed` also returns global
-   *  rows a workspace fork overrides, each flagged `shadowed: true`. */
+  /** Global + this account's skills. `includeShadowed` also returns global
+   *  rows a account fork overrides, each flagged `shadowed: true`. */
   listSkills: (accountId: string, includeShadowed = false) =>
     request<Skill[]>(
       `/accounts/${encodeURIComponent(accountId)}/skills`
       + (includeShadowed ? '?include_shadowed=1' : ''),
     ),
-  /** Copy a global skill into this workspace, where it shadows the global by
+  /** Copy a global skill into this account, where it shadows the global by
    *  slug while the global keeps receiving upstream updates. */
   forkSkill: (accountId: string, skillId: string, skillVersionId?: string) =>
     request<Skill>(
@@ -1693,7 +1693,7 @@ export const api = {
   getWorkflowHealth: () =>
     request<WorkflowHealthRollup>('/admin/workflow-health'),
 
-  // All-time/장기 구간 누적 (ticket 090abc77) — workspace는 getAuthHeaders()의
+  // All-time/장기 구간 누적 (ticket 090abc77) — account는 getAuthHeaders()의
   // ambient X-Account-Id 헤더로 해결되므로 여기서 별도로 넘기지 않는다.
   // 별도 엔드포인트로 둔 이유는 getWorkflowHealth의 15초 폴링에 all-time
   // 집계까지 얹지 않기 위함(컨트롤러 docstring 참고) — 호출부가 직접
@@ -1919,7 +1919,7 @@ export const api = {
   attachHostTerminal: (managerId: string, terminalId: string, size?: { cols: number; rows: number }) =>
     request<TerminalSnapshot>(
       `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}`
-      + (size ? `?cols=${size.cols}&rows=${size.rows}` : ''),
+      + (size ? `?cols=${size.cols}&roaccount=${size.rows}` : ''),
     ),
   writeHostTerminal: (managerId: string, terminalId: string, data: string) =>
     request<{ ok: true }>(
@@ -2180,9 +2180,9 @@ export const api = {
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
     max_open_missions?: number;
-    /** 글로벌(workspace 비종속) 팀으로 생성. 기본값 false. */
+    /** 글로벌(account 비종속) 팀으로 생성. 기본값 false. */
     is_global?: boolean;
-    /** 글로벌 팀 전용: orchestrator가 미션을 만들 수 있는 workspace 목록. */
+    /** 글로벌 팀 전용: orchestrator가 미션을 만들 수 있는 account 목록. */
     allowed_account_ids?: string[];
   }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeam: (
@@ -2197,7 +2197,7 @@ export const api = {
       max_parallel_steps?: number;
       max_open_missions?: number;
       enabled?: boolean;
-      /** 글로벌 팀 전용: workspace 허용목록을 통째로 교체한다. */
+      /** 글로벌 팀 전용: account 허용목록을 통째로 교체한다. */
       allowed_account_ids?: string[];
     },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -2504,7 +2504,7 @@ export interface TicketListQuery {
   archived_only?: boolean;
 }
 
-/** Query string for GET /accounts/:wsId/tickets (pure — unit tested). */
+/** Query string for GET /accounts/:accountId/tickets (pure — unit tested). */
 export function ticketListQueryString(filters: TicketListQuery): string {
   const qs = new URLSearchParams();
   if (filters.status && filters.status.length) qs.set('status', filters.status.join(','));

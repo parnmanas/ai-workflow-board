@@ -87,8 +87,8 @@ function logServiceStub() {
 
 function liveInstance(overrides = {}) {
   return {
-    // 이 워크스페이스는 이 파일의 나머지 테스트가 두루 쓰는 accountId:'w1'
-    // 과 일치해야 한다 — startSession의 workspace-visibility 검증(리뷰
+    // 이 계정는 이 파일의 나머지 테스트가 두루 쓰는 accountId:'w1'
+    // 과 일치해야 한다 — startSession의 account-visibility 검증(리뷰
     // 지적 round 1)이 서로 다른 값이면 403으로 막기 때문.
     instance_id: 'inst-1',
     agent_id: 'manager-agent-1',
@@ -187,13 +187,13 @@ test('startSession happy path: creates a starting session, issues cli_login_star
 });
 
 // 리뷰 지적(round 1): instance_id는 클라이언트가 직접 제출하는 값이라,
-// 그 instance가 실제로 요청 workspace에 속하는지 서버가 검증하지 않으면
-// 다른 workspace의 instance_id를 그대로 넣어 명령을 보낼 수 있었다.
-test('review-fix: startSession rejects a account-scoped request whose instance belongs to a DIFFERENT workspace', async () => {
-  const { instance, commandService } = service({ instances: [liveInstance({ account_id: 'other-workspace' })] });
+// 그 instance가 실제로 요청 account에 속하는지 서버가 검증하지 않으면
+// 다른 account의 instance_id를 그대로 넣어 명령을 보낼 수 있었다.
+test('review-fix: startSession rejects a account-scoped request whose instance belongs to a DIFFERENT account', async () => {
+  const { instance, commandService } = service({ instances: [liveInstance({ account_id: 'other-account' })] });
   await assert.rejects(
     () => instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
-    (err) => err.status === 403 && /not available in this workspace/.test(err.message),
+    (err) => err.status === 403 && /not available in this account/.test(err.message),
   );
   assert.equal(commandService.calls.length, 0, 'must reject before ever issuing the command');
 });
@@ -204,8 +204,8 @@ test('review-fix: startSession allows a account-scoped request against a GLOBAL 
   assert.equal(session.status, 'starting');
 });
 
-test('review-fix: startSession for a GLOBAL session may target an instance from ANY workspace (matches listCliLoginInstances\' own no-workspace-filter behavior for global admins)', async () => {
-  const { instance } = service({ instances: [liveInstance({ account_id: 'some-other-workspace' })] });
+test('review-fix: startSession for a GLOBAL session may target an instance from ANY account (matches listCliLoginInstances\' own no-account-filter behavior for global admins)', async () => {
+  const { instance } = service({ instances: [liveInstance({ account_id: 'some-other-account' })] });
   const session = await instance.startSession({ accountId: '', isGlobal: true, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'admin-1' });
   assert.equal(session.status, 'starting');
   assert.equal(session.is_global, true);
@@ -625,7 +625,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
       permissions: JSON.stringify(['admin.credentials']),
       password_hash: await auth.hashPassword('user-password'),
     }));
-    const workspace = await accountRepo.save(accountRepo.create({ name: 'Login Account' }));
+    const account = await accountRepo.save(accountRepo.create({ name: 'Login Account' }));
 
     const registry = app.get(InstanceRegistryService);
     const instanceId = `inst-${randomUUID()}`;
@@ -633,7 +633,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     registry.upsert({
       instance_id: instanceId,
       agent_id: managerAgentId,
-      account_id: workspace.id,
+      account_id: account.id,
       mode: 'manager',
       hostname: 'test-host',
       plugin_version: '1.0.0',
@@ -653,7 +653,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
 
     // The instance picker route surfaces the fake manager with its
     // capability report.
-    const instancesRes = await fetch(`${baseUrl}/cli-login/instances?account_id=${workspace.id}`, {
+    const instancesRes = await fetch(`${baseUrl}/cli-login/instances?account_id=${account.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     const instancesBody = await instancesRes.json();
@@ -679,7 +679,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const missingInstance = await fetch(`${baseUrl}/cli-login/start`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: workspace.id, cli: 'codex', credential_name: 'x', instance_id: 'does-not-exist' }),
+      body: JSON.stringify({ account_id: account.id, cli: 'codex', credential_name: 'x', instance_id: 'does-not-exist' }),
     });
     assert.equal(missingInstance.status, 404);
 
@@ -691,7 +691,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const started = await fetch(`${baseUrl}/cli-login/start`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: workspace.id, cli: 'codex', credential_name: 'My Codex', instance_id: instanceId }),
+      body: JSON.stringify({ account_id: account.id, cli: 'codex', credential_name: 'My Codex', instance_id: instanceId }),
     });
     const startedBody = await started.json();
     assert.equal(started.status, 201);
@@ -704,8 +704,8 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     assert.equal(capturedCommand.args.session_id, startedBody.id);
     assert.equal(capturedCommand.args.cli, 'codex');
 
-    // GET reflects the same session back to the same workspace.
-    const fetched = await fetch(`${baseUrl}/cli-login/${startedBody.id}?account_id=${workspace.id}`, {
+    // GET reflects the same session back to the same account.
+    const fetched = await fetch(`${baseUrl}/cli-login/${startedBody.id}?account_id=${account.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     const fetchedBody = await fetched.json();
@@ -727,7 +727,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     assert.ok(globalInstancesBody.some((i) => i.instance_id === instanceId));
 
     // 리뷰 지적(round 1): 전역 세션의 조회/취소도 생성과 동일한 게이트가
-    // 필요하다 — workspace 스코프 권한만으로 다른 workspace를 위해 만든
+    // 필요하다 — account 스코프 권한만으로 다른 account를 위해 만든
     // 전역 세션을 열람/취소할 수 있으면 안 된다.
     const globalStarted = await fetch(`${baseUrl}/cli-login/start`, {
       method: 'POST',

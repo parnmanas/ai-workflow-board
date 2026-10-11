@@ -25,7 +25,7 @@ test('사이드바 Knowledge 섹션에 Ontology Graph 항목이 Resources/Prompt
 test('ready/stale 그래프는 전용 snapshot API로 조회해 Sigma/Graphology 캔버스에 마운트한다', () => {
   assert.match(apiSource, /getOntologyGraph:/);
   assert.match(apiSource, /\/ontology\/graph/);
-  assert.match(pageSource, /api\.getOntologyGraph\(wsId, graphId\)/);
+  assert.match(pageSource, /api\.getOntologyGraph\(accountId, graphId\)/);
   assert.match(pageSource, /<OntologyGraphCanvas snapshot={snapshot} \/>/);
   assert.match(canvasSource, /import Graph from 'graphology'/);
   assert.match(canvasSource, /import Sigma from 'sigma'/);
@@ -53,11 +53,11 @@ test('그래프 캔버스는 도메인 타입과 Sigma 렌더 타입을 분리�
   assert.match(canvasSource, /camera\.off\('updated', updateZoom\)/);
 });
 
-test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라우트를 건다(Orchestration과 같은 패턴)', () => {
+test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:accountId 하위에 라우트를 건다(Orchestration과 같은 패턴)', () => {
   assert.match(appSource, /const OntologyGraphPage = lazy\(\(\) => import\('\.\/components\/ontology\/OntologyGraphPage'\)\)/);
   assert.match(appSource, /<Route path="ontology-graph" element={<OntologyGraphPage \/>} \/>/);
-  // WorkspaceManagementPage의 kind 스위치(CRUD-list 패턴)로 억지로 끼워넣지
-  // 않았는지 — 자기 라우트 element가 WorkspaceManagementPage가 아니어야 한다.
+  // AccountManagementPage의 kind 스위치(CRUD-list 패턴)로 억지로 끼워넣지
+  // 않았는지 — 자기 라우트 element가 AccountManagementPage가 아니어야 한다.
   assert.doesNotMatch(appSource, /path="ontology-graph" element={<AccountManagementPage/);
 });
 
@@ -108,7 +108,7 @@ test('"Refresh Graph"는 GET /status 재호출이 아니라 POST /refresh 커맨
   // 존재 여부로 분기해 refreshOntologyGraph를 실제로 호출하는지 확인.
   assert.match(pageSource, /const handleBuildOrRefresh = useCallback\(async \(\) => \{/);
   assert.match(pageSource, /if \(!statusResp\) \{\s*void load\(\);\s*return;\s*\}/);
-  assert.match(pageSource, /api\.refreshOntologyGraph\(wsId, statusResp\.graph_id\)/);
+  assert.match(pageSource, /api\.refreshOntologyGraph\(accountId, statusResp\.graph_id\)/);
   assert.match(pageSource, /onClick={\(\) => void handleBuildOrRefresh\(\)}/);
 });
 
@@ -118,10 +118,10 @@ test('Refresh/Build 버튼은 building 중에는 비활성화된다(중복 클�
 
 test('저장소 목록은 Project 다 — repository Resource 를 조회하지 않고, 그래프 키는 같은 id 를 resourceId 자리로 넘긴다(docs/tickets.md)', () => {
   assert.match(pageSource, /import \{ useProjects \} from '\.\.\/\.\.\/projects\/useProjects'/);
-  assert.match(pageSource, /const \{ projects \} = useProjects\(wsId\)/);
+  assert.match(pageSource, /const \{ projects \} = useProjects\(accountId\)/);
   assert.doesNotMatch(pageSource, /listResources\(/, 'repository Resource 목록을 읽으면 안 된다');
   assert.doesNotMatch(pageSource, /'repository'/);
   // 프로젝트는 옛 repository Resource 와 같은 id 로 이관됐고 그래프도 그 id 로 키잉돼 있다.
-  assert.match(pageSource, /getOntologyGraphStatus\(wsId, \{ resourceId: projectId, folderPath \}\)/);
-  assert.match(pageSource, /logOntologyGraphViewOpened\(wsId, \{ resourceId: projectId, folderPath \}\)/);
+  assert.match(pageSource, /getOntologyGraphStatus\(accountId, \{ resourceId: projectId, folderPath \}\)/);
+  assert.match(pageSource, /logOntologyGraphViewOpened\(accountId, \{ resourceId: projectId, folderPath \}\)/);
 });

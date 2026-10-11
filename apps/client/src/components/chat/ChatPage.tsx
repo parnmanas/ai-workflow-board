@@ -90,7 +90,7 @@ function ProtocolUpgradeBanner() {
 export default function ChatPage() {
   const { roomId: routeRoomId } = useParams<{ roomId?: string }>();
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const navigate = useNavigate();
   const { user } = useAuth();
   // Announcements (toast / sound / OS notification) belong to
@@ -180,7 +180,7 @@ export default function ChatPage() {
   const showAllRooms = false;
 
   useEffect(() => {
-    api.listChatRooms(showAllRooms ? 'account' : undefined, wsId)
+    api.listChatRooms(showAllRooms ? 'account' : undefined, accountId)
       .then((list) => {
         setRooms(list);
       })
@@ -195,7 +195,7 @@ export default function ChatPage() {
           err,
         );
       });
-  }, [showAllRooms, wsId]);
+  }, [showAllRooms, accountId]);
 
   // Keep the persistent shell's compact room list in sync without creating a
   // second real-time stream subscription in the Sidebar. AppLayout also loads
@@ -203,9 +203,9 @@ export default function ChatPage() {
   // while ChatPage is mounted.
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('chat-rooms-changed', {
-      detail: { accountId: wsId, rooms },
+      detail: { accountId: accountId, rooms },
     }));
-  }, [rooms, wsId]);
+  }, [rooms, accountId]);
 
   // Canonical room links use /chat/:roomId so the persistent Sidebar can
   // identify the active room. The old ?room=<id> form remains supported for
@@ -215,12 +215,12 @@ export default function ChatPage() {
     const newChatParam = searchParams.get('new');
     const roomParam = searchParams.get('room');
     const messageParam = searchParams.get('message');
-    if (newChatParam === '1' && wsId) {
+    if (newChatParam === '1' && accountId) {
       setShowNewChat(true);
       navigate(`/chat`, { replace: true });
       return;
     }
-    if (roomParam && wsId) {
+    if (roomParam && accountId) {
       const messageQuery = messageParam ? `?message=${encodeURIComponent(messageParam)}` : '';
       navigate(`/chat/${roomParam}${messageQuery}`, { replace: true });
       return;
@@ -229,7 +229,7 @@ export default function ChatPage() {
     setActiveRoomId(targetRoomId);
     if (!targetRoomId) return;
     if (messageParam) setScrollToMessageId(messageParam);
-  }, [routeRoomId, searchParams, navigate, wsId]);
+  }, [routeRoomId, searchParams, navigate, accountId]);
 
   // Load messages + mark read on room change
   useEffect(() => {
@@ -288,8 +288,8 @@ export default function ChatPage() {
           const isMember = detail.participants.some(
             (p: any) => p.participant_id === user?.id && p.participant_type === 'user',
           );
-          // Re-derive: only an observer if scope is workspace AND viewer
-          // truly isn't a participant. Members in workspace mode get
+          // Re-derive: only an observer if scope is account AND viewer
+          // truly isn't a participant. Members in account mode get
           // normal read-receipt behaviour.
           setIsObserver(showAllRooms && !isMember);
           if (isMember) {
@@ -311,7 +311,7 @@ export default function ChatPage() {
     // guard against a newer SSE push landing before this resolves (review
     // round 2, P1 #2) — a plain replace would stomp it back to this stale
     // snapshot. observer=true matches the getChatRoom/getChatRoomMessages
-    // calls above so a non-participant workspace-wide viewer isn't 404'd by
+    // calls above so a non-participant account-wide viewer isn't 404'd by
     // the server's new room-access check (review round 2, P1 #1).
     //
     // requestStartedSeq captures the shared monotonic counter's CURRENT value
@@ -529,17 +529,17 @@ export default function ChatPage() {
       {
         currentUserId: user?.id,
         getActiveRoomId: () => activeRoomIdRef.current,
-        listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, wsId),
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, accountId),
         setRooms,
         refreshActiveRoomParticipants,
       },
       data,
     );
-  }, [user?.id, showAllRooms, refreshActiveRoomParticipants, wsId]));
+  }, [user?.id, showAllRooms, refreshActiveRoomParticipants, accountId]));
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
-    if (wsId) navigate(`/chat/${roomId}`);
+    if (accountId) navigate(`/chat/${roomId}`);
   }
 
   // Older-message loader: fetches a page of history strictly older than
@@ -616,7 +616,7 @@ export default function ChatPage() {
     if (activeRoomId === roomId) {
       setActiveRoomId(null);
       setMessages([]);
-      if (wsId) navigate(`/chat`);
+      if (accountId) navigate(`/chat`);
     }
   }
 
@@ -655,7 +655,7 @@ export default function ChatPage() {
     // 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 — SSE 경로와 동일 반응.
     reflectParticipantChange(
       {
-        listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, wsId),
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, accountId),
         setRooms,
         getActiveRoomId: () => activeRoomIdRef.current,
         refreshActiveRoomParticipants,
@@ -668,7 +668,7 @@ export default function ChatPage() {
     setShowNewChat(false);
     if (!room || !room.id) {
       // Add-people mode — just refresh
-      api.listChatRooms(undefined, wsId).then(setRooms).catch(() => {});
+      api.listChatRooms(undefined, accountId).then(setRooms).catch(() => {});
       return;
     }
     // Immediately add the room to the list and select it (avoids race condition).
@@ -694,7 +694,7 @@ export default function ChatPage() {
     });
     selectRoom(room.id);
     // Refresh in background to get full data (unread_count, etc.)
-    api.listChatRooms(undefined, wsId).then(setRooms).catch(() => {});
+    api.listChatRooms(undefined, accountId).then(setRooms).catch(() => {});
   }
 
   const activeRoom = useMemo(
@@ -702,7 +702,6 @@ export default function ChatPage() {
     [rooms, activeRoomId],
   );
 
-  const accountId = wsId || '';
   useEffect(() => {
     if (!accountId) return;
     let cancelled = false;

@@ -6,8 +6,8 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { ActivityService } from '../../services/activity.service';
 
-// Phase 3 D-46 — workspace-wide recent activity feed for the dashboard.
-// Single-workspace assumption per REQUIREMENTS.md §Out of Scope — no per-workspace
+// Phase 3 D-46 — account-wide recent activity feed for the dashboard.
+// Single-account assumption per REQUIREMENTS.md §Out of Scope — no per-account
 // scoping on getRecentActivity. Multi-tenant scoping is deferred.
 @ApiBearerAuth('user-session')
 @ApiTags('activity')

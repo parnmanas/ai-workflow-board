@@ -45,17 +45,17 @@ export function registerDeploymentTools(server: McpServer, ctx: ToolContext) {
   server.tool(
     'report_deployment',
     'Tell AWB that an ENVIRONMENT is now live on a specific commit — the "merged ≠ deployed" fix ' +
-    '(ticket 8ce72b18). Upserts one record per (workspace, environment): the CURRENT live commit. ' +
+    '(ticket 8ce72b18). Upserts one record per (account, environment): the CURRENT live commit. ' +
     'Call this from your deploy webhook / CI finish step. It un-gates any QA rerun that is WAITING ' +
     'for this environment to deploy the fix: the rerun fires the moment `deployed_commit_sha` (or one ' +
     'of `ancestor_shas`) includes the fix commit — no time guessing. Pass `ancestor_shas` (e.g. ' +
     '`git rev-list --max-count=200 HEAD`) so the "does this deploy include the fix" ancestor check ' +
     'works without AWB holding a clone. Omit `account_id` for a GLOBAL/shared environment (e.g. the ' +
-    'AWB server itself); set it to scope the environment to one workspace.',
+    'AWB server itself); set it to scope the environment to one account.',
     {
       environment: z.string().describe('Environment name, e.g. "production", "staging", "awb-server". This is what a QA scenario points at via target_environment.'),
       deployed_commit_sha: z.string().describe('The commit SHA now LIVE in this environment (git rev-parse HEAD of what was deployed).'),
-      account_id: z.string().optional().describe('Scope to one workspace. Omit for a GLOBAL environment shared across accounts.'),
+      account_id: z.string().optional().describe('Scope to one account. Omit for a GLOBAL environment shared across accounts.'),
       base_url: z.string().optional().describe('Public base URL of the environment (for the UI badge link / poller).'),
       repo_resource_id: z.string().optional().describe('Optional Resource id of the repo this environment deploys (provenance).'),
       ancestor_shas: z.array(z.string()).optional().describe('Recent commit ancestry of deployed_commit_sha (newest→oldest, e.g. `git rev-list --max-count=200 HEAD`). Enables the "deploy includes the fix commit" ancestor gate without a server-side clone.'),

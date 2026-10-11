@@ -9,7 +9,7 @@
 // 또 날리는 raw "BEGIN TRANSACTION"이 도중에 throw하고, EntityManager.
 // transaction()의 catch 블록이 그 SHARED runner에 raw ROLLBACK을 날리면서
 // 실제로는 더 진행돼 있던 쪽의 트랜잭션까지 조용히 중단시켜 버린다. 이는 아래
-// 첫 번째 테스트("raw workspace count")로 직접 증명된다: 겹치는 두 미적용
+// 첫 번째 테스트("raw account count")로 직접 증명된다: 겹치는 두 미적용
 // (unpatched) 트랜잭션이 총 4개 행을 쓰려 시도했을 때 2개만 살아남는다.
 //
 // 이 스위트가 증명하는 것:

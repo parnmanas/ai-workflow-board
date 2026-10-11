@@ -48,15 +48,15 @@ const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities
 const { OntologyEdge } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyEdge.js'));
 
 const GRAPH_ID = 'callpath-graph';
-const WORKSPACE_ID = 'callpath-ws';
+const ACCOUNT_ID = 'callpath-ws';
 
 let nodeRepo, edgeRepo;
 
 function node(id) {
-  return { id, account_id: WORKSPACE_ID, graph_id: GRAPH_ID, symbol_id: `sym:${id}`, type: 'Callable', layer: 'structural', name: id, confidence: 1, status: 'active' };
+  return { id, account_id: ACCOUNT_ID, graph_id: GRAPH_ID, symbol_id: `sym:${id}`, type: 'Callable', layer: 'structural', name: id, confidence: 1, status: 'active' };
 }
 function edge(id, srcId, dstId, confidence, overrides = {}) {
-  return { id, account_id: WORKSPACE_ID, graph_id: GRAPH_ID, src_id: srcId, dst_id: dstId, type: 'CALLS', layer: 'structural', confidence, status: 'active', ...overrides };
+  return { id, account_id: ACCOUNT_ID, graph_id: GRAPH_ID, src_id: srcId, dst_id: dstId, type: 'CALLS', layer: 'structural', confidence, status: 'active', ...overrides };
 }
 
 // 대량(수만 건) edge를 빠르게 심기 위한 원시 다중-row INSERT — TypeORM의
@@ -154,7 +154,7 @@ before(async () => {
   const dummyEdges = [];
   for (let i = 0; i < DUMMY_HUB_OUT_DEGREE; i++) {
     dummyEdges.push({
-      id: `hc-e${i}`, account_id: WORKSPACE_ID, graph_id: GRAPH_ID,
+      id: `hc-e${i}`, account_id: ACCOUNT_ID, graph_id: GRAPH_ID,
       src_id: 'QP1', dst_id: `hc-leaf${i}`, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active',
     });
   }
@@ -173,10 +173,10 @@ before(async () => {
   //    증명한다 — path_confidence로 어느 쪽이 골렸는지 뚜렷이 구분된다.
   await nodeRepo.insert([node('RS'), node('RH'), node('RY'), node('RT')]);
   await edgeRepo.insert([edge('e-rs-rh', 'RS', 'RH', 0.99), edge('e-ry-rt', 'RY', 'RT', 0.99)]);
-  const parallelEdges = [{ id: 'rh-ry-best', account_id: WORKSPACE_ID, graph_id: GRAPH_ID, src_id: 'RH', dst_id: 'RY', type: 'CALLS', layer: 'structural', confidence: 0.95, status: 'active' }];
+  const parallelEdges = [{ id: 'rh-ry-best', account_id: ACCOUNT_ID, graph_id: GRAPH_ID, src_id: 'RH', dst_id: 'RY', type: 'CALLS', layer: 'structural', confidence: 0.95, status: 'active' }];
   const PARALLEL_EDGE_COUNT = MAX_CALL_PATH_VISITED + 10_000;
   for (let i = 0; i < PARALLEL_EDGE_COUNT; i++) {
-    parallelEdges.push({ id: `rh-ry-dup${i}`, account_id: WORKSPACE_ID, graph_id: GRAPH_ID, src_id: 'RH', dst_id: 'RY', type: 'CALLS', layer: 'structural', confidence: 0.76, status: 'active' });
+    parallelEdges.push({ id: `rh-ry-dup${i}`, account_id: ACCOUNT_ID, graph_id: GRAPH_ID, src_id: 'RH', dst_id: 'RY', type: 'CALLS', layer: 'structural', confidence: 0.76, status: 'active' });
   }
   await bulkInsertEdgesRaw(parallelEdges);
 });

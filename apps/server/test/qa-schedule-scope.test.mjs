@@ -2,7 +2,7 @@
 // column it left behind) is gone with the board-less ticket model
 // (docs/tickets.md); qa-schedule-behavior.test.mjs covers the tick and dispatch
 // with stubs, so this file checks the Account boundary against a real
-// DataSource: (1) create() refuses a schedule without a workspace, (2) list()
+// DataSource: (1) create() refuses a schedule without a account, (2) list()
 // and get() never cross into another Account.
 
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { QaScheduleService } from '../dist/modules/qa/qa-schedule.service.js';
 const noopLog = { info() {}, warn() {}, error() {} };
 const noQuiesce = { isQuiesced: async () => false };
 
-describe('QA Schedule workspace scope', () => {
+describe('QA Schedule account scope', () => {
   let dataSource;
   let service;
 
@@ -35,7 +35,7 @@ describe('QA Schedule workspace scope', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a QA schedule without a workspace', async () => {
+  it('rejects creating a QA schedule without a account', async () => {
     await assert.rejects(
       service.create({ name: 'Unscoped schedule', intervalMs: 60_000 }),
       /account_id is required/,
@@ -43,15 +43,15 @@ describe('QA Schedule workspace scope', () => {
   });
 
   it('list() and get() stay inside the requested Account', async () => {
-    const mine = await service.create({ accountId: 'workspace-a', name: 'Account A schedule', intervalMs: 60_000 });
-    const theirs = await service.create({ accountId: 'workspace-b', name: 'Account B schedule', intervalMs: 60_000 });
+    const mine = await service.create({ accountId: 'account-a', name: 'Account A schedule', intervalMs: 60_000 });
+    const theirs = await service.create({ accountId: 'account-b', name: 'Account B schedule', intervalMs: 60_000 });
 
-    const rows = await service.list('workspace-a');
+    const rows = await service.list('account-a');
     assert.ok(rows.some(row => row.id === mine.id));
     assert.equal(rows.some(row => row.id === theirs.id), false, 'another Account schedule never leaks in');
-    assert.ok(rows.every(row => row.account_id === 'workspace-a'));
+    assert.ok(rows.every(row => row.account_id === 'account-a'));
 
-    assert.equal((await service.get(mine.id, 'workspace-a')).id, mine.id);
-    await assert.rejects(service.get(theirs.id, 'workspace-a'), /not found in workspace/);
+    assert.equal((await service.get(mine.id, 'account-a')).id, mine.id);
+    await assert.rejects(service.get(theirs.id, 'account-a'), /not found in account/);
   });
 });

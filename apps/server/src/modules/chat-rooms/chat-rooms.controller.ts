@@ -43,16 +43,16 @@ export class ChatRoomsController {
   @Get()
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
   async listRooms(@Req() req: Request, @Res() res: Response, @Query('scope') scope?: string) {
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
     if (scope === 'account') {
-      // Observer view: every active room in this workspace, including ones
+      // Observer view: every active room in this account, including ones
       // the caller is not a participant in (e.g., agent-to-agent DMs).
-      const rooms = await this.crud.listAllWorkspaceRooms(wsId);
+      const rooms = await this.crud.listAllAccountRooms(accountId);
       return res.json(rooms);
     }
     const user = (req as any).currentUser;
-    const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+    const ids: string[] = (req as any).accessibleAccountIds || [accountId];
     const rooms = (await Promise.all(ids.map(id => this.crud.listRooms(id, user.id)))).flat();
     return res.json(rooms.sort((a, b) => new Date(b.last_message_at || b.created_at).getTime() - new Date(a.last_message_at || a.created_at).getTime()));
   }
@@ -61,14 +61,14 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async createRoom(@Req() req: Request, @Res() res: Response, @Body() body: any) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
     const { participants, name } = body;
     if (!participants || !Array.isArray(participants)) {
       return res.status(400).json({ error: 'participants array required' });
     }
     try {
-      const result = await this.crud.createRoom(wsId, { type: 'user', id: user.id }, participants, name);
+      const result = await this.crud.createRoom(accountId, { type: 'user', id: user.id }, participants, name);
       return res.status(201).json(result);
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
@@ -81,14 +81,14 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
   async unreadCounts(@Req() req: Request, @Res() res: Response) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
     // Reuse listRooms — it already computes per-room unread counts via the
     // same datetime-comparison query the chat page uses. Sidebar badge
     // doesn't need room metadata (name, last message, dm partner), so we
     // project just { total, perRoom } here. Sum is trivial client-side too
     // but returning it explicitly avoids a client-side reduce loop.
-    const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+    const ids: string[] = (req as any).accessibleAccountIds || [accountId];
     const rooms = (await Promise.all(ids.map(id => this.crud.listRooms(id, user.id)))).flat();
     const perRoom: Record<string, number> = {};
     let total = 0;
@@ -104,19 +104,19 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
   async searchMessages(
     @Query('q') q: string,
-    @Query('account_id') wsId: string,
+    @Query('account_id') accountId: string,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     if (!q || q.length < 2) {
       return res.status(400).json({ error: 'Query must be at least 2 characters' });
     }
-    if (!wsId) {
+    if (!accountId) {
       return res.status(400).json({ error: 'account_id is required' });
     }
     try {
       const user = (req as any).currentUser;
-      const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+      const ids: string[] = (req as any).accessibleAccountIds || [accountId];
       const results = (await Promise.all(ids.map(id => this.messaging.searchMessages(id, user.id, q)))).flat();
       return res.json(results);
     } catch (err: any) {
@@ -147,17 +147,17 @@ export class ChatRoomsController {
   // between pushes needs this to show "currently active" state immediately
   // instead of waiting for the next progress recheck or session exit
   // (ticket e18be8ff review round 1, P1 #2). requireRoomAccess enforces the
-  // same participant/observer + workspace boundary as getRoom before serving
+  // same participant/observer + account boundary as getRoom before serving
   // the in-memory store, which is keyed only by roomId and otherwise has no
   // notion of who's allowed to read it (review round 2, P1 #1).
   @Get(':roomId/session-status')
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
   async getSessionStatus(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
+    const accountId = req.headers['x-account-id'] as string;
     try {
       const observe = req.query.observer === 'true';
-      await this.membership.requireRoomAccess(roomId, wsId, user.id, { observer: observe });
+      await this.membership.requireRoomAccess(roomId, accountId, user.id, { observer: observe });
       return res.json(getChatRoomSessionStatus(roomId));
     } catch (err: any) {
       return res.status(err.status || 500).json({ error: err.message });
@@ -172,12 +172,12 @@ export class ChatRoomsController {
     const before = req.query.before as string | undefined;
     const observer = req.query.observer === 'true';
     // accountId 를 넘기면 서비스가 자유 참여 방(티켓 995a9519)의 읽기를 허용한다 —
-    // 그 완화는 방이 이 워크스페이스 소속일 때만 성립하므로 경계를 함께 넘겨야 한다.
-    const wsId = req.headers['x-account-id'] as string;
+    // 그 완화는 방이 이 계정 소속일 때만 성립하므로 경계를 함께 넘겨야 한다.
+    const accountId = req.headers['x-account-id'] as string;
     try {
       const messages = await this.messaging.getMessages(roomId, user.id, limit, before, {
         observer,
-        accountId: wsId,
+        accountId: accountId,
       });
       return res.json(messages);
     } catch (err: any) {
@@ -189,7 +189,7 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async sendMessage(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
+    const accountId = req.headers['x-account-id'] as string;
     const { content } = body;
     const attachmentIds = Array.isArray(body.attachment_ids) ? body.attachment_ids : [];
     // Attachment-only messages (screenshot / file share without a caption) are
@@ -225,7 +225,7 @@ export class ChatRoomsController {
     try {
       const msg = await this.messaging.sendMessage(
         roomId,
-        wsId,
+        accountId,
         'user',
         user.id,
         user.name || user.email,
@@ -243,8 +243,8 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async addAttachment(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
 
     const incoming: any[] = Array.isArray(body?.attachments)
       ? body.attachments
@@ -279,7 +279,7 @@ export class ChatRoomsController {
           owner_id: roomId,
           ticket_id: null,
           room_id: roomId,
-          account_id: wsId,
+          account_id: accountId,
           file_name: f.file_name,
           file_mimetype: verifiedMime,
           file_data: f.file_data,
@@ -310,7 +310,7 @@ export class ChatRoomsController {
       await this.membership.requireActiveParticipant(roomId, user.id, 'user');
       // Accept both pre-send (owner_type='chat_room') and post-send
       // (owner_type='chat_message') rows: the room_id anchor enforces
-      // workspace + room scope either way, so the uploader can preview
+      // account + room scope either way, so the uploader can preview
       // before send and any room participant can download after send.
       const row = await this.attachmentRepo.findOne({
         where: { id: attachmentId, room_id: roomId },
@@ -371,8 +371,8 @@ export class ChatRoomsController {
     }
   }
 
-  // rename 도 `setOpenJoin` 과 같은 이유로 워크스페이스를 함께 넘긴다(티켓 de4d27e9).
-  // 방의 active 참여자인지만 보면, 지난/다른 워크스페이스 방의 참여자 행을 들고 있는
+  // rename 도 `setOpenJoin` 과 같은 이유로 계정를 함께 넘긴다(티켓 de4d27e9).
+  // 방의 active 참여자인지만 보면, 지난/다른 계정 방의 참여자 행을 들고 있는
   // 호출자가 지금 보고 있는 스코프 밖의 방 이름을 바꿀 수 있다. 대조는 서비스가 하고,
   // 불일치는 없는 방과 **같은 404** 로 돌려준다. 클라이언트는 `getAuthHeaders()` 가
   // 이미 이 헤더를 싣는다.
@@ -380,21 +380,21 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async renameRoom(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
     const { name } = body;
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ error: 'name required' });
     }
     try {
-      await this.crud.renameRoom(roomId, wsId, user.id, name);
+      await this.crud.renameRoom(roomId, accountId, user.id, name);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
     }
   }
 
-  // 자유 참여(open join) 토글 — 티켓 995a9519. 켜면 같은 워크스페이스의 모든 유저에게
+  // 자유 참여(open join) 토글 — 티켓 995a9519. 켜면 같은 계정의 모든 유저에게
   // 방이 보이고, 참여자가 아니어도 첫 발언 시점에 auto-join 되어 대화에 낄 수 있다.
   // 권한 범위(방의 active participant 누구나)와 DM·시스템 소유 방 거부의 근거는
   // RoomCrudService.setOpenJoin 주석에 있다. rename 과 같은 CHAT_SEND 를 요구한다 —
@@ -403,13 +403,13 @@ export class ChatRoomsController {
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async setOpenJoin(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
     if (typeof body?.open_join !== 'boolean') {
       return res.status(400).json({ error: 'open_join must be a boolean' });
     }
     try {
-      const result = await this.crud.setOpenJoin(roomId, wsId, user.id, body.open_join);
+      const result = await this.crud.setOpenJoin(roomId, accountId, user.id, body.open_join);
       return res.json({ ok: true, ...result });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
@@ -417,21 +417,21 @@ export class ChatRoomsController {
   }
 
   // 초대는 DM 을 group 으로 승격시킬 수 있다(티켓 70e62a9d). `setOpenJoin` 과 같은
-  // 이유로 워크스페이스를 함께 넘긴다 — 방의 active 참여자인지만 보면, 다른/지난
-  // 워크스페이스 방의 참여자 행을 들고 있는 호출자가 지금 보고 있는 스코프 밖의 방을
+  // 이유로 계정를 함께 넘긴다 — 방의 active 참여자인지만 보면, 다른/지난
+  // 계정 방의 참여자 행을 들고 있는 호출자가 지금 보고 있는 스코프 밖의 방을
   // 바꿀 수 있다. 대조는 서비스가 하고 불일치는 404 다.
   @Post(':roomId/participants')
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async addParticipants(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
-    const wsId = req.headers['x-account-id'] as string;
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
     const { participants } = body;
     if (!participants || !Array.isArray(participants)) {
       return res.status(400).json({ error: 'participants array required' });
     }
     try {
-      await this.membership.addParticipants(roomId, wsId, user.id, participants);
+      await this.membership.addParticipants(roomId, accountId, user.id, participants);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });

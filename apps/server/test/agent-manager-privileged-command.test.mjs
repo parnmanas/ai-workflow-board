@@ -36,13 +36,13 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
   });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'privileged');
+  const account = await createAccount(app, getDataSourceToken, 'privileged');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'privileged-manager',
     type: 'manager',
   });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'privileged-manager-key',
   });
   const stranger = await createAgent(app, getDataSourceToken, null, {
@@ -50,7 +50,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
     type: 'manager',
   });
   const strangerKey = await createApiKey(app, getDataSourceToken, stranger.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'privileged-stranger-key',
   });
   const admin = await createUser(app, getDataSourceToken, { name: 'privileged-admin', role: 'admin' });
@@ -85,7 +85,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
   const svc = app.get(PrivilegedCommandService);
   const newRequest = (over = {}) => {
     const created = svc.create({
-      account_id: workspace.id,
+      account_id: account.id,
       agent_id: 'agent-asking',
       agent_name: 'Runner/Worker',
       instance_id: INSTANCE_ID,
@@ -190,7 +190,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
   newRequest();
   newRequest();
   const overflow = svc.create({
-    account_id: workspace.id,
+    account_id: account.id,
     agent_id: 'agent-asking',
     agent_name: 'Runner/Worker',
     instance_id: INSTANCE_ID,

@@ -8,7 +8,7 @@ export class AgentAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
 
-    // Dev mode: skip validation entirely, no workspace scoping.
+    // Dev mode: skip validation entirely, no account scoping.
     // HARD-gated behind NODE_ENV !== 'production' — a stray AGENT_DEV_MODE flag
     // on a prod deploy must never open every /api/agent/* endpoint
     // unauthenticated (security finding: authz).
@@ -32,7 +32,7 @@ export class AgentAuthGuard implements CanActivate {
       if (dbResult.valid && dbResult.apiKey) {
         const apiKey = dbResult.apiKey;
         // Paired Hosts supervise executions across accounts; ordinary keys
-        // retain their workspace scope.
+        // retain their account scope.
         const runtimeKey = apiKey.host_id ? /^runtime:.*:(rt-[0-9a-f]{16})$/.exec(apiKey.name || '')?.[1] : undefined;
         const isManagerKey = !!apiKey.host_id && !runtimeKey;
         // Inject account_id from the API key record for account-scoped queries
@@ -50,7 +50,7 @@ export class AgentAuthGuard implements CanActivate {
       // Fall through to ENV key check
     }
 
-    // Fall back to static ENV key — no workspace scoping (dev/legacy usage)
+    // Fall back to static ENV key — no account scoping (dev/legacy usage)
     const envKey = process.env.AGENT_API_KEY;
     if (envKey && providedKey === envKey) {
       request.currentAccountId = null;

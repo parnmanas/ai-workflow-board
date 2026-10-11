@@ -35,11 +35,11 @@ import { z } from 'zod';
  *
  * A fourth, independent ceiling shares this schema but is NOT ticket-scoped:
  *   (d) max_runs_per_window — rolling-window cap on new QaRun/ActionRun/
- *       OrchestrationMission creations, scoped to the WORKSPACE rather than a
+ *       OrchestrationMission creations, scoped to the ACCOUNT rather than a
  *       ticket (common/run-budget-guard.ts, ticket a51ec6d9). Those three
  *       entities are not Tickets — no ticket_id/board_id to key a per-ticket
  *       ceiling off of — so (d) is resolved via `resolveHardBudget` below
- *       (workspace config only, no board layer) instead of
+ *       (account config only, no board layer) instead of
  *       `resolveHardBudgetForTicket`. It shares `window_minutes` with (c) for
  *       the same reason (b) does: one rolling window is simpler than several.
  *
@@ -66,11 +66,11 @@ export const HardBudgetConfigSchema = z
     max_dispatches_per_window: z.number().int().positive().max(1000).optional(),
     /** (b) Summed input+output tokens inside the SAME window (window_minutes above) that trips the breaker. */
     max_tokens_per_window: z.number().int().positive().max(100_000_000).optional(),
-    /** (d) New QaRun/ActionRun/OrchestrationMission creations inside the SAME window (window_minutes above), counted per-workspace and independently per run type. */
+    /** (d) New QaRun/ActionRun/OrchestrationMission creations inside the SAME window (window_minutes above), counted per-account and independently per run type. */
     max_runs_per_window: z.number().int().positive().max(1000).optional(),
     /** On breach: auto-pend the ticket (surfaces on the User tab, drops future triggers). */
     auto_pend: z.boolean().optional(),
-    /** On breach: post a chat-room alert to the workspace. */
+    /** On breach: post a chat-room alert to the account. */
     notify: z.boolean().optional(),
   })
   .strict();
@@ -79,11 +79,11 @@ export type HardBudgetConfig = z.infer<typeof HardBudgetConfigSchema>;
 
 /**
  * HardBudgetConfigSchema의 board-scope 서브셋 (티켓 73b92d23). max_runs_per_window를
- * 제외한다 — 이 필드는 워크스페이스 전용(위 (d) 참고)이라 board의
+ * 제외한다 — 이 필드는 계정 전용(위 (d) 참고)이라 board의
  * `hard_budget_config`가 실제로 흘러가는 유일한 소비처인
  * `resolveHardBudgetForTicket`(hard-budget-guard.ts)는 resolved 객체의
  * `.maxRunsPerWindow`를 전혀 읽지 않는다. 이 필드를 읽는 건
- * `resolveHardBudgetForWorkspace`(run-budget-guard.ts)뿐이고, 그 경로엔
+ * `resolveHardBudgetForAccount`(run-budget-guard.ts)뿐이고, 그 경로엔
  * board 레이어가 없다. 이 스키마가 생기기 전에는 board에 max_runs_per_window를
  * 설정하면 validation은 통과하고 저장까지 되지만 어떤 가드도 소비하지
  * 않는 조용한 accepted-but-inert no-op이었다. 부모의 `.strict()` 스키마에
@@ -119,18 +119,18 @@ export interface ResolvedHardBudget {
 
 /**
  * Built-in defaults — conservative on purpose (see file header).
- * maxRunsPerWindow is workspace-wide (aggregated across every ticket/
+ * maxRunsPerWindow is account-wide (aggregated across every ticket/
  * scenario/action/team in scope), unlike maxDispatchesPerWindow which is
  * PER TICKET — so despite a run being a much heavier unit of work than a
- * single dispatch, the workspace-wide default still needs headroom above a
+ * single dispatch, the account-wide default still needs headroom above a
  * single ticket's dispatch cap to clear ordinary aggregate load (a QA batch
  * across many scenarios, an Action's bounded retries across several source
  * tickets, etc. — empirically, the existing action-run-resume-mcp.test.mjs
  * integration test alone drives more than 10 Action dispatches, including
- * retries, inside one shared test workspace). 50/hour stays a meaningful
+ * retries, inside one shared test account). 50/hour stays a meaningful
  * emergency brake against an actual runaway create loop (which fires far
  * more densely than any legitimate batch) while not tripping on normal
- * aggregate usage; operators can tune it tighter or looser per workspace.
+ * aggregate usage; operators can tune it tighter or looser per account.
  */
 export const DEFAULT_HARD_BUDGET: ResolvedHardBudget = {
   enabled: true,
@@ -217,33 +217,33 @@ export function resolveHardBudgetConfig(
 }
 
 /**
- * Key-level merge of the workspace default with the board override — the
+ * Key-level merge of the account default with the board override — the
  * `hard_budget_config` analogue of `resolveHarnessConfig`
  * (common/harness-config.ts). The board wins per key it explicitly sets;
- * unset keys inherit from the workspace; both unset inherit `base` (the
+ * unset keys inherit from the account; both unset inherit `base` (the
  * env-folded baseline) verbatim.
  *
  * Implemented as two chained `resolveHardBudgetConfig` folds rather than a
  * from-scratch key loop: `resolveHardBudgetConfig(raw, base)` already IS a
  * one-level "override folds onto a fully-resolved base" operation, so
- * folding the workspace onto `base` first and then the board onto THAT
- * result produces exactly the same board > workspace > base precedence
+ * folding the account onto `base` first and then the board onto THAT
+ * result produces exactly the same board > account > base precedence
  * `resolveHarnessConfig` computes explicitly.
  *
  * Callers insert this as a layer INTO the existing board→env chain
  * (`resolveHardBudgetForTicket`, common/hard-budget-guard.ts) or use it
- * workspace-only for the run-creation-rate ceiling, which has no board layer
- * (`resolveHardBudgetForWorkspace`, common/run-budget-guard.ts — see (d)
+ * account-only for the run-creation-rate ceiling, which has no board layer
+ * (`resolveHardBudgetForAccount`, common/run-budget-guard.ts — see (d)
  * above / docs/catalog-scopes.md for why QaRun/ActionRun/OrchestrationMission
  * are not board-scoped).
  */
 export function resolveHardBudget(
-  workspaceRaw: string | null | undefined,
+  accountRaw: string | null | undefined,
   boardRaw: string | null | undefined,
   base: ResolvedHardBudget = DEFAULT_HARD_BUDGET,
 ): ResolvedHardBudget {
-  const workspaceResolved = resolveHardBudgetConfig(workspaceRaw, base);
-  return resolveHardBudgetConfig(boardRaw, workspaceResolved);
+  const accountResolved = resolveHardBudgetConfig(accountRaw, base);
+  return resolveHardBudgetConfig(boardRaw, accountResolved);
 }
 
 /**
@@ -269,7 +269,7 @@ export function validateHardBudgetConfigInput(
  * BOARD-scope hard_budget_config(update_board MCP 인자 / boards.controller.ts의
  * PATCH body)의 write-path 입력을 검증한다 — validateHardBudgetConfigInput과
  * 계약은 같지만 BoardHardBudgetConfigSchema를 거치므로 max_runs_per_window
- * (워크스페이스 전용, 티켓 73b92d23)는 조용히 validation을 통과해 no-op으로
+ * (계정 전용, 티켓 73b92d23)는 조용히 validation을 통과해 no-op으로
  * 저장되는 대신 400으로 거부된다.
  */
 export function validateBoardHardBudgetConfigInput(

@@ -1,6 +1,6 @@
 // 그래프 하나(graph_id)의 노드/DECLARES 엣지를 메모리로 읽어 리졸버가 쓸
 // 조회 인덱스로 만든다(ticket e52e7f64, DESIGN.md 축 1 "Tier 1.5는
-// separate, whole-workspace pass"). persist.ts(ticket e14ef1c9)가 File
+// separate, whole-account pass"). persist.ts(ticket e14ef1c9)가 File
 // 노드 props에 남겨둔 refs[]/imports[]/exports[]/heritage[]를 재파싱 없이
 // 그대로 읽어들인다 — persist.ts 자신의 헤더 코멘트가 명시한 계약.
 import type { DataSource, EntityManager } from 'typeorm';
@@ -37,7 +37,7 @@ export interface DefNodeInfo {
   endLine: number | null;
 }
 
-/** 그래프 하나의 whole-workspace 심볼 인덱스 — 파일 경로/이름/한정이름/
+/** 그래프 하나의 whole-account 심볼 인덱스 — 파일 경로/이름/한정이름/
  *  BK-tree 조회를 위한 자료구조를 한 번의 DB 스캔으로 구성한다. */
 export class GraphSymbolIndex {
   readonly filesByPath = new Map<string, FileNodeInfo>();

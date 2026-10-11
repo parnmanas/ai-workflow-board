@@ -1,4 +1,4 @@
-// Per-workspace supervisor cadence / liveness diagnostic (ticket 1fcba693).
+// Per-account supervisor cadence / liveness diagnostic (ticket 1fcba693).
 //
 // The staleMsElevated gauge only counts HOW MANY accounts are mis-set. This
 // endpoint answers WHICH one and by how much: configured vs default vs effective
@@ -19,7 +19,7 @@ const TICK = 60_000;
 const FLOOR = 120_000; // 2 min liveness floor
 const TTL = 900_000; // 15 min current_task TTL
 
-test('supervisor-cadence diagnostic: exposes per-workspace configured/default/effective + elevated + recovery thresholds/bounds', async (t) => {
+test('supervisor-cadence diagnostic: exposes per-account configured/default/effective + elevated + recovery thresholds/bounds', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
@@ -29,7 +29,7 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   // stale window SMALLER than the current_task TTL — the case the old
   // Math.min(stale, TTL) leaked-bound under-reported (reviewer blocker).
   const wsShort = await createAccount(app, modules.getDataSourceToken, { name: 'cadence-short' });
-  // Reproduce the incident band-aid on one workspace.
+  // Reproduce the incident band-aid on one account.
   await ds.getRepository('Account').update(wsIncident.id, { supervisor_stale_ms: FOUR_H });
   await ds.getRepository('Account').update(wsShort.id, { supervisor_stale_ms: FIVE_MIN });
 
@@ -56,14 +56,14 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
 
   const byId = Object.fromEntries(body.accounts.map((w) => [w.account_id, w]));
 
-  // Incident workspace: the 4 h value is visible, flagged, with its provenance.
+  // Incident account: the 4 h value is visible, flagged, with its provenance.
   const inc = byId[wsIncident.id];
-  assert.ok(inc, 'incident workspace present in the diagnostic');
+  assert.ok(inc, 'incident account present in the diagnostic');
   assert.equal(inc.supervisor_stale_ms.configured, FOUR_H, 'configured value surfaced');
   assert.equal(inc.supervisor_stale_ms.effective, FOUR_H, 'effective = the value the tick uses');
   assert.equal(inc.supervisor_stale_ms.is_default, false, 'NOT the default (a custom/incident value)');
   assert.equal(inc.elevated, true, 'flagged elevated (far above the sane-max)');
-  assert.equal(inc.supervisor_tick_ms, TICK, 'tick echoed per workspace');
+  assert.equal(inc.supervisor_tick_ms, TICK, 'tick echoed per account');
   // Detection thresholds (tick-exclusive), split by death-mode (reviewer AC):
   // a single "absent" number conflated two very different guarantees.
   assert.equal(inc.recovery_thresholds_ms.registry_absent, FLOOR, 'registry-absent threshold = the 2 min floor, not 4 h');
@@ -84,12 +84,12 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   assert.equal(inc.recovery_bounds_ms.leaked_with_output, FOUR_H + TICK, 'leaked_with_output bound = 4 h + one tick');
   assert.equal(inc.recovery_bounds_ms.present_strand, FOUR_H + TICK, 'present-strand bound = 4 h window + one tick');
 
-  // Default workspace: effective = default, not elevated.
+  // Default account: effective = default, not elevated.
   const def = byId[wsDefault.id];
-  assert.ok(def, 'default workspace present');
+  assert.ok(def, 'default account present');
   assert.equal(def.supervisor_stale_ms.effective, 1_800_000);
   assert.equal(def.supervisor_stale_ms.is_default, true, 'default value flagged as default');
-  assert.equal(def.elevated, false, 'a default-cadence workspace is never elevated');
+  assert.equal(def.elevated, false, 'a default-cadence account is never elevated');
   assert.equal(def.recovery_thresholds_ms.registry_absent, FLOOR, 'registry-absent threshold is the floor under a 30 min window too');
   assert.equal(def.recovery_thresholds_ms.leaked_current_task, TTL, 'leaked threshold = the 15 min TTL (TTL < the 30 min stale window)');
   // A leaked-with-output seat under the 30 min window recovers off the output
@@ -104,7 +104,7 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   // 5 min — the honest number is the 15 min TTL, independent of the small stale
   // window. This case is what makes the min() bug observable.
   const short = byId[wsShort.id];
-  assert.ok(short, 'short-stale workspace present');
+  assert.ok(short, 'short-stale account present');
   assert.equal(short.supervisor_stale_ms.effective, FIVE_MIN, 'effective = the 5 min value');
   assert.equal(short.recovery_thresholds_ms.registry_absent, FLOOR, 'registry-absent threshold = floor (floor < 5 min stale, so floor wins)');
   assert.equal(
@@ -127,5 +127,5 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   assert.equal(short.recovery_bounds_ms.leaked_with_output, TTL + TICK, 'leaked_with_output bound = 15 min TTL + one tick');
   assert.equal(short.recovery_bounds_ms.present_strand, FIVE_MIN + TICK, 'present-strand bound = 5 min + one tick');
 
-  assert.equal(body.elevated_count >= 1, true, 'at least the incident workspace is counted elevated');
+  assert.equal(body.elevated_count >= 1, true, 'at least the incident account is counted elevated');
 });

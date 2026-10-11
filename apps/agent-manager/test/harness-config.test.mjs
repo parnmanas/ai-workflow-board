@@ -1,4 +1,4 @@
-// Harness-config spawn application (ticket e9c7a896) — the board/workspace
+// Harness-config spawn application (ticket e9c7a896) — the board/account
 // harness shipped on agent_trigger must map onto CLI flags without changing
 // any spawn that carries no harness. Covers:
 //   - parseHarnessConfig: defensive event-field parse (object / JSON string /

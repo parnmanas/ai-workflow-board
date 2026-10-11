@@ -14,7 +14,7 @@ import {
 
 // "Where does the auto-filed fix ticket land" — shared by the QA scenario and
 // Security profile editors (docs/tickets.md → QA / Security failure tickets):
-// the ticket joins the workspace pool with a status, tags and an optional
+// the ticket joins the account pool with a status, tags and an optional
 // project.
 
 interface Props {

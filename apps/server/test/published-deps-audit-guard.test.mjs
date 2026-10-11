@@ -120,7 +120,7 @@ test('lockfileVersions 는 node_modules 경로에서 이름→버전을 뽑는�
       'node_modules/@scope/b': { version: '2.0.0' },
       // 중첩 설치 — 마지막 node_modules/ 뒤가 패키지 이름이다.
       'node_modules/a/node_modules/c': { version: '3.0.0' },
-      // 워크스페이스 심링크는 실제 설치본이 아니라 버전 축에서 제외한다.
+      // 계정 심링크는 실제 설치본이 아니라 버전 축에서 제외한다.
       'node_modules/ws': { link: true, resolved: 'apps/ws' },
       'apps/ws': { name: 'ws', version: '9.9.9' },
     },
@@ -280,7 +280,7 @@ test('installScriptPackages 는 해석된 lockfile 에서 install-script 패키�
       'node_modules/esbuild': { version: '0.25.0', hasInstallScript: true },
       'node_modules/zod': { version: '4.3.6' },
       'node_modules/a/node_modules/@scope/nested': { version: '2.0.0', hasInstallScript: true },
-      // link 엔트리는 워크스페이스 심링크라 설치 시 스크립트가 도는 대상이 아니다.
+      // link 엔트리는 계정 심링크라 설치 시 스크립트가 도는 대상이 아니다.
       'node_modules/local': { version: '0.0.0', hasInstallScript: true, link: true },
     },
   });

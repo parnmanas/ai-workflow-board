@@ -11,7 +11,7 @@ const API_PORT = 7701;
 const FIXTURE_FOLDER = 'apps/client/test/fixtures/ontology-smoke-source';
 
 let app;
-let workspace;
+let account;
 let project;
 let token;
 const dbPaths = [
@@ -36,16 +36,16 @@ test.beforeAll(async () => {
     role: 'admin',
     status: 'active',
   });
-  workspace = await dataSource.getRepository('Account').save({
-    name: 'Ontology smoke workspace',
+  account = await dataSource.getRepository('Account').save({
+    name: 'Ontology smoke account',
     description: 'Bounded browser smoke fixture',
   });
   await dataSource.getRepository('RelationTuple').save({
     subject_type: 'user', subject_id: user.id, relation: 'admin',
-    object_type: 'account', object_id: workspace.id,
+    object_type: 'account', object_id: account.id,
   });
   project = await dataSource.getRepository('Project').save({
-    account_id: workspace.id,
+    account_id: account.id,
     name: 'AWB ontology smoke fixture',
     description: 'Two-file repository fixture',
     repo_url: 'https://github.com/parnmanas/ai-workflow-board.git',
@@ -74,7 +74,7 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   await page.addInitScript(({ authToken, accountId }) => {
     localStorage.setItem('auth_token', authToken);
     localStorage.setItem('currentAccountId', accountId);
-  }, { authToken: token, accountId: workspace.id });
+  }, { authToken: token, accountId: account.id });
 
   const statuses = [];
   let snapshotLoads = 0;

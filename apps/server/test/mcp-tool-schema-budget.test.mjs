@@ -1,7 +1,7 @@
 // 티켓 faa32380 — AWB MCP tool schema 크기 감사.
 //
 // 배경: 7d8ea7c9 사고에서 vLLM 백엔드(context_window 65,536)로 첫 채팅
-// 메시지를 보낼 때 system prompt + AWB/agent/board/workspace instructions +
+// 메시지를 보낼 때 system prompt + AWB/agent/board/account instructions +
 // MCP tool schema + session metadata를 합쳐 실측 33,537 input tokens가
 // 됐고, CLI 고정 max_output_tokens(32,000)를 더해 정확히 1 token 초과,
 // HTTP 500이 났다(백엔드 tokenizer가 그 요청에 실제로 청구한 값).

@@ -7,7 +7,7 @@ import { useProjects } from '../../projects/useProjects';
 import { projectFolderHelperView } from '../../projects/projectFolderHelper.logic';
 
 interface ProjectFolderHelperProps {
-  /** Account whose projects are offered. Falls back to the active workspace. */
+  /** Account whose projects are offered. Falls back to the active account. */
   accountId?: string;
   /**
    * The currently selected Runtime Host — one id, or the ids that name the same
@@ -26,7 +26,7 @@ interface ProjectFolderHelperProps {
  * clone folder on the selected host (docs/tickets.md → "Main clone folder per
  * host"). Shared by RuntimeSpecEditor (tickets, a project's default assignee,
  * every DeclareRuntimeSection) and the orchestration team-slot editor, so the
- * rule lives once. Renders nothing while the workspace has no projects.
+ * rule lives once. Renders nothing while the account has no projects.
  */
 export default function ProjectFolderHelper({
   accountId,
@@ -35,8 +35,8 @@ export default function ProjectFolderHelper({
   onPick,
   disabled = false,
 }: ProjectFolderHelperProps) {
-  const wsId = accountId || getActiveAccountId() || '';
-  const { projects } = useProjects(wsId);
+  const resolvedAccountId = accountId || getActiveAccountId() || '';
+  const { projects } = useProjects(resolvedAccountId);
   const view = useMemo(
     () => projectFolderHelperView(projects, hostIds, currentDir),
     [projects, hostIds, currentDir],

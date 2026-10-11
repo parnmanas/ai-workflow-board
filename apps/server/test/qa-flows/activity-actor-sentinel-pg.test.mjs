@@ -126,7 +126,7 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
   };
 
   // A status move by a non-user actor and ticket-archiver(archived, 'system') —
-  // agent-manager 의 worktree/workspace 회수가 이 두 프레임만 보고 돈다.
+  // agent-manager 의 worktree/account 회수가 이 두 프레임만 보고 돈다.
   for (const [actorId, action] of [['auto-advance', 'moved'], ['system', 'archived']]) {
     const mapped = await def.map({
       ticket_id: '44444444-4444-4444-8444-444444444444',

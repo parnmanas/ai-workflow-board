@@ -13,14 +13,14 @@ Scope는 생성 후 변경하지 않는다. 다른 scope가 필요하면 새 정
 
 ## Board 계층은 없다
 
-예전에는 Board 가 세 번째 scope 계층(Global < Workspace < Board)이었다. 커밋
-`65adf0b` 가 카탈로그 아이템의 Board scope 를 Workspace 로 승격했고, 보드 자체가
+예전에는 Board 가 세 번째 scope 계층(Global < Account < Board)이었다. 커밋
+`65adf0b` 가 카탈로그 아이템의 Board scope 를 Account 로 승격했고, 보드 자체가
 제거되면서(`docs/tickets.md`) 남아 있던 `board_id` 호환 컬럼도 엔티티에서 사라졌다.
 
 - `CatalogScoped`(`apps/server/src/common/catalog-scope.ts`)는 `account_id`
   하나뿐이다.
 - `normalizeCatalogScope()` 는 `global` / `account` 외의 `scope`(예전
-  `'board'` 포함)를 400 으로 거부한다. 구 `workspace` 값은 전송 경계에서 `account`로 읽는다.
+  `'board'` 포함)를 400 으로 거부한다. 구 `account` 값은 전송 경계에서 `account`로 읽는다.
 - `canUseCatalogItem(row, accountId)` 는 Global 행과 그 Account 행만 허용한다.
 - 실행 기록에도 Board 컨텍스트가 없다 — `WorkflowFunctionRun`, `QaRun(Batch)`,
   `SecurityRun(Batch)`, `ActionRun` 어디에도 `board_id` 가 없다.
@@ -45,11 +45,11 @@ global skill은 "없었다"가 아니라 **표현 자체가 불가능**했다. �
 하고, 다른 카탈로그 타입과 다른 점이 하나 있다:
 
 - Global 유일성은 데코레이터의 복합 unique index가 아니라 **partial unique
-  index** 두 개(`uq_skills_global_slug` / `uq_skills_workspace_slug`)가 보장한다.
+  index** 두 개(`uq_skills_global_slug` / `uq_skills_account_slug`)가 보장한다.
   Postgres에서 `NULL != NULL` 이라 `(account_id, slug)` 복합 index는 global 행을
   전혀 제약하지 못한다 — `workflow_functions`가 쓰는 것과 같은 분리다. 두 부분
   인덱스는 `Skill.ts`의 `@Index(..., { unique: true, where })`로 선언하며
-  PostgreSQL과 SQLite(sql.js) 모두에 적용된다. `workspace`가 들어간 인덱스 이름은
+  PostgreSQL과 SQLite(sql.js) 모두에 적용된다. `account`가 들어간 인덱스 이름은
   기존 DB와의 호환을 위해 유지한 이름이다.
 
 Skill은 slug 기준으로 Account가 Global을 **shadow** 한다(Function의 key와 같은

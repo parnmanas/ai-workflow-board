@@ -416,14 +416,14 @@ test('정렬: 응답이 뒤죽박죽 순서로 와도 판정은 (created_at, id)
 // 이 키가 하나의 CI 장애를 식별한다. board id 가 들어가면 같은 저장소를 감시하는 보드
 // 수만큼 실행 티켓이 열리고 같은 수정이 여러 번 dispatch 된다(이 티켓의 원인).
 
-test('incident 키: 같은 workspace·repo·branch·workflow 면 어느 보드가 만들든 같은 키다 (ticket 3886473a)', () => {
+test('incident 키: 같은 account·repo·branch·workflow 면 어느 보드가 만들든 같은 키다 (ticket 3886473a)', () => {
   const fromBoardA = ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555');
   const fromBoardB = ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555');
   assert.equal(fromBoardA, fromBoardB);
   assert.equal(fromBoardA, 'ci_red:ws-1:acme/widgets:main:555');
 });
 
-test('incident 키: workspace 가 다르면 합쳐지지 않는다 — 티켓·역할·에이전트가 workspace 스코프다', () => {
+test('incident 키: account 가 다르면 합쳐지지 않는다 — 티켓·역할·에이전트가 account 스코프다', () => {
   assert.notEqual(
     ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555'),
     ciIncidentDedupeKey('ws-2', 'acme/widgets', 'main', '555'),

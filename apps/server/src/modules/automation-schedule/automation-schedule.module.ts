@@ -5,8 +5,8 @@ import { Action } from '../../entities/Action';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { WorkspaceScheduleService } from './automation-schedule.service';
-import { WorkspaceScheduleController } from './automation-schedule.controller';
+import { AutomationScheduleService } from './automation-schedule.service';
+import { AutomationScheduleController } from './automation-schedule.controller';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { ActionsModule } from '../actions/actions.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
@@ -30,8 +30,8 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     ActionsModule,
     SharedServicesModule,
   ],
-  controllers: [WorkspaceScheduleController],
-  providers: [WorkspaceScheduleService, AuthGuard, PermissionGuard],
-  exports: [WorkspaceScheduleService],
+  controllers: [AutomationScheduleController],
+  providers: [AutomationScheduleService, AuthGuard, PermissionGuard],
+  exports: [AutomationScheduleService],
 })
-export class WorkspaceScheduleModule {}
+export class AutomationScheduleModule {}

@@ -108,26 +108,26 @@ export default function AccountSelector({
           <div style={{ padding: '8px 12px', fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>
             Accounts
           </div>
-          {accounts.map(ws => (
+          {accounts.map(account => (
             <div
-              key={ws.id}
-              onClick={() => { onSelect(ws.id); setShowDropdown(false); }}
+              key={account.id}
+              onClick={() => { onSelect(account.id); setShowDropdown(false); }}
               style={{
                 padding: '10px 12px',
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
-                background: ws.id === currentAccountId ? tokens.colors.border : 'transparent',
-                borderLeft: ws.id === currentAccountId ? `3px solid ${tokens.colors.accent}` : '3px solid transparent',
+                background: account.id === currentAccountId ? tokens.colors.border : 'transparent',
+                borderLeft: account.id === currentAccountId ? `3px solid ${tokens.colors.accent}` : '3px solid transparent',
               }}
-              onMouseEnter={e => { if (ws.id !== currentAccountId) (e.currentTarget.style.background = `${tokens.colors.surfaceCard}80`); }}
-              onMouseLeave={e => { if (ws.id !== currentAccountId) (e.currentTarget.style.background = 'transparent'); }}
+              onMouseEnter={e => { if (account.id !== currentAccountId) (e.currentTarget.style.background = `${tokens.colors.surfaceCard}80`); }}
+              onMouseLeave={e => { if (account.id !== currentAccountId) (e.currentTarget.style.background = 'transparent'); }}
             >
-              <span style={{ fontSize: '13px', color: tokens.colors.textStrong, fontWeight: 500 }}>{ws.name}</span>
-              {typeof ws.ticket_count === 'number' && (
+              <span style={{ fontSize: '13px', color: tokens.colors.textStrong, fontWeight: 500 }}>{account.name}</span>
+              {typeof account.ticket_count === 'number' && (
                 <span style={{ marginLeft: 'auto', fontSize: '11px', color: tokens.colors.textMuted }}>
-                  {ws.ticket_count} ticket{ws.ticket_count !== 1 ? 's' : ''}
+                  {account.ticket_count} ticket{account.ticket_count !== 1 ? 's' : ''}
                 </span>
               )}
             </div>

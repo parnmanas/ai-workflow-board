@@ -102,7 +102,7 @@ export async function ordinaryWorkCandidatesForChat(
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
  * event (ticket e9c7a896). The server ships the resolved account (older
- * servers: board ⊕ workspace) harness as a JSON object (or omits it — older
+ * servers: board ⊕ account) harness as a JSON object (or omits it — older
  * servers / unconfigured accounts). Accepts an object or a JSON string, keeps only the known keys
  * with the right runtime types, and degrades to null on anything else —
  * a malformed harness must never block the dispatch it rides on.
@@ -717,7 +717,7 @@ export interface SubagentSpawnArgs {
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
   /** Resolved account harness from the trigger event (e9c7a896; older
-   *  servers: board ⊕ workspace). Null/absent → spawn exactly as before. */
+   *  servers: board ⊕ account). Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
   runtimeProfile?: RuntimeProfileSpec | null;
   /** Ticket-level abstract effort preset, resolved server-side and shipped on
@@ -811,7 +811,7 @@ export interface ChatDispatchArgs {
   isActionRoom?: boolean;
   /** ticket 9fd27487: 이번 디스패치가 실제로 프로비저닝된 절대경로 cwd
    *  (`.awb/act/<action8>` 또는 `.awb/chat/<room8>`) — opt-in하지 않은 채팅
-   *  workspace라면 그냥 에이전트의 통상적인 working_dir 루트일 뿐인 `agentContext.cwd`와는
+   *  account라면 그냥 에이전트의 통상적인 working_dir 루트일 뿐인 `agentContext.cwd`와는
    *  다르다. 프로비저닝이 실행되어 성공했을 때만 값이 설정되므로, 기본값(여기서는
    *  undefined)일 때는 첫 턴 프롬프트의 폴더 경계 블록이 working_dir 루트 자체를
    *  "네게 배정된 작업폴더"라고 잘못 주장하지 않고 그대로 부재 상태를 유지한다. */
@@ -885,7 +885,7 @@ export interface TicketTriggerArgs {
    *  server didn't include it (older server). */
   maxConcurrentTicketsPerAgent?: number;
   /** Resolved account harness from the trigger event (e9c7a896; older
-   *  servers: board ⊕ workspace). Applied at SESSION CREATION only — a live session's CLI flags are
+   *  servers: board ⊕ account). Applied at SESSION CREATION only — a live session's CLI flags are
    *  fixed at spawn; follow-up turns into an existing pid keep the
    *  harness the session was born with. Null/absent → spawn as before. */
   harness?: HarnessSpec | null;
@@ -1784,7 +1784,7 @@ export class EventDispatcher {
    * worktree 규약 ⑤: when a ticket is ARCHIVED, physically remove everything it
    * used across every managed agent this manager owns — its per_ticket worktree
    * (`.awb/wt/<ticket8>`, force-removed even if dirty) AND its QA/Security run
-   * workspace (`.awb/qa/<ticket8>`). The reusable 'shared' worktree is never
+   * account (`.awb/qa/<ticket8>`). The reusable 'shared' worktree is never
    * touched (removeTicketWorktrees skips it).
    *
    * Distinct from #cleanupTerminalTicketWorktrees:
@@ -1801,7 +1801,7 @@ export class EventDispatcher {
    * dirs are already gone (e.g. the worktree was reclaimed at Done). Best-effort,
    * fire-and-forget; never throws.
    */
-  async #cleanupArchivedTicketWorkspace(
+  async #cleanupArchivedTicketAccount(
     ticketId: string,
     repositoryResourceId?: string,
     mainCloneHint?: string | null,
@@ -3302,7 +3302,7 @@ export class EventDispatcher {
       return;
     }
 
-    // Account harness (older servers: board ⊕ workspace) resolved server-side
+    // Account harness (older servers: board ⊕ account) resolved server-side
     // and flattened onto the event (e9c7a896). Parsed here (ahead of its original single use-site
     // below) so the ticket 48aeab6e CLI-readiness gate immediately below can
     // also read harness.permission_mode.
@@ -3318,10 +3318,10 @@ export class EventDispatcher {
       harnessMode: harness?.permission_mode,
     });
 
-    // ticket 48aeab6e: CLI workspace-trust / provider-auth readiness. Unlike
+    // ticket 48aeab6e: CLI account-trust / provider-auth readiness. Unlike
     // the push-credential gate below (assignee-only — only that role pushes),
     // this applies to EVERY role: any role's CLI spawn can hit an unapproved
-    // workspace trust dialog or an expired, unrenewable OAuth session, and
+    // account trust dialog or an expired, unrenewable OAuth session, and
     // both fail the CLI process itself before it does anything useful.
     // Catching it here (before spawn) saves the session/turn a doomed spawn
     // would burn and gives the operator ONE actionable comment instead of a
@@ -3353,7 +3353,7 @@ export class EventDispatcher {
       );
       const trustRequired = adapter.requiresWorkspaceTrust(permissionPolicy);
       // ticket 152e3606 리뷰 반영: bypassPermissions(harness 미설정 또는
-      // 명시적 bypassPermissions — trustRequired=false)일 때만 워크스페이스
+      // 명시적 bypassPermissions — trustRequired=false)일 때만 계정
       // trust를 미리 시딩한다. 이 디스패치 자체엔 trust가 무관하지만(스킵
       // 플래그가 이미 대화상자를 우회한다), 같은 폴더가 나중에 non-bypass
       // harness로 재사용되거나 Action/QA run이 같은 cwd를 재사용할 때를
@@ -3397,9 +3397,9 @@ export class EventDispatcher {
         if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
           const isTrust = blockerKind === 'cli_trust_required';
           const content = isTrust
-            ? `⚠️ **CLI workspace trust 미승인** — 이 CLI(\`${agentContext.cli}\`)의 workspace trust 승인이 확인되지 않아 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+            ? `⚠️ **CLI account trust 미승인** — 이 CLI(\`${agentContext.cli}\`)의 account trust 승인이 확인되지 않아 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
               `세부: \`${readiness.detail || ''}\`\n\n` +
-              `이 보드/워크스페이스 harness의 \`permission_mode\`를 \`bypassPermissions\`로 되돌리거나, ` +
+              `이 보드/계정 harness의 \`permission_mode\`를 \`bypassPermissions\`로 되돌리거나, ` +
               `\`${agentContext.cli_home_dir}/.claude.json\`의 \`projects["${agentContext.cwd}"].hasTrustDialogAccepted\`를 \`true\`로 설정한 뒤 다시 트리거하세요.\n\n` +
               `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — trust를 수정한 뒤 티켓을 unpend(User 탭의 ▶ Resume) 하세요._`
             : `⚠️ **CLI 인증 만료** — 이 CLI(\`${agentContext.cli}\`)의 OAuth 세션이 만료되었고 자동 갱신할 refresh token도 없어 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
@@ -4896,7 +4896,7 @@ export class EventDispatcher {
         this.#poolRetry.cancelByTicket(ev.ticket_id, 'ticket archived');
         this.#sessionDefer.cancelByTicket(ev.ticket_id, 'ticket archived');
         this.#forgetTriggerRawForTicket(ev.ticket_id); // ticket 467f714a blocker #1
-        void this.#cleanupArchivedTicketWorkspace(
+        void this.#cleanupArchivedTicketAccount(
           ev.ticket_id,
           ev.repository_resource_id || ev.project_id || undefined,
           parseMainCloneDir(ev.main_clone_dir ?? ev.base_repo?.main_clone_dir),
@@ -5257,7 +5257,7 @@ export class EventDispatcher {
       // Pin the prepared folder as the subagent cwd (matches the prompt path).
       if (agentContext) runContext = { ...agentContext, cwd: result.dir };
       log(`Run workspace ready: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
-      // ticket 152e3606: run 작업폴더의 workspace trust를 시딩한다. run의
+      // ticket 152e3606: run 작업폴더의 account trust를 시딩한다. run의
       // CLI 세션은 완전히 비대화형이라 trust 대화상자를 수락해줄 사람이
       // 없다 — 미신뢰 cwd는 경고만 내는 게 아니라 repo의
       // `.claude/settings.json` permissions.allow를 조용히 무시해버린다(이

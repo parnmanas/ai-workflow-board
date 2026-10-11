@@ -57,17 +57,17 @@ export class DatabaseModule implements OnModuleInit {
       throw e;
     }
 
-    const wsRepo = this.dataSource.getRepository(Account);
-    // Seed default workspace if empty (seeding, NOT migration — stays here).
-    // A workspace is just a ticket pool now (docs/tickets.md) — nothing else
+    const accountRepo = this.dataSource.getRepository(Account);
+    // Seed default account if empty (seeding, NOT migration — stays here).
+    // A account is just a ticket pool now (docs/tickets.md) — nothing else
     // to seed.
-    const wsCount = await wsRepo.count();
-    if (wsCount === 0) {
-      await wsRepo.save(wsRepo.create({
+    const accountCount = await accountRepo.count();
+    if (accountCount === 0) {
+      await accountRepo.save(accountRepo.create({
         name: 'Personal',
         description: 'Default ownership account',
       }));
-      this.dbLog('Seeded default workspace');
+      this.dbLog('Seeded default account');
     }
   }
 }

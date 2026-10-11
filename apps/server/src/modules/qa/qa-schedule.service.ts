@@ -119,13 +119,13 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
   async list(accountId: string): Promise<QaSchedule[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.account_id = :ws', { ws: accountId });
+      .where('s.account_id = :account', { account: accountId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
   async get(id: string, accountId: string): Promise<QaSchedule> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'QA schedule not found in workspace');
+    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'QA schedule not found in account');
   }
 
   async create(input: CreateScheduleInput): Promise<QaSchedule> {
@@ -339,7 +339,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
         triggeredById,
       });
     }
-    // scope='all' → resolve every enabled scenario in the workspace AT DISPATCH
+    // scope='all' → resolve every enabled scenario in the account AT DISPATCH
     // TIME (no id snapshot), so scenario add/remove is reflected automatically.
     return this.qaRunService.startBatch({
       accountId: schedule.account_id,

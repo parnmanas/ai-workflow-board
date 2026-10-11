@@ -3,7 +3,7 @@
 // editor. React-free so `node --test` imports it directly
 // (test/on-failure-ticket-form.test.mjs).
 //
-// The ticket lands in the workspace pool — no board / column any more. The
+// The ticket lands in the account pool — no board / column any more. The
 // editor owns `project_id`, `status`, `tags`, `priority`, `dedupe` and
 // `assignee_runtime`; scenario/profile-specific knobs (QA rerun loop, Security
 // min_severity) are layered on top by each editor. Keys the editor does not

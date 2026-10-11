@@ -39,8 +39,8 @@ export interface TicketPanelProps {
   agents: RuntimeParticipant[];
   users?: User[];
   channels: Channel[];
-  /** Root tickets of the workspace pool currently loaded by the page — next-ticket/prerequisite/"link existing subtask" pickers + tag suggestions. */
-  workspaceTickets?: TicketCard[];
+  /** Root tickets of the account pool currently loaded by the page — next-ticket/prerequisite/"link existing subtask" pickers + tag suggestions. */
+  accountTickets?: TicketCard[];
   typingIndicators: Record<string, string | null>;
   accountId?: string;
   onClose: () => void;
@@ -137,7 +137,7 @@ type StagedAttachment = {
 };
 
 export default function TicketPanel({
-  ticket, agents, channels, workspaceTickets, typingIndicators, accountId,
+  ticket, agents, channels, accountTickets, typingIndicators, accountId,
   onClose, onUpdate, onMove, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
   scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
@@ -273,7 +273,7 @@ export default function TicketPanel({
     setNavStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
   }, []);
 
-  const wsId = activeTicket.account_id || accountId || getActiveAccountId() || '';
+  const resolvedAccountId = activeTicket.account_id || accountId || getActiveAccountId() || '';
   const isRoot = activeTicket.depth === 0 && !activeTicket.parent_id;
 
   // In-flight flags below are keyed by ticket id: the panel is reused across
@@ -370,8 +370,8 @@ export default function TicketPanel({
     return Math.max(10, Math.min(20, visualLines));
   }, [draft.description]);
 
-  const { projects, loading: projectsLoading } = useProjects(wsId || null);
-  // The workspace list wins; until it loads, the full ticket's own project
+  const { projects, loading: projectsLoading } = useProjects(resolvedAccountId || null);
+  // The account list wins; until it loads, the full ticket's own project
   // summary (it carries host_folders) still lets the assignee editor prefill
   // the project's folder on the chosen host.
   const draftProject = useMemo(
@@ -380,18 +380,18 @@ export default function TicketPanel({
     [projects, draft.projectId, activeTicket.project],
   );
   // Tag suggestions: every tag in the loaded pool, most used first.
-  // plus the workspace-wide `/ticket-tags` counts (the page may be filtered).
-  const workspaceTags = useTicketTags(wsId || null);
+  // plus the account-wide `/ticket-tags` counts (the page may be filtered).
+  const accountTags = useTicketTags(resolvedAccountId || null);
   const tagPool = useMemo(
-    () => mergeTagSuggestions(collectTagPool(workspaceTickets), workspaceTags),
-    [workspaceTickets, workspaceTags],
+    () => mergeTagSuggestions(collectTagPool(accountTickets), accountTags),
+    [accountTickets, accountTags],
   );
   const [actionOptions, setActionOptions] = useState<Action[]>([]);
   const [commentContent, setCommentContent] = useState('');
   // Staged attachments — kept in memory until the user hits Send. Two kinds:
   //   • file     — a freshly picked File, uploaded as a Resource on Send (raw
   //                bytes, no base64-in-JSON, so large videos don't 413).
-  //   • resource — a reference to an already-uploaded workspace Resource.
+  //   • resource — a reference to an already-uploaded account Resource.
   // On Send, files upload first; then the comment POST carries only
   // attachment_resource_ids (never the bytes), which is what fixes the 10MB
   // body 413 that silently dropped video comments (ticket ff3e7337).
@@ -613,12 +613,12 @@ export default function TicketPanel({
   }, [activeTicket.id]);
 
   // Seed @-mention candidates from the agents prop immediately so the
-  // dropdown works before the workspace mention-candidates call returns.
+  // dropdown works before the account mention-candidates call returns.
   useEffect(() => {
     setMentionCandidates(agents.map(a => ({ type: 'agent' as const, id: a.id, name: formatAgentDisplayName(a) })));
-    if (!wsId) return;
+    if (!resolvedAccountId) return;
     let cancelled = false;
-    api.getMentionCandidates(wsId, activeTicket.id)
+    api.getMentionCandidates(resolvedAccountId, activeTicket.id)
       .then(data => {
         if (cancelled) return;
         const next: MentionCandidate[] = [
@@ -641,7 +641,7 @@ export default function TicketPanel({
       })
       .catch(() => { /* keep fallback */ });
     return () => { cancelled = true; };
-  }, [activeTicket.id, agents, wsId]);
+  }, [activeTicket.id, agents, resolvedAccountId]);
 
   // Ticket-field drafts that differ from the server-side row, shaped as the
   // PATCH body. The Save handler sends it in a single round trip (one
@@ -703,18 +703,18 @@ export default function TicketPanel({
   }, [requestClose]);
 
   // Load the Action candidates for the "Run on Done" picker. Reusable Actions
-  // are Account-scoped, and per-ticket dispatch checks workspace + enabled.
+  // are Account-scoped, and per-ticket dispatch checks account + enabled.
   useEffect(() => {
-    if (!wsId) {
+    if (!resolvedAccountId) {
       setActionOptions([]);
       return;
     }
     let cancelled = false;
-    api.listActions(wsId)
+    api.listActions(resolvedAccountId)
       .then(rows => { if (!cancelled) setActionOptions(rows || []); })
       .catch(() => { if (!cancelled) setActionOptions([]); });
     return () => { cancelled = true; };
-  }, [wsId]);
+  }, [resolvedAccountId]);
 
   // Remove a staged attachment and revoke its object URL (files only — resource
   // /raw URLs aren't object URLs and don't need revoking).
@@ -732,7 +732,7 @@ export default function TicketPanel({
     const input = document.createElement('input');
     input.type = 'file';
     // No mimetype restriction — comment attachments go through the Resource
-    // table the same as any other workspace asset, so the picker accepts
+    // table the same as any other account asset, so the picker accepts
     // PDFs, zips, videos, etc.
     input.multiple = true;
     input.onchange = (e) => {
@@ -765,7 +765,7 @@ export default function TicketPanel({
     input.click();
   };
 
-  // ─── Reference an existing workspace Resource ──────────────
+  // ─── Reference an existing account Resource ──────────────
   // The design-recommended path: instead of re-uploading bytes, point the
   // comment at a Resource that already exists. The comment POST then carries
   // only the id (ticket ff3e7337).
@@ -773,8 +773,8 @@ export default function TicketPanel({
     setResourcePickerOpen(true);
     setResourcePickerLoading(true);
     setResourcePickerError(null);
-    const ws = (activeTicket as any).account_id || accountId;
-    if (!ws) {
+    const account = (activeTicket as any).account_id || resolvedAccountId;
+    if (!account) {
       setResourcePickerError('소유 계정을 확인할 수 없습니다.');
       setResourcePickerLoading(false);
       return;
@@ -782,9 +782,9 @@ export default function TicketPanel({
     try {
       // Account files first, then existing comment attachments — de-duped
       // by id, files with bytes only.
-      const wsRes = await api.listResources(ws).catch(() => [] as Resource[]);
+      const accountRes = await api.listResources(account).catch(() => [] as Resource[]);
       const seen = new Set<string>();
-      const merged = wsRes.filter((r) => {
+      const merged = accountRes.filter((r) => {
         if (seen.has(r.id)) return false;
         seen.add(r.id);
         return !!r.file_name; // only file-backed resources are attachable
@@ -795,7 +795,7 @@ export default function TicketPanel({
     } finally {
       setResourcePickerLoading(false);
     }
-  }, [activeTicket, accountId]);
+  }, [activeTicket, resolvedAccountId]);
 
   const addResourceReference = (r: Resource) => {
     setCommentAttachments(prev => {
@@ -965,15 +965,15 @@ export default function TicketPanel({
     // the staged items so the user can retry instead of losing the comment.
     let resourceIds: string[] = [];
     if (commentAttachments.length > 0) {
-      const ws = (activeTicket as any).account_id || accountId;
-      if (!ws) { showToast('소유 계정을 확인할 수 없어 첨부를 업로드할 수 없습니다.', 'error'); return; }
+      const account = (activeTicket as any).account_id || resolvedAccountId;
+      if (!account) { showToast('소유 계정을 확인할 수 없어 첨부를 업로드할 수 없습니다.', 'error'); return; }
       setCommentSending(true);
       try {
         for (const att of commentAttachments) {
           if (att.resourceId) { resourceIds.push(att.resourceId); continue; }
           if (att.file) {
             const uploaded = await api.uploadResourceFile(att.file, {
-              account_id: ws,
+              account_id: account,
               type: 'comment_attachment',
             });
             resourceIds.push(uploaded.id);
@@ -1092,10 +1092,10 @@ export default function TicketPanel({
     const onUnload = () => {
       try {
         const token = localStorage.getItem('auth_token');
-        const wsId = activeTicket.account_id || accountId || getActiveAccountId();
+        const unloadAccountId = activeTicket.account_id || resolvedAccountId || getActiveAccountId();
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers.Authorization = `Bearer ${token}`;
-        if (wsId) headers['X-Account-Id'] = wsId;
+        if (unloadAccountId) headers['X-Account-Id'] = unloadAccountId;
         const baseUrl = window.location.hostname === 'localhost'
           ? `${window.location.protocol}//${window.location.hostname}:7701`
           : '';
@@ -1652,7 +1652,7 @@ export default function TicketPanel({
               </div>
             </div>
 
-            {/* Tags (draft) — suggestions come from the loaded workspace pool */}
+            {/* Tags (draft) — suggestions come from the loaded account pool */}
             <div style={{ marginBottom: 14 }}>
               <label style={labelStyle}>Tags</label>
               <TagInput
@@ -1683,7 +1683,7 @@ export default function TicketPanel({
                   assignee={draftAssignee}
                   unsaved={!!draft.assignee && !runtimeSpecEqual(draft.assignee.value, activeTicket.assignee)}
                   project={draftProject}
-                  accountId={wsId}
+                  accountId={resolvedAccountId}
                   disabled={savingDraft}
                   onChange={(next: RuntimeSpecDraft | null) => setDraftField('assignee', { value: next })}
                   runNote={runNote}
@@ -1700,7 +1700,7 @@ export default function TicketPanel({
             )}
 
             {/* Next Ticket — when this ticket enters `done`, the linked ticket
-                is picked up next. Options come from the loaded workspace pool;
+                is picked up next. Options come from the loaded account pool;
                 the server-hydrated next_ticket snapshot keeps the saved link
                 visible even when it isn't in the loaded list. */}
             <div style={{ marginBottom: 14 }}>
@@ -1719,12 +1719,12 @@ export default function TicketPanel({
                 }}
               >
                 <option value="">— None —</option>
-                {activeTicket.next_ticket && !(workspaceTickets || []).some(t => t.id === activeTicket.next_ticket!.id) && (
+                {activeTicket.next_ticket && !(accountTickets || []).some(t => t.id === activeTicket.next_ticket!.id) && (
                   <option value={activeTicket.next_ticket.id}>
                     {activeTicket.next_ticket.title} · {ticketStatusLabel(activeTicket.next_ticket.status)}
                   </option>
                 )}
-                {(workspaceTickets || [])
+                {(accountTickets || [])
                   .filter(t => t.id !== activeTicket.id)
                   .map(t => (
                     <option key={t.id} value={t.id}>{t.title} · {ticketStatusLabel(t.status)}</option>
@@ -1745,7 +1745,7 @@ export default function TicketPanel({
               rows={prereqRows}
               busy={prereqBusy}
               error={prereqError}
-              candidates={(workspaceTickets || []).filter(t =>
+              candidates={(accountTickets || []).filter(t =>
                 t.id !== activeTicket.id && !prereqRows.some(r => r.prerequisite_ticket_id === t.id))}
               onAdd={handleAddPrerequisite}
               onRemove={handleRemovePrerequisite}
@@ -1846,7 +1846,7 @@ export default function TicketPanel({
             <ChildTicketList
               parentTicket={activeTicket}
               maxDepth={2}
-              workspaceTickets={workspaceTickets}
+              accountTickets={accountTickets}
               tagPool={tagPool}
               onCreateChild={onCreateChild}
               onMoveChild={moveTicket}

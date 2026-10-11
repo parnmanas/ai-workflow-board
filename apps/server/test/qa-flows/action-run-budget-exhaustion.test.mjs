@@ -1,10 +1,10 @@
-// QA flow — Action bounded-retry가 workspace run-budget 상한에 막힐 때의 실제 왕복
+// QA flow — Action bounded-retry가 account run-budget 상한에 막힐 때의 실제 왕복
 // (티켓 a51ec6d9 플랜 작업분해 5번 "Done when": "ActionRun 왕복 1건 — 상한 걸린 상태에서
 // completeRun(failed) → 재-디스패치 거부 → 소스 티켓 resume").
 //
 // run-budget-guard.test.mjs / run-budget-dispatch-gate.test.mjs 는 각각 순수 로직과
 // 정적 호출부 순서만 고정한다. 이 파일은 그 사이를 실 MCP 프로토콜로 잇는다 — run_action
-// 으로 워크스페이스의 유일한 run-budget 슬롯을 소진시킨 뒤, complete_action_run(failed)
+// 으로 계정의 유일한 run-budget 슬롯을 소진시킨 뒤, complete_action_run(failed)
 // 이 유발하는 bounded-retry 재-dispatch 가 실제로 거부되고, 그 거부가 (정정 2에 따라)
 // dispatch() 안에서 던져져 completeRun 의 기존 catch 가 자연히 "소진"으로 처리해 소스
 // 티켓을 실제로 재개하는지를 관측 가능한 신호로 고정한다:
@@ -28,7 +28,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_ACTION_BUDGET_EXHAUSTION_PORT || '0';
 
-test('Action retry blocked by an exhausted workspace run-budget surfaces as exhaustion and resumes the source ticket', async (t) => {
+test('Action retry blocked by an exhausted account run-budget surfaces as exhaustion and resumes the source ticket', async (t) => {
   step('Boot app + MCP');
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => {
@@ -74,7 +74,7 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   const action = await mcp.callTool('save_action', {
     account_id: ws.id,
     name: 'Reindex search',
-    prompt: 'reindex {{workspace.name}}',
+    prompt: 'reindex {{account.name}}',
     target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!action.isError, 'save_action succeeds');

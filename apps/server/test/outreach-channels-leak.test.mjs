@@ -6,8 +6,8 @@
 // mismatch — are caught here too.
 //
 // Two concerns, both against the REAL HTTP response:
-//   1. Account isolation — a channel created in workspace A never appears
-//      when listing/getting scoped to workspace B (the query-level
+//   1. Account isolation — a channel created in account A never appears
+//      when listing/getting scoped to account B (the query-level
 //      account_id filter, exercised through the full guard+controller
 //      stack this time, not just the service directly).
 //   2. Credential non-exposure — the ticket's "자격증명이... API 응답 어디에도
@@ -51,12 +51,12 @@ async function loadServerModules() {
     return { NestFactory, AppModule, AuthService, getDataSourceToken };
   } catch (err) {
     throw new Error(
-      'Leak test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message,
+      'Leak test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message,
     );
   }
 }
 
-describe('outreach-channels-leak: cross-workspace isolation + credential non-exposure', async () => {
+describe('outreach-channels-leak: cross-account isolation + credential non-exposure', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -89,7 +89,7 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
     wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (outreach)', description: 'Leak test' }));
 
     // A real Credential row carrying a RECOGNIZABLE raw-secret substring,
-    // scoped to workspace A. Nothing in the CRUD path ever decrypts this
+    // scoped to account A. Nothing in the CRUD path ever decrypts this
     // (only outreach-credential.ts's resolveOutreachCredential does, and only
     // from the polling sweep) — the plain marker is enough to prove the value
     // never round-trips into an HTTP response regardless.
@@ -134,29 +134,29 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
     assert.doesNotMatch(raw, new RegExp(RAW_SECRET_TOKEN), 'the raw secret token never appears in the response');
   });
 
-  it('admin listing workspace A sees the created channel', async () => {
+  it('admin listing account A sees the created channel', async () => {
     const res = await apiRequest(BASE_URL, `/outreach-channels?account_id=${wsA.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     const rows = Array.isArray(res.data) ? res.data : [];
-    assert.ok(rows.some((c) => c.id === channelA.id), 'workspace A listing includes channel A');
+    assert.ok(rows.some((c) => c.id === channelA.id), 'account A listing includes channel A');
     const raw = JSON.stringify(rows);
     assert.doesNotMatch(raw, /credential_id/, 'list response never carries credential_id');
     assert.doesNotMatch(raw, new RegExp(RAW_SECRET_TOKEN), 'list response never carries the raw token');
   });
 
-  it('admin listing workspace B never sees workspace A\'s channel', async () => {
+  it('admin listing account B never sees account A\'s channel', async () => {
     const res = await apiRequest(BASE_URL, `/outreach-channels?account_id=${wsB.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     const rows = Array.isArray(res.data) ? res.data : [];
-    assert.equal(rows.filter((c) => c.id === channelA.id).length, 0, 'channel A must not leak into workspace B\'s listing');
+    assert.equal(rows.filter((c) => c.id === channelA.id).length, 0, 'channel A must not leak into account B\'s listing');
   });
 
-  it('get(:id) scoped to workspace B 404s for a channel that belongs to workspace A', async () => {
+  it('get(:id) scoped to account B 404s for a channel that belongs to account A', async () => {
     const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}?account_id=${wsB.id}`, { token: adminToken });
-    assert.equal(res.status, 404, 'cross-workspace get must not resolve');
+    assert.equal(res.status, 404, 'cross-account get must not resolve');
   });
 
-  it('get(:id) scoped to the correct workspace resolves without leaking the secret', async () => {
+  it('get(:id) scoped to the correct account resolves without leaking the secret', async () => {
     const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}?account_id=${wsA.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     assert.equal(res.data.id, channelA.id);

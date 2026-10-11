@@ -46,7 +46,7 @@ export class ResourcesController {
   // NOTE: raw binary upload (POST /api/resources/upload) lives in
   // ResourceMediaController, not here. This controller is admin-gated
   // (MANAGE_RESOURCES); comment-attachment upload must be reachable by any
-  // workspace member, so it authorizes by workspace membership there instead
+  // account member, so it authorizes by account membership there instead
   // (ticket ff3e7337 review blocker 2).
 
   @Get()
@@ -62,7 +62,7 @@ export class ResourcesController {
       return res.status(400).json({ error: 'account_id query parameter is required' });
     }
     const qb = this.resourceRepo.createQueryBuilder('r')
-      .where('(r.account_id IS NULL OR r.account_id = :ws)', { ws: accountId });
+      .where('(r.account_id IS NULL OR r.account_id = :account)', { account: accountId });
     if (type) {
       qb.andWhere('r.type = :t', { t: type });
     }
@@ -172,7 +172,7 @@ export class ResourcesController {
       return res.status(403).json({ error: 'Only admins can update Global Resources' });
     }
     if (resource.account_id !== null && body.account_id !== resource.account_id) {
-      return res.status(404).json({ error: 'Resource not found in workspace' });
+      return res.status(404).json({ error: 'Resource not found in account' });
     }
     if (
       (body.account_id !== undefined && (body.account_id || null) !== resource.account_id)
@@ -225,7 +225,7 @@ export class ResourcesController {
         return res.status(403).json({ error: 'Only admins can delete Global Resources' });
       }
     } else if (!accountId || resource.account_id !== accountId) {
-      return res.status(404).json({ error: 'Resource not found in workspace' });
+      return res.status(404).json({ error: 'Resource not found in account' });
     }
     await this.resourceRepo.delete({ id });
     return res.json({ success: true, id });

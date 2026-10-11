@@ -70,7 +70,7 @@ export function canInviteToRoom(
  * 스코프마다 다른 프로젝션을 손으로 만들어 필드 이름이 갈린다:
  *   - 내 방 (`GET /chat-rooms` → `listRooms`)
  *       `{ participant_type, participant_id, name }`
- *   - Account 관전 (`?scope=account` → `listAllWorkspaceRooms`)
+ *   - Account 관전 (`?scope=account` → `listAllAccountRooms`)
  *       `{ type, id, name }`
  *
  * `api.listChatRooms('account')` 도 같은 타입을 돌려주므로 **tsc 는 이 불일치를
@@ -114,7 +114,7 @@ export function countUserParticipants(participants: MentionParticipant[]): numbe
 // ─── 활성 방 로스터 재조회 (P2 stale-response 가드) ───────────────────────────
 
 export interface RefreshRosterDeps {
-  // 방 상세 조회. observer 인자는 워크스페이스 관찰 모드에서 403 을 피하려 전달한다.
+  // 방 상세 조회. observer 인자는 계정 관찰 모드에서 403 을 피하려 전달한다.
   // 반환을 any 로 둔 이유: 서버 wire 는 평평한 `name` 을 내려주지만 선언 타입
   // ChatRoomDetail.participants(ChatRoomParticipantInfo)는 participant_name 을 쓰는
   // 기존 불일치가 있어, ChatPage 도 역대 `detail: any` 로 읽어 왔다(동작 보존).
@@ -159,7 +159,7 @@ export function makeRefreshActiveRoomParticipants(
 // ─── 참여자 추가/이탈 반영 (방 목록 + 활성 방 로스터) ─────────────────────────
 
 export interface ReflectParticipantChangeDeps {
-  /** 현재 스코프(내 방/워크스페이스) 그대로 방 목록 재조회. */
+  /** 현재 스코프(내 방/계정) 그대로 방 목록 재조회. */
   listChatRooms: () => Promise<ChatRoomListItem[]>;
   setRooms: (rooms: ChatRoomListItem[]) => void;
   getActiveRoomId: () => string | null;
@@ -284,7 +284,7 @@ export interface ChatRoomUpdateDispatchDeps {
  *  - renamed            → 방 목록의 해당 방 이름만 갱신
  *  - participant_added/left → reflectParticipantChange (방 목록 + 활성 방 로스터)
  *  - read(본인)         → 해당 방 unread 를 0 으로 (다른 탭/기기 동기화)
- *  - open_join_changed  → 같은 워크스페이스면 방 목록 재조회 (ticket 995a9519).
+ *  - open_join_changed  → 같은 계정면 방 목록 재조회 (ticket 995a9519).
  *                         플래그 갱신이 아니라 재조회인 것은 이 이벤트의 핵심 수신자가
  *                         비참여자이고, 그들에겐 방의 추가/제거가 반영돼야 하기 때문이다.
  */

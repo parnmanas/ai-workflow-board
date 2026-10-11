@@ -598,7 +598,7 @@ export class OutreachIngestService {
   }
 
   /** The channel's target project, if it still exists in the channel's
-   *  workspace. A project force-deleted after the channel was saved files
+   *  account. A project force-deleted after the channel was saved files
    *  the ticket without a project (the same thing the delete did to that
    *  project's existing tickets) and says so in the log, instead of failing
    *  every poll of the channel until someone edits it. */

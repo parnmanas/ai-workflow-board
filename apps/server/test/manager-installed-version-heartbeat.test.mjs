@@ -12,14 +12,14 @@ import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-
 
 process.env.PORT = process.env.MANAGER_INSTALLED_VERSION_PORT || '0';
 
-async function heartbeat(port, key, manager, workspace, body) {
+async function heartbeat(port, key, manager, account, body) {
   const response = await fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
     method: 'POST',
     headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
-      account_id: workspace.id,
+      account_id: account.id,
       mode: 'manager',
       hostname: 'installed-version-host',
       plugin_version: '1.6.246',
@@ -37,19 +37,19 @@ test('heartbeat installed_version/restart_required round-trip; absence stays und
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'installed-version');
+  const account = await createAccount(app, getDataSourceToken, 'installed-version');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'installed-version-host', type: 'manager' });
-  const key = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'installed-version' });
+  const key = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'installed-version' });
   const registry = app.get(InstanceRegistryService);
 
   // 구버전 매니저: 필드 자체가 없다
-  await heartbeat(port, key, manager, workspace, { instance_id: 'inst-old' });
+  await heartbeat(port, key, manager, account, { instance_id: 'inst-old' });
   let rec = registry.get('inst-old');
   assert.equal(rec.installed_version, undefined);
   assert.equal(rec.restart_required, undefined);
 
   // 디스크만 새 버전
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     instance_id: 'inst-old',
     latest_version: '1.6.247',
     update_available: true,
@@ -64,7 +64,7 @@ test('heartbeat installed_version/restart_required round-trip; absence stays und
   assert.equal(rec.update_available, true);
 
   // 재기동 뒤: 실행본 = 설치본
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     instance_id: 'inst-old',
     plugin_version: '1.6.247',
     latest_version: '1.6.247',
@@ -77,11 +77,11 @@ test('heartbeat installed_version/restart_required round-trip; absence stays und
   assert.equal(rec.restart_required, false);
 
   // 방어: 문자열이 아니면 null, 너무 길면 절단
-  await heartbeat(port, key, manager, workspace, { instance_id: 'inst-old', installed_version: 12345, restart_required: 'yes' });
+  await heartbeat(port, key, manager, account, { instance_id: 'inst-old', installed_version: 12345, restart_required: 'yes' });
   rec = registry.get('inst-old');
   assert.equal(rec.installed_version, null);
   assert.equal(rec.restart_required, true, 'truthy coerces like update_available');
-  await heartbeat(port, key, manager, workspace, { instance_id: 'inst-old', installed_version: 'x'.repeat(200) });
+  await heartbeat(port, key, manager, account, { instance_id: 'inst-old', installed_version: 'x'.repeat(200) });
   assert.equal(registry.get('inst-old').installed_version.length, 64);
 
   // 관리자 목록 API 가 spread 로 그대로 내보낸다
@@ -89,7 +89,7 @@ test('heartbeat installed_version/restart_required round-trip; absence stays und
   const { createUser } = await import('./helpers/fixtures.mjs');
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
-  await heartbeat(port, key, manager, workspace, { instance_id: 'inst-old', installed_version: '1.6.248', restart_required: true });
+  await heartbeat(port, key, manager, account, { instance_id: 'inst-old', installed_version: '1.6.248', restart_required: true });
   const list = await (await fetch(`http://127.0.0.1:${port}/api/admin/agent-manager/instances`, { headers: { Authorization: `Bearer ${token}` } })).json();
   const row = list.find((i) => i.instance_id === 'inst-old');
   assert.equal(row.installed_version, '1.6.248');

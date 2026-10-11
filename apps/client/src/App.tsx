@@ -12,7 +12,7 @@ import { tokens } from './tokens';
 
 // 라우트 단위 코드 스플리팅: 무거운 페이지 컴포넌트를 지연 로드해 초기 번들을
 // 작게 유지한다 (티켓 33a8ccc4 — 1.18MB 단일 청크 경고 해소).
-// Tickets — 워크스페이스 전체 티켓 풀(보드 없음, docs/tickets.md). Kanban/List 두 뷰.
+// Tickets — 접근 가능한 계정을 합친 티켓 풀(보드 없음, docs/tickets.md). Kanban/List 두 뷰.
 const TicketsPage = lazy(() => import('./components/tickets/TicketsPage'));
 // Projects — 저장소 + Host 별 메인 클론 폴더(repository Resource 를 대체).
 const ProjectsPage = lazy(() => import('./components/projects/ProjectsPage'));
@@ -62,7 +62,7 @@ export function DefaultRedirect() {
   return <GlobalRedirect to="sessions" />;
 }
 
-export function LegacyWorkspaceRedirect() {
+export function LegacyPathRedirect() {
   const { pathname, search, hash } = useLocation();
   return <Navigate to={`${canonicalWorkPath(pathname)}${search}${hash}`} replace />;
 }
@@ -197,7 +197,7 @@ function AppContent() {
         <Routes>
           <Route element={<AppLayout />}>
             <Route index element={<DefaultRedirect />} />
-            <Route path="ws/:wsId/*" element={<LegacyWorkspaceRedirect />} />
+            <Route path="ws/:wsId/*" element={<LegacyPathRedirect />} />
             <Route path="agents/*" element={<GlobalRedirect to="sessions" />} />
             <Route path="dashboard" element={<DefaultRedirect />} />
             <Route path="assistant" element={<ChatFirstHome />} />
@@ -214,7 +214,7 @@ function AppContent() {
             <Route path="teams" element={<OrchestrationTeamsPage />} />
             <Route path="missions" element={<OrchestrationPage />} />
             <Route path="missions/:missionId" element={<MissionDetailPage />} />
-            <Route path="orchestration/*" element={<LegacyWorkspaceRedirect />} />
+            <Route path="orchestration/*" element={<LegacyPathRedirect />} />
             <Route path="chat" element={<ChatPage />} />
             <Route path="chat/:roomId" element={<ChatPage />} />
             <Route path="projects" element={<ProjectsPage />} />

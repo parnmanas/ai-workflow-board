@@ -47,7 +47,7 @@ interface SidebarProps {
   overlay: boolean;
   isOpen: boolean;
   onClose: () => void;
-  wsId: string | null;
+  accountId: string | null;
   rooms: ChatRoomListItem[];
   roomsLoading: boolean;
   containerRef?: React.Ref<HTMLElement>;
@@ -89,7 +89,7 @@ export default function Sidebar({
   overlay,
   isOpen,
   onClose,
-  wsId,
+  accountId,
   rooms,
   roomsLoading,
   containerRef,
@@ -97,7 +97,7 @@ export default function Sidebar({
   const { user, logout, hasPermission } = useAuth();
   const { counts, countsLoaded, markAllTicketsReadLocal } = useNotifications();
   const { showToast } = useToast();
-  const { teams, missions, teamsLoading, missionsLoading } = useWorkNavLists(wsId);
+  const { teams, missions, teamsLoading, missionsLoading } = useWorkNavLists(accountId);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -128,7 +128,7 @@ export default function Sidebar({
   const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
   const loadAttemptedRef = React.useRef<Set<string>>(new Set());
 
-  // 워크스페이스 전체 "모두 읽음" (티켓 628f4b39) — Tickets 페이지의 배너와 같은
+  // 계정 전체 "모두 읽음" (티켓 628f4b39) — Tickets 페이지의 배너와 같은
   // 동작(서버 upsert 먼저, 그다음 로컬 배지).
   const handleMarkAllTicketsRead = async () => {
     setMarkingAllTicketsRead(true);
@@ -153,7 +153,7 @@ export default function Sidebar({
   // 음성 지원("헤이 <이름>" 듣기 + 답 낭독)을 켠다(docs/voice-operator.md "음성 지원 · 잠들기").
   const operators = useVoiceOperators(canUseSessions && hasPermission('voice.use'));
   const wake = useWakeState();
-  const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);
+  const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && accountId ? accountId : null);
 
   // 다른 사용자로 로그인할 때만 목록과 세션 캐시를 초기화한다.
   React.useEffect(() => {
@@ -179,7 +179,7 @@ export default function Sidebar({
 
   const featureSections: Array<{ title: string; items: NavItem[] }> = [
     {
-      // Tickets(워크스페이스 전체 티켓 풀)는 맨 위 평평한 행으로, Teams /
+      // Tickets(계정 전체 티켓 풀)는 맨 위 평평한 행으로, Teams /
       // Orchestrations 는 목록을 서브메뉴로 펴는 계층형 그룹이라 평평한 items 가
       // 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
       title: 'Work',
@@ -569,7 +569,7 @@ export default function Sidebar({
     );
   };
 
-  // WORK — 맨 위 Tickets 한 줄(워크스페이스 전체 미읽음 배지), 그다음 Teams /
+  // WORK — 맨 위 Tickets 한 줄(계정 전체 미읽음 배지), 그다음 Teams /
   // Orchestrations 를 그 순서대로 각자의 목록을 서브메뉴로 펴서 보여준다(티켓 03ca8b5b).
   const ticketsNav = buildTicketsNavItem({
     basePath,
@@ -800,7 +800,7 @@ export default function Sidebar({
           <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
           <div style={{ marginTop: 1, fontSize: 10, color: tokens.colors.textMuted }}>AI Workflow Board</div>
         </div>
-        <MentionInboxBadge accountId={wsId} />
+        <MentionInboxBadge accountId={accountId} />
         <NotificationSettingsPanel />
         {/* Former main-frame header buttons — the desktop AWB brand bar is
             gone, so mute/artifact toggles live here now (drawer too). */}
@@ -816,7 +816,7 @@ export default function Sidebar({
             (WORK 의 Teams/Orchestrations 목록과 같은 모양). 섹션 머리(SESSIONS · CHAT …)로 두면 그 아래 오는
             HOSTS 줄까지 operator 묶음처럼 보인다. 줄을 누르면 목록을 펴고 접는다 — operator 를 모아 보는
             화면은 따로 없다(관리는 Admin → Voice). */}
-        {operators.length > 0 && wsId && (() => {
+        {operators.length > 0 && accountId && (() => {
           const expanded = !collapsedGroups.operators;
           const awakeOperator = wake.mode === 'awake' ? operators.find((op) => op.id === wake.operatorId) ?? null : null;
           const toggle = () => setCollapsedGroups((prev) => ({ ...prev, operators: expanded }));

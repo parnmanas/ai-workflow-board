@@ -15,7 +15,7 @@ test('ADMIN navigation omits standalone QA, Column Policies, and Agent Manager i
   assert.doesNotMatch(sidebarSource, /label:\s*'Agent Manager'/);
 });
 
-test('legacy Agent Manager URL redirects into workspace HOSTS management', () => {
+test('legacy Agent Manager URL redirects into account HOSTS management', () => {
   assert.match(
     adminPageSource,
     /path="agent-manager"[\s\S]*WorkRouteRedirect path="hosts"/,
@@ -47,5 +47,5 @@ test('P4c-4: agents surface is gone — nav has no AI Agents item, route redirec
 test('runtime console survives on AgentManagerPage without the agent list', () => {
   assert.match(agentManagerPageSource, /export function InstanceDetail/);
   assert.match(agentManagerPageSource, /<InstalledCliVersions/);
-  assert.doesNotMatch(agentManagerPageSource, /WorkspaceAgentRows|AgentStatusSummary|Without a live runtime/);
+  assert.doesNotMatch(agentManagerPageSource, /AccountAgentRows|AgentStatusSummary|Without a live runtime/);
 });

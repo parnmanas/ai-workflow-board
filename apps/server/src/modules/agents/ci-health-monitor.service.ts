@@ -61,18 +61,18 @@
  * 새 실패가 Done 티켓에 매달린 채 영원히 재평가되지 않는다 (아래 done 문단 참고).
  *
  * **Incident 수렴 — 티켓은 프로젝트당 1건이 아니라 장애당 1건이다** (ticket 3886473a):
- * 위 키에 들어가는 것은 project id 가 **아니라** workspace id 다. 같은 저장소를 가리키는
- * 프로젝트가 한 workspace 에 둘 있으면, 키에 감시 단위를 넣었을 때 같은 실패 run 에 대해
+ * 위 키에 들어가는 것은 project id 가 **아니라** account id 다. 같은 저장소를 가리키는
+ * 프로젝트가 한 account 에 둘 있으면, 키에 감시 단위를 넣었을 때 같은 실패 run 에 대해
  * 실행 티켓이 2건 열리고 같은 담당자가 같은 한 줄 수정을 두 번 dispatch 받는다(보드 시절
  * 실측: 같은 run 을 두고 쌍둥이 티켓이 열려, 사람이 선행조건을 걸었다 풀었다 하며 손으로
- * 조정해야 했다). 그래서 (workspace, repo, branch, workflow) 가 하나의 **incident** 이고,
+ * 조정해야 했다). 그래서 (account, repo, branch, workflow) 가 하나의 **incident** 이고,
  * 먼저 trip 한 프로젝트가 canonical 티켓을 만들며 나머지는 그것을 **채택**한다 —
  * `CiRedAlert.created_ticket_id` 가 같은 티켓을 가리키고(관계), 프로젝트별 채팅 알림이 그
  * 티켓을 링크하며(알림), 채택 사실은 canonical 티켓에 코멘트로 남는다. 프로젝트별 감시·복구
  * 판정·재알림 쿨다운은 그대로 프로젝트별 `CiRedAlert` 행에 남는다.
  *
- * 스코프에 workspace 가 들어가는 이유(빼면 안 되는 이유): 티켓·프로젝트가 전부
- * workspace 스코프다. 다른 workspace 의 티켓을 가리키면 그 workspace 에서는 열 수도
+ * 스코프에 account 가 들어가는 이유(빼면 안 되는 이유): 티켓·프로젝트가 전부
+ * account 스코프다. 다른 account 의 티켓을 가리키면 그 account 에서는 열 수도
  * dispatch 할 수도 없는 죽은 참조가 되고, 알림 본문의 티켓 링크도 어긋난다.
  * 서로 다른 저장소·브랜치·workflow 는 키가 다르므로 절대 합쳐지지 않는다.
  *
@@ -311,12 +311,12 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 /**
- * 한 CI 장애(incident)의 신원. **project id 는 들어가지 않는다** — 같은 workspace 안에서
+ * 한 CI 장애(incident)의 신원. **project id 는 들어가지 않는다** — 같은 account 안에서
  * 같은 저장소·브랜치·workflow 를 감시하는 프로젝트가 여럿이면 그것은 장애 N 건이 아니라
  * 1 건이고, 실행 티켓도 1 건이어야 한다 (ticket 3886473a).
  *
- * workspace 는 반드시 들어간다 — 티켓·프로젝트가 workspace 스코프라 다른 workspace 의
- * 티켓을 가리키면 그 workspace 에서 열 수도 dispatch 할 수도 없다.
+ * account 는 반드시 들어간다 — 티켓·프로젝트가 account 스코프라 다른 account 의
+ * 티켓을 가리키면 그 account 에서 열 수도 dispatch 할 수도 없다.
  */
 export function ciIncidentDedupeKey(
   accountId: string, repoFullName: string, branch: string, workflowId: string,
@@ -779,21 +779,21 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Resolve the chat room to publish into for a workspace. Order:
+   * Resolve the chat room to publish into for a account. Order:
    *   1. Account.alerts_chat_room_id, if set and the room exists.
-   *   2. Oldest chat room in the workspace by `created_at ASC`.
+   *   2. Oldest chat room in the account by `created_at ASC`.
    */
   private async _resolveAlertRoomId(accountId: string): Promise<string | null> {
     if (!accountId) return null;
-    const ws = await this.dataSource.getRepository(Account).findOne({ where: { id: accountId } });
+    const account = await this.dataSource.getRepository(Account).findOne({ where: { id: accountId } });
     const roomRepo = this.dataSource.getRepository(ChatRoom);
-    if (ws?.alerts_chat_room_id) {
-      const configured = await roomRepo.findOne({ where: { id: ws.alerts_chat_room_id, account_id: accountId } });
+    if (account?.alerts_chat_room_id) {
+      const configured = await roomRepo.findOne({ where: { id: account.alerts_chat_room_id, account_id: accountId } });
       if (configured) return configured.id;
     }
     const fallback = await roomRepo
       .createQueryBuilder('r')
-      .where('r.account_id = :wsId', { wsId: accountId })
+      .where('r.account_id = :accountId', { accountId: accountId })
       .orderBy('r.created_at', 'ASC')
       .limit(1)
       .getOne();

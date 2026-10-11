@@ -47,7 +47,7 @@ after(() => { void app.close().catch(() => {}); });
 const { getDataSourceToken, ActivityService } = modules;
 const ds = app.get(getDataSourceToken());
 
-// ── Shared scene: one workspace, a managed agent (has a manager → prefixed
+// ── Shared scene: one account, a managed agent (has a manager → prefixed
 //    display), its Runtime Host identity (bare display), a human user, and
 //    a ticket to hang activity / pending state on. ────────────────────────────
 const ws = await createAccount(app, getDataSourceToken, 'fullname');
@@ -201,7 +201,7 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as the Host b
 // lands on the SSE wire. Drive it truly end-to-end through /api/events/stream.
 test('Realtime board_update SSE: actor_name is the canonical Host display', async () => {
   const key = await createApiKey(app, getDataSourceToken, manager.id, { accountId: ws.id, label: 'sse-sub' });
-  // board_update has no subscriber filter (workspace scoping is the page's
+  // board_update has no subscriber filter (account scoping is the page's
   // job), so a plain stream receives every ticket-change frame.
   const sse = await openSseStream(port, key.raw_key, {});
   after(() => sse.close());

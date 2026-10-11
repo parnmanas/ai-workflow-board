@@ -8,9 +8,9 @@
 //
 // Resolution order for the repo (first match wins):
 //   1. repo_ref.url        — direct git url (escape hatch).
-//   2. repo_ref.project_id — a Project in the run's workspace (url /
+//   2. repo_ref.project_id — a Project in the run's account (url /
 //                            default_branch / credential / clone_policy).
-// There is no inherited repo: the board ⊕ workspace `environment_config`
+// There is no inherited repo: the board ⊕ account `environment_config`
 // fallback went away with boards (docs/tickets.md), so a run without a
 // repo_ref gets a `RunProvision` with `repo: null` — the manager just ensures
 // the folder exists and the rendered prompt still tells the agent what to do.
@@ -90,11 +90,11 @@ async function resolveRunRepo(
   }
 
   // 2. Project — account-scoped, so a stale id pointing at another
-  //    workspace's project never gets its url (or credential) shipped.
+  //    account's project never gets its url (or credential) shipped.
   //    ProjectsService is stateless over the DataSource, so this plain helper
   //    builds one instead of threading DI through every caller.
   if (!ref?.project_id) return null;
-  const project = await new ProjectsService(ds).getInWorkspace(ref.project_id, input.accountId);
+  const project = await new ProjectsService(ds).getInAccount(ref.project_id, input.accountId);
   const url = (project?.repo_url || '').trim();
   if (!project || !url) return null;
   const credential = await resolveRepoCredential(ds, project.credential_id, input.accountId);
@@ -118,8 +118,8 @@ async function resolveRunClonePolicy(
   accountId: string,
 ) {
   try {
-    const ws = await ds.getRepository(Account).findOne({ where: { id: accountId } });
-    return resolveClonePolicy(projectRaw, ws?.clone_policy);
+    const account = await ds.getRepository(Account).findOne({ where: { id: accountId } });
+    return resolveClonePolicy(projectRaw, account?.clone_policy);
   } catch {
     return resolveClonePolicy(projectRaw, null);
   }
@@ -128,10 +128,10 @@ async function resolveRunClonePolicy(
 /**
  * Resolve the https git credential for a Project (its `credential_id` →
  * decrypted `{ username?, token }`), degrading to null on ANY failure so a
- * missing / foreign-workspace / undecryptable Credential never wedges the run —
+ * missing / foreign-account / undecryptable Credential never wedges the run —
  * the provisioner just falls back to an anonymous clone (the pre-wiring
  * behavior). Mirrors the availability-first stance the rest of this resolver
- * takes: `resolveGitCredential` THROWS on a foreign-workspace / tokenless /
+ * takes: `resolveGitCredential` THROWS on a foreign-account / tokenless /
  * unreadable credential, and we swallow that to null here (the run still
  * dispatches — only auth is skipped, exactly as today for a public repo).
  */

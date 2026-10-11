@@ -187,11 +187,11 @@ export class RoomMembershipService {
 
     // ── 검사 순서는 의도적이다 (리뷰 라운드1 지적 1) ────────────────────────
     //
-    // ① 워크스페이스 경계 — **가장 먼저**. participant 행은 한 번 생기면 남으므로
-    //    "이 방의 active 참여자인가"만으로는 경계가 지속되지 않는다: 지난 워크스페이스나
-    //    다른 워크스페이스 방의 행을 들고 있는 호출자가 지금 바인딩된 스코프와 무관하게
+    // ① 계정 경계 — **가장 먼저**. participant 행은 한 번 생기면 남으므로
+    //    "이 방의 active 참여자인가"만으로는 경계가 지속되지 않는다: 지난 계정나
+    //    다른 계정 방의 행을 들고 있는 호출자가 지금 바인딩된 스코프와 무관하게
     //    그 방을 승격시키고 새 참여자를 넣을 수 있었다. 존재하지 않는 방과 **같은 404** 를
-    //    주는 것도 의도다 — 남의 워크스페이스 room_id 로 방의 존재를 확인할 수 없어야
+    //    주는 것도 의도다 — 남의 계정 room_id 로 방의 존재를 확인할 수 없어야
     //    한다(`setOpenJoin` / `requireRoomAccess` 와 동일 규칙).
     // ② 참여자 자격 — 그 다음. 시스템 방 판정보다 **먼저** 둬서 비참여자가 400/403 의
     //    차이로 방의 종류를 알아내지 못하게 한다.
@@ -743,13 +743,13 @@ export class RoomMembershipService {
   /**
    * Shared helper for read endpoints that are keyed only by roomId (e.g. GET
    * .../session-status): throw 404 if the room doesn't exist OR belongs to a
-   * different workspace than the caller's current one (same status for both
-   * so a foreign-workspace roomId doesn't confirm existence), and — unless
-   * `observer` (the workspace-wide monitoring view, same bypass `getRoom`
+   * different account than the caller's current one (same status for both
+   * so a foreign-account roomId doesn't confirm existence), and — unless
+   * `observer` (the account-wide monitoring view, same bypass `getRoom`
    * grants via `?observer=true`) — 403 unless userId is an active participant.
    * `getRoomDetail` intentionally tolerates a non-member viewer for that same
    * observer flow but never checked account_id at all; this helper is the
-   * one used by endpoints that need the workspace boundary actually enforced
+   * one used by endpoints that need the account boundary actually enforced
    * (ticket e18be8ff review round 2, P1 #1).
    */
   async requireRoomAccess(

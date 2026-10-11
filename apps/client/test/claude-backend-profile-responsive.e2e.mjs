@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const workspace = { id: 'ws-claude-profile', name: '프로필 비교', slug: 'profile-compare', relations: ['admin'] };
+const account = { id: 'ws-claude-profile', name: '프로필 비교', slug: 'profile-compare', relations: ['admin'] };
 const profile = {
   id: 'profile-responsive',
   name: 'Claude 호환 프로필',
@@ -17,7 +17,7 @@ const runtimeHost = {
   instance_id: 'runtime-instance-codex',
   agent_id: 'runtime-host-codex',
   agent_name: 'Codex Runtime Host',
-  account_id: workspace.id,
+  account_id: account.id,
   mode: 'manager',
   hostname: 'codex-host.test',
   plugin_version: '1.0.0',
@@ -37,7 +37,7 @@ async function stubApi(page) {
   await page.addInitScript(({ accountId }) => {
     localStorage.setItem('auth_token', 'e2e-token');
     localStorage.setItem('currentAccountId', accountId);
-  }, { accountId: workspace.id });
+  }, { accountId: account.id });
 
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname.replace(/^\/api/, '');
@@ -45,29 +45,29 @@ async function stubApi(page) {
     if (path === '/auth/me') {
       body = {
         id: 'user-e2e', name: 'E2E 관리자', email: 'e2e@example.test', role: 'admin',
-        status: 'active', permissions: '["admin.access"]', resolved_permissions: ['admin.access'], accounts: [workspace],
+        status: 'active', permissions: '["admin.access"]', resolved_permissions: ['admin.access'], accounts: [account],
       };
-    } else if (path === '/accounts') {
-      body = [workspace];
-    } else if (path === `/accounts/${workspace.id}`) {
-      body = workspace;
+    } else if (path === '/workspaces') {
+      body = [account];
+    } else if (path === `/accounts/${account.id}`) {
+      body = account;
     } else if (path === '/admin/claude-backend-profiles') {
       body = { profiles: [profile], default_profile_id: profile.id };
     } else if (path === '/credentials') {
       body = [];
     } else if (path === '/claude-backend-profiles') {
-      // 티켓 e616dbfc — 워크스페이스 스코프 라우트 2개가 이 전역 카탈로그
+      // 티켓 e616dbfc — 계정 스코프 라우트 2개가 이 전역 카탈로그
       // 하나로 대체됐다(비관리자 읽기 표면).
       body = { profiles: [profile], default_profile_id: profile.id };
     } else if (path === '/agents/dashboard') {
       body = [];
     } else if (path === '/admin/agent-manager/managers') {
-      body = [{ id: runtimeHost.agent_id, name: runtimeHost.agent_name, account_id: workspace.id, is_active: 1 }];
+      body = [{ id: runtimeHost.agent_id, name: runtimeHost.agent_name, account_id: account.id, is_active: 1 }];
     } else if (path === '/admin/agent-manager/instances') {
       body = [runtimeHost];
-    } else if (path === `/accounts/${workspace.id}/credentials`) {
+    } else if (path === `/accounts/${account.id}/credentials`) {
       body = [];
-    } else if (path === `/accounts/${workspace.id}/mentions/unread`) {
+    } else if (path === `/accounts/${account.id}/mentions/unread`) {
       body = { items: [], total: 0 };
     } else if (path.includes('unread') || path.includes('counts')) {
       body = { count: 0, total: 0, per_room: {}, per_ticket: {}, per_board: {} };

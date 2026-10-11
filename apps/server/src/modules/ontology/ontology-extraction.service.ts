@@ -125,8 +125,8 @@ export class OntologyExtractionService {
   }
 
   async extractRepo(opts: ExtractRepoOptions): Promise<ExtractRepoResult> {
-    const project = await this.projects.getInWorkspace(opts.resourceId, opts.accountId);
-    if (!project) throw new Error('Project not found in workspace');
+    const project = await this.projects.getInAccount(opts.resourceId, opts.accountId);
+    if (!project) throw new Error('Project not found in account');
     if (!project.repo_url) {
       throw new Error("project has no repo_url — set the project's repository URL before extracting its ontology graph");
     }

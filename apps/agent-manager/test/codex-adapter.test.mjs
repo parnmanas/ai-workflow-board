@@ -171,7 +171,7 @@ test('buildOneshotSpawn omits per-run MCP override for unattributed chat runs', 
   assert.equal(descriptor.args.includes('-c'), false);
 });
 
-test('buildOneshotSpawn pins Codex workspace root to the manager-selected cwd', () => {
+test('buildOneshotSpawn pins Codex account root to the manager-selected cwd', () => {
   const adapter = new CodexCliAdapter();
   const cwd = '/repo/.awb/wt/12345678';
   const descriptor = adapter.buildOneshotSpawn({
@@ -181,7 +181,7 @@ test('buildOneshotSpawn pins Codex workspace root to the manager-selected cwd', 
     cwd,
   });
   const cdIndex = descriptor.args.indexOf('--cd');
-  assert.ok(cdIndex >= 0, 'Codex must receive an explicit workspace root');
+  assert.ok(cdIndex >= 0, 'Codex must receive an explicit account root');
   assert.equal(descriptor.args[cdIndex + 1], cwd);
 });
 

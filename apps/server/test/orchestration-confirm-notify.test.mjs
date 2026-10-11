@@ -5,7 +5,7 @@
 // 이고, 엔진과 맞물린 동작(중복 방지·loop 재진입·판정 후 침묵)은 qa-flow e2e 가 잰다.
 //
 // 이 파일이 지키는 계약:
-//   - 수신자 해석: 사람 소유자 우선, 에이전트가 만든 미션은 워크스페이스 owner/member.
+//   - 수신자 해석: 사람 소유자 우선, 에이전트가 만든 미션은 계정 owner/member.
 //   - payload 에 미션명·질문(instructions)·판정 화면 링크가 실제로 들어간다(요구사항 2).
 //   - 어떤 실패도 던지지 않는다(요구사항 6) — dispatcher 가 던져도, ReBAC 이 던져도,
 //     선점 UPDATE 가 실패해도 호출자에게 예외가 새지 않는다.
@@ -28,7 +28,7 @@ async function loadService() {
     return (await import('file://' + file)).OrchestrationConfirmNotifyService;
   } catch (err) {
     throw new Error(
-      '이 테스트는 서버 빌드를 먼저 요구한다. `npm run --workspace=apps/server build`. 원인: ' + err.message,
+      '이 테스트는 서버 빌드를 먼저 요구한다. `npm run --account=apps/server build`. 원인: ' + err.message,
     );
   }
 }
@@ -178,7 +178,7 @@ test('instructions 가 비면 step 제목으로 대체한다 — 무엇을 묻�
   assert.match(calls[0].payload.body, /Does the page look right\?/);
 });
 
-test('에이전트가 만든 미션은 워크스페이스 owner/member 로 넓힌다 (중복 제거)', async () => {
+test('에이전트가 만든 미션은 계정 owner/member 로 넓힌다 (중복 제거)', async () => {
   const ServiceClass = await loadService();
   const { svc, calls } = makeService(ServiceClass, {
     subjects: {
@@ -203,7 +203,7 @@ test('에이전트가 만든 미션은 워크스페이스 owner/member 로 넓�
   );
 });
 
-test('사람 소유자가 있으면 워크스페이스로 넓히지 않는다 — 소음을 만들지 않는다', async () => {
+test('사람 소유자가 있으면 계정로 넓히지 않는다 — 소음을 만들지 않는다', async () => {
   const ServiceClass = await loadService();
   const { svc, calls } = makeService(ServiceClass, {
     subjects: { owner: [{ type: 'user', id: 'u-owner' }], member: [{ type: 'user', id: 'u-member' }] },

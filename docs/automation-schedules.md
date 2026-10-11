@@ -58,7 +58,7 @@ Action 이 삭제되면 그 스케줄은 **스스로 비활성화**된다. 영�
 같은 개념이 두 곳에서 다르게 동작했고, 어느 화면에서 예약을 걸었는지에 따라 운영자가
 받는 보장이 달랐다. 따라잡는 쪽으로 합쳤다.
 
-이관은 `1760000000088-MoveActionCronToWorkspaceSchedules`(역사적 마이그레이션 이름은 유지):
+이관은 `1760000000088-MoveActionCronToAutomationSchedules`(역사적 마이그레이션 이름은 유지):
 
 - **벽시계 시각을 보존한다** — 서버의 UTC 오프셋만큼 시를 되돌리고, 날짜가 넘어가면
   요일도 함께 민다(`0 4 * * *` KST → `0 19 * * *` UTC, `0 5 * * 1` → `0 20 * * 0`).
@@ -84,9 +84,9 @@ MCP `create_automation_schedule` / `update_automation_schedule` /
 `list_automation_schedules` / `run_automation_schedule_now`, 클라이언트
 `components/AutomationSchedulesEditor.tsx`.
 
-구 `/api/workspace-schedules`, `*_workspace_schedule` MCP 이름과 `workspace_id`는
+구 `/api/account-schedules`, `*_account_schedule` MCP 이름과 `account_id`는
 호환 alias다. 새 호출은 `account_id`와 위 canonical 이름을 쓴다.
 
-회귀: `apps/server/test/workspace-schedule-action-dispatch.test.mjs`(발화 경로·택일
+회귀: `apps/server/test/account-schedule-action-dispatch.test.mjs`(발화 경로·택일
 검증), `apps/server/test/action-cron-moved-to-schedules.test.mjs`(시간대 변환·옛 구현
 제거).

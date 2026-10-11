@@ -51,32 +51,32 @@ test('two global skills cannot share a slug (partial unique index)', { skip: !is
 test('the partial unique indexes exist and are scoped as documented', { skip: !isPostgres && 'postgres only' }, async () => {
   const rows = await ds.query(
     `SELECT indexname, indexdef FROM pg_indexes
-     WHERE tablename = 'skills' AND indexname IN ('uq_skills_global_slug', 'uq_skills_workspace_slug')`,
+     WHERE tablename = 'skills' AND indexname IN ('uq_skills_global_slug', 'uq_skills_account_slug')`,
   );
   const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
   assert.ok(byName.has('uq_skills_global_slug'), 'the Skill entity must declare uq_skills_global_slug');
-  assert.ok(byName.has('uq_skills_workspace_slug'), 'the Skill entity must declare uq_skills_workspace_slug');
+  assert.ok(byName.has('uq_skills_account_slug'), 'the Skill entity must declare uq_skills_account_slug');
   assert.match(byName.get('uq_skills_global_slug'), /WHERE .*account_id IS NULL/i);
-  assert.match(byName.get('uq_skills_workspace_slug'), /WHERE .*account_id IS NOT NULL/i);
+  assert.match(byName.get('uq_skills_account_slug'), /WHERE .*account_id IS NOT NULL/i);
 });
 
-test('a workspace MAY reuse a global slug — that is the fork path, not a conflict', { skip: !isPostgres && 'postgres only' }, async () => {
+test('a account MAY reuse a global slug — that is the fork path, not a conflict', { skip: !isPostgres && 'postgres only' }, async () => {
   const ws = await createAccount(app, modules.getDataSourceToken, `pgfork-${stamp}`);
   const slug = `pg-fork-${stamp}`;
   await skills.create('', { slug, name: 'Global', body: '# global\n' }, 'admin', 'global');
   const fork = await skills.create(ws.id, { slug, name: 'Fork', body: '# fork\n' }, 'tester', 'account');
   assert.equal(fork.account_id, ws.id);
 
-  // ...but only once per workspace.
+  // ...but only once per account.
   await assert.rejects(
     () => skills.create(ws.id, { slug, name: 'Again', body: '# again\n' }, 'tester', 'account'),
-    'a workspace may not hold two skills with the same slug',
+    'a account may not hold two skills with the same slug',
   );
 
   const visible = await skills.list(ws.id);
   const matches = visible.filter((s) => s.slug === slug);
   assert.equal(matches.length, 1, 'shadowing must collapse to one row');
-  assert.equal(matches[0].account_id, ws.id, 'the workspace fork must win');
+  assert.equal(matches[0].account_id, ws.id, 'the account fork must win');
 });
 
 test('a global skill\'s versions are stored with account_id NULL', { skip: !isPostgres && 'postgres only' }, async () => {

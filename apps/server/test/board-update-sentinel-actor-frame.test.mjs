@@ -12,7 +12,7 @@
 // 보드 제거 후에도 `board_update` 는 티켓 변경 이벤트 이름으로 남는다
 // (docs/tickets.md). 유실의 실질 피해는 agent-manager 의 `handleBoardUpdate` 다:
 // 상태 이동(moved → done) 의 티켓 worktree 회수와 archived 의 QA/Security run
-// workspace 회수가 이 프레임만 보고 돌고 대체 경로가 없다(10분 sweep 은 dirty
+// account 회수가 이 프레임만 보고 돌고 대체 경로가 없다(10분 sweep 은 dirty
 // 트리를 일부러 보존한다). 비-uuid actor 를 쓰는 대표 경로가 바로 그 둘이다 —
 // ticket-archiver(archived, 'system'), 그리고 MCP move_ticket 으로 agent 가
 // 직접 옮기는 상태 이동(callerActor → actor_id 가 런타임 identity 키 `rt-…`).
@@ -48,7 +48,7 @@ const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const AGENT_UUID = '22222222-2222-4222-8222-222222222222';
 const MANAGER_UUID = '33333333-3333-4333-8333-333333333333';
 const TICKET_ID = '44444444-4444-4444-8444-444444444444';
-const WORKSPACE_ID = 'ws-1';
+const ACCOUNT_ID = 'ws-1';
 const PROJECT_ID = 'proj-1';
 // MCP move_ticket 의 actor_id — callerActor() 가 caller.runtimeKey 를 쓴다.
 const RUNTIME_KEY = 'rt-0123456789abcdef';
@@ -100,7 +100,7 @@ function boardUpdateDef() {
 function mapCtx(agentRepo) {
   return {
     resolveTicketSnapshot: async () => ({
-      root_id: TICKET_ID, account_id: WORKSPACE_ID, status: 'done', project_id: PROJECT_ID,
+      root_id: TICKET_ID, account_id: ACCOUNT_ID, status: 'done', project_id: PROJECT_ID,
     }),
     resolveActorDisplayName: (actorId) => resolveAgentDisplayName(asScope(agentRepo), actorId),
   };
@@ -134,7 +134,7 @@ test('sentinel actor 의 board_update 프레임이 살아남고 저장된 actor_
     const mapped = await def.map(sentinelActivity(actorId, action), mapCtx(pgLikeAgentRepo(calls)));
 
     assert.ok(mapped, `'${actorId}' / ${action} 의 프레임이 발행되어야 한다 (null 이면 유실)`);
-    assert.equal(mapped.scope.account_id, WORKSPACE_ID);
+    assert.equal(mapped.scope.account_id, ACCOUNT_ID);
     assert.equal(mapped.payload.actor_id, actorId);
     assert.equal(
       mapped.payload.actor_name, actorId,
@@ -192,7 +192,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
   };
   const ticketRepo = {
     async findOne() {
-      return { id: TICKET_ID, status: 'done', parent_id: null, account_id: WORKSPACE_ID, project_id: PROJECT_ID };
+      return { id: TICKET_ID, status: 'done', parent_id: null, account_id: ACCOUNT_ID, project_id: PROJECT_ID };
     },
   };
   const emptyRepo = { async findOne() { return null; }, async find() { return []; }, async count() { return 0; } };
@@ -211,7 +211,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
     { async register() {}, async unregister() {}, async touch() {}, async listForAgent() { return []; }, list() { return []; } },
     { noteConnected() {}, noteDisconnected() {}, isConnected() { return false; } },
     /* MemoryMetricsRegistry */ { register() {} },
-    { async accessibleIds() { return [WORKSPACE_ID]; } },
+    { async accessibleIds() { return [ACCOUNT_ID]; } },
   );
 
   const observable = await controller.stream(fakeReq());
@@ -240,7 +240,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
   const frame = received.find((m) => m.type === 'board_update');
   assert.ok(frame, 'agents 조회가 던져도 board_update 프레임은 발행되어야 한다');
   assert.equal(frame.data.ticket_id, TICKET_ID);
-  assert.equal(frame.data.account_id, WORKSPACE_ID);
+  assert.equal(frame.data.account_id, ACCOUNT_ID);
   assert.equal(frame.data.action, 'moved');
   // 구버전 매니저의 terminal 회수가 읽는 컬럼 투영은 status 에서 파생된다.
   assert.equal(frame.data.status, 'done');

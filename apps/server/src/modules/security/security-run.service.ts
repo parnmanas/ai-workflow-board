@@ -63,7 +63,7 @@ export interface StartSecurityRunResult {
 export interface StartSecurityBatchArgs {
   accountId: string;
   // Explicit ordered profile ids, OR `all: true` to expand to every enabled
-  // profile in the workspace. Exactly one is used —
+  // profile in the account. Exactly one is used —
   // profileIds wins if both are given.
   profileIds?: string[];
   all?: boolean;
@@ -129,7 +129,7 @@ export class SecurityRunService {
 
   async listRuns(profileId: string, accountId: string, limit = 20): Promise<SecurityRun[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    await findOrFail(this.profileRepo, { where: { id: profileId, account_id: accountId } }, 'security profile not found in workspace');
+    await findOrFail(this.profileRepo, { where: { id: profileId, account_id: accountId } }, 'security profile not found in account');
     return this.runRepo.find({
       where: { profile_id: profileId, account_id: accountId },
       order: { created_at: 'DESC' },
@@ -139,7 +139,7 @@ export class SecurityRunService {
 
   async getRun(runId: string, accountId: string): Promise<SecurityRun> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'security run not found in workspace');
+    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'security run not found in account');
   }
 
   // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -457,7 +457,7 @@ export class SecurityRunService {
 
   async getBatch(batchId: string, accountId: string): Promise<SecurityRunBatch> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.batchRepo, { where: { id: batchId, account_id: accountId } }, 'security batch not found in workspace');
+    return findOrFail(this.batchRepo, { where: { id: batchId, account_id: accountId } }, 'security batch not found in account');
   }
 
   /**
@@ -547,7 +547,7 @@ export class SecurityRunService {
   /** Resolve the ordered profile id list for a new batch (explicit list, else all-in-scope). */
   private async _resolveBatchProfileIds(args: StartSecurityBatchArgs): Promise<string[]> {
     // Explicit list wins. Preserve caller order; drop ids that aren't enabled
-    // profiles in this workspace so a stale/foreign id can't wedge the batch.
+    // profiles in this account so a stale/foreign id can't wedge the batch.
     if (Array.isArray(args.profileIds) && args.profileIds.length > 0) {
       const found = await this.profileRepo.find({
         where: { id: In(args.profileIds), account_id: args.accountId },
@@ -562,7 +562,7 @@ export class SecurityRunService {
       // Resolve definitions at dispatch time so profile add/remove is
       // reflected without a schedule snapshot.
       const qb = this.profileRepo.createQueryBuilder('p')
-        .where('p.account_id = :ws', { ws: args.accountId })
+        .where('p.account_id = :account', { account: args.accountId })
         .andWhere('p.enabled = :en', { en: true });
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return rows.map((p) => p.id);

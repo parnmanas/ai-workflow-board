@@ -32,7 +32,7 @@ test('ontology_graph_progress 정의가 registry에 존재하고 map/filter/flat
   );
 });
 
-test('map()이 실제 emit 페이로드를 workspace 스코프 + 필드 그대로의 payload로 변환한다', () => {
+test('map()이 실제 emit 페이로드를 account 스코프 + 필드 그대로의 payload로 변환한다', () => {
   const emitted = {
     account_id: 'ws-1',
     graph_id: 'g-1',

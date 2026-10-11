@@ -133,7 +133,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
 
   private async _onDeploymentReported(signal: DeploymentReportedSignal): Promise<void> {
     // Fail-closed on a GLOBAL deployment (account_id=null): fanning it out
-    // to every workspace's Reddit channels would post on behalf of accounts
+    // to every account's Reddit channels would post on behalf of accounts
     // that never asked for it. A future global-broadcast feature would be an
     // explicit opt-in, not this default (lesson e45829b8).
     if (!signal.account_id) {

@@ -176,7 +176,7 @@ test('trackedTicketTool: documented exclusions never emit a card', () => {
 test('removed board-model tools are no longer classified; board-less tools are', () => {
   const removed = [
     'list_boards', 'get_board', 'get_board_summary', 'create_board', 'update_board', 'delete_board',
-    'move_board_to_workspace', 'create_column', 'update_column', 'delete_column', 'add_board_lesson',
+    'move_board_to_account', 'create_column', 'update_column', 'delete_column', 'add_board_lesson',
     'list_board_lessons', 'update_board_lesson', 'list_prompt_templates', 'save_prompt_template',
     'delete_prompt_template', 'move_ticket_to_board', 'propose_move', 'record_agreement',
     'handoff_to_agent', 'reject_handoff', 'get_handoff_pipeline', 'create_benchmark_run',

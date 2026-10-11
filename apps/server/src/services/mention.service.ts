@@ -24,7 +24,7 @@ export interface ResolvedMention {
 // - id: UUID / agent id; restrict to [\w-] to keep matching cheap
 // - displayName: anything up to `]`; optional
 //
-// `@[role:<slug>]` shortcuts are gone with workspace roles (docs/tickets.md):
+// `@[role:<slug>]` shortcuts are gone with account roles (docs/tickets.md):
 // a ticket has exactly one assignee agent and no role holders to fan out to.
 // An old role token in stored text no longer matches and stays plain text.
 const TOKEN_RE = /@\[(user|agent):([\w-]+)(?:\|([^\]]*))?\]/g;

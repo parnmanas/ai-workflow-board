@@ -22,7 +22,7 @@ import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { prependBoardLanguageInstruction } from '../../common/harness-config';
 import { isDoneStatus } from '../../common/ticket-status';
 import { ProjectsService } from '../projects/projects.service';
@@ -55,7 +55,7 @@ function makeError(status: number, message: string): Error & { status: number } 
 /**
  * P4c-3b: spec-direct dispatch용 pseudo-Agent. 저장된 스냅샷에서 dispatch가
  * 읽는 필드만 채운다 — DB 행이 없어도 방 참가자/프롬프트/run 기록이 돈다.
- * workspace는 Action의 것을 물려받는다 (spec에 workspace 개념이 없어서).
+ * account는 Action의 것을 물려받는다 (spec에 account 개념이 없어서).
  */
 /**
  * P4c-4: dispatch 대상 pseudo — 저장된 spec 스냅샷에서 dispatch 가 읽는
@@ -395,7 +395,7 @@ export class ActionsService {
   async list(accountId: string): Promise<Action[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.actionRepo.createQueryBuilder('a')
-      .where('a.account_id = :ws', { ws: accountId });
+      .where('a.account_id = :account', { account: accountId });
     return qb.orderBy('a.name', 'ASC').getMany();
   }
 
@@ -449,7 +449,7 @@ export class ActionsService {
 
   async update(id: string, accountId: string, patch: Partial<Action>): Promise<Action> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    const existing = await findOrFail(this.actionRepo, { where: { id, account_id: accountId } }, 'Action not found in workspace');
+    const existing = await findOrFail(this.actionRepo, { where: { id, account_id: accountId } }, 'Action not found in account');
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -520,7 +520,7 @@ export class ActionsService {
   async remove(id: string, accountId: string): Promise<void> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const existing = await this.actionRepo.findOne({ where: { id, account_id: accountId } });
-    if (!existing) throw makeError(404, 'Action not found in workspace');
+    if (!existing) throw makeError(404, 'Action not found in account');
     // Cascade: delete every Run (and the room each Run created) before the
     // action row goes. Otherwise the chat list ends up with orphan rooms
     // pointing at a non-existent action_id.
@@ -532,7 +532,7 @@ export class ActionsService {
 
   async listRuns(actionId: string, accountId: string, limit = 20): Promise<ActionRun[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    await findOrFail(this.actionRepo, { where: { id: actionId, account_id: accountId } }, 'Action not found in workspace');
+    await findOrFail(this.actionRepo, { where: { id: actionId, account_id: accountId } }, 'Action not found in account');
     return this.runRepo.find({
       where: { action_id: actionId, account_id: accountId },
       order: { created_at: 'DESC' },
@@ -542,7 +542,7 @@ export class ActionsService {
 
   async getRun(runId: string, accountId: string): Promise<ActionRun> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'Run not found in workspace');
+    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'Run not found in account');
   }
 
   /**
@@ -581,7 +581,7 @@ export class ActionsService {
     const run = await findOrFail(
       this.runRepo,
       { where: { id: runId, account_id: accountId } },
-      'Run not found in workspace',
+      'Run not found in account',
     );
 
     const summary = (args.summary || '').trim();
@@ -612,7 +612,7 @@ export class ActionsService {
       .update(ActionRun)
       .set({ status: args.status, result_summary: summary, completed_at: completedAt, retry_pending: willRetry })
       .where('id = :id', { id: run.id })
-      .andWhere('account_id = :ws', { ws: accountId })
+      .andWhere('account_id = :account', { account: accountId })
       .andWhere("status = 'running'")
       .execute();
     // Fail-closed single-winner (reviewer non-blocker note): only a positive
@@ -854,7 +854,7 @@ export class ActionsService {
       .update(ActionRun)
       .set({ batch_resume_claimed: true })
       .where('batch_id = :b', { b: batchId })
-      .andWhere('account_id = :ws', { ws: run.account_id })
+      .andWhere('account_id = :account', { account: run.account_id })
       .andWhere('batch_resume_claimed = :claimed', { claimed: false })
       .execute();
     if ((claim.affected ?? 0) <= 0) {
@@ -997,9 +997,9 @@ export class ActionsService {
   ): Promise<void> {
     try {
       await this.activityRepo.save(this.activityRepo.create({
-        // Source workspace (reviewer req 3) — the run's workspace is the source
-        // ticket's workspace (enforced at dispatch), so the audit row is visible
-        // in the workspace activity feed instead of defaulting to '' (which hid
+        // Source account (reviewer req 3) — the run's account is the source
+        // ticket's account (enforced at dispatch), so the audit row is visible
+        // in the account activity feed instead of defaulting to '' (which hid
         // it from every account-scoped query).
         account_id: run.account_id,
         entity_type: 'ticket',
@@ -1044,7 +1044,7 @@ export class ActionsService {
 
     const reason =
       `High-impact Action "${action.name}" requires human approval before it can run. ` +
-      `A workspace admin must approve it via POST /api/actions/${action.id}/approvals (or the Actions UI), ` +
+      `A account admin must approve it via POST /api/actions/${action.id}/approvals (or the Actions UI), ` +
       `or perform the operation manually — the server will not let an agent auto-execute a deploy/publish/release.`;
     try {
       await this.ticketRepo.update(
@@ -1134,7 +1134,7 @@ export class ActionsService {
     const action = await findOrFail(
       this.actionRepo,
       { where: { id: args.actionId, account_id: args.accountId } },
-      'Action not found in workspace',
+      'Action not found in account',
     );
     // Only high-impact Actions are gated, so only they need a grant. Rejecting an
     // approval for a benign Action keeps the surface honest (no dangling grants
@@ -1144,11 +1144,11 @@ export class ActionsService {
       throw makeError(400, 'this action is not high-impact and does not require approval to run');
     }
 
-    // Bind to a real ticket in the same workspace (mirrors the dispatch boundary).
+    // Bind to a real ticket in the same account (mirrors the dispatch boundary).
     const ticket = await this.ticketRepo.findOne({ where: { id: args.sourceTicketId } });
     if (!ticket) throw makeError(404, 'source ticket not found');
     if (ticket.account_id !== action.account_id) {
-      throw makeError(400, 'source ticket belongs to a different workspace than the action');
+      throw makeError(400, 'source ticket belongs to a different account than the action');
     }
 
     const ttl = typeof args.ttlMinutes === 'number' && args.ttlMinutes > 0
@@ -1209,7 +1209,7 @@ export class ActionsService {
   /** List approval grants for an action (most recent first) — audit visibility. */
   async listApprovals(actionId: string, accountId: string, limit = 20): Promise<ActionApproval[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    await findOrFail(this.actionRepo, { where: { id: actionId, account_id: accountId } }, 'Action not found in workspace');
+    await findOrFail(this.actionRepo, { where: { id: actionId, account_id: accountId } }, 'Action not found in account');
     return this.approvalRepo.find({
       where: { action_id: actionId, account_id: accountId },
       order: { created_at: 'DESC' },
@@ -1351,11 +1351,11 @@ export class ActionsService {
       throw makeError(400, `no target agent of this action exists any more: ${missingTargets.join(', ')}`);
     }
 
-    // Source-ticket workspace boundary (ticket 524bb434, reviewer req 1). When
+    // Source-ticket account boundary (ticket 524bb434, reviewer req 1). When
     // a ticket dispatches this run, the ticket MUST exist and live in the same
-    // workspace as the Action. Without this a caller could link an Action run
-    // to a ticket in another workspace and, via `complete_action_run`, drive
-    // cross-workspace comments / re-dispatch. Validated here at dispatch so the
+    // account as the Action. Without this a caller could link an Action run
+    // to a ticket in another account and, via `complete_action_run`, drive
+    // cross-account comments / re-dispatch. Validated here at dispatch so the
     // persisted `source_ticket_id` is always trustworthy — `completeRun` reads
     // it back off the run row and never re-derives it from caller input.
     const sourceTicketId = (args.sourceTicketId || '').trim();
@@ -1363,7 +1363,7 @@ export class ActionsService {
       const sourceTicket = await this.ticketRepo.findOne({ where: { id: sourceTicketId } });
       if (!sourceTicket) throw makeError(404, 'source ticket not found');
       if (sourceTicket.account_id !== action.account_id) {
-        throw makeError(400, 'source ticket belongs to a different workspace than the action');
+        throw makeError(400, 'source ticket belongs to a different account than the action');
       }
     }
 
@@ -1388,7 +1388,7 @@ export class ActionsService {
     // ── High-impact pre-execution approval gate (ticket 524bb434, scope 5) ──
     // A high-impact Action (explicit flag OR name heuristic) has irreversible
     // external effects, so an AGENT clearing a ticket blocker may NOT auto-run
-    // it — a real workspace admin must have approved it. Only the ticket-driven
+    // it — a real account admin must have approved it. Only the ticket-driven
     // agent/system path is gated: a human-clicked UI run (type='user') is itself
     // the approval, and standing scheduler/hook runs carry no source ticket.
     //
@@ -1416,7 +1416,7 @@ export class ActionsService {
         throw makeError(
           403,
           `Action "${action.name}" is high-impact and requires explicit human approval before it can run. ` +
-          `The source ticket has been set to pending_user_action — a workspace admin must approve it via ` +
+          `The source ticket has been set to pending_user_action — a account admin must approve it via ` +
           `POST /api/actions/${action.id}/approvals (or the Actions UI) or handle the operation manually. ` +
           `An agent cannot approve its own high-impact deploy/publish/release.`,
         );
@@ -1438,11 +1438,11 @@ export class ActionsService {
     // optional pieces best-effort — missing fields render as empty string in
     // the template, which is friendlier than failing the whole Run.
     // 배치 공통 조각이라 루프 밖에서 한 번만 읽는다(대상 N개여도 쿼리는 1회씩).
-    const workspace = await this.accountRepo.findOne({ where: { id: action.account_id } });
+    const account = await this.accountRepo.findOne({ where: { id: action.account_id } });
     // The finished ticket's project, for `{{project.*}}` on hook runs. Scoped to
-    // the Action's workspace so a foreign id never leaks another workspace's repo.
+    // the Action's account so a foreign id never leaks another account's repo.
     const project = args.ticketContext?.project_id
-      ? await this.projects.getInWorkspace(args.ticketContext.project_id, action.account_id)
+      ? await this.projects.getInAccount(args.ticketContext.project_id, action.account_id)
       : null;
     const user = args.triggeredByType === 'user' && args.triggeredById
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })
@@ -1471,7 +1471,7 @@ export class ActionsService {
       const agent = agents[i];
       try {
         runs.push(await this._dispatchOne({
-          action, agent, args, workspace, project, user,
+          action, agent, args, account, project, user,
           runId: runIds[i],
           batchId,
           sourceTicketId,
@@ -1594,7 +1594,7 @@ export class ActionsService {
     action: Action;
     agent: DispatchPseudoAgent;
     args: DispatchActionArgs;
-    workspace: Account | null;
+    account: Account | null;
     project: Project | null;
     user: User | null;
     runId: string;
@@ -1605,7 +1605,7 @@ export class ActionsService {
     /** 이 Action의 대상이 2개 이상인가 — 작업폴더를 에이전트별로 가를지 판단. */
     fanOut: boolean;
   }): Promise<DispatchedRun> {
-    const { action, agent, args, workspace, project, user, runId, batchId, sourceTicketId, approval, highImpact, fanOut } = input;
+    const { action, agent, args, account, project, user, runId, batchId, sourceTicketId, approval, highImpact, fanOut } = input;
 
     // run 단위 예산 계수 (티켓 fc3906c5). `dispatch()` 헤드 체크는 승인 소모
     // 전 fail-fast 용이고, 실제 계수는 여기서 run 하나당 한 번 일어난다 —
@@ -1620,7 +1620,7 @@ export class ActionsService {
     );
 
     const ctx = buildRenderContext({
-      workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
+      account: account ? { id: account.id, name: account.name } : null,
       project: project
         ? { id: project.id, name: project.name, repo_url: project.repo_url, default_branch: project.default_branch }
         : null,
@@ -1630,13 +1630,13 @@ export class ActionsService {
       runId,
       ticket: args.ticketContext ?? null,
     });
-    // 런-워크스페이스 프로비저닝 힌트 (티켓 9fd27487 — 비-티켓 실행 경로에는
+    // 런-계정 프로비저닝 힌트 (티켓 9fd27487 — 비-티켓 실행 경로에는
     // 폴더 규칙이 아예 없었다). Action의 workspace_folder + repo_ref +
     // checkout_mode를 QA/security와 똑같은 방식으로(buildRunProvision) 구체적인
     // RunProvision으로 해석해서, agent-manager가 run subagent를 스폰하기 전에
     // `.awb/act/<leaf>`를 미리 준비하도록 한다 — working_dir 루트에서 그냥
     // 실행되던 것 대신. repo는 Action 의 repo_ref 만 본다 — 비어 있으면 clone
-    // 없이 폴더만 준비된다(board/workspace environment_config 상속은 board 와
+    // 없이 폴더만 준비된다(board/account environment_config 상속은 board 와
     // 함께 사라졌다).
     //
     // fan-out 작업폴더 분리 (티켓 fc3906c5): 기본 폴더는 `.awb/act/<action8>`로
@@ -1658,12 +1658,12 @@ export class ActionsService {
     });
 
     const renderedPrompt = renderActionPrompt(action.prompt || '', ctx);
-    // Output language came from the finished ticket's board; it is a workspace
+    // Output language came from the finished ticket's board; it is a account
     // setting now. Only ticket-driven hook runs carry it, as before — manual /
     // cron runs never had a language instruction.
     const withLanguage = prependBoardLanguageInstruction(
       renderedPrompt,
-      args.ticketContext ? workspace?.language : null,
+      args.ticketContext ? account?.language : null,
     );
     // Every run gets a completion contract appended so the target agent reports
     // its outcome via `complete_action_run` — without this, `status` never

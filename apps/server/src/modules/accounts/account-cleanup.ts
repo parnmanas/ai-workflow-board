@@ -7,8 +7,8 @@ import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { activityEvents } from '../../services/activity.service';
 
 /**
- * Tickets and projects reference their workspace by a plain varchar (no FK),
- * so deleting a workspace must remove them explicitly — the board → column →
+ * Tickets and projects reference their account by a plain varchar (no FK),
+ * so deleting a account must remove them explicitly — the board → column →
  * ticket cascade that used to do it is gone. Comments, attachments and
  * prerequisite links cascade from the ticket rows.
  */
@@ -20,9 +20,9 @@ export async function deleteAccountContent(dataSource: DataSource, accountId: st
     // whole set in one statement is portable only when nothing points at a
     // row already gone.
     await manager.getRepository(Ticket).createQueryBuilder().delete()
-      .where('account_id = :ws AND parent_id IS NOT NULL', { ws: accountId }).execute();
+      .where('account_id = :account AND parent_id IS NOT NULL', { account: accountId }).execute();
     await manager.getRepository(Ticket).createQueryBuilder().delete()
-      .where('account_id = :ws', { ws: accountId }).execute();
+      .where('account_id = :account', { account: accountId }).execute();
     const projects = await manager.getRepository(Project).find({ where: { account_id: accountId }, select: ['id'] });
     for (const project of projects) {
       await manager.getRepository(ProjectHostFolder).delete({ project_id: project.id });

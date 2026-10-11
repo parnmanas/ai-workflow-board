@@ -22,15 +22,15 @@ export class AuthController {
     @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
   ) {}
 
-  private async _buildWorkspacesForUser(userId: string) {
+  private async _buildAccountsForUser(userId: string) {
     // Admin gets all accounts — never blocked by empty ReBACservice relations
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (user?.role === 'admin') {
-      const allWorkspaces = await this.accountRepo.find();
-      return allWorkspaces.map(ws => ({
-        id: ws.id,
-        name: ws.name,
-        slug: ws.slug,
+      const allAccounts = await this.accountRepo.find();
+      return allAccounts.map(account => ({
+        id: account.id,
+        name: account.name,
+        slug: account.slug,
         relations: ['owner'],
       }));
     }
@@ -45,13 +45,13 @@ export class AuthController {
     if (allWsIds.length === 0) return [];
 
     const accounts = await this.accountRepo.find({ where: { id: In(allWsIds) } });
-    return accounts.map(ws => ({
-      id: ws.id,
-      name: ws.name,
-      slug: ws.slug,
+    return accounts.map(account => ({
+      id: account.id,
+      name: account.name,
+      slug: account.slug,
       relations: [
-        ...(memberWsIds.includes(ws.id) ? ['member'] : []),
-        ...(ownerWsIds.includes(ws.id) ? ['owner'] : []),
+        ...(memberWsIds.includes(account.id) ? ['member'] : []),
+        ...(ownerWsIds.includes(account.id) ? ['owner'] : []),
       ],
     }));
   }
@@ -76,7 +76,7 @@ export class AuthController {
 
     const user = result.user as any;
     const permissions = resolvePermissions(user.role, user.permissions ? JSON.parse(user.permissions || '[]') : []);
-    const accounts = await this._buildWorkspacesForUser(user.id);
+    const accounts = await this._buildAccountsForUser(user.id);
 
     return res.json({
       token: result.token,
@@ -112,7 +112,7 @@ export class AuthController {
     const customPerms = (user as any).permissions ? JSON.parse((user as any).permissions || '[]') : [];
     const permissions = resolvePermissions(user.role, customPerms);
     const { password_hash, ...safeUser } = user as any;
-    const accounts = await this._buildWorkspacesForUser(user.id);
+    const accounts = await this._buildAccountsForUser(user.id);
 
     return res.json({
       ...safeUser,
@@ -205,9 +205,9 @@ export class AuthController {
   }
 
   @Get('public-accounts')
-  async publicWorkspaces(@Res() res: Response) {
+  async publicAccounts(@Res() res: Response) {
     const accounts = await this.accountRepo.find({ where: { is_public: 1 } as any });
-    return res.json(accounts.map(ws => ({ id: ws.id, name: ws.name, slug: ws.slug })));
+    return res.json(accounts.map(account => ({ id: account.id, name: account.name, slug: account.slug })));
   }
 
   /** Public: exposes whether Google OAuth is enabled + the client_id (never the secret). */

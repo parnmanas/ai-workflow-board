@@ -102,7 +102,7 @@ export function resolveCommentType(raw: string | null | undefined): CommentType 
 // older than this window. 24h is the lightest possible default that still
 // catches "asked yesterday, never answered" without flagging a question
 // posted an hour ago. Tunable per deployment by reaching into here; future
-// extension could pull this from per-workspace settings.
+// extension could pull this from per-account settings.
 export const STALE_QUESTION_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 // Pure derived check — no network. The ticket list endpoint already eagerly

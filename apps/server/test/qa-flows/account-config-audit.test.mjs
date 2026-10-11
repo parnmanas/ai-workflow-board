@@ -1,7 +1,7 @@
 // Account config-change audit (ticket 1fcba693).
 //
 // The incident's 4 h supervisor_stale_ms was applied at runtime with NO audit
-// trail — workspace updates were never recorded, so the change's actor / time /
+// trail — account updates were never recorded, so the change's actor / time /
 // source could only be RECONSTRUCTED from row timestamps + code archaeology, not
 // proven. This closes that gap: every change to a supervisor/dispatch cadence
 // knob now writes a grep-able `config_changed` ActivityLog row carrying
@@ -27,7 +27,7 @@ function fakeRes() {
   return { _status: 200, _json: undefined, status(c) { this._status = c; return this; }, json(x) { this._json = x; return this; } };
 }
 
-test('workspace config-change audit: cadence PATCH writes config_changed rows with actor + old→new + source', async (t) => {
+test('account config-change audit: cadence PATCH writes config_changed rows with actor + old→new + source', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());

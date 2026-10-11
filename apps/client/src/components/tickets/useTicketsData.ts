@@ -17,7 +17,7 @@ import { applyMove } from '../../tickets/kanban';
  * is ignored (same contract the board hook had) so the list doesn't refetch
  * twice per click.
  */
-export function useTicketsData(wsId: string, filters: TicketFilters) {
+export function useTicketsData(accountId: string, filters: TicketFilters) {
   const [tickets, setTickets] = useState<TicketCard[]>([]);
   const [tagCounts, setTagCounts] = useState<TicketTagCount[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,10 +38,10 @@ export function useTicketsData(wsId: string, filters: TicketFilters) {
   const query = useMemo(() => filtersToQuery(filters), [queryKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refresh = useCallback(async () => {
-    if (!wsId) { setTickets([]); setLoading(false); return; }
+    if (!accountId) { setTickets([]); setLoading(false); return; }
     const seq = ++requestSeq.current;
     try {
-      const res = await api.listTickets(wsId, query);
+      const res = await api.listTickets(accountId, query);
       if (seq !== requestSeq.current) return; // a newer filter/refresh won
       setTickets(Array.isArray(res?.tickets) ? res.tickets : []);
       setTagCounts(Array.isArray(res?.tags) ? res.tags : []);
@@ -52,7 +52,7 @@ export function useTicketsData(wsId: string, filters: TicketFilters) {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [wsId, query]);
+  }, [accountId, query]);
 
   useEffect(() => {
     setLoading(true);
@@ -60,22 +60,22 @@ export function useTicketsData(wsId: string, filters: TicketFilters) {
   }, [refresh]);
 
   useEffect(() => {
-    if (!wsId) { setUsers([]); setChannels([]); return; }
+    if (!accountId) { setUsers([]); setChannels([]); return; }
     let cancelled = false;
     Promise.all([
-      api.getUsers(wsId).catch(() => []),
-      api.getChannels(wsId).catch(() => []),
+      api.getUsers(accountId).catch(() => []),
+      api.getChannels(accountId).catch(() => []),
     ]).then(([u, c]) => {
       if (cancelled) return;
       setUsers(u as User[]);
       setChannels(c as Channel[]);
     });
     return () => { cancelled = true; };
-  }, [wsId]);
+  }, [accountId]);
 
   const { subscribe } = useBoardStream();
   useEffect(() => {
-    if (!wsId) return;
+    if (!accountId) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const unsubUpdate = subscribe('board_update', (data: any) => {
       if (localActionCount.current > 0) return;
@@ -95,7 +95,7 @@ export function useTicketsData(wsId: string, filters: TicketFilters) {
       unsubUpdate();
       unsubTyping();
     };
-  }, [wsId, refresh, subscribe]);
+  }, [accountId, refresh, subscribe]);
 
   /** Run a local write, then refetch; the SSE echo is muted for a moment. */
   const withLocalAction = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
@@ -128,8 +128,8 @@ export function useTicketsData(wsId: string, filters: TicketFilters) {
   }, [refresh]);
 
   const createTicket = useCallback(
-    (body: TicketCreateInput) => withLocalAction(() => api.createTicket(wsId, body)),
-    [withLocalAction, wsId],
+    (body: TicketCreateInput) => withLocalAction(() => api.createTicket(accountId, body)),
+    [withLocalAction, accountId],
   );
   const updateTicket = useCallback(
     (ticketId: string, data: TicketPatch | Record<string, any>) => withLocalAction(() => api.updateTicket(ticketId, data as TicketPatch)),

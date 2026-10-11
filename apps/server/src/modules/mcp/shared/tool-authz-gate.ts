@@ -79,8 +79,8 @@
  *                is never consulted. See the branch discussion above.
  *
  * Deliberately NOT tiered here (left to their existing per-file logic):
- * update_account (a workspace-bound non-full-scope caller is intentionally
- * allowed — see account-tools.ts's callerCanAccessWorkspace usage).
+ * update_account (an account-bound non-full-scope caller is intentionally
+ * allowed — see account-tools.ts's callerCanAccessAccount usage).
  * (P4c-3b: move_agent_to_workspace no longer exists, so its carve-out is gone.)
  */
 
@@ -98,10 +98,10 @@ export type AuthzTier = 'full' | 'caller';
  * rejects a call the tool's existing logic would otherwise allow.
  */
 export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
-  // Role/permission + credential-minting + cross-workspace-cascade tools —
+  // Role/permission + credential-minting + cross-account-cascade tools —
   // d6b56237's originally-reported set. Every one of these unconditionally
   // calls requireFullScopeCaller (directly, or via
-  // requireWorkspaceScopedFullAccess whose first step is
+  // requireAccountScopedFullAccess whose first step is
   // requireFullScopeCaller), so 'full' here never conflicts with existing
   // behavior.
   delete_user: 'full',
@@ -112,7 +112,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // non-full-scope caller through (e.g. a 'write'-scoped key minting a
   // 'read'-scoped key for itself) — the central gate only asserts SOME
   // resolvable caller, never anonymous/sessionless, and leaves the
-  // scope-ceiling / workspace-match nuance to the handler that already
+  // scope-ceiling / account-match nuance to the handler that already
   // implements it.
   // 권한 상승 요청/결과 조회. 게이트는 "세션리스 caller 가 아님" 만 강제하고,
   // 진짜 인가는 두 군데에 있다: (1) 이 agent 를 감독하는 살아 있는 매니저가
@@ -153,7 +153,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   //   - patch_orchestration_graph: 진짜 인가는 runner service patchGraph()의
   //     requireOrchestrator() 검사다(submit_orchestration_plan과 정확히 같은 경로).
   //     게이트는 세션리스 caller만 걸러내면 된다.
-  //   - list_orchestration_graph_templates: 미션도 workspace도 건드리지 않는
+  //   - list_orchestration_graph_templates: 미션도 계정도 건드리지 않는
   //     순수 상수 카탈로그라 소유권 개념 자체가 없다. 그래도 'full'로 올리지
   //     않는 이유는 오케스트레이터 에이전트가 계획 중 읽어야 하는 값이라서다 —
   //     'caller'가 이 파일의 최소 하한선(세션리스 거부)을 그대로 적용한다.
@@ -194,8 +194,8 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
 
   // Board-less tickets (docs/tickets.md): new tools, not in
   // KNOWN_EXISTING_TOOLS. 'caller' is the floor every handler already
-  // assumes — list_tickets scopes to the caller's workspace, and the project
-  // tools check callerCanAccessWorkspace against the project's workspace
+  // assumes — list_tickets scopes to the caller's account, and the project
+  // tools check callerCanAccessAccount against the project's account
   // themselves (runbook (d)); a full-scope tier would lock out the ticket
   // agents that need to read where a project lives on their host.
   list_tickets: 'caller',
@@ -208,7 +208,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // enforces on its own — resolveGraph()/resolveOrProvision() in
   // ontology-tools.ts / ontology-lifecycle.service.ts scope every graph to
   // its (account_id, resource_id, folder_path) or a graph_id already
-  // bound to that workspace; a graph_id from another workspace resolves to
+  // bound to that account; a graph_id from another account resolves to
   // `not_found` rather than leaking existence. All six are read-only
   // (graph_status's only mutation is auto-provisioning/kicking off its own
   // build, never touching another caller's data) — no cross-agent/

@@ -120,12 +120,12 @@ test('validateHardBudgetConfigInput: accepts a well-formed partial config', () =
 
 // ── BoardHardBudgetConfigSchema / validateBoardHardBudgetConfigInput (티켓
 //    73b92d23) — update_board(MCP)와 boards.controller.ts의 PATCH가 쓰는
-//    board-scope 서브셋. max_runs_per_window는 워크스페이스 전용
-//    (resolveHardBudgetForWorkspace, run-budget-guard.ts)이고,
+//    board-scope 서브셋. max_runs_per_window는 계정 전용
+//    (resolveHardBudgetForAccount, run-budget-guard.ts)이고,
 //    resolveHardBudgetForTicket(board의 hard_budget_config가 실제로 흘러가는
 //    곳)은 이 필드를 전혀 읽지 않는다 — 그래서 board scope에서 이 필드를
 //    받아주면 조용히 validation을 통과해 저장되는 no-op이었다. ──────────────
-test('validateBoardHardBudgetConfigInput: max_runs_per_window를 거부한다 (워크스페이스 전용, board 레이어 없음)', () => {
+test('validateBoardHardBudgetConfigInput: max_runs_per_window를 거부한다 (계정 전용, board 레이어 없음)', () => {
   const result = validateBoardHardBudgetConfigInput({ max_runs_per_window: 10 });
   assert.equal(result.ok, false);
   assert.match(result.error, /max_runs_per_window/);
@@ -152,7 +152,7 @@ test('validateBoardHardBudgetConfigInput: 알 수 없는 키·범위 초과 값�
   assert.equal(validateBoardHardBudgetConfigInput({ window_minutes: 2000 }).ok, false, '1440(24시간) 이하여야 함');
 });
 
-test('validateHardBudgetConfigInput(워크스페이스 스코프)은 max_runs_per_window를 계속 허용한다 — 거부는 board 스코프에만 적용', () => {
+test('validateHardBudgetConfigInput(계정 스코프)은 max_runs_per_window를 계속 허용한다 — 거부는 board 스코프에만 적용', () => {
   const result = validateHardBudgetConfigInput({ max_runs_per_window: 10 });
   assert.equal(result.ok, true);
   assert.deepEqual(result.value, { max_runs_per_window: 10 });
@@ -213,32 +213,32 @@ test('resolveHardBudgetConfig: max_runs_per_window overrides independently and s
   assert.equal(untouched.maxRunsPerWindow, DEFAULT_HARD_BUDGET.maxRunsPerWindow, 'unset keeps the baseline');
 });
 
-// ── resolveHardBudget: workspace→board→base precedence (ticket a51ec6d9) ───
+// ── resolveHardBudget: account→board→base precedence (ticket a51ec6d9) ───
 // The `hard_budget_config` analogue of harness-config.ts's resolveHarnessConfig
-// — a board wins per key it sets, unset keys fall to the workspace, both unset
+// — a board wins per key it sets, unset keys fall to the account, both unset
 // fall to `base` (the env-folded baseline).
-test('resolveHardBudget: both workspace and board null inherits base verbatim', () => {
+test('resolveHardBudget: both account and board null inherits base verbatim', () => {
   const base = hardBudgetDefaultsFromEnv({});
   assert.deepEqual(resolveHardBudget(null, null, base), base);
 });
 
-test('resolveHardBudget: a workspace-only override applies when the board is null (the ActionRun/OrchestrationMission shape — no board layer)', () => {
+test('resolveHardBudget: a account-only override applies when the board is null (the ActionRun/OrchestrationMission shape — no board layer)', () => {
   const resolved = resolveHardBudget(JSON.stringify({ max_runs_per_window: 3 }), null, DEFAULT_HARD_BUDGET);
   assert.equal(resolved.maxRunsPerWindow, 3);
-  assert.equal(resolved.maxAutoResponses, DEFAULT_HARD_BUDGET.maxAutoResponses, 'keys the workspace does not set keep the base');
+  assert.equal(resolved.maxAutoResponses, DEFAULT_HARD_BUDGET.maxAutoResponses, 'keys the account does not set keep the base');
 });
 
-test('resolveHardBudget: a board-only override applies when the workspace is null', () => {
+test('resolveHardBudget: a board-only override applies when the account is null', () => {
   const resolved = resolveHardBudget(null, JSON.stringify({ notify: false }), DEFAULT_HARD_BUDGET);
   assert.equal(resolved.notify, false);
 });
 
-test('resolveHardBudget: the board wins per key over the workspace; unset board keys fall through to the workspace', () => {
+test('resolveHardBudget: the board wins per key over the account; unset board keys fall through to the account', () => {
   const resolved = resolveHardBudget(
     JSON.stringify({ max_auto_responses: 55, notify: true }),
     JSON.stringify({ notify: false }),
     DEFAULT_HARD_BUDGET,
   );
   assert.equal(resolved.notify, false, 'board explicitly sets notify — board wins');
-  assert.equal(resolved.maxAutoResponses, 55, 'board leaves max_auto_responses unset — inherits from the workspace layer');
+  assert.equal(resolved.maxAutoResponses, 55, 'board leaves max_auto_responses unset — inherits from the account layer');
 });

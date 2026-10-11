@@ -54,7 +54,7 @@ export function suggestTags(
 }
 
 /**
- * Union of several suggestion sources (workspace-wide `/ticket-tags`, the loaded
+ * Union of several suggestion sources (account-wide `/ticket-tags`, the loaded
  * list's facet, …) — one row per tag (case-insensitive, first spelling wins),
  * keeping the highest count seen, most used first.
  */

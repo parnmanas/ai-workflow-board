@@ -18,11 +18,11 @@ test('pair/redeem mints a host-only identity with no Agent row', async (t) => {
 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const workspace = await createAccount(app, getDataSourceToken, 'redeem-cutover');
+  const account = await createAccount(app, getDataSourceToken, 'redeem-cutover');
 
   const pairing = app.get(PairingService);
   const rec = pairing.mint({
-    account_id: workspace.id,
+    account_id: account.id,
     created_by_user_id: 'test-admin',
     agent_name: 'cutover-host',
   });
@@ -87,7 +87,7 @@ test('pair/redeem mints a host-only identity with no Agent row', async (t) => {
   const { OrchestrationHostsService } = await import(
     '../dist/modules/orchestration/orchestration-hosts.service.js'
   );
-  const hosts = await app.get(OrchestrationHostsService).listRuntimeHosts(workspace.id);
+  const hosts = await app.get(OrchestrationHostsService).listRuntimeHosts(account.id);
   const row = hosts.find((h) => h.manager_agent_id === redeemed.host_id);
   assert.ok(row, `redeemed host missing from catalogue: ${JSON.stringify(hosts.map((h) => h.manager_agent_id))}`);
   assert.equal(row.legacy_agent_id, null);

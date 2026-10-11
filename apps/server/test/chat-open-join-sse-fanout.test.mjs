@@ -10,12 +10,12 @@
 // 만들고 filter() 로 수신 여부를 판정하는, events.controller 가 하는 그 순서다. 정적
 // grep 이 아니라 실제 함수를 돌리므로 필터를 되돌리면 여기서 바로 깨진다.
 //
-// 워크스페이스 대조는 서버가 아니라 수신 측이 한다. 이 스택에서 users 는 워크스페이스에
-// 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다) SSE identity 에도 워크스페이스가 없어
+// 계정 대조는 서버가 아니라 수신 측이 한다. 이 스택에서 users 는 계정에
+// 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다) SSE identity 에도 계정가 없어
 // 동기 필터가 판정할 근거가 없기 때문이다. 그래서 이 파일은 두 겹을 나눠 검증한다:
 //   1) 서버 — 이 update type 이 방 구성원 밖의 user 에게도 나가고, account_id 를
 //      함께 싣는다(수신 측이 대조할 근거). 에이전트에게는 나가지 않는다.
-//   2) 클라이언트 — 같은 워크스페이스면 목록을 재조회하고, 다른 워크스페이스면 버린다.
+//   2) 클라이언트 — 같은 계정면 목록을 재조회하고, 다른 계정면 버린다.
 //      (2) 는 apps/client/test/chat-participants.test.mjs 가 담당한다.
 
 import { test } from 'node:test';
@@ -95,7 +95,7 @@ test('open_join_changed 는 수신 측이 스코프를 판정할 account_id 를 
   assert.equal(
     envelope.payload.account_id,
     WS,
-    'users 는 워크스페이스에 소속되지 않아 서버 필터가 판정할 수 없다 — 대조 근거를 실어 보내야 한다',
+    'users 는 계정에 소속되지 않아 서버 필터가 판정할 수 없다 — 대조 근거를 실어 보내야 한다',
   );
   assert.equal(envelope.scope.account_id, WS, '봉투 scope 에도 실린다');
 

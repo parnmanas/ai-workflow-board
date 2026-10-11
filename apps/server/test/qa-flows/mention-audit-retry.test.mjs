@@ -19,7 +19,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'mention-audit-retry',
+    accountName: 'mention-audit-retry',
   });
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'Audit Agent' });
   const ticket = await createTicket(app, getDataSourceToken, {
@@ -125,7 +125,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(failedRows.length, 1);
 
   const { ws: otherWs } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'mention-audit-other-workspace',
+    accountName: 'mention-audit-other-account',
   });
   const foreignAgent = await createAgent(app, getDataSourceToken, otherWs.id, { name: 'Foreign Agent' });
   const rejected = await post(port, `/api/agent/tickets/${ticket.id}/mention-audit-runs/start`, {

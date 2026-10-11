@@ -11,13 +11,13 @@
 // for `repo_ref.project_id` (and the legacy `resource_id` alias, since
 // repository Resources were migrated to Projects with the same id) — while
 // keeping a direct-url repo anonymous and NEVER wedging the run when the
-// credential is missing / foreign-workspace / undecryptable (availability-first).
-// There is no inherited repo any more: the board ⊕ workspace environment_config
+// credential is missing / foreign-account / undecryptable (availability-first).
+// There is no inherited repo any more: the board ⊕ account environment_config
 // fallback went away with boards, so a run without a repo_ref gets `repo: null`.
 //
 // Behavioural (not a static guard): drives the real compiled `buildRunProvision`
 // against a fake DataSource + the real encryption service, so a regression that
-// stops attaching the credential (or leaks a foreign-workspace token) fails here.
+// stops attaching the credential (or leaks a foreign-account token) fails here.
 
 process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'run-provision-cred-test-key';
 
@@ -167,7 +167,7 @@ test('project path: branch falls back to the project default_branch; explicit re
 
 test('global credential (account_id = null) is accepted (instance-wide shared)', async () => {
   // resolveGitCredential accepts a GLOBAL credential (account_id null); the
-  // run-provision path must ship it too, not treat null as foreign-workspace.
+  // run-provision path must ship it too, not treat null as foreign-account.
   const ds = makeDataSource({ projects: [projectRow()], credentials: [credRow({ account_id: null })] });
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: { project_id: 'proj-1' } });
 
@@ -204,8 +204,8 @@ test('direct-url repo_ref never carries a credential', async () => {
 
 // --- availability-first: a bad credential degrades to anonymous, never wedges -
 
-test('foreign-workspace credential degrades to anonymous (run still dispatches)', async () => {
-  // Credential belongs to another workspace → resolveGitCredential throws →
+test('foreign-account credential degrades to anonymous (run still dispatches)', async () => {
+  // Credential belongs to another account → resolveGitCredential throws →
   // resolveRepoCredential swallows to null → repo keeps its url, drops auth.
   const ds = makeDataSource({
     projects: [projectRow()],
@@ -214,7 +214,7 @@ test('foreign-workspace credential degrades to anonymous (run still dispatches)'
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: { project_id: 'proj-1' } });
 
   assert.equal(rp.repo.url, 'https://github.com/parnmanas/private.git', 'url must still resolve');
-  assert.equal(rp.repo.credential, undefined, 'a foreign-workspace token must NOT be shipped');
+  assert.equal(rp.repo.credential, undefined, 'a foreign-account token must NOT be shipped');
 });
 
 test('undecryptable credential blob degrades to anonymous', async () => {
@@ -230,14 +230,14 @@ test('undecryptable credential blob degrades to anonymous', async () => {
 
 // --- project scope + no inherited repo ---------------------------------------
 
-test('a project of ANOTHER workspace never ships its url or credential (repo: null, run still provisions)', async () => {
+test('a project of ANOTHER account never ships its url or credential (repo: null, run still provisions)', async () => {
   const ds = makeDataSource({
     projects: [projectRow({ account_id: 'ws-OTHER' })],
     credentials: [credRow({ account_id: 'ws-OTHER' })],
   });
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: { project_id: 'proj-1' } });
 
-  assert.equal(rp.repo, null, 'a stale project id pointing at another workspace must not leak that repo');
+  assert.equal(rp.repo, null, 'a stale project id pointing at another account must not leak that repo');
   assert.equal(rp.workspace_folder, '.awb/qa/scenario', 'the folder still resolves — only the clone is skipped');
 });
 
@@ -256,7 +256,7 @@ test('a project with no repo_url resolves to repo: null (nothing to clone)', asy
   assert.equal(rp.repo, null);
 });
 
-test('no repo_ref → repo: null — there is no inherited board/workspace environment repo any more', async () => {
+test('no repo_ref → repo: null — there is no inherited board/account environment repo any more', async () => {
   const ds = makeDataSource({ projects: [projectRow()], credentials: [credRow()] });
   const rp = await buildRunProvision(ds, { ...baseInput, repoRef: null });
 

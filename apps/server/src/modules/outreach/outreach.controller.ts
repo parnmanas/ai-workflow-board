@@ -81,7 +81,7 @@ function outboundToJson(p: OutreachOutboundPost) {
  * `record_outreach_classification` lives in mcp/tools/outreach-tools.ts —
  * this REST controller only ever handled channel CRUD/status, unaffected.
  *
- * Gated on MANAGE_RESOURCES — an OutreachChannel is, shape-wise, a workspace
+ * Gated on MANAGE_RESOURCES — an OutreachChannel is, shape-wise, a account
  * catalog item that attaches a Credential exactly like Resource does, so it
  * reuses that permission rather than introducing a new one. The outbound
  * approval endpoints below (ticket d86d0c24 step 6) reuse the SAME gate —

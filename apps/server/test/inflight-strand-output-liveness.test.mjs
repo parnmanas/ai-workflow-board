@@ -39,7 +39,7 @@ async function loadDist(relParts) {
     return await import(url);
   } catch (err) {
     throw new Error(
-      'This test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' +
+      'This test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' +
         err.message,
     );
   }

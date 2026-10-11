@@ -19,17 +19,17 @@ import type { ToolContext } from './context';
 const SCOPE_RANK: Record<string, number> = { read: 0, write: 1, full: 2 };
 
 const UNAUTHORIZED_MESSAGE =
-  'Unauthorized: API key management requires a DB-backed MCP key bound to an Agent with a resolvable workspace.';
+  'Unauthorized: API key management requires a DB-backed MCP key bound to an Agent with a resolvable account.';
 
 /**
  * Every api-key MCP tool is account-scoped to the caller — the REST
  * `/api/keys` path (guarded by PermissionGuard + AccountGuard +
- * MANAGE_API_KEYS) is the intended cross-workspace admin surface. Resolves
- * to the caller's real workspace, or null when the gate fails (never trust
+ * MANAGE_API_KEYS) is the intended cross-account admin surface. Resolves
+ * to the caller's real account, or null when the gate fails (never trust
  * a request-supplied account_id — there isn't one on these tools, but the
  * same "unbound caller = deny" rule from workflow-function-tools applies).
  */
-async function requireCallerWorkspace(
+async function requireCallerAccount(
   ctx: ToolContext,
   extra: { sessionId?: string },
 ): Promise<string | null> {
@@ -42,10 +42,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_api_keys',
-    'List API keys in your workspace (key values are masked). Shows name, scope, agent, status, usage stats.',
+    'List API keys in your account (key values are masked). Shows name, scope, agent, status, usage stats.',
     {},
     async (_args: any, extra: { sessionId?: string }) => {
-      const accountId = await requireCallerWorkspace(ctx, extra);
+      const accountId = await requireCallerAccount(ctx, extra);
       if (!accountId) return err(UNAUTHORIZED_MESSAGE);
       const keys = await apiKeyService.listApiKeys(accountId);
       return ok(keys);
@@ -54,10 +54,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'get_api_key',
-    'Get details of a single API key by ID (must belong to your workspace)',
+    'Get details of a single API key by ID (must belong to your account)',
     { key_id: z.string().describe('API key ID') },
     async ({ key_id }, extra: { sessionId?: string }) => {
-      const accountId = await requireCallerWorkspace(ctx, extra);
+      const accountId = await requireCallerAccount(ctx, extra);
       if (!accountId) return err(UNAUTHORIZED_MESSAGE);
       const key = await apiKeyService.getApiKey(key_id);
       if (!key || key.account_id !== accountId) return err('API key not found');
@@ -67,7 +67,7 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'create_api_key',
-    'Create a new API key for MCP authentication, scoped to your workspace. The raw key is returned ONLY in this response — save it immediately.',
+    'Create a new API key for MCP authentication, scoped to your account. The raw key is returned ONLY in this response — save it immediately.',
     {
       name: z.string().describe('Display name for the key (e.g. "claude-prod", "gpt-dev")'),
       scope: z.enum(['full', 'read', 'write']).optional().default('full').describe('Permission scope'),
@@ -110,10 +110,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'revoke_api_key',
-    'Revoke (deactivate) an API key in your workspace. The key remains in DB but can no longer authenticate.',
+    'Revoke (deactivate) an API key in your account. The key remains in DB but can no longer authenticate.',
     { key_id: z.string().describe('API key ID to revoke') },
     async ({ key_id }, extra: { sessionId?: string }) => {
-      const accountId = await requireCallerWorkspace(ctx, extra);
+      const accountId = await requireCallerAccount(ctx, extra);
       if (!accountId) return err(UNAUTHORIZED_MESSAGE);
       const existing = await apiKeyService.getApiKey(key_id);
       if (!existing || existing.account_id !== accountId) return err('API key not found');
@@ -125,10 +125,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'delete_api_key',
-    'Permanently delete an API key from your workspace',
+    'Permanently delete an API key from your account',
     { key_id: z.string().describe('API key ID to delete') },
     async ({ key_id }, extra: { sessionId?: string }) => {
-      const accountId = await requireCallerWorkspace(ctx, extra);
+      const accountId = await requireCallerAccount(ctx, extra);
       if (!accountId) return err(UNAUTHORIZED_MESSAGE);
       const existing = await apiKeyService.getApiKey(key_id);
       if (!existing || existing.account_id !== accountId) return err('API key not found');
@@ -140,7 +140,7 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_api_key',
-    'Update an API key\'s metadata (name, scope, active status, expiration, agent link) within your workspace',
+    'Update an API key\'s metadata (name, scope, active status, expiration, agent link) within your account',
     {
       key_id: z.string().describe('API key ID'),
       name: z.string().optional().describe('New display name'),

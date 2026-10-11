@@ -44,7 +44,7 @@ export interface SubscriberIdentity {
 export interface EventMapContext {
   /**
    * The ROOT ticket behind an activity (subtasks walk up to their root):
-   * workspace, status and project. null when the ticket is gone.
+   * account, status and project. null when the ticket is gone.
    */
   resolveTicketSnapshot(ticketId: string, entityId: string): Promise<{
     root_id: string;

@@ -21,7 +21,7 @@ const { decideRunFreshness } = await import(
   'file://' + path.join(DIST_ROOT, 'common', 'workspace-folder-options.js')
 );
 
-// The live workspace-374bb2e3 scenario config that exposed the bug.
+// The live account-374bb2e3 scenario config that exposed the bug.
 const base = { checkout_mode: 'reuse', build_mode: 'cold_then_warm' };
 
 test('cold_then_warm + reuse, nothing stamped yet → COLD (first run / pre-stamp bug state)', () => {

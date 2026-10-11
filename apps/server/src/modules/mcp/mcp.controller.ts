@@ -34,7 +34,7 @@ import { QaScheduleService } from '../qa/qa-schedule.service';
 import { SecurityProfileService } from '../security/security-profile.service';
 import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
-import { WorkspaceScheduleService } from '../automation-schedule/automation-schedule.service';
+import { AutomationScheduleService } from '../automation-schedule/automation-schedule.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
 import { TicketService } from '../tickets/ticket.service';
@@ -151,7 +151,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly securityProfileService: SecurityProfileService,
     private readonly securityRunService: SecurityRunService,
     private readonly securityScheduleService: SecurityScheduleService,
-    private readonly workspaceScheduleService: WorkspaceScheduleService,
+    private readonly automationScheduleService: AutomationScheduleService,
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly ciWaitService: CiWaitService,
     private readonly ticketService: TicketService,
@@ -265,7 +265,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       securityProfileService: this.securityProfileService,
       securityRunService: this.securityRunService,
       securityScheduleService: this.securityScheduleService,
-      workspaceScheduleService: this.workspaceScheduleService,
+      automationScheduleService: this.automationScheduleService,
       artifactRefsService: this.artifactRefsService,
       ticketPrerequisitesService: this.ticketPrerequisitesService,
       ciWaitService: this.ciWaitService,
@@ -308,7 +308,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       const mcpAuthInfo = await authenticateMcpRequest(req, res, this.apiKeyService, mcpLogError);
       if (!mcpAuthInfo) return; // Response already sent
 
-      // Operator(고정된 Agent Session)의 연결은 워크스페이스에 묶지 않는다 — 사이트 전체를 관리한다.
+      // Operator(고정된 Agent Session)의 연결은 계정에 묶지 않는다 — 사이트 전체를 관리한다.
       // 조건·신뢰 경계는 voice/operator-config.ts `isOperatorConnection`.
       if (mcpAuthInfo.accountId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers,
         (managerId, ref) => this.agentSessionsService.resolveMcpSessionRef(managerId, ref))) {
@@ -392,7 +392,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       if (sessionId && sessionStore.has(sessionId)) {
         const session = sessionStore.get(sessionId)!;
         sessionStore.touch(sessionId);
-        // 워크스페이스 범위는 요청마다 다시 판정한 값을 따른다 — 이미 열린 MCP 세션을 operator 로
+        // 계정 범위는 요청마다 다시 판정한 값을 따른다 — 이미 열린 MCP 세션을 operator 로
         // 지정하거나 해제해도 다음 요청부터 맞는 범위로 돈다(같은 키의 연결일 때만).
         if (session.auth && session.auth.source === 'db' && session.auth.agentId === mcpAuthInfo.agentId
           && session.auth.accountId !== mcpAuthInfo.accountId) {

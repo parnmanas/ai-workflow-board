@@ -5,7 +5,7 @@
 //      짧은 턴·사용자가 멈춘 턴은 알리지 않는다. 오류는 길이와 무관하게 알린다.
 //   2. 확인 대기(권한·질문)는 알리되, 같은 세션에서 연달아 오면 한 번만.
 //   3. 미션: 종료 이벤트(mission_completed/failed/cancelled)와 결정 대기(confirm_notified)만 알린다 —
-//      대상은 사람 소유자, 없으면 워크스페이스 owner.
+//      대상은 사람 소유자, 없으면 계정 owner.
 //   4. 작업 알림음은 TTS 가 없어도 보낸다. 대화 답변만 TTS 가 필요하다.
 //   5. 소리는 받는 사람만, 처음 요청될 때 한 번 합성한다.
 //   6. 문장은 받침과 무관하게 맞는 조사만 쓴다(제목 바로 뒤에 이/가를 붙이지 않는다).
@@ -132,7 +132,7 @@ test('waiting for the user is announced once per burst', async (t) => {
   assert.match(heard[0].text, /확인을 기다리고 있어요\.$/);
 });
 
-test('missions: terminal and decision events only, to the human owner or else the workspace owners', async (t) => {
+test('missions: terminal and decision events only, to the human owner or else the account owners', async (t) => {
   const missions = {
     m1: { id: 'm1', account_id: 'w1', title: '음성 게이트웨이', created_by_type: 'user', created_by: 'u7', result_summary: '세 단계 모두 끝났고 PR #23 을 열었어요.' },
     m2: { id: 'm2', account_id: 'w1', title: '야간 점검', created_by_type: 'agent', created_by: 'agent-1', result_summary: '' },
@@ -152,7 +152,7 @@ test('missions: terminal and decision events only, to the human owner or else th
   assert.equal(heard[0].user_id, 'u7');
   assert.equal(heard[0].text, "'음성 게이트웨이' 미션이 끝났어요. 단계 3개 중 3개가 끝났어요. 세 단계 모두 끝났고 PR #23 을 열었어요.");
   assert.deepEqual(heard[0].target, { type: 'mission', account_id: 'w1', mission_id: 'm1' });
-  assert.equal(heard[1].user_id, 'owner-1', 'agent-created mission → workspace owners (users only)');
+  assert.equal(heard[1].user_id, 'owner-1', 'agent-created mission → account owners (users only)');
   assert.equal(heard[1].text, "'야간 점검' 미션에서 결정이 필요해요. 단계: 배포 승인.");
 });
 

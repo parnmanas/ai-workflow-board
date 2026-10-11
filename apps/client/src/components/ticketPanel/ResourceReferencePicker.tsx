@@ -3,7 +3,7 @@ import { rawResourceUrl } from '../../api';
 import { tokens } from '../../tokens';
 import type { Resource } from '../../types';
 
-// Modal that lists file-backed workspace Resources so a comment can
+// Modal that lists file-backed account Resources so a comment can
 // reference one instead of re-uploading bytes (ticket ff3e7337 — the
 // design-recommended "reference existing Resource" path).
 export default function ResourceReferencePicker({

@@ -517,7 +517,7 @@ test('projectParticipants / countUserParticipants: wire → 로스터 투영과 
   assert.deepEqual(projectParticipants({ id: 'A' }), [], 'participants 누락 방어');
 });
 
-test('dispatchChatRoomUpdate: open_join_changed 는 같은 워크스페이스면 방 목록을 재조회한다 (ticket 995a9519)', async () => {
+test('dispatchChatRoomUpdate: open_join_changed 는 같은 계정면 방 목록을 재조회한다 (ticket 995a9519)', async () => {
   // 리뷰 라운드1 P1-2. 이 이벤트의 핵심 수신자는 **아직 참여하지 않은 사용자**이고,
   // 그들에게 필요한 것은 플래그 갱신이 아니라 방이 목록에 새로 나타나거나(ON) 사라지는
   // 것(OFF)이다. 그래서 플래그만 손대면 부족하고 목록을 다시 받아야 한다.
@@ -548,7 +548,7 @@ test('dispatchChatRoomUpdate: open_join_changed 는 같은 워크스페이스면
   });
   await flush();
 
-  assert.equal(listCalls, 1, '같은 워크스페이스의 변경은 목록 재조회를 부른다');
+  assert.equal(listCalls, 1, '같은 계정의 변경은 목록 재조회를 부른다');
   assert.deepEqual(
     roomsState.get().map((r) => r.id),
     ['A', 'B'],

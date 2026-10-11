@@ -120,7 +120,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
 
   // ── 4f. Account authorization (ticket ff3e7337 review blockers 1 & 2).
   //       The above ran as an ADMIN (createUser defaults role='admin'), which
-  //       bypasses every workspace gate — so it could never have caught the
+  //       bypasses every account gate — so it could never have caught the
   //       two authz holes the reviewer found. Exercise them with real,
   //       non-admin identities here.
   const ds = app.get(getDataSourceToken());
@@ -132,7 +132,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
       object_type: 'account', object_id: accountId,
     }));
 
-  // A non-admin MEMBER of the resource's workspace.
+  // A non-admin MEMBER of the resource's account.
   const member = await createUser(app, getDataSourceToken, { name: 'media-member', role: 'user' });
   await grantMember(member.id, ws.id);
   const memberToken = app.get(AuthService).createSession(member.id);
@@ -150,7 +150,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const memberRes = await memberUp.json();
   assert.ok(memberRes.id, 'member upload returns a resource id');
 
-  // …and reference it from a comment (AccountGuard needs the workspace id +
+  // …and reference it from a comment (AccountGuard needs the account id +
   // membership; the member tuple above satisfies it).
   const memberComment = await fetch(`${base}/api/tickets/${ticket.id}/comments`, {
     method: 'POST',
@@ -159,33 +159,33 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   });
   assert.equal(memberComment.status, 201, `non-admin member comment attach should succeed, got ${memberComment.status}`);
 
-  // …and stream it back (authenticated member of the resource's workspace).
+  // …and stream it back (authenticated member of the resource's account).
   const memberRaw = await fetch(`${base}/api/resources/${memberRes.id}/raw`, { headers: memberHeaders });
-  assert.equal(memberRaw.status, 200, 'member can stream a resource in their own workspace');
+  assert.equal(memberRaw.status, 200, 'member can stream a resource in their own account');
   await memberRaw.arrayBuffer();
 
   // Blocker 1: a user who is authenticated but NOT a member of the resource's
-  // workspace must be REFUSED (403, not 401) — no cross-workspace byte access.
+  // account must be REFUSED (403, not 401) — no cross-account byte access.
   const outsider = await createUser(app, getDataSourceToken, { name: 'media-outsider', role: 'user' });
   const otherWs = await createAccount(app, getDataSourceToken, 'media-other');
-  await grantMember(outsider.id, otherWs.id); // member of a DIFFERENT workspace
+  await grantMember(outsider.id, otherWs.id); // member of a DIFFERENT account
   const outsiderToken = app.get(AuthService).createSession(outsider.id);
   const outsiderHeaders = { Authorization: `Bearer ${outsiderToken}` };
 
   const outsiderRaw = await fetch(`${base}/api/resources/${uploaded.id}/raw`, { headers: outsiderHeaders });
-  assert.equal(outsiderRaw.status, 403, 'non-member cannot stream another workspace resource');
+  assert.equal(outsiderRaw.status, 403, 'non-member cannot stream another account resource');
 
   // ?token form must be gated the same way (media tags can't send headers).
   const outsiderTok = await fetch(`${base}/api/resources/${uploaded.id}/raw?token=${encodeURIComponent(outsiderToken)}`);
   assert.equal(outsiderTok.status, 403, 'non-member ?token raw fetch also refused');
 
-  // …and a non-member cannot upload into a workspace they don't belong to.
+  // …and a non-member cannot upload into a account they don't belong to.
   const outsiderUp = await fetch(`${base}/api/resources/upload?account_id=${ws.id}&type=comment_attachment`, {
     method: 'POST',
     headers: { ...outsiderHeaders, 'Content-Type': 'image/png', 'X-File-Name': 'evil.png' },
     body: Buffer.from('nope', 'utf8'),
   });
-  assert.equal(outsiderUp.status, 403, 'non-member cannot upload into another workspace');
+  assert.equal(outsiderUp.status, 403, 'non-member cannot upload into another account');
 
   // ── 5. Oversize JSON body → CLEAN 413 with a friendly message (not 500).
   const huge = 'x'.repeat(11 * 1024 * 1024); // > the 10MB json() ceiling

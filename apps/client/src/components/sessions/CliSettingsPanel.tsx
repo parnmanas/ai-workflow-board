@@ -11,7 +11,7 @@ import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 /**
  * CLI 설정 — 이 Runtime Host 의 이 CLI 에 대해 두 가지를 정한다.
  *
- *  1. **인증**: 어떤 워크스페이스 Credential(Settings → Credentials)로 로그인할지. 비워 두면 장비
+ *  1. **인증**: 어떤 계정 Credential(Settings → Credentials)로 로그인할지. 비워 두면 장비
  *     운영자의 CLI 로그인(`claude login` 등)을 그대로 쓴다. 매니저는 credential 이 묶였을 때만 세션
  *     전용 cli-home 을 만들고, 운영자 홈의 로그인 파일은 건드리지 않는다.
  *  2. **기본 설정**: 새 세션의 approval 모드·모델. 어댑터 프로세스는 매번 자기 기본값으로 시작하므로
@@ -19,7 +19,7 @@ import { useHostModels, withHostModelOption } from '../../cli/hostModels';
  *     이 호스트에서 세션을 한 번도 연 적이 없으면 아직 알 수 없어 그 줄이 나오지 않는다.
  */
 export interface CliSettingsPanelProps {
-  wsId: string;
+  accountId: string;
   managerId: string;
   cli: string;
   hostName: string;
@@ -35,7 +35,7 @@ function defaultsOf(settings: AgentSessionCliSettings | null): Record<string, st
   return out;
 }
 
-export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onChanged }: CliSettingsPanelProps) {
+export default function CliSettingsPanel({ accountId, managerId, cli, hostName, onChanged }: CliSettingsPanelProps) {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
@@ -173,7 +173,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
           )}
           {settings.candidates.length === 0 && (
             <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
-              No {runtimeLabel(cli)} credential in this workspace yet. Add one in Settings → Credentials, or log in on the host itself.
+              No {runtimeLabel(cli)} credential in this account yet. Add one in Settings → Credentials, or log in on the host itself.
             </span>
           )}
         </div>

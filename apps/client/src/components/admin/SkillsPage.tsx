@@ -67,8 +67,8 @@ export default function SkillsPage() {
 
   useEffect(() => { void load(); }, [currentAccountId]);
 
-  // Global skills are inherited by every workspace; publishing/quarantining
-  // one from a workspace is refused server-side, so the UI offers Fork instead.
+  // Global skills are inherited by every account; publishing/quarantining
+  // one from a account is refused server-side, so the UI offers Fork instead.
   const isGlobal = !!selected && !selected.account_id;
 
   const openSkill = async (skill: Skill) => {
@@ -224,7 +224,7 @@ export default function SkillsPage() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                   <strong style={{ color: tokens.colors.textPrimary }}>{selected.name}</strong>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    {/* A global skill is inherited by every workspace, so it is
+                    {/* A global skill is inherited by every account, so it is
                         read-only from here — diverging means forking it, which
                         leaves the global free to keep receiving updates. */}
                     {isGlobal ? (

@@ -34,17 +34,17 @@ import type { CreateScenarioInput } from './qa.service';
  * the journey clip explicitly.
  *
  * Consumed by:
- *   - scripts/seed-qa-scenarios.mjs (idempotent upsert into a live workspace)
+ *   - scripts/seed-qa-scenarios.mjs (idempotent upsert into a live account)
  *   - test/qa-flows/qa-run-lifecycle.test.mjs (regression: build → run → record)
  *
- * Keeping the catalogue as plain data (no workspace/agent ids baked in) is what
+ * Keeping the catalogue as plain data (no account/agent ids baked in) is what
  * makes it reproducible across environments — buildScenarioCreatePayloads()
  * stamps the env-specific scope on at seed time.
  *
  * Scenarios whose premise went away with boards (board pause, board move,
  * column role routing / auto-advance, backlog promotion, role mentions,
  * benchmarks, the board-scoped dispatch-liveness probe) were dropped from the
- * catalogue; already-seeded rows of them stay in their workspace until an
+ * catalogue; already-seeded rows of them stay in their account until an
  * operator deletes them (re-seeding never deletes).
  */
 
@@ -205,7 +205,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     key: 'archive-unarchive',
     name: 'Archive / unarchive ticket',
     description:
-      'Archiving a ticket removes it from the workspace ticket list; unarchiving restores it. '
+      'Archiving a ticket removes it from the account ticket list; unarchiving restores it. '
       + 'Mirrors archive-edge-paths.test.mjs.',
     qa_driver: AWB_MCP_DRIVER,
     qa_driver_config: driverConfig(),
@@ -232,7 +232,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['resources', 'attachments', 'media'],
     steps: [
-      step(0, 'Save a comment_attachment Resource in the workspace', 'Resource created with type=comment_attachment', 'save_resource', { account_id: '{{account_id}}', type: 'comment_attachment', name: 'qa-evidence.txt' }),
+      step(0, 'Save a comment_attachment Resource in the account', 'Resource created with type=comment_attachment', 'save_resource', { account_id: '{{account_id}}', type: 'comment_attachment', name: 'qa-evidence.txt' }),
       step(1, 'Read the resource back', 'get_resource returns metadata (id, mimetype, size)', 'get_resource', { resource_id: '{{resource_id}}' }),
       step(2, 'Attach it to a comment', 'add_comment with attachment_resource_ids succeeds', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: evidence attached', attachment_resource_ids: ['{{resource_id}}'] }),
       step(3, 'Reload the ticket', 'get_ticket shows the comment with its attachment hydrated', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
@@ -345,7 +345,7 @@ export interface BuildScenarioOptions {
  * right dedupe: the first failure files a fix ticket; subsequent failures of
  * the same scenario append a recurrence comment to that still-open ticket
  * instead of spawning a fresh one. project/assignee are left unset, so the fix
- * ticket lands in the run's workspace pool assigned to the scenario's
+ * ticket lands in the run's account pool assigned to the scenario's
  * target_runtime.
  *
  * QA→fix→QA closed loop (ticket 467dbc7a): `rerun_on_fix` is ON so a seeded
@@ -383,7 +383,7 @@ export function keyTag(key: string): string {
 }
 
 /**
- * Stamp the env-specific scope (workspace/agent) onto each template and
+ * Stamp the env-specific scope (account/agent) onto each template and
  * return ready-to-create payloads. The stable `key` is preserved both as the
  * leading tag (`key:<key>`) and folded into the catalogue, so an idempotent
  * seeder can match-and-update instead of duplicating.

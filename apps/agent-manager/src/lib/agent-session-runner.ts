@@ -101,7 +101,7 @@ export interface AgentSessionRequest {
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';
   elicitation_content?: Record<string, unknown> | null;
-  /** CLI 설정에 묶인 워크스페이스 Credential(open/prompt). 없으면 운영자 로그인 그대로. */
+  /** CLI 설정에 묶인 계정 Credential(open/prompt). 없으면 운영자 로그인 그대로. */
   credential_id?: string | null;
   /** open — 세션 잠금을 쥔 **외부** 프로세스까지 종료하고 연다.
    *
@@ -186,7 +186,7 @@ interface SessionAuth {
   label: string;
   /** backend profile 이 걸렸으면 그 lease — 세션이 닫힐 때 반납한다(어댑터 사이드카가 있으면 함께 정리). */
   runtimeLease?: RuntimeLease | null;
-  /** 자격증명의 출처 — 워크스페이스 Credential 인지, 그 장비 운영자의 CLI 로그인인지. */
+  /** 자격증명의 출처 — 계정 Credential 인지, 그 장비 운영자의 CLI 로그인인지. */
   source: 'credential' | 'operator';
   env: Record<string, string>;
   stripEnvKeys: string[];
@@ -1213,7 +1213,7 @@ export class AgentSessionRunner {
     const prefix = sessionCredentialPrefix(cli);
     if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
-      ?? ((id: string, ws: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, ws));
+      ?? ((id: string, account: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, account));
     const fetched = await fetcher(credentialId, request.account_id || '');
     if (!fetched) throw Object.assign(new Error('The credential assigned in CLI settings could not be fetched from AWB.'), { code: 'credential_unavailable' });
     if (!fetched.provider.startsWith(prefix)) {

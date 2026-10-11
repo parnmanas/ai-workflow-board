@@ -8,7 +8,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 // to Projects (entities/Project.ts) with the same id, and the controller/MCP
 // reject new ones.
 @Entity('resources')
-@Index('idx_resources_workspace', ['account_id'])
+@Index('idx_resources_account', ['account_id'])
 export class Resource {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -36,7 +36,7 @@
  * ## 무엇이 여기 없는가
  *
  * 프롬프트 본문·task text·세션 id 는 실행 시점에만 정해지므로 자리표시자를
- * 넣고 `placeholder` 로 표시한다. 보드/워크스페이스 harness 와 티켓 effort
+ * 넣고 `placeholder` 로 표시한다. 보드/계정 harness 와 티켓 effort
  * preset, 티켓별 `cli_runtime_profile` 도 **디스패치 시점** 입력이라 heartbeat
  * 시점에는 알 수 없다 — 지어내지 않고 `varies_per_dispatch` 에 이름만 남긴다.
  */
@@ -147,7 +147,7 @@ const MODE_NOTES: Record<'session' | 'oneshot', string[]> = {
 
 /** 디스패치 시점에만 정해지는 입력들. 이름만 보고하고 값은 지어내지 않는다. */
 const PER_DISPATCH_INPUTS = Object.freeze([
-  '보드·워크스페이스 harness (harness_config)',
+  '보드·계정 harness (harness_config)',
   '티켓 effort preset',
   '티켓별 cli_runtime_profile',
   '프롬프트 본문 · task text',

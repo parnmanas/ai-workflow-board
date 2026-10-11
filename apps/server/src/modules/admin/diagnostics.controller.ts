@@ -70,12 +70,12 @@ export class PublicDiagnosticsController {
   ) {}
 
   /**
-   * Per-workspace supervisor cadence / liveness diagnostic (ticket 1fcba693).
+   * Per-account supervisor cadence / liveness diagnostic (ticket 1fcba693).
    *
    * The `ticketSupervisor.staleMsElevated` gauge on `GET memory` only counts how
    * MANY accounts are mis-set — it can't tell you WHICH one or by how much.
    * This endpoint answers "why is recovery paced slowly here": for every
-   * workspace it shows the configured value, the in-code default, the EFFECTIVE
+   * account it shows the configured value, the in-code default, the EFFECTIVE
    * value the supervisor tick actually uses, and the source (configured vs
    * default) for supervisor_stale_ms / supervisor_resend_ms, plus the liveness
    * floor, the sane-max, and the `elevated` flag. So a value like the incident's
@@ -83,7 +83,7 @@ export class PublicDiagnosticsController {
    * exactly the "출처·effective value가 진단에서 확인 가능" DoD.
    *
    * Same public/read posture and risk profile as `GET memory` (cadence numbers +
-   * workspace name; no user/ticket/credential content).
+   * account name; no user/ticket/credential content).
    */
   @Get('supervisor-cadence')
   async getSupervisorCadence() {

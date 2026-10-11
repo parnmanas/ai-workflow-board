@@ -23,7 +23,7 @@ export class ClaudeBackendProfilesController {
     return (await this.dataSource.getRepository(SystemSetting).findOne({ where: { key: DEFAULT_KEY } }))?.value || null;
   }
 
-  // 프로필은 인스턴스 전역이므로(티켓 e616dbfc) 워크스페이스 배정·기본값을
+  // 프로필은 인스턴스 전역이므로(티켓 e616dbfc) 계정 배정·기본값을
   // 조회하던 3개 쿼리는 사라졌다. Board / Ticket 의 프로필 핀은 보드 제거와
   // 함께 없어졌고(docs/tickets.md — 티켓 실행 설정은 assignee RuntimeSpec 이
   // 갖는다), Agent 핀은 P4c-4 에서 사라졌다. 남은 참조자는 전역 기본값뿐이다.
@@ -137,7 +137,7 @@ export class ClaudeBackendProfilesController {
  * 비관리자도 읽을 수 있는 전역 프로필 카탈로그 (티켓 e616dbfc).
  *
  * 프로필 핀 드롭다운(에이전트 / 세션 설정 / ManagedAgentDialog)이 목록을
- * 채우던 워크스페이스 엔드포인트를 대체한다. 위의 관리자 컨트롤러는 같은
+ * 채우던 계정 엔드포인트를 대체한다. 위의 관리자 컨트롤러는 같은
  * 목록을 주지만 `AdminGuard` 라서, 그대로 갈아끼우면 비관리자에게는 드롭다운이
  * 통째로 빈 목록이 된다 — 그래서 읽기 전용 표면을 따로 둔다. 쓰기(생성 /
  * 수정 / 삭제 / 기본값 지정)는 계속 `api/admin/claude-backend-profiles` 에만

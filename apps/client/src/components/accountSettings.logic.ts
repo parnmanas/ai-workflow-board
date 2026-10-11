@@ -1,8 +1,8 @@
 // Account "Ticket dispatch" settings ⇄ form (docs/tickets.md → Account
 // settings). These used to live on each board; with boards gone they are
-// workspace-wide: output language, per-agent concurrency, done-ticket
+// account-wide: output language, per-agent concurrency, done-ticket
 // auto-archive and the dispatch pause switch. React-free so `node --test`
-// imports it directly (test/workspace-settings-logic.test.mjs).
+// imports it directly (test/account-settings-logic.test.mjs).
 
 import type { Account } from '../types';
 
@@ -38,11 +38,11 @@ export interface DispatchSettingsPatch {
   dispatch_paused_at?: string | null;
 }
 
-export function dispatchSettingsToForm(ws: DispatchSettingsSource | null | undefined): DispatchSettingsForm {
-  const max = ws?.max_concurrent_tickets_per_agent;
-  const days = ws?.auto_archive_days;
+export function dispatchSettingsToForm(account: DispatchSettingsSource | null | undefined): DispatchSettingsForm {
+  const max = account?.max_concurrent_tickets_per_agent;
+  const days = account?.auto_archive_days;
   return {
-    language: typeof ws?.language === 'string' ? ws.language : '',
+    language: typeof account?.language === 'string' ? account.language : '',
     maxConcurrent: String(
       typeof max === 'number' && Number.isFinite(max) && max >= 1 ? max : DEFAULT_MAX_CONCURRENT_TICKETS_PER_AGENT,
     ),
@@ -80,7 +80,7 @@ function normalizedLanguage(raw: string): string | null {
 
 /**
  * The PATCH body for the form: only keys whose value differs from the stored
- * workspace, so saving one field never rewrites another an admin changed in
+ * account, so saving one field never rewrites another an admin changed in
  * another tab. Returns `{ errors }` instead when the form is invalid.
  */
 export function buildDispatchSettingsPatch(
@@ -106,8 +106,8 @@ export function buildDispatchSettingsPatch(
   return { patch, errors };
 }
 
-export function isDispatchPaused(ws: DispatchSettingsSource | null | undefined): boolean {
-  return !!ws?.dispatch_paused_at;
+export function isDispatchPaused(account: DispatchSettingsSource | null | undefined): boolean {
+  return !!account?.dispatch_paused_at;
 }
 
 /** Pause → stamp "now"; resume → null. */

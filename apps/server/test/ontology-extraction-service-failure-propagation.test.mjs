@@ -38,10 +38,10 @@ const { OntologyExtractionService } = await import(
 
 // 그래프의 `resourceId` 는 이름만 남은 것이고 값은 Project id 다 — 저장소
 // Resource 가 같은 id 로 Project 로 이관됐다(docs/tickets.md). 서비스는
-// ProjectsService.getInWorkspace(id, accountId) 로 저장소를 해소한다.
+// ProjectsService.getInAccount(id, accountId) 로 저장소를 해소한다.
 function fakeProjectsService() {
   return {
-    async getInWorkspace(id, accountId) {
+    async getInAccount(id, accountId) {
       if (id !== 'res-1' || accountId !== 'ws-1') return null;
       return {
         id: 'res-1',

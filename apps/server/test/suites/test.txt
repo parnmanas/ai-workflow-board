@@ -32,6 +32,9 @@ test/agent-templates.test.mjs
 test/api-keys-leak.test.mjs
 test/archive-exclusion-guard.test.mjs
 test/attachment-truncation-guard.test.mjs
+test/automation-schedule-action-dispatch.test.mjs
+test/automation-schedule-behavior.test.mjs
+test/automation-schedule-scope.test.mjs
 test/board-removal-migration.test.mjs
 test/board-update-sentinel-actor-frame.test.mjs
 test/boot-concurrent-sessions.test.mjs
@@ -40,14 +43,14 @@ test/boot-port-guard.test.mjs
 test/channels-leak.test.mjs
 test/chat-attachments-guard.test.mjs
 test/chat-dm-promotion.test.mjs
-test/chat-messages-workspace-boundary.test.mjs
+test/chat-messages-account-boundary.test.mjs
 test/chat-my-rooms-uuid-guard.test.mjs
 test/chat-observer-uuid-guard.test.mjs
 test/chat-open-join-sse-fanout.test.mjs
 test/chat-open-join.test.mjs
-test/chat-rename-workspace-boundary.test.mjs
+test/chat-rename-account-boundary.test.mjs
 test/chat-room-join-cast-guard.test.mjs
-test/chat-rooms-list-workspace-boundary.test.mjs
+test/chat-rooms-list-account-boundary.test.mjs
 test/chat-roundtrip.test.mjs
 test/chat-session-status-snapshot.test.mjs
 test/chat-structured-metadata.test.mjs
@@ -70,7 +73,7 @@ test/credential-whitespace-normalize.test.mjs
 test/credentials-scope-switch.test.mjs
 test/credentials-scope.test.mjs
 test/cron-coverage-guard.test.mjs
-test/cross-workspace-holder-name.test.mjs
+test/cross-account-holder-name.test.mjs
 test/deploy-branch-audit-guard.test.mjs
 test/environment-config-repo-only.test.mjs
 test/event-registry-chat-runtime-profile-wire.test.mjs
@@ -236,7 +239,4 @@ test/voice-speakable.test.mjs
 test/voice-support-switch.test.mjs
 test/voice-wake-match.test.mjs
 test/workspace-folder-traversal-guard.test.mjs
-test/workspace-schedule-action-dispatch.test.mjs
-test/workspace-schedule-behavior.test.mjs
-test/workspace-schedule-scope.test.mjs
 npm run test:qa

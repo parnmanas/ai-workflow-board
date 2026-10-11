@@ -98,7 +98,7 @@ appendFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   type: 'spawn', pid: process.pid, argv, sessionId, at: Date.now()
 }) + '\\n');
 if (sessionFlag === '--session-id') {
-  const projectDir = join(process.env.CLAUDE_CONFIG_DIR, 'projects', '-fixture-workspace');
+  const projectDir = join(process.env.CLAUDE_CONFIG_DIR, 'projects', '-fixture-account');
   mkdirSync(projectDir, { recursive: true });
   writeFileSync(join(projectDir, sessionId + '.jsonl'), JSON.stringify({ type: 'user' }) + '\\n');
 }
@@ -569,7 +569,7 @@ test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보�
 test('BaseSessionManager는 종료된 기존 Claude 대화를 동일 UUID의 --resume으로 재개한다', async () => {
   const executable = await makeClaudeFixture('claude-base-session-resume.mjs');
   const sessionKey = 'room-base-session-resume';
-  const projectDir = join(fixtureRoot, 'claude-base-home', 'projects', '-fixture-workspace');
+  const projectDir = join(fixtureRoot, 'claude-base-home', 'projects', '-fixture-account');
   await mkdir(projectDir, { recursive: true });
   await writeFile(join(projectDir, `${resolveClaudeSessionId(sessionKey)}.jsonl`), '{"type":"user"}\n');
 
@@ -1079,7 +1079,7 @@ test('profile validation accepts a positive-integer auto_compact_window', () => 
   }));
 });
 
-test('non-Claude spawn ignores a workspace Claude profile including model, cwd, env, args, and credential contract', async () => {
+test('non-Claude spawn ignores a account Claude profile including model, cwd, env, args, and credential contract', async () => {
   const binDir = join(fixtureRoot, 'npm');
   const originalCwd = join(fixtureRoot, 'codex-work');
   const profileCwd = join(fixtureRoot, 'claude-profile-work');
@@ -1160,7 +1160,7 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
       ticketId: '',
       agentId: 'agent-codex',
       runtimeProfile: {
-        id: 'workspace-claude',
+        id: 'account-claude',
         kind: 'claude-backend',
         protocol: 'anthropic-compatible',
         base_url: 'http://127.0.0.1:49999',

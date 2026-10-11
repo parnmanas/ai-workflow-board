@@ -64,7 +64,7 @@ function render(inst) {
   return React.createElement(
     ToastProvider,
     null,
-    React.createElement(ConfirmProvider, null, React.createElement(InstanceDetail, { inst, workspaceAgents: [] })),
+    React.createElement(ConfirmProvider, null, React.createElement(InstanceDetail, { inst, accountAgents: [] })),
   );
 }
 

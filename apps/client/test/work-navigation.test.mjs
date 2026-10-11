@@ -5,7 +5,7 @@
 //   2. 각 계층 메뉴가 자기 엔티티 목록을 서브메뉴로 갖고, 서브 경로가 기존 상세 화면을 가리킨다
 //   3. 형제 메뉴가 동시에 active 로 보이지 않는다 (예전 /teams 접두사 겹침 회귀)
 //   4. 목록이 비면 메뉴별 empty state 문구를 갖는다
-//   5. Tickets 는 워크스페이스 전체 미읽음 배지를 싣는다
+//   5. Tickets 는 계정 전체 미읽음 배지를 싣는다
 //
 // 실제 렌더까지 태우는 검증은 sidebar-work-hierarchy.test.mjs 가 담당한다.
 import test from 'node:test';
@@ -110,7 +110,7 @@ test('아직 응답 전이면 loading 이 켜져 empty state 와 구분된다', 
   assert.deepEqual(groups.map((g) => g.loading), [true, true]);
 });
 
-test('Tickets 메뉴: /tickets 경로, 그 화면에서 active, 워크스페이스 전체 미읽음 배지', () => {
+test('Tickets 메뉴: /tickets 경로, 그 화면에서 active, 계정 전체 미읽음 배지', () => {
   const item = buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/tickets`, ticketUnreadTotal: 3 });
   assert.equal(item.key, 'tickets');
   assert.equal(item.label, 'Tickets');

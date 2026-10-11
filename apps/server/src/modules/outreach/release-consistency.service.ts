@@ -111,7 +111,7 @@ export class ReleaseConsistencyService implements OnModuleInit, OnModuleDestroy 
 
   private async _onDeploymentReported(signal: DeploymentReportedSignal): Promise<void> {
     // Fail-closed on a GLOBAL deployment (account_id=null) — same reasoning
-    // as OutreachPublisherService: fanning it out to every workspace's
+    // as OutreachPublisherService: fanning it out to every account's
     // GitHub channels would generate reports for accounts that never
     // asked for it.
     if (!signal.account_id) return;

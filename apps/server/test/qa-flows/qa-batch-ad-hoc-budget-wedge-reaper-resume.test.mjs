@@ -15,7 +15,7 @@
 // technique) but driving the schedule-agnostic reaper instead of a schedule
 // tick:
 //   1. start_qa_batch (ad-hoc, no schedule) dispatches scenario 0, consuming
-//      the workspace's only run-budget slot.
+//      the account's only run-budget slot.
 //   2. completing run 0 tries to advance to scenario 1, which the guard
 //      rejects → batch parks `running` at index 1 with no run recorded (the
 //      wedge) — and nothing is tracking this batch via last_batch_id.
@@ -46,9 +46,9 @@ process.env.QA_SCHEDULER_ENABLED = 'false';
 process.env.QA_BATCH_REAPER_ENABLED = 'false';
 process.env.PORT = process.env.QA_BATCH_AD_HOC_REAPER_PORT || '0';
 
-function scenarioPayload(wsId, agentId, name) {
+function scenarioPayload(accountId, agentId, name) {
   return {
-    account_id: wsId,
+    account_id: accountId,
     target_runtime: agentId,
     name,
     qa_driver: 'http-api',
@@ -116,7 +116,7 @@ test('QaRunBatchReaperService resumes an ad-hoc (schedule-less) batch wedged on 
   assert.equal(stillWedged.status, 'running', 'still wedged — the run-budget window has not cleared yet');
   assert.equal(stillWedged.run_ids.length, 1, 'resume retried and hit the same rejection again — no phantom run created');
 
-  step('Raise the workspace run-budget ceiling (the window clears) and sweep again — the resume actually dispatches the remaining index');
+  step('Raise the account run-budget ceiling (the window clears) and sweep again — the resume actually dispatches the remaining index');
   await ds.getRepository('Account').update(ws.id, {
     hard_budget_config: JSON.stringify({ max_runs_per_window: 10, window_minutes: 60, notify: false }),
   });

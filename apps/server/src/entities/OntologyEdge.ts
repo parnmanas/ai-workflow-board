@@ -5,12 +5,12 @@ export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod };
 
 // DESIGN.md 축 2가 고정한 엣지 전용 닫힌 어휘. `type`(CONTAINS, CALLS,
 // DECORATES, AFFECTS_CODE, ...)은 의도적으로 union이 아니다 — OntologyNode.
-// type/kind와 같은 열린/워크스페이스 확장 가능한 taxonomy 논리.
+// type/kind와 같은 열린/계정 확장 가능한 taxonomy 논리.
 //
 // DESIGN.md 축 2에 고정됨(리뷰 지적, integrity/major) — 이름 해석
 // 신뢰도(name-resolution confidence)와 런타임 디스패치 신뢰도는 별개 축.
 // 구조적 CALLS 엣지에만 해당, 다른 모든 엣지 타입에서는 null/미사용. 위
-// type/kind/layer와 달리 이 어휘는 진짜 닫혀 있어서(워크스페이스 확장
+// type/kind/layer와 달리 이 어휘는 진짜 닫혀 있어서(계정 확장
 // 불가) — 리뷰 지적, 6ca4894a Review round 1 — TypeScript union만이 아니라
 // 실제 DB 레벨 CHECK 제약(아래)으로 강제한다. TypeORM `simple-enum` 컬럼
 // 타입을 검토했으나 기각했다 — sqlite/sql.js 드라이버에서는 그냥 순수

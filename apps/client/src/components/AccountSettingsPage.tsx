@@ -30,21 +30,21 @@ import {
 // operators.
 export default function AccountSettingsPage() {
   const { currentAccountId, setCurrentAccount, refreshUser } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const { hasPermission } = useAuth();
   const { showToast } = useToast();
   const { accounts, createAccount, updateAccount, deleteAccount, refresh } = useAccounts();
   const [account, setAccount] = useState<Account | null>(null);
 
   const load = useCallback(async () => {
-    if (!wsId) return;
+    if (!accountId) return;
     try {
-      const ws = await api.getAccount(wsId);
-      setAccount(ws);
+      const account = await api.getAccount(accountId);
+      setAccount(account);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load account', 'error');
     }
-  }, [wsId, showToast]);
+  }, [accountId, showToast]);
 
   useEffect(() => { load(); }, [load]);
 

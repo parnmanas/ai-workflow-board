@@ -1,7 +1,7 @@
 // 단위 테스트 — 동적 max_output_tokens clamp (ticket 7d8ea7c9 후속).
 //
 // 이 테스트가 막는 실제 사고: 새 채팅 세션의 첫 턴(system prompt +
-// AWB/agent/board/workspace instructions + MCP tool schema + 세션 메타데이터)이
+// AWB/agent/board/account instructions + MCP tool schema + 세션 메타데이터)이
 // 33,537 input tokens 가 됐다. Claude Code CLI 자체의 고정 max_tokens
 // 요청(32,000)을 더하면 합계 65,537 — vLLM 백엔드의 context_window(65,536)를
 // 정확히 1 token 초과해 vLLM 이 요청 자체를 거부했다(HTTP 500). 아래 경계값은

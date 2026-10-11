@@ -19,7 +19,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { callerHoldsId, getCallerAgent } from '../shared/session-auth';
-import { callerCanAccessWorkspace, requireFullScopeCaller } from '../shared/authz';
+import { callerCanAccessAccount, requireFullScopeCaller } from '../shared/authz';
 import { GraphRefResolutionError } from '../../ontology/ontology-lifecycle.service';
 import type { OntologyGraph } from '../../../entities/OntologyGraph';
 import type { OntologyNode } from '../../../entities/OntologyNode';
@@ -31,27 +31,27 @@ import type { ToolContext } from './context';
 const UNAVAILABLE_MESSAGE =
   'Ontology graph tools are unavailable in standalone MCP server mode — use the NestJS-integrated server.';
 
-const WORKSPACE_SCOPE_ERROR =
-  'Unauthorized: the caller is not a member of this account_id — cross-workspace graph access is denied.';
+const ACCOUNT_SCOPE_ERROR =
+  'Unauthorized: the caller is not a member of this account_id — cross-account graph access is denied.';
 
 const GRAPH_REFRESH_SCOPE_ERROR =
-  '권한 거부: graph_refresh는 이 티켓의 담당자(assignee) 에이전트의 full-scope API 키가 필요하며, 그래프의 프로젝트는 티켓의 프로젝트(같은 워크스페이스)여야 합니다.';
+  '권한 거부: graph_refresh는 이 티켓의 담당자(assignee) 에이전트의 full-scope API 키가 필요하며, 그래프의 프로젝트는 티켓의 프로젝트(같은 계정)여야 합니다.';
 
 // 리뷰 지적(critical, d35b7b7d 1차 반려) — TOOL_AUTHZ_TABLE의 'caller' tier는
 // "세션리스가 아닌 어떤 caller든" 통과시킬 뿐, 그 caller가 요청한
-// workspace_id에 실제로 속하는지는 전혀 검증하지 않는다(skill 문서의 (c)
+// account_id에 실제로 속하는지는 전혀 검증하지 않는다(skill 문서의 (c)
 // "게이트는 하한선"이 정확히 이 얘기). resolveOrProvision()도 graph row의
-// workspace_id를 입력값 자기 자신과만 비교할 뿐(A1의 idempotent-provisioning
-// 로직), caller의 진짜 workspace와는 무관하다 — 그래서 워크스페이스 A의
-// 정상 caller가 워크스페이스 B의 resource_id/graph_id를 알기만 하면 B의
+// account_id를 입력값 자기 자신과만 비교할 뿐(A1의 idempotent-provisioning
+// 로직), caller의 진짜 account와는 무관하다 — 그래서 계정 A의
+// 정상 caller가 계정 B의 resource_id/graph_id를 알기만 하면 B의
 // 그래프를 조회하거나(graph_status라면) B 소유 리소스의 clone/추출까지
 // 기동시킬 수 있었다. workflow-function-tools.ts의 scopeAllowed() 선례를
 // 그대로 따른다 — 매 핸들러 진입에서 검증하고, 실패하면 어떤 DB 조회도
 // 실행하기 전에 즉시 거부한다.
-async function checkWorkspaceScope(ctx: ToolContext, extra: { sessionId?: string }, accountId: string): Promise<ReturnType<typeof err> | null> {
+async function checkAccountScope(ctx: ToolContext, extra: { sessionId?: string }, accountId: string): Promise<ReturnType<typeof err> | null> {
   const caller = getCallerAgent(extra);
-  const allowed = await callerCanAccessWorkspace(ctx.dataSource, caller, accountId);
-  return allowed ? null : err(WORKSPACE_SCOPE_ERROR);
+  const allowed = await callerCanAccessAccount(ctx.dataSource, caller, accountId);
+  return allowed ? null : err(ACCOUNT_SCOPE_ERROR);
 }
 
 async function checkGraphRefreshScope(
@@ -62,16 +62,16 @@ async function checkGraphRefreshScope(
   const caller = getCallerAgent(extra);
   if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
   if (!caller?.subagentTicketId || caller.subagentTicketId !== input.ticketId) return err(GRAPH_REFRESH_SCOPE_ERROR);
-  if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, input.accountId))) return err(GRAPH_REFRESH_SCOPE_ERROR);
+  if (!(await callerCanAccessAccount(ctx.dataSource, caller, input.accountId))) return err(GRAPH_REFRESH_SCOPE_ERROR);
 
   // graph.resource_id 는 Project id 다(저장소 Resource 가 같은 id 로 이관됐다).
   const [ticket, project] = await Promise.all([
     ctx.dataSource.getRepository(Ticket).findOne({ where: { id: input.ticketId } }),
-    ctx.projectsService.getInWorkspace(input.graph.resource_id, input.accountId),
+    ctx.projectsService.getInAccount(input.graph.resource_id, input.accountId),
   ]);
   // 예전에는 TicketRoleAssignment 행(역할 무관)으로 "이 티켓을 맡은 에이전트인가"를
   // 확인했다. 티켓을 맡는 역할이 담당자(assignee) 하나로 줄었으므로 같은 질문은
-  // 티켓의 assignee identity 와 호출자를 비교하는 것이다 — 워크스페이스 소속만으로는
+  // 티켓의 assignee identity 와 호출자를 비교하는 것이다 — 계정 소속만으로는
   // 통과시키지 않는다(그건 위에서 이미 확인했고, 남의 티켓 그래프를 갈아엎는 것을
   // 막는 것이 이 게이트의 목적이다).
   const isAssignee = !!ticket && callerHoldsId(caller, ticket.assignee_key);
@@ -125,7 +125,7 @@ type ResolveGraphResult =
 
 async function resolveGraph(ctx: ToolContext, extra: { sessionId?: string }, args: GraphRefArgs): Promise<ResolveGraphResult> {
   if (!ctx.ontologyLifecycleService) return { ok: false, response: err(UNAVAILABLE_MESSAGE) };
-  const scopeError = await checkWorkspaceScope(ctx, extra, args.account_id);
+  const scopeError = await checkAccountScope(ctx, extra, args.account_id);
   if (scopeError) return { ok: false, response: scopeError };
   try {
     const graph = await ctx.ontologyLifecycleService.resolveOrProvision({
@@ -186,7 +186,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       if (!ctx.ontologyLifecycleService) return err(UNAVAILABLE_MESSAGE);
       const resource_id = resourceIdArg || project_id;
       if (!resource_id) return err('resource_id (the Project id) is required', { code: 'missing_ref' });
-      const scopeError = await checkWorkspaceScope(ctx, extra, account_id);
+      const scopeError = await checkAccountScope(ctx, extra, account_id);
       if (scopeError) return scopeError;
       const graph = await ctx.ontologyLifecycleService.resolveOrProvision({
         accountId: account_id, resourceId: resource_id, folderPath: folder_path,
@@ -207,11 +207,11 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'graph_refresh',
     '현재 작업 중인 티켓의 기존 온톨로지 그래프를 비동기로 1회 재빌드합니다. ' +
     'DB 기반 full-scope 에이전트 API 키가 필요하고, 호출자가 ticket_id 의 담당자(assignee)여야 하며, ' +
-    '그래프의 프로젝트(resource_id)가 그 티켓의 project_id(같은 워크스페이스)와 같아야 합니다. ' +
+    '그래프의 프로젝트(resource_id)가 그 티켓의 project_id(같은 계정)와 같아야 합니다. ' +
     '그래프가 이미 building이면 bounded no-op으로 즉시 started=false를 반환합니다. ' +
     '후속 읽기 전용 graph_status 호출로 확인할 수 있도록 graph_id/status를 반환합니다.',
     {
-      account_id: z.string().describe('워크스페이스 ID'),
+      account_id: z.string().describe('계정 ID'),
       ticket_id: z.string().describe('배정된 에이전트가 재빌드를 요청하는 티켓 ID'),
       graph_id: z.string().describe('graph_status에서 얻은 기존 그래프 ID'),
     },
@@ -219,7 +219,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
       if (!ctx.ontologyLifecycleService) return err(UNAVAILABLE_MESSAGE);
       const caller = getCallerAgent(extra);
       if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
-      if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, account_id))) return err(GRAPH_REFRESH_SCOPE_ERROR);
+      if (!(await callerCanAccessAccount(ctx.dataSource, caller, account_id))) return err(GRAPH_REFRESH_SCOPE_ERROR);
       let graph: OntologyGraph;
       try {
         graph = await ctx.ontologyLifecycleService.resolveOrProvision({ accountId: account_id, graphId: graph_id });

@@ -9,21 +9,21 @@ export class AccountGuard implements CanActivate {
     const req = context.switchToHttp().getRequest();
     const user = req.currentUser;
 
-    // A `/accounts/:wsId/...` route names its workspace in the path; the
+    // A `/accounts/:accountId/...` route names its account in the path; the
     // header is what membership was checked against, so the two must agree.
-    const pathAccountId = req.params?.wsId;
+    const pathAccountId = req.params?.accountId;
 
-    // Admin bypass — per D-09: admins can access any workspace without a tuple
+    // Admin bypass — per D-09: admins can access any account without a tuple
     if (user?.role === 'admin') {
-      const wsId = req.headers['x-account-id'] || req.query['account_id'] || pathAccountId;
-      req.currentAccountId = wsId || null;
+      const accountId = req.headers['x-account-id'] || req.query['account_id'] || pathAccountId;
+      req.currentAccountId = accountId || null;
       return true;
     }
 
     // Header or query param — SSE uses ?account_id= because EventSource cannot send headers
     const accountId = req.headers['x-account-id'] || req.query['account_id'];
     if (!accountId) {
-      throw new UnauthorizedException('workspace_required');
+      throw new UnauthorizedException('account_required');
     }
 
     // Check both 'member' and 'owner' relations
@@ -39,10 +39,10 @@ export class AccountGuard implements CanActivate {
     );
 
     if (!isMember && !isOwner) {
-      throw new ForbiddenException('workspace_access_denied');
+      throw new ForbiddenException('account_access_denied');
     }
     if (pathAccountId && pathAccountId !== accountId) {
-      throw new ForbiddenException('workspace_access_denied');
+      throw new ForbiddenException('account_access_denied');
     }
 
     req.currentAccountId = accountId;

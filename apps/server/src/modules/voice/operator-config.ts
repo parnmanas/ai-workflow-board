@@ -35,8 +35,8 @@ export interface OperatorEntry {
   cwd: string;
   title: string;
   /**
-   * 이 세션을 다루던 워크스페이스 — 서버가 대신 프롬프트를 보낼 때(작업 보고) 그 워크스페이스의 CLI 설정
-   * (credential 바인딩·기억된 설정)으로 세션을 연다. 등록 때 화면의 워크스페이스로 정해진다.
+   * 이 세션을 다루던 계정 — 서버가 대신 프롬프트를 보낼 때(작업 보고) 그 계정의 CLI 설정
+   * (credential 바인딩·기억된 설정)으로 세션을 연다. 등록 때 화면의 계정로 정해진다.
    */
   account_id: string;
   /** 사용자가 이 operator 와 마지막으로 대화한 시각 — 보고를 받을 operator 를 고르는 데 쓴다(같은 호스트가 없을 때). */
@@ -280,15 +280,15 @@ export async function operatorVocabulary(dataSource: DataSource): Promise<string
 // ─── 사이트 전체 권한 ─────────────────────────────────────────────────────
 
 /**
- * operator 세션의 AWB MCP 연결은 **워크스페이스에 묶지 않는다** — 사이트 전체를 관리하는 에이전트다
+ * operator 세션의 AWB MCP 연결은 **계정에 묶지 않는다** — 사이트 전체를 관리하는 에이전트다
  * (docs/voice-operator.md "권한").
  *
  * 세션의 MCP 는 그 장비 매니저의 키로 주입되고(agent-session-runner `#defaultMcpServers`), 그 키는
- * 페어링 때 한 워크스페이스에 묶인다. operator 로 등록된 세션의 연결만 그 묶음을 푼다 — 조건은 셋이 다:
+ * 페어링 때 한 계정에 묶인다. operator 로 등록된 세션의 연결만 그 묶음을 푼다 — 조건은 셋이 다:
  *   1. 매니저가 Agent Session 에 주입한 연결이다(`X-AWB-Client-Type: agent-session`),
  *   2. `X-AWB-Session-Id` 가 등록된 operator 세션 중 하나다,
  *   3. 키가 그 operator 의 Host 의 full 키다.
- * 풀린 연결은 Host 신원(장비 단위, 워크스페이스 없음)으로 판정된다(`authz.ts` `callerCanAccessWorkspace`).
+ * 풀린 연결은 Host 신원(장비 단위, 계정 없음)으로 판정된다(`authz.ts` `callerCanAccessAccount`).
  *
  * 신뢰 경계는 그 장비의 사용자다: 같은 장비의 다른 프로세스도 매니저 키를 읽고 같은 헤더를 만들 수 있다.
  * operator 등록이 admin 전용인 이유이고, 풀릴 때마다 로그를 남긴다.

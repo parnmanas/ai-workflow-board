@@ -174,14 +174,14 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_qa_scenarios',
-    'List reusable QA scenarios in a workspace.',
+    'List reusable QA scenarios in a account.',
     {
       account_id: z.string().describe('Account ID (required)'),
     },
     async ({ account_id }) => {
       const repo = dataSource.getRepository(QaScenario);
       const qb = repo.createQueryBuilder('s')
-        .where('s.account_id = :ws', { ws: account_id });
+        .where('s.account_id = :account', { account: account_id });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return ok(rows.map(scenarioToJson));
     },

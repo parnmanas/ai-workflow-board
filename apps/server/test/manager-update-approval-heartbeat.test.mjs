@@ -22,27 +22,27 @@ async function setup(t, port, label) {
   const { app, port: boundPort, modules } = await bootApp({ port });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, label);
+  const account = await createAccount(app, getDataSourceToken, label);
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: `${label}-host`,
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label,
   });
   const dataSource = app.get(getDataSourceToken());
-  return { app, port: boundPort, workspace, manager, key, dataSource };
+  return { app, port: boundPort, account, manager, key, dataSource };
 }
 
-async function heartbeat(port, key, manager, workspace, body) {
+async function heartbeat(port, key, manager, account, body) {
   const response = await fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
     method: 'POST',
     headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
-      account_id: workspace.id,
+      account_id: account.id,
       mode: 'manager',
       hostname: 'approval-test-host',
       plugin_version: '1.6.94',
@@ -69,11 +69,11 @@ async function approvalRows(dataSource, agentId, { expect } = {}) {
 }
 
 test('승인 대기 버전을 실은 하트비트가 레지스트리에 저장되고 감사행을 남긴다', async (t) => {
-  const { port, manager, workspace, key, dataSource, app } = await setup(
+  const { port, manager, account, key, dataSource, app } = await setup(
     t, Number.parseInt(process.env.PORT, 10), 'update-approval',
   );
 
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     instance_id: 'update-approval-1',
     latest_version: '1.7.0',
     update_available: true,
@@ -100,7 +100,7 @@ test('같은 요청이 반복되는 하트비트는 감사행을 새로 쌓지 �
   // 파생 포트는 소스 grep 에도 포트 목록에도 잡히지 않는 데다, bootApp 이 부팅마다
   // process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 이 파일의 세 번째·네 번째
   // 부팅은 7933·7934 가 아니라 7934·7937 로 밀려 있었다.
-  const { port, manager, workspace, key, dataSource } = await setup(t, 0, 'update-approval-dedupe');
+  const { port, manager, account, key, dataSource } = await setup(t, 0, 'update-approval-dedupe');
 
   const base = {
     instance_id: 'update-approval-dedupe-1',
@@ -111,15 +111,15 @@ test('같은 요청이 반복되는 하트비트는 감사행을 새로 쌓지 �
   };
   // 하트비트는 30초마다 온다 — 같은 값이 이어지는 동안 다시 쓰면 로그가 요청
   // 하나로 뒤덮인다.
-  await heartbeat(port, key, manager, workspace, base);
-  await heartbeat(port, key, manager, workspace, base);
-  await heartbeat(port, key, manager, workspace, base);
+  await heartbeat(port, key, manager, account, base);
+  await heartbeat(port, key, manager, account, base);
+  await heartbeat(port, key, manager, account, base);
 
   let rows = await approvalRows(dataSource, manager.id, { expect: 1 });
   assert.equal(rows.length, 1, '값이 같은 동안에는 한 번만 기록한다');
 
   // 승인 없이 더 새 버전이 올라온 경우 — 이건 별개의 요청이므로 새로 남아야 한다.
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     ...base,
     latest_version: '1.8.0',
     update_approval_pending_version: '1.8.0',
@@ -133,7 +133,7 @@ test('같은 요청이 반복되는 하트비트는 감사행을 새로 쌓지 �
 });
 
 test('매니저 재기동으로 instance_id 가 바뀌어도 같은 요청은 다시 기록하지 않는다', async (t) => {
-  const { port, manager, workspace, key, dataSource } = await setup(t, 0, 'update-approval-restart');
+  const { port, manager, account, key, dataSource } = await setup(t, 0, 'update-approval-restart');
 
   const pending = {
     latest_version: '1.7.0',
@@ -141,9 +141,9 @@ test('매니저 재기동으로 instance_id 가 바뀌어도 같은 요청은 �
     update_channel: 'latest',
     update_approval_pending_version: '1.7.0',
   };
-  await heartbeat(port, key, manager, workspace, { ...pending, instance_id: 'restart-before' });
+  await heartbeat(port, key, manager, account, { ...pending, instance_id: 'restart-before' });
   // 재기동 = 새 instance_id. upsert 가 전임자를 supersede 한다.
-  await heartbeat(port, key, manager, workspace, { ...pending, instance_id: 'restart-after' });
+  await heartbeat(port, key, manager, account, { ...pending, instance_id: 'restart-after' });
 
   const rows = await approvalRows(dataSource, manager.id, { expect: 1 });
   assert.equal(
@@ -154,10 +154,10 @@ test('매니저 재기동으로 instance_id 가 바뀌어도 같은 요청은 �
 });
 
 test('승인 대기가 아닌 하트비트는 감사행을 남기지 않고, 구버전 매니저는 필드가 undefined 로 남는다', async (t) => {
-  const { port, manager, workspace, key, dataSource, app } = await setup(t, 0, 'update-approval-absent');
+  const { port, manager, account, key, dataSource, app } = await setup(t, 0, 'update-approval-absent');
 
   // 1) 필드를 아는 매니저지만 대기 없음 → null
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     instance_id: 'approval-absent-null',
     latest_version: '1.7.0',
     update_available: true,
@@ -167,7 +167,7 @@ test('승인 대기가 아닌 하트비트는 감사행을 남기지 않고, 구
   assert.equal(withNull.update_approval_pending_version, null);
 
   // 2) 필드를 아예 모르는 구버전 매니저 → undefined (null 과 구분되어야 한다)
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     instance_id: 'approval-absent-undefined',
     latest_version: '1.7.0',
     update_available: true,
@@ -187,8 +187,8 @@ test('업데이트 실패 버전·사유를 실은 하트비트는 레지스트�
   // ralf 2026-10-03: 업데이트 실패가 어디에도 남지 않아 "왜 안 뜨나"를 알 수 없었다.
   // 실패한 버전만 스킵하고 새 버전 오퍼는 막지 않으므로, 사유는 레지스트리까지만
   // 흐르고 감사행은 남기지 않는다(승인 요청과 달리 반복 하트비트마다 쌓일 수 있다).
-  const { port, manager, workspace, key, app } = await setup(t, 0, 'update-failure');
-  await heartbeat(port, key, manager, workspace, {
+  const { port, manager, account, key, app } = await setup(t, 0, 'update-failure');
+  await heartbeat(port, key, manager, account, {
     instance_id: 'update-failure-1',
     latest_version: '1.6.265',
     update_available: false,
@@ -204,7 +204,7 @@ test('업데이트 실패 버전·사유를 실은 하트비트는 레지스트�
   assert.match(record.update_failure_reason, /boot verification failed/);
 
   // 실패 없는 하트비트는 null 로 돌아온다 — undefined(구버전)와 구분된다.
-  await heartbeat(port, key, manager, workspace, {
+  await heartbeat(port, key, manager, account, {
     instance_id: 'update-failure-2',
     latest_version: '1.6.266',
     update_available: true,

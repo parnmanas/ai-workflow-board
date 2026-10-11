@@ -27,7 +27,7 @@ const STORED = {
   dispatch_paused_at: null,
 };
 
-test('form reads the stored workspace; missing values fall back to defaults', () => {
+test('form reads the stored account; missing values fall back to defaults', () => {
   assert.deepEqual(dispatchSettingsToForm(STORED), { language: 'Korean', maxConcurrent: '2', autoArchiveDays: '14' });
   assert.deepEqual(dispatchSettingsToForm({}), { language: '', maxConcurrent: '1', autoArchiveDays: '' });
   assert.deepEqual(
@@ -113,12 +113,12 @@ test('Ticket dispatch section PATCHes only the changed keys and the pause switch
   const dom = setupDom();
   const calls = [];
   const original = api.updateAccount;
-  api.updateAccount = async (id, data) => { calls.push({ id, data }); return { ...workspace, ...data }; };
+  api.updateAccount = async (id, data) => { calls.push({ id, data }); return { ...account, ...data }; };
   t.after(() => { api.updateAccount = original; });
 
-  const workspace = { id: 'ws-1', name: 'W', description: '', created_at: '', updated_at: '', ...STORED };
-  let current = workspace;
-  const view = mount(React.createElement(TicketDispatchSettings, { account: workspace, onSaved: (next) => { current = next; } }));
+  const account = { id: 'ws-1', name: 'W', description: '', created_at: '', updated_at: '', ...STORED };
+  let current = account;
+  const view = mount(React.createElement(TicketDispatchSettings, { account: account, onSaved: (next) => { current = next; } }));
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;
 
@@ -153,8 +153,8 @@ test('invalid input blocks the save and shows the error', async (t) => {
   api.updateAccount = async (id, data) => { calls.push({ id, data }); return null; };
   t.after(() => { api.updateAccount = original; });
 
-  const workspace = { id: 'ws-1', name: 'W', description: '', created_at: '', updated_at: '', ...STORED };
-  const view = mount(React.createElement(TicketDispatchSettings, { account: workspace, onSaved: () => {} }));
+  const account = { id: 'ws-1', name: 'W', description: '', created_at: '', updated_at: '', ...STORED };
+  const view = mount(React.createElement(TicketDispatchSettings, { account: account, onSaved: () => {} }));
   t.after(() => { view.unmount(); dom.cleanup(); });
   const { container } = view;
 

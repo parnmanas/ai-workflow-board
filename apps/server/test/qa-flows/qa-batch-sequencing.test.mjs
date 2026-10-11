@@ -27,9 +27,9 @@ process.env.PORT = process.env.QA_BATCH_SEQ_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function scenarioPayload(wsId, agentId, name) {
+function scenarioPayload(accountId, agentId, name) {
   return {
-    account_id: wsId,
+    account_id: accountId,
     target_runtime: agentId,
     name,
     qa_driver: 'http-api',

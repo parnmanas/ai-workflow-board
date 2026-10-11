@@ -3,7 +3,7 @@
 // refs[]/imports[]/heritage[]를 신뢰도 캐스케이드(cascade.ts)로 해소해
 // IMPORTS/CALLS/INSTANTIATES/USES_TYPE/REFERENCES/EXTENDS/IMPLEMENTS
 // 엣지를 만들고, reverse_edge_index를 채운다. Tier 1.5 자체가 "a separate,
-// whole-workspace pass"로 설계돼 있어(DESIGN.md 축 1) 이 그래프의 노드
+// whole-account pass"로 설계돼 있어(DESIGN.md 축 1) 이 그래프의 노드
 // 전체를 메모리에 올린다 — persist.ts와 마찬가지로 청크 upsert +
 // 명시적 매크로태스크 양보 계약을 그대로 재사용한다(upsertChunked/
 // yieldToEventLoop, persist.ts에서 import).

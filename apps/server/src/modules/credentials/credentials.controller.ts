@@ -107,7 +107,7 @@ function serializeCliLoginSession(s: CliLoginSession) {
   };
 }
 
-// Shared response shape. `scope` lets the client tell workspace credentials
+// Shared response shape. `scope` lets the client tell account credentials
 // apart from inherited global ones. Write permissions are enforced per row in
 // the current Account management page.
 function serializeCred(c: Credential) {
@@ -184,7 +184,7 @@ export class CredentialsController {
   /**
    * Writing a GLOBAL (instance-level) credential is gated behind the dedicated
    * MANAGE_GLOBAL_CREDENTIALS permission (admins hold it via ALL_PERMISSIONS).
-   * Account members who can manage their own workspace credentials can still
+   * Account members who can manage their own account credentials can still
    * only READ globals (list/bind), never create/edit/delete them.
    */
   private canManageGlobal(req: Request): boolean {
@@ -216,7 +216,7 @@ export class CredentialsController {
     @Res() res: Response,
   ) {
     // scope=global → globals only (legacy callers). Otherwise a
-    // workspace view returns its own credentials PLUS inherited globals.
+    // account view returns its own credentials PLUS inherited globals.
     let where: any[];
     if (scope === 'global') {
       where = [{ account_id: IsNull() }];
@@ -257,8 +257,8 @@ export class CredentialsController {
     } else {
       // 리뷰 지적(round 1)과 같은 클래스의 문제: account_id 없이 부르면
       // "전역" 조회이므로 credential 생성과 동일하게 MANAGE_GLOBAL_CREDENTIALS
-      // 가 없으면 막는다 — 아니면 workspace 스코프 credential 권한만 가진
-      // 사용자가 다른 workspace들의 manager instance_id를 열람할 수 있었다.
+      // 가 없으면 막는다 — 아니면 account 스코프 credential 권한만 가진
+      // 사용자가 다른 account들의 manager instance_id를 열람할 수 있었다.
       if (!this.canManageGlobal(req)) {
         return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
       }
@@ -325,7 +325,7 @@ export class CredentialsController {
     const session = await this.cliLoginSessions.getSession(sessionId, accountId);
     if (!session) return res.status(404).json({ error: 'Login session not found' });
     // 리뷰 지적(round 1): 전역 세션 조회에도 생성과 같은 게이트가 필요하다 —
-    // 그렇지 않으면 workspace 스코프 권한만으로 다른 workspace를 위해 만든
+    // 그렇지 않으면 account 스코프 권한만으로 다른 account를 위해 만든
     // 전역 세션의 상태(진행 URL/코드 등)를 열람할 수 있었다.
     if (session.is_global && !this.canManageGlobal(req)) {
       return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
@@ -344,7 +344,7 @@ export class CredentialsController {
     const existing = await this.cliLoginSessions.getSession(sessionId, accountId);
     if (!existing) return res.status(404).json({ error: 'Login session not found' });
     // 리뷰 지적(round 1): 취소도 조회와 같은 전역 게이트가 필요하다 — 취소는
-    // 다른 workspace를 위한 전역 세션에 대한 뮤테이션이므로 생성과 동일한
+    // 다른 account를 위한 전역 세션에 대한 뮤테이션이므로 생성과 동일한
     // 권한을 요구해야 한다.
     if (existing.is_global && !this.canManageGlobal(req)) {
       return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
@@ -421,8 +421,8 @@ export class CredentialsController {
     @Res() res: Response,
   ) {
     const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
-    // A global credential (account_id=NULL) is readable from any workspace.
-    // A workspace credential is only readable from its own workspace.
+    // A global credential (account_id=NULL) is readable from any account.
+    // A account credential is only readable from its own account.
     if (cred.account_id !== null && cred.account_id !== accountId) {
       return res.status(404).json({ error: 'Credential not found' });
     }
@@ -508,7 +508,7 @@ export class CredentialsController {
       return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
     }
     if (targetScope === 'account' && !actingAccountId) {
-      return res.status(400).json({ error: 'account_id is required for workspace scope' });
+      return res.status(400).json({ error: 'account_id is required for account scope' });
     }
     const scopeChanged = targetScope !== currentScope;
     if (scopeChanged && targetScope === 'account') {
@@ -570,8 +570,8 @@ export class CredentialsController {
         entity_id: saved.id,
         action: 'credential_scope_changed',
         field_changed: 'account_id',
-        old_value: currentScope === 'global' ? 'global' : `workspace:${previousAccountId ?? ''}`,
-        new_value: targetScope === 'global' ? 'global' : `workspace:${actingAccountId}`,
+        old_value: currentScope === 'global' ? 'global' : `account:${previousAccountId ?? ''}`,
+        new_value: targetScope === 'global' ? 'global' : `account:${actingAccountId}`,
         actor_id: actor?.id || '',
         actor_name: actor?.name || '',
         ticket_id: '',

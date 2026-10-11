@@ -28,7 +28,7 @@ import { hasPermission } from '../../common/types/permissions';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount, agentAccountWhere } from '../../common/agent-account-scope';
 
 @ApiBearerAuth('user-session')
 @ApiTags('accounts')
@@ -36,7 +36,7 @@ import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/age
 @UseGuards(AuthGuard)
 export class AccountsController {
   constructor(
-    @InjectRepository(Account) private readonly wsRepo: Repository<Account>,
+    @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly rebacService: ReBACService,
@@ -55,7 +55,7 @@ export class AccountsController {
     return owner;
   }
 
-  private async requireWorkspaceAccess(user: CurrentUserData, accountId: string, res: Response) {
+  private async requireAccountAccess(user: CurrentUserData, accountId: string, res: Response) {
     if (user?.role === 'admin') return true;
     const subject = { type: 'user', id: user.id };
     const object = { type: 'account', id: accountId };
@@ -70,10 +70,10 @@ export class AccountsController {
   async list(@Req() req: Request, @Res() res: Response) {
     const ids: string[] = (req as any).accessibleAccountIds || [];
     if (!ids.length) return res.json([]);
-    const accounts = await this.wsRepo.find({ where: { id: In(ids) }, order: { created_at: 'DESC' } });
-    const result = await Promise.all(accounts.map(async ws => {
-      const ticketCount = await this.ticketRepo.count({ where: { account_id: ws.id, archived_at: IsNull(), parent_id: IsNull() } });
-      return { ...ws, ticket_count: ticketCount };
+    const accounts = await this.accountRepo.find({ where: { id: In(ids) }, order: { created_at: 'DESC' } });
+    const result = await Promise.all(accounts.map(async account => {
+      const ticketCount = await this.ticketRepo.count({ where: { account_id: account.id, archived_at: IsNull(), parent_id: IsNull() } });
+      return { ...account, ticket_count: ticketCount };
     }));
     return res.json(result);
   }
@@ -95,17 +95,17 @@ export class AccountsController {
 
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireWorkspaceAccess(user, id, res)) return;
-    const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    if (!await this.requireAccountAccess(user, id, res)) return;
+    const account = await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
     const rows = await this.ticketRepo.createQueryBuilder('t')
       .select('t.status', 'status')
       .addSelect('COUNT(*)', 'n')
-      .where('t.account_id = :ws AND t.parent_id IS NULL AND t.archived_at IS NULL', { ws: id })
+      .where('t.account_id = :account AND t.parent_id IS NULL AND t.archived_at IS NULL', { account: id })
       .groupBy('t.status')
       .getRawMany();
     const ticket_counts: Record<string, number> = {};
     for (const r of rows) ticket_counts[r.status] = Number(r.n);
-    return res.json({ ...ws, ticket_counts });
+    return res.json({ ...account, ticket_counts });
   }
 
   @Patch(':id')
@@ -116,13 +116,13 @@ export class AccountsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     if (!await this.requireOwner(user, id, res)) return;
-    const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    const account = await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
 
     // Snapshot the cadence/liveness knobs BEFORE mutating so a config-change
     // audit can record old→new (ticket 1fcba693). These are the settings that
     // pace the supervisor backstop — the incident was a 4 h supervisor_stale_ms
     // applied with no trail. Audit written after a successful save below.
-    const cadenceBefore = cadenceSnapshot(ws);
+    const cadenceBefore = cadenceSnapshot(account);
 
     const {
       name, description,
@@ -132,66 +132,66 @@ export class AccountsController {
       harness_config, environment_config,
       hard_budget_config, clone_policy,
     } = body;
-    if (name !== undefined) ws.name = name;
-    if (description !== undefined) ws.description = description;
+    if (name !== undefined) account.name = name;
+    if (description !== undefined) account.description = description;
 
     // Supervisor cadence (TicketDispatchService). Defaults (30 min / 5 min)
     // live in the entity column; only positive finite integers are accepted
-    // so a bad PATCH can't wedge the workspace into "0 ms stale check".
+    // so a bad PATCH can't wedge the account into "0 ms stale check".
     if (supervisor_stale_ms !== undefined) {
       const v = Number(supervisor_stale_ms);
-      if (Number.isFinite(v) && v > 0) ws.supervisor_stale_ms = Math.floor(v);
+      if (Number.isFinite(v) && v > 0) account.supervisor_stale_ms = Math.floor(v);
       else return res.status(400).json({ error: 'supervisor_stale_ms must be a positive number' });
     }
     if (supervisor_resend_ms !== undefined) {
       const v = Number(supervisor_resend_ms);
-      if (Number.isFinite(v) && v > 0) ws.supervisor_resend_ms = Math.floor(v);
+      if (Number.isFinite(v) && v > 0) account.supervisor_resend_ms = Math.floor(v);
       else return res.status(400).json({ error: 'supervisor_resend_ms must be a positive number' });
     }
     // Ticket dispatch settings that used to live on each board (docs/tickets.md).
     if (max_concurrent_tickets_per_agent !== undefined) {
       const v = Number(max_concurrent_tickets_per_agent);
-      if (Number.isInteger(v) && v >= 1 && v <= 50) ws.max_concurrent_tickets_per_agent = v;
+      if (Number.isInteger(v) && v >= 1 && v <= 50) account.max_concurrent_tickets_per_agent = v;
       else return res.status(400).json({ error: 'max_concurrent_tickets_per_agent must be an integer 1..50' });
     }
     if (dispatch_paused_at !== undefined) {
       if (dispatch_paused_at === null || dispatch_paused_at === false || dispatch_paused_at === '') {
-        ws.dispatch_paused_at = null;
+        account.dispatch_paused_at = null;
       } else {
         const at = dispatch_paused_at === true ? new Date() : new Date(dispatch_paused_at);
         if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'dispatch_paused_at must be an ISO timestamp, true or null' });
-        ws.dispatch_paused_at = ws.dispatch_paused_at || at;
+        account.dispatch_paused_at = account.dispatch_paused_at || at;
       }
     }
     if (language !== undefined) {
       const v = language == null ? '' : String(language).trim();
-      ws.language = v ? v.slice(0, 64) : null;
+      account.language = v ? v.slice(0, 64) : null;
     }
     if (auto_archive_days !== undefined) {
       if (auto_archive_days === null || auto_archive_days === '') {
-        ws.auto_archive_days = null;
+        account.auto_archive_days = null;
       } else {
         const v = Number(auto_archive_days);
-        if (Number.isInteger(v) && v >= 1 && v <= 365) ws.auto_archive_days = v;
+        if (Number.isInteger(v) && v >= 1 && v <= 365) account.auto_archive_days = v;
         else return res.status(400).json({ error: 'auto_archive_days must be null or an integer 1..365' });
       }
     }
 
-    // 채팅-워크스페이스-폴더 opt-in(티켓 9fd27487).    // 채팅-워크스페이스-폴더 opt-in(티켓 9fd27487). int(0/1) truthy 정규화.
+    // 채팅-계정-폴더 opt-in(티켓 9fd27487).    // 채팅-계정-폴더 opt-in(티켓 9fd27487). int(0/1) truthy 정규화.
     if (chat_workspace_folder_enabled !== undefined) {
       const raw = chat_workspace_folder_enabled;
-      ws.chat_workspace_folder_enabled = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
+      account.chat_workspace_folder_enabled = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
     }
 
     // Account agent harness (ticket 7122600c): null clears, objects are
     // strict-zod-validated → 400.
     if (harness_config !== undefined) {
       if (harness_config === null) {
-        ws.harness_config = null;
+        account.harness_config = null;
       } else {
         const checked = validateHarnessConfigInput(harness_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
-        ws.harness_config = serializeHarnessConfig(checked.value);
+        account.harness_config = serializeHarnessConfig(checked.value);
       }
     }
 
@@ -200,11 +200,11 @@ export class AccountsController {
     // null clears, objects are strict-zod-validated → 400.
     if (hard_budget_config !== undefined) {
       if (hard_budget_config === null) {
-        ws.hard_budget_config = null;
+        account.hard_budget_config = null;
       } else {
         const checked = validateHardBudgetConfigInput(hard_budget_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
-        ws.hard_budget_config = serializeHardBudgetConfig(checked.value);
+        account.hard_budget_config = serializeHardBudgetConfig(checked.value);
       }
     }
 
@@ -212,11 +212,11 @@ export class AccountsController {
     // agents. null clears.
     if (environment_config !== undefined) {
       if (environment_config === null) {
-        ws.environment_config = null;
+        account.environment_config = null;
       } else {
         const checked = validateEnvironmentConfigInput(environment_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
-        ws.environment_config = serializeEnvironmentConfig(checked.value);
+        account.environment_config = serializeEnvironmentConfig(checked.value);
       }
     }
 
@@ -225,11 +225,11 @@ export class AccountsController {
     // 기본값(clone timeout 60분)이 그대로 적용된다.
     if (clone_policy !== undefined) {
       if (clone_policy === null) {
-        ws.clone_policy = null;
+        account.clone_policy = null;
       } else {
         const checked = validateClonePolicyInput(clone_policy);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
-        ws.clone_policy = serializeClonePolicy(checked.value);
+        account.clone_policy = serializeClonePolicy(checked.value);
       }
     }
 
@@ -243,26 +243,26 @@ export class AccountsController {
     let auditRows: ActivityLog[];
     try {
       auditRows = await this.dataSource.transaction(async (manager) => {
-        await manager.save(ws);
-        return this._auditCadenceChangesTx(manager, ws.id, cadenceBefore, ws, {
+        await manager.save(account);
+        return this._auditCadenceChangesTx(manager, account.id, cadenceBefore, account, {
           actorId: user?.id || '',
           actorName: user?.name || '',
           source: 'rest',
         });
       });
     } catch (e: any) {
-      return res.status(500).json({ error: `Failed to persist workspace settings: ${e?.message || String(e)}` });
+      return res.status(500).json({ error: `Failed to persist account settings: ${e?.message || String(e)}` });
     }
     this.activityService.emitLogged(auditRows);
 
-    return res.json(ws);
+    return res.json(account);
   }
 
   /**
    * Write a `config_changed` ActivityLog row for each supervisor/dispatch
    * cadence field that actually changed (ticket 1fcba693), via the caller's
    * transaction `manager` so the rows commit — or roll back — atomically with
-   * the workspace save. Account-scoped (entity_type='account',
+   * the account save. Account-scoped (entity_type='account',
    * ticket_id=''), carrying actor + old→new + source so a value like the
    * incident's 4 h supervisor_stale_ms can never again land without a trail.
    * Returns the persisted (not-yet-emitted) rows; the caller emits them after
@@ -303,15 +303,15 @@ export class AccountsController {
   @Delete(':id')
   async delete(@Param('id') id: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
     if (!await this.requireOwner(user, id, res)) return;
-    const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    const account = await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
 
-    const count = await this.wsRepo.count();
+    const count = await this.accountRepo.count();
     if (count <= 1) return res.status(400).json({ error: 'Cannot delete the last account' });
 
-    await deleteAccountContent(this.dataSource, ws.id);
+    await deleteAccountContent(this.dataSource, account.id);
     await this.dataSource.transaction(async manager => {
-      await manager.getRepository(RelationTuple).delete({ object_type: 'account', object_id: ws.id });
-      await manager.getRepository(Account).delete(ws.id);
+      await manager.getRepository(RelationTuple).delete({ object_type: 'account', object_id: account.id });
+      await manager.getRepository(Account).delete(account.id);
     });
     return res.json({ success: true });
   }
@@ -320,8 +320,8 @@ export class AccountsController {
 
   @Get(':id/members')
   async listMembers(@Param('id') id: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireWorkspaceAccess(user, id, res)) return;
-    await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    if (!await this.requireAccountAccess(user, id, res)) return;
+    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
 
     const [members, owners] = await Promise.all([
       this.rebacService.listSubjects({ type: 'account', id }, 'member'),
@@ -358,7 +358,7 @@ export class AccountsController {
       return res.status(400).json({ error: 'relation must be member or owner' });
     }
 
-    await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
     await findOrFail(this.userRepo, { where: { id: user_id } }, 'User not found');
 
     await this.rebacService.grant({ type: 'user', id: user_id }, relation, { type: 'account', id });
@@ -371,7 +371,7 @@ export class AccountsController {
     @Body() body: any, @Res() res: Response, @CurrentUser() user: CurrentUserData,
   ) {
     if (!await this.requireOwner(user, id, res)) return;
-    await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
     await findOrFail(this.userRepo, { where: { id: userId } }, 'User not found');
     const { relation } = body;
     if (!['member', 'owner'].includes(relation)) {
@@ -387,7 +387,7 @@ export class AccountsController {
   @Delete(':id/members/:userId')
   async removeMember(@Param('id') id: string, @Param('userId') userId: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
     if (!await this.requireOwner(user, id, res)) return;
-    await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
     await this.rebacService.revoke({ type: 'user', id: userId }, 'member', { type: 'account', id });
     await this.rebacService.revoke({ type: 'user', id: userId }, 'owner', { type: 'account', id });
     return res.json({ success: true });
@@ -396,7 +396,7 @@ export class AccountsController {
   // ─── Mention autocomplete candidates ───────────────────────
   //
   // Returns the user + agent set the composer's @-dropdown should show for
-  // this workspace. The only agent a ticket comment can wake is the ticket's
+  // this account. The only agent a ticket comment can wake is the ticket's
   // assignee, so the agent section is that one agent (when `ticket_id` is
   // supplied and the ticket has one).
 
@@ -407,8 +407,8 @@ export class AccountsController {
     @Res() res: Response,
     @CurrentUser() user: CurrentUserData,
   ) {
-    if (!await this.requireWorkspaceAccess(user, id, res)) return;
-    await findOrFail(this.wsRepo, { where: { id } }, 'Account not found');
+    if (!await this.requireAccountAccess(user, id, res)) return;
+    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
 
     const [members, owners] = await Promise.all([
       this.rebacService.listSubjects({ type: 'account', id }, 'member'),
@@ -449,11 +449,11 @@ export class AccountsController {
 }
 
 /** The settings whose changes get a `config_changed` audit row (ticket 1fcba693). */
-function cadenceSnapshot(ws: Account) {
+function cadenceSnapshot(account: Account) {
   return {
-    supervisor_stale_ms: String(ws.supervisor_stale_ms),
-    supervisor_resend_ms: String(ws.supervisor_resend_ms),
-    max_concurrent_tickets_per_agent: String(ws.max_concurrent_tickets_per_agent),
-    dispatch_paused_at: ws.dispatch_paused_at ? new Date(ws.dispatch_paused_at).toISOString() : '',
+    supervisor_stale_ms: String(account.supervisor_stale_ms),
+    supervisor_resend_ms: String(account.supervisor_resend_ms),
+    max_concurrent_tickets_per_agent: String(account.max_concurrent_tickets_per_agent),
+    dispatch_paused_at: account.dispatch_paused_at ? new Date(account.dispatch_paused_at).toISOString() : '',
   };
 }

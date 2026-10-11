@@ -33,7 +33,7 @@ import { resolveCallerIdentityRow } from '../../mcp/shared/authz';
 import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { LogService } from '../../../services/log.service';
-import { agentIsVisibleInWorkspace } from '../../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../../common/agent-account-scope';
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import { clampEnv } from '../outreach-polling.service';
 import { InboundItem } from '../connectors/types';

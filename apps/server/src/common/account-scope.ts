@@ -44,7 +44,7 @@ export class AccountScope {
     };
   }
 
-  // For cross-workspace admin queries — bypasses workspace scoping intentionally.
+  // For cross-account admin queries — bypasses account scoping intentionally.
   static asAdmin<T extends ObjectLiteral>(dataSource: DataSource, entity: EntityTarget<T>): Repository<T> {
     return dataSource.getRepository(entity);
   }

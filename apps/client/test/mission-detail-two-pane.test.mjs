@@ -213,8 +213,8 @@ async function renderSession(t, { step: s, items, events = [], hasMore = false }
 
   const calls = [];
   const original = api.getOrchestrationStepSession;
-  api.getOrchestrationStepSession = async (stepId, wsId, opts) => {
-    calls.push({ stepId, wsId, opts });
+  api.getOrchestrationStepSession = async (stepId, accountId, opts) => {
+    calls.push({ stepId, accountId, opts });
     const page = opts?.beforeId ? [] : items;
     return {
       step_id: s.id,
@@ -229,7 +229,7 @@ async function renderSession(t, { step: s, items, events = [], hasMore = false }
   const view = mount(
     React.createElement(StepSessionPanel, {
       step: s,
-      wsId: 'ws-1',
+      accountId: 'ws-1',
       events,
       stepTimeoutMinutes: 90,
       onClose: () => {},

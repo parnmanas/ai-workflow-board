@@ -2751,9 +2751,9 @@ export class WorktreeManager {
           await fsp.rm(path, { recursive: true, force: true });
           removed++;
           await forgetRunWorkspaceLeaf(root, leaf);
-          log(`[worktree] swept idle ${kind} workspace ${path} (idle ${Math.round(idleMs / 60000)}min)`);
+          log(`[worktree] swept idle ${kind} account ${path} (idle ${Math.round(idleMs / 60000)}min)`);
         } catch (err: any) {
-          log(`[worktree] sweep failed for ${kind} workspace ${path}: ${err?.message ?? err}`);
+          log(`[worktree] sweep failed for ${kind} account ${path}: ${err?.message ?? err}`);
           survived.push(leaf); // 삭제 실패 — 조상이 이 경로를 함께 지우지 않도록 살아남은 것으로 취급
         }
       }
@@ -2804,7 +2804,7 @@ export class WorktreeManager {
    * — 즉 그 디렉터리가 우리 자신의 프로비저닝 산출물이라고 확신할 수 있을 때만
    * — leaf로 push한 뒤에도 계속 내려가 자손 leaf를 마저 찾는다. `.git`이 있는
    * 디렉터리는 절대 더 내려가지 않는다: 그 밑은 전부 체크아웃된 저장소 자신의
-   * 콘텐츠이지 별개 workspace 경계일 수 없고, 서브디렉터리마다 파일이 있다는
+   * 콘텐츠이지 별개 account 경계일 수 없고, 서브디렉터리마다 파일이 있다는
    * 이유로 leaf 취급하면(예: `src/`, `node_modules/`) 실제로 살아있는 저장소의
    * 일부를 독립 sweep 대상으로 오인해 지워버리는, 원래 버그보다 더 나쁜 상황을
    * 만든다. 마커도 `.git`도 없이 파일만 있어서 leaf로 폴백 판정된 경우(스크래치

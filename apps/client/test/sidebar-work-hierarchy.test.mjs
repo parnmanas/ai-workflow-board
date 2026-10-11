@@ -195,7 +195,7 @@ async function mountSidebar(t, options = {}) {
                   onClose: () => {
                     closed.count += 1;
                   },
-                  wsId: WS_ID,
+                  accountId: WS_ID,
                   rooms: [],
                   roomsLoading: false,
                 }),
@@ -308,7 +308,7 @@ test('② 계층 메뉴 아래 실제 팀/미션이 서브메뉴로 뜬다', asy
   assert.deepEqual(subItemLabels(view, 'Missions'), ['Ship the nav', 'Backfill telemetry']);
 });
 
-test('②-b Tickets 줄은 워크스페이스 전체 읽지 않은 티켓 코멘트 수를 배지로 보인다', async (t) => {
+test('②-b Tickets 줄은 계정 전체 읽지 않은 티켓 코멘트 수를 배지로 보인다', async (t) => {
   const { view } = await mountSidebar(t, { ticketUnread: 4 });
   const row = groupRow(view, 'Tickets');
   assert.match(row.textContent, /4/);

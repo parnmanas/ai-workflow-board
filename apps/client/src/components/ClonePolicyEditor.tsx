@@ -12,7 +12,7 @@ import {
 // Repo clone 정책 에디터 (ticket bddb63ee).
 //
 // 두 표면이 **같은 ClonePolicy 형태**를 편집한다 — Project 설정(프로젝트별 override)과
-// Account Settings(워크스페이스 기본값) — 저장 대상만 다르다. 그래서 ProjectForm
+// Account Settings(계정 기본값) — 저장 대상만 다르다. 그래서 ProjectForm
 // 는 필드 그리드(ClonePolicyFields)를, AccountSettingsPage 는 저장 버튼까지 포함한
 // 기본 export 를 쓴다. 폼 매핑·검증은 clonePolicy.logic.ts 가 소유한다(jsdom 없이
 // 단위 테스트하기 위한 분리 — environmentConfig.logic.ts 와 같은 관례).

@@ -29,7 +29,7 @@ export interface DispatchAgentLike {
  * 티켓 71532b4f — comment_mention dispatch(코멘트 @-멘션으로 깨우는 one-shot
  * subagent)용 harness / Claude backend runtime profile / environment env_vars /
  * worktree mode. TicketDispatchService 가 agent_trigger 에 싣는 것과 같은
- * 워크스페이스 레이어를 쓰므로, 같은 (agent, ticket) 이 어느 경로로 깨든 같은
+ * 계정 레이어를 쓰므로, 같은 (agent, ticket) 이 어느 경로로 깨든 같은
  * backend/harness/env 로 동작한다.
  *
  * environment_config 는 env_vars 만 — repository 는 티켓의 project 에서만 온다.
@@ -50,13 +50,13 @@ export async function resolveMentionDispatchExtras(
     worktree_mode: DEFAULT_WORKTREE_MODE,
   };
   try {
-    const workspace = ticket.account_id
+    const account = ticket.account_id
       ? await dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } })
       : null;
-    const env = parseEnvironmentConfig(workspace?.environment_config);
+    const env = parseEnvironmentConfig(account?.environment_config);
     extras = {
       ...extras,
-      harness_config: appendBoardLanguageInstruction(parseHarnessConfig(workspace?.harness_config), workspace?.language),
+      harness_config: appendBoardLanguageInstruction(parseHarnessConfig(account?.harness_config), account?.language),
       environment_config: env ? resolveEnvironmentConfig({ ...env, repositories: [] }, () => null) : null,
     };
   } catch {

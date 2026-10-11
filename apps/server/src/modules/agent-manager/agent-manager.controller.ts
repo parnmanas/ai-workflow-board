@@ -44,7 +44,7 @@ import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
-import { agentIsVisibleInWorkspace, normalizeAgentAccountId } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount, normalizeAgentAccountId } from '../../common/agent-account-scope';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import {
   resolveSlotCredentialSources,
@@ -305,7 +305,7 @@ function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | 
  *     to register and refresh per-process presence. The heartbeat adds
  *     agent_ids[]/working_dirs[]/paired_at to the InstanceRecord.
  *   - Admin user: GET `/api/admin/agent-manager/instances` etc. for the
- *     runtime dashboard embedded in the workspace AI Agents page. ST-4 adds pairing/command endpoints.
+  *     runtime dashboard embedded in the account AI Agents page. ST-4 adds pairing/command endpoints.
  *   - awb-agent-manager bootstrap: POST `/api/agent-manager/pair/redeem`
  *     swaps a one-time pairing token for an API key + agent identity.
  *   - awb-agent-manager runtime: POST `/api/agent-manager/command/ack`
@@ -958,7 +958,7 @@ export class AgentManagerController {
 
   /**
    * Manager-side: exchange a pairing token (issued by an admin via the AWB
-   * UI) for an API key, agent identity, and workspace binding. The token is
+   * UI) for an API key, agent identity, and account binding. The token is
    * the only auth — the handler is intentionally guard-less because the
    * caller has nothing else yet. Single-shot: a redeemed token is consumed.
    */
@@ -981,8 +981,8 @@ export class AgentManagerController {
     if (!resolvedToken && code) {
       // PairingService doesn't expose a code lookup directly (the token is
       // the bearer, not the code). Iterate the account-scoped list of any
-      // known workspace to find a match — small fan-out, in-memory map.
-      // We don't know the workspace here, so do an unscoped scan via the
+      // known account to find a match — small fan-out, in-memory map.
+      // We don't know the account here, so do an unscoped scan via the
       // service's internal map. Add a thin helper for this.
       const found = (this.pairing as any).findByCode?.(code);
       if (found && typeof found.token === 'string') resolvedToken = found.token;
@@ -1018,7 +1018,7 @@ export class AgentManagerController {
       account_id: rec.account_id,
     });
 
-    this.logService.info('AgentManager', `Pairing redeemed id=${rec.id} ws=${rec.account_id} host=${host.id}`);
+    this.logService.info('AgentManager', `Pairing redeemed id=${rec.id} account=${rec.account_id} host=${host.id}`);
 
     // Audit: each redeem mints a *new* Host row. If the operator re-paired a
     // host that already had an operator-set name (e.g. "Ralf"), the new row
@@ -1027,7 +1027,7 @@ export class AgentManagerController {
     // Log so the trail is in /admin/logs.
     this.logService.info(
       'AgentIdentity',
-      `Runtime Host created via pair/redeem: name="${host.name}" (id=${host.id.slice(0, 8)} hostname=${hostname} ws=${rec.account_id} pairing=${rec.id})`,
+      `Runtime Host created via pair/redeem: name="${host.name}" (id=${host.id.slice(0, 8)} hostname=${hostname} account=${rec.account_id} pairing=${rec.id})`,
       {
         host_id: host.id,
         agent_name: host.name,
@@ -1291,7 +1291,7 @@ export class AgentManagerController {
   @ApiOperation({ summary: 'List currently-heartbeating Runtime Host instances' })
   async list(@Query('account_id') accountId: string, @Res() res: Response, @Req() req: Request) {
     const requested = (req as any).requestedAccountId;
-    const data = requested ? this.registry.listForWorkspace(requested) : this.registry.list();
+    const data = requested ? this.registry.listForAccount(requested) : this.registry.list();
     // Enrich each instance with the RuntimeHost name so the admin list can
     // render the configured identity instead of the OS hostname. Fallback to
     // hostname when the Host row is missing — keeps the previous default
@@ -1353,7 +1353,7 @@ export class AgentManagerController {
     if (!inst.account_id) {
       return res.json([]);
     }
-    const all = await this.subagentMonitor.listForWorkspace(inst.account_id);
+    const all = await this.subagentMonitor.listForAccount(inst.account_id);
     return res.json(all.filter((s) => s.agent_id === inst.agent_id));
   }
 
@@ -1469,10 +1469,10 @@ export class AgentManagerController {
   @Get('api/admin/agent-manager/pair')
   @UseGuards(PermissionGuard, AccountGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
-  @ApiOperation({ summary: 'List active pairing tokens for the current workspace' })
+  @ApiOperation({ summary: 'List active pairing tokens for the current account' })
   pairList(@CurrentAccountId() accountId: string | null, @Res() res: Response) {
     if (!accountId) return res.json([]);
-    return res.json(this.pairing.listForWorkspace(accountId));
+    return res.json(this.pairing.listForAccount(accountId));
   }
 
   @ApiBearerAuth('user-session')
@@ -1880,7 +1880,7 @@ export class AgentManagerController {
   // key) so a host can only ever provision keys for itself, and MCP-side
   // attribution degrades to the `runtime:<key>` synthetic identity until
   // P4c-4 reworks display. Same rotation hygiene as the managed-agent path:
-  // prior provisioning rows for (host, key, workspace) are hard-deleted.
+  // prior provisioning rows for (host, key, account) are hard-deleted.
   //
   // Auth model: AgentAuthGuard validates the manager's apiKey. Callers whose
   // key predates the P0 host stamp (no host_id, legacy manager agent) are
@@ -1899,7 +1899,7 @@ export class AgentManagerController {
     }
     const accountId = String(body?.account_id || '').trim();
     if (!accountId) {
-      return res.status(400).json({ error: 'runtime_key_workspace_required' });
+      return res.status(400).json({ error: 'runtime_key_account_required' });
     }
     const hostId = String((req as any).apiKey?.host_id || '').trim();
     if (!hostId) {
@@ -1931,7 +1931,7 @@ export class AgentManagerController {
     });
     this.logService.info(
       'AgentManager',
-      `Provisioned runtime apiKey ${key} (host=${hostId.slice(0, 8)} ws=${accountId.slice(0, 8)})`,
+      `Provisioned runtime apiKey ${key} (host=${hostId.slice(0, 8)} account=${accountId.slice(0, 8)})`,
       { key_id: issued.apiKey.id, masked: issued.apiKey.key_masked },
     );
     return res.status(201).json({
@@ -1953,9 +1953,9 @@ export class AgentManagerController {
   //
   // Auth: a Runtime Host key (manager or runtime-tuple key). A paired Host
   // supervises executions across accounts, so the boundary is the project's
-  // own workspace: an explicit `account_id` must match it, a
+  // own account: an explicit `account_id` must match it, a
   // account-scoped (runtime) key must belong to it, and the credential must
-  // be global or of that workspace. `agent_id` is the runtime identity the
+  // be global or of that account. `agent_id` is the runtime identity the
   // clone is for — a runtime key may only ask for itself.
   @ApiSecurity('agent-api-key')
   @Get(['api/agent-manager/projects/:projectId/git-credential', 'api/agent-manager/resources/:resourceId/git-credential'])
@@ -1979,18 +1979,18 @@ export class AgentManagerController {
 
     const projectId = String(projectIdParam || resourceIdParam || '').trim();
     const project = projectId ? await this.dataSource.getRepository(Project).findOne({ where: { id: projectId } }) : null;
-    const requestedWorkspace = String(requestedAccountId || '').trim();
-    if (!project || (requestedWorkspace && requestedWorkspace !== project.account_id)) {
-      return res.status(404).json({ error: 'project not found in agent workspace' });
+    const requestedAccount = String(requestedAccountId || '').trim();
+    if (!project || (requestedAccount && requestedAccount !== project.account_id)) {
+      return res.status(404).json({ error: 'project not found in agent account' });
     }
     const keyAccountId = callerRuntimeKey ? String((req as any).apiKey?.account_id || '').trim() : '';
     if (keyAccountId && keyAccountId !== project.account_id) {
-      return res.status(403).json({ error: 'project is outside the API key workspace' });
+      return res.status(403).json({ error: 'project is outside the API key account' });
     }
     if (!project.credential_id) return res.status(204).send();
     const cred = await this.credentialRepo.findOne({ where: { id: project.credential_id } });
     if (!cred || (cred.account_id !== null && cred.account_id !== project.account_id)) {
-      return res.status(403).json({ error: 'repository credential is outside the project workspace' });
+      return res.status(403).json({ error: 'repository credential is outside the project account' });
     }
     const plaintext = decrypt(cred.encrypted_data || '');
     if (!plaintext) return res.status(503).json({ error: 'credential_decrypt_failed' });
@@ -2032,7 +2032,8 @@ export class AgentManagerController {
   async getManagedAgentCredential(
     @Param('id') targetAgentId: string,
     @Query('account_id') requestedAccountId: string | undefined,
-    @Query('workspace_id') requestedWorkspaceId: string | undefined,
+    // Legacy alias (transport boundary): older managers send `workspace_id`.
+    @Query('workspace_id') legacyWorkspaceId: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -2067,9 +2068,9 @@ export class AgentManagerController {
 
     // Scope check: the fetch must serve the identity's own owner scope, so a
     // cross-account binding can't leak secrets (mirrors the git-credential
-    // route's workspace guard).
+    // route's account guard).
     const ownerAccountId = String(source.account_id || '').trim();
-    const requested = String(requestedAccountId || requestedWorkspaceId || '').trim();
+    const requested = String(requestedAccountId || legacyWorkspaceId || '').trim();
     if (requested && ownerAccountId && requested !== ownerAccountId) {
       return res.status(403).json({ error: 'identity is outside the requested account' });
     }
@@ -2176,11 +2177,11 @@ export class AgentManagerController {
       return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
     }
     const targetAccountId = String(body?.account_id || parent.account_id || (req as any).apiKey?.account_id || '').trim();
-    if (targetAccountId && !agentIsVisibleInWorkspace(parent.account_id, targetAccountId)) {
-      return res.status(403).json({ error: 'runtime_child_workspace_mismatch' });
+    if (targetAccountId && !agentIsVisibleInAccount(parent.account_id, targetAccountId)) {
+      return res.status(403).json({ error: 'runtime_child_account_mismatch' });
     }
     if (!targetAccountId) {
-      return res.status(400).json({ error: 'runtime_child_workspace_required' });
+      return res.status(400).json({ error: 'runtime_child_account_required' });
     }
     const strategy = body?.strategy === 'swarm'
       ? 'swarm'
@@ -2229,11 +2230,11 @@ export class AgentManagerController {
       return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
     }
     const targetAccountId = String(body?.account_id || parent.account_id || (req as any).apiKey?.account_id || '').trim();
-    if (targetAccountId && !agentIsVisibleInWorkspace(parent.account_id, targetAccountId)) {
-      return res.status(403).json({ error: 'runtime_child_workspace_mismatch' });
+    if (targetAccountId && !agentIsVisibleInAccount(parent.account_id, targetAccountId)) {
+      return res.status(403).json({ error: 'runtime_child_account_mismatch' });
     }
     if (!targetAccountId) {
-      return res.status(400).json({ error: 'runtime_child_workspace_required' });
+      return res.status(400).json({ error: 'runtime_child_account_required' });
     }
     const status = ['completed', 'failed', 'cancelled'].includes(String(body?.status))
       ? body.status as 'completed' | 'failed' | 'cancelled'

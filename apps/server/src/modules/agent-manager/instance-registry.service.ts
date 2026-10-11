@@ -184,7 +184,7 @@ export interface InstanceRecord {
   // the stored record carries only ticket_id.
   active_worktrees?: WorktreeStatusEntry[];
   // manager의 `.awb/act` / `.awb/chat` 아래에 있는 라이브 Action-Run / 채팅방
-  // 워크스페이스(티켓 9fd27487). active_worktrees와 동일한 presence 계약을 따른다
+  // 계정(티켓 9fd27487). active_worktrees와 동일한 presence 계약을 따른다
   // — 구버전 manager는 undefined로 남기며, 이 경우 관리자 UI는 "run-workspace
   // 텔레메트리 없음"으로 축소 표시한다.
   active_run_workspaces?: RunWorkspaceStatusEntry[];
@@ -380,7 +380,7 @@ export interface WorktreeStatusEntry {
 }
 
 /**
- * manager heartbeat 에서 보고되는 라이브 Action-Run 또는 채팅방 워크스페이스 하나
+ * manager heartbeat 에서 보고되는 라이브 Action-Run 또는 채팅방 계정 하나
  * (티켓 9fd27487). `apps/agent-manager/src/lib/instance-heartbeat.ts` 의
  * RunWorkspaceStatusEntry 를 그대로 미러링한다 — wire shape 이 바뀌면 두 곳을
  * 함께 동기화할 것.
@@ -472,7 +472,7 @@ export class InstanceRegistryService implements OnModuleDestroy {
     });
   }
 
-  listForWorkspace(accountId: string): InstanceRecord[] {
+  listForAccount(accountId: string): InstanceRecord[] {
     return this.list().filter((i) => i.account_id === accountId);
   }
 

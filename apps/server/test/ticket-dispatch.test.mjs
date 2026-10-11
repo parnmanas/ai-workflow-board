@@ -8,7 +8,7 @@
 //     leaves in_progress;
 //   - a HUMAN comment on an in_progress ticket re-sends it; an agent comment
 //     does not;
-//   - unpend re-sends; a paused workspace starts nothing until resumed;
+//   - unpend re-sends; a paused account starts nothing until resumed;
 //   - the supervisor re-sends a dead in_progress ticket (force respawn) and
 //     parks it for a human after MAX_SUPERVISOR_REDISPATCHES.
 
@@ -115,7 +115,7 @@ test('unpend re-sends the ticket', async () => {
   await vagent.waitForTrigger((t) => t.ticket_id === second.id && t.trigger_source === 'unpend', 5000);
 });
 
-test('a paused workspace starts nothing until it is resumed', async () => {
+test('a paused account starts nothing until it is resumed', async () => {
   await api('PATCH', `/tickets/${second.id}/move`, { status: 'review' });
   await api('PATCH', `/accounts/${ws.id}`, { dispatch_paused_at: true });
   const third = (await api('POST', `/accounts/${ws.id}/tickets`, { title: 'third', assignee: agent.runtime_spec })).body;
@@ -123,7 +123,7 @@ test('a paused workspace starts nothing until it is resumed', async () => {
   assert.equal(await status(third.id), 'todo');
   const run = await api('POST', `/tickets/${third.id}/trigger`);
   assert.equal(run.body.dispatched, false);
-  assert.equal(run.body.reason, 'workspace_paused');
+  assert.equal(run.body.reason, 'account_paused');
 
   await api('PATCH', `/accounts/${ws.id}`, { dispatch_paused_at: null });
   await vagent.waitForTrigger((t) => t.ticket_id === third.id, 5000);

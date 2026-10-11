@@ -42,12 +42,12 @@ const TINY_TXT = Buffer.from('hello!\n').toString('base64');
 const FAKE_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
-async function createDmRoom(app, getDataSourceToken, { wsId, userA, userB }) {
+async function createDmRoom(app, getDataSourceToken, { accountId, userA, userB }) {
   const ds = app.get(getDataSourceToken());
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
   const room = await roomRepo.save(roomRepo.create({
-    account_id: wsId,
+    account_id: accountId,
     type: 'dm',
     name: '',
   }));
@@ -64,11 +64,11 @@ async function createDmRoom(app, getDataSourceToken, { wsId, userA, userB }) {
   return room;
 }
 
-function authHeaders(token, wsId) {
+function authHeaders(token, accountId) {
   return {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${token}`,
-    'X-Account-Id': wsId,
+    'X-Account-Id': accountId,
   };
 }
 
@@ -84,7 +84,7 @@ test('chat-room attachment lifecycle: upload → send → history → download a
   const senderToken = app.get(AuthService).createSession(sender.id);
   const outsiderToken = app.get(AuthService).createSession(outsider.id);
 
-  const room = await createDmRoom(app, getDataSourceToken, { wsId: ws.id, userA: sender, userB: peer });
+  const room = await createDmRoom(app, getDataSourceToken, { accountId: ws.id, userA: sender, userB: peer });
 
   step('1. Upload two attachments (one PNG, one TXT) — pending state');
   const uploadRes = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/attachments`, {

@@ -27,9 +27,9 @@ export class SubagentMonitorController {
   @ApiBearerAuth('user-session')
   @Get('api/subagent-monitor/accounts/:accountId')
   @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'List active + recently-ended subagents in a workspace' })
-  async listForWorkspace(@Param('accountId') accountId: string, @Res() res: Response) {
-    const list = await this.svc.listForWorkspace(accountId);
+  @ApiOperation({ summary: 'List active + recently-ended subagents in a account' })
+  async listForAccount(@Param('accountId') accountId: string, @Res() res: Response) {
+    const list = await this.svc.listForAccount(accountId);
     return res.json(list);
   }
 
@@ -44,7 +44,7 @@ export class SubagentMonitorController {
   ) {
     if (!accountId) return res.status(400).json({ error: 'account_id is required' });
     const t = await this.svc.getTranscript(subagentId, accountId);
-    if (!t) return res.status(404).json({ error: 'Subagent not found in this workspace' });
+    if (!t) return res.status(404).json({ error: 'Subagent not found in this account' });
     return res.json(t);
   }
 
@@ -58,11 +58,11 @@ export class SubagentMonitorController {
     if (!agentId) return res.status(401).json({ error: 'Could not resolve agent from API key' });
 
     const { subagent_id, kind, session_key, pid, started_at, label, ticket_id, ticket_title, role } = body || {};
-    // account_id falls back to the API key's bound workspace when the
+    // account_id falls back to the API key's bound account when the
     // plugin doesn't pass it explicitly (the plugin doesn't always know it).
     const accountId = body?.account_id || (req as any).currentAccountId;
     if (!subagent_id || !kind || !accountId) {
-      return res.status(400).json({ error: 'subagent_id, kind, and account_id (or workspace-bound key) are required' });
+      return res.status(400).json({ error: 'subagent_id, kind, and account_id (or account-bound key) are required' });
     }
     const rec = await this.svc.register({
       subagent_id,

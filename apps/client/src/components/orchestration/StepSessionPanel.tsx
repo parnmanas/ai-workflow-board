@@ -86,13 +86,13 @@ export function systemBlockTitle(text: string): string {
 
 export default function StepSessionPanel({
   step,
-  wsId,
+  accountId,
   events,
   stepTimeoutMinutes,
   onClose,
 }: {
   step: OrchestrationStep;
-  wsId: string;
+  accountId: string;
   /** 미션 전체 타임라인. 이 step 의 것만 걸러 쓴다. */
   events: OrchestrationTimelineEvent[];
   stepTimeoutMinutes: number;
@@ -112,8 +112,8 @@ export default function StepSessionPanel({
   // 첨부 바이트는 step 첨부 경로로 읽는다 — 채팅 경로는 참여자 게이트라 step 방에서는
   // 사람이 못 읽는다. 세션 전사와 같은 게이트(orchestration 권한)를 탄다.
   const loadAttachment = useCallback(
-    async (meta: EvidenceMediaMeta) => api.getOrchestrationStepAttachment(step.id, wsId, meta.id),
-    [step.id, wsId],
+    async (meta: EvidenceMediaMeta) => api.getOrchestrationStepAttachment(step.id, accountId, meta.id),
+    [step.id, accountId],
   );
   const media = useEvidenceUrls(loadAttachment);
 
@@ -124,7 +124,7 @@ export default function StepSessionPanel({
     async (opts?: { silent?: boolean }) => {
       if (!opts?.silent) setLoading(true);
       try {
-        const res = await api.getOrchestrationStepSession(step.id, wsId, { limit: PAGE_SIZE });
+        const res = await api.getOrchestrationStepSession(step.id, accountId, { limit: PAGE_SIZE });
         // 서버는 최신순(DESC)으로 준다 — 전사는 오래된 것부터 읽는다.
         setItems([...res.items].reverse());
         setHasMore(res.has_more);
@@ -136,7 +136,7 @@ export default function StepSessionPanel({
         setLoading(false);
       }
     },
-    [step.id, wsId],
+    [step.id, accountId],
   );
 
   useEffect(() => {
@@ -153,7 +153,7 @@ export default function StepSessionPanel({
   const loadOlder = async () => {
     if (!nextBefore) return;
     try {
-      const res = await api.getOrchestrationStepSession(step.id, wsId, {
+      const res = await api.getOrchestrationStepSession(step.id, accountId, {
         limit: PAGE_SIZE,
         beforeId: nextBefore,
       });

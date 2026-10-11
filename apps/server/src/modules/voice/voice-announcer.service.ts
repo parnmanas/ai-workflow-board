@@ -455,7 +455,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 사람이 만든 미션은 그 사람에게. 에이전트가 만든 미션은 사람 소유자가 없으므로 워크스페이스 owner 에게
+   * 사람이 만든 미션은 그 사람에게. 에이전트가 만든 미션은 사람 소유자가 없으므로 계정 owner 에게
    * (확인 게이트 알림 `orchestration-confirm-notify.service.ts` 와 같은 출발점이되, 소리는 member 전원까지
    * 넓히지 않는다 — 말소리는 채팅 알림보다 훨씬 거슬린다).
    */

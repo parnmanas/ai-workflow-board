@@ -2,14 +2,14 @@
 //
 // Cross-tenant leak test for the api-keys module.
 //
-// Purpose: Verify that workspace A's API keys cannot be accessed by users belonging only to
-// workspace B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
+// Purpose: Verify that account A's API keys cannot be accessed by users belonging only to
+// account B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
 // when AccountGuard is applied to ApiKeysController.
 //
 // Current state (Phase 5):
-//   - ApiKeysController uses PermissionGuard + MANAGE_API_KEYS — no workspace scoping.
+//   - ApiKeysController uses PermissionGuard + MANAGE_API_KEYS — no account scoping.
 //   - GET /api/keys returns ALL keys across all accounts (no account_id filter).
-//   - Cross-workspace isolation is NOT enforced until Phase 6 adds AccountGuard + account_id to ApiKey.
+//   - Cross-account isolation is NOT enforced until Phase 6 adds AccountGuard + account_id to ApiKey.
 //
 // Tests marked it.todo() will pass after Phase 6 applies AccountGuard to ApiKeysController.
 //
@@ -55,12 +55,12 @@ async function loadServerModules() {
     return { NestFactory, AppModule, AuthService, getDataSourceToken };
   } catch (err) {
     throw new Error(
-      'Leak test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
+      'Leak test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message
     );
   }
 }
 
-describe('api-keys-leak: cross-workspace API key isolation', async () => {
+describe('api-keys-leak: cross-account API key isolation', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -96,7 +96,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
     wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (api-keys)', description: 'Leak test', created_at: new Date('2001-01-01T00:00:00Z') }));
     wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (api-keys)', description: 'Leak test', created_at: new Date('2000-01-01T00:00:00Z') }));
 
-    // ─── Create user B and assign to workspace B ──────────────────────────────
+    // ─── Create user B and assign to account B ──────────────────────────────
     const userBRec = await userRepo.save(userRepo.create({
       name: 'apikeys-leak-user-b',
       email: USER_B_EMAIL,
@@ -111,7 +111,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
       object_type: 'account', object_id: wsB.id,
     }));
 
-    // ─── Create an API key in workspace A via HTTP ─────────────────────────────
+    // ─── Create an API key in account A via HTTP ─────────────────────────────
     // Phase 6+: ApiKeysController.create persists account_id from the
     // X-Account-Id header, and list/get/revoke are account-scoped. Create
     // key A scoped to ws_a so the scoped controls below can find it.
@@ -156,7 +156,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
 
   it('admin can list API keys and sees the created key (control)', async () => {
     // API keys are account-scoped — the admin must supply the ws_a header to
-    // see ws_a's keys (an admin with no workspace context gets an empty list).
+    // see ws_a's keys (an admin with no account context gets an empty list).
     const res = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
       accountId: wsA.id,
@@ -213,7 +213,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
       assert.equal(
         keys.filter(k => k.id === apiKeyA.id).length,
         0,
-        'Account A API key must not appear in workspace B listing',
+        'Account A API key must not appear in account B listing',
       );
     }
   });
@@ -224,7 +224,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
       token: tokenB,
       accountId: wsA.id,
     });
-    assert.equal(res.status, 403, `Expected 403 for cross-workspace key access, got ${res.status}: ${JSON.stringify(res.data)}`);
+    assert.equal(res.status, 403, `Expected 403 for cross-account key access, got ${res.status}: ${JSON.stringify(res.data)}`);
   });
 
   it('admin with X-Account-Id: ws_a can list only ws_a API keys — Phase 6 account-scoped key query', async () => {
@@ -248,7 +248,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
     assert.equal(
       keys.filter(k => k.id === apiKeyA.id).length,
       0,
-      'Account A API key must not appear in workspace B listing',
+      'Account A API key must not appear in account B listing',
     );
   });
 });

@@ -151,14 +151,14 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'list_security_profiles',
-    'List reusable security-inspection profiles in a workspace.',
+    'List reusable security-inspection profiles in a account.',
     {
       account_id: z.string().describe('Account ID (required)'),
     },
     async ({ account_id }) => {
       const repo = dataSource.getRepository(SecurityProfile);
       const qb = repo.createQueryBuilder('p')
-        .where('p.account_id = :ws', { ws: account_id });
+        .where('p.account_id = :account', { account: account_id });
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return ok(rows.map(profileToJson));
     },

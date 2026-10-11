@@ -7,9 +7,9 @@
 // 30s sweep and emits `agent_status` events on the activityEvents bus whenever
 // the in-memory Map<agent_id, AgentStatus> actually changes.
 //
-// NOTE on multi-workspace: Phase 3 is single-workspace (see REQUIREMENTS Out of
-// Scope). The sweep reads every agent in the agents table regardless of workspace.
-// When multi-tenant arrives, the sweep + emit path will need a workspace filter
+// NOTE on multi-account: Phase 3 is single-account (see REQUIREMENTS Out of
+// Scope). The sweep reads every agent in the agents table regardless of account.
+// When multi-tenant arrives, the sweep + emit path will need a account filter
 // (see 03-RESEARCH.md §Pitfall 7).
 import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
@@ -40,7 +40,7 @@ interface ActiveTask {
   ticket_title: string;
   claimed_at: Date;
   // Role slug the subagent was spawned for (assignee/reporter/reviewer
-  // or a workspace-custom slug). Optional because pre-v0.34 plugins do
+  // or a account-custom slug). Optional because pre-v0.34 plugins do
   // not pin a role; the dashboard renders without it when undefined.
   role?: string;
   // Task kind (ticket 09ed8def). Board-ticket tasks (the `active_tasks` Map)
@@ -122,7 +122,7 @@ export const CURRENT_TASK_STALE_MS = 15 * 60_000;
 // The effective TTL is NOT a fixed constant — it is derived every sweep as
 // clamp(MAX(Account.supervisor_stale_ms), FLOOR, CEILING). Why: the
 // TicketSupervisor force-suppression gate compares a strand's output age
-// against that workspace's supervisor_stale_ms. If retention were a fixed 6 h
+// against that account's supervisor_stale_ms. If retention were a fixed 6 h
 // but an operator raised supervisor_stale_ms above it (a real incident-response
 // move — see ticket 47a72129), an entry in the (TTL, staleMs) band would be
 // evicted while the gate still treats it as recent → getOutputLivenessAt()
@@ -171,7 +171,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   private readonly outputLiveness = new Map<string, number>();
   // Effective output-liveness retention TTL (ticket 47a72129), recomputed each
   // sweep as resolveOutputLivenessTtlMs(MAX(supervisor_stale_ms)). Seeded at the
-  // FLOOR so the pre-first-sweep window (and any workspace-query failure) is
+  // FLOOR so the pre-first-sweep window (and any account-query failure) is
   // safe — it never starts shorter than the historical fixed 6 h.
   private outputLivenessTtlMs: number = OUTPUT_LIVENESS_TTL_FLOOR_MS;
   // QA live-task registry (ticket 09ed8def): agent_id → (run_id → QA ActiveTask,
@@ -1063,12 +1063,12 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
 
     // Refresh the effective output-liveness retention TTL (ticket 47a72129)
     // from the largest supervisor_stale_ms across accounts, so retention is
-    // always >= any workspace's force-gate window (up to the CEILING).
+    // always >= any account's force-gate window (up to the CEILING).
     this.outputLivenessTtlMs = await this._resolveOutputLivenessTtlMs();
 
     // Evict aged output-liveness entries (ticket fdc69c13) so the map stays
     // bounded — a finished/dead session's last entry has nobody to clear it.
-    // The effective TTL is derived to sit at or above every workspace's
+    // The effective TTL is derived to sit at or above every account's
     // supervisor_stale_ms, so an entry still within the supervisor's force-gate
     // window is never dropped early (the exit-143 deathloop guard).
     const outputCutoff = Date.now() - this.outputLivenessTtlMs;
@@ -1088,8 +1088,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     try {
       const row = await this.dataSource
         .getRepository(Account)
-        .createQueryBuilder('ws')
-        .select('MAX(ws.supervisor_stale_ms)', 'max')
+        .createQueryBuilder('account')
+        .select('MAX(account.supervisor_stale_ms)', 'max')
         .getRawOne<{ max: number | string | null }>();
       const maxStaleMs = row?.max != null ? Number(row.max) : 0;
       return resolveOutputLivenessTtlMs(maxStaleMs);

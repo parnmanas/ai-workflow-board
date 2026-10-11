@@ -8,7 +8,7 @@ interface PrerequisitesFieldProps {
   rows: TicketPrerequisiteRow[];
   busy: boolean;
   error: string | null;
-  /** Pickable tickets (workspace pool minus self and already-linked). */
+  /** Pickable tickets (account pool minus self and already-linked). */
   candidates: Array<{ id: string; title: string; status: TicketStatus }>;
   /** Resolves true when the link was added (clears the picker). */
   onAdd(prerequisiteId: string, reason: string): Promise<boolean>;

@@ -26,7 +26,7 @@ const { renderActionPrompt, buildRenderContext } = await import(
 );
 
 const ctx = buildRenderContext({
-  workspace: { id: 'ws-1', name: 'Acme' },
+  account: { id: 'ws-1', name: 'Acme' },
   agent: { id: 'agent-1', name: 'Builder' },
   action: { id: 'action-1', name: 'Deploy' },
   runId: 'run-1',
@@ -45,7 +45,7 @@ test('renderActionPrompt: every OTHER unresolved token still collapses to empty 
 
 test('renderActionPrompt: ordinary {{var.path}} substitution is unaffected by the special case', () => {
   const rendered = renderActionPrompt(
-    '{{action.name}} run {{run.id}} for {{workspace.name}} by {{agent.name}}',
+    '{{action.name}} run {{run.id}} for {{account.name}} by {{agent.name}}',
     ctx,
   );
   assert.equal(rendered, 'Deploy run run-1 for Acme by Builder');

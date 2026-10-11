@@ -35,10 +35,10 @@ const POLL_MS = 3000;
  */
 export default function OntologyGraphPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const { showToast } = useToast();
 
-  const { projects } = useProjects(wsId);
+  const { projects } = useProjects(accountId);
   const [projectId, setProjectId] = useState('');
   const [folderPath, setFolderPath] = useState('');
   const [statusResp, setStatusResp] = useState<OntologyGraphStatusResponse | null>(null);
@@ -55,10 +55,10 @@ export default function OntologyGraphPage() {
 
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
-      if (!wsId || !projectId) return;
+      if (!accountId || !projectId) return;
       if (!opts?.silent) setLoading(true);
       try {
-        const resp = await api.getOntologyGraphStatus(wsId, { resourceId: projectId, folderPath });
+        const resp = await api.getOntologyGraphStatus(accountId, { resourceId: projectId, folderPath });
         setStatusResp(resp);
       } catch (e: any) {
         if (!opts?.silent) showToast(e?.message || 'Failed to load graph status', 'error');
@@ -66,7 +66,7 @@ export default function OntologyGraphPage() {
         if (!opts?.silent) setLoading(false);
       }
     },
-    [wsId, projectId, folderPath, showToast],
+    [accountId, projectId, folderPath, showToast],
   );
 
   // 선택이 바뀔 때마다 상태를 다시 불러온다 — 최초 (project id, folder_path)
@@ -78,17 +78,17 @@ export default function OntologyGraphPage() {
     setSnapshot(null);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, projectId, folderPath]);
+  }, [accountId, projectId, folderPath]);
 
   // 휴먼 그래프뷰 재방문 텔레메트리(Done-when) — 폴링이 아니라 실제로 다른
   // repo/folder를 선택했을 때만 1회 기록.
   useEffect(() => {
-    if (!wsId || !projectId) return;
+    if (!accountId || !projectId) return;
     const key = `${projectId}::${folderPath}`;
     if (loggedViewKey.current === key) return;
     loggedViewKey.current = key;
-    api.logOntologyGraphViewOpened(wsId, { resourceId: projectId, folderPath }).catch(() => { /* 텔레메트리 실패는 조용히 무시 */ });
-  }, [wsId, projectId, folderPath]);
+    api.logOntologyGraphViewOpened(accountId, { resourceId: projectId, folderPath }).catch(() => { /* 텔레메트리 실패는 조용히 무시 */ });
+  }, [accountId, projectId, folderPath]);
 
   // "Build/Refresh Graph" 액션(리뷰 지적, 승인 블로커) — load()(GET
   // /status)는 조회+최초 프로비저닝만 할 뿐, 이미 존재하는(ready/stale/
@@ -98,21 +98,21 @@ export default function OntologyGraphPage() {
   // 킥오프한 뒤, 그 결과(대개 status='building')를 반영하도록 load()를
   // 다시 불러 폴링을 재개시킨다.
   const handleBuildOrRefresh = useCallback(async () => {
-    if (!wsId || !projectId) return;
+    if (!accountId || !projectId) return;
     if (!statusResp) {
       void load();
       return;
     }
     setRefreshing(true);
     try {
-      await api.refreshOntologyGraph(wsId, statusResp.graph_id);
+      await api.refreshOntologyGraph(accountId, statusResp.graph_id);
     } catch (e: any) {
       showToast(e?.message || 'Failed to refresh graph', 'error');
     } finally {
       setRefreshing(false);
     }
     void load({ silent: true });
-  }, [wsId, projectId, statusResp, load, showToast]);
+  }, [accountId, projectId, statusResp, load, showToast]);
 
   // building 동안만 폴링 — ready/error/stale 도달 즉시 멈춘다
   // (MissionDetailPage.tsx의 isLive 안전망 폴링과 같은 자세).
@@ -135,19 +135,19 @@ export default function OntologyGraphPage() {
     let cancelled = false;
     setGraphError('');
     setGraphLoading(true);
-    api.getOntologyGraph(wsId, graphId)
+    api.getOntologyGraph(accountId, graphId)
       .then((next) => { if (!cancelled) setSnapshot(next); })
       .catch((error: any) => { if (!cancelled) { setSnapshot(null); setGraphError(error?.message || 'Failed to load graph'); } })
       .finally(() => { if (!cancelled) setGraphLoading(false); });
     return () => { cancelled = true; };
-  }, [wsId, statusResp?.graph_id, statusResp?.status, statusResp?.indexed_at]);
+  }, [accountId, statusResp?.graph_id, statusResp?.status, statusResp?.indexed_at]);
 
   // 배경 스윕/증분 갱신(오늘은 대개 무음 — incremental scheduler가 아직
   // 어떤 실 트리거에도 배선돼 있지 않음, ontology-graph-freshness.test.mjs
   // 코멘트 참고)이 이 그래프를 건드리면 즉시(디바운스) 재조회한다 —
   // MissionDetailPage.tsx의 scheduleRefresh와 같은 패턴.
   useBoardStreamEvent('ontology_graph_progress', (data: OntologyGraphProgressEvent) => {
-    if (!data || data.account_id !== wsId || !statusResp || data.graph_id !== statusResp.graph_id) return;
+    if (!data || data.account_id !== accountId || !statusResp || data.graph_id !== statusResp.graph_id) return;
     if (refreshTimer.current) clearTimeout(refreshTimer.current);
     refreshTimer.current = setTimeout(() => void load({ silent: true }), 400);
   });
@@ -192,7 +192,7 @@ export default function OntologyGraphPage() {
             value={projectId}
             onChange={(e) => setProjectId(e.target.value)}
             options={[
-              { value: '', label: projects.length ? 'Select a project…' : 'No projects in this workspace yet', disabled: true },
+              { value: '', label: projects.length ? 'Select a project…' : 'No projects in this account yet', disabled: true },
               ...projects.map((p) => ({ value: p.id, label: p.name })),
             ]}
           />

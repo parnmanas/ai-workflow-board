@@ -97,7 +97,7 @@ async function render(t, { steps, onDecided = () => {} }) {
     pause() {}
   };
   const view = mount(
-    h(ToastProvider, null, h(ConfirmRequestPanel, { steps, wsId: 'ws-1', onDecided })),
+    h(ToastProvider, null, h(ConfirmRequestPanel, { steps, accountId: 'ws-1', onDecided })),
   );
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));

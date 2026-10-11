@@ -25,7 +25,7 @@ export class TicketReadState {
   @Column({ type: 'varchar' })
   ticket_id: string;
 
-  // Denormalized so a global "all unread for me in workspace W" query
+  // Denormalized so a global "all unread for me in account W" query
   // can be answered without joining tickets.
   @Column({ type: 'varchar', nullable: true, default: '' })
   account_id: string;

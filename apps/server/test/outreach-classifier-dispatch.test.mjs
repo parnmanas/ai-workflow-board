@@ -151,7 +151,7 @@ test('classifier_runtime set but agent not found falls back to rule-based, no di
 test('host removed after channel configuration falls back to rule-based, no dispatch', async () => {
   const agents = [{ id: 'agent-1', account_id: 'ws-1' }]; // matched when the channel was configured
   const { classifier, roomRepo, messaging, bridge } = makeClassifier({ agents });
-  agents.splice(0); // agent moved to another workspace afterward
+  agents.splice(0); // agent moved to another account afterward
 
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());

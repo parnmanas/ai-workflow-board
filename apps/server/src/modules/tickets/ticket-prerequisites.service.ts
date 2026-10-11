@@ -6,7 +6,7 @@
  * this is the backward M:N pull, B parks itself until every prereq A is done.
  *
  * Why it exists:
- *   - Validation: same-workspace, no self-reference, no cycle, no archived
+ *   - Validation: same-account, no self-reference, no cycle, no archived
  *     prereq. Add-time guard is cheap — a DFS over the prereq graph.
  *   - Mutator surface: `addPrerequisites(ticket, prereqs[], reason, actor)`,
  *     `removePrerequisite(ticket, prereq)`, `listPrerequisites(ticket)`.
@@ -109,7 +109,7 @@ export class TicketPrerequisitesService {
       if (!row) throw badRequest(`Prerequisite ticket not found: ${pid}`);
       if (row.archived_at) throw badRequest(`Prerequisite ticket is archived: ${pid}`);
       if (ticket.account_id && row.account_id && row.account_id !== ticket.account_id) {
-        throw badRequest(`Prerequisite must be in the same workspace: ${pid}`);
+        throw badRequest(`Prerequisite must be in the same account: ${pid}`);
       }
       validated.push({ id: pid, row });
     }
@@ -117,7 +117,7 @@ export class TicketPrerequisitesService {
     // Cycle detection: for each candidate, refuse if `ticketId` is already
     // reachable from the candidate through the existing prereq graph
     // (`prereqOf[ticketId]` reached when walking down from the candidate).
-    // DFS bounded by ticket count — every workspace's graph is small.
+    // DFS bounded by ticket count — every account's graph is small.
     for (const { id: pid } of validated) {
       if (await wouldCreateCycle(this.dataSource, ticketId, pid)) {
         throw badRequest(

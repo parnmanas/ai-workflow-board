@@ -191,7 +191,7 @@ export default function ProjectForm({ project, accountId, credentials, hosts, on
               : []),
           ]}
         />
-        <div style={HELP}>clone·push 에 쓰는 워크스페이스 Credential. 연결 테스트도 이 값으로 인증합니다.</div>
+        <div style={HELP}>clone·push 에 쓰는 계정 Credential. 연결 테스트도 이 값으로 인증합니다.</div>
       </div>
 
       <div>

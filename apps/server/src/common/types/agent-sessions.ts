@@ -145,7 +145,7 @@ export const AGENT_SESSION_MODE_DEFAULT_KEY = '__mode';
 
 /**
  * 이 세션이 어떤 계정으로 도는지. 두 축이 있다:
- *   - `source` — 자격증명의 출처. `'credential'` 은 워크스페이스 Credential(CLI 설정),
+ *   - `source` — 자격증명의 출처. `'credential'` 은 계정 Credential(CLI 설정),
  *     `'operator'` 은 그 장비 운영자의 CLI 로그인(`claude login` / `codex login`) 그대로.
  *     매니저만 아는 사실이라 매니저가 보고한다.
  *   - 나머지(`kind`/`label`/`account`) — CLI 가 실제로 쓰고 있는 신원. 어댑터가

@@ -25,7 +25,7 @@ import { getServerBaseUrl } from '../serverConfig';
  *
  * Design notes:
  * - Opens ONE stream without a per-entity filter (app-level subscription), so
- *   workspace switches do NOT require reconnecting the EventSource.
+ *   account switches do NOT require reconnecting the EventSource.
  *   Consumers filter by `data.account_id` / `data.ticket_id` client-side.
  *   (`board_update` keeps its name — it is the ticket-change event.)
  * - Uses EventTarget as an internal pub/sub to broadcast received events to
@@ -135,7 +135,7 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       (window.location.hostname === 'localhost'
         ? `${window.location.protocol}//${window.location.hostname}:7701`
         : '');
-    // NOTE: no filter query param — this is a workspace-agnostic subscription.
+    // NOTE: no filter query param — this is a account-agnostic subscription.
     // Consumers filter board_update (ticket-change) events client-side.
     const url = `${baseUrl}/api/events/stream?token=${encodeURIComponent(token)}`;
 

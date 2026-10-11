@@ -45,7 +45,7 @@ export interface MissionExtraMember {
  * team mid-mission never re-points a live mission at a different agent.
  */
 @Entity('orchestration_missions')
-@Index('idx_orch_missions_workspace', ['account_id'])
+@Index('idx_orch_missions_account', ['account_id'])
 @Index('idx_orch_missions_team', ['team_id'])
 @Index('idx_orch_missions_status', ['status'])
 @Index('idx_orch_missions_post_actions_pending', ['post_actions_pending'])
@@ -314,7 +314,7 @@ export class OrchestrationMission {
   @Column({ type: 'varchar', default: '' })
   workspace_folder: string;
 
-  /** 모든 step이 체크아웃할 repo. null = board/workspace environment_config repo 재사용. */
+  /** 모든 step이 체크아웃할 repo. null = board/account environment_config repo 재사용. */
   @Column({ type: 'simple-json', nullable: true, default: null })
   repo_ref: WorkspaceFolderRepoRef | null;
 

@@ -3,7 +3,7 @@
  *
  * Tools:
  *   - subscribe_events: pull activity log slice (time-cursor paginated),
- *     optionally narrowed to a workspace / tag set / the caller's tickets.
+ *     optionally narrowed to a account / tag set / the caller's tickets.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -22,7 +22,7 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
     'subscribe_events',
     'Subscribe to ticket events. Returns recent events since the given cursor (ISO timestamp or event ID). Events include ticket creation, updates, moves, comments, and agent assignments. Poll periodically to receive updates.',
     {
-      account_id: z.string().optional().describe('Filter events by workspace (omit for all)'),
+      account_id: z.string().optional().describe('Filter events by account (omit for all)'),
       tags: z.array(z.string()).optional().describe('Only events of tickets carrying every one of these tags'),
       since: z.string().optional().describe('ISO timestamp or activity log ID cursor — returns events after this point. Omit for last 10 minutes.'),
       limit: z.number().optional().default(50).describe('Max events to return'),
@@ -55,7 +55,7 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
 
       if (account_id || (tags && tags.length)) {
         const qb = dataSource.getRepository(Ticket).createQueryBuilder('t').select(['t.id', 't.parent_id', 't.tags']);
-        if (account_id) qb.where('t.account_id = :ws', { ws: account_id });
+        if (account_id) qb.where('t.account_id = :account', { account: account_id });
         const rows = await qb.getMany();
         const wanted = (tags || []).map((t) => t.toLowerCase());
         const rootOk = new Set(rows

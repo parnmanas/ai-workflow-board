@@ -172,7 +172,7 @@ export default function CliCredentialImport({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <p style={{ margin: 0, color: tokens.colors.textSecondary, fontSize: 13, lineHeight: 1.55 }}>
             Log in on this computer, then import the generated credential file. AWB encrypts it as a reusable
-            workspace credential, so each managed agent and computer can select the account it needs.
+            account credential, so each managed agent and computer can select the account it needs.
           </p>
 
           <div style={{ display: 'flex', gap: 8 }} role="group" aria-label="CLI provider">

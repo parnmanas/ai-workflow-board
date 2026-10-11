@@ -30,7 +30,7 @@
 //      session B in a different ticket/room kept an actually-idle session A
 //      "fresh" forever — a real resource-leak regression, not just noise.
 //      Scoping the scan to THIS session's own cwd subtree (every managed
-//      chat/ticket session gets its own dedicated workspace folder, so two
+//      chat/ticket session gets its own dedicated account folder, so two
 //      sessions of the same agent normally have two different cwds) fixes
 //      the cross-session false positive while still covering the exact
 //      subagents/workflows/<id>/ files that motivated signal 3 — they nest

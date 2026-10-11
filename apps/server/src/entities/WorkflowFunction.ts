@@ -3,11 +3,11 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
 /**
  * Reusable operation exposed to humans, workflows, and MCP agents.
  * Scope is derived consistently across AWB catalogs:
- * global=(account_id NULL), workspace=(account_id set).
+ * global=(account_id NULL), account=(account_id set).
  */
 @Entity('workflow_functions')
 @Index('uq_workflow_functions_global_key', ['key'], { unique: true, where: 'account_id IS NULL' })
-@Index('uq_workflow_functions_workspace_key', ['account_id', 'key'], { unique: true, where: 'account_id IS NOT NULL' })
+@Index('uq_workflow_functions_account_key', ['account_id', 'key'], { unique: true, where: 'account_id IS NOT NULL' })
 export class WorkflowFunction {
   @PrimaryGeneratedColumn('uuid')
   id: string;

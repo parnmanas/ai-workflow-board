@@ -23,23 +23,23 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
 
   server.tool(
     'list_archived_tickets',
-    'List archived (soft-deleted) tickets of a workspace. Pagination via cursor + limit; optional q filters by title / id / tag (case-insensitive). ' +
+    'List archived (soft-deleted) tickets of a account. Pagination via cursor + limit; optional q filters by title / id / tag (case-insensitive). ' +
       'Rows keep their status so the UI can show "archived from Done". Lookup-only — use unarchive_ticket to restore.',
     {
-      account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller\'s account)'),
       cursor: z.string().optional().describe('Pagination cursor returned by a previous call as next_cursor (opaque compound `<isoTimestamp>|<id>`). Bare ISO timestamps from older callers still work.'),
       limit: z.number().int().min(1).max(200).optional().default(50).describe('Max rows per page (1..200, default 50)'),
       q: z.string().optional().describe('Optional case-insensitive substring filter on title / exact id match / tag name'),
     },
     async ({ account_id, cursor, limit, q }, extra: { sessionId?: string }) => {
-      const ws = account_id || getCallerAgent(extra)?.accountId || '';
-      if (!ws) return err('account_id is required');
+      const account = account_id || getCallerAgent(extra)?.accountId || '';
+      if (!account) return err('account_id is required');
       const ticketRepo = dataSource.getRepository(Ticket);
       // Compound (archived_at DESC, id DESC) sort — the archiver stamps a
       // whole batch with the same archived_at, so an archived_at-only cursor
       // would drop the rest of that batch on the next page.
       let qb = ticketRepo.createQueryBuilder('t')
-        .where('t.account_id = :ws', { ws })
+        .where('t.account_id = :account', { account })
         .andWhere('t.parent_id IS NULL')
         .andWhere('t.archived_at IS NOT NULL')
         .orderBy('t.archived_at', 'DESC')

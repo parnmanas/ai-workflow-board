@@ -13,7 +13,7 @@
 //   3. install script 를 갖는 패키지가 알려진 목록을 벗어나지 않는다.
 //   4. 우리가 **발행하는** 패키지(awb-agent-manager)가 provenance 와 함께 나간다
 //      — 위 1~3 은 "받는 쪽" 방어, 이건 "주는 쪽" 방어다 (2026-08-10 추가).
-//   5. 발행 가능한 워크스페이스가 그 하나뿐이고, 그 tarball 이 `files` 로 좁혀진다
+//   5. 발행 가능한 계정가 그 하나뿐이고, 그 tarball 이 `files` 로 좁혀진다
 //      (2026-08-15 추가).
 //   6. 그 provenance 를 매니저 self-update 가 실제로 **검증**한다 — 증명을 만들어만
 //      놓고 아무도 읽지 않으면 방어가 아니다 (2026-08-15 추가).
@@ -52,7 +52,7 @@ const AGENT_MANAGER_PKG = path.join(REPO_ROOT, 'apps', 'agent-manager', 'package
 // `npm install` 은 lockfile 을 제안으로만 취급한다. 같은 커밋을 두 번 빌드해도
 // semver 범위 안에서 다른 버전이 잡힐 수 있고, 컨테이너 안의 lockfile 자체를
 // 덮어쓴다. 2026-08-07 감사 전까지 runner 스테이지가 정확히 그 상태였다
-// (`RUN npm install --omit=dev --workspace=server`) — 감사한 트리와 배포된
+// (`RUN npm install --omit=dev --account=server`) — 감사한 트리와 배포된
 // 트리가 같다는 보장이 없었다.
 test('Dockerfile installs dependencies only through `npm ci`', () => {
   const lines = fs.readFileSync(DOCKERFILE, 'utf8').split('\n');
@@ -149,7 +149,7 @@ test('dockerfileInstallLines 는 전역 설치를 제외하고 주석 줄을 세
 // ─────────────────────────────────────────────────────────────────────────────
 
 const LOCK = JSON.parse(fs.readFileSync(LOCKFILE, 'utf8'));
-// workspace 링크(`apps/*`)는 registry 에서 오지 않으므로 resolved/integrity 가
+// account 링크(`apps/*`)는 registry 에서 오지 않으므로 resolved/integrity 가
 // 없는 게 정상이다. 그 외 전부가 검사 대상.
 const REGISTRY_ENTRIES = Object.entries(LOCK.packages ?? {}).filter(
   ([name, meta]) => name !== '' && !meta.link && !name.startsWith('apps/'),
@@ -475,17 +475,17 @@ test('agent-manager package.json declares the repository provenance verifies aga
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. 발행 표면 최소화 — 발행 대상이 아닌 워크스페이스는 발행될 수 없어야 한다
+// 5. 발행 표면 최소화 — 발행 대상이 아닌 계정는 발행될 수 없어야 한다
 //    (2026-08-15 감사 추가)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 루트는 `private: true` 지만 `server` / `client` 워크스페이스는 아무 표시가
-// 없었다. `npm publish --accounts` 한 번이면(또는 워크스페이스 안에서 무심코
+// 루트는 `private: true` 지만 `server` / `client` 계정는 아무 표시가
+// 없었다. `npm publish --accounts` 한 번이면(또는 계정 안에서 무심코
 // 친 `npm publish` 한 번이면) 발행 의도가 없는 두 패키지가 공개 레지스트리로
 // 나간다 — 둘 다 `files` 필드도 없어 tarball 은 디렉터리 전체가 된다.
 // `private: true` 는 npm 이 publish 를 하드 거부하게 만드는 유일한 in-repo 통제라,
 // 발행 가능한 이름을 의도한 하나(awb-agent-manager)로 고정한다.
-test('only the intended workspace is publishable', () => {
+test('only the intended account is publishable', () => {
   const publishable = [];
   for (const rel of ['apps/server', 'apps/client', 'apps/agent-manager']) {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel, 'package.json'), 'utf8'));
@@ -494,7 +494,7 @@ test('only the intended workspace is publishable', () => {
   assert.deepEqual(
     publishable,
     ['apps/agent-manager (awb-agent-manager)'],
-    'exactly one workspace may be publishable; mark every other workspace `"private": true` ' +
+    'exactly one account may be publishable; mark every other account `"private": true` ' +
       `so npm refuses to publish it (currently publishable: ${publishable.join(', ') || 'none'})`,
   );
 

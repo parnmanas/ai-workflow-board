@@ -15,7 +15,7 @@ import { ReBACService } from '../../services/rebac.service';
  * `GET /api/resources/:id/raw?download=1` — 새로 만들지 않는다(APK는 /raw가
  * 자동으로 attachment로 내린다).
  *
- * 권한: 읽고·올리고·지우기는 그 워크스페이스의 member/owner(admin 우회) —
+ * 권한: 읽고·올리고·지우기는 그 계정의 member/owner(admin 우회) —
  * ResourceMediaController와 같은 경계다. 삭제는 올린 본인 또는 admin만.
  */
 @ApiBearerAuth('user-session')
@@ -68,13 +68,13 @@ export class LibraryController {
     };
   }
 
-  /** 워크스페이스의 자료 목록 — 최신 올린 순. file_data는 절대 내보내지 않는다. */
+  /** 계정의 자료 목록 — 최신 올린 순. file_data는 절대 내보내지 않는다. */
   @Get()
   async list(@Query('account_id') accountId: string, @Req() req: Request, @Res() res: Response) {
     const user = this.currentUser(req);
     if (!accountId) return res.status(400).json({ error: 'account_id_required', message: 'account_id is required.' });
     if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'workspace_access_denied' });
+      return res.status(403).json({ error: 'account_access_denied' });
     }
     const items = await this.libraryRepo.find({
       where: { account_id: accountId },
@@ -108,14 +108,14 @@ export class LibraryController {
       return res.status(400).json({ error: 'account_id_resource_id_title_required', message: 'account_id, resource_id and title are required.' });
     }
     if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'workspace_access_denied' });
+      return res.status(403).json({ error: 'account_access_denied' });
     }
     const resource = await this.resourceRepo.findOne({ where: { id: resourceId } });
     if (!resource || !resource.file_data) {
       return res.status(400).json({ error: 'resource_not_found', message: 'No such uploaded file.' });
     }
     if (resource.account_id !== accountId) {
-      return res.status(400).json({ error: 'resource_account_mismatch', message: 'The file belongs to another workspace.' });
+      return res.status(400).json({ error: 'resource_account_mismatch', message: 'The file belongs to another account.' });
     }
     const rawKind = typeof body?.kind === 'string' ? body.kind : '';
     const kind = rawKind === 'app' || rawKind === 'file'
@@ -139,7 +139,7 @@ export class LibraryController {
     const user = this.currentUser(req);
     if (!accountId) return res.status(400).json({ error: 'account_id_required', message: 'account_id is required.' });
     if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'workspace_access_denied' });
+      return res.status(403).json({ error: 'account_access_denied' });
     }
     const items = await this.libraryRepo.find({
       where: { account_id: accountId, kind: 'app' },
@@ -157,7 +157,7 @@ export class LibraryController {
     const user = this.currentUser(req);
     if (!accountId) return res.status(400).json({ error: 'account_id_required', message: 'account_id is required.' });
     if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'workspace_access_denied' });
+      return res.status(403).json({ error: 'account_access_denied' });
     }
     const item = await this.libraryRepo.findOne({ where: { id, account_id: accountId } });
     if (!item) return res.status(404).json({ error: 'not_found' });

@@ -1,6 +1,6 @@
 // Regression / feature proof: live pull import export-surface audit trail
 // (ticket 0f638509, review round 1 P3 — blocking). The source export surface
-// can return every workspace's plaintext credentials, so every access —
+// can return every account's plaintext credentials, so every access —
 // denied AND successful — must leave a durable, greppable ActivityLog row
 // (never the raw X-Agent-Key or actual row/credential contents).
 //
@@ -16,7 +16,7 @@
 //      audit unconditionally on every call (test 6, test 7).
 //   2. A failed audit write was swallowed and the plaintext export still
 //      went out — not acceptable for a mandatory control on a surface that
-//      can return every workspace's credentials. Fix: _auditAccess() now
+//      can return every account's credentials. Fix: _auditAccess() now
 //      returns a boolean and both handlers refuse with 503 when it's false
 //      (test 8).
 //

@@ -91,10 +91,10 @@ export function deploymentIncludesCommit(dep: DeploymentCommitInfo | null | unde
 }
 
 /**
- * The current live deployment for `environment` as seen by a given workspace.
- * A account-scoped row shadows a global (null-workspace) one, but we simply
+ * The current live deployment for `environment` as seen by a given account.
+ * A account-scoped row shadows a global (null-account) one, but we simply
  * pick the freshest by deployed_at across {account-scoped, global} — a global
- * self-report that is newer than a stale workspace override should still win
+ * self-report that is newer than a stale account override should still win
  * (the environment genuinely moved forward). `accountId` null → global only.
  */
 export async function findLatestDeployment(
@@ -106,7 +106,7 @@ export async function findLatestDeployment(
   if (!env) return null;
   const qb = repo.createQueryBuilder('d').where('d.environment = :env', { env });
   if (accountId) {
-    qb.andWhere('(d.account_id = :ws OR d.account_id IS NULL)', { ws: accountId });
+    qb.andWhere('(d.account_id = :account OR d.account_id IS NULL)', { account: accountId });
   } else {
     qb.andWhere('d.account_id IS NULL');
   }

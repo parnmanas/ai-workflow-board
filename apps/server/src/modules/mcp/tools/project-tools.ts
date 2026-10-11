@@ -12,7 +12,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { callerCanAccessWorkspace } from '../shared/authz';
+import { callerCanAccessAccount } from '../shared/authz';
 import { ProjectInputError } from '../../projects/projects.service';
 import type { ToolContext } from './context';
 
@@ -21,14 +21,14 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
 
   server.tool(
     'list_projects',
-    'List the projects (repositories) of a workspace, each with its main clone folder per Runtime Host (`host_folders`).',
-    { account_id: z.string().optional().describe('Account (defaults to the caller\'s workspace)') },
+    'List the projects (repositories) of a account, each with its main clone folder per Runtime Host (`host_folders`).',
+    { account_id: z.string().optional().describe('Account (defaults to the caller\'s account)') },
     async ({ account_id }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const ws = account_id || caller?.accountId || '';
-      if (!ws) return err('account_id is required');
-      if (!(await callerCanAccessWorkspace(dataSource, caller, ws))) return err('Unauthorized: caller does not belong to this workspace');
-      return ok(await projectsService.list(ws));
+      const account = account_id || caller?.accountId || '';
+      if (!account) return err('account_id is required');
+      if (!(await callerCanAccessAccount(dataSource, caller, account))) return err('Unauthorized: caller does not belong to this account');
+      return ok(await projectsService.list(account));
     },
   );
 
@@ -40,7 +40,7 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
     async ({ project_id }, extra: { sessionId?: string }) => {
       const project = await projectsService.get(project_id);
       if (!project) return err('Project not found');
-      if (!(await callerCanAccessWorkspace(dataSource, getCallerAgent(extra), project.account_id))) {
+      if (!(await callerCanAccessAccount(dataSource, getCallerAgent(extra), project.account_id))) {
         return err('Project not found');
       }
       return ok(await projectsService.view(project));
@@ -50,10 +50,10 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
   server.tool(
     'save_project',
     'Create (omit project_id) or update a project. `host_folders` sets the main clone folder per Runtime Host ' +
-    '(absolute path on that host; an empty path removes the entry). Requires access to the project\'s workspace.',
+    '(absolute path on that host; an empty path removes the entry). Requires access to the project\'s account.',
     {
       project_id: z.string().optional().describe('Omit to create'),
-      account_id: z.string().optional().describe('Account for a new project (defaults to the caller\'s workspace)'),
+      account_id: z.string().optional().describe('Account for a new project (defaults to the caller\'s account)'),
       name: z.string().optional(),
       description: z.string().optional(),
       repo_url: z.string().optional(),
@@ -74,12 +74,12 @@ export function registerProjectTools(server: McpServer, ctx: ToolContext): void 
           const existing = await projectsService.get(args.project_id);
           if (!existing) return err('Project not found');
           accountId = existing.account_id;
-          if (!(await callerCanAccessWorkspace(dataSource, caller, accountId))) return err('Project not found');
+          if (!(await callerCanAccessAccount(dataSource, caller, accountId))) return err('Project not found');
           projectId = (await projectsService.update(args.project_id, accountId, args)).id;
         } else {
           accountId = args.account_id || caller?.accountId || '';
           if (!accountId) return err('account_id is required');
-          if (!(await callerCanAccessWorkspace(dataSource, caller, accountId))) return err('Unauthorized: caller does not belong to this workspace');
+          if (!(await callerCanAccessAccount(dataSource, caller, accountId))) return err('Unauthorized: caller does not belong to this account');
           projectId = (await projectsService.create(accountId, args)).id;
         }
         for (const folder of args.host_folders || []) {

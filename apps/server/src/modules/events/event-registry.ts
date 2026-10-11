@@ -76,17 +76,17 @@ function roomMemberFilter(envelope: StreamEvent<any>, identity: SubscriberIdenti
 /**
  * `chat_room_update` 의 수신 범위 (티켓 995a9519, 리뷰 라운드1 P1-2).
  *
- * `open_join_changed` 만 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 간다.
+ * `open_join_changed` 만 방 구성원이 아니라 **계정의 모든 사용자**에게 간다.
  * 이 변경이 실제로 영향을 주는 대상이 정확히 비참여자이기 때문이다 — ON 이면 그들에게
  * 방이 새로 보여야 하고, OFF 면 그들의 사이드바에서 사라져야 한다. 방 구성원만 받으면
  * 정작 상태가 바뀐 쪽은 아무것도 못 받고, OFF 뒤에도 새로고침 전까지 닫힌 방을 계속
  * 보다가 읽기·발화 403 을 맞는다.
  *
- * 워크스페이스 대조를 **수신 측**이 하는 이유: 이 스택에서 `users` 는 워크스페이스에
+ * 계정 대조를 **수신 측**이 하는 이유: 이 스택에서 `users` 는 계정에
  * 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다 — `requested_account_id` 는 가입 시
- * 선택값일 뿐이다), SSE identity 에도 워크스페이스가 없다(events.controller 는 boardId 만
+ * 선택값일 뿐이다), SSE identity 에도 계정가 없다(events.controller 는 boardId 만
  * 받는다). 그래서 서버 필터가 동기적으로 판정할 근거가 없다. 대신 payload 에
- * `account_id` 를 실어 보내고 수신 측이 지금 보고 있는 워크스페이스와 대조한다 —
+ * `account_id` 를 실어 보내고 수신 측이 지금 보고 있는 계정와 대조한다 —
  * `subagent_registered` / `subagent_log` / `subagent_ended` 가 이미 쓰는 방식과 같다
  * ("Account scoping happens at the page (REST) level; SSE filter only checks the
  * identity kind"). 에이전트에게는 보내지 않는다: 이 옵션은 사람의 방 목록 가시성에만
@@ -238,7 +238,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         column_prompt: event.column_prompt ?? null,
         base_repo: event.base_repo ?? null,
         base_branch: event.base_branch || '',
-        // ticket bddb63ee: resolved repo clone policy (Repo Resource ⊕ workspace
+        // ticket bddb63ee: resolved repo clone policy (Repo Resource ⊕ account
         // default). Null = no override → agent-manager uses its own system
         // defaults (clone timeout 60분).
         clone_policy: event.clone_policy ?? null,
@@ -304,7 +304,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         ticket_prompt: p.ticket_prompt,
         trigger_source: p.trigger_source,
         // Board-less model (docs/tickets.md): the status the column fields
-        // below are projected from, the workspace, and the project summary.
+        // below are projected from, the account, and the project summary.
         status: p.status || '',
         account_id: p.account_id || '',
         project: p.project ?? null,
@@ -332,7 +332,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         // per-repo timeout/strategy never leaves the envelope, so a large repo
         // silently falls back to the manager defaults.
         clone_policy: p.clone_policy ?? null,
-        // e9c7a896: resolved workspace+board harness — agent-manager's
+        // e9c7a896: resolved account+board harness — agent-manager's
         // handleTrigger reads ev.harness_config off the flattened event and
         // maps the keys onto subagent CLI flags at spawn. Same flatten rule
         // as column_prompt: without this line the field never leaves the
@@ -487,7 +487,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         room_id: typeof event.room_id === 'string' ? event.room_id : undefined,
         // 티켓 9fd27487: chat_room_message 의 run_provision 과 짝을 이루는
         // DM/@-멘션 버전 — 전체 이유는 아래 그 필드의 코멘트를 참고. 값이 없으면
-        // 생략해서, 아직 opt-in 하지 않은 워크스페이스의 DM wire shape 이
+        // 생략해서, 아직 opt-in 하지 않은 계정의 DM wire shape 이
         // byte-for-byte 그대로 유지되게 한다.
         run_provision: event.run_provision ? event.run_provision : undefined,
         // RoomMessagingService가 서버단에서 이 값을 해석하고, 아무것도
@@ -522,10 +522,10 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: ChatRoomMessagePayload = {
         room_id: event.room_id,
-        // Room membership — not workspace — decides SSE delivery, so a
-        // multi-workspace user sees both accounts' room traffic on one
-        // stream. Carry the workspace so the web UI can scope its per-
-        // workspace unread badge. RoomMessagingService already stamps it on
+        // Room membership — not account — decides SSE delivery, so a
+        // multi-account user sees both accounts' room traffic on one
+        // stream. Carry the account so the web UI can scope its per-
+        // account unread badge. RoomMessagingService already stamps it on
         // every emit; this map() used to drop it on the floor.
         account_id: event.account_id || undefined,
         message_id: event.message_id,
@@ -629,8 +629,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         participant_ids: event.participant_ids,
         // 자유 참여 옵션 변경(ticket 995a9519) — `open_join_changed` 에만 채워진다.
         open_join: event.open_join,
-        // 같은 이벤트에만 실린다. 이 update type 은 워크스페이스 전체로 나가므로
-        // 수신 측이 "지금 보고 있는 워크스페이스의 일인가"를 이 값으로 판정한다
+        // 같은 이벤트에만 실린다. 이 update type 은 계정 전체로 나가므로
+        // 수신 측이 "지금 보고 있는 계정의 일인가"를 이 값으로 판정한다
         // (chatRoomUpdateFilter 주석 참조).
         account_id: event.account_id,
         // B3: read-event reader identity + marker, populated only when present.
@@ -1015,7 +1015,7 @@ export const EVENT_TYPES: EventDefinition[] = [
 
   // ───────── subagent_registered / subagent_log / subagent_ended ─────────
   // Account-scoped fan-out: every user with an SSE stream subscribed to the
-  // workspace sees every subagent on every agent machine in that workspace.
+  // account sees every subagent on every agent machine in that account.
   // No agent-side filter — the events are observability traffic the agents
   // don't need to consume themselves. UI does the rendering.
   {
@@ -1085,7 +1085,7 @@ export const EVENT_TYPES: EventDefinition[] = [
 
   // ───────── agent_instance_update ─────────
   // Runtime Host presence registry change. Account-
-  // scoped so the admin UI for one workspace doesn't see every other tenant's
+  // scoped so the admin UI for one account doesn't see every other tenant's
   // instance traffic; agent subscribers don't need this (it's pure UI fuel for
   // the human-side dashboard).
   {
@@ -1202,7 +1202,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   // 밀어 넣는다. UI(T6)만 소비 — agent(agent-manager 포함)는 서버가 이동 시점에
   // getConsensusState 로 재계산하므로 이 이벤트가 필요 없다. 따라서 user-only
   // filter: agent-manager 스위치는 이 타입을 받지 않고 SSE contract 무관.
-  // subagent_*/agent_instance_update 와 같은 "UI fuel" 패턴 — 워크스페이스
+  // subagent_*/agent_instance_update 와 같은 "UI fuel" 패턴 — 계정
   // 스코프는 페이지(REST) 레벨에서 좁혀지고, 여기선 user 구독자에게만 흘린다.
   {
     eventType: 'consensus_update',
@@ -1320,7 +1320,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   // 티켓 964014f5: Ontology Graph 증분 갱신(Phase A/B/C) 진행 + graph_status.
   // consensus_update/orchestration_update와 같은 user-only UI fuel 패턴 —
   // agent는 MCP 툴 응답의 {indexed_at, confidence}(축 6, 미배정)로 신선도를
-  // 알지 이 스트림을 구독하지 않는다. workspace 스코프(ticket_id 없음 — 이
+  // 알지 이 스트림을 구독하지 않는다. account 스코프(ticket_id 없음 — 이
   // 이벤트는 티켓이 아니라 그래프에 묶인다).
   {
     eventType: 'ontology_graph_progress',

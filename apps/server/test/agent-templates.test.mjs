@@ -117,17 +117,17 @@ test('pre-sync cleanup reuses an existing Host binding and rejects conflicting a
 });
 
 test('runtime identity resolves only from an active Host-bound execution credential', async () => {
-  const { resolveCallerIdentityRow, callerCanAccessWorkspace } = require('../dist/modules/mcp/shared/authz');
+  const { resolveCallerIdentityRow, callerCanAccessAccount } = require('../dist/modules/mcp/shared/authz');
   const db = await database();
   try {
     const host = await db.getRepository(RuntimeHost).save({ name: 'machine' });
     const runtimeKey = 'rt-0123456789abcdef';
     const keys = db.getRepository(ApiKey);
-    const key = await keys.save({ name: `runtime:Coder:${runtimeKey}`, key: 'hash', host_id: host.id, account_id: 'workspace-a' });
-    assert.deepEqual(await resolveCallerIdentityRow(db, runtimeKey), { kind: 'runtime', id: runtimeKey, name: 'Coder', account_id: 'workspace-a' });
+    const key = await keys.save({ name: `runtime:Coder:${runtimeKey}`, key: 'hash', host_id: host.id, account_id: 'account-a' });
+    assert.deepEqual(await resolveCallerIdentityRow(db, runtimeKey), { kind: 'runtime', id: runtimeKey, name: 'Coder', account_id: 'account-a' });
     const caller = { agentId: runtimeKey, source: 'db', scope: 'full' };
-    assert.equal(await callerCanAccessWorkspace(db, caller, 'workspace-a'), true);
-    assert.equal(await callerCanAccessWorkspace(db, caller, 'workspace-b'), false);
+    assert.equal(await callerCanAccessAccount(db, caller, 'account-a'), true);
+    assert.equal(await callerCanAccessAccount(db, caller, 'account-b'), false);
     await keys.update(key.id, { is_active: 0 });
     assert.equal(await resolveCallerIdentityRow(db, runtimeKey), null);
     await keys.update(key.id, { is_active: 1 });

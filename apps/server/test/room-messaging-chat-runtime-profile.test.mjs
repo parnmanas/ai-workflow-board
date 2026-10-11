@@ -3,7 +3,7 @@
 // 결함이었지만(handleChatRequest가 payload.cli_runtime_profile을 읽어
 // runtimeProfile을 만들지 않음), 애초에 서버가 chat_request 이벤트에
 // cli_runtime_profile을 실어 보낸 적이 없었다 — trigger-loop.service.ts가
-// ticket dispatch에 대해 하는 것과 동일한 agent > workspace 해석을 chat
+// ticket dispatch에 대해 하는 것과 동일한 agent > account 해석을 chat
 // 경로(DM/@-멘션)에도 적용해야 한다.
 //
 // room-messaging-chat-workspace-folder-opt-in.test.mjs와 같은 기법(실제
@@ -68,7 +68,7 @@ function profileRow(runtime) {
 
 // resolveClaudeBackendProfileForDispatch 용 최소 DataSource. 프로필은 인스턴스
 // 전역이므로(티켓 e616dbfc) claude_backend_profiles 테이블이 유일한 소스다 —
-// 예전처럼 workspace.cli_runtime_profiles 를 읽지 않는다. SystemSetting(전역
+// 예전처럼 account.cli_runtime_profiles 를 읽지 않는다. SystemSetting(전역
 // 기본값)은 findOne() → null 로 "미설정"이 된다.
 function makeDataSource(profiles = [LOCAL_PROFILE]) {
   const rows = profiles.map(profileRow);
@@ -80,7 +80,7 @@ function makeDataSource(profiles = [LOCAL_PROFILE]) {
   };
 }
 
-function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
+function makeSvc({ agent, account, profiles = [LOCAL_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
   // P4c-4: DM 상대의 cli/cli_runtime_profile 은 참가자 스냅샷 runtime_spec 이
   // 정본이다 (Agent 행 없음). id → 객체 해석은 profiles 목록으로 흉내낸다
@@ -106,7 +106,7 @@ function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
       };
     },
   };
-  const accountRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return account; } };
   const messageRepo = {
     createQueryBuilder: makeQueryBuilder,
     manager: {
@@ -144,7 +144,7 @@ function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
   // throwing — irrelevant to what this file actually tests.
   const connectivity = { isReachable: () => true };
   // P4c-4: (room, participant, message, ticket, userMention, attachment,
-  // workspace, dataSource, log, membership, mention, connectivity) — agentRepo 없음.
+  // account, dataSource, log, membership, mention, connectivity) — agentRepo 없음.
   const svc = new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, {}, {}, {},
     accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
@@ -166,7 +166,7 @@ const optedOutWs = { id: 'ws-1' };
 
 test('DM to a Claude agent with a resolvable profile: chat_request carries cli_runtime_profile', async () => {
   const agent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
-  const svc = makeSvc({ agent, workspace: optedOutWs });
+  const svc = makeSvc({ agent, account: optedOutWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -188,7 +188,7 @@ test('DM to a Claude agent with a resolvable profile: chat_request carries cli_r
 
 test('DM to a non-Claude agent: chat_request omits cli_runtime_profile even with a configured profile', async () => {
   const agent = { id: 'agent-2', type: 'codex', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
-  const svc = makeSvc({ agent, workspace: optedOutWs });
+  const svc = makeSvc({ agent, account: optedOutWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -202,7 +202,7 @@ test('DM to a non-Claude agent: chat_request omits cli_runtime_profile even with
 
 test('DM to a Claude agent with no cli_runtime_profile configured: chat_request omits the key (byte-identical legacy wire shape)', async () => {
   const agent = { id: 'agent-3', type: 'claude', role_prompt: '', cli_runtime_profile: null, credential_id: null };
-  const svc = makeSvc({ agent, workspace: optedOutWs });
+  const svc = makeSvc({ agent, account: optedOutWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -217,7 +217,7 @@ test('DM to a Claude agent with no cli_runtime_profile configured: chat_request 
 test('DM to a Claude agent whose resolved profile requires a credential it does not have: omitted + warns instead of dispatching a broken profile', async () => {
   const guardedProfile = { ...LOCAL_PROFILE, id: 'needs-cred', credential_required: true, credential_ref: '11111111-1111-4111-8111-111111111111' };
   const agent = { id: 'agent-4', type: 'claude', role_prompt: '', cli_runtime_profile: 'needs-cred', credential_id: null };
-  const svc = makeSvc({ agent, workspace: optedOutWs, profiles: [guardedProfile] });
+  const svc = makeSvc({ agent, account: optedOutWs, profiles: [guardedProfile] });
   const capture = captureEmit();
   warnLogs.length = 0;
   try {
@@ -234,7 +234,7 @@ test('DM to a Claude agent whose resolved profile requires a credential it does 
 test('DM profile 조회 실패는 profile 미지정으로 축약하지 않고 디스패치를 중단한다', async () => {
   const malformedProfile = { ...LOCAL_PROFILE, id: 'malformed', credential_required: true, credential_ref: '잘못된-id' };
   const agent = { id: 'agent-5', type: 'claude', role_prompt: '', cli_runtime_profile: 'malformed', credential_id: null };
-  const svc = makeSvc({ agent, workspace: optedOutWs, profiles: [malformedProfile] });
+  const svc = makeSvc({ agent, account: optedOutWs, profiles: [malformedProfile] });
   const capture = captureEmit();
   errorLogs.length = 0;
   try {
@@ -271,7 +271,7 @@ function captureRoomMessageEmit() {
   };
 }
 
-function makeGroupSvc({ agents, workspace, onSpecRead, profiles = [LOCAL_PROFILE] }) {
+function makeGroupSvc({ agents, account, onSpecRead, profiles = [LOCAL_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
   // P4c-4: broadcast 해석은 참가자 스냅샷 runtime 맵을 읽는다 (Agent 행 없음).
   // spec 의 cli_runtime_profile 은 id 문자열 — 해석은 레지스트리가 한다.
@@ -289,7 +289,7 @@ function makeGroupSvc({ agents, workspace, onSpecRead, profiles = [LOCAL_PROFILE
   // stub이면 충분하다(getOne() -> null이면 markRead가 participant 체크
   // 직후 바로 리턴한다, DM 테스트에서 허용한 markRead no-op과 동일).
   const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
-  const accountRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return account; } };
   const messageRepo = {
     createQueryBuilder: () => ({ ...makeQueryBuilder(), async getOne() { return null; } }),
     manager: {
@@ -333,7 +333,7 @@ function makeGroupSvc({ agents, workspace, onSpecRead, profiles = [LOCAL_PROFILE
 test('Group room broadcast: cli_runtime_profiles carries only the Claude-type member with a resolvable profile', async () => {
   const claudeAgent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
   const codexAgent = { id: 'agent-2', type: 'codex', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
-  const svc = makeGroupSvc({ agents: [claudeAgent, codexAgent], workspace: optedOutWs });
+  const svc = makeGroupSvc({ agents: [claudeAgent, codexAgent], account: optedOutWs });
   const capture = captureRoomMessageEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello room');
@@ -352,7 +352,7 @@ test('Group room broadcast: cli_runtime_profiles carries only the Claude-type me
 test('Group room broadcast: cli_runtime_profiles is omitted entirely when no member resolves a profile', async () => {
   const claudeAgentNoProfile = { id: 'agent-3', type: 'claude', role_prompt: '', cli_runtime_profile: null, credential_id: null };
   const emptyWs = { id: 'ws-2' };
-  const svc = makeGroupSvc({ agents: [claudeAgentNoProfile], workspace: emptyWs });
+  const svc = makeGroupSvc({ agents: [claudeAgentNoProfile], account: emptyWs });
   const capture = captureRoomMessageEmit();
   try {
     await svc.sendMessage('room-1', 'ws-2', 'user', 'user-1', 'Alice', 'hello room');
@@ -370,7 +370,7 @@ test('Group room broadcast: a progress heartbeat never triggers profile resoluti
   // 맵으로 해석되는 게 아니라 resolution 자체를 완전히 건너뛴다는 것을
   // 증명한다.
   let findCalls = 0;
-  const svc = makeGroupSvc({ agents: [claudeAgent], workspace: optedOutWs, onSpecRead: () => { findCalls += 1; } });
+  const svc = makeGroupSvc({ agents: [claudeAgent], account: optedOutWs, onSpecRead: () => { findCalls += 1; } });
   const capture = captureRoomMessageEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'agent', 'manager-1', 'Manager', 'tool call narration', undefined, undefined, 'progress');

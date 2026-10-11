@@ -25,11 +25,11 @@ import { useHostNames } from '../runtime/useHostNames';
  * 담당한다(ArtifactPanel 선례).
  *
  * "티켓 열기" 버튼(티켓 7815a958): 뷰는 onOpen 콜백이 주어질 때만 버튼을 렌더한다
- * (ErrorState 의 onRetry 와 동일한 선택적 렌더 관례). 티켓은 워크스페이스 하나의
+ * (ErrorState 의 onRetry 와 동일한 선택적 렌더 관례). 티켓은 계정 하나의
  * 풀에 있으므로(docs/tickets.md) 활성/비활성은 ticket.account_id 유무만으로 정해지는
  * 순수 파생값이라 SSR 테스트로 고정할 수 있다 — 보관된 티켓도 Tickets 페이지가 id 로
- * 열어 준다. 실제 navigate() 호출(다른 workspace 로도 이동 가능해야 함 — 티켓 28258c75
- * 의 URL 기반 workspace 전환과 동일 계약)은 useNavigate 를 쓰는 컨테이너가 담당한다.
+ * 열어 준다. 실제 navigate() 호출(다른 account 로도 이동 가능해야 함 — 티켓 28258c75
+ * 의 URL 기반 account 전환과 동일 계약)은 useNavigate 를 쓰는 컨테이너가 담당한다.
  */
 
 export type TicketArtifactState =
@@ -135,7 +135,7 @@ export function TicketArtifactView({
   // 시스템 코멘트는 노이즈라 상세 요약에선 걸러 최근 사람/에이전트 발화만 몇 개 보여준다.
   const visibleComments = comments.filter((c) => c?.author_type !== 'system').slice(-4);
 
-  // "티켓 열기" 활성/비활성 — 티켓의 workspace 를 모르면(구 응답·고아 행) 주소를 만들 수
+  // "티켓 열기" 활성/비활성 — 티켓의 account 를 모르면(구 응답·고아 행) 주소를 만들 수
   // 없으므로 비활성 + 안내 문구로 대체한다(완료기준 #4).
   const canOpen = canOpenTicket(t);
   const openHint = canOpen ? undefined : '이 티켓이 속한 티켓을 찾을 수 없습니다.';
@@ -333,7 +333,7 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
 
   const retry = useCallback(() => load(true), [load]);
 
-  // 다른 workspace 의 티켓이어도 URL 에 명시적 wsId 를 실어 이동한다 —
+  // 다른 account 의 티켓이어도 URL 에 명시적 accountId 를 실어 이동한다 —
   // AppLayout 의 URL→state 동기화 effect(티켓 28258c75)가 currentAccountId·
   // X-Account-Id 헤더를 그 즉시 맞춰준다. `?ticket=` 쿼리는 Tickets 페이지가
   // 소비하는 딥링크 계약(MentionInboxBadge·알림과 동일, utils/ticketPath)이다.

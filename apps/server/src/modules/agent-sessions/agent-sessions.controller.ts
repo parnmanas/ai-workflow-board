@@ -8,7 +8,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { AgentSessionError, AgentSessionsService } from './agent-sessions.service';
 
 /**
- * 사용자 표면. 워크스페이스는 chat-rooms 와 같은 `X-Account-Id` 헤더 규약.
+ * 사용자 표면. 계정는 chat-rooms 와 같은 `X-Account-Id` 헤더 규약.
  * 모든 경로가 (Runtime Host, CLI) 아래에 있다 — 세션은 AWB 의 것이 아니라 그 장비의 것이다.
  */
 @ApiBearerAuth('user-session')
@@ -23,7 +23,7 @@ export class AgentSessionsController {
     const raw = req.headers['x-account-id'];
     const value = Array.isArray(raw) ? raw[0] : raw;
     if (!value) {
-      res.status(400).json({ error: 'workspace_required', message: 'X-Account-Id header is required' });
+      res.status(400).json({ error: 'account_required', message: 'X-Account-Id header is required' });
       return null;
     }
     return String(value);
@@ -46,17 +46,17 @@ export class AgentSessionsController {
 
   @Get('hosts')
   async hosts(@Req() req: Request, @Res() res: Response) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.listHosts(ws));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.listHosts(account));
   }
 
-  /** CLI 설정 — 이 Runtime Host 의 이 CLI 를 어떤 워크스페이스 Credential 로 인증할지. */
+  /** CLI 설정 — 이 Runtime Host 의 이 CLI 를 어떤 계정 Credential 로 인증할지. */
   @Get('hosts/:managerId/:cli/settings')
   async getSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.getCliSettings(ws, managerId, cli));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.getCliSettings(account, managerId, cli));
   }
 
   /**
@@ -66,9 +66,9 @@ export class AgentSessionsController {
    */
   @Put('hosts/:managerId/:cli/settings')
   async setSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.setCliSettings(ws, this.userId(req), managerId, cli, body?.credential_id ?? null, body?.default_config, body?.backend_profile_id));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.setCliSettings(account, this.userId(req), managerId, cli, body?.credential_id ?? null, body?.default_config, body?.backend_profile_id));
   }
 
   /**
@@ -88,10 +88,10 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
+    const account = this.accountId(req, res);
+    if (!account) return;
     try {
-      const bytes = await this.sessions.readImage(ws, this.userId(req), managerId, cli, sessionId, imageRef);
+      const bytes = await this.sessions.readImage(account, this.userId(req), managerId, cli, sessionId, imageRef);
       // mime 은 이벤트 payload 가 들고 있다(화면이 아는 값) — 여기서는 바이트만 책임진다.
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Length', String(bytes.length));
@@ -122,10 +122,10 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
+    const account = this.accountId(req, res);
+    if (!account) return;
     try {
-      const image = await this.sessions.readLocalImage(ws, this.userId(req), managerId, cli, sessionId, String(path ?? ''), String(cwd ?? ''));
+      const image = await this.sessions.readLocalImage(account, this.userId(req), managerId, cli, sessionId, String(path ?? ''), String(cwd ?? ''));
       res.setHeader('Content-Type', image.mimeType);
       res.setHeader('Content-Length', String(image.bytes.length));
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -142,18 +142,18 @@ export class AgentSessionsController {
 
   @Get('hosts/:managerId/:cli/sessions')
   async list(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.listSessions(ws, this.userId(req), managerId, cli, (req as any).accessibleAccountIds));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.listSessions(account, this.userId(req), managerId, cli, (req as any).accessibleAccountIds));
   }
 
   /** `{ session_id?, cwd?, title?, force? }` — session_id 없으면 새 세션(session/new), 있으면 복원(session/load).
    *  `force` 는 잠금을 쥔 외부 프로세스까지 종료하고 연다(화면의 확인 대화상자를 거친 재요청). */
   @Post('hosts/:managerId/:cli/sessions')
   async open(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 201, () => this.sessions.openSession(ws, this.userId(req), managerId, cli, {
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 201, () => this.sessions.openSession(account, this.userId(req), managerId, cli, {
       session_id: typeof body?.session_id === 'string' ? body.session_id : null,
       cwd: typeof body?.cwd === 'string' ? body.cwd : '',
       title: typeof body?.title === 'string' ? body.title : '',
@@ -169,9 +169,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.getSession(ws, this.userId(req), managerId, cli, sessionId));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.getSession(account, this.userId(req), managerId, cli, sessionId));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/prompt')
@@ -183,9 +183,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 202, () => this.sessions.prompt(ws, this.userId(req), managerId, cli, sessionId, body?.text, body?.images));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 202, () => this.sessions.prompt(account, this.userId(req), managerId, cli, sessionId, body?.text, body?.images));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/permission')
@@ -197,9 +197,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.decidePermission(ws, this.userId(req), managerId, cli, sessionId, body?.request_id, body?.option_id ?? null));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.decidePermission(account, this.userId(req), managerId, cli, sessionId, body?.request_id, body?.option_id ?? null));
   }
 
   /** `{ elicitation_id, action: 'accept'|'decline'|'cancel', content? }` — 에이전트의 질문/폼(ACP elicitation)에 답한다. */
@@ -212,9 +212,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.answerElicitation(ws, this.userId(req), managerId, cli, sessionId, body?.elicitation_id, body?.action, body?.content));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.answerElicitation(account, this.userId(req), managerId, cli, sessionId, body?.elicitation_id, body?.action, body?.content));
   }
 
   /** `{ config_id, value }` — 모델·reasoning 등 ACP session config option 변경. value 는 select 의 value id 또는 boolean. */
@@ -227,9 +227,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 202, () => this.sessions.setConfigOption(ws, this.userId(req), managerId, cli, sessionId, body?.config_id, body?.value));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 202, () => this.sessions.setConfigOption(account, this.userId(req), managerId, cli, sessionId, body?.config_id, body?.value));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/cancel')
@@ -240,9 +240,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 202, () => this.sessions.cancel(ws, this.userId(req), managerId, cli, sessionId));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 202, () => this.sessions.cancel(account, this.userId(req), managerId, cli, sessionId));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/mode')
@@ -254,9 +254,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 202, () => this.sessions.setMode(ws, this.userId(req), managerId, cli, sessionId, body?.mode_id));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 202, () => this.sessions.setMode(account, this.userId(req), managerId, cli, sessionId, body?.mode_id));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/repair-credential')
@@ -267,9 +267,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 202, () => this.sessions.repairCredential(ws, this.userId(req), managerId, cli, sessionId));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 202, () => this.sessions.repairCredential(account, this.userId(req), managerId, cli, sessionId));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/restart')
@@ -280,9 +280,9 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 202, () => this.sessions.restart(ws, this.userId(req), managerId, cli, sessionId));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 202, () => this.sessions.restart(account, this.userId(req), managerId, cli, sessionId));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/close')
@@ -293,8 +293,8 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.accountId(req, res);
-    if (!ws) return;
-    return this.run(res, 200, () => this.sessions.close(ws, this.userId(req), managerId, cli, sessionId));
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.close(account, this.userId(req), managerId, cli, sessionId));
   }
 }

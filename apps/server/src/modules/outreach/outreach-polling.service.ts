@@ -167,7 +167,7 @@ export class OutreachPollingService implements OnModuleInit, OnModuleDestroy {
    *  Credential resolution happens OUTSIDE the connector (D1): the connector
    *  receives an already-resolved token, never a credential_id — and this
    *  also fails the poll fast (surfaced via `failed`, retried next
-   *  occurrence) when a credential was revoked, its workspace scope no
+   *  occurrence) when a credential was revoked, its account scope no
    *  longer matches, or (reddit) the channel has no target whitelist,
    *  instead of the connector silently running unauthenticated/unscoped. */
   private async _resolveConnector(channel: OutreachChannel): Promise<OutreachConnector> {

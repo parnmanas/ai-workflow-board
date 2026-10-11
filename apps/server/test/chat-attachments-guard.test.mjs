@@ -8,7 +8,7 @@
 // server contract before this subtask can ship:
 //
 //   - migration + backfill on ticket_attachments
-//   - owner-transition validation (workspace + room + sender match) before
+//   - owner-transition validation (account + room + sender match) before
 //     a pending upload is bound to a message
 //   - chat participant download auth (require_active_participant on REST)
 //   - send_chat_room_message schema accepts attachment_ids[]
@@ -66,12 +66,12 @@ test('GeneralizeAttachmentsForChat migration backfills owner_type/owner_id from 
 
 // ── Send-time validation ─────────────────────────────────────────────
 
-test('RoomMessagingService._validatePendingAttachments enforces room + workspace + sender match', () => {
+test('RoomMessagingService._validatePendingAttachments enforces room + account + sender match', () => {
   const code = stripComments(read('modules/chat-rooms/room-messaging.service.ts'));
   assert.match(code, /_validatePendingAttachments/, 'helper must exist so every send_message caller funnels through one guard');
-  // Account scope check — required so a pending upload in workspace A
-  // can't be smuggled into a message in workspace B.
-  assert.match(code, /row\.account_id\s*!==\s*accountId/, 'pending attachment must reject ids that belong to a different workspace');
+  // Account scope check — required so a pending upload in account A
+  // can't be smuggled into a message in account B.
+  assert.match(code, /row\.account_id\s*!==\s*accountId/, 'pending attachment must reject ids that belong to a different account');
   // Uploader identity — required so a co-participant can't attach another
   // user / agent's pending file to their own message.
   assert.match(code, /row\.uploaded_by_type\s*!==\s*senderType[\s\S]{0,80}uploaded_by_id\s*!==\s*senderId/, 'pending attachment must reject ids uploaded by a different sender');

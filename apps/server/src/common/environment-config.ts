@@ -7,11 +7,11 @@ import { z } from 'zod';
  * a board: git repositories to clone/prepare under the agent home, non-secret
  * env vars to inject into the subagent, and bootstrap commands to run once.
  * Stored as a JSON text column on both Account (`environment_config` =
- * workspace-wide default) and Board (`environment_config` = per-board override),
+ * account-wide default) and Board (`environment_config` = per-board override),
  * mirroring the `Board.harness_config` / `Board.effort_presets` convention.
  *
  * Resolution is KEY-LEVEL (resolveEnvironmentConfig): a board only overrides the
- * top-level keys it sets; unset keys fall through to the workspace default. Both
+ * top-level keys it sets; unset keys fall through to the account default. Both
  * unset → null, which every consumer must treat as "no environment setup —
  * dispatch exactly as before" (null-safe contract, same as harness_config).
  *
@@ -204,21 +204,21 @@ export function serializeEnvironmentConfig(
 }
 
 /**
- * Key-level merge of the workspace default with the board override. The board
+ * Key-level merge of the account default with the board override. The board
  * wins per top-level key it explicitly sets; keys it leaves unset inherit from
- * the workspace. Both null → null (caller keeps current behaviour). Shared
+ * the account. Both null → null (caller keeps current behaviour). Shared
  * resolve point for REST/MCP consumers and the dispatch path so every reader
  * agrees on precedence (mirrors resolveHarnessConfig).
  */
 export function mergeEnvironmentConfig(
-  workspaceRaw: string | null | undefined,
+  accountRaw: string | null | undefined,
   boardRaw: string | null | undefined,
 ): EnvironmentConfig | null {
-  const ws = parseEnvironmentConfig(workspaceRaw);
+  const account = parseEnvironmentConfig(accountRaw);
   const board = parseEnvironmentConfig(boardRaw);
-  if (!ws) return board;
-  if (!board) return ws;
-  const merged: EnvironmentConfig = { ...ws };
+  if (!account) return board;
+  if (!board) return account;
+  const merged: EnvironmentConfig = { ...account };
   for (const key of ENVIRONMENT_CONFIG_KEYS) {
     if (board[key] !== undefined) (merged as any)[key] = board[key];
   }

@@ -1191,7 +1191,7 @@ export class UpdateChecker {
  * (SSE `update_manager`, SIGUSR1, future direct callers). Hoisting this out of
  * `main.ts` is load-bearing: prior versions kept the flag local to
  * `runRuntime()` and only guarded SIGUSR1, so two concurrent SSE dispatches
- * (or one SSE + one SIGUSR1) would race in three places — workspace-root
+ * (or one SSE + one SIGUSR1) would race in three places — account-root
  * `npm install`, `tsc` writing `dist/`, and the double `setTimeout(reExecManager,
  * 1500)` lockfile-takeover loop. Gating `runSelfUpdate` itself collapses all
  * those entry points onto a single in-flight bit.

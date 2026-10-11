@@ -145,7 +145,7 @@ test('Runtime Hosts 화면의 "Refresh models" 는 그 호스트로 갱신을 �
     t,
     React.createElement(InstanceDetail, {
       inst: instanceRow({ availableModels: { claude: ['opus'] } }),
-      workspaceAgents: [],
+      accountAgents: [],
     }),
   );
   await act(async () => {});

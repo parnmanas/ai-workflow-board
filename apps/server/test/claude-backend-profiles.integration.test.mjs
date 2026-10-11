@@ -24,7 +24,7 @@ let adminToken;
 let ownerToken;
 let memberToken;
 let outsiderToken;
-let workspace;
+let account;
 let owner;
 let member;
 /* P4c-4: agent fixture 삭제 (Agent 행 없음). 보드 제거 후 Board / Ticket 핀도
@@ -79,8 +79,8 @@ before(async () => {
   ({ user: member, token: memberToken } = await createUser('profile-member'));
   ({ token: outsiderToken } = await createUser('profile-outsider'));
 
-  workspace = await ds.getRepository('Account').save(ds.getRepository('Account').create({
-    name: 'Profile integration workspace',
+  account = await ds.getRepository('Account').save(ds.getRepository('Account').create({
+    name: 'Profile integration account',
     cli_runtime_profiles: JSON.stringify([{
       id: 'legacy-profile',
       kind: 'claude-backend',
@@ -89,12 +89,12 @@ before(async () => {
       model: 'legacy-model',
     }]),
   }));
-  await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'account', id: workspace.id });
-  await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'account', id: workspace.id });
+  await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'account', id: account.id });
+  await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'account', id: account.id });
 
   // RuntimeSpec 검증(POST /runtime-specs/validate)은 Host 존재부터 본다.
   host = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({
-    name: 'profiles-host', hostname: 'fixture', account_id: workspace.id, is_active: 1,
+    name: 'profiles-host', hostname: 'fixture', account_id: account.id, is_active: 1,
   }));
 
   await ds.getRepository('Credential').save(ds.getRepository('Credential').create({
@@ -117,8 +117,8 @@ after(async () => {
 });
 
 describe('Claude backend profile integration', () => {
-  // 티켓 e616dbfc — 워크스페이스 스코프가 사라진 자리. 쓰기는 여전히 관리자
-  // 전용이고, 읽기는 워크스페이스 배정과 무관하게 로그인한 사용자면 누구나
+  // 티켓 e616dbfc — 계정 스코프가 사라진 자리. 쓰기는 여전히 관리자
+  // 전용이고, 읽기는 계정 배정과 무관하게 로그인한 사용자면 누구나
   // 같은 전역 목록을 본다. 자격증명 값·참조는 어느 표면에도 실리지 않는다.
   it('쓰기는 AdminGuard, 읽기는 로그인만 — 전역 카탈로그는 모두에게 같은 목록', async () => {
     for (const token of [ownerToken, memberToken, outsiderToken]) {
@@ -138,7 +138,7 @@ describe('Claude backend profile integration', () => {
       assert.equal(catalog.status, 200, `${label}: ${JSON.stringify(catalog.data)}`);
       const ids = new Set(catalog.data.profiles.map(row => row.id));
       assert.ok([...expected].every(id => ids.has(id)), `${label} 은 전역 프로필을 모두 봐야 합니다.`);
-      // 워크스페이스 배정 흔적이 응답에 남으면 안 된다.
+      // 계정 배정 흔적이 응답에 남으면 안 된다.
       assert.equal('allowed_profile_ids' in catalog.data, false);
       const serialized = JSON.stringify(catalog.data);
       assert.equal(serialized.includes(secretCredentialId), false, `${label}: credential_ref 가 새면 안 됩니다.`);
@@ -149,7 +149,7 @@ describe('Claude backend profile integration', () => {
     assert.equal((await apiRequest(baseUrl, '/claude-backend-profiles', {})).status, 401);
   });
 
-  // 예전에는 워크스페이스 allow-set 이 Board/Agent/run 핀의 권위였고, 비워두면
+  // 예전에는 계정 allow-set 이 Board/Agent/run 핀의 권위였고, 비워두면
   // 전역에 존재하는 프로필이라도 거부됐다. 이제 권위는 전역 목록 하나뿐이므로
   // (a) 전역에 없는 id 는 여전히 400 이고 (b) 전역에 있으면 배정 없이도 통과한다.
   // Board / Ticket 핀은 보드 제거와 함께 사라졌다 — 남은 핀 표면은 RuntimeSpec
@@ -160,16 +160,16 @@ describe('Claude backend profile integration', () => {
       runtime_config: { strategy: 'single', permission_mode: 'strict' },
     });
     const denied = await apiRequest(baseUrl, '/runtime-specs/validate', {
-      token: adminToken, method: 'POST', body: { account_id: workspace.id, spec: spec('legacy-profile') },
+      token: adminToken, method: 'POST', body: { account_id: account.id, spec: spec('legacy-profile') },
     });
     assert.equal(denied.status, 400, JSON.stringify(denied.data));
-    assert.match(denied.data.error, /does not exist$/, '에러 문구에 워크스페이스 스코프가 남으면 안 됩니다.');
+    assert.match(denied.data.error, /does not exist$/, '에러 문구에 계정 스코프가 남으면 안 됩니다.');
 
-    // profileB 는 어떤 워크스페이스에도 배정된 적이 없다 — 예전 계약이라면 400.
-    // 검증은 로그인만 요구하므로 워크스페이스 멤버도 같은 판정을 받는다.
+    // profileB 는 어떤 계정에도 배정된 적이 없다 — 예전 계약이라면 400.
+    // 검증은 로그인만 요구하므로 계정 멤버도 같은 판정을 받는다.
     for (const token of [adminToken, memberToken]) {
       const accepted = await apiRequest(baseUrl, '/runtime-specs/validate', {
-        token, method: 'POST', body: { account_id: workspace.id, spec: spec(profileB.id) },
+        token, method: 'POST', body: { account_id: account.id, spec: spec(profileB.id) },
       });
       assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
       assert.equal(accepted.data.spec.cli_runtime_profile, profileB.id);

@@ -195,7 +195,7 @@ async function mountSidebar(t, options = {}) {
                   overlay: false,
                   isOpen: false,
                   onClose: () => {},
-                  wsId: WS_ID,
+                  accountId: WS_ID,
                   rooms: [],
                   roomsLoading: false,
                 }),

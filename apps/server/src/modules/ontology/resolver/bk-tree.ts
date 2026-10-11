@@ -1,6 +1,6 @@
 // 의존성 없는 in-process BK-tree(ticket e52e7f64, DESIGN.md 축 1 —
 // REVIEW-NOTES.md S6). fuzzy(~0.35) tier 전용 — pairwise 문자열 비교가
-// O(refs × defs)로 폭발하는 걸 피하기 위해, 워크스페이스 심볼명 전체에
+// O(refs × defs)로 폭발하는 걸 피하기 위해, 계정 심볼명 전체에
 // 대해 편집거리 기반 O(log n) 평균 룩업을 제공한다(메트릭 트리의 표준
 // 결과 — 삼각부등식으로 후보 서브트리를 가지치기한다). sql.js FTS5는
 // 기본 빌드에 컴파일돼 있지 않아(같은 리뷰 지적) 채택 불가라고 이미
@@ -49,10 +49,10 @@ export interface BKQueryStats {
   visitedNodes: number;
 }
 
-/** 편집거리 메트릭 위의 BK-tree — insert()는 추출 런당 워크스페이스 심볼명
+/** 편집거리 메트릭 위의 BK-tree — insert()는 추출 런당 계정 심볼명
  *  전체에 대해 한 번씩, query()는 미해소 참조 하나당 한 번 호출된다. 둘 다
  *  평균 O(log n) 노드 방문(가지치기 덕분) — pairwise 비교(O(n))와 달리
- *  워크스페이스 규모가 커져도 완만하게 스케일한다. */
+ *  계정 규모가 커져도 완만하게 스케일한다. */
 export class BKTree {
   private root: BKNode | null = null;
   private _size = 0;

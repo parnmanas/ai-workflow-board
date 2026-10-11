@@ -39,7 +39,7 @@ interface QAReport {
   };
   categories: Record<string, { passed: number; failed: number; skipped: number }>;
   results: TestResult[];
-  cleanup: { workspace_deleted: boolean; error?: string };
+  cleanup: { account_deleted: boolean; error?: string };
 }
 
 @ApiBearerAuth('user-session')
@@ -156,10 +156,10 @@ export class QaController {
       },
       categories,
       results,
-      // Flow suite doesn't create a shared scratch workspace (each file
+      // Flow suite doesn't create a shared scratch account (each file
       // owns its scene), so there's no single cleanup row to surface —
       // we just pass through a trivially-"clean" state for UI-shape parity.
-      cleanup: { workspace_deleted: true },
+      cleanup: { account_deleted: true },
       warnings: warnings.length ? warnings : undefined,
     };
 

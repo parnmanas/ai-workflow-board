@@ -139,7 +139,7 @@ async function setupDb() {
   return dataSource;
 }
 
-async function seedWorkspace(dataSource, accountId) {
+async function seedAccount(dataSource, accountId) {
   const wsRepo = dataSource.getRepository(Account);
   return wsRepo.save(wsRepo.create({ id: accountId, name: accountId }));
 }
@@ -188,7 +188,7 @@ function makeService(dataSource, classifier, {
 test('a bug item creates a todo ticket with the fixed description header and source tags', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const connector = makeConnector([item({
@@ -231,7 +231,7 @@ test('a bug item creates a todo ticket with the fixed description header and sou
 test('the channel target_tags + target_project_id classify the ticket and the project default_assignee picks it up', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const project = await seedProject(dataSource, 'ws-1', { default_assignee: RUNTIME });
     const channel = await seedChannel(dataSource, {
       kind: 'reddit', target_tags: ['feedback', 'Outreach'], target_project_id: project.id,
@@ -263,7 +263,7 @@ test('the channel target_tags + target_project_id classify the ticket and the pr
 test('a target project deleted after the channel was saved files the ticket without a project and logs it, instead of failing every poll', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource, { target_project_id: 'project-that-was-deleted' });
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const { warns, log } = recordingLog();
@@ -287,7 +287,7 @@ test('a target project deleted after the channel was saved files the ticket with
 test('polling the same external item twice creates only one ticket (dedupe index, not just cursor)', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     let channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -314,7 +314,7 @@ test('polling the same external item twice creates only one ticket (dedupe index
 test('a noise classification never creates a ticket', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-noise': { category: 'noise', confidence: 95 } });
     const connector = makeConnector([item({ external_item_id: 'gh-noise', created_at: new Date('2026-06-25T10:00:00Z') })]);
@@ -337,7 +337,7 @@ test('a noise classification never creates a ticket', async () => {
 test('a question classification never creates a ticket either', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-q': { category: 'question', confidence: 90 } });
     const connector = makeConnector([item({ external_item_id: 'gh-q', created_at: new Date('2026-06-25T10:00:00Z') })]);
@@ -355,7 +355,7 @@ test('a question classification never creates a ticket either', async () => {
 test('confidence below the channel threshold holds the item instead of ticketing or discarding', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource, { classify_threshold: 80 });
     const classifier = makeClassifier({ 'gh-low': { category: 'bug', confidence: 50 } });
     const connector = makeConnector([item({ external_item_id: 'gh-low', created_at: new Date('2026-06-25T10:00:00Z') })]);
@@ -379,7 +379,7 @@ test('confidence below the channel threshold holds the item instead of ticketing
 test('the cursor persists across a simulated restart — no re-collection, no gap', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const seededChannel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
@@ -425,7 +425,7 @@ test('the cursor persists across a simulated restart — no re-collection, no ga
 test('a per-item processing error does not crash the poll and freezes the cursor before the failure point', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-bad': { category: 'bug', confidence: 90 } });
     const connector = makeConnector([item({ external_item_id: 'gh-bad', created_at: new Date('2026-06-25T10:00:00Z') })]);
@@ -451,7 +451,7 @@ test('a per-item processing error does not crash the poll and freezes the cursor
 test('two pollChannel sweeps racing on the same external item create exactly one ticket and one ledger row', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-race': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-race', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -489,7 +489,7 @@ test('two pollChannel sweeps racing on the same external item create exactly one
 test('a ledger-link failure after ticket creation leaves the ticket intact — retry finds it via the dedupe key, lands exactly one ticket, and never re-runs the creation side effects', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const project = await seedProject(dataSource, 'ws-1', { default_assignee: RUNTIME });
     const channel = await seedChannel(dataSource, { target_project_id: project.id });
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
@@ -555,7 +555,7 @@ test('a ledger-link failure after ticket creation leaves the ticket intact — r
 test('ticket creation colliding with an existing open ticket for the same dedupe key links to it instead of creating a duplicate', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-collide': { category: 'bug', confidence: 90 } });
     const collideItem = item({ external_item_id: 'gh-collide', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -605,7 +605,7 @@ test('ticket creation colliding with an existing open ticket for the same dedupe
 test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key releases the key and lands a fresh, visible ticket in the SAME poll — no permanent retry loop', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-archived-collide': { category: 'bug', confidence: 90 } });
     const collideItem = item({ external_item_id: 'gh-archived-collide', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -660,7 +660,7 @@ test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key r
 test('two pollChannel sweeps racing on the SAME archived-holder collision still land exactly one fresh ticket', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-archived-race': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-archived-race', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -731,7 +731,7 @@ test('two pollChannel sweeps racing on the SAME archived-holder collision still 
 test('an item whose original ticket was archived (dedupe key already cleared) reclaims into a fresh, visible ticket', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-reopen': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-reopen', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -785,7 +785,7 @@ test('an item whose original ticket was archived (dedupe key already cleared) re
 test('a still-active claim (fresh lease) is NOT reclaimed by a racing second poll — deterministic barrier, exactly one ticket', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-race2': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-race2', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -841,7 +841,7 @@ test('a still-active claim (fresh lease) is NOT reclaimed by a racing second pol
 test('lease fencing: a real takeover after the lease actually expires still lands exactly one ticket, not two', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-fence': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-fence', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -914,7 +914,7 @@ test('lease fencing: a real takeover after the lease actually expires still land
 test('a stale ticket_id=null claim from before this fix is reclaimed and ticketed on the next poll, not skipped forever', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
@@ -963,7 +963,7 @@ test('a stale ticket_id=null claim from before this fix is reclaimed and tickete
 test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후보로 표면화되고 pending_user_action이 켜진다', async (t) => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
@@ -1012,7 +1012,7 @@ test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후
 test('같은 채널에서 정규화 제목까지 동일한 두 번째 리포트는 canonical_ticket_id로 자동링크되어 독립 dispatch가 억제된다', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
@@ -1072,7 +1072,7 @@ test('같은 채널에서 정규화 제목까지 동일한 두 번째 리포트�
 test('record()(Decision/Comment 저장) 실패는 리포트 INSERT 까지 롤백하고, 재시도가 티켓·canonical 링크·감사 기록을 한 번에 남긴다', async (t) => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
@@ -1169,7 +1169,7 @@ test('record()(Decision/Comment 저장) 실패는 리포트 INSERT 까지 롤백
 test('a threaded comment item (parent_external_item_id) whose parent is already ticketed appends a Comment instead of creating a new ticket', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
@@ -1213,7 +1213,7 @@ test('a threaded comment item (parent_external_item_id) whose parent is already 
 test('re-polling the SAME threaded comment appends exactly one Comment (idempotent)', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
@@ -1244,7 +1244,7 @@ test('re-polling the SAME threaded comment appends exactly one Comment (idempote
 test('a threaded comment whose parent has not been ticketed yet (still noise) falls through and is classified as a standalone item', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     // Parent issue classifies as noise (never ticketed); the threaded comment
     // classifies as a bug on its own.
@@ -1283,7 +1283,7 @@ test('a threaded comment whose parent has not been ticketed yet (still noise) fa
 test('an issue-update item whose parent is already ticketed appends a Comment with update-specific wording (not "New comment")', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
@@ -1316,7 +1316,7 @@ test('an issue-update item whose parent is already ticketed appends a Comment wi
 test('re-polling the SAME issue-update id (unchanged edit) appends exactly once (idempotent)', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
@@ -1349,7 +1349,7 @@ test('re-polling the SAME issue-update id (unchanged edit) appends exactly once 
 test('a LATER edit (different issue-update id) appends AGAIN — not deduped away like the unchanged-edit case', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
@@ -1396,7 +1396,7 @@ test('a LATER edit (different issue-update id) appends AGAIN — not deduped awa
 test('a new comment on an old issue does not ALSO emit a spurious "source item was updated" comment when the issue body itself is unchanged', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
@@ -1451,7 +1451,7 @@ test('a new comment on an old issue does not ALSO emit a spurious "source item w
 test('an issue-update compared against a parent with no recorded content_hash (legacy row) still appends — unknown is never treated as unchanged', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource, 'ws-1');
+    await seedAccount(dataSource, 'ws-1');
     const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);

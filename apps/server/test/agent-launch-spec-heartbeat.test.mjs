@@ -20,19 +20,19 @@ async function bootWithManager(t, port, label) {
   const { app, port: boundPort, modules } = await bootApp({ port });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, label);
+  const account = await createAccount(app, getDataSourceToken, label);
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: label,
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label,
   });
-  return { app, port: boundPort, workspace, manager, key };
+  return { app, port: boundPort, account, manager, key };
 }
 
-function heartbeat(port, key, manager, workspace, instanceId, extra) {
+function heartbeat(port, key, manager, account, instanceId, extra) {
   return fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
     method: 'POST',
     headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
@@ -40,7 +40,7 @@ function heartbeat(port, key, manager, workspace, instanceId, extra) {
       instance_id: instanceId,
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
-      account_id: workspace.id,
+      account_id: account.id,
       mode: 'manager',
       hostname: 'test-host',
       plugin_version: 'test',
@@ -113,16 +113,16 @@ const VALID_SPEC = {
     },
     recorded_at: '2026-01-01T00:00:01.000Z',
   },
-  varies_per_dispatch: ['보드·워크스페이스 harness (harness_config)'],
+  varies_per_dispatch: ['보드·계정 harness (harness_config)'],
   computed_at: '2026-01-01T00:00:00.000Z',
 };
 
 test('실효 실행 사양이 손상 없이 레지스트리와 REST 응답에 실린다', async (t) => {
-  const { app, port, workspace, manager, key } = await bootWithManager(
+  const { app, port, account, manager, key } = await bootWithManager(
     t, Number.parseInt(process.env.PORT, 10), 'launch-spec-ok',
   );
 
-  const res = await heartbeat(port, key, manager, workspace, 'launch-spec-ok', {
+  const res = await heartbeat(port, key, manager, account, 'launch-spec-ok', {
     agent_launch_specs: [VALID_SPEC],
   });
   assert.equal(res.status, 201, await res.text());
@@ -155,7 +155,7 @@ test('실효 실행 사양이 손상 없이 레지스트리와 REST 응답에 �
 });
 
 test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 (빈 배열로 접지 않는다)', async (t) => {
-  const { app, port, workspace, manager, key } = await bootWithManager(
+  const { app, port, account, manager, key } = await bootWithManager(
     // 고정 포트를 산술로 파생(PORT+n)하지 않고 OS 가 고른 빈 포트를 쓴다 (ticket 5db0964a).
     // 파생 포트는 소스 grep 에도 포트 목록에도 잡히지 않는 데다, bootApp 이 부팅마다
     // process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 두 번째 파생부터는 의도한
@@ -164,7 +164,7 @@ test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 
   );
 
   // 신규 필드를 전혀 모르는 매니저의 하트비트.
-  const res = await heartbeat(port, key, manager, workspace, 'launch-spec-legacy', {});
+  const res = await heartbeat(port, key, manager, account, 'launch-spec-legacy', {});
   assert.equal(res.status, 201, await res.text());
 
   const registry = app.get(InstanceRegistryService);
@@ -178,7 +178,7 @@ test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 
 
   // 반대쪽: 신규 매니저가 "대상 에이전트 없음"을 보고하면 빈 배열로 보존된다.
   // 이 둘이 구분되어야 UI 가 "보고하지 않음"과 "값 없음"을 다르게 그릴 수 있다.
-  const res2 = await heartbeat(port, key, manager, workspace, 'launch-spec-empty', {
+  const res2 = await heartbeat(port, key, manager, account, 'launch-spec-empty', {
     agent_launch_specs: [],
   });
   assert.equal(res2.status, 201, await res2.text());
@@ -186,12 +186,12 @@ test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 
 });
 
 test('매니저가 다운그레이드되면 다음 하트비트에서 사양이 사라진다', async (t) => {
-  const { app, port, workspace, manager, key } = await bootWithManager(
+  const { app, port, account, manager, key } = await bootWithManager(
     t, 0, 'launch-spec-downgrade',
   );
   const registry = app.get(InstanceRegistryService);
 
-  await heartbeat(port, key, manager, workspace, 'launch-spec-dg', {
+  await heartbeat(port, key, manager, account, 'launch-spec-dg', {
     agent_launch_specs: [VALID_SPEC],
   });
   assert.equal(registry.get('launch-spec-dg').agent_launch_specs.length, 1);
@@ -199,16 +199,16 @@ test('매니저가 다운그레이드되면 다음 하트비트에서 사양이 
 
   // 같은 instance_id 로 필드 없는 하트비트가 오면(= 구버전으로 롤백) 옛 사양을
   // 계속 보여주면 안 된다 — 화면이 이미 존재하지 않는 실행 계획을 주장하게 된다.
-  await heartbeat(port, key, manager, workspace, 'launch-spec-dg', {});
+  await heartbeat(port, key, manager, account, 'launch-spec-dg', {});
   assert.equal(registry.get('launch-spec-dg').agent_launch_specs, undefined);
 });
 
 test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않는다', async (t) => {
-  const { app, port, workspace, manager, key } = await bootWithManager(
+  const { app, port, account, manager, key } = await bootWithManager(
     t, 0, 'launch-spec-hostile',
   );
 
-  const res = await heartbeat(port, key, manager, workspace, 'launch-spec-hostile', {
+  const res = await heartbeat(port, key, manager, account, 'launch-spec-hostile', {
     agent_launch_specs: [
       // agent_id 없는 행은 통째로 버린다.
       { cli: 'claude', args: [] },

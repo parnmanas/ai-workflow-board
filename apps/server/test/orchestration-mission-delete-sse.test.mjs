@@ -143,7 +143,7 @@ test('deleteMission() 은 deleted=true 인 orchestration_update 를 실제로 �
   assert.equal(frame.deleted, true);
   assert.equal(frame.mission_id, mission.id);
   assert.equal(frame.account_id, WS);
-  // 소비자가 워크스페이스 필터에 쓰는 필드들이 삭제 프레임에도 실려야 한다.
+  // 소비자가 계정 필터에 쓰는 필드들이 삭제 프레임에도 실려야 한다.
   assert.equal(frame.team_id, 'team-1');
   assert.equal(typeof frame.timestamp, 'string');
 });

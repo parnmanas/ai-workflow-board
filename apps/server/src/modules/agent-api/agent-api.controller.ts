@@ -6,7 +6,7 @@ import { Repository, DataSource, EntityManager, IsNull, MoreThanOrEqual } from '
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
@@ -67,8 +67,8 @@ export class AgentApiController {
     }
     // P4c-4: Agent 행 대신 Host/링크 해소.
     const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
-    if (!accountId || !agent || !agentIsVisibleInWorkspace(agent.account_id, accountId)) {
-      return res.status(400).json({ error: 'agent does not belong to ticket workspace' });
+    if (!accountId || !agent || !agentIsVisibleInAccount(agent.account_id, accountId)) {
+      return res.status(400).json({ error: 'agent does not belong to ticket account' });
     }
     const familyKey = `${triggerId}:${agentId}`;
     const marker = await this.dataSource.transaction(async (manager) => {
@@ -271,13 +271,13 @@ export class AgentApiController {
     return res.json(outcome);
   }
 
-  // ── Account-scoping guards (security finding: authz / cross-workspace IDOR)
+  // ── Account-scoping guards (security finding: authz / cross-account IDOR)
   //
   // AgentAuthGuard stamps request.currentAccountId from the presented DB API
   // key (env/admin keys → null; the dev-mode bypass also → null). A null scope
   // is treated as full-scope and allowed everywhere — it covers env/admin keys
-  // and workspace-less manager keys that legitimately operate across the
-  // instance. A non-null scope must match the target resource's workspace, or
+  // and account-less manager keys that legitimately operate across the
+  // instance. A non-null scope must match the target resource's account, or
   // the handler returns 403 instead of silently operating on another tenant's
   // tickets / boards / chat.
 
@@ -288,13 +288,13 @@ export class AgentApiController {
 
   private denyScope(res: Response) {
     return res.status(403).json({
-      error: 'workspace_scope_denied',
-      message: 'API key is scoped to a different workspace than the target resource.',
+      error: 'account_scope_denied',
+      message: 'API key is scoped to a different account than the target resource.',
     });
   }
 
-  // Resolve the owning workspace for a ticket id, climbing child → root (the
-  // root row is authoritative for workspace membership).
+  // Resolve the owning account for a ticket id, climbing child → root (the
+  // root row is authoritative for account membership).
   private async resolveTicketAccountId(
     db: DataSource | EntityManager,
     ticketId: string,
@@ -314,7 +314,7 @@ export class AgentApiController {
   }
 
   // Returns true when the request's scoped key may NOT touch the given target
-  // workspace. A scoped key against an unresolvable workspace (null) is also
+  // account. A scoped key against an unresolvable account (null) is also
   // rejected — fail closed rather than leak across tenants.
   private scopeRejects(req: Request, targetAccountId: string | null): boolean {
     const scope = this.requestScope(req);
@@ -656,7 +656,7 @@ export class AgentApiController {
     const projectId = body.project_id ? String(body.project_id) : '';
     if (projectId) {
       const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId } });
-      if (!project || project.account_id !== accountId) return res.status(404).json({ error: 'project not found in this workspace' });
+      if (!project || project.account_id !== accountId) return res.status(404).json({ error: 'project not found in this account' });
     }
     const existingOpen = () => this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
     const reply = (ticket: Ticket, reused: boolean) => res.status(reused ? 200 : 201).json({
@@ -683,12 +683,12 @@ export class AgentApiController {
     }
   }
 
-  /** agent-manager가 non-native 프롬프트에 주입할 현재 workspace의 project · 자주 쓰는 tag 후보. */
+  /** agent-manager가 non-native 프롬프트에 주입할 현재 account의 project · 자주 쓰는 tag 후보. */
   @Get('ordinary-work-candidates')
   async ordinaryWorkCandidates(@Req() req: Request, @Res() res: Response) {
     const scope = this.requestScope(req);
     const accountId = String(req.query.account_id || scope || '');
-    if (!accountId) return res.status(400).json({ error: 'workspace scope is required' });
+    if (!accountId) return res.status(400).json({ error: 'account scope is required' });
     if (scope && scope !== accountId) return this.denyScope(res);
     const projects = await this.dataSource.getRepository(Project).find({
       where: { account_id: accountId },

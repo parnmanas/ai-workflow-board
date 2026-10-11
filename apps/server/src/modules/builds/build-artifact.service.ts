@@ -88,7 +88,7 @@ export class BuildArtifactService {
   }
 
   /**
-   * Upsert an artifact record keyed by (workspace, repo_key, target, commit_sha,
+   * Upsert an artifact record keyed by (account, repo_key, target, commit_sha,
    * host). A rebuild of the same commit (e.g. failed → ok) updates the existing
    * row rather than piling duplicates.
    */

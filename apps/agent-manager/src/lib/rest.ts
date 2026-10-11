@@ -18,7 +18,7 @@ export interface AwbConfig {
    *  `X-Agent-Key`/`Authorization` (ticket 7d8ea7c9 후속, ticket 23253aeb로
    *  ticket-dispatch 세션까지 확장). chat/ticket 세션의 per-agent 키는 spawn
    *  시점에 한 번만 캡처되어 세션 수명 내내 재사용되는데, 세션 도중 stale
-   *  해지거나 스코프를 벗어나면 매니저 자체의 항상 유효하고 workspace 에
+   *  해지거나 스코프를 벗어나면 매니저 자체의 항상 유효하고 account 에
    *  종속되지 않는 키만이 실패 알림을 조용히 유실시키지 않고 전달할 유일한
    *  수단이다 (401/403 은 classifyHttpSendFailure 가 'permanent' 로 분류해
    *  이후 버퍼링/재시도되지 않는다). 미설정 시 재시도 없음 — `apiKey` 를

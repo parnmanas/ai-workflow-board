@@ -91,7 +91,7 @@ export class AccountAccessService {
         if (step) owner = (await this.dataSource.getRepository('OrchestrationMission').findOne({ where: { id: step.mission_id }, select: ['account_id'] }))?.account_id;
       }
     }
-    const pathId = req.params?.accountId || req.params?.wsId;
+    const pathId = req.params?.accountId || req.params?.accountId;
     const requested = pathId || req.body?.account_id || req.query?.account_id;
     const hint = requested || req.headers?.['x-account-id'];
     // Administrative list filters are explicit parameters. The browser's

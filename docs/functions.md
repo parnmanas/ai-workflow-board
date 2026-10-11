@@ -136,11 +136,11 @@ after an Agent says it merged.
 - `agent.set_working_directory`
 - `agent.reload_configuration`
 - `agent.verify_connectivity`
-- `workspace.clone_repository`
-- `workspace.refresh_repository`
-- `workspace.validate_credentials`
-- `workspace.rotate_credential`
-- `workspace.archive_artifacts`
+- `account.clone_repository`
+- `account.refresh_repository`
+- `account.validate_credentials`
+- `account.rotate_credential`
+- `account.archive_artifacts`
 - `notification.send`
 - `notification.request_approval`
 

@@ -144,7 +144,7 @@ export interface AgentTriggerPayload {
   base_repo: { id: string; name: string; url: string; default_branch: string; main_clone_dir?: string | null } | null;
   base_branch: string;
   // Resolved clone policy for `base_repo` (ticket bddb63ee): the project's
-  // own `clone_policy` merged key-by-key over the workspace default
+  // own `clone_policy` merged key-by-key over the account default
   // (resolveClonePolicy). agent-manager applies it to the container base clone —
   // wall-clock budget, idle-stall budget, and the shallow/partial/single-branch
   // flags. Null when neither layer configures anything; the manager then uses its
@@ -175,7 +175,7 @@ export interface AgentTriggerPayload {
       support_files: Array<{ path: string; content: string }>;
     }>;
   } | null;
-  // Account harness config (ticket e9c7a896) plus the workspace language
+  // Account harness config (ticket e9c7a896) plus the account language
   // instruction. agent-manager maps the
   // keys onto subagent CLI flags at spawn time (--append-system-prompt /
   // --allowedTools / --disallowedTools / --model / --permission-mode).
@@ -311,13 +311,13 @@ export interface ChatRequestPayload {
   room_id?: string;
   // ticket 9fd27487: DM / @-멘션 디스패치를 위한 run-workspace 프로비저닝
   // 힌트 — chat_room_message의 run_provision에 대응하는 `chat_request` 쪽
-  // 짝이다. 대상 workspace가 chat_workspace_folder_enabled를 opt-in한
+  // 짝이다. 대상 account가 chat_workspace_folder_enabled를 opt-in한
   // 경우에만 RoomMessagingService가 채워 넣으며(room-messaging.service.ts
-  // 참고), opt-in하지 않은 workspace에서는 (kind로만 걸러지는 게 아니라)
+  // 참고), opt-in하지 않은 account에서는 (kind로만 걸러지는 게 아니라)
   // 필드 자체가 생략되어 DM의 wire shape가 기본적으로 byte 단위까지 그대로
   // 유지된다.
   run_provision?: RunProvision;
-  // ticket 7d8ea7c9: resolved agent > workspace Claude backend profile for
+  // ticket 7d8ea7c9: resolved agent > account Claude backend profile for
   // this chat dispatch — same resolution RoomMessagingService applies as
   // trigger-loop.service.ts does for ticket dispatch, but agent-only (a chat
   // turn has no ticket/board to layer). agent-manager's handleChatRequest
@@ -398,10 +398,10 @@ export interface ChatRoomMessageMetadata {
 export interface ChatRoomMessagePayload {
   room_id: string;
   // Account the room belongs to. SSE delivery is scoped by room membership,
-  // NOT by workspace — a user who belongs to two accounts receives room
+  // NOT by account — a user who belongs to two accounts receives room
   // events from both on the same stream. The web UI's unread badge is
-  // per-workspace, so without this field it counted foreign-workspace
-  // messages into the workspace currently on screen.
+  // per-account, so without this field it counted foreign-account
+  // messages into the account currently on screen.
   account_id?: string;
   message_id: string;
   sender_type: 'user' | 'agent' | 'system';
@@ -490,12 +490,12 @@ export interface ChatRoomUpdatePayload {
   participant_ids?: string[];
 
   // 자유 참여 옵션의 새 값 (ticket 995a9519). `open_join_changed` 에만 실린다.
-  // 이 update type 만 방 구성원이 아니라 워크스페이스의 모든 사용자에게 나간다 —
+  // 이 update type 만 방 구성원이 아니라 계정의 모든 사용자에게 나간다 —
   // 변경의 영향 대상이 정확히 비참여자이기 때문이다(event-registry 의
   // `chatRoomUpdateFilter` 주석 참조).
   open_join?: boolean;
-  // 위 브로드캐스트의 스코프 판정 근거. 수신 측이 지금 보고 있는 워크스페이스와
-  // 대조해 남의 워크스페이스 이벤트를 버린다. `open_join_changed` 에만 채워진다.
+  // 위 브로드캐스트의 스코프 판정 근거. 수신 측이 지금 보고 있는 계정와
+  // 대조해 남의 계정 이벤트를 버린다. `open_join_changed` 에만 채워진다.
   account_id?: string;
 
   // B3 fix: `read` events carry the reader's identity + the new marker so that
@@ -561,7 +561,7 @@ export interface CommentMentionPayload {
   // depth reaches its cap so an agent-mention ping-pong auto-terminates —
   // the chain resets once a human comments.
   agent_chain_depth?: number;
-  // 티켓 71532b4f: agent_trigger와 같은 workspace 레이어로 해석된 dispatch
+  // 티켓 71532b4f: agent_trigger와 같은 account 레이어로 해석된 dispatch
   // 부가값. 이전에는 comment_mention이 이 셋을 전혀 나르지
   // 않아, 코멘트 멘션으로 깨운 세션이 agent에 명시 핀된 cli_runtime_profile을
   // 무시하고 순정 Claude로 조용히 돌았다 — agent-manager의 handleCommentMention이
@@ -585,7 +585,7 @@ export interface CommentMentionPayload {
 
 // Phase-9 typed comments — fires when a user/agent starts composing a comment
 // on a ticket. Scoped per ticket so other viewers of the same ticket can render
-// "X is typing..." without polluting the workspace-wide stream. The actor is
+// "X is typing..." without polluting the account-wide stream. The actor is
 // excluded from delivery (filter in event-registry) so they don't see their own
 // typing echoed back.
 export interface CommentTypingPayload {
@@ -620,7 +620,7 @@ export interface UserMentionPayload {
   account_id: string;
   source_type: 'comment' | 'chat_message';
   source_id: string;
-  // Comment mentions deep-link to /ws/<wsId>/tickets?ticket=<id>&comment=<id>;
+  // Comment mentions deep-link to /account/<accountId>/tickets?ticket=<id>&comment=<id>;
   // chat mentions use room_id instead.
   ticket_id: string | null;
   room_id: string | null;
@@ -971,7 +971,7 @@ export interface OntologyGraphProgressPayload {
  *  `POST /api/agent/sessions/rpc/:request_id` 로 응답한다(fs_request 와 같은 패턴). */
 export interface AgentSessionRequestPayload {
   manager_id: string;
-  /** 요청을 낸 워크스페이스 — credential 조회 스코프. */
+  /** 요청을 낸 계정 — credential 조회 스코프. */
   account_id: string;
   cli: string;
   // 유니온을 여기 다시 적지 않는다 — `AGENT_SESSION_REQUEST_OPS`(agent-sessions.ts)가
@@ -1011,7 +1011,7 @@ export interface AgentSessionRequestPayload {
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';
   elicitation_content?: Record<string, unknown> | null;
-  /** CLI 설정에 묶인 워크스페이스 Credential — open/prompt 에만 실린다. 매니저는
+  /** CLI 설정에 묶인 계정 Credential — open/prompt 에만 실린다. 매니저는
    *  `GET /api/agent/sessions/credential/:id` 로 원문을 받아 세션 cli-home 에 적용한다. */
   credential_id?: string | null;
   /** open — 세션 잠금을 쥔 **외부** 프로세스까지 종료하고 연다.

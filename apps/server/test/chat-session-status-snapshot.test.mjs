@@ -107,14 +107,14 @@ test('GET session-status: a live push is visible on the next room entry without 
 
 // Regression for ticket e18be8ff review round 2, P1 #1 — the GET above used
 // to answer straight from the in-memory store keyed only by roomId, with no
-// room-existence / workspace / membership check at all. A caller who merely
-// knows (or guesses/reuses) a roomId from a workspace they don't belong to —
-// or who belongs to the room's own workspace but was never added as a
+// room-existence / account / membership check at all. A caller who merely
+// knows (or guesses/reuses) a roomId from a account they don't belong to —
+// or who belongs to the room's own account but was never added as a
 // participant — could read that room's live agent name, keep-alive deadline,
 // and background-task count. PermissionGuard alone never catches this: the
-// default 'admin' role grants CHAT_VIEW globally, independent of workspace or
+// default 'admin' role grants CHAT_VIEW globally, independent of account or
 // room membership (see hasPermission in common/types/permissions.ts).
-test('GET session-status: rejects a foreign-workspace roomId and a same-workspace non-participant, but keeps the observer bypass', async (t) => {
+test('GET session-status: rejects a foreign-account roomId and a same-account non-participant, but keeps the observer bypass', async (t) => {
   // 고정 포트를 산술로 파생(PORT+n)하지 않고 OS 가 고른 빈 포트를 쓴다 (ticket 5db0964a).
   // 파생 포트는 소스 grep 에도 포트 목록에도 잡히지 않는 데다, bootApp 이 부팅마다
   // process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 두 번째 파생부터는 의도한
@@ -146,32 +146,32 @@ test('GET session-status: rejects a foreign-workspace roomId and a same-workspac
   assert.ok(postRes.ok, `session-status POST should succeed: ${await postRes.text()}`);
 
   // `outsider` is a real, permission-holding user ('admin' role — passes
-  // PermissionGuard's CHAT_VIEW check regardless of workspace) — just not a
+  // PermissionGuard's CHAT_VIEW check regardless of account) — just not a
   // participant of `room`, and currently scoped (via the header) to a
-  // DIFFERENT workspace than the room actually belongs to. Same status as a
-  // genuinely-missing room so a foreign-workspace roomId can't even be
+  // DIFFERENT account than the room actually belongs to. Same status as a
+  // genuinely-missing room so a foreign-account roomId can't even be
   // confirmed to exist.
-  const crossWorkspaceRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
+  const crossAccountRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
     headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': otherWs.id },
   });
-  assert.equal(crossWorkspaceRes.status, 403,
+  assert.equal(crossAccountRes.status, 403,
     'the actual room owner is authorized independently of the ambient account, but a non-participant still cannot read session status');
 
-  // Same outsider, now correctly scoped to the room's own workspace via the
+  // Same outsider, now correctly scoped to the room's own account via the
   // header — but still not a participant, and not asking as an observer.
-  const sameWorkspaceNonMemberRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
+  const sameAccountNonMemberRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
     headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': ws.id },
   });
-  assert.equal(sameWorkspaceNonMemberRes.status, 403,
-    'a same-workspace non-participant must be rejected unless asking as an explicit observer');
+  assert.equal(sameAccountNonMemberRes.status, 403,
+    'a same-account non-participant must be rejected unless asking as an explicit observer');
 
-  // Same outsider, same workspace, but with the explicit observer flag that
-  // getRoom / getChatRoomMessages already grant a workspace-wide monitor —
+  // Same outsider, same account, but with the explicit observer flag that
+  // getRoom / getChatRoomMessages already grant a account-wide monitor —
   // must still work so this fix doesn't regress that feature.
   const observerRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status?observer=true`, {
     headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': ws.id },
   });
-  assert.equal(observerRes.status, 200, 'the observer bypass must still work for a genuine same-workspace monitor');
+  assert.equal(observerRes.status, 200, 'the observer bypass must still work for a genuine same-account monitor');
   const observerBody = await observerRes.json();
   assert.equal(observerBody.length, 1);
   assert.equal(observerBody[0].agent_id, agent.id);

@@ -15,13 +15,13 @@ export class Account {
   @Column({ type: 'int', default: 0 })
   is_public: number; // 0=private, 1=public
 
-  // URL-safe slug for workspace; nullable until backfill migration (Plan 02) sets defaults
+  // URL-safe slug for account; nullable until backfill migration (Plan 02) sets defaults
   @Column({ type: 'varchar', unique: true, nullable: true })
   slug: string | null;
 
   // ─────────────────────────────────────────────────────────────────────
   // Ticket dispatch settings (docs/tickets.md). These used to live on each
-  // Board; with boards gone the workspace is the only scope a ticket has.
+  // Board; with boards gone the account is the only scope a ticket has.
   // ─────────────────────────────────────────────────────────────────────
 
   /** An in_progress ticket with no live agent and no activity for this long is re-dispatched by the supervisor. ms. Default: 30 min. */
@@ -36,7 +36,7 @@ export class Account {
   @Column({ type: 'int', default: 1 })
   max_concurrent_tickets_per_agent: number;
 
-  /** Non-null = ticket dispatch is paused for the whole workspace (humans can still edit/move). */
+  /** Non-null = ticket dispatch is paused for the whole account (humans can still edit/move). */
   @Column({ type: Date, nullable: true, default: null })
   dispatch_paused_at: Date | null;
 
@@ -52,9 +52,9 @@ export class Account {
 
   /**
    * Chat room to receive system alerts (e.g. CI-red pings from
-   * `CiHealthMonitorService`). Optional — when null, the sender falls back to the workspace's oldest chat room
-   * (`created_at ASC`) so an unconfigured workspace still surfaces the
-   * alert somewhere visible. Operators set this via the workspace
+   * `CiHealthMonitorService`). Optional — when null, the sender falls back to the account's oldest chat room
+   * (`created_at ASC`) so an unconfigured account still surfaces the
+   * alert somewhere visible. Operators set this via the account
    * settings PATCH when they want a dedicated #alerts room.
    *
    * No FK constraint — the column is a soft pointer so deleting the

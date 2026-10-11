@@ -385,7 +385,7 @@ export async function loadTicketFull(
 
   // Project the ticket is about — summary plus every host's main clone
   // folder, so the panel and the agent see where it lives without a second
-  // round-trip. Account-scoped: a stale cross-workspace id resolves to null.
+  // round-trip. Account-scoped: a stale cross-account id resolves to null.
   // `base_repo` keeps the pre-project shape agent-managers read on REST.
   out.project = null;
   out.base_repo = null;
@@ -416,7 +416,7 @@ export async function loadTicketFull(
 
   // Hydrate the linked next-ticket snapshot so the picker UI can render its
   // title + status without a second round-trip. Account-scoped so a stale
-  // id pointing at another workspace's row never leaks its title here.
+  // id pointing at another account's row never leaks its title here.
   out.next_ticket = null;
   if (ticket.next_ticket_id) {
     const next = await scope.getRepository(Ticket).findOne({

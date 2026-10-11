@@ -18,10 +18,10 @@
 // ontology-query-*.test.mjs는 이미 query 함수 자체를 검증했으므로, 여기는
 // "MCP 스키마->핸들러->서비스 배선"이 그 값을 실제로 전달하는지만 본다.
 //
-// 리뷰 지적(critical/high, d35b7b7d 1차 반려) 회귀 — (a) cross-workspace
+// 리뷰 지적(critical/high, d35b7b7d 1차 반려) 회귀 — (a) cross-account
 // authorization: TOOL_AUTHZ_TABLE의 'caller' tier는 caller 존재만 확인할
 // 뿐 account_id 소속은 검증하지 않았다(진짜 세션 caller를 sessionStore에
-// 등록해 다른 workspace의 리소스를 요청했을 때 거부되는지 확인). (b)
+// 등록해 다른 account의 리소스를 요청했을 때 거부되는지 확인). (b)
 // suggested_next_calls: "unique"만으로 "고신뢰"를 보장하지 못하던 문제
 // (confidence_min을 낮춰도 speculative(<0.6) 매치는 여전히 제외돼야 함).
 //
@@ -47,7 +47,7 @@ process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
 // initDb()는 AppDataSource(primary, Agent 포함)와 AppOntologyDataSource
-// 둘 다 초기화한다 — callerCanAccessWorkspace()가 ctx.dataSource(=primary)에서
+// 둘 다 초기화한다 — callerCanAccessAccount()가 ctx.dataSource(=primary)에서
 // 실제 Agent row를 조회하므로 두 DataSource 모두 필요하다.
 const { AppDataSource, AppOntologyDataSource, initDb } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 /* P4c-4: Agent 엔티티 삭제 — makeAgent 는 RuntimeHost 행을 만든다. */
@@ -63,15 +63,15 @@ const { OntologyLifecycleService } = await import('file://' + path.join(DIST_ROO
 const { OntologyQueryService } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/ontology-query.service.js'));
 const { registerOntologyTools } = await import('file://' + path.join(DIST_ROOT, 'modules/mcp/tools/ontology-tools.js'));
 
-const WORKSPACE_ID = 'gs-ws';
-const OTHER_WORKSPACE_ID = 'gs-ws-other';
+const ACCOUNT_ID = 'gs-ws';
+const OTHER_ACCOUNT_ID = 'gs-ws-other';
 const RESOURCE_ID = 'gs-resource-1';
 const FOLDER_PATH = '';
-const CONF_GRAPH_ID = 'gs-conf-graph'; // 'confidence_min' describe가 만들고, 'cross-workspace' describe가 재사용(정의 순서상 뒤에 실행됨)
+const CONF_GRAPH_ID = 'gs-conf-graph'; // 'confidence_min' describe가 만들고, 'cross-account' describe가 재사용(정의 순서상 뒤에 실행됨)
 
 // mcp-tool-authz.test.mjs와 같은 패턴 — 실제 Host row + sessionStore 등록으로
 // 진짜 caller 신원을 만든다(빈 extra={}는 getCallerAgent를 undefined로
-// 만들어 callerCanAccessWorkspace가 항상 deny하므로 더는 쓸 수 없다).
+// 만들어 callerCanAccessAccount가 항상 deny하므로 더는 쓸 수 없다).
 // P4c-4: Agent 행 없음 — RuntimeHost 행이 정체성이다.
 async function makeAgent(accountId) {
   const { RuntimeHost } = await import('file://' + path.join(DIST_ROOT, 'entities/RuntimeHost.js'));
@@ -84,19 +84,19 @@ function registerSession(sessionId, auth) {
   return () => sessionStore.remove(sessionId);
 }
 
-let homeSessionId; // WORKSPACE_ID에 바인딩된 기본 caller — 대부분의 테스트가 이걸 씀
+let homeSessionId; // ACCOUNT_ID에 바인딩된 기본 caller — 대부분의 테스트가 이걸 씀
 let homeAgent;
 
 function node(id, graphId, overrides = {}) {
   return {
-    id, account_id: WORKSPACE_ID, graph_id: graphId, symbol_id: `sym:${id}`,
+    id, account_id: ACCOUNT_ID, graph_id: graphId, symbol_id: `sym:${id}`,
     type: 'Callable', layer: 'structural', name: id, path: '', confidence: 1, status: 'active',
     ...overrides,
   };
 }
 function edge(id, graphId, srcId, dstId, overrides = {}) {
   return {
-    id, account_id: WORKSPACE_ID, graph_id: graphId, src_id: srcId, dst_id: dstId,
+    id, account_id: ACCOUNT_ID, graph_id: graphId, src_id: srcId, dst_id: dstId,
     type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active',
     ...overrides,
   };
@@ -113,9 +113,9 @@ before(async () => {
   nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
   edgeRepo = AppOntologyDataSource.getRepository(OntologyEdge);
 
-  homeAgent = await makeAgent(WORKSPACE_ID);
+  homeAgent = await makeAgent(ACCOUNT_ID);
   homeSessionId = `session-${randomUUID()}`;
-  registerSession(homeSessionId, { agentId: homeAgent.id, accountId: WORKSPACE_ID, scope: 'read', source: 'db' });
+  registerSession(homeSessionId, { agentId: homeAgent.id, accountId: ACCOUNT_ID, scope: 'read', source: 'db' });
 
   const fakeExtraction = {
     extractRepo: async () => ({
@@ -147,7 +147,7 @@ before(async () => {
   tools = {};
   const fakeServer = { tool(name, description, schema, handler) { tools[name] = { handler }; } };
   registerOntologyTools(fakeServer, {
-    dataSource: AppDataSource, // callerCanAccessWorkspace()가 여기서 Agent를 조회한다(온톨로지 전용 DataSource가 아님)
+    dataSource: AppDataSource, // callerCanAccessAccount()가 여기서 Agent를 조회한다(온톨로지 전용 DataSource가 아님)
     projectsService: new ProjectsService(AppDataSource), // graph_refresh가 graph.resource_id(= project id)를 해소한다
     logger: capturingLogger,
     ontologyLifecycleService: lifecycleService,
@@ -184,7 +184,7 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   async function saveAssignedTicket(title, projectId) {
     const spec = assigneeSpec('graph-refresh');
     return AppDataSource.getRepository(Ticket).save({
-      id: randomUUID(), account_id: WORKSPACE_ID, title, status: 'in_progress',
+      id: randomUUID(), account_id: ACCOUNT_ID, title, status: 'in_progress',
       project_id: projectId, assignee: spec, assignee_key: runtimeIdentityKey(spec),
     });
   }
@@ -192,18 +192,18 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   function registerAssigneeSession(extraAuth = {}) {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
-      agentId: homeAgent.id, runtimeKey: assigneeKey, accountId: WORKSPACE_ID, scope: 'full', source: 'db',
+      agentId: homeAgent.id, runtimeKey: assigneeKey, accountId: ACCOUNT_ID, scope: 'full', source: 'db',
       subagentTicketId: ticketId, ...extraAuth,
     });
     return { sessionId, cleanup };
   }
 
   before(async () => {
-    const project = await saveProject(WORKSPACE_ID, 'refresh-repository');
+    const project = await saveProject(ACCOUNT_ID, 'refresh-repository');
     const ticket = await saveAssignedTicket('refresh ticket', project.id);
     assigneeKey = ticket.assignee_key;
     const graph = await graphRepo.save({
-      id: randomUUID(), account_id: WORKSPACE_ID, resource_id: project.id,
+      id: randomUUID(), account_id: ACCOUNT_ID, resource_id: project.id,
       folder_path: '', status: 'error', error: 'previous build failed',
     });
     ticketId = ticket.id;
@@ -216,7 +216,7 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
     const { sessionId, cleanup } = registerAssigneeSession();
     logs.length = 0;
     const body = await callTool('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: graphId,
     }, sessionId);
     cleanup();
 
@@ -231,7 +231,7 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   it('이미 building이면 즉시 started=false를 반환하고 두 번째 빌드를 시작하지 않는다', async () => {
     const { sessionId, cleanup } = registerAssigneeSession();
     const body = await callTool('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: graphId,
     }, sessionId);
     cleanup();
     assert.deepEqual(body, { graph_id: graphId, status: 'building', started: false });
@@ -240,32 +240,32 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
 
   it('read-scope API key와 티켓 미배정 에이전트는 모두 거부된다', async () => {
     const readDenied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: graphId,
     });
     assert.match(readDenied.error, /full-scope/i);
 
-    // 같은 워크스페이스의 full-scope 런타임이지만 이 티켓의 assignee identity 가 아니다.
-    const unassignedAgent = await makeAgent(WORKSPACE_ID);
+    // 같은 계정의 full-scope 런타임이지만 이 티켓의 assignee identity 가 아니다.
+    const unassignedAgent = await makeAgent(ACCOUNT_ID);
     const fullSessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(fullSessionId, {
       agentId: unassignedAgent.id, runtimeKey: runtimeIdentityKey({ cli: 'claude', working_dir: '/work/someone-else', credential_id: null }),
-      accountId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
+      accountId: ACCOUNT_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
     });
     const assignmentDenied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: graphId,
     }, fullSessionId);
     cleanup();
     assert.match(assignmentDenied.error, /담당자\(assignee\) 에이전트/);
   });
 
   it('티켓의 프로젝트와 다른 그래프 프로젝트는 거부된다', async () => {
-    const otherProject = await saveProject(WORKSPACE_ID, 'other-repository');
+    const otherProject = await saveProject(ACCOUNT_ID, 'other-repository');
     const otherGraph = await graphRepo.save({
-      id: randomUUID(), account_id: WORKSPACE_ID, resource_id: otherProject.id, folder_path: '', status: 'error',
+      id: randomUUID(), account_id: ACCOUNT_ID, resource_id: otherProject.id, folder_path: '', status: 'error',
     });
     const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: otherGraph.id,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: otherGraph.id,
     }, sessionId);
     cleanup();
     assert.match(denied.error, /그래프의 프로젝트/);
@@ -276,14 +276,14 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
     const otherTicket = await saveAssignedTicket('과거 작업 티켓', (await graphRepo.findOneByOrFail({ id: graphId })).resource_id);
     const { sessionId: unpinnedSessionId, cleanup: cleanupUnpinned } = registerAssigneeSession({ subagentTicketId: undefined });
     const unpinnedDenied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: otherTicket.id, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: otherTicket.id, graph_id: graphId,
     }, unpinnedSessionId);
     cleanupUnpinned();
     assert.match(unpinnedDenied.error, /담당자\(assignee\) 에이전트/);
 
     const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: otherTicket.id, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: otherTicket.id, graph_id: graphId,
     }, sessionId);
     cleanup();
     assert.match(denied.error, /담당자\(assignee\) 에이전트/);
@@ -295,28 +295,28 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
     await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: null });
     const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: graphId,
     }, sessionId);
     cleanup();
     await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: originalProjectId });
     assert.match(denied.error, /그래프의 프로젝트/);
   });
 
-  // 예전의 "workspace_id가 null인 전역 저장소 Resource" 케이스 대응 — Project 는
-  // 항상 한 워크스페이스에 속하므로, 워크스페이스 밖의 저장소를 가리키는 형태는
-  // "다른 워크스페이스의 프로젝트"다. 티켓과 그래프가 둘 다 그 id 를 가리켜도
-  // 프로젝트가 요청 워크스페이스 소속이 아니면 거부해야 한다.
-  it('다른 워크스페이스의 프로젝트는 거부된다', async () => {
-    const foreignProject = await saveProject(OTHER_WORKSPACE_ID, 'foreign-repository');
+  // 예전의 "account_id가 null인 전역 저장소 Resource" 케이스 대응 — Project 는
+  // 항상 한 계정에 속하므로, 계정 밖의 저장소를 가리키는 형태는
+  // "다른 계정의 프로젝트"다. 티켓과 그래프가 둘 다 그 id 를 가리켜도
+  // 프로젝트가 요청 계정 소속이 아니면 거부해야 한다.
+  it('다른 계정의 프로젝트는 거부된다', async () => {
+    const foreignProject = await saveProject(OTHER_ACCOUNT_ID, 'foreign-repository');
     const foreignGraph = await graphRepo.save({
-      id: randomUUID(), account_id: WORKSPACE_ID, resource_id: foreignProject.id, folder_path: '', status: 'error',
+      id: randomUUID(), account_id: ACCOUNT_ID, resource_id: foreignProject.id, folder_path: '', status: 'error',
     });
     const ticket = await AppDataSource.getRepository(Ticket).findOneByOrFail({ id: ticketId });
     const originalProjectId = ticket.project_id;
     await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: foreignProject.id });
     const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
-      account_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: foreignGraph.id,
+      account_id: ACCOUNT_ID, ticket_id: ticketId, graph_id: foreignGraph.id,
     }, sessionId);
     cleanup();
     await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: originalProjectId });
@@ -344,28 +344,28 @@ async function callToolExpectError(name, args, sessionId = homeSessionId) {
 
 describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참조 시 실제 프로비저닝', () => {
   it('처음 보는 (resource_id, folder_path)는 OntologyGraph 행을 자동 생성하고 status=building을 반환한다', async () => {
-    const body = await callTool('graph_status', { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
+    const body = await callTool('graph_status', { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
     assert.equal(body.status, 'building');
     assert.ok(body.graph_id, 'graph_id must be present so the caller is never stuck without one (A1)');
     assert.equal(body.indexed_at, null);
     assert.equal(body.commit, '');
 
-    const rows = await graphRepo.find({ where: { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH } });
+    const rows = await graphRepo.find({ where: { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH } });
     assert.equal(rows.length, 1, 'exactly one OntologyGraph row must exist after the first reference');
     assert.equal(rows[0].id, body.graph_id);
   });
 
   it('같은 (resource_id, folder_path)를 다시 불러도 새 행을 만들지 않는다(idempotent provisioning)', async () => {
-    const first = await callTool('graph_status', { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
-    const second = await callTool('graph_status', { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
+    const first = await callTool('graph_status', { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
+    const second = await callTool('graph_status', { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
     assert.equal(first.graph_id, second.graph_id);
 
-    const rows = await graphRepo.find({ where: { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH } });
+    const rows = await graphRepo.find({ where: { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH } });
     assert.equal(rows.length, 1);
   });
 
   it('runInitialBuild() 완료 후 status가 ready로 바뀌고 indexed_at/commit/progress가 채워진다', async () => {
-    const before1 = await callTool('graph_status', { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
+    const before1 = await callTool('graph_status', { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
     const graph = await graphRepo.findOne({ where: { id: before1.graph_id } });
 
     // fire-and-forget(kickOffInitialBuild)을 기다리지 않고 실제 구현
@@ -373,7 +373,7 @@ describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참�
     // 자신의 doc comment가 명시하는 테스트 방식.
     await lifecycleService.runInitialBuild(graph);
 
-    const afterBuild = await callTool('graph_status', { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
+    const afterBuild = await callTool('graph_status', { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
     assert.equal(afterBuild.status, 'ready');
     assert.equal(afterBuild.commit, 'deadbeef');
     assert.ok(afterBuild.indexed_at, 'indexed_at must be set once the build completes');
@@ -383,7 +383,7 @@ describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참�
 
   it('graph_status 호출은 Done-when 텔레메트리(에이전트/티켓별 호출 로그)로 기록된다', async () => {
     logs.length = 0;
-    await callTool('graph_status', { account_id: WORKSPACE_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
+    await callTool('graph_status', { account_id: ACCOUNT_ID, resource_id: RESOURCE_ID, folder_path: FOLDER_PATH });
     const callLog = logs.find((l) => l.cat === 'Ontology' && l.meta?.tool === 'graph_status');
     assert.ok(callLog, 'every graph_ tool call must be logged for the call-frequency Done-when');
   });
@@ -392,7 +392,7 @@ describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참�
     const degraded = {};
     const fakeServer = { tool(name, description, schema, handler) { degraded[name] = handler; } };
     registerOntologyTools(fakeServer, { logger: { info() {}, warn() {}, error() {} } });
-    const res = await degraded.graph_status({ account_id: WORKSPACE_ID, resource_id: 'other', folder_path: '' }, {});
+    const res = await degraded.graph_status({ account_id: ACCOUNT_ID, resource_id: 'other', folder_path: '' }, {});
     assert.ok(res.isError);
     assert.match(res.content[0].text, /standalone/i);
   });
@@ -401,10 +401,10 @@ describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참�
 describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴에 실제로 적용된다(MCP 핸들러 레이어)', () => {
   before(async () => {
     // resolveGraph()는 graph_id를 캐릭터 그대로 신뢰하지 않고 실제
-    // OntologyGraph 행 + account_id 일치를 확인한다(다른 workspace 소유
+    // OntologyGraph 행 + account_id 일치를 확인한다(다른 account 소유
     // 그래프는 not_found로 취급 — 존재 여부를 흘리지 않는다, tool-authz-gate.ts
     // 코멘트 참고) — 그래서 OntologyNode/Edge뿐 아니라 이 행도 직접 만들어야 한다.
-    await graphRepo.insert({ id: CONF_GRAPH_ID, account_id: WORKSPACE_ID, resource_id: 'conf-resource', folder_path: '', status: 'ready' });
+    await graphRepo.insert({ id: CONF_GRAPH_ID, account_id: ACCOUNT_ID, resource_id: 'conf-resource', folder_path: '', status: 'ready' });
 
     // CA는 path='mod' 안, CB는 path='other'(스코프 밖) — graph_module_summary가
     // dependency_count를 "스코프 밖으로 나가는 엣지"로 집계하려면 두 끝이
@@ -421,30 +421,30 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
   });
 
   it('graph_neighbors: 기본 confidence_min(0.75) 아래 엣지는 제외되고, confidence_min을 낮추면 포함된다', async () => {
-    const withDefault = await callTool('graph_neighbors', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA' });
+    const withDefault = await callTool('graph_neighbors', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA' });
     assert.equal(withDefault.matches.length, 0);
     assert.equal(withDefault.confidence_min, 0.75);
 
-    const lowered = await callTool('graph_neighbors', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA', confidence_min: 0.4 });
+    const lowered = await callTool('graph_neighbors', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA', confidence_min: 0.4 });
     assert.equal(lowered.matches.length, 1);
     assert.equal(lowered.matches[0].id, 'CB');
   });
 
   it('graph_blast_radius: 같은 엣지를 역방향에서도 confidence_min으로 필터링한다', async () => {
-    const withDefault = await callTool('graph_blast_radius', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB' });
+    const withDefault = await callTool('graph_blast_radius', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB' });
     assert.equal(withDefault.matches.length, 0);
 
-    const lowered = await callTool('graph_blast_radius', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB', confidence_min: 0.4 });
+    const lowered = await callTool('graph_blast_radius', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB', confidence_min: 0.4 });
     assert.equal(lowered.matches.length, 1);
     assert.equal(lowered.matches[0].id, 'CA');
   });
 
   it('graph_call_path: 낮은 confidence 엣지뿐이면 기본값으로는 못 찾고, 낮추면 찾는다 — 응답의 confidence_min도 실제 적용값을 반영', async () => {
-    const withDefault = await callTool('graph_call_path', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB' });
+    const withDefault = await callTool('graph_call_path', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB' });
     assert.equal(withDefault.found, false);
     assert.equal(withDefault.confidence_min, 0.75);
 
-    const lowered = await callTool('graph_call_path', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB', confidence_min: 0.4 });
+    const lowered = await callTool('graph_call_path', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB', confidence_min: 0.4 });
     assert.equal(lowered.found, true);
     assert.equal(lowered.confidence_min, 0.4);
     // path:line 그라운딩(DESIGN.md 축 6 mandatory-bound) — src/dst가 하이드레이트된 심볼 참조를 담아야 한다.
@@ -453,10 +453,10 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
   });
 
   it('graph_find_symbol: confidence_min 아래 노드는 매치에서 제외되고, 낮추면 포함된다', async () => {
-    const withDefault = await callTool('graph_find_symbol', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol' });
+    const withDefault = await callTool('graph_find_symbol', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol' });
     assert.equal(withDefault.matches.length, 0);
 
-    const lowered = await callTool('graph_find_symbol', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol', confidence_min: 0.4 });
+    const lowered = await callTool('graph_find_symbol', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol', confidence_min: 0.4 });
     assert.equal(lowered.matches.length, 1);
     assert.equal(lowered.unique, true);
   });
@@ -466,7 +466,7 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
   // 낮춰도 여전히 unique=true가 되지만, speculative(<0.6) 매치라
   // detail/suggested_next_calls는 나오면 안 된다.
   it('graph_find_symbol: unique여도 speculative(<0.6) 매치는 confidence_min을 낮춰도 detail/suggested_next_calls를 내지 않는다', async () => {
-    const res = await callTool('graph_find_symbol', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol', confidence_min: 0 });
+    const res = await callTool('graph_find_symbol', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol', confidence_min: 0 });
     assert.equal(res.matches.length, 1);
     assert.equal(res.unique, true);
     assert.equal(res.detail, undefined, 'a unique-but-speculative(<0.6) match must NOT get detail');
@@ -475,7 +475,7 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
 
   it('graph_find_symbol: unique + 고신뢰(>=0.6, 고정 기준) 매치는 detail/suggested_next_calls를 포함한다', async () => {
     // CA는 confidence=1(node() 헬퍼 기본값) — exact-name 유일 매치.
-    const res = await callTool('graph_find_symbol', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'CA' });
+    const res = await callTool('graph_find_symbol', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, name: 'CA' });
     assert.equal(res.matches.length, 1);
     assert.equal(res.unique, true);
     assert.ok(res.detail, 'a unique high-confidence match must include detail');
@@ -483,92 +483,92 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
   });
 
   it('graph_module_summary: confidence_min이 dependency/dependent 집계에 적용되고 응답에 반영된다', async () => {
-    const withDefault = await callTool('graph_module_summary', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, path: 'mod' });
+    const withDefault = await callTool('graph_module_summary', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, path: 'mod' });
     assert.equal(withDefault.symbol_count, 1); // path='mod' 스코프 안에는 CA 하나뿐(CB는 'other', CLOW는 '')
     assert.equal(withDefault.dependency_count, 0); // CA->CB 엣지(0.5)가 기본 floor 아래라 집계에서 빠짐
     assert.equal(withDefault.confidence_min, 0.75);
 
-    const lowered = await callTool('graph_module_summary', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, path: 'mod', confidence_min: 0.4 });
+    const lowered = await callTool('graph_module_summary', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, path: 'mod', confidence_min: 0.4 });
     assert.equal(lowered.dependency_count, 1); // CB가 스코프 밖 의존 대상으로 집계됨
   });
 });
 
 // 리뷰 지적(critical, d35b7b7d 1차 반려) 회귀 — TOOL_AUTHZ_TABLE의 'caller'
 // tier는 caller 존재만 확인할 뿐 account_id 소속은 검증하지 않았다.
-// OTHER_WORKSPACE_ID에 바인딩된, 그 자체로는 정상적인 caller가 WORKSPACE_ID의
+// OTHER_ACCOUNT_ID에 바인딩된, 그 자체로는 정상적인 caller가 ACCOUNT_ID의
 // graph_id/resource_id를 안다고 해서 그 데이터에 접근하거나(조회) 빌드를
 // 기동할(graph_status) 수 있으면 안 된다 — 6개 툴 전부 확인. 이 describe는
 // 정의 순서상 'confidence_min' describe 다음에 실행되므로 CONF_GRAPH_ID와
 // 그 안의 CA/CB 노드가 이미 존재한다(node:test는 같은 레벨 describe를
 // 정의 순서대로 순차 실행 — 파일 전체에 concurrency 옵션이 없음).
-describe('cross-workspace authorization — 리뷰 지적(critical) 회귀: 다른 workspace의 caller는 거부된다', () => {
+describe('cross-account authorization — 리뷰 지적(critical) 회귀: 다른 account의 caller는 거부된다', () => {
   let otherSessionId;
 
   before(async () => {
-    const otherAgent = await makeAgent(OTHER_WORKSPACE_ID);
+    const otherAgent = await makeAgent(OTHER_ACCOUNT_ID);
     otherSessionId = `session-${randomUUID()}`;
-    registerSession(otherSessionId, { agentId: otherAgent.id, accountId: OTHER_WORKSPACE_ID, scope: 'read', source: 'db' });
+    registerSession(otherSessionId, { agentId: otherAgent.id, accountId: OTHER_ACCOUNT_ID, scope: 'read', source: 'db' });
   });
 
-  it('graph_status: 다른 workspace의 caller가 WORKSPACE_ID를 사칭하면 거부되고, 새 그래프도 만들지 않는다', async () => {
-    const beforeCount = (await graphRepo.find({ where: { account_id: WORKSPACE_ID, resource_id: 'cross-ws-probe', folder_path: '' } })).length;
+  it('graph_status: 다른 account의 caller가 ACCOUNT_ID를 사칭하면 거부되고, 새 그래프도 만들지 않는다', async () => {
+    const beforeCount = (await graphRepo.find({ where: { account_id: ACCOUNT_ID, resource_id: 'cross-ws-probe', folder_path: '' } })).length;
     const errBody = await callToolExpectError(
       'graph_status',
-      { account_id: WORKSPACE_ID, resource_id: 'cross-ws-probe', folder_path: '' },
+      { account_id: ACCOUNT_ID, resource_id: 'cross-ws-probe', folder_path: '' },
       otherSessionId,
     );
-    assert.match(errBody.error, /workspace/i);
-    const afterCount = (await graphRepo.find({ where: { account_id: WORKSPACE_ID, resource_id: 'cross-ws-probe', folder_path: '' } })).length;
+    assert.match(errBody.error, /account/i);
+    const afterCount = (await graphRepo.find({ where: { account_id: ACCOUNT_ID, resource_id: 'cross-ws-probe', folder_path: '' } })).length;
     assert.equal(afterCount, beforeCount, 'a denied caller must never trigger provisioning as a side effect');
   });
 
-  it('graph_find_symbol: 다른 workspace의 caller는 거부된다(데이터가 아니라 에러를 받는다)', async () => {
+  it('graph_find_symbol: 다른 account의 caller는 거부된다(데이터가 아니라 에러를 받는다)', async () => {
     const errBody = await callToolExpectError(
       'graph_find_symbol',
-      { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'CA' },
+      { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, name: 'CA' },
       otherSessionId,
     );
-    assert.match(errBody.error, /workspace/i);
+    assert.match(errBody.error, /account/i);
   });
 
-  it('graph_module_summary: 다른 workspace의 caller는 거부된다', async () => {
+  it('graph_module_summary: 다른 account의 caller는 거부된다', async () => {
     const errBody = await callToolExpectError(
       'graph_module_summary',
-      { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, path: '' },
+      { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, path: '' },
       otherSessionId,
     );
-    assert.match(errBody.error, /workspace/i);
+    assert.match(errBody.error, /account/i);
   });
 
-  it('graph_neighbors: 다른 workspace의 caller는 거부된다', async () => {
+  it('graph_neighbors: 다른 account의 caller는 거부된다', async () => {
     const errBody = await callToolExpectError(
       'graph_neighbors',
-      { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA' },
+      { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA' },
       otherSessionId,
     );
-    assert.match(errBody.error, /workspace/i);
+    assert.match(errBody.error, /account/i);
   });
 
-  it('graph_blast_radius: 다른 workspace의 caller는 거부된다', async () => {
+  it('graph_blast_radius: 다른 account의 caller는 거부된다', async () => {
     const errBody = await callToolExpectError(
       'graph_blast_radius',
-      { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB' },
+      { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB' },
       otherSessionId,
     );
-    assert.match(errBody.error, /workspace/i);
+    assert.match(errBody.error, /account/i);
   });
 
-  it('graph_call_path: 다른 workspace의 caller는 거부된다', async () => {
+  it('graph_call_path: 다른 account의 caller는 거부된다', async () => {
     const errBody = await callToolExpectError(
       'graph_call_path',
-      { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB' },
+      { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB' },
       otherSessionId,
     );
-    assert.match(errBody.error, /workspace/i);
+    assert.match(errBody.error, /account/i);
   });
 
-  it('대조군 — 같은 workspace의 caller(homeSessionId)는 정상적으로 데이터를 받는다', async () => {
-    const res = await callTool('graph_neighbors', { account_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA', confidence_min: 0.4 });
+  it('대조군 — 같은 account의 caller(homeSessionId)는 정상적으로 데이터를 받는다', async () => {
+    const res = await callTool('graph_neighbors', { account_id: ACCOUNT_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA', confidence_min: 0.4 });
     assert.equal(res.matches.length, 1);
   });
 });

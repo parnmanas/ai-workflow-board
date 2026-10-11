@@ -47,7 +47,7 @@ describe('Resources scope contract (Global / Account)', () => {
   it('rejects a Board scope — it is just an unknown scope now', async () => {
     const res = response();
     await controller.create(
-      { scope: 'board', account_id: 'workspace-a', name: 'Board resource', type: 'link', url: 'https://example.test' },
+      { scope: 'board', account_id: 'account-a', name: 'Board resource', type: 'link', url: 'https://example.test' },
       memberReq,
       res,
     );
@@ -58,7 +58,7 @@ describe('Resources scope contract (Global / Account)', () => {
   it('refuses a repository Resource — repositories are Projects now', async () => {
     const res = response();
     await controller.create(
-      { account_id: 'workspace-a', name: 'Repo', type: 'repository', url: 'https://github.com/o/r.git' },
+      { account_id: 'account-a', name: 'Repo', type: 'repository', url: 'https://github.com/o/r.git' },
       memberReq,
       res,
     );
@@ -74,8 +74,8 @@ describe('Resources scope contract (Global / Account)', () => {
 
   it('list() returns the Account own Resources plus inherited globals, never another Account', async () => {
     for (const [body, req] of [
-      [{ account_id: 'workspace-a', name: 'Account resource', type: 'link', url: 'https://a.test' }, memberReq],
-      [{ account_id: 'workspace-b', name: 'Other workspace resource', type: 'link', url: 'https://b.test' }, memberReq],
+      [{ account_id: 'account-a', name: 'Account resource', type: 'link', url: 'https://a.test' }, memberReq],
+      [{ account_id: 'account-b', name: 'Other account resource', type: 'link', url: 'https://b.test' }, memberReq],
       [{ scope: 'global', name: 'Global resource', type: 'link', url: 'https://g.test' }, adminReq],
     ]) {
       const res = response();
@@ -84,7 +84,7 @@ describe('Resources scope contract (Global / Account)', () => {
     }
 
     const listRes = response();
-    await controller.list('workspace-a', undefined, 'name', 'asc', undefined, listRes);
+    await controller.list('account-a', undefined, 'name', 'asc', undefined, listRes);
     assert.deepEqual(listRes.body.map((row) => row.name), ['Account resource', 'Global resource']);
     assert.deepEqual(listRes.body.map((row) => row.scope), ['account', 'global']);
     // The row shape carries no Board layer at all.
@@ -93,15 +93,15 @@ describe('Resources scope contract (Global / Account)', () => {
 
   it('get() hides another Account Resource even by direct id lookup, but serves globals', async () => {
     const repo = dataSource.getRepository(Resource);
-    const foreign = await repo.save(repo.create({ account_id: 'workspace-b', name: 'Direct-lookup foreign resource' }));
+    const foreign = await repo.save(repo.create({ account_id: 'account-b', name: 'Direct-lookup foreign resource' }));
     const global = await repo.save(repo.create({ account_id: null, name: 'Direct-lookup global resource' }));
 
     const hidden = response();
-    await controller.get(foreign.id, 'workspace-a', hidden);
+    await controller.get(foreign.id, 'account-a', hidden);
     assert.equal(hidden.statusCode, 404);
 
     const shown = response();
-    await controller.get(global.id, 'workspace-a', shown);
+    await controller.get(global.id, 'account-a', shown);
     assert.equal(shown.statusCode, 200);
     assert.equal(shown.body.scope, 'global');
   });

@@ -115,7 +115,7 @@ function profileRow(runtime) {
 }
 
 // 프로필은 인스턴스 전역이라(티켓 e616dbfc) claude_backend_profiles 테이블이
-// 유일한 소스다 — 예전처럼 workspace.cli_runtime_profiles 를 읽지 않는다.
+// 유일한 소스다 — 예전처럼 account.cli_runtime_profiles 를 읽지 않는다.
 function makeDataSource(profiles) {
   const rows = profiles.map(profileRow);
   return {
@@ -140,7 +140,7 @@ const VLLM_PROFILE = {
 const OLD_MANAGER_INSTANCE = { plugin_version: '1.6.30' }; // predates capability reporting
 const NEW_MANAGER_INSTANCE = { plugin_version: '1.6.94', manager_capabilities: ['context_window_clamp'] };
 
-function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE] }) {
+function makeSvc({ agent, account, instanceRegistry, profiles = [VLLM_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
   const dmRoom = { id: 'room-1', type: 'dm', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, account_id: 'ws-1' };
   const roomRepo = {
@@ -162,7 +162,7 @@ function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE]
       };
     },
   };
-  const accountRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return account; } };
   const messageRepo = {
     // sendMessage()'s own transactional insert path.
     createQueryBuilder: makeQueryBuilder,
@@ -219,7 +219,7 @@ const wsWithVllmProfile = { id: 'ws-1' };
 test('DM dispatch to an OLD manager (no manager_capabilities) for a context_window profile: chat_request is suppressed, a system message explains why', async () => {
   const agent = { id: 'agent-old', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
   const instanceRegistry = { listForAgent: (id) => (id === agent.id ? [OLD_MANAGER_INSTANCE] : []) };
-  const svc = makeSvc({ agent, workspace: wsWithVllmProfile, instanceRegistry });
+  const svc = makeSvc({ agent, account: wsWithVllmProfile, instanceRegistry });
 
   const chatRequest = captureOnce('chat_request');
   const roomMessage = captureOnce('chat_room_message');
@@ -242,7 +242,7 @@ test('DM dispatch to an OLD manager (no manager_capabilities) for a context_wind
 test('DM dispatch to a NEW manager (declares context_window_clamp) for the IDENTICAL profile: chat_request proceeds normally', async () => {
   const agent = { id: 'agent-new', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
   const instanceRegistry = { listForAgent: (id) => (id === agent.id ? [NEW_MANAGER_INSTANCE] : []) };
-  const svc = makeSvc({ agent, workspace: wsWithVllmProfile, instanceRegistry });
+  const svc = makeSvc({ agent, account: wsWithVllmProfile, instanceRegistry });
 
   const chatRequest = captureOnce('chat_request');
   const roomMessage = captureOnce('chat_room_message');
@@ -265,7 +265,7 @@ test('DM dispatch to a NEW manager (declares context_window_clamp) for the IDENT
 test('DM dispatch with NO live manager telemetry at all: fails OPEN (dispatch proceeds) — cannot prove an incompatibility from silence', async () => {
   const agent = { id: 'agent-unknown', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
   const instanceRegistry = { listForAgent: () => [] };
-  const svc = makeSvc({ agent, workspace: wsWithVllmProfile, instanceRegistry });
+  const svc = makeSvc({ agent, account: wsWithVllmProfile, instanceRegistry });
 
   const chatRequest = captureOnce('chat_request');
   try {
@@ -278,7 +278,7 @@ test('DM dispatch with NO live manager telemetry at all: fails OPEN (dispatch pr
 
 test('DM dispatch when instanceRegistry itself is undefined (hand-constructed caller that predates this ticket): fails OPEN, never throws', async () => {
   const agent = { id: 'agent-no-registry', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
-  const svc = makeSvc({ agent, workspace: wsWithVllmProfile, instanceRegistry: undefined });
+  const svc = makeSvc({ agent, account: wsWithVllmProfile, instanceRegistry: undefined });
 
   const chatRequest = captureOnce('chat_request');
   try {
@@ -294,7 +294,7 @@ test('DM dispatch for a profile WITHOUT context_window: never gates, even agains
   const ws = { id: 'ws-1' };
   const agent = { id: 'agent-plain', type: 'claude', role_prompt: '', cli_runtime_profile: 'plain-anthropic', credential_id: null };
   const instanceRegistry = { listForAgent: () => [OLD_MANAGER_INSTANCE] };
-  const svc = makeSvc({ agent, workspace: ws, instanceRegistry, profiles: [plainProfile] });
+  const svc = makeSvc({ agent, account: ws, instanceRegistry, profiles: [plainProfile] });
 
   const chatRequest = captureOnce('chat_request');
   try {
@@ -327,7 +327,7 @@ function captureRoomMessageOnce() {
   };
 }
 
-function makeGroupSvc({ agents, workspace, instanceRegistry, profiles = [VLLM_PROFILE] }) {
+function makeGroupSvc({ agents, account, instanceRegistry, profiles = [VLLM_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
   const groupRoom = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
   const roomRepo = {
@@ -339,7 +339,7 @@ function makeGroupSvc({ agents, workspace, instanceRegistry, profiles = [VLLM_PR
   // 직후 바로 리턴하게만 해두면 충분하다(room-messaging-chat-runtime-profile
   // 테스트의 동일 stub과 같은 이유).
   const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
-  const accountRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return account; } };
   const messageRepo = {
     createQueryBuilder: () => ({ ...makeQueryBuilder(), async getOne() { return null; } }),
     manager: {
@@ -396,7 +396,7 @@ test('Group room broadcast with mixed old/new managers: the old-manager member i
   };
   const svc = makeGroupSvc({
     agents: [oldManagerAgent, newManagerAgent, plainAgent],
-    workspace: wsWithVllmProfile,
+    account: wsWithVllmProfile,
     instanceRegistry,
   });
 
@@ -435,7 +435,7 @@ test('Group room broadcast with mixed old/new managers: the old-manager member i
 test('Group room broadcast with NO live manager telemetry: fails OPEN — the member stays in both cli_runtime_profiles and agent_member_ids', async () => {
   const agent = { id: 'agent-unknown-group', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
   const instanceRegistry = { listForAgent: () => [] };
-  const svc = makeGroupSvc({ agents: [agent], workspace: wsWithVllmProfile, instanceRegistry });
+  const svc = makeGroupSvc({ agents: [agent], account: wsWithVllmProfile, instanceRegistry });
 
   const roomMessage = captureRoomMessageOnce();
   try {
@@ -453,7 +453,7 @@ test('Group room broadcast with NO live manager telemetry: fails OPEN — the me
 
 test('Group room broadcast when instanceRegistry itself is undefined: fails OPEN, never throws', async () => {
   const agent = { id: 'agent-no-registry-group', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
-  const svc = makeGroupSvc({ agents: [agent], workspace: wsWithVllmProfile, instanceRegistry: undefined });
+  const svc = makeGroupSvc({ agents: [agent], account: wsWithVllmProfile, instanceRegistry: undefined });
 
   const roomMessage = captureRoomMessageOnce();
   try {
@@ -478,7 +478,7 @@ test('Group room broadcast end-to-end through event-registry: final wire bytes e
   };
   const svc = makeGroupSvc({
     agents: [oldManagerAgent, newManagerAgent],
-    workspace: wsWithVllmProfile,
+    account: wsWithVllmProfile,
     instanceRegistry,
   });
 

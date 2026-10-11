@@ -6,7 +6,7 @@ import { QaRun, QaRunStatus } from '../../entities/QaRun';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
@@ -129,7 +129,7 @@ export interface CreateScenarioInput {
 }
 
 /**
- * Owns QaScenario CRUD. Mirrors ActionsService's CRUD half (workspace scope
+ * Owns QaScenario CRUD. Mirrors ActionsService's CRUD half (account scope
  * checks, target-agent validation). The Run dispatch + result recording live
  * in QaRunService.
  */
@@ -146,7 +146,7 @@ export class QaService {
   async list(accountId: string): Promise<QaScenarioListItem[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scenarioRepo.createQueryBuilder('s')
-      .where('s.account_id = :ws', { ws: accountId });
+      .where('s.account_id = :account', { account: accountId });
     const scenarios = await qb.orderBy('s.name', 'ASC').getMany();
     return this._attachLastRun(scenarios);
   }
@@ -258,7 +258,7 @@ export class QaService {
 
   async update(id: string, accountId: string, patch: Partial<CreateScenarioInput>): Promise<QaScenario> {
     if (!accountId) throw makeError(400, 'account_id is required');
-    const existing = await findOrFail(this.scenarioRepo, { where: { id, account_id: accountId } }, 'QA scenario not found in workspace');
+    const existing = await findOrFail(this.scenarioRepo, { where: { id, account_id: accountId } }, 'QA scenario not found in account');
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -303,7 +303,7 @@ export class QaService {
   async remove(id: string, accountId: string): Promise<void> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const existing = await this.scenarioRepo.findOne({ where: { id, account_id: accountId } });
-    if (!existing) throw makeError(404, 'QA scenario not found in workspace');
+    if (!existing) throw makeError(404, 'QA scenario not found in account');
     // Cascade: tear down every run + the room each run created so the chat
     // list doesn't end up with orphan rooms pointing at a deleted scenario.
     await this.runService.deleteRunsForScenario(id);

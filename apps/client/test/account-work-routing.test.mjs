@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setupDom, mount, React, act } from './helpers/jsdom.mjs';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from '../src/contexts/AuthContext.tsx';
-import { LegacyWorkspaceRedirect } from '../src/App.tsx';
+import { LegacyPathRedirect } from '../src/App.tsx';
 import { api, getActiveAccountId, setActiveAccountId } from '../src/api.ts';
 
 const accounts = [
@@ -33,14 +33,14 @@ test('multiple accounts do not block sign-in, and a bookmarked work URL cannot s
   assert.equal(getActiveAccountId(), 'personal');
 });
 
-test('legacy workspace URLs keep resource ids, queries and fragments on canonical work routes', (t) => {
+test('legacy account URLs keep resource ids, queries and fragments on canonical work routes', (t) => {
   const dom = setupDom();
   let location;
   function Probe() { location = useLocation(); return null; }
   const view = mount(React.createElement(MemoryRouter, {
     initialEntries: ['/ws/organization/orchestration/missions/mission-9?step=s1#evidence'],
   }, React.createElement(Routes, null,
-    React.createElement(Route, { path: '/ws/:wsId/*', element: React.createElement(LegacyWorkspaceRedirect) }),
+    React.createElement(Route, { path: '/ws/:wsId/*', element: React.createElement(LegacyPathRedirect) }),
     React.createElement(Route, { path: '/missions/:missionId', element: React.createElement(Probe) }),
   )));
   t.after(() => { view.unmount(); dom.cleanup(); });

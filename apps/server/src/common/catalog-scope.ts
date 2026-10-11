@@ -27,7 +27,7 @@ export function normalizeCatalogScope(input: {
     || (input.account_id ? 'account' : 'global');
   if (requested === 'global') return { account_id: null };
   const accountId = String(input.account_id || '').trim();
-  if (!accountId) throw Object.assign(new Error('account_id is required for workspace scope'), { status: 400 });
+  if (!accountId) throw Object.assign(new Error('account_id is required for account scope'), { status: 400 });
   return { account_id: accountId };
 }
 

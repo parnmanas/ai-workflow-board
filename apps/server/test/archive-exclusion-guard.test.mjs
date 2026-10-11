@@ -43,7 +43,7 @@ const ACTIVE_TICKET_SOURCES = [
   ],
   [
     'modules/tickets/ticket.service.ts',
-    'GET /api/accounts/:wsId/tickets + MCP list_tickets must exclude archived tickets by default (include_archived / archived_only opt-in only)',
+    'GET /api/accounts/:accountId/tickets + MCP list_tickets must exclude archived tickets by default (include_archived / archived_only opt-in only)',
   ],
 ];
 
@@ -132,12 +132,12 @@ test('ticket.service.ts stamps terminal_entered_at on create and move, and rejec
   }
 });
 
-// Compound cursor — the archiver stamps every ticket in a per-workspace sweep
+// Compound cursor — the archiver stamps every ticket in a per-account sweep
 // with the same `archived_at`, so a cursor that only carries the timestamp
 // would skip the rest of that batch when a page boundary lands inside it.
 // MCP list_archived_tickets must order on (archived_at, id) and carry both in
 // next_cursor so same-timestamp ties pass through stably. (The REST archive
-// view is now `GET /api/accounts/:wsId/tickets?archived_only=1` — a filter
+// view is now `GET /api/accounts/:accountId/tickets?archived_only=1` — a filter
 // on the ticket list, not a cursor-paged endpoint.)
 const COMPOUND_CURSOR_SOURCES = [
   [
@@ -242,7 +242,7 @@ const REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES = [
   ],
   [
     'modules/mcp/tools/account-tools.ts',
-    'MCP get_account per-status ticket_counts is the same active surface as the REST workspace get — archived rows must not be counted',
+    'MCP get_account per-status ticket_counts is the same active surface as the REST account get — archived rows must not be counted',
   ],
 ];
 for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
@@ -267,7 +267,7 @@ for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
 const TERMINAL_STAMP_CREATE_SOURCES = [
   [
     'modules/tickets/tickets.controller.ts',
-    'POST /api/accounts/:wsId/tickets must create through TicketService — otherwise an operator-created Done ticket never auto-archives',
+    'POST /api/accounts/:accountId/tickets must create through TicketService — otherwise an operator-created Done ticket never auto-archives',
   ],
   [
     'modules/mcp/tools/ticket-crud-tools.ts',
@@ -296,10 +296,10 @@ for (const [relPath, why] of TERMINAL_STAMP_CREATE_SOURCES) {
   });
 }
 
-// The archiver itself must keep the per-workspace batch cap (operator
-// guardrail — the first tick after enabling auto-archive on a workspace with
+// The archiver itself must keep the per-account batch cap (operator
+// guardrail — the first tick after enabling auto-archive on a account with
 // 10k done tickets shouldn't ship 10k writes in one transaction).
-test('ticket-archiver.service.ts caps its per-workspace sweep', () => {
+test('ticket-archiver.service.ts caps its per-account sweep', () => {
   const SOURCE = path.resolve(
     __dirname, '..', 'src', 'modules', 'tickets', 'ticket-archiver.service.ts',
   );
@@ -308,7 +308,7 @@ test('ticket-archiver.service.ts caps its per-workspace sweep', () => {
   assert.match(
     code,
     /ARCHIVER_BATCH_LIMIT|\.take\(/,
-    'ticket-archiver.service.ts must keep a per-workspace batch cap so first-tick activation on a large workspace does not blow up.',
+    'ticket-archiver.service.ts must keep a per-account batch cap so first-tick activation on a large account does not blow up.',
   );
   assert.match(
     code,

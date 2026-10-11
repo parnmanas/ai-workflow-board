@@ -2,14 +2,14 @@
 //
 // Cross-tenant leak test for the tickets module.
 //
-// Purpose: Verify that workspace A's tickets cannot be accessed by users belonging only to
-// workspace B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
+// Purpose: Verify that account A's tickets cannot be accessed by users belonging only to
+// account B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
 // when AccountGuard is applied to TicketsController.
 //
-// Tickets live in one pool per workspace (docs/tickets.md): created and listed
-// under /api/accounts/:wsId/tickets, read by id at /api/tickets/:id. Every
+// Tickets live in one pool per account (docs/tickets.md): created and listed
+// under /api/accounts/:accountId/tickets, read by id at /api/tickets/:id. Every
 // route sits behind AuthGuard + AccountGuard, which checks the caller's
-// membership of the workspace named by the X-Account-Id header.
+// membership of the account named by the X-Account-Id header.
 //
 // Design (mirrors proxy-passthrough.test.mjs):
 //   - Boots NestJS app in-process from compiled dist/. Requires `npm run build` (satisfied by test script).
@@ -60,12 +60,12 @@ async function loadServerModules() {
     return { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken };
   } catch (err) {
     throw new Error(
-      'Leak test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
+      'Leak test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message
     );
   }
 }
 
-describe('tickets-leak: cross-workspace ticket isolation', async () => {
+describe('tickets-leak: cross-account ticket isolation', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -141,15 +141,15 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
 
     // Phase 6+: AccountGuard requires an explicit ReBAC membership tuple plus
     // an X-Account-Id header for non-admin callers. Grant user A membership
-    // in workspace A so the positive control (a member reading a ticket in their
-    // own workspace) actually exercises the allow path. User B is deliberately
+    // in account A so the positive control (a member reading a ticket in their
+    // own account) actually exercises the allow path. User B is deliberately
     // left without any membership so the negative controls below still reject.
     await rebacService.grant({ type: 'user', id: userA.id }, 'member', { type: 'account', id: wsA.id });
-    // User C is a genuine member of workspace B — the guard lets them in with
+    // User C is a genuine member of account B — the guard lets them in with
     // X-Account-Id: ws_b, so these cases probe the routes' own scoping.
     await rebacService.grant({ type: 'user', id: userC.id }, 'member', { type: 'account', id: wsB.id });
 
-    // ─── Create a ticket in workspace A's pool via HTTP ───────────────────────
+    // ─── Create a ticket in account A's pool via HTTP ───────────────────────
     const ticketRes = await apiRequest(BASE_URL, `/accounts/${wsA.id}/tickets`, {
       token: adminToken,
       accountId: wsA.id,
@@ -170,7 +170,7 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     // the code node:test computed.
   });
 
-  it('admin can create a ticket in workspace A', () => {
+  it('admin can create a ticket in account A', () => {
     assert.ok(ticketA?.id, 'Ticket should have been created with an ID');
     assert.equal(ticketA.title, 'Leak Test Ticket in WS A');
     assert.equal(ticketA.account_id, wsA.id);
@@ -185,29 +185,29 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     assert.equal(res.data.id, ticketA.id);
   });
 
-  it('user A (ws_a member) can retrieve ticket from workspace A', async () => {
+  it('user A (ws_a member) can retrieve ticket from account A', async () => {
     // tokenA is a valid session AND user A holds a member tuple on ws_a, so the
     // AccountGuard allow path is satisfied once X-Account-Id is supplied.
     const res = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
       token: tokenA,
       accountId: wsA.id,
     });
-    assert.equal(res.status, 200, 'User A should be able to fetch ticket from their workspace');
+    assert.equal(res.status, 200, 'User A should be able to fetch ticket from their account');
     assert.equal(res.data.id, ticketA.id);
   });
 
-  it('user A lists workspace A tickets and sees ticket A (control)', async () => {
+  it('user A lists account A tickets and sees ticket A (control)', async () => {
     const res = await apiRequest(BASE_URL, `/accounts/${wsA.id}/tickets`, {
       token: tokenA,
       accountId: wsA.id,
     });
     assert.equal(res.status, 200);
-    assert.ok(res.data.tickets.some((t) => t.id === ticketA.id), 'Account A ticket should appear in workspace A listing');
+    assert.ok(res.data.tickets.some((t) => t.id === ticketA.id), 'Account A ticket should appear in account A listing');
   });
 
   // ─── Isolation contract ───────────────────────────────────────────────────
 
-  it('user B (no membership) cannot retrieve workspace A ticket by ID — 403 or 404', async () => {
+  it('user B (no membership) cannot retrieve account A ticket by ID — 403 or 404', async () => {
     for (const accountId of [wsB.id, wsA.id]) {
       const res = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
         token: tokenB,
@@ -215,12 +215,12 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
       });
       assert.ok(
         res.status === 403 || res.status === 404,
-        `Expected 403 or 404 for cross-workspace ticket access (X-Account-Id ${accountId}), got ${res.status}: ${JSON.stringify(res.data)}`,
+        `Expected 403 or 404 for cross-account ticket access (X-Account-Id ${accountId}), got ${res.status}: ${JSON.stringify(res.data)}`,
       );
     }
   });
 
-  it('user B (no membership) cannot list workspace A tickets — 403', async () => {
+  it('user B (no membership) cannot list account A tickets — 403', async () => {
     const res = await apiRequest(BASE_URL, `/accounts/${wsA.id}/tickets`, {
       token: tokenB,
       accountId: wsA.id,
@@ -228,19 +228,19 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     assert.equal(res.status, 403, `Expected 403, got ${res.status}: ${JSON.stringify(res.data)}`);
   });
 
-  it('user C (ws_b member) listing workspace B does not see workspace A tickets', async () => {
+  it('user C (ws_b member) listing account B does not see account A tickets', async () => {
     const res = await apiRequest(BASE_URL, `/accounts/${wsB.id}/tickets`, {
       token: tokenC,
       accountId: wsB.id,
     });
     assert.equal(res.status, 200);
-    assert.equal(res.data.tickets.filter((t) => t.id === ticketA.id).length, 0, 'Account A ticket must not appear in workspace B listing');
+    assert.equal(res.data.tickets.filter((t) => t.id === ticketA.id).length, 0, 'Account A ticket must not appear in account B listing');
   });
 
   // AccountGuard checks membership against X-Account-Id and requires a
-  // `/accounts/:wsId` path to name the same workspace; TicketAccountGuard
-  // 404s a `/tickets/:id` of any other workspace.
-  it('user C (ws_b member) cannot list workspace A tickets through the ws_a path', async () => {
+  // `/accounts/:accountId` path to name the same account; TicketAccountGuard
+  // 404s a `/tickets/:id` of any other account.
+  it('user C (ws_b member) cannot list account A tickets through the ws_a path', async () => {
     const res = await apiRequest(BASE_URL, `/accounts/${wsA.id}/tickets`, {
       token: tokenC,
       accountId: wsB.id,
@@ -248,7 +248,7 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     assert.ok(res.status === 403 || res.status === 404, `Expected 403/404, got ${res.status}`);
   });
 
-  it('user C (ws_b member) cannot create a ticket in workspace A', async () => {
+  it('user C (ws_b member) cannot create a ticket in account A', async () => {
     const res = await apiRequest(BASE_URL, `/accounts/${wsA.id}/tickets`, {
       token: tokenC,
       accountId: wsB.id,
@@ -258,7 +258,7 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     assert.ok(res.status === 403 || res.status === 404, `Expected 403/404, got ${res.status}`);
   });
 
-  it('user C (ws_b member) cannot read or edit workspace A ticket by ID', async () => {
+  it('user C (ws_b member) cannot read or edit account A ticket by ID', async () => {
     const read = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
       token: tokenC,
       accountId: wsB.id,

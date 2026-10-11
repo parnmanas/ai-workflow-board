@@ -66,7 +66,7 @@ test('실제 package-lock.json 에서 레지스트리 패키지를 다수 읽어
     byName.size > 100,
     `패키지를 ${byName.size}개만 읽었다 — 파서가 깨지면 검사 대상 없이 침묵 통과한다`,
   );
-  // 워크스페이스 자신은 레지스트리 패키지가 아니다.
+  // 계정 자신은 레지스트리 패키지가 아니다.
   assert.equal(byName.has('server'), false);
   assert.equal(byName.has('awb-agent-manager'), false);
 });
@@ -79,7 +79,7 @@ test('alias 엔트리는 키가 아니라 name 필드의 실제 패키지명으�
   assert.equal(byName.has('string-width-cjs'), false, 'alias 키를 패키지명으로 썼다');
 });
 
-test('루트·워크스페이스·link·비HTTP resolved 는 제외한다', () => {
+test('루트·계정·link·비HTTP resolved 는 제외한다', () => {
   const byName = lockfilePackages({
     packages: {
       '': { name: 'root', version: '1.0.0' },
@@ -116,7 +116,7 @@ test('같은 패키지의 중첩 사본은 버전 집합으로 합쳐진다', ()
 test('packageNameFromKey — 중첩·scoped·node_modules 없는 키', () => {
   assert.equal(packageNameFromKey('node_modules/lodash'), 'lodash');
   assert.equal(packageNameFromKey('node_modules/a/node_modules/@scope/b'), '@scope/b');
-  // 워크스페이스 디렉터리 키. 잘라내기 산술로 엉뚱한 이름을 만들면 안 된다.
+  // 계정 디렉터리 키. 잘라내기 산술로 엉뚱한 이름을 만들면 안 된다.
   assert.equal(packageNameFromKey('apps/server'), null);
   assert.equal(packageNameFromKey(''), null);
 });

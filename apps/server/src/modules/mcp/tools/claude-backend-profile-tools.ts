@@ -216,7 +216,7 @@ export async function updateClaudeBackendProfile(
         : { credential_ref: input.credential_ref }),
   });
 
-  // 프로필은 인스턴스 전역이라 "배정된 워크스페이스" 개념이 없다(티켓 e616dbfc).
+  // 프로필은 인스턴스 전역이라 "배정된 계정" 개념이 없다(티켓 e616dbfc).
   // 예전의 배정-소유권 대조는 대조할 대상 자체가 사라져 존재 검사만 남는다.
   if (runtime.credential_ref) {
     const credential = await manager.getRepository(Credential).findOne({
@@ -309,7 +309,7 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
 
   server.tool(
     'list_claude_backend_profiles',
-    'List safe Claude backend profile metadata. Profiles are instance-global — there is no per-workspace assignment or default. Credential references and secrets are omitted. DB-backed, full-scope Agent MCP only.',
+    'List safe Claude backend profile metadata. Profiles are instance-global — there is no per-account assignment or default. Credential references and secrets are omitted. DB-backed, full-scope Agent MCP only.',
     {},
     async (_args, extra) => gated(
       extra,

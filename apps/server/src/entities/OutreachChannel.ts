@@ -20,8 +20,8 @@ export type OutreachDeployPostMode = 'new_post' | 'reply_to_existing' | 'auto' |
  * `credential_id` is a bare FK-less pointer into the shared Credential table
  * (same pattern as Resource.credential_id) — resolved via outreach-credential.ts's
  * `resolveOutreachCredential`, which mirrors git-branches.ts's `resolveGitCredential`
- * account-scope guard (global credential OR same-workspace; a mismatched
- * workspace throws rather than silently resolving to no token).
+ * account-scope guard (global credential OR same-account; a mismatched
+ * account throws rather than silently resolving to no token).
  *
  * Tickets filed from a channel get `target_tags` (plus the provenance tags the
  * ingest adds) and `target_project_id`; both optional.

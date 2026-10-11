@@ -124,7 +124,7 @@ export class TicketService {
   /**
    * Shape-check an assignee RuntimeSpec and refuse what dispatch would only
    * discover later: a CLI runtime profile that does not exist, or a credential
-   * this workspace cannot use — the same checks team slots and
+   * this account cannot use — the same checks team slots and
    * /runtime-specs/validate apply.
    */
   async normalizeAssignee(input: unknown, accountId: string): Promise<{ assignee: RuntimeSpec | null; assignee_key: string }> {
@@ -141,7 +141,7 @@ export class TicketService {
     if (spec.credential_id) {
       const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: spec.credential_id } });
       if (!credential || (credential.account_id !== null && credential.account_id !== accountId)) {
-        throw new TicketInputError(`credential ${spec.credential_id} is not available to this workspace`);
+        throw new TicketInputError(`credential ${spec.credential_id} is not available to this account`);
       }
     }
     return { assignee: spec, assignee_key: runtimeIdentityKey(spec) };
@@ -164,8 +164,8 @@ export class TicketService {
   private async resolveProject(accountId: string, projectId: unknown, scope: DataSource | EntityManager = this.dataSource): Promise<Project | null> {
     const id = str(projectId);
     if (!id) return null;
-    const project = await this.projects.getInWorkspace(id, accountId, scope);
-    if (!project) throw new TicketInputError(`project ${id} not found in this workspace`, 400, 'project_not_found');
+    const project = await this.projects.getInAccount(id, accountId, scope);
+    if (!project) throw new TicketInputError(`project ${id} not found in this account`, 400, 'project_not_found');
     return project;
   }
 
@@ -173,7 +173,7 @@ export class TicketService {
     const row = await scope.getRepository(Ticket)
       .createQueryBuilder('t')
       .select('MAX(t.position)', 'max')
-      .where('t.account_id = :ws AND t.status = :status AND t.parent_id IS NULL', { ws: accountId, status })
+      .where('t.account_id = :account AND t.status = :status AND t.parent_id IS NULL', { account: accountId, status })
       .getRawOne();
     const max = Number(row?.max);
     return Number.isFinite(max) ? max + 1 : 0;
@@ -483,7 +483,7 @@ export class TicketService {
 
   // ── read ──────────────────────────────────────────────────────────────
 
-  /** Root tickets of a workspace for the Tickets page / list_tickets. */
+  /** Root tickets of a account for the Tickets page / list_tickets. */
   async list(accountId: string | string[], filter: TicketListFilter = {}): Promise<{ tickets: any[]; tags: Array<{ tag: string; count: number }> }> {
     const accountIds = Array.isArray(accountId) ? accountId : [accountId];
     if (!accountIds.length) return { tickets: [], tags: [] };
@@ -606,7 +606,7 @@ export class TicketService {
     };
   }
 
-  /** Distinct tags in use across the workspace — the tag picker's suggestions. */
+  /** Distinct tags in use across the account — the tag picker's suggestions. */
   async tagSuggestions(accountId: string | string[]): Promise<Array<{ tag: string; count: number }>> {
     const accountIds = Array.isArray(accountId) ? accountId : [accountId];
     if (!accountIds.length) return [];

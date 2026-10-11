@@ -1,7 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 // ReBAC tuple storage: subject has relation to object.
-// E.g. user:alice member workspace:main
+// E.g. user:alice member account:main
 // Three composite indexes cover the main query patterns.
 @Index(['object_type', 'object_id', 'relation'])    // check membership, list members
 @Index(['subject_type', 'subject_id', 'relation'])  // list user's objects

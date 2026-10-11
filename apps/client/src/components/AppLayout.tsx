@@ -63,10 +63,10 @@ export default function AppLayout() {
   const [sidebarRooms, setSidebarRooms] = useState<ChatRoomListItem[]>([]);
   const [sidebarRoomsLoading, setSidebarRoomsLoading] = useState(false);
 
-  const fetchSidebarRooms = useCallback(async (wsId: string) => {
+  const fetchSidebarRooms = useCallback(async (accountId: string) => {
     setSidebarRoomsLoading(true);
     try {
-      const rooms = await api.listChatRooms(undefined, wsId);
+      const rooms = await api.listChatRooms(undefined, accountId);
       setSidebarRooms(rooms);
     } catch {
       setSidebarRooms([]);
@@ -148,7 +148,7 @@ export default function AppLayout() {
         overlay={drawerMode}
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        wsId={currentAccountId}
+        accountId={currentAccountId}
         rooms={sidebarRooms}
         roomsLoading={sidebarRoomsLoading}
         containerRef={drawerRef}

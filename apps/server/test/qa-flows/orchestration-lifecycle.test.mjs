@@ -69,7 +69,7 @@ const HUMAN = { type: 'user', id: 'qa-operator', name: 'QA Operator' };
 
 // ONE app for the whole file. bootApp() pins SQLJS_DB_PATH on its first call,
 // so a second boot in the same process would attach a second DataSource to the
-// same sql.js file — the tests below isolate themselves by workspace instead.
+// same sql.js file — the tests below isolate themselves by account instead.
 let shared = null;
 async function sharedApp(t) {
   if (!shared) {
@@ -637,7 +637,7 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
   assert.equal(memberMissions.missions.length, 1, 'a roster member sees the mission too');
 
   const strangerMissionsResult = await strangerMcp.callTool('list_orchestration_missions', {});
-  assert.deepEqual(strangerMissionsResult.missions, [], 'a non-member sees nothing, even in the same workspace');
+  assert.deepEqual(strangerMissionsResult.missions, [], 'a non-member sees nothing, even in the same account');
 
   step('Finished missions are hidden by default and shown with include_finished');
   await ds.getRepository('OrchestrationMission').update({ id: mission.id }, { status: 'completed' });
@@ -1112,7 +1112,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
     target_runtimes: [member.runtime_spec],
   });
 
-  step('구조화된 완료 조건, 커스텀 workspace 루트, post_actions 2개(실재/댕글링)를 갖는 미션');
+  step('구조화된 완료 조건, 커스텀 account 루트, post_actions 2개(실재/댕글링)를 갖는 미션');
 
   const mission = await missions.createMission({
     account_id: ws.id,
@@ -1142,7 +1142,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   assert.ok(!plan?.isError, `plan 실패: ${JSON.stringify(plan)}`);
   assert.deepEqual(plan.dispatched_now, ['only-step']);
 
-  step('디스패치된 step은 미션의 커스텀 workspace 루트 아래 자기만의 격리된 폴더에 고정된다');
+  step('디스패치된 step은 미션의 커스텀 account 루트 아래 자기만의 격리된 폴더에 고정된다');
   const afterPlan = await missions.getMissionDetail(mission.id, ws.id);
   const only = afterPlan.steps.find((s) => s.step_key === 'only-step');
   assert.equal(
@@ -1441,7 +1441,7 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
         title: `Noise mission ${i}`,
         status: 'completed',
         finished_at: new Date(),
-        // run-budget-guard.ts(ticket a51ec6d9, 별개의 완결된 기능)는 workspace당
+        // run-budget-guard.ts(ticket a51ec6d9, 별개의 완결된 기능)는 account당
         // 최근 60분 이내 생성된 OrchestrationMission 행 수를 세어 창구를
         // 막는다 — 이 120개를 createMission()이 아니라 리포지토리로 직접
         // 심더라도 그 카운트에는 똑같이 잡힌다. 이 테스트가 검증하려는 건

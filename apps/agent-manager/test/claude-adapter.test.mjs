@@ -144,7 +144,7 @@ test('Claude provider transcript 존재 여부로 최초 생성과 resume를 구
   const id = resolveClaudeSessionId(legacy);
   assert.equal(await adapter.hasPersistedSession(home, legacy), false);
 
-  const projectDir = join(home, 'projects', '-workspace-a');
+  const projectDir = join(home, 'projects', '-account-a');
   await fsp.mkdir(projectDir, { recursive: true });
   await fsp.writeFile(join(projectDir, `${id}.jsonl`), '{"type":"user"}\n');
 
@@ -267,7 +267,7 @@ test('ensureWorkspaceTrust: .claude.json이 아예 없음 → 새로 만들고, 
   const cwd = '/mnt/data/awb-agents/awb/.awb/act/6158a5ff';
   await adapter.ensureWorkspaceTrust(cliHomeDir, cwd);
   const meta = await adapter.readTrustMeta(cliHomeDir, cwd);
-  assert.deepEqual(meta, { trusted: true }, '방금 프로비저닝된 워크스페이스 폴더는 trusted로 읽혀야 한다');
+  assert.deepEqual(meta, { trusted: true }, '방금 프로비저닝된 계정 폴더는 trusted로 읽혀야 한다');
 });
 
 test('ensureWorkspaceTrust: 무관한 project/key가 있는 기존 .claude.json → 이 cwd만 추가하고 나머지는 보존', async () => {

@@ -93,7 +93,7 @@ interface NotificationContextValue {
    */
   markRead: (source: NotificationSource, key?: string) => void;
   /**
-   * 워크스페이스의 모든 티켓-코멘트 뱃지를 0으로 만든다(사이드바/Tickets
+   * 계정의 모든 티켓-코멘트 뱃지를 0으로 만든다(사이드바/Tickets
    * 페이지의 "모두 읽음" 액션 — 서버 read-all 이 성공한 뒤 호출) — optimistic,
    * 다른 탭에도 알린다.
    */

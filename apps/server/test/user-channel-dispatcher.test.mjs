@@ -13,11 +13,11 @@
 // stub `userChannelRepo.find` is consulted for each non-sender member.
 //
 // Also covers `_handleActivity` (ticket f57dcfbc): it used to build a
-// workspace-less `/?ticket=<id>` notification link — the same legacy
+// account-less `/?ticket=<id>` notification link — the same legacy
 // pattern removed from the client's admin fallbacks — instead of the
 // account-scoped shape `_buildDeepLink` already uses for mentions. Since
 // boards were removed that shape is the Tickets page
-// (`/ws/<wsId>/tickets?ticket=<id>`, common/artifact-ref.ts ticketPath), and
+// (`/ws/<accountId>/tickets?ticket=<id>`, common/artifact-ref.ts ticketPath), and
 // the recipients are the ticket's human participants (creator, commenters,
 // mentioned users — ticket-participants.ts), never the agent assignee.
 
@@ -36,7 +36,7 @@ async function loadDispatcher() {
     return mod.UserChannelDispatcherService;
   } catch (err) {
     throw new Error(
-      'Test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
+      'Test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message
     );
   }
 }
@@ -238,7 +238,7 @@ function makeActivityService(UserChannelDispatcherService, { tickets, commenters
   );
 }
 
-test("_handleActivity links to the ticket on its workspace's Tickets page — not the legacy workspace-less /?ticket= fallback", async () => {
+test("_handleActivity links to the ticket on its account's Tickets page — not the legacy account-less /?ticket= fallback", async () => {
   const UserChannelDispatcherService = await loadDispatcher();
   const prevUrl = process.env.AWB_PUBLIC_URL;
   process.env.AWB_PUBLIC_URL = 'https://awb.example.com';
@@ -277,7 +277,7 @@ test("_handleActivity links to the ticket on its workspace's Tickets page — no
   }
 });
 
-test("_handleActivity omits the url when the ticket's workspace can't be resolved (no broken fallback link)", async () => {
+test("_handleActivity omits the url when the ticket's account can't be resolved (no broken fallback link)", async () => {
   const UserChannelDispatcherService = await loadDispatcher();
   const prevUrl = process.env.AWB_PUBLIC_URL;
   process.env.AWB_PUBLIC_URL = 'https://awb.example.com';

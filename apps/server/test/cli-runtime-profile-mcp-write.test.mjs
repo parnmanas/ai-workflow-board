@@ -20,7 +20,7 @@ let port;
 let ds;
 let mcp;
 let token;
-let workspace;
+let account;
 let agent;
 let profile;
 let resolveClaudeBackendProfileForDispatch;
@@ -30,7 +30,7 @@ const assigneeWith = (cli_runtime_profile) => ({ ...agent.runtime_spec, cli: 'cl
 async function api(method, path, body) {
   const res = await fetch(`http://localhost:${port}/api${path}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': workspace.id },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': account.id },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -42,7 +42,7 @@ async function api(method, path, body) {
 // backlog 티켓은 디스패치되지 않는다 — 핀 저장 경로만 본다.
 async function makeTicket(cliRuntimeProfile = null) {
   const created = await mcp.callTool('create_ticket', {
-    account_id: workspace.id,
+    account_id: account.id,
     title: `profile pin ${randomUUID().slice(0, 8)}`,
     status: 'backlog',
     assignee: assigneeWith(cliRuntimeProfile),
@@ -62,11 +62,11 @@ before(async () => {
   ({ resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js'));
   const { AuthService } = await import('../dist/services/auth.service.js');
 
-  workspace = await createAccount(app, gdst, 'cli-profile-mcp-write');
+  account = await createAccount(app, gdst, 'cli-profile-mcp-write');
   const admin = await createUser(app, gdst, { name: 'admin', role: 'admin' });
   token = app.get(AuthService).createSession(admin.id);
-  agent = await createAgent(app, gdst, workspace.id, { name: 'profile-writer', runtime: true });
-  const key = await createApiKey(app, gdst, agent.id, { accountId: workspace.id, label: 'profile-writer' });
+  agent = await createAgent(app, gdst, account.id, { name: 'profile-writer', runtime: true });
+  const key = await createApiKey(app, gdst, agent.id, { accountId: account.id, label: 'profile-writer' });
   mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 
@@ -80,7 +80,7 @@ before(async () => {
       config: '{}',
     }),
   );
-  // 프로필은 인스턴스 전역이라 워크스페이스 배정이 없다(티켓 e616dbfc).
+  // 프로필은 인스턴스 전역이라 계정 배정이 없다(티켓 e616dbfc).
   // 상속의 마지막 단계는 SystemSetting 의 전역 기본값 하나뿐이다.
   await ds.getRepository('SystemSetting').save(
     ds.getRepository('SystemSetting').create({

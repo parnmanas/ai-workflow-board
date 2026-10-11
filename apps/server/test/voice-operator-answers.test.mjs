@@ -96,7 +96,7 @@ test('a spoken choice reaches the waiting session only from a turn the user star
     body: JSON.stringify({ name: 'Jarvis', manager_id: host.id, cli: 'claude', session_id: 'op-1', title: 'Jarvis' }),
   });
   assert.equal(registered.status, 201, registered.text);
-  assert.equal(registered.body.operator.account_id, ws.id, 'the workspace the operator was registered from is kept');
+  assert.equal(registered.body.operator.account_id, ws.id, 'the account the operator was registered from is kept');
 
   const mcp = (sessionId) => new McpClient({
     baseUrl: base, apiKey: hostKey, clientInfo: { name: 'claude-agent-acp', version: 'test' },
@@ -127,7 +127,7 @@ test('a spoken choice reaches the waiting session only from a turn the user star
   assert.match(report.text, /요청: Run npm publish/);
   assert.match(report.text, /선택지: 1\) Allow once {2}2\) Reject/);
   assert.ok(report.text.includes(`answer_session_permission(manager_id="${host.id}", cli="codex", session_id="sess-work", request_id="r1", option_id=1)"allow_once" 2)"reject")`), report.text);
-  assert.equal(report.account_id, ws.id, 'the operator session opens with the workspace it was registered from');
+  assert.equal(report.account_id, ws.id, 'the operator session opens with the account it was registered from');
 
   // 2. operator 는 미결 요청을 본다.
   const listed = await operator.callTool('list_pending_session_requests', {});

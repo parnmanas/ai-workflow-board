@@ -92,7 +92,7 @@ export async function resolveCallerDisplayName(
  * Resolve an agent UUID from either a raw ID (passthrough) or a display name.
  * Returns the empty string when neither yields a match.
  *
- * Name lookup is documented as deprecated: the workspace can host multiple
+ * Name lookup is documented as deprecated: the account can host multiple
  * agents with identical `name` (e.g. `Ralf` as both a manager Agent row and
  * a Claude subagent), and a silent first-match pick routes triggers to the
  * wrong agent type. We log a warn on the name path and throw on multi-match
@@ -156,13 +156,13 @@ export async function resolveAgentIdAndName(
  *   - empty / null / undefined  → returns null (clears the link)
  *   - same id as the ticket itself → throws (no self-link)
  *   - target row missing → throws
- *   - target lives in a different workspace → throws
+ *   - target lives in a different account → throws
  *
- * A guessed id from another workspace can never wire a cross-workspace chain.
+ * A guessed id from another account can never wire a cross-account chain.
  *
  * `currentTicketId` is the ticket being updated (or null when creating, in
  * which case the self-link check is skipped — a new ticket can't reference
- * itself before it has an id). `currentAccountId` is the workspace the
+ * itself before it has an id). `currentAccountId` is the account the
  * link is being established in; when empty, only the existence + self-link
  * checks run.
  */
@@ -183,7 +183,7 @@ export async function validateNextTicketId(
     throw new Error('next_ticket_id not found');
   }
   if (currentAccountId && target.account_id && target.account_id !== currentAccountId) {
-    throw new Error('next_ticket_id must point to a ticket in the same workspace');
+    throw new Error('next_ticket_id must point to a ticket in the same account');
   }
   return candidate;
 }

@@ -21,7 +21,7 @@ const MAX_PAGE_SIZE = 2000;
  * 도착지 주도).
  *
  * 인증은 MigrationExportGuard(scope=migration_export ApiKey 전용, dev-mode
- * bypass 없음) — 이 컨트롤러는 전 워크스페이스의 크리덴셜을 포함한 원본
+ * bypass 없음) — 이 컨트롤러는 전 계정의 크리덴셜을 포함한 원본
  * row를 그대로 스트리밍하는 표면이라 가장 엄격한 게이트가 필요하다.
  */
 @ApiTags('migration-export')
@@ -52,7 +52,7 @@ export class MigrationExportController {
     const selfDeploy = await this.deployments.getLatest(null, SELF_DEPLOY_ENV_DEFAULT).catch(() => null);
 
     // Fail CLOSED (review round 2) — the audit trail is a mandatory control
-    // for this surface (전 워크스페이스 크리덴셜을 반환할 수 있는 표면), not
+    // for this surface (전 계정 크리덴셜을 반환할 수 있는 표면), not
     // best-effort. If the write itself fails, refuse to hand back data rather
     // than silently exporting unaudited.
     if (!(await this._auditAccess(req, 'migration_export_meta', 'meta', `${tables.length} tables reported`))) {
@@ -141,7 +141,7 @@ export class MigrationExportController {
    * caller 신원만 기록한다. `new_value`는 사람이 읽을 요약(행수/페이지 상태)일
    * 뿐 실제 row 데이터·크리덴셜 평문·토큰은 절대 담지 않는다.
    *
-   * fail-closed 계약(리뷰 라운드2, 차단): 이 표면은 전 워크스페이스 크리덴셜을
+   * fail-closed 계약(리뷰 라운드2, 차단): 이 표면은 전 계정 크리덴셜을
    * 반환할 수 있어 감사 로그가 best-effort가 아니라 필수 제어다. 쓰기 실패를
    * 삼키지 않고 `false`로 알려 호출자(meta/table)가 데이터 응답 대신 503을
    * 내도록 한다 — "감사에 실패했지만 평문은 나갔다"를 구조적으로 막는다.

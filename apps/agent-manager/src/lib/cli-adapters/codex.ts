@@ -311,7 +311,7 @@ export class CodexCliAdapter extends CliAdapter {
       args: [
         'exec',
         ...attributionArgs,
-        // Keep Codex's own workspace root identical to the OS process cwd.
+        // Keep Codex's own account root identical to the OS process cwd.
         // Relying on child_process.cwd alone lets Codex re-resolve a different
         // project root, after which an assigned `.awb/wt/...` path appears to
         // be missing even though the manager created and spawned inside it.

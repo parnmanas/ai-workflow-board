@@ -32,7 +32,7 @@ export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): v
     {
       agent_id: z.string().describe('Calling agent ID'),
       ticket_id: z.string().describe('Ticket the agent is now working on'),
-      role: z.string().optional().describe('Role slug the subagent was spawned for (assignee/reporter/reviewer or a workspace-custom slug). Surfaced on the dashboard so a multi-role agent shows which hat it is wearing right now.'),
+      role: z.string().optional().describe('Role slug the subagent was spawned for (assignee/reporter/reviewer or a account-custom slug). Surfaced on the dashboard so a multi-role agent shows which hat it is wearing right now.'),
       task_token: z.string().optional().describe('Per-session generation nonce (ticket 1fcba693). Stamped on the active task so a later clear_current_task carrying the SAME token is the only one that releases this seat + its output-liveness badge. A respawn that re-sets the same (agent,ticket,role) seat overwrites the token, so a stale earlier session can never clear a live successor.'),
     },
     async ({ agent_id, ticket_id, role, task_token }) => {

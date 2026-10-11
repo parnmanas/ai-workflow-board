@@ -35,14 +35,14 @@ const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities
 const { OntologyEdge } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyEdge.js'));
 
 const GRAPH_ID = 'reach-graph';
-const WORKSPACE_ID = 'reach-ws';
+const ACCOUNT_ID = 'reach-ws';
 
 let nodeRepo, edgeRepo;
 
 function node(id, overrides = {}) {
   return {
     id,
-    account_id: WORKSPACE_ID,
+    account_id: ACCOUNT_ID,
     graph_id: GRAPH_ID,
     symbol_id: `sym:${id}`,
     type: 'Callable',
@@ -57,7 +57,7 @@ function node(id, overrides = {}) {
 function edge(id, srcId, dstId, overrides = {}) {
   return {
     id,
-    account_id: WORKSPACE_ID,
+    account_id: ACCOUNT_ID,
     graph_id: GRAPH_ID,
     src_id: srcId,
     dst_id: dstId,

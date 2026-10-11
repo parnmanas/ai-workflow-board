@@ -51,7 +51,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'list-for-agent');
+  const account = await createAccount(app, getDataSourceToken, 'list-for-agent');
   // The manager's OWN identity — distinct from any agent it supervises.
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'list-for-agent-manager',
@@ -59,11 +59,11 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
   });
   // The executable agent TriggerLoop/DM/@mention dispatch is actually
   // gating for. Must be a different id than `manager` to reproduce the bug.
-  const target = await createAgent(app, getDataSourceToken, workspace.id, {
+  const target = await createAgent(app, getDataSourceToken, account.id, {
     name: 'list-for-agent-target',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'list-for-agent',
   });
 
@@ -72,7 +72,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
     agent_id: manager.id,
     host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
     agent_ids: [target.id],
-    account_id: workspace.id,
+    account_id: account.id,
     mode: 'manager',
     hostname: 'test-host',
     plugin_version: '1.6.30', // predates capability reporting
@@ -109,7 +109,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
     agent_id: manager.id,
     host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
     agent_ids: [target.id],
-    account_id: workspace.id,
+    account_id: account.id,
     mode: 'manager',
     hostname: 'test-host',
     plugin_version: '1.6.94',

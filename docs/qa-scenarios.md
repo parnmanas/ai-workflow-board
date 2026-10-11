@@ -59,7 +59,7 @@ compiled catalogue exists, then run the seeder against a live AWB:
 
 node apps/server/scripts/seed-qa-scenarios.mjs \
   --base-url http://localhost:7701 \
-  --workspace <account_id> \
+  --account <account_id> \
   --runtime <runtime-spec.json>   # the QA agent's RuntimeSpec (target_runtime)
   # --api-key <agent_key>         # or run against MCP_DEV_MODE
   # --only ticket-lifecycle,chat-room-messaging
@@ -69,7 +69,7 @@ node apps/server/scripts/seed-qa-scenarios.mjs \
 The seeder is **idempotent**: each scenario carries a stable `key:<key>` tag, so
 re-running matches the existing row and `update_qa_scenario`s it in place rather
 than duplicating. `--dry-run` prints the CREATE/UPDATE plan without writing.
-The seeder's `--workspace` flag is its retained compatibility name for an account
+The seeder's `--account` flag is its retained compatibility name for an account
 UUID; new MCP calls use `account_id`. The QA work list aggregates accessible
 accounts and de-duplicates Global scenarios by ID.
 

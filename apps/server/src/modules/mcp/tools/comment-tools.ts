@@ -29,7 +29,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { resolveCallerIdentityRow } from '../shared/authz';
 import { RuntimeHost } from '../../../entities/RuntimeHost';
 import { resolveAgentDisplayName, isUuidShapedId } from '../../../utils/agent-name';
-import { agentIsVisibleInWorkspace } from '../../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../../common/agent-account-scope';
 import { resolveAuthorRole, mergeAuthorRoleIntoMetadata } from './author-role';
 import { TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
@@ -147,7 +147,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       author_role: z.string().optional()
         .describe("Role the comment is authored as. Auto-filled ('assignee' when you are the ticket's assignee, or the subagent session pin) when omitted. Stored on metadata.author_role."),
       attachment_resource_ids: z.array(z.string()).optional()
-        .describe("Resource ids to attach. Each must already exist with type='comment_attachment' in the ticket's workspace — create them first via save_resource. MCP does not accept inline base64 here (cap payload size, keep upload/transaction logic in one place)."),
+        .describe("Resource ids to attach. Each must already exist with type='comment_attachment' in the ticket's account — create them first via save_resource. MCP does not accept inline base64 here (cap payload size, keep upload/transaction logic in one place)."),
     },
     async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, author_role, attachment_resource_ids }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
@@ -225,7 +225,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }
       }
 
-      // Validate any attachment_resource_ids so agents can't cross-workspace
+      // Validate any attachment_resource_ids so agents can't cross-account
       // or mistakenly wire a generic resource into a comment.
       const resolvedAttachmentIds: string[] = Array.isArray(attachment_resource_ids)
         ? attachment_resource_ids.filter((v): v is string => typeof v === 'string' && !!v)
@@ -236,7 +236,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         for (const rid of resolvedAttachmentIds) {
           const r = found.get(rid);
           if (!r) return err(`attachment_resource_ids contains unknown id: ${rid}`);
-          if (r.account_id !== ticket.account_id) return err(`attachment resource ${rid} belongs to a different workspace`);
+          if (r.account_id !== ticket.account_id) return err(`attachment resource ${rid} belongs to a different account`);
           if (r.type !== 'comment_attachment') return err(`attachment resource ${rid} is type=${r.type}; expected comment_attachment`);
         }
       }
@@ -428,7 +428,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           for (const m of resolved) {
             if (m.type === 'agent') {
               if (quiescedForMentions) continue;
-              // P4c-4: uuid 행 / rt- spec 공통 해소 (workspace 검사 포함).
+              // P4c-4: uuid 행 / rt- spec 공통 해소 (account 검사 포함).
               const target = await resolveMentionTarget(dataSource, ticket, m.id);
               if (!target) continue;
               const { extras } = target;

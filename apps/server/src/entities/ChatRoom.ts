@@ -81,13 +81,13 @@ export class ChatRoom {
   @Column({ type: 'varchar', nullable: true, default: null })
   run_kind: string | null;
 
-  // 자유 참여(open join, ticket 995a9519). 켜면 이 방은 **같은 워크스페이스의 모든
+  // 자유 참여(open join, ticket 995a9519). 켜면 이 방은 **같은 계정의 모든
   // 유저**에게 열린다 — 참여자가 아니어도 방 목록에 보이고, 첫 발언 시점에 참여자로
   // auto-join 되어 바로 대화에 낄 수 있다(room-messaging.service.ts sendMessage).
   //
   // 완화되는 것은 **참여자 게이트 하나뿐**이다. 나란히 서 있는 다른 경계는 그대로다:
-  //   - 워크스페이스 경계 — 완화 경로는 room.account_id 를 호출자의 워크스페이스와
-  //     직접 대조한다. "모든 유저"는 언제나 같은 워크스페이스 안의 유저다.
+  //   - 계정 경계 — 완화 경로는 room.account_id 를 호출자의 계정와
+  //     직접 대조한다. "모든 유저"는 언제나 같은 계정 안의 유저다.
   //   - 에이전트 — 이 완화는 **유저 전용**이다. 에이전트(MCP send_chat_room_message)는
   //     기존대로 참여자 행을 요구한다. 아니면 에이전트가 아무 방에나 난입한다.
   //   - orchestration 발화 권한 — mission 방의 MANAGE_ACTIONS 검사

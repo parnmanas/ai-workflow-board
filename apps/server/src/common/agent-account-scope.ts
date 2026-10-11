@@ -1,7 +1,7 @@
 import { IsNull, type FindOperator } from 'typeorm';
 
 export type AgentAccountId = string | null | undefined;
-export type AgentWorkspaceWhere = {
+export type AgentAccountWhere = {
   account_id: string | FindOperator<string>;
 };
 
@@ -11,18 +11,18 @@ export function normalizeAgentAccountId(value: unknown): string | null {
 }
 
 /** True when an Agent can be referenced by an artifact in targetAccountId. */
-export function agentIsVisibleInWorkspace(
+export function agentIsVisibleInAccount(
   agentAccountId: AgentAccountId,
   targetAccountId: string,
 ): boolean {
   const target = targetAccountId.trim();
   if (!target) return false;
-  const agentWorkspace = normalizeAgentAccountId(agentAccountId);
-  return agentWorkspace === null || agentWorkspace === target;
+  const agentAccount = normalizeAgentAccountId(agentAccountId);
+  return agentAccount === null || agentAccount === target;
 }
 
-/** TypeORM OR branches for workspace-local plus global Agent discovery. */
-export function agentWorkspaceWhere(accountId: string): AgentWorkspaceWhere[] {
+/** TypeORM OR branches for account-local plus global Agent discovery. */
+export function agentAccountWhere(accountId: string): AgentAccountWhere[] {
   const target = accountId.trim();
   if (!target) return [];
   return [

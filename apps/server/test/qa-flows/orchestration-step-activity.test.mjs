@@ -16,7 +16,7 @@
 //      근거한다.
 //   5. 목록 페이로드(`live_steps`)는 무엇이 돌고 있고 마지막 신호가 언제인지 싣는다.
 //   6. REST `steps/:id/session` 은 그 방의 전사(지시·하트비트·보고)를 최신순 + 커서로
-//      돌려주고, 워크스페이스 경계와 인증을 지킨다.
+//      돌려주고, 계정 경계와 인증을 지킨다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -283,7 +283,7 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
     '페이지가 겹치지 않는다 — (created_at, id) 복합 커서가 같은 밀리초에서도 경계를 지킨다',
   );
 
-  logStep('워크스페이스 경계를 지킨다');
+  logStep('계정 경계를 지킨다');
   const wrong = await fetch(
     `${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${other.id}`,
     { headers: { Authorization: deniedAuthorization, 'X-Account-Id': other.id } },

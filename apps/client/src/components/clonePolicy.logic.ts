@@ -8,7 +8,7 @@ import type { ClonePolicy } from '../types';
 // 테스트도 이 모듈을 그대로 검증한다(로직 복제본이 아니다).
 //
 // 같은 ClonePolicy 형태를 두 표면이 편집한다 — Project 설정(프로젝트별 override)과
-// Account Settings(워크스페이스 기본값). 저장 대상만 다르므로 필드 매핑과 입력
+// Account Settings(계정 기본값). 저장 대상만 다르므로 필드 매핑과 입력
 // 검증은 이 한 곳에 둔다.
 //
 // 서버 zod 가 최종 검증 권한이며, 여기서는 사용자가 **어느 칸이 잘못됐는지** 알 수

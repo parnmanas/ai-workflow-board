@@ -428,11 +428,11 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     assert.equal((await activeRows(room.id, BOB)).length, 1);
   });
 
-  // ── 워크스페이스 경계 (리뷰 라운드1 지적 1) ──────────────────────────────
+  // ── 계정 경계 (리뷰 라운드1 지적 1) ──────────────────────────────
 
-  it('다른 워크스페이스의 방은 active 참여자여도 404 로 거부된다', async () => {
+  it('다른 계정의 방은 active 참여자여도 404 로 거부된다', async () => {
     // participant 행은 한 번 생기면 남는다. 그래서 "이 방의 참여자인가"만으로는 경계가
-    // 지속되지 않는다 — 지난/다른 워크스페이스 방의 행을 들고 있는 호출자가 지금
+    // 지속되지 않는다 — 지난/다른 계정 방의 행을 들고 있는 호출자가 지금
     // 바인딩된 스코프 밖의 방을 승격시킬 수 있었다.
     const room = await seedRoom({ account_id: OTHER_WS }, [
       { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
@@ -441,7 +441,7 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     await assert.rejects(
       () => invite(room.id, ALICE, [asUser(BOB)], 'user', WS),
       (err) => err.status === 404 && /room not found/i.test(err.message),
-      '타 워크스페이스 room_id 가 통과했다',
+      '타 계정 room_id 가 통과했다',
     );
 
     const after = await roomOf(room.id);
@@ -450,10 +450,10 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     assert.equal((await activeRows(room.id, BOB)).length, 0);
   });
 
-  it('타 워크스페이스에서는 방의 존재도 종류도 드러나지 않는다 (404 로 수렴)', async () => {
-    // 없는 방과 **같은 404** 여야 한다 — 다르면 남의 워크스페이스 room_id 를 넣어보는
+  it('타 계정에서는 방의 존재도 종류도 드러나지 않는다 (404 로 수렴)', async () => {
+    // 없는 방과 **같은 404** 여야 한다 — 다르면 남의 계정 room_id 를 넣어보는
     // 것만으로 방의 존재를 확인할 수 있다. 시스템 소유 방이어도 400 이 아니라 404 다
-    // (워크스페이스 검사가 시스템 방 판정보다 먼저 돌기 때문).
+    // (계정 검사가 시스템 방 판정보다 먼저 돌기 때문).
     const foreignSystemDm = await seedRoom({ account_id: OTHER_WS, run_kind: 'qa' }, [
       { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
     ]);
@@ -464,12 +464,12 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
       .then(() => null, (e) => e);
 
     assert.equal(missing.status, 404);
-    assert.equal(foreign.status, 404, '타 워크스페이스 시스템 방이 400 으로 종류를 드러냈다');
+    assert.equal(foreign.status, 404, '타 계정 시스템 방이 400 으로 종류를 드러냈다');
     assert.equal(foreign.message, missing.message, '두 사유가 구별되면 방의 존재가 샌다');
   });
 
   it('비참여자에게는 시스템 방 여부가 드러나지 않는다 (400 아니라 403)', async () => {
-    // 시스템 방 판정을 참여자 검사보다 먼저 두면, 같은 워크스페이스의 비참여자가
+    // 시스템 방 판정을 참여자 검사보다 먼저 두면, 같은 계정의 비참여자가
     // 400/403 차이로 그 방이 시스템 소유인지 알아낼 수 있다.
     const systemDm = await seedRoom({ run_kind: 'qa' }, [
       { type: 'user', id: ALICE }, { type: 'agent', id: BOT },

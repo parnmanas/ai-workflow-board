@@ -68,7 +68,7 @@ meta-test guards against that regression returning.
   **not** call `process.exit`; handle teardown + the real exit code come from
   the `--test-force-exit` flag the runners pass.
 - **`fixtures.mjs`** — TypeORM-repo-direct factories:
-  `createWorkspace`, `createUser`, `createAgent` (`runtime: true` gives the
+  `createAccount`, `createUser`, `createAgent` (`runtime: true` gives the
   agent a Runtime Host and a `runtime_spec` to use as a ticket `assignee`),
   `createApiKey`, `createProject` (with `hostFolders` main clone folders) and
   `createTicket` (`status`, `assignee`, `tags`, `projectId`, …).
@@ -106,7 +106,7 @@ meta-test guards against that regression returning.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { createAgent, createTicket, createWorkspace, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
+import { createAgent, createTicket, createAccount, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 const { TicketDispatchService } = await import('../../dist/modules/agents/ticket-dispatch.service.js');
@@ -120,7 +120,7 @@ test('my scenario', async (t) => {
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'demo');
+  const ws = await createAccount(app, getDataSourceToken, 'demo');
   const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
 
   const agent = new VirtualAgent({
@@ -138,9 +138,9 @@ test('my scenario', async (t) => {
 
   // A todo ticket with an assignee is started by the dispatcher's queue.
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id, title: 'demo', status: 'todo', assignee: worker.runtime_spec,
+    accountId: ws.id, title: 'demo', status: 'todo', assignee: worker.runtime_spec,
   });
-  await app.get(TicketDispatchService).startQueued({ workspaceId: ws.id });
+  await app.get(TicketDispatchService).startQueued({ accountId: ws.id });
 
   const trig = await agent.waitForTrigger(tr => tr.ticket_id === ticket.id);
   assert.equal(trig.role, 'assignee');

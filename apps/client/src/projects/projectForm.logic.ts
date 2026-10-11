@@ -111,10 +111,10 @@ export function isProjectFormDirty(form: ProjectFormState, project: Project | nu
 // ─── credentials ────────────────────────────────────────────────────────────
 
 /**
- * Credentials a project may use: global ones plus this workspace's own — the
+ * Credentials a project may use: global ones plus this account's own — the
  * same rule ResourceManager applies to account-scoped resources. A credential
  * the project already points at stays selectable even if it would no longer be
- * listed (moved scope / other workspace) so editing never silently drops it.
+ * listed (moved scope / other account) so editing never silently drops it.
  */
 export function projectCredentialChoices(
   credentials: Credential[],

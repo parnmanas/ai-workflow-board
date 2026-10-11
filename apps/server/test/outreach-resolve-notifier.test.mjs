@@ -51,7 +51,7 @@ async function setupDb() {
   return dataSource;
 }
 
-async function seedWorkspace(dataSource) {
+async function seedAccount(dataSource) {
   const wsRepo = dataSource.getRepository(Account);
   await wsRepo.save(wsRepo.create({ id: 'ws-1', name: 'ws-1' }));
 }
@@ -189,7 +189,7 @@ function installFakeGithubFetch() {
 test('publish_policy=approval: a Done backlinked ticket creates a draft reply, no external call', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval' });
     const ticket = await seedDoneTicket(dataSource);
@@ -215,7 +215,7 @@ test('publish_policy=approval: a Done backlinked ticket creates a draft reply, n
 test('publish_policy=auto: a Done backlinked ticket replies immediately, exactly one external call', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
     const ticket = await seedDoneTicket(dataSource);
@@ -238,7 +238,7 @@ test('publish_policy=auto: a Done backlinked ticket replies immediately, exactly
 test('re-entering Done for the SAME backlinked item never fires a second reply', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
     const ticket = await seedDoneTicket(dataSource);
@@ -260,7 +260,7 @@ test('re-entering Done for the SAME backlinked item never fires a second reply',
 test('a Done ticket with NO outreach backlink is a total no-op', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const ticket = await seedDoneTicket(dataSource);
     // No OutreachInboundItem row references this ticket.
     const { notifier } = makeServices(dataSource);
@@ -275,7 +275,7 @@ test('a Done ticket with NO outreach backlink is a total no-op', async () => {
 test('a moved activity into a status other than done is a no-op, even for a done-looking backlinked ticket', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
     const ticket = await seedDoneTicket(dataSource);
@@ -296,7 +296,7 @@ test('a moved activity into a status other than done is a no-op, even for a done
 test('a done entry the ticket has since been moved back out of is a no-op (status is re-read, not trusted from the activity)', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
     // Reopened: TicketService.move clears terminal_entered_at on leaving done.
@@ -317,7 +317,7 @@ test('a done entry the ticket has since been moved back out of is a no-op (statu
 test('reconcile skips a backlinked github candidate whose ticket is not done', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -345,7 +345,7 @@ test('reconcile skips a backlinked github candidate whose ticket is not done', a
 test('publish_policy=off never creates a ledger row', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'off' });
     const ticket = await seedDoneTicket(dataSource);
@@ -362,7 +362,7 @@ test('publish_policy=off never creates a ledger row', async () => {
 test('idempotency is independent of Ticket.on_done_dispatched_at — the on-done Action hook cannot starve this service', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval' });
     // Simulate the on-ticket-done Action hook having ALREADY claimed this
@@ -385,7 +385,7 @@ test('idempotency is independent of Ticket.on_done_dispatched_at — the on-done
 test('github kind, target_environment configured, NO matching deployment yet: no comment is posted (evidence gate holds it pending)', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -417,7 +417,7 @@ test('github kind, target_environment configured, NO matching deployment yet: no
 test('github kind, NO fix-commit tag: a deployment at/after Done does NOT satisfy the gate — freshness-only timing is never accepted as evidence', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -448,7 +448,7 @@ test('github kind, NO fix-commit tag: a deployment at/after Done does NOT satisf
 test('github kind, fix-commit tag + matching ancestor_shas satisfies the gate immediately (no freshness fallback needed)', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -482,7 +482,7 @@ test('github kind, fix-commit tag + matching ancestor_shas satisfies the gate im
 test('github kind: a deployment reported AFTER the ticket reached Done fires the previously-pending resolve once its sha matches the fix-commit tag', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -520,7 +520,7 @@ test('github kind: a deployment reported AFTER the ticket reached Done fires the
 test('restart durability: a BRAND-NEW service instance (no prior _handleActivity call) still finds and fires an already-satisfied candidate via reconcile', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -555,7 +555,7 @@ test('restart durability: a BRAND-NEW service instance (no prior _handleActivity
 test('reconcile is idempotent: calling it twice against an already-published item makes no second external call', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
@@ -586,7 +586,7 @@ test('reconcile is idempotent: calling it twice against an already-published ite
 test('close_on_resolve=false (default): the issue is never closed even under publish_policy=auto', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod', close_on_resolve: false,
@@ -614,7 +614,7 @@ test('close_on_resolve=false (default): the issue is never closed even under pub
 test('close_on_resolve=true + publish_policy=auto: the issue is closed after a successful resolve reply', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod', close_on_resolve: true,
@@ -642,7 +642,7 @@ test('close_on_resolve=true + publish_policy=auto: the issue is closed after a s
 test('close_on_resolve=true but publish_policy=approval: the draft is never auto-published, so close is never called either', async () => {
   const dataSource = await setupDb();
   try {
-    await seedWorkspace(dataSource);
+    await seedAccount(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'approval', target_environment: 'prod', close_on_resolve: true,

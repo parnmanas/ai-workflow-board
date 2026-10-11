@@ -23,7 +23,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       url: z.string().optional().describe('GitHub repository URL (e.g. https://github.com/owner/repo)'),
       owner: z.string().optional().describe('Repository owner (alternative to url)'),
       repo: z.string().optional().describe('Repository name (alternative to url)'),
-      credential_id: z.string().optional().describe('Credential ID from workspace credentials (overrides global token)'),
+      credential_id: z.string().optional().describe('Credential ID from account credentials (overrides global token)'),
     },
     async ({ url, owner, repo, credential_id }) => {
       if (!(await githubService.isEnabled(credential_id))) {
@@ -74,7 +74,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       let existing: Resource | null = null;
       if (resource_id) {
         existing = await resourceRepo.findOne({ where: { id: resource_id, account_id } });
-        if (!existing) return err('Resource not found in workspace');
+        if (!existing) return err('Resource not found in account');
       }
       // Auth precedence: explicit param → the resource's stored credential →
       // the global token (resolved inside the connector).

@@ -10,7 +10,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * ProjectHostFolder — one main clone per (project, host).
  */
 @Entity('projects')
-@Index('idx_projects_workspace', ['account_id'])
+@Index('idx_projects_account', ['account_id'])
 export class Project {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -34,7 +34,7 @@ export class Project {
   @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;
 
-  // JSON text (common/clone-policy.ts) merged key-by-key over the workspace
+  // JSON text (common/clone-policy.ts) merged key-by-key over the account
   // default by resolveClonePolicy. null = no override.
   @Column({ type: 'text', nullable: true, default: null })
   clone_policy: string | null;

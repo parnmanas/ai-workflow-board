@@ -123,7 +123,7 @@ shells out to `ffmpeg` (or `$QA_FFMPEG`). It maps onto the contract as:
 | Verb | Implementation |
 | --- | --- |
 | `setup` | launch headless Chrome (`--remote-debugging-port=0`), attach to a page target |
-| `do` (auth) | `POST /api/auth/login` → inject `auth_token` + `currentWorkspaceId` into `localStorage` |
+| `do` (auth) | `POST /api/auth/login` → inject `auth_token` + `currentAccountId` into `localStorage` |
 | `do` (navigate) | **in-SPA** `history.pushState` + `popstate` (see note below) |
 | `observe` | `Page.captureScreenshot` → PNG; `Page.startScreencast` frames → `ffmpeg` → MP4 |
 | `teardown` | kill the browser process |
@@ -147,13 +147,13 @@ Two gotchas this helper encodes, learned from running it end-to-end (ticket 91ce
 ```
 node apps/server/scripts/qa-visual-capture.mjs \
   --base-url https://awb.example:7700 --email qa@awb.local --password … \
-  --workspace <ws> --ticket <ticket> \
+  --account <ws> --ticket <ticket> \
   --out /tmp/qa-shots --record-video --ffmpeg /path/to/ffmpeg
 ```
 
 It captures login, Tickets, the ticket detail (`?ticket=<id>`), chat, QA,
 Projects, Resources and ownership settings. This reference helper retains
-`--workspace`, `currentWorkspaceId`, and `/ws/:ws/...` for compatibility;
+`--account`, `currentAccountId`, and `/ws/:ws/...` for compatibility;
 the current UI redirects its legacy routes to canonical work routes such as
 `/tickets`, `/qa`, and `/projects`. Those work pages have no owner switch.
 

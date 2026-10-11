@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { WorkspaceScheduleService } from '../dist/modules/automation-schedule/automation-schedule.service.js';
+import { AutomationScheduleService } from '../dist/modules/automation-schedule/automation-schedule.service.js';
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const notQuiesced = { isQuiesced: async () => false };
@@ -43,7 +43,7 @@ function makeService({ schedule, action, dispatchImpl, saved = [] }) {
 
   // (schedule, room, participant, host, dataSource, messaging, log, quiesce,
   // action, actions).
-  const svc = new WorkspaceScheduleService(
+  const svc = new AutomationScheduleService(
     scheduleRepo, roomRepo, participantRepo, /* hostRepo */ {}, dataSource, messaging, logStub,
     notQuiesced, actionRepo, actions,
   );
@@ -98,7 +98,7 @@ test('Action 이 삭제됐으면 스케줄이 스스로 꺼진다', async () => 
 /** create() 만 쓰는 최소 서비스. */
 function makeCreator(action) {
   const savedRows = [];
-  const svc = new WorkspaceScheduleService(
+  const svc = new AutomationScheduleService(
     { save: async (s) => { savedRows.push(s); return s; }, create: (d) => ({ ...d }), findOne: async () => null, find: async () => [] },
     {}, {}, /* hostRepo */ {}, /* dataSource */ {}, {}, logStub,
     notQuiesced,
@@ -126,16 +126,16 @@ test('둘 다 없으면 거부한다', async () => {
   );
 });
 
-test('없는 Action / 다른 워크스페이스의 Action 은 거부한다', async () => {
+test('없는 Action / 다른 계정의 Action 은 거부한다', async () => {
   const { svc } = makeCreator(ACTION);
   await assert.rejects(
     () => svc.create({ accountId: 'ws-1', name: 'x', actionId: 'nope', cron: '0 1 * * *' }),
     /action not found/,
   );
-  // 스케줄은 자기 워크스페이스 안에서만 무언가를 일으킬 수 있다.
+  // 스케줄은 자기 계정 안에서만 무언가를 일으킬 수 있다.
   await assert.rejects(
     () => svc.create({ accountId: 'ws-other', name: 'x', actionId: 'act-1', cron: '0 1 * * *' }),
-    /different workspace/,
+    /different account/,
   );
 });
 

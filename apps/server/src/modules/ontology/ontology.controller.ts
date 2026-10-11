@@ -60,8 +60,8 @@ export class OntologyController {
    *  흡수한다(그래프 자체의 status/indexed_at/commit은 DB에만 의존하므로 git
    *  접근 실패가 전체 응답을 깨서는 안 된다). */
   private async resolveRepoPath(projectId: string, accountId: string): Promise<string> {
-    const project = await this.projects.getInWorkspace(projectId, accountId);
-    if (!project) throw new Error('Project not found in workspace');
+    const project = await this.projects.getInAccount(projectId, accountId);
+    if (!project) throw new Error('Project not found in account');
     if (!project.repo_url) {
       throw new Error("project has no repo_url — set the project's repository URL before checking freshness");
     }

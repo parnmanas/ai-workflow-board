@@ -6,8 +6,8 @@ import { isUuidShapedId } from '../../utils/agent-name';
 
 /**
  * Runs after AccountGuard on every `/tickets/:id/...` route: a non-admin may
- * only touch a ticket of the workspace AccountGuard verified. A ticket of
- * another workspace answers 404, the same as one that does not exist, so ids
+ * only touch a ticket of the account AccountGuard verified. A ticket of
+ * another account answers 404, the same as one that does not exist, so ids
  * cannot be probed. Missing tickets pass through to the handler's own 404.
  */
 @Injectable()

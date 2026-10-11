@@ -18,7 +18,7 @@ import { Project } from '../../entities/Project';
 import { normalizeTags } from '../tickets/ticket.service';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { isValidCron } from '../qa/qa-cron';
 import { OutreachPollingService } from './outreach-polling.service';
 
@@ -95,7 +95,7 @@ export class OutreachChannelService {
     return findOrFail(
       this.channelRepo,
       { where: { id, account_id: accountId } },
-      'Outreach channel not found in workspace',
+      'Outreach channel not found in account',
     );
   }
 
@@ -232,29 +232,29 @@ export class OutreachChannelService {
   }
 
   /** Mirrors ResourcesController.assertCredentialScope — a GLOBAL credential
-   *  (account_id=null) or one scoped to the SAME workspace is available; a
-   *  cross-workspace credential is rejected. */
+   *  (account_id=null) or one scoped to the SAME account is available; a
+   *  cross-account credential is rejected. */
   private async _assertCredentialScope(credentialId: string | null, accountId: string): Promise<void> {
     if (!credentialId) return;
     const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
     if (!credential) throw makeError(400, 'credential not found');
     const available = credential.account_id === null || credential.account_id === accountId;
-    if (!available) throw makeError(400, 'credential is not available in this workspace scope');
+    if (!available) throw makeError(400, 'credential is not available in this account scope');
   }
 
   /** A configured target_project_id must resolve inside the channel's own
-   *  workspace — caught here at save time instead of every filed ticket
+   *  account — caught here at save time instead of every filed ticket
    *  failing project validation later. */
   private async _assertProjectScope(projectId: string | null, accountId: string): Promise<string | null> {
     if (!projectId) return null;
     const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId, account_id: accountId } });
-    if (!project) throw makeError(400, 'target_project_id must reference a project in this workspace');
+    if (!project) throw makeError(400, 'target_project_id must reference a project in this account');
     return project.id;
   }
 
   /** A configured classifier_runtime must be visible in the channel's own
-   *  workspace — same "caught at save time, not silently ignored" contract
-   *  as _assertProjectScope, reusing the same agent-workspace-visibility rule
+   *  account — same "caught at save time, not silently ignored" contract
+   *  as _assertProjectScope, reusing the same agent-account-visibility rule
    *  SecurityProfile.target_agent_id (and 15+ other call sites) already
    *  standardize on: a account-scoped agent must match, but a global
    *  agent (account_id null/'') is visible everywhere. */

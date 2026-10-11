@@ -44,7 +44,7 @@ function waitFor(predicate, label, timeoutMs = 5000) {
 
 const SESSION_ID = '01a0e005-ccaa-7512-b4fb-b7278d260e34';
 
-/** 공통 준비: 워크스페이스·관리자·매니저 하트비트까지. */
+/** 공통 준비: 계정·관리자·매니저 하트비트까지. */
 async function setup(t) {
   const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });

@@ -1,9 +1,9 @@
 // 실브라우저(jsdom) 스모크: `?ticket=` 딥링크 → Artifact 패널 오픈 + 파라미터 제거,
-// 그리고 루트/워크스페이스 리다이렉트가 쿼리스트링을 보존하는지(에픽 리뷰 MINOR-1).
+// 그리고 루트/계정 리다이렉트가 쿼리스트링을 보존하는지(에픽 리뷰 MINOR-1).
 // 티켓 98d0936e · F2-1 · §회귀 안전망 ②(딥링크).
 //
 // - TicketArtifactController 가 `?ticket=<id>` 를 관찰해 패널을 열고 파라미터를 제거.
-// - App 의 LegacyWorkspaceRedirect 가 `?ticket=..` → `sessions?ticket=..` 로
+// - App 의 LegacyPathRedirect 가 `?ticket=..` → `sessions?ticket=..` 로
 //   쿼리를 실어 나른다(수정 전: search 유실로 딥링크가 셸에 도달 못함).
 //   기본 랜딩은 Agent Session 목록(sessions)이다.
 //
@@ -17,7 +17,7 @@ import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx'
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import TicketArtifactController from '../src/components/TicketArtifactController.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
-import { LegacyWorkspaceRedirect } from '../src/App.tsx';
+import { LegacyPathRedirect } from '../src/App.tsx';
 
 const h = React.createElement;
 
@@ -91,7 +91,7 @@ test('MINOR-1: ?ticket= 리다이렉트가 쿼리스트링을 보존한다', () 
           Routes,
           null,
           // 기본 모드 → sessions 로 리다이렉트하며 search 를 실어 나른다
-          h(Route, { path: '/ws/:wsId/*', element: h(LegacyWorkspaceRedirect) }),
+          h(Route, { path: '/ws/:accountId/*', element: h(LegacyPathRedirect) }),
           h(Route, { path: '/sessions', element: h(LocationProbe) }),
         ),
       ),

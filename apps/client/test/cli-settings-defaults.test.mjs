@@ -73,7 +73,7 @@ function stubApi(t, initial) {
 const panel = (props) => h(
   MemoryRouter,
   { initialEntries: ['/sessions/m-rolf'] },
-  h(ToastProvider, null, h(CliSettingsPanel, { wsId: 'ws-1', managerId: 'm-rolf', cli: 'codex', hostName: 'rolf', ...props })),
+  h(ToastProvider, null, h(CliSettingsPanel, { accountId: 'ws-1', managerId: 'm-rolf', cli: 'codex', hostName: 'rolf', ...props })),
 );
 const saveButton = () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Save');
 

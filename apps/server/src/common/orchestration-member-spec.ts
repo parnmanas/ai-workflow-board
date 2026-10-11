@@ -108,7 +108,7 @@ function fail(label: string, message: string): never {
  * Validate + normalize loose REST/MCP input into a TeamAgentSpec.
  *
  * Referential checks that need the DB (does this manager exist, is that
- * credential visible in this workspace, does that backend profile exist) are
+ * credential visible in this account, does that backend profile exist) are
  * NOT done here — they live in the provisioner, which already holds the
  * repositories. This function owns only the shape.
  *

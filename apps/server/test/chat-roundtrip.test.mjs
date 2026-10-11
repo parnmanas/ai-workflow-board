@@ -1,7 +1,7 @@
 // Integration test — chat round-trip over the REAL chat-rooms surface.
 //
 // HISTORY: the original four cases (round-trip, cross-user privacy, agent
-// impersonation, workspace boundary) were written against a chat API that never
+// impersonation, account boundary) were written against a chat API that never
 // shipped — POST /api/chat/messages, GET /api/chat/threads, and an MCP
 // send_chat_message tool taking an agent_id (the impersonation vector). Chat
 // actually shipped as `api/chat-rooms` (rooms + participants), where sender
@@ -14,8 +14,8 @@
 //   - agent impersonation → structurally removed (send_chat_room_message has no
 //     agent_id param; RoomMessagingService.requireActiveParticipant gates it) —
 //     behavioral participant-gate coverage in qa-flows/chat-message-read.test.mjs
-//   - workspace boundary  → qa-flows/chat-message-read.test.mjs (room/search
-//     scope) + qa-flows/comment-mention.test.mjs (cross-workspace SSE non-leak)
+//   - account boundary  → qa-flows/chat-message-read.test.mjs (room/search
+//     scope) + qa-flows/comment-mention.test.mjs (cross-account SSE non-leak)
 //
 // What was NOT covered anywhere was the stitched ROUND-TRIP itself across both
 // transports in one flow. This rewrite closes exactly that gap on the real
@@ -204,16 +204,16 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   assert.ok(outsiderApproval.isError, 'an agent that is not a room participant cannot post an approval card');
 
   const otherWs = await createAccount(app, getDataSourceToken, 'chat-roundtrip-other');
-  const crossWorkspaceTicket = await createTicket(app, getDataSourceToken, {
+  const crossAccountTicket = await createTicket(app, getDataSourceToken, {
     accountId: otherWs.id,
-    title: 'other workspace pending',
+    title: 'other account pending',
   });
-  await ds.getRepository('Ticket').update(crossWorkspaceTicket.id, { pending_user_action: true });
-  const crossWorkspaceApproval = await agentMcp.callTool('request_ticket_unpend_approval', {
+  await ds.getRepository('Ticket').update(crossAccountTicket.id, { pending_user_action: true });
+  const crossAccountApproval = await agentMcp.callTool('request_ticket_unpend_approval', {
     room_id: room.id,
-    ticket_id: crossWorkspaceTicket.id,
+    ticket_id: crossAccountTicket.id,
   });
-  assert.ok(crossWorkspaceApproval.isError, 'ticket and room from different accounts are rejected');
+  assert.ok(crossAccountApproval.isError, 'ticket and room from different accounts are rejected');
 
   const agentPatch = await fetch(`${base}/api/tickets/${createdTicket.id}`, {
     method: 'PATCH',

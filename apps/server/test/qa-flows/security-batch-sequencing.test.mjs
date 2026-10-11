@@ -23,9 +23,9 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.SECURITY_BATCH_SEQ_PORT || '0';
 
-function profilePayload(wsId, agentId, name) {
+function profilePayload(accountId, agentId, name) {
   return {
-    account_id: wsId,
+    account_id: accountId,
     target_runtime: agentId,
     name,
     scan_driver: 'code-review',

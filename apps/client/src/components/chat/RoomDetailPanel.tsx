@@ -151,7 +151,7 @@ export function RoomHeaderActions({
       </button>
       {/* 자유 참여(open join, ticket 995a9519) — group 전용. DM 은 정확히 2인
           불변식이라 서버가 이 옵션을 거부하므로 토글 자체를 걸지 않는다. 켜면 같은
-          워크스페이스의 모든 유저에게 방이 보이고, 참여자가 아니어도 첫 발언 시점에
+          계정의 모든 유저에게 방이 보이고, 참여자가 아니어도 첫 발언 시점에
           자동으로 참여자가 된다. */}
       {room.type === 'group' && (
         <button
@@ -161,8 +161,8 @@ export function RoomHeaderActions({
           data-testid="room-open-join-toggle"
           title={
             room.open_join
-              ? 'Anyone in this workspace can see and join this room. Click to close it to participants only.'
-              : 'Only participants can see this room. Click to let anyone in this workspace see and join it.'
+              ? 'Anyone in this account can see and join this room. Click to close it to participants only.'
+              : 'Only participants can see this room. Click to let anyone in this account see and join it.'
           }
           style={{
             ...ghostButton,

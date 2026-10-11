@@ -139,7 +139,7 @@ test('3. entity missing on source is surfaced as a diagnostic reason alongside t
 
 test('4. a non-empty destination is rejected without allow_merge, and accepted with it', async () => {
   const wsRepo = ds.getRepository(Account);
-  await wsRepo.save(wsRepo.create({ name: 'pre-existing workspace' }));
+  await wsRepo.save(wsRepo.create({ name: 'pre-existing account' }));
 
   const svc = new TestableMigrationRunService(ds, runRepo, logStub, quiesceStub);
 

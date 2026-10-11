@@ -2,7 +2,7 @@
 // git-credential-resolution.test.mjs's shape, since outreach-credential.ts
 // deliberately copies resolveGitCredential's account-scope contract.
 // Priority case per the ticket's plan: (c) a credential scoped to a DIFFERENT
-// workspace must be REJECTED, not silently resolved to no token — that gap
+// account must be REJECTED, not silently resolved to no token — that gap
 // is this feature's biggest security risk.
 
 import 'reflect-metadata';
@@ -23,7 +23,7 @@ test('no credential_id resolves to null without querying', async () => {
   assert.equal(resolved, null);
 });
 
-test('a GLOBAL credential (account_id=null) resolves regardless of caller workspace', async () => {
+test('a GLOBAL credential (account_id=null) resolves regardless of caller account', async () => {
   const resolved = await resolveOutreachCredential(repoWith({
     id: 'cred-1', account_id: null,
     encrypted_data: JSON.stringify({ token: 'global-token' }),
@@ -31,7 +31,7 @@ test('a GLOBAL credential (account_id=null) resolves regardless of caller worksp
   assert.deepEqual(resolved, { username: undefined, token: 'global-token', extra: {} });
 });
 
-test('a credential scoped to the SAME workspace resolves', async () => {
+test('a credential scoped to the SAME account resolves', async () => {
   const resolved = await resolveOutreachCredential(repoWith({
     id: 'cred-1', account_id: 'ws-1',
     encrypted_data: JSON.stringify({ token: 'ws-token' }),
@@ -90,13 +90,13 @@ test('client_secret in the blob never leaks into a thrown error message', async 
   assert.doesNotMatch(caught.message, new RegExp(secret));
 });
 
-test('a credential scoped to a DIFFERENT workspace is rejected, not silently ignored', async () => {
+test('a credential scoped to a DIFFERENT account is rejected, not silently ignored', async () => {
   await assert.rejects(
     resolveOutreachCredential(repoWith({
       id: 'cred-1', account_id: 'ws-other',
       encrypted_data: JSON.stringify({ token: 'other-ws-token' }),
     }), 'cred-1', 'ws-1'),
-    (err) => err instanceof OutreachCredentialResolutionError && /different workspace/.test(err.message),
+    (err) => err instanceof OutreachCredentialResolutionError && /different account/.test(err.message),
   );
 });
 
@@ -125,7 +125,7 @@ test('a credential with an empty token reports the real error', async () => {
   );
 });
 
-test('rejecting a cross-workspace credential never leaks its token in the error message', async () => {
+test('rejecting a cross-account credential never leaks its token in the error message', async () => {
   const secretToken = 'super-secret-outreach-token-xyz';
   let caught = null;
   try {

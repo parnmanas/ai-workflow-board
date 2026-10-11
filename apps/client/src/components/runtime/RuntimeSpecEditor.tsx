@@ -61,8 +61,8 @@ export default function RuntimeSpecEditor({
 
   useEffect(() => {
     let cancelled = false;
-    const wsId = accountId || getActiveAccountId() || undefined;
-    api.listCredentials(wsId).then((list) => {
+    const resolvedAccountId = accountId || getActiveAccountId() || undefined;
+    api.listCredentials(resolvedAccountId).then((list) => {
       if (!cancelled) setCredentials(list as Credential[]);
     }).catch(() => {});
     return () => { cancelled = true; };

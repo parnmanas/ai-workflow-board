@@ -1,17 +1,17 @@
-// list_chat_rooms 의 워크스페이스 경계 회귀 테스트 — 티켓 ced48818.
+// list_chat_rooms 의 계정 경계 회귀 테스트 — 티켓 ced48818.
 //
-// 고치기 전에는 이 MCP 툴이 호출자의 워크스페이스를 해석하지 않고 **자신의 active
+// 고치기 전에는 이 MCP 툴이 호출자의 계정를 해석하지 않고 **자신의 active
 // 참여자 행만** 봤다. `chat_room_participants` 행은 한 번 생기면 남으므로 그것만으로는
-// 경계가 지속되지 않는다 — 지난/다른 워크스페이스 방의 참여자 행을 들고 있는 에이전트
+// 경계가 지속되지 않는다 — 지난/다른 계정 방의 참여자 행을 들고 있는 에이전트
 // 에게 그 방의 `name` 과 `last_message_at` 이 계속 실렸다. 방 이름은 set_chat_room_name
-// 의 용도상 대화 주제를 담고, `last_message_at` 은 타 워크스페이스의 활동 시각이다.
+// 의 용도상 대화 주제를 담고, `last_message_at` 은 타 계정의 활동 시각이다.
 //
 // 같은 "내 방 목록"의 REST 형제 경로인 RoomCrudService.listRooms 는 이미
-// `r.account_id = :wsId` 를 1급 조건으로 걸고 있었다 — MCP 쪽만 빠져 있어 같은
+// `r.account_id = :accountId` 를 1급 조건으로 걸고 있었다 — MCP 쪽만 빠져 있어 같은
 // 질문에 두 표면의 답이 갈렸다. 형제 툴 get_chat_room_messages(티켓 5a95315f)와 같은
 // 결함 계급이다.
 //
-// 실제 sql.js DataSource 위에서 진짜 쿼리를 돌린다(chat-messages-workspace-boundary.
+// 실제 sql.js DataSource 위에서 진짜 쿼리를 돌린다(chat-messages-account-boundary.
 // test.mjs 선례). 검증 대상이 "조인된 방 행의 account_id 가 실제로 대조되는가" 자체
 // 라 스텁으로는 아무것도 안 잡힌다 — 조건을 통째로 빼도 스텁 테스트는 통과한다.
 //
@@ -22,7 +22,7 @@
 // 이 읽기 경로는 트랜잭션을 열지 않으므로 `serializeSqljsTransactions()` 는 걸지
 // 않는다(겹치는 transaction() 호출이 있는 스위트에만 필요하다).
 //
-// 실행: node --test --test-force-exit apps/server/test/chat-rooms-list-workspace-boundary.test.mjs
+// 실행: node --test --test-force-exit apps/server/test/chat-rooms-list-account-boundary.test.mjs
 //   (dist/ 를 import 하므로 `npm run build -w server` 가 선행되어야 한다)
 
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 
 const WS = '11111111-1111-4111-8111-111111111111';
 const OTHER_WS = '22222222-2222-4222-8222-222222222222';
-/** WS 소속 에이전트 — 정상 목록과 타 워크스페이스 배제를 함께 본다. */
+/** WS 소속 에이전트 — 정상 목록과 타 계정 배제를 함께 본다. */
 const BOT = '33333333-3333-4333-8333-333333333333';
 /** account_id 가 없는(global) 에이전트 — 해석 실패 경로와 세션 스코프 판정용. */
 const GLOBAL_BOT = '55555555-5555-4555-8555-555555555555';
@@ -98,7 +98,7 @@ function assertNoRoomsLeaked(res) {
   assert.deepEqual(Object.keys(res.payload), ['error'], '거부 응답에 error 외의 필드가 실렸다');
 }
 
-describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
+describe('list_chat_rooms 계정 경계 (티켓 ced48818)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
@@ -144,11 +144,11 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
 
   // ── 경계 ──────────────────────────────────────────────────────────────────
 
-  it('타 워크스페이스 방은 active 참여자 행이 있어도 목록에 실리지 않는다', async () => {
-    // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 워크스페이스가 아니면 뺀다.
+  it('타 계정 방은 active 참여자 행이 있어도 목록에 실리지 않는다', async () => {
+    // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 계정가 아니면 뺀다.
     const mine = await seedRoom({ name: '우리 방' }, [{ type: 'agent', id: BOT }]);
     await seedRoom(
-      { account_id: OTHER_WS, name: '남의 워크스페이스 배포 논의' },
+      { account_id: OTHER_WS, name: '남의 계정 배포 논의' },
       [{ type: 'agent', id: BOT }],
     );
 
@@ -157,13 +157,13 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     assert.equal(res.isError, false, '정상 목록이 거부됐다');
     assert.deepEqual(res.payload.map(r => r.room_id), [mine.id]);
     assert.equal(
-      JSON.stringify(res.payload).includes('남의 워크스페이스 배포 논의'),
+      JSON.stringify(res.payload).includes('남의 계정 배포 논의'),
       false,
-      '타 워크스페이스 방 이름이 응답에 실렸다',
+      '타 계정 방 이름이 응답에 실렸다',
     );
   });
 
-  it('타 워크스페이스 방만 들고 있으면 빈 목록이 된다', async () => {
+  it('타 계정 방만 들고 있으면 빈 목록이 된다', async () => {
     // 부분 필터가 아니라 전량 배제인지 — 방 이름도 활동 시각도 나가면 안 된다.
     await seedRoom(
       { account_id: OTHER_WS, last_message_at: new Date('2026-01-01T00:00:00.000Z') },
@@ -176,7 +176,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     assert.deepEqual(res.payload, []);
   });
 
-  it('세션에 workspace 가 없으면 에이전트 자신의 account_id 로 판정한다', async () => {
+  it('세션에 account 가 없으면 에이전트 자신의 account_id 로 판정한다', async () => {
     const mine = await seedRoom({}, [{ type: 'agent', id: BOT }]);
     await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
 
@@ -186,7 +186,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     assert.deepEqual(res.payload.map(r => r.room_id), [mine.id]);
   });
 
-  it('workspace 를 해석할 수 없으면(전역 에이전트 + 스코프 없는 세션) 거부한다', async () => {
+  it('account 를 해석할 수 없으면(전역 에이전트 + 스코프 없는 세션) 거부한다', async () => {
     // 전역 에이전트는 account_id 가 null 이라 폴백도 비고, 세션 키에도 스코프가 없다.
     await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
 
@@ -195,7 +195,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     assertNoRoomsLeaked(res);
   });
 
-  it('전역 에이전트도 세션 키의 workspace 밖 방은 목록에서 빠진다', async () => {
+  it('전역 에이전트도 세션 키의 account 밖 방은 목록에서 빠진다', async () => {
     const mine = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
     await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
 
@@ -205,9 +205,9 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     assert.deepEqual(res.payload.map(r => r.room_id), [mine.id]);
   });
 
-  // ── 같은 워크스페이스 무회귀 ────────────────────────────────────────────────
+  // ── 같은 계정 무회귀 ────────────────────────────────────────────────
 
-  it('같은 워크스페이스 방은 last_message_at 최신순이고 활동 없는 방이 뒤로 간다', async () => {
+  it('같은 계정 방은 last_message_at 최신순이고 활동 없는 방이 뒤로 간다', async () => {
     // 경계 조건을 쿼리에 끼워 넣으면서 ORDER BY ... DESC NULLS LAST 가 깨지지 않았는지.
     const older = await seedRoom(
       { name: '오래된 방', last_message_at: new Date('2026-01-01T00:00:00.000Z') },

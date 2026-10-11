@@ -21,7 +21,7 @@ import { createUser, createAccount } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_WORKFLOW_HEALTH_LTU_PORT || '0';
 
-test('workflow-health/long-term-usage: guard composition, validation, workspace scoping', async (t) => {
+test('workflow-health/long-term-usage: guard composition, validation, account scoping', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => closeTestApp(app));
   const { getDataSourceToken, AuthService } = modules;

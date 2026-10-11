@@ -24,13 +24,13 @@ test('Manager heartbeat with manager_capabilities stores it verbatim on the inst
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'manager-capabilities');
+  const account = await createAccount(app, getDataSourceToken, 'manager-capabilities');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'manager-capabilities-host',
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'manager-capabilities',
   });
 
@@ -46,7 +46,7 @@ test('Manager heartbeat with manager_capabilities stores it verbatim on the inst
         instance_id: 'manager-capabilities-test',
         agent_id: manager.id,
         host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
-        account_id: workspace.id,
+        account_id: account.id,
         mode: 'manager',
         hostname: 'test-host',
         plugin_version: '1.6.94',
@@ -80,13 +80,13 @@ test('Manager heartbeat WITHOUT manager_capabilities leaves the field undefined 
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'manager-capabilities-absent');
+  const account = await createAccount(app, getDataSourceToken, 'manager-capabilities-absent');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'manager-capabilities-absent-host',
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'manager-capabilities-absent',
   });
 
@@ -102,7 +102,7 @@ test('Manager heartbeat WITHOUT manager_capabilities leaves the field undefined 
         instance_id: 'manager-capabilities-absent-test',
         agent_id: manager.id,
         host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
-        account_id: workspace.id,
+        account_id: account.id,
         mode: 'manager',
         hostname: 'test-host',
         plugin_version: '1.5.0',

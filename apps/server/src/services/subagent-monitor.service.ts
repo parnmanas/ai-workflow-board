@@ -324,8 +324,8 @@ export class SubagentMonitorService {
     return { ended: stale.length };
   }
 
-  /** All current records (active + recently-ended) for a workspace. */
-  async listForWorkspace(accountId: string): Promise<SubagentSummary[]> {
+  /** All current records (active + recently-ended) for a account. */
+  async listForAccount(accountId: string): Promise<SubagentSummary[]> {
     const rows = await this.subagents.find({
       where: { account_id: accountId },
       order: { started_at: 'DESC' },

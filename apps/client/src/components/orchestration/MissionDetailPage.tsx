@@ -41,7 +41,7 @@ import { missionStyle, progressPercent } from './status';
 export default function MissionDetailPage() {
   const { missionId = '' } = useParams<{ missionId: string }>();
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const navigate = useNavigate();
   const compact = useMediaQuery('(max-width: 1100px)');
   const [stepsOpen, setStepsOpen] = useState(false);
@@ -66,10 +66,10 @@ export default function MissionDetailPage() {
 
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
-      if (!wsId || !missionId) return;
+      if (!accountId || !missionId) return;
       if (!opts?.silent) setLoading(true);
       try {
-        setMission(await api.getOrchestrationMission(missionId, wsId));
+        setMission(await api.getOrchestrationMission(missionId, accountId));
         setNotFound(false);
       } catch (e: any) {
         if (!opts?.silent) setNotFound(true);
@@ -77,7 +77,7 @@ export default function MissionDetailPage() {
         if (!opts?.silent) setLoading(false);
       }
     },
-    [wsId, missionId],
+    [accountId, missionId],
   );
 
   useEffect(() => {
@@ -87,9 +87,9 @@ export default function MissionDetailPage() {
   // Edit 모달의 (편집 중엔 비활성화된) Team select에 현재 팀 이름을 보여주는
   // 데만 필요하다 — draft 미션만 편집 가능하므로 자주 열리는 경로는 아니다.
   useEffect(() => {
-    if (!wsId) return;
-    api.listOrchestrationTeams(wsId).then(setTeams).catch(() => setTeams([]));
-  }, [wsId]);
+    if (!accountId) return;
+    api.listOrchestrationTeams(accountId).then(setTeams).catch(() => setTeams([]));
+  }, [accountId]);
 
   // Debounced refetch: a wave of parallel steps completing emits one frame per
   // step, and each would otherwise trigger its own full detail request.
@@ -149,7 +149,7 @@ export default function MissionDetailPage() {
    * 깨어나므로, 화면은 곧 대화가 이어지는 상태가 된다.
    */
   const reopen = () =>
-    act(() => api.reopenOrchestrationMission(mission.id, wsId), '미션을 다시 열었습니다 — orchestrator 를 깨웠습니다');
+    act(() => api.reopenOrchestrationMission(mission.id, accountId), '미션을 다시 열었습니다 — orchestrator 를 깨웠습니다');
   const evidenceTotal =
     mission.steps.reduce((n, s) => n + (s.evidence_count ?? 0), 0) + (mission.mission_evidence_count ?? 0);
 
@@ -173,7 +173,7 @@ export default function MissionDetailPage() {
                   variant="primary"
                   size="sm"
                   loading={busy}
-                  onClick={() => act(() => api.startOrchestrationMission(mission.id, wsId), 'Orchestrator briefed')}
+                  onClick={() => act(() => api.startOrchestrationMission(mission.id, accountId), 'Orchestrator briefed')}
                 >
                   Start
                 </Button>
@@ -188,7 +188,7 @@ export default function MissionDetailPage() {
                   variant="secondary"
                   size="sm"
                   loading={busy}
-                  onClick={() => act(() => api.pauseOrchestrationMission(mission.id, wsId), 'Mission paused')}
+                  onClick={() => act(() => api.pauseOrchestrationMission(mission.id, accountId), 'Mission paused')}
                 >
                   Pause
                 </Button>
@@ -199,7 +199,7 @@ export default function MissionDetailPage() {
                 variant="primary"
                 size="sm"
                 loading={busy}
-                onClick={() => act(() => api.resumeOrchestrationMission(mission.id, wsId), 'Mission resumed')}
+                onClick={() => act(() => api.resumeOrchestrationMission(mission.id, accountId), 'Mission resumed')}
               >
                 Resume
               </Button>
@@ -231,7 +231,7 @@ export default function MissionDetailPage() {
       <div style={{ padding: '10px 16px 0', display: 'flex', flexDirection: 'column', gap: 10 }}>
         <StatusStrip mission={mission} />
         {/* 미션 전체가 여기서 멈춰 있으므로 접지 않는다 — 사람이 답해야 진행된다. */}
-        <ConfirmRequestPanel steps={mission.steps} wsId={wsId} onDecided={() => load({ silent: true })} />
+        <ConfirmRequestPanel steps={mission.steps} accountId={accountId} onDecided={() => load({ silent: true })} />
       </div>
 
       {/*
@@ -301,7 +301,7 @@ export default function MissionDetailPage() {
                     act(
                       () =>
                         api.updateOrchestrationMission(mission.id, {
-                          account_id: wsId,
+                          account_id: accountId,
                           // 이 필드 하나만 보낸다 — 브리핑 필드를 함께 실으면 running
                           // 미션에서 서버의 draft 잠금이 409 를 낸다.
                           user_chat_mode: e.target.value as OrchestrationUserChatMode,
@@ -336,7 +336,7 @@ export default function MissionDetailPage() {
                 <StepSessionPanel
                   key={selectedStep.id}
                   step={selectedStep}
-                  wsId={wsId}
+                  accountId={accountId}
                   events={mission.events}
                   stepTimeoutMinutes={mission.step_timeout_minutes}
                   onClose={() => setSelectedStepId(null)}
@@ -345,7 +345,7 @@ export default function MissionDetailPage() {
                 <MissionConversationPanel
                   key={mission.id}
                   missionId={mission.id}
-                  accountId={wsId}
+                  accountId={accountId}
                   roomId={mission.room_id}
                   events={mission.events}
                   live={isLive}
@@ -388,7 +388,7 @@ export default function MissionDetailPage() {
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
                 <MissionEvidencePane
                   missionId={mission.id}
-                  wsId={wsId}
+                  accountId={accountId}
                   steps={mission.steps}
                   // 미션 상세가 갱신될 때마다(SSE/폴링) 갤러리도 다시 읽는다 — 새 증거는
                   // 곧 updated_at 이나 증거 수의 변화로 드러난다.
@@ -410,7 +410,7 @@ export default function MissionDetailPage() {
 
       <MissionFormModal
         isOpen={showEdit}
-        wsId={wsId}
+        accountId={accountId}
         teams={teams}
         mission={mission}
         onClose={() => setShowEdit(false)}
@@ -423,7 +423,7 @@ export default function MissionDetailPage() {
       <NudgeModal
         isOpen={showNudge}
         missionId={mission.id}
-        wsId={wsId}
+        accountId={accountId}
         onClose={() => setShowNudge(false)}
         onDone={(m) => {
           setMission(m);
@@ -438,7 +438,7 @@ export default function MissionDetailPage() {
         confirmLabel="Cancel mission"
         onConfirm={async () => {
           setShowCancel(false);
-          await act(() => api.cancelOrchestrationMission(mission.id, wsId, 'cancelled from the mission view'), 'Mission cancelled');
+          await act(() => api.cancelOrchestrationMission(mission.id, accountId, 'cancelled from the mission view'), 'Mission cancelled');
         }}
         onCancel={() => setShowCancel(false)}
       />
@@ -473,13 +473,13 @@ function Tab({ active, onClick, children }: { active: boolean; onClick: () => vo
 function NudgeModal({
   isOpen,
   missionId,
-  wsId,
+  accountId,
   onClose,
   onDone,
 }: {
   isOpen: boolean;
   missionId: string;
-  wsId: string;
+  accountId: string;
   onClose: () => void;
   onDone: (m: OrchestrationMissionDetail) => void;
 }) {
@@ -494,7 +494,7 @@ function NudgeModal({
   const submit = async () => {
     setSaving(true);
     try {
-      onDone(await api.nudgeOrchestrationMission(missionId, wsId, note.trim()));
+      onDone(await api.nudgeOrchestrationMission(missionId, accountId, note.trim()));
       showToast('Orchestrator woken', 'success');
     } catch (e: any) {
       showToast(e?.message || 'Failed to nudge', 'error');

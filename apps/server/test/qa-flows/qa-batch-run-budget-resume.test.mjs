@@ -43,9 +43,9 @@ const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 process.env.QA_SCHEDULER_ENABLED = 'false';
 process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_RESUME_PORT || '0';
 
-function scenarioPayload(wsId, agentId, name) {
+function scenarioPayload(accountId, agentId, name) {
   return {
-    account_id: wsId,
+    account_id: accountId,
     target_runtime: agentId,
     name,
     qa_driver: 'http-api',
@@ -125,7 +125,7 @@ test('QA schedule tick resumes a batch wedged on a transient run-budget rejectio
   assert.equal(stillWedged.status, 'running', 'still wedged — the run-budget window has not cleared yet');
   assert.equal(stillWedged.run_ids.length, 1, 'resume retried and hit the same rejection again — no phantom run created');
 
-  step('Raise the workspace run-budget ceiling (the window clears) and tick again — the resume actually dispatches the remaining index');
+  step('Raise the account run-budget ceiling (the window clears) and tick again — the resume actually dispatches the remaining index');
   await ds.getRepository('Account').update(ws.id, {
     hard_budget_config: JSON.stringify({ max_runs_per_window: 10, window_minutes: 60, notify: false }),
   });

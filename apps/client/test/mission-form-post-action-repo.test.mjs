@@ -107,7 +107,7 @@ async function mountModal(t, { mission = null, listProjects = async () => [], li
   const view = mount(
     React.createElement(MissionFormModal, {
       isOpen: true,
-      wsId: 'ws-1',
+      accountId: 'ws-1',
       teams: TEAMS,
       mission,
       onClose: () => {},

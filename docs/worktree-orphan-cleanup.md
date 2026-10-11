@@ -2,7 +2,7 @@
 
 One-time sweep for git-worktree debris left behind **before** the `.awb/wt/`
 convention. This is the operational counterpart to the automatic archive
-reclamation (`EventDispatcher.#cleanupArchivedTicketWorkspace`) — that handles
+reclamation (`EventDispatcher.#cleanupArchivedTicketAccount`) — that handles
 newly-archived tickets going forward; this runbook cleans the pre-existing pile.
 
 ## What we're cleaning
@@ -151,7 +151,7 @@ node apps/agent-manager/scripts/cleanup-orphan-worktrees.mjs \
 | 경로 | 대상 범위 | 무엇을 회수하나 |
 |---|---|---|
 | **terminal cleanup** — `EventDispatcher.#cleanupTerminalTicketWorktrees` → `WorktreeManager.cleanupTerminalTicketGit` (`apps/agent-manager/src/lib/event-dispatcher.ts`) | 그 매니저가 관리하는 **모든** agent 의 `working_dir` (`managedAgentContexts.list()` 를 순회하며 `working_dir` 로 dedupe) + `main-clones.json` 에 기록된 main clone 폴더 + REST 티켓의 `base_repo.main_clone_dir` | 티켓 worktree + 그 worktree 가 물고 있던 로컬/origin `ticket/<uuid>-*` ref |
-| **archive 회수 (규약 ⑤)** — `EventDispatcher.#cleanupArchivedTicketWorkspace` → `WorktreeManager.removeTicketWorktrees` / `removeTicketRunWorkspace` | 위와 같은 범위 (main clone 은 기록된 폴더 + 이벤트의 `main_clone_dir` 힌트) | 티켓 worktree + QA/Security run workspace. **branch ref 는 건드리지 않는다** |
+| **archive 회수 (규약 ⑤)** — `EventDispatcher.#cleanupArchivedTicketAccount` → `WorktreeManager.removeTicketWorktrees` / `removeTicketRunWorkspace` | 위와 같은 범위 (main clone 은 기록된 폴더 + 이벤트의 `main_clone_dir` 힌트) | 티켓 worktree + QA/Security run workspace. **branch ref 는 건드리지 않는다** |
 | **10분 주기 sweep** — `apps/agent-manager/src/main.ts` 의 `sweepWorktrees()` → `WorktreeManager.sweep` | agent `working_dir` + `main-clones.json` 의 main clone 폴더 | idle + clean 인 worktree **만**. branch ref 는 건드리지 않는다 |
 | **런북** — 이 문서의 `apps/agent-manager/scripts/cleanup-orphan-worktrees.mjs` | 운영자가 지정한 repo | 수동 |
 

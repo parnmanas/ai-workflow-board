@@ -1,6 +1,6 @@
 // 티켓 딥링크 공유 유틸 (board-less, docs/tickets.md).
 //
-// 티켓은 워크스페이스 하나의 풀에 있으므로 workspace + id 만으로 주소가 된다:
+// 티켓은 계정 하나의 풀에 있으므로 account + id 만으로 주소가 된다:
 // `/ws/<ws>/tickets?ticket=<id>` (`&comment=<id>` 로 코멘트 스크롤). 예전 보드
 // 딥링크(`/boards/<board>?ticket=`)는 클라이언트가 board id 를 모르는 경우가 많았다.
 // TicketArtifact "티켓 열기" · QA/Security 의 fix 티켓 링크 · 알림/멘션 이동이 공유한다.

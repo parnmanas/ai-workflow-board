@@ -1,4 +1,4 @@
-// Behavioral test for WorkspaceScheduleService.runOnce() / runNow() / CRUD —
+// Behavioral test for AutomationScheduleService.runOnce() / runNow() / CRUD —
 // drives the scheduler sweep against in-memory fake repos with a fixed `now`
 // (ticket 8845be79). Direct sibling of qa-schedule-behavior.test.mjs /
 // security-schedule-behavior.test.mjs. Covers:
@@ -12,7 +12,7 @@
 //   • disabled schedule is never swept (negative case).
 //   • orphan self-heal — an enabled schedule with next_run_at=null gets a cursor
 //     computed forward WITHOUT firing on the same sweep.
-//   • a missing/cross-workspace target agent fails that schedule WITHOUT stalling
+//   • a missing/cross-account target agent fails that schedule WITHOUT stalling
 //     the sweep (next_run_at still advanced so it retries).
 //   • CRUD validation — cadence both/neither, required target_agent_id /
 //     task_prompt, computeNextRun cron/interval/disabled.
@@ -23,7 +23,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WorkspaceScheduleService } from '../dist/modules/automation-schedule/automation-schedule.service.js';
+import { AutomationScheduleService } from '../dist/modules/automation-schedule/automation-schedule.service.js';
 
 const MIN = 60_000;
 const NOW = new Date('2026-06-29T12:00:00Z');
@@ -168,7 +168,7 @@ function svcWith(rows, agents = [{ id: AGENT_UUID, account_id: 'ws-1', name: 'Bo
     getRepository: (entity) => (entity?.name === 'RuntimeHost' ? hostRepo : { async findOne() { return null; }, async find() { return []; } }),
   };
   const messaging = makeMessaging();
-  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, hostRepo, dataSource, messaging, noopLog, noQuiesce, {}, {});
+  const svc = new AutomationScheduleService(scheduleRepo, roomRepo, participantRepo, hostRepo, dataSource, messaging, noopLog, noQuiesce, {}, {});
   return { svc, scheduleRepo, roomRepo, participantRepo, messaging };
 }
 
@@ -240,12 +240,12 @@ test('missing target agent fails that schedule but does not stall the sweep (cur
   assert.ok(new Date(sch.next_run_at).getTime() > NOW.getTime(), 'cursor still advanced so it retries next occurrence');
 });
 
-test('cross-workspace target agent is rejected (no dispatch)', async () => {
+test('cross-account target agent is rejected (no dispatch)', async () => {
   const sch = makeSchedule({ target_agent_id: 'agent-x' });
   const { svc, messaging } = svcWith([sch], [{ id: 'agent-x', account_id: 'ws-OTHER', name: 'Foreign' }]);
 
   const { dispatched } = await svc.runOnce(NOW);
-  assert.deepEqual(dispatched, [], 'cross-workspace agent not dispatched');
+  assert.deepEqual(dispatched, [], 'cross-account agent not dispatched');
   assert.equal(messaging.calls.length, 0, 'no message sent across accounts');
 });
 

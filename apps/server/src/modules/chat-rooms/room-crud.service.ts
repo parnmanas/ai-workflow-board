@@ -11,7 +11,7 @@ import { activityEvents } from '../../services/activity.service';
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 
 const PARTICIPANT_CAP = 50;
@@ -21,7 +21,7 @@ const PARTICIPANT_CAP = 50;
  * participant/sender id — notably the synthetic 'system' author QA/Action
  * dispatch seeds as a room participant (qa-run.service.ts / actions.service.ts)
  * — must never reach a uuid-typed column lookup (users.id / agents.id). See
- * listAllWorkspaceRooms for the Postgres crash this prevents.
+ * listAllAccountRooms for the Postgres crash this prevents.
  */
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -68,7 +68,7 @@ export class RoomCrudService {
 
   /**
    * List the rooms visible to the current user: the ones they actively
-   * participate in, plus every `open_join` room in the workspace (ticket
+   * participate in, plus every `open_join` room in the account (ticket
    * 995a9519) whether or not they have joined it yet.
    * Returns rooms sorted by last_message_at DESC (COALESCE for SQLite safety).
    * Includes unread_count (datetime comparison, not UUID) and dm_partner_name for DMs.
@@ -78,7 +78,7 @@ export class RoomCrudService {
     // Join on active participant row for calling user.
     //
     // LEFT (not INNER) since ticket 995a9519: an `open_join` room is listed for
-    // every user in the workspace, so the caller may legitimately have no
+    // every user in the account, so the caller may legitimately have no
     // participant row yet. The membership predicate stays in the JOIN's ON
     // clause — moving it to WHERE would turn the outer join back into an inner
     // one and silently drop the open rooms this branch exists to surface.
@@ -90,9 +90,9 @@ export class RoomCrudService {
         `${t('p.room_id')} = ${t('r.id')} AND p.participant_id = :userId AND p.participant_type = 'user' AND p.left_at IS NULL`,
         { userId },
       )
-      .where('r.account_id = :wsId', { wsId: accountId })
+      .where('r.account_id = :accountId', { accountId: accountId })
       // 자유 참여 방은 참여자가 아니어도 목록에 실린다. 이 조건이 없으면 위 LEFT JOIN
-      // 은 워크스페이스의 **모든** 방을 흘려보낸다 — 완화 대상은 open_join 방 하나뿐이다.
+      // 은 계정의 **모든** 방을 흘려보낸다 — 완화 대상은 open_join 방 하나뿐이다.
       .andWhere('(p.id IS NOT NULL OR r.open_join = :openJoin)', { openJoin: true })
       // Action-Run rooms (action_id IS NOT NULL) are surfaced inside the
       // Actions detail view, not the global chat list — hiding them here
@@ -108,7 +108,7 @@ export class RoomCrudService {
       // Mission rooms ship with the option ON, and the Mission screen opens them
       // directly by `mission.room_id` — it never goes through this list. Letting
       // them through here would dump every mission's room into the sidebar of
-      // every user in the workspace, which is exactly what the filters prevent.
+      // every user in the account, which is exactly what the filters prevent.
       .andWhere('r.orchestration_mission_id IS NULL')
       // Unread count: messages after last_read_at (datetime comparison per CHAT-12).
       // Progress rows are agent-manager tool-call heartbeats — the user
@@ -199,7 +199,7 @@ export class RoomCrudService {
     // dispatch seeds as a room participant (qa-run.service.ts:229-235). users.id
     // / agents.id are uuid, so feeding 'system' to findByIds aborts the WHOLE
     // query on Postgres with `invalid input syntax for type uuid: "system"` — the
-    // same 500 the observer view hit (see listAllWorkspaceRooms). SQLite doesn't
+    // same 500 the observer view hit (see listAllAccountRooms). SQLite doesn't
     // type-check so dev never saw it. My rooms is latent today (a QA room's only
     // user participant is 'system', which the caller can't be), but filter
     // defensively — synthetic ids resolve by name in resolveName() below.
@@ -217,7 +217,7 @@ export class RoomCrudService {
     const resolveName = (type: string, id: string): string => {
       // Non-uuid ids never made it into the maps above (filtered out) — resolve
       // the known synthetic 'system' author by convention (mirrors nameOf in
-      // listAllWorkspaceRooms) so My rooms shows "System" not "Unknown".
+      // listAllAccountRooms) so My rooms shows "System" not "Unknown".
       if (!id || !UUID_RE.test(id)) return id === 'system' ? 'System' : 'Unknown';
       if (type === 'user') return usersById.get(id) ?? 'Unknown User';
       if (type === 'agent') return agentsById.get(id) ?? 'Unknown Agent';
@@ -372,14 +372,14 @@ export class RoomCrudService {
         throw makeError(400, e?.message || 'invalid participant.runtime');
       }
     }
-    // P4c-4: uuid 참가자는 Host/링크 해소 + workspace 가시성 검사 (Agent 행 없음).
+    // P4c-4: uuid 참가자는 Host/링크 해소 + account 가시성 검사 (Agent 행 없음).
     // 스냅샷은 직접 든 spec(directSpecs)만 기록한다.
     if (requestedAgentIds.length > 0) {
       for (const id of requestedAgentIds) {
         const holder = await resolveCallerIdentityRow(this.dataSource, id);
-        if (!holder) throw makeError(400, `Agent ${id} does not belong to this workspace`);
-        if (!agentIsVisibleInWorkspace(holder.account_id, accountId)) {
-          throw makeError(400, `Agent ${id} does not belong to this workspace`);
+        if (!holder) throw makeError(400, `Agent ${id} does not belong to this account`);
+        if (!agentIsVisibleInAccount(holder.account_id, accountId)) {
+          throw makeError(400, `Agent ${id} does not belong to this account`);
         }
       }
     }
@@ -437,7 +437,7 @@ export class RoomCrudService {
     });
     await this.participantRepo.save(participantRows);
 
-    this.logService.info('ChatRooms', `Created ${roomType} room ${room.id} in workspace ${accountId}`);
+    this.logService.info('ChatRooms', `Created ${roomType} room ${room.id} in account ${accountId}`);
 
     const viewerUserId = creator.type === 'user' ? creator.id : '';
     const detail = await this.getRoomDetail(room.id, viewerUserId);
@@ -509,11 +509,11 @@ export class RoomCrudService {
    * DM dedup is gone — users keeping multiple topic-tagged threads with the
    * same person rely on naming to tell them apart.
    *
-   * 워크스페이스 대조는 참여자 검사와 **별개로** 필요하다(티켓 de4d27e9).
+   * 계정 대조는 참여자 검사와 **별개로** 필요하다(티켓 de4d27e9).
    * `chat_room_participants` 행은 한 번 생기면 남으므로 "이 방의 active 참여자인가"
-   * 만으로는 경계가 지속되지 않는다 — 지난/다른 워크스페이스 방의 참여자 행을 들고
+   * 만으로는 경계가 지속되지 않는다 — 지난/다른 계정 방의 참여자 행을 들고
    * 있는 호출자가 지금 바인딩된 스코프와 무관하게 그 방 이름을 바꿀 수 있었다.
-   * 방 이름은 사이드바·헤더에 그대로 노출되므로 타 워크스페이스에 대한 교란 수단이
+   * 방 이름은 사이드바·헤더에 그대로 노출되므로 타 계정에 대한 교란 수단이
    * 된다. 검사 순서도 참여자 게이트보다 **앞**이어야 한다 — 뒤에 두면 참여자 행을
    * 가진 호출자에게 403/404 차이로 방의 존재가 드러난다.
    */
@@ -525,7 +525,7 @@ export class RoomCrudService {
     actorType: string = 'user',
   ): Promise<void> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    // 워크스페이스가 다르면 존재 자체를 알려주지 않는다 — `setOpenJoin` / `requireRoomAccess` 와 같은 규칙.
+    // 계정가 다르면 존재 자체를 알려주지 않는다 — `setOpenJoin` / `requireRoomAccess` 와 같은 규칙.
     if (!room || room.account_id !== accountId) {
       throw makeError(404, 'Room not found');
     }
@@ -559,8 +559,8 @@ export class RoomCrudService {
    * `clearRoomForUser` 가 모두 같은 규약이고, `chat_rooms` 에는 생성자 컬럼이 아예 없어
    * "생성자만" 은 구현할 수단이 없다(생성자는 참여자 행 하나로만 남는다). 관리자 전용으로
    * 올리는 쪽도 맞지 않는다 — 자기가 만든 그룹 방을 열어두는 것은 일상적인 채팅 설정이지
-   * 운영 권한이 아니다. 방을 여는 것으로 넘어가는 것은 **같은 워크스페이스 안의 읽기·발화**
-   * 뿐이고 워크스페이스 경계는 아래에서 그대로 강제된다.
+   * 운영 권한이 아니다. 방을 여는 것으로 넘어가는 것은 **같은 계정 안의 읽기·발화**
+   * 뿐이고 계정 경계는 아래에서 그대로 강제된다.
    *
    * 거부하는 두 부류:
    *
@@ -586,7 +586,7 @@ export class RoomCrudService {
     actorType: string = 'user',
   ): Promise<{ room_id: string; open_join: boolean }> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    // 워크스페이스가 다르면 존재 자체를 알려주지 않는다 — `requireRoomAccess` 와 같은 규칙.
+    // 계정가 다르면 존재 자체를 알려주지 않는다 — `requireRoomAccess` 와 같은 규칙.
     if (!room || room.account_id !== accountId) {
       throw makeError(404, 'Room not found');
     }
@@ -607,11 +607,11 @@ export class RoomCrudService {
 
       const memberIds = await this.membership.getRoomMemberIds(roomId);
       const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
-      // 이 이벤트만 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 나간다
+      // 이 이벤트만 방 구성원이 아니라 **계정의 모든 사용자**에게 나간다
       // (티켓 995a9519 리뷰 라운드1 P1-2, `chatRoomUpdateFilter` 참조). 변경의 실제
       // 영향 대상이 비참여자이기 때문이다 — ON 이면 방이 새로 보여야 하고 OFF 면
       // 사이드바에서 사라져야 한다. `account_id` 는 수신 측이 "지금 보고 있는
-      // 워크스페이스의 일인가"를 판정하는 근거이므로 반드시 함께 싣는다.
+      // 계정의 일인가"를 판정하는 근거이므로 반드시 함께 싣는다.
       // member_ids / agent_member_ids 는 다른 update_type 과 봉투 모양을 맞추기 위해
       // 그대로 둔다(이 타입에서는 필터가 쓰지 않는다).
       activityEvents.emit('chat_room_update', {
@@ -630,16 +630,16 @@ export class RoomCrudService {
 
   /**
    * Account-wide observer view: every active room regardless of caller's
-   * membership. Used by the chat page's "All workspace rooms" toggle so a
+   * membership. Used by the chat page's "All account rooms" toggle so a
    * human can monitor agent-to-agent conversations they aren't a participant
    * in. Does not compute per-user unread counts (caller may not be a member).
    */
-  async listAllWorkspaceRooms(accountId: string): Promise<any[]> {
+  async listAllAccountRooms(accountId: string): Promise<any[]> {
     // Same action_id IS NULL filter as listRooms — observer view also wants to
     // skip Action-Run rooms because they belong to the Actions surface, and
     // orchestration rooms because they belong to the Mission detail view.
     const rooms = await this.roomRepo.createQueryBuilder('r')
-      .where('r.account_id = :wsId', { wsId: accountId })
+      .where('r.account_id = :accountId', { accountId: accountId })
       .andWhere('r.action_id IS NULL')
       .andWhere('r.orchestration_mission_id IS NULL')
       .orderBy('r.last_message_at', 'DESC')

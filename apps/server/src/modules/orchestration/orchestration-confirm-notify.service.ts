@@ -278,7 +278,7 @@ export class OrchestrationConfirmNotifyService {
    *
    * 에이전트가 MCP `create_orchestration_mission` 으로 만든 미션은 사람 소유자가 아예
    * 없다(`created_by` 가 agent id). 그 미션의 게이트도 사람이 답해야만 열리므로 여기서
-   * 끊으면 티켓이 고치려는 침묵이 그대로 남는다 — 그래서 워크스페이스의 owner/member 로
+   * 끊으면 티켓이 고치려는 침묵이 그대로 남는다 — 그래서 계정의 owner/member 로
    * 넓힌다. 넓혀도 실제 소음은 작다: 채널 바인딩이 없는 사용자는 `dispatchForUser` 가
    * 그 자리에서 no-op 이라 아무 데도 가지 않는다.
    */

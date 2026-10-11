@@ -77,9 +77,9 @@ test('behind가 정확히 1이면 단수형("1 commit", commits 아님)을 쓴�
 
 test('git 접근 실패(freshness_error)는 behind/ahead가 null이어도 detail에 원인을 보여준다', () => {
   const badge = freshnessBadge({
-    status: 'ready', indexedAt: '2026-08-01T00:00:00.000Z', commit: 'abcdef1234567', behind: null, ahead: null, dirtyRatio: 0.1, freshnessError: 'Resource not found in workspace',
+    status: 'ready', indexedAt: '2026-08-01T00:00:00.000Z', commit: 'abcdef1234567', behind: null, ahead: null, dirtyRatio: 0.1, freshnessError: 'Resource not found in account',
   });
-  assert.equal(badge.detail, 'Unable to check current HEAD (Resource not found in workspace)');
+  assert.equal(badge.detail, 'Unable to check current HEAD (Resource not found in account)');
 });
 
 test('dirtyRatioToFreshPercent은 반올림한 정수 퍼센트를 반환한다', () => {

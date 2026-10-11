@@ -30,7 +30,7 @@ export interface MissionProject {
 
 /**
  * The mission's project, or null when it names none. A project id that does not
- * resolve inside the mission's workspace is treated as "no project" — the same
+ * resolve inside the mission's account is treated as "no project" — the same
  * stance `buildRunProvision` takes, so the prompt never describes a repo the
  * provisioner will not check out.
  */
@@ -40,7 +40,7 @@ export async function loadMissionProject(
 ): Promise<MissionProject | null> {
   const ref = normalizeRepoRef(mission.repo_ref);
   if (!ref?.project_id) return null;
-  const project = await projects.getInWorkspace(ref.project_id, mission.account_id);
+  const project = await projects.getInAccount(ref.project_id, mission.account_id);
   if (!project) return null;
   return {
     id: project.id,

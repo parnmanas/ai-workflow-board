@@ -46,7 +46,7 @@ test('client exposes direct management routes with Global/current-Account catalo
   const app = fs.readFileSync(path.join(ROOT, 'App.tsx'), 'utf8');
   const sidebar = fs.readFileSync(path.join(ROOT, 'components', 'Sidebar.tsx'), 'utf8');
   const management = fs.readFileSync(path.join(ROOT, 'components', 'AccountManagementPage.tsx'), 'utf8');
-  assert.doesNotMatch(app, /WorkspaceCatalogPage|function CatalogRedirect/);
+  assert.doesNotMatch(app, /AccountCatalogPage|function CatalogRedirect/);
   assert.match(app, /path="catalog" element={<GlobalRedirect to="functions"/);
   for (const kind of ['functions', 'resources', 'actions', 'qa', 'security', 'schedules']) {
     assert.match(app, new RegExp(`path="${kind}" element={<AccountManagementPage kind="${kind}"`));

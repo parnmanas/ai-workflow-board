@@ -48,7 +48,7 @@ describe('Credentials REST scope contract (Global / Account)', () => {
     await controller.create(
       {
         scope: 'board',
-        account_id: 'workspace-a',
+        account_id: 'account-a',
         name: 'Board credential',
         provider: 'github',
         credentials: { token: 'secret' },
@@ -73,8 +73,8 @@ describe('Credentials REST scope contract (Global / Account)', () => {
 
   it('list() returns the Account own credentials plus inherited globals, never another Account', async () => {
     for (const [body, req] of [
-      [{ account_id: 'workspace-a', name: 'Account credential', provider: 'github', credentials: { token: 'a' } }, memberReq],
-      [{ account_id: 'workspace-b', name: 'Other workspace credential', provider: 'github', credentials: { token: 'b' } }, memberReq],
+      [{ account_id: 'account-a', name: 'Account credential', provider: 'github', credentials: { token: 'a' } }, memberReq],
+      [{ account_id: 'account-b', name: 'Other account credential', provider: 'github', credentials: { token: 'b' } }, memberReq],
       [{ scope: 'global', name: 'Global credential', provider: 'github', credentials: { token: 'g' } }, adminReq],
     ]) {
       const res = response();
@@ -83,7 +83,7 @@ describe('Credentials REST scope contract (Global / Account)', () => {
     }
 
     const listRes = response();
-    await controller.list('workspace-a', undefined, undefined, undefined, listRes);
+    await controller.list('account-a', undefined, undefined, undefined, listRes);
     const names = listRes.body.map((row) => row.name).sort();
     assert.deepEqual(names, ['Account credential', 'Global credential']);
     assert.equal(listRes.body.find((r) => r.name === 'Global credential').scope, 'global');

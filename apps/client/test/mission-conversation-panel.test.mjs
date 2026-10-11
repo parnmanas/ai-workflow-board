@@ -339,7 +339,7 @@ test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다
       assert.deepEqual(
         joinCalls,
         [{ missionId: 'mission-1', accountId: 'ws-1' }],
-        '패널이 받은 미션·워크스페이스로 참여를 요청해야 한다',
+        '패널이 받은 미션·계정로 참여를 요청해야 한다',
       );
       assert.ok(
         view.container.querySelector('textarea'),

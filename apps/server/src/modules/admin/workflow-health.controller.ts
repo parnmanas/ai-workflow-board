@@ -19,7 +19,7 @@ import { AgentUsageService } from '../agents/agent-usage.service';
  *   - GET /api/admin/workflow-health/long-term-usage → all-time/장기 구간 누적 (rollup + live
  *                                                    merge, ticket 8d5c6f5d) — optional
  *                                                    ?from=&to= (YYYY-MM-DD, UTC-day aligned;
- *                                                    `from` 생략 = all-time). 항상 workspace
+ *                                                    `from` 생략 = all-time). 항상 account
  *                                                    스코프 필요 (ticket 090abc77)
  *
  * The main rollup degrades `token_usage` to null on a failing usage query

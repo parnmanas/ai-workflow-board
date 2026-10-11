@@ -31,7 +31,7 @@ Global 정의는 모든 account가 상속하므로, 한 테넌트가 전 테넌�
 
 ### Fork
 
-`POST /api/accounts/:wsId/skills/:skillId/fork` 는 global skill을 같은 slug로
+`POST /api/accounts/:accountId/skills/:skillId/fork` 는 global skill을 같은 slug로
 account에 복사한다. 그 순간부터 fork가 shadow하고, **그 아래의 global은 업스트림
 갱신을 계속 받는다.** global을 직접 고치는 것이 아니라 이게 커스터마이즈 경로다.
 
@@ -130,7 +130,7 @@ key·custom tag가 포함된 임의 YAML을 실행할 이유가 없다. 최상�
 | Account REST | `.../skills.controller.ts` |
 | Admin REST | `.../skill-registry.controller.ts` |
 | 런 manifest 고정 | `.../run-skill-snapshot.service.ts` |
-| 유일성 | `apps/server/src/entities/Skill.ts` 의 부분 유니크 인덱스 `uq_skills_global_slug` / `uq_skills_workspace_slug` (엔티티에 선언해야 synchronize 가 지우지 않는다) |
+| 유일성 | `apps/server/src/entities/Skill.ts` 의 부분 유니크 인덱스 `uq_skills_global_slug` / `uq_skills_account_slug` (엔티티에 선언해야 synchronize 가 지우지 않는다) |
 
 ## 테스트
 

@@ -443,7 +443,7 @@ test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKE
   assert.ok((await lstat(link)).isSymbolicLink(), 'projects is a symlink');
   assert.equal(await readlink(link), join(h.root, 'claude', 'projects'), 'linked to the operator home so existing sessions stay visible');
   const trust = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8'));
-  assert.equal(trust.projects[h.cwd].hasTrustDialogAccepted, true, 'workspace trust seeded for headless use');
+  assert.equal(trust.projects[h.cwd].hasTrustDialogAccepted, true, 'account trust seeded for headless use');
   await assert.rejects(statFile(join(home, '.credentials.json')), 'oauth token mode writes no credentials file');
 });
 
@@ -854,7 +854,7 @@ test('re-applying skips options already at the wanted value, and a resumed sessi
 // ─── 이 세션이 어떤 계정으로 도는가 ──────────────────────────────────────────────
 //
 // 어댑터가 `_auth/status_update` 로 자기 로그인 신원을 민다(claude-agent-acp · codex-acp 공통 확장).
-// 매니저는 거기에 **출처**(워크스페이스 Credential 인지 장비 운영자 로그인인지 — 어댑터는 모르는 사실)를
+// 매니저는 거기에 **출처**(계정 Credential 인지 장비 운영자 로그인인지 — 어댑터는 모르는 사실)를
 // 더해 상태로 올리고, history 의 live 에도 실어 화면이 다시 들어와도 볼 수 있게 한다.
 test('the adapter-reported account is relayed with the credential source the manager knows', async (t) => {
   const { cwd, server, runner } = await harness(t);
@@ -874,7 +874,7 @@ test('the adapter-reported account is relayed with the credential source the man
   await runner.handle(request('close', { session_id: sid }));
 });
 
-test('a session opened with a workspace credential reports source=credential', async (t) => {
+test('a session opened with a account credential reports source=credential', async (t) => {
   const { cwd, server, runner } = await harness(t, {
     credentialFetcher: async () => ({ credential_id: 'cred-auth', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-xxxxxxxxxxxx' } }),
   });

@@ -6,7 +6,7 @@
 //
 // 이 파일이 검증하는 것은 "코드에 그런 줄이 있다"가 아니라 **사용자가 실제로 보내지는가**
 // 이므로, 메시지 전송과 참여는 전부 진짜 REST 엔드포인트를 세션 토큰으로 때린다 —
-// 인증 · 권한 가드 · 워크스페이스 헤더 · 컨트롤러 배선이 전부 경로에 포함된다.
+// 인증 · 권한 가드 · 계정 헤더 · 컨트롤러 배선이 전부 경로에 포함된다.
 //
 // 완료 기준 대응:
 //   1. 생성자가 mission 시작 직후 바로 메시지를 보낼 수 있다(403 없음).
@@ -576,11 +576,11 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     false,
     '참여자가 된 사용자의 방 목록에도 mission 방은 없다 — 사이드바가 미션으로 뒤덮이지 않는다',
   );
-  const observed = await rooms.listAllWorkspaceRooms(ws.id);
+  const observed = await rooms.listAllAccountRooms(ws.id);
   assert.equal(
     observed.some((r) => r.id === started.room_id),
     false,
-    '워크스페이스 관전 목록에서도 제외된다',
+    '계정 관전 목록에서도 제외된다',
   );
 
   // ── 6. step room 은 사람 참여 대상이 아니다 ───────────────────────────────

@@ -37,12 +37,12 @@ export function registerSkillProposalTools(server: McpServer, ctx: ToolContext):
       const agent = await resolveCallerIdentityRow(ctx.dataSource, caller.agentId);
       if (!agent) return err('The runtime Agent identity was not found.');
       const accountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
-      if (!accountId) return err('The runtime API key is not scoped to a workspace.');
+      if (!accountId) return err('The runtime API key is not scoped to a account.');
       if (skill_id) {
         const target = await ctx.dataSource.getRepository(Skill).findOne({
           where: { id: skill_id, account_id: accountId },
         });
-        if (!target) return err('Target skill does not exist in the runtime Agent workspace.');
+        if (!target) return err('Target skill does not exist in the runtime Agent account.');
       }
       try {
         const canonical = canonicalizeSkillContent(body, support_files);

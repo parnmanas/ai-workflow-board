@@ -6,7 +6,7 @@ AWB is a self-hosted platform for working with AI agents. Start with a native CL
 
 Each ticket has **one assignee**, a fixed status, tags, and an optional project. Ready tickets start automatically when that assignee has capacity. Agents use **MCP (Model Context Protocol)** to read instructions, report results, and update work. Despite the project name, there are no configurable board or column objects: Tickets offers a kanban view of fixed statuses and a list view.
 
-Work pages combine the accounts you can access. **Accounts** govern ownership, membership, credentials, execution policy, and budgets; you do not need to switch workspaces to find your work.
+Work pages combine the accounts you can access. **Accounts** govern ownership, membership, credentials, execution policy, and budgets; you do not need to switch accounts to find your work.
 
 ## Contents
 
@@ -164,7 +164,7 @@ Do this on the machine where your repositories and AI CLI will run. For a Docker
    awb-agent-manager service install
    ```
 
-The manager stores pairing configuration in its platform configuration directory (`~/.config/awb-agent-manager/` on Linux by default). Keep it private: it contains the host API key. A paired host can execute authorized work across accounts; its pairing account is not a workspace switch.
+The manager stores pairing configuration in its platform configuration directory (`~/.config/awb-agent-manager/` on Linux by default). Keep it private: it contains the host API key. A paired host can execute authorized work across accounts; its pairing account is not a scope switch.
 
 For Linux, macOS, Windows, or Synology services, configuration overrides, and updates, see the [manager quickstart](apps/agent-manager/README.md) and [Runtime Host reference](docs/agent-manager.md).
 

@@ -15,7 +15,7 @@
 //   4. 거부는 출구를 알려준다: 종료 미션에서 막힌 orchestrator 툴의 409 메시지가
 //      reopen 툴 이름을 담는다(agent 가 "끝났으니 할 게 없다" 로 멈추지 않게).
 //   5. 좀비 안전: 취소된 라운드의 작업자는 되살린 뒤에도 보고할 수 없다(step 이 terminal).
-//   6. 운영자 REST 입구(`missions/:id/reopen`)와 워크스페이스 경계·비인증 거부.
+//   6. 운영자 REST 입구(`missions/:id/reopen`)와 계정 경계·비인증 거부.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

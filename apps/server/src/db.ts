@@ -94,7 +94,7 @@ export function isSqljsDirty(): boolean {
  * save/insert/update/remove, QueryBuilder .delete()/.update(), AND raw
  * dataSource.query() calls — so unlike an entity-level afterInsert/afterUpdate
  * subscriber it can't miss bulk/raw writes (e.g. the retention DELETEs or the
- * boot-time manager-workspace strip). It mirrors the driver's own isDirty
+ * boot-time manager-account strip). It mirrors the driver's own isDirty
  * heuristic: anything that isn't a SELECT/PRAGMA is treated as a mutation.
  * Marking dirty too eagerly only ever costs a redundant flush — never data loss.
  *
@@ -645,8 +645,8 @@ export function startOntologySqljsAutoFlush(
  * 온톨로지 sql.js DataSource의 row-count ceiling(ticket 6ca4894a,
  * REVIEW-NOTES.md S1의 defense-in-depth 완화책 — 위 듀얼 DataSource
  * 분리는 온톨로지 증가가 AWB 나머지를 블로킹하는 것은 막지만, 한
- * 워크스페이스의 온톨로지 그래프가 같은 sql.js 파일을 공유하는 다른
- * 워크스페이스의 온톨로지 그래프 flush를 여전히 느리게 만들 수 있다).
+ * 계정의 온톨로지 그래프가 같은 sql.js 파일을 공유하는 다른
+ * 계정의 온톨로지 그래프 flush를 여전히 느리게 만들 수 있다).
  * sql.js/dev 전용 — Postgres는 매 flush마다 전체 파일을 재export하는
  * 단계 자체가 없으므로 이 ceiling이 적용되지 않는다.
  *
@@ -656,12 +656,12 @@ export function startOntologySqljsAutoFlush(
  * 950,000 rows)을 채운 뒤 실제 saveDatabase() export 시간을 측정 — 536.2
  * MB 파일에 676ms wall-clock(2026-08-22 측정, sql.js@1.12.0, 재현 명령은 그
  * 스크립트 헤더 참고). 1,000,000은 설계된 워스트케이스 전체가 ceiling에
- * 안 걸리고 여유 있게 끝나도록 하면서, 그 이상의 폭주 증가(한 워크스페이스에
+ * 안 걸리고 여유 있게 끝나도록 하면서, 그 이상의 폭주 증가(한 계정에
  * 여러 대형 저장소, 재삽입 버그 등)는 export 비용이 무한정 커지게 두는
  * 대신 실측된 서브초 단위 flush 비용 안으로 제한한다.
  *
  * 이 상수는 숫자만 제공한다 — enforcement(DESIGN.md의 "마지막 스냅샷 기준
- * 읽기 전용으로 격하, 또는 해당 워크스페이스의 기능 비활성화")는 여기서
+ * 읽기 전용으로 격하, 또는 해당 계정의 기능 비활성화")는 여기서
  * 의도적으로 구현하지 않는다. 이 티켓의 범위는 스키마 + DataSource
  * 분리이고, 이 ceiling은 온톨로지 대량 쓰기를 실제로 수행하는 티켓(추출
  * 워커)이나 온톨로지 읽기를 제공하는 티켓이 참조해야 할 값이지,

@@ -8,7 +8,7 @@
 //   2. agent 가 진짜 MCP 경로로 PNG 와 WebM 을 올려 메시지에 묶으면, step 세션 항목에
 //      첨부 메타가 실린다(바이트는 실리지 않는다 — 전사 한 페이지가 수십 MB 가 되면 안 된다).
 //   3. 바이트는 `steps/:id/attachments/:attId` 로 읽는다. 채팅 경로는 참여자 게이트라 step
-//      방에서는 사람이 못 읽는다. 다른 step 의 id 로는 404(방 앵커), 다른 워크스페이스도 404.
+//      방에서는 사람이 못 읽는다. 다른 step 의 id 로는 404(방 앵커), 다른 계정도 404.
 //   4. 미션 증거 갤러리(`missions/:id/evidence`)는 미디어만, step_key 와 함께, 최신순으로.
 //   5. 미션 상세의 step 에 `evidence_count` 가 실린다(레일 배지).
 
@@ -193,7 +193,7 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   const withLog = session.items.find((i) => (i.attachments ?? []).some((a) => a.file_name === 'build.log'));
   assert.equal(withLog.attachments[0].is_media, false, '로그 파일은 미디어가 아니다');
 
-  logStep('바이트는 step 첨부 경로로만 읽히고, 방 앵커와 워크스페이스 경계를 지킨다');
+  logStep('바이트는 step 첨부 경로로만 읽히고, 방 앵커와 계정 경계를 지킨다');
   const bytes = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?account_id=${ws.id}`, { headers: H });
   assert.equal(bytes.status, 200);
   const body = await bytes.json();

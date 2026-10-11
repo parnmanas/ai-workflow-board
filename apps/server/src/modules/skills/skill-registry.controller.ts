@@ -15,8 +15,8 @@ import { BuiltinSkillPackService } from './builtin-skill-pack.service';
  *
  * Separate from SkillsController on purpose. That controller is mounted under
  * `/api/accounts/:accountId/...` and is reachable by anyone with
- * MANAGE_AGENTS in a workspace; global definitions are inherited by EVERY
- * workspace, so mutating them is gated on ADMIN_ACCESS instead — the
+ * MANAGE_AGENTS in a account; global definitions are inherited by EVERY
+ * account, so mutating them is gated on ADMIN_ACCESS instead — the
  * "Global 쓰기는 admin 권한으로 제한" rule in docs/catalog-scopes.md.
  */
 @ApiTags('skills')
@@ -40,7 +40,7 @@ export class SkillRegistryController {
 
   @Get('skills/:skillId')
   async getGlobal(@Param('skillId') skillId: string, @Res() res: Response) {
-    // Empty workspace id = admin/global read context.
+    // Empty account id = admin/global read context.
     return this.respond(res, () => this.skills.get('', skillId));
   }
 

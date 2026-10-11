@@ -4,7 +4,7 @@
  * ## 왜 계산된 projection 만으로는 부족한가
  *
  * `launch-spec.ts` 는 heartbeat 시점에 알 수 있는 것만으로 "다음 spawn 사양"을
- * **추정**한다. 그런데 디스패치 시점 입력(보드/워크스페이스 harness, 티켓 effort
+ * **추정**한다. 그런데 디스패치 시점 입력(보드/계정 harness, 티켓 effort
  * preset, 티켓별 `cli_runtime_profile`)은 권한 플래그·모델·프로파일 args/env/cwd
  * 를 **덮을 수 있다**. 그래서 추정값만 보여 주면 화면의 명령이 바로 다음 실행과
  * 다를 수 있고, `varies_per_dispatch` 문구는 그 차이를 고지할 뿐 없애지 못한다.
@@ -66,7 +66,7 @@ export interface RecordedLaunchSpec {
   context: {
     ticket_id: string | null;
     role: string | null;
-    /** 보드/워크스페이스 harness 가 적용됐나 (적용된 키 이름). */
+    /** 보드/계정 harness 가 적용됐나 (적용된 키 이름). */
     harness_keys: string[];
     /** 티켓 effort preset 이 만든 최종 effort 값. */
     effort: string | null;

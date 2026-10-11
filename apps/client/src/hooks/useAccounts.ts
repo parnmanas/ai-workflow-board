@@ -28,9 +28,9 @@ export function useAccounts() {
   }, [refresh]);
 
   const createAccount = async (name: string, description = '') => {
-    const ws = await api.createAccount({ name, description });
+    const account = await api.createAccount({ name, description });
     await refresh();
-    return ws;
+    return account;
   };
 
   const updateAccount = async (id: string, data: { name?: string; description?: string }) => {

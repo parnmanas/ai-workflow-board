@@ -1,5 +1,5 @@
 // SSRF 방어 — Function `http` 실행기(workflow-functions.service.ts)가 호출하는
-// 아웃바운드 요청 전용 가드. config.url/method/headers/body는 워크스페이스
+// 아웃바운드 요청 전용 가드. config.url/method/headers/body는 계정
 // 스코프 에이전트가 자유롭게 지정한 Function 정의에서 오므로, 클라우드 메타데이터
 // (169.254.169.254)나 내부 서비스로 향하는 요청과 그 응답 본문 전체 노출(full-read
 // SSRF)을 막는다. (티켓 f177aeb3 H1, 리뷰 승인 차단 반영)

@@ -44,7 +44,7 @@ export function upsertTerminal(list: TerminalSummary[], next: TerminalSummary): 
   return [...rest, next].sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
-export function terminalPath(wsId: string, managerId: string, terminalId: string): string {
+export function terminalPath(accountId: string, managerId: string, terminalId: string): string {
   return `/terminals/${managerId}/${terminalId}`;
 }
 

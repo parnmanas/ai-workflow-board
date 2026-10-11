@@ -131,7 +131,7 @@ tick 은 `SecurityRunReaperService`/`QaScheduleService` 패턴 그대로:
 
 사용자 Profile/Schedule 목록은 접근 가능한 Account를 합친다. 새 스케줄은
 `account_id`의 계정에 귀속되며 상세·수정·실행 권한과 credential·정책·예산은 실제
-소유 계정으로 검사한다. 구 `workspace_id`는 입력 호환 alias다.
+소유 계정으로 검사한다. 구 `account_id`는 입력 호환 alias다.
 
 ```
 # 수동 전체 점검 (batch)

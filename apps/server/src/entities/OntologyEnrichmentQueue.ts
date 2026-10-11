@@ -11,9 +11,9 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 // 완료조건 3)로만 소비된다 — cooldown_until 갱신 자체는 실제 배선.
 //
 // 원본 컬럼 목록은 research-incremental.md의 (node_id, priority, staled_at,
-// cooldown_until) 그대로이되, graph_id를 추가했다 — 워크스페이스/그래프별
+// cooldown_until) 그대로이되, graph_id를 추가했다 — 계정/그래프별
 // 텔레메트리 집계(REVIEW-NOTES.md S5: "log stale-queue size/age percentiles
-// per workspace over time")를 위해 graph_id 없이는 여러 그래프의 대기열이
+// per account over time")를 위해 graph_id 없이는 여러 그래프의 대기열이
 // 섞여 집계될 수밖에 없다.
 //
 // STORAGE: OntologyNode/Edge와 같은 자세 — sql.js에서는

@@ -4,7 +4,7 @@ import { tokens } from '../tokens';
 import { Button, Input, Select } from './common';
 
 // Agent harness editor (ticket 7122600c), rendered by Account Settings —
-// the workspace harness is shipped on every ticket dispatch in the workspace.
+// the account harness is shipped on every ticket dispatch in the account.
 // The raw harness_config JSON string from the server is parsed here; saving
 // hands the structured object (or null when every field is empty) to the
 // caller, which PATCHes it and re-fetches. Server-side zod is the validation
@@ -24,12 +24,12 @@ interface HarnessConfigEditorProps {
 // text) by appending it to the options at render time.
 const PERMISSION_MODE_OPTIONS = [
   { value: '', label: '(inherit / unset)' },
-  { value: 'auto', label: 'auto — Claude autonomous / Codex workspace write' },
+  { value: 'auto', label: 'auto — Claude autonomous / Codex account write' },
   { value: 'dontAsk', label: 'dontAsk — no clarification prompts' },
-  { value: 'acceptEdits', label: 'acceptEdits — allow workspace edits' },
+  { value: 'acceptEdits', label: 'acceptEdits — allow account edits' },
   { value: 'plan', label: 'plan — read-only' },
   { value: 'bypassPermissions', label: 'bypassPermissions — unrestricted' },
-  { value: 'manual', label: 'manual — Claude manual / Codex workspace write' },
+  { value: 'manual', label: 'manual — Claude manual / Codex account write' },
 ];
 
 export function parseHarnessConfigRaw(raw: string | null | undefined): HarnessConfig {

@@ -3,10 +3,10 @@
 // 순수 로직(필터 ⇄ URL, lane 위치 계산, 정렬)은 ticket-filters / ticket-kanban /
 // ticket-list-view-logic 테스트가 고정한다. 여기서는 그 조각들이 실제 페이지에서
 // 배선되는지를 프로덕션과 같은 provider 스택 위에서 확인한다:
-//   1. URL 필터가 GET /accounts/:wsId/tickets 쿼리로 나가고, 상태 필터에 맞는 lane 만 그린다
+//   1. URL 필터가 GET /accounts/:accountId/tickets 쿼리로 나가고, 상태 필터에 맞는 lane 만 그린다
 //   2. 상태 칩을 누르면 URL 이 바뀌고 새 쿼리로 다시 불러온다
 //   3. `?ticket=<id>` 가 상세 패널을 열고(GET /tickets/:id), 닫으면 파라미터가 사라진다
-//   4. 워크스페이스 dispatch_paused_at 이면 일시정지 배너가 보인다
+//   4. 계정 dispatch_paused_at 이면 일시정지 배너가 보인다
 //   5. List 보기 전환이 localStorage 에 남고 표로 그린다
 //   6. 예전 /boards/* 딥링크는 쿼리를 유지한 채 /tickets 로 리다이렉트된다
 //

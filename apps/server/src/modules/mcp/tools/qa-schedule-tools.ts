@@ -68,7 +68,7 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'list_qa_schedules',
-    'List reusable QA schedules in a workspace.',
+    'List reusable QA schedules in a account.',
     {
       account_id: z.string().describe('Account ID (required)'),
     },

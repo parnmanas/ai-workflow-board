@@ -2,11 +2,11 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 import { Comment } from './Comment';
 import type { TicketStatus } from '../common/ticket-status';
 
-// A ticket lives in one workspace pool, classified by `tags` and an optional
+// A ticket lives in one account pool, classified by `tags` and an optional
 // `project_id`, and is worked end-to-end by ONE assignee agent (docs/tickets.md).
 // Indexes cover the hot reads: the Tickets page lists root tickets by
 // (account_id, status), child lookups filter by parent_id, the dispatcher
-// scans in_progress/todo per workspace, the archiver filters archived_at.
+// scans in_progress/todo per account, the archiver filters archived_at.
 @Entity('tickets')
 @Index('idx_tickets_ws_status', ['account_id', 'status'])
 @Index('idx_tickets_parent', ['parent_id'])
@@ -105,7 +105,7 @@ export class Ticket {
 
   // Optional pointer to the next ticket to pick up once this one is done. When
   // this ticket enters `done`, TicketDispatchService moves a backlog next
-  // ticket to `todo` (and so queues it for its assignee). Same-workspace +
+  // ticket to `todo` (and so queues it for its assignee). Same-account +
   // no-self-link guarded at write time. Empty / null disables the chain.
   @Column({ type: 'varchar', nullable: true, default: null })
   next_ticket_id: string | null;

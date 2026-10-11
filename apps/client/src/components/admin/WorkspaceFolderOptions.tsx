@@ -133,8 +133,8 @@ interface WorkspaceFolderOptionsProps {
   /** Action 은 cold/warm 빌드 개념이 없다(QaScenario.build_mode 상당 컬럼 없음) —
    *  build_mode 셀렉트를 숨긴다. 기본 true(QA/Security 는 계속 표시). */
   showBuildMode?: boolean;
-  /** 프로젝트 목록을 조회할 workspace(티켓 af31e92d). 생략하면 다른 admin 화면들과
-   *  동일하게 활성 workspace 로 폴백한다. */
+  /** 프로젝트 목록을 조회할 account(티켓 af31e92d). 생략하면 다른 admin 화면들과
+   *  동일하게 활성 account 로 폴백한다. */
   accountId?: string;
 }
 
@@ -151,7 +151,7 @@ const linkButton: React.CSSProperties = {
 };
 
 interface RepoRefPickerProps {
-  /** 프로젝트 목록 조회에 쓸 workspace. 빈 문자열이면 조회를 건너뛴다. */
+  /** 프로젝트 목록 조회에 쓸 account. 빈 문자열이면 조회를 건너뛴다. */
   accountId: string;
   state: RepoRefFormState;
   onChange: (patch: Partial<RepoRefFormState>) => void;
@@ -237,7 +237,7 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
     ...visibleProjects.map((p) => ({ value: p.id, label: p.repo_url ? `${p.name} · ${p.repo_url}` : p.name })),
   ];
 
-  // 목록을 못 쓰는 상태(권한 없음/조회 실패/워크스페이스에 프로젝트가 없음)
+  // 목록을 못 쓰는 상태(권한 없음/조회 실패/계정에 프로젝트가 없음)
   // 에서는 id 를 직접 넣을 수 있어야 한다.
   const projectListUnusable = !projectsLoading && (Boolean(projectsError) || projects.length === 0);
   const branchSelectable = Boolean(selectedProjectId) && !branchesLoading && !branchesError;

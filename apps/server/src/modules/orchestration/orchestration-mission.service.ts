@@ -506,33 +506,33 @@ export class OrchestrationMissionService {
     // alert rather than crossing that boundary for one notify call.
     await enforceRunBudget({ dataSource: this.dataSource, logger: this.logService }, 'orchestration', accountId);
 
-    // 이 workspace 소유 팀 OR 글로벌 팀(티켓 1b62b437)에 매칭된다 — 글로벌 팀의
-    // 로스터는 workspace 비종속이지만, 이 팀이 실행하는 MISSION은 여전히 호출자가
-    // 해석한 workspace에 귀속/과금된다.
+    // 이 account 소유 팀 OR 글로벌 팀(티켓 1b62b437)에 매칭된다 — 글로벌 팀의
+    // 로스터는 account 비종속이지만, 이 팀이 실행하는 MISSION은 여전히 호출자가
+    // 해석한 account에 귀속/과금된다.
     const team = await this.teamRepo.findOne({
       where: visibleScopeWhere<OrchestrationTeam>(accountId, { id: input.team_id }),
     });
-    if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
+    if (!team) throw orchestrationError(404, 'orchestration team not found in account');
     if (!team.orchestrator_agent_id) {
       throw orchestrationError(400, `team "${team.name}" has no orchestrator agent set`);
     }
-    // 글로벌 팀의 allowed_workspace_ids를 권위 있게 강제하는 지점 — "MANAGE_ACTIONS을
-    // 가진 아무 호출자"와 "팀이 허가받은 적 없는 workspace에 미션을 과금"을 가르는
+    // 글로벌 팀의 allowed_account_ids를 권위 있게 강제하는 지점 — "MANAGE_ACTIONS을
+    // 가진 아무 호출자"와 "팀이 허가받은 적 없는 account에 미션을 과금"을 가르는
     // 유일한 게이트(티켓 1b62b437). create_orchestration_mission의 사전 검사만이
     // 아니라 여기에도 있어야, team-scope 검사가 따로 없는 REST/human 경로
     // (POST /orchestration/missions)에도 똑같이 적용된다 — 안 그러면 그 컨트롤러는
-    // 글로벌 팀에 대해 호출자가 준 workspace_id를 아무 검증 없이 그대로 통과시킨다.
+    // 글로벌 팀에 대해 호출자가 준 account_id를 아무 검증 없이 그대로 통과시킨다.
     if (team.account_id === null) {
       const allowed = Array.isArray(team.allowed_account_ids) ? team.allowed_account_ids : [];
       if (allowed.length === 0) {
         throw orchestrationError(
           409,
           `team "${team.name}" is global but has no allowed accounts configured — a human operator must ` +
-            `set the team's workspace allow-list before it can create missions.`,
+            `set the team's account allow-list before it can create missions.`,
         );
       }
       if (!allowed.includes(accountId)) {
-        throw orchestrationError(400, `account_id "${accountId}" is not on team "${team.name}"'s allowed workspace list.`);
+        throw orchestrationError(400, `account_id "${accountId}" is not on team "${team.name}"'s allowed account list.`);
       }
     }
     if (input.orchestrator_agent_id && input.orchestrator_agent_id !== team.orchestrator_agent_id) {
@@ -654,7 +654,7 @@ export class OrchestrationMissionService {
         );
       }
     }
-    // 브리핑(title/objective/context/criteria/method/workspace/post-actions)은
+    // 브리핑(title/objective/context/criteria/method/account/post-actions)은
     // orchestrator가 브리핑되기 전, draft 상태일 때만 편집 가능하다. 미션
     // 프롬프트가 이미 전송된 뒤에 여기서 편집하면 orchestrator가 들은 내용과
     // UI가 보여주는 내용이 조용히 어긋난다 — orchestrator는 그 편집을 알 방법이
@@ -813,10 +813,10 @@ export class OrchestrationMissionService {
    * 이번 미션에서만 함께 쓸 임시 멤버 목록을 검증·정규화한다.
    *
    * 팀 슬롯과 같은 shape 검사 + 참조 검사를 수행한다: Host 실존, credential이
-   * 미션 workspace 에서 보이는지, backend profile 실존. 실행 identity
+   * 미션 account 에서 보이는지, backend profile 실존. 실행 identity
    * (`agent_id`)는 여기서 확정해 저장하므로, 이후 검증·디스패치는 팀 멤버와
-   * 같은 코드로 탄다. 미션 workspace 기준으로 검사하는 이유: 글로벌 팀의
-   * 미션은 호출자가 해석한 workspace 에 귀속되므로, 그 workspace 의 credential
+   * 같은 코드로 탄다. 미션 account 기준으로 검사하는 이유: 글로벌 팀의
+   * 미션은 호출자가 해석한 account 에 귀속되므로, 그 account 의 credential
    * 을 쓰는 임시 멤버가 정당하다(팀 슬롯의 team-scope 검사와 다른 지점이다).
    */
   private async normalizeExtraMembers(input: unknown, missionAccountId: string): Promise<MissionExtraMember[]> {
@@ -845,7 +845,7 @@ export class OrchestrationMissionService {
       if (credentialId) {
         const cred = await this.dataSource.getRepository(Credential).findOne({ where: { id: credentialId } });
         if (!cred || (cred.account_id !== null && cred.account_id !== missionAccountId)) {
-          throw orchestrationError(400, `extra_members[${i}]: credential ${credentialId} is not available to this mission's workspace`);
+          throw orchestrationError(400, `extra_members[${i}]: credential ${credentialId} is not available to this mission's account`);
         }
       }
       const profileId = String((spec as any).cli_runtime_profile || '');
@@ -912,7 +912,7 @@ export class OrchestrationMissionService {
    * Missions an agent belongs to, as orchestrator or team member — the
    * agent-scoped counterpart to `listMissions` (account-scoped, human/REST
    * use). No account_id input, same rationale as `listTeamsForAgent`: the
-   * caller may be a workspace-less manager identity. Defaults to non-terminal
+   * caller may be a account-less manager identity. Defaults to non-terminal
    * missions only (an orchestrator recovering a lost mission_id cares about
    * what's still open); pass status to widen it.
    */
@@ -1358,7 +1358,7 @@ export class OrchestrationMissionService {
    *
    * 채팅의 `chat-rooms/:room/attachments/:id` 는 참여자 게이트라 step 방에서는 어느
    * 운영자도 못 읽는다(세션 전사와 같은 이유). 여기서는 **첨부가 그 step 의 방에 속하는지**
-   * 를 앵커로 잡는다 — step 을 통해 워크스페이스 경계가 강제되고, 다른 방의 첨부 id 를
+   * 를 앵커로 잡는다 — step 을 통해 계정 경계가 강제되고, 다른 방의 첨부 id 를
    * 들이밀어도 방이 다르면 404 다. 미션 방의 첨부는 채팅 경로로 읽는다(사람이 참여자다).
    */
   async getStepAttachment(
@@ -1729,7 +1729,7 @@ export class OrchestrationMissionService {
   }> {
     const mission = await this.requireMission(missionId);
     if (accountId && mission.account_id !== accountId) {
-      throw orchestrationError(404, 'mission not found in this workspace');
+      throw orchestrationError(404, 'mission not found in this account');
     }
     const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
 

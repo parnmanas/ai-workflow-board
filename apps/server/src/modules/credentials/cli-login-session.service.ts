@@ -12,7 +12,7 @@ import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
-import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
+import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { catalogLoginCapable } from '../../common/cli-catalog';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -109,14 +109,14 @@ export class CliLoginSessionService {
       throw makeError(404, 'That Runtime Host instance is not currently online');
     }
     // 리뷰 지적(round 1): instance_id는 클라이언트가 그대로 제출하는 값이라,
-    // 이 검증이 없으면 다른 workspace의 manager instance_id를 직접 넣어
+    // 이 검증이 없으면 다른 account의 manager instance_id를 직접 넣어
     // command를 보낼 수 있었다. 전역(is_global) 세션은 자기 자신의
-    // listCliLoginInstances(account_id 없음)가 이미 모든 workspace의
-    // 인스턴스를 보여주는 것과 동일하게 어떤 instance든 허용하고, workspace
-    // 세션은 그 instance가 이 workspace에서 실제로 보이는 경우(전역
+    // listCliLoginInstances(account_id 없음)가 이미 모든 account의
+    // 인스턴스를 보여주는 것과 동일하게 어떤 instance든 허용하고, account
+    // 세션은 그 instance가 이 account에서 실제로 보이는 경우(전역
     // instance 포함)에만 허용한다.
-    if (!args.isGlobal && !agentIsVisibleInWorkspace(inst.account_id, args.accountId)) {
-      throw makeError(403, 'That Runtime Host instance is not available in this workspace');
+    if (!args.isGlobal && !agentIsVisibleInAccount(inst.account_id, args.accountId)) {
+      throw makeError(403, 'That Runtime Host instance is not available in this account');
     }
 
     const session = await this.sessionRepo.save(
@@ -152,7 +152,7 @@ export class CliLoginSessionService {
   async getSession(sessionId: string, accountId: string): Promise<CliLoginSession | null> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) return null;
-    // 글로벌 세션(is_global)은 어느 workspace에서든 조회 가능 — Credential의
+    // 글로벌 세션(is_global)은 어느 account에서든 조회 가능 — Credential의
     // "글로벌은 어디서든 read 가능" 규약과 동일.
     if (!session.is_global && session.account_id !== accountId) return null;
     return session;

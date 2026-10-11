@@ -6,7 +6,7 @@ import { MentionsService } from './mentions.service';
 
 /**
  * Unread @-mention inbox for the web UI. All endpoints are scoped by
- * `currentUser.id` — even if a caller supplies a workspace they don't belong
+ * `currentUser.id` — even if a caller supplies a account they don't belong
  * to, they only see their own unread rows, and every row's user_id is set
  * at dispatch time (tickets.controller / room-messaging.service).
  */
@@ -17,11 +17,11 @@ import { MentionsService } from './mentions.service';
 export class MentionsController {
   constructor(private readonly mentionsService: MentionsService) {}
 
-  @Get(['mentions/unread', 'accounts/:wsId/mentions/unread'])
-  async listUnread(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
+  @Get(['mentions/unread', 'accounts/:accountId/mentions/unread'])
+  async listUnread(@Param('accountId') accountId: string, @Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const ids = wsId ? [wsId] : ((req as any).accessibleAccountIds || []);
+    const ids = accountId ? [accountId] : ((req as any).accessibleAccountIds || []);
 
     const [items, count] = await Promise.all([
       this.mentionsService.listUnread(ids, currentUser.id),
@@ -30,12 +30,12 @@ export class MentionsController {
     return res.json({ count, items });
   }
 
-  @Post(['mentions/read-all', 'accounts/:wsId/mentions/read-all'])
-  async markAllRead(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
+  @Post(['mentions/read-all', 'accounts/:accountId/mentions/read-all'])
+  async markAllRead(@Param('accountId') accountId: string, @Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
-    const updated = await this.mentionsService.markAllRead(wsId ? [wsId] : ((req as any).accessibleAccountIds || []), currentUser.id);
+    const updated = await this.mentionsService.markAllRead(accountId ? [accountId] : ((req as any).accessibleAccountIds || []), currentUser.id);
     return res.json({ updated });
   }
 

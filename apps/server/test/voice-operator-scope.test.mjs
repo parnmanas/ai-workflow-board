@@ -1,9 +1,9 @@
 // Operator 의 사이트 전체 권한 — docs/voice-operator.md "권한".
 //
-// 매니저 키는 페어링 때 한 워크스페이스에 묶인다. operator 로 등록된 Agent Session 의 MCP 연결만 그
+// 매니저 키는 페어링 때 한 계정에 묶인다. operator 로 등록된 Agent Session 의 MCP 연결만 그
 // 묶음을 푼다. 고정하는 것:
-//   1. 등록 전에는 그 키로 다른 워크스페이스를 다룰 수 없다(워크스페이스 검사 도구가 거부한다).
-//   2. 등록되면 **이미 열려 있던 MCP 세션도** 다음 요청부터 다른 워크스페이스를 다룬다.
+//   1. 등록 전에는 그 키로 다른 계정를 다룰 수 없다(계정 검사 도구가 거부한다).
+//   2. 등록되면 **이미 열려 있던 MCP 세션도** 다음 요청부터 다른 계정를 다룬다.
 //   3. 같은 키라도 다른 세션 id 의 연결은 여전히 묶여 있다 — 그 세션이 operator 로 따로 등록되기 전까지.
 //   4. operator 가 여럿이면 각자 풀리고, 하나를 해제하면 그 하나만 곧바로 다시 묶인다(캐시를 기다리지 않는다).
 //
@@ -39,10 +39,10 @@ test('registered operator sessions manage other accounts; nothing else on the ho
   const operator = sessionClient('s-operator');
   const bystander = sessionClient('s-other');
   const touchOther = (client, description) => client.callTool('update_account', { account_id: other.id, description });
-  const denied = (r) => JSON.stringify(r).includes('does not belong to this workspace');
+  const denied = (r) => JSON.stringify(r).includes('does not belong to this account');
 
-  // 1. 지정 전: 페어링 워크스페이스 밖은 못 다룬다.
-  assert.ok(denied(await touchOther(operator, 'before')), 'bound to the pairing workspace before pinning');
+  // 1. 지정 전: 페어링 계정 밖은 못 다룬다.
+  assert.ok(denied(await touchOther(operator, 'before')), 'bound to the pairing account before pinning');
 
   // 2. 등록 → 이미 열린 MCP 세션도 다음 요청부터 풀린다.
   const register = (name, sessionId) => fetch(`${base}/api/voice/operators`, {
@@ -52,7 +52,7 @@ test('registered operator sessions manage other accounts; nothing else on the ho
   const jarvis = await register('Jarvis', 's-operator');
   assert.equal(jarvis.status, 201);
   const lifted = await touchOther(operator, 'set by the operator');
-  assert.ok(!denied(lifted), `operator may manage another workspace: ${JSON.stringify(lifted)}`);
+  assert.ok(!denied(lifted), `operator may manage another account: ${JSON.stringify(lifted)}`);
   const ws = await app.get(getDataSourceToken()).getRepository('Account').findOneBy({ id: other.id });
   assert.equal(ws.description, 'set by the operator');
 

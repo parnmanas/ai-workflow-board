@@ -91,7 +91,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const activityService = app.get(modules.ActivityService);
   const ticketService = app.get(TicketService);
 
-  step('Seed workspace + agent');
+  step('Seed account + agent');
   const ws = await createAccount(app, modules.getDataSourceToken, 'on-done');
   const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'hook-target' });
   // P4c-4: hook dispatch 용 spec (아래 모든 createAction 에 전달).

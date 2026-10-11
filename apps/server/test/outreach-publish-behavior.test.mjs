@@ -343,7 +343,7 @@ test('deploy_post_mode=auto posts new on the first release, replies on a later o
   } finally { await dataSource.destroy(); }
 });
 
-test('a GLOBAL deployment (account_id=null) never publishes to any workspace channel (fail-closed)', async () => {
+test('a GLOBAL deployment (account_id=null) never publishes to any account channel (fail-closed)', async () => {
   const dataSource = await setupDb();
   try {
     const cred = await seedCredential(dataSource);
@@ -459,7 +459,7 @@ test('approve() with a MISMATCHED channelId 404s and makes ZERO connector calls'
   try {
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval', deploy_post_mode: 'new_post' });
-    // Same workspace, deploy_post_mode='off' so it is never itself a deploy
+    // Same account, deploy_post_mode='off' so it is never itself a deploy
     // target — its only role here is to supply a channel id that does NOT
     // own the draft below.
     const otherChannel = await seedChannel(dataSource, cred.id, { name: 'other channel', deploy_post_mode: 'off' });

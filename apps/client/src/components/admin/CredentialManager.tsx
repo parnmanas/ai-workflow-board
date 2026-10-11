@@ -399,7 +399,7 @@ export default function CredentialManager({
       if (editCred) {
         await api.updateCredential(editCred.id, {
           scope: formScope,
-          // Doubles as the ownership proof for a workspace credential and the
+          // Doubles as the ownership proof for a account credential and the
           // destination when a global one is narrowed — see the server's
           // update() doc comment.
           account_id: editCred.account_id ?? effectiveWsId,

@@ -49,7 +49,7 @@ export function publicProfile(row: ClaudeBackendProfile) {
 }
 
 /**
- * Claude backend profile 은 인스턴스 전역 단일 스코프다 — 워크스페이스 배정
+ * Claude backend profile 은 인스턴스 전역 단일 스코프다 — 계정 배정
  * 계층은 존재하지 않는다(티켓 e616dbfc). 이 함수가 프로필 목록의 유일한
  * 소스이며, 검증·디스패치 해석 양쪽이 같은 목록을 본다.
  */
@@ -81,8 +81,8 @@ export async function validateCliRuntimeProfileSelection(
 
 /**
  * 디스패치 시점의 프로필 해석 — 체인은 **핀 → 전역 기본값** 2단계다.
- * 예전에 있던 워크스페이스 단계는 제거됐다(티켓 e616dbfc): 워크스페이스
- * 기본값이 그 워크스페이스의 무관한 claude 에이전트에게 새어나가던 경로가
+ * 예전에 있던 계정 단계는 제거됐다(티켓 e616dbfc): 계정
+ * 기본값이 그 계정의 무관한 claude 에이전트에게 새어나가던 경로가
  * 이 단계와 함께 사라진다.
  *
  * 상속 시맨틱은 그대로다 — `null`/undefined 핀은 다음 selector 로 넘어가고,

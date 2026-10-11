@@ -7,9 +7,9 @@
 // Host named by the spec's `manager_agent_id`. Critical to verify, through
 // the real REST comment path:
 //   - The mentioned assignee receives the event (with its RuntimeSpec).
-//   - No sibling agent in the same workspace receives it — not even when the
+//   - No sibling agent in the same account receives it — not even when the
 //     same comment @-tags the sibling (it is not on the ticket).
-//   - No agent in a different workspace receives it (account-scope safety).
+//   - No agent in a different account receives it (account-scope safety).
 //   - The mention is the wake-up: the human comment does not ALSO re-send an
 //     agent_trigger for the in_progress ticket (that would wake it twice).
 
@@ -92,7 +92,7 @@ test('comment_mention is delivered only to the mentioned assignee (account-scope
   assert.equal(
     foreignVA.mentionsFor(ticket.id).length,
     0,
-    'cross-workspace agent must not see mention',
+    'cross-account agent must not see mention',
   );
   assert.equal(
     alphaVA.triggersFor(ticket.id).filter((tr) => tr.trigger_source === 'comment').length,

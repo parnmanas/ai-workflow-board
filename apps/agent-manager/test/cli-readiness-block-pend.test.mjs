@@ -1,8 +1,8 @@
-// Integration test — CLI workspace-trust / provider-auth dispatch preflight
+// Integration test — CLI account-trust / provider-auth dispatch preflight
 // (ticket 48aeab6e).
 //
 // Background: a planner dispatch repeatedly failed before doing any real
-// work because the checked-out CLI workspace wasn't trust-approved and/or the
+// work because the checked-out CLI account wasn't trust-approved and/or the
 // provider OAuth session was expired with no refresh token, while the
 // assignee sat idle across multiple supervisor cycles. This proves the fix
 // end-to-end through the REAL EventDispatcher (mirrors
@@ -115,7 +115,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
-  // ticket 152e3606: bypassPermissions 티켓 디스패치는 워크스페이스 trust를
+  // ticket 152e3606: bypassPermissions 티켓 디스패치는 계정 trust를
   // fire-and-forget으로 시딩한다 — 임시 cli-home 디렉터리를 지우기 전에
   // 그 백그라운드 쓰기를 먼저 드레인해야, 삭제 도중 새 파일이 생겨
   // ENOTEMPTY가 나는 레이스를 피할 수 있다.
@@ -189,7 +189,7 @@ const countTool = (name) => mcpToolCalls.filter((n) => n === name).length;
 
 // ── (1) interactive trust required ──────────────────────────────────────────
 
-test('unapproved workspace trust under a non-bypass permission_mode pends on the first abort, spawns nothing, dedupes, and recovers', async () => {
+test('unapproved account trust under a non-bypass permission_mode pends on the first abort, spawns nothing, dedupes, and recovers', async () => {
   const cliHomeDir = await makeCliHomeDir(); // empty — no .claude.json written yet
   const state = newState();
   const d = makeDispatcher(state, cliHomeDir);
@@ -206,7 +206,7 @@ test('unapproved workspace trust under a non-bypass permission_mode pends on the
 
   await d.handleTrigger(makeEvent({ harness_config, field_changed: 'a1' }));
 
-  assert.equal(state.spawns.length, 0, 'no strand spawned while workspace trust is unapproved');
+  assert.equal(state.spawns.length, 0, 'no strand spawned while account trust is unapproved');
   assert.equal(countTool('pend_ticket'), 1, 'a durable CLI-trust blocker pends on the FIRST abort');
   assert.equal(countTool('add_comment'), 1, 'the abort posts a single actionable ticket comment');
   assert.equal(ticketState.pending_user_action, true, 'the pend transition actually set pending_user_action');
@@ -315,9 +315,9 @@ test('control: an untrusted, credential-less cli-home under the DEFAULT harness 
   assert.equal(countTool('add_comment'), 0);
 });
 
-// ── (4) ticket 152e3606: 티켓 워크스페이스 trust 시딩 — bypass에서만, fire-and-forget ──
+// ── (4) ticket 152e3606: 티켓 계정 trust 시딩 — bypass에서만, fire-and-forget ──
 
-test('ticket 152e3606: bypassPermissions 티켓 디스패치는 워크스페이스 trust를 백그라운드로 시딩한다', async () => {
+test('ticket 152e3606: bypassPermissions 티켓 디스패치는 계정 trust를 백그라운드로 시딩한다', async () => {
   const cliHomeDir = await makeCliHomeDir(); // untrusted, harness_config 없음 → bypassPermissions
   const state = newState();
   const d = makeDispatcher(state, cliHomeDir);
@@ -332,11 +332,11 @@ test('ticket 152e3606: bypassPermissions 티켓 디스패치는 워크스페이�
   assert.equal(
     raw.projects[CWD]?.hasTrustDialogAccepted,
     true,
-    '지금은 bypass라 trust가 무관해도, 이 워크스페이스가 나중에 non-bypass harness로 재사용될 때를 위해 미리 trusted로 남겨둬야 한다',
+    '지금은 bypass라 trust가 무관해도, 이 계정가 나중에 non-bypass harness로 재사용될 때를 위해 미리 trusted로 남겨둬야 한다',
   );
 });
 
-test('ticket 152e3606: non-bypass permission_mode에서는 워크스페이스 trust 시딩을 아예 시도하지 않는다', async () => {
+test('ticket 152e3606: non-bypass permission_mode에서는 계정 trust 시딩을 아예 시도하지 않는다', async () => {
   const cliHomeDir = await makeCliHomeDir(); // untrusted — .claude.json 자체가 아직 없음
   const state = newState();
   const d = makeDispatcher(state, cliHomeDir);
@@ -361,7 +361,7 @@ test('ticket 152e3606: non-bypass permission_mode에서는 워크스페이스 tr
 //
 // 요구사항: "Pending 은 실제 사람 승인/secret/irreversible-risk gate 에만
 // 생성하고, CLI 내부 permission/trust dialog 때문에 생성하지 않는다" +
-// "Claude workspace trust preflight 가 trusted 에서는 Pending 을 만들지 않음".
+// "Claude account trust preflight 가 trusted 에서는 Pending 을 만들지 않음".
 // (1) 의 케이스와 **완전히 같은 조건**(빈 cli-home + non-bypass harness)에
 // Agent trust=trusted 만 얹어, 그 하나로 Pending 이 사라지는지 확인한다.
 

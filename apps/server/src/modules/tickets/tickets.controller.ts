@@ -105,8 +105,8 @@ export class TicketsController {
 
   // ─── list / create ──────────────────────────────────────
 
-  @Get(['tickets', 'accounts/:wsId/tickets'])
-  async list(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
+  @Get(['tickets', 'accounts/:accountId/tickets'])
+  async list(@Param('accountId') accountId: string, @Req() req: Request, @Res() res: Response) {
     const q = req.query as Record<string, string | undefined>;
     const split = (v: string | undefined) => (v || '').split(',').map((s) => s.trim()).filter(Boolean);
     const statuses: TicketStatus[] = [];
@@ -115,7 +115,7 @@ export class TicketsController {
       if (!status) return res.status(400).json({ error: `status must be one of ${TICKET_STATUSES.join(', ')}` });
       statuses.push(status);
     }
-    const result = await this.tickets.list(wsId || (req as any).accessibleAccountIds || [], {
+    const result = await this.tickets.list(accountId || (req as any).accessibleAccountIds || [], {
       status: statuses,
       tags: split(q.tags),
       project_id: q.project_id || undefined,
@@ -128,15 +128,15 @@ export class TicketsController {
     return res.json(result);
   }
 
-  @Get(['ticket-tags', 'accounts/:wsId/ticket-tags'])
-  async tags(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
-    return res.json({ tags: await this.tickets.tagSuggestions(wsId || (req as any).accessibleAccountIds || []) });
+  @Get(['ticket-tags', 'accounts/:accountId/ticket-tags'])
+  async tags(@Param('accountId') accountId: string, @Req() req: Request, @Res() res: Response) {
+    return res.json({ tags: await this.tickets.tagSuggestions(accountId || (req as any).accessibleAccountIds || []) });
   }
 
-  @Post(['tickets', 'accounts/:wsId/tickets'])
-  async create(@Param('wsId') wsId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+  @Post(['tickets', 'accounts/:accountId/tickets'])
+  async create(@Param('accountId') accountId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      const { ticket, duplicate_candidates } = await this.tickets.create(wsId || (req as any).currentAccountId, body, this.actorOf(req));
+      const { ticket, duplicate_candidates } = await this.tickets.create(accountId || (req as any).currentAccountId, body, this.actorOf(req));
       const full = await loadTicketFull(this.dataSource, ticket.id, { commentLimit: DETAIL_COMMENT_PAGE });
       return res.status(201).json({ ...full, duplicate_candidates });
     } catch (err) {
@@ -207,18 +207,18 @@ export class TicketsController {
 
   // ─── unread / read-all ──────────────────────────────────
 
-  // 한 워크스페이스 내에서 `userId`가 "관여"하는 티켓 ID 집합: 만든 사람이거나
+  // 한 계정 내에서 `userId`가 "관여"하는 티켓 ID 집합: 만든 사람이거나
   // TicketReadState 행이 있는(=한 번이라도 읽은 적 있는) 티켓 — 아카이브된
   // 티켓은 어느 쪽이든 제외. unreadCounts 와 markAllTicketsRead 가 이 메서드를
   // 공유해 "관여" 판정 기준이 항상 일치하도록 한다.
   private async _getInvolvedTicketIds(
-    wsId: string,
+    accountId: string,
     userId: string,
   ): Promise<{ involvedIds: string[]; readBy: Record<string, Date | null> }> {
     const ownTickets = await this.ticketRepo
       .createQueryBuilder('t')
       .select('t.id', 'id')
-      .where('t.account_id = :wsId', { wsId })
+      .where('t.account_id = :accountId', { accountId })
       .andWhere('t.created_by_id = :uid', { uid: userId })
       .andWhere('t.archived_at IS NULL')
       .getRawMany();
@@ -226,7 +226,7 @@ export class TicketsController {
       .createQueryBuilder('r')
       .select('r.ticket_id', 'id')
       .addSelect('r.last_read_at', 'last_read_at')
-      .where('r.user_id = :uid AND r.account_id = :wsId', { uid: userId, wsId })
+      .where('r.user_id = :uid AND r.account_id = :accountId', { uid: userId, accountId })
       .getRawMany();
     // A ticket the user once read and that has since been archived must not
     // keep pinging the badge.
@@ -237,7 +237,7 @@ export class TicketsController {
           .createQueryBuilder('t')
           .select('t.id', 'id')
           .where('t.id IN (:...ids)', { ids: readOnlyIds })
-          .andWhere('t.account_id = :wsId', { wsId })
+          .andWhere('t.account_id = :accountId', { accountId })
           .andWhere('t.archived_at IS NULL')
           .getRawMany()).map((r) => r.id as string)
       : [];
@@ -256,10 +256,10 @@ export class TicketsController {
   async unreadCounts(@Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const wsId = (req.headers['x-account-id'] as string) || '';
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = (req.headers['x-account-id'] as string) || '';
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
 
-    const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+    const ids: string[] = (req as any).accessibleAccountIds || [accountId];
     const involved = await Promise.all(ids.map(id => this._getInvolvedTicketIds(id, currentUser.id)));
     const involvedIds = involved.flatMap(item => item.involvedIds);
     const readBy = Object.assign({}, ...involved.map(item => item.readBy)) as Record<string, Date | null>;
@@ -290,10 +290,10 @@ export class TicketsController {
   async markAllTicketsRead(@Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const wsId = (req.headers['x-account-id'] as string) || '';
-    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
+    const accountId = (req.headers['x-account-id'] as string) || '';
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
 
-    const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+    const ids: string[] = (req as any).accessibleAccountIds || [accountId];
     const involved = await Promise.all(ids.map(async id => ({ account_id: id, ...(await this._getInvolvedTicketIds(id, currentUser.id)) })));
     const updated = involved.reduce((n, item) => n + item.involvedIds.length, 0);
     if (updated === 0) return res.json({ updated: 0 });
@@ -388,7 +388,7 @@ export class TicketsController {
       if (newParentId === ticket.id) return res.status(400).json({ error: 'A ticket cannot be its own parent' });
       const parent = await this.ticketRepo.findOne({ where: { id: newParentId } });
       if (!parent) return res.status(400).json({ error: 'Parent ticket not found' });
-      if (parent.account_id !== ticket.account_id) return res.status(400).json({ error: 'Parent must be in the same workspace' });
+      if (parent.account_id !== ticket.account_id) return res.status(400).json({ error: 'Parent must be in the same account' });
       depth = parent.depth + 1;
       const hasGrandchildren = await this.ticketRepo
         .createQueryBuilder('t')
@@ -787,8 +787,8 @@ export class TicketsController {
       return res.status(400).json({ error: 'type=answer requires parent_id pointing to the question being answered' });
     }
 
-    // Verify any pre-created Resource ids belong to this ticket's workspace
-    // and are typed correctly before we commit. Cross-workspace references
+    // Verify any pre-created Resource ids belong to this ticket's account
+    // and are typed correctly before we commit. Cross-account references
     // would let a caller attach another team's Resource to a comment.
     if (preIds.length > 0) {
       const resourceRepo = this.dataSource.getRepository(Resource);
@@ -798,7 +798,7 @@ export class TicketsController {
         const r = found.get(rid);
         if (!r) return res.status(400).json({ error: `attachment_resource_ids contains unknown id: ${rid}` });
         if (r.account_id !== null && r.account_id !== ticket.account_id) {
-          return res.status(400).json({ error: `attachment resource ${rid} belongs to a different workspace` });
+          return res.status(400).json({ error: `attachment resource ${rid} belongs to a different account` });
         }
         if (r.type !== 'comment_attachment') {
           return res.status(400).json({ error: `attachment resource ${rid} is type=${r.type}; expected comment_attachment` });

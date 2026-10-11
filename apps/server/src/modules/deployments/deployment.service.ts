@@ -87,7 +87,7 @@ export class DeploymentService {
       ? input.ancestorShas.map((s) => normalizeSha(s)).filter(Boolean).slice(0, 500)
       : undefined;
 
-    // UPSERT by identity (account_id, environment). Null workspace uses IsNull()
+    // UPSERT by identity (account_id, environment). Null account uses IsNull()
     // so the global row is matched (a plain `{ account_id: null }` where works in
     // TypeORM but IsNull() is explicit + index-friendly).
     const existing = await this.repo.findOne({
@@ -116,7 +116,7 @@ export class DeploymentService {
 
     this.logService.info(
       'Deploy',
-      `deployment recorded — env=${environment}${accountId ? ` ws=${accountId}` : ' (global)'} commit=${deployedCommitSha.slice(0, 12)} source=${source}`,
+      `deployment recorded — env=${environment}${accountId ? ` account=${accountId}` : ' (global)'} commit=${deployedCommitSha.slice(0, 12)} source=${source}`,
       { id: row.id },
     );
 
@@ -138,26 +138,26 @@ export class DeploymentService {
     return row;
   }
 
-  /** The current live deployment for an environment as a given workspace sees it. */
+  /** The current live deployment for an environment as a given account sees it. */
   async getLatest(accountId: string | null | undefined, environment: string): Promise<Deployment | null> {
     return findLatestDeployment(this.repo, accountId ?? null, environment);
   }
 
   /**
-   * List the current live deployment per environment visible to a workspace
+   * List the current live deployment per environment visible to a account
    * (its own environments + all global ones). One row per environment name (the
    * freshest). Powers the board/QA "live commit" badge (DoD item 5).
    */
-  async listForWorkspace(accountId: string | null | undefined): Promise<Deployment[]> {
+  async listForAccount(accountId: string | null | undefined): Promise<Deployment[]> {
     const qb = this.repo.createQueryBuilder('d');
     if (accountId) {
-      qb.where('(d.account_id = :ws OR d.account_id IS NULL)', { ws: accountId });
+      qb.where('(d.account_id = :account OR d.account_id IS NULL)', { account: accountId });
     } else {
       qb.where('d.account_id IS NULL');
     }
     qb.orderBy('d.deployed_at', 'DESC').addOrderBy('d.created_at', 'DESC');
     const rows = await qb.getMany();
-    // Collapse to the freshest row per environment name (workspace row shadows a
+    // Collapse to the freshest row per environment name (account row shadows a
     // global only when it is genuinely newer — same rule as findLatestDeployment).
     const byEnv = new Map<string, Deployment>();
     for (const r of rows) {

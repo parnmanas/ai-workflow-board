@@ -64,7 +64,7 @@ export class Action {
   // cron/manual-only Action. `'on_ticket_done'` opts the Action into the
   // on-ticket-done hook: when a ticket enters `done`,
   // OnTicketDoneActionService dispatches a Run with the completed ticket as
-  // context, applied workspace-wide. trigger_label optionally narrows the
+  // context, applied account-wide. trigger_label optionally narrows the
   // policy further:
   //   - trigger_label empty → any ticket; non-empty → the finished ticket must
   //     carry that tag.
@@ -74,7 +74,7 @@ export class Action {
   trigger: string;
 
   // Tag-scope filter for `trigger='on_ticket_done'` (ticket 16a6339c). Empty
-  // = no tag requirement (workspace-wide). Non-empty = the finished ticket's
+  // = no tag requirement (account-wide). Non-empty = the finished ticket's
   // `tags` must include this exact string for the hook to fire. (The column
   // predates tags — they replaced ticket labels with the same encoding.)
   // Ignored when `trigger` is not 'on_ticket_done'.

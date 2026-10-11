@@ -93,7 +93,7 @@ async function mountCredentialManagerForImport(t) {
     role: 'admin',
     status: 'active',
     permissions: [],
-    accounts: [{ id: 'workspace-1', name: 'Account', slug: null, relations: [] }],
+    accounts: [{ id: 'account-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
 
@@ -123,7 +123,7 @@ async function mountCredentialManagerForImport(t) {
   };
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { accountId: 'workspace-1' }),
+    React.createElement(CredentialManager, { accountId: 'account-1' }),
   );
   await flush();
 
@@ -166,7 +166,7 @@ test('importing a CLI login credential from the Credentials page appears in the 
 
   assert.equal(createCredentialCalls.length, 1);
   assert.equal(createCredentialCalls[0].scope, 'account');
-  assert.equal(createCredentialCalls[0].account_id, 'workspace-1');
+  assert.equal(createCredentialCalls[0].account_id, 'account-1');
   assert.equal(createCredentialCalls[0].provider, 'codex_subscription');
 
   // 모달이 닫히고(= Resources 로 이동하지 않고 같은 화면에서) 새 credential 이

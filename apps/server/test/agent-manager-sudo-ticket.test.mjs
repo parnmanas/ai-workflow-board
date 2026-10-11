@@ -31,22 +31,22 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
   });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createAccount(app, getDataSourceToken, 'sudo-ticket');
+  const account = await createAccount(app, getDataSourceToken, 'sudo-ticket');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'sudo-ticket-manager',
     type: 'manager',
   });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'sudo-ticket-manager-key',
   });
-  // 같은 워크스페이스의 **다른** 매니저 — 남의 티켓을 집으려 시도하는 쪽.
+  // 같은 계정의 **다른** 매니저 — 남의 티켓을 집으려 시도하는 쪽.
   const other = await createAgent(app, getDataSourceToken, null, {
     name: 'sudo-ticket-other',
     type: 'manager',
   });
   const otherKey = await createApiKey(app, getDataSourceToken, other.id, {
-    accountId: workspace.id,
+    accountId: account.id,
     label: 'sudo-ticket-other-key',
   });
   const admin = await createUser(app, getDataSourceToken, { name: 'sudo-ticket-admin', role: 'admin' });

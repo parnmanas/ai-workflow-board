@@ -1,10 +1,10 @@
 // 회귀 테스트 — Agent trust → CLI 실행 권한 플래그 매핑 (ticket 5851e435).
 //
 // 배경: Agent `runtime_config.permission_mode`(strict/approve/trusted)와
-// board/workspace harness `permission_mode` 가 별도 계층으로 존재했고, CLI
+// board/account harness `permission_mode` 가 별도 계층으로 존재했고, CLI
 // adapter 들은 후자만 봤다. 그래서 `trusted` 로 표시된 에이전트라도 보드에
 // harness permission_mode 가 하나 걸려 있으면
-//   - claude 는 `--dangerously-skip-permissions` 를 잃어 workspace trust
+//   - claude 는 `--dangerously-skip-permissions` 를 잃어 account trust
 //     대화상자가 다시 load-bearing 이 되고(→ dispatch Pending),
 //   - codex 는 `--dangerously-bypass-approvals-and-sandbox` 대신 제한
 //     sandbox 로 내려갔다.

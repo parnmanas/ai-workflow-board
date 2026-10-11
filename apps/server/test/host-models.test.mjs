@@ -22,9 +22,9 @@ test('host models: read from heartbeat, refresh waits for the command ack, auth 
   const base = `http://127.0.0.1:${port}`;
   const { AuthService, getDataSourceToken, activityEvents } = modules;
 
-  const workspace = await createAccount(app, getDataSourceToken, 'host-models');
+  const account = await createAccount(app, getDataSourceToken, 'host-models');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'ralf', type: 'manager' });
-  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'ralf-key' });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'ralf-key' });
   const viewer = await createUser(app, getDataSourceToken, { name: 'viewer', role: 'user' });
   const token = app.get(AuthService).createSession(viewer.id);
   const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };

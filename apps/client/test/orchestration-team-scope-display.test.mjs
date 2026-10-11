@@ -1,6 +1,6 @@
 // 팀 Edit 모달 스코프 표시 회귀 테스트 (티켓 3e4765bb).
 //
-// 실버그는 `team.is_global && <div/>` 형태라 workspace 종속 팀(is_global===false)이면
+// 실버그는 `team.is_global && <div/>` 형태라 account 종속 팀(is_global===false)이면
 // 표현식이 false 로 평가되어 JSX 자체는 소스에 있어도 아무것도 렌더되지 않는다.
 // 소스 정규식 단언만으로는 이 버그를 잡지 못하므로(파일에 코드가 여전히 존재) 실제
 // DOM 마운트로 렌더 결과를 단언한다.
@@ -38,7 +38,7 @@ async function mountModal(t, { team, accounts = [] }) {
   const view = mount(
     React.createElement(TeamFormModal, {
       isOpen: true,
-      wsId: 'ws-1',
+      accountId: 'ws-1',
       // 로스터가 "Agent 고르기" 에서 "Runtime Host·CLI·모델·작업폴더 slot 선언" 으로
       // 바뀌면서(ticket e1eeddca) 이 모달의 prop 도 agents/globalAgents →
       // hosts/credentials/backendProfiles 로 바뀌었다. 이 테스트가 옛 prop 을 계속
@@ -64,7 +64,7 @@ async function mountModal(t, { team, accounts = [] }) {
   return view;
 }
 
-test('workspace 종속 팀 Edit은 Scope와 workspace 이름을 보여준다', async (t) => {
+test('account 종속 팀 Edit은 Scope와 account 이름을 보여준다', async (t) => {
   const team = baseTeam({ is_global: false, account_id: 'ws-1', owner_account_id: 'ws-1' });
   const { container } = await mountModal(t, {
     team,
@@ -75,7 +75,7 @@ test('workspace 종속 팀 Edit은 Scope와 workspace 이름을 보여준다', a
   assert.match(container.textContent, /Platform/);
 });
 
-test('글로벌 팀 Edit은 workspace 종속 팀과 동일한 Scope 라벨/레이아웃으로 Global을 보여준다', async (t) => {
+test('글로벌 팀 Edit은 account 종속 팀과 동일한 Scope 라벨/레이아웃으로 Global을 보여준다', async (t) => {
   const team = baseTeam({ is_global: true, account_id: null, owner_account_id: 'ws-1' });
   const { container } = await mountModal(t, { team, accounts: [] });
   assert.match(container.textContent, /Scope/);
@@ -85,7 +85,7 @@ test('글로벌 팀 Edit은 workspace 종속 팀과 동일한 Scope 라벨/레�
   assert.ok(labels.includes('Scope'));
 });
 
-test('workspace 이름 해석에 실패해도 (undefined)나 빈 괄호를 출력하지 않는다', async (t) => {
+test('account 이름 해석에 실패해도 (undefined)나 빈 괄호를 출력하지 않는다', async (t) => {
   const team = baseTeam({ is_global: false, account_id: 'ws-missing', owner_account_id: 'ws-missing' });
   const { container } = await mountModal(t, { team, accounts: [] });
   assert.match(container.textContent, /This account/);

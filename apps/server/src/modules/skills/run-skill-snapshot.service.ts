@@ -36,7 +36,7 @@ export class RunSkillSnapshotService {
     });
     if (existing) return existing;
 
-    // Assignments are keyed by (workspace, runtime identity, skill) only — the
+    // Assignments are keyed by (account, runtime identity, skill) only — the
     // board / role narrowing went away with boards.
     const assignments = await this.assignments.find({
       where: { account_id: args.accountId, runtime_key: args.agentId },
@@ -44,7 +44,7 @@ export class RunSkillSnapshotService {
     const versionIds = assignments.map((assignment) => assignment.skill_version_id);
     // Scope-free lookup by id. The assignment row is already account-scoped
     // and its skill_version_id was validated at assign time, so re-filtering by
-    // workspace here adds no authorization — it only DROPS global skills
+    // account here adds no authorization — it only DROPS global skills
     // (account_id NULL) out of the manifest, which silently ships a run
     // without the built-in skills the operator assigned to that agent.
     const versions = versionIds.length
@@ -79,7 +79,7 @@ export class RunSkillSnapshotService {
       }));
     } catch (error) {
       // Two dispatch producers can race on the same logical run. The unique
-      // (workspace, run) boundary chooses the winner; every loser must reuse
+      // (account, run) boundary chooses the winner; every loser must reuse
       // that exact immutable snapshot instead of calculating a replacement.
       const winner = await this.snapshots.findOne({
         where: { account_id: args.accountId, run_id: args.runId },

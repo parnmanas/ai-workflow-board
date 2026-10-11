@@ -18,7 +18,7 @@ interface AccountMember {
 
 export default function AccountUsersPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   const confirm = useConfirm();
   const [members, setMembers] = useState<AccountMember[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
@@ -27,16 +27,16 @@ export default function AccountUsersPage() {
   const [selectedRelation, setSelectedRelation] = useState('member');
 
   const load = useCallback(async () => {
-    if (!wsId) return;
-    const data = await api.getAccountMembers(wsId);
+    if (!accountId) return;
+    const data = await api.getAccountMembers(accountId);
     setMembers(data);
-  }, [wsId]);
+  }, [accountId]);
 
   useEffect(() => { load(); }, [load]);
 
   const handleAdd = async () => {
-    if (!wsId || !selectedUserId) return;
-    await api.addAccountMember(wsId, selectedUserId, selectedRelation);
+    if (!accountId || !selectedUserId) return;
+    await api.addAccountMember(accountId, selectedUserId, selectedRelation);
     setShowAddModal(false);
     setSelectedUserId('');
     setSelectedRelation('member');
@@ -44,20 +44,20 @@ export default function AccountUsersPage() {
   };
 
   const handleRemove = async (userId: string, userName: string) => {
-    if (!wsId) return;
+    if (!accountId) return;
     const ok = await confirm({
       title: 'Remove member',
       message: `Remove ${userName} from this account?`,
       confirmLabel: 'Remove',
     });
     if (!ok) return;
-    await api.removeAccountMember(wsId, userId);
+    await api.removeAccountMember(accountId, userId);
     await load();
   };
 
   const handleRoleChange = async (userId: string, newRelation: string) => {
-    if (!wsId) return;
-    await api.updateAccountMemberRole(wsId, userId, newRelation);
+    if (!accountId) return;
+    await api.updateAccountMemberRole(accountId, userId, newRelation);
     await load();
   };
 

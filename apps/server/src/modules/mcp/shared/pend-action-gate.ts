@@ -3,7 +3,7 @@
  *
  * 목적: 에이전트가 "배포가 필요하다" 같은, 자동화 가능한 작업을 이유로 곧장
  * 티켓을 Pending 하는 것을 막는다. pend_ticket 핸들러(ticket-crud-tools.ts)가
- * 티켓 범위의 "실행 가능한" Action(enabled + workspace/board 스코프 일치)을 모아
+ * 티켓 범위의 "실행 가능한" Action(enabled + account/board 스코프 일치)을 모아
  * 이 함수로 판정한다:
  *   - 실행 가능한 Action 이 하나라도 있고 `no_action_reason` 이 비어 있으면 → 거부.
  *     반환 메시지에 후보 Action 목록과 다음 절차(run_action / save_action+run_action /

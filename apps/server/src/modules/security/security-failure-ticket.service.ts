@@ -44,7 +44,7 @@ const SEVERITY_RANK: Record<SecuritySeverity, number> = {
  * and deterministic (the test can assert the ticket exists right after
  * complete_security_run returns).
  *
- * The ticket goes through TicketService.create into the run's workspace pool
+ * The ticket goes through TicketService.create into the run's account pool
  * (docs/tickets.md → "QA / Security failure tickets"): tags from the policy,
  * optional project, status `todo` (or `backlog`), and an assignee resolved as
  * `assignee_runtime` → profile `target_runtime` → the project's
@@ -96,7 +96,7 @@ export class SecurityFailureTicketService {
     try {
       const accountId = run.account_id || profile.account_id;
       if (!accountId) {
-        this.logService.warn('Security', `on_failure_ticket enabled for profile ${profile.id} but run ${run.id} has no workspace — skipping`);
+        this.logService.warn('Security', `on_failure_ticket enabled for profile ${profile.id} but run ${run.id} has no account — skipping`);
         return null;
       }
 
@@ -142,7 +142,7 @@ export class SecurityFailureTicketService {
     // Match the JSON-string tag list (`tags` is a JSON string column). LIKE
     // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
     return this.dataSource.getRepository(Ticket).createQueryBuilder('t')
-      .where('t.account_id = :ws', { ws: accountId })
+      .where('t.account_id = :account', { account: accountId })
       .andWhere('t.depth = 0')
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.status <> :done', { done: DONE_STATUS })
@@ -159,11 +159,11 @@ export class SecurityFailureTicketService {
     qualifying: SecurityFinding[],
     minSeverity: SecuritySeverity,
   ): Promise<string> {
-    // A project id that no longer resolves in this workspace must not swallow
+    // A project id that no longer resolves in this account must not swallow
     // the finding report — file it without a project and say so in the log.
     let projectId: string | null = (cfg.project_id || '').trim() || null;
-    if (projectId && !(await this.projects.getInWorkspace(projectId, accountId))) {
-      this.logService.warn('Security', `on_failure_ticket: project ${projectId} not found in workspace ${accountId} (profile ${profile.id}) — filing without a project`);
+    if (projectId && !(await this.projects.getInAccount(projectId, accountId))) {
+      this.logService.warn('Security', `on_failure_ticket: project ${projectId} not found in account ${accountId} (profile ${profile.id}) — filing without a project`);
       projectId = null;
     }
     // assignee_runtime → profile target_runtime → (omitted) project default_assignee.

@@ -100,7 +100,7 @@ export function filtersToSearch(filters: TicketFilters, base?: URLSearchParams |
   return next;
 }
 
-/** GET /accounts/:wsId/tickets query for these filters. */
+/** GET /accounts/:accountId/tickets query for these filters. */
 export function filtersToQuery(filters: TicketFilters): TicketListQuery {
   const query: TicketListQuery = {};
   const statuses = normalizeStatuses(filters.statuses);

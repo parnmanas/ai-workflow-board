@@ -26,7 +26,7 @@ import { SubagentLogLine } from './SubagentLogLine';
 @Index(['expires_at'])
 // Ticket ef53fdf4's hard-budget token gate runs countWindowTokens on EVERY
 // dispatch attempt (not a 15s poll like AgentUsageService), filtering by
-// ticket_id + started_at — index it so a busy workspace's subagents table
+// ticket_id + started_at — index it so a busy account's subagents table
 // doesn't force a full scan on that hot path.
 @Index(['ticket_id', 'started_at'])
 export class Subagent {

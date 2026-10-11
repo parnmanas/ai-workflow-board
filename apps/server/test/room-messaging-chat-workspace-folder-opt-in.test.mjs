@@ -11,8 +11,8 @@
 //   2. 메시지가 실제 턴일 때('progress' 하트비트가 아닐 때)
 //   3. 방이 Action Run / Orchestration Mission 방이 아닐 때(그런 방들은 이미
 //      자체 provision을 갖고 있거나 의도적으로 아예 없다)
-//   4. 대상 WORKSPACE가 opt-in했을 때(chat_workspace_folder_enabled) — 기본값은
-//      OFF이므로, opt-in하지 않은 워크스페이스의 chat_room_message wire 형태는
+//   4. 대상 ACCOUNT가 opt-in했을 때(chat_workspace_folder_enabled) — 기본값은
+//      OFF이므로, opt-in하지 않은 계정의 chat_room_message wire 형태는
 //      바이트 단위로 그대로 유지된다(run_provision 키 자체가 없다)
 //
 // 실제 컴파일된 sendMessage()를 그 repository/service들을 대신하는 가벼운
@@ -50,17 +50,17 @@ function makeQueryBuilder() {
   return qb;
 }
 
-// `room`/`workspace`는 테스트별로 변경 가능한 fixture다 — 각 테스트가 스텁
+// `room`/`account`는 테스트별로 변경 가능한 fixture다 — 각 테스트가 스텁
 // 그래프 전체를 다시 배선하지 않고도 action_id / orchestration_mission_id /
 // chat_workspace_folder_enabled 값만 바꿔치기할 수 있다.
-function makeSvc({ room, workspace }) {
+function makeSvc({ room, account }) {
   const roomRepo = {
     async findOne() { return room; }, // _handleDmAgentRequest(room.type 체크)와 roomForName 양쪽에서 함께 쓰인다
     async update() {},
   };
   const accountRepo = {
     calls: 0,
-    async findOne() { accountRepo.calls++; return workspace; },
+    async findOne() { accountRepo.calls++; return account; },
   };
   const messageRepo = {
     createQueryBuilder: makeQueryBuilder,
@@ -122,8 +122,8 @@ const qaRoom = { id: 'room-1', name: 'QA: Smoke · abc12345', type: 'group', act
 const optedInWs = { id: 'ws-1', chat_workspace_folder_enabled: 1 };
 const optedOutWs = { id: 'ws-1', chat_workspace_folder_enabled: 0 };
 
-test('opted-in workspace + plain chat room: emitted chat_room_message carries a kind:"chat" run_provision', async () => {
-  const { svc } = makeSvc({ room: plainRoom, workspace: optedInWs });
+test('opted-in account + plain chat room: emitted chat_room_message carries a kind:"chat" run_provision', async () => {
+  const { svc } = makeSvc({ room: plainRoom, account: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -140,7 +140,7 @@ test('opted-in workspace + plain chat room: emitted chat_room_message carries a 
 });
 
 test('NOT opted in (default): no run_provision at all — byte-identical to pre-ticket wire shape', async () => {
-  const { svc, accountRepo } = makeSvc({ room: plainRoom, workspace: optedOutWs });
+  const { svc, accountRepo } = makeSvc({ room: plainRoom, account: optedOutWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -153,8 +153,8 @@ test('NOT opted in (default): no run_provision at all — byte-identical to pre-
   }
 });
 
-test('Action Run room: no fallback provision even when the workspace opted in (Actions supply their own via opts.runProvision)', async () => {
-  const { svc, accountRepo } = makeSvc({ room: actionRoom, workspace: optedInWs });
+test('Action Run room: no fallback provision even when the account opted in (Actions supply their own via opts.runProvision)', async () => {
+  const { svc, accountRepo } = makeSvc({ room: actionRoom, account: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -168,8 +168,8 @@ test('Action Run room: no fallback provision even when the workspace opted in (A
   }
 });
 
-test('QA run room: no fallback provision on a FOLLOW-UP message even when the workspace opted in (review follow-up — a later status update must not override the run\'s real .awb/qa/<scenario> provision with a bogus .awb/chat/<room> one)', async () => {
-  const { svc, accountRepo } = makeSvc({ room: qaRoom, workspace: optedInWs });
+test('QA run room: no fallback provision on a FOLLOW-UP message even when the account opted in (review follow-up — a later status update must not override the run\'s real .awb/qa/<scenario> provision with a bogus .awb/chat/<room> one)', async () => {
+  const { svc, accountRepo } = makeSvc({ room: qaRoom, account: optedInWs });
   const capture = captureEmit();
   try {
     // 여기서는 opts.runProvision을 넘기지 않는다 — 방 안의 나중 메시지를
@@ -185,7 +185,7 @@ test('QA run room: no fallback provision on a FOLLOW-UP message even when the wo
 });
 
 test('Orchestration Mission room: no fallback provision (Mission steps use the ticket worktree instead)', async () => {
-  const { svc, accountRepo } = makeSvc({ room: missionRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: missionRoom, account: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent');
@@ -198,7 +198,7 @@ test('Orchestration Mission room: no fallback provision (Mission steps use the t
 });
 
 test('caller-supplied runProvision (Action/QA/security dispatch) always wins — the chat fallback never overwrites it', async () => {
-  const { svc, accountRepo } = makeSvc({ room: plainRoom, workspace: optedInWs });
+  const { svc, accountRepo } = makeSvc({ room: plainRoom, account: optedInWs });
   const capture = captureEmit();
   const callerProvision = {
     kind: 'qa', run_id: 'run-9', account_id: 'ws-1',
@@ -217,8 +217,8 @@ test('caller-supplied runProvision (Action/QA/security dispatch) always wins —
   }
 });
 
-test('progress heartbeat: no fallback provision, and the workspace flag is never looked up (hot-path cost guard)', async () => {
-  const { svc, accountRepo } = makeSvc({ room: plainRoom, workspace: optedInWs });
+test('progress heartbeat: no fallback provision, and the account flag is never looked up (hot-path cost guard)', async () => {
+  const { svc, accountRepo } = makeSvc({ room: plainRoom, account: optedInWs });
   const capture = captureEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'agent', 'agent-1', 'Builder', 'reading files…', undefined, undefined, 'progress');

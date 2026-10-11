@@ -183,7 +183,7 @@ AGENTS.md 를 덮어쓰면 안 되고, 예전 지침 파일은 새로 써야 이
 
 세션의 AWB MCP 는 매니저 키로 주입되고(`apps/agent-manager/src/lib/agent-session-runner.ts` `#defaultMcpServers`),
 일반 Account-scoped MCP 연결은 그 계정 범위로 제한된다(`mcp/shared/authz.ts`의 역사적 helper 이름
-`callerCanAccessWorkspace`). Host는 장비 신원이고, 페어링 키의 `account_id` stamp만으로
+`callerCanAccessAccount`). Host는 장비 신원이고, 페어링 키의 `account_id` stamp만으로
 Host의 실행 접근 범위를 정하지 않는다.
 
 **operator 로 등록된 세션의 MCP 연결만 그 묶음을 푼다**(`modules/voice/operator-config.ts` `isOperatorConnection`,

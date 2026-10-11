@@ -5,11 +5,11 @@ import PageHeader from './PageHeader';
 
 export default function AccountApiKeysPage() {
   const { currentAccountId } = useAuth();
-  const wsId = currentAccountId || '';
+  const accountId = currentAccountId || '';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader title="API Keys" />
-      <ApiKeyManager accountId={wsId} />
+      <ApiKeyManager accountId={accountId} />
     </div>
   );
 }

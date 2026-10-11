@@ -113,7 +113,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const existing = await mcp.callTool('save_action', {
     account_id: ws.id,
     name: 'Reindex search',
-    prompt: 'reindex {{workspace.name}}',
+    prompt: 'reindex {{account.name}}',
     target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!existing.isError, 'save_action (existing) succeeds');
@@ -161,7 +161,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   assert.ok(acts1.length >= 1, 'action_run_completed audit row written on the source ticket');
   assert.match(acts1[0].new_value, /succeeded/, 'audit row records the succeeded outcome');
-  // Reviewer req 3 — the audit row is stamped with the source workspace so the
+  // Reviewer req 3 — the audit row is stamped with the source account so the
   // account-scoped activity feed surfaces it (previously defaulted to '').
   assert.equal(acts1[0].account_id, ws.id, 'audit row records the source account_id');
 
@@ -255,9 +255,9 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   );
 
   // ─────────────────────────────────────────────────────────────────────────
-  // CASE 4 — source_ticket_id workspace boundary (reviewer req 1)
+  // CASE 4 — source_ticket_id account boundary (reviewer req 1)
   // ─────────────────────────────────────────────────────────────────────────
-  step('CASE 4 — run_action rejects nonexistent + cross-workspace source_ticket_id');
+  step('CASE 4 — run_action rejects nonexistent + cross-account source_ticket_id');
   // Nonexistent ticket id → 404-shaped rejection, no run created.
   const badRun = await mcp.callTool('run_action', {
     action_id: existing.id,
@@ -265,9 +265,9 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   assert.equal(badRun.isError, true, 'run_action rejects a nonexistent source ticket');
 
-  // A ticket in a DIFFERENT workspace must be rejected — otherwise one
-  // workspace's Action run could be linked to another workspace's ticket and,
-  // via complete_action_run, drive cross-workspace comments / re-dispatch.
+  // A ticket in a DIFFERENT account must be rejected — otherwise one
+  // account's Action run could be linked to another account's ticket and,
+  // via complete_action_run, drive cross-account comments / re-dispatch.
   const otherWs = await createAccount(app, getDataSourceToken, 'foreignws');
   const foreignTicket = await createTicket(app, getDataSourceToken, {
     accountId: otherWs.id, title: 'foreign ticket', status: 'in_progress',
@@ -276,8 +276,8 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     action_id: existing.id,            // action lives in `ws`
     source_ticket_id: foreignTicket.id, // ticket lives in `otherWs`
   });
-  assert.equal(crossRun.isError, true, 'run_action rejects a cross-workspace source ticket');
-  assert.match(JSON.stringify(crossRun.error), /different workspace/i, 'rejection names the workspace boundary');
+  assert.equal(crossRun.isError, true, 'run_action rejects a cross-account source ticket');
+  assert.match(JSON.stringify(crossRun.error), /different account/i, 'rejection names the account boundary');
   // No run row leaked for `existing` beyond the legitimate CASE-1 run.
   const existingRuns = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: existing.id });
   assert.equal(existingRuns.length, 1, 'rejected dispatches created no ActionRun row');

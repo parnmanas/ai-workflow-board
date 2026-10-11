@@ -83,7 +83,7 @@ tick 은 `QaRunReaperService`/`DbRetentionService` 패턴 그대로:
 
 사용자 목록은 접근 가능한 Account의 스케줄을 합친다. 새 스케줄은 `account_id`의
 계정에 귀속되며, 상세·수정·실행 권한과 credential·정책·예산은 실제 소유 계정으로
-검사한다. 구 `workspace_id`는 입력 호환 alias다.
+검사한다. 구 `account_id`는 입력 호환 alias다.
 
 ```
 GET    /api/qa/schedules                      # 접근 가능한 계정 합산

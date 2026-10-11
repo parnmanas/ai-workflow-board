@@ -129,7 +129,7 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
   );
   const usageSvc = app.get(usageModule.AgentUsageService);
 
-  step('Seed workspace + agent + api key for real X-Agent-Key HTTP calls');
+  step('Seed account + agent + api key for real X-Agent-Key HTTP calls');
   const ws = await createAccount(app, getDataSourceToken, 'usage');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'usage-agent' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'usage' });
@@ -187,7 +187,7 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     assert.equal(rowAfterResend.input_tokens, 1500, 'a resend after ended_at is set does NOT overwrite usage');
     assert.equal(rowAfterResend.total_cost_usd, 0.0421, 'cost from the resend is discarded too');
 
-    // getTokenUsageStats() is a global, unscoped rollup (no workspace/ticket
+    // getTokenUsageStats() is a global, unscoped rollup (no account/ticket
     // filter) — this row's started_at is real "now", so it would otherwise
     // land inside every window Group 2 queries below and skew its exact-count
     // assertions. Self-cleanup, same as Group 2's seeded rows are scoped to
@@ -341,7 +341,7 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     const rollupRepo = ds.getRepository('AgentUsageDailyRollup');
     const linesRepo = ds.getRepository('SubagentLogLine');
 
-    // "now"로부터 수년 떨어진 고정 달력 날짜 — 같은 workspace 안 다른
+    // "now"로부터 수년 떨어진 고정 달력 날짜 — 같은 account 안 다른
     // 그룹들의 now()-상대적 시드 row와 완전히 격리된다.
     const day = '2020-01-15';
     const dayStart = new Date(`${day}T10:00:00.000Z`);
@@ -388,7 +388,7 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     assert.notEqual(await subRepo.findOne({ where: { subagent_id: live1.subagent_id } }), null, 'not-yet-expired row must survive the sweep');
     assert.deepEqual(await linesRepo.find({ where: { subagent_id: a1.subagent_id } }), [], 'log line deleted alongside its subagent row');
 
-    step('AgentUsageDailyRollup has one row per (workspace, day, agent) — a1+a2 folded into agent A’s row, b1 into its own');
+    step('AgentUsageDailyRollup has one row per (account, day, agent) — a1+a2 folded into agent A’s row, b1 into its own');
     const rollupA = await rollupRepo.findOne({ where: { account_id: ws.id, usage_date: day, agent_id: 'rollup-agent-A' } });
     assert.ok(rollupA, 'agent A rollup row created');
     assert.equal(rollupA.runs_total, 2);
@@ -427,7 +427,7 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
       Math.abs(after.avg_cost_per_run_usd_priced_only - before.avg_cost_per_run_usd_priced_only) < 1e-9,
     );
 
-    step('a second sweep tick on a NEW batch for the same (workspace, day, agent) increments the existing rollup row instead of overwriting it');
+    step('a second sweep tick on a NEW batch for the same (account, day, agent) increments the existing rollup row instead of overwriting it');
     await seedSubagent(subRepo, {
       accountId: ws.id, agentId: 'rollup-agent-A',
       startedAt: dayStart, endedAt: dayStart, expiresAt: past,

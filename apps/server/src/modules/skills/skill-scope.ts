@@ -9,7 +9,7 @@ import { canUseCatalogItem, normalizeCatalogScope, type CatalogScope } from '../
 
 export type SkillScope = CatalogScope;
 
-/** '' / undefined / 'global' → global; otherwise the workspace uuid. */
+/** '' / undefined / 'global' → global; otherwise the account uuid. */
 export function resolveSkillScope(input: {
   scope?: string | null;
   account_id?: string | null;
@@ -30,7 +30,7 @@ export function skillIsVisibleTo(skill: Pick<Skill, 'account_id'>, accountId: st
 }
 
 /**
- * TypeORM `where` for "global rows OR this workspace's rows".
+ * TypeORM `where` for "global rows OR this account's rows".
  *
  * `account_id: IsNull()` and `account_id: accountId` cannot be expressed
  * in one object, so this returns the two-element OR array TypeORM understands.
@@ -49,7 +49,7 @@ export function visibleScopeWhere<T extends { account_id: string | null }>(
 
 /**
  * Account-over-global shadowing by slug — the same precedence
- * WorkflowFunction applies to its `key`. A workspace fork of a built-in skill
+ * WorkflowFunction applies to its `key`. A account fork of a built-in skill
  * therefore wins without the operator having to delete the global original.
  *
  * `include_shadowed` callers (the management UI) skip this and render both.

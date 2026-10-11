@@ -6,8 +6,8 @@ export class Credential {
   id: string;
 
   // Nullable: a NULL account_id marks a GLOBAL (instance-level) credential
-  // shared across every workspace. Non-NULL pins the credential to one
-  // workspace (the original behaviour). Mirrors the Agent.account_id
+  // shared across every account. Non-NULL pins the credential to one
+  // account (the original behaviour). Mirrors the Agent.account_id
   // nullable pattern used for manager rows (migrations 018/019).
   @Column({ type: 'varchar', nullable: true, default: null })
   account_id: string | null;

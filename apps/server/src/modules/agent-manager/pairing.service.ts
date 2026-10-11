@@ -8,7 +8,7 @@ import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
  * the awb-agent-manager redeems on first run.
  *
  * Storage is intentionally in-memory: a token is one-shot, scoped to a single
- * workspace, and TTL'd at 10 minutes. Surviving restart isn't worth a
+ * account, and TTL'd at 10 minutes. Surviving restart isn't worth a
  * persistence layer — if the admin restarts AWB while a token is in flight
  * they regenerate.
  */
@@ -76,7 +76,7 @@ export class PairingService implements OnModuleDestroy {
       redeemed_instance_id: null,
     };
     this.tokens.set(token, rec);
-    this.logService.info('AgentManager', `Minted pairing token id=${id} ws=${params.account_id}`);
+    this.logService.info('AgentManager', `Minted pairing token id=${id} account=${params.account_id}`);
     return rec;
   }
 
@@ -103,7 +103,7 @@ export class PairingService implements OnModuleDestroy {
    * the bearer. The display code is what the human types into the manager;
    * the raw token is returned ONCE on mint() and then never again.
    */
-  listForWorkspace(accountId: string): Array<Omit<PairingToken, 'token'>> {
+  listForAccount(accountId: string): Array<Omit<PairingToken, 'token'>> {
     const out: Array<Omit<PairingToken, 'token'>> = [];
     for (const rec of this.tokens.values()) {
       if (rec.account_id !== accountId) continue;

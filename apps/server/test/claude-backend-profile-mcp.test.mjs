@@ -13,7 +13,7 @@ process.env.NODE_ENV = 'test';
 let ds;
 let tools;
 let managerAgent;
-let workspace;
+let account;
 
 function withTimeout(promise, message, timeoutMs = 1_000) {
   let timer;
@@ -38,8 +38,8 @@ before(async () => {
     hostname: 'profile-test',
     account_id: null,
   }));
-  workspace = await ds.getRepository('Account').save(ds.getRepository('Account').create({
-    name: 'Profile MCP workspace',
+  account = await ds.getRepository('Account').save(ds.getRepository('Account').create({
+    name: 'Profile MCP account',
   }));
 });
 
@@ -63,7 +63,7 @@ describe('Claude backend profile MCP operations', () => {
       ds.getRepository('RuntimeHost').create({
         name: 'Ordinary profile operator',
         hostname: 'profile-test',
-        account_id: workspace.id,
+        account_id: account.id,
       }),
     );
     assert.equal(
@@ -168,10 +168,10 @@ describe('Claude backend profile MCP operations', () => {
       },
     });
     assert.equal(retry.changed, false);
-    // 프로필은 인스턴스 전역이라 목록에 워크스페이스 인자가 없다(티켓 e616dbfc).
+    // 프로필은 인스턴스 전역이라 목록에 계정 인자가 없다(티켓 e616dbfc).
     const listed = await tools.listClaudeBackendProfiles(ds);
     assert.equal(listed.profiles.some(item => item.id === current.id), true);
-    assert.equal('allowed_profile_ids' in listed, false, '워크스페이스 allow-set 은 응답에 없어야 합니다.');
+    assert.equal('allowed_profile_ids' in listed, false, '계정 allow-set 은 응답에 없어야 합니다.');
   });
 
   it('rejects an invalid update without changing the stored profile', async () => {
@@ -237,13 +237,13 @@ describe('Claude backend profile MCP operations', () => {
     );
   });
 
-  // 티켓 e616dbfc 로 시맨틱이 뒤집힌 자리다. 예전에는 프로필이 여러 워크스페이스에
-  // 배정될 수 있어서, 특정 워크스페이스 소유 credential 을 붙이면 "모든 배정
-  // 워크스페이스가 소유하지는 않는다"며 거부했다. 배정 개념이 사라진 지금은
+  // 티켓 e616dbfc 로 시맨틱이 뒤집힌 자리다. 예전에는 프로필이 여러 계정에
+  // 배정될 수 있어서, 특정 계정 소유 credential 을 붙이면 "모든 배정
+  // 계정가 소유하지는 않는다"며 거부했다. 배정 개념이 사라진 지금은
   // 대조할 대상이 없으므로, 존재하는 credential 이면 그대로 저장된다.
-  it('워크스페이스 소유 credential 도 전역 프로필에 그대로 붙는다', async () => {
-    const ownerWorkspace = await ds.getRepository('Account').save(
-      ds.getRepository('Account').create({ name: 'Credential owner workspace' }),
+  it('계정 소유 credential 도 전역 프로필에 그대로 붙는다', async () => {
+    const ownerAccount = await ds.getRepository('Account').save(
+      ds.getRepository('Account').create({ name: 'Credential owner account' }),
     );
     const profile = await tools.upsertClaudeBackendProfile(ds, {
       name: 'Shared assigned profile',
@@ -253,8 +253,8 @@ describe('Claude backend profile MCP operations', () => {
     });
     const credential = await ds.getRepository('Credential').save(
       ds.getRepository('Credential').create({
-        account_id: ownerWorkspace.id,
-        name: 'First workspace credential',
+        account_id: ownerAccount.id,
+        name: 'First account credential',
         provider: 'anthropic',
         encrypted_data: 'test-only',
       }),

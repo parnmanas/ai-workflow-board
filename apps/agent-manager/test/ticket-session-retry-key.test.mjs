@@ -9,7 +9,7 @@
 // 하지 않는다 — 특히 postSilentExitSystemComment 가 조용히 실패하면 티켓에
 // silent-exit 코멘트가 전혀 안 남고 dispatch loop만 계속 재시도하는 형태로
 // 나타날 수 있다. AwbConfig.retryApiKey 는 이 함수들이 포기하기 전에 매니저
-// 자체의 항상 유효하고 workspace 에 종속되지 않는 키로 한 번 더 재시도하게
+// 자체의 항상 유효하고 account 에 종속되지 않는 키로 한 번 더 재시도하게
 // 한다.
 
 import { mkdtempSync } from 'node:fs';

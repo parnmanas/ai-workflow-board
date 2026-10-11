@@ -36,7 +36,7 @@ async function loadDist(...segments) {
     return await import(url);
   } catch (err) {
     throw new Error(
-      '이 테스트는 서버 빌드 산출물이 필요하다. `npm run --workspace=apps/server build` 를 먼저 실행할 것. 원인: ' + err.message,
+      '이 테스트는 서버 빌드 산출물이 필요하다. `npm run --account=apps/server build` 를 먼저 실행할 것. 원인: ' + err.message,
     );
   }
 }

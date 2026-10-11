@@ -145,7 +145,7 @@ function context(permissionMode, cliHomeDir) {
     working_dir: '/workspace',
     mcp_config_path: '/config/mcp.json',
     api_key: 'agent-api-key',
-    account_id: 'txiv-board-workspace',
+    account_id: 'txiv-board-account',
     cli_home_dir: cliHomeDir,
     extra_env: {},
     credential_provider: null,
@@ -311,7 +311,7 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
   const wire = JSON.stringify({
     event_type: 'agent_trigger', ticket_id: TICKET, action: 'assignee',
     actor_name: AGENT, field_changed: 'txiv-trigger', trigger_source: 'column_move',
-    account_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
+    account_id: 'txiv-board-account', worktree_mode: 'per_ticket',
     base_repo: {
       id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
       default_branch: 'master',
@@ -347,7 +347,7 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
   // repository resource); a 200 there means the legacy alias is never needed.
   assert.equal(repositoryCredentialRequests.length, 1);
   assert.match(repositoryCredentialRequests[0], /\/api\/agent-manager\/projects\/gameclient-resource\/git-credential/);
-  assert.match(repositoryCredentialRequests[0], /account_id=txiv-board-workspace/);
+  assert.match(repositoryCredentialRequests[0], /account_id=txiv-board-account/);
   assert.deepEqual(dispatchAcks.map((ack) => ack.outcome), ['processed']);
 });
 
@@ -380,7 +380,7 @@ test('wire consumer: flattened event 의 clone_policy 가 worktree bootstrap clo
   const wire = JSON.stringify({
     event_type: 'agent_trigger', ticket_id: TICKET, action: 'assignee',
     actor_name: AGENT, field_changed: 'clone-policy-trigger', trigger_source: 'column_move',
-    account_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
+    account_id: 'txiv-board-account', worktree_mode: 'per_ticket',
     base_repo: {
       id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
       default_branch: 'master',

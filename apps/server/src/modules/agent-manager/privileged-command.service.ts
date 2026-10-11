@@ -148,7 +148,7 @@ export class PrivilegedCommandService implements OnModuleDestroy {
     return req;
   }
 
-  /** 운영자 화면이 읽는 목록. 워크스페이스로 좁힌다. */
+  /** 운영자 화면이 읽는 목록. 계정로 좁힌다. */
   listPending(account_id: string | null): PrivilegedCommandRequest[] {
     const out: PrivilegedCommandRequest[] = [];
     for (const req of this.requests.values()) {

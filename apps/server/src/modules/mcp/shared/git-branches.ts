@@ -25,9 +25,9 @@ export class GitCredentialResolutionError extends Error {
   readonly code = 'credential_unavailable';
 }
 
-/** Decrypt a workspace Credential row into the `{username, token}` shape
+/** Decrypt a account Credential row into the `{username, token}` shape
  *  `applyCredential` expects. Accepts a GLOBAL credential (account_id=NULL,
- *  shared instance-wide) or one scoped to `accountId`; an out-of-workspace
+ *  shared instance-wide) or one scoped to `accountId`; an out-of-account
  *  credential resolves to null. Also returns null if the row is missing or
  *  fails to decrypt — callers should treat that as "no auth available" and let
  *  `git ls-remote` decide whether the repo is reachable anonymously. */
@@ -40,7 +40,7 @@ export async function resolveGitCredential(
   const cred = await credRepo.findOne({ where: { id: credentialId } });
   if (!cred) throw new GitCredentialResolutionError(`Selected credential ${credentialId} does not exist`);
   if (cred.account_id !== null && cred.account_id !== accountId) {
-    throw new GitCredentialResolutionError('Selected credential belongs to a different workspace');
+    throw new GitCredentialResolutionError('Selected credential belongs to a different account');
   }
   try {
     const data = JSON.parse(decryptStrict(cred.encrypted_data));
@@ -111,7 +111,7 @@ export async function listRepoBranches(opts: ListRepoBranchesOptions): Promise<R
     // when the URL needs auth we didn't provide — fail fast instead of hanging
     // the request. The `--` end-of-options separator stops a Resource URL
     // that begins with `-` (e.g. `--upload-pack=…`) from being parsed as a
-    // git flag — `--upload-pack` is a known RCE primitive and a workspace
+    // git flag — `--upload-pack` is a known RCE primitive and a account
     // member can write any string they want into Resource.url.
     const child = spawn('git', ['ls-remote', '--heads', '--', url], {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },

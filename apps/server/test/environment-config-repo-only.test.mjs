@@ -233,9 +233,9 @@ test('resolve: a resource_id that fails lookup and has no url is dropped (not sh
   assert.equal(resolved, null, 'nothing actionable remains → null (dispatch treats as no env setup)');
 });
 
-// ── merge — simplified configs still merge key-level (board over workspace) ──
+// ── merge — simplified configs still merge key-level (board over account) ──
 
-test('merge: board repositories override the workspace default', () => {
+test('merge: board repositories override the account default', () => {
   const merged = mergeEnvironmentConfig(
     JSON.stringify({ repositories: [{ resource_id: 'ws-repo' }] }),
     JSON.stringify({ repositories: [{ resource_id: 'board-repo' }] }),

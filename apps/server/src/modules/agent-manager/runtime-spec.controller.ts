@@ -17,7 +17,7 @@ import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
  * Read-only: normalizes the shape (the same `normalizeRuntimeSpec` P4 inputs
  * will go through) and checks the referential half against the DB — host
  * exists (host-first, legacy manager fallback), credential visible to the
- * workspace, backend profile exists. Returns the normalized spec or a 400
+ * account, backend profile exists. Returns the normalized spec or a 400
  * with a human-readable reason. Persists nothing.
  *
  * Any logged-in user may call it — a spec is not a secret, and the team /
@@ -53,7 +53,7 @@ export class RuntimeSpecController {
     if (spec.credential_id) {
       const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id } });
       if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
-        return res.status(400).json({ ok: false, error: `credential ${spec.credential_id} is not available to this workspace` });
+        return res.status(400).json({ ok: false, error: `credential ${spec.credential_id} is not available to this account` });
       }
     }
 

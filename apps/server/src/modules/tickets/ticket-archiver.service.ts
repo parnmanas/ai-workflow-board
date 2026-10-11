@@ -1,6 +1,6 @@
 /**
  * TicketArchiverService — background sweep that soft-archives `done` tickets
- * older than their workspace's `auto_archive_days` setting.
+ * older than their account's `auto_archive_days` setting.
  *
  * `OnModuleInit` plants a plain
  * `setInterval`, no `@Cron`, no external scheduler dependency. Default tick
@@ -10,7 +10,7 @@
  *
  * Per-tick mechanics:
  *
- *   1. Find every workspace with `auto_archive_days IS NOT NULL`.
+ *   1. Find every account with `auto_archive_days IS NOT NULL`.
  *   2. For each, select tickets where:
  *        - `status = 'done'`
  *        - `archived_at IS NULL`
@@ -29,14 +29,14 @@
  *          which spell `GREATEST`/`MAX` differently): `terminal_entered_at`
  *          and `updated_at` compared directly, plus a `NOT EXISTS` over
  *          `comments` for any row newer than the cutoff.
- *      Capped at ARCHIVER_BATCH_LIMIT per workspace so the first archiver tick
- *      after enabling auto-archive on a workspace with 10k done tickets doesn't
+ *      Capped at ARCHIVER_BATCH_LIMIT per account so the first archiver tick
+ *      after enabling auto-archive on a account with 10k done tickets doesn't
  *      issue 10k writes in a single transaction.
  *   3. For each candidate, stamp `archived_at = now` and emit an activity_log
  *      `action='archived'` row (`actor_name='TicketArchiverService'`) so the
  *      audit trail records the sweep.
  *
- * Idempotent: re-running the tick on a workspace with nothing to archive is a
+ * Idempotent: re-running the tick on a account with nothing to archive is a
  * single empty SELECT. Stops cleanly on module destroy.
  */
 
@@ -93,42 +93,42 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
   /**
    * One archive sweep. Exposed publicly so tests + the operator-triggered
    * admin endpoint can drive it deterministically without waiting for the
-   * setInterval. Returns the per-workspace archive counts.
+   * setInterval. Returns the per-account archive counts.
    */
-  async runOnce(): Promise<{ archived_total: number; per_workspace: Array<{ account_id: string; count: number }> }> {
+  async runOnce(): Promise<{ archived_total: number; per_account: Array<{ account_id: string; count: number }> }> {
     const accounts = await this.dataSource.getRepository(Account).createQueryBuilder('w')
       .where('w.auto_archive_days IS NOT NULL')
       .getMany();
-    const perWorkspace: Array<{ account_id: string; count: number }> = [];
+    const perAccount: Array<{ account_id: string; count: number }> = [];
     let total = 0;
-    for (const ws of accounts) {
+    for (const account of accounts) {
       try {
-        const count = await this.archiveWorkspace(ws);
-        perWorkspace.push({ account_id: ws.id, count });
+        const count = await this.archiveAccount(account);
+        perAccount.push({ account_id: account.id, count });
         total += count;
       } catch (e) {
-        this.logService.error('Archiver', 'workspace archive failed (continuing)', {
-          err: String(e), account_id: ws.id,
+        this.logService.error('Archiver', 'account archive failed (continuing)', {
+          err: String(e), account_id: account.id,
         });
       }
     }
     if (total > 0) {
       this.logService.info('Archiver', 'tick complete', {
-        workspaces_processed: accounts.length,
+        accounts_processed: accounts.length,
         archived_total: total,
-        per_workspace: perWorkspace,
+        per_account: perAccount,
       });
     }
-    return { archived_total: total, per_workspace: perWorkspace };
+    return { archived_total: total, per_account: perAccount };
   }
 
-  private async archiveWorkspace(ws: Account): Promise<number> {
-    const days = ws.auto_archive_days;
+  private async archiveAccount(account: Account): Promise<number> {
+    const days = account.auto_archive_days;
     if (days === null || days === undefined) return 0;
     const cutoff = new Date(Date.now() - days * 86_400_000);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const candidates = await ticketRepo.createQueryBuilder('t')
-      .where('t.account_id = :ws', { ws: ws.id })
+      .where('t.account_id = :account', { account: account.id })
       .andWhere('t.status = :done', { done: DONE_STATUS })
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.parent_id IS NULL')
@@ -167,12 +167,12 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
         });
       } catch (e) {
         this.logService.warn('Archiver', 'per-ticket archive failed (continuing)', {
-          err: String(e), ticket_id: t.id, account_id: ws.id,
+          err: String(e), ticket_id: t.id, account_id: account.id,
         });
       }
     }
-    this.logService.info('Archiver', 'workspace sweep archived tickets', {
-      account_id: ws.id,
+    this.logService.info('Archiver', 'account sweep archived tickets', {
+      account_id: account.id,
       auto_archive_days: days,
       archived: candidates.length,
       hit_batch_limit: candidates.length >= ARCHIVER_BATCH_LIMIT,

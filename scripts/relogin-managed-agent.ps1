@@ -54,7 +54,7 @@ function Get-AgentEntries {
       Dir        = $_.FullName
       Name       = '(missing config.json)'
       Cli        = $null
-      WorkspaceId = $null
+      AccountId  = $null
       WorkingDir = $null
     }
     if (Test-Path -LiteralPath $cfgPath) {
@@ -62,7 +62,7 @@ function Get-AgentEntries {
         $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
         $entry.Name        = $cfg.name
         $entry.Cli         = $cfg.cli
-        $entry.WorkspaceId = $cfg.workspace_id
+        $entry.AccountId   = if ($cfg.account_id) { $cfg.account_id } else { $cfg.workspace_id }
         $entry.WorkingDir  = $cfg.working_dir
       } catch { }
     }
@@ -116,7 +116,7 @@ if ($List -or -not $AgentId) {
   Write-Host ""
   Write-Host "Agents:"
   $entries | ForEach-Object {
-    Write-Host ("  - {0}  name={1}  cli={2}  workspace={3}" -f $_.AgentId, $_.Name, $_.Cli, $_.WorkspaceId)
+    Write-Host ("  - {0}  name={1}  cli={2}  account={3}" -f $_.AgentId, $_.Name, $_.Cli, $_.AccountId)
   }
   if ($List) { exit 0 }
   if ($entries.Count -eq 1) {
@@ -145,7 +145,7 @@ $credPath   = Join-Path $cliHome '.credentials.json'
 
 Write-Host ""
 Write-Host "Selected agent     : $($entry.Name)  ($AgentId)"
-Write-Host "Workspace          : $($entry.WorkspaceId)"
+Write-Host "Account            : $($entry.AccountId)"
 Write-Host "CLAUDE_CONFIG_DIR  : $cliHome"
 Write-Host ""
 
@@ -216,7 +216,7 @@ if ([string]::IsNullOrEmpty($oauth.refreshToken)) {
 Write-Host ""
 Write-Host "Direct method (Method A) — done." -ForegroundColor Green
 Write-Host "Restart the agent in AWB so the next subagent spawn picks up the new token:"
-Write-Host "  AWB Workspace -> AI Agents -> $($entry.Name) -> Restart"
+Write-Host "  AWB Hosts -> Runtime Host -> $($entry.Name) -> Restart"
 Write-Host ""
 
 if ($ShowCredential) {
@@ -226,7 +226,7 @@ if ($ShowCredential) {
   Get-Content -LiteralPath $credPath -Raw
   Write-Host "----- END credentials_json -----"
   Write-Host ""
-  Write-Host "After saving the credential, attach it to agent '$($entry.Name)' in AWB Workspace -> AI Agents -> Edit -> CLI credential, then Restart." -ForegroundColor Cyan
+  Write-Host "After saving the credential, attach it to agent '$($entry.Name)' in AWB Hosts -> Runtime Host -> Edit -> CLI credential, then Restart." -ForegroundColor Cyan
 } else {
   Write-Host "(re-run with -ShowCredential to also print the JSON for AWB Settings -> Credentials remote injection.)"
 }

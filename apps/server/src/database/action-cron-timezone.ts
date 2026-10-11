@@ -1,4 +1,4 @@
-// `1760000000088-MoveActionCronToWorkspaceSchedules` 가 쓰는 순수 헬퍼.
+// `1760000000088-MoveActionCronToAutomationSchedules` 가 쓰는 순수 헬퍼.
 //
 // **왜 마이그레이션 파일 밖에 있나**: TypeORM 은 migrations glob
 // (`src/database/migrations/*.{js,ts}`) 에 걸린 파일의 **모든 export** 를 마이그레이션
