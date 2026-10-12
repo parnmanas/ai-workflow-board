@@ -236,6 +236,13 @@ Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + �
 (`agent_session_cli_settings`, `GET/PUT /api/agent-sessions/hosts/:managerId/:cli/settings`, 화면은 호스트 세션
 목록의 "CLI settings"). 비워 두면 장비 운영자의 CLI 로그인(`claude login` / `codex login`)을 그대로 쓴다.
 
+구독 로그인이 만료되면 Settings → Credentials → **Log in with CLI**에서 CLI를 선택하고,
+**Save login to → Update 기존 Credential 이름**을 고른 뒤 브라우저 로그인을 완료한다.
+성공한 로그인 정보만 기존 Credential에 갱신하며, ID·이름·소유 계정과 세션/런타임의 연결은 유지한다.
+로그인 실패·취소 시 기존 인증 정보도 유지한다. **Import from File**에서도 같은 기존 Credential을
+선택해 인증 파일을 갱신할 수 있다. 기존 Credential과 로그인 CLI의 provider가 일치해야 하며,
+global Credential 갱신에는 global 관리 권한이 필요하다.
+
 - 후보는 소유 계정 + global credential 중 provider 접두어가 CLI 와 맞는 것(`claude_*`, `codex_*`, `opencode_*`)이다.
   불일치는 400, 다른 계정 것은 404, hermes 는 아직 미지원(409).
 - 매니저는 open/prompt 요청에 실린 `credential_id` 로 `GET /api/agent/sessions/credential/:id?account_id=` 를 부른다.

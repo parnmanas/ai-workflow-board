@@ -952,6 +952,7 @@ export interface CliLoginSession {
   cli_provider: string;
   cli_method: string;
   credential_name: string;
+  target_credential_id?: string | null;
   status: CliLoginSessionStatus;
   verification_url: string | null;
   user_code: string | null;

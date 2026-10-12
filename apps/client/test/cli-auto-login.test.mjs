@@ -15,7 +15,7 @@ async function flush() {
   });
 }
 
-async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {}) {
+async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl, credentials = [] } = {}) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
   globalThis.sessionStorage = dom.window.sessionStorage;
@@ -41,7 +41,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     accounts: [{ id: 'account-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
-  api.listCredentials = async () => [];
+  api.listCredentials = async () => credentials;
   api.listCliLoginInstances = async () => [
     {
       instance_id: 'inst-1',
@@ -63,6 +63,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
       is_global: data.scope === 'global',
       cli: data.cli,
       credential_name: data.credential_name,
+      target_credential_id: data.target_credential_id || null,
       status: 'starting',
       verification_url: null,
       user_code: null,
@@ -143,6 +144,7 @@ test("'Try Again' after a failed claude attempt resets to a clean claude form, n
       is_global: false,
       cli: data.cli,
       credential_name: data.credential_name,
+      target_credential_id: data.target_credential_id || null,
       status: 'failed',
       verification_url: null,
       user_code: null,
@@ -203,4 +205,26 @@ test('changeProvider 는 사용자가 직접 입력한 이름은 덮어쓰지 �
     '내가 직접 입력한 이름',
     '직접 입력한 이름은 provider 전환 시 새 기본값으로 덮어써지면 안 된다',
   );
+});
+
+
+test('CLI login refresh selects the existing credential and sends its ID and actual owner', async (t) => {
+  const { container, startCliLoginCalls } = await mountCredentialManagerForAutoLogin(t, {
+    credentials: [{ id: 'existing-codex', account_id: 'account-2', scope: 'account',
+      name: 'Work Codex', provider: 'codex_subscription', credential_fields: { auth_json: 'masked' },
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString() }],
+  });
+  await click(buttonsByText(container, 'Log in with CLI')[0]);
+  await flush();
+  const targetSelect = selects(container).find((select) => [...select.options].some((option) => option.value === 'existing-codex'));
+  assert.ok(targetSelect);
+  await changeSelect(targetSelect, 'existing-codex');
+  await flush();
+  assert.match(container.textContent, /Existing session and runtime settings keep using it/);
+  await click(buttonsByText(container, 'Update Credential')[0]);
+  await flush();
+  assert.equal(startCliLoginCalls.length, 1);
+  assert.equal(startCliLoginCalls[0].target_credential_id, 'existing-codex');
+  assert.equal(startCliLoginCalls[0].account_id, 'account-2');
+  assert.equal(startCliLoginCalls[0].credential_name, 'Work Codex');
 });

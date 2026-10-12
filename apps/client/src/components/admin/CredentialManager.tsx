@@ -483,11 +483,13 @@ export default function CredentialManager({
         <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} credentials</span>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <CliAutoLogin
+            credentials={credentials.filter((c) => c.scope !== 'global' || canManageGlobal)}
             accountId={effectiveCreateOwner ?? ''}
             createScope={effectiveCreateOwner === null ? 'global' : 'account'}
             onCreated={loadCredentials}
           />
           <CliCredentialImport
+            credentials={credentials.filter((c) => c.scope !== 'global' || canManageGlobal)}
             accountId={effectiveCreateOwner ?? ''}
             createScope={effectiveCreateOwner === null ? 'global' : 'account'}
             onCreated={loadCredentials}

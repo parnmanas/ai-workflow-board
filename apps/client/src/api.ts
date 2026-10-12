@@ -1312,6 +1312,7 @@ export const api = {
     cli_provider?: string;
     cli_method?: string;
     credential_name: string;
+    target_credential_id?: string;
     instance_id: string;
   }) => request<CliLoginSession>('/credentials/cli-login/start', { method: 'POST', body: JSON.stringify(data) }),
   getCliLoginSession: (sessionId: string, accountId?: string) => {

@@ -71,7 +71,7 @@ async function flush() {
   });
 }
 
-async function mountCredentialManagerForImport(t) {
+async function mountCredentialManagerForImport(t, existing = []) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
   globalThis.sessionStorage = dom.window.sessionStorage;
@@ -85,6 +85,7 @@ async function mountCredentialManagerForImport(t) {
     getSetupStatus: api.getSetupStatus,
     listCredentials: api.listCredentials,
     createCredential: api.createCredential,
+    updateCredential: api.updateCredential,
   };
   api.getMe = async () => ({
     id: 'admin-1',
@@ -100,7 +101,12 @@ async function mountCredentialManagerForImport(t) {
   // Backend 상태를 흉내: import 전에는 목록이 비어 있고, createCredential 이
   // 성공하면 다음 listCredentials 호출부터 새 credential 이 포함된다 — 실제
   // 서버 라운드트립 없이도 "생성 즉시 같은 화면 목록에 나타난다" 를 검증한다.
-  let credentialsDb = [];
+  let credentialsDb = existing;
+  const updateCredentialCalls = [];
+  api.updateCredential = async (id, data) => {
+    updateCredentialCalls.push({ id, data });
+    return credentialsDb.find((c) => c.id === id);
+  };
   const createCredentialCalls = [];
   api.listCredentials = async () => credentialsDb.slice();
   api.createCredential = async (data) => {
@@ -133,7 +139,7 @@ async function mountCredentialManagerForImport(t) {
     Object.assign(api, originals);
     dom.cleanup();
   });
-  return { ...view, createCredentialCalls };
+  return { ...view, createCredentialCalls, updateCredentialCalls };
 }
 
 test('importing a CLI login credential from the Credentials page appears in the same list immediately', async (t) => {
@@ -174,5 +180,35 @@ test('importing a CLI login credential from the Credentials page appears in the 
   // 회귀 방지 단언.
   assert.equal(buttonsByText(container, 'Create Credential').length, 0);
   assert.match(container.textContent, /Codex CLI login/);
+  assert.match(container.textContent, /1 credentials/);
+});
+
+
+test('file re-import updates the existing credential using its owner and never creates a replacement', async (t) => {
+  const { container, createCredentialCalls, updateCredentialCalls } = await mountCredentialManagerForImport(t, [{
+    id: 'existing-codex', account_id: 'account-2', scope: 'account', name: 'Work Codex', provider: 'codex_subscription',
+    credential_fields: { auth_json: 'masked' }, created_at: new Date().toISOString(),
+  }]);
+  await click(buttonsByText(container, 'Import from File')[0]);
+  const targetSelect = [...container.querySelectorAll('select')].find((select) => [...select.options].some((option) => option.value === 'existing-codex'));
+  assert.ok(targetSelect);
+  await act(async () => {
+    targetSelect.value = 'existing-codex';
+    targetSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+  const fileInput = container.querySelector('input[type="file"][accept*="json"]');
+  const contents = '{"tokens":{"access_token":"fresh"}}';
+  const authFile = new window.File([contents], 'auth.json', { type: 'application/json' });
+  await act(async () => {
+    Object.defineProperty(fileInput, 'files', { value: [authFile], configurable: true });
+    fileInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await click(buttonsByText(container, 'Update Credential')[0]);
+  await flush();
+  assert.equal(createCredentialCalls.length, 0);
+  assert.deepEqual(updateCredentialCalls, [{ id: 'existing-codex', data: {
+    account_id: 'account-2', credentials: { auth_json: contents },
+  } }]);
   assert.match(container.textContent, /1 credentials/);
 });

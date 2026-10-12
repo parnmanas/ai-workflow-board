@@ -98,6 +98,7 @@ function serializeCliLoginSession(s: CliLoginSession) {
     cli_provider: s.cli_provider,
     cli_method: s.cli_method,
     credential_name: s.credential_name,
+    target_credential_id: s.target_credential_id,
     status: s.status,
     verification_url: s.verification_url,
     user_code: s.user_code,
@@ -316,6 +317,7 @@ export class CredentialsController {
         cliProvider: String(body?.cli_provider || '').trim(),
         cliMethod: String(body?.cli_method || '').trim(),
         credentialName: String(body?.credential_name || '').trim(),
+        targetCredentialId: String(body?.target_credential_id || '').trim() || undefined,
         instanceId,
         triggeredById: actor?.id || '',
       });

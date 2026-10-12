@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
-import type { CatalogScope, CliLoginInstanceOption, CliLoginSession } from '../../types';
+import type { Credential, CatalogScope, CliLoginInstanceOption, CliLoginSession } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { tokens } from '../../tokens';
@@ -68,7 +68,7 @@ function statusMessage(session: CliLoginSession): string {
     case 'completing':
       return 'Approved — finishing up…';
     case 'succeeded':
-      return `${label} credential created.`;
+      return `${label} credential ${session.target_credential_id ? 'updated' : 'created'}.`;
     case 'failed':
       return session.error_detail || 'Login failed.';
     case 'timed_out':
@@ -87,16 +87,19 @@ function defaultCredentialName(cli: string): string {
 export default function CliAutoLogin({
   accountId,
   createScope = 'account',
+  credentials = [],
   onCreated,
 }: {
   accountId: string;
   createScope?: CatalogScope;
+  credentials?: Credential[];
   onCreated?: () => void | Promise<void>;
 }) {
   const { showToast } = useToast();
   const catalog = useCliCatalog();
   const loginClis = loginCapableClis(catalog);
   const [open, setOpen] = useState(false);
+  const [targetId, setTargetId] = useState('');
   const [provider, setProvider] = useState<string>(() => defaultLoginCli());
   const [instances, setInstances] = useState<CliLoginInstanceOption[]>([]);
   const [instancesLoading, setInstancesLoading] = useState(false);
@@ -110,7 +113,9 @@ export default function CliAutoLogin({
   const [session, setSession] = useState<CliLoginSession | null>(null);
   const [error, setError] = useState('');
 
-  const isGlobal = createScope === 'global';
+  const target = credentials.find((c) => c.id === targetId);
+  const loginAccountId = target ? target.account_id || '' : accountId;
+  const isGlobal = target ? target.scope === 'global' : createScope === 'global';
   const login: CliLoginDescriptor | null = cliLoginInfo(provider);
   const providerScoped = !!login?.provider_scoped;
   const presets = login?.presets ?? [];
@@ -122,7 +127,7 @@ export default function CliAutoLogin({
   const loadInstances = useCallback(async () => {
     setInstancesLoading(true);
     try {
-      const list = await api.listCliLoginInstances(isGlobal ? undefined : accountId);
+      const list = await api.listCliLoginInstances(isGlobal ? undefined : loginAccountId);
       setInstances(list);
       if (list.length > 0 && !instanceId) setInstanceId(list[0].instance_id);
     } catch (err: any) {
@@ -131,11 +136,11 @@ export default function CliAutoLogin({
       setInstancesLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isGlobal, accountId]);
+  }, [isGlobal, loginAccountId]);
 
   useEffect(() => {
     if (open && !session) void loadInstances();
-  }, [open, session, loadInstances]);
+  }, [open, session, loadInstances, targetId, provider]);
 
   const reset = (nextProvider: string = provider) => {
     setSession(null);
@@ -151,6 +156,8 @@ export default function CliAutoLogin({
     if (!credentialName.trim() || credentialName === defaultCredentialName(provider)) {
       setCredentialName(defaultCredentialName(next));
     }
+    setTargetId('');
+    setInstanceId('');
     setProvider(next);
     setProviderPreset(presetId(0));
   };
@@ -164,7 +171,11 @@ export default function CliAutoLogin({
   };
 
   const start = async () => {
-    if (!credentialName.trim()) {
+    if (targetId && !target) {
+      setError('The selected credential is no longer available. Select another credential.');
+      return;
+    }
+    if (!target && !credentialName.trim()) {
       setError('Credential name is required.');
       return;
     }
@@ -183,10 +194,11 @@ export default function CliAutoLogin({
     try {
       const started = await api.startCliLogin({
         scope: isGlobal ? 'global' : 'account',
-        account_id: isGlobal ? undefined : accountId,
+        account_id: isGlobal ? undefined : loginAccountId,
+        ...(target ? { target_credential_id: target.id } : {}),
         cli: provider,
         ...(providerScoped ? { cli_provider: scopedProvider, cli_method: scopedMethod } : {}),
-        credential_name: credentialName.trim(),
+        credential_name: target?.name || credentialName.trim(),
         instance_id: instanceId,
       });
       setSession(started);
@@ -200,7 +212,7 @@ export default function CliAutoLogin({
   const cancel = async () => {
     if (!session) return;
     try {
-      const cancelled = await api.cancelCliLogin(session.id, isGlobal ? undefined : accountId);
+      const cancelled = await api.cancelCliLogin(session.id, isGlobal ? undefined : loginAccountId);
       setSession(cancelled);
     } catch (err: any) {
       showToast(err?.message || 'Failed to cancel login.', 'error');
@@ -234,14 +246,14 @@ export default function CliAutoLogin({
     const sessionId = session.id;
     const timer = setInterval(async () => {
       try {
-        const fresh = await api.getCliLoginSession(sessionId, isGlobal ? undefined : accountId);
+        const fresh = await api.getCliLoginSession(sessionId, isGlobal ? undefined : loginAccountId);
         setSession(fresh);
       } catch {
         // best-effort — SSE or the next tick will catch up
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [session?.id, session?.status, isGlobal, accountId]);
+  }, [session?.id, session?.status, isGlobal, loginAccountId]);
 
   // succeeded → refresh the credentials list once so the new row appears
   // without the user having to close the modal first.
@@ -267,7 +279,7 @@ export default function CliAutoLogin({
                 Cancel
               </Button>
               <Button variant="primary" onClick={start} disabled={starting} loading={starting}>
-                Start Login
+                {target ? 'Update Credential' : 'Start Login'}
               </Button>
             </>
           ) : TERMINAL_STATUSES.has(session.status) ? (
@@ -300,6 +312,25 @@ export default function CliAutoLogin({
               onChange={(e) => changeProvider(e.target.value)}
               options={loginClis.map((d) => ({ value: d.id, label: d.label }))}
             />
+            <Select
+              label="Save login to"
+              value={targetId}
+              onChange={(e) => {
+                setTargetId(e.target.value);
+                setInstanceId('');
+                setError('');
+              }}
+              options={[
+                { value: '', label: 'Create a new credential' },
+                ...credentials.filter((c) => c.provider === login?.harvest_provider)
+                  .map((c) => ({ value: c.id, label: `Update ${c.name}` })),
+              ]}
+            />
+            {target && (
+              <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
+                Updates “{target.name}” in place. Existing session and runtime settings keep using it.
+              </div>
+            )}
             {providerScoped && (
               <>
                 <Select
@@ -351,7 +382,8 @@ export default function CliAutoLogin({
             )}
             <Input
               label="Credential Name"
-              value={credentialName}
+              value={target?.name || credentialName}
+              disabled={!!target}
               onChange={(e) => setCredentialName(e.target.value)}
               error={error || undefined}
             />

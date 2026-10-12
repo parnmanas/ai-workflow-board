@@ -55,6 +55,10 @@ export class CliLoginSession {
   @Column({ type: 'varchar' })
   credential_name: string;
 
+  // Set only when this login refreshes an existing credential in place.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  target_credential_id: string | null;
+
   @Column({ type: 'varchar', default: 'starting' })
   status: CliLoginSessionStatus;
 

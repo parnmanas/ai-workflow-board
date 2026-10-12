@@ -1,9 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { api } from '../../api';
-import type { CatalogScope } from '../../types';
+import type { Credential, CatalogScope } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal } from '../common';
+import { Button, Input, Modal, Select } from '../common';
 import { cliLabel, cliLoginInfo, loginCapableClis, useCliCatalog } from '../../cli/catalog';
 import { defaultLoginCli } from '../../cli/presentation';
 
@@ -49,10 +49,12 @@ function validateJsonFile(contents: string): string | null {
 export default function CliCredentialImport({
   accountId,
   createScope = 'account',
+  credentials = [],
   onCreated,
 }: {
   accountId: string;
   createScope?: CatalogScope;
+  credentials?: Credential[];
   onCreated?: () => void | Promise<void>;
 }) {
   const { showToast } = useToast();
@@ -61,6 +63,8 @@ export default function CliCredentialImport({
   const credentialInput = useRef<HTMLInputElement | null>(null);
   const configInput = useRef<HTMLInputElement | null>(null);
   const [open, setOpen] = useState(false);
+  const [targetId, setTargetId] = useState('');
+  const target = credentials.find((c) => c.id === targetId);
   const [provider, setProvider] = useState<string>(() => defaultLoginCli());
   const [name, setName] = useState('');
   const [credentialJson, setCredentialJson] = useState('');
@@ -72,6 +76,7 @@ export default function CliCredentialImport({
   const details = importDetailsFor(provider) ?? importDetailsFor(defaultLoginCli());
 
   const reset = (nextProvider: string = provider) => {
+    setTargetId('');
     setProvider(nextProvider);
     setName('');
     setCredentialJson('');
@@ -105,12 +110,16 @@ export default function CliCredentialImport({
   };
 
   const createCredential = async () => {
+    if (targetId && !target) {
+      setError('The selected credential is no longer available. Select another credential.');
+      return;
+    }
     if (!details) {
       setError('No CLI in the catalog supports file import.');
       return;
     }
     const jsonError = validateJsonFile(credentialJson);
-    if (!name.trim()) {
+    if (!target && !name.trim()) {
       setError('Credential name is required.');
       return;
     }
@@ -118,25 +127,36 @@ export default function CliCredentialImport({
       setError(jsonError);
       return;
     }
-    if (createScope !== 'global' && !accountId) {
+    if (!target && createScope !== 'global' && !accountId) {
       setError('Ownership defaults are unavailable.');
       return;
     }
 
     setSaving(true);
     try {
-      await api.createCredential({
-        scope: createScope === 'global' ? 'global' : 'account',
-        account_id: createScope === 'global' ? undefined : accountId,
-        name: name.trim(),
-        description: `Imported from ${details.file} after ${details.command}.`,
-        provider: details.provider,
-        credentials: {
-          [details.field]: credentialJson.trim(),
-          ...(details.extraFile && extraFileContents.trim() ? { [details.extraFile]: extraFileContents } : {}),
-        },
-      });
-      showToast(`${details.label} credential created.`, 'success');
+      const fields = {
+        [details.field]: credentialJson.trim(),
+        ...(details.extraFile && extraFileContents.trim() ? { [details.extraFile]: extraFileContents } : {}),
+      };
+      if (target) {
+        await api.updateCredential(target.id, {
+          account_id: target.account_id || undefined,
+          credentials: fields,
+        });
+      } else {
+        await api.createCredential({
+          scope: createScope === 'global' ? 'global' : 'account',
+          account_id: createScope === 'global' ? undefined : accountId,
+          name: name.trim(),
+          description: `Imported from ${details.file} after ${details.command}.`,
+          provider: details.provider,
+          credentials: {
+            [details.field]: credentialJson.trim(),
+            ...(details.extraFile && extraFileContents.trim() ? { [details.extraFile]: extraFileContents } : {}),
+          },
+        });
+      }
+      showToast(`${details.label} credential ${target ? 'updated' : 'created'}.`, 'success');
       setOpen(false);
       reset(defaultLoginCli());
       await onCreated?.();
@@ -164,7 +184,7 @@ export default function CliCredentialImport({
           <>
             <Button variant="secondary" onClick={close} disabled={saving}>Cancel</Button>
             <Button variant="primary" onClick={createCredential} disabled={saving || !details} loading={saving}>
-              Create Credential
+              {target ? 'Update Credential' : 'Create Credential'}
             </Button>
           </>
         )}
@@ -241,9 +261,21 @@ export default function CliCredentialImport({
                 )}
               </div>
 
+              <Select
+                label="Save login to"
+                value={targetId}
+                onChange={(e) => { setTargetId(e.target.value); setError(''); }}
+                options={[
+                  { value: '', label: 'Create a new credential' },
+                  ...credentials.filter((c) => c.provider === details.provider)
+                    .map((c) => ({ value: c.id, label: `Update ${c.name}` })),
+                ]}
+              />
+              {target && <div style={{ fontSize: 13 }}>Existing session and runtime settings keep using this credential.</div>}
               <Input
                 label="Credential Name"
-                value={name}
+                value={target?.name || name}
+                disabled={!!target}
                 onChange={(event) => { setName(event.target.value); setError(''); }}
                 placeholder={`e.g. ${details.label} · work account`}
                 error={error || undefined}
@@ -251,7 +283,7 @@ export default function CliCredentialImport({
             </>
           )}
           <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
-            Importing copies the current login snapshot. If the CLI rotates or expires it, log in again and import a new credential before switching agents to it.
+            Importing copies the current login snapshot. If the CLI rotates or expires it, log in again and update the existing credential here.
           </div>
         </div>
       </Modal>

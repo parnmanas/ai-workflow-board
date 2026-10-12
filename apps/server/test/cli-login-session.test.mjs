@@ -61,6 +61,14 @@ function credRepoStub() {
       saved.push(row);
       return row;
     },
+    findOne: async ({ where }) => saved.find((row) => row.id === where.id) || null,
+    update: async (where, patch) => {
+      const row = saved.find((row) => row.id === where.id && row.provider === where.provider
+        && row.account_id === (typeof where.account_id === 'string' ? where.account_id : null));
+      if (!row) return { affected: 0 };
+      Object.assign(row, patch);
+      return { affected: 1 };
+    },
     saved,
   };
 }
@@ -878,4 +886,56 @@ test('applyProgress: a url-only awaiting_user report is stored (claude has no co
   });
   assert.equal(second.verification_url, 'https://auth.openai.com/codex/device');
   assert.equal(second.user_code, 'WZ1E-3RVM7');
+});
+
+
+test('CLI re-login updates the same credential, preserving metadata and optional config; failure leaves secrets intact', async () => {
+  const { encrypt, decryptStrict } = await import('../dist/services/encryption.service.js');
+  const h = service();
+  const original = await h.credRepo.save(h.credRepo.create({
+    account_id: 'w1', name: 'Work Codex', description: 'Keep me', provider: 'codex_subscription',
+    agent_env: false, encrypted_data: encrypt(JSON.stringify({ auth_json: 'old-auth', config_toml: 'model = "my-model"' })),
+  }));
+  const args = { accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'Ignored new name',
+    targetCredentialId: original.id, instanceId: 'inst-1', triggeredById: 'u1' };
+  const failed = await h.instance.startSession(args);
+  await h.instance.applyProgress({ sessionId: failed.id, callerAgentId: 'manager-agent-1', commandId: 'cmd-xyz', status: 'failed' });
+  assert.equal(JSON.parse(decryptStrict(original.encrypted_data)).auth_json, 'old-auth');
+  const session = await h.instance.startSession(args);
+  const result = await h.instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: 'cmd-xyz',
+    status: 'succeeded', credentialFields: { auth_json: 'new-auth' } });
+  assert.equal(result.target_credential_id, original.id);
+  assert.equal(result.created_credential_id, original.id);
+  assert.equal(h.credRepo.saved.length, 1, 'no new row or bindings to repoint');
+  assert.equal(original.name, 'Work Codex');
+  assert.equal(original.description, 'Keep me');
+  assert.equal(original.account_id, 'w1');
+  assert.deepEqual(JSON.parse(decryptStrict(original.encrypted_data)), { auth_json: 'new-auth', config_toml: 'model = "my-model"' });
+  await h.instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: 'cmd-xyz',
+    status: 'succeeded', credentialFields: { auth_json: 'stale-duplicate' } });
+  assert.equal(JSON.parse(decryptStrict(original.encrypted_data)).auth_json, 'new-auth');
+});
+
+test('CLI credential refresh validates target scope/provider before dispatch and again at completion', async () => {
+  const h = service();
+  const target = await h.credRepo.save(h.credRepo.create({ account_id: 'w2', name: 'Target', provider: 'codex_subscription', encrypted_data: 'untouched' }));
+  const args = { accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'Target',
+    targetCredentialId: target.id, instanceId: 'inst-1', triggeredById: 'u1' };
+  await assert.rejects(h.instance.startSession(args), /not found in this scope/);
+  target.account_id = null;
+  await assert.rejects(h.instance.startSession(args), /not found in this scope/);
+  target.account_id = 'w1';
+  target.provider = 'codex_api_key';
+  await assert.rejects(h.instance.startSession(args), /provider does not match/);
+  assert.equal(h.commandService.calls.length, 0);
+  target.provider = 'codex_subscription';
+  const session = await h.instance.startSession(args);
+  target.account_id = null; // The row was re-scoped while the browser login was pending.
+  await assert.rejects(h.instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: 'cmd-xyz',
+    status: 'succeeded', credentialFields: { auth_json: 'new-auth' } }), /not found in this scope/);
+  assert.equal(target.encrypted_data, 'untouched');
+  h.credRepo.saved.splice(0);
+  await assert.rejects(h.instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: 'cmd-xyz',
+    status: 'succeeded', credentialFields: { auth_json: 'new-auth' } }), /not found in this scope/);
+  assert.equal(h.credRepo.saved.length, 0, 'a deleted refresh target never becomes a new credential');
 });

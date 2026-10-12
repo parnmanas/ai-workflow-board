@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import {
   CliLoginSession,
   TERMINAL_CLI_LOGIN_SESSION_STATUSES,
@@ -56,6 +56,7 @@ export interface StartCliLoginSessionArgs {
   cliProvider?: string;
   cliMethod?: string;
   credentialName: string;
+  targetCredentialId?: string;
   instanceId: string;
   triggeredById: string;
 }
@@ -97,6 +98,9 @@ export class CliLoginSessionService {
     if (!args.credentialName?.trim()) {
       throw makeError(400, 'credential_name is required');
     }
+    if (args.targetCredentialId) {
+      await this.refreshTarget(args.targetCredentialId, args.isGlobal, args.accountId, provider);
+    }
     const cliProvider = (args.cliProvider || '').trim();
     const cliMethod = (args.cliMethod || '').trim();
     if (PROVIDER_SCOPED_CLIS.has(args.cli) && (!cliProvider || !cliMethod)) {
@@ -127,6 +131,7 @@ export class CliLoginSessionService {
         cli_provider: cliProvider,
         cli_method: cliMethod,
         credential_name: args.credentialName.trim(),
+        target_credential_id: args.targetCredentialId || null,
         status: 'starting',
         instance_id: inst.instance_id,
         manager_agent_id: inst.agent_id,
@@ -255,22 +260,43 @@ export class CliLoginSessionService {
       if (!requiredField || !fields[requiredField]?.trim()) {
         throw makeError(400, `credential_fields.${requiredField || '?'} is required on success`);
       }
-      const plaintext = JSON.stringify(fields);
+      const target = session.target_credential_id
+        ? await this.refreshTarget(session.target_credential_id, session.is_global, session.account_id, provider)
+        : null;
+      let existingFields: Record<string, string> = {};
+      if (target) {
+        try { existingFields = JSON.parse(decryptStrict(target.encrypted_data)); } catch {
+          // Reauthentication can repair credentials encrypted with a lost key.
+        }
+      }
+      const plaintext = JSON.stringify({ ...existingFields, ...fields });
       const encrypted = encrypt(plaintext);
       if (decryptStrict(encrypted) !== plaintext) {
         throw makeError(500, 'Credential encryption verification failed; credential was not saved');
       }
-      const credential = await this.credRepo.save(
-        this.credRepo.create({
-          account_id: session.is_global ? null : session.account_id,
-          name: session.credential_name,
-          description: session.cli_provider
-            ? `Automatically created via CLI device-auth login (${session.cli} / ${session.cli_provider}).`
-            : `Automatically created via CLI device-auth login (${session.cli}).`,
+      let credential: Credential;
+      if (target) {
+        credential = target;
+        // Update only secrets. Names, ownership, exposure and every binding stay intact.
+        const updated = await this.credRepo.update({
+          id: credential.id,
+          account_id: session.is_global ? IsNull() : session.account_id,
           provider,
-          encrypted_data: encrypted,
-        }),
-      );
+        }, { encrypted_data: encrypted });
+        if (updated.affected !== 1) throw makeError(409, 'Credential changed or was deleted during login; start again');
+      } else {
+        credential = await this.credRepo.save(
+          this.credRepo.create({
+            account_id: session.is_global ? null : session.account_id,
+            name: session.credential_name,
+            description: session.cli_provider
+              ? `Automatically created via CLI device-auth login (${session.cli} / ${session.cli_provider}).`
+              : `Automatically created via CLI device-auth login (${session.cli}).`,
+            provider,
+            encrypted_data: encrypted,
+          }),
+        );
+      }
       session.status = 'succeeded';
       session.created_credential_id = credential.id;
       session.finished_at = new Date();
@@ -287,6 +313,15 @@ export class CliLoginSessionService {
     await this.sessionRepo.save(session);
     this.emitProgress(session);
     return session;
+  }
+
+  private async refreshTarget(id: string, isGlobal: boolean, accountId: string, provider: string): Promise<Credential> {
+    const credential = await this.credRepo.findOne({ where: { id } });
+    if (!credential || credential.account_id !== (isGlobal ? null : accountId)) {
+      throw makeError(404, 'Credential not found in this scope');
+    }
+    if (credential.provider !== provider) throw makeError(400, 'Credential provider does not match this CLI login');
+    return credential;
   }
 
   /** CliLoginSessionReaperService가 호출 — 오래 non-terminal인 세션을 회수. */
