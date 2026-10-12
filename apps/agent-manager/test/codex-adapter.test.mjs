@@ -584,3 +584,50 @@ test('runtime template effort is passed as a quoted Codex config override', () =
   const defaultRun = adapter.buildOneshotSpawn({ rolePrompt: '', taskText: 'test', mcpConfigPath: null });
   assert.equal(defaultRun.args.some((a) => a.startsWith('model_reasoning_effort=')), false);
 });
+
+test('subscription preparation preserves Codex token rotation until the AWB credential changes', async () => {
+  const home = await freshDir();
+  const adapter = new CodexCliAdapter();
+  const source = JSON.stringify({ tokens: { account_id: 'account-a', refresh_token: 'original' }, last_refresh: '2026-09-01T00:00:00Z' });
+  const credential = { provider: 'codex_subscription', fields: { auth_json: source } };
+  await adapter.prepareCliHome(home, credential);
+  const refreshed = JSON.stringify({ tokens: { account_id: 'account-a', refresh_token: 'rotated' }, last_refresh: '2026-09-02T00:00:00Z' });
+  await fsp.writeFile(join(home, 'auth.json'), refreshed);
+  // A new adapter instance models a manager restart as well as a new session.
+  await new CodexCliAdapter().prepareCliHome(home, credential);
+  assert.equal(await fsp.readFile(join(home, 'auth.json'), 'utf8'), refreshed);
+
+  const replacement = JSON.stringify({ tokens: { account_id: 'account-a', refresh_token: 'new-login' }, last_refresh: '2026-09-03T00:00:00Z' });
+  await adapter.prepareCliHome(home, { ...credential, fields: { auth_json: replacement } });
+  assert.equal(await fsp.readFile(join(home, 'auth.json'), 'utf8'), replacement);
+  await fsp.unlink(join(home, 'auth.json'));
+  await adapter.prepareCliHome(home, { ...credential, fields: { auth_json: replacement } });
+  assert.equal(await fsp.readFile(join(home, 'auth.json'), 'utf8'), replacement, 'a missing file is seeded again');
+
+  await adapter.prepareCliHome(home, { provider: 'codex_api_key', fields: { api_key: 'api-key' } });
+  await assert.rejects(fsp.stat(join(home, 'auth.json')), { code: 'ENOENT' });
+  await assert.rejects(fsp.stat(join(home, 'awb-auth-source.sha256')), { code: 'ENOENT' });
+});
+
+test('subscription preparation adopts a newer private auth file only for the same account', async () => {
+  const adapter = new CodexCliAdapter();
+  const source = JSON.stringify({ tokens: { account_id: 'account-a', refresh_token: 'original' }, last_refresh: '2026-09-01T00:00:00Z' });
+  for (const accountId of ['account-a', 'account-b']) {
+    const home = await freshDir();
+    const local = JSON.stringify({ tokens: { account_id: accountId, refresh_token: 'rotated' }, last_refresh: '2026-09-02T00:00:00Z' });
+    await fsp.writeFile(join(home, 'auth.json'), local);
+    await adapter.prepareCliHome(home, { provider: 'codex_subscription', fields: { auth_json: source } });
+    assert.equal(await fsp.readFile(join(home, 'auth.json'), 'utf8'), accountId === 'account-a' ? local : source);
+  }
+});
+
+test('subscription preparation replaces an inherited auth symlink without touching operator auth', async () => {
+  const operator = await freshDir();
+  const home = await freshDir();
+  const authPath = join(operator, 'auth.json');
+  await fsp.writeFile(authPath, 'operator auth');
+  await fsp.symlink(authPath, join(home, 'auth.json'));
+  await new CodexCliAdapter().prepareCliHome(home, { provider: 'codex_subscription', fields: { auth_json: 'credential auth' } });
+  assert.equal(await fsp.readFile(authPath, 'utf8'), 'operator auth');
+  assert.equal((await fsp.lstat(join(home, 'auth.json'))).isSymbolicLink(), false);
+});

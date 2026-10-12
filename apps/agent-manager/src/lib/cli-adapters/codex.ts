@@ -8,6 +8,7 @@
 // rather than sharing the operator's $HOME.
 
 import { promises as fsp, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse, stringify } from 'smol-toml';
@@ -583,23 +584,25 @@ export class CodexCliAdapter extends CliAdapter {
   ): Promise<{ extraEnv: Record<string, string> }> {
     const mainHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
 
-    // Always start from a clean slate so credential mode changes
-    // (operator-default → subscription → api_key) take effect on the
-    // next spawn without a leftover from the previous mode winning.
-    await this.#unlinkIfPresent(join(cliHomeDir, 'auth.json'));
-
     if (credential && credential.provider === 'codex_subscription') {
       // Operator pasted the literal `auth.json` (and optionally `config.toml`)
-      // content into the AWB UI; replay verbatim. config.toml is optional —
-      // when missing we leave it absent so codex uses its compiled defaults.
+      // content into the AWB UI. Seed auth once, then let Codex rotate it;
+      // config.toml is optional and uses compiled defaults when omitted.
       const authJson = credential.fields?.auth_json ?? '';
       const configToml = credential.fields?.config_toml ?? '';
       if (authJson) {
-        await fsp.writeFile(join(cliHomeDir, 'auth.json'), authJson, { mode: 0o600 });
+        await this.#prepareSubscriptionAuth(cliHomeDir, authJson);
+      } else {
+        await this.#unlinkIfPresent(join(cliHomeDir, 'auth.json'));
+        await this.#unlinkIfPresent(join(cliHomeDir, 'awb-auth-source.sha256'));
       }
       await this.#prepareConfig(cliHomeDir, mainHome, configToml, 'replace', mcp);
       return { extraEnv: {} };
     }
+
+    // Mode changes must discard subscription state, including its source stamp.
+    await this.#unlinkIfPresent(join(cliHomeDir, 'auth.json'));
+    await this.#unlinkIfPresent(join(cliHomeDir, 'awb-auth-source.sha256'));
 
     if (credential && credential.provider === 'codex_api_key') {
       // OPENAI_API_KEY is the standard env var the codex CLI consults for
@@ -633,6 +636,39 @@ export class CodexCliAdapter extends CliAdapter {
     }
     await this.#prepareConfig(cliHomeDir, mainHome, '', 'inherit', mcp);
     return { extraEnv: {} };
+  }
+
+  async #prepareSubscriptionAuth(cliHomeDir: string, source: string): Promise<void> {
+    const authPath = join(cliHomeDir, 'auth.json');
+    const stampPath = join(cliHomeDir, 'awb-auth-source.sha256');
+    const stamp = createHash('sha256').update(source).digest('hex');
+    const previousStamp = await this.#readIfPresent(stampPath);
+    const local = await this.#readIfPresent(authPath);
+    const privateFile = await fsp.lstat(authPath).then((stat) => stat.isFile(), (err) => {
+      if (err?.code === 'ENOENT') return false;
+      throw err;
+    });
+    // Codex rotates refresh tokens in this file. Replaying the original AWB
+    // credential on every open destroys that rotation and reuses a spent token.
+    let preserve = privateFile && !!local && previousStamp === stamp;
+    if (privateFile && local && !previousStamp) {
+      // Adopt a refreshed home created before source stamps were introduced.
+      try {
+        const saved = JSON.parse(local);
+        const supplied = JSON.parse(source);
+        preserve = !!saved.tokens?.account_id
+          && saved.tokens.account_id === supplied.tokens?.account_id
+          && !!saved.tokens.refresh_token
+          && Date.parse(saved.last_refresh) > Date.parse(supplied.last_refresh);
+      } catch { /* An unrecognized file is replaced by the supplied credential. */ }
+    }
+    if (!preserve) {
+      // Never write through an operator-home symlink inherited in another mode.
+      await this.#unlinkIfPresent(authPath);
+      await fsp.writeFile(authPath, source, { mode: 0o600 });
+    }
+    await this.#unlinkIfPresent(stampPath);
+    await fsp.writeFile(stampPath, stamp, { mode: 0o600 });
   }
 
   async #prepareConfig(
