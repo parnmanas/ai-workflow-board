@@ -782,10 +782,23 @@ export class OpencodeCliAdapter extends CliAdapter {
   }
 
   async #linkIfPresent(src: string, dst: string): Promise<void> {
+    let sourcePath: string;
     try {
-      await fsp.access(src);
+      sourcePath = await fsp.realpath(src);
     } catch {
       return;
+    }
+    // AgentSessionRunner may already link the entire data directory to the
+    // operator's store. Different path strings then name the SAME auth.json:
+    // unlink(dst) would delete the operator's keys and symlink(src, dst) would
+    // replace them with a self-referential loop. Also leave correct file links
+    // intact when preparing the same home again (or concurrently).
+    try {
+      if (await fsp.realpath(dst) === sourcePath) return;
+    } catch (err: any) {
+      // Missing/broken destination links may be replaced. Other lookup errors
+      // must abort before we remove a credential we could not identify.
+      if (err?.code !== 'ENOENT' && err?.code !== 'ELOOP') throw err;
     }
     try {
       await fsp.unlink(dst);
