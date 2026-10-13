@@ -17,6 +17,7 @@ import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpComm
 import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
 import { watchCodexAsyncQuestions } from '../dist/lib/clis/codex/async-questions.js';
 import { appendFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const MANAGER = 'manager-1';
@@ -102,6 +103,7 @@ async function harness(t, runnerOptions = {}, adapterEnv = {}) {
     {
       getManagerId: () => MANAGER,
       store,
+      sessionHomesDir: join(root, 'session-homes'),
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
       // 어댑터 프로세스의 env — 픽스처가 MCP handshake 결과 같은 시나리오를 바꾸는 스위치로 읽는다.
       ...(Object.keys(adapterEnv).length ? { baseEnv: { ...process.env, ...adapterEnv } } : {}),
@@ -1188,4 +1190,42 @@ test('history read failures reach the RPC caller instead of returning an empty s
   assert.equal(response.ok, false);
   assert.equal(response.code, 'history_read_failed');
   assert.match(response.error, /database query timed out/);
+});
+
+
+test('selected launch permission is applied through ACP and unavailable modes fail visibly', async (t) => {
+  const { runner, server, cwd } = await harness(t);
+  await runner.handle(request('open', { cli: 'codex', request_id: 'launch-agent', cwd, config_defaults: { __permission_mode: 'agent' } }));
+  assert.equal(server.rpc('launch-agent').ok, true);
+  assert.equal(server.rpc('launch-agent').result.current_mode, 'agent');
+  await runner.handle(request('close', { cli: 'codex', session_id: server.rpc('launch-agent').result.session_id }));
+  await runner.handle(request('open', { cli: 'codex', request_id: 'launch-unavailable', cwd, config_defaults: { __permission_mode: 'agent-full-access' } }));
+  assert.equal(server.rpc('launch-unavailable').ok, false);
+  assert.match(server.rpc('launch-unavailable').error, /does not offer permission mode/);
+  await runner.handle(request('open', { cli: 'claude', request_id: 'launch-invalid', cwd, config_defaults: { __permission_mode: 'agent-full-access' } }));
+  assert.equal(server.rpc('launch-invalid').ok, false);
+  assert.match(server.rpc('launch-invalid').error, /Unsupported session option/);
+});
+
+test('session worktree is used by ACP, preserved on restart and cleaned on explicit close after merge', async (t) => {
+  const { runner, server, cwd } = await harness(t);
+  const git = (path, ...args) => execFileSync('git', ['-C', path, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git(cwd, 'init', '-b', 'main');
+  git(cwd, 'config', 'user.name', 'Test'); git(cwd, 'config', 'user.email', 'test@example.invalid');
+  await writeFile(join(cwd, 'base'), 'base'); git(cwd, 'add', '.'); git(cwd, 'commit', '-m', 'initial');
+  await runner.handle(request('open', { request_id: 'managed-worktree', cwd, config_defaults: { __git_workflow: 'worktree' } }));
+  const opened = server.rpc('managed-worktree');
+  assert.equal(opened.ok, true, opened.error);
+  const sid = opened.result.session_id;
+  const workDir = opened.result.cwd;
+  assert.notEqual(workDir, cwd);
+  const branch = git(workDir, 'branch', '--show-current');
+  await runner.handle(request('restart', { session_id: sid, cwd, config_defaults: { __git_workflow: 'worktree' } }));
+  assert.equal(git(workDir, 'branch', '--show-current'), branch);
+  await writeFile(join(workDir, 'feature'), 'done'); git(workDir, 'add', 'feature'); git(workDir, 'commit', '-m', 'feature');
+  git(cwd, 'merge', '--ff-only', branch);
+  await runner.handle(request('close', { session_id: sid }));
+  assert.equal(existsSync(workDir), false);
+  assert.ok(server.events(sid).some(e => e.payload.text?.includes('Merged session worktree and local branch removed')));
+  assert.equal(runner._snapshot().length, 0);
 });

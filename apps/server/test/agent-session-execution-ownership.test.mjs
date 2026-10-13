@@ -96,6 +96,7 @@ test('native execution pins ownership, credential and runtime settings across am
       body: JSON.stringify({
         instance_id: `execution-test-${managerId}`, agent_id: managerId, host_id: managerId,
         mode: 'manager', hostname: 'execution-host', plugin_version: 'test', cli: 'claude',
+        session_launch_options: { claude: [{ config_id: '__permission_mode', name: 'Permissions', type: 'select', options: [{ value: 'bypassPermissions', name: 'Skip permissions', description: 'Skip tool approval prompts.' }] }, { config_id: '__git_workflow', name: 'Git workflow', type: 'select', options: [{ value: 'main', name: 'Main' }, { value: 'worktree', name: 'Worktree' }] }] },
         cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4242, started_at: new Date().toISOString(),
       }),
     });
@@ -324,6 +325,34 @@ test('native execution pins ownership, credential and runtime settings across am
     assert.equal(newSnapshot.account_id, accountA.id);
     assert.equal(newSnapshot.credential_id, replacementCredential.id);
     assertPinned(await send('restart'), { ...originalConfig, model: 'model-explicit', __mode: 'agent' });
+  });
+
+  await t.test('launch metadata and per-session overrides survive HTTP and pin without changing defaults', async () => {
+    const before = await call(`${base}${cliPath}/settings`, { headers: headers(accountA.id) });
+    assert.equal(before.body.launch_options[0].config_id, '__permission_mode');
+    assert.equal(before.body.launch_options[0].options[0].description, 'Skip tool approval prompts.');
+    nextNewSessionId = `overrides-${randomUUID()}`;
+    const overrides = { __permission_mode: 'bypassPermissions', __git_workflow: 'worktree', model: 'model-explicit', reasoning: null };
+    const response = await call(`${base}${cliPath}/sessions`, {
+      method: 'POST', headers: headers(accountA.id), body: JSON.stringify({ cwd: '/tmp/execution-fixture', config_overrides: overrides }),
+    });
+    assert.equal(response.status, 201, response.text);
+    const sent = requests.filter(r => r.op === 'open').at(-1);
+    assert.equal(sent.config_defaults.__permission_mode, 'bypassPermissions');
+    assert.equal(sent.config_defaults.__git_workflow, 'worktree');
+    assert.equal(sent.config_defaults.reasoning, undefined);
+    const saved = await ds.getRepository('AgentSessionExecution').findOneByOrFail({ manager_id: managerId, cli: 'claude', session_id: nextNewSessionId });
+    assert.deepEqual(JSON.parse(saved.config_defaults), sent.config_defaults);
+    const after = await call(`${base}${cliPath}/settings`, { headers: headers(accountA.id) });
+    assert.deepEqual(after.body.default_config, before.body.default_config);
+    const invalid = await call(`${base}${cliPath}/sessions`, {
+      method: 'POST', headers: headers(accountA.id), body: JSON.stringify({ cwd: '/tmp/execution-fixture', config_overrides: { __permission_mode: 'made-up' } }),
+    });
+    assert.equal(invalid.status, 400);
+    const resumeOverride = await call(`${base}${cliPath}/sessions`, {
+      method: 'POST', headers: headers(accountA.id), body: JSON.stringify({ session_id: nextNewSessionId, config_overrides: overrides }),
+    });
+    assert.equal(resumeOverride.status, 400);
   });
 
   await t.test('database snapshot survives a complete server reboot with no live session cache', async () => {

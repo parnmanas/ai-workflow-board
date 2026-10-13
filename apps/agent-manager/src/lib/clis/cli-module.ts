@@ -218,6 +218,8 @@ export interface CliSessionStoreDriver {
 }
 
 export interface CliSessionSpec {
+  /** Options available before the first ACP session exists, advertised by the host. */
+  readonly launchOptions?: readonly CliSessionLaunchOption[];
   /** 이 장비에서 세션을 열 수 있는가 — PATH 만 본다(spawn 없음). */
   detect(env: NodeJS.ProcessEnv, findOnPath: (name: string) => Promise<string | null>): Promise<boolean>;
   /** ACP 어댑터 명령. `AWB_ACP_COMMAND_<CLI>` env override 는 호출자가 먼저 본다. */
@@ -241,6 +243,16 @@ export interface CliSessionSpec {
    *  제공하지 않는다 — 없는 파일을 뒤져 "주인을 못 찾았다" 고 말하는 것보다,
    *  애초에 그 선택지를 내놓지 않는 편이 정직하다. */
   lockRelativePath?(sessionId: string): string;
+}
+
+export interface CliSessionLaunchOption {
+  config_id: string;
+  name: string;
+  description: string;
+  category: 'launch';
+  type: 'select';
+  current_value: string;
+  options: Array<{ value: string; name: string; description: string }>;
 }
 
 // ─── effort preset ─────────────────────────────────────────────────────────

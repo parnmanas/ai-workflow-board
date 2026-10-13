@@ -1,3 +1,4 @@
+import { sanitizeSessionLaunchOptions } from '../../common/session-launch-options';
 import { ApiBearerAuth, ApiSecurity, ApiTags, ApiOperation } from '@nestjs/swagger';
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
@@ -899,6 +900,7 @@ export class AgentManagerController {
       runtime_capabilities,
       manager_capabilities,
       acp_session_clis,
+      session_launch_options: sanitizeSessionLaunchOptions(body?.session_launch_options),
       acp_adapters,
       acp_adapter_latest_versions,
       ...(agent_sessions !== undefined ? { agent_sessions } : {}),

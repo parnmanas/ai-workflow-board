@@ -1,3 +1,5 @@
+import { SESSION_PERMISSION_KEY, SESSION_WORKFLOW_KEY, validateSessionLaunchOptions } from './session-launch-options.js';
+import { SessionWorkspaces, sessionWorkflowInstruction, type SessionWorkspace } from './session-workspace.js';
 import { normalizeAccountScope } from './account-scope.js';
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
@@ -9,8 +11,8 @@ import { normalizeAccountScope } from './account-scope.js';
 //     사용자 지정)를 띄워 **운영자의 CLI 홈 그대로** session/load 또는 session/new 로 연 뒤,
 //   - 스트림(text · reasoning · tool call · permission · usage)을 가공 없이 서버로 중계한다.
 //
-// 기존 chat/ticket 세션 매니저와 달리 AWB Agent identity·프롬프트 래핑·히스토리 재조립이
-// 없다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
+// AWB Agent identity·히스토리 재조립 없이 CLI 기록을 사용한다. 새 세션의 Git workflow
+// 지침은 prompt에 전달한다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
 
 import { access, constants as fsConstants, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -93,7 +95,7 @@ export interface AgentSessionRequest {
   /** set_config_option */
   config_id?: string;
   config_value?: string | boolean;
-  /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode). */
+  /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode, `__permission_mode` / `__git_workflow` 는 실행 옵션). */
   config_defaults?: Record<string, string | boolean>;
   /** CLI 설정에서 고른 Claude backend profile — 그 엔드포인트·모델로 세션을 띄운다. */
   runtime_profile?: RuntimeProfileSpec | null;
@@ -213,6 +215,7 @@ interface PendingElicitation {
 type CommandPatch = { name: string; description: string; input_hint?: string };
 
 interface LiveSession {
+  workspace: SessionWorkspace | null;
   cli: string;
   sessionId: string;
   /** 이 프로세스의 MCP 연결이 `X-AWB-Session-Id` 로 보내는 값 — 불러온 세션은 세션 id, 새 세션은 `pending-<uuid>`. */
@@ -476,6 +479,7 @@ export class AgentSessionRunner {
   readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir' | 'silenceWarnMs'>>
     & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher' | 'maxLineBytes'>;
   readonly #store: AgentSessionStore;
+  readonly #workspaces: SessionWorkspaces;
   readonly #live = new Map<string, LiveSession>();
   readonly #opening = new Map<string, Promise<LiveSession>>();
   /** 프로세스가 먼저 죽어 #live 에서 빠진 세션 — stopAll 이 마지막 상태 전송까지 기다린다. */
@@ -483,6 +487,7 @@ export class AgentSessionRunner {
 
   constructor(config: AwbConfig, options: AgentSessionRunnerOptions) {
     this.#config = config;
+    this.#workspaces = new SessionWorkspaces(join(options.sessionHomesDir ?? join(AGENT_MANAGER_HOME, 'session-homes'), '..', 'session-workspaces'));
     this.#store = options.store ?? new AgentSessionStore();
     // 기록에서 다시 읽은 이미지도 라이브와 같은 scratch·같은 참조 규칙으로 보관한다.
     this.#store.setImageSink?.((cli, sessionId, base64) => this.storeHistoryImage(cli, sessionId, base64));
@@ -752,7 +757,6 @@ export class AgentSessionRunner {
   }
 
   async #open(cli: string, requestedSessionId: string, requestedCwd: string, title: string, request: AgentSessionRequest): Promise<LiveSession> {
-    const tag = `[agent-session ${cli}${requestedSessionId ? ` ${requestedSessionId.slice(0, 8)}` : ' new'}]`;
     let cwd = requestedCwd.trim();
     if (requestedSessionId) {
       // Restore metadata even when the caller already supplied a working directory.
@@ -760,6 +764,23 @@ export class AgentSessionRunner {
       cwd ||= history?.session?.cwd || '';
       title = history?.session?.title || title;
     }
+    validateSessionLaunchOptions(cli, request.config_defaults);
+    const workspace = await this.#workspaces.prepare(cli, requestedSessionId, cwd, String(request.config_defaults?.[SESSION_WORKFLOW_KEY] ?? 'main'));
+    let opened: LiveSession | null = null;
+    try {
+      const live = await this.#openAdapter(cli, requestedSessionId, workspace?.cwd ?? cwd, title, request, workspace);
+      opened = live;
+      if (workspace) await this.#workspaces.save(cli, live.sessionId, workspace);
+      return live;
+    } catch (error) {
+      if (opened) await this.#closeLive(cli, opened.sessionId, 'idle', 'workspace_binding_failed');
+      if (!requestedSessionId && workspace) await this.#workspaces.discard(cli, '', workspace);
+      throw error;
+    }
+  }
+
+  async #openAdapter(cli: string, requestedSessionId: string, cwd: string, title: string, request: AgentSessionRequest, workspace: SessionWorkspace | null): Promise<LiveSession> {
+    const tag = `[agent-session ${cli}${requestedSessionId ? ` ${requestedSessionId.slice(0, 8)}` : ' new'}]`;
     if (!cwd) throw new Error('No working directory: pass cwd for a new session.');
     try {
       await access(cwd, fsConstants.R_OK);
@@ -827,6 +848,7 @@ export class AgentSessionRunner {
       const mcpServers = this.#options.mcpServers ? this.#options.mcpServers(sessionIdForMcp) : this.#defaultMcpServers(sessionIdForMcp);
 
       live = {
+        workspace,
         cli,
         sessionId: requestedSessionId,
         mcpSessionRef: sessionIdForMcp,
@@ -939,10 +961,28 @@ export class AgentSessionRunner {
       // 기억된 설정(approval 모드·모델 …)을 다시 건다 — 어댑터는 프로세스마다 기본값으로 시작하므로
       // 이걸 하지 않으면 유휴 회수·재접속 때마다 사용자의 선택이 사라진다. 실패해도 세션은 연다.
       await this.#applyConfigDefaults(live, request.config_defaults);
+      const permissionMode = request.config_defaults?.[SESSION_PERMISSION_KEY];
+      if (typeof permissionMode === 'string') {
+        const option = live.configOptions.find((o) => o.category === 'mode' && o.options.some((v) => v.value === permissionMode));
+        if (option) {
+          await this.#setConfigOption(live, option.config_id, permissionMode);
+          if (live.configOptions.find((o) => o.config_id === option.config_id)?.current_value !== permissionMode) {
+            throw new Error(`The ${cli} ACP adapter did not apply permission mode ${permissionMode}.`);
+          }
+        }
+        else if (live.availableModes.some((m) => m.id === permissionMode)) {
+          await live.client.request('session/set_mode', { sessionId: live.sessionId, modeId: permissionMode }, { timeoutMs: this.#options.requestTimeoutMs });
+          live.currentMode = permissionMode;
+          this.#enqueue(live, [], { current_mode: permissionMode, reason: 'launch_permissions' });
+        } else throw new Error(`The ${cli} ACP adapter does not offer permission mode ${permissionMode}. Update the adapter or choose a supported mode.`);
+      }
       this.#touch(live);
       return live;
     } catch (err) {
-      if (live) this.#closeAsyncQuestions(live);
+      if (live) {
+        if (this.#live.get(this.#key(cli, live.sessionId)) === live) this.#live.delete(this.#key(cli, live.sessionId));
+        this.#closeAsyncQuestions(live);
+      }
       const child = client.process;
       client.close();
       if (child?.pid) await terminateDetachedProcessTree(child.pid, 250, { child }).catch(() => undefined);
@@ -1049,6 +1089,7 @@ export class AgentSessionRunner {
   async #applyConfigDefaults(live: LiveSession, defaults: Record<string, string | boolean> | undefined): Promise<void> {
     if (!defaults) return;
     for (const [key, value] of Object.entries(defaults)) {
+      if (key === SESSION_PERMISSION_KEY || key === SESSION_WORKFLOW_KEY) continue;
       try {
         if (key === MODE_DEFAULT_KEY) {
           if (typeof value !== 'string' || !value || live.currentMode === value) continue;
@@ -1416,7 +1457,12 @@ export class AgentSessionRunner {
       this.#enqueue(live, [{ type: 'error', payload: { message: 'A turn is already in progress.', code: 'turn_in_progress' }, turn_id: turnId }]);
       return;
     }
-    const blocks: { type: string; text?: string; data?: string; mimeType?: string }[] = [{ type: 'text', text }];
+    // Native slash commands must remain unwrapped for adapter command dispatch.
+    const instruction = text.trimStart().startsWith('/') ? '' : sessionWorkflowInstruction(live.workspace);
+    const blocks: { type: string; text?: string; data?: string; mimeType?: string }[] = [
+      ...(instruction ? [{ type: 'text', text: instruction }] : []),
+      { type: 'text', text },
+    ];
     const validImages: { mimeType: string; data: string }[] = [];
     for (const image of Array.isArray(images) ? images : []) {
       const base64 = typeof image?.base64 === 'string' ? image.base64.replace(/\s+/g, '') : '';
@@ -2156,7 +2202,19 @@ export class AgentSessionRunner {
   async #closeLive(cli: string, sessionId: string, finalStatus: 'closed' | 'idle', reason: string = finalStatus): Promise<void> {
     const key = this.#key(cli, sessionId);
     const live = this.#live.get(key);
-    if (!live) return;
+    if (!live) {
+      if (finalStatus === 'closed') {
+        const workspace = await this.#workspaces.prepare(cli, sessionId, '').catch(() => null);
+        if (workspace) {
+          const text = await this.#workspaces.cleanup(workspace);
+          await this.#workspaces.save(cli, sessionId, workspace);
+          if (text) await postAgentSessionEvents(this.#config, this.#ref(cli, sessionId), [{
+            id: `${sessionId}:cleanup:${randomUUID()}`, seq: 0, turn_id: '', type: 'system', payload: { text }, created_at: new Date().toISOString(),
+          }], { status: 'closed', reason: 'workspace_cleanup' });
+        }
+      }
+      return;
+    }
     live.closing = true;
     this.#closeAsyncQuestions(live);
     this.#clearIdle(live);
@@ -2170,6 +2228,11 @@ export class AgentSessionRunner {
     live.client.close();
     if (pid && child) await terminateDetachedProcessTree(pid, 250, { child }).catch(() => undefined);
     await live.runtimeLease?.close().catch(() => undefined);
+    if (finalStatus === 'closed' && live.workspace) {
+      const cleanup = await this.#workspaces.cleanup(live.workspace);
+      await this.#workspaces.save(cli, sessionId, live.workspace);
+      if (cleanup) this.#enqueue(live, [{ type: 'system', payload: { text: cleanup } }]);
+    }
     const text = finalStatus === 'closed'
       ? 'Agent process stopped.'
       : reason === 'idle'

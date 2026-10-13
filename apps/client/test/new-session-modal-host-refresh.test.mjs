@@ -172,7 +172,7 @@ test('the modal offers approval mode and model from the cached options, seeded f
   }
 });
 
-test('creating a session remembers the chosen settings before opening it', async (t) => {
+test('creating a session saves chosen defaults only when explicitly selected', async (t) => {
   const dom = setupDom();
   try {
     const calls = stubSettingsApi(t);
@@ -181,6 +181,7 @@ test('creating a session remembers the chosen settings before opening it', async
     await flush();
     change(document.querySelector('select[data-config-id="model"]'), 'gpt-b');
     typeInto(cwdInput(), '/srv/app');
+    click(document.querySelector('input[type="checkbox"]'));
     click([...document.querySelectorAll('button')].find((b) => b.textContent === 'Start session'));
     await flush();
 
@@ -237,7 +238,8 @@ test('new sessions use model-specific effort dropdowns and persist the ACP confi
   typeInto(cwdInput(), '/srv/effort-test');
   click([...document.querySelectorAll('button')].find(b => b.textContent === 'Start session'));
   await flush();
-  assert.deepEqual(calls.put[0].defaultConfig, { model: 'gpt-b', reasoning: 'low' });
+  assert.equal(calls.put.length, 0);
+  assert.deepEqual(calls.open[0].input.config_overrides, { mode: null, model: 'gpt-b', reasoning: 'low' });
   assert.equal(calls.open.length, 1);
 });
 
@@ -259,7 +261,8 @@ test('switching to an unreported model clears remembered effort before starting 
   typeInto(cwdInput(), '/srv/effort-default');
   click([...document.querySelectorAll('button')].find(b => b.textContent === 'Start session'));
   await flush();
-  assert.deepEqual(calls.put[0].defaultConfig, { model: 'gpt-b', reasoning: null });
+  assert.equal(calls.put.length, 0);
+  assert.deepEqual(calls.open[0].input.config_overrides, { mode: null, model: 'gpt-b', reasoning: null });
   assert.equal(calls.open.length, 1);
 });
 
@@ -284,7 +287,7 @@ test('a new host can select a credential without cached config and saves it befo
   api.openHostSession = async (...args) => { assert.equal(saved, true); calls.open.push(args); return { session_id: 'new' }; };
   click(startButton());
   await flush();
-  assert.deepEqual(calls.put[0], ['m-rolf', 'codex', CREDENTIAL.id, {}]);
+  assert.deepEqual(calls.put[0], ['m-rolf', 'codex', CREDENTIAL.id, undefined]);
   assert.equal(calls.open.length, 1);
 });
 
@@ -300,7 +303,8 @@ test('model changes preserve the credential from current settings when the hosts
   typeInto(cwdInput(), '/srv/app');
   click(startButton());
   await flush();
-  assert.equal(calls.put[0].credentialId, CREDENTIAL.id);
+  assert.equal(calls.put.length, 0, 'model overrides do not rewrite the saved credential');
+  assert.equal(calls.open[0].input.config_overrides.model, 'gpt-b');
   assert.equal(calls.open.length, 1);
 });
 
@@ -393,4 +397,29 @@ test('a credential save failure leaves the new session unopened', async (t) => {
   await flush();
   assert.equal(calls.open.length, 0);
   assert.ok([...document.querySelectorAll('[role="alert"]')].some((node) => node.textContent.includes('Credential save failed')));
+});
+
+
+test('launch options and descriptions are available on a fresh host; overrides do not rewrite defaults', async (t) => {
+  const dom = setupDom();
+  const launchOptions = [
+    { config_id: '__permission_mode', name: 'Permissions', category: 'launch', type: 'select', current_value: '', description: 'Choose permissions.', options: [{ value: 'agent-full-access', name: '--dangerously-bypass-approvals-and-sandbox', description: 'Disable approvals and sandbox restrictions.' }] },
+    { config_id: '__git_workflow', name: 'Git workflow', category: 'launch', type: 'select', current_value: 'main', description: 'Choose where to work.', options: [{ value: 'main', name: 'Main', description: 'Work directly on main/master.' }, { value: 'worktree', name: 'Worktree', description: 'Use a managed worktree.' }] },
+  ];
+  const calls = stubSettingsApi(t, { settings: { ...SETTINGS, known_config_options: [], default_config: { __permission_mode: 'agent-full-access' }, launch_options: launchOptions } });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  const permissions = document.querySelector('select[data-config-id="__permission_mode"]');
+  assert.equal(permissions.value, 'agent-full-access');
+  assert.match(document.body.textContent, /Disable approvals and sandbox restrictions/);
+  assert.match(document.body.textContent, /Work directly on main/);
+  change(permissions, '');
+  change(document.querySelector('select[data-config-id="__git_workflow"]'), 'worktree');
+  typeInto(cwdInput(), '/srv/app');
+  click(startButton());
+  await flush();
+  assert.equal(calls.put.length, 0);
+  assert.deepEqual(calls.open[0].input.config_overrides, { __permission_mode: null, __git_workflow: 'worktree', __mode: null });
 });

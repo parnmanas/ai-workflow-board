@@ -69,9 +69,13 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
   // 모델 목록은 모든 화면이 공유하는 스토어에서 온다 — 세션을 한 번 열어야만 갱신되던 옛
   // 동작 대신, 열릴 때 오래된/빈 목록을 훅이 재열거하고 버튼으로도 바로 새로고침한다.
   const hostModels = useHostModels(managerId, cli);
-  // 모달과 같은 규약: approval 모드(category 'mode') 와 모델(category 'model') 만 여기서 정한다.
-  const defaultOptions = withHostModelOption(settings?.known_config_options ?? [], hostModels.models, hostModels.labels)
-    .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0);
+  // Launch choices and model defaults use the same catalog as the new-session form.
+  const defaultOptions = [
+    ...(settings?.launch_options ?? []),
+    ...withHostModelOption(settings?.known_config_options ?? [], hostModels.models, hostModels.labels)
+      .filter((o) => o.type === 'select' && (o.category === 'model' || (o.category === 'mode'
+        && !settings?.launch_options?.some((launch) => launch.config_id === '__permission_mode'))) && o.options.length > 0),
+  ];
   const savedDefaults = defaultsOf(settings);
   const missingCredential = !!settings?.credential_id && !settings.credential;
   const dirty = (settings?.credential_id ?? settings?.credential?.id ?? '') !== selected
@@ -88,6 +92,10 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
         const value = defaults[option.config_id] || '';
         if (value === (savedDefaults[option.config_id] || '')) continue;
         patch[option.config_id] = value || null;
+      }
+      if ('__permission_mode' in patch) {
+        patch.__mode = null;
+        for (const option of settings.known_config_options.filter((o) => o.category === 'mode')) patch[option.config_id] = null;
       }
       const backendChanged = (settings.backend?.id || '') !== backend;
       const next = await api.setHostCliSettings(
@@ -209,7 +217,7 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
         defaultOptions.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
             <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
-              Applied to every {runtimeLabel(cli)} session on {hostName} — including ones you reopen.
+              Defaults for new {runtimeLabel(cli)} sessions on {hostName}. Existing sessions keep their saved options.
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {defaultOptions.map((option) => (
@@ -223,11 +231,14 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
                     disabled={saving}
                     onChange={(e) => setDefaults((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
                   >
-                    <option value="">{runtimeLabel(cli)} default</option>
+                    <option value="">{option.config_id === '__git_workflow' ? 'Main / master (default)' : `${runtimeLabel(cli)} default`}</option>
                     {option.options.map((choice) => (
                       <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
                     ))}
                   </select>
+                  <span style={{ fontSize: 11, maxWidth: 340 }}>
+                    {option.options.find((choice) => choice.value === (defaults[option.config_id] || option.current_value))?.description || option.description}
+                  </span>
                 </label>
               ))}
               <Button

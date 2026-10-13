@@ -94,6 +94,16 @@ export const claudeModule = defineCliModule({
   login: claudeLogin,
 
   sessions: {
+    launchOptions: [{
+      config_id: '__permission_mode', name: 'Permissions', category: 'launch', type: 'select', current_value: '',
+      description: 'Applied through the Claude ACP permission mode before the first prompt.',
+      options: [
+        { value: 'default', name: 'Ask for permissions', description: 'Use normal Claude Code approval prompts.' },
+        { value: 'acceptEdits', name: 'Accept edits', description: 'Automatically approve file edits; other tools follow their permission rules.' },
+        { value: 'plan', name: 'Plan only', description: 'Explore and plan without making changes.' },
+        { value: 'bypassPermissions', name: '--dangerously-skip-permissions', description: 'Skip tool permission prompts. The CLI can reject this mode when host policy or root execution forbids it.' },
+      ],
+    }],
     async detect(_env, findOnPath) {
       return !!(await findOnPath('claude-agent-acp')) || !!(await findOnPath('claude'));
     },

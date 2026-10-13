@@ -1,3 +1,4 @@
+import { mergeSessionConfig } from '../../common/session-launch-options';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -96,6 +97,7 @@ export interface AgentSessionCliSettings {
   default_config: Record<string, string | boolean>;
   /** 마지막으로 본 선택지 — 세션이 열리기 전(새 세션 모달)에 고를 수 있게 한다. */
   known_config_options: AgentSessionConfigOption[];
+  launch_options: AgentSessionConfigOption[];
   updated_at: string | null;
 }
 
@@ -532,7 +534,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     }).orIgnore().execute();
   }
 
-  private async rememberExecutionOption(managerId: string, cli: string, sessionId: string, key: string, value: string | boolean): Promise<void> {
+  private async rememberExecutionOption(managerId: string, cli: string, sessionId: string, key: string, value: string | boolean, clearLaunchPermission = false): Promise<void> {
     await this.dataSource.transaction(async manager => {
       const binding = await manager.getRepository(AgentSessionExecution).findOne({
         where: { manager_id: managerId, cli, session_id: sessionId },
@@ -541,6 +543,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       if (!binding) return;
       const defaults = this.parseDefaults(binding.config_defaults);
       defaults[key] = value;
+      if (clearLaunchPermission) delete defaults.__permission_mode;
       await manager.getRepository(AgentSessionExecution).update(binding.id, { config_defaults: JSON.stringify(defaults) });
     });
   }
@@ -619,9 +622,10 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 사용자가 고른 설정을 기억한다 — 어댑터 프로세스는 유휴 회수·재시작마다 기본값으로 돌아가므로,
    * 기억해 두지 않으면 "갔다가 돌아오면 또 default" 가 된다. row 가 없으면 만든다(credential 없이도 유효).
    */
-  private async rememberDefault(accountId: string, managerId: string, cli: string, key: string, value: string | boolean, userId: string): Promise<void> {
+  private async rememberDefault(accountId: string, managerId: string, cli: string, key: string, value: string | boolean, userId: string, clearLaunchPermission = false): Promise<void> {
     const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     const next = { ...this.parseDefaults(row?.default_config), [key]: value };
+    if (clearLaunchPermission) delete next.__permission_mode;
     if (row) {
       row.default_config = JSON.stringify(next);
       row.updated_by = userId;
@@ -689,6 +693,15 @@ export class AgentSessionsService implements OnModuleDestroy {
     throw new AgentSessionError(404, 'host_unknown', 'No Runtime Host with this id.');
   }
 
+  private launchOptions(managerId: string, cli: string): AgentSessionConfigOption[] {
+    return this.managerRecords().find((r) => r.agent_id === managerId)?.session_launch_options?.[cli] ?? [];
+  }
+
+  private mergeConfig(managerId: string, cli: string, current: Record<string, string | boolean>, patch: unknown) {
+    try { return mergeSessionConfig(current, patch, this.launchOptions(managerId, cli)); }
+    catch (error: any) { throw new AgentSessionError(400, 'config_value_invalid', error.message); }
+  }
+
   async getCliSettings(accountId: string, managerId: string, cli: string): Promise<AgentSessionCliSettings> {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
     await this.requireManagerAgent(managerId);
@@ -701,6 +714,14 @@ export class AgentSessionsService implements OnModuleDestroy {
     const pinnedBackend = row?.backend_profile_id
       ? backends.find((b) => b.runtime.id === row.backend_profile_id) ?? null
       : null;
+    const knownOptions = this.withModelFallback(cached.length ? cached : this.liveConfigOptions(managerId, cli), managerId, cli);
+    const launchOptions = this.launchOptions(managerId, cli);
+    const defaults = this.parseDefaults(row?.default_config);
+    // Preserve a saved legacy approval choice when upgrading to the launch selector.
+    if (defaults.__permission_mode === undefined) {
+      const legacyMode = knownOptions.filter((o) => o.category === 'mode').map((o) => defaults[o.config_id]).find((v) => typeof v === 'string') ?? defaults.__mode;
+      if (typeof legacyMode === 'string' && launchOptions.find((o) => o.config_id === '__permission_mode')?.options.some((o) => o.value === legacyMode)) defaults.__permission_mode = legacyMode;
+    }
     return {
       manager_id: managerId,
       cli,
@@ -711,14 +732,15 @@ export class AgentSessionsService implements OnModuleDestroy {
       supports_backend: supportsBackend,
       backend: pinnedBackend ? this.backendRef(pinnedBackend.runtime, pinnedBackend.name) : null,
       backend_candidates: backends.map((b) => this.backendRef(b.runtime, b.name)),
-      default_config: this.parseDefaults(row?.default_config),
+      default_config: defaults,
+      launch_options: launchOptions,
       // 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다:
       //   1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP configOptions (가장 정확 — 표시 이름·현재값 포함)
       //   2) 지금 살아 있는 세션이 아는 선택지 (서버 재시작 직후)
       //   3) 단일 출처(HostModelsService)의 모델 목록으로 합성한 model 옵션 (세션을 한 번도 연 적 없는 조합)
       // 3번이 없던 동안에는 "처음 쓰는 호스트×CLI 면 모델을 못 고른다" 가 됐고, 사용자 눈에는
       // 되는 조합과 안 되는 조합이 뒤섞인 것처럼 보였다.
-      known_config_options: this.withModelFallback(cached.length ? cached : this.liveConfigOptions(managerId, cli), managerId, cli),
+      known_config_options: knownOptions,
       updated_at: row ? new Date(row.updated_at).toISOString() : null,
     };
   }
@@ -766,14 +788,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       : null;
     const mergeDefaults = (current: string | null | undefined): string => {
       if (!patch) return current ?? '{}';
-      const next = this.parseDefaults(current);
-      for (const [key, value] of Object.entries(patch)) {
-        if (!key || key.length > CONFIG_ID_MAX) continue;
-        if (value === null) delete next[key];
-        else if (typeof value === 'boolean') next[key] = value;
-        else if (typeof value === 'string' && value.length <= 256) next[key] = value;
-        else throw new AgentSessionError(400, 'config_value_invalid', `default_config.${key} must be a string, boolean, or null`);
-      }
+      const next = this.mergeConfig(managerId, cli, this.parseDefaults(current), patch);
       return JSON.stringify(next);
     };
     if (existing) {
@@ -1174,7 +1189,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     userId: string,
     managerId: string,
     cli: string,
-    input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean },
+    input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean; config_overrides?: unknown },
   ): Promise<AgentSessionLiveSnapshot> {
     const rec = this.requireHost(accountId, managerId, cli);
     const sessionId = input.session_id ? String(input.session_id) : null;
@@ -1184,6 +1199,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (!sessionId && !cwd) throw new AgentSessionError(400, 'cwd_required', 'A working directory is required for a new session.');
     const title = String(input.title ?? '').trim().slice(0, TITLE_MAX);
     const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    if (input.config_overrides !== undefined) {
+      if (sessionId) throw new AgentSessionError(400, 'config_overrides_new_session_only');
+      execution.config_defaults = this.mergeConfig(managerId, cli, execution.config_defaults, input.config_overrides);
+    }
+    // A downgraded manager must not silently ignore saved launch choices.
+    this.mergeConfig(managerId, cli, {}, Object.fromEntries(Object.entries(execution.config_defaults)
+      .filter(([key]) => key === '__permission_mode' || key === '__git_workflow')));
     accountId = execution.account_id;
     const credentialId = execution.credential_id;
     const configDefaults = execution.config_defaults;
@@ -1454,8 +1476,10 @@ export class AgentSessionsService implements OnModuleDestroy {
     accountId = execution.account_id;
     const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
     // 고른 값을 기억한다 — 어댑터는 프로세스가 회수되면 기본값으로 돌아간다.
-    await this.rememberDefault(accountId, managerId, cli, configId, valueInput, userId);
-    await this.rememberExecutionOption(managerId, cli, sessionId, configId, valueInput);
+    const changesMode = state.config_options.some((o) => o.config_id === configId && o.category === 'mode');
+    await this.rememberDefault(accountId, managerId, cli, configId, valueInput, userId, changesMode);
+    await this.rememberExecutionOption(managerId, cli, sessionId, configId, valueInput, changesMode);
+    if (changesMode) delete execution.config_defaults.__permission_mode;
     execution.config_defaults[configId] = valueInput;
     this.emitRequest({
       manager_id: managerId, account_id: accountId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput,
@@ -1486,8 +1510,9 @@ export class AgentSessionsService implements OnModuleDestroy {
     accountId = execution.account_id;
     const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
     // 레거시 modes 전용 어댑터를 위해 예약 키로 기억한다(config option 으로 오는 어댑터는 그쪽 id 로 기억된다).
-    await this.rememberDefault(accountId, managerId, cli, AGENT_SESSION_MODE_DEFAULT_KEY, modeId, userId);
-    await this.rememberExecutionOption(managerId, cli, sessionId, AGENT_SESSION_MODE_DEFAULT_KEY, modeId);
+    await this.rememberDefault(accountId, managerId, cli, AGENT_SESSION_MODE_DEFAULT_KEY, modeId, userId, true);
+    await this.rememberExecutionOption(managerId, cli, sessionId, AGENT_SESSION_MODE_DEFAULT_KEY, modeId, true);
+    delete execution.config_defaults.__permission_mode;
     execution.config_defaults[AGENT_SESSION_MODE_DEFAULT_KEY] = modeId;
     this.emitRequest({
       manager_id: managerId, account_id: accountId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId,

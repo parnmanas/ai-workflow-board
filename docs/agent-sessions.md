@@ -61,12 +61,41 @@ usage limit에 걸린 credential을 호스트 CLI 설정에서 바꾼 뒤 재시
 요구하면(`credential_ref`) 다른 키로 붙이지 않고 409 `backend_credential_mismatch`로 거절한다.
 기존 CLI 전사, 세션 id, credential 전용 홈과 기록 링크는 이 소유권 이관으로 이동하지 않는다.
 
-**New session**에서 credential을 직접 선택할 수 있다. 선택한 인증과 모델 기본값은
-세션을 열기 전에 저장하며, 현재 CLI 설정에서 읽은 credential을 그대로 사용한다.
+**New session**에서 credential을 직접 선택할 수 있다. 인증 변경은 CLI 설정에 저장하며,
+모델·실행 옵션은 기본적으로 이번 세션에만 적용한다. **Save these options as defaults**를
+선택하면 소유 Account × Host × CLI의 다음 세션 기본값으로 저장한다.
 아직 credential이 없으면 **Add / manage credentials**로 등록한 뒤 **Refresh credentials**를
 누른다. 새 호스트에서 **Host's own login**을 쓰려면 먼저 그 호스트의 CLI에 로그인해야 한다.
 삭제된 기본 credential이나 설정 조회 실패는 시작 전에 표시하고, 인증을 선택하거나 조회를
 다시 성공시키기 전까지 세션 생성을 막는다. 기존 세션의 인증 snapshot은 그 세션을 Restart할 때만 바뀐다.
+
+### 실행 옵션과 Git 작업 방식
+
+매니저 `CliModule.sessions.launchOptions`가 CLI별 옵션·설명을 선언하며 하트비트
+`session_launch_options` → CLI settings의 `launch_options`로 전달한다. 첫 ACP 세션을
+열기 전에도 선택할 수 있다. Codex의 `--dangerously-bypass-approvals-and-sandbox`는
+ACP `agent-full-access`, Claude의 `--dangerously-skip-permissions`는 `bypassPermissions`로
+첫 prompt 전에 적용한다. 지원되지 않거나 적용되지 않은 권한 모드는 세션 열기를 실패시킨다.
+다른 CLI는 지원을 선언한 실행 옵션과 공통 Git workflow를 보여준다. 임의 shell 인자를 받지 않는다.
+
+`POST …/sessions`의 `config_overrides`는 새 세션 전용 부분 덮어쓰기다. `null`은 저장된
+기본값을 이번 세션에서 해제한다. 합쳐진 값은 `AgentSessionExecution.config_defaults`에
+고정하여 재개/재시작에도 유지한다. 예약 키 `__permission_mode`와 `__git_workflow`는
+server·manager 공동 contract다. 기존 헤더에서 명시적으로 권한 모드를 바꾸면 이전 실행 옵션보다 우선한다.
+
+Git workflow의 기본은 **Main / master**다. 새 세션은 선택한 저장소의 로컬 main/master로
+이동하고 해당 폴더에서 작업한다. 다른 브랜치에 미커밋·미추적 파일이 있으면 전환을 거부한다.
+Git 저장소가 아닌 폴더는 그대로 사용한다. **Worktree** 또는 **Worktree + pull request**를
+선택하면 `.awb/session-wt/<uuid>`와 `awb/session-<uuid>`를 만들고 ACP cwd로 사용한다.
+선택한 방식과 작업 종료 지침은 매 prompt에 전달하며, PR 생성은 에이전트가 수행한다.
+
+매니저는 `session-workspaces/`에 직접 만든 폴더·브랜치·base를 기록한다. 명시적 **Close**에서
+프로세스를 종료한 뒤, 깨끗하고 로컬 base에 병합된 worktree와 브랜치만 제거한다. Squash merge는
+base와 작업 브랜치의 tree가 같은 경우에도 확인된다. 미완료 작업은 보존하고 전사에 이유를 남긴다.
+원격에서 병합했다면 로컬 base를 갱신한 뒤 Close를 다시 실행한다. 유휴 회수·매니저 종료·Restart는
+정리하지 않아 재개할 수 있다. 정리된 세션의 기록은 남지만 새 작업은 main 폴더에서 새 세션으로 연다.
+기존 네이티브 세션·다른 작업 폴더는 이 기능이 자동 전환하거나 삭제하지 않는다.
+이 계약은 `/sessions` 전용이며 티켓의 dispatch worktree 계약은 별도다.
 
 새 세션의 모델 선택기와 생성 후 헤더는 같은 `SessionModelSelect`를 사용한다.
 모델 id·표시 이름·순서·기본 선택지까지 동일하며, 라이브 ACP 보고를 브라우저의

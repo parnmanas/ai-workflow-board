@@ -3053,6 +3053,7 @@ export interface AgentSessionCliSettings {
   default_config: Record<string, string | boolean>;
   /** 마지막으로 본 선택지 — 세션이 열리기 전에도 고를 수 있게 한다. */
   known_config_options: AgentSessionConfigOption[];
+  launch_options?: AgentSessionConfigOption[];
   updated_at: string | null;
 }
 

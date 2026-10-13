@@ -69,9 +69,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  // 세션 설정(approval 모드·모델). 선택지는 어댑터가 살아 있어야 알 수 있어 서버가 마지막 목록을
-  // 캐시해 준다 — 그래서 세션을 열기 전에도 고를 수 있다. 고른 값은 호스트×CLI 에 기억되고,
-  // 이 세션을 포함해 이후 열리는 모든 세션에 다시 걸린다(프로세스가 회수돼도 유지된다).
+  // Launch options come from the host CLI modules; model/config options come from ACP.
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
   const [credentialId, setCredentialId] = useState('');
@@ -79,6 +77,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   const [settingsRefresh, setSettingsRefresh] = useState(0);
   const settingsKey = useRef('');
   const [knownOptions, setKnownOptions] = useState<AgentSessionConfigOption[]>([]);
+  const [saveDefaults, setSaveDefaults] = useState(false);
   const [chosenConfig, setChosenConfig] = useState<Record<string, string | boolean>>({});
 
   // 닫힐 때 폼을 비운다 — 다음에 열릴 때 아래 effect 가 "아직 고른 호스트가 없다" 를
@@ -91,6 +90,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     setCli('');
     setCwd('');
     setTitle('');
+    setSaveDefaults(false);
     setError(null);
     setPickerOpen(false);
   }, [open]);
@@ -166,11 +166,15 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   // 모델 목록은 모든 화면이 공유하는 스토어에서 온다(src/cli/hostModels.ts) — 오래된/빈
   // 목록은 열릴 때 재열거된다. 어댑터가 보고한 목록이 있으면 스토어도 그것만 준다(세션 안과 같은 목록).
   const hostModels = useHostModels(open ? managerId : null, cli);
-  // 모달에서 고르는 것은 세션의 성격을 정하는 둘뿐이다(그 밖의 설정은 세션 헤더에서 바꾼다).
+  // Host-declared launch choices are available even before the first ACP session.
   const modalOptions = useMemo(
-    () => withHostModelOption(knownOptions, hostModels.models, hostModels.labels)
-      .filter((o) => o.type === 'select' && (o.category === 'mode') && o.options.length > 0),
-    [knownOptions, hostModels.models, hostModels.labels],
+    () => [
+      ...(settings?.launch_options ?? []),
+      ...withHostModelOption(knownOptions, hostModels.models, hostModels.labels)
+        .filter((o) => o.type === 'select' && o.category === 'mode' && o.options.length > 0
+          && !settings?.launch_options?.some((launch) => launch.config_id === '__permission_mode')),
+    ],
+    [settings, knownOptions, hostModels.models, hostModels.labels],
   );
 
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
@@ -198,12 +202,15 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     setCreating(true);
     setError(null);
     try {
-      // 고른 설정을 먼저 기억시킨다 — 매니저는 세션을 연 직후 이 값을 다시 걸고, 다음에 다시 열 때도 쓴다.
+      // Per-session overrides are pinned by the server. Saving defaults is an explicit choice.
       const changed: Record<string, string | boolean | null> = Object.fromEntries(
         modalOptions
-          .map((o) => [o.config_id, chosenConfig[o.config_id]] as const)
-          .filter(([, value]) => typeof value === 'string' && value),
+          .map((o) => [o.config_id, chosenConfig[o.config_id] || null] as const),
       );
+      if (settings.launch_options?.some((o) => o.config_id === '__permission_mode')) {
+        changed.__mode = null;
+        for (const option of knownOptions.filter((o) => o.category === 'mode')) changed[option.config_id] = null;
+      }
       const modelOption = withHostModelOption(knownOptions, hostModels.models, hostModels.labels).find((o) => o.category === 'model');
       const effortOption = hostEffortReport(hostModels.view, cli, selection.model);
       if (selectionEdited.current && selection.effort && (!effortOption?.config_id || !effortOption.options.some((o) => o.value === selection.effort))) throw new Error('선택한 모델의 Effort 지원 여부를 확인할 수 없습니다. CLI 기본값을 선택하거나 목록을 새로고침하세요.');
@@ -215,10 +222,10 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
         for (const option of knownOptions.filter((o) => o.category === 'thought_level')) changed[option.config_id] = null;
       }
       const credentialChanged = credentialId !== (settings.credential_id ?? settings.credential?.id ?? '');
-      if (Object.keys(changed).length || credentialChanged) {
-        await api.setHostCliSettings(managerId, cli, credentialId || null, changed);
+      if (saveDefaults || credentialChanged) {
+        await api.setHostCliSettings(managerId, cli, credentialId || null, saveDefaults ? changed : undefined);
       }
-      const live = await api.openHostSession(managerId, cli, { cwd: trimmed, title: title.trim() });
+      const live = await api.openHostSession(managerId, cli, { cwd: trimmed, title: title.trim(), config_overrides: changed });
       rememberCwd(managerId, cli, trimmed);
       onCreated(live);
     } catch (err: any) {
@@ -246,7 +253,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <p style={{ margin: 0, fontSize: 12.5, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
           Choose how the CLI signs in on the Runtime Host. Its session history stays on that machine,
-          and output streams here with tool permissions for you to approve.
+          and output streams here. Choose permissions and a Git workflow before starting.
         </p>
 
         <RuntimeSelectionFields session idPrefix="new-session"
@@ -334,7 +341,6 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
           <div key={option.config_id}>
             <label htmlFor={`new-session-config-${option.config_id}`} style={labelStyle}>
               {option.name}
-              <span style={{ color: tokens.colors.textMuted }}> — kept for every session on this host</span>
               {option.category === 'model' && (
                 <button
                   type="button"
@@ -350,16 +356,26 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
               id={`new-session-config-${option.config_id}`}
               data-config-id={option.config_id}
               style={selectStyle}
+              disabled={creating || settingsLoading}
               value={typeof chosenConfig[option.config_id] === 'string' ? String(chosenConfig[option.config_id]) : ''}
               onChange={(e) => setChosenConfig((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
             >
-              <option value="">{`${runtimeLabel(cli)} default`}</option>
+              <option value="">{option.config_id === '__git_workflow' ? 'Main / master (default)' : `${runtimeLabel(cli)} default`}</option>
               {option.options.map((choice) => (
                 <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
               ))}
             </select>
+            <p style={{ ...labelStyle, marginTop: 6, lineHeight: 1.5 }}>
+              {option.options.find((choice) => choice.value === (chosenConfig[option.config_id] || option.current_value))?.description || option.description}
+            </p>
           </div>
         ))}
+
+        <label style={{ ...labelStyle, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input type="checkbox" checked={saveDefaults} disabled={creating || settingsLoading}
+            onChange={(e) => setSaveDefaults(e.target.checked)} />
+          Save these options as defaults for new sessions on this host and CLI
+        </label>
 
         <Input
           label="Title (optional)"

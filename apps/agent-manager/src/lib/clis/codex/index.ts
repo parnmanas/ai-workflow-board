@@ -71,6 +71,15 @@ export const codexModule = defineCliModule({
   login: codexLogin,
 
   sessions: {
+    launchOptions: [{
+      config_id: '__permission_mode', name: 'Permissions and sandbox', category: 'launch', type: 'select', current_value: '',
+      description: 'Applied through the Codex ACP approval mode before the first prompt.',
+      options: [
+        { value: 'read-only', name: 'Read only', description: 'Read files; changes and commands requiring additional access need approval.' },
+        { value: 'agent', name: 'Agent (sandboxed)', description: 'Use the workspace sandbox with approval for additional access.' },
+        { value: 'agent-full-access', name: '--dangerously-bypass-approvals-and-sandbox', description: 'Full access: disable approval prompts and sandbox restrictions for this session.' },
+      ],
+    }],
     async detect(_env, findOnPath) {
       return !!(await findOnPath('codex-acp')) || !!(await findOnPath('codex'));
     },

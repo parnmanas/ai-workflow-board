@@ -16,6 +16,7 @@
 // Cadence: same 30s clock as PresenceHeartbeat. Server's TTL is 90s.
 
 import { hostname } from 'node:os';
+import { sessionLaunchOptions } from './session-launch-options.js';
 import { randomUUID } from 'node:crypto';
 import { HEARTBEAT_INTERVAL_MS, REQUEST_TIMEOUT_MS, DEFAULT_CLI_ID } from './constants.js';
 import { log } from './logging.js';
@@ -660,6 +661,7 @@ export class InstanceHeartbeat {
           : {}),
         ...(cliInstalls && cliInstalls.length ? { cli_installs: cliInstalls } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
+        session_launch_options: Object.fromEntries((meta?.acpSessionClis ?? []).map((cli) => [cli, sessionLaunchOptions(cli)])),
         ...(acpAdaptersNow?.length ? { acp_adapters: acpAdaptersNow } : {}),
         ...(acpAdapterLatest && Object.keys(acpAdapterLatest).length
           ? { acp_adapter_latest_versions: acpAdapterLatest }
