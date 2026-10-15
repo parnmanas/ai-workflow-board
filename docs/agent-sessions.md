@@ -311,6 +311,10 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
 
 - `list` RPC 답의 세션별 `live_status`, `history` RPC 답의 `live`(프로세스가 없으면 `null`)로 서버가 메모리를 **되맞춘다**.
   매니저가 "없다" 고 하면 진행 중 상태는 idle 로 — `starting` 만은 open RPC 타임아웃(120s) 동안 지킨다.
+- `open`·`list`·`history`를 기다리는 동안 같은 세션에 새 이벤트나 상태가 도착했으면, 늦게 돌아온 RPC의 상태는
+  적용하지 않는다. 서버 내부 관측 순번으로 비교하므로 같은 밀리초에 발생한 전환도 보존한다. 이전에는 `open`만
+  보호해, 늦은 목록/기록 조회의 `ready`가 새 작업의 `busy`를 덮고 새 시각으로 화면까지 전달될 수 있었다.
+  반대로 더 새로운 관측이 없으면 매니저의 상태를 적용해 유령 `busy`를 계속 복구한다.
 - 매니저 인스턴스가 사라지면(`agent_instance_update` action=removed, 같은 identity 의 다른 인스턴스 없음) 그 장비의 진행 중
   세션을 모두 idle 로 되돌리고 driver 에게 `agent_session_update{reason:'host_offline'}` 를 보낸다.
 - **하트비트가 살아 있는 세션 전체를 싣는다** (`agent_sessions: [{cli, session_id, status}]`, 매니저 `InstanceMeta.agentSessionsProvider`
@@ -599,6 +603,8 @@ cache_write` 로 계산한다.
 
 - 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달 /
   유령 상태 되돌림(list·history·인스턴스 제거·하트비트) / config option·elicitation op 과 awaiting_input / 첫 이벤트의 상태 추정.
+- 서버: `agent-session-read-status-race.test.mjs` — 늦은 list/history 응답과 새 이벤트·하트비트의 경합,
+  같은 밀리초 전환, 초기 상태 생성과 소유권 조회 중 도착한 이벤트, 기존 유령 상태 복구.
 - agent-manager: `agent-session-heartbeat.test.mjs` — 하트비트 `agent_sessions` 필드와 `liveStates()`.
 - agent-manager: `apps/agent-manager/test/agent-session-store.test.mjs`(합성 Claude·Codex 파일 파싱),
   `agent-session-runner.test.mjs`(fake ACP 로 list·history·open·prompt·permission·resume, credential 별 세션 cli-home 적용,
