@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { canonicalWorkPath } from './utils/workRoutes';
 import { ToastProvider, useToast } from './contexts/ToastContext';
@@ -80,26 +80,6 @@ function AppContent() {
   const { isAuthenticated, isLoading, serverUnavailable } = useAuth();
   const { showToast } = useToast();
   const wasAuthenticated = useRef(false);
-  const navigate = useNavigate();
-
-  // 네이티브 앱 딥링크(awb://sessions/…?say=…) — 백그라운드 wake 알림 탭이 여기로 온다.
-  // 웹에서는 isNativeApp()이 false라 리스너를 달지 않는다.
-  useEffect(() => {
-    let cleanup: (() => void) | undefined;
-    void (async () => {
-      const { isNativeApp, parseAwbDeepLink } = await import('./native/backgroundWake');
-      if (!isNativeApp()) return;
-      const { App } = await import('@capacitor/app');
-      const sub = await App.addListener('appUrlOpen', (event) => {
-        const path = parseAwbDeepLink(event.url);
-        if (path) navigate(path);
-      });
-      cleanup = () => {
-        void sub.remove().catch(() => undefined);
-      };
-    })().catch(() => undefined);
-    return () => cleanup?.();
-  }, [navigate]);
 
   // Show toast when auth state transitions from authenticated → not authenticated
   useEffect(() => {
@@ -183,8 +163,8 @@ function AppContent() {
           >
             Retry
           </button>
-          {/* 막다른 해소: 서버에 못 닿아 로그인 화면조차 안 뜰 때 여기서 주소를 바꾼다.
-              네이티브 앱은 첫 실행이 항상 이 화면이다(번들 오리진에 서버가 없으므로). */}
+          {/* 막다른 해소: 서버에 못 닿아 로그인 화면조차 안 뜰 때 여기서 주소를 바꾼다
+              (Android 앱에서는 앱의 연결 화면을 연다). */}
           <div style={{
             width: '100%', marginTop: 8, paddingTop: 16,
             borderTop: `1px solid ${tokens.colors.border}`, textAlign: 'left',

@@ -97,7 +97,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'AgentErrorLog', 'AgentUsageDailyRollup',
 
   // Account 하위 설정
-  'UserChannel', 'Deployment',
+  'UserChannel', 'UserDevice', 'Deployment',
   'OrchestrationTeam', 'Action', 'QaScenario', 'SecurityProfile', 'OutreachChannel',
   'CliLoginSession',
   // Agent Session(CLI 직접 세션)의 Runtime Host × CLI 설정. 세션 내용은 장비의

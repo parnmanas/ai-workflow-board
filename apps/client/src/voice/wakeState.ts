@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { reportVoiceSupport } from './presence';
+import { isAndroidApp, setNativeVoice } from '../native/androidBridge';
 
 /**
  * 음성 지원의 탭 상태(docs/voice-operator.md "음성 지원 · 잠들기").
@@ -124,6 +125,21 @@ class WakeStore {
     try { localStorage.setItem(ENABLED_KEY, enabled ? '1' : '0'); } catch { /* private mode */ }
     this.#applyEnabled(enabled);
     // 서버도 안다 — 사용자의 단말이 모두 꺼지면 세션 완료를 operator 에게 보고하지 않는다.
+    reportVoiceSupport(enabled);
+    // Android 앱 안에서는 이 스위치가 곧 앱의 상시 음성이다(단말의 스위치는 하나). 켤 때 앱이 마이크
+    // 권한을 묻고, 거절되면 앱이 알려 온 대로 다시 끈다.
+    if (isAndroidApp()) {
+      setNativeVoice(enabled)
+        .then((status) => { if (status.enabled !== enabled) this.syncDeviceEnabled(status.enabled); })
+        .catch(() => undefined);
+    }
+  }
+
+  /** Android 앱의 상시 음성 스위치가 바뀌었다(앱 알림의 "끄기" · 권한 거절) — 화면 스위치를 맞춘다. */
+  syncDeviceEnabled(enabled: boolean): void {
+    if (this.#state.enabled === enabled) return;
+    try { localStorage.setItem(ENABLED_KEY, enabled ? '1' : '0'); } catch { /* private mode */ }
+    this.#applyEnabled(enabled);
     reportVoiceSupport(enabled);
   }
 

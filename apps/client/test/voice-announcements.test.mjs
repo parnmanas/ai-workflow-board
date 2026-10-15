@@ -201,7 +201,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.equal(wakeStore.state.mode, 'off', 'wake-off must not wake the operator');
   assert.equal(wakeStore.state.operatorId, null);
   assert.notEqual(currentPath, '/sessions/m1/codex/operator-session', 'stay where you are when name calling is off');
-  assert.equal(view.container.querySelector('textarea'), null, 'no operator composer is opened');
+  assert.equal(Boolean(view.container.querySelector('textarea')), false, 'no operator composer is opened');
   assert.equal(microphoneStarts, 0, 'no microphone without name calling');
   assert.equal(wakeStore.reportOperator(), 'op', 'the reporter is still remembered for a later manual listen');
   assert.equal(ttsCalls, 0);

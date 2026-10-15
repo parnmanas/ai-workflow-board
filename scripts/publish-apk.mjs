@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * publish-apk.mjs — APK를 자료실에 올린다. 사이트의 "Android 앱 받기" 버튼은
- * kind='app' 중 최신본을 가리키므로, 올리면 버튼이 곧바로 새 버전을 낸다.
+ * publish-apk.mjs — APK를 자료실에 올린다(자료실 사본). 사이트의 "Android 앱 받기" 버튼은
+ * GitHub release 의 awb-android.apk 를 가리킨다 — 배포는 docs/android-app.md "빌드 · 배포".
  *
  * 흐름: 로그인 → raw 업로드 → 자료 묶기. 바이트는 raw 본문으로 가서 10MB JSON
  * 상한에 걸리지 않는다.
@@ -9,7 +9,7 @@
  * 실행:
  *   node scripts/publish-apk.mjs --server https://awb.example.com \
  *     --email admin@example.com --password '...' \
- *     --file apps/client/android/app/build/outputs/apk/debug/app-debug.apk \
+ *     --file apps/android/app/build/outputs/apk/release/app-release.apk \
  *     --version 1.0 --title "AWB Android"
  *
  * --account 로 계정을 지정할 수 있고(생략하면 첫 번째), 비밀번호 대신

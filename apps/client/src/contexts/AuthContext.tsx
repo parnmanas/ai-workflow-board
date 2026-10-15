@@ -1,5 +1,12 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { api, setActiveAccountId, bootstrapActiveAccountId } from '../api';
+import {
+  isAndroidApp,
+  nativeRefreshToken,
+  nativeSessionToken,
+  notifyNativeLoggedIn,
+  notifyNativeLoggedOut,
+} from '../native/androidBridge';
 import { User } from '../types';
 import { loadCliCatalog } from '../cli/catalog';
 
@@ -72,6 +79,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // 세션 복원
   const checkSession = useCallback(async () => {
+    // Android 앱은 단말 자격으로 세션을 이어 붙인다 — 서버가 다시 떠서 저장된 토큰이 죽었어도
+    // 앱이 새 세션을 준다(다시 로그인하지 않는다).
+    if (isAndroidApp()) {
+      const nativeToken = await nativeSessionToken();
+      if (nativeToken) localStorage.setItem('auth_token', nativeToken);
+    }
     const savedToken = localStorage.getItem('auth_token');
 
     if (!savedToken) {
@@ -123,8 +136,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { checkSession(); }, [checkSession]);
 
   // Listen for auth-expired events from the API layer (e.g., 401 responses)
+  const tokenRef = useRef<string | null>(state.token);
+  tokenRef.current = state.token;
+  const nativeRefreshAt = useRef(0);
   useEffect(() => {
     const handler = () => {
+      // Android 앱: 세션이 끊긴 것(배포 재시작 · 24시간)이면 앱이 새 세션을 준다. 한 번만 시도한다 —
+      // 앱도 못 주면(단말 자격 회수) 진짜 로그아웃이다.
+      if (isAndroidApp() && Date.now() - nativeRefreshAt.current > 30_000) {
+        nativeRefreshAt.current = Date.now();
+        const rejected = tokenRef.current || '';
+        void nativeRefreshToken(rejected).then((fresh) => {
+          if (fresh) {
+            localStorage.setItem('auth_token', fresh);
+            void checkSession();
+          } else {
+            expire();
+          }
+        });
+        return;
+      }
+      expire();
+    };
+    const expire = () => {
       localStorage.removeItem('auth_token');
       localStorage.removeItem('currentAccountId');
       setActiveAccountId(null);
@@ -138,7 +172,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener('auth-expired', handler);
     return () => window.removeEventListener('auth-expired', handler);
-  }, []);
+  }, [checkSession]);
+
+  // Android 앱에 로그인을 알린다 — 앱이 단말 자격을 받아 두고(처음이면) 상시 음성을 켠다.
+  useEffect(() => {
+    if (state.isAuthenticated && state.token) notifyNativeLoggedIn(state.token);
+  }, [state.isAuthenticated, state.token]);
 
   // Load the LLM CLI catalog once a session exists (the endpoint needs a
   // logged-in user; `isAuthenticated` is false for pending users / users
@@ -184,6 +223,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    await notifyNativeLoggedOut();
     try { await api.logout(); } catch { /* ignore */ }
     localStorage.removeItem('auth_token');
     localStorage.removeItem('currentAccountId');

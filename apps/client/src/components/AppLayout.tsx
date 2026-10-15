@@ -13,6 +13,7 @@ import { TicketMetaProvider } from '../contexts/TicketMetaContext';
 import VoiceAnnouncer from '../voice/VoiceAnnouncer';
 import { SessionProposalNotifier } from './sessions/SessionProposalCards';
 import WakeListener from '../voice/WakeListener';
+import AndroidAppBridge from '../native/AndroidAppBridge';
 import { useAuth } from '../contexts/AuthContext';
 import { NotificationMuteButton } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
@@ -138,6 +139,7 @@ export default function AppLayout() {
     {/* 음성 알림 · 음성 지원 — 화면을 그리지 않고 모든 화면에서 산다(docs/voice-operator.md). */}
     <VoiceAnnouncer />
     <WakeListener />
+    <AndroidAppBridge />
     {/* operator 의 작업 제안 — 새 제안을 알리고 목록을 따라간다(docs/voice-operator.md "작업 제안"). */}
     <SessionProposalNotifier />
     <ArtifactPanelProvider>

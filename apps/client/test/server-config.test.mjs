@@ -51,7 +51,8 @@ test('서버 불가 화면에 서버 입력이 있다 — 로그인 화면이 �
   assert.match(app, /<ServerConfigField \/>/);
 });
 
-test('네이티브 앱은 로그인 화면에서 서버 입력을 펼친 채로 시작한다', () => {
-  const login = read('src/components/LoginPage.tsx');
-  assert.match(login, /isNativeApp\(\) && !getServerBaseUrl\(\)/);
+test('Android 앱에서는 서버 입력 대신 앱의 연결 화면을 연다', () => {
+  // 앱은 서버가 서빙한 화면을 띄우므로 서버 주소를 앱이 쥔다 — 화면에서 주소를 바꾸면 크로스오리진이 된다.
+  assert.match(read('src/components/LoginPage.tsx'), /<ServerConfigField \/>/);
+  assert.match(read('src/components/ServerConfigField.tsx'), /if \(isAndroidApp\(\)\) return <NativeServerButton \/>/);
 });

@@ -6,6 +6,7 @@ import {
   isMixedContentRisk,
   setServerBaseUrl,
 } from '../serverConfig';
+import { changeNativeServer, isAndroidApp } from '../native/androidBridge';
 
 /**
  * PWA 서버 주소 입력 — LoginPage(로그인 전)와 Settings(로그인 후)에서 공유.
@@ -16,6 +17,28 @@ import {
  * https 페이지에서 http 서버는 브라우저가 차단한다(경고 표시).
  */
 export default function ServerConfigField({ compact = false }: { compact?: boolean }) {
+  // Android 앱은 서버 주소를 앱이 쥔다(이 화면은 그 서버가 서빙한 것이다) — 바꾸기는 앱의 연결 화면에서.
+  if (isAndroidApp()) return <NativeServerButton />;
+  return <WebServerConfigField compact={compact} />;
+}
+
+function NativeServerButton() {
+  return (
+    <button
+      type="button"
+      onClick={() => changeNativeServer()}
+      style={{
+        padding: '8px 12px', background: 'transparent',
+        color: tokens.colors.textSecondary, border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+      }}
+    >
+      다른 서버에 연결 (현재 {typeof window !== 'undefined' ? window.location.host : ''})
+    </button>
+  );
+}
+
+function WebServerConfigField({ compact = false }: { compact?: boolean }) {
   const [value, setValue] = useState(() => getServerBaseUrl());
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);

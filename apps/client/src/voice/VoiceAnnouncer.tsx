@@ -13,6 +13,7 @@ import { notificationSoundClip } from './notificationSound';
 import { wakeStore } from './wakeState';
 import { announceOperatorsChanged, loadVoiceOperators, useVoiceOperators } from './operator';
 import { sessionPath } from '../components/sessions/sessionList.logic';
+import { hiddenInAndroidApp } from '../native/androidBridge';
 
 const KEY_PREFIX = 'announcement:';
 
@@ -53,6 +54,8 @@ export default function VoiceAnnouncer() {
   }, []);
 
   useBoardStreamEvent('voice_announcement', useCallback((data: VoiceAnnouncementEvent) => {
+    // Android 앱 안에서 화면이 숨어 있으면 앱의 상시 음성이 읽고 알린다(같은 소식을 두 번 듣지 않게).
+    if (hiddenInAndroidApp()) return;
     const { ready, enabled, audio, sound, accountId } = latest.current;
     const playback = announcementPlayback(data?.kind || '');
     // 음성 지원이 꺼져 있으면 operator 의 내용을 읽지 않는다 — TTS가 준비됐어도

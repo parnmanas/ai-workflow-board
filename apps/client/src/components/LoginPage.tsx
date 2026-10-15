@@ -1,22 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api';
-import { getServerUrl, getServerBaseUrl } from '../serverConfig';
-import { isNativeApp } from '../native/backgroundWake';
+import { getServerUrl } from '../serverConfig';
+import { isAndroidApp, startNativeGoogleLogin } from '../native/androidBridge';
 import { tokens } from '../tokens';
 import ServerConfigField from './ServerConfigField';
 
 function ServerConnectDetails() {
-  // 네이티브 앱 + 미설정이면 펼친 채로 — 접힌 채로는 없는 것이나 같다(이번 장애).
-  const [open, setOpen] = useState(() => {
-    try {
-      return isNativeApp() && !getServerBaseUrl();
-    } catch {
-      return false;
-    }
-  });
   return (
-    <details style={{ marginTop: 20 }} open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+    <details style={{ marginTop: 20 }}>
       <summary style={{
         fontSize: 12, color: tokens.colors.textMuted, cursor: 'pointer',
         fontWeight: 600,
@@ -380,6 +372,12 @@ export default function LoginPage() {
             </div>
             <a
               href={getServerUrl('/api/auth/oauth/google/start')}
+              onClick={(e) => {
+                // Android 앱: Google 은 WebView 안 로그인을 막는다 — 앱이 시스템 브라우저로 로그인하고 돌아온다.
+                if (!isAndroidApp()) return;
+                e.preventDefault();
+                startNativeGoogleLogin();
+              }}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
                 width: '100%', padding: '11px 14px',
@@ -426,7 +424,7 @@ export default function LoginPage() {
         )}
 
         {/* PWA: 다른 AWB 서버를 바라볼 때만 펼친다 — 기본은 same-origin.
-            네이티브 앱은 번들에 서버가 없어 첫 실행부터 펼쳐 둔다. */}
+            Android 앱에서는 앱이 서버 주소를 쥐고 있어 "다른 서버에 연결" 버튼이 앱의 연결 화면을 연다. */}
         <ServerConnectDetails />
       </div>
     </div>

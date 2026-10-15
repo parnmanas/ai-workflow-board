@@ -13,6 +13,7 @@ import { isFillerUtterance, isReportRequest, matchWake } from './wake.logic';
 import { transcriptionFeedback } from './transcriptionFeedback';
 import { NOTIFICATION_FOLLOW_UP_KEY, NOTIFICATION_FOLLOW_UP_MS, useWakeState, wakeStore } from './wakeState';
 import { reportVoiceSupport } from './presence';
+import { useHiddenInAndroidApp } from '../native/AndroidAppBridge';
 
 /** 한 단말에서 한 탭만 이름을 듣는다 — 탭마다 마이크를 열면 같은 부름에 여러 탭이 깨어난다. */
 const WAKE_LOCK = 'awb-voice-wake-listener';
@@ -45,7 +46,9 @@ export default function WakeListener() {
   const [hasLock, setHasLock] = useState(false);
   const cancelFollowUpSpeech = useRef<() => void>(() => {});
 
-  const wanted = !!config?.wake.ready && operators.length > 0 && voiceRecordingSupported()
+  // Android 앱 안에서 화면이 숨으면 앱의 상시 음성이 대신 듣는다 — 같은 단말에서 둘이 들으면 두 번 깨어난다.
+  const hiddenInApp = useHiddenInAndroidApp();
+  const wanted = !!config?.wake.ready && operators.length > 0 && voiceRecordingSupported() && !hiddenInApp
     && wake.mode !== 'awake' && wake.micClaims === 0 && !wake.micElsewhere && (wake.enabled || !!wake.followUp);
 
   useEffect(() => {

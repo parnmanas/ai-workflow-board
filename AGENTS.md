@@ -327,6 +327,12 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - PTY 는 **선택 의존성**(`@lydell/node-pty`, 플랫폼별 prebuild — linux/darwin/win32). 못 불러오면 던지지 않고 그 장비의 셸 목록을 비운다 → 서버가 터미널 호스트 목록에서 뺀다(409 `terminal_unsupported`). Windows 는 ConPTY 로 같은 경로를 탄다.
 - `terminal_request` payload · `/api/agent/terminals/*` 바디 · 하트비트 필드는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/terminals.md`.
 
+## Android 앱 (`apps/android`)
+
+- 네이티브 껍데기(Java)가 **서버가 서빙하는 웹 화면 전체**를 WebView 로 띄운다 — 웹 빌드를 앱에 묶지 말 것(예전 Capacitor 껍데기가 그래서 CORS · 구글 로그인 이탈을 겪고 버려졌다). 네이티브는 상시 음성(`voice/VoiceService`) · 단말 자격(`UserDevice`, `/api/auth/devices*`) · 구글 로그인 PKCE 왕복(`oauth/google/start?app=android` → `awb://oauth` → `oauth/app/exchange`)만 맡는다.
+- 웹 ↔ 앱은 `window.AwbAndroid`(`apps/client/src/native/androidBridge.ts` ↔ `WebBridge.java`). 요청 이름을 바꾸면 양쪽을 같이 — `apps/client/test/android-bridge.test.mjs` 가 본다. `VoiceRules.java` 는 `voice/wake.logic.ts` 의 사본이다(`android-voice-rules.test.mjs`).
+- 앱 화면이 보이면 웹이, 안 보이면 서비스가 듣고 읽는다(한 단말에서 둘이 같이 들으면 두 번 깨어난다). 웹 음성 코드를 고칠 때 `hiddenInAndroidApp()` 게이트를 지우지 말 것. 상세: `docs/android-app.md`.
+
 ## Voice (음성 입력 · 낭독 · 음성 알림)
 
 - 음성은 **AWB 서버가 엔진을 잡는다**(`modules/voice`, SystemSettings `voice.*`, 권한 `voice.use` 기본 admin 전용) — 화면은 녹음 바이트를 보내 글자를 받고, 글자를 보내 소리를 받는다. CLI 에이전트는 텍스트만 다루고 **agent-manager 는 오디오 경로에 없다**(SSE contract 무관). Claude/Codex 의 자체 음성 기능은 구독 경로로 재사용할 수 없어서 별도 엔진(Soniox · ElevenLabs · Typecast · Azure · Google · OpenAI 호환)을 쓴다.

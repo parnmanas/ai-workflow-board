@@ -1,6 +1,6 @@
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { LoginDto, RegisterDto, SetupDto } from './auth.dto';
-import { Controller, Post, Get, Body, Headers, Query, Req, Res, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Body, Headers, Param, Query, Req, Res, HttpStatus } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
@@ -10,13 +10,18 @@ import { AuthService } from '../../services/auth.service';
 import { GoogleOAuthService } from '../../services/google-oauth.service';
 import { ReBACService } from '../../services/rebac.service';
 import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../common/types/permissions';
+import { DeviceAuthService } from './device-auth.service';
+import { OAuthFlowStore, appRedirect, isValidCodeChallenge, type OAuthClient } from './oauth-flow';
 
 @ApiTags('auth')
 @Controller('api/auth')
 export class AuthController {
+  private readonly oauthFlow = new OAuthFlowStore();
+
   constructor(
     private readonly authService: AuthService,
     private readonly googleOAuthService: GoogleOAuthService,
+    private readonly deviceAuth: DeviceAuthService,
     private readonly rebacService: ReBACService,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
@@ -218,11 +223,27 @@ export class AuthController {
     return res.json({ google: { enabled, client_id: clientId || null } });
   }
 
-  /** Redirects the browser to Google's consent screen. */
+  /**
+   * Redirects the browser to Google's consent screen.
+   * `?app=android&code_challenge=<S256>` 는 Android 앱의 Custom Tab 로그인 — 끝나면
+   * 웹 화면 대신 `awb://oauth?code=…` 로 돌아가고, 앱이 verifier 로 코드를 바꾼다.
+   */
   @Get('oauth/google/start')
-  async googleOAuthStart(@Req() req: Request, @Res() res: Response) {
+  async googleOAuthStart(
+    @Query('app') app: string,
+    @Query('code_challenge') codeChallenge: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    let client: OAuthClient = { kind: 'web' };
+    if (app) {
+      if (app !== 'android' || !isValidCodeChallenge(codeChallenge)) {
+        return (res as any).status(400).json({ error: 'app login needs app=android and an S256 code_challenge' });
+      }
+      client = { kind: 'app', challenge: codeChallenge };
+    }
     const redirectUri = this._buildRedirectUri(req);
-    const authUrl = await this.googleOAuthService.getAuthUrl(redirectUri, 'awb');
+    const authUrl = await this.googleOAuthService.getAuthUrl(redirectUri, this.oauthFlow.issueState(client));
     if (!authUrl) {
       return (res as any).status(503).json({ error: 'Google OAuth is not configured' });
     }
@@ -234,18 +255,27 @@ export class AuthController {
   async googleOAuthCallback(
     @Query('code') code: string,
     @Query('error') oauthError: string,
+    @Query('state') state: string,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     const expressRes = res as any;
+    const client = this.oauthFlow.consumeState(state);
+    if (!client) {
+      return expressRes.redirect('/?oauth_error=invalid_state');
+    }
+    const fail = (reason: string) => client.kind === 'app'
+      ? expressRes.redirect(appRedirect({ error: reason }))
+      : expressRes.redirect(`/?oauth_error=${encodeURIComponent(reason)}`);
+
     if (oauthError || !code) {
-      return expressRes.redirect(`/?oauth_error=${encodeURIComponent(oauthError || 'access_denied')}`);
+      return fail(oauthError || 'access_denied');
     }
 
     const redirectUri = this._buildRedirectUri(req);
     const googleUser = await this.googleOAuthService.exchangeCodeForUser(code, redirectUri);
     if (!googleUser) {
-      return expressRes.redirect('/?oauth_error=token_exchange_failed');
+      return fail('token_exchange_failed');
     }
 
     const result = await this.authService.loginOrCreateGoogleUser(
@@ -256,10 +286,69 @@ export class AuthController {
     );
 
     if ('error' in result) {
-      return expressRes.redirect(`/?oauth_error=${encodeURIComponent(result.error)}`);
+      return fail(result.error);
     }
 
+    if (client.kind === 'app') {
+      return expressRes.redirect(appRedirect({ code: this.oauthFlow.issueAppCode(result.token, client.challenge) }));
+    }
     return expressRes.redirect(`/?token=${encodeURIComponent(result.token)}`);
+  }
+
+  /** 앱이 `awb://oauth?code=` 로 받은 코드를 PKCE verifier 와 함께 세션 토큰으로 바꾼다. */
+  @Post('oauth/app/exchange')
+  oauthAppExchange(@Body() body: any, @Res() res: Response) {
+    const token = this.oauthFlow.exchangeAppCode(body?.code, body?.code_verifier);
+    if (!token) {
+      return res.status(400).json({ error: 'invalid_or_expired_code' });
+    }
+    return res.json({ token });
+  }
+
+  /**
+   * 앱 단말 등록 — 로그인한 세션으로 부르면 단말 토큰을 한 번 내준다.
+   * 앱은 그것을 보관했다가 세션이 끊기면 `devices/session` 으로 새 세션을 받는다.
+   */
+  @Post('devices')
+  async registerDevice(@Headers('authorization') authHeader: string, @Body() body: any, @Res() res: Response) {
+    const user = await this._sessionUser(authHeader);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+    const device = await this.deviceAuth.register(user.id, body || {});
+    return res.status(201).json(device);
+  }
+
+  @Post('devices/session')
+  async deviceSession(@Body() body: any, @Res() res: Response) {
+    const minted = await this.deviceAuth.mintSession(body?.device_token, body?.app_version);
+    if (!minted) return res.status(401).json({ error: 'device_revoked' });
+    return res.json(minted);
+  }
+
+  /** 앱 로그아웃 — 이 단말의 자격을 회수한다(토큰을 쥔 쪽만 부를 수 있다). */
+  @Post('devices/revoke')
+  async revokeDevice(@Body() body: any, @Res() res: Response) {
+    await this.deviceAuth.revokeToken(body?.device_token);
+    return res.json({ success: true });
+  }
+
+  @Get('devices')
+  async listDevices(@Headers('authorization') authHeader: string, @Res() res: Response) {
+    const user = await this._sessionUser(authHeader);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+    return res.json(await this.deviceAuth.listForUser(user.id));
+  }
+
+  @Delete('devices/:id')
+  async deleteDevice(@Headers('authorization') authHeader: string, @Param('id') id: string, @Res() res: Response) {
+    const user = await this._sessionUser(authHeader);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+    const ok = await this.deviceAuth.revokeForUser(user.id, id);
+    return ok ? res.json({ success: true }) : res.status(404).json({ error: 'not_found' });
+  }
+
+  private async _sessionUser(authHeader: string | undefined) {
+    if (!authHeader?.startsWith('Bearer ')) return null;
+    return this.authService.getSessionUser(authHeader.slice(7).trim());
   }
 
   private _buildRedirectUri(req: Request): string {

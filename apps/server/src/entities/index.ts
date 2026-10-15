@@ -22,6 +22,8 @@ export { Credential } from './Credential';
 export { AgentErrorLog } from './AgentErrorLog';
 export { UserMention } from './UserMention';
 export { UserChannel } from './UserChannel';
+// 앱 단말 자격 — 세션이 끊겨도 앱이 다시 로그인 없이 세션을 받는다.
+export { UserDevice } from './UserDevice';
 export { TicketReadState } from './TicketReadState';
 export { TicketAttachment } from './TicketAttachment';
 export { Subagent } from './Subagent';

@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
 import ServerConfigField, { PwaInstallButton } from './ServerConfigField';
-import BackgroundWakeCard from './BackgroundWakeCard';
+import AndroidVoiceCard from './AndroidVoiceCard';
 import ApkDownloadButton from './ApkDownloadButton';
 
 interface SettingsDestination {
@@ -159,7 +159,7 @@ export default function SettingsOverviewPage() {
                 <ApkDownloadButton />
               </div>
             </div>
-            <BackgroundWakeCard />
+            <AndroidVoiceCard />
           </section>
           {visibleGroups.map((group) => (
             <section key={group.title} aria-labelledby={`settings-${group.title.replace(/\W+/g, '-').toLowerCase()}`}>

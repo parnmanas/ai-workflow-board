@@ -30,7 +30,7 @@ AWB 전체를 관리하는 에이전트 하나(**operator**)와 웹·Android 앱
 | 질문 | 결정 |
 |---|---|
 | 음성 엔진 | **품질 우선**, 외부 클라우드 전송 허용 |
-| 앱 | **Android 먼저**, 가능하면 크로스플랫폼 → Capacitor (기존 React/Vite 클라이언트 재사용, iOS 는 같은 프로젝트에 나중에) |
+| 앱 | **Android 먼저** → 네이티브 껍데기가 서버의 웹 화면을 그대로 띄우고 상시 음성만 네이티브로(`docs/android-app.md`). Capacitor 껍데기는 2026-10-15 에 버렸다 |
 | operator 두뇌 | **CLI 를 고를 수 있어야 한다** — 실행은 agent-manager 가 맡는다 |
 
 ## Claude · Codex 의 음성은 왜 못 쓰는가
@@ -476,14 +476,13 @@ queued → 대상이 한가하면 바로, 턴 중이면 그 턴이 끝날 때 pr
 - 알림 채널의 소리는 채널을 만든 뒤 고정된다 → 메시지별 음성을 채널 소리로 실을 수 없다.
 - 오디오 포커스는 transient-may-duck 으로 잡는다(음악을 줄였다가 되돌린다).
 
-## 앱 (Capacitor, Android 먼저)
+## 앱 (Android)
 
-- `apps/mobile` — Capacitor 프로젝트. WebView 는 배포된 AWB(`server.url`)를 그대로 띄운다 → UI 변경은 서버 배포로
-  따라오고, 앱 업데이트는 네이티브 부분(FCM, 재생 서비스, 권한)이 바뀔 때만 필요하다.
-- 네이티브: FCM 토큰 등록(`POST /api/me/devices`), `FirebaseMessagingService` + 재생 서비스, 마이크 권한(WebView getUserMedia 허용).
-- 서버: `user_devices` 엔티티(배럴 export 와 `MIGRATION_ENTITY_ORDER` 등록을 같은 커밋에), FCM HTTP v1 발송(서비스 계정).
-- 빌드: GitHub Actions(ubuntu 러너에 Android SDK 포함)에서 APK 를 만든다. 개인 사용은 사이드로드로 충분하고 Play 등록은 선택이다.
-- iOS 는 같은 프로젝트에 나중에 붙인다(NSE 타깃 추가, Apple Developer 계정 필요).
+- `apps/android` — 네이티브 앱(Java). WebView 가 배포된 AWB 화면을 그대로 띄우고(UI 변경은 서버 배포로 따라온다),
+  상시 음성 · 끊기지 않는 로그인 · 구글 로그인 왕복만 네이티브로 한다. 상세: `docs/android-app.md`.
+- 화면이 꺼져 있거나 다른 앱이 앞에 있어도 `VoiceService`(포그라운드 서비스)가 이름을 듣고, operator 와 대화하고, 답과
+  operator 의 답 알림을 읽는다 — 웹 화면과 같은 엔드포인트 · 같은 규칙이다. 화면이 보이면 웹 화면이 맡는다.
+- 남은 것: FCM(서비스가 죽어 있을 때의 알림), iOS.
 
 ## 단계
 
@@ -492,7 +491,7 @@ queued → 대상이 한가하면 바로, 턴 중이면 그 턴이 끝날 때 pr
 | P1 음성 게이트웨이 + 웹 대화 | `modules/voice`(공급자 · 설정 · 전사 · 합성 · `toSpeakable`), Agent Session 컴포저 마이크 + 응답 낭독, Voice lab | 세션 화면에서 말로 묻고 답을 듣는다. Voice lab 으로 엔진을 확정한다 |
 | P2 음성 알림 (웹 · Telegram) | announcer, `voice_announcement`, 클립 캐시, 사용자 설정, 아래 공백 메우기 | 다른 화면에 있을 때 세션 종료 · 미션 종료를 말로 듣는다 |
 | P3 operator | 이름 붙은 operator 여러 개(☆ Operator) · 사이드바 진입점 · 지침 · 사이트 전체 권한 · 음성 지원/잠들기. 남은 것: `notify_user`(턴 도중 먼저 말 걸기) | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
-| P4 Android 앱 | `apps/mobile`, 디바이스 등록, FCM, 재생 서비스 | 폰이 잠겨 있어도 작업 종료를 말로 듣고, 앱에서 operator 와 대화한다 |
+| P4 Android 앱 | `apps/android`, 단말 자격(`UserDevice`), 상시 음성 서비스. 남은 것: FCM | 폰이 잠겨 있어도 작업 종료를 말로 듣고, 앱에서 operator 와 대화한다 |
 | P5 (선택) | iOS, 실시간 음성 프런트(GPT-Live client delegation) | — |
 
 ## P1 구현 — 음성 게이트웨이 + 세션 음성 대화
