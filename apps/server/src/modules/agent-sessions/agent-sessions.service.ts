@@ -141,6 +141,8 @@ export interface ManagerStatePatch {
 }
 
 interface LiveState {
+  /** Internal observation order; wall-clock milliseconds can tie or move backwards. */
+  revision: number;
   manager_id: string;
   manager_name: string;
   cli: string;
@@ -337,6 +339,7 @@ function normalizeCommands(input: unknown): AgentSessionCommand[] {
 export class AgentSessionsService implements OnModuleDestroy {
   private readonly pending = new Map<string, PendingRpc>();
   private readonly live = new Map<string, LiveState>();
+  private liveRevision = 0;
   /** 매니저 id → Host 이름(읽은 적 있는 것). 매니저가 먼저 말을 거는 동기 경로가 이름을 쓰게. */
   private readonly hostNames = new Map<string, string>();
   /** 매니저 → (MCP 연결 참조값 → 세션 id). 새로 만든 세션의 MCP 연결은 세션 id 대신 참조값을 보낸다. */
@@ -1041,6 +1044,7 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   async listSessions(accountId: string, userId: string, managerId: string, cli: string, accessibleAccountIds: readonly string[] = [accountId]): Promise<AgentSessionSummary[]> {
     this.requireHost(accountId, managerId, cli);
+    const revisionBefore = this.liveRevision;
     const result = await this.rpc<{ sessions?: unknown }>(managerId, cli, 'list', { account_id: accountId }, userId);
     const list = Array.isArray(result?.sessions) ? result.sessions : [];
     const bindings = await this.dataSource.getRepository(AgentSessionExecution).find({
@@ -1058,7 +1062,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 메모리는 그 답에 맞춰 고친다 — 매니저가 "없다" 고 하면 진행 중 상태를 idle 로.
       const reported = typeof raw?.live_status === 'string' && STATUS_SET.has(raw.live_status) ? (raw.live_status as string) : null;
       const state = this.live.get(liveKey(managerId, cli, s.session_id));
-      if (state) this.reconcileWithManager(state, reported, 'list');
+      if (state && state.revision <= revisionBefore) this.reconcileWithManager(state, reported, 'list');
       const status = state?.status ?? reported ?? undefined;
       out.push({ ...s, live_status: status });
     }
@@ -1074,6 +1078,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   ): Promise<{ session: AgentSessionSummary | null; live: AgentSessionLiveSnapshot; events: AgentSessionEventRecord[] }> {
     const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
+    const revisionBefore = this.liveRevision;
     const result = await this.rpc<{ session?: unknown; events?: unknown; live?: unknown }>(managerId, cli, 'history', { account_id: accountId, session_id: sessionId }, userId);
     const summary = this.normalizeSummary(cli, result?.session);
     const events = Array.isArray(result?.events)
@@ -1096,6 +1101,9 @@ export class AgentSessionsService implements OnModuleDestroy {
     // prompt 가 409 고 Connect 버튼도 안 나와서 — 쓰기 동작으로만 driver 를 잡던 예전
     // 규칙 아래서는 되찾을 길이 아예 없었다. 그래서 화면은 끝난 작업을 "Working" 인 채로
     // 붙들고 그 뒤 대화가 하나도 흐르지 않았다.
+    // A delayed read may describe the previous turn. Capture this before applying
+    // metadata, which also advances the revision. A new seed already has reportedStatus.
+    const advancedDuringRead = state.revision > revisionBefore;
     state.driver_user_id = userId;
     if (reportedLive) {
       // 살아 있는 프로세스의 모드·config option·slash command 는 매니저만 안다(서버 재시작 뒤 특히).
@@ -1108,7 +1116,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         ...(typeof reportedLive.resume_supported === 'boolean' ? { resume_supported: reportedLive.resume_supported } : {}),
       });
     }
-    this.reconcileWithManager(state, reportedStatus, 'history');
+    if (!advancedDuringRead) this.reconcileWithManager(state, reportedStatus, 'history');
     return { session: summary, live: this.snapshot(state), events };
   }
 
@@ -1215,8 +1223,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     // RPC 가 돌아온 뒤 open 결과의 status 를 **무조건** 쓰면 그보다 최신인 상태를 과거로
     // 되돌린다 — 페이지에 들어오면 idle 세션마다 자동 연결이 걸리므로, 그 창에서 프롬프트를
     // 보낸 세션이 "돌고 있는데 ready" 로 영구히 고착됐다. 비교 근거로 RPC 전 세대를 적어 둔다.
-    const stateBefore = sessionId ? this.live.get(liveKey(managerId, cli, sessionId)) : undefined;
-    const generationBefore = stateBefore?.updated_at ?? null;
+    const revisionBefore = this.liveRevision;
     let result: Record<string, any>;
     try {
       result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { account_id: accountId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile, force: input.force === true }, userId);
@@ -1250,24 +1257,17 @@ export class AgentSessionsService implements OnModuleDestroy {
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
     if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
     await this.pinExecution(managerId, cli, openedId, execution);
-    // seedState 는 있으면 그대로 돌려주므로, "RPC 중에 생겼는가" 는 그 호출 **전에** 봐야 한다.
-    const stateExistedBeforeSeed = this.live.has(liveKey(managerId, cli, openedId));
     const state = await this.seedState(rec, managerId, cli, openedId, {
       cwd: typeof result?.cwd === 'string' && result.cwd ? result.cwd : cwd,
       title: typeof result?.title === 'string' ? result.title : title,
-      status: 'ready',
+      status: typeof result?.status === 'string' ? result.status : 'ready',
       driver_user_id: userId,
     });
     // RPC 중에 상태가 앞서 나갔으면 open 결과의 status 는 **쓰지 않는다**(이미 과거다).
     // 구조 정보(mode·config_options·auth)는 그 세션의 정적 성질이라 그대로 반영한다.
     //
-    // "앞서 나갔다" 에는 두 가지가 있다 — 세대가 올라간 것과, **없던 상태가 생긴 것**.
-    // 뒤엣것을 빠뜨리면 가드가 헛돈다: 처음 연결하는 세션은 RPC 를 보낼 때 라이브 상태가
-    // 아직 없고, 그 사이 도착한 이벤트 relay 가 상태를 busy 로 만들어 두기 때문이다
-    // (바로 이 경로가 "돌고 있는데 ready" 의 실제 재현 조건이다).
-    const advancedDuringOpen = stateBefore
-      ? state.updated_at > (generationBefore as number)
-      : stateExistedBeforeSeed;
+    // 새로 심은 상태는 이미 open 결과를 담고 있다. 이벤트가 먼저 만든 상태는 그 관측을 지킨다.
+    const advancedDuringOpen = state.revision > revisionBefore;
     this.applyPatch(state, {
       ...(advancedDuringOpen
         ? {}
@@ -1337,7 +1337,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
     state.last_error = null;
     state.last_error_code = null;
-    state.updated_at = Date.now();
+    this.touchState(state);
     // The manager restores native titles and names new sessions. A missing server
     // snapshot after reconnect must not rename an existing session from this prompt.
     const live = this.emitUpdate(state, 'prompt');
@@ -1406,7 +1406,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.awaiting.get(liveKey(managerId, cli, sessionId))?.delete(requestId);
     state.driver_user_id = userId;
     if (state.status === 'awaiting_permission') state.status = 'busy';
-    state.updated_at = Date.now();
+    this.touchState(state);
     const live = this.emitUpdate(state, 'permission');
     this.emitRequest({
       manager_id: managerId, account_id: accountId, cli, op: 'permission', session_id: sessionId,
@@ -1450,7 +1450,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.awaiting.get(liveKey(managerId, cli, sessionId))?.delete(elicitationId);
     state.driver_user_id = userId;
     if (state.status === 'awaiting_input') state.status = 'busy';
-    state.updated_at = Date.now();
+    this.touchState(state);
     const live = this.emitUpdate(state, 'elicitation');
     this.emitRequest({
       manager_id: managerId, account_id: accountId, cli, op: 'elicitation', session_id: sessionId,
@@ -1540,7 +1540,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       state.status = 'starting';
       state.last_error = null;
       state.last_error_code = null;
-      state.updated_at = Date.now();
+      this.touchState(state);
       this.emitUpdate(state, 'settings');
     }
     return state;
@@ -1574,7 +1574,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'closed', driver_user_id: userId });
     state.status = 'closed';
     state.driver_user_id = userId;
-    state.updated_at = Date.now();
+    this.touchState(state);
     this.awaiting.delete(liveKey(managerId, cli, sessionId));
     this.emitRequest({ manager_id: managerId, account_id: accountId, cli, op: 'close', session_id: sessionId, driver_user_id: userId });
     return this.emitUpdate(state, 'closed');
@@ -1601,7 +1601,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'starting', driver_user_id: userId });
     state.status = 'starting';
     state.driver_user_id = userId;
-    state.updated_at = Date.now();
+    this.touchState(state);
     // 세션을 **다시 여는** 요청이므로 open/prompt 와 똑같은 개설 컨텍스트를 실어야 한다.
     // 특히 `credential_id` 를 빠뜨리면 운영자 로그인으로 열리고, 그 다음 op 가 바인딩된
     // credential 을 싣고 오는 순간 매니저가 "binding changed" 로 또 다시 연다 — 계정이
@@ -1653,7 +1653,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       this.applyPatch(state, patch);
       live = this.emitUpdate(state, patch.reason || 'manager_patch');
     } else {
-      state.updated_at = Date.now();
+      this.touchState(state);
     }
     return { relayed: events.length, live };
   }
@@ -1754,17 +1754,20 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 바뀌면 driver 에게 `agent_session_update` 를 보내 열려 있는 화면도 함께 고친다.
    */
   private reconcileWithManager(state: LiveState, reportedStatus: string | null, reason: string): void {
+    // An unchanged heartbeat still supersedes an older in-flight read. Do not
+    // refresh updated_at here: an absent process must not extend starting's grace.
+    state.revision = ++this.liveRevision;
     if (reportedStatus) {
       if (reportedStatus === state.status) return;
       state.status = reportedStatus;
-      state.updated_at = Date.now();
+      this.touchState(state);
       this.emitUpdate(state, reason);
       return;
     }
     if (!IN_FLIGHT_STATUSES.has(state.status)) return;
     if (state.status === 'starting' && Date.now() - state.updated_at < STARTING_GRACE_MS) return;
     state.status = 'idle';
-    state.updated_at = Date.now();
+    this.touchState(state);
     this.emitUpdate(state, reason);
   }
 
@@ -1816,7 +1819,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       this.awaiting.delete(key); // 프로세스가 없으면 기다리던 요청도 없다
       if (!IN_FLIGHT_STATUSES.has(state.status)) continue;
       state.status = 'idle';
-      state.updated_at = Date.now();
+      this.touchState(state);
       this.emitUpdate(state, 'host_offline');
       changed += 1;
     }
@@ -1878,6 +1881,9 @@ export class AgentSessionsService implements OnModuleDestroy {
     const existing = this.live.get(liveKey(managerId, cli, sessionId));
     if (existing) return existing;
     const name = await this.managerName(managerId, rec.hostname);
+    // Manager events can create a state while the host name is being loaded.
+    const arrived = this.live.get(liveKey(managerId, cli, sessionId));
+    if (arrived) return arrived;
     return this.createState(managerId, name, cli, sessionId, seed);
   }
 
@@ -1890,6 +1896,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   ): LiveState {
     this.sweep();
     const state: LiveState = {
+      revision: ++this.liveRevision,
       manager_id: managerId,
       manager_name: managerName,
       cli,
@@ -1910,6 +1917,11 @@ export class AgentSessionsService implements OnModuleDestroy {
     };
     this.live.set(liveKey(managerId, cli, sessionId), state);
     return state;
+  }
+
+  private touchState(state: LiveState): void {
+    state.revision = ++this.liveRevision;
+    state.updated_at = Date.now();
   }
 
   private applyPatch(state: LiveState, patch: ManagerStatePatch): void {
@@ -1957,7 +1969,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         ? patch.last_error_code.slice(0, 64)
         : null;
     }
-    state.updated_at = Date.now();
+    this.touchState(state);
   }
 
   private sweep(): void {
