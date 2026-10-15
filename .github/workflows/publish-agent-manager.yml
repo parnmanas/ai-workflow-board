@@ -12,12 +12,10 @@
 #   collapse 될 것도 없다. package.json 의 version 은 '최초 배포 seed floor' 로만
 #   남는다(이미 npm 에 올라간 뒤에는 참조되지 않음).
 #
-# Auth: npm Trusted Publishing (OIDC). 저장된 토큰이 없다 — publish 순간 npm CLI 가
-#   이 잡의 GitHub OIDC 토큰(permissions.id-token)을 레지스트리에서 단명 publish
-#   토큰으로 교환한다. npmjs.com 의 awb-agent-manager → Settings → Trusted Publisher
-#   에 이 저장소 + 이 워크플로 파일이 등록돼 있어야 한다. 예전 NPM_TOKEN secret 은
-#   쓰기 토큰 최대 수명(90일)을 넘겨 2026-10-11 에 만료됐고, npm 은 그걸 PUT 404 로
-#   답해 "패키지가 없다" 처럼 보였다 — 토큰이 없으면 만료될 것도 없다.
+# Auth: npm Trusted Publishing (OIDC), with the repository NPM_TOKEN secret
+#   available as fallback. That secret is synced from AWB's NPM.AWB credential;
+#   rotate it there and update the GitHub secret together. An absent Trusted
+#   Publisher registration or an expired token can both surface as PUT 404.
 #
 # 트리거 (loop 방지 — reviewer guard #4):
 #   - push to `main` 이되 **agent-manager 산출물/publish 기계**를 건드린 push 로만
@@ -170,12 +168,15 @@ jobs:
       # 로 "레지스트리의 이 버전이 정말 parnmanas/ai-workflow-board 의 이 커밋에서
       # 이 워크플로로 빌드됐는지" 검증할 수 있다. 없으면 어디선가 publish 권한 토큰이
       # 유출됐을 때 공격자가 임의 tarball 을 같은 이름으로 올려도 구분할 방법이 없다.
-      # 인증은 Trusted Publishing(OIDC) — NODE_AUTH_TOKEN 을 넘기지 않는다.
+      # npm can use OIDC or the token synced from AWB's NPM.AWB credential.
+      # Scope the token to publishing; never print it or put it in the tarball.
       # 전제조건(모두 충족 확인함): repo public, package.json.repository 가 실제
       # 저장소를 가리킴, GitHub Actions 에서 publish, permissions.id-token=write.
       - name: Publish to npm
         if: steps.plan.outputs.action == 'publish'
         run: npm publish -w awb-agent-manager --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # 릴리스 태그 기록 — publish 직후(fresh) 또는 "npm 엔 있고 tag 만 없음" 복구
       # (recover-tag). HEAD 를 가리키는 경량 태그. GITHUB_TOKEN 태그 push 는 이

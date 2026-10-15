@@ -24,13 +24,16 @@
 > 에 랜딩하는 게 릴리스 트리거다(트리거는 version diff 가 아니라 agent-manager
 > 산출물/publish 기계 변경 — `paths` 필터). 계산된 버전은 main 에 **되커밋하지
 > 않고** 태그/tarball 에만 담으므로 봇 push→재트리거 루프가 없다. 두 전제는
-> Parn/infra 쪽: npmjs.com 의 awb-agent-manager → Settings → **Trusted Publisher** 에
-> 이 저장소(`parnmanas/ai-workflow-board`)와 워크플로 파일(`publish-agent-manager.yml`)이
-> 등록돼 있어야 하고(저장된 토큰 없음 — OIDC 교환, npm ≥ 11.5.1), 변경이 실제로
-> `main` 에 닿아야 한다(bc306b8d 의 1.0.0-stuck 은 트리거 자체가 없던 경우).
+> Parn/infra 쪽: npm 인증이 구성돼 있어야 하고, 변경이 실제로 `main` 에 닿아야 한다
+> (bc306b8d 의 1.0.0-stuck 은 트리거 자체가 없던 경우). 인증은 npmjs.com 패키지 설정의
+> **Trusted Publisher** (`parnmanas/ai-workflow-board`, `publish-agent-manager.yml`, npm ≥ 11.5.1)
+> 또는 GitHub 저장소 secret `NPM_TOKEN`으로 한다. 토큰 원본은 AWB의 **NPM.AWB** credential이며
+> `agent_env`가 켜진 세션에는 `NPM_TOKEN`으로 주입된다. 갱신 시 GitHub secret도 함께 교체한다.
+> 값은 출력하지 않고 `gh secret set NPM_TOKEN`의 stdin으로 전달하며, workflow는 publish 단계에만
+> `NODE_AUTH_TOKEN`으로 노출한다. AWB와 GitHub 사이의 자동 동기화는 없다.
 > publish 가 `PUT … 404` 로 실패하면 패키지가 없는 게 아니라 **인증 실패**다 —
-> Trusted Publisher 등록이 빠졌거나 바뀐 것이다(2026-10-11, 90일 만료된 NPM_TOKEN 이
-> 같은 모양으로 실패했다). 재실행은 **멱등**하다 — 이미 올라간 버전이면 태그만
+> Trusted Publisher 등록과 토큰의 유효성·패키지 쓰기 권한을 확인한다(2026-10-11, 만료된
+> NPM_TOKEN도 같은 모양으로 실패했다). 재실행은 **멱등**하다 — 이미 올라간 버전이면 태그만
 > 보장하고, 부분 실패(publish 됐는데 태그만 실패)는 다음 run 이 npm 의 gitHead
 > provenance(배포 당시 커밋 SHA)로 복구한다.
 
