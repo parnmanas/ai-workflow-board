@@ -3,6 +3,8 @@ import { tokens } from '../../../tokens';
 import TicketRefCard from '../TicketRefCard';
 import ResolvedArtifactRef from '../ResolvedArtifactRef';
 import { ARTIFACT_TOKEN_RE, ArtifactRefType } from '../../../utils/artifactRef';
+import { splitMarkdownFences } from '../../../utils/markdownFences';
+import CodeBlock from '../../common/CodeBlock';
 
 // ─── renderMarkdown — XSS-safe inline markdown ───────────────────────────────
 // T-07-12: No dangerouslySetInnerHTML. React JSX element construction only.
@@ -82,6 +84,12 @@ export function handleMentionAwareCopy(e: React.ClipboardEvent<HTMLElement>): vo
 }
 
 export function renderMarkdown(text: string, participants?: MentionParticipant[]): React.ReactNode[] {
+  return splitMarkdownFences(text).map((segment, index) => segment.kind === 'code'
+    ? <CodeBlock key={index} code={segment.code} language={segment.language} />
+    : <React.Fragment key={index}>{renderInlineMarkdown(segment.text, participants)}</React.Fragment>);
+}
+
+function renderInlineMarkdown(text: string, participants?: MentionParticipant[]): React.ReactNode[] {
   if (!text) return [];
 
   // Step 1: Split on backtick code spans

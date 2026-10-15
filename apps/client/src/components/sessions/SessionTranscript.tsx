@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
+import CodeBlock from '../common/CodeBlock';
 import { renderMarkdown } from '../chat/utils/markdown';
 import { formatReceivedAt, usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
@@ -79,21 +80,6 @@ function statusChip(status: string): { text: string; color: string; bg: string }
   }
 }
 
-const preStyle: React.CSSProperties = {
-  margin: '6px 0 0',
-  padding: '8px 10px',
-  background: tokens.colors.surface,
-  border: `1px solid ${tokens.colors.border}`,
-  borderRadius: tokens.radii.md,
-  color: tokens.colors.textStrong,
-  fontFamily: MONO,
-  fontSize: 11.5,
-  lineHeight: 1.45,
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
-  maxHeight: 320,
-  overflow: 'auto',
-};
 
 const cardStyle: React.CSSProperties = {
   border: `1px solid ${tokens.colors.border}`,
@@ -346,14 +332,12 @@ function ToolBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'tool' }
       </summary>
       {input && (
         <div>
-          <div style={{ marginTop: 6, fontSize: 11, color: tokens.colors.textMuted }}>Input</div>
-          <pre style={preStyle}>{clip(input)}</pre>
+          <CodeBlock code={input} displayCode={clip(input)} language="Input" maxHeight={320} />
         </div>
       )}
       {output && (
         <div>
-          <div style={{ marginTop: 6, fontSize: 11, color: tokens.colors.textMuted }}>Output</div>
-          <pre style={preStyle}>{clip(output)}</pre>
+          <CodeBlock code={output} displayCode={clip(output)} language="Output" maxHeight={320} />
         </div>
       )}
     </details>
@@ -400,7 +384,7 @@ function PermissionBlock({
       {rawInput && (
         <details style={{ marginTop: 4 }}>
           <summary style={summaryStyle}>Details</summary>
-          <pre style={preStyle}>{clip(rawInput)}</pre>
+          <CodeBlock code={rawInput} displayCode={clip(rawInput)} language="Input" maxHeight={320} />
         </details>
       )}
       {decided ? (

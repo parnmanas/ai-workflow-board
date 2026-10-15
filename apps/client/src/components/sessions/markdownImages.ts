@@ -1,3 +1,5 @@
+import { splitMarkdownFences } from '../../utils/markdownFences';
+
 /**
  * 에이전트 답 속의 미리보기 참조(`![alt](target)` 이미지, `[보고서](./report.html)` 같은
  * html/md 파일 링크)를 떼어 낸다.
@@ -83,13 +85,9 @@ function fileKindOf(target: string): 'html' | 'markdown' | null {
 
 /** 코드 펜스(```)와 인라인 코드 안의 `![…](…)` 는 예시이지 그림이 아니다 — 그 구간을 건너뛴다. */
 function codeRanges(text: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = [];
-  const fence = /^(```|~~~)[^\n]*\n[\s\S]*?(?:^\1[^\n]*$|(?![\s\S]))/gm;
+  const ranges: Array<[number, number]> = splitMarkdownFences(text)
+    .filter((segment) => segment.kind === 'code').map((segment) => [segment.start, segment.end]);
   let m: RegExpExecArray | null;
-  while ((m = fence.exec(text)) !== null) {
-    ranges.push([m.index, m.index + m[0].length]);
-    if (m[0].length === 0) fence.lastIndex++;
-  }
   const inline = /`[^`\n]+`/g;
   while ((m = inline.exec(text)) !== null) {
     const at = m.index;
@@ -135,8 +133,8 @@ export function splitMarkdownImages(text: string): MarkdownImageSegment[] {
     .map((seg, i) => {
       if (seg.kind !== 'text') return seg;
       let t = seg.text;
-      if (out[i - 1]?.kind !== 'text') t = t.replace(/^[ \t]*\r?\n/, '');
-      if (out[i + 1]?.kind !== 'text') t = t.replace(/\r?\n[ \t]*$/, '');
+      if (out[i - 1] && out[i - 1].kind !== 'text') t = t.replace(/^[ \t]*\r?\n/, '');
+      if (out[i + 1] && out[i + 1].kind !== 'text') t = t.replace(/\r?\n[ \t]*$/, '');
       return { kind: 'text' as const, text: t };
     })
     .filter((seg) => seg.kind !== 'text' || seg.text.length > 0);
