@@ -12,7 +12,7 @@ import type { AgentSessionEventRecord } from '../types';
  * 그걸로 답을 잃으면 안 된다.
  */
 
-const SEGMENT_BREAKS = new Set(['tool_call', 'permission_request', 'elicitation_request', 'plan']);
+export const SEGMENT_BREAKS = new Set(['tool_call', 'permission_request', 'elicitation_request', 'plan']);
 
 function lastNonEmpty(segments: string[]): string {
   for (let i = segments.length - 1; i >= 0; i--) {
@@ -45,6 +45,10 @@ export interface FinishedTurnAnswer {
  */
 export class TurnAnswerTracker {
   #turns = new Map<string, string[]>();
+
+  currentText(turnId: string): string {
+    return this.#turns.get(turnId)?.at(-1) ?? '';
+  }
 
   /** 이벤트 하나를 먹인다. 턴 종료 이벤트면 그 턴의 답을 돌려주고 상태를 비운다. */
   push(ev: AgentSessionEventRecord | null | undefined): FinishedTurnAnswer | null {

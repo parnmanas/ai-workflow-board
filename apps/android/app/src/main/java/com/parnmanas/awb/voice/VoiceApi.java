@@ -62,6 +62,7 @@ final class VoiceApi {
     String wakeError = "";
     boolean sttReady;
     boolean ttsReady;
+    boolean ttsStreaming;
   }
 
   static final class Match {
@@ -121,6 +122,7 @@ final class VoiceApi {
     c.wakeError = wake == null ? "" : wake.optString("error", "");
     c.sttReady = stt != null && stt.optBoolean("ready", false);
     c.ttsReady = tts != null && tts.optBoolean("ready", false);
+    c.ttsStreaming = tts != null && tts.optBoolean("streaming", false);
     return c;
   }
 
@@ -168,8 +170,12 @@ final class VoiceApi {
   }
 
   List<String> speakable(String text, boolean summary) throws IOException {
+    return speakable(text, summary, false);
+  }
+
+  List<String> speakable(String text, boolean summary, boolean partial) throws IOException {
     JSONObject j = ok(call(null, (b, h) ->
-        Http.postJson(b + "/api/voice/speakable", h, Http.obj("text", text, "summary", summary)))).json();
+        Http.postJson(b + "/api/voice/speakable", h, Http.obj("text", text, "summary", summary, "partial", partial)))).json();
     JSONArray arr = j.optJSONArray("chunks");
     List<String> out = new ArrayList<>();
     if (arr == null) return out;
@@ -183,6 +189,14 @@ final class VoiceApi {
   Audio speech(String chunk) throws IOException {
     Http.Response r = ok(call(null, (b, h) -> Http.postJson(b + "/api/voice/speech", h, Http.obj("text", chunk))));
     return new Audio(r.body, r.contentType);
+  }
+
+  void streamSpeech(String text, Speaker speaker) throws IOException {
+    ok(call(null, (b, h) -> Http.streamPostJson(b + "/api/voice/speech/stream", h, Http.obj("text", text), new Http.StreamConsumer() {
+      public void opened(java.net.HttpURLConnection connection) throws IOException { speaker.openPcmConnection(connection); }
+      public void closed(java.net.HttpURLConnection connection) { speaker.closePcmConnection(connection); }
+      public void read(java.io.InputStream input, java.net.HttpURLConnection connection) throws IOException { speaker.playPcm(input, connection); }
+    })));
   }
 
   Audio announcementAudio(String id) throws IOException {

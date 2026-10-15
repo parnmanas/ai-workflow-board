@@ -17,7 +17,7 @@ about:
   * audio in: the browser records webm/opus (Chrome, Android WebView) or mp4/aac
     (Safari). Everything is decoded here (PyAV bundles FFmpeg — no system ffmpeg)
     into 16 kHz mono WAV before the ASR model sees it.
-  * audio out: TTS models emit PCM/WAV; AWB plays MP3, so it is encoded here.
+  * audio out: saved clips are encoded as MP3; streaming clients receive PCM directly.
 """
 
 from __future__ import annotations
@@ -38,7 +38,8 @@ import httpx
 import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 import speaker_filter
 
 ASR_URL = os.environ.get("ASR_URL", "http://127.0.0.1:8411/v1").rstrip("/")
@@ -255,14 +256,18 @@ def speakable_tail(text: str) -> str:
     return text if re.search(r"[.!?。！？…]$", text) else f"{text}."
 
 
-async def tts_backend(text: str, voice: dict[str, Any], language: str | None) -> tuple[np.ndarray, int]:
-    """Ask the TTS model server (vLLM-Omni, OpenAI speech shape) for WAV. The
-    voice-specific fields (speaker, language, style instructions) come from voices.json."""
+def tts_request(text: str, voice: dict[str, Any], language: str | None) -> dict[str, Any]:
     body: dict[str, Any] = {"input": speakable_tail(text), "response_format": "wav", **voice.get("request", {})}
     if TTS_MODEL and "model" not in body:
         body["model"] = TTS_MODEL
     if "language" not in body:
         body["language"] = TTS_LANGUAGE_NAMES.get((language or "").lower(), "Auto")
+    return body
+
+
+async def tts_backend(text: str, voice: dict[str, Any], language: str | None) -> tuple[np.ndarray, int]:
+    """Buffered output for saved clips and existing clients."""
+    body = tts_request(text, voice, language)
     res = await client.post(f"{TTS_URL}/v1/audio/speech", json=body)
     if res.status_code != 200:
         raise HTTPException(status_code=502, detail=f"tts backend {res.status_code}: {res.text[:300]}")
@@ -291,6 +296,28 @@ async def speech(request: Request) -> Response:
     voice = next((v for v in catalog.get("voices", []) if v.get("id") == wanted), None)
     if voice is None:
         raise HTTPException(status_code=400, detail=f"unknown voice {wanted!r} — see GET /v1/audio/voices")
+    if body.get("stream") is True:
+        if body.get("response_format") != "pcm":
+            raise HTTPException(status_code=400, detail="streaming requires response_format=pcm")
+        payload = tts_request(text, voice, body.get("language"))
+        # vLLM-Omni >=0.24 defaults stream=true to SSE. Request raw bytes explicitly.
+        payload.update(stream=True, stream_format="audio", response_format="pcm", sample_rate=24000)
+        upstream = await client.send(client.build_request("POST", f"{TTS_URL}/v1/audio/speech", json=payload), stream=True)
+        if upstream.status_code != 200 or not upstream.headers.get("content-type", "").startswith("audio/pcm"):
+            await upstream.aclose()
+            raise HTTPException(status_code=502, detail=f"tts backend does not provide PCM streaming ({upstream.status_code})")
+
+        async def audio_chunks():
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+
+        return StreamingResponse(audio_chunks(), media_type="audio/pcm", background=BackgroundTask(upstream.aclose), headers={
+            "X-Audio-Sample-Rate": "24000", "X-Audio-Channels": "1",
+            "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no",
+        })
     samples, rate = await tts_backend(text, voice, body.get("language"))
     if str(body.get("response_format") or "mp3") == "wav":
         return Response(wav_bytes(samples, rate), media_type="audio/wav")

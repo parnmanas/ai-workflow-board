@@ -136,6 +136,52 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   private volatile Mode mode = Mode.SLEEPING;
   private volatile VoiceApi.Operator awakeOp;
   private volatile boolean wakeNoteSent = false;
+  private volatile long speechGeneration = 0;
+  private String streamingTurnId;
+  private SpeechSegment speechSegment;
+
+  private static final class SpeechSegment {
+    String text = "";
+    String spoken = ""; // Only the speech executor reads/writes this field.
+  }
+
+  private void cancelStreamedAnswer() {
+    speechGeneration++;
+    streamingTurnId = null;
+    speechSegment = null;
+    if (speaker != null) speaker.cancel();
+  }
+
+  private void queueSpeechSnapshot(SpeechSegment segment, boolean partial) {
+    if (segment == null) return;
+    String text = segment.text;
+    long generation = speechGeneration;
+    speech.execute(() -> {
+      if (!running || generation != speechGeneration) return;
+      try {
+        String ready = String.join(" ", api.speakable(text, true, partial));
+        if (!ready.startsWith(segment.spoken)) return;
+        String next = ready.substring(segment.spoken.length()).trim();
+        if (!next.isEmpty() && generation == speechGeneration) {
+          withSpeaking(() -> {
+            try {
+              if (config != null && config.ttsStreaming) api.streamSpeech(next, speaker);
+              else {
+                VoiceApi.Audio audio = api.speech(next);
+                if (generation == speechGeneration) speaker.play(audio.bytes, audio.contentType);
+              }
+            } catch (Exception e) {
+              if (generation == speechGeneration) { Log.w(TAG, "streaming speech failed", e); error = "읽지 못했습니다: " + e.getMessage(); publish(); }
+            }
+          });
+        }
+        segment.spoken = ready;
+        lastActivityAt = System.currentTimeMillis();
+      } catch (Exception e) {
+        if (generation == speechGeneration) { error = "읽지 못했습니다: " + e.getMessage(); publish(); }
+      }
+    });
+  }
   private volatile long lastActivityAt = 0;
   private volatile String pendingTurnId;
   private volatile long pendingSince = 0;
@@ -306,7 +352,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     }
     stopListening();
     if (events != null) events.stop();
-    if (speaker != null) speaker.cancel();
+    cancelStreamedAnswer();
     final VoiceApi a = api;
     final String tab = tabId;
     final boolean awake = mode == Mode.AWAKE;
@@ -374,6 +420,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     if (mode == Mode.AWAKE) {
       if (pendingTurnId != null && now - pendingSince > REPLY_GIVE_UP_MS) {
         pendingTurnId = null;
+        cancelStreamedAnswer();
       }
       boolean idle = pendingTurnId == null && !speaking && queuedEmpty();
       if (idle && now - lastActivityAt > VoiceRules.WAKE_IDLE_SLEEP_MS) {
@@ -562,7 +609,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     VoiceApi.Match m = api.match(text);
     Log.i(TAG, "sleeping heard \"" + text + "\" → " + (m.operator == null ? "no call" : "call " + m.operator.name));
     if (m.operator != null) {
-      wake(resolve(m.operator), m.rest);
+      wake(resolve(m.operator), text);
     } else if (follow != null && !VoiceRules.isFiller(text)) {
       wake(follow, text);
     } else if (reportTarget != null && now < reportUntil && VoiceRules.isReportRequest(text)) {
@@ -577,15 +624,13 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     Log.i(TAG, "awake heard \"" + text + "\"");
     if (text.isEmpty() || VoiceRules.isFiller(text)) return;
     lastActivityAt = System.currentTimeMillis();
-    // 깨어 있는 동안 다시 이름을 부르면 이름만 떼고, 다른 operator 를 부르면 그쪽이 깨어난다.
+    // 호출어를 포함한 발화 전체를 보낸다. 다른 operator 를 부르면 그쪽이 직접 답한다.
     VoiceApi.Match m = api.match(text);
     if (m.operator != null) {
       if (!m.operator.id.equals(op.id)) {
-        wake(resolve(m.operator), m.rest);
+        wake(resolve(m.operator), text);
         return;
       }
-      text = m.rest;
-      if (text.isEmpty() || VoiceRules.isFiller(text)) return;
     }
     sendPrompt(text);
   }
@@ -602,12 +647,13 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     followUpUntil = 0;
     if (reportTarget != null && reportTarget.id.equals(op.id)) reportTarget = null;
     if (switching) {
+      cancelStreamedAnswer();
       pendingTurnId = null;
       synchronized (queued) {
         queued.clear();
       }
     }
-    speech.execute(() -> withSpeaking(() -> speaker.earcon(true)));
+    speech.execute(() -> withSpeaking(() -> { speaker.resetCancel(); speaker.earcon(true); }));
     lastPresenceAt = System.currentTimeMillis();
     try {
       api.presence(tabId, op, true);
@@ -621,13 +667,14 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   private void sleep(boolean earcon) {
     if (mode != Mode.AWAKE) return;
     Log.i(TAG, "sleep");
+    cancelStreamedAnswer();
     mode = Mode.SLEEPING;
     awakeOp = null;
     pendingTurnId = null;
     synchronized (queued) {
       queued.clear();
     }
-    if (earcon) speech.execute(() -> withSpeaking(() -> speaker.earcon(false)));
+    if (earcon) speech.execute(() -> withSpeaking(() -> { speaker.resetCancel(); speaker.earcon(false); }));
     try {
       api.presence(tabId, null, false);
     } catch (Exception ignored) {
@@ -649,6 +696,8 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     String body = wakeNoteSent ? text : VoiceRules.withWakeNote(text);
     try {
       String turnId = api.prompt(op, body);
+      cancelStreamedAnswer();
+      speech.execute(() -> speaker.resetCancel());
       busySince = 0;
       wakeNoteSent = true;
       pendingTurnId = turnId.isEmpty() ? null : turnId;
@@ -718,12 +767,49 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     if (op == null || !op.sameSession(data.optString("manager_id"), data.optString("cli"), data.optString("session_id"))) {
       return;
     }
-    VoiceRules.TurnAnswers.Finished done = answers.push(data.optJSONObject("event"));
+    JSONObject event = data.optJSONObject("event");
+    VoiceRules.TurnAnswers.Finished done = answers.push(event);
+    if (event != null && pendingTurnId != null && pendingTurnId.equals(event.optString("turn_id"))
+        && config != null && config.ttsReady) {
+      String type = event.optString("type");
+      if ("text".equals(type)) {
+        streamingTurnId = pendingTurnId;
+        if (speechSegment == null) speechSegment = new SpeechSegment();
+        JSONObject payload = event.optJSONObject("payload");
+        String delta = payload == null ? "" : payload.optString("text", "");
+        String tail = speechSegment.text.isEmpty() ? "" : speechSegment.text.substring(speechSegment.text.length() - 1);
+        speechSegment.text += delta;
+        if ((tail + delta).matches("(?s).*(?:[.!?。！？…]\\s|\\n).*")) queueSpeechSnapshot(speechSegment, true);
+      } else if ("tool_call".equals(type) || "permission_request".equals(type)
+          || "elicitation_request".equals(type) || "plan".equals(type)) {
+        queueSpeechSnapshot(speechSegment, false);
+        speechSegment = null;
+      }
+    }
     if (done == null || pendingTurnId == null || !done.turnId.equals(pendingTurnId)) return;
     pendingTurnId = null;
     lastActivityAt = System.currentTimeMillis();
     detail = "";
     Log.i(TAG, "turn finished " + done.turnId + " (" + done.stopReason + "): " + done.answer.length() + " chars");
+    if (done.turnId.equals(streamingTurnId)) {
+      if (!done.speakable()) {
+        cancelStreamedAnswer();
+        updateNotification(); drainQueue(); return;
+      }
+      queueSpeechSnapshot(speechSegment, false);
+      speechSegment = null;
+      streamingTurnId = null;
+      long generation = speechGeneration;
+      boolean shouldSleep = VoiceRules.splitSleepMarker(done.answer).sleep;
+      speech.execute(() -> worker.execute(() -> {
+        if (generation != speechGeneration) return;
+        lastActivityAt = System.currentTimeMillis();
+        if (shouldSleep) sleep(true);
+        else drainQueue();
+      }));
+      updateNotification();
+      return;
+    }
     if (done.speakable()) {
       VoiceRules.SleepSplit split = VoiceRules.splitSleepMarker(done.answer);
       speech.execute(() -> {
@@ -742,6 +828,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     if (op == null || session == null || pendingTurnId == null) return;
     if (!op.sameSession(session.optString("manager_id"), session.optString("cli"), session.optString("session_id"))) return;
     if ("turn_failed".equals(data.optString("reason"))) {
+      cancelStreamedAnswer();
       answers.forget(pendingTurnId);
       pendingTurnId = null;
       detail = "operator 가 답하지 못했습니다";

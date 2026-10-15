@@ -435,3 +435,54 @@ test('transcribe drops a vocabulary echo (the lab still sees the raw answer)', a
   assert.equal(lab.text, 'AWB, rolf.');
   assert.equal(lab.ignored, undefined);
 });
+
+test('PCM streaming exposes the first packet before completion and propagates cancellation', async () => {
+  const { service } = makeService({ 'voice.tts.provider': 'local', 'voice.local.base_url': 'http://voice/v1' });
+  let upstream;
+  let signal;
+  let cancelled = false;
+  service.fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(body.stream_format, 'audio');
+    assert.equal(body.response_format, 'pcm');
+    signal = init.signal;
+    return new Response(new ReadableStream({ start(c) { upstream = c; c.enqueue(new Uint8Array([1, 2])); }, cancel() { cancelled = true; } }),
+      { headers: { 'content-type': 'audio/pcm' } });
+  };
+  const abort = new AbortController();
+  await service.streamSpeech('안녕하세요.', abort.signal, async (body, provider) => {
+    assert.equal(provider, 'local');
+    const reader = body.getReader();
+    assert.deepEqual([...((await reader.read()).value)], [1, 2], 'available while upstream is still open');
+    abort.abort();
+    assert.equal(signal.aborted, true);
+    await reader.cancel(); reader.releaseLock();
+  });
+  assert.equal(cancelled, true);
+  assert.equal((await service.status(false)).tts.streaming, true);
+});
+
+test('streaming never treats an old gateway MP3 or an unsupported provider as PCM', async () => {
+  let { service } = makeService({ 'voice.tts.provider': 'local', 'voice.local.base_url': 'http://voice/v1' });
+  service.fetchImpl = async () => new Response('ID3', { headers: { 'content-type': 'audio/mpeg' } });
+  await assert.rejects(service.streamSpeech('안녕.', new AbortController().signal, async () => assert.fail('must not consume MP3')), /PCM streaming/);
+  ({ service } = makeService({ 'voice.tts.provider': 'google', 'voice.google.api_key': 'test' }));
+  await assert.rejects(service.streamSpeech('안녕.', new AbortController().signal, async () => {}));
+});
+
+test('incremental speakable holds partial sentences, code and unfinished markup', async () => {
+  const { service } = makeService({});
+  const partial = (text, summary = false) => service.speakable(text, summary, true).join(' ');
+  assert.equal(partial('진행 중'), '');
+  assert.equal(partial('버전 1.'), '');
+  assert.equal(partial('버전 1.5입니다. 다음'), '버전 1.5입니다.');
+  assert.equal(partial('완료했어요. 다음 문장을'), '완료했어요.');
+  assert.equal(partial('완료했어요.\n\n```js\nsecret.foo();\n'), '완료했어요.');
+  assert.equal(partial('완료했어요. [미완성 링크. '), '완료했어요.');
+  assert.equal(partial('완료했어요.\n\n| 표의 내용. 다음'), '완료했어요.');
+  assert.equal(partial('완료했어요. *미완성 강조. '), '완료했어요.');
+  assert.equal(partial('완료했어요. <span title="내용. '), '완료했어요.');
+  assert.equal(partial('완료했어요. [[sleep'), '완료했어요.');
+  assert.equal(partial('완료했어요.\n\n상세는 여기에요. ', true), '완료했어요.');
+  assert.equal(service.speakable('마침표 없는 마지막 말', true).join(' '), '마침표 없는 마지막 말.');
+});

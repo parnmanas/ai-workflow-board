@@ -29,7 +29,7 @@ function hasUserActivation(): boolean {
  *
  * 잠든 동안 들린 발화마다(브라우저 안의 VAD 가 말의 시작과 끝을 가른다) 자체 호스팅 STT 로 받아 적고,
  * 그 글이 operator 를 부르는 말이면 신호음을 내고 그 operator 의 세션 화면으로 간다 — 거기서 대화 모드가
- * 스스로 켜지고, 이름 뒤에 이어 한 말이 첫 요청으로 간다.
+ * 스스로 켜지고, 호출어를 포함한 발화 전체가 첫 요청으로 간다.
  *
  * 탭이 숨어 있어도 듣는다(켜 둔 단말을 스피커처럼 쓰는 것이 이 기능의 쓰임새다). 다른 소리를 읽는 동안은
  * 쉰다 — 스피커 소리에서 이름을 듣지 않게.
@@ -175,7 +175,7 @@ export default function WakeListener() {
           const operator = match?.operator ?? answering ?? reporting;
           if (!operator) return;
           playEarcon('wake');
-          wakeStore.wake(operator.id, match ? (match.rest || null) : text);
+          wakeStore.wake(operator.id, text);
           go(sessionPath(``, operator.manager_id, operator.cli, operator.session_id));
         })
         .catch((err: any) => { failure = err?.message || '이름을 확인하지 못했습니다'; })

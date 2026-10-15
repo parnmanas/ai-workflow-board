@@ -58,6 +58,23 @@ export const localTts: TtsProvider = {
   defaultVoice: LOCAL_DEFAULT_VOICE,
   missing,
 
+  async stream(input, ctx) {
+    const res = await ctx.fetch(`${ctx.config.localBaseUrl}/audio/speech`, {
+      method: 'POST',
+      headers: { ...headers(ctx.config), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: input.text, voice: input.voice, model: input.model || undefined,
+        language: input.languages.length === 1 ? input.languages[0] : undefined,
+        stream: true, stream_format: 'audio', response_format: 'pcm', sample_rate: 24000 }),
+      signal: ctx.signal,
+    });
+    if (!res.ok) throw await upstreamFailure('local', res);
+    if (!res.body || !res.headers.get('content-type')?.startsWith('audio/pcm')) {
+      await res.body?.cancel();
+      throw new Error('Self-hosted gateway must support PCM streaming; update services/voice-server.');
+    }
+    return res.body;
+  },
+
   async synthesize(input, ctx) {
     const body: Record<string, unknown> = { input: input.text, voice: input.voice, response_format: 'mp3' };
     if (input.model) body.model = input.model;

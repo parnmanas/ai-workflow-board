@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { LogService } from '../../services/log.service';
-import { splitSpeakable, toSpeakable, toSpokenSummary } from './speakable';
+import { splitSpeakable, toSpeakable, toSpokenSummary, stableSpeechPrefix } from './speakable';
 import {
   STT_PROVIDERS,
   TTS_PROVIDERS,
@@ -40,7 +40,7 @@ export interface VoiceEngineStatus {
 
 export interface VoiceStatusView {
   stt: VoiceEngineStatus;
-  tts: VoiceEngineStatus & { voice: string };
+  tts: VoiceEngineStatus & { voice: string; streaming: boolean };
   /** operator 를 이름으로 부르는 상시 청취를 켤 수 있는가(자체 호스팅 STT 에서만). */
   wake: { ready: boolean; error: string | null };
   lab?: { stt: string[]; tts: string[] };
@@ -165,6 +165,7 @@ export class VoiceService {
           }
         }, config.tts.provider),
         voice: config.tts.voice,
+        streaming: !!TTS_PROVIDER_IMPLS[config.tts.provider as TtsProviderId]?.stream,
       },
       wake: { ready: false, error: null },
     };
@@ -334,12 +335,33 @@ export class VoiceService {
 
   /** 화면용 답 → 읽을 조각들. 읽을 것이 없으면 빈 배열(호출자는 말하지 않는다). */
   /** `summary` — operator 의 답: 첫 문단(귀로 들을 요약)만 읽는다(`toSpokenSummary`). */
-  speakable(text: string, summary = false): string[] {
+  speakable(text: string, summary = false, partial = false): string[] {
     if (typeof text !== 'string') return [];
     if (text.length > MAX_SPEAKABLE_INPUT_CHARS) {
       throw new VoiceError(413, 'voice_text_too_long', `Text is longer than ${MAX_SPEAKABLE_INPUT_CHARS} characters.`);
     }
-    return splitSpeakable(summary ? toSpokenSummary(text) : toSpeakable(text));
+    const ready = partial ? stableSpeechPrefix(text) : text;
+    return splitSpeakable(summary ? toSpokenSummary(ready) : toSpeakable(ready));
+  }
+
+  /** Keep the timeout and caller cancellation alive through the last audio byte. */
+  async streamSpeech(text: string, signal: AbortSignal, consume: (body: ReadableStream<Uint8Array>, provider: string, lifetime: AbortSignal) => Promise<void>): Promise<void> {
+    const clean = (text || '').trim();
+    if (!clean) throw new VoiceError(400, 'voice_text_empty', 'Nothing to say — the text is empty.');
+    if (clean.length > MAX_SPEECH_TEXT_CHARS) throw new VoiceError(413, 'voice_text_too_long', 'Split speech into shorter chunks.');
+    const config = await this.config();
+    const provider = this.resolveTts(config, config.tts.provider);
+    if (!provider.stream) throw new VoiceError(409, 'voice_stream_unsupported', `${provider.id} does not support streaming in AWB.`);
+    const voice = config.tts.voice || provider.defaultVoice;
+    if (!voice) throw new VoiceError(409, 'voice_tts_no_voice', 'Pick a voice in Admin → Voice.');
+    await this.callUpstream(provider.id, SYNTHESIZE_TIMEOUT_MS, async (timeout) => {
+      const combined = AbortSignal.any([signal, timeout]);
+      combined.throwIfAborted();
+      const body = await provider.stream!({ text: clean, voice, model: config.tts.model || provider.defaultModel,
+        languages: config.stt.languages }, this.context(config, combined));
+      try { await consume(body, provider.id, combined); }
+      finally { if (!body.locked) await body.cancel().catch(() => undefined); }
+    });
   }
 
   /** 읽을 문장 → 소리. 입력은 이미 speakable 을 거친 조각이라고 본다(여기서 다시 다듬지 않는다). */

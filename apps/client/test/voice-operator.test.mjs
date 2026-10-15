@@ -30,6 +30,8 @@ test('the brief names the operator and carries the voice rules', () => {
   const brief = operatorBrief('자비스');
   assert.match(brief, /operator "자비스"/);
   assert.match(brief, /"헤이 자비스"/);
+  assert.match(brief, /부르기만 하면 "네, 듣고 있어요. 말씀하세요."/);
+  assert.match(brief, /호출에 대한 응답에는 \[\[sleep\]\] 를 붙이지 않는다/);
   assert.match(brief, /요약을 1~3문장/);
   assert.match(brief, /rolf\/ralf\/ragnar/);
   assert.match(brief, /복창하고 "네" 같은 명시적인 확인/);

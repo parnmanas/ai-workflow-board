@@ -1866,11 +1866,13 @@ export const api = {
    * 화면용 답 → 읽을 조각들(서버의 toSpeakable + splitSpeakable). 읽을 것이 없으면 빈 배열.
    * `summary` — operator 의 답: 첫 문단(귀로 들을 요약)만 읽는다(서버 toSpokenSummary).
    */
-  voiceSpeakable: (text: string, summary = false) =>
-    request<{ chunks: string[] }>('/voice/speakable', { method: 'POST', body: JSON.stringify(summary ? { text, summary: true } : { text }) }),
+  voiceSpeakable: (text: string, summary = false, partial = false, signal?: AbortSignal) =>
+    request<{ chunks: string[] }>('/voice/speakable', { method: 'POST', signal, body: JSON.stringify({ text, summary, partial }) }),
   /** 이미 읽을 문장으로 다듬은 조각 하나를 소리로. */
-  synthesizeVoice: async (text: string): Promise<Blob> =>
-    (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
+  synthesizeVoice: async (text: string, signal?: AbortSignal): Promise<Blob> =>
+    (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json', signal })).blob(),
+  streamVoice: (text: string, signal: AbortSignal): Promise<Response> =>
+    fetchOk('/voice/speech/stream', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json', signal }),
   /** Operators(이름 붙은 Agent Session) — 등록·수정·해제는 admin 만. */
   // operator 의 작업 제안(docs/voice-operator.md "작업 제안") — 내가 정할 것만 온다. 보내는 것은 그 세션에 프롬프트를 넣는 일이다.
   listSessionProposals: () => request<{ proposals: SessionProposal[] }>('/voice/proposals'),

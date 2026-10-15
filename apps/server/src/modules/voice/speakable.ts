@@ -39,6 +39,57 @@ const EMOJI_RE = /[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu;
 // 문장 끝: 마침표류 + 닫는 따옴표/괄호. 숫자 사이의 점(1.5)은 뒤에 공백이 없어 경계가 아니다.
 const SENTENCE_END_RE = /([.!?。！？…]+["'”’)\]]*)(?=\s|$)/g;
 
+/** Only commit complete sentences outside unfinished Markdown. A trailing period
+ * waits for whitespace (it could still become 1.5 or a URL). Cleanup stays here,
+ * shared by web and native clients, rather than duplicating Markdown rules there. */
+export function stableSpeechPrefix(text: string): string {
+  let cut = 0;
+  let offset = 0;
+  let fence = '';
+  let inline = false;
+  let square = 0;
+  let paren = 0;
+  let angle = false;
+  const emphasis = new Set<string>();
+  for (const line of text.split(/(?<=\n)/)) {
+    const marker = line.match(/^[ \t]*(```+|~~~+)/)?.[1];
+    if (marker) {
+      if (!fence) fence = marker[0];
+      else if (fence === marker[0]) fence = '';
+      offset += line.length;
+      continue;
+    }
+    if (fence || line.trimStart().startsWith('|')) { offset += line.length; continue; }
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '\\') { i++; continue; }
+      if (c === '`') { inline = !inline; continue; }
+      if (inline) continue;
+      const pair = line.slice(i, i + 2);
+      if (pair === '**' || pair === '__' || pair === '~~') {
+        if (emphasis.has(pair)) emphasis.delete(pair); else emphasis.add(pair);
+        i++; continue;
+      }
+      if (c === '*' || c === '_') {
+        if (emphasis.has(c) && i > 0 && !/\s/.test(line[i - 1])) emphasis.delete(c);
+        else if ((i === 0 || /[\s(]/.test(line[i - 1])) && line[i + 1] && !/\s/.test(line[i + 1])) emphasis.add(c);
+      }
+      if (c === '<') angle = true;
+      if (c === '>') angle = false;
+      if (c === '[') square++;
+      if (c === ']') square = Math.max(0, square - 1);
+      if (c === '(') paren++;
+      if (c === ')') paren = Math.max(0, paren - 1);
+      if (!square && !paren && !angle && !emphasis.size && /[.!?。！？…]/.test(c)) {
+        const tail = text.slice(offset + i).match(/^[.!?。！？…]+["'”’)\]]*(?=\s)/);
+        if (tail) cut = offset + i + tail[0].length;
+      }
+    }
+    offset += line.length;
+  }
+  return text.slice(0, cut);
+}
+
 function stripFencedCode(text: string): string {
   // 닫히지 않은 펜스(스트리밍 중 잘린 답)도 끝까지 코드로 본다.
   return text.replace(/(^|\n)[ \t]*(```|~~~)[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, '$1');

@@ -1,5 +1,7 @@
 """Run with the isolated voice-tools environment: python -m unittest test_voice_server -v."""
 import io
+import asyncio
+import json
 import unittest
 from unittest.mock import patch
 
@@ -54,6 +56,45 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.client.aclose()
+
+    async def test_pcm_stream_yields_before_completion_and_closes_on_disconnect(self):
+        closed = False
+        release = asyncio.Event()
+        seen = []
+
+        class Audio(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'\x01\x02'
+                await release.wait()
+                yield b'\x03\x04'
+
+            async def aclose(self):
+                nonlocal closed
+                closed = True
+
+        async def handler(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, headers={'content-type': 'audio/pcm'}, stream=Audio())
+
+        class Request:
+            async def json(self):
+                return {'input': '안녕하세요', 'stream': True, 'response_format': 'pcm'}
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as upstream:
+            with patch.object(gateway, 'client', upstream), patch.object(gateway, 'load_voices', return_value={
+                'default': 'ko', 'voices': [{'id': 'ko', 'request': {'voice': 'sohee', 'instructions': 'Warm'}}],
+            }):
+                response = await gateway.speech(Request())
+                self.assertEqual(await anext(response.body_iterator), b'\x01\x02')
+                self.assertFalse(release.is_set(), 'the rest of the audio is not available yet')
+                self.assertEqual(seen[0]['stream_format'], 'audio')
+                self.assertEqual(seen[0]['response_format'], 'pcm')
+                self.assertEqual(seen[0]['sample_rate'], 24000)
+                self.assertEqual(seen[0]['voice'], 'sohee')
+                self.assertEqual(seen[0]['instructions'], 'Warm')
+                self.assertEqual(seen[0]['input'], '안녕하세요.')
+                await response.body_iterator.aclose()
+                self.assertTrue(closed, 'disconnect closes the backend request')
 
     async def test_unknown_models_are_rejected_and_whisper_is_explicit(self):
         with patch.object(gateway, 'WHISPER_MODEL', 'large-v3-turbo'), patch.object(gateway, 'whisper_transcribe', return_value='hello'):

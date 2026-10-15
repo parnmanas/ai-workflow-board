@@ -1,4 +1,12 @@
 import { api } from '../api';
+import { playPcmStream } from './pcmPlayback';
+
+export interface TextSpeechStream {
+  update(text: string): void;
+  endSegment(): void;
+  finish(): Promise<void>;
+  cancel(): void;
+}
 
 /**
  * 낭독기. 탭 안에서 **한 번에 한 목소리**만 낸다 — 새 낭독이 오면 이전 것을 끊는다(최신 답이 우선).
@@ -28,6 +36,9 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAI
 
 class SpeechPlayer {
   #audio: HTMLAudioElement | null = null;
+  #context: AudioContext | null = null;
+  #abort: AbortController | null = null;
+  #textStreamActive = false;
   #generation = 0;
   #objectUrl: string | null = null;
   #endCurrent: (() => void) | null = null;
@@ -59,6 +70,10 @@ class SpeechPlayer {
 
   /** 사용자 제스처 안에서 부른다 — 이후 제스처 없는 재생(턴이 끝났을 때)이 막히지 않게. */
   unlock(): void {
+    if (typeof AudioContext !== 'undefined') {
+      this.#context ??= new AudioContext();
+      void this.#context.resume().catch(() => undefined);
+    }
     const el = this.#element();
     if (this.#state.speaking) return;
     el.src = SILENT_WAV;
@@ -74,6 +89,9 @@ class SpeechPlayer {
   /** 지금 나오는 소리만 끊는다(줄 선 알림은 남는다). */
   #interrupt(): void {
     this.#generation += 1;
+    this.#abort?.abort();
+    this.#abort = null;
+    this.#textStreamActive = false;
     const el = this.#audio;
     if (el) {
       el.pause();
@@ -157,10 +175,109 @@ class SpeechPlayer {
     void this.#drain();
   }
 
+  /** Consume growing text segments while the agent is still producing its turn.
+   * Snapshots coalesce during playback; already spoken text is never replayed. */
+  beginStream(key: string, options: { summary?: boolean; pcm?: boolean } = {}): TextSpeechStream {
+    this.#interrupt();
+    const generation = this.#generation;
+    const abort = new AbortController();
+    this.#abort = abort;
+    this.#textStreamActive = true;
+    this.#set({ speaking: false, key, error: null });
+    const segments = [{ text: '', spoken: '', final: false, revision: 0, processed: -1 }];
+    let closed = false;
+    let wake: (() => void) | null = null;
+    const notify = () => { wake?.(); wake = null; };
+    abort.signal.addEventListener('abort', notify, { once: true });
+    const done = (async () => {
+      try {
+        for (;;) {
+          abort.signal.throwIfAborted();
+          const segment = segments[0];
+          if (!segment) {
+            if (closed) break;
+            await new Promise<void>((resolve) => { wake = resolve; });
+            continue;
+          }
+          if (segment.processed === segment.revision) {
+            await new Promise<void>((resolve) => { wake = resolve; });
+            continue;
+          }
+          const revision = segment.revision;
+          const final = segment.final;
+          const { chunks } = await api.voiceSpeakable(segment.text, !!options.summary, !final, abort.signal);
+          abort.signal.throwIfAborted();
+          const ready = chunks.join(' ');
+          // A late rewrite must never replay or misalign text already heard.
+          if (ready.startsWith(segment.spoken)) {
+            let offset = 0;
+            // Preserve the server's request-sized chunks even when many sentences
+            // accumulate while the previous audio is playing.
+            const remaining = chunks.map((chunk) => {
+              const rest = chunk.slice(Math.max(0, segment.spoken.length - offset)).trim();
+              offset += chunk.length + 1;
+              return rest;
+            }).filter(Boolean);
+            for (const rest of remaining) {
+              this.#set({ speaking: true, key, error: null });
+              if (options.pcm) {
+                this.#context ??= new AudioContext();
+                const response = await api.streamVoice(rest, abort.signal);
+                await playPcmStream(response, this.#context, abort.signal);
+              } else {
+                const blob = await api.synthesizeVoice(rest, abort.signal);
+                abort.signal.throwIfAborted();
+                await this.#play(blob, generation);
+              }
+              abort.signal.throwIfAborted();
+              this.#set({ speaking: false, key, error: null });
+            }
+            segment.spoken = ready;
+          }
+          segment.processed = revision;
+          if (final) segments.shift();
+        }
+        if (generation === this.#generation) this.#set({ speaking: false, key, error: null });
+      } catch (err) {
+        if (generation === this.#generation && !abort.signal.aborted) {
+          this.#set({ speaking: false, key, error: playbackError(err) });
+        }
+      } finally {
+        abort.abort();
+        if (generation === this.#generation) { this.#textStreamActive = false; this.#releaseUrl(); void this.#drain(); }
+      }
+    })();
+    const endSegment = () => {
+      if (closed || abort.signal.aborted) return;
+      const segment = segments.at(-1);
+      if (segment && !segment.final) { segment.final = true; segment.revision++; }
+      notify();
+    };
+    return {
+      update: (text) => {
+        if (closed || abort.signal.aborted) return;
+        let segment = segments.at(-1);
+        if (!segment || segment.final) {
+          segment = { text: '', spoken: '', final: false, revision: 0, processed: -1 };
+          segments.push(segment);
+        }
+        if (segment.text !== text) {
+          const added = text.slice(Math.max(0, segment.text.length - 1));
+          segment.text = text;
+          // Do not make a sanitizer request for every LLM token.
+          if (/[.!?。！？…]\s|\n/.test(added)) { segment.revision++; notify(); }
+        }
+      },
+      endSegment,
+      finish: () => { endSegment(); closed = true; notify(); return done; },
+      cancel: () => { if (generation === this.#generation) this.#interrupt(); },
+    };
+  }
+
   /** 미리 합성된 소리 하나(음성 알림)를 줄 세운다. 지금 아무것도 안 나오면 바로 튼다. */
   enqueueClip(fetchClip: () => Promise<Blob>, key: string, onEnded?: () => void): void {
     this.#queue.push({ key, fetch: fetchClip, onEnded });
-    if (!this.#state.speaking) void this.#drain();
+    if (!this.#state.speaking && !this.#textStreamActive) void this.#drain();
   }
 
   async #drain(): Promise<void> {

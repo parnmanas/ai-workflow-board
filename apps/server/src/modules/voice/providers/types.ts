@@ -66,6 +66,8 @@ export interface TtsProvider {
   defaultVoice: string;
   missing(config: VoiceConfig): string | null;
   synthesize(input: TtsInput, ctx: ProviderContext): Promise<TtsOutput>;
+  /** Raw signed little-endian 16-bit PCM, mono, 24 kHz. Body stays live until consumed/cancelled. */
+  stream?(input: TtsInput, ctx: ProviderContext): Promise<ReadableStream<Uint8Array>>;
   /** 공급자 API 가 알려 주는 목소리. `languages` 로 거를 수 있으면 거른다. 목록 API 가 없으면 생략. */
   listVoices?(languages: string[], ctx: ProviderContext): Promise<VoiceOption[]>;
 }

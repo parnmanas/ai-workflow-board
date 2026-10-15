@@ -2,7 +2,7 @@
 // 실행: node --import tsx --test apps/client/test/voice-wake.test.mjs
 //
 // 고정하는 것:
-//   1. 부르는 말은 발화 맨 앞의 "앞머리 + 이름" · "이름 + 부름 조사" 이고, 뒤에 이어 한 말이 첫 요청이 된다.
+//   1. 부르는 말은 발화 맨 앞의 "앞머리 + 이름" · "이름 + 부름 조사" 이고, 뒤에 이어 한 말도 구분한다.
 //      문장 첫머리에 이름이 나온 이야기("자비스 진짜 좋다")와 이름만 한 발화(엔진이 용어집을 읊은 메아리일
 //      수 있다)는 부름이 아니다.
 //   2. 음성 인식의 작은 철자 틀림(자모 하나)은 같은 이름으로 보되, 짧은 이름은 엄격하다.
@@ -125,6 +125,10 @@ test('the wake note rides the first request and is hidden on screen', () => {
   assert.match(WAKE_PROMPT_NOTE, /\[\[sleep\]\]/);
   assert.deepEqual(stripWakeNote(sent), { text: '오늘 배포 상태 알려줘', noted: true });
   assert.deepEqual(stripWakeNote('그냥 질문'), { text: '그냥 질문', noted: false });
+  assert.match(WAKE_PROMPT_NOTE, /부르기만 하면 듣고 있다고 짧게 답하고 다음 말을 기다리세요/);
+  assert.match(WAKE_PROMPT_NOTE, /호출에 대한 응답에는 잠들기 표시를 붙이지 마세요/);
+  assert.deepEqual(stripWakeNote('(음성 대화 — 사용자가 대화를 마치는 말을 하면 짧게 인사하고 답 맨 끝에 [[sleep]] 를 붙이세요.)\n예전 대화'),
+    { text: '예전 대화', noted: true }, 'existing transcripts still hide their old voice note');
 });
 
 test('fillers are not requests; a confirming "네" is', () => {

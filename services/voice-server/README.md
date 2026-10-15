@@ -6,6 +6,17 @@ LAN — today **ragnar** (DGX Spark class: aarch64, NVIDIA GB10, unified memory,
 driver 580 / CUDA 13). Design and rationale: `docs/voice-operator.md` →
 "셀프호스팅 엔진".
 
+Streaming speech uses the same `/v1/audio/speech` endpoint with
+`{"input":"안녕하세요.","stream":true,"response_format":"pcm"}`. It returns raw signed
+16-bit little-endian PCM, mono at 24 kHz, as the backend generates it. The gateway
+preserves the selected voice/style and requests `stream_format:"audio"` explicitly
+from the pinned vLLM-Omni v0.30.0 backend (otherwise `stream:true` defaults to SSE).
+It neither decodes a complete WAV nor encodes a complete MP3 on this path.
+Deploy this gateway before enabling the corresponding AWB server/web update;
+older gateways return MP3 and are rejected by the PCM client. Reverse proxies must
+honor `X-Accel-Buffering: no` or disable buffering for this route. The change does
+not require replacing the model or changing the container's memory limits.
+
 ```
 AWB server (rolf) ──LAN, Bearer key──▶ awb-voice-gateway :8410  (this repo: awb_voice_server.py)
                                          ├─▶ awb-voice-asr  127.0.0.1:8411  vLLM + Qwen/Qwen3-ASR-1.7B

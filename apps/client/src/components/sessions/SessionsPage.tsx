@@ -31,8 +31,8 @@ import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
 import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voice/useVoice';
-import { speechPlayer } from '../../voice/speechPlayer';
-import { TurnAnswerTracker, shouldSpeakFinishedTurn } from '../../voice/turnAnswer.logic';
+import { speechPlayer, type TextSpeechStream } from '../../voice/speechPlayer';
+import { TurnAnswerTracker, shouldSpeakFinishedTurn, SEGMENT_BREAKS } from '../../voice/turnAnswer.logic';
 import { sessionTargetKey, setViewingSession } from '../../voice/announcements';
 import { reportViewingSession } from '../../voice/presence';
 import { operatorBrief, operatorForSession, useVoiceOperators } from '../../voice/operator';
@@ -424,13 +424,14 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   const ttsReady = !!voiceConfig?.tts.ready;
   const [readReplies, setReadReplies] = useReadRepliesSetting();
   const speech = useSpeechState();
-  const speakPrefsRef = useRef({ readReplies, ttsReady });
-  speakPrefsRef.current = { readReplies, ttsReady };
+  const speakPrefsRef = useRef({ readReplies, ttsReady, pcm: !!voiceConfig?.tts.streaming });
+  speakPrefsRef.current = { readReplies, ttsReady, pcm: !!voiceConfig?.tts.streaming };
   // 말로 물으면 답도 소리로 — "읽기" 를 켜 두지 않았어도 마지막 프롬프트가 음성이었으면 읽는다.
   const lastPromptSpokenRef = useRef(false);
   // 라이브 스트림만 따라간다 — 화면의 이벤트 배열은 창 상한으로 앞이 잘려 긴 턴의 답을 잃을 수 있다.
   const answerTrackerRef = useRef<TurnAnswerTracker | null>(null);
   if (!answerTrackerRef.current) answerTrackerRef.current = new TurnAnswerTracker();
+  const liveSpeechRef = useRef(new Map<string, TextSpeechStream>());
   const speechKeyPrefix = `${managerId}/${cli}/${sessionId}:`;
   const speakingHere = speech.speaking && !!speech.key?.startsWith(speechKeyPrefix);
   // Operator — 이 세션에 이름을 붙여 사이트 관리 에이전트로 등록한다(admin). 사이드바 OPERATORS 가
@@ -447,6 +448,9 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   );
   const [operatorDialogOpen, setOperatorDialogOpen] = useState(false);
   const wake = useWakeState();
+  useEffect(() => {
+    if (!wake.enabled && speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();
+  }, [wake.enabled, speechKeyPrefix]);
   const awakeHere = !!thisOperator && wake.mode === 'awake' && wake.operatorId === thisOperator.id;
   const wakeRefs = useRef({ awake: awakeHere, operator: thisOperator, operators });
   wakeRefs.current = { awake: awakeHere, operator: thisOperator, operators };
@@ -471,6 +475,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   // 다른 화면으로 가면 이 세션의 낭독을 멈춘다 — 무엇을 읽는지 보이지 않는 소리는 소음이다.
   useEffect(() => () => {
     if (speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();
+    liveSpeechRef.current.clear();
   }, [speechKeyPrefix]);
   // 이 세션을 보고 있는 동안에는 이 세션에 대한 음성 알림을 말하지 않는다(답은 여기서 읽는다).
   useEffect(() => {
@@ -525,23 +530,41 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     // 보고 있는 화면에서만 읽는다. 다른 화면에 있을 때 알리는 것은 음성 알림의 몫이다.
     // 이름을 불러 깨운 대화는 탭이 숨어 있어도 읽는다 — 켜 둔 단말을 스피커처럼 쓰는 경우다.
     const finished = answerTrackerRef.current?.push(data.event);
+    const turnId = data.event.turn_id;
+    if (!turnId || !ownTurnIdsRef.current.has(turnId)) return;
+    const { awake, operator: op } = wakeRefs.current;
+    const prefs = speakPrefsRef.current;
+    const canRead = wakeStore.state.enabled && prefs.ttsReady
+      && (awake || ((prefs.readReplies || lastPromptSpokenRef.current) && document.visibilityState === 'visible'));
+    let stream = liveSpeechRef.current.get(turnId);
+    if (canRead && data.event.type === 'text') {
+      if (!stream) {
+        stream = speechPlayer.beginStream(`${speechKeyPrefix}${turnId}`, { summary: !!op, pcm: prefs.pcm });
+        liveSpeechRef.current.set(turnId, stream);
+      }
+      stream.update(answerTrackerRef.current?.currentText(turnId) ?? '');
+    } else if (!canRead) stream?.cancel();
+    if (SEGMENT_BREAKS.has(data.event.type)) stream?.endSegment();
     if (!finished || !ownTurnIdsRef.current.has(finished.turnId)) return;
     ownTurnIdsRef.current.delete(finished.turnId);
+    liveSpeechRef.current.delete(finished.turnId);
     // operator 가 대화를 마무리하면 답 끝에 잠들기 표시를 붙인다 — 다 읽은 뒤에 잠든다.
     const { text: answer, sleep } = splitSleepMarker(finished.answer);
-    const { awake, operator: op } = wakeRefs.current;
+    const wakeActivation = wakeStore.state.wokeAt;
     const goToSleep = () => {
-      if (!sleep || !awake || !op) return;
+      if (!sleep || !awake || !op || wakeStore.state.wokeAt !== wakeActivation) return;
       playEarcon('sleep');
       wakeStore.sleep(op.id);
     };
-    const prefs = speakPrefsRef.current;
     // 음성 지원이 꺼져 있으면 읽지 않는다 — "답을 소리로 읽기" 설정이나 말로 한
     // 요청(voice in → voice out)과 무관하게 이 단말에서는 낭독하지 않는다.
     const speak = wakeStore.state.enabled && prefs.ttsReady && shouldSpeakFinishedTurn({ ...finished, answer })
       && (awake || ((prefs.readReplies || lastPromptSpokenRef.current) && document.visibilityState === 'visible'));
     // operator 의 답은 첫 문단(귀로 들을 요약)만 읽는다 — 작업 결과를 통째로 옮긴 답은 길고 장황하다.
-    if (speak) void speechPlayer.speak(answer, `${speechKeyPrefix}${finished.turnId}`, { summary: !!op }).then(goToSleep);
+    if (stream) {
+      if (!speak) stream.cancel();
+      void stream.finish().then(goToSleep);
+    } else if (speak) void speechPlayer.speak(answer, `${speechKeyPrefix}${finished.turnId}`, { summary: !!op }).then(goToSleep);
     else goToSleep();
   }, [matches, speechKeyPrefix]));
 
@@ -729,13 +752,12 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
         const match = matchWake(heard, wakeRefs.current.operators);
         if (!match) return heard;
         if (match.operator.id === id) {
-          // 깨어 있는데 또 불렀다 — 이름만 떼고 보낸다. 이름만 불렀으면 듣고 있다고 신호음으로 답한다.
-          if (!match.rest) playEarcon('wake');
-          return match.rest || null;
+          // 부르기만 해도 operator 가 듣고 있다고 직접 답한다.
+          return heard;
         }
         // 다른 operator 를 불렀다 — 그쪽이 깨어난다.
         playEarcon('wake');
-        wakeStore.wake(match.operator.id, match.rest || null);
+        wakeStore.wake(match.operator.id, heard);
         navigate(sessionPath(``, match.operator.manager_id, match.operator.cli, match.operator.session_id));
         return null;
       },
