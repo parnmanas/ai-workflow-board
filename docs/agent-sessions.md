@@ -321,6 +321,11 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
   → `AgentSessionRunner.liveStates()`). 서버는 매 하트비트(30초)마다 그 목록으로 메모리를 맞춘다 — 보고된 세션은 그 상태로,
   보고에 없는 진행 중 세션은 idle 로(`reason:'heartbeat'`). 매니저 업데이트·재부팅·연결 단절·프로세스 사망 어느 경우든 30초
   안에 화면이 실제와 같아진다. 비어 있어도 `[]` 를 보내는 이유가 이것이다(구버전 매니저는 필드가 없어 아무것도 바꾸지 않는다).
+- CLI가 턴을 끝내도 마지막 이벤트 전송이 대기 중이면 매니저는 `busy`를 유지한다. 하트비트·기록 조회가
+  이벤트 전송 대기열을 앞질러 `ready`를 보고하면 화면에 메시지와 도구 결과가 계속 추가되는데 상태만 Ready가 된다.
+  느린 요청 뒤에 쌓인 출력은 최대 128행·512KiB로 묶되, 승인 요청·턴 완료 등 상태 패치 경계는 합치지 않는다.
+  개별 이벤트의 기존 크기 제한과 전송 실패 처리 정책은 그대로다. 회귀: `agent-session-delivery.test.mjs`,
+  `agent-session-runner.test.mjs`의 전송 지연 중 heartbeat/history 상태 검사.
 - **MCP 연결의 세션 식별** — 매니저가 세션 프로세스에 주입하는 AWB MCP 연결은 `X-AWB-Session-Id` 를 싣는다(operator 판정의
   근거, `docs/voice-operator.md` "권한"). 불러온 세션은 세션 id 를 그대로 싣지만, **새 세션은 프로세스를 띄울 때 id 를 아직
   모른다** — 매니저는 고유 참조값(`pending-<uuid>`)을 싣고, 하트비트 `agent_sessions[].mcp_session_ref` 로 "이 참조는 이 세션"

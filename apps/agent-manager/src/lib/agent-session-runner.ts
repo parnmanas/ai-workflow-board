@@ -19,6 +19,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
 import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
+import { AgentSessionDelivery } from './agent-session-delivery.js';
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { describeSessionFailure } from './session-failure.js';
 import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
@@ -249,6 +250,7 @@ interface LiveSession {
   silenceTimer: NodeJS.Timeout | null;
   idleTimer: NodeJS.Timeout | null;
   postChain: Promise<void>;
+  delivery?: AgentSessionDelivery;
   seq: number;
   /** 프로세스마다 다른 id 접두어 — 라이브 seq 는 프로세스마다 1 부터라 id 만으로 중복을 걸러야 한다. */
   nonce: string;
@@ -1547,9 +1549,12 @@ export class AgentSessionRunner {
       ], { status: live.exited ? 'idle' : 'error', last_error: message, reason: 'turn_failed' });
     } finally {
       this.#clearSilenceWatch(live);
+      // Heartbeats/history bypass the delivery queue. Keep the turn busy until
+      // its final output drains, or they advertise Ready while old tool/text
+      // events are still arriving (potentially minutes behind on a slow link).
+      await live.postChain;
       live.turn = null;
       this.#touch(live);
-      await live.postChain;
       const answer = live.queuedQuestionAnswers.shift();
       if (answer && !live.closing && !live.exited) await this.#runPrompt(live, answer.turnId, answer.text);
     }
@@ -2097,11 +2102,8 @@ export class AgentSessionRunner {
       return { ...e, payload: boundedPayload(e.payload), seq: live.seq, id: `${live.sessionId}:live:${live.nonce}:${live.seq}`, created_at: now };
     });
     const ref = this.#ref(live.cli, live.sessionId);
-    live.postChain = live.postChain
-      .then(() => (stamped.length || state
-        ? postAgentSessionEvents(this.#config, ref, stamped, state ?? null)
-        : Promise.resolve({ ok: true, status: 204 })))
-      .then(() => undefined, () => undefined);
+    live.delivery ??= new AgentSessionDelivery((batch, patch) => postAgentSessionEvents(this.#config, ref, batch, patch));
+    live.postChain = live.delivery.enqueue(stamped, state);
     return stamped;
   }
 

@@ -172,6 +172,39 @@ test('list / history RPCs answer from the CLI home store', async (t) => {
   assert.equal(server.rpc('rpc-missing').code, 'not_found');
 });
 
+test('heartbeat and history remain busy until the final turn delivery drains', async (t) => {
+  const { cwd, store, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  await runner.handle(request('open', { request_id: 'rpc-drain-open', session_id: null, cwd }));
+  const sid = server.rpc('rpc-drain-open').result.session_id;
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  t.after(release);
+  let finalDeliveryStarted = false;
+  let nativeTurnFinished = false;
+  store.touchAwbSession = async () => { nativeTurnFinished = true; };
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : null;
+    if (body?.events?.some((e) => e.type === 'turn' && e.payload.phase === 'finished')) {
+      finalDeliveryStarted = true;
+      await blocked;
+    }
+    return fetch(url, init);
+  };
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-drain', text: 'hello' }));
+  try {
+    await waitFor(() => finalDeliveryStarted && nativeTurnFinished, 'finished CLI with blocked delivery');
+    assert.equal(runner.liveStates()[0].status, 'busy', 'heartbeat must not overtake pending output');
+    await runner.handle(request('history', { request_id: 'rpc-drain-history', session_id: sid }));
+    assert.equal(server.rpc('rpc-drain-history').result.live.status, 'busy', 'history must not advertise premature Ready either');
+  } finally {
+    release();
+    await turn;
+  }
+  assert.equal(runner.liveStates()[0].status, 'ready');
+  assert.equal(server.events(sid).at(-1).state.status, 'ready');
+});
+
 test('open(new) → prompt stream → permission relay → turn finished, and the session lands in the AWB index', async (t) => {
   const { cwd, store, server, runner } = await harness(t);
   await runner.handle(request('open', { request_id: 'rpc-open', session_id: null, cwd, title: 'Try things' }));
