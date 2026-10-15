@@ -116,13 +116,64 @@ export class VoiceController {
   /** `{ text, summary? }`(화면용 답) → `{ chunks }`(읽을 조각). `summary` 면 첫 문단만(operator 의 답). 엔진을 부르지 않는다. */
   @Post('speakable')
   async speakable(@Body() body: any, @Res() res: Response) {
-    return run(res, () => ({ chunks: this.voice.speakable(typeof body?.text === 'string' ? body.text : '', body?.summary === true) }));
+    return run(res, () => ({ chunks: this.voice.speakable(typeof body?.text === 'string' ? body.text : '', body?.summary === true, body?.partial === true) }));
   }
 
   /** `{ text }`(읽을 조각 하나) → 오디오 바이트. */
   @Post('speech')
   async speech(@Body() body: any, @Res() res: Response) {
     return sendAudio(res, () => this.voice.synthesize(typeof body?.text === 'string' ? body.text : ''));
+  }
+
+  @Post('speech/stream')
+  async streamSpeech(@Body() body: any, @Res() res: Response) {
+    const abort = new AbortController();
+    const onClose = () => abort.abort();
+    res.once('close', onClose);
+    try {
+      await this.voice.streamSpeech(typeof body?.text === 'string' ? body.text : '', abort.signal, async (audio, provider, lifetime) => {
+        res.status(200);
+        res.setHeader('Content-Type', 'audio/pcm');
+        res.setHeader('X-Audio-Sample-Rate', '24000');
+        res.setHeader('X-Audio-Channels', '1');
+        res.setHeader('Access-Control-Expose-Headers', 'X-Audio-Sample-Rate, X-Audio-Channels, X-Voice-Provider');
+        res.setHeader('X-Voice-Provider', provider);
+        res.setHeader('Cache-Control', 'no-store, no-transform');
+        res.setHeader('X-Accel-Buffering', 'no');
+        const reader = audio.getReader();
+        let bytes = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            lifetime.throwIfAborted();
+            bytes += value.length;
+            if (!res.write(value)) {
+              await new Promise<void>((resolve, reject) => {
+                const cleanup = () => { res.off('drain', drain); lifetime.removeEventListener('abort', close); };
+                const drain = () => { cleanup(); resolve(); };
+                const close = () => { cleanup(); reject(new Error('Audio client disconnected')); };
+                res.once('drain', drain); lifetime.addEventListener('abort', close, { once: true });
+                if (lifetime.aborted) close();
+              });
+            }
+          }
+          if (!bytes) throw new VoiceError(502, 'voice_tts_empty', 'TTS returned no audio.');
+          if (bytes % 2) throw new Error('Truncated PCM sample');
+        } finally {
+          await reader.cancel().catch(() => undefined);
+          reader.releaseLock();
+        }
+      });
+      res.end();
+    } catch (err) {
+      if (abort.signal.aborted) return;
+      if (res.headersSent) res.destroy(err instanceof Error ? err : undefined);
+      else if (err instanceof VoiceError) res.status(err.status).json({ error: err.code, message: err.message });
+      else throw err;
+    } finally {
+      res.off('close', onClose);
+    }
   }
 
   /**

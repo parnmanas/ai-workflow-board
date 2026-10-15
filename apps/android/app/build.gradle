@@ -11,9 +11,9 @@ android {
         applicationId 'com.parnmanas.awb'
         minSdk 26
         targetSdk 36
-        // 10: 네이티브 앱으로 재작성(서버 화면을 그대로 띄우는 WebView + 상시 음성 서비스).
-        versionCode 10
-        versionName '2.0.0'
+        // 11: Qwen PCM 스트리밍과 operator 호출 응답.
+        versionCode 11
+        versionName '2.1.0'
         buildConfigField 'String', 'DEFAULT_SERVER_URL', '"https://awb.parnmanas.com"'
     }
 

@@ -24,7 +24,7 @@ public final class VoiceRules {
 
   /** 깨어난 뒤 처음 보내는 요청 앞에 붙는 한 줄 — 웹 `WAKE_PROMPT_NOTE` 와 글자 그대로 같아야 한다. */
   public static final String WAKE_PROMPT_NOTE =
-      "(음성 대화 — 사용자가 대화를 마치는 말을 하면 짧게 인사하고 답 맨 끝에 " + SLEEP_MARKER + " 를 붙이세요.)";
+      "(음성 대화 — 부르기만 하면 듣고 있다고 짧게 답하고 다음 말을 기다리세요. 이어진 요청이 있으면 그 요청에 답하세요. 호출에 대한 응답에는 잠들기 표시를 붙이지 마세요. 사용자가 대화를 마치는 말을 하면 짧게 인사하고 답 맨 끝에 " + SLEEP_MARKER + " 를 붙이세요.)";
 
   /** 깨어 있다가 아무 말이 없으면 이만큼 뒤에 잠든다(답을 기다리거나 읽는 동안은 세지 않는다). */
   public static final long WAKE_IDLE_SLEEP_MS = 60_000;

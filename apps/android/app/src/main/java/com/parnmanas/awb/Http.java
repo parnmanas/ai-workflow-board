@@ -99,6 +99,39 @@ public final class Http {
         "application/json; charset=utf-8", READ_TIMEOUT_MS);
   }
 
+  public interface StreamConsumer {
+    default void opened(HttpURLConnection connection) throws IOException {}
+    default void closed(HttpURLConnection connection) {}
+    void read(InputStream input, HttpURLConnection connection) throws IOException;
+  }
+
+  /** Only invoke the consumer after successful headers, so a 401 can be retried safely. */
+  public static Response streamPostJson(String url, Map<String, String> headers, JSONObject body, StreamConsumer consumer) throws IOException {
+    HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+    try {
+      conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+      conn.setReadTimeout(READ_TIMEOUT_MS);
+      conn.setRequestMethod("POST");
+      conn.setInstanceFollowRedirects(false);
+      for (Map.Entry<String, String> h : headers.entrySet()) conn.setRequestProperty(h.getKey(), h.getValue());
+      conn.setRequestProperty("Content-Type", "application/json");
+      consumer.opened(conn);
+      byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+      conn.setDoOutput(true);
+      conn.setFixedLengthStreamingMode(bytes.length);
+      try (OutputStream out = conn.getOutputStream()) { out.write(bytes); }
+      int code = conn.getResponseCode();
+      if (code < 200 || code >= 300) {
+        InputStream error = conn.getErrorStream();
+        return new Response(code, error == null ? new byte[0] : readAll(error), conn.getContentType());
+      }
+      if (!"audio/pcm".equals(conn.getContentType()) || !"24000".equals(conn.getHeaderField("X-Audio-Sample-Rate"))
+          || !"1".equals(conn.getHeaderField("X-Audio-Channels"))) throw new IOException("Unsupported PCM stream");
+      try (InputStream input = conn.getInputStream()) { consumer.read(input, conn); }
+      return new Response(code, new byte[0], conn.getContentType());
+    } finally { conn.disconnect(); consumer.closed(conn); }
+  }
+
   public static Response putJson(String url, Map<String, String> headers, JSONObject body) throws IOException {
     return request("PUT", url, headers, body.toString().getBytes(StandardCharsets.UTF_8),
         "application/json; charset=utf-8", READ_TIMEOUT_MS);

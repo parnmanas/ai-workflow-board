@@ -298,7 +298,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   const showMic = !!voiceInput && conversation.supported;
   const conversing = conversation.phase !== 'off';
 
-  // 깨어나면 대화 모드를 켜고 부르는 말에 이어 한 말을 보낸다. 잠들면 끈다.
+  // 깨어나면 대화 모드를 켜고 호출어를 포함한 첫 발화를 보낸다. 잠들면 끈다.
   const { start: startConversation, stop: stopConversation } = conversation;
   const startedByWakeRef = useRef(false);
   useEffect(() => {

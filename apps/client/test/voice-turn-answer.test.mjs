@@ -85,3 +85,73 @@ test('the server copy of the rule gives the same answers as the client (they mus
     assert.deepEqual(b, a);
   }
 });
+
+test('streaming playback consumes completed text before turn end without repeating it', async (t) => {
+  const { api } = await import('../src/api.ts');
+  const { speechPlayer } = await import('../src/voice/speechPlayer.ts');
+  const { stableSpeechPrefix, toSpokenSummary, splitSpeakable } = await import('../../server/src/modules/voice/speakable.ts');
+  const requested = [];
+  const oldAudio = globalThis.Audio;
+  globalThis.Audio = class {
+    play() { queueMicrotask(() => this.onended?.()); return Promise.resolve(); }
+    pause() {} load() {} removeAttribute() {}
+  };
+  t.after(() => { speechPlayer.stop(); globalThis.Audio = oldAudio; });
+  t.mock.method(api, 'voiceSpeakable', async (text, _summary, partial) => ({ chunks: splitSpeakable(toSpokenSummary(partial ? stableSpeechPrefix(text) : text)) }));
+  t.mock.method(api, 'synthesizeVoice', async (text) => { requested.push(text); return new Blob(['audio']); });
+  const flush = () => new Promise((r) => setTimeout(r, 10));
+  const stream = speechPlayer.beginStream('test-live', { summary: true });
+  stream.update('첫 문장입니다. 다음');
+  await flush();
+  assert.deepEqual(requested, ['첫 문장입니다.'], 'turn is still open');
+  assert.equal(speechPlayer.state.speaking, false, 'waiting for the next sentence must not hold the microphone paused');
+  stream.update('첫 문장입니다. 다음 문장입니다.\n\n화면용 상세입니다. ');
+  await flush();
+  assert.deepEqual(requested, ['첫 문장입니다.', '다음 문장입니다.']);
+  await stream.finish();
+  assert.equal(requested.length, 2, 'turn end must not replay the complete answer');
+  assert.equal(speechPlayer.state.speaking, false);
+});
+
+test('PCM playback starts before the response closes and cancels its reader', async () => {
+  const { playPcmStream } = await import('../src/voice/pcmPlayback.ts');
+  let upstream;
+  let cancelled = false;
+  const response = new Response(new ReadableStream({ start(c) { upstream = c; }, cancel() { cancelled = true; } }),
+    { headers: { 'content-type': 'audio/pcm', 'x-audio-sample-rate': '24000', 'x-audio-channels': '1' } });
+  const started = [];
+  const context = { state: 'running', currentTime: 0, destination: {},
+    createBuffer: (_channels, frames, rate) => ({ duration: frames / rate, getChannelData: () => new Float32Array(frames) }),
+    createBufferSource: () => ({ connect() {}, disconnect() {}, start(at) { started.push(at); }, stop() { this.onended?.(); } }),
+  };
+  const abort = new AbortController();
+  const done = playPcmStream(response, context, abort.signal);
+  upstream.enqueue(new Uint8Array(1)); // Network packets need not align with int16 samples.
+  upstream.enqueue(new Uint8Array(1919));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(started.length, 1, 'first audio scheduled while upstream is still producing');
+  abort.abort();
+  await assert.rejects(done, { name: 'AbortError' });
+  assert.equal(cancelled, true);
+});
+
+test('streaming long answers preserve server chunk limits without replaying earlier sentences', async (t) => {
+  const { api } = await import('../src/api.ts');
+  const { speechPlayer } = await import('../src/voice/speechPlayer.ts');
+  const { splitSpeakable } = await import('../../server/src/modules/voice/speakable.ts');
+  const requested = [];
+  t.after(() => speechPlayer.stop());
+  t.mock.method(api, 'voiceSpeakable', async (text) => ({ chunks: splitSpeakable(text) }));
+  t.mock.method(api, 'synthesizeVoice', async (text) => { requested.push(text); return new Blob(['audio']); });
+  const stream = speechPlayer.beginStream('test-long');
+  const first = '먼저 확인했습니다.';
+  stream.update(first + ' ');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(requested, [first]);
+  const text = first + ' ' + '아주 긴 결과를 문장마다 순서대로 읽어 드립니다. '.repeat(150).trim();
+  stream.update(text);
+  await stream.finish();
+  assert.ok(requested.length > 2);
+  assert.ok(requested.every((chunk) => chunk.length <= 2000));
+  assert.equal(requested.join(' '), text);
+});

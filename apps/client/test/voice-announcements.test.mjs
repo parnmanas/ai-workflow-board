@@ -278,6 +278,20 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.equal(wakeStore.state.mode, 'awake', 'manually enabling the microphone still accepts 보고해');
   assert.equal(prompts.at(-1).text, '보고해', 'manual name calling still delivers the request once');
   assert.equal(currentPath, '/sessions/m1/codex/operator-session');
+  // A call without a trailing request must still reach the operator, exactly once.
+  for (const text of ['헤이 Jarvis.', 'Hey Jarvis, 오늘 배포 상태 알려줘.']) {
+    act(() => wakeStore.sleep('op'));
+    await flush();
+    const before = prompts.length;
+    api.transcribeVoice = async () => ({ text });
+    act(speech); await flush();
+    assert.equal(wakeStore.state.operatorId, 'op');
+    assert.equal(wakeStore.state.source, 'call');
+    assert.equal(prompts.length, before + 1);
+    assert.equal(prompts.at(-1).text, text, 'keep the call and any following request intact');
+    assert.equal(prompts.at(-1).spoken, true, 'the operator response uses the spoken reply path');
+    assert.equal(wakeStore.takeFirstPrompt('op'), null, 'the composer already consumed the call');
+  }
 });
 
 test('voice support off skips reading operator content; on reads it', async (t) => {

@@ -9,6 +9,9 @@ import android.media.AudioTrack;
 import android.media.MediaPlayer;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -24,6 +27,8 @@ final class Speaker {
       .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
       .build();
   private volatile MediaPlayer current;
+  private volatile AudioTrack pcmTrack;
+  private volatile HttpURLConnection pcmConnection;
   private volatile boolean cancelled = false;
 
   Speaker(Context ctx) {
@@ -34,6 +39,10 @@ final class Speaker {
   /** 지금 소리와 이어질 소리를 멈춘다. */
   void cancel() {
     cancelled = true;
+    HttpURLConnection conn = pcmConnection;
+    if (conn != null) conn.disconnect();
+    AudioTrack track = pcmTrack;
+    if (track != null) { try { track.pause(); track.flush(); } catch (Exception ignored) {} }
     MediaPlayer p = current;
     if (p != null) {
       try {
@@ -49,6 +58,57 @@ final class Speaker {
 
   boolean isCancelled() {
     return cancelled;
+  }
+
+  void openPcmConnection(HttpURLConnection connection) throws IOException {
+    pcmConnection = connection;
+    if (cancelled) { connection.disconnect(); throw new IOException("Speech cancelled"); }
+  }
+
+  void closePcmConnection(HttpURLConnection connection) {
+    if (pcmConnection == connection) pcmConnection = null;
+  }
+
+  /** AudioTrack consumes signed 16-bit mono samples as the HTTP body arrives. */
+  void playPcm(InputStream input, HttpURLConnection connection) throws IOException {
+    if (cancelled) return;
+    AudioFocusRequest focus = requestFocus();
+    AudioTrack track = new AudioTrack.Builder().setAudioAttributes(attrs)
+        .setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(24000).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+        .setTransferMode(AudioTrack.MODE_STREAM)
+        .setBufferSizeInBytes(Math.max(4800, AudioTrack.getMinBufferSize(24000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)))
+        .build();
+    pcmTrack = track;
+    pcmConnection = connection;
+    long written = 0;
+    try {
+      if (cancelled) return;
+      track.play();
+      byte[] buffer = new byte[4800];
+      int carry = 0;
+      int n;
+      while (!cancelled && (n = input.read(buffer, carry, buffer.length - carry)) != -1) {
+        int size = n + carry;
+        int aligned = size & ~1;
+        for (int offset = 0; offset < aligned && !cancelled;) {
+          int count = track.write(buffer, offset, aligned - offset, AudioTrack.WRITE_BLOCKING);
+          if (count <= 0) throw new IOException("PCM playback failed: " + count);
+          offset += count; written += count;
+        }
+        carry = size - aligned;
+        if (carry > 0) buffer[0] = buffer[aligned];
+      }
+      if (!cancelled && (carry != 0 || written == 0)) throw new IOException("Empty or truncated PCM audio");
+      long deadline = System.currentTimeMillis() + 5000;
+      while (!cancelled && (track.getPlaybackHeadPosition() & 0xffffffffL) < written / 2) {
+        if (System.currentTimeMillis() > deadline) throw new IOException("PCM playback stalled");
+        try { Thread.sleep(10); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+      }
+    } finally {
+      pcmTrack = null; pcmConnection = null;
+      track.release(); abandonFocus(focus);
+    }
   }
 
   /** 서버가 만든 소리(mp3 · wav 등)를 끝까지 재생한다. */

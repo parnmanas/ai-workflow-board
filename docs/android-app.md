@@ -58,9 +58,11 @@ voice/Vad · VoiceApi · EventStream · Speaker · VoiceRules
 
 - 잠듦: 발화 → `POST /api/voice/transcribe?purpose=wake`(자체 호스팅 엔진) → `POST /api/voice/operators/match`.
   알림 뒤 15초는 이름 없이, 10분 안의 "보고해" 는 그 operator 로.
-- 깨어남: 신호음 → 이름 뒤에 한 말 · 이어지는 말이 `POST /api/agent-sessions/hosts/…/prompt` 로(첫 요청에만
-  `WAKE_PROMPT_NOTE`). 바쁘면 줄 세운다. 답은 `/api/events/stream` 의 `agent_session_event` 로 받아 마지막 덩어리를
-  고르고(`TurnAnswers`), `POST /api/voice/speakable {summary:true}` → `POST /api/voice/speech` 로 읽는다.
+- 깨어남: 신호음 → 호출어를 포함한 발화 전체 · 이어지는 말이 `POST /api/agent-sessions/hosts/…/prompt` 로(첫 요청에만
+  `WAKE_PROMPT_NOTE`). 이름만 불러도 operator 가 직접 답한다. 바쁘면 줄 세운다. 답은 `/api/events/stream` 의
+  `agent_session_event` 로 받아 문장이 완성될 때부터 `POST /api/voice/speakable {summary:true,partial:true}` 로
+  다듬는다. Qwen 은 `POST /api/voice/speech/stream` 의 PCM 을 AudioTrack 으로 즉시 읽으며, 다른 공급자는
+  기존 `/api/voice/speech` 를 쓴다. 세그먼트·턴 완료 시 남은 문장을 읽고 이미 말한 부분은 반복하지 않는다.
   `[[sleep]]` 이나 60초 조용하면 잠든다. 깨어 있는 동안 `PUT /api/voice/presence` 로 "이 단말이 맡았다" 를 알린다.
 - 알림: `voice_announcement` 의 `operator_reply` 는 낭독(`/api/voice/announcements/:id/audio`), 나머지는 알림음 + 알림.
 - 스위치: 사이드바 👂 음성 지원 스위치와 앱의 상시 음성은 **같은 스위치**다(`wakeStore.setEnabled` ↔ `voice.setEnabled`).
@@ -89,7 +91,7 @@ JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # VoiceRules · Vad 단위 �
 ```
 
 - `applicationId com.parnmanas.awb` 와 릴리즈 키가 Capacitor 껍데기와 같아 덮어 설치로 올라간다. `versionCode` 는 손으로
-  올린다(10 = 이 재작성).
+  올린다(10 = 이 재작성, 11 = Qwen 스트리밍).
 - 배포는 GitHub release 의 `awb-android.apk` 자산이다 — 설정 · 자료실의 "Android 앱 받기" 가 `releases/latest` 를 본다
   (`apps/client/src/githubRelease.ts`).
 - **서버를 먼저 배포한다.** 앱의 로그인 유지 · 구글 로그인은 서버의 `/api/auth/devices*` · `oauth/app/exchange` 가 있어야 한다.

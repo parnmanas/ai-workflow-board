@@ -3141,7 +3141,7 @@ export interface VoiceEngineStatus {
 
 export interface VoiceConfigView {
   stt: VoiceEngineStatus;
-  tts: VoiceEngineStatus & { voice: string };
+  tts: VoiceEngineStatus & { voice: string; streaming?: boolean };
   /** operator 를 이름으로 부르는 상시 청취를 켤 수 있는가(자체 호스팅 STT 에서만). */
   wake: { ready: boolean; error: string | null };
   /** admin 에게만 — 키가 있어 Voice lab 이 비교할 수 있는 공급자. */

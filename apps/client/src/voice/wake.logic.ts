@@ -112,7 +112,7 @@ export interface WakeMatch<T extends WakeCandidate = WakeCandidate> {
   operator: T;
   /** 이름으로 들린 부분(원문 그대로) — 별칭 등록을 돕는다. */
   heard: string;
-  /** 부르는 말 뒤에 이어서 한 말 — 깨어나자마자 보낼 첫 요청. 없으면 ''. */
+  /** 부르는 말 뒤에 이어서 한 말. 없으면 ''. 전송할 때는 호출어를 포함한 원문을 쓴다. */
   rest: string;
   distance: number;
   /** 어떻게 불렀나 — 앞머리("헤이 …") · 부름 조사("…야"). */
@@ -210,7 +210,8 @@ export function splitSleepMarker(answer: string): { text: string; sleep: boolean
 }
 
 /** 깨어난 뒤 처음 보내는 요청 앞에 붙는 한 줄 — 긴 세션에서 지침이 요약돼 사라져도 규칙이 남게. */
-export const WAKE_PROMPT_NOTE = `(음성 대화 — 사용자가 대화를 마치는 말을 하면 짧게 인사하고 답 맨 끝에 ${SLEEP_MARKER} 를 붙이세요.)`;
+const LEGACY_WAKE_PROMPT_NOTE = `(음성 대화 — 사용자가 대화를 마치는 말을 하면 짧게 인사하고 답 맨 끝에 ${SLEEP_MARKER} 를 붙이세요.)`;
+export const WAKE_PROMPT_NOTE = `(음성 대화 — 부르기만 하면 듣고 있다고 짧게 답하고 다음 말을 기다리세요. 이어진 요청이 있으면 그 요청에 답하세요. 호출에 대한 응답에는 잠들기 표시를 붙이지 마세요. 사용자가 대화를 마치는 말을 하면 짧게 인사하고 답 맨 끝에 ${SLEEP_MARKER} 를 붙이세요.)`;
 
 export function withWakeNote(text: string): string {
   return `${WAKE_PROMPT_NOTE}\n${text}`;
@@ -218,8 +219,9 @@ export function withWakeNote(text: string): string {
 
 /** 화면에 보일 때는 그 한 줄을 떼고 "음성" 표시로 대신한다. */
 export function stripWakeNote(text: string): { text: string; noted: boolean } {
-  if (!text.startsWith(WAKE_PROMPT_NOTE)) return { text, noted: false };
-  return { text: text.slice(WAKE_PROMPT_NOTE.length).replace(/^\n/, ''), noted: true };
+  const note = [WAKE_PROMPT_NOTE, LEGACY_WAKE_PROMPT_NOTE].find((prefix) => text.startsWith(prefix));
+  if (!note) return { text, noted: false };
+  return { text: text.slice(note.length).replace(/^\n/, ''), noted: true };
 }
 
 /**

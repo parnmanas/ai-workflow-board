@@ -123,12 +123,77 @@ agent-manager 가 맡는 것은 **operator 세션의 실행**뿐이다(아래 Op
    그대로 읽으면 길고 장황했다(2026-10-08 사용자 지적). 지침과 보고 프롬프트가 "첫 문단은 1~2문장 요약" 을 가르친다.
    operator 가 아닌 세션의 "Read aloud" 는 그대로(`toSpeakable`, 1500자) 읽는다.
 
-- 문장 단위로 끊어 순차 합성·재생한다(다음 문장을 미리 요청) — 첫 소리까지의 지연을 줄인다.
-- 한 턴의 텍스트는 도구 호출 사이사이에 끼어 온다. **마지막 도구 호출 뒤의 텍스트**를 최종 답으로 읽는다.
-  도구 진행을 짧은 상태음/상태 문구로 알려 긴 턴의 침묵을 메우는 것은 operator 단계(P3)에서 붙인다.
+- 대화 답은 턴 종료를 기다리지 않고 **완성된 문장부터** 합성한다. 미완성 문장·링크·인라인 코드·코드 펜스는
+  서버 `stableSpeechPrefix()`에서 보류한다. 일반 낭독 정리는 계속 `toSpeakable()`/`toSpokenSummary()`가 담당한다.
+- 한 턴의 텍스트는 도구 호출 사이사이에 끼어 온다. 스트리밍 대화에서는 "확인해 볼게요" 같은 설명도 먼저 읽고,
+  도구·권한·질문·plan 경계에서 설명 구간을 마무리한다. operator는 **각 설명 구간의 첫 문단**만 읽는다.
+  도구 출력·계획 데이터 자체는 읽지 않으며, 종료 시 이미 읽은 내용을 반복하지 않는다. 기록의 수동 낭독과
+  작업 보고는 기존처럼 마지막 비어 있지 않은 텍스트 구간을 고른다.
 - 재생 규칙: 사용자가 말하기 시작하면 즉시 멈춘다(barge-in). autoplay 는 마이크·읽기 버튼을 누르는 제스처로 재생 요소를
   깨워 둔다(iOS 는 제스처 안에서 한 번 재생된 요소만 나중에 소리를 낸다). 대화 낭독은 **보고 있는(visible) 탭만** 하고,
   화면과 무관한 음성 알림(P2)은 탭이 여러 개일 때 한 탭만 말하도록 리더를 정한다.
+
+## 스트리밍 TTS 조사와 구현 (2026-10-15)
+
+지연은 세 부분이다: **LLM이 읽을 문장을 만들 때까지 + TTS 첫 오디오까지 + 전송·재생 버퍼**.
+오디오만 스트리밍해도 턴 종료까지 기다리면 긴 답의 대기 시간은 남는다. 이번 구현은 문장이 완성될 때 요청하고,
+오디오는 24 kHz / mono / signed PCM16 little-endian 조각을 받는 대로 재생한다.
+토큰 하나마다 발음하는 모델 수준의 양방향 스트리밍과는 구분한다. 문장별 합성은 문장 사이 운율 연결에 한계가 있다.
+
+| 후보 | 텍스트 입력·오디오 출력 | 비용/적용 판단 |
+|---|---|---|
+| 현재 Qwen3-TTS + vLLM-Omni | HTTP PCM 스트리밍. WebSocket은 문장/절 단위로 나눌 수 있음 | 현재 모델·GPU 재사용. AWB의 초기 구현으로 선택 |
+| ElevenLabs Flash v2.5 / v4 Turbo | Flash는 TTS WebSocket, v4 계열은 Text-to-Dialogue WebSocket. 텍스트를 나눠 넣고 오디오를 받음 | 공식 API 표시가 둘 다 $0.04/1,000자. 현재 ElevenLabs 어댑터는 파일 출력이며 별도 스트리밍 어댑터가 필요 |
+| Cartesia Sonic | WebSocket `context_id` + `continue`, PCM 출력, context 취소 | Pro 월 $5/100K credits, TTS 1자=1 credit. 한국어 지원. AWB 신규 공급자 추가 필요 |
+| Google Chirp 3 HD | gRPC 양방향 텍스트/오디오 스트리밍, 한국어 `ko-KR` | 정가 $30/백만 자, 무료 사용량·할당량 별도. 기존 AWB REST API-key 어댑터와 다른 인증/전송 배선 필요 |
+
+가격은 조사 당일 공식 페이지의 USD 표기이며 세금·플랜 조건·무료 사용량은 별도다. 공식 업체 수치인
+Flash 약 75ms, v4 Turbo 중앙 추론 약 100ms는 AWB의 STT·LLM·네트워크를 포함한 실측값이 아니다.
+한국어의 자연스러움과 한영 혼용 발음은 동일한 문장·목소리 조건으로 직접 비교해야 한다.
+
+근거: [vLLM-Omni v0.30.0 고정 소스](https://github.com/vllm-project/vllm-omni/blob/v0.30.0/docs/serving/speech_api.md),
+[vLLM 스트리밍 API](https://docs.vllm.ai/projects/vllm-omni/en/stable/serving/speech_api/),
+[ElevenLabs WebSocket 구분](https://elevenlabs.io/docs/eleven-api/guides/how-to/websockets/tts-vs-ttd-websockets),
+[ElevenLabs API 가격](https://elevenlabs.io/pricing/api), [ElevenLabs 모델](https://elevenlabs.io/docs/overview/models),
+[Cartesia WebSocket](https://docs.cartesia.ai/api-reference/tts/websocket), [Cartesia 가격](https://www.cartesia.ai/pricing),
+[Cartesia 언어](https://www.cartesia.ai/languages),
+[Chirp 3 HD 스트리밍·언어](https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd),
+[Google 가격](https://cloud.google.com/text-to-speech/pricing).
+
+### 연구·오픈소스 후보
+
+- [Qwen3-TTS Technical Report, 2026-01](https://arxiv.org/abs/2601.15621): 텍스트·음성의 dual-track 생성과
+  12.5Hz 토크나이저, 인과적 오디오 디코더를 사용한다. 논문의 97ms 첫 패킷은 해당 실험 조건의 수치다.
+  [공식 구현](https://github.com/QwenLM/Qwen3-TTS)과 현재 vLLM 서빙이 있으므로 AWB에 연구 모델을 새로 학습할 필요가 없다.
+- [SpeakStream, 2025-05](https://arxiv.org/abs/2505.19206): 텍스트와 음성 조각을 교차 학습해 입력 텍스트가
+  계속 들어오는 동안 음성을 생성하는 접근. 문장 경계 대기 자체를 줄이는 연구 방향이다.
+- [FlashTTS, 2026-06](https://arxiv.org/abs/2606.09141): 지연된 여러 트랙, 다중 토큰 예측과 flow distillation으로
+  문장 버퍼링·디코딩 지연을 줄인다. 논문 첫 패킷 325ms를 다른 모델의 광고 수치와 동등 조건으로 비교하면 안 된다.
+- [X-Square-Robot/Qwen3TTS-Streaming](https://github.com/X-Square-Robot/Qwen3TTS-Streaming): Qwen 기반의
+  토큰 입력 스트리밍 대안. 개발자 RTX 5090 벤치마크는 현재 GB10 환경의 보장이 아니므로 별도 검증 대상으로 둔다.
+
+### AWB 전송 계약과 적용
+
+- `GET /api/voice/config`의 `tts.streaming`은 AWB 공급자 어댑터의 PCM 스트리밍 지원 여부다. 현재 `local`만 지원한다.
+  다른 공급자를 선택했을 때도 완성 문장부터 기존 합성을 요청하지만 오디오는 기존 파일 방식으로 재생한다.
+  공급자를 자동으로 바꾸거나 스트리밍 실패를 성공한 것처럼 숨기지 않는다.
+- `POST /api/voice/speakable {text, summary, partial:true}`는 누적 텍스트에서 확정된 부분만 정리한다.
+  구간 종료 때 `partial:false`로 남은 문장을 마무리한다. 클라이언트는 이미 읽은 접두부를 빼고 추가분만 보낸다.
+- `POST /api/voice/speech/stream {text}`는 기존 `voice.use` 권한으로 보호한다. 응답은 `audio/pcm`,
+  `X-Audio-Sample-Rate: 24000`, `X-Audio-Channels: 1`, `Cache-Control: no-store, no-transform`,
+  `X-Accel-Buffering: no`다. 서버가 키를 보관하고, backpressure·합성 제한 시간·클라이언트 취소를 처리한다.
+- Python 게이트웨이는 `stream:true, stream_format:"audio", response_format:"pcm", sample_rate:24000`를
+  vLLM-Omni로 보낸다. `stream:true`만 쓰면 현재 버전은 **SSE**를 반환하므로 raw PCM 재생기에 바로 줄 수 없다.
+  기존 WAV 디코딩 → MP3 인코딩은 스트리밍 경로에서 건너뛴다. 목소리·스타일은 기존 `voices.json`을 사용한다.
+- 웹은 Fetch ReadableStream → Web Audio 예약 재생, Android 백그라운드는 HTTP InputStream → AudioTrack을 쓴다.
+  새 발화·중단·화면 이탈에서는 재생과 진행 중 요청을 취소하고, `[[sleep]]`은 턴과 낭독이 끝난 뒤 처리한다.
+- 적용 순서: **로컬 Python 게이트웨이 → AWB 서버/웹 → Android 앱 업데이트**. 게이트웨이가 예전 MP3를 반환하면
+  형식 오류를 표시한다. 모델 재설치나 agent-manager 변경은 필요 없다.
+- 검증은 가짜 스트리밍 업스트림으로 첫 패킷 선전달, EOF 전 재생, 홀수 바이트 경계, 취소, 중복 낭독 방지,
+  Markdown 보류, 기존 HTTP 권한을 확인한다.
+- 2026-10-15 Ragnar 게이트웨이 실측: Sohee의 “네, 듣고 있어요. 무엇을 도와드릴까요?” 요청에서 첫 PCM
+  0.335초, 전체 전송 1.887초, 5패킷·192,000바이트(4초 음성). 이는 단일 GPU 요청의 HTTP 수신 측정이며
+  STT·LLM·브라우저/휴대폰 재생을 포함한 대화 지연이나 반복 벤치마크는 아니다.
 
 ## Operator
 
@@ -210,7 +275,7 @@ Host의 실행 접근 범위를 정하지 않는다.
 잠듦 ─ 사이드바 OPERATORS 👂 on ─▶ 상시 청취(WakeListener: VAD → /voice/transcribe?purpose=wake → matchWake)
   │                                         │ "헤이 자비스, 오늘 배포 상태 알려줘"
   │                                         ▼  신호음 ↑ · 그 세션 화면으로 이동
-  │                              깨어 있음: 대화 모드가 스스로 켜지고 "오늘 배포 상태 알려줘" 가 첫 요청으로 간다
+  │                              깨어 있음: 대화 모드가 스스로 켜지고 호출어를 포함한 발화 전체가 첫 요청으로 간다
   │                                         │ 이름 없이 계속 대화(답은 탭이 숨어 있어도 읽는다)
   └──── 신호음 ↓ ◀── operator 답 끝의 [[sleep]] 을 다 읽은 뒤 · 60초 조용 · 💤/🎙 끄기 · 화면 이탈
 ```
@@ -249,7 +314,9 @@ Host의 실행 접근 범위를 정하지 않는다.
 - 그 밖에 잠드는 경우: 답을 기다리거나 읽는 동안이 아닌데 60초 조용(`WAKE_IDLE_SLEEP_MS`), 💤 잠들기 또는 🎙 끄기,
   그 operator 화면을 떠남(마지막 화면이 닫히면 한 틱 뒤 — React 개발 모드의 붙였다 떼기를 견디게), 깨어났는데
   10초 안에 화면이 열리지 않음.
-- 깨어 있는 동안 다시 이름을 부르면 이름만 떼고 보낸다. **다른 operator 를 부르면 그쪽이 깨어난다**(화면 이동).
+- **호출도 대화의 첫 턴이다.** "헤이 자비스"만 말해도 발화 전체를 해당 operator에 보내고, operator가 듣고 있다고 짧게 답한다.
+  첫 요청의 음성 안내에도 이 규칙을 실어 기존 operator 세션에도 적용한다. 이어진 요청이 있으면 함께 전달해 그 요청에 답한다.
+  깨어 있는 동안 다시 부를 때도 발화 전체를 보낸다. **다른 operator 를 부르면 그쪽이 깨어나 답한다**(화면 이동).
   군소리("음", "어")는 보내지 않는다 — "네" 는 확인 대답이라 보낸다.
 - 검증: 헤드리스 Chromium 가짜 마이크에 ragnar TTS 로 만든 "헤이 자비스." / "오늘 배포 상태 알려줘." / "고마워, 이제 됐어." 를
   넣고 실제 ragnar ASR 로 — 듣기 시작 1.6초 → 이름 인식 216ms → 깨어나 세션 화면·대화 모드까지 0.3초 → 첫 요청(안내 한 줄

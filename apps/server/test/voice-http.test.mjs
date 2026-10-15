@@ -36,6 +36,7 @@ async function call(url, init) {
 /** OpenAI 호환 오디오 서버 흉내 — 받은 요청을 기록하고 고정 응답을 준다. */
 async function startFakeAudioServer() {
   const seen = [];
+  let finishStream;
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -55,6 +56,12 @@ async function startFakeAudioServer() {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ models: [{ id: 'qwen3-asr', name: 'Qwen' }, { id: 'whisper-large-v3-turbo', name: 'Whisper' }], speaker: { ready: true } }));
       } else if (req.url === '/v1/audio/speech') {
+        if (JSON.parse(body.toString()).stream) {
+          res.writeHead(200, { 'content-type': 'audio/pcm' });
+          res.write(Buffer.from([1, 2]));
+          finishStream = () => res.end(Buffer.from([3, 4]));
+          return;
+        }
         res.writeHead(200, { 'content-type': 'audio/mpeg' });
         res.end(Buffer.from('ID3-fake-mp3'));
       } else {
@@ -64,7 +71,7 @@ async function startFakeAudioServer() {
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return { seen, url: `http://127.0.0.1:${server.address().port}/v1`, close: () => new Promise((r) => server.close(r)) };
+  return { seen, finishStream: () => finishStream?.(), url: `http://127.0.0.1:${server.address().port}/v1`, close: () => new Promise((r) => server.close(r)) };
 }
 
 test('voice gateway: permissions, settings, transcribe, speakable → speech, and honest failures', async (t) => {
@@ -112,7 +119,7 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   assert.equal(saved.status, 200, saved.buf.toString());
   config = await call(`${base}/api/voice/config`, { headers: adminAuth });
   assert.equal(config.body.stt.ready, true, JSON.stringify(config.body));
-  assert.deepEqual(config.body.tts, { provider: 'openai', ready: true, error: null, voice: 'kore' });
+  assert.deepEqual(config.body.tts, { provider: 'openai', ready: true, error: null, voice: 'kore', streaming: false });
   assert.deepEqual(config.body.lab, { stt: ['openai'], tts: ['openai'] });
   const settingsList = await call(`${base}/api/admin/settings`, { headers: adminAuth });
   assert.ok(settingsList.body.some((s) => s.key === 'voice.soniox.api_key' && s.is_secret), 'voice keys are listed as secrets');
@@ -244,10 +251,24 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   assert.match(config.body.wake.error, /self-hosted/);
   await call(`${base}/api/admin/settings`, {
     method: 'PATCH', headers: { ...adminAuth, ...json },
-    body: JSON.stringify({ settings: { 'voice.stt.provider': 'local', 'voice.local.base_url': fake.url } }),
+    body: JSON.stringify({ settings: { 'voice.stt.provider': 'local', 'voice.tts.provider': 'local', 'voice.local.base_url': fake.url } }),
   });
   config = await call(`${base}/api/voice/config`, { headers: adminAuth });
   assert.deepEqual(config.body.wake, { ready: true, error: null });
+  assert.equal(config.body.tts.streaming, true);
+  assert.equal((await call(`${base}/api/voice/speech/stream`, { method: 'POST', headers: { ...plainAuth, ...json }, body: '{"text":"안녕"}' })).status, 403);
+  const streamed = await fetch(`${base}/api/voice/speech/stream`, {
+    method: 'POST', headers: { ...adminAuth, ...json }, body: '{"text":"안녕하세요."}', signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(streamed.status, 200);
+  assert.equal(streamed.headers.get('x-audio-sample-rate'), '24000');
+  assert.equal(streamed.headers.get('x-accel-buffering'), 'no');
+  const reader = streamed.body.getReader();
+  assert.deepEqual([...((await reader.read()).value)], [1, 2], 'first packet arrives before the upstream completes');
+  fake.finishStream();
+  assert.deepEqual([...((await reader.read()).value)], [3, 4]);
+  assert.equal((await reader.read()).done, true);
+  reader.releaseLock();
   fake.seen.length = 0;
   const heard = await call(`${base}/api/voice/transcribe?purpose=wake`, wakeClip);
   assert.equal(heard.status, 200, heard.buf.toString());

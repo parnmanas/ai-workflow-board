@@ -143,7 +143,7 @@ class WakeStore {
     reportVoiceSupport(enabled);
   }
 
-  /** `operatorId` 가 불렸다. `firstPrompt` 는 이름 뒤에 이어 한 말(없으면 null). */
+  /** `firstPrompt` 는 호출어를 포함한 발화 전체. 알림으로만 열 때는 null. */
   wake(operatorId: string, firstPrompt: string | null, source: 'call' | 'notification' = 'call'): void {
     if (this.#reportTarget?.operatorId === operatorId) this.#reportTarget = null;
     this.#clearFollowUp();
@@ -156,7 +156,7 @@ class WakeStore {
     }, ATTACH_GRACE_MS);
   }
 
-  /** 깨운 말에 이어 한 말을 한 번만 내준다. */
+  /** 깨운 발화를 해당 operator 에게 한 번만 내준다. */
   takeFirstPrompt(operatorId: string): string | null {
     if (this.#firstPrompt?.operatorId !== operatorId) return null;
     const { text } = this.#firstPrompt;
