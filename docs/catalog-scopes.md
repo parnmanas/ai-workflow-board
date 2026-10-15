@@ -27,6 +27,27 @@ Scope는 생성 후 변경하지 않는다. 다른 scope가 필요하면 새 정
 
 ## 적용 대상
 
+### MCP credential 조회
+
+`list_credentials({ account_id?, provider?, scope?, limit?, offset? })`는 접근 가능한
+credential 목록을 `{ credentials, total, limit, offset }`으로 반환한다. 기본 페이지
+크기는 50, 최대 100이다. `get_credential({ credential_id })`는 같은 메타데이터 한 건을
+반환하며, 조회한 ID를 프로젝트·GitHub 도구 등의 `credential_id`에 넣을 수 있다.
+
+DB 인증과 살아 있는 Runtime Host/runtime identity가 필요하다. 계정에 바인딩된
+키는 그 계정과 Global credential만 조회한다(read 키도 허용). 계정에 바인딩되지
+않은 full-scope Host는 전체 계정을 조회하며, `account_id`로 한 계정과 Global을
+선택할 수 있다. `scope: 'account'` 또는 `'global'`은 해당 계층만 남긴다.
+
+이름·설명·provider·소유 계정·환경변수 노출 설정/변수명·저장 상태·시각을 반환하고,
+토큰·비밀번호·마스킹된 값·암호문은 반환하지 않는다. `credential_status`의 `ok`는
+복호화 가능한 필드가 있다는 뜻이며 공급자의 인증 성공이나 토큰 유효성을 검증한
+것은 아니다. 비어 있는 객체는 `empty`, 손상/복호화/형식 오류는 `unreadable`이다.
+생성·수정과 비밀값 관리는 기존 Settings → Credentials를 사용한다.
+두 도구는 기본 full 도구 프로필에 제공되며 compact에는 포함되지 않는다.
+
+### 객체별 지원 범위
+
 | Type | Global | Account |
 | --- | --- | --- |
 | Function | yes | yes |

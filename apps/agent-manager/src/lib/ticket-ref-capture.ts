@@ -364,6 +364,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // board-less Projects (git repo + its knowledge, replacing repository Resources).
   // Reads; save_project below is a non-ticket write.
   list_projects: 'read', get_project: 'read',
+  list_credentials: 'read', get_credential: 'read',
   // ticket d35b7b7d (Ontology Graph 6/7) — five pure-query graph_ tools, same
   // posture as search_resources above: read-only lookups over a domain
   // corpus (Ontology Graph nodes/edges), no ticket-row mutation.

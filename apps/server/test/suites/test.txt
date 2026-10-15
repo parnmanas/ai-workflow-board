@@ -20,6 +20,7 @@ test/agent-fullname-display.test.mjs
 test/agent-fullname-orchestration-typing.test.mjs
 test/agent-manager-privileged-command.test.mjs
 test/agent-manager-refresh-available-models.test.mjs
+test/agent-manager-slot-credential.test.mjs
 test/agent-manager-sudo-ticket.test.mjs
 test/agent-manager-tool-call-telemetry.test.mjs
 test/agent-manager-update-cli.test.mjs
@@ -71,6 +72,7 @@ test/comment-tools-user-author-uuid-guard.test.mjs
 test/credential-agent-env.test.mjs
 test/credential-mask.test.mjs
 test/credential-whitespace-normalize.test.mjs
+test/credentials-mcp.test.mjs
 test/credentials-scope-switch.test.mjs
 test/credentials-scope.test.mjs
 test/cron-coverage-guard.test.mjs

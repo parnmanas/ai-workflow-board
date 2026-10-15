@@ -98,6 +98,9 @@ export type AuthzTier = 'full' | 'caller';
  * rejects a call the tool's existing logic would otherwise allow.
  */
 export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
+  // Read-only metadata; handlers enforce DB identity and account/global visibility.
+  list_credentials: 'caller',
+  get_credential: 'caller',
   // Role/permission + credential-minting + cross-account-cascade tools —
   // d6b56237's originally-reported set. Every one of these unconditionally
   // calls requireFullScopeCaller (directly, or via

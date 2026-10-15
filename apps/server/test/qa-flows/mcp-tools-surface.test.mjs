@@ -39,6 +39,8 @@ const EXPECTED_TOOLS = [
   'save_project',
   'list_repo_branches',
   'list_accounts',
+  'list_credentials',
+  'get_credential',
   // Ticket 48d14fff — prerequisite ("blocked-by ticket") surface.
   'add_ticket_prerequisites',
   'remove_ticket_prerequisite',
