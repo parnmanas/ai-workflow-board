@@ -18,6 +18,8 @@ import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
 import { watchCodexAsyncQuestions } from '../dist/lib/clis/codex/async-questions.js';
 import { appendFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const MANAGER = 'manager-1';
@@ -25,16 +27,26 @@ const CLAUDE_ID = '11111111-2222-4333-8444-555555555555';
 
 function installFakeServer() {
   const calls = [];
+  /** 본문 상한에 걸려 거절된 요청(서버 앞 프록시처럼 **보낸 바이트**로 잰다). */
+  const rejected = [];
   const original = globalThis.fetch;
+  const server = { maxBodyBytes: Infinity };
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
-    const body = init?.body ? JSON.parse(init.body) : null;
-    calls.push({ url: target, method, body, apiKey: init?.headers?.['X-Agent-Key'] });
+    const wire = init?.body ? Buffer.from(init.body) : null;
+    const gzipped = init?.headers?.['Content-Encoding'] === 'gzip';
+    if (wire && wire.length > server.maxBodyBytes) {
+      rejected.push({ url: target, bytes: wire.length, gzipped });
+      return new Response('<html><body>413 Request Entity Too Large</body></html>', { status: 413, headers: { 'content-type': 'text/html' } });
+    }
+    const body = wire ? JSON.parse((gzipped ? gunzipSync(wire) : wire).toString('utf8')) : null;
+    calls.push({ url: target, method, body, apiKey: init?.headers?.['X-Agent-Key'], bytes: wire?.length ?? 0, gzipped });
     return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  return {
+  return Object.assign(server, {
     calls,
+    rejected,
     restore: () => { globalThis.fetch = original; },
     rpc: (requestId) => calls.find((c) => c.url.endsWith(`/api/agent/sessions/rpc/${requestId}`))?.body ?? null,
     events: (sessionId) => calls
@@ -43,7 +55,7 @@ function installFakeServer() {
     states: (sessionId) => calls
       .filter((c) => c.url.includes(`/api/agent/sessions/${MANAGER}/`) && (c.url.endsWith(`/${sessionId}/events`) || c.url.endsWith(`/${sessionId}`)))
       .map((c) => (c.method === 'PATCH' ? c.body : c.body.state)).filter(Boolean),
-  };
+  });
 }
 
 async function waitFor(predicate, label, timeoutMs = 8000) {
@@ -170,6 +182,43 @@ test('list / history RPCs answer from the CLI home store', async (t) => {
   await runner.handle(request('history', { request_id: 'rpc-missing', session_id: 'missing-1' }));
   assert.equal(server.rpc('rpc-missing').ok, false);
   assert.equal(server.rpc('rpc-missing').code, 'not_found');
+});
+
+// 원격 서버에서 89MB(이미지 107장) 세션이 한 시간 동안 열리지 않았다 — 매니저 로그에 rpc POST 413 이 56번 남았고,
+// 응답이 버려질 때마다 서버는 답을 받지 못해 화면은 40초 타임아웃만 봤다. 본문 상한은 AWB 서버만 두는 게 아니다
+// (서버 앞의 프록시는 nginx 기본 1MB). 그래서 413 이면 기록은 최근 것을 지키며 줄여 다시 보내고, 끝내 못 보내는
+// 응답(이미지)은 이유를 담은 짧은 실패로 바꿔 화면이 바로 알게 한다. 큰 응답은 gzip 으로 보낸다.
+test('rpc replies survive a body cap in front of the server: history shrinks to fit, an image becomes a too_large error', async (t) => {
+  const { root, server, runner } = await harness(t);
+  const sid = '11111111-2222-4333-8444-5555555555bb';
+  const rows = [];
+  for (let i = 0; i < 160; i += 1) {
+    // 압축이 잘 안 되는 내용(base64 난수) — gzip 만으로 통과해 버리면 줄이는 경로를 시험할 수 없다.
+    rows.push({ type: 'user', uuid: `u${i}`, sessionId: sid, cwd: join(root, 'work'), timestamp: new Date(Date.UTC(2026, 9, 16, 0, 0, i * 2)).toISOString(), message: { role: 'user', content: `prompt ${i}` } });
+    rows.push({ type: 'assistant', uuid: `a${i}`, sessionId: sid, timestamp: new Date(Date.UTC(2026, 9, 16, 0, 0, i * 2 + 1)).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: `answer ${i} ${randomBytes(11_000).toString('base64')}` }] } });
+  }
+  await writeFile(join(root, 'claude', 'projects', '-work', `${sid}.jsonl`), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  server.maxBodyBytes = 1024 * 1024;
+
+  await runner.handle(request('history', { request_id: 'rpc-big-history', session_id: sid }));
+  assert.ok(server.rejected.length >= 1, 'the full window was rejected first');
+  assert.ok(server.rejected.every((r) => r.gzipped), 'large replies go out gzip-compressed');
+  const history = server.rpc('rpc-big-history');
+  assert.equal(history?.ok, true, 'a smaller window got through instead of leaving the screen to time out');
+  const events = history.result.events;
+  assert.equal(history.result.truncated, true);
+  assert.equal(events[0].type, 'system');
+  const omitted = Number(/Earlier history omitted \((\d+) events\)/.exec(events[0].payload.text)?.[1]);
+  assert.equal(omitted + events.length - 1, rows.length, 'the notice counts exactly what was left out');
+  assert.match(events.at(-1).payload.text, /^answer 159 /, 'the newest answer is kept');
+  assert.deepEqual(events.slice(1).map((e) => e.seq), events.slice(1).map((_, i) => rows.length - (events.length - 1) + i + 1), 'seq stays absolute and contiguous');
+
+  const stored = await runner.storeHistoryImage('claude', sid, randomBytes(2 * 1024 * 1024).toString('base64'));
+  await runner.handle(request('image', { request_id: 'rpc-big-image', session_id: sid, image_ref: stored.ref }));
+  const image = server.rpc('rpc-big-image');
+  assert.equal(image?.ok, false);
+  assert.equal(image.code, 'too_large', 'the server maps this to 413 at once');
+  assert.match(image.error, /too large/);
 });
 
 test('heartbeat and history remain busy until the final turn delivery drains', async (t) => {

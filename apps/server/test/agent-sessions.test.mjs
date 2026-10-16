@@ -1131,6 +1131,62 @@ test('local image: 경로를 매니저에 묻고 바이트를 그 mime 으로, �
   assert.equal(empty.status, 400);
 });
 
+// 원격 서버에서 89MB 세션이 한 시간 동안 열리지 않았다 — 매니저의 RPC 응답이 413 으로 버려질 때마다 화면은
+// 40초 타임아웃만 봤다. 매니저가 보낼 수 있는 가장 큰 정상 응답(이미지 8MiB → base64 10.7MiB)이 서버의 일반
+// JSON 상한(10MB)을 넘었으므로, RPC 응답 경로는 그보다 큰 상한으로 받고 gzip 본문도 푼다.
+test('rpc reply: the largest image the manager can send (gzip, over the general 10MB cap) reaches the user; too_large maps to 413', async (t) => {
+  const { gzipSync } = await import('node:zlib');
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const base = `http://localhost:${port}`;
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-rpc-size');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-rs', role: 'admin' });
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': ws.id };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-rs', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: 'inst-rs-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4244, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok(heartbeat.status < 300, heartbeat.text);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+
+  const SID = '11111111-2222-4333-8444-5555555555aa';
+  const ask = async (managerBody) => {
+    const seen = requests.length;
+    const pending = fetch(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/${SID}/image/abc123`, { headers: ownerHeaders });
+    await waitFor(() => requests.length > seen, 'image request');
+    const req = requests[requests.length - 1];
+    const raw = JSON.stringify({ manager_id: managerId, ...managerBody });
+    const reply = await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: gzipSync(raw),
+    });
+    const res = await pending;
+    return { raw, reply, res, bytes: Buffer.from(await res.arrayBuffer()) };
+  };
+
+  const image = Buffer.alloc(8 * 1024 * 1024, 7);
+  const big = await ask({ ok: true, result: { base64: image.toString('base64') } });
+  assert.ok(Buffer.byteLength(big.raw) > 10 * 1024 * 1024, 'the reply is over the general JSON cap once inflated');
+  assert.equal(big.reply.status, 200, big.reply.text);
+  assert.equal(big.res.status, 200);
+  assert.equal(big.bytes.equals(image), true, 'the bytes arrive intact');
+
+  const tooLarge = await ask({ ok: false, error: 'rejected as too large (HTTP 413)', code: 'too_large' });
+  assert.equal(tooLarge.res.status, 413, 'the user sees the reason right away instead of a 30–40s timeout');
+});
+
 // prompt 에 이미지를 함께 보내면 바이트가 매니저로 전달된다 — opencode 가 ACP Image 블록으로
 // 받아 보는(1.18.34 `promptCapabilities.image` 실측) 네이티브 경로다. 서버는 저장하지 않는다.
 test('prompt with images forwards bytes to the manager; bad input is rejected with a reason', async (t) => {

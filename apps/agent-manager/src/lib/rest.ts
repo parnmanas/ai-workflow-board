@@ -1,3 +1,6 @@
+import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
+
 import { normalizeAccountScope } from './account-scope.js';
 import { REQUEST_TIMEOUT_MS } from './constants.js';
 import { log } from './logging.js';
@@ -1323,15 +1326,16 @@ async function sendAgentSessionRequest(
   config: AwbConfig,
   method: 'POST' | 'PATCH',
   url: string,
-  payload: string,
+  payload: string | Uint8Array<ArrayBuffer>,
   label: string,
   /** 로그 접두어 — 같은 전송 경로를 쓰는 표면이 둘이라(세션/터미널) 로그에서 구분한다. */
   surface = 'agent-session',
+  extraHeaders: Record<string, string> = {},
 ): Promise<AgentSessionRestResult> {
   try {
     const resp = await fetch(url, {
       method,
-      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json', ...extraHeaders },
       body: payload,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -1349,15 +1353,35 @@ function agentSessionPath(ref: AgentSessionRef): string {
   return `${encodeURIComponent(ref.manager_id)}/${encodeURIComponent(ref.cli)}/${encodeURIComponent(ref.session_id)}`;
 }
 
+const gzipAsync = promisify(gzip);
+/**
+ * 이만큼 넘는 세션 RPC 응답은 gzip 으로 보낸다(`Content-Encoding: gzip` — 서버의 json 파서가 풀어 읽는다).
+ * 기록(최대 6MiB)은 글자라 몇 분의 일로 줄어, 서버 앞에 본문 상한이 작은 프록시(nginx 기본 1MB 등)가
+ * 있어도 대부분 통과한다. 서버 쪽 상한은 **푼 크기**로 재므로 서버 상한을 비껴가는 수단은 아니다.
+ */
+const RPC_GZIP_MIN_BYTES = 64 * 1024;
+
+export type AgentSessionRpcBody = { ok: boolean; result?: unknown; error?: string; code?: string };
+
 export async function postAgentSessionRpcResponse(
   config: AwbConfig,
   managerId: string,
   requestId: string,
-  body: { ok: boolean; result?: unknown; error?: string; code?: string },
+  body: AgentSessionRpcBody,
+  /** 로그용 — 어떤 요청의 응답이 실패했는지 로그만 보고 알 수 있어야 한다. */
+  op = '',
 ): Promise<AgentSessionRestResult> {
   if (!requestId) return { ok: false, status: 0 };
   const url = `${trimSlash(config.url)}/api/agent/sessions/rpc/${encodeURIComponent(requestId)}`;
-  return sendAgentSessionRequest(config, 'POST', url, JSON.stringify({ manager_id: managerId, ...body }), `rpc(${requestId.slice(0, 8)})`);
+  const payload = JSON.stringify({ manager_id: managerId, ...body });
+  const bytes = Buffer.byteLength(payload);
+  const label = `rpc(${requestId.slice(0, 8)}${op ? ` ${op}` : ''} ${(bytes / 1048576).toFixed(2)}MiB)`;
+  if (bytes >= RPC_GZIP_MIN_BYTES) {
+    const sent = await sendAgentSessionRequest(config, 'POST', url, new Uint8Array(await gzipAsync(payload)), `${label} gzip`, 'agent-session', { 'Content-Encoding': 'gzip' });
+    // 압축 본문을 거절하는 중간 장비(415)에만 원문으로 다시 보낸다.
+    if (sent.status !== 415) return sent;
+  }
+  return sendAgentSessionRequest(config, 'POST', url, payload, label);
 }
 
 export async function postAgentSessionEvents(

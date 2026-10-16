@@ -53,6 +53,8 @@ export interface HistoryResult {
   session: SessionSummary | null;
   events: HistoryEvent[];
   truncated: boolean;
+  /** 창 밖으로 생략한 이벤트 수(맨 앞 안내 줄에 적힌 수). 응답에 싣지 않는다 — 다시 접을 때 쓴다. */
+  omitted: number;
 }
 
 export interface AwbSessionIndexEntry {
@@ -96,6 +98,38 @@ const EXTERNAL_COMMAND_TIMEOUT_MS = 10_000;
  * 있으므로 마지막 방어선으로 둔다.
  */
 const HISTORY_BODY_MAX_BYTES = 6 * 1024 * 1024;
+
+/**
+ * 이벤트 창을 바이트 상한에 맞춘다 — 오래된 것부터 버리고, 앞서 버린 것(`omittedBefore`)과 합쳐 맨 앞에
+ * 생략 안내를 한 줄 단다. 처음 읽을 때(`readHistory`)와 더 작게 다시 접을 때(`refitHistory`)가 같은 규칙을 쓴다.
+ */
+function fitHistoryWindow(
+  sessionId: string,
+  events: HistoryEvent[],
+  omittedBefore: number,
+  maxBytes: number,
+): Pick<HistoryResult, 'events' | 'truncated' | 'omitted'> {
+  const kept = fitHistoryBytes<HistoryEvent>(events, maxBytes);
+  const omitted = omittedBefore + (events.length - kept.length);
+  if (omitted > 0) {
+    kept.unshift({
+      id: `${sessionId}:truncated`, seq: 0, turn_id: '', type: 'system',
+      payload: { text: `Earlier history omitted (${omitted} events).` },
+      created_at: kept[0]?.created_at ?? new Date().toISOString(),
+    });
+  }
+  return { events: kept, truncated: omitted > 0, omitted };
+}
+
+/**
+ * 이미 읽은 기록을 더 작은 바이트 상한으로 다시 접는다(최근 것을 지킨다). 응답이 서버나 그 앞의 프록시에서
+ * 413 으로 거절됐을 때 쓴다 — 기록 파일(수십~수백 MB)을 다시 파싱하지 않는다.
+ */
+export function refitHistory(history: HistoryResult, maxBytes: number): HistoryResult {
+  if (!history.session) return history;
+  const body = history.omitted > 0 ? history.events.slice(1) : history.events;
+  return { ...history, ...fitHistoryWindow(history.session.session_id, body, history.omitted, maxBytes) };
+}
 
 /** `defaultExec` 출력 상한 — 예전 execFile `maxBuffer` 와 같은 값이다. */
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
@@ -343,6 +377,7 @@ export class AgentSessionStore {
         : null,
       events: [],
       truncated: false,
+      omitted: 0,
     };
     // id 는 파일명·SQL 에 그대로 박히므로 형식을 먼저 강제한다(따옴표·백슬래시가 낄 수 없는 집합).
     if (!SESSION_ID_RE.test(sessionId)) return fromIndexOnly;
@@ -364,18 +399,9 @@ export class AgentSessionStore {
       const absolute = read.offset + i + 1;
       return { ...e, seq: absolute, id: `${sessionId}:${absolute}` };
     });
-    const kept = fitHistoryBytes<HistoryEvent>(events, HISTORY_BODY_MAX_BYTES);
     // 생략분 = 창 앞의 것(offset) + 바이트 상한으로 떨어진 것. 스캐너가 화면에 안 그리는
     // 항목(opencode 의 step-start 등)을 건너뛰어도 그것을 "생략" 으로 세지 않는다.
-    const omitted = read.offset + (read.events.length - kept.length);
-    const truncated = omitted > 0;
-    if (truncated) {
-      kept.unshift({
-        id: `${sessionId}:truncated`, seq: 0, turn_id: '', type: 'system',
-        payload: { text: `Earlier history omitted (${omitted} events).` },
-        created_at: kept[0]?.created_at ?? new Date().toISOString(),
-      });
-    }
+    const window = fitHistoryWindow(sessionId, events, read.offset, HISTORY_BODY_MAX_BYTES);
     return {
       session: {
         cli,
@@ -387,8 +413,7 @@ export class AgentSessionStore {
         source: indexEntry ? 'awb' : 'cli',
         ...(read.sizeBytes !== undefined ? { size_bytes: read.sizeBytes } : {}),
       },
-      events: kept,
-      truncated,
+      ...window,
     };
   }
 

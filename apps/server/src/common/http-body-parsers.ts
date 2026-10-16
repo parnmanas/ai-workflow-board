@@ -26,6 +26,12 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   app.use('/api/voice/lab/transcribe', raw({ type: () => true, limit: '25mb' }));
   app.use('/api/voice/speaker/enroll', raw({ type: () => true, limit: '25mb' }));
 
+  // 매니저의 세션 RPC 응답(docs/agent-sessions.md) — 아래 10MB 보다 큰 답이 정상이다. 이미지 한 장의
+  // 상한이 8MiB(매니저 MAX_IMAGE_BYTES · LOCAL_IMAGE_MAX_BYTES)라 base64 로 10.7MiB 가 되고, 기록은 6MiB 까지
+  // 온다. 10MB 로 받으면 큰 이미지의 응답이 413 으로 버려져 화면은 타임아웃만 봤다. 매니저는 큰 응답을
+  // gzip 으로 보내지만 이 상한은 푼 크기로 잰다.
+  app.use('/api/agent/sessions/rpc', json({ limit: '16mb' }));
+
   // Raise the JSON/urlencoded limit from Express's 100KB default to 10MB. Agent
   // plugins ship proxy.log error/event batches (up to 500 entries) that routinely
   // cross 100KB; the default silently bounced them as Express catch-all 404s.

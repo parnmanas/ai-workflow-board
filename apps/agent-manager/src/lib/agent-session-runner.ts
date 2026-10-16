@@ -18,7 +18,7 @@ import { access, constants as fsConstants, lstat, mkdir, readFile, readdir, rm, 
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
-import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
+import { AgentSessionStore, refitHistory, type HistoryEvent, type HistoryResult, type SessionSummary } from './agent-session-store.js';
 import { AgentSessionDelivery } from './agent-session-delivery.js';
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { describeSessionFailure } from './session-failure.js';
@@ -38,6 +38,7 @@ import {
   postAgentSessionEvents,
   postAgentSessionRpcResponse,
   type AgentSessionAuthPatch,
+  type AgentSessionRpcBody,
   type AgentSessionConfigOptionPatch,
   type AgentSessionEventInput,
   type AgentSessionRef,
@@ -324,6 +325,12 @@ function imageRefOf(base64: string): string {
 
 /** 보관·전달할 이미지 한 장의 상한. 넘으면 사실을 알리고 버린다 — 조용히 사라지는 것보다 낫다. */
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/**
+ * history 응답이 413 으로 거절됐을 때 차례로 다시 접어 보낼 바이트 상한(최근 것을 지킨다). 처음 상한(6MiB)은
+ * AWB 서버의 상한 안이지만, 서버 앞의 프록시는 더 작을 수 있다(nginx 기본 1MB). 실측: 89MB 세션이 한 시간 동안
+ * 413 을 56번 받는 동안 화면은 매번 40초 타임아웃만 봤다.
+ */
+const HISTORY_RETRY_BYTES = [2 * 1024 * 1024, 512 * 1024, 128 * 1024] as const;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
 /** Agent Session 을 열 수 있는 CLI(세션 슬라이스를 선언한 모듈). */
 export const ACP_SESSION_CLIS: readonly string[] = cliModulesWith('sessions').map((m) => m.id);
@@ -640,13 +647,13 @@ export class AgentSessionRunner {
 
   async #handleRpc(request: AgentSessionRequest, cli: string, sessionId: string, tag: string): Promise<void> {
     const requestId = request.request_id!;
-    const managerId = this.#options.getManagerId();
+    const op = String(request.op);
     try {
       switch (request.op) {
         case 'list': {
           const sessions = await this.#store.listSessions(cli);
           const withLive = sessions.map((s) => ({ ...s, live_status: this.#live.get(this.#key(cli, s.session_id)) ? this.#statusOf(this.#live.get(this.#key(cli, s.session_id))!) : undefined }));
-          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: { sessions: withLive } });
+          await this.#reply(requestId, op, { ok: true, result: { sessions: withLive } });
           return;
         }
         case 'image': {
@@ -655,10 +662,10 @@ export class AgentSessionRunner {
           if (!sessionId) throw Object.assign(new Error('session_id is required'), { code: 'not_found' });
           const stored = await this.readStoredImage(cli, sessionId, String(request.image_ref || ''));
           if (!stored) {
-            await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: 'Image not found on this Runtime Host.', code: 'not_found' });
+            await this.#reply(requestId, op, { ok: false, error: 'Image not found on this Runtime Host.', code: 'not_found' });
             return;
           }
-          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: { base64: stored.base64 } });
+          await this.#reply(requestId, op, { ok: true, result: { base64: stored.base64 } });
           return;
         }
         case 'local_image': {
@@ -668,13 +675,13 @@ export class AgentSessionRunner {
           const live = sessionId ? this.#live.get(this.#key(cli, sessionId)) : undefined;
           try {
             const image = await readLocalImage(String(request.image_path || ''), live?.cwd || request.cwd || '');
-            await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
+            await this.#reply(requestId, op, {
               ok: true,
               result: { base64: image.bytes.toString('base64'), mime_type: image.mimeType, path: image.path },
             });
           } catch (err: any) {
             if (!(err instanceof LocalImageError)) throw err;
-            await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: err.message, code: err.code });
+            await this.#reply(requestId, op, { ok: false, error: err.message, code: err.code });
           }
           return;
         }
@@ -683,7 +690,7 @@ export class AgentSessionRunner {
           const history = await this.#store.readHistory(cli, sessionId);
           const live = this.#live.get(this.#key(cli, sessionId));
           if (!history.session && !live) {
-            await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' });
+            await this.#reply(requestId, op, { ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' });
             return;
           }
           // 아직 결정되지 않은 permission 요청은 CLI 홈 파일에 없다(SSE 로만 흘렀다). 화면을
@@ -692,33 +699,54 @@ export class AgentSessionRunner {
           const pending = live
             ? [...live.pendingPermissions.values(), ...live.pendingElicitations.values(), ...live.asyncQuestions.values()].map((p) => p.event)
             : [];
-          const events = pending.length
-            ? [...history.events, ...pending.map((e, i) => ({ ...e, seq: history.events.length + i + 1 }))]
-            : history.events;
-          await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
+          const state = live ? this.#stateOf(live) : null;
+          const reply = (h: HistoryResult): AgentSessionRpcBody => ({
             ok: true,
             result: {
-              session: history.session ?? (live ? this.#summaryOf(live) : null),
-              events,
-              truncated: history.truncated,
-              live: live ? this.#stateOf(live) : null,
+              session: h.session ?? (live ? this.#summaryOf(live) : null),
+              events: pending.length ? [...h.events, ...pending.map((e, i) => ({ ...e, seq: h.events.length + i + 1 }))] : h.events,
+              truncated: h.truncated,
+              live: state,
             },
           });
+          // 거절되면 창을 줄여 다시 보낸다 — 최근 대화만이라도 열리는 것이 40초 뒤 에러보다 낫다.
+          await this.#reply(requestId, op, reply(history), ...HISTORY_RETRY_BYTES.map((max) => () => reply(refitHistory(history, max))));
           return;
         }
         case 'open': {
           const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
-          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: this.#stateOf(live) });
+          await this.#reply(requestId, op, { ok: true, result: this.#stateOf(live) });
           return;
         }
         default:
-          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: `Unknown RPC op ${String(request.op)}`, code: 'bad_request' });
+          await this.#reply(requestId, op, { ok: false, error: `Unknown RPC op ${op}`, code: 'bad_request' });
       }
     } catch (err: any) {
       const message = redactSecrets(err?.message ?? String(err));
       log(`${tag} ${request.op} rpc failed: ${message}`);
-      await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: message, code: err?.code ?? 'manager_error' });
+      await this.#reply(requestId, op, { ok: false, error: message, code: err?.code ?? 'manager_error' });
     }
+  }
+
+  /**
+   * RPC 응답을 보낸다. 본문이 AWB 서버나 그 앞의 프록시의 크기 상한에 걸리면(413) 서버는 응답을 받지 못해
+   * 화면이 타임아웃(history 는 40초)만 본다. 그래서 413 이면 다음 후보(`smaller` — 더 작게 접은 응답)를 차례로
+   * 보내고, 모두 거절되면 이유를 담은 짧은 실패로 바꿔 보낸다.
+   */
+  async #reply(requestId: string, op: string, body: AgentSessionRpcBody, ...smaller: Array<() => AgentSessionRpcBody>): Promise<void> {
+    const managerId = this.#options.getManagerId();
+    let sent = await postAgentSessionRpcResponse(this.#config, managerId, requestId, body, op);
+    for (const next of smaller) {
+      if (sent.status !== 413) return;
+      log(`[agent-session] ${op} response rejected as too large (HTTP 413) — retrying with a smaller one`);
+      sent = await postAgentSessionRpcResponse(this.#config, managerId, requestId, next(), op);
+    }
+    if (sent.status !== 413) return;
+    await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
+      ok: false,
+      code: 'too_large',
+      error: `The Runtime Host's ${op} response was rejected as too large (HTTP 413) by the AWB server or a proxy in front of it.`,
+    }, op);
   }
 
   async stopAll(reason = 'manager_shutdown'): Promise<void> {
