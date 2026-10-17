@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { UserChannelsModal } from './UserChannelsModal';
@@ -18,11 +18,43 @@ import { speechPlayer } from '../../voice/speechPlayer';
  *   - Per-source on/off toggles for mentions, chat, tickets, admin, and
  *     the audio cue. Defaults mirror the legacy chat_notify_muted key.
  */
+const POPUP_WIDTH = 260;
+const POPUP_MARGIN = 8;
+
+/**
+ * Where the popup goes, relative to the bell's wrapper: right-aligned to the
+ * bell, but pushed back inside the viewport. In the 260px mobile drawer the bell
+ * sits mid-header, so plain `right: 0` started the popup off-screen to the left.
+ * The height is capped to the room below the bell and the rest scrolls.
+ */
+export function popupPlacement(anchor: { left: number; right: number; bottom: number }, viewport: { width: number; height: number }) {
+  const width = Math.min(POPUP_WIDTH, viewport.width - POPUP_MARGIN * 2);
+  const left = Math.min(Math.max(anchor.right - width, POPUP_MARGIN), viewport.width - POPUP_MARGIN - width);
+  return {
+    left: left - anchor.left,
+    width,
+    maxHeight: Math.max(160, viewport.height - anchor.bottom - 6 - POPUP_MARGIN),
+  };
+}
+
 export function NotificationSettingsPanel() {
   const { prefs, setPref, notificationPermission, requestNotificationPermission } = useNotifications();
   const voiceConfig = useVoiceConfig();
   const [open, setOpen] = useState(false);
   const [channelsModalOpen, setChannelsModalOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState<ReturnType<typeof popupPlacement> | null>(null);
+  // Measured before paint so the popup never flashes at the clipped spot.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const anchor = wrapRef.current?.getBoundingClientRect();
+      if (anchor) setPlace(popupPlacement(anchor, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [open]);
   const hasNotificationAPI = typeof window !== 'undefined' && 'Notification' in window;
   const permission = notificationPermission;
 
@@ -38,7 +70,7 @@ export function NotificationSettingsPanel() {
   };
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div ref={wrapRef} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label="Notification settings"
@@ -79,9 +111,12 @@ export function NotificationSettingsPanel() {
         <div
           style={{
             position: 'absolute',
-            top: 36,
-            right: 0,
-            width: 260,
+            top: '100%',
+            marginTop: 6,
+            ...(place
+              ? { left: place.left, width: place.width, maxHeight: place.maxHeight, overflowY: 'auto' as const }
+              : { right: 0, width: POPUP_WIDTH }),
+            boxSizing: 'border-box',
             background: tokens.colors.surfaceCard,
             border: `1px solid ${tokens.colors.border}`,
             borderRadius: tokens.radii.md,

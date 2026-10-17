@@ -803,9 +803,11 @@ export default function Sidebar({
         <MentionInboxBadge accountId={accountId} />
         <NotificationSettingsPanel />
         {/* Former main-frame header buttons — the desktop AWB brand bar is
-            gone, so mute/artifact toggles live here now (drawer too). */}
-        <NotificationMuteButton />
-        <ArtifactToggleButton />
+            gone, so mute/artifact toggles live here on desktop. The drawer
+            leaves them to the mobile top bar, which already shows both: in a
+            260px header they doubled up and squeezed the brand. */}
+        {!overlay && <NotificationMuteButton />}
+        {!overlay && <ArtifactToggleButton />}
       </div>
 
       <nav

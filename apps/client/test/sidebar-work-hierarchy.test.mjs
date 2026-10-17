@@ -34,6 +34,7 @@ import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx'
 import Sidebar from '../src/components/Sidebar.tsx';
 import { MISSIONS_CHANGED_EVENT, TEAMS_CHANGED_EVENT } from '../src/components/workNavigation.ts';
 import { LegacyOrchestrationTeamsRedirect } from '../src/App.tsx';
+import { popupPlacement } from '../src/components/common/NotificationSettingsPanel.tsx';
 
 const h = React.createElement;
 
@@ -586,4 +587,48 @@ test('missions owned by another accessible account stay live in the global sideb
   });
   await flush();
   assert.deepEqual(subItemLabels(view, 'Missions'), []);
+});
+
+// 2026-10-17: 모바일 드로어 머리에 종이 두 개(알림 설정 🔔 + 소리 끄기 🔔) 나란히 있었고, 알림 설정
+// 팝업은 260px 드로어 가운데의 종에 오른쪽 정렬돼 화면 왼쪽 밖에서 시작해 잘렸다.
+function headerButtons(view) {
+  const aside = view.container.querySelector('[data-testid="app-sidebar"]');
+  return [...aside.firstElementChild.querySelectorAll('button')].map((b) => ({
+    label: b.getAttribute('aria-label') || '',
+    glyph: (b.textContent || '').trim(),
+  }));
+}
+
+test('사이드바 머리의 종은 하나 — 소리 끄기는 스피커 모양이고, 드로어에서는 톱바에 맡긴다', async (t) => {
+  const desktop = await mountSidebar(t);
+  const buttons = headerButtons(desktop.view);
+  assert.equal(buttons.filter((b) => /🔔|🔕/.test(b.glyph)).length, 1, `bell once, got ${JSON.stringify(buttons)}`);
+  assert.ok(buttons.some((b) => b.label === 'Notification settings'));
+  const mute = buttons.find((b) => /notification sound/.test(b.label));
+  assert.ok(mute, '데스크톱은 한 번에 끄는 버튼을 머리에 둔다');
+  assert.match(mute.glyph, /🔊|🔇/);
+});
+
+test('드로어 머리에는 소리 끄기 · Artifact 버튼이 없다 — 모바일 톱바에 이미 있다', async (t) => {
+  const drawer = await mountSidebar(t, { overlay: true });
+  const buttons = headerButtons(drawer.view);
+  assert.ok(buttons.some((b) => b.label === 'Notification settings'));
+  assert.equal(buttons.some((b) => /notification sound/.test(b.label)), false, JSON.stringify(buttons));
+  assert.equal(buttons.some((b) => /Artifact/.test(b.label)), false, JSON.stringify(buttons));
+});
+
+test('알림 설정 팝업은 화면 안에 놓인다 — 오른쪽 정렬을 하되 넘치면 안쪽으로 민다', () => {
+  // 드로어(260px) 가운데의 종: 오른쪽 정렬이면 x=-112 에서 시작했다.
+  const drawer = popupPlacement({ left: 120, right: 148, bottom: 50 }, { width: 390, height: 844 });
+  assert.equal(120 + drawer.left, 8, '왼쪽 여백 8px 에서 시작');
+  assert.equal(drawer.width, 260);
+  // 화면 오른쪽 끝의 종: 오른쪽 정렬 그대로.
+  const right = popupPlacement({ left: 1380, right: 1410, bottom: 40 }, { width: 1440, height: 900 });
+  assert.equal(1380 + right.left + right.width, 1410);
+  // 아주 좁은 화면: 폭을 줄여서라도 양쪽 여백을 지킨다.
+  const narrow = popupPlacement({ left: 200, right: 228, bottom: 40 }, { width: 240, height: 500 });
+  assert.equal(narrow.width, 224);
+  assert.equal(200 + narrow.left, 8);
+  // 낮은 화면(가로 폰): 남은 높이만큼만, 나머지는 스크롤.
+  assert.equal(popupPlacement({ left: 0, right: 30, bottom: 50 }, { width: 667, height: 375 }).maxHeight, 375 - 50 - 6 - 8);
 });

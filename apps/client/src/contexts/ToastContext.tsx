@@ -157,7 +157,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 }
 
 
-/** Lives in the application header so it never covers a composer action. */
+/**
+ * Lives in the application header so it never covers a composer action.
+ * A speaker, not a bell: it is the one-tap form of the "Audio cue" toggle, and
+ * the bell next to it opens the notification settings — two bells side by side
+ * read as one control shown twice.
+ */
 export function NotificationMuteButton() {
   const { muted, toggleMute } = useToast();
   return (
@@ -165,16 +170,16 @@ export function NotificationMuteButton() {
       type="button"
       className="awb-notification-mute"
       onClick={toggleMute}
-      aria-label={muted ? 'Unmute notifications' : 'Mute notifications'}
+      aria-label={muted ? 'Unmute notification sound' : 'Mute notification sound'}
       aria-pressed={muted}
-      title={muted ? 'Unmute notifications' : 'Mute notifications'}
+      title={muted ? 'Unmute notification sound' : 'Mute notification sound'}
       style={{
         width: 32, height: 32, flexShrink: 0, borderRadius: tokens.radii.md,
         background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
         color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 14,
       }}
     >
-      {muted ? '🔕' : '🔔'}
+      {muted ? '🔇' : '🔊'}
     </button>
   );
 }
