@@ -304,3 +304,20 @@ test('버튼으로 닫으면 얹었던 history 항목을 걷어낸다', async (t
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(dom.window.history.state?.awbOverlay, undefined, '다음 뒤로 가기가 헛돌지 않는다');
 });
+
+test('Esc 는 라이트박스만 닫는다 — 아래 화면(티켓 패널 등)의 Esc 닫기로 번지지 않는다', (t) => {
+  let closed = 0;
+  let underneath = 0;
+  // 티켓 패널은 document 에서 Esc 로 닫힌다 — 라이트박스가 떠 있으면 그 Esc 는 라이트박스 것이다.
+  const { view } = setup(t, { onClosed: () => closed++ });
+  // setupDom 이 전역 document 를 새로 만든 뒤에 단다.
+  const onKey = (e) => { if (e.key === 'Escape') underneath++; };
+  document.addEventListener('keydown', onKey);
+  t.after(() => document.removeEventListener('keydown', onKey));
+  act(() => {
+    document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  assert.equal(closed, 1, '라이트박스는 닫힌다');
+  assert.equal(underneath, 0, '아래 화면은 Esc 를 받지 않는다');
+  assert.ok(view.container.querySelector('[data-testid="closed"]'));
+});

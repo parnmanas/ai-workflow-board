@@ -52,14 +52,18 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
 
   useCloseOnBack(onClose);
 
+  // Esc 는 라이트박스 몫이다 — capture 단계에서 받아 멈춘다. 티켓 패널처럼 document 에서 Esc 로
+  // 닫히는 화면 위에 떠 있을 때, 사진만 닫으려던 Esc 가 그 화면까지 닫지 않게.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-      else if (e.key === 'ArrowLeft') goPrev();
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      } else if (e.key === 'ArrowLeft') goPrev();
       else if (e.key === 'ArrowRight') goNext();
     }
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
   }, [onClose, goPrev, goNext]);
 
   if (total === 0 || !current) return null;

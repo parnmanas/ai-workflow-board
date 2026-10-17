@@ -271,13 +271,16 @@ export function EvidenceLightbox({
     setBroken(false);
   }, [url]);
   useEffect(() => {
+    // Esc 는 라이트박스 몫 — capture 에서 멈춰 아래 화면의 Esc 닫기까지 번지지 않게(MediaLightbox 와 같다).
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-      else if (e.key === 'ArrowLeft') onPrev?.();
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      } else if (e.key === 'ArrowLeft') onPrev?.();
       else if (e.key === 'ArrowRight') onNext?.();
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
   }, [onClose, onPrev, onNext]);
   useCloseOnBack(onClose);
   const video = isVideoMime(meta.mime_type);
