@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { tokens } from '../../tokens';
+import ZoomStage from './ZoomStage';
+import { useCloseOnBack } from './useCloseOnBack';
 
 /**
  * 이미지/영상 공용 라이트박스.
@@ -8,6 +10,9 @@ import { tokens } from '../../tokens';
  * 넘기는" UX 로 통일하기 위한 단일 구현이다. 각 화면은 갤러리 목록(items)과 현재
  * 위치(index)만 넘기면 된다 — 키보드(Esc/←→), 배경 클릭 닫기, 깨진 파일 표시,
  * 영상 인라인 재생, 다운로드(팝업 안의 부차 버튼)는 여기서 한 번만 다룬다.
+ *
+ * 확대 · 이동(핀치, 드래그, 더블탭, 휠)과 스와이프 넘기기/닫기는 `ZoomStage` 가, 뒤로 가기로
+ * 닫기(안드로이드 앱의 뒤로 버튼)는 `useCloseOnBack` 이 맡는다.
  */
 
 export interface MediaLightboxItem {
@@ -45,6 +50,8 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
     onIndexChange((safeIndex + 1) % total);
   }, [safeIndex, total, onIndexChange]);
 
+  useCloseOnBack(onClose);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose();
@@ -74,55 +81,21 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
         zIndex: 2000,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 10,
+        // 오버레이 위의 손가락이 뒤 화면을 스크롤하지 않게.
+        touchAction: 'none',
+        overscrollBehavior: 'contain',
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          position: 'relative',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          maxWidth: '94vw',
-          maxHeight: '82vh',
-          width: '100%',
-        }}
-      >
-        {total > 1 && (
-          <button
-            type="button"
-            aria-label="Previous"
-            data-testid="media-lightbox-prev"
-            onClick={goPrev}
-            style={{
-              position: 'absolute',
-              left: 8,
-              top: '50%',
-              transform: 'translateY(-50%)',
-              zIndex: 2,
-              width: 40,
-              height: 56,
-              borderRadius: 8,
-              border: '1px solid rgba(255,255,255,0.25)',
-              background: 'rgba(0,0,0,0.55)',
-              color: '#fff',
-              fontSize: 22,
-              cursor: 'pointer',
-              lineHeight: 1,
-            }}
-          >
-            ‹
-          </button>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', minHeight: 120 }}>
-          {loading ? (
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        {loading ? (
+          <div style={centered}>
             <div style={{ color: '#bbb', fontSize: 13 }}>불러오는 중…</div>
-          ) : broken ? (
+          </div>
+        ) : broken ? (
+          <div style={centered}>
             <div
               data-testid="media-lightbox-broken"
+              onClick={(e) => e.stopPropagation()}
               style={{
                 maxWidth: 520,
                 padding: 20,
@@ -139,49 +112,43 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
               </div>
               바이트는 저장돼 있지만 이미지/영상으로 해석되지 않습니다.
             </div>
-          ) : isVideo ? (
-            <video
-              key={current.src}
-              src={current.src}
-              controls
-              autoPlay
-              playsInline
-              preload="metadata"
-              onError={() => setBroken(true)}
-              style={{ maxWidth: '88vw', maxHeight: '78vh', borderRadius: 6, background: '#000' }}
-            />
-          ) : (
-            <img
-              key={current.src}
-              src={current.src}
-              alt={label}
-              onError={() => setBroken(true)}
-              style={{ maxWidth: '88vw', maxHeight: '78vh', borderRadius: 6, objectFit: 'contain' }}
-            />
-          )}
-        </div>
+          </div>
+        ) : (
+          <ZoomStage
+            key={current.src}
+            kind={current.kind}
+            src={current.src}
+            alt={label}
+            onError={() => setBroken(true)}
+            onPrev={total > 1 ? goPrev : undefined}
+            onNext={total > 1 ? goNext : undefined}
+            onDismiss={onClose}
+          />
+        )}
+        {total > 1 && (
+          <button
+            type="button"
+            aria-label="Previous"
+            data-testid="media-lightbox-prev"
+            onClick={(e) => {
+              e.stopPropagation();
+              goPrev();
+            }}
+            style={{ ...navButton, left: 8 }}
+          >
+            ‹
+          </button>
+        )}
         {total > 1 && (
           <button
             type="button"
             aria-label="Next"
             data-testid="media-lightbox-next"
-            onClick={goNext}
-            style={{
-              position: 'absolute',
-              right: 8,
-              top: '50%',
-              transform: 'translateY(-50%)',
-              zIndex: 2,
-              width: 40,
-              height: 56,
-              borderRadius: 8,
-              border: '1px solid rgba(255,255,255,0.25)',
-              background: 'rgba(0,0,0,0.55)',
-              color: '#fff',
-              fontSize: 22,
-              cursor: 'pointer',
-              lineHeight: 1,
+            onClick={(e) => {
+              e.stopPropagation();
+              goNext();
             }}
+            style={{ ...navButton, right: 8 }}
           >
             ›
           </button>
@@ -198,6 +165,8 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
           flexWrap: 'wrap',
           justifyContent: 'center',
           maxWidth: '88vw',
+          margin: '0 auto',
+          padding: '6px 0 calc(10px + env(safe-area-inset-bottom, 0px))',
           lineHeight: 1.6,
           textAlign: 'center',
         }}
@@ -238,3 +207,28 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
     </div>
   );
 }
+
+const centered: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 16,
+};
+
+const navButton: React.CSSProperties = {
+  position: 'absolute',
+  top: '50%',
+  transform: 'translateY(-50%)',
+  zIndex: 2,
+  width: 40,
+  height: 56,
+  borderRadius: 8,
+  border: '1px solid rgba(255,255,255,0.25)',
+  background: 'rgba(0,0,0,0.55)',
+  color: '#fff',
+  fontSize: 22,
+  cursor: 'pointer',
+  lineHeight: 1,
+};

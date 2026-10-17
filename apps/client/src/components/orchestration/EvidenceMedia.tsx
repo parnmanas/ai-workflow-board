@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
+import ZoomStage from '../common/ZoomStage';
+import { useCloseOnBack } from '../common/useCloseOnBack';
 import { base64ToBlob, formatBytes, isImageMime, isVideoMime, triggerBlobDownload } from '../chat/utils/attachments';
 
 /**
@@ -241,7 +243,10 @@ export function EvidenceThumb({
   );
 }
 
-/** 전체 화면 미리보기 — 이미지는 원본 크기, 동영상은 컨트롤 달린 플레이어. prev/next 로 갤러리를 넘긴다. */
+/**
+ * 전체 화면 미리보기 — 이미지는 맞춤 크기에서 확대 · 이동(`ZoomStage`), 동영상은 컨트롤 달린 플레이어.
+ * prev/next 로 갤러리를 넘긴다.
+ */
 export function EvidenceLightbox({
   meta,
   url,
@@ -274,8 +279,14 @@ export function EvidenceLightbox({
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose, onPrev, onNext]);
+  useCloseOnBack(onClose);
   const video = isVideoMime(meta.mime_type);
   const canNav = !!(onPrev && onNext);
+  const navButton: React.CSSProperties = {
+    position: 'absolute', top: '50%', transform: 'translateY(-50%)', zIndex: 2,
+    width: 40, height: 56, borderRadius: 8, border: '1px solid rgba(255,255,255,0.25)',
+    background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 22, cursor: 'pointer', lineHeight: 1,
+  };
   return (
     <div
       role="dialog"
@@ -290,80 +301,68 @@ export function EvidenceLightbox({
         zIndex: 2000,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 10,
+        touchAction: 'none',
+        overscrollBehavior: 'contain',
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', maxWidth: '94vw', width: '100%' }}
-      >
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        {broken ? (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+            <div
+              data-testid="evidence-lightbox-broken"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: 520,
+                padding: 20,
+                borderRadius: 8,
+                background: tokens.colors.surfaceCard,
+                color: tokens.colors.textSecondary,
+                fontSize: 12.5,
+                lineHeight: 1.7,
+              }}
+            >
+              <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
+                ⚠ 이 파일은 열 수 없습니다
+              </div>
+              바이트는 서버에 저장돼 있지만 이미지로 해석되지 않습니다. 파일이 끝까지 오지 않았거나
+              형식이 맞지 않는 경우이고, 어느 쪽이든 화면에서 복구할 방법은 없습니다 — 담당 agent 에게
+              다시 올려 달라고 하세요. 아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.
+            </div>
+          </div>
+        ) : (
+          <ZoomStage
+            key={url}
+            kind={video ? 'video' : 'image'}
+            src={url}
+            alt={meta.file_name}
+            onError={() => setBroken(true)}
+            onPrev={canNav ? onPrev : undefined}
+            onNext={canNav ? onNext : undefined}
+            onDismiss={onClose}
+          />
+        )}
         {canNav && (
           <button
             type="button"
             aria-label="Previous"
-            onClick={onPrev}
-            style={{
-              position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', zIndex: 2,
-              width: 40, height: 56, borderRadius: 8, border: '1px solid rgba(255,255,255,0.25)',
-              background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 22, cursor: 'pointer', lineHeight: 1,
+            onClick={(e) => {
+              e.stopPropagation();
+              onPrev?.();
             }}
+            style={{ ...navButton, left: 8 }}
           >
             ‹
           </button>
         )}
-        {broken ? (
-        <div
-          data-testid="evidence-lightbox-broken"
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            maxWidth: 520,
-            padding: 20,
-            borderRadius: 8,
-            background: tokens.colors.surfaceCard,
-            color: tokens.colors.textSecondary,
-            fontSize: 12.5,
-            lineHeight: 1.7,
-          }}
-        >
-          <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
-            ⚠ 이 파일은 열 수 없습니다
-          </div>
-          바이트는 서버에 저장돼 있지만 이미지로 해석되지 않습니다. 파일이 끝까지 오지 않았거나
-          형식이 맞지 않는 경우이고, 어느 쪽이든 화면에서 복구할 방법은 없습니다 — 담당 agent 에게
-          다시 올려 달라고 하세요. 아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.
-        </div>
-      ) : video ? (
-        <video
-          key={url}
-          src={url}
-          controls
-          autoPlay
-          onError={() => setBroken(true)}
-          style={{ maxWidth: '88vw', maxHeight: '78vh', borderRadius: 6, background: '#000' }}
-          onClick={(e) => e.stopPropagation()}
-        />
-      ) : (
-        <img
-          key={url}
-          src={url}
-          alt={meta.file_name}
-          onError={() => setBroken(true)}
-          style={{ maxWidth: '88vw', maxHeight: '78vh', borderRadius: 6 }}
-          onClick={(e) => e.stopPropagation()}
-        />
-      )}
         {canNav && (
           <button
             type="button"
             aria-label="Next"
-            onClick={onNext}
-            style={{
-              position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', zIndex: 2,
-              width: 40, height: 56, borderRadius: 8, border: '1px solid rgba(255,255,255,0.25)',
-              background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 22, cursor: 'pointer', lineHeight: 1,
+            onClick={(e) => {
+              e.stopPropagation();
+              onNext?.();
             }}
+            style={{ ...navButton, right: 8 }}
           >
             ›
           </button>
@@ -380,6 +379,8 @@ export function EvidenceLightbox({
           flexWrap: 'wrap',
           justifyContent: 'center',
           maxWidth: '80vw',
+          margin: '0 auto',
+          padding: '6px 0 calc(10px + env(safe-area-inset-bottom, 0px))',
           lineHeight: 1.6,
           textAlign: 'center',
         }}

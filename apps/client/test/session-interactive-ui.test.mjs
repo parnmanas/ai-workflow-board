@@ -161,6 +161,15 @@ test('composer: attach button takes images; text-empty image-only prompt still s
       if (Date.now() - started > 5000) throw new Error('attachment never became sendable');
       await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     }
+    // 보내기 전에 썸네일을 누르면 같은 라이트박스로 크게 본다.
+    const thumbSrc = document.querySelector('[aria-label="Attached images"] img').getAttribute('src');
+    click(document.querySelector('button[aria-label="Preview image shot.png"]'));
+    const lightbox = document.querySelector('[data-testid="media-lightbox"]');
+    assert.ok(lightbox, '첨부 썸네일이 라이트박스를 연다');
+    assert.equal(lightbox.querySelector('[data-testid="zoom-stage"] img').getAttribute('src'), thumbSrc);
+    click([...lightbox.querySelectorAll('button')].find((b) => /Close/.test(b.textContent)));
+    assert.equal(Boolean(document.querySelector('[data-testid="media-lightbox"]')), false);
+
     const sendBtn = sendBtnNow();
     assert.equal(sendBtn.disabled, false, '그림만 있어도 전송이 열린다');
     click(sendBtn);

@@ -5,6 +5,7 @@ import { applySlashCommand, matchSlashCommands } from './sessionTranscript.logic
 import { readFileAsBase64 } from '../chat/utils/attachments';
 import { useHandsFreeConversation, type ConversationPhase } from '../../voice/useVoice';
 import { WAKE_IDLE_SLEEP_MS } from '../../voice/wake.logic';
+import MediaLightbox from '../common/MediaLightbox';
 
 /**
  * Agent Session 프롬프트 입력. Chat 의 ChatMessageInput 과 달리 방/멘션에
@@ -109,6 +110,8 @@ const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
 export default function SessionComposer({ disabled, busy, placeholder, hint, commands, onSend, onCancel, voiceInput }: SessionComposerProps) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<SessionPromptImage[]>([]);
+  // 보내기 전에 첨부한 그림을 크게 확인한다(대화 속 첨부와 같은 라이트박스).
+  const [previewId, setPreviewId] = useState<string | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [selected, setSelected] = useState(0);
@@ -318,6 +321,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   };
 
   const locked = disabled || sending;
+  const previewIndex = previewId ? images.findIndex((img) => img.localId === previewId) : -1;
   return (
     <div
       className="awb-session-composer"
@@ -342,7 +346,14 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
                 border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface,
               }}
             >
-              <img src={img.previewUrl} alt={img.name || 'attached image'} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: img.base64 ? 1 : 0.5 }} />
+              <button
+                type="button"
+                onClick={() => setPreviewId(img.localId)}
+                aria-label={`Preview image ${img.name || 'attached'}`}
+                style={{ display: 'block', width: '100%', height: '100%', padding: 0, border: 'none', background: 'transparent', cursor: 'zoom-in' }}
+              >
+                <img src={img.previewUrl} alt={img.name || 'attached image'} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: img.base64 ? 1 : 0.5, display: 'block' }} />
+              </button>
               <button
                 type="button"
                 onClick={() => removeImage(img.localId)}
@@ -357,6 +368,14 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             </div>
           ))}
         </div>
+      )}
+      {previewIndex >= 0 && (
+        <MediaLightbox
+          items={images.map((img) => ({ src: img.previewUrl, kind: 'image' as const, caption: img.name || '첨부 이미지', filename: img.name || 'image' }))}
+          index={previewIndex}
+          onIndexChange={(next) => setPreviewId(images[next]?.localId ?? null)}
+          onClose={() => setPreviewId(null)}
+        />
       )}
       {attachError && (
         <div style={{ fontSize: 11.5, color: tokens.colors.warning, marginBottom: 6 }}>{attachError}</div>

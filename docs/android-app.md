@@ -27,6 +27,15 @@ voice/Vad · VoiceApi · EventStream · Speaker · VoiceRules
 웹 쪽 짝: `apps/client/src/native/androidBridge.ts`(요청/응답 · 이벤트), `native/AndroidAppBridge.tsx`(이동 · 스위치 맞추기 ·
 숨으면 대화 내려놓기), `components/AndroidVoiceCard.tsx`(설정 → Device).
 
+### WebView 가 대신 해 주지 않는 것 — 화면 쪽에서 맞춘다
+
+- **페이지 확대가 꺼져 있다**(WebView 기본값: built-in zoom off). 두 손가락 확대가 필요한 화면은 웹이 직접 계산한다 —
+  첨부 이미지/영상 라이트박스(`components/common/ZoomStage.tsx`, 계산은 `zoomPan.logic.ts`)가 핀치 · 드래그 · 더블탭 ·
+  스와이프(넘기기/닫기)를 다룬다. 새 확대 화면도 이것을 쓴다 — 웹 · 앱 · 데스크톱이 같은 제스처를 탄다.
+- **뒤로 버튼은 `WebView.goBack()`** 이다. history 항목이 없는 오버레이는 뒤로를 누르면 화면째 사라진다 —
+  라이트박스는 `components/common/useCloseOnBack.ts` 로 열려 있는 동안 같은 주소의 항목 하나를 얹어 뒤로가 그것을 닫게 한다.
+  네이티브 변경 없이 웹 배포만으로 따라온다.
+
 ## 로그인
 
 1. 화면(WebView)에서 로그인한다 — 이메일/비밀번호는 웹 폼 그대로, 구글은 `oauth.google` 브릿지 → Custom Tab →

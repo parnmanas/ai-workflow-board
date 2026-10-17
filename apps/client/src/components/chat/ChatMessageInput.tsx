@@ -6,6 +6,7 @@ import { MentionTextarea, MentionCandidate, MentionTextareaHandle } from '../com
 import { formatAgentDisplayName } from '../../utils/agentName';
 import { formatBytes, isImageMime, readFileAsBase64 } from './utils/attachments';
 import { completeComposerSend } from './utils/composerSend';
+import MediaLightbox from '../common/MediaLightbox';
 
 // ─── ChatMessageInput ─────────────────────────────────────────────────────────
 
@@ -43,6 +44,10 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  // 보내기 전에 첨부한 그림을 크게 확인한다(대화 속 첨부와 같은 라이트박스).
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const previewImages = pendingAttachments.filter((p) => p.previewUrl);
+  const previewIndex = previewId ? previewImages.findIndex((p) => p.localId === previewId) : -1;
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0);
@@ -356,12 +361,21 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
               key={p.localId}
               entry={p}
               onRemove={() => handleRemove(p.localId)}
+              onOpen={p.previewUrl ? () => setPreviewId(p.localId) : undefined}
             />
           ))}
           <div style={{ marginLeft: 'auto', fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', alignSelf: 'center' }}>
             {pendingAttachments.length} / {MAX_CLIENT_ATTACHMENTS}
           </div>
         </div>
+      )}
+      {previewIndex >= 0 && (
+        <MediaLightbox
+          items={previewImages.map((p) => ({ src: p.previewUrl!, kind: 'image' as const, caption: p.fileName, filename: p.fileName }))}
+          index={previewIndex}
+          onIndexChange={(next) => setPreviewId(previewImages[next]?.localId ?? null)}
+          onClose={() => setPreviewId(null)}
+        />
       )}
       {uploadError && (
         <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.danger, padding: '4px 16px' }}>
@@ -475,9 +489,11 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
 interface PendingAttachmentChipProps {
   entry: PendingAttachment;
   onRemove: () => void;
+  /** 이미지 칩을 누르면 보내기 전에 크게 본다. */
+  onOpen?: () => void;
 }
 
-function PendingAttachmentChip({ entry, onRemove }: PendingAttachmentChipProps) {
+function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChipProps) {
   const isImg = !!entry.previewUrl;
   return (
     <div
@@ -498,17 +514,24 @@ function PendingAttachmentChip({ entry, onRemove }: PendingAttachmentChipProps) 
       }}
     >
       {isImg ? (
-        <img
-          src={entry.previewUrl}
-          alt={entry.fileName}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            display: 'block',
-            opacity: entry.status === 'uploading' ? 0.6 : 1,
-          }}
-        />
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={`Preview ${entry.fileName}`}
+          style={{ display: 'block', width: '100%', height: '100%', padding: 0, border: 'none', background: 'transparent', cursor: onOpen ? 'zoom-in' : 'default' }}
+        >
+          <img
+            src={entry.previewUrl}
+            alt={entry.fileName}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              display: 'block',
+              opacity: entry.status === 'uploading' ? 0.6 : 1,
+            }}
+          />
+        </button>
       ) : (
         <>
           <div
