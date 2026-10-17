@@ -59,13 +59,13 @@ export default function ProjectBranchFields({
   const selected = projects.find(p => p.id === projectId) || null;
   const knownDefault = defaultBranch || selected?.default_branch
     || (savedProject?.id === projectId ? savedProject?.default_branch : '') || 'origin/HEAD';
-  const defaultLabel = `project default (${knownDefault})`;
+  const defaultLabel = `프로젝트 기본값 (${knownDefault})`;
   const freeText = !!projectId && !loading && (!!error || branches.length === 0);
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12, marginBottom: 16 }}>
       <div>
-        <label style={labelStyle}>Project{projectsLoading ? ' · loading…' : ''}</label>
+        <label style={labelStyle}>프로젝트{projectsLoading ? ' · 불러오는 중' : ''}</label>
         <select
           value={projectId}
           disabled={disabled}
@@ -84,7 +84,7 @@ export default function ProjectBranchFields({
         </select>
       </div>
       <div>
-        <label style={labelStyle}>Base Branch{projectId && loading ? ' · loading…' : ''}</label>
+        <label style={labelStyle}>기준 브랜치{projectId && loading ? ' · 불러오는 중' : ''}</label>
         {freeText ? (
           <input
             value={baseBranch}
@@ -100,7 +100,7 @@ export default function ProjectBranchFields({
             onChange={e => onBranchChange(e.target.value)}
             style={{ ...fieldStyle, cursor: disabled || !projectId || loading ? 'not-allowed' : 'pointer' }}
           >
-            <option value="">{projectId ? defaultLabel : '— Select project first —'}</option>
+            <option value="">{projectId ? defaultLabel : '— 프로젝트를 먼저 고르세요 —'}</option>
             {/* A pinned branch may be gone upstream or the list still loading —
                 show it anyway so the picker reflects the persisted value. */}
             {baseBranch && !branches.some(b => b.name === baseBranch) && (
@@ -110,8 +110,8 @@ export default function ProjectBranchFields({
           </select>
         )}
         {error && (
-          <div style={{ fontSize: '10px', color: tokens.colors.dangerLight, marginTop: 4 }}>
-            {error} — 브랜치 이름을 직접 입력할 수 있습니다
+          <div title={error} style={{ fontSize: '11px', color: tokens.colors.warningLight, marginTop: 4 }}>
+            브랜치 목록을 불러오지 못했습니다 — 이름을 직접 입력하세요
           </div>
         )}
       </div>

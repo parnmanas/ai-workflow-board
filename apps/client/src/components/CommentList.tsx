@@ -452,6 +452,8 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                   fontSize: isCompact ? '12px' : '13px',
                   color: isCompact ? tstyle.text : tokens.colors.textDisabled,
                   lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0,
+                  // Long URLs / ids / code wrap instead of widening the panel.
+                  overflowWrap: 'anywhere', wordBreak: 'break-word',
                 }}
               >{renderMarkdown(c.content)}</p>
               {attachments.length > 0 && (

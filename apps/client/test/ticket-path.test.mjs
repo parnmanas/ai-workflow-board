@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { canOpenTicket, ticketPath, ticketsPagePath } from '../src/utils/ticketPath.ts';
+import { canOpenTicket, isTicketsPagePath, ticketPath, ticketsPagePath } from '../src/utils/ticketPath.ts';
 
 test('ticketPath: /ws/<ws>/tickets?ticket=<id>', () => {
   assert.equal(ticketPath('w1', 't1'), '/tickets?ticket=t1');
@@ -34,4 +34,13 @@ test('canOpenTicket: ticket id만 있으면 열 수 있다', () => {
   assert.equal(canOpenTicket({ id: 't1' }), true);
   assert.equal(canOpenTicket({ account_id: 'w1' }), false);
   assert.equal(canOpenTicket(null), false);
+});
+
+test('isTicketsPagePath: Tickets 화면에서만 참 (그 화면이 ?ticket= 을 직접 연다)', () => {
+  assert.equal(isTicketsPagePath(ticketsPagePath('acc-1')), true);
+  assert.equal(isTicketsPagePath('/tickets/'), true);
+  assert.equal(isTicketsPagePath('/sessions'), false);
+  assert.equal(isTicketsPagePath('/tickets/extra'), false);
+  // 구 워크스페이스 주소는 라우터가 /tickets 로 돌려보낸 뒤에 본다(LegacyPathRedirect).
+  assert.equal(isTicketsPagePath('/ws/ws-1/tickets'), false);
 });

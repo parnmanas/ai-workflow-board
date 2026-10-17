@@ -328,39 +328,35 @@ export default function TicketsPage() {
     activePanelTicket ? (
       <TicketPanel
         ticket={activePanelTicket}
-        agents={[]}
-        users={data.users}
-        channels={data.channels}
         accountTickets={data.tickets}
-        typingIndicators={data.typingIndicators}
         accountId={accountId}
         onClose={closeTicket}
-        onUpdate={(id, fields) => wrapAction(() => data.updateTicket(id, fields))}
         onMove={handleMove}
         onDelete={(id) => { void handleDelete(id); }}
-        onCreateChild={(parentId, childData) => { void wrapAction(() => data.createChildTicket(parentId, childData), 'Subtask created'); }}
+        onCreateChild={(parentId, childData) => { void wrapAction(() => data.createChildTicket(parentId, childData), '하위 작업을 추가했습니다'); }}
         onDeleteChild={(childId) => { void handleDeleteChild(childId); }}
-        onReparentChild={(parentId, childId) => { void wrapAction(() => data.reparentTicket(childId, parentId), 'Subtask linked'); }}
-        // Must reject on failure — the panel keeps its dirty draft visible.
+        onReparentChild={(parentId, childId) => { void wrapAction(() => data.reparentTicket(childId, parentId), '하위 작업으로 연결했습니다'); }}
+        // Must reject on failure — the panel keeps its edits visible.
         onSaveDraft={async (ticketId, fields) => {
           if (Object.keys(fields).length === 0) return;
           const updated = await withLoading(() => data.updateTicket(ticketId, fields));
           // PATCH returns the full ticket — adopt it before resolving so the
-          // panel never flashes the pre-save tags/assignee after dropping its draft.
+          // panel never flashes the pre-save values after dropping its draft.
           if (updated && (updated as Ticket).id === openTicketId) setPanelTicket(updated as Ticket);
         }}
-        onAddComment={(ticketId, content, attachments, options) => {
-          void wrapAction(() => data.addComment(ticketId, content, attachments || [], options), 'Comment added');
+        // Rejects on failure — the composer keeps the text and the files.
+        onAddComment={async (ticketId, content, _attachments, options) => {
+          await withLoading(() => data.addComment(ticketId, content, [], options));
         }}
         onSetCommentStatus={(ticketId, commentId, status) => {
-          void wrapAction(() => data.setCommentStatus(ticketId, commentId, status), status === 'resolved' ? 'Question resolved' : 'Question reopened');
+          void wrapAction(() => data.setCommentStatus(ticketId, commentId, status), status === 'resolved' ? '질문을 해결로 표시했습니다' : '질문을 다시 열었습니다');
         }}
         onSelectTicket={openTicket}
         scrollToCommentId={scrollToCommentId}
         onScrollToCommentConsumed={consumeComment}
       />
     ) : (
-      <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>
+      <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13, background: tokens.colors.surface, height: '100%' }}>
         티켓을 불러오는 중…
         <button type="button" onClick={closeTicket} style={{ marginLeft: 12, background: 'none', border: 'none', color: tokens.colors.accent, cursor: 'pointer' }}>닫기</button>
       </div>
@@ -452,7 +448,7 @@ export default function TicketsPage() {
               <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>{body}</div>
             </Panel>
             <Separator style={{ width: 4, background: tokens.colors.border, cursor: 'col-resize', flexShrink: 0 }} />
-            <Panel defaultSize="42" minSize="25" maxSize="70" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <Panel defaultSize="45" minSize="30" maxSize="65" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               {panel}
             </Panel>
           </Group>

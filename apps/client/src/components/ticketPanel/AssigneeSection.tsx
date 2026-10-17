@@ -102,7 +102,7 @@ export default function AssigneeSection({
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={labelStyle}>
-        Assignee
+        담당
         {unsaved && <span style={{ marginLeft: 6, color: tokens.colors.warningLight, textTransform: 'none' }}>· 저장 전</span>}
       </label>
       <div style={{
@@ -132,11 +132,11 @@ export default function AssigneeSection({
           {!editing && (
             <>
               <button type="button" disabled={disabled} onClick={openEditor} style={btn('plain', disabled)}>
-                {assignee ? 'Edit' : '지정'}
+                {assignee ? '변경' : '지정'}
               </button>
               {assignee && (
                 <button type="button" disabled={disabled} onClick={() => onChange(null)} style={btn('danger', disabled)}>
-                  Clear
+                  해제
                 </button>
               )}
             </>
@@ -168,7 +168,7 @@ export default function AssigneeSection({
               </button>
             </div>
             <div style={{ fontSize: '10px', color: tokens.colors.textMuted, marginTop: 4, textAlign: 'right' }}>
-              적용한 담당자는 아래 Save 로 저장됩니다.
+              적용한 담당자는 아래 ‘저장’ 을 눌러야 반영됩니다.
             </div>
           </div>
         )}

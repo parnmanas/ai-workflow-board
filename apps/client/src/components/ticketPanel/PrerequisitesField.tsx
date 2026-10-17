@@ -40,8 +40,8 @@ export default function PrerequisitesField({
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={labelStyle}>
-        Prerequisites
-        {rows.length > 0 && (open > 0 ? ` · ${open} blocking, auto-resumes when all done` : ' · all satisfied')}
+        선행 티켓
+        {rows.length > 0 && (open > 0 ? ` · ${open}개 대기 — 모두 끝나면 자동 재개` : ' · 모두 완료')}
       </label>
 
       {rows.length > 0 && (

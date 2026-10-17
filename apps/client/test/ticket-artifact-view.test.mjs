@@ -15,13 +15,14 @@ import { TicketArtifactView } from '../src/components/TicketArtifact.tsx';
 
 const render = (state) => renderToStaticMarkup(React.createElement(TicketArtifactView, { state }));
 
-test('TicketPanel의 duplicate 선택 UI는 확인된 duplicate pending 원인에서만 노출한다', () => {
-  const source = fs.readFileSync(new URL('../src/components/TicketPanel.tsx', import.meta.url), 'utf8');
+test('티켓 상세의 duplicate 선택 UI는 확인된 duplicate pending 원인에서만 노출한다', () => {
+  const source = fs.readFileSync(new URL('../src/components/ticketPanel/PendingNotice.tsx', import.meta.url), 'utf8');
   assert.match(
     source,
-    /activeTicket\.duplicate_decision_pending === true\s*&&\s*!!activeTicket\.duplicate_candidates\?\.length/,
+    /ticket\.duplicate_decision_pending === true\s*&&\s*!!ticket\.duplicate_candidates\?\.length/,
   );
-  assert.doesNotMatch(source, /\{!!activeTicket\.duplicate_candidates\?\.length && !duplicateDecisionDone/);
+  // The choice only shows inside the pending (needs-a-human) box.
+  assert.match(source, /\{ticket\.pending_user_action && \(/);
 });
 
 test('로딩 상태: 로딩 문구', () => {

@@ -150,18 +150,18 @@ export default function ChildTicketList({
   };
 
   return (
-    <div style={{ marginTop: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        <h4 style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textDisabled }}>
-          Subtasks ({doneCount}/{children.length})
+    <div style={{ minWidth: 0 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+        <h4 style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textDisabled, margin: 0 }}>
+          하위 작업 ({doneCount}/{children.length})
         </h4>
         {canCreateChildren && addMode === null && (
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <button onClick={() => setAddMode('new')} style={actionBtnStyle}>+ New subtask</button>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+            <button onClick={() => setAddMode('new')} style={actionBtnStyle}>+ 새 하위 작업</button>
             {canLinkExisting && (
               <>
                 <span style={{ color: tokens.colors.borderStrong, fontSize: '11px' }}>·</span>
-                <button onClick={() => setAddMode('link')} style={actionBtnStyle}>+ Link existing</button>
+                <button onClick={() => setAddMode('link')} style={actionBtnStyle}>+ 기존 티켓 연결</button>
               </>
             )}
           </div>

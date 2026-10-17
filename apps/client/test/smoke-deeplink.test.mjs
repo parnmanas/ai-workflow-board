@@ -103,3 +103,43 @@ test('MINOR-1: ?ticket= 리다이렉트가 쿼리스트링을 보존한다', () 
     dom.cleanup();
   }
 });
+
+test('Tickets 화면의 `?ticket=` 은 가로채지 않는다 — 페이지가 자기 상세 패널을 연다', () => {
+  // 회귀: 컨트롤러가 여기서도 파라미터를 지우고 미리보기를 열면, Tickets 화면의 상세
+  // 패널은 영영 열리지 않고 "티켓 열기" 가 같은 링크로 돌아오는 루프가 된다.
+  const dom = setupDom({ width: 1280 });
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise(() => {});
+  globalThis.localStorage = dom.window.localStorage;
+  probe.search = null;
+  try {
+    mount(
+      h(
+        MemoryRouter,
+        { initialEntries: ['/tickets?ticket=T1'] },
+        h(
+          Routes,
+          null,
+          h(Route, {
+            path: '/tickets',
+            element: h(
+              BoardStreamProvider,
+              null,
+              h(
+                ArtifactPanelProvider,
+                null,
+                h(TicketArtifactController, null, h(LocationProbe), h(ArtifactPanel, { isMobile: false })),
+              ),
+            ),
+          }),
+        ),
+      ),
+    );
+
+    assert.equal(Boolean(document.querySelector('[role="complementary"]')), false, '미리보기 패널을 열면 안 됨');
+    assert.match(probe.search || '', /ticket=T1/, 'ticket 파라미터는 Tickets 화면이 쓰도록 남아야 함');
+  } finally {
+    globalThis.fetch = prevFetch;
+    dom.cleanup();
+  }
+});

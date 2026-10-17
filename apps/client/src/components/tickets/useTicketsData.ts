@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import type { TicketCreateInput, TicketPatch } from '../../api';
-import type { Channel, TicketCard, TicketTagCount, User } from '../../types';
+import type { TicketCard, TicketTagCount } from '../../types';
 import type { TicketStatus } from '../../tickets/status';
 import { useBoardStream } from '../../contexts/BoardStreamContext';
 import { filtersToQuery, filtersToSearch, type TicketFilters } from '../../tickets/ticketFilters';
@@ -10,8 +10,7 @@ import { applyMove } from '../../tickets/kanban';
 /**
  * Tickets page data — accessible tickets for the current filters, kept live
  * from the `board_update` SSE event (the ticket-change event kept its name,
- * docs/tickets.md), plus the per-ticket typing indicators the detail panel
- * shows and the users/channels it needs for mentions and notifications.
+ * docs/tickets.md).
  *
  * Local writes refetch themselves; while one is in flight the SSE echo of it
  * is ignored (same contract the board hook had) so the list doesn't refetch
@@ -22,9 +21,6 @@ export function useTicketsData(accountId: string, filters: TicketFilters) {
   const [tagCounts, setTagCounts] = useState<TicketTagCount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [typingIndicators, setTypingIndicators] = useState<Record<string, string | null>>({});
   // Bumped after every local write — the open detail panel refetches its full
   // ticket on change (SSE changes to the open ticket are handled by the page).
   const [changeNonce, setChangeNonce] = useState(0);
@@ -59,20 +55,6 @@ export function useTicketsData(accountId: string, filters: TicketFilters) {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => {
-    if (!accountId) { setUsers([]); setChannels([]); return; }
-    let cancelled = false;
-    Promise.all([
-      api.getUsers(accountId).catch(() => []),
-      api.getChannels(accountId).catch(() => []),
-    ]).then(([u, c]) => {
-      if (cancelled) return;
-      setUsers(u as User[]);
-      setChannels(c as Channel[]);
-    });
-    return () => { cancelled = true; };
-  }, [accountId]);
-
   const { subscribe } = useBoardStream();
   useEffect(() => {
     if (!accountId) return;
@@ -83,17 +65,9 @@ export function useTicketsData(accountId: string, filters: TicketFilters) {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => { void refresh(); }, 300);
     });
-    const unsubTyping = subscribe('agent_typing', (data: any) => {
-      if (!data?.ticket_id) return;
-      setTypingIndicators((prev) => ({
-        ...prev,
-        [data.ticket_id]: data.action === 'started' ? data.actor_name : null,
-      }));
-    });
     return () => {
       if (timer) clearTimeout(timer);
       unsubUpdate();
-      unsubTyping();
     };
   }, [accountId, refresh, subscribe]);
 
@@ -168,9 +142,6 @@ export function useTicketsData(accountId: string, filters: TicketFilters) {
     tagCounts,
     loading,
     error,
-    users,
-    channels,
-    typingIndicators,
     changeNonce,
     refresh,
     moveTicket,

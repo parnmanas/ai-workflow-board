@@ -3,6 +3,11 @@ export function ticketsPagePath(accountId: string): string {
   return `/tickets`;
 }
 
+/** True on the Tickets page itself — it owns `?ticket=` and opens its own detail panel. */
+export function isTicketsPagePath(pathname: string): boolean {
+  return /^\/tickets\/?$/.test(pathname);
+}
+
 export function ticketPath(
   accountId: string,
   ticketId: string,

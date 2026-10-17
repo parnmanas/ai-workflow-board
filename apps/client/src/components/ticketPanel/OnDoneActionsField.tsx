@@ -10,7 +10,8 @@ interface OnDoneActionsFieldProps {
   onChange(update: (prev: string[]) => string[]): void;
   /** Every Action in the account — also resolves names of already-bound ids. */
   actions: Action[];
-  agents: RuntimeParticipant[];
+  /** Only labels each action's target; omitted → no label. */
+  agents?: RuntimeParticipant[];
   labelStyle: React.CSSProperties;
 }
 
@@ -30,7 +31,7 @@ const iconBtnStyle = (disabled: boolean): React.CSSProperties => ({
  * deleted still renders so it can be unbound; disabled actions are skipped at
  * dispatch, so they are flagged.
  */
-export default function OnDoneActionsField({ value, onChange, actions, agents, labelStyle }: OnDoneActionsFieldProps) {
+export default function OnDoneActionsField({ value, onChange, actions, agents = [], labelStyle }: OnDoneActionsFieldProps) {
   const actionById = new Map(actions.map(a => [a.id, a]));
   const candidates = actions.filter(a => !value.includes(a.id));
 
@@ -47,7 +48,7 @@ export default function OnDoneActionsField({ value, onChange, actions, agents, l
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ ...labelStyle, marginBottom: 6 }}>
-        Run on Done{value.length > 0 ? ` · ${value.length} bound` : ''}
+        완료 시 실행{value.length > 0 ? ` · ${value.length}개` : ''}
       </label>
       <div style={{
         background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg,

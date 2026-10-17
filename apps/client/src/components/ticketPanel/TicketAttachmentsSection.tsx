@@ -237,7 +237,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
         <label style={{ ...labelStyle, marginBottom: 0 }}>
-          Attachments
+          첨부
           {ticketAttachments.length > 0 && (
             <span style={{ marginLeft: 6, color: tokens.colors.textDisabled, fontWeight: 500 }}>
               ({ticketAttachments.length}/{TICKET_ATTACHMENT_MAX})
