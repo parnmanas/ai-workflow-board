@@ -86,55 +86,40 @@ test('composer without commands never shows a popup and Enter sends', async () =
   }
 });
 
-test('composer: busy Enter queues instead of sending; queue flushes one at a time as busy toggles off', async () => {
+test('composer: busy Enter sends straight away — the manager hands it to the running turn, nothing is held on screen', async () => {
   const dom = setupDom();
   try {
     const sent = [];
-    let resolveSend;
     const view = mount(h(SessionComposer, {
       disabled: false, busy: true, placeholder: 'Prompt…', commands: [],
-      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
+      onSend: (t) => { sent.push(t); },
       onCancel() {},
     }));
     const textarea = document.querySelector('textarea[aria-label="Prompt"]');
     assert.equal(textarea.disabled, false, 'typing is not blocked while busy');
+    const send = document.querySelector('button.awb-composer-send');
+    assert.equal(send.textContent, 'Send', 'busy: the button still sends — there is no Queue mode');
 
     typeInto(textarea, 'first question');
     keydown('Enter', { target: textarea });
-    assert.deepEqual(sent, [], 'busy: Enter does not send immediately');
-    assert.equal(textarea.value, '', 'the composer clears once the text is queued');
-    assert.equal(document.querySelector('[aria-label="Queued prompts"] li')?.textContent.includes('first question'), true, 'queued text is shown');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.deepEqual(sent, [{ text: 'first question', images: [] }], 'busy: Enter sends immediately');
+    assert.equal(textarea.value, '', 'the composer clears once sent');
 
     typeInto(textarea, 'second question');
     keydown('Enter', { target: textarea });
-    assert.equal(document.querySelectorAll('[aria-label="Queued prompts"] li').length, 2, 'a second queued prompt stacks behind the first');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.deepEqual(sent, [{ text: 'first question', images: [] }, { text: 'second question', images: [] }], 'a second message also goes out right away');
+    assert.equal(Boolean(document.querySelector('[aria-label="Queued prompts"]')), false, 'no on-screen queue');
 
-    // 턴이 끝나 busy 가 false 로 넘어오면 큐 맨 앞만 흘려보낸다.
+    // 턴이 끝나도(busy → false) 다시 보내지 않는다 — 화면에는 붙잡아 둔 것이 없다.
     act(() => { view.rerender(h(SessionComposer, {
       disabled: false, busy: false, placeholder: 'Prompt…', commands: [],
-      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
+      onSend: (t) => { sent.push(t); },
       onCancel() {},
     })); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.deepEqual(sent, [{ text: 'first question', images: [] }], 'only the first queued item is flushed on the busy->false edge');
-    assert.equal(document.querySelectorAll('[aria-label="Queued prompts"] li').length, 1, 'the second item is still waiting');
-
-    resolveSend();
-    // 방금 보낸 프롬프트가 새 턴을 열어 busy 가 다시 true 로 돌아왔다가, 그 턴이 끝나 다시 false 가 된다.
-    act(() => { view.rerender(h(SessionComposer, {
-      disabled: false, busy: true, placeholder: 'Prompt…', commands: [],
-      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
-      onCancel() {},
-    })); });
-    act(() => { view.rerender(h(SessionComposer, {
-      disabled: false, busy: false, placeholder: 'Prompt…', commands: [],
-      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
-      onCancel() {},
-    })); });
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.deepEqual(sent, [{ text: 'first question', images: [] }, { text: 'second question', images: [] }], 'the second queued item flushes on the next busy->false edge');
-    assert.equal(Boolean(document.querySelector('[aria-label="Queued prompts"]')), false, '둘 다 전송되고 나면 큐가 비어 있다');
-    resolveSend();
+    assert.equal(sent.length, 2, 'the busy→idle edge does not flush anything');
     view.unmount();
   } finally {
     dom.cleanup();

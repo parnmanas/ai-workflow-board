@@ -21,6 +21,8 @@ const configOptions = [
   { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'agent', options: [{ value: 'read-only', name: 'Ask for approval' }, { value: 'agent', name: 'Approve for me' }] },
 ];
 let pendingElicitPrompt = null;
+/** `HOLD_TURN_TEST` 프롬프트 — steering 이나 cancel 이 올 때까지 열어 두는 턴. */
+let heldPrompt = null;
 // initialize 에서 client 가 광고한 capabilities — 실제 어댑터처럼 slash command 알림은
 // 세션 설정(configOptions) 을 이해하는 client 에게만 보낸다(다른 테스트의 이벤트 순서를 건드리지 않게).
 let clientCapabilities = {};
@@ -186,8 +188,26 @@ rl.on('line', (line) => {
         agentInfo: { name: 'fake-hermes', version: '0.1.0' },
         agentCapabilities: { loadSession: true },
         authMethods: [],
+        // claude-agent-acp · codex-acp 의 광고 — 진행 중인 턴에 `_session/steering` 으로 끼워 넣을 수 있다.
+        ...(process.env.FAKE_ACP_STEERING === '1' ? { _meta: { steering: { supported: true } } } : {}),
       });
       break;
+    case '_session/steering': {
+      const steerText = (message.params?.prompt ?? []).map((b) => b?.text ?? '').join(' ').trim();
+      const idleBehavior = message.params?._meta?.steering?.idleBehavior ?? 'none';
+      if (!heldPrompt) {
+        result(message.id, { outcome: idleBehavior === 'promptRequired' ? 'promptRequired' : 'startedNewTurn' });
+        break;
+      }
+      // 진행 중인 턴이 끼워 넣은 말을 읽고 같은 턴 안에서 답한 뒤 끝난다.
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+        sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `heard: ${steerText} (${idleBehavior}, ${(message.params?.prompt ?? []).length} block)` },
+      } } });
+      result(message.id, { outcome: 'injected' });
+      result(heldPrompt, { stopReason: 'end_turn' });
+      heldPrompt = null;
+      break;
+    }
     case 'session/new': {
       const invalid = validateMcpServers(message.params?.mcpServers);
       if (invalid) {
@@ -294,6 +314,14 @@ rl.on('line', (line) => {
           sessionUpdate: 'session_info_update', title: process.env.FAKE_ACP_PROMPT_TITLE,
         } },
       });
+      if (JSON.stringify(message.params.prompt).includes('HOLD_TURN_TEST')) {
+        // 일하는 중인 턴 — steering 이나 cancel 이 올 때까지 열어 둔다.
+        heldPrompt = message.id;
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working on it' },
+        } } });
+        break;
+      }
       if (process.env.FAKE_ACP_FAST_PROMPT === '1') {
         result(message.id, { stopReason: 'end_turn' });
         break;
@@ -488,6 +516,10 @@ rl.on('line', (line) => {
       });
       break;
     case 'session/cancel':
+      if (heldPrompt) {
+        result(heldPrompt, { stopReason: 'cancelled' });
+        heldPrompt = null;
+      }
       send({
         jsonrpc: '2.0',
         method: 'test/cancelled',

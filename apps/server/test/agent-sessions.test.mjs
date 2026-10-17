@@ -194,9 +194,18 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   assert.equal(promptReq.title, 'Fix login', 'existing title is preserved');
   assert.equal(promptReq.turn_id, prompt.body.turn_id);
   assert.equal(promptReq.cwd, '/home/parn/repo', 'cwd from the history summary is forwarded');
-  const busy = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
-  assert.equal(busy.status, 409);
-  assert.equal(busy.body.error, 'session_busy');
+  // 진행 중(starting)에도 화면의 프롬프트는 막지 않는다 — 매니저가 그 턴에 넣는다(steering). 새 턴을 열지 않으므로 상태는 그대로다.
+  const during = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
+  assert.equal(during.status, 202, during.text);
+  assert.equal(during.body.live.status, 'starting', 'an in-turn prompt does not restart the turn state');
+  const duringReq = requests.find((r) => r.op === 'prompt' && r.turn_id === during.body.turn_id);
+  assert.equal(duringReq?.text, 'again', 'the in-turn prompt reaches the manager right away');
+  // 서버가 사용자 대신 보내는 프롬프트(작업 보고·작업 제안)는 끼어들지 않는다 — 턴이 끝난 뒤 보낸다.
+  const { AgentSessionsService } = await import(new URL('../dist/modules/agent-sessions/agent-sessions.service.js', import.meta.url));
+  await assert.rejects(
+    app.get(AgentSessionsService).promptOnBehalf(ws.id, owner.id, managerId, 'claude', 'sess-aaaa', 'report'),
+    (err) => err?.code === 'session_busy',
+  );
 
   // manager relays the stream — frames reach the driver's SSE, nothing is stored
   const turnId = prompt.body.turn_id;
@@ -649,8 +658,9 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.equal(asked.relayed, 1, 'elicitation_request is an accepted event type');
   assert.equal(asked.live.status, 'awaiting_input');
   await stream.waitFor('agent_session_event', (d) => d?.session_id === sid && d.event?.type === 'elicitation_request', 4000);
-  const blocked = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
-  assert.equal(blocked.status, 409, 'a pending question blocks prompting like a pending permission');
+  const whileAsked = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
+  assert.equal(whileAsked.status, 202, 'a pending question does not block the user from writing to the turn');
+  assert.equal(whileAsked.body.live.status, 'awaiting_input', 'the question is still pending — the in-turn prompt changes nothing');
   const badAction = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'maybe' }) });
   assert.equal(badAction.status, 400);
   const badContent = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'accept', content: ['not', 'an', 'object'] }) });
@@ -756,8 +766,9 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'heartbeat', 4000);
   assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'awaiting_permission' }])).status < 300, 'heartbeat: waiting for approval');
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'awaiting_permission' && d.reason === 'heartbeat', 4000);
-  const blockedByHeartbeat = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'x' }) });
-  assert.equal(blockedByHeartbeat.status, 409, 'a heartbeat-reported waiting state blocks prompting');
+  const duringHeartbeatWait = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'x' }) });
+  assert.equal(duringHeartbeatWait.status, 202, duringHeartbeatWait.text);
+  assert.equal(duringHeartbeatWait.body.live.status, 'awaiting_permission', 'a heartbeat-reported waiting state survives an in-turn prompt');
   assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'ready' }])).status < 300);
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'ready' && d.reason === 'heartbeat', 4000);
 

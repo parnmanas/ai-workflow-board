@@ -1288,6 +1288,12 @@ export class AgentSessionsService implements OnModuleDestroy {
     return this.emitUpdate(state, 'opened');
   }
 
+  /**
+   * `duringTurn` — 사용자가 화면에서 보낸 프롬프트. 턴이 진행 중이어도 막지 않고 매니저로 보낸다:
+   * Claude Code/Codex 데스크탑처럼 매니저가 그 턴에 끼워 넣고(`_session/steering`), 못 하는 CLI 면 매니저가
+   * 들고 있다가 턴이 끝나는 즉시 보낸다(docs/agent-sessions.md "턴 중 입력"). 서버가 사용자 대신 보내는
+   * 프롬프트(작업 보고·작업 제안)는 끼어들지 않는다 — 진행 중이면 409 를 받고 턴이 끝난 뒤 보낸다.
+   */
   async prompt(
     accountId: string,
     userId: string,
@@ -1296,6 +1302,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     sessionId: string,
     textInput: unknown,
     imagesInput?: unknown,
+    options: { duringTurn?: boolean } = {},
   ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
     const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
@@ -1327,16 +1334,20 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (!text.trim() && images.length === 0) throw new AgentSessionError(400, 'text_required');
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: userId });
-    if (!agentSessionAcceptsPrompt(state.status)) {
+    const opensTurn = agentSessionAcceptsPrompt(state.status);
+    if (!opensTurn && !options.duringTurn) {
       throw new AgentSessionError(409, 'session_busy', 'A turn is already in progress. Cancel it or wait for it to finish.');
     }
     const execution = await this.executionFor(accountId, managerId, cli, sessionId);
     accountId = execution.account_id;
     const turnId = randomUUID();
     state.driver_user_id = userId;
-    state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
-    state.last_error = null;
-    state.last_error_code = null;
+    // 턴 중 입력은 새 턴을 열지 않는다 — 진행 중 상태(권한 대기 포함)는 매니저가 계속 알린다.
+    if (opensTurn) {
+      state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
+      state.last_error = null;
+      state.last_error_code = null;
+    }
     this.touchState(state);
     // The manager restores native titles and names new sessions. A missing server
     // snapshot after reconnect must not rename an existing session from this prompt.
@@ -1586,7 +1597,8 @@ export class AgentSessionsService implements OnModuleDestroy {
    * `close` 와 달리 다음 프롬프트를 기다리지 않는다 — 운영자가 재시작을 누르는 이유는
    * 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는 것은
    * 지금 당장 살아 있는 새 프로세스다. 상태를 `starting` 으로 먼저 옮겨 두면 그 사이에
-   * 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt).
+   * 서버가 대신 보내는 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt). 화면의 턴 중 입력은
+   * 그대로 매니저로 가고, 매니저가 재시작된 프로세스를 기다렸다가 넣는다.
    *
    * 인증은 이때 소유 계정의 현재 CLI 설정으로 다시 묶는다(rebindCredentialForRestart) —
    * usage limit 에 걸린 credential 을 호스트 설정에서 바꾸고 재시작하는 것이 정식 경로다.

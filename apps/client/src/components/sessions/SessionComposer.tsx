@@ -18,12 +18,11 @@ import { WAKE_IDLE_SLEEP_MS } from '../../voice/wake.logic';
  * 모르는 모델은 어댑터·모델이 직접 거절한다. 장수·용량 상한(5장·장당 8MB)은 서버가
  * 최종 판정하고, 여기는 탭 OOM 전에 빨리 막는 용도로만 둔다.
  *
- * `busy` 동안에도 입력은 막지 않는다 — 실제 CLI/Desktop 처럼 타이핑·Enter 를
- * 그대로 받되, 전송 대신 큐에 쌓아 둔다(`queue`). `busy` 가 true→false 로
- * 넘어가는 그 순간(턴 종료 — permission/elicitation 대기도 `busy` 에 포함되므로
- * 사용자가 그 결정을 마친 뒤에만 넘어간다)에 큐 맨 앞을 하나 흘려보낸다. 그 전송이
- * 다시 새 턴을 열어 `busy` 가 true 로 돌아오면, 다음 false 전환 때 그다음 항목을
- * 흘려보내는 식으로 한 번에 하나씩만 나간다 — 세션은 한 턴만 처리할 수 있어서다.
+ * `busy` 동안에도 입력은 막지 않고 **화면이 붙잡아 두지도 않는다** — Claude Code/Codex
+ * 데스크탑처럼 Enter 를 누르면 바로 보낸다. 매니저가 진행 중인 턴에 끼워 넣어(`_session/steering`)
+ * 에이전트가 그 턴 안에서 읽고 답하고, 끼워 넣지 못하는 CLI 면 매니저가 들고 있다가 턴이 끝나는
+ * 즉시 보낸다(어느 쪽인지 전사에 남는다). 예전엔 여기서 큐에 쌓았다가 턴이 끝난 뒤에야 보냈다 —
+ * 에이전트는 그 말을 끝까지 모른 채 일했다.
  */
 
 /** 미리보기 파이프라인과 같은 집합 — SVG 는 화면에 그릴 수 없어 받지 않는다. */
@@ -106,11 +105,6 @@ const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
   'paused-for-reply': '🔈 답을 읽는 중 — 끝나면 다시 듣습니다',
 };
 
-function promptLabel(p: SessionPrompt): string {
-  if (p.text.trim()) return p.text;
-  if (p.images.length) return `[${p.images.length} image(s)]`;
-  return '';
-}
 
 export default function SessionComposer({ disabled, busy, placeholder, hint, commands, onSend, onCancel, voiceInput }: SessionComposerProps) {
   const [text, setText] = useState('');
@@ -119,19 +113,8 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   const [sending, setSending] = useState(false);
   const [selected, setSelected] = useState(0);
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
-  const [queue, setQueue] = useState<SessionPrompt[]>([]);
-  const queueRef = useRef<SessionPrompt[]>([]);
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
-
-  const setQueueBoth = useCallback((next: SessionPrompt[]) => {
-    queueRef.current = next;
-    setQueue(next);
-  }, []);
-
-  const removeQueued = useCallback((index: number) => {
-    setQueueBoth(queueRef.current.filter((_, i) => i !== index));
-  }, [setQueueBoth]);
 
   const revokeImages = useCallback((list: SessionPromptImage[]) => {
     for (const img of list) URL.revokeObjectURL(img.previewUrl);
@@ -208,20 +191,6 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     void addFiles(files);
   }, [addFiles]);
 
-  // busy 가 방금 false 로 넘어온 시점에만 큐 맨 앞을 흘려보낸다 — busy 가 그대로거나
-  // (다른 prop 변화로 effect 가 재실행돼도) true→true, false→false 는 무시한다.
-  const prevBusyRef = useRef(busy);
-  useEffect(() => {
-    const wasBusy = prevBusyRef.current;
-    prevBusyRef.current = busy;
-    if (!wasBusy || busy || disabled) return;
-    const [next, ...rest] = queueRef.current;
-    if (!next) return;
-    setQueueBoth(rest);
-    setSending(true);
-    Promise.resolve(onSend(next)).finally(() => setSending(false));
-  }, [busy, disabled, onSend, setQueueBoth]);
-
   const slash = useMemo(() => matchSlashCommands(text, commands ?? []), [text, commands]);
   const popupOpen = slash.active && slash.matches.length > 0 && dismissedFor !== text;
   const commandListRef = useRef<HTMLUListElement>(null);
@@ -257,13 +226,6 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     const ready = images.filter((p) => p.base64);
     const value: SessionPrompt = { text: (overrideText ?? text).trim(), images: ready, ...(overrideText !== undefined ? { spoken: true } : {}) };
     if ((!value.text && !ready.length) || disabled || sending || stillReading) return;
-    if (busy) {
-      setQueueBoth([...queueRef.current, value]);
-      setText('');
-      revokeImages(images);
-      setImages([]);
-      return;
-    }
     setSending(true);
     try {
       await onSend(value);
@@ -274,7 +236,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     } finally {
       setSending(false);
     }
-  }, [text, images, disabled, busy, sending, stillReading, onSend, setQueueBoth, revokeImages]);
+  }, [text, images, disabled, sending, stillReading, onSend, revokeImages]);
 
   const wake = voiceInput?.wake ?? null;
   const awake = !!wake?.awake;
@@ -328,12 +290,12 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     }
   }, [conversation.phase, awake]);
 
-  // 깨어 있는 동안 아무 말이 없으면 잠든다. 답을 기다리거나 읽는 동안·큐가 남은 동안은 세지 않는다.
+  // 깨어 있는 동안 아무 말이 없으면 잠든다. 답을 기다리거나 읽는 동안은 세지 않는다.
   useEffect(() => {
-    if (!awake || conversation.phase !== 'listening' || busy || sending || queue.length > 0) return;
+    if (!awake || conversation.phase !== 'listening' || busy || sending) return;
     const timer = setTimeout(() => wakeRef.current?.onSleep('idle'), WAKE_IDLE_SLEEP_MS);
     return () => clearTimeout(timer);
-  }, [awake, conversation.phase, busy, sending, queue.length]);
+  }, [awake, conversation.phase, busy, sending]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
@@ -368,41 +330,6 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     >
       {hint && (
         <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, marginBottom: 6 }}>{hint}</div>
-      )}
-      {queue.length > 0 && (
-        <ul
-          ref={commandListRef}
-          aria-label="Queued prompts"
-          style={{
-            listStyle: 'none', margin: '0 0 6px', padding: 0, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 112, overflowY: 'auto',
-          }}
-        >
-          {queue.map((q, i) => (
-            <li
-              key={i}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: tokens.radii.md,
-                border: `1px dashed ${tokens.colors.border}`, background: tokens.colors.surface,
-              }}
-            >
-              <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>{i === 0 ? '다음 전송…' : `대기 ${i + 1}`}</span>
-              <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {promptLabel(q)}{q.images.length > 0 && ` 🖼 ${q.images.length}`}
-              </span>
-              <button
-                type="button"
-                onClick={() => removeQueued(i)}
-                aria-label="Remove queued prompt"
-                style={{
-                  flexShrink: 0, border: 'none', background: 'transparent', color: tokens.colors.textMuted,
-                  fontSize: 14, lineHeight: 1, cursor: 'pointer', padding: '2px 4px',
-                }}
-              >
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
       )}
       {images.length > 0 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }} aria-label="Attached images">
@@ -615,7 +542,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           className="awb-composer-send"
           onClick={() => void submit()}
           disabled={locked || !canSend || stillReading}
-          title={busy ? '지금 보내지 않고, 현재 턴이 끝나면 큐 순서대로 전송합니다' : undefined}
+          title={busy ? '진행 중인 턴에 바로 보냅니다 — 에이전트가 작업 중에 읽고 이어서 답합니다' : undefined}
           style={{
             height: 40,
             padding: '0 16px',
@@ -628,11 +555,11 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             cursor: locked || !canSend || stillReading ? 'not-allowed' : 'pointer',
           }}
         >
-          {sending ? 'Sending…' : busy ? 'Queue' : 'Send'}
+          {sending ? 'Sending…' : 'Send'}
         </button>
       </div>
       <div className="awb-composer-help" style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
-        {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 conversation mode: just talk, pause to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
+        {busy ? 'Enter sends into the running turn — the agent reads it mid-task' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 conversation mode: just talk, pause to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
       </div>
     </div>
   );

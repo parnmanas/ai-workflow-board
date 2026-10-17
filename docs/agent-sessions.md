@@ -28,8 +28,8 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   내려가 그 폭을 나눠 쓴다. 사이드바나 Artifact 패널로 본문이 좁아져도 같은 규칙이다.
   상태 · Connect/Stop · ☰ 메뉴는 제목 줄에 그대로 있다.
 - 입력 영역 자체의 폭이 좁으면 프롬프트가 전체 너비를 차지하고, 명령·첨부·마이크와
-  Send/Queue/Cancel은 그 아래 행으로 내려간다. 사이드바나 Artifact 패널로 본문이 좁아져도
-  같은 배치를 적용한다. 실행 중 입력은 계속 가능하며 Queue로 다음 턴에 보낼 수 있다.
+  Send/Cancel은 그 아래 행으로 내려간다. 사이드바나 Artifact 패널로 본문이 좁아져도
+  같은 배치를 적용한다. 실행 중 입력도 계속 가능하며 Send 가 진행 중인 턴에 바로 넣는다([턴 중 입력](#턴-중-입력-steering)).
 - 알림 음소거 벨은 상단에 있다. 하단 전송 버튼을 가리지 않는다.
 - 브라우저의 동적 높이와 visual viewport 변화를 따라 입력 영역을 배치한다.
   모바일 입력 글자 크기는 16px로 유지하고, 사용자의 확대/축소는 제한하지 않는다.
@@ -255,7 +255,8 @@ Mode·Collaboration mode(default/plan)·Model(gpt-5.6-sol, gpt-6-astra, …)·Re
 `session/request_permission` 으로 온다(예: plan 확정 "Implement this plan?" 의 implement_plan/revise_plan). 질문은
 Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + 메모)으로 온다. read-only 모드에서도 작업 폴더 안의
 쓰기는 codex 샌드박스가 그냥 허용하므로 approval 이 뜨지 않는 게 codex 의 동작이다.
-`awaiting_input` 은 `awaiting_permission` 과 같은 대기 상태다: prompt 는 409 `session_busy`, 유령 되돌림 대상, 프로세스 종료·close 때
+`awaiting_input` 은 `awaiting_permission` 과 같은 대기 상태다: 서버가 대신 보내는 prompt 는 409 `session_busy`(화면의 입력은
+[턴 중 입력](#턴-중-입력-steering)으로 그 턴에 들어간다), 유령 되돌림 대상, 프로세스 종료·close 때
 미결 질문은 `elicitation_decision{action:'cancel', decided_by:'system'}` 으로 닫히고, history RPC 가 미결 질문을 같은 id 로 다시 실어 보낸다.
 
 ## CLI 설정 (credential · backend · 기본 설정)
@@ -302,8 +303,29 @@ global Credential 갱신에는 global 관리 권한이 필요하다.
 ## 상태
 
 `idle`(프로세스 없음) → `starting` → `ready` ⇄ `busy` ⇄ `awaiting_permission` / `awaiting_input`; `error`(last_error); `closed`(사용자가 멈춤).
-idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 중(busy / awaiting_* / starting)에는 409 `session_busy`.
-상수는 `apps/server/src/common/types/agent-sessions.ts` 가 단일 원천이다.
+idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 중(busy / awaiting_* / starting)에 화면이 보낸 prompt 는
+새 턴을 열지 않고 그 턴에 들어간다(아래 "턴 중 입력"). 서버가 사용자 대신 보내는 prompt(작업 보고·작업 제안)만 409 `session_busy`
+를 받고 턴이 끝난 뒤 보낸다. 상수는 `apps/server/src/common/types/agent-sessions.ts` 가 단일 원천이다.
+
+### 턴 중 입력 (steering)
+
+Claude Code/Codex 데스크탑처럼 에이전트가 일하는 중에 보낸 말은 **그 턴에 바로 들어간다** — 에이전트가 다음 틈(도구 호출
+사이, 또는 지금 생성을 끊고)에 읽고 같은 턴 안에서 이어서 답한다. 화면은 붙잡아 두지 않는다(예전엔 컴포저가 큐에 쌓았다가
+턴이 끝난 뒤에야 보내서, 에이전트는 그 말을 끝까지 모른 채 일했다).
+
+- 경로: 화면 `POST …/prompt` → 서버(`prompt(…, { duringTurn: true })`, 상태는 그대로) → 매니저 `op: 'prompt'` →
+  `#promptDuringTurn` → ACP 확장 `_session/steering`. 서버가 대신 보내는 프롬프트(`promptOnBehalf`)는 `duringTurn` 이 없다.
+- 지원 여부는 CLI 이름이 아니라 어댑터가 정한다 — initialize 응답의 `_meta.steering.supported`(claude-agent-acp 0.84+/0.91,
+  codex-acp 1.13+/2.2 실측 true). 대기 중인 권한·질문이 있으면 claude 어댑터가 그 결정 뒤로 미룬다.
+- 끼워 넣지 못하면 **매니저가** 들고 있다가 턴이 끝나는 즉시 새 턴으로 보낸다: 어댑터가 steering 을 광고하지 않음 ·
+  slash command(새 프롬프트로 받아야 명령으로 실행된다) · 어댑터의 턴이 이미 끝나 남은 출력만 흘려보내는 중. 앞의 둘은
+  전사에 `system{code:'prompt_queued'}` 로 남고, 프로세스가 그 전에 죽으면 각 행에 `error{code:'prompt_dropped'}` 가 남는다.
+- steer 는 `_meta.steering.idleBehavior: 'promptRequired'` 를 싣는다 — 보내는 사이 턴이 끝나면 claude 는 `promptRequired`
+  로 돌려주고 매니저가 새 턴으로 보낸다. codex 는 이 옵션을 모르고 `startedNewTurn`(어댑터가 따로 연 턴)으로 답하는데,
+  그 턴은 AWB 가 끝을 모르므로 `system{code:'steer_new_turn'}` 로 알린다. 그 틈을 좁히려고 매니저는 `session/prompt` 답이
+  온 뒤(`turn.settled`)에는 steer 하지 않는다.
+- 재시작 중 들어온 프롬프트는 재시작 전체가 `#opening` 에 걸려 있어 재시작된 프로세스를 기다린다(닫히는 옛 프로세스 옆에
+  하나 더 띄우지 않는다).
 
 **진실은 매니저 쪽 프로세스다.** 서버 메모리의 상태는 매니저의 마지막 상태 패치에 의존하는데, 매니저가
 self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호를 보내 세션 프로세스가 먼저 죽는다) 그 패치가
@@ -595,7 +617,8 @@ cache_write` 로 계산한다.
   Claude/Codex/OpenCode/Hermes 사이에 명령을 번역하거나 공통 목록을 하드코딩하지 않는다. 터미널 전용 명령까지 지원한다는 의미는 아니다.
   `session/load` 도중 오는 명령 목록도 제어 상태로 보존한다(과거 메시지 재생만 숨김). 이후 업데이트가 빈 목록이면 기존 목록을 지운다.
   입력창 `/` 버튼 또는 `/` 입력으로 목록을 열고, ↑/↓ 및 Tab/클릭으로 선택한다. 완성된 명령은 Enter로 전송하고 Shift+Enter는 줄바꿈한다.
-  실행 중에는 일반 메시지처럼 큐에 들어가므로 현재 턴이 끝난 후 실행된다. `/steer` 같은 실행 중 전용 명령을 즉시 실행하는 경로는 제공하지 않는다.
+  실행 중에 보낸 명령은 턴에 끼워 넣지 않고 매니저가 들고 있다가 현재 턴이 끝난 후 실행한다(일반 메시지는 그 턴에 들어간다 —
+  [턴 중 입력](#턴-중-입력-steering)). `/steer` 같은 실행 중 전용 명령을 즉시 실행하는 경로는 제공하지 않는다.
 - 프롬프트 실패는 원문과 함께 ACP 코드, 제공자가 알려 준 HTTP 상태·오류 코드·문제 파라미터 및 복구 안내를 표시한다.
   OpenCode는 해당 턴이 시작된 뒤의 최신 assistant 오류만 네이티브 DB에서 읽고, 같은 모델의 마지막 성공 요청 토큰 수(캐시 포함)를 덧붙인다.
   이 수치는 실패한 요청의 크기가 아니다. `invalid parameters`/HTTP 400만으로 컨텍스트 초과를 단정하지 않으며,
@@ -654,8 +677,9 @@ cache_write` 로 계산한다.
 - 기록은 CLI 홈에 있으므로 **대화는 이어진다**. 죽는 것은 프로세스뿐이다.
 - 인증은 이때 소유 계정의 **현재 CLI 설정 credential** 로 다시 묶인다(위 실행 고정의 유일한 예외) —
   restart 가 싣는 `credential_id` 는 그렇게 갱신된 snapshot 값이고, 이후 prompt 도 같은 로그인으로 다시 연다.
-- 서버는 요청 즉시 상태를 `starting` 으로 옮긴다 — 그 사이 프롬프트가 끼어들지 못하게
-  하는 것이 `agentSessionAcceptsPrompt` 의 기존 계약이다.
+- 서버는 요청 즉시 상태를 `starting` 으로 옮긴다 — 그 사이 서버가 대신 보내는 프롬프트가 끼어들지 못하게
+  하는 것이 `agentSessionAcceptsPrompt` 의 기존 계약이다. 화면의 입력은 매니저로 가고, 매니저가 재시작 전체를
+  `#opening` 에 걸어 두므로 재시작된 프로세스를 기다렸다가 들어간다.
 - 진행 중인 턴이 있으면 끊긴다. UI 는 `starting` 일 때만 버튼을 잠근다: 턴 중이라도
   운영자가 일부러 죽이려는 것일 수 있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다.
 

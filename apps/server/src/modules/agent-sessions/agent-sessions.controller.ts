@@ -186,7 +186,7 @@ export class AgentSessionsController {
   ) {
     const account = this.accountId(req, res);
     if (!account) return;
-    return this.run(res, 202, () => this.sessions.prompt(account, this.userId(req), managerId, cli, sessionId, body?.text, body?.images));
+    return this.run(res, 202, () => this.sessions.prompt(account, this.userId(req), managerId, cli, sessionId, body?.text, body?.images, { duringTurn: true }));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/permission')

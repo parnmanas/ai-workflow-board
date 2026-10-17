@@ -92,9 +92,9 @@ for (const size of [{ width: 320, height: 568 }, { width: 360, height: 740 }, { 
     await expect(page.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
     await expectFits(page);
     await input.fill('반응형 전송 확인');
-    await page.getByRole('button', { name: size.width === 320 ? 'Queue' : 'Send', exact: true }).click();
-    if (size.width === 320) await expect(page.getByLabel('Queued prompts')).toContainText('반응형 전송 확인');
-    else await expect.poll(() => f.prompts.length).toBe(1);
+    // 진행 중인 턴(320 폭)에서도 바로 보낸다 — 매니저가 그 턴에 넣는다.
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect.poll(() => f.prompts.length).toBe(1);
     expect(f.errors).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath('session.png') });
   });

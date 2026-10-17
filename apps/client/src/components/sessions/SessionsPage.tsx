@@ -1168,7 +1168,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       <SessionComposer
         disabled={false}
         busy={busy}
-        placeholder={pending ? (pending.kind === 'elicitation' ? 'Answer the question above…' : 'Answer the permission request above…') : canPrompt(status) ? `Send a prompt to ${runtimeLabel(cli)}…` : 'Working…'}
+        placeholder={pending ? (pending.kind === 'elicitation' ? 'Answer the question above…' : 'Answer the permission request above…') : canPrompt(status) ? `Send a prompt to ${runtimeLabel(cli)}…` : `${runtimeLabel(cli)} is working — type to add to the current turn…`}
         hint={composerHint}
         commands={commands}
         onSend={send}

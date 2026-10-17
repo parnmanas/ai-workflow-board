@@ -17,9 +17,11 @@ import type {
   AcpPromptResponse,
   AcpSessionUpdateParams,
   AcpSetConfigOptionRequest,
+  AcpSteerRequest,
+  AcpSteerResponse,
   AcpUsage,
 } from './acp-types.js';
-import { ACP_AUTH_STATUS_METHOD, ACP_PROTOCOL_VERSION } from './acp-types.js';
+import { ACP_AUTH_STATUS_METHOD, ACP_PROTOCOL_VERSION, ACP_STEERING_METHOD } from './acp-types.js';
 import {
   AcpProtocolError,
   JsonRpcPeer,
@@ -349,6 +351,11 @@ export class AcpClient {
     options?: JsonRpcRequestOptions,
   ): Promise<AcpPromptResponse> {
     return this.request('session/prompt', request, options);
+  }
+
+  /** `_session/steering` — 진행 중인 턴에 끼워 넣는다. 어댑터가 광고할 때만 부를 것. */
+  steer(request: AcpSteerRequest, options?: JsonRpcRequestOptions): Promise<AcpSteerResponse> {
+    return this.request(ACP_STEERING_METHOD, request, options);
   }
 
   cancel(sessionId: string): Promise<void> {

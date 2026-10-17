@@ -53,6 +53,8 @@ export interface AcpInitializeResponse {
   agentCapabilities: Record<string, unknown>;
   agentInfo: AcpImplementation;
   authMethods?: unknown[];
+  /** 최상위 확장 광고 — `steering.supported` 가 `_session/steering` 을 받는다는 뜻이다. */
+  _meta?: Record<string, unknown>;
 }
 
 export interface AcpNameValue {
@@ -177,6 +179,23 @@ export interface AcpContentBlock {
 export interface AcpPromptRequest {
   sessionId: string;
   prompt: AcpContentBlock[];
+}
+
+/**
+ * `_session/steering` — 진행 중인 턴에 메시지를 끼워 넣는 ACP 확장(claude-agent-acp · codex-acp 가
+ * 같은 이름으로 구현하고 initialize 의 `_meta.steering.supported` 로 광고한다). Claude Code/Codex
+ * 데스크탑이 작업 중에 보낸 메시지를 그 턴 안에서 읽게 하는 경로와 같다. `promptRequired` 는
+ * 턴이 이미 끝났을 때 어댑터가 새 턴을 몰래 열지 말고 돌려 달라는 요청이다 — claude 만 따르고,
+ * codex 는 무시하고 `startedNewTurn` 으로 답한다.
+ */
+export const ACP_STEERING_METHOD = '_session/steering';
+
+export interface AcpSteerRequest extends AcpPromptRequest {
+  _meta?: { steering?: { idleBehavior?: 'promptRequired' } };
+}
+
+export interface AcpSteerResponse {
+  outcome?: 'injected' | 'promptRequired' | 'startedNewTurn' | 'failed' | string;
 }
 
 export interface AcpUsage {

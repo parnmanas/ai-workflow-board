@@ -57,6 +57,7 @@ import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
 import type {
   AcpAuthStatus,
+  AcpContentBlock,
   AcpElicitationOutcome,
   AcpElicitationRequest,
   AcpMcpServer,
@@ -86,7 +87,7 @@ export interface AgentSessionRequest {
    * 를 광고하는(1.18.34 실측) 네이티브 경로라 MCP 같은 우회가 필요 없다. vision 을 모르는
    * 모델은 어댑터·모델이 직접 거절/무시한다(실측: "this model doesn't support image input").
    */
-  images?: { base64?: string; mime_type?: string }[];
+  images?: PromptImageInput[];
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
@@ -216,6 +217,14 @@ interface PendingElicitation {
 
 type CommandPatch = { name: string; description: string; input_hint?: string };
 
+type PromptImageInput = { base64?: string; mime_type?: string };
+
+interface QueuedPrompt {
+  turnId: string;
+  text: string;
+  images?: PromptImageInput[] | null;
+}
+
 interface LiveSession {
   workspace: SessionWorkspace | null;
   cli: string;
@@ -228,13 +237,16 @@ interface LiveSession {
   allowPromptTitle: boolean;
   client: AcpClient;
   loadSupported: boolean;
+  /** 어댑터가 `_session/steering` 을 광고했는가 — 그러면 턴 중에 온 프롬프트를 그 턴에 바로 넣는다. */
+  steeringSupported: boolean;
   /** session/load 가 기록을 재생하는 동안 true — 재생 이벤트는 UI 가 이미 history 로 가졌으므로 버린다. */
   loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
   pendingElicitations: Map<string, PendingElicitation>;
   asyncQuestions: Map<string, { question: CliAsyncQuestion; event: StampedEvent; timer: NodeJS.Timeout }>;
   asyncQuestionWatcher: CliAsyncQuestionWatcher | null;
-  queuedQuestionAnswers: Array<{ turnId: string; text: string }>;
+  /** 지금 턴이 끝나면 새 턴으로 보낼 프롬프트 — 비동기 질문의 답, 그리고 steering 을 못 하는 어댑터에 턴 중 온 프롬프트. */
+  queuedPrompts: QueuedPrompt[];
   /** 세션 id 를 알기 전(session/new 응답 전)에 어댑터가 보낸 행 — 열리는 즉시 순서대로 흘려보낸다. */
   preSessionEvents: AgentSessionEventInput[];
   /** 어댑터가 준 세션 설정(모델·reasoning …)·slash command·모드 — history RPC 의 `live` 로 서버가 다시 받는다. */
@@ -242,8 +254,9 @@ interface LiveSession {
   availableCommands: CommandPatch[];
   currentMode: string | null;
   availableModes: Array<{ id: string; name: string; description?: string }>;
-  /** `sawUsage` — 이 턴에 어댑터가 사용량을 보고했는가(안 했으면 기록에서 메꾼다). */
-  turn: { turnId: string; startedAt: number; sawUsage?: boolean } | null;
+  /** `sawUsage` — 이 턴에 어댑터가 사용량을 보고했는가(안 했으면 기록에서 메꾼다).
+   *  `settled` — 어댑터가 `session/prompt` 에 답했다(남은 출력만 흘려보내는 중). 이때부터는 끼워 넣을 턴이 없다. */
+  turn: { turnId: string; startedAt: number; sawUsage?: boolean; settled?: boolean } | null;
   textBuffer: string;
   reasoningBuffer: string;
   flushTimer: NodeJS.Timeout | null;
@@ -616,8 +629,18 @@ export class AgentSessionRunner {
           // 그래서 CLI 를 올린 뒤 모델 목록·기능이 비로소 갱신된다(살아 있는
           // 프로세스는 기동 시점의 CLI 상태를 계속 물고 있다).
           if (!sessionId) throw new Error('restart requires an existing session id');
-          await this.#closeLive(cli, sessionId, 'idle', 'restart');
-          const restarted = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
+          // 재시작 전체를 "여는 중" 으로 건다 — 그 사이 온 프롬프트는(턴 중 입력도 화면이 붙잡지 않고 바로
+          // 보낸다) 닫히는 옛 프로세스 옆에 새 프로세스를 하나 더 띄우지 않고 재시작된 프로세스를 기다린다.
+          const key = this.#key(cli, sessionId);
+          const previous = this.#opening.get(key);
+          const restarting = (async () => {
+            if (previous) await previous.catch(() => undefined);
+            await this.#closeLive(cli, sessionId, 'idle', 'restart');
+            return this.#open(cli, sessionId, request.cwd || '', request.title || '', request);
+          })();
+          this.#opening.set(key, restarting);
+          restarting.finally(() => { if (this.#opening.get(key) === restarting) this.#opening.delete(key); }).catch(() => undefined);
+          const restarted = await restarting;
           this.#enqueue(
             restarted,
             [{ type: 'system', payload: { text: 'Session process restarted — it now runs the CLI currently on disk.' } }],
@@ -780,8 +803,9 @@ export class AgentSessionRunner {
     }
     const opening = this.#open(cli, sessionId, cwd, title, request);
     if (sessionId) {
-      this.#opening.set(this.#key(cli, sessionId), opening);
-      opening.finally(() => this.#opening.delete(this.#key(cli, sessionId))).catch(() => undefined);
+      const key = this.#key(cli, sessionId);
+      this.#opening.set(key, opening);
+      opening.finally(() => { if (this.#opening.get(key) === opening) this.#opening.delete(key); }).catch(() => undefined);
     }
     return opening;
   }
@@ -887,12 +911,13 @@ export class AgentSessionRunner {
         allowPromptTitle: !requestedSessionId,
         client,
         loadSupported,
+        steeringSupported: (initialized?._meta?.steering as { supported?: unknown } | undefined)?.supported === true,
         loading: false,
         pendingPermissions: new Map(),
         pendingElicitations: new Map(),
         asyncQuestions: new Map(),
         asyncQuestionWatcher: null,
-        queuedQuestionAnswers: [],
+        queuedPrompts: [],
         preSessionEvents: [],
         configOptions: [],
         availableCommands: [],
@@ -1482,14 +1507,18 @@ export class AgentSessionRunner {
     return /^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(m) ? m : null;
   }
 
-  async #runPrompt(live: LiveSession, turnId: string, text: string, images?: { base64?: string; mime_type?: string }[] | null): Promise<void> {
-    if (live.turn) {
-      this.#enqueue(live, [{ type: 'error', payload: { message: 'A turn is already in progress.', code: 'turn_in_progress' }, turn_id: turnId }]);
-      return;
-    }
-    // Native slash commands must remain unwrapped for adapter command dispatch.
-    const instruction = text.trimStart().startsWith('/') ? '' : sessionWorkflowInstruction(live.workspace);
-    const blocks: { type: string; text?: string; data?: string; mimeType?: string }[] = [
+  /**
+   * 프롬프트 블록 — 텍스트 + 첨부 이미지. 쓸 수 없는 이미지는 턴을 죽이지 않고 빠진 사실만 남기고,
+   * 보낼 것이 하나도 없으면 오류 행을 남기고 null 을 준다.
+   */
+  #promptContent(
+    live: LiveSession,
+    turnId: string,
+    text: string,
+    images: PromptImageInput[] | null | undefined,
+    instruction: string,
+  ): { blocks: AcpContentBlock[]; validImages: { mimeType: string; data: string }[] } | null {
+    const blocks: AcpContentBlock[] = [
       ...(instruction ? [{ type: 'text', text: instruction }] : []),
       { type: 'text', text },
     ];
@@ -1518,14 +1547,27 @@ export class AgentSessionRunner {
       validImages.push({ mimeType, data: base64 });
       blocks.push({ type: 'image', data: base64, mimeType });
     }
-    if (!text.trim() && blocks.length <= 1) {
+    if (!text.trim() && validImages.length === 0) {
       this.#enqueue(live, [{ type: 'error', payload: { message: 'A prompt needs text or at least one image.', code: 'prompt_empty' }, turn_id: turnId }]);
+      return null;
+    }
+    return { blocks, validImages };
+  }
+
+  async #runPrompt(live: LiveSession, turnId: string, text: string, images?: PromptImageInput[] | null): Promise<void> {
+    if (live.turn) {
+      await this.#promptDuringTurn(live, turnId, text, images);
       return;
     }
+    // Native slash commands must remain unwrapped for adapter command dispatch.
+    const instruction = text.trimStart().startsWith('/') ? '' : sessionWorkflowInstruction(live.workspace);
+    const content = this.#promptContent(live, turnId, text, images, instruction);
+    if (!content) return;
+    const { blocks, validImages } = content;
     live.turn = { turnId, startedAt: Date.now(), sawUsage: false };
     this.#clearIdle(live);
     if (!live.title && live.allowPromptTitle) {
-      const titleText = text.trim() || (blocks.length > 1 ? `${blocks.length - 1} image(s)` : '');
+      const titleText = text.trim() || (validImages.length ? `${validImages.length} image(s)` : '');
       live.title = titleText.replace(/\s+/g, ' ').slice(0, 80);
       await this.#store.touchAwbSession(live.cli, live.sessionId, { title: live.title }).catch(() => undefined);
     }
@@ -1538,7 +1580,10 @@ export class AgentSessionRunner {
       const response = await live.client.prompt(
         { sessionId: live.sessionId, prompt: blocks },
         { timeoutMs: this.#options.promptTimeoutMs },
-      );
+      ).finally(() => {
+        // 어댑터 쪽 턴은 여기서 끝났다 — 남은 출력을 흘려보내는 동안 온 프롬프트는 끼워 넣지 않고 다음 턴으로 보낸다.
+        if (live.turn?.turnId === turnId) live.turn.settled = true;
+      });
       this.#flushBuffers(live, turnId);
       const events: AgentSessionEventInput[] = [];
       const responseUsage = normalizeSessionUsage({
@@ -1583,9 +1628,85 @@ export class AgentSessionRunner {
       await live.postChain;
       live.turn = null;
       this.#touch(live);
-      const answer = live.queuedQuestionAnswers.shift();
-      if (answer && !live.closing && !live.exited) await this.#runPrompt(live, answer.turnId, answer.text);
+      const next = live.queuedPrompts.shift();
+      if (next && !live.closing && !live.exited) await this.#runPrompt(live, next.turnId, next.text, next.images);
     }
+  }
+
+  /**
+   * 턴 중에 온 프롬프트 — Claude Code/Codex 데스크탑처럼 진행 중인 턴에 바로 넣는다(`_session/steering`).
+   * 에이전트는 다음 틈(도구 호출 사이, 또는 지금 생성을 끊고)에 읽고 **같은 턴 안에서** 답한다 — 그 출력은
+   * 진행 중인 턴의 이벤트로 흐른다. 대기 중인 권한·질문이 있으면 어댑터가 그 결정 뒤로 미룬다.
+   * 끼워 넣을 수 없을 때(어댑터가 steering 을 광고하지 않음, slash command, 어댑터의 턴이 이미 끝나
+   * 남은 출력만 흘려보내는 중)는 이 매니저가 들고 있다가 턴이 끝나는 즉시 새 턴으로 보낸다 — 화면이
+   * 붙잡아 두지 않으므로 무엇이 어디서 기다리는지 전사에 남긴다.
+   */
+  async #promptDuringTurn(live: LiveSession, turnId: string, text: string, images: PromptImageInput[] | null | undefined): Promise<void> {
+    const turn = live.turn;
+    const prompt: QueuedPrompt = { turnId, text, images };
+    if (!turn || turn.settled) {
+      live.queuedPrompts.push(prompt);
+      return;
+    }
+    if (!live.steeringSupported) {
+      this.#queuePrompt(live, prompt, `${live.cli} cannot take a message in the middle of a turn`);
+      return;
+    }
+    // slash command 는 어댑터가 새 프롬프트로 받을 때만 명령으로 실행한다 — 턴에 끼워 넣으면 그냥 글자다.
+    if (text.trimStart().startsWith('/')) {
+      this.#queuePrompt(live, prompt, 'A slash command runs as its own turn');
+      return;
+    }
+    const content = this.#promptContent(live, turnId, text, images, '');
+    if (!content) return;
+    let outcome: string | undefined;
+    try {
+      const response = await live.client.steer(
+        { sessionId: live.sessionId, prompt: content.blocks, _meta: { steering: { idleBehavior: 'promptRequired' } } },
+        { timeoutMs: this.#options.requestTimeoutMs },
+      );
+      outcome = response?.outcome;
+    } catch (err: any) {
+      const message = redactSecrets(err?.message ?? String(err));
+      this.#enqueue(live, [{ type: 'error', payload: { message: `Could not hand the message to the running turn: ${message}`, code: 'steer_failed' }, turn_id: turnId }]);
+      return;
+    }
+    if (outcome === 'promptRequired') {
+      // 보내는 사이 턴이 끝났다(claude) — 어댑터가 돌려준 것을 새 턴으로 보낸다.
+      if (live.turn) live.queuedPrompts.push(prompt);
+      else if (!live.closing && !live.exited) await this.#runPrompt(live, turnId, text, images);
+      return;
+    }
+    if (outcome !== 'injected' && outcome !== 'startedNewTurn') {
+      this.#enqueue(live, [{
+        type: 'error',
+        payload: { message: `${live.cli} did not take the message into the running turn (${outcome || 'no outcome'}). Send it again once the turn ends.`, code: 'steer_failed' },
+        turn_id: turnId,
+      }]);
+      return;
+    }
+    for (const valid of content.validImages) this.#emitImage(live, { ...valid, uri: '' }, turnId);
+    if (outcome === 'startedNewTurn') {
+      // codex 는 promptRequired 를 모른다 — 턴이 끝난 바로 그 틈이면 어댑터가 따로 새 턴을 연다.
+      this.#enqueue(live, [{
+        type: 'system',
+        payload: {
+          text: `The running turn ended just as this message arrived, so ${live.cli} started a separate turn for it. `
+            + 'Its output still streams here, but AWB cannot tell when that turn finishes.',
+          code: 'steer_new_turn',
+        },
+        turn_id: turnId,
+      }]);
+    }
+  }
+
+  #queuePrompt(live: LiveSession, prompt: QueuedPrompt, reason: string): void {
+    live.queuedPrompts.push(prompt);
+    this.#enqueue(live, [{
+      type: 'system',
+      payload: { text: `${reason} — this message goes in as soon as the current turn ends.`, code: 'prompt_queued' },
+      turn_id: prompt.turnId,
+    }]);
   }
 
   /**
@@ -1901,7 +2022,7 @@ export class AgentSessionRunner {
         const text = `User answer to your asynchronous question (${elicitationId}):\n${asyncQuestion.question.message}\n${JSON.stringify(content ?? {})}`;
         const answer = { turnId: randomUUID(), text };
         this.#enqueue(live, [{ type: 'user_prompt', payload: { text, queued: !!live.turn }, turn_id: answer.turnId }]);
-        if (live.turn) live.queuedQuestionAnswers.push(answer);
+        if (live.turn) live.queuedPrompts.push(answer);
         else void this.#runPrompt(live, answer.turnId, answer.text);
       }
       return;
@@ -2283,6 +2404,13 @@ export class AgentSessionRunner {
       this.#enqueue(live, [{ type: 'elicitation_decision', payload: { elicitation_id: id, action: 'cancel', decided_by: 'system' } }]);
     }
     live.asyncQuestions.clear();
-    live.queuedQuestionAnswers = [];
+    // 턴이 끝나길 기다리던 프롬프트는 프로세스와 함께 사라진다 — 조용히 버리지 않고 각 행에 알린다.
+    for (const dropped of live.queuedPrompts.splice(0)) {
+      this.#enqueue(live, [{
+        type: 'error',
+        payload: { message: 'Not sent — the agent process stopped before the current turn ended. Send it again.', code: 'prompt_dropped' },
+        turn_id: dropped.turnId,
+      }]);
+    }
   }
 }

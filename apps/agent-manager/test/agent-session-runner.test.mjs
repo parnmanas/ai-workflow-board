@@ -393,6 +393,64 @@ test('restart kills the process and reopens the SAME session — 새 프로세�
   );
 });
 
+test('a prompt sent mid-turn goes INTO the running turn when the adapter advertises steering — desktop-style, no second turn', async (t) => {
+  // Claude Code/Codex 데스크탑처럼 작업 중에 보낸 말은 그 턴에 바로 들어가 에이전트가 이어서 읽는다.
+  // 예전엔 화면이 큐에 쌓아 두었다가 턴이 끝난 뒤에야 보냈고, 매니저도 turn_in_progress 로 거절했다.
+  const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_STEERING: '1' });
+  await runner.handle(request('open', { request_id: 'rpc-steer-open', session_id: null, cwd }));
+  const sid = server.rpc('rpc-steer-open').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-work', text: 'HOLD_TURN_TEST refactor the parser' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'text' && /working on it/.test(e.payload.text)), 'the turn is working');
+
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-steer', text: 'also update the docs' }));
+  await turn;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn(finished)');
+
+  const events = server.events(sid);
+  const heard = events.find((e) => e.type === 'text' && /heard:/.test(e.payload.text));
+  assert.ok(heard, 'the agent read the message inside the running turn');
+  assert.match(heard.payload.text, /heard: also update the docs \(promptRequired, 1 block\)/, 'only the text goes in (no per-turn instruction), asking the adapter to hand it back if the turn already ended');
+  assert.equal(heard.turn_id, 't-work', 'its answer streams as part of the running turn');
+  assert.deepEqual(events.filter((e) => e.type === 'turn' && e.payload.phase === 'started').map((e) => e.turn_id), ['t-work'], 'no second turn was opened');
+  assert.equal(events.some((e) => e.type === 'error'), false, `no turn_in_progress error: ${JSON.stringify(events.filter((e) => e.type === 'error'))}`);
+  assert.equal(events.filter((e) => e.type === 'turn').at(-1).state.status, 'ready');
+});
+
+test('an adapter without steering: the manager holds the mid-turn prompt, says so in the transcript, and sends it the moment the turn ends', async (t) => {
+  const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  await runner.handle(request('open', { request_id: 'rpc-hold-open', session_id: null, cwd }));
+  const sid = server.rpc('rpc-hold-open').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-work', text: 'HOLD_TURN_TEST long job' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'text' && /working on it/.test(e.payload.text)), 'the turn is working');
+
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-next', text: 'then run the tests' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'system' && e.payload.code === 'prompt_queued'), 'queued notice');
+  const notice = server.events(sid).find((e) => e.payload?.code === 'prompt_queued');
+  assert.equal(notice.turn_id, 't-next', 'the notice sits on the held prompt');
+  assert.equal(server.events(sid).some((e) => e.type === 'turn' && e.turn_id === 't-next'), false, 'it does not start while the turn runs');
+
+  await runner.handle(request('cancel', { session_id: sid }));
+  await turn;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.turn_id === 't-next' && e.payload.phase === 'finished'), 'the held prompt ran as the next turn');
+  const turns = server.events(sid).filter((e) => e.type === 'turn').map((e) => `${e.turn_id}:${e.payload.phase}`);
+  assert.deepEqual(turns, ['t-work:started', 't-work:finished', 't-next:started', 't-next:finished']);
+});
+
+test('a prompt that arrives during a restart waits for the restarted process instead of opening a second one', async (t) => {
+  const { server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  await runner.handle(request('open', { request_id: 'rpc-restart-race', session_id: CLAUDE_ID }));
+  const before = runner._snapshot()[0]?.pid;
+  await Promise.all([
+    runner.handle(request('restart', { session_id: CLAUDE_ID })),
+    runner.handle(request('prompt', { session_id: CLAUDE_ID, turn_id: 't-after-restart', text: 'continue' })),
+  ]);
+  const live = runner._snapshot();
+  assert.equal(live.length, 1, 'one process for the session');
+  assert.notEqual(live[0].pid, before, 'it is the restarted process');
+  await waitFor(() => server.events(CLAUDE_ID).some((e) => e.type === 'turn' && e.turn_id === 't-after-restart' && e.payload.phase === 'finished'), 'the prompt ran on the restarted process');
+  assert.equal(server.events(CLAUDE_ID).some((e) => e.type === 'error'), false, JSON.stringify(server.events(CLAUDE_ID).filter((e) => e.type === 'error')));
+});
+
 test('restart 는 열려 있는 세션을 요구한다 — 세션 id 없이는 되살릴 대상이 없다', async (t) => {
   const { server, runner } = await harness(t);
   await runner.handle(request('restart', { session_id: null }));
