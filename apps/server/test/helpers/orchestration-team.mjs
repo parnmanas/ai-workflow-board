@@ -14,6 +14,30 @@
 // `runtimeHostKeyForAgent`).
 
 import { createAgent, createApiKey, registerRuntimeHostKeyFor } from './fixtures.mjs';
+import { AgentManagerCommandService } from '../../dist/modules/agent-manager/agent-manager-command.service.js';
+
+const virtualHosts = new WeakMap();
+
+// These QA hosts run VirtualAgent rather than a real CLI manager. Simulate only
+// the awaited host preparation; roster-edit commands still use the real service.
+// Command/ack ordering and auth failures are tested in the runtime-preparation
+// and agent-manager-slot-credential suites, and CLI materialization in manager tests.
+function registerVirtualPreparation(app, hostId) {
+  let hosts = virtualHosts.get(app);
+  if (!hosts) {
+    hosts = new Set();
+    virtualHosts.set(app, hosts);
+    const commands = app.get(AgentManagerCommandService);
+    const original = commands.provisionSlotIdentity.bind(commands);
+    commands.provisionSlotIdentity = (spec, opts) => {
+      if (hosts.has(spec.manager_agent_id) && opts.waitForAckMs !== undefined) {
+        return Promise.resolve({ ok: true, reason: 'virtual_host_prepared' });
+      }
+      return original(spec, opts);
+    };
+  }
+  hosts.add(hostId);
+}
 
 /** Default working folder for a slot. Absolute, as the spec validator requires. */
 export const TEST_WORKING_DIR = '/srv/awb-test/account';
@@ -28,6 +52,7 @@ export async function createRuntimeHost(app, getDataSourceToken, accountId, { na
     accountId,
     label: `runtime-host-${name}`,
   });
+  registerVirtualPreparation(app, host.id);
   return { ...host, api_key: key.raw_key };
 }
 

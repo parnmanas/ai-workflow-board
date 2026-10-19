@@ -2044,14 +2044,21 @@ export class AgentManagerController {
     const callerHostId = String((req as any).currentHostId || '').trim();
     if (!callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
 
+    const requested = String(requestedAccountId || legacyWorkspaceId || '').trim();
+
     // The identity hash carries no host, so the same spec can exist on
     // several machines — only a slot on the CALLING host authorizes it.
     // The credential_id is functionally determined by the key (it is a hash
-    // input), so every same-host match agrees on it; first one wins.
+    // input), so every same-host match agrees on it; scope selects the grant.
     let source: SlotCredentialSource | undefined;
     try {
       const candidates = await resolveSlotCredentialSources(this.dataSource, agentId);
-      source = candidates.find((c) => c.manager_agent_id === callerHostId);
+      const onHost = candidates.filter((c) => c.manager_agent_id === callerHostId);
+      // One runtime can be used in several accounts. A match from another
+      // account must not shadow the mission/room that authorized this request.
+      source = onHost.find((c) => requested && c.account_id === requested)
+        ?? onHost.find((c) => c.account_id === null)
+        ?? onHost[0];
       if (!source && candidates.length > 0) {
         this.logService.warn(
           'AgentManager',
@@ -2072,7 +2079,6 @@ export class AgentManagerController {
     // cross-account binding can't leak secrets (mirrors the git-credential
     // route's account guard).
     const ownerAccountId = String(source.account_id || '').trim();
-    const requested = String(requestedAccountId || legacyWorkspaceId || '').trim();
     if (requested && ownerAccountId && requested !== ownerAccountId) {
       return res.status(403).json({ error: 'identity is outside the requested account' });
     }

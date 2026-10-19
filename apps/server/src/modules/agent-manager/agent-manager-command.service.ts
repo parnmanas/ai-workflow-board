@@ -141,7 +141,7 @@ export class AgentManagerCommandService {
 
   /**
    * Materialize one slot-declared runtime identity on its host (`spawn_agent`,
-   * best-effort, fire-and-forget — `issue` never waits for the ack).
+   * optionally awaiting acknowledgement for mission start/reopen).
    *
    * Why callers need this: the dispatch path (`#provisionRuntimeContext` on
    * the manager) only prepares an empty cli-home plus an MCP/apiKey pair —
@@ -162,7 +162,8 @@ export class AgentManagerCommandService {
    * its operator-HOME symlink) is (re-)provisioned: `spawn_agent` is
    * idempotent (apiKey reuse, cli-home prep from a clean slate).
    *
-   * Never throws — callers treat a failure as "dispatch proceeds as before".
+   * `restart` bypasses the heartbeat skip and reaps stale CLI processes.
+   * Never throws — callers decide whether a classified failure blocks dispatch.
    */
   async provisionSlotIdentity(
     spec: {
@@ -173,7 +174,7 @@ export class AgentManagerCommandService {
       credential_id?: string | null;
       runtime_config?: unknown;
     },
-    opts: { accountId: string; label?: string; issuedBy: string },
+    opts: { accountId: string; label?: string; issuedBy: string; restart?: boolean; waitForAckMs?: number },
   ): Promise<{ ok: boolean; reason: string; skipped?: boolean }> {
     const hostId = String(spec?.manager_agent_id || '').trim();
     const cli = String(spec?.cli || '').trim().toLowerCase();
@@ -195,7 +196,7 @@ export class AgentManagerCommandService {
     const slotCredentialId = String(spec?.credential_id || '').trim();
     const reported = inst.agent_credentials?.find((row) => row?.agent_id === key);
     if (
-      slotCredentialId &&
+      !opts.restart && slotCredentialId &&
       (reported?.kind === 'subscription' || reported?.kind === 'api_key')
     ) {
       return { ok: true, reason: 'already_materialized', skipped: true };
@@ -204,7 +205,7 @@ export class AgentManagerCommandService {
     try {
       const { command_id } = await this.issue(
         inst,
-        'spawn_agent',
+        opts.restart ? 'restart_agent' : 'spawn_agent',
         {
           agent_id: key,
           name: String(opts.label || cli).slice(0, 120),
@@ -217,6 +218,18 @@ export class AgentManagerCommandService {
         },
         opts.issuedBy,
       );
+      if (opts.waitForAckMs !== undefined) {
+        const deadline = Date.now() + opts.waitForAckMs;
+        while (true) {
+          const outcome = this.commandLedger.getOutcome(command_id);
+          if (outcome) {
+            if (outcome.status === 'error') return { ok: false, reason: outcome.detail || 'provision_failed' };
+            break;
+          }
+          if (Date.now() >= deadline) return { ok: false, reason: 'provision_ack_timeout' };
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
       this.logService.info(
         'AgentManager',
         `provisioned slot identity ${key.slice(0, 11)} on host=${hostId.slice(0, 8)} (credential=${slotCredentialId.slice(0, 8) || 'operator-home'})`,

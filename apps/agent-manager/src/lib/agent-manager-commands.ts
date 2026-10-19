@@ -534,7 +534,7 @@ export class AgentManagerCommandHandler {
 
     // Pull the canonical record from AWB so we know the cli / working_dir
     // the admin configured. Falls back to in-payload args when present.
-    const remote = await fetchAgentRecord(this.#config, agentId);
+    const remote = /^rt-[a-f0-9]{16}$/.test(agentId) ? null : await fetchAgentRecord(this.#config, agentId);
     const name = remote?.name ?? payload.args?.name ?? agentId.slice(0, 8);
     const cli = remote?.type ?? payload.args?.cli ?? DEFAULT_CLI_ID;
     const workingDir = remote?.working_dir || payload.args?.working_dir || '';
@@ -602,13 +602,15 @@ export class AgentManagerCommandHandler {
     //     legacy operator-HOME symlink path
     //   - server returns the decrypted payload → write it to disk for
     //     rehydrate and apply via the adapter
-    //   - any error → null, log + fall back (the CLI's own auth error
-    //     is more actionable than blocking spawn here)
+    //   - a selected credential cannot be loaded → fail before registration
     // Provider must match the agent's CLI (e.g. claude_subscription on a
     // claude agent); a mismatch is logged and ignored so a typo on the
     // AWB side doesn't silently start sending OpenAI keys to claude.
     const credentialIdHint = typeof payload.args?.credential_id === 'string' ? payload.args.credential_id : '';
     const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint, accountId);
+    if (credentialIdHint && credential?.credential_id !== credentialIdHint) {
+      throw new Error(`spawn_agent: configured credential ${credentialIdHint} could not be loaded for ${cli}`);
+    }
     if (credential) {
       await writeAgentCredential(agentId, credential);
     } else {
@@ -620,9 +622,8 @@ export class AgentManagerCommandHandler {
     // auth error on a fresh per-agent home (claude reads
     // .credentials.json from CLAUDE_CONFIG_DIR; without this hook the
     // first turn exited with is_error=true in well under a second).
-    // Best-effort: a propagation failure is logged but doesn't block
-    // spawn — the CLI's own auth error is more actionable than a
-    // missing-file abort here.
+    // An explicitly selected credential must be applied before registration.
+    // Operator-home propagation retains its legacy best-effort behavior.
     let extraEnv: Record<string, string> = {};
     // ACP 런타임(hermes)은 cli-home 을 스스로 관리한다 — CLI 어댑터가 있는 모듈만 준비한다.
     if (findCliModule(cli)?.transport === 'cli') {
@@ -644,7 +645,7 @@ export class AgentManagerCommandHandler {
     } catch (err: any) {
       const detail = `spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`;
       log(detail);
-      if (cliDispatch(cli).cliHomePrepFatal) {
+      if (credentialIdHint || cliDispatch(cli).cliHomePrepFatal) {
         this.#deps.registry.markStopped(agentId, detail);
         throw new Error(detail);
       }
@@ -716,7 +717,7 @@ export class AgentManagerCommandHandler {
    * legacy operator-HOME credential propagation.
    *
    * `credentialIdHint` is the credential_id the server enriched the spawn
-   * payload with at dispatch time; we use it for diagnostic logging only —
+   * payload with at dispatch time; the caller verifies it was loaded —
    * the manager never trusts client-supplied credential payloads, only
    * what the server returns over its authenticated REST endpoint.
    */
@@ -894,6 +895,14 @@ export class AgentManagerCommandHandler {
   async #restartAgent(payload: AgentManagerCommandPayload): Promise<string> {
     // Asserts args.agent_id once up front — both inner calls reuse it via payload.
     const agentId = this.#targetAgentId(payload, 'restart_agent');
+    // Runtime identities have no server-side Agent record to hydrate from.
+    // Capture launch settings and the credential reference before reaping secrets.
+    const stored = await readManagedAgentConfig(agentId);
+    const credential = await readAgentCredential(agentId);
+    payload = {
+      ...payload,
+      args: { ...stored, credential_id: credential?.credential_id ?? '', ...payload.args },
+    };
     // Reset circuit-breaker for this agent — the operator presumably fixed
     // the config/credential issue that triggered the breaker, so the
     // re-pushed triggers should be allowed through immediately.

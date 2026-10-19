@@ -241,8 +241,8 @@ export class OrchestrationTeamService {
    * edited field take effect.
    *
    * Notified with the PREVIOUS identity key: a cli/dir/credential edit mints a
-   * new key whose sessions don't exist yet, while the replaced key's sessions
-   * keep running on the old launch context. Best-effort (offline → skip): the
+   * new key whose sessions don't exist yet. Stop the replaced identity; its
+   * replacement is provisioned separately. Best-effort (offline → skip): the
    * dispatch path auto-spawns on next use, so an unreachable host must not fail
    * the edit.
    */
@@ -268,8 +268,12 @@ export class OrchestrationTeamService {
     try {
       await this.commands.issue(
         inst,
-        'restart_agent',
-        { agent_id: previousAgentId, account_id: teamAccountId ?? undefined },
+        runtimeIdentityKey(merged) === previousAgentId ? 'restart_agent' : 'stop_agent',
+        {
+          ...merged,
+          agent_id: previousAgentId,
+          account_id: teamAccountId ?? undefined,
+        },
         'system:orchestration-roster',
       );
     } catch (e: any) {

@@ -1158,6 +1158,11 @@ export async function provisionManagedAgentApiKey(
   accountId?: string,
 ): Promise<{ raw_key: string; key_id: string; agent_id: string; account_id: string } | null> {
   if (!agentId) return null;
+  // Runtime identities have no Agent row or legacy managed-agent key route.
+  if (/^rt-[a-f0-9]{16}$/.test(agentId)) {
+    const issued = await provisionRuntimeApiKey(config, agentId, accountId || '');
+    return issued ? { ...issued, agent_id: agentId } : null;
+  }
   try {
     const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : '';
     const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/apikey/provision${query}`;

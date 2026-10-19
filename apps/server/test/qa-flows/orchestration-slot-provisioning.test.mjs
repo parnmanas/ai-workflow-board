@@ -496,21 +496,21 @@ test('Editing a slot in place tells the Runtime Host to restart the agent — ot
   };
   t.after(() => { commands.issue = originalIssue; });
 
-  step('Changing the CLI issues restart_agent for that identity');
+  step('Changing the CLI stops the old identity and provisions the new one');
   issued.length = 0;
   await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { cli: 'codex' } });
-  assert.deepEqual(issued, [{ command: 'restart_agent', agent_id: squad.member('builder').id }],
-    `a CLI change must re-sync the host with restart_agent, got ${JSON.stringify(issued)}`);
+  assert.deepEqual(issued.map((i) => i.command), ['stop_agent', 'spawn_agent'],
+    `a CLI change must replace the identity, got ${JSON.stringify(issued)}`);
 
   step('So does a model-only change — the host caches the model too');
   issued.length = 0;
   await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { model: 'gpt-5.6-sol' } });
   assert.deepEqual(issued.map((i) => i.command), ['restart_agent']);
 
-  step('And a working-folder change');
+  step('A working-folder change also replaces the identity');
   issued.length = 0;
   await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { working_dir: '/srv/awb-test/moved' } });
-  assert.deepEqual(issued.map((i) => i.command), ['restart_agent']);
+  assert.deepEqual(issued.map((i) => i.command), ['stop_agent', 'spawn_agent']);
 
   step('A no-op runtime re-submit issues nothing — an edit that changes nothing must not restart a working agent');
   issued.length = 0;

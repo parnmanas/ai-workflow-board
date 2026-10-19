@@ -164,6 +164,7 @@ test/orchestration-mission-room-open-join.test.mjs
 test/orchestration-mission-user-chat-mode.test.mjs
 test/orchestration-plan-dag.test.mjs
 test/orchestration-reaper-behavior.test.mjs
+test/orchestration-runtime-preparation.test.mjs
 test/outreach-channels-leak.test.mjs
 test/outreach-channels-scope.test.mjs
 test/outreach-classifier-dispatch.test.mjs

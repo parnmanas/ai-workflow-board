@@ -777,3 +777,76 @@ test('updateCli dep 이 배선되지 않은 매니저는 명확한 사유로 err
   assert.equal(ack.status, 'error');
   assert.match(ack.detail, /not wired/);
 });
+
+test('runtime spawn provisions its key and applies the configured credential; restart reaps before refreshing it', async () => {
+  const agentId = 'rt-0123456789abcdef';
+  const accountId = 'mission-account';
+  const order = [];
+  let context;
+  let authToken = 'test-first-token';
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init });
+    if (String(url).endsWith('/runtime-keys/provision')) {
+      order.push('key');
+      assert.deepEqual(JSON.parse(init.body), { key: agentId, account_id: accountId });
+      return Response.json({ raw_key: 'fixture-key', key_id: 'key-id', key: agentId, account_id: accountId });
+    }
+    if (String(url).includes('/credential?')) {
+      order.push('credential');
+      assert.ok(String(url).endsWith(`account_id=${accountId}`));
+      return Response.json({ credential_id: 'credential-1', provider: 'claude_api_key', fields: { api_key: authToken } });
+    }
+    if (String(url).endsWith('/command/ack')) return Response.json({});
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const handler = new AgentManagerCommandHandler(
+    { url: 'https://awb.spawn.example', apiKey: 'manager-key', delegation: {} },
+    {
+      getInstanceId: () => 'instance-1',
+      registry: { ...registryStub(), upsert: () => ({ status: 'spawning' }) },
+      contextRegistry: { upsert: (value) => { context = value; }, delete: () => true },
+      chatSessionManager: { stopForAgent: async () => { order.push('stop-chat'); return { count: 1 }; } },
+      ticketSessionManager: { stopForAgent: async () => { order.push('stop-ticket'); return { count: 1 }; } },
+      subagentManager: { stopForAgent: async () => { order.push('stop-subagent'); return { count: 1 }; } },
+      requestStreamReconnect: async () => { order.push('connected'); },
+    },
+  );
+  await handler.handle(JSON.stringify({ command_id: 'runtime-spawn', command: 'spawn_agent', args: {
+    agent_id: agentId, name: 'Mission worker', cli: 'claude', working_dir: tmpdir(),
+    account_id: accountId, credential_id: 'credential-1',
+  } }));
+  assert.equal(context?.credential_id, 'credential-1');
+  assert.equal(context?.extra_env.ANTHROPIC_API_KEY, authToken);
+  assert.equal(JSON.parse(requests.at(-1).init.body).status, 'ok');
+  assert.deepEqual(order, ['key', 'credential', 'connected']);
+  authToken = 'test-rotated-token';
+  order.length = 0;
+  await handler.handle(JSON.stringify({ command_id: 'runtime-restart', command: 'restart_agent', args: { agent_id: agentId } }));
+  assert.equal(JSON.parse(requests.at(-1).init.body).status, 'ok');
+  assert.deepEqual(order, ['stop-chat', 'stop-ticket', 'stop-subagent', 'key', 'credential', 'connected']);
+  assert.equal(context?.extra_env.ANTHROPIC_API_KEY, authToken);
+  assert.ok(!requests.some(({ url }) => /\/managed-agents\/[^/]+\/apikey\/provision/.test(url)));
+});
+
+test('a missing explicitly selected credential fails spawn instead of using operator login', async () => {
+  const agentId = 'rt-fedcba9876543210';
+  await writeApiKey(agentId, 'fixture-key', 'account');
+  let registered = false;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init });
+    if (String(url).includes('/credential?')) return new Response(null, { status: 503 });
+    return Response.json({});
+  };
+  const handler = new AgentManagerCommandHandler(
+    { url: 'https://awb.spawn.example', apiKey: 'manager-key', delegation: {} },
+    { getInstanceId: () => 'instance-1', registry: { ...registryStub(), upsert: () => ({}) },
+      contextRegistry: { upsert: () => { registered = true; } } },
+  );
+  await handler.handle(JSON.stringify({ command_id: 'missing-auth', command: 'spawn_agent', args: {
+    agent_id: agentId, cli: 'claude', working_dir: tmpdir(), account_id: 'account', credential_id: 'credential-missing',
+  } }));
+  assert.equal(registered, false);
+  const ack = JSON.parse(requests.at(-1).init.body);
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /configured credential.*could not be loaded/);
+});

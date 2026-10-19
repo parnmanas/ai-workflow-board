@@ -164,7 +164,7 @@ test('spec이 깨진 행은 조용히 건너뛴다', async () => {
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
-function provisionService({ credentials = undefined, issueImpl = null } = {}) {
+function provisionService({ credentials = undefined, issueImpl = null, getOutcome = () => null } = {}) {
   const inst = {
     mode: 'manager',
     agent_id: 'host-1',
@@ -175,7 +175,7 @@ function provisionService({ credentials = undefined, issueImpl = null } = {}) {
   };
   const svc = new AgentManagerCommandService(
     { list: () => [inst] },
-    { record() {} },
+    { record() {}, getOutcome },
     noopLog,
     {},
     {},
@@ -350,4 +350,57 @@ test('credential 행이 지워졌으면 404다', async () => {
   const res = fakeRes();
   await c.getManagedAgentCredential('rt-abc', 'w1', undefined, { currentHostId: 'host-1' }, res);
   assert.equal(res.out.statusCode, 404);
+});
+
+
+test('mission preparation waits for the correlated ack and propagates a host error', async () => {
+  let outcome = null;
+  const { svc } = provisionService({ getOutcome: () => outcome });
+  let settled = false;
+  const pending = svc.provisionSlotIdentity(SPEC(), {
+    accountId: 'w1', issuedBy: 'test', waitForAckMs: 1000,
+  }).then((result) => { settled = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(settled, false, 'emitting the command is not credential readiness');
+  outcome = { status: 'error', detail: 'configured credential could not be loaded' };
+  assert.deepEqual(await pending, { ok: false, reason: outcome.detail });
+});
+
+test('mission rerun bypasses healthy heartbeat metadata and sends a full restart spec', async () => {
+  const spec = SPEC();
+  const { svc, calls } = provisionService({
+    credentials: [{ agent_id: runtimeIdentityKey(spec), kind: 'subscription' }],
+    getOutcome: () => ({ status: 'ok' }),
+  });
+  const result = await svc.provisionSlotIdentity(spec, {
+    accountId: 'w1', issuedBy: 'test', restart: true, waitForAckMs: 1000,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls[0].command, 'restart_agent');
+  assert.equal(calls[0].args.working_dir, spec.working_dir);
+  assert.equal(calls[0].args.cli, spec.cli);
+  assert.equal(calls[0].args.credential_id, spec.credential_id);
+});
+
+test('mission preparation times out without reporting a successful spawn', async () => {
+  const { svc } = provisionService();
+  assert.deepEqual(await svc.provisionSlotIdentity(SPEC(), {
+    accountId: 'w1', issuedBy: 'test', waitForAckMs: 0,
+  }), { ok: false, reason: 'provision_ack_timeout' });
+});
+
+test('a same-host identity in multiple accounts resolves the requesting mission account', async () => {
+  const ds = stubDataSource({
+    members: [
+      { team_id: 't1', agent_id: 'rt-shared', spec: SPEC() },
+      { team_id: 't2', agent_id: 'rt-shared', spec: SPEC() },
+    ],
+    teams: [{ id: 't1', account_id: 'w1' }, { id: 't2', account_id: 'w2' }],
+  });
+  const controller = controllerWith({ ds, credRow: {
+    id: 'cred-1', provider: 'claude_subscription', account_id: null, encrypted_data: CRED_FIELDS,
+  } });
+  const res = fakeRes();
+  await controller.getManagedAgentCredential('rt-shared', 'w2', undefined, { currentHostId: 'host-1' }, res);
+  assert.equal(res.out.statusCode, 200);
 });
