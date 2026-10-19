@@ -94,7 +94,7 @@ test('AgentSessionRunner.liveStates lists open sessions with their status and fo
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
       // MCP 연결이 X-AWB-Session-Id 로 보낼 값을 엿본다(기본 서버 대신 빈 목록).
       mcpServers: (ref) => { mcpRefs.push(ref); return []; },
-      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
+      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, turnStallMs: 20_000,
     },
   );
   t.after(async () => { await runner.stopAll('test').catch(() => undefined); await rm(root, { recursive: true, force: true }); });

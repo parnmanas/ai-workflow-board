@@ -132,7 +132,8 @@ export interface AgentSessionRunnerOptions {
   idleMinutes?: number;
   permissionTimeoutMs?: number;
   requestTimeoutMs?: number;
-  promptTimeoutMs?: number;
+  /** 턴이 이만큼 **진행 증거 없이** 지나면 취소한다(턴 길이 상한이 아니다 — `#checkTurnProgress`). */
+  turnStallMs?: number;
   /** 턴이 아무 이벤트도 못 내보낸 채 이만큼 지나면 트랜스크립트에 한 줄 알린다. */
   silenceWarnMs?: number;
   flushIntervalMs?: number;
@@ -255,13 +256,16 @@ interface LiveSession {
   currentMode: string | null;
   availableModes: Array<{ id: string; name: string; description?: string }>;
   /** `sawUsage` — 이 턴에 어댑터가 사용량을 보고했는가(안 했으면 기록에서 메꾼다).
-   *  `settled` — 어댑터가 `session/prompt` 에 답했다(남은 출력만 흘려보내는 중). 이때부터는 끼워 넣을 턴이 없다. */
-  turn: { turnId: string; startedAt: number; sawUsage?: boolean; settled?: boolean } | null;
+   *  `settled` — 어댑터가 `session/prompt` 에 답했다(남은 출력만 흘려보내는 중). 이때부터는 끼워 넣을 턴이 없다.
+   *  `stalled` — 진행 증거 없이 창이 지나 매니저가 취소했다(`#stopStalledTurn`). */
+  turn: { turnId: string; startedAt: number; sawUsage?: boolean; settled?: boolean; stalled?: boolean } | null;
   textBuffer: string;
   reasoningBuffer: string;
   flushTimer: NodeJS.Timeout | null;
   /** 턴이 조용한 동안 도는 감시 타이머 — 이벤트가 하나라도 나오면 꺼진다. */
   silenceTimer: NodeJS.Timeout | null;
+  /** 턴 진행 확인 타이머(`#armTurnWatch`) — 멎은 턴을 취소한 뒤에는 취소 유예 타이머가 된다. */
+  turnWatchTimer: NodeJS.Timeout | null;
   idleTimer: NodeJS.Timeout | null;
   postChain: Promise<void>;
   delivery?: AgentSessionDelivery;
@@ -284,6 +288,9 @@ interface LiveSession {
   /** 어댑터가 **무엇이든** 내보낸 마지막 시각(epoch ms). 진행 신호 1.
    *  `#enqueue` 한 곳에서만 찍는다 — 모든 이벤트가 그 깔때기를 지난다. */
   lastOutputAtMs: number | null;
+  /** **어댑터가** 마지막으로 무언가를 알린 시각 — 턴 진행 확인의 신호 1. `lastOutputAtMs` 는 매니저가
+   *  스스로 찍는 행(턴 시작·system 안내)도 세므로, 그것을 쓰면 멎은 턴이 자기 경고로 살아 있는 척한다. */
+  lastAdapterOutputAtMs: number | null;
   closing: boolean;
   exited: boolean;
 }
@@ -310,7 +317,26 @@ interface LiveSession {
 const DEFAULT_IDLE_MINUTES = 180;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;
+/**
+ * 턴의 "멎음" 판정 창. **턴 길이의 상한이 아니다** — 예전엔 `session/prompt` 의 JSON-RPC 기한이었는데,
+ * 기한이 지나면 매니저만 기다리기를 그만두고(턴 실패·오류 상태·operator 에 "타임아웃으로 종료" 보고)
+ * 어댑터에는 아무것도 알리지 않아, CLI 는 그 턴을 계속 돌렸다(실측 2026-10-19 ralf: 6시간 넘게 커밋·
+ * push 하던 claude 턴이 "종료됐다" 고 보고된 뒤에도 몇 분 더 일했다). 턴은 steering·백그라운드
+ * 서브에이전트로 얼마든지 길어질 수 있다. 그래서 이제 기한 없이 기다리고, 이 창마다 idle 회수와 같은
+ * 3-신호 gate(session-progress.ts)로 **확인**한다 — 창 내내 증거가 하나도 없을 때만 실제로 취소하고,
+ * 취소에도 답하지 않으면 프로세스를 내린다. 어느 쪽이든 AWB 가 "끝났다" 고 말하는 턴은 실제로 끝난 턴이다.
+ */
+const DEFAULT_TURN_STALL_MS = 6 * 60 * 60_000;
+/** 진행 확인 주기 — 창보다 길지 않게. 마지막 진행 뒤 `창 + 이 주기` 안에 멎음을 알아챈다. */
+const TURN_CHECK_EVERY_MS = 30 * 60_000;
+/** 멎은 턴에 `session/cancel` 을 보낸 뒤 어댑터의 답을 기다리는 시간. */
+const TURN_CANCEL_GRACE_MS = 60_000;
+
+function formatSpan(ms: number): string {
+  if (ms >= 3_600_000) return `${Math.round((ms / 3_600_000) * 10) / 10}h`;
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)} min`;
+  return `${Math.round(ms / 1000)}s`;
+}
 /**
  * 턴이 **아무것도** 내보내지 않은 채 이만큼 지나면 화면에 한 줄 알린다.
  *
@@ -498,7 +524,7 @@ export class AgentSessionRunner {
   readonly #config: AwbConfig;
   /** 진행 중인 이미지 파일 쓰기 — 이벤트를 먼저 보내므로 읽기가 이걸 기다린다. */
   readonly #imageWrites = new Map<string, Promise<void>>();
-  readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir' | 'silenceWarnMs'>>
+  readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'turnStallMs' | 'flushIntervalMs' | 'sessionHomesDir' | 'silenceWarnMs'>>
     & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher' | 'maxLineBytes'>;
   readonly #store: AgentSessionStore;
   readonly #workspaces: SessionWorkspaces;
@@ -518,7 +544,7 @@ export class AgentSessionRunner {
       idleMinutes: options.idleMinutes ?? DEFAULT_IDLE_MINUTES,
       permissionTimeoutMs: options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-      promptTimeoutMs: options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS,
+      turnStallMs: options.turnStallMs ?? DEFAULT_TURN_STALL_MS,
       silenceWarnMs: options.silenceWarnMs ?? SILENT_TURN_WARN_MS,
       flushIntervalMs: options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
       commandResolver: options.commandResolver,
@@ -928,6 +954,7 @@ export class AgentSessionRunner {
         reasoningBuffer: '',
         flushTimer: null,
         silenceTimer: null,
+        turnWatchTimer: null,
         idleTimer: null,
         postChain: Promise.resolve(),
         seq: 0,
@@ -938,6 +965,7 @@ export class AgentSessionRunner {
         runtimeLease: auth.runtimeLease ?? null,
         cliHome: auth.cliHome,
         lastOutputAtMs: null,
+        lastAdapterOutputAtMs: null,
         emittedImages: new Set(),
         closing: false,
         exited: false,
@@ -1576,10 +1604,12 @@ export class AgentSessionRunner {
     // 이미지 RPC 가 그대로 동작한다(다시열기는 opencode `file` 파트에서 같은 그림을 복원한다).
     for (const valid of validImages) this.#emitImage(live, { ...valid, uri: '' }, turnId);
     this.#armSilenceWatch(live, turnId);
+    this.#armTurnWatch(live, turnId);
     try {
+      // 기한 없이 기다린다 — 턴의 끝은 어댑터의 답, 프로세스 종료, 또는 멎은 턴의 취소가 정한다.
       const response = await live.client.prompt(
         { sessionId: live.sessionId, prompt: blocks },
-        { timeoutMs: this.#options.promptTimeoutMs },
+        { timeoutMs: 0 },
       ).finally(() => {
         // 어댑터 쪽 턴은 여기서 끝났다 — 남은 출력을 흘려보내는 동안 온 프롬프트는 끼워 넣지 않고 다음 턴으로 보낸다.
         if (live.turn?.turnId === turnId) live.turn.settled = true;
@@ -1615,13 +1645,17 @@ export class AgentSessionRunner {
       const native = err?.code === 'acp_remote_error'
         ? await this.#store.readTurnFailure(live.cli, live.sessionId, live.turn?.startedAt ?? Date.now()).catch(() => null)
         : null;
-      const message = redactSecrets(describeSessionFailure(err instanceof Error ? err : { message: String(err) }, native));
+      const message = live.turn?.turnId === turnId && live.turn.stalled
+        ? `The turn made no progress for ${formatSpan(this.#options.turnStallMs)} and ${live.cli} did not stop when cancelled — `
+          + 'AWB stopped the agent process. The next prompt resumes the session.'
+        : redactSecrets(describeSessionFailure(err instanceof Error ? err : { message: String(err) }, native));
       this.#enqueue(live, [
-        { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: turnId },
+        { type: 'error', payload: { message, code: live.turn?.stalled ? 'turn_stalled' : err?.code ?? undefined }, turn_id: turnId },
         { type: 'turn', payload: { phase: 'finished', stop_reason: 'error' }, turn_id: turnId },
       ], { status: live.exited ? 'idle' : 'error', last_error: message, reason: 'turn_failed' });
     } finally {
       this.#clearSilenceWatch(live);
+      this.#clearTurnWatch(live);
       // Heartbeats/history bypass the delivery queue. Keep the turn busy until
       // its final output drains, or they advertise Ready while old tool/text
       // events are still arriving (potentially minutes behind on a slow link).
@@ -1728,8 +1762,8 @@ export class AgentSessionRunner {
         payload: {
           text: `${live.cli} has sent nothing for ${seconds}s — no output, no tool call, no error. `
             + 'It is most likely retrying an upstream failure in silence (a rate limit or an unusable model '
-            + 'does this), so the turn can hang until the prompt timeout. Stop it and try another model if '
-            + 'nothing follows.',
+            + `does this). AWB cancels a turn only after ${formatSpan(this.#options.turnStallMs)} without any sign of progress, `
+            + 'so stop it and try another model if nothing follows.',
           code: 'turn_silent',
         },
         turn_id: turnId,
@@ -1745,9 +1779,94 @@ export class AgentSessionRunner {
     }
   }
 
+  /**
+   * 턴 진행 확인. **타이머 만료는 CHECK 이고 KILL 이 아니다**(session-progress.ts) — 오래 걸린다는 것은
+   * 증거가 아니다. 확인할 때마다 idle 회수와 같은 3-신호 gate 를 돌리고(신호 1 은 어댑터 출력만),
+   * 하나라도 신선하면 다시 건다. 사용자 결정을 기다리는 동안(권한·질문 — 자기 기한이 따로 있다)과
+   * 판정을 못 한 경우에도 멈추지 않는다.
+   */
+  #armTurnWatch(live: LiveSession, turnId: string): void {
+    this.#clearTurnWatch(live);
+    const windowMs = this.#options.turnStallMs;
+    if (windowMs <= 0) return;
+    live.turnWatchTimer = setTimeout(() => {
+      live.turnWatchTimer = null;
+      void this.#checkTurnProgress(live, turnId);
+    }, Math.min(windowMs, TURN_CHECK_EVERY_MS));
+    live.turnWatchTimer.unref?.();
+  }
+
+  #clearTurnWatch(live: LiveSession): void {
+    if (live.turnWatchTimer) {
+      clearTimeout(live.turnWatchTimer);
+      live.turnWatchTimer = null;
+    }
+  }
+
+  async #checkTurnProgress(live: LiveSession, turnId: string): Promise<void> {
+    const current = () => live.turn?.turnId === turnId && !live.turn.settled && !live.closing && !live.exited;
+    if (!current()) return;
+    const turn = live.turn!;
+    const windowMs = this.#options.turnStallMs;
+    if (live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0) {
+      this.#armTurnWatch(live, turnId);
+      return;
+    }
+    const pid = live.client.process?.pid ?? null;
+    let progress: ProgressCheckResult | null = null;
+    if (pid) {
+      try {
+        progress = await checkSessionProgress(
+          { pid, cliHomeDir: live.cliHome, cwd: live.cwd, freshMs: windowMs },
+          Math.max(live.lastAdapterOutputAtMs ?? 0, turn.startedAt),
+        );
+      } catch (err: any) {
+        log(`[agent-session] turn progress check failed ${live.cli}/${live.sessionId.slice(0, 8)}: ${err?.message ?? err} — keeping the turn`);
+      }
+    }
+    if (!current()) return;
+    if (!progress || progress.alive) {
+      const age = Date.now() - turn.startedAt;
+      if (progress && age >= windowMs) {
+        log(`[agent-session] turn ${turnId.slice(0, 8)} of ${live.cli}/${live.sessionId.slice(0, 8)} has run ${formatSpan(age)} and is still progressing (${progress.reasons.join('; ')})`);
+      }
+      this.#armTurnWatch(live, turnId);
+      return;
+    }
+    this.#stopStalledTurn(live, turnId, windowMs);
+  }
+
+  /**
+   * 창 내내 진행 증거가 없었다 — 기다리기만 그만두지 않고 **실제로 턴을 멈춘다**. 먼저 `session/cancel`
+   * (어댑터가 답하면 평범한 cancelled 턴으로 끝난다), 유예 안에 답이 없으면 어댑터가 멎은 것이므로 프로세스를
+   * 내린다(다음 프롬프트가 `--resume` 으로 다시 연다). 매니저가 끝났다고 말하는데 CLI 는 계속 도는 상태를
+   * 남기지 않기 위해서다.
+   */
+  #stopStalledTurn(live: LiveSession, turnId: string, windowMs: number): void {
+    if (!live.turn || live.turn.turnId !== turnId) return;
+    live.turn.stalled = true;
+    log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] turn ${turnId.slice(0, 8)} made no progress for ${formatSpan(windowMs)} — cancelling`);
+    this.#enqueue(live, [{
+      type: 'system',
+      payload: {
+        text: `No progress for ${formatSpan(windowMs)} — no output from ${live.cli}, no background task, no cli-home activity. Cancelling the turn.`,
+        code: 'turn_stalled',
+      },
+      turn_id: turnId,
+    }]);
+    void live.client.cancel(live.sessionId).catch(() => undefined);
+    live.turnWatchTimer = setTimeout(() => {
+      live.turnWatchTimer = null;
+      if (live.turn?.turnId !== turnId || live.turn.settled || live.closing || live.exited) return;
+      void this.#closeLive(live.cli, live.sessionId, 'idle', 'stalled');
+    }, Math.min(TURN_CANCEL_GRACE_MS, windowMs));
+    live.turnWatchTimer.unref?.();
+  }
+
   // ─── ACP 스트림 → 서버 ───────────────────────────────────────────────
 
   #onEvent(live: LiveSession, event: RuntimeEvent): void {
+    live.lastAdapterOutputAtMs = Date.now();
     // Metadata is live control state even during session/load replay, or before
     // session/new has returned an id. Publish it with the opening snapshot.
     if (event.type === 'diagnostic' && event.method === 'session/update') {

@@ -314,6 +314,23 @@ rl.on('line', (line) => {
           sessionUpdate: 'session_info_update', title: process.env.FAKE_ACP_PROMPT_TITLE,
         } },
       });
+      if (JSON.stringify(message.params.prompt).includes('TICK_TURN_TEST')) {
+        // 오래 걸리지만 계속 일하는 턴 — 일정 간격으로 출력하다 끝난다(멎은 턴과 구분되어야 한다).
+        const ticks = Number(process.env.FAKE_ACP_TICKS) || 10;
+        const everyMs = Number(process.env.FAKE_ACP_TICK_MS) || 100;
+        let n = 0;
+        const timer = setInterval(() => {
+          n += 1;
+          send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+            sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `step ${n} ` },
+          } } });
+          if (n >= ticks) {
+            clearInterval(timer);
+            result(message.id, { stopReason: 'end_turn' });
+          }
+        }, everyMs);
+        break;
+      }
       if (JSON.stringify(message.params.prompt).includes('HOLD_TURN_TEST')) {
         // 일하는 중인 턴 — steering 이나 cancel 이 올 때까지 열어 둔다.
         heldPrompt = message.id;

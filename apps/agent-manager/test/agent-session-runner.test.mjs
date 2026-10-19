@@ -123,7 +123,7 @@ async function harness(t, runnerOptions = {}, adapterEnv = {}) {
       idleMinutes: 0,
       permissionTimeoutMs: 5000,
       requestTimeoutMs: 10_000,
-      promptTimeoutMs: 20_000,
+      turnStallMs: 20_000,
       ...runnerOptions,
     },
   );
@@ -559,7 +559,7 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
         fetches.push({ id, ws });
         return provider ? { credential_id: id, provider, fields } : null;
       },
-      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
+      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, turnStallMs: 20_000,
     },
   );
   base.holdsRoot(runner);
@@ -1138,7 +1138,7 @@ test('credential (opencode_api_key): the nested session-store link is created wi
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
       baseEnv: { ...process.env, HOME: operatorHome, FAKE_ACP_CAPTURE_FILE: captureFile, OPENCODE_API_KEY: 'operator-shell-key' },
       credentialFetcher: async (id) => ({ credential_id: id, provider: 'opencode_api_key', fields: { api_key: 'sk-go-test' } }),
-      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
+      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, turnStallMs: 20_000,
     },
   );
   h.holdsRoot(runner);
@@ -1165,7 +1165,7 @@ test('credential (opencode_api_key): the nested session-store link is created wi
 // 프롬프트 타임아웃은 기본 6시간이라 화면은 그동안 "Working" 하나만 띄운 채 멈춰 있었다.
 // 턴을 죽이지는 않되, 아무 말도 없었다는 사실만은 알려야 한다.
 test('a turn that emits nothing gets a silence warning in the transcript, and a talking turn does not', async (t) => {
-  const quiet = await harness(t, { promptTimeoutMs: 4000, silenceWarnMs: 150 }, { FAKE_ACP_SILENT_PROMPT: '1' });
+  const quiet = await harness(t, { turnStallMs: 1000, silenceWarnMs: 150 }, { FAKE_ACP_SILENT_PROMPT: '1' });
   await quiet.runner.handle(request('open', { request_id: 'rpc-silent', session_id: null, cwd: quiet.cwd }));
   const sid = quiet.server.rpc('rpc-silent').result.session_id;
   await quiet.runner.handle(request('prompt', { session_id: sid, turn_id: 'turn-silent', text: 'hello?' }));
@@ -1176,7 +1176,7 @@ test('a turn that emits nothing gets a silence warning in the transcript, and a 
   await quiet.runner.handle(request('close', { session_id: sid }));
 
   // 말을 하는 턴은 경고하지 않는다 — 감시는 첫 이벤트에서 꺼진다.
-  const talking = await harness(t, { promptTimeoutMs: 20_000, silenceWarnMs: 150 });
+  const talking = await harness(t, { turnStallMs: 20_000, silenceWarnMs: 150 });
   await talking.runner.handle(request('open', { request_id: 'rpc-talk', session_id: null, cwd: talking.cwd }));
   const tid = talking.server.rpc('rpc-talk').result.session_id;
   await talking.runner.handle(request('prompt', { session_id: tid, turn_id: 'turn-talk', text: 'hello' }));
@@ -1186,6 +1186,52 @@ test('a turn that emits nothing gets a silence warning in the transcript, and a 
     'a turn that streamed text must not be flagged as silent',
   );
   await talking.runner.handle(request('close', { session_id: tid }));
+});
+
+test('a turn that runs past the stall window keeps going while it shows progress — no timeout, no false "ended"', async (t) => {
+  // 2026-10-19 ralf: 6시간 넘게 커밋·push 하던 claude 턴이 session/prompt 기한에 걸려 "타임아웃으로 종료" 로 보고됐는데,
+  // CLI 는 그 뒤로도 몇 분 더 일했다. 창은 턴 길이 상한이 아니라 "진행 증거 없음" 의 창이다.
+  const { cwd, server, runner } = await harness(t, { turnStallMs: 300, silenceWarnMs: 0 }, { FAKE_ACP_TICKS: '12', FAKE_ACP_TICK_MS: '100' });
+  await runner.handle(request('open', { request_id: 'rpc-long', session_id: null, cwd }));
+  const sid = server.rpc('rpc-long').result.session_id;
+  const started = Date.now();
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-long', text: 'TICK_TURN_TEST build everything' }));
+  assert.ok(Date.now() - started >= 1000, 'the turn outlived the 300ms window several times over');
+  const events = server.events(sid);
+  assert.equal(events.some((e) => e.payload?.code === 'turn_stalled' || e.type === 'error'), false, JSON.stringify(events.filter((e) => e.type !== 'text')));
+  const finished = events.filter((e) => e.type === 'turn').at(-1);
+  assert.equal(finished.payload.stop_reason, 'end_turn', 'the turn ended when the CLI ended it');
+  assert.equal(finished.state.status, 'ready');
+  assert.match(events.filter((e) => e.type === 'text').map((e) => e.payload.text).join(''), /step 12/);
+});
+
+test('a turn with no progress for the whole window is actually cancelled — the CLI stops too, not just the manager', async (t) => {
+  const { cwd, server, runner } = await harness(t, { turnStallMs: 300, silenceWarnMs: 0 });
+  await runner.handle(request('open', { request_id: 'rpc-stall', session_id: null, cwd }));
+  const sid = server.rpc('rpc-stall').result.session_id;
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-stall', text: 'HOLD_TURN_TEST then go quiet' }));
+  const events = server.events(sid);
+  const stalled = events.find((e) => e.payload?.code === 'turn_stalled');
+  assert.ok(stalled, 'the transcript says why the turn stopped');
+  assert.match(stalled.payload.text, /No progress for/);
+  const finished = events.filter((e) => e.type === 'turn').at(-1);
+  assert.equal(finished.payload.stop_reason, 'cancelled', 'the adapter was told to stop and answered as cancelled');
+  assert.equal(finished.state.status, 'ready');
+  assert.equal(runner._snapshot().length, 1, 'an adapter that honours cancel keeps its process');
+});
+
+test('a stalled turn whose adapter ignores cancel gets its process stopped, so nothing keeps running behind a "failed" turn', async (t) => {
+  const { cwd, server, runner } = await harness(t, { turnStallMs: 300, silenceWarnMs: 0 }, { FAKE_ACP_SILENT_PROMPT: '1' });
+  await runner.handle(request('open', { request_id: 'rpc-wedged', session_id: null, cwd }));
+  const sid = server.rpc('rpc-wedged').result.session_id;
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-wedged', text: 'hello?' }));
+  await waitFor(() => server.events(sid).some((e) => e.state?.status === 'idle'), 'idle after the process is stopped');
+  const events = server.events(sid);
+  assert.ok(events.some((e) => e.payload?.code === 'turn_stalled' && e.type === 'system'), 'cancel notice');
+  const error = events.find((e) => e.type === 'error');
+  assert.equal(error?.payload.code, 'turn_stalled');
+  assert.match(error.payload.message, /did not stop when cancelled/);
+  assert.equal(runner._snapshot().length, 0, 'the wedged process is gone');
 });
 
 test('provider failure details reach the existing error event and state with secrets redacted', async (t) => {

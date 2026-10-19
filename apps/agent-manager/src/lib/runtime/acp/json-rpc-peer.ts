@@ -44,7 +44,7 @@ export class AcpProtocolError extends Error {
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: unknown): void;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | undefined;
   removeAbort?: () => void;
 }
 
@@ -68,6 +68,7 @@ export interface JsonRpcPeerOptions {
 }
 
 export interface JsonRpcRequestOptions {
+  /** 0 이하나 Infinity 는 "기한 없음" — 끝은 응답·`signal`·연결 종료가 정한다. */
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -150,13 +151,14 @@ export class JsonRpcPeer {
     const id = this.#nextId++;
     const timeoutMs = options.timeoutMs ?? this.#options.requestTimeoutMs;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      // setTimeout 은 2^31-1ms 를 넘거나 Infinity 면 1ms 로 접혀 곧바로 발화한다 — 기한 없음은 타이머 없음이다.
+      const timer = timeoutMs > 0 && Number.isFinite(timeoutMs) ? setTimeout(() => {
         this.#pending.delete(id);
         reject(new AcpProtocolError(
           'acp_timeout',
           `ACP request timed out after ${timeoutMs}ms: ${method}`,
         ));
-      }, timeoutMs);
+      }, timeoutMs) : undefined;
 
       const pending: PendingRequest = {
         resolve: (value) => resolve(value as T),
