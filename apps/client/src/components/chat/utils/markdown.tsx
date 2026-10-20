@@ -19,28 +19,24 @@ import CodeBlock from '../../common/CodeBlock';
 const ROLE_SHORTCUTS = new Set(['reviewer', 'assignee', 'reporter']);
 const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;
 
-function trimAutoLinkEnd(candidate: string): string {
+function autoLinkHref(candidate: string): string {
   const brackets: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
   const balance: Record<string, number> = { '(': 0, '[': 0, '{': 0 };
-  for (const char of candidate) {
-    if (char in balance) balance[char]++;
-    else if (char in brackets) balance[brackets[char]]--;
-  }
-
   let end = candidate.length;
-  while (end > 0) {
-    const char = candidate[end - 1];
-    const opening = brackets[char];
-    if (opening && balance[opening] < 0) {
-      balance[opening]++;
-      end--;
-    } else if (/[.,!?;:]/.test(char)) {
-      end--;
-    } else {
-      break;
+  for (let i = 0; i < candidate.length; i++) {
+    const char = candidate[i];
+    if (char in balance) balance[char]++;
+    else if (char in brackets) {
+      const opening = brackets[char];
+      // An unmatched closing bracket ends the URL even in `)에서`, not just at EOF.
+      if (balance[opening] === 0) {
+        end = i;
+        break;
+      }
+      balance[opening]--;
     }
   }
-  return candidate.slice(0, end);
+  return candidate.slice(0, end).replace(/[.,!?;:]+$/, '');
 }
 
 export interface MentionParticipant {
@@ -242,9 +238,14 @@ function renderInlineMarkdown(text: string, participants?: MentionParticipant[])
         }
 
         // Step 2: Apply bold, italic, links to non-mention, non-code segments
-        const segments = mp.split(/(\*\*[^*]+\*\*|\*[^*]+\*|https?:\/\/[^\s<>"']+)/g);
-        for (const seg of segments) {
-          if (!seg) continue;
+        const inline = /\*\*[^*]+\*\*|\*[^*]+\*|https?:\/\/[^\s<>"']+/g;
+        let inlineCursor = 0;
+        let inlineMatch: RegExpExecArray | null;
+        while ((inlineMatch = inline.exec(mp)) !== null) {
+          if (inlineMatch.index > inlineCursor) {
+            nodes.push(<React.Fragment key={keyIdx++}>{mp.slice(inlineCursor, inlineMatch.index)}</React.Fragment>);
+          }
+          const seg = inlineMatch[0];
           if (seg.startsWith('**') && seg.endsWith('**') && seg.length > 4) {
             nodes.push(
               <strong key={keyIdx++} style={{ fontWeight: 600 }}>
@@ -256,16 +257,19 @@ function renderInlineMarkdown(text: string, participants?: MentionParticipant[])
           } else if (/^https?:\/\//.test(seg)) {
             // T-07-12: Only allow http/https — reject javascript: and data: schemes
             // Keep balanced URL brackets, but leave surrounding prose outside the link.
-            const href = trimAutoLinkEnd(seg);
+            const href = autoLinkHref(seg);
             nodes.push(
               <InlineLink key={keyIdx++} href={href} />,
             );
-            if (href.length < seg.length) {
-              nodes.push(<React.Fragment key={keyIdx++}>{seg.slice(href.length)}</React.Fragment>);
-            }
+            // Resume at the actual URL end so adjacent prose can contain another link.
+            inline.lastIndex = inlineMatch.index + href.length;
           } else {
             nodes.push(<React.Fragment key={keyIdx++}>{seg}</React.Fragment>);
           }
+          inlineCursor = inline.lastIndex;
+        }
+        if (inlineCursor < mp.length) {
+          nodes.push(<React.Fragment key={keyIdx++}>{mp.slice(inlineCursor)}</React.Fragment>);
         }
       }
       }
