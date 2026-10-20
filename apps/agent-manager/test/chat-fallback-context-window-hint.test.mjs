@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildChatFallbackMessage } from '../dist/lib/chat-session-manager.js';
+import { buildChatFallbackMessage, ChatSessionManager } from '../dist/lib/chat-session-manager.js';
 
 test('빈 body → exit code 와 무관하게 출력 없음 메시지', () => {
   assert.equal(buildChatFallbackMessage('', 1), '⚠️ Agent가 응답하지 못했습니다 (출력 없음).');
@@ -42,4 +42,57 @@ test('exit code 0(에러 컨텍스트 없음)에서 "context window" 를 언급�
   // 문구를 우연히 인용한 tail 에 대한 오탐을 막는다.
   const message = buildChatFallbackMessage('mentions context window limit in passing', 0);
   assert.doesNotMatch(message, /컨텍스트 윈도우/);
+});
+
+test('persistent turn failure is visible before process exit and is not duplicated on exit', async (t) => {
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(init.body) });
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const manager = new ChatSessionManager({
+    url: 'http://localhost:0', apiKey: 'manager-test',
+    delegation: { enabled: true, maxConcurrent: 10, idleMinutes: 999, maxTurnsPerSession: 999 },
+  });
+  const session = {
+    pid: 12345, roomId: 'room-1', agentId: 'agent-1', cli_type: 'claude',
+    turnCount: 1, _effectiveApiKey: 'runtime-test',
+  };
+  const result = {
+    isResult: true, isError: true,
+    raw: { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 500 Unexpected reasoning effort max.' },
+  };
+  const notices = () => requests.filter((r) => r.body.content?.includes('Agent 실행 턴이 실패'));
+  manager._onStdoutParsed(session, result, '');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notices().length, 1);
+  assert.match(notices()[0].body.content, /Unexpected reasoning effort max/);
+
+  manager._onStdoutParsed(session, result, '');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notices().length, 1, 'duplicate result frame is not posted twice');
+  session.turnCount++;
+  manager._onStdoutParsed(session, result, '');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notices().length, 2, 'a later failed turn is still reported');
+
+  await manager._onChildExit(session, 0, null);
+  assert.equal(requests.filter((r) => typeof r.body.content === 'string').length, 2, 'exit adds no duplicate fallback');
+});
+
+test('successful persistent result does not emit a failure notice', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response('{}'); };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const manager = new ChatSessionManager({ url: 'http://localhost:0', apiKey: 'test', delegation: { enabled: true } });
+  manager._onStdoutParsed(
+    { pid: 12346, roomId: 'room', agentId: 'agent', turnCount: 1 },
+    { isResult: true, isError: false, raw: { type: 'result', subtype: 'success', is_error: false } },
+    '',
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
 });

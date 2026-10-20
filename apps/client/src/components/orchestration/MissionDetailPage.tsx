@@ -15,6 +15,8 @@ import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
 import { relativeTime } from '../../utils/time';
+import { copyPlainText } from '../../utils/clipboard';
+import MissionHeaderMenu, { MissionIdentity } from './MissionHeaderMenu';
 import PlanGraph from './PlanGraph';
 import ConfirmRequestPanel from './ConfirmRequestPanel';
 import MissionConversationPanel from './MissionConversationPanel';
@@ -41,13 +43,13 @@ import { missionStyle, progressPercent } from './status';
 export default function MissionDetailPage() {
   const { missionId = '' } = useParams<{ missionId: string }>();
   const { currentAccountId } = useAuth();
-  const accountId = currentAccountId || '';
   const navigate = useNavigate();
   const compact = useMediaQuery('(max-width: 1100px)');
   const [stepsOpen, setStepsOpen] = useState(false);
   const { showToast } = useToast();
 
   const [mission, setMission] = useState<OrchestrationMissionDetail | null>(null);
+  const accountId = mission?.id === missionId ? mission.account_id : currentAccountId || '';
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
@@ -61,6 +63,8 @@ export default function MissionDetailPage() {
   const [showCancel, setShowCancel] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
+  const deleting = useRef(false);
   const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -144,6 +148,26 @@ export default function MissionDetailPage() {
   }
 
   const selectedStep = mission.steps.find((s) => s.id === selectedStepId) || null;
+  const copyMissionId = async () => {
+    const copied = await copyPlainText(mission.id);
+    showToast(copied ? 'Mission ID copied' : 'Could not copy mission ID', copied ? 'success' : 'error');
+  };
+  const deleteMission = async () => {
+    if (deleting.current || busy) return;
+    deleting.current = true;
+    setBusy(true);
+    try {
+      await api.deleteOrchestrationMission(mission.id, mission.account_id);
+      setShowDelete(false);
+      showToast('Mission deleted', 'success');
+      navigate('/missions');
+    } catch (e: any) {
+      showToast(e?.message || 'Could not delete mission', 'error');
+    } finally {
+      deleting.current = false;
+      setBusy(false);
+    }
+  };
   /**
    * 종료된 미션 되살리기. 성공하면 상태가 running 으로 돌아오고 orchestrator 가 방에서
    * 깨어나므로, 화면은 곧 대화가 이어지는 상태가 된다.
@@ -166,9 +190,6 @@ export default function MissionDetailPage() {
             </Button>
             {mission.status === 'draft' && (
               <>
-                <Button variant="secondary" size="sm" onClick={() => setShowEdit(true)}>
-                  Edit
-                </Button>
                 <Button
                   variant="primary"
                   size="sm"
@@ -219,6 +240,13 @@ export default function MissionDetailPage() {
                 Reopen
               </Button>
             )}
+            <MissionHeaderMenu
+              mission={mission}
+              busy={busy}
+              onCopy={() => void copyMissionId()}
+              onEdit={() => setShowEdit(true)}
+              onDelete={() => setShowDelete(true)}
+            />
           </>
         }
       />
@@ -401,7 +429,7 @@ export default function MissionDetailPage() {
               </div>
             ) : (
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>
-                <BriefPane mission={mission} teams={teams} />
+                <BriefPane mission={mission} teams={teams} onCopyId={() => void copyMissionId()} />
               </div>
             )}
           </div>
@@ -429,6 +457,15 @@ export default function MissionDetailPage() {
           setMission(m);
           setShowNudge(false);
         }}
+      />
+
+      <ConfirmDialog
+        isOpen={showDelete}
+        title="Delete mission?"
+        message={`Delete "${mission.title}" and its steps? This cannot be undone.\nMission ID: ${mission.id}`}
+        confirmLabel={busy ? 'Deleting…' : 'Delete mission'}
+        onConfirm={() => void deleteMission()}
+        onCancel={() => { if (!deleting.current) setShowDelete(false); }}
       />
 
       <ConfirmDialog
@@ -684,13 +721,20 @@ function Prose({ text, muted }: { text: string; muted?: boolean }) {
  * 절반을 차지하고 있어서, 지금 움직이는 것을 보려면 매번 지나쳐 스크롤해야 했다.
  * 필요할 때 한 번 읽는 자료는 한 번에 찾을 수 있는 자리에 모아 두는 편이 낫다.
  */
-function BriefPane({ mission, teams }: { mission: OrchestrationMissionDetail; teams: OrchestrationTeam[] }) {
+function BriefPane({ mission, teams, onCopyId }: {
+  mission: OrchestrationMissionDetail;
+  teams: OrchestrationTeam[];
+  onCopyId: () => void;
+}) {
   const excluded = mission.excluded_member_ids ?? [];
   const extras = mission.extra_members ?? [];
   const team = teams.find((t) => t.id === mission.team_id) || null;
   const excludedNames = excluded.map((id) => team?.members.find((m) => m.agent_id === id)?.agent_name || id.slice(0, 11));
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820 }}>
+      <Section title="Mission information">
+        <MissionIdentity id={mission.id} onCopy={onCopyId} />
+      </Section>
       {(excluded.length > 0 || extras.length > 0) && (
         <Section title={`Team roster for this mission — ${team?.name ?? mission.team_name}`}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>

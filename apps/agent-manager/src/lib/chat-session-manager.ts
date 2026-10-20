@@ -143,8 +143,9 @@ export class ChatSessionManager
   // that reuse the same sessionKey after respawn. Output buffering lives on
   // the base class (`_outputRings` + `_collectOutputTail`) — both ticket and
   // chat managers share that ring, this set just records whether the agent
-  // actually called `send_chat_room_message` during this pid's lifetime.
+  // actually called `send_chat_room_message` during the current turn.
   #chatSent = new Set<number>();
+  #reportedErrorTurn = new Map<number, number>();
   // Per-session progress emit state. Same pid keying as the others so a
   // respawned child gets a fresh budget without leaking the previous
   // session's last-emit timestamp / count.
@@ -312,6 +313,7 @@ export class ChatSessionManager
       // by spec.onExit, which ordinary chat turns never set) so a hypothetical
       // reuse can't strand a held lock until the manager restarts.
       if (spec.onExit) sess.releaseRunLock = spec.onExit;
+      this.#chatSent.delete(sess.pid);
       this._sendFollowUp(sess, followupText, { onProgress: spec.onProgress, images });
       return { dispatched: true, pid: sess.pid };
     }
@@ -467,6 +469,11 @@ export class ChatSessionManager
     // Without this, `finalSeen=true` from turn 1 would silently suppress all
     // future turns on the same pid.
     if (parsed.isResult) {
+      // A persistent CLI can fail a turn without exiting. Waiting for child
+      // exit hides API/auth errors until the idle reaper eventually runs.
+      if (parsed.isError === true || parsed.raw?.is_error === true) {
+        this.#reportTurnError(sess, parsed);
+      }
       this.#progressMeta.delete(sess.pid);
       // F-1 (ticket 24694916): turn ended — every tool_use + tool_result line for
       // this turn has already been parsed, so flush the captured ticket-action refs
@@ -524,6 +531,23 @@ export class ChatSessionManager
 
   protected _onStderrLine(_sess: SessionRecord, _line: string): void {
     // Stderr buffering handled in BaseSessionManager#wireStdio (shared ring).
+  }
+
+  #reportTurnError(sess: SessionRecord, parsed: ParseResult): void {
+    if (!sess.roomId || !sess.agentId || this.#reportedErrorTurn.get(sess.pid) === sess.turnCount) return;
+    this.#reportedErrorTurn.set(sess.pid, sess.turnCount);
+    const raw = parsed.raw;
+    const detail = [
+      typeof raw?.result === 'string' ? raw.result : '',
+      ...(Array.isArray(raw?.errors) ? raw.errors.filter((e: unknown) => typeof e === 'string') : []),
+    ].filter(Boolean).join('\n') || this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);
+    const message = `⚠️ Agent 실행 턴이 실패했습니다 (cli=${sess.cli_type}).\n` +
+      (detail ? `\`\`\`\n${detail.slice(-FALLBACK_MAX_CHARS)}\n\`\`\`` : 'CLI가 오류 결과를 반환했습니다.');
+    void postChatRoomMessage({
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    }, sess.roomId, sess.agentId, message);
   }
 
   // -- Visibility overrides (ticket 6ff827cb) --------------------------------
@@ -678,13 +702,14 @@ export class ChatSessionManager
     // ticket actions (before the turn-end result line), still emit their card so a
     // crash never drops a "누락 없이" ticket-action card. No-op when already flushed.
     this.#flushTicketRefs(sess);
-    const sent = this.#chatSent.has(sess.pid);
+    const sent = this.#chatSent.has(sess.pid) || this.#reportedErrorTurn.get(sess.pid) === sess.turnCount;
     // Snapshot the buffered output BEFORE the base class clears it (the
     // base clears the ring after this hook returns).
     const body = sent ? '' : this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);
 
     // Cleanup tracking state regardless of outcome.
     this.#chatSent.delete(sess.pid);
+    this.#reportedErrorTurn.delete(sess.pid);
     this.#progressMeta.delete(sess.pid);
 
     // Evict this room's in-memory history bucket once no other live session

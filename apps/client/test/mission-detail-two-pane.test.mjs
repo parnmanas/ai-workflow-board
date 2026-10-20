@@ -16,6 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, React, act } from './helpers/jsdom.mjs';
 import MissionStepRail from '../src/components/orchestration/MissionStepRail.tsx';
+import MissionHeaderMenu from '../src/components/orchestration/MissionHeaderMenu.tsx';
 import { api } from '../src/api.ts';
 import StepSessionPanel, {
   buildStepSessionRows,
@@ -58,6 +59,40 @@ const step = (key, overrides = {}) => ({
 });
 
 const COUNTS = { total: 3, done: 1, failed: 0, inFlight: 1, pending: 1, awaitingUser: 0 };
+
+test('mission menu exposes the full reference ID and guards edit/delete by lifecycle', async (t) => {
+  const dom = setupDom();
+  const calls = [];
+  const id = '9b80b315-5e8b-4594-afaf-8a4934cf0428';
+  const props = {
+    mission: { id, status: 'running' }, busy: false,
+    onCopy: () => calls.push('copy'),
+    onEdit: () => calls.push('edit'),
+    onDelete: () => calls.push('delete'),
+  };
+  const view = mount(React.createElement(MissionHeaderMenu, props));
+  t.after(() => { view.unmount(); dom.cleanup(); });
+  const button = (label) => [...view.container.querySelectorAll('button')].find((b) => b.textContent.includes(label));
+  await act(async () => view.container.querySelector('[aria-label="Mission menu"]').click());
+  assert.match(view.container.textContent, new RegExp(id));
+  await act(async () => view.container.querySelector('[aria-label="Copy mission ID"]').click());
+  assert.deepEqual(calls, ['copy']);
+  assert.equal(button('Edit mission').disabled, true);
+  assert.equal(button('Delete mission').disabled, true);
+  assert.match(button('Delete mission').title, /Cancel/);
+
+  view.rerender(React.createElement(MissionHeaderMenu, { ...props, mission: { id, status: 'draft' } }));
+  assert.equal(button('Edit mission').disabled, false);
+  await act(async () => button('Edit mission').click());
+  assert.deepEqual(calls, ['copy', 'edit']);
+  assert.equal(view.container.querySelector('[aria-label="Mission menu"]').getAttribute('aria-expanded'), 'false');
+  await act(async () => view.container.querySelector('[aria-label="Mission menu"]').click());
+  view.rerender(React.createElement(MissionHeaderMenu, { ...props, mission: { id, status: 'completed' } }));
+  assert.equal(button('Edit mission').disabled, true);
+  assert.equal(button('Delete mission').disabled, false);
+  await act(async () => button('Delete mission').click());
+  assert.deepEqual(calls, ['copy', 'edit', 'delete']);
+});
 
 async function renderRail(t, props) {
   const dom = setupDom();
