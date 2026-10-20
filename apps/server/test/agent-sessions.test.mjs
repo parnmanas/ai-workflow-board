@@ -277,7 +277,7 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
     'restart 는 같은 세션 id 로 나간다 — 새 세션을 만드는 것이 아니다',
   );
 
-  // 6. rpc timeout surfaces as 504 (nobody answers)
+  // 6. offline hosts and manager not_found replies surface as 404.
   const orig = requests.length;
   const slow = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions/never-answered`, { headers: ownerHeaders });
   await waitFor(() => requests.length > orig, 'history rpc emitted');

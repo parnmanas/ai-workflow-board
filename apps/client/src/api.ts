@@ -168,6 +168,21 @@ function getAuthHeaders(): Record<string, string> {
   return headers;
 }
 
+/**
+ * One readable line for a failed response. The server's `message` (structured
+ * errors set it) wins over the `error` slug. A body that is not JSON — or JSON
+ * carrying markup — is a proxy's error page (Cloudflare replaces an origin
+ * 502/504 with its own HTML), so only its status is named, never its body:
+ * "Request failed" alone told the user nothing (2026-10-20).
+ */
+export function apiErrorMessage(status: number, body: any): string {
+  const detail = body?.message || body?.error;
+  if (typeof detail === 'string' && detail.trim() && !/<[!/?a-z][^>]*>/i.test(detail)) return detail;
+  return status === 504 || status === 524
+    ? `서버 응답 시간이 초과되었습니다 (HTTP ${status}). 잠시 후 다시 시도해 주세요.`
+    : `요청에 실패했습니다 (HTTP ${status}). 잠시 후 다시 시도해 주세요.`;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     headers: getAuthHeaders(),
@@ -178,14 +193,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       localStorage.removeItem('auth_token');
       window.dispatchEvent(new Event('auth-expired'));
     }
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    // Prefer the server's human-readable `message` (structured errors set it)
-    // so toasts show a legible
-    // reason instead of a machine slug; fall back to the `error` slug, then a
-    // generic string. The machine-readable `code`/`error` slug + HTTP status are
-    // preserved on the thrown error so callers can still branch on the *kind* of
-    // failure instead of pattern-matching the message.
-    const error = new Error(err.message || err.error || 'Request failed') as ApiError;
+    const err = (await res.json().catch(() => null)) ?? {};
+    // The machine-readable `code`/`error` slug + HTTP status are preserved on
+    // the thrown error so callers can still branch on the *kind* of failure
+    // instead of pattern-matching the message.
+    const error = new Error(apiErrorMessage(res.status, err)) as ApiError;
     if (err.code) error.code = err.code;
     else if (typeof err.error === 'string') error.code = err.error;
     error.status = res.status;
@@ -225,13 +237,7 @@ async function fetchOk(path: string, init: RequestInit & { contentType?: string 
     }
     const err = await res.json().catch(() => null);
     // Proxies can return an HTML error page. Only expose a short API message, never the response body.
-    const detail = err?.message || err?.error;
-    const fallback = res.status === 504
-      ? '서버 응답 시간이 초과되었습니다 (HTTP 504). 잠시 후 다시 시도해 주세요.'
-      : `요청에 실패했습니다 (HTTP ${res.status}). 잠시 후 다시 시도해 주세요.`;
-    const message = typeof detail === 'string' && !/<[!/?a-z][^>]*>/i.test(detail)
-      ? detail.slice(0, 300) : fallback;
-    const error = new Error(message) as Error & { code?: string; status?: number };
+    const error = new Error(apiErrorMessage(res.status, err).slice(0, 300)) as Error & { code?: string; status?: number };
     if (typeof err?.code === 'string') error.code = err.code;
     else if (typeof err?.error === 'string') error.code = err.error;
     error.status = res.status;

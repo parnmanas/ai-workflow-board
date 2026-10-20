@@ -149,6 +149,12 @@ credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using
   local_image — `open` 은 중복 실행 위험으로 제외)는 그 매니저 스트림이 붙으면(`AgentConnectivityRegistry.onBecameReachable`)
   같은 request_id 로 다시 보내고 타임아웃도 새로 잰다. 사이드바도 목록 실패를 "세션 없음" 으로 저장하지 않고 마지막
   목록을 유지한 채 다시 묻는다(`Sidebar.tsx` `loadHostSessions`).
+  **RPC 실패의 기본 HTTP 상태는 502/504 가 아니다**: 매니저가 실패를 답하면 기본 422, 시간 초과는 503(사유는 `message`).
+  `not_found`(404), 잘못된 경로(400), 이미지 형식(415)·크기(413) 오류는 기존 상태를 유지한다.
+  앞단 Cloudflare 가 origin 의 502/504 를 자기 HTML 오류 페이지로 바꿔, 매니저가 정확히 말한 사유("The repository is
+  on … with local changes")가 화면에 "Request failed" 로만 보였다(2026-10-20). 터미널 RPC 도 같다 —
+  `common/host-rpc-status.ts`. 화면은 그래도 가려진 응답을 받으면 본문 대신 상태 코드를 말한다(`api.ts` `apiErrorMessage`).
+  open 타임아웃은 120s다. 배포 환경의 프록시 제한이 먼저 걸리면 서버 응답 대신 524를 받을 수 있다.
 - **매니저 `agent-session-store.ts`** — CLI 홈 리더. Claude: `projects/*/*.jsonl` (`agent-*.jsonl` 서브에이전트 파일과
   프롬프트 없는 빈 세션 제외, `custom-title` 우선, sidechain 행 제외). Codex: `sessions/**/rollout-*.jsonl`
   (`session_meta` → id/cwd, developer/environment_context 메시지는 제목에서 제외). 기록은 같은 파일을 트랜스크립트

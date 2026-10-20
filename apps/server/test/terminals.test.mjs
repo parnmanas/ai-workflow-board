@@ -152,6 +152,29 @@ test('terminals relay: hosts → RPC list/open/attach → input/resize → outpu
   assert.equal(badShell.body.error, 'shell_unknown');
   assert.equal(requests.length, before, 'an unknown shell never reaches the Runtime Host');
 
+  // Host failures retain their reason and code through the HTTP boundary.
+  for (const [reply, status, code, message] of [
+    [{ ok: false, code: 'manager_error', error: 'Unable to start the requested shell.' }, 422, 'manager_error', 'Unable to start the requested shell.'],
+    [{ ok: false, code: 'timeout', error: 'The Runtime Host did not respond in time.' }, 503, 'timeout', 'The Runtime Host did not respond in time.'],
+    [{ ok: false, code: 'not_found', error: 'Shell not found.' }, 404, 'not_found', 'Shell not found.'],
+    [{ ok: true, result: {} }, 422, 'manager_error', 'Runtime Host did not return a terminal id.'],
+  ]) {
+    const previousCount = requests.length;
+    const pending = call(`${base}/api/terminals/hosts/${managerId}/terminals`, {
+      method: 'POST', headers: ownerHeaders, body: JSON.stringify({ shell: 'bash' }),
+    });
+    await waitFor(() => requests.slice(previousCount).some((r) => r.op === 'open'), 'failed open rpc');
+    const request = requests.slice(previousCount).find((r) => r.op === 'open');
+    const acknowledged = await call(`${base}/api/agent/terminals/rpc/${request.request_id}`, {
+      method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...reply }),
+    });
+    assert.equal(acknowledged.status, 200, acknowledged.text);
+    const failed = await pending;
+    assert.equal(failed.status, status, failed.text);
+    assert.equal(failed.body.error, code);
+    assert.equal(failed.body.message, message);
+  }
+
   // 3. list — 매니저의 라이브 테이블이 원천. 죽은 행은 답에 실려도 목록에 넣지 않는다.
   const listCall = call(`${base}/api/terminals/hosts/${managerId}/terminals`, { headers: ownerHeaders });
   await rpcRespond((r) => r.op === 'list', {

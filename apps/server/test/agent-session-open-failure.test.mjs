@@ -89,8 +89,10 @@ test('open 이 실패하면 그 사유가 세션 상태에 남고 driver 에게 
   });
 
   // 1. HTTP 응답이 사유를 그대로 싣는다 — 화면 토스트가 읽는 값.
+  //    502 가 아니라 422: 앞단 Cloudflare 가 origin 의 502/504 를 자기 HTML 로 바꿔 사유가
+  //    화면에 닿지 않았다("Request failed" 만 보였다, 2026-10-20 — common/host-rpc-status.ts).
   const failed = await openCall;
-  assert.equal(failed.status, 502, failed.text);
+  assert.equal(failed.status, 422, failed.text);
   assert.equal(failed.body.error, 'resume_locked', '기계가 분기할 코드는 보존된다');
   assert.equal(failed.body.message, REASON, '사람이 읽을 사유가 그대로 온다');
 
@@ -166,10 +168,29 @@ test('세션 id 없이 새로 여는 경우는 붙일 곳이 없으므로 상태
   });
 
   const failed = await openCall;
-  assert.equal(failed.status, 502, failed.text);
+  assert.equal(failed.status, 422, failed.text);
   // 사유는 여전히 응답으로 간다(토스트가 읽는다). 다만 붙일 세션 id 가 없으니
   // 유령 세션 행을 만들어 목록을 더럽히지는 않는다.
   assert.equal(failed.body.message, 'codex is not installed on this host');
+
+  // 매니저가 실패를 답하든(422) 답하지 못하든(503) 502/504 는 쓰지 않는다 — 앞단 Cloudflare 가
+  // 그 둘을 자기 HTML 로 바꿔 사유가 사라진다. 실제로 가려졌던 사유(2026-10-20 ralf)로 확인한다.
+  const DIRTY = 'The repository is on claude/skill-tree-polish-20261020 with local changes. Commit or move those changes before starting on main.';
+  for (const [code, error, status] of [['manager_error', DIRTY, 422], ['timeout', 'The Runtime Host did not respond in time.', 503]]) {
+    const before = requests.filter((r) => r.op === 'open').length;
+    const pending = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
+      method: 'POST', headers, body: JSON.stringify({ cwd: '/repo' }),
+    });
+    await waitFor(() => requests.filter((r) => r.op === 'open').length > before, `open rpc (${code})`);
+    const rpc = requests.filter((r) => r.op === 'open').at(-1);
+    await call(`${base}/api/agent/sessions/rpc/${rpc.request_id}`, {
+      method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ok: false, error, code }),
+    });
+    const res = await pending;
+    assert.equal(res.status, status, `${code}: ${res.text}`);
+    assert.ok(![502, 504].includes(res.status), 'Cloudflare 가 가리는 상태는 쓰지 않는다');
+    assert.equal(res.body.message, error, '사유가 그대로 온다');
+  }
 });
 
 // `force` 는 파괴적 플래그다 — 켜지면 그 장비의 남의 프로세스가 죽는다. 그래서 두 가지를

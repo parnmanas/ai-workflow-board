@@ -43,6 +43,7 @@ import type {
   AgentSessionModeOption,
   AgentSessionRequestPayload,
 } from '../../common/types/stream-events';
+import { HOST_RPC_FAILED_STATUS, HOST_RPC_TIMEOUT_STATUS } from '../../common/host-rpc-status';
 
 /** 컨트롤러가 HTTP 상태로 옮기는 도메인 오류. */
 export class AgentSessionError extends Error {
@@ -209,9 +210,12 @@ const CWD_MAX = 1024;
 const TITLE_MAX = 200;
 const MAX_PENDING = 200;
 const LIVE_TTL_MS = 24 * 60 * 60_000;
-/** 매니저가 돌려준 오류 코드 → HTTP 상태. 목록에 없는 코드는 502(매니저 쪽 실패). */
+/**
+ * 매니저가 돌려준 오류 코드 → HTTP 상태. 목록에 없는 코드는 HOST_RPC_FAILED_STATUS(매니저 쪽 실패).
+ * 502/504 를 쓰지 않는 이유는 common/host-rpc-status.ts — 앞단 Cloudflare 가 사유를 가린다.
+ */
 const RPC_ERROR_STATUS: Record<string, number> = {
-  timeout: 504,
+  timeout: HOST_RPC_TIMEOUT_STATUS,
   not_found: 404,
   // local_image — 경로가 이미지 파일이 아니거나(415), 너무 크거나(413), 경로 모양이 틀렸다(400).
   invalid_path: 400,
@@ -1007,7 +1011,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.emitRequest(request);
     return promise.then((body) => {
       if (!body.ok) {
-        const status = RPC_ERROR_STATUS[body.code ?? ''] ?? 502;
+        const status = RPC_ERROR_STATUS[body.code ?? ''] ?? HOST_RPC_FAILED_STATUS;
         throw new AgentSessionError(status, body.code || 'manager_error', body.error || 'Runtime Host reported an error.');
       }
       return body.result as T;
@@ -1255,7 +1259,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       throw err;
     }
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
-    if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
+    if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(HOST_RPC_FAILED_STATUS, 'manager_error', 'Runtime Host did not return a session id.');
     await this.pinExecution(managerId, cli, openedId, execution);
     const state = await this.seedState(rec, managerId, cli, openedId, {
       cwd: typeof result?.cwd === 'string' && result.cwd ? result.cwd : cwd,

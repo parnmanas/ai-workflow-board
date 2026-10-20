@@ -12,9 +12,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
+import { setupDom } from './helpers/jsdom.mjs';
+import { api, apiErrorMessage } from '../src/api.ts';
 
 const source = await readFile(
   new URL('../src/components/sessions/SessionsPage.tsx', import.meta.url),
+  'utf8',
+);
+// 모든 top-level await 는 첫 test() 보다 앞에 둔다 — 뒤에 두면 --test-force-exit 러너가 앞 테스트만
+// 돌리고 끝나, 그 뒤에 등록되는 테스트가 조용히 실행되지 않는다(이 파일의 7개 중 5개가 그랬다).
+const runnerSource = await readFile(
+  new URL('../../agent-manager/src/lib/agent-session-runner.ts', import.meta.url),
   'utf8',
 );
 
@@ -42,11 +50,6 @@ test('오류 배너가 서버가 남긴 사유와 방금 실패한 사유를 모
     /role="alert"[\s\S]*?\{missingCredential\s*\?[\s\S]*?: \(status === 'error' && live\?\.last_error\) \|\| connectError\}/,
   );
 });
-
-const runnerSource = await readFile(
-  new URL('../../agent-manager/src/lib/agent-session-runner.ts', import.meta.url),
-  'utf8',
-);
 
 test('매니저가 active-writer 거절에 조치를 덧붙인다', () => {
   // codex 원문만 중계하면 "무엇을 고치라는 건지" 가 빠진다. 가장 흔한 사유 하나는
@@ -106,4 +109,49 @@ test('저장된 오류 코드로도 강제 열기를 낸다 — 이 페이지에
   assert.match(source, /\{canForceOpen && !connecting && \(/);
   // 버튼이 나와도 눌러서 아무 일이 없으면 안 된다 — 사유를 저장된 last_error 에서도 가져온다.
   assert.match(source, /const reason = lockedByExternal\s*\n\s*\|\| \(live\?\.last_error_code === 'resume_locked_external' \? live\.last_error : null\);/);
+});
+
+// 2026-10-20 ralf: 새 세션을 열 때 매니저가 "The repository is on <branch> with local changes …" 로
+// 거절했지만 화면은 "Request failed" 만 보였다. 서버의 502 JSON 을 앞단 Cloudflare 가 자기 HTML 오류
+// 페이지로 바꿔 사유가 사라졌고, 클라이언트는 본문이 JSON 이 아니면 아무 말도 못 했다. 서버는 이제
+// 422/503 으로 사유를 실어 보내고(서버 테스트), 화면은 가려진 응답이라도 상태 코드는 말한다.
+
+async function openWith(t, response) {
+  const dom = setupDom();
+  const previousStorage = globalThis.localStorage;
+  globalThis.localStorage = dom.window.localStorage;
+  t.after(() => { if (previousStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = previousStorage; dom.cleanup(); });
+  t.mock.method(globalThis, 'fetch', async () => response);
+  return api.openHostSession('ralf', 'claude', { cwd: 'E:/Repository/txiv/emberdelve' }).then(
+    () => assert.fail('open should fail'),
+    (err) => err,
+  );
+}
+
+test('매니저가 답한 사유(422 JSON)는 그대로 화면 문구가 된다', async (t) => {
+  const reason = 'The repository is on claude/skill-tree-polish-20261020 with local changes. Commit or move those changes before starting on main.';
+  const err = await openWith(t, new Response(JSON.stringify({ error: 'manager_error', message: reason }), { status: 422, headers: { 'Content-Type': 'application/json' } }));
+  assert.equal(err.message, reason);
+  assert.equal(err.code, 'manager_error');
+  assert.equal(err.status, 422);
+});
+
+test('프록시가 HTML 로 가린 오류도 "Request failed" 가 아니라 상태를 말한다 — 본문은 내보이지 않는다', async (t) => {
+  const html = '<!DOCTYPE html><html><head><title>awb.parnmanas.com | 502: Bad gateway</title></head><body>Cloudflare Ray ID: 8d1f</body></html>';
+  const err = await openWith(t, new Response(html, { status: 502, headers: { 'Content-Type': 'text/html' } }));
+  assert.equal(err.message, '요청에 실패했습니다 (HTTP 502). 잠시 후 다시 시도해 주세요.');
+  assert.doesNotMatch(err.message, /Request failed|DOCTYPE|Cloudflare|Ray ID/);
+  assert.equal(err.status, 502);
+});
+
+test('Cloudflare 시간 초과(524)는 시간 초과라고 말한다', async (t) => {
+  const err = await openWith(t, new Response('<html>timeout</html>', { status: 524, headers: { 'Content-Type': 'text/html' } }));
+  assert.match(err.message, /서버 응답 시간이 초과되었습니다 \(HTTP 524\)/);
+});
+
+test('apiErrorMessage: message 가 slug 보다 먼저고, 마크업이 든 문구는 쓰지 않는다', () => {
+  assert.equal(apiErrorMessage(409, { error: 'conflict', message: '이미 열려 있습니다' }), '이미 열려 있습니다');
+  assert.equal(apiErrorMessage(400, { error: 'bad_request' }), 'bad_request');
+  assert.equal(apiErrorMessage(502, { error: '<html>gateway</html>' }), '요청에 실패했습니다 (HTTP 502). 잠시 후 다시 시도해 주세요.');
+  assert.equal(apiErrorMessage(500, null), '요청에 실패했습니다 (HTTP 500). 잠시 후 다시 시도해 주세요.');
 });

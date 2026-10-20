@@ -23,6 +23,7 @@ import type {
   TerminalSummary,
 } from '../../common/types/terminals';
 import type { TerminalRequestPayload } from '../../common/types/stream-events';
+import { HOST_RPC_FAILED_STATUS, HOST_RPC_TIMEOUT_STATUS } from '../../common/host-rpc-status';
 
 export class TerminalError extends Error {
   constructor(
@@ -267,7 +268,8 @@ export class TerminalsService implements OnModuleDestroy {
     this.emitRequest({ manager_id: managerId, account_id: '', op, request_id: requestId, driver_user_id: driverUserId, ...args });
     return promise.then((body) => {
       if (!body.ok) {
-        const status = body.code === 'timeout' ? 504 : body.code === 'not_found' ? 404 : 502;
+        // 502/504 는 앞단 Cloudflare 가 자기 오류 페이지로 바꿔 사유를 가린다(common/host-rpc-status.ts).
+        const status = body.code === 'timeout' ? HOST_RPC_TIMEOUT_STATUS : body.code === 'not_found' ? 404 : HOST_RPC_FAILED_STATUS;
         throw new TerminalError(status, body.code || 'manager_error', body.error || 'Runtime Host reported an error.');
       }
       return body.result as T;
@@ -376,7 +378,7 @@ export class TerminalsService implements OnModuleDestroy {
       rows,
     }, userId);
     const openedId = typeof result?.terminal_id === 'string' ? result.terminal_id : '';
-    if (!TERMINAL_ID_RE.test(openedId)) throw new TerminalError(502, 'manager_error', 'Runtime Host did not return a terminal id.');
+    if (!TERMINAL_ID_RE.test(openedId)) throw new TerminalError(HOST_RPC_FAILED_STATUS, 'manager_error', 'Runtime Host did not return a terminal id.');
     const managerName = await this.managerName(managerId, rec.hostname);
     const state = this.upsertFromManager(managerId, managerName, openedId, { cols, rows, cwd, title, shell, status: 'live', ...(result?.terminal ?? result ?? {}) });
     state.driver_user_id = userId;
