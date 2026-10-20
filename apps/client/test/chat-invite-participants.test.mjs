@@ -153,7 +153,7 @@ test('canInviteToRoom: 방 타입이 아니라 참여 여부만 본다 (로스�
   assert.equal(canInviteToRoom(null), false);
 });
 
-// ─── 피커: 승격 경고 · 후보 필터 · 제출 payload ───────────────────────────────
+// ─── 피커: 승격 경고 · 후보 필터 · 여러 Agent 선언 · 제출 payload ─────────────
 
 const USERS = [
   { id: 'user-me', name: 'Me' },
@@ -173,21 +173,27 @@ function mountPicker(props) {
     getUsers: api.getUsers,
     getAgents: api.getAgents,
     addChatRoomParticipants: api.addChatRoomParticipants,
+    createChatRoom: api.createChatRoom,
     listTemplateHosts: api.listTemplateHosts,
     validateRuntimeSpec: api.validateRuntimeSpec,
+    listAgentTemplates: api.listAgentTemplates,
   };
   api.getUsers = async () => USERS;
+  api.listAgentTemplates = async () => [];
   api.getAgents = async () => AGENTS;
-  // P4c-4: 에이전트 초대는 runtime 선언으로 들어간다 — Host 카탈로그 스텁.
+  // P4c-4: 에이전트는 runtime 선언으로 들어간다 — Host 카탈로그 스텁.
   api.listTemplateHosts = async () => [{ id: 'host-1', name: 'host-one' }];
+  // 서버 normalizeRuntimeSpec 처럼 label 이 비면 `<폴더 끝>/<cli>` 로 채운다.
   api.validateRuntimeSpec = async (_ws, spec) => ({
     ok: true,
     spec: {
-      manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: spec.working_dir,
-      credential_id: null, label: '초대봇', role_prompt: '',
+      manager_agent_id: spec.manager_agent_id, cli: spec.cli, model: spec.model ?? null,
+      working_dir: spec.working_dir, credential_id: spec.credential_id ?? null,
+      label: spec.label || `${spec.working_dir.split('/').filter(Boolean).pop()}/${spec.cli}`,
+      role_prompt: spec.role_prompt || '',
     },
   });
-  // DeclareRuntimeSection 은 accountId 가 있어야 Host 목록을 로드한다.
+  // 런타임 spec 에디터는 accountId 로 credential 을 불러온다.
   const prevWs = getActiveAccountId();
   setActiveAccountId('ws-1');
   const mounted = mount(
@@ -204,6 +210,50 @@ function mountPicker(props) {
   return mounted;
 }
 
+const findButton = (container, re) =>
+  [...container.querySelectorAll('button')].find((b) => re.test(b.textContent.trim()));
+
+function setNativeValue(el, value) {
+  const proto = el instanceof window.HTMLSelectElement
+    ? window.HTMLSelectElement.prototype
+    : window.HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value')?.set.call(el, value);
+  el.dispatchEvent(new window.Event('input', { bubbles: true }));
+  el.dispatchEvent(new window.Event('change', { bubbles: true }));
+}
+
+/** "+ Agent 추가" → Host/CLI/폴더(+label) 입력 → "Agent 추가". 편집기 안의 결과 텍스트를 돌려준다. */
+async function declareAgent(container, { dir, label = '' }) {
+  const open = findButton(container, /^\+ Agent 추가$/);
+  assert.ok(open, "'+ Agent 추가' 버튼이 없다");
+  click(open);
+  await flush();
+  const editor = container.querySelector('[data-testid="new-chat-agent-editor"]');
+  assert.ok(editor, 'Agent 편집기가 열리지 않았다');
+  const selects = [...editor.querySelectorAll('select')];
+  const hostSelect = selects.find((s) => [...s.options].some((o) => o.value === 'host-1'));
+  assert.ok(hostSelect, 'Host 선택이 없다');
+  await act(async () => { setNativeValue(hostSelect, 'host-1'); });
+  await flush();
+  const cliSelect = [...editor.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'claude'));
+  const inputs = [...editor.querySelectorAll('input')];
+  const dirInput = inputs.find((i) => i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+  assert.ok(cliSelect && dirInput, 'runtime 선언 입력(CLI/dir)이 없다');
+  await act(async () => {
+    setNativeValue(cliSelect, 'claude');
+    setNativeValue(dirInput, dir);
+  });
+  if (label) {
+    const labelInput = [...editor.querySelectorAll('input')].find((i) => i.placeholder && i.placeholder.includes('자동 표시'));
+    assert.ok(labelInput, 'Label 입력이 없다');
+    await act(async () => { setNativeValue(labelInput, label); });
+  }
+  await flush();
+  click(findButton(editor, /^Agent 추가$/));
+  await flush();
+  return container.querySelector('[data-testid="new-chat-agent-editor"]');
+}
+
 test('DM 초대 시 되돌릴 수 없는 승격을 확정 전에 알린다', async () => {
   const picker = mountPicker({ addToRoomId: 'room-1', promotesDmToGroup: true });
   try {
@@ -214,10 +264,7 @@ test('DM 초대 시 되돌릴 수 없는 승격을 확정 전에 알린다', asy
     assert.match(notice.textContent, /그룹 대화/);
     // 이전 대화가 초대된 사람에게 보인다는 사실도 함께 알려야 한다(승격의 의도된 성질).
     assert.match(notice.textContent, /이전 내용/);
-
-    const submit = [...picker.container.querySelectorAll('button')]
-      .find((b) => /Convert to Group/.test(b.textContent));
-    assert.ok(submit, '확인 버튼 라벨이 승격을 드러내야 한다');
+    assert.ok(findButton(picker.container, /Convert to Group/), '확인 버튼 라벨이 승격을 드러내야 한다');
   } finally {
     picker.unmount();
     picker.restore();
@@ -233,10 +280,23 @@ test('group 방 초대에는 승격 경고를 띄우지 않는다', async () => 
       false,
       'group 방 초대에는 DM 승격 경고를 띄우지 않는다',
     );
-    assert.ok(
-      [...picker.container.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Add to Room'),
-      'group 방은 기존 라벨 그대로여야 한다',
-    );
+    assert.ok(findButton(picker.container, /^Add to Room$/), 'group 방은 기존 라벨 그대로여야 한다');
+  } finally {
+    picker.unmount();
+    picker.restore();
+  }
+});
+
+test('공용 Modal 로 뜬다 — 다이얼로그 하나 안에 Agents 와 People 섹션이 있다', async () => {
+  const picker = mountPicker({});
+  try {
+    await flush();
+    const dialogs = picker.container.querySelectorAll('[role="dialog"]');
+    assert.equal(dialogs.length, 1, '다이얼로그는 하나여야 한다');
+    // 공용 Modal 의 다이얼로그는 스스로 스크롤한다 — runtime 편집기가 길어져도 잘리지 않는다.
+    assert.equal(dialogs[0].style.overflowY, 'auto', '다이얼로그 본문이 스크롤돼야 한다');
+    assert.ok(dialogs[0].querySelector('section[aria-label="Agents"]'), 'Agents 섹션이 없다');
+    assert.ok(dialogs[0].querySelector('section[aria-label="People"]'), 'People 섹션이 없다');
   } finally {
     picker.unmount();
     picker.restore();
@@ -274,47 +334,19 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
     await flush();
 
     // 유저는 후보 행의 체크박스로 고른다.
-    const rows = [...picker.container.querySelectorAll('label')];
-    const bob = rows.find((l) => l.textContent.includes('Bob'));
+    const bob = [...picker.container.querySelectorAll('label')].find((l) => l.textContent.includes('Bob'));
     assert.ok(bob, "후보 'Bob' 를 찾을 수 없다");
     click(bob.querySelector('input[type="checkbox"]'));
     await flush();
 
     // 에이전트는 runtime 선언으로 추가한다 (Agent 목록 표면 없음).
-    const toggle = [...picker.container.querySelectorAll('label')]
-      .find((l) => l.textContent.includes('실행 설정'));
-    assert.ok(toggle, 'runtime 선언 토글이 없다');
-    click(toggle.querySelector('input[type="checkbox"]'));
-    await flush();
-    const setNativeValue = (el, value) => {
-      const proto = el instanceof window.HTMLSelectElement
-        ? window.HTMLSelectElement.prototype
-        : window.HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, 'value')?.set.call(el, value);
-      el.dispatchEvent(new window.Event('input', { bubbles: true }));
-      el.dispatchEvent(new window.Event('change', { bubbles: true }));
-    };
-    const selects = [...picker.container.querySelectorAll('select')];
-    const hostSelect = selects.find((s) => [...s.options].some((o) => o.value === 'host-1'));
-    const cliSelect = selects.find((s) => [...s.options].some((o) => o.value === 'claude'));
-    const dirInput = [...picker.container.querySelectorAll('input')].find((i) =>
-      i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
-    assert.ok(hostSelect && cliSelect && dirInput, 'runtime 선언 입력이 없다');
-    await act(async () => {
-      setNativeValue(hostSelect, 'host-1');
-      setNativeValue(cliSelect, 'claude');
-      setNativeValue(dirInput, '/wt/invite-bot');
-    });
-    await flush();
-    const resolveBtn = [...picker.container.querySelectorAll('button')]
-      .find((b) => b.textContent.includes('이 설정 사용'));
-    assert.ok(resolveBtn, 'Resolve 버튼이 없다');
-    click(resolveBtn);
-    await flush();
-    assert.match(picker.container.textContent, /초대봇/, '선언한 runtime 칩이 선택에 추가돼야 한다');
+    const editorAfter = await declareAgent(picker.container, { dir: '/wt/invite-bot', label: '초대봇' });
+    assert.equal(editorAfter, null, '추가하면 편집기가 닫혀야 한다');
+    const cards = [...picker.container.querySelectorAll('[data-testid="new-chat-agent"]')];
+    assert.equal(cards.length, 1);
+    assert.match(cards[0].textContent, /host-one\/초대봇/, 'Agent 카드는 <Host>/<label> 로 보여야 한다');
 
-    const submit = [...picker.container.querySelectorAll('button')]
-      .find((b) => /Convert to Group/.test(b.textContent));
+    const submit = findButton(picker.container, /Convert to Group/);
     assert.ok(submit, '제출 버튼이 없다');
     click(submit);
     await flush();
@@ -336,12 +368,70 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
   }
 });
 
+test('새 채팅: Agent 여럿을 선언해 이름 붙인 그룹 방을 만든다', async () => {
+  const calls = [];
+  const picker = mountPicker({});
+  api.createChatRoom = async (participants, name) => {
+    calls.push({ participants, name });
+    return { id: 'room-new', type: 'group', name };
+  };
+  try {
+    await flush();
+    await declareAgent(picker.container, { dir: '/repo/app', label: 'writer' });
+    // 한 Agent 면 DM — 모든 메시지에 답한다고 알린다.
+    assert.match(picker.container.querySelector('[data-testid="new-chat-shape"]').textContent, /1:1 대화/);
+    assert.ok(findButton(picker.container, /^Start Chat$/));
+
+    await declareAgent(picker.container, { dir: '/repo/review', label: 'reviewer' });
+    const names = [...picker.container.querySelectorAll('[data-testid="new-chat-agent"]')].map((c) => c.textContent);
+    assert.equal(names.length, 2);
+    assert.match(names[0], /host-one\/writer/);
+    assert.match(names[1], /host-one\/reviewer/);
+    // 둘 이상이면 그룹 — Agent 는 @멘션에 답한다는 규칙을 만들기 전에 알린다.
+    assert.match(picker.container.querySelector('[data-testid="new-chat-shape"]').textContent, /그룹 대화.*@멘션/);
+
+    const roomName = [...picker.container.querySelectorAll('input')].find((i) => i.placeholder?.includes('자동 지정'));
+    assert.ok(roomName, '방 이름 입력이 없다');
+    await act(async () => { setNativeValue(roomName, '설계 회의'); });
+
+    click(findButton(picker.container, /^Create Group$/));
+    await flush();
+    assert.equal(calls.length, 1, 'api.createChatRoom 이 불려야 한다');
+    assert.equal(calls[0].name, '설계 회의');
+    assert.deepEqual(
+      calls[0].participants.map((p) => [p.participant_type, p.participant_id, p.runtime?.label]),
+      [['agent', '', 'writer'], ['agent', '', 'reviewer']],
+    );
+  } finally {
+    picker.unmount();
+    picker.restore();
+  }
+});
+
+test('같은 실행 신원(CLI·폴더·credential)의 Agent 는 두 번 넣지 못한다 — 서버가 하나로 합친다', async () => {
+  const picker = mountPicker({});
+  try {
+    await flush();
+    await declareAgent(picker.container, { dir: '/repo/app', label: 'opus' });
+    // 모델·label 만 다르고 신원이 같다.
+    const editor = await declareAgent(picker.container, { dir: '/repo/app', label: 'sonnet' });
+    assert.ok(editor, '중복이면 편집기가 열린 채 남아야 한다');
+    const alerts = [...editor.querySelectorAll('[role="alert"]')].map((a) => a.textContent).join(' | ');
+    assert.match(alerts, /host-one\/opus/, `중복 신원을 알려야 한다: ${alerts}`);
+    assert.equal(picker.container.querySelectorAll('[data-testid="new-chat-agent"]').length, 1);
+    // 편집기가 열려 있는 동안은 방을 만들 수 없다 — 입력 중인 Agent 가 조용히 빠지지 않게.
+    assert.equal(findButton(picker.container, /^Start Chat$/).disabled, true);
+  } finally {
+    picker.unmount();
+    picker.restore();
+  }
+});
+
 test('아무도 고르지 않으면 제출 버튼이 비활성이다', async () => {
   const picker = mountPicker({ addToRoomId: 'room-1', promotesDmToGroup: true });
   try {
     await flush();
-    const submit = [...picker.container.querySelectorAll('button')]
-      .find((b) => /Convert to Group/.test(b.textContent));
+    const submit = findButton(picker.container, /Convert to Group/);
     assert.ok(submit);
     assert.equal(submit.disabled, true);
   } finally {
