@@ -328,12 +328,20 @@ export class RoomMessagingService {
     const messages = await qb.getMany();
     const attachmentsByMessage = await this._loadAttachmentsForMessages(messages.map(m => m.id));
 
+    // Agent 발신자 이름은 이 방의 참여자 행에서 한 번에 해석한다 — spec-direct(rt-)
+    // 발신자는 행의 spec 스냅샷이 이름의 출처라 id 만으로는 'Unknown' 이 된다. 떠난
+    // 참여자의 기록도 이름을 유지해야 하므로 left 행까지 본다(resolveRoomAgentNames).
+    const roomAgentNames = messages.some(m => m.sender_type === 'agent')
+      ? await this.membership.resolveRoomAgentNames(roomId)
+      : new Map<string, string>();
+
     // Resolve sender names with caching
     const nameCache = new Map<string, string>();
     const resolved = await Promise.all(
       messages.map(async msg => {
         const cacheKey = `${msg.sender_type}:${msg.sender_id}`;
-        let senderName = nameCache.get(cacheKey);
+        let senderName = nameCache.get(cacheKey)
+          ?? (msg.sender_type === 'agent' ? roomAgentNames.get(msg.sender_id) : undefined);
         if (!senderName) {
           senderName = await this.membership.resolveParticipantName(msg.sender_type, msg.sender_id);
           nameCache.set(cacheKey, senderName);
@@ -505,8 +513,12 @@ export class RoomMessagingService {
     // resolves the prefix), so the same agent's live messages flicker between
     // bare and prefixed names. Centralizing here keeps every entry point
     // (REST, agent-api ack, MCP send_chat_room_message, Actions) consistent.
+    // 방 참여자 행이 우선이다: spec-direct(rt-) 발신자는 그 spec 의
+    // `<Host>/<label>` 이고, 호출자가 넘긴 이름은 agent-api 의 'Agent' 나 MCP 의 Host
+    // 이름이라 같은 Host 의 여러 runtime 이 한 이름으로 뭉개진다.
     if (senderType === 'agent') {
-      const display = await resolveAgentDisplayName(this.dataSource, senderId);
+      const display = (await this.membership.resolveRoomAgentNames(roomId)).get(senderId)
+        ?? await resolveAgentDisplayName(this.dataSource, senderId);
       if (display) senderName = display;
     }
 

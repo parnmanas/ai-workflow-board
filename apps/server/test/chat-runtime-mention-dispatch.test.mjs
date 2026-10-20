@@ -108,6 +108,8 @@ function makeSvc({ room, ticket, participantSpec, mentionRefs, participantRows, 
   const ticketRepo = { async findOne() { return ticket; } };
   const membership = {
     async requireActiveParticipant() {},
+    // agent 발신자 표시명(<Host>/<label>) — 이 스텁의 시나리오는 이름을 보지 않는다.
+    async resolveRoomAgentNames() { return new Map(); },
     async requireMissionRoomSpeaker() {},
     async resolveMissionChatPolicy() { return null; },
     async getRoomMemberIds() { return ['user-1', RT]; },

@@ -768,8 +768,10 @@ export class AgentApiController {
     // Resolve canonical Manager/Agent display server-side so the typing
     // indicator label matches the rest of the chat UI even when the
     // subagent posts a bare name (or no name at all).
+    // spec-direct(rt-) 응답자는 방 참여자 행의 spec 이 이름의 출처다(`<Host>/<label>`).
     const resolvedName =
-      (await resolveAgentDisplayName(this.dataSource, agent_id))
+      (await this.membership.resolveRoomAgentNames(roomId)).get(agent_id)
+      || (await resolveAgentDisplayName(this.dataSource, agent_id))
       || agent_name
       || 'Agent';
     const memberIds = await this.membership.getRoomMemberIds(roomId);
@@ -794,7 +796,9 @@ export class AgentApiController {
     // Same display-name resolution as setChatRoomTyping — the badge must be
     // attributed to the responding agent's resolved `<Manager>/<Agent>` name.
     const resolvedName =
-      (await resolveAgentDisplayName(this.dataSource, agent_id)) || 'Agent';
+      (await this.membership.resolveRoomAgentNames(roomId)).get(agent_id)
+      || (await resolveAgentDisplayName(this.dataSource, agent_id))
+      || 'Agent';
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
     const resolvedKeepAliveUntilMs = typeof keep_alive_until_ms === 'number' ? keep_alive_until_ms : null;

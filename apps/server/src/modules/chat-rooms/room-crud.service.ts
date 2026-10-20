@@ -9,7 +9,7 @@ import { User } from '../../entities/User';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { RoomMembershipService } from './room-membership.service';
-import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds, resolveRuntimeDisplayNames } from '../../utils/agent-name';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
@@ -205,16 +205,26 @@ export class RoomCrudService {
     // defensively — synthetic ids resolve by name in resolveName() below.
     const userIds = [...participantIds].filter(k => k.startsWith('user:')).map(k => k.slice(5)).filter(id => UUID_RE.test(id));
     const agentIds = [...participantIds].filter(k => k.startsWith('agent:')).map(k => k.slice(6)).filter(id => UUID_RE.test(id));
-    const [usersById, agentsById] = await Promise.all([
+    const [usersById, agentsById, runtimeNames] = await Promise.all([
       userIds.length > 0
         ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email])))
         : Promise.resolve(new Map<string, string>()),
       agentIds.length > 0
         ? resolveAgentDisplayNamesByIds(this.dataSource, agentIds)
         : Promise.resolve(new Map<string, string>()),
+      // spec-direct(rt-) 참여자는 그 방 행의 spec 스냅샷이 이름의 출처다 — label 은
+      // 신원이 아니라 같은 rt- 키도 방마다 다를 수 있어 (room, participant) 로 키를 잡는다.
+      resolveRuntimeDisplayNames(
+        this.dataSource,
+        allParticipantRows
+          .filter(p => p.participant_type === 'agent' && p.runtime_spec)
+          .map(p => [`${p.room_id}:${p.participant_id}`, p.runtime_spec] as const),
+      ),
     ]);
 
-    const resolveName = (type: string, id: string): string => {
+    const resolveName = (roomId: string, type: string, id: string): string => {
+      const runtimeName = type === 'agent' ? runtimeNames.get(`${roomId}:${id}`) : undefined;
+      if (runtimeName) return runtimeName;
       // Non-uuid ids never made it into the maps above (filtered out) — resolve
       // the known synthetic 'system' author by convention (mirrors nameOf in
       // listAllAccountRooms) so My rooms shows "System" not "Unknown".
@@ -257,7 +267,7 @@ export class RoomCrudService {
       let dmPartnerName: string | null = null;
       if (room.type === 'dm') {
         const partner = dmPartnerByRoom.get(room.id);
-        if (partner) dmPartnerName = resolveName(partner.participant_type, partner.participant_id);
+        if (partner) dmPartnerName = resolveName(room.id, partner.participant_type, partner.participant_id);
       }
 
       // Hide preview text when the cached "last message" predates the user's
@@ -268,7 +278,7 @@ export class RoomCrudService {
       const lastMsg = lastMsgByRoom.get(room.id);
       const clearedAt = clearedAtByRoom.get(room.id) || null;
       if (lastMsg && (!clearedAt || lastMsg.created_at > clearedAt)) {
-        const senderName = resolveName(lastMsg.sender_type, lastMsg.sender_id);
+        const senderName = resolveName(room.id, lastMsg.sender_type, lastMsg.sender_id);
         const preview = `${senderName}: ${lastMsg.content}`;
         lastMessagePreview = preview.length > 80 ? preview.slice(0, 77) + '...' : preview;
       }
@@ -279,7 +289,7 @@ export class RoomCrudService {
       const participantProjection = (participantsByRoom.get(room.id) || []).map(p => ({
         participant_type: p.participant_type,
         participant_id: p.participant_id,
-        name: resolveName(p.participant_type, p.participant_id),
+        name: resolveName(room.id, p.participant_type, p.participant_id),
       }));
 
       return {
@@ -465,7 +475,7 @@ export class RoomCrudService {
         id: p.id,
         participant_type: p.participant_type,
         participant_id: p.participant_id,
-        name: await this.membership.resolveParticipantName(p.participant_type, p.participant_id),
+        name: await this.membership.resolveParticipantName(p.participant_type, p.participant_id, undefined, p.runtime_spec),
         last_read_at: p.last_read_at,
         joined_at: p.joined_at,
       })),
@@ -481,6 +491,8 @@ export class RoomCrudService {
         dmPartnerName = await this.membership.resolveParticipantName(
           partner.participant_type,
           partner.participant_id,
+          undefined,
+          partner.runtime_spec,
         );
       }
     }
@@ -680,32 +692,30 @@ export class RoomCrudService {
       userIds.length > 0 ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email]))) : Promise.resolve(new Map<string, string>()),
       agentIds.length > 0 ? resolveAgentDisplayNamesByIds(this.dataSource, agentIds) : Promise.resolve(new Map<string, string>()),
     ]);
-    // P4c-4: spec-direct (rt-) 참가자는 행 스냅샷 라벨로 표시한다.
-    const specLabelById = new Map<string, string>();
-    for (const p of participantRows) {
-      if (p.participant_type !== 'agent') continue;
-      const spec = (p as any).runtime_spec as Record<string, any> | null;
-      const label = spec && typeof spec === 'object' ? String(spec.label || '').trim() : '';
-      if (label) specLabelById.set(p.participant_id, label);
-    }
-    const nameOf = (type: string, id: string): string => {
+    // P4c-4: spec-direct (rt-) 참가자는 그 방 행의 spec 스냅샷으로 `<Host>/<label>`.
+    // label 은 신원이 아니라 같은 rt- 키도 방마다 다를 수 있어 (room, participant) 로 잡는다.
+    const runtimeNames = await resolveRuntimeDisplayNames(
+      this.dataSource,
+      participantRows
+        .filter(p => p.participant_type === 'agent' && p.runtime_spec)
+        .map(p => [`${p.room_id}:${p.participant_id}`, p.runtime_spec] as const),
+    );
+    const nameOf = (roomId: string, type: string, id: string): string => {
+      const runtimeName = type === 'agent' ? runtimeNames.get(`${roomId}:${id}`) : undefined;
+      if (runtimeName) return runtimeName;
       // Non-uuid ids never made it into the maps above (filtered out) — resolve
       // the known synthetic 'system' author by convention, same as
       // resolveParticipantName, so the observer view shows "System" not "Unknown".
-      if (!id || !UUID_RE.test(id)) {
-        if (id === 'system') return 'System';
-        if (type === 'agent') return specLabelById.get(id) || 'Unknown';
-        return 'Unknown';
-      }
+      if (!id || !UUID_RE.test(id)) return id === 'system' ? 'System' : 'Unknown';
       if (type === 'user') return usersById.get(id) || 'Unknown User';
-      if (type === 'agent') return agentsById.get(id) || specLabelById.get(id) || 'Unknown Agent';
+      if (type === 'agent') return agentsById.get(id) || 'Unknown Agent';
       return 'Unknown';
     };
     return rooms.map((r) => {
       const parts = (partsByRoom.get(r.id) || []).map(p => ({
         type: p.participant_type,
         id: p.participant_id,
-        name: nameOf(p.participant_type, p.participant_id),
+        name: nameOf(r.id, p.participant_type, p.participant_id),
       }));
       const last = lastByRoom.get(r.id);
       return {
@@ -718,7 +728,7 @@ export class RoomCrudService {
         last_message: last
           ? {
               content: last.content,
-              sender_name: nameOf(last.sender_type, last.sender_id),
+              sender_name: nameOf(r.id, last.sender_type, last.sender_id),
               created_at: last.created_at,
             }
           : null,

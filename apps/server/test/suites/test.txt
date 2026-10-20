@@ -54,6 +54,7 @@ test/chat-rename-account-boundary.test.mjs
 test/chat-room-join-cast-guard.test.mjs
 test/chat-rooms-list-account-boundary.test.mjs
 test/chat-roundtrip.test.mjs
+test/chat-runtime-participant-names.test.mjs
 test/chat-session-status-snapshot.test.mjs
 test/chat-structured-metadata.test.mjs
 test/chat-system-sender-uuid-guard.test.mjs

@@ -125,6 +125,8 @@ function makeSvc({ agent, account, profiles = [LOCAL_PROFILE] }) {
   };
   const membership = {
     async requireActiveParticipant() {},
+    // agent 발신자 표시명(<Host>/<label>) — 이 스텁의 시나리오는 이름을 보지 않는다.
+    async resolveRoomAgentNames() { return new Map(); },
     // 티켓 f6a0de0e — orchestration 룸은 발화 시점에도 권한을 다시 본다. 이 스텁의
     // 방은 mission 룸이 아니므로 no-op 이지만, 메서드가 없으면 sendMessage 가 터진다.
     async requireMissionRoomSpeaker() {},
@@ -309,6 +311,8 @@ function makeGroupSvc({ agents, account, onSpecRead, profiles = [LOCAL_PROFILE] 
   const agentMemberIds = new Set(agents.map((a) => a.id));
   const membership = {
     async requireActiveParticipant() {},
+    // agent 발신자 표시명(<Host>/<label>) — 이 스텁의 시나리오는 이름을 보지 않는다.
+    async resolveRoomAgentNames() { return new Map(); },
     // 티켓 f6a0de0e — orchestration 룸은 발화 시점에도 권한을 다시 본다. 이 스텁의
     // 방은 mission 룸이 아니므로 no-op 이지만, 메서드가 없으면 sendMessage 가 터진다.
     async requireMissionRoomSpeaker() {},

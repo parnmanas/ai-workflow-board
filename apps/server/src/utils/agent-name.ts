@@ -20,6 +20,7 @@
 import { In, type DataSource, type EntityManager } from 'typeorm';
 import { RuntimeHost } from '../entities/RuntimeHost';
 import { ApiKey } from '../entities/ApiKey';
+import { displayNameForRuntime, parseRuntimeSpec } from '../common/runtime-spec';
 
 const SEPARATOR = '/';
 
@@ -123,4 +124,30 @@ export async function resolveAgentDisplayNamesByIds(
   // Keep only UUID-shaped ids — a non-uuid actor id (system label, rt- key)
   // is simply ABSENT from the map. See UUID_RE note above.
   return hostNameById(scope, Array.from(new Set(ids.filter((x): x is string => !!x))));
+}
+
+/**
+ * Spec-direct runtime (`rt-` key) 표시명 — `<Host>/<label>`, Host 행이 없으면
+ * bare label. `rt-` 키는 실행 주소라 Host 조회로는 이름이 나오지 않으므로, 그
+ * 실행을 선언한 spec 스냅샷(예: chat participant 행의 `runtime_spec`)을 같이
+ * 넘겨야 한다. 키는 호출자 마음대로(participant id 등) — spec 을 해석하지 못한
+ * 항목은 맵에서 빠지고, 호출자가 자기 폴백을 쓴다.
+ */
+export async function resolveRuntimeDisplayNames(
+  scope: IdentityScope,
+  entries: Iterable<readonly [string, unknown]>,
+): Promise<Map<string, string>> {
+  const specs = new Map<string, NonNullable<ReturnType<typeof parseRuntimeSpec>>>();
+  for (const [key, value] of entries) {
+    const spec = parseRuntimeSpec(value);
+    if (spec) specs.set(key, spec);
+  }
+  const out = new Map<string, string>();
+  if (specs.size === 0) return out;
+  const hostNames = await hostNameById(scope, [...specs.values()].map((s) => s.manager_agent_id));
+  for (const [key, spec] of specs) {
+    const hostName = hostNames.get(spec.manager_agent_id);
+    out.set(key, hostName ? displayNameForRuntime(hostName, spec) : spec.label);
+  }
+  return out;
 }

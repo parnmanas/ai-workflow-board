@@ -8,7 +8,11 @@ import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { activityEvents } from '../../services/activity.service';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { isUuidShapedId } from '../../utils/agent-name';
-import { resolveAgentDisplayName } from '../../utils/agent-name';
+import {
+  resolveAgentDisplayName,
+  resolveAgentDisplayNamesByIds,
+  resolveRuntimeDisplayNames,
+} from '../../utils/agent-name';
 import { LogService } from '../../services/log.service';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import {
@@ -366,12 +370,24 @@ export class RoomMembershipService {
    * 트랜잭션에서 이름을 정하므로, 기본 저장소로 질의하면 트랜잭션 밖의 상태를 본다.
    */
   async buildGroupRoomName(
-    participants: { participant_type: string; participant_id: string }[],
+    participants: {
+      participant_type: string;
+      participant_id: string;
+      /** 저장된 참여자 행의 spec 스냅샷. */
+      runtime_spec?: unknown;
+      /** 아직 저장 전인 초대 항목이 든 정규화 spec. */
+      runtime?: unknown;
+    }[],
     em?: EntityManager,
   ): Promise<string> {
     const names: string[] = [];
     for (const p of participants.slice(0, 3)) {
-      names.push(await this.resolveParticipantName(p.participant_type, p.participant_id, em));
+      names.push(await this.resolveParticipantName(
+        p.participant_type,
+        p.participant_id,
+        em,
+        p.runtime_spec ?? p.runtime,
+      ));
     }
     return participants.length > 3
       ? `${names.join(', ')} and ${participants.length - 3} more`
@@ -768,6 +784,34 @@ export class RoomMembershipService {
   }
 
   /**
+   * 방의 agent 참여자 표시명(participant_id → 이름)을 한 번에 해석한다. spec-direct
+   * 참여자는 행의 `runtime_spec` 으로 `<Host>/<label>`, spec 없는 Host 신원은 Host 이름.
+   *
+   * **떠난 행도 포함한다** — 메시지 기록의 발신자는 지금 참여 중이 아닐 수 있다. 같은
+   * 참여자가 나갔다 다시 들어와 행이 여럿이면 가장 늦게 들어온 행의 spec 이 이긴다.
+   * 해석하지 못한 id 는 맵에서 빠진다(호출자가 자기 폴백을 쓴다).
+   */
+  async resolveRoomAgentNames(roomId: string, em?: EntityManager): Promise<Map<string, string>> {
+    const repo = em ? em.getRepository(ChatRoomParticipant) : this.participantRepo;
+    const rows = await repo.find({
+      where: { room_id: roomId, participant_type: 'agent' },
+      order: { joined_at: 'ASC' },
+    });
+    const specs = new Map<string, unknown>();
+    const bare = new Set<string>();
+    for (const row of rows) {
+      if (row.runtime_spec) specs.set(row.participant_id, row.runtime_spec);
+      else bare.add(row.participant_id);
+    }
+    const scope = em ?? this.dataSource;
+    const [byHost, bySpec] = await Promise.all([
+      resolveAgentDisplayNamesByIds(scope, [...bare].filter(id => !specs.has(id))),
+      resolveRuntimeDisplayNames(scope, specs),
+    ]);
+    return new Map([...byHost, ...bySpec]);
+  }
+
+  /**
    * Shared helper: resolve a (type, id) pair to a human-readable display name.
    * Returns 'Unknown User' / 'Unknown Agent' / 'Unknown' on miss (never throws).
    *
@@ -793,7 +837,18 @@ export class RoomMembershipService {
      * 2-인자 호출부와 똑같이 기본 저장소로 조회한다.
      */
     em?: EntityManager,
+    /**
+     * agent 참여자의 runtime spec 스냅샷(참여자 행의 `runtime_spec`, 또는 저장 전
+     * 초대 항목의 `runtime`). spec-direct 참여자의 id 는 `rt-` 실행 주소라 어떤 조회로도
+     * 이름이 나오지 않는다 — 이름의 출처는 그 참여를 선언한 spec 이다.
+     */
+    runtimeSpec?: unknown,
   ): Promise<string> {
+    if (participantType === 'agent' && runtimeSpec) {
+      const names = await resolveRuntimeDisplayNames(em ?? this.dataSource, [[participantId, runtimeSpec]]);
+      const display = names.get(participantId);
+      if (display) return display;
+    }
     if (!participantId || !UUID_RE.test(participantId)) {
       // 'system' is the known dispatch author; anything else non-uuid is a
       // malformed/legacy id — neither is a row in users/agents.
