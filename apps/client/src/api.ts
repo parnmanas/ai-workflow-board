@@ -98,7 +98,8 @@ import type {
   OntologyGraphSnapshotResponse,
   OrchestrationPostActionCondition,
   OrchestrationMissionExtraMemberInput,
-  OrchestrationRepoRef,
+  OrchestrationMissionProjectInput,
+  OrchestrationFolderScope,
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
@@ -2343,8 +2344,10 @@ export const api = {
     method?: string;
     completion_criteria?: Array<{ key: string; description: string }>;
     post_actions?: Array<{ action_id: string; order?: number; condition?: OrchestrationPostActionCondition }>;
+    /** 이 미션이 다루는 project 들(첫 항목이 primary). 시작하려면 하나 이상 필요하다. */
+    projects?: OrchestrationMissionProjectInput[];
+    folder_scope?: OrchestrationFolderScope;
     workspace_folder?: string;
-    repo_ref?: OrchestrationRepoRef | null;
     checkout_mode?: 'reuse' | 'fresh';
     max_parallel_steps?: number;
     max_steps?: number;
@@ -2356,7 +2359,7 @@ export const api = {
     /** 미션 대화에서 사람이 발화할 수 있는가(티켓 9cfd8161). 기본 'open'. */
     user_chat_mode?: OrchestrationUserChatMode;
     /**
-     * 이번 미션에서만 제외할 팀 멤버의 agent_id 목록. 팀 로스터는 그대로이며
+     * 이번 미션에서만 제외할 팀 멤버(행 id) 목록. 팀 로스터는 그대로이며
      * 실행 엔진이 effective roster 에서 뺀다.
      */
     excluded_member_ids?: string[];
@@ -2378,8 +2381,9 @@ export const api = {
       method?: string;
       completion_criteria?: Array<{ key: string; description: string }>;
       post_actions?: Array<{ action_id: string; order?: number; condition?: OrchestrationPostActionCondition }>;
+      projects?: OrchestrationMissionProjectInput[];
+      folder_scope?: OrchestrationFolderScope;
       workspace_folder?: string;
-      repo_ref?: OrchestrationRepoRef | null;
       checkout_mode?: 'reuse' | 'fresh';
       max_parallel_steps?: number;
       max_steps?: number;

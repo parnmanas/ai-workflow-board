@@ -73,6 +73,13 @@ export class AccountAccessService {
       if (referenceId && /^[0-9a-f-]{36}$/i.test(referenceId)) {
         owner = (await this.dataSource.getRepository(referenceEntity).findOne({ where: { id: referenceId }, select: ['account_id'] }))?.account_id;
       }
+      // A global team owns no account, so a mission on it belongs where its
+      // primary project lives — the mission's projects must sit in its account.
+      const primaryProjectId = Array.isArray(req.body?.projects) ? req.body.projects[0]?.project_id : undefined;
+      if (!owner && path === '/api/orchestration/missions' && typeof primaryProjectId === 'string'
+        && /^[0-9a-f-]{36}$/i.test(primaryProjectId)) {
+        owner = (await this.dataSource.getRepository('Project').findOne({ where: { id: primaryProjectId }, select: ['account_id'] }))?.account_id;
+      }
     }
     if (resourceId) {
       try { resourceId = decodeURIComponent(resourceId); }

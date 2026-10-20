@@ -1,29 +1,50 @@
-// Mission 생성/편집 모달 — post_actions / repo_ref 라운드트립 회귀 테스트
+// Mission 생성/편집 모달 — post_actions / projects 라운드트립 회귀 테스트
 // (리뷰 지적 반영, 티켓 2dc3c62f). 반려 사유: API 타입에는 post_actions/repo_ref가
 // 있는데도 생성 모달 상태·submit이 이를 다루지 않았고 별도 편집 UI도 없었다.
 //
 // 이 파일이 고정하는 것:
-//   - 기존 미션을 편집(mission prop이 채워짐)하면 그 미션의 post_actions/repo_ref가
-//     폼 필드에 그대로 반영된다(Advanced 섹션이 자동으로 펼쳐진 상태로).
+//   - 기존 미션을 편집(mission prop이 채워짐)하면 그 미션의 post_actions/projects가
+//     폼 필드에 그대로 반영된다(post_actions 가 있으면 Advanced 섹션이 자동으로 펼쳐진 상태로).
 //   - 새 미션 생성(mission=null)에서도 "+ Add post-action" 버튼으로 행을 추가하고
-//     action/condition/repo 필드를 채울 수 있다 — 이전엔 이 입력 자체가 없었다.
+//     action/condition 을 채울 수 있다 — 이전엔 이 입력 자체가 없었다. project 와 브랜치도
+//     같은 폼에서 고른다.
 //
 // api.listActions는 실제 서버 없이(jsdom, 네트워크 없음) 항상 실패해 빈 배열로
 // 폴백한다(MissionFormModal 자체가 이미 .catch(() => setActions([]))로 처리) —
 // 그래서 여기서는 데이터 의존적인 action <select>의 옵션이 아니라, 실제 서버 응답과
-// 무관하게 항상 존재하는 고정 옵션(condition select)과 repo_ref 필드의 값으로
+// 무관하게 항상 존재하는 고정 옵션(condition select)과 projects 행의 값으로
 // 라운드트립을 검증한다.
 //
-// repo_ref 입력은 티켓 eb9cdd1c 에서 원시 텍스트 3개 → 공용 RepoRefPicker(검색형
-// 프로젝트 드롭다운)로 바뀌었다. 여기서는 프로젝트 목록을 빈 배열로 스텁해 폴백
-// 경로를 결정적으로 고정하고, 드롭다운 자체의 계약은 mission-form-repo-picker.test.mjs
-// 가 다룬다.
+// 작업 저장소는 예전엔 Advanced 안의 단일 repo_ref(RepoRefPicker)였다. 팀이 재사용되면서
+// 작업 폴더가 팀 slot 에서 미션의 PROJECT 들로 옮겨 갔고(각 멤버는 그 project 의 자기 Host
+// 폴더에서 일한다), 선택 UI 도 Advanced 밖의 Projects 섹션이 됐다. 여기서는 projects 가
+// post-action·실행 그래프와 같은 payload 로 함께 오가는지만 보고, Projects 섹션 자체의 계약
+// (여러 개 선택·primary·멤버별 폴더·시작 차단)은 mission-form-projects.test.mjs 가 다룬다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, run, typeInto, React, act } from './helpers/jsdom.mjs';
 import { MissionFormModal } from '../src/components/orchestration/OrchestrationPage.tsx';
 import { api } from '../src/api.ts';
+
+// 미션 계정(ws-1)의 project. 이 파일의 팀은 멤버·orchestrator 런타임이 없으므로 폴더 유무가
+// 시작을 막지 않는다 — 그 규칙은 mission-form-projects.test.mjs 의 몫이다.
+const AWB = {
+  id: 'p-awb',
+  account_id: 'ws-1',
+  name: 'AWB',
+  description: '',
+  repo_url: 'https://github.com/parnmanas/ai-workflow-board.git',
+  default_branch: 'main',
+  credential_id: null,
+  clone_policy: null,
+  use_pr: false,
+  instructions: '',
+  default_assignee: null,
+  host_folders: [],
+  created_at: new Date(0).toISOString(),
+  updated_at: new Date(0).toISOString(),
+};
 
 function baseMission(overrides) {
   return {
@@ -33,7 +54,7 @@ function baseMission(overrides) {
     team_name: 'Platform squad',
     title: 'Ship the billing export',
     status: 'draft',
-    orchestrator_agent_id: 'agent-1',
+    orchestrator_agent_id: null,
     orchestrator_name: 'Orchestrator',
     plan_version: 0,
     counts: { total: 0, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0 },
@@ -47,9 +68,13 @@ function baseMission(overrides) {
     method: '',
     completion_criteria: [],
     post_actions: [],
-    resolved_workspace_folder: '.awb/orch/mission-1',
+    excluded_member_ids: [],
+    extra_members: [],
+    projects: [],
+    folder_scope: 'shared',
+    roster: null,
+    resolved_workspace_folder: '',
     workspace_folder: '',
-    repo_ref: null,
     checkout_mode: 'reuse',
     plan_summary: '',
     result_summary: '',
@@ -65,6 +90,7 @@ function baseMission(overrides) {
     graph_spec: null,
     total_visits: 0,
     confirm_policy: 'auto',
+    user_chat_mode: 'open',
     steps: [],
     events: [],
     ...overrides,
@@ -80,9 +106,9 @@ const TEAMS = [
     allowed_account_ids: [],
     name: 'Platform squad',
     description: '',
-    orchestrator_agent_id: 'agent-1',
     orchestrator_name: 'Orchestrator',
     orchestrator_online: true,
+    orchestrator_runtime: null,
     orchestrator_prompt: '',
     max_parallel_steps: 3,
     max_open_missions: 1,
@@ -94,15 +120,12 @@ const TEAMS = [
   },
 ];
 
-async function mountModal(t, { mission = null, listProjects = async () => [], listProjectBranches = async () => ({ branches: [], default_branch: '' }) } = {}) {
+async function mountModal(t, { mission = null, listProjects = async () => [AWB] } = {}) {
   const dom = setupDom();
   const originalListProjects = api.listProjects;
-  const originalListProjectBranches = api.listProjectBranches;
   api.listProjects = listProjects;
-  api.listProjectBranches = listProjectBranches;
   t.after(() => {
     api.listProjects = originalListProjects;
-    api.listProjectBranches = originalListProjectBranches;
   });
   const view = mount(
     React.createElement(MissionFormModal, {
@@ -124,17 +147,37 @@ async function mountModal(t, { mission = null, listProjects = async () => [], li
   return view;
 }
 
-test('기존 미션 편집 — post_actions/repo_ref가 채워진 미션은 Advanced가 자동으로 펼쳐지고 그 값이 폼에 반영된다', async (t) => {
+/** controlled <select> 의 값을 네이티브 setter 로 바꾸고 change 를 태운다. */
+function change(element, value) {
+  run(() => {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set;
+    setter.call(element, value);
+    element.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+}
+
+/** Projects 섹션의 "Add a project" 드롭다운으로 project 하나를 고른다. */
+function addProject(container, projectId) {
+  const select = container.querySelector('select[aria-label="Add a project"]');
+  assert.ok(select, '"Add a project" 드롭다운이 있다');
+  change(select, projectId);
+}
+
+test('기존 미션 편집 — post_actions/projects가 채워진 미션은 Advanced가 자동으로 펼쳐지고 그 값이 폼에 반영된다', async (t) => {
   const mission = baseMission({
     post_actions: [
       { action_id: 'action-1', order: 1, condition: 'on_success', status: 'pending', run_id: null, room_id: null, error: '', dispatched_at: null },
     ],
-    repo_ref: { project_id: 'res-42', branch: 'main' },
+    projects: [{ project_id: 'p-awb', branch: 'main', name: 'AWB' }],
   });
   const { container } = await mountModal(t, { mission });
 
   assert.match(container.textContent, /Post-completion actions/, 'Advanced 섹션이 자동으로 펼쳐져 post-action 편집기가 보인다');
-  assert.match(container.textContent, /repo_ref \(작업폴더로 체크아웃할 저장소/, '공용 repo 피커 블록이 렌더링된다');
+  assert.equal(
+    Boolean(container.querySelector('select[aria-label="프로젝트 선택"]')),
+    false,
+    '구 repo_ref 피커(RepoRefPicker)는 더 이상 렌더링되지 않는다',
+  );
 
   const conditionSelect = [...container.querySelectorAll('select')].find((s) =>
     [...s.options].some((o) => o.value === 'on_success'),
@@ -142,21 +185,30 @@ test('기존 미션 편집 — post_actions/repo_ref가 채워진 미션은 Adva
   assert.ok(conditionSelect, 'condition select가 렌더링된다');
   assert.equal(conditionSelect.value, 'on_success', '기존 post_action의 condition이 그대로 반영된다');
 
-  // 목록이 비어 있으면(권한 없음/등록된 프로젝트 없음) id 를 직접 넣을 수 있어야
-  // 하고, 저장된 값이 거기에 그대로 실려 있어야 한다.
-  const projectInput = container.querySelector('input[aria-label="project_id 직접 입력"]');
-  assert.ok(projectInput, '프로젝트 목록이 비면 project_id 수동 입력이 제공된다');
-  assert.equal(projectInput.value, 'res-42', 'repo_ref.project_id가 폼에 반영된다');
-  const branchSelect = container.querySelector('select[aria-label="브랜치 선택"]');
-  assert.ok(branchSelect, 'repo_ref.branch는 브랜치 드롭다운으로 편집한다');
-  assert.equal(branchSelect.value, 'main', 'repo_ref.branch가 폼에 반영된다');
+  // projects 는 Projects 섹션의 행으로 돌아온다 — project 마다 브랜치 입력이 하나씩이다.
+  const branchInput = container.querySelector('[data-testid="mission-projects"] input[aria-label="Branch for AWB"]');
+  assert.ok(branchInput, '저장된 project 가 이름으로 된 행으로 반영된다');
+  assert.equal(branchInput.value, 'main', 'projects[].branch가 폼에 반영된다');
 
   // Team select는 편집 중엔 바뀌면 안 되므로 비활성화되어 있어야 한다.
   const teamSelect = [...container.querySelectorAll('select')].find((s) => s.value === 'team-1');
   assert.ok(teamSelect?.disabled, '편집 중에는 Team select가 비활성화된다');
 });
 
-test('새 미션 생성 — post-action 행을 추가하고 action/condition, repo_ref 필드를 채울 수 있다', async (t) => {
+test('projects 는 Advanced 밖에 있다 — project 만 채워진 미션은 Advanced 를 펼치지 않아도 보인다', async (t) => {
+  // 예전 repo_ref 는 Advanced 안에 있어서 저장돼 있으면 Advanced 를 자동으로 펼쳐야 했다.
+  // 이제 작업 폴더는 미션의 project 들이 정하고, 그 선택은 항상 보이는 섹션에 있다.
+  const mission = baseMission({ projects: [{ project_id: 'p-awb', branch: '', name: 'AWB' }] });
+  const { container } = await mountModal(t, { mission });
+
+  assert.doesNotMatch(container.textContent, /Post-completion actions/, '다른 실행 계약이 없으면 Advanced 는 접힌 채로 열린다');
+  assert.ok(
+    container.querySelector('[data-testid="mission-projects"] input[aria-label="Branch for AWB"]'),
+    'Advanced 를 펼치지 않아도 저장된 project 가 보인다',
+  );
+});
+
+test('새 미션 생성 — post-action 행을 추가하고 action/condition 을, project 와 브랜치를 채울 수 있다', async (t) => {
   const { container } = await mountModal(t, { mission: null });
 
   // Advanced는 기본적으로 접혀 있다 — 펼쳐야 필드가 나타난다.
@@ -165,8 +217,6 @@ test('새 미션 생성 — post-action 행을 추가하고 action/condition, re
   assert.ok(toggle, 'Advanced 토글 버튼이 있다');
   click(toggle);
   assert.match(container.textContent, /Post-completion actions/, '토글 후 post-action 편집기가 나타난다');
-  // 토글로 새로 마운트된 repo 피커의 목록 조회를 act 안에서 끝낸다.
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
   const addPostAction = [...container.querySelectorAll('button')].find((b) => /Add post-action/.test(b.textContent || ''));
   assert.ok(addPostAction, '"+ Add post-action" 버튼이 있다 — 이전엔 이 입력 자체가 없었다');
@@ -178,10 +228,13 @@ test('새 미션 생성 — post-action 행을 추가하고 action/condition, re
   assert.ok(conditionSelect, '행 추가 후 condition select가 나타난다');
   assert.equal(conditionSelect.value, 'always', '새 post-action의 condition 기본값은 always다');
 
-  const repoUrlInput = container.querySelector('input[aria-label="repo URL"]');
-  assert.ok(repoUrlInput, 'repo_ref용 URL input이 존재한다');
-  typeInto(repoUrlInput, 'https://example.test/repo.git');
-  assert.equal(repoUrlInput.value, 'https://example.test/repo.git', 'repo_ref URL을 타이핑으로 채울 수 있다');
+  // repo_ref 의 URL·브랜치 입력 대신 project 를 고르고 그 project 의 브랜치를 적는다.
+  assert.equal(Boolean(container.querySelector('input[aria-label="repo URL"]')), false, 'repo_ref용 URL input은 없어졌다');
+  addProject(container, 'p-awb');
+  const branchInput = container.querySelector('[data-testid="mission-projects"] input[aria-label="Branch for AWB"]');
+  assert.ok(branchInput, 'project 를 고르면 그 project 의 브랜치 입력이 생긴다');
+  typeInto(branchInput, 'release');
+  assert.equal(branchInput.value, 'release', 'project 브랜치를 타이핑으로 채울 수 있다');
 });
 
 // ── 실행 그래프 + 사용자 확인 강도 (티켓 5dbe4aa2) ──────────────────────────
@@ -258,6 +311,9 @@ test('새 미션 생성 — 실행 그래프 토글과 확인 강도 select 가 
   });
   assert.equal(policySelect.value, 'key_steps');
 
+  // "즉시 브리핑" 생성은 project 가 하나는 있어야 보낸다(없으면 폼이 요청 없이 막는다).
+  addProject(container, 'p-awb');
+
   const save = [...container.querySelectorAll('button')].find((b) => /Create & brief/.test(b.textContent || ''));
   assert.ok(save, '저장 버튼이 있다');
   click(save);
@@ -268,11 +324,18 @@ test('새 미션 생성 — 실행 그래프 토글과 확인 강도 select 가 
   assert.equal(calls.created.length, 1, '생성이 실제로 전송된다');
   assert.equal(calls.created[0].graph_enabled, true, '체크박스 값이 payload 에 실려야 한다');
   assert.equal(calls.created[0].confirm_policy, 'key_steps', '고른 정책이 payload 에 실려야 한다');
+  assert.deepEqual(calls.created[0].projects, [{ project_id: 'p-awb' }], '고른 project 가 같은 payload 로 나간다');
+  assert.equal('repo_ref' in calls.created[0], false, 'repo_ref 는 더 이상 보내지 않는다');
 });
 
 test('기존 draft 편집 — 저장된 graph_enabled/confirm_policy 가 폼에 반영되고 PATCH 로 되돌아간다', async (t) => {
   const calls = stubMissionApi(t);
-  const mission = baseMission({ graph_enabled: true, confirm_policy: 'every_step' });
+  const mission = baseMission({
+    graph_enabled: true,
+    confirm_policy: 'every_step',
+    projects: [{ project_id: 'p-awb', branch: 'main', name: 'AWB' }],
+    folder_scope: 'isolated',
+  });
   const { container } = await mountModal(t, { mission });
 
   // graph 가 켜진 미션은 Advanced 가 자동으로 펼쳐져야 한다 — 접혀 있으면 사용자가
@@ -295,4 +358,8 @@ test('기존 draft 편집 — 저장된 graph_enabled/confirm_policy 가 폼에 
   assert.equal(calls.updated.length, 1);
   assert.equal(calls.updated[0].data.graph_enabled, true, '편집 저장에도 값이 보존돼야 한다');
   assert.equal(calls.updated[0].data.confirm_policy, 'every_step');
+  // 실행 계약을 고쳐 저장해도 미션의 project 들과 폴더 범위가 함께 되돌아간다.
+  assert.deepEqual(calls.updated[0].data.projects, [{ project_id: 'p-awb', branch: 'main' }]);
+  assert.equal(calls.updated[0].data.folder_scope, 'isolated');
+  assert.equal('repo_ref' in calls.updated[0].data, false, '편집 경로도 repo_ref 를 보내지 않는다');
 });

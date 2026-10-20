@@ -22,18 +22,17 @@ import TeamSlotRuntimeFields, {
   slotDraftProblem,
   slotDraftToSpec,
   type SlotDraft,
-  type SlotNeighbour,
 } from './TeamSlotRuntimeFields';
 
 /**
  * Team roster management.
  *
- * A roster slot is declared as **Runtime Host + CLI + model + working folder**
- * (see TeamSlotRuntimeFields) rather than picked from a list of Agents someone
+ * A roster slot is declared as **Runtime Host + CLI + model** (see
+ * TeamSlotRuntimeFields) rather than picked from a list of Agents someone
  * created first. That is the whole point of this screen: a team spanning three
- * machines is built here, in one pass, and AWB provisions the agent identities
- * behind it. Slots on one host that name the same folder share a working tree —
- * which is how members hand work to each other and reuse one checkout.
+ * machines is built here, in one pass. A team names no folders — it is reused
+ * across missions, and each mission's projects decide where a member works
+ * (that project's folder on the member's host).
  *
  * The orchestrator is a required, first-class field rather than "a member with
  * a special role_label": the mission state machine addresses it directly and
@@ -60,9 +59,8 @@ export default function OrchestrationTeamsPage() {
 
   const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
   // Slot pickers are fed by machines, not by agents: Runtime Hosts with the CLIs
-  // they have installed, the models they enumerated, and the working folders
-  // already in use on them. Credentials / backend profiles are the optional
-  // per-slot auth knobs the same form offers.
+  // they have installed and the models they enumerated. Credentials / backend
+  // profiles are the optional per-slot auth knobs the same form offers.
   const [hosts, setHosts] = useState<OrchestrationRuntimeHost[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [backendProfiles, setBackendProfiles] = useState<ClaudeBackendProfile[]>([]);
@@ -418,19 +416,18 @@ export default function OrchestrationTeamsPage() {
 }
 
 /**
- * One-line summary of where a slot runs. Shown on every roster row because
- * "which machine / folder is this member on" is now the defining fact about a
+ * One-line summary of what a slot runs. Shown on every roster row because
+ * "which machine / CLI / model is this member" is the defining fact about a
  * member — with several hosts in play, two rows are otherwise indistinguishable.
  */
 function RuntimeChip({ runtime }: { runtime: OrchestrationSlotRuntime | null }) {
   if (!runtime) {
     return (
       <span style={{ fontSize: 11, color: tokens.colors.warningLight }}>
-        No runtime recorded — open Edit and save to set the host, CLI and working folder.
+        No runtime recorded — open Edit and save to set the host and CLI.
       </span>
     );
   }
-  const shared = runtime.folder_scope === 'shared';
   return (
     <span style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
       <span title={runtime.manager_online ? 'Runtime Host online' : 'Runtime Host offline'}>
@@ -438,41 +435,17 @@ function RuntimeChip({ runtime }: { runtime: OrchestrationSlotRuntime | null }) 
       </span>
       <span>·</span>
       <span>{runtime.cli}{runtime.model ? ` (${runtime.model})` : ''}</span>
-      <span>·</span>
-      <code style={{ fontSize: 10, color: tokens.colors.textSecondary }}>{runtime.working_dir}</code>
-      <span style={{ color: shared ? tokens.colors.accentLight : tokens.colors.textMuted }}>
-        {shared
-          ? runtime.shared_with.length
-            ? `· shared with ${runtime.shared_with.join(', ')}`
-            : '· works in this folder directly'
-          : '· isolated per-step folder'}
-      </span>
     </span>
   );
 }
 
-/** Every OTHER slot on a team, for the folder-sharing hints in the slot form. */
-function neighboursOf(team: OrchestrationTeam | null, exclude?: { memberId?: string; orchestrator?: boolean }): SlotNeighbour[] {
-  if (!team) return [];
-  const out: SlotNeighbour[] = [];
-  if (!exclude?.orchestrator && team.orchestrator_runtime) {
-    out.push({
-      label: team.orchestrator_name || 'orchestrator',
-      manager_agent_id: team.orchestrator_runtime.manager_agent_id,
-      working_dir: team.orchestrator_runtime.working_dir,
-      folder_scope: team.orchestrator_runtime.folder_scope,
-    });
-  }
-  for (const m of team.members) {
-    if (exclude?.memberId === m.id || !m.runtime) continue;
-    out.push({
-      label: m.agent_name || m.role_label || 'member',
-      manager_agent_id: m.runtime.manager_agent_id,
-      working_dir: m.runtime.working_dir,
-      folder_scope: m.runtime.folder_scope,
-    });
-  }
-  return out;
+/** Same slot — every field a slot is launched with is equal (the server's sameTeamSlotSpec). */
+function sameSlot(a: OrchestrationSlotRuntime | null, b: OrchestrationSlotRuntime | null): boolean {
+  if (!a || !b) return false;
+  const key = (r: OrchestrationSlotRuntime) => JSON.stringify([
+    r.manager_agent_id, r.cli, r.model ?? '', r.credential_id ?? '', r.cli_runtime_profile ?? '', r.runtime_config ?? null,
+  ]);
+  return key(a) === key(b);
 }
 
 function OnlineDot({ online }: { online: boolean }) {
@@ -668,9 +641,6 @@ export function TeamFormModal({
             hosts={hosts}
             credentials={credentials}
             backendProfiles={backendProfiles}
-            onHostRefreshed={onHostRefreshed}
-            accountId={accountId}
-            neighbours={neighboursOf(team, { orchestrator: true })}
           />
         </SlotSection>
         <LabeledTextarea
@@ -811,7 +781,7 @@ function AddMemberModal({
     if (!team) return;
     // Seed from the orchestrator's slot: on a single-machine team that is
     // almost always right, and on a multi-machine one it still puts a valid host
-    // and CLI in the form so only the folder has to change.
+    // and CLI in the form so usually only the model has to change.
     setDraft(team.orchestrator_runtime ? slotDraftFromRuntime(team.orchestrator_runtime) : emptySlotDraft());
     setRoleLabel('');
     setCapabilities('');
@@ -890,7 +860,7 @@ function AddMemberModal({
             type="checkbox"
             checked={asOrchestrator}
             onChange={(e) => setAsOrchestrator(e.target.checked)}
-            disabled={!team?.orchestrator_agent_id}
+            disabled={!team?.orchestrator_runtime}
           />
           <span>
             This member is the orchestrator itself
@@ -903,7 +873,7 @@ function AddMemberModal({
         {!asOrchestrator && (
           <SlotSection
             title="Runtime"
-            subtitle="Which machine, CLI, model and folder this member runs on. Point two members at the same folder on the same host to let them work in one tree."
+            subtitle="Which machine, CLI and model this member runs on. Where it works is decided per mission: each mission's projects, in their folder on this host."
             problem={problem}
           >
             <TeamSlotRuntimeFields
@@ -912,9 +882,6 @@ function AddMemberModal({
               hosts={hosts}
               credentials={credentials}
               backendProfiles={backendProfiles}
-              onHostRefreshed={onHostRefreshed}
-              accountId={accountId}
-              neighbours={neighboursOf(team)}
             />
           </SlotSection>
         )}
@@ -960,7 +927,9 @@ function MemberEditButton({
     setDraft(slotDraftFromRuntime(member.runtime));
   }, [open, member]);
 
-  const isOrchestratorRow = member.agent_id === team.orchestrator_agent_id;
+  // 서버와 같은 판정이다 — 오케스트레이터와 슬롯이 완전히 같으면 그 행은 "로스터에 앉은
+  // 오케스트레이터"이고, 런타임 편집은 팀 쪽 한 곳에서만 한다.
+  const isOrchestratorRow = sameSlot(member.runtime, team.orchestrator_runtime);
   const problem = isOrchestratorRow ? null : slotDraftProblem(draft);
 
   const submit = async () => {
@@ -1039,7 +1008,7 @@ function MemberEditButton({
           ) : (
             <SlotSection
               title="Runtime"
-              subtitle="Changing the machine gives this member a new identity on that host; changing the folder or model edits the one it already has."
+              subtitle="Missions already running keep the runtime they started with; the next mission (or reopening one) uses this."
               problem={problem}
             >
               <TeamSlotRuntimeFields
@@ -1048,9 +1017,6 @@ function MemberEditButton({
                 hosts={hosts}
                 credentials={credentials}
                 backendProfiles={backendProfiles}
-                onHostRefreshed={onHostRefreshed}
-                accountId={accountId}
-                neighbours={neighboursOf(team, { memberId: member.id })}
               />
             </SlotSection>
           )}

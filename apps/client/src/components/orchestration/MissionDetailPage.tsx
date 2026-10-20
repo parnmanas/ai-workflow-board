@@ -729,12 +729,66 @@ function BriefPane({ mission, teams, onCopyId }: {
   const excluded = mission.excluded_member_ids ?? [];
   const extras = mission.extra_members ?? [];
   const team = teams.find((t) => t.id === mission.team_id) || null;
-  const excludedNames = excluded.map((id) => team?.members.find((m) => m.agent_id === id)?.agent_name || id.slice(0, 11));
+  const excludedNames = excluded.map((id) => team?.members.find((m) => m.id === id)?.agent_name || id.slice(0, 11));
+  const projects = mission.projects ?? [];
+  const projectName = (id: string) => projects.find((p) => p.project_id === id)?.name || id.slice(0, 8);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820 }}>
       <Section title="Mission information">
         <MissionIdentity id={mission.id} onCopy={onCopyId} />
       </Section>
+      <Section title="Projects">
+        {projects.length === 0 ? (
+          <div style={{ fontSize: 12, color: tokens.colors.warningLight }}>
+            No project — a mission needs at least one before it can start (members work in a project&apos;s folder on
+            their own host).
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tokens.colors.textSecondary }}>
+            {projects.map((p, i) => (
+              <div key={p.project_id}>
+                <span style={{ color: tokens.colors.textStrong }}>{p.name || p.project_id}</span>
+                {p.branch && <span> · branch <code>{p.branch}</code></span>}
+                {i === 0 && <span style={{ color: tokens.colors.textMuted }}> · primary</span>}
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+              {(mission.folder_scope ?? 'shared') === 'shared'
+                ? 'Shared folders — each step runs directly in its project\'s folder on its host.'
+                : `Isolated folders — each step gets its own checkout under its project's folder (${mission.resolved_workspace_folder}/<step>).`}
+            </div>
+          </div>
+        )}
+      </Section>
+      {mission.roster && (
+        <Section title="Who works where">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
+              Fixed when the mission started — editing the team later does not change it (reopening does).
+            </div>
+            {mission.roster.orchestrator && (
+              <div>
+                <span style={{ color: tokens.colors.textStrong }}>{mission.roster.orchestrator.name}</span>
+                <span style={{ color: tokens.colors.textMuted }}> · orchestrator · </span>
+                {projectName(mission.roster.orchestrator.project_id)} — <code style={{ fontSize: 11 }}>{mission.roster.orchestrator.working_dir}</code>
+              </div>
+            )}
+            {mission.roster.members.map((m) => (
+              <div key={m.slot_id}>
+                <span style={{ color: tokens.colors.textStrong }}>{m.name}</span>
+                <span style={{ color: tokens.colors.textMuted }}>
+                  {' · '}{m.cli}{m.model ? ` (${m.model})` : ''}{m.kind === 'extra' ? ' · ad-hoc' : ''}
+                </span>
+                {m.projects.map((p) => (
+                  <div key={p.project_id} style={{ fontSize: 11, marginLeft: 12 }}>
+                    {projectName(p.project_id)} — <code style={{ fontSize: 11 }}>{p.working_dir}</code>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
       {(excluded.length > 0 || extras.length > 0) && (
         <Section title={`Team roster for this mission — ${team?.name ?? mission.team_name}`}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
@@ -776,19 +830,6 @@ function BriefPane({ mission, teams, onCopyId }: {
             <Prose text={mission.acceptance_criteria} muted />
           </>
         )}
-        <SubHeading>Step working folder</SubHeading>
-        <div style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
-          {mission.resolved_workspace_folder}
-        </div>
-        {/* Qualify the path: it is the root for ISOLATED slots only. A member whose slot
-            uses the shared folder scope runs in its own working folder instead, so stating
-            this unconditionally would send someone looking for files in a directory that
-            never exists. */}
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-          Relative to each member&apos;s working folder, for members whose roster slot uses the
-          <strong> isolated</strong> folder scope — each step gets its own subfolder here. Members set to
-          <strong> shared</strong> run in their working folder directly; the Teams screen shows which is which.
-        </div>
       </Section>
 
       {mission.completion_criteria.length > 0 && (

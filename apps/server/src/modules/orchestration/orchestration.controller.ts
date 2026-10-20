@@ -276,8 +276,12 @@ export class OrchestrationController {
   async createMission(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id?: string } | undefined;
+      // `orchestrator_agent_id` pre-stamps an agent-created draft with the identity
+      // the MCP tool already proved is the team's orchestrator. A human request has
+      // nothing to prove it with, so it never reaches the service.
+      const { orchestrator_agent_id: _ignored, ...input } = body ?? {};
       const mission = await this.missions.createMission({
-        ...body,
+        ...input,
         created_by_type: 'user',
         created_by: user?.id || '',
       });

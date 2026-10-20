@@ -281,9 +281,12 @@ export default function StepSessionPanel({
               manual recovery only
             </span>
           )}
-          {step.workspace_folder && (
-            <span style={{ fontFamily: 'monospace', fontSize: 10, color: tokens.colors.textMuted }}>
-              {step.workspace_folder}
+          {(step.project_name || step.working_dir) && (
+            <span
+              style={{ fontFamily: 'monospace', fontSize: 10, color: tokens.colors.textMuted }}
+              title="The step's project, and the folder it runs in on the assignee's host"
+            >
+              {[step.project_name, [step.working_dir, step.workspace_folder].filter(Boolean).join('/')].filter(Boolean).join(' · ')}
             </span>
           )}
         </div>

@@ -119,8 +119,9 @@ async function stage(t, { label, confirmPolicy = 'auto', graphEnabled = true } =
     return client;
   };
 
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI) 로만 선언하고 폴더는 미션의 project 가 정한다 —
+  // 실행 정체성은 미션 시작 시 (CLI, project 폴더, credential) 로 확정되므로 lead/worker
+  // 를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: `Confirm squad ${label}`,
@@ -134,6 +135,7 @@ async function stage(t, { label, confirmPolicy = 'auto', graphEnabled = true } =
   const mission = await missions.createMission({
     account_id: ws.id,
     team_id: team.id,
+    ...squad.missionDefaults,
     title: `Confirm mission ${label}`,
     objective: 'Exercise the human confirmation gate end to end.',
     // 슬롯 회계를 실제로 시험하기 위한 값 — 게이트가 슬롯을 먹으면 docs 가 못 나간다.

@@ -11,6 +11,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { Brackets, DataSource, EntityManager, Repository, In, Not } from 'typeorm';
 import { OrchestrationMission, MissionExtraMember } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
@@ -22,6 +23,7 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Credential } from '../../entities/Credential';
+import { Project } from '../../entities/Project';
 import { repairTruncatedMediaForRead } from '../mcp/shared/ticket-helpers';
 import { resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
@@ -54,7 +56,6 @@ import {
 } from './orchestration.constants';
 import {
   CheckoutMode,
-  WorkspaceFolderRepoRef,
   normalizeCheckoutMode,
   normalizeRepoRef,
   normalizeWorkspaceFolder,
@@ -62,14 +63,18 @@ import {
 } from '../../common/workspace-folder-options';
 import { CLI_RUNTIME_NONE } from '../../common/cli-runtime-profiles';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
-import { runtimeIdentityKey } from '../../common/runtime-spec';
 import {
+  MemberFolderScope,
   TeamAgentSpecError,
-  normalizeTeamAgentSpec,
+  normalizeMemberFolderScope,
+  normalizeTeamSlotSpec,
 } from '../../common/orchestration-member-spec';
+import { MissionProjectRef, normalizeMissionProjects, readMissionProjects } from './orchestration-project';
+import { ORCHESTRATOR_SLOT_ID, readRuntimeRoster } from './orchestration-roster';
+import { teamsForIdentities } from './orchestration-slot-identities';
 
 export interface MissionExtraMemberInput {
-  /** 팀 슬롯과 같은 runtime spec — Runtime Host / CLI / model / working folder. */
+  /** 팀 슬롯과 같은 slot spec — Runtime Host / CLI / model / credential (폴더 없음 — 미션의 project 가 정한다). */
   runtime: unknown;
   role_label?: string;
   capabilities?: string;
@@ -267,9 +272,17 @@ export interface MissionStepView {
   instructions: string;
   acceptance_criteria: string;
   depends_on: string[];
+  /** The roster slot the orchestrator assigned (team member id / ad-hoc slot id). */
+  assignee_slot: string | null;
+  /** The execution identity the step runs as (slot × project folder). */
   assignee_agent_id: string | null;
   assignee_name: string;
   assignee_online: boolean;
+  /** The mission project this step works on, and its name ('' when unknown). */
+  project_id: string | null;
+  project_name: string;
+  /** The folder the step runs in on its host (its project's folder there); '' when unassigned. */
+  working_dir: string;
   status: string;
   position: number;
   plan_version: number;
@@ -281,7 +294,7 @@ export interface MissionStepView {
   dispatched_at: Date | null;
   started_at: Date | null;
   finished_at: Date | null;
-  /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
+  /** isolated 미션에서 이 step 이 project 폴더 아래 고정되는 상대 경로. */
   workspace_folder: string;
   /** loop 재진입 횟수(1-based, 미실행 0). attempt(같은 iteration의 재시도)와 다른 축. */
   visit: number;
@@ -323,10 +336,18 @@ export interface MissionDetail extends MissionListItem {
    * `[]` = 추가 없음.
    */
   extra_members: MissionExtraMember[];
-  /** 해석 완료된 working_dir-relative 루트(절대 ''가 아님) — `.awb/orch/<leaf>`. */
+  /** 이 미션의 project 들(첫 항목이 primary). 이름은 지금 조회한 값이고, 사라진 project 는 ''. */
+  projects: Array<MissionProjectRef & { name: string }>;
+  /** `shared` | `isolated` — step 이 project 폴더 자체에서 도는지, step 별 체크아웃에서 도는지. */
+  folder_scope: MemberFolderScope;
+  /**
+   * 시작 때 확정한 로스터 요약 — 슬롯마다 어느 project 를 어느 폴더에서 맡는지.
+   * 시작 전이거나 이 기능 이전에 시작된 미션은 null.
+   */
+  roster: MissionRosterView | null;
+  /** 해석 완료된 project-folder-relative 루트(절대 ''가 아님) — `.awb/orch/<leaf>`. isolated 전용. */
   resolved_workspace_folder: string;
   workspace_folder: string;
-  repo_ref: WorkspaceFolderRepoRef | null;
   checkout_mode: CheckoutMode;
   plan_summary: string;
   result_summary: string;
@@ -365,6 +386,23 @@ export interface MissionDetail extends MissionListItem {
     data: Record<string, any> | null;
     created_at: Date;
     write_seq: number;
+  }>;
+}
+
+/** A started mission's frozen roster, as the mission screen shows it. */
+export interface MissionRosterView {
+  folder_scope: MemberFolderScope;
+  orchestrator: { name: string; project_id: string; working_dir: string } | null;
+  members: Array<{
+    slot_id: string;
+    kind: string;
+    name: string;
+    role_label: string;
+    cli: string;
+    model: string | null;
+    max_concurrent: number;
+    /** One entry per project this slot can work on (its host has the project's folder). */
+    projects: Array<{ project_id: string; working_dir: string }>;
   }>;
 }
 
@@ -453,8 +491,16 @@ export class OrchestrationMissionService {
     method?: string;
     completion_criteria?: unknown;
     post_actions?: unknown;
-    workspace_folder?: string;
+    /**
+     * 이 미션이 다루는 project 들 — `[{ project_id, branch? }]`, 첫 항목이 primary.
+     * 시작하려면 하나 이상 필요하다(draft 는 비워 둘 수 있다).
+     */
+    projects?: unknown;
+    /** 레거시 단일 project 입력 — `projects` 가 없을 때만 `[repo_ref]` 로 읽는다. */
     repo_ref?: unknown;
+    /** `shared`(기본) | `isolated`. */
+    folder_scope?: string;
+    workspace_folder?: string;
     checkout_mode?: string;
     max_parallel_steps?: number;
     max_steps?: number;
@@ -469,7 +515,7 @@ export class OrchestrationMissionService {
     created_by_type?: string;
     created_by?: string;
     /**
-     * 이번 미션에서만 제외할 팀 멤버의 agent_id 목록. 팀 로스터는 그대로이며
+     * 이번 미션에서만 제외할 팀 멤버(행 id) 목록. 팀 로스터는 그대로이며
      * 실행 엔진이 effective roster 에서 뺀다. 존재하지 않는 id 가 있으면 400.
      */
     excluded_member_ids?: unknown;
@@ -483,13 +529,13 @@ export class OrchestrationMissionService {
      * until startMission runs (ticket b7127aae review round 2). Without this,
      * a mission that is left `draft` (start:false, or startMission throwing
      * before it stamps this field — e.g. an empty roster) has
-     * orchestrator_agent_id=null forever: requireOrchestrator's `!==
-     * callerAgentId` check then 403s EVERY caller, including the real
-     * orchestrator, so complete_orchestration_mission/get_orchestration_mission
-     * can't reach it either — a team-slot wedge with no MCP escape hatch.
-     * Must equal team.orchestrator_agent_id (checked below); startMission
-     * overwrites this with the same value when it actually starts, so
-     * pre-stamping it here is idempotent with that path.
+     * orchestrator_agent_id=null forever: requireOrchestrator then 403s EVERY
+     * caller, including the agent that created it, so
+     * complete_orchestration_mission can't close it — a wedge with no MCP
+     * escape hatch. Only the agent-created path sets it, with the identity it
+     * already proved to be the team's orchestrator (create_orchestration_mission);
+     * the REST controller never forwards it. startMission overwrites it with
+     * the orchestrator's identity in the mission's project folder.
      */
     orchestrator_agent_id?: string;
   }): Promise<OrchestrationMission> {
@@ -513,8 +559,8 @@ export class OrchestrationMissionService {
       where: visibleScopeWhere<OrchestrationTeam>(accountId, { id: input.team_id }),
     });
     if (!team) throw orchestrationError(404, 'orchestration team not found in account');
-    if (!team.orchestrator_agent_id) {
-      throw orchestrationError(400, `team "${team.name}" has no orchestrator agent set`);
+    if (!team.orchestrator_spec) {
+      throw orchestrationError(400, `team "${team.name}" has no orchestrator set`);
     }
     // 글로벌 팀의 allowed_account_ids를 권위 있게 강제하는 지점 — "MANAGE_ACTIONS을
     // 가진 아무 호출자"와 "팀이 허가받은 적 없는 account에 미션을 과금"을 가르는
@@ -535,9 +581,6 @@ export class OrchestrationMissionService {
         throw orchestrationError(400, `account_id "${accountId}" is not on team "${team.name}"'s allowed account list.`);
       }
     }
-    if (input.orchestrator_agent_id && input.orchestrator_agent_id !== team.orchestrator_agent_id) {
-      throw orchestrationError(403, 'orchestrator_agent_id must match the team\'s own orchestrator');
-    }
 
     const objective = (input.objective || '').trim();
     if (!objective) throw orchestrationError(400, 'objective is required — the orchestrator plans from it');
@@ -551,20 +594,9 @@ export class OrchestrationMissionService {
     // 팀을 고른 뒤 이번 미션에서만 멤버를 빼거나 임시 멤버를 얹는 값이다.
     // 팀 로스터 자체는 건드리지 않으므로 다음 미션에 영향을 주지 않는다.
     const excludedIds = normalizeExcludedMemberIds(input.excluded_member_ids);
-    if (excludedIds.length > 0) {
-      const teamMemberIds = new Set(
-        (await this.memberRepo.find({ where: { team_id: team.id }, select: ['agent_id'] as any }))
-          .map((m) => m.agent_id),
-      );
-      const unknown = excludedIds.filter((id) => !teamMemberIds.has(id));
-      if (unknown.length > 0) {
-        throw orchestrationError(
-          400,
-          `excluded_member_ids references members that are not on team "${team.name}": ${unknown.join(', ')}`,
-        );
-      }
-    }
+    await this.assertExcludedOnTeam(team, excludedIds);
     const extraMembers = await this.normalizeExtraMembers(input.extra_members, accountId);
+    const projects = await this.normalizeProjectsInput(input.projects, input.repo_ref, accountId);
 
     const mission = await this.missionRepo.save(
       this.missionRepo.create({
@@ -581,8 +613,10 @@ export class OrchestrationMissionService {
         // "미확정 항목 있음" == "배열이 비어있지 않음"이다(post_actions_pending
         // 문서 참고). 이후 runPostActions()가 실제 처리 진행에 맞춰 갱신한다.
         post_actions_pending: postActionsResult.postActions.length > 0,
+        projects: projects.length ? projects : null,
+        folder_scope: normalizeFolderScopeInput(input.folder_scope),
         workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
-        repo_ref: normalizeRepoRef(input.repo_ref),
+        repo_ref: null,
         checkout_mode: normalizeCheckoutMode(input.checkout_mode),
         status: 'draft',
         orchestrator_agent_id: input.orchestrator_agent_id || null,
@@ -622,8 +656,11 @@ export class OrchestrationMissionService {
       method?: string;
       completion_criteria?: unknown;
       post_actions?: unknown;
-      workspace_folder?: string;
+      projects?: unknown;
+      /** 레거시 단일 project 입력 — `projects` 가 없을 때만 읽는다. */
       repo_ref?: unknown;
+      folder_scope?: string;
+      workspace_folder?: string;
       checkout_mode?: string;
       max_parallel_steps?: number;
       max_steps?: number;
@@ -658,9 +695,10 @@ export class OrchestrationMissionService {
     // orchestrator가 브리핑되기 전, draft 상태일 때만 편집 가능하다. 미션
     // 프롬프트가 이미 전송된 뒤에 여기서 편집하면 orchestrator가 들은 내용과
     // UI가 보여주는 내용이 조용히 어긋난다 — orchestrator는 그 편집을 알 방법이
-    // 없다. workspace_folder/repo_ref/checkout_mode도 함께 잠근다: 미션 도중
-    // 체크아웃 위치를 바꾸면 이미 디스패치된 step(다른 폴더)과 이후 디스패치될
-    // step이 서로 어긋난다. completion_criteria의 구조(어떤 criteria가 있는지)도
+    // 없다. projects/folder_scope/workspace_folder/checkout_mode도 함께 잠근다:
+    // 미션 도중 작업 위치를 바꾸면 이미 디스패치된 step(다른 폴더)과 이후 디스패치될
+    // step이 서로 어긋나고, 시작 때 확정한 로스터(runtime_roster)와도 어긋난다.
+    // completion_criteria의 구조(어떤 criteria가 있는지)도
     // 여기서 잠긴다 — `met`을 런타임에 뒤집는 건 대신
     // `update_orchestration_criteria`(mission-locked, orchestrator 전용)로 한다.
     const briefLocked = mission.status !== 'draft';
@@ -672,8 +710,10 @@ export class OrchestrationMissionService {
       patch.method !== undefined ||
       patch.completion_criteria !== undefined ||
       patch.post_actions !== undefined ||
-      patch.workspace_folder !== undefined ||
+      patch.projects !== undefined ||
       patch.repo_ref !== undefined ||
+      patch.folder_scope !== undefined ||
+      patch.workspace_folder !== undefined ||
       patch.checkout_mode !== undefined ||
       // graph_enabled도 브리핑 계약의 일부다: 미션이 이미 시작된 뒤 켜면
       // orchestrator는 자기가 분기/loop를 쓸 수 있다는 사실을 들은 적이 없고,
@@ -726,8 +766,15 @@ export class OrchestrationMissionService {
       mission.post_actions = result.postActions.length ? result.postActions : null;
       mission.post_actions_pending = result.postActions.length > 0;
     }
+    if (patch.projects !== undefined || patch.repo_ref !== undefined) {
+      const projects = await this.normalizeProjectsInput(patch.projects, patch.repo_ref, mission.account_id);
+      mission.projects = projects.length ? projects : null;
+      // 목록이 원천이 됐으므로 레거시 단일 참조는 비운다 — 남겨 두면 목록을 비운 draft 가
+      // readMissionProjects 의 레거시 폴백으로 옛 project 를 다시 읽는다.
+      mission.repo_ref = null;
+    }
+    if (patch.folder_scope !== undefined) mission.folder_scope = normalizeFolderScopeInput(patch.folder_scope);
     if (patch.workspace_folder !== undefined) mission.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
-    if (patch.repo_ref !== undefined) mission.repo_ref = normalizeRepoRef(patch.repo_ref);
     if (patch.checkout_mode !== undefined) mission.checkout_mode = normalizeCheckoutMode(patch.checkout_mode);
     if (patch.max_parallel_steps !== undefined) {
       mission.max_parallel_steps = clampInt(patch.max_parallel_steps, mission.max_parallel_steps, 1, MAX_PARALLEL_CEILING);
@@ -750,19 +797,7 @@ export class OrchestrationMissionService {
       if (!team) throw orchestrationError(404, 'orchestration team not found');
       if (patch.excluded_member_ids !== undefined) {
         const excludedIds = normalizeExcludedMemberIds(patch.excluded_member_ids);
-        if (excludedIds.length > 0) {
-          const teamMemberIds = new Set(
-            (await this.memberRepo.find({ where: { team_id: team.id }, select: ['agent_id'] as any }))
-              .map((m) => m.agent_id),
-          );
-          const unknown = excludedIds.filter((id) => !teamMemberIds.has(id));
-          if (unknown.length > 0) {
-            throw orchestrationError(
-              400,
-              `excluded_member_ids references members that are not on team "${team.name}": ${unknown.join(', ')}`,
-            );
-          }
-        }
+        await this.assertExcludedOnTeam(team, excludedIds);
         mission.excluded_member_ids = excludedIds.length ? excludedIds : null;
       }
       if (patch.extra_members !== undefined) {
@@ -813,18 +848,18 @@ export class OrchestrationMissionService {
    * 이번 미션에서만 함께 쓸 임시 멤버 목록을 검증·정규화한다.
    *
    * 팀 슬롯과 같은 shape 검사 + 참조 검사를 수행한다: Host 실존, credential이
-   * 미션 account 에서 보이는지, backend profile 실존. 실행 identity
-   * (`agent_id`)는 여기서 확정해 저장하므로, 이후 검증·디스패치는 팀 멤버와
-   * 같은 코드로 탄다. 미션 account 기준으로 검사하는 이유: 글로벌 팀의
-   * 미션은 호출자가 해석한 account 에 귀속되므로, 그 account 의 credential
-   * 을 쓰는 임시 멤버가 정당하다(팀 슬롯의 team-scope 검사와 다른 지점이다).
+   * 미션 account 에서 보이는지, backend profile 실존. 폴더는 받지 않는다 — 팀
+   * 멤버와 똑같이 미션의 project 폴더에서 일한다. 로스터 주소(`slot_id`)를 여기서
+   * 발급해 저장하므로 이후 검증·디스패치는 팀 멤버와 같은 코드로 탄다. 미션 account
+   * 기준으로 검사하는 이유: 글로벌 팀의 미션은 호출자가 해석한 account 에 귀속되므로,
+   * 그 account 의 credential 을 쓰는 임시 멤버가 정당하다(팀 슬롯의 team-scope 검사와
+   * 다른 지점이다).
    */
   private async normalizeExtraMembers(input: unknown, missionAccountId: string): Promise<MissionExtraMember[]> {
     if (input === undefined || input === null) return [];
     if (!Array.isArray(input)) throw orchestrationError(400, 'extra_members must be an array');
     if (input.length > 20) throw orchestrationError(400, 'extra_members is limited to 20 entries');
     const out: MissionExtraMember[] = [];
-    const seen = new Set<string>();
     for (let i = 0; i < input.length; i++) {
       const raw = input[i] as Record<string, any>;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -832,7 +867,7 @@ export class OrchestrationMissionService {
       }
       let spec: Record<string, any>;
       try {
-        spec = normalizeTeamAgentSpec((raw as any).runtime, `extra_members[${i}].runtime`) as unknown as Record<string, any>;
+        spec = normalizeTeamSlotSpec((raw as any).runtime, `extra_members[${i}].runtime`) as unknown as Record<string, any>;
       } catch (e) {
         if (e instanceof TeamAgentSpecError) throw orchestrationError(400, e.message);
         throw e;
@@ -855,14 +890,9 @@ export class OrchestrationMissionService {
           throw orchestrationError(400, `extra_members[${i}]: cli_runtime_profile "${profileId}" does not exist`);
         }
       }
-      const agentId = runtimeIdentityKey(spec as any);
-      if (seen.has(agentId)) {
-        throw orchestrationError(400, `extra_members[${i}]: duplicate runtime spec (same execution identity ${agentId})`);
-      }
-      seen.add(agentId);
       const maxConcurrentRaw = Number((raw as any).max_concurrent);
       out.push({
-        agent_id: agentId,
+        slot_id: randomUUID(),
         role_label: String((raw as any).role_label || '').trim(),
         capabilities: String((raw as any).capabilities || '').trim(),
         max_concurrent: Number.isFinite(maxConcurrentRaw)
@@ -872,6 +902,77 @@ export class OrchestrationMissionService {
       });
     }
     return out;
+  }
+
+  /**
+   * Excluded ids must name members of this team. A member is addressed by its
+   * row id; the identity a slot carried while slots declared folders is still
+   * accepted for rows that have one.
+   */
+  private async assertExcludedOnTeam(team: OrchestrationTeam, excludedIds: string[]): Promise<void> {
+    if (excludedIds.length === 0) return;
+    const known = new Set<string>();
+    for (const m of await this.memberRepo.find({ where: { team_id: team.id }, select: ['id', 'agent_id'] as any })) {
+      known.add(m.id);
+      if (m.agent_id) known.add(m.agent_id);
+    }
+    const unknown = excludedIds.filter((id) => !known.has(id));
+    if (unknown.length > 0) {
+      throw orchestrationError(
+        400,
+        `excluded_member_ids references members that are not on team "${team.name}": ${unknown.join(', ')}`,
+      );
+    }
+  }
+
+  /**
+   * `projects` input → the stored list, every project checked to exist in the
+   * mission's account. A legacy `repo_ref` is read as a one-project list when
+   * `projects` is absent; a bare repository URL is refused — work happens in a
+   * project's folder on each host, and a URL has no folders.
+   */
+  private async normalizeProjectsInput(
+    projectsInput: unknown,
+    repoRefInput: unknown,
+    accountId: string,
+  ): Promise<MissionProjectRef[]> {
+    let refs: MissionProjectRef[];
+    if (projectsInput !== undefined && projectsInput !== null) {
+      refs = normalizeMissionProjects(projectsInput);
+    } else {
+      const legacy = normalizeRepoRef(repoRefInput);
+      if (legacy?.url && !legacy.project_id) {
+        throw orchestrationError(
+          400,
+          'a mission works in its projects\' folders on each host, so it needs a Project, not a bare repository ' +
+            'URL. Create a Project for this repository (and register its folder on each host), then pass ' +
+            '`projects: [{ project_id }]`.',
+        );
+      }
+      refs = legacy?.project_id ? [{ project_id: legacy.project_id, branch: legacy.branch || '' }] : [];
+    }
+    if (refs.length === 0) return [];
+    const found = await this.dataSource.getRepository(Project).find({
+      where: { id: In(refs.map((r) => r.project_id)) },
+      select: ['id', 'account_id'] as any,
+    });
+    const inAccount = new Set(found.filter((p) => p.account_id === accountId).map((p) => p.id));
+    const missing = refs.filter((r) => !inAccount.has(r.project_id)).map((r) => r.project_id);
+    if (missing.length > 0) {
+      throw orchestrationError(400, `project(s) not found in this mission's account: ${missing.join(', ')}`);
+    }
+    return refs;
+  }
+
+  /** Project names by id (ids that no longer resolve are simply absent). */
+  private async projectNames(ids: string[]): Promise<Map<string, string>> {
+    const unique = Array.from(new Set(ids.filter(Boolean)));
+    if (unique.length === 0) return new Map();
+    const rows = await this.dataSource.getRepository(Project).find({
+      where: { id: In(unique) },
+      select: ['id', 'name'] as any,
+    });
+    return new Map(rows.map((p) => [p.id, p.name]));
   }
 
   async deleteMission(missionId: string, accountId: string): Promise<void> {
@@ -946,14 +1047,14 @@ export class OrchestrationMissionService {
     return this.projectMissionList(missions);
   }
 
-  /** team_ids where the caller is the orchestrator or a roster member (either identity). */
+  /**
+   * team_ids where the caller is the orchestrator or a roster member — its
+   * identity is one of the team's slots in some project folder
+   * (orchestration-slot-identities.ts).
+   */
   private async teamIdsForAgent(caller: OrchestrationCaller): Promise<string[]> {
     const ids = [caller.agentId, caller.runtimeKey].filter((v): v is string => !!v);
-    const [orchTeams, memberRows] = await Promise.all([
-      this.teamRepo.find({ where: { orchestrator_agent_id: In(ids) }, select: ['id'] }),
-      this.memberRepo.find({ where: { agent_id: In(ids) }, select: ['team_id'] }),
-    ]);
-    return Array.from(new Set<string>([...orchTeams.map((t) => t.id), ...memberRows.map((m) => m.team_id)]));
+    return Array.from((await teamsForIdentities(this.dataSource, ids)).keys());
   }
 
   private async projectMissionList(missions: OrchestrationMission[]): Promise<MissionListItem[]> {
@@ -989,7 +1090,10 @@ export class OrchestrationMissionService {
       title: m.title,
       status: m.status,
       orchestrator_agent_id: m.orchestrator_agent_id,
-      orchestrator_name: m.orchestrator_agent_id ? displayById.get(m.orchestrator_agent_id) ?? '' : '',
+      // 시작된 미션은 로스터가 `<Host>/<cli>` 이름을 들고 있다 — rt- identity 는 표시
+      // 이름으로 해소되지 않는다.
+      orchestrator_name: readRuntimeRoster(m.runtime_roster)?.orchestrator.name
+        || (m.orchestrator_agent_id ? displayById.get(m.orchestrator_agent_id) ?? '' : ''),
       plan_version: m.plan_version,
       counts: countSteps(steps.filter((s) => s.mission_id === m.id)),
       started_at: m.started_at,
@@ -1046,6 +1150,13 @@ export class OrchestrationMissionService {
       return leaf;
     };
 
+    const projectRefs = readMissionProjects(mission);
+    const projectNameById = await this.projectNames([
+      ...projectRefs.map((p) => p.project_id),
+      ...steps.map((s) => s.project_id).filter((v): v is string => !!v),
+    ]);
+    const roster = readRuntimeRoster(mission.runtime_roster);
+
     const events = await this.eventRepo.find({
       where: { mission_id: mission.id },
       order: { created_at: 'DESC' },
@@ -1098,9 +1209,31 @@ export class OrchestrationMissionService {
       post_actions: Array.isArray(mission.post_actions) ? mission.post_actions : [],
       excluded_member_ids: readExcludedMemberIds(mission),
       extra_members: readExtraMembers(mission),
+      projects: projectRefs.map((p) => ({ ...p, name: projectNameById.get(p.project_id) ?? '' })),
+      folder_scope: normalizeMemberFolderScope(mission.folder_scope),
+      roster: roster
+        ? {
+            folder_scope: roster.folder_scope,
+            orchestrator: (() => {
+              const r = roster.runtimes.find((x) => x.slot_id === ORCHESTRATOR_SLOT_ID);
+              return r ? { name: roster.orchestrator.name, project_id: r.project_id, working_dir: r.spec.working_dir } : null;
+            })(),
+            members: roster.members.map((m) => ({
+              slot_id: m.slot_id,
+              kind: m.kind,
+              name: m.name,
+              role_label: m.role_label,
+              cli: m.spec.cli,
+              model: m.spec.model,
+              max_concurrent: m.max_concurrent,
+              projects: roster.runtimes
+                .filter((r) => r.slot_id === m.slot_id)
+                .map((r) => ({ project_id: r.project_id, working_dir: r.spec.working_dir })),
+            })),
+          }
+        : null,
       resolved_workspace_folder: resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id),
       workspace_folder: mission.workspace_folder,
-      repo_ref: mission.repo_ref,
       checkout_mode: mission.checkout_mode,
       plan_summary: mission.plan_summary,
       result_summary: mission.result_summary,
@@ -1130,13 +1263,19 @@ export class OrchestrationMissionService {
           instructions: s.instructions,
           acceptance_criteria: s.acceptance_criteria,
           depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
+          assignee_slot: s.assignee_slot ?? null,
           assignee_agent_id: s.assignee_agent_id,
-          assignee_name: composeSlot(
-            s.assignee_agent_id,
-            (s as any)?.assignee_spec as Record<string, any> | null,
-            String(((s as any)?.assignee_spec as Record<string, any> | null)?.cli ?? ''),
-          ),
+          assignee_name:
+            (s.assignee_slot ? roster?.members.find((m) => m.slot_id === s.assignee_slot)?.name : undefined)
+            ?? composeSlot(
+              s.assignee_agent_id,
+              (s as any)?.assignee_spec as Record<string, any> | null,
+              String(((s as any)?.assignee_spec as Record<string, any> | null)?.cli ?? ''),
+            ),
           assignee_online: false,
+          project_id: s.project_id ?? null,
+          project_name: s.project_id ? projectNameById.get(s.project_id) ?? '' : '',
+          working_dir: String(((s as any)?.assignee_spec as Record<string, any> | null)?.working_dir ?? ''),
           status: s.status,
           position: s.position,
           plan_version: s.plan_version,
@@ -1148,7 +1287,11 @@ export class OrchestrationMissionService {
           dispatched_at: s.dispatched_at,
           started_at: s.started_at,
           finished_at: s.finished_at,
-          workspace_folder: `${resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id)}/${s.step_key}`,
+          // isolated step 만 project 폴더 아래 자기 체크아웃이 있다 — shared step 은 project 폴더
+          // 자체(working_dir)에서 돌므로, 있지도 않은 경로를 보여 주지 않는다.
+          workspace_folder: ((s as any)?.assignee_spec as Record<string, any> | null)?.folder_scope === 'shared'
+            ? ''
+            : `${resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id)}/${s.step_key}`,
           visit: s.visit ?? 0,
           verdict: s.verdict ?? '',
           retry_policy: s.retry_policy || 'auto',
@@ -1522,6 +1665,10 @@ export class OrchestrationMissionService {
       order: { created_at: 'DESC' },
       take: 40,
     });
+    const projectRefs = readMissionProjects(mission);
+    const projectNameById = await this.projectNames(projectRefs.map((p) => p.project_id));
+    const roster = readRuntimeRoster(mission.runtime_roster);
+    const slotName = new Map((roster?.members ?? []).map((m) => [m.slot_id, m.name]));
 
     return {
       mission_id: mission.id,
@@ -1536,12 +1683,38 @@ export class OrchestrationMissionService {
         ? 'complete_orchestration_mission(status:"completed") is BLOCKED until every entry here has met:true — use update_orchestration_criteria to flip one.'
         : 'No structured completion criteria defined — acceptance_criteria (prose) is the only definition of done.',
       post_actions: Array.isArray(mission.post_actions) ? mission.post_actions : [],
-      excluded_member_ids: readExcludedMemberIds(mission),
-      extra_members: readExtraMembers(mission),
-      roster_note:
-        'Only the assignees listed in your mission brief ("Your team") are valid — the team may have been ' +
-        'adjusted for this mission (members excluded, ad-hoc members added). If you lost the brief, ask the ' +
-        'operator for the current roster; a rejected assignee error also lists the valid ids.',
+      projects: projectRefs.map((p) => ({
+        project_id: p.project_id,
+        name: projectNameById.get(p.project_id) ?? '',
+        branch: p.branch,
+      })),
+      folder_scope: normalizeMemberFolderScope(mission.folder_scope),
+      // 브리핑의 "Your team" 과 같은 로스터 — 브리핑을 잃은 orchestrator 가 여기서 다시
+      // 읽는다. step 은 `slot`(아래 slot_id)과 그 슬롯이 맡을 수 있는 `project` 로 배정한다.
+      roster: roster
+        ? roster.members.map((m) => ({
+            slot_id: m.slot_id,
+            name: m.name,
+            role_label: m.role_label,
+            capabilities: m.capabilities,
+            max_concurrent: m.max_concurrent,
+            cli: m.spec.cli,
+            model: m.spec.model,
+            projects: roster.runtimes
+              .filter((r) => r.slot_id === m.slot_id)
+              .map((r) => ({
+                project_id: r.project_id,
+                name: projectNameById.get(r.project_id) ?? '',
+                working_dir: r.spec.working_dir,
+              })),
+          }))
+        : null,
+      roster_note: roster
+        ? 'Assign a step with `assignee` = a slot_id from `roster`, and `project` = one of the projects listed ' +
+          'under that slot (omit it when the slot can only work on one). That project\'s folder on the slot\'s ' +
+          'host is where the step runs.'
+        : 'This mission has no runtime roster (it started before missions named their projects). Existing ' +
+          'steps can be retried; new assignments are not possible — ask the operator to start a new mission.',
       plan_version: mission.plan_version,
       plan_summary: mission.plan_summary,
       limits: {
@@ -1581,8 +1754,9 @@ export class OrchestrationMissionService {
         title: s.title,
         status: s.status,
         depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
-        assignee_agent_id: s.assignee_agent_id,
-        assignee_name: composeAssignee(s),
+        assignee: s.assignee_slot ?? null,
+        assignee_name: (s.assignee_slot ? slotName.get(s.assignee_slot) : undefined) ?? composeAssignee(s),
+        project: s.project_id ?? null,
         attempt: s.attempt,
         max_attempts: s.max_attempts,
         visit: s.visit ?? 0,
@@ -1974,7 +2148,10 @@ export function readExcludedMemberIds(mission: { excluded_member_ids?: unknown }
   return [];
 }
 
-/** 저장된 임시 멤버 읽기 — 깨진 행은 버리고 정상 항목만. */
+/**
+ * 저장된 임시 멤버 읽기 — 깨진 행은 버리고 정상 항목만. 폴더를 직접 선언하던 시절의
+ * 행에는 `slot_id` 가 없으므로 `extra:<agent_id>` 를 로스터 주소로 쓴다.
+ */
 export function readExtraMembers(mission: { extra_member_specs?: unknown }): MissionExtraMember[] {
   const v = (mission as any)?.extra_member_specs;
   if (!v) return [];
@@ -1987,7 +2164,24 @@ export function readExtraMembers(mission: { extra_member_specs?: unknown }): Mis
     }
   }
   if (!Array.isArray(arr)) return [];
-  return (arr as any[]).filter(
-    (e) => e && typeof e === 'object' && typeof (e as any).agent_id === 'string' && (e as any).spec && typeof (e as any).spec === 'object',
-  ) as MissionExtraMember[];
+  const out: MissionExtraMember[] = [];
+  for (const e of arr as any[]) {
+    if (!e || typeof e !== 'object' || !e.spec || typeof e.spec !== 'object') continue;
+    const slotId = typeof e.slot_id === 'string' && e.slot_id
+      ? e.slot_id
+      : typeof e.agent_id === 'string' && e.agent_id ? `extra:${e.agent_id}` : '';
+    if (!slotId) continue;
+    out.push({ ...e, slot_id: slotId });
+  }
+  return out;
+}
+
+/** `folder_scope` input — only the two known values; anything else is a 400, not a silent default. */
+function normalizeFolderScopeInput(value: unknown): MemberFolderScope {
+  if (value === undefined || value === null || value === '') return 'shared';
+  const raw = String(value).trim();
+  if (raw !== 'shared' && raw !== 'isolated') {
+    throw orchestrationError(400, `folder_scope must be "shared" or "isolated" (got "${raw}")`);
+  }
+  return raw;
 }

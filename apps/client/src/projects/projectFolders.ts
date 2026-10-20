@@ -1,8 +1,9 @@
 // Project ↔ Runtime Host folder helpers (docs/tickets.md → "Main clone folder
 // per host"). A project has at most one main clone folder per Runtime Host; the
-// ticket form, the project's default assignee and orchestration team slots all
-// offer "use the project's folder on this host" as the spec's working_dir, so
-// agents on different hosts never guess where the project lives.
+// ticket form and the project's default assignee offer "use the project's folder
+// on this host" as the spec's working_dir, and a mission's members work in the
+// folder on their own host (missionProjects.logic.ts), so agents on different
+// hosts never guess where the project lives.
 // React-free — `test/project-host-folder-prefill.test.mjs` imports it directly.
 
 import { emptyRuntimeSpec, type RuntimeSpecDraft } from '../runtime/runtimeSpec';

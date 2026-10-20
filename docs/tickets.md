@@ -91,10 +91,12 @@ the project on that machine:
   worktree from it at `<main_clone>/.awb/wt/<ticket8>` (instead of
   `<working_dir>/.awb/base/<slug>`). Shipped as `base_repo.main_clone_dir` on
   `agent_trigger`.
-- **Missions / orchestration**: a mission names a `project_id`; each step's
-  work order tells the member where that project lives on *its* host, and the
-  team-slot editor offers "project folder on this host" as the slot's
-  working_dir. Members on different hosts therefore never guess the folder.
+- **Missions / orchestration**: a mission names one or more projects
+  (`projects`, primary first) and every member works in a project's folder on
+  *its own* host — team slots name no folder. A host without the project's
+  folder cannot take steps on that project (the mission refuses to start when a
+  member's host has none of them). Members on different hosts therefore never
+  guess the folder. See docs/orchestration.md → "미션 프로젝트".
 - **QA / Security / Actions**: `repo_ref.project_id` replaces
   `repo_ref.resource_id`.
 

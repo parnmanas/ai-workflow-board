@@ -113,10 +113,11 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
 
   // ── 1. Team ───────────────────────────────────────────────────────────────
   step('Create a team with an orchestrator and two members');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
-  // P4c-4: identity 는 spec 내용 주소다 — 서로 다른 worker 가 필요하면
-  // working_dir 가 달라야 한다 (같은 폴더·CLI·credential 은 같은 worker).
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언한다 — 폴더는 팀이 아니라 미션의
+  // project 가 Host 마다 정한다. buildTeam 이 팀이 일할 project(Host 별 폴더)를 함께
+  // 만들고, 각 슬롯이 그 폴더에서 도는 실행 identity 를 돌려준다.
+  // identity 는 (CLI, 폴더, credential) 내용 주소다 — 서로 다른 worker 가 필요하면
+  // 폴더가 달라야 한다 (buildTeam 은 폴더마다 Host 를 따로 잡는다).
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Platform squad',
@@ -140,20 +141,23 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   const backendMcp = await mcpFor(backend, 'backend');
   const frontendMcp = await mcpFor(frontend, 'frontend');
 
-  // Two slots with an identical spec share ONE worker identity (content-addressed:
-  // same (cli, dir, credential) IS the same worker — the manager provisions by
-  // that key too). They are still two member rows (distinct role_labels, rooms,
-  // caps), and folder sharing is exactly this shape. The old "same agent twice"
-  // rejection has no input left to fire on.
-  // P4c-4: backend 멤버와 바이트 단위 동일 스펙으로 두 번째 backend 슬롯을
-  // 추가한다 (어느 필드 하나라도 다르면 다른 worker 다).
+  // Two slots with an identical spec are still two member rows (each with its
+  // own id, role_label, rooms and cap) — the old "same agent twice" rejection
+  // has no input left to fire on. A slot names no folder, so the team view cannot say
+  // who a slot runs as; the mission does once it starts (asserted below):
+  // placed in the same project folder, the twins resolve to ONE execution
+  // identity (same (cli, folder, credential) IS the same worker — the manager
+  // provisions by that key too, and folder sharing is exactly this shape), yet
+  // stay separately assignable by slot id.
+  // backend 멤버와 바이트 단위 동일한 slot spec 으로 두 번째 backend 슬롯을 추가하고,
+  // 미션 로스터에서 확인하도록 시작 전까지 남겨 둔다.
   const backendCurrent = team.members.find((m) => m.role_label === 'backend');
   const backendSpec = {
-    manager_agent_id: squad.host.id,
+    manager_agent_id: backendCurrent.runtime.manager_agent_id,
     cli: backendCurrent.runtime.cli,
-    working_dir: backendCurrent.runtime.working_dir,
-    folder_scope: backendCurrent.runtime.folder_scope,
-    credential_id: backendCurrent.runtime.credential_id ?? null,
+    model: backendCurrent.runtime.model,
+    credential_id: backendCurrent.runtime.credential_id,
+    cli_runtime_profile: backendCurrent.runtime.cli_runtime_profile,
     runtime_config: backendCurrent.runtime.runtime_config,
   };
   const twinned = await teams.addMember(team.id, ws.id, {
@@ -164,13 +168,11 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   assert.equal(twinned.members.length, 3, 'an identically-configured slot is a new member, not a duplicate');
   const backendSlots = twinned.members.filter((m) => m.role_label === 'backend');
   assert.equal(backendSlots.length, 2);
-  assert.equal(backendSlots[0].agent_id, backendSlots[1].agent_id,
-    'identical specs share one worker identity (content-addressed)');
-  assert.equal(backendSlots[0].runtime.working_dir, backendSlots[1].runtime.working_dir,
-    'and they name the same folder — that is how two slots share one tree');
   assert.notEqual(backendSlots[0].id, backendSlots[1].id,
-    'but they stay distinct member rows with their own role_labels and rooms');
-  await teams.removeMember(team.id, ws.id, backendSlots[1].id);
+    'they stay distinct member rows with their own slot ids, role_labels and rooms');
+  assert.deepEqual(backendSlots[0].runtime, backendSlots[1].runtime, 'with byte-identical slot specs');
+  assert.equal(backendSlots[0].runtime.working_dir, undefined, 'a slot names no folder — the mission\'s project does');
+  const backendTwin = backendSlots.find((m) => m.id !== backend.slot_id);
 
   // ── 2. Mission + start ────────────────────────────────────────────────────
   step('Create a mission and brief the orchestrator');
@@ -183,19 +185,38 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
     max_parallel_steps: 2,
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   assert.equal(created.status, 'draft', 'a fresh mission is a draft until started');
 
   const started = await runner.startMission(created.id, ws.id, HUMAN);
   assert.equal(started.status, 'planning');
-  assert.equal(started.orchestrator_agent_id, lead.id, 'the orchestrator is snapshotted at start');
+  assert.equal(started.orchestrator_agent_id, lead.id,
+    'the orchestrator is snapshotted at start — its identity in the project folder on its host');
   assert.ok(started.room_id, 'a mission room was created');
+
+  step('Start places every slot in the project folder on its host — the twin slots become ONE identity');
+  const runtimesOf = (slotId) => started.runtime_roster.runtimes.filter((r) => r.slot_id === slotId);
+  const [twinA] = runtimesOf(backend.slot_id);
+  const [twinB] = runtimesOf(backendTwin.id);
+  assert.ok(twinA && twinB, 'both backend slots are on the mission roster');
+  assert.equal(twinA.spec.working_dir, backend.folder, 'a slot works in the project\'s folder on its own host');
+  assert.equal(twinB.spec.working_dir, twinA.spec.working_dir, 'and identical slots land in the same folder');
+  assert.equal(twinA.agent_id, backend.id);
+  assert.equal(twinB.agent_id, twinA.agent_id,
+    'identical slots in one folder share ONE execution identity (content-addressed)');
 
   const brief = await roomMessages(ds, started.room_id);
   assert.equal(brief.length, 1, 'exactly one brief was posted');
   assert.match(brief[0].content, new RegExp(created.id), 'the brief carries the mission id the tools need');
   assert.match(brief[0].content, /submit_orchestration_plan/, 'the brief names the tool that submits the plan');
   assert.match(brief[0].content, new RegExp(backend.name), 'the roster is rendered into the brief');
+  for (const slot of backendSlots) {
+    assert.ok(brief[0].content.includes(`(slot: \`${slot.id}\`)`),
+      'each twin is listed under its own slot id — that is what the orchestrator assigns to');
+  }
+  assert.ok(brief[0].content.includes(`its folder on this host: \`${backend.folder}\``),
+    'the roster names the project folder each member works in on its host');
   assert.match(brief[0].content, /Always ask for tests\./, 'team standing instructions are appended');
 
   const missionRoom = await ds.getRepository('ChatRoom').findOne({ where: { id: started.room_id } });
@@ -213,12 +234,30 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   assert.ok(!readBack?.isError, `get_orchestration_mission failed: ${JSON.stringify(readBack)}`);
   assert.equal(readBack.status, 'planning');
   assert.equal(readBack.steps.length, 0, 'no plan yet');
+  assert.deepEqual(readBack.projects.map((p) => p.project_id), [squad.project.id], 'the mission names its project');
+  assert.deepEqual(
+    readBack.roster.filter((m) => m.role_label === 'backend').map((m) => m.slot_id).sort(),
+    backendSlots.map((m) => m.id).sort(),
+    'the live roster the orchestrator re-reads lists both twin slots',
+  );
 
   step('A non-member agent cannot read the plan');
   const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'stranger' });
   const strangerMcp = await mcpFor(stranger, 'stranger');
   const denied = await strangerMcp.callTool('get_orchestration_mission', { mission_id: created.id });
   assert.ok(denied?.isError, 'an unrelated agent must not read a mission');
+
+  step('An identity two slots share cannot pick one of them — a step names its slot');
+  const ambiguous = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: created.id,
+    steps: [
+      { step_key: 'api', title: 'Add the CSV endpoint', instructions: 'Add it.', assignee_agent_id: backend.id },
+    ],
+  });
+  assert.ok(ambiguous?.isError, 'the legacy identity alias resolves only when it maps to exactly one slot');
+  for (const slot of backendSlots) {
+    assert.ok(ambiguous.error.error.includes(slot.id), 'the refusal lists the slot ids to pick from');
+  }
 
   step('Orchestrator submits a plan: two parallel steps + one that joins them');
   const planResult = await leadMcp.callTool('submit_orchestration_plan', {
@@ -233,10 +272,11 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
         assignee_agent_id: frontend.id,
       },
       {
+        // 슬롯 주소로 배정한다. project 는 생략 — 이 슬롯이 맡을 수 있는 project 가 하나뿐이다.
         step_key: 'api',
         title: 'Add the CSV endpoint',
         instructions: 'Add GET /api/billing/export returning CSV.',
-        assignee_agent_id: backend.id,
+        assignee: backend.slot_id,
       },
       {
         step_key: 'ui',
@@ -247,12 +287,16 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
     ],
   });
   assert.ok(!planResult?.isError, `submit_orchestration_plan failed: ${JSON.stringify(planResult)}`);
-  assert.equal(planResult.plan_version, 1);
+  assert.equal(planResult.plan_version, 1, 'the rejected submission spent no plan version');
   assert.equal(planResult.status, 'running', 'an accepted plan moves the mission to running');
   assert.deepEqual(planResult.dispatched_now.sort(), ['api', 'ui'], 'both dependency-free steps go out at once');
 
   const afterPlan = await missions.getMissionDetail(created.id, ws.id);
   const byKey = Object.fromEntries(afterPlan.steps.map((s) => [s.step_key, s]));
+  assert.equal(byKey.api.assignee_slot, backend.slot_id, 'a step is assigned to a slot');
+  assert.equal(byKey.api.assignee_agent_id, backend.id, 'and runs as that slot\'s identity in the project folder');
+  assert.equal(byKey.api.project_id, squad.project.id, 'the one project the slot can work on is implied');
+  assert.equal(byKey.ui.assignee_slot, frontend.slot_id, 'the legacy identity alias resolves to the one slot it maps to');
   assert.equal(byKey.api.status, 'dispatched');
   assert.equal(byKey.ui.status, 'dispatched');
   assert.equal(byKey.ship.status, 'pending', 'the joining step waits for both dependencies');
@@ -408,8 +452,8 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
     return client;
   };
 
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Solo squad',
@@ -427,6 +471,7 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
     team_id: team.id,
     title: 'Migrate the ledger',
     objective: 'Move the ledger to the new schema.',
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 
@@ -523,8 +568,8 @@ test('Orchestration: parallelism is capped by the mission setting', async (t) =>
   const runner = app.get(OrchestrationRunnerService);
 
   const ws = await createAccount(app, getDataSourceToken, 'orchestration-parallel');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Wide squad',
@@ -547,6 +592,7 @@ test('Orchestration: parallelism is capped by the mission setting', async (t) =>
     title: 'Three independent chores',
     objective: 'Do three unrelated things.',
     max_parallel_steps: 2,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 
@@ -595,8 +641,8 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
   assert.deepEqual(strangerTeamsBefore.teams, []);
 
   step('Create a team; orchestrator and roster member both see it, a stranger does not');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Discovery squad',
@@ -627,6 +673,7 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
     objective: 'Prove discovery tools are scoped correctly.',
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
 
   const orchMissions = await orchMcp.callTool('list_orchestration_missions', {});
@@ -665,8 +712,8 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
     t.after(() => { void client.close().catch(() => {}); });
     return client;
   };
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Create-mission squad',
@@ -720,12 +767,14 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   await ds.getRepository('OrchestrationTeam').update({ id: team.id }, { enabled: 1 });
 
   step('Orchestrator creates a mission; explicit max_steps/max_parallel_steps are clamped to the agent ceiling');
+  // 시작하려면 미션이 project 를 이름해야 한다 — 멤버는 그 project 의 자기 Host 폴더에서 일한다.
   const created = await orchMcp.callTool('create_orchestration_mission', {
     team_id: team.id,
     title: 'Agent-created mission',
     objective: 'Prove the self-service creation path works end to end.',
     max_steps: 999,
     max_parallel_steps: 999,
+    ...squad.missionDefaults,
   });
   assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
   assert.equal(created.status, 'planning', 'start:true (default) briefs immediately');
@@ -774,26 +823,40 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
 
   const retried = await orchMcp.callTool('create_orchestration_mission', {
     team_id: team.id, title: 'Retry after unwedging', objective: 'Retry after unwedging.',
+    ...squad.missionDefaults,
   });
   assert.ok(!retried.isError, `retry after unwedge failed: ${JSON.stringify(retried)}`);
   assert.notEqual(retried.mission_id, missionId);
+  assert.equal(retried.status, 'planning', 'the unwedged team briefs its new mission like the first one');
 
   step('The recursion guard: an agent with an in-flight step elsewhere cannot also start a new mission');
   // A different team orch also orchestrates — proves the guard is keyed on the
   // AGENT holding in-flight work, not on the target team's own open-mission cap
   // (team3 has zero open missions of its own, so only guard (b) can be firing).
+  // team3 의 orchestrator 슬롯을 `team` 과 같은 Runtime Host·같은 CLI 로 두고, 그 Host 의
+  // 같은 폴더를 team3 의 project 폴더로 등록한다. 슬롯에는 폴더가 없고 identity 는
+  // (CLI, 폴더, credential) 이므로 두 팀의 orchestrator 는 같은 agent 다 — 이제는 팀
+  // 편집기만으로 이 모양이 나온다.
   const team3Squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Second team orch also runs',
+    host: orch.host,
+    orchestrator: { spec: { working_dir: orch.folder } },
     team: { created_by: HUMAN.id },
   });
   const team3 = team3Squad.team;
-  // Point team3 at the SAME orchestrator identity as `team`. The team editor
-  // can no longer produce this (each slot mints its own identity), but rows
-  // that predate the spec-based roster genuinely share an operator-authored
-  // orchestrator across teams, and the guard has to hold for them — it is keyed
-  // on the AGENT holding in-flight work, not on the team.
-  await ds.getRepository('OrchestrationTeam').update({ id: team3.id }, { orchestrator_agent_id: orch.id });
+  assert.equal(team3Squad.orchestrator.id, orch.id, 'the same CLI login in the same folder IS the same orchestrator');
+  // Rows recorded before slots lost their folder carry the orchestrator identity
+  // on the team itself (`orchestrator_agent_id`) and still count as that agent's
+  // team, so the guard has to hold for them too. Its own slot runs elsewhere.
+  const legacySquad = await buildTeam(app, getDataSourceToken, teams, {
+    accountId: ws.id,
+    name: 'Legacy team orch also runs',
+    team: { created_by: HUMAN.id },
+  });
+  const legacyTeam = legacySquad.team;
+  assert.notEqual(legacySquad.orchestrator.id, orch.id);
+  await ds.getRepository('OrchestrationTeam').update({ id: legacyTeam.id }, { orchestrator_agent_id: orch.id });
   await ds.getRepository('OrchestrationStep').save(
     ds.getRepository('OrchestrationStep').create({
       mission_id: retried.mission_id,
@@ -805,11 +868,13 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
       status: 'dispatched',
     }),
   );
-  const recursionAttempt = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team3.id, title: 'Should be blocked by recursion guard', objective: 'Should be blocked.',
-  });
-  assert.equal(recursionAttempt.isError, true);
-  assert.match(recursionAttempt.error.error, /in flight/);
+  for (const target of [team3, legacyTeam]) {
+    const recursionAttempt = await orchMcp.callTool('create_orchestration_mission', {
+      team_id: target.id, title: 'Should be blocked by recursion guard', objective: 'Should be blocked.',
+    });
+    assert.equal(recursionAttempt.isError, true, `${target.name}: ${JSON.stringify(recursionAttempt)}`);
+    assert.match(recursionAttempt.error.error, /in flight/);
+  }
 });
 
 test('Orchestration: create_orchestration_mission — max_open_missions = 0 forbids self-created missions with a clean 409, not a TypeError', async (t) => {
@@ -828,8 +893,8 @@ test('Orchestration: create_orchestration_mission — max_open_missions = 0 forb
 
   const ws = await createAccount(app, getDataSourceToken, 'orch-cap-zero');
   step('A team created with max_open_missions: 0 persists the deliberate zero, not the ?? 1 default');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Cap-zero squad',
@@ -869,8 +934,8 @@ test('Orchestration: create_orchestration_mission — max_open_missions = 2 allo
   const teams = app.get(OrchestrationTeamService);
 
   const ws = await createAccount(app, getDataSourceToken, 'orch-cap-two');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Cap-two squad',
@@ -933,8 +998,8 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   };
 
   step('Team roster includes the orchestrator itself, mirroring a rollup-style mission');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Self-assign squad',
@@ -944,14 +1009,15 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   const team = squad.team;
   const orch = squad.orchestrator;
   const helper = squad.member('helper');
-  // `as_orchestrator` is the only way to express "the planner also executes":
-  // sending its runtime spec again would mint a SECOND worker configured the
-  // same way, not the orchestrator itself.
+  // `as_orchestrator` expresses "the planner also executes": the row copies the
+  // orchestrator's slot (and updateMember refuses to fork it from there). A slot
+  // names no folder, so the team view can only show the two slots are the same;
+  // the mission proves the rest — placed in the project folder, that row runs
+  // as the orchestrator identity itself (asserted after start).
   const withSelf = await teams.addMember(team.id, ws.id, { as_orchestrator: true, role_label: 'planner' });
-  assert.ok(
-    withSelf.members.some((m) => m.agent_id === team.orchestrator_agent_id),
-    'the orchestrator identity itself must be on the roster, not a look-alike',
-  );
+  const planner = withSelf.members.find((m) => m.role_label === 'planner');
+  assert.ok(planner, 'the orchestrator is on its own roster as an executing member');
+  assert.deepEqual(planner.runtime, withSelf.orchestrator_runtime, 'the roster row is the orchestrator\'s own slot');
   const orchMcp = await mcpFor(orch, 'self-assign-orch');
 
   const mission = await missions.createMission({
@@ -961,8 +1027,17 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
     objective: 'A helper reports, the orchestrator rolls the result up itself.',
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
-  await runner.startMission(mission.id, ws.id, HUMAN);
+  const started = await runner.startMission(mission.id, ws.id, HUMAN);
+  const plannerRuntimes = started.runtime_roster.runtimes.filter((r) => r.slot_id === planner.id);
+  assert.equal(plannerRuntimes.length, 1, 'the planner slot works on the mission\'s one project');
+  assert.equal(started.orchestrator_agent_id, orch.id);
+  assert.equal(
+    plannerRuntimes[0].agent_id,
+    orch.id,
+    'the orchestrator identity itself must be on the roster, not a look-alike',
+  );
 
   step('A plan step assigned to the orchestrator (who is also a member) is accepted, not "not a member"');
   const plan = await orchMcp.callTool('submit_orchestration_plan', {
@@ -1000,6 +1075,7 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   const final = await missions.getMissionDetail(mission.id, ws.id);
   const rollup = final.steps.find((s) => s.step_key === 'rollup');
   assert.equal(rollup.status, 'dispatched');
+  assert.equal(rollup.assignee_slot, planner.id, 'the orchestrator identity resolves to its roster slot');
   assert.equal(rollup.assignee_agent_id, orch.id);
   assert.ok(rollup.room_id, 'the orchestrator gets a real work-order room for its own step, like any assignee');
 });
@@ -1025,8 +1101,8 @@ test('Orchestration: a draft mission is never an unrecoverable wedge (review rou
     t.after(() => { void client.close().catch(() => {}); });
     return client;
   };
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Draft-wedge squad',
@@ -1090,8 +1166,8 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
     t.after(() => { void client.close().catch(() => {}); });
     return client;
   };
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Contract squad',
@@ -1112,7 +1188,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
     target_runtimes: [member.runtime_spec],
   });
 
-  step('구조화된 완료 조건, 커스텀 account 루트, post_actions 2개(실재/댕글링)를 갖는 미션');
+  step('구조화된 완료 조건, isolated 폴더의 커스텀 루트, post_actions 2개(실재/댕글링)를 갖는 미션');
 
   const mission = await missions.createMission({
     account_id: ws.id,
@@ -1128,6 +1204,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
     workspace_folder: 'custom-root',
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   assert.equal(mission.completion_criteria.length, 1);
   assert.equal(mission.completion_criteria[0].met, false, '갓 만든 criterion은 unmet 상태로 시작한다');
@@ -1142,9 +1219,10 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   assert.ok(!plan?.isError, `plan 실패: ${JSON.stringify(plan)}`);
   assert.deepEqual(plan.dispatched_now, ['only-step']);
 
-  step('디스패치된 step은 미션의 커스텀 account 루트 아래 자기만의 격리된 폴더에 고정된다');
+  step('디스패치된 step은 assignee Host 의 project 폴더 아래, 미션의 커스텀 루트 밑 자기만의 격리된 폴더에 고정된다');
   const afterPlan = await missions.getMissionDetail(mission.id, ws.id);
   const only = afterPlan.steps.find((s) => s.step_key === 'only-step');
+  assert.equal(only.working_dir, member.folder, '격리 폴더의 기준은 그 step 의 project 가 assignee Host 에 둔 폴더다');
   assert.equal(
     only.workspace_folder,
     '.awb/orch/custom-root/only-step',
@@ -1224,8 +1302,8 @@ test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pendin
   const reaper = app.get(OrchestrationReaperService);
 
   const ws = await createAccount(app, getDataSourceToken, 'orch-crash-recovery');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Crash-recovery squad',
@@ -1253,6 +1331,7 @@ test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pendin
     objective: 'Prove post-actions survive a crash between terminal-status save and runPostActions.',
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   const staleDispatchedAt = new Date(Date.now() - 10 * 60_000).toISOString(); // 유예시간(2분)을 훌쩍 넘긴 시각
   const missionRepo = ds.getRepository('OrchestrationMission');
@@ -1314,8 +1393,8 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
   const reaper = app.get(OrchestrationReaperService);
 
   const ws = await createAccount(app, getDataSourceToken, 'orch-crash-linkage');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Crash-linkage squad',
@@ -1342,6 +1421,7 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
     objective: 'Prove a successfully-dispatched post-action survives a crash before its run_id is saved.',
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
 
   step('dispatch()가 실제로 만들어낸 ActionRun을 직접 심어둔다 — order=0 post-action의 결정론적 상관관계 키로');
@@ -1410,8 +1490,8 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
   const reaper = app.get(OrchestrationReaperService);
 
   const ws = await createAccount(app, getDataSourceToken, 'orch-starvation');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 만 선언하고 폴더는 미션의 project 가 정한다 —
+  // buildTeam 이 그 project 를 함께 만들고, 그 폴더에서 도는 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Starvation squad',
@@ -1461,6 +1541,7 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
     objective: 'Finished long ago but still has an unresolved post-action.',
     created_by_type: 'user',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   await missionRepo.update(
     { id: oldMission.id },

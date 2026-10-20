@@ -1,20 +1,20 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 /**
- * One Agent's membership in an OrchestrationTeam.
+ * One slot on an OrchestrationTeam's roster. The row `id` is the slot's
+ * address: missions assign steps to it (`OrchestrationStep.assignee_slot`).
  *
  * `capabilities` is the single most load-bearing field of the whole feature:
  * it is rendered verbatim into the orchestrator's planning prompt as the
  * roster blurb, so it is what the orchestrator actually reasons over when it
  * decides who gets which step. An empty blurb still works (the orchestrator
- * falls back to the agent name + role_label) but produces markedly worse
+ * falls back to the slot name + role_label) but produces markedly worse
  * assignments, so the UI nudges for it.
  *
- * The orchestrator agent itself is NOT required to have a member row — it is
- * addressed through OrchestrationTeam.orchestrator_agent_id. A team MAY still
- * add it as a member if the operator wants the orchestrator to also execute
- * steps; nothing forbids it, and `assign_orchestration_step` accepts any agent
- * with a member row.
+ * The orchestrator itself is NOT required to have a member row — it is the
+ * team's `orchestrator_spec`. A team MAY still put it on the roster (a member
+ * row with the same spec) if the operator wants the orchestrator to also
+ * execute steps.
  */
 @Entity('orchestration_team_members')
 @Index('idx_orch_members_team', ['team_id'])
@@ -37,27 +37,24 @@ export class OrchestrationTeamMember {
   account_id: string | null;
 
   /**
-   * The backing Agent identity this slot dispatches to. Since the roster became
-   * spec-declared it is an OUTPUT, not an input: the operator picks Runtime Host
-   * / CLI / model / working folder. The runtime identity key
-   * (runtimeIdentityKey of `spec`) is written back here. Everything
-   * downstream — SSE scope, MCP api key, ChatRoomParticipant, dispatch — keeps
-   * reading this exact field, which is why the refactor needed no changes there.
+   * Legacy: the runtime identity key this slot had while slots declared their
+   * own working folder. A slot is no longer an identity on its own — it gets one
+   * per project folder of each mission (orchestration-roster.ts) — so new rows
+   * leave this null. Kept for rows written before the change, so an execution
+   * identity recorded on old missions still maps back to its slot.
    */
-  @Column({ type: 'varchar' })
-  agent_id: string;
+  @Column({ type: 'varchar', nullable: true, default: null })
+  agent_id: string | null;
 
   /**
-   * How this slot runs: Runtime Host + CLI + model + working folder + folder
-   * scope (`TeamAgentSpec`, common/orchestration-member-spec.ts). This is what
-   * the team editor writes and what `agent_id` above is derived from.
+   * How this slot runs: Runtime Host + CLI + model + credential + backend +
+   * execution config (`TeamSlotSpec`, common/orchestration-member-spec.ts). No
+   * folder: a mission decides where (its projects' folders on this host).
    *
-   * Nullable for the same reason every other additive column here is: rows
-   * written before the spec-based roster existed carry null, and the migration
-   * back-fills them from their backing Agent. A member whose spec is still null
-   * keeps dispatching exactly as before (`folder_scope` then defaults to
-   * `isolated`, the pre-refactor behaviour) — `parseTeamAgentSpec` degrades to
-   * null rather than throwing, so a legacy row can never break the roster read.
+   * Nullable because rows written before the spec-based roster carry null; such
+   * a slot is left out of a mission's roster. Rows written while slots declared a
+   * folder still hold `working_dir` / `folder_scope` keys — `parseTeamSlotSpec`
+   * ignores them and the next save drops them.
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
   spec: Record<string, any> | null;

@@ -143,7 +143,8 @@ async function stage(t, { label } = {}) {
     return client;
   };
 
-  // 슬롯 spec 으로 팀을 만들고, AWB 가 프로비저닝한 정체성을 돌려받는다.
+  // 슬롯 spec(Host + CLI, 폴더 없음)으로 팀을 만들고, 미션의 project 폴더에서 확정될
+  // 실행 정체성을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: `Notify squad ${label}`,
@@ -157,6 +158,7 @@ async function stage(t, { label } = {}) {
   const mission = await missions.createMission({
     account_id: ws.id,
     team_id: team.id,
+    ...squad.missionDefaults,
     title: `Notify mission ${label}`,
     objective: 'Exercise the confirm gate notification path.',
     max_parallel_steps: 2,

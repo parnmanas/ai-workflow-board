@@ -147,8 +147,9 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   const join = (missionId, token) =>
     post(`/api/orchestration/missions/${missionId}/join-conversation`, token, { account_id: ws.id });
 
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 만든다 — 그래서 여기서 lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 로 선언하고 폴더는 미션의 project 가 정한다 —
+  // 그래서 여기서 lead/worker 를 미리 만들지 않고, 슬롯 × project 폴더로 계산된 실행
+  // identity 를 buildTeam 에게서 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: 'Conversation squad',
@@ -168,6 +169,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     objective: 'Add a CSV export.',
     created_by_type: 'user',
     created_by: owner.id,
+    ...squad.missionDefaults,
   });
   const started = await runner.startMission(created.id, ws.id, {
     type: 'user',
@@ -246,6 +248,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     objective: 'Created before human participants existed.',
     created_by_type: 'user',
     created_by: owner.id,
+    ...squad.missionDefaults,
   });
   const legacyStarted = await runner.startMission(legacyMission.id, ws.id, {
     type: 'user',
@@ -312,6 +315,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     objective: 'Something an agent planned.',
     created_by_type: 'agent',
     created_by: lead.id,
+    ...squad.missionDefaults,
   });
   const agentStarted = await runner.startMission(agentOwned.id, ws.id, {
     type: 'agent',
@@ -460,6 +464,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     objective: 'Already over.',
     created_by_type: 'user',
     created_by: owner.id,
+    ...squad.missionDefaults,
   });
   const closedStarted = await runner.startMission(closed.id, ws.id, {
     type: 'user',

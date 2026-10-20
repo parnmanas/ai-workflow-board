@@ -105,6 +105,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
     title: 'Reopen mission',
     objective: 'ship v1',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
   await leadMcp.callTool('submit_orchestration_plan', {
@@ -225,6 +226,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
     title: 'Cancelled mission',
     objective: 'stop halfway',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   await runner.startMission(cancelled.id, ws.id, HUMAN);
   await leadMcp.callTool('submit_orchestration_plan', {

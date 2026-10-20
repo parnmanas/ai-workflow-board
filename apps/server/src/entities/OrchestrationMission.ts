@@ -2,19 +2,26 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 import { CheckoutMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 import { MissionCompletionCriterion, MissionPostAction } from '../modules/orchestration/orchestration.constants';
 import { GraphSpec } from '../modules/orchestration/orchestration-graph';
+import type { MissionProjectRef } from '../modules/orchestration/orchestration-project';
+import type { MissionRuntimeRoster } from '../modules/orchestration/orchestration-roster';
 
 /**
- * 이번 미션에서만 함께 쓰는 임시 멤버 한 자리. 팀 슬롯과 같은 runtime spec 에
- * 표시용 라벨을 얹은 형태이며, `agent_id` 는 spec 에서 계산된 runtime identity
- * key 로 확정해 저장한다.
+ * 이번 미션에서만 함께 쓰는 임시 멤버 한 자리. 팀 슬롯과 같은 slot spec(Host · CLI ·
+ * model · credential — 폴더 없음)에 표시용 라벨을 얹은 형태다. 폴더는 팀 멤버와
+ * 똑같이 미션의 project 에서 정해진다.
  */
 export interface MissionExtraMember {
-  /** spec 에서 계산된 runtime identity key — step assignee 로 지목되는 값. */
-  agent_id: string;
+  /** 로스터 주소 — 임시 멤버를 추가할 때 발급한 uuid. step 은 이 값으로 배정된다. */
+  slot_id: string;
   role_label: string;
   capabilities: string;
   max_concurrent: number;
   spec: Record<string, any>;
+  /**
+   * 레거시: 임시 멤버가 폴더를 직접 선언하던 때 저장된 runtime identity key.
+   * 그 시절 행은 `slot_id` 가 없어 `extra:<agent_id>` 로 읽힌다(readExtraMembers).
+   */
+  agent_id?: string;
 }
 
 /**
@@ -41,8 +48,10 @@ export interface MissionExtraMember {
  *               results are recorded but no new step goes out until resume.
  *   completed / failed / cancelled — terminal.
  *
- * `orchestrator_agent_id` is snapshotted from the team at start so editing the
- * team mid-mission never re-points a live mission at a different agent.
+ * The roster is resolved against the mission's projects and frozen at start
+ * (`runtime_roster`, with `orchestrator_agent_id` / `orchestrator_spec` taken
+ * from it) so editing the team mid-mission never re-points a live mission at a
+ * different worker or folder.
  */
 @Entity('orchestration_missions')
 @Index('idx_orch_missions_account', ['account_id'])
@@ -213,7 +222,11 @@ export class OrchestrationMission {
   @Column({ type: 'varchar', default: 'draft' })
   status: string;
 
-  /** Snapshot of team.orchestrator_agent_id taken at start. */
+  /**
+   * The orchestrator's execution identity — its slot in its project folder,
+   * from `runtime_roster` at start. An agent-created draft is pre-stamped with
+   * the creating agent's identity so it can still close the draft.
+   */
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestrator_agent_id: string | null;
 
@@ -239,10 +252,52 @@ export class OrchestrationMission {
   @Column({ type: 'simple-json', nullable: true, default: null })
   extra_member_specs: MissionExtraMember[] | null;
 
+  // ── 작업 위치: 미션의 project 들 ────────────────────────────────────────────
+
   /**
-   * Snapshot of team.orchestrator_spec taken at start (P1). Dual-write와 함께
-   * 쌓이는 Spec 직dispatch용 스냅샷 — P2에서 dispatch가 이쪽을 읽으면
-   * orchestrator_agent_id는 제거된다. 그 전까지 읽는 쪽은 없다.
+   * 이 미션이 다루는 Project 목록 — `[{ project_id, branch }]`, 첫 항목이 primary.
+   *
+   * 팀은 여러 미션에 재사용되므로 "어느 폴더에서 일하는가"는 팀 슬롯이 아니라 미션이
+   * 정한다. 멤버의 작업 폴더는 각 project 의 **그 멤버 Host** 의 main clone
+   * (`ProjectHostFolder`)이고, 폴더가 없는 Host 는 그 project 를 맡을 수 없다
+   * (`orchestration-roster.ts` 의 resolveMissionRoster). step 마다 어느 project 에서
+   * 일하는지를 orchestrator 가 정한다(`OrchestrationStep.project_id`). 오케스트레이터는
+   * 자기 Host 에 폴더가 있는 첫 project 에서 돈다.
+   *
+   * `[]`/null 이면 레거시 `repo_ref.project_id` 를 한 항목짜리 목록으로 읽는다
+   * (`readMissionProjects`). project 가 하나도 없는 미션은 시작할 수 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  projects: MissionProjectRef[] | null;
+
+  /**
+   * `shared`(기본) | `isolated` — step 이 project 폴더 자체에서 도는지, step 마다
+   * `.awb/orch/<mission>/<step>` 체크아웃에서 도는지(`MemberFolderScope`). 예전에는
+   * 팀 슬롯마다 정했지만, 충돌하는 빌드를 부채살로 펼칠지는 팀이 아니라 그 미션의
+   * 일이라 미션으로 옮겼다. 브리핑 계약이라 draft 에서만 바꿀 수 있다.
+   *
+   * `shared` 미션 둘이 같은 Host 의 같은 폴더에서 동시에 일하면 서로의 파일을
+   * 덮어쓰므로 시작(·재개) 단계에서 막는다(`sharedFolderConflict`).
+   */
+  @Column({ type: 'varchar', default: 'shared' })
+  folder_scope: string;
+
+  /**
+   * 시작 시점에 확정한 로스터 — 슬롯(팀 멤버 − 제외 + 임시)과, 각 슬롯이 각 project
+   * 에서 도는 실행 spec·identity(`MissionRuntimeRoster`, orchestration-roster.ts).
+   *
+   * orchestrator 는 이 로스터로 브리핑받으므로 계획 검증·재배정·동시성 상한·런타임
+   * 준비(credential)·디스패치가 전부 이 스냅샷을 읽는다 — 실행 중 팀을 고쳐도 이
+   * 미션이 배정할 수 있는 대상은 바뀌지 않는다. 다시 열기(reopen)가 현재 팀으로 다시
+   * 계산한다. 매니저의 credential 조회(`slot-credential-resolver.ts`)도 identity 를
+   * 여기서 찾는다. null = 시작 전이거나 이 컬럼 이전에 시작된 미션.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  runtime_roster: MissionRuntimeRoster | null;
+
+  /**
+   * 오케스트레이터의 실행 spec — 시작 시 `runtime_roster` 에서 함께 기록한다(슬롯 +
+   * 그 Host 의 project 폴더). 다시 열기가 이 identity 를 재시작한다.
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
   orchestrator_spec: Record<string, any> | null;
@@ -302,23 +357,26 @@ export class OrchestrationMission {
   @Column({ type: Date, nullable: true, default: null })
   finished_at: Date | null;
 
-  // ── Agent 작업공간(ticket 2dc3c62f) ────────────────────────────────────────
+  // ── isolated step 작업공간(ticket 2dc3c62f) ─────────────────────────────────
   // QaScenario/Action/SecurityProfile과 동일한 필드 구성 + 정규화 방식이다
-  // (common/workspace-folder-options.ts 참고). 이 mission 값은 루트이고, 각
-  // 디스패치된 step은 그 아래 `<root>/<step_key>`로 격리된다
-  // (orchestration-runner.service.ts의 dispatchStep 참고) — 동시 진행 중인
-  // step끼리 폴더를 공유하는 일이 없다.
+  // (common/workspace-folder-options.ts 참고). `folder_scope: 'isolated'` 미션에서만
+  // 쓰인다: 각 디스패치된 step은 그 step 의 project 폴더 아래 `<root>/<step_key>`로
+  // 격리되고 그 project 를 체크아웃한다(orchestration-runner.service.ts의 dispatchStep).
 
-  /** `.awb/orch/` 아래의 working_dir-relative 루트(worktree 규약 ③). '' = 미설정
+  /** `.awb/orch/` 아래의 project-folder-relative 루트(worktree 규약 ③). '' = 미설정
    *  → 결정론적 기본값 `.awb/orch/<mission8>`(resolveWorkspaceFolder). */
   @Column({ type: 'varchar', default: '' })
   workspace_folder: string;
 
-  /** 모든 step이 체크아웃할 repo. null = board/account environment_config repo 재사용. */
+  /**
+   * 레거시: 미션이 project 를 하나만 가리키던 때의 저장소 참조. 이제 `projects` 가
+   * 원천이고, 이 값은 `projects` 가 빈 옛 행을 읽을 때만 쓰인다(readMissionProjects).
+   * 새 미션은 쓰지 않는다.
+   */
   @Column({ type: 'simple-json', nullable: true, default: null })
   repo_ref: WorkspaceFolderRepoRef | null;
 
-  /** 각 step의 작업폴더를 준비하는 방식. 'fresh'는 매 디스패치마다 폴더를 비우고 재체크아웃한다. */
+  /** isolated step 의 작업폴더를 준비하는 방식. 'fresh'는 매 디스패치마다 폴더를 비우고 재체크아웃한다. */
   @Column({ type: 'varchar', default: 'reuse' })
   checkout_mode: CheckoutMode;
 

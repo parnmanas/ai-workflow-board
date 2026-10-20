@@ -27,35 +27,36 @@ import type { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { normalizeConfirmPolicy } from './orchestration.constants';
 
 export interface RosterEntry {
-  agent_id: string;
+  /** The slot's roster address — what the orchestrator puts in a step's `assignee`. */
+  slot_id: string;
   agent_name: string;
   role_label: string;
   capabilities: string;
   max_concurrent: number;
   is_online: boolean;
   /**
-   * Where this member physically runs — host, CLI, model, working folder, and
-   * who shares that folder. null for a legacy member row with no stored spec.
+   * Where this member physically runs — host, CLI, model, and the mission
+   * projects it can work on (one per project whose folder its host has), with
+   * who else works in each of those folders.
    *
-   * This is planning-relevant, not decoration: members sharing one folder on one
-   * host can hand work over through the filesystem, members on different machines
-   * cannot. An orchestrator that cannot see the difference has to assume the
-   * pessimistic case for the whole team.
+   * This is planning-relevant, not decoration: a member can only take a step on
+   * a project its host has; members sharing one folder on one host can hand
+   * work over through the filesystem, members on different machines cannot. An
+   * orchestrator that cannot see the difference has to assume the pessimistic
+   * case for the whole team.
    */
   runtime?: {
     host_name: string;
     cli: string;
     model: string | null;
-    working_dir: string;
-    folder_scope: 'shared' | 'isolated';
-    /** Other members in the same folder on the same host. */
-    folder_mates: string[];
-    /**
-     * The mission project's main clone folder on this member's host. Absent
-     * when the mission has no project; null when it has one but this host has
-     * no main clone folder registered for it.
-     */
-    project_folder?: string | null;
+    projects: Array<{
+      project_id: string;
+      project_name: string;
+      /** That project's folder on this member's host — where its steps on that project run. */
+      folder: string;
+      /** Other members working in the same folder on the same host. */
+      folder_mates: string[];
+    }>;
   } | null;
 }
 
@@ -96,69 +97,66 @@ function section(title: string, body: string): string {
   return `## ${title}\n${trimmed}\n`;
 }
 
-function renderRoster(roster: RosterEntry[]): string {
+function renderRoster(roster: RosterEntry[], folderScope: 'shared' | 'isolated'): string {
   if (roster.length === 0) return '(no members — you cannot delegate; report this immediately)';
   const lines = roster
     .map((m) => {
-      const bits = [`- **${m.agent_name}** (agent_id: \`${m.agent_id}\`)`];
+      const bits = [`- **${m.agent_name}** (slot: \`${m.slot_id}\`)`];
       if (m.role_label) bits.push(`  - role: ${m.role_label}`);
       bits.push(`  - concurrent step capacity: ${m.max_concurrent}`);
       bits.push(`  - currently: ${m.is_online ? 'online' : 'offline (work will queue until it connects)'}`);
       if (m.capabilities) bits.push(`  - capabilities: ${m.capabilities}`);
       const rt = m.runtime;
       if (rt) {
-        bits.push(
-          `  - runs: ${rt.cli}${rt.model ? ` (${rt.model})` : ''} on host **${rt.host_name}** in \`${rt.working_dir}\``,
-        );
-        if (rt.folder_scope === 'shared') {
-          bits.push(
-            rt.folder_mates.length
-              ? `  - **shares that folder with: ${rt.folder_mates.join(', ')}** — files written there are visible to them`
-              : `  - works directly in that folder (no per-step scratch copy)`,
-          );
-        } else {
-          bits.push(`  - each step gets its own isolated scratch folder under that path`);
-        }
-        // Per host, not per mission: two members on different machines have
-        // the project in different places, and the orchestrator writes paths
-        // into their instructions.
-        if (rt.project_folder !== undefined) {
-          bits.push(
-            rt.project_folder
-              ? `  - project main clone on this host: \`${rt.project_folder}\`` +
-                  (rt.folder_scope === 'shared' && sameFolder(rt.project_folder, rt.working_dir)
-                    ? ' — the same folder this member works in'
-                    : '')
-              : `  - project main clone on this host: **none registered** — do not hand this member a path from another host`,
-          );
+        bits.push(`  - runs: ${rt.cli}${rt.model ? ` (${rt.model})` : ''} on host **${rt.host_name}**`);
+        // Per host, not per mission: two members on different machines have a
+        // project in different places, and the orchestrator writes paths into
+        // their instructions.
+        for (const p of rt.projects) {
+          bits.push(`  - can work on **${p.project_name}** (\`${p.project_id}\`) — its folder on this host: \`${p.folder}\``);
         }
       }
       return bits.join('\n');
     })
     .join('\n');
 
+  if (folderScope === 'isolated') {
+    return [
+      lines,
+      '',
+      '**Isolated folders.** Every step gets its own fresh checkout of its project under that project\'s folder,',
+      'so steps never see each other\'s files — results travel through step result summaries and artifacts.',
+    ].join('\n');
+  }
+
   // State the consequence once, after the list, rather than per member: the
   // orchestrator needs to know that co-located members are a capability
   // (hand work over in place) AND a hazard (concurrent steps in one tree).
   const sharedGroups = new Map<string, string[]>();
   for (const m of roster) {
-    const rt = m.runtime;
-    if (!rt || rt.folder_scope !== 'shared' || rt.folder_mates.length === 0) continue;
-    const key = `${rt.host_name}\u0000${rt.working_dir}`;
-    const group = sharedGroups.get(key) ?? [];
-    group.push(m.agent_name);
-    sharedGroups.set(key, group);
+    for (const p of m.runtime?.projects ?? []) {
+      if (p.folder_mates.length === 0) continue;
+      const key = `${m.runtime!.host_name}\u0000${p.folder}`;
+      const group = sharedGroups.get(key) ?? [];
+      group.push(m.agent_name);
+      sharedGroups.set(key, group);
+    }
   }
-  if (sharedGroups.size === 0) return lines;
+  const header = [
+    lines,
+    '',
+    '**Shared folders.** A step runs directly in its project\'s folder on the assignee\'s host — nothing is',
+    're-cloned or wiped for it, so it sees whatever earlier steps left there.',
+  ];
+  if (sharedGroups.size === 0) return header.join('\n');
 
   const notes = Array.from(sharedGroups.entries()).map(([key, names]) => {
     const [host, dir] = key.split('\u0000');
     return `- \`${dir}\` on **${host}**: ${names.join(', ')}`;
   });
   return [
-    lines,
-    '',
-    '**Shared working folders.** These members are in the same directory on the same machine:',
+    ...header,
+    'These members work in the same directory on the same machine:',
     ...notes,
     '',
     'Plan with that in mind. Two members in one folder can pass work through the filesystem —',
@@ -181,13 +179,11 @@ export function renderMissionPrompt(args: {
   teamPrompt: string;
   roster: RosterEntry[];
   replan?: boolean;
-  /**
-   * The mission's project. `own_host` is where the orchestrator itself runs
-   * (null when its slot has no spec); the members' folders ride the roster.
-   */
-  project?: (PromptProject & {
-    own_host: { host_name: string; main_clone_folder: string | null } | null;
-  }) | null;
+  /** The mission's projects, primary first. The members' folders ride the roster. */
+  projects: PromptProject[];
+  /** Where the orchestrator itself runs: its host and the project folder it was started in. */
+  ownFolder: { host_name: string; project_name: string; folder: string } | null;
+  folderScope: 'shared' | 'isolated';
 }): string {
   const { mission, teamName, teamPrompt, roster } = args;
   const lines: string[] = [];
@@ -232,9 +228,16 @@ export function renderMissionPrompt(args: {
     lines.push(section('User confirmation gates', renderConfirmPolicyGuidance(mission.confirm_policy)));
   }
 
-  if (args.project) lines.push(section(`Project: ${args.project.name}`, renderBriefProject(args.project)));
+  if (args.projects.length > 0) {
+    lines.push(
+      section(
+        args.projects.length === 1 ? `Project: ${args.projects[0].name}` : `Projects (${args.projects.length})`,
+        renderBriefProjects(args.projects, args.ownFolder),
+      ),
+    );
+  }
 
-  lines.push(section('Your team', renderRoster(roster)));
+  lines.push(section('Your team', renderRoster(roster, args.folderScope)));
 
   lines.push('## How this works');
   lines.push(
@@ -246,8 +249,11 @@ export function renderMissionPrompt(args: {
       `   invent busywork steps, and do not collapse genuinely parallel work into one serial step.`,
       `3. Submit it with \`mcp__awb__submit_orchestration_plan\`. Each step needs a \`step_key\` (short slug),`,
       `   a \`title\`, \`instructions\` written for the assignee (they do NOT see this brief), an`,
-      `   \`assignee_agent_id\` from the roster above, and \`depends_on\` listing the step_keys that must`,
-      `   finish first. Steps with no shared dependency run in PARALLEL, so express real independence.`,
+      `   \`assignee\` (a slot id from the roster above), a \`project\` (a project id the assignee can work`,
+      `   on — omit it only when that member can work on just one), and \`depends_on\` listing the step_keys`,
+      `   that must finish first. The step runs in that project's folder on the assignee's host; work that`,
+      `   spans projects is one step per project, ordered with \`depends_on\`. Steps with no shared`,
+      `   dependency run in PARALLEL, so express real independence.`,
       `4. The server dispatches every step whose dependencies are satisfied, up to`,
       `   ${mission.max_parallel_steps} at a time. You do not need to dispatch them yourself.`,
       `5. You will be woken in this room when a step fails or blocks, when nothing further can be dispatched,`,
@@ -301,27 +307,28 @@ export function renderMissionPrompt(args: {
   return lines.filter((l) => l !== '').join('\n');
 }
 
-function renderBriefProject(
-  project: PromptProject & { own_host: { host_name: string; main_clone_folder: string | null } | null },
+function renderBriefProjects(
+  projects: PromptProject[],
+  own: { host_name: string; project_name: string; folder: string } | null,
 ): string {
-  const facts = projectFacts(project);
-  const own = project.own_host;
-  const lines = [`- Project id: \`${project.id}\``, ...facts.head];
+  const lines: string[] = [];
+  for (const project of projects) {
+    const facts = projectFacts(project);
+    if (projects.length > 1) lines.push(`### ${project.name}`);
+    lines.push(`- Project id: \`${project.id}\``, ...facts.head);
+    if (facts.instructions) lines.push(facts.instructions.replace(/^\n### Project instructions/, '- Project instructions:'));
+    lines.push('');
+  }
   if (own) {
-    lines.push(
-      own.main_clone_folder
-        ? `- Main clone on your host (**${own.host_name}**): \`${own.main_clone_folder}\``
-        : `- Your host (**${own.host_name}**) has no main clone folder registered for this project.`,
-    );
+    lines.push(`You run on **${own.host_name}** in \`${own.folder}\` (${own.project_name}).`);
   }
   lines.push(
-    '',
-    'Every Runtime Host keeps its own main clone of this project, at a path that differs from host to host.',
-    'The roster below lists the folder on each member\'s host (or says that host has none), and each work',
-    'order repeats it for the member that receives it. When your step instructions point into the project,',
-    'use paths relative to the project root — never an absolute path taken from another member\'s host.',
+    'Every Runtime Host keeps its own main clone of each project, at a path that differs from host to host,',
+    'and a member can only take steps on a project its host has. The roster below lists, per member, the',
+    'projects it can work on and the folder on its host; each work order repeats it for the member that',
+    'receives it. When your step instructions point into a project, use paths relative to that project\'s',
+    'root — never an absolute path taken from another member\'s host.',
   );
-  if (facts.instructions) lines.push(facts.instructions);
   return lines.join('\n');
 }
 
@@ -418,14 +425,14 @@ export function renderStepPrompt(args: {
   dependencies: DependencyContext[];
   isRetry: boolean;
   /**
-   * agent-manager가 스폰 전에 프로비저닝하는 working_dir-relative 폴더(티켓
-   * 2dc3c62f). `isolated` 슬롯에만 있다 — `shared` 슬롯은 폴더를 프로비저닝하지
+   * agent-manager가 스폰 전에 프로비저닝하는 project-folder-relative 폴더(티켓
+   * 2dc3c62f). `isolated` 미션에만 있다 — `shared` 미션은 폴더를 프로비저닝하지
    * 않으므로 대신 `sharedFolder` 가 채워진다.
    */
   workspaceFolder?: string;
   /**
-   * `shared` folder_scope 슬롯이 그대로 쓰는 working_dir 과, 같은 폴더를 쓰는
-   * 팀원들. `workspaceFolder` 와 상호배타다.
+   * `shared` 미션의 step 이 그대로 쓰는 폴더(그 project 의 이 Host 폴더)와, 같은
+   * 폴더를 쓰는 팀원들. `workspaceFolder` 와 상호배타다.
    */
   sharedFolder?: {
     working_dir: string;
@@ -450,9 +457,9 @@ export function renderStepPrompt(args: {
    */
   roomId?: string | null;
   /**
-   * 미션의 프로젝트와, **이 멤버가 도는 Host** 에서의 main clone 폴더(docs/tickets.md).
+   * 이 step 의 프로젝트와, **이 멤버가 도는 Host** 에서의 main clone 폴더(docs/tickets.md).
    * Host 마다 경로가 다르므로 다른 멤버의 경로를 넘겨짚지 않도록 자기 Host 의 값(또는
-   * "등록 없음")을 명시한다. null/생략이면 미션에 프로젝트가 없다.
+   * "등록 없음")을 명시한다. null/생략이면 step 에 프로젝트가 없다(레거시 미션).
    */
   project?: (PromptProject & {
     /** '' when the slot's host could not be named. */
@@ -486,15 +493,16 @@ export function renderStepPrompt(args: {
     lines.push(
       section(
         'Working folder (server-decided — do NOT improvise)',
-        `\`<working_dir>/${args.workspaceFolder}\` — prepared for you and set as your current directory before ` +
-          `you were spawned. Work only here; do not \`cd\` elsewhere or clone a fresh copy yourself.`,
+        `\`<project folder>/${args.workspaceFolder}\` — this step's own checkout, prepared for you and set as ` +
+          `your current directory before you were spawned. Work only here; do not \`cd\` elsewhere or clone a ` +
+          `fresh copy yourself.`,
       ),
     );
   } else if (args.sharedFolder) {
-    // A shared slot starts in the operator's real working folder, which may
-    // already hold a checkout, a build, and other members' work in progress.
-    // The two things the agent must be told are therefore the opposite of the
-    // isolated case: nothing was prepared for you, and you are not alone.
+    // A shared step starts in the project's real checkout on this host, which
+    // may already hold a build and other members' work in progress. The two
+    // things the agent must be told are therefore the opposite of the isolated
+    // case: nothing was prepared for you, and you are not alone.
     const mates = args.sharedFolder.shared_with;
     const body = [
       `\`${args.sharedFolder.working_dir}\` — your current directory, and it is your **shared team working ` +

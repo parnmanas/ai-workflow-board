@@ -1,13 +1,8 @@
 /**
  * Runtime Host catalogue for the team editor (P4c-2b successor of
- * OrchestrationAgentProvisionerService's read half).
- *
- * The provisioner used to ALSO mint a backing Agent row per slot; slots are
- * now addressed by their runtime identity key (`runtimeIdentityKey(spec)`,
- * common/runtime-spec.ts) and dispatch resolves them without an Agent row, so
- * the mint/edit/delete half is gone. What remains is the read half the team
- * editor needs: every Runtime Host with its CLI / model / working-folder
- * candidates.
+ * OrchestrationAgentProvisionerService's read half): every Runtime Host with
+ * its CLI / model candidates. Slots name no folder — a mission places them in
+ * its projects' folders — so there are no folder candidates here.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -45,13 +40,6 @@ export interface RuntimeHostView {
   /** cliType → model ids the host enumerated at boot. */
   available_models: Record<string, string[]>;
   cli_versions: Record<string, string>;
-  /**
-   * Working folders already in use on this host — the "share a folder with a
-   * teammate" picker. Union of every Agent row's `working_dir` under this host
-   * and every team slot spec naming it, so a folder shows up whether it was
-   * first typed on the AI Agents screen or in a team editor.
-   */
-  working_dirs: string[];
 }
 
 const ISSUED_BY = 'system:orchestration-roster';
@@ -69,14 +57,14 @@ export class OrchestrationHostsService {
 
   /**
    * Every Runtime Host an operator can place a team slot on, with the CLI /
-   * model / working-folder candidates for each.
+   * model candidates for each.
    *
    * Offline hosts are included, with `is_online: false`. Hiding them would make
    * a team un-editable exactly when a machine is down — and since dispatch
    * resolves runtime identities without an Agent row anyway (auto-provision on
    * first dispatch), authoring against an offline host is legitimate. Their
-   * CLI/working-dir candidates come from team slot specs, which is the only
-   * thing available with no heartbeat (model lists stay single-sourced from
+   * CLI candidates come from team slot specs, which is the only thing
+   * available with no heartbeat (model lists stay single-sourced from
    * HostModelsService and are simply absent offline).
    *
    * Deliberately NOT narrowed by account. A Runtime Host is a machine, not a
@@ -126,20 +114,10 @@ export class OrchestrationHostsService {
       return cands[0] ?? null;
     };
 
-    // Working-folder candidates come from team slot specs (Agent 행 없음).
-    // P4c-4: heartbeat 가 없을 때 CLI 후보도 spec 에서 복원한다 — 슬롯이 지목한
+    // heartbeat 가 없을 때 CLI 후보를 slot spec 에서 복원한다 — 슬롯이 지목한
     // CLI 는 그 호스트에서 쓸 수 있음이 이미 입증된 선택지다.
-    const folders = new Map<string, Set<string>>();
     const specClis = new Map<string, Set<string>>();
-    const knownHostIds = new Set(hostRows.map((h) => h.id));
-    const entryKeyFor = (raw: string): string => {
-      if (knownHostIds.has(raw)) return raw;
-      return raw;
-    };
-    for (const dir of await this.specWorkingDirs()) {
-      addTo(folders, entryKeyFor(dir.manager_agent_id), dir.working_dir);
-      if (dir.cli) addTo(specClis, entryKeyFor(dir.manager_agent_id), dir.cli);
-    }
+    for (const slot of await this.specClis()) addTo(specClis, slot.manager_agent_id, slot.cli);
 
     return [...entries.values()]
       .sort((a, b) => a.name.localeCompare(b.name))
@@ -166,7 +144,6 @@ export class OrchestrationHostsService {
           // 입력도 받는다) — 그것 때문에 목록 자체를 갈라놓을 이유는 없다.
           available_models: this.hostModels.modelsByCli(e.hostId),
           cli_versions: rec?.cli_versions ?? {},
-          working_dirs: Array.from(folders.get(e.key) ?? []).sort(),
         };
       });
   }
@@ -207,16 +184,15 @@ export class OrchestrationHostsService {
     return hosts.find((h) => h.manager_agent_id === id) ?? null;
   }
 
-  /** `(manager, working_dir)` pairs named by existing team slots. */
-  private async specWorkingDirs(): Promise<Array<{ manager_agent_id: string; working_dir: string; cli: string }>> {
-    const out: Array<{ manager_agent_id: string; working_dir: string; cli: string }> = [];
+  /** `(host, cli)` pairs named by existing team slots. */
+  private async specClis(): Promise<Array<{ manager_agent_id: string; cli: string }>> {
+    const out: Array<{ manager_agent_id: string; cli: string }> = [];
     const push = (raw: unknown) => {
       if (!raw || typeof raw !== 'object') return;
       const spec = raw as Record<string, unknown>;
       const host = typeof spec.manager_agent_id === 'string' ? spec.manager_agent_id.trim() : '';
-      const dir = typeof spec.working_dir === 'string' ? spec.working_dir.trim() : '';
       const cli = typeof spec.cli === 'string' ? spec.cli.trim() : '';
-      if (host && dir) out.push({ manager_agent_id: host, working_dir: dir, cli });
+      if (host && cli) out.push({ manager_agent_id: host, cli });
     };
     for (const m of await this.memberRepo.find({ select: { id: true, spec: true } as any })) push(m.spec);
     for (const t of await this.teamRepo.find({ select: { id: true, orchestrator_spec: true } as any })) {

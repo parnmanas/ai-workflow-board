@@ -1,21 +1,21 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 /**
- * A named roster of Agents that executes Missions together under one
+ * A named, reusable roster that executes Missions together under one
  * orchestrator.
  *
- * `orchestrator_agent_id` is REQUIRED by the feature contract — a team with no
- * orchestrator cannot run a Mission, because the whole model is "one agent owns
- * the plan and delegates". The column is nullable at the DB level only so
- * TypeORM `synchronize` can add it to an existing SQLite/Postgres schema
- * without a hand-written migration (D-01, same posture as every other additive
- * column in this codebase); the service layer rejects an empty value on both
- * create and update, and `startMission` re-asserts it at dispatch time.
+ * An orchestrator slot (`orchestrator_spec`) is REQUIRED by the feature
+ * contract — a team with no orchestrator cannot run a Mission, because the
+ * whole model is "one agent owns the plan and delegates". The service layer
+ * rejects a missing spec on create and update, and `startMission` re-asserts it.
+ *
+ * A team says WHO works (Runtime Host + CLI + model per slot), never WHERE:
+ * the same team runs missions on different repositories, so the folder comes
+ * from each mission's projects (OrchestrationMission.projects).
  *
  * Membership lives in the sibling `orchestration_team_members` table rather
  * than a JSON array column so a member row can carry its own capability blurb
- * and concurrency cap, and so an agent-scoped query ("which teams is this agent
- * on?") stays a plain indexed lookup.
+ * and concurrency cap.
  *
  * `account_id`는 nullable이다(티켓 1b62b437): null = 글로벌 팀 — 모든 account에서
  * 보이고 로스터는 글로벌 에이전트로만 제한된다. 이는 로스터 축에만 해당하는 변경이다 —
@@ -64,27 +64,20 @@ export class OrchestrationTeam {
   description: string;
 
   /**
-   * Agent.id of the orchestrator. Enforced non-empty by the service layer.
-   *
-   * Like a member's `agent_id`, this is now DERIVED from `orchestrator_spec`
-   * below — the operator declares Runtime Host / CLI / model / folder and
-   * The slot's runtime identity key (runtimeIdentityKey of `orchestrator_spec`).
+   * Legacy: the orchestrator's runtime identity key from when slots declared
+   * their own folder. The orchestrator now gets an identity per mission (its
+   * slot in that mission's project folder — `OrchestrationMission.orchestrator_agent_id`),
+   * so new teams leave this null. Old values stay so an identity recorded on
+   * old missions still maps back to this team.
    */
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestrator_agent_id: string | null;
 
   /**
-   * The orchestrator's runtime spec — same `TeamAgentSpec` shape as
-   * `OrchestrationTeamMember.spec`, so both slots are authored by one form and
-   * validated by one function.
-   *
-   * The orchestrator gets a spec rather than staying an Agent picker because the
-   * inconsistency was worse than the symmetry: the roster is the thing you edit
-   * most, and leaving one slot on the old "go create an Agent first" flow would
-   * mean a team still could not be built end-to-end on one screen — the actual
-   * complaint this refactor answers. Its `folder_scope` defaults to `shared` too
-   * and matters for the same reason: the orchestrator often wants to read the
-   * artifacts its members left in the shared tree.
+   * The orchestrator's slot — same `TeamSlotSpec` shape as
+   * `OrchestrationTeamMember.spec` (Runtime Host + CLI + model + credential,
+   * no folder), so both slots are authored by one form and validated by one
+   * function. Missions place it in their primary project's folder on its host.
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
   orchestrator_spec: Record<string, any> | null;

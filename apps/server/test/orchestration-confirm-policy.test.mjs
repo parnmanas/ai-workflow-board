@@ -49,7 +49,7 @@ const brief = (overrides = {}) =>
     teamPrompt: '',
     roster: [
       {
-        agent_id: 'a1',
+        slot_id: 'a1',
         agent_name: 'Manager/Worker',
         role_label: 'builder',
         capabilities: '',
@@ -57,6 +57,9 @@ const brief = (overrides = {}) =>
         is_online: true,
       },
     ],
+    projects: [],
+    ownFolder: null,
+    folderScope: 'shared',
   });
 
 // ── 정규화 ───────────────────────────────────────────────────────────────────

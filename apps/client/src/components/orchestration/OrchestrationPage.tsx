@@ -6,6 +6,7 @@ import type {
   Action,
   ClaudeBackendProfile,
   Credential,
+  OrchestrationFolderScope,
   OrchestrationMissionDetail,
   OrchestrationMissionExtraMemberInput,
   OrchestrationMissionListItem,
@@ -15,6 +16,7 @@ import type {
   OrchestrationRuntimeHost,
   OrchestrationTeam,
   OrchestrationUpdateEvent,
+  Project,
 } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
@@ -24,7 +26,16 @@ import { Button, EmptyState, Input, Modal, Select } from '../common';
 import { relativeTime, shortDuration } from '../../utils/time';
 import { missionStyle, progressPercent } from './status';
 import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
-import { RepoRefPicker, buildRepoRefPayload, repoRefProjectId } from '../admin/WorkspaceFolderOptions';
+import DirectoryPicker from '../admin/DirectoryPicker';
+import { notifyProjectsChanged, useProjects } from '../../projects/useProjects';
+import {
+  addMissionProject,
+  makePrimaryProject,
+  missionStartProblems,
+  slotCoverage,
+  type CoverageSlot,
+  type MissionProjectDraft,
+} from './missionProjects.logic';
 import TeamSlotRuntimeFields, {
   emptySlotDraft,
   slotDraftFromRuntime,
@@ -362,9 +373,10 @@ export function MissionFormModal({
   const [graphEnabled, setGraphEnabled] = useState(false);
   const [confirmPolicy, setConfirmPolicy] = useState<OrchestrationConfirmPolicy>('auto');
   const [userChatMode, setUserChatMode] = useState<OrchestrationUserChatMode>('open');
-  const [repoProjectId, setRepoProjectId] = useState('');
-  const [repoUrl, setRepoUrl] = useState('');
-  const [repoBranch, setRepoBranch] = useState('');
+  // 미션이 다루는 project 들(첫 항목이 primary) — 멤버는 각 project 의 **자기 Host** 폴더에서
+  // 일한다. 팀은 폴더를 모른다(여러 미션에 재사용되므로).
+  const [projectDrafts, setProjectDrafts] = useState<MissionProjectDraft[]>([]);
+  const [folderScope, setFolderScope] = useState<OrchestrationFolderScope>('shared');
   const [actions, setActions] = useState<Action[]>([]);
   // ── 미션별 로스터 오버라이드 ──────────────────────────────────────────
   // 팀을 고른 뒤 이번 미션에서만 빼고 쓸 멤버(excludedIds)와 임시로 얹을
@@ -382,18 +394,6 @@ export function MissionFormModal({
   const [backendProfiles, setBackendProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [hostsLoading, setHostsLoading] = useState(false);
 
-  // RepoRefPicker 는 평면 상태 + patch 한 벌로 말한다. 저장소를 바꿀 때
-  // { repoProjectId, repoBranch } 처럼 두 필드를 한 번에 보내므로 개별로 반영한다.
-  const repoRefState = useMemo(
-    () => ({ repoProjectId, repoUrl, repoBranch }),
-    [repoProjectId, repoUrl, repoBranch],
-  );
-  const patchRepoRef = useCallback((patch: Partial<typeof repoRefState>) => {
-    if (patch.repoProjectId !== undefined) setRepoProjectId(patch.repoProjectId);
-    if (patch.repoUrl !== undefined) setRepoUrl(patch.repoUrl);
-    if (patch.repoBranch !== undefined) setRepoBranch(patch.repoBranch);
-  }, []);
-
   useEffect(() => {
     if (!isOpen) return;
     api.listActions(accountId).then(setActions).catch(() => setActions([]));
@@ -402,7 +402,7 @@ export function MissionFormModal({
     setContext(mission?.context || '');
     setCriteria(mission?.acceptance_criteria || '');
     setStartNow(true);
-    setShowAdvanced(!!mission && (!!mission.method || mission.completion_criteria.length > 0 || mission.post_actions.length > 0 || !!mission.workspace_folder || !!mission.repo_ref || !!mission.graph_enabled));
+    setShowAdvanced(!!mission && (!!mission.method || mission.completion_criteria.length > 0 || mission.post_actions.length > 0 || !!mission.graph_enabled));
     setMethod(mission?.method || '');
     setWorkspaceFolder(mission?.workspace_folder || '');
     setCheckoutMode(mission?.checkout_mode || 'reuse');
@@ -411,10 +411,8 @@ export function MissionFormModal({
     setUserChatMode(mission?.user_chat_mode || 'open');
     setCompletionCriteria((mission?.completion_criteria || []).map((c) => ({ key: c.key, description: c.description })));
     setPostActions((mission?.post_actions || []).map((p) => ({ action_id: p.action_id, order: p.order, condition: p.condition })));
-    // project_id 우선, 이관 전 레코드의 resource_id 는 같은 id 라 읽기 폴백(docs/tickets.md).
-    setRepoProjectId(repoRefProjectId(mission?.repo_ref));
-    setRepoUrl(mission?.repo_ref?.url || '');
-    setRepoBranch(mission?.repo_ref?.branch || '');
+    setProjectDrafts((mission?.projects ?? []).map((p) => ({ project_id: p.project_id, branch: p.branch || '' })));
+    setFolderScope(mission?.folder_scope || 'shared');
     setTeamId(mission?.team_id || teams.find((t) => t.enabled && t.members.length > 0)?.id || teams[0]?.id || '');
     // 편집(draft) 모드에서는 저장된 오버라이드를 복원하고, 생성 모드에서는 빈 값으로 시작한다.
     setExcludedIds(mission?.excluded_member_ids ?? []);
@@ -435,6 +433,18 @@ export function MissionFormModal({
 
   const selectedTeam = teams.find((t) => t.id === teamId) || null;
 
+  // 미션은 계정 소유 팀이면 그 팀의 계정에 귀속되고(서버 account-access), project 는 미션
+  // 계정 소유여야 한다 — 그래서 고를 수 있는 project 목록도 그 계정의 것이다. 이미 있는
+  // 미션(draft 편집)은 자기 계정이 정해져 있다(글로벌 팀 미션은 primary project 의 계정).
+  const projectAccountId = mission?.account_id || selectedTeam?.account_id || accountId;
+  const { projects: listedProjects, loading: projectsLoading, error: projectsError } = useProjects(projectAccountId);
+  // GET /api/projects 는 인자와 무관하게 접근 가능한 모든 계정의 project 를 합쳐 준다 — 미션 계정 것만
+  // 남긴다(다른 계정의 project 는 서버가 "not found in this mission's account" 로 거부한다).
+  const accountProjects = useMemo(
+    () => listedProjects.filter((p) => p.account_id === projectAccountId),
+    [listedProjects, projectAccountId],
+  );
+
   // 팀이 바뀌면 제외 목록에서 더 이상 그 팀에 없는 id 는 걷어낸다 — 다른 팀의
   // 제외를 들고 있으면 제출 때 서버가 400 으로 거부한다. 임시 멤버는 팀과
   // 무관하므로 유지한다.
@@ -445,11 +455,65 @@ export function MissionFormModal({
   useEffect(() => {
     if (!selectedTeam) return;
     setExcludedIds((prev) => {
-      const valid = new Set(selectedTeam.members.map((m) => m.agent_id));
+      const valid = new Set(selectedTeam.members.map((m) => m.id));
       const pruned = prev.filter((id) => valid.has(id));
       return pruned.length === prev.length ? prev : pruned;
     });
   }, [selectedTeam]);
+
+  // 다른 계정의 팀으로 바꾸면 그 계정에 없는 project 는 고를 수 없다 — 목록이 도착한 뒤에만
+  // 걷어낸다(로딩 중이나 조회 실패 중에 비우면 편집 중인 draft 의 선택이 사라진다).
+  useEffect(() => {
+    if (projectsLoading || projectsError) return;
+    setProjectDrafts((prev) => {
+      const known = new Set(accountProjects.map((p) => p.id));
+      const kept = prev.filter((p) => known.has(p.project_id));
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [accountProjects, projectsLoading, projectsError]);
+
+  // 누가 어느 project 를 맡을 수 있는가 — 서버의 resolveMissionRoster 와 같은 규칙으로,
+  // 시작하기 전에 폼에서 보여 주고 막는다.
+  const coverageSlots = useMemo(() => {
+    const members: CoverageSlot[] = (selectedTeam?.members ?? [])
+      .filter((m) => !excludedIds.includes(m.id) && m.runtime)
+      .map((m) => ({ key: m.id, label: m.agent_name, host_ids: [m.runtime!.manager_agent_id] }));
+    extraMembers.forEach((e, i) => {
+      members.push({
+        key: `extra:${i}`,
+        label: e.role_label || e.runtime.cli,
+        host_ids: [e.runtime.manager_agent_id],
+      });
+    });
+    const orchestrator: CoverageSlot | null = selectedTeam?.orchestrator_runtime
+      ? {
+          key: 'orchestrator',
+          label: selectedTeam.orchestrator_name || 'orchestrator',
+          host_ids: [selectedTeam.orchestrator_runtime.manager_agent_id],
+        }
+      : null;
+    return { orchestrator, members };
+  }, [selectedTeam, excludedIds, extraMembers]);
+  const startProblems = useMemo(
+    () => missionStartProblems({ projects: accountProjects, selected: projectDrafts, ...coverageSlots }),
+    [accountProjects, projectDrafts, coverageSlots],
+  );
+
+  // 폼 안에서 바로 "이 Host 의 이 project 폴더" 를 등록한다 — 등록은 Projects 화면과 같은
+  // API 이고, 그 Host 의 모든 멤버에게 함께 적용된다.
+  const [folderTarget, setFolderTarget] = useState<{ project: Project; hostId: string } | null>(null);
+  const registerFolder = async (path: string) => {
+    const target = folderTarget;
+    setFolderTarget(null);
+    if (!target) return;
+    try {
+      await api.setProjectHostFolder(target.project.id, target.hostId, path);
+      notifyProjectsChanged();
+      showToast(`${target.project.name}: folder set on this host`, 'success');
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to set the project folder', 'error');
+    }
+  };
 
   // 임시 멤버 폼을 열 때만 호스트·인증 정보를 가져온다 — 미션 모달을 열 때마다
   // 무겁게 들고 있지 않기 위함이다. 팀 편집 화면과 같은 피드다.
@@ -470,7 +534,7 @@ export function MissionFormModal({
     }
   }, [hosts.length, hostsLoading, accountId]);
 
-  const includedCount = (selectedTeam?.members.filter((m) => !excludedIds.includes(m.agent_id)).length ?? 0) + extraMembers.length;
+  const includedCount = (selectedTeam?.members.filter((m) => !excludedIds.includes(m.id)).length ?? 0) + extraMembers.length;
 
   const submit = async () => {
     if (!title.trim() || !objective.trim() || !teamId) {
@@ -479,6 +543,11 @@ export function MissionFormModal({
     }
     if (selectedTeam && selectedTeam.members.length > 0 && includedCount === 0) {
       showToast('All members are excluded — include at least one member or add an ad-hoc member', 'error');
+      return;
+    }
+    // 시작까지 하는 생성만 막는다 — draft 저장은 project 를 나중에 채워도 된다.
+    if (!mission && startNow && startProblems.length > 0) {
+      showToast(startProblems[0], 'error');
       return;
     }
     const cleanCriteria = completionCriteria
@@ -490,8 +559,7 @@ export function MissionFormModal({
     // 일부라 유일성이 실제로 중요하므로(리뷰 지적 반영, 티켓 2dc3c62f), 제출
     // 직전에 최종 배열 순서 그대로 0..N-1로 다시 매긴다.
     const cleanPostActions = postActions.filter((p) => p.action_id).map((p, idx) => ({ ...p, order: idx }));
-    // 생성/편집 두 경로가 같은 repoRef 를 쓰므로 규칙은 여기 한 번만 적용된다.
-    const repoRef = buildRepoRefPayload(repoRefState);
+    const projects = projectDrafts.map((p) => ({ project_id: p.project_id, ...(p.branch.trim() ? { branch: p.branch.trim() } : {}) }));
     setSaving(true);
     try {
       const saved = mission
@@ -504,8 +572,9 @@ export function MissionFormModal({
             method: method.trim(),
             completion_criteria: cleanCriteria,
             post_actions: cleanPostActions,
+            projects,
+            folder_scope: folderScope,
             workspace_folder: workspaceFolder.trim(),
-            repo_ref: repoRef,
             checkout_mode: checkoutMode,
             graph_enabled: graphEnabled,
             confirm_policy: confirmPolicy,
@@ -523,8 +592,9 @@ export function MissionFormModal({
             method: method.trim(),
             completion_criteria: cleanCriteria.length ? cleanCriteria : undefined,
             post_actions: cleanPostActions.length ? cleanPostActions : undefined,
+            projects,
+            folder_scope: folderScope,
             workspace_folder: workspaceFolder.trim(),
-            repo_ref: repoRef,
             checkout_mode: checkoutMode,
             graph_enabled: graphEnabled,
             confirm_policy: confirmPolicy,
@@ -587,12 +657,29 @@ export function MissionFormModal({
           </div>
         )}
 
+        <MissionProjectsSection
+          projects={accountProjects}
+          loading={projectsLoading}
+          selected={projectDrafts}
+          onChange={setProjectDrafts}
+          folderScope={folderScope}
+          onFolderScopeChange={setFolderScope}
+          workspaceFolder={workspaceFolder}
+          onWorkspaceFolderChange={setWorkspaceFolder}
+          checkoutMode={checkoutMode}
+          onCheckoutModeChange={setCheckoutMode}
+        />
+
         {selectedTeam && (
           <MissionRosterAdjust
             team={selectedTeam}
+            projects={accountProjects}
+            selectedProjects={projectDrafts}
+            coverage={coverageSlots}
+            onSetFolder={(project, hostId) => setFolderTarget({ project, hostId })}
             excludedIds={excludedIds}
-            onToggleExclude={(agentId, exclude) =>
-              setExcludedIds((prev) => (exclude ? [...prev, agentId] : prev.filter((id) => id !== agentId)))
+            onToggleExclude={(memberId, exclude) =>
+              setExcludedIds((prev) => (exclude ? [...prev, memberId] : prev.filter((id) => id !== memberId)))
             }
             extraMembers={extraMembers}
             onRemoveExtra={(idx) => setExtraMembers((prev) => prev.filter((_, i) => i !== idx))}
@@ -610,7 +697,6 @@ export function MissionFormModal({
             hostsLoading={hostsLoading}
             credentials={credentials}
             backendProfiles={backendProfiles}
-            accountId={accountId}
             adHocDraft={adHocDraft}
             onAdHocDraftChange={setAdHocDraft}
             adHocRole={adHocRole}
@@ -680,7 +766,7 @@ export function MissionFormModal({
             padding: 0,
           }}
         >
-          {showAdvanced ? '▾' : '▸'} Advanced — execution contract & working folder
+          {showAdvanced ? '▾' : '▸'} Advanced — execution contract
         </button>
 
         {showAdvanced && (
@@ -855,37 +941,6 @@ export function MissionFormModal({
                 </Button>
               </div>
             </div>
-            <div>
-              <Input
-                label="Account folder root (optional)"
-                value={workspaceFolder}
-                onChange={(e) => setWorkspaceFolder(e.target.value)}
-                placeholder=".awb/orch/<mission id> (default)"
-              />
-              <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
-                working_dir-relative root every step's isolated folder nests under. Default: .awb/orch/&lt;mission id&gt;.
-              </span>
-            </div>
-            <Select
-              label="Checkout mode"
-              options={[
-                { value: 'reuse', label: 'Reuse — fetch + fast-forward before each step' },
-                { value: 'fresh', label: 'Fresh — wipe + re-checkout before each step' },
-              ]}
-              value={checkoutMode}
-              onChange={(e) => setCheckoutMode(e.target.value as 'reuse' | 'fresh')}
-            />
-            <div>
-              <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
-                Project — the repository checked out for every step. Each step&apos;s work order also tells
-                the member where this project&apos;s main clone folder is on its host.
-              </span>
-              {/* Action/QA/Security 편집 폼과 같은 피커를 쓴다(티켓 eb9cdd1c) — 검색형
-                  프로젝트 드롭다운 + 브랜치 드롭다운, 목록에 없는 id 보존, 조회 실패 시
-                  수동 입력 폴백까지 그대로 승계한다. 여기만 별도 입력을 두면 같은
-                  화면이 또 갈라진다. */}
-              <RepoRefPicker accountId={accountId} state={repoRefState} onChange={patchRepoRef} />
-            </div>
           </div>
         )}
 
@@ -895,8 +950,207 @@ export function MissionFormModal({
             Brief the orchestrator immediately
           </label>
         )}
+        {!mission && startNow && startProblems.length > 0 && (
+          <div data-testid="mission-start-problems" style={{ fontSize: 11, color: tokens.colors.warningLight, lineHeight: 1.5 }}>
+            {startProblems.map((p) => <div key={p}>{p}</div>)}
+          </div>
+        )}
       </div>
+      <DirectoryPicker
+        isOpen={!!folderTarget}
+        onClose={() => setFolderTarget(null)}
+        managerAgentId={folderTarget?.hostId ?? ''}
+        onPick={(path) => void registerFolder(path)}
+      />
     </Modal>
+  );
+}
+
+/**
+ * 미션이 다루는 project 들과 폴더 범위.
+ *
+ * 팀은 폴더를 모른다 — 여러 미션에 재사용되기 때문이다. 대신 미션이 project 를 고르고,
+ * 멤버는 각 project 의 **자기 Host** 폴더(Projects → host folders)에서 일한다. 첫 project 가
+ * primary 다(오케스트레이터는 자기 Host 에 폴더가 있는 첫 project 에서 돈다).
+ */
+function MissionProjectsSection({
+  projects,
+  loading,
+  selected,
+  onChange,
+  folderScope,
+  onFolderScopeChange,
+  workspaceFolder,
+  onWorkspaceFolderChange,
+  checkoutMode,
+  onCheckoutModeChange,
+}: {
+  projects: Project[];
+  loading: boolean;
+  selected: MissionProjectDraft[];
+  onChange(next: MissionProjectDraft[]): void;
+  folderScope: OrchestrationFolderScope;
+  onFolderScopeChange(next: OrchestrationFolderScope): void;
+  workspaceFolder: string;
+  onWorkspaceFolderChange(next: string): void;
+  checkoutMode: 'reuse' | 'fresh';
+  onCheckoutModeChange(next: 'reuse' | 'fresh'): void;
+}) {
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const addable = projects.filter((p) => !selected.some((s) => s.project_id === p.id));
+  return (
+    <div
+      data-testid="mission-projects"
+      style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}
+    >
+      <div>
+        <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}>Projects</span>
+        <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.4 }}>
+          Where this mission works. Each member works in a project&apos;s folder on its own host; the orchestrator
+          assigns every step to one project. The first one is the primary.
+        </span>
+      </div>
+      {selected.length === 0 && (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+          {loading ? 'Loading projects…' : projects.length === 0
+            ? 'This account has no projects yet — create one on the Projects page first.'
+            : 'No project selected.'}
+        </div>
+      )}
+      {selected.map((p, i) => {
+        const project = byId.get(p.project_id);
+        return (
+          <div key={p.project_id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block', color: tokens.colors.textStrong }}>
+                {project?.name ?? p.project_id}
+                {i === 0 && <span style={{ color: tokens.colors.textMuted }}> · primary</span>}
+              </span>
+              {project?.repo_url && (
+                <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>{project.repo_url}</span>
+              )}
+            </span>
+            <input
+              aria-label={`Branch for ${project?.name ?? p.project_id}`}
+              value={p.branch}
+              placeholder={project?.default_branch ? `branch (${project.default_branch})` : 'branch (default)'}
+              onChange={(e) => onChange(selected.map((x) => (x.project_id === p.project_id ? { ...x, branch: e.target.value } : x)))}
+              style={{ width: 150, padding: '6px 8px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+            />
+            {i > 0 && (
+              <Button variant="ghost" size="sm" onClick={() => onChange(makePrimaryProject(selected, p.project_id))}>
+                Make primary
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" onClick={() => onChange(selected.filter((x) => x.project_id !== p.project_id))}>
+              Remove
+            </Button>
+          </div>
+        );
+      })}
+      {addable.length > 0 && (
+        <Select
+          aria-label="Add a project"
+          value=""
+          options={[
+            { value: '', label: selected.length ? '+ Add another project' : 'Select a project' },
+            ...addable.map((p) => ({ value: p.id, label: p.repo_url ? `${p.name} · ${p.repo_url}` : p.name })),
+          ]}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange(addMissionProject(selected, e.target.value))}
+        />
+      )}
+      <Select
+        label="Folders"
+        value={folderScope}
+        options={[
+          { value: 'shared', label: 'Shared — steps run directly in the project folder' },
+          { value: 'isolated', label: 'Isolated — each step gets its own checkout' },
+        ]}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onFolderScopeChange(e.target.value as OrchestrationFolderScope)}
+      />
+      {folderScope === 'shared' ? (
+        <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
+          Members on one host share the project&apos;s checkout and can hand files to each other. Nothing is cloned
+          or wiped — the folder must already hold the checkout. Another shared mission already working in the same
+          folder blocks this one from starting.
+        </span>
+      ) : (
+        <>
+          <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
+            Each step gets a fresh <code>.awb/orch/&lt;mission&gt;/&lt;step&gt;</code> checkout of its project under the
+            project folder. Steps cannot see each other&apos;s files — results travel through reports and artifacts.
+          </span>
+          <Input
+            label="Checkout root (optional)"
+            value={workspaceFolder}
+            onChange={(e) => onWorkspaceFolderChange(e.target.value)}
+            placeholder=".awb/orch/<mission id> (default)"
+          />
+          <Select
+            label="Checkout mode"
+            options={[
+              { value: 'reuse', label: 'Reuse — fetch + fast-forward before each step' },
+              { value: 'fresh', label: 'Fresh — wipe + re-checkout before each step' },
+            ]}
+            value={checkoutMode}
+            onChange={(e) => onCheckoutModeChange(e.target.value as 'reuse' | 'fresh')}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 한 슬롯이 고른 project 들 중 무엇을 맡을 수 있는가 — 그 Host 에 폴더가 있으면 그 경로를,
+ * 없으면 그 자리에서 등록하는 버튼을 보여 준다. 등록은 그 Host 의 모든 멤버에게 함께 적용된다.
+ */
+function SlotProjectFolders({
+  projects,
+  selectedProjects,
+  slot,
+  onSetFolder,
+}: {
+  projects: Project[];
+  selectedProjects: MissionProjectDraft[];
+  slot: CoverageSlot;
+  onSetFolder(project: Project, hostId: string): void;
+}) {
+  if (selectedProjects.length === 0) return null;
+  const coverage = slotCoverage(projects, selectedProjects, slot);
+  return (
+    <span style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
+      {coverage.folders.map((f) => {
+        const project = projects.find((p) => p.id === f.project_id);
+        const name = project?.name ?? f.project_id;
+        return f.folder ? (
+          <span key={f.project_id} style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+            ✓ {name} — <code style={{ fontSize: 10 }}>{f.folder}</code>
+          </span>
+        ) : (
+          <span key={f.project_id} style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'flex', alignItems: 'center', gap: 6 }}>
+            ✗ {name} — no folder on this host
+            {project && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSetFolder(project, slot.host_ids[0]);
+                }}
+                style={{ border: 'none', background: 'transparent', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 11, padding: 0, fontFamily: 'inherit' }}
+              >
+                Set folder…
+              </button>
+            )}
+          </span>
+        );
+      })}
+      {!coverage.workable && (
+        <span style={{ fontSize: 11, color: tokens.colors.warningLight }}>
+          Cannot work on any selected project — set a folder, or leave this member out.
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -906,9 +1160,14 @@ export function MissionFormModal({
  * 새 팀을 만들지 않고 usage limit 에 걸린 모델 슬롯을 빼거나 임시 멤버를 얹는
  * 입구다. 팀 로스터 자체는 건드리지 않으므로 다음 미션에 영향을 주지 않는다.
  * 체크 해제 = 이번 미션에서 제외, 임시 멤버 = 팀에 없는 슬롯을 이번에만 추가.
+ * 멤버마다 고른 project 의 폴더가 그 Host 에 있는지 함께 보여 준다.
  */
 function MissionRosterAdjust({
   team,
+  projects,
+  selectedProjects,
+  coverage,
+  onSetFolder,
   excludedIds,
   onToggleExclude,
   extraMembers,
@@ -919,7 +1178,6 @@ function MissionRosterAdjust({
   hostsLoading,
   credentials,
   backendProfiles,
-  accountId,
   adHocDraft,
   onAdHocDraftChange,
   adHocRole,
@@ -931,8 +1189,12 @@ function MissionRosterAdjust({
   onAddAdHoc,
 }: {
   team: OrchestrationTeam;
+  projects: Project[];
+  selectedProjects: MissionProjectDraft[];
+  coverage: { orchestrator: CoverageSlot | null; members: CoverageSlot[] };
+  onSetFolder(project: Project, hostId: string): void;
   excludedIds: string[];
-  onToggleExclude(agentId: string, exclude: boolean): void;
+  onToggleExclude(memberId: string, exclude: boolean): void;
   extraMembers: OrchestrationMissionExtraMemberInput[];
   onRemoveExtra(idx: number): void;
   showAdHocForm: boolean;
@@ -941,7 +1203,6 @@ function MissionRosterAdjust({
   hostsLoading: boolean;
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
-  accountId: string;
   adHocDraft: SlotDraft;
   onAdHocDraftChange(next: SlotDraft): void;
   adHocRole: string;
@@ -952,8 +1213,9 @@ function MissionRosterAdjust({
   onAdHocMaxConcurrentChange(v: number): void;
   onAddAdHoc(): void;
 }) {
-  const included = team.members.filter((m) => !excludedIds.includes(m.agent_id));
+  const included = team.members.filter((m) => !excludedIds.includes(m.id));
   const adHocProblem = showAdHocForm ? slotDraftProblem(adHocDraft) : null;
+  const slotFor = (key: string) => coverage.members.find((c) => c.key === key) ?? null;
   return (
     <div
       style={{
@@ -974,18 +1236,27 @@ function MissionRosterAdjust({
           The team itself is unchanged — the next mission still sees everybody.
         </span>
       </div>
+      {coverage.orchestrator && (
+        <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
+          <span style={{ display: 'block', color: tokens.colors.textStrong }}>
+            {coverage.orchestrator.label} <span style={{ color: tokens.colors.textMuted }}>· orchestrator</span>
+          </span>
+          <SlotProjectFolders projects={projects} selectedProjects={selectedProjects} slot={coverage.orchestrator} onSetFolder={onSetFolder} />
+        </div>
+      )}
       {team.members.length === 0 && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
           No team members to choose from.
         </div>
       )}
       {team.members.map((m) => {
-        const excluded = excludedIds.includes(m.agent_id);
+        const excluded = excludedIds.includes(m.id);
         const rt = m.runtime;
         const detail = [
           m.role_label || rt?.cli || m.agent_type,
           rt?.model || '',
         ].filter(Boolean).join(' · ');
+        const slot = slotFor(m.id);
         return (
           <label
             key={m.id}
@@ -1002,7 +1273,7 @@ function MissionRosterAdjust({
             <input
               type="checkbox"
               checked={!excluded}
-              onChange={(e) => onToggleExclude(m.agent_id, !e.target.checked)}
+              onChange={(e) => onToggleExclude(m.id, !e.target.checked)}
               style={{ marginTop: 2 }}
             />
             <span style={{ minWidth: 0 }}>
@@ -1013,6 +1284,9 @@ function MissionRosterAdjust({
               {detail && (
                 <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>{detail}</span>
               )}
+              {!excluded && slot && (
+                <SlotProjectFolders projects={projects} selectedProjects={selectedProjects} slot={slot} onSetFolder={onSetFolder} />
+              )}
             </span>
           </label>
         );
@@ -1022,33 +1296,39 @@ function MissionRosterAdjust({
           <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textStrong }}>
             Ad-hoc members for this mission ({extraMembers.length})
           </span>
-          {extraMembers.map((e, i) => (
-            <div
-              key={i}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                fontSize: 12,
-                color: tokens.colors.textSecondary,
-                border: `1px dashed ${tokens.colors.border}`,
-                borderRadius: 6,
-                padding: '6px 8px',
-              }}
-            >
-              <span style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: 'block', color: tokens.colors.textStrong }}>
-                  {e.role_label || e.runtime.cli}{e.runtime.model ? ` · ${e.runtime.model}` : ''}
+          {extraMembers.map((e, i) => {
+            const slot = slotFor(`extra:${i}`);
+            return (
+              <div
+                key={i}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 12,
+                  color: tokens.colors.textSecondary,
+                  border: `1px dashed ${tokens.colors.border}`,
+                  borderRadius: 6,
+                  padding: '6px 8px',
+                }}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block', color: tokens.colors.textStrong }}>
+                    {e.role_label || e.runtime.cli}{e.runtime.model ? ` · ${e.runtime.model}` : ''}
+                  </span>
+                  <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>
+                    {e.runtime.cli} · {hosts.find((h) => h.manager_agent_id === e.runtime.manager_agent_id)?.manager_name ?? e.runtime.manager_agent_id}
+                  </span>
+                  {slot && (
+                    <SlotProjectFolders projects={projects} selectedProjects={selectedProjects} slot={slot} onSetFolder={onSetFolder} />
+                  )}
                 </span>
-                <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>
-                  {e.runtime.cli} · {e.runtime.working_dir}
-                </span>
-              </span>
-              <Button variant="ghost" size="sm" onClick={() => onRemoveExtra(i)}>
-                Remove
-              </Button>
-            </div>
-          ))}
+                <Button variant="ghost" size="sm" onClick={() => onRemoveExtra(i)}>
+                  Remove
+                </Button>
+              </div>
+            );
+          })}
         </div>
       )}
       {!showAdHocForm ? (
@@ -1086,18 +1366,11 @@ function MissionRosterAdjust({
             <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading Runtime Hosts…</div>
           ) : (
             <TeamSlotRuntimeFields
-              accountId={accountId}
               value={adHocDraft}
               onChange={onAdHocDraftChange}
               hosts={hosts}
               credentials={credentials}
               backendProfiles={backendProfiles}
-              neighbours={team.members.map((m) => ({
-                label: m.agent_name,
-                manager_agent_id: m.runtime?.manager_agent_id ?? '',
-                working_dir: m.runtime?.working_dir ?? '',
-                folder_scope: m.runtime?.folder_scope ?? 'shared',
-              }))}
             />
           )}
           <div style={{ display: 'flex', gap: 8 }}>

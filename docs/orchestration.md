@@ -24,11 +24,12 @@ Account는 membership·credential·정책·예산의 경계다. 계정 소유 Te
 
 | 개념 | 설명 |
 | --- | --- |
-| **Team** | 로스터. **오케스트레이터 1명 필수** + 멤버 N명. |
-| **Slot** | 로스터의 한 자리(오케스트레이터 또는 멤버). **Runtime Host + CLI + model + working folder** 로 선언하며 실행 identity는 spec에서 계산한다. Agent 행을 만들지 않는다. |
+| **Team** | 재사용하는 로스터. **오케스트레이터 1명 필수** + 멤버 N명. 폴더를 모른다. |
+| **Slot** | 로스터의 한 자리(오케스트레이터 또는 멤버). **Runtime Host + CLI + model** (+ credential·backend·runtime_config) 으로 선언한다. 폴더가 없으므로 그 자체로는 실행 identity 가 아니다. Agent 행을 만들지 않는다. |
 | **Member** | 팀원 slot. `capabilities` 문구가 오케스트레이터의 배정 판단에 그대로 쓰인다. |
-| **Mission** | 팀에 맡기는 업무 한 건. objective / context / acceptance_criteria 로 기술. |
-| **Step** | 오케스트레이터가 만든 계획의 노드. `depends_on` 으로 DAG 를 이룬다. |
+| **Mission** | 팀에 맡기는 업무 한 건. objective / context / acceptance_criteria 로 기술하고, 작업할 **project 들**을 고른다. |
+| **Runtime** | 미션 시작 때 정해지는 (slot, project) 한 쌍: slot 의 CLI 가 그 project 의 **slot Host 폴더**에서 도는 것. 실행 identity 는 여기서 계산한다. |
+| **Step** | 오케스트레이터가 만든 계획의 노드. slot + project 로 배정되고, `depends_on` 으로 DAG 를 이룬다. |
 | **Timeline** | Mission 안에서 일어난 모든 일의 append-only 기록 (UI 관찰 표면). |
 
 ---
@@ -42,41 +43,85 @@ Account는 membership·credential·정책·예산의 경계다. 계정 소유 Te
 | `manager_agent_id` | 이 slot 이 도는 Runtime Host(페어링된 agent-manager 장비). |
 | `cli` | 그 장비에 설치된 CLI (`claude`/`codex`/`hermes`/…). `custom` 은 매니저가 자동 spawn 하지 못하므로 제외. |
 | `model` | 그 CLI 에 넘길 모델. 비우면 CLI 기본값. 후보는 `HostModelsService` → `useHostModels()` 한 경로로 읽는다(라이브 ACP → 영속 ACP → 하트비트 중 첫 비어 있지 않은 출처). |
-| `working_dir` | 그 장비의 **절대 경로**. 매니저는 working_dir 없이는 spawn 을 거부한다. |
-| `folder_scope` | `shared`(기본) / `isolated`. 아래 참고. |
 | `credential_id` · `cli_runtime_profile` · `runtime_config` | 선택 — 공통 `RuntimeSelectionFields`에서 지정하는 credential, backend, 실행 전략/권한 설정. |
 
-각 slot 은 **runtime identity key**(`runtimeIdentityKey(spec)`,
-`common/runtime-spec.ts`) 로 주소가 정해진다 — Agent 행을 만들지 않는다.
-dispatch 는 그 키를 레지스트리 튜플 매칭으로 해소하고, 없으면 첫 디스패치 때
-매니저가 runtime 키 + cli-home 을 self-heal 로 발급한다(P4c-2a). 같은 spec 은
-같은 키이므로, 폴더를 공유하는 두 멤버는 **서로 다른 slot 행 + 같은 실행 위치**
-가 아니라 **같은 identity** 로 합쳐진다 — 한 트리를 공유하는 협업이 기본값이다.
+**slot 에는 폴더가 없다**(`TeamSlotSpec`, `common/orchestration-member-spec.ts`). 팀은 여러
+미션에 재사용되고 미션마다 다루는 저장소가 다르므로, "어디서 일하는가" 는 미션이 고른
+project 들이 정한다 — 아래 "미션 프로젝트". 예전처럼 slot 이 폴더를 들고 있으면 팀이
+저장소 하나에 묶이고, step 의 project 폴더가 slot 폴더와 다를 때 work order 가 "main clone
+은 지금 작업폴더가 아니다" 를 해명해야 했다. 이전 빌드가 저장한 slot 의 `working_dir` /
+`folder_scope` 키는 읽을 때 무시되고 다음 저장 때 사라진다.
 
-현재 키는 `lower(cli) + working_dir + credential_id`를 해시한 `rt-<hex16>`이다.
-model·label·Host id는 해시 입력이 아니다. 실행할 장비는 spec의
-`manager_agent_id`로 별도 해소한다. Host만 바꿨다고 키가 바뀐다고 가정하지 말 것.
-정확한 계약은 server·manager의 `runtimeIdentityKey()`이며 양쪽을 함께 유지한다.
+### runtime — slot 을 project 폴더에 놓는다
+
+미션을 시작하면 엔진이 effective roster(팀 멤버 − 이번 미션 제외 + 임시 멤버)의 slot 마다,
+미션 project 중 **그 slot Host 에 폴더가 등록된** project 각각에 대해 runtime 을 만든다:
+
+- 실행 spec = slot + `working_dir`(그 project 의 그 Host 폴더) + `folder_scope`(미션 설정)
+- 실행 identity = `runtimeIdentityKey(실행 spec)` — `lower(cli) + working_dir + credential_id`
+  해시 `rt-<hex16>`. model·label·Host id는 해시 입력이 아니다(정확한 계약은 server·manager의
+  `runtimeIdentityKey()`이며 양쪽을 함께 유지한다).
+- 오케스트레이터는 자기 Host 에 폴더가 있는 **첫** project(목록 순서, 첫 항목이 primary)에서 돈다.
+
+결과는 `OrchestrationMission.runtime_roster` 에 **고정**된다(`orchestration-roster.ts`).
+브리핑의 로스터, 계획·재배정 검증, slot 별 동시성 상한, runtime 준비(credential), 디스패치,
+매니저의 credential 조회(`slot-credential-resolver.ts`)가 전부 이 스냅샷을 읽는다 —
+오케스트레이터가 브리핑받은 로스터와 서버가 허용하는 배정이 갈리지 않고, 실행 중 팀을
+고쳐도 이 미션이 쓰는 runtime 은 바뀌지 않는다. 팀 편집은 다음 미션과 **다시 열기**(멤버를
+지금의 팀으로 다시 계산한다)가 반영한다. 그래서 slot 편집은 어느 Host 에도 명령을 보내지
+않는다.
+
+시작을 막는 경우(409 + 무엇을 고칠지):
+
+- project 가 하나도 없다.
+- 오케스트레이터나 참여 멤버의 Host 에 미션 project 중 어느 것의 폴더도 없다 — Projects →
+  그 project → host folders 에 그 장비의 main clone 을 등록하거나, 그 멤버를 이번 미션에서 뺀다.
+- `shared` 미션인데 다른 진행 중(planning/running/paused) `shared` 미션의 멤버가 같은 Host·같은
+  폴더에서 일하고 있다 — 아래 folder_scope.
+
+### step 배정은 slot + project 로
+
+identity 는 폴더에서 나오므로, 모델만 다른 두 slot(예: 같은 장비의 Opus 리뷰어 + Sonnet
+구현자)은 같은 project 폴더에서 **같은 identity** 다 — 같은 CLI 로그인이 같은 트리에서 도는
+것이니 실행 면에서는 맞다(모델은 매 디스패치의 spec 이 싣는다). 그러나 로스터에서는 서로 다른
+일꾼이라 오케스트레이터가 골라 쓸 수 있어야 한다. 그래서 step 은 identity 가 아니라
+**slot**(`assignee`, 브리핑의 `slot:` 값 = 팀 멤버 행 id 또는 임시 멤버의 `slot_id`)과
+**project**(`project`, id 또는 정확한 이름)로 배정한다:
+
+- project 를 생략하면 그 slot 이 맡을 수 있는 project 가 하나일 때만 그것으로 정한다(project
+  하나짜리 미션은 항상 그렇다). 여럿이면 400 으로 project 를 요구한다.
+- slot Host 에 폴더가 없는 project 를 지정하면 400 — 그 slot 이 맡을 수 있는 project 를 함께 알린다.
+- step 에는 `assignee_slot`, `project_id`, `assignee_agent_id`(실행 identity — 보고 MCP 인증, step
+  방 참여자, `list_my_orchestration_steps`), `assignee_spec`(실행 spec — 디스패치가 이것으로 스폰한다)이
+  남는다. 동시성 상한(`max_concurrent`)도 slot 단위다.
+- 구 계약의 `assignee_agent_id` 는 별칭으로 받는다: slot id 이거나, 이 로스터의 slot 하나에만
+  대응하는 실행 identity 일 때.
+- `runtime_roster` 가 없는 옛 미션(이 기능 이전에 시작)은 새 배정을 할 수 없다(기존 step 의 retry 는
+  그 step 의 스냅샷으로 돈다).
 
 Agent 테이블과 Agent CRUD/목록 화면은 제거됐다. Runtime Host는 `/hosts`, 실행
 선언은 팀 slot/티켓 assignee/채팅·자동화의 inline RuntimeSpec에서 관리한다.
 Agent 템플릿은 선택한 설정을 복사하는 편의 기능이고 실행 identity가 아니다.
 실행 이력의 `*_agent_id` 필드에는 계산된 runtime key가 남을 수 있지만 이를
-Agent 행이나 템플릿 id로 조회하지 않는다.
+Agent 행이나 템플릿 id로 조회하지 않는다. MCP 의 "내가 속한 팀"(`list_orchestration_teams`,
+`create_orchestration_mission` 의 오케스트레이터 확인)은 호출자 identity 가 그 팀 slot 을 어떤
+project 폴더에 놓았을 때의 identity 와 같은지로 계산한다(`orchestration-slot-identities.ts`).
 
 ### folder_scope — 폴더를 공유한다는 것
 
+미션 단위 설정이다(`OrchestrationMission.folder_scope`, draft 에서만 편집 — 브리핑 계약).
+
 | 값 | step 의 cwd | RunProvision | 쓰임새 |
 | --- | --- | --- | --- |
-| `shared`(기본) | `working_dir` **그 자체** | **보내지 않음** | 같은 Host·같은 폴더를 가리키는 slot 끼리 한 트리를 공유한다. 파일로 일을 주고받고, 체크아웃/빌드 산출물을 함께 쓴다. |
-| `isolated` | `<working_dir>/.awb/orch/<mission>/<step_key>` | 보냄(+ 미션 repo 체크아웃) | 이 기능 이전 동작. 같은 repo 에 충돌하는 빌드를 부채살로 펼칠 때. |
+| `shared`(기본) | step project 의 그 Host 폴더 **그 자체** | **보내지 않음** | 같은 Host 에서 같은 project 를 맡은 slot 끼리 한 트리를 공유한다. 파일로 일을 주고받고, 체크아웃/빌드 산출물을 함께 쓴다. |
+| `isolated` | `<project 폴더>/.awb/orch/<mission>/<step_key>` | 보냄(+ 그 step 의 project 체크아웃) | 같은 repo 에 충돌하는 빌드를 부채살로 펼칠 때. |
 
 `shared` 가 RunProvision 을 **아예 보내지 않는** 것이 핵심이다. provision 은
 `checkout_mode:'fresh'` 에서 대상 폴더를 `rm -rf` 하므로, 그 대상이 운영자의 실제
-작업폴더가 되는 순간 복구 불가능한 파괴가 된다. 따라서 `shared` slot 은 미션의
-`repo_ref`/`checkout_mode` 를 **무시하며**(step 프롬프트가 이를 명시한다) 공유 폴더의
-체크아웃 준비는 운영자의 몫이다 — 애초에 "이미 준비된 트리를 공유한다"가 `shared` 를
-고르는 이유다.
+체크아웃이 되는 순간 복구 불가능한 파괴가 된다. 따라서 `shared` 미션은 `checkout_mode` 를
+**무시하며**(step 프롬프트가 이를 명시한다) project 폴더의 체크아웃 준비는 운영자의 몫이다 —
+등록된 폴더에 실제 체크아웃이 있어야 한다(티켓 dispatch 와 달리 미션은 폴더를 clone 하지
+않는다).
 
 대가도 실재한다: 동시에 도는 두 step 이 한 working tree 를 공유하므로 서로의 파일을
 덮어쓸 수 있다. 그래서 (1) 플래닝 브리핑의 로스터가 어느 멤버끼리 폴더를 공유하는지
@@ -84,38 +129,46 @@ Agent 행이나 템플릿 id로 조회하지 않는다.
 공유 사실과 금지 행위(트리 리셋·브랜치 전환·`git clean -fdx`)를 알린다. 파괴적 동시
 편집을 하는 멤버는 `max_concurrent: 1` 로 두는 것이 안전하다.
 
+팀이 재사용되면 같은 project 에 미션이 여럿 생길 수 있다. `shared` 미션 둘이 같은 Host 의
+같은 폴더에서 동시에 일하면 서로의 작업을 덮어쓰고 브랜치를 두고 다투므로, 시작·다시 열기가
+다른 진행 중 `shared` 미션과 **멤버** runtime 의 (Host, 폴더)가 겹치면 409 로 거부한다
+(`sharedFolderConflict`). 오케스트레이터는 계획·검토만 하므로 겹침 판정에서 빠지고, `isolated`
+미션은 겹치지 않는다(step 마다 자기 체크아웃).
+
 Mission 은 **티켓이 아니다.** 티켓 수명주기는 고정 status 와 담당자 한 명이 구동하지만
 Mission 은 런타임에 작성·수정되는 계획이 구동한다. 두 모델을 한 엔티티에 욱여넣으면
 "step 이 티켓 status 의 어디에 있는가" 같은 답 없는 질문이 생기므로 별도 테이블로 둔다.
 
 ### 미션 프로젝트 — 호스트마다 다른 main clone 폴더
 
-미션은 `repo_ref`(`{ project_id?, url?, branch? }`,
-`common/workspace-folder-options.ts`)로 작업할 **Project** 를 가리킨다. 이관 전
-레코드의 `resource_id` 는 같은 id 의 `project_id` 로 읽힌다(repository Resource 가
-같은 id 로 Project 가 됐다). branch 는 `repo_ref.branch` → Project 의
-`default_branch` → 원격 HEAD 순.
+미션은 `projects`(`[{ project_id, branch? }]`, 첫 항목이 primary, 최대 10개)로 작업할
+**Project** 들을 고른다. project 는 미션 계정 소유여야 한다(계정 소유 팀이면 그 팀의 계정,
+글로벌 팀이면 primary project 의 계정에 미션이 귀속된다). branch 는 항목의 `branch` →
+Project 의 `default_branch` → 원격 HEAD 순. 이전의 단일 `repo_ref` 는 `projects` 가 없는
+옛 행을 읽거나 옛 호출자가 보낼 때 한 항목짜리 목록으로 해석되는 별칭일 뿐이다(project 없는
+raw URL 은 400 — 폴더가 없으므로 일할 곳이 없다).
 
 Project 는 Runtime Host 마다 자기 **main clone 폴더**(`ProjectHostFolder`)를 갖고, 그
 경로는 장비마다 다르다. 그래서 프롬프트는 읽는 쪽이 실제로 도는 Host 기준으로 폴더를
-적는다(`orchestration-project.ts` → `loadMissionProject()` / `projectFolderForHost()`,
+적는다(`orchestration-project.ts` → `loadMissionProjects()` / `projectFolderForHost()`,
 렌더는 `orchestration-prompt.ts`):
 
-- **플래닝 브리핑**: 로스터의 멤버마다 `project main clone on this host` 줄로 그 멤버
-  Host 의 폴더를 적고(없으면 "none registered — 다른 Host 의 경로를 주지 말 것"),
-  오케스트레이터 자신의 Host 폴더도 따로 적는다. step 지시문에는 다른 멤버 Host 의
+- **플래닝 브리핑**: 모든 project(id·저장소·branch·instructions)와 오케스트레이터 자신이 도는
+  폴더를 적고, 로스터의 멤버마다 `can work on **<project>** (<id>) — its folder on this host`
+  줄로 그 멤버가 맡을 수 있는 project 와 그 Host 폴더를 적는다. 여러 project 에 걸친 일은
+  project 마다 step 을 나누고 `depends_on` 으로 순서를 잡으라고, step 지시문에는 다른 멤버 Host 의
   절대 경로 대신 project 루트 기준 상대 경로를 쓰라고 지시한다.
-- **step work order**: `Project: <name>` 블록이 그 멤버 Host 의 main clone 폴더를
-  "이 장비의 정식 체크아웃"으로 명시하고, 그 폴더가 지금 작업폴더(shared)와 같은지,
-  isolated step 의 체크아웃과 어떤 관계인지, 그 안에서 reset/clean/브랜치 전환을 하지
-  말라는 것까지 적는다. 폴더가 등록되지 않은 Host 면 "추측하지 말고 다른 Host 경로를
-  쓰지 말라"고 적는다.
-- **팀 slot 편집기**: working_dir 옆에 "Project folder on this host"
-  (`ProjectFolderHelper`)를 띄워, 그 Host 에 등록된 project 폴더를 slot 의
-  working_dir 로 바로 고를 수 있다.
+- **step work order**: `Project: <name>` 블록이 그 step 의 project 와 그 멤버 Host 의 폴더를
+  "이 장비의 정식 체크아웃"으로 명시하고(shared 면 지금 작업폴더 그 자체), isolated step 이면
+  자기 체크아웃에서 일하되 main clone 에서 reset/clean/브랜치 전환을 하지 말라고 적는다.
+- **미션 폼**: project 를 고르면 멤버(·오케스트레이터·임시 멤버)마다 고른 project 의 폴더가 그
+  Host 에 있는지(`✓ 경로` / `✗ no folder on this host`)를 보여 주고, 없으면 그 자리에서 폴더를
+  등록한다(`Set folder…` → Host 디렉터리 선택 → `PUT /api/projects/:id/host-folders/:hostId`).
+  어떤 project 도 맡을 수 없는 참여 멤버가 있으면 "생성 후 바로 시작" 을 막는다(서버의 시작
+  거부와 같은 규칙 — `missionProjects.logic.ts`).
 
 따라서 서로 다른 Host 의 멤버가 폴더를 추측할 일이 없다. 폴더 등록은 Projects 화면
-(`PUT /api/projects/:id/host-folders/:hostId`)에서 한다.
+(`PUT /api/projects/:id/host-folders/:hostId`)이나 미션 폼에서 한다.
 
 ---
 
@@ -128,11 +181,13 @@ usage limit 에 걸린 모델 슬롯이 있어도 새 팀을 만들지 않고 �
 - **제외**: 체크를 해제하면 그 멤버는 이번 미션의 effective roster 에서 빠진다.
   팀 로스터 자체는 그대로이므로 다음 미션에는 다시 나온다.
 - **임시 추가**: 팀에 없는 슬롯을 이번 미션에만 얹는다(팀 슬롯과 같은
-  Runtime Host / CLI / model / working folder 선언 + 역할·역량). 팀 로스터에
-  기록되지 않아 다음 미션에 영향을 주지 않는다.
+  Runtime Host / CLI / model 선언 + 역할·역량, 폴더 없음 — 팀 멤버처럼 미션 project
+  폴더에서 일한다). 저장 때 로스터 주소 `slot_id` 를 발급한다. 팀 로스터에 기록되지 않아
+  다음 미션에 영향을 주지 않는다.
 
-서버는 팀 로스터가 아니라 effective roster 로 브리핑·계획 검증·재배정 검증·
-디스패치를 수행하므로, 오케스트레이터가 볼 수 있는 assignee 와 서버가 허용하는
+제외는 팀 멤버 **행 id** 로 지정한다(같은 spec 의 두 슬롯도 따로 뺄 수 있다). 서버는 팀
+로스터가 아니라 effective roster 로 `runtime_roster` 를 만들고, 그것으로 브리핑·계획 검증·
+재배정 검증·디스패치를 수행하므로, 오케스트레이터가 볼 수 있는 assignee 와 서버가 허용하는
 assignee 가 갈리지 않는다. 조정은 **draft 에서만** 바꿀 수 있다 — 브리핑이 나간
 뒤 바꾸면 오케스트레이터가 들은 로스터와 실제 검증 대상이 어긋나기 때문이다.
 미션 상세의 Brief 탭에 이번 미션의 조정 내역(제외·임시)이 표시되고, 시작 이벤트에
@@ -1025,12 +1080,12 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 > `agent_member_ids` 로 나간다. 다른 것은 `sender_id` 가 `system` 이냐 실제 사용자
 > UUID 냐뿐이라, agent-manager 디스패치 계약은 손대지 않았다.
 
-> **Agent 작업공간 (ticket 2dc3c62f):** step 디스패치는 QA/Action 런과 동일한
-> `run_provision` 힌트(`kind:'orchestration'`)를 실어 보낸다 — agent-manager 가
-> subagent 스폰 전에 `<working_dir>/.awb/orch/<mission-leaf>/<step_key>` 를
+> **Agent 작업공간 (ticket 2dc3c62f):** `isolated` 미션의 step 디스패치는 QA/Action 런과
+> 동일한 `run_provision` 힌트(`kind:'orchestration'`)를 실어 보낸다 — agent-manager 가
+> subagent 스폰 전에 `<project 폴더>/.awb/orch/<mission-leaf>/<step_key>` 를
 > 프로비저닝(clone/fetch+ff-pull 또는 폴더만 생성)하고 그 경로를 cwd 로 고정한다.
-> `OrchestrationMission.workspace_folder`(루트, 기본값 `<mission id 8자>`) /
-> `repo_ref`(`project_id` 우선, 위 "미션 프로젝트") / `checkout_mode` 로 제어한다.
+> `OrchestrationMission.workspace_folder`(루트, 기본값 `<mission id 8자>`) / 그 step 의
+> project(위 "미션 프로젝트") / `checkout_mode` 로 제어한다. `shared` 미션은 보내지 않는다.
 > `RunProvisionKind` 화이트리스트와 idle-sweep(`.awb/act`/`.awb/chat`와 동일한 정책)에 `'orchestration'` 이
 > 추가됐다. Mission 은 `method`(수행 방식), 구조화된 `completion_criteria`
 > 체크리스트(전원 met 이어야 `complete_orchestration_mission(status:"completed")`
@@ -1044,18 +1099,22 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 
 ## 실행 인증과 다시 열기
 
-미션 시작은 오케스트레이터와 실제 참여 멤버의 RuntimeSpec을 호스트에 준비시키고,
-각 명령의 성공 ack를 받은 뒤 브리핑을 보낸다(최대 30초). 호스트 오프라인,
-크리덴셜 적용 실패, ack 시간 초과는 시작 요청의 오류로 반환되며 미션은 draft에
-남는다. Runtime identity의 MCP 키는 `runtime-keys/provision`에서 발급하고,
-명시된 CLI credential을 읽거나 적용하지 못하면 다른 로그인으로 대체하지 않는다.
+미션 시작은 `runtime_roster` 의 모든 runtime(오케스트레이터 + 멤버 × project)을 호스트에
+준비시키고, 각 명령의 성공 ack를 받은 뒤 브리핑을 보낸다(최대 30초). 로스터는 준비 **전에**
+저장된다 — 매니저가 준비 중에 받아 가는 credential 을 서버가 이 로스터로 찾기 때문이다. 호스트
+오프라인, 크리덴셜 적용 실패, ack 시간 초과는 시작 요청의 오류로 반환되며 미션은 로스터 없이
+draft에 남는다. Runtime identity의 MCP 키는 `runtime-keys/provision`에서 발급하고, 명시된 CLI
+credential을 읽거나 적용하지 못하면 다른 로그인으로 대체하지 않는다.
 
-사람이 종료된 미션을 다시 열면 각 참여 identity에 `restart_agent`를 보내 기존
-chat/ticket/subagent 프로세스를 종료하고 크리덴셜을 다시 읽는다. 재시작 성공을
-확인한 뒤에만 미션을 running으로 바꾸고 오케스트레이터를 깨운다. 실패하면 기존
-종료 상태와 결과를 유지한다. 동일 identity를 공유하는 슬롯은 한 번만 재시작한다.
-오케스트레이터가 MCP로 직접 다시 여는 경우에는 호출 중인 자기 프로세스를 보존하고
-멤버만 재시작한다. 일시정지 후 Resume는 진행 중인 step을 유지하는 기존 동작이다.
+사람이 종료된 미션을 다시 열면 멤버를 **지금의 팀**으로 다시 계산해(종료 뒤 슬롯의 credential·
+모델을 고치고 다시 여는 것이 이 경로의 쓰임새다) 각 runtime 에 `restart_agent`를 보내 기존
+chat/ticket/subagent 프로세스를 종료하고 크리덴셜을 다시 읽는다. 오케스트레이터는 미션 방의
+참여자 그대로 둔다. 재시작 성공을 확인한 뒤에만 미션을 running으로 바꾸고 오케스트레이터를
+깨운다. 실패하면 이전 로스터와 기존 종료 상태·결과를 유지한다. 동일 identity를 공유하는 runtime
+은 한 번만 재시작한다. 오케스트레이터가 MCP로 직접 다시 여는 경우에는 호출 중인 자기 프로세스를
+보존하고 멤버만 재시작한다. 다시 연 뒤 step 을 `retry` 하면 그 step 의 runtime 을 새 로스터에서 다시
+읽는다. project 를 모르는 옛 미션(이 기능 이전)은 그 미션이 쓰던 실행 스냅샷(오케스트레이터 +
+step)만 다시 준비한다. 일시정지 후 Resume는 진행 중인 step을 유지하는 기존 동작이다.
 
 ## 안전장치
 
@@ -1105,9 +1164,10 @@ chat/ticket/subagent 프로세스를 종료하고 크리덴셜을 다시 읽는�
 | **Mission** | 사람(UI, `start:true` 로 즉시 브리핑) **또는** 그 Team 의 오케스트레이터 Agent 자신(`create_orchestration_mission` MCP 툴) | 사람이 이미 Team 을 만들며 권한을 승인해 둔 상태이므로, 오케스트레이터의 Mission 자기-생성은 새 자율성 표면이 아니라 **이미 승인된 권한의 반복 행사**다. |
 
 `create_orchestration_mission` 입력은 `team_id` / `title` / `objective` / `context?` /
-`acceptance_criteria?` / `max_steps?` / `max_parallel_steps?` / `step_timeout_minutes?` /
-`start?` 뿐이다. **`orchestrator_agent_id` · `members[]` · `team_name` 입력은 없다** —
-오케스트레이터는 팀에서 파생되고(호출자 자신만 가능), 로스터는 여전히 사람의 것이다.
+`acceptance_criteria?` / `projects?` / `folder_scope?` / `max_steps?` / `max_parallel_steps?` /
+`step_timeout_minutes?` / `start?` 등이다. **`orchestrator_agent_id` · `members[]` · `team_name`
+입력은 없다** — 오케스트레이터는 팀에서 파생되고(호출자 자신만 가능), 로스터는 여전히 사람의
+것이다. 시작까지 하려면 `projects` 가 필요하다(없으면 생성은 되고 `start_error` 로 이유가 온다).
 `list_orchestration_teams` / `list_orchestration_missions` 로 자기 소속 team_id·기존
 미션을 먼저 조회한다.
 
@@ -1116,7 +1176,7 @@ chat/ticket/subagent 프로세스를 종료하고 크리덴셜을 다시 읽는�
 
 | 가드 | 내용 |
 | --- | --- |
-| 소유권 | `team.orchestrator_agent_id` 가 호출자 자신이어야 함(null 팀 거부) |
+| 소유권 | 호출자가 그 팀의 오케스트레이터여야 함 — 호출자 identity 가 팀 오케스트레이터 slot 을 그 Host 의 어떤 project 폴더에 놓았을 때의 identity 와 같아야 한다(`orchestration-slot-identities.ts`). 생성된 draft 에는 호출자 identity 가 오케스트레이터로 찍혀 직접 닫을 수 있고, 시작하면 미션 project 폴더의 오케스트레이터 identity 로 바뀐다 |
 | 비활성 팀 | `team.enabled === 0` 이면 거부 |
 | 팀당 열린 미션 상한 | `OrchestrationTeam.max_open_missions`(기본 1) 초과 시 생성 대신 **409** — `existing_mission_id` / `existing_mission_status` / `open_step_count` 를 실어 반환한다. `status:"running"` 이면서 `open_step_count:0` 이면(전 step 종료 후 오케스트레이터가 `complete_orchestration_mission` 을 안 부른 상태) 409 메시지가 그 사실과 탈출 경로를 그대로 알려준다 — 이 상태는 `OrchestrationReaperService` 의 running-stall 분기가 최대 `ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS`(기본 20분) 후 재브리핑, 2회 무응답 후 `failed` 로 자동 승격해 슬롯을 회수하므로 수동 개입은 그전에 쓸 수 있는 지름길일 뿐이다. |
 | 재귀 차단 | 호출자가 어떤 미션에서든 `dispatched`/`running` step 을 보유 중이면 생성 거부(`listOpenStepsForAgent` 재사용) — orchestrator 가 자기 팀의 member 이기까지 한 것은 정상 패턴이라 막지 않는다(브리핑 재발행은 `startMission` 이 1회만 발행 + `updateMission` 이 `status≠draft` 이면 409 로 거부해 이미 구조적으로 불가능). |
@@ -1142,10 +1202,10 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 
 | 툴 | 용도 |
 | --- | --- |
-| `get_orchestration_mission` | 현재 계획·결과·타임라인·즉시 디스패치 가능 목록 |
-| `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다. 셋 다 없으면 **확정된 그래프를 보존**하고 새 step 만 고립 node 로 편입한다 — 버리려면 `reset_graph: true` |
+| `get_orchestration_mission` | 현재 계획·결과·타임라인·즉시 디스패치 가능 목록 + `projects` 와 `roster`(slot 마다 맡을 수 있는 project 와 그 Host 폴더 — 브리핑을 잃었을 때의 복구 경로) |
+| `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · step 은 `assignee`(slot id) + `project` 로 배정한다(위 "step 배정은 slot + project 로") · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다. 셋 다 없으면 **확정된 그래프를 보존**하고 새 step 만 고립 node 로 편입한다 — 버리려면 `reset_graph: true` |
 | `patch_orchestration_graph` | 실행 중인 그래프를 **부분** 수정 — 분기 열기/닫기, 의존 재배선, 반복 상한 조정, 폭주 loop 정지. plan 을 건드리지 않아 `plan_version` 을 소모하지 않는다 |
-| `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` / `set_retry_budget` — `max_attempts` 를 함께 보내면 예산이 바닥난 노드도 **같은 노드로** 다시 돈다 |
+| `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` / `set_retry_budget` — `max_attempts` 를 함께 보내면 예산이 바닥난 노드도 **같은 노드로** 다시 돈다 · 재배정은 `assignee`(+ 생략하면 step 의 지금 project 를 유지하는 `project`) |
 | `add_orchestration_note` | 타임라인에 판단 근거 기록 |
 | `complete_orchestration_mission` | `completed` / `failed` — **미션을 끝내는 유일한 경로** |
 
@@ -1162,9 +1222,9 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 
 | 툴 | 용도 |
 | --- | --- |
-| `list_orchestration_teams` | 내가 오케스트레이터·멤버로 속한 Team 목록 (`create_orchestration_mission` 의 `team_id` 발견 경로). 각 멤버의 `runtime` 블록에 Host·CLI·model·working folder·`folder_scope`·`shared_with` 가 실린다 |
+| `list_orchestration_teams` | 내가 오케스트레이터·멤버로 속한 Team 목록 (`create_orchestration_mission` 의 `team_id` 발견 경로). 각 멤버의 `runtime` 블록에 Host·CLI·model 이 실린다 — 폴더는 미션별이라 `get_orchestration_mission` 의 `roster` 에 있다 |
 | `list_orchestration_missions` | 내가 속한 Mission 목록·상태 (기본 non-terminal 만, `include_finished` 로 확장) |
-| `create_orchestration_mission` | 내가 오케스트레이터인 Team 에 한해 Mission 생성(+즉시 브리핑) — "미션 생성 주체" 절 참고 |
+| `create_orchestration_mission` | 내가 오케스트레이터인 Team 에 한해 Mission 생성(+즉시 브리핑, `projects`·`folder_scope` 지정) — "미션 생성 주체" 절 참고 |
 | `list_orchestration_graph_templates` | 내장 실행 그래프 템플릿 카탈로그(용도·파라미터·예시). 읽기 전용이며 미션을 건드리지 않는다 |
 
 `submit_orchestration_plan` 이 병합(추가적)인 이유: 누락 키를 삭제하면 이미 끝난

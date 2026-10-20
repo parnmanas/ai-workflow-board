@@ -248,7 +248,9 @@ function StepCard({
         {step.assignee_name || 'unassigned'}
       </div>
 
-      {step.workspace_folder && (
+      {/* 어느 project 의 어느 폴더에서 도는가 — 멤버는 step 의 project 폴더(자기 Host)에서
+          일하고, isolated 미션이면 그 아래 step 별 체크아웃에서 일한다. */}
+      {(step.project_name || step.workspace_folder) && (
         <div
           style={{
             marginTop: 3,
@@ -259,9 +261,9 @@ function StepCard({
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={step.workspace_folder}
+          title={[step.working_dir, step.workspace_folder].filter(Boolean).join('/')}
         >
-          {step.workspace_folder}
+          {[step.project_name, step.workspace_folder].filter(Boolean).join(' · ')}
         </div>
       )}
 

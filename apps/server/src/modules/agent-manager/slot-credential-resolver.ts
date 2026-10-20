@@ -16,8 +16,12 @@
  * identity key is functionally determined by its spec, so the slot holding
  * that identity IS the credential grant a human already made when they built
  * the roster. Sources, in order:
- *   1. team orchestrator / member slots (`orchestrator_spec` / `spec`)
- *   2. mission ad-hoc members (`extra_member_specs`)
+ *   1. mission runtime rosters (`runtime_roster`) — a team slot has no folder,
+ *      so its identities exist per mission: the slot in each project folder,
+ *      frozen when the mission started (orchestration-roster.ts)
+ *   2. legacy identities recorded on team rows from when slots declared their
+ *      own folder (`orchestrator_agent_id` / member `agent_id`), and mission
+ *      ad-hoc members from then (`extra_member_specs[].agent_id`)
  *   3. ticket assignees (`assignee`, matched by denormalized `assignee_key`)
  *   4. chat participant inline specs (`runtime_spec`)
  *
@@ -34,6 +38,7 @@ import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { Ticket } from '../../entities/Ticket';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
+import { readRuntimeRoster } from '../orchestration/orchestration-roster';
 
 export interface SlotCredentialSource {
   /** credential_id from the slot spec. null = operator-HOME fallback (204). */
@@ -91,7 +96,27 @@ export async function resolveSlotCredentialSources(
   const participantRepo = dataSource.getRepository(ChatRoomParticipant);
   const roomRepo = dataSource.getRepository(ChatRoom);
 
-  // 1a. team member slots — stored agent_id IS the identity key.
+  // 1. mission runtime rosters — every (slot, project folder) runtime a started
+  // mission resolved. Fetch only the columns needed and filter in JS: the
+  // missions table is small and this route fires on spawn, never per dispatch.
+  const missions = await missionRepo.find({ select: ['id', 'account_id', 'extra_member_specs', 'runtime_roster'] as any });
+  for (const mission of missions) {
+    const roster = readRuntimeRoster((mission as any)?.runtime_roster);
+    for (const runtime of roster?.runtimes ?? []) {
+      if (runtime.agent_id !== id) continue;
+      const slot = runtime.slot_id === 'orchestrator'
+        ? roster!.orchestrator
+        : roster!.members.find((m) => m.slot_id === runtime.slot_id);
+      out.push({
+        credential_id: runtime.spec.credential_id,
+        manager_agent_id: runtime.spec.manager_agent_id,
+        account_id: (mission as any)?.account_id ?? null,
+        label: `mission "${String((mission as any)?.id ?? '').slice(0, 8)}" ${slot?.name ?? runtime.slot_id}`,
+      });
+    }
+  }
+
+  // 2a. legacy team member identities — stored agent_id was the identity key.
   const members = await memberRepo.find({ where: { agent_id: id } });
   if (members.length > 0) {
     const teams = await teamRepo.find({ where: { id: In(Array.from(new Set(members.map((m) => m.team_id)))) } });
@@ -109,7 +134,7 @@ export async function resolveSlotCredentialSources(
     }
   }
 
-  // 1b. team orchestrator slots.
+  // 2b. legacy team orchestrator identities.
   const orchTeams = await teamRepo.find({ where: { orchestrator_agent_id: id } });
   for (const t of orchTeams) {
     const ref = readSlotRef((t as any)?.orchestrator_spec);
@@ -122,12 +147,8 @@ export async function resolveSlotCredentialSources(
     });
   }
 
-  // 2. mission ad-hoc members.
-  // `IS NOT NULL` across both backends without a query-builder split: fetch
-  // only the two columns and filter in JS — the missions table is small and
-  // this route fires on spawn, never per dispatch.
-  const missionsWithExtras = await missionRepo.find({ select: ['id', 'account_id', 'extra_member_specs'] as any });
-  for (const mission of missionsWithExtras) {
+  // 2c. legacy mission ad-hoc members (they carried their identity key).
+  for (const mission of missions) {
     for (const extra of readExtraMembers((mission as any)?.extra_member_specs)) {
       if (String(extra.agent_id) !== id) continue;
       const ref = readSlotRef(extra.spec);

@@ -92,13 +92,15 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
     title: 'Evidence mission',
     objective: 'ship it with proof',
     created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 
   const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label: 'lead' });
-  // P4c-4: worker 는 rt- 슬롯 identity — 증거 업로드(chat tools)는 runtime-tuple
-  // 키(`runtime:<label>:<rt-key>`, host 바인딩)로 인증한다.
-  const workerHostId = squad.team.members.find((m) => m.agent_id === worker.id)?.runtime?.manager_agent_id;
+  // P4c-4: worker 는 rt- 실행 identity(슬롯 × 미션 project 폴더) — 증거 업로드(chat
+  // tools)는 runtime-tuple 키(`runtime:<label>:<rt-key>`, host 바인딩)로 인증한다.
+  // 팀 멤버 뷰에는 identity 가 없으므로(폴더는 미션이 정한다) 슬롯의 Host 로 묶는다.
+  const workerHostId = worker.host.id;
   const workerKeyRow = await createApiKey(app, getDataSourceToken, null, { accountId: ws.id, label: 'worker-tuple', hostId: workerHostId });
   await ds.getRepository('ApiKey').update({ id: workerKeyRow.id }, { name: `runtime:builder:${worker.id}` });
   const workerKey = workerKeyRow;

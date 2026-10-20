@@ -81,6 +81,7 @@ test('예산을 채워 같은 노드를 다시 돌린다 — 복제 노드를 �
   const mission = await missions.createMission({
     account_id: ws.id, team_id: squad.team.id, title: 'Budget mission',
     objective: 'get it right', created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
   await leadMcp.callTool('submit_orchestration_plan', {

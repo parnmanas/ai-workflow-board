@@ -103,8 +103,8 @@ test('실제 서버 재시작: 새 프로세스의 부팅 스윕이 스스로 �
   const svcA = await services(a.app);
 
   const ws = await createAccount(a.app, getDataSourceToken, 'orch-restart');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 로 선언하고 폴더는 미션의 project 가 정한다 —
+  // 실행 identity(슬롯 × project 폴더)는 buildTeam 이 계산해 돌려준다.
   const squad = await buildTeam(a.app, getDataSourceToken, svcA.teams, {
     accountId: ws.id,
     name: 'Restart squad',
@@ -122,6 +122,7 @@ test('실제 서버 재시작: 새 프로세스의 부팅 스윕이 스스로 �
     objective: 'survive a server restart',
     created_by: HUMAN.id,
     step_timeout_minutes: 30,
+    ...squad.missionDefaults,
   });
   await svcA.runner.startMission(mission.id, ws.id, HUMAN);
   await svcA.runner.submitPlan(mission.id, { agentId: lead.id }, {
@@ -233,8 +234,8 @@ test('orchestrator 세션 재시작: 대화 맥락과 진행 상태를 그대로
   const ds = app.get(getDataSourceToken());
 
   const ws = await createAccount(app, getDataSourceToken, 'orch-orch-restart');
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 로 선언하고 폴더는 미션의 project 가 정한다 —
+  // 실행 identity(슬롯 × project 폴더)는 buildTeam 이 계산해 돌려준다.
   const squad = await buildTeam(app, getDataSourceToken, svc.teams, {
     accountId: ws.id,
     name: 'Session squad',
@@ -251,6 +252,7 @@ test('orchestrator 세션 재시작: 대화 맥락과 진행 상태를 그대로
     objective: 'keep the thread',
     created_by: HUMAN.id,
     step_timeout_minutes: 30,
+    ...squad.missionDefaults,
   });
   await svc.runner.startMission(mission.id, ws.id, HUMAN);
   await svc.runner.submitPlan(mission.id, { agentId: lead.id }, {

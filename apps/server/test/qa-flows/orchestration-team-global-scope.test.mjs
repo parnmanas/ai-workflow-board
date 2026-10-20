@@ -1,14 +1,17 @@
 // QA flow: 오케스트레이션 Team의 글로벌(account 비종속) 스코프 — 티켓 1b62b437.
 //
 // Team = 로스터(누가 무엇을 오케스트레이션할 수 있나), Mission = 실행·거버넌스 스코프
-// (어느 account의 room/budget에서 도는가). 이 파일은 그 축 분리가 끝까지 유지됨을
-// 증명한다:
+// (어느 account의 room/budget/project에서 도는가). 팀 슬롯은 Runtime Host + CLI + model
+// 일 뿐 폴더도 실행 identity 도 없다 — 미션이 시작할 때 자기 account 의 project 폴더에
+// 슬롯을 놓으면서 identity 가 생긴다. 이 파일은 그 축 분리가 끝까지 유지됨을 증명한다:
 //
-//   1. 글로벌 팀의 로스터에는 글로벌(account 비종속) 에이전트만 들어갈 수 있다 —
-//      account 종속 에이전트는 orchestrator/member로 거절된다.
+//   1. 글로벌 팀의 팀 행·슬롯 행에는 account 도 identity 도 없다. 슬롯이 account 안을
+//      가리킬 수 있는 유일한 참조인 credential 은 글로벌이어야 한다 — 아니면 한 account 의
+//      로그인을 허용된 모든 account 의 미션이 쓰게 된다.
 //   2. 글로벌 팀의 create_orchestration_mission은 account_id를 요구하며 팀의
 //      human이 설정한 허용목록 안의 값만 받아들인다; 결과 미션의 room/step/budget은
-//      그 account로 스코핑된다.
+//      그 account로 스코핑되고, 미션은 그 account 의 project 에서 일한다 — 허용된 다른
+//      account 는 같은 팀을 자기 project 로 돌린다.
 //   3. account 종속 팀의 동작은 한 치도 바뀌지 않는다: account_id를 생략하면
 //      여전히 팀 자신의 account가 기본값이고, 명시적으로 불일치하는 값은 이제
 //      거절된다(새 동작 — 이전에는 team_id 조회 자체가 일치를 요구해서 애초에 조용히
@@ -17,18 +20,21 @@
 //      (owner_account_id)만 쓸 수 있다.
 //   5. max_open_missions는 팀 단위가 아니라 (팀, account) 단위로 강제된다 —
 //      글로벌 팀의 account A 캡이 account B의 슬롯을 소비하지 않는다.
-//   6. dispatchStep은 디스패치 시점에 assignee의 account를 재검증한다 — 팀 가입
-//      이후 멤버십의 account가 다른 account로 어긋난(stale) 멤버는 절대
-//      스텝을 받지 않는다; 대신 실패 처리되고 오케스트레이터가 깨어난다(글로벌 팀
-//      여부와 무관하게 기존에 있던 구멍도 닫는다). Agent/보드의 account 이동
-//      서비스는 사라졌으므로 멤버 행을 직접 고쳐 stale 상태를 재현한다.
+//   6. 미션이 일하는 곳은 그 미션 account 의 project 뿐이다 — 다른 account 의 project 는
+//      미션 생성과 plan 제출에서 거절되고, step 은 미션 account 의 project 폴더에서 돈다.
+//      (예전에는 dispatchStep 이 멤버십 행의 account 가 미션과 어긋난 멤버를 거절했다 —
+//      가입 뒤 다른 account 로 옮겨진 Agent 를 막는 장치였다. 옮길 Agent 행이 없어졌고
+//      슬롯 행의 account 는 팀 스코프의 정보용 스냅샷일 뿐이라, 이제 account 경계는 step 의
+//      폴더가 정해지는 지점 — 미션의 project — 에 있다.)
+//   7. pump() 안에서 드러난 디스패치 실패는 reportStep 한 번에 오케스트레이터를 정확히
+//      한 번 깨운다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createApiKey, createAccount } from '../helpers/fixtures.mjs';
+import { createApiKey, createAccount, createProject } from '../helpers/fixtures.mjs';
 import { buildTeam, createRuntimeHost, slotSpec } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -74,20 +80,27 @@ async function mcpForAgent(app, getDataSourceToken, port, agent, label, t) {
   return client;
 }
 
+/** A Credential row — only its account scope matters to the slot reference check. */
+async function credentialRow(ds, accountId, name) {
+  const repo = ds.getRepository('Credential');
+  return repo.save(repo.create({ account_id: accountId, name, provider: 'claude', encrypted_data: 'qa-not-a-secret' }));
+}
+
 // The old form of this test asserted that a account-scoped AGENT is rejected
-// from a global team's roster. That rule no longer has an input to reject: a
-// slot names a machine, and the provisioner stamps the identity it creates with
-// the TEAM's own scope. So the guarantee is now structural, and this test
-// asserts the structure instead of the rejection — the property that matters
-// downstream is unchanged (dispatchStep must never hand a global team's mission
-// room to a account-scoped worker).
-test('Orchestration Team: global roster integrity — a global team provisions account-less identities', async (t) => {
+// from a global team's roster, and later that the identities a global team
+// provisioned were account-less. Neither has an input any more: a slot names a
+// machine (Runtime Host + CLI + model), and it is not an identity at all — a
+// mission places it in the mission account's project folders. What is left to
+// hold is structural: the team row and its slot rows carry no account and no
+// identity, and the one reference a slot makes INTO an account — a credential —
+// must be global. The property that matters downstream is unchanged: a global
+// team's mission never runs on another account's resources.
+test('Orchestration Team: global roster integrity — a global team\'s rows carry no account or identity, and its slots no account credential', async (t) => {
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
-  // P4c-4: account 귀속은 member 행이 진다 (Agent 행 없음).
   const memberRepo = ds.getRepository('OrchestrationTeamMember');
 
   const ws = await createAccount(app, getDataSourceToken, 'roster-integrity');
@@ -107,26 +120,56 @@ test('Orchestration Team: global roster integrity — a global team provisions a
   assert.equal(team.owner_account_id, ws.id);
   assert.deepEqual(team.allowed_account_ids, [ws.id]);
 
-  step('Its orchestrator identity is account-less, not stamped with the creating account');
-  // P4c-4: orchestrator identity 는 rt- 키라 행이 없다 — 팀 행의 null account +
-  // 아래 member 행 단언이 귀속을 커버한다.
-  assert.equal(team.account_id, null, 'global team row carries no account');
+  step('Its row carries no account and no orchestrator identity — a mission places the orchestrator, in the mission\'s account');
+  const teamRow = await ds.getRepository('OrchestrationTeam').findOne({ where: { id: team.id } });
+  assert.equal(teamRow.account_id, null, 'global team row carries no account');
+  assert.equal(teamRow.orchestrator_agent_id, null, 'and no identity — a slot has no folder to be one in');
 
-  step('So is every member identity it provisions');
+  step('So does every member slot it adds');
   const withMember = await teams.addMember(team.id, ws.id, { runtime: slotSpec(host.id), role_label: 'builder' });
   assert.equal(withMember.members.length, 1);
-  const memberRow = await memberRepo.findOne({ where: { team_id: team.id, agent_id: withMember.members[0].agent_id } });
+  assert.equal('agent_id' in withMember.members[0], false, 'a member view names no identity');
+  const memberRow = await memberRepo.findOne({ where: { id: withMember.members[0].id } });
+  assert.ok(memberRow, 'the slot row is addressed by its own id');
   assert.equal(memberRow.account_id, null);
+  assert.equal(memberRow.agent_id, null);
 
-  step('A account-scoped team stamps its account onto the identities instead');
+  step('A global team\'s slot may only name a global credential — an account\'s login would run in every allowed account');
+  const accountLogin = await credentialRow(ds, ws.id, 'account-login');
+  const globalLogin = await credentialRow(ds, null, 'global-login');
+  await assert.rejects(
+    () => teams.addMember(team.id, ws.id, {
+      runtime: slotSpec(host.id, { credential_id: accountLogin.id }),
+      role_label: 'leaky',
+    }),
+    (e) => {
+      assert.equal(e.status, 400);
+      assert.match(e.message, /not available to this team/);
+      return true;
+    },
+  );
+  const withGlobalLogin = await teams.addMember(team.id, ws.id, {
+    runtime: slotSpec(host.id, { credential_id: globalLogin.id }),
+    role_label: 'global-login',
+  });
+  assert.equal(withGlobalLogin.members.find((m) => m.role_label === 'global-login').runtime.credential_id, globalLogin.id);
+  assert.ok(!withGlobalLogin.members.some((m) => m.role_label === 'leaky'), 'the refused slot left no row behind');
+
+  step('A account-scoped team stamps its account onto its slot rows instead — and may use that account\'s credential');
   const scopedTeam = await teams.createTeam({
     account_id: ws.id,
     name: 'Scoped squad',
     orchestrator: slotSpec(host.id),
     created_by: HUMAN.id,
   });
-  // P4c-4: orchestrator 는 member 행이 없다 — 팀 행 + 아래 member 행 귀속이 귀속을 커버한다.
   assert.equal(scopedTeam.account_id, ws.id);
+  const scopedWithMember = await teams.addMember(scopedTeam.id, ws.id, {
+    runtime: slotSpec(host.id, { credential_id: accountLogin.id }),
+    role_label: 'builder',
+  });
+  const scopedRow = await memberRepo.findOne({ where: { id: scopedWithMember.members[0].id } });
+  assert.equal(scopedRow.account_id, ws.id);
+  assert.equal(scopedRow.agent_id, null, 'scoped or global, a slot row records no identity');
 });
 
 test('Orchestration Team: allowed_account_ids is validated against real account rows, not just normalized', async (t) => {
@@ -184,7 +227,7 @@ test('Orchestration Team: allowed_account_ids is validated against real account 
   assert.deepEqual(new Set(unchanged.allowed_account_ids), new Set([ws.id, otherWs.id]));
 });
 
-test('Orchestration Team: create_orchestration_mission for a global team — account_id required + allow-listed', async (t) => {
+test('Orchestration Team: create_orchestration_mission for a global team — account_id required + allow-listed, projects of that account', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
@@ -194,16 +237,18 @@ test('Orchestration Team: create_orchestration_mission for a global team — acc
 
   const wsA = await createAccount(app, getDataSourceToken, 'global-mission-a');
   const wsB = await createAccount(app, getDataSourceToken, 'global-mission-b');
+  const wsC = await createAccount(app, getDataSourceToken, 'global-mission-c');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: wsA.id,
     name: 'Global mission squad',
-    team: { is_global: true, created_by: HUMAN.id, allowed_account_ids: [wsA.id] },
+    team: { is_global: true, created_by: HUMAN.id, allowed_account_ids: [wsA.id, wsC.id] },
     members: [{ role_label: 'builder' }],
   });
   const team = squad.team;
   const orch = squad.orchestrator;
   const member = squad.member('builder');
   const orchMcp = await mcpForAgent(app, getDataSourceToken, port, orch, 'gm-orch', t);
+  const defaultsA = await squad.missionDefaultsFor(wsA.id);
 
   step('account_id is required for a global team');
   const missing = await orchMcp.callTool('create_orchestration_mission', {
@@ -229,10 +274,9 @@ test('Orchestration Team: create_orchestration_mission for a global team — acc
   );
 
   step('An empty allow-list denies by default, even with a real account_id');
-  // 이 팀은 자기 orchestrator 정체성을 따로 갖는다(슬롯 하나 = 정체성 하나)
-  // — `create_orchestration_mission` 의 소유권 검사가 호출자를 그 팀의
-  // orchestrator 와 대조하므로, 그 정체성의 키로 호출해야 allow-list 분기까지
-  // 도달한다.
+  // `create_orchestration_mission` 의 소유권 검사는 호출자를 그 팀의 orchestrator 슬롯(어느
+  // project 폴더에서 도는 identity)과 대조하므로, 이 팀 자신의 orchestrator identity 키로
+  // 호출해야 allow-list 분기까지 도달한다.
   const noListSquad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: wsA.id,
     name: 'No allow-list team',
@@ -243,31 +287,64 @@ test('Orchestration Team: create_orchestration_mission for a global team — acc
   assert.deepEqual(noListTeam.allowed_account_ids, []);
   const denied = await noListMcp.callTool('create_orchestration_mission', {
     team_id: noListTeam.id, title: 'no list', objective: 'no list', account_id: wsA.id,
+    ...(await noListSquad.missionDefaultsFor(wsA.id)),
   });
   assert.equal(denied.isError, true);
   assert.match(denied.error.error, /no allowed accounts configured/);
 
-  step('An allow-listed account_id succeeds and the mission is fully scoped to it');
+  step('An allow-listed account_id succeeds and the mission is fully scoped to it — working in that account\'s project');
   const created = await orchMcp.callTool('create_orchestration_mission', {
     team_id: team.id, title: 'Global mission', objective: 'Prove global team missions are account-scoped.',
-    account_id: wsA.id,
+    account_id: wsA.id, ...defaultsA,
   });
   assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
-  assert.equal(created.status, 'planning');
+  assert.equal(created.status, 'planning', `the mission must start, got ${JSON.stringify(created)}`);
   const detail = await missions.getMissionDetail(created.mission_id, wsA.id);
   assert.equal(detail.account_id, wsA.id, 'the mission is billed to the account the orchestrator chose');
+  assert.deepEqual(detail.projects.map((p) => p.project_id), defaultsA.projects.map((p) => p.project_id));
 
   step('The dispatched step + its room are ALSO stamped with that account, not the (null) team account');
   const plan = await orchMcp.callTool('submit_orchestration_plan', {
     mission_id: created.mission_id,
+    // 레거시 별칭: 이 미션의 로스터에서 슬롯 하나에만 대응하는 실행 identity 는 그 슬롯으로 받아들여진다.
     steps: [{ step_key: 'only', title: 'Only step', instructions: 'do it', assignee_agent_id: member.id }],
   });
   assert.ok(!plan.isError, `plan failed: ${JSON.stringify(plan)}`);
   assert.deepEqual(plan.dispatched_now, ['only']);
   const step1 = (await missions.listSteps(created.mission_id))[0];
   assert.equal(step1.account_id, wsA.id);
+  assert.equal(step1.assignee_slot, member.slot_id, 'the identity alias resolved to the member\'s slot');
   const room = await ds.getRepository('ChatRoom').findOne({ where: { id: step1.room_id } });
   assert.equal(room.account_id, wsA.id);
+
+  step('A mission works only on projects of ITS OWN account — another account\'s project is refused, even for an allowed account');
+  const crossed = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'crossed', objective: 'crossed', account_id: wsC.id, ...defaultsA, start: false,
+  });
+  assert.equal(crossed.isError, true);
+  assert.match(crossed.error.error, /not found in this mission's account/);
+
+  step('Another allowed account runs the same global team on its own project');
+  const defaultsC = await squad.missionDefaultsFor(wsC.id);
+  assert.notEqual(defaultsC.projects[0].project_id, defaultsA.projects[0].project_id, 'sanity: a wsC project, not wsA\'s');
+  const createdC = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Global mission in C', objective: 'Run the shared roster for another account.',
+    account_id: wsC.id, ...defaultsC,
+  });
+  assert.ok(!createdC.isError, `create failed: ${JSON.stringify(createdC)}`);
+  assert.equal(createdC.status, 'planning');
+  const planC = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: createdC.mission_id,
+    steps: [{ step_key: 'only', title: 'Only step', instructions: 'do it', assignee: member.slot_id }],
+  });
+  assert.ok(!planC.isError, `plan failed: ${JSON.stringify(planC)}`);
+  assert.deepEqual(planC.dispatched_now, ['only']);
+  const stepC = (await missions.listSteps(createdC.mission_id))[0];
+  assert.equal(stepC.account_id, wsC.id);
+  assert.equal(stepC.project_id, defaultsC.projects[0].project_id, 'the step works on wsC\'s project');
+  assert.equal(stepC.assignee_spec.working_dir, member.folder, 'in that project\'s folder on the member\'s host');
+  const roomC = await ds.getRepository('ChatRoom').findOne({ where: { id: stepC.room_id } });
+  assert.equal(roomC.account_id, wsC.id);
 });
 
 test('Orchestration Team: account-scoped team behavior is unchanged by the global-team feature', async (t) => {
@@ -407,8 +484,8 @@ test('Orchestration Team: max_open_missions is enforced per (team, account), not
   assert.notEqual(firstB.mission_id, firstA.mission_id);
 });
 
-test('Orchestration Team: dispatchStep re-validates account legality — a member moved after joining is never dispatched to', async (t) => {
-  const { app, port, modules, services } = await sharedApp(t);
+test('Orchestration Team: a global team\'s mission works only in its own account\'s projects — refused at create and at plan time', async (t) => {
+  const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
   const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
@@ -416,55 +493,76 @@ test('Orchestration Team: dispatchStep re-validates account legality — a membe
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
 
-  const wsA = await createAccount(app, getDataSourceToken, 'move-bug-a');
-  const wsB = await createAccount(app, getDataSourceToken, 'move-bug-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'own-projects-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'own-projects-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: wsA.id,
-    name: 'Move-bug squad',
-    team: { max_parallel_steps: 4, created_by: HUMAN.id },
-    members: [{ role_label: 'stayer' }, { role_label: 'mover' }],
+    name: 'Own-projects squad',
+    team: { is_global: true, max_parallel_steps: 4, created_by: HUMAN.id, allowed_account_ids: [wsA.id, wsB.id] },
+    members: [{ role_label: 'builder' }],
   });
-  const team = squad.team;
-  const orch = squad.orchestrator;
-  const stayer = squad.member('stayer');
-  const mover = squad.member('mover');
-
-  step('mover joins while still in account A, then its membership goes stale in account B');
-  // P4c-4: agent 이동 retired — stale membership 을 member 행 직접 수정으로 재현한다.
-  await ds.getRepository('OrchestrationTeamMember').update(
-    { team_id: team.id, agent_id: mover.id }, { account_id: wsB.id },
-  );
-  const staleMembership = await ds.getRepository('OrchestrationTeamMember').findOne({ where: { team_id: team.id, agent_id: mover.id } });
-  assert.ok(staleMembership, 'the membership row carries the stale account — this is the gap dispatchStep must catch');
-
-  step('Start a mission and submit a plan with one step per member, both dependency-free');
-  const mission = await missions.createMission({
-    account_id: wsA.id, team_id: team.id, title: 'Move-bug mission', objective: 'Prove stale membership cannot be dispatched to.',
-    created_by_type: 'user', created_by: HUMAN.id,
-  });
-  const started = await runner.startMission(mission.id, wsA.id, HUMAN);
-  const plan = await runner.submitPlan(mission.id, { agentId: orch.id }, {
-    steps: [
-      { step_key: 'stays', title: 'Goes to the agent still in A', instructions: 'do it', assignee_agent_id: stayer.id },
-      { step_key: 'moved', title: 'Goes to the agent moved to B', instructions: 'do it', assignee_agent_id: mover.id },
+  const builder = squad.member('builder');
+  const defaultsA = await squad.missionDefaultsFor(wsA.id);
+  // wsB 의 project — 팀이 일해도 되는 account 이고 같은 호스트들에 폴더도 있다. 다른 것은
+  // account 뿐이다. wsA 의 미션이 이 폴더에서 일하면 wsB 의 체크아웃을 wsA 의 예산으로 고친다.
+  const foreign = await createProject(app, getDataSourceToken, wsB.id, {
+    name: 'foreign',
+    hostFolders: [
+      { hostId: builder.host.id, path: '/srv/awb-test/own-projects-foreign' },
+      { hostId: squad.orchestrator.host.id, path: '/srv/awb-test/own-projects-foreign-orch' },
     ],
   });
+  const base = {
+    account_id: wsA.id, team_id: squad.team.id, objective: 'Stay inside the mission\'s account.',
+    created_by_type: 'user', created_by: HUMAN.id,
+  };
 
-  step('The legitimate step dispatches normally; the stale one is failed instead, and the orchestrator is woken');
-  const steps = await missions.listSteps(mission.id);
-  const byKey = Object.fromEntries(steps.map((s) => [s.step_key, s]));
-  assert.equal(byKey.stays.status, 'dispatched', 'an in-account member is unaffected by the fix');
-  assert.equal(byKey.moved.status, 'failed', 'the moved member must never receive the work order');
-  assert.match(byKey.moved.result_summary, /account/);
-  assert.equal(byKey.moved.room_id, null, 'no room was ever created for the illegal dispatch');
+  step('createMission refuses a project of another account — even an account the team may work for');
+  await assert.rejects(
+    () => missions.createMission({ ...base, title: 'Foreign project', projects: [{ project_id: foreign.id }] }),
+    (e) => {
+      assert.equal(e.status, 400);
+      assert.match(e.message, /not found in this mission's account/);
+      assert.ok(e.message.includes(foreign.id), 'the message names the offending project');
+      return true;
+    },
+  );
+  step('...through the legacy repo_ref alias as well');
+  await assert.rejects(
+    () => missions.createMission({ ...base, title: 'Foreign repo_ref', repo_ref: { project_id: foreign.id } }),
+    (e) => { assert.equal(e.status, 400); assert.match(e.message, /not found in this mission's account/); return true; },
+  );
 
-  const events = await ds.getRepository('OrchestrationEvent').find({ where: { mission_id: mission.id }, order: { created_at: 'ASC' } });
-  assert.ok(events.some((e) => e.type === 'orchestrator_woken'), 'a dispatch failure must wake the orchestrator, same as a reported failure');
+  step('A plan step cannot reach outside the mission\'s projects either');
+  const mission = await missions.createMission({ ...base, title: 'Own projects', ...defaultsA });
+  await runner.startMission(mission.id, wsA.id, HUMAN);
+  await assert.rejects(
+    () => runner.submitPlan(mission.id, { agentId: squad.orchestrator.id }, {
+      steps: [{ step_key: 'outside', title: 'Outside', instructions: 'do it', assignee: builder.slot_id, project: foreign.id }],
+    }),
+    (e) => {
+      assert.equal(e.status, 400);
+      assert.match(e.message, /is not one of this mission's projects/);
+      return true;
+    },
+  );
+  assert.equal((await missions.listSteps(mission.id)).length, 0, 'the refused plan wrote nothing');
 
-  step('The wake prompt actually reached the orchestrator\'s room');
-  const roomMsgs = await ds.getRepository('ChatRoomMessage').find({ where: { room_id: started.room_id }, order: { created_at: 'ASC' } });
-  assert.ok(roomMsgs.length >= 2, 'brief + wake-up, at minimum');
-  assert.match(roomMsgs[roomMsgs.length - 1].content, /moved/);
+  step('A step lands in the mission\'s own project folder; its step row and room carry the mission\'s account');
+  await runner.submitPlan(mission.id, { agentId: squad.orchestrator.id }, {
+    steps: [{ step_key: 'inside', title: 'Inside', instructions: 'do it', assignee: builder.slot_id }],
+  });
+  const [inside] = await missions.listSteps(mission.id);
+  assert.equal(inside.status, 'dispatched');
+  assert.equal(inside.account_id, wsA.id);
+  assert.equal(inside.project_id, defaultsA.projects[0].project_id);
+  assert.equal(inside.assignee_spec.working_dir, builder.folder);
+  const room = await ds.getRepository('ChatRoom').findOne({ where: { id: inside.room_id } });
+  assert.equal(room.account_id, wsA.id);
+  const participant = await ds.getRepository('ChatRoomParticipant').findOne({
+    where: { room_id: inside.room_id, participant_type: 'agent' },
+  });
+  assert.equal(participant.runtime_spec.working_dir, builder.folder, 'the manager is handed the wsA project\'s folder');
 });
 
 test('Orchestration Team: a dispatch failure surfaced during reportStep wakes the orchestrator exactly once, not twice', async (t) => {
@@ -474,6 +572,12 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   // reportStep이 유발한 pump() 안에서 디스패치 실패가 드러났을 때 reportStep 호출
   // 한 번에 대해 wake 메시지가 두 번(agent-manager가 subagent spawn 두 번으로
   // 취급하는 실제 채팅 포스트 두 번) 올라갔다.
+  //
+  // 실패를 만드는 방법만 바뀌었다. 예전에는 멤버십 행의 account 를 어긋나게 고쳐
+  // dispatchStep 의 account 재검증에 걸리게 했지만 그 재검증의 근거(옮길 수 있는 Agent
+  // 행)가 사라졌다. 이제는 의존 step 의 실행 스냅샷에서 폴더를 지워, dispatchStep 이
+  // "no runtime to run on" 으로 거절하게 한다 — 이 테스트가 보는 것은 실패 원인이 아니라
+  // 그 실패가 오케스트레이터를 몇 번 깨우는가다.
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
@@ -483,7 +587,6 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const runner = app.get(OrchestrationRunnerService);
 
   const wsA = await createAccount(app, getDataSourceToken, 'double-wake-a');
-  const wsB = await createAccount(app, getDataSourceToken, 'double-wake-b');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: wsA.id,
     name: 'Double-wake squad',
@@ -494,14 +597,11 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const orch = squad.orchestrator;
   const first = squad.member('first');
   const second = squad.member('second');
-  // P4c-4: agent 이동 retired — stale membership 을 member 행 직접 수정으로 재현한다 (move-bug 테스트와 동일).
-  await ds.getRepository('OrchestrationTeamMember').update(
-    { team_id: team.id, agent_id: second.id }, { account_id: wsB.id },
-  );
   const mission = await missions.createMission({
     account_id: wsA.id, team_id: team.id, title: 'Double-wake mission',
     objective: 'Prove one pump-time dispatch failure yields exactly one wake.',
     created_by_type: 'user', created_by: HUMAN.id,
+    ...squad.missionDefaults,
   });
   const started = await runner.startMission(mission.id, wsA.id, HUMAN);
   // "blocked-on-first"는 "first"에 의존하므로 submitPlan 자체로는 디스패치되지
@@ -509,18 +609,22 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   // 안에서만 디스패치 가능해진다.
   await runner.submitPlan(mission.id, { agentId: orch.id }, {
     steps: [
-      { step_key: 'first', title: 'First step', instructions: 'do it', assignee_agent_id: first.id },
+      { step_key: 'first', title: 'First step', instructions: 'do it', assignee: first.slot_id },
       {
-        step_key: 'blocked-on-first', title: 'Depends on first, assigned to the moved agent',
-        instructions: 'do it', assignee_agent_id: second.id, depends_on: ['first'],
+        step_key: 'blocked-on-first', title: 'Depends on first, its runtime snapshot broken below',
+        instructions: 'do it', assignee: second.slot_id, depends_on: ['first'],
       },
     ],
   });
+  const planned = await missions.listSteps(mission.id);
+  const blockedStep = planned.find((s) => s.step_key === 'blocked-on-first');
+  const { working_dir: _dir, folder_scope: _scope, ...slotOnly } = blockedStep.assignee_spec;
+  await ds.getRepository('OrchestrationStep').update({ id: blockedStep.id }, { assignee_spec: slotOnly });
 
   const beforeCount = await ds.getRepository('ChatRoomMessage').count({ where: { room_id: started.room_id } });
   assert.equal(beforeCount, 1, 'sanity: only the initial brief is in the mission room before the report');
 
-  const [firstStep] = await missions.listSteps(mission.id).then((all) => all.filter((s) => s.step_key === 'first'));
+  const firstStep = planned.find((s) => s.step_key === 'first');
   // lease token 은 dispatchStep 이 attempt 마다 발급해 work order 에 실어 보낸다 —
   // 실제 작업자가 그걸 복사해 오듯, 여기서도 현재 값을 그대로 되돌려준다(티켓 4d065f82).
   const freshFirst = await missions.requireStep(firstStep.id);
@@ -529,11 +633,12 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
     summary: 'done',
     lease_token: freshFirst.lease_token,
   });
-  assert.equal(report.orchestrator_woken, true, 'the newly-dispatchable-but-illegal step must still trigger a wake');
+  assert.equal(report.orchestrator_woken, true, 'the newly-dispatchable-but-undispatchable step must still trigger a wake');
 
   const stepsAfter = await missions.listSteps(mission.id);
   const blocked = stepsAfter.find((s) => s.step_key === 'blocked-on-first');
-  assert.equal(blocked.status, 'failed', 'dispatch to the moved agent must fail, not silently skip');
+  assert.equal(blocked.status, 'failed', 'a step that cannot be dispatched must fail, not silently skip');
+  assert.match(blocked.result_summary, /no runtime to run on/, 'sanity: it failed for the reason this test set up');
 
   const wokenEvents = await ds.getRepository('OrchestrationEvent').find({
     where: { mission_id: mission.id, type: 'orchestrator_woken' },

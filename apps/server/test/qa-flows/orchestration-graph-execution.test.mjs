@@ -115,8 +115,10 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
     return client;
   };
 
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — lead/worker/critic 을 미리 만들지 않고 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI) 로만 선언한다 — 어느 폴더에서 일하는지는 팀이
+  // 아니라 미션의 project 가 정한다(그 project 의 각 Host 폴더). 실행 정체성은 미션
+  // 시작 시 (CLI, 폴더, credential) 로 확정되므로 lead/worker/critic 을 미리 만들지
+  // 않고 돌려받는다.
   //
   // max_concurrent 기본값은 1이다 — 이 그래프는 같은 builder에게 병렬 node
   // (api ‖ ui)를 맡기므로 올려두지 않으면 member 상한에서 직렬화돼 fan-out
@@ -126,9 +128,10 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
     name: `Graph squad ${label}`,
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [
-      // P4c-4: 슬롯마다 다른 working_dir — identity 가 슬롯별로 달라져야
-      // builder/reviewer 가 서로 다른 worker 다 (같은 키면 account 이동
-      // 테스트가 양쪽 member 행을 함께 옮겨 버린다).
+      // 슬롯마다 다른 project 폴더 — buildTeam 이 서로 다른 Host 에 놓는다. 정체성이
+      // 슬롯별로 달라야 builder/reviewer 가 서로 다른 worker 다: 아래 plan 은 슬롯을
+      // 정체성 별칭(`assignee_agent_id: worker.id`)으로 지목하는데, 한 정체성이 두
+      // 슬롯에 걸리면 서버가 어느 쪽인지 정할 수 없어 배정을 거부한다.
       { role_label: 'builder', capabilities: 'builds things', max_concurrent: 4, spec: { working_dir: '/srv/graph-builder' } },
       { role_label: 'reviewer', capabilities: 'judges work', max_concurrent: 2, spec: { working_dir: '/srv/graph-reviewer' } },
     ],
@@ -141,6 +144,7 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
   const mission = await missions.createMission({
     account_id: ws.id,
     team_id: team.id,
+    ...squad.missionDefaults,
     title: `Graph mission ${label}`,
     objective: 'Exercise the execution graph end to end.',
     max_parallel_steps: 4,
@@ -151,9 +155,6 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
   await runner.startMission(mission.id, ws.id, HUMAN);
 
   return {
-    app,
-    // createAccount/createAgent 등 fixture 헬퍼가 요구하는 DataSource 토큰 게터.
-    getDataSourceToken,
     ds,
     ws,
     lead,
@@ -637,37 +638,58 @@ test('fan-out 경계: 남은 예산보다 ready node가 많아도 global budget�
 
 test('디스패치 실패 시 예산: work order 전송 전에 실패하면 예산을 쓰지 않는다', async (t) => {
   const s = await stage(t, { label: 'dispatchfail' });
-  const { app, getDataSourceToken, ds, ws, missions, mission, worker, critic, leadMcp } = s;
+  const { ds, ws, missions, mission, worker, critic, leadMcp, workerMcp } = s;
 
-  // critic을 다른 account로 옮겨 dispatchStep의 account 재검증에서 던지게 만든다.
-  // 이 검사는 room 생성과 예산 커밋보다 **앞**이므로, 이 실패는 subagent를 띄운 적이
-  // 없고 따라서 예산도 쓰지 않아야 한다(정책: 예산은 "떴을 수 있는가" 기준).
-  // P4c-4: 검사는 member 행 스냅샷을 본다 (Agent 행 없음).
-  const other = await createAccount(app, getDataSourceToken, 'orch-elsewhere');
-  await ds.getRepository('OrchestrationTeamMember').update({ agent_id: critic.id }, { account_id: other.id });
-
-  step('entry 2개 중 하나는 정상 디스패치, 하나는 전송 전 실패');
+  // dispatchStep 이 room 생성과 예산 커밋보다 **앞**에서 던지게 만든다. 이 실패는
+  // subagent를 띄운 적이 없고 따라서 예산도 쓰지 않아야 한다(정책: 예산은 "떴을 수
+  // 있는가" 기준).
+  //
+  // 예전 트리거는 critic 의 member 행을 다른 account 로 옮겨 account 재검증에서 던지게
+  // 하는 것이었다. 그 재검증은 없어졌다 — step 은 배정 시점의 실행 스냅샷
+  // (`assignee_spec`: 슬롯 + 그 project 의 Host 폴더)에서 뜨고, 실행 중 팀을 고쳐도 이미
+  // 계획된 step 은 바뀌지 않는다. 지금 남은 전송 전 실패는 "실행할 런타임이 없는 step"
+  // 이다: 스냅샷 이전에 배정된 레거시 step(슬롯·스냅샷 없이 정체성만 가진 step)인데 그
+  // 정체성을 가진 슬롯 행이 더는 없을 때.
+  //
+  // 두 형제가 **같은 pump** 에서 나가야 "하나는 성공해 예산을 쓰고, 하나는 전송 전에
+  // 실패해 쓰지 않는다"를 한 번에 잴 수 있다. 계획 제출이 곧바로 디스패치하므로, 형제를
+  // kickoff 뒤에 두고 그 사이에 하나를 레거시 step 으로 바꿔 둔다.
+  step('kickoff 뒤에 형제 2개를 두고, 그중 하나를 런타임 없는 레거시 step 으로 만든다');
   const submitted = await leadMcp.callTool('submit_orchestration_plan', {
     mission_id: mission.id,
-    summary: 'two independent entry nodes',
+    summary: 'a kickoff that fans out to two independent nodes',
     steps: [
-      { step_key: 'alpha', title: 'Alpha', instructions: 'x', assignee_agent_id: worker.id },
-      { step_key: 'beta', title: 'Beta', instructions: 'x', assignee_agent_id: critic.id },
+      { step_key: 'kickoff', title: 'Kickoff', instructions: 'x', assignee_agent_id: worker.id },
+      { step_key: 'alpha', title: 'Alpha', instructions: 'x', depends_on: ['kickoff'], assignee_agent_id: worker.id },
+      { step_key: 'beta', title: 'Beta', instructions: 'x', depends_on: ['kickoff'], assignee_agent_id: critic.id },
     ],
     // graph를 안 보내면 wave adapter가 승격한다 — 예산 회계는 그대로 활성화된다.
   });
   assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
-  assert.deepEqual(submitted.dispatched_now, ['alpha'], '정상 assignee만 나간다');
-  assert.equal(submitted.graph.max_total_visits, 2, 'adapter 기본 예산 = node 수');
+  assert.deepEqual(submitted.dispatched_now, ['kickoff']);
+  assert.equal(submitted.graph.max_total_visits, 3, 'adapter 기본 예산 = node 수');
 
-  const { detail, byKey } = await readSteps(missions, mission.id, ws.id);
-  assert.equal(byKey.beta.status, 'failed', '전송 불가는 step 실패로 기록된다');
-  assert.match(byKey.beta.result_summary, /dispatch failed/);
+  const { byKey } = await readSteps(missions, mission.id, ws.id);
+  assert.ok(byKey.beta.assignee_agent_id, '전제: beta 는 정체성으로 배정돼 있다');
+  await ds.getRepository('OrchestrationStep').update(
+    { id: byKey.beta.id },
+    { assignee_slot: null, assignee_spec: null },
+  );
+
+  step('형제 2개가 같은 pump 에 나간다 — 하나는 정상 디스패치, 하나는 전송 전 실패');
+  const afterKickoff = await report(workerMcp, byKey.kickoff.id, { status: 'done', summary: 'kicked off', visit: 1 });
+  assert.deepEqual(afterKickoff.next_steps_dispatched, ['alpha'], '런타임이 있는 step 만 나간다');
+
+  const after = await readSteps(missions, mission.id, ws.id);
+  assert.equal(after.byKey.alpha.status, 'dispatched');
+  assert.equal(after.byKey.beta.status, 'failed', '전송 불가는 step 실패로 기록된다');
+  assert.match(after.byKey.beta.result_summary, /dispatch failed/);
+  assert.match(after.byKey.beta.result_summary, /no runtime to run on/, '실패 지점이 room 생성 앞의 런타임 해소다');
   assert.equal(
-    detail.total_visits,
-    1,
+    after.detail.total_visits,
+    2,
     '전송 직전 커밋 지점 **앞에서** 던진 실패는 예산을 소진하지 않는다 — ' +
-      '성공한 alpha 1건만 계상된다',
+      '성공한 kickoff·alpha 2건만 계상된다',
   );
   assert.equal(
     await ds.getRepository('ChatRoom').count({ where: { orchestration_step_id: byKey.beta.id } }),

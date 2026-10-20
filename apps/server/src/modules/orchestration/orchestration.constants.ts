@@ -495,7 +495,12 @@ export interface PlanStepInput {
   instructions?: string;
   acceptance_criteria?: string;
   depends_on?: string[];
+  /** Roster slot id (from the brief's "Your team") that executes this step. */
+  assignee?: string;
+  /** Deprecated alias of `assignee`. */
   assignee_agent_id?: string;
+  /** Mission project the step works on — required when the assignee can work on more than one. */
+  project?: string;
   /** 'auto'(기본) | 'manual'. `StepRetryPolicy` 참고 — 티켓 4d065f82. */
   retry_policy?: StepRetryPolicy;
 }

@@ -25,8 +25,8 @@ interface ProjectFolderHelperProps {
  * "Use project folder" — fills a runtime's working_dir with a project's main
  * clone folder on the selected host (docs/tickets.md → "Main clone folder per
  * host"). Shared by RuntimeSpecEditor (tickets, a project's default assignee,
- * every DeclareRuntimeSection) and the orchestration team-slot editor, so the
- * rule lives once. Renders nothing while the account has no projects.
+ * every DeclareRuntimeSection), so the rule lives once. Renders nothing while
+ * the account has no projects.
  */
 export default function ProjectFolderHelper({
   accountId,

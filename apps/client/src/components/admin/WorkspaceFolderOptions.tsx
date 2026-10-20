@@ -52,9 +52,10 @@ export function initWorkspaceFolderState(src: {
 }
 
 /**
- * `RepoRefPicker` 가 실제로 읽고 쓰는 필드만 추린 것. Orchestration Mission 모달처럼
- * workspace_folder/build_mode 개념이 없는 폼도 repo 블록만 떼어 재사용할 수 있게,
- * 넓은 `WorkspaceFolderFormState` 대신 이 좁은 타입을 요구한다(티켓 eb9cdd1c).
+ * `RepoRefPicker` 가 실제로 읽고 쓰는 필드만 추린 것. workspace_folder/build_mode 개념이
+ * 없는 폼도 repo 블록만 떼어 재사용할 수 있게, 넓은 `WorkspaceFolderFormState` 대신 이
+ * 좁은 타입을 요구한다(티켓 eb9cdd1c). Orchestration Mission 모달은 이제 단일 repo 가
+ * 아니라 project 목록을 고르므로 이 피커를 쓰지 않는다(MissionProjectsSection).
  */
 export type RepoRefFormState = Pick<WorkspaceFolderFormState, 'repoProjectId' | 'repoUrl' | 'repoBranch'>;
 

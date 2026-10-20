@@ -2389,20 +2389,23 @@ export type OrchestrationStepStatus =
   /** confirm 노드가 사람의 Pass/Fail 판정을 기다리는 durable pause(티켓 5dbe4aa2). */
   | 'awaiting_user';
 
-/** Where a roster slot's step actually runs. See the server's MemberFolderScope. */
+/**
+ * Where a mission's steps run inside their project's folder: `shared` = in the
+ * folder itself (members on one host share the tree), `isolated` = a fresh
+ * checkout per step under it. See the server's MemberFolderScope.
+ */
 export type OrchestrationFolderScope = 'shared' | 'isolated';
 
 /**
- * A roster slot's runtime, as declared in the team editor: Runtime Host + CLI +
- * model + working folder. This — not a pre-existing Agent — is what defines a
- * team member; the backing Agent identity is provisioned from it server-side.
+ * A roster slot, as declared in the team editor: Runtime Host + CLI + model
+ * (+ credential / backend / execution config). No folder — a team is reused
+ * across missions, and each mission's projects decide where a slot works (that
+ * project's folder on the slot's host).
  */
 export interface OrchestrationSlotSpecInput {
   manager_agent_id: string;
   cli: string;
   model?: string | null;
-  working_dir: string;
-  folder_scope?: OrchestrationFolderScope;
   credential_id?: string | null;
   cli_runtime_profile?: string | null;
   runtime_config?: Record<string, any> | null;
@@ -2413,17 +2416,14 @@ export interface OrchestrationSlotRuntime extends OrchestrationSlotSpecInput {
   manager_name: string;
   manager_online: boolean;
   model: string | null;
-  folder_scope: OrchestrationFolderScope;
   credential_id: string | null;
   cli_runtime_profile: string | null;
   runtime_config: Record<string, any> | null;
-  /** Other slots on this team in the same folder on the same host. */
-  shared_with: string[];
 }
 
 export interface OrchestrationTeamMember {
+  /** The slot's address — a mission excludes it, and assigns steps to it, by this id. */
   id: string;
-  agent_id: string;
   agent_name: string;
   agent_type: string;
   is_online: boolean;
@@ -2440,8 +2440,8 @@ export interface OrchestrationTeamMember {
  * 서버의 MissionExtraMember 와 같은 모양이다.
  */
 export interface OrchestrationMissionExtraMember {
-  /** spec 에서 계산된 runtime identity key — step assignee 로 지목되는 값. */
-  agent_id: string;
+  /** 로스터 주소 — step 이 배정되는 값. */
+  slot_id: string;
   role_label: string;
   capabilities: string;
   max_concurrent: number;
@@ -2467,7 +2467,6 @@ export interface OrchestrationTeam {
   allowed_account_ids: string[];
   name: string;
   description: string;
-  orchestrator_agent_id: string | null;
   orchestrator_name: string;
   orchestrator_online: boolean;
   orchestrator_runtime: OrchestrationSlotRuntime | null;
@@ -2507,6 +2506,35 @@ export interface OrchestrationPostAction {
   room_id?: string | null;
   error?: string;
   dispatched_at?: string | null;
+}
+
+/** One project a mission works on. `branch` '' = the project's default branch. */
+export interface OrchestrationMissionProjectInput {
+  project_id: string;
+  branch?: string;
+}
+
+export interface OrchestrationMissionProject {
+  project_id: string;
+  branch: string;
+  /** Resolved project name ('' when the project no longer exists). */
+  name: string;
+}
+
+/** A started mission's frozen roster: which slot works on which project, in which folder. */
+export interface OrchestrationMissionRoster {
+  folder_scope: OrchestrationFolderScope;
+  orchestrator: { name: string; project_id: string; working_dir: string } | null;
+  members: Array<{
+    slot_id: string;
+    kind: string;
+    name: string;
+    role_label: string;
+    cli: string;
+    model: string | null;
+    max_concurrent: number;
+    projects: Array<{ project_id: string; working_dir: string }>;
+  }>;
 }
 
 // Mission repo (docs/tickets.md): `project_id` replaces the repository-Resource
@@ -2663,9 +2691,17 @@ export interface OrchestrationStep {
   instructions: string;
   acceptance_criteria: string;
   depends_on: string[];
+  /** The roster slot the orchestrator assigned the step to. Absent on old server responses. */
+  assignee_slot?: string | null;
+  /** The execution identity the step runs as (slot × project folder). */
   assignee_agent_id: string | null;
   assignee_name: string;
   assignee_online: boolean;
+  /** The mission project the step works on. Absent on old server responses. */
+  project_id?: string | null;
+  project_name?: string;
+  /** The folder the step runs in on its host ('' when unassigned). */
+  working_dir?: string;
   status: OrchestrationStepStatus;
   position: number;
   plan_version: number;
@@ -2677,7 +2713,7 @@ export interface OrchestrationStep {
   dispatched_at: string | null;
   started_at: string | null;
   finished_at: string | null;
-  /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
+  /** isolated 미션에서 이 step 의 project 폴더 아래 체크아웃 상대 경로. */
   workspace_folder: string;
   /** loop 재진입 횟수(1-based, 미실행 0). attempt(같은 iteration의 재시도)와 다른 축. */
   visit: number;
@@ -2755,7 +2791,7 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   completion_criteria: OrchestrationCompletionCriterion[];
   post_actions: OrchestrationPostAction[];
   /**
-   * 이번 미션에서만 제외된 팀 멤버의 agent_id 목록. `[]` = 제외 없음.
+   * 이번 미션에서만 제외된 팀 멤버(행 id) 목록. `[]` = 제외 없음.
    * 구 서버 응답에는 없으므로 옵셔널 — 없을 때는 제외 없음으로 취급한다.
    */
   excluded_member_ids?: string[];
@@ -2764,9 +2800,15 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
    * 구 서버 응답에는 없으므로 옵셔널 — 없을 때는 추가 없음으로 취급한다.
    */
   extra_members?: OrchestrationMissionExtraMember[];
+  /** 이 미션의 project 들 — 첫 항목이 primary. 이름은 서버가 조회해 붙인다(사라진 project 는 ''). */
+  projects: OrchestrationMissionProject[];
+  /** step 이 project 폴더 자체에서 도는지(shared), step 별 체크아웃에서 도는지(isolated). */
+  folder_scope: OrchestrationFolderScope;
+  /** 시작 때 확정한 로스터(누가 어느 project 를 어느 폴더에서 맡는지). 시작 전이면 null. */
+  roster: OrchestrationMissionRoster | null;
+  /** isolated 미션의 step 체크아웃 루트(project 폴더 기준 상대 경로). */
   resolved_workspace_folder: string;
   workspace_folder: string;
-  repo_ref: OrchestrationRepoRef | null;
   checkout_mode: 'reuse' | 'fresh';
   plan_summary: string;
   result_summary: string;
@@ -2826,8 +2868,6 @@ export interface OrchestrationRuntimeHost {
    */
   available_models: Record<string, string[]>;
   cli_versions: Record<string, string>;
-  /** Working folders already used on this host — the "share a folder" picker. */
-  working_dirs: string[];
 }
 
 /** Payload of the `orchestration_update` SSE frame (UI-only event). */

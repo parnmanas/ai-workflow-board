@@ -30,8 +30,9 @@
  * there is no MCP tool for that and there will not be one; "Team = a human
  * grants an agent authority over a roster, Mission = that agent exercising it"
  * is the boundary this file enforces. create_orchestration_mission only lets
- * the team's own orchestrator_agent_id start work for a team a human already
- * built; it takes no orchestrator_agent_id / members / team_name input.
+ * the team's own orchestrator (its orchestrator slot running in some project
+ * folder) start work for a team a human already built; it takes no
+ * orchestrator / members / team_name input.
  *
  * Authorization is per-mission, not per-scope: the runner checks the calling
  * agent id against `mission.orchestrator_agent_id` / `step.assignee_agent_id`
@@ -52,7 +53,7 @@ import { ok, err } from '../shared/helpers';
 import { callerHoldsId, getCallerAgent } from '../shared/session-auth';
 import type { OrchestrationCaller } from '../../orchestration/orchestration.constants';
 import { isInFlight } from '../../orchestration/orchestration.constants';
-import { loadMissionProject, projectFolderForHost } from '../../orchestration/orchestration-project';
+import { loadMissionProjects, readMissionProjects } from '../../orchestration/orchestration-project';
 import { parseTeamAgentSpec } from '../../../common/orchestration-member-spec';
 import { repoRefSchema } from '../../../common/workspace-folder-options';
 import {
@@ -143,8 +144,9 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
 
   server.tool(
     'submit_orchestration_plan',
-    'Submit (or revise) the plan for a mission you orchestrate. Each step names an assignee from your team ' +
-      'and lists the step_keys it depends on; steps with no shared dependency run in PARALLEL. The server ' +
+    'Submit (or revise) the plan for a mission you orchestrate. Each step names an assignee (a slot id from ' +
+      'your roster), the mission project it works on, and the step_keys it depends on; the step runs in that ' +
+      'project\'s folder on the assignee\'s host, and steps with no shared dependency run in PARALLEL. The server ' +
       'immediately dispatches every step whose dependencies are already satisfied — you do not dispatch them ' +
       'yourself. Revising is additive: a step_key that already exists is updated only if it has not started, ' +
       'and steps you omit are kept (use update_orchestration_step to drop one). On a graph-mode mission the ' +
@@ -184,10 +186,21 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
               .array(z.string())
               .optional()
               .describe('step_keys that must finish before this one can start. Omit for steps that can start now.'),
+            assignee: z
+              .string()
+              .optional()
+              .describe('slot id of the team member who executes this step (the `slot` in your brief\'s roster)'),
+            project: z
+              .string()
+              .optional()
+              .describe(
+                'Project id (or exact name) this step works on — one the assignee can work on per the roster. ' +
+                  'Omit only when the assignee can work on just one of the mission\'s projects.',
+              ),
             assignee_agent_id: z
               .string()
               .optional()
-              .describe('agent_id of the team member who executes this step (from the roster in your brief)'),
+              .describe('Deprecated alias of `assignee`.'),
           }),
         )
         .describe('The plan. Order does not matter — dependencies determine execution order.'),
@@ -327,7 +340,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
               ? 'Those steps are now in flight. You will be woken in this room when one fails or when the ' +
                 'wave finishes — wait for that rather than polling.'
               : 'Nothing was dispatchable yet. If that is unexpected, check that every step has an ' +
-                'assignee_agent_id and that its dependencies can actually be satisfied.',
+                'assignee and that its dependencies can actually be satisfied.',
         });
       } catch (e: any) {
         return toolError(e, 'failed to submit plan');
@@ -479,7 +492,18 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     {
       step_id: z.string().describe('Step id from get_orchestration_mission'),
       action: z.enum(['retry', 'reassign', 'amend', 'skip', 'cancel', 'set_retry_budget']),
-      assignee_agent_id: z.string().optional().describe('Required for "reassign"; optional for "retry"'),
+      assignee: z
+        .string()
+        .optional()
+        .describe('Slot id to run the step — required for "reassign"; optional for "retry" / "amend"'),
+      project: z
+        .string()
+        .optional()
+        .describe(
+          'Project the step works on. Omitted on a reassign = keep the step\'s current project (the new ' +
+            'assignee must be able to work on it).',
+        ),
+      assignee_agent_id: z.string().optional().describe('Deprecated alias of `assignee`.'),
       instructions: z.string().optional().describe('Replacement work order for "amend" / "retry"'),
       acceptance_criteria: z.string().optional().describe('Replacement "done when" for "amend" / "retry"'),
       max_attempts: z
@@ -661,12 +685,17 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         }
         const all = await svc.listSteps(mission.id);
         const depKeys = Array.isArray(step.depends_on) ? step.depends_on : [];
-        // The work order's project block, for a member that lost it: the main
-        // clone folder is the one on the host THIS step runs on (hosts differ).
+        // The work order's project block, for a member that lost it: the step's
+        // project and the folder it runs in on THIS step's host (hosts differ).
         // Best-effort — a failed lookup must not block re-reading the work order.
-        const project = await loadMissionProject(ctx.projectsService, mission).catch(() => null);
-        const stepHostId = parseTeamAgentSpec(step.assignee_spec)?.manager_agent_id ?? null;
-        const mainClone = project ? projectFolderForHost(project, stepHostId) : null;
+        const projects = await loadMissionProjects(ctx.projectsService, mission)
+          .then((r) => r.loaded)
+          .catch(() => []);
+        const projectId = step.project_id ?? readMissionProjects(mission)[0]?.project_id ?? null;
+        const project = projects.find((p) => p.id === projectId) ?? null;
+        const execSpec = parseTeamAgentSpec(step.assignee_spec);
+        const stepHostId = execSpec?.manager_agent_id ?? null;
+        const mainClone = project && stepHostId ? project.host_folders.get(stepHostId) ?? null : null;
         return ok({
           step_id: step.id,
           step_key: step.step_key,
@@ -698,9 +727,11 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
                 branch: project.branch,
                 instructions: project.instructions,
                 main_clone_folder: mainClone,
+                working_dir: execSpec?.working_dir ?? null,
                 note: mainClone
-                  ? 'main_clone_folder is this project\'s checkout on the host this step runs on. Never reset, ' +
-                    'clean or switch branches in it unless the step says so.'
+                  ? 'main_clone_folder is this project\'s checkout on the host this step runs on; working_dir is ' +
+                    'where this step runs (the same folder for a shared mission, its own checkout under it for an ' +
+                    'isolated one). Never reset, clean or switch branches in the main clone unless the step says so.'
                   : stepHostId
                     ? 'No main clone folder is registered for this project on the host this step runs on — do not ' +
                       'guess one or use a path from another host.'
@@ -880,9 +911,9 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     'Teams and their rosters are authored by humans in the AWB UI — this tool only reads them. List the ' +
       'orchestration teams you belong to, as orchestrator or member. Use it to find the team_id you need for ' +
       'create_orchestration_mission, or to see who your teammates are. Each member carries a `runtime` block ' +
-      '(Runtime Host, CLI, model, working folder, folder_scope, and who shares that folder): members sharing ' +
-      'one folder on one host can hand work over through the filesystem, members elsewhere must exchange ' +
-      'results through step artifacts.',
+      '(Runtime Host, CLI, model). A team names no folders: each mission decides which projects it works on, ' +
+      'and a member works in a project\'s folder on its own host — get_orchestration_mission shows that ' +
+      'per-mission roster.',
     {},
     async (_args, extra) => {
       const svc = teams();
@@ -932,8 +963,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
   server.tool(
     'create_orchestration_mission',
     'Teams and their rosters are authored by humans in the AWB UI — this tool cannot create or join a team. ' +
-      'It creates a mission for a team you already orchestrate: only the agent named as that team\'s ' +
-      'orchestrator may call this for its team_id (use list_orchestration_teams to find it). This is exercising ' +
+      'It creates a mission for a team you already orchestrate: only that team\'s orchestrator (its orchestrator ' +
+      'slot, running in one of the projects\' folders) may call this for its team_id (use list_orchestration_teams ' +
+      'to find it). Name the mission\'s `projects` — each member works in a project\'s folder on its own host, ' +
+      'so a mission without a project cannot start. This is exercising ' +
       'authority a human already granted when they built the team, not a new autonomy surface — team/roster ' +
       'membership is still entirely human-controlled. Your team allows one open (non-terminal) mission per ' +
       'account at a time; a second attempt for the SAME account is rejected with a 409 naming the existing ' +
@@ -986,21 +1019,37 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           'Actions to dispatch after the mission ends (fire-and-forget — failure to dispatch is recorded but ' +
             'never reopens or changes the mission).',
         ),
+      projects: z
+        .array(
+          z.object({
+            project_id: z.string().describe('Project id (list_projects)'),
+            branch: z.string().optional().describe('Branch to work from; omit for the project default'),
+          }),
+        )
+        .optional()
+        .describe(
+          'The projects this mission works on, primary first. A member works in a project\'s folder on its own ' +
+            'host, so a member whose host has none of these projects\' folders cannot take part — starting fails ' +
+            'and says which. Required to start.',
+        ),
+      repo_ref: repoRefSchema
+        .optional()
+        .describe('Deprecated: one project as { project_id, branch } — use `projects`. A bare `url` is refused.'),
+      folder_scope: z
+        .enum(['shared', 'isolated'])
+        .optional()
+        .describe(
+          'shared (default): each step runs directly in its project\'s folder — members on one host share the ' +
+            'tree. isolated: each step gets its own checkout under that folder.',
+        ),
       workspace_folder: z
         .string()
         .optional()
-        .describe('working_dir-relative root for every step\'s isolated working folder (default: `.awb/orch/<mission id8>`)'),
-      repo_ref: repoRefSchema
-        .optional()
-        .describe(
-          'The project this mission works on — { project_id (preferred), url (raw git URL escape hatch), branch }. ' +
-            'Isolated steps get their own checkout of it, and every brief and work order names the project\'s ' +
-            'main clone folder on each member\'s host. Omit = no repo (nothing is checked out).',
-        ),
+        .describe('isolated only: project-folder-relative root for each step\'s checkout (default: `.awb/orch/<mission id8>`)'),
       checkout_mode: z
         .enum(['reuse', 'fresh'])
         .optional()
-        .describe('How each step\'s folder is prepared (default "reuse"; "fresh" wipes + re-checks-out every dispatch)'),
+        .describe('isolated only: how each step\'s checkout is prepared (default "reuse"; "fresh" wipes + re-checks-out every dispatch)'),
       account_id: z
         .string()
         .optional()
@@ -1035,10 +1084,11 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
 
       try {
         const team = await teamSvc.requireTeamById(args.team_id);
-        if (!team.orchestrator_agent_id || !callerHoldsId(caller, team.orchestrator_agent_id)) {
+        if (!(await teamSvc.isTeamOrchestrator(team, caller))) {
           return err(
-            'you are not the orchestrator of this team — only the agent named as team.orchestrator_agent_id ' +
-              'may create a mission for it. Use list_orchestration_teams to see teams you actually belong to.',
+            'you are not the orchestrator of this team — only its orchestrator slot (running in one of the ' +
+              'account\'s project folders) may create a mission for it. Use list_orchestration_teams to see teams ' +
+              'you actually belong to.',
             { status: 403 },
           );
         }
@@ -1158,8 +1208,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           method: args.method,
           completion_criteria: args.completion_criteria,
           post_actions: args.post_actions,
-          workspace_folder: args.workspace_folder,
+          projects: args.projects,
           repo_ref: args.repo_ref,
+          folder_scope: args.folder_scope,
+          workspace_folder: args.workspace_folder,
           checkout_mode: args.checkout_mode,
           max_steps: maxSteps,
           max_parallel_steps: maxParallelSteps,
@@ -1167,13 +1219,13 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           created_by_type: 'agent',
           created_by: caller.agentId,
           // Stamp the orchestrator NOW, not only on a successful startMission —
-          // already proven above to equal team.orchestrator_agent_id. Without
-          // this a mission left `draft` (start:false, or startMission throwing
-          // below) has orchestrator_agent_id=null forever and no caller can ever
-          // pass requireOrchestrator on it again — not even to close it.
-          // P4c-2b: the TEAM's id, not the caller's — runtime callers act as
-          // their host uuid, which never equals the stored rt- identity.
-          orchestrator_agent_id: team.orchestrator_agent_id,
+          // the caller's identity was proven above to be the team's orchestrator
+          // slot. Without this a mission left `draft` (start:false, or
+          // startMission throwing below) has orchestrator_agent_id=null forever
+          // and no caller can ever pass requireOrchestrator on it again — not
+          // even to close it. startMission replaces it with the orchestrator's
+          // identity in the mission's own project folder.
+          orchestrator_agent_id: caller.runtimeKey || caller.agentId,
         });
 
         let current = mission;
@@ -1190,6 +1242,14 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           }
         }
 
+        // The orchestrator runs in one of the mission's project folders. When the
+        // caller works in none of them, a separate session (the same slot in that
+        // folder) was briefed — saying "you are briefed" would send the caller
+        // into 403s on its own mission.
+        const callerIdentity = caller.runtimeKey || caller.agentId;
+        const briefedElsewhere = !startError && args.start !== false
+          && !!current.orchestrator_agent_id && current.orchestrator_agent_id !== callerIdentity;
+        const orchestratorFolder = String((current.orchestrator_spec as Record<string, any> | null)?.working_dir ?? '');
         return ok({
           mission_id: mission.id,
           status: current.status,
@@ -1197,13 +1257,19 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           note: startError
             ? 'Mission was created but briefing failed (see start_error) — you own it (get_orchestration_mission ' +
               'to inspect it). There is no tool to retry starting an existing draft; once the cause is fixed ' +
-              '(e.g. the team now has members), close this one with complete_orchestration_mission(status:' +
-              '"failed") and call create_orchestration_mission again.'
+              '(e.g. the team now has members, or every member\'s host has a folder for one of the projects), close ' +
+              'this one with complete_orchestration_mission(status:"failed") and call create_orchestration_mission again.'
             : args.start === false
               ? 'Mission created as a draft — you will not be briefed until a human starts it in the AWB UI. ' +
                 'You can still get_orchestration_mission to inspect it or complete_orchestration_mission to ' +
                 'close it and free your team\'s mission slot.'
-              : 'You are now briefed in the mission room. Call submit_orchestration_plan next.',
+              : briefedElsewhere
+                ? `The mission's orchestrator works in one of its project folders (${orchestratorFolder || 'on your host'}), ` +
+                  'which is not the folder you are running in — so a separate orchestrator session was ' +
+                  'briefed in the mission room and owns the plan; you are not this mission\'s orchestrator and ' +
+                  'need do nothing further. To orchestrate a mission yourself, include a project whose folder you ' +
+                  'are working in.'
+                : 'You are now briefed in the mission room. Call submit_orchestration_plan next.',
         });
       } catch (e: any) {
         return toolError(e, 'failed to create mission');

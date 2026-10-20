@@ -92,9 +92,9 @@ test('runtime-hosts feed names every paired Runtime Host and never offers a work
     'executable agents must not appear as Runtime Hosts',
   );
 
-  // The working-folder picker is seeded from the folders already in use on that
-  // host — this is what makes "share a folder with a teammate" a click.
-  assert.ok(Array.isArray(a.working_dirs), 'a host must report a working-folder candidate list');
+  // A slot names no folder (the mission's projects decide where it works), so
+  // the team editor's host feed carries no folder candidates.
+  assert.equal(a.working_dirs, undefined, 'the host feed must not offer slot folders any more');
 });
 
 // ─── 2. Team projection ──────────────────────────────────────────────────────
@@ -106,7 +106,6 @@ test('runtime-hosts feed names every paired Runtime Host and never offers a work
 const SLOT_SPEC = (managerId, extra = {}) => ({
   manager_agent_id: managerId,
   cli: 'hermes',
-  working_dir: '/srv/work/app',
   runtime_config: { strategy: 'single', permission_mode: 'strict' },
   ...extra,
 });
@@ -150,7 +149,6 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
     team_id: team.id,
     title: 'fullname mission',
     objective: 'prove names',
-    orchestrator_agent_id: team.orchestrator_agent_id,
     created_by_type: 'user',
     created_by: 'tester',
   });

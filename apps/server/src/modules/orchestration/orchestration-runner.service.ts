@@ -43,6 +43,7 @@ import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember'
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { RuntimeHost } from '../../entities/RuntimeHost';
+import { Project } from '../../entities/Project';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
@@ -55,7 +56,7 @@ import { AgentManagerCommandService } from '../agent-manager/agent-manager-comma
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { orchestrationError } from './orchestration-errors';
 import { isUuidShapedId, resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
-import { isRuntimeIdentityKey, runtimeIdentityKey } from '../../common/runtime-spec';
+import { runtimeIdentityKey } from '../../common/runtime-spec';
 import {
   CONFIRM_FEEDBACK_MAX,
   CONFIRM_VERDICTS,
@@ -86,6 +87,7 @@ import {
 import {
   ConfirmFeedbackContext,
   DependencyContext,
+  PromptProject,
   RosterEntry,
   renderMissionPrompt,
   renderLeaseRecoveryNudge,
@@ -114,14 +116,30 @@ import {
 import { expandGraphTemplate } from './orchestration-graph-templates';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import {
-  MemberFolderScope,
   TeamAgentSpec,
+  TeamSlotSpec,
+  normalizeMemberFolderScope,
   parseTeamAgentSpec,
+  parseTeamSlotSpec,
 } from '../../common/orchestration-member-spec';
 import { callerHoldsId } from '../mcp/shared/session-auth';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { ProjectsService } from '../projects/projects.service';
-import { MissionProject, loadMissionProject, projectFolderForHost } from './orchestration-project';
+import { MissionProject, loadMissionProjects, projectFolderForHost, readMissionProjects } from './orchestration-project';
+import {
+  ORCHESTRATOR_SLOT_ID,
+  MissionRuntime,
+  MissionRuntimeRoster,
+  RosterSlot,
+  folderMatesOf,
+  orchestratorRuntime,
+  readRuntimeRoster,
+  resolveMissionRoster,
+  resolveStepAssignment,
+  runtimesForSlot,
+  sharedFolderConflict,
+  slotDisplayName,
+} from './orchestration-roster';
 
 /** Synthetic sender the dispatch messages are attributed to, mirroring QA/Actions. */
 const SYSTEM_SENDER_ID = 'system';
@@ -222,46 +240,27 @@ export class OrchestrationRunnerService {
       const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
       if (!team) throw orchestrationError(404, 'orchestration team not found');
       if (team.enabled === 0) throw orchestrationError(409, `team "${team.name}" is disabled`);
-      if (!team.orchestrator_agent_id) throw orchestrationError(400, `team "${team.name}" has no orchestrator agent`);
 
-      // P4c-4: orchestrator 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
-      const orchestratorId = team.orchestrator_agent_id;
-      const orchestratorSpec = parseTeamAgentSpec(team.orchestrator_spec);
-      const orchestratorName = await resolveAgentDisplayName(this.dataSource, orchestratorId);
-      if (!orchestratorName && !isRuntimeIdentityKey(orchestratorId)) {
-        throw orchestrationError(400, 'orchestrator agent no longer exists');
-      }
-      const orchestratorLabel = orchestratorName
-        ?? orchestratorSpec?.cli
-        ?? orchestratorId.slice(0, 11);
+      // Place every slot in the mission's project folders and freeze the result
+      // (orchestration-roster.ts). This is where a missing project folder on a
+      // member's host surfaces — before anything is dispatched.
+      const { roster, projects } = await this.resolveRoster(mission, team);
+      await this.assertNoSharedFolderConflict(mission, roster);
+      const orchestrator = orchestratorRuntime(roster)!;
 
-      const project = await this.missionProject(mission);
-      const roster = await this.buildRosterForMission(mission, project);
-      if (roster.length === 0) {
-        throw orchestrationError(
-          400,
-          `team "${team.name}" has no members available for this mission — every member is excluded ` +
-            `and no ad-hoc member was added. Include at least one member or add an ad-hoc member.`,
-        );
+      // Stored BEFORE the runtimes are prepared: the manager fetches each
+      // identity's credential while it prepares it, and the credential route
+      // finds the identity through this roster (slot-credential-resolver.ts).
+      mission.runtime_roster = roster;
+      await this.missionRepo.save(mission);
+      try {
+        // Do not dispatch until the host has applied the slot credentials.
+        await this.prepareRuntimes(mission, this.runtimeTargets(team, roster, projects));
+      } catch (e) {
+        mission.runtime_roster = null;
+        await this.missionRepo.save(mission);
+        throw e;
       }
-      // Do not dispatch until the host has applied the slot credentials.
-      await this.provisionMissionRoster(mission, team);
-      const briefProject = project
-        ? {
-            id: project.id,
-            name: project.name,
-            repo_url: project.repo_url,
-            branch: project.branch,
-            instructions: project.instructions,
-            own_host: orchestratorSpec
-              ? {
-                  host_name: (await this.hostNames([orchestratorSpec.manager_agent_id])).get(orchestratorSpec.manager_agent_id)
-                    ?? '(unknown host)',
-                  main_clone_folder: projectFolderForHost(project, orchestratorSpec.manager_agent_id),
-                }
-              : null,
-          }
-        : null;
 
       const room = await this.roomRepo.save(
         this.roomRepo.create({
@@ -290,26 +289,31 @@ export class OrchestrationRunnerService {
       );
       await this.addRoomParticipants(
         room.id,
-        orchestratorId,
+        orchestrator.agent_id,
         missionHumanOwner(mission),
-        team.orchestrator_spec ?? null,
+        orchestrator.spec as unknown as Record<string, any>,
       );
 
       mission.room_id = room.id;
-      mission.orchestrator_agent_id = orchestratorId;
-      // P1 dual-write: Spec 직dispatch용 스냅샷. dispatch는 당분간 agent_id를
-      // 읽고, P2에서 이쪽으로 전환한다.
-      mission.orchestrator_spec = team.orchestrator_spec ?? null;
+      mission.orchestrator_agent_id = orchestrator.agent_id;
+      mission.orchestrator_spec = orchestrator.spec as unknown as Record<string, any>;
       mission.status = 'planning';
       mission.started_at = new Date();
       await this.missionRepo.save(mission);
 
+      const hostName = (await this.hostNames([orchestrator.spec.manager_agent_id])).get(orchestrator.spec.manager_agent_id);
       const prompt = renderMissionPrompt({
         mission,
         teamName: team.name,
         teamPrompt: team.orchestrator_prompt,
-        roster,
-        project: briefProject,
+        roster: await this.rosterEntries(team, roster, projects),
+        projects: projects.map(promptProject),
+        ownFolder: {
+          host_name: hostName ?? '(unknown host)',
+          project_name: projects.find((p) => p.id === orchestrator.project_id)?.name ?? '',
+          folder: orchestrator.spec.working_dir,
+        },
+        folderScope: roster.folder_scope,
       });
 
       try {
@@ -318,6 +322,7 @@ export class OrchestrationRunnerService {
         mission.status = 'draft';
         mission.room_id = null;
         mission.started_at = null;
+        mission.runtime_roster = null;
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'error',
@@ -336,19 +341,22 @@ export class OrchestrationRunnerService {
             excluded + extra > 0
               ? ` (roster adjusted for this mission: ${excluded} excluded, ${extra} ad-hoc)`
               : '';
-          return `Mission briefed to orchestrator ${orchestratorLabel} (${roster.length} member(s) available)${overrideNote}`;
+          return `Mission briefed to orchestrator ${roster.orchestrator.name} (${roster.members.length} member(s) ` +
+            `available on ${projects.length} project(s))${overrideNote}`;
         })(),
         actor_type: actor.type,
         actor_id: actor.id,
         actor_name: actor.name,
         data: {
           room_id: room.id,
-          orchestrator_agent_id: orchestratorId,
+          orchestrator_agent_id: orchestrator.agent_id,
           excluded_member_ids: readExcludedMemberIds(mission),
           extra_member_count: readExtraMembers(mission).length,
+          projects: projects.map((p) => p.id),
+          folder_scope: roster.folder_scope,
         },
       });
-      this.logService.info('Orchestration', `mission ${mission.id} started → orchestrator ${orchestratorId}`, {
+      this.logService.info('Orchestration', `mission ${mission.id} started → orchestrator ${orchestrator.agent_id}`, {
         account_id: mission.account_id,
         room_id: room.id,
       });
@@ -508,21 +516,45 @@ export class OrchestrationRunnerService {
       const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
       if (!team) throw orchestrationError(404, 'orchestration team not found');
       if (team.enabled === 0) throw orchestrationError(409, `team "${team.name}" is disabled`);
-      if (!team.orchestrator_agent_id) {
-        throw orchestrationError(409, `team "${team.name}" has no orchestrator agent to reopen this mission with`);
-      }
-      // P4c-4: orchestrator 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
-      if (!isRuntimeIdentityKey(team.orchestrator_agent_id)) {
-        const orchestratorName = await resolveAgentDisplayName(this.dataSource, team.orchestrator_agent_id);
-        if (!orchestratorName) throw orchestrationError(409, 'orchestrator agent no longer exists');
+
+      // 멤버는 지금의 팀으로 다시 계산한다 — 종료 뒤 팀 슬롯(credential·모델)을 고치고
+      // 다시 여는 것이 이 경로의 쓰임새다. 오케스트레이터는 미션 방의 참여자 그대로
+      // 둔다(그 identity 가 방의 대화를 이어 가고, MCP 로 다시 여는 호출자 자신이기도 하다).
+      // project 를 하나도 모르는 옛 미션은 로스터를 만들 수 없으므로, 그 미션이 이미
+      // 쓰던 실행 스냅샷(오케스트레이터 + step)만 다시 준비한다.
+      let targets: Array<{ spec: TeamAgentSpec; label: string }>;
+      let roster: MissionRuntimeRoster | null = null;
+      if (readMissionProjects(mission).length > 0) {
+        const resolved = await this.resolveRoster(mission, team);
+        roster = keepOrchestratorRuntime(resolved.roster, mission);
+        await this.assertNoSharedFolderConflict(mission, roster);
+        targets = this.runtimeTargets(team, roster, resolved.projects);
+      } else {
+        targets = this.legacyRuntimeTargets(team, mission, await this.missions.listSteps(mission.id));
       }
 
       // A human rerun must discard CLI processes that captured stale auth.
       // An orchestrator reopening via MCP must survive its own tool call.
-      await this.provisionMissionRoster(mission, team, {
-        restart: true,
-        preserveAgentId: actor.type === 'agent' ? mission.orchestrator_agent_id : undefined,
-      });
+      // The roster is stored first (the credential route resolves identities
+      // through it) and put back if preparation fails — a failed reopen leaves
+      // the finished mission exactly as it was.
+      const previousRoster = mission.runtime_roster;
+      if (roster) {
+        mission.runtime_roster = roster;
+        await this.missionRepo.save(mission);
+      }
+      try {
+        await this.prepareRuntimes(mission, targets, {
+          restart: true,
+          preserveAgentId: actor.type === 'agent' ? mission.orchestrator_agent_id : undefined,
+        });
+      } catch (e) {
+        if (roster) {
+          mission.runtime_roster = previousRoster;
+          await this.missionRepo.save(mission);
+        }
+        throw e;
+      }
 
       mission.status = 'running';
       mission.finished_at = null;
@@ -623,7 +655,7 @@ export class OrchestrationRunnerService {
       if (input.status === 'failed') mission.failure_reason = 'orchestrator declared the mission failed';
       await this.missionRepo.save(mission);
 
-      const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
+      const orchestratorName = await this.orchestratorName(mission);
       await this.missions.recordEvent(mission, {
         type: input.status === 'completed' ? 'mission_completed' : 'mission_failed',
         message:
@@ -967,7 +999,6 @@ export class OrchestrationRunnerService {
             instructions: s.instructions,
             acceptance_criteria: s.acceptance_criteria,
             depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
-            assignee_agent_id: s.assignee_agent_id ?? undefined,
           })),
         ...input.steps,
       ];
@@ -1053,16 +1084,26 @@ export class OrchestrationRunnerService {
         }
       }
 
-      const roster = await this.buildRosterForMission(mission);
-      const rosterIds = new Set(roster.map((r) => r.agent_id));
+      // Resolve every submitted assignment against the roster the orchestrator
+      // was briefed with, BEFORE anything is written — one bad step rejects the
+      // whole submission rather than half-applying it.
+      const roster = readRuntimeRoster(mission.runtime_roster);
+      const rosterProjects = await this.rosterProjects(mission);
+      const assignments = new Map<string, ReturnType<OrchestrationRunnerService['assignmentFor']>>();
+      const projectOnly = new Map<string, string>();
       for (const s of input.steps) {
-        const assignee = (s.assignee_agent_id || '').trim();
-        if (assignee && !rosterIds.has(assignee)) {
-          throw orchestrationError(
-            400,
-            `step "${s.step_key}": agent ${assignee} is not available for this mission. ` +
-              `Valid assignees: ${roster.map((r) => `${r.agent_name} (${r.agent_id})`).join(', ')}`,
+        const key = String(s.step_key).trim();
+        const assignee = planAssignee(s);
+        if (assignee) {
+          // A step already on record keeps its project unless the plan names
+          // another — the same rule as update_orchestration_step's reassign.
+          const project = s.project || existingByKey.get(key)?.project_id || undefined;
+          assignments.set(
+            key,
+            this.assignmentFor(mission, roster, rosterProjects, { assignee, project }, `step "${key}"`),
           );
+        } else if ((s.project || '').trim()) {
+          projectOnly.set(key, this.missionProjectId(rosterProjects, s.project!, `step "${key}"`));
         }
       }
 
@@ -1070,18 +1111,6 @@ export class OrchestrationRunnerService {
       const created: string[] = [];
       const updated: string[] = [];
       const toSave: OrchestrationStep[] = [];
-      // P1 dual-write: assignee 스펙 스냅샷용 member spec 맵 (raw 복사).
-      // 미션 임시 멤버(extra)도 같은 맵에 얹는다 — step 행의 스냅샷이 그 뒤의
-      // 디스패치·재배정에서 팀 멤버와 동일하게 해소되기 위함이다.
-      const specByAgent = new Map(
-        (await this.memberRepo.find({ where: { team_id: mission.team_id } }))
-          .map((m) => [m.agent_id, m.spec ?? null] as const),
-      );
-      for (const extra of readExtraMembers(mission)) {
-        if (extra?.agent_id && !specByAgent.has(extra.agent_id)) {
-          specByAgent.set(extra.agent_id, (extra.spec ?? null) as any);
-        }
-      }
 
       validated.steps.forEach((s, index) => {
         const key = String(s.step_key).trim();
@@ -1102,8 +1131,10 @@ export class OrchestrationRunnerService {
               instructions: String(s.instructions ?? '').trim(),
               acceptance_criteria: String(s.acceptance_criteria ?? '').trim(),
               depends_on: depends,
-              assignee_agent_id: (s.assignee_agent_id || '').trim() || null,
-              assignee_spec: specByAgent.get((s.assignee_agent_id || '').trim()) ?? null,
+              assignee_slot: assignments.get(key)?.assignee_slot ?? null,
+              project_id: assignments.get(key)?.project_id ?? projectOnly.get(key) ?? null,
+              assignee_agent_id: assignments.get(key)?.assignee_agent_id ?? null,
+              assignee_spec: assignments.get(key)?.assignee_spec ?? null,
               status: 'pending',
               position: index,
               plan_version: nextVersion,
@@ -1134,10 +1165,19 @@ export class OrchestrationRunnerService {
             found.instructions = String(s.instructions ?? '').trim();
             found.acceptance_criteria = String(s.acceptance_criteria ?? '').trim();
             found.depends_on = depends;
-            const assignee = (s.assignee_agent_id || '').trim();
-            if (assignee) {
-              found.assignee_agent_id = assignee;
-              found.assignee_spec = specByAgent.get(assignee) ?? null;
+            const assignment = assignments.get(key);
+            if (assignment) Object.assign(found, assignment);
+            else if (projectOnly.has(key)) {
+              // A new project for an already-assigned step moves it with its slot;
+              // a step with no assignee yet just remembers where it will run.
+              if (found.assignee_slot) {
+                Object.assign(found, this.assignmentFor(
+                  mission, roster, rosterProjects,
+                  { assignee: found.assignee_slot, project: projectOnly.get(key) }, `step "${key}"`,
+                ));
+              } else {
+                found.project_id = projectOnly.get(key)!;
+              }
             }
             found.plan_version = nextVersion;
             updated.push(key);
@@ -1158,7 +1198,7 @@ export class OrchestrationRunnerService {
       if (mission.status === 'planning') mission.status = 'running';
       await this.missionRepo.save(mission);
 
-      const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
+      const orchestratorName = await this.orchestratorName(mission);
       await this.missions.recordEvent(mission, {
         type: 'plan_submitted',
         message:
@@ -1286,7 +1326,7 @@ export class OrchestrationRunnerService {
       mission.graph_revision = (mission.graph_revision ?? 0) + 1;
       await this.missionRepo.save(mission);
 
-      const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
+      const orchestratorName = await this.orchestratorName(mission);
       const summary = applied.changes.map((c) => c.detail).join('; ');
       await this.missions.recordEvent(mission, {
         type: 'graph_patched',
@@ -1325,7 +1365,12 @@ export class OrchestrationRunnerService {
     caller: OrchestrationCaller,
     input: {
       action: 'retry' | 'reassign' | 'amend' | 'skip' | 'cancel' | 'set_retry_budget';
+      /** Roster slot id to (re)assign to. */
+      assignee?: string;
+      /** Deprecated alias of `assignee` (a slot id, or a legacy execution identity). */
       assignee_agent_id?: string;
+      /** Mission project the step works on. Omitted on a reassign = keep the step's project. */
+      project?: string;
       instructions?: string;
       acceptance_criteria?: string;
       reason?: string;
@@ -1350,12 +1395,27 @@ export class OrchestrationRunnerService {
       // Re-read inside the lock: a concurrent report may have changed it between
       // the lookup above and our turn in the queue.
       const fresh = await this.missions.requireStep(stepId);
-      const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
+      const orchestratorName = await this.orchestratorName(mission);
 
-      if (input.assignee_agent_id) {
-        const roster = await this.buildRosterForMission(mission);
-        if (!roster.some((r) => r.agent_id === input.assignee_agent_id)) {
-          throw orchestrationError(400, `agent ${input.assignee_agent_id} is not available for this mission`);
+      // A new assignee and/or project resolves against the mission's roster up
+      // front, so a bad slot or a project its host lacks is rejected before any
+      // state changes.
+      const roster = readRuntimeRoster(mission.runtime_roster);
+      const requestedAssignee = planAssignee(input);
+      const requestedProject = (input.project || '').trim();
+      let assignment: ReturnType<OrchestrationRunnerService['assignmentFor']> | null = null;
+      let projectOnly: string | null = null;
+      if (requestedAssignee || requestedProject) {
+        const rosterProjects = await this.rosterProjects(mission);
+        const slot = requestedAssignee || fresh.assignee_slot || '';
+        if (slot) {
+          assignment = this.assignmentFor(
+            mission, roster, rosterProjects,
+            { assignee: slot, project: requestedProject || fresh.project_id || undefined },
+            `step "${fresh.step_key}"`,
+          );
+        } else {
+          projectOnly = this.missionProjectId(rosterProjects, requestedProject, `step "${fresh.step_key}"`);
         }
       }
 
@@ -1449,10 +1509,8 @@ export class OrchestrationRunnerService {
           if (input.acceptance_criteria !== undefined) {
             fresh.acceptance_criteria = String(input.acceptance_criteria).trim();
           }
-          if (input.assignee_agent_id) {
-            fresh.assignee_agent_id = input.assignee_agent_id;
-            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id, mission);
-          }
+          if (assignment) Object.assign(fresh, assignment);
+          else if (projectOnly) fresh.project_id = projectOnly;
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
             type: 'note',
@@ -1466,12 +1524,11 @@ export class OrchestrationRunnerService {
           break;
         }
         case 'reassign': {
-          if (!input.assignee_agent_id) throw orchestrationError(400, 'assignee_agent_id is required to reassign');
+          if (!assignment) throw orchestrationError(400, 'assignee (a slot id from the roster) is required to reassign');
           if (isInFlight(fresh.status)) {
             throw orchestrationError(409, `step "${fresh.step_key}" is in flight — cannot reassign mid-execution`);
           }
-          fresh.assignee_agent_id = input.assignee_agent_id;
-          fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id, mission);
+          Object.assign(fresh, assignment);
           if (isTerminalStepStatus(fresh.status)) fresh.status = 'pending';
           // 재배정은 needs_recovery 를 벗어나는 명시적 조치다 — 사유를 남겨두면
           // UI 가 이미 처리된 복구 요청을 계속 띄운다.
@@ -1481,7 +1538,10 @@ export class OrchestrationRunnerService {
             type: 'step_assigned',
             step_id: fresh.id,
             step_key: fresh.step_key,
-            message: `Step "${fresh.title}" reassigned to ${await this.agentName(input.assignee_agent_id)} by ${orchestratorName}`,
+            message:
+              `Step "${fresh.title}" reassigned to ` +
+              `${roster?.members.find((m) => m.slot_id === fresh.assignee_slot)?.name ?? fresh.assignee_slot} ` +
+              `by ${orchestratorName}`,
             actor_type: 'agent',
             actor_id: caller.agentId,
             actor_name: orchestratorName,
@@ -1500,7 +1560,7 @@ export class OrchestrationRunnerService {
                   fresh.attempt + 2,
                   MAX_STEP_ATTEMPTS_CEILING,
                 )}) — you can send it together with action "retry" in one call, and amend \`instructions\` or ` +
-                `\`assignee_agent_id\` at the same time. Reuse this step unless the next round is genuinely ` +
+                `\`assignee\` at the same time. Reuse this step unless the next round is genuinely ` +
                 `different work; cloning it into a near-duplicate step splits its history across nodes.`,
             );
           }
@@ -1511,9 +1571,22 @@ export class OrchestrationRunnerService {
           if (input.acceptance_criteria !== undefined) {
             fresh.acceptance_criteria = String(input.acceptance_criteria).trim();
           }
-          if (input.assignee_agent_id) {
-            fresh.assignee_agent_id = input.assignee_agent_id;
-            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id, mission);
+          if (assignment) Object.assign(fresh, assignment);
+          else if (projectOnly) fresh.project_id = projectOnly;
+          else if (fresh.assignee_slot && roster) {
+            // A plain retry re-reads the step's runtime from the mission's roster —
+            // after a reopen that is the CURRENT team's slot (fixed credential,
+            // model). A slot that is no longer on the roster keeps the snapshot it
+            // last ran with rather than failing the retry.
+            try {
+              Object.assign(fresh, this.assignmentFor(
+                mission, roster, await this.rosterProjects(mission),
+                { assignee: fresh.assignee_slot, project: fresh.project_id },
+                `step "${fresh.step_key}"`,
+              ));
+            } catch {
+              // keep the existing snapshot
+            }
           }
           fresh.status = 'pending';
           fresh.finished_at = null;
@@ -2341,22 +2414,23 @@ export class OrchestrationRunnerService {
     if (progress.dispatchable.length === 0) return { dispatched: [], failed: [] };
 
     const byKey = new Map(steps.map((s) => [s.step_key, s]));
-    const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
-    // P4c-3b: 같은 identity를 여러 슬롯이 공유할 수 있어 상한은 max로 합친다.
-    const capByAgent = new Map<string, number>();
-    for (const m of members) {
-      capByAgent.set(m.agent_id, Math.max(capByAgent.get(m.agent_id) ?? 0, m.max_concurrent));
-    }
+    // Capacity is per roster SLOT: two slots in one folder share an execution
+    // identity but are separate workers with their own max_concurrent. A step
+    // from before slots were addressed (no assignee_slot) is counted by its
+    // identity, with the old default of one at a time.
+    const roster = readRuntimeRoster(mission.runtime_roster);
+    const capBySlot = new Map((roster?.members ?? []).map((m) => [m.slot_id, m.max_concurrent]));
+    const loadKey = (s: OrchestrationStep): string =>
+      s.assignee_slot || (s.assignee_agent_id ? `identity:${s.assignee_agent_id}` : '');
 
-    // Live per-agent load, counted across THIS mission only. Cross-mission load
+    // Live per-slot load, counted across THIS mission only. Cross-mission load
     // is intentionally not counted here: a member's real ceiling is enforced by
-    // the agent-manager's own per-agent concurrency gate, and double-counting it
-    // here would deadlock two missions that share a member.
-    const loadByAgent = new Map<string, number>();
+    // the agent-manager's own concurrency gate, and double-counting it here
+    // would deadlock two missions that share a member.
+    const loadBySlot = new Map<string, number>();
     for (const s of steps) {
-      if (isInFlight(s.status) && s.assignee_agent_id) {
-        loadByAgent.set(s.assignee_agent_id, (loadByAgent.get(s.assignee_agent_id) ?? 0) + 1);
-      }
+      const key = loadKey(s);
+      if (isInFlight(s.status) && key) loadBySlot.set(key, (loadBySlot.get(key) ?? 0) + 1);
     }
     let slots = mission.max_parallel_steps - progress.inFlight.length;
 
@@ -2434,8 +2508,9 @@ export class OrchestrationRunnerService {
         }
         continue;
       }
-      const cap = capByAgent.get(agentId) ?? 1;
-      const load = loadByAgent.get(agentId) ?? 0;
+      const slotKey = loadKey(step);
+      const cap = capBySlot.get(step.assignee_slot ?? '') ?? 1;
+      const load = loadBySlot.get(slotKey) ?? 0;
       if (load >= cap) {
         if (step.status !== 'ready') {
           step.status = 'ready';
@@ -2446,7 +2521,7 @@ export class OrchestrationRunnerService {
 
       try {
         await this.dispatchStep(mission, step, steps);
-        loadByAgent.set(agentId, load + 1);
+        loadBySlot.set(slotKey, load + 1);
         slots -= 1;
         dispatched.push(step.step_key);
       } catch (e: any) {
@@ -2529,33 +2604,32 @@ export class OrchestrationRunnerService {
     opts?: { recovery?: boolean },
   ): Promise<void> {
     const agentId = step.assignee_agent_id!;
-    // P4c-2b: rt- assignee는 Agent 행이 없다 — step 스냅샷 → member spec 순으로
-    // 해소한다. uuid assignee는 기존 경로 그대로.
-    // P4c-4: assignee 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
-    // step 스냅샷 → member spec 순으로 해소한다.
-    const agentName = await resolveAgentDisplayName(this.dataSource, agentId);
-    if (!agentName && !isRuntimeIdentityKey(agentId)) {
-      throw orchestrationError(400, `assignee agent ${agentId} no longer exists`);
-    }
-    const memberRowForAgent = await this.memberRepo.findOne({
-      where: { team_id: mission.team_id, agent_id: agentId },
-    });
-    const agentSpec = step.assignee_spec ?? memberRowForAgent?.spec ?? null;
-    const agentLabel = agentName
-      ?? (agentSpec as any)?.label
-      ?? parseTeamAgentSpec(memberRowForAgent?.spec)?.cli
-      ?? parseTeamAgentSpec(agentSpec as any)?.cli
-      ?? agentId.slice(0, 11);
-    // P4c-4: Agent 행 없음 — account 소속 검사는 member 행 스냅샷으로만 한다.
-    if (memberRowForAgent && memberRowForAgent.account_id && memberRowForAgent.account_id !== mission.account_id) {
+    // The step runs from its execution snapshot: the slot placed in the step's
+    // project folder, taken when it was (re)assigned. A step from before that
+    // snapshot existed falls back to the slot row that still carries the folder
+    // it was declared with.
+    const roster = readRuntimeRoster(mission.runtime_roster);
+    const slot = step.assignee_slot ? roster?.members.find((m) => m.slot_id === step.assignee_slot) ?? null : null;
+    const legacyRow = step.assignee_spec
+      ? null
+      : await this.memberRepo.findOne({
+        where: { team_id: mission.team_id, agent_id: agentId },
+        order: { position: 'ASC', created_at: 'ASC' },
+      });
+    const agentSpec = step.assignee_spec ?? legacyRow?.spec ?? null;
+    const execSpec = parseTeamAgentSpec(agentSpec);
+    if (!execSpec) {
       throw orchestrationError(
         400,
-        `assignee slot ${agentLabel} no longer belongs to this mission's account — refusing to dispatch`,
+        `step "${step.step_key}" has no runtime to run on (no slot in a project folder) — reassign it`,
       );
     }
+    const stepHostId = execSpec.manager_agent_id;
+    const stepHostName = (await this.hostNames([stepHostId])).get(stepHostId) ?? '';
+    const agentLabel = slot?.name ?? slotDisplayName(stepHostName, legacyRow?.role_label ?? '', execSpec.cli);
 
     const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
-    const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
+    const orchestratorName = await this.orchestratorName(mission);
 
     // One room per ATTEMPT, not per step: a retry must not inherit the failed
     // attempt's conversation, or the subagent replays its own dead end as history.
@@ -2578,12 +2652,7 @@ export class OrchestrationRunnerService {
         orchestration_step_id: step.id,
       }),
     );
-    await this.addRoomParticipants(
-      room.id,
-      agentId,
-      null,
-      (agentSpec && typeof agentSpec === 'object' ? { ...agentSpec } : null),
-    );
+    await this.addRoomParticipants(room.id, agentId, null, { ...execSpec } as Record<string, any>);
 
     const depKeys = Array.isArray(step.depends_on) ? step.depends_on : [];
     const depSteps = allSteps.filter((s) => depKeys.includes(s.step_key));
@@ -2598,10 +2667,9 @@ export class OrchestrationRunnerService {
         step_key: s.step_key,
         title: s.title,
         status: s.status,
-        assignee_name: s.assignee_agent_id
-          ? depDisplayById.get(s.assignee_agent_id)
-            ?? ((s.assignee_spec as any)?.label || '')
-          : '',
+        assignee_name:
+          (s.assignee_slot ? roster?.members.find((m) => m.slot_id === s.assignee_slot)?.name : undefined)
+          ?? (s.assignee_agent_id ? depDisplayById.get(s.assignee_agent_id) ?? '' : ''),
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
       }));
@@ -2639,39 +2707,29 @@ export class OrchestrationRunnerService {
       await this.missionRepo.save(mission);
     }
 
-    // 이 step이 어디서 도는가 — 담당 슬롯의 `folder_scope`가 결정한다.
+    // 이 step이 어디서 도는가 — 실행 spec 의 폴더(그 step 의 project 의 이 Host 폴더)와
+    // 미션의 `folder_scope` 가 결정한다(실행 spec 에 함께 스냅샷된다).
     //
-    //   isolated: `.awb/orch/<mission-leaf>/<step_key>`를 프로비저닝한다(티켓
-    //     2dc3c62f). 같은 미션의 동시 진행 step끼리 폴더를 공유하지 않으며,
-    //     mission.repo_ref가 있으면 매니저가 그 폴더에 체크아웃까지 해 준다.
-    //     `missionLeaf`는 getMissionDetail의 `resolved_workspace_folder` 계산과
-    //     정확히 동일하다 — leaf를 buildRunProvision이 step id로부터 유도하게
-    //     두지 않고 미리 계산해두는 이유는 그 메서드의 문서 참고.
+    //   isolated: project 폴더 아래 `.awb/orch/<mission-leaf>/<step_key>`를 프로비저닝하고
+    //     그 step 의 project 를 체크아웃한다(티켓 2dc3c62f). 같은 미션의 동시 진행 step
+    //     끼리 폴더를 공유하지 않는다. `missionLeaf`는 getMissionDetail의
+    //     `resolved_workspace_folder` 계산과 정확히 동일하다 — leaf를 buildRunProvision이
+    //     step id로부터 유도하게 두지 않고 미리 계산해두는 이유는 그 메서드의 문서 참고.
     //
     //   shared: **RunProvision을 아예 보내지 않는다.** 그러면 매니저는 폴더를
-    //     따로 만들지도 pin하지도 않고, subagent는 그 에이전트의 working_dir
-    //     자체에서 스폰된다 — 같은 폴더를 가리키는 슬롯끼리 한 트리를 공유하게
-    //     되는 지점이고, 이 기능의 목적이다.
+    //     따로 만들지도 pin하지도 않고, subagent는 project 폴더 자체에서 스폰된다 —
+    //     같은 Host 에서 같은 project 를 맡은 슬롯끼리 한 트리를 공유하는 지점이다.
     //
-    //     여기서 폴더를 "working_dir 루트"로 프로비저닝하지 **않는** 것이
-    //     핵심이다: provision은 `checkout_mode: 'fresh'`에서 대상 폴더를
-    //     `rm -rf` 하므로, 그 대상이 운영자의 실제 작업폴더가 되는 순간
-    //     복구 불가능한 파괴가 된다. 따라서 shared 슬롯은 repo_ref/checkout_mode를
-    //     의도적으로 무시하며(프롬프트가 이를 명시한다), 공유 폴더의 체크아웃
-    //     준비는 운영자의 몫이다 — 애초에 "이미 준비된 트리를 공유한다"가
-    //     shared를 고르는 이유다.
-    // P4c-4: 같은 identity 를 공유하는 슬롯이 둘일 수 있어 findOne 이 어느
-    // 쌍둥이를 돌려줄지 모른다 — position 순으로 먼저 온 행을 "자기"로 보고
-    // mate 에서 뺀다 (결정적이어야 work order 가 매번 같은 이름을 부른다).
-    const memberRow = await this.memberRepo.findOne({
-      where: { team_id: mission.team_id, agent_id: agentId },
-      order: { position: 'ASC', created_at: 'ASC' },
-    });
-    // 스펙이 없는 레거시 member 행은 이 기능 도입 전과 동일하게 동작해야 한다 →
-    // isolated. `parseTeamAgentSpec`이 깨진 스펙도 null로 낮추므로, 읽기 실패가
-    // 조용히 공유 모드로 넘어가(= 격리를 잃어) 버리는 일은 없다.
-    const slotSpec = parseTeamAgentSpec(memberRow?.spec);
-    const folderScope: MemberFolderScope = slotSpec?.folder_scope ?? 'isolated';
+    //     여기서 그 폴더를 프로비저닝하지 **않는** 것이 핵심이다: provision은
+    //     `checkout_mode: 'fresh'`에서 대상 폴더를 `rm -rf` 하므로, 그 대상이 운영자의
+    //     실제 체크아웃이 되는 순간 복구 불가능한 파괴가 된다. 따라서 shared step 은
+    //     checkout_mode 를 의도적으로 무시하며(프롬프트가 이를 명시한다), 그 폴더의
+    //     체크아웃 준비는 운영자의 몫이다.
+    const folderScope = execSpec.folder_scope;
+    const projects = await this.missionProjects(mission);
+    const legacyProjectRef = !step.project_id ? readMissionProjects(mission)[0] ?? null : null;
+    const project = projects.find((p) => p.id === (step.project_id ?? legacyProjectRef?.project_id)) ?? null;
+    const projectRef = readMissionProjects(mission).find((p) => p.project_id === project?.id) ?? null;
 
     const missionLeaf = mission.workspace_folder || mission.id.slice(0, 8);
     const stepWorkspaceFolder = `${missionLeaf}/${step.step_key}`;
@@ -2683,7 +2741,7 @@ export class OrchestrationRunnerService {
           runId: step.id,
           accountId: mission.account_id,
           workspaceFolder: stepWorkspaceFolder,
-          repoRef: mission.repo_ref,
+          repoRef: project ? { project_id: project.id, branch: projectRef?.branch || undefined } : mission.repo_ref,
           checkoutMode: mission.checkout_mode,
         });
 
@@ -2698,20 +2756,17 @@ export class OrchestrationRunnerService {
       : null;
 
     // 프로젝트 폴더는 이 step 을 실제로 돌리는 Host 기준이다 — 매니저가 스폰에 쓰는
-    // 것과 같은 spec(step 스냅샷 → member spec)의 manager_agent_id 로 찾는다.
-    const project = await this.missionProject(mission);
-    const stepHostId = (parseTeamAgentSpec(agentSpec) ?? slotSpec)?.manager_agent_id ?? null;
+    // 것과 같은 실행 spec 의 Host 로 찾는다.
     const stepProject = project
       ? {
-          id: project.id,
-          name: project.name,
-          repo_url: project.repo_url,
-          branch: project.branch,
-          instructions: project.instructions,
-          host_name: stepHostId ? (await this.hostNames([stepHostId])).get(stepHostId) ?? '' : '',
+          ...promptProject(project),
+          host_name: stepHostName,
           main_clone_folder: projectFolderForHost(project, stepHostId),
           checked_out_in_workspace_folder: !!runProvision?.repo,
         }
+      : null;
+    const stepRuntime = roster && slot
+      ? roster.runtimes.find((r) => r.slot_id === slot.slot_id && r.project_id === step.project_id) ?? null
       : null;
 
     const prompt = renderStepPrompt({
@@ -2725,13 +2780,13 @@ export class OrchestrationRunnerService {
       project: stepProject,
       isRetry: step.attempt > 1 || !!opts?.recovery,
       workspaceFolder: runProvision?.workspace_folder,
-      sharedFolder: folderScope === 'shared' && slotSpec
+      sharedFolder: folderScope === 'shared'
         ? {
-            working_dir: slotSpec.working_dir,
-            // 이 트리를 같이 쓰는 같은 팀의 다른 슬롯들. 프롬프트가 이름을 불러
+            working_dir: execSpec.working_dir,
+            // 이 트리를 같이 쓰는 이 미션의 다른 슬롯들. 프롬프트가 이름을 불러
             // 주지 않으면 담당자는 자기 폴더가 사유지라고 가정하고 서로의 파일을
             // 덮어쓴다 — 공유는 알려줘야 협업이 되고, 모르면 사고가 된다.
-            shared_with: await this.folderMates(mission.team_id, slotSpec, agentId, memberRow?.id ?? `extra:${agentId}`, mission),
+            shared_with: roster && stepRuntime ? folderMatesOf(roster, stepRuntime).map((m) => m.name) : [],
           }
         : null,
       graphNode: graphNode
@@ -3121,7 +3176,7 @@ export class OrchestrationRunnerService {
         step.lease_stale_since = now;
         await this.stepRepo.save(step);
 
-        const assigneeName = await this.agentName(step.assignee_agent_id);
+        const assigneeName = await this.assigneeName(mission, step);
         await this.missions.recordEvent(mission, {
           type: 'step_lease_stale',
           step_id: step.id,
@@ -3405,239 +3460,231 @@ export class OrchestrationRunnerService {
     return (await resolveAgentDisplayName(this.dataSource, agentId)) ?? '';
   }
 
+  /** The orchestrator's `<Host>/<cli>` name from the mission's roster, else whatever its identity resolves to. */
+  private async orchestratorName(mission: OrchestrationMission): Promise<string> {
+    return readRuntimeRoster(mission.runtime_roster)?.orchestrator.name || this.agentName(mission.orchestrator_agent_id);
+  }
+
+  /** A step's assignee as people read it: its roster slot's name, else its identity's display name. */
+  private async assigneeName(mission: OrchestrationMission, step: OrchestrationStep): Promise<string> {
+    const slot = step.assignee_slot
+      ? readRuntimeRoster(mission.runtime_roster)?.members.find((m) => m.slot_id === step.assignee_slot)
+      : null;
+    return slot?.name || this.agentName(step.assignee_agent_id);
+  }
+
   /**
-   * The mission's project for the prompts. Best-effort: a failed lookup leaves
-   * the project block out of the prompt (logged) rather than blocking a brief or
-   * a dispatch — the same availability-first stance as `buildRunProvision`.
+   * The mission's projects for a work order. Best-effort: a failed lookup leaves
+   * the project block out of the prompt (logged) rather than blocking a
+   * dispatch — the folder the step runs in is already in its execution spec.
    */
-  private async missionProject(mission: OrchestrationMission): Promise<MissionProject | null> {
-    if (!mission.repo_ref) return null;
+  private async missionProjects(mission: OrchestrationMission): Promise<MissionProject[]> {
+    if (readMissionProjects(mission).length === 0) return [];
     try {
-      return await loadMissionProject(this.projects, mission);
+      return (await loadMissionProjects(this.projects, mission)).loaded;
     } catch (e: any) {
       this.logService.warn('Orchestration', `mission ${mission.id}: project lookup failed — prompt omits it`, {
         mission_id: mission.id,
         err: e?.message || String(e),
       });
-      return null;
+      return [];
     }
   }
 
-  /** RuntimeHost names by id (ids that are not Host rows are simply absent). */
+  /**
+   * RuntimeHost names by id (ids that are not Host rows are simply absent).
+   * Display-only, so a failed lookup yields no names instead of failing the
+   * dispatch or brief that wanted them.
+   */
   private async hostNames(hostIds: string[]): Promise<Map<string, string>> {
     const ids = Array.from(new Set(hostIds.filter((v) => !!v)));
     const out = new Map<string, string>();
     if (ids.length === 0) return out;
-    const rows = await this.dataSource.getRepository(RuntimeHost).find({
-      where: { id: In(ids) },
-      select: { id: true, name: true } as any,
-    });
-    for (const h of rows) if ((h as any)?.name) out.set(h.id, (h as any).name);
+    try {
+      const rows = await this.dataSource.getRepository(RuntimeHost).find({
+        where: { id: In(ids) },
+        select: { id: true, name: true } as any,
+      });
+      for (const h of rows) if ((h as any)?.name) out.set(h.id, (h as any).name);
+    } catch (e: any) {
+      this.logService.warn('Orchestration', `host name lookup failed: ${e?.message || e}`);
+    }
     return out;
   }
 
   /**
-   * `project` (start-of-mission brief only) adds each member's main clone
-   * folder for the mission's project on that member's host. The other callers
-   * only validate assignee ids and leave it out.
-   *
-   * When `excludedIds` / `extraMembers` are given, the team roster is adjusted
-   * to this mission's effective roster: excluded team slots are dropped and
-   * ad-hoc slots are appended. Callers that validate or brief a specific
-   * mission must go through `buildRosterForMission` so the orchestrator only
-   * ever sees — and can only assign — what this mission may actually use.
+   * The mission's effective roster slots — team members minus this mission's
+   * exclusions, plus its ad-hoc members — and the orchestrator's slot. A member
+   * row without a readable spec (a legacy row never re-saved) has nothing to
+   * run and is left out.
    */
-  private async buildRoster(
-    teamId: string,
-    project: MissionProject | null = null,
-    overrides?: { excludedIds?: string[]; extraMembers?: Array<{ agent_id: string; role_label: string; capabilities: string; max_concurrent: number; spec: Record<string, any> }> },
-  ): Promise<RosterEntry[]> {
-    const members = await this.teams.listMembers(teamId);
-    const excluded = new Set((overrides?.excludedIds ?? []).map((id) => String(id)));
-    const live = excluded.size > 0 ? members.filter((m) => !excluded.has(m.agent_id)) : members;
-    // P4c-2b: Agent 행이 없는 rt- 슬롯도 로스터에 포함된다 — spec이 있으면 된다.
-    const specsAll = new Map<string, ReturnType<typeof parseTeamAgentSpec>>(
-      live.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]),
-    );
-    type PresentRow = { id: string; agent_id: string; role_label: string; capabilities: string; max_concurrent: number; agent: null };
-    const present: PresentRow[] = live
-      .filter((m) => (m as any).agent || specsAll.get(m.agent_id))
-      .map((m) => ({ id: m.id, agent_id: m.agent_id, role_label: m.role_label, capabilities: m.capabilities, max_concurrent: m.max_concurrent, agent: null }));
-    for (const extra of overrides?.extraMembers ?? []) {
-      if (!extra?.agent_id || !extra.spec || typeof extra.spec !== 'object') continue;
-      const parsed = parseTeamAgentSpec(extra.spec);
-      if (!parsed) continue;
-      specsAll.set(extra.agent_id, parsed);
-      present.push({
-        id: `extra:${extra.agent_id}`,
-        agent_id: extra.agent_id,
-        role_label: extra.role_label || parsed.cli || '',
-        capabilities: extra.capabilities || '',
-        max_concurrent: Number.isFinite(extra.max_concurrent) && extra.max_concurrent >= 1 ? Math.floor(extra.max_concurrent) : 1,
-        agent: null,
-      });
-    }
-    // The roster is what the orchestrator reads in its brief prompt, so it must
-    // carry the same full name the operator sees in the UI — otherwise two
-    // managers running an agent with the same short name are indistinguishable
-    // to the orchestrator when it assigns steps.
-    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
-    const displayById = await resolveAgentDisplayNamesByIds(
-      this.dataSource,
-      present.map((m) => m.agent_id),
-    );
-    const specs = specsAll;
-    const hostIds = Array.from(
-      new Set(Array.from(specs.values()).filter((sp): sp is NonNullable<typeof sp> => !!sp).map((sp) => sp.manager_agent_id)),
-    );
-    // P4c-4: Host 이름 + presence 는 Host 카탈로그에서 해소한다.
-    // (Agent 테이블 없음 — presence 는 heartbeat 레지스트리 기준이다.)
-    const hostNameById = new Map<string, string>();
-    const hostOnline = new Set<string>();
-    if (hostIds.length > 0) {
-      const hostRows = await this.dataSource.getRepository(RuntimeHost).find({
-        where: { id: In(hostIds) },
-        select: { id: true, name: true } as any,
-      });
-      for (const h of hostRows) {
-        if ((h as any).name) hostNameById.set(h.id, (h as any).name);
-      }
-      try {
-        const team = await this.teamRepo.findOne({ where: { id: teamId }, select: { id: true, account_id: true } as any });
-        const views = await this.teams.listRuntimeHosts((team as any)?.account_id ?? '');
-        for (const v of views) {
-          if (v.is_online) {
-            hostOnline.add(v.manager_agent_id);
-            if (v.legacy_agent_id) hostOnline.add(v.legacy_agent_id);
-          }
-        }
-      } catch {
-        // best-effort — presence 없이도 로스터는 나간다.
-      }
-    }
-    return present.map((m) => {
-      const spec = specs.get(m.agent_id) ?? null;
-      // P4c-4: displayById 는 linked uuid 를 Host bare name 으로만 해소하고
-      // rt- 키는 모른다 — spec 의 host + role_label/cli leaf 로 합성한다
-      // (runbook agent-display-name: 로스터 프롬프트도 구분 가능해야 한다).
-      const hostPart = (spec ? hostNameById.get(spec.manager_agent_id) : undefined)
-        ?? (() => {
-          const resolved = displayById.get(m.agent_id);
-          return resolved && !resolved.includes('/') ? resolved : undefined;
-        })();
-      const leaf = m.role_label || spec?.cli || '';
-      const agent_name = hostPart && leaf
-        ? `${hostPart}/${leaf}`
-        : (displayById.get(m.agent_id) ?? leaf ?? m.agent_id.slice(0, 11));
-      return {
-        agent_id: m.agent_id,
-        agent_name,
+  private async effectiveSlots(
+    mission: OrchestrationMission,
+    team: OrchestrationTeam,
+  ): Promise<{ orchestrator: RosterSlot | null; members: RosterSlot[]; hostName: (id: string) => string }> {
+    const excluded = new Set(readExcludedMemberIds(mission));
+    const rows = (await this.teams.listMembers(team.id))
+      .filter((m) => !excluded.has(m.id) && !(m.agent_id && excluded.has(m.agent_id)));
+    const extras = readExtraMembers(mission);
+    const orchestratorSpec = parseTeamSlotSpec(team.orchestrator_spec);
+
+    const specs = [
+      orchestratorSpec,
+      ...rows.map((m) => parseTeamSlotSpec(m.spec)),
+      ...extras.map((e) => parseTeamSlotSpec(e.spec)),
+    ].filter((sp): sp is TeamSlotSpec => !!sp);
+    const names = await this.hostNames(specs.map((sp) => sp.manager_agent_id));
+    const hostName = (id: string) => names.get(id) ?? '(unknown host)';
+
+    const members: RosterSlot[] = [];
+    for (const m of rows) {
+      const spec = parseTeamSlotSpec(m.spec);
+      if (!spec) continue;
+      members.push({
+        slot_id: m.id,
+        kind: 'member',
+        name: slotDisplayName(names.get(spec.manager_agent_id), m.role_label, spec.cli),
         role_label: m.role_label,
         capabilities: m.capabilities,
         max_concurrent: m.max_concurrent,
-        is_online: spec ? hostOnline.has(spec.manager_agent_id) : false,
-        // Where this member physically runs. The orchestrator plans better with
-        // it than without: two members in one folder on one host can hand work
-        // over through the filesystem, while members on different machines need
-        // their results carried in step artifacts. Without this in the roster the
-        // orchestrator cannot tell those two situations apart and has to assume
-        // the pessimistic one for everybody.
-        runtime: spec
-          ? {
-              host_name: hostNameById.get(spec.manager_agent_id) ?? '(unknown host)',
-              cli: spec.cli,
-              model: spec.model,
-              working_dir: spec.working_dir,
-              folder_scope: spec.folder_scope,
-              folder_mates: present
-                .filter((other) => {
-                  // P4c-4: 같은 identity 를 공유하는 슬롯이 둘일 수 있다 —
-                  // 자기는 행 id 로 제외한다 (agent_id 로 하면 쌍둥이를 못 본다).
-                  if (other.id === m.id) return false;
-                  const os = specs.get(other.agent_id);
-                  return !!os
-                    && os.manager_agent_id === spec.manager_agent_id
-                    && os.working_dir === spec.working_dir;
-                })
-                .map((other) => displayById.get(other.agent_id) ?? (other.role_label || other.agent_id.slice(0, 11))),
-              ...(project ? { project_folder: projectFolderForHost(project, spec.manager_agent_id) } : {}),
-            }
-          : null,
-      };
-    });
-  }
-
-  /**
-   * P1 dual-write helper: member 슬롯의 raw spec 스냅샷. 복사본을 돌려준다 —
-   * step 행에 박히는 시점 이후의 로스터 편집이 과거 스냅샷을 오염시키지 않게.
-   * 미션 임시 멤버(extra)도 먼저 본다 — 팀 멤버와 같은 코드로 디스패치되기 위함이다.
-   * 멤버가 없으면 null (dispatch는 당분간 agent_id를 읽으므로 무해).
-   */
-  private async assigneeSpecSnapshot(
-    teamId: string,
-    agentId: string,
-    mission?: OrchestrationMission | { extra_member_specs?: unknown },
-  ): Promise<Record<string, any> | null> {
-    const id = (agentId || '').trim();
-    if (!id) return null;
-    if (mission) {
-      const extra = readExtraMembers(mission as any).find((e) => e.agent_id === id);
-      if (extra?.spec && typeof extra.spec === 'object' && !Array.isArray(extra.spec)) {
-        return { ...(extra.spec as Record<string, any>) };
-      }
+        spec,
+      });
     }
-    const row = await this.memberRepo.findOne({ where: { team_id: teamId, agent_id: id } });
-    const spec = row?.spec;
-    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
-    return { ...(spec as Record<string, any>) };
+    for (const e of extras) {
+      const spec = parseTeamSlotSpec(e.spec);
+      if (!spec) continue;
+      members.push({
+        slot_id: e.slot_id,
+        kind: 'extra',
+        name: slotDisplayName(names.get(spec.manager_agent_id), e.role_label, spec.cli),
+        role_label: e.role_label || '',
+        capabilities: e.capabilities || '',
+        max_concurrent: Number.isFinite(e.max_concurrent) && e.max_concurrent >= 1 ? Math.floor(e.max_concurrent) : 1,
+        spec,
+      });
+    }
+    const orchestrator: RosterSlot | null = orchestratorSpec
+      ? {
+          slot_id: ORCHESTRATOR_SLOT_ID,
+          kind: 'orchestrator',
+          name: slotDisplayName(names.get(orchestratorSpec.manager_agent_id), '', orchestratorSpec.cli),
+          role_label: '',
+          capabilities: '',
+          max_concurrent: 1,
+          spec: orchestratorSpec,
+        }
+      : null;
+    return { orchestrator, members, hostName };
   }
 
   /**
-   * 특정 미션의 effective roster — 팀 로스터에서 제외 목록을 빼고 임시 멤버를 얹는다.
-   * 브리핑·계획 검증·재배정 검증은 전부 이 경로를 타야 orchestrator 가 볼 수 있는
-   * 멤버와 서버가 허용하는 멤버가 갈리지 않는다.
+   * Resolve the mission's roster against its projects (orchestration-roster.ts),
+   * or throw a 4xx that says exactly what to fix: a missing project, a member
+   * whose host has none of the projects' folders, an empty roster.
    */
-  private buildRosterForMission(
+  private async resolveRoster(
     mission: OrchestrationMission,
-    project: MissionProject | null = null,
-  ): Promise<RosterEntry[]> {
-    return this.buildRoster(mission.team_id, project, {
-      excludedIds: readExcludedMemberIds(mission),
-      extraMembers: readExtraMembers(mission).map((e) => ({
-        agent_id: e.agent_id,
-        role_label: e.role_label,
-        capabilities: e.capabilities,
-        max_concurrent: e.max_concurrent,
-        spec: e.spec,
-      })),
+    team: OrchestrationTeam,
+  ): Promise<{ roster: MissionRuntimeRoster; projects: MissionProject[] }> {
+    const { loaded: projects, missing } = await loadMissionProjects(this.projects, mission);
+    if (missing.length > 0) {
+      throw orchestrationError(
+        409,
+        `project(s) ${missing.join(', ')} no longer exist in this mission's account — edit the mission's projects.`,
+      );
+    }
+    const { orchestrator, members, hostName } = await this.effectiveSlots(mission, team);
+    if (!orchestrator) throw orchestrationError(400, `team "${team.name}" has no orchestrator`);
+    if (members.length === 0) {
+      throw orchestrationError(
+        400,
+        `team "${team.name}" has no members available for this mission — every member is excluded ` +
+          `and no ad-hoc member was added. Include at least one member or add an ad-hoc member.`,
+      );
+    }
+    const resolved = resolveMissionRoster({
+      orchestrator,
+      members,
+      projects,
+      folderScope: normalizeMemberFolderScope(mission.folder_scope),
+      hostName,
+      // An agent-created draft carries its creator; keep it orchestrating when it
+      // is the orchestrator slot in one of this mission's project folders.
+      preferOrchestratorIdentity: mission.status === 'draft' ? mission.orchestrator_agent_id : null,
     });
+    if ('error' in resolved) throw orchestrationError(409, resolved.error);
+    return { roster: resolved.roster, projects };
+  }
+
+  /**
+   * Refuse to run a `shared` mission in a checkout another running `shared`
+   * mission is already writing to — two missions in one tree overwrite each
+   * other's files and fight over the branch.
+   */
+  private async assertNoSharedFolderConflict(mission: OrchestrationMission, roster: MissionRuntimeRoster): Promise<void> {
+    if (roster.folder_scope !== 'shared') return;
+    const others = await this.missionRepo.find({
+      where: { status: In(['planning', 'running', 'paused']) },
+      select: { id: true, title: true, status: true, runtime_roster: true } as any,
+    });
+    const conflict = sharedFolderConflict(
+      roster,
+      others
+        .filter((o) => o.id !== mission.id)
+        .map((o) => ({ id: o.id, title: o.title, status: o.status, roster: readRuntimeRoster(o.runtime_roster) })),
+    );
+    if (!conflict) return;
+    const host = (await this.hostNames([conflict.host])).get(conflict.host) ?? conflict.host;
+    throw orchestrationError(
+      409,
+      `mission "${conflict.mission.title}" (${conflict.mission.status}) is already working in ` +
+        `${conflict.folder} on ${host} with shared folders. Two shared missions in one checkout overwrite each ` +
+        `other's work — wait for it to finish, or run this mission with isolated folders.`,
+    );
+  }
+
+  /** Every runtime of a roster, labelled `<team>/<slot> @ <project>` for the host's logs. */
+  private runtimeTargets(
+    team: OrchestrationTeam,
+    roster: MissionRuntimeRoster,
+    projects: Array<{ id: string; name: string }>,
+  ): Array<{ spec: TeamAgentSpec; label: string }> {
+    const slotName = new Map([roster.orchestrator, ...roster.members].map((m) => [m.slot_id, m.name]));
+    return roster.runtimes.map((r) => ({
+      spec: r.spec,
+      label: `${team.name}/${r.slot_id === ORCHESTRATOR_SLOT_ID ? 'orchestrator' : slotName.get(r.slot_id) ?? r.slot_id}` +
+        ` @ ${projects.find((p) => p.id === r.project_id)?.name ?? r.project_id}`,
+    }));
+  }
+
+  /**
+   * A mission from before missions named projects has no roster to resolve —
+   * its orchestrator and steps carry their own execution snapshots, and those
+   * are what a reopen prepares again. Retrying its existing steps keeps working;
+   * new assignments are refused (no roster), with a message saying so.
+   */
+  private legacyRuntimeTargets(
+    team: OrchestrationTeam,
+    mission: OrchestrationMission,
+    steps: OrchestrationStep[],
+  ): Array<{ spec: TeamAgentSpec; label: string }> {
+    const out: Array<{ spec: TeamAgentSpec; label: string }> = [];
+    const orchestrator = parseTeamAgentSpec(mission.orchestrator_spec);
+    if (orchestrator) out.push({ spec: orchestrator, label: `${team.name}/orchestrator` });
+    for (const step of steps) {
+      const spec = parseTeamAgentSpec(step.assignee_spec);
+      if (spec) out.push({ spec, label: `${team.name}/${step.step_key}` });
+    }
+    return out;
   }
 
   /** Prepare each distinct runtime and wait for its host acknowledgement before dispatch. */
-  private async provisionMissionRoster(
+  private async prepareRuntimes(
     mission: OrchestrationMission,
-    team: OrchestrationTeam,
+    targets: Array<{ spec: TeamAgentSpec; label: string }>,
     opts: { restart?: boolean; preserveAgentId?: string | null } = {},
   ): Promise<void> {
     if (!this.commands) return;
-    const targets: Array<{ spec: TeamAgentSpec; label: string }> = [];
-    const orchSpec = parseTeamAgentSpec(opts.restart
-      ? mission.orchestrator_spec ?? team.orchestrator_spec
-      : team.orchestrator_spec);
-    if (orchSpec) targets.push({ spec: orchSpec, label: `${team.name}/orchestrator` });
-    const excluded = new Set(readExcludedMemberIds(mission));
-    const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
-    for (const m of members) {
-      if (excluded.has(m.agent_id)) continue;
-      const spec = parseTeamAgentSpec((m as any)?.spec);
-      if (!spec) continue;
-      targets.push({ spec, label: `${team.name}/${m.role_label || spec.cli || m.agent_id.slice(0, 8)}` });
-    }
-    for (const extra of readExtraMembers(mission)) {
-      const spec = parseTeamAgentSpec(extra?.spec);
-      if (!spec) continue;
-      targets.push({ spec, label: `${team.name}/ad-hoc:${extra.role_label || spec.cli || extra.agent_id.slice(0, 8)}` });
-    }
     const unique = [...new Map(targets.map((target) => [
       `${target.spec.manager_agent_id}:${runtimeIdentityKey(target.spec)}`, target,
     ])).values()];
@@ -3661,63 +3708,104 @@ export class OrchestrationRunnerService {
   }
 
   /**
-   * Other members of this team whose slot points at the same (host, folder) as
-   * `spec` — the people the dispatched agent is literally sharing a directory
-   * with. Named in the work order so a shared tree reads as collaboration
-   * rather than as an unexplained race.
+   * The brief's "Your team": every assignable slot with the projects it can
+   * work on (and who shares each folder). Host presence is best-effort — the
+   * roster goes out without it rather than not at all.
    */
-  private async folderMates(
-    teamId: string,
-    spec: TeamAgentSpec,
-    selfAgentId: string,
-    selfMemberId: string | null = null,
-    mission?: OrchestrationMission | { extra_member_specs?: unknown; excluded_member_ids?: unknown },
-  ): Promise<string[]> {
-    const members = await this.memberRepo.find({ where: { team_id: teamId } });
-    const excluded = mission ? new Set(readExcludedMemberIds(mission as any)) : new Set<string>();
-    type MateRow = { id: string; agent_id: string; role_label: string; spec: unknown };
-    const rows: MateRow[] = members
-      .filter((m) => !excluded.has(m.agent_id))
-      .map((m) => ({ id: m.id, agent_id: m.agent_id, role_label: m.role_label, spec: m.spec }));
-    if (mission) {
-      for (const extra of readExtraMembers(mission as any)) {
-        if (!extra?.agent_id || !extra.spec) continue;
-        rows.push({ id: `extra:${extra.agent_id}`, agent_id: extra.agent_id, role_label: extra.role_label || '', spec: extra.spec });
+  private async rosterEntries(
+    team: OrchestrationTeam,
+    roster: MissionRuntimeRoster,
+    projects: Array<{ id: string; name: string }>,
+  ): Promise<RosterEntry[]> {
+    const hostIds = roster.members.map((m) => m.spec.manager_agent_id);
+    const names = await this.hostNames(hostIds);
+    const online = new Set<string>();
+    try {
+      for (const v of await this.teams.listRuntimeHosts(team.account_id ?? team.owner_account_id ?? '')) {
+        if (v.is_online) {
+          online.add(v.manager_agent_id);
+          if (v.legacy_agent_id) online.add(v.legacy_agent_id);
+        }
       }
+    } catch {
+      // best-effort — presence 없이도 로스터는 나간다.
     }
-    const mates = rows.filter((m) => {
-      // P4c-4: 쌍둥이 슬롯은 agent_id 가 같아 id 로는 자기를 가릴 수 없다 —
-      // 호출자가 먼저 온 행(position ASC)을 자기라고 지목한다. 임시 멤버(extra)는
-      // 행 id 가 `extra:<agent_id>` 이므로 같은 규칙으로 자기를 가린다.
-      if (selfMemberId ? m.id === selfMemberId : m.agent_id === selfAgentId) return false;
-      const other = parseTeamAgentSpec(m.spec);
-      return !!other
-        && other.manager_agent_id === spec.manager_agent_id
-        && other.working_dir === spec.working_dir;
-    });
-    if (mates.length === 0) return [];
-    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음). rt- 키는 display
-    // 맵이 모르므로 팀 화면과 같은 합성 (`<host>/<role|cli>`)으로 떨어진다 —
-    // work order 가 부르는 이름과 로스터가 보여주는 이름이 같아야 한다.
-    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, mates.map((m) => m.agent_id));
-    const hostIds = Array.from(new Set(mates.map((m) => parseTeamAgentSpec(m.spec)?.manager_agent_id).filter((v): v is string => !!v)));
-    const hostNameById = new Map<string, string>();
-    if (hostIds.length > 0) {
-      const rows = await this.dataSource.getRepository(RuntimeHost).find({
-        where: { id: In(hostIds) },
-        select: { id: true, name: true } as any,
-      });
-      for (const h of rows) if ((h as any)?.name) hostNameById.set(h.id, (h as any).name);
+    return roster.members.map((m) => ({
+      slot_id: m.slot_id,
+      agent_name: m.name,
+      role_label: m.role_label,
+      capabilities: m.capabilities,
+      max_concurrent: m.max_concurrent,
+      is_online: online.has(m.spec.manager_agent_id),
+      runtime: {
+        host_name: names.get(m.spec.manager_agent_id) ?? '(unknown host)',
+        cli: m.spec.cli,
+        model: m.spec.model,
+        projects: runtimesForSlot(roster, m.slot_id).map((r) => ({
+          project_id: r.project_id,
+          project_name: projects.find((p) => p.id === r.project_id)?.name ?? r.project_id,
+          folder: r.spec.working_dir,
+          folder_mates: roster.folder_scope === 'shared' ? folderMatesOf(roster, r).map((x) => x.name) : [],
+        })),
+      },
+    }));
+  }
+
+  /**
+   * Resolve one step assignment (`assignee` slot + optional `project`) against
+   * the mission's frozen roster into the step's assignment fields. `label` names
+   * the step in the error so an orchestrator submitting a whole plan sees which
+   * one is wrong.
+   */
+  private assignmentFor(
+    mission: OrchestrationMission,
+    roster: MissionRuntimeRoster | null,
+    projects: Array<{ id: string; name: string }>,
+    input: { assignee: string; project?: string | null },
+    label: string,
+  ): Pick<OrchestrationStep, 'assignee_slot' | 'project_id' | 'assignee_agent_id' | 'assignee_spec'> {
+    if (!roster) {
+      throw orchestrationError(
+        409,
+        `${label}: this mission has no runtime roster (it started before missions named their projects), so ` +
+          `steps cannot be (re)assigned. Retry existing steps as they are, or ask the operator to start a new ` +
+          `mission with projects.`,
+      );
     }
-    return mates.map((m) => {
-      const hit = displayById.get(m.agent_id);
-      if (hit) return hit;
-      const ms = parseTeamAgentSpec(m.spec);
-      const leaf = m.role_label || ms?.cli || '';
-      const hostPart = (ms ? hostNameById.get(ms.manager_agent_id) : undefined) ?? undefined;
-      if (hostPart && leaf) return `${hostPart}/${leaf}`;
-      return leaf || m.agent_id.slice(0, 11);
+    const resolved = resolveStepAssignment(roster, projects, { slot: input.assignee, project: input.project });
+    if ('error' in resolved) throw orchestrationError(400, `${label}: ${resolved.error}`);
+    return {
+      assignee_slot: resolved.slot.slot_id,
+      project_id: resolved.runtime.project_id,
+      assignee_agent_id: resolved.runtime.agent_id,
+      assignee_spec: { ...resolved.runtime.spec } as Record<string, any>,
+    };
+  }
+
+  /** A project named by a step without an assignee: one of the mission's, by id or unambiguous name. */
+  private missionProjectId(projects: Array<{ id: string; name: string }>, value: string, label: string): string {
+    const wanted = value.trim();
+    const byId = projects.find((p) => p.id === wanted);
+    if (byId) return byId.id;
+    const byName = projects.filter((p) => p.name.toLowerCase() === wanted.toLowerCase());
+    if (byName.length === 1) return byName[0].id;
+    throw orchestrationError(
+      400,
+      `${label}: "${wanted}" is not one of this mission's projects: ` +
+        (projects.map((p) => `${p.name} (${p.id})`).join(', ') || '(the mission names no project)'),
+    );
+  }
+
+  /** The projects a roster's messages name, by id. */
+  private async rosterProjects(mission: OrchestrationMission): Promise<Array<{ id: string; name: string }>> {
+    const refs = readMissionProjects(mission);
+    if (refs.length === 0) return [];
+    const rows = await this.dataSource.getRepository(Project).find({
+      where: { id: In(refs.map((r) => r.project_id)) },
+      select: { id: true, name: true } as any,
     });
+    const nameById = new Map(rows.map((p) => [p.id, p.name]));
+    return refs.map((r) => ({ id: r.project_id, name: nameById.get(r.project_id) ?? r.project_id }));
   }
 
   /**
@@ -3828,6 +3916,44 @@ export function missionHumanOwner(mission: {
   if (mission.created_by_type !== 'user') return null;
   const id = (mission.created_by || '').trim();
   return id ? id : null;
+}
+
+/**
+ * The slot a plan step / step update names: `assignee`, or the deprecated
+ * `assignee_agent_id` alias (a slot id, or an execution identity that maps to
+ * exactly one slot — see resolveStepAssignment).
+ */
+function planAssignee(input: { assignee?: string | null; assignee_agent_id?: string | null }): string {
+  return String(input.assignee || input.assignee_agent_id || '').trim();
+}
+
+/**
+ * A reopen keeps the orchestrator the mission room already has: the members
+ * are re-resolved from the current team, but the orchestrator's runtime is
+ * carried over from the mission's snapshot when there is one — that identity is
+ * the room's participant and, on an MCP reopen, the very caller.
+ */
+function keepOrchestratorRuntime(roster: MissionRuntimeRoster, mission: OrchestrationMission): MissionRuntimeRoster {
+  const spec = parseTeamAgentSpec(mission.orchestrator_spec);
+  const current = orchestratorRuntime(roster);
+  if (!spec || !current) return roster;
+  const kept: MissionRuntime = {
+    slot_id: ORCHESTRATOR_SLOT_ID,
+    project_id: current.project_id,
+    agent_id: runtimeIdentityKey(spec),
+    spec,
+  };
+  return { ...roster, runtimes: [kept, ...roster.runtimes.filter((r) => r.slot_id !== ORCHESTRATOR_SLOT_ID)] };
+}
+
+function promptProject(project: MissionProject): PromptProject {
+  return {
+    id: project.id,
+    name: project.name,
+    repo_url: project.repo_url,
+    branch: project.branch,
+    instructions: project.instructions,
+  };
 }
 
 function normalizeArtifacts(

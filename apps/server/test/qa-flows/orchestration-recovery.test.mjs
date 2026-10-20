@@ -97,8 +97,8 @@ async function stage(t, { label }) {
     return client;
   };
 
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 로 선언하고 폴더는 미션의 project 가 정한다 —
+  // lead/worker 를 미리 만들지 않고, 슬롯 × project 폴더로 계산된 실행 identity 를 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
     name: `Recovery squad ${label}`,
@@ -116,6 +116,7 @@ async function stage(t, { label }) {
     objective: 'ship the thing',
     created_by: HUMAN.id,
     step_timeout_minutes: 30,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 
@@ -556,9 +557,9 @@ async function driveManualRecovery(t, { label, graphEnabled }) {
   const reaper = app.get(services.OrchestrationReaperService);
 
   const ws = await createAccount(app, getDataSourceToken, `rec-${label}`);
-  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
-  // AWB 가 프로비저닝한다 — lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
-  // 팀을 먼저 만든다 — orchestrator 정체성이 팀 생성의 결과물이라 그 api key 는
+  // 로스터 슬롯은 (Runtime Host, CLI, model) 로 선언하고 폴더는 미션의 project 가 정한다 —
+  // lead/worker 를 미리 만들지 않고, 슬롯 × project 폴더로 계산된 실행 identity 를 돌려받는다.
+  // 팀(과 그 project)을 먼저 만든다 — orchestrator identity 가 그 결과물이라 api key 는
   // 그 뒤에야 만들 수 있다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: ws.id,
@@ -582,6 +583,7 @@ async function driveManualRecovery(t, { label, graphEnabled }) {
     created_by: HUMAN.id,
     step_timeout_minutes: 30,
     graph_enabled: graphEnabled,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 

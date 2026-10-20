@@ -126,6 +126,7 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
     objective: 'ship it',
     created_by: HUMAN.id,
     step_timeout_minutes: 45,
+    ...squad.missionDefaults,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 

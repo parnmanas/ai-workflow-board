@@ -77,13 +77,35 @@ export class OrchestrationStep {
   @Column({ type: 'simple-json', nullable: true, default: null })
   depends_on: string[] | null;
 
+  /**
+   * The roster slot this step is assigned to — what the orchestrator chose
+   * (team member row id, or an ad-hoc member's slot id; see
+   * orchestration-roster.ts). Concurrency caps and reassignment are per slot.
+   * null = unassigned, or a step assigned before slots were addressed directly.
+   */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  assignee_slot: string | null;
+
+  /**
+   * The mission project this step works on. With `assignee_slot` it decides the
+   * working folder: that project's folder on the slot's host. null on steps from
+   * before missions named projects.
+   */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  project_id: string | null;
+
+  /**
+   * The execution identity the step runs as — `runtimeIdentityKey(assignee_spec)`.
+   * Room participant, MCP authorization of the step's reports, and "my steps"
+   * lookups all key on this. Derived from (slot, project) at assignment time.
+   */
   @Column({ type: 'varchar', nullable: true, default: null })
   assignee_agent_id: string | null;
 
   /**
-   * Snapshot of the member's `spec` at (re)assignment time (P1). Mission의
-   * orchestrator_spec과 같은 dual-write — P2에서 dispatch가 이쪽을 읽으면
-   * assignee_agent_id는 제거된다. 그 전까지 읽는 쪽은 없다.
+   * Execution spec snapshot taken at (re)assignment time: the slot placed in
+   * the step's project folder, plus the mission's folder scope. Dispatch spawns
+   * from this, so a later team edit never changes a step already planned.
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
   assignee_spec: Record<string, any> | null;
