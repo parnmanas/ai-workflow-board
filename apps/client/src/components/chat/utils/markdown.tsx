@@ -19,6 +19,30 @@ import CodeBlock from '../../common/CodeBlock';
 const ROLE_SHORTCUTS = new Set(['reviewer', 'assignee', 'reporter']);
 const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;
 
+function trimAutoLinkEnd(candidate: string): string {
+  const brackets: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+  const balance: Record<string, number> = { '(': 0, '[': 0, '{': 0 };
+  for (const char of candidate) {
+    if (char in balance) balance[char]++;
+    else if (char in brackets) balance[brackets[char]]--;
+  }
+
+  let end = candidate.length;
+  while (end > 0) {
+    const char = candidate[end - 1];
+    const opening = brackets[char];
+    if (opening && balance[opening] < 0) {
+      balance[opening]++;
+      end--;
+    } else if (/[.,!?;:]/.test(char)) {
+      end--;
+    } else {
+      break;
+    }
+  }
+  return candidate.slice(0, end);
+}
+
 export interface MentionParticipant {
   id: string;
   name: string;
@@ -218,7 +242,7 @@ function renderInlineMarkdown(text: string, participants?: MentionParticipant[])
         }
 
         // Step 2: Apply bold, italic, links to non-mention, non-code segments
-        const segments = mp.split(/(\*\*[^*]+\*\*|\*[^*]+\*|https?:\/\/[^\s]+)/g);
+        const segments = mp.split(/(\*\*[^*]+\*\*|\*[^*]+\*|https?:\/\/[^\s<>"']+)/g);
         for (const seg of segments) {
           if (!seg) continue;
           if (seg.startsWith('**') && seg.endsWith('**') && seg.length > 4) {
@@ -231,9 +255,14 @@ function renderInlineMarkdown(text: string, participants?: MentionParticipant[])
             nodes.push(<em key={keyIdx++}>{seg.slice(1, -1)}</em>);
           } else if (/^https?:\/\//.test(seg)) {
             // T-07-12: Only allow http/https — reject javascript: and data: schemes
+            // Keep balanced URL brackets, but leave surrounding prose outside the link.
+            const href = trimAutoLinkEnd(seg);
             nodes.push(
-              <InlineLink key={keyIdx++} href={seg} />,
+              <InlineLink key={keyIdx++} href={href} />,
             );
+            if (href.length < seg.length) {
+              nodes.push(<React.Fragment key={keyIdx++}>{seg.slice(href.length)}</React.Fragment>);
+            }
           } else {
             nodes.push(<React.Fragment key={keyIdx++}>{seg}</React.Fragment>);
           }
