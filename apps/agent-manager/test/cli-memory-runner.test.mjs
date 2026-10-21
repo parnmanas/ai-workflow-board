@@ -20,9 +20,19 @@ const { cliModulesWith } = await import('../dist/lib/clis/index.js');
 
 const UUID = '11111111-2222-3333-4444-555555555555';
 
-async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'awb-mem-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+/**
+ * `alias` — fixture 를 심볼릭 링크 별칭 경로로 잡는다. 선언 경로(별칭)와 realpath(실제)가 글자로 다르게 되어
+ * Windows 의 8.3 단축명(`C:\\Users\\RUNNER~1\\…` vs realpath 의 `runneradmin`)과 같은 종류의 불일치를 재현한다.
+ */
+async function fixture(t, { alias = false } = {}) {
+  const real = await mkdtemp(join(tmpdir(), 'awb-mem-'));
+  t.after(() => rm(real, { recursive: true, force: true }));
+  let root = real;
+  if (alias) {
+    root = `${real}-alias`;
+    await symlink(real, root, 'dir');
+    t.after(() => rm(root, { force: true }));
+  }
   const claudeHome = join(root, 'claude-home');
   const codexHome = join(root, 'codex-home');
   const hermesHome = join(root, 'hermes-home');
@@ -80,14 +90,14 @@ test('scan: declared locations per CLI, session-home copies are shared, settings
   const global = byPath(claude, join(fx.claudeHome, 'CLAUDE.md'));
   assert.equal(global.loaded, 'always');
   assert.equal(global.hash, memoryHash(await readFile(join(fx.claudeHome, 'CLAUDE.md'))));
-  assert.deepEqual(global.missing_paths, ['~/nope/missing.txt'], '/api/... is not a file path; ~/ resolves against the user home');
+  assert.deepEqual(global.missing_paths, [join('~', 'nope', 'missing.txt')], '/api/... is not a file path; ~/ resolves against the user home');
   assert.equal(byPath(claude, join(fx.claudeHome, 'rules', 'ts.md')).loaded, 'conditional', '`paths:` frontmatter → conditional');
   const index = byPath(claude, join(fx.claudeHome, 'projects', fx.key, 'memory', 'MEMORY.md'));
   assert.equal(index.kind, 'auto_index');
   assert.equal(index.load_limit_lines, 200);
   assert.equal(index.project_dir, fx.project, 'auto memory key maps back to the known project folder');
   const fact = byPath(claude, join(fx.claudeHome, 'projects', fx.key, 'memory', 'fact.md'));
-  assert.deepEqual(fact.missing_paths, ['~/repo/src/old.ts'], 'backticked relative paths resolve against the project folder');
+  assert.deepEqual(fact.missing_paths, [join('~', 'repo', 'src', 'old.ts')], 'backticked relative paths resolve against the project folder');
   assert.equal(byPath(claude, join(fx.project, 'CLAUDE.md')).scope, 'project');
 
   // 세션 홈: 링크된 auto memory 는 shared_with 로만, 전역 지침은 "없음" 자리로.
@@ -158,7 +168,8 @@ test('write: only declared locations; base_hash guards; every change is backed u
 });
 
 test('links: writing through a link replaces the target; link op connects a session home; delete removes only the link', async (t) => {
-  const fx = await fixture(t);
+  // 별칭 경로 위에서 돈다 — 선언 경로와 realpath 가 달라도 메모리 위치끼리의 링크는 허용돼야 한다.
+  const fx = await fixture(t, { alias: true });
   const run = (req) => fx.runner.run({ manager_id: 'mgr', project_dirs: [fx.project], ...req });
   const operator = join(fx.claudeHome, 'CLAUDE.md');
   const slot = join(fx.sessionHomes, 'claude', UUID, 'CLAUDE.md');
@@ -234,5 +245,7 @@ test('referencedPaths ignores URLs and API routes, keeps real absolute and home 
     'see https://example.com/a/b and /api/agent/sessions and /mnt/data/x.md, `~/.codex/AGENTS.md`',
     { projectDir: null, userHome: '/home/u', rootEntries: new Set(['mnt', 'home']), platform: 'linux' },
   );
-  assert.deepEqual(refs.sort(), ['/home/u/.codex/AGENTS.md', '/mnt/data/x.md']);
+  assert.deepEqual(refs.sort(), [join('/home/u', '.codex/AGENTS.md'), '/mnt/data/x.md'].sort());
+  // `~/x` 처럼 구간이 하나여도 홈 아래 경로다(합친 뒤 `/` 로 세던 버그는 Windows 에서 이것을 버렸다).
+  assert.deepEqual(referencedPaths('see ~/notes.md', { projectDir: null, userHome: '/home/u', rootEntries: new Set(), platform: 'linux' }), [join('/home/u', 'notes.md')]);
 });

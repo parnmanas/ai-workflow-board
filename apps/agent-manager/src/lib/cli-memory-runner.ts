@@ -187,14 +187,17 @@ export function referencedPaths(content: string, opts: { projectDir: string | nu
     if (out.size >= PATH_CHECKS_PER_FILE) break;
     let p = trim(m[1]);
     if (p.includes('*') || p.includes('<') || p.includes('{')) continue;
+    // 구간 수는 **합치기 전에** 센다 — Windows 에서 `join(홈, …)` 은 `\` 로 이어 붙여 `/` 로 세면 한 구간이 된다.
     if (p.startsWith('~/')) {
-      p = join(opts.userHome, p.slice(2));
+      const rel = p.slice(2).replace(/\/+$/, '');
+      if (!rel) continue;
+      p = join(opts.userHome, rel);
     } else {
-      const first = p.split('/')[1];
-      if (!first || !opts.rootEntries.has(first)) continue;
+      const parts = p.split('/').filter(Boolean);
+      if (parts.length < 2 || !opts.rootEntries.has(parts[0])) continue;
+      p = p.replace(/\/+$/, '');
     }
-    if (p.split('/').filter(Boolean).length < 2) continue;
-    out.add(p.replace(/\/+$/, '') || p);
+    out.add(p);
   }
   if ((opts.platform ?? process.platform) === 'win32') {
     for (const m of content.matchAll(/\b([A-Za-z]:\\[^\s`'"<>|*?]+)/g)) {
@@ -423,11 +426,26 @@ export class MemoryRunner {
    * 덮어쓰지 못하게 하면서, 흔한 구성(`CLAUDE.md` → `AGENTS.md`)은 어느 탭에서 고쳐도 되게 한다.
    */
   async #linkTargetAllowed(real: string, located: Located[], projectDirs: string[]): Promise<boolean> {
-    const declared = (locs: Located[]) => locs.some((loc) => loc.files.some((f) => f.path === real) || loc.dirs.some((d) => dirname(real) === d.path));
-    if (declared(located)) return true;
+    // 비교는 실제 경로끼리 한다 — 선언 경로는 설정·환경에서 온 문자열이라 realpath 와 글자가 다를 수 있다
+    // (Windows 8.3 단축명 `RUNNER~1`, 링크가 낀 상위 폴더, 대소문자).
+    const key = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+    const realOf = async (p: string) => key(await realpath(p).catch(() => resolve(p)));
+    const target = key(real);
+    const targetDir = key(dirname(real));
+    const declared = async (locs: Located[]): Promise<boolean> => {
+      for (const loc of locs) {
+        if (loc.files.some((f) => key(f.path) === target) || loc.dirs.some((d) => key(d.path) === targetDir)) return true;
+      }
+      for (const loc of locs) {
+        for (const f of loc.files) if (await realOf(f.path) === target) return true;
+        for (const d of loc.dirs) if (await realOf(d.path) === targetDir) return true;
+      }
+      return false;
+    };
+    if (await declared(located)) return true;
     for (const other of this.modules()) {
       if (other.id === located[0]?.module.id) continue;
-      if (declared(await this.#locate(other, projectDirs))) return true;
+      if (await declared(await this.#locate(other, projectDirs))) return true;
     }
     return false;
   }
