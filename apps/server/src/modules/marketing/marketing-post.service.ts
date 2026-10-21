@@ -20,6 +20,7 @@ const LINK_CODE_RE = /\/api\/m\/([A-Za-z0-9]{12})(?![A-Za-z0-9])/g;
 
 export type ConnectorFactory = (channel: OutreachChannel, credentialRepo: Repository<Credential>) => Promise<OutreachConnector>;
 type EmailApprovedHandler = (post: MarketingPost, channel: MarketingChannel, campaign: MarketingCampaign, actor: MarketingActor) => Promise<void>;
+type EmailPreflight = (post: MarketingPost, channel: MarketingChannel, campaign: MarketingCampaign) => Promise<void>;
 
 /** 커뮤니티 글의 실제 본문 — 본문 끝에 공개 문구를 붙인다(비울 수 없다). */
 export function composeCommunityBody(body: string, disclosure: string): string {
@@ -54,6 +55,7 @@ export class MarketingPostService {
   /** 테스트가 가짜 커넥터를 꽂을 수 있게. */
   connectorFactory: ConnectorFactory = resolveChannelConnector;
   private emailApproved: EmailApprovedHandler | null = null;
+  private emailPreflight: EmailPreflight | null = null;
 
   constructor(
     @InjectRepository(MarketingPost) private readonly postRepo: Repository<MarketingPost>,
@@ -69,8 +71,12 @@ export class MarketingPostService {
     });
   }
 
-  /** 메일 발송 서비스가 자기 생성자에서 등록한다(순환 의존을 피하려고). */
-  onEmailApproved(fn: EmailApprovedHandler): void {
+  /**
+   * 메일 발송 서비스가 자기 생성자에서 등록한다(순환 의존을 피하려고). preflight 는 상태를 바꾸기 **전에**
+   * 보낼 수 있는지(공개 주소 · 메일 credential · 수신자 수) 확인한다 — 못 보낼 글을 sending 에 묶어 두지 않게.
+   */
+  onEmailApproved(preflight: EmailPreflight, fn: EmailApprovedHandler): void {
+    this.emailPreflight = preflight;
     this.emailApproved = fn;
   }
 
@@ -218,7 +224,10 @@ export class MarketingPostService {
     }
     const finalBody = post.kind === 'email' ? body : composeCommunityBody(body, campaign.disclosure);
     const next = channel.kind === 'outreach' ? 'publishing' : channel.kind === 'email' ? 'sending' : 'approved';
-    if (next === 'sending' && !this.emailApproved) throw marketingError(503, 'email sending is not available on this server');
+    if (next === 'sending') {
+      if (!this.emailApproved || !this.emailPreflight) throw marketingError(503, 'email sending is not available on this server');
+      await this.emailPreflight({ ...post, title, body } as MarketingPost, channel, campaign);
+    }
     const note = typeof edits.note === 'string' ? edits.note.trim().slice(0, 1000) : '';
     const won = await this.postRepo.createQueryBuilder().update(MarketingPost)
       .set({
@@ -250,7 +259,19 @@ export class MarketingPostService {
     const approved = await this.get(id, accountId);
     if (next === 'publishing') return this.publish(approved, channel);
     if (next === 'sending') {
-      await this.emailApproved!(approved, channel, campaign, actor);
+      try {
+        await this.emailApproved!(approved, channel, campaign, actor);
+      } catch (e: any) {
+        const error = String(e?.message || e).slice(0, 2000);
+        await this.postRepo.createQueryBuilder().update(MarketingPost)
+          .set({ status: 'failed', error })
+          .where('id = :id AND status = :s', { id, s: 'sending' })
+          .execute();
+        await this.audit.record({
+          accountId: post.account_id, campaignId: post.campaign_id, entityType: 'post', entityId: id, action: 'post.failed',
+          actor: SYSTEM_MARKETING_ACTOR, summary: `메일 발송 준비 실패: ${error}`, detail: { error },
+        });
+      }
       return this.get(id, accountId);
     }
     return approved;

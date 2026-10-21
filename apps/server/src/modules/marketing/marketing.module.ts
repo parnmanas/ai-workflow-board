@@ -12,6 +12,8 @@ import { MarketingMetric } from '../../entities/MarketingMetric';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { MarketingFeedback } from '../../entities/MarketingFeedback';
 import { Ticket } from '../../entities/Ticket';
+import { MarketingContact } from '../../entities/MarketingContact';
+import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { Project } from '../../entities/Project';
@@ -38,6 +40,9 @@ import { MarketingPublicController } from './marketing-public.controller';
 import { MarketingFeedbackService } from './marketing-feedback.service';
 import { MarketingFeedbackController } from './marketing-feedback.controller';
 import { AgentsModule } from '../agents/agents.module';
+import { MarketingContactService } from './marketing-contact.service';
+import { MarketingEmailService } from './marketing-email.service';
+import { MarketingContactsController } from './marketing-contacts.controller';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -49,6 +54,7 @@ import { AgentsModule } from '../agents/agents.module';
       MarketingCampaign, MarketingAuditEvent, MarketingChannel,
       MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
       MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
+      MarketingContact, MarketingEmailSend,
       Project, RuntimeHost, OutreachChannel, Credential,
     ]),
     SharedServicesModule,
@@ -59,7 +65,7 @@ import { AgentsModule } from '../agents/agents.module';
   ],
   controllers: [
     MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController,
-    MarketingAnalyticsController, MarketingPublicController, MarketingFeedbackController,
+    MarketingAnalyticsController, MarketingPublicController, MarketingFeedbackController, MarketingContactsController,
   ],
   providers: [
     MarketingAuditService,
@@ -71,6 +77,8 @@ import { AgentsModule } from '../agents/agents.module';
     MarketingPostService,
     MarketingAnalyticsService,
     MarketingFeedbackService,
+    MarketingContactService,
+    MarketingEmailService,
     MarketingAgentService,
     AuthGuard,
     PermissionGuard,
@@ -78,7 +86,7 @@ import { AgentsModule } from '../agents/agents.module';
   exports: [
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
     MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingFeedbackService,
-    MarketingAgentService,
+    MarketingContactService, MarketingEmailService, MarketingAgentService,
   ],
 })
 export class MarketingModule {}

@@ -13,6 +13,7 @@ import { MarketingSpendService } from './marketing-spend.service';
 import { MarketingPostService } from './marketing-post.service';
 import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
+import { MarketingEmailService } from './marketing-email.service';
 import {
   allocationToJson, campaignToJson, channelToJson, feedbackToJson, linkToJson, metricToJson, postToJson, spendToJson,
 } from './marketing-json';
@@ -38,6 +39,7 @@ export class MarketingAgentService {
     private readonly posts: MarketingPostService,
     private readonly analytics: MarketingAnalyticsService,
     private readonly feedback: MarketingFeedbackService,
+    private readonly email: MarketingEmailService,
   ) {}
 
   async listCampaigns(accountIds: string[] | 'all'): Promise<MarketingCampaign[]> {
@@ -79,9 +81,17 @@ export class MarketingAgentService {
       this.spend.list(campaign, undefined, 20),
       this.posts.list(campaign, undefined, 20),
     ]);
+    const channelViews = await Promise.all(channels.map(async (ch) => {
+      const view: Record<string, unknown> = channelToJson(ch);
+      if (ch.kind === 'email' && ch.status === 'active' && ch.config?.list_name) {
+        // 에이전트는 연락처를 볼 수 없다 — 몇 명에게 갈지만 안다.
+        view.audience_count = await this.email.countEligible(campaign.account_id, String(ch.config.list_name));
+      }
+      return view;
+    }));
     return {
       campaign: campaignToJson(campaign),
-      channels: channels.map(channelToJson),
+      channels: channelViews,
       budget,
       recent_spend_requests: open.map((r) => ({
         id: r.id, status: r.status, amount_text: spendToJson(r).amount_text, payee: r.payee, channel_id: r.channel_id,

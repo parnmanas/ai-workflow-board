@@ -11,6 +11,8 @@ import type { MarketingPost } from '../../entities/MarketingPost';
 import type { MarketingLink } from '../../entities/MarketingLink';
 import type { MarketingMetric } from '../../entities/MarketingMetric';
 import type { MarketingFeedback } from '../../entities/MarketingFeedback';
+import type { MarketingContact } from '../../entities/MarketingContact';
+import type { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -285,5 +287,42 @@ export function feedbackToJson(f: MarketingFeedback, forAgent = false) {
     recorded_by_name: f.recorded_by_name,
     cycle_id: f.cycle_id,
     created_at: f.created_at,
+  };
+}
+
+/** 연락처 — 수신거부 토큰은 내보내지 않는다(그 사람의 메일에만 있다). */
+export function contactToJson(c: MarketingContact) {
+  return {
+    id: c.id,
+    account_id: c.account_id,
+    email: c.email,
+    name: c.name,
+    lists: c.lists || [],
+    status: c.status,
+    consent_method: c.consent_method,
+    consent_source: c.consent_source,
+    consent_at: c.consent_at,
+    consent_text_version: c.consent_text_version,
+    night_consent: c.night_consent,
+    country: c.country,
+    timezone: c.timezone,
+    unsubscribed_at: c.unsubscribed_at,
+    unsubscribe_source: c.unsubscribe_source,
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+  };
+}
+
+export function emailSendToJson(s: MarketingEmailSend) {
+  return {
+    id: s.id,
+    post_id: s.post_id,
+    contact_id: s.contact_id,
+    status: s.status,
+    attempts: s.attempts,
+    next_attempt_at: s.next_attempt_at,
+    provider_message_id: s.provider_message_id,
+    error: s.error,
+    sent_at: s.sent_at,
   };
 }
