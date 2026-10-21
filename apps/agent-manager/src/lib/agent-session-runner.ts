@@ -22,12 +22,12 @@ import { AgentSessionStore, refitHistory, type HistoryEvent, type HistoryResult,
 import { AgentSessionDelivery } from './agent-session-delivery.js';
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { describeSessionFailure } from './session-failure.js';
-import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
+import { cliModulesWith, cliSessions, findCliModule } from './clis/index.js';
 import type { CliAsyncQuestion, CliAsyncQuestionWatcher } from './clis/cli-module.js';
 import { findOnPath } from './find-on-path.js';
 import { describeHolders, findLockHolders, killHolder, selectKillTargets, type LockHolder } from './file-lock-holders.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
-import { normalizeCredentialFields } from './credential-fields.js';
+import { acceptRuntimeCredential } from './runtime-credential.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
@@ -1334,24 +1334,16 @@ export class AgentSessionRunner {
     const none: SessionAuth = { label: 'operator-login', source: 'operator', env: {}, stripEnvKeys: [], cliHome: null };
     const credentialId = request.credential_id || '';
     if (!credentialId) return this.#withBackend(cli, request, none, '', undefined);
-    const prefix = sessionCredentialPrefix(cli);
-    if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
+    if (!sessionCredentialPrefix(cli)) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
       ?? ((id: string, account: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, account));
-    const fetched = await fetcher(credentialId, request.account_id || '');
-    if (!fetched) throw Object.assign(new Error('The credential assigned in CLI settings could not be fetched from AWB.'), { code: 'credential_unavailable' });
-    if (!fetched.provider.startsWith(prefix)) {
-      throw Object.assign(new Error(`CLI settings credential provider ${fetched.provider} does not match ${cli}.`), { code: 'credential_provider_mismatch' });
-    }
-    // 줄바꿈 등 공백이 섞인 토큰(터미널에서 접혀 복사된 `claude setup-token` 값)은 헤더
-    // 생성부터 실패한다 — managed-agent 경로와 같은 규칙으로 정리한다.
-    const { fields, repaired } = normalizeCredentialFields(fetched.fields);
-    if (repaired.length) log(`[agent-session ${cli}] credential ${fetched.credential_id.slice(0, 8)} whitespace repaired in: ${repaired.join(', ')}`);
-    const missing = (requiredCredentialFields(fetched.provider) ?? []).filter((key) => !fields[key]);
-    if (missing.length) {
-      throw Object.assign(new Error(`CLI settings credential ${fetched.provider} is missing ${missing.join(', ')} — re-save it in Settings → Credentials.`), { code: 'credential_incomplete' });
-    }
-    const credential: SessionCredential = { ...fetched, fields };
+    // 티켓·채팅·미션이 쓰는 runtime identity 와 같은 규칙으로 받는다(runtime-credential.ts).
+    const credential: SessionCredential = acceptRuntimeCredential(
+      cli,
+      credentialId,
+      await fetcher(credentialId, request.account_id || ''),
+      `[agent-session ${cli}]`,
+    );
     const adapter = createRuntimeCliAdapter(cli);
     const cliHome = join(this.#options.sessionHomesDir, cli, credential.credential_id);
     await mkdir(cliHome, { recursive: true, mode: 0o700 });

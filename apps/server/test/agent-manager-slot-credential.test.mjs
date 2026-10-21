@@ -227,6 +227,23 @@ test('operator_home 스냅샷 + 슬롯 credential이면 재프로비저닝한다
   assert.equal(calls.length, 1);
 });
 
+test('credential 없는 슬롯은 operator_home 으로 준비돼 있으면 건너뛰고, 아니면 재프로비저닝한다', async () => {
+  const spec = { manager_agent_id: 'host-1', cli: 'claude', working_dir: '/repo', credential_id: null };
+  const key = runtimeIdentityKey(spec);
+  const ready = provisionService({
+    credentials: [{ agent_id: key, cli: 'claude', kind: 'operator_home', expires_at_ms: null, refresh_token_present: false }],
+  });
+  const skipped = await ready.svc.provisionSlotIdentity(spec, { accountId: 'w1', issuedBy: 'test', waitForAckMs: 1000 });
+  assert.deepEqual(skipped, { ok: true, reason: 'already_materialized', skipped: true });
+  assert.equal(ready.calls.length, 0, 'a prepared operator-login identity is not respawned on every dispatch');
+
+  const missing = provisionService({
+    credentials: [{ agent_id: key, cli: 'claude', kind: 'missing', expires_at_ms: null, refresh_token_present: false }],
+  });
+  await missing.svc.provisionSlotIdentity(spec, { accountId: 'w1', issuedBy: 'test' });
+  assert.equal(missing.calls.length, 1);
+});
+
 test('호스트 오프라인이면 조용히 실패 분류한다', async () => {
   const svc = new AgentManagerCommandService({ list: () => [] }, { record() {} }, noopLog, {}, {});
   const r = await svc.provisionSlotIdentity(
@@ -363,7 +380,7 @@ test('mission preparation waits for the correlated ack and propagates a host err
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(settled, false, 'emitting the command is not credential readiness');
   outcome = { status: 'error', detail: 'configured credential could not be loaded' };
-  assert.deepEqual(await pending, { ok: false, reason: outcome.detail });
+  assert.deepEqual(await pending, { ok: false, reason: outcome.detail, refused: true }, 'a host error is the host refusing this runtime');
 });
 
 test('mission rerun bypasses healthy heartbeat metadata and sends a full restart spec', async () => {

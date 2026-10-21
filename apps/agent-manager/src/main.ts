@@ -76,7 +76,7 @@ import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
 import { WorktreeManager, worktreeSlug } from './lib/worktree-manager.js';
-import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
+import { AgentManagerCommandHandler, credentialKind } from './lib/agent-manager-commands.js';
 import {
   listManagedAgentDirs,
   readManagedAgentConfig,
@@ -1281,17 +1281,6 @@ async function runRuntime(
         }
       }
       }
-      // Mirror the spawn-time `credential_kind` mapping (see
-      // agent-manager-commands.ts → credentialKind). Rehydrate uses the
-      // on-disk credential snapshot rather than a fresh AWB fetch, so the
-      // mapping has to be in two places — keep the rules identical.
-      const credentialKind: 'subscription' | 'api_key' | 'operator_home' = !credential
-        ? 'operator_home'
-        : credential.provider.endsWith('_subscription')
-          ? 'subscription'
-          : credential.provider.endsWith('_api_key')
-            ? 'api_key'
-            : 'subscription';
       managedAgentContexts.upsert({
         agent_id: id,
         account_id: cfg.account_id || '',
@@ -1313,7 +1302,8 @@ async function runRuntime(
         // auth env vars after a manager restart without re-fetching from AWB.
         credential_provider: credential?.provider ?? null,
         credential_id: credential?.credential_id ?? null,
-        credential_kind: credentialKind,
+        // Same rule as spawn, applied to the on-disk snapshot.
+        credential_kind: credentialKind(credential),
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });

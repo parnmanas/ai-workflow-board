@@ -159,4 +159,50 @@ test('tickets list filters by status, tags and project', async () => {
   assert.equal(byProject.body.tickets[0].assignee.label, agent.runtime_spec.label);
 });
 
+test('the trigger waits for the host to prepare the assignee runtime, and a host refusal stops it', async () => {
+  // Fired unawaited, the preparation (spawn_agent: credential into cli-home) lost
+  // the race to the trigger and tickets ran without their credential.
+  const row = await ds.getRepository('Ticket').findOneBy({ id: first.id });
+  const ticket = { ...row, status: 'in_progress' };
+  const original = dispatcher.commands;
+  try {
+    let release;
+    const prepares = [];
+    dispatcher.commands = {
+      provisionSlotIdentity: (spec, opts) => {
+        prepares.push(opts);
+        return new Promise((resolve) => { release = resolve; });
+      },
+    };
+    const sentBefore = vagent.triggersFor(ticket.id).length;
+    const pending = dispatcher.dispatch(ticket, 'manual');
+    await settle(100);
+    assert.equal(prepares.length, 1);
+    assert.ok(prepares[0].waitForAckMs > 0, 'preparation waits for the host ack');
+    assert.equal(vagent.triggersFor(ticket.id).length, sentBefore, 'no trigger before the runtime is prepared');
+    release({ ok: true, reason: 'provisioned' });
+    assert.equal((await pending).dispatched, true);
+    await vagent.waitForTrigger((t) => t.ticket_id === ticket.id && t.trigger_source === 'manual', 5000);
+
+    dispatcher.commands = {
+      provisionSlotIdentity: async () => ({ ok: false, reason: 'spawn_agent: configured credential cred-x could not be loaded', refused: true }),
+    };
+    const sent = vagent.triggersFor(ticket.id).length;
+    assert.deepEqual(await dispatcher.dispatch(ticket, 'manual'), { dispatched: false, reason: 'runtime_refused' });
+    await settle(100);
+    assert.equal(vagent.triggersFor(ticket.id).length, sent, 'a refused runtime is never triggered on another login');
+    const failed = await ds.getRepository('ActivityLog').findOne({
+      where: { ticket_id: ticket.id, action: 'dispatch_failed' },
+      order: { created_at: 'DESC' },
+    });
+    assert.match(failed.new_value, /could not be loaded/);
+
+    // Offline / timeout says nothing about the runtime — the manager prepares it itself.
+    dispatcher.commands = { provisionSlotIdentity: async () => ({ ok: false, reason: 'provision_ack_timeout' }) };
+    assert.equal((await dispatcher.dispatch(ticket, 'manual')).dispatched, true);
+  } finally {
+    dispatcher.commands = original;
+  }
+});
+
 exitAfterTests();

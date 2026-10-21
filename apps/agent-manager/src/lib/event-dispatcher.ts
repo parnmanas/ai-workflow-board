@@ -26,13 +26,13 @@ import {
   postChatRoomMessage,
   postDispatchAck,
   provisionManagedAgentApiKey,
-  provisionRuntimeApiKey,
 } from './rest.js';
-import { ensureCliHomeDir, readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
+import { readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig, OrdinaryWorkBoardCandidate, OrdinaryWorkCandidates } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
-import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
+import type { ManagedAgentContext, ManagedAgentContextRegistry } from './managed-agent-context.js';
+import type { RuntimeIdentityInput } from './agent-manager-commands.js';
 import type { TicketRepositoryContext, WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFor } from './prompts.js';
@@ -375,6 +375,9 @@ const LEGACY_EFFORT_ALIASES: Record<string, EffortLevel> = { xhigh: 'max' };
  *   - `supervisor` — the TicketSupervisor re-pushes on its own ~60s cadence, so
  *                  the trigger is not lost; replaying only adds a spawn. */
 const MENTION_HOLDER_SERVES_TRIGGER_SOURCES = new Set(['comment', 'supervisor']);
+
+/** Nack reason + comment de-dup key for RuntimeContextRefusedError on a ticket. */
+export const RUNTIME_CREDENTIAL_BLOCKER = 'runtime_credential_unavailable';
 
 export const PI_TICKET_DISPATCH_BLOCK_REASON = 'pi_ticket_mcp_unsupported';
 export const PI_TICKET_DISPATCH_BLOCK_COMMENT =
@@ -1118,6 +1121,21 @@ export interface PromptComposer {
 
 export interface AgentManagerCommandSink {
   handle(raw: string): Promise<void>;
+  /** The routine spawn_agent runs (agent-manager-commands.ts) — the dispatcher
+   *  prepares a runtime it has no context for through it, never on its own. */
+  materializeRuntimeIdentity?(input: RuntimeIdentityInput): Promise<unknown>;
+}
+
+/**
+ * A runtime selected a credential this host could not apply. The event is not
+ * run at all — running it on the operator's login (or the manager's own
+ * identity) instead would hide the failure behind a different account.
+ */
+export class RuntimeContextRefusedError extends Error {
+  constructor(readonly key: string, readonly credentialId: string, readonly detail: string) {
+    super(`runtime ${key} refused: credential ${credentialId.slice(0, 8)} could not be applied — ${detail}`);
+    this.name = 'RuntimeContextRefusedError';
+  }
 }
 
 export interface EventDispatcherDeps {
@@ -1916,91 +1934,118 @@ export class EventDispatcher {
     if (!spec || !this.#managedAgentContexts) return undefined;
     // 채팅 전용 기본 폴더(chat-workdirs.ts)는 매니저가 만든다 — 지워졌어도 다음 디스패치가 되살린다.
     await ensureChatWorkdir(spec.working_dir).catch((err: any) => log(`chat workdir create failed (${spec.working_dir}): ${err?.message ?? err}`));
-    const entry = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec);
-    if (entry) {
-      const ctx: AgentExecutionContext = {
-        agent_id: entry.agent_id,
-        account_id: entry.account_id,
-        api_key: entry.api_key,
-        cwd: entry.working_dir,
-        mcp_config_path: entry.mcp_config_path,
-        cli: spec.cli,
-        cli_home_dir: entry.cli_home_dir,
-        extra_env: entry.extra_env,
-        credential_provider: entry.credential_provider ?? null,
-        credential_id: entry.credential_id ?? null,
-        model: spec.model ?? entry.model ?? null,
-        runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? entry.runtime_config ?? null,
-      };
-      if (!ctx.api_key || !ctx.cwd || !ctx.mcp_config_path) return undefined;
-      return this.#scopeAgentContext(ctx, accountId);
-    }
-    // P4c-2a: tuple miss → self-heal by provisioning a runtime identity instead
-    // of reporting a miss. No Agent row needed: the key + cli-home are keyed by
-    // the stable runtimeIdentityKey, the server binds the key to this host
-    // (host_id from our own pairing-time key), and MCP attribution degrades to
-    // the `runtime:<key>` synthetic identity (P4c-4 reworks display).
-    return this.#provisionRuntimeContext(spec, accountId);
+    // The identity key covers cli + folder + credential but not the model, so an
+    // entry under the key is this runtime even when the snapshot picks another
+    // model (the spec's model wins below). Re-preparing it would rewrite the
+    // cli-home credential under a live CLI for nothing.
+    const prepared = this.#managedAgentContexts.get(runtimeIdentityKey(spec));
+    const entry = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec)
+      ?? (prepared && (prepared.credential_id || null) === (spec.credential_id || null) ? prepared : null)
+      ?? (await this.#materializeRuntime(spec, accountId));
+    if (!entry) return undefined;
+    const ctx: AgentExecutionContext = {
+      agent_id: entry.agent_id,
+      account_id: entry.account_id,
+      api_key: entry.api_key,
+      cwd: entry.working_dir,
+      mcp_config_path: entry.mcp_config_path,
+      cli: spec.cli,
+      cli_home_dir: entry.cli_home_dir,
+      extra_env: entry.extra_env,
+      credential_provider: entry.credential_provider ?? null,
+      credential_id: entry.credential_id ?? null,
+      model: spec.model ?? entry.model ?? null,
+      runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? entry.runtime_config ?? null,
+    };
+    if (!ctx.api_key || !ctx.cwd || !ctx.mcp_config_path) return undefined;
+    return this.#scopeAgentContext(ctx, accountId);
   }
 
   /**
-   * P4c-2a: build an execution context for a runtime tuple with no registry
-   * entry. Guarded: absolute working_dir + non-empty cli required, provision
-   * failure degrades to undefined (caller keeps the legacy miss path).
+   * A runtime tuple with no registry entry: prepare it through the same routine
+   * `spawn_agent` runs (`materializeRuntimeIdentity`) — apiKey, MCP config,
+   * cli-home AND the selected credential — and return the registered entry.
    *
-   * Credential posture is operator-fallback: per-agent credential files are
-   * only prepared by the spawn_agent path (which owns adapter-specific
-   * bootstrap), so a fresh runtime tuple runs on the operator's login until
-   * an operator provisions a credential for it. Logged, never silent.
+   * This used to build a credential-less context of its own ("operator
+   * credential fallback") while the server's fire-and-forget spawn_agent raced
+   * to apply the credential, so whether a ticket or chat turn ran logged in
+   * depended on which event arrived first. Now there is one routine, and a
+   * selected credential that cannot be applied throws RuntimeContextRefusedError
+   * instead of running on another login. Without a credential, a failure
+   * degrades to undefined (the caller's legacy miss path), as before.
    */
-  async #provisionRuntimeContext(
+  async #materializeRuntime(
     spec: TriggerRuntimeSpec,
     accountId: string | undefined | null,
-  ): Promise<AgentExecutionContext | undefined> {
+  ): Promise<ManagedAgentContext | undefined> {
     const dir = (spec.working_dir || '').trim();
     const cli = (spec.cli || '').trim().toLowerCase();
-    const absolute = dir.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\');
-    if (!absolute || !cli) {
-      log(`Runtime provision refused: need absolute working_dir + cli (dir='${dir.slice(0, 80)}' cli='${cli}')`);
-      return undefined;
-    }
-    const scope = String(accountId || '').trim();
-    if (!scope) {
-      log('Runtime provision refused: no account scope for key issuance');
-      return undefined;
-    }
+    const credentialId = (spec.credential_id || '').trim();
     const key = runtimeIdentityKey(spec);
-    try {
-      let apiKey = await readApiKey(key, scope);
-      if (!apiKey) {
-        const issued = await provisionRuntimeApiKey(this.#config, key, scope, spec.label || spec.cli);
-        if (!issued?.raw_key) throw new Error('server refused runtime key issuance');
-        apiKey = issued.raw_key;
-        await writeApiKey(key, apiKey, scope);
-      }
-      const mcpConfigPath = await writeMcpConfig(key, this.#config.url, apiKey, scope);
-      const cliHomeDir = await ensureCliHomeDir(key);
-      log(
-        `Runtime provisioned: key=${key} cli=${cli} model=${spec.model || '(default)'} ` +
-          `dir=${dir} scope=${scope.slice(0, 8)} (operator credential fallback)`,
-      );
-      return {
-        agent_id: key,
-        account_id: scope,
-        api_key: apiKey,
-        cwd: dir,
-        mcp_config_path: mcpConfigPath,
-        cli,
-        cli_home_dir: cliHomeDir,
-        extra_env: undefined,
-        credential_provider: null,
-        credential_id: spec.credential_id ?? null,
-        model: spec.model ?? null,
-        runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? null,
-      };
-    } catch (e: any) {
-      log(`Runtime provision failed: ${e?.message ?? e} (key=${key}) — falling back to legacy miss path`);
+    const refuse = (detail: string): undefined => {
+      if (credentialId) throw new RuntimeContextRefusedError(key, credentialId, detail);
+      log(`Runtime provision refused: ${detail} (key=${key})`);
       return undefined;
+    };
+    const absolute = dir.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\');
+    if (!absolute || !cli) return refuse(`need absolute working_dir + cli (dir='${dir.slice(0, 80)}' cli='${cli}')`);
+    const scope = String(accountId || '').trim();
+    if (!scope) return refuse('no account scope for key issuance');
+    const materialize = this.#agentManagerCommandHandler?.materializeRuntimeIdentity?.bind(this.#agentManagerCommandHandler);
+    if (!materialize) return refuse('no runtime materializer wired');
+    try {
+      await materialize({
+        agent_id: key,
+        name: spec.label || cli,
+        cli,
+        working_dir: dir,
+        model: spec.model || '',
+        runtime_config: (spec.runtime_config as RuntimeIdentityInput['runtime_config']) ?? null,
+        credential_id: credentialId,
+        account_id: scope,
+      });
+    } catch (e: any) {
+      return refuse(String(e?.message ?? e));
+    }
+    const entry = this.#managedAgentContexts?.get(key);
+    if (!entry) return refuse('materialized identity is missing from the context registry');
+    log(
+      `Runtime provisioned: key=${key} cli=${cli} model=${spec.model || '(default)'} ` +
+        `dir=${dir} scope=${scope.slice(0, 8)} credential=${entry.credential_provider || 'operator-login'}`,
+    );
+    return entry;
+  }
+
+  /**
+   * Tell the people waiting on an event that its runtime was refused (see
+   * RuntimeContextRefusedError): a ticket comment once per ticket episode, or a
+   * room message. Retries come from the server (ticket nack backoff) or the
+   * next message, so fixing the credential is all the operator has to do.
+   */
+  async #noticeRuntimeRefused(
+    err: RuntimeContextRefusedError,
+    where: { ticketId?: string; roomId?: string; agentId?: string },
+  ): Promise<void> {
+    log(`Runtime refused: key=${err.key} credential=${err.credentialId.slice(0, 8)} ${err.detail}`);
+    const text =
+      `⚠️ **실행 credential 적용 실패** — 이 런타임에 선택된 credential(\`${err.credentialId.slice(0, 8)}\`)을 ` +
+      `이 Runtime Host 에서 적용하지 못해 실행하지 않았습니다. 다른 로그인으로 대신 실행하지 않습니다.\n\n` +
+      `세부: \`${err.detail.slice(0, 400)}\`\n\n` +
+      `Settings → Credentials 에서 그 credential 을 확인하거나 다시 저장하세요.`;
+    if (where.ticketId) {
+      if (!this.#dispatchBlockers.shouldComment(where.ticketId, RUNTIME_CREDENTIAL_BLOCKER)) return;
+      await fireAndForgetTool(this.#config, 'add_comment', {
+        ticket_id: where.ticketId,
+        content: `${text} 디스패치는 자동으로 다시 시도됩니다.`,
+        metadata: { auto_notice: true }, // 자기 재트리거 방지 — #postDeferAuditComment 주석 참고
+      });
+      return;
+    }
+    if (where.roomId) {
+      await postChatRoomMessage(this.#config, where.roomId, where.agentId || err.key, text).catch((postErr: any) => {
+        log(`runtime-refused notice POST threw: room=${where.roomId} ${postErr?.message ?? postErr}`);
+        return false;
+      });
     }
   }
 
@@ -2793,7 +2838,15 @@ export class EventDispatcher {
     // P4c-1: runtime 스냅샷 튜플 매칭 우선 — 일치하면 spec이 이긴다.
     // 없으면 위 agent_id 경로 그대로 (동작 불변).
     if (triggerRuntime) {
-      const rtCtx = await this.#resolveRuntimeContext(triggerRuntime, ev.account_id);
+      let rtCtx: AgentExecutionContext | undefined;
+      try {
+        rtCtx = await this.#resolveRuntimeContext(triggerRuntime, ev.account_id);
+      } catch (err) {
+        if (!(err instanceof RuntimeContextRefusedError)) throw err;
+        await this.#noticeRuntimeRefused(err, { ticketId: typeof ev.ticket_id === 'string' ? ev.ticket_id : '' });
+        this.#ackDispatch(ev, 'nack', RUNTIME_CREDENTIAL_BLOCKER);
+        return;
+      }
       if (rtCtx) {
         if (!agentContext || rtCtx.agent_id !== agentContext.agent_id) {
           log(
@@ -4169,7 +4222,14 @@ export class EventDispatcher {
     let agentContext = this.#resolveAgentContext(payload.agent_id || '');
     // P4c-1: trigger 경로와 동일 — runtime 스냅샷 튜플 매칭 우선.
     if (chatRuntime) {
-      const rtCtx = await this.#resolveRuntimeContext(chatRuntime, payload.account_id);
+      let rtCtx: AgentExecutionContext | undefined;
+      try {
+        rtCtx = await this.#resolveRuntimeContext(chatRuntime, payload.account_id);
+      } catch (err) {
+        if (!(err instanceof RuntimeContextRefusedError)) throw err;
+        await this.#noticeRuntimeRefused(err, { roomId: payload.room_id, agentId: payload.agent_id });
+        return;
+      }
       if (rtCtx) {
         if (!agentContext || rtCtx.agent_id !== agentContext.agent_id) {
           log(
@@ -4462,7 +4522,14 @@ export class EventDispatcher {
     if (!agentContext) {
       const mentionRuntime = parseTriggerRuntime((ev as any).runtime);
       if (mentionRuntime) {
-        const rtCtx = await this.#resolveRuntimeContext(mentionRuntime, ev.account_id);
+        let rtCtx: AgentExecutionContext | undefined;
+        try {
+          rtCtx = await this.#resolveRuntimeContext(mentionRuntime, ev.account_id);
+        } catch (err) {
+          if (!(err instanceof RuntimeContextRefusedError)) throw err;
+          await this.#noticeRuntimeRefused(err, { ticketId });
+          return;
+        }
         if (rtCtx) {
           log(
             `Comment mention context from runtime snapshot: ticket=${String(ticketId).slice(0, 8)} ` +
@@ -5074,12 +5141,20 @@ export class EventDispatcher {
         ? (p.agent_member_runtimes as Record<string, unknown>)
         : null;
       if (rtSpecs) {
+        let refused: { err: RuntimeContextRefusedError; id: string } | null = null;
         for (const id of memberIds) {
           if (typeof id !== 'string' || !id.startsWith('rt-')) continue;
           if (senderAgentId && id === senderAgentId) continue;
           const spec = parseTriggerRuntime((rtSpecs as Record<string, unknown>)[id]);
           if (!spec) continue;
-          const rtCtx = await this.#resolveRuntimeContext(spec, p.account_id);
+          let rtCtx: AgentExecutionContext | undefined;
+          try {
+            rtCtx = await this.#resolveRuntimeContext(spec, p.account_id);
+          } catch (err) {
+            if (!(err instanceof RuntimeContextRefusedError)) throw err;
+            refused ??= { err, id };
+            continue;
+          }
           if (rtCtx) {
             log(
               `Chat room member from runtime snapshot: room=${String(p.room_id || '').slice(0, 8)} ` +
@@ -5088,6 +5163,11 @@ export class EventDispatcher {
             agentContext = rtCtx;
             break;
           }
+        }
+        // Falling through would answer as the manager's own identity — on its login.
+        if (!agentContext && refused) {
+          await this.#noticeRuntimeRefused(refused.err, { roomId: p.room_id, agentId: refused.id });
+          return;
         }
       }
     }

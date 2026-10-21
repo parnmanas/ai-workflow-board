@@ -35,7 +35,7 @@ import { normalizeAccountEnvelope } from './account-scope.js';
 
 import { log } from './logging.js';
 import { DEFAULT_CLI_ID } from './constants.js';
-import { normalizeCredentialFields } from './credential-fields.js';
+import { acceptRuntimeCredential } from './runtime-credential.js';
 import {
   postCommandAck,
   fetchAgentRecord,
@@ -70,7 +70,8 @@ import {
   maskKey,
 } from './managed-agent-store.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
-import { cliDispatch, credentialProviderKind, findCliModule, requiredCredentialFields } from './clis/index.js';
+import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
+import { cliDispatch, credentialProviderKind, findCliModule } from './clis/index.js';
 import { runSelfUpdate, restartManager } from './self-update.js';
 import type { CliLoginManager } from './cli-login.js';
 import type { AcpAdapterUpdateResult } from './clis/acp-adapter-update.js';
@@ -120,13 +121,6 @@ type CommandKind =
   // 승인이라는 개념 자체가 무너지기 때문이다.
   | 'run_privileged_command';
 
-// Primary required field per credential provider — the one that carries the
-// actual auth secret. When the server returns a credential row with this
-// field empty/missing, the manager treats it as misconfigured and falls back
-// to operator HOME with an explicit error log (rather than writing an empty
-// `.credentials.json` / `auth.json` / `oauth_creds.json` into cli-home,
-// which silently breaks CLI auth). Optional secondary fields like codex's
-// `config_toml` are intentionally excluded — they're not auth-bearing.
 const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'spawn_agent',
   'stop_agent',
@@ -157,6 +151,27 @@ export interface AgentManagerCommandPayload {
   issued_by?: string;
   issued_at?: string;
   timestamp?: string;
+}
+
+/** What a runtime identity runs as — see `materializeRuntimeIdentity`. */
+export interface RuntimeIdentityInput {
+  agent_id: string;
+  name: string;
+  cli: string;
+  working_dir: string;
+  /** '' = the CLI's own default (no --model flag). */
+  model: string;
+  runtime_config: AgentRuntimeConfig | null;
+  /** The credential the runtime spec selected; '' = none selected. */
+  credential_id: string;
+  account_id: string;
+}
+
+export interface RuntimeIdentityResult {
+  /** apiKey was issued now rather than reused from disk. */
+  provisioned: boolean;
+  apiKey: string;
+  credential: ManagedAgentCredential | null;
 }
 
 export interface CommandHandlerDeps {
@@ -313,6 +328,8 @@ export interface RefreshAvailableModelsResult {
 export class AgentManagerCommandHandler {
   #config: AwbConfig;
   #deps: CommandHandlerDeps;
+  /** agent_id → tail of its in-flight materializations (one at a time per id). */
+  #materializing = new Map<string, Promise<void>>();
 
   constructor(config: AwbConfig, deps: CommandHandlerDeps) {
     this.#config = config;
@@ -545,9 +562,75 @@ export class AgentManagerCommandHandler {
       (typeof (remote as any)?.model === 'string' && (remote as any).model.trim()) ||
       (typeof payload.args?.model === 'string' && payload.args.model.trim()) ||
       '';
-    const runtimeConfig = remote?.runtime_config ?? payload.args?.runtime_config ?? null;
-    const accountId = String(payload.args?.account_id || (remote as any)?.account_id || this.#config.account_id || '').trim();
+    const { provisioned, apiKey, credential } = await this.materializeRuntimeIdentity({
+      agent_id: agentId,
+      name,
+      cli,
+      working_dir: workingDir,
+      model,
+      runtime_config: remote?.runtime_config ?? payload.args?.runtime_config ?? null,
+      // The credential_id the server enriched the spawn payload with. The
+      // manager never trusts client-supplied credential payloads, only what the
+      // server returns over its authenticated REST endpoint.
+      credential_id: typeof payload.args?.credential_id === 'string' ? payload.args.credential_id : '',
+      account_id: String(payload.args?.account_id || (remote as any)?.account_id || this.#config.account_id || '').trim(),
+    });
 
+    // Force a fresh SSE connect so the server's cached managedAgentIds
+    // set picks up this agent. Without this, the next chat_request /
+    // agent_trigger / comment_mention targeted at <agentId> is silently
+    // filtered out by the server's per-event fan-out and the user reports
+    // a brand-new managed agent that "doesn't respond to anything".
+    // Awaited so the ack POST only fires after the SSE stream is live with
+    // the new agent in its managedAgentIds set — closing the race window
+    // where a user sending a chat message between ack and reconnect would
+    // have it silently dropped. The reconnect() Promise has a built-in
+    // 10s safety timeout so the ack is never blocked indefinitely.
+    await this.#deps.requestStreamReconnect?.();
+
+    const credentialNote = credential ? ` credential=${credential.provider}` : ' credential=none';
+    log(
+      `spawn_agent: agent=${agentId.slice(0, 8)} name=${name} cli=${cli} cwd=${workingDir}` +
+        ` apiKey=${maskKey(apiKey)}${provisioned ? ' (provisioned)' : ' (reused)'}${credentialNote}`,
+    );
+    return (
+      `spawn_agent ok: agent=${agentId.slice(0, 8)} cli=${cli} cwd=${workingDir}` +
+      ` apiKey=${provisioned ? 'provisioned' : 'reused'}${credentialNote}`
+    );
+  }
+
+  /**
+   * Prepare a runtime identity on this host so a CLI can run as it: registry
+   * entry, on-disk config, AWB apiKey + MCP config, per-identity cli-home, and
+   * the identity's CLI credential applied into that home.
+   *
+   * This is the ONLY place that happens. `spawn_agent` / `restart_agent` call
+   * it, and so does EventDispatcher whenever a ticket trigger, chat request,
+   * mention or mission step names a runtime this host has no context for yet.
+   * The dispatcher used to build a credential-less context of its own in that
+   * case, so whichever of the trigger and the server's `spawn_agent` arrived
+   * first decided whether the ticket ran logged in — the same credential
+   * worked for missions (which wait for spawn_agent) and Agent Sessions, and
+   * failed for tickets and chat.
+   *
+   * A selected credential that cannot be applied throws
+   * (`RuntimeCredentialError`, see runtime-credential.ts); it never falls back
+   * to the operator's login. Calls for the same agent_id run one at a time so a
+   * trigger and a concurrent spawn_agent never write the same cli-home at once.
+   */
+  materializeRuntimeIdentity(input: RuntimeIdentityInput): Promise<RuntimeIdentityResult> {
+    const id = input.agent_id;
+    const run = (this.#materializing.get(id) ?? Promise.resolve()).then(() => this.#materialize(input));
+    const tail = run.then(() => undefined, () => undefined);
+    this.#materializing.set(id, tail);
+    void tail.then(() => {
+      if (this.#materializing.get(id) === tail) this.#materializing.delete(id);
+    });
+    return run;
+  }
+
+  async #materialize(input: RuntimeIdentityInput): Promise<RuntimeIdentityResult> {
+    const { agent_id: agentId, name, cli, working_dir: workingDir, model, runtime_config: runtimeConfig, account_id: accountId } = input;
     if (!workingDir) {
       throw new Error('spawn_agent: working_dir is empty — set it before spawning');
     }
@@ -555,7 +638,7 @@ export class AgentManagerCommandHandler {
     const rec = this.#deps.registry.upsert({ agent_id: agentId, name, cli, working_dir: workingDir });
     rec.status = 'spawning';
 
-    // 2. on-disk dir + 3. cached settings
+    // on-disk dir + cached settings (rehydrated on manager restart)
     await ensureManagedAgentDir(agentId);
     await writeManagedAgentConfig({
       agent_id: agentId,
@@ -568,7 +651,7 @@ export class AgentManagerCommandHandler {
       last_spawn_at: new Date().toISOString(),
     });
 
-    // 4. apiKey: reuse on-disk if present (faster + avoids unnecessary
+    // apiKey: reuse on-disk if present (faster + avoids unnecessary
     // rotation); else provision a fresh one. The server's provision
     // endpoint is idempotent in the "rotate any prior provisioned" sense,
     // so a fresh provision here is also safe — we just don't gratuitously
@@ -578,6 +661,7 @@ export class AgentManagerCommandHandler {
     if (!rawApiKey) {
       const issued = await provisionManagedAgentApiKey(this.#config, agentId, accountId);
       if (!issued?.raw_key) {
+        this.#deps.registry.markStopped(agentId, 'apiKey provisioning failed');
         throw new Error('spawn_agent: apiKey provisioning failed (server returned no key)');
       }
       rawApiKey = issued.raw_key;
@@ -597,19 +681,16 @@ export class AgentManagerCommandHandler {
     const cliHomeDir = cliHomeDirFor(agentId);
 
     // Per-agent CLI credential — fetch from AWB (paid via the manager's
-    // apiKey, server enforces ownership). Three outcomes:
-    //   - server returns 204 (no credential set) → null, fall back to
-    //     legacy operator-HOME symlink path
-    //   - server returns the decrypted payload → write it to disk for
-    //     rehydrate and apply via the adapter
-    //   - a selected credential cannot be loaded → fail before registration
-    // Provider must match the agent's CLI (e.g. claude_subscription on a
-    // claude agent); a mismatch is logged and ignored so a typo on the
-    // AWB side doesn't silently start sending OpenAI keys to claude.
-    const credentialIdHint = typeof payload.args?.credential_id === 'string' ? payload.args.credential_id : '';
-    const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint, accountId);
-    if (credentialIdHint && credential?.credential_id !== credentialIdHint) {
-      throw new Error(`spawn_agent: configured credential ${credentialIdHint} could not be loaded for ${cli}`);
+    // apiKey, server enforces ownership): none → operator-HOME symlink path;
+    // a credential → write it to disk for rehydrate and apply via the adapter;
+    // a selected credential that cannot be loaded → fail before registration.
+    let credential: ManagedAgentCredential | null;
+    try {
+      credential = await this.#resolveAgentCredential(agentId, cli, input.credential_id, accountId);
+    } catch (err: any) {
+      const detail = `spawn_agent: configured credential ${input.credential_id.slice(0, 8) || '(from AWB)'} could not be loaded for ${cli}: ${err?.message ?? err}`;
+      this.#deps.registry.markStopped(agentId, detail);
+      throw Object.assign(new Error(detail), { code: err?.code });
     }
     if (credential) {
       await writeAgentCredential(agentId, credential);
@@ -645,14 +726,14 @@ export class AgentManagerCommandHandler {
     } catch (err: any) {
       const detail = `spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`;
       log(detail);
-      if (credentialIdHint || cliDispatch(cli).cliHomePrepFatal) {
+      if (credential || cliDispatch(cli).cliHomePrepFatal) {
         this.#deps.registry.markStopped(agentId, detail);
         throw new Error(detail);
       }
     }
     }
 
-    // 5. context registry — EventDispatcher reads this on every event
+    // context registry — EventDispatcher reads this on every event
     if (this.#deps.contextRegistry) {
       this.#deps.contextRegistry.upsert({
         agent_id: agentId,
@@ -681,113 +762,33 @@ export class AgentManagerCommandHandler {
       });
     }
 
-    // 6. mark running. pid=process.pid means "managed by THIS manager";
+    // mark running. pid=process.pid means "managed by THIS manager";
     // there's no per-agent permanent process to track, but the heartbeat
     // surface still wants a live pid for the dashboard.
     this.#deps.registry.markRunning(agentId, process.pid);
-
-    // 7. force a fresh SSE connect so the server's cached managedAgentIds
-    // set picks up this agent. Without this, the next chat_request /
-    // agent_trigger / comment_mention targeted at <agentId> is silently
-    // filtered out by the server's per-event fan-out and the user reports
-    // a brand-new managed agent that "doesn't respond to anything".
-    // Awaited so the ack POST only fires after the SSE stream is live with
-    // the new agent in its managedAgentIds set — closing the race window
-    // where a user sending a chat message between ack and reconnect would
-    // have it silently dropped. The reconnect() Promise has a built-in
-    // 10s safety timeout so the ack is never blocked indefinitely.
-    await this.#deps.requestStreamReconnect?.();
-
-    const credentialNote = credential ? ` credential=${credential.provider}` : ' credential=none';
-    log(
-      `spawn_agent: agent=${agentId.slice(0, 8)} name=${name} cli=${cli} cwd=${workingDir}` +
-        ` apiKey=${maskKey(rawApiKey)}${provisioned ? ' (provisioned)' : ' (reused)'}${credentialNote}`,
-    );
-    return (
-      `spawn_agent ok: agent=${agentId.slice(0, 8)} cli=${cli} cwd=${workingDir}` +
-      ` apiKey=${provisioned ? 'provisioned' : 'reused'}${credentialNote}`
-    );
+    return { provisioned, apiKey: rawApiKey, credential };
   }
 
   /**
-   * Pull the per-agent CLI credential from AWB and validate that its
-   * provider prefix matches the agent's CLI (e.g. `claude_subscription` on
-   * a claude agent). Returns null when AWB has none configured, when the
-   * fetch fails, or when the provider doesn't match — caller falls back to
-   * legacy operator-HOME credential propagation.
+   * Pull the per-agent CLI credential from AWB and accept it through the same
+   * rule Agent Sessions use (`acceptRuntimeCredential`). Returns null only when
+   * no credential is selected and AWB has none for this identity — the caller
+   * then uses the operator-HOME path. A selected credential that cannot be
+   * loaded, matched or completed throws.
    *
-   * `credentialIdHint` is the credential_id the server enriched the spawn
-   * payload with at dispatch time; the caller verifies it was loaded —
-   * the manager never trusts client-supplied credential payloads, only
-   * what the server returns over its authenticated REST endpoint.
+   * `credentialId` is the credential the runtime spec selected. Empty means
+   * "none selected", but AWB may still answer with one: restart_agent of an
+   * identity whose last spawn lost its credential, or a legacy Agent-era id.
    */
   async #resolveAgentCredential(
     agentId: string,
     cli: string,
-    credentialIdHint: string,
+    credentialId: string,
     accountId?: string,
   ): Promise<ManagedAgentCredential | null> {
     const fetched = await fetchAgentCredential(this.#config, agentId, accountId);
-    if (!fetched) {
-      if (credentialIdHint) {
-        log(
-          `spawn_agent: agent=${agentId.slice(0, 8)} expected credential=${credentialIdHint.slice(0, 8)} but server returned none`,
-        );
-      }
-      return null;
-    }
-    const expectedPrefix = `${cli}_`;
-    if (!fetched.provider.startsWith(expectedPrefix)) {
-      log(
-        `spawn_agent: agent=${agentId.slice(0, 8)} credential provider=${fetched.provider}` +
-          ` does not match cli=${cli}; ignoring`,
-      );
-      return null;
-    }
-    // Server returned a credential row, but the required field for this
-    // provider is empty. Two real-world causes seen so far:
-    //   1. Operator created the credential row in AWB UI without pasting the
-    //      `.credentials.json` / `auth.json` / `oauth_creds.json` content.
-    //   2. Server-side decrypt failed silently (pre-fix the controller would
-    //      catch JSON.parse on '' and return 200 OK with fields={}). New
-    //      controller now returns 503 in that case, but stale servers still
-    //      observe this codepath.
-    // Either way: writing an empty credential file silently breaks auth in a
-    // way that's hard to diagnose from the CLI's own error. Log loud + return
-    // null so caller falls back to operator HOME (legacy).
-    // Strip whitespace the operator's paste smuggled into the secret before
-    // anything consumes it. An interior newline in an OAuth token is not a
-    // soft problem: the CLI puts it in an Authorization header and every
-    // request fails, for every agent sharing the credential.
-    const { fields, repaired } = normalizeCredentialFields(fetched.fields);
-    if (repaired.length > 0) {
-      log(
-        `spawn_agent: agent=${agentId.slice(0, 8)} credential=${fetched.provider} ` +
-          `(id=${fetched.credential_id.slice(0, 8)}) carried whitespace inside field(s) ` +
-          `${repaired.join(',')} — stripped. Re-save the credential in AWB Settings → Credentials.`,
-      );
-    }
-
-    const required = requiredCredentialFields(fetched.provider);
-    if (required) {
-      const present = required.filter((k) => {
-        const v = fields[k];
-        return typeof v === 'string' && v.length > 0;
-      });
-      if (present.length === 0) {
-        log(
-          `spawn_agent: agent=${agentId.slice(0, 8)} credential=${fetched.provider} ` +
-            `(id=${fetched.credential_id.slice(0, 8)}) has empty required field(s) ${required.join(',')} — ` +
-            `re-edit the credential in AWB Settings → Credentials. Falling back to operator HOME.`,
-        );
-        return null;
-      }
-    }
-    return {
-      credential_id: fetched.credential_id,
-      provider: fetched.provider,
-      fields,
-    };
+    if (!fetched && !credentialId) return null;
+    return acceptRuntimeCredential(cli, credentialId || fetched!.credential_id, fetched, `spawn_agent: agent=${agentId.slice(0, 8)}`);
   }
 
   async #stopAgent(payload: AgentManagerCommandPayload): Promise<string> {
@@ -1286,7 +1287,8 @@ export class AgentManagerCommandHandler {
  * operator's HOME credential into cli-home, which still has a usable
  * expiry the heartbeat will report).
  */
-function credentialKind(
+/** Heartbeat `agent_credentials.kind` of a materialized identity — spawn and boot rehydrate share it. */
+export function credentialKind(
   credential: ManagedAgentCredential | null,
 ): 'subscription' | 'api_key' | 'operator_home' {
   if (!credential) return 'operator_home';

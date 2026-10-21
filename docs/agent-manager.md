@@ -57,27 +57,49 @@ There is no default runtime, default strategy, or fallback to an editor/plugin
 session. A missing, unknown, unavailable, or invalid runtime fails with a
 typed error instead of silently changing execution semantics.
 
-### Slot credentials are materialized only by spawn_agent / restart_agent
+### One routine prepares a runtime identity — and applies its credential
 
-A roster slot (or ticket assignee) naming a `credential_id` does NOT get that
-credential applied by dispatch alone: the dispatch path only prepares an empty
-cli-home plus the MCP/apiKey pair, and the CLI then fails with "Not logged
-in". The credential files (or env injection) are written exclusively by the
-`spawn_agent` / `restart_agent` command path, which fetches them from
+`AgentManagerCommandHandler.materializeRuntimeIdentity()` is the only place a
+runtime identity is prepared on a host: registry entry, on-disk config (boot
+rehydrate reads it), AWB apiKey + MCP config, per-identity cli-home, and the
+CLI credential the spec selected, fetched from
 `GET /api/agent-manager/managed-agents/:id/credential` (resolved through the
 slot holding that identity — a started mission's runtime roster, a ticket
-assignee, or a chat participant spec — never through an Agent row).
+assignee, or a chat participant spec — never through an Agent row) and applied
+into that cli-home by the CLI adapter. Calls for one identity run one at a time.
 
-Consequences the server enforces so this never goes stale silently:
+It runs for `spawn_agent` / `restart_agent`, and the dispatcher calls it
+whenever a ticket trigger, chat request, mention or mission step names a
+runtime the host has no context for yet. Before 2026-10-22 the dispatcher
+built a credential-less context of its own in that case while the server's
+`spawn_agent` was still on its way, so the ticket CLI usually started with no
+credential ("Not logged in", `is_error` ~1s into the first turn) even though
+the same credential worked in Agent Sessions and missions.
+
+Credentials are accepted by one rule shared with Agent Sessions
+(`runtime-credential.ts` → `acceptRuntimeCredential`): provider must match the
+CLI, whitespace inside single-line secrets is repaired, required fields must be
+present. A selected credential that cannot be applied is **refused** — the
+event does not run on the operator's login or the manager's identity instead.
+A ticket gets one comment and a `runtime_credential_unavailable` nack (the
+server retries with backoff, so fixing the credential is enough); a chat room
+gets a message. A runtime that selects no credential runs on the operator
+login as before.
+
+What the server does on its side:
 
 - A team slot names no folder, so it is not an identity until a mission places
   it in a project folder. Mission start resolves every (slot, project) runtime,
   stores it in `orchestration_missions.runtime_roster`, and `spawn_agent`s each
   distinct identity, waiting for the host's ack before it briefs anyone; a
   reopen `restart_agent`s them. Editing a team slot sends nothing to any host.
-- Every ticket dispatch provisions its assignee the same way. Steady state
-  stays silent: identities the host already reports as `subscription` /
-  `api_key` are skipped.
+- Ticket dispatch prepares its assignee the same way and waits for the host's
+  ack before emitting `agent_trigger`. A host error (it refused the runtime)
+  stops the dispatch with a `dispatch_failed` activity; offline or a timeout
+  emits anyway, since the manager runs the same routine itself.
+- Steady state stays silent: identities the host already reports as prepared
+  the way the slot asks (`subscription` / `api_key` for a credential slot,
+  `operator_home` for one without) are not re-provisioned.
 
 ## Account ownership compatibility
 

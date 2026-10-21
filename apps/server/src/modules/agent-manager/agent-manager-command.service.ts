@@ -154,16 +154,22 @@ export class AgentManagerCommandService {
    * (the identity hash covers all three, so the edit mints a new key while
    * `restart_agent` only reaps the previous one).
    *
-   * Heartbeat-aware skip: when the host already reports a materialized
-   * credential (`subscription` / `api_key`) for this key AND the slot still
-   * names a credential, there is nothing to do — steady-state mission starts
-   * and ticket dispatches stay silent. Everything else (missing metadata,
-   * `operator_home`, `missing`, or a slot with no credential that never got
-   * its operator-HOME symlink) is (re-)provisioned: `spawn_agent` is
-   * idempotent (apiKey reuse, cli-home prep from a clean slate).
+   * Heartbeat-aware skip: when the host already reports this key as prepared
+   * the way the slot asks — a credential (`subscription` / `api_key`) for a slot
+   * that names one, `operator_home` for a slot that names none — there is
+   * nothing to do, so steady-state mission starts and ticket dispatches don't
+   * wait on the host. The host only reports identities that went through
+   * spawn_agent or boot rehydrate, both of which prepare the cli-home.
+   * Everything else (no row, `missing`, `unknown`, a credential slot reported
+   * as `operator_home`) is (re-)provisioned: `spawn_agent` is idempotent
+   * (apiKey reuse, cli-home prep from a clean slate).
    *
    * `restart` bypasses the heartbeat skip and reaps stale CLI processes.
    * Never throws — callers decide whether a classified failure blocks dispatch.
+   * `refused` marks the one failure that is the host's own verdict (it acked
+   * the command with an error, e.g. the selected credential cannot be loaded);
+   * every other failure (offline, timeout, transport) says nothing about the
+   * runtime itself.
    */
   async provisionSlotIdentity(
     spec: {
@@ -175,7 +181,7 @@ export class AgentManagerCommandService {
       runtime_config?: unknown;
     },
     opts: { accountId: string; label?: string; issuedBy: string; restart?: boolean; waitForAckMs?: number },
-  ): Promise<{ ok: boolean; reason: string; skipped?: boolean }> {
+  ): Promise<{ ok: boolean; reason: string; skipped?: boolean; refused?: boolean }> {
     const hostId = String(spec?.manager_agent_id || '').trim();
     const cli = String(spec?.cli || '').trim().toLowerCase();
     const dir = String(spec?.working_dir || '').trim();
@@ -195,10 +201,10 @@ export class AgentManagerCommandService {
     if (!inst) return { ok: false, reason: 'manager_offline' };
     const slotCredentialId = String(spec?.credential_id || '').trim();
     const reported = inst.agent_credentials?.find((row) => row?.agent_id === key);
-    if (
-      !opts.restart && slotCredentialId &&
-      (reported?.kind === 'subscription' || reported?.kind === 'api_key')
-    ) {
+    const prepared = slotCredentialId
+      ? reported?.kind === 'subscription' || reported?.kind === 'api_key'
+      : reported?.kind === 'operator_home';
+    if (!opts.restart && prepared) {
       return { ok: true, reason: 'already_materialized', skipped: true };
     }
     const model = String((spec as any)?.model || '').trim();
@@ -223,7 +229,7 @@ export class AgentManagerCommandService {
         while (true) {
           const outcome = this.commandLedger.getOutcome(command_id);
           if (outcome) {
-            if (outcome.status === 'error') return { ok: false, reason: outcome.detail || 'provision_failed' };
+            if (outcome.status === 'error') return { ok: false, reason: outcome.detail || 'provision_failed', refused: true };
             break;
           }
           if (Date.now() >= deadline) return { ok: false, reason: 'provision_ack_timeout' };

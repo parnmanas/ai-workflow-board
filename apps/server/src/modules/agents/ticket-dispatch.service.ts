@@ -56,6 +56,9 @@ const SWEEP_INTERVAL_MS = 30_000;
 const NACK_RETRY_BASE_MS = 60_000;
 const OFFLINE_NOTICE_COOLDOWN_MS = 60 * 60_000;
 const NACK_RETRY_STALE_MS = 24 * 60 * 60_000;
+// Host ack for assignee runtime preparation. Only an identity the host doesn't
+// report as prepared waits (spawn_agent ends with an SSE reconnect, ≤10s).
+const PREPARE_ACK_TIMEOUT_MS = 20_000;
 
 /**
  * Ticket dispatch (docs/tickets.md) — the one place that decides when a
@@ -102,9 +105,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     private readonly runSkillSnapshots: RunSkillSnapshotService,
     private readonly prerequisites: TicketPrerequisitesService,
     private readonly projects: ProjectsService,
-    // 미션/팀과 같은 credential materialization 함정: assignee spec의 credential
-    // 파일은 spawn_agent 경로에서만 쓰이므로, 프로비저닝된 적 없는 identity는
-    // 여기서 best-effort로 확보한다. 스텁 생성자는 비워 두면 훅이 건너뛴다.
+    // Assignee runtime 준비(spawn_agent: apiKey · MCP · cli-home · credential) — dispatch()
+    // 참고. 스텁 생성자는 비워 두면 준비를 건너뛴다.
     // (AgentsModule ↔ AgentManagerModule 순환은 모듈 레벨 forwardRef로 해소돼
     //  있으므로, 같은 모듈의 autostart 서비스와 같이 plain 주입한다.)
     private readonly commands?: AgentManagerCommandService,
@@ -419,18 +421,28 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       return { dispatched: false, reason: 'host_offline' };
     }
 
-    // Assignee identity의 credential materialization — 팀/미션과 같은 함정:
-    // 디스패치만으로는 슬롯 credential 파일이 절대 써지지 않으므로,
-    // 프로비저닝된 적 없는 identity는 여기서 best-effort로 확보한다.
-    // fire-and-forget: 실패해도 디스패치는 예전대로 진행한다.
+    // Assignee runtime 준비를 호스트의 답까지 기다린 뒤 트리거를 보낸다 — 미션 시작
+    // (orchestration-runner prepareRuntimes)과 같은 규칙. 예전엔 준비를 기다리지 않고
+    // 바로 트리거를 쏴서, 트리거가 먼저 도착하면 티켓 CLI 가 credential 없이 떴다
+    // (같은 credential 이 세션·미션에선 되고 티켓에선 안 되던 원인). 호스트가 준비를
+    // 거부하면(선택한 credential 을 못 불러옴 등) 다른 로그인으로 돌리지 않고 멈춘다;
+    // 오프라인·시간 초과는 트리거를 그대로 보낸다 — 매니저가 같은 준비 루틴을 스스로 돈다.
     if (this.commands) {
-      void this.commands
-        .provisionSlotIdentity(spec, {
-          accountId: ticket.account_id,
-          label: `ticket:${ticket.id.slice(0, 8)}/${(spec as any)?.cli || 'agent'}`,
-          issuedBy: 'system:ticket-dispatch',
-        })
-        .catch(() => undefined);
+      const prepared = await this.commands.provisionSlotIdentity(spec, {
+        accountId: ticket.account_id,
+        label: `ticket:${ticket.id.slice(0, 8)}/${spec.cli || 'agent'}`,
+        issuedBy: 'system:ticket-dispatch',
+        waitForAckMs: PREPARE_ACK_TIMEOUT_MS,
+      });
+      if (prepared.refused) {
+        this.logService.warn('Dispatch', 'assignee runtime refused by its host; not emitted', { reason: prepared.reason, ticket_id: ticket.id });
+        await this.dataSource.getRepository(ActivityLog).save({
+          entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id || '',
+          action: 'dispatch_failed', field_changed: source, new_value: prepared.reason.slice(0, 500),
+          role: 'assignee', actor_name: 'AWB', trigger_source: source,
+        });
+        return { dispatched: false, reason: 'runtime_refused' };
+      }
     }
 
     let payload: AgentTriggerPayload & Record<string, unknown>;

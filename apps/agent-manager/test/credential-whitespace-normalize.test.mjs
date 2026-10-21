@@ -54,16 +54,24 @@ test('normalizeCredentialFields tolerates a missing fields map', () => {
 });
 
 test('the AWB fetch path normalizes before the required-field check and returns the clean map', () => {
-  const src = read('lib/agent-manager-commands.ts');
+  // One acceptance rule for every fetched credential (runtime-credential.ts).
+  const src = read('lib/runtime-credential.ts');
   const normalizeAt = src.indexOf('normalizeCredentialFields(fetched.fields)');
-  const requiredAt = src.indexOf('const required = requiredCredentialFields(fetched.provider)');
+  const requiredAt = src.indexOf('requiredCredentialFields(fetched.provider)');
   assert.ok(normalizeAt > 0, 'fetched credential must be normalized');
   assert.ok(normalizeAt < requiredAt, 'normalization must precede the required-field check');
   assert.doesNotMatch(
     src.slice(normalizeAt),
     /fields: fetched\.fields/,
-    'the resolved credential must carry the normalized fields, not the raw fetch',
+    'the accepted credential must carry the normalized fields, not the raw fetch',
   );
+  // Both fetch paths go through it — runtime identities (spawn_agent, tickets,
+  // chat, missions) and Agent Sessions.
+  for (const rel of ['lib/agent-manager-commands.ts', 'lib/agent-session-runner.ts']) {
+    const caller = read(rel);
+    assert.match(caller, /acceptRuntimeCredential\(/, `${rel} accepts credentials through the shared rule`);
+    assert.doesNotMatch(caller, /normalizeCredentialFields\(fetched/, `${rel} must not re-implement the rule`);
+  }
 });
 
 test('the on-disk credential snapshot is normalized on both write and read', () => {
