@@ -4,7 +4,15 @@
 //
 // The legacy tables below carry only the columns the migration reads; the
 // rest of the schema is whatever synchronize builds for the current entities
-// (the same thing a fresh database gets). What this pins:
+// (the same thing a fresh database gets).
+//
+// 이 이름들은 지금의 어휘가 아니라 동결된 역사다. 보드 제거 이전의 DB 는
+// workspace → account rename 보다 오래됐으므로 `workspace_roles` 와
+// `uq_workflow_functions_workspace_key` 를 갖고 있고, 마이그레이션과 pre-sync 도
+// 그 이름을 읽고 지운다. 코드와 함께 여기까지 rename 했더니 픽스처가 존재한 적
+// 없는 DB 가 됐다 — pre-sync 가 board_id 인덱스를 남겨 synchronize 가 매 부팅 실패했다.
+//
+// What this pins:
 //   - column → status, board name → tag (old labels kept), base repo / board
 //     environment repo → project, assignee role RuntimeSpec → assignee;
 //   - repository Resources become Projects with the SAME id and leave
@@ -75,7 +83,7 @@ async function writeLegacyDb(file) {
       use_pr boolean NOT NULL DEFAULT 0, archived_at datetime, created_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE columns (id varchar PRIMARY KEY NOT NULL, board_id varchar NOT NULL, name varchar NOT NULL, position integer NOT NULL,
       is_terminal boolean NOT NULL DEFAULT 0, kind varchar NOT NULL DEFAULT '');
-    CREATE TABLE account_roles (id varchar PRIMARY KEY NOT NULL, account_id varchar NOT NULL, slug varchar NOT NULL, name varchar NOT NULL);
+    CREATE TABLE workspace_roles (id varchar PRIMARY KEY NOT NULL, account_id varchar NOT NULL, slug varchar NOT NULL, name varchar NOT NULL);
     CREATE TABLE ticket_role_assignments (id varchar PRIMARY KEY NOT NULL, ticket_id varchar NOT NULL, role_id varchar NOT NULL,
       agent_id varchar, user_id varchar, holder_key varchar NOT NULL DEFAULT '', runtime_spec text, created_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE board_lessons (id varchar PRIMARY KEY NOT NULL, board_id varchar NOT NULL, body text NOT NULL DEFAULT '');
@@ -91,7 +99,7 @@ async function writeLegacyDb(file) {
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}), version integer NOT NULL DEFAULT 1);
     CREATE TABLE workflow_functions (id varchar PRIMARY KEY NOT NULL, account_id varchar, board_id varchar, key varchar NOT NULL,
       name varchar NOT NULL, created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
-    CREATE UNIQUE INDEX uq_workflow_functions_account_key ON workflow_functions (account_id, key)
+    CREATE UNIQUE INDEX uq_workflow_functions_workspace_key ON workflow_functions (account_id, key)
       WHERE account_id IS NOT NULL AND board_id IS NULL;
     CREATE UNIQUE INDEX uq_workflow_functions_board_key ON workflow_functions (board_id, key) WHERE board_id IS NOT NULL;
   `);
@@ -111,8 +119,8 @@ async function writeLegacyDb(file) {
     [COL.archivedTodo, ARCHIVED_BOARD, 'To Do', 0, 0, 'active'],
   ];
   for (const c of cols) run('INSERT INTO columns (id, board_id, name, position, is_terminal, kind) VALUES (?,?,?,?,?,?)', c);
-  run('INSERT INTO account_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_ASSIGNEE, WS, 'assignee', 'Assignee']);
-  run('INSERT INTO account_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_REVIEWER, WS, 'reviewer', 'Reviewer']);
+  run('INSERT INTO workspace_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_ASSIGNEE, WS, 'assignee', 'Assignee']);
+  run('INSERT INTO workspace_roles (id, account_id, slug, name) VALUES (?,?,?,?)', [ROLE_REVIEWER, WS, 'reviewer', 'Reviewer']);
   run('INSERT INTO board_lessons (id, board_id, body) VALUES (?,?,?)', ['l1', BOARD, 'lesson']);
   run("INSERT INTO resources (id, account_id, name, type, url, default_branch, clone_policy, credential_id) VALUES (?,?,?,?,?,?,?,?)",
     [REPO, WS, 'GameClient Repository', 'repository', 'https://github.com/example/gameclient', 'master', '{"clone_depth":1}', null]);
@@ -246,11 +254,12 @@ test('board-scoped workflow functions fold into the account without key collisio
   assert.ok(indexes.includes('uq_workflow_functions_account_key'), indexes.join(', '));
   assert.ok(indexes.includes('uq_workflow_functions_global_key'), indexes.join(', '));
   assert.ok(!indexes.includes('uq_workflow_functions_board_key'));
+  assert.ok(!indexes.includes('uq_workflow_functions_workspace_key'), '옛 키 인덱스는 새 인덱스로 대체돼야 한다(나란히 남지 않는다)');
 });
 
 test('retired tables and snapshots are dropped', async () => {
   const tables = (await ds.query("SELECT name FROM sqlite_master WHERE type = 'table'")).map((r) => r.name);
-  for (const gone of ['boards', 'columns', 'account_roles', 'ticket_role_assignments', 'board_lessons',
+  for (const gone of ['boards', 'columns', 'workspace_roles', 'ticket_role_assignments', 'board_lessons',
     'board_removal_ticket_snapshot', 'board_removal_repo_snapshot']) {
     assert.ok(!tables.includes(gone), `${gone} should be dropped`);
   }
