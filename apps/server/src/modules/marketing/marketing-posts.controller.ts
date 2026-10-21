@@ -32,7 +32,7 @@ export class MarketingPostsController {
       const rows = await this.posts.list(campaign, status || undefined, limit ? Number(limit) : 100);
       return res.json(rows.map((p) => postToJson(p, this.posts.preview(p, campaign))));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list posts' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list posts' });
     }
   }
 
@@ -44,7 +44,7 @@ export class MarketingPostsController {
       const campaign = await this.campaigns.get(post.campaign_id, accountId);
       return res.json(postToJson(post, this.posts.preview(post, campaign)));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Post not found' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Post not found' });
     }
   }
 

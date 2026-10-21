@@ -1,8 +1,11 @@
 /**
  * 메일 공급자 어댑터 — Resend · SendGrid HTTP API(docs/marketing.md "메일").
  *
- * 결과 분류: 2xx → sent, 4xx(잘못된 주소 · 거부) → failed(다시 보내지 않는다), 그 밖(5xx · 네트워크 · 타임아웃) →
- * retry(발송 큐가 몇 번 다시 시도한다). 키는 서버만 복호화해 여기로 넘긴다.
+ * 결과 분류는 "다시 보내면 두 번 받을 수 있는가" 로 정한다.
+ *   - Resend: `Idempotency-Key`(= 발송 행 id)를 보낸다. 같은 키의 재요청은 한 번만 발송되므로 타임아웃 · 5xx · 429 는 retry.
+ *   - SendGrid: 멱등 키가 없다. 429(확실히 받지 않음)만 retry 이고, 타임아웃 · 네트워크 · 5xx 는 이미 받았을 수 있어
+ *     failed 로 닫는다(중복 발송보다 누락이 낫다).
+ *   - 4xx(잘못된 주소 · 거부)는 failed. 키는 서버만 복호화해 여기로 넘긴다.
  */
 import type { ComposedEmail, EmailSender } from '../../common/marketing/email';
 
@@ -19,6 +22,8 @@ export interface EmailSendInput {
   sender: EmailSender;
   to: { email: string; name: string };
   message: ComposedEmail;
+  /** 같은 메일의 재시도에 쓰는 고정 키(발송 행 id). */
+  idempotencyKey: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -36,7 +41,7 @@ export async function sendEmail(input: EmailSendInput): Promise<EmailOutcome> {
     if (input.provider === 'resend') {
       res = await fetchImpl('https://api.resend.com/emails', {
         method: 'POST',
-        headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json', 'idempotency-key': input.idempotencyKey },
         body: JSON.stringify({
           from: fromHeader(input.sender),
           to: [input.to.email],
@@ -66,7 +71,10 @@ export async function sendEmail(input: EmailSendInput): Promise<EmailOutcome> {
     }
   } catch (e: any) {
     clearTimeout(timer);
-    return { outcome: 'retry', error: e?.name === 'AbortError' ? 'email provider timed out' : `email provider unreachable: ${String(e?.message || e).slice(0, 200)}` };
+    const error = e?.name === 'AbortError' ? 'email provider timed out' : `email provider unreachable: ${String(e?.message || e).slice(0, 200)}`;
+    return input.provider === 'resend'
+      ? { outcome: 'retry', error }
+      : { outcome: 'failed', error: `${error} — not retried (it may have been delivered)` };
   }
   let text = '';
   try { text = await res.text(); } catch { text = ''; } finally { clearTimeout(timer); }
@@ -78,8 +86,10 @@ export async function sendEmail(input: EmailSendInput): Promise<EmailOutcome> {
     return { outcome: 'sent', message_id: id.slice(0, 200) };
   }
   const detail = text.slice(0, 300);
-  if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+  if (res.status === 429) return { outcome: 'retry', error: `email provider rate-limited (HTTP 429): ${detail}` };
+  if (res.status >= 400 && res.status < 500) {
     return { outcome: 'failed', error: `email provider refused (HTTP ${res.status}): ${detail}` };
   }
-  return { outcome: 'retry', error: `email provider answered HTTP ${res.status}: ${detail}` };
+  if (input.provider === 'resend') return { outcome: 'retry', error: `email provider answered HTTP ${res.status}: ${detail}` };
+  return { outcome: 'failed', error: `email provider answered HTTP ${res.status}: ${detail} — not retried (it may have been delivered)` };
 }

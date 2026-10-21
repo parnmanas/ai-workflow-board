@@ -82,7 +82,7 @@ export class MarketingContactsController {
       const [rows, counts] = await Promise.all([this.email.listSends(post), this.email.sendCounts(post.id)]);
       return res.json({ counts, sends: rows.map(emailSendToJson) });
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list sends' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list sends' });
     }
   }
 }

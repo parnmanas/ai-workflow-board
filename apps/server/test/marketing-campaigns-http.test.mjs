@@ -62,8 +62,8 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
 
   // 2. 생성 + 검증
   assert.equal((await post('/campaigns', marketerH, {})).status, 400, 'name is required');
-  assert.equal((await post('/campaigns', marketerH, { name: 'x', currency: 'kr' })).status, 400);
-  assert.equal((await post('/campaigns', marketerH, { name: 'x', budget_total_minor: 12.5 })).status, 400, 'floats are rejected');
+  assert.equal((await post('/campaigns', adminH, { name: 'x', currency: 'kr' })).status, 400);
+  assert.equal((await post('/campaigns', adminH, { name: 'x', budget_total_minor: 12.5 })).status, 400, 'floats are rejected');
   assert.equal((await post('/campaigns', marketerH, { name: 'x', allowed_domains: ['localhost'] })).status, 400);
   assert.equal((await post('/campaigns', marketerH, { name: 'x', capabilities: ['ads'] })).status, 400);
 
@@ -75,22 +75,32 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
   const sse = await openSseStream(port, marketerH.Authorization.slice('Bearer '.length));
   t.after(() => sse.close());
 
-  const created = await post('/campaigns', marketerH, {
-    name: 'Launch week',
-    project_id: product.id,
-    product_brief: 'AWB — agents that run your tickets.',
-    capabilities: ['community_post', 'analytics', 'paid_spend'],
+  const money = {
     currency: 'usd',
     budget_total_minor: '500000',
     budget_period: 'month',
     budget_period_minor: 200000,
     max_transaction_minor: 50000,
     payees: [{ name: 'Reddit Ads', ref: 'ads-acct-1' }],
+  };
+  const basics = {
+    name: 'Launch week',
+    project_id: product.id,
+    product_brief: 'AWB — agents that run your tickets.',
+    capabilities: ['community_post', 'analytics', 'paid_spend'],
     allowed_domains: ['https://awb.example.com/'],
     cycle_interval_ms: 3_600_000,
-  });
+  };
+  const moneyByManager = await post('/campaigns', marketerH, { ...basics, ...money });
+  assert.equal(moneyByManager.status, 403, 'money settings need marketing.approve_spend, not just manage');
+  assert.match(moneyByManager.body.error, /marketing\.approve_spend/);
+  const created = await post('/campaigns', marketerH, basics);
   assert.equal(created.status, 201, created.text);
-  const campaign = created.body;
+  assert.equal(created.body.budget_total_minor, 0, 'a manager-created campaign cannot spend until money is set by an approver');
+  assert.equal((await patch(`/campaigns/${created.body.id}`, marketerH, { dual_approval_threshold_minor: 0 })).status, 403);
+  const funded = await patch(`/campaigns/${created.body.id}`, auth(admin, mine.id), money);
+  assert.equal(funded.status, 200, funded.text);
+  const campaign = funded.body;
   assert.equal(campaign.account_id, mine.id, 'owned by the project\'s account');
   assert.equal(campaign.status, 'draft');
   assert.equal(campaign.currency, 'USD');

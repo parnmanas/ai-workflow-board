@@ -112,8 +112,15 @@ test('marketing posts: drafts, approval with edits, connector publish/reply, fai
   assert.equal(fake.published[0].body, 'Edited by a human. https://awb.example.com/api/m/Abc123XYZ789\n\n— Posted by the AWB team (AI-assisted).');
   assert.equal((await post(`/posts/${d1.post.id}/approve`, {})).status, 409, 'approve once');
 
+  // 답글: fullname 만으로는 어느 subreddit 인지 모른다 — 커넥터에 물어 채널 밖이면 초안을 만들지 않는다.
+  fake.threads.set('t3_elsewhere', { target: 'programming', permalink: 'https://www.reddit.com/r/programming/comments/elsewhere', title: 'Off-channel thread' });
+  fake.threads.set('t1_abc123', { target: 'SelfHosted', permalink: 'https://www.reddit.com/r/selfhosted/comments/x/y/abc123', title: 'My setup' });
+  assert.match(errText(await draft({ channel_id: reddit.id, body: 'hi', reply_to: 't3_elsewhere' })), /outside this channel/);
+  assert.match(errText(await draft({ channel_id: reddit.id, body: 'hi', reply_to: 't3_unknown' })), /could not verify reply_to/);
   const d2 = await draft({ channel_id: reddit.id, body: 'Thanks for the feedback — fixed in 1.0.1.', reply_to: 't1_abc123' });
   assert.equal(d2.post.kind, 'reply');
+  assert.deepEqual(d2.post.reply_context, { target: 'SelfHosted', permalink: 'https://www.reddit.com/r/selfhosted/comments/x/y/abc123', title: 'My setup' },
+    'the approver sees where the reply will land');
   const replied = await post(`/posts/${d2.post.id}/approve`, {});
   assert.equal(replied.body.status, 'published', replied.text);
   assert.deepEqual(fake.replies[0], { threadRef: 't1_abc123', body: 'Thanks for the feedback — fixed in 1.0.1.\n\n— Posted by the AWB team (AI-assisted).' });

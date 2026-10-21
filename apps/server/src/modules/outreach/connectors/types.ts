@@ -22,6 +22,19 @@ export interface OutreachConnector {
    * it (ticket 31e7cd24, GitHub's off-by-default issue-close option).
    */
   close?(threadRef: string): Promise<void>;
+  /**
+   * Optional: where a thread lives — `target` is the same whitelist identifier
+   * `publish` takes (subreddit name / "owner/repo"). Marketing replies call this
+   * before drafting so a reply can never land in a thread outside its channel
+   * (docs/marketing.md "커뮤니케이션"). `title` is outsider text — display only.
+   */
+  describeThread?(threadRef: string): Promise<ThreadInfo>;
+}
+
+export interface ThreadInfo {
+  target: string;
+  permalink: string;
+  title: string;
 }
 
 export interface InboundItem {

@@ -84,6 +84,13 @@ export class MarketingSpendRequest {
   @Column({ type: 'varchar', nullable: true, default: null })
   cycle_id: string | null;
 
+  /**
+   * 요청 시점에 2인 승인 대상이었는가. 승인 때는 이것과 그때의 임계값 중 **더 엄격한 쪽**을 쓴다 — 요청이 들어온 뒤
+   * 임계값을 올리거나 없애도 이미 들어온 큰 요청이 한 사람 승인으로 내려가지 않는다.
+   */
+  @Column({ type: 'boolean', default: false })
+  dual_required: boolean;
+
   /** 승인 기록 [{ user_id, name, at }] — 2인 규칙이면 둘. */
   @Column({ type: 'simple-json', default: '[]' })
   approvals: Array<{ user_id: string; name: string; at: string }>;

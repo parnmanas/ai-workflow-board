@@ -36,7 +36,7 @@ export class MarketingAnalyticsController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json(await this.analytics.report(campaign, { since: parseDate(since), until: parseDate(until) }));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to build report' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to build report' });
     }
   }
 
@@ -47,7 +47,7 @@ export class MarketingAnalyticsController {
       const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
       return res.json((await this.analytics.listLinks(campaign)).map((l) => linkToJson(l, base ? `${base}/api/m/${l.code}` : null)));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list links' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list links' });
     }
   }
 
@@ -69,7 +69,7 @@ export class MarketingAnalyticsController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.analytics.listMetrics(campaign, limit ? Number(limit) : 200)).map(metricToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list metrics' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list metrics' });
     }
   }
 

@@ -41,7 +41,7 @@
  *      record it on channel state distinctly from a transient rate-limit
  *      failure.
  */
-import { InboundItem, OutboundPost, OutboundResult, OutreachConnector } from './types';
+import { InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
 import { OutreachRateLimiter, sharedOutreachRateLimiter } from '../outreach-rate-limiter';
 
 export class RedditConnectorConfigError extends Error {
@@ -258,6 +258,26 @@ export class RedditConnector implements OutreachConnector {
     const thing = result?.json?.data?.things?.[0]?.data;
     if (!thing?.name) throw new RedditApiError('Reddit comment response missing comment name/id');
     return { external_item_id: thing.name, permalink: this._absolutePermalink(thing.permalink || '') };
+  }
+
+  /**
+   * Which subreddit a post/comment fullname lives in (`/api/info`). Used by
+   * marketing replies to refuse a thread outside the channel's subreddit — the
+   * fullname alone says nothing about where it is. Read-only, but it is a real
+   * API call, so it goes through the same `_request` (and its rate cap).
+   */
+  async describeThread(threadRef: string): Promise<ThreadInfo> {
+    if (!threadRef || !/^t[13]_[a-z0-9]+$/i.test(threadRef)) {
+      throw new RedditApiError(`threadRef must be a Reddit fullname (t1_.../t3_...), got: ${threadRef}`);
+    }
+    const result = await this._request<any>('GET', `/api/info?id=${encodeURIComponent(threadRef)}`);
+    const data = result?.data?.children?.[0]?.data;
+    if (!data || !data.subreddit) throw new RedditApiError(`thread ${threadRef} was not found`);
+    return {
+      target: String(data.subreddit),
+      permalink: this._absolutePermalink(data.permalink || ''),
+      title: String(data.title || data.link_title || ''),
+    };
   }
 
   // ── Internals ────────────────────────────────────────────────────────────

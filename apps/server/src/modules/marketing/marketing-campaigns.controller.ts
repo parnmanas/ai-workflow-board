@@ -10,7 +10,7 @@ import { MarketingCycleService } from './marketing-cycle.service';
 import { campaignToJson, auditToJson, cycleToJson } from './marketing-json';
 import { normalizeStatus } from './marketing-campaign.logic';
 import { errorStatus } from './marketing-errors';
-import { assertCanChangePayment, boundAccountId, listAccountIds, userActor } from './marketing-http';
+import { assertCanChangeMoneySettings, boundAccountId, listAccountIds, userActor } from './marketing-http';
 
 /**
  * 캠페인 REST(docs/marketing.md). 목록은 접근 가능한 계정을 합치고, 상세 · 쓰기는
@@ -41,7 +41,7 @@ export class MarketingCampaignsController {
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      assertCanChangePayment(req, body);
+      assertCanChangeMoneySettings(req, body);
       const row = await this.campaigns.create(boundAccountId(req), body || {}, userActor(req));
       return res.status(201).json(campaignToJson(row));
     } catch (e: any) {
@@ -54,7 +54,7 @@ export class MarketingCampaignsController {
     try {
       return res.json(campaignToJson(await this.campaigns.get(id, boundAccountId(req))));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Campaign not found' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Campaign not found' });
     }
   }
 
@@ -62,7 +62,7 @@ export class MarketingCampaignsController {
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const { account_id: _ignored, ...patch } = body || {};
-      assertCanChangePayment(req, patch);
+      assertCanChangeMoneySettings(req, patch);
       const row = await this.campaigns.update(id, boundAccountId(req), patch, userActor(req));
       return res.json(campaignToJson(row));
     } catch (e: any) {
@@ -96,7 +96,7 @@ export class MarketingCampaignsController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.cycles.list(campaign)).map(cycleToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list cycles' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list cycles' });
     }
   }
 
@@ -127,7 +127,7 @@ export class MarketingCampaignsController {
       });
       return res.json(rows.map(auditToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to read audit log' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to read audit log' });
     }
   }
 }

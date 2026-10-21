@@ -18,6 +18,7 @@ import { createAccount, createAgent, createApiKey, createUser } from './helpers/
 import { McpClient } from './helpers/mcp-client.mjs';
 import { encrypt } from '../dist/services/encryption.service.js';
 import { MarketingEmailService } from '../dist/modules/marketing/marketing-email.service.js';
+import { sendEmail } from '../dist/modules/marketing/marketing-email-providers.js';
 import {
   isNightFor, nextSendableAt, consentFresh, adLabelFor, composeMarketingEmail, localHour,
 } from '../dist/common/marketing/email.js';
@@ -66,6 +67,25 @@ test('email rules: night hours, consent age, ad label, footer and headers', () =
   assert.match(mail.headers['List-Unsubscribe'], /^<https:\/\/awb\.example\.com\/api\/m\/u\/tok>, <mailto:help@awb\.example\.com\?subject=unsubscribe>$/);
 });
 
+test('email providers: retry only when a resend cannot duplicate the message', async () => {
+  const sender = { from_name: 'AWB', from_address: 'hi@awb.example.com', reply_to: '', postal_address: 'Seoul', contact_email: 'hi@awb.example.com', ad_label: '(광고)' };
+  const base = { apiKey: 'k', sender, to: { email: 'a@example.com', name: '' }, message: { subject: 's', text: 't', headers: {} }, idempotencyKey: 'send-1' };
+  const timeout = async () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }); };
+  const status = (code) => async () => new Response('{}', { status: code });
+  let seenHeaders = null;
+  const ok = async (url, init) => { seenHeaders = init.headers; return new Response('{"id":"re_1"}', { status: 200 }); };
+  assert.equal((await sendEmail({ ...base, provider: 'resend', fetchImpl: ok })).outcome, 'sent');
+  assert.equal(seenHeaders['idempotency-key'], 'send-1', 'Resend gets a stable idempotency key');
+  assert.equal((await sendEmail({ ...base, provider: 'resend', fetchImpl: timeout })).outcome, 'retry', 'idempotent → safe to retry');
+  assert.equal((await sendEmail({ ...base, provider: 'resend', fetchImpl: status(503) })).outcome, 'retry');
+  const sgTimeout = await sendEmail({ ...base, provider: 'sendgrid', fetchImpl: timeout });
+  assert.equal(sgTimeout.outcome, 'failed', 'SendGrid has no idempotency key — a timeout may already be delivered');
+  assert.match(sgTimeout.error, /may have been delivered/);
+  assert.equal((await sendEmail({ ...base, provider: 'sendgrid', fetchImpl: status(503) })).outcome, 'failed');
+  assert.equal((await sendEmail({ ...base, provider: 'sendgrid', fetchImpl: status(429) })).outcome, 'retry', '429 means not accepted');
+  assert.equal((await sendEmail({ ...base, provider: 'resend', fetchImpl: status(422) })).outcome, 'failed');
+});
+
 test('marketing email: consented contacts, queue, night deferral, compliance footer, unsubscribe', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); delete process.env.AWB_PUBLIC_URL; });
@@ -78,7 +98,7 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   const replies = [];
   emailService.fetchImpl = async (url, init) => {
     const body = JSON.parse(init.body);
-    sent.push({ url, body, auth: init.headers.authorization });
+    sent.push({ url, body, auth: init.headers.authorization, idem: init.headers['idempotency-key'] });
     const reply = replies.shift() || { status: 200, body: { id: `re_${sent.length}` } };
     return new Response(JSON.stringify(reply.body), { status: reply.status });
   };
@@ -171,12 +191,21 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   assert.match(sent[0].body.text, new RegExp(`${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/api/m/u/${bob.unsubscribe_token}`));
   assert.match(sent[0].body.text, /AWB Team · 1 Main St, Seoul · help@awb\.example\.com/);
   assert.equal(sent[0].body.headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+  const bobSend = await ds.getRepository('MarketingEmailSend').findOneBy({ post_id: drafted.post.id, contact_id: bob.id });
+  assert.equal(sent[0].idem, bobSend.id, 'the send row id is the idempotency key');
   const kimSend = await ds.getRepository('MarketingEmailSend').findOneBy({ post_id: drafted.post.id, contact_id: kim.id });
   assert.equal(kimSend.status, 'deferred');
   assert.equal(localHour(kimSend.next_attempt_at, 'Asia/Seoul'), 8);
   assert.equal((await api(`/posts/${drafted.post.id}`)).body.status, 'sending', 'not done while someone is deferred');
   const morning = new Date(kimSend.next_attempt_at.getTime() + 60_000);
-  assert.deepEqual(await emailService.processQueue(morning), { sent: 1, deferred: 0, failed: 0, suppressed: 0 });
+  // 캠페인을 멈추면 큐도 멈춘다(버리지 않고 보류) — 재개하면 이어서 보낸다.
+  await post(`/campaigns/${campaign.id}/status`, { status: 'paused' });
+  assert.deepEqual(await emailService.processQueue(morning), { sent: 0, deferred: 1, failed: 0, suppressed: 0 });
+  const pausedRow = await ds.getRepository('MarketingEmailSend').findOneBy({ id: kimSend.id });
+  assert.match(pausedRow.error, /campaign is paused/);
+  await post(`/campaigns/${campaign.id}/status`, { status: 'active' });
+  const resumedAt = new Date(pausedRow.next_attempt_at.getTime() + 60_000);
+  assert.deepEqual(await emailService.processQueue(resumedAt), { sent: 1, deferred: 0, failed: 0, suppressed: 0 });
   assert.equal(sent[1].body.subject, '(광고) AWB 1.0 is here', 'KR recipients always get (광고)');
   const done = (await api(`/posts/${drafted.post.id}`)).body;
   assert.equal(done.status, 'published');

@@ -13,7 +13,7 @@ import {
   SYSTEM_MARKETING_ACTOR,
   type MarketingActor,
 } from '../../common/marketing/marketing-constants';
-import { flushSqljs } from '../../db';
+import { afterSqljsTransactions, flushSqljs } from '../../db';
 import { LogService } from '../../services/log.service';
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
@@ -196,6 +196,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         ...fields,
         expected_outcome: expected,
         payload_sha256: spendPayloadHash(fields),
+        dual_required: campaign.dual_approval_threshold_minor > 0 && amount >= campaign.dual_approval_threshold_minor,
         status: 'pending',
         dedupe_key: dedupeKey,
         requested_by_type: actor.type === 'agent' ? 'agent' : 'user',
@@ -254,7 +255,11 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       const approvals = Array.isArray(row.approvals) ? [...row.approvals] : [];
       if (approvals.some((a) => a.user_id === actor.id)) throw marketingError(409, 'you have already approved this request — a different person must give the second approval');
       approvals.push({ user_id: actor.id, name: actor.name, at: now.toISOString() });
-      const dual = campaign.dual_approval_threshold_minor > 0 && row.amount_minor >= campaign.dual_approval_threshold_minor;
+      const dual = row.dual_required
+        || (campaign.dual_approval_threshold_minor > 0 && row.amount_minor >= campaign.dual_approval_threshold_minor);
+      if (!findPayee(campaign, row.payee)) throw marketingError(409, `payee "${row.payee}" is no longer on the campaign allowlist`);
+      const channel = await manager.getRepository(MarketingChannel).findOne({ where: { id: row.channel_id } });
+      if (!channel || channel.status !== 'active') throw marketingError(409, `the channel is ${channel?.status || 'gone'} — only active channels can be paid for`);
 
       const ledger = await loadLedger(manager, campaign.id);
       const allocation = await activeAllocation(manager, campaign.id, row.channel_id);
@@ -317,8 +322,34 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     return this.closePending(id, accountId, actor, 'denied', note, 'spend.denied', '지출 거부');
   }
 
+  /**
+   * 취소 — pending 은 그대로 닫고, 승인됐지만 아직 보내지 않은(approved) 요청은 보류한 예산을 풀며 닫는다.
+   * executing 이후는 이미 나갔을 수 있으니 취소가 아니라 대조(결제 완료 · 실패 기록)의 일이다.
+   */
   async cancel(id: string, accountId: string, actor: MarketingActor, note = ''): Promise<MarketingSpendRequest> {
-    return this.closePending(id, accountId, actor, 'cancelled', note, 'spend.cancelled', '지출 요청 취소');
+    const pre = await this.get(id, accountId);
+    if (pre.status !== 'approved') return this.closePending(id, accountId, actor, 'cancelled', note, 'spend.cancelled', '지출 요청 취소');
+    await this.dataSource.transaction(async (manager) => {
+      await lockCampaign(manager, pre.campaign_id);
+      const repo = manager.getRepository(MarketingSpendRequest);
+      const row = await repo.findOne({ where: { id } });
+      if (!row || row.status !== 'approved') throw marketingError(409, `spend request is ${row?.status || 'gone'} — it can no longer be cancelled`);
+      const won = await repo.createQueryBuilder().update(MarketingSpendRequest)
+        .set({ status: 'cancelled', error: `cancelled after approval by ${actor.name || actor.id}${note ? `: ${note.slice(0, 500)}` : ''}` })
+        .where('id = :id AND status = :s', { id, s: 'approved' })
+        .execute();
+      if (!won.affected) throw marketingError(409, 'spend request changed concurrently');
+      const ledger = await loadLedger(manager, row.campaign_id);
+      const totals = requestTotals(ledger, row.id);
+      const held = totals.reserve - totals.release;
+      if (held > 0) await appendLedger(manager, ledger, this.ledgerBase(row, row.period_key), [{ kind: 'release', amount_minor: held, note: 'cancelled before sending' }], actor);
+      await this.audit.record({
+        accountId: row.account_id, campaignId: row.campaign_id, entityType: 'spend_request', entityId: id, action: 'spend.cancelled', actor,
+        summary: `승인된 지출 취소(보내기 전): ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee}`, detail: { note, from: 'approved' },
+      }, manager);
+    });
+    this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', id, 'cancelled');
+    return this.get(id, accountId);
   }
 
   /**
@@ -411,64 +442,109 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
    * 외부로 보낸다 — 같은 요청을 두 번 보내는 경로는 없다.
    */
   async execute(id: string): Promise<MarketingSpendRequest> {
-    const row = await this.spendRepo.findOne({ where: { id } });
-    if (!row) throw marketingError(404, 'spend request not found');
-    if (row.provider !== 'webhook') return row;
-    const claim = await this.spendRepo.createQueryBuilder().update(MarketingSpendRequest)
-      .set({ status: 'executing', executing_at: new Date() })
-      .where('id = :id AND status = :s', { id, s: 'approved' })
-      .execute();
-    if (!claim.affected) return (await this.spendRepo.findOne({ where: { id } }))!;
-    await this.audit.record({
-      accountId: row.account_id,
-      campaignId: row.campaign_id,
-      entityType: 'spend_request',
-      entityId: id,
-      action: 'spend.executing',
-      actor: SYSTEM_MARKETING_ACTOR,
-      summary: `결제 실행 시작(webhook): ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee}`,
-      detail: { payload_sha256: row.payload_sha256 },
-    });
-    // sql.js 는 주기적으로만 파일에 쓴다 — "보내기 시작했다" 가 디스크에 없는 채로 죽으면 재시작 후 다시 보낼 수
-    // 있게 된다. 외부 호출 전에 강제로 내려 쓴다(Postgres 는 커밋이 곧 영속).
-    await flushSqljs(this.dataSource, true).catch((e) => {
-      this.logService.warn('Marketing', 'sqljs flush before payment failed', { err: String(e) });
-    });
+    const pre = await this.spendRepo.findOne({ where: { id } });
+    if (!pre) throw marketingError(404, 'spend request not found');
+    if (pre.provider !== 'webhook') return pre;
 
-    let outcome: PaymentOutcome;
-    if (spendPayloadHash(row) !== row.payload_sha256) {
-      outcome = { outcome: 'failed', error: 'stored request no longer matches the approved hash — not sent', response: {} };
-    } else {
-      try {
-        const secret = readWebhookSecret(await resolveMarketingSecret(this.credentialRepo, row.provider_credential_id || '', row.account_id));
-        const campaign = await this.campaignRepo.findOne({ where: { id: row.campaign_id } });
-        const channel = await this.channels.get(row.channel_id, row.account_id).catch(() => null as MarketingChannel | null);
-        const body = canonicalJson({
-          type: 'marketing.spend.execute',
-          spend_request_id: row.id,
-          campaign: { id: row.campaign_id, name: campaign?.name || '', slug: campaign?.slug || '' },
-          channel: { id: row.channel_id, platform: channel?.platform || '', target: channel?.target || '' },
-          amount_minor: row.amount_minor,
-          currency: row.currency,
-          payee: row.payee,
-          payee_ref: row.payee_ref,
-          purpose: row.purpose,
-          payload: row.payload || {},
-          payload_sha256: row.payload_sha256,
-          approved_by: (row.approvals || []).map((a) => ({ name: a.name, at: a.at })),
-          issued_at: new Date().toISOString(),
-        });
-        outcome = await executeWebhookPayment({ secret, body, idempotencyKey: row.id, fetchImpl: this.fetchImpl });
-      } catch (e: any) {
-        // 보내기 전의 실패(credential 을 못 읽음 등) — 아무것도 나가지 않았으니 failed 로 닫아도 이중 지출이 없다.
-        outcome = { outcome: 'failed', error: `not sent: ${String(e?.message || e).slice(0, 300)}`, response: {} };
+    // 1. 잠금 안에서: 지금도 보내도 되는가. 승인 뒤에 캠페인이 정지됐거나 수취인이 허용 목록에서 빠졌거나 채널이
+    //    멈췄으면 보내지 않고 failed(예산 해제)로 닫는다 — 승인 직후 프로세스가 죽어 sweep 이 나중에 실행하는 경우에도
+    //    사람이 그 사이에 바꾼 결정이 이긴다. 통과하면 같은 트랜잭션에서 approved → executing.
+    const claim = await this.dataSource.transaction(async (manager) => {
+      const campaign = await lockCampaign(manager, pre.campaign_id);
+      const repo = manager.getRepository(MarketingSpendRequest);
+      const row = await repo.findOne({ where: { id } });
+      if (!row || row.status !== 'approved') return null;
+      const channel = await manager.getRepository(MarketingChannel).findOne({ where: { id: row.channel_id } });
+      const blocker = campaign.status !== 'active' ? `the campaign is ${campaign.status}`
+        : !findPayee(campaign, row.payee) ? `payee "${row.payee}" is no longer on the campaign allowlist`
+          : !channel || channel.status !== 'active' ? `the channel is ${channel?.status || 'gone'}`
+            : spendPayloadHash(row) !== row.payload_sha256 ? 'the stored request no longer matches the approved hash' : null;
+      if (blocker) {
+        await this.settle(manager, row, 'failed', SYSTEM_MARKETING_ACTOR, { error: `not sent: ${blocker}`, from: 'approved' });
+        return null;
       }
+      const won = await repo.createQueryBuilder().update(MarketingSpendRequest)
+        .set({ status: 'executing', executing_at: new Date() })
+        .where('id = :id AND status = :s', { id, s: 'approved' })
+        .execute();
+      if (!won.affected) return null;
+      await this.audit.record({
+        accountId: row.account_id,
+        campaignId: row.campaign_id,
+        entityType: 'spend_request',
+        entityId: id,
+        action: 'spend.executing',
+        actor: SYSTEM_MARKETING_ACTOR,
+        summary: `결제 실행 시작(webhook): ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee}`,
+        detail: { payload_sha256: row.payload_sha256 },
+      }, manager);
+      return { row, campaign, channel: channel! };
+    });
+    if (!claim) {
+      this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', id, 'executed');
+      return (await this.spendRepo.findOne({ where: { id } }))!;
+    }
+    const { row, campaign, channel } = claim;
+
+    // 2. sql.js 는 주기적으로만 파일에 쓴다 — "보내기 시작했다" 가 디스크에 없는 채로 죽으면 재시작 뒤 다시 보낼 수 있다.
+    //    외부 호출 전에 강제로 내려 쓰고(트랜잭션 큐 뒤에서 — export 는 연결을 닫았다 열어 진행 중 트랜잭션을 끊는다),
+    //    내려 쓰지 못하면 보내지 않는다. 아무것도 나가지 않았으니 failed 로 닫아도 이중 지출이 없다.
+    try {
+      await this.persistNow();
+    } catch (e: any) {
+      await this.dataSource.transaction(async (manager) => {
+        await lockCampaign(manager, row.campaign_id);
+        const current = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
+        if (current?.status === 'executing') {
+          await this.settle(manager, current, 'failed', SYSTEM_MARKETING_ACTOR, {
+            error: `not sent: could not persist the executing state (${String(e?.message || e).slice(0, 200)})`, from: 'executing',
+          });
+        }
+      });
+      this.audit.notify(row.account_id, row.campaign_id, 'spend_request', id, 'executed');
+      return (await this.spendRepo.findOne({ where: { id } }))!;
     }
 
+    // 3. 보낸다.
+    let outcome: PaymentOutcome;
+    try {
+      const secret = readWebhookSecret(await resolveMarketingSecret(this.credentialRepo, row.provider_credential_id || '', row.account_id));
+      const body = canonicalJson({
+        type: 'marketing.spend.execute',
+        spend_request_id: row.id,
+        campaign: { id: row.campaign_id, name: campaign.name, slug: campaign.slug },
+        channel: { id: row.channel_id, platform: channel.platform, target: channel.target },
+        amount_minor: row.amount_minor,
+        currency: row.currency,
+        payee: row.payee,
+        payee_ref: row.payee_ref,
+        purpose: row.purpose,
+        payload: row.payload || {},
+        payload_sha256: row.payload_sha256,
+        approved_by: (row.approvals || []).map((a) => ({ name: a.name, at: a.at })),
+        issued_at: new Date().toISOString(),
+      });
+      outcome = await executeWebhookPayment({ secret, body, idempotencyKey: row.id, fetchImpl: this.fetchImpl });
+    } catch (e: any) {
+      // 보내기 전의 실패(credential 을 못 읽음 등) — 아무것도 나가지 않았으니 failed 로 닫아도 이중 지출이 없다.
+      outcome = { outcome: 'failed', error: `not sent: ${String(e?.message || e).slice(0, 300)}`, response: {} };
+    }
+
+    // 4. 결과를 기록한다.
     await this.dataSource.transaction(async (manager) => {
       await lockCampaign(manager, row.campaign_id);
       const current = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
-      if (!current || current.status !== 'executing') return; // 사람이 그 사이 대조했다
+      if (!current || current.status !== 'executing') {
+        // 그 사이 사람이 대조했다(executing 이 오래 걸려 unknown 이 된 뒤 등). 결과를 버리지 말고 감사에 남겨
+        // 사람이 자기 기록과 맞춰 볼 수 있게 한다.
+        await this.audit.record({
+          accountId: row.account_id, campaignId: row.campaign_id, entityType: 'spend_request', entityId: id,
+          action: 'spend.late_result', actor: SYSTEM_MARKETING_ACTOR,
+          summary: `결제 응답이 늦게 도착함(${outcome.outcome}${outcome.outcome === 'paid' ? `, 거래 ${outcome.transaction_id}` : ''}) — 현재 상태 ${current?.status || '없음'}, 기록과 대조하세요`,
+          detail: { outcome: outcome.outcome, transaction_id: outcome.outcome === 'paid' ? outcome.transaction_id : '', response: outcome.response },
+        }, manager);
+        return;
+      }
       if (outcome.outcome === 'paid') {
         await this.settle(manager, current, 'paid', SYSTEM_MARKETING_ACTOR, {
           provider_ref: outcome.transaction_id, receipt_url: outcome.receipt_url, response: outcome.response, from: 'executing',
@@ -494,9 +570,14 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         }
       }
     });
-    await flushSqljs(this.dataSource, true).catch(() => {});
+    await this.persistNow().catch(() => {});
     this.audit.notify(row.account_id, row.campaign_id, 'spend_request', id, 'executed');
     return (await this.spendRepo.findOne({ where: { id } }))!;
+  }
+
+  /** sql.js 를 지금 파일로 내려 쓴다(Postgres 는 no-op). 진행 중인 트랜잭션이 끝난 뒤에 — export 가 연결을 다시 연다. */
+  private persistNow(): Promise<boolean> {
+    return afterSqljsTransactions(this.dataSource, () => flushSqljs(this.dataSource, true));
   }
 
   // ── 주기 정리 ────────────────────────────────────────────────────────────

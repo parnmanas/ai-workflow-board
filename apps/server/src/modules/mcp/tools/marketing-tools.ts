@@ -13,12 +13,13 @@ import { z } from 'zod';
 import type { MarketingCampaign } from '../../../entities/MarketingCampaign';
 import type { MarketingActor } from '../../../common/marketing/marketing-constants';
 import { callerCanAccessAccount, resolveCallerAccountId } from '../shared/authz';
-import { getCallerAgent } from '../shared/session-auth';
+import { callerHoldsId, getCallerAgent } from '../shared/session-auth';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
 
 const CALLER_ERROR = 'Unauthorized: marketing tools require a DB-backed MCP key (an agent session)';
 const ACCESS_ERROR = 'Unauthorized: caller cannot access this campaign\'s account';
+const NOT_FOUND = 'campaign not found';
 
 export function registerMarketingTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, marketingAgentService, marketingCycleService } = ctx;
@@ -44,7 +45,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
     const campaign = await marketingAgentService.findCampaign(campaignId);
     // 접근할 수 없는 캠페인은 "없음" 과 같은 답을 준다 — 다른 계정의 id 존재 여부를 흘리지 않는다.
     if (!campaign || !(await callerCanAccessAccount(dataSource, caller, campaign.account_id))) {
-      return { error: campaign ? ACCESS_ERROR : 'campaign not found' };
+      return { error: NOT_FOUND };
     }
     return { campaign, actor: actorOf(caller) };
   }
@@ -118,7 +119,12 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
       const cycle = await marketingCycleService.findById(cycle_id);
       if (!cycle) return err('cycle not found');
       const found = await campaignFor(extra, cycle.campaign_id);
-      if ('error' in found) return err(found.error === ACCESS_ERROR ? 'cycle not found' : found.error);
+      if ('error' in found) return err(found.error === NOT_FOUND ? 'cycle not found' : found.error);
+      // 사이클을 닫는 것은 그 사이클을 받은 캠페인 에이전트뿐이다 — 같은 계정의 다른 에이전트(예: 외부 글을 인용한
+      // 티켓을 처리하던 에이전트)가 다음 사이클의 "다음 행동" 을 써 넣지 못하게.
+      if (!callerHoldsId(getCallerAgent(extra), cycle.agent_key)) {
+        return err('only the campaign agent that was given this cycle can complete it');
+      }
       try {
         const done = await marketingCycleService.complete(cycle, found.actor, { summary, next_actions });
         return ok({ cycle_id: done.id, cycle_no: done.cycle_no, status: done.status, next_cycle_at: found.campaign.next_cycle_at });
@@ -351,7 +357,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
       const campaignId = await marketingAgentService.campaignOfSpendRequest(spend_request_id);
       if (!campaignId) return err('spend request not found');
       const found = await campaignFor(extra, campaignId);
-      if ('error' in found) return err(found.error === ACCESS_ERROR ? 'spend request not found' : found.error);
+      if ('error' in found) return err(found.error === NOT_FOUND ? 'spend request not found' : found.error);
       try {
         return ok(await marketingAgentService.getSpendRequest(found.campaign, spend_request_id));
       } catch (e: any) {

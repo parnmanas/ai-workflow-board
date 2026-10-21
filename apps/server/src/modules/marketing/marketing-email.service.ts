@@ -25,6 +25,8 @@ const MAX_ATTEMPTS = 3;
 const RETRY_MS = 10 * 60_000;
 /** 'sending' 으로 이만큼 남은 행은 프로세스가 결과를 기록하지 못한 것이다 — 다시 보내지 않고 failed 로 닫는다. */
 const STUCK_SENDING_MS = 10 * 60_000;
+/** 캠페인 · 채널이 일시정지된 동안 보류한 메일을 다시 볼 간격. */
+const PAUSE_RECHECK_MS = 60 * 60_000;
 
 /** 수신거부 링크(공개). AWB_PUBLIC_URL 이 없으면 메일을 보내지 않는다 — 수신거부 링크 없는 광고 메일은 불법이다. */
 export function unsubscribeUrlFor(token: string): string {
@@ -53,6 +55,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(MarketingContact) private readonly contactRepo: Repository<MarketingContact>,
     @InjectRepository(MarketingPost) private readonly postRepo: Repository<MarketingPost>,
     @InjectRepository(MarketingChannel) private readonly channelRepo: Repository<MarketingChannel>,
+    @InjectRepository(MarketingCampaign) private readonly campaignRepo: Repository<MarketingCampaign>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     private readonly contacts: MarketingContactService,
     private readonly posts: MarketingPostService,
@@ -156,6 +159,8 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       });
       const senders = new Map<string, { sender: EmailSender; provider: string; apiKey: string } | null>();
       const postCache = new Map<string, MarketingPost | null>();
+      const campaigns = new Map<string, MarketingCampaign | null>();
+      const channels = new Map<string, MarketingChannel | null>();
       const touched = new Set<string>();
       for (const row of due) {
         const claim = await this.sendRepo.createQueryBuilder().update(MarketingEmailSend)
@@ -164,7 +169,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
           .execute();
         if (!claim.affected) continue;
         touched.add(row.post_id);
-        const outcome = await this.sendOne(row, now, senders, postCache);
+        const outcome = await this.sendOne(row, now, senders, postCache, campaigns, channels);
         stats[outcome]++;
       }
       for (const postId of touched) await this.finishIfDone(postId);
@@ -198,6 +203,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
           ].join('\n'),
           headers: {},
         },
+        idempotencyKey: `unsubscribe-notice-${contact.id}-${date}`,
         fetchImpl: this.fetchImpl,
       });
       return outcome.outcome === 'sent';
@@ -214,6 +220,8 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     now: Date,
     senders: Map<string, { sender: EmailSender; provider: string; apiKey: string } | null>,
     postCache: Map<string, MarketingPost | null>,
+    campaigns: Map<string, MarketingCampaign | null>,
+    channels: Map<string, MarketingChannel | null>,
   ): Promise<'sent' | 'deferred' | 'failed' | 'suppressed'> {
     const finish = async (status: string, extra: Partial<MarketingEmailSend>) => {
       await this.sendRepo.update({ id: row.id }, { status, ...extra });
@@ -237,13 +245,28 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       await finish('suppressed', { error: `post is ${post?.status || 'gone'}` });
       return 'suppressed';
     }
+    if (!campaigns.has(row.campaign_id)) campaigns.set(row.campaign_id, await this.campaignRepo.findOne({ where: { id: row.campaign_id } }));
+    const campaign = campaigns.get(row.campaign_id);
+    if (!campaign || campaign.status === 'archived') {
+      await finish('suppressed', { error: `the campaign is ${campaign ? 'archived' : 'gone'}` });
+      return 'suppressed';
+    }
+    if (!channels.has(row.channel_id)) channels.set(row.channel_id, await this.channelRepo.findOne({ where: { id: row.channel_id } }));
+    const channel = channels.get(row.channel_id);
+    // 일시정지는 "멈춤" 이지 "버림" 이 아니다 — 재개하면 이어서 보낸다.
+    if (campaign.status !== 'active' || channel?.status === 'paused') {
+      await finish('deferred', {
+        next_attempt_at: new Date(now.getTime() + PAUSE_RECHECK_MS),
+        error: campaign.status !== 'active' ? `deferred: the campaign is ${campaign.status}` : 'deferred: the channel is paused',
+      });
+      return 'deferred';
+    }
     if (!senders.has(row.channel_id)) {
-      const channel = await this.channelRepo.findOne({ where: { id: row.channel_id } });
       senders.set(row.channel_id, channel && channel.status === 'active' ? await this.senderFor(channel).catch(() => null) : null);
     }
     const sender = senders.get(row.channel_id);
     if (!sender) {
-      await finish('failed', { error: 'the email channel is paused, gone or misconfigured' });
+      await finish('failed', { error: 'the email channel is gone or misconfigured' });
       return 'failed';
     }
     let outcome;
@@ -255,7 +278,10 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
         unsubscribeUrl: unsubscribeUrlFor(contact.unsubscribe_token),
         contact,
       });
-      outcome = await sendEmail({ provider: sender.provider, apiKey: sender.apiKey, sender: sender.sender, to: { email: contact.email, name: contact.name }, message, fetchImpl: this.fetchImpl });
+      outcome = await sendEmail({
+        provider: sender.provider, apiKey: sender.apiKey, sender: sender.sender, to: { email: contact.email, name: contact.name },
+        message, idempotencyKey: row.id, fetchImpl: this.fetchImpl,
+      });
     } catch (e: any) {
       outcome = { outcome: 'failed' as const, error: String(e?.message || e).slice(0, 500) };
     }

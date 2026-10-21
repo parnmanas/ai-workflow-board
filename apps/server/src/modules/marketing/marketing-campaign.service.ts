@@ -297,11 +297,11 @@ export class MarketingCampaignService {
       row.payment_credential_id = provider === 'webhook' ? credentialId : null;
     }
     if (body.agent_runtime !== undefined) {
-      row.agent_runtime = await this.normalizeSpec(body.agent_runtime, 'agent_runtime');
+      row.agent_runtime = await this.normalizeSpec(body.agent_runtime, 'agent_runtime', row.account_id);
       row.refreshRuntimeIdentity();
     }
     if (body.improvement_assignee !== undefined) {
-      row.improvement_assignee = await this.normalizeSpec(body.improvement_assignee, 'improvement_assignee');
+      row.improvement_assignee = await this.normalizeSpec(body.improvement_assignee, 'improvement_assignee', row.account_id);
     }
     if (row.capabilities.includes('feedback_to_product') && !row.project_id && row.status === 'active') {
       throw marketingError(400, 'feedback_to_product needs project_id (the product the feedback improves)');
@@ -311,7 +311,7 @@ export class MarketingCampaignService {
     }
   }
 
-  private async normalizeSpec(value: unknown, label: string): Promise<Record<string, any> | null> {
+  private async normalizeSpec(value: unknown, label: string, accountId: string): Promise<Record<string, any> | null> {
     if (value === null || value === '') return null;
     let spec;
     try {
@@ -321,6 +321,13 @@ export class MarketingCampaignService {
     }
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
     if (!host) throw marketingError(400, `${label} references an unknown Runtime Host`);
+    if (spec.credential_id) {
+      // 다른 계정의 credential 은 저장 때 거부한다 — 실행 순간(매니저의 credential 조회)에 403 으로 늦게 터지지 않게.
+      const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id }, select: ['id', 'account_id'] });
+      if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
+        throw marketingError(400, `${label}.credential_id is not a credential of this account`);
+      }
+    }
     return { ...spec };
   }
 

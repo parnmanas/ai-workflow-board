@@ -32,6 +32,9 @@ const MIN_TICK_MS = 5_000;
 const MAX_TICK_MS = 60 * 60_000;
 const TICK_BATCH = 50;
 const DECISION_ACTIONS = ['post.rejected', 'post.failed', 'spend.denied', 'spend.failed', 'spend.expired', 'channel.rejected', 'allocation.rejected'];
+const DECISION_LABELS: Record<string, string> = {
+  post: '게시물', spend_request: '지출 요청', channel: '채널', allocation: '편성',
+};
 
 function clampEnv(name: string, def: number, min: number, max: number): number {
   const raw = Number.parseInt(process.env[name] || '', 10);
@@ -292,8 +295,18 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
         `결제 방식: ${budget.payment_provider}`,
       ],
       pending: { drafts, spend, allocations, channels: proposedChannels },
-      decisions: decisions.map((d) => ({ what: d.summary.slice(0, 160), status: d.action, note: String((d.detail as any)?.note || (d.detail as any)?.error || '') })),
-      report: report ? report.lines : [],
+      // 결정은 "무엇(종류 · id) · 결과 · 사람의 사유" 만 — 감사 요약에는 에이전트가 쓴 제목이 섞여 있어 싣지 않는다.
+      decisions: decisions.map((d) => ({
+        what: `${DECISION_LABELS[d.entity_type] || d.entity_type} ${d.entity_id.slice(0, 8)}`,
+        status: d.action,
+        note: String((d.detail as any)?.note || (d.detail as any)?.error || ''),
+      })),
+      // 성과 줄도 사람이 승인한 채널 것만(제안 단계 채널의 이름은 에이전트가 쓴 글이다).
+      report: report
+        ? report.channels.map((c, i) => ({ c, line: report.lines[i] }))
+          .filter(({ c }) => c.status === 'active' || c.status === 'paused')
+          .map(({ line }) => line)
+        : [],
       previous: previous ? { cycle_no: previous.cycle_no, status: previous.status, summary: previous.summary, next_actions: previous.next_actions || [] } : null,
       untrusted,
     };

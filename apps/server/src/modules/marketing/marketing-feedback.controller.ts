@@ -45,7 +45,7 @@ export class MarketingFeedbackController {
         })),
       });
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list feedback' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list feedback' });
     }
   }
 

@@ -318,7 +318,8 @@ export class MarketingChannelService {
           // 이 OutreachChannel 은 캠페인 게시용이다. 자체 배포 공지는 끈 채로 둔다.
           publishPolicy: 'approval',
           deployPostMode: 'off',
-          rateLimitPerHour: Number.isInteger(create.rate_limit_per_hour) ? create.rate_limit_per_hour : 2,
+          // 읽기(답글 대상 확인)도 같은 시간당 상한을 쓴다 — 게시만 세는 값보다 넉넉히.
+          rateLimitPerHour: Number.isInteger(create.rate_limit_per_hour) ? create.rate_limit_per_hour : 6,
           targetTags: ['marketing', `campaign:${campaign.slug}`],
           targetProjectId: campaign.project_id,
         });

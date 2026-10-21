@@ -235,6 +235,24 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   const loser = [race1, race2, race3][results.findIndex((r) => r.status === 409)];
   assert.equal((await post(`/spend-requests/${loser.id}/deny`, A, { note: 'over budget' })).body.status, 'denied');
 
+  // 2인 규칙은 요청 시점에 고정된다 — 요청 뒤에 임계값을 내려도 한 사람 승인으로 내려가지 않는다.
+  const big = (await ask({ amount_minor: 25000 })).spend_request;
+  assert.equal(big.dual_required, true);
+  assert.equal((await patch(`/campaigns/${campaign.id}`, M, { dual_approval_threshold_minor: 0 })).status, 403, 'manage cannot touch the threshold');
+  assert.equal((await patch(`/campaigns/${campaign.id}`, A, { dual_approval_threshold_minor: 0 })).status, 200);
+  const stillTwo = await post(`/spend-requests/${big.id}/approve`, A, { payload_sha256: big.payload_sha256 });
+  assert.equal(stillTwo.body.final, false, 'lowering the threshold later does not weaken a request already made');
+  await post(`/spend-requests/${big.id}/deny`, A, { note: 'test' });
+  assert.equal((await patch(`/campaigns/${campaign.id}`, A, { dual_approval_threshold_minor: 20000 })).status, 200);
+
+  // 승인됐지만 아직 보내지 않은 요청은 취소할 수 있고, 보류한 예산이 풀린다.
+  const later = (await ask({ amount_minor: 5000 })).spend_request;
+  assert.equal((await post(`/spend-requests/${later.id}/approve`, A, { payload_sha256: later.payload_sha256 })).body.status, 'approved');
+  assert.equal((await budget()).total.held, 5000);
+  const cancelled = await post(`/spend-requests/${later.id}/cancel`, A, { note: 'changed plan' });
+  assert.equal(cancelled.body.status, 'cancelled', cancelled.text);
+  assert.equal((await budget()).total.held, 0, 'cancelling an approved request releases its reserve');
+
   // 5. webhook
   const credRepo = ds.getRepository('Credential');
   const payCred = await credRepo.save(credRepo.create({
@@ -270,6 +288,13 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   const reconciled = await post(`/spend-requests/${reqE.id}/mark-paid`, A, { provider_ref: 'txn_checked_by_hand' });
   assert.equal(reconciled.body.status, 'paid');
 
+  // 409(멱등 키 중복)는 "이미 처리됐을 수 있다" — failed 로 닫아 예산을 풀면 안 된다.
+  payments.replies.push({ status: 409, body: { error: 'duplicate idempotency key' } });
+  const dupKey = (await ask({ amount_minor: 2000 })).spend_request;
+  const ambiguous = await post(`/spend-requests/${dupKey.id}/approve`, A, { payload_sha256: dupKey.payload_sha256 });
+  assert.equal(ambiguous.body.status, 'unknown', '409 is ambiguous, not a refusal');
+  await post(`/spend-requests/${dupKey.id}/mark-failed`, A, { note: 'checked: not charged' });
+
   payments.replies.push({ status: 402, body: { error: 'card declined' } });
   const reqF = (await ask({ amount_minor: 3000 })).spend_request;
   const failedF = await post(`/spend-requests/${reqF.id}/approve`, A, { payload_sha256: reqF.payload_sha256 });
@@ -277,12 +302,28 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   assert.match(failedF.body.error, /402/);
   assert.equal((await post(`/spend-requests/${reqF.id}/mark-paid`, A, { provider_ref: 'x' })).status, 409);
 
+  // 승인 직후 죽어 approved 로 남은 webhook 요청 — 그 사이 캠페인이 정지됐으면 sweep 이 보내지 않고 닫는다.
+  const realExecute = spendService.execute;
+  spendService.execute = async (id) => spendService.get(id, '');
+  const stranded = (await ask({ amount_minor: 1500 })).spend_request;
+  assert.equal((await post(`/spend-requests/${stranded.id}/approve`, A, { payload_sha256: stranded.payload_sha256 })).body.status, 'approved');
+  spendService.execute = realExecute;
+  await post(`/campaigns/${campaign.id}/status`, A, { status: 'paused' });
+  const callsBefore = payments.seen.length;
+  await spendService.sweep(new Date(Date.now() + 5 * 60_000));
+  const strandedAfter = (await api(`/spend-requests/${stranded.id}`, A)).body;
+  assert.equal(strandedAfter.status, 'failed');
+  assert.match(strandedAfter.error, /not sent: the campaign is paused/);
+  assert.equal(payments.seen.length, callsBefore, 'nothing was sent');
+  assert.deepEqual(strandedAfter.ledger.map((e) => e.kind), ['reserve', 'release']);
+  await post(`/campaigns/${campaign.id}/status`, A, { status: 'active' });
+
   // 실행 도중 재시작 → unknown(다시 보내지 않는다)
   const reqG = (await ask({ amount_minor: 1000 })).spend_request;
   await ds.getRepository('MarketingSpendRequest').update({ id: reqG.id }, { status: 'executing', executing_at: new Date(Date.now() - 60_000) });
   assert.equal(await spendService.recoverInterrupted(new Date()), 1);
   assert.equal((await api(`/spend-requests/${reqG.id}`, A)).body.status, 'unknown');
-  assert.equal(payments.seen.length, 3);
+  assert.equal(payments.seen.length, 4, 'D, E, the 409 one and F were sent; G never was');
 
   // 6. 만료 · 일시정지 취소 · 통화 고정 · 삭제 불가
   const reqH = (await ask({ amount_minor: 1000 })).spend_request;

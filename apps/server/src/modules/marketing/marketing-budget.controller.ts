@@ -41,7 +41,7 @@ export class MarketingBudgetController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json(await this.budget.summary(campaign));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to read budget' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to read budget' });
     }
   }
 
@@ -52,7 +52,7 @@ export class MarketingBudgetController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.budget.listAllocations(campaign)).map(allocationToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list allocations' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list allocations' });
     }
   }
 
@@ -104,7 +104,7 @@ export class MarketingBudgetController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.spend.list(campaign, status || undefined, limit ? Number(limit) : 100)).map(spendToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list spend requests' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list spend requests' });
     }
   }
 
@@ -115,7 +115,7 @@ export class MarketingBudgetController {
       const row = await this.spend.get(id, boundAccountId(req));
       return res.json({ ...spendToJson(row), ledger: (await this.spend.ledgerFor(row.id)).map(ledgerToJson) });
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Spend request not found' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Spend request not found' });
     }
   }
 
@@ -187,7 +187,7 @@ export class MarketingBudgetController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.budget.listLedger(campaign, limit ? Number(limit) : 200)).map(ledgerToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to read ledger' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to read ledger' });
     }
   }
 }

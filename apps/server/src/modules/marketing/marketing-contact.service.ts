@@ -57,7 +57,11 @@ export class MarketingContactService {
 
   /** 목록의 발송 대상 — subscribed · 주소 있음 · 동의 2 년 이내. 빠진 수도 같이 센다. */
   async eligible(accountId: string, listName: string, now: Date = new Date()) {
-    const all = await this.contactRepo.find({ where: { account_id: accountId } });
+    // 발송 판단에 필요한 칼럼만 읽는다(사이클 · get_marketing_campaign 마다 불린다).
+    const all = await this.contactRepo.find({
+      where: { account_id: accountId },
+      select: ['id', 'account_id', 'email', 'lists', 'status', 'consent_at'],
+    });
     const inList = all.filter((c) => (c.lists || []).includes(listName));
     const out = { contacts: [] as MarketingContact[], excluded: { not_subscribed: 0, consent_expired: 0 } };
     for (const c of inList) {

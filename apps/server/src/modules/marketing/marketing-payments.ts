@@ -15,6 +15,7 @@ import { createHmac } from 'node:crypto';
 import { marketingError } from './marketing-errors';
 
 export const WEBHOOK_TIMEOUT_MS = 20_000;
+const DEFINITE_REFUSALS = new Set([400, 401, 402, 403, 404, 422]);
 const RESPONSE_SNIPPET = 2000;
 
 export interface WebhookSecret {
@@ -110,7 +111,9 @@ export async function executeWebhookPayment(opts: {
     const receipt = parsed && typeof parsed.receipt_url === 'string' && /^https?:\/\//.test(parsed.receipt_url) ? parsed.receipt_url : '';
     return { outcome: 'paid', transaction_id: txn.slice(0, 200), receipt_url: receipt.slice(0, 1000), response };
   }
-  if (res.status >= 400 && res.status < 500) {
+  // 받는 쪽이 "이 결제를 하지 않았다" 고 분명히 말한 경우만 failed(예산 해제)다. 408 · 409(멱등 키 중복 = 이미 처리됐을
+  // 수 있다) · 425 · 429 같은 그 밖의 4xx 는 모호하므로 unknown — 사람이 대조한다.
+  if (DEFINITE_REFUSALS.has(res.status)) {
     return { outcome: 'failed', error: `payment endpoint refused the payment (HTTP ${res.status})`, response };
   }
   return { outcome: 'unknown', error: `payment endpoint answered HTTP ${res.status} — the payment may or may not have happened`, response };

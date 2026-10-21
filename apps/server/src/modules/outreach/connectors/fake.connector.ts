@@ -1,4 +1,4 @@
-import { InboundItem, OutboundPost, OutboundResult, OutreachConnector } from './types';
+import { InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
 
 /**
  * In-memory OutreachConnector for tests and for this ticket's scope cut (real
@@ -10,6 +10,8 @@ import { InboundItem, OutboundPost, OutboundResult, OutreachConnector } from './
 export class FakeOutreachConnector implements OutreachConnector {
   readonly published: OutboundPost[] = [];
   readonly replies: Array<{ threadRef: string; body: string }> = [];
+  /** describeThread 의 답 — 테스트가 채운다. 없는 ref 는 "찾을 수 없음". */
+  readonly threads = new Map<string, ThreadInfo>();
   private items: InboundItem[];
 
   constructor(items: InboundItem[] = []) {
@@ -33,6 +35,12 @@ export class FakeOutreachConnector implements OutreachConnector {
     this.published.push(post);
     const id = `fake-post-${this.published.length}`;
     return { external_item_id: id, permalink: `fake://post/${id}` };
+  }
+
+  async describeThread(threadRef: string): Promise<ThreadInfo> {
+    const info = this.threads.get(threadRef);
+    if (!info) throw new Error(`thread ${threadRef} was not found`);
+    return info;
   }
 
   async reply(threadRef: string, body: string): Promise<OutboundResult> {

@@ -30,7 +30,7 @@ export class MarketingChannelsController {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.channels.list(campaign)).map(channelToJson));
     } catch (e: any) {
-      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list channels' });
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list channels' });
     }
   }
 

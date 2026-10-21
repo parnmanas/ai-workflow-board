@@ -142,8 +142,13 @@ export class MarketingPostService {
       if (channel.kind === 'outreach' && !title) throw marketingError(400, 'title is required for a new post');
       kind = 'post';
     }
-    // 글은 자기 채널의 대상으로만 간다 — 다른 subreddit/repo 로 새는 길을 만들지 않는다.
+    // 글은 자기 채널의 대상으로만 간다 — 다른 subreddit/repo 로 새는 길을 만들지 않는다. 답글은 fullname/참조만 봐서는
+    // 어느 커뮤니티의 스레드인지 모르므로, 커넥터에 물어 이 채널 대상 안인지 확인하고 그 결과를 승인 화면에 남긴다.
     const target = channel.target;
+    let replyContext: Record<string, string> = {};
+    if (kind === 'reply' && channel.kind === 'outreach') {
+      replyContext = await this.verifyReplyTarget(channel, replyTo);
+    }
     const rationale = str(body.rationale, 'rationale', 4000);
     if (actor.type === 'agent' && !rationale) throw marketingError(400, 'rationale is required — why this message, for this channel, now');
     let saved: MarketingPost;
@@ -157,6 +162,7 @@ export class MarketingPostService {
         body: text,
         final_body: '',
         reply_to: replyTo,
+        reply_context: replyContext,
         target,
         status: 'draft',
         dedupe_key: dedupeKey,
@@ -343,12 +349,39 @@ export class MarketingPostService {
     this.audit.notify(post.account_id, post.campaign_id, 'post', post.id, 'sent');
   }
 
+  /** 답글 대상 스레드가 이 채널의 대상(subreddit/repo) 안인지 커넥터로 확인한다. 밖이면 초안을 만들지 않는다. */
+  private async verifyReplyTarget(channel: MarketingChannel, replyTo: string): Promise<Record<string, string>> {
+    const outreach = channel.outreach_channel_id ? await this.outreachRepo.findOne({ where: { id: channel.outreach_channel_id } }) : null;
+    if (!outreach || outreach.account_id !== channel.account_id) throw marketingError(409, 'the channel\'s outreach connection is gone — reconnect it');
+    let connector: OutreachConnector;
+    try {
+      connector = await this.connectorFactory(outreach, this.credentialRepo);
+    } catch (e: any) {
+      throw marketingError(409, `could not reach the channel to verify reply_to: ${String(e?.message || e).slice(0, 200)}`);
+    }
+    if (!connector.describeThread) throw marketingError(400, 'replies are not supported on this channel');
+    let info;
+    try {
+      info = await connector.describeThread(replyTo);
+    } catch (e: any) {
+      throw marketingError(400, `could not verify reply_to: ${String(e?.message || e).slice(0, 200)}`);
+    }
+    if (String(info.target || '').toLowerCase() !== channel.target_key) {
+      throw marketingError(400, `reply_to is a thread in ${info.target || 'an unknown place'}, outside this channel (${channel.target}) — reply only inside the channel`);
+    }
+    return { target: String(info.target), permalink: String(info.permalink || ''), title: String(info.title || '').slice(0, 300) };
+  }
+
   private async publish(post: MarketingPost, channel: MarketingChannel): Promise<MarketingPost> {
     let result: { external_item_id: string; permalink: string } | null = null;
     let error = '';
     try {
       const outreach = channel.outreach_channel_id ? await this.outreachRepo.findOne({ where: { id: channel.outreach_channel_id } }) : null;
       if (!outreach || outreach.account_id !== post.account_id) throw new Error('the channel\'s outreach connection is gone — reconnect it');
+      if (post.kind === 'reply' && String(post.reply_context?.target || '').toLowerCase() !== channel.target_key) {
+        // 초안 때 확인한 대상이 없거나 다르면(이 검사 이전의 행 등) 보내지 않는다.
+        throw new Error('the reply target was not verified to be inside this channel — draft the reply again');
+      }
       const connector = await this.connectorFactory(outreach, this.credentialRepo);
       result = post.kind === 'reply'
         ? await connector.reply(post.reply_to, post.final_body)

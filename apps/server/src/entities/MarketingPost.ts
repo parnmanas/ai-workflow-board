@@ -48,6 +48,13 @@ export class MarketingPost {
   @Column({ type: 'varchar', default: '' })
   reply_to: string;
 
+  /**
+   * reply 의 대상을 서버가 확인한 결과 { target, permalink, title } — 초안 때 커넥터의 describeThread 로 그 스레드가
+   * 이 채널의 subreddit/repo 안인지 확인하고 남긴다. 승인 화면이 "어디에 답글이 달리는지" 를 보여 준다. title 은 외부 글.
+   */
+  @Column({ type: 'simple-json', default: '{}' })
+  reply_context: Record<string, string>;
+
   /** 게시 대상(subreddit · owner/repo). 비면 채널의 target. */
   @Column({ type: 'varchar', default: '' })
   target: string;
