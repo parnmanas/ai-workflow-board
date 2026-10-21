@@ -112,14 +112,9 @@ export class CliLoginSessionService {
     if (!inst) {
       throw makeError(404, 'That Runtime Host instance is not currently online');
     }
-    // 리뷰 지적(round 1): instance_id는 클라이언트가 그대로 제출하는 값이라,
-    // 이 검증이 없으면 다른 account의 manager instance_id를 직접 넣어
-    // command를 보낼 수 있었다. 전역(is_global) 세션은 자기 자신의
-    // listCliLoginInstances(account_id 없음)가 이미 모든 account의
-    // 인스턴스를 보여주는 것과 동일하게 어떤 instance든 허용하고, account
-    // 세션은 그 instance가 이 account에서 실제로 보이는 경우(전역
-    // instance 포함)에만 허용한다.
-    if (!args.isGlobal && !agentIsVisibleInAccount(inst.account_id, args.accountId)) {
+    // A Global credential is shared; the login process still belongs to the
+    // caller's account and must run on one of that account's hosts.
+    if (!agentIsVisibleInAccount(inst.account_id, args.accountId)) {
       throw makeError(403, 'That Runtime Host instance is not available in this account');
     }
 
@@ -157,15 +152,13 @@ export class CliLoginSessionService {
   async getSession(sessionId: string, accountId: string): Promise<CliLoginSession | null> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) return null;
-    // 글로벌 세션(is_global)은 어느 account에서든 조회 가능 — Credential의
-    // "글로벌은 어디서든 read 가능" 규약과 동일.
-    if (!session.is_global && session.account_id !== accountId) return null;
+    if (!accountId || session.account_id !== accountId) return null;
     return session;
   }
 
   async cancelSession(sessionId: string, accountId: string): Promise<CliLoginSession> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
-    if (!session || (!session.is_global && session.account_id !== accountId)) {
+    if (!session || !accountId || session.account_id !== accountId) {
       throw makeError(404, 'Login session not found');
     }
     if (TERMINAL_CLI_LOGIN_SESSION_STATUSES.includes(session.status)) {

@@ -206,17 +206,22 @@ test('review-fix: startSession rejects a account-scoped request whose instance b
   assert.equal(commandService.calls.length, 0, 'must reject before ever issuing the command');
 });
 
-test('review-fix: startSession allows a account-scoped request against a GLOBAL (account_id=null) instance', async () => {
-  const { instance } = service({ instances: [liveInstance({ account_id: null })] });
-  const session = await instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' });
-  assert.equal(session.status, 'starting');
+test('startSession rejects an unowned instance instead of treating it as Global', async () => {
+  const { instance, commandService } = service({ instances: [liveInstance({ account_id: null })] });
+  await assert.rejects(
+    () => instance.startSession({ accountId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
+    (err) => err.status === 403,
+  );
+  assert.equal(commandService.calls.length, 0);
 });
 
-test('review-fix: startSession for a GLOBAL session may target an instance from ANY account (matches listCliLoginInstances\' own no-account-filter behavior for global admins)', async () => {
-  const { instance } = service({ instances: [liveInstance({ account_id: 'some-other-account' })] });
-  const session = await instance.startSession({ accountId: '', isGlobal: true, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'admin-1' });
-  assert.equal(session.status, 'starting');
-  assert.equal(session.is_global, true);
+test('creating a Global credential does not grant execution on another account’s host', async () => {
+  const { instance, commandService } = service({ instances: [liveInstance({ account_id: 'some-other-account' })] });
+  await assert.rejects(
+    () => instance.startSession({ accountId: 'w1', isGlobal: true, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'admin-1' }),
+    (err) => err.status === 403,
+  );
+  assert.equal(commandService.calls.length, 0);
 });
 
 // ─── CliLoginSessionService.applyProgress ──────────────────────────────
@@ -445,13 +450,16 @@ test('applyProgress: succeeded encrypts + stores a claude_subscription credentia
 test('applyProgress: succeeded on a GLOBAL session creates a account_id=null credential', async () => {
   const s = service();
   const session = await s.instance.startSession({
-    accountId: '',
+    accountId: 'w1',
     isGlobal: true,
     cli: 'codex',
     credentialName: 'Global Codex',
     instanceId: 'inst-1',
     triggeredById: 'admin-1',
   });
+  assert.equal(session.account_id, 'w1', 'the login execution remains account-owned');
+  assert.equal(await s.instance.getSession(session.id, 'other-account'), null);
+  await assert.rejects(() => s.instance.cancelSession(session.id, 'other-account'), (err) => err.status === 404);
   await s.instance.applyProgress({
     sessionId: session.id,
     callerAgentId: 'manager-agent-1',
@@ -614,8 +622,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
     const accountRepo = dataSource.getRepository('Account');
-    // Make the automatic default differ deterministically from the manager's
-    // owner; Global administration must still list that manager.
+    // A separate account's host must remain hidden from Global authors.
     const unrelatedDefault = await accountRepo.save(accountRepo.create({ name: 'Unrelated Default Account', created_at: new Date('2000-01-01T00:00:00Z') }));
 
     const admin = await userRepo.save(userRepo.create({
@@ -634,6 +641,8 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
       password_hash: await auth.hashPassword('user-password'),
     }));
     const account = await accountRepo.save(accountRepo.create({ name: 'Login Account' }));
+    const { AccountAccessService } = await import('../dist/services/account-access.service.js');
+    app.get(AccountAccessService).accessibleIds = async () => [account.id];
 
     const registry = app.get(InstanceRegistryService);
     const instanceId = `inst-${randomUUID()}`;
@@ -653,6 +662,10 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
         codex: { installed: true, healthy: true, version: '0.147.0', reason: null, capabilities: {} },
         claude: { installed: true, healthy: true, version: '2.1.238', reason: null, capabilities: {} },
       },
+    });
+    registry.upsert({
+      ...registry.list().find((i) => i.instance_id === instanceId),
+      instance_id: 'foreign-instance', agent_id: 'foreign-manager', account_id: unrelatedDefault.id,
     });
 
     const adminToken = auth.createSession(admin.id);
@@ -721,18 +734,19 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     assert.equal(fetchedBody.id, startedBody.id);
     assert.equal(fetchedBody.status, 'starting');
 
-    // 리뷰 지적(round 1): listCliLoginInstances를 account_id 없이 부르면
-    // "전역" 조회이므로 credential 생성과 동일한 게이트가 필요하다.
-    const globalInstancesDenied = await fetch(`${baseUrl}/cli-login/instances`, {
+    // An omitted account uses the caller's accessible hosts, including for
+    // authors with permission to create Global credentials.
+    const ownInstances = await fetch(`${baseUrl}/cli-login/instances`, {
       headers: { Authorization: `Bearer ${nonAdminToken}` },
     });
-    assert.equal(globalInstancesDenied.status, 403);
+    assert.equal(ownInstances.status, 200);
+    assert.deepEqual((await ownInstances.json()).map((i) => i.instance_id), [instanceId]);
     const globalInstancesAllowed = await fetch(`${baseUrl}/cli-login/instances`, {
-      headers: { Authorization: `Bearer ${adminToken}`, 'X-Account-Id': unrelatedDefault.id },
+      headers: { Authorization: `Bearer ${adminToken}` },
     });
     assert.equal(globalInstancesAllowed.status, 200);
     const globalInstancesBody = await globalInstancesAllowed.json();
-    assert.ok(globalInstancesBody.some((i) => i.instance_id === instanceId));
+    assert.deepEqual(globalInstancesBody.map((i) => i.instance_id), [instanceId]);
 
     // 리뷰 지적(round 1): 전역 세션의 조회/취소도 생성과 동일한 게이트가
     // 필요하다 — account 스코프 권한만으로 다른 account를 위해 만든

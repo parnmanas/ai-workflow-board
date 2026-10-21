@@ -6,6 +6,7 @@ import * as bcrypt from 'bcryptjs';
 import { User } from '../entities/User';
 import { MemoryMetricsRegistry } from './memory-metrics.registry';
 import { LogService } from './log.service';
+import { ensurePersonalAccount } from '../common/personal-account';
 
 interface Session {
   userId: string;
@@ -180,6 +181,7 @@ export class AuthService {
     this.loginAttemptsByEmail.delete(emailKey);
     this.loginAttemptsByIp.delete(ip);
 
+    await ensurePersonalAccount(this.userRepo.manager, user);
     const token = this.createSession(user.id);
     const { password_hash, ...safeUser } = user as any;
     return { token, user: safeUser };
@@ -223,6 +225,7 @@ export class AuthService {
     }
 
     if (!user) return { error: 'Failed to create user account' };
+    await ensurePersonalAccount(this.userRepo.manager, user);
 
     if ((user as any).status === 'pending') {
       return { error: 'Your account is pending admin approval' };
@@ -239,7 +242,7 @@ export class AuthService {
   async getSessionUser(token: string): Promise<User | null> {
     const session = this.validateSession(token);
     if (!session) return null;
-    return this.userRepo.findOne({ where: { id: session.userId } });
+    return this.userRepo.findOne({ where: { id: session.userId, status: 'active' } });
   }
 
   async needsSetup(): Promise<boolean> {

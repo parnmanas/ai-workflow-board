@@ -13,8 +13,7 @@ import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { ApiKey } from '../dist/entities/ApiKey.js';
 import { ActionsService } from '../dist/modules/actions/actions.service.js';
 
-// P4c-4: 대상 검증은 Host 행으로 해소한다 (Agent 테이블 없음). 전역 스코프
-// 행이면 모든 계정에서 보인다.
+// Every execution host belongs to the same account as its Action.
 const HOST_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
 const TARGET = { manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
 
@@ -31,8 +30,9 @@ describe('Actions account scope', () => {
     });
     await dataSource.initialize();
     await dataSource.getRepository(RuntimeHost).save(
-      dataSource.getRepository(RuntimeHost).create({ id: HOST_ID, name: 'host', account_id: null }),
+      dataSource.getRepository(RuntimeHost).create({ id: HOST_ID, name: 'host', account_id: 'account-a' }),
     );
+    await dataSource.getRepository(RuntimeHost).save({ id: 'bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb', name: 'host-b', account_id: 'account-b' });
     const actionRepo = dataSource.getRepository(Action);
     const stub = {};
     // (action, run, approval, room, participant, message, attachment, host,
@@ -65,7 +65,7 @@ describe('Actions account scope', () => {
 
   it('list() returns only the requested account\'s Actions', async () => {
     await service.create({ account_id: 'account-a', name: 'Account A action', target_runtimes: [TARGET] });
-    await service.create({ account_id: 'account-b', name: 'Account B action', target_runtimes: [TARGET] });
+    await service.create({ account_id: 'account-b', name: 'Account B action', target_runtimes: [{ ...TARGET, manager_agent_id: 'bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb' }] });
 
     const rowsA = await service.list('account-a');
     assert.ok(rowsA.some((row) => row.name === 'Account A action'));

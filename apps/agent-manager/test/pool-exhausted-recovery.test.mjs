@@ -36,6 +36,7 @@ const TICKET = 'ticket-pool';
 function makeCtx() {
   return {
     agent_id: AGENT,
+    account_id: 'account-1',
     name: 'Rolf',
     cli: 'claude',
     working_dir: '/ws',
@@ -234,7 +235,7 @@ function makeDispatcher(state) {
     };
   }
   return new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
+    { url: 'http://127.0.0.1:0', apiKey: 'test-key', account_id: 'account-1', delegation: { enabled: true } },
     deps,
   );
 }
@@ -256,7 +257,7 @@ function newState(overrides = {}) {
 // worktree_mode='shared' so resolveCwd is asked for a pool slot.
 function makeEvent(overrides = {}) {
   return JSON.stringify({
-    event_type: 'agent_trigger',
+    event_type: 'agent_trigger', account_id: 'account-1',
     ticket_id: TICKET,
     action: 'assignee',
     actor_name: AGENT,
@@ -505,7 +506,7 @@ test('pool_exhausted with no reclaim trigger wired → signal recorded, retry st
 test('on-demand reclaim that throws is swallowed (treated as 0 freed) — dispatch queues a retry, never wedges', async () => {
   const throwState = newState({ poolFull: true, scheduler: manualScheduler() });
   const throwing = new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
+    { url: 'http://127.0.0.1:0', apiKey: 'test-key', account_id: 'account-1', delegation: { enabled: true } },
     {
       worktreeManager: {
         async resolveCwd() { throwState.resolveCalls += 1; return { isWorktree: false, reason: 'pool_exhausted' }; },

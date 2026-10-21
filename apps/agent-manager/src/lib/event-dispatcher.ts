@@ -1440,7 +1440,7 @@ export class EventDispatcher {
     // for the operator on give-up, and pre-checks ticket eligibility so a pended /
     // terminal ticket's queued retry is dropped before it fires.
     this.#poolRetry = new PendingDispatchRetry({
-      onRetry: (raw) => this.handleTrigger(raw),
+      onRetry: (raw) => this.#replayWork('agent_trigger', raw),
       onGiveUp: (entry) => this.#pendExhaustedPoolRetry(entry),
       verify: (entry) => this.#isPoolRetryEligible(entry),
       scheduler: deps.poolRetryScheduler ?? undefined,
@@ -1462,9 +1462,8 @@ export class EventDispatcher {
     // re-driving — the durable exactly-once the process-local reservation can't give
     // across a restart. A mention has no durable session to reap, so it passes none.
     this.#sessionDefer.setResumeHandler((intent, onSpawned) =>
-      intent.kind === 'mention'
-        ? this.handleCommentMention(intent.raw)
-        : this.handleTrigger(intent.raw, { onDispatched: (pid) => onSpawned(pid) }),
+      this.#replayWork(intent.kind === 'mention' ? 'comment_mention' : 'agent_trigger', intent.raw,
+        { onDispatched: (pid) => onSpawned(pid) }),
     );
     this.#sessionDefer.load();
   }
@@ -2053,21 +2052,12 @@ export class EventDispatcher {
     context: AgentExecutionContext | undefined,
     accountId: string | undefined | null,
   ): Promise<AgentExecutionContext | undefined> {
-    const scope = String(accountId || '').trim();
-    if (!context || !scope || context.account_id === scope) return context;
-    let apiKey = await readApiKey(context.agent_id, scope);
-    if (!apiKey) {
-      const issued = await provisionManagedAgentApiKey(this.#config, context.agent_id, scope);
-      if (!issued?.raw_key) throw new Error(`Could not provision account-scoped key for ${scope}`);
-      apiKey = issued.raw_key;
-      await writeApiKey(context.agent_id, apiKey, scope);
+    const scope = String(accountId || this.#config.account_id || '').trim();
+    if (!context) return context;
+    if (!scope || scope !== this.#config.account_id || context.account_id !== scope) {
+      throw new Error('Runtime context does not belong to this manager account');
     }
-    // Ticket ee26302d: cross-account re-scoping — no resolved profile in
-    // scope here either (same gap as agent-manager-commands.ts's spawn_agent
-    // / #refreshMcpConfig), always writes 'full'. Corrected by the next
-    // actual spawn through base-session-manager.ts / subagent-manager.ts.
-    const mcpConfigPath = await writeMcpConfig(context.agent_id, this.#config.url, apiKey, scope);
-    return { ...context, account_id: scope, api_key: apiKey, mcp_config_path: mcpConfigPath };
+    return context;
   }
 
   async #dispatchHermes(args: {
@@ -2461,9 +2451,39 @@ export class EventDispatcher {
     return !!this.#managedAgentContexts?.has(senderId);
   }
 
+  /** Called only with the authenticated connection's server_meta ownership. */
+  bindAccount(accountId: string): void {
+    this.#config.account_id = accountId;
+    for (const context of this.#managedAgentContexts?.list() ?? []) context.account_id = accountId;
+  }
+
+  #acceptAccount(eventType: string, raw: string): boolean {
+    if (!raw) return false;
+    let event: any;
+    try { event = JSON.parse(raw); } catch { return false; }
+    const accountIds = [event?.account_id, event?.scope?.account_id, event?.payload?.account_id,
+      event?.args?.account_id, event?.payload?.args?.account_id]
+      .filter(value => value !== undefined);
+    // The server stamps ownership for both flattened and envelope events.
+    // Check before logging or forwarding a payload to a local runner.
+    if (!this.#config.account_id || !accountIds.length || accountIds.some(id => id !== this.#config.account_id)) {
+      log(`Dropped ${eventType}: account ownership does not match this manager`);
+      return false;
+    }
+    return true;
+  }
+
+  /** Durable retries must re-check ownership after a restart/rebinding too. */
+  async #replayWork(eventType: 'agent_trigger' | 'comment_mention', raw: string,
+    opts?: { onDispatched?: (pid: number | null) => void }): Promise<void> {
+    if (!this.#acceptAccount(eventType, raw)) return;
+    if (eventType === 'comment_mention') await this.handleCommentMention(raw);
+    else await this.handleTrigger(raw, opts);
+  }
+
   /** Route a raw SSE event payload to the right handler. */
   dispatch(eventType: string, raw: string): void | Promise<void> {
-    if (!raw) return;
+    if (!this.#acceptAccount(eventType, raw)) return;
     switch (eventType) {
       case 'agent_trigger':
       case 'board_update':
@@ -2669,7 +2689,7 @@ export class EventDispatcher {
         // Fire-and-forget so we don't extend the caller's finally/onExit; the
         // replay re-enters handleTrigger cleanly (re-acquires the slot,
         // force-respawns fresh).
-        this.handleTrigger(forcedRaw).catch((err: any) =>
+        this.#replayWork('agent_trigger', forcedRaw).catch((err: any) =>
           log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
         );
       }
@@ -2777,7 +2797,7 @@ export class EventDispatcher {
     // Deliberately un-caught here: the single settled catch lives at the call
     // site, so one place handles EVERY fault on this path (a dispatch throw as
     // well as anything unexpected above) instead of two partial guards.
-    await this.handleTrigger(raw);
+    await this.#replayWork('agent_trigger', raw);
   }
 
   async handleTrigger(

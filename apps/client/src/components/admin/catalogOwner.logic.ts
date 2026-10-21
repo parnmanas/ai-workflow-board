@@ -1,12 +1,12 @@
-/** Internal ownership routing for catalogs; no workspace/scope UI. */
+/** Ownership defaults for account catalogs. */
 export interface OwnerAccount {
   id: string;
 }
 
-/** Default owner for new items: Global when permitted, otherwise the first accessible Account. */
-export function defaultCreateOwner(accounts: readonly OwnerAccount[], canManageGlobal: boolean): string | null {
-  if (canManageGlobal) return null;
-  return accounts[0]?.id ?? null;
+/** Global creation requires an explicit choice; permission alone never shares data. */
+export function defaultCreateOwner(accounts: readonly OwnerAccount[], explicitlyGlobal = false): string | null {
+  if (explicitlyGlobal) return null;
+  return accounts[0]?.id ?? '';
 }
 
 /**

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
@@ -78,6 +78,9 @@ export class AgentManagerCommandService {
     args: Record<string, any>,
     issuedBy: string,
   ): Promise<{ command_id: string; issued_at: string }> {
+    if (!instance.account_id || (args.account_id && args.account_id !== instance.account_id)) {
+      throw new ForbiddenException('account_access_denied');
+    }
     // P4c-4: spawn 인자는 호출자가 완성해서 준다 (Agent 행 hydration 제거).
     const hydrated: Record<string, any> = { ...args };
 
@@ -199,6 +202,7 @@ export class AgentManagerCommandService {
       inst = null;
     }
     if (!inst) return { ok: false, reason: 'manager_offline' };
+    if (!opts.accountId || inst.account_id !== opts.accountId) return { ok: false, reason: 'account_access_denied', refused: true };
     const slotCredentialId = String(spec?.credential_id || '').trim();
     const reported = inst.agent_credentials?.find((row) => row?.agent_id === key);
     const prepared = slotCredentialId

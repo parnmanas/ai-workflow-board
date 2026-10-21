@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import PageHeader from './PageHeader';
 import FunctionManager from './admin/FunctionManager';
@@ -38,13 +38,15 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
   const accountId = currentAccountId || '';
   const info = PAGE_INFO[kind];
 
-  // Ownership stays in request routing, never in a workspace/scope picker.
-  // Credentials have a dedicated permission for instance-wide writes.
+  const [createGlobal, setCreateGlobal] = useState(false);
+  useEffect(() => { setCreateGlobal(false); }, [kind, accountId]);
+
+  // Global writes are explicit; the normal destination is the signed-in account.
   const canManageGlobalHere = kind === 'credentials'
     ? hasPermission('admin.global_credentials')
     : hasPermission('admin.access');
 
-  const createAccountId = defaultCreateOwner(availableAccounts, canManageGlobalHere);
+  const createAccountId = defaultCreateOwner(availableAccounts, canManageGlobalHere && createGlobal);
 
   const definitionProps = {
     catalogMode: true,
@@ -92,6 +94,12 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
         description={info.description}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
+        {canManageGlobalHere && ['functions', 'credentials', 'resources'].includes(kind) && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <input type="checkbox" checked={createGlobal} onChange={event => setCreateGlobal(event.target.checked)} />
+            Create new items as Global (shared with all accounts)
+          </label>
+        )}
         {manager}
       </div>
     </div>

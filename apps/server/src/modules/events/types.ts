@@ -13,7 +13,7 @@ export interface SubscriberIdentity {
   name: string;
   agentId?: string;
   userId?: string;
-  /** Ownership accounts visible to this human subscriber. */
+  /** Ownership accounts visible to this user or authenticated host key. */
   accountIds?: Set<string>;
   /** Server-generated UUID for this SSE connection. */
   sseSessionId?: string;

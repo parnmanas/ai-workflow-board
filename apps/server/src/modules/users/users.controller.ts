@@ -10,6 +10,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { resolvePermissions } from '../../common/types/permissions';
 import { AuthService } from '../../services/auth.service';
 import { findOrFail } from '../../common/find-or-fail';
+import { ensurePersonalAccount } from '../../common/personal-account';
 
 @ApiBearerAuth('user-session')
 @ApiTags('users')
@@ -55,6 +56,7 @@ export class UsersController {
 
     const created = this.userRepo.create(userData);
     const saved: User = (await this.userRepo.save(created as any)) as any;
+    await ensurePersonalAccount(this.userRepo.manager, saved);
     const { password_hash: _ph, ...safeUser } = saved as any;
     const customPerms = saved.permissions ? JSON.parse(saved.permissions || '[]') : [];
     return res.status(201).json({ ...safeUser, resolved_permissions: resolvePermissions(saved.role, customPerms) });
@@ -79,6 +81,7 @@ export class UsersController {
     }
 
     const updated = await this.userRepo.save(user);
+    await ensurePersonalAccount(this.userRepo.manager, updated);
     const { password_hash, ...safeUser } = updated as any;
     const customPerms = updated.permissions ? JSON.parse(updated.permissions || '[]') : [];
     return res.json({ ...safeUser, resolved_permissions: resolvePermissions(updated.role, customPerms) });
@@ -87,6 +90,9 @@ export class UsersController {
   @Delete(':id')
   async delete(@Param('id') id: string, @Res() res: Response) {
     const user = await findOrFail(this.userRepo, { where: { id } }, 'User not found');
+    if (await this.userRepo.manager.getRepository('Account').existsBy({ owner_user_id: user.id })) {
+      return res.status(409).json({ error: 'User owns an account. Disable the login instead to preserve its work.' });
+    }
     await this.userRepo.delete(user.id);
     return res.json({ success: true });
   }

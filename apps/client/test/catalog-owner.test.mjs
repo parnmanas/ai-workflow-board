@@ -1,4 +1,4 @@
-// Catalogs have no workspace/scope controls; ownership remains internal to requests.
+// Catalogs default to account ownership; sharing requires an explicit Global choice.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,10 +19,11 @@ const ACCOUNTS = [
 
 // ─── pure logic ─────────────────────────────────────────
 
-test('the default owner is Global when permitted, otherwise the first accessible account', () => {
+test('new items belong to the account unless Global is explicitly selected', () => {
   assert.equal(defaultCreateOwner(ACCOUNTS, true), null);
   assert.equal(defaultCreateOwner(ACCOUNTS, false), 'account-1');
-  assert.equal(defaultCreateOwner([], false), null);
+  assert.equal(defaultCreateOwner(ACCOUNTS), 'account-1');
+  assert.equal(defaultCreateOwner([], false), '');
 });
 
 test('a Resource binds Global credentials and its own account’s only', () => {
@@ -82,7 +83,7 @@ function assertNoOwnershipUi(container) {
   }
 }
 
-test('Credentials page aggregates without an owner picker and creates shared credentials when permitted', async (t) => {
+for (const explicitlyGlobal of [false, true]) test(`Credentials page creates ${explicitlyGlobal ? 'Global only after selection' : 'in the account even with global permission'}`, async (t) => {
   const listCalls = [];
   const created = [];
   const { container } = await mountSignedIn(t, React.createElement(AccountManagementPage, { kind: 'credentials' }), {
@@ -98,6 +99,10 @@ test('Credentials page aggregates without an owner picker and creates shared cre
   assert.ok(listCalls.length > 0);
   assert.ok(listCalls.every(([accountId]) => accountId === undefined), JSON.stringify(listCalls));
 
+  const globalChoice = container.querySelector('input[type="checkbox"]');
+  assert.equal(globalChoice.checked, false);
+  if (explicitlyGlobal) click(globalChoice);
+
   click(buttonsByText(container, '+ New Credential')[0]);
   assertNoOwnershipUi(container);
   const name = container.querySelector('input[placeholder="e.g. My GitHub PAT"]');
@@ -107,8 +112,8 @@ test('Credentials page aggregates without an owner picker and creates shared cre
   });
   await act(async () => { click(buttonsByText(container, 'Save Credential')[0]); });
   assert.equal(created.length, 1);
-  assert.equal(created[0].scope, 'global');
-  assert.equal(created[0].account_id, undefined);
+  assert.equal(created[0].scope, explicitlyGlobal ? 'global' : 'account');
+  assert.equal(created[0].account_id ?? null, explicitlyGlobal ? null : 'account-1');
 });
 
 test('Credentials page without global permission creates in the automatic account without showing a picker', async (t) => {
@@ -121,6 +126,7 @@ test('Credentials page without global permission creates in the automatic accoun
     },
   });
   assertNoOwnershipUi(container);
+  assert.doesNotMatch(container.textContent, /Create new items as Global/);
   click(buttonsByText(container, '+ New Credential')[0]);
   const name = container.querySelector('input[placeholder="e.g. My GitHub PAT"]');
   run(() => {

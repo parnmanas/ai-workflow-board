@@ -109,20 +109,26 @@ What the server does on its side:
   the way the slot asks (`subscription` / `api_key` for a credential slot,
   `operator_home` for one without) are not re-provisioned.
 
-## Account ownership compatibility
+## Account ownership
 
 Work pages use `/sessions`, `/tickets`, `/projects`, and `/missions` without an
 owner switch. The manager receives canonical `account_id` on work and session
-requests. Server SSE also carries the old `account_id` alias so existing
-installations keep running; new managers normalize old SSE and saved config to
-`account_id`. New config writes contain only the canonical owner field.
+requests. The Host, manager key and runtime keys must share the same nonempty
+account. A manager cannot execute work or fetch account secrets for another
+owner. An unowned Host is not a Global Host.
+
+SSE starts with `server_meta.account_id`, resolved from the authenticated key.
+The manager binds that owner before reconnect callbacks and work dispatch,
+including when its saved config contains an obsolete account hint. Every work
+frame carries `account_id`; conflicting or absent ownership is rejected before
+logging or executing the payload. Durable retries re-check the same boundary.
+Server and manager must be released together for this contract.
 
 The owner UUID stays the same. Existing `apikey.<UUID>`,
 `mcp-config.<UUID>[.compact].json`, managed runtime homes, credential session
-homes, and native CLI history retain their paths. `--account` is an optional
-manual override; `--account` / `-w` remain deprecated aliases. Pairing and
-normal work do not require selecting a account. Filesystem `workspace_folder`,
-RunWorkspace, CLI account trust, and Codex `workspace-write` retain their
+homes, and native CLI history retain their paths. A local account hint cannot
+override key ownership. Pairing and normal work use the authenticated Account.
+Filesystem `workspace_folder`, RunWorkspace, CLI workspace trust, and Codex `workspace-write` retain their
 working-directory meanings.
 
 ## Host topology
@@ -381,8 +387,9 @@ prefix, producing `CLOUDFLARE_API_TOKEN` for
   subagent, persistent ticket/chat session, Agent Session — calls
   `GET /api/agent-manager/agent-env?account_id=` with the Host key
   (`agent-env-credentials.ts`). Auth matches the project git-credential route:
-  a Host key names the account, an account-scoped runtime key only gets its
-  own. Response: `{ env, sources, skipped }`, `Cache-Control: no-store`.
+  both Host and runtime keys only get their owning account's values plus
+  explicit Global values. Response: `{ env, sources, skipped }`,
+  `Cache-Control: no-store`.
 - **Merge order**: right after the base env (next to the account
   `environment_config.env_vars`), below `AWB_API_KEY`, cli-home, the per-agent
   CLI credential and harness env — so it cannot shadow them. The manager also

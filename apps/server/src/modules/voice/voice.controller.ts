@@ -261,10 +261,9 @@ export class VoiceLabController {
 export class VoiceOperatorsController {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
-  private denied(req: Request, res: Response): boolean {
-    if ((req as any).currentUser?.role === 'admin') return false;
-    res.status(403).json({ error: 'admin_required', message: 'Only an admin can manage operators.' });
-    return true;
+  private visible(req: Request, list: Awaited<ReturnType<typeof readOperators>>) {
+    const ids: string[] = (req as any).accessibleAccountIds || [];
+    return list.filter(op => !!op.account_id && ids.includes(op.account_id));
   }
 
   private async write(res: Response, fn: () => Promise<unknown>) {
@@ -277,8 +276,8 @@ export class VoiceOperatorsController {
   }
 
   @Get()
-  async list(@Res() res: Response) {
-    return res.json({ operators: await readOperators(this.dataSource) });
+  async list(@Req() req: Request, @Res() res: Response) {
+    return res.json({ operators: this.visible(req, await readOperators(this.dataSource)) });
   }
 
   /**
@@ -288,20 +287,24 @@ export class VoiceOperatorsController {
    * `wake.logic.ts`와 같은 규칙이다.
    */
   @Post('match')
-  async matchWake(@Body() body: any, @Res() res: Response) {
+  async matchWake(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const text = typeof body?.text === 'string' ? body.text.slice(0, 500) : '';
-    return this.write(res, async () => toWakeMatchResponse(matchWakeOperator(text, await readOperators(this.dataSource))));
+    return this.write(res, async () => toWakeMatchResponse(matchWakeOperator(text, this.visible(req, await readOperators(this.dataSource)))));
   }
 
   /** `{ name, aliases?, manager_id, cli, session_id, cwd?, title? }` — 이 세션을 이 이름의 operator 로 등록한다. */
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    if (this.denied(req, res)) return;
-    // 화면의 계정를 같이 남긴다 — 서버가 대신 보고를 보낼 때 이 계정의 CLI 설정으로 연다.
-    const header = req.headers['x-account-id'];
-    const accountId = String(Array.isArray(header) ? header[0] : header ?? '');
+    if (typeof body?.manager_id !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.manager_id)) return res.status(400).json({ error: 'invalid_host_id' });
+    const host = await this.dataSource.getRepository('RuntimeHost').findOneBy({ id: body.manager_id });
+    if (!host?.is_active || !host.account_id || !(req as any).accessibleAccountIds?.includes(host.account_id)) {
+      return res.status(403).json({ error: 'account_access_denied' });
+    }
+    const accountId = host.account_id;
+    const execution = await this.dataSource.getRepository('AgentSessionExecution').findOneBy({ manager_id: host.id, cli: body.cli, session_id: body.session_id });
+    if (execution && execution.account_id !== accountId) return res.status(403).json({ error: 'account_access_denied' });
     return this.write(res, () => updateOperators(this.dataSource, (list) => {
-      const operator = createOperatorEntry({ ...body, account_id: accountId }, (req as any).currentUser.id, list);
+      const operator = createOperatorEntry({ ...body, account_id: accountId }, (req as any).currentUser.id, list.filter(op => op.account_id === accountId));
       return { next: [...list, operator], result: { operator } };
     }));
   }
@@ -309,11 +312,10 @@ export class VoiceOperatorsController {
   /** `{ name?, aliases?, title? }` */
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    if (this.denied(req, res)) return;
     return this.write(res, () => updateOperators(this.dataSource, (list) => {
-      const current = list.find((op) => op.id === id);
+      const current = this.visible(req, list).find((op) => op.id === id);
       if (!current) throw new OperatorInputError(404, 'operator_not_found', 'No such operator.');
-      const operator = patchOperatorEntry(current, body, list);
+      const operator = patchOperatorEntry(current, body, list.filter(op => op.account_id === current.account_id));
       return { next: list.map((op) => (op.id === id ? operator : op)), result: { operator } };
     }));
   }
@@ -321,11 +323,10 @@ export class VoiceOperatorsController {
   /** 등록만 푼다 — 세션은 그 장비에 그대로 남는다. */
   @Delete(':id')
   async remove(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    if (this.denied(req, res)) return;
     return this.write(res, () => updateOperators(this.dataSource, (list) => {
-      if (!list.some((op) => op.id === id)) throw new OperatorInputError(404, 'operator_not_found', 'No such operator.');
+      if (!this.visible(req, list).some((op) => op.id === id)) throw new OperatorInputError(404, 'operator_not_found', 'No such operator.');
       const next = list.filter((op) => op.id !== id);
-      return { next, result: { operators: next } };
+      return { next, result: { operators: this.visible(req, next) } };
     }));
   }
 }

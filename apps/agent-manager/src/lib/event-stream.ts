@@ -195,7 +195,7 @@ export class EventStream {
    * spawns.
    *
    * Returns a Promise that resolves once the fresh SSE connection is
-   * established (HTTP 200 received). spawn_agent awaits this so the ack
+   * established (authenticated server_meta received). spawn_agent awaits this so the ack
    * POST only fires after the server's managedAgentIds cache includes the
    * new agent — closing the race window where a chat message arriving
    * between ack and reconnect would be silently dropped.
@@ -263,11 +263,6 @@ export class EventStream {
 
       log('SSE connected');
       this.#retryDelay = RECONNECT_INITIAL_MS;
-      try {
-        this.#onConnect?.();
-      } catch {
-        /* hook errors must not block stream read */
-      }
       await this.#readStream(resp.body);
 
       log('SSE stream ended, reconnecting...');
@@ -286,6 +281,7 @@ export class EventStream {
     // only thing that clears it; `state.lastEventId` keeps advancing as events
     // dispatch and we mirror it back onto `#lastEventId` for the next connect.
     const state = newSseParseState(this.#lastEventId);
+    let accountBound = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -293,6 +289,23 @@ export class EventStream {
 
       const events = feedSse(state, decoder.decode(value, { stream: true }));
       for (const { eventType, data } of events) {
+        if (eventType === 'ping') continue;
+        if (eventType === 'server_meta') {
+          // The server resolves this owner from the authenticated key/host,
+          // before any work frames. Saved pre-migration account hints may be stale.
+          try {
+            const meta = JSON.parse(data);
+            if (typeof meta.account_id === 'string' && meta.account_id.trim()) {
+              this.#dispatcher.bindAccount(meta.account_id.trim());
+              if (!accountBound) {
+                accountBound = true;
+                try { this.#onConnect?.(); } catch { /* hook errors must not block stream read */ }
+              }
+            }
+          } catch { /* Malformed metadata cannot grant access to a work frame. */ }
+          continue;
+        }
+        if (!accountBound) continue;
         const result = this.#dispatcher.dispatch(eventType, data);
         if (result instanceof Promise) {
           result.catch((err) =>

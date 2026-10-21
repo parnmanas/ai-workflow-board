@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Response } from 'express';
@@ -33,10 +33,8 @@ export class RuntimeSpecController {
   ) {}
 
   @Post('validate')
-  async validate(@Body() body: any, @Res() res: Response) {
-    const accountId = typeof body?.account_id === 'string' && body.account_id.trim()
-      ? body.account_id.trim()
-      : null;
+  async validate(@Body() body: any, @Res() res: Response, @Req() req: any) {
+    const accountId = req.currentAccountId;
     let spec;
     try {
       spec = normalizeRuntimeSpec(body?.spec, 'spec');
@@ -46,8 +44,8 @@ export class RuntimeSpecController {
 
     // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 행 없음).
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
-    if (!host) {
-      return res.status(400).json({ ok: false, error: `Runtime Host ${spec.manager_agent_id} does not exist` });
+    if (!host?.is_active || !accountId || host.account_id !== accountId) {
+      return res.status(400).json({ ok: false, error: 'Runtime Host is not available to this account' });
     }
 
     if (spec.credential_id) {

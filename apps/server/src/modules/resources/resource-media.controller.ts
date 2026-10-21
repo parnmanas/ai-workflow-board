@@ -6,6 +6,7 @@ import { Repository } from 'typeorm';
 import { Resource } from '../../entities/Resource';
 import { User } from '../../entities/User';
 import { AuthService } from '../../services/auth.service';
+import { AccountAccessService } from '../../services/account-access.service';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
 
 /**
@@ -22,7 +23,7 @@ import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
  *      refetch (ticket ff3e7337). expandCommentAttachments now ships metadata
  *      only; the client points media tags at this endpoint.
  *   3. Catalog management is permission-gated; attachments are available to
- *      authenticated active users of this shared instance.
+ *      authenticated active users who own the resource's Account (or Global).
  *
  * Routes:
  *   GET  /api/resources/:id/raw  (two path segments, so it never collides with
@@ -36,6 +37,7 @@ export class ResourceMediaController {
   constructor(
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     private readonly authService: AuthService,
+    private readonly accounts: AccountAccessService,
   ) {}
 
   // Resolve the session user from an Authorization: Bearer header (fetch
@@ -70,7 +72,9 @@ export class ResourceMediaController {
   ) {
     const user = await this.resolveUser(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
-    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
+    const ids = await this.accounts.accessibleIds(user);
+    accountId ||= ids[0];
+    if (!accountId || !ids.includes(accountId)) return res.status(403).json({ error: 'account_access_denied' });
     const buf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
     if (!buf || buf.length === 0) {
       return res.status(400).json({ error: 'request body is empty — send the file bytes as the raw request body' });
@@ -134,6 +138,9 @@ export class ResourceMediaController {
     const resource = await this.resourceRepo.findOne({ where: { id } });
     if (!resource || !resource.file_data) {
       return res.status(404).json({ error: 'Resource not found or has no file data' });
+    }
+    if (resource.account_id !== null && !(await this.accounts.accessibleIds(user)).includes(resource.account_id)) {
+      return res.status(403).json({ error: 'account_access_denied' });
     }
 
     const buf = Buffer.from(resource.file_data, 'base64');

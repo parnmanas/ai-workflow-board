@@ -9,6 +9,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import bcrypt from 'bcryptjs';
 import { User } from '../dist/entities/User.js';
+import { Account } from '../dist/entities/Account.js';
 import { AuthService } from '../dist/services/auth.service.js';
 import { MemoryMetricsRegistry } from '../dist/services/memory-metrics.registry.js';
 import { LogService } from '../dist/services/log.service.js';
@@ -22,7 +23,7 @@ describe('Auth login throttle (M2)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [User],
+      entities: [User, Account],
       synchronize: true,
       logging: false,
     });

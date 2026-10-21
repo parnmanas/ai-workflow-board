@@ -165,6 +165,7 @@ export class FsBrowserService {
     activityEvents.emit('fs_request', {
       request_id: requestId,
       agent_id: agentId,
+      account_id: agent.account_id,
       op,
       path: args.path,
       offset: args.offset,

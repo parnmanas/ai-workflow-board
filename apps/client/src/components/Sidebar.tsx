@@ -260,9 +260,7 @@ export default function Sidebar({
           icon: 'S',
           exact: true,
         },
-        ...(canAdmin
-          ? [{ key: 'work-defaults', path: `${basePath}/settings/defaults`, label: 'Work defaults', icon: 'O' }]
-          : []),
+        { key: 'work-defaults', path: `${basePath}/settings/defaults`, label: 'Work defaults', icon: 'O' },
         { key: 'users', path: `${basePath}/settings/users`, label: 'Users', icon: 'U' },
         { key: 'credentials', path: `${basePath}/settings/credentials`, label: 'Credentials', icon: 'C' },
         { key: 'channels', path: `${basePath}/settings/channels`, label: 'Channels', icon: 'N' },

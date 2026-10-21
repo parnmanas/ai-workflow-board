@@ -102,6 +102,7 @@ export class ArtifactRefsService {
     }
     if (!entity) return this.unavailable(ref.type, ref.id, 'not_found');
     if (allowedAccountIds) {
+      if (!entityAccount && ref.type !== 'function') return this.unavailable(ref.type, ref.id, 'account_access_denied');
       if (entityAccount && !allowedAccountIds.includes(entityAccount)) return this.unavailable(ref.type, ref.id, 'account_access_denied');
       if (entityAccount) accountName = (await this.accounts.findOne({ where: { id: entityAccount } }))?.name;
     } else if (entityAccount !== accountId && !(ref.type === 'function' && entityAccount === null)) {

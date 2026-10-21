@@ -33,6 +33,7 @@ import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 
 const require = createRequire(import.meta.url);
 
+const OWNER = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const WS = '11111111-1111-4111-8111-111111111111';
 const BOARD = '22222222-2222-4222-8222-222222222222';
 const ARCHIVED_BOARD = '33333333-3333-4333-8333-333333333333';
@@ -76,6 +77,9 @@ async function writeLegacyDb(file) {
   const db = new SQL.Database();
   const now = "datetime('now')";
   db.run(`
+    CREATE TABLE users (id varchar PRIMARY KEY NOT NULL, name varchar NOT NULL, status varchar NOT NULL DEFAULT 'active',
+      role varchar NOT NULL DEFAULT 'admin', created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
+    INSERT INTO users (id, name) VALUES ('${OWNER}', 'Legacy owner');
     CREATE TABLE accounts (id varchar PRIMARY KEY NOT NULL, name varchar NOT NULL, description varchar NOT NULL DEFAULT '',
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
     CREATE TABLE boards (id varchar PRIMARY KEY NOT NULL, account_id varchar, name varchar NOT NULL,
@@ -166,6 +170,7 @@ fs.rmSync(dbFile, { force: true });
 await writeLegacyDb(dbFile);
 process.env.SQLJS_DB_PATH = dbFile;
 process.env.DB_TYPE = 'sqlite';
+process.env.AWB_LEGACY_OWNER_USER_ID = OWNER;
 
 const { preSyncBoardRemoval } = await import('../dist/database/pre-sync-board-removal.js');
 const { buildDataSourceOptions } = await import('../dist/db.js');

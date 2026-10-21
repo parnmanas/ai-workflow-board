@@ -206,6 +206,9 @@ export class FsBrowserController {
     // 실패는 request()가 그대로 503/실패로 돌려준다).
     const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    if (!agent.account_id || !(req as any).accessibleAccountIds?.includes(agent.account_id)) {
+      return res.status(403).json({ error: 'account_access_denied' });
+    }
 
     const argLabel = op === 'mkdir' ? `${args.path ?? ''}/${args.name ?? ''}` : (args.path ?? '');
     this.logService.info('FsBrowser', `${userLabel} ${op} ${argLabel} on agent ${agent.name} (${agent.id})`);

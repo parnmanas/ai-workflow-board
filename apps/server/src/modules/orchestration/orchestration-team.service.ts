@@ -188,7 +188,7 @@ export class OrchestrationTeamService {
    */
   private async assertSlotReferences(spec: TeamSlotSpec, teamAccountId: string | null): Promise<void> {
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
-    if (!host) throw orchestrationError(400, `Runtime Host ${spec.manager_agent_id} does not exist`);
+    if (!host?.is_active || !teamAccountId || host.account_id !== teamAccountId) throw orchestrationError(400, 'Runtime Host is not available to this team');
     if (spec.credential_id) {
       const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id } });
       if (!cred || (cred.account_id !== null && cred.account_id !== teamAccountId)) {

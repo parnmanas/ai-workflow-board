@@ -437,91 +437,33 @@ export class AgentManagerController {
   })
   async heartbeat(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const auth = (req as any).apiKey;
-    // Raw key bindings — currentAgentId 는 P4 fallback 으로 host id 일 수
-    // 있으므로 (지워진 Agent 행 시나리오에서 body agent uuid 와 어긋나
-    // 오탐 403), agent 동등 검사는 키의 agent 바인딩 원본으로만 한다.
-    const keyAgentId = typeof auth?.agent_id === 'string' && auth.agent_id ? auth.agent_id : null;
-    const fallbackAgentId = keyAgentId;
-
     const instance_id = typeof body?.instance_id === 'string' ? body.instance_id.trim() : '';
-    if (!instance_id) {
-      return res.status(400).json({ error: 'instance_id is required' });
-    }
+    if (!instance_id) return res.status(400).json({ error: 'instance_id is required' });
+    if (body?.mode !== 'manager') return res.status(400).json({ error: 'runtime_host_mode_required' });
 
-    if (body?.mode !== 'manager') {
-      return res.status(400).json({ error: 'runtime_host_mode_required' });
-    }
-    const bodyAgentId = typeof body?.agent_id === 'string' && body.agent_id
-      ? body.agent_id
-      : null;
-    const agent_id = fallbackAgentId || bodyAgentId;
-    // P4 (manager identity → RuntimeHost): heartbeat 정체성을 host-first 로
-    // 해소한다. 새 매니저는 agent_id 와 함께 host_id 를 동봉하고, 키에도
-    // host_id 가 stamped 되어 있다. host 가 해소되면 Agent 행은 best-effort
-    // dual-read (없어도 통과 — fan-out scope/agent_id 문자열 호환용).
-    // host 가 어디에도 없으면 legacy 경로 (agent 행 + self-heal) 로 폴백해
-    // 구버전 매니저/키와 호환을 유지한다.
-    const bodyHostId = typeof body?.host_id === 'string' && body.host_id
-      ? body.host_id
-      : null;
-    const keyHostId = typeof auth?.host_id === 'string' && auth.host_id
-      ? auth.host_id
-      : null;
-    const host_id = bodyHostId || keyHostId;
-    // agent_id 문자열은 당분간 유지 — registry agent_id + fan-out SSE scope +
-    // currentAgentId 호출자 식별이 전부 이 문자열을 키로 쓴다. host-first 로
-    // 바뀌는 것은 "어느 테이블에서 정체성을 검증하는가" 뿐이다. host 해소가
-    // 되면 Agent 행 부재는 더 이상 403 사유가 아니다.
-    if (!agent_id) {
-      return res.status(400).json({ error: 'agent_id is required (and could not be resolved from API key)' });
-    }
-    if (fallbackAgentId && bodyAgentId && bodyAgentId !== fallbackAgentId) {
+    const bodyAgentId = typeof body?.agent_id === 'string' ? body.agent_id : null;
+    const bodyHostId = typeof body?.host_id === 'string' ? body.host_id : null;
+    const keyHostId = typeof auth?.host_id === 'string' ? auth.host_id : null;
+    const accountId = (req as any).currentAccountId;
+    if (accountId && !keyHostId) return res.status(403).json({ error: 'runtime_host_identity_required' });
+    if (keyHostId && ((bodyHostId && bodyHostId !== keyHostId) || (bodyAgentId && bodyAgentId !== keyHostId))) {
       return res.status(403).json({ error: 'runtime_host_identity_mismatch' });
     }
-    if (keyHostId && bodyHostId && bodyHostId !== keyHostId) {
-      return res.status(403).json({ error: 'runtime_host_identity_mismatch' });
-    }
-    let host: { id: string } | null = null;
-    if (host_id) {
-      host = await this.hostRepo.findOne({ where: { id: host_id } });
-      if (!host) {
-        // 키가 살아 있는데 Host 행이 지워진 경우 — agent self-heal 과 같은
-        // 계약으로 Host 행만 재생성한다. Agent 행은 더 이상 만들지 않는다 (P4).
-        try {
-          const hostname =
-            typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
-          const recreated = this.hostRepo.create({
-            id: host_id,
-            name: `awb-agent-manager (${hostname})`,
-            hostname,
-            account_id: auth?.account_id ?? null,
-            is_active: 1,
-          });
-          host = await this.hostRepo.save(recreated);
-          this.logService.warn(
-            'AgentManager',
-            `Recreated missing RuntimeHost id=${host_id.slice(0, 8)} from heartbeat`,
-            { host_id, hostname, instance_id, via: 'instance-heartbeat self-heal' },
-          );
-        } catch (err: any) {
-          this.logService.warn(
-            'AgentManager',
-            `Host self-heal failed for host_id=${host_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
-            { err: err?.message ?? String(err), host_id, instance_id },
-          );
-        }
-      } else {
-        // best-effort presence — 실패해도 하트비트는 계속 간다.
-        try {
-          await this.hostRepo.update({ id: host.id }, { last_seen_at: new Date() });
-        } catch { /* best-effort */ }
-      }
-    }
-    // P4c-4: Agent 행 조회/재생성 제거 — 정체성은 Host 행만 본다.
-    // host 바인딩 없는 구버전 매니저/키는 재페어링해야 한다 (마이그레이션 안내).
-    if (!host) {
+    // Only the explicit local-development bypass can resolve a host without a
+    // bound key. Neither path recreates a deleted/unowned Host from a heartbeat.
+    const host_id = keyHostId || bodyHostId || bodyAgentId;
+    const host = host_id ? await this.hostRepo.findOneBy({ id: host_id }) : null;
+    if (!host?.is_active || !host.account_id || (accountId && host.account_id !== accountId)) {
       return res.status(403).json({ error: 'runtime_host_identity_required' });
     }
+    const agent_id = host.id;
+    const registered = this.registry.get(instance_id);
+    if (registered && (registered.host_id || registered.agent_id) !== host.id) {
+      return res.status(403).json({ error: 'runtime_host_identity_mismatch' });
+    }
+    try {
+      await this.hostRepo.update({ id: host.id }, { last_seen_at: new Date() });
+    } catch { /* presence is best-effort */ }
 
     const mode: 'manager' = 'manager';
     const cli_adapters = Array.isArray(body?.cli_adapters)
@@ -899,7 +841,7 @@ export class AgentManagerController {
       // P4: 어느 Host 에서 온 하트비트인지. fan-out host-affinity 와
       // Host 기준 presence 집계가 이 필드로 붙는다.
       host_id: host?.id ?? host_id ?? null,
-      account_id: null,
+      account_id: host?.account_id || auth?.account_id || null,
       mode,
       hostname,
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
@@ -1010,8 +952,7 @@ export class AgentManagerController {
     // 각 redeem은 새 Host 행을 받는다 (한 Host 를 revoke 해도 다른 Host 에
     // 영향 없음 — 예전 "redemption마다 새 Agent 행" 계약과 동일).
     //
-    // account_id 스탬프는 bookkeeping 전용이며 권한 경계가 아니다 —
-    // AgentAuthGuard는 host 바인딩 키를 full-scope 로 취급한다.
+    // The pairing account owns both the host and its manager key.
     const agentName = (rec.agent_name || `awb-agent-manager (${hostname})`).slice(0, 200);
     const host = await this.hostRepo.save(
       this.hostRepo.create({
@@ -1170,6 +1111,9 @@ export class AgentManagerController {
     if (outcome === 'suppressed' && !trigger_id) {
       return res.status(400).json({ error: 'suppressed outcome requires trigger_id' });
     }
+    if (!await this.canReportTicket(req, ticket_id)) {
+      return res.status(403).json({ error: 'account_access_denied' });
+    }
     // P4c-4: suppressed 결과는 Host 키(매니저 세션)에서만 온다.
     if (outcome === 'suppressed') {
       const callerHost = (req as any).currentHostId
@@ -1200,6 +1144,15 @@ export class AgentManagerController {
     return res.status(200).json({ ok: true, applied: result.applied });
   }
 
+  private async canReportTicket(req: any, ticketId: string, agentId?: string): Promise<boolean> {
+    if (!req.currentAccountId || !req.currentHostId || !/^[0-9a-f-]{36}$/i.test(ticketId)) return false;
+    const ticket = await this.ticketRepo.findOneBy({ id: ticketId });
+    return !!ticket && ticket.account_id === req.currentAccountId
+      && ticket.assignee?.manager_agent_id === req.currentHostId
+      && (!req.currentRuntimeKey || ticket.assignee_key === req.currentRuntimeKey)
+      && (!agentId || agentId === req.currentHostId || agentId === ticket.assignee_key);
+  }
+
   /**
    * Manager → server per-(agent,ticket,role) OUTPUT-LIVENESS heartbeat
    * (ticket fdc69c13). agent-manager POSTs this (throttled) whenever a ticket
@@ -1211,11 +1164,8 @@ export class AgentManagerController {
    * NO DB write / SSE emit here → recording liveness can never re-enter the
    * trigger loop (self-echo guard, DoD#4).
    *
-   * Auth: AgentAuthGuard (X-Agent-Key). A manager key is full-scope; the body
-   * carries the managed agent_id. Same open trust model as /api/agent/ping (any
-   * valid key may report) — the only abuse is a bogus liveness DELAYING a
-   * force_respawn, which the circuit-breaker + agent-manager's own watchdog
-   * still backstop. Accepts one record or a batch under `items`.
+   * Auth: the key's Account and Host must match the ticket's assigned runtime.
+   * Accepts one record or a batch under `items`.
    */
   @ApiSecurity('agent-api-key')
   @Post('api/agent-manager/output-liveness')
@@ -1230,6 +1180,7 @@ export class AgentManagerController {
       const ticketId = String(it?.ticket_id || '').trim();
       const role = String(it?.role || '').trim();
       if (!agentId || !ticketId) continue;
+      if (!await this.canReportTicket(req, ticketId, agentId)) continue;
       this.agentStatus.recordOutputLiveness(agentId, ticketId, role);
       recorded++;
     }
@@ -1248,9 +1199,7 @@ export class AgentManagerController {
    * 비-JSON 어댑터는 이 표본에 절대 나타나지 않는다 — 데이터 부재이지
    * 버그가 아니다(postToolCallTelemetry 코멘트 참고).
    *
-   * Auth: AgentAuthGuard(X-Agent-Key) — output-liveness와 같은 open trust
-   * 모델. 이 값은 어떤 게이트/판단도 구동하지 않는 순수 관측 신호라 남용
-   * 리스크가 없다.
+   * Auth: output-liveness와 같은 Account·Host·담당 runtime 검사를 거친다.
    */
   @ApiSecurity('agent-api-key')
   @Post('api/agent-manager/tool-call-telemetry')
@@ -1265,6 +1214,9 @@ export class AgentManagerController {
     const nativeCalls = Number.isFinite(body?.native_calls) ? Math.max(0, Math.trunc(body.native_calls)) : 0;
     if (!agentId || !ticketId || (graphCalls === 0 && nativeCalls === 0)) {
       return res.json({ ok: true, recorded: false });
+    }
+    if (!await this.canReportTicket(req, ticketId, agentId)) {
+      return res.status(403).json({ error: 'account_access_denied' });
     }
     this.logService.info(
       'Ontology',
@@ -1302,7 +1254,9 @@ export class AgentManagerController {
   @ApiOperation({ summary: 'List currently-heartbeating Runtime Host instances' })
   async list(@Query('account_id') accountId: string, @Res() res: Response, @Req() req: Request) {
     const requested = (req as any).requestedAccountId;
-    const data = requested ? this.registry.listForAccount(requested) : this.registry.list();
+    const accessible = new Set<string>((req as any).accessibleAccountIds || []);
+    const data = (requested ? this.registry.listForAccount(requested) : this.registry.list())
+      .filter(instance => instance.account_id && accessible.has(instance.account_id));
     // Enrich each instance with the RuntimeHost name so the admin list can
     // render the configured identity instead of the OS hostname. Fallback to
     // hostname when the Host row is missing — keeps the previous default
@@ -1358,9 +1312,10 @@ export class AgentManagerController {
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({ summary: 'Subagents currently tracked for the agent backing this instance' })
-  async subagents(@Param('id') id: string, @Res() res: Response) {
+  async subagents(@Param('id') id: string, @Res() res: Response, @Req() req: Request) {
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (!inst.account_id || !(req as any).accessibleAccountIds?.includes(inst.account_id)) return res.status(403).json({ error: 'account_access_denied' });
     if (!inst.account_id) {
       return res.json([]);
     }
@@ -1373,9 +1328,10 @@ export class AgentManagerController {
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({ summary: 'Recent server-side log entries that mention this instance / its agent' })
-  logs(@Param('id') id: string, @Query('limit') limitRaw: string, @Res() res: Response) {
+  logs(@Param('id') id: string, @Query('limit') limitRaw: string, @Res() res: Response, @Req() req: Request) {
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (!inst.account_id || !(req as any).accessibleAccountIds?.includes(inst.account_id)) return res.status(403).json({ error: 'account_access_denied' });
 
     const limit = Math.min(Math.max(parseInt(limitRaw) || 100, 1), 500);
     const candidates = this.logService.query({ limit: 2000 });
@@ -1409,10 +1365,12 @@ export class AgentManagerController {
     @Param('id') id: string,
     @CurrentUser() user: CurrentUserData | undefined,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (!inst.account_id || !(req as any).accessibleAccountIds?.includes(inst.account_id)) return res.status(403).json({ error: 'account_access_denied' });
     const command_id = randomBytes(8).toString('hex');
     const issued_at = new Date().toISOString();
     const payload: AgentManagerCommandPayload = {
@@ -1517,17 +1475,19 @@ export class AgentManagerController {
     @CurrentUser() user: CurrentUserData | undefined,
     @CurrentAccountId() accountId: string | null,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (!inst.account_id || !(req as any).accessibleAccountIds?.includes(inst.account_id)) return res.status(403).json({ error: 'account_access_denied' });
     const command = String(body?.command || '') as AgentManagerCommand;
     if (!ALLOWED_COMMANDS.has(command)) {
       return res.status(400).json({ error: `unknown command "${command}"` });
     }
     const args: Record<string, any> = typeof body?.args === 'object' && body.args ? { ...body.args } : {};
-    if (command === 'spawn_agent' && args.account_id === undefined && accountId) {
-      args.account_id = accountId;
+    if (command === 'spawn_agent' && args.account_id === undefined) {
+      args.account_id = inst.account_id;
     }
 
     // Emit + spawn_agent arg hydration + ledger-record all live in
@@ -1557,7 +1517,7 @@ export class AgentManagerController {
     @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
-    return res.json(this.privileged.listPending((req as any).requestedAccountId));
+    return res.json(this.privileged.listPending((req as any).requestedAccountId).filter(p => p.account_id && (req as any).accessibleAccountIds?.includes(p.account_id)));
   }
 
   @ApiBearerAuth('user-session')
@@ -1570,6 +1530,7 @@ export class AgentManagerController {
     @Body() body: any,
     @CurrentUser() user: CurrentUserData | undefined,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const password = typeof body?.password === 'string' ? body.password : '';
@@ -1577,6 +1538,7 @@ export class AgentManagerController {
 
     const pending = this.privileged.get(String(id || ''));
     if (!pending) return res.status(404).json({ error: 'request not found or expired' });
+    if (!pending.account_id || !(req as any).accessibleAccountIds?.includes(pending.account_id)) return res.status(403).json({ error: 'account_access_denied' });
     if (pending.status !== 'pending') {
       return res.status(409).json({ error: `request is already ${pending.status}` });
     }
@@ -1626,8 +1588,11 @@ export class AgentManagerController {
     @Param('id') id: string,
     @CurrentUser() user: CurrentUserData | undefined,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const pending = this.privileged.get(String(id || ''));
+    if (!pending?.account_id || !(req as any).accessibleAccountIds?.includes(pending.account_id)) return res.status(403).json({ error: 'account_access_denied' });
     const denied = this.privileged.deny(String(id || ''), user.id);
     if (!denied) return res.status(404).json({ error: 'request not found, expired, or already decided' });
     // 거부는 아무것도 만들지 않는다 — @Post 의 기본 201 을 그대로 두면 "생성됨" 으로
@@ -1723,10 +1688,12 @@ export class AgentManagerController {
     @Body() body: any,
     @CurrentUser() user: CurrentUserData | undefined,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (!inst.account_id || !(req as any).accessibleAccountIds?.includes(inst.account_id)) return res.status(403).json({ error: 'account_access_denied' });
 
     const password = typeof body?.password === 'string' ? body.password : '';
     if (!password) return res.status(400).json({ error: 'password is required' });
@@ -1757,7 +1724,7 @@ export class AgentManagerController {
     @Res() res: Response,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
-    this.sudoTickets.revoke(String(ticketId || ''));
+    this.sudoTickets.revoke(String(ticketId || ''), user.id);
     // 있었는지 없었는지 알려주지 않는다 — 티켓 id 존재 여부는 정보다.
     return res.json({ ok: true });
   }
@@ -1835,9 +1802,15 @@ export class AgentManagerController {
     @Param('commandId') commandId: string,
     @CurrentUser() user: CurrentUserData | undefined,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const outcome = this.commandLedger.getOutcome(commandId);
+    const record = outcome || this.commandLedger.get(commandId);
+    if (record) {
+      const host = await this.hostRepo.findOneBy({ id: record.agent_id });
+      if (!host?.account_id || !(req as any).accessibleAccountIds?.includes(host.account_id)) return res.status(403).json({ error: 'account_access_denied' });
+    }
     if (outcome) {
       return res.json({
         state: outcome.status,
@@ -1912,6 +1885,9 @@ export class AgentManagerController {
     if (!accountId) {
       return res.status(400).json({ error: 'runtime_key_account_required' });
     }
+    if ((req as any).currentAccountId !== accountId) {
+      return res.status(403).json({ error: 'runtime_key_account_mismatch' });
+    }
     const hostId = String((req as any).apiKey?.host_id || '').trim();
     if (!hostId) {
       return res.status(403).json({
@@ -1963,9 +1939,8 @@ export class AgentManagerController {
   // alias; current ones ask `/projects/` first and fall back on 404.
   //
   // Auth: a Runtime Host key (manager or runtime-tuple key). A paired Host
-  // supervises executions across accounts, so the boundary is the project's
-  // own account: an explicit `account_id` must match it, a
-  // account-scoped (runtime) key must belong to it, and the credential must
+  // and runtime keys must belong to the project's account. An explicit
+  // `account_id` must match it, and the credential must
   // be global or of that account. `agent_id` is the runtime identity the
   // clone is for — a runtime key may only ask for itself.
   @ApiSecurity('agent-api-key')
@@ -1994,8 +1969,8 @@ export class AgentManagerController {
     if (!project || (requestedAccount && requestedAccount !== project.account_id)) {
       return res.status(404).json({ error: 'project not found in agent account' });
     }
-    const keyAccountId = callerRuntimeKey ? String((req as any).apiKey?.account_id || '').trim() : '';
-    if (keyAccountId && keyAccountId !== project.account_id) {
+    const keyAccountId = String((req as any).currentAccountId || '').trim();
+    if (!keyAccountId || keyAccountId !== project.account_id) {
       return res.status(403).json({ error: 'project is outside the API key account' });
     }
     if (!project.credential_id) return res.status(204).send();
@@ -2043,8 +2018,6 @@ export class AgentManagerController {
   async getManagedAgentCredential(
     @Param('id') targetAgentId: string,
     @Query('account_id') requestedAccountId: string | undefined,
-    // Legacy alias (transport boundary): older managers send `workspace_id`.
-    @Query('workspace_id') legacyWorkspaceId: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -2053,7 +2026,10 @@ export class AgentManagerController {
     const callerHostId = String((req as any).currentHostId || '').trim();
     if (!callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
 
-    const requested = String(requestedAccountId || legacyWorkspaceId || '').trim();
+    const requested = String(requestedAccountId || (req as any).currentAccountId || '').trim();
+    if (!requested || requested !== (req as any).currentAccountId) {
+      return res.status(403).json({ error: 'identity is outside the API key account' });
+    }
 
     // The identity hash carries no host, so the same spec can exist on
     // several machines — only a slot on the CALLING host authorizes it.
@@ -2062,12 +2038,10 @@ export class AgentManagerController {
     let source: SlotCredentialSource | undefined;
     try {
       const candidates = await resolveSlotCredentialSources(this.dataSource, agentId);
-      const onHost = candidates.filter((c) => c.manager_agent_id === callerHostId);
+      const onHost = candidates.filter((c) => c.manager_agent_id === callerHostId && c.account_id === requested);
       // One runtime can be used in several accounts. A match from another
       // account must not shadow the mission/room that authorized this request.
-      source = onHost.find((c) => requested && c.account_id === requested)
-        ?? onHost.find((c) => c.account_id === null)
-        ?? onHost[0];
+      source = onHost[0];
       if (!source && candidates.length > 0) {
         this.logService.warn(
           'AgentManager',

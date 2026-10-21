@@ -25,6 +25,7 @@ interface IncomingEntry {
 }
 
 interface ListOpts {
+  account_ids: string[];
   agent_id?: string;
   level?: string;
   category?: string;
@@ -102,8 +103,10 @@ export class AgentLogsService {
   }
 
   async list(opts: ListOpts): Promise<any[]> {
+    if (!opts.account_ids?.length) return [];
     const limit = Math.min(Math.max(opts.limit ?? DEFAULT_LIST_LIMIT, 1), MAX_LIST_LIMIT);
     const qb = this.repo.createQueryBuilder('log');
+    qb.where('log.account_id IN (:...account_ids)', { account_ids: opts.account_ids });
 
     if (opts.agent_id) qb.andWhere('log.agent_id = :agent_id', { agent_id: opts.agent_id });
     if (opts.level) qb.andWhere('log.level = :level', { level: opts.level });
@@ -140,21 +143,25 @@ export class AgentLogsService {
   // all-time errors, which only makes sense on a user's first visit before
   // the client has stored a last-seen timestamp; subsequent polls always
   // pass one. Matches the UI filter default ("errors only" badge, not warn).
-  async countSince(since: Date | null): Promise<number> {
+  async countSince(since: Date | null, accountIds: string[]): Promise<number> {
+    if (!accountIds?.length) return 0;
     const qb = this.repo.createQueryBuilder('l').where("l.level IN ('error', 'fatal')");
+    qb.andWhere('l.account_id IN (:...account_ids)', { account_ids: accountIds });
     if (since && !Number.isNaN(since.getTime())) {
       qb.andWhere('l.occurred_at > :since', { since });
     }
     return qb.getCount();
   }
 
-  async listAgentsWithRecentErrors(days = 7): Promise<{ agent_id: string; agent_name: string | null; error_count: number }[]> {
+  async listAgentsWithRecentErrors(days: number, accountIds: string[]): Promise<{ agent_id: string; agent_name: string | null; error_count: number }[]> {
+    if (!accountIds?.length) return [];
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const raw = await this.repo
       .createQueryBuilder('log')
       .select('log.agent_id', 'agent_id')
       .addSelect('COUNT(*)', 'error_count')
       .where('log.occurred_at >= :since', { since })
+      .andWhere('log.account_id IN (:...account_ids)', { account_ids: accountIds })
       .groupBy('log.agent_id')
       .getRawMany();
 

@@ -30,7 +30,8 @@ describe('QA Scenario account scope', () => {
     const runRepo = dataSource.getRepository(QaRun);
     // P4c-4: 타겟 해소는 Host 행이다 ('agent-1' id 로 직접 심는다).
     const hostRepo = dataSource.getRepository(RuntimeHost);
-    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'qa-host', hostname: 'qa', account_id: null }));
+    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'qa-host', hostname: 'qa', account_id: 'account-a' }));
+    await hostRepo.save(hostRepo.create({ id: 'agent-2', name: 'host-b', account_id: 'account-b' }));
     // (scenario, run, dataSource, host, runService) — list/create/update never touch runService.
     service = new QaService(scenarioRepo, runRepo, dataSource, hostRepo, {});
   });
@@ -48,7 +49,7 @@ describe('QA Scenario account scope', () => {
 
   it('list() and update() stay inside the requested Account', async () => {
     const mine = await service.create({ account_id: 'account-a', name: 'Account A scenario', target_runtime: TARGET_RUNTIME });
-    const theirs = await service.create({ account_id: 'account-b', name: 'Account B scenario', target_runtime: TARGET_RUNTIME });
+    const theirs = await service.create({ account_id: 'account-b', name: 'Account B scenario', target_runtime: { ...TARGET_RUNTIME, manager_agent_id: 'agent-2' } });
 
     const rows = await service.list('account-a');
     assert.ok(rows.some(row => row.id === mine.id));

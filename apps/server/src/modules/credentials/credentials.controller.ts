@@ -260,21 +260,9 @@ export class CredentialsController {
     @Res() res: Response,
   ) {
     const all = this.instanceRegistry.list().filter((i) => i.mode === 'manager');
-    // The automatic creation default does not scope Global administration.
     const requested = (req as any).accountAccessBound ? (req as any).requestedAccountId : accountId;
-    let visible;
-    if (requested) {
-      visible = all.filter((i) => i.account_id === requested || i.account_id === null);
-    } else {
-      // 리뷰 지적(round 1)과 같은 클래스의 문제: account_id 없이 부르면
-      // "전역" 조회이므로 credential 생성과 동일하게 MANAGE_GLOBAL_CREDENTIALS
-      // 가 없으면 막는다 — 아니면 account 스코프 credential 권한만 가진
-      // 사용자가 다른 account들의 manager instance_id를 열람할 수 있었다.
-      if (!this.canManageGlobal(req)) {
-        return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
-      }
-      visible = all;
-    }
+    const accessible = new Set<string>((req as any).accessibleAccountIds || (accountId ? [accountId] : []));
+    const visible = all.filter(i => i.account_id && accessible.has(i.account_id) && (!requested || i.account_id === requested));
     return res.json(
       visible.map((i) => {
         const clis = cliInstallState(i.runtime_capabilities as any);
@@ -302,8 +290,8 @@ export class CredentialsController {
     if (isGlobal && !this.canManageGlobal(req)) {
       return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
     }
-    const accountId = isGlobal ? '' : String(body?.account_id || '').trim();
-    if (!isGlobal && !accountId) return res.status(400).json({ error: 'account_id is required' });
+    const accountId = String((req as any).currentAccountId || body?.account_id || '').trim();
+    if (!accountId) return res.status(400).json({ error: 'account_id is required' });
     const instanceId = String(body?.instance_id || '').trim();
     if (!instanceId) return res.status(400).json({ error: 'instance_id is required' });
     const actor = (req as any).currentUser;
@@ -352,7 +340,7 @@ export class CredentialsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const accountId = String(body?.account_id || '');
+    const accountId = String((req as any).currentAccountId || body?.account_id || '');
     const existing = await this.cliLoginSessions.getSession(sessionId, accountId);
     if (!existing) return res.status(404).json({ error: 'Login session not found' });
     // 리뷰 지적(round 1): 취소도 조회와 같은 전역 게이트가 필요하다 — 취소는
@@ -446,7 +434,7 @@ export class CredentialsController {
     const { name, description = '', provider, credentials: credData } = body;
     let catalogScope;
     try {
-      catalogScope = normalizeCatalogScope(body);
+      catalogScope = normalizeCatalogScope({ ...body, account_id: body.account_id || (req as any).currentAccountId });
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid scope' });
     }

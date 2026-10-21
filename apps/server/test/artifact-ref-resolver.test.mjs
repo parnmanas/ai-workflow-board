@@ -17,7 +17,7 @@ const repo = (rows) => ({
 });
 
 function service(access = true) {
-  const hosts = repo([{ id: ids.agent, account_id: ws, name: 'Same name' }]);
+  const hosts = repo([{ id: ids.agent, account_id: ws, name: 'Same name', is_active: 1 }]);
   return new ArtifactRefsService(
     repo([{ id: ids.ticket, account_id: ws, status: 'todo', title: 'Same name' }]),
     { getRepository: () => hosts },
@@ -25,7 +25,6 @@ function service(access = true) {
     repo([{ id: ids.function, account_id: ws, name: 'Same name' }]),
     repo([{ id: ids.schedule, account_id: ws, name: 'Same name' }]),
     repo([{ id: ws, name: 'Primary account' }]),
-    { check: async () => access },
     { accessibleIds: async () => access ? [ws] : [] },
   );
 }

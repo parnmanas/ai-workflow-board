@@ -4,6 +4,7 @@ import { DataSource, In, IsNull, Not } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { Account } from '../../entities/Account';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Comment } from '../../entities/Comment';
 import { User } from '../../entities/User';
 import { isUuidShapedId } from '../../utils/agent-name';
@@ -442,6 +443,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (ticket.status !== 'in_progress' && ticket.status !== 'todo') return { dispatched: false, reason: `status_${ticket.status}` };
     const spec = parseRuntimeSpec(ticket.assignee);
     if (!spec) return { dispatched: false, reason: 'unassigned' };
+    const host = await this.dataSource.getRepository(RuntimeHost).findOneBy({ id: spec.manager_agent_id });
+    if (!host?.is_active || host.account_id !== ticket.account_id) return { dispatched: false, reason: 'host_account_mismatch' };
     const account = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
     if (!account) return { dispatched: false, reason: 'account_missing' };
     if (account.dispatch_paused_at) return { dispatched: false, reason: 'account_paused' };

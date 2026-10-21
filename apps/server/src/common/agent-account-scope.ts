@@ -1,11 +1,11 @@
-import { IsNull, type FindOperator } from 'typeorm';
+import type { FindOperator } from 'typeorm';
 
 export type AgentAccountId = string | null | undefined;
 export type AgentAccountWhere = {
   account_id: string | FindOperator<string>;
 };
 
-/** Normalize every explicit global representation to the database invariant. */
+/** Normalize an execution owner's id. A missing owner grants no access. */
 export function normalizeAgentAccountId(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -18,16 +18,12 @@ export function agentIsVisibleInAccount(
   const target = targetAccountId.trim();
   if (!target) return false;
   const agentAccount = normalizeAgentAccountId(agentAccountId);
-  return agentAccount === null || agentAccount === target;
+  return agentAccount === target;
 }
 
-/** TypeORM OR branches for account-local plus global Agent discovery. */
+/** Runtime identities are local to their owning account. */
 export function agentAccountWhere(accountId: string): AgentAccountWhere[] {
   const target = accountId.trim();
   if (!target) return [];
-  return [
-    { account_id: target },
-    { account_id: '' },
-    { account_id: IsNull() },
-  ];
+  return [{ account_id: target }];
 }

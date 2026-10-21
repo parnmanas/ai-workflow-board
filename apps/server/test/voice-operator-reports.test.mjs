@@ -46,6 +46,8 @@ function setup(operators, { prompt, proposals = [] } = {}) {
   const rows = Object.entries(settings).map(([key, value]) => ({ key, value: key.endsWith('.api_key') ? encrypt(value) : value }));
   const stored = new Map([[OPERATORS_SETTING_KEY, { key: OPERATORS_SETTING_KEY, value: JSON.stringify(operators) }]]);
   const repos = {
+    RuntimeHost: { findOneBy: async ({ id }) => ({ id, account_id: 'ws-1', is_active: 1 }) },
+    Account: { findOneBy: async ({ id }) => ({ id, owner_user_id: 'u1' }) },
     SystemSetting: {
       find: async () => rows,
       findOne: async ({ where }) => (stored.has(where.key) ? { ...stored.get(where.key) } : null),
@@ -391,7 +393,7 @@ test('the screen recognises the same report prefix and sleep marker the server u
   assert.ok(client.includes("export const SLEEP_MARKER = '[[sleep]]';"), 'client and server agree on the sleep marker');
 });
 
-test('after a server restart a session has no driver — its news still reaches the operator, for whoever registered it', async (t) => {
+test('after a server restart a session has no driver — its news reaches the operator for the current account owner', async (t) => {
   const jarvis = operator('jarvis', 'host-rolf', { created_by: 'admin-1' });
   const { heard, prompts, teardown } = setup([jarvis]);
   t.after(teardown);
@@ -406,11 +408,11 @@ test('after a server restart a session has no driver — its news still reaches 
   emit('elicitation', { status: 'awaiting_input' });
   await flush();
   assert.equal(prompts.length, 1, 'reported even though nobody drives that session right now');
-  assert.equal(prompts[0].userId, 'admin-1', 'the operator works for the user who registered it');
+  assert.equal(prompts[0].userId, 'u1', 'the operator works for the account owner even if someone else originally registered it');
   finishTurn(opSession(jarvis), prompts[0].turn_id, '롤프의 세션이 질문을 기다려요.');
   await flush();
   assert.equal(heard.length, 1);
-  assert.equal(heard[0].user_id, 'admin-1');
+  assert.equal(heard[0].user_id, 'u1');
 });
 
 test('a viewed question still invites a cue, with choices explained on request', async (t) => {
@@ -559,4 +561,14 @@ test('switch rule: any live device on; stale devices drop out; the last choice d
   assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now }, b: { enabled: true, at: now - day } }, now), true);
   assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now }, b: { enabled: true, at: now - 8 * day } }, now), false, 'a device silent for over a week drops out');
   assert.equal(operatorReportsEnabled({ a: { enabled: false, at: now - 9 * day }, b: { enabled: true, at: now - 8 * day } }, now), true, 'none live — the latest choice decides');
+});
+
+
+test('reports never route to another account operator or another account user', async t => {
+  const { reports, prompts, teardown } = setup([operator('foreign', 'other-host', { account_id: 'ws-other' })]);
+  t.after(teardown);
+  const report = { kind: 'finished', user_id: 'u1', session: session('host-rolf', 'private-session'), detail: 'private result', duration_ms: 1, at: Date.now() };
+  assert.equal(await reports.submit(report), false);
+  assert.equal(await reports.submit({ ...report, user_id: 'foreign-user' }), false);
+  assert.deepEqual(prompts, []);
 });

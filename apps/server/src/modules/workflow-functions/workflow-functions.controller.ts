@@ -80,10 +80,10 @@ export class WorkflowFunctionsController {
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      if ((body?.scope === 'global' || !body?.account_id) && !this.isAdmin(req)) {
+      if (body?.scope === 'global' && !this.isAdmin(req)) {
         return res.status(403).json({ error: 'Only admins can create Global Functions' });
       }
-      return res.status(201).json(await this.functions.create(body));
+      return res.status(201).json(await this.functions.create({ ...body, account_id: body?.account_id || (req as any).currentAccountId }));
     } catch (error) {
       return this.fail(res, error, 'Failed to create Function');
     }

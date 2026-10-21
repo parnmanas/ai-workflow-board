@@ -111,7 +111,7 @@ export class CliMemoryService {
   }
 
   async listHosts(accountIds: string[]): Promise<MemoryHostInfo[]> {
-    const records = this.managerRecords();
+    const records = this.managerRecords().filter(r => r.account_id && accountIds.includes(r.account_id));
     const ids = Array.from(new Set(records.map((r) => r.agent_id)));
     const names = new Map<string, string>();
     const projectCounts = new Map<string, number>();
@@ -143,9 +143,10 @@ export class CliMemoryService {
     return Array.from(byManager.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  private requireHost(managerId: string): InstanceRecord {
+  private requireHost(accountIds: string[], managerId: string): InstanceRecord {
     const records = this.managerRecords().filter((r) => r.agent_id === managerId);
     if (!records.length) throw new CliMemoryError(404, 'host_offline', 'This Runtime Host is not connected right now.');
+    if (!records[0].account_id || !accountIds.includes(records[0].account_id)) throw new CliMemoryError(403, 'account_access_denied');
     const rec = records.find((r) => this.supports(r));
     if (!rec) {
       throw new CliMemoryError(409, 'memory_unsupported', `Runtime Host ${records[0].hostname} runs an agent-manager without memory support — update it first.`);
@@ -268,7 +269,7 @@ export class CliMemoryService {
   // ─── 사용자 표면 ────────────────────────────────────────────────────────
 
   async snapshot(accountIds: string[], userId: string, managerId: string, opts: { checkPaths: boolean }): Promise<MemoryHostSnapshot> {
-    const rec = this.requireHost(managerId);
+    const rec = this.requireHost(accountIds, managerId);
     const projectDirs = await this.projectDirs(managerId, accountIds);
     const result = await this.rpc<{ platform?: string; clis?: CliMemorySnapshot[]; content_budget_exhausted?: boolean }>(managerId, 'scan', {
       project_dirs: projectDirs.map((d) => d.path),
@@ -300,7 +301,7 @@ export class CliMemoryService {
   }
 
   async read(accountIds: string[], userId: string, managerId: string, input: { cli: unknown; path: unknown }): Promise<MemoryFileInfo> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const projectDirs = await this.projectDirs(managerId, accountIds);
     const result = await this.rpc<{ file: MemoryFileInfo }>(managerId, 'read', {
       cli: this.cli(input.cli), path: this.path(input.path), project_dirs: projectDirs.map((d) => d.path),
@@ -314,7 +315,7 @@ export class CliMemoryService {
     managerId: string,
     input: { cli: unknown; path: unknown; content: unknown; base_hash: unknown; reason?: unknown },
   ): Promise<MemoryFileInfo> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const cli = this.cli(input.cli);
     const path = this.path(input.path);
     const content = this.content(input.content);
@@ -328,7 +329,7 @@ export class CliMemoryService {
   }
 
   async remove(accountIds: string[], userId: string, managerId: string, input: { cli: unknown; path: unknown; base_hash: unknown }): Promise<{ deleted: true }> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const cli = this.cli(input.cli);
     const path = this.path(input.path);
     const projectDirs = await this.projectDirs(managerId, accountIds);
@@ -338,7 +339,7 @@ export class CliMemoryService {
   }
 
   async history(accountIds: string[], userId: string, managerId: string, input: { cli: unknown; path: unknown }): Promise<MemoryVersionInfo[]> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const projectDirs = await this.projectDirs(managerId, accountIds);
     const result = await this.rpc<{ versions?: MemoryVersionInfo[] }>(managerId, 'history', {
       cli: this.cli(input.cli), path: this.path(input.path), project_dirs: projectDirs.map((d) => d.path),
@@ -352,7 +353,7 @@ export class CliMemoryService {
     managerId: string,
     input: { cli: unknown; path: unknown; version_id: unknown },
   ): Promise<{ version_id: string; content: string; hash: string; size: number }> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const versionId = typeof input.version_id === 'string' ? input.version_id : '';
     if (!VERSION_ID_RE.test(versionId)) throw new CliMemoryError(400, 'version_invalid', 'Unknown backup version.');
     const projectDirs = await this.projectDirs(managerId, accountIds);
@@ -367,7 +368,7 @@ export class CliMemoryService {
     managerId: string,
     input: { cli: unknown; path: unknown; version_id: unknown; base_hash: unknown },
   ): Promise<MemoryFileInfo> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const versionId = typeof input.version_id === 'string' ? input.version_id : '';
     if (!VERSION_ID_RE.test(versionId)) throw new CliMemoryError(400, 'version_invalid', 'Unknown backup version.');
     const cli = this.cli(input.cli);
@@ -386,7 +387,7 @@ export class CliMemoryService {
     managerId: string,
     input: { cli: unknown; path: unknown; target: unknown; base_hash: unknown },
   ): Promise<{ file: MemoryFileInfo; linked: boolean; copied: boolean }> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     const cli = this.cli(input.cli);
     const path = this.path(input.path);
     const target = this.path(input.target, 'target');
@@ -399,7 +400,7 @@ export class CliMemoryService {
   }
 
   async batch(accountIds: string[], userId: string, managerId: string, opsInput: unknown): Promise<MemoryBatchResultItem[]> {
-    this.requireHost(managerId);
+    this.requireHost(accountIds, managerId);
     if (!Array.isArray(opsInput) || opsInput.length === 0) throw new CliMemoryError(400, 'ops_required', 'ops must be a non-empty array.');
     if (opsInput.length > MEMORY_BATCH_MAX) throw new CliMemoryError(413, 'batch_too_large', `At most ${MEMORY_BATCH_MAX} operations per batch.`);
     let totalBytes = 0;

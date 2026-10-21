@@ -3,6 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { randomBytes, createHash } from 'crypto';
 import { ApiKey } from '../entities/ApiKey';
+import { RuntimeHost } from '../entities/RuntimeHost';
+import { Account } from '../entities/Account';
 
 @Injectable()
 export class ApiKeyService {
@@ -132,6 +134,15 @@ export class ApiKeyService {
     if (!found) return { valid: false, reason: 'Key not found' };
     if (!found.is_active) return { valid: false, reason: 'Key is revoked' };
     if (found.expires_at && new Date(found.expires_at) < new Date()) return { valid: false, reason: 'Key is expired' };
+    if (!found.account_id || !await this.repo.manager.getRepository(Account).existsBy({ id: found.account_id })) {
+      return { valid: false, reason: 'Key has no owning account' };
+    }
+    if (found.host_id) {
+      const host = await this.repo.manager.getRepository(RuntimeHost).findOneBy({ id: found.host_id });
+      if (!host?.is_active || host.account_id !== found.account_id) {
+        return { valid: false, reason: 'Key does not belong to an active host in its account' };
+      }
+    }
 
     this.repo.update(found.id, {
       last_used_at: new Date(),

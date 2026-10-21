@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository, EntityManager } from 'typeorm';
@@ -8,8 +8,6 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { User } from '../../entities/User';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { ApiKey } from '../../entities/ApiKey';
-import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { CurrentUserData } from '../../common/decorators/current-user.decorator';
@@ -21,11 +19,8 @@ import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { validateClonePolicyInput, serializeClonePolicy } from '../../common/clone-policy';
 import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
-import { hasPermission } from '../../common/types/permissions';
-import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { agentIsVisibleInAccount, agentAccountWhere } from '../../common/agent-account-scope';
 
 /** 공용 메모리 상한(글자). 매 티켓·미션 지시문에 통째로 실린다. */
 export const KNOWLEDGE_MEMORY_MAX = 32_000;
@@ -44,8 +39,8 @@ export class AccountsController {
   ) {}
 
   private async requireOwner(user: CurrentUserData, accountId: string, res: Response) {
-    if (user?.role === 'admin') return true;
-    res.status(403).json({ error: 'admin_required' });
+    if (user && await this.accountRepo.existsBy({ id: accountId, owner_user_id: user.id })) return true;
+    res.status(403).json({ error: 'account_owner_required' });
     return false;
   }
 
@@ -289,7 +284,7 @@ export class AccountsController {
     @Res() res: Response,
     @CurrentUser() user: CurrentUserData,
   ) {
-    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
+    const account = await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
 
     const agents: Array<{ id: string; name: string }> = [];
     if (ticketId) {
@@ -301,7 +296,7 @@ export class AccountsController {
       }
     }
 
-    const users = (await this.userRepo.find({ where: { status: 'active' }, order: { name: 'ASC' } }))
+    const users = (account.owner_user_id ? await this.userRepo.find({ where: { id: account.owner_user_id, status: 'active' } }) : [])
       .map(u => ({ id: u.id, name: u.name, avatar_url: u.avatar_url }));
 
     return res.json({

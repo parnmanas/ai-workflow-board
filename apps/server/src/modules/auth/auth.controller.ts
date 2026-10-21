@@ -7,6 +7,8 @@ import { Repository, In } from 'typeorm';
 import { User } from '../../entities/User';
 import { Account } from '../../entities/Account';
 import { AuthService } from '../../services/auth.service';
+import { AccountAccessService } from '../../services/account-access.service';
+import { ensurePersonalAccount } from '../../common/personal-account';
 import { GoogleOAuthService } from '../../services/google-oauth.service';
 import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../common/types/permissions';
 import { DeviceAuthService } from './device-auth.service';
@@ -23,10 +25,13 @@ export class AuthController {
     private readonly deviceAuth: DeviceAuthService,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
+    private readonly accountAccess: AccountAccessService,
   ) {}
 
   private async _buildAccountsForUser(userId: string) {
-    const accounts = await this.accountRepo.find({ order: { created_at: 'ASC', id: 'ASC' } });
+    const ids = await this.accountAccess.accessibleIds({ id: userId, role: '' });
+    const accounts = ids.length ? await this.accountRepo.find({ where: { id: In(ids) } }) : [];
+    accounts.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
     return accounts.map(account => ({ id: account.id, name: account.name }));
   }
 
@@ -125,6 +130,7 @@ export class AuthController {
     if (user) {
       user.name = name;
       user.role = 'admin';
+      user.status = 'active';
       (user as any).password_hash = password_hash;
       user = await this.userRepo.save(user);
     } else {
@@ -136,6 +142,7 @@ export class AuthController {
       return res.status(500).json({ error: 'Failed to create user' });
     }
 
+    await ensurePersonalAccount(this.userRepo.manager, user);
     const token = this.authService.createSession(user.id);
     const { password_hash: _, ...safeUser } = user as any;
     const permissions = resolvePermissions('admin', []);
@@ -143,6 +150,7 @@ export class AuthController {
     return res.status(201).json({
       token,
       user: { ...safeUser, resolved_permissions: permissions },
+      accounts: await this._buildAccountsForUser(user.id),
     });
   }
 
@@ -172,7 +180,8 @@ export class AuthController {
       status: 'pending',
       password_hash,
     } as any);
-    await this.userRepo.save(created as any);
+    const registered = await this.userRepo.save(created as any);
+    await ensurePersonalAccount(this.userRepo.manager, registered as User);
 
     return res.status(201).json({ success: true, message: 'Registration submitted. Please wait for admin approval.' });
   }

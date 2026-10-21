@@ -54,6 +54,7 @@ async function waitFor(pred, { timeoutMs = 3000, stepMs = 5 } = {}) {
 function makeCtx() {
   return {
     agent_id: AGENT,
+    account_id: 'account-1',
     name: 'Rolf',
     cli: 'claude',
     working_dir: '/ws',
@@ -239,7 +240,7 @@ function makeHarness(opts = {}) {
     list: () => [{ working_dir: '/ws' }],
   };
   const d = new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
+    { url: 'http://127.0.0.1:0', apiKey: 'test-key', account_id: 'account-1', delegation: { enabled: true } },
     { worktreeManager, subagentManager: makeSubagentManager(state, liveSet, opts.pidBase), managedAgentContexts, sessionLimitDeferStore: store },
   );
   return { d, store, sched, nowRef, state, liveSet };
@@ -247,7 +248,7 @@ function makeHarness(opts = {}) {
 
 function trigger(overrides = {}) {
   return JSON.stringify({
-    event_type: 'agent_trigger',
+    event_type: 'agent_trigger', account_id: 'account-1',
     ticket_id: 'T-1',
     action: 'assignee',
     actor_name: AGENT,
@@ -353,7 +354,7 @@ test('a comment_mention is coalesced into one pending intent while deferred (no 
 
   const mention = (comment) =>
     JSON.stringify({
-      event_type: 'comment_mention',
+      event_type: 'comment_mention', account_id: 'account-1',
       ticket_id: 'T-1',
       comment_id: comment,
       agent_id: AGENT,
@@ -445,7 +446,7 @@ test('blocker #2: a mention arriving during defer (no trigger) is coalesced and 
 
   await d.handleCommentMention(
     JSON.stringify({
-      event_type: 'comment_mention',
+      event_type: 'comment_mention', account_id: 'account-1',
       ticket_id: 'T-m',
       comment_id: 'c1',
       agent_id: AGENT,

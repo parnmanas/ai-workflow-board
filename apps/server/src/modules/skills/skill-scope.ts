@@ -9,7 +9,7 @@ import { canUseCatalogItem, normalizeCatalogScope, type CatalogScope } from '../
 
 export type SkillScope = CatalogScope;
 
-/** '' / undefined / 'global' → global; otherwise the account uuid. */
+/** Only an explicit 'global' scope shares a new skill across accounts. */
 export function resolveSkillScope(input: {
   scope?: string | null;
   account_id?: string | null;

@@ -474,8 +474,8 @@ export class AutomationScheduleService implements OnModuleInit, OnModuleDestroy 
       }
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
-      if (!hostRow) {
-        throw makeError(400, 'target_runtime references an unknown Runtime Host');
+      if (!hostRow?.is_active || !accountId || hostRow.account_id !== accountId) {
+        throw makeError(400, 'target_runtime references a Runtime Host outside this account');
       }
       return { targetAgentId: runtimeIdentityKey(spec), taskPrompt: prompt, actionId: null, targetRuntime: { ...spec } };
     }

@@ -70,58 +70,18 @@ export async function resolveCallerAccountId(
 }
 
 /**
- * True when the caller may act within `targetAccountId`. A caller with an
- * explicitly bound account (session accountId, or its own Agent row's
- * account_id) must match exactly — this is the fail-closed replacement for
- * the old `!caller?.accountId || caller.accountId === accountId`
- * pattern, which trusted an unbound caller's claimed account_id
- * unconditionally.
- *
- * The one deliberate escape hatch preserved from that prior behavior: a
- * genuinely GLOBAL full-scope Agent (DB row with account_id NULL/'') may
- * still reach every account, but only after a DB lookup proves the agent
- * really is global — never merely because the caller omitted accountId.
- * Every other unresolved case (no caller, no agentId, unknown agent) denies.
- *
- * A null `targetAccountId` (a genuinely global resource) is checked via
- * that same DB lookup FIRST, before ever consulting `caller.accountId` —
- * a account-bound ApiKey can never legitimately equal a null target by
- * definition, so short-circuiting on it there would reject every caller,
- * including a genuinely global Agent whose ApiKey row still carries a
- * non-null account_id from issuance context (ticket 9b7a5bb7).
+ * Manager and runtime callers may act only inside their owning account.
+ * Global catalog reads are handled explicitly by the catalog's visibility
+ * checks; a missing owner never grants cross-account or Global write access.
  */
 export async function callerCanAccessAccount(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
   targetAccountId: string | null,
 ): Promise<boolean> {
-  if (!caller) return false;
-  // P4c-4: Host/링크 해소 (Agent 테이블 없음). Host 는 장비 단위라
-  // account-less manager 와 같은 full-scope 취급 — pairing account
-  // 스탬프가 있어도 경계가 아니다.
-  const callerRowAccount = async (): Promise<string | null | undefined> => {
-    if (!caller.agentId) return undefined;
-    const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
-    if (!row) return undefined;
-    if (row.kind === 'host') return null;
-    return normalizeAgentAccountId(row.account_id);
-  };
-  if (targetAccountId === null) {
-    if (!caller.agentId) return false;
-    const account = await callerRowAccount();
-    if (account === undefined) return false;
-    return account === null && caller.scope === 'full';
-  }
-  if (caller.accountId) {
-    return normalizeAgentAccountId(caller.accountId) === targetAccountId;
-  }
-  if (!caller.agentId) return false;
-  const account = await callerRowAccount();
-  if (account === undefined) return false;
-  if (account === null) {
-    return caller.scope === 'full';
-  }
-  return account === targetAccountId;
+  if (!caller || !targetAccountId) return false;
+  const accountId = await resolveCallerAccountId(dataSource, caller);
+  return accountId !== null && accountId === targetAccountId;
 }
 
 /**
@@ -139,14 +99,14 @@ export async function resolveCallerIdentityRow(
   if (isRuntimeIdentityKey(agentId)) {
     const keys = await dataSource.getRepository(ApiKey).find({ where: { name: Like(`runtime:%:${agentId}`) } });
     for (const key of keys) {
-      if (!key.host_id || !key.is_active) continue;
+      if (!key.host_id || !key.is_active || !key.account_id || (key.expires_at && new Date(key.expires_at) < new Date())) continue;
       const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: key.host_id } });
-      if (host) return { kind: 'runtime', id: agentId, name: key.name.slice('runtime:'.length, -(agentId.length + 1)), account_id: key.account_id || null };
+      if (host?.is_active && host.account_id === key.account_id) return { kind: 'runtime', id: agentId, name: key.name.slice('runtime:'.length, -(agentId.length + 1)), account_id: key.account_id || null };
     }
     return null;
   }
   const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: agentId } });
-  if (host) {
+  if (host?.is_active && host.account_id) {
     return { kind: 'host', id: host.id, name: host.name, account_id: host.account_id ?? null };
   }
 
@@ -154,7 +114,7 @@ export async function resolveCallerIdentityRow(
 }
 
 export const ACCOUNT_SCOPE_GATE_ERROR =
-  'Unauthorized: this operation requires a full-scope caller bound to (or a genuinely global Agent spanning) the target account.';
+  'Unauthorized: this operation requires a full-scope caller bound to the target account.';
 
 /**
  * Combines `requireFullScopeCaller` with a account-boundary check against

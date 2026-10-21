@@ -134,7 +134,7 @@ export class ResourcesController {
     if (type === 'repository') return res.status(400).json({ error: REPOSITORY_RESOURCE_REJECTION });
     let catalogScope;
     try {
-      catalogScope = normalizeCatalogScope({ scope: body.scope, account_id });
+      catalogScope = normalizeCatalogScope({ scope: body.scope, account_id: account_id || (req as any).currentAccountId });
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid scope' });
     }

@@ -144,8 +144,8 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return { payload, scope: { account_id: snapshot.account_id } };
     },
-    // Account scoping happens at the page (REST) level — the flattened frame
-    // carries account_id for the client to compare; every subscriber gets it.
+    // EventsController checks the resolved owner for every subscriber; the
+    // flattened frame also carries account_id for clients and Runtime Hosts.
     filter: () => true,
     // Runtime Hosts read ticket_id/action/field_changed/actor_name at the top level.
     flatten: (env) => {

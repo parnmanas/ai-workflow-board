@@ -420,14 +420,13 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   // ─── Hosts ──────────────────────────────────────────────────────────────
 
-  /** 매니저 identity 는 계정에 속하지 않는다(하트비트가 account_id:null 로
-   *  등록). 세션은 장비의 것이므로 살아 있는 모든 Runtime Host 를 보여준다. */
+  /** Presence is stamped from the authenticated host's owning account. */
   private managerRecords(): InstanceRecord[] {
     return this.registry.list().filter((r) => r.mode === 'manager');
   }
 
   async listHosts(accountId: string): Promise<AgentSessionHost[]> {
-    const records = this.managerRecords();
+    const records = this.managerRecords().filter(r => !!accountId && r.account_id === accountId);
     const ids = Array.from(new Set(records.map((r) => r.agent_id)));
     const names = new Map<string, string>();
     if (ids.length) {
@@ -472,10 +471,11 @@ export class AgentSessionsService implements OnModuleDestroy {
     return Array.from(new Set(base.filter((cli) => ACP_SESSION_CLIS.has(cli))));
   }
 
-  private requireHost(_accountId: string, managerId: string, cli: string): InstanceRecord {
+  private requireHost(accountId: string, managerId: string, cli: string): InstanceRecord {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
     const rec = this.managerRecords().find((r) => r.agent_id === managerId);
     if (!rec) throw new AgentSessionError(404, 'host_offline', 'This Runtime Host is not connected right now.');
+    if (!accountId || rec.account_id !== accountId) throw new AgentSessionError(403, 'account_access_denied');
     if (!this.hostClis(rec).includes(cli)) {
       throw new AgentSessionError(409, 'cli_unsupported', `Runtime Host ${rec.hostname} has no ACP session adapter for ${cli}.`);
     }
@@ -694,8 +694,9 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   // P4c-4: RuntimeHost 행이 세션 Host 다 (Agent 테이블 없음).
-  private async requireManagerAgent(managerId: string): Promise<{ id: string; name: string }> {
+  private async requireManagerAgent(accountId: string, managerId: string): Promise<{ id: string; name: string }> {
     const host = await this.hosts.findOne({ where: { id: managerId } });
+    if (host && (!accountId || host.account_id !== accountId || !host.is_active)) throw new AgentSessionError(403, 'account_access_denied');
     if (host) return { id: host.id, name: host.name };
     throw new AgentSessionError(404, 'host_unknown', 'No Runtime Host with this id.');
   }
@@ -711,7 +712,7 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   async getCliSettings(accountId: string, managerId: string, cli: string): Promise<AgentSessionCliSettings> {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
-    await this.requireManagerAgent(managerId);
+    await this.requireManagerAgent(accountId, managerId);
     const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
     const candidates = await this.candidateCredentials(accountId, cli);
     const current = row?.credential_id ? candidates.find((c) => c.id === row.credential_id) ?? null : null;
@@ -762,7 +763,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     backendProfileInput?: unknown,
   ): Promise<AgentSessionCliSettings> {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
-    await this.requireManagerAgent(managerId);
+    await this.requireManagerAgent(accountId, managerId);
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
     const credentialId = typeof credentialIdInput === 'string' && credentialIdInput.trim() ? credentialIdInput.trim() : null;
     if (credentialId) {
@@ -955,6 +956,7 @@ export class AgentSessionsService implements OnModuleDestroy {
    */
   async getSessionCredential(managerId: string, credentialId: string, accountId: string): Promise<{ credential_id: string; provider: string; fields: Record<string, string> }> {
     if (!accountId) throw new AgentSessionError(400, 'account_required');
+    await this.requireManagerAgent(accountId, managerId);
     const binding = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, credential_id: credentialId } });
     const execution = binding ? null : await this.dataSource.getRepository(AgentSessionExecution).findOne({
       where: { account_id: accountId, manager_id: managerId, credential_id: credentialId },

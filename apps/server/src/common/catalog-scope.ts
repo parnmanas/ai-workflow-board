@@ -23,8 +23,7 @@ export function normalizeCatalogScope(input: {
       { status: 400 },
     );
   }
-  const requested = input.scope
-    || (input.account_id ? 'account' : 'global');
+  const requested = input.scope || 'account';
   if (requested === 'global') return { account_id: null };
   const accountId = String(input.account_id || '').trim();
   if (!accountId) throw Object.assign(new Error('account_id is required for account scope'), { status: 400 });

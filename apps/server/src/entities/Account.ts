@@ -1,9 +1,17 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 @Entity('accounts')
+@Index('uq_accounts_personal_owner', ['owner_user_id'], { unique: true, where: "kind = 'personal' AND owner_user_id IS NOT NULL" })
 export class Account {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  @Column({ type: 'varchar', default: 'personal' })
+  kind: 'personal' | 'organization';
+
+  /** Login identity that owns this account. NULL legacy accounts grant no access. */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  owner_user_id: string | null;
 
   @Column({ type: 'varchar' })
   name: string;

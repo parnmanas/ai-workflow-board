@@ -156,7 +156,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, true);
   });
 
-  it('rejects delete_user from a account-scoped (non-full-scope) caller', async () => {
+  it('rejects login-user deletion even from a full-scope account caller', async () => {
     const agent = await makeAgent('account-a');
     const userRepo = dataSource.getRepository(User);
     const target = await userRepo.save(userRepo.create({ name: 'Doomed User', role: 'user' }));
@@ -172,11 +172,9 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const result = await tools.delete_user.handler({ user_id: target.id }, { sessionId });
     cleanup();
 
-    // A db-backed, full-scope, agent-bound caller is exactly what
-    // requireFullScopeCaller demands — this specific combination is allowed.
-    assert.equal(result.isError, undefined);
+    assert.equal(result.isError, true);
     const reloaded = await userRepo.findOne({ where: { id: target.id } });
-    assert.equal(reloaded, null);
+    assert.equal(reloaded.id, target.id);
   });
 
   it('rejects delete_user from a read-scoped caller', async () => {
@@ -356,11 +354,10 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, true);
   });
 
-  it('allows a genuinely global (account_id-less) full-scope Agent through the escape hatch', async () => {
-    const globalAgent = await makeAgent(''); // '' normalizes to null (global)
+  it('an unowned full-scope Host cannot access any account', async () => {
+    const globalAgent = await makeAgent(''); // missing ownership is invalid
     const sessionId = `session-${randomUUID()}`;
-    // No caller.accountId on the session — must fall through to the DB
-    // lookup, which proves this agent really is global.
+    // No session or Host account must fail closed, even with full key scope.
     const cleanup = registerSession(sessionId, {
       agentId: globalAgent.id,
       scope: 'full',
@@ -370,7 +367,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const result = await tools.list_functions.handler({ account_id: 'account-any' }, { sessionId });
     cleanup();
 
-    assert.equal(result.isError, undefined);
+    assert.equal(result.isError, true);
   });
 
   // ─── agent-tools.ts: writes removed (P4c-3b) ───
@@ -426,7 +423,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(updateResult.isError, true);
   });
 
-  it('allows create_user / update_user from a resolvable caller with no role/permissions in the request', async () => {
+  it('runtime callers cannot create login users even without role/permissions in the request', async () => {
     const agent = await makeAgent('account-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
@@ -437,7 +434,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     });
 
     const createResult = await tools.create_user.handler({ name: 'Legit User' }, { sessionId });
-    assert.equal(createResult.isError, undefined);
+    assert.equal(createResult.isError, true);
     cleanup();
   });
 

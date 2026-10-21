@@ -103,12 +103,12 @@ test('native execution pins ownership, credential and runtime settings across am
     });
     assert.equal(response.status, 200, response.text);
   }
-  async function setDefaults(accountId, credential, profile, defaultConfig) {
+  async function setDefaults(accountId, credential, profile, defaultConfig, expectedStatus = 200) {
     const response = await call(`${base}${cliPath}/settings`, {
       method: 'PUT', headers: headers(accountId),
       body: JSON.stringify({ credential_id: credential.id, backend_profile_id: profile.id, default_config: defaultConfig }),
     });
-    assert.equal(response.status, 200, response.text);
+    assert.equal(response.status, expectedStatus, response.text);
     return response.body;
   }
   async function send(op, body = {}, ambientAccount = accountB.id) {
@@ -158,7 +158,7 @@ test('native execution pins ownership, credential and runtime settings across am
 
   await t.test('opening a known native session persists its original execution snapshot', async () => {
     await setDefaults(accountA.id, originalCredential, originalProfile, originalConfig);
-    await setDefaults(accountB.id, ambientCredential, ambientProfile, { model: 'model-ambient', reasoning: 'low', approvals: false });
+    await setDefaults(accountB.id, ambientCredential, ambientProfile, { model: 'model-ambient', reasoning: 'low', approvals: false }, 404);
     const before = requests.length;
     const response = await call(`${base}${cliPath}/sessions`, {
       method: 'POST', headers: headers(accountA.id), body: JSON.stringify({ session_id: nativeId, cwd: '/tmp/execution-fixture' }),
@@ -243,8 +243,9 @@ test('native execution pins ownership, credential and runtime settings across am
     assert.equal(settingsA.body.credential.id, replacementCredential.id);
     assert.equal(settingsA.body.default_config.model, 'model-explicit');
     assert.equal(settingsA.body.default_config.reasoning, 'low', 'explicit model update preserves other future-session defaults');
-    assert.equal(settingsB.body.credential.id, ambientCredential.id);
-    assert.equal(settingsB.body.default_config.model, 'model-ambient', 'ambient account settings remain independent');
+    assert.equal(settingsB.body.credential.id, replacementCredential.id);
+    assert.equal(settingsB.body.default_config.model, 'model-explicit', 'the host owner determines settings even when an accessible ambient account differs');
+    assert.equal(await ds.getRepository('AgentSessionCliSetting').countBy({ manager_id: managerId, account_id: accountB.id }), 0, 'a host never gains defaults owned by a different account');
   });
 
   await t.test('a newly created native session uses current defaults without changing older sessions', async () => {
@@ -313,7 +314,7 @@ test('native execution pins ownership, credential and runtime settings across am
     const denied = await call(`${base}${sessionPath}/restart`, {
       method: 'POST', headers: headers(accountB.id, otherToken), body: '{}',
     });
-    assert.equal(denied.status, 202, denied.text);
+    assert.equal(denied.status, 403, denied.text);
   });
   assert.deepEqual(rpcFailures, [], 'all mocked manager RPC responses were accepted');
 });

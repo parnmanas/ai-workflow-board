@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { AgentLogsService } from './agent-logs.service';
@@ -20,8 +20,10 @@ export class AgentLogsAdminController {
     @Query('until') until: string | undefined,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
+    @Req() req: any,
   ) {
     const rows = await this.service.list({
+      account_ids: req.accessibleAccountIds || [],
       agent_id: agentId,
       level,
       category,
@@ -33,18 +35,18 @@ export class AgentLogsAdminController {
   }
 
   @Get('agents')
-  async agents(@Res() res: Response) {
-    return res.json(await this.service.listAgentsWithRecentErrors(7));
+  async agents(@Res() res: Response, @Req() req: any) {
+    return res.json(await this.service.listAgentsWithRecentErrors(7, req.accessibleAccountIds || []));
   }
 
   // Admin sidebar badge: how many error-level entries have landed since
   // the caller last checked. `since` is tracked client-side in localStorage
   // and sent on every poll — the server does no per-user state tracking
-  // here because error logs are global (not per-user). Capped to error/fatal
-  // level so warn-level noise doesn't flood the badge.
+  // here. Counts use the same account filter as the list and are capped to
+  // error/fatal level so warn-level noise doesn't flood the badge.
   @Get('unseen-count')
-  async unseenCount(@Query('since') since: string | undefined, @Res() res: Response) {
-    const count = await this.service.countSince(since ? new Date(since) : null);
+  async unseenCount(@Query('since') since: string | undefined, @Res() res: Response, @Req() req: any) {
+    const count = await this.service.countSince(since ? new Date(since) : null, req.accessibleAccountIds || []);
     return res.json({ count });
   }
 }

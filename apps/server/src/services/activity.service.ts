@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, EntityManager, DataSource } from 'typeorm';
+import { Repository, EntityManager, DataSource, In } from 'typeorm';
 import { EventEmitter } from 'events';
 import { ActivityLog } from '../entities/ActivityLog';
 import { LogService } from './log.service';
@@ -170,17 +170,20 @@ export class ActivityService {
     for (const row of rows) this._emitActivity(row);
   }
 
-  async getTicketActivity(ticketId: string, limit = 50): Promise<ActivityLog[]> {
+  async getTicketActivity(ticketId: string, accountIds: string[], limit = 50): Promise<ActivityLog[]> {
+    if (!accountIds.length) return [];
     const rows = await this.repo.find({
-      where: { ticket_id: ticketId },
+      where: { ticket_id: ticketId, account_id: In(accountIds) },
       order: { created_at: 'DESC' },
       take: limit,
     });
     return this.resolveActorDisplayNames(rows);
   }
 
-  async getRecentActivity(limit = 100): Promise<ActivityLog[]> {
+  async getRecentActivity(accountIds: string[], limit = 100): Promise<ActivityLog[]> {
+    if (!accountIds.length) return [];
     const rows = await this.repo.find({
+      where: { account_id: In(accountIds) },
       order: { created_at: 'DESC' },
       take: limit,
     });

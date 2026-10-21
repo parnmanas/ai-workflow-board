@@ -111,8 +111,9 @@ export async function authenticateMcpRequest(
     // ENV validation
     const envKeys = loadMcpEnvKeys();
     const envMatch = envKeys.find(k => k.key === token);
-    if (envMatch) {
-      return { keyHint: maskMcpKey(envMatch.key), agentName: envMatch.agentName, scope: 'full', source: 'env' };
+    const envAccountId = process.env.MCP_ACCOUNT_ID?.trim();
+    if (envMatch && envAccountId) {
+      return { keyHint: maskMcpKey(envMatch.key), agentName: envMatch.agentName, scope: 'full', accountId: envAccountId, source: 'env' };
     }
 
     res.status(403).json({ jsonrpc: '2.0', error: { code: -32002, message: 'Invalid API key.' }, id: null });

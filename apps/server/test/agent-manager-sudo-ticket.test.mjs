@@ -32,7 +32,7 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
 
   const { AuthService, getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'sudo-ticket');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'sudo-ticket-manager',
     type: 'manager',
   });
@@ -41,7 +41,7 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
     label: 'sudo-ticket-manager-key',
   });
   // 같은 계정의 **다른** 매니저 — 남의 티켓을 집으려 시도하는 쪽.
-  const other = await createAgent(app, getDataSourceToken, null, {
+  const other = await createAgent(app, getDataSourceToken, account.id, {
     name: 'sudo-ticket-other',
     type: 'manager',
   });
@@ -129,6 +129,14 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
     200,
   );
   await readJson(await consume(third.ticket_id, managerKey.raw_key), 404);
+
+  const foreignAdmin = await createUser(app, getDataSourceToken, { name: 'foreign-admin', role: 'admin' });
+  const foreignToken = app.get(AuthService).createSession(foreignAdmin.id);
+  const fourth = await readJson(await mint({ password: PASSWORD, scope }), 201);
+  await readJson(await fetch(`http://127.0.0.1:${port}/api/admin/agent-manager/sudo-ticket/${fourth.ticket_id}`, {
+    method: 'DELETE', headers: { Authorization: `Bearer ${foreignToken}` },
+  }), 200);
+  await readJson(await consume(fourth.ticket_id, managerKey.raw_key), 200);
 
   // ── 모양이 어긋난 발급 요청은 거부 ──────────────────────────────────────
   await readJson(await mint({ scope }), 400);

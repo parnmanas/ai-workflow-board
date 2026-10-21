@@ -15,6 +15,10 @@ const runtimeSpecsById = new Map();
 // host agent id → its api key, so several agents under one host share one key
 // (a real manager runs one SSE stream for all of them).
 const hostKeysByHost = new Map();
+// Feature suites may create several owned pools before their first actor.
+// Bind those fixture accounts to that actor; isolation tests pass an explicit
+// ownerUserId (or create rows directly). This never changes production access.
+const fixtureOwners = new WeakMap();
 
 export function runtimeHostKeyForAgent(agentId) {
   return runtimeHostKeysByAgent.get(agentId) || null;
@@ -54,10 +58,10 @@ export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId
   return minted.raw_key;
 }
 
-export async function createAccount(app, getDataSourceToken, name = 'qa') {
+export async function createAccount(app, getDataSourceToken, name = 'qa', { ownerUserId } = {}) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Account');
-  const row = await repo.save(repo.create({ name: `ws-${name}-${stamp()}`, description: 'qa account' }));
+  const row = await repo.save(repo.create({ name: `account-${name}-${stamp()}`, description: 'qa account', kind: 'organization', owner_user_id: ownerUserId ?? fixtureOwners.get(ds) ?? null }));
   traceEvent('fixture', { kind: 'account', id: row.id, name: row.name });
   return row;
 }
@@ -77,6 +81,11 @@ export async function createUser(
       status: 'active',
     }),
   );
+  if (!fixtureOwners.has(ds)) {
+    fixtureOwners.set(ds, row.id);
+    await ds.getRepository('Account').createQueryBuilder().update()
+      .set({ owner_user_id: row.id }).where('owner_user_id IS NULL AND kind = :kind', { kind: 'organization' }).execute();
+  }
   traceEvent('fixture', { kind: 'user', id: row.id, name: row.name, role: row.role });
   return row;
 }
@@ -96,7 +105,7 @@ export async function createAgent(
       ds.getRepository('RuntimeHost').create({
         name: agentName,
         hostname: 'fixture',
-        account_id: null,
+        account_id: accountId || null,
         is_active: 1,
       }),
     );
@@ -107,7 +116,7 @@ export async function createAgent(
     });
     runtimeHostKeysByAgent.set(host.id, hostKey.raw_key);
     hostKeysByHost.set(host.id, hostKey.raw_key);
-    traceEvent('fixture', { kind: 'agent', id: host.id, name: host.name, account_id: null });
+    traceEvent('fixture', { kind: 'agent', id: host.id, name: host.name, account_id: host.account_id });
     return {
       id: host.id,
       name: host.name,
@@ -115,7 +124,7 @@ export async function createAgent(
       type: 'manager',
       is_active: 1,
       is_online: 0,
-      account_id: null,
+      account_id: host.account_id,
       role_prompt: rolePrompt || '',
     };
   }

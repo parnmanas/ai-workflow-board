@@ -782,7 +782,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const freshSettings = await call(`${base}/api/agent-sessions/hosts/${managerId}/codex/settings`, { headers: freshHeaders });
   assert.equal(freshSettings.status, 200, freshSettings.text);
   assert.deepEqual(freshSettings.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'a account with no settings row still sees what the live session offers');
-  assert.deepEqual(freshSettings.body.default_config, {}, 'but nothing is remembered for it yet');
+  assert.deepEqual(freshSettings.body.default_config, { model: 'gpt-fast', fast_mode: true, __mode: 'agent' }, 'an ambient account header does not change the host owner or its defaults');
 
   const beforeRemember = await call(settingsUrl, { headers: ownerHeaders });
   assert.equal(beforeRemember.status, 200, beforeRemember.text);

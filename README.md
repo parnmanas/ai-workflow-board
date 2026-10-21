@@ -270,8 +270,10 @@ Source npm scripts run the backend in `apps/server`, where `dotenv/config` loads
 | `AWB_DATA_DIR` | Server file storage. Docker sets `/app/data` and persists it in `awbdata`. |
 | `ENCRYPTION_KEY` | Optional stable secret for credential encryption. If absent, a key file is generated under the server data directory. Preserve the secret or that file. |
 | `CORS_ORIGIN` | Explicit allowed origin for cross-origin browser access. Development reflects origins when unset; production rejects cross-origin requests when unset. Same-origin UI/API deployment works without it. |
-| `MCP_API_KEYS` | Legacy/environment MCP keys (`name:key,name2:key2` or comma-separated keys). UI-managed keys are preferred. |
-| `AGENT_API_KEY` | Legacy/environment shared agent key. Host pairing issues a managed key instead. |
+| `MCP_API_KEYS` | Environment MCP keys (`name:key,name2:key2` or comma-separated keys). Requires `MCP_ACCOUNT_ID`; UI-managed keys are preferred. |
+| `MCP_ACCOUNT_ID` | Account that owns every key configured through `MCP_API_KEYS`. An unset owner disables those keys. |
+| `AGENT_API_KEY` | Environment agent key. Requires `AGENT_ACCOUNT_ID`. Host pairing issues an account-owned managed key instead. |
+| `AGENT_ACCOUNT_ID` | Account that owns `AGENT_API_KEY`. An unset owner disables the environment key. |
 | `MCP_DEV_MODE` | Optional local bypass: only outside production and when no active DB/environment MCP keys exist. Defaults to no bypass. |
 | `AGENT_DEV_MODE` | Optional local agent-API bypass: only outside production and when `AGENT_API_KEY` is absent. Defaults to no bypass. |
 | `SQLJS_DB_PATH`, `SQLJS_ONTOLOGY_DB_PATH` | Override SQLite file paths. Absolute paths avoid ambiguity; relative values resolve under `database/`. |

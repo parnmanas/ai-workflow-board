@@ -112,7 +112,7 @@ export class EventsController implements OnModuleDestroy {
     if (cached) return cached;
     const pending = this.dataSource.getRepository('AgentSessionExecution').findOne({
       where: { manager_id: session.manager_id, cli: session.cli, session_id: session.session_id }, select: ['account_id'],
-    }).then(binding => binding?.account_id || null);
+    }).then(async binding => binding?.account_id || (await this.hostRepo.findOneBy({ id: session.manager_id }))?.account_id || null);
     if (this.nativeOwners.size >= 2048) this.nativeOwners.delete(this.nativeOwners.keys().next().value!);
     this.nativeOwners.set(key, pending);
     // Unbound sessions may be pinned later. Sharing the lookup also preserves
@@ -183,6 +183,7 @@ export class EventsController implements OnModuleDestroy {
         try {
           const mapped = await def.map(rawEvent, mapCtx);
           if (!mapped) return;
+          mapped.scope.account_id ||= rawEvent.account_id || (mapped.payload as any)?.account_id;
           if (def.eventType === 'agent_session_update' || def.eventType === 'agent_session_event') {
             const payload = mapped.payload as any;
             const session = payload.session || payload;
@@ -191,6 +192,23 @@ export class EventsController implements OnModuleDestroy {
               if (owner) mapped.scope.account_id = owner;
             }
           }
+          if (!mapped.scope.account_id) {
+            const payload = mapped.payload as any;
+            const hostId = payload.manager_id || payload.terminal?.manager_id || payload.instance?.host_id
+              || payload.instance?.agent_id || payload.runtime?.manager_agent_id || mapped.scope.agent_id;
+            if (typeof hostId === 'string' && /^[0-9a-f-]{36}$/i.test(hostId)) {
+              mapped.scope.account_id = (await this.hostRepo.findOneBy({ id: hostId }))?.account_id || undefined;
+            }
+            if (!mapped.scope.account_id && payload.ticket_id) {
+              mapped.scope.account_id = (await this.ticketRepo.findOne({ where: { id: payload.ticket_id }, select: ['account_id'] }))?.account_id;
+            }
+            if (!mapped.scope.account_id && payload.room_id) {
+              mapped.scope.account_id = (await this.dataSource.getRepository('ChatRoom').findOne({ where: { id: payload.room_id }, select: ['account_id'] }))?.account_id;
+            }
+          }
+          // Work and host-control events must have an owner before fan-out.
+          // User-targeted notifications and server metadata have their own filters.
+          if (!mapped.scope.account_id && !mapped.scope.user_id) return;
           const envelope: StreamEvent = {
             event_type: def.eventType,
             scope: mapped.scope,
@@ -314,6 +332,7 @@ export class EventsController implements OnModuleDestroy {
             agentId: keyResult.apiKey.host_id ?? undefined,
             // P4c-2b: host-affinity 분기용. 구 키에는 host_id가 없어 undefined.
             hostId: keyResult.apiKey.host_id ?? undefined,
+            accountIds: new Set([keyResult.apiKey.account_id]),
           };
         }
       } catch {
@@ -429,7 +448,10 @@ export class EventsController implements OnModuleDestroy {
 
     // Emit protocol version on connect so clients can detect legacy/mismatch (CHAT-20)
     const versionEvent = of({
-      data: JSON.stringify({ chat_protocol_version: 2 }),
+      data: JSON.stringify({
+        chat_protocol_version: 2,
+        ...(identity.type === 'agent' ? { account_id: [...(identity.accountIds || [])][0], host_id: identity.hostId } : {}),
+      }),
       type: 'server_meta',
     } as MessageEvent);
 
@@ -450,7 +472,7 @@ export class EventsController implements OnModuleDestroy {
         filter((event: StreamEvent) => {
           const def = registry.get(event.event_type);
           if (!def) return false;
-          if (identity.type === 'user' && event.scope.account_id && !identity.accountIds?.has(event.scope.account_id)) return false;
+          if (event.scope.account_id && !identity.accountIds?.has(event.scope.account_id)) return false;
 
           // ST-6: managed-agent fan-out. If this is a manager identity and
           // the event is targeted at one of its managed agents, run the
@@ -544,7 +566,7 @@ export class EventsController implements OnModuleDestroy {
           const def = registry.get(event.event_type);
           // Runtime Host-consumed types flatten payload fields; newer UI-only
           // types ship the envelope natively.
-          const rawDataObj = def?.flatten ? def.flatten(event) : event;
+          const rawDataObj = { ...(def?.flatten ? def.flatten(event) : event), account_id: event.scope.account_id };
           // Credential firewall: never ship run_provision.repo.credential to a
           // non-agent (human) SSE recipient — the git token is for an agent
           // recipient's clone only. See redactRunProvisionCredential (module scope).

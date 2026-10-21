@@ -67,19 +67,11 @@ export class OrchestrationHostsService {
    * available with no heartbeat (model lists stay single-sourced from
    * HostModelsService and are simply absent offline).
    *
-   * Deliberately NOT narrowed by account. A Runtime Host is a machine, not a
-   * account member — managers are paired once by an admin and legitimately run
-   * slots for several accounts (the cross-account `listManagers` endpoint
-   * takes the same position). The account scope that matters is stamped onto
-   * the slot's credential visibility check at roster-write time.
+   * Only hosts owned by the execution account may appear in its roster.
    */
-  async listRuntimeHosts(_accountId: string): Promise<RuntimeHostView[]> {
-    // P4 (manager identity → RuntimeHost): 카탈로그의 원천을 runtime_hosts 로
-    // 옮긴다. manager Agent 행은 legacy 별칭으로만 남는다 (같은 페어링의
-    // dual-write 쌍은 api_keys 의 agent_id/host_id 쌍으로 묶어 하나로 합친다).
-    // P4c-4: runtime_hosts 원천 (Agent 테이블 없음 — legacy 별칭은
-    // api_keys 링크에서 복원한다).
-    const hostRows = await this.hostRepo.find({ order: { name: 'ASC' } });
+  async listRuntimeHosts(accountId: string): Promise<RuntimeHostView[]> {
+    if (!accountId) return [];
+    const hostRows = await this.hostRepo.find({ where: { account_id: accountId, is_active: 1 }, order: { name: 'ASC' } });
     if (hostRows.length === 0) return [];
 
     interface Entry {

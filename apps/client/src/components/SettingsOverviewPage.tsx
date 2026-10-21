@@ -30,21 +30,21 @@ export default function SettingsOverviewPage() {
 
   const groups: SettingsGroup[] = [
     {
-      title: 'Ownership',
-      description: 'Personal and organization ownership, defaults, and access rules.',
+      title: 'Account',
+      description: 'Your work defaults and login-user administration.',
       items: [
         {
-          title: 'Ownership & defaults',
+          title: 'Work defaults',
           description: 'Ticket dispatch, language, agent harness and clone policy defaults.',
-          path: `/settings/ownership`,
+          path: `/settings/defaults`,
           icon: 'W',
-          adminOnly: true,
         },
         {
-          title: 'Members',
-          description: 'People who can access this account.',
-          path: `/settings/members`,
+          title: 'Login users',
+          description: 'Approve or disable login users. Each user has a personal account.',
+          path: `/settings/users`,
           icon: 'M',
+          adminOnly: true,
         },
       ],
     },

@@ -48,9 +48,8 @@ export async function loadAgentEnvForAccount(credRepo: Pick<Repository<Credentia
 // never ride an SSE payload; contract shared with
 // apps/agent-manager/src/lib/agent-env-credentials.ts.
 //
-// Auth mirrors the project git-credential route: a Runtime Host key. A paired
-// Host supervises executions across accounts, so a manager key names the
-// account; an account-scoped runtime key may only ask for its own.
+// Manager and runtime keys can retrieve their own account's credentials and
+// explicit Global credentials. A request parameter cannot widen that scope.
 @ApiTags('agent-manager')
 @Controller()
 export class CredentialsAgentEnvController {
@@ -71,12 +70,11 @@ export class CredentialsAgentEnvController {
     const callerHostId = String((req as any).currentHostId || '').trim();
     if (!callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
     const requested = String(requestedAccountId || '').trim();
-    const keyAccountId = (req as any).currentRuntimeKey ? String((req as any).apiKey?.account_id || '').trim() : '';
-    if (keyAccountId && requested && keyAccountId !== requested) {
+    const keyAccountId = String((req as any).currentAccountId || '').trim();
+    if (!keyAccountId || (requested && keyAccountId !== requested)) {
       return res.status(403).json({ error: 'account_id is outside the API key account' });
     }
-    const accountId = keyAccountId || requested;
-    if (!accountId) return res.status(400).json({ error: 'account_id is required' });
+    const accountId = keyAccountId;
 
     const result = await loadAgentEnvForAccount(this.credRepo, accountId);
     if (result.skipped.length) {

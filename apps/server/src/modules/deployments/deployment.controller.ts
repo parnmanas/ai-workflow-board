@@ -1,9 +1,10 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Body, Query, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Deployment } from '../../entities/Deployment';
 import { DeploymentService } from './deployment.service';
+import { normalizeCatalogScope } from '../../common/catalog-scope';
 
 /** Wire projection of a Deployment row (snake_case, dates as ISO). */
 export function deploymentToJson(d: Deployment | null) {
@@ -46,17 +47,21 @@ export class DeploymentController {
 
   /** Record (upsert) the live commit for an environment. */
   @Post('report')
-  async report(@Body() body: any, @Res() res: Response) {
+  async report(@Body() body: any, @Res() res: Response, @Req() req: any) {
+    if (body.scope === 'global' && req.currentUser?.role !== 'admin') {
+      return res.status(403).json({ error: 'Global deployment reports require an administrator' });
+    }
     try {
+      const owner = normalizeCatalogScope({ scope: body.scope, account_id: req.currentAccountId });
       const row = await this.deployments.report({
-        accountId: body.account_id ?? null,
+        accountId: owner.account_id,
         environment: body.environment,
         deployedCommitSha: body.deployed_commit_sha ?? body.commit_sha,
         baseUrl: body.base_url,
         repoResourceId: body.repo_resource_id,
         ancestorShas: Array.isArray(body.ancestor_shas) ? body.ancestor_shas : undefined,
         source: body.source ?? 'webhook',
-        reportedBy: body.reported_by,
+        reportedBy: req.currentUser.id,
         deployedAt: body.deployed_at ?? null,
       });
       return res.json(deploymentToJson(row));

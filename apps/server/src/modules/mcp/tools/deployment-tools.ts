@@ -19,6 +19,7 @@ import { Deployment } from '../../../entities/Deployment';
 import { DEPLOYMENT_SOURCES } from '../../../common/deployment-options';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { requireAccountScopedFullAccess, resolveCallerAccountId } from '../shared/authz';
 import type { ToolContext } from './context';
 
 function deploymentToJson(d: Deployment | null) {
@@ -50,12 +51,12 @@ export function registerDeploymentTools(server: McpServer, ctx: ToolContext) {
     'for this environment to deploy the fix: the rerun fires the moment `deployed_commit_sha` (or one ' +
     'of `ancestor_shas`) includes the fix commit — no time guessing. Pass `ancestor_shas` (e.g. ' +
     '`git rev-list --max-count=200 HEAD`) so the "does this deploy include the fix" ancestor check ' +
-    'works without AWB holding a clone. Omit `account_id` for a GLOBAL/shared environment (e.g. the ' +
-    'AWB server itself); set it to scope the environment to one account.',
+    'works without AWB holding a clone. Omit `account_id` to use the authenticated Account. ' +
+    'Global deployment reports require the administrator REST endpoint.',
     {
       environment: z.string().describe('Environment name, e.g. "production", "staging", "awb-server". This is what a QA scenario points at via target_environment.'),
       deployed_commit_sha: z.string().describe('The commit SHA now LIVE in this environment (git rev-parse HEAD of what was deployed).'),
-      account_id: z.string().optional().describe('Scope to one account. Omit for a GLOBAL environment shared across accounts.'),
+      account_id: z.string().optional().describe('Must match the authenticated Account. Defaults to that Account.'),
       base_url: z.string().optional().describe('Public base URL of the environment (for the UI badge link / poller).'),
       repo_resource_id: z.string().optional().describe('Optional Resource id of the repo this environment deploys (provenance).'),
       ancestor_shas: z.array(z.string()).optional().describe('Recent commit ancestry of deployed_commit_sha (newest→oldest, e.g. `git rev-list --max-count=200 HEAD`). Enables the "deploy includes the fix commit" ancestor gate without a server-side clone.'),
@@ -66,8 +67,11 @@ export function registerDeploymentTools(server: McpServer, ctx: ToolContext) {
       if (!deploymentService) return err('Deployment service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
+        const accountId = account_id || await resolveCallerAccountId(ctx.dataSource, caller);
+        const denied = await requireAccountScopedFullAccess(ctx.dataSource, caller, accountId);
+        if (denied) return err(denied);
         const row = await deploymentService.report({
-          accountId: account_id ?? null,
+          accountId,
           environment,
           deployedCommitSha: deployed_commit_sha,
           baseUrl: base_url,

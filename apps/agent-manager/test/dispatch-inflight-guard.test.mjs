@@ -63,6 +63,7 @@ function makeConfig(delegation = {}) {
   return {
     url: 'http://127.0.0.1:0', // never reached — fetch is mocked to fail-closed
     apiKey: 'test-key',
+    account_id: 'account-1',
     silentExitVerifyDelayMs: 0, // skip the real grace delay (ticket 2fd06686) in tests
     delegation: {
       enabled: true,
@@ -200,6 +201,7 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
       if (!id) return undefined;
       return {
         agent_id: id,
+        account_id: 'account-1',
         api_key: 'k',
         working_dir: '/tmp/wd',
         mcp_config_path: '/tmp/mcp.json',
@@ -229,6 +231,7 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
 
 function evJson(fields = {}) {
   return JSON.stringify({
+    account_id: 'account-1',
     ticket_id: 't1',
     action: 'assignee',
     actor_name: 'a1',

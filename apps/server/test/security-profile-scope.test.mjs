@@ -30,7 +30,8 @@ describe('Security Profile account scope', () => {
     const runRepo = dataSource.getRepository(SecurityRun);
     // P4c-4: 타겟 해소는 Host 행이다 ('agent-1' id 로 직접 심는다).
     const hostRepo = dataSource.getRepository(RuntimeHost);
-    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'sec-host', hostname: 'sec', account_id: null }));
+    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'sec-host', hostname: 'sec', account_id: 'account-a' }));
+    await hostRepo.save(hostRepo.create({ id: 'agent-2', name: 'host-b', account_id: 'account-b' }));
     // (profile, run, dataSource, host, runService) — list/create never touch runService.
     service = new SecurityProfileService(profileRepo, runRepo, dataSource, hostRepo, {});
   });
@@ -60,7 +61,7 @@ describe('Security Profile account scope', () => {
     await service.create({
       account_id: 'account-b',
       name: 'Account B profile',
-      target_runtime: TARGET_RUNTIME,
+      target_runtime: { ...TARGET_RUNTIME, manager_agent_id: 'agent-2' },
       scan_driver: 'code-review',
     });
 

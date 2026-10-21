@@ -6,7 +6,7 @@ import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import HarnessConfigEditor from './HarnessConfigEditor';
 import ClonePolicyEditor from './ClonePolicyEditor';
-import { Button, Input, PermissionNotice } from './common';
+import { Button, Input } from './common';
 import { tokens } from '../tokens';
 import {
   AUTO_ARCHIVE_DAYS_MAX,
@@ -23,13 +23,11 @@ import {
 // work: the dispatch settings (language, per-agent concurrency, auto-archive,
 // pause — formerly per board, docs/tickets.md), the agent harness shipped on
 // every ticket dispatch, and the repo clone policy (a Project overrides it per
-// key from its own Clone Policy, ticket bddb63ee). Admin-gated — these apply to
-// every ticket and every repo checkout in the account, so edits belong to
-// operators.
+// key from its own Clone Policy, ticket bddb63ee). The authenticated account
+// owner may edit these defaults; the server checks the actual owner.
 export default function AccountSettingsPage() {
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
-  const { hasPermission } = useAuth();
   const { showToast } = useToast();
   const [account, setAccount] = useState<Account | null>(null);
 
@@ -55,19 +53,6 @@ export default function AccountSettingsPage() {
     minHeight: 0,
   };
 
-  if (!hasPermission('admin.access')) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-        <PageHeader title="Work defaults" />
-        <div style={pageStyle}>
-          <PermissionNotice
-            title="Admin access required"
-            message="Admin access is required to edit work defaults."
-          />
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>

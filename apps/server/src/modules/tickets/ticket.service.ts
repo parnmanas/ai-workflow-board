@@ -136,6 +136,8 @@ export class TicketService {
       if (e instanceof RuntimeSpecError) throw new TicketInputError(e.message);
       throw e;
     }
+    const host = await this.dataSource.getRepository(RuntimeHost).findOneBy({ id: spec.manager_agent_id });
+    if (!host?.is_active || !accountId || host.account_id !== accountId) throw new TicketInputError('Runtime Host is not available to this account');
     const profile = await validateCliRuntimeProfileSelection(this.dataSource, spec.cli_runtime_profile);
     if (!profile.ok) throw new TicketInputError(profile.error);
     if (spec.credential_id) {

@@ -29,7 +29,7 @@ describe('Account Schedule account scope', () => {
     await dataSource.initialize();
     const scheduleRepo = dataSource.getRepository(AutomationSchedule);
     // P4c-4: target_runtime 의 manager_agent_id 는 Host 행으로 해소된다.
-    const hostRepo = { findOne: async () => ({ id: 'agent-1', account_id: null }) };
+    const hostRepo = { findOne: async ({ where }) => ({ id: where.id, is_active: 1, account_id: where.id === 'agent-1' ? 'account-a' : 'account-b' }) };
     // (schedule, room, participant, host, dataSource, messaging, log, quiesce, action, actions)
     service = new AutomationScheduleService(scheduleRepo, {}, {}, hostRepo, {}, {}, noopLog, noQuiesce, {}, {});
   });
@@ -61,7 +61,7 @@ describe('Account Schedule account scope', () => {
     const theirs = await service.create({
       accountId: 'account-b',
       name: 'Account B schedule',
-      targetRuntime: TARGET_RUNTIME,
+      targetRuntime: { ...TARGET_RUNTIME, manager_agent_id: 'agent-2' },
       taskPrompt: 'do the thing',
       intervalMs: 60_000,
     });

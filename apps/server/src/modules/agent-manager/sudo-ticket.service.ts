@@ -129,8 +129,9 @@ export class SudoTicketService implements OnModuleDestroy {
   }
 
   /** 발급만 하고 쓰이지 않은 티켓을 운영자가 취소할 때(모달을 닫는 등). */
-  revoke(ticket_id: string): void {
+  revoke(ticket_id: string, issuedBy?: string): void {
     const ticket = this.tickets.get(ticket_id);
+    if (issuedBy && ticket?.issued_by !== issuedBy) return;
     if (!ticket) return;
     this.tickets.delete(ticket_id);
     this.wipe(ticket);

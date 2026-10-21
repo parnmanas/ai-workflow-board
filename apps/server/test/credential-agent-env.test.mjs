@@ -166,7 +166,8 @@ describe('credential agent env — REST', () => {
     return res;
   }
 
-  const hostReq = { currentHostId: 'host-1', currentRuntimeKey: null, apiKey: { host_id: 'host-1', account_id: null } };
+  const hostReq = { currentHostId: 'host-1', currentAccountId: 'acc-1', currentRuntimeKey: null, apiKey: { host_id: 'host-1', account_id: 'acc-1' } };
+  const otherHostReq = { currentHostId: 'host-2', currentAccountId: 'acc-2', currentRuntimeKey: null, apiKey: { host_id: 'host-2', account_id: 'acc-2' } };
 
   it('stores Cloudflare tokens masked and delivers them only after exposure is enabled', async () => {
     const providers = response();
@@ -197,7 +198,7 @@ describe('credential agent env — REST', () => {
     assert.deepEqual(updated.body.agent_env_names, ['CLOUDFLARE_API_TOKEN']);
     assert.ok(!JSON.stringify(updated.body).includes(token));
     assert.deepEqual((await fetchEnv(hostReq, 'acc-1')).body.env, { CLOUDFLARE_API_TOKEN: token });
-    assert.deepEqual((await fetchEnv(hostReq, 'acc-2')).body.env, {});
+    assert.deepEqual((await fetchEnv(otherHostReq, 'acc-2')).body.env, {});
   });
 
   it('stores the Google client and hands it to a Host as env', async () => {
@@ -267,7 +268,7 @@ describe('credential agent env — REST', () => {
   it('a global exposed credential reaches every account; another account never sees account-owned ones', async () => {
     await create({ scope: 'global', name: 'Global key', provider: 'custom', credentials: { SHARED_TOKEN: 's' }, agent_env: true });
     await create({ account_id: 'acc-1', name: 'Mine', provider: 'custom', credentials: { MINE: 'm' }, agent_env: true });
-    const other = await fetchEnv(hostReq, 'acc-2');
+    const other = await fetchEnv(otherHostReq, 'acc-2');
     assert.deepEqual(other.body.env, { SHARED_TOKEN: 's' });
   });
 
@@ -280,11 +281,13 @@ describe('credential agent env — REST', () => {
     assert.match(reserved.body.error, /reserved/);
   });
 
-  it('route auth: Host key required; a runtime key only reads its own account', async () => {
+  it('route auth: both manager and runtime keys only read their own account', async () => {
     await create({ account_id: 'acc-1', name: 'Mine', provider: 'custom', credentials: { MINE: 'm' }, agent_env: true });
     assert.equal((await fetchEnv({ currentHostId: null }, 'acc-1')).statusCode, 403);
-    assert.equal((await fetchEnv(hostReq, '')).statusCode, 400);
-    const runtimeReq = { currentHostId: 'host-1', currentRuntimeKey: 'rt-0123456789abcdef', apiKey: { host_id: 'host-1', account_id: 'acc-1' } };
+    assert.equal((await fetchEnv(hostReq, '')).statusCode, 200);
+    assert.equal((await fetchEnv(hostReq, 'acc-2')).statusCode, 403);
+    assert.equal((await fetchEnv({ currentHostId: 'unowned' }, 'acc-1')).statusCode, 403);
+    const runtimeReq = { currentHostId: 'host-1', currentAccountId: 'acc-1', currentRuntimeKey: 'rt-0123456789abcdef', apiKey: { host_id: 'host-1', account_id: 'acc-1' } };
     assert.equal((await fetchEnv(runtimeReq, 'acc-2')).statusCode, 403);
     const own = await fetchEnv(runtimeReq, undefined);
     assert.equal(own.statusCode, 200);

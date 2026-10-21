@@ -20,7 +20,7 @@
     "migration:create": "tsx ../../node_modules/typeorm/cli.js migration:create",
     "migration:run": "tsx src/database/run-migrations.ts",
     "migration:revert": "tsx ../../node_modules/typeorm/cli.js migration:revert -d src/db.ts",
-    "test:catalog-scope": "node --test test/agent-manager-instance-supersede.test.mjs test/catalog-scope.test.mjs test/catalog-scope-promotion.test.mjs",
+    "test:catalog-scope": "node --test test/agent-manager-instance-supersede.test.mjs test/catalog-scope.test.mjs test/board-removal-migration.test.mjs",
     "test:auto-notice": "node --test test/comment-tools-auto-notice.test.mjs",
     "test": "node test/run-suite.mjs --suite test",
     "test:qa": "node test/run-suite.mjs --suite test-qa",

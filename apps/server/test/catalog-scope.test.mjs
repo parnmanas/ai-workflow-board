@@ -20,9 +20,10 @@ test('catalog scope normalizes to the canonical Global/Account nullable account_
   assert.deepEqual(normalizeCatalogScope({ scope: 'account', account_id: 'ws' }), {
     account_id: 'ws',
   });
-  // Scope inferred from the presence of account_id when `scope` is omitted.
+  // Omission never makes an item global.
   assert.deepEqual(normalizeCatalogScope({ account_id: 'ws' }), { account_id: 'ws' });
-  assert.deepEqual(normalizeCatalogScope({}), { account_id: null });
+  assert.throws(() => normalizeCatalogScope({}), /account_id is required/);
+  assert.throws(() => normalizeCatalogScope({ account_id: null }), /account_id is required/);
   // The Board layer is gone together with boards — 'board' is just an
   // unknown scope now.
   assert.throws(
@@ -74,11 +75,10 @@ test('client exposes direct management routes with Global + accessible-Account c
   assert.doesNotMatch(sidebar, /label: 'Global Functions'/);
   assert.doesNotMatch(sidebar, /label: 'Global Credentials'/);
   const ownerLogic = fs.readFileSync(path.join(ROOT, 'components', 'admin', 'catalogOwner.logic.ts'), 'utf8');
-  assert.match(management, /Account for new item/);
-  // Global (when permitted) + every accessible account — not a single hidden
-  // "current account" option.
-  assert.match(management, /createOwnerOptions\(ownerAccounts, canManageGlobalHere\)/);
-  assert.match(ownerLogic, /label: 'Not set \(Global\)'/);
+  assert.match(management, /createGlobal/);
+  assert.match(management, /canManageGlobalHere && createGlobal/);
+  assert.match(management, /Create new items as Global/);
+  assert.match(ownerLogic, /explicitlyGlobal = false/);
   assert.doesNotMatch(management, /<option value="account">/);
   assert.doesNotMatch(management, /boardScoped|boardId/);
   // Boards are gone, so no catalog page may hang off a board route.

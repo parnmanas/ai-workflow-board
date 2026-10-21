@@ -1,5 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { IsNull, Not, type FindOptionsWhere } from 'typeorm';
+import { IsNull, type FindOptionsWhere } from 'typeorm';
 import { z } from 'zod';
 import { Credential } from '../../../entities/Credential';
 import { agentEnvNames } from '../../../common/credential-agent-env';
@@ -45,18 +45,13 @@ export function registerCredentialTools(server: McpServer, ctx: ToolContext): vo
     const caller = getCallerAgent(extra);
     if (!caller || caller.source !== 'db' || !['read', 'write', 'full'].includes(caller.scope || '')
       || !(await resolveCallerIdentityRow(dataSource, caller.agentId))) return null;
-    // An account pinned to a runtime key always limits discovery, even when
-    // its identity resolves to the shared Runtime Host.
-    const allAccounts = !caller.accountId && await callerCanAccessAccount(dataSource, caller, null);
     const accountId = await resolveCallerAccountId(dataSource, caller);
-    return allAccounts || accountId
-      ? { caller: !allAccounts && accountId ? { ...caller, accountId } : caller, allAccounts, accountId }
-      : null;
+    return accountId ? { caller: { ...caller, accountId }, accountId } : null;
   }
 
   server.tool(
     'list_credentials',
-    'List credential metadata and IDs for GitHub/project/runtime credential_id references. DB-backed callers may read their account and inherited globals; unbound full-scope Hosts may read all accounts. Credentials are managed in Settings > Credentials. No secret values. credential_status describes stored data, not provider validity.',
+    'List credential metadata and IDs for GitHub/project/runtime credential_id references. DB-backed callers may read their own account and inherited globals. Credentials are managed in Settings > Credentials. No secret values. credential_status describes stored data, not provider validity.',
     {
       account_id: z.string().min(1).optional().describe('Filter to an accessible account plus globals; defaults to all caller-accessible credentials'),
       provider: z.string().min(1).optional(),
@@ -70,13 +65,11 @@ export function registerCredentialTools(server: McpServer, ctx: ToolContext): vo
       if (account_id && !(await callerCanAccessAccount(dataSource, allowed.caller, account_id))) {
         return err('Unauthorized: caller does not belong to this account');
       }
-      const accountId = account_id || (allowed.allAccounts ? null : allowed.accountId);
+      const accountId = allowed.accountId;
       const filter: FindOptionsWhere<Credential> = provider ? { provider } : {};
       const where: FindOptionsWhere<Credential>[] = scope === 'global'
         ? [{ ...filter, account_id: IsNull() }]
-        : accountId
-          ? [{ ...filter, account_id: accountId }, ...(scope === 'account' ? [] : [{ ...filter, account_id: IsNull() }])]
-          : [{ ...filter, ...(scope === 'account' ? { account_id: Not(IsNull()) } : {}) }];
+        : [{ ...filter, account_id: accountId }, ...(scope === 'account' ? [] : [{ ...filter, account_id: IsNull() }])];
       const [rows, total] = await dataSource.getRepository(Credential).findAndCount({ where, order: { name: 'ASC', id: 'ASC' }, take: limit, skip: offset });
       return ok({ credentials: rows.map(credentialMetadata), total, limit, offset });
     },

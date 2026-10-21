@@ -5,8 +5,7 @@ import { HostModelsError, HostModelsService } from './host-models.service';
 
 /**
  * 모델이 보이는 모든 화면(Agent 다이얼로그 · 팀 슬롯 · 세션 설정 · 새 세션 · Runtime
- * Hosts)이 쓰는 하나의 읽기/갱신 경로. 로그인한 사용자면 누구나 — 모델 목록은
- * 비밀이 아니고, 재열거는 호스트가 자기 CLI 에 `models` 를 묻는 일일 뿐이다.
+ * Hosts)이 쓰는 하나의 읽기/갱신 경로. AuthGuard가 호스트 소유 계정의 접근을 확인한다.
  */
 @Controller('api/agent-manager/hosts')
 @UseGuards(AuthGuard)

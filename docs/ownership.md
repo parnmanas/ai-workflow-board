@@ -1,50 +1,73 @@
-# Shared work and instance defaults
+# Account ownership
 
-Sessions, tickets, projects, teams and missions share one installation. There
-are no user-defined work accounts, ownership memberships, or account selectors.
-Active users can access work after authentication; feature permissions and
-administrator-only configuration still apply. Chat-room participation, runtime
-host authorization and credential-secret access remain separate controls.
+Account is the default ownership and execution boundary. Only catalog objects
+explicitly created as Global are shared. A missing owner on a Runtime Host or
+API key is invalid; it does not mean Global.
 
-`/settings/defaults` manages shared dispatch and execution defaults.
-`/settings/users` manages login users, approval and feature permissions. Account
-creation/deletion, membership assignment and the account CRUD MCP tools have
-been removed. Approving a user no longer requires assigning a workspace.
+Runtime Hosts, manager keys, runtime keys, native sessions, tickets, projects,
+teams and missions belong to an Account. A key must match its active Host's
+owner. A manager cannot provision a runtime key, fetch credentials, or execute
+work for another Account. Global credentials may be consumed by account-owned
+work; creating a Global credential still runs its login process on a host the
+caller can access.
 
-## Data transition
+User-facing lists and SSE use the caller's accessible accounts. Detail and
+write routes resolve the object's owner, rather than trusting a browser's
+account hint. Administrator and Global-authoring permissions do not bypass
+host ownership. Error-log lists and counts use the same account boundary;
+uploads are stamped with the authenticated owner. New independent work uses the caller's default Account;
+referenced projects and teams determine ownership of their work. See
+[catalog scopes](catalog-scopes.md) for Global authoring.
 
-Migration `1760000000094-SingleInstanceWork` removes the previous accounts and
-membership tuples without deleting their tickets, comments, projects,
-credentials, attachments, missions or native-session bindings. Business object
-IDs, contents and timestamps are retained. Shared knowledge memory from the old
-accounts is concatenated into the shared defaults without discarding its text. Usage rollups are summed after
-removing the former ownership grouping. Conflicting catalog keys abort the
-transaction instead of silently replacing a definition.
+Deployment reports also default to the authenticated Account. Global reports
+require an explicit `scope: 'global'` on the administrator REST endpoint; the
+MCP reporter can only report for its own Account. Ticket acknowledgements,
+output liveness and tool telemetry must match the assigned runtime's Account
+and Host.
 
-Per-account CLI defaults are reset; credential records and each existing
-session's pinned configuration remain intact. Shared dispatch defaults start
-with the application's defaults. Native CLI homes and transcript files are not
-renamed or deleted.
+Work pages retain `/sessions`, `/tickets`, `/projects`, and `/missions` without
+the old workspace/account picker. Account defaults are at `/settings/defaults`;
+login-user administration is at `/settings/users`. Old workspace membership,
+account CRUD and membership-assignment APIs are not restored by this change.
 
-## Remaining internal storage
+## Login identity and ownership
 
-The execution pipeline still carries `account_id` and reads defaults from the
-`accounts` table. This is transitional implementation, not a selectable owner
-or a permission boundary: the only internal execution key is
-`00000000-0000-4000-8000-000000000001`. Do not reintroduce account creation or
-membership around it. Removing these remaining fields requires a separate
-server/manager contract change; this transition does not claim that physical
-schema cleanup is complete.
+A User is a login identity; an Account owns work. Signup/setup creates one
+personal Account per User. `accounts.owner_user_id` identifies its owner and
+`kind = 'personal'` has a unique owner index. Concurrent first requests reuse
+the same account. Inactive users have no access. An administrator manages
+instance users and explicit Global configuration; that role does not grant
+access to someone else's work. Account defaults are editable by their owner.
+Organization membership is reserved for a future implementation, without
+reviving workspace selectors or legacy role tuples.
 
-Built-in/global catalog rows can still have a NULL internal key, while custom
-rows use the shared execution key. This distinction does not partition users.
+Lists, raw attachments, activity feeds, artifact references and SSE check the
+same account boundary. Operator registrations and report routing are account
+bound. MCP runtime keys cannot create, alter or delete login users; the human
+user-administration UI manages those identities. Disabling a user preserves
+its work; deleting a user that owns an Account is rejected.
 
-Runtime REST/MCP/SSE no longer translates workspace owner aliases. Historical
-database migration code remains available to preserve data during upgrades.
-Filesystem `workspace_folder`, CLI `workspace-write`, and CLI trust still refer
-to actual working directories.
+## Existing data migration
 
-Back up the database before upgrading. Apply through the regular boot or
-offline migration entry point; do not call the old account deletion API, which
-used to cascade-delete work. Rollback requires restoring the backup together
-with the previous server build.
+Migration `1760000000094-SingleInstanceWork` consolidated old ownership into
+`00000000-0000-4000-8000-000000000001`. Migration
+`1760000000095-PersonalAccountOwnership` assigns that unchanged UUID to the
+active User explicitly named by `AWB_LEGACY_OWNER_USER_ID`. Other users receive
+empty personal Accounts. For this installation the confirmed legacy owner is
+Parn; kent.k starts empty. Historical NULL catalog owners were an automatic
+Global default, so existing credentials and custom catalog rows become private.
+Builtin Skills/Functions remain Global. Empty/stale ownership in work and
+history is repaired without changing contents, IDs, timestamps or ciphertext.
+An upgrade with existing data and no explicit owner fails instead of guessing.
+Fresh installations create their first Account at signup/setup.
+
+Back up the database before applying the forward migration and verify that
+business contents and credential ciphertext remain intact. Keep existing
+native homes, transcripts and credential/MCP paths. Deploy the server's SSE
+ownership stamps together with the manager update; a new manager rejects
+work from an older server that omits them.
+
+Runtime REST/MCP/SSE uses `account_id`. Historical workspace owner conversion
+belongs only to database migration code. Filesystem `workspace_folder`,
+RunWorkspace, CLI workspace trust and Codex `workspace-write` retain their
+working-directory meanings.

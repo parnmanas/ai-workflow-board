@@ -1,9 +1,12 @@
-import { Injectable, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Injectable, ForbiddenException, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { Account } from '../entities/Account';
+import { RuntimeHost } from '../entities/RuntimeHost';
+import { User } from '../entities/User';
+import { ensurePersonalAccount } from '../common/personal-account';
 
-/** Supplies the remaining internal execution context to request handlers. */
+/** Login identity -> owned accounts. Administrative permissions do not widen ownership. */
 @Injectable()
 export class AccountAccessService {
   constructor(
@@ -11,7 +14,13 @@ export class AccountAccessService {
   ) {}
 
   async accessibleIds(user: { id: string; role: string }): Promise<string[]> {
-    return (await this.dataSource.getRepository(Account).find({ select: ['id'], order: { created_at: 'ASC', id: 'ASC' } })).map(a => a.id);
+    const active = user?.id && await this.dataSource.getRepository(User).findOneBy({ id: user.id, status: 'active' });
+    if (!active) return [];
+    const personal = await ensurePersonalAccount(this.dataSource.manager, active);
+    const owned = await this.dataSource.getRepository(Account).find({
+      where: { owner_user_id: active.id }, select: ['id'], order: { created_at: 'ASC', id: 'ASC' },
+    });
+    return [personal.id, ...owned.map(a => a.id).filter(id => id !== personal.id)];
   }
 
   async bindRequest(req: any): Promise<void> {
@@ -46,6 +55,17 @@ export class AccountAccessService {
       if (match) { entity = owners[match[1]]; resourceId = match[2]; }
     }
     let owner: string | null | undefined;
+    const hostPath = path.match(/\/api\/(?:agent-sessions|terminals|cli-memory|(?:admin\/)?agent-manager)\/hosts\/([^/]+)/);
+    if (hostPath) {
+      let hostId: string;
+      try { hostId = decodeURIComponent(hostPath[1]); }
+      catch { throw new BadRequestException('invalid_host_id'); }
+      if (!/^[0-9a-f-]{36}$/i.test(hostId)) throw new BadRequestException('invalid_host_id');
+      const host = await this.dataSource.getRepository(RuntimeHost).findOneBy({ id: hostId });
+      if (!host) throw new NotFoundException('host_unknown');
+      if (!host?.is_active || !host.account_id || !ids.includes(host.account_id)) throw new ForbiddenException('account_access_denied');
+      owner = host.account_id;
+    }
     const nativeSession = path.match(/\/agent-sessions\/hosts\/([^/]+)\/([^/]+)\/sessions(?:\/([^/]+))?$/)
       || path.match(/\/agent-sessions\/hosts\/([^/]+)\/([^/]+)\/sessions\/([^/]+)\//);
     const nativeId = nativeSession?.[3] || (nativeSession && req.body?.session_id);
@@ -106,7 +126,7 @@ export class AccountAccessService {
       // Express 5 exposes query through a getter; replace it once for decorators.
       Object.defineProperty(req, 'query', { value: { ...req.query, account_id: effective }, configurable: true, writable: true });
       if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body) && !Array.isArray(req.body)
-        && (owner || (path.includes('/orchestration/') && req.body.account_id === undefined))) {
+        && ((owner && !hostPath) || (path.includes('/orchestration/') && req.body.account_id === undefined))) {
         req.body.account_id = effective;
       }
     }

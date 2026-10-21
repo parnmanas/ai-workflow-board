@@ -505,8 +505,8 @@ export class ActionsService {
     for (const spec of specs) {
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
-      if (!hostRow) {
-        throw makeError(400, `target_runtime references an unknown Runtime Host: ${spec.manager_agent_id}`);
+      if (!hostRow?.is_active || !accountId || hostRow.account_id !== accountId) {
+        throw makeError(400, `target_runtime references a Runtime Host outside this account: ${spec.manager_agent_id}`);
       }
       const key = runtimeIdentityKey(spec);
       if (seen.has(key)) continue;

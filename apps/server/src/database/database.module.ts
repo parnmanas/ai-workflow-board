@@ -3,7 +3,6 @@ import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions, serializeSqljsTransactions } from '../db';
 import * as entitiesBarrel from '../entities';
-import { Account } from '../entities/Account';
 import { LogService } from '../services/log.service';
 
 const entityList = Object.values(entitiesBarrel);
@@ -57,17 +56,6 @@ export class DatabaseModule implements OnModuleInit {
       throw e;
     }
 
-    const accountRepo = this.dataSource.getRepository(Account);
-    // Seed default account if empty (seeding, NOT migration — stays here).
-    // A account is just a ticket pool now (docs/tickets.md) — nothing else
-    // to seed.
-    const accountCount = await accountRepo.count();
-    if (accountCount === 0) {
-      await accountRepo.save(accountRepo.create({
-        name: 'Personal',
-        description: 'Default ownership account',
-      }));
-      this.dbLog('Seeded default account');
-    }
+    // Personal accounts are created with login users, never as unowned seeds.
   }
 }

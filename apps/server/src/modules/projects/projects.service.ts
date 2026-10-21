@@ -252,7 +252,7 @@ export class ProjectsService {
     if (!path) throw new ProjectInputError('path is required');
     if (!isAbsoluteHostPath(path)) throw new ProjectInputError(`path must be an absolute path on the host (got "${path}")`);
     const host = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: hostId } });
-    if (!host) throw new ProjectInputError('Runtime Host not found', 404, 'host_not_found');
+    if (!host?.is_active || host.account_id !== accountId) throw new ProjectInputError('Runtime Host not available to this account', 404, 'host_not_found');
     const repo = this.dataSource.getRepository(ProjectHostFolder);
     const existing = await repo.findOne({ where: { project_id: id, host_id: hostId } });
     if (existing) {
