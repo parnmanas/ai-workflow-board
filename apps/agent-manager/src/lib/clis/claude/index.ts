@@ -12,6 +12,7 @@ import { TIER_FLAG_PERMISSION_CAPABILITIES } from '../../permission-policy.js';
 import { requestCapabilities } from '../../runtime/domain/capabilities.js';
 import type { RuntimeCapabilities } from '../../runtime/runtime-types.js';
 import { defineCliModule } from '../cli-module.js';
+import { claudeMemory } from './memory.js';
 import { claudeLogin } from './login.js';
 import { claudeSessionStore } from './sessions.js';
 import { resolveAcpAdapter } from '../bundled-acp.js';
@@ -130,4 +131,6 @@ export const claudeModule = defineCliModule({
     pluginUpdates: true,
     runtimeProfile: true,
   },
+
+  memory: claudeMemory,
 });

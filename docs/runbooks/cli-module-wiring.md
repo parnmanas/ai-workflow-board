@@ -20,6 +20,7 @@
    - `login` — `clis/<id>/login.ts` 에 `plan`/`createLineParser`/`harvest`. `harvestProvider` 는 위 provider 중 하나.
    - `sessions` — `detect`/`resolveAcpCommand`/`operatorHome`(+ `storeSubdir`, `adjustEnv`, `supportsBackendProfile`, `store`). 기록 스캐너는 `clis/<id>/sessions.ts` 에 `CliSessionStoreDriver` 로 — 공용 헬퍼는 `agent-session-history.ts`.
    - `effort` — `keys` 와(빌려 쓰면) `sliceKey`.
+   - `memory`(선택) — 그 CLI 가 메모리를 두는 곳: `root`/`locate`(+ `extraHomes`, `settings`). `clis/<id>/memory.ts` 에 두고 공용 헬퍼는 `clis/memory-common.ts`. 선언한 파일·디렉터리만 `/memory` 화면이 읽고 쓴다 — docs/cli-memory.md.
    - `dispatch` — 필요한 게이트 플래그만.
 3. 등록: `src/lib/clis/builtin.ts` 의 `BUILTIN_CLI_MODULES` 에 한 줄.
 4. 테스트: `test/<id>-adapter.test.mjs`(기존 5개 어댑터 테스트 참고). `test/cli-modules.test.mjs`

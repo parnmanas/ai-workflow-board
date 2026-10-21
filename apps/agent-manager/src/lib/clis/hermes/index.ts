@@ -11,6 +11,7 @@ import { requestCapabilities } from '../../runtime/domain/capabilities.js';
 import { listHermesProfiles, resolveHermesAcpCommand } from '../../runtime/hermes/hermes-command.js';
 import { HermesRuntime, type HermesRuntimeOptions } from '../../runtime/hermes/hermes-runtime.js';
 import { defineCliModule } from '../cli-module.js';
+import { hermesMemory } from './memory.js';
 
 export const hermesModule = defineCliModule({
   id: 'hermes',
@@ -46,4 +47,6 @@ export const hermesModule = defineCliModule({
     // — `store` 없음, `storeSubdir` 없음.
     operatorHome: () => homedir(),
   },
+
+  memory: hermesMemory,
 });

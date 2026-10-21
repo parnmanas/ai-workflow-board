@@ -14,6 +14,7 @@ import type {
   CliDispatchSpec,
   CliEffortSpec,
   CliLoginSpec,
+  CliMemorySpec,
   CliModule,
   CliSessionSpec,
 } from './cli-module.js';
@@ -28,6 +29,11 @@ export type {
   CliLoginParsed,
   CliLoginPlan,
   CliLoginSpec,
+  CliMemoryDirDecl,
+  CliMemoryFileDecl,
+  CliMemoryHome,
+  CliMemoryLocateContext,
+  CliMemorySpec,
   CliModule,
   CliSessionSpec,
   CliSessionStoreContext,
@@ -73,7 +79,7 @@ export function isAcpRuntime(id: string | null | undefined): boolean {
 }
 
 /** 해당 슬라이스를 가진 모듈만. */
-export function cliModulesWith<K extends 'binary' | 'credentials' | 'login' | 'sessions' | 'effort' | 'dispatch'>(
+export function cliModulesWith<K extends 'binary' | 'credentials' | 'login' | 'sessions' | 'memory' | 'effort' | 'dispatch'>(
   slice: K,
 ): Array<CliModule & { [P in K]-?: NonNullable<CliModule[P]> }> {
   return listCliModules().filter((m) => m[slice] !== undefined) as Array<CliModule & { [P in K]-?: NonNullable<CliModule[P]> }>;
@@ -85,6 +91,11 @@ export function cliLogin(id: string | null | undefined): CliLoginSpec | null {
 
 export function cliSessions(id: string | null | undefined): CliSessionSpec | null {
   return findCliModule(id)?.sessions ?? null;
+}
+
+/** 메모리 파일 위치 선언(docs/cli-memory.md). 없으면 그 CLI 는 메모리 화면에 나오지 않는다. */
+export function cliMemory(id: string | null | undefined): CliMemorySpec | null {
+  return findCliModule(id)?.memory ?? null;
 }
 
 export function cliCredentials(id: string | null | undefined): CliCredentialSpec | null {

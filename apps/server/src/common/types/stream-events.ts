@@ -11,6 +11,7 @@ import type { WorktreeMode } from '../worktree-config';
 import type { TicketStatus } from '../ticket-status';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
 import type { TerminalOutputChunk, TerminalSummary } from './terminals';
+import type { MemoryBatchOp } from './cli-memory';
 import type { SessionProposalView } from './agent-sessions';
 import type { RuntimeSpec } from '../runtime-spec';
 import type {
@@ -52,6 +53,7 @@ export type StreamEventType =
   | 'terminal_request'       // Terminal(Runtime Host 셸): 서버 → agent-manager 제어(open/attach/input/resize/close) — 대상 agent 스코프
   | 'terminal_update'        // Terminal: 라이브 터미널 상태 변경(status/cwd/title/크기) — UI 전용, driver 만
   | 'terminal_output'        // Terminal: PTY 출력 청크 — UI 전용, driver 만
+  | 'cli_memory_request'     // CLI Memory: 서버 → agent-manager 메모리 파일 RPC(scan/read/write/…) — 대상 agent 스코프
   | 'voice_announcement'     // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
   | 'agent_session_proposal'; // Voice: operator 의 작업 제안이 생기거나 바뀌었다 — UI 전용, 승인할 사용자만
 
@@ -1106,6 +1108,30 @@ export interface TerminalRequestPayload {
   /** input — 키 입력 원문(UTF-8 문자열 그대로. 제어문자 포함). */
   data?: string;
   /** 출력을 받을 사용자 — 마지막으로 열거나 attach 한 사람. */
+  driver_user_id: string;
+  issued_at: string;
+}
+
+/** 서버 → agent-manager. CLI Memory(docs/cli-memory.md) — 전부 RPC 이고 매니저는
+ *  `POST /api/agent/cli-memory/rpc/:id` 로 답한다. scope.agent_id 가 매니저 identity 라 그 매니저
+ *  SSE 연결에만 간다. op 집합은 common/types/cli-memory.ts 의 `MEMORY_REQUEST_OPS`. */
+export interface CliMemoryRequestPayload {
+  manager_id: string;
+  op: string;
+  request_id: string;
+  cli?: string;
+  path?: string;
+  content?: string;
+  /** 문자열 = 지금 내용이 이 해시여야 / null = 없어야 / 생략 = 확인 안 함. */
+  base_hash?: string | null;
+  version_id?: string;
+  /** link — 운영자 홈의 원본. */
+  target?: string;
+  reason?: string;
+  ops?: MemoryBatchOp[];
+  /** 서버가 정한 이 장비의 프로젝트 폴더 — project 범위 파일은 여기서만 찾고 쓴다. */
+  project_dirs?: string[];
+  check_paths?: boolean;
   driver_user_id: string;
   issued_at: string;
 }

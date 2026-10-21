@@ -39,6 +39,7 @@ import { OntologyModule } from './modules/ontology/ontology.module';
 import { MigrationModule } from './modules/migration/migration.module';
 import { AgentSessionsModule } from './modules/agent-sessions/agent-sessions.module';
 import { TerminalsModule } from './modules/terminals/terminals.module';
+import { CliMemoryModule } from './modules/cli-memory/cli-memory.module';
 import { CliCatalogModule } from './modules/cli-catalog/cli-catalog.module';
 import { VoiceModule } from './modules/voice/voice.module';
 
@@ -96,6 +97,7 @@ import { VoiceModule } from './modules/voice/voice.module';
     ChatRoomsModule,
     AgentSessionsModule,
     TerminalsModule,
+    CliMemoryModule,
     CliCatalogModule,
     VoiceModule,
     ResourcesModule,

@@ -408,9 +408,14 @@ export const MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP = 'context_window_clamp';
  *  화면은 이 플래그를 광고한 매니저에만 어댑터 Update 버튼을 낸다 — 버튼만 보고 눌렀다가 옛 매니저가
  *  `unknown command` 로 거절하는 일이 실제로 있었다(1.6.257 이하). */
 export const MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE = 'acp_adapter_update';
+/** 이 빌드는 `cli_memory_request` RPC 를 안다(docs/cli-memory.md). 서버는 이 플래그를 광고한 매니저만
+ *  메모리 화면에 열 수 있는 호스트로 내고, 나머지는 "매니저 업데이트 필요" 로 보여 준다. 값은 서버
+ *  `MANAGER_CAPABILITY_CLI_MEMORY`(common/types/cli-memory.ts)와 같아야 한다. */
+export const MANAGER_CAPABILITY_CLI_MEMORY = 'cli_memory';
 export const MANAGER_CAPABILITIES: readonly string[] = [
   MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP,
   MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE,
+  MANAGER_CAPABILITY_CLI_MEMORY,
 ];
 
 /** 티켓 ee26302d(faa32380 감사 후속) — 이 문턱 미만 context_window 를 가진

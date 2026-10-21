@@ -103,7 +103,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 import { getApiBase } from './serverConfig';
 
@@ -1920,6 +1920,31 @@ export const api = {
     const blob = await res.blob();
     return { blob, latencyMs: Math.round(performance.now() - startedAt) };
   },
+
+  // ─── CLI Memory (LLM CLI 메모리 파일) ──────────────────────────────────
+  // 서버: apps/server/src/modules/cli-memory — 상태 없는 중계자. 파일은 Runtime Host 장비에 있고
+  // 쓰기마다 매니저가 백업을 남긴다. base_hash: 문자열(그 내용이어야) · null(없어야) · 생략(덮어쓰기).
+  listMemoryHosts: () => request<MemoryHostInfo[]>('/cli-memory/hosts'),
+  getMemorySnapshot: (managerId: string, opts?: { checkPaths?: boolean }) =>
+    request<MemoryHostSnapshot>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/snapshot${opts?.checkPaths ? '?check_paths=1' : ''}`),
+  readMemoryFile: (managerId: string, cli: string, path: string) =>
+    request<MemoryFileInfo>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/file?${new URLSearchParams({ cli, path }).toString()}`),
+  writeMemoryFile: (managerId: string, body: { cli: string; path: string; content: string; base_hash?: string | null; reason?: string }) =>
+    request<MemoryFileInfo>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/file`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteMemoryFile: (managerId: string, body: { cli: string; path: string; base_hash?: string | null }) =>
+    request<{ deleted: true }>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/file/delete`, { method: 'POST', body: JSON.stringify(body) }),
+  listMemoryVersions: (managerId: string, cli: string, path: string) =>
+    request<MemoryVersionInfo[]>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/history?${new URLSearchParams({ cli, path }).toString()}`),
+  readMemoryVersion: (managerId: string, cli: string, path: string, versionId: string) =>
+    request<{ version_id: string; content: string; hash: string; size: number }>(
+      `/cli-memory/hosts/${encodeURIComponent(managerId)}/history/${encodeURIComponent(versionId)}?${new URLSearchParams({ cli, path }).toString()}`,
+    ),
+  restoreMemoryVersion: (managerId: string, body: { cli: string; path: string; version_id: string; base_hash?: string | null }) =>
+    request<MemoryFileInfo>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/restore`, { method: 'POST', body: JSON.stringify(body) }),
+  linkMemoryFile: (managerId: string, body: { cli: string; path: string; target: string; base_hash?: string | null }) =>
+    request<{ file: MemoryFileInfo; linked: boolean; copied: boolean }>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/link`, { method: 'POST', body: JSON.stringify(body) }),
+  memoryBatch: (managerId: string, ops: MemoryBatchOp[]) =>
+    request<{ results: MemoryBatchResultItem[] }>(`/cli-memory/hosts/${encodeURIComponent(managerId)}/batch`, { method: 'POST', body: JSON.stringify({ ops }) }),
 
   // ─── Terminals (Runtime Host 셸) ──────────────────────────────────────
   // 서버: apps/server/src/modules/terminals. 살아 있는 터미널만 다룬다 — 기록이 없으므로

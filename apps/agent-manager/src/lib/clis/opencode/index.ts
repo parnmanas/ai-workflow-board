@@ -16,6 +16,7 @@ import { OpencodeCliAdapter } from '../../cli-adapters/opencode.js';
 import { BYPASS_ONLY_PERMISSION_CAPABILITIES } from '../../permission-policy.js';
 import { requestCapabilities } from '../../runtime/domain/capabilities.js';
 import { defineCliModule } from '../cli-module.js';
+import { opencodeMemory } from './memory.js';
 import { oneshotCapabilities } from '../shared-capabilities.js';
 import { opencodeLogin } from './login.js';
 import { opencodeSessionStore } from './sessions.js';
@@ -87,4 +88,6 @@ export const opencodeModule = defineCliModule({
   },
 
   effort: { keys: ['model'] },
+
+  memory: opencodeMemory,
 });

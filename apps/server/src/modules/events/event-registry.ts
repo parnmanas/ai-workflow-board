@@ -42,6 +42,7 @@ import {
   AgentSessionUpdatePayload,
   AgentSessionEventPayload,
   TerminalRequestPayload,
+  CliMemoryRequestPayload,
   TerminalUpdatePayload,
   TerminalOutputPayload,
   VoiceAnnouncementPayload,
@@ -1466,6 +1467,43 @@ export const EVENT_TYPES: EventDefinition[] = [
         cols: event.cols,
         rows: event.rows,
         data: event.data,
+        driver_user_id: event.driver_user_id,
+        issued_at: event.issued_at,
+      };
+      return {
+        payload,
+        scope: { agent_id: event.manager_id },
+        timestamp: event.issued_at,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
+  },
+
+  // ───────── cli_memory_request ─────────
+  // CLI Memory: 서버 → agent-manager(docs/cli-memory.md). terminal_request 와 같은 규약 —
+  // scope.agent_id 가 매니저 identity 라 그 매니저 SSE 연결에만 가고 사용자에게는 절대 가지 않는다.
+  // 내용(content)이 실리므로 사용자 연결로 새면 안 된다.
+  {
+    eventType: 'cli_memory_request',
+    emitterEvent: 'cli_memory_request',
+    map(event: any) {
+      const payload: CliMemoryRequestPayload = {
+        manager_id: event.manager_id,
+        op: event.op,
+        request_id: event.request_id,
+        cli: event.cli,
+        path: event.path,
+        content: event.content,
+        base_hash: event.base_hash,
+        version_id: event.version_id,
+        target: event.target,
+        reason: event.reason,
+        ops: event.ops,
+        project_dirs: event.project_dirs,
+        check_paths: event.check_paths,
         driver_user_id: event.driver_user_id,
         issued_at: event.issued_at,
       };

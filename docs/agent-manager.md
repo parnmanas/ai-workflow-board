@@ -657,6 +657,19 @@ can actually launch; an empty list is how a host without PTY support tells the s
 "do not offer terminals here" (the module is an optional dependency, so a failed
 install degrades to that instead of breaking the manager). Details: `docs/terminals.md`.
 
+## CLI Memory
+
+`cli-memory-runner.ts` reads and writes the memory files of the LLM CLIs on this host
+(`CLAUDE.md`, rules, Claude auto memory, Codex `AGENTS.md`/`memories/`, Hermes
+`MEMORY.md`/`USER.md` …), driven by `cli_memory_request` SSE RPCs. Where each CLI keeps
+its memory is declared by the CLI module's `memory` slice (`clis/<id>/memory.ts`); the
+runner only writes declared files or new `.md` files directly inside declared
+directories, checks `base_hash` against concurrent CLI edits, backs every change up
+under `memory-backups/`, and replaces files atomically (through symlinks, never
+replacing the link). It scans the operator home plus credential session homes, because
+those homes do not share global instructions. Support is advertised with the
+`cli_memory` manager capability. Details: `docs/cli-memory.md`.
+
 ## Security boundaries
 
 - API keys and credentials remain scoped to the managed Agent.

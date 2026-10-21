@@ -6,6 +6,7 @@ import { AntigravityCliAdapter } from '../../cli-adapters/antigravity.js';
 import { BYPASS_ONLY_PERMISSION_CAPABILITIES } from '../../permission-policy.js';
 import { requestCapabilities } from '../../runtime/domain/capabilities.js';
 import { defineCliModule } from '../cli-module.js';
+import { antigravityMemory } from './memory.js';
 import { oneshotCapabilities } from '../shared-capabilities.js';
 
 function unixCandidates(home: string): string[] {
@@ -48,4 +49,6 @@ export const antigravityModule = defineCliModule({
   },
 
   effort: { keys: ['model'] },
+
+  memory: antigravityMemory,
 });

@@ -255,6 +255,73 @@ export interface CliSessionLaunchOption {
   options: Array<{ value: string; name: string; description: string }>;
 }
 
+// ─── memory (CLI 메모리 파일 — docs/cli-memory.md) ─────────────────────────
+
+/** 서버 `common/types/cli-memory.ts` 의 문자열 집합과 같다(별도 패키지라 사본). */
+export type CliMemoryScope = 'global' | 'project';
+export type CliMemoryKind =
+  | 'instructions' | 'rules' | 'auto_index' | 'auto_topic' | 'entries' | 'persona' | 'generated' | 'knowledge';
+export type CliMemoryFormat = 'markdown' | 'section_entries';
+export type CliMemoryLoadMode = 'always' | 'index_head' | 'conditional' | 'on_demand';
+
+/** 메모리를 찾을 홈 하나. 운영자 홈 + AWB 세션 전용 홈 + 런타임 프로필. */
+export interface CliMemoryHome {
+  readonly id: string;
+  readonly kind: 'operator' | 'session' | 'profile';
+  readonly path: string;
+  readonly credentialId: string | null;
+  readonly profile: string | null;
+}
+
+export interface CliMemoryLocateContext {
+  readonly home: CliMemoryHome;
+  /** OS 사용자 홈(`~` 표시와 `~/…` 경로 해석용). */
+  readonly userHome: string;
+  /** 서버가 알려 준 이 장비의 프로젝트 폴더. project 범위 파일은 여기서만 찾는다. */
+  readonly projectDirs: readonly string[];
+}
+
+/** 선언된 메모리 파일 하나(있든 없든). 없는 파일은 "만들 수 있는 자리" 다. */
+export interface CliMemoryFileDecl {
+  readonly path: string;
+  readonly scope: CliMemoryScope;
+  readonly kind: CliMemoryKind;
+  readonly format: CliMemoryFormat;
+  readonly label: string;
+  readonly group: string;
+  readonly projectDir: string | null;
+  readonly loaded: CliMemoryLoadMode;
+  readonly loadLimitLines?: number;
+  readonly charLimit?: number;
+  /** 기본 true. CLI 가 통째로 다시 만드는 파일도 고칠 수는 있다 — 화면이 경고만 한다. */
+  readonly editable?: boolean;
+  /** 없을 때 목록에 "만들 수 있는 자리" 로 낼 것인가. 기본은 없으면 숨긴다. */
+  readonly slot?: boolean;
+}
+
+/** 새 `.md` 파일을 만들 수 있는 디렉터리. 그 안의 기존 파일은 `locate` 가 따로 낸다. */
+export interface CliMemoryDirDecl {
+  readonly path: string;
+  readonly scope: CliMemoryScope;
+  readonly kind: CliMemoryKind;
+  readonly label: string;
+  readonly group: string;
+  readonly projectDir: string | null;
+}
+
+export interface CliMemorySpec {
+  /** 화면 머리말 — 이 CLI 가 메모리를 어떻게 쓰는지. */
+  readonly summary: string;
+  /** 이 CLI 의 메모리 루트(운영자 홈). 없으면 "이 장비에 없다" 로 접힌다. */
+  root(env: NodeJS.ProcessEnv): string;
+  /** 운영자 홈 밖에서 찾을 홈들(AWB 세션 전용 홈 · 런타임 프로필). 호출자가 운영자 홈을 앞에 붙인다. */
+  extraHomes?(ctx: { readonly sessionHomesDir: string; readonly env: NodeJS.ProcessEnv }): Promise<CliMemoryHome[]>;
+  /** 홈 하나에서 파일과 생성 가능 디렉터리를 찾는다. 절대 throw 하지 않는다 — 못 읽으면 빈 목록. */
+  locate(ctx: CliMemoryLocateContext): Promise<{ files: CliMemoryFileDecl[]; dirs: CliMemoryDirDecl[] }>;
+  /** CLI 설정의 메모리 관련 값(`memory_char_limit` …). best-effort. */
+  settings?(home: CliMemoryHome): Promise<Record<string, string | number | boolean | null>>;
+}
+
 // ─── effort preset ─────────────────────────────────────────────────────────
 
 export type CliEffortKey = 'model' | 'effort' | 'ultracode';
@@ -296,6 +363,8 @@ export interface CliModule extends RuntimePluginManifest {
   readonly credentials?: CliCredentialSpec;
   readonly login?: CliLoginSpec;
   readonly sessions?: CliSessionSpec;
+  /** 메모리 파일 위치(docs/cli-memory.md). 없으면 이 CLI 는 메모리 화면에 나오지 않는다. */
+  readonly memory?: CliMemorySpec;
   readonly effort?: CliEffortSpec;
   readonly dispatch?: CliDispatchSpec;
 }

@@ -149,6 +149,7 @@ export default function Sidebar({
   // 이고 세션 자체는 그 장비에 있다. 권한이 없는 사용자에겐 섹션을 그리지 않는다.
   const canUseSessions = hasPermission('agent_sessions.use');
   const canUseTerminals = hasPermission('terminals.use');
+  const canUseMemory = hasPermission('cli_memory.use');
   // Operators(이름 붙은 Agent Session) — 등록돼 있으면 맨 위에서 어디서든 바로 연다. 머리의 스위치가
   // 음성 지원("헤이 <이름>" 듣기 + 답 낭독)을 켠다(docs/voice-operator.md "음성 지원 · 잠들기").
   const operators = useVoiceOperators(canUseSessions && hasPermission('voice.use'));
@@ -194,6 +195,15 @@ export default function Sidebar({
             path: `${basePath}/terminals`,
             label: 'Terminals',
             icon: 'T',
+          }]
+          : []),
+        // CLI Memory — 기본 admin 전용 권한. 그 장비의 CLI 메모리 파일(모든 에이전트 세션의 지침)을 고친다.
+        ...(canUseMemory
+          ? [{
+            key: 'memory',
+            path: `${basePath}/memory`,
+            label: 'Memory',
+            icon: 'M',
           }]
           : []),
       ],

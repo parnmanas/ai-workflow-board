@@ -3367,3 +3367,127 @@ export interface AgentTemplate {
   created_at: string;
   updated_at: string;
 }
+
+// ─── CLI Memory (docs/cli-memory.md) ─────────────────────────────────────
+// 서버 apps/server/src/common/types/cli-memory.ts 의 미러. 메모리는 Runtime Host 장비의 파일이고
+// 서버는 중계만 한다 — 분석·변환은 components/memory/*.logic.ts 가 이 스냅샷 위에서 한다.
+
+export type MemoryScope = 'global' | 'project';
+export type MemoryKind = 'instructions' | 'rules' | 'auto_index' | 'auto_topic' | 'entries' | 'persona' | 'generated' | 'knowledge';
+export type MemoryFormat = 'markdown' | 'section_entries';
+export type MemoryLoadMode = 'always' | 'index_head' | 'conditional' | 'on_demand';
+
+export interface MemoryHostInfo {
+  manager_id: string;
+  name: string;
+  hostname: string;
+  platform: string;
+  plugin_version: string;
+  last_seen_at: string;
+  supported: boolean;
+  project_count: number;
+}
+
+export interface MemoryHomeInfo {
+  id: string;
+  kind: 'operator' | 'session' | 'profile';
+  path: string;
+  display_path: string;
+  credential_id: string | null;
+  credential_name?: string | null;
+  profile: string | null;
+  exists: boolean;
+}
+
+export interface MemoryFileInfo {
+  home_id: string;
+  path: string;
+  display_path: string;
+  scope: MemoryScope;
+  kind: MemoryKind;
+  format: MemoryFormat;
+  label: string;
+  group: string;
+  project_dir: string | null;
+  loaded: MemoryLoadMode;
+  load_limit_lines: number | null;
+  char_limit: number | null;
+  editable: boolean;
+  exists: boolean;
+  size: number;
+  mtime: string | null;
+  hash: string | null;
+  content: string | null;
+  truncated: boolean;
+  omitted: boolean;
+  link_target: string | null;
+  shared_with: string | null;
+  missing_paths?: string[];
+}
+
+export interface MemoryDirInfo {
+  home_id: string;
+  path: string;
+  display_path: string;
+  scope: MemoryScope;
+  kind: MemoryKind;
+  label: string;
+  group: string;
+  project_dir: string | null;
+  exists: boolean;
+}
+
+export interface CliMemorySnapshot {
+  cli: string;
+  label: string;
+  summary: string;
+  detected: boolean;
+  homes: MemoryHomeInfo[];
+  files: MemoryFileInfo[];
+  dirs: MemoryDirInfo[];
+  settings: Record<string, string | number | boolean | null>;
+}
+
+export interface MemoryProjectDir {
+  path: string;
+  project_id: string;
+  project_name: string;
+}
+
+export interface MemoryHostSnapshot {
+  manager_id: string;
+  manager_name: string;
+  hostname: string;
+  platform: string;
+  generated_at: string;
+  project_dirs: MemoryProjectDir[];
+  clis: CliMemorySnapshot[];
+  content_budget_exhausted: boolean;
+}
+
+export interface MemoryVersionInfo {
+  version_id: string;
+  created_at: string;
+  size: number;
+  hash: string;
+  reason: string;
+}
+
+export interface MemoryBatchOp {
+  op: 'write' | 'delete' | 'link';
+  cli: string;
+  path: string;
+  content?: string;
+  base_hash?: string | null;
+  target?: string;
+  reason?: string;
+}
+
+export interface MemoryBatchResultItem {
+  ok: boolean;
+  op: string;
+  path: string;
+  file?: MemoryFileInfo | null;
+  error?: string;
+  code?: string;
+}

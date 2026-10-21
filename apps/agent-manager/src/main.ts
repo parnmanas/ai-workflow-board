@@ -92,6 +92,7 @@ import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
 import { AgentSessionRunner, detectAcpSessionClis } from './lib/agent-session-runner.js';
 import { TerminalRunner } from './lib/terminal-runner.js';
+import { MemoryRunner } from './lib/cli-memory-runner.js';
 import { loadAgentInfo } from './lib/config.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
@@ -665,6 +666,12 @@ async function runRuntime(
   // (PTY 모듈이 없거나 쓸 만한 셸이 없는 장비).
   const terminalShells = await terminalRunner.availableShells();
   log(`terminals: shells on this host = ${terminalShells.map((s) => s.id).join(', ') || '(none — terminal support off)'}`);
+  // CLI Memory — 이 장비의 LLM CLI 메모리 파일(CLAUDE.md · AGENTS.md · auto memory …)을 읽고 쓴다
+  // (docs/cli-memory.md). `cli_memory_request` SSE 만 소비하며 상태가 없다 — 지원 여부는 하트비트
+  // `manager_capabilities` 의 `cli_memory` 로 광고한다.
+  const memoryRunner = new MemoryRunner(config, {
+    getManagerId: () => loadAgentInfo()?.agent_id || '',
+  });
   // 하트비트 `acp_session_clis` — 이 장비에서 세션을 열 수 있는 CLI(PATH 만 본다).
   const acpSessionClis = await detectAcpSessionClis();
   log(`agent sessions: ACP-capable CLIs on this host = ${acpSessionClis.join(', ') || '(none)'}`);
@@ -1344,6 +1351,7 @@ async function runRuntime(
       runtimeSupervisor,
       agentSessionRunner,
       terminalRunner,
+      memoryRunner,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },

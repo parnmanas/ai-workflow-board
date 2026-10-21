@@ -11,6 +11,7 @@ import { PiCliAdapter } from '../../cli-adapters/pi.js';
 import { BYPASS_ONLY_PERMISSION_CAPABILITIES } from '../../permission-policy.js';
 import { requestCapabilities } from '../../runtime/domain/capabilities.js';
 import { defineCliModule } from '../cli-module.js';
+import { piMemory } from './memory.js';
 import { oneshotCapabilities } from '../shared-capabilities.js';
 
 // Pi is a pure TypeScript/Node CLI, not a compiled binary like codex —
@@ -48,4 +49,6 @@ export const piModule = defineCliModule({
   effort: { keys: ['model'] },
 
   dispatch: { ticketDispatch: 'blocked', scanStderrForTools: true },
+
+  memory: piMemory,
 });

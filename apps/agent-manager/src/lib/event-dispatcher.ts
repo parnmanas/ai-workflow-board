@@ -11,6 +11,7 @@ import { normalizeAccountEnvelope } from './account-scope.js';
 import { log } from './logging.js';
 import type { AgentSessionRunner, AgentSessionRequest } from './agent-session-runner.js';
 import type { TerminalRunner, TerminalRequest } from './terminal-runner.js';
+import type { MemoryRunner, MemoryRequest } from './cli-memory-runner.js';
 import { loadAgentInfo } from './config.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
@@ -1130,6 +1131,8 @@ export interface EventDispatcherDeps {
   agentSessionRunner?: AgentSessionRunner | null;
   // Terminal(Runtime Host 셸) 러너 — `terminal_request` SSE 를 처리한다. 같은 이유로 선택적이다.
   terminalRunner?: TerminalRunner | null;
+  // CLI Memory 러너 — `cli_memory_request` SSE 를 처리한다(docs/cli-memory.md). 같은 이유로 선택적이다.
+  memoryRunner?: MemoryRunner | null;
   fsBrowser?: FsBrowser | null;
   prompts?: PromptComposer | null;
   // ST-5b — handler for agent_manager_command SSE events. Optional so the
@@ -1193,6 +1196,7 @@ export class EventDispatcher {
   #runtimeSupervisor: RuntimeSupervisor | null;
   #agentSessionRunner: AgentSessionRunner | null;
   #terminalRunner: TerminalRunner | null;
+  #memoryRunner: MemoryRunner | null;
   // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
   // (broken worktree / missing push credential). The abort already suppresses
   // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
@@ -1409,6 +1413,7 @@ export class EventDispatcher {
     this.#runtimeSupervisor = deps.runtimeSupervisor ?? null;
     this.#agentSessionRunner = deps.agentSessionRunner ?? null;
     this.#terminalRunner = deps.terminalRunner ?? null;
+    this.#memoryRunner = deps.memoryRunner ?? null;
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
     this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
     this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
@@ -2448,6 +2453,10 @@ export class EventDispatcher {
       case 'terminal_request':
         recordEvent(eventType, raw);
         break;
+      // 메모리 RPC 는 이벤트 로그에 남기지 않는다 — 페이로드에 메모리 파일 내용이 실리고(비밀이 섞일 수
+      // 있다) 이벤트 로그 원문은 서버 Agent Logs 로 올라간다. 무엇을 바꿨는지는 러너가 경로만 로그한다.
+      case 'cli_memory_request':
+        break;
       default:
         return; // silently drop unknown event types (e.g. agent_typing)
     }
@@ -2472,6 +2481,8 @@ export class EventDispatcher {
         return this.handleAgentSessionRequest(raw);
       case 'terminal_request':
         return this.handleTerminalRequest(raw);
+      case 'cli_memory_request':
+        return this.handleMemoryRequest(raw);
     }
   }
 
@@ -2515,6 +2526,26 @@ export class EventDispatcher {
     const self = loadAgentInfo()?.agent_id || '';
     if (self && payload.manager_id !== self) return; // 다른 매니저 앞으로 온 요청
     await this.#terminalRunner.handle(payload);
+  }
+
+  /**
+   * CLI Memory 요청(docs/cli-memory.md). 메모리 파일도 AWB Agent 가 아니라 **이 장비** 의 것이므로
+   * 매니저 identity 만 대조한다.
+   */
+  async handleMemoryRequest(raw: string): Promise<void> {
+    if (!this.#memoryRunner) return;
+    let ev: any;
+    try {
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
+    } catch (err: any) {
+      log(`Failed to parse cli_memory_request: ${err?.message ?? err}`);
+      return;
+    }
+    const payload = (ev?.payload ?? ev ?? {}) as MemoryRequest;
+    if (!payload.manager_id || !payload.op) return;
+    const self = loadAgentInfo()?.agent_id || '';
+    if (self && payload.manager_id !== self) return; // 다른 매니저 앞으로 온 요청
+    await this.#memoryRunner.handle(payload);
   }
 
   async handleFsRequest(raw: string): Promise<void> {

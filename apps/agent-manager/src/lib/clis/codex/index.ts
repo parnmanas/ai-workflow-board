@@ -7,6 +7,7 @@ import { CodexCliAdapter } from '../../cli-adapters/codex.js';
 import { TIER_FLAG_PERMISSION_CAPABILITIES } from '../../permission-policy.js';
 import { requestCapabilities } from '../../runtime/domain/capabilities.js';
 import { defineCliModule } from '../cli-module.js';
+import { codexMemory } from './memory.js';
 import { oneshotCapabilities } from '../shared-capabilities.js';
 import { codexLogin } from './login.js';
 import { codexSessionStore } from './sessions.js';
@@ -115,4 +116,6 @@ export const codexModule = defineCliModule({
     // 조용히 망가지므로 등록 실패로 승격한다.
     cliHomePrepFatal: true,
   },
+
+  memory: codexMemory,
 });

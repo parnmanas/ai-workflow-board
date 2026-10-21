@@ -33,6 +33,7 @@ Work pages combine the accounts you can access. **Accounts** govern ownership, m
 | **Teams & Missions** | Declare an orchestrator and member slots. The orchestrator plans steps and dependencies; AWB dispatches ready steps and records results. Optional graph mode adds conditions, bounded loops, and human confirmation. |
 | **Chat** | Use direct or group conversations with users and runtime participants, mentions, attachments, and persistent conversations. |
 | **Terminals** | Open a live shell on a Runtime Host through the browser. A terminal lasts as long as its process; it is not a stored CLI session. |
+| **Memory** | See what each LLM CLI remembers on a host — CLAUDE.md, AGENTS.md, Claude auto memory, Codex memories, Hermes notes. Analyze cost and problems, edit with conflict checks and backups, apply notes to other CLIs or hosts, import and export. |
 | **Actions, Functions & Schedules** | Save agent prompts as Actions, define typed operations as Functions, and schedule prompts or Actions using UTC cron or intervals. |
 | **QA & Security** | Define reusable scenarios/profiles, run them manually or in scheduled batches, record evidence, and optionally file failure tickets. QA can rerun after a fix, including a deployment gate. |
 | **Knowledge & Skills** | Store documents, images, and links as Resources; optionally enable vector search and repository ontology graphs. Publish versioned skills and assign snapshots to runtime identities. |

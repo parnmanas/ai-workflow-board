@@ -1389,6 +1389,29 @@ export async function postAgentSessionRpcResponse(
   return sendAgentSessionRequest(config, 'POST', url, payload, label);
 }
 
+/**
+ * CLI Memory RPC 응답(docs/cli-memory.md). 스캔 응답은 메모리 파일 내용을 싣고 수 MiB 가 될 수
+ * 있어 세션 RPC 와 같은 규칙으로 큰 본문은 gzip 으로 보낸다.
+ */
+export async function postCliMemoryRpcResponse(
+  config: AwbConfig,
+  managerId: string,
+  requestId: string,
+  body: AgentSessionRpcBody,
+  op = '',
+): Promise<AgentSessionRestResult> {
+  if (!requestId) return { ok: false, status: 0 };
+  const url = `${trimSlash(config.url)}/api/agent/cli-memory/rpc/${encodeURIComponent(requestId)}`;
+  const payload = JSON.stringify({ manager_id: managerId, ...body });
+  const bytes = Buffer.byteLength(payload);
+  const label = `rpc(${requestId.slice(0, 8)}${op ? ` ${op}` : ''} ${(bytes / 1048576).toFixed(2)}MiB)`;
+  if (bytes >= RPC_GZIP_MIN_BYTES) {
+    const sent = await sendAgentSessionRequest(config, 'POST', url, new Uint8Array(await gzipAsync(payload)), `${label} gzip`, 'cli-memory', { 'Content-Encoding': 'gzip' });
+    if (sent.status !== 415) return sent;
+  }
+  return sendAgentSessionRequest(config, 'POST', url, payload, label, 'cli-memory');
+}
+
 export async function postAgentSessionEvents(
   config: AwbConfig,
   ref: AgentSessionRef,

@@ -327,6 +327,15 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - PTY 는 **선택 의존성**(`@lydell/node-pty`, 플랫폼별 prebuild — linux/darwin/win32). 못 불러오면 던지지 않고 그 장비의 셸 목록을 비운다 → 서버가 터미널 호스트 목록에서 뺀다(409 `terminal_unsupported`). Windows 는 ConPTY 로 같은 경로를 탄다.
 - `terminal_request` payload · `/api/agent/terminals/*` 바디 · 하트비트 필드는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/terminals.md`.
 
+## CLI Memory (LLM CLI 메모리 파일)
+
+- Runtime Host 장비의 CLI 메모리(Claude `CLAUDE.md`·rules·auto memory, Codex `AGENTS.md`·`memories/`, Hermes `MEMORY.md`/`USER.md`, OpenCode/Pi `AGENTS.md`, Antigravity `GEMINI.md` …)를 `/memory` 에서 보고·분석하고·고치고·다른 CLI/장비에 적용하고·import/export 한다. **원본은 그 장비의 파일**이고 서버는 상태 없는 중계자다(`modules/cli-memory`, SSE `cli_memory_request`, 매니저 `cli-memory-runner.ts`, 권한 `cli_memory.use` 기본 admin 전용, 상수 단일 원천 `apps/server/src/common/types/cli-memory.ts`).
+- **어디에 무엇이 있는지는 CLI 모듈의 `memory` 슬라이스 한 곳**(`apps/agent-manager/src/lib/clis/<id>/memory.ts`)이 선언한다 — 러너·화면에 CLI 이름 분기를 쓰지 말 것. 러너는 선언된 파일, 또는 선언된 디렉터리 바로 아래의 새 `.md` 에만 쓴다. project 범위 폴더는 **서버가** `ProjectHostFolder` 에서 골라 싣는다 — 화면이 보낸 폴더를 매니저로 넘기지 말 것(임의 폴더에 지침 파일을 만드는 길이 된다).
+- 쓰기는 `base_hash`(내용 sha256 앞 16자; 문자열 = 그 내용이어야 · `null` = 없어야 · 생략 = 확인 안 함)로 CLI 의 동시 편집을 막고, 모든 변경 전에 매니저가 `memory-backups/` 에 백업한다(History · 지운 파일 복원). 링크를 통한 쓰기는 대상을 바꾸고 링크를 보존한다.
+- AWB credential 세션은 자기 CLI 홈(`session-homes/<cli>/<credential_id>`)을 쓰고 기록 디렉터리만 운영자 홈으로 링크하므로 **운영자의 전역 지침(CLAUDE.md · AGENTS.md)을 못 본다** — 스캔은 세션 홈도 보고, 분석이 경고하며 link op 로 잇는다. 세션 홈 준비 경로를 바꿀 때 이 관계를 함께 볼 것.
+- 분석·형식 변환·번들은 화면의 순수 함수(`components/memory/*.logic.ts`)다. Hermes 항목은 hermes-agent 와 같은 `\n§\n` 규칙으로만 직렬화한다(아니면 Hermes drift guard 가 그 파일 쓰기를 거부한다). 다른 CLI 로 옮긴 내용은 관리 블록(`<!-- awb-memory:begin <id> -->`)으로 넣어 재적용이 멱등이다.
+- `cli_memory_request` payload · `/api/agent/cli-memory/rpc` 바디 · `manager_capabilities` 의 `cli_memory` 는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/cli-memory.md`.
+
 ## Android 앱 (`apps/android`)
 
 - 네이티브 껍데기(Java)가 **서버가 서빙하는 웹 화면 전체**를 WebView 로 띄운다 — 웹 빌드를 앱에 묶지 말 것(예전 Capacitor 껍데기가 그래서 CORS · 구글 로그인 이탈을 겪고 버려졌다). 네이티브는 상시 음성(`voice/VoiceService`) · 단말 자격(`UserDevice`, `/api/auth/devices*`) · 구글 로그인 PKCE 왕복(`oauth/google/start?app=android` → `awb://oauth` → `oauth/app/exchange`)만 맡는다.

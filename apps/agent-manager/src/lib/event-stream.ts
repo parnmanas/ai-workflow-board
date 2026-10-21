@@ -9,6 +9,8 @@
 //   - comment_mention:  user @-mentioned this agent
 //   - fs_request:       remote fs operation request
 //   - agent_session_request: Agent Session(CLI 직접 세션) 제어 — open/prompt/permission/cancel/set_mode/close
+//   - terminal_request: Terminal(Runtime Host 셸) 제어
+//   - cli_memory_request: CLI Memory(메모리 파일) 읽기·쓰기 RPC
 //   - agent_typing:     ignored
 //
 // Responsibilities are narrow by design:
