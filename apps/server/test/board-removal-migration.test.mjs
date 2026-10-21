@@ -211,7 +211,7 @@ test('repository resources become projects with the same id and leave resources'
   assert.equal(repo.repo_url, 'https://github.com/example/gameclient');
   assert.equal(repo.default_branch, 'master');
   assert.equal(repo.clone_policy, '{"clone_depth":1}');
-  assert.equal(repo.account_id, WS);
+  assert.equal(repo.account_id, '00000000-0000-4000-8000-000000000001');
   // The board used PRs, so its environment repo's project does too.
   assert.ok(Number(projects.find((p) => p.id === ENV_REPO).use_pr) === 1 || projects.find((p) => p.id === ENV_REPO).use_pr === true);
   const remaining = await ds.query('SELECT id, type FROM resources');
@@ -240,15 +240,15 @@ test('tickets of an archived board are archived', async () => {
   assert.ok(!(await ticket(T(2))).archived_at);
 });
 
-test('board settings move to the account', async () => {
-  const [ws] = await ds.query('SELECT * FROM accounts WHERE id = ?', [WS]);
-  assert.equal(ws.language, 'Korean');
-  assert.equal(Number(ws.auto_archive_days), 14);
-  assert.equal(Number(ws.max_concurrent_tickets_per_agent), 2);
+test('legacy board policies are reset to shared defaults', async () => {
+  const [ws] = await ds.query('SELECT * FROM accounts WHERE id = ?', ['00000000-0000-4000-8000-000000000001']);
+  assert.equal(ws.language, null);
+  assert.equal(ws.auto_archive_days, null);
+  assert.equal(Number(ws.max_concurrent_tickets_per_agent), 1);
 });
 
 test('board-scoped workflow functions fold into the account without key collisions', async () => {
-  const rows = await ds.query("SELECT id, key FROM workflow_functions WHERE account_id = ? ORDER BY key", [WS]);
+  const rows = await ds.query("SELECT id, key FROM workflow_functions WHERE account_id = ? ORDER BY key", ['00000000-0000-4000-8000-000000000001']);
   assert.deepEqual(rows.map((r) => [r.key, r.id]), [['custom.deploy', FN.ws], ['custom.lint', FN.boardFree]]);
   const indexes = (await ds.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'workflow_functions'")).map((r) => r.name);
   assert.ok(indexes.includes('uq_workflow_functions_account_key'), indexes.join(', '));

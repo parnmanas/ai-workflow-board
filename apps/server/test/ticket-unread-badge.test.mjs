@@ -54,14 +54,12 @@ async function loadServerModules() {
     const { NestFactory } = await import('@nestjs/core');
     const appModuleUrl = 'file://' + path.join(distRoot, 'app.module.js');
     const authServiceUrl = 'file://' + path.join(distRoot, 'services', 'auth.service.js');
-    const rebacServiceUrl = 'file://' + path.join(distRoot, 'services', 'rebac.service.js');
     const activityServiceUrl = 'file://' + path.join(distRoot, 'services', 'activity.service.js');
     const { AppModule } = await import(appModuleUrl);
     const { AuthService } = await import(authServiceUrl);
-    const { ReBACService } = await import(rebacServiceUrl);
     const { activityEvents } = await import(activityServiceUrl);
     const { getDataSourceToken } = await import('@nestjs/typeorm');
-    return { NestFactory, AppModule, AuthService, ReBACService, activityEvents, getDataSourceToken };
+    return { NestFactory, AppModule, AuthService, activityEvents, getDataSourceToken };
   } catch (err) {
     throw new Error(
       'ticket-unread-badge test requires the server to be built first. Run `npm run --account=apps/server build`. Original error: ' + err.message
@@ -94,7 +92,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
 
   before(async () => {
     const modules = await loadServerModules();
-    const { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken } = modules;
+    const { NestFactory, AppModule, AuthService, getDataSourceToken } = modules;
     activityEvents = modules.activityEvents;
 
     app = await NestFactory.create(AppModule, { logger: false });
@@ -102,7 +100,6 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     BASE_URL = makeBaseUrl(app.getHttpServer().address().port);
 
     authService = app.get(AuthService);
-    const rebacService = app.get(ReBACService);
     const ds = app.get(getDataSourceToken());
     userRepo = ds.getRepository('User');
     const wsRepo = ds.getRepository('Account');
@@ -119,7 +116,6 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     viewerToken = authService.createSession(viewer.id);
 
     ws = await wsRepo.save(wsRepo.create({ name: 'Unread Badge WS', description: 'ticket 628f4b39' }));
-    await rebacService.grant({ type: 'user', id: viewer.id }, 'member', { type: 'account', id: ws.id });
 
     const mk = (title, extra = {}) => ticketRepo.save(ticketRepo.create({
       title, account_id: ws.id, status: 'todo', ...extra,

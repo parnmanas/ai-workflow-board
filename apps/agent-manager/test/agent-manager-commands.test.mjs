@@ -85,7 +85,7 @@ function registryStub() {
   };
 }
 
-test('refresh_mcp_config reads the existing scoped key from legacy command args', async () => {
+test('refresh_mcp_config reads the existing scoped key from canonical command args', async () => {
   const agentId = 'legacy-owner-command';
   const accountId = 'original-account-uuid';
   await writeApiKey(agentId, 'fixture-scoped-key', accountId);
@@ -95,7 +95,7 @@ test('refresh_mcp_config reads the existing scoped key from legacy command args'
   );
   await handler.handle(JSON.stringify({
     command_id: 'legacy-owner-refresh', command: 'refresh_mcp_config',
-    args: { agent_id: agentId, workspace_id: accountId },
+    args: { agent_id: agentId, account_id: accountId },
   }));
   const config = JSON.parse(await fsp.readFile(mcpConfigPathFor(agentId, accountId), 'utf8'));
   assert.equal(config.mcpServers.awb.headers.Authorization, 'Bearer fixture-scoped-key');

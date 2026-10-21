@@ -12,7 +12,6 @@ import { AgentsModule } from '../agents/agents.module';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
 import { AgentManagerController } from './agent-manager.controller';
 import { RuntimeSpecController } from './runtime-spec.controller';
 import { InstanceRegistryModule } from './instance-registry.module';
@@ -70,7 +69,6 @@ import { SkillsModule } from '../skills/skills.module';
     AgentAuthGuard,
     AuthGuard,
     PermissionGuard,
-    AccountGuard,
   ],
   exports: [
     PairingService,

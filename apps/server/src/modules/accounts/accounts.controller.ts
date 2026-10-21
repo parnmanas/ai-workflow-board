@@ -4,7 +4,6 @@ import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository, EntityManager } from 'typeorm';
 import { Account } from '../../entities/Account';
-import { RelationTuple } from '../../entities/RelationTuple';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { User } from '../../entities/User';
@@ -17,8 +16,6 @@ import type { CurrentUserData } from '../../common/decorators/current-user.decor
 import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
-import { deleteAccountContent } from './account-cleanup';
-import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
@@ -42,32 +39,16 @@ export class AccountsController {
     @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    private readonly rebacService: ReBACService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly activityService: ActivityService,
   ) {}
 
   private async requireOwner(user: CurrentUserData, accountId: string, res: Response) {
     if (user?.role === 'admin') return true;
-    const owner = await this.rebacService.check(
-      { type: 'user', id: user.id },
-      'owner',
-      { type: 'account', id: accountId },
-    );
-    if (!owner) res.status(403).json({ error: 'account_owner_required' });
-    return owner;
+    res.status(403).json({ error: 'admin_required' });
+    return false;
   }
 
-  private async requireAccountAccess(user: CurrentUserData, accountId: string, res: Response) {
-    if (user?.role === 'admin') return true;
-    const subject = { type: 'user', id: user.id };
-    const object = { type: 'account', id: accountId };
-    const allowed =
-      await this.rebacService.check(subject, 'owner', object) ||
-      await this.rebacService.check(subject, 'member', object);
-    if (!allowed) res.status(403).json({ error: 'account_access_denied' });
-    return allowed;
-  }
 
   @Get()
   async list(@Req() req: Request, @Res() res: Response) {
@@ -81,24 +62,8 @@ export class AccountsController {
     return res.json(result);
   }
 
-  @Post()
-  async create(@Body() body: any, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    const { name, description = '' } = body;
-    if (!name) return res.status(400).json({ error: 'name is required' });
-    const account = await this.dataSource.transaction(async manager => {
-      const row = await manager.getRepository(Account).save(manager.getRepository(Account).create({ name, description }));
-      await manager.getRepository(RelationTuple).save(manager.getRepository(RelationTuple).create({
-        subject_type: 'user', subject_id: user.id, relation: 'owner', object_type: 'account', object_id: row.id,
-      }));
-      return row;
-    });
-    activityEvents.emit('account_membership_changed', { user_id: user.id, account_id: account.id });
-    return res.status(201).json(account);
-  }
-
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireAccountAccess(user, id, res)) return;
     const account = await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
     const rows = await this.ticketRepo.createQueryBuilder('t')
       .select('t.status', 'status')
@@ -128,7 +93,6 @@ export class AccountsController {
     const cadenceBefore = cadenceSnapshot(account);
 
     const {
-      name, description,
       supervisor_stale_ms, supervisor_resend_ms,
       max_concurrent_tickets_per_agent, dispatch_paused_at, language, auto_archive_days,
       chat_workspace_folder_enabled,
@@ -136,8 +100,6 @@ export class AccountsController {
       hard_budget_config, clone_policy,
       knowledge_memory,
     } = body;
-    if (name !== undefined) account.name = name;
-    if (description !== undefined) account.description = description;
 
     // Supervisor cadence (TicketDispatchService). Defaults (30 min / 5 min)
     // live in the entity column; only positive finite integers are accepted
@@ -313,99 +275,6 @@ export class AccountsController {
     return rows;
   }
 
-  @Delete(':id')
-  async delete(@Param('id') id: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireOwner(user, id, res)) return;
-    const account = await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
-
-    const count = await this.accountRepo.count();
-    if (count <= 1) return res.status(400).json({ error: 'Cannot delete the last account' });
-
-    await deleteAccountContent(this.dataSource, account.id);
-    await this.dataSource.transaction(async manager => {
-      await manager.getRepository(RelationTuple).delete({ object_type: 'account', object_id: account.id });
-      await manager.getRepository(Account).delete(account.id);
-    });
-    return res.json({ success: true });
-  }
-
-  // ─── Account Members (ReBAC) ─────────────────────────
-
-  @Get(':id/members')
-  async listMembers(@Param('id') id: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireAccountAccess(user, id, res)) return;
-    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
-
-    const [members, owners] = await Promise.all([
-      this.rebacService.listSubjects({ type: 'account', id }, 'member'),
-      this.rebacService.listSubjects({ type: 'account', id }, 'owner'),
-    ]);
-
-    const ownerIds = new Set(owners.filter(s => s.type === 'user').map(s => s.id));
-    const allUserIds = [...new Set([
-      ...members.filter(s => s.type === 'user').map(s => s.id),
-      ...ownerIds,
-    ])];
-
-    if (allUserIds.length === 0) return res.json([]);
-
-    const users = await this.userRepo.find({ where: { id: In(allUserIds) } });
-    const result = users.map(u => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      status: (u as any).status,
-      avatar_url: u.avatar_url,
-      relation: ownerIds.has(u.id) ? 'owner' : 'member',
-    }));
-    return res.json(result);
-  }
-
-  @Post(':id/members')
-  async addMember(@Param('id') id: string, @Body() body: any, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireOwner(user, id, res)) return;
-    const { user_id, relation = 'member' } = body;
-    if (!user_id) return res.status(400).json({ error: 'user_id is required' });
-    if (!['member', 'owner'].includes(relation)) {
-      return res.status(400).json({ error: 'relation must be member or owner' });
-    }
-
-    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
-    await findOrFail(this.userRepo, { where: { id: user_id } }, 'User not found');
-
-    await this.rebacService.grant({ type: 'user', id: user_id }, relation, { type: 'account', id });
-    return res.status(201).json({ success: true, user_id, relation, account_id: id });
-  }
-
-  @Patch(':id/members/:userId')
-  async updateMemberRole(
-    @Param('id') id: string, @Param('userId') userId: string,
-    @Body() body: any, @Res() res: Response, @CurrentUser() user: CurrentUserData,
-  ) {
-    if (!await this.requireOwner(user, id, res)) return;
-    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
-    await findOrFail(this.userRepo, { where: { id: userId } }, 'User not found');
-    const { relation } = body;
-    if (!['member', 'owner'].includes(relation)) {
-      return res.status(400).json({ error: 'relation must be member or owner' });
-    }
-    // Revoke both, then grant the new one
-    await this.rebacService.revoke({ type: 'user', id: userId }, 'member', { type: 'account', id });
-    await this.rebacService.revoke({ type: 'user', id: userId }, 'owner', { type: 'account', id });
-    await this.rebacService.grant({ type: 'user', id: userId }, relation, { type: 'account', id });
-    return res.json({ success: true, user_id: userId, relation });
-  }
-
-  @Delete(':id/members/:userId')
-  async removeMember(@Param('id') id: string, @Param('userId') userId: string, @Res() res: Response, @CurrentUser() user: CurrentUserData) {
-    if (!await this.requireOwner(user, id, res)) return;
-    await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
-    await this.rebacService.revoke({ type: 'user', id: userId }, 'member', { type: 'account', id });
-    await this.rebacService.revoke({ type: 'user', id: userId }, 'owner', { type: 'account', id });
-    return res.json({ success: true });
-  }
-
   // ─── Mention autocomplete candidates ───────────────────────
   //
   // Returns the user + agent set the composer's @-dropdown should show for
@@ -420,13 +289,8 @@ export class AccountsController {
     @Res() res: Response,
     @CurrentUser() user: CurrentUserData,
   ) {
-    if (!await this.requireAccountAccess(user, id, res)) return;
     await findOrFail(this.accountRepo, { where: { id } }, 'Account not found');
 
-    const [members, owners] = await Promise.all([
-      this.rebacService.listSubjects({ type: 'account', id }, 'member'),
-      this.rebacService.listSubjects({ type: 'account', id }, 'owner'),
-    ]);
     const agents: Array<{ id: string; name: string }> = [];
     if (ticketId) {
       const ticket = await this.ticketRepo.findOne({ where: { id: ticketId, account_id: id } });
@@ -437,15 +301,8 @@ export class AccountsController {
       }
     }
 
-    const allUserIds = [...new Set([
-      ...members.filter(s => s.type === 'user').map(s => s.id),
-      ...owners.filter(s => s.type === 'user').map(s => s.id),
-    ])];
-    const users = allUserIds.length
-      ? (await this.userRepo.find({ where: { id: In(allUserIds) } }))
-          .map(u => ({ id: u.id, name: u.name, avatar_url: u.avatar_url }))
-          .sort((a, b) => a.name.localeCompare(b.name))
-      : [];
+    const users = (await this.userRepo.find({ where: { status: 'active' }, order: { name: 'ASC' } }))
+      .map(u => ({ id: u.id, name: u.name, avatar_url: u.avatar_url }));
 
     return res.json({
       users,

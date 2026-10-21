@@ -8,7 +8,6 @@ import { User } from '../../entities/User';
 import { Account } from '../../entities/Account';
 import { AuthService } from '../../services/auth.service';
 import { GoogleOAuthService } from '../../services/google-oauth.service';
-import { ReBACService } from '../../services/rebac.service';
 import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../common/types/permissions';
 import { DeviceAuthService } from './device-auth.service';
 import { OAuthFlowStore, appRedirect, isValidCodeChallenge, type OAuthClient } from './oauth-flow';
@@ -22,43 +21,13 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly googleOAuthService: GoogleOAuthService,
     private readonly deviceAuth: DeviceAuthService,
-    private readonly rebacService: ReBACService,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
   ) {}
 
   private async _buildAccountsForUser(userId: string) {
-    // Admin gets all accounts — never blocked by empty ReBACservice relations
-    const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (user?.role === 'admin') {
-      const allAccounts = await this.accountRepo.find();
-      return allAccounts.map(account => ({
-        id: account.id,
-        name: account.name,
-        slug: account.slug,
-        relations: ['owner'],
-      }));
-    }
-
-    const memberWsIds = await this.rebacService.listObjects(
-      { type: 'user', id: userId }, 'member', 'account',
-    );
-    const ownerWsIds = await this.rebacService.listObjects(
-      { type: 'user', id: userId }, 'owner', 'account',
-    );
-    const allWsIds = [...new Set([...memberWsIds, ...ownerWsIds])];
-    if (allWsIds.length === 0) return [];
-
-    const accounts = await this.accountRepo.find({ where: { id: In(allWsIds) } });
-    return accounts.map(account => ({
-      id: account.id,
-      name: account.name,
-      slug: account.slug,
-      relations: [
-        ...(memberWsIds.includes(account.id) ? ['member'] : []),
-        ...(ownerWsIds.includes(account.id) ? ['owner'] : []),
-      ],
-    }));
+    const accounts = await this.accountRepo.find({ order: { created_at: 'ASC', id: 'ASC' } });
+    return accounts.map(account => ({ id: account.id, name: account.name }));
   }
 
   @Post('login')
@@ -181,7 +150,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Register a new user. First user becomes admin automatically.' })
   @ApiBody({ type: RegisterDto })
   async register(@Body() body: any, @Res() res: Response) {
-    const { name, email, password, requested_account_id } = body;
+    const { name, email, password } = body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'name, email, and password are required' });
     }
@@ -202,17 +171,10 @@ export class AuthController {
       role: 'user',
       status: 'pending',
       password_hash,
-      requested_account_id: requested_account_id || null,
     } as any);
     await this.userRepo.save(created as any);
 
     return res.status(201).json({ success: true, message: 'Registration submitted. Please wait for admin approval.' });
-  }
-
-  @Get('public-accounts')
-  async publicAccounts(@Res() res: Response) {
-    const accounts = await this.accountRepo.find({ where: { is_public: 1 } as any });
-    return res.json(accounts.map(account => ({ id: account.id, name: account.name, slug: account.slug })));
   }
 
   /** Public: exposes whether Google OAuth is enabled + the client_id (never the secret). */

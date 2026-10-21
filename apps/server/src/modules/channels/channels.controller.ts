@@ -5,7 +5,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Channel } from '../../entities/Channel';
 import { PermissionGuard } from '../../common/guards/permission.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentAccountId } from '../../common/decorators/current-account.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
@@ -15,7 +14,7 @@ import { findOrFail } from '../../common/find-or-fail';
 @ApiBearerAuth('user-session')
 @ApiTags('channels')
 @Controller('api/channels')
-@UseGuards(PermissionGuard, AccountGuard)
+@UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_CHANNELS)
 export class ChannelsController {
   constructor(

@@ -6,7 +6,6 @@ import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { LibraryItem } from '../../entities/LibraryItem';
 import { Resource } from '../../entities/Resource';
-import { ReBACService } from '../../services/rebac.service';
 
 /**
  * 자료실 — 파일 바이트는 Resource(`type='library_file'`)에, 겉장(제목·버전·종류)은
@@ -15,7 +14,7 @@ import { ReBACService } from '../../services/rebac.service';
  * `GET /api/resources/:id/raw?download=1` — 새로 만들지 않는다(APK는 /raw가
  * 자동으로 attachment로 내린다).
  *
- * 권한: 읽고·올리고·지우기는 그 계정의 member/owner(admin 우회) —
+ * 권한: 읽기와 업로드는 로그인한 사용자에게 허용한다.
  * ResourceMediaController와 같은 경계다. 삭제는 올린 본인 또는 admin만.
  */
 @ApiBearerAuth('user-session')
@@ -26,20 +25,10 @@ export class LibraryController {
   constructor(
     @InjectRepository(LibraryItem) private readonly libraryRepo: Repository<LibraryItem>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
-    private readonly rebacService: ReBACService,
   ) {}
 
   private currentUser(req: Request): { id: string; role: string } {
     return (req as any).currentUser;
-  }
-
-  private async canAccess(user: { id: string; role: string }, accountId: string | null | undefined): Promise<boolean> {
-    if (!accountId) return false;
-    if (user.role === 'admin') return true;
-    const sub = { type: 'user', id: user.id } as const;
-    const obj = { type: 'account', id: accountId } as const;
-    if (await this.rebacService.check(sub, 'member', obj)) return true;
-    return this.rebacService.check(sub, 'owner', obj);
   }
 
   /** base64 길이를 바이트로 — 목록이 file_data를 디코드하지 않게. */
@@ -73,9 +62,6 @@ export class LibraryController {
   async list(@Query('account_id') accountId: string, @Req() req: Request, @Res() res: Response) {
     const user = this.currentUser(req);
     if (!accountId) return res.status(400).json({ error: 'account_id_required', message: 'account_id is required.' });
-    if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'account_access_denied' });
-    }
     const items = await this.libraryRepo.find({
       where: { account_id: accountId },
       order: { created_at: 'DESC' },
@@ -107,9 +93,6 @@ export class LibraryController {
     if (!accountId || !resourceId || !title) {
       return res.status(400).json({ error: 'account_id_resource_id_title_required', message: 'account_id, resource_id and title are required.' });
     }
-    if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'account_access_denied' });
-    }
     const resource = await this.resourceRepo.findOne({ where: { id: resourceId } });
     if (!resource || !resource.file_data) {
       return res.status(400).json({ error: 'resource_not_found', message: 'No such uploaded file.' });
@@ -138,9 +121,6 @@ export class LibraryController {
   async latestApp(@Query('account_id') accountId: string, @Req() req: Request, @Res() res: Response) {
     const user = this.currentUser(req);
     if (!accountId) return res.status(400).json({ error: 'account_id_required', message: 'account_id is required.' });
-    if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'account_access_denied' });
-    }
     const items = await this.libraryRepo.find({
       where: { account_id: accountId, kind: 'app' },
       order: { created_at: 'DESC' },
@@ -156,9 +136,6 @@ export class LibraryController {
   async remove(@Param('id') id: string, @Query('account_id') accountId: string, @Req() req: Request, @Res() res: Response) {
     const user = this.currentUser(req);
     if (!accountId) return res.status(400).json({ error: 'account_id_required', message: 'account_id is required.' });
-    if (!(await this.canAccess(user, accountId))) {
-      return res.status(403).json({ error: 'account_access_denied' });
-    }
     const item = await this.libraryRepo.findOne({ where: { id, account_id: accountId } });
     if (!item) return res.status(404).json({ error: 'not_found' });
     if (item.created_by !== user.id && user.role !== 'admin') {

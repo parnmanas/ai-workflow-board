@@ -4,9 +4,9 @@
 
 AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작업 표면으로 삼고, 티켓과 프로젝트 및 팀 미션으로 업무를 추적·자동화하는 플랫폼이다. 티켓 하나는 **한 Agent(assignee)** 가 처음부터 끝까지 맡아(혼자 하든, 자기 subagent 들에게 나눠 하든) 처리하고, 결과를 comment 로 남긴 뒤 상태를 `done`(또는 사람 확인용 `review`)으로 옮긴다. 보드는 없다 — 티켓은 접근 가능한 계정의 업무를 합쳐 보여주고 **tag** 와 **project** 로 분류·필터링한다.
 
-**Workspace 작업 개념은 제거됐다.** `/sessions`, `/tickets`, `/projects`, `/missions` 작업 페이지에는 소유 계정 전환기가 없다. `Account`는 소유권·ReBAC membership·credential·정책·예산의 관리 경계다. 목록과 unread는 접근 가능한 계정을 합치며, 상세·쓰기·artifact ref·SSE는 실제 객체의 소유 계정으로 권한을 검사한다. 새 독립 작업은 기본 접근 계정에, 선택한 Project/계정 소유 Team의 작업은 그 객체의 계정에 귀속된다. 계약: `docs/ownership.md`.
+**작업 소유권 구분을 제거했다.** 사용자가 만든 workspace/Account와 ReBAC 멤버십은 더 이상 업무 경계가 아니다. 로그인한 활성 사용자는 공통 업무 목록을 사용한다. 로그인·기능별 권한·관리자 권한·채팅방 참여·Runtime Host 권한은 유지한다. 설정은 `/settings/defaults`, 로그인 사용자 관리는 `/settings/users`다. Account/Scope 선택기·계정 생성/삭제·멤버 배정 UI/API/MCP를 다시 만들지 말 것. 계약: `docs/ownership.md`, `docs/catalog-scopes.md`.
 
-**카탈로그도 workspace 선택 UI를 되살리지 않는다.** Resources·Credentials·Functions에서 예전 workspace 목록을 Account/Scope 선택기, Owner 열·상세, 실행 계정 선택기로 노출하지 말 것. 목록은 접근 가능한 객체를 합치고 생성 귀속은 자동으로 정한다(Global 쓰기 권한이 있으면 Global, 아니면 기본 접근 계정). 기존 객체의 수정·삭제는 실제 소유권을 유지한다. Teams의 Scope/허용 계정 선택, Shared Memory의 계정 선택도 두지 않는다. 새 팀과 공용 메모리는 기본 접근 계정으로 귀속하고 기존 팀의 접근 정책은 편집 시 보존한다. 계정 자체의 관리는 `/settings/ownership`에 둔다. 계약: `docs/catalog-scopes.md` → UI.
+**내부 필드는 아직 전환 중이다.** 실행 파이프라인의 `account_id`와 `accounts` 기본값 저장 행은 단일 내부 실행 키(`common/instance-context.ts`)로 통합됐다. 기존 계정 ID와 권한 연결은 이관으로 제거하지만, 이것을 물리적인 소유권 컬럼 제거까지 끝난 것으로 취급하지 않는다. 업무 객체 ID·내용·credential 암호문·네이티브 세션 파일은 보존한다.
 
 **Core Value:** Agent가 MCP로 연결되어 티켓을 자율 처리하고, 큐에 쌓인 다음 티켓이 그 Agent 에게 자동으로 이어지는 연속 자동화 루프.
 
@@ -17,7 +17,7 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - **DB 호환**: SQLite(개발) + PostgreSQL(운영) 이중 지원 유지
 - **Agent 독립성**: AWB는 Agent의 내부 구현에 의존하지 않음 — MCP 인터페이스만 사용
 - **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (monorepo root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `docs/runbooks/agent-manager-release.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Account CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 와 `status` / `project` / `base_repo.main_clone_dir` (docs/tickets.md) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
-- **소유 계약과 호환**: 정본은 `account_id`, `X-Account-Id`, `*_account`, `*_automation_schedule`이다. 구 workspace URL/REST body·query·header·MCP 인자·manager config는 경계에서 alias로 읽는다. 기존 소유 UUID는 그대로 유지하며, 소유권 rename으로 credential/MCP 파일 suffix나 native session 홈 경로를 바꾸지 말 것. `workspace_folder`, `RunWorkspace`, CLI workspace trust, Codex `workspace-write`는 실제 파일 작업공간 의미라 유지한다.
+- **전송 계약**: 현재 실행 필드는 `account_id`, `X-Account-Id`, `*_automation_schedule`이다. workspace 소유권 이름을 런타임 alias로 다시 읽거나 내보내지 않는다. 구 DB 변환은 이관 코드에만 둔다. `workspace_folder`, `RunWorkspace`, CLI workspace trust, Codex `workspace-write`는 실제 파일 작업공간 의미라 유지한다.
 
 ## Technology Stack
 

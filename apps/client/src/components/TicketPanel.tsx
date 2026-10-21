@@ -293,7 +293,7 @@ export default function TicketPanel({
       {/* The bottom padding keeps the last control clear of the app-wide
           sound toggle that floats at the bottom-right corner (ToastContext). */}
       <div style={{
-        flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', padding: '14px 14px 60px',
+        flex: 1, minHeight: 0, overflowY: tab === 'conversation' ? 'hidden' : 'auto', overflowX: 'hidden', padding: '14px 14px 60px',
         display: 'flex', flexDirection: 'column',
       }}>
         {tab === 'overview' && (

@@ -24,7 +24,6 @@ import { MANAGED_AGENTS_DIR } from './constants.js';
 import { resolveSelfCommand } from './self-path.js';
 import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 import { normalizeCredentialFields } from './credential-fields.js';
-import { normalizeAccountScope } from './account-scope.js';
 
 export interface ManagedAgentDiskConfig {
   agent_id: string;
@@ -182,7 +181,7 @@ export async function readManagedAgentConfig(agentId: string): Promise<ManagedAg
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     if (raw && typeof raw === 'object' && raw.agent_id === agentId) {
-      return normalizeAccountScope(raw) as ManagedAgentDiskConfig;
+      return raw as ManagedAgentDiskConfig;
     }
   } catch {
     // Treat malformed config as "no config" — caller will rewrite.
@@ -192,7 +191,7 @@ export async function readManagedAgentConfig(agentId: string): Promise<ManagedAg
 
 export async function writeManagedAgentConfig(cfg: ManagedAgentDiskConfig): Promise<void> {
   await ensureManagedAgentDir(cfg.agent_id);
-  await fsp.writeFile(configPathFor(cfg.agent_id), JSON.stringify(normalizeAccountScope(cfg), null, 2), { mode: 0o600 });
+  await fsp.writeFile(configPathFor(cfg.agent_id), JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
 export async function readApiKey(agentId: string, accountId?: string): Promise<string | null> {

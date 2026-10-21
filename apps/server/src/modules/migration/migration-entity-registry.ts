@@ -135,7 +135,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'OutreachOutboundPost', 'TicketDuplicateDecision',
 
   // 완전 다형적(polymorphic)/미강제 — 어디에 있어도 안전, 맨 뒤에 배치
-  'ActivityLog', 'RelationTuple',
+  'ActivityLog',
 ];
 
 /**

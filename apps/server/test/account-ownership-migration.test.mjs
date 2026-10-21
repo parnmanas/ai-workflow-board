@@ -395,17 +395,17 @@ test('standalone initDb upgrades pre-0091 SQLite data and applies the migration 
     const persisted = await new DataSource(options).initialize();
     try {
       const ticket = (await persisted.query('SELECT account_id, status, tags, project_id FROM tickets'))[0];
-      assert.equal(ticket.account_id, OWNER);
+      assert.equal(ticket.account_id, '00000000-0000-4000-8000-000000000001');
       assert.equal(ticket.status, 'done', '0091 data transformation has already run');
       assert.deepEqual(JSON.parse(ticket.tags), ['bug', 'Legacy Board']);
       assert.equal(ticket.project_id, 'repo-1');
       assert.deepEqual(await persisted.query('SELECT id, account_id, repo_url FROM projects'), [{
-        id: 'repo-1', account_id: OWNER, repo_url: 'https://example.com/old-repo',
+        id: 'repo-1', account_id: '00000000-0000-4000-8000-000000000001', repo_url: 'https://example.com/old-repo',
       }]);
       const account = (await persisted.query('SELECT * FROM accounts'))[0];
-      assert.equal(account.language, 'Korean');
-      assert.equal(account.auto_archive_days, 14);
-      assert.equal(account.max_concurrent_tickets_per_agent, 3);
+      assert.equal(account.language, null);
+      assert.equal(account.auto_archive_days, null);
+      assert.equal(account.max_concurrent_tickets_per_agent, 1);
       const migrations = (await persisted.query('SELECT name FROM migrations')).map(row => row.name);
       assert.ok(migrations.includes('BoardlessTickets1760000000091'));
       assert.ok(migrations.includes('AccountOwnership1760000000092'));

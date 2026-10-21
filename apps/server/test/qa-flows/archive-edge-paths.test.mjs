@@ -3,7 +3,7 @@
 // Scenarios the reviewer flagged as missing behavioural coverage
 // (the existing archive-exclusion-guard.test.mjs is static-grep only):
 //
-//   1. REST GET /api/accounts/:id, the ticket list and MCP get_account
+//   1. REST GET /api/accounts/:id, the ticket list
 //      must exclude archived tickets by default (and from the per-status
 //      ticket_counts).
 //   2. Creating a ticket directly in `done` must stamp terminal_entered_at, so
@@ -108,7 +108,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   // not dispatch.
 
   // ─── Subtest 1 — account REST + ticket list + MCP default exclusion ───
-  await t.test('REST /api/accounts/:id, the ticket list and MCP get_account exclude archived tickets', async () => {
+  await t.test('REST /api/accounts/:id, the ticket list exclude archived tickets', async () => {
     step('Seed two tickets in the same status: one active, one archived');
     const activeRow = await createTicket(app, getDataSourceToken, {
       accountId: ws.id, status: 'backlog', title: 'active row', assignee: driverAgent,
@@ -135,12 +135,6 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
     const archivedOnly = await (await rest('GET', `/accounts/${ws.id}/tickets?archived_only=1`)).json();
     assert.deepEqual(archivedOnly.tickets.map((row) => row.id), [archivedRow.id],
       'archived_only=1 is the opt-in archive view');
-
-    step('MCP get_account');
-    const mcpRes = await mcp.callTool('get_account', { account_id: ws.id });
-    assert.ok(mcpRes && !mcpRes.isError, `get_account failed: ${JSON.stringify(mcpRes)}`);
-    assert.equal(mcpRes.ticket_counts.backlog, 1,
-      `MCP get_account ticket_counts must reflect only the active ticket (got ${JSON.stringify(mcpRes.ticket_counts)})`);
 
     // Sanity: cleanup so the later subtests don't see these tickets.
     await ticketRepo.delete({ id: activeRow.id });

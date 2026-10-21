@@ -38,7 +38,6 @@ const EXPECTED_TOOLS = [
   'get_project',
   'save_project',
   'list_repo_branches',
-  'list_accounts',
   'list_credentials',
   'get_credential',
   // Ticket 48d14fff — prerequisite ("blocked-by ticket") surface.
@@ -122,6 +121,7 @@ const EXPECTED_TOOLS = [
 // batch_operations and get_board_summary.
 const REMOVED_TOOLS = [
   'list_boards', 'get_board', 'create_board', 'update_board', 'delete_board',
+  'list_accounts', 'get_account', 'create_account', 'update_account', 'delete_account',
   'get_board_summary', 'move_board_to_account', 'move_ticket_to_board',
   'create_column', 'update_column', 'delete_column',
   'add_board_lesson', 'list_board_lessons', 'update_board_lesson',

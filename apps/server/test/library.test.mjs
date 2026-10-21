@@ -29,12 +29,6 @@ const adminReq = { currentUser: { id: 'u-admin', role: 'admin' } };
 const memberReq = { currentUser: { id: 'u-member', role: 'user' } };
 const strangerReq = { currentUser: { id: 'u-stranger', role: 'user' } };
 
-// u-member는 ws-a의 member, u-stranger는 아무 데도 없다.
-const members = new Set(['u-member:ws-a']);
-const fakeRebac = {
-  check: async (sub, _rel, obj) => members.has(`${sub.id}:${obj.id}`),
-};
-
 function makeResource(repo, accountId, fileName, bytes) {
   return repo.save(repo.create({
     account_id: accountId,
@@ -67,20 +61,20 @@ describe('Library (자료실)', () => {
     await dataSource.initialize();
     libRepo = dataSource.getRepository(LibraryItem);
     resRepo = dataSource.getRepository(Resource);
-    controller = new LibraryController(libRepo, resRepo, fakeRebac);
+    controller = new LibraryController(libRepo, resRepo);
   });
 
   after(async () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('멤버가 아니면 목록도 생성도 403이다', async () => {
+  it('로그인 사용자는 멤버십 없이 목록을 읽고 존재하는 파일로만 생성한다', async () => {
     const list = response();
     await controller.list('ws-a', strangerReq, list);
-    assert.equal(list.statusCode, 403);
+    assert.equal(list.statusCode, 200);
     const create = response();
     await controller.create({ account_id: 'ws-a', resource_id: 'x', title: 't' }, strangerReq, create);
-    assert.equal(create.statusCode, 403);
+    assert.equal(create.statusCode, 400);
     const missing = response();
     await controller.list('', memberReq, missing);
     assert.equal(missing.statusCode, 400);

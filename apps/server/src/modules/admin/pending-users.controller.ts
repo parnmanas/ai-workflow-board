@@ -4,11 +4,8 @@ import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../../entities/User';
-import { Account } from '../../entities/Account';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
-import { ReBACService } from '../../services/rebac.service';
-import { ActivityService } from '../../services/activity.service';
 import { findOrFail } from '../../common/find-or-fail';
 
 @ApiBearerAuth('user-session')
@@ -18,9 +15,6 @@ import { findOrFail } from '../../common/find-or-fail';
 export class PendingUsersController {
   constructor(
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
-    private readonly rebacService: ReBACService,
-    private readonly activityService: ActivityService,
   ) {}
 
   // Lightweight count for the admin sidebar badge. Separate from GET / so
@@ -36,21 +30,8 @@ export class PendingUsersController {
   async list(@Res() res: Response) {
     const users = await this.userRepo.find({ where: { status: 'pending' } as any });
 
-    const result = await Promise.all(users.map(async user => {
-      const u = user as any;
-      let requested_account_name: string | null = null;
-      if (u.requested_account_id) {
-        const account = await this.accountRepo.findOne({ where: { id: u.requested_account_id } });
-        requested_account_name = account?.name || null;
-      }
-      return {
-        id: u.id,
-        name: u.name,
-        email: u.email,
-        requested_account_id: u.requested_account_id || null,
-        requested_account_name,
-        created_at: u.created_at,
-      };
+    const result = users.map(user => ({
+      id: user.id, name: user.name, email: user.email, status: user.status, created_at: user.created_at,
     }));
 
     return res.json({ users: result });
@@ -80,20 +61,4 @@ export class PendingUsersController {
     return res.json({ success: true });
   }
 
-  @Post(':id/assign')
-  async assign(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const { account_id, relation = 'member' } = body;
-    if (!account_id) return res.status(400).json({ error: 'account_id is required' });
-
-    await findOrFail(this.userRepo, { where: { id } }, 'User not found');
-    await findOrFail(this.accountRepo, { where: { id: account_id } }, 'Account not found');
-
-    await this.rebacService.grant(
-      { type: 'user', id },
-      relation,
-      { type: 'account', id: account_id },
-    );
-
-    return res.json({ success: true });
-  }
 }

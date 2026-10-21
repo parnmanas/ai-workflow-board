@@ -5,7 +5,6 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Credential } from '../../entities/Credential';
 import { AuthGuard } from '../../common/guards/auth.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
 import {
@@ -28,7 +27,7 @@ import { ProjectInputError, ProjectsService } from './projects.service';
 @ApiBearerAuth('user-session')
 @ApiTags('projects')
 @Controller('api')
-@UseGuards(AuthGuard, AccountGuard)
+@UseGuards(AuthGuard)
 export class ProjectsController {
   constructor(
     private readonly projects: ProjectsService,

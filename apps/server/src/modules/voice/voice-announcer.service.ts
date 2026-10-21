@@ -4,7 +4,6 @@ import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
-import { ReBACService } from '../../services/rebac.service';
 import { cliDescriptor } from '../../common/cli-catalog';
 import type { VoiceAnnouncementPayload, VoiceAnnouncementTarget } from '../../common/types/stream-events';
 import {
@@ -126,7 +125,6 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly voice: VoiceService,
     private readonly logService: LogService,
-    private readonly rebac: ReBACService,
     private readonly reports: OperatorReportService,
     private readonly presence: VoicePresenceService,
     private readonly support: VoiceSupportService,
@@ -463,8 +461,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
    */
   private async missionRecipients(mission: any): Promise<string[]> {
     if (mission.created_by_type === 'user' && mission.created_by) return [mission.created_by];
-    const owners = await this.rebac.listSubjects({ type: 'account', id: mission.account_id }, 'owner');
-    return Array.from(new Set(owners.filter((s: any) => s.type === 'user' && !!s.id).map((s: any) => s.id)));
+    const users = await this.dataSource.getRepository('User').find({ where: { status: 'active', role: 'admin' }, select: ['id'] });
+    return users.map(user => user.id);
   }
 
   // ─── 발행 · 소리 ─────────────────────────────────────────────────────────

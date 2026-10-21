@@ -10,7 +10,6 @@ import {
 import { log } from './logging.js';
 import { isKnownCli, KNOWN_CLI_IDS } from './clis/index.js';
 import type { AwbConfig } from './rest.js';
-import { normalizeAccountScope } from './account-scope.js';
 
 export interface AgentInfo {
   agent_id: string | null;
@@ -25,7 +24,7 @@ export interface AgentInfo {
 export function loadConfig(path: string = CONFIG_PATH): AwbConfig | null {
   if (!existsSync(path)) return null;
   try {
-    const raw = normalizeAccountScope(JSON.parse(readFileSync(path, 'utf8')));
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
     raw.delegation = { ...DELEGATION_DEFAULTS, ...(raw.delegation || {}) };
     const cli = String(raw.cli || DEFAULT_CLI_ID).toLowerCase().trim();
     raw.cli = cli || DEFAULT_CLI_ID;
@@ -44,7 +43,7 @@ export function loadConfig(path: string = CONFIG_PATH): AwbConfig | null {
 export function loadAgentInfo(path: string = AGENT_PATH): AgentInfo | null {
   if (!existsSync(path)) return null;
   try {
-    const raw = normalizeAccountScope(JSON.parse(readFileSync(path, 'utf8')));
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
     return raw && typeof raw === 'object' ? (raw as AgentInfo) : null;
   } catch {
     return null;

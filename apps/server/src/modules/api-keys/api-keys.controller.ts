@@ -2,7 +2,6 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentAccountId } from '../../common/decorators/current-account.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
@@ -11,7 +10,7 @@ import { ApiKeyService } from '../../services/api-key.service';
 @ApiBearerAuth('user-session')
 @ApiTags('api-keys')
 @Controller('api/keys')
-@UseGuards(PermissionGuard, AccountGuard)
+@UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_API_KEYS)
 export class ApiKeysController {
   constructor(private readonly apiKeyService: ApiKeyService) {}

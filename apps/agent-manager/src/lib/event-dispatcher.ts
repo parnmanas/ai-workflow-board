@@ -1,4 +1,3 @@
-import { normalizeAccountEnvelope } from './account-scope.js';
 // Routes parsed SSE events (trigger / chat_request / chat_room_message /
 // board_update / comment_mention / fs_request) to the appropriate session or
 // subagent manager. Extracted from EventStream so the SSE pipe can stay a thin
@@ -2519,7 +2518,7 @@ export class EventDispatcher {
     if (!this.#agentSessionRunner) return;
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse agent_session_request: ${err?.message ?? err}`);
       return;
@@ -2540,7 +2539,7 @@ export class EventDispatcher {
     if (!this.#terminalRunner) return;
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse terminal_request: ${err?.message ?? err}`);
       return;
@@ -2560,7 +2559,7 @@ export class EventDispatcher {
     if (!this.#memoryRunner) return;
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse cli_memory_request: ${err?.message ?? err}`);
       return;
@@ -2575,7 +2574,7 @@ export class EventDispatcher {
   async handleFsRequest(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse fs_request: ${err?.message ?? err}`);
       return;
@@ -2714,7 +2713,7 @@ export class EventDispatcher {
   async #replayColumnWorkflowTrigger(raw: string, ticketId: string, role: string): Promise<void> {
     let parsed: any;
     try {
-      parsed = normalizeAccountEnvelope(JSON.parse(raw));
+      parsed = JSON.parse(raw);
     } catch {
       return;
     }
@@ -2787,7 +2786,7 @@ export class EventDispatcher {
   ): Promise<void> {
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse trigger: ${err?.message ?? err}`);
       return;
@@ -4178,7 +4177,7 @@ export class EventDispatcher {
   async handleChatRequest(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse chat_request: ${err?.message ?? err}`);
       return;
@@ -4454,7 +4453,7 @@ export class EventDispatcher {
   async handleCommentMention(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse comment_mention: ${err?.message ?? err}`);
       return;
@@ -4940,7 +4939,7 @@ export class EventDispatcher {
 
   handleBoardUpdate(raw: string): void {
     try {
-      const ev = normalizeAccountEnvelope(JSON.parse(raw));
+      const ev = JSON.parse(raw);
       // entity_type: 'ticket' | 'comment' | 'child_ticket' etc.
       // action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed'
 
@@ -5064,7 +5063,7 @@ export class EventDispatcher {
   async handleChatRoomMessage(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = normalizeAccountEnvelope(JSON.parse(raw));
+      ev = JSON.parse(raw);
     } catch (err: any) {
       log(`Failed to parse chat_room_message: ${err?.message ?? err}`);
       return;

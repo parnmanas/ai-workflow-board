@@ -1,10 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { LogService } from '../../services/log.service';
-import { ReBACService } from '../../services/rebac.service';
 import { UserChannelDispatcherService } from '../../services/notification-providers';
 import { NotifyPayload } from '../../services/notification-providers/types';
 import { AWAITING_USER_STATUS } from './orchestration.constants';
@@ -71,7 +70,7 @@ export class OrchestrationConfirmNotifyService {
   constructor(
     @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
     private readonly dispatcher: UserChannelDispatcherService,
-    private readonly rebac: ReBACService,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly missions: OrchestrationMissionService,
     private readonly logService: LogService,
   ) {}
@@ -233,7 +232,7 @@ export class OrchestrationConfirmNotifyService {
 
       await this.recordNotifiedEvent(mission, step, kind, result);
     } catch (e: any) {
-      // 여기까지 온 예외는 수신자 해석(ReBAC 질의) 실패다. 게이트는 그대로 열려 있고
+      // 여기까지 온 예외는 수신자 해석(관리자 조회) 실패다. 게이트는 그대로 열려 있고
       // 미션 실행은 영향받지 않는다.
       this.logService.error(
         'Orchestration',
@@ -286,14 +285,8 @@ export class OrchestrationConfirmNotifyService {
     if (mission.created_by_type === 'user' && mission.created_by) {
       return [mission.created_by];
     }
-    const object = { type: 'account', id: mission.account_id };
-    const [owners, members] = await Promise.all([
-      this.rebac.listSubjects(object, 'owner'),
-      this.rebac.listSubjects(object, 'member'),
-    ]);
-    return Array.from(
-      new Set([...owners, ...members].filter((s) => s.type === 'user' && !!s.id).map((s) => s.id)),
-    );
+    const users = await this.dataSource.getRepository('User').find({ where: { status: 'active', role: 'admin' }, select: ['id'] });
+    return users.map(user => user.id);
   }
 
   /**

@@ -18,7 +18,6 @@ import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { AGENT_PATH, CONFIG_PATH } from './constants.js';
-import { normalizeAccountScope } from './account-scope.js';
 
 export interface SetupOptions {
   /** Override config.json target path. Default: $AWB_AGENT_MANAGER_HOME/config.json */
@@ -110,7 +109,7 @@ async function redeem(url: string, token: string, instanceId: string): Promise<R
     }
     throw new Error(`pair/redeem ${resp.status} ${resp.statusText}: ${detail || '(empty body)'}`);
   }
-  const body = normalizeAccountScope(await resp.json()) as RedeemResponse;
+  const body = await resp.json() as RedeemResponse;
   if (!body?.api_key || !body?.agent_id) {
     throw new Error(`pair/redeem returned malformed body: ${JSON.stringify(body)}`);
   }

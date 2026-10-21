@@ -19,7 +19,7 @@ const TicketsPage = lazy(() => import('./components/tickets/TicketsPage'));
 const ProjectsPage = lazy(() => import('./components/projects/ProjectsPage'));
 const LibraryPage = lazy(() => import('./components/LibraryPage'));const AdminPage = lazy(() => import('./components/admin/AdminPage'));
 const ChatPage = lazy(() => import('./components/ChatPage'));
-const AccountUsersPage = lazy(() => import('./components/AccountUsersPage'));
+const UsersPage = lazy(() => import('./components/UsersPage'));
 const AccountChannelsPage = lazy(() => import('./components/AccountChannelsPage'));
 const AccountApiKeysPage = lazy(() => import('./components/AccountApiKeysPage'));
 const AccountManagementPage = lazy(() => import('./components/AccountManagementPage'));
@@ -223,9 +223,8 @@ function AppContent() {
             <Route path="security" element={<AccountManagementPage kind="security" />} />
             <Route path="schedules" element={<AccountManagementPage kind="schedules" />} />
             <Route path="settings" element={<SettingsOverviewPage />} />
-            <Route path="settings/ownership" element={<AccountSettingsPage />} />
-            <Route path="settings/workspace" element={<GlobalRedirect to="settings/ownership" />} />
-            <Route path="settings/members" element={<AccountUsersPage />} />
+            <Route path="settings/defaults" element={<AccountSettingsPage />} />
+            <Route path="settings/users" element={<UsersPage />} />
             <Route path="settings/credentials" element={<AccountManagementPage kind="credentials" />} />
             <Route path="settings/channels" element={<AccountChannelsPage />} />
             <Route path="settings/api-keys" element={<AccountApiKeysPage />} />

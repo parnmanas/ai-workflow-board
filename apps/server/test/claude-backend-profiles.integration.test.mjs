@@ -19,7 +19,6 @@ let baseUrl;
 let app;
 let ds;
 let auth;
-let rebac;
 let adminToken;
 let ownerToken;
 let memberToken;
@@ -66,13 +65,11 @@ before(async () => {
   const { getDataSourceToken } = await import('@nestjs/typeorm');
   const { AppModule } = await import('../dist/app.module.js');
   const { AuthService } = await import('../dist/services/auth.service.js');
-  const { ReBACService } = await import('../dist/services/rebac.service.js');
   app = await NestFactory.create(AppModule, { logger: false });
   await app.listen(Number(process.env.PORT), '0.0.0.0');
   baseUrl = makeBaseUrl(app.getHttpServer().address().port);
   ds = app.get(getDataSourceToken());
   auth = app.get(AuthService);
-  rebac = app.get(ReBACService);
 
   ({ token: adminToken } = await createUser('profile-admin', 'admin'));
   ({ user: owner, token: ownerToken } = await createUser('profile-owner'));
@@ -89,8 +86,6 @@ before(async () => {
       model: 'legacy-model',
     }]),
   }));
-  await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'account', id: account.id });
-  await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'account', id: account.id });
 
   // RuntimeSpec 검증(POST /runtime-specs/validate)은 Host 존재부터 본다.
   host = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({

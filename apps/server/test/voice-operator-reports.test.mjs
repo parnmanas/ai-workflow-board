@@ -77,7 +77,7 @@ function setup(operators, { prompt, proposals = [] } = {}) {
   const presence = new VoicePresenceService();
   const reports = new OperatorReportService(dataSource, prompter, log);
   const support = new VoiceSupportService(dataSource, log);
-  const announcer = new VoiceAnnouncerService(dataSource, voice, log, { listSubjects: async () => [] }, reports, presence, support);
+  const announcer = new VoiceAnnouncerService(dataSource, voice, log, reports, presence, support);
   announcer.onModuleInit();
   const heard = [];
   const onAnnounce = (p) => heard.push(p);

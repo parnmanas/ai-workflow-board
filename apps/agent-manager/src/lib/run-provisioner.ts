@@ -1,4 +1,3 @@
-import { normalizeAccountScope } from './account-scope.js';
 // QA/security run-workspace provisioner (ticket 25db3cc6 — 작업폴더 옵션화 4/5).
 //
 // Runs JUST BEFORE a QA/security run subagent is spawned, driven by the
@@ -200,7 +199,7 @@ const RUN_PROVISION_KINDS: RunProvisionKind[] = ['qa', 'security', 'action', 'ch
 
 export function parseRunProvision(raw: unknown): RunProvision | null {
   if (!raw || typeof raw !== 'object') return null;
-  const o = normalizeAccountScope(raw) as Record<string, unknown>;
+  const o = raw as Record<string, unknown>;
   const kind = RUN_PROVISION_KINDS.includes(o.kind as RunProvisionKind) ? (o.kind as RunProvisionKind) : null;
   const run_id = typeof o.run_id === 'string' ? o.run_id : '';
   const account_id = typeof o.account_id === 'string' ? o.account_id : '';

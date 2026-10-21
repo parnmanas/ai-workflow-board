@@ -5,7 +5,7 @@
 // 이고, 엔진과 맞물린 동작(중복 방지·loop 재진입·판정 후 침묵)은 qa-flow e2e 가 잰다.
 //
 // 이 파일이 지키는 계약:
-//   - 수신자 해석: 사람 소유자 우선, 에이전트가 만든 미션은 계정 owner/member.
+//   - 수신자 해석: 사람 소유자 우선, 에이전트가 만든 미션은 활성 관리자.
 //   - payload 에 미션명·질문(instructions)·판정 화면 링크가 실제로 들어간다(요구사항 2).
 //   - 어떤 실패도 던지지 않는다(요구사항 6) — dispatcher 가 던져도, ReBAC 이 던져도,
 //     선점 UPDATE 가 실패해도 호출자에게 예외가 새지 않는다.
@@ -98,10 +98,14 @@ function makeService(ServiceClass, overrides = {}) {
       return overrides.dispatchResult ?? { sent: 1, failed: 0 };
     },
   };
-  const rebac = {
-    async listSubjects(object, relation) {
-      if (overrides.rebacThrows) throw new Error('rebac down');
-      return (overrides.subjects ?? {})[relation] ?? [];
+  const dataSource = {
+    getRepository(name) {
+      assert.equal(name, 'User');
+      return { async find(options) {
+        assert.deepEqual(options, { where: { status: 'active', role: 'admin' }, select: ['id'] });
+        if (overrides.recipientLookupThrows) throw new Error('user lookup failed');
+        return overrides.admins ?? [];
+      } };
     },
   };
   const missions = {
@@ -115,7 +119,7 @@ function makeService(ServiceClass, overrides = {}) {
     error: (...a) => logs.error.push(a),
   };
 
-  const svc = new ServiceClass(stepRepo, dispatcher, rebac, missions, logService);
+  const svc = new ServiceClass(stepRepo, dispatcher, dataSource, missions, logService);
   return { svc, calls, updates, events, logs, claims };
 }
 
@@ -178,19 +182,10 @@ test('instructions 가 비면 step 제목으로 대체한다 — 무엇을 묻�
   assert.match(calls[0].payload.body, /Does the page look right\?/);
 });
 
-test('에이전트가 만든 미션은 계정 owner/member 로 넓힌다 (중복 제거)', async () => {
+test('에이전트가 만든 미션은 활성 관리자 로 넓힌다 (중복 제거)', async () => {
   const ServiceClass = await loadService();
   const { svc, calls } = makeService(ServiceClass, {
-    subjects: {
-      owner: [{ type: 'user', id: 'u-owner' }],
-      // 같은 사람이 두 relation 에 있어도 한 번만, agent subject 는 제외.
-      member: [
-        { type: 'user', id: 'u-owner' },
-        { type: 'user', id: 'u-member' },
-        { type: 'agent', id: 'a-1' },
-        { type: 'user', id: '' },
-      ],
-    },
+    admins: [{ id: 'u-owner' }, { id: 'u-member' }],
   });
 
   svc.scheduleGateNotice({ ...MISSION, created_by_type: 'agent', created_by: 'agent-77' }, STEP);
@@ -199,14 +194,14 @@ test('에이전트가 만든 미션은 계정 owner/member 로 넓힌다 (중복
   assert.deepEqual(
     calls.map((c) => c.userId).sort(),
     ['u-member', 'u-owner'],
-    'agent subject 와 빈 id 는 빠지고, 중복 사용자는 한 번만 받는다',
+    '활성 관리자에게 알린다',
   );
 });
 
 test('사람 소유자가 있으면 계정로 넓히지 않는다 — 소음을 만들지 않는다', async () => {
   const ServiceClass = await loadService();
   const { svc, calls } = makeService(ServiceClass, {
-    subjects: { owner: [{ type: 'user', id: 'u-owner' }], member: [{ type: 'user', id: 'u-member' }] },
+    admins: [{ id: 'u-owner' }, { id: 'u-member' }],
   });
   svc.scheduleGateNotice(MISSION, STEP);
   await svc.settled();
@@ -217,7 +212,7 @@ test('사람 소유자가 있으면 계정로 넓히지 않는다 — 소음을 
 test('수신자가 하나도 없어도 조용히 끝난다 (요구사항 6)', async () => {
   const ServiceClass = await loadService();
   const { svc, calls, events } = makeService(ServiceClass, {
-    subjects: { owner: [], member: [] },
+    admins: [],
   });
   svc.scheduleGateNotice({ ...MISSION, created_by_type: 'agent', created_by: 'agent-77' }, STEP);
   await svc.settled();
@@ -252,10 +247,10 @@ test('provider 가 전부 실패해도(sent=0) 예외가 아니라 기록으로 
   assert.equal(events[0].data.failed, 2);
 });
 
-test('수신자 해석(ReBAC)이 던져도 예외가 새지 않는다', async () => {
+test('수신자 조회이 던져도 예외가 새지 않는다', async () => {
   const ServiceClass = await loadService();
   const { svc, calls, logs } = makeService(ServiceClass, {
-    rebacThrows: true,
+    recipientLookupThrows: true,
   });
   svc.scheduleGateNotice({ ...MISSION, created_by_type: 'agent', created_by: 'agent-77' }, STEP);
   await svc.settled();
@@ -366,7 +361,7 @@ test('settled() 는 진행 중인 배경 발송을 모두 기다린다', async (
   const ServiceClass = await loadService();
   let release;
   const gate = new Promise((r) => { release = r; });
-  const { svc, calls } = makeService(ServiceClass, { subjects: {} });
+  const { svc, calls } = makeService(ServiceClass, { admins: [] });
   // dispatchForUser 를 붙잡아 두고 settled() 가 실제로 기다리는지 본다.
   const slowDispatcher = {
     async dispatchForUser(userId, notifyKey, payload) {

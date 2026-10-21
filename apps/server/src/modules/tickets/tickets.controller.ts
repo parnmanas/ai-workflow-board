@@ -9,8 +9,6 @@ import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
 import { AuthGuard } from '../../common/guards/auth.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
-import { TicketAccountGuard } from './ticket-account.guard';
 import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -53,7 +51,7 @@ import { parseTicketStatus, TICKET_STATUSES, type TicketStatus } from '../../com
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
 @Controller('api')
-@UseGuards(AuthGuard, AccountGuard, TicketAccountGuard)
+@UseGuards(AuthGuard)
 export class TicketsController {
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,

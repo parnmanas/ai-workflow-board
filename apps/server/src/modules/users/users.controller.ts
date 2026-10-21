@@ -9,7 +9,6 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { resolvePermissions } from '../../common/types/permissions';
 import { AuthService } from '../../services/auth.service';
-import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 
 @ApiBearerAuth('user-session')
@@ -21,29 +20,11 @@ export class UsersController {
   constructor(
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly authService: AuthService,
-    private readonly rebacService: ReBACService,
   ) {}
 
   @Get()
   async list(@Query('account_id') accountId: string, @Res() res: Response) {
-    let users: User[];
-
-    if (accountId) {
-      // Account-scoped: get members via ReBAC tuples
-      const [members, owners] = await Promise.all([
-        this.rebacService.listSubjects({ type: 'account', id: accountId }, 'member'),
-        this.rebacService.listSubjects({ type: 'account', id: accountId }, 'owner'),
-      ]);
-      const userIds = [...new Set(
-        [...members, ...owners].filter(s => s.type === 'user').map(s => s.id),
-      )];
-      users = userIds.length > 0
-        ? await this.userRepo.find({ where: { id: In(userIds) }, order: { name: 'ASC' } })
-        : [];
-    } else {
-      // Global: all users (admin view)
-      users = await this.userRepo.find({ order: { name: 'ASC' } });
-    }
+    const users = await this.userRepo.find({ order: { name: 'ASC' } });
 
     const enriched = users.map(u => {
       const customPerms = u.permissions ? JSON.parse(u.permissions || '[]') : [];

@@ -6,7 +6,6 @@ import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
   ARTIFACT_REF_TYPES, ArtifactRefType, UUID_RE, formatArtifactRef, formatUnavailableArtifact, ticketPath,
 } from '../../common/artifact-ref';
-import { ReBACService } from '../../services/rebac.service';
 import { AccountAccessService } from '../../services/account-access.service';
 
 export interface ResolvedArtifactRef {
@@ -28,7 +27,6 @@ export class ArtifactRefsService {
     @InjectRepository(WorkflowFunction) private readonly functions: Repository<WorkflowFunction>,
     @InjectRepository(AutomationSchedule) private readonly schedules: Repository<AutomationSchedule>,
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
-    private readonly rebac: ReBACService,
     private readonly access: AccountAccessService,
   ) {}
 

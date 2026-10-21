@@ -1,75 +1,50 @@
-# Work ownership
+# Shared work and instance defaults
 
-AWB opens work directly: `/sessions`, `/tickets`, `/projects`, `/teams`,
-`/missions` and `/chat`. There is no workspace selector and no required
-workspace segment in a work URL. Tags and projects classify tickets; a project
-continues to represent one repository and its main clone folder on each host.
+Sessions, tickets, projects, teams and missions share one installation. There
+are no user-defined work accounts, ownership memberships, or account selectors.
+Active users can access work after authentication; feature permissions and
+administrator-only configuration still apply. Chat-room participation, runtime
+host authorization and credential-secret access remain separate controls.
 
-`Account` is the ownership and administration boundary. It carries memberships,
-credentials, shared catalogs, execution defaults, dispatch controls and budgets.
-It is managed at `/settings/ownership`; it does not contain a separate copy of
-the work interface. Existing workspace IDs become account IDs without merging
-accounts or their permissions. The first accessible account is the automatic
-creation default; a supplied authorized owner or a selected project/team can
-choose the owner of new work.
+`/settings/defaults` manages shared dispatch and execution defaults.
+`/settings/users` manages login users, approval and feature permissions. Account
+creation/deletion, membership assignment and the account CRUD MCP tools have
+been removed. Approving a user no longer requires assigning a workspace.
 
-## Authorization and discovery
+## Data transition
 
-Canonical work list endpoints aggregate accessible accounts: tickets, projects,
-chat rooms, teams, missions, actions, automation schedules, QA and Security.
-The Function, Credential and Resource catalog pages do the same and add the
-Global rows. These pages have no account/scope picker or owner labels. New
-catalog items use Global automatically when the caller may manage Global items;
-otherwise they use the first accessible account. Existing items retain their
-ownership on edit. An explicit `account_id` on those list endpoints
-keeps the single-account view (that account + Global) that pickers binding one
-account's work rely on (see [catalog scopes](catalog-scopes.md)).
-Unread counters and mention inboxes use the same accessible ownership set.
-ID-addressed requests resolve the actual resource owner and check membership;
-a page's default account cannot grant access or change an existing owner.
-Teams also omit scope and allowed-account selectors: new teams use the automatic
-account, and editing preserves existing ownership and access policy. Shared
-Memory uses the automatic account without offering the old account list.
-Account administration distinguishes members from owners: members can read,
-owners or administrators can change settings and membership. Resource catalogs
-still have explicit Global (`account_id NULL`) and Account scopes. Global
-credentials keep their additional administration permission.
+Migration `1760000000094-SingleInstanceWork` removes the previous accounts and
+membership tuples without deleting their tickets, comments, projects,
+credentials, attachments, missions or native-session bindings. Business object
+IDs, contents and timestamps are retained. Shared knowledge memory from the old
+accounts is concatenated into the shared defaults without discarding its text. Usage rollups are summed after
+removing the former ownership grouping. Conflicting catalog keys abort the
+transaction instead of silently replacing a definition.
 
-User SSE streams filter events with an ownership account against the user's
-accessible accounts, then apply existing room/recipient filters. Membership changes
-close browser streams so reconnect resolves current permissions. Native session
-events also carry their pinned owner internally before delivery. Host control
-and runtime permissions retain their existing contracts. Runtime Hosts and
-native CLI history remain machine-level resources; account membership does not
-replace permission to operate a host.
+Per-account CLI defaults are reset; credential records and each existing
+session's pinned configuration remain intact. Shared dispatch defaults start
+with the application's defaults. Native CLI homes and transcript files are not
+renamed or deleted.
 
-## Native sessions
+## Remaining internal storage
 
-The native session identity remains `(Runtime Host, CLI, native session ID)`.
-AWB stores no session transcript. `agent_session_executions` stores only the
-execution binding: owner, credential ID, config defaults and runtime profile.
-The first open pins those settings. Subsequent prompts, restart and reopen use
-the pinned binding, including after a server restart or a change of account
-creation defaults. An explicit session config/mode change updates the binding.
-Unbound native sessions acquire a binding when first opened through AWB; existing
-native IDs and files are not rewritten.
+The execution pipeline still carries `account_id` and reads defaults from the
+`accounts` table. This is transitional implementation, not a selectable owner
+or a permission boundary: the only internal execution key is
+`00000000-0000-4000-8000-000000000001`. Do not reintroduce account creation or
+membership around it. Removing these remaining fields requires a separate
+server/manager contract change; this transition does not claim that physical
+schema cleanup is complete.
 
-## Compatibility and extension
+Built-in/global catalog rows can still have a NULL internal key, while custom
+rows use the shared execution key. This distinction does not partition users.
 
-The schema uses `accounts`, `account_id`, and `automation_schedules`. REST and MCP
-use `X-Account-Id`, account tools and automation schedule tools. Legacy
-`/ws/:wsId/...` UI bookmarks redirect with entity IDs, query strings and hashes
-preserved. Legacy REST owner fields, headers, account administration routes and
-MCP tool calls are normalized at the transport boundary. Existing installed
-managers receive legacy ownership aliases; newer managers read old configuration
-and write the canonical account fields.
+Runtime REST/MCP/SSE no longer translates workspace owner aliases. Historical
+database migration code remains available to preserve data during upgrades.
+Filesystem `workspace_folder`, CLI `workspace-write`, and CLI trust still refer
+to actual working directories.
 
-Filesystem `workspace_folder`, CLI `workspace-write` and trust settings still
-mean an execution directory. They are independent of work ownership and retain
-their existing names and behavior. Historical migration names and index names
-also remain where required for persisted migration history.
-
-Long-lived reusable task context can be introduced independently in the future.
-This change introduces no new context container and does not make one mandatory.
-For DB upgrade and rollback instructions see
-[the migration runbook](runbooks/account-ownership-migration.md).
+Back up the database before upgrading. Apply through the regular boot or
+offline migration entry point; do not call the old account deletion API, which
+used to cascade-delete work. Rollback requires restoring the backup together
+with the previous server build.

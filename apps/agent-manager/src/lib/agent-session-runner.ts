@@ -1,6 +1,5 @@
 import { SESSION_PERMISSION_KEY, SESSION_WORKFLOW_KEY, validateSessionLaunchOptions } from './session-launch-options.js';
 import { SessionWorkspaces, sessionWorkflowInstruction, type SessionWorkspace } from './session-workspace.js';
-import { normalizeAccountScope } from './account-scope.js';
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
 // 세션의 단위는 **(이 Runtime Host, CLI, CLI 네이티브 세션 id)** 다. AWB 서버는
@@ -623,7 +622,6 @@ export class AgentSessionRunner {
   // ─── 디스패처 진입점 ──────────────────────────────────────────────────
 
   async handle(request: AgentSessionRequest): Promise<void> {
-    request = normalizeAccountScope(request);
     const cli = String(request.cli || '').toLowerCase();
     const sessionId = request.session_id || '';
     const tag = `[agent-session ${cli}${sessionId ? ` ${sessionId.slice(0, 8)}` : ''}]`;

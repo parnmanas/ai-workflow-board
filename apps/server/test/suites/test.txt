@@ -31,7 +31,6 @@ test/agent-session-read-status-race.test.mjs
 test/agent-session-rpc-redeliver.test.mjs
 test/agent-sessions.test.mjs
 test/agent-templates.test.mjs
-test/api-keys-leak.test.mjs
 test/archive-exclusion-guard.test.mjs
 test/attachment-truncation-guard.test.mjs
 test/automation-schedule-action-dispatch.test.mjs
@@ -43,7 +42,6 @@ test/boot-concurrent-sessions.test.mjs
 test/boot-helper-port-isolation.test.mjs
 test/boot-port-guard.test.mjs
 test/catalog-list-aggregation.test.mjs
-test/channels-leak.test.mjs
 test/chat-attachments-guard.test.mjs
 test/chat-dm-promotion.test.mjs
 test/chat-messages-account-boundary.test.mjs
@@ -220,6 +218,7 @@ test/security-run-reaper-behavior.test.mjs
 test/security-schedule-behavior.test.mjs
 test/security-schedule-scope.test.mjs
 test/server-sigterm-exits.test.mjs
+test/single-instance-work.test.mjs
 test/skill-global-scope.test.mjs
 test/spa-fallback-assets-404.test.mjs
 test/spa-fallback-dotsegment.test.mjs
@@ -236,7 +235,6 @@ test/test-registration-merge.test.mjs
 test/ticket-dispatch.test.mjs
 test/ticket-status-work-order.test.mjs
 test/ticket-unread-badge.test.mjs
-test/tickets-leak.test.mjs
 test/user-channel-dispatcher.test.mjs
 test/user-mention-sse-flat-shape-guard.test.mjs
 test/voice-announcer.test.mjs
@@ -245,7 +243,6 @@ test/voice-http.test.mjs
 test/voice-operator-answers.test.mjs
 test/voice-operator-proposals.test.mjs
 test/voice-operator-reports.test.mjs
-test/voice-operator-scope.test.mjs
 test/voice-operators.test.mjs
 test/voice-speakable.test.mjs
 test/voice-support-switch.test.mjs

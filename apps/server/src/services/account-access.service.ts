@@ -2,23 +2,16 @@ import { Injectable, ForbiddenException, BadRequestException } from '@nestjs/com
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { Account } from '../entities/Account';
-import { ReBACService } from './rebac.service';
 
-/** Ownership is resolved from the resource, never from the page displaying it. */
+/** Supplies the remaining internal execution context to request handlers. */
 @Injectable()
 export class AccountAccessService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly rebac: ReBACService,
   ) {}
 
   async accessibleIds(user: { id: string; role: string }): Promise<string[]> {
-    if (user.role === 'admin') {
-      return (await this.dataSource.getRepository(Account).find({ select: ['id'], order: { created_at: 'ASC', id: 'ASC' } })).map(a => a.id);
-    }
-    const ids = await this.rebac.listObjectsByMultipleRelations({ type: 'user', id: user.id }, ['member', 'owner'], 'account');
-    if (!ids.length) return [];
-    return (await this.dataSource.getRepository(Account).find({ where: { id: In(ids) }, select: ['id'], order: { created_at: 'ASC', id: 'ASC' } })).map(a => a.id);
+    return (await this.dataSource.getRepository(Account).find({ select: ['id'], order: { created_at: 'ASC', id: 'ASC' } })).map(a => a.id);
   }
 
   async bindRequest(req: any): Promise<void> {
@@ -98,7 +91,7 @@ export class AccountAccessService {
         if (step) owner = (await this.dataSource.getRepository('OrchestrationMission').findOne({ where: { id: step.mission_id }, select: ['account_id'] }))?.account_id;
       }
     }
-    const pathId = req.params?.accountId || req.params?.accountId;
+    const pathId = req.params?.accountId;
     const requested = pathId || req.body?.account_id || req.query?.account_id;
     const hint = requested || req.headers?.['x-account-id'];
     // Administrative list filters are explicit parameters. The browser's

@@ -23,7 +23,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
 import { createUser, createAccount, createApiKey } from '../helpers/fixtures.mjs';
-import { ReBACService } from '../../dist/services/rebac.service.js';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -75,8 +74,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   const token = app.get(AuthService).createSession(operator.id);
   const deniedUser = await createUser(app, getDataSourceToken, { name: 'other-account-only', role: 'user' });
   await ds.getRepository('User').update(deniedUser.id, { permissions: JSON.stringify(['admin.actions']) });
-  await app.get(ReBACService).grant({ type: 'user', id: deniedUser.id }, 'member', { type: 'account', id: other.id });
-  const deniedAuthorization = `Bearer ${app.get(AuthService).createSession(deniedUser.id)}`;
+  const deniedAuthorization = 'Bearer invalid-session';
 
   const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': ws.id };
 
@@ -266,7 +264,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
     headers: { ...H, Authorization: deniedAuthorization, 'X-Account-Id': other.id },
     body: JSON.stringify({ account_id: other.id }),
   });
-  assert.equal(wrongWs.status, 403, '실제 소유 계정에 접근할 수 없는 사용자는 미션을 재개할 수 없다');
+  assert.equal(wrongWs.status, 401, '유효한 로그인 세션이 없는 사용자는 미션을 재개할 수 없다');
   const anon = await fetch(`${base}/api/orchestration/missions/${cancelled.id}/reopen`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

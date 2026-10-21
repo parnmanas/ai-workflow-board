@@ -2,7 +2,6 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AdminGuard } from '../../common/guards/admin.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
 import { CurrentAccountId } from '../../common/decorators/current-account.decorator';
 import { AgentUsageService } from '../agents/agent-usage.service';
 
@@ -36,7 +35,7 @@ import { AgentUsageService } from '../agents/agent-usage.service';
 @ApiBearerAuth('user-session')
 @ApiTags('admin')
 @Controller('api/admin/workflow-health')
-@UseGuards(AdminGuard, AccountGuard)
+@UseGuards(AdminGuard)
 export class WorkflowHealthController {
   constructor(private readonly usage: AgentUsageService) {}
 

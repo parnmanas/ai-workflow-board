@@ -261,9 +261,9 @@ export default function Sidebar({
           exact: true,
         },
         ...(canAdmin
-          ? [{ key: 'ownership-settings', path: `${basePath}/settings/ownership`, label: 'Ownership', icon: 'O' }]
+          ? [{ key: 'work-defaults', path: `${basePath}/settings/defaults`, label: 'Work defaults', icon: 'O' }]
           : []),
-        { key: 'members', path: `${basePath}/settings/members`, label: 'Members', icon: 'M' },
+        { key: 'users', path: `${basePath}/settings/users`, label: 'Users', icon: 'U' },
         { key: 'credentials', path: `${basePath}/settings/credentials`, label: 'Credentials', icon: 'C' },
         { key: 'channels', path: `${basePath}/settings/channels`, label: 'Channels', icon: 'N' },
         { key: 'api-keys', path: `${basePath}/settings/api-keys`, label: 'API Keys', icon: 'K' },

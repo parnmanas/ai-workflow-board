@@ -31,12 +31,16 @@ const TTS_READY = {
   'voice.stt.languages': 'ko,en',
 };
 
-function setup(settings = TTS_READY, { missions = {}, steps = {}, owners = [] } = {}) {
+function setup(settings = TTS_READY, { missions = {}, steps = {}, admins = [] } = {}) {
   const rows = Object.entries(settings).map(([key, value]) => ({
     key, value: key.endsWith('.api_key') && value ? encrypt(value) : value,
   }));
   const repos = {
     // operator 가 없는 사이트 — 세션 소식은 예전처럼 템플릿으로 직접 알린다(작업 보고는 voice-operator-reports.test.mjs).
+    User: { find: async (options) => {
+      assert.deepEqual(options, { where: { status: 'active', role: 'admin' }, select: ['id'] });
+      return admins;
+    } },
     SystemSetting: { find: async () => rows, findOne: async () => null },
     OrchestrationMission: { findOne: async ({ where }) => missions[where.id] ?? null },
     OrchestrationStep: { findOne: async ({ where }) => steps[`${where.mission_id}/${where.step_key}`] ?? null },
@@ -50,10 +54,9 @@ function setup(settings = TTS_READY, { missions = {}, steps = {}, owners = [] } 
     synthCalls.push(JSON.parse(init.body));
     return new Response(Buffer.from('mp3'), { status: 200, headers: { 'content-type': 'audio/mpeg' } });
   };
-  const rebac = { listSubjects: async () => owners };
   invalidateOperatorCache();
   const reports = new OperatorReportService(dataSource, { promptOnBehalf: async () => { throw new Error('no operator to prompt'); } }, log);
-  const announcer = new VoiceAnnouncerService(dataSource, voice, log, rebac, reports, new VoicePresenceService(), new VoiceSupportService(dataSource, log));
+  const announcer = new VoiceAnnouncerService(dataSource, voice, log, reports, new VoicePresenceService(), new VoiceSupportService(dataSource, log));
   announcer.onModuleInit();
   const heard = [];
   const onAnnounce = (p) => heard.push(p);
@@ -132,13 +135,13 @@ test('waiting for the user is announced once per burst', async (t) => {
   assert.match(heard[0].text, /확인을 기다리고 있어요\.$/);
 });
 
-test('missions: terminal and decision events only, to the human owner or else the account owners', async (t) => {
+test('missions: terminal and decision events only, to the human owner or else the active administrators', async (t) => {
   const missions = {
     m1: { id: 'm1', account_id: 'w1', title: '음성 게이트웨이', created_by_type: 'user', created_by: 'u7', result_summary: '세 단계 모두 끝났고 PR #23 을 열었어요.' },
     m2: { id: 'm2', account_id: 'w1', title: '야간 점검', created_by_type: 'agent', created_by: 'agent-1', result_summary: '' },
   };
   const steps = { 'm2/approve': { title: '배포 승인' } };
-  const { heard, teardown } = setup(TTS_READY, { missions, steps, owners: [{ type: 'user', id: 'owner-1' }, { type: 'agent', id: 'x' }] });
+  const { heard, teardown } = setup(TTS_READY, { missions, steps, admins: [{ id: 'owner-1' }] });
   t.after(teardown);
   const missionUpdate = (mission_id, type, extra = {}) => activityEvents.emit('orchestration_update', {
     mission_id, account_id: 'w1', title: missions[mission_id].title, status: 'running',
@@ -152,7 +155,7 @@ test('missions: terminal and decision events only, to the human owner or else th
   assert.equal(heard[0].user_id, 'u7');
   assert.equal(heard[0].text, "'음성 게이트웨이' 미션이 끝났어요. 단계 3개 중 3개가 끝났어요. 세 단계 모두 끝났고 PR #23 을 열었어요.");
   assert.deepEqual(heard[0].target, { type: 'mission', account_id: 'w1', mission_id: 'm1' });
-  assert.equal(heard[1].user_id, 'owner-1', 'agent-created mission → account owners (users only)');
+  assert.equal(heard[1].user_id, 'owner-1', 'agent-created mission → active administrators');
   assert.equal(heard[1].text, "'야간 점검' 미션에서 결정이 필요해요. 단계: 배포 승인.");
 });
 

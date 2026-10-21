@@ -78,10 +78,6 @@
  *   - 'deny'   → (UNCLASSIFIED_TIER) rejected unconditionally; caller/scope
  *                is never consulted. See the branch discussion above.
  *
- * Deliberately NOT tiered here (left to their existing per-file logic):
- * update_account (an account-bound non-full-scope caller is intentionally
- * allowed — see account-tools.ts's callerCanAccessAccount usage).
- * (P4c-3b: move_agent_to_workspace no longer exists, so its carve-out is gone.)
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -113,7 +109,6 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // behavior.
   delete_user: 'full',
   // P4c-3b: create_agent / update_agent / delete_agent no longer exist.
-  delete_account: 'full',
 
   // Same file family, but their own logic deliberately allows a
   // non-full-scope caller through (e.g. a 'write'-scoped key minting a
@@ -296,23 +291,23 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'complete_action_run', 'complete_qa_run', 'complete_security_run',
   'correct_confirmed_ticket_duplicate', 'create_api_key', 'create_channel', 'create_chat_room',
   'create_child_ticket', 'create_qa_scenario', 'create_qa_schedule', 'create_security_profile',
-  'create_security_schedule', 'create_ticket', 'create_user', 'create_account',
+  'create_security_schedule', 'create_ticket', 'create_user',
   'create_automation_schedule', 'decide_ticket_duplicate', 'delete_action', 'delete_api_key',
   'delete_channel', 'delete_chat_message_attachment', 'delete_child_ticket', 'delete_function',
   'delete_qa_scenario', 'delete_qa_schedule', 'delete_resource', 'delete_security_profile',
   'delete_security_schedule', 'delete_ticket', 'delete_ticket_attachment', 'delete_user',
-  'delete_account', 'delete_automation_schedule', 'embed_resources', 'execute_function',
+  'delete_automation_schedule', 'embed_resources', 'execute_function',
   'fetch_github_info', 'get_action', 'get_api_key', 'get_chat_room_messages', 'get_function',
   'get_latest_artifact', 'get_my_tickets', 'get_qa_batch', 'get_qa_run', 'get_qa_scenario',
   'get_qa_schedule', 'get_recent_activity', 'get_resource', 'get_security_batch',
   'get_security_profile', 'get_security_run', 'get_security_schedule', 'get_ticket',
-  'get_ticket_activity', 'get_ticket_attachment', 'get_user', 'get_account',
+  'get_ticket_activity', 'get_ticket_attachment', 'get_user',
   'get_automation_schedule', 'list_action_runs', 'list_actions', 'list_api_keys',
   'list_archived_tickets', 'list_channels', 'list_chat_rooms', 'list_claude_backend_profiles',
   'list_function_runs', 'list_functions', 'list_qa_runs', 'list_qa_scenarios', 'list_qa_schedules',
   'list_repo_branches', 'list_resources', 'list_security_profiles', 'list_security_runs',
   'list_security_schedules', 'list_ticket_attachments', 'list_ticket_prerequisites', 'list_users',
-  'list_accounts', 'list_automation_schedules', 'move_ticket', 'pend_ticket',
+  'list_automation_schedules', 'move_ticket', 'pend_ticket',
   'propose_skill_change', 'qa_run_heartbeat', 'record_decision', 'record_outreach_classification',
   'record_qa_step', 'record_security_finding', 'refresh_security_checklist',
   'register_build_artifact', 'release_ticket', 'remove_ticket_prerequisite',
@@ -325,7 +320,7 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'unarchive_ticket', 'unpend_ticket', 'update_api_key', 'update_channel', 'update_child_ticket',
   'update_claude_backend_profile', 'update_qa_scenario', 'update_qa_schedule',
   'update_security_profile', 'update_security_schedule', 'update_ticket', 'update_user',
-  'update_account', 'update_automation_schedule', 'upsert_claude_backend_profile', 'whoami',
+  'update_automation_schedule', 'upsert_claude_backend_profile', 'whoami',
   // Orchestration mode (팀 기반 자율 업무 오케스트레이션). These are listed here
   // rather than in TOOL_AUTHZ_TABLE because none of them is gated on API-key
   // scope: every mutating one checks the CALLING AGENT against the mission's

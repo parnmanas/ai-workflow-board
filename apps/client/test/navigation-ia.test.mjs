@@ -66,8 +66,8 @@ test('the main chat surface does not duplicate the sidebar room list', () => {
 
 test('settings remain one click away and own canonical nested routes', () => {
   for (const segment of [
-    'ownership',
-    'members',
+    'defaults',
+    'users',
     'credentials',
     'channels',
     'api-keys',

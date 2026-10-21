@@ -18,7 +18,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
 import { createUser, createAccount, createApiKey } from '../helpers/fixtures.mjs';
-import { ReBACService } from '../../dist/services/rebac.service.js';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -72,8 +71,7 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   const token = app.get(AuthService).createSession(operator.id);
   const deniedUser = await createUser(app, getDataSourceToken, { name: 'other-account-only', role: 'user' });
   await ds.getRepository('User').update(deniedUser.id, { permissions: JSON.stringify(['admin.actions']) });
-  await app.get(ReBACService).grant({ type: 'user', id: deniedUser.id }, 'member', { type: 'account', id: other.id });
-  const deniedAuthorization = `Bearer ${app.get(AuthService).createSession(deniedUser.id)}`;
+  const deniedAuthorization = 'Bearer invalid-session';
 
   const H = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id };
 
@@ -208,7 +206,7 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   const crossWs = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?account_id=${other.id}`, {
     headers: { ...H, Authorization: deniedAuthorization, 'X-Account-Id': other.id },
   });
-  assert.equal(crossWs.status, 403, '실제 소유 계정에 접근할 수 없는 사용자는 증거를 읽을 수 없다');
+  assert.equal(crossWs.status, 401, '유효한 로그인 세션이 없는 사용자는 증거를 읽을 수 없다');
   const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/attachments/${pngId}?account_id=${ws.id}`);
   assert.ok(anon.status === 401 || anon.status === 403);
   const viaChat = await fetch(`${base}/api/chat-rooms/${buildRoom.id}/attachments/${pngId}`, { headers: H });

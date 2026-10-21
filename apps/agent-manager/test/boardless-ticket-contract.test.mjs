@@ -373,9 +373,9 @@ test('dispatcher: status trigger one-shot prompt and runtime effort (effort_pres
 });
 
 for (const persistent of [true, false]) {
-  test(`dispatcher: legacy owner field preserves project credential scope (${persistent ? 'persistent' : 'one-shot'})`, async () => {
+  test(`dispatcher: execution context preserves project credential lookup (${persistent ? 'persistent' : 'one-shot'})`, async () => {
     const { dispatcher, calls } = harness({ persistent });
-    await dispatcher.handleTrigger(boardlessTrigger({ account_id: undefined, workspace_id: 'ws-1' }));
+    await dispatcher.handleTrigger(boardlessTrigger({ account_id: 'ws-1' }));
     assert.equal(await waitFor(() => (persistent ? calls.tsm : calls.spawn).length === 1), true, JSON.stringify(calls.acks));
     assert.ok(calls.credential.length > 0);
     for (const url of calls.credential) {

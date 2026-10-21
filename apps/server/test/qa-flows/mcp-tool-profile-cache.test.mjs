@@ -36,7 +36,7 @@ const FULL_FLOOR = 150;
 const COMPACT_CEILING = 50;
 // A tool every full session registers but COMPACT_TOOL_ALLOWLIST omits — the
 // marker that tells the two cached bodies apart.
-const COMPACT_OMITTED_TOOL = 'update_account';
+const COMPACT_OMITTED_TOOL = 'create_user';
 
 async function makeClient(baseUrl, apiKey, extraHeaders) {
   const client = new McpClient({ baseUrl, apiKey, extraHeaders });

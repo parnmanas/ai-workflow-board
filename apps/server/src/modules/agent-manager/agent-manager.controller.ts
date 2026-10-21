@@ -21,7 +21,6 @@ import { ChildRunService } from '../agents/child-run.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { PermissionGuard } from '../../common/guards/permission.guard';
-import { AccountGuard } from '../../common/guards/account.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentUser, CurrentUserData } from '../../common/decorators/current-user.decorator';
 import { CurrentAccountId } from '../../common/decorators/current-account.decorator';
@@ -1453,7 +1452,7 @@ export class AgentManagerController {
 
   @ApiBearerAuth('user-session')
   @Post('api/admin/agent-manager/pair')
-  @UseGuards(PermissionGuard, AccountGuard)
+  @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({ summary: 'Mint a one-time pairing token for an awb-agent-manager bootstrap' })
   pairMint(
@@ -1479,7 +1478,7 @@ export class AgentManagerController {
 
   @ApiBearerAuth('user-session')
   @Get('api/admin/agent-manager/pair')
-  @UseGuards(PermissionGuard, AccountGuard)
+  @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({ summary: 'List active pairing tokens for the current account' })
   pairList(@CurrentAccountId() accountId: string | null, @Res() res: Response) {
@@ -1489,7 +1488,7 @@ export class AgentManagerController {
 
   @ApiBearerAuth('user-session')
   @Delete('api/admin/agent-manager/pair/:id')
-  @UseGuards(PermissionGuard, AccountGuard)
+  @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({ summary: 'Revoke an unredeemed pairing token' })
   pairRevoke(

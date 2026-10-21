@@ -274,14 +274,11 @@ export const api = {
   setup: (data: { name: string; email: string; password: string }) =>
     request<any>('/auth/setup', { method: 'POST', body: JSON.stringify(data) }),
 
-  register: (name: string, email: string, password: string, requestedAccountId?: string) =>
+  register: (name: string, email: string, password: string) =>
     request<{ success: boolean; message: string }>('/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ name, email, password, requested_account_id: requestedAccountId }),
+      body: JSON.stringify({ name, email, password }),
     }),
-
-  getPublicAccounts: () =>
-    request<{ id: string; name: string; slug: string }[]>('/auth/public-accounts'),
 
   // ─── Admin Pending Users ────────────────────────────────
   getPendingUsers: () =>
@@ -296,20 +293,11 @@ export const api = {
       body: JSON.stringify({ reason }),
     }),
 
-  assignUserAccount: (userId: string, accountId: string, relation: string = 'member') =>
-    request<any>(`/admin/pending-users/${userId}/assign`, {
-      method: 'POST',
-      body: JSON.stringify({ account_id: accountId, relation }),
-    }),
-
   getPermissionsMeta: () =>
     request<{ permissions: Record<string, { label: string; description: string; group: string }>; role_defaults: Record<string, string[]> }>('/auth/permissions'),
 
   // ─── Accounts ────────────────────────────────────────
-  getAccounts: () => request<Account[]>('/accounts'),
   getAccount: (id: string) => request<Account>(`/accounts/${id}`),
-  createAccount: (data: { name: string; description?: string }) =>
-    request<any>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
   updateAccount: (id: string, data: {
     name?: string;
     description?: string;
@@ -325,20 +313,6 @@ export const api = {
     knowledge_memory?: string;
   }) =>
     request<Account>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteAccount: (id: string) =>
-    request<any>(`/accounts/${id}`, { method: 'DELETE' }),
-  getAccountMembers: (accountId: string) =>
-    request<any[]>(`/accounts/${accountId}/members`),
-  addAccountMember: (accountId: string, userId: string, relation: string = 'member') =>
-    request<any>(`/accounts/${accountId}/members`, {
-      method: 'POST', body: JSON.stringify({ user_id: userId, relation }),
-    }),
-  updateAccountMemberRole: (accountId: string, userId: string, relation: string) =>
-    request<any>(`/accounts/${accountId}/members/${userId}`, {
-      method: 'PATCH', body: JSON.stringify({ relation }),
-    }),
-  removeAccountMember: (accountId: string, userId: string) =>
-    request<any>(`/accounts/${accountId}/members/${userId}`, { method: 'DELETE' }),
   // 프로필 핀 드롭다운용 전역 카탈로그(티켓 e616dbfc). 프로필은 인스턴스
   // 전역이라 계정 인자가 없다. getClaudeBackendProfiles 는 관리자
   // 전용 라우트라 비관리자에게는 빈 목록이 되므로 읽기는 이쪽을 쓴다.

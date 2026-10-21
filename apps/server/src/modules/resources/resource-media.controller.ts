@@ -6,7 +6,6 @@ import { Repository } from 'typeorm';
 import { Resource } from '../../entities/Resource';
 import { User } from '../../entities/User';
 import { AuthService } from '../../services/auth.service';
-import { ReBACService } from '../../services/rebac.service';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
 
 /**
@@ -22,12 +21,8 @@ import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
  *      payloads from carrying the full base64 of every attachment on every
  *      refetch (ticket ff3e7337). expandCommentAttachments now ships metadata
  *      only; the client points media tags at this endpoint.
- *   3. ResourcesController is gated by MANAGE_RESOURCES (admin-only). Comment
- *      attachment upload/view must be reachable by any account MEMBER, not
- *      just admins — otherwise a non-admin attaching a file gets 403 and the
- *      comment never sends (ticket ff3e7337 review blocker 2). So these routes
- *      authorize by account membership (ReBAC member/owner, admin bypass),
- *      mirroring AccountGuard, instead of inheriting the admin permission.
+ *   3. Catalog management is permission-gated; attachments are available to
+ *      authenticated active users of this shared instance.
  *
  * Routes:
  *   GET  /api/resources/:id/raw  (two path segments, so it never collides with
@@ -41,7 +36,6 @@ export class ResourceMediaController {
   constructor(
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     private readonly authService: AuthService,
-    private readonly rebacService: ReBACService,
   ) {}
 
   // Resolve the session user from an Authorization: Bearer header (fetch
@@ -56,25 +50,6 @@ export class ResourceMediaController {
     return this.authService.getSessionUser(token);
   }
 
-  // Authorize account access the same way AccountGuard does: admins bypass,
-  // everyone else must hold member OR owner on the account. This is the
-  // isolation boundary the rest of the app enforces on every ticket read.
-  private async canAccessAccount(user: User, accountId: string | null | undefined): Promise<boolean> {
-    if (!accountId) return false;
-    if (user.role === 'admin') return true;
-    const isMember = await this.rebacService.check(
-      { type: 'user', id: user.id },
-      'member',
-      { type: 'account', id: accountId },
-    );
-    if (isMember) return true;
-    return this.rebacService.check(
-      { type: 'user', id: user.id },
-      'owner',
-      { type: 'account', id: accountId },
-    );
-  }
-
   // Raw binary upload — the body is a Buffer (express raw() parser mounted in
   // main.ts for this exact path), NOT JSON. Metadata rides in query params and
   // the X-File-Name header so no base64 inflation and no 10MB JSON ceiling: a
@@ -83,7 +58,7 @@ export class ResourceMediaController {
   // but the client now references the created Resource by id from a comment
   // instead of re-inlining the bytes into the comment POST (ticket ff3e7337).
   //
-  // Authorization: any member of the target account (admin bypass) — NOT the
+  // Authorization: an active authenticated user — not the
   // admin-only MANAGE_RESOURCES of ResourcesController, so non-admin users can
   // attach files to comments.
   @Post('upload')
@@ -96,9 +71,6 @@ export class ResourceMediaController {
     const user = await this.resolveUser(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
-    if (!(await this.canAccessAccount(user, accountId))) {
-      return res.status(403).json({ error: 'account_access_denied' });
-    }
     const buf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
     if (!buf || buf.length === 0) {
       return res.status(400).json({ error: 'request body is empty — send the file bytes as the raw request body' });
@@ -162,15 +134,6 @@ export class ResourceMediaController {
     const resource = await this.resourceRepo.findOne({ where: { id } });
     if (!resource || !resource.file_data) {
       return res.status(404).json({ error: 'Resource not found or has no file data' });
-    }
-
-    // Authorize: only members of the resource's account (admin bypass) may
-    // stream its bytes. Without this, any authenticated user could read any
-    // resource by UUID across accounts (ticket ff3e7337 review blocker 1) —
-    // the one resource-read path that would otherwise ignore the isolation
-    // boundary AccountGuard enforces everywhere else.
-    if (!(await this.canAccessAccount(user, resource.account_id))) {
-      return res.status(403).json({ error: 'account_access_denied' });
     }
 
     const buf = Buffer.from(resource.file_data, 'base64');

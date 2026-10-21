@@ -240,10 +240,6 @@ const REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES = [
     'modules/accounts/accounts.controller.ts',
     'GET /api/accounts/:id is an active snapshot — archived tickets must not silently inflate its per-status ticket_counts (use the archive filters for archive-inclusive reads)',
   ],
-  [
-    'modules/mcp/tools/account-tools.ts',
-    'MCP get_account per-status ticket_counts is the same active surface as the REST account get — archived rows must not be counted',
-  ],
 ];
 for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
   test(`${path.basename(relPath)} filters archived_at (review-bounce guard)`, () => {

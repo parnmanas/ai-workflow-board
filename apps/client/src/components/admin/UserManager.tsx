@@ -16,7 +16,6 @@ interface PendingUser {
   name: string;
   email: string;
   status: 'pending';
-  requested_account_name: string | null;
   created_at: string;
 }
 
@@ -24,7 +23,6 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
   const confirm = useConfirm();
   const [users, setUsers] = useState<User[]>([]);
   const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
-  const [accounts, setAccounts] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -33,15 +31,12 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
   });
   const [permInfo, setPermInfo] = useState<PermissionInfo | null>(null);
   const [showPerms, setShowPerms] = useState(false);
-  // Track which approved users are showing account assignment UI
-  const [assigningAccount, setAssigningAccount] = useState<Record<string, string>>({});
 
   const load = async () => {
-    const [usersData, permData, pendingData, accountsData] = await Promise.all([
+    const [usersData, permData, pendingData] = await Promise.all([
       api.getUsers(accountId),
       api.getPermissionsMeta(),
       accountId ? Promise.resolve([]) : api.getPendingUsers(),
-      api.getAccounts(),
     ]);
     setUsers(usersData);
     setPermInfo(permData);
@@ -50,7 +45,6 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
     // "Pending Approval" section never renders even when accounts await
     // approval. api.getPendingUsers is typed as `any` so TS doesn't catch it.
     setPendingUsers(Array.isArray(pendingData) ? pendingData : (pendingData?.users ?? []));
-    setAccounts(accountsData);
   };
 
   // The pending-users badge is a live count of accounts still awaiting a
@@ -117,17 +111,6 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
     refreshBadges();
   };
 
-  const handleAssignAccount = async (userId: string, accountId: string) => {
-    if (!accountId) return;
-    await api.assignUserAccount(userId, accountId);
-    setAssigningAccount(prev => {
-      const next = { ...prev };
-      delete next[userId];
-      return next;
-    });
-    await load();
-  };
-
   const togglePermission = (perm: string) => {
     setForm(f => ({
       ...f,
@@ -165,30 +148,12 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
           <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
             {user.email || 'No email'} &middot; {new Date(user.created_at).toLocaleDateString()}
           </div>
-          <div style={{ fontSize: '11px', color: tokens.colors.textSecondary, marginTop: 2 }}>
-            Requested account: <span style={{ color: user.requested_account_name ? tokens.colors.textStrong : tokens.colors.borderStrong }}>
-              {user.requested_account_name || 'None'}
-            </span>
-          </div>
         </div>
         <Badge variant="warning">{user.status}</Badge>
-        {/* Account assignment dropdown for approve flow */}
-        <Select
-          value={assigningAccount[user.id] || ''}
-          onChange={e => setAssigningAccount(prev => ({ ...prev, [user.id]: (e.target as HTMLSelectElement).value }))}
-          placeholder="Assign account..."
-          options={accounts.map((account: any) => ({ value: account.id, label: account.name }))}
-          style={{ width: 160 }}
-        />
         <Button
           variant="primary"
           size="sm"
-          onClick={async () => {
-            await handleApprove(user.id);
-            if (assigningAccount[user.id]) {
-              await handleAssignAccount(user.id, assigningAccount[user.id]);
-            }
-          }}
+          onClick={() => handleApprove(user.id)}
         >Approve</Button>
         <Button variant="danger" size="sm" onClick={() => handleReject(user.id)}>Reject</Button>
       </div>
@@ -229,7 +194,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
         <Button variant="primary" size="md" onClick={() => { resetForm(); setShowForm(true); }}>+ Add User</Button>
       </div>
 
-      {/* Pending Users Section — dedicated API call for requested_account_name */}
+      {/* Pending Users Section */}
       {pendingUsers.length > 0 && (
         <div style={{ marginBottom: 20 }}>
           <h4 style={{

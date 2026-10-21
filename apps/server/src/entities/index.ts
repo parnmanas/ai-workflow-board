@@ -10,7 +10,6 @@ export { RuntimeHost } from './RuntimeHost';
 export { Channel } from './Channel';
 export { ActivityLog } from './ActivityLog';
 export { ApiKey } from './ApiKey';
-export { RelationTuple } from './RelationTuple';
 export { ChatRoom } from './ChatRoom';
 export { ChatRoomParticipant } from './ChatRoomParticipant';
 export { ChatRoomMessage } from './ChatRoomMessage';

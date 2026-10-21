@@ -7,7 +7,6 @@ import { Channel } from '../entities/Channel';
 import { Comment } from '../entities/Comment';
 import { Ticket } from '../entities/Ticket';
 import { User } from '../entities/User';
-import { RelationTuple } from '../entities/RelationTuple';
 import { UserChannel } from '../entities/UserChannel';
 import { SystemSetting } from '../entities/SystemSetting';
 import { ActivityService } from './activity.service';
@@ -21,7 +20,6 @@ import { MemoryWatchdogService } from './memory-watchdog.service';
 import { AgentConnectivityRegistry } from './agent-connectivity.registry';
 import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
-import { ReBACService } from './rebac.service';
 import { AccountAccessService } from './account-access.service';
 import { MentionService } from './mention.service';
 import { PresenceService } from './presence.service';
@@ -40,7 +38,7 @@ import {
  * Global cross-cutting services.
  *
  * Only truly ubiquitous services live here (Log, Auth, ApiKey, Activity,
- * ReBAC, Mention, Discord). Everything else is scoped to its feature module:
+ * Mention, Discord). Everything else is scoped to its feature module:
  *
  *   - EmbeddingService / GitHubConnectorService → `modules/mcp/mcp-services.module.ts`
  *   - NotificationService / SystemCommentService → provider only (they run as
@@ -55,7 +53,7 @@ import {
   imports: [
     TypeOrmModule.forFeature([
       ActivityLog, AgentErrorLog, ApiKey, Channel, Comment, Ticket, User,
-      RelationTuple, UserChannel, SystemSetting,
+      UserChannel, SystemSetting,
     ]),
   ],
   providers: [
@@ -72,7 +70,6 @@ import {
     OntologySqljsFlushService,
     NotificationService,
     SystemCommentService,
-    ReBACService,
     AccountAccessService,
     MentionService,
     PresenceService,
@@ -91,7 +88,6 @@ import {
     LogService,
     MemoryMetricsRegistry,
     AgentConnectivityRegistry,
-    ReBACService,
     AccountAccessService,
     MentionService,
     PresenceService,

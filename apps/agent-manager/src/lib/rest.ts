@@ -1,7 +1,6 @@
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 
-import { normalizeAccountScope } from './account-scope.js';
 import { REQUEST_TIMEOUT_MS } from './constants.js';
 import { log } from './logging.js';
 
@@ -134,7 +133,7 @@ export async function fetchTicketContext(
       log(`Ticket fetch failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`);
       return null;
     }
-    return normalizeAccountScope(await resp.json());
+    return await resp.json();
   } catch (err: any) {
     log(`Ticket fetch error: ${err?.message ?? err} (ticket=${ticketId})`);
     return null;
@@ -736,7 +735,7 @@ export async function fetchAgentRecord(
       log(`agent fetch failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
       return null;
     }
-    return normalizeAccountScope(await resp.json()) as any;
+    return await resp.json() as any;
   } catch (err: any) {
     log(`agent fetch error: ${err?.message ?? err} (agent=${agentId})`);
     return null;
@@ -1178,7 +1177,7 @@ export async function provisionManagedAgentApiKey(
       log(`apiKey provision failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
       return null;
     }
-    return normalizeAccountScope(await resp.json()) as any;
+    return await resp.json() as any;
   } catch (err: any) {
     log(`apiKey provision error: ${err?.message ?? err} (agent=${agentId})`);
     return null;
@@ -1215,7 +1214,7 @@ export async function provisionRuntimeApiKey(
       log(`runtime key provision failed: ${resp.status} ${resp.statusText} (key=${key})`);
       return null;
     }
-    return normalizeAccountScope(await resp.json()) as any;
+    return await resp.json() as any;
   } catch (err: any) {
     log(`runtime key provision error: ${err?.message ?? err} (key=${key})`);
     return null;

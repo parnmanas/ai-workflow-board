@@ -211,7 +211,8 @@ export default function TicketConversation({
         </label>
       )}
 
-      <div style={{ flex: 1, minHeight: 120, minWidth: 0 }}>
+      {/* Constrain the virtualized list so only comments scroll, not the composer. */}
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
         <CommentList
           comments={visible}
           onImagePreview={onPreview}
@@ -228,7 +229,7 @@ export default function TicketConversation({
         />
       </div>
 
-      <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10, marginTop: 8, minWidth: 0 }}>
+      <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10, marginTop: 8, minWidth: 0, flexShrink: 0 }}>
         {replyingTo && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, padding: '5px 8px',

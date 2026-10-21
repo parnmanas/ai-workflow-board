@@ -106,7 +106,7 @@ test(`main pages and new-session dialog fit width ${width}`, async ({ page }, te
   test.setTimeout(60_000);
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page);
-  for (const route of ['/sessions', `/sessions/${host.manager_id}`, '/tickets', '/tickets?ticket=responsive-ticket', '/projects', '/projects?project=responsive-project', '/missions', '/missions/mission', '/teams', '/chat', '/chat/responsive-room', '/hosts', '/terminals', '/settings', '/settings/ownership', '/settings/members', '/settings/credentials', '/settings/channels', '/settings/api-keys', '/settings/claude-profiles']) {
+  for (const route of ['/sessions', `/sessions/${host.manager_id}`, '/tickets', '/tickets?ticket=responsive-ticket', '/projects', '/projects?project=responsive-project', '/missions', '/missions/mission', '/teams', '/chat', '/chat/responsive-room', '/hosts', '/terminals', '/settings', '/settings/defaults', '/settings/users', '/settings/credentials', '/settings/channels', '/settings/api-keys', '/settings/claude-profiles']) {
     await page.goto(route);
     await expect(page.getByTestId('app-shell')).toBeVisible();
     await page.waitForTimeout(180);

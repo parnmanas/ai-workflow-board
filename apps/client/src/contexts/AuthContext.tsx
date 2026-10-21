@@ -13,8 +13,6 @@ import { loadCliCatalog } from '../cli/catalog';
 interface AccountEntry {
   id: string;
   name: string;
-  slug: string | null;
-  relations: string[];
 }
 
 interface AuthState {
@@ -35,7 +33,6 @@ interface AuthContextValue extends AuthState {
   setup: (name: string, email: string, password: string) => Promise<void>;
   hasPermission: (perm: string) => boolean;
   refreshUser: () => Promise<void>;
-  setCurrentAccount: (accountId: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -252,12 +249,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const setCurrentAccount = (accountId: string) => {
-    localStorage.setItem('currentAccountId', accountId);
-    setActiveAccountId(accountId);
-    setState(s => ({ ...s, currentAccountId: accountId, isAuthenticated: true }));
-  };
-
   const hasPermission = (perm: string): boolean => {
     if (!state.user) return false;
     const perms = state.user.resolved_permissions || [];
@@ -273,7 +264,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, setup, hasPermission, refreshUser, setCurrentAccount }}>
+    <AuthContext.Provider value={{ ...state, login, logout, setup, hasPermission, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

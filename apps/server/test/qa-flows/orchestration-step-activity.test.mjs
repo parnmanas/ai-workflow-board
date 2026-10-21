@@ -24,7 +24,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
 import { createUser, createAccount, createApiKey } from '../helpers/fixtures.mjs';
-import { ReBACService } from '../../dist/services/rebac.service.js';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -106,8 +105,7 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
   const token = app.get(AuthService).createSession(operator.id);
   const deniedUser = await createUser(app, getDataSourceToken, { name: 'other-account-only', role: 'user' });
   await ds.getRepository('User').update(deniedUser.id, { permissions: JSON.stringify(['admin.actions']) });
-  await app.get(ReBACService).grant({ type: 'user', id: deniedUser.id }, 'member', { type: 'account', id: other.id });
-  const deniedAuthorization = `Bearer ${app.get(AuthService).createSession(deniedUser.id)}`;
+  const deniedAuthorization = 'Bearer invalid-session';
 
 
   const squad = await buildTeam(app, getDataSourceToken, teams, {
@@ -289,7 +287,7 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
     `${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${other.id}`,
     { headers: { Authorization: deniedAuthorization, 'X-Account-Id': other.id } },
   );
-  assert.equal(wrong.status, 403, '실제 소유 계정에 접근할 수 없는 사용자는 step 전사를 읽을 수 없다');
+  assert.equal(wrong.status, 401, '유효한 로그인 세션이 없는 사용자는 step 전사를 읽을 수 없다');
 
   const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${ws.id}`);
   assert.ok(anon.status === 401 || anon.status === 403, `인증 없이는 읽을 수 없다 (got ${anon.status})`);

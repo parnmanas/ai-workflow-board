@@ -54,7 +54,7 @@ const NOT_AN_OPERATOR = 'Only a registered AWB operator session can use this too
  * 권한 요청은 사람이 결정하라고 있는 것이고, MCP 는 에이전트만 붙는 표면이라 "사람이 정했다" 를 증명하지
  * 못한다. 그래서 대신 전하는 조건을 **서버가 확인할 수 있는 사실**로만 정한다:
  *   1. 호출자가 등록된 operator 세션의 연결이다 — 매니저가 그 세션에 주입한 연결, 그 세션 id, 그 Host 의 full 키
- *      (`operator-config.ts` `isOperatorConnection` 과 같은 조건).
+ *      등록된 operator 세션과 host 신원을 확인한다.
  *   2. 그 operator 가 지금 **사용자가 시작한 턴**을 돌고 있다 — 사람이 로그인한 화면에서 방금 말을 걸었다. AWB 가
  *      보낸 보고 턴이나 서버가 모르는 턴에서는 거절한다. 보고에는 다른 세션이 쓴 글(믿을 수 없는 입력)이 실려 오므로,
  *      그 글만 보고 operator 가 스스로 승인하는 길을 막는 것이 이 조건이다.

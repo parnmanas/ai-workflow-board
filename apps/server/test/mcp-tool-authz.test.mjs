@@ -34,7 +34,6 @@ import { ApiKey } from '../dist/entities/ApiKey.js';
 import { registerUserTools } from '../dist/modules/mcp/tools/user-tools.js';
 import { registerApiKeyTools } from '../dist/modules/mcp/tools/api-key-tools.js';
 import { registerWorkflowFunctionTools } from '../dist/modules/mcp/tools/workflow-function-tools.js';
-import { registerAccountTools } from '../dist/modules/mcp/tools/account-tools.js';
 
 import { ApiKeyService } from '../dist/services/api-key.service.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
@@ -99,7 +98,6 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     registerUserTools(fakeServer, ctx);
     registerApiKeyTools(fakeServer, ctx);
     registerWorkflowFunctionTools(fakeServer, ctx);
-    registerAccountTools(fakeServer, ctx);
   });
 
   after(async () => {
@@ -395,68 +393,6 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   });
 
 
-  // ─── account-tools.ts: update/delete_account ───
-
-  it('rejects update_account when the caller does not belong to the target account', async () => {
-    const caller = await makeAgent('account-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      accountId: 'account-a',
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.update_account.handler(
-      { account_id: 'account-b', name: 'Renamed by outsider' },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(result.isError, true);
-  });
-
-  it('rejects delete_account from a non-full-scope caller', async () => {
-    const caller = await makeAgent('account-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      accountId: 'account-a',
-      scope: 'write',
-      source: 'db',
-    });
-
-    const result = await tools.delete_account.handler({ account_id: 'account-a' }, { sessionId });
-    cleanup();
-
-    assert.equal(result.isError, true);
-  });
-
-  // ─── Review round 2 (ticket d6b56237 comment b647d97e): the 19 tests above
-  // never exercised a account-A full-scope caller reaching into account
-  // B — every prior "allows ..." positive test kept caller and target in the
-  // SAME account, so requireFullScopeCaller's missing account-boundary
-  // check went uncaught. These add the cross-tenant destructive paths, plus
-  // the sessionless user-tools gate and foreign agent_id linking. ───
-
-
-  it('rejects delete_account of account B from a account-A full-scope caller', async () => {
-    const caller = await makeAgent('account-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      accountId: 'account-a',
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.delete_account.handler({ account_id: 'account-b' }, { sessionId });
-    cleanup();
-
-    assert.equal(result.isError, true);
-  });
-
-
   // ─── DoD (b): sessionless / unresolvable-session create_user / update_user ───
 
   it('rejects create_user and update_user with no session at all', async () => {
@@ -583,7 +519,6 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
 
   it('maps the d6b56237 role/credential/cascade tools to their verified tier', () => {
     assert.equal(resolveAuthzTier('delete_user'), 'full');
-    assert.equal(resolveAuthzTier('delete_account'), 'full');
     assert.equal(resolveAuthzTier('create_user'), 'caller');
     assert.equal(resolveAuthzTier('update_user'), 'caller');
     assert.equal(resolveAuthzTier('create_api_key'), 'caller');
@@ -645,13 +580,10 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.ok(KNOWN_EXISTING_TOOLS.has('create_ticket'));
   });
 
-  it('leaves update_account to its own nuanced per-file logic', () => {
-    // update_account intentionally allows a account-bound NON-full-scope
-    // caller. A static per-name tier would misgate it, so it is not in the
-    // table — and it matches neither the delete_* / revoke_* fallback pattern
-    // nor the unknown-name deny, so the fallback leaves it alone either.
-    // (move_agent_to_account no longer exists — see the removal test above.)
-    assert.equal(resolveAuthzTier('update_account'), null);
+  it('removed ownership tools are not classified as available tools', () => {
+    for (const name of ['list_accounts', 'get_account', 'create_account', 'update_account', 'delete_account']) {
+      assert.equal(KNOWN_EXISTING_TOOLS.has(name), false);
+    }
   });
 
   // ─── installToolAuthzGate: end-to-end wrapping behavior ───

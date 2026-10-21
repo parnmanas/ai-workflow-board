@@ -1,3 +1,4 @@
+import { INSTANCE_CONTEXT_ID } from './common/instance-context';
 import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
 import { preSyncAccountOwnership } from './database/pre-sync-account-ownership';
 import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
@@ -611,6 +612,16 @@ export async function initOntologyDb(): Promise<void> {
   if (!AppOntologyDataSource.isInitialized) {
     await preSyncAccountOwnership(AppOntologyDataSource.options);
     await AppOntologyDataSource.initialize();
+    // The graph is a separate SQLite file; the primary database migration cannot
+    // reach it. Rebind only obsolete ownership keys and preserve graph contents.
+    await AppOntologyDataSource.transaction(async manager => {
+      for (const metadata of AppOntologyDataSource!.entityMetadatas) {
+        if (!metadata.findColumnWithPropertyName('account_id')) continue;
+        const table = AppOntologyDataSource!.driver.escape(metadata.tableName);
+        await manager.query(`UPDATE ${table} SET account_id = ? WHERE account_id IS NOT NULL AND account_id != ?`,
+          [INSTANCE_CONTEXT_ID, INSTANCE_CONTEXT_ID]);
+      }
+    });
   }
 }
 

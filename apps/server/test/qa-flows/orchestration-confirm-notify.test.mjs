@@ -52,7 +52,6 @@ async function loadServices() {
   const dispatcher = await import(
     pathToFileURL(path.join(DIST, 'services', 'notification-providers', 'dispatcher.service.js')).href
   );
-  const rebac = await import(pathToFileURL(path.join(DIST, 'services', 'rebac.service.js')).href);
   const log = await import(pathToFileURL(path.join(DIST, 'services', 'log.service.js')).href);
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
@@ -61,7 +60,6 @@ async function loadServices() {
     OrchestrationReaperService: reaper.OrchestrationReaperService,
     OrchestrationConfirmNotifyService: notify.OrchestrationConfirmNotifyService,
     UserChannelDispatcherService: dispatcher.UserChannelDispatcherService,
-    ReBACService: rebac.ReBACService,
     LogService: log.LogService,
   };
 }
@@ -183,7 +181,7 @@ async function stage(t, { label } = {}) {
       new services.OrchestrationConfirmNotifyService(
         ds.getRepository('OrchestrationStep'),
         dispatcher,
-        app.get(services.ReBACService),
+        ds,
         missions,
         app.get(services.LogService),
       ),

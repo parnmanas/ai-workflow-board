@@ -15,7 +15,6 @@ import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
 import { authenticateMcpRequest } from './shared/mcp-http-auth';
-import { isOperatorConnection } from '../voice/operator-config';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -55,7 +54,6 @@ import { OntologyQueryService } from '../ontology/ontology-query.service';
 import { OperatorDecisionService } from '../voice/operator-decision.service';
 import { OperatorProposalService } from '../voice/operator-proposal.service';
 import { InterruptedSessionsService } from '../voice/interrupted-sessions.service';
-import { AgentSessionsService } from '../agent-sessions/agent-sessions.service';
 
 // Module-level log reference, set from McpController.onModuleInit
 let logService: LogService | null = null;
@@ -178,8 +176,6 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // 작업 제안 — operator 가 다른 세션에 시킬 일을 제안하고, 사용자 승인 뒤 보낸다(VoiceModule).
     private readonly operatorProposalService: OperatorProposalService,
     private readonly interruptedSessionsService: InterruptedSessionsService,
-    // operator 세션의 연결을 알아본다 — 새로 만든 세션의 MCP 참조값 → 세션 id.
-    private readonly agentSessionsService: AgentSessionsService,
   ) {}
 
   onModuleInit() {
@@ -311,20 +307,6 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       const mcpAuthInfo = await authenticateMcpRequest(req, res, this.apiKeyService, mcpLogError);
       if (!mcpAuthInfo) return; // Response already sent
 
-      // Operator(고정된 Agent Session)의 연결은 계정에 묶지 않는다 — 사이트 전체를 관리한다.
-      // 조건·신뢰 경계는 voice/operator-config.ts `isOperatorConnection`.
-      if (mcpAuthInfo.accountId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers,
-        (managerId, ref) => this.agentSessionsService.resolveMcpSessionRef(managerId, ref))) {
-        if (req.method === 'POST' && req.body?.method === 'initialize') {
-          this._logService.info('MCP', 'operator session connected with site-wide scope', {
-            host_id: mcpAuthInfo.agentId,
-            session_id: String(req.headers['x-awb-session-id'] || ''),
-            pairing_account_id: mcpAuthInfo.accountId,
-          });
-        }
-        mcpAuthInfo.accountId = undefined;
-      }
-
       // Inject account_id from API key into request context for downstream use
       (req as any).currentAccountId = mcpAuthInfo.accountId ?? null;
 
@@ -395,8 +377,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       if (sessionId && sessionStore.has(sessionId)) {
         const session = sessionStore.get(sessionId)!;
         sessionStore.touch(sessionId);
-        // 계정 범위는 요청마다 다시 판정한 값을 따른다 — 이미 열린 MCP 세션을 operator 로
-        // 지정하거나 해제해도 다음 요청부터 맞는 범위로 돈다(같은 키의 연결일 때만).
+        // Refresh persisted key context after migration without changing the host identity.
         if (session.auth && session.auth.source === 'db' && session.auth.agentId === mcpAuthInfo.agentId
           && session.auth.accountId !== mcpAuthInfo.accountId) {
           session.auth.accountId = mcpAuthInfo.accountId;

@@ -1,7 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import { useAccounts } from '../hooks/useAccounts';
-import AccountSelector from './AccountSelector';
 import { Account } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -29,11 +27,10 @@ import {
 // every ticket and every repo checkout in the account, so edits belong to
 // operators.
 export default function AccountSettingsPage() {
-  const { currentAccountId, setCurrentAccount, refreshUser } = useAuth();
+  const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const { hasPermission } = useAuth();
   const { showToast } = useToast();
-  const { accounts, createAccount, updateAccount, deleteAccount, refresh } = useAccounts();
   const [account, setAccount] = useState<Account | null>(null);
 
   const load = useCallback(async () => {
@@ -61,11 +58,11 @@ export default function AccountSettingsPage() {
   if (!hasPermission('admin.access')) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-        <PageHeader title="Ownership & defaults" />
+        <PageHeader title="Work defaults" />
         <div style={pageStyle}>
           <PermissionNotice
             title="Admin access required"
-            message="Admin access is required to edit account settings."
+            message="Admin access is required to edit work defaults."
           />
         </div>
       </div>
@@ -74,30 +71,8 @@ export default function AccountSettingsPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <PageHeader title="Ownership & defaults" description={account?.name} />
+      <PageHeader title="Work defaults" />
       <div style={pageStyle}>
-        <section style={{ marginBottom: 24 }}>
-          <p style={{ color: tokens.colors.textSecondary, fontSize: 13, marginTop: 0 }}>
-            Manage personal and organization ownership. This account supplies defaults for new work;
-            sessions, tickets and missions remain accessible from their direct links.
-          </p>
-          <AccountSelector
-            accounts={accounts}
-            currentAccountId={currentAccountId}
-            onSelect={setCurrentAccount}
-            onCreate={async (name, description) => {
-              const created = await createAccount(name, description);
-              await refreshUser();
-              if (created?.id) setCurrentAccount(created.id);
-            }}
-            onUpdate={async (id, data) => { await updateAccount(id, data); await load(); }}
-            onDelete={async (id) => {
-              await deleteAccount(id);
-              await refresh();
-              await refreshUser();
-            }}
-          />
-        </section>
         {!account ? (
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading…</div>
         ) : (

@@ -1,4 +1,3 @@
-import { normalizeAccountEnvelope } from './account-scope.js';
 // ST-5b — handle agent_manager_command SSE events.
 //
 // Event shape (from server, see common/types/stream-events on AWB):
@@ -336,7 +335,7 @@ export class AgentManagerCommandHandler {
   async handle(raw: string): Promise<void> {
     let payload: AgentManagerCommandPayload;
     try {
-      payload = normalizeAccountEnvelope(JSON.parse(raw));
+      payload = JSON.parse(raw);
     } catch (err: any) {
       log(`agent_manager_command: parse failed: ${err?.message ?? err}`);
       return;
