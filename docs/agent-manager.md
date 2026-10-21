@@ -86,6 +86,14 @@ server retries with backoff, so fixing the credential is enough); a chat room
 gets a message. A runtime that selects no credential runs on the operator
 login as before.
 
+Chat room broadcasts include all participants' runtime specs. Each manager
+selects only specs whose `manager_agent_id` matches its paired Host, before
+consulting its context cache or fetching credentials. Runtime identity hashes
+omit the host, so a cached key alone is not a host-ownership check. A broadcast
+with no eligible local participant only updates history. Cached contexts that
+name a credential but have no applied provider are prepared again through the
+same materializer before dispatch, including group Chat.
+
 What the server does on its side:
 
 - A team slot names no folder, so it is not an identity until a mission places

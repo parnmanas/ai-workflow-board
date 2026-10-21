@@ -1917,21 +1917,18 @@ export class EventDispatcher {
     };
   }
 
-  /**
-   * P4c-1: runtime 스냅샷 → 실행 컨텍스트. 레지스트리를 튜플로 스캔해 일치하는
-   * 항목의 key/mcp/cli-home을 빌리되, spawn 플래그(cli/model/runtime_config)는
-   * 스냅샷이 이긴다 (서버 P4a와 같은 "스냅샷 정본" 규칙).
-   *
-   * 일치 항목이 없으면 undefined — 호출자는 기존 agent_id 경로 그대로 가고,
-   * miss 리포트는 그쪽에서 기존대로 난다. 새 인프라(키 발급 등) 없음: P4b
-   * 흐름이 만드는 Agent 행은 전부 레지스트리에 있으므로 과도기 커버는 완전하다.
-   * P4c-3에서 Agent 생성이 사라질 때 runtime-key 발급이 함께 들어간다.
-   */
+  /** Runtime hashes omit the host; a room broadcast contains every host's specs. */
+  #runtimeBelongsToThisHost(spec: TriggerRuntimeSpec): boolean {
+    const info = loadAgentInfo();
+    const hostId = info?.host_id || info?.agent_id;
+    return !hostId || spec.manager_agent_id === hostId;
+  }
+
   async #resolveRuntimeContext(
     spec: TriggerRuntimeSpec | null,
     accountId: string | undefined | null,
   ): Promise<AgentExecutionContext | undefined> {
-    if (!spec || !this.#managedAgentContexts) return undefined;
+    if (!spec || !this.#managedAgentContexts || !this.#runtimeBelongsToThisHost(spec)) return undefined;
     // 채팅 전용 기본 폴더(chat-workdirs.ts)는 매니저가 만든다 — 지워졌어도 다음 디스패치가 되살린다.
     await ensureChatWorkdir(spec.working_dir).catch((err: any) => log(`chat workdir create failed (${spec.working_dir}): ${err?.message ?? err}`));
     // The identity key covers cli + folder + credential but not the model, so an
@@ -1939,9 +1936,13 @@ export class EventDispatcher {
     // model (the spec's model wins below). Re-preparing it would rewrite the
     // cli-home credential under a live CLI for nothing.
     const prepared = this.#managedAgentContexts.get(runtimeIdentityKey(spec));
-    const entry = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec)
-      ?? (prepared && (prepared.credential_id || null) === (spec.credential_id || null) ? prepared : null)
-      ?? (await this.#materializeRuntime(spec, accountId));
+    const cached = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec)
+      ?? (prepared && (prepared.credential_id || null) === (spec.credential_id || null) ? prepared : null);
+    // Older dispatchers registered the selected id before applying its secret.
+    // Such a context must pass through the shared materializer before reuse.
+    const entry = cached && (!spec.credential_id || cached.credential_provider)
+      ? cached
+      : await this.#materializeRuntime(spec, accountId);
     if (!entry) return undefined;
     const ctx: AgentExecutionContext = {
       agent_id: entry.agent_id,
@@ -2359,31 +2360,6 @@ export class EventDispatcher {
   }
 
   /**
-   * Chat-event variant: events.controller delivers a chat_room_message to a
-   * manager whenever any of its managed agents participates in the room, but
-   * the wire payload doesn't single out which one should reply. We pick the
-   * first managed agent in `agent_member_ids` whose runtime context is fully
-   * bootstrapped — that's the identity the spawned chat session runs under.
-   * Returns undefined when no match exists (manager itself is the participant
-   * and the spawn should fall back to manager defaults).
-   */
-  #resolveAgentContextFromMembers(
-    memberIds: string[],
-    excludeAgentId?: string | null,
-  ): AgentExecutionContext | undefined {
-    if (!memberIds.length || !this.#managedAgentContexts) return undefined;
-    for (const id of memberIds) {
-      // The sender never answers its own message. Skipping it here (rather
-      // than dropping the whole event) is what lets a SIBLING managed agent
-      // on the same host pick the message up.
-      if (excludeAgentId && id === excludeAgentId) continue;
-      const ctx = this.#resolveAgentContext(id);
-      if (ctx) return ctx;
-    }
-    return undefined;
-  }
-
-  /**
    * ticket c0c0b1e4: classify why #resolveAgentContext(id) came back undefined
    * for a single candidate id. 'unmanaged'/'no_id' are routine (the id was
    * never this manager's to resolve) — only 'not_bootstrapped' means the
@@ -2400,7 +2376,7 @@ export class EventDispatcher {
   }
 
   /** Members variant of {@link #agentContextMissReason} for
-   *  #resolveAgentContextFromMembers callers — reports 'not_bootstrapped' if
+   *  chat member resolution — reports 'not_bootstrapped' if
    *  ANY candidate is a registered-but-broken managed agent, even when other
    *  members in the list are simply unmanaged. Also returns the specific
    *  member id that triggered a 'not_bootstrapped' verdict (ticket c0c0b1e4
@@ -2421,7 +2397,7 @@ export class EventDispatcher {
 
   /**
    * ticket c0c0b1e4: previously an unresolved agent context (undefined from
-   * #resolveAgentContext/#resolveAgentContextFromMembers) skipped every
+   * #resolveAgentContext or chat member resolution) skipped every
    * downstream identity check and fell through to a generic "dropped (no
    * delegation path)" log line that classify() never picks up — a fully
    * silent drop with no signal beyond the local log file. Logs a
@@ -2827,6 +2803,7 @@ export class EventDispatcher {
     // P3a 관측: 서버가 동봉한 runtime 스냅샷을 파싱만 한다. spawn 경로는
     // 그대로 agent_id — P4에서 정본으로 승격한다. 파싱 실패는 조용히 폴백.
     const triggerRuntime = parseTriggerRuntime((ev as any).runtime);
+    if (triggerRuntime && !this.#runtimeBelongsToThisHost(triggerRuntime)) return;
     if (triggerRuntime && typeof ev.ticket_id === 'string' && ev.ticket_id) {
       log(
         `Trigger runtime snapshot: ticket=${ev.ticket_id.slice(0, 8)} ` +
@@ -4212,6 +4189,7 @@ export class EventDispatcher {
     const payload = ev.payload || {};
     // P3a 관측: trigger 경로와 동일 — 파싱만 하고 spawn은 그대로 agent_id.
     const chatRuntime = parseTriggerRuntime(payload.runtime);
+    if (chatRuntime && !this.#runtimeBelongsToThisHost(chatRuntime)) return;
     if (chatRuntime && typeof payload.room_id === 'string' && payload.room_id) {
       log(
         `Chat runtime snapshot: room=${payload.room_id.slice(0, 8)} ` +
@@ -4517,10 +4495,11 @@ export class EventDispatcher {
     const ticketId = ev.ticket_id || '';
     const commentId = ev.comment_id || ev.field_changed || '';
     const agentId = ev.agent_id || ev.actor_name || '';
+    const mentionRuntime = parseTriggerRuntime(ev.runtime);
+    if (mentionRuntime && !this.#runtimeBelongsToThisHost(mentionRuntime)) return;
     let agentContext = this.#resolveAgentContext(agentId);
     // P4c-4: spec-direct 멘션 — broadcast 스냅샷으로 해소 (튜플 매칭 → auto-provision).
     if (!agentContext) {
-      const mentionRuntime = parseTriggerRuntime((ev as any).runtime);
       if (mentionRuntime) {
         let rtCtx: AgentExecutionContext | undefined;
         try {
@@ -5132,44 +5111,38 @@ export class EventDispatcher {
     // candidate selection. Any OTHER managed member — including a sibling
     // hosted by this same manager — is still eligible.
     const senderAgentId = p.sender_type === 'agent' ? p.sender_id || '' : '';
-    let agentContext = this.#resolveAgentContextFromMembers(memberIds, senderAgentId);
-    // P4c-2b: rt- 멤버는 broadcast의 agent_member_runtimes 맵에서 spec을 읽어
-    // 해소한다 (튜플 매칭 → 없으면 auto-provision). 기존 agent 멤버 경로가
-    // 먼저이므로 동작은 가산적(additive)이다.
-    if (!agentContext) {
-      const rtSpecs = (p.agent_member_runtimes && typeof p.agent_member_runtimes === 'object' && !Array.isArray(p.agent_member_runtimes))
-        ? (p.agent_member_runtimes as Record<string, unknown>)
-        : null;
-      if (rtSpecs) {
-        let refused: { err: RuntimeContextRefusedError; id: string } | null = null;
-        for (const id of memberIds) {
-          if (typeof id !== 'string' || !id.startsWith('rt-')) continue;
-          if (senderAgentId && id === senderAgentId) continue;
-          const spec = parseTriggerRuntime((rtSpecs as Record<string, unknown>)[id]);
-          if (!spec) continue;
-          let rtCtx: AgentExecutionContext | undefined;
-          try {
-            rtCtx = await this.#resolveRuntimeContext(spec, p.account_id);
-          } catch (err) {
-            if (!(err instanceof RuntimeContextRefusedError)) throw err;
-            refused ??= { err, id };
-            continue;
-          }
-          if (rtCtx) {
-            log(
-              `Chat room member from runtime snapshot: room=${String(p.room_id || '').slice(0, 8)} ` +
-                `key=${id.slice(0, 11)} cli=${spec.cli}`,
-            );
-            agentContext = rtCtx;
-            break;
-          }
-        }
-        // Falling through would answer as the manager's own identity — on its login.
-        if (!agentContext && refused) {
-          await this.#noticeRuntimeRefused(refused.err, { roomId: p.room_id, agentId: refused.id });
-          return;
-        }
+    const rtSpecs = (p.agent_member_runtimes && typeof p.agent_member_runtimes === 'object' && !Array.isArray(p.agent_member_runtimes))
+      ? (p.agent_member_runtimes as Record<string, unknown>)
+      : null;
+    let agentContext: AgentExecutionContext | undefined;
+    let refused: { err: RuntimeContextRefusedError; id: string } | null = null;
+    for (const id of memberIds) {
+      if (id === senderAgentId) continue;
+      const spec = parseTriggerRuntime(rtSpecs?.[id]);
+      if (spec && !this.#runtimeBelongsToThisHost(spec)) continue;
+      try {
+        // Resolve snapshots even for cached members: a stale context may name
+        // a credential without ever having applied it to the CLI home/env.
+        agentContext = spec
+          ? await this.#resolveRuntimeContext(spec, p.account_id)
+          : this.#resolveAgentContext(id);
+      } catch (err) {
+        if (!(err instanceof RuntimeContextRefusedError)) throw err;
+        refused ??= { err, id };
+        continue;
       }
+      if (agentContext) break;
+    }
+    if (!agentContext && refused) {
+      await this.#noticeRuntimeRefused(refused.err, { roomId: p.room_id, agentId: refused.id });
+      return;
+    }
+    // A broadcast is also delivered for history updates. When all eligible
+    // runtimes are remote (or the local sender), never answer as the manager.
+    const self = loadAgentInfo();
+    if (!agentContext && rtSpecs && !memberIds.includes(self?.host_id || self?.agent_id || '')) {
+      this.#chatSessionManager?.recordRoomMessage(p);
+      return;
     }
     agentContext = await this.#scopeAgentContext(agentContext, p.account_id);
 

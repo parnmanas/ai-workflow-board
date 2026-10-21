@@ -11,16 +11,23 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, promises as fsp } from 'node:fs';
+import { mkdtempSync, writeFileSync, promises as fsp } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 process.env.AWB_AGENT_MANAGER_HOME = mkdtempSync(join(tmpdir(), 'awb-runtime-credential-'));
+writeFileSync(join(process.env.AWB_AGENT_MANAGER_HOME, 'agent.json'), JSON.stringify({ agent_id: 'legacy-host-id', host_id: 'host-1' }));
 
 const { EventDispatcher, runtimeIdentityKey, RUNTIME_CREDENTIAL_BLOCKER } = await import('../dist/lib/event-dispatcher.js');
 const { AgentManagerCommandHandler } = await import('../dist/lib/agent-manager-commands.js');
 const { ManagedAgentContextRegistry } = await import('../dist/lib/managed-agent-context.js');
 const { _drainTrustSeedLocksForTests } = await import('../dist/lib/cli-adapters/claude.js');
+
+const operatorConfigDir = process.env.CLAUDE_CONFIG_DIR;
+process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'awb-test-operator-'));
+writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, '.credentials.json'), JSON.stringify({
+  claudeAiOauth: { accessToken: 'test-operator-token', refreshToken: 'test-refresh', expiresAt: Date.now() + 3600000 },
+}));
 
 const TICKET = '22222222-2222-4222-8222-222222222222';
 const ACCOUNT = 'account-1';
@@ -34,6 +41,8 @@ beforeEach(() => {
   server = {
     credential: { status: 200, body: { credential_id: 'cred-1', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-ticket' } } },
     credentialFetches: 0,
+    credentialTargets: [],
+    chatPosts: [],
     comments: [],
     acks: [],
   };
@@ -60,11 +69,16 @@ beforeEach(() => {
     }
     if (/\/managed-agents\/[^/]+\/credential\?/.test(u)) {
       server.credentialFetches += 1;
+      server.credentialTargets.push(decodeURIComponent(u.match(/managed-agents\/([^/]+)/)[1]));
       // A slow server makes the race the production log showed: the trigger's
       // context resolution and spawn_agent overlap.
       await new Promise((resolve) => setTimeout(resolve, 20));
       const { status, body } = server.credential;
       return status === 200 ? Response.json(body) : new Response(null, { status });
+    }
+    if (/\/chat-rooms\/[^/]+\/messages$/.test(u) && method === 'POST') {
+      server.chatPosts.push(JSON.parse(init.body));
+      return Response.json({});
     }
     if (u.endsWith('/api/agent-manager/dispatch/ack')) {
       server.acks.push(JSON.parse(init.body));
@@ -97,8 +111,14 @@ function host() {
     contextRegistry: contexts,
   });
   const spawns = [];
+  const chatSpawns = [];
+  const history = [];
   const dispatcher = new EventDispatcher(config, {
     managedAgentContexts: contexts,
+    chatSessionManager: {
+      recordRoomMessage(p) { history.push(p); },
+      async dispatch(args) { chatSpawns.push(args); return { dispatched: true, pid: 4242 }; },
+    },
     agentManagerCommandHandler: commands,
     worktreeManager: {
       enabled: true,
@@ -119,7 +139,7 @@ function host() {
       async spawn(args) { spawns.push(args); return { spawned: true, pid: 4242 }; },
     },
   });
-  return { commands, dispatcher, contexts, spawns };
+  return { commands, dispatcher, contexts, spawns, chatSpawns, history };
 }
 
 function spec(credentialId) {
@@ -227,6 +247,101 @@ test('Agent Sessions and runtime identities refuse the same incomplete credentia
   assert.equal(wrapped.fields.oauth_token, 'sk-ant-oat-ab');
 });
 
+function roomEvent(runtimes, overrides = {}) {
+  return JSON.stringify({ payload: {
+    room_id: 'room-1', account_id: ACCOUNT, sender_type: 'user', sender_id: 'user-1', content: 'hello',
+    agent_member_ids: runtimes.map(runtimeIdentityKey),
+    agent_member_runtimes: Object.fromEntries(runtimes.map((r) => [runtimeIdentityKey(r), r])),
+    ...overrides,
+  } });
+}
+
+for (const mode of ['direct', 'group']) {
+  test(`${mode} chat applies the selected credential before its first turn`, async () => {
+    const { dispatcher, chatSpawns } = host();
+    const runtime = spec('cred-1');
+    if (mode === 'direct') {
+      await dispatcher.handleChatRequest(JSON.stringify({ payload: {
+        room_id: 'room-1', account_id: ACCOUNT, agent_id: runtimeIdentityKey(runtime), runtime, content: 'hello',
+      } }));
+    } else {
+      await dispatcher.handleChatRoomMessage(roomEvent([runtime]));
+    }
+    assert.equal(chatSpawns.length, 1);
+    assert.equal(chatSpawns[0].agentContext.extra_env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-ticket');
+    assert.equal(server.credentialFetches, 1);
+  });
+}
+
+test('group chat ignores remote members before fetching credentials, including stale cached identities', async () => {
+  const { dispatcher, contexts, chatSpawns, history } = host();
+  const local = spec('cred-1');
+  const remote = { ...local, manager_agent_id: 'host-2', working_dir: WORKDIR + '-remote' };
+  contexts.upsert({
+    agent_id: runtimeIdentityKey(remote), cli: remote.cli, working_dir: remote.working_dir,
+    api_key: 'stale-key', mcp_config_path: '/stale/mcp.json', account_id: ACCOUNT,
+  });
+  await dispatcher.handleChatRoomMessage(roomEvent([remote, local]));
+  assert.equal(chatSpawns.length, 1);
+  assert.equal(chatSpawns[0].agentId, runtimeIdentityKey(local));
+  assert.deepEqual(server.credentialTargets, [runtimeIdentityKey(local)]);
+  assert.equal(server.chatPosts.length, 0);
+
+  // The local reply is broadcast again; it must not cause this host to answer
+  // as the remote member or emit a bogus credential-failure message for it.
+  await dispatcher.handleChatRoomMessage(roomEvent([remote, local], {
+    sender_type: 'agent', sender_id: runtimeIdentityKey(local),
+  }));
+  assert.equal(chatSpawns.length, 1);
+  assert.equal(server.credentialFetches, 1);
+  assert.equal(server.chatPosts.length, 0);
+  assert.equal(history.length, 2);
+});
+
+test('group chat repairs a cached context with a selected id but no applied credential', async () => {
+  const { dispatcher, contexts, chatSpawns } = host();
+  const runtime = spec('cred-1');
+  contexts.upsert({
+    agent_id: runtimeIdentityKey(runtime), cli: runtime.cli, model: runtime.model,
+    working_dir: runtime.working_dir, account_id: ACCOUNT, api_key: 'old-key',
+    mcp_config_path: '/old/mcp.json', credential_id: 'cred-1', credential_provider: null,
+  });
+  await dispatcher.handleChatRoomMessage(roomEvent([runtime]));
+  assert.equal(chatSpawns.length, 1);
+  assert.equal(server.credentialFetches, 1);
+  assert.equal(chatSpawns[0].agentContext.extra_env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-ticket');
+});
+
+test('a local chat credential failure prevents dispatch instead of using the manager login', async () => {
+  server.credential = { status: 503 };
+  const { dispatcher, chatSpawns } = host();
+  await dispatcher.handleChatRoomMessage(roomEvent([spec('cred-1')]));
+  assert.equal(chatSpawns.length, 0);
+  assert.equal(server.chatPosts.length, 1);
+  assert.match(server.chatPosts[0].content, /credential 적용 실패/);
+});
+
+test('targeted chat and ticket events for another host are ignored even if the runtime key is cached', async () => {
+  const { dispatcher, contexts, chatSpawns, spawns } = host();
+  const runtime = { ...spec('cred-1'), manager_agent_id: 'host-2' };
+  contexts.upsert({
+    agent_id: runtimeIdentityKey(runtime), cli: runtime.cli, working_dir: runtime.working_dir,
+    api_key: 'cached-key', mcp_config_path: '/cached/mcp.json', account_id: ACCOUNT,
+  });
+  await dispatcher.handleChatRequest(JSON.stringify({ payload: {
+    room_id: 'room-1', account_id: ACCOUNT, agent_id: runtimeIdentityKey(runtime), runtime,
+  } }));
+  await dispatcher.handleTrigger(trigger(runtime));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(chatSpawns.length + spawns.length, 0);
+  assert.equal(server.credentialFetches, 0);
+  assert.equal(server.acks.length, 0);
+  assert.equal(server.chatPosts.length, 0);
+});
+
 test.after(async () => {
   await fsp.rm(process.env.AWB_AGENT_MANAGER_HOME, { recursive: true, force: true });
+  await fsp.rm(process.env.CLAUDE_CONFIG_DIR, { recursive: true, force: true });
+  if (operatorConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+  else process.env.CLAUDE_CONFIG_DIR = operatorConfigDir;
 });
