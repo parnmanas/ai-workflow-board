@@ -4,6 +4,10 @@
 import type { MarketingCampaign } from '../../entities/MarketingCampaign';
 import type { MarketingAuditEvent } from '../../entities/MarketingAuditEvent';
 import type { MarketingChannel } from '../../entities/MarketingChannel';
+import type { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
+import type { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
+import type { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
+import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
 
@@ -34,6 +38,8 @@ export function campaignToJson(c: MarketingCampaign) {
     budget_period_minor: c.budget_period_minor,
     max_transaction_minor: c.max_transaction_minor,
     dual_approval_threshold_minor: c.dual_approval_threshold_minor,
+    payment_provider: c.payment_provider,
+    payment_credential_id: c.payment_credential_id,
     payees: c.payees || [],
     allowed_domains: c.allowed_domains || [],
     disclosure: c.disclosure,
@@ -94,5 +100,87 @@ export function channelToJson(ch: MarketingChannel) {
     decision_note: ch.decision_note,
     created_at: ch.created_at,
     updated_at: ch.updated_at,
+  };
+}
+
+export function allocationToJson(a: MarketingBudgetAllocation) {
+  return {
+    id: a.id,
+    campaign_id: a.campaign_id,
+    channel_id: a.channel_id,
+    batch_id: a.batch_id,
+    amount_minor: a.amount_minor,
+    amount_text: formatMinorAmount(a.amount_minor, a.currency),
+    currency: a.currency,
+    status: a.status,
+    rationale: a.rationale,
+    proposed_by_type: a.proposed_by_type,
+    proposed_by_id: a.proposed_by_id,
+    proposed_by_name: a.proposed_by_name,
+    decided_by: a.decided_by,
+    decided_by_name: a.decided_by_name,
+    decided_at: a.decided_at,
+    decision_note: a.decision_note,
+    supersedes_id: a.supersedes_id,
+    created_at: a.created_at,
+  };
+}
+
+export function spendToJson(r: MarketingSpendRequest) {
+  return {
+    id: r.id,
+    account_id: r.account_id,
+    campaign_id: r.campaign_id,
+    channel_id: r.channel_id,
+    amount_minor: r.amount_minor,
+    amount_text: formatMinorAmount(r.amount_minor, r.currency),
+    currency: r.currency,
+    payee: r.payee,
+    payee_ref: r.payee_ref,
+    purpose: r.purpose,
+    expected_outcome: r.expected_outcome,
+    provider: r.provider,
+    payload: r.payload || {},
+    payload_sha256: r.payload_sha256,
+    status: r.status,
+    dedupe_key: r.dedupe_key,
+    requested_by_type: r.requested_by_type,
+    requested_by_id: r.requested_by_id,
+    requested_by_name: r.requested_by_name,
+    cycle_id: r.cycle_id,
+    approvals: r.approvals || [],
+    decided_by: r.decided_by,
+    decided_by_name: r.decided_by_name,
+    decided_at: r.decided_at,
+    decision_note: r.decision_note,
+    expires_at: r.expires_at,
+    period_key: r.period_key,
+    executing_at: r.executing_at,
+    paid_at: r.paid_at,
+    provider_ref: r.provider_ref,
+    receipt_url: r.receipt_url,
+    provider_response: r.provider_response || {},
+    error: r.error,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+}
+
+export function ledgerToJson(e: MarketingLedgerEntry) {
+  return {
+    id: e.id,
+    campaign_id: e.campaign_id,
+    channel_id: e.channel_id,
+    spend_request_id: e.spend_request_id,
+    kind: e.kind,
+    amount_minor: e.amount_minor,
+    amount_text: formatMinorAmount(e.amount_minor, e.currency),
+    currency: e.currency,
+    period_key: e.period_key,
+    actor_type: e.actor_type,
+    actor_id: e.actor_id,
+    actor_name: e.actor_name,
+    note: e.note,
+    created_at: e.created_at,
   };
 }

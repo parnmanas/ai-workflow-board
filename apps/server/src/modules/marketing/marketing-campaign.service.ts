@@ -4,12 +4,15 @@ import { DataSource, In, Repository } from 'typeorm';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { Project } from '../../entities/Project';
 import { RuntimeHost } from '../../entities/RuntimeHost';
+import { Credential } from '../../entities/Credential';
 import { normalizeRuntimeSpec } from '../../common/runtime-spec';
 import { normalizeCurrency, parseMinorAmount, MarketingMoneyError } from '../../common/marketing/money';
-import { type MarketingActor, type CampaignStatus } from '../../common/marketing/marketing-constants';
+import { PAYMENT_PROVIDERS, type MarketingActor, type CampaignStatus } from '../../common/marketing/marketing-constants';
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 import { marketingError } from './marketing-errors';
+import { resolveMarketingSecret } from './marketing-credential';
+import { readWebhookSecret } from './marketing-payments';
 import {
   assertTransition,
   computeNextCycleAt,
@@ -34,7 +37,8 @@ export type CampaignInput = Record<string, unknown>;
 const SCALAR_AUDIT_KEYS = [
   'name', 'project_id', 'capabilities', 'cycle_cron', 'cycle_interval_ms', 'currency', 'budget_total_minor',
   'budget_period', 'budget_period_minor', 'max_transaction_minor', 'dual_approval_threshold_minor', 'payees',
-  'allowed_domains', 'disclosure', 'limits', 'feedback_ticket_status', 'agent_key',
+  'allowed_domains', 'disclosure', 'limits', 'feedback_ticket_status', 'agent_key', 'payment_provider',
+  'payment_credential_id',
 ] as const;
 const TEXT_AUDIT_KEYS = ['product_brief', 'goal', 'target_audience'] as const;
 
@@ -52,6 +56,7 @@ export class MarketingCampaignService {
     @InjectRepository(MarketingCampaign) private readonly campaignRepo: Repository<MarketingCampaign>,
     @InjectRepository(Project) private readonly projectRepo: Repository<Project>,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly audit: MarketingAuditService,
     private readonly hooks: MarketingCampaignHooks,
@@ -108,6 +113,8 @@ export class MarketingCampaignService {
       max_transaction_minor: 0,
       dual_approval_threshold_minor: 0,
       spend_version: 0,
+      payment_provider: 'manual',
+      payment_credential_id: null,
       payees: [],
       allowed_domains: [],
       disclosure: normalizeDisclosure(''),
@@ -273,6 +280,22 @@ export class MarketingCampaignService {
         row.project_id = null;
       }
     }
+    if (body.payment_provider !== undefined || body.payment_credential_id !== undefined) {
+      const provider = body.payment_provider !== undefined ? String(body.payment_provider || '').trim() : row.payment_provider;
+      if (!(PAYMENT_PROVIDERS as readonly string[]).includes(provider)) {
+        throw marketingError(400, `payment_provider must be one of: ${PAYMENT_PROVIDERS.join(', ')}`);
+      }
+      const credentialId = body.payment_credential_id !== undefined
+        ? (typeof body.payment_credential_id === 'string' ? body.payment_credential_id.trim() : '') || null
+        : row.payment_credential_id;
+      if (provider === 'webhook') {
+        if (!credentialId) throw marketingError(400, 'payment_provider webhook needs payment_credential_id (webhook_url + secret)');
+        // 지금 읽을 수 있고 모양이 맞는지 저장 시점에 확인한다 — 승인 순간에 처음 알게 되면 늦다.
+        readWebhookSecret(await resolveMarketingSecret(this.credentialRepo, credentialId, row.account_id));
+      }
+      row.payment_provider = provider;
+      row.payment_credential_id = provider === 'webhook' ? credentialId : null;
+    }
     if (body.agent_runtime !== undefined) {
       row.agent_runtime = await this.normalizeSpec(body.agent_runtime, 'agent_runtime');
       row.refreshRuntimeIdentity();
@@ -349,6 +372,8 @@ function snapshot(row: MarketingCampaign) {
     limits: { ...(row.limits || {}) },
     feedback_ticket_status: row.feedback_ticket_status,
     agent_key: row.agent_key,
+    payment_provider: row.payment_provider,
+    payment_credential_id: row.payment_credential_id,
     product_brief: row.product_brief,
     goal: row.goal,
     target_audience: row.target_audience,

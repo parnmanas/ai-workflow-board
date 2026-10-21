@@ -132,4 +132,72 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
       }
     },
   );
+
+  server.tool(
+    'propose_marketing_budget_allocation',
+    'Propose how the campaign budget is split across approved channels for one budget period (the campaign\'s budget_period; whole campaign when "none"). A person with marketing.approve_spend approves it; spend on a channel needs its approved allocation. Base it on results (get_marketing_report) and cite them in rationale. Needs capability paid_spend. Amounts are integers in minor units of the campaign currency (KRW 50000 = ₩50,000; USD 1250 = $12.50). A new proposal for a channel replaces its undecided earlier proposal.',
+    {
+      campaign_id: z.string(),
+      allocations: z.array(z.object({
+        channel_id: z.string(),
+        amount_minor: z.number().int().nonnegative(),
+      })).min(1).max(20),
+      rationale: z.string().describe('Why this split — cite the channel results it is based on'),
+    },
+    async ({ campaign_id, ...body }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      try {
+        return ok(await marketingAgentService!.proposeAllocation(found.campaign, body, found.actor));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to propose allocation');
+      }
+    },
+  );
+
+  server.tool(
+    'request_marketing_spend',
+    'Ask a person to approve a payment (ad spend, sponsorship, tool fee …) for an approved channel. Nothing is paid until a person with marketing.approve_spend approves it; the payment method is set by people on the campaign, not by you. Refused immediately when it would exceed the per-transaction cap, the remaining campaign/period budget, or the channel\'s approved allocation, or when payee is not on the campaign payee allowlist. Amounts are integers in minor units. Use dedupe_key to make retries safe. Needs capability paid_spend.',
+    {
+      campaign_id: z.string(),
+      channel_id: z.string(),
+      amount_minor: z.number().int().positive(),
+      currency: z.string().describe('ISO 4217; must equal the campaign currency'),
+      payee: z.string().describe('Exact name from the campaign payees allowlist'),
+      purpose: z.string().describe('What the money buys'),
+      expected_outcome: z.string().describe('What it should achieve and how you will measure it'),
+      payload: z.record(z.string(), z.any()).optional().describe('Execution details the payment endpoint needs (ad set, dates, targeting …). Max 8 KB. Never put secrets here.'),
+      dedupe_key: z.string().optional(),
+      cycle_id: z.string().optional().describe('The marketing cycle this belongs to, if any'),
+    },
+    async ({ campaign_id, cycle_id, ...body }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      try {
+        return ok(await marketingAgentService!.requestSpend(found.campaign, body, found.actor, cycle_id || null));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to request spend');
+      }
+    },
+  );
+
+  server.tool(
+    'get_marketing_spend_request',
+    'Read one spend request: status (pending, approved, executing, paid, failed, unknown, denied, expired, cancelled), approvals, payment result and error.',
+    {
+      spend_request_id: z.string(),
+    },
+    async ({ spend_request_id }, extra) => {
+      if (!marketingAgentService) return err('Marketing service unavailable in this MCP context');
+      const campaignId = await marketingAgentService.campaignOfSpendRequest(spend_request_id);
+      if (!campaignId) return err('spend request not found');
+      const found = await campaignFor(extra, campaignId);
+      if ('error' in found) return err(found.error === ACCESS_ERROR ? 'spend request not found' : found.error);
+      try {
+        return ok(await marketingAgentService.getSpendRequest(found.campaign, spend_request_id));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to read spend request');
+      }
+    },
+  );
 }

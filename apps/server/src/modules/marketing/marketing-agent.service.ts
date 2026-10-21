@@ -8,7 +8,9 @@ import {
 } from '../../common/marketing/marketing-constants';
 import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingChannelService } from './marketing-channel.service';
-import { campaignToJson, channelToJson } from './marketing-json';
+import { MarketingBudgetService } from './marketing-budget.service';
+import { MarketingSpendService } from './marketing-spend.service';
+import { allocationToJson, campaignToJson, channelToJson, spendToJson } from './marketing-json';
 import { hasCapability, resolveLimits } from './marketing-campaign.logic';
 import { marketingError } from './marketing-errors';
 
@@ -26,6 +28,8 @@ export class MarketingAgentService {
   constructor(
     private readonly campaigns: MarketingCampaignService,
     private readonly channels: MarketingChannelService,
+    private readonly budget: MarketingBudgetService,
+    private readonly spend: MarketingSpendService,
   ) {}
 
   async listCampaigns(accountIds: string[] | 'all'): Promise<MarketingCampaign[]> {
@@ -59,14 +63,49 @@ export class MarketingAgentService {
     }
   }
 
-  /** get_marketing_campaign 의 응답 — 캠페인 설정 · 채널 · 에이전트가 지켜야 할 규칙. */
+  /** get_marketing_campaign 의 응답 — 캠페인 설정 · 채널 · 예산 · 대기 중 요청 · 에이전트가 지켜야 할 규칙. */
   async overview(campaign: MarketingCampaign) {
-    const channels = await this.channels.list(campaign);
+    const [channels, budget, open] = await Promise.all([
+      this.channels.list(campaign),
+      this.budget.summary(campaign),
+      this.spend.list(campaign, undefined, 20),
+    ]);
     return {
       campaign: campaignToJson(campaign),
       channels: channels.map(channelToJson),
+      budget,
+      recent_spend_requests: open.map((r) => ({
+        id: r.id, status: r.status, amount_text: spendToJson(r).amount_text, payee: r.payee, channel_id: r.channel_id,
+        purpose: r.purpose.slice(0, 200), created_at: r.created_at, error: r.error,
+      })),
       rules: agentRules(campaign),
     };
+  }
+
+  async proposeAllocation(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor) {
+    this.assertCanAct(campaign, 'paid_spend');
+    await this.assertDailyLimit(campaign, 'allocation_proposals_per_day', (since) => this.budget.countProposedSince(campaign.id, since));
+    const rows = await this.budget.propose(campaign, body, actor);
+    return { allocations: rows.map(allocationToJson), note: 'A person with marketing.approve_spend decides. Spend on a channel needs its approved allocation.' };
+  }
+
+  async requestSpend(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor, cycleId: string | null) {
+    this.assertCanAct(campaign, 'paid_spend');
+    await this.assertDailyLimit(campaign, 'spend_requests_per_day', (since) => this.spend.countRequestedSince(campaign.id, since));
+    const { request, duplicate } = await this.spend.request(campaign, body, actor, { cycleId });
+    return { spend_request: spendToJson(request), duplicate, note: 'Nothing is paid until a person approves it. Check back with get_marketing_spend_request.' };
+  }
+
+  async getSpendRequest(campaign: MarketingCampaign, id: string) {
+    const row = await this.spend.get(id, campaign.account_id);
+    if (row.campaign_id !== campaign.id) throw marketingError(404, 'spend request not found in this campaign');
+    return spendToJson(row);
+  }
+
+  /** get_marketing_spend_request 는 요청 id 만 받는다 — 그 요청의 캠페인을 찾아 호출자 검사를 거친다. */
+  async campaignOfSpendRequest(id: string): Promise<string | null> {
+    const row = await this.spend.get(id, '').catch(() => null);
+    return row ? row.campaign_id : null;
   }
 
   async proposeChannel(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor) {

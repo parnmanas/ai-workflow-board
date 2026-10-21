@@ -109,6 +109,17 @@ export class MarketingCampaign {
   @Column({ type: 'int', default: 0 })
   spend_version: number;
 
+  /**
+   * 결제 방식 — manual(사람이 AWB 밖에서 결제하고 기록) | webhook(운영자 결제 엔드포인트로 서명된 실행 지시).
+   * 에이전트가 고르지 않는다. 바꾸려면 marketing.approve_spend 가 필요하다.
+   */
+  @Column({ type: 'varchar', default: 'manual' })
+  payment_provider: string;
+
+  /** webhook 결제의 credential(webhook_url + secret). 서버만 복호화한다. */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  payment_credential_id: string | null;
+
   /** 지출 수취인 허용 목록 — 사람만 고친다. [{ name, ref?, note? }] */
   @Column({ type: 'simple-json', default: '[]' })
   payees: Array<{ name: string; ref?: string; note?: string }>;

@@ -142,3 +142,6 @@ export { AgentTemplate } from './AgentTemplate';
 export { MarketingCampaign } from './MarketingCampaign';
 export { MarketingAuditEvent } from './MarketingAuditEvent';
 export { MarketingChannel } from './MarketingChannel';
+export { MarketingBudgetAllocation } from './MarketingBudgetAllocation';
+export { MarketingSpendRequest } from './MarketingSpendRequest';
+export { MarketingLedgerEntry } from './MarketingLedgerEntry';

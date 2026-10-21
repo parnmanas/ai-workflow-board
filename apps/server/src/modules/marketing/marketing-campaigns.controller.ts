@@ -9,7 +9,7 @@ import { MarketingAuditService } from './marketing-audit.service';
 import { campaignToJson, auditToJson } from './marketing-json';
 import { normalizeStatus } from './marketing-campaign.logic';
 import { errorStatus } from './marketing-errors';
-import { boundAccountId, listAccountIds, userActor } from './marketing-http';
+import { assertCanChangePayment, boundAccountId, listAccountIds, userActor } from './marketing-http';
 
 /**
  * 캠페인 REST(docs/marketing.md). 목록은 접근 가능한 계정을 합치고, 상세 · 쓰기는
@@ -39,6 +39,7 @@ export class MarketingCampaignsController {
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
+      assertCanChangePayment(req, body);
       const row = await this.campaigns.create(boundAccountId(req), body || {}, userActor(req));
       return res.status(201).json(campaignToJson(row));
     } catch (e: any) {
@@ -59,6 +60,7 @@ export class MarketingCampaignsController {
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const { account_id: _ignored, ...patch } = body || {};
+      assertCanChangePayment(req, patch);
       const row = await this.campaigns.update(id, boundAccountId(req), patch, userActor(req));
       return res.json(campaignToJson(row));
     } catch (e: any) {

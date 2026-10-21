@@ -42,6 +42,7 @@ export type FeedbackTicketStatus = typeof FEEDBACK_TICKET_STATUSES[number];
 export const DEFAULT_MARKETING_LIMITS = {
   drafts_per_day: 20,
   spend_requests_per_day: 5,
+  allocation_proposals_per_day: 3,
   links_per_day: 50,
   channel_proposals_per_day: 10,
   feedback_per_day: 100,
@@ -81,6 +82,14 @@ export type ChannelStatus = typeof CHANNEL_STATUSES[number];
 export const EMAIL_PROVIDERS = ['resend', 'sendgrid'] as const;
 export type EmailProvider = typeof EMAIL_PROVIDERS[number];
 export const DEFAULT_EMAIL_AD_LABEL = '(광고)';
+
+export const PAYMENT_PROVIDERS = ['manual', 'webhook'] as const;
+export type PaymentProvider = typeof PAYMENT_PROVIDERS[number];
+
+export const SPEND_STATUSES = ['pending', 'approved', 'executing', 'paid', 'failed', 'unknown', 'denied', 'expired', 'cancelled'] as const;
+export type SpendStatus = typeof SPEND_STATUSES[number];
+
+export const ALLOCATION_STATUSES = ['proposed', 'active', 'superseded', 'rejected'] as const;
 
 /** 승인 대기 지출 요청의 기본 만료(결정이 없으면 거부). */
 export const SPEND_REQUEST_TTL_MS = 72 * 60 * 60_000;

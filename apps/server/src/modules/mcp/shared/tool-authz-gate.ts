@@ -249,6 +249,9 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   list_marketing_campaigns: 'caller',
   get_marketing_campaign: 'caller',
   propose_marketing_channel: 'caller',
+  propose_marketing_budget_allocation: 'caller',
+  request_marketing_spend: 'caller',
+  get_marketing_spend_request: 'caller',
 };
 
 /**
