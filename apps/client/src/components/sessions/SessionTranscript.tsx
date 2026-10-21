@@ -287,7 +287,9 @@ function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { te
       <div
         data-block="assistant"
         style={{
-          maxWidth: 860,
+          // 내용 폭으로 크는 말풍선이라 860 만으로는 막히지 않는다 — 코드 블록의 긴 줄(white-space: pre)이
+          // 말풍선을 화면 밖으로 밀어 전사 전체가 가로로 스크롤됐다. 폭을 전사에 묶어 코드가 제자리에서 스크롤되게 한다.
+          maxWidth: 'min(860px, 100%)',
           color: tokens.colors.textPrimary,
           fontSize: 13.5,
           lineHeight: 1.6,
