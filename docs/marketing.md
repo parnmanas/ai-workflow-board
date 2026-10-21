@@ -156,6 +156,7 @@
 | email | `sending` (발송 큐) | 큐가 다 돌면 `published` |
 
 - outreach 게시가 실패해도 **자동 재시도하지 않는다.** 네트워크 실패 뒤에도 실제로는 올라가 있을 수 있어서다. 다시 보낼지는 사람이 `retry` 로 정한다.
+- **답글은 채널 밖으로 가지 않는다.** reddit fullname(`t3_…`/`t1_…`)이나 github 참조만 봐서는 어느 커뮤니티의 스레드인지 알 수 없다. 그래서 초안 때 커넥터의 `describeThread`(reddit `/api/info`, github 는 참조 파싱)로 그 스레드가 채널 대상 안인지 확인하고, 결과를 `reply_context`(대상 · 링크 · 제목)로 승인 화면에 보여 준다. 채널 밖이거나 확인할 수 없으면 초안을 만들지 않고, 게시 직전에 한 번 더 확인한다.
 - 일시정지된 채널 · 캠페인에서는 승인할 수 없다.
 - 거부 사유(`note`)는 다음 사이클 지시문의 "사람의 최근 결정"에 실린다. 에이전트는 이걸 보고 배운다.
 
@@ -177,8 +178,10 @@
 - 큐는 30초마다 50통씩 처리한다.
   - **보내기 직전에 연락처 상태를 다시 본다.** 그 사이 수신거부했으면 `suppressed` 다.
   - 수신자 현지 21:00–08:00 이고 야간 동의가 없으면 `deferred` 로 두고, 아침 08:00 에 보낸다.
-  - 4xx 는 `failed` 다. 5xx · 네트워크 오류는 최대 3번까지 다시 시도한다.
+  - 4xx 는 `failed` 다.
+  - 다시 보낼지는 "다시 보내면 두 번 받을 수 있는가" 로 정한다. Resend 에는 발송 행 id 를 `Idempotency-Key` 로 보내므로 타임아웃 · 5xx · 429 를 최대 3번까지 다시 시도한다. SendGrid 는 멱등 키가 없어 429 만 다시 시도하고, 타임아웃 · 5xx 는 `failed` 로 닫는다.
   - 보내던 중 끊긴 행은 다시 보내지 않고 `failed` 로 닫는다. 중복 발송보다 누락이 낫다.
+  - 캠페인이나 채널이 일시정지되면 큐의 메일은 버리지 않고 `deferred` 로 미룬다. 재개하면 이어서 보낸다. 보관된 캠페인의 메일은 `suppressed` 다.
 - 서버가 **강제로** 넣는 것:
   - 제목 앞 광고 표기. 한국 · 국가 미상 수신자는 항상 `(광고)`, 그 밖은 채널 `ad_label`.
   - 본문 끝 꼬리말: 발신자명 · 우편 주소 · 연락처, 무료 수신거부 링크, 수신 동의일.
@@ -208,13 +211,14 @@
   - `budget_total_minor`: 0 이면 지출 불가.
   - `budget_period` (`none|week|month`, UTC, ISO 주) 와 `budget_period_minor`: 기간 한도. 0 이면 기간 한도 없음.
   - `max_transaction_minor`: 건당 한도.
-  - `dual_approval_threshold_minor`: 이 금액 이상이면 서로 다른 두 사람이 승인해야 한다.
+  - `dual_approval_threshold_minor`: 이 금액 이상이면 서로 다른 두 사람이 승인해야 한다. 요청이 들어올 때 `dual_required` 로 고정되므로, 나중에 임계값을 내려도 이미 들어온 요청은 약해지지 않는다(승인 때는 고정값과 그때 임계값 중 더 엄격한 쪽).
 - **채널 편성**(`MarketingBudgetAllocation`)
   - 에이전트가 근거와 함께 제안하고, `approve_spend` 가 승인한다. 승인되면 그 채널의 이전 편성은 `superseded` 가 된다.
   - 결정되지 않은 이전 제안도 새 제안이 오면 `superseded` 로 정리된다.
   - active 편성 합이 기간 한도(없으면 총 한도)를 넘으면 승인이 거부된다.
   - **편성이 없는 채널에는 지출할 수 없다.**
-- **수취인 허용 목록**(`payees`): 요청의 `payee` 는 이 목록 안이어야 한다.
+- **수취인 허용 목록**(`payees`): 요청의 `payee` 는 이 목록 안이어야 한다. 요청 · 승인 · 실행 때마다 다시 본다.
+- **돈 설정의 권한:** 한도 · 임계값 · 수취인 · 통화 · 결제 방식을 바꾸는 것은 `marketing.approve_spend` 의 일이다. 임계값을 0 으로 내리면 혼자 승인할 수 있고 수취인을 넣으면 돈이 갈 곳이 생기므로, 캠페인 운영 권한(manage)만으로는 바꾸지 못한다.
 - **결제 방식**(`payment_provider`, `payment_credential_id`)
   - 캠페인 설정이고, 에이전트가 고르지 않는다.
   - 바꾸려면 `approve_spend` 가 있어야 한다.
@@ -250,8 +254,8 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
    승인자 identity 는 로그인 세션에서만 온다. 2인 규칙 대상이면 첫 승인은 `approvals` 에 기록만 하고, 같은 사람은 두 번 승인할 수 없다.
 3. **실행(webhook).** 다음 순서로 진행한다.
-   1. `approved → executing` 을 CAS 로 **먼저 커밋**한다. sql.js 는 이때 즉시 flush 한다.
-   2. 해시를 다시 확인한다.
+   1. 캠페인 잠금 트랜잭션 안에서 **지금도 보내도 되는지** 다시 본다: 캠페인 active, 수취인이 아직 허용 목록에 있음, 채널 active, 저장된 해시 일치. 하나라도 어긋나면 보내지 않고 `failed`(예산 해제)로 닫는다. 통과하면 같은 트랜잭션에서 `approved → executing` 을 CAS 로 커밋한다.
+   2. sql.js 는 이때 파일로 즉시 내려 쓴다. 진행 중인 트랜잭션이 끝난 뒤(`afterSqljsTransactions`)에 하고, 내려 쓰지 못하면 보내지 않는다.
    3. 정규화 JSON 본문을 POST 한다. 헤더는 다음과 같다.
       - `X-AWB-Signature: t=<unix>,v1=<hex hmac-sha256(secret, "<t>.<body>")>`
       - `Idempotency-Key: <spend request id>` (재시도해도 바뀌지 않는다)
@@ -260,8 +264,10 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
    | 응답 | 결과 | 예산 |
    | --- | --- | --- |
    | 2xx + `transaction_id` | `paid` | `release` + `capture` |
-   | 4xx | `failed` | `release` |
-   | 그 밖(타임아웃 · 5xx · 리다이렉트 · `transaction_id` 없는 2xx) | `unknown` | 그대로 보류 |
+   | 명확한 거절(400 · 401 · 402 · 403 · 404 · 422) | `failed` | `release` |
+   | 그 밖(타임아웃 · 5xx · 리다이렉트 · 408 · 409 · 425 · 429 · `transaction_id` 없는 2xx) | `unknown` | 그대로 보류 |
+
+   409 는 멱등 키 중복(= 이미 처리됐을 수 있음)인 경우가 많아 거절로 보지 않는다. 사람이 이미 대조한 뒤에 도착한 결과는 버리지 않고 `spend.late_result` 로 감사에 남긴다.
 
    - **자동 재전송은 없다.**
    - 재시작하거나 10분 넘게 걸린 `executing` 은 `unknown` 이 된다.
@@ -271,7 +277,8 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 4. **환불.** `approve_spend` 를 가진 사람이 사유를 적어 기록한다.
    - 결제된 금액 안에서만 기록할 수 있다.
    - 환불은 capture 에 묶이고, 요청을 다시 열지 않는다(`paid` 로 남는다).
-5. **정리.** 캠페인을 일시정지하거나 보관하면 `pending` 요청은 `cancelled` 가 된다. 원장이 생긴 뒤에는 통화를 바꿀 수 없고, 캠페인을 삭제할 수도 없다(보관만 된다).
+5. **취소.** `pending` 은 그대로, 승인됐지만 아직 보내지 않은 `approved` 는 보류한 예산을 풀며 `cancelled` 로 닫는다. `executing` 이후는 이미 나갔을 수 있으니 취소가 아니라 대조의 일이다.
+6. **정리.** 캠페인을 일시정지하거나 보관하면 `pending` 요청은 `cancelled` 가 된다. 원장이 생긴 뒤에는 통화를 바꿀 수 없고, 캠페인을 삭제할 수도 없다(보관만 된다).
 
 ## 분석
 
@@ -322,7 +329,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 2. **계정 run budget 을 검사한다**(`max_runs_per_window` 의 `marketing` 축). 방이나 사이클 행을 만들기 전이다.
 3. **앞 사이클이 아직 `running` 이면 시작하지 않는다.** 6시간이 지났으면 `timed_out` 으로 닫는다.
 4. **`MarketingCycle` 행과 방을 만든다.** 캠페인 에이전트(RuntimeSpec)를 앉히고 사이클 지시문을 보낸다.
-5. **에이전트는 `complete_marketing_cycle(cycle_id, summary, next_actions)` 로 끝낸다.** 한 번만 부를 수 있다.
+5. **에이전트는 `complete_marketing_cycle(cycle_id, summary, next_actions)` 로 끝낸다.** 한 번만, 그 사이클을 받은 캠페인 에이전트(runtime key)만 부를 수 있다 — 같은 계정의 다른 에이전트가 다음 사이클의 "다음 행동" 을 써 넣지 못하게.
 
 지시문(`buildCyclePrompt`)에 실리는 것:
 
@@ -334,8 +341,9 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 - 대기 중 승인 수
 - **사람의 최근 결정과 그 사유**
 - 30일 성과 요약
-- 직전 사이클 요약과 다음 행동
-- 직전 사이클 이후 들어온 **외부 글**: 비신뢰 블록 안에 넣는다. 링크는 지우고, 구분자는 무력화하고, 15건까지 각 300자로 자르고, 블록 앞뒤에 경고를 붙인다.
+- 직전 사이클 요약과 다음 행동: 에이전트가 쓴 것이라 **메모 블록**(`UNVERIFIED_AGENT_NOTES`)에 참고 기록으로 넣는다.
+- 직전 사이클 이후 들어온 **외부 글**: 비신뢰 블록 안에 넣는다. 링크는 지우고, `<` `>` 를 지워 구분자를 흉내 내지 못하게 하고, 15건까지 각 300자로 자르고, 블록 앞뒤에 경고를 붙인다.
+- 신뢰 구역(블록 밖)에는 사람이 쓰거나 승인한 것만 둔다: 승인된 채널의 이름 · 가이드 · 홍보 규칙, 사람의 거부 사유. 제안 단계 채널은 id · 플랫폼 · 상태만 보이고, 감사 요약(에이전트가 쓴 제목이 섞인다)은 싣지 않는다.
 
 나머지 규칙:
 
@@ -347,7 +355,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 권한 | 할 수 있는 일 | 기본 |
 | --- | --- | --- |
 | `marketing.manage` | 캠페인 CRUD, 채널 · 콘텐츠 승인, 추적 링크 · 지표 · 피드백, 연락처 | admin 전용 |
-| `marketing.approve_spend` | 결제 방식 변경, 편성 승인, 지출 승인 · 거부 · 취소, 결제 기록 · 대조 · 환불 | admin 전용 |
+| `marketing.approve_spend` | 돈 설정(한도 · 2인 임계값 · 수취인 · 통화 · 결제 방식) 변경, 편성 승인, 지출 승인 · 거부 · 취소, 결제 기록 · 대조 · 환불 | admin 전용 |
 
 예산 · 지출 · 원장 조회는 둘 중 하나만 있어도 된다.
 
