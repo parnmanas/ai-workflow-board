@@ -27,6 +27,7 @@ test/agent-manager-update-cli.test.mjs
 test/agent-session-execution-ownership.test.mjs
 test/agent-session-open-failure.test.mjs
 test/agent-session-open-status-race.test.mjs
+test/agent-session-read-status-race.test.mjs
 test/agent-session-rpc-redeliver.test.mjs
 test/agent-sessions.test.mjs
 test/agent-templates.test.mjs
