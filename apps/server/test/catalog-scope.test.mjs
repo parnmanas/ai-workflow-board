@@ -74,11 +74,13 @@ test('client exposes direct management routes with Global + accessible-Account c
   assert.doesNotMatch(sidebar, /label: 'Global Functions'/);
   assert.doesNotMatch(sidebar, /label: 'Global Credentials'/);
   const ownerLogic = fs.readFileSync(path.join(ROOT, 'components', 'admin', 'catalogOwner.logic.ts'), 'utf8');
-  assert.match(management, /Account for new item/);
-  // Global (when permitted) + every accessible account — not a single hidden
-  // "current account" option.
-  assert.match(management, /createOwnerOptions\(ownerAccounts, canManageGlobalHere\)/);
-  assert.match(ownerLogic, /label: 'Not set \(Global\)'/);
+  // 카탈로그는 계정/Scope 선택기를 되살리지 않는다(AGENTS.md, docs/catalog-scopes.md → UI) — 생성 귀속은
+  // 자동이다: Global 쓰기 권한이 있으면 Global, 아니면 기본 접근 계정.
+  assert.doesNotMatch(management, /Account for new item/);
+  assert.doesNotMatch(management, /createOwnerOptions/);
+  assert.match(management, /defaultCreateOwner\(availableAccounts, canManageGlobalHere\)/);
+  assert.match(ownerLogic, /export function defaultCreateOwner\(/);
+  assert.doesNotMatch(ownerLogic, /label: 'Not set \(Global\)'/);
   assert.doesNotMatch(management, /<option value="account">/);
   assert.doesNotMatch(management, /boardScoped|boardId/);
   // Boards are gone, so no catalog page may hang off a board route.
