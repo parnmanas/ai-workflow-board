@@ -43,6 +43,7 @@ const TICKET = 'ticket-prov';
 // provisioning path is never exercised).
 function makeCtx() {
   return {
+    account_id: 'test-account',
     agent_id: AGENT,
     name: 'Rolf',
     cli: 'claude',
@@ -164,7 +165,7 @@ function makeDispatcher(state) {
   // No ticketSessionManager → the dispatcher falls to the one-shot subagent path,
   // whose spawn() (our faithful single-flight fake) we count.
   return new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
+    { account_id: 'test-account', url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
     {
       worktreeManager,
       subagentManager: makeSubagentManager(state),
@@ -188,6 +189,7 @@ function newState(overrides = {}) {
 
 function makeEvent(overrides = {}) {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'agent_trigger',
     ticket_id: TICKET,
     action: 'assignee',

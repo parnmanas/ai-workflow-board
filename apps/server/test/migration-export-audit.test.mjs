@@ -58,6 +58,7 @@ await ds.initialize();
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const activityLogRepo = ds.getRepository(ActivityLog);
 const activityService = new ActivityService(activityLogRepo, ds, logStub);
+const keyAccount = await ds.getRepository(Account).save({ name: 'Export operator' });
 const apiKeyService = new ApiKeyService(ds.getRepository(ApiKey));
 const guard = new MigrationExportGuard(apiKeyService, activityService);
 const noDeployment = { getLatest: async () => null };
@@ -111,7 +112,7 @@ test('2. an invalid key is denied AND audited without ever recording the present
 });
 
 test('3. a valid key with the WRONG scope is denied AND audited, but its identity IS captured (legitimate key, just insufficient scope)', async () => {
-  const { raw_key } = await apiKeyService.createApiKey({ name: 'wrong-scope-key', scope: 'full' });
+  const { raw_key } = await apiKeyService.createApiKey({ account_id: keyAccount.id, name: 'wrong-scope-key', scope: 'full' });
   const ctx = fakeContext({ 'x-agent-key': raw_key });
   await assert.rejects(() => guard.canActivate(ctx));
 
@@ -122,7 +123,7 @@ test('3. a valid key with the WRONG scope is denied AND audited, but its identit
 });
 
 test('4. a valid scope=migration_export key passes the guard, and req.apiKey is populated for the controller to audit against', async () => {
-  const { raw_key } = await apiKeyService.createApiKey({ name: 'good-export-key', scope: MIGRATION_EXPORT_SCOPE });
+  const { raw_key } = await apiKeyService.createApiKey({ account_id: keyAccount.id, name: 'good-export-key', scope: MIGRATION_EXPORT_SCOPE });
   const ctx = fakeContext({ 'x-agent-key': raw_key });
   const ok = await guard.canActivate(ctx);
   assert.equal(ok, true);

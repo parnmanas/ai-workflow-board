@@ -23,7 +23,7 @@ async function setup(t, port, label) {
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, label);
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: `${label}-host`,
     type: 'manager',
   });

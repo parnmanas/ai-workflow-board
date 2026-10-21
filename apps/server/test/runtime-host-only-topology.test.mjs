@@ -24,7 +24,7 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
 
   const { AuthService, getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'runtime-host-only');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'runtime-host',
     type: 'manager',
   });

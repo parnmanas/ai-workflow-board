@@ -46,6 +46,7 @@ const TICKET = 'ticket-mcp-transport';
 
 function makeCtx() {
   return {
+    account_id: 'test-account',
     agent_id: AGENT,
     name: 'Codex agent',
     cli: 'codex', // requiresWorkspaceTrust() is false for every non-claude adapter (base.ts default)
@@ -159,13 +160,14 @@ function makeDispatcher(state, serverName) {
   // No ticketSessionManager → the one-shot subagent path runs, whose spawn()
   // (our faithful fake) is what raises invalid_mcp_transport.
   return new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
+    { account_id: 'test-account', url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
     { worktreeManager, subagentManager: makeSubagentManager(state, serverName), managedAgentContexts },
   );
 }
 
 function makeEvent(overrides = {}) {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'agent_trigger',
     ticket_id: TICKET,
     action: 'assignee',

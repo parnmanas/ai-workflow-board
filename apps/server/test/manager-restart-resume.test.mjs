@@ -104,8 +104,9 @@ test('a planned restart hands its interrupted work to AWB: tickets re-sent, sess
   const mine = await call(`${base}/api/accounts/${ws.id}/tickets`, { method: 'POST', headers: userHeaders, body: JSON.stringify({ title: 'terrain', assignee: spec }) });
   assert.equal(mine.status, 201, mine.text);
   await waitFor(() => triggers.find((x) => x.ticket_id === mine.body.id && x.trigger_source === 'start'), 'the ticket started on this host');
+  const otherHost = await createAgent(app, getDataSourceToken, ws.id, { name: 'other-host', type: 'manager' });
   const theirs = await call(`${base}/api/accounts/${ws.id}/tickets`, {
-    method: 'POST', headers: userHeaders, body: JSON.stringify({ title: 'other host', assignee: { ...spec, manager_agent_id: 'other-host' } }),
+    method: 'POST', headers: userHeaders, body: JSON.stringify({ title: 'other host', assignee: { ...spec, manager_agent_id: otherHost.id } }),
   });
   assert.equal(theirs.status, 201, theirs.text);
 

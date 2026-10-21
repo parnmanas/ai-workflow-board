@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
 import { createAccount, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 
+process.env.AGENT_DEV_MODE = 'false';
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 test('Hermes error-log entry survives POST /api/agent/error-logs → GET (agent-key) and GET (admin), filtered by level=error&category=hermes', async (t) => {

@@ -56,6 +56,7 @@ afterEach(() => {
 
 function context(cli) {
   return {
+    account_id: 'test-account',
     agent_id: AGENT,
     name: 'PI guard agent',
     cli,
@@ -103,6 +104,7 @@ function harness(cli) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
@@ -114,6 +116,7 @@ function harness(cli) {
 
 function ticketTrigger() {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'agent_trigger',
     ticket_id: 'ticket-pi-guard',
     action: 'assignee',
@@ -130,6 +133,7 @@ function ticketTrigger() {
 
 function chatRequest() {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_request',
     timestamp: '2026-07-23T00:00:00.000Z',
     payload: {

@@ -118,21 +118,18 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const noAuthRes = await fetch(`${base}/api/resources/${uploaded.id}/raw`);
   assert.equal(noAuthRes.status, 401, 'unauthenticated raw fetch rejected');
 
-  // ── 4f. Account authorization (ticket ff3e7337 review blockers 1 & 2).
-  //       The above ran as an ADMIN (createUser defaults role='admin'), which
-  //       bypasses every account gate — so it could never have caught the
-  //       two authz holes the reviewer found. Exercise them with real,
-  //       non-admin identities here.
-  const ds = app.get(getDataSourceToken());
-  // A non-admin MEMBER of the resource's account.
+  // Account ownership applies equally to administrators and ordinary users.
+  // An ordinary owner can attach media inside their account.
   const member = await createUser(app, getDataSourceToken, { name: 'media-member', role: 'user' });
+  const memberWs = await createAccount(app, getDataSourceToken, 'member-media', { ownerUserId: member.id });
+  const memberTicket = await createTicket(app, getDataSourceToken, { accountId: memberWs.id, title: 'member media' });
   const memberToken = app.get(AuthService).createSession(member.id);
   const memberHeaders = { Authorization: `Bearer ${memberToken}` };
 
   // Blocker 2: a non-admin member must be able to UPLOAD (the old endpoint
   // inherited admin-only MANAGE_RESOURCES → every non-admin attach 403'd).
   const small = Buffer.from('a non-admin member uploaded this image', 'utf8');
-  const memberUp = await fetch(`${base}/api/resources/upload?account_id=${ws.id}&type=comment_attachment`, {
+  const memberUp = await fetch(`${base}/api/resources/upload?account_id=${memberWs.id}&type=comment_attachment`, {
     method: 'POST',
     headers: { ...memberHeaders, 'Content-Type': 'image/png', 'X-File-Name': encodeURIComponent('member.png') },
     body: small,
@@ -141,11 +138,10 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const memberRes = await memberUp.json();
   assert.ok(memberRes.id, 'member upload returns a resource id');
 
-  // …and reference it from a comment (AccountGuard needs the account id +
-  // membership; the member tuple above satisfies it).
-  const memberComment = await fetch(`${base}/api/tickets/${ticket.id}/comments`, {
+  // The comment and attachment share the same owner account.
+  const memberComment = await fetch(`${base}/api/tickets/${memberTicket.id}/comments`, {
     method: 'POST',
-    headers: { ...memberHeaders, 'Content-Type': 'application/json', 'X-Account-Id': ws.id },
+    headers: { ...memberHeaders, 'Content-Type': 'application/json', 'X-Account-Id': memberWs.id },
     body: JSON.stringify({ content: 'member attaches', attachment_resource_ids: [memberRes.id] }),
   });
   assert.equal(memberComment.status, 201, `non-admin member comment attach should succeed, got ${memberComment.status}`);
@@ -158,17 +154,16 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   // Blocker 1: a user who is authenticated but NOT a member of the resource's
   // account must be REFUSED (403, not 401) — no cross-account byte access.
   const outsider = await createUser(app, getDataSourceToken, { name: 'media-outsider', role: 'user' });
-  const otherWs = await createAccount(app, getDataSourceToken, 'media-other');
   const outsiderToken = app.get(AuthService).createSession(outsider.id);
   const outsiderHeaders = { Authorization: `Bearer ${outsiderToken}` };
 
   const outsiderRaw = await fetch(`${base}/api/resources/${uploaded.id}/raw`, { headers: outsiderHeaders });
-  assert.equal(outsiderRaw.status, 200, 'authenticated users share work media');
+  assert.equal(outsiderRaw.status, 403, 'another account cannot read private media');
   await outsiderRaw.arrayBuffer();
 
   // ?token form must be gated the same way (media tags can't send headers).
   const outsiderTok = await fetch(`${base}/api/resources/${uploaded.id}/raw?token=${encodeURIComponent(outsiderToken)}`);
-  assert.equal(outsiderTok.status, 200, 'query-token auth also accesses shared media');
+  assert.equal(outsiderTok.status, 403, 'query-token auth preserves media ownership');
   await outsiderTok.arrayBuffer();
 
   // …and a non-member cannot upload into a account they don't belong to.
@@ -177,7 +172,7 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
     headers: { ...outsiderHeaders, 'Content-Type': 'image/png', 'X-File-Name': 'evil.png' },
     body: Buffer.from('nope', 'utf8'),
   });
-  assert.equal(outsiderUp.status, 201, 'authenticated users can attach shared media');
+  assert.equal(outsiderUp.status, 403, 'another account cannot upload into the owner account');
   await outsiderUp.json();
 
   // ── 5. Oversize JSON body → CLEAN 413 with a friendly message (not 500).

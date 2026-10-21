@@ -45,6 +45,7 @@ import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { Account } from '../dist/entities/Account.js';
 import { Project } from '../dist/entities/Project.js';
 import { Ticket } from '../dist/entities/Ticket.js';
@@ -131,7 +132,7 @@ function item(over = {}) {
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Account, Project, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
+    entities: [RuntimeHost, Account, Project, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
     synchronize: true,
     logging: false,
   });
@@ -145,6 +146,7 @@ async function seedAccount(dataSource, accountId) {
 }
 
 async function seedProject(dataSource, accountId, over = {}) {
+  if (over.default_assignee) await dataSource.getRepository(RuntimeHost).save({ id: over.default_assignee.manager_agent_id, name: 'Outreach host', account_id: accountId, is_active: 1 });
   const repo = dataSource.getRepository(Project);
   return repo.save(repo.create({ account_id: accountId, name: 'outreach project', ...over }));
 }

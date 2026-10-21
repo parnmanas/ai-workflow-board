@@ -41,6 +41,8 @@ function setup(settings = TTS_READY, { missions = {}, steps = {}, admins = [] } 
       assert.deepEqual(options, { where: { status: 'active', role: 'admin' }, select: ['id'] });
       return admins;
     } },
+    RuntimeHost: { findOneBy: async () => ({ id: 'host-1', account_id: 'account-1', is_active: 1 }) },
+    Account: { findOneBy: async () => ({ id: 'account-1', owner_user_id: 'u1' }) },
     SystemSetting: { find: async () => rows, findOne: async () => null },
     OrchestrationMission: { findOne: async ({ where }) => missions[where.id] ?? null },
     OrchestrationStep: { findOne: async ({ where }) => steps[`${where.mission_id}/${where.step_key}`] ?? null },

@@ -92,7 +92,7 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
       // 링크 해소는 연결된 Host 행까지 확인한다 (authz.resolveCallerIdentityRow).
       async findOne({ where } = {}) {
         if (where?.id && where.id !== 'host-1') return null;
-        return { id: 'host-1', name: 'host', account_id: 'ws-1' };
+        return { id: 'host-1', name: 'host', account_id: 'ws-1', is_active: 1 };
       },
     },
     ApiKey: {

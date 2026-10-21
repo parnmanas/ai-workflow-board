@@ -169,6 +169,7 @@ function provisionService({ credentials = undefined, issueImpl = null, getOutcom
     mode: 'manager',
     agent_id: 'host-1',
     host_id: 'host-1',
+    account_id: 'w1',
     instance_id: 'i1',
     started_at: '2026-01-01',
     agent_credentials: credentials,
@@ -323,7 +324,7 @@ test('슬롯 credential이 복호화돼 그대로 내려간다', async () => {
   });
   const c = controllerWith({ ds, credRow: { id: 'cred-1', provider: 'claude_subscription', account_id: 'w1', encrypted_data: CRED_FIELDS } });
   const res = fakeRes();
-  await c.getManagedAgentCredential('rt-abc', 'w1', undefined, { currentHostId: 'host-1' }, res);
+  await c.getManagedAgentCredential('rt-abc', 'w1', { currentAccountId: 'w1', currentHostId: 'host-1' }, res);
   assert.equal(res.out.statusCode, 200);
   assert.equal(res.out.body.credential_id, 'cred-1');
   assert.equal(res.out.body.provider, 'claude_subscription');
@@ -337,10 +338,10 @@ test('credential 없는 슬롯은 204, 모르는 identity는 404다', async () =
   });
   const c = controllerWith({ ds });
   const res204 = fakeRes();
-  await c.getManagedAgentCredential('rt-nocred', 'w1', undefined, { currentHostId: 'host-1' }, res204);
+  await c.getManagedAgentCredential('rt-nocred', 'w1', { currentAccountId: 'w1', currentHostId: 'host-1' }, res204);
   assert.equal(res204.out.statusCode, 204);
   const res404 = fakeRes();
-  await c.getManagedAgentCredential('rt-nope', 'w1', undefined, { currentHostId: 'host-1' }, res404);
+  await c.getManagedAgentCredential('rt-nope', 'w1', { currentAccountId: 'w1', currentHostId: 'host-1' }, res404);
   assert.equal(res404.out.statusCode, 404);
 });
 
@@ -351,10 +352,10 @@ test('타 호스트·타 계정은 403이다', async () => {
   });
   const c = controllerWith({ ds, credRow: { id: 'cred-1', provider: 'claude_subscription', account_id: 'w1', encrypted_data: CRED_FIELDS } });
   const resHost = fakeRes();
-  await c.getManagedAgentCredential('rt-abc', 'w1', undefined, { currentHostId: 'host-OTHER' }, resHost);
+  await c.getManagedAgentCredential('rt-abc', 'w1', { currentAccountId: 'w1', currentHostId: 'host-OTHER' }, resHost);
   assert.equal(resHost.out.statusCode, 403);
   const resAccount = fakeRes();
-  await c.getManagedAgentCredential('rt-abc', 'w-OTHER', undefined, { currentHostId: 'host-1' }, resAccount);
+  await c.getManagedAgentCredential('rt-abc', 'w-OTHER', { currentAccountId: 'w1', currentHostId: 'host-1' }, resAccount);
   assert.equal(resAccount.out.statusCode, 403);
 });
 
@@ -365,7 +366,7 @@ test('credential 행이 지워졌으면 404다', async () => {
   });
   const c = controllerWith({ ds, credRow: undefined });
   const res = fakeRes();
-  await c.getManagedAgentCredential('rt-abc', 'w1', undefined, { currentHostId: 'host-1' }, res);
+  await c.getManagedAgentCredential('rt-abc', 'w1', { currentAccountId: 'w1', currentHostId: 'host-1' }, res);
   assert.equal(res.out.statusCode, 404);
 });
 
@@ -406,7 +407,7 @@ test('mission preparation times out without reporting a successful spawn', async
   }), { ok: false, reason: 'provision_ack_timeout' });
 });
 
-test('a same-host identity in multiple accounts resolves the requesting mission account', async () => {
+test('a legacy same-host identity in another account cannot widen the manager key', async () => {
   const ds = stubDataSource({
     members: [
       { team_id: 't1', agent_id: 'rt-shared', spec: SPEC() },
@@ -418,6 +419,6 @@ test('a same-host identity in multiple accounts resolves the requesting mission 
     id: 'cred-1', provider: 'claude_subscription', account_id: null, encrypted_data: CRED_FIELDS,
   } });
   const res = fakeRes();
-  await controller.getManagedAgentCredential('rt-shared', 'w2', undefined, { currentHostId: 'host-1' }, res);
-  assert.equal(res.out.statusCode, 200);
+  await controller.getManagedAgentCredential('rt-shared', 'w2', { currentAccountId: 'w1', currentHostId: 'host-1' }, res);
+  assert.equal(res.out.statusCode, 403);
 });

@@ -56,7 +56,7 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
 
   const { AuthService, getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'update-cli');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'update-cli-manager',
     type: 'manager',
   });

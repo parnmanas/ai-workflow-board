@@ -1,33 +1,5 @@
-// QA flow: 오케스트레이션 Team의 글로벌(account 비종속) 스코프 — 티켓 1b62b437.
-//
-// Team = 로스터(누가 무엇을 오케스트레이션할 수 있나), Mission = 실행·거버넌스 스코프
-// (어느 account의 room/budget/project에서 도는가). 팀 슬롯은 Runtime Host + CLI + model
-// 일 뿐 폴더도 실행 identity 도 없다 — 미션이 시작할 때 자기 account 의 project 폴더에
-// 슬롯을 놓으면서 identity 가 생긴다. 이 파일은 그 축 분리가 끝까지 유지됨을 증명한다:
-//
-//   1. 글로벌 팀의 팀 행·슬롯 행에는 account 도 identity 도 없다. 슬롯이 account 안을
-//      가리킬 수 있는 유일한 참조인 credential 은 글로벌이어야 한다 — 아니면 한 account 의
-//      로그인을 허용된 모든 account 의 미션이 쓰게 된다.
-//   2. 글로벌 팀의 create_orchestration_mission은 account_id를 요구하며 팀의
-//      human이 설정한 허용목록 안의 값만 받아들인다; 결과 미션의 room/step/budget은
-//      그 account로 스코핑되고, 미션은 그 account 의 project 에서 일한다 — 허용된 다른
-//      account 는 같은 팀을 자기 project 로 돌린다.
-//   3. account 종속 팀의 동작은 한 치도 바뀌지 않는다: account_id를 생략하면
-//      여전히 팀 자신의 account가 기본값이고, 명시적으로 불일치하는 값은 이제
-//      거절된다(새 동작 — 이전에는 team_id 조회 자체가 일치를 요구해서 애초에 조용히
-//      불가능했다).
-//   4. 글로벌 팀은 모든 account에서 보이지만(listTeams), 만든 account
-//      (owner_account_id)만 쓸 수 있다.
-//   5. max_open_missions는 팀 단위가 아니라 (팀, account) 단위로 강제된다 —
-//      글로벌 팀의 account A 캡이 account B의 슬롯을 소비하지 않는다.
-//   6. 미션이 일하는 곳은 그 미션 account 의 project 뿐이다 — 다른 account 의 project 는
-//      미션 생성과 plan 제출에서 거절되고, step 은 미션 account 의 project 폴더에서 돈다.
-//      (예전에는 dispatchStep 이 멤버십 행의 account 가 미션과 어긋난 멤버를 거절했다 —
-//      가입 뒤 다른 account 로 옮겨진 Agent 를 막는 장치였다. 옮길 Agent 행이 없어졌고
-//      슬롯 행의 account 는 팀 스코프의 정보용 스냅샷일 뿐이라, 이제 account 경계는 step 의
-//      폴더가 정해지는 지점 — 미션의 project — 에 있다.)
-//   7. pump() 안에서 드러난 디스패치 실패는 reportStep 한 번에 오케스트레이터를 정확히
-//      한 번 깨운다.
+// Account-owned teams and missions. Legacy Global/allow-list arguments cannot
+// grant execution on another account's hosts; explicit Global credentials remain usable.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -74,7 +46,7 @@ async function sharedApp(t) {
 }
 
 async function mcpForAgent(app, getDataSourceToken, port, agent, label, t) {
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: agent.account_id || '', label });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: agent.host.account_id, label });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => { void client.close().catch(() => {}); });
   return client;
@@ -86,268 +58,41 @@ async function credentialRow(ds, accountId, name) {
   return repo.save(repo.create({ account_id: accountId, name, provider: 'claude', encrypted_data: 'qa-not-a-secret' }));
 }
 
-// The old form of this test asserted that a account-scoped AGENT is rejected
-// from a global team's roster, and later that the identities a global team
-// provisioned were account-less. Neither has an input any more: a slot names a
-// machine (Runtime Host + CLI + model), and it is not an identity at all — a
-// mission places it in the mission account's project folders. What is left to
-// hold is structural: the team row and its slot rows carry no account and no
-// identity, and the one reference a slot makes INTO an account — a credential —
-// must be global. The property that matters downstream is unchanged: a global
-// team's mission never runs on another account's resources.
-test('Orchestration Team: global roster integrity — a global team\'s rows carry no account or identity, and its slots no account credential', async (t) => {
+test('legacy Global team creation cannot make an account host globally executable', async (t) => {
   const { app, modules, services } = await sharedApp(t);
-  const { getDataSourceToken } = modules;
-  const ds = app.get(getDataSourceToken());
-  const { OrchestrationTeamService } = services;
-  const teams = app.get(OrchestrationTeamService);
-  const memberRepo = ds.getRepository('OrchestrationTeamMember');
-
-  const ws = await createAccount(app, getDataSourceToken, 'roster-integrity');
-  const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'roster-host' });
-
-  step('A global team is stamped with the creating account as owner and no account of its own');
-  const team = await teams.createTeam({
-    account_id: ws.id,
-    is_global: true,
-    name: 'Global squad',
-    orchestrator: slotSpec(host.id),
-    created_by: HUMAN.id,
-    allowed_account_ids: [ws.id],
-  });
-  assert.equal(team.is_global, true);
-  assert.equal(team.account_id, null);
-  assert.equal(team.owner_account_id, ws.id);
-  assert.deepEqual(team.allowed_account_ids, [ws.id]);
-
-  step('Its row carries no account and no orchestrator identity — a mission places the orchestrator, in the mission\'s account');
-  const teamRow = await ds.getRepository('OrchestrationTeam').findOne({ where: { id: team.id } });
-  assert.equal(teamRow.account_id, null, 'global team row carries no account');
-  assert.equal(teamRow.orchestrator_agent_id, null, 'and no identity — a slot has no folder to be one in');
-
-  step('So does every member slot it adds');
-  const withMember = await teams.addMember(team.id, ws.id, { runtime: slotSpec(host.id), role_label: 'builder' });
-  assert.equal(withMember.members.length, 1);
-  assert.equal('agent_id' in withMember.members[0], false, 'a member view names no identity');
-  const memberRow = await memberRepo.findOne({ where: { id: withMember.members[0].id } });
-  assert.ok(memberRow, 'the slot row is addressed by its own id');
-  assert.equal(memberRow.account_id, null);
-  assert.equal(memberRow.agent_id, null);
-
-  step('A global team\'s slot may only name a global credential — an account\'s login would run in every allowed account');
-  const accountLogin = await credentialRow(ds, ws.id, 'account-login');
-  const globalLogin = await credentialRow(ds, null, 'global-login');
-  await assert.rejects(
-    () => teams.addMember(team.id, ws.id, {
-      runtime: slotSpec(host.id, { credential_id: accountLogin.id }),
-      role_label: 'leaky',
-    }),
-    (e) => {
-      assert.equal(e.status, 400);
-      assert.match(e.message, /not available to this team/);
-      return true;
-    },
-  );
-  const withGlobalLogin = await teams.addMember(team.id, ws.id, {
-    runtime: slotSpec(host.id, { credential_id: globalLogin.id }),
-    role_label: 'global-login',
-  });
-  assert.equal(withGlobalLogin.members.find((m) => m.role_label === 'global-login').runtime.credential_id, globalLogin.id);
-  assert.ok(!withGlobalLogin.members.some((m) => m.role_label === 'leaky'), 'the refused slot left no row behind');
-
-  step('A account-scoped team stamps its account onto its slot rows instead — and may use that account\'s credential');
-  const scopedTeam = await teams.createTeam({
-    account_id: ws.id,
-    name: 'Scoped squad',
-    orchestrator: slotSpec(host.id),
-    created_by: HUMAN.id,
-  });
-  assert.equal(scopedTeam.account_id, ws.id);
-  const scopedWithMember = await teams.addMember(scopedTeam.id, ws.id, {
-    runtime: slotSpec(host.id, { credential_id: accountLogin.id }),
-    role_label: 'builder',
-  });
-  const scopedRow = await memberRepo.findOne({ where: { id: scopedWithMember.members[0].id } });
-  assert.equal(scopedRow.account_id, ws.id);
-  assert.equal(scopedRow.agent_id, null, 'scoped or global, a slot row records no identity');
+  const ds = app.get(modules.getDataSourceToken());
+  const teams = app.get(services.OrchestrationTeamService);
+  const owner = await createAccount(app, modules.getDataSourceToken, 'global-legacy-owner');
+  const other = await createAccount(app, modules.getDataSourceToken, 'global-legacy-other');
+  const host = await createRuntimeHost(app, modules.getDataSourceToken, owner.id, { name: 'private-host' });
+  const before = await ds.getRepository('OrchestrationTeam').count();
+  await assert.rejects(teams.createTeam({
+    account_id: owner.id, name: 'Legacy global', is_global: true,
+    allowed_account_ids: [owner.id, other.id], orchestrator: slotSpec(host.id),
+  }), /Runtime Host is not available to this team/);
+  assert.equal(await ds.getRepository('OrchestrationTeam').count(), before, 'refused creation leaves no team');
 });
 
-test('Orchestration Team: allowed_account_ids is validated against real account rows, not just normalized', async (t) => {
+test('team slots require owned hosts and own or explicit Global credentials', async (t) => {
   const { app, modules, services } = await sharedApp(t);
-  const { getDataSourceToken } = modules;
-  const { OrchestrationTeamService } = services;
-  const teams = app.get(OrchestrationTeamService);
-
-  const ws = await createAccount(app, getDataSourceToken, 'allowlist-fk');
-  const otherWs = await createAccount(app, getDataSourceToken, 'allowlist-fk-other');
-  const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'allowlist-fk-host' });
-  const bogusAccountId = '00000000-0000-4000-8000-000000000000';
-
-  step('createTeam rejects an allowed_account_ids entry that is not a real account row — 400, no orphan team persisted');
-  await assert.rejects(
-    () => teams.createTeam({
-      account_id: ws.id,
-      is_global: true,
-      name: 'Bogus allow-list team',
-      orchestrator: slotSpec(host.id),
-      created_by: HUMAN.id,
-      allowed_account_ids: [ws.id, bogusAccountId],
-    }),
-    (e) => {
-      assert.equal(e.status, 400);
-      assert.match(e.message, new RegExp(bogusAccountId));
-      return true;
-    },
-  );
-  const ds = app.get(getDataSourceToken());
-  const orphan = await ds.getRepository('OrchestrationTeam').findOne({ where: { name: 'Bogus allow-list team' } });
-  assert.equal(orphan, null, 'a team with an unvalidated allowed_account_ids entry must not be persisted');
-
-  step('createTeam accepts allowed_account_ids once every entry is a real account');
-  const team = await teams.createTeam({
-    account_id: ws.id,
-    is_global: true,
-    name: 'Valid allow-list team',
-    orchestrator: slotSpec(host.id),
-    created_by: HUMAN.id,
-    allowed_account_ids: [ws.id, otherWs.id],
-  });
-  assert.deepEqual(new Set(team.allowed_account_ids), new Set([ws.id, otherWs.id]));
-
-  step('updateTeam rejects the same bogus id on the allow-list-replace path — 400, previous allow-list untouched');
-  await assert.rejects(
-    () => teams.updateTeam(team.id, ws.id, { allowed_account_ids: [bogusAccountId] }),
-    (e) => {
-      assert.equal(e.status, 400);
-      assert.match(e.message, new RegExp(bogusAccountId));
-      return true;
-    },
-  );
-  const unchanged = await teams.getTeam(team.id, ws.id);
-  assert.deepEqual(new Set(unchanged.allowed_account_ids), new Set([ws.id, otherWs.id]));
+  const ds = app.get(modules.getDataSourceToken());
+  const teams = app.get(services.OrchestrationTeamService);
+  const owner = await createAccount(app, modules.getDataSourceToken, 'slot-owner');
+  const other = await createAccount(app, modules.getDataSourceToken, 'slot-other');
+  const host = await createRuntimeHost(app, modules.getDataSourceToken, owner.id, { name: 'owned' });
+  const foreignHost = await createRuntimeHost(app, modules.getDataSourceToken, other.id, { name: 'foreign' });
+  const own = await credentialRow(ds, owner.id, 'own login');
+  const global = await credentialRow(ds, null, 'explicit Global login');
+  const foreign = await credentialRow(ds, other.id, 'private login');
+  const team = await teams.createTeam({ account_id: owner.id, name: 'Owned team', orchestrator: slotSpec(host.id, { credential_id: own.id }) });
+  assert.equal(team.account_id, owner.id);
+  await teams.addMember(team.id, owner.id, { role_label: 'shared login', runtime: slotSpec(host.id, { credential_id: global.id }) });
+  await assert.rejects(teams.addMember(team.id, owner.id, { role_label: 'foreign host', runtime: slotSpec(foreignHost.id) }), /Runtime Host is not available/);
+  await assert.rejects(teams.addMember(team.id, owner.id, { role_label: 'foreign credential', runtime: slotSpec(host.id, { credential_id: foreign.id }) }), /credential .* is not available/);
+  assert.equal((await teams.getTeam(team.id, owner.id)).members.length, 1, 'refused slots do not change the roster');
 });
 
-test('Orchestration Team: create_orchestration_mission for a global team — account_id required + allow-listed, projects of that account', async (t) => {
-  const { app, port, modules, services } = await sharedApp(t);
-  const { getDataSourceToken } = modules;
-  const ds = app.get(getDataSourceToken());
-  const { OrchestrationTeamService, OrchestrationMissionService } = services;
-  const teams = app.get(OrchestrationTeamService);
-  const missions = app.get(OrchestrationMissionService);
-
-  const wsA = await createAccount(app, getDataSourceToken, 'global-mission-a');
-  const wsB = await createAccount(app, getDataSourceToken, 'global-mission-b');
-  const wsC = await createAccount(app, getDataSourceToken, 'global-mission-c');
-  const squad = await buildTeam(app, getDataSourceToken, teams, {
-    accountId: wsA.id,
-    name: 'Global mission squad',
-    team: { is_global: true, created_by: HUMAN.id, allowed_account_ids: [wsA.id, wsC.id] },
-    members: [{ role_label: 'builder' }],
-  });
-  const team = squad.team;
-  const orch = squad.orchestrator;
-  const member = squad.member('builder');
-  const orchMcp = await mcpForAgent(app, getDataSourceToken, port, orch, 'gm-orch', t);
-  const defaultsA = await squad.missionDefaultsFor(wsA.id);
-
-  step('account_id is required for a global team');
-  const missing = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'no ws', objective: 'no ws',
-  });
-  assert.equal(missing.isError, true);
-  assert.match(missing.error.error, /account_id is required/);
-
-  step('An out-of-allow-list account_id is rejected');
-  const notAllowed = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'wrong ws', objective: 'wrong ws', account_id: wsB.id,
-  });
-  assert.equal(notAllowed.isError, true);
-  assert.match(notAllowed.error.error, /not on team .* allowed account/i);
-
-  step('The allow-list is enforced by createMission itself, not just the MCP tool — a direct/REST-style call is rejected too (would otherwise bypass the whitelist via POST /api/orchestration/missions)');
-  await assert.rejects(
-    () => missions.createMission({
-      account_id: wsB.id, team_id: team.id, title: 'REST bypass attempt', objective: 'REST bypass attempt',
-      created_by_type: 'user', created_by: HUMAN.id,
-    }),
-    (e) => { assert.equal(e.status, 400); assert.match(e.message, /not on team .* allowed account/i); return true; },
-  );
-
-  step('An empty allow-list denies by default, even with a real account_id');
-  // `create_orchestration_mission` 의 소유권 검사는 호출자를 그 팀의 orchestrator 슬롯(어느
-  // project 폴더에서 도는 identity)과 대조하므로, 이 팀 자신의 orchestrator identity 키로
-  // 호출해야 allow-list 분기까지 도달한다.
-  const noListSquad = await buildTeam(app, getDataSourceToken, teams, {
-    accountId: wsA.id,
-    name: 'No allow-list team',
-    team: { is_global: true, created_by: HUMAN.id },
-  });
-  const noListTeam = noListSquad.team;
-  const noListMcp = await mcpForAgent(app, getDataSourceToken, port, noListSquad.orchestrator, 'gm-orch-nolist', t);
-  assert.deepEqual(noListTeam.allowed_account_ids, []);
-  const denied = await noListMcp.callTool('create_orchestration_mission', {
-    team_id: noListTeam.id, title: 'no list', objective: 'no list', account_id: wsA.id,
-    ...(await noListSquad.missionDefaultsFor(wsA.id)),
-  });
-  assert.equal(denied.isError, true);
-  assert.match(denied.error.error, /no allowed accounts configured/);
-
-  step('An allow-listed account_id succeeds and the mission is fully scoped to it — working in that account\'s project');
-  const created = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'Global mission', objective: 'Prove global team missions are account-scoped.',
-    account_id: wsA.id, ...defaultsA,
-  });
-  assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
-  assert.equal(created.status, 'planning', `the mission must start, got ${JSON.stringify(created)}`);
-  const detail = await missions.getMissionDetail(created.mission_id, wsA.id);
-  assert.equal(detail.account_id, wsA.id, 'the mission is billed to the account the orchestrator chose');
-  assert.deepEqual(detail.projects.map((p) => p.project_id), defaultsA.projects.map((p) => p.project_id));
-
-  step('The dispatched step + its room are ALSO stamped with that account, not the (null) team account');
-  const plan = await orchMcp.callTool('submit_orchestration_plan', {
-    mission_id: created.mission_id,
-    // 레거시 별칭: 이 미션의 로스터에서 슬롯 하나에만 대응하는 실행 identity 는 그 슬롯으로 받아들여진다.
-    steps: [{ step_key: 'only', title: 'Only step', instructions: 'do it', assignee_agent_id: member.id }],
-  });
-  assert.ok(!plan.isError, `plan failed: ${JSON.stringify(plan)}`);
-  assert.deepEqual(plan.dispatched_now, ['only']);
-  const step1 = (await missions.listSteps(created.mission_id))[0];
-  assert.equal(step1.account_id, wsA.id);
-  assert.equal(step1.assignee_slot, member.slot_id, 'the identity alias resolved to the member\'s slot');
-  const room = await ds.getRepository('ChatRoom').findOne({ where: { id: step1.room_id } });
-  assert.equal(room.account_id, wsA.id);
-
-  step('A mission works only on projects of ITS OWN account — another account\'s project is refused, even for an allowed account');
-  const crossed = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'crossed', objective: 'crossed', account_id: wsC.id, ...defaultsA, start: false,
-  });
-  assert.equal(crossed.isError, true);
-  assert.match(crossed.error.error, /not found in this mission's account/);
-
-  step('Another allowed account runs the same global team on its own project');
-  const defaultsC = await squad.missionDefaultsFor(wsC.id);
-  assert.notEqual(defaultsC.projects[0].project_id, defaultsA.projects[0].project_id, 'sanity: a wsC project, not wsA\'s');
-  const createdC = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'Global mission in C', objective: 'Run the shared roster for another account.',
-    account_id: wsC.id, ...defaultsC,
-  });
-  assert.ok(!createdC.isError, `create failed: ${JSON.stringify(createdC)}`);
-  assert.equal(createdC.status, 'planning');
-  const planC = await orchMcp.callTool('submit_orchestration_plan', {
-    mission_id: createdC.mission_id,
-    steps: [{ step_key: 'only', title: 'Only step', instructions: 'do it', assignee: member.slot_id }],
-  });
-  assert.ok(!planC.isError, `plan failed: ${JSON.stringify(planC)}`);
-  assert.deepEqual(planC.dispatched_now, ['only']);
-  const stepC = (await missions.listSteps(createdC.mission_id))[0];
-  assert.equal(stepC.account_id, wsC.id);
-  assert.equal(stepC.project_id, defaultsC.projects[0].project_id, 'the step works on wsC\'s project');
-  assert.equal(stepC.assignee_spec.working_dir, member.folder, 'in that project\'s folder on the member\'s host');
-  const roomC = await ds.getRepository('ChatRoom').findOne({ where: { id: stepC.room_id } });
-  assert.equal(roomC.account_id, wsC.id);
-});
-
-test('Orchestration Team: account-scoped team behavior is unchanged by the global-team feature', async (t) => {
+test('Orchestration Team: mission account defaults to its owning team and rejects an explicit foreign account', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const { OrchestrationTeamService } = services;
@@ -392,10 +137,10 @@ test('Orchestration Team: account-scoped team behavior is unchanged by the globa
     team_id: team.id, title: 'mismatched ws', objective: 'mismatched ws', account_id: wsB.id,
   });
   assert.equal(mismatched.isError, true);
-  assert.match(mismatched.error.error, /does not match this team's own account/);
+  assert.match(mismatched.error.error, /caller account/);
 });
 
-test('Orchestration Team: global team visibility + owner-only write permission', async (t) => {
+test('Orchestration Team: private team visibility and owner-only writes', async (t) => {
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const { OrchestrationTeamService } = services;
@@ -407,32 +152,29 @@ test('Orchestration Team: global team visibility + owner-only write permission',
 
   const team = await teams.createTeam({
     account_id: owner.id,
-    is_global: true,
     name: 'Owner-guarded team',
     orchestrator: slotSpec(host.id),
     created_by: HUMAN.id,
   });
 
-  step('listTeams(otherAccount) surfaces the global team even though it never touched that account');
+  step('another account cannot list or read the team');
   const listFromOther = await teams.listTeams(other.id);
-  assert.ok(listFromOther.some((t) => t.id === team.id), 'global team must be visible from every account');
+  assert.ok(!listFromOther.some((t) => t.id === team.id));
 
-  step('getTeam is readable from any account');
-  const readFromOther = await teams.getTeam(team.id, other.id);
-  assert.equal(readFromOther.id, team.id);
+  await assert.rejects(teams.getTeam(team.id, other.id), /team not found in account/);
 
   step('A non-owning account cannot rename, add members to, or delete the global team');
   await assert.rejects(
     () => teams.updateTeam(team.id, other.id, { name: 'hijacked' }),
-    (e) => { assert.equal(e.status, 403); assert.match(e.message, /owned by a different account/); return true; },
+    (e) => { assert.equal(e.status, 404); assert.match(e.message, /team not found in account/); return true; },
   );
   await assert.rejects(
     () => teams.addMember(team.id, other.id, { runtime: slotSpec(host.id), role_label: 'builder' }),
-    (e) => { assert.equal(e.status, 403); return true; },
+    (e) => { assert.equal(e.status, 404); return true; },
   );
   await assert.rejects(
     () => teams.deleteTeam(team.id, other.id),
-    (e) => { assert.equal(e.status, 403); return true; },
+    (e) => { assert.equal(e.status, 404); return true; },
   );
 
   step('The owning account can still write to it normally');
@@ -442,7 +184,7 @@ test('Orchestration Team: global team visibility + owner-only write permission',
   assert.equal(withMember.members.length, 1);
 });
 
-test('Orchestration Team: max_open_missions is enforced per (team, account), not per team', async (t) => {
+test('Orchestration Team: mission capacity stays independent between account-owned teams', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const { OrchestrationTeamService } = services;
@@ -454,7 +196,6 @@ test('Orchestration Team: max_open_missions is enforced per (team, account), not
     accountId: wsA.id,
     name: 'Cap-per-account squad',
     team: {
-      is_global: true,
       created_by: HUMAN.id,
       max_open_missions: 1,
       allowed_account_ids: [wsA.id, wsB.id],
@@ -476,15 +217,18 @@ test('Orchestration Team: max_open_missions is enforced per (team, account), not
   assert.equal(secondA.isError, true);
   assert.equal(secondA.error.existing_mission_id, firstA.mission_id);
 
-  step('A mission in account B succeeds anyway — B has its own independent slot');
-  const firstB = await orchMcp.callTool('create_orchestration_mission', {
-    team_id: team.id, title: 'B-1', objective: 'B-1', account_id: wsB.id, start: false,
+  assert.equal((await orchMcp.callTool('create_orchestration_mission', { team_id: team.id, title: 'foreign', objective: 'foreign', account_id: wsB.id, start: false })).isError, true);
+  const squadB = await buildTeam(app, getDataSourceToken, teams, { accountId: wsB.id, name: 'B team', team: { max_open_missions: 1, created_by: HUMAN.id } });
+  const mcpB = await mcpForAgent(app, getDataSourceToken, port, squadB.orchestrator, 'cap-b', t);
+  step('Account B can use its own team independently');
+  const firstB = await mcpB.callTool('create_orchestration_mission', {
+    team_id: squadB.team.id, title: 'B-1', objective: 'B-1', account_id: wsB.id, start: false,
   });
   assert.ok(!firstB.isError, `B slot should be independent of A's cap: ${JSON.stringify(firstB)}`);
   assert.notEqual(firstB.mission_id, firstA.mission_id);
 });
 
-test('Orchestration Team: a global team\'s mission works only in its own account\'s projects — refused at create and at plan time', async (t) => {
+test('Orchestration Team: a team\'s mission works only in its own account\'s projects — refused at create and at plan time', async (t) => {
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
@@ -498,7 +242,7 @@ test('Orchestration Team: a global team\'s mission works only in its own account
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     accountId: wsA.id,
     name: 'Own-projects squad',
-    team: { is_global: true, max_parallel_steps: 4, created_by: HUMAN.id, allowed_account_ids: [wsA.id, wsB.id] },
+    team: { max_parallel_steps: 4, created_by: HUMAN.id, allowed_account_ids: [wsA.id, wsB.id] },
     members: [{ role_label: 'builder' }],
   });
   const builder = squad.member('builder');

@@ -319,7 +319,7 @@ describe('renameRoom 계정 경계 (티켓 de4d27e9)', () => {
     const res = await mcpRename(room.id, GLOBAL_BOT, undefined);
 
     assert.equal(res.isError, true);
-    assert.equal(res.payload.error, 'Could not resolve account from caller API key');
+    assert.equal(res.payload.error, 'Agent identity not found for this session');
     assert.equal(await nameOf(room.id), '원래 이름');
     assert.equal(roomUpdates.length, 0);
   });

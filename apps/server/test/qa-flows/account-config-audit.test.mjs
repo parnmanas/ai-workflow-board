@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { bootApp } from '../helpers/boot.mjs';
-import { createAccount, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey, createUser } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,8 +36,8 @@ test('account config-change audit: cadence PATCH writes config_changed rows with
   const controller = app.get(AccountsController);
   const activityRepo = ds.getRepository('ActivityLog');
 
-  const ws = await createAccount(app, modules.getDataSourceToken, { name: 'audit-target' });
-  const user = { id: 'user-parn', name: 'Parn', email: 'parn@x', role: 'admin', permissions: [] };
+  const user = await createUser(app, modules.getDataSourceToken, { name: 'Parn' });
+  const ws = await createAccount(app, modules.getDataSourceToken, 'audit-target');
   const auditRows = async () => activityRepo.find({
     where: { entity_type: 'account', entity_id: ws.id, action: 'config_changed' },
     order: { created_at: 'ASC' },
@@ -54,8 +54,8 @@ test('account config-change audit: cadence PATCH writes config_changed rows with
   assert.equal(r0.field_changed, 'supervisor_stale_ms');
   assert.equal(r0.old_value, '1800000', 'old value = the 30 min default');
   assert.equal(r0.new_value, '14400000', 'new value = the 4 h incident value');
-  assert.equal(r0.actor_id, 'user-parn', 'actor id captured from @CurrentUser');
-  assert.equal(r0.actor_name, 'Parn', 'actor name captured');
+  assert.equal(r0.actor_id, user.id, 'actor id captured from @CurrentUser');
+  assert.equal(r0.actor_name, user.name, 'actor name captured');
   assert.equal(r0.trigger_source, 'rest', 'source = rest');
   assert.equal(r0.account_id, ws.id, 'account-scoped');
   assert.equal(r0.ticket_id, '', 'not tied to a ticket');

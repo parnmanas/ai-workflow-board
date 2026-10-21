@@ -19,7 +19,7 @@ test('Runtime Host heartbeat stores structured runtime health and capabilities',
 
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'runtime-health');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'runtime-host',
     type: 'manager',
   });
@@ -110,7 +110,7 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
 
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'runtime-health-profiles');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'runtime-host-profiles',
     type: 'manager',
   });
@@ -188,7 +188,7 @@ test('Runtime Host heartbeat carries permission_tiers through, all-or-nothing', 
 
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'runtime-health-tiers');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'runtime-host-tiers',
     type: 'manager',
   });

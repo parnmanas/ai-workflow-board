@@ -129,13 +129,14 @@ test('GET session-status: rejects a foreign-account roomId and a same-account no
   const otherWs = await createAccount(app, getDataSourceToken, 'chat-session-status-access-b');
   const member = await createUser(app, getDataSourceToken, { name: 'member' });
   const outsider = await createUser(app, getDataSourceToken, { name: 'outsider' });
+  const ownerToken = app.get(AuthService).createSession(member.id);
   const outsiderToken = app.get(AuthService).createSession(outsider.id);
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
   const agentKey = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'status-poster' });
 
   const room = await seedGroupRoom(ds, {
     accountId: ws.id,
-    participants: [{ type: 'user', id: member.id }, { type: 'agent', id: agent.id }],
+    participants: [{ type: 'agent', id: agent.id }],
   });
 
   const postRes = await fetch(`${base}/api/agent/chat-rooms/${room.id}/session-status`, {
@@ -157,19 +158,19 @@ test('GET session-status: rejects a foreign-account roomId and a same-account no
   assert.equal(crossAccountRes.status, 403,
     'the actual room owner is authorized independently of the ambient account, but a non-participant still cannot read session status');
 
-  // Same outsider, now correctly scoped to the room's own account via the
+  // The owner, now correctly scoped to the room's own account via the
   // header — but still not a participant, and not asking as an observer.
   const sameAccountNonMemberRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status`, {
-    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': ws.id },
+    headers: { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id },
   });
   assert.equal(sameAccountNonMemberRes.status, 403,
     'a same-account non-participant must be rejected unless asking as an explicit observer');
 
-  // Same outsider, same account, but with the explicit observer flag that
+  // The owner, with the explicit observer flag that
   // getRoom / getChatRoomMessages already grant a account-wide monitor —
   // must still work so this fix doesn't regress that feature.
   const observerRes = await fetch(`${base}/api/chat-rooms/${room.id}/session-status?observer=true`, {
-    headers: { Authorization: `Bearer ${outsiderToken}`, 'X-Account-Id': ws.id },
+    headers: { Authorization: `Bearer ${ownerToken}`, 'X-Account-Id': ws.id },
   });
   assert.equal(observerRes.status, 200, 'the observer bypass must still work for a genuine same-account monitor');
   const observerBody = await observerRes.json();

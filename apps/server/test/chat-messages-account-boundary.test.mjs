@@ -275,24 +275,15 @@ describe('get_chat_room_messages 계정 경계 (티켓 5a95315f)', () => {
     const res = await mcpRead(room.id, GLOBAL_BOT, undefined);
 
     assertNoMessagesLeaked(res);
-    assert.equal(res.payload.error, 'Could not resolve account from caller API key');
+    assert.equal(res.payload.error, 'Agent identity not found for this session');
   });
 
-  it('전역 에이전트도 세션 키의 account 밖 방은 읽지 못한다', async () => {
-    // global 이라고 전 계정가 열리지는 않는다 — 판정 기준은 어디까지나 지금
-    // 바인딩된 스코프다. 같은 읽기의 형제 경로인 agent-api REST 도 키 스코프로 막는다.
-    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
-    await seedMessages(foreign, [{ content: '남의 계정 대화' }]);
-    const own = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
-    await seedMessages(own, [{ content: '내 계정 대화' }]);
-
-    const foreignRes = await mcpRead(foreign.id, GLOBAL_BOT, WS);
-    const ownRes = await mcpRead(own.id, GLOBAL_BOT, WS);
-
-    assertNoMessagesLeaked(foreignRes);
-    assert.equal(foreignRes.payload.error, 'Chat room not found');
-    assert.equal(ownRes.isError, false, '세션 스코프 안의 방까지 막혔다');
-    assert.deepEqual(ownRes.payload.messages.map(m => m.content), ['내 계정 대화']);
+  it('소유 계정이 없는 호스트는 세션에 account가 있어도 방을 읽지 못한다', async () => {
+    const room = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
+    await seedMessages(room, [{ content: '공개되지 않는 대화' }]);
+    const res = await mcpRead(room.id, GLOBAL_BOT, WS);
+    assertNoMessagesLeaked(res);
+    assert.equal(res.payload.error, 'Agent identity not found for this session');
   });
 
   // ── 무회귀 ────────────────────────────────────────────────────────────────

@@ -85,8 +85,8 @@ describe('outreach-channels-leak: cross-account isolation + credential non-expos
     }));
     adminToken = authService.createSession(adminUser.id);
 
-    wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (outreach)', description: 'Leak test' }));
-    wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (outreach)', description: 'Leak test' }));
+    wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (outreach)', description: 'Leak test', kind: 'organization', owner_user_id: adminUser.id }));
+    wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (outreach)', description: 'Leak test', kind: 'organization', owner_user_id: adminUser.id }));
 
     // A real Credential row carrying a RECOGNIZABLE raw-secret substring,
     // scoped to account A. Nothing in the CRUD path ever decrypts this

@@ -190,6 +190,7 @@ async function harness(t, permissionMode, cliHomeDir, worktreeOverride) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'txiv-board-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
@@ -201,6 +202,7 @@ async function harness(t, permissionMode, cliHomeDir, worktreeOverride) {
 
 function ticketTrigger() {
   return JSON.stringify({
+    account_id: 'txiv-board-account',
     event_type: 'agent_trigger',
     ticket_id: TICKET,
     action: 'assignee',

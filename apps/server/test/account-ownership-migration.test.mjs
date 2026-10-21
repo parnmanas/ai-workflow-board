@@ -372,6 +372,8 @@ test('offline migration wrapper rejects --fake before opening or changing either
 test('standalone initDb upgrades pre-0091 SQLite data and applies the migration ledger before serving MCP', async () => {
   await withSqlite(async (source, options) => {
     await seedBoardLegacy(source);
+    await source.query("CREATE TABLE users (id varchar PRIMARY KEY, name varchar NOT NULL, status varchar NOT NULL DEFAULT 'active', role varchar NOT NULL DEFAULT 'admin', created_at datetime NOT NULL DEFAULT (datetime('now')), updated_at datetime NOT NULL DEFAULT (datetime('now')))");
+    await source.query('INSERT INTO users (id, name) VALUES (?, ?)', [OWNER, 'Confirmed owner']);
     await source.sqljsManager.saveDatabase();
     await source.destroy();
     const ontology = path.join(path.dirname(options.location), 'ontology.db');
@@ -390,7 +392,7 @@ test('standalone initDb upgrades pre-0091 SQLite data and applies the migration 
       }
     `;
     await execFileAsync(process.execPath, ['--input-type=module', '-e', script], {
-      env: isolatedSqliteEnvironment(options, ontology), timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
+      env: { ...isolatedSqliteEnvironment(options, ontology), AWB_LEGACY_OWNER_USER_ID: OWNER }, timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
     });
     const persisted = await new DataSource(options).initialize();
     try {

@@ -46,6 +46,7 @@ function context() {
 
 function trigger() {
   return JSON.stringify({
+    account_id: 'account-1',
     event_type: 'agent_trigger',
     ticket_id: TICKET,
     action: 'assignee',
@@ -106,7 +107,7 @@ async function waitForAck() {
 test('ticket 조회 null이면 persistent 세션 실행 전에 preflight nack한다', async () => {
   const { deps, calls } = dependencies({ persistent: true });
   const dispatcher = new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true, persistentTicketSessions: true } },
+    { account_id: 'account-1', url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true, persistentTicketSessions: true } },
     deps,
   );
 
@@ -123,7 +124,7 @@ test('ticket 조회 null이면 persistent 세션 실행 전에 preflight nack한
 test('ticket 조회 null이면 stateless spawn 전에 preflight nack한다', async () => {
   const { deps, calls } = dependencies({ persistent: false });
   const dispatcher = new EventDispatcher(
-    { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true, persistentTicketSessions: false } },
+    { account_id: 'account-1', url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true, persistentTicketSessions: false } },
     deps,
   );
 

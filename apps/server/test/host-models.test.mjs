@@ -23,7 +23,7 @@ test('host models: read from heartbeat, refresh waits for the command ack, auth 
   const { AuthService, getDataSourceToken, activityEvents } = modules;
 
   const account = await createAccount(app, getDataSourceToken, 'host-models');
-  const manager = await createAgent(app, getDataSourceToken, null, { name: 'ralf', type: 'manager' });
+  const manager = await createAgent(app, getDataSourceToken, account.id, { name: 'ralf', type: 'manager' });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'ralf-key' });
   const viewer = await createUser(app, getDataSourceToken, { name: 'viewer', role: 'user' });
   const token = app.get(AuthService).createSession(viewer.id);
@@ -57,7 +57,7 @@ test('host models: read from heartbeat, refresh waits for the command ack, auth 
   assert.equal(snap.instance_id, INSTANCE_ID);
   assert.equal(snap.refreshed_at, '2026-09-26T00:00:00.000Z');
   assert.deepEqual(snap.models, { claude: ['opus'], opencode: ['opencode/big-pickle'] });
-  assert.equal((await fetch(`${base}/api/agent-manager/hosts/does-not-exist/models`, { headers: userHeaders })).status, 404);
+  assert.equal((await fetch(`${base}/api/agent-manager/hosts/11111111-1111-4111-8111-111111111111/models`, { headers: userHeaders })).status, 404);
 
   // 2. refresh: command issued to this instance; the response waits for the ack
   const issued = new Promise((resolve) => {
@@ -83,7 +83,7 @@ test('host models: read from heartbeat, refresh waits for the command ack, auth 
   assert.equal(fresh.refreshed_at, '2026-09-26T00:05:00.000Z');
 
   // 3. offline host → 409
-  const ghost = await createAgent(app, getDataSourceToken, null, { name: 'ghost', type: 'manager' });
+  const ghost = await createAgent(app, getDataSourceToken, account.id, { name: 'ghost', type: 'manager' });
   const offline = await fetch(`${base}/api/agent-manager/hosts/${ghost.id}/models/refresh`, { method: 'POST', headers: userHeaders });
   assert.equal(offline.status, 409);
 });

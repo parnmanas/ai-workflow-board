@@ -191,7 +191,7 @@ beforeEach(() => { originalFetch = globalThis.fetch; });
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 test('repository credential asks /projects/:id first and falls back to /resources/:id only on 404', async () => {
-  const config = { url: 'http://awb.test', apiKey: 'k' };
+  const config = { account_id: 'ws-1', url: 'http://awb.test', apiKey: 'k' };
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
@@ -312,7 +312,7 @@ function harness({ persistent }) {
     };
   }
   const dispatcher = new EventDispatcher(
-    { url: 'http://awb.test', apiKey: 'test-key', delegation: { enabled: true, persistentTicketSessions: persistent } },
+    { account_id: 'ws-1', url: 'http://awb.test', apiKey: 'test-key', delegation: { enabled: true, persistentTicketSessions: persistent } },
     deps,
   );
   return { dispatcher, calls };

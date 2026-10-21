@@ -57,7 +57,7 @@ function makeScenario() {
 const dataSource = {
   getRepository: (entity) => {
     if (entity?.name === 'RuntimeHost') {
-      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', account_id: 'ws-1' }; }, async find() { return []; } };
+      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', account_id: 'ws-1', is_active: 1 }; }, async find() { return []; } };
     }
     return { findOne: async () => { throw new Error('no repo'); } };
   },
@@ -142,7 +142,7 @@ function makeGate() {
   return { wait, release };
 }
 
-test('a resumeWedgedBatch call concurrent with an in-flight onRunFinalized dispatch is a no-op (no double dispatch)', async () => {
+test('a resumeWedgedBatch call concurrent with an in-flight onRunFinalized dispatch is a no-op (no double dispatch)', { timeout: 5000 }, async () => {
   const batch = makeBatch({ current_index: 0, run_ids: ['run-0'] });
   const paused = makeGate();
   const reachedSend = makeGate();
@@ -180,7 +180,7 @@ test('a resumeWedgedBatch call concurrent with an in-flight onRunFinalized dispa
   assert.equal(runRepo.saves[0].batch_index, 1);
 });
 
-test('once the in-flight dispatch completes, a genuinely wedged batch IS resumed on the next call (guard releases cleanly)', async () => {
+test('once the in-flight dispatch completes, a genuinely wedged batch IS resumed on the next call (guard releases cleanly)', { timeout: 5000 }, async () => {
   const batch = makeBatch({ current_index: 1, run_ids: ['run-0'] }); // wedge signature: no run at index 1
   const { svc, runRepo, captured, batchRepo } = makeSvc({ batch });
 

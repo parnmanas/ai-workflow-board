@@ -42,7 +42,7 @@ test('agent-api enforces account scoping on the legacy /api/agent surface', asyn
 
   const keyA = await createApiKey(app, getDataSourceToken, null, { accountId: wsA.id, label: 'a' });
   const keyB = await createApiKey(app, getDataSourceToken, null, { accountId: wsB.id, label: 'b' });
-  // accountId '' → guard resolves scope to null → full-scope (env/admin/manager).
+  // A credential without an owning account cannot authorize work.
   const keyGlobal = await createApiKey(app, getDataSourceToken, null, { accountId: '', label: 'global' });
 
   step('a key scoped to the ticket\'s own account can read it (200)');
@@ -57,30 +57,24 @@ test('agent-api enforces account scoping on the legacy /api/agent surface', asyn
   const err = await crossWs.json();
   assert.equal(err.error, 'account_scope_denied', 'returns the scope-denied error code');
 
-  step('a full-scope (account-less) key still works — env/admin/manager keys unaffected');
+  step('an account-less key is rejected instead of gaining global work access');
   const globalRead = await getTicket(port, ticket.id, keyGlobal.raw_key);
-  assert.equal(globalRead.status, 200, 'null-scope key keeps full access');
+  assert.equal(globalRead.status, 401, 'unowned key must be rejected');
 
-  // Regression — daemon "Ticket/Chat history/fallback POST 403" (ticket
-  // 2f13e3d7): pair/redeem mints the manager's key scoped to its pairing
-  // account, but the manager supervises children across ALL accounts and
-  // fetches their tickets/chat over /api/agent/*. Once AgentApiController added
-  // account-scope guards, that scoped key 403'd every cross-account fetch.
-  // AgentAuthGuard now treats a manager-owned key as full-scope, matching the
-  // "account-less manager keys" invariant the IDOR fix documents.
-  step('a manager-owned key scoped to a DIFFERENT account still reads cross-account (200)');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  step('a manager key stays inside its host account');
+  const manager = await createAgent(app, getDataSourceToken, wsB.id, {
     name: 'mgr', type: 'manager',
   });
-  // Scoped to wsB on the row, but owned by a manager → guard resolves full-scope.
-  // P4c-4: manager 판정은 host 바인딩만 본다 — agent_id 만으로는 부족하다.
   const keyManager = await createApiKey(app, getDataSourceToken, manager.id, {
     accountId: wsB.id, label: 'mgr', hostId: manager.id,
   });
+  const ownTicket = await createTicket(app, getDataSourceToken, {
+    accountId: wsB.id, title: 'manager-owned ticket', status: 'todo',
+  });
+  assert.equal((await getTicket(port, ownTicket.id, keyManager.raw_key)).status, 200);
   const mgrCross = await getTicket(port, ticket.id, keyManager.raw_key);
-  assert.equal(mgrCross.status, 200, 'manager key must reach across accounts');
-  const mgrBody = await mgrCross.json();
-  assert.equal(mgrBody.id, ticket.id, 'returns the cross-account ticket payload');
+  assert.equal(mgrCross.status, 403, 'manager key cannot reach another account');
+  assert.equal((await mgrCross.json()).error, 'account_scope_denied');
 
   step('an invalid key is rejected by the guard (401) — dev bypass is off');
   const noKey = await getTicket(port, ticket.id, 'awb_not_a_real_key');

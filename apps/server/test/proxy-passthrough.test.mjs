@@ -75,7 +75,7 @@ test('SSE stream delivers role_prompt and ticket_prompt at top level for agent_t
   // 배달된다 (managed fan-out 집합 제거). 트리거는 Host identity 로 주소가
   // 지정된 형태가 유일한 배달 가능 형태다.
   const ws = await createAccount(app, getDataSourceToken, 'runtime-host-passthrough');
-  const runtimeHost = await createAgent(app, getDataSourceToken, null, {
+  const runtimeHost = await createAgent(app, getDataSourceToken, ws.id, {
     name: 'runtime-host',
     type: 'manager',
   });

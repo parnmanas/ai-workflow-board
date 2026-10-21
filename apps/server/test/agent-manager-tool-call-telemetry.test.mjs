@@ -31,12 +31,12 @@ function response() {
   };
 }
 
-// AgentManagerController 생성자는 18개 의존성을 받지만 reportToolCallTelemetry는
-// this.logService만 사용한다 — 나머지는 절대 호출되지 않는 빈 스텁으로 채운다.
+// The authenticated host can report only tickets assigned to its own account.
 function makeController(logService) {
   const noop = {};
   return new AgentManagerController(
-    noop, noop, noop, noop, logService, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
+    noop, noop, noop, noop, logService, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
+    { findOneBy: async () => ({ account_id: 'account-1', assignee: { manager_agent_id: 'manager-agent-9' }, assignee_key: 'agent-1' }) }, noop, noop,
   );
 }
 
@@ -46,8 +46,8 @@ test('reportToolCallTelemetry: 유효한 표본은 집계 로그 1줄만 남기�
   const res = response();
 
   await controller.reportToolCallTelemetry(
-    { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee', graph_calls: 2, native_calls: 5 },
-    {},
+    { agent_id: 'agent-1', ticket_id: '11111111-1111-4111-8111-111111111111', role: 'assignee', graph_calls: 2, native_calls: 5 },
+    { currentAccountId: 'account-1', currentHostId: 'manager-agent-9' },
     res,
   );
 
@@ -56,7 +56,7 @@ test('reportToolCallTelemetry: 유효한 표본은 집계 로그 1줄만 남기�
   assert.equal(logService.calls[0].category, 'Ontology');
   assert.deepEqual(
     { agent_id: logService.calls[0].meta.agent_id, ticket_id: logService.calls[0].meta.ticket_id, graph_calls: logService.calls[0].meta.graph_calls, native_calls: logService.calls[0].meta.native_calls },
-    { agent_id: 'agent-1', ticket_id: 'ticket-1', graph_calls: 2, native_calls: 5 },
+    { agent_id: 'agent-1', ticket_id: '11111111-1111-4111-8111-111111111111', graph_calls: 2, native_calls: 5 },
   );
   assert.equal(logService.calls[0].meta.source, 'claude_stream_json');
 });
@@ -67,8 +67,8 @@ test('reportToolCallTelemetry: graph_calls/native_calls 둘 다 0이면 로그�
   const res = response();
 
   await controller.reportToolCallTelemetry(
-    { agent_id: 'agent-1', ticket_id: 'ticket-1', graph_calls: 0, native_calls: 0 },
-    {},
+    { agent_id: 'agent-1', ticket_id: '11111111-1111-4111-8111-111111111111', graph_calls: 0, native_calls: 0 },
+    { currentAccountId: 'account-1', currentHostId: 'manager-agent-9' },
     res,
   );
 
@@ -83,7 +83,7 @@ test('reportToolCallTelemetry: ticket_id 누락 시 로그를 남기지 않는�
 
   await controller.reportToolCallTelemetry(
     { agent_id: 'agent-1', graph_calls: 3, native_calls: 1 },
-    {},
+    { currentAccountId: 'account-1', currentHostId: 'manager-agent-9' },
     res,
   );
 
@@ -97,8 +97,8 @@ test('reportToolCallTelemetry: body에 agent_id가 없으면 req.currentAgentId�
   const res = response();
 
   await controller.reportToolCallTelemetry(
-    { ticket_id: 'ticket-1', graph_calls: 1, native_calls: 0 },
-    { currentAgentId: 'manager-agent-9' },
+    { ticket_id: '11111111-1111-4111-8111-111111111111', graph_calls: 1, native_calls: 0 },
+    { currentAgentId: 'manager-agent-9', currentAccountId: 'account-1', currentHostId: 'manager-agent-9' },
     res,
   );
 
@@ -112,8 +112,8 @@ test('reportToolCallTelemetry: 음수/비유한 카운트는 0으로 방어적�
   const res = response();
 
   await controller.reportToolCallTelemetry(
-    { agent_id: 'agent-1', ticket_id: 'ticket-1', graph_calls: -5, native_calls: Number.NaN },
-    {},
+    { agent_id: 'agent-1', ticket_id: '11111111-1111-4111-8111-111111111111', graph_calls: -5, native_calls: Number.NaN },
+    { currentAccountId: 'account-1', currentHostId: 'manager-agent-9' },
     res,
   );
 

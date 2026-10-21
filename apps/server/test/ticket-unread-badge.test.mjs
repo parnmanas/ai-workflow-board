@@ -115,7 +115,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     }));
     viewerToken = authService.createSession(viewer.id);
 
-    ws = await wsRepo.save(wsRepo.create({ name: 'Unread Badge WS', description: 'ticket 628f4b39' }));
+    ws = await wsRepo.save(wsRepo.create({ name: 'Unread Badge WS', owner_user_id: viewer.id, description: 'ticket 628f4b39' }));
 
     const mk = (title, extra = {}) => ticketRepo.save(ticketRepo.create({
       title, account_id: ws.id, status: 'todo', ...extra,
@@ -223,7 +223,7 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     activityEvents.on('ticket_reads_cleared', handler);
     try {
       const res = await apiRequest(BASE_URL, '/tickets/read-all', {
-        token: bystanderToken, accountId: ws.id, method: 'POST', body: {},
+        token: bystanderToken, method: 'POST', body: {},
       });
       assert.ok(res.status === 200 || res.status === 201, `read-all must succeed, got ${res.status}`);
       assert.equal(res.data.updated, 0);

@@ -61,6 +61,7 @@ function makeDispatcher(extraDeps = {}) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'W1',
       url: 'http://127.0.0.1:0',
       apiKey: 'test',
       delegation: { enabled: true, persistentTicketSessions: false },
@@ -176,6 +177,7 @@ function makeHermesDispatcher(extraDeps = {}) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'W1',
       url: 'http://127.0.0.1:0',
       apiKey: 'test',
       delegation: { enabled: true, persistentTicketSessions: false },

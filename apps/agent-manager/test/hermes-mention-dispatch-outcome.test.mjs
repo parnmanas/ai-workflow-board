@@ -132,6 +132,7 @@ afterEach(() => {
 
 function context(permissionMode) {
   return {
+    account_id: 'test-account',
     agent_id: AGENT,
     name: 'Hermes mention outcome agent',
     cli: 'hermes',
@@ -165,6 +166,7 @@ async function harness(t, permissionMode) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
@@ -176,6 +178,7 @@ async function harness(t, permissionMode) {
 
 function commentMentionEvent() {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'comment_mention',
     ticket_id: TICKET,
     comment_id: 'comment-1',

@@ -356,44 +356,19 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   const persisted = await activeRowsFor(ds, agentStarted.room_id, owner.id);
   assert.equal(persisted.length, 1, 'DB 에 active 참여자 행으로 남는다');
 
-  // ── 3. 생성자가 아닌 운영자 ───────────────────────────────────────────────
-  //
-  // 티켓 995a9519 로 이 블록의 계약이 바뀌었다. 예전에는 join 을 먼저 눌러야 했지만
-  // (자동 등록 대상은 생성자뿐이었다), mission 방이 open_join 으로 열리면서 참여자가
-  // 아닌 운영자도 **바로** 말할 수 있고 그 발화가 참여자 등록을 겸한다. 사용자의 원래
-  // 요청("mission 화면의 Chat 에 참여자가 아니어도 낄 수 있어야 한다")이 정확히 이것이다.
-  step('생성자가 아닌 운영자는 join 없이 바로 말할 수 있고, 그 발화로 참여자가 된다');
-  assert.deepEqual(
-    await activeRowsFor(ds, started.room_id, peer.id),
-    [],
-    '사전 조건 — peer 는 아직 이 방의 참여자가 아니다',
-  );
-  const peerFirstSay = await say(started.room_id, peerToken, '나도 한마디');
-  assert.equal(
-    peerFirstSay.status,
-    201,
-    `자유 참여 방에서는 참여자가 아니어도 발화가 된다 (${await peerFirstSay.clone().text()})`,
-  );
-  const peerRows = await activeRowsFor(ds, started.room_id, peer.id);
-  assert.equal(peerRows.length, 1, '첫 발화 시점에 참여자 행이 정확히 하나 생긴다 (auto-join)');
-  assert.ok(peerRows[0].last_read_at, '재입장 규약과 같이 last_read_at 이 찍힌다');
+  step('다른 계정의 관리자는 열린 미션 방에도 참여하거나 말할 수 없다');
+  assert.equal((await say(started.room_id, peerToken, '나도 한마디')).status, 403);
+  assert.equal((await join(created.id, peerToken)).status, 403);
+  assert.deepEqual(await activeRowsFor(ds, started.room_id, peer.id), []);
 
-  // auto-join 은 멱등이다 — 계속 말해도 행이 늘지 않는다.
-  assert.equal((await say(started.room_id, peerToken, '한마디 더')).status, 201);
-  assert.equal(
-    (await activeRowsFor(ds, started.room_id, peer.id)).length,
-    1,
-    '이어지는 발화가 참여자 행을 중복 생성하지 않는다',
-  );
-
-  // 명시적 join 경로도 그대로 살아 있다 — 이미 참여 중이므로 joined:false 로 응답한다.
-  const peerJoinAfter = await join(created.id, peerToken);
-  assert.equal(peerJoinAfter.status, 201);
-  assert.deepEqual(
-    await peerJoinAfter.json(),
-    { room_id: started.room_id, joined: false },
-    'auto-join 뒤의 명시적 join 은 아무것도 바꾸지 않는다',
-  );
+  step('소유자는 열린 방을 나갔다가 말하면 자동으로 다시 참여한다');
+  await membership.leaveRoom(started.room_id, owner.id);
+  assert.equal((await say(started.room_id, ownerToken, '다시 한마디')).status, 201);
+  assert.equal((await say(started.room_id, ownerToken, '한마디 더')).status, 201);
+  const ownerRows = await activeRowsFor(ds, started.room_id, owner.id);
+  assert.equal(ownerRows.length, 1, '자동 참여는 active 행을 중복 생성하지 않는다');
+  assert.ok(ownerRows[0].last_read_at);
+  assert.deepEqual(await (await join(created.id, ownerToken)).json(), { room_id: started.room_id, joined: false });
 
   // ── 4. 권한 없는 사용자는 여전히 차단 ─────────────────────────────────────
   step('MANAGE_ACTIONS 가 없는 사용자는 join 도 발화도 못 한다');
@@ -401,7 +376,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   assert.equal(denied.status, 403, 'join 은 nudge/cancel 과 같은 권한 관객으로 막힌다');
   assert.deepEqual(
     await activeParticipants(ds, started.room_id),
-    [`agent:${lead.id}`, `user:${owner.id}`, `user:${peer.id}`, 'user:system'].sort(),
+    [`agent:${lead.id}`, `user:${owner.id}`, 'user:system'].sort(),
     '거부된 join 은 참여자를 남기지 않는다',
   );
   // 이 사용자는 CHAT_SEND 를 갖고 있다 — 그래도 막힌다. 티켓 995a9519 이후 이 방은
@@ -422,7 +397,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // 리뷰 라운드1 지적 1: participant 행은 한 번 생기면 남으므로, join 시점 검사만으로는
   // 권한 회수가 반영되지 않는다. 강등된 계정이 계속 orchestrator 를 깨울 수 있었다.
   step('join 뒤 권한이 회수되면 그 사용자는 더 이상 발화할 수 없다');
-  const demoted = await createUser(app, getDataSourceToken, { name: 'to-be-demoted' });
+  const demoted = owner;
   const demotedToken = auth.createSession(demoted.id);
   assert.equal((await join(created.id, demotedToken)).status, 201, '강등 전에는 참여할 수 있다');
   assert.equal(
@@ -450,6 +425,8 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     '의사 user system 은 users 행이 없다 — 게이트가 엔진 wake 를 막으면 미션이 통째로 정지한다',
   );
 
+  await ds.getRepository('User').update({ id: owner.id }, { role: 'admin' });
+
   // ── 4b. 종료된 미션에도 참여하고 말할 수 있다 ───────────────────────────────
   //
   // 계약이 바뀐 자리다. 예전에는 join 과 발화 모두 거부였고 그때는 맞았다 — 미션을
@@ -472,14 +449,14 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     name: owner.name,
   });
   await runner.cancelMission(closed.id, ws.id, { type: 'user', id: owner.id, name: owner.name }, 'no longer needed');
-  const closedJoin = await join(closed.id, peerToken);
+  const closedJoin = await join(closed.id, ownerToken);
   assert.equal(closedJoin.status, 201, '종료된 미션에도 참여할 수 있다');
   assert.equal(
-    (await activeParticipants(ds, closedStarted.room_id)).includes(`user:${peer.id}`),
+    (await activeParticipants(ds, closedStarted.room_id)).includes(`user:${owner.id}`),
     true,
     '참여가 실제로 기록된다 — 이후 발화가 참여자 게이트에 걸리지 않는다',
   );
-  const closedSay = await say(closedStarted.room_id, peerToken, '이거 한 군데만 더 고쳐 줄 수 있어?');
+  const closedSay = await say(closedStarted.room_id, ownerToken, '이거 한 군데만 더 고쳐 줄 수 있어?');
   assert.equal(closedSay.status, 201, '끝난 미션에서도 운영자는 orchestrator 에게 말할 수 있다');
 
   step('말을 거는 것만으로 미션 상태가 바뀌지는 않는다 — 되살리기는 명시적 전이다');
@@ -509,7 +486,8 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // (CLAUDE.md), 경합 자체가 아니라 그 경합이 만들 수 있었던 **고장 상태**를 직접 만들어
   // 검증한다 — 그래야 백엔드와 무관하게 유효하다.
   step('같은 사용자가 동시에 두 번 참여해도 active 행은 하나다');
-  const racer = await createUser(app, getDataSourceToken, { name: 'racer' });
+  const racer = owner;
+  await membership.leaveRoom(started.room_id, owner.id);
   const racerToken = auth.createSession(racer.id);
   const bothJoins = await Promise.all([join(created.id, racerToken), join(created.id, racerToken)]);
   const joinedFlags = await Promise.all(bothJoins.map((r) => r.json().then((b) => b.joined)));

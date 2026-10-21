@@ -53,7 +53,7 @@ test('refresh_available_models 는 무관한 하트비트가 아니라 같은 co
 
   const { AuthService, getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'refresh-available-models');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'refresh-models-manager',
     type: 'manager',
   });

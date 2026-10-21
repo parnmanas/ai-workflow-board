@@ -25,7 +25,7 @@ test('Manager heartbeat with manager_capabilities stores it verbatim on the inst
 
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'manager-capabilities');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'manager-capabilities-host',
     type: 'manager',
   });
@@ -81,7 +81,7 @@ test('Manager heartbeat WITHOUT manager_capabilities leaves the field undefined 
 
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'manager-capabilities-absent');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'manager-capabilities-absent-host',
     type: 'manager',
   });

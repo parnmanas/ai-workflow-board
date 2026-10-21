@@ -8,6 +8,7 @@ const MESSAGE_ID = 'message-db-1';
 
 function agentContext() {
   return {
+    account_id: 'test-account',
     agent_id: AGENT_ID,
     name: 'Chat Agent',
     cli: 'codex',
@@ -26,6 +27,7 @@ function harness() {
   const context = agentContext();
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: {
@@ -55,6 +57,7 @@ test('room-backed chat_request uses the persisted message id as its idempotency 
   const { dispatcher, spawns } = harness();
 
   await dispatcher.handleChatRequest(JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_request',
     timestamp: '2026-07-30T04:36:17.137Z',
     payload: {
@@ -74,6 +77,7 @@ test('chat_room_message does not execute again when chat_request is canonical fo
   const { dispatcher, spawns } = harness();
 
   await dispatcher.handleChatRequest(JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_request',
     timestamp: '2026-07-30T04:36:17.137Z',
     payload: {
@@ -85,6 +89,7 @@ test('chat_room_message does not execute again when chat_request is canonical fo
     },
   }));
   await dispatcher.handleChatRoomMessage(JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_room_message',
     payload: {
       room_id: 'room-1',

@@ -99,7 +99,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'launch-spec-wire');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'launch-spec-wire', type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {

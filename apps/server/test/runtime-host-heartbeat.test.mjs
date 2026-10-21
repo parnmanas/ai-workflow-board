@@ -77,7 +77,7 @@ test('Heartbeat with host binding passes without an Agent row and stamps registr
   });
 
   const { status, body } = await postHeartbeat(port, key.raw_key, baseBody({
-    agent_id: phantomAgentId,
+    agent_id: host.id,
     host_id: host.id,
   }));
   assert.equal(status, 201, JSON.stringify(body));
@@ -85,7 +85,7 @@ test('Heartbeat with host binding passes without an Agent row and stamps registr
 
   const record = app.get(InstanceRegistryService).get(body.instance_id);
   assert.equal(record.host_id, host.id);
-  assert.equal(record.agent_id, phantomAgentId);
+  assert.equal(record.agent_id, host.id);
 
   const reloaded = await ds.getRepository('RuntimeHost').findOne({ where: { id: host.id } });
   assert.ok(reloaded?.last_seen_at, 'RuntimeHost.last_seen_at advances on host-first heartbeat');
@@ -151,7 +151,7 @@ test('Host rename is admin-only, validates names, and preserves pairing through 
   const runtimeId = randomUUID();
   const key = await createApiKey(app, getDataSourceToken, runtimeId, { accountId: account.id, hostId: host.id, label: 'host-rename' });
   const heartbeat = () => postHeartbeat(port, key.raw_key, baseBody({
-    instance_id: 'rename-instance', agent_id: runtimeId, host_id: host.id, hostname: host.hostname,
+    instance_id: 'rename-instance', agent_id: host.id, host_id: host.id, hostname: host.hostname,
   }));
   assert.equal((await heartbeat()).status, 201);
   const admin = await createUser(app, getDataSourceToken, { name: 'rename-admin' });

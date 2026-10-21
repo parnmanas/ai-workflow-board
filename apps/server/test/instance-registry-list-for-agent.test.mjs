@@ -53,7 +53,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'list-for-agent');
   // The manager's OWN identity — distinct from any agent it supervises.
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'list-for-agent-manager',
     type: 'manager',
   });

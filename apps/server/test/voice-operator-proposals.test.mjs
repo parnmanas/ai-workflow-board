@@ -52,7 +52,7 @@ test('an operator proposes work for a session; it reaches the session only after
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const other = await createUser(app, getDataSourceToken, { name: 'other-admin', role: 'admin' });
   const headersFor = (user) => ({
-    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json',
+    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, ...(user.id === admin.id ? { 'X-Account-Id': ws.id } : {}), 'Content-Type': 'application/json',
   });
   const userHeaders = headersFor(admin);
   const stream = await openSseStream(port, app.get(AuthService).createSession(admin.id), {});
@@ -133,8 +133,8 @@ test('an operator proposes work for a session; it reaches the session only after
   assert.equal((await operator.callTool('withdraw_session_prompt_proposal', { proposal_id: toOp.proposal.id })).proposal.status, 'withdrawn');
   assert.equal((await operator.callTool('propose_session_prompt', { ...target, session_id: 'never-seen', text: 'x' })).error.code, 'session_unknown');
   const theirs = await prompt(other, 'codex', 'sess-theirs', '다른 사람 일');
-  assert.equal(theirs.status, 202, theirs.text);
-  assert.equal((await operator.callTool('propose_session_prompt', { ...target, session_id: 'sess-theirs', text: 'x' })).error.code, 'not_this_user');
+  assert.equal(theirs.status, 403, 'another account cannot start work on this host');
+  assert.equal((await operator.callTool('propose_session_prompt', { ...target, session_id: 'sess-theirs', text: 'x' })).error.code, 'session_unknown');
   assert.equal((await operator.callTool('propose_session_prompt', { ...target, text: '   ' })).error.code, 'text_required');
 
   // 4. 보고 턴에서 operator 가 스스로 보내지 못한다.
@@ -238,7 +238,7 @@ test('cross-host proposals: an operator on one host can task an ordinary session
   const ws = await createAccount(app, getDataSourceToken, 'voice-proposals-xhost');
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const headersFor = (user) => ({
-    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json',
+    Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, ...(user.id === admin.id ? { 'X-Account-Id': ws.id } : {}), 'Content-Type': 'application/json',
   });
   const userHeaders = headersFor(admin);
 

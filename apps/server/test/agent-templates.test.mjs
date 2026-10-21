@@ -21,23 +21,24 @@ test('Agent templates CRUD persists preferences and rejects Agent ownership/fold
   const db = await database();
   try {
     const hosts = db.getRepository(RuntimeHost);
-    const host = await hosts.save(hosts.create({ name: 'host', hostname: 'host' }));
-    const controller = new AgentTemplatesController(db.getRepository(AgentTemplate), hosts);
+    const host = await hosts.save(hosts.create({ name: 'host', hostname: 'host', account_id: 'account-a' }));
+    const controller = new AgentTemplatesController(db.getRepository(AgentTemplate), hosts, { list: () => [] });
+    const req = { accessibleAccountIds: ['account-a'] };
     const input = { name: 'Code', host_id: host.id, cli: 'codex', model: 'test-model', effort: 'high', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
-    const saved = await controller.create(input);
+    const saved = await controller.create(input, req);
     assert.equal(saved.model, 'test-model'); assert.equal(saved.effort, 'high');
     for (const field of ['working_dir', 'agent_id', 'account_id', 'role_prompt']) {
-      await assert.rejects(controller.create({ ...input, [field]: '/tmp/repo' }), /Only name/);
-      await assert.rejects(controller.update(saved.id, { [field]: '/tmp/repo' }), /Only name/);
+      await assert.rejects(controller.create({ ...input, [field]: '/tmp/repo' }, req), /Only name/);
+      await assert.rejects(controller.update(saved.id, { [field]: '/tmp/repo' }, req), /Only name/);
     }
-    await assert.rejects(controller.create({ ...input, host_id: 'missing' }), /Host not found/);
-    await assert.rejects(controller.create({ ...input, cli: 'unknown' }), /Unknown executable runtime/);
-    await assert.rejects(controller.create({ ...input, runtime_config: { strategy: 'wrong' } }), /strategy/);
-    await controller.update(saved.id, { name: 'Updated', effort: null });
-    assert.equal((await controller.list())[0].name, 'Updated');
-    assert.equal((await controller.list())[0].effort, null);
-    await controller.remove(saved.id); assert.deepEqual(await controller.list(), []);
-    await assert.rejects(controller.update(saved.id, { name: 'gone' }), /not found/);
+    await assert.rejects(controller.create({ ...input, host_id: 'missing' }, req), /Runtime Host not available/);
+    await assert.rejects(controller.create({ ...input, cli: 'unknown' }, req), /Unknown executable runtime/);
+    await assert.rejects(controller.create({ ...input, runtime_config: { strategy: 'wrong' } }, req), /strategy/);
+    await controller.update(saved.id, { name: 'Updated', effort: null }, req);
+    assert.equal((await controller.list(req))[0].name, 'Updated');
+    assert.equal((await controller.list(req))[0].effort, null);
+    await controller.remove(saved.id, req); assert.deepEqual(await controller.list(req), []);
+    await assert.rejects(controller.update(saved.id, { name: 'gone' }, req), /not found/);
     const columns = (await db.createQueryRunner().getTable('agent_templates')).columns.map((c) => c.name);
     assert.equal(columns.includes('working_dir'), false);
   } finally { await db.destroy(); }
@@ -120,7 +121,7 @@ test('runtime identity resolves only from an active Host-bound execution credent
   const { resolveCallerIdentityRow, callerCanAccessAccount } = require('../dist/modules/mcp/shared/authz');
   const db = await database();
   try {
-    const host = await db.getRepository(RuntimeHost).save({ name: 'machine' });
+    const host = await db.getRepository(RuntimeHost).save({ name: 'machine', account_id: 'account-a' });
     const runtimeKey = 'rt-0123456789abcdef';
     const keys = db.getRepository(ApiKey);
     const key = await keys.save({ name: `runtime:Coder:${runtimeKey}`, key: 'hash', host_id: host.id, account_id: 'account-a' });

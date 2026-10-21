@@ -277,7 +277,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     source_ticket_id: foreignTicket.id, // ticket lives in `otherWs`
   });
   assert.equal(crossRun.isError, true, 'run_action rejects a cross-account source ticket');
-  assert.match(JSON.stringify(crossRun.error), /different account/i, 'rejection names the account boundary');
+  assert.match(JSON.stringify(crossRun.error), /caller account/i, 'rejection names the account boundary');
   // No run row leaked for `existing` beyond the legitimate CASE-1 run.
   const existingRuns = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: existing.id });
   assert.equal(existingRuns.length, 1, 'rejected dispatches created no ActionRun row');

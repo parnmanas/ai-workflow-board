@@ -37,7 +37,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
 
   const { AuthService, getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'privileged');
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'privileged-manager',
     type: 'manager',
   });
@@ -45,7 +45,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
     accountId: account.id,
     label: 'privileged-manager-key',
   });
-  const stranger = await createAgent(app, getDataSourceToken, null, {
+  const stranger = await createAgent(app, getDataSourceToken, account.id, {
     name: 'privileged-stranger',
     type: 'manager',
   });

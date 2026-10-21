@@ -77,7 +77,10 @@ test('TicketDispatchService.dispatch refuses while quiesced, before the host rea
   // The account lookup (needed for the dispatch-pause check right before the
   // gate) is the only repository read allowed; connectivity/instanceRegistry
   // are empty stubs, so passing the gate would throw.
-  const dataSource = { getRepository: () => ({ findOne: async () => ({ id: 'w1', dispatch_paused_at: null }) }) };
+  const dataSource = { getRepository: () => ({
+    findOneBy: async () => ({ id: 'host-1', account_id: 'w1', is_active: 1 }),
+    findOne: async () => ({ id: 'w1', dispatch_paused_at: null }),
+  }) };
   const svc = makeTicketDispatch({ dataSource });
   const ticket = {
     id: 'tk-1', account_id: 'w1', status: 'in_progress', archived_at: null,

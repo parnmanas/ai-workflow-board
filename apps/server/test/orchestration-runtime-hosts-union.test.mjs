@@ -12,8 +12,8 @@ import { OrchestrationHostsService } from '../dist/modules/orchestration/orchest
 // P4 (manager identity → RuntimeHost): runtime-hosts 카탈로그는 runtime_hosts
 // 원천 + manager Agent 행 legacy 별칭의 합집합이다. dual-write 쌍은 하나로
 // 합쳐지고 (키는 Host id), Agent 행 없는 Host 도 목록에 나온다.
-async function listHosts(app) {
-  return app.get(OrchestrationHostsService).listRuntimeHosts('any-account');
+async function listHosts(app, accountId) {
+  return app.get(OrchestrationHostsService).listRuntimeHosts(accountId);
 }
 
 test('Host catalog returns one host-keyed row without retired Agent aliases', async (t) => {
@@ -26,7 +26,7 @@ test('Host catalog returns one host-keyed row without retired Agent aliases', as
 
   // P4c-4: createAgent(type manager)는 Host 행을 직접 만든다 — dual-write
   // 쌍을 흉내내려면 키에 구 agent uuid 바인딩을 얹는다 (평문 컬럼, FK 없음).
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'union-manager',
     type: 'manager',
   });
@@ -38,7 +38,7 @@ test('Host catalog returns one host-keyed row without retired Agent aliases', as
     hostId: host.id,
   });
 
-  const hosts = await listHosts(app);
+  const hosts = await listHosts(app, account.id);
   assert.equal(hosts.length, 1, JSON.stringify(hosts.map((h) => h.manager_name)));
   assert.equal(hosts[0].manager_agent_id, host.id);
   assert.equal(hosts[0].legacy_agent_id, null);
@@ -62,7 +62,7 @@ test('Host without an Agent row still appears, keyed by host id', async (t) => {
     }),
   );
 
-  const hosts = await listHosts(app);
+  const hosts = await listHosts(app, account.id);
   const row = hosts.find((h) => h.manager_agent_id === host.id);
   assert.ok(row, `host-only row missing: ${JSON.stringify(hosts.map((h) => h.manager_agent_id))}`);
   assert.equal(row.legacy_agent_id, null);
@@ -74,14 +74,14 @@ test('Host rows created by pairing appear keyed by host id', async (t) => {
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  await createAccount(app, getDataSourceToken, 'hosts-legacy');
+  const account = await createAccount(app, getDataSourceToken, 'hosts-legacy');
 
-  const manager = await createAgent(app, getDataSourceToken, null, {
+  const manager = await createAgent(app, getDataSourceToken, account.id, {
     name: 'legacy-only-manager',
     type: 'manager',
   });
 
-  const hosts = await listHosts(app);
+  const hosts = await listHosts(app, account.id);
   const row = hosts.find((h) => h.manager_agent_id === manager.id);
   assert.ok(row, `host row missing: ${JSON.stringify(hosts.map((h) => h.manager_agent_id))}`);
   assert.equal(row.legacy_agent_id, null);

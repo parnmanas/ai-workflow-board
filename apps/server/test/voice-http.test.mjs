@@ -20,7 +20,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createUser } from './helpers/fixtures.mjs';
+import { createUser, createAccount, createAgent } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
@@ -84,6 +84,9 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
 
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const plain = await createUser(app, getDataSourceToken, { name: 'plain', role: 'user' });
+  const account = await createAccount(app, getDataSourceToken, 'voice-http');
+  const host1 = await createAgent(app, getDataSourceToken, account.id, { name: 'voice-host-1', type: 'manager' });
+  const host2 = await createAgent(app, getDataSourceToken, account.id, { name: 'voice-host-2', type: 'manager' });
   const adminToken = app.get(AuthService).createSession(admin.id);
   const plainToken = app.get(AuthService).createSession(plain.id);
   const adminAuth = { Authorization: `Bearer ${adminToken}` };
@@ -169,7 +172,7 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   const plainStream = await openSseStream(port, plainToken, {});
   t.after(() => { adminStream.close(); plainStream.close(); });
   activityEvents.emit('agent_session_update', {
-    session: { manager_id: 'host-1', manager_name: 'rolf', cli: 'claude', session_id: 's1', title: '배포', status: 'error', driver_user_id: admin.id },
+    session: { manager_id: host1.id, manager_name: 'rolf', cli: 'claude', session_id: 's1', title: '배포', status: 'error', driver_user_id: admin.id },
     reason: 'turn_failed',
     driver_user_id: admin.id,
     timestamp: new Date().toISOString(),
@@ -178,7 +181,7 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   const announcement = typeof frame.data === 'string' ? JSON.parse(frame.data) : frame.data;
   assert.equal(announcement.kind, 'session_turn_failed');
   assert.equal(announcement.text, "rolf의 Claude Code 세션 '배포'에서 오류가 났어요.");
-  assert.deepEqual(announcement.target, { type: 'session', manager_id: 'host-1', cli: 'claude', session_id: 's1' });
+  assert.deepEqual(announcement.target, { type: 'session', manager_id: host1.id, cli: 'claude', session_id: 's1' });
   const leaked = await plainStream.drainOfType('voice_announcement', 300);
   assert.equal(leaked.length, 0, 'other users never see it');
   const announcementAudio = await call(`${base}/api/voice/announcements/${announcement.id}/audio`, { headers: adminAuth });
@@ -192,19 +195,19 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   const register = (body, auth = adminAuth) => call(operatorsUrl, { method: 'POST', headers: { ...auth, ...json }, body: JSON.stringify(body) });
   const patchOperator = (id, body, auth = adminAuth) => call(`${operatorsUrl}/${id}`, { method: 'PATCH', headers: { ...auth, ...json }, body: JSON.stringify(body) });
   assert.deepEqual((await call(operatorsUrl, { headers: adminAuth })).body, { operators: [] });
-  assert.equal((await register({ name: 'Jarvis', manager_id: 'host-1' })).body.error, 'operator_session_required');
-  assert.equal((await register({ name: ' ', manager_id: 'host-1', cli: 'claude', session_id: 's1' })).body.error, 'operator_name_required');
+  assert.equal((await register({ name: 'Jarvis', manager_id: host1.id })).body.error, 'operator_session_required');
+  assert.equal((await register({ name: ' ', manager_id: host1.id, cli: 'claude', session_id: 's1' })).body.error, 'operator_name_required');
   const jarvis = await register({
-    name: 'Jarvis', aliases: '자비스, 쟈비스, jarvis', manager_id: 'host-1', cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator',
+    name: 'Jarvis', aliases: '자비스, 쟈비스, jarvis', manager_id: host1.id, cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator',
   });
   assert.equal(jarvis.status, 201, jarvis.buf.toString());
   assert.equal(jarvis.body.operator.created_by, admin.id);
   assert.deepEqual(jarvis.body.operator.aliases, ['자비스', '쟈비스'], 'an alias equal to the name is dropped');
-  const friday = await register({ name: 'Friday', manager_id: 'host-2', cli: 'codex', session_id: 's2' });
+  const friday = await register({ name: 'Friday', manager_id: host2.id, cli: 'codex', session_id: 's2' });
   assert.equal(friday.status, 201);
-  const sameSession = await register({ name: 'Other', manager_id: 'host-1', cli: 'claude', session_id: 's1' });
+  const sameSession = await register({ name: 'Other', manager_id: host1.id, cli: 'claude', session_id: 's1' });
   assert.deepEqual([sameSession.status, sameSession.body.error], [409, 'operator_session_taken']);
-  const sameName = await register({ name: 'JAR VIS', manager_id: 'host-3', cli: 'claude', session_id: 's3' });
+  const sameName = await register({ name: 'JAR VIS', manager_id: host1.id, cli: 'claude', session_id: 's3' });
   assert.deepEqual([sameName.status, sameName.body.error], [409, 'operator_name_taken'], 'case and spaces do not make a new name');
   const aliasClash = await patchOperator(friday.body.operator.id, { aliases: ['자비스'] });
   assert.deepEqual([aliasClash.status, aliasClash.body.error], [409, 'operator_name_taken'], 'an alias may not call another operator');

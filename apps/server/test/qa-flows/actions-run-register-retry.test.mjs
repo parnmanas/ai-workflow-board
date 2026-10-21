@@ -202,11 +202,12 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   // …and another account's Action must NOT count either — the account is
   // the only scope an Action has.
   const otherWs = await createAccount(app, getDataSourceToken, 'actions-other');
+  const otherHost = await createAgent(app, getDataSourceToken, otherWs.id, { name: 'other-deploy-host', type: 'manager' });
   await actions.create({
     account_id: otherWs.id,
     name: 'Other account deploy',
     prompt: 'x',
-    target_runtimes: [RUNTIME_SPEC],
+    target_runtimes: [{ ...RUNTIME_SPEC, manager_agent_id: otherHost.id }],
   });
 
   const candidates = await loadPendActionCandidates(ds, ticket);

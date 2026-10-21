@@ -58,6 +58,7 @@ afterEach(() => {
 
 function context() {
   return {
+    account_id: 'test-account',
     agent_id: AGENT,
     name: 'Hermes mention guard agent',
     cli: 'hermes',
@@ -82,6 +83,7 @@ function harness() {
   // (hermes-chat-dispatch-failure.test.mjs 와 동일한 재현 방식).
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
@@ -93,6 +95,7 @@ function harness() {
 
 function commentMentionEvent() {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'comment_mention',
     ticket_id: TICKET,
     comment_id: 'comment-1',

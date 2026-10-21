@@ -221,7 +221,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('대상 중 하나라도 Host가 없으면 저장 전체를 거부한다', async () => {
     await assert.rejects(
       service.create({ account_id: WS, name: 'bad', target_runtimes: [SPECA, { ...SPECB, manager_agent_id: 'missing-host' }] }),
-      /unknown Runtime Host/,
+      /Runtime Host outside this account/,
     );
     assert.equal(await dataSource.getRepository(Action).count(), 0, '부분 저장이 남으면 안 된다');
   });

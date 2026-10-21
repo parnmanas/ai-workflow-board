@@ -38,7 +38,7 @@ test('heartbeat installed_version/restart_required round-trip; absence stays und
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
   const account = await createAccount(app, getDataSourceToken, 'installed-version');
-  const manager = await createAgent(app, getDataSourceToken, null, { name: 'installed-version-host', type: 'manager' });
+  const manager = await createAgent(app, getDataSourceToken, account.id, { name: 'installed-version-host', type: 'manager' });
   const key = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'installed-version' });
   const registry = app.get(InstanceRegistryService);
 

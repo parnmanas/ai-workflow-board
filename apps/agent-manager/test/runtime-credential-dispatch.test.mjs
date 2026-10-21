@@ -104,7 +104,7 @@ function host() {
     markStopped() {},
     get() { return undefined; },
   };
-  const config = { url: 'http://awb.test', apiKey: 'manager-key', delegation: { enabled: true } };
+  const config = { account_id: ACCOUNT, url: 'http://awb.test', apiKey: 'manager-key', delegation: { enabled: true } };
   const commands = new AgentManagerCommandHandler(config, {
     getInstanceId: () => 'instance-1',
     registry,
@@ -239,7 +239,7 @@ test('Agent Sessions and runtime identities refuse the same incomplete credentia
   assert.throws(() => acceptRuntimeCredential('claude', 'cred-1', incomplete, 'test'), { code: 'credential_incomplete' });
   assert.throws(() => acceptRuntimeCredential('claude', 'cred-1', null, 'test'), { code: 'credential_unavailable' });
   assert.throws(
-    () => acceptRuntimeCredential('claude', 'cred-1', { ...incomplete, provider: 'codex_api_key', fields: { api_key: 'k' } }, 'test'),
+    () => acceptRuntimeCredential('claude', 'cred-1', { ...incomplete, provider: 'codex_api_key', fields: { account_id: ACCOUNT, api_key: 'k' } }, 'test'),
     { code: 'credential_provider_mismatch' },
   );
   assert.throws(() => acceptRuntimeCredential('claude', 'cred-1', { ...incomplete, credential_id: 'cred-2' }, 'test'), { code: 'credential_unavailable' });

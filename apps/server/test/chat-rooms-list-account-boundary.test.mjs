@@ -195,14 +195,10 @@ describe('list_chat_rooms 계정 경계 (티켓 ced48818)', () => {
     assertNoRoomsLeaked(res);
   });
 
-  it('전역 에이전트도 세션 키의 account 밖 방은 목록에서 빠진다', async () => {
-    const mine = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
-    await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: GLOBAL_BOT }]);
-
+  it('소유 계정이 없는 호스트는 세션에 account가 있어도 방 목록을 읽지 못한다', async () => {
+    await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
     const res = await mcpList(GLOBAL_BOT, WS);
-
-    assert.equal(res.isError, false);
-    assert.deepEqual(res.payload.map(r => r.room_id), [mine.id]);
+    assertNoRoomsLeaked(res);
   });
 
   // ── 같은 계정 무회귀 ────────────────────────────────────────────────

@@ -39,6 +39,7 @@ afterEach(() => {
 
 function context() {
   return {
+    account_id: 'test-account',
     agent_id: AGENT,
     name: 'Hermes guard agent',
     cli: 'hermes',
@@ -62,6 +63,7 @@ function harness() {
   // 'runtime_supervisor_unavailable' 로 fail-closed 하는 경로를 재현한다.
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
@@ -73,6 +75,7 @@ function harness() {
 
 function chatRequest(roomId) {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_request',
     timestamp: '2026-08-10T00:00:00.000Z',
     payload: {
@@ -86,6 +89,7 @@ function chatRequest(roomId) {
 
 function chatRoomMessage(roomId) {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_room_message',
     timestamp: '2026-08-10T00:00:00.000Z',
     payload: {
@@ -143,6 +147,7 @@ function harnessWithSupervisor(dispatchImpl) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },

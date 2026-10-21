@@ -275,7 +275,7 @@ test('A slot names who runs, never where — the team view carries no folder and
     }),
     (e) => {
       assert.equal(e.status, 400);
-      assert.match(e.message, /Runtime Host .* does not exist/);
+      assert.match(e.message, /Runtime Host is not available to this team/);
       return true;
     },
   );

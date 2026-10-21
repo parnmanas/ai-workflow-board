@@ -15,6 +15,7 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
+import { User } from '../dist/entities/User.js';
 import { Account } from '../dist/entities/Account.js';
 import { Credential } from '../dist/entities/Credential.js';
 import { Resource } from '../dist/entities/Resource.js';
@@ -61,7 +62,7 @@ describe('catalog lists aggregate accessible Accounts + Global', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Account, Credential, Resource, WorkflowFunction, WorkflowFunctionRun],
+      entities: [User, Account, Credential, Resource, WorkflowFunction, WorkflowFunctionRun],
       synchronize: true,
       logging: false,
     });
@@ -251,10 +252,11 @@ describe('catalog lists aggregate accessible Accounts + Global', () => {
   // browser's X-Account-Id creation-default header and the rewritten
   // query.account_id must not turn into an explicit account filter.
   it('through AccountAccessService.bindRequest: the default-account header does not filter, an explicit account_id does', async () => {
+    const admin = await dataSource.getRepository(User).save({ id: 'u-admin', name: 'Admin', email: 'catalog-admin@example.test', role: 'admin', status: 'active' });
     const accountRepo = dataSource.getRepository(Account);
     const [first, second] = [
-      await accountRepo.save(accountRepo.create({ name: 'First' })),
-      await accountRepo.save(accountRepo.create({ name: 'Second' })),
+      await accountRepo.save(accountRepo.create({ name: 'First', kind: 'personal', owner_user_id: admin.id })),
+      await accountRepo.save(accountRepo.create({ name: 'Second', kind: 'organization', owner_user_id: admin.id })),
     ];
     const credRepo = dataSource.getRepository(Credential);
     for (const account of [first, second]) {
@@ -264,7 +266,6 @@ describe('catalog lists aggregate accessible Accounts + Global', () => {
       }));
     }
     const access = new AccountAccessService(dataSource, {});
-    const admin = { id: 'u-admin', name: 'Admin', role: 'admin', permissions: [] };
 
     const pageReq = { currentUser: admin, method: 'GET', path: '/api/credentials', query: {}, headers: { 'x-account-id': first.id } };
     await access.bindRequest(pageReq);

@@ -52,7 +52,7 @@ function makeScenario() {
 const dataSource = {
   getRepository: (entity) => {
     if (entity?.name === 'RuntimeHost') {
-      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', account_id: 'ws-1' }; }, async find() { return []; } };
+      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', account_id: 'ws-1', is_active: 1 }; }, async find() { return []; } };
     }
     return { findOne: async () => { throw new Error('no repo'); } };
   },

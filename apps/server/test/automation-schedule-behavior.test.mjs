@@ -161,7 +161,7 @@ function svcWith(rows, agents = [{ id: AGENT_UUID, account_id: 'ws-1', name: 'Bo
   // quiesce, action, actions). 타겟 해소는 Host 행이다. Action 형태는 이 파일이
   // 다루지 않으므로 action/actions 자리는 빈 stub 이다.
   const hostRepo = {
-    async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
+    async findOne({ where }) { const row = agents.find((a) => a.id === where.id); return row ? { is_active: 1, ...row } : null; },
     async find() { return []; },
   };
   const dataSource = {

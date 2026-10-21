@@ -132,6 +132,7 @@ test('standalone mcp-server.js HTTP mode enforces authentication end-to-end', as
   const { AppDataSource } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
   const { ApiKey } = await import('file://' + path.join(DIST_ROOT, 'entities', 'ApiKey.js'));
   const rawKey = `awb_test_${randomUUID().replace(/-/g, '')}`;
+  const account = await AppDataSource.getRepository('Account').save({ name: 'Standalone test' });
   const apiKeyRepo = AppDataSource.getRepository(ApiKey);
   await apiKeyRepo.save(apiKeyRepo.create({
     name: 'standalone-http-auth-test',
@@ -140,7 +141,7 @@ test('standalone mcp-server.js HTTP mode enforces authentication end-to-end', as
     agent_id: null,
     scope: 'full',
     is_active: 1,
-    account_id: '',
+    account_id: account.id,
   }));
 
   let sessionId;

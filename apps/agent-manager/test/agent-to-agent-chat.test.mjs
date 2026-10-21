@@ -47,6 +47,7 @@ afterEach(() => {
 
 function hermesContext() {
   return {
+    account_id: 'test-account',
     agent_id: HERMES,
     name: 'Hermes sibling',
     cli: 'hermes',
@@ -83,6 +84,7 @@ async function harness(t) {
   };
   const dispatcher = new EventDispatcher(
     {
+      account_id: 'test-account',
       url: 'http://127.0.0.1:0',
       apiKey: 'test-key',
       delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
@@ -94,6 +96,7 @@ async function harness(t) {
 
 function agentMessage({ roomId, senderId, memberIds, depth }) {
   return JSON.stringify({
+    account_id: 'test-account',
     event_type: 'chat_room_message',
     timestamp: '2026-08-18T00:00:00.000Z',
     payload: {

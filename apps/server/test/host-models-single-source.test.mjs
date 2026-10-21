@@ -36,7 +36,7 @@ test('한 호스트의 모델 목록은 mission / session / Agent 다이얼로�
   const { AuthService, getDataSourceToken } = modules;
 
   const account = await createAccount(app, getDataSourceToken, 'single-source');
-  const manager = await createAgent(app, getDataSourceToken, null, { name: 'rolf', type: 'manager' });
+  const manager = await createAgent(app, getDataSourceToken, account.id, { name: 'rolf', type: 'manager' });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'rolf-key' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
@@ -129,7 +129,7 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
   const ds = app.get(getDataSourceToken());
 
   const account = await createAccount(app, getDataSourceToken, 'reported-models');
-  const manager = await createAgent(app, getDataSourceToken, null, { name: 'ralf', type: 'manager' });
+  const manager = await createAgent(app, getDataSourceToken, account.id, { name: 'ralf', type: 'manager' });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'ralf-key' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin2', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
@@ -226,7 +226,7 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
   const ds = app.get(getDataSourceToken());
 
   const account = await createAccount(app, getDataSourceToken, 'ragnar-claude');
-  const manager = await createAgent(app, getDataSourceToken, null, { name: 'Ragnar', type: 'manager' });
+  const manager = await createAgent(app, getDataSourceToken, account.id, { name: 'Ragnar', type: 'manager' });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: account.id, label: 'ragnar-key' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin3', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);

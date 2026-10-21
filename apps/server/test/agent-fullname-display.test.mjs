@@ -79,31 +79,31 @@ test('Activity tab: actor_name re-resolves to the Host bare name from actor_id',
   // Rows deliberately written with WRONG/bare actor_name to prove the read side
   // — not a write mutation — supplies the canonical name.
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'updated',
     field_changed: 'managed', actor_id: manager.id, actor_name: 'Coder-bare-leaf',
   });
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'updated',
     field_changed: 'runtime-host', actor_id: manager.id, actor_name: 'stale-whatever',
   });
   // System actor: no actor_id → the stored label must survive verbatim.
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'moved',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'moved',
     field_changed: 'system', actor_id: '', actor_name: 'AWB',
   });
   // Human actor: actor_id is a User id (never an Agent) → name untouched.
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'updated',
     field_changed: 'user', actor_id: user.id, actor_name: user.name,
   });
   // Stale prefixed row: the read projection re-resolves via actor_id, so the
   // old `<Manager>/<Agent>` text reads back as the current Host name.
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'updated',
     field_changed: 'already-full', actor_id: manager.id, actor_name: 'Mgr/Coder',
   });
 
-  const rows = await activityService.getTicketActivity(ticket.id);
+  const rows = await activityService.getTicketActivity(ticket.id, [ws.id]);
   const byField = new Map(rows.map(r => [r.field_changed, r]));
 
   // linked managed id → its Host's bare name (unambiguous: no leaf on screen)
@@ -210,7 +210,7 @@ test('Realtime board_update SSE: actor_name is the canonical Host display', asyn
   // Stamp the BARE leaf name at write time — the realtime frame must still
   // arrive canonicalized, exactly like the durable read path.
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'updated',
     field_changed: 'sse-managed', actor_id: manager.id, actor_name: 'Coder-bare-leaf',
   });
 
@@ -227,7 +227,7 @@ test('Realtime board_update SSE: actor_name is the canonical Host display', asyn
   // Non-agent actor (system label, no actor_id) must ride the wire verbatim —
   // the projection only touches ids that resolve to an Agent row.
   await activityService.logActivity({
-    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'moved',
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ws.id, action: 'moved',
     field_changed: 'sse-system', actor_id: '', actor_name: 'AWB',
   });
   const sysFrame = await sse.waitFor(
