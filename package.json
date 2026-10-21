@@ -17,7 +17,8 @@
     "start": "npm start -w server",
     "start:agent-manager": "npm run start -w awb-agent-manager",
     "mcp": "npm run mcp -w server",
-    "mcp:http": "npm run mcp:http -w server"
+    "mcp:http": "npm run mcp:http -w server",
+    "prebuild": "node scripts/clean-build-output.mjs"
   },
   "devDependencies": {
     "turbo": "^2.4.0"
