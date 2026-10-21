@@ -267,6 +267,19 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   assert.equal(cancelled.body.status, 'cancelled', cancelled.text);
   assert.equal((await budget()).total.held, 0, 'cancelling an approved request releases its reserve');
 
+  // 재배분: 늘리는 쪽을 먼저 적어 보내도 줄이는 쪽부터 승인돼, 합이 정확히 상한(60,000)인 계획이 중간에 거부되지 않는다.
+  const channel2 = (await post(`/campaigns/${campaign.id}/channels`, A, { platform: 'blog', target: 'https://devblog.example.net', name: 'Dev blog' })).body;
+  await post(`/channels/${channel2.id}/approve`, A, { mode: 'manual' });
+  const rebalance = await post(`/campaigns/${campaign.id}/allocations`, A, {
+    allocations: [{ channel_id: channel2.id, amount_minor: 30000 }, { channel_id: channel.id, amount_minor: 30000 }],
+    rationale: 'Move half of the budget to the blog.', approve: true,
+  });
+  assert.equal(rebalance.status, 201, rebalance.text);
+  assert.deepEqual(rebalance.body.map((a) => a.status), ['active', 'active']);
+  assert.equal((await budget()).allocated_total_minor, 60000);
+  assert.equal((await post(`/campaigns/${campaign.id}/allocations`, M, { allocations: [{ channel_id: channel2.id, amount_minor: 1 }], rationale: 'x', approve: true })).status, 403,
+    'setting budget is an approve_spend decision');
+
   // 5. webhook
   const credRepo = ds.getRepository('Credential');
   const payCred = await credRepo.save(credRepo.create({

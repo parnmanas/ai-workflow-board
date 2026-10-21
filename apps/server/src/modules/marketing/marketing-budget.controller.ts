@@ -60,8 +60,14 @@ export class MarketingBudgetController {
       let rows = created;
       if (body?.approve === true) {
         // 방금 만든 행만 승인한다 — 같은 사람이 예전에 남긴 다른 제안까지 휩쓸어 승인하지 않게.
+        // 줄이는 편성을 먼저 승인한다: 재배분(한쪽을 줄이고 다른 쪽을 늘림)이 중간에 상한을 넘었다고 거부되지 않게.
+        const deltas = await Promise.all(created.map(async (row) => {
+          const current = await this.budget.activeFor(campaign.id, row.channel_id);
+          return { row, delta: row.amount_minor - (current ? current.amount_minor : 0) };
+        }));
+        deltas.sort((a, b) => a.delta - b.delta);
         rows = [];
-        for (const row of created) rows.push(await this.budget.approve(row.id, accountId, actor, 'set directly'));
+        for (const { row } of deltas) rows.push(await this.budget.approve(row.id, accountId, actor, 'set directly'));
       }
       return res.status(201).json(rows.map(allocationToJson));
     } catch (e: any) {
