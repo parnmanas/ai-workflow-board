@@ -31,9 +31,20 @@
 > `agent_env`가 켜진 세션에는 `NPM_TOKEN`으로 주입된다. 갱신 시 GitHub secret도 함께 교체한다.
 > 값은 출력하지 않고 `gh secret set NPM_TOKEN`의 stdin으로 전달하며, workflow는 publish 단계에만
 > `NODE_AUTH_TOKEN`으로 노출한다. AWB와 GitHub 사이의 자동 동기화는 없다.
+> 실제 발행 경로는 **Trusted Publisher** 다 — npm CLI 는 OIDC 교환을 먼저 시도하고 실패할 때만
+> 토큰으로 내려간다. 2026-10-15 등록 이후(1.6.287~) 모든 버전이 OIDC 로 나갔다. 어느 경로였는지는
+> `npm view awb-agent-manager@<version> _npmUser` 로 본다 — `GitHub Actions <npm-oidc-no-reply@github.com>`
+> 이면 OIDC, npm 계정 이름이면 토큰이다.
 > publish 가 `PUT … 404` 로 실패하면 패키지가 없는 게 아니라 **인증 실패**다 —
 > Trusted Publisher 등록과 토큰의 유효성·패키지 쓰기 권한을 확인한다(2026-10-11, 만료된
-> NPM_TOKEN도 같은 모양으로 실패했다). 재실행은 **멱등**하다 — 이미 올라간 버전이면 태그만
+> NPM_TOKEN도 같은 모양으로 실패했다). `EOTP` 는 OIDC 교환이 실패해 one-time password 를 요구하는
+> 토큰으로 내려갔다는 뜻이다 — CI 는 OTP 를 줄 수 없으므로 토큰보다 **Trusted Publisher 등록을 먼저**
+> 확인한다. 2026-10-11~15 장애가 이 순서였다: 만료 토큰 404 → 등록이 유효하지 않은 채 OIDC 전용으로
+> 바꿔 404 가 이어짐 → 토큰 fallback 을 되살린 run 은 `EOTP` → 등록을 바로잡은 뒤 재실행으로 복구
+> (ticket 95c267dc).
+> 2FA 를 우회하는 토큰은 npm 이 직접 publish 를 제한하는 중이라
+> (publish 로그의 `npm tokens that bypass 2FA are being restricted` 공지) 토큰은 fallback 으로만 둔다.
+> 재실행은 **멱등**하다 — 이미 올라간 버전이면 태그만
 > 보장하고, 부분 실패(publish 됐는데 태그만 실패)는 다음 run 이 npm 의 gitHead
 > provenance(배포 당시 커밋 SHA)로 복구한다.
 
