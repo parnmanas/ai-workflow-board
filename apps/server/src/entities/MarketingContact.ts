@@ -3,7 +3,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
 /**
  * MarketingContact — 마케팅 메일 수신자와 그 동의 증거(docs/marketing.md "메일").
  *
- * 계정 단위다(여러 캠페인의 메일 채널이 `lists` 로 골라 쓴다). **사람만** 넣는다 — 에이전트에게는 연락처를
+ * 설치 전체의 한 목록이다(여러 캠페인의 메일 채널이 `lists` 로 골라 쓴다). **사람만** 넣는다 — 에이전트에게는 연락처를
  * 추가하는 경로가 없다(수집한 주소로 스팸을 보내는 길을 막는다). 동의 증거(방법 · 시각 · 출처 · 문구 버전 · IP)를
  * 같이 받고, 동의가 2 년을 넘으면 재확인 전까지 발송에서 빠진다(정보통신망법 §50). 야간(수신자 현지 21–08시)
  * 수신은 `night_consent` 가 있어야 한다.

@@ -333,7 +333,7 @@ test('지출 승인 권한이 없으면 돈 버튼이 없다 — 예산 · 지�
   assert.ok(hasButton(within(container, 'marketing-post-post-1'), '거부'), '게시 · 채널 결정은 운영 권한으로 한다');
 });
 
-test('메일 채널 카드의 "연락처 관리" 는 캠페인의 소유 계정 · 수신 목록을 실어 연다', async (t) => {
+test('메일 채널 카드의 "연락처 관리" 는 캠페인의 실행 키 · 수신 목록을 실어 연다', async (t) => {
   const emailChannel = {
     ...channels[1], id: 'ch-mail', platform: 'email', kind: 'email', name: '뉴스레터', target: 'newsletter',
     email: {
@@ -352,7 +352,7 @@ test('메일 채널 카드의 "연락처 관리" 는 캠페인의 소유 계정 
   assert.equal(link.textContent, '연락처 관리');
   const href = new URL(link.getAttribute('href'), 'http://localhost');
   assert.equal(href.pathname, '/marketing/contacts');
-  assert.equal(href.searchParams.get('account'), 'acc-org', '캠페인의 소유 계정');
+  assert.equal(href.searchParams.get('account'), 'acc-org', '캠페인의 실행 키');
   assert.equal(href.searchParams.get('campaign'), 'c-1');
   assert.equal(href.searchParams.get('list'), 'newsletter');
 });

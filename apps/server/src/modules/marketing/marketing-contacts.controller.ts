@@ -12,7 +12,7 @@ import { errorStatus } from './marketing-errors';
 import { boundAccountId, userActor } from './marketing-http';
 
 /**
- * 메일 연락처 · 발송 기록 REST(docs/marketing.md "메일"). 연락처는 계정 단위이고 사람만 넣는다 — MCP 에는 없다.
+ * 메일 연락처 · 발송 기록 REST(docs/marketing.md "메일"). 연락처는 설치 전체의 한 목록이고(같은 주소는 한 번) 사람만 넣는다 — MCP 에는 없다.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('marketing')

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { api } from '../../api';
 import type {
   MarketingCampaign,
@@ -34,8 +34,8 @@ import {
 import { FieldLabel, Hint } from './MarketingUi';
 
 /**
- * 캠페인 만들기 · 설정 고치기(docs/marketing.md). 소유 계정은 고르지 않는다 — 제품 Project 를 고르면 그
- * Project 의 계정, 아니면 기본 접근 계정에 서버가 귀속시킨다. 돈 설정(통화 · 한도 · 수취인 · 결제 방식)은
+ * 캠페인 만들기 · 설정 고치기(docs/marketing.md). 캠페인은 공통 업무라 소유를 고르지 않는다 — 실행 키(account_id)는
+ * 서버가 정한다(docs/ownership.md). 돈 설정(통화 · 한도 · 수취인 · 결제 방식)은
  * 예산 설정(MarketingBudgetSettingsModal)에서 marketing.approve_spend 가 있는 사람만 고친다.
  */
 
@@ -131,8 +131,6 @@ export function CampaignFormModal({ mode, campaign: campaignProp, canApproveSpen
   const [cadence, setCadence] = useState<CadenceDraft>(() => cadenceDraftFrom(campaign || null));
   const [currency, setCurrency] = useState(campaign?.currency || 'KRW');
   const [agent, setAgent] = useState<Record<string, any> | null>(campaign?.agent_runtime || null);
-  // 그 실행 선언을 해석한 계정 — credential 은 계정 것이라, 새 캠페인의 소유 계정이 바뀌면 다시 골라야 한다.
-  const [agentAccountId, setAgentAccountId] = useState<string | null>(campaign?.account_id || null);
   const [disclosure, setDisclosure] = useState(campaign?.disclosure || '');
   const [domains, setDomains] = useState((campaign?.allowed_domains || []).join('\n'));
   const [limits, setLimits] = useState<Record<string, string>>(() => {
@@ -148,22 +146,9 @@ export function CampaignFormModal({ mode, campaign: campaignProp, canApproveSpen
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // 수정할 때는 같은 계정의 Project 만 고를 수 있다(서버가 다른 계정의 Project 를 거부한다).
-  const projectChoices = useMemo(
-    () => projects.filter((p) => !editing || p.account_id === campaign!.account_id),
-    [projects, editing, campaign],
-  );
   const selectedProject = projects.find((p) => p.id === projectId) || null;
-  // 실행 선언(credential · 폴더)을 고를 계정 — 수정이면 캠페인의 계정, 새로 만들면 고른 Project 의 계정.
+  // 실행 선언(credential · 폴더)을 고를 때 싣는 실행 키 — 수정이면 캠페인의 것, 새로 만들면 고른 Project 의 것.
   const runtimeAccountId = editing ? campaign!.account_id : selectedProject?.account_id || currentAccountId || '';
-  useEffect(() => {
-    if (editing || !agent || !agentAccountId || agentAccountId === runtimeAccountId) return;
-    // Project 를 바꿔 새 캠페인이 다른 계정에 속하게 됐다 — 앞 계정에서 고른 credential 은 서버가 거부한다.
-    setAgent(null);
-    setAgentAccountId(null);
-    notify('Project 를 바꿔 캠페인의 소유 계정이 달라졌습니다 — 캠페인 에이전트를 다시 지정하세요', 'info');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeAccountId]);
 
   const submit = async () => {
     if (!name.trim()) { setError('이름을 입력하세요'); return; }
@@ -251,7 +236,7 @@ export function CampaignFormModal({ mode, campaign: campaignProp, canApproveSpen
         <Select
           label="제품 Project (선택)"
           value={projectId}
-          options={[{ value: '', label: '— 없음 —' }, ...projectChoices.map((p) => ({ value: p.id, label: p.name }))]}
+          options={[{ value: '', label: '— 없음 —' }, ...projects.map((p) => ({ value: p.id, label: p.name }))]}
           onChange={(e) => setProjectId(e.target.value)}
         />
         <Hint>피드백에서 나온 버그 · 기능 요청 티켓이 이 Project 에 들어갑니다.</Hint>
@@ -273,13 +258,12 @@ export function CampaignFormModal({ mode, campaign: campaignProp, canApproveSpen
             {agent && <Button size="sm" variant="ghost" onClick={() => setAgent(null)}>해제</Button>}
           </div>
           <DeclareRuntimeSection
-            // 계정이 바뀌거나 선언을 지우면 새로 연다 — 앞 계정의 credential 을 들고 있지 않게.
+            // 선언을 지우면 새로 연다 — 지운 선언의 credential 을 들고 있지 않게.
             key={`${runtimeAccountId}:${agent ? 'set' : 'none'}`}
             accountId={runtimeAccountId}
             initialValue={agent}
             onResolved={(spec) => {
               setAgent(spec);
-              setAgentAccountId(runtimeAccountId);
               notify('에이전트 설정을 적용했습니다 — 저장하면 반영됩니다', 'info');
             }}
           />

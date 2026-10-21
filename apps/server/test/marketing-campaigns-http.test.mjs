@@ -1,12 +1,12 @@
 // Marketing 캠페인 REST · MCP 배선 — docs/marketing.md.
 //
 // 고정하는 것:
-//   1. marketing.manage 는 기본 admin 전용이다. 부여받은 일반 사용자는 자기 계정의 캠페인만 다룬다 —
-//      다른 계정 캠페인의 상세 · 수정은 실제 소유 계정으로 검사돼 403 이다.
-//   2. 생성 · 수정 입력 검증(이름 · 통화 · 금액 · 도메인 · 같은 계정 project), project 를 고르면 그 계정 소유.
+//   1. marketing.manage 는 기본 admin 전용이다. 부여받은 일반 사용자는 멤버십 없이 공통 업무의 캠페인을 다룬다
+//      (docs/ownership.md) — 다른 사람이 만든 캠페인도 보고 고친다. 권한이 없으면 403 이다.
+//   2. 생성 · 수정 입력 검증(이름 · 통화 · 금액 · 도메인), project 를 고르면 그 project 의 실행 키로 귀속.
 //   3. 상태 전이: agent_runtime 없이 활성화 불가(409), 활성화하면 다음 사이클 시각이 잡히고 일시정지하면 지워진다.
-//   4. 모든 변경이 감사 로그에 남는다(이전/이후 값). SSE `marketing_update` 가 계정 사용자에게 간다.
-//   5. MCP list/get_marketing_campaign 은 DB-backed 키의 소유 계정만 보고, 다른 계정 키는 거부된다.
+//   4. 모든 변경이 감사 로그에 남는다(이전/이후 값). SSE `marketing_update` 가 사용자에게 간다.
+//   5. MCP list/get_marketing_campaign 은 DB-backed 키의 캠페인을 보고, 없는 캠페인은 "없음" 으로 답한다.
 //
 // 실행: node --test --test-force-exit test/marketing-campaigns-http.test.mjs (dist 필요)
 
@@ -16,7 +16,6 @@ import { bootApp, closeTestApp } from './helpers/boot.mjs';
 import { createAccount, createAgent, createApiKey, createProject, createUser } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
-import { ReBACService } from '../dist/services/rebac.service.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 process.env.AGENT_DEV_MODE = 'false';
@@ -37,14 +36,11 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
   const base = `http://127.0.0.1:${port}`;
 
   const mine = await createAccount(app, getDataSourceToken, 'mkt-mine');
-  const theirs = await createAccount(app, getDataSourceToken, 'mkt-theirs');
   const admin = await createUser(app, getDataSourceToken, { name: 'mkt-admin', role: 'admin' });
   const marketer = await createUser(app, getDataSourceToken, { name: 'mkt-marketer', role: 'user' });
   const plain = await createUser(app, getDataSourceToken, { name: 'mkt-plain', role: 'user' });
+  // 멤버십은 없다 — 로그인한 활성 사용자는 공통 업무를 쓰고, 기능 권한만 본다(docs/ownership.md).
   await ds.getRepository('User').update(marketer.id, { permissions: JSON.stringify(['marketing.manage']) });
-  const rebac = app.get(ReBACService);
-  await rebac.grant({ type: 'user', id: marketer.id }, 'member', { type: 'account', id: mine.id });
-  await rebac.grant({ type: 'user', id: plain.id }, 'member', { type: 'account', id: mine.id });
 
   const auth = (user, accountId) => ({
     Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`,
@@ -68,9 +64,6 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
   assert.equal((await post('/campaigns', marketerH, { name: 'x', capabilities: ['ads'] })).status, 400);
 
   const product = await createProject(app, getDataSourceToken, mine.id, { name: 'product' });
-  const foreignProject = await createProject(app, getDataSourceToken, theirs.id, { name: 'foreign' });
-  assert.equal((await post('/campaigns', marketerH, { name: 'x', project_id: foreignProject.id })).status, 403,
-    'choosing another account\'s project makes that account the owner — which this user cannot reach');
 
   const sse = await openSseStream(port, marketerH.Authorization.slice('Bearer '.length));
   t.after(() => sse.close());
@@ -101,7 +94,7 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
   const funded = await patch(`/campaigns/${created.body.id}`, auth(admin, mine.id), money);
   assert.equal(funded.status, 200, funded.text);
   const campaign = funded.body;
-  assert.equal(campaign.account_id, mine.id, 'owned by the project\'s account');
+  assert.equal(campaign.account_id, mine.id, 'bound to the project\'s execution key');
   assert.equal(campaign.status, 'draft');
   assert.equal(campaign.currency, 'USD');
   assert.equal(campaign.budget_total_minor, 500000);
@@ -114,17 +107,19 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
     const d = typeof data === 'string' ? JSON.parse(data) : data;
     return d?.campaign_id === campaign.id && d?.action === 'created';
   }, 5000);
-  assert.ok(frame, 'marketing_update reaches users of the owning account');
+  assert.ok(frame, 'marketing_update reaches users');
 
-  // 다른 계정의 캠페인(관리자가 만든 것)은 이 사용자에게 보이지 않는다.
-  const foreign = await post('/campaigns', auth(admin, theirs.id), { name: 'Theirs' });
-  assert.equal(foreign.status, 201, foreign.text);
-  assert.equal(foreign.body.account_id, theirs.id);
+  // 공통 업무: 다른 사람(관리자)이 만든 캠페인도 이 사용자가 보고 고친다 — 멤버십으로 가르지 않는다.
+  const shared = await post('/campaigns', adminH, { name: 'Shared' });
+  assert.equal(shared.status, 201, shared.text);
   const listed = await api('/campaigns', marketerH);
   assert.equal(listed.status, 200, listed.text);
-  assert.deepEqual(listed.body.map((c) => c.id), [campaign.id]);
-  assert.equal((await api(`/campaigns/${foreign.body.id}`, marketerH)).status, 403, 'detail is checked against the real owner');
-  assert.equal((await patch(`/campaigns/${foreign.body.id}`, marketerH, { name: 'mine now' })).status, 403);
+  assert.deepEqual(listed.body.map((c) => c.id).sort(), [campaign.id, shared.body.id].sort());
+  assert.equal((await api(`/campaigns/${shared.body.id}`, marketerH)).status, 200, 'no membership is needed to open shared work');
+  const renamed = await patch(`/campaigns/${shared.body.id}`, marketerH, { name: 'Shared (renamed)' });
+  assert.equal(renamed.status, 200, renamed.text);
+  assert.equal(renamed.body.name, 'Shared (renamed)');
+  assert.equal((await api(`/campaigns/${shared.body.id}`, auth(plain, mine.id))).status, 403, 'the feature permission still applies');
 
   // 3. 상태 전이
   const noAgent = await post(`/campaigns/${campaign.id}/status`, marketerH, { status: 'active' });
@@ -163,14 +158,12 @@ test('marketing campaigns: permissions, validation, lifecycle, audit, SSE and MC
   t.after(() => client.close().catch(() => {}));
   const mcpList = await client.callTool('list_marketing_campaigns', {});
   assert.ok(Array.isArray(mcpList), JSON.stringify(mcpList));
-  assert.deepEqual(mcpList.map((c) => c.id), [campaign.id], 'only the key\'s own account');
+  assert.deepEqual(mcpList.map((c) => c.id).sort(), [campaign.id, shared.body.id].sort());
   const overview = await client.callTool('get_marketing_campaign', { campaign_id: campaign.id });
   assert.equal(overview.campaign.id, campaign.id);
   assert.ok(overview.rules.length >= 3);
-  const deniedForeign = await client.callTool('get_marketing_campaign', { campaign_id: foreign.body.id });
-  assert.equal(deniedForeign.isError, true);
-  const deniedList = await client.callTool('list_marketing_campaigns', { account_id: theirs.id });
-  assert.equal(deniedList.isError, true);
+  const missing = await client.callTool('get_marketing_campaign', { campaign_id: '00000000-0000-4000-8000-00000000dead' });
+  assert.equal(missing.isError, true);
 
   // 삭제: 돈이 오간 적 없는 캠페인은 지울 수 있고, 감사 로그는 남는다.
   const removed = await api(`/campaigns/${campaign.id}`, marketerH, { method: 'DELETE' });

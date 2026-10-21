@@ -14,7 +14,7 @@ export function userActor(req: Request): MarketingActor {
   };
 }
 
-/** 목록: 명시적으로 고른 계정이 있으면 그 계정만, 아니면 접근 가능한 모든 계정. */
+/** 목록: account_id 를 명시하면 그 실행 키만, 아니면 전부(공통 업무 — docs/ownership.md). */
 export function listAccountIds(req: Request): string[] {
   const accessible: string[] = (req as any).accessibleAccountIds || [];
   const requested: string | null = (req as any).requestedAccountId || null;
@@ -22,7 +22,7 @@ export function listAccountIds(req: Request): string[] {
   return accessible.length ? accessible : [((req as any).currentAccountId as string) || ''].filter(Boolean);
 }
 
-/** 상세 · 쓰기: AccountAccessService 가 객체의 실제 소유 계정으로 맞춰 둔 값. */
+/** 상세 · 쓰기: AccountAccessService 가 객체의 실행 키(account_id)로 맞춰 둔 값. */
 export function boundAccountId(req: Request): string {
   return ((req as any).currentAccountId as string) || String((req.query as any)?.account_id || '');
 }

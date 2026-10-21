@@ -29,7 +29,7 @@ export interface MarketingCtx {
   /** 예산 승인자만 열 수 있는 화면(marketing.manage 없음)에서는 null. */
   campaign: MarketingCampaign | null;
   campaignId: string;
-  /** 캠페인의 소유 계정 — credential · Outreach 채널 · 연락처를 그 계정에서 고른다. */
+  /** 캠페인의 실행 키(account_id) — credential · Outreach 채널 · 연락처 조회에 그대로 싣는다. */
   accountId: string;
   currency: string;
   dualThresholdMinor: number;

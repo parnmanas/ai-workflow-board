@@ -46,7 +46,7 @@ const TEXT_AUDIT_KEYS = ['product_brief', 'goal', 'target_audience'] as const;
  * MarketingCampaignService — 캠페인 CRUD 와 상태 전이(docs/marketing.md).
  *
  * 모든 입력은 marketing-campaign.logic.ts 의 순수 정규화를 지난다. 이 서비스가 더하는 것은
- * DB 를 봐야 아는 검사(같은 계정의 Project · 존재하는 Runtime Host · 원장이 생긴 뒤의 통화 고정)와
+ * DB 를 봐야 아는 검사(같은 실행 키의 Project · 존재하는 Runtime Host · 원장이 생긴 뒤의 통화 고정)와
  * 감사 기록이다. 다른 마케팅 기능(지출 · 사이클 …)은 MarketingCampaignHooks 로 상태 전이에
  * 끼어든다 — 이 서비스가 그 서비스들을 직접 알면 순환 의존이 생긴다.
  */
@@ -75,7 +75,7 @@ export class MarketingCampaignService {
     return this.campaignRepo.find({ order: { updated_at: 'DESC' } });
   }
 
-  /** 소유 계정까지 맞아야 찾는다. 다른 계정의 캠페인은 "없음" 과 구별하지 않는다. */
+  /** 실행 키(account_id)까지 맞아야 찾는다. 맞지 않으면 "없음" 과 구별하지 않는다. */
   async get(id: string, accountId: string): Promise<MarketingCampaign> {
     const row = id ? await this.campaignRepo.findOne({ where: { id } }) : null;
     if (!row || (accountId && row.account_id !== accountId)) throw marketingError(404, 'campaign not found');
@@ -322,7 +322,7 @@ export class MarketingCampaignService {
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
     if (!host) throw marketingError(400, `${label} references an unknown Runtime Host`);
     if (spec.credential_id) {
-      // 다른 계정의 credential 은 저장 때 거부한다 — 실행 순간(매니저의 credential 조회)에 403 으로 늦게 터지지 않게.
+      // 실행 키가 다른 credential 은 저장 때 거부한다 — 실행 순간(매니저의 credential 조회)에 403 으로 늦게 터지지 않게.
       const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id }, select: ['id', 'account_id'] });
       if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) {
         throw marketingError(400, `${label}.credential_id is not a credential of this account`);

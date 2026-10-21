@@ -1,8 +1,8 @@
 /**
  * 마케팅이 쓰는 비밀(메일 공급자 키 · 결제 webhook 비밀)의 복호화 — 서버 안에서만, 쓰는 순간에만.
  *
- * outreach-credential.ts 와 같은 경계 규칙이다: 전역(account_id NULL) 또는 같은 계정의 Credential 만,
- * 다른 계정 것은 던진다. 환경 변수로 대체하지 않는다. 반환값은 문자열 필드 전부다 — 어떤 필드가 필요한지는
+ * outreach-credential.ts 와 같은 규칙이다: 전역(account_id NULL) 또는 캠페인과 같은 실행 키의 Credential 만 쓰고,
+ * 아니면 던진다. 환경 변수로 대체하지 않는다. 반환값은 문자열 필드 전부다 — 어떤 필드가 필요한지는
  * 쓰는 쪽(메일 어댑터 · 결제 어댑터)이 안다. 이 값은 로그 · 감사 detail · 응답에 넣지 않는다.
  */
 import type { Repository } from 'typeorm';

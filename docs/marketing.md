@@ -13,9 +13,9 @@
 | MCP 툴 | `modules/mcp/tools/marketing-tools.ts` |
 | 화면 | `apps/client/src/components/marketing/*` |
 
-- 엔티티는 전부 Account 소유(`account_id`)다. 서로를 평문 varchar 로 참조하고 DB FK 는 없다. 상세 · 쓰기는 객체의 실제 소유 계정으로 권한을 검사한다(`AccountAccessService` 가 `/api/marketing/<종류>/<uuid>` 의 주인을 찾는다, `docs/ownership.md`).
+- 캠페인과 그 하위 객체는 공통 업무다. 로그인한 활성 사용자 중 마케팅 권한(아래 "권한")을 가진 사람이 다루고, 멤버십으로 가르지 않는다(`docs/ownership.md`). 엔티티의 `account_id` 는 소유 구분이 아니라 단일 내부 실행 키이며, `AccountAccessService` 가 `/api/marketing/<종류>/<uuid>` 의 그 값을 요청에 묶는다. 엔티티는 서로를 평문 varchar 로 참조하고 DB FK 는 없다.
 - **agent-manager 변경과 SSE contract 변경은 없다.** 사이클은 QA · Automation Schedule 과 같은 방식으로 에이전트를 깨운다: 방을 열고, 에이전트를 앉히고, 첫 메시지를 보낸다.
-- `marketing_update` SSE 는 UI 전용 이벤트다(user-only filter, 계정 스코프). 무엇이 바뀌었는지만 싣고, 화면이 REST 로 다시 읽는다.
+- `marketing_update` SSE 는 UI 전용 이벤트다(user-only filter). 무엇이 바뀌었는지만 싣고, 화면이 REST 로 다시 읽는다.
 
 ## 원칙
 
@@ -50,7 +50,7 @@
 | `MarketingChannel` | `marketing_channels` | 캠페인의 채널(연결 테이블 + 탐색 근거). kind 는 `outreach` · `email` · `manual` |
 | `MarketingPost` | `marketing_posts` | 채널별 콘텐츠(게시글 · 답글 · 메일) |
 | `MarketingEmailSend` | `marketing_email_sends` | 메일 한 통 = (post × contact). 발송 큐이자 기록 |
-| `MarketingContact` | `marketing_contacts` | 메일 수신자(계정 단위), 동의 증거, 수신거부, 억제 해시 |
+| `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 수신거부, 억제 해시 |
 | `MarketingBudgetAllocation` | `marketing_budget_allocations` | 채널별 예산 편성(버전) |
 | `MarketingSpendRequest` | `marketing_spend_requests` | 지출 요청과 그 상태 기계 |
 | `MarketingLedgerEntry` | `marketing_ledger_entries` | append-only 원장 |
@@ -164,7 +164,7 @@
 
 ### 연락처
 
-- 연락처는 계정 단위이고, 사람만 가져온다(`POST /api/marketing/contacts/import`).
+- 연락처는 설치 전체의 한 목록이다(같은 주소는 한 번). 사람만 가져온다(`POST /api/marketing/contacts/import`).
 - 동의 증거를 같이 받는다.
   - 필수: 방법(`signup_form|checkout|event|import|other`), 출처, 시각
   - 선택: 문구 버전, IP, 야간 수신 동의, 국가, 시간대
@@ -326,10 +326,10 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 - 대상: `next_cycle_at` 이 지난 active 캠페인. 각 캠페인마다 다음 순서로 처리한다.
 
 1. **커서를 먼저 전진한다**(`qa-cron`). 겹친 tick 은 아무것도 하지 않고, 놓친 회차는 한 번만 돈다.
-2. **계정 run budget 을 검사한다**(`max_runs_per_window` 의 `marketing` 축). 방이나 사이클 행을 만들기 전이다.
+2. **run budget 을 검사한다**(공용 기본값 `hard_budget_config` 의 `max_runs_per_window`, `marketing` 축). 방이나 사이클 행을 만들기 전이다.
 3. **앞 사이클이 아직 `running` 이면 시작하지 않는다.** 6시간이 지났으면 `timed_out` 으로 닫는다.
 4. **`MarketingCycle` 행과 방을 만든다.** 캠페인 에이전트(RuntimeSpec)를 앉히고 사이클 지시문을 보낸다.
-5. **에이전트는 `complete_marketing_cycle(cycle_id, summary, next_actions)` 로 끝낸다.** 한 번만, 그 사이클을 받은 캠페인 에이전트(runtime key)만 부를 수 있다 — 같은 계정의 다른 에이전트가 다음 사이클의 "다음 행동" 을 써 넣지 못하게.
+5. **에이전트는 `complete_marketing_cycle(cycle_id, summary, next_actions)` 로 끝낸다.** 한 번만, 그 사이클을 받은 캠페인 에이전트(runtime key)만 부를 수 있다 — 다른 에이전트가 다음 사이클의 "다음 행동" 을 써 넣지 못하게.
 
 지시문(`buildCyclePrompt`)에 실리는 것:
 
@@ -364,7 +364,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 전부 tier `caller` 다. 핸들러가 검사하는 것:
 
 - DB-backed caller 인가
-- 캠페인 **소유 계정**에 접근할 수 있는가(`callerCanAccessAccount`). 다른 계정의 id 는 "없음"으로 답한다.
+- 호출 키가 캠페인의 실행 키에 접근할 수 있는가(`callerCanAccessAccount`, 다른 MCP 툴과 같은 규칙). 아니면 없는 id 와 똑같이 "없음"으로 답한다.
 - 캠페인 상태 · capability · 일일 상한(`MarketingAgentService`)
 
 | 툴 | capability |

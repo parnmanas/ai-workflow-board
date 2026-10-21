@@ -15,8 +15,8 @@ import { CampaignFormModal } from './MarketingCampaignForm';
 import { Chip, StatusPill, tableStyles } from './MarketingUi';
 
 /**
- * Marketing — 에이전트가 돌리는 제품 마케팅 캠페인(docs/marketing.md). 목록은 접근 가능한 계정의 캠페인을 합치고,
- * 소유 계정 선택기는 두지 않는다. 사람이 하는 일은 캠페인 안의 승인함에 모인다.
+ * Marketing — 에이전트가 돌리는 제품 마케팅 캠페인(docs/marketing.md). 공통 업무라 목록은 캠페인 전체이고
+ * 소유 선택기는 없다(docs/ownership.md). 사람이 하는 일은 캠페인 안의 승인함에 모인다.
  */
 export default function MarketingPage() {
   const { hasPermission } = useAuth();

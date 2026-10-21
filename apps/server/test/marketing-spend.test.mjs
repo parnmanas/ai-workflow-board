@@ -21,7 +21,6 @@ import { createHmac } from 'node:crypto';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
 import { createAccount, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
-import { ReBACService } from '../dist/services/rebac.service.js';
 import { encrypt } from '../dist/services/encryption.service.js';
 import { MarketingSpendService } from '../dist/modules/marketing/marketing-spend.service.js';
 
@@ -82,10 +81,8 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   const approverB = await createUser(app, getDataSourceToken, { name: 'mkt-approver-b', role: 'admin' });
   const marketer = await createUser(app, getDataSourceToken, { name: 'mkt-marketer', role: 'user' });
   await ds.getRepository('User').update(marketer.id, { permissions: JSON.stringify(['marketing.manage']) });
-  await app.get(ReBACService).grant({ type: 'user', id: marketer.id }, 'member', { type: 'account', id: account.id });
   const treasurer = await createUser(app, getDataSourceToken, { name: 'mkt-treasurer', role: 'user' });
   await ds.getRepository('User').update(treasurer.id, { permissions: JSON.stringify(['marketing.approve_spend']) });
-  await app.get(ReBACService).grant({ type: 'user', id: treasurer.id }, 'member', { type: 'account', id: account.id });
   const auth = (user) => ({ Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Account-Id': account.id, 'Content-Type': 'application/json' });
   const A = auth(approverA);
   const B = auth(approverB);

@@ -26,9 +26,9 @@ import { FieldLabel, Hint, NoteModal, StatusPill, tableStyles } from './Marketin
 const PAGE_SIZE = 50;
 
 /**
- * 메일 연락처(docs/marketing.md "메일") — 계정 단위이고 사람만 넣는다(에이전트 경로 없음). 캠페인 화면에서
- * 열면 그 캠페인의 소유 계정(`?account=`)을 명시해 서버에 보낸다(서버가 접근을 검사한다). 계정 선택기는
- * 두지 않는다 — 없으면 서버가 기본 접근 계정으로 묶는다.
+ * 메일 연락처(docs/marketing.md "메일") — 설치 전체의 한 목록이고 사람만 넣는다(에이전트 경로 없음). 캠페인 화면에서
+ * 열면 그 캠페인의 실행 키(`?account=` → account_id)를 그대로 싣는다. 사용자가 고르는 소유 구분이 아니다
+ * (docs/ownership.md) — 없으면 서버가 정한다.
  */
 export default function MarketingContactsPage() {
   const { hasPermission } = useAuth();
@@ -128,9 +128,6 @@ export default function MarketingContactsPage() {
         )}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {!accountId && (
-          <Hint>캠페인의 메일 채널에서 “연락처 관리” 로 열면 그 캠페인 계정의 연락처를 봅니다. 지금은 기본 계정의 연락처입니다.</Hint>
-        )}
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(200px, 2fr) auto', gap: 8, alignItems: 'end' }}>
           <Input
             label="수신 목록"

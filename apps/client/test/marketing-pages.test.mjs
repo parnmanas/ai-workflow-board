@@ -1,14 +1,14 @@
 // Marketing 목록 · 새 캠페인 · 메일 연락처 화면 렌더 회귀(docs/marketing.md).
 //
 // 고정하는 계약:
-//   1. 목록은 접근 가능한 계정의 캠페인을 합쳐 보여 주고(상태 · 기능 · 주기), 소유 계정 선택기가 없다.
-//   2. 새 캠페인 본문에 account_id 를 싣지 않는다(서버가 Project 의 계정 또는 기본 계정에 귀속).
+//   1. 목록은 공통 업무의 캠페인 전체를 보여 주고(상태 · 기능 · 주기), 소유 선택기가 없다(docs/ownership.md).
+//   2. 새 캠페인 본문에 account_id 를 싣지 않는다(실행 키는 서버가 정한다).
 //   3. 돈 설정(통화 등)은 marketing.approve_spend 가 있는 사람만 그리고 보낸다 — 운영 권한만 있으면 통화 칸이
 //      없고 본문에도 없다(서버가 403 으로 거부하는 키).
 //   4. 지출 승인 권한만 있어도 목록을 본다 — 만들기 · 연락처(운영 권한의 일)는 없고, 그 권한으로 부를 수 없는 경로는
 //      부르지 않는다. 캠페인마다 "승인 대기 N" 은 /marketing/inbox 의 actionable 이다.
-//   5. 연락처 화면은 ?account= 로 받은 캠페인 계정을 모든 연락처 호출에 account_id 로 싣는다.
-//   6. CSV 가져오기는 검증을 통과한 행만, 그 계정으로 보낸다.
+//   5. 연락처 화면은 ?account= 로 받은 캠페인의 실행 키를 모든 연락처 호출에 account_id 로 싣는다.
+//   6. CSV 가져오기는 검증을 통과한 행만, 그 실행 키로 보낸다.
 //
 // 실행: node --import tsx --test --test-force-exit test/marketing-pages.test.mjs
 import test from 'node:test';

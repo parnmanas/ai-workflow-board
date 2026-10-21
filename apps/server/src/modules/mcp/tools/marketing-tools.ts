@@ -3,7 +3,8 @@
  *
  * 전부 authz tier `caller` 다. 게이트는 "세션 없는 호출이 아님" 만 보고, 진짜 인가는 여기서 한다:
  *   1. DB-backed caller(API 키 세션)여야 한다 — env/dev 키는 누가 했는지 남길 수 없다.
- *   2. 캠페인의 **소유 계정**에 접근할 수 있어야 한다(callerCanAccessAccount, 요청 인자의 account_id 를 믿지 않는다).
+ *   2. 호출 키가 캠페인의 실행 키(account_id)에 접근할 수 있어야 한다(callerCanAccessAccount — 다른 MCP 툴과 같은
+ *      규칙, 요청 인자의 account_id 를 믿지 않는다).
  *   3. 캠페인 상태 · capability · 일일 상한은 MarketingAgentService 가 적용한다.
  *
  * 승인 · 거부 · 결제 기록 툴은 의도적으로 **없다** — 돈과 외부 발신은 사람이 화면에서 정한다.
@@ -35,7 +36,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
     return { type: 'agent', id, name: caller.agentName || id };
   }
 
-  /** 캠페인을 읽고 호출자가 그 소유 계정에 접근할 수 있는지 본다. */
+  /** 캠페인을 읽고 호출 키가 그 실행 키에 접근할 수 있는지 본다. */
   async function campaignFor(extra: { sessionId?: string }, campaignId: string): Promise<
     { campaign: MarketingCampaign; actor: MarketingActor } | { error: string }
   > {
@@ -43,7 +44,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
     const caller = dbCaller(extra);
     if (!caller) return { error: CALLER_ERROR };
     const campaign = await marketingAgentService.findCampaign(campaignId);
-    // 접근할 수 없는 캠페인은 "없음" 과 같은 답을 준다 — 다른 계정의 id 존재 여부를 흘리지 않는다.
+    // 접근할 수 없는 캠페인은 "없음" 과 같은 답을 준다 — id 의 존재 여부를 흘리지 않는다.
     if (!campaign || !(await callerCanAccessAccount(dataSource, caller, campaign.account_id))) {
       return { error: NOT_FOUND };
     }
@@ -120,7 +121,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
       if (!cycle) return err('cycle not found');
       const found = await campaignFor(extra, cycle.campaign_id);
       if ('error' in found) return err(found.error === NOT_FOUND ? 'cycle not found' : found.error);
-      // 사이클을 닫는 것은 그 사이클을 받은 캠페인 에이전트뿐이다 — 같은 계정의 다른 에이전트(예: 외부 글을 인용한
+      // 사이클을 닫는 것은 그 사이클을 받은 캠페인 에이전트뿐이다 — 다른 에이전트(예: 외부 글을 인용한
       // 티켓을 처리하던 에이전트)가 다음 사이클의 "다음 행동" 을 써 넣지 못하게.
       if (!callerHoldsId(getCallerAgent(extra), cycle.agent_key)) {
         return err('only the campaign agent that was given this cycle can complete it');

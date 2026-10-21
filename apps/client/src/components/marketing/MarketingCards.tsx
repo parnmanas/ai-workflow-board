@@ -69,7 +69,7 @@ import {
 
 const actorKind = (type: string) => (type === 'agent' ? '에이전트' : type === 'user' ? '사람' : type || '');
 
-/** 연락처 화면 — 캠페인의 소유 계정을 명시해서 연다(계정 선택기는 두지 않는다). */
+/** 연락처 화면 — 캠페인의 실행 키(account_id)를 실어 연다. 사용자가 고르는 소유 구분은 없다(docs/ownership.md). */
 export function contactsPath(accountId: string, opts: { campaignId?: string; list?: string } = {}): string {
   const params = new URLSearchParams();
   if (accountId) params.set('account', accountId);

@@ -13,8 +13,8 @@ import { errorStatus } from './marketing-errors';
 import { assertCanChangeMoneySettings, assertCanViewMarketing, boundAccountId, listAccountIds, userActor } from './marketing-http';
 
 /**
- * 캠페인 REST(docs/marketing.md). 목록은 접근 가능한 계정을 합치고, 상세 · 쓰기는
- * AccountAccessService 가 캠페인의 실제 소유 계정으로 묶어 둔 계정으로 검사한다.
+ * 캠페인 REST(docs/marketing.md). 공통 업무라 목록은 전부 보이고(docs/ownership.md), 상세 · 쓰기는
+ * AccountAccessService 가 캠페인의 실행 키(account_id)로 묶어 둔 값으로 다룬다. 권한은 기능 권한만 본다.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('marketing')
