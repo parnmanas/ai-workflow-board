@@ -134,6 +134,30 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
   );
 
   server.tool(
+    'draft_marketing_post',
+    'Draft a message for an approved channel: a community post, a reply to a thread, or (on an email channel) a campaign email. A person approves (and may edit) it before anything is sent; the campaign disclosure line is appended automatically to community posts and the legal footer + unsubscribe link to emails. Needs capability community_post (or email for email channels). Write for the channel: follow its guidelines and self-promotion rules, be useful first, never pretend to be an unaffiliated user. Use dedupe_key to make retries safe.',
+    {
+      campaign_id: z.string(),
+      channel_id: z.string(),
+      title: z.string().optional().describe('Post title (required for new reddit/github posts) or the email subject'),
+      body: z.string().describe('Markdown body (plain text for email)'),
+      reply_to: z.string().optional().describe('Reply instead of a new post: reddit fullname (t3_…/t1_…) or github issue:{owner}/{repo}#{n}'),
+      rationale: z.string().describe('Why this message, for this channel, now'),
+      dedupe_key: z.string().optional(),
+      cycle_id: z.string().optional(),
+    },
+    async ({ campaign_id, cycle_id, ...body }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      try {
+        return ok(await marketingAgentService!.draftPost(found.campaign, body, found.actor, cycle_id || null));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to draft post');
+      }
+    },
+  );
+
+  server.tool(
     'propose_marketing_budget_allocation',
     'Propose how the campaign budget is split across approved channels for one budget period (the campaign\'s budget_period; whole campaign when "none"). A person with marketing.approve_spend approves it; spend on a channel needs its approved allocation. Base it on results (get_marketing_report) and cite them in rationale. Needs capability paid_spend. Amounts are integers in minor units of the campaign currency (KRW 50000 = ₩50,000; USD 1250 = $12.50). A new proposal for a channel replaces its undecided earlier proposal.',
     {

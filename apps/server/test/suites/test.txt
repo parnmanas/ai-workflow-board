@@ -108,6 +108,7 @@ test/marketing-budget-logic.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
 test/marketing-logic.test.mjs
+test/marketing-posts.test.mjs
 test/marketing-spend.test.mjs
 test/mcp-harness-marker-sanitizer.test.mjs
 test/mcp-server-orphan-leak-guard.test.mjs

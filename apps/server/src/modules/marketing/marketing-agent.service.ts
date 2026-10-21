@@ -10,7 +10,8 @@ import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingChannelService } from './marketing-channel.service';
 import { MarketingBudgetService } from './marketing-budget.service';
 import { MarketingSpendService } from './marketing-spend.service';
-import { allocationToJson, campaignToJson, channelToJson, spendToJson } from './marketing-json';
+import { MarketingPostService } from './marketing-post.service';
+import { allocationToJson, campaignToJson, channelToJson, postToJson, spendToJson } from './marketing-json';
 import { hasCapability, resolveLimits } from './marketing-campaign.logic';
 import { marketingError } from './marketing-errors';
 
@@ -30,6 +31,7 @@ export class MarketingAgentService {
     private readonly channels: MarketingChannelService,
     private readonly budget: MarketingBudgetService,
     private readonly spend: MarketingSpendService,
+    private readonly posts: MarketingPostService,
   ) {}
 
   async listCampaigns(accountIds: string[] | 'all'): Promise<MarketingCampaign[]> {
@@ -65,10 +67,11 @@ export class MarketingAgentService {
 
   /** get_marketing_campaign 의 응답 — 캠페인 설정 · 채널 · 예산 · 대기 중 요청 · 에이전트가 지켜야 할 규칙. */
   async overview(campaign: MarketingCampaign) {
-    const [channels, budget, open] = await Promise.all([
+    const [channels, budget, open, posts] = await Promise.all([
       this.channels.list(campaign),
       this.budget.summary(campaign),
       this.spend.list(campaign, undefined, 20),
+      this.posts.list(campaign, undefined, 20),
     ]);
     return {
       campaign: campaignToJson(campaign),
@@ -78,7 +81,24 @@ export class MarketingAgentService {
         id: r.id, status: r.status, amount_text: spendToJson(r).amount_text, payee: r.payee, channel_id: r.channel_id,
         purpose: r.purpose.slice(0, 200), created_at: r.created_at, error: r.error,
       })),
+      recent_posts: posts.map((p) => ({
+        id: p.id, channel_id: p.channel_id, kind: p.kind, status: p.status, title: p.title.slice(0, 200),
+        permalink: p.permalink, error: p.error, decision_note: p.decision_note, created_at: p.created_at,
+      })),
       rules: agentRules(campaign),
+    };
+  }
+
+  /** 초안 — 채널 종류가 capability 를 정한다(메일 채널은 email, 그 밖은 community_post). */
+  async draftPost(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor, cycleId: string | null) {
+    const channel = await this.channels.getInCampaign(campaign, String(body.channel_id || ''));
+    this.assertCanAct(campaign, channel.kind === 'email' ? 'email' : 'community_post');
+    await this.assertDailyLimit(campaign, 'drafts_per_day', (since) => this.posts.countDraftedSince(campaign.id, since));
+    const { post, duplicate } = await this.posts.draft(campaign, channel, body, actor, { cycleId });
+    return {
+      post: postToJson(post, this.posts.preview(post, campaign)),
+      duplicate,
+      note: 'Nothing is sent until a person approves it. The disclosure line is appended automatically.',
     };
   }
 

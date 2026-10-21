@@ -145,3 +145,4 @@ export { MarketingChannel } from './MarketingChannel';
 export { MarketingBudgetAllocation } from './MarketingBudgetAllocation';
 export { MarketingSpendRequest } from './MarketingSpendRequest';
 export { MarketingLedgerEntry } from './MarketingLedgerEntry';
+export { MarketingPost } from './MarketingPost';

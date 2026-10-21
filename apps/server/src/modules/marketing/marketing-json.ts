@@ -7,6 +7,7 @@ import type { MarketingChannel } from '../../entities/MarketingChannel';
 import type { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
 import type { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
 import type { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
+import type { MarketingPost } from '../../entities/MarketingPost';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -182,5 +183,41 @@ export function ledgerToJson(e: MarketingLedgerEntry) {
     actor_name: e.actor_name,
     note: e.note,
     created_at: e.created_at,
+  };
+}
+
+/** `preview_body` 는 승인하면 실제로 나갈 본문(공개 문구 포함) — 승인 화면은 이것을 보여 준다. */
+export function postToJson(p: MarketingPost, previewBody?: string) {
+  return {
+    id: p.id,
+    account_id: p.account_id,
+    campaign_id: p.campaign_id,
+    channel_id: p.channel_id,
+    kind: p.kind,
+    title: p.title,
+    body: p.body,
+    preview_body: previewBody ?? (p.final_body || p.body),
+    final_body: p.final_body,
+    reply_to: p.reply_to,
+    target: p.target,
+    status: p.status,
+    dedupe_key: p.dedupe_key,
+    rationale: p.rationale,
+    created_by_type: p.created_by_type,
+    created_by_id: p.created_by_id,
+    created_by_name: p.created_by_name,
+    cycle_id: p.cycle_id,
+    decided_by: p.decided_by,
+    decided_by_name: p.decided_by_name,
+    decided_at: p.decided_at,
+    decision_note: p.decision_note,
+    edited: p.edited,
+    external_item_id: p.external_item_id,
+    permalink: p.permalink,
+    published_at: p.published_at,
+    error: p.error,
+    link_codes: p.link_codes || [],
+    created_at: p.created_at,
+    updated_at: p.updated_at,
   };
 }

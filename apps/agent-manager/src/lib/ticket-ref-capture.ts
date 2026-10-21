@@ -460,6 +460,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   list_marketing_campaigns: 'read',
   get_marketing_campaign: 'read',
   propose_marketing_channel: 'non-ticket',
+  draft_marketing_post: 'non-ticket',
   propose_marketing_budget_allocation: 'non-ticket',
   request_marketing_spend: 'non-ticket',
   get_marketing_spend_request: 'read',

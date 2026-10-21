@@ -6,6 +6,7 @@ import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
 import { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
 import { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
+import { MarketingPost } from '../../entities/MarketingPost';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { Project } from '../../entities/Project';
@@ -24,6 +25,8 @@ import { OutreachModule } from '../outreach/outreach.module';
 import { MarketingBudgetService } from './marketing-budget.service';
 import { MarketingSpendService } from './marketing-spend.service';
 import { MarketingBudgetController } from './marketing-budget.controller';
+import { MarketingPostService } from './marketing-post.service';
+import { MarketingPostsController } from './marketing-posts.controller';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -33,14 +36,14 @@ import { MarketingBudgetController } from './marketing-budget.controller';
   imports: [
     TypeOrmModule.forFeature([
       MarketingCampaign, MarketingAuditEvent, MarketingChannel,
-      MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry,
+      MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
       Project, RuntimeHost, OutreachChannel, Credential,
     ]),
     SharedServicesModule,
     // 채널 승인이 새 OutreachChannel 을 OutreachChannelService 로 만든다(그쪽 검증을 그대로 탄다).
     OutreachModule,
   ],
-  controllers: [MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController],
+  controllers: [MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController],
   providers: [
     MarketingAuditService,
     MarketingCampaignHooks,
@@ -48,13 +51,14 @@ import { MarketingBudgetController } from './marketing-budget.controller';
     MarketingChannelService,
     MarketingBudgetService,
     MarketingSpendService,
+    MarketingPostService,
     MarketingAgentService,
     AuthGuard,
     PermissionGuard,
   ],
   exports: [
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
-    MarketingSpendService, MarketingAgentService,
+    MarketingSpendService, MarketingPostService, MarketingAgentService,
   ],
 })
 export class MarketingModule {}
