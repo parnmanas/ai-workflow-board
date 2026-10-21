@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, In, IsNull, MoreThan, Not, Repository } from 'typeorm';
+import { Between, In, IsNull, MoreThan, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { MarketingFeedback } from '../../entities/MarketingFeedback';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
@@ -83,7 +83,7 @@ export class MarketingFeedbackService {
 
   async list(campaign: MarketingCampaign, opts: { since?: Date; limit?: number } = {}): Promise<MarketingFeedback[]> {
     return this.feedbackRepo.find({
-      where: { campaign_id: campaign.id, ...(opts.since ? { created_at: MoreThan(opts.since) } : {}) },
+      where: { campaign_id: campaign.id, ...(opts.since ? { created_at: MoreThanOrEqual(opts.since) } : {}) },
       order: { created_at: 'DESC' },
       take: Math.min(Math.max(opts.limit || 100, 1), 500),
     });
@@ -95,7 +95,7 @@ export class MarketingFeedbackService {
     const byOutreach = new Map(channels.map((c) => [c.outreach_channel_id as string, c]));
     if (!byOutreach.size) return [];
     const rows = await this.inboundRepo.find({
-      where: { channel_id: In([...byOutreach.keys()]), ...(opts.since ? { collected_at: MoreThan(opts.since) } : {}) },
+      where: { channel_id: In([...byOutreach.keys()]), ...(opts.since ? { collected_at: MoreThanOrEqual(opts.since) } : {}) },
       order: { collected_at: 'DESC' },
       take: Math.min(Math.max(opts.limit || 50, 1), 200),
     });

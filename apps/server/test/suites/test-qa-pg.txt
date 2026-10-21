@@ -9,6 +9,7 @@ test/drop-agent-host-backfill.test.mjs
 test/marketing-analytics.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
+test/marketing-cycle.test.mjs
 test/marketing-email.test.mjs
 test/marketing-feedback.test.mjs
 test/marketing-spend.test.mjs

@@ -6,7 +6,8 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingAuditService } from './marketing-audit.service';
-import { campaignToJson, auditToJson } from './marketing-json';
+import { MarketingCycleService } from './marketing-cycle.service';
+import { campaignToJson, auditToJson, cycleToJson } from './marketing-json';
 import { normalizeStatus } from './marketing-campaign.logic';
 import { errorStatus } from './marketing-errors';
 import { assertCanChangePayment, boundAccountId, listAccountIds, userActor } from './marketing-http';
@@ -24,6 +25,7 @@ export class MarketingCampaignsController {
   constructor(
     private readonly campaigns: MarketingCampaignService,
     private readonly audit: MarketingAuditService,
+    private readonly cycles: MarketingCycleService,
   ) {}
 
   @Get()
@@ -85,6 +87,26 @@ export class MarketingCampaignsController {
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to delete campaign' });
+    }
+  }
+
+  @Get(':id/cycles')
+  async listCycles(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      const campaign = await this.campaigns.get(id, boundAccountId(req));
+      return res.json((await this.cycles.list(campaign)).map(cycleToJson));
+    } catch (e: any) {
+      return res.status(errorStatus(e, 404)).json({ error: e?.message || 'Failed to list cycles' });
+    }
+  }
+
+  /** "지금 실행" — 예약과 같은 경로(run budget · 실행 중 사이클 검사 포함). */
+  @Post(':id/cycles/run')
+  async runCycle(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      return res.status(201).json(cycleToJson(await this.cycles.runNow(id, boundAccountId(req), userActor(req))));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to start the cycle' });
     }
   }
 

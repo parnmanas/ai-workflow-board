@@ -35,6 +35,7 @@ import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
 import { AutomationScheduleService } from '../automation-schedule/automation-schedule.service';
 import { MarketingAgentService } from '../marketing/marketing-agent.service';
+import { MarketingCycleService } from '../marketing/marketing-cycle.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
 import { TicketService } from '../tickets/ticket.service';
@@ -179,6 +180,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly interruptedSessionsService: InterruptedSessionsService,
     // Marketing(docs/marketing.md) — marketing-tools.ts 의 캠페인 에이전트 표면.
     private readonly marketingAgentService: MarketingAgentService,
+    private readonly marketingCycleService: MarketingCycleService,
   ) {}
 
   onModuleInit() {
@@ -284,6 +286,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       operatorProposalService: this.operatorProposalService,
       interruptedSessionsService: this.interruptedSessionsService,
       marketingAgentService: this.marketingAgentService,
+      marketingCycleService: this.marketingCycleService,
     };
   }
 

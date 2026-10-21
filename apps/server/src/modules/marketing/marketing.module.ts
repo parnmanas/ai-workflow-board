@@ -14,6 +14,9 @@ import { MarketingFeedback } from '../../entities/MarketingFeedback';
 import { Ticket } from '../../entities/Ticket';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
+import { MarketingCycle } from '../../entities/MarketingCycle';
+import { ChatRoom } from '../../entities/ChatRoom';
+import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { Project } from '../../entities/Project';
@@ -43,6 +46,8 @@ import { AgentsModule } from '../agents/agents.module';
 import { MarketingContactService } from './marketing-contact.service';
 import { MarketingEmailService } from './marketing-email.service';
 import { MarketingContactsController } from './marketing-contacts.controller';
+import { MarketingCycleService } from './marketing-cycle.service';
+import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -54,7 +59,7 @@ import { MarketingContactsController } from './marketing-contacts.controller';
       MarketingCampaign, MarketingAuditEvent, MarketingChannel,
       MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
       MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
-      MarketingContact, MarketingEmailSend,
+      MarketingContact, MarketingEmailSend, MarketingCycle, ChatRoom, ChatRoomParticipant,
       Project, RuntimeHost, OutreachChannel, Credential,
     ]),
     SharedServicesModule,
@@ -62,6 +67,8 @@ import { MarketingContactsController } from './marketing-contacts.controller';
     OutreachModule,
     // 피드백 → 제품 티켓은 TicketService 로만 만든다(docs/tickets.md).
     AgentsModule,
+    // 사이클은 방을 열고 RoomMessagingService 로 첫 메시지를 보낸다(QA/Automation 과 같은 디스패치).
+    ChatRoomsModule,
   ],
   controllers: [
     MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController,
@@ -80,13 +87,14 @@ import { MarketingContactsController } from './marketing-contacts.controller';
     MarketingContactService,
     MarketingEmailService,
     MarketingAgentService,
+    MarketingCycleService,
     AuthGuard,
     PermissionGuard,
   ],
   exports: [
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
     MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingFeedbackService,
-    MarketingContactService, MarketingEmailService, MarketingAgentService,
+    MarketingContactService, MarketingEmailService, MarketingAgentService, MarketingCycleService,
   ],
 })
 export class MarketingModule {}

@@ -151,3 +151,4 @@ export { MarketingMetric } from './MarketingMetric';
 export { MarketingFeedback } from './MarketingFeedback';
 export { MarketingContact } from './MarketingContact';
 export { MarketingEmailSend } from './MarketingEmailSend';
+export { MarketingCycle } from './MarketingCycle';

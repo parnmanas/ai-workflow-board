@@ -248,6 +248,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // 사람이 REST 로 승인할 때만 일어난다 — 승인 툴은 존재하지 않는다.
   list_marketing_campaigns: 'caller',
   get_marketing_campaign: 'caller',
+  complete_marketing_cycle: 'caller',
   propose_marketing_channel: 'caller',
   draft_marketing_post: 'caller',
   create_marketing_link: 'caller',

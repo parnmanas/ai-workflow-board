@@ -30,13 +30,15 @@ import type { DataSource, Repository } from 'typeorm';
 import { OrchestrationMission } from '../entities/OrchestrationMission';
 import { QaRun } from '../entities/QaRun';
 import { ActionRun } from '../entities/ActionRun';
+import { MarketingCycle } from '../entities/MarketingCycle';
 import { Account } from '../entities/Account';
 import { ChatRoom } from '../entities/ChatRoom';
 import type { RoomMessagingService } from '../modules/chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from './hard-budget-config';
 import { sinceBoundaryParam } from './created-at-since-param';
 
-export type RunBudgetKind = 'qa' | 'action' | 'orchestration';
+// 'marketing' — 마케팅 사이클(docs/marketing.md "루프"). MarketingCycleService.dispatch 가 방 · 사이클 행보다 먼저 부른다.
+export type RunBudgetKind = 'qa' | 'action' | 'orchestration' | 'marketing';
 
 export interface RunBudgetLogger {
   warn(category: string, message: string, meta?: Record<string, unknown>): void;
@@ -61,6 +63,7 @@ function runRepo(dataSource: DataSource, kind: RunBudgetKind): Repository<RunRow
     case 'qa': return dataSource.getRepository(QaRun) as unknown as Repository<RunRow>;
     case 'action': return dataSource.getRepository(ActionRun) as unknown as Repository<RunRow>;
     case 'orchestration': return dataSource.getRepository(OrchestrationMission) as unknown as Repository<RunRow>;
+    case 'marketing': return dataSource.getRepository(MarketingCycle) as unknown as Repository<RunRow>;
   }
 }
 

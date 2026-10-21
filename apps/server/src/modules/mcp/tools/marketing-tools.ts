@@ -21,7 +21,7 @@ const CALLER_ERROR = 'Unauthorized: marketing tools require a DB-backed MCP key 
 const ACCESS_ERROR = 'Unauthorized: caller cannot access this campaign\'s account';
 
 export function registerMarketingTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, marketingAgentService } = ctx;
+  const { dataSource, marketingAgentService, marketingCycleService } = ctx;
 
   function dbCaller(extra: { sessionId?: string }) {
     const caller = getCallerAgent(extra);
@@ -101,6 +101,29 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
         return ok(await marketingAgentService!.overview(found.campaign));
       } catch (e: any) {
         return err(e?.message || 'Failed to read campaign');
+      }
+    },
+  );
+
+  server.tool(
+    'complete_marketing_cycle',
+    'Finish a marketing cycle you were given (its cycle_id is in the cycle prompt): summarize what you did, what is waiting for people (drafts, spend requests, channel proposals) and what you learned from the results, and list the next actions for the following cycle. Call it exactly once at the end of every cycle.',
+    {
+      cycle_id: z.string(),
+      summary: z.string().describe('What you did this cycle, what awaits human decisions, what the numbers say'),
+      next_actions: z.array(z.string()).max(20).optional().describe('What the next cycle should do first'),
+    },
+    async ({ cycle_id, summary, next_actions }, extra) => {
+      if (!marketingCycleService) return err('Marketing service unavailable in this MCP context');
+      const cycle = await marketingCycleService.findById(cycle_id);
+      if (!cycle) return err('cycle not found');
+      const found = await campaignFor(extra, cycle.campaign_id);
+      if ('error' in found) return err(found.error === ACCESS_ERROR ? 'cycle not found' : found.error);
+      try {
+        const done = await marketingCycleService.complete(cycle, found.actor, { summary, next_actions });
+        return ok({ cycle_id: done.id, cycle_no: done.cycle_no, status: done.status, next_cycle_at: found.campaign.next_cycle_at });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to complete cycle');
       }
     },
   );

@@ -55,6 +55,7 @@ import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import type { AutomationScheduleService } from '../../automation-schedule/automation-schedule.service';
 import type { MarketingAgentService } from '../../marketing/marketing-agent.service';
+import type { MarketingCycleService } from '../../marketing/marketing-cycle.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
 import { TicketService } from '../../tickets/ticket.service';
@@ -236,6 +237,7 @@ export interface ToolContext {
   // Marketing(docs/marketing.md) — 캠페인 에이전트의 MCP 표면(marketing-tools.ts). 사이클 · 승인 · 외부 발신이
   // NestJS 프로세스의 서비스에 있으므로 standalone context 에는 없다 — 도구가 그 사유로 거절한다.
   marketingAgentService?: MarketingAgentService;
+  marketingCycleService?: MarketingCycleService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

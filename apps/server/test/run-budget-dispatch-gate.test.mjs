@@ -107,6 +107,18 @@ test('orchestration-mission.service.ts createMission calls enforceRunBudget exac
   });
 });
 
+// 마케팅 사이클(docs/marketing.md "루프") — 사이클 하나 = 방 하나 + 에이전트 spawn 한 번이라 run 과 같은 자원을 쓴다.
+// 예산 검사가 사이클 행 · 방 저장보다 먼저여야 한다.
+test('marketing-cycle.service.ts dispatch calls enforceRunBudget exactly once, before the cycle row and ChatRoom saves', () => {
+  assertGuardedChokepoint({
+    file: 'modules/marketing/marketing-cycle.service.ts',
+    methodOpenRe: /private async dispatch\(campaign: MarketingCampaign[\s\S]*?\r?\n  \}\r?\n/,
+    sideEffectMarkers: ['this.cycleRepo.save(', 'this.roomRepo.save('],
+    methodLabel: 'MarketingCycleService.dispatch',
+  });
+  assert.match(code('modules/marketing/marketing-cycle.service.ts'), /enforceRunBudget\(\s*\{[\s\S]*?\},\s*'marketing',/);
+});
+
 test('each chokepoint passes its own kind: "qa" / "action" / "orchestration"', () => {
   const qaSrc = code('modules/qa/qa-run.service.ts');
   assert.match(

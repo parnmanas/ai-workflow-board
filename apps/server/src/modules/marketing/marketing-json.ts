@@ -13,6 +13,7 @@ import type { MarketingMetric } from '../../entities/MarketingMetric';
 import type { MarketingFeedback } from '../../entities/MarketingFeedback';
 import type { MarketingContact } from '../../entities/MarketingContact';
 import type { MarketingEmailSend } from '../../entities/MarketingEmailSend';
+import type { MarketingCycle } from '../../entities/MarketingCycle';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -324,5 +325,24 @@ export function emailSendToJson(s: MarketingEmailSend) {
     provider_message_id: s.provider_message_id,
     error: s.error,
     sent_at: s.sent_at,
+  };
+}
+
+export function cycleToJson(c: MarketingCycle) {
+  return {
+    id: c.id,
+    campaign_id: c.campaign_id,
+    cycle_no: c.cycle_no,
+    status: c.status,
+    trigger: c.trigger,
+    triggered_by: c.triggered_by,
+    room_id: c.room_id,
+    agent_key: c.agent_key,
+    started_at: c.started_at,
+    completed_at: c.completed_at,
+    summary: c.summary,
+    next_actions: c.next_actions || [],
+    untrusted_items: c.untrusted_items,
+    error: c.error,
   };
 }
