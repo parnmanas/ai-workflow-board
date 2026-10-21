@@ -9,6 +9,7 @@ test/drop-agent-host-backfill.test.mjs
 test/marketing-analytics.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
+test/marketing-feedback.test.mjs
 test/marketing-spend.test.mjs
 test/qa-flows/activity-actor-sentinel-pg.test.mjs
 test/qa-flows/chat-attachments.test.mjs

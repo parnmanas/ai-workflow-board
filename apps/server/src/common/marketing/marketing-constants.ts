@@ -101,6 +101,12 @@ export const MARKETING_GAUGE_METRICS = ['followers', 'subscribers'] as const;
 export const MARKETING_METRICS = [...MARKETING_COUNTER_METRICS, ...MARKETING_GAUGE_METRICS] as const;
 export type MarketingMetricName = typeof MARKETING_METRICS[number];
 
+export const FEEDBACK_CATEGORIES = ['bug', 'feature_request', 'question', 'praise', 'complaint', 'other'] as const;
+export type FeedbackCategory = typeof FEEDBACK_CATEGORIES[number];
+/** 제품 Project 티켓이 되는 분류. */
+export const TICKETABLE_FEEDBACK: readonly FeedbackCategory[] = ['bug', 'feature_request'];
+export const FEEDBACK_SENTIMENTS = ['positive', 'neutral', 'negative'] as const;
+
 /** 승인 대기 지출 요청의 기본 만료(결정이 없으면 거부). */
 export const SPEND_REQUEST_TTL_MS = 72 * 60 * 60_000;
 

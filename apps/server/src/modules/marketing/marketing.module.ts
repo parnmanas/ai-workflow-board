@@ -10,6 +10,8 @@ import { MarketingPost } from '../../entities/MarketingPost';
 import { MarketingLink } from '../../entities/MarketingLink';
 import { MarketingMetric } from '../../entities/MarketingMetric';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
+import { MarketingFeedback } from '../../entities/MarketingFeedback';
+import { Ticket } from '../../entities/Ticket';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { Project } from '../../entities/Project';
@@ -33,6 +35,9 @@ import { MarketingPostsController } from './marketing-posts.controller';
 import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { MarketingAnalyticsController } from './marketing-analytics.controller';
 import { MarketingPublicController } from './marketing-public.controller';
+import { MarketingFeedbackService } from './marketing-feedback.service';
+import { MarketingFeedbackController } from './marketing-feedback.controller';
+import { AgentsModule } from '../agents/agents.module';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -43,16 +48,18 @@ import { MarketingPublicController } from './marketing-public.controller';
     TypeOrmModule.forFeature([
       MarketingCampaign, MarketingAuditEvent, MarketingChannel,
       MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
-      MarketingLink, MarketingMetric, OutreachInboundItem,
+      MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
       Project, RuntimeHost, OutreachChannel, Credential,
     ]),
     SharedServicesModule,
     // 채널 승인이 새 OutreachChannel 을 OutreachChannelService 로 만든다(그쪽 검증을 그대로 탄다).
     OutreachModule,
+    // 피드백 → 제품 티켓은 TicketService 로만 만든다(docs/tickets.md).
+    AgentsModule,
   ],
   controllers: [
     MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController,
-    MarketingAnalyticsController, MarketingPublicController,
+    MarketingAnalyticsController, MarketingPublicController, MarketingFeedbackController,
   ],
   providers: [
     MarketingAuditService,
@@ -63,13 +70,15 @@ import { MarketingPublicController } from './marketing-public.controller';
     MarketingSpendService,
     MarketingPostService,
     MarketingAnalyticsService,
+    MarketingFeedbackService,
     MarketingAgentService,
     AuthGuard,
     PermissionGuard,
   ],
   exports: [
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
-    MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingAgentService,
+    MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingFeedbackService,
+    MarketingAgentService,
   ],
 })
 export class MarketingModule {}

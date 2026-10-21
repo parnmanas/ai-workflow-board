@@ -10,6 +10,7 @@ import type { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
 import type { MarketingPost } from '../../entities/MarketingPost';
 import type { MarketingLink } from '../../entities/MarketingLink';
 import type { MarketingMetric } from '../../entities/MarketingMetric';
+import type { MarketingFeedback } from '../../entities/MarketingFeedback';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -257,5 +258,32 @@ export function metricToJson(m: MarketingMetric) {
     recorded_by_type: m.recorded_by_type,
     recorded_by_name: m.recorded_by_name,
     created_at: m.created_at,
+  };
+}
+
+/**
+ * 피드백 직렬화. 에이전트용(`forAgent`)은 외부인이 쓴 필드 이름에 `_untrusted` 를 붙여 데이터임을 이름으로도
+ * 드러낸다 — MCP 응답을 읽는 모델이 그 안의 문장을 지시로 받지 않게.
+ */
+export function feedbackToJson(f: MarketingFeedback, forAgent = false) {
+  const external = forAgent
+    ? { author_untrusted: f.author, content_untrusted: f.content }
+    : { author: f.author, content: f.content };
+  return {
+    id: f.id,
+    campaign_id: f.campaign_id,
+    channel_id: f.channel_id,
+    post_id: f.post_id,
+    source_url: f.source_url,
+    ...external,
+    summary: f.summary,
+    category: f.category,
+    sentiment: f.sentiment,
+    status: f.status,
+    ticket_id: f.ticket_id,
+    recorded_by_type: f.recorded_by_type,
+    recorded_by_name: f.recorded_by_name,
+    cycle_id: f.cycle_id,
+    created_at: f.created_at,
   };
 }
