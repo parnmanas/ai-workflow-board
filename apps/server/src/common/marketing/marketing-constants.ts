@@ -57,6 +57,31 @@ export const DEFAULT_MARKETING_DISCLOSURE = '— 이 글은 제품 제작자가 
 /** 사이클 cadence 하한 — 에이전트를 몇 분마다 깨우는 실수를 막는다. */
 export const MIN_CYCLE_INTERVAL_MS = 10 * 60_000;
 
+/**
+ * 채널 플랫폼. reddit · github 는 outreach 커넥터가 있어 서버가 직접 게시할 수 있고(kind `outreach`),
+ * email 은 메일 발송 채널(kind `email`), 나머지는 사람이 게시하고 링크를 기록한다(kind `manual`).
+ */
+export const CHANNEL_PLATFORMS = [
+  'reddit', 'github', 'hacker_news', 'product_hunt', 'x', 'linkedin', 'discord', 'slack', 'forum',
+  'blog', 'newsletter', 'youtube', 'email', 'other',
+] as const;
+export type ChannelPlatform = typeof CHANNEL_PLATFORMS[number];
+
+/** outreach 커넥터가 있는 플랫폼 → OutreachChannel.kind */
+export const OUTREACH_PLATFORMS: Partial<Record<ChannelPlatform, 'reddit' | 'github'>> = { reddit: 'reddit', github: 'github' };
+
+export const CHANNEL_KINDS = ['outreach', 'email', 'manual'] as const;
+export type ChannelKind = typeof CHANNEL_KINDS[number];
+
+/** proposed → active | awaiting_credential | rejected, active ↔ paused */
+export const CHANNEL_STATUSES = ['proposed', 'awaiting_credential', 'active', 'paused', 'rejected'] as const;
+export type ChannelStatus = typeof CHANNEL_STATUSES[number];
+
+/** 메일 공급자(메일 credential 의 `provider` 필드). */
+export const EMAIL_PROVIDERS = ['resend', 'sendgrid'] as const;
+export type EmailProvider = typeof EMAIL_PROVIDERS[number];
+export const DEFAULT_EMAIL_AD_LABEL = '(광고)';
+
 /** 승인 대기 지출 요청의 기본 만료(결정이 없으면 거부). */
 export const SPEND_REQUEST_TTL_MS = 72 * 60 * 60_000;
 

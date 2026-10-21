@@ -136,7 +136,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
 
   // Marketing(docs/marketing.md) — 전부 평문 varchar 참조뿐(실FK 없음). 캠페인이 부모,
   // 나머지는 campaign_id 로 붙는다. 감사 로그는 append-only 기록이라 이관 대상이다.
-  'MarketingCampaign', 'MarketingAuditEvent',
+  'MarketingCampaign', 'MarketingAuditEvent', 'MarketingChannel',
 
   // 완전 다형적(polymorphic)/미강제 — 어디에 있어도 안전, 맨 뒤에 배치
   'ActivityLog',

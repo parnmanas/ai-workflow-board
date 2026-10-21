@@ -459,6 +459,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // Marketing(서버 marketing-tools.ts, docs/marketing.md) — 캠페인 조회. 티켓을 만들지도 바꾸지도 않는다.
   list_marketing_campaigns: 'read',
   get_marketing_campaign: 'read',
+  propose_marketing_channel: 'non-ticket',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
   start_security_run: 'non-ticket',

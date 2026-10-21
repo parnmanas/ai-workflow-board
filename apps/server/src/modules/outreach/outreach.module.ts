@@ -59,6 +59,6 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
   // ClassificationBridgeService must be the SAME singleton instance the MCP
   // module's record_outreach_classification tool resolves against — see
   // that service's docstring for why (in-process bridge, one Map per process).
-  exports: [ClassificationBridgeService],
+  exports: [ClassificationBridgeService, OutreachChannelService],
 })
 export class OutreachModule {}

@@ -141,3 +141,4 @@ export { AgentTemplate } from './AgentTemplate';
 // `synchronize`. 이관 레지스트리(MIGRATION_ENTITY_ORDER)와 한 쌍.
 export { MarketingCampaign } from './MarketingCampaign';
 export { MarketingAuditEvent } from './MarketingAuditEvent';
+export { MarketingChannel } from './MarketingChannel';

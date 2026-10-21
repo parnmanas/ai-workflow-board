@@ -104,4 +104,32 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
       }
     },
   );
+
+  server.tool(
+    'propose_marketing_channel',
+    'Propose a channel (community, forum, newsletter, social account, mailing list …) where the campaign\'s product should be talked about. A human approves it before anything can be posted there. Needs capability channel_discovery. Base the proposal on pages you actually opened: list them in evidence_urls, quote the community\'s self-promotion rules (rules_summary + rules_url), and say why the audience fits. Re-proposing the same platform+target returns the existing channel (duplicate: true).',
+    {
+      campaign_id: z.string(),
+      platform: z.enum(['reddit', 'github', 'hacker_news', 'product_hunt', 'x', 'linkedin', 'discord', 'slack', 'forum', 'blog', 'newsletter', 'youtube', 'email', 'other']),
+      target: z.string().describe('reddit: subreddit name; github: owner/repo; others: the URL or list name'),
+      name: z.string().optional().describe('Short display name'),
+      rationale: z.string().describe('Why this channel fits the product and goal'),
+      audience_fit: z.string().optional(),
+      audience_size: z.number().int().nonnegative().optional().describe('Members/followers/subscribers you observed'),
+      audience_observed_at: z.string().optional().describe('ISO date you observed audience_size'),
+      evidence_urls: z.array(z.string()).min(1).max(10).describe('Pages you actually opened while researching'),
+      rules_summary: z.string().optional().describe('The community\'s self-promotion / posting rules, quoted or summarized'),
+      rules_url: z.string().optional(),
+      guidelines: z.string().optional().describe('Proposed tone, posting frequency, do and don\'t for this channel'),
+    },
+    async ({ campaign_id, ...body }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      try {
+        return ok(await marketingAgentService!.proposeChannel(found.campaign, body, found.actor));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to propose channel');
+      }
+    },
+  );
 }
