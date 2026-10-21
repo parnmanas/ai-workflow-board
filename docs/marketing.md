@@ -259,7 +259,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
    승인자 identity 는 로그인 세션에서만 온다. 2인 규칙 대상이면 첫 승인은 `approvals` 에 기록만 하고, 같은 사람은 두 번 승인할 수 없다.
 3. **실행(webhook).** 다음 순서로 진행한다.
    1. 캠페인 잠금 트랜잭션 안에서 **지금도 보내도 되는지** 다시 본다: 캠페인 active, 수취인이 아직 허용 목록에 있음, 채널 active, 저장된 해시 일치. 하나라도 어긋나면 보내지 않고 `failed`(예산 해제)로 닫는다. 통과하면 같은 트랜잭션에서 `approved → executing` 을 CAS 로 커밋한다.
-   2. sql.js 는 이때 파일로 즉시 내려 쓴다. 진행 중인 트랜잭션이 끝난 뒤(`afterSqljsTransactions`)에 하고, 내려 쓰지 못하면 보내지 않는다.
+   2. sql.js 는 이때 파일로 즉시 내려 쓴다(`flushSqljs` — 진행 중인 트랜잭션이 끝난 뒤에 쓴다). 내려 쓰지 못하면 보내지 않는다.
    3. 정규화 JSON 본문을 POST 한다. 헤더는 다음과 같다.
       - `X-AWB-Signature: t=<unix>,v1=<hex hmac-sha256(secret, "<t>.<body>")>`
       - `Idempotency-Key: <spend request id>` (재시도해도 바뀌지 않는다)

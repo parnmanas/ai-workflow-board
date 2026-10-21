@@ -13,7 +13,7 @@ import {
   SYSTEM_MARKETING_ACTOR,
   type MarketingActor,
 } from '../../common/marketing/marketing-constants';
-import { afterSqljsTransactions, flushSqljs } from '../../db';
+import { flushSqljs } from '../../db';
 import { LogService } from '../../services/log.service';
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
@@ -575,9 +575,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     return (await this.spendRepo.findOne({ where: { id } }))!;
   }
 
-  /** sql.js 를 지금 파일로 내려 쓴다(Postgres 는 no-op). 진행 중인 트랜잭션이 끝난 뒤에 — export 가 연결을 다시 연다. */
+  /** sql.js 를 지금 파일로 내려 쓴다(Postgres 는 no-op). flushSqljs 가 진행 중인 트랜잭션이 끝난 뒤에 쓴다 — export 가 연결을 다시 연다. */
   private persistNow(): Promise<boolean> {
-    return afterSqljsTransactions(this.dataSource, () => flushSqljs(this.dataSource, true));
+    return flushSqljs(this.dataSource, true);
   }
 
   // ── 주기 정리 ────────────────────────────────────────────────────────────

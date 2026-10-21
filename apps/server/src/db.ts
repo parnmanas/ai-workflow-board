@@ -169,12 +169,26 @@ export class SqljsWriteSubscriber implements EntitySubscriberInterface {
 // transaction() 프라미스가 settle되는 순간 token.active를 false로 닫으면,
 // store 참조 자체는 늦게 실행되는 자손에도 계속 전파되더라도 `getStore()?.active`는
 // 그 시점엔 이미 false이므로 재진입으로 오인되지 않고 정상적으로 큐를 다시 탄다.
-const sqljsWorkQueues = new WeakMap<DataSource, <T>(work: () => Promise<T>) => Promise<T>>();
+const sqljsWorkQueues = new WeakMap<DataSource, {
+  enqueue: <T>(work: () => Promise<T>) => Promise<T>;
+  holdsTurn: () => boolean;
+}>();
 
-/** 같은 sql.js 연결의 트랜잭션이 끝난 뒤 연결을 직접 만지는 작업을 실행한다. */
+/**
+ * 같은 sql.js 연결의 트랜잭션이 끝난 뒤 연결을 직접 만지는 작업을 실행한다. work 가 도는 동안 큐에
+ * 선 트랜잭션은 시작하지 않는다. 이미 큐 차례를 쥔 체인(트랜잭션 콜백, 또는 다른 work) 안에서 부르면
+ * 기다리지 않고 그 차례 안에서 바로 실행한다 — 자기 뒤에 줄 서면 데드락이다.
+ * 큐를 거치지 않는 repo.save()/remove() 의 암묵 트랜잭션은 막지 못한다 — 파일 export 는 이것만으로
+ * 부족하니 flushSqljs()/flushOntologySqljs() 를 쓴다(exportSqljsWhenIdle 참고).
+ */
 export function afterSqljsTransactions<T>(dataSource: DataSource, work: () => Promise<T>): Promise<T> {
-  const enqueue = sqljsWorkQueues.get(dataSource);
-  return enqueue ? enqueue(work) : work();
+  const queue = sqljsWorkQueues.get(dataSource);
+  return queue ? queue.enqueue(work) : work();
+}
+
+/** 지금 호출 체인이 이 연결의 큐 차례를 이미 쥐고 있는가 — 트랜잭션 콜백이나 afterSqljsTransactions() work 안. */
+function holdsSqljsTurn(dataSource: DataSource): boolean {
+  return sqljsWorkQueues.get(dataSource)?.holdsTurn() ?? false;
 }
 
 export function serializeSqljsTransactions(dataSource: DataSource): void {
@@ -186,30 +200,30 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
   const original = manager.transaction.bind(manager);
   const reentry = new AsyncLocalStorage<{ active: boolean }>();
   let queue: Promise<void> = Promise.resolve();
+  const holdsTurn = () => reentry.getStore()?.active === true;
+  // 트랜잭션과 afterSqljsTransactions() 작업이 같은 큐 차례를 쓰고, 재진입 규칙도 같다: 트랜잭션
+  // 안의 트랜잭션은 SAVEPOINT 중첩이고, 작업 안의 작업·트랜잭션은 이미 쥔 차례의 연장이다.
   const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
-    const run = queue.then(work);
-    queue = run.then(() => undefined, () => undefined);
-    return run;
-  };
-  sqljsWorkQueues.set(dataSource, enqueue);
-
-  manager.transaction = (...args: unknown[]) => {
-    if (reentry.getStore()?.active) return original(...args);
+    if (holdsTurn()) return work();
     const token = { active: true };
-    const run: Promise<unknown> = enqueue(() => reentry.run(token, () => original(...args)));
+    const run = queue.then(() => reentry.run(token, work));
     // Keep the chain alive regardless of outcome — a failed transaction must
     // not wedge every transaction queued behind it. The rejection itself is
     // still delivered to this call's own caller via `run`. Closing the token
-    // here (once the real transaction has actually settled) — rather than
-    // relying on run()'s callback scope — is what keeps a stale fire-and-
-    // forget descendant from reading a reentry flag that has outlived the
-    // transaction it was spawned from.
+    // here (once the real work has actually settled) — rather than relying on
+    // run()'s callback scope — is what keeps a stale fire-and-forget
+    // descendant from reading a reentry flag that has outlived the work it
+    // was spawned from.
+    queue = run.then(() => undefined, () => undefined);
     run.then(
       () => { token.active = false; },
       () => { token.active = false; },
     );
     return run;
   };
+  sqljsWorkQueues.set(dataSource, { enqueue, holdsTurn });
+
+  manager.transaction = (...args: unknown[]) => enqueue(() => original(...args));
 }
 
 
@@ -375,9 +389,17 @@ export function resolveSqljsFlushIntervalMs(): number {
  *       re-export to guarantee the last sub-interval batch reaches disk
  *       (ticket 84a6d207).
  *
- * Ordering note: the dirty flag is cleared BEFORE the (synchronous) export so a
- * write that lands during the async file write re-marks dirty and is caught on
- * the next tick / by the forced re-export — it is never silently dropped. A
+ * The export itself waits until no transaction is open on the connection (see
+ * exportSqljsWhenIdle) — so a flush can take as long as the transactions it
+ * waits for, and the forced shutdown flush includes every transaction that was
+ * already queued when it was called. A forced flush awaited from inside a
+ * transaction cannot write while its own caller is open: it does not wait for
+ * the in-flight flush, which is queued behind that very transaction, and fails
+ * after the export deadline instead, leaving the batch dirty.
+ *
+ * Ordering note: the dirty flag is cleared right before the (synchronous) export
+ * so a write that lands during the async file write re-marks dirty and is caught
+ * on the next tick / by the forced re-export — it is never silently dropped. A
  * failed save re-marks dirty so the batch is retried.
  *
  * @returns true if a save was actually performed.
@@ -390,11 +412,15 @@ export async function flushSqljs(dataSource: DataSource, force = false): Promise
     // A periodic tick coalesces into the running flush; only a forced flush
     // (shutdown) waits it out and then re-exports below.
     if (!force) return false;
-    try {
-      await sqljsFlushInFlight;
-    } catch {
-      // The in-flight flush's error is surfaced to ITS own caller; we proceed to
-      // a fresh forced export regardless so the final batch still gets a shot.
+    // Inside a transaction the in-flight export is queued behind that
+    // transaction, which is waiting for us — never wait for it from there.
+    if (!holdsSqljsTurn(dataSource)) {
+      try {
+        await sqljsFlushInFlight;
+      } catch {
+        // The in-flight flush's error is surfaced to ITS own caller; we proceed to
+        // a fresh forced export regardless so the final batch still gets a shot.
+      }
     }
   }
 
@@ -412,20 +438,87 @@ export async function flushSqljs(dataSource: DataSource, force = false): Promise
 }
 
 /**
- * Perform a single full-DB export. Clears the dirty flag BEFORE the export (so a
- * write during the async file write re-marks dirty) and re-marks dirty on
+ * Perform a single full-DB export. Clears the dirty flag right before the export
+ * (so a write during the async file write re-marks dirty) and re-marks dirty on
  * failure so the batch is retried. Internal — callers go through flushSqljs(),
  * which owns the in-flight coalesce/supersede contract.
  */
 async function doSqljsExport(dataSource: DataSource): Promise<boolean> {
-  sqljsDirty = false;
   try {
-    await dataSource.sqljsManager.saveDatabase();
+    await exportSqljsWhenIdle(dataSource, () => { sqljsDirty = false; });
     return true;
   } catch (e) {
     sqljsDirty = true; // surface for retry on the next tick / shutdown
     throw e;
   }
+}
+
+/** How long an export waits for a transaction opened outside the queue — see exportSqljsWhenIdle(). */
+export const SQLJS_EXPORT_TXN_WAIT_MS = 1_000;
+const SQLJS_EXPORT_TXN_POLL_MS = 5;
+
+/**
+ * Write a sql.js DataSource to its file without ending an open transaction.
+ *
+ * sql.js Database.export() closes and reopens the connection. SQLite rolls back
+ * whatever transaction is open at that moment; that transaction's remaining
+ * statements then autocommit on the reopened connection and its COMMIT fails
+ * with "cannot commit - no transaction is active", while TypeORM's single
+ * shared runner keeps believing a transaction is active. So the export waits:
+ *
+ *   1. behind the transaction queue (afterSqljsTransactions) — no queued
+ *      manager.transaction() is running, and none starts until the write is done;
+ *   2. then until the connection has no transaction open — repo.save() /
+ *      remove() open their own transaction on the shared runner without going
+ *      through the queue (EntityPersistExecutor → queryRunner.startTransaction()).
+ *
+ * The last check and the export run in one synchronous step — export() happens
+ * inside saveDatabase() before its first await — so nothing can open a
+ * transaction in between. `markClean` runs in that same step.
+ *
+ * A transaction still open after SQLJS_EXPORT_TXN_WAIT_MS is not cut: the export
+ * fails, the caller keeps its dirty flag, and the next flush tries again. Implicit
+ * transactions finish within one event-loop turn (no entity listener awaits I/O),
+ * so only a flush awaited from inside a transaction gets that far — it waits on
+ * its own caller. A queued transaction that never settles holds up this export
+ * (the shutdown flush included) just as it holds up every transaction behind it.
+ */
+async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void): Promise<void> {
+  await afterSqljsTransactions(dataSource, async () => {
+    const deadline = Date.now() + SQLJS_EXPORT_TXN_WAIT_MS;
+    while (sqljsTransactionOpen(dataSource)) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `sql.js export skipped: a transaction has been open for over ${SQLJS_EXPORT_TXN_WAIT_MS}ms ` +
+          `and exporting would end it (Database.export() reopens the connection)`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, SQLJS_EXPORT_TXN_POLL_MS));
+    }
+    markClean();
+    await dataSource.sqljsManager.saveDatabase();
+  });
+}
+
+/**
+ * Whether the sql.js connection has a transaction open right now. SQLite itself
+ * answers: BEGIN fails with "cannot start a transaction within a transaction"
+ * exactly when one is open, and is rolled back at once when none is (sql.js does
+ * not expose sqlite3_get_autocommit). TypeORM's queryRunner.isTransactionActive
+ * is not a substitute — it stays true for good once a COMMIT fails because the
+ * transaction was already gone, which is the state a cutting export left behind,
+ * and then no export would ever run again.
+ */
+function sqljsTransactionOpen(dataSource: DataSource): boolean {
+  const db = (dataSource.driver as unknown as { databaseConnection: { exec(sql: string): unknown } }).databaseConnection;
+  try {
+    db.exec('BEGIN');
+  } catch (e) {
+    if (/cannot start a transaction within a transaction/.test(String((e as Error)?.message ?? e))) return true;
+    throw e;
+  }
+  db.exec('ROLLBACK');
+  return false;
 }
 
 /**
@@ -561,12 +654,11 @@ if (AppOntologyDataSource) {
 
 /** doSqljsExport()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
 async function doOntologySqljsExport(dataSource: DataSource): Promise<boolean> {
-  ontologySqljsDirty = false;
   try {
     // sql.js export는 활성 트랜잭션을 암묵적으로 끝낼 수 있다. 전체 그래프
     // 빌드가 양보한 사이 주기 flush가 끼어들어 COMMIT을 무효화하지 않도록
-    // 이 DataSource의 트랜잭션 직렬화 큐 뒤에서만 내보낸다.
-    await afterSqljsTransactions(dataSource, () => dataSource.sqljsManager.saveDatabase());
+    // primary와 같은 경로로, 이 DataSource의 트랜잭션이 모두 닫힌 뒤에만 내보낸다.
+    await exportSqljsWhenIdle(dataSource, () => { ontologySqljsDirty = false; });
     return true;
   } catch (e) {
     ontologySqljsDirty = true;
@@ -581,10 +673,13 @@ export async function flushOntologySqljs(dataSource: DataSource, force = false):
 
   if (ontologySqljsFlushInFlight) {
     if (!force) return false;
-    try {
-      await ontologySqljsFlushInFlight;
-    } catch {
-      // 그 flush 자신의 호출자에게 전달됨; 새로운 강제 export를 진행한다.
+    // 트랜잭션 안이면 진행 중인 export 가 바로 그 트랜잭션 뒤에 줄 서 있다 — 기다리면 서로를 기다린다.
+    if (!holdsSqljsTurn(dataSource)) {
+      try {
+        await ontologySqljsFlushInFlight;
+      } catch {
+        // 그 flush 자신의 호출자에게 전달됨; 새로운 강제 export를 진행한다.
+      }
     }
   }
 

@@ -239,6 +239,7 @@ test/spa-fallback-assets-404.test.mjs
 test/spa-fallback-dotsegment.test.mjs
 test/spa-fallback-guard.test.mjs
 test/sqljs-batched-flush.test.mjs
+test/sqljs-flush-transaction-overlap.test.mjs
 test/sqljs-transaction-serialize-queue.test.mjs
 test/subagent-appendlocks-eviction.test.mjs
 test/suite-manifest-sort.test.mjs
