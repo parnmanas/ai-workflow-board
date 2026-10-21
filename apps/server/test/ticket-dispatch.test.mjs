@@ -205,4 +205,17 @@ test('the trigger waits for the host to prepare the assignee runtime, and a host
   }
 });
 
+test('the work order lists the ticket\'s open child tickets by id', async () => {
+  // Children are the assignee's own checklist; the order tells it which ones are left (822e54d6).
+  const child = await api('POST', `/tickets/${first.id}/children`, { title: 'wire the screens' });
+  assert.ok(child.status < 300, JSON.stringify(child.body));
+  const row = await ds.getRepository('Ticket').findOneBy({ id: first.id });
+  const result = await dispatcher.dispatch({ ...row, status: 'in_progress' }, 'manual');
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  const trigger = await vagent.waitForTrigger((t) => t.ticket_id === first.id && t.trigger_id === result.trigger_id, 5000);
+  const order = trigger._wire.column_prompt.content;
+  assert.match(order, /## Child tickets \(your checklist\)/);
+  assert.ok(order.includes(`- \`${child.body.id}\` wire the screens`), order);
+});
+
 exitAfterTests();

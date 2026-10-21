@@ -22,7 +22,7 @@ they do not create separate work surfaces. See [ownership.md](ownership.md).
 | `assignee` | `RuntimeSpec \| null` — the one agent that does the ticket (host + CLI + model + working_dir …, see `common/runtime-spec.ts`). `null` = unassigned (never dispatched). |
 | `priority` | `low` / `medium` / `high` / `critical` (`urgent` is accepted as an alias of `critical`). |
 | `position` | Ordering inside a status lane. |
-| `parent_id` | Child tickets (sub-tasks) keep working as before. Children have no assignee of their own and are not dispatched; they are a checklist the assignee works through. |
+| `parent_id` | Child tickets (sub-tasks) keep working as before. Children have no assignee of their own and are not dispatched; they are a checklist the assignee works through and closes one by one (`update_child_ticket(status: "done")`) as each part is verified. The parent cannot move to `done` while a child is open (done guard). |
 | `pending_user_action` / `pending_on_tickets` / `pending_ci_wait` | Unchanged pending flags. Any pending flag blocks dispatch. |
 | `archived_at` | Unchanged soft-archive. |
 | `terminal_entered_at` | Set when the ticket enters `done`, cleared when it leaves. |
@@ -209,6 +209,11 @@ Same event, same envelope. Changes:
 - `column_prompt` carries the built-in single-agent ticket work order
   (`common/ticket-work-order.ts`) — `template_id = 'builtin:ticket-work-order'`.
   New managers render it as the work order (no "current column only" contract).
+  Its **Child tickets** section tells the assignee how to work the checklist —
+  children are never dispatched, so it does them itself and closes each one as
+  soon as it is verified, not in a batch at the end — and lists the children
+  still open with their ids. Before it existed, a ticket split into 8 children
+  finished every stage with all 8 still `todo` (822e54d6).
 - `base_repo` = the project: `{ id: project.id, name, url, default_branch,
   main_clone_dir }`. `main_clone_dir` = the project's folder on the assignee's
   host, or `null`.

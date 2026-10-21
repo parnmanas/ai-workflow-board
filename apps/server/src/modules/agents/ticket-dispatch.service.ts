@@ -524,9 +524,17 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       projectId: ticket.project_id || null,
     });
 
+    // The checklist the order spells out and lists by id (docs/tickets.md).
+    const children = await this.dataSource.getRepository(Ticket).find({
+      select: ['id', 'title', 'status'],
+      where: { parent_id: ticket.id, archived_at: IsNull() },
+      order: { position: 'ASC', created_at: 'ASC' },
+    });
+
     const workOrder = renderTicketWorkOrder({
       base_branch: baseBranch,
       ticket_id: ticket.id,
+      children: children.map((c) => ({ id: c.id, title: c.title, status: c.status })),
       knowledge: {
         shared_memory: account.knowledge_memory || '',
         skills: RunSkillSnapshotService.index((snapshot.manifest as PinnedSkillManifestEntry[]) || []),

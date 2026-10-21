@@ -13,6 +13,12 @@
  * (`system_prompt_append`, language) and the project's `instructions` ride
  * alongside on the same payload.
  *
+ * Child tickets (docs/tickets.md): they are the assignee's own checklist —
+ * never dispatched, no assignee of their own — so the order spells out how to
+ * work them (close each one as it is verified, not in a batch at the end) and
+ * lists the ones still open with their ids. Without that, a ticket split into
+ * 8 children finished all 8 stages with every child still todo (822e54d6).
+ *
  * Knowledge (docs/skills.md "Knowledge"): the account's shared memory and the
  * index of skills pinned for this run are rendered as their own section — the
  * index carries names and descriptions only; the agent loads a skill's text with
@@ -38,6 +44,35 @@ export interface TicketWorkOrderContext {
   knowledge?: KnowledgeBlock | null;
   /** The ticket — the skill loader call names it so the pinned version is served. */
   ticket_id?: string;
+  /** The ticket's child tickets (the checklist), in order. Omitted → treated as none yet. */
+  children?: Array<{ id: string; title: string; status: string }> | null;
+}
+
+/** Open children listed by id in the order — beyond this the count says how many more. */
+const LISTED_OPEN_CHILDREN = 30;
+
+/** How to work child tickets, plus the ones still open. Pure. */
+export function renderChildTicketsSection(children: TicketWorkOrderContext['children']): string {
+  const all = children || [];
+  const open = all.filter((c) => c.status !== 'done');
+  const state = !all.length
+    ? 'This ticket has no child tickets yet.'
+    : !open.length
+    ? `All ${all.length} child tickets of this ticket are done.`
+    : [
+        `This ticket has ${all.length} child tickets; ${open.length} still open — they are your remaining scope:`,
+        ...open.slice(0, LISTED_OPEN_CHILDREN).map((c) => `- \`${c.id}\` ${c.title}`),
+        ...(open.length > LISTED_OPEN_CHILDREN ? [`- …and ${open.length - LISTED_OPEN_CHILDREN} more (\`mcp__awb__get_ticket\`).`] : []),
+      ].join('\n');
+  return `## Child tickets (your checklist)
+Child tickets are this ticket's checklist. They have no assignee and are never dispatched: you do every one of them yourself (with your own subagents if you like) — nobody else will pick them up.
+- Splitting big work: one child per part you can implement and verify on its own (\`mcp__awb__create_child_ticket\`). Scope you discover on the way gets a child too.
+- **Close each item as soon as its part is implemented and verified**: comment the result on that child (\`mcp__awb__add_comment\` with the child's id), then \`mcp__awb__update_child_ticket(status: "done")\`. One at a time as you go — never in a batch at the end. People follow your progress through this list.
+- Children only track open / done (\`todo\` / \`done\`); \`move_ticket\` does not apply to them.
+- Dropping an item: comment why on the child, then close it.
+- This ticket cannot move to done while a child is open — AWB rejects it. Do not pass \`force\` to get around that.
+
+${state}`;
 }
 
 export interface KnowledgeSkillLine {
@@ -121,13 +156,15 @@ You are the only agent on this ticket and you own it end to end — there is no 
 
 ${projectBlock}
 ${knowledgeBlock ? `\n${knowledgeBlock}\n` : ''}
+${renderChildTicketsSection(ctx.children)}
+
 ## 1. Understand
 - Read the ticket with \`mcp__awb__get_ticket\`: description, instructions, comments, attachments, child tickets, prerequisites.
 - Investigate before asking. If the requirement is genuinely ambiguous in a way only a human can settle, ask in a comment, call \`mcp__awb__pend_ticket\` with a one-line reason, and stop.
 
 ## 2. Plan
 - For anything non-trivial, post a short plan as a comment before you start.
-- Big work: split it. Fan independent parts out to your own subagents and integrate their results yourself, or create child tickets (\`mcp__awb__create_child_ticket\`) as a checklist you work through. Do not hand the work to other agents.
+- Big work: split it. Fan independent parts out to your own subagents and integrate their results yourself, or make them child tickets (see **Child tickets** above). Do not hand the work to other agents.
 - Before building, check the work is not already done or in flight: \`git log origin/${base}\`, and \`mcp__awb__list_tickets\` with this ticket's project/tags.
 
 ## 3. Implement
@@ -141,6 +178,7 @@ ${project ? landingSection(project.use_pr) : '## 5. Land\nNothing to land.'}
 
 ## 6. Report and finish
 - \`mcp__awb__add_comment\` with: what changed, how you verified it (paste the key output), commit SHA / PR URL, anything left over.
+- Every child ticket is already \`done\` (see **Child tickets** above).
 - File follow-ups you noticed as new tickets (\`mcp__awb__create_ticket\`, status \`backlog\`, same project and tags, description starting with a link to this ticket).
 - Then finish with exactly one of:
   - \`mcp__awb__move_ticket(status: "done")\` — the work is complete and landed.
