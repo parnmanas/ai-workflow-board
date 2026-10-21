@@ -12,6 +12,7 @@ import { log } from './logging.js';
 import type { AgentSessionRunner, AgentSessionRequest } from './agent-session-runner.js';
 import type { TerminalRunner, TerminalRequest } from './terminal-runner.js';
 import type { MemoryRunner, MemoryRequest } from './cli-memory-runner.js';
+import { ensureChatWorkdir } from './chat-workdirs.js';
 import { loadAgentInfo } from './config.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
@@ -1913,6 +1914,8 @@ export class EventDispatcher {
     accountId: string | undefined | null,
   ): Promise<AgentExecutionContext | undefined> {
     if (!spec || !this.#managedAgentContexts) return undefined;
+    // 채팅 전용 기본 폴더(chat-workdirs.ts)는 매니저가 만든다 — 지워졌어도 다음 디스패치가 되살린다.
+    await ensureChatWorkdir(spec.working_dir).catch((err: any) => log(`chat workdir create failed (${spec.working_dir}): ${err?.message ?? err}`));
     const entry = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec);
     if (entry) {
       const ctx: AgentExecutionContext = {

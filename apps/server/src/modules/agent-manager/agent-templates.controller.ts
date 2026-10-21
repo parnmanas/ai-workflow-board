@@ -8,6 +8,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { validateAgentRuntimeConfig } from '../../common/runtime-config';
+import { InstanceRegistryService } from './instance-registry.service';
 
 @Controller('api/agent-templates')
 @UseGuards(AuthGuard)
@@ -15,10 +16,19 @@ export class AgentTemplatesController {
   constructor(
     @InjectRepository(AgentTemplate) private readonly templates: Repository<AgentTemplate>,
     @InjectRepository(RuntimeHost) private readonly hosts: Repository<RuntimeHost>,
+    private readonly registry: InstanceRegistryService,
   ) {}
 
+  /** `chat_workdir_root` 는 지금 연결된 매니저가 알린 채팅 전용 폴더 루트 — 꺼져 있거나 구버전이면 null. */
   @Get('hosts')
-  listHosts() { return this.hosts.find({ select: { id: true, name: true }, order: { name: 'ASC' } }); }
+  async listHosts() {
+    const rows = await this.hosts.find({ select: { id: true, name: true }, order: { name: 'ASC' } });
+    const roots = new Map<string, string>();
+    for (const rec of this.registry.list()) {
+      if (rec.mode === 'manager' && rec.chat_workdir_root) roots.set(rec.agent_id, rec.chat_workdir_root);
+    }
+    return rows.map((h) => ({ ...h, chat_workdir_root: roots.get(h.id) ?? null }));
+  }
 
   @Get()
   list() { return this.templates.find({ order: { name: 'ASC', id: 'ASC' } }); }

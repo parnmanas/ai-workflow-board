@@ -129,6 +129,9 @@ export interface InstanceMeta {
   // Terminal — 이 장비에서 띄울 수 있는 셸(TerminalRunner.availableShells). 부팅 시 한 번
   // 계산한 정적 값이고, **비어 있으면 서버가 이 장비를 터미널 목록에서 뺀다**.
   terminalShells?: TerminalShellHeartbeatEntry[] | null;
+  // 채팅 전용 작업 폴더 루트(chat-workdirs.ts). 새 채팅에서 폴더를 비우면 화면이 이 아래 경로를 채운다.
+  // 구버전 매니저는 보내지 않는다 — 그 장비에서는 폴더를 직접 적어야 한다.
+  chatWorkdirRoot?: string | null;
   // Terminal — 지금 살아 있는 PTY 전체(TerminalRunner.liveStates). agent_sessions 와 같은
   // 규약으로 매 tick 전체 목록을 보내 서버의 유령 행을 정리하게 한다.
   terminalsProvider?: (() => TerminalHeartbeatEntry[]) | null;
@@ -669,6 +672,7 @@ export class InstanceHeartbeat {
         ...(agentSessions ? { agent_sessions: agentSessions } : {}),
         ...(meta?.platform ? { platform: meta.platform } : {}),
         ...(meta?.terminalShells?.length ? { terminal_shells: meta.terminalShells } : {}),
+        ...(meta?.chatWorkdirRoot ? { chat_workdir_root: meta.chatWorkdirRoot } : {}),
         ...(terminals ? { terminals } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(agentLaunchSpecs ? { agent_launch_specs: agentLaunchSpecs } : {}),

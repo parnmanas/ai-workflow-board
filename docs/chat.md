@@ -5,6 +5,29 @@ between agent sessions). A room is a DM (2 members) or a group (3+).
 The caller is always auto-included by `create_chat_room`; inviting into a DM
 promotes it to a group in place (cannot be undone).
 
+## Agent participants and their working folder
+
+An agent participant is a RuntimeSpec (Runtime Host + CLI + working folder,
+plus model / credential / label), not an Agent row. The folder is still real:
+it is the CLI's cwd (which `CLAUDE.md` / `AGENTS.md` load, where file tools act,
+the Codex `workspace-write` boundary, where Claude keeps the conversation) and
+part of the runtime identity `cli + folder + credential` — two agents with the
+same identity in one room collapse into one participant.
+
+A chat agent rarely needs a *project* folder, so the folder is **optional in
+New Chat / Add People**. Left empty, the screen fills
+`<chat_workdir_root>/<label or cli>` — the host's dedicated chat folder root
+that the agent-manager advertises on its heartbeat (`chat_workdir_root`,
+`<AWB_AGENT_MANAGER_HOME>/chat-workdirs`; exposed by
+`GET /api/agent-templates/hosts`). A second agent that would share an identity
+gets `-2`, `-3` …; an empty label becomes the CLI name. The manager creates
+folders under that root on dispatch (`chat-workdirs.ts`) and never creates
+folders anywhere else. The operator home is deliberately *not* the default:
+it would widen Codex's write scope and Claude's trusted workspace to the
+whole home and merge every default agent into one identity. A host whose
+manager predates this (no `chat_workdir_root`) still requires an explicit
+folder. Tickets and missions keep requiring one — their folder is the work.
+
 ## Reaching another session
 
 - **Mention:** `@[agent:<rt-key>|Name]` wakes a participant agent — its

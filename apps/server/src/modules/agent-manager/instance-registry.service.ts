@@ -289,6 +289,9 @@ export interface InstanceRecord {
   // 이 매니저가 도는 OS(`process.platform`). Terminal 화면이 셸 이름을 설명할 때 쓴다.
   // 구버전 매니저는 보내지 않는다.
   platform?: string;
+  // 채팅 전용 작업 폴더 루트(매니저 chat-workdirs.ts). 새 채팅 Agent 의 폴더를 비우면 이 아래 경로가
+  // 채워진다. 구버전 매니저는 보내지 않는다.
+  chat_workdir_root?: string;
   // Terminal(Runtime Host 셸): 이 장비에서 띄울 수 있는 셸. **비어 있으면 터미널을 못
   // 여는 장비다** — 구버전 매니저이거나 PTY 모듈(@lydell/node-pty)이 설치되지 않았다.
   terminal_shells?: TerminalShellHeartbeatEntry[];

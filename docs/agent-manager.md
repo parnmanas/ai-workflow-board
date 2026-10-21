@@ -657,6 +657,15 @@ can actually launch; an empty list is how a host without PTY support tells the s
 "do not offer terminals here" (the module is an optional dependency, so a failed
 install degrades to that instead of breaking the manager). Details: `docs/terminals.md`.
 
+## Chat working folders
+
+`chat-workdirs.ts` owns `<AWB_AGENT_MANAGER_HOME>/chat-workdirs`, advertised on
+every heartbeat as `chat_workdir_root` (server ↔ manager contract — change both
+in the same PR). New Chat fills `<root>/<label or cli>` when a chat agent is
+declared without a folder, and `#resolveRuntimeContext` creates that folder on
+dispatch — only paths strictly inside the root, never a user-chosen folder.
+Details: `docs/chat.md` → "Agent participants and their working folder".
+
 ## CLI Memory
 
 `cli-memory-runner.ts` reads and writes the memory files of the LLM CLIs on this host

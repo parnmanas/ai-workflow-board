@@ -21,6 +21,8 @@ export { emptyRuntimeSpec };
 export interface RuntimeHostChoice {
   id: string;
   name: string;
+  /** 이 Host 매니저가 알린 채팅 전용 폴더 루트(새 채팅에서 폴더를 비우면 쓴다). 모르면 null. */
+  chat_workdir_root?: string | null;
 }
 
 interface RuntimeSpecEditorProps {
@@ -36,6 +38,11 @@ interface RuntimeSpecEditorProps {
    * main clone folder on the selected host). Default true; pass false to hide.
    */
   showProjectFolderHelper?: boolean;
+  /**
+   * 작업 폴더를 비워도 되는 화면(새 채팅)만 준다 — 라벨에 "선택" 을 붙이고 비웠을 때 무엇을 쓰는지
+   * 안내한다. 기본값을 실제로 채우는 것은 호출자 몫이다(티켓·미션에서는 폴더가 필수다).
+   */
+  folderOptionalHint?: string | null;
   disabled?: boolean;
 }
 
@@ -54,6 +61,7 @@ export default function RuntimeSpecEditor({
   accountId,
   showFolderScope = false,
   showProjectFolderHelper = true,
+  folderOptionalHint = null,
   disabled = false,
 }: RuntimeSpecEditorProps) {
   const set = (patch: Partial<RuntimeSpecDraft>) => onChange({ ...value, ...patch });
@@ -88,13 +96,18 @@ export default function RuntimeSpecEditor({
 
       <div style={{ marginTop: 12 }}>
         <Input
-          label="Working dir (Host 절대 경로)"
+          label={folderOptionalHint ? 'Working dir (선택 · Host 절대 경로)' : 'Working dir (Host 절대 경로)'}
           value={value.working_dir}
           disabled={disabled}
-          placeholder="/home/user/work"
+          placeholder={folderOptionalHint ? '비워 두면 채팅 전용 폴더' : '/home/user/work'}
           onChange={(e) => set({ working_dir: (e.target as HTMLInputElement).value })}
         />
         {dirError && <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 4 }}>{dirError}</div>}
+        {folderOptionalHint && !value.working_dir.trim() && (
+          <div data-testid="runtime-folder-optional-hint" style={{ fontSize: 11, color: tokens.colors.textSecondary, marginTop: 4, lineHeight: 1.5 }}>
+            {folderOptionalHint}
+          </div>
+        )}
         {showProjectFolderHelper && (
           <ProjectFolderHelper
             accountId={accountId}

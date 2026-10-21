@@ -43,3 +43,51 @@ export function newChatShape(counts: { agents: number; people: number }): 'empty
   if (total === 0) return 'empty';
   return total === 1 ? 'dm' : 'group';
 }
+
+// ─── 기본 채팅 폴더 ───────────────────────────────────────────────────────
+// 채팅 Agent 의 작업 폴더는 선택이다. 비우면 그 Runtime Host 매니저가 알린 채팅 전용 루트
+// (`chat_workdir_root`, agent-manager chat-workdirs.ts) 아래 `<이름>` 을 쓴다 — 매니저가 첫 디스패치
+// 때 만든다. 폴더는 여전히 CLI 의 cwd 이자 실행 신원의 일부라서, 같은 방에서 겹치면 `-2`, `-3` 을
+// 붙여 다른 신원으로 만든다. 같은 이름이면 다른 방에서도 같은 폴더(같은 신원)를 다시 쓴다.
+
+/** 폴더 이름으로 쓸 조각 — 영숫자·한글·`.`·`-`·`_` 만, 비면 `agent`. */
+export function chatFolderSlug(name: string | null | undefined): string {
+  const slug = (name || '').trim().toLowerCase()
+    .replace(/[^a-z0-9가-힣._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 60);
+  return slug || 'agent';
+}
+
+function hostSeparator(root: string): '/' | '\\' {
+  return root.includes('\\') && !root.includes('/') ? '\\' : '/';
+}
+
+/** root 아래 경로인가(기본 채팅 폴더를 카드에서 짧게 보이기 위해). */
+export function isChatWorkdir(dir: string | null | undefined, root: string | null | undefined): boolean {
+  if (!dir || !root) return false;
+  const sep = hostSeparator(root);
+  const base = root.endsWith(sep) ? root : root + sep;
+  return dir.startsWith(base) && dir.length > base.length;
+}
+
+/**
+ * 비워 둔 폴더의 기본값. `taken(dir)` 이 true 면(같은 방의 다른 Agent 와 신원이 겹치면) 번호를 붙인다.
+ * root 가 없으면(꺼진 Host · 구버전 매니저) null — 그때는 폴더를 직접 적어야 한다.
+ */
+export function defaultChatWorkdir(
+  root: string | null | undefined,
+  name: string | null | undefined,
+  taken: (dir: string) => boolean,
+): { dir: string; n: number } | null {
+  const trimmed = (root || '').trim();
+  if (!trimmed) return null;
+  const sep = hostSeparator(trimmed);
+  const base = trimmed.endsWith(sep) ? trimmed.slice(0, -1) : trimmed;
+  const slug = chatFolderSlug(name);
+  for (let n = 1; n < 100; n += 1) {
+    const dir = `${base}${sep}${n === 1 ? slug : `${slug}-${n}`}`;
+    if (!taken(dir)) return { dir, n };
+  }
+  return null;
+}

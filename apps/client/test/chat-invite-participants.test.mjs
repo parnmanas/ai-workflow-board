@@ -24,6 +24,7 @@ import { RoomHeaderActions } from '../src/components/chat/RoomDetailPanel.tsx';
 import ParticipantPicker from '../src/components/chat/ParticipantPicker.tsx';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { canInviteToRoom } from '../src/components/chat/utils/participantFlow.ts';
+import { chatFolderSlug, defaultChatWorkdir, isChatWorkdir } from '../src/components/chat/utils/chatAgents.ts';
 
 const flush = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
@@ -166,7 +167,7 @@ const AGENTS = [
 ];
 
 /** 피커를 AuthProvider 아래 마운트하고, api 를 원상복구할 정리 함수를 함께 돌려준다. */
-function mountPicker(props) {
+function mountPicker(props, { hosts } = {}) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
   const originals = {
@@ -182,7 +183,7 @@ function mountPicker(props) {
   api.listAgentTemplates = async () => [];
   api.getAgents = async () => AGENTS;
   // P4c-4: 에이전트는 runtime 선언으로 들어간다 — Host 카탈로그 스텁.
-  api.listTemplateHosts = async () => [{ id: 'host-1', name: 'host-one' }];
+  api.listTemplateHosts = async () => hosts ?? [{ id: 'host-1', name: 'host-one' }];
   // 서버 normalizeRuntimeSpec 처럼 label 이 비면 `<폴더 끝>/<cli>` 로 채운다.
   api.validateRuntimeSpec = async (_ws, spec) => ({
     ok: true,
@@ -237,7 +238,7 @@ async function declareAgent(container, { dir, label = '' }) {
   await flush();
   const cliSelect = [...editor.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'claude'));
   const inputs = [...editor.querySelectorAll('input')];
-  const dirInput = inputs.find((i) => i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+  const dirInput = inputs.find((i) => i.type === 'text' && i.placeholder && /\/home\/user\/work|채팅 전용 폴더/.test(i.placeholder));
   assert.ok(cliSelect && dirInput, 'runtime 선언 입력(CLI/dir)이 없다');
   await act(async () => {
     setNativeValue(cliSelect, 'claude');
@@ -434,6 +435,74 @@ test('아무도 고르지 않으면 제출 버튼이 비활성이다', async () 
     const submit = findButton(picker.container, /Convert to Group/);
     assert.ok(submit);
     assert.equal(submit.disabled, true);
+  } finally {
+    picker.unmount();
+    picker.restore();
+  }
+});
+
+// ─── 작업 폴더는 선택 — 비우면 그 Host 의 채팅 전용 폴더 ─────────────────────
+// 폴더는 CLI 의 cwd 이자 실행 신원(cli + 폴더 + credential)의 일부라 없앨 수는 없다. 대신 비우면
+// 매니저가 알린 채팅 전용 루트 아래 `<이름>` 을 쓴다 — 홈을 기본값으로 쓰면 Codex 쓰기 범위·Claude
+// 신뢰 범위가 홈 전체가 된다.
+
+test('기본 채팅 폴더: 이름 조각 · 겹치면 번호 · Windows 루트 · 루트 없으면 null', () => {
+  assert.equal(chatFolderSlug('My Bot!'), 'my-bot');
+  assert.equal(chatFolderSlug('  '), 'agent');
+  assert.equal(chatFolderSlug('../etc'), 'etc', '경로 조각으로 빠져나가지 않는다');
+  const taken = new Set(['/m/chat/claude']);
+  assert.deepEqual(defaultChatWorkdir('/m/chat/', 'claude', (d) => taken.has(d)), { dir: '/m/chat/claude-2', n: 2 });
+  assert.deepEqual(defaultChatWorkdir('C:\\awb\\chat', '리뷰어', () => false), { dir: 'C:\\awb\\chat\\리뷰어', n: 1 });
+  assert.equal(defaultChatWorkdir(null, 'x', () => false), null);
+  assert.equal(isChatWorkdir('/m/chat/claude', '/m/chat'), true);
+  assert.equal(isChatWorkdir('/m/chatty/x', '/m/chat'), false);
+  assert.equal(isChatWorkdir('/m/chat', '/m/chat'), false);
+});
+
+const CHAT_ROOT = '/home/u/.config/awb-agent-manager/chat-workdirs';
+
+test('새 채팅: 폴더를 비우면 채팅 전용 폴더를 쓰고, 같은 CLI 둘째는 번호를 붙여 다른 신원이 된다', async () => {
+  const calls = [];
+  const picker = mountPicker({}, { hosts: [{ id: 'host-1', name: 'host-one', chat_workdir_root: CHAT_ROOT }] });
+  api.createChatRoom = async (participants, name) => {
+    calls.push({ participants, name });
+    return { id: 'room-new', type: 'group', name };
+  };
+  try {
+    await flush();
+    click(findButton(picker.container, /^\+ Agent 추가$/));
+    await flush();
+    assert.ok(picker.container.querySelector('[data-testid="runtime-folder-optional-hint"]'), '폴더가 선택이라는 안내가 보여야 한다');
+    click(findButton(picker.container, /^취소$/));
+    await flush();
+
+    await declareAgent(picker.container, { dir: '' });
+    await declareAgent(picker.container, { dir: '' });
+    const cards = [...picker.container.querySelectorAll('[data-testid="new-chat-agent"]')].map((c) => c.textContent);
+    assert.equal(cards.length, 2, '같은 CLI 를 둘 넣어도 신원이 갈라져 둘 다 들어간다');
+    assert.match(cards[0], /host-one\/Claude Code/);
+    assert.match(cards[1], /host-one\/Claude Code 2/);
+    assert.match(cards[0], /채팅 전용 폴더/, '긴 기본 경로 대신 짧게 보인다');
+
+    click(findButton(picker.container, /^Create Group$/));
+    await flush();
+    assert.equal(calls.length, 1);
+    const dirs = calls[0].participants.filter((p) => p.participant_type === 'agent').map((p) => p.runtime.working_dir);
+    assert.deepEqual(dirs, [`${CHAT_ROOT}/claude`, `${CHAT_ROOT}/claude-2`]);
+  } finally {
+    picker.unmount();
+    picker.restore();
+  }
+});
+
+test('새 채팅: 채팅 전용 폴더를 모르는 Host(구버전·꺼짐)는 폴더를 비우면 사유를 보이고 추가하지 않는다', async () => {
+  const picker = mountPicker({});
+  try {
+    await flush();
+    const editor = await declareAgent(picker.container, { dir: '' });
+    assert.ok(editor, '편집기가 그대로 열려 있어야 한다');
+    assert.match(editor.querySelector('[role="alert"]').textContent, /채팅 전용 폴더를 알리지 않았습니다/);
+    assert.equal(picker.container.querySelectorAll('[data-testid="new-chat-agent"]').length, 0);
   } finally {
     picker.unmount();
     picker.restore();

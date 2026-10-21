@@ -9,7 +9,8 @@ import { isRuntimeSpecComplete } from '../../runtime/runtimeSpec';
 import { Button, Input, Modal } from '../common';
 import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeHostChoice, type RuntimeSpecDraft } from '../runtime/RuntimeSpecEditor';
 import { loadAddPeopleCandidates } from './utils/participantFlow';
-import { findSameRuntimeAgent, newChatShape } from './utils/chatAgents';
+import { cliLabel } from '../../cli/catalog';
+import { defaultChatWorkdir, findSameRuntimeAgent, isChatWorkdir, newChatShape } from './utils/chatAgents';
 
 // ─── Participant type for picker ──────────────────────────────────────────────
 
@@ -62,8 +63,9 @@ const hintStyle: React.CSSProperties = {
  * 새 채팅 / 사람 추가 — 여러 Agent 와 사람을 한 방에 모은다.
  *
  * Agent 는 목록에서 고르는 대상이 아니라 실행 선언이다(Agent 테이블 없음, P4c-4): Runtime
- * Host + CLI + 작업 폴더 (+ 모델·credential·label·역할)를 적어 하나씩 추가하고, 서버가
- * 저장 시점에 실행 신원을 매긴다. 사람은 계정 사용자 목록에서 고른다.
+ * Host + CLI (+ 작업 폴더·모델·credential·label·역할)를 적어 하나씩 추가하고, 서버가
+ * 저장 시점에 실행 신원을 매긴다. 작업 폴더를 비우면 그 Host 의 채팅 전용 폴더를 쓴다
+ * (chatAgents.defaultChatWorkdir). 사람은 계정 사용자 목록에서 고른다.
  */
 export default function NewChatModal({ open, onClose, onCreated, addToRoomId, existingParticipantIds = [], promotesDmToGroup = false }: NewChatModalProps) {
   const { user: currentUser } = useAuth();
@@ -109,7 +111,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
     let cancelled = false;
     api.listTemplateHosts()
       .then((rows) => {
-        if (!cancelled) setHosts((rows || []).map((h) => ({ id: h.id, name: h.name || h.id.slice(0, 8) })));
+        if (!cancelled) setHosts((rows || []).map((h) => ({ id: h.id, name: h.name || h.id.slice(0, 8), chat_workdir_root: h.chat_workdir_root ?? null })));
       })
       .catch(() => { if (!cancelled) setHosts([]); });
     return () => { cancelled = true; };
@@ -168,14 +170,31 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
   }
 
   async function saveAgent() {
-    if (!isRuntimeSpecComplete(draft)) {
-      setDraftError('Runtime Host, CLI, 작업 폴더(Host 절대 경로)를 모두 입력하세요.');
+    // 폴더를 비웠으면 그 Host 의 채팅 전용 폴더(<root>/<이름>)를 쓴다. 이름도 비웠으면 CLI 이름을
+    // 붙인다 — 그러지 않으면 서버 기본 label(`<폴더 끝>/<cli>`)이 `claude/claude` 가 된다.
+    let candidate = draft;
+    if (draft.manager_agent_id && draft.cli && !draft.working_dir.trim()) {
+      const root = hosts.find((h) => h.id === draft.manager_agent_id)?.chat_workdir_root ?? null;
+      const label = (draft.label || '').trim();
+      const picked = defaultChatWorkdir(root, label || draft.cli, (dir) => !!findSameRuntimeAgent(agents, { ...draft, working_dir: dir }, editingKey));
+      if (!picked) {
+        setDraftError('이 Runtime Host 는 채팅 전용 폴더를 알리지 않았습니다(꺼져 있거나 매니저가 오래됨) — 작업 폴더를 직접 입력하세요.');
+        return;
+      }
+      candidate = {
+        ...draft,
+        working_dir: picked.dir,
+        label: label || (picked.n > 1 ? `${cliLabel(draft.cli)} ${picked.n}` : cliLabel(draft.cli)),
+      };
+    }
+    if (!isRuntimeSpecComplete(candidate)) {
+      setDraftError('Runtime Host 와 CLI 를 고르세요. 작업 폴더를 적었다면 Host 절대 경로여야 합니다.');
       return;
     }
     setResolving(true);
     setDraftError(null);
     try {
-      const result = await api.validateRuntimeSpec(accountId, draft);
+      const result = await api.validateRuntimeSpec(accountId, candidate);
       if (!result.ok || !result.spec) throw new Error(result.error || 'Runtime 설정이 올바르지 않습니다.');
       const spec = result.spec;
       const same = findSameRuntimeAgent(agents, spec, editingKey);
@@ -199,6 +218,15 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       setResolving(false);
     }
   }
+
+  // 작업 폴더 안내 — 고른 Host 가 채팅 전용 폴더를 알렸을 때만 "비워도 된다" 고 말한다.
+  const draftRoot = hosts.find((h) => h.id === draft.manager_agent_id)?.chat_workdir_root ?? null;
+  const chatFolderHint = !draft.manager_agent_id
+    ? '비워 두면 그 Host 의 채팅 전용 폴더를 씁니다. 프로젝트 파일을 다룰 Agent 만 폴더를 고르세요.'
+    : draftRoot
+    ? `비워 두면 ${draftRoot} 아래 전용 폴더를 씁니다. 프로젝트 파일을 다룰 Agent 만 폴더를 고르세요.`
+    // 그 Host 가 지원하지 않으면 폴더는 필수다 — "선택" 표시를 내지 않는다(저장할 때 사유를 알린다).
+    : null;
 
   const isAddMode = !!addToRoomId;
   const shape = newChatShape({ agents: agents.length, people: selectedPeople.length });
@@ -322,7 +350,9 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
             <ul style={{ listStyle: 'none', margin: `${tokens.spacing.sm}px 0 0`, padding: 0, display: 'flex', flexDirection: 'column', gap: tokens.spacing.xs }}>
               {agents.map((a) => {
                 const name = agentName(a.spec);
-                const meta = [a.spec.cli, a.spec.model || 'CLI 기본 모델', a.spec.working_dir].filter(Boolean).join(' · ');
+                const root = hosts.find((h) => h.id === a.spec.manager_agent_id)?.chat_workdir_root;
+                const folder = isChatWorkdir(a.spec.working_dir, root) ? '채팅 전용 폴더' : a.spec.working_dir;
+                const meta = [a.spec.cli, a.spec.model || 'CLI 기본 모델', folder].filter(Boolean).join(' · ');
                 const isEditing = editingKey === a.key;
                 return (
                   <li
@@ -386,6 +416,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                 onChange={(next) => { setDraft(next); setDraftError(null); }}
                 hosts={hosts}
                 accountId={accountId}
+                folderOptionalHint={chatFolderHint}
                 disabled={resolving}
               />
               {draftError && (

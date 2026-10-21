@@ -93,6 +93,7 @@ import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile }
 import { AgentSessionRunner, detectAcpSessionClis } from './lib/agent-session-runner.js';
 import { TerminalRunner } from './lib/terminal-runner.js';
 import { MemoryRunner } from './lib/cli-memory-runner.js';
+import { CHAT_WORKDIR_ROOT } from './lib/chat-workdirs.js';
 import { loadAgentInfo } from './lib/config.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
@@ -1636,6 +1637,8 @@ async function runRuntime(
       platform: process.platform,
       terminalShells,
       terminalsProvider: () => terminalRunner.liveStates(),
+      // 새 채팅에서 폴더를 비우면 쓰는 이 장비의 채팅 전용 폴더 루트.
+      chatWorkdirRoot: CHAT_WORKDIR_ROOT,
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,

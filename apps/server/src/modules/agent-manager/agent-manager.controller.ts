@@ -10,6 +10,7 @@ import { Credential } from '../../entities/Credential';
 import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
 import { Project } from '../../entities/Project';
+import { isAbsoluteHostPath } from '../../common/orchestration-member-spec';
 import { Account } from '../../entities/Account';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { decrypt } from '../../services/encryption.service';
@@ -594,6 +595,9 @@ export class AgentManagerController {
         .map((e: any) => ({ terminal_id: String(e.terminal_id).slice(0, 64), status: String(e.status).slice(0, 32) }))
       : undefined;
     const platform = typeof body?.platform === 'string' && body.platform ? String(body.platform).slice(0, 32) : undefined;
+    // 채팅 전용 작업 폴더 루트 — 새 채팅에서 폴더를 비우면 화면이 이 아래 경로를 채운다(절대 경로만).
+    const chatRoot = typeof body?.chat_workdir_root === 'string' ? body.chat_workdir_root.trim() : '';
+    const chat_workdir_root = chatRoot && chatRoot.length <= 1024 && isAbsoluteHostPath(chatRoot) ? chatRoot : undefined;
 
     // Runtime Host supervision metadata.
     const agent_ids = Array.isArray(body?.agent_ids)
@@ -905,6 +909,7 @@ export class AgentManagerController {
       acp_adapter_latest_versions,
       ...(agent_sessions !== undefined ? { agent_sessions } : {}),
       ...(platform !== undefined ? { platform } : {}),
+      ...(chat_workdir_root !== undefined ? { chat_workdir_root } : {}),
       ...(terminal_shells !== undefined ? { terminal_shells } : {}),
       ...(terminals !== undefined ? { terminals } : {}),
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
