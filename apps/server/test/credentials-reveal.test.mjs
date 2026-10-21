@@ -175,7 +175,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
       permissions: JSON.stringify(['admin.credentials']),
       password_hash: await auth.hashPassword('user-password'),
     }));
-    const account = await accountRepo.save(accountRepo.create({ name: 'Reveal Account' }));
+    const account = await accountRepo.save(accountRepo.create({ name: 'Reveal Account', kind: 'personal', owner_user_id: admin.id }));
     const routedCredential = await credentialRepo.save(credentialRepo.create({
       account_id: account.id,
       board_id: null,

@@ -78,6 +78,8 @@ before(async () => {
 
   account = await ds.getRepository('Account').save(ds.getRepository('Account').create({
     name: 'Profile integration account',
+    kind: 'personal',
+    owner_user_id: owner.id,
     cli_runtime_profiles: JSON.stringify([{
       id: 'legacy-profile',
       kind: 'claude-backend',
@@ -155,14 +157,20 @@ describe('Claude backend profile integration', () => {
       runtime_config: { strategy: 'single', permission_mode: 'strict' },
     });
     const denied = await apiRequest(baseUrl, '/runtime-specs/validate', {
-      token: adminToken, method: 'POST', body: { account_id: account.id, spec: spec('legacy-profile') },
+      token: ownerToken, method: 'POST', body: { account_id: account.id, spec: spec('legacy-profile') },
     });
     assert.equal(denied.status, 400, JSON.stringify(denied.data));
     assert.match(denied.data.error, /does not exist$/, '에러 문구에 계정 스코프가 남으면 안 됩니다.');
 
     // profileB 는 어떤 계정에도 배정된 적이 없다 — 예전 계약이라면 400.
-    // 검증은 로그인만 요구하므로 계정 멤버도 같은 판정을 받는다.
-    for (const token of [adminToken, memberToken]) {
+    // Global catalog visibility does not grant access to another account's Host.
+    for (const token of [adminToken, memberToken, outsiderToken]) {
+      const forbidden = await apiRequest(baseUrl, '/runtime-specs/validate', {
+        token, method: 'POST', body: { account_id: account.id, spec: spec(profileB.id) },
+      });
+      assert.equal(forbidden.status, 403, JSON.stringify(forbidden.data));
+    }
+    for (const token of [ownerToken]) {
       const accepted = await apiRequest(baseUrl, '/runtime-specs/validate', {
         token, method: 'POST', body: { account_id: account.id, spec: spec(profileB.id) },
       });

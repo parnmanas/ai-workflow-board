@@ -32,14 +32,15 @@ before(async () => {
   ds = new DataSource(buildDataSourceOptions());
   await ds.initialize();
 
-  // P4c-4: registry 접근 자격은 Host 행이다.
+  account = await ds.getRepository('Account').save(ds.getRepository('Account').create({
+    name: 'Profile MCP account',
+  }));
+  // Registry identity requires an active, account-owned Host.
   managerAgent = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({
     name: 'Profile manager',
     hostname: 'profile-test',
-    account_id: null,
-  }));
-  account = await ds.getRepository('Account').save(ds.getRepository('Account').create({
-    name: 'Profile MCP account',
+    account_id: account.id,
+    is_active: 1,
   }));
 });
 
@@ -48,7 +49,7 @@ after(async () => {
 });
 
 describe('Claude backend profile MCP operations', () => {
-  it('allows DB-backed full-scope keys bound to any existing Agent', async () => {
+  it('allows DB-backed full-scope keys bound to active account-owned Hosts', async () => {
     const managerCaller = {
       agentId: managerAgent.id,
       source: 'db',
@@ -71,7 +72,7 @@ describe('Claude backend profile MCP operations', () => {
         agentId: ordinary.id,
         source: 'db',
         scope: 'full',
-        accountId: '00000000-0000-0000-0000-000000000000',
+        accountId: account.id,
       }),
       null,
     );
@@ -107,6 +108,17 @@ describe('Claude backend profile MCP operations', () => {
       }),
       unauthorized,
     );
+  });
+
+  it('rejects ownerless and inactive Host identities', async () => {
+    for (const fields of [{ account_id: null, is_active: 1 }, { account_id: account.id, is_active: 0 }]) {
+      const host = await ds.getRepository('RuntimeHost').save({
+        name: 'Unavailable profile operator', hostname: 'profile-test', ...fields,
+      });
+      assert.match(await tools.requireAgentRegistryAccess(ds, {
+        agentId: host.id, source: 'db', scope: 'full', accountId: account.id,
+      }), /Unauthorized/);
+    }
   });
 
   it('upserts once, reuses on retry, and refuses a same-name overwrite', async () => {
