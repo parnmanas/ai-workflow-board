@@ -12,7 +12,7 @@ export default defineConfig({
       ? { executablePath: process.env.CHROME_PATH }
       : undefined,
   },
-  webServer: {
+  webServer: process.env.PLAYWRIGHT_TEST_MATCH === 'ontology-graph.e2e.mjs' ? undefined : {
     command: 'npm run dev -- --host 127.0.0.1 --port 4173',
     cwd: '..',
     url: 'http://127.0.0.1:4173',

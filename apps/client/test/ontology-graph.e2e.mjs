@@ -3,14 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'vite';
 import { bootApp, closeTestApp } from '../../server/test/helpers/boot.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
-const API_PORT = 7701;
 const FIXTURE_FOLDER = 'apps/client/test/fixtures/ontology-smoke-source';
 
 let app;
+let vite;
+let baseUrl;
 let account;
 let project;
 let token;
@@ -25,7 +27,20 @@ test.beforeAll(async () => {
   fs.rmSync(gitCachePath, { recursive: true, force: true });
   [process.env.SQLJS_DB_PATH, process.env.SQLJS_ONTOLOGY_DB_PATH] = dbPaths;
   process.env.AWB_GIT_CACHE_DIR = gitCachePath;
-  ({ app } = await bootApp({ port: API_PORT, logger: false }));
+  const boot = await bootApp({ port: 0, logger: false });
+  app = boot.app;
+  const apiUrl = `http://127.0.0.1:${boot.port}`;
+  // Keep the real API, including SSE, isolated from any running AWB server.
+  vite = await createServer({
+    root: path.resolve(__dirname, '..'),
+    server: {
+      host: '127.0.0.1',
+      port: 0,
+      proxy: { '/api': { target: apiUrl }, '/mcp': { target: apiUrl } },
+    },
+  });
+  await vite.listen();
+  baseUrl = `http://127.0.0.1:${vite.httpServer.address().port}`;
 
   const { getDataSourceToken } = await import('@nestjs/typeorm');
   const { AuthService } = await import('../../server/dist/services/auth.service.js');
@@ -39,10 +54,8 @@ test.beforeAll(async () => {
   account = await dataSource.getRepository('Account').save({
     name: 'Ontology smoke account',
     description: 'Bounded browser smoke fixture',
-  });
-  await dataSource.getRepository('RelationTuple').save({
-    subject_type: 'user', subject_id: user.id, relation: 'admin',
-    object_type: 'account', object_id: account.id,
+    kind: 'personal',
+    owner_user_id: user.id,
   });
   project = await dataSource.getRepository('Project').save({
     account_id: account.id,
@@ -57,6 +70,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  await vite?.close();
   await closeTestApp(app);
   for (const dbPath of dbPaths) fs.rmSync(dbPath, { force: true });
   fs.rmSync(gitCachePath, { recursive: true, force: true });
@@ -86,7 +100,7 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
     if (url.pathname === '/api/ontology/graph' && response.ok()) snapshotLoads += 1;
   });
 
-  await page.goto(`/ontology-graph`);
+  await page.goto(`${baseUrl}/ontology-graph`);
   await page.getByPlaceholder('repo root').fill(FIXTURE_FOLDER);
   await page.locator('select').filter({ has: page.locator(`option[value="${project.id}"]`) }).selectOption(project.id);
 
