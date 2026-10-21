@@ -751,6 +751,25 @@ test('close while a permission is pending relays a system-cancelled decision and
   assert.equal(runner._snapshot().length, 0);
 });
 
+test('interruptedTurns lists a session cut off mid-decision, and nothing once the turn is over', async (t) => {
+  // 매니저 재시작 직전에 저장할 것(restart-resume.ts) — 턴 중이거나 그 안에서 결정을 기다리는 세션만.
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-i', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-i').result.session_id;
+  assert.deepEqual(runner.interruptedTurns(), [], 'an open session with no turn has nothing to continue');
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-i', text: 'hello' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  const [cut] = runner.interruptedTurns();
+  assert.equal(cut.session_id, sid);
+  assert.equal(cut.cli, 'claude');
+  assert.equal(cut.cwd, cwd);
+  assert.equal(cut.state, 'awaiting_permission');
+  assert.ok(Date.parse(cut.turn_started_at) <= Date.now());
+  await runner.handle(request('close', { session_id: sid }));
+  await turn;
+  assert.deepEqual(runner.interruptedTurns(), []);
+});
+
 // Windows 회귀 가드 (ralf): 어댑터가 npm 배치 shim 이거나 `npx` 폴백이면 node 의 spawn() 은
 // `spawn npx ENOENT` / `spawn EINVAL` 로 죽는다. ACP 어댑터는 반드시 cross-spawn 으로 띄운다.
 test('ACP adapters are spawned through cross-spawn so Windows .cmd shims and the npx fallback resolve', async () => {

@@ -730,8 +730,9 @@ test('user_prompt 는 출처별로 origin 을 갖는다 — 직접 입력과 자
     ev('user_prompt', { text: '[AWB 작업 보고] 다른 세션 소식 1건입니다.\n\n1. 완료' }, 't2'),
     ev('user_prompt', { text: '[AWB 오퍼레이터 작업] Jarvis — 사용자 승인\n테스트 돌려줘' }, 't3'),
     ev('user_prompt', { text: 'User answer to your asynchronous question (abc):\nQ\n{"a":1}' }, 't4'),
+    ev('user_prompt', { text: '[AWB 재개] Agent Manager 가 재시작(업데이트)되면서 이 세션의 직전 턴이 중간에 끊겼습니다.' }, 't5'),
   ]);
-  assert.deepEqual(blocks.map((b) => b.origin), ['user', 'operator-report', 'operator-task', 'async-answer']);
+  assert.deepEqual(blocks.map((b) => b.origin), ['user', 'operator-report', 'operator-task', 'async-answer', 'restart-resume']);
   assert.equal(blocks[1].report, true);
   assert.equal(blocks[2].operatorTask, 'Jarvis');
   assert.equal(blocks[2].text, '테스트 돌려줘', 'operator 작업은 앞머리를 떼고 본문만 둔다');

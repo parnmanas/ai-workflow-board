@@ -77,6 +77,8 @@ const DIRECT_KIND: Record<SessionReportKind, Extract<AnnouncementKind, `session_
   failed: 'session_turn_failed',
   needs_permission: 'session_needs_input',
   needs_input: 'session_needs_input',
+  // operator 에게 닿지 못한 재시작 보고 — 템플릿에 "끊김" 이 없어 가장 가까운 "턴 실패" 로 알린다.
+  interrupted: 'session_turn_failed',
 };
 
 /** 매니저가 중계한 요청 행 → 보고에 실을 요청(답을 전하는 데 필요한 id · 선택지 · 칸). */

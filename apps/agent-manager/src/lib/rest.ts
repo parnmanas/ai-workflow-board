@@ -1223,6 +1223,31 @@ export async function provisionRuntimeApiKey(
 }
 
 /**
+ * Hand AWB the work a planned restart interrupted (restart-resume.ts). `retry`
+ * = AWB could not be reached (keep the record); `rejected` = AWB answered 4xx
+ * (sending it again cannot help).
+ */
+export async function postRestartResume(
+  config: AwbConfig,
+  body: Record<string, unknown>,
+): Promise<{ status: 'ok' | 'retry' | 'rejected'; detail: string }> {
+  try {
+    const resp = await fetch(`${trimSlash(config.url)}/api/agent-manager/restart-resume`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    const text = await resp.text().catch(() => '');
+    if (resp.ok) return { status: 'ok', detail: text.slice(0, 300) };
+    const retryable = resp.status >= 500 || resp.status === 408 || resp.status === 429;
+    return { status: retryable ? 'retry' : 'rejected', detail: `${resp.status} ${text.slice(0, 200)}` };
+  } catch (err: any) {
+    return { status: 'retry', detail: err?.message ?? String(err) };
+  }
+}
+
+/**
  * Ask the server to immediately re-push agent_trigger(s) for the given
  * (ticket, role) work a just-restarted managed agent was interrupted on.
  * Used by restart_agent right after the fresh spawn so the agent resumes on

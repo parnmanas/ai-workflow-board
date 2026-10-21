@@ -151,7 +151,9 @@ export type PromptOrigin =
   /** operator 가 제안하고 사용자가 승인한 작업 — 왼쪽 주황 카드. */
   | 'operator-task'
   /** 에이전트의 비동기 질문에 사용자가 폼으로 답한 것을 시스템이 전달 — 왼쪽 회색 카드. */
-  | 'async-answer';
+  | 'async-answer'
+  /** Agent Manager 재시작이 끊은 턴을 operator 가 잇게 해 AWB 가 보낸 고정 문구 — 왼쪽 회색 카드. */
+  | 'restart-resume';
 
 export type TranscriptBlock =
   /**
@@ -321,6 +323,16 @@ export function isAsyncAnswerPrompt(text: string): boolean {
   return (text || '').startsWith(ASYNC_ANSWER_PREFIX);
 }
 
+/**
+ * Agent Manager 재시작이 끊은 턴을 잇는 프롬프트(docs/voice-operator.md "재시작으로 끊긴 작업"). 첫머리는
+ * server `modules/voice/interrupted-sessions.ts` 의 `SESSION_RESUME_PREFIX` 와 같다(바꾸면 같이).
+ */
+export const SESSION_RESUME_PREFIX = '[AWB 재개]';
+
+export function isSessionResumePrompt(text: string): boolean {
+  return (text || '').startsWith(SESSION_RESUME_PREFIX);
+}
+
 /** user_prompt 한 건의 출처 — payload 에 명시(origin)가 있으면 그것을 믿고, 없으면 텍스트 앞머리로 안다. */
 export function resolvePromptOrigin(rawText: string, noted: boolean, payloadOrigin: unknown): { text: string; origin: PromptOrigin; report: boolean; operatorTask: string | null } {
   const text = rawText;
@@ -331,11 +343,13 @@ export function resolvePromptOrigin(rawText: string, noted: boolean, payloadOrig
     if (o === 'operator-report' || o === 'report') return { text, origin: 'operator-report', report: true, operatorTask: null };
     if (o === 'operator-task' || (o === 'server' && task)) return { text: task ? task.text : text, origin: 'operator-task', report: false, operatorTask: task ? task.operator : '' };
     if (o === 'async-answer') return { text, origin: 'async-answer', report: false, operatorTask: null };
+    if ((o === 'user' || o === 'server') && isSessionResumePrompt(text)) return { text, origin: 'restart-resume', report: false, operatorTask: null };
     if (o === 'user' || o === 'server') return { text: task ? task.text : text, origin: task ? 'operator-task' : (isOperatorReportPrompt(text) ? 'operator-report' : 'user'), report: isOperatorReportPrompt(text), operatorTask: task ? task.operator : null };
   }
   if (task) return { text: task.text, origin: 'operator-task', report: false, operatorTask: task.operator };
   if (isOperatorReportPrompt(text)) return { text, origin: 'operator-report', report: true, operatorTask: null };
   if (isAsyncAnswerPrompt(text)) return { text, origin: 'async-answer', report: false, operatorTask: null };
+  if (isSessionResumePrompt(text)) return { text, origin: 'restart-resume', report: false, operatorTask: null };
   if (noted) return { text, origin: 'voice', report: false, operatorTask: null };
   return { text, origin: 'user', report: false, operatorTask: null };
 }

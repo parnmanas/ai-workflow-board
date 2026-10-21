@@ -378,6 +378,7 @@ test('transcript: 직접 입력과 시스템·다른 세션·이미지 발신자
       { id: 'p2', seq: 2, turn_id: 't2', type: 'user_prompt', created_at: '2026-10-11T12:01:00.000Z', payload: { text: '[AWB 작업 보고] 다른 세션 소식 1건입니다.\n\n1. 완료' } },
       { id: 'p3', seq: 3, turn_id: 't3', type: 'user_prompt', created_at: '2026-10-11T12:02:00.000Z', payload: { text: '[AWB 오퍼레이터 작업] Jarvis — 사용자 승인\n테스트 돌려줘' } },
       { id: 'p4', seq: 4, turn_id: 't4', type: 'user_prompt', created_at: '2026-10-11T12:03:00.000Z', payload: { text: 'User answer to your asynchronous question (x):\nQ' } },
+      { id: 'p5', seq: 8, turn_id: 't5', type: 'user_prompt', created_at: '2026-10-11T12:04:00.000Z', payload: { text: '[AWB 재개] 직전 턴이 끊겼습니다. 이어서 진행하세요.' } },
       { id: 'i1', seq: 5, turn_id: 't1', type: 'image', created_at: '2026-10-11T12:00:01.000Z', payload: { image_ref: '', mime_type: 'image/png', size: 10, uri: 'https://example.com/a.png' } },
       { id: 'a1', seq: 6, turn_id: 't1', type: 'text', created_at: '2026-10-11T12:00:02.000Z', payload: { text: 'reply' } },
       { id: 'i2', seq: 7, turn_id: 't1', type: 'image', created_at: '2026-10-11T12:00:03.000Z', payload: { image_ref: '', mime_type: 'image/png', size: 10, uri: 'https://example.com/b.png' } },
@@ -399,6 +400,11 @@ test('transcript: 직접 입력과 시스템·다른 세션·이미지 발신자
     const async = document.querySelector('[data-block="async-answer"]');
     assert.ok(async, '비동기 답변 전달은 별도 블록이다');
     assert.match(async.parentElement.textContent, /자동 전달/);
+
+    const resume = document.querySelector('[data-block="restart-resume"]');
+    assert.ok(resume, '재시작으로 끊긴 턴의 재개는 사용자 말풍선이 아니라 시스템 블록이다');
+    assert.match(resume.parentElement.textContent, /재시작으로 끊긴 턴 이어서/);
+    assert.match(resume.textContent, /^\[AWB 재개\]/, '재개 문구는 그대로 보인다');
 
     // 직접 입력 말풍선은 오른쪽, 시스템·다른 세션은 왼쪽이다
     const userCol = user.closest('div[style]').parentElement;

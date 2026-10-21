@@ -13,7 +13,11 @@ import type { AnnouncementLanguage } from './announcement-text';
  */
 export const OPERATOR_REPORT_PREFIX = '[AWB 작업 보고]';
 
-export type SessionReportKind = 'finished' | 'failed' | 'needs_permission' | 'needs_input';
+/**
+ * `interrupted` — agent-manager 재시작(업데이트)이 진행 중이던 턴을 끊었다. operator 는
+ * `resume_interrupted_session` 으로 이어서 진행시킨다(interrupted-sessions.ts).
+ */
+export type SessionReportKind = 'finished' | 'failed' | 'needs_permission' | 'needs_input' | 'interrupted';
 
 export interface ReportedSession {
   manager_id: string;
@@ -128,13 +132,13 @@ function minutes(ms: number | null, lang: AnnouncementLanguage): string {
 }
 
 const KIND_LABEL: Record<AnnouncementLanguage, Record<SessionReportKind, string>> = {
-  ko: { finished: '완료', failed: '오류', needs_permission: '승인 필요', needs_input: '답변 필요' },
-  en: { finished: 'finished', failed: 'failed', needs_permission: 'needs approval', needs_input: 'needs an answer' },
+  ko: { finished: '완료', failed: '오류', needs_permission: '승인 필요', needs_input: '답변 필요', interrupted: '중단됨' },
+  en: { finished: 'finished', failed: 'failed', needs_permission: 'needs approval', needs_input: 'needs an answer', interrupted: 'interrupted' },
 };
 
 const DETAIL_LABEL: Record<AnnouncementLanguage, Record<SessionReportKind, string>> = {
-  ko: { finished: '마지막 답', failed: '오류', needs_permission: '요청', needs_input: '질문' },
-  en: { finished: 'Last answer', failed: 'Error', needs_permission: 'Request', needs_input: 'Question' },
+  ko: { finished: '마지막 답', failed: '오류', needs_permission: '요청', needs_input: '질문', interrupted: '상황' },
+  en: { finished: 'Last answer', failed: 'Error', needs_permission: 'Request', needs_input: 'Question', interrupted: 'What happened' },
 };
 
 /**
@@ -163,6 +167,16 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
   lines[0] += lang === 'ko'
     ? ' 어떤 세션에 이어서 시킬 일이 있으면 propose_session_prompt 로 제안하세요 — 사용자가 승인해야 전달됩니다. 다른 장비의 세션에도 제안할 수 있습니다(보고에 적힌 manager_id를 그대로 쓰세요).'
     : ' To have a session do follow-up work, propose it with propose_session_prompt — it is sent only after the user approves. Sessions on other hosts are fine targets too (use their manager_id as reported).';
+  if (reports.some((r) => r.kind === 'interrupted')) {
+    // 재시작으로 끊긴 세션 — 제안이 아니라 재개 도구로 바로 잇는다(사용자가 시작했던 일이고, 보내는 글은 AWB 가 정한다).
+    lines[0] += lang === 'ko'
+      ? ' "중단됨" 은 Agent Manager 재시작(업데이트)으로 진행 중이던 턴이 끊긴 세션입니다. 이어서 진행해야 하는 세션은 '
+        + 'resume_interrupted_session(manager_id, cli, session_id) 으로 재개하세요 — AWB 가 정해진 재개 문구를 바로 보내며 사용자 승인은 필요 없습니다. '
+        + '사용자가 멈추라고 했거나 이미 끝난 일처럼 재개가 맞지 않으면 재개하지 말고 요약에 그 이유를 적으세요. 너 자신의 세션이면 이 턴에서 이어서 하면 됩니다.'
+      : ' Items marked "interrupted" are sessions whose turn an Agent Manager restart (an update) cut off. Continue the ones that should go on with '
+        + 'resume_interrupted_session(manager_id, cli, session_id) — AWB sends a fixed resume prompt right away; no user approval is needed. '
+        + 'If resuming is wrong (the user told it to stop, or the work was already done), do not resume it and say why in your summary. If it is your own session, just carry on in this turn.';
+  }
   if (reports.some((r) => r.delegated)) {
     lines[0] += lang === 'ko'
       ? ' "네가 시킨 작업" 표시가 붙은 건은 네가 제안하고 사용자가 승인한 작업의 결과입니다 — 결과를 그대로 옮기지 말고 무엇이 됐는지 1~2문장으로 요약하세요.'

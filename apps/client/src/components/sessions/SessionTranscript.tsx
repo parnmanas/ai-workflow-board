@@ -168,17 +168,26 @@ function OperatorTaskPromptBlock({ text, operator, createdAt }: { text: string; 
   );
 }
 
-/** 에이전트의 비동기 질문에 사용자가 폼으로 답한 것을 시스템이 전달 — 직접 입력과 구분한다. */
-function AsyncAnswerPromptBlock({ text, createdAt }: { text: string; createdAt?: string }) {
+/**
+ * 사람이 아니라 시스템이 보낸 프롬프트 — 직접 입력과 구분한다. 비동기 질문의 답 전달(첫 줄은 안내라 떼고 본문만),
+ * 재시작으로 끊긴 턴의 재개(고정 문구 그대로).
+ */
+function SystemPromptBlock({ origin, label, text, createdAt, dropFirstLine }: {
+  origin: 'async-answer' | 'restart-resume';
+  label: string;
+  text: string;
+  createdAt?: string;
+  dropFirstLine?: boolean;
+}) {
   const time = createdAt ? promptTime(createdAt) : '';
   const lines = text.split('\n');
-  const body = lines.length > 1 ? lines.slice(1).join('\n').trim() : text;
+  const body = dropFirstLine && lines.length > 1 ? lines.slice(1).join('\n').trim() : text;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
-      <SenderLabel align="left">💬 질문 답변 자동 전달 · 시스템{time ? ` · ${time}` : ''}</SenderLabel>
+      <SenderLabel align="left">{label}{time ? ` · ${time}` : ''}</SenderLabel>
       <div
-        data-block="async-answer"
-        data-origin="async-answer"
+        data-block={origin}
+        data-origin={origin}
         style={{
           maxWidth: 860, alignSelf: 'flex-start',
           padding: '8px 12px', borderRadius: tokens.radii.md,
@@ -1168,7 +1177,10 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
               return <OperatorTaskPromptBlock key={block.key} text={block.text} operator={block.operatorTask || ''} createdAt={block.createdAt} />;
             }
             if (origin === 'async-answer') {
-              return <AsyncAnswerPromptBlock key={block.key} text={block.text} createdAt={block.createdAt} />;
+              return <SystemPromptBlock key={block.key} origin="async-answer" label="💬 질문 답변 자동 전달 · 시스템" text={block.text} createdAt={block.createdAt} dropFirstLine />;
+            }
+            if (origin === 'restart-resume') {
+              return <SystemPromptBlock key={block.key} origin="restart-resume" label="🔄 재시작으로 끊긴 턴 이어서 · AWB" text={block.text} createdAt={block.createdAt} />;
             }
             return <PromptBlock key={block.key} text={block.text} voice={block.voice || origin === 'voice'} createdAt={block.createdAt} />;
           }

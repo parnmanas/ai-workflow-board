@@ -28,6 +28,7 @@ import { findOnPath } from './find-on-path.js';
 import { describeHolders, findLockHolders, killHolder, selectKillTargets, type LockHolder } from './file-lock-holders.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { acceptRuntimeCredential } from './runtime-credential.js';
+import type { InterruptedAgentSession } from './restart-resume.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
@@ -572,6 +573,28 @@ export class AgentSessionRunner {
 
   countInFlight(): number {
     return this._snapshot().filter((s) => s.busy).length;
+  }
+
+  /**
+   * Sessions a restart would cut off mid-turn (or mid-decision inside one) —
+   * saved before a planned restart so the operator can have them continue
+   * (restart-resume.ts). An open session with no turn is left out: there is
+   * nothing to continue, its next prompt reopens it.
+   */
+  interruptedTurns(): InterruptedAgentSession[] {
+    return Array.from(this.#live.values())
+      .filter((live) => !live.exited && !live.closing && !!live.sessionId)
+      .filter((live) => live.turn !== null || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0)
+      .map((live) => ({
+        cli: live.cli,
+        session_id: live.sessionId,
+        cwd: live.cwd,
+        title: live.title,
+        state: live.pendingPermissions.size > 0
+          ? 'awaiting_permission'
+          : live.pendingElicitations.size > 0 || live.asyncQuestions.size > 0 ? 'awaiting_input' : 'turn',
+        turn_started_at: live.turn ? new Date(live.turn.startedAt).toISOString() : null,
+      }));
   }
 
   /**

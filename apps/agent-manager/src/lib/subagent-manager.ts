@@ -2612,6 +2612,16 @@ export class SubagentManager implements SubagentManagerContract {
     log(`SubagentManager stopped (terminated ${victims.length} children, reason=${stopReason})`);
   }
 
+  /** Ticket one-shots running now — a restart cuts every one of them off. */
+  inFlightTickets(): Array<{ ticketId: string; role: string; agentId: string }> {
+    const out: Array<{ ticketId: string; role: string; agentId: string }> = [];
+    for (const rec of this.#map.values()) {
+      if (rec.kind === 'reservation' || !rec.ticket_id) continue;
+      out.push({ ticketId: rec.ticket_id, role: rec.role || '', agentId: rec.agent_id || '' });
+    }
+    return out;
+  }
+
   _snapshot(): any[] {
     const out: any[] = [];
     for (const rec of this.#map.values()) {

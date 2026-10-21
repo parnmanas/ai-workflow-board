@@ -48,6 +48,7 @@ export type DispatchSource =
   | 'reassigned'     // assignee changed on an in_progress ticket
   | 'supervisor'     // the agent died without finishing
   | 'nack_retry'     // the manager refused the last dispatch; retrying
+  | 'manager_restart' // the host restarted mid-turn (update / restart_manager / restart_agent)
   | string;
 
 /** Supervisor re-sends without the agent making progress before the ticket is parked. */
@@ -150,6 +151,35 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     }
     if (ticket.status !== 'in_progress') return { dispatched: false, reason: `status_${ticket.status}` };
     return this.dispatch(ticket, source);
+  }
+
+  /**
+   * A Runtime Host restarted (or restarted one of its runtimes) in the middle of
+   * these tickets: re-send each one it actually runs. A ticket assigned to a
+   * runtime on another host is skipped — a manager only resumes its own work.
+   */
+  async resumeAfterHostRestart(
+    ticketIds: string[],
+    hostIds: string[],
+    opts: { assigneeKey?: string } = {},
+  ): Promise<{ resumed: string[]; skipped: Array<{ ticket_id: string; reason: string }> }> {
+    const hosts = new Set(hostIds.filter(Boolean));
+    const resumed: string[] = [];
+    const skipped: Array<{ ticket_id: string; reason: string }> = [];
+    for (const id of [...new Set(ticketIds.filter(Boolean))]) {
+      const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id } });
+      const host = parseRuntimeSpec(ticket?.assignee)?.manager_agent_id;
+      if (!ticket) {
+        skipped.push({ ticket_id: id, reason: 'not_found' });
+      } else if (!host || !hosts.has(host) || (opts.assigneeKey && ticket.assignee_key !== opts.assigneeKey)) {
+        skipped.push({ ticket_id: id, reason: 'not_this_host' });
+      } else {
+        const result = await this.resumeTicket(id, 'manager_restart');
+        if (result.dispatched) resumed.push(id);
+        else skipped.push({ ticket_id: id, reason: result.reason || 'not_dispatched' });
+      }
+    }
+    return { resumed, skipped };
   }
 
   /** Manual Run: a todo ticket starts now (still capacity-bound); in_progress re-sends. */

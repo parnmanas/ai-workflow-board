@@ -18,6 +18,10 @@
  *   - withdraw_session_prompt_proposal: 자기 제안을 거둔다.
  *   - list_session_prompt_proposals:   자기 제안의 상태(승인 대기 · 보낼 차례 · 보냄 · 거절 …).
  * 조건과 이유는 `voice/operator-proposal.service.ts`.
+ *
+ * 재시작으로 끊긴 작업(docs/voice-operator.md "재시작으로 끊긴 작업") — 제안의 유일한 예외:
+ *   - resume_interrupted_session:      agent-manager 재시작이 끊은 세션을 고정된 재개 문구로 잇는다(승인 없이).
+ * 조건과 이유는 `voice/interrupted-sessions.service.ts`.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -33,7 +37,7 @@ function failure(e: any) {
 }
 
 export function registerOperatorTools(server: McpServer, ctx: ToolContext): void {
-  const { operatorDecisionService, operatorProposalService } = ctx;
+  const { operatorDecisionService, operatorProposalService, interruptedSessionsService } = ctx;
   const unavailable = () => err('operator tools need the NestJS-integrated AWB server — live session state is not available in standalone MCP mode.');
 
   server.tool(
@@ -158,6 +162,28 @@ export function registerOperatorTools(server: McpServer, ctx: ToolContext): void
       if (!operatorProposalService) return unavailable();
       try {
         return ok({ proposal: await operatorProposalService.withdraw(getCallerAgent(extra), proposal_id) });
+      } catch (e: any) {
+        return failure(e);
+      }
+    },
+  );
+
+  server.tool(
+    'resume_interrupted_session',
+    `${WHO} Continues an Agent Session whose turn was cut off when its Runtime Host's agent-manager restarted (an update ` +
+    'or restart_manager) — only the sessions an AWB work report listed as "interrupted", within 6 hours, once each. AWB ' +
+    'sends a fixed resume prompt (you cannot choose the text) right away, without asking the user, because it continues ' +
+    'work the user had already started. For any new work use propose_session_prompt. Not for your own session — you are ' +
+    'already running again; carry on in your current turn.',
+    {
+      manager_id: z.string().describe('Runtime Host id of the interrupted session (as reported)'),
+      cli: z.string().describe('CLI of the interrupted session (e.g. claude, codex)'),
+      session_id: z.string().describe('The interrupted session\'s id'),
+    },
+    async (args, extra) => {
+      if (!interruptedSessionsService) return unavailable();
+      try {
+        return ok(await interruptedSessionsService.resume(getCallerAgent(extra), args));
       } catch (e: any) {
         return failure(e);
       }

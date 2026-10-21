@@ -451,6 +451,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   answer_session_question: 'non-ticket',
   propose_session_prompt: 'non-ticket',
   send_session_prompt_proposal: 'non-ticket',
+  resume_interrupted_session: 'non-ticket',
   withdraw_session_prompt_proposal: 'non-ticket',
   list_session_prompt_proposals: 'non-ticket',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',

@@ -1938,6 +1938,17 @@ export class BaseSessionManager {
    * server supervisor's stale sweep. Chat sessions carry no ticketId and so
    * contribute nothing to `inflight`.
    */
+  /**
+   * Ticket work a restart would cut off: sessions in the middle of a turn. A
+   * persistent session idling between turns is not interrupted work — waking
+   * its ticket again after the restart would only duplicate a turn.
+   */
+  inFlightTickets(): Array<{ ticketId: string; role: string; agentId: string }> {
+    return Array.from(this._sessions.values())
+      .filter((s) => s.ticketId && s._currentTurn)
+      .map((s) => ({ ticketId: s.ticketId as string, role: (s.role as string) || '', agentId: (s.agentId as string) || '' }));
+  }
+
   async stopForAgent(
     agentId: string,
   ): Promise<{ count: number; inflight: Array<{ ticketId: string; role: string }> }> {

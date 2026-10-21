@@ -404,7 +404,7 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
   맞춰 글로 만든다.
 - 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림음만 낸다), 깨어 있는 대화를 맡은
   화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
-- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기"). 이어서 시킬 일은 **제안**만 하고, 보내는 것은 사용자가 승인한 뒤다(아래 "작업 제안"). 그래서 보고마다 세션 참조(`manager_id` · `cli` · `session_id`)와 제안 도구 안내 한 줄이 실린다.
+- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기"). 이어서 시킬 일은 **제안**만 하고, 보내는 것은 사용자가 승인한 뒤다(아래 "작업 제안"). 예외는 매니저 재시작이 끊은 턴의 재개 하나다(아래 "재시작으로 끊긴 작업" — 고정 문구라 다른 세션의 글이 명령이 되지 않는다). 그래서 보고마다 세션 참조(`manager_id` · `cli` · `session_id`)와 제안 도구 안내 한 줄이 실린다.
 - **SSE 전달 목록(event-registry)은 필드를 골라 담는다** — `voice_announcement` 에 필드를 더하면 `map()` 에도 더할 것
   (`operator` 가 빠져 화면에 안 갔던 것을 `event-registry-payload-parity-guard` 가 잡았다).
 - 회귀: `apps/server/test/voice-operator-reports.test.mjs`(라우팅 · 보고 문장 · 요약 전달 · 보고 있음 · 바쁨/묶음 ·
@@ -507,6 +507,38 @@ queued → 대상이 한가하면 바로, 턴 중이면 그 턴이 끝날 때 pr
 - 회귀: `apps/server/test/voice-operator-proposals.test.mjs`(보고의 세션 참조 · 보고 턴 제안 · 거절 조건 · 보고 턴 자기 전송 거절 ·
   superseded · 화면 승인 → 턴 끝나면 전송 · 음성 승인 · 거둠/거절), `apps/client/test/session-proposals.test.mjs`(목록 규칙 · 화면별
   필터 · 전사 라벨 · 카드 동작).
+
+### 재시작으로 끊긴 작업 — operator 가 이어서 진행시킨다 (2026-10-22)
+
+agent-manager 업데이트(·`restart_manager`)는 돌고 있는 작업을 기다리지 않는다. 매니저가 재시작 직전에 끊길 작업을
+저장했다가 새 프로세스가 연결되면 AWB 에 넘긴다(`docs/agent-manager.md` → "재시작으로 끊긴 작업"). 티켓은 AWB 가 바로
+다시 보내고, 끊긴 **Agent Session** 은 그 호스트의 operator(없으면 가장 최근에 대화한 operator — 작업 보고와 같은
+`routeOperators()`)에게 `중단됨` 으로 보고한다(2026-10-22 사용자 요청: "해당 장비의 operator, 없으면 대표 operator 에게
+진행 중이던 세션을 계속 진행시키도록").
+
+```
+매니저 재시작 직전: 턴 중 세션·티켓 저장 → 재시작 → 연결되면 POST /api/agent-manager/restart-resume
+   ▼ 서버: 이 호스트의 티켓 resumeTicket(manager_restart) · 세션은 AGENT_MANAGER_RESTART_RESUME_EVENT
+InterruptedSessionsService: 끊김 기록(메모리, 6시간) + operator 에게 "1. 중단됨 — rolf / Codex · '빌드' … 끊길 때: 턴 실행 중, 12분"
+   ▼ operator 보고 턴: resume_interrupted_session(manager_id, cli, session_id)
+promptOnBehalf(그 세션의 계정·사용자, "[AWB 재개] Agent Manager 가 재시작(업데이트)되면서 … 이어서 진행하세요 …")
+```
+
+- **작업 제안의 유일한 예외다 — 사용자 승인 없이 보낸다.** 제안이 승인을 요구하는 이유는 보고(다른 세션이 쓴 글)가
+  다른 세션에 대한 명령이 되지 않게 하려는 것이다. 재개는 그 위험이 없다: 보내는 글은 AWB 가 정한 고정 문구
+  (`composeResumePrompt`)이고 operator 가 고르는 것은 "재개할지" 뿐이며, 잇는 일은 사용자가 이미 시작한 일이다.
+- 그래서 문을 좁게 둔다(`voice/interrupted-sessions.service.ts`): 등록된 operator 연결만(`not_an_operator`), AWB 가
+  끊김을 기록한 세션만(`not_interrupted` — 다른 일은 `propose_session_prompt`), 기록 뒤 6시간 안, 끊김마다 한 번
+  (`already_resumed`), 자기 세션은 아니다(`own_session` — 이미 다시 돌고 있으니 그 턴에서 잇는다). 보고 턴에서도 부를 수 있다.
+- 보고는 음성 지원 스위치와 무관하게 간다 — 결과 알림이 아니라 operator 가 할 일이다. operator 가 없으면 보고하지 않는다(세션
+  전사에 "Agent process stopped (self_update_restart)" 가 남는다). operator 에게 닿지 못하면 평소처럼 직접 알림으로 되돌리고,
+  템플릿에 "끊김" 이 없어 "턴 실패" 문장을 쓴다.
+- 끊김 기록은 메모리에만 있다 — 그 사이 서버가 다시 뜨면(배포) 아직 잇지 않은 세션은 사용자가 직접 이어야 한다.
+- 재개 프롬프트 첫머리 `[AWB 재개]` 는 server(`voice/interrupted-sessions.ts` `SESSION_RESUME_PREFIX`)·client
+  (`sessionTranscript.logic.ts`) 계약이다 — 화면은 사용자 말풍선이 아니라 "🔄 재시작으로 끊긴 턴 이어서 · AWB" 로 그린다.
+- 회귀: `apps/server/test/manager-restart-resume.test.mjs`(티켓 재전송 범위 · 보고 문장 · 재개 문구·계정·사용자 · 거절 조건 ·
+  한 번만 · resume-triggers), `apps/agent-manager/test/restart-resume.test.mjs`(저장·합치기·만료·전달 결과별 처리 · 끊긴 작업의
+  범위), `apps/client/test/agent-session-transcript.test.mjs`·`session-interactive-ui.test.mjs`(전사 표시).
 
 ### 출처 이벤트 (기본값)
 

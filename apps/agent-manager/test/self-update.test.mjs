@@ -11,8 +11,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promises as fsp, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { promises as fsp, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
@@ -27,10 +28,10 @@ import {
   _resetSelfUpdateInFlightForTests,
   UPDATE_CHANNEL_ENV,
   UPDATE_CHANNEL_OFF,
-  SELF_UPDATE_DRAIN_MAX_WAIT_MS,
   UpdateChecker,
-  evaluateNpmUpdateGate,
   hasPendingSelfUpdate,
+  setPlannedRestartHook,
+  _runPlannedRestartHookForTests,
   _npmGlobalUpdaterSourceForTests,
   pendingRestartReason,
   _setPendingRestartReasonForTests,
@@ -166,31 +167,35 @@ test('runSelfUpdate: channel=off refuses to touch the install', async () => {
   }
 });
 
-// ticket b831b896: a self-update restart used to SIGTERM every in-flight
-// chat/action/QA/ticket-dispatch session unconditionally — a session that
-// had started 13 seconds earlier died mid-run and its failure got recorded
-// with a guessed cause.
-//
-// Round 1 fixed that by blocking runSelfUpdate in-call until
-// countInFlightSessions() drained. Review round 2 found that blocking wait
-// itself was a regression: it ran BEFORE checking whether an update was
-// even needed (channel off / already latest paid the full wait for
-// nothing), it held the module-level self-update mutex for its whole
-// duration (silently no-op'ing a concurrent operator restart_manager), and
-// — because the drain cap and the server's command-ledger RECORD_TTL_MS are
-// both exactly 10 minutes — the SSE update_manager ack for any run that hit
-// the cap arrived after the ledger entry expired and got rejected 410, even
-// though the update itself went on to succeed.
-//
-// Round 2: the drain check moved to AFTER channel/npm-reachable/provenance/
-// already-latest are resolved (so it only ever runs when an install is
-// definitely about to happen), and it no longer blocks — a non-zero count
-// returns `deferred:true` immediately and UpdateChecker's periodic tick
-// retries automatically, tracking the wall-clock cap across those retries
-// via _deferredSince. evaluateNpmUpdateGate is the synchronous, pure
-// decision function this all reduces to — test it directly rather than the
-// full pipeline, which needs a real npm registry round-trip to even reach
-// it (see the channel=off note in the file header).
+// Running work never holds an update back. It used to (ticket b831b896): the
+// update waited up to 10 min for sessions to drain, so a busy host deferred
+// every update. Now the restart path saves what it interrupts
+// (setPlannedRestartHook → restart-resume.ts) and AWB resumes it afterwards.
+
+test('self-update never consults running sessions — there is no drain gate left to defer it', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'lib', 'self-update.ts'), 'utf8');
+  assert.doesNotMatch(src, /countInFlightSessions|_deferredSince|evaluateNpmUpdateGate/);
+});
+
+test('the planned-restart hook runs with the restart reason and a throwing hook never blocks the restart', () => {
+  const seen = [];
+  try {
+    setPlannedRestartHook((reason) => seen.push(reason));
+    _setPendingRestartReasonForTests('self_update_restart');
+    _runPlannedRestartHookForTests(() => {});
+    _setPendingRestartReasonForTests(null);
+    _runPlannedRestartHookForTests(() => {});
+    assert.deepEqual(seen, ['self_update_restart', 'manager_restart'], 'restart_manager has no update reason');
+
+    const logs = [];
+    setPlannedRestartHook(() => { throw new Error('disk full'); });
+    _runPlannedRestartHookForTests((m) => logs.push(m));
+    assert.match(logs.join('\n'), /restarting anyway\): disk full/);
+  } finally {
+    setPlannedRestartHook(null);
+    _setPendingRestartReasonForTests(null);
+  }
+});
 
 test('compareSemver: equal versions → 0 (drives the already-latest skip)', () => {
   assert.equal(compareSemver('1.6.154', '1.6.154'), 0);
@@ -204,54 +209,11 @@ test('compareSemver: current ahead of registry (local/dev build) → <0 (no upda
   assert.ok(compareSemver('1.6.100', '1.6.154') < 0);
 });
 
-test('evaluateNpmUpdateGate: countInFlightSessions not wired → proceeds, no summary', () => {
-  const r = evaluateNpmUpdateGate({ countInFlightSessions: null, deferredSinceMs: null, nowMs: 1000, capMs: 60_000 });
-  assert.deepEqual(r, { proceed: true, deferred: false, nextDeferredSinceMs: null, summary: null });
-});
-
-test('evaluateNpmUpdateGate: zero sessions, no prior deferral → proceeds silently', () => {
-  const r = evaluateNpmUpdateGate({ countInFlightSessions: 0, deferredSinceMs: null, nowMs: 1000, capMs: 60_000 });
-  assert.deepEqual(r, { proceed: true, deferred: false, nextDeferredSinceMs: null, summary: null });
-});
-
-test('evaluateNpmUpdateGate: zero sessions AFTER a prior deferral → proceeds with a "drained" summary', () => {
-  const r = evaluateNpmUpdateGate({ countInFlightSessions: 0, deferredSinceMs: 500, nowMs: 1000, capMs: 60_000 });
-  assert.equal(r.proceed, true);
-  assert.equal(r.nextDeferredSinceMs, null);
-  assert.match(r.summary, /drained — proceeding/);
-});
-
-test('evaluateNpmUpdateGate: sessions present, first check → defers and starts the clock at nowMs', () => {
-  const r = evaluateNpmUpdateGate({ countInFlightSessions: 3, deferredSinceMs: null, nowMs: 10_000, capMs: 60_000 });
-  assert.equal(r.proceed, false);
-  assert.equal(r.deferred, true);
-  assert.equal(r.nextDeferredSinceMs, 10_000);
-  assert.match(r.summary, /3 in-flight session/);
-  assert.match(r.summary, /will retry automatically/);
-});
-
-test('evaluateNpmUpdateGate: continuing streak within cap → keeps the ORIGINAL since timestamp', () => {
-  const r = evaluateNpmUpdateGate({ countInFlightSessions: 1, deferredSinceMs: 10_000, nowMs: 40_000, capMs: 60_000 });
-  assert.equal(r.proceed, false);
-  assert.equal(r.deferred, true);
-  assert.equal(r.nextDeferredSinceMs, 10_000, 'a retry must not reset the clock — the cap tracks the whole streak');
-  assert.match(r.summary, /deferred 30s so far/);
-});
-
-test('evaluateNpmUpdateGate: streak exceeds the cap → forces through (proceed, clock cleared)', () => {
-  const capMs = SELF_UPDATE_DRAIN_MAX_WAIT_MS;
-  const r = evaluateNpmUpdateGate({ countInFlightSessions: 5, deferredSinceMs: 10_000, nowMs: 10_000 + capMs + 1, capMs });
-  assert.equal(r.proceed, true);
-  assert.equal(r.deferred, false);
-  assert.equal(r.nextDeferredSinceMs, null);
-  assert.match(r.summary, /cap .*exceeded — proceeding with 5 session/);
-});
-
 test('_resetSelfUpdateInFlightForTests clears hasPendingSelfUpdate too', (t) => {
   _resetSelfUpdateInFlightForTests();
-  // ticket 23753dc7 이후 hasPendingSelfUpdate 는 drain 연기뿐 아니라 매니저 홈의
-  // 설치 실패 기록도 본다. 빈 디렉터리를 넘겨 이 단언이 "이 호스트에 실제로
-  // 실패한 자가 업데이트가 남아 있는가"에 좌우되지 않게 한다.
+  // hasPendingSelfUpdate 는 매니저 홈의 설치 실패 기록을 본다(ticket 23753dc7). 빈
+  // 디렉터리를 넘겨 이 단언이 "이 호스트에 실제로 실패한 자가 업데이트가 남아
+  // 있는가"에 좌우되지 않게 한다.
   const dir = mkdtempSync(join(tmpdir(), 'awb-self-update-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.equal(hasPendingSelfUpdate({ stateDir: dir }), false);
@@ -265,41 +227,13 @@ test('_resetSelfUpdateInFlightForTests clears hasPendingSelfUpdate too', (t) => 
 // self-update mutex is released promptly enough that a concurrent operator
 // restart_manager is never silently swallowed.
 
-test('runSelfUpdate: channel=off never even calls countInFlightSessions (drain check is downstream of it)', async (t) => {
-  const prev = process.env[UPDATE_CHANNEL_ENV];
-  process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
-  _resetSelfUpdateInFlightForTests();
-  const stateDir = mkdtempSync(join(tmpdir(), 'awb-self-update-'));
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
-  try {
-    let calls = 0;
-    const r = await runSelfUpdate({
-      log: () => {},
-      noReExec: true,
-      countInFlightSessions: () => {
-        calls += 1;
-        return 3;
-      },
-    });
-    assert.equal(calls, 0, 'an update that is off/refused must never cost a session-drain check');
-    assert.equal(r.changed, false);
-    assert.equal(r.deferred, undefined);
-    // 위와 같은 이유로 격리된 상태 디렉터리를 쓴다(ticket 23753dc7).
-    assert.equal(hasPendingSelfUpdate({ stateDir }), false);
-  } finally {
-    if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
-    else process.env[UPDATE_CHANNEL_ENV] = prev;
-    _resetSelfUpdateInFlightForTests();
-  }
-});
-
 test('runSelfUpdate: resolves near-instantly on a short-circuit path (no reintroduced blocking sleep)', async () => {
   const prev = process.env[UPDATE_CHANNEL_ENV];
   process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
   _resetSelfUpdateInFlightForTests();
   try {
     const startedAt = Date.now();
-    await runSelfUpdate({ log: () => {}, noReExec: true, countInFlightSessions: () => 5 });
+    await runSelfUpdate({ log: () => {}, noReExec: true });
     const elapsedMs = Date.now() - startedAt;
     assert.ok(
       elapsedMs < 2_000,

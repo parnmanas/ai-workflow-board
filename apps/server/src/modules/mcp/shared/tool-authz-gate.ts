@@ -238,6 +238,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // 그 위에 "사용자가 시작한 턴" · "그 사용자가 정할 미결 제안" 을 서비스가 본다.
   propose_session_prompt: 'full',
   send_session_prompt_proposal: 'full',
+  resume_interrupted_session: 'full',
   withdraw_session_prompt_proposal: 'full',
   list_session_prompt_proposals: 'full',
 };

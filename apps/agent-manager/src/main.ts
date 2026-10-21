@@ -23,9 +23,11 @@ import {
   runBootVerification,
   runBootVerificationTimeout,
   runSelfUpdate,
+  setPlannedRestartHook,
   setRunningVersion,
   UpdateChecker,
 } from './lib/self-update.js';
+import { deliverRestartResume, readRestartResume, writeRestartResume, type InterruptedTicket } from './lib/restart-resume.js';
 import { effectivePlatform, insideAgentSession, restartHint } from './lib/supervisor.js';
 import { BOOT_VERIFY_TIMEOUT_MS } from './lib/self-update-rollback.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
@@ -745,20 +747,38 @@ async function runRuntime(
   // OAuth until idle/maxTurns retired it (10+ minutes).
   const chatSessionManager = new ChatSessionManager(config);
   const ticketSessionManager = new TicketSessionManager(config, circuitBreaker);
-  // ticket b831b896: total chat / action / QA / ticket-dispatch sessions
-  // currently live, across all three managers. Fed to runSelfUpdate so it can
-  // defer a restart while real work is in flight instead of SIGTERMing it
-  // moments after it starts.
-  const countInFlightSessions = (): number =>
-    subagentManager._snapshot().length +
-    chatSessionManager._snapshot().length +
-    ticketSessionManager._snapshot().length +
-    agentSessionRunner.countInFlight();
-  // ticket b831b896 round 2: updateChecker was constructed earlier (before
-  // these session managers existed), so it's wired late via the setter
-  // instead of a constructor opt — lets its periodic tick retry a
-  // self-update that got deferred waiting for sessions to drain.
-  updateChecker.setCountInFlightSessions(countInFlightSessions);
+  // A planned restart (self-update, restart_manager) does not wait for work to
+  // drain: right before it leaves, save what it interrupts — Agent Session turns
+  // for the host's operator to continue, ticket turns for AWB to re-send — and
+  // hand that to AWB once the new process is connected (restart-resume.ts).
+  setPlannedRestartHook((reason) => {
+    const tickets = new Map<string, InterruptedTicket>();
+    for (const t of [...ticketSessionManager.inFlightTickets(), ...subagentManager.inFlightTickets()]) {
+      tickets.set(`${t.ticketId}\0${t.role}`, { ticket_id: t.ticketId, role: t.role, agent_id: t.agentId });
+    }
+    const sessions = agentSessionRunner.interruptedTurns();
+    writeRestartResume({
+      version: 1, reason, saved_at: new Date().toISOString(), from_version: version, sessions, tickets: [...tickets.values()],
+    });
+    log(`Restart resume: saved ${sessions.length} interrupted session(s) and ${tickets.size} ticket(s) before the ${reason}`);
+  });
+  // What the previous process's planned restart interrupted — handed to AWB on
+  // the first connect, kept for the next one while AWB cannot be reached.
+  let restartResume = readRestartResume();
+  let restartResumeSending = false;
+  const deliverPendingRestartResume = (): void => {
+    if (!restartResume || restartResumeSending) return;
+    restartResumeSending = true;
+    const record = restartResume;
+    void deliverRestartResume(config, record, version)
+      .then((outcome) => {
+        if (outcome !== 'retry') restartResume = null;
+      })
+      .catch((err: any) => log(`Restart resume: delivery failed: ${err?.message ?? err}`))
+      .finally(() => {
+        restartResumeSending = false;
+      });
+  };
   // Late-bound reference to the SSE stream — the EventStream is constructed
   // after this command handler (it depends on commandHandler for dispatch),
   // so the spawn_agent → reconnect hook captures this slot and resolves it
@@ -1046,9 +1066,6 @@ async function runRuntime(
     circuitBreaker,
     runtimeSupervisor,
     cliLoginManager,
-    // ticket b831b896: lets #updateManager() pass the live session count into
-    // runSelfUpdate's drain-wait gate.
-    countInFlightSessions,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     // ticket 40110b64 — 호스트에서 CLI 를 업그레이드한 뒤 매니저를 재시작하지
     // 않고 모델 목록만 갱신하는 경로. 재열거 자체가 best-effort 라 일부 CLI 가
@@ -1353,6 +1370,7 @@ async function runRuntime(
       // messages buffered while it wasn't. Also covers boot-after-crash: the
       // first connect after load() replays what a dead manager left behind.
       void messageOutbox.flush('sse_connect');
+      deliverPendingRestartResume();
     },
   });
   eventStreamRef = eventStream;
@@ -1942,7 +1960,7 @@ async function runRuntime(
     try {
       // ticket 9408b308: SIGUSR1 은 호스트에 접근 가능한 운영자의 명시적 지시다
       // — `scheduled` 정책에서 이 개시를 승인으로 기록해 다음 창에 다시 묻지 않게 한다.
-      const result = await runSelfUpdate({ log, countInFlightSessions, approvalSource: 'sigusr1' });
+      const result = await runSelfUpdate({ log, approvalSource: 'sigusr1' });
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);

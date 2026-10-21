@@ -31,6 +31,11 @@ import { ApiKeyService } from '../../services/api-key.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
 import { activityEvents } from '../../services/activity.service';
 import {
+  AGENT_MANAGER_RESTART_RESUME_EVENT,
+  parseInterruptedSessions,
+  type RestartResumeEvent,
+} from '../voice/interrupted-sessions';
+import {
   InstanceRegistryService,
   type InstanceRecord,
   type RuntimeCapabilityDescriptor,
@@ -2169,6 +2174,79 @@ export class AgentManagerController {
       provider: cred.provider,
       fields,
     });
+  }
+
+  /**
+   * The Runtime Host calling a restart route — from its key, or, when no key was
+   * validated (AGENT_DEV_MODE), the body's `host_id` claim: the same rule as the
+   * heartbeat and the Agent Session routes.
+   */
+  private restartCaller(req: Request, body: any): { agentId: string; hostId: string } {
+    const agentId = String((req as any).currentAgentId || '').trim();
+    const hostId = String((req as any).currentHostId || '').trim();
+    if (agentId || hostId || (req as any).apiKey) return { agentId, hostId };
+    const claim = typeof body?.host_id === 'string' ? body.host_id.trim() : '';
+    return { agentId: claim, hostId: claim };
+  }
+
+  /**
+   * Manager → server: the work a planned restart (self-update, restart_manager)
+   * of this host interrupted, sent once the new process is connected
+   * (agent-manager restart-resume.ts). Updates no longer wait for that work to
+   * drain. Tickets are re-sent here; interrupted Agent Sessions go to the
+   * host's operator (or the most recently talked-to one), who continues them
+   * with resume_interrupted_session (voice/interrupted-sessions.service.ts).
+   */
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/restart-resume')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Manager → server: resume the work a planned restart of this host interrupted' })
+  async restartResume(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const { agentId: callerAgentId, hostId: callerHostId } = this.restartCaller(req, body);
+    if (!callerAgentId && !callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
+    const ticketIds = (Array.isArray(body?.tickets) ? body.tickets : [])
+      .map((t: any) => (typeof t?.ticket_id === 'string' ? t.ticket_id.trim() : ''))
+      .slice(0, 200);
+    const tickets = await this.dispatcher.resumeAfterHostRestart(ticketIds, [callerHostId, callerAgentId]);
+    const restart: RestartResumeEvent = {
+      // Agent Session routes identify the manager by its key's agent id (agent-sessions-agent.controller.ts).
+      manager_id: callerAgentId || callerHostId,
+      reason: typeof body?.reason === 'string' ? body.reason.slice(0, 64) : 'manager_restart',
+      from_version: typeof body?.from_version === 'string' ? body.from_version.slice(0, 64) : '',
+      to_version: typeof body?.to_version === 'string' ? body.to_version.slice(0, 64) : '',
+      sessions: parseInterruptedSessions(body?.sessions),
+    };
+    if (restart.sessions.length) activityEvents.emit(AGENT_MANAGER_RESTART_RESUME_EVENT, restart);
+    this.logService.info(
+      'AgentManager',
+      `restart-resume host=${(callerHostId || callerAgentId).slice(0, 8)} reason=${restart.reason} ` +
+        `v${restart.from_version || '?'}→v${restart.to_version || '?'} tickets resumed=${tickets.resumed.length} ` +
+        `skipped=${tickets.skipped.length} sessions=${restart.sessions.length}`,
+      { skipped: tickets.skipped },
+    );
+    return res.status(200).json({ ok: true, tickets, sessions: restart.sessions.length });
+  }
+
+  /**
+   * Manager → server: re-send the tickets a just-restarted runtime was in the
+   * middle of (restart_agent). Removed with the Agent table in P4c-4 while the
+   * manager kept calling it, so every restart_agent re-push 404'd and the
+   * interrupted tickets waited for the supervisor.
+   */
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/managed-agents/:id/resume-triggers')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: "Manager → server: re-send a restarted runtime's interrupted tickets" })
+  async resumeManagedAgentTriggers(@Param('id') runtimeKey: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const { agentId: callerAgentId, hostId: callerHostId } = this.restartCaller(req, body);
+    if (!callerAgentId && !callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
+    const ticketIds = (Array.isArray(body?.items) ? body.items : [])
+      .map((t: any) => (typeof t?.ticket_id === 'string' ? t.ticket_id.trim() : ''))
+      .slice(0, 200);
+    const tickets = await this.dispatcher.resumeAfterHostRestart(ticketIds, [callerHostId, callerAgentId], {
+      assigneeKey: String(runtimeKey || '').trim(),
+    });
+    return res.status(200).json({ ok: true, emitted: tickets.resumed.length, skipped: tickets.skipped.length });
   }
 
   @Post('api/agent-manager/runtime/child-runs/start')

@@ -97,25 +97,6 @@ const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
 const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const NPM_VIEW_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
-/**
- * Upper bound on how long a self-update stays deferred (across separate
- * runSelfUpdate() calls — see _deferredSince) waiting for in-flight chat /
- * action / QA / ticket-dispatch sessions to drain before forcing the
- * restart anyway. Sessions still running past this cap get SIGTERM'd same
- * as before — the difference is the kill is now tagged
- * `reason=self_update_restart` accurately instead of guessed.
- *
- * Round 2 (ticket b831b896 review): this is now a WALL-CLOCK cap checked on
- * each retry, not a single in-call blocking sleep. Round 1 blocked inside
- * one runSelfUpdate() call for up to this long, which held the
- * selfUpdateInFlight mutex the whole time (silently no-op'ing a concurrent
- * operator restart_manager) and made the SSE update_manager ack arrive
- * after the server's command-ledger RECORD_TTL_MS (also 10 minutes —
- * apps/server/src/modules/agent-manager/command-ledger.service.ts),
- * getting rejected 410 even though the update itself succeeded.
- */
-export const SELF_UPDATE_DRAIN_MAX_WAIT_MS = 10 * 60_000;
-
 /** 복귀 재기동이 끝내 발화하지 않을 때 프로세스를 비정상 종료시키는 상한
  *  (감독자가 다시 띄우게 한다). scheduleRollbackRestart 참고. */
 const ROLLBACK_RESTART_BACKSTOP_MS = 60_000;
@@ -266,7 +247,7 @@ export interface UpdatePolicyGateResult {
 /**
  * 지금 tick 에서 갱신을 개시할지 / 승인을 요청할지 / 아무것도 안 할지 판정한다.
  *
- * 부수효과 없는 동기 함수 — `evaluateNpmUpdateGate` 가 확립한 패턴을 따른다.
+ * 부수효과 없는 동기 함수다.
  * 실제 개시 경로는 새 버전이 레지스트리에 실제로 올라온 상황에서만 도는데,
  * 그 상황을 통합 테스트로 재현할 수 없으므로 판정만 떼어 직접 단위 테스트한다.
  *
@@ -424,14 +405,14 @@ export interface SelfUpdateResult {
    *  command handler / SIGUSR1 path) inspects this so it can hand the ack
    *  POST + log line a head start before the parent exits. */
   willReExec?: boolean;
-  /** ticket b831b896 round 2: true when `changed:false` means "an update IS
-   *  needed but is waiting for in-flight sessions to drain — UpdateChecker
-   *  will retry automatically", as opposed to a genuine skip/refuse
-   *  (channel off, npm unreachable, provenance refused, already up to
-   *  date) or a real failure (install failed). Callers that otherwise treat
-   *  `changed:false` as an error (e.g. the SSE update_manager ack) should
-   *  NOT do so when this is true — nothing is wrong, the update is simply
-   *  pending. */
+  /** true when `changed:false` means "an update IS needed but is backing off
+   *  after earlier install failures — UpdateChecker will retry automatically",
+   *  as opposed to a genuine skip/refuse (channel off, npm unreachable,
+   *  provenance refused, already up to date) or a real failure. Callers that
+   *  otherwise treat `changed:false` as an error (e.g. the SSE update_manager
+   *  ack) should NOT do so when this is true — the update is simply pending.
+   *  Running work never defers an update: it is saved and resumed after the
+   *  restart instead (restart-resume.ts). */
   deferred?: boolean;
 }
 
@@ -439,20 +420,6 @@ export interface SelfUpdateOpts {
   log?: (msg: string) => void;
   /** Skip the actual re-exec — useful for tests / dry runs. */
   noReExec?: boolean;
-  /**
-   * Returns the number of chat/action/QA/ticket-dispatch sessions currently
-   * in flight. Checked ONCE an actual install has been confirmed (channel
-   * on, npm reachable, provenance verified, not already up to date) — a
-   * non-zero count returns a `changed:false` "deferred" result immediately
-   * (no blocking sleep); UpdateChecker's periodic tick retries automatically
-   * until drainMaxWaitMs elapses (ticket b831b896 round 2 — round 1 blocked
-   * in-call, which held the selfUpdateInFlight mutex and delayed the SSE
-   * ack past the server's command-ledger TTL). Omitted by callers that
-   * can't tell us what's running (legacy tests, dry-run probes) — the check
-   * is skipped entirely rather than guessing. */
-  countInFlightSessions?: () => number;
-  /** Test-only override for the drain wait cap (default SELF_UPDATE_DRAIN_MAX_WAIT_MS). */
-  drainMaxWaitMs?: number;
   /** 부팅 검증 상태 / 복귀 핀 파일을 둘 디렉터리. 생략하면 매니저 홈
    *  (`$AWB_AGENT_MANAGER_HOME`). 테스트가 tmp 디렉터리로 격리하기 위한 주입점.  */
   stateDir?: string;
@@ -739,12 +706,6 @@ export class UpdateChecker {
   #stopped = false;
   #intervalMs: number;
   #log: (msg: string) => void;
-  /** ticket b831b896 round 2: lets #tick retry a self-update that an
-   *  earlier runSelfUpdate() call deferred because sessions were in flight.
-   *  Nullable — main.ts wires this in via setCountInFlightSessions() AFTER
-   *  construction, since the session managers it reads don't exist yet at
-   *  the point UpdateChecker itself is constructed. */
-  #countInFlightSessions: (() => number) | null = null;
   /** ticket 9408b308 — 갱신 개시 정책과 유지보수 창. 생성 시점에 한 번 고정한다
    *  (채널과 같은 수명): 호스트 로컬 설정이라 프로세스 중간에 바뀔 일이 없고,
    *  tick 마다 env 를 다시 읽으면 판정 근거가 tick 사이에 흔들릴 수 있다. */
@@ -775,9 +736,6 @@ export class UpdateChecker {
       currentVersion?: string;
       /** 디스크 설치본 버전 리더(테스트 주입). 기본 readInstalledVersion. */
       installedVersion?: () => string;
-      /** See setCountInFlightSessions — accepted here too so a test can
-       *  construct a fully-wired checker in one call. */
-      countInFlightSessions?: () => number;
       /** 복귀 핀 파일을 읽을 디렉터리. 생략하면 매니저 홈. 테스트 격리용. */
       stateDir?: string;
       /** ticket 9408b308 — 정책/창 주입(테스트용). 생략하면 환경변수를 읽는다. */
@@ -799,7 +757,6 @@ export class UpdateChecker {
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
-    this.#countInFlightSessions = opts.countInFlightSessions ?? null;
     this.#policy = resolveUpdatePolicy(opts.updatePolicy);
     this.#windowRaw = opts.updateWindow ?? process.env[UPDATE_WINDOW_ENV] ?? null;
     this.#stateDir = opts.stateDir;
@@ -896,15 +853,6 @@ export class UpdateChecker {
     return { ...this.#status };
   }
 
-  /** ticket b831b896 round 2: wire the live in-flight session counter in
-   *  after construction (main.ts builds this checker before the chat /
-   *  ticket / subagent managers it reads from exist). Once set, #tick
-   *  retries any self-update that's currently deferred waiting for
-   *  sessions to drain — see hasPendingSelfUpdate(). */
-  setCountInFlightSessions(fn: () => number): void {
-    this.#countInFlightSessions = fn;
-  };
-
   start(): void {
     if (this.#stopped || this.#timer) return;
     if (this.#status.install_mode !== 'npm-global') {
@@ -967,26 +915,17 @@ export class UpdateChecker {
     // ticket 9408b308: 갱신 개시 정책 판정. `manual`(기본)에서는 action='none'
     // 이라 아래 재시도 경로만 남고, 이 기능 도입 전과 동작이 같다.
     const startedByPolicy = await this.#applyUpdatePolicy();
-    // ticket b831b896 round 2: retry a self-update that an earlier
-    // runSelfUpdate() call (SIGUSR1 / SSE update_manager) deferred because
-    // sessions were in flight — that call already returned immediately
-    // rather than blocking, so this periodic tick is the only thing that
-    // ever revisits it. runSelfUpdate owns the selfUpdateInFlight mutex and
-    // the SELF_UPDATE_DRAIN_MAX_WAIT_MS wall-clock cap itself, so this is a
-    // plain retry, not a special case.
+    // Retry an install that failed earlier and is still within its retry
+    // budget (hasPendingSelfUpdate) — this periodic tick is the only thing
+    // that ever revisits it.
     //
     // 정책 게이트가 이미 이번 tick 에서 개시를 시도했다면 건너뛴다 — 같은 tick 에
     // 두 번 부르면 두 번째는 in-flight 뮤텍스에 걸려 무의미한 실패 로그만 남긴다.
-    if (
-      !startedByPolicy &&
-      this.#countInFlightSessions &&
-      hasPendingSelfUpdate({ stateDir: this.#stateDir })
-    ) {
+    if (!startedByPolicy && hasPendingSelfUpdate({ stateDir: this.#stateDir })) {
       try {
         await this.#runUpdate({
           log: this.#log,
           stateDir: this.#stateDir,
-          countInFlightSessions: this.#countInFlightSessions,
         });
       } catch (err: any) {
         this.#log(`Self-update retry failed: ${err?.stack || err?.message || err}`);
@@ -1061,7 +1000,6 @@ export class UpdateChecker {
         ...(decision.reason === 'approved' && decision.approvalVersion
           ? { pinnedTargetVersion: decision.approvalVersion }
           : {}),
-        ...(this.#countInFlightSessions ? { countInFlightSessions: this.#countInFlightSessions } : {}),
       });
     } catch (err: any) {
       this.#log(`Self-update: policy-initiated update failed: ${err?.stack || err?.message || err}`);
@@ -1202,8 +1140,6 @@ let selfUpdateInFlight = false;
 export function _resetSelfUpdateInFlightForTests(): void {
   selfUpdateInFlight = false;
   _pendingRestartReason = null;
-  _deferredSince = null;
-  _lastDeferredDueToSessions = false;
 }
 
 /**
@@ -1243,14 +1179,6 @@ export async function runSelfUpdate(opts: SelfUpdateOpts = {}): Promise<SelfUpda
       selfUpdateInFlight = false;
     }
     _lastReExecScheduled = false;
-    // _deferredSince tracks a "waiting for sessions to drain" streak ACROSS
-    // separate runSelfUpdate() calls (this call may be a UpdateChecker retry
-    // of an earlier deferral) — clear it on any outcome except "still
-    // deferred", same one-shot-flag idiom as _lastReExecScheduled above.
-    if (!_lastDeferredDueToSessions) {
-      _deferredSince = null;
-    }
-    _lastDeferredDueToSessions = false;
   }
 }
 
@@ -1298,6 +1226,33 @@ export function pendingRestartReason(): 'self_update_restart' | null {
   return _pendingRestartReason;
 }
 
+/**
+ * Runs synchronously right before a planned restart leaves this process —
+ * self-update install or restart-only, `restart_manager`, SIGUSR2 — so main.ts
+ * can save the work it is about to interrupt (restart-resume.ts). Called from
+ * the restart path itself and not from the SIGTERM handler: on Windows a
+ * self-SIGTERM ends the process without running any handler.
+ */
+let _plannedRestartHook: ((reason: string) => void) | null = null;
+
+export function setPlannedRestartHook(fn: ((reason: string) => void) | null): void {
+  _plannedRestartHook = fn;
+}
+
+/** Test seam — runs the hook exactly as a planned restart would. */
+export function _runPlannedRestartHookForTests(out: (msg: string) => void): void {
+  runPlannedRestartHook(out);
+}
+
+function runPlannedRestartHook(out: (msg: string) => void): void {
+  if (!_plannedRestartHook) return;
+  try {
+    _plannedRestartHook(_pendingRestartReason ?? 'manager_restart');
+  } catch (err: any) {
+    out(`Self-update: could not save the work this restart interrupts (restarting anyway): ${err?.message ?? err}`);
+  }
+}
+
 /** 테스트 전용 탈출구: runNpmGlobalSelfUpdate() 를 통해 실제 npm-global 설치 +
  *  자가 SIGTERM 을 구동하지 않고도 pendingRestartReason() 을 검증할 수 있게
  *  한다(ticket 6abe2b79 — pendingRestartReason 자체는 b831b896 이 도입했지만
@@ -1308,91 +1263,19 @@ export function _setPendingRestartReasonForTests(reason: 'self_update_restart' |
 }
 
 /**
- * Wall-clock timestamp (Date.now()) of the first deferred-due-to-sessions
- * self-update attempt in the current streak, or null when nothing is
- * currently deferred. Tracked ACROSS separate runSelfUpdate() calls (a
- * retry from UpdateChecker's tick is a fresh call) rather than held across
- * one blocking sleep — see SELF_UPDATE_DRAIN_MAX_WAIT_MS for why round 1's
- * in-call blocking wait was wrong.
- */
-let _deferredSince: number | null = null;
-
-/** Set (once) right before a "still deferred, within cap" return so
- *  runSelfUpdate's finally{} knows NOT to clear _deferredSince — same
- *  one-shot-flag idiom as _lastReExecScheduled. */
-let _lastDeferredDueToSessions = false;
-
-/**
  * True while a self-update still has work pending that UpdateChecker's
- * periodic tick should revisit (see UpdateChecker#tick). Two sources:
+ * periodic tick should revisit (see UpdateChecker#tick): ticket 23753dc7 —
+ * 설치가 실패했고 아직 재시도 상한이 남은 상태. 이 신호가 없으면 정책 G 의
+ * 백오프(5분 → 15분)를 소진할 주체가 없어 "재시도한다"가 선언에 그친다. 상태
+ * 파일을 읽으므로 **재기동을 넘어서도** 성립한다 — Windows 경로에서는 실패를
+ * 관측한 프로세스와 재시도할 프로세스가 아예 다르다. 상한을 소진하면 phase 가
+ * install_blocked 로 바뀌어 여기서 false 가 되고, 자동 시도는 그대로 멈춘다.
  *
- *  1. 진행 중 세션이 빠지길 기다리는 drain 연기 (_deferredSince, ticket b831b896).
- *  2. ticket 23753dc7 — 설치가 실패했고 아직 재시도 상한이 남은 상태. 이 신호가
- *     없으면 정책 G 의 백오프(5분 → 15분)를 소진할 주체가 없어 "재시도한다"가
- *     선언에 그친다. 상태 파일을 읽으므로 **재기동을 넘어서도** 성립한다 —
- *     Windows 경로에서는 실패를 관측한 프로세스와 재시도할 프로세스가 아예 다르다.
- *     상한을 소진하면 phase 가 install_blocked 로 바뀌어 여기서 false 가 되고,
- *     자동 시도는 그대로 멈춘다.
+ * Running sessions are not a reason to wait: the restart saves them and AWB
+ * resumes them afterwards (restart-resume.ts).
  */
 export function hasPendingSelfUpdate(opts: { stateDir?: string } = {}): boolean {
-  if (_deferredSince !== null) return true;
   return readBootVerificationRecord(opts.stateDir)?.phase === 'install_failed';
-}
-
-export interface NpmUpdateGateResult {
-  /** True = go ahead and install (sessions are clear, or the cap forced it). */
-  proceed: boolean;
-  /** True = `proceed:false` because the count was zero anyway (nothing to
-   *  install to begin with) — never true when proceed is true. */
-  deferred: boolean;
-  /** _deferredSince value the caller should hold going forward — null clears
-   *  it (nothing pending anymore), a timestamp starts/continues a streak. */
-  nextDeferredSinceMs: number | null;
-  /** Human-readable outcome, or null when there's nothing worth logging
-   *  (count was 0 and no prior deferral was in progress). */
-  summary: string | null;
-}
-
-/**
- * Pure decision point for whether an install-confirmed self-update should
- * proceed now, defer, or force through past the drain cap. Synchronous and
- * side-effect-free by construction — cannot block — so it's the thing to
- * unit test directly rather than the full runNpmGlobalSelfUpdate pipeline,
- * which needs a real npm registry round-trip to even reach this point
- * (ticket b831b896 round 2 review — round 1's blocking in-call sleep here
- * was the actual defect: it held the caller for up to `capMs`, which held
- * the module-level self-update mutex that whole time and made the SSE
- * update_manager ack arrive after the server's command-ledger TTL).
- */
-export function evaluateNpmUpdateGate(input: {
-  countInFlightSessions: number | null;
-  deferredSinceMs: number | null;
-  nowMs: number;
-  capMs: number;
-}): NpmUpdateGateResult {
-  const { countInFlightSessions, deferredSinceMs, nowMs, capMs } = input;
-  if (countInFlightSessions === null) {
-    // Not wired (legacy caller, dry-run probe) — never block on a question
-    // we have no way to answer.
-    return { proceed: true, deferred: false, nextDeferredSinceMs: null, summary: null };
-  }
-  if (countInFlightSessions <= 0) {
-    const summary = deferredSinceMs !== null ? 'in-flight sessions drained — proceeding with restart' : null;
-    return { proceed: true, deferred: false, nextDeferredSinceMs: null, summary };
-  }
-  const since = deferredSinceMs ?? nowMs;
-  const deferredForMs = nowMs - since;
-  if (deferredForMs < capMs) {
-    const summary =
-      `npm-global update deferred: ${countInFlightSessions} in-flight session(s) — will retry ` +
-      `automatically (deferred ${Math.round(deferredForMs / 1000)}s so far, ` +
-      `cap ${Math.round(capMs / 60_000)}min)`;
-    return { proceed: false, deferred: true, nextDeferredSinceMs: since, summary };
-  }
-  const summary =
-    `drain wait cap (${Math.round(capMs / 60_000)}min) exceeded — ` +
-    `proceeding with ${countInFlightSessions} session(s) still in flight`;
-  return { proceed: true, deferred: false, nextDeferredSinceMs: null, summary };
 }
 
 async function runSelfUpdateLocked(
@@ -1799,23 +1682,10 @@ async function runNpmGlobalSelfUpdate(
     return { changed: true, summary, willReExec: false };
   }
 
-  // ticket b831b896 review round 2: an install + restart is now DEFINITELY
-  // about to happen (every earlier gate passed) — this is the one place a
-  // session-drain check belongs. evaluateNpmUpdateGate is synchronous and
-  // side-effect-free (cannot block); UpdateChecker's periodic tick retries
-  // this whole call automatically until the gate reports proceed:true.
-  const gate = evaluateNpmUpdateGate({
-    countInFlightSessions: opts.countInFlightSessions ? opts.countInFlightSessions() : null,
-    deferredSinceMs: _deferredSince,
-    nowMs: Date.now(),
-    capMs: opts.drainMaxWaitMs ?? SELF_UPDATE_DRAIN_MAX_WAIT_MS,
-  });
-  _deferredSince = gate.nextDeferredSinceMs;
-  if (gate.summary) out(`Self-update: ${gate.summary}`);
-  if (!gate.proceed) {
-    _lastDeferredDueToSessions = gate.deferred;
-    return { changed: false, summary: gate.summary!, deferred: gate.deferred || undefined };
-  }
+  // Running work does not hold the update back (it used to wait up to 10 min
+  // for sessions to drain, so busy hosts kept deferring): the restart path
+  // saves it first and AWB resumes it after the restart — see
+  // setPlannedRestartHook below and restart-resume.ts.
 
   // ticket 23753dc7 (정책 G): 이 버전에 대한 설치 실패가 누적돼 있으면 상한과
   // 백오프를 먼저 본다. 카운터는 파일에 있으므로 재기동을 넘어 이어진다 —
@@ -2605,6 +2475,7 @@ export async function runBootVerificationTimeout(
  */
 function shutdownForNpmGlobalUpdate(out: (msg: string) => void): void {
   out('Self-update: shutting down so the npm-global updater can reinstall + restart');
+  runPlannedRestartHook(out);
   setTimeout(() => {
     try {
       process.kill(process.pid, 'SIGTERM');
@@ -2830,6 +2701,7 @@ export function resolveReexecStrategy(opts: {
   *    child take over the agent lockfile without a 60s wait.
   */
 function reExecManager(out: (msg: string) => void): void {
+  runPlannedRestartHook(out);
   if (isManagedBySystemd()) {
     out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
     // We trigger the SIGTERM shutdown handler so chat / ticket sessions get

@@ -11,6 +11,8 @@ test('disk newer than the running process → restart action, even when the regi
   assert.equal(action.kind, 'restart');
   assert.equal(action.label, 'Restart to apply v1.6.247');
   assert.match(action.confirm, /already installed on this host/);
+  assert.doesNotMatch(action.confirm, /drain/, 'running work no longer holds the restart back');
+  assert.match(action.confirm, /operator to continue interrupted sessions/);
   assert.equal(installedVersionBadge(inst), 'installed v1.6.247 — restart required');
   // 레지스트리가 앞서도 디스크가 이미 새 빌드면 재기동이 먼저다(설치 없이 끝난다)
   assert.equal(managerUpdateAction({ ...inst, update_available: false }).kind, 'restart');

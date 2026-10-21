@@ -752,15 +752,31 @@ self-update 는 npm-global 설치 모드에서만 동작한다. 아래는 현재
 | 감지 | `UpdateChecker` 가 5분마다 `npm view awb-agent-manager@<channel> version` 을 읽어 `update_available` 을 **광고만** 한다 | `self-update.ts` → `#tickNpmGlobal()` |
 | 개시 | **설치를 스스로 시작하지 않는다.** 외부 트리거(관리자 UI 의 `update_manager` 명령 또는 `SIGUSR1`)가 있어야 한다 | `agent-manager-commands.ts`, `main.ts` |
 | 공급망 검증 | 대상 버전의 SLSA provenance 를 확인하고 증명이 없으면 **설치를 거부한다**(fail-closed) | `self-update.ts` → `parseProvenanceView()` |
-| drain | 진행 중 chat/action/QA/ticket 세션이 있으면 설치를 연기하고, 주기 tick 이 재시도한다 | `self-update.ts` → `evaluateNpmUpdateGate()` |
-| 강제 재시작 | 연기가 벽시계 10분(`SELF_UPDATE_DRAIN_MAX_WAIT_MS`)을 넘으면 남은 세션을 `reason=self_update_restart` 로 태그하고 강행한다 | 같은 함수 |
+| 진행 중 작업 | **기다리지 않는다.** 계획된 재시작(업데이트·재기동·`restart_manager`)은 떠나기 직전에 끊길 작업을 `restart-resume.json` 에 저장하고 바로 재시작한다. 새 프로세스가 SSE 에 붙으면 AWB 에 넘기고(`POST /api/agent-manager/restart-resume`) 지운다 — 아래 "재시작으로 끊긴 작업" | `self-update.ts` → `setPlannedRestartHook()`, `restart-resume.ts` |
 | 재기동 | 분리된 임시 헬퍼가 매니저 종료를 기다렸다가 `npm i -g` 후 재기동한다 | `NPM_GLOBAL_UPDATER_SOURCE` |
-| 실행본 ≠ 설치본 | "현재 버전" 은 **부팅 때 잡은 실행 버전**(`setRunningVersion`)이다. 프로세스 밖에서 `npm i -g` 가 돌아 디스크(`dist/package.json`)만 새 버전이면 하트비트가 `installed_version` + `restart_required` 를 광고하고, `update_manager` 는 설치를 건너뛰고 **재기동만** 한다(디스크 빌드 기동 probe → drain → 부팅 검증 arm → re-exec). 레지스트리가 실행 버전보다 새 것이 없으면 `upToDate` 로 ok ack | `self-update.ts` → `runNpmGlobalSelfUpdate()`, `UpdateChecker.status()` |
+| 실행본 ≠ 설치본 | "현재 버전" 은 **부팅 때 잡은 실행 버전**(`setRunningVersion`)이다. 프로세스 밖에서 `npm i -g` 가 돌아 디스크(`dist/package.json`)만 새 버전이면 하트비트가 `installed_version` + `restart_required` 를 광고하고, `update_manager` 는 설치를 건너뛰고 **재기동만** 한다(디스크 빌드 기동 probe → 부팅 검증 arm → 끊길 작업 저장 → re-exec). 레지스트리가 실행 버전보다 새 것이 없으면 `upToDate` 로 ok ack | `self-update.ts` → `runNpmGlobalSelfUpdate()`, `UpdateChecker.status()` |
 | 직접 실행 보호 | 락 소유자가 systemd 감독 아래 있거나 contender 가 AWB 세션(`AWB_SESSION_ID`) 안이면 `--force` 는 소유자를 죽이지 않는다: 이 빌드가 더 새로우면 SIGUSR2 로 재기동을 **넘기고** exit 0(`EAGENTHANDOFF`), 아니면 거부 exit 2(`EAGENTSUPERVISED`). 단 handoff 는 **SIGUSR2 가 있는 플랫폼 전용**이다 — win32 에는 그 시그널이 없어 `process.kill` 이 던지므로, 그 플랫폼에서는 더 새 빌드여도 handoff 를 내지 않고 거부한다(거부 사유가 관리자 UI Restart / `restart_manager` 를 안내한다). 예전에는 시그널 실패를 삼킨 채 `EAGENTHANDOFF` → exit 0 을 내서 일어나지 않은 재기동을 성공으로 보고했다. 판정이 보는 플랫폼의 테스트 seam 은 `AWB_AGENT_MANAGER_PLATFORM` 이다. `AWB_AGENT_MANAGER_TAKEOVER=1` 일 때만 예전 takeover. 감독 판정은 **부모 프로세스**(`systemd --user`)로 한다 — INVOCATION_ID 는 데스크톱 앱의 자식 셸까지 물려받아 근거가 못 된다(테스트 seam `AWB_AGENT_MANAGER_SUPERVISOR`) | `agent-lockfile.ts` → `decideForceTakeover()`, `supervisor.ts` |
 
-drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 의
-`countInFlightSessions`). 에이전트가 스스로 갱신을 트리거하면 보통 `deferred` 가 먼저
-뜨고 최대 10분 뒤에 설치되는 것이 정상 경로다 — 실패로 오판하지 말 것.
+### 재시작으로 끊긴 작업 (2026-10-22)
+
+예전에는 진행 중인 chat/action/QA/ticket/Agent Session 이 있으면 설치를 최대 10분 미뤘다
+(drain). 카운터가 트리거를 건 세션 자신까지 세서 바쁜 호스트는 매번 10분을 기다렸고, 결국
+남은 작업을 죽이고 강행했다 — 기다림은 아무것도 지키지 못했다. 이제는 바로 재시작하고, 끊긴
+작업을 재시작 뒤에 잇는다.
+
+| 단계 | 동작 | 근거 |
+|---|---|---|
+| 저장 | 재시작 경로가 떠나기 직전 **동기로** 저장한다: 턴 중이거나 그 안에서 승인·답을 기다리는 Agent Session(`interruptedTurns()`), 턴 중인 persistent 티켓 세션과 실행 중인 one-shot 티켓(`inFlightTickets()`). 턴 사이에 쉬는 세션은 넣지 않는다(다시 깨우면 턴이 겹친다). SIGTERM 핸들러가 아니라 재시작 경로에서 쓰는 이유: Windows 에서 자기 자신에게 보낸 SIGTERM 은 핸들러 없이 프로세스를 끝낸다 | `self-update.ts` → `runPlannedRestartHook()`, `main.ts` |
+| 보존 | 아직 넘기지 못한 기록은 **합친다**(덮지 않는다) — 새 빌드가 연결 전에 부팅 검증에 실패해 다시 재시작해도 이전 프로세스가 저장한 작업이 남는다. 6시간이 지난 기록은 버린다 | `restart-resume.ts` → `writeRestartResume()`/`readRestartResume()` |
+| 전달 | 첫 SSE 연결에서 보낸다. 2xx·4xx(다시 보내도 소용없다)면 지우고, 닿지 못하거나 5xx 면 다음 연결에 다시 보낸다 | `deliverRestartResume()`, `rest.ts` → `postRestartResume()` |
+| 티켓 | 서버가 **이 호스트의** 티켓만 `resumeTicket(id, 'manager_restart')` 로 다시 보낸다(다른 호스트·없는 티켓은 건너뛴다) | `TicketDispatchService.resumeAfterHostRestart()` |
+| 세션 | 그 호스트의 operator(없으면 가장 최근에 대화한 operator)에게 `중단됨` 보고 → operator 가 `resume_interrupted_session` 으로 고정 재개 문구를 보낸다 | `docs/voice-operator.md` → "재시작으로 끊긴 작업" |
+
+`restart_agent` 의 재전송(`POST /api/agent-manager/managed-agents/:id/resume-triggers`)도 같은
+`resumeAfterHostRestart()` 를 탄다. 이 라우트는 P4c-4 에서 Agent 테이블과 함께 지워진 뒤 매니저만
+계속 불러 404 였다(재시작한 런타임의 티켓이 supervisor 를 기다렸다).
+
+채팅방의 끊긴 답(미션 step 포함)은 아직 잇지 않는다 — 그 방에 다시 말을 걸어야 한다.
 
 ### 확정된 정책
 
@@ -771,8 +787,8 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
   유지보수 창은 *언제 물어볼지*를 정하지 *언제 무인 실행할지*를 정하지 않는다. 승인 없이
   창 안에서 개시하는 방식은 `auto` 이며, 그쪽이 티켓이 말한 "완전 자동"이다. 상세는 아래
   "승인 게이트" 참조.
-- **강제 재시작은 현행 10분 상한을 유지한다.** 상한을 없애면, 카운터가 트리거 세션을
-  포함하는 특성상 상시 가동 호스트는 영원히 갱신되지 않는다. 상한이 곧 종결 보장이다.
+- **진행 중 작업은 갱신을 미루지 않는다(2026-10-22).** 예전 10분 drain 상한은 바쁜 호스트를
+  매번 10분 기다리게 한 뒤 결국 작업을 죽였다. 끊긴 작업은 위 "재시작으로 끊긴 작업" 으로 잇는다.
 - **롤백은 "다운그레이드"가 아니라 "부팅 검증 후 이전 버전 재설치"로 정의한다.** 판정
   기준은 재기동 후 하트비트 1회 성공이며, 되돌린 버전에도 provenance 게이트를 그대로
   적용한다(이전 버전이라고 예외를 두지 않는다).
@@ -790,7 +806,7 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
 | 승인 단위 | **(호스트 × 대상 버전) 1회성.** 한 호스트에서 v1.6.185 를 승인해도 v1.6.186 이나 다른 호스트에는 적용되지 않는다 |
 | 요청 시점 | 유지보수 창에 진입했고, 실제로 새 버전이 있고, provenance 검증을 통과했을 때 |
 | 미승인 시 | **아무 일도 일어나지 않는다.** 요청은 다음 창에 다시 표면화된다. 시간이 지난다고 무인 실행으로 승격되지 않는다 |
-| 승인 후 | 기존 경로 그대로 — drain → 10분 상한 → 설치 → 재기동 |
+| 승인 후 | 기존 경로 그대로 — 설치 → 끊길 작업 저장 → 재기동 |
 
 `auto` 는 이 게이트를 건너뛴다. 아래 사각지대 3건이 닫히기 전에는 어느 호스트에서도 켜지
 않는다.

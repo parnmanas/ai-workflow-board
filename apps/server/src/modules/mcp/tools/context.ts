@@ -75,6 +75,7 @@ import type { OntologyLifecycleService } from '../../ontology/ontology-lifecycle
 import type { OntologyQueryService } from '../../ontology/ontology-query.service';
 import type { OperatorDecisionService } from '../../voice/operator-decision.service';
 import type { OperatorProposalService } from '../../voice/operator-proposal.service';
+import type { InterruptedSessionsService } from '../../voice/interrupted-sessions.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -228,6 +229,9 @@ export interface ToolContext {
   // 작업 제안(docs/voice-operator.md "작업 제안") — operator 가 다른 세션에 시킬 일을 제안한다. 같은 이유로
   // standalone context 에는 없다.
   operatorProposalService?: OperatorProposalService;
+  // 재시작으로 끊긴 작업(docs/voice-operator.md) — operator 가 끊긴 세션을 고정 문구로 잇는다. 같은 이유로
+  // standalone context 에는 없다.
+  interruptedSessionsService?: InterruptedSessionsService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

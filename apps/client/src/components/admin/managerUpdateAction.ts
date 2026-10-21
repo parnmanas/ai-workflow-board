@@ -4,7 +4,10 @@
  *
  *   - restart:  디스크 설치본(installed_version)이 실행 중(plugin_version)과 다르다 —
  *               `npm i -g` 가 프로세스 밖에서 돌았다. 설치 없이 재기동만 하면 된다.
- *               update_manager 를 보내면 매니저가 설치를 건너뛰고 재기동한다(drain·부팅 검증 포함).
+ *               update_manager 를 보내면 매니저가 설치를 건너뛰고 바로 재기동한다(부팅 검증 포함).
+ *
+ * 업데이트·재기동은 돌고 있는 작업을 기다리지 않는다 — 매니저가 끊길 작업을 저장했다가 재시작 뒤 AWB 가
+ * 티켓을 다시 보내고, 끊긴 세션은 그 호스트의 operator 에게 이어서 진행하도록 넘긴다(INTERRUPTED_WORK_NOTE).
  *   - update:   레지스트리에 더 새 버전이 있다 — 기존 Update.
  *   - latest:   올릴 것이 없다.
  *   - unknown:  구버전 매니저라 업데이트 확인을 보고하지 않는다.
@@ -27,6 +30,9 @@ export type ManagerUpdateAction =
   | { kind: 'latest'; label: string; title: string }
   | { kind: 'unknown'; label: string; title: string };
 
+const INTERRUPTED_WORK_NOTE =
+  'Running work is not waited for: after the restart AWB re-sends interrupted tickets and asks the host\'s operator to continue interrupted sessions.';
+
 export function managerUpdateAction(inst: ManagerUpdateActionInput): ManagerUpdateAction {
   if (inst.restart_required && inst.installed_version) {
     return {
@@ -37,7 +43,7 @@ export function managerUpdateAction(inst: ManagerUpdateActionInput): ManagerUpda
         'Restarting loads the installed build (no reinstall).',
       confirm:
         `v${inst.installed_version} is already installed on this host (running v${inst.plugin_version}). ` +
-        'Restart the manager now to load it? In-flight sessions are drained first.',
+        'Restart the manager now to load it? ' + INTERRUPTED_WORK_NOTE,
     };
   }
   if (inst.update_available) {
@@ -51,8 +57,8 @@ export function managerUpdateAction(inst: ManagerUpdateActionInput): ManagerUpda
           : `Update from v${inst.plugin_version} → v${target} (git pull + npm ci + build, then re-exec).`,
       confirm:
         inst.install_mode === 'npm-global'
-          ? 'Update this manager? It will reinstall from npm (npm i -g --ignore-scripts awb-agent-manager@latest) and restart.'
-          : 'Update this manager? It will pull the latest source, rebuild, and restart.',
+          ? 'Update this manager? It will reinstall from npm (npm i -g --ignore-scripts awb-agent-manager@latest) and restart. ' + INTERRUPTED_WORK_NOTE
+          : 'Update this manager? It will pull the latest source, rebuild, and restart. ' + INTERRUPTED_WORK_NOTE,
     };
   }
   if (inst.update_available === undefined) {
