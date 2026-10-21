@@ -51,7 +51,7 @@ async function call(name, args = {}, overrides = {}) {
 
 test('read-only account caller discovers own and inherited globals, never other accounts', async () => {
   const { result, data } = await call('list_credentials');
-  assert.ok(!result.isError);
+  assert.ok(!result.isError, JSON.stringify(result));
   assert.deepEqual(data.credentials.map(r => r.id), [own.id, global.id, broken.id, empty.id]);
   assert.equal(data.total, 4);
   assert.equal(data.limit, 50);
@@ -73,7 +73,7 @@ test('provider, scope and pagination filters agree with total', async () => {
 test('detail follows same visibility and returns identical errors for hidden and absent IDs', async () => {
   for (const row of [own, global]) {
     const { result, data } = await call('get_credential', { credential_id: row.id });
-    assert.ok(!result.isError);
+    assert.ok(!result.isError, JSON.stringify(result));
     assert.equal(data.id, row.id);
   }
   const hidden = await call('get_credential', { credential_id: other.id });
@@ -91,12 +91,12 @@ test('explicit foreign account is denied even with global scope or a full-scope 
   }
 });
 
-test('unbound full-scope host aggregates accounts and can narrow to one account plus globals', async () => {
+test('unbound full-scope host falls back to its stored owner and cannot aggregate accounts', async () => {
   const auth = { accountId: undefined, scope: 'full' };
-  assert.equal((await call('list_credentials', {}, auth)).data.total, 5);
-  assert.deepEqual((await call('list_credentials', { account_id: 'account-b' }, auth)).data.credentials.map(r => r.id), [other.id, global.id]);
-  assert.equal((await call('list_credentials', { scope: 'account' }, auth)).data.total, 4);
-  assert.equal((await call('get_credential', { credential_id: other.id }, auth)).data.id, other.id);
+  assert.equal((await call('list_credentials', {}, auth)).data.total, 4);
+  assert.equal((await call('list_credentials', { account_id: 'account-b' }, auth)).result.isError, true);
+  assert.equal((await call('list_credentials', { scope: 'account' }, auth)).data.total, 3);
+  assert.equal((await call('get_credential', { credential_id: other.id }, auth)).result.isError, true);
 });
 
 test('unbound read host falls back to its account and cannot aggregate others', async () => {

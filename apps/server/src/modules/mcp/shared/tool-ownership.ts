@@ -50,7 +50,7 @@ export async function checkToolOwnership(
     tickets.add(attachment.ticket_id);
   }
   for (const id of tickets) {
-    const ticket = await dataSource.getRepository('Ticket').findOne({ where: { id }, select: ['account_id'] });
+    const ticket = await dataSource.getRepository('Ticket').findOne({ where: { id }, select: ['id', 'account_id'] });
     if (!accountId || !ticket || ticket.account_id !== accountId) return DENIED;
   }
   // Catalog objects can be explicitly Global. Work and channels cannot.
@@ -61,9 +61,10 @@ export async function checkToolOwnership(
   ];
   for (const [field, entity, globalAllowed] of references) {
     if (!args[field]) continue;
-    let row = await dataSource.getRepository(entity).findOne({ where: { id: args[field] }, select: ['account_id'] });
+    // A NULL-only projection hydrates as no entity; keep the id for Global rows.
+    let row = await dataSource.getRepository(entity).findOne({ where: { id: args[field] }, select: ['id', 'account_id'] });
     // Repository resources were migrated into Projects with the same UUID.
-    if (!row && field === 'resource_id') row = await dataSource.getRepository('Project').findOne({ where: { id: args[field] }, select: ['account_id'] });
+    if (!row && field === 'resource_id') row = await dataSource.getRepository('Project').findOne({ where: { id: args[field] }, select: ['id', 'account_id'] });
     if (!row || !(globalAllowed && row.account_id === null) && (!accountId || row.account_id !== accountId)) return DENIED;
   }
   return null;
