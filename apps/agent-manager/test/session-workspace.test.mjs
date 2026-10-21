@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionWorkspaces, sessionWorkflowInstruction } from '../dist/lib/session-workspace.js';
@@ -33,7 +33,8 @@ for (const base of ['main', 'master']) test(`default works on ${base} without cr
   git(repo, 'switch', '-c', 'old-topic');
   const workspace = await workspaces.prepare('codex', '', repo);
   assert.equal(git(repo, 'branch', '--show-current'), base);
-  assert.equal(workspace.cwd, repo);
+  // prepare() 는 정규화된(realpath) 경로를 돌려준다 — windows 의 tmpdir() 는 8.3 짧은 이름(RUNNER~1)일 수 있다.
+  assert.equal(workspace.cwd, await realpath(repo));
   assert.equal(workspace.root, undefined);
   assert.equal(git(repo, 'worktree', 'list', '--porcelain').match(/^worktree /gm).length, 1);
   assert.match(sessionWorkflowInstruction(workspace), /Do not create a branch/);
