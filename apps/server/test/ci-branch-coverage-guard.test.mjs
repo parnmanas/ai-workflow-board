@@ -26,6 +26,35 @@ import { deployBranches, pushBranches } from '../../../scripts/audit-ci-branch-c
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const CI_YML = path.join(REPO_ROOT, '.github/workflows/ci.yml');
 
+// Browser checks share a job, but must report failures independently.
+function browserSmokeSteps() {
+  const yaml = fs.readFileSync(CI_YML, 'utf8').replace(/^\s*#.*$/gm, '');
+  const job = yaml.match(/^  ontology-graph-browser-smoke:\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/m);
+  assert.ok(job, 'browser smoke job is missing');
+  return job[1].split(/^      - /m).slice(1);
+}
+
+test('Ontology browser smoke runs after responsive failure, unless cancelled', () => {
+  const steps = browserSmokeSteps();
+  const ontology = steps.find((step) => step.includes('run: npm run build -w server && npm run test:e2e:ontology -w client'));
+  assert.ok(ontology, 'server build + Ontology smoke step is missing');
+  assert.match(ontology, /^        if: \$\{\{ !cancelled\(\) \}\}$/m);
+  assert.doesNotMatch(ontology, /continue-on-error:/);
+});
+
+test('responsive screenshots depend only on responsive failure and upload before the next Playwright run', () => {
+  const steps = browserSmokeSteps();
+  const responsiveIndex = steps.findIndex((step) => step.includes('run: npm run test:e2e:responsive -w client'));
+  const uploadIndex = steps.findIndex((step) => step.includes('name: Upload responsive UI failure screenshots'));
+  const ontologyIndex = steps.findIndex((step) => step.includes('test:e2e:ontology'));
+  assert.ok(responsiveIndex >= 0 && uploadIndex > responsiveIndex && ontologyIndex > uploadIndex,
+    'upload responsive artifacts before Ontology overwrites the shared test-results directory');
+  assert.match(steps[responsiveIndex], /^        id: responsive$/m);
+  assert.match(steps[uploadIndex], /^        if: \$\{\{ !cancelled\(\) && steps\.responsive\.outcome == 'failure' \}\}$/m);
+  assert.match(steps[uploadIndex], /^          path: apps\/client\/test-results\/$/m);
+  assert.doesNotMatch(steps[responsiveIndex], /continue-on-error:/);
+});
+
 test('실제 ci.yml 에서 main 과 production.private 을 둘 다 읽어낸다', () => {
   const branches = pushBranches(fs.readFileSync(CI_YML, 'utf8'));
   assert.notEqual(

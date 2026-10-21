@@ -516,15 +516,18 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Check responsive work pages
+        id: responsive
         run: npm run test:e2e:responsive -w client
       - name: Upload responsive UI failure screenshots
-        if: failure()
+        if: ${{ !cancelled() && steps.responsive.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: responsive-ui-failures
           path: apps/client/test-results/
           if-no-files-found: ignore
       - name: Build server and run bounded browser smoke
+        # Responsive failures must not hide Ontology regressions.
+        if: ${{ !cancelled() }}
         run: npm run build -w server && npm run test:e2e:ontology -w client
 
   # apps/server 전체 `npm test` 체이닝 CI 게이트 (ticket 003fcc99).
