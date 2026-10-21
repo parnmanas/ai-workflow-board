@@ -13,6 +13,9 @@
 //   • re-entering Done (a duplicate 'moved' activity for the SAME item) never
 //     fires a second reply — idempotency rides the OutreachOutboundPost
 //     (channel_id, dedupe_key) unique index, not a ticket column.
+//   • resolve replies get no whitelist exemption: the connector re-checks
+//     where the original thread lives, so an item from a subreddit the
+//     channel has since dropped gets no reply.
 //   • a Done ticket with NO outreach backlink is a total no-op.
 //   • only a status change INTO done triggers it: a 'moved' to another status,
 //     or a done entry the ticket has since been moved back out of, is a no-op.
@@ -138,6 +141,8 @@ function makeServices(dataSource) {
 
 const REAL_FETCH = globalThis.fetch;
 function restoreFetch() { globalThis.fetch = REAL_FETCH; }
+/** Counts only /api/comment (the reply itself). The /api/info lookup the
+ *  connector makes first answers every thread as living in r/awb. */
 function installFakeRedditFetch() {
   let calls = 0;
   const okHeaders = { get: () => null };
@@ -145,6 +150,13 @@ function installFakeRedditFetch() {
     const u = String(url);
     if (u === 'https://www.reddit.com/api/v1/access_token') {
       return { ok: true, status: 200, headers: okHeaders, json: async () => ({ access_token: 'tok', expires_in: 3600 }), text: async () => '' };
+    }
+    if (u.includes('/api/info')) {
+      return {
+        ok: true, status: 200, headers: okHeaders,
+        json: async () => ({ data: { children: [{ data: { subreddit: 'awb', permalink: '/r/awb/comments/x/y', title: '' } }] } }),
+        text: async () => '',
+      };
     }
     if (u.includes('/api/comment')) {
       calls++;
@@ -254,6 +266,31 @@ test('re-entering Done for the SAME backlinked item never fires a second reply',
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
     assert.equal(rows.length, 1, 'still exactly one ledger row');
     assert.equal(fake.callCount(), 1, 'still exactly one external call');
+  } finally { await dataSource.destroy(); }
+});
+
+test('no exemption for resolve replies: an item from a subreddit the channel has since dropped from its whitelist gets no reply (ticket d74280db)', async () => {
+  const dataSource = await setupDb();
+  try {
+    await seedAccount(dataSource);
+    const cred = await seedCredential(dataSource);
+    // Collected while r/awb was whitelisted; the operator has since narrowed
+    // the channel to r/awb_news (e.g. r/awb stopped allowing bots).
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto', targets: ['awb_news'] });
+    const ticket = await seedDoneTicket(dataSource);
+    await seedInboundItem(dataSource, channel, ticket.id, { external_item_id: 't1_beforenarrowing' });
+    const { notifier } = makeServices(dataSource);
+
+    const fake = installFakeRedditFetch();
+    try {
+      await notifier._handleActivity(movedToDone(ticket.id));
+    } finally { restoreFetch(); }
+
+    const rows = await dataSource.getRepository(OutreachOutboundPost).find();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].status, 'failed');
+    assert.match(rows[0].error, /r\/awb, which is not in this channel's subreddit whitelist/);
+    assert.equal(fake.callCount(), 0, 'nothing was posted');
   } finally { await dataSource.destroy(); }
 });
 

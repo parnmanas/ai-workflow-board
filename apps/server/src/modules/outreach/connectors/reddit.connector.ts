@@ -11,8 +11,15 @@
  *     explicit anti-scope-creep requirement (self-promotion rules differ per
  *     subreddit and auto-expansion risks a ban/shadowban).
  *   - `publish`/`reply` also reject a target outside `targets` — belt-and-
- *     suspenders on top of the same requirement, since OutreachChannel.targets
- *     is already validated upstream by OutreachChannelService.
+ *     suspenders on top of the same requirement, enforced here rather than
+ *     trusted to callers. `publish` names its subreddit; a `reply` fullname
+ *     does not, so `reply` first looks the thread up (`describeThread`) and
+ *     refuses one that is outside `targets` or cannot be found. No caller is
+ *     exempt, not even a resolve reply to an item this connector collected
+ *     itself: the whitelist may have shrunk since, and
+ *     `OutreachChannel.reply_thread_ref` is operator free text nothing else
+ *     checks. The lookup costs a request against the rate cap, so where a
+ *     thread lives is cached process-wide (RedditThreadLocationCache).
  *   - Every request carries the caller-supplied `userAgent` (Reddit API rules
  *     require a descriptive, unique User-Agent identifying the client).
  *
@@ -80,6 +87,51 @@ const MAX_RATE_LIMIT_RETRIES = 3;
 const BASE_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 
+const THREAD_LOCATION_CACHE_MAX_ENTRIES = 1_000;
+
+/**
+ * Which subreddit each Reddit fullname lives in — what `reply` must know
+ * before it may post, and what the fullname itself does not say. A fresh
+ * RedditConnector is built per call (connector-resolver.ts), so an instance
+ * field would never be hit; like outreach-rate-limiter.ts, one process-wide
+ * instance is shared instead (`sharedRedditThreadLocationCache`). Entries
+ * never go stale — Reddit cannot move a post to another subreddit, and a
+ * comment lives wherever its post does — so there is no expiry, only a size
+ * bound (least recently used first out). Only the location is cached, never
+ * the allow/deny decision: each connector checks it against its own
+ * `targets` on every reply.
+ */
+export class RedditThreadLocationCache {
+  private readonly subreddits = new Map<string, string>();
+
+  constructor(private readonly maxEntries: number = THREAD_LOCATION_CACHE_MAX_ENTRIES) {}
+
+  get(fullname: string): string | undefined {
+    const subreddit = this.subreddits.get(fullname);
+    if (subreddit !== undefined) {
+      // A Map iterates in insertion order — re-inserting marks it most recently used.
+      this.subreddits.delete(fullname);
+      this.subreddits.set(fullname, subreddit);
+    }
+    return subreddit;
+  }
+
+  remember(fullname: string, subreddit: string): void {
+    if (!fullname || !subreddit) return;
+    this.subreddits.delete(fullname);
+    this.subreddits.set(fullname, subreddit);
+    if (this.subreddits.size > this.maxEntries) {
+      const oldest = this.subreddits.keys().next();
+      if (!oldest.done) this.subreddits.delete(oldest.value);
+    }
+  }
+}
+
+// Process-wide instance every production RedditConnector shares (see class
+// docstring). Tests inject their own via RedditConnectorOptions.threadLocations,
+// the same way they bypass sharedOutreachRateLimiter.
+export const sharedRedditThreadLocationCache = new RedditThreadLocationCache();
+
 export interface RedditCredentialLike {
   username?: string;
   token: string;
@@ -100,6 +152,8 @@ export interface RedditConnectorOptions {
   // Test seam — defaults to the shared process-wide limiter (see that file's
   // docstring for why production never overrides this).
   rateLimiter?: OutreachRateLimiter;
+  // Test seam — defaults to sharedRedditThreadLocationCache, for the same reason.
+  threadLocations?: RedditThreadLocationCache;
   // Test seam for the proactive rate-limit-window wait (default Date.now) —
   // keeps that wait's duration computation deterministic under test instead
   // of depending on real elapsed wall-clock time between two calls.
@@ -128,6 +182,7 @@ export class RedditConnector implements OutreachConnector {
   private readonly channelId: string;
   private readonly rateLimitPerHour: number;
   private readonly rateLimiter: OutreachRateLimiter;
+  private readonly threadLocations: RedditThreadLocationCache;
   private readonly now: () => number;
 
   private accessToken: AccessToken | null = null;
@@ -171,6 +226,7 @@ export class RedditConnector implements OutreachConnector {
     this.channelId = opts.channelId || '';
     this.rateLimitPerHour = opts.rateLimitPerHour ?? 0;
     this.rateLimiter = opts.rateLimiter || sharedOutreachRateLimiter;
+    this.threadLocations = opts.threadLocations || sharedRedditThreadLocationCache;
     this.now = opts.now || Date.now;
   }
 
@@ -237,13 +293,25 @@ export class RedditConnector implements OutreachConnector {
     }
     const data = result?.json?.data;
     if (!data?.name) throw new RedditApiError('Reddit submit response missing post name/id');
+    // Deploy announcements in 'auto' mode later reply under this very post.
+    this.threadLocations.remember(data.name, post.target.trim());
     return { external_item_id: data.name, permalink: this._absolutePermalink(data.url) };
   }
 
-  /** Reply to an existing thing (post or comment). `threadRef` is a Reddit fullname (t3_/t1_). */
+  /**
+   * Reply to an existing thing (post or comment). `threadRef` is a Reddit
+   * fullname (t3_/t1_), which does not say where it is — so the thread's
+   * subreddit is looked up first (cached, else `describeThread`) and the reply
+   * is refused unless it is whitelisted. A lookup failure refuses too.
+   */
   async reply(threadRef: string, body: string): Promise<OutboundResult> {
-    if (!threadRef || !/^t[13]_/.test(threadRef)) {
-      throw new RedditApiError(`threadRef must be a Reddit fullname (t1_.../t3_...), got: ${threadRef}`);
+    this._assertFullname(threadRef);
+    if (this.targets.size === 0) {
+      throw new RedditApiError('this channel has no subreddit whitelist — refusing to reply anywhere');
+    }
+    const subreddit = this.threadLocations.get(threadRef) ?? (await this.describeThread(threadRef)).target;
+    if (!this._isWhitelisted(subreddit)) {
+      throw new RedditApiError(`thread ${threadRef} is in r/${subreddit}, which is not in this channel's subreddit whitelist`);
     }
     const form = new URLSearchParams({
       thing_id: threadRef,
@@ -262,17 +330,19 @@ export class RedditConnector implements OutreachConnector {
 
   /**
    * Which subreddit a post/comment fullname lives in (`/api/info`). Used by
-   * marketing replies to refuse a thread outside the channel's subreddit — the
-   * fullname alone says nothing about where it is. Read-only, but it is a real
-   * API call, so it goes through the same `_request` (and its rate cap).
+   * `reply` and by marketing drafts to refuse a thread outside the channel's
+   * subreddit — the fullname alone says nothing about where it is. Read-only,
+   * but it is a real API call, so it goes through the same `_request` (and its
+   * rate cap). Always asks Reddit (permalink/title are shown to the approver);
+   * the location it learns is remembered, so a reply after a draft-time check
+   * costs no second lookup.
    */
   async describeThread(threadRef: string): Promise<ThreadInfo> {
-    if (!threadRef || !/^t[13]_[a-z0-9]+$/i.test(threadRef)) {
-      throw new RedditApiError(`threadRef must be a Reddit fullname (t1_.../t3_...), got: ${threadRef}`);
-    }
+    this._assertFullname(threadRef);
     const result = await this._request<any>('GET', `/api/info?id=${encodeURIComponent(threadRef)}`);
     const data = result?.data?.children?.[0]?.data;
     if (!data || !data.subreddit) throw new RedditApiError(`thread ${threadRef} was not found`);
+    this.threadLocations.remember(threadRef, String(data.subreddit));
     return {
       target: String(data.subreddit),
       permalink: this._absolutePermalink(data.permalink || ''),
@@ -282,9 +352,21 @@ export class RedditConnector implements OutreachConnector {
 
   // ── Internals ────────────────────────────────────────────────────────────
 
+  private _isWhitelisted(subreddit: string): boolean {
+    return this.targets.has((subreddit || '').trim().toLowerCase());
+  }
+
   private _assertTargetAllowed(target: string): void {
-    if (!this.targets.has((target || '').trim().toLowerCase())) {
+    if (!this._isWhitelisted(target)) {
       throw new RedditApiError(`target "${target}" is not in this channel's subreddit whitelist`);
+    }
+  }
+
+  // Strict on purpose: `/api/info?id=` also accepts a comma-separated list, so
+  // anything beyond one fullname must never reach it (or `/api/comment`).
+  private _assertFullname(threadRef: string): void {
+    if (!threadRef || !/^t[13]_[a-z0-9]+$/i.test(threadRef)) {
+      throw new RedditApiError(`threadRef must be a Reddit fullname (t1_.../t3_...), got: ${threadRef}`);
     }
   }
 

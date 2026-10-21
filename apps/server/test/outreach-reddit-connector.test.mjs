@@ -12,6 +12,7 @@ import {
   RedditForbiddenError,
   RedditRateLimitError,
   RedditApiError,
+  RedditThreadLocationCache,
 } from '../dist/modules/outreach/connectors/reddit.connector.js';
 import { OutreachRateLimiter, OutreachChannelRateLimitedError } from '../dist/modules/outreach/outreach-rate-limiter.js';
 
@@ -127,20 +128,168 @@ test('publish rejects a target outside the whitelist WITHOUT making any network 
   assert.equal(calls.length, 0, 'no request was made for a non-whitelisted target');
 });
 
-test('reply posts a comment and rejects a non-fullname threadRef', async () => {
+// ── reply checks where the thread is itself (ticket d74280db) ────────────────
+// A fullname does not say which subreddit it is in, so reply() looks it up
+// (/api/info) and refuses anything outside `targets` — callers' own checks are
+// not the only guard. Every test here injects a fresh RedditThreadLocationCache
+// so no test sees a location another one learned.
+
+/** `/api/info` answer: `subreddits` maps fullname → subreddit; anything else is "not found". */
+function infoResponse(url, subreddits) {
+  const id = new URL(url).searchParams.get('id');
+  const subreddit = subreddits[id];
+  const children = subreddit
+    ? [{ kind: id.slice(0, 2), data: { name: id, subreddit, permalink: `/r/${subreddit}/comments/x/y`, title: 'A thread' } }]
+    : [];
+  return fakeResponse({ status: 200, json: { kind: 'Listing', data: { children } } });
+}
+
+const COMMENT_OK = () => fakeResponse({
+  status: 200,
+  json: { json: { errors: [], data: { things: [{ data: { name: 't1_reply1', permalink: '/r/awb/comments/x/y/reply1' } }] } } },
+});
+
+/** Fake Reddit that records every API path (minus the OAuth host) in order. */
+function fakeReddit(subreddits) {
+  const paths = [];
   const fetchImpl = async (url) => {
-    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
-    if (String(url).includes('/api/comment')) {
-      return fakeResponse({ status: 200, json: { json: { errors: [], data: { things: [{ data: { name: 't1_reply1', permalink: '/r/awb/comments/x/y/reply1' } }] } } } });
+    const u = String(url);
+    if (u === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    paths.push(u.replace('https://oauth.reddit.com', ''));
+    if (u.includes('/api/info')) return infoResponse(u, subreddits);
+    if (u.includes('/api/comment')) return COMMENT_OK();
+    if (u.includes('/api/submit')) {
+      return fakeResponse({ status: 200, json: { json: { errors: [], data: { name: 't3_new1', url: '/r/awb/comments/new1/x' } } } });
     }
-    throw new Error(`unexpected url ${url}`);
+    throw new Error(`unexpected url ${u}`);
   };
-  const conn = new RedditConnector(makeCred(), { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl });
+  return {
+    fetchImpl,
+    paths,
+    infoCalls: () => paths.filter((p) => p.startsWith('/api/info')).length,
+    commentCalls: () => paths.filter((p) => p === '/api/comment').length,
+  };
+}
+
+test('reply looks up the thread\'s subreddit first, then posts the comment (whitelist match is case-insensitive)', async () => {
+  const reddit = fakeReddit({ t3_orig: 'AWB' });
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations: new RedditThreadLocationCache(),
+  });
   const result = await conn.reply('t3_orig', 'thanks for the report');
   assert.equal(result.external_item_id, 't1_reply1');
   assert.equal(result.permalink, 'https://www.reddit.com/r/awb/comments/x/y/reply1');
+  assert.deepEqual(reddit.paths, ['/api/info?id=t3_orig', '/api/comment'], 'lookup strictly before the comment');
+});
 
+test('reply rejects a malformed threadRef — including a comma-separated id list — without any network call', async () => {
+  const reddit = fakeReddit({ t3_a: 'awb', t3_b: 'awb' });
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations: new RedditThreadLocationCache(),
+  });
   await assert.rejects(conn.reply('not-a-fullname', 'x'), RedditApiError);
+  // /api/info?id= takes a list — "t3_a,t3_b" must not slip through as one ref.
+  await assert.rejects(conn.reply('t3_a,t3_b', 'x'), RedditApiError);
+  assert.deepEqual(reddit.paths, []);
+});
+
+test('reply refuses a thread in a subreddit outside the whitelist — the comment is never posted', async () => {
+  const reddit = fakeReddit({ t3_elsewhere: 'programming' });
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations: new RedditThreadLocationCache(),
+  });
+  await assert.rejects(
+    conn.reply('t3_elsewhere', 'x'),
+    (err) => err instanceof RedditApiError && /t3_elsewhere is in r\/programming.*not in this channel's subreddit whitelist/.test(err.message),
+  );
+  assert.equal(reddit.commentCalls(), 0);
+});
+
+test('reply refuses when the lookup fails (not found, or an API error) — fail-closed, the comment is never posted', async () => {
+  const reddit = fakeReddit({});
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations: new RedditThreadLocationCache(),
+  });
+  await assert.rejects(conn.reply('t1_gone', 'x'), /t1_gone was not found/);
+
+  const broken = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    if (String(url).includes('/api/info')) return fakeResponse({ status: 500, text: 'upstream down' });
+    throw new Error(`the comment must not be attempted: ${url}`);
+  };
+  const conn2 = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: broken, threadLocations: new RedditThreadLocationCache(),
+  });
+  await assert.rejects(conn2.reply('t3_orig', 'x'), (err) => err instanceof RedditApiError && err.status === 500);
+  assert.equal(reddit.commentCalls(), 0);
+});
+
+test('reply on a channel with an empty whitelist is refused without any network call', async () => {
+  const reddit = fakeReddit({ t3_orig: 'awb' });
+  const conn = new RedditConnector(makeCred(), {
+    targets: [], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations: new RedditThreadLocationCache(),
+  });
+  await assert.rejects(conn.reply('t3_orig', 'x'), /no subreddit whitelist/);
+  assert.deepEqual(reddit.paths, []);
+});
+
+test('where a thread lives is shared across connector instances, but each connector applies its OWN whitelist', async () => {
+  const reddit = fakeReddit({ t3_shared: 'awb' });
+  const threadLocations = new RedditThreadLocationCache();
+  const common = { userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations };
+  await new RedditConnector(makeCred(), { ...common, targets: ['awb'] }).reply('t3_shared', 'x');
+  // A fresh instance (production builds one per call) answers from the cache…
+  await new RedditConnector(makeCred(), { ...common, targets: ['awb'] }).reply('t3_shared', 'y');
+  // …and the cache never carries the allow decision over to another whitelist.
+  await assert.rejects(
+    new RedditConnector(makeCred(), { ...common, targets: ['other'] }).reply('t3_shared', 'z'),
+    /not in this channel's subreddit whitelist/,
+  );
+  assert.equal(reddit.infoCalls(), 1, 'looked up once — the location never changes');
+  assert.equal(reddit.commentCalls(), 2, 'the off-whitelist connector posted nothing');
+});
+
+test('describeThread (the marketing draft-time check) remembers the location, so the later reply costs no second lookup', async () => {
+  const reddit = fakeReddit({ t1_abc123: 'SelfHosted' });
+  const threadLocations = new RedditThreadLocationCache();
+  const opts = { targets: ['selfhosted'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations };
+  const info = await new RedditConnector(makeCred(), opts).describeThread('t1_abc123');
+  assert.equal(info.target, 'SelfHosted');
+  await new RedditConnector(makeCred(), opts).reply('t1_abc123', 'Thanks — fixed in 1.0.1.');
+  assert.equal(reddit.infoCalls(), 1);
+  assert.equal(reddit.commentCalls(), 1);
+});
+
+test('publish remembers its new post, so replying under it later (deploy_post_mode=auto) costs no lookup', async () => {
+  const reddit = fakeReddit({});
+  const threadLocations = new RedditThreadLocationCache();
+  const opts = { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations };
+  const posted = await new RedditConnector(makeCred(), opts).publish({ target: 'awb', title: 'Release', body: 'notes' });
+  await new RedditConnector(makeCred(), opts).reply(posted.external_item_id, 'Next release');
+  assert.equal(reddit.infoCalls(), 0, 'the post was made in r/awb — nothing to look up');
+  assert.equal(reddit.commentCalls(), 1);
+});
+
+test('the lookup counts against rate_limit_per_hour — when it takes the last slot, the comment is refused, never posted', async () => {
+  const reddit = fakeReddit({ t3_orig: 'awb' });
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl: reddit.fetchImpl, threadLocations: new RedditThreadLocationCache(),
+    channelId: 'ch-reply', rateLimitPerHour: 1, rateLimiter: new OutreachRateLimiter(),
+  });
+  await assert.rejects(conn.reply('t3_orig', 'x'), OutreachChannelRateLimitedError);
+  assert.equal(reddit.infoCalls(), 1);
+  assert.equal(reddit.commentCalls(), 0);
+});
+
+test('RedditThreadLocationCache drops the least recently used entry past its bound', () => {
+  const cache = new RedditThreadLocationCache(2);
+  cache.remember('t3_a', 'awb');
+  cache.remember('t3_b', 'awb');
+  assert.equal(cache.get('t3_a'), 'awb'); // touched — t3_b is now the oldest
+  cache.remember('t3_c', 'other');
+  assert.equal(cache.get('t3_b'), undefined);
+  assert.equal(cache.get('t3_a'), 'awb');
+  assert.equal(cache.get('t3_c'), 'other');
 });
 
 test('fetchInbound: empty targets makes ZERO network calls (fail-closed, no auto-discovery)', async () => {

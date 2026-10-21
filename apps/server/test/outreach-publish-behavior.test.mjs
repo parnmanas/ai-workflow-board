@@ -28,6 +28,8 @@
 //   • deploy_post_mode='reply_to_existing' always replies to the fixed
 //     reply_thread_ref; 'auto' posts new on the first release and replies on
 //     a later one still inside auto_reuse_window_days.
+//   • a reply_thread_ref in a subreddit outside the channel's whitelist is
+//     refused by the connector — the row lands failed, nothing is posted.
 //   • a GLOBAL deployment (account_id=null) never publishes anywhere
 //     (fail-closed).
 
@@ -113,16 +115,26 @@ function signal(over = {}) {
 const REAL_FETCH = globalThis.fetch;
 function restoreFetch() { globalThis.fetch = REAL_FETCH; }
 
-/** Fakes Reddit's OAuth + submit/comment endpoints. Only counts calls to
+/** Fakes Reddit's OAuth + info/submit/comment endpoints. Only counts calls to
  *  /api/submit and /api/comment — the actual external side-effecting calls
- *  ("did we post to Reddit"), not the OAuth token fetch. */
-function installFakeRedditFetch({ fail = false } = {}) {
+ *  ("did we post to Reddit"), not the OAuth token fetch or the /api/info
+ *  lookup a reply makes first. That lookup answers from `threadSubreddits`
+ *  (fullname → subreddit), defaulting to the channel's own 'awb'. */
+function installFakeRedditFetch({ fail = false, threadSubreddits = {} } = {}) {
   let calls = 0;
   const okHeaders = { get: () => null };
   globalThis.fetch = async (url) => {
     const u = String(url);
     if (u === 'https://www.reddit.com/api/v1/access_token') {
       return { ok: true, status: 200, headers: okHeaders, json: async () => ({ access_token: 'tok', expires_in: 3600 }), text: async () => '' };
+    }
+    if (u.includes('/api/info')) {
+      const subreddit = threadSubreddits[new URL(u).searchParams.get('id')] || 'awb';
+      return {
+        ok: true, status: 200, headers: okHeaders,
+        json: async () => ({ data: { children: [{ data: { subreddit, permalink: `/r/${subreddit}/comments/x/y`, title: '' } }] } }),
+        text: async () => '',
+      };
     }
     if (u.includes('/api/submit')) {
       calls++;
@@ -318,6 +330,32 @@ test('deploy_post_mode=reply_to_existing always replies to the fixed reply_threa
     assert.equal(row.target, '');
     assert.equal(row.status, 'published');
     assert.equal(fake.callCount(), 1);
+  } finally { await dataSource.destroy(); }
+});
+
+test('deploy_post_mode=reply_to_existing never replies into a reply_thread_ref outside the channel\'s subreddit whitelist (ticket d74280db)', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    // reply_thread_ref is operator free text — nothing checks where it points
+    // until the connector does, right before the reply.
+    const channel = await seedChannel(dataSource, cred.id, {
+      publish_policy: 'auto', deploy_post_mode: 'reply_to_existing', reply_thread_ref: 't3_offwhitelist',
+    });
+    const svc = makeService(dataSource);
+    const fake = installFakeRedditFetch({ threadSubreddits: { t3_offwhitelist: 'programming' } });
+    try {
+      await svc._onDeploymentReported(signal());
+    } finally { restoreFetch(); }
+
+    const row = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
+    assert.equal(row.status, 'failed');
+    assert.match(row.error, /r\/programming.*not in this channel's subreddit whitelist/);
+    assert.equal(fake.callCount(), 0, 'nothing was posted');
+
+    const after = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    assert.match(after.last_error, /not in this channel's subreddit whitelist/, 'the operator sees why on the channel');
+    assert.equal(after.blocked_at, null, 'a refused target is not a Reddit ban');
   } finally { await dataSource.destroy(); }
 });
 
