@@ -37,7 +37,8 @@ async function fixture(page, { busy = false, withStep = false } = {}) {
     if (path === '/auth/me') body = { id: 'user-test', name: 'Test user', email: 'test@example.test', role: 'admin', status: 'active', permissions: [], resolved_permissions: ['admin.access', 'admin.actions', 'agent_sessions.use', 'voice.use'], accounts: [account] };
     else if (path === '/cli-catalog') body = { clis: cliCatalog() };
     else if (path === '/auth/setup-status') body = { needs_setup: false };
-    else if (path === '/workspaces') body = [account];
+    // 아래의 `endsWith('counts')` 보다 먼저 와야 한다 — '/accounts' 도 'counts' 로 끝난다.
+    else if (path === '/accounts') body = [account];
     else if (path === `/accounts/${account.id}`) body = account;
     else if (path === '/admin/agent-manager/instances') body = [{ instance_id: 'instance', host_id: host.manager_id, agent_id: host.manager_id, agent_name: host.name, hostname: host.hostname, account_id: account.id, mode: 'manager', cli: 'mixed', cli_adapters: ['codex'], pid: 123, plugin_version: '1.0.0', started_at: live.updated_at, last_seen_at: live.updated_at, working_dirs: [], agent_ids: [] }];
     else if (path === '/voice/config') body = { stt: { provider: 'openai', ready: true }, tts: { provider: 'openai', ready: true }, wake: { ready: false } };
@@ -123,7 +124,8 @@ test(`main pages and new-session dialog fit width ${width}`, async ({ page }, te
       await input.fill('채팅과 미션에서도 넓게 입력합니다');
     }
     expect(f.errors, route).toEqual([]);
-    await page.screenshot({ path: testInfo.outputPath(`${route.split('/').filter(Boolean).join('-')}.png`) });
+    // 쿼리의 `?`·`=` 가 파일명에 남으면 실패 시 upload-artifact 가 업로드 전체를 거부한다.
+    await page.screenshot({ path: testInfo.outputPath(`${route.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '')}.png`) });
   }
   await page.goto('/sessions?new=1');
   const dialog = page.getByRole('dialog', { name: 'New session', exact: true });
