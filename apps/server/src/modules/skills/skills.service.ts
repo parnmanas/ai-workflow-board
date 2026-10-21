@@ -1,8 +1,10 @@
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
+import { Project } from '../../entities/Project';
+import { ACCOUNT_TARGET_KEY, parseAssignmentTarget, projectTargetKey } from './skill-assignment-target';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { IsNull, Repository, DataSource } from 'typeorm';
+import { In, IsNull, Repository, DataSource } from 'typeorm';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { RuntimeSkillAssignment } from '../../entities/RuntimeSkillAssignment';
@@ -190,6 +192,11 @@ export class SkillsService {
     }));
   }
 
+  /**
+   * 버전 하나를 대상에 핀한다(docs/skills.md "배정 범위"). 대상은 `body.target`:
+   *   `{ scope: 'account' }` · `{ scope: 'project', project_id }` · `{ scope: 'runtime', runtime }`.
+   * `target` 없이 `runtime` 만 오면 예전 호출(실행 범위)로 읽는다. 같은 대상에 다시 배정하면 버전만 바뀐다.
+   */
   async assign(accountId: string, skillId: string, body: any, actorId: string) {
     // Visible is enough here — assigning a GLOBAL skill to a account agent is
     // the primary way a built-in gets used. The assignment row itself stays
@@ -199,15 +206,30 @@ export class SkillsService {
       where: { id: String(body.skill_version_id), skill_id: skillId },
     });
     if (!version) throw httpError(404, 'skill_version_not_found', 'Skill version not found');
-    let spec;
-    try { spec = normalizeRuntimeSpec(body.runtime, 'runtime'); }
-    catch (error) { throw httpError(400, 'invalid_runtime', (error as Error).message); }
-    if (!await this.dataSource.getRepository(RuntimeHost).existsBy({ id: spec.manager_agent_id })) {
-      throw httpError(404, 'host_not_found', 'Runtime Host not found');
+    const target = body.target && typeof body.target === 'object' ? body.target : { scope: 'runtime', runtime: body.runtime };
+    let runtimeKey: string;
+    let targetLabel = '';
+    if (target.scope === 'account') {
+      runtimeKey = ACCOUNT_TARGET_KEY;
+    } else if (target.scope === 'project') {
+      const projectId = typeof target.project_id === 'string' ? target.project_id : '';
+      const project = projectId
+        ? await this.dataSource.getRepository(Project).findOne({ where: { id: projectId, account_id: accountId } })
+        : null;
+      if (!project) throw httpError(404, 'project_not_found', 'Project not found in this account');
+      runtimeKey = projectTargetKey(project.id);
+    } else if (target.scope === 'runtime') {
+      let spec;
+      try { spec = normalizeRuntimeSpec(target.runtime, 'runtime'); }
+      catch (error) { throw httpError(400, 'invalid_runtime', (error as Error).message); }
+      const host = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: spec.manager_agent_id } });
+      if (!host) throw httpError(404, 'host_not_found', 'Runtime Host not found');
+      runtimeKey = runtimeIdentityKey(spec);
+      targetLabel = `${host.name || host.id.slice(0, 8)}/${spec.label || spec.cli}`.slice(0, 200);
+    } else {
+      throw httpError(400, 'invalid_target', 'target.scope must be account, project or runtime');
     }
-    const runtimeKey = runtimeIdentityKey(spec);
-    // One assignment per (account, runtime identity, skill) — re-assigning
-    // re-pins the version in place.
+    // One assignment per (account, target, skill) — re-assigning re-pins the version in place.
     const existing = await this.assignments.findOne({
       where: {
         account_id: accountId,
@@ -222,7 +244,69 @@ export class SkillsService {
       skill_id: skillId,
       skill_version_id: version.id,
       assigned_by: actorId,
+      target_label: targetLabel || existing?.target_label || '',
     }));
+  }
+
+  /** 이 계정의 배정 전부 — 범위·대상·skill·핀된 버전을 사람이 읽을 수 있게. */
+  async listAssignments(accountId: string) {
+    const rows = await this.assignments.find({ where: { account_id: accountId }, order: { created_at: 'ASC' } });
+    const skillIds = Array.from(new Set(rows.map((r) => r.skill_id)));
+    const versionIds = Array.from(new Set(rows.map((r) => r.skill_version_id)));
+    const skills = skillIds.length ? await this.skills.find({ where: { id: In(skillIds) } }) : [];
+    const versions = versionIds.length ? await this.versions.find({ where: { id: In(versionIds) }, select: ['id', 'version', 'skill_id'] }) : [];
+    const latest = skillIds.length
+      ? await this.versions.find({ where: { skill_id: In(skillIds) }, select: ['id', 'version', 'skill_id'], order: { version: 'DESC' } })
+      : [];
+    const latestBySkill = new Map<string, number>();
+    for (const v of latest) if (!latestBySkill.has(v.skill_id)) latestBySkill.set(v.skill_id, v.version);
+    const projectIds = rows.map((r) => parseAssignmentTarget(r.runtime_key).project_id).filter((id): id is string => !!id);
+    const projects = projectIds.length
+      ? await this.dataSource.getRepository(Project).find({ where: { id: In(projectIds) }, select: ['id', 'name'] })
+      : [];
+    const skillById = new Map(skills.map((s) => [s.id, s]));
+    const versionById = new Map(versions.map((v) => [v.id, v]));
+    const projectName = new Map(projects.map((p) => [p.id, p.name]));
+    return rows.map((row) => {
+      const target = parseAssignmentTarget(row.runtime_key);
+      const skill = skillById.get(row.skill_id);
+      return {
+        id: row.id,
+        scope: target.scope,
+        project_id: target.project_id,
+        project_name: target.project_id ? projectName.get(target.project_id) ?? null : null,
+        runtime_key: target.runtime_key,
+        target_label: row.target_label || '',
+        skill_id: row.skill_id,
+        skill_slug: skill?.slug ?? '',
+        skill_name: skill?.name ?? '',
+        skill_status: skill?.status ?? 'missing',
+        skill_version_id: row.skill_version_id,
+        version: versionById.get(row.skill_version_id)?.version ?? null,
+        latest_version: latestBySkill.get(row.skill_id) ?? null,
+        assigned_by: row.assigned_by,
+        created_at: row.created_at,
+      };
+    });
+  }
+
+  /** 같은 대상에 다른 버전을 핀한다(대상은 그대로). 실행 범위 배정은 spec 없이도 버전만 바꿀 수 있다. */
+  async repin(accountId: string, assignmentId: string, versionId: unknown, actorId: string) {
+    const row = await this.assignments.findOne({ where: { id: assignmentId, account_id: accountId } });
+    if (!row) throw httpError(404, 'assignment_not_found', 'Assignment not found');
+    const version = await this.versions.findOne({ where: { id: String(versionId || ''), skill_id: row.skill_id } });
+    if (!version) throw httpError(404, 'skill_version_not_found', 'Skill version not found');
+    row.skill_version_id = version.id;
+    row.assigned_by = actorId;
+    return this.assignments.save(row);
+  }
+
+  /** 배정 해제. 이미 고정된 런 스냅샷에는 영향이 없다(그 런은 그대로 끝난다). */
+  async unassign(accountId: string, assignmentId: string) {
+    const row = await this.assignments.findOne({ where: { id: assignmentId, account_id: accountId } });
+    if (!row) throw httpError(404, 'assignment_not_found', 'Assignment not found');
+    await this.assignments.delete({ id: row.id });
+    return { deleted: true };
   }
 
   async propose(accountId: string, body: any, source: { agentId?: string; runId?: string }) {

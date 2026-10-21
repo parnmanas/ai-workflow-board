@@ -16,7 +16,7 @@ import { AgentConnectivityRegistry } from '../../services/agent-connectivity.reg
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { AgentStatusService } from './agent-status.service';
-import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
+import { RunSkillSnapshotService, type PinnedSkillManifestEntry } from '../skills/run-skill-snapshot.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { ProjectsService } from '../projects/projects.service';
 import { parseRuntimeSpec, runtimeIdentityKey, type RuntimeSpec } from '../../common/runtime-spec';
@@ -515,8 +515,22 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     const mainCloneDir = project ? await this.projects.hostFolder(project.id, spec.manager_agent_id) : null;
     const baseBranch = ticket.base_branch || '';
 
+    // Skill selection is part of the execution contract — fail closed. Shared (account) and
+    // project assignments ride along with the assignee's own (docs/skills.md "배정 범위").
+    const snapshot = await this.runSkillSnapshots.resolve({
+      accountId: ticket.account_id,
+      runId: `ticket:${ticket.id}:assignee`,
+      agentId,
+      projectId: ticket.project_id || null,
+    });
+
     const workOrder = renderTicketWorkOrder({
       base_branch: baseBranch,
+      ticket_id: ticket.id,
+      knowledge: {
+        shared_memory: account.knowledge_memory || '',
+        skills: RunSkillSnapshotService.index((snapshot.manifest as PinnedSkillManifestEntry[]) || []),
+      },
       project: project
         ? {
             name: project.name,
@@ -547,13 +561,6 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
-
-    // Skill selection is part of the execution contract — fail closed.
-    const snapshot = await this.runSkillSnapshots.resolve({
-      accountId: ticket.account_id,
-      runId: `ticket:${ticket.id}:assignee`,
-      agentId,
-    });
 
     return {
       trigger_id: randomUUID(),

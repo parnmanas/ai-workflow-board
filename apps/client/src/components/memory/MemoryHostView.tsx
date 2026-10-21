@@ -291,7 +291,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
         : 'Scanning memory files on this host…'}
       actions={(
         <div style={{ display: 'flex', gap: 6 }}>
-          <Button size="sm" variant="ghost" onClick={() => navigate('/memory')}>Hosts</Button>
+          <Button size="sm" variant="ghost" onClick={() => navigate('/memory?tab=hosts')}>Hosts</Button>
           <Button size="sm" variant="secondary" disabled={loading} onClick={() => void (async () => { if (await guardLeave()) { setEditorNonce((n) => n + 1); await load(); } })()}>
             {loading ? 'Scanning…' : 'Refresh'}
           </Button>

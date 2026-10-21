@@ -7,7 +7,6 @@ import AgentLogViewer from './AgentLogViewer';
 import SettingsManager from './SettingsManager';
 import MigrationManager from './MigrationManager';
 import WorkflowHealthDashboard from './WorkflowHealthDashboard';
-import SkillsPage from './SkillsPage';
 import SkillRegistryPage from './SkillRegistryPage';
 import VoicePage from './VoicePage';
 import { tokens } from '../../tokens';
@@ -52,7 +51,8 @@ export default function AdminPage() {
       <Route path="logs" element={<AdminRoute page="logs"><LogViewer /></AdminRoute>} />
       <Route path="agent-logs" element={<AdminRoute page="agent-logs"><AgentLogViewer /></AdminRoute>} />
       <Route path="agent-manager" element={<WorkRouteRedirect path="hosts" />} />
-      <Route path="skills" element={<AdminRoute page="skills"><SkillsPage /></AdminRoute>} />
+      {/* Skills 는 Knowledge 로 옮겼다(/skills) — 예전 링크는 그리로 보낸다. */}
+      <Route path="skills" element={<WorkRouteRedirect path="skills" />} />
       <Route path="skill-registry" element={<AdminRoute page="skill-registry"><SkillRegistryPage /></AdminRoute>} />
       <Route path="workflow-health" element={<AdminRoute page="workflow-health"><WorkflowHealthDashboard /></AdminRoute>} />
       <Route path="global-credentials" element={<WorkRouteRedirect path="settings/credentials" />} />

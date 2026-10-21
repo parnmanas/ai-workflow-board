@@ -30,6 +30,9 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { agentIsVisibleInAccount, agentAccountWhere } from '../../common/agent-account-scope';
 
+/** 공용 메모리 상한(글자). 매 티켓·미션 지시문에 통째로 실린다. */
+export const KNOWLEDGE_MEMORY_MAX = 32_000;
+
 @ApiBearerAuth('user-session')
 @ApiTags('accounts')
 @Controller('api/accounts')
@@ -131,6 +134,7 @@ export class AccountsController {
       chat_workspace_folder_enabled,
       harness_config, environment_config,
       hard_budget_config, clone_policy,
+      knowledge_memory,
     } = body;
     if (name !== undefined) account.name = name;
     if (description !== undefined) account.description = description;
@@ -181,6 +185,15 @@ export class AccountsController {
     if (chat_workspace_folder_enabled !== undefined) {
       const raw = chat_workspace_folder_enabled;
       account.chat_workspace_folder_enabled = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
+    }
+
+    // 공용 메모리(Knowledge) — 모든 Agent 의 지시문에 실리므로 상한을 둔다.
+    if (knowledge_memory !== undefined) {
+      if (typeof knowledge_memory !== 'string') return res.status(400).json({ error: 'knowledge_memory must be a string' });
+      if (knowledge_memory.length > KNOWLEDGE_MEMORY_MAX) {
+        return res.status(400).json({ error: `knowledge_memory is capped at ${KNOWLEDGE_MEMORY_MAX} characters` });
+      }
+      account.knowledge_memory = knowledge_memory;
     }
 
     // Account agent harness (ticket 7122600c): null clears, objects are

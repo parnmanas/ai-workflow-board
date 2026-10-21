@@ -35,6 +35,54 @@ Global 정의는 모든 account가 상속하므로, 한 테넌트가 전 테넌�
 account에 복사한다. 그 순간부터 fork가 shadow하고, **그 아래의 global은 업스트림
 갱신을 계속 받는다.** global을 직접 고치는 것이 아니라 이게 커스터마이즈 경로다.
 
+## 배정 범위
+
+배정은 (account, 대상, skill) 하나에 **버전 하나를 핀**한다. 대상은 세 가지다
+(`modules/skills/skill-assignment-target.ts`):
+
+| 범위 | 대상 | `runtime_key` 인코딩 |
+| --- | --- | --- |
+| 공용(Shared) | 그 계정의 모든 Agent | `*` |
+| 프로젝트 | 그 프로젝트의 티켓·미션 step | `project:<project_id>` |
+| 실행(runtime) | 한 실행 신원(cli + 폴더 + credential) | `rt-<hex>` (`runtimeIdentityKey`) |
+
+- 한 실행의 skill = **공용 ∪ 그 실행의 프로젝트 ∪ 그 실행 신원**. 같은 skill 이 여러 범위에 배정돼
+  있으면 **좁은 범위가 이긴다**(실행 > 프로젝트 > 공용) — 프로젝트나 한 Agent 만 다른 버전을 쓰게 할 수 있다.
+- 범위는 기존 컬럼에 인코딩한다 — 스키마 변경 없이 예전 배정은 전부 실행 범위로 읽히고, 기존 유일 인덱스가
+  "대상마다 skill 하나" 를 그대로 지킨다. 실행 범위 배정은 대상 이름(`<Host>/<label>`)을 `target_label` 에 남긴다.
+- REST: `GET …/skills/assignments`(현황), `POST …/skills/:id/assignments` `{ skill_version_id, target }`
+  (`target`: `{scope:'account'}` · `{scope:'project', project_id}` · `{scope:'runtime', runtime}`; `runtime` 만
+  보내는 예전 호출도 된다), `PATCH …/skills/assignments/:id` `{ skill_version_id }`(재핀), `DELETE` (해제).
+
+## Knowledge — 공용 메모리 · 프로젝트 메모리 · skill
+
+화면은 Knowledge → **Memory**(Shared / Projects / Host files) 와 **Skills**(배정 · 카탈로그 · 제안)다.
+
+| 지식 | 저장 | 실리는 곳 |
+| --- | --- | --- |
+| 공용 메모리 | `Account.knowledge_memory`(소유자만 수정, 32,000자) | 모든 티켓 work order · 미션 step 의 `## Knowledge` 섹션, MCP `get_knowledge`, 호스트 동기화 |
+| 프로젝트 메모리 | `Project.instructions` | 그 프로젝트 티켓의 `### Project instructions`, 미션 step 의 Project 섹션, `get_knowledge({project_id})` |
+| skill | 위 배정 범위 | work order / step 의 skill **목차**(이름·설명·버전·범위), 본문은 MCP `get_skill` |
+
+- **목차만 싣고 본문은 꺼내 읽는다.** 쓰지 않는 skill 이 매 실행의 맥락을 차지하지 않게. 지시문이 `get_skill`
+  호출 방법(티켓 id 또는 프로젝트 id 포함)을 적는다. 이 경로는 MCP 를 쓰는 모든 CLI 에 똑같이 통한다 —
+  예전에는 런 스냅샷이 Hermes 에만 파일로 전달되고 Claude · Codex 는 무시했다(Hermes 의 파일 전달은 그대로다).
+- **티켓은 고정, 나머지는 현재값.** 티켓 런은 시작할 때 스냅샷(`ticket:<id>:assignee`)을 고정하므로
+  `get_skill({ticket_id})` 은 나중에 재핀·해제해도 그 버전을 준다. 미션 step · 세션은 그 순간의 배정을 읽는다.
+- 계산은 `modules/skills/knowledge.ts` 한 곳이다(`skillManifestFor` / `knowledgeBlockFor`) — 런 스냅샷,
+  미션 step 지시문, MCP 가 모두 이것을 부른다. 경로마다 따로 풀지 말 것. 렌더는 `common/ticket-work-order.ts`
+  의 `renderKnowledgeSection()` 하나를 티켓과 미션이 같이 쓴다.
+- **MCP**: `get_knowledge({ ticket_id?, project_id?, account_id? })`, `get_skill({ slug, … })` — 읽기 전용,
+  티어 `caller`. 계정은 티켓 → 프로젝트 → 키의 계정 → Agent Session 의 실행 계정 → (계정에 묶이지 않은 Host
+  키만) `account_id` 순으로 정하고, 키가 묶인 계정과 다르면 거부한다. 실행 범위 skill 은 호출자의
+  `runtimeKey` 로 찾는다. 소형 컨텍스트 런의 compact 도구 표면(`tool-profiles.ts`)에도 `get_skill` 은 들어
+  있다 — 지시문이 그 도구를 가리키기 때문이다.
+- **사람이 여는 CLI 세션**: AWB 가 지시문을 쓰지 않으므로, Memory → Shared 의 "Sync to a host's CLI files"
+  가 공용 메모리 + 공용 skill 목차를 각 CLI 전역 지침 파일(CLAUDE.md · AGENTS.md · GEMINI.md …, AWB credential
+  세션 홈 포함)에 관리 블록(`awb-knowledge:<account_id>`)으로 넣는다. 나머지 내용은 그대로이고 다시 동기화하면
+  블록만 바뀐다. 쓰기는 CLI Memory 경로(base_hash · 백업)를 그대로 탄다(docs/cli-memory.md). 프로젝트 지식은
+  전역 파일에 넣지 않는다 — 블록이 `get_knowledge({project_id})` 를 안내한다.
+
 ## 불변성과 런 고정
 
 - `SkillVersion`은 불변이다. 변경은 **새 버전 append**이며 기존 버전을 수정하거나
@@ -130,6 +178,10 @@ key·custom tag가 포함된 임의 YAML을 실행할 이유가 없다. 최상�
 | Account REST | `.../skills.controller.ts` |
 | Admin REST | `.../skill-registry.controller.ts` |
 | 런 manifest 고정 | `.../run-skill-snapshot.service.ts` |
+| 배정 범위 · Knowledge 계산 | `.../skill-assignment-target.ts`, `.../knowledge.ts` |
+| Knowledge 섹션 렌더 | `apps/server/src/common/ticket-work-order.ts` (`renderKnowledgeSection`) |
+| MCP 읽기 | `apps/server/src/modules/mcp/tools/knowledge-tools.ts` |
+| 화면 | `apps/client/src/components/knowledge/*`, `components/admin/SkillsPage.tsx` (`/skills`) |
 | 유일성 | `apps/server/src/entities/Skill.ts` 의 부분 유니크 인덱스 `uq_skills_global_slug` / `uq_skills_account_slug` (엔티티에 선언해야 synchronize 가 지우지 않는다) |
 
 ## 테스트
@@ -138,7 +190,8 @@ key·custom tag가 포함된 임의 YAML을 실행할 이유가 없다. 최상�
 npm run build
 cd apps/server
 node test/run-suite.mjs test/skill-global-scope.test.mjs \
-  test/skill-lifecycle.test.mjs test/run-skill-snapshot.test.mjs
+  test/skill-lifecycle.test.mjs test/run-skill-snapshot.test.mjs test/knowledge-scopes.test.mjs
+# client: test/knowledge-logic.test.mjs (범위 묶기 · 호스트 동기화 블록), test/skill-governance-ui.test.mjs
 # Postgres partial unique index (sql.js로는 검증 불가)
 npm run test:qa:pg        # CI job: postgres-dialect-matrix
 ```

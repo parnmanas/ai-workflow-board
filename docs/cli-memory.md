@@ -1,7 +1,9 @@
 # CLI Memory (LLM CLI 메모리 파일)
 
 Runtime Host 장비에 있는 LLM CLI 의 **메모리**를 AWB 화면에서 보고, 분석하고, 고치고, 다른 CLI·다른
-장비로 옮기는 표면이다(`/memory`). 메모리의 원본은 그 장비의 파일이고, AWB 는 아무것도 저장하지 않는다.
+장비로 옮기는 표면이다(Knowledge → Memory → **Host files**, `/memory?tab=hosts`). 메모리의 원본은 그 장비의
+파일이고, AWB 는 아무것도 저장하지 않는다. 같은 화면의 Shared / Projects 탭은 AWB 가 저장하는 공용·프로젝트
+메모리다(docs/skills.md "Knowledge") — 공용 메모리는 이 문서의 쓰기 경로로 호스트 CLI 파일에 동기화된다.
 
 ## CLI 마다 메모리는 어디에 있나
 

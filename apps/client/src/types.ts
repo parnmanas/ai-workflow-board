@@ -1320,6 +1320,8 @@ export interface Account {
   id: string; // GUID
   name: string;
   description: string;
+  /** 공용 메모리(Knowledge) — 이 계정의 모든 Agent 지시문에 실린다. 프로젝트별은 Project.instructions. */
+  knowledge_memory?: string;
   // Account-wide agent harness, shipped on every ticket dispatch. Raw JSON
   // string of HarnessConfig.
   harness_config?: string | null;
@@ -3491,3 +3493,30 @@ export interface MemoryBatchResultItem {
   error?: string;
   code?: string;
 }
+
+// ─── Knowledge — skill 배정 범위 (docs/skills.md "배정 범위") ──────────────
+
+export type SkillAssignmentScope = 'account' | 'project' | 'runtime';
+
+export interface SkillAssignment {
+  id: string;
+  scope: SkillAssignmentScope;
+  project_id: string | null;
+  project_name: string | null;
+  runtime_key: string | null;
+  target_label: string;
+  skill_id: string;
+  skill_slug: string;
+  skill_name: string;
+  skill_status: string;
+  skill_version_id: string;
+  version: number | null;
+  latest_version: number | null;
+  assigned_by: string;
+  created_at: string;
+}
+
+export type SkillAssignmentTarget =
+  | { scope: 'account' }
+  | { scope: 'project'; project_id: string }
+  | { scope: 'runtime'; runtime: Record<string, any> };

@@ -339,6 +339,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   fetch_github_info: 'read', get_action: 'read',
   get_api_key: 'read', get_chat_room_messages: 'read',
   get_function: 'read',
+  // Knowledge(공용 메모리 · 프로젝트 메모리 · skill) 읽기 — 티켓을 바꾸지 않는다.
+  get_knowledge: 'read', get_skill: 'read',
   get_latest_artifact: 'read',
   get_my_tickets: 'read', get_qa_batch: 'read', get_qa_run: 'read', get_qa_scenario: 'read',
   get_qa_schedule: 'read', get_recent_activity: 'read', get_resource: 'read',

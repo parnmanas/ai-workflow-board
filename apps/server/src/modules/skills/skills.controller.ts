@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -37,6 +37,33 @@ export class SkillsController {
       ? raw
       : undefined;
     return res.json(await this.service.listProposals(accountId, status));
+  }
+
+  /** 배정 현황 — 공용 / 프로젝트 / 실행 범위의 핀된 버전(docs/skills.md "배정 범위"). */
+  @Get('assignments')
+  async listAssignments(@Param('accountId') accountId: string, @Res() res: Response) {
+    return this.respond(res, () => this.service.listAssignments(accountId));
+  }
+
+  /** `{ skill_version_id }` — 같은 대상에 다른 버전을 핀한다. */
+  @Patch('assignments/:assignmentId')
+  async repin(
+    @Param('accountId') accountId: string,
+    @Param('assignmentId') assignmentId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.respond(res, () => this.service.repin(accountId, assignmentId, body?.skill_version_id, (req as any).currentUser?.id || ''));
+  }
+
+  @Delete('assignments/:assignmentId')
+  async unassign(
+    @Param('accountId') accountId: string,
+    @Param('assignmentId') assignmentId: string,
+    @Res() res: Response,
+  ) {
+    return this.respond(res, () => this.service.unassign(accountId, assignmentId));
   }
 
   @Get(':skillId')

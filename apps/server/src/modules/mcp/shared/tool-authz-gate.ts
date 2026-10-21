@@ -101,6 +101,10 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // Read-only metadata; handlers enforce DB identity and account/global visibility.
   list_credentials: 'caller',
   get_credential: 'caller',
+  // Knowledge (docs/skills.md) — read-only; the handler resolves the caller's account
+  // (ticket → project → key → session execution) and refuses other accounts.
+  get_knowledge: 'caller',
+  get_skill: 'caller',
   // Role/permission + credential-minting + cross-account-cascade tools —
   // d6b56237's originally-reported set. Every one of these unconditionally
   // calls requireFullScopeCaller (directly, or via

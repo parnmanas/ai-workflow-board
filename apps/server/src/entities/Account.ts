@@ -69,6 +69,12 @@ export class Account {
   @Column({ type: 'text', nullable: true, default: null })
   harness_config: string | null;
 
+  // 공용 메모리(docs/skills.md "Knowledge") — 이 계정의 모든 Agent 가 알아야 할 것. 티켓·미션 지시문에
+  // 실리고 MCP `get_knowledge` 로 읽히며, 화면에서 호스트의 CLI 전역 메모리 파일로 동기화할 수 있다.
+  // 프로젝트별 메모리는 Project.instructions 다.
+  @Column({ type: 'text', default: '' })
+  knowledge_memory: string;
+
   // dormant, no reader (티켓 e616dbfc) — Claude backend profile 이 인스턴스
   // 전역 단일 스코프로 확정되면서 이 두 레거시 컬럼을 읽거나 쓰는 코드는
   // 전부 사라졌다. 그럼에도 컬럼을 남기는 이유는 synchronize 가 하드코딩으로

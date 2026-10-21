@@ -2,12 +2,15 @@ import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
 import { formatAgentDisplayName } from '../../utils/agentName';
-import type { RuntimeParticipant, Skill, SkillDetail, SkillProposal } from '../../types';
+import type { Project, Skill, SkillDetail, SkillProposal } from '../../types';
 import { tokens } from '../../tokens';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
 import { Badge, Button, Card, Input } from '../common';
 import SkillProposalReview from './SkillProposalReview';
+import SkillAssignmentsPanel from '../knowledge/SkillAssignmentsPanel';
+
+type AssignScope = 'account' | 'project' | 'runtime';
 
 const textareaStyle: React.CSSProperties = {
   background: tokens.colors.surface,
@@ -25,7 +28,12 @@ export default function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [proposals, setProposals] = useState<SkillProposal[]>([]);
   const [selected, setSelected] = useState<SkillDetail | null>(null);
-  const [tab, setTab] = useState<'catalog' | 'proposals'>('catalog');
+  // 배정(범위별 현황)이 기본 — "누가 무엇을 받는가" 가 가장 먼저 묻는 질문이다(docs/skills.md "배정 범위").
+  const [tab, setTab] = useState<'assignments' | 'catalog' | 'proposals'>('assignments');
+  const [assignScope, setAssignScope] = useState<AssignScope>('account');
+  const [assignProject, setAssignProject] = useState('');
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [assignmentsNonce, setAssignmentsNonce] = useState(0);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [slug, setSlug] = useState('');
@@ -66,6 +74,13 @@ export default function SkillsPage() {
   }, [currentAccountId, selected?.id, showToast]);
 
   useEffect(() => { void load(); }, [currentAccountId]);
+
+  useEffect(() => {
+    if (!currentAccountId) return;
+    api.listProjects(currentAccountId)
+      .then((rows) => setProjects(rows.filter((p) => p.account_id === currentAccountId)))
+      .catch(() => setProjects([]));
+  }, [currentAccountId]);
 
   // Global skills are inherited by every account; publishing/quarantining
   // one from a account is refused server-side, so the UI offers Fork instead.
@@ -125,14 +140,21 @@ export default function SkillsPage() {
   };
 
   const assign = async () => {
-    if (!currentAccountId || !selected || !assignmentRuntime || !assignmentVersion) return;
+    if (!currentAccountId || !selected || !assignmentVersion) return;
+    const target = assignScope === 'account'
+      ? { scope: 'account' as const }
+      : assignScope === 'project'
+      ? (assignProject ? { scope: 'project' as const, project_id: assignProject } : null)
+      : (assignmentRuntime ? { scope: 'runtime' as const, runtime: assignmentRuntime } : null);
+    if (!target) return;
     setSaving(true);
     try {
       await api.assignSkill(currentAccountId, selected.id, {
         skill_version_id: assignmentVersion,
-        runtime: assignmentRuntime,
+        target,
       });
-      showToast('Exact skill version assigned', 'success');
+      showToast(assignScope === 'account' ? 'Assigned to every agent in this account' : assignScope === 'project' ? 'Assigned to the project' : 'Assigned to that runtime', 'success');
+      setAssignmentsNonce((n) => n + 1);
     } catch (error: any) {
       showToast(error?.message || 'Failed to assign skill', 'error');
     } finally {
@@ -148,12 +170,15 @@ export default function SkillsPage() {
     <div style={{ display: 'grid', gap: 16 }}>
       <Card style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <strong style={{ color: tokens.colors.textPrimary }}>AWB owns skill truth</strong>
+          <strong style={{ color: tokens.colors.textPrimary }}>Skills agents can use</strong>
           <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>
-            Versions are immutable. Runs pin a digest. Runtime learning creates proposals only.
+            Assign a version to every agent (Shared), to a project, or to one runtime. Versions are immutable; ticket runs pin them. Runtime learning creates proposals only.
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          <Button variant={tab === 'assignments' ? 'primary' : 'secondary'} onClick={() => setTab('assignments')}>
+            Assignments
+          </Button>
           <Button variant={tab === 'catalog' ? 'primary' : 'secondary'} onClick={() => setTab('catalog')}>
             Catalog
           </Button>
@@ -163,7 +188,14 @@ export default function SkillsPage() {
         </div>
       </Card>
 
-      {tab === 'proposals' ? (
+      {tab === 'assignments' ? (
+        <SkillAssignmentsPanel
+          key={assignmentsNonce}
+          accountId={currentAccountId}
+          skills={skills}
+          onOpenSkill={(skill) => { setTab('catalog'); void openSkill(skill); }}
+        />
+      ) : tab === 'proposals' ? (
         <div style={{ display: 'grid', gap: 12 }}>
           {proposals.length === 0 && <Card><span style={{ color: tokens.colors.textMuted }}>No proposals.</span></Card>}
           {proposals.map((proposal) => (
@@ -296,15 +328,43 @@ export default function SkillsPage() {
               </Card>
 
               <Card style={{ display: 'grid', gap: 10 }}>
-                <strong style={{ color: tokens.colors.textPrimary }}>Pin assignment</strong>
-                <DeclareRuntimeSection accountId={currentAccountId || ''} onResolved={setAssignmentRuntime} />
-                {assignmentRuntime && <span>{assignmentRuntime.label || assignmentRuntime.cli} · {assignmentRuntime.working_dir}</span>}
+                <strong style={{ color: tokens.colors.textPrimary }}>Assign</strong>
+                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 13, color: tokens.colors.textPrimary }}>
+                  {([
+                    ['account', 'Shared — every agent'],
+                    ['project', 'A project'],
+                    ['runtime', 'One runtime'],
+                  ] as Array<[AssignScope, string]>).map(([value, label]) => (
+                    <label key={value} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                      <input type="radio" name="skill-assign-scope" checked={assignScope === value} onChange={() => setAssignScope(value)} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {assignScope === 'project' && (
+                  <select value={assignProject} onChange={(event) => setAssignProject(event.target.value)} style={textareaStyle} aria-label="Project">
+                    <option value="">Choose a project…</option>
+                    {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                  </select>
+                )}
+                {assignScope === 'runtime' && (
+                  <>
+                    <DeclareRuntimeSection accountId={currentAccountId || ''} onResolved={setAssignmentRuntime} />
+                    {assignmentRuntime && <span>{assignmentRuntime.label || assignmentRuntime.cli} · {assignmentRuntime.working_dir}</span>}
+                  </>
+                )}
                 <select value={assignmentVersion} onChange={(event) => setAssignmentVersion(event.target.value)} style={textareaStyle}>
                   {selected.versions.map((version) => (
                     <option key={version.id} value={version.id}>v{version.version} · {version.digest.slice(0, 12)}</option>
                   ))}
                 </select>
-                <Button onClick={assign} loading={saving}>Assign exact version</Button>
+                <Button
+                  onClick={assign}
+                  loading={saving}
+                  disabled={(assignScope === 'project' && !assignProject) || (assignScope === 'runtime' && !assignmentRuntime)}
+                >
+                  Assign this version
+                </Button>
               </Card>
             </div>
           ) : (

@@ -25,6 +25,7 @@
 import type { OrchestrationMission } from '../../entities/OrchestrationMission';
 import type { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { normalizeConfirmPolicy } from './orchestration.constants';
+import { renderKnowledgeSection, type KnowledgeBlock } from '../../common/ticket-work-order';
 
 export interface RosterEntry {
   /** The slot's roster address — what the orchestrator puts in a step's `assignee`. */
@@ -420,6 +421,11 @@ export interface ConfirmFeedbackContext {
 export function renderStepPrompt(args: {
   mission: OrchestrationMission;
   step: OrchestrationStep;
+  /**
+   * 공용 메모리 + 이 step 실행에 배정된 skill 목차(docs/skills.md "Knowledge"). 티켓 work order 와
+   * 같은 블록(`renderKnowledgeSection`)이다. 없거나 비면 프롬프트는 이 기능 이전과 같다.
+   */
+  knowledge?: KnowledgeBlock | null;
   teamName: string;
   orchestratorName: string;
   dependencies: DependencyContext[];
@@ -526,6 +532,8 @@ export function renderStepPrompt(args: {
     lines.push(section('Shared working folder (read this before you touch anything)', body));
   }
   if (args.project) lines.push(section(`Project: ${args.project.name}`, renderStepProject(args)));
+  const knowledge = renderKnowledgeSection(args.knowledge, { projectId: step.project_id ?? null });
+  if (knowledge) lines.push(knowledge);
   lines.push(section('Your task', step.instructions));
   if (step.acceptance_criteria) lines.push(section('Done when', step.acceptance_criteria));
 

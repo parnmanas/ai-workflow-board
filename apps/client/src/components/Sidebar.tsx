@@ -150,6 +150,8 @@ export default function Sidebar({
   const canUseSessions = hasPermission('agent_sessions.use');
   const canUseTerminals = hasPermission('terminals.use');
   const canUseMemory = hasPermission('cli_memory.use');
+  // Knowledge — 공용·프로젝트 메모리와 skill 배정은 Agent 를 관리하는 사람이 다룬다(서버 MANAGE_AGENTS).
+  const canManageKnowledge = hasPermission('admin.agents');
   // Operators(이름 붙은 Agent Session) — 등록돼 있으면 맨 위에서 어디서든 바로 연다. 머리의 스위치가
   // 음성 지원("헤이 <이름>" 듣기 + 답 낭독)을 켠다(docs/voice-operator.md "음성 지원 · 잠들기").
   const operators = useVoiceOperators(canUseSessions && hasPermission('voice.use'));
@@ -197,15 +199,6 @@ export default function Sidebar({
             icon: 'T',
           }]
           : []),
-        // CLI Memory — 기본 admin 전용 권한. 그 장비의 CLI 메모리 파일(모든 에이전트 세션의 지침)을 고친다.
-        ...(canUseMemory
-          ? [{
-            key: 'memory',
-            path: `${basePath}/memory`,
-            label: 'Memory',
-            icon: 'M',
-          }]
-          : []),
       ],
     },
     {
@@ -230,6 +223,24 @@ export default function Sidebar({
           label: 'Ontology Graph',
           icon: 'G',
         },
+        // Memory · Skills — Agent 가 아는 것(docs/skills.md "Knowledge"): 공용 / 프로젝트별 메모리와 호스트 CLI 파일,
+        // 범위별 skill 배정. 권한이 없는 사용자에게는 행 자체를 그리지 않는다.
+        ...(canUseMemory || canManageKnowledge
+          ? [{
+            key: 'memory',
+            path: `${basePath}/memory`,
+            label: 'Memory',
+            icon: 'M',
+          }]
+          : []),
+        ...(canManageKnowledge
+          ? [{
+            key: 'skills',
+            path: `${basePath}/skills`,
+            label: 'Skills',
+            icon: 'S',
+          }]
+          : []),
       ],
     },
     {
@@ -287,12 +298,6 @@ export default function Sidebar({
       path: '/admin/workflow-health',
       label: 'Workflow Health',
       icon: 'H',
-    },
-    {
-      key: 'skills',
-      path: '/admin/skills',
-      label: 'Skills',
-      icon: 'S',
     },
     {
       key: 'skill-registry',

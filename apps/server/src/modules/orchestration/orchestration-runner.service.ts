@@ -57,6 +57,7 @@ import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notif
 import { orchestrationError } from './orchestration-errors';
 import { isUuidShapedId, resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
 import { runtimeIdentityKey } from '../../common/runtime-spec';
+import { knowledgeBlockFor } from '../skills/knowledge';
 import {
   CONFIRM_FEEDBACK_MAX,
   CONFIRM_VERDICTS,
@@ -2769,9 +2770,21 @@ export class OrchestrationRunnerService {
       ? roster.runtimes.find((r) => r.slot_id === slot.slot_id && r.project_id === step.project_id) ?? null
       : null;
 
+    // 공용 메모리 + 이 실행(slot × project)에 배정된 skill — 티켓과 같은 Knowledge 블록. 못 읽어도 step 은
+    // 보낸다(지식은 보조 맥락이고, 디스패치를 막을 이유가 아니다).
+    const knowledge = await knowledgeBlockFor(this.dataSource, {
+      accountId: mission.account_id,
+      runtimeKey: runtimeIdentityKey(execSpec),
+      projectId: project?.id ?? null,
+    }).catch((err: any) => {
+      this.logService.warn('Orchestration', `knowledge for step ${step.step_key} unavailable: ${err?.message ?? err}`);
+      return null;
+    });
+
     const prompt = renderStepPrompt({
       mission,
       step,
+      knowledge,
       teamName: team?.name ?? '',
       orchestratorName,
       dependencies,

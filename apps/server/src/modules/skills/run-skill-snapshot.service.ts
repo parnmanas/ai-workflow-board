@@ -1,21 +1,16 @@
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { RuntimeSkillAssignment } from '../../entities/RuntimeSkillAssignment';
 import { RunSkillSnapshot } from '../../entities/RunSkillSnapshot';
 import { Skill } from '../../entities/Skill';
 import { SkillVersion } from '../../entities/SkillVersion';
+import type { KnowledgeSkillLine } from '../../common/ticket-work-order';
+import { skillIndex, skillManifestFor, type ManifestEntry } from './knowledge';
 
-export interface PinnedSkillManifestEntry {
-  skill_id: string;
-  skill_version_id: string;
-  slug: string;
-  version: number;
-  digest: string;
-  body: string;
-  support_files: Array<{ path: string; content: string }>;
-}
+/** 런 스냅샷 manifest 한 줄 — 정의는 knowledge.ts(공용 계산과 같은 모양). */
+export type PinnedSkillManifestEntry = ManifestEntry;
 
 @Injectable()
 export class RunSkillSnapshotService {
@@ -26,46 +21,24 @@ export class RunSkillSnapshotService {
     @InjectRepository(Skill) private readonly skills: Repository<Skill>,
   ) {}
 
+  /** 이 실행에 해당하는 skill(공용 + 프로젝트 + 실행, 좁은 범위 우선)의 핀된 manifest — knowledge.ts. */
+  async manifestFor(args: { accountId: string; runtimeKey?: string | null; projectId?: string | null }): Promise<PinnedSkillManifestEntry[]> {
+    return skillManifestFor({ assignments: this.assignments, versions: this.versions, skills: this.skills }, args);
+  }
+
   async resolve(args: {
     accountId: string;
     runId: string;
     agentId: string;
+    /** 티켓의 프로젝트 — 그 프로젝트에 배정된 skill 도 실린다. */
+    projectId?: string | null;
   }): Promise<RunSkillSnapshot> {
     const existing = await this.snapshots.findOne({
       where: { account_id: args.accountId, run_id: args.runId },
     });
     if (existing) return existing;
 
-    // Assignments are keyed by (account, runtime identity, skill) only — the
-    // board / role narrowing went away with boards.
-    const assignments = await this.assignments.find({
-      where: { account_id: args.accountId, runtime_key: args.agentId },
-    });
-    const versionIds = assignments.map((assignment) => assignment.skill_version_id);
-    // Scope-free lookup by id. The assignment row is already account-scoped
-    // and its skill_version_id was validated at assign time, so re-filtering by
-    // account here adds no authorization — it only DROPS global skills
-    // (account_id NULL) out of the manifest, which silently ships a run
-    // without the built-in skills the operator assigned to that agent.
-    const versions = versionIds.length
-      ? await this.versions.find({ where: { id: In(versionIds) } })
-      : [];
-    const skills = versions.length
-      ? await this.skills.find({ where: { id: In(versions.map((version) => version.skill_id)) } })
-      : [];
-    const skillById = new Map(skills.filter((skill) => skill.status === 'active').map((skill) => [skill.id, skill]));
-    const manifest: PinnedSkillManifestEntry[] = versions
-      .filter((version) => skillById.has(version.skill_id))
-      .map((version) => ({
-        skill_id: version.skill_id,
-        skill_version_id: version.id,
-        slug: skillById.get(version.skill_id)!.slug,
-        version: version.version,
-        digest: version.digest,
-        body: version.body,
-        support_files: version.support_files,
-      }))
-      .sort((a, b) => a.slug.localeCompare(b.slug) || a.digest.localeCompare(b.digest));
+    const manifest = await this.manifestFor({ accountId: args.accountId, runtimeKey: args.agentId, projectId: args.projectId });
     const digest = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
     try {
       return await this.snapshots.save(this.snapshots.create({
@@ -87,6 +60,11 @@ export class RunSkillSnapshotService {
       if (winner) return winner;
       throw error;
     }
+  }
+
+  /** 목차 — 이름·설명·버전·범위만(본문 없이). 지시문과 `get_knowledge` 가 보여 준다. */
+  static index(manifest: readonly PinnedSkillManifestEntry[]): KnowledgeSkillLine[] {
+    return skillIndex(manifest);
   }
 
   async lock(accountId: string, runId: string): Promise<void> {

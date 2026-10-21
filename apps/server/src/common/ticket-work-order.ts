@@ -12,6 +12,11 @@
  * Account / project specifics are not written here: the account harness
  * (`system_prompt_append`, language) and the project's `instructions` ride
  * alongside on the same payload.
+ *
+ * Knowledge (docs/skills.md "Knowledge"): the account's shared memory and the
+ * index of skills pinned for this run are rendered as their own section — the
+ * index carries names and descriptions only; the agent loads a skill's text with
+ * `mcp__awb__get_skill` when it applies, so unused skills cost no context.
  */
 
 export const TICKET_WORK_ORDER_TEMPLATE_ID = 'builtin:ticket-work-order';
@@ -29,6 +34,53 @@ export interface TicketWorkOrderContext {
   } | null;
   /** Branch the work starts from ('' → the project's default, then origin/HEAD). */
   base_branch: string;
+  /** Shared memory + pinned skill index. Omitted/empty → no Knowledge section. */
+  knowledge?: KnowledgeBlock | null;
+  /** The ticket — the skill loader call names it so the pinned version is served. */
+  ticket_id?: string;
+}
+
+export interface KnowledgeSkillLine {
+  slug: string;
+  name: string;
+  description: string;
+  version: number;
+  scope: 'account' | 'project' | 'runtime';
+}
+
+export interface KnowledgeBlock {
+  /** Account.knowledge_memory — applies to every agent of the account. */
+  shared_memory: string;
+  skills: KnowledgeSkillLine[];
+}
+
+const SCOPE_LABEL: Record<KnowledgeSkillLine['scope'], string> = { account: 'shared', project: 'project', runtime: 'this agent' };
+
+/**
+ * The Knowledge section (shared memory + skill index). Pure — also used by the
+ * orchestration step prompt so every dispatched run reads the same block.
+ * Returns '' when there is nothing to say.
+ */
+export function renderKnowledgeSection(knowledge: KnowledgeBlock | null | undefined, opts: { ticketId?: string; projectId?: string | null } = {}): string {
+  if (!knowledge) return '';
+  const memory = (knowledge.shared_memory || '').trim();
+  const skills = knowledge.skills || [];
+  if (!memory && !skills.length) return '';
+  const parts = ['## Knowledge'];
+  if (memory) parts.push('### Shared memory (applies to every agent of this account)', memory);
+  if (skills.length) {
+    const call = opts.ticketId
+      ? `\`mcp__awb__get_skill\` with \`{ slug, ticket_id: "${opts.ticketId}" }\``
+      : opts.projectId
+      ? `\`mcp__awb__get_skill\` with \`{ slug, project_id: "${opts.projectId}" }\``
+      : '`mcp__awb__get_skill` with `{ slug }`';
+    parts.push(
+      '### Skills assigned to this run',
+      `Load a skill's full text with ${call} before you use it — the version is pinned for this run.`,
+      ...skills.map((s) => `- **${s.slug}** (v${s.version}, ${SCOPE_LABEL[s.scope]})${s.name && s.name !== s.slug ? ` — ${s.name}` : ''}${s.description ? `: ${s.description}` : ''}`),
+    );
+  }
+  return parts.join('\n\n');
 }
 
 function landingSection(usePr: boolean): string {
@@ -61,12 +113,14 @@ export function renderTicketWorkOrder(ctx: TicketWorkOrderContext): string {
       ].filter(Boolean).join('\n')
     : '## No project\nThis ticket is not about a repository. Skip the git steps (3 and 5); do the work, then report and finish the same way.';
 
+  const knowledgeBlock = renderKnowledgeSection(ctx.knowledge, { ticketId: ctx.ticket_id });
+
   return `# Ticket work order
 
 You are the only agent on this ticket and you own it end to end — there is no separate planner, reviewer or merger. AWB has already moved it to **In Progress**.
 
 ${projectBlock}
-
+${knowledgeBlock ? `\n${knowledgeBlock}\n` : ''}
 ## 1. Understand
 - Read the ticket with \`mcp__awb__get_ticket\`: description, instructions, comments, attachments, child tickets, prerequisites.
 - Investigate before asking. If the requirement is genuinely ambiguous in a way only a human can settle, ask in a comment, call \`mcp__awb__pend_ticket\` with a one-line reason, and stop.

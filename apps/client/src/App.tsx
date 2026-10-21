@@ -32,6 +32,8 @@ const HostsPage = lazy(() => import('./components/HostsPage'));
 const TerminalsPage = lazy(() => import('./components/terminals/TerminalsPage'));
 // CLI Memory — Runtime Host 의 LLM CLI 메모리 파일(docs/cli-memory.md).
 const MemoryPage = lazy(() => import('./components/memory/MemoryPage'));
+// Skills — Knowledge 아래 범위별 배정(docs/skills.md).
+const SkillsKnowledgePage = lazy(() => import('./components/knowledge/SkillsKnowledgePage'));
 // 오케스트레이션 모드 — 칸반 보드와 같은 최상위 작업 표면.
 const OrchestrationPage = lazy(() => import('./components/orchestration/OrchestrationPage'));
 const OrchestrationTeamsPage = lazy(() => import('./components/orchestration/OrchestrationTeamsPage'));
@@ -201,6 +203,7 @@ function AppContent() {
             <Route path="terminals/:managerId/:terminalId" element={<TerminalsPage />} />
             <Route path="memory" element={<MemoryPage />} />
             <Route path="memory/:managerId" element={<MemoryPage />} />
+            <Route path="skills" element={<SkillsKnowledgePage />} />
             <Route path="tickets" element={<TicketsPage />} />
             <Route path="boards/*" element={<LegacyBoardsRedirect />} />
             <Route path="board/settings" element={<LegacyBoardsRedirect />} />

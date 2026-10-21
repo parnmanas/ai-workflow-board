@@ -362,6 +362,8 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - Global 쓰기는 admin 전용(`/api/admin/skill-registry`). Account 사용자는 global을 읽고 배정만 할 수 있다.
 - Global을 채우는 소스 두 개: 저장소 안의 **내장 팩** `skills/` (부팅 시 멱등 시드, 네트워크 불필요 — "최신"은 서버 업그레이드로 따라온다)과 **tap**(외부 git repo, **기본 비활성**, 부팅 시 절대 동기화 안 함).
 - 동기화는 **append-only**: 변경은 새 불변 버전을 추가할 뿐이고, assignment는 특정 버전을 핀하므로 이미 배정된 에이전트가 읽는 내용은 절대 바뀌지 않는다. `quarantined` 는 운영자 거부권이라 동기화가 되살리지 않는다.
+- **배정 범위**: skill 버전은 공용(계정 모든 Agent, `runtime_key='*'`) · 프로젝트(`project:<id>`) · 실행(`rt-…`) 에 핀한다. 한 실행 = 공용 ∪ 그 프로젝트 ∪ 그 실행, 같은 skill 은 **좁은 범위가 이긴다**. 범위 계산은 `modules/skills/knowledge.ts` 한 곳(런 스냅샷 · 미션 step · MCP 공용) — 경로마다 따로 풀지 말 것.
+- **Knowledge(공용 메모리 · 프로젝트 메모리 · skill)** 는 화면 Knowledge → Memory / Skills 에 있다. 공용 메모리 `Account.knowledge_memory`, 프로젝트 메모리 `Project.instructions`. 티켓 work order · 미션 step 은 `renderKnowledgeSection()` 으로 공용 메모리와 skill **목차**만 싣고, 본문은 MCP `get_skill`(티켓 안에서는 그 런의 고정 버전)로 읽는다 — 모든 CLI 에 같은 경로다. 사람이 여는 CLI 세션용으로는 공용 지식을 호스트 CLI 전역 파일에 관리 블록으로 동기화한다(CLI Memory 쓰기 경로).
 - 새 SKILL.md 레이아웃/스코프/동기화 규칙은 `docs/skills.md`, 스코프 모델 전반은 `docs/catalog-scopes.md`.
 
 ## Development runbooks

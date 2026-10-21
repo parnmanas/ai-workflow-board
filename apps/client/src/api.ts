@@ -103,7 +103,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SkillAssignment, SkillAssignmentTarget, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 import { getApiBase } from './serverConfig';
 
@@ -321,6 +321,8 @@ export const api = {
     auto_archive_days?: number | null;
     /** ISO timestamp pauses all ticket dispatch in the account; null resumes. */
     dispatch_paused_at?: string | null;
+    /** 공용 메모리(Knowledge) — 소유자만 고칠 수 있다. */
+    knowledge_memory?: string;
   }) =>
     request<Account>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: string) =>
@@ -1575,12 +1577,28 @@ export const api = {
     skillId: string,
     body: {
       skill_version_id: string;
-      runtime: Record<string, any>;
+      /** 공용 / 프로젝트 / 실행 범위. 예전 호출처럼 `runtime` 만 주면 실행 범위다. */
+      target?: SkillAssignmentTarget;
+      runtime?: Record<string, any>;
     },
   ) =>
     request<unknown>(
       `/accounts/${encodeURIComponent(accountId)}/skills/${encodeURIComponent(skillId)}/assignments`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+  /** 배정 현황 — 공용 · 프로젝트 · 실행 범위(docs/skills.md "배정 범위"). */
+  listSkillAssignments: (accountId: string) =>
+    request<SkillAssignment[]>(`/accounts/${encodeURIComponent(accountId)}/skills/assignments`),
+  /** 같은 대상에 다른 버전을 핀한다. */
+  repinSkillAssignment: (accountId: string, assignmentId: string, skillVersionId: string) =>
+    request<unknown>(
+      `/accounts/${encodeURIComponent(accountId)}/skills/assignments/${encodeURIComponent(assignmentId)}`,
+      { method: 'PATCH', body: JSON.stringify({ skill_version_id: skillVersionId }) },
+    ),
+  unassignSkill: (accountId: string, assignmentId: string) =>
+    request<{ deleted: true }>(
+      `/accounts/${encodeURIComponent(accountId)}/skills/assignments/${encodeURIComponent(assignmentId)}`,
+      { method: 'DELETE' },
     ),
   quarantineSkill: (accountId: string, skillId: string) =>
     request<Skill>(
