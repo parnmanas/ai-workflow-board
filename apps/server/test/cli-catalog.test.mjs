@@ -53,6 +53,7 @@ const OLD_BACKEND_PROFILE_CLIS = ['claude'];
 const OLD_PROVIDER_FIELDS = {
   github: { label: 'GitHub', fields: ['token'] },
   gitlab: { label: 'GitLab', fields: ['token'] },
+  cloudflare: { label: 'Cloudflare', fields: ['api_token'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
   google_oauth: { label: 'Google OAuth', fields: ['client_id', 'client_secret', 'refresh_token'] },
   git_http: { label: 'Git (HTTPS host)', fields: ['url', 'username', 'token'] },
@@ -223,7 +224,7 @@ test('derived constants equal the old hand-written literals', () => {
   }
   assert.deepEqual(
     Object.keys(NON_CLI_CREDENTIAL_PROVIDERS),
-    ['github', 'gitlab', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
+    ['github', 'gitlab', 'cloudflare', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
   );
   assert.deepEqual(plain(REVEALABLE_OAUTH_FIELDS), OLD_REVEALABLE_OAUTH_FIELDS);
 

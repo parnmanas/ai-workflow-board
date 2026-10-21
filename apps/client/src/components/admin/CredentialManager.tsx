@@ -90,6 +90,7 @@ interface ProviderOption {
 const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDef> }> = [
   { value: 'github', label: 'GitHub', icon: 'G', fields: { token: { label: 'Personal Access Token', placeholder: 'ghp_...' } } },
   { value: 'gitlab', label: 'GitLab', icon: 'L', fields: { token: { label: 'Access Token', placeholder: 'glpat-...' } } },
+  { value: 'cloudflare', label: 'Cloudflare', icon: 'C', fields: { api_token: { label: 'API Token', placeholder: 'Paste your Cloudflare API token' } } },
   { value: 'openai', label: 'OpenAI', icon: 'O', fields: { api_key: { label: 'API Key', placeholder: 'sk-...' } } },
   {
     value: 'google_oauth',

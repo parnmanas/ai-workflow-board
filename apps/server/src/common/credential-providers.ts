@@ -16,6 +16,7 @@ export interface CredentialProviderFields {
 export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialProviderFields>> = {
   github: { label: 'GitHub', fields: ['token'] },
   gitlab: { label: 'GitLab', fields: ['token'] },
+  cloudflare: { label: 'Cloudflare', fields: ['api_token'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
   // OAuth 2.0 client from Google Cloud Console. refresh_token is optional but
   // an agent cannot call a Google API with the client pair alone — it needs a

@@ -54,6 +54,7 @@ export const DEFAULT_AGENT_ENV_PREFIX: Readonly<Record<string, string>> = {
   google_oauth: 'GOOGLE',
   github: 'GITHUB',
   gitlab: 'GITLAB',
+  cloudflare: 'CLOUDFLARE',
   npm: 'NPM',
 };
 

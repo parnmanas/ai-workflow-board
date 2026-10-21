@@ -347,9 +347,13 @@ An operator can hand a stored secret to agents as process env — the case it
 was built for is a Google OAuth client (`google_oauth` provider: `client_id`,
 `client_secret`, optional `refresh_token`; the form fills them from the
 Cloud Console JSON or an authorized-user JSON). Any non-CLI credential
-(`github`, `gitlab`, `openai`, `google_oauth`, `git_http`, `npm`, `custom` with its own
+(`github`, `gitlab`, `cloudflare`, `openai`, `google_oauth`, `git_http`, `npm`, `custom` with its own
 key/value rows) can opt in with **Expose to agents as environment
 variables** (`Credential.agent_env` + `env_prefix`).
+
+Cloudflare stores an `api_token`; enabling exposure suggests the `CLOUDFLARE`
+prefix, producing `CLOUDFLARE_API_TOKEN` for
+[Wrangler](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/).
 
 - **Naming**: `<env_prefix>_<FIELD>` upper-cased — `GOOGLE` + `client_id` →
   `GOOGLE_CLIENT_ID`. An empty prefix uses the key as-is (Custom keys that are

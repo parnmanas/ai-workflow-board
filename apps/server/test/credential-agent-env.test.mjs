@@ -18,6 +18,7 @@ import { after, before, beforeEach, describe, it, test } from 'node:test';
 import { DataSource } from 'typeorm';
 
 import {
+  DEFAULT_AGENT_ENV_PREFIX,
   agentEnvName,
   npmRegistryUrl,
   resolveAgentEnv,
@@ -166,6 +167,38 @@ describe('credential agent env — REST', () => {
   }
 
   const hostReq = { currentHostId: 'host-1', currentRuntimeKey: null, apiKey: { host_id: 'host-1', account_id: null } };
+
+  it('stores Cloudflare tokens masked and delivers them only after exposure is enabled', async () => {
+    const providers = response();
+    await controller.providers(providers);
+    assert.deepEqual(providers.body.cloudflare, { label: 'Cloudflare', fields: ['api_token'] });
+
+    const token = 'cloudflare-test-api-token-123456789';
+    const created = await create({
+      account_id: 'acc-1',
+      name: 'Cloudflare',
+      provider: 'cloudflare',
+      credentials: { api_token: ` ${token}\n` },
+    });
+    assert.equal(created.statusCode, 201, JSON.stringify(created.body));
+    assert.ok(!JSON.stringify(created.body).includes(token));
+    assert.deepEqual((await fetchEnv(hostReq, 'acc-1')).body.env, {});
+    const stored = await dataSource.getRepository(Credential).findOneByOrFail({ id: created.body.id });
+    assert.ok(!stored.encrypted_data.includes(token));
+
+    const updated = response();
+    await controller.update(created.body.id, {
+      account_id: 'acc-1',
+      agent_env: true,
+      env_prefix: DEFAULT_AGENT_ENV_PREFIX.cloudflare,
+      credentials: { api_token: '' },
+    }, adminReq, updated);
+    assert.equal(updated.statusCode, 200, JSON.stringify(updated.body));
+    assert.deepEqual(updated.body.agent_env_names, ['CLOUDFLARE_API_TOKEN']);
+    assert.ok(!JSON.stringify(updated.body).includes(token));
+    assert.deepEqual((await fetchEnv(hostReq, 'acc-1')).body.env, { CLOUDFLARE_API_TOKEN: token });
+    assert.deepEqual((await fetchEnv(hostReq, 'acc-2')).body.env, {});
+  });
 
   it('stores the Google client and hands it to a Host as env', async () => {
     const created = await create({

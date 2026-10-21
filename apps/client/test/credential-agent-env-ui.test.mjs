@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 
 import {
   AGENT_ENV_PROVIDERS,
+  DEFAULT_AGENT_ENV_PREFIX,
   agentEnvName,
   agentEnvNames,
   customRowsProblem,
@@ -29,7 +30,11 @@ test('env name preview matches the server rule', () => {
 });
 
 test('only non-CLI providers offer exposure', () => {
-  assert.deepEqual([...AGENT_ENV_PROVIDERS].sort(), ['custom', 'git_http', 'github', 'gitlab', 'google_oauth', 'npm', 'openai']);
+  assert.deepEqual([...AGENT_ENV_PROVIDERS].sort(), ['cloudflare', 'custom', 'git_http', 'github', 'gitlab', 'google_oauth', 'npm', 'openai']);
+});
+
+test('Cloudflare defaults to the API token environment variable', () => {
+  assert.deepEqual(agentEnvNames('cloudflare', DEFAULT_AGENT_ENV_PREFIX.cloudflare, ['api_token']), ['CLOUDFLARE_API_TOKEN']);
 });
 
 test('a git host previews its origin, and env vars only once a prefix is given', () => {

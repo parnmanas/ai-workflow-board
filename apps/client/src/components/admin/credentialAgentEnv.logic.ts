@@ -9,7 +9,7 @@
  */
 
 /** Providers whose fields may be exposed as env — the non-CLI ones. */
-export const AGENT_ENV_PROVIDERS: ReadonlySet<string> = new Set(['github', 'gitlab', 'openai', 'google_oauth', 'git_http', 'npm', 'custom']);
+export const AGENT_ENV_PROVIDERS: ReadonlySet<string> = new Set(['github', 'gitlab', 'cloudflare', 'openai', 'google_oauth', 'git_http', 'npm', 'custom']);
 
 /** A git host is handed to agents' git as a credential helper; it gets env vars only with a prefix. */
 export const GIT_HOST_PROVIDER = 'git_http';
@@ -22,6 +22,7 @@ export const DEFAULT_AGENT_ENV_PREFIX: Readonly<Record<string, string>> = {
   google_oauth: 'GOOGLE',
   github: 'GITHUB',
   gitlab: 'GITLAB',
+  cloudflare: 'CLOUDFLARE',
   npm: 'NPM',
 };
 

@@ -32,6 +32,7 @@ export const CLI_PRESENTATION: Record<string, CliPresentation> = {
 const NON_CLI_PROVIDER_COLORS: Record<string, string> = {
   github: '#24292f',
   gitlab: '#fc6d26',
+  cloudflare: '#f38020',
   openai: '#10a37f',
   custom: NEUTRAL_COLOR,
 };
