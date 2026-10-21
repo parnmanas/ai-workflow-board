@@ -28,6 +28,7 @@ import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { NotificationProvider } from '../src/contexts/NotificationContext.tsx';
+import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx';
 import Sidebar from '../src/components/Sidebar.tsx';
 import { ActivityDot, ActivityPill } from '../src/components/common/ActivityIndicator.tsx';
 import {
@@ -188,10 +189,13 @@ test('⑥ 왼쪽 프레임 — 돌고 있는 세션과 작업 중인 방에 같�
         h(AuthProvider, null,
           h(BoardStreamProvider, null,
             h(NotificationProvider, null,
-              h(Sidebar, {
-                overlay: false, isOpen: false, onClose: () => {}, accountId: WS_ID,
-                rooms: [room], roomsLoading: false,
-              }),
+              // 데스크톱 사이드바(overlay: false)는 머리에 Artifact 토글을 그린다 — 셸(AppLayout)처럼 감싼다.
+              h(ArtifactPanelProvider, null,
+                h(Sidebar, {
+                  overlay: false, isOpen: false, onClose: () => {}, accountId: WS_ID,
+                  rooms: [room], roomsLoading: false,
+                }),
+              ),
             ),
           ),
         ),

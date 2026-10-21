@@ -83,7 +83,9 @@ for (const [cli, initialChoices] of Object.entries(fixtures)) {
     click(button('Start session'));
     await settle();
     assert.equal(open.mock.callCount(), 1, [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent).join('\n'));
-    assert.equal(put.mock.calls[0].arguments[3].model, initialChoices.at(-1)[0]);
+    // 고른 모델은 이 세션에만 고정된다 — 호스트 기본값 저장은 사용자가 따로 골라야 한다.
+    assert.equal(open.mock.calls[0].arguments[2].config_overrides.model, initialChoices.at(-1)[0]);
+    assert.equal(put.mock.callCount(), 0, '세션 시작이 호스트 CLI 기본값을 덮어쓰면 안 된다');
     assert.deepEqual(choices(modelSelect()), before, 'the newly created header must be exactly equal to the creation selector');
     change(modelSelect(), initialChoices[1][0]);
     await settle();
