@@ -46,6 +46,7 @@ export const DEFAULT_MARKETING_LIMITS = {
   links_per_day: 50,
   channel_proposals_per_day: 10,
   feedback_per_day: 100,
+  metrics_per_day: 500,
   feedback_tickets_per_day: 3,
   open_feedback_tickets: 10,
 } as const;
@@ -90,6 +91,15 @@ export const SPEND_STATUSES = ['pending', 'approved', 'executing', 'paid', 'fail
 export type SpendStatus = typeof SPEND_STATUSES[number];
 
 export const ALLOCATION_STATUSES = ['proposed', 'active', 'superseded', 'rejected'] as const;
+
+/** 기간 안의 값을 더하는 지표. */
+export const MARKETING_COUNTER_METRICS = [
+  'clicks', 'impressions', 'views', 'engagements', 'replies', 'signups', 'conversions', 'revenue_minor',
+] as const;
+/** 기간 안의 마지막 관측값을 쓰는 지표(수준). */
+export const MARKETING_GAUGE_METRICS = ['followers', 'subscribers'] as const;
+export const MARKETING_METRICS = [...MARKETING_COUNTER_METRICS, ...MARKETING_GAUGE_METRICS] as const;
+export type MarketingMetricName = typeof MARKETING_METRICS[number];
 
 /** 승인 대기 지출 요청의 기본 만료(결정이 없으면 거부). */
 export const SPEND_REQUEST_TTL_MS = 72 * 60 * 60_000;

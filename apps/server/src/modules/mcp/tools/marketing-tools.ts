@@ -158,6 +158,72 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
   );
 
   server.tool(
+    'create_marketing_link',
+    'Create a tracked short link for a channel (and optionally a post). Put the returned url in your post instead of the raw destination so clicks are counted per channel; UTM parameters are added automatically. The destination must be on the campaign allowed_domains (humans maintain that list). Needs capability analytics.',
+    {
+      campaign_id: z.string(),
+      channel_id: z.string(),
+      destination_url: z.string().describe('Where the link should land (http/https, on an allowed domain)'),
+      post_id: z.string().optional(),
+      label: z.string().optional(),
+    },
+    async ({ campaign_id, ...body }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      try {
+        return ok(await marketingAgentService!.createLink(found.campaign, body, found.actor));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to create link');
+      }
+    },
+  );
+
+  server.tool(
+    'record_marketing_metrics',
+    'Record channel or post metrics you observed (impressions, views, engagements, replies, signups, conversions, revenue_minor, followers, subscribers) — e.g. from the platform\'s stats page or the product\'s analytics. Clicks are counted by tracked links, not recorded here. Each observation is stored with you as its source; report only what you actually saw. Needs capability analytics.',
+    {
+      campaign_id: z.string(),
+      observations: z.array(z.object({
+        metric: z.enum(['impressions', 'views', 'engagements', 'replies', 'signups', 'conversions', 'revenue_minor', 'followers', 'subscribers']),
+        value: z.number().int().nonnegative(),
+        channel_id: z.string().optional(),
+        post_id: z.string().optional(),
+        observed_at: z.string().optional().describe('ISO time of the observation (default now)'),
+        note: z.string().optional().describe('Where the number came from'),
+      })).min(1).max(50),
+    },
+    async ({ campaign_id, observations }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      try {
+        return ok(await marketingAgentService!.recordMetrics(found.campaign, observations, found.actor));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to record metrics');
+      }
+    },
+  );
+
+  server.tool(
+    'get_marketing_report',
+    'Per-channel performance for a period (default last 30 days): posts published, tracked clicks, recorded metrics, spend, CPC, cost per signup/conversion, CTR, ROAS, allocation, feedback and tickets. Use it to decide which channels deserve more effort or budget.',
+    {
+      campaign_id: z.string(),
+      since: z.string().optional().describe('ISO start (default 30 days ago)'),
+      until: z.string().optional().describe('ISO end (default now)'),
+    },
+    async ({ campaign_id, since, until }, extra) => {
+      const found = await campaignFor(extra, campaign_id);
+      if ('error' in found) return err(found.error);
+      const parse = (v?: string) => (v && !Number.isNaN(new Date(v).getTime()) ? new Date(v) : undefined);
+      try {
+        return ok(await marketingAgentService!.report(found.campaign, { since: parse(since), until: parse(until) }));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to build report');
+      }
+    },
+  );
+
+  server.tool(
     'propose_marketing_budget_allocation',
     'Propose how the campaign budget is split across approved channels for one budget period (the campaign\'s budget_period; whole campaign when "none"). A person with marketing.approve_spend approves it; spend on a channel needs its approved allocation. Base it on results (get_marketing_report) and cite them in rationale. Needs capability paid_spend. Amounts are integers in minor units of the campaign currency (KRW 50000 = ₩50,000; USD 1250 = $12.50). A new proposal for a channel replaces its undecided earlier proposal.',
     {

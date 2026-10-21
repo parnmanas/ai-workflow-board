@@ -6,6 +6,7 @@ test/account-ownership-access.test.mjs
 test/account-ownership-migration.test.mjs
 test/agent-session-execution-ownership.test.mjs
 test/drop-agent-host-backfill.test.mjs
+test/marketing-analytics.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
 test/marketing-spend.test.mjs

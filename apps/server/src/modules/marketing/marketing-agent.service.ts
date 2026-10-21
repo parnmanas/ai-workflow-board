@@ -11,7 +11,8 @@ import { MarketingChannelService } from './marketing-channel.service';
 import { MarketingBudgetService } from './marketing-budget.service';
 import { MarketingSpendService } from './marketing-spend.service';
 import { MarketingPostService } from './marketing-post.service';
-import { allocationToJson, campaignToJson, channelToJson, postToJson, spendToJson } from './marketing-json';
+import { MarketingAnalyticsService } from './marketing-analytics.service';
+import { allocationToJson, campaignToJson, channelToJson, linkToJson, metricToJson, postToJson, spendToJson } from './marketing-json';
 import { hasCapability, resolveLimits } from './marketing-campaign.logic';
 import { marketingError } from './marketing-errors';
 
@@ -32,6 +33,7 @@ export class MarketingAgentService {
     private readonly budget: MarketingBudgetService,
     private readonly spend: MarketingSpendService,
     private readonly posts: MarketingPostService,
+    private readonly analytics: MarketingAnalyticsService,
   ) {}
 
   async listCampaigns(accountIds: string[] | 'all'): Promise<MarketingCampaign[]> {
@@ -100,6 +102,27 @@ export class MarketingAgentService {
       duplicate,
       note: 'Nothing is sent until a person approves it. The disclosure line is appended automatically.',
     };
+  }
+
+  async createLink(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor) {
+    this.assertCanAct(campaign, 'analytics');
+    const channel = await this.channels.getInCampaign(campaign, String(body.channel_id || ''));
+    this.channels.assertUsable(channel);
+    await this.assertDailyLimit(campaign, 'links_per_day', (since) => this.analytics.countLinksSince(campaign.id, since));
+    const { link, url } = await this.analytics.createLink(campaign, channel, body, actor);
+    return { link: linkToJson(link, url), note: 'Put url in the post instead of the destination so clicks are counted per channel.' };
+  }
+
+  async recordMetrics(campaign: MarketingCampaign, observations: unknown, actor: MarketingActor) {
+    this.assertCanAct(campaign, 'analytics');
+    await this.assertDailyLimit(campaign, 'metrics_per_day', (since) => this.analytics.countMetricsSince(campaign.id, since));
+    const rows = await this.analytics.recordMetrics(campaign, observations, actor);
+    return { recorded: rows.map(metricToJson) };
+  }
+
+  /** 읽기 전용 — capability 없이도 읽는다(사이클 지시문에도 실린다). */
+  async report(campaign: MarketingCampaign, range: { since?: Date; until?: Date }) {
+    return this.analytics.report(campaign, range);
   }
 
   async proposeAllocation(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor) {

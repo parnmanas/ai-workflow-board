@@ -8,6 +8,8 @@ import type { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAl
 import type { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
 import type { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
 import type { MarketingPost } from '../../entities/MarketingPost';
+import type { MarketingLink } from '../../entities/MarketingLink';
+import type { MarketingMetric } from '../../entities/MarketingMetric';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -219,5 +221,41 @@ export function postToJson(p: MarketingPost, previewBody?: string) {
     link_codes: p.link_codes || [],
     created_at: p.created_at,
     updated_at: p.updated_at,
+  };
+}
+
+export function linkToJson(l: MarketingLink, url: string | null) {
+  return {
+    id: l.id,
+    campaign_id: l.campaign_id,
+    channel_id: l.channel_id,
+    post_id: l.post_id,
+    code: l.code,
+    url,
+    destination_url: l.destination_url,
+    redirect_url: l.redirect_url,
+    label: l.label,
+    clicks: l.clicks,
+    created_by_type: l.created_by_type,
+    created_by_name: l.created_by_name,
+    created_at: l.created_at,
+  };
+}
+
+export function metricToJson(m: MarketingMetric) {
+  return {
+    id: m.id,
+    campaign_id: m.campaign_id,
+    channel_id: m.channel_id,
+    post_id: m.post_id,
+    link_id: m.link_id,
+    metric: m.metric,
+    value: m.value,
+    source: m.source,
+    observed_at: m.bucket_start,
+    note: m.note,
+    recorded_by_type: m.recorded_by_type,
+    recorded_by_name: m.recorded_by_name,
+    created_at: m.created_at,
   };
 }

@@ -146,3 +146,5 @@ export { MarketingBudgetAllocation } from './MarketingBudgetAllocation';
 export { MarketingSpendRequest } from './MarketingSpendRequest';
 export { MarketingLedgerEntry } from './MarketingLedgerEntry';
 export { MarketingPost } from './MarketingPost';
+export { MarketingLink } from './MarketingLink';
+export { MarketingMetric } from './MarketingMetric';
