@@ -59,7 +59,7 @@ style.textContent = `
   .awb-shell {
     display: flex;
     height: 100vh;
-    height: var(--awb-viewport-height, 100dvh);
+    height: min(100dvh, var(--awb-viewport-height, 100dvh));
     overflow: hidden;
     background: ${tokens.colors.surface};
   }
