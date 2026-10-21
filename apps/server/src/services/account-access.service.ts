@@ -41,7 +41,17 @@ export class AccountAccessService {
     let resourceId: string | undefined;
     const nested = path.match(/\/api\/(qa|security|actions|functions)\/(scenarios|profiles|schedules|runs|batches)\/([^/]+)/);
     const orchestration = path.match(/\/orchestration\/(missions|teams|steps)\/([^/]+)/);
-    if (orchestration) {
+    const marketing = path.match(/\/api\/marketing\/([a-z-]+)\/([^/]+)/);
+    if (marketing) {
+      // docs/marketing.md — 캠페인과 그 하위 객체는 각자 account_id 를 들고 있다.
+      entity = ({
+        campaigns: 'MarketingCampaign', channels: 'MarketingChannel', posts: 'MarketingPost',
+        allocations: 'MarketingBudgetAllocation', 'spend-requests': 'MarketingSpendRequest',
+        contacts: 'MarketingContact', feedback: 'MarketingFeedback', cycles: 'MarketingCycle',
+        links: 'MarketingLink',
+      } as Record<string, string>)[marketing[1]];
+      resourceId = marketing[2];
+    } else if (orchestration) {
       entity = { missions: 'OrchestrationMission', teams: 'OrchestrationTeam', steps: 'OrchestrationStep' }[orchestration[1]];
       resourceId = orchestration[2];
     } else if (nested) {
@@ -80,7 +90,7 @@ export class AccountAccessService {
     }
     // Selecting a project/team determines the owner of newly created work.
     // A page's default account must not make another accessible project fail.
-    if (!owner && req.method === 'POST' && (path === '/api/tickets' || path === '/api/orchestration/missions')) {
+    if (!owner && req.method === 'POST' && (path === '/api/tickets' || path === '/api/orchestration/missions' || path === '/api/marketing/campaigns')) {
       const referenceId = req.body?.project_id || req.body?.team_id;
       const referenceEntity = req.body?.project_id ? 'Project' : 'OrchestrationTeam';
       if (referenceId && /^[0-9a-f-]{36}$/i.test(referenceId)) {

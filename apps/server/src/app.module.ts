@@ -34,6 +34,7 @@ import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-f
 import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
 import { OutreachModule } from './modules/outreach/outreach.module';
+import { MarketingModule } from './modules/marketing/marketing.module';
 import { OrchestrationModule } from './modules/orchestration/orchestration.module';
 import { OntologyModule } from './modules/ontology/ontology.module';
 import { MigrationModule } from './modules/migration/migration.module';
@@ -113,6 +114,7 @@ import { VoiceModule } from './modules/voice/voice.module';
     SkillsModule,
     ArtifactRefsModule,
     OutreachModule,
+    MarketingModule,
     OrchestrationModule,
     OntologyModule,
     MigrationModule,

@@ -104,6 +104,34 @@ import type {
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
   OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SkillAssignment, SkillAssignmentTarget, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
+import type {
+  MarketingCampaign,
+  MarketingCampaignInput,
+  MarketingCampaignStatus,
+  MarketingCycle,
+  MarketingAuditEvent,
+  MarketingChannel,
+  MarketingChannelApproval,
+  MarketingPost,
+  MarketingPostSends,
+  MarketingBudgetSummary,
+  MarketingAllocation,
+  MarketingSpendRequest,
+  MarketingLedgerEntry,
+  MarketingReport,
+  MarketingLink,
+  MarketingMetric,
+  MarketingMetricObservation,
+  MarketingFeedback,
+  MarketingFeedbackList,
+  MarketingFeedbackInput,
+  MarketingContact,
+  MarketingContactList,
+  MarketingContactImportRow,
+  MarketingContactImportResult,
+  MarketingInboxSummary,
+  OutreachChannelSummary,
+} from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 import { getApiBase } from './serverConfig';
 
@@ -2532,6 +2560,214 @@ export const api = {
     request<OntologyGraphSnapshotResponse>(
       `/ontology/graph?account_id=${encodeURIComponent(accountId)}&graph_id=${encodeURIComponent(graphId)}`,
     ),
+
+  // ─── Marketing (docs/marketing.md) ─────────────────────
+  // 목록은 접근 가능한 계정을 합치고, 상세·쓰기는 서버(AccountAccessService)가 객체의 실제 소유
+  // 계정으로 묶는다. 새 캠페인은 고른 Project 의 계정, 없으면 기본 접근 계정에 귀속되므로 본문에
+  // account_id 를 싣지 않는다. 승인 · 결제 경로는 사람(로그인 세션)만 — MCP 에는 없다.
+  listMarketingCampaigns: () => request<MarketingCampaign[]>('/marketing/campaigns'),
+  /** 사람을 기다리는 수(이 사용자가 처리할 수 있는 것만) — 사이드바 배지 · 목록이 캠페인마다 묻지 않고 한 번에 읽는다. */
+  getMarketingInbox: () => request<MarketingInboxSummary>('/marketing/inbox'),
+  getMarketingCampaign: (id: string) =>
+    request<MarketingCampaign>(`/marketing/campaigns/${encodeURIComponent(id)}`),
+  createMarketingCampaign: (data: MarketingCampaignInput & { name: string }) =>
+    request<MarketingCampaign>('/marketing/campaigns', { method: 'POST', body: JSON.stringify(data) }),
+  updateMarketingCampaign: (id: string, data: MarketingCampaignInput) =>
+    request<MarketingCampaign>(`/marketing/campaigns/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  setMarketingCampaignStatus: (id: string, status: MarketingCampaignStatus) =>
+    request<MarketingCampaign>(`/marketing/campaigns/${encodeURIComponent(id)}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    }),
+  /** 돈이 오간 캠페인은 409 — 보관(archived)해야 한다. */
+  deleteMarketingCampaign: (id: string) =>
+    request<{ success: boolean; id: string }>(`/marketing/campaigns/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listMarketingCycles: (campaignId: string) =>
+    request<MarketingCycle[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/cycles`),
+  /** "지금 실행" — 예약과 같은 경로(실행 중이면 409, run budget 초과면 429). */
+  runMarketingCycle: (campaignId: string) =>
+    request<MarketingCycle>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/cycles/run`, { method: 'POST' }),
+  listMarketingAudit: (campaignId: string, opts: { limit?: number; before?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set('limit', String(opts.limit));
+    if (opts.before) params.set('before', opts.before);
+    const qs = params.toString();
+    return request<MarketingAuditEvent[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/audit${qs ? `?${qs}` : ''}`);
+  },
+
+  listMarketingChannels: (campaignId: string) =>
+    request<MarketingChannel[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/channels`),
+  /** 사람이 직접 채널을 추가한다. 같은 (플랫폼, 대상)이 있으면 그 행을 `duplicate: true` 로 돌려준다. */
+  createMarketingChannel: (campaignId: string, data: {
+    platform: string;
+    target: string;
+    name?: string;
+    rationale?: string;
+    guidelines?: string;
+    rules_summary?: string;
+    rules_url?: string;
+    evidence_urls?: string[];
+  }) =>
+    request<MarketingChannel & { duplicate: boolean }>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/channels`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateMarketingChannel: (id: string, data: {
+    name?: string;
+    guidelines?: string;
+    rules_summary?: string;
+    audience_fit?: string;
+    rationale?: string;
+    email?: Record<string, unknown>;
+  }) =>
+    request<MarketingChannel>(`/marketing/channels/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  approveMarketingChannel: (id: string, data: MarketingChannelApproval) =>
+    request<MarketingChannel>(`/marketing/channels/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify(data) }),
+  /** awaiting_credential 채널을 OutreachChannel 에 잇는다. */
+  connectMarketingChannel: (id: string, data: MarketingChannelApproval) =>
+    request<MarketingChannel>(`/marketing/channels/${encodeURIComponent(id)}/connect`, { method: 'POST', body: JSON.stringify(data) }),
+  rejectMarketingChannel: (id: string, note: string) =>
+    request<MarketingChannel>(`/marketing/channels/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
+  pauseMarketingChannel: (id: string) =>
+    request<MarketingChannel>(`/marketing/channels/${encodeURIComponent(id)}/pause`, { method: 'POST' }),
+  resumeMarketingChannel: (id: string) =>
+    request<MarketingChannel>(`/marketing/channels/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
+
+  listMarketingPosts: (campaignId: string, opts: { status?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.status) params.set('status', opts.status);
+    if (opts.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return request<MarketingPost[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/posts${qs ? `?${qs}` : ''}`);
+  },
+  /** 승인(수정 포함 — 바꾼 title/body 만 보낸다). 공개 문구 · 메일 꼬리말은 서버가 붙인다. */
+  approveMarketingPost: (id: string, data: { title?: string; body?: string; note?: string }) =>
+    request<MarketingPost>(`/marketing/posts/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify(data) }),
+  rejectMarketingPost: (id: string, note: string) =>
+    request<MarketingPost>(`/marketing/posts/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
+  retryMarketingPost: (id: string) =>
+    request<MarketingPost>(`/marketing/posts/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
+  /** manual 채널 — 사람이 직접 올린 뒤 그 글의 주소를 기록한다. */
+  markMarketingPostPublished: (id: string, permalink: string) =>
+    request<MarketingPost>(`/marketing/posts/${encodeURIComponent(id)}/mark-published`, {
+      method: 'POST',
+      body: JSON.stringify({ permalink }),
+    }),
+  listMarketingPostSends: (id: string) =>
+    request<MarketingPostSends>(`/marketing/posts/${encodeURIComponent(id)}/sends`),
+
+  getMarketingBudget: (campaignId: string) =>
+    request<MarketingBudgetSummary>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/budget`),
+  listMarketingAllocations: (campaignId: string) =>
+    request<MarketingAllocation[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/allocations`),
+  /** 사람이 직접 편성하고 곧바로 승인한다(marketing.approve_spend). */
+  setMarketingAllocations: (campaignId: string, data: { allocations: Array<{ channel_id: string; amount_minor: number }>; rationale: string }) =>
+    request<MarketingAllocation[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/allocations`, {
+      method: 'POST',
+      body: JSON.stringify({ ...data, approve: true }),
+    }),
+  approveMarketingAllocation: (id: string, note: string) =>
+    request<MarketingAllocation>(`/marketing/allocations/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify({ note }) }),
+  rejectMarketingAllocation: (id: string, note: string) =>
+    request<MarketingAllocation>(`/marketing/allocations/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
+  listMarketingSpendRequests: (campaignId: string, opts: { status?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.status) params.set('status', opts.status);
+    if (opts.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    return request<MarketingSpendRequest[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/spend-requests${qs ? `?${qs}` : ''}`);
+  },
+  getMarketingSpendRequest: (id: string) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}`),
+  /**
+   * 지출 승인 — `payloadSha256` 은 사람이 화면에서 본 요청의 해시 그대로여야 한다(다르면 409).
+   * `final: false` 는 2인 규칙의 첫 승인만 기록됐다는 뜻이다.
+   */
+  approveMarketingSpend: (id: string, payloadSha256: string, note = '') =>
+    request<MarketingSpendRequest & { final: boolean }>(`/marketing/spend-requests/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ payload_sha256: payloadSha256, note }),
+    }),
+  denyMarketingSpend: (id: string, note: string) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/deny`, { method: 'POST', body: JSON.stringify({ note }) }),
+  cancelMarketingSpend: (id: string, note: string) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify({ note }) }),
+  /** manual 승인 건 또는 결과 불명(unknown) 건을 결제 완료로 닫는다 — 거래 id 필수. */
+  markMarketingSpendPaid: (id: string, data: { provider_ref: string; receipt_url?: string; note?: string }) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/mark-paid`, { method: 'POST', body: JSON.stringify(data) }),
+  markMarketingSpendFailed: (id: string, note: string) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/mark-failed`, { method: 'POST', body: JSON.stringify({ note }) }),
+  refundMarketingSpend: (id: string, data: { amount_minor: number; note: string; provider_ref?: string }) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify(data) }),
+  listMarketingLedger: (campaignId: string, limit?: number) =>
+    request<MarketingLedgerEntry[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/ledger${limit ? `?limit=${limit}` : ''}`),
+
+  getMarketingReport: (campaignId: string, range: { since?: string; until?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (range.since) params.set('since', range.since);
+    if (range.until) params.set('until', range.until);
+    const qs = params.toString();
+    return request<MarketingReport>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/report${qs ? `?${qs}` : ''}`);
+  },
+  listMarketingLinks: (campaignId: string) =>
+    request<MarketingLink[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/links`),
+  /** 목적지는 캠페인 allowed_domains 안이어야 한다. */
+  createMarketingLink: (campaignId: string, data: { channel_id: string; destination_url: string; label?: string }) =>
+    request<MarketingLink>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/links`, { method: 'POST', body: JSON.stringify(data) }),
+  listMarketingMetrics: (campaignId: string, limit?: number) =>
+    request<MarketingMetric[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/metrics${limit ? `?limit=${limit}` : ''}`),
+  recordMarketingMetrics: (campaignId: string, observations: MarketingMetricObservation[]) =>
+    request<MarketingMetric[]>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/metrics`, {
+      method: 'POST',
+      body: JSON.stringify({ observations }),
+    }),
+
+  listMarketingFeedback: (campaignId: string) =>
+    request<MarketingFeedbackList>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/feedback`),
+  recordMarketingFeedback: (campaignId: string, data: MarketingFeedbackInput) =>
+    request<{ feedback: MarketingFeedback; duplicate: boolean; ticket_id: string | null; note?: string }>(
+      `/marketing/campaigns/${encodeURIComponent(campaignId)}/feedback`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  /** 상한과 무관하게 사람이 티켓으로 만든다. */
+  fileMarketingFeedbackTicket: (feedbackId: string) =>
+    request<{ ticket_id: string; status: string; title: string }>(`/marketing/feedback/${encodeURIComponent(feedbackId)}/ticket`, { method: 'POST' }),
+
+  // 연락처는 계정 단위다. 계정 선택기는 두지 않는다(AGENTS.md) — 캠페인에서 열면 그 캠페인의 계정을
+  // `account_id` 로 명시하고(서버가 접근을 검사한다), 없으면 서버가 기본 접근 계정으로 묶는다.
+  listMarketingContacts: (
+    accountId: string | null,
+    query: { list?: string; status?: string; q?: string; limit?: number; offset?: number } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (accountId) params.set('account_id', accountId);
+    if (query.list) params.set('list', query.list);
+    if (query.status) params.set('status', query.status);
+    if (query.q) params.set('q', query.q);
+    if (query.limit) params.set('limit', String(query.limit));
+    if (query.offset) params.set('offset', String(query.offset));
+    const qs = params.toString();
+    return request<MarketingContactList>(`/marketing/contacts${qs ? `?${qs}` : ''}`);
+  },
+  importMarketingContacts: (accountId: string | null, data: { lists: string[]; contacts: MarketingContactImportRow[] }) =>
+    request<MarketingContactImportResult>(
+      `/marketing/contacts/import${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  unsubscribeMarketingContact: (id: string, note: string, accountId?: string | null) =>
+    request<MarketingContact>(
+      `/marketing/contacts/${encodeURIComponent(id)}/unsubscribe${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'POST', body: JSON.stringify({ note }) },
+    ),
+  /** 주소 · 이름을 지우고 억제용 해시만 남긴다(되돌릴 수 없다). */
+  eraseMarketingContact: (id: string, accountId?: string | null) =>
+    request<MarketingContact>(
+      `/marketing/contacts/${encodeURIComponent(id)}/erase${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'POST' },
+    ),
+  /** 채널 연결용 OutreachChannel 목록(서버 권한: admin.resources). */
+  listOutreachChannels: (accountId: string) =>
+    request<OutreachChannelSummary[]>(`/outreach-channels?account_id=${encodeURIComponent(accountId)}`),
 };
 
 // ─── Ticket list / write shapes (docs/tickets.md) ─────────

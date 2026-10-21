@@ -76,7 +76,7 @@ import {
   listIssueCommentsSince,
   listOpenIssuesSince,
 } from '../../../services/github-connector.service';
-import { InboundItem, OutboundPost, OutboundResult, OutreachConnector } from './types';
+import { InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
 import { OutreachRateLimiter, sharedOutreachRateLimiter } from '../outreach-rate-limiter';
 
 export class GitHubConnectorConfigError extends Error {
@@ -239,6 +239,12 @@ export class GitHubConnector implements OutreachConnector {
     const { owner, repo, number } = this._parseIssueRef(threadRef);
     this._assertTargetAllowed(`${owner}/${repo}`);
     await this._withRetry(() => closeIssue(owner, repo, number, this.token, { fetchImpl: this.fetchImpl }));
+  }
+
+  /** Where an `issue:{owner}/{repo}#{number}` ref lives — the ref itself says it (no API call). */
+  async describeThread(threadRef: string): Promise<ThreadInfo> {
+    const { owner, repo, number } = this._parseIssueRef(threadRef);
+    return { target: `${owner}/${repo}`, permalink: `https://github.com/${owner}/${repo}/issues/${number}`, title: '' };
   }
 
   // ── Internals ────────────────────────────────────────────────────────────

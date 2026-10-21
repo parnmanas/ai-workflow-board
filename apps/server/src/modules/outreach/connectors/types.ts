@@ -13,7 +13,9 @@ export interface OutreachConnector {
   fetchInbound(since: string): Promise<InboundItem[]>;
   /** Publish a new top-level post to the channel. Real implementations follow. */
   publish(post: OutboundPost): Promise<OutboundResult>;
-  /** Reply to an existing thread/issue on the channel. Real implementations follow. */
+  /** Reply to an existing thread/issue on the channel. Real connectors refuse a
+   *  thread outside the channel's `targets` themselves, whatever the caller
+   *  checked — GitHub reads the repo off the ref, Reddit looks the thread up. */
   reply(threadRef: string, body: string): Promise<OutboundResult>;
   /**
    * Optional: close/resolve the native thread (e.g. a GitHub issue). Reddit
@@ -22,6 +24,19 @@ export interface OutreachConnector {
    * it (ticket 31e7cd24, GitHub's off-by-default issue-close option).
    */
   close?(threadRef: string): Promise<void>;
+  /**
+   * Optional: where a thread lives — `target` is the same whitelist identifier
+   * `publish` takes (subreddit name / "owner/repo"). Marketing replies call this
+   * before drafting so a reply can never land in a thread outside its channel
+   * (docs/marketing.md "커뮤니케이션"). `title` is outsider text — display only.
+   */
+  describeThread?(threadRef: string): Promise<ThreadInfo>;
+}
+
+export interface ThreadInfo {
+  target: string;
+  permalink: string;
+  title: string;
 }
 
 export interface InboundItem {

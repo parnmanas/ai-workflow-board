@@ -137,3 +137,18 @@ export { AgentSessionExecution } from './AgentSessionExecution';
 export { AgentSessionPromptProposal } from './AgentSessionPromptProposal';
 
 export { AgentTemplate } from './AgentTemplate';
+// Marketing(에이전트 기반 제품 마케팅 루프, docs/marketing.md). Auto-DDL'd by TypeORM
+// `synchronize`. 이관 레지스트리(MIGRATION_ENTITY_ORDER)와 한 쌍.
+export { MarketingCampaign } from './MarketingCampaign';
+export { MarketingAuditEvent } from './MarketingAuditEvent';
+export { MarketingChannel } from './MarketingChannel';
+export { MarketingBudgetAllocation } from './MarketingBudgetAllocation';
+export { MarketingSpendRequest } from './MarketingSpendRequest';
+export { MarketingLedgerEntry } from './MarketingLedgerEntry';
+export { MarketingPost } from './MarketingPost';
+export { MarketingLink } from './MarketingLink';
+export { MarketingMetric } from './MarketingMetric';
+export { MarketingFeedback } from './MarketingFeedback';
+export { MarketingContact } from './MarketingContact';
+export { MarketingEmailSend } from './MarketingEmailSend';
+export { MarketingCycle } from './MarketingCycle';

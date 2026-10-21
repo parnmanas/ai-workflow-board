@@ -360,6 +360,13 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - **재시작으로 끊긴 세션**: operator 는 `resume_interrupted_session` 으로 **사용자 승인 없이** 잇는다 — 작업 제안의 유일한 예외. 보내는 글이 고정 문구(`[AWB 재개]`, server `voice/interrupted-sessions.ts`·client `sessionTranscript.logic.ts` 계약)이고 AWB 가 끊김을 기록한 세션만 6시간 안에 한 번이라 다른 세션의 글이 명령이 되지 않는다. 글을 operator 가 고르게 하거나 기록 밖의 세션을 허용하는 변경은 제안 규칙을 우회하는 길이다 — 하지 말 것. 상세: `docs/voice-operator.md` → "재시작으로 끊긴 작업".
 - **말로 답하기**: operator 는 MCP `answer_session_permission` / `answer_session_question` 으로 사용자가 말로 고른 것을 기다리는 세션에 전한다. MCP 는 "사람이 정했다" 를 증명하지 못하므로 서버가 **operator 연결 · 사용자가 시작한 operator 턴(보고 턴 거절) · 같은 사용자 · 아직 미결인 요청과 그 선택지**만 허락한다(`voice/operator-decision.service.ts`). 이 조건을 느슨하게 하는 변경(예: 보고 턴에서 허용)은 다른 세션이 쓴 글로 승인이 일어나는 길을 연다 — 하지 말 것. 상세: `docs/voice-operator.md` → "말로 답하기".
 
+## Marketing (에이전트 기반 제품 마케팅 루프)
+
+- `/marketing` 의 캠페인 에이전트가 주기마다 채널 탐색 → 게시 · 메일 → 예산 편성 · 지출 요청 → 분석 → 피드백 → 제품 티켓을 돈다(`modules/marketing`, MCP `marketing-tools.ts`, 규칙 · 상수 `common/marketing/*`). **에이전트는 제안만 하고 사람이 정하고 서버가 집행한다** — 승인 · 거부 · 결제 기록 · 연락처 MCP 툴을 만들지 말 것. 결제 키 · 메일 키를 에이전트에게 주지 말 것(`agent_env` credential 은 거부된다).
+- 돈: 잔액 칼럼을 두지 말 것 — 한도는 append-only `marketing_ledger_entries` 합으로 `common/marketing/budget.ts` 한 곳에서 계산한다. 돈이 움직이는 전이는 `lockCampaign` 트랜잭션(캠페인 행 잠금 → 상태 CAS → 원장 · 감사)으로만, 승인은 화면이 본 `payload_sha256` 과 함께. 결과가 모호한 결제(`unknown`)를 자동으로 재전송하거나 `failed` 로 닫지 말 것(이중 지출). 원장 · 감사 로그를 UPDATE/DELETE 하는 경로를 만들지 말 것.
+- 외부 발신은 전부 사람 승인 뒤다(자동 게시 없음). 메일은 동의 연락처에게만, 광고 표기 · 발신자 정보 · 수신거부 링크 · One-Click 헤더는 `common/marketing/email.ts` 가 강제한다. 외부 글은 사이클 지시문의 비신뢰 블록(`common/marketing/cycle-prompt.ts`)과 MCP 의 `*_untrusted` 필드로만 에이전트에게 간다.
+- 사이클은 자체 tick(qa-cron 의미)이고 디스패치는 방 + 첫 메시지라 agent-manager · SSE contract 변경이 없다. `marketing_update` 는 UI 전용 SSE. 상세: `docs/marketing.md`.
+
 ## Skills (AWB 기능)
 
 - Global(`account_id NULL`) / Account 2계층. 같은 slug면 Account가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.

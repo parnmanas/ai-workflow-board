@@ -79,6 +79,11 @@ test('client exposes direct management routes with Global + accessible-Account c
   assert.match(management, /canManageGlobalHere && createGlobal/);
   assert.match(management, /Create new items as Global/);
   assert.match(ownerLogic, /explicitlyGlobal = false/);
+  // Account selection stays automatic; Global requires an explicit choice.
+  assert.doesNotMatch(management, /Account for new item/);
+  assert.doesNotMatch(management, /createOwnerOptions/);
+  assert.match(ownerLogic, /export function defaultCreateOwner\(/);
+  assert.doesNotMatch(ownerLogic, /label: 'Not set \(Global\)'/);
   assert.doesNotMatch(management, /<option value="account">/);
   assert.doesNotMatch(management, /boardScoped|boardId/);
   // Boards are gone, so no catalog page may hang off a board route.

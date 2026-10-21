@@ -118,3 +118,20 @@ test('보드가 없어졌다: /tickets · /projects 라우트가 있고 예전 /
   // 계정를 바꿀 때 섹션이 없으면 기본 랜딩(sessions)으로 간다 — 'boards' 가 아니다.
   assert.doesNotMatch(appLayoutSource, /\/boards/);
 });
+
+test('Marketing 은 WORK 의 한 줄이고 권한이 있는 사람에게만 보이며, 목록 · 연락처 · 캠페인 라우트가 있다', () => {
+  // docs/marketing.md — 캠페인 운영(marketing.manage) 또는 지출 승인(marketing.approve_spend) 중 하나면 행을 그린다.
+  assert.match(sidebarSource, /hasPermission\('marketing\.manage'\) \|\| hasPermission\('marketing\.approve_spend'\)/);
+  const work = sidebarSource.indexOf("title: 'Work'");
+  const automation = sidebarSource.indexOf("title: 'Automation'");
+  const marketingRow = sidebarSource.indexOf("key: 'marketing'");
+  assert.ok(work < marketingRow && marketingRow < automation, 'Marketing 행은 WORK 섹션 안에 있다');
+  assert.match(sidebarSource.slice(work, automation), /\.\.\.\(canUseMarketing\s*\?/, '권한이 없으면 행 자체를 그리지 않는다');
+  // 배지는 서버 승인함 합계(이 사용자가 처리할 수 있는 것) — 렌더 계약은 marketing-inbox-badge.test.mjs 가 본다.
+  assert.match(sidebarSource, /useMarketingInbox\(canUseMarketing\)/);
+  assert.match(sidebarSource, /badgeLabel: `승인 대기 \$\{marketingPending\}건`/);
+  assert.match(appSource, /path="marketing" element=\{<MarketingPage \/>\}/);
+  assert.match(appSource, /path="marketing\/contacts" element=\{<MarketingContactsPage \/>\}/);
+  assert.match(appSource, /path="marketing\/:campaignId" element=\{<MarketingCampaignPage \/>\}/);
+  assert.match(appSource, /lazy\(\(\) => import\('\.\/components\/marketing\/MarketingPage'\)\)/, '라우트 단위로 지연 로드한다');
+});

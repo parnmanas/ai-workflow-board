@@ -40,6 +40,10 @@ const OrchestrationTeamsPage = lazy(() => import('./components/orchestration/Orc
 const MissionDetailPage = lazy(() => import('./components/orchestration/MissionDetailPage'));
 // Ontology Graph UI 셸(ticket d22b83b4) — 캔버스 없는 라우트/사이드바/배지.
 const OntologyGraphPage = lazy(() => import('./components/ontology/OntologyGraphPage'));
+// Marketing — 에이전트가 돌리는 제품 마케팅 캠페인과 사람의 승인함(docs/marketing.md).
+const MarketingPage = lazy(() => import('./components/marketing/MarketingPage'));
+const MarketingCampaignPage = lazy(() => import('./components/marketing/MarketingCampaignPage'));
+const MarketingContactsPage = lazy(() => import('./components/marketing/MarketingContactsPage'));
 
 // 지연 로드되는 라우트 청크를 가져오는 동안 보여줄 폴백.
 function RouteFallback() {
@@ -210,6 +214,9 @@ function AppContent() {
             <Route path="teams" element={<OrchestrationTeamsPage />} />
             <Route path="missions" element={<OrchestrationPage />} />
             <Route path="missions/:missionId" element={<MissionDetailPage />} />
+            <Route path="marketing" element={<MarketingPage />} />
+            <Route path="marketing/contacts" element={<MarketingContactsPage />} />
+            <Route path="marketing/:campaignId" element={<MarketingCampaignPage />} />
             <Route path="orchestration/*" element={<LegacyPathRedirect />} />
             <Route path="chat" element={<ChatPage />} />
             <Route path="chat/:roomId" element={<ChatPage />} />

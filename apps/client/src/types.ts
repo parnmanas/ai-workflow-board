@@ -3520,3 +3520,610 @@ export type SkillAssignmentTarget =
   | { scope: 'account' }
   | { scope: 'project'; project_id: string }
   | { scope: 'runtime'; runtime: Record<string, any> };
+
+// ─── Marketing (docs/marketing.md) ──────────────────────────────────────────
+// 서버 `modules/marketing/marketing-json.ts` 직렬화의 모양 그대로다. 금액은 전부 정수
+// 최소 단위(minor units)이고 통화는 캠페인 하나에 하나다 — 표기는
+// components/marketing/marketing.logic.ts 의 formatMinor() 한 곳에서 한다.
+
+export type MarketingCapability =
+  | 'channel_discovery'
+  | 'community_post'
+  | 'email'
+  | 'feedback_collect'
+  | 'feedback_to_product'
+  | 'analytics'
+  | 'paid_spend';
+
+export type MarketingCampaignStatus = 'draft' | 'active' | 'paused' | 'archived';
+export type MarketingBudgetPeriod = 'none' | 'week' | 'month';
+export type MarketingPaymentProvider = 'manual' | 'webhook';
+export type MarketingFeedbackTicketStatus = 'backlog' | 'todo';
+
+export type MarketingLimitKey =
+  | 'drafts_per_day'
+  | 'spend_requests_per_day'
+  | 'allocation_proposals_per_day'
+  | 'links_per_day'
+  | 'channel_proposals_per_day'
+  | 'feedback_per_day'
+  | 'metrics_per_day'
+  | 'feedback_tickets_per_day'
+  | 'open_feedback_tickets';
+
+export interface MarketingPayee {
+  name: string;
+  ref?: string;
+  note?: string;
+}
+
+export interface MarketingCampaign {
+  id: string;
+  account_id: string;
+  project_id: string | null;
+  name: string;
+  slug: string;
+  status: MarketingCampaignStatus;
+  product_brief: string;
+  goal: string;
+  target_audience: string;
+  capabilities: MarketingCapability[];
+  /** 캠페인 에이전트(RuntimeSpec). 없으면 시작할 수 없다. */
+  agent_runtime: RuntimeSpecDraft | null;
+  agent_key: string;
+  cycle_cron: string | null;
+  cycle_interval_ms: number | null;
+  next_cycle_at: string | null;
+  last_cycle_at: string | null;
+  cycle_count: number;
+  currency: string;
+  budget_total_minor: number;
+  budget_period: MarketingBudgetPeriod;
+  budget_period_minor: number;
+  max_transaction_minor: number;
+  dual_approval_threshold_minor: number;
+  payment_provider: MarketingPaymentProvider;
+  payment_credential_id: string | null;
+  payees: MarketingPayee[];
+  allowed_domains: string[];
+  disclosure: string;
+  /** 기본값과 합친 실제 상한. */
+  limits: Record<MarketingLimitKey, number>;
+  /** 캠페인이 직접 정한 값만. */
+  limit_overrides: Partial<Record<MarketingLimitKey, number>>;
+  feedback_ticket_status: MarketingFeedbackTicketStatus;
+  improvement_assignee: RuntimeSpecDraft | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** POST /api/marketing/campaigns · PATCH /api/marketing/campaigns/:id 본문(snake_case 그대로, 정의된 키만 바뀐다). */
+export interface MarketingCampaignInput {
+  name?: string;
+  project_id?: string | null;
+  product_brief?: string;
+  goal?: string;
+  target_audience?: string;
+  capabilities?: MarketingCapability[];
+  agent_runtime?: Record<string, any> | null;
+  cycle_cron?: string | null;
+  cycle_interval_ms?: number | null;
+  currency?: string;
+  budget_total_minor?: number;
+  budget_period?: MarketingBudgetPeriod;
+  budget_period_minor?: number;
+  max_transaction_minor?: number;
+  dual_approval_threshold_minor?: number;
+  payees?: MarketingPayee[];
+  allowed_domains?: string[];
+  disclosure?: string;
+  limits?: Partial<Record<MarketingLimitKey, number>>;
+  feedback_ticket_status?: MarketingFeedbackTicketStatus;
+  improvement_assignee?: Record<string, any> | null;
+  /** marketing.approve_spend 가 있어야 바꿀 수 있다. */
+  payment_provider?: MarketingPaymentProvider;
+  payment_credential_id?: string | null;
+}
+
+export type MarketingCycleStatus = 'running' | 'completed' | 'timed_out' | 'cancelled' | 'failed';
+
+export interface MarketingCycle {
+  id: string;
+  campaign_id: string;
+  cycle_no: number;
+  status: MarketingCycleStatus;
+  trigger: string;
+  triggered_by: string;
+  room_id: string | null;
+  agent_key: string;
+  started_at: string;
+  completed_at: string | null;
+  summary: string;
+  next_actions: string[];
+  untrusted_items: number;
+  error: string;
+}
+
+export interface MarketingAuditEvent {
+  id: string;
+  campaign_id: string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  actor_type: 'user' | 'agent' | 'system' | 'public' | string;
+  actor_id: string;
+  actor_name: string;
+  summary: string;
+  detail: Record<string, any>;
+  created_at: string;
+}
+
+export type MarketingChannelKind = 'outreach' | 'email' | 'manual';
+export type MarketingChannelStatus = 'proposed' | 'awaiting_credential' | 'active' | 'paused' | 'rejected';
+
+/** 메일 채널 설정 — 비밀 값은 credential 에만 있고 여기에는 id 만 있다. */
+export interface MarketingEmailConfig {
+  credential_id: string;
+  from_name: string;
+  from_address: string;
+  reply_to: string;
+  postal_address: string;
+  contact_email: string;
+  ad_label: string;
+  list_name: string;
+  provider?: string;
+}
+
+export interface MarketingChannel {
+  id: string;
+  account_id: string;
+  campaign_id: string;
+  platform: string;
+  kind: MarketingChannelKind;
+  name: string;
+  target: string;
+  status: MarketingChannelStatus;
+  rationale: string;
+  audience_fit: string;
+  audience_size: number | null;
+  audience_observed_at: string | null;
+  evidence_urls: string[];
+  rules_summary: string;
+  rules_url: string;
+  guidelines: string;
+  outreach_channel_id: string | null;
+  email: MarketingEmailConfig | null;
+  proposed_by_type: string;
+  proposed_by_id: string;
+  proposed_by_name: string;
+  decided_by: string | null;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  decision_note: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** POST /api/marketing/channels/:id/approve · /connect 본문. */
+export interface MarketingChannelApproval {
+  mode: MarketingChannelKind;
+  outreach_channel_id?: string;
+  create_outreach?: { credential_id: string; rate_limit_per_hour?: number; collect_feedback?: boolean };
+  email?: Partial<MarketingEmailConfig>;
+  note?: string;
+}
+
+export type MarketingPostKind = 'post' | 'reply' | 'email';
+export type MarketingPostStatus = 'draft' | 'approved' | 'publishing' | 'sending' | 'published' | 'rejected' | 'failed';
+
+export interface MarketingPost {
+  id: string;
+  account_id: string;
+  campaign_id: string;
+  channel_id: string;
+  kind: MarketingPostKind;
+  title: string;
+  body: string;
+  /** 승인하면 실제로 나갈 본문(공개 문구 포함). */
+  preview_body: string;
+  final_body: string;
+  reply_to: string;
+  /**
+   * reddit/github 답글이 달릴 곳 — 서버가 그 스레드가 채널의 subreddit/repo 안에 있는지 확인한 것.
+   * 확인하지 않은 글(수동 채널 · 예전 행)은 `{}` 다. `title` 은 외부인이 쓴 글이라 글자로만 보여 준다.
+   */
+  reply_context?: { target?: string; permalink?: string; title?: string } | null;
+  target: string;
+  status: MarketingPostStatus;
+  rationale: string;
+  created_by_type: string;
+  created_by_name: string;
+  cycle_id: string | null;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  decision_note: string;
+  edited: boolean;
+  permalink: string;
+  published_at: string | null;
+  error: string;
+  link_codes: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MarketingEmailSend {
+  id: string;
+  post_id: string;
+  contact_id: string;
+  status: string;
+  attempts: number;
+  next_attempt_at: string | null;
+  provider_message_id: string;
+  error: string;
+  sent_at: string | null;
+}
+
+export interface MarketingPostSends {
+  counts: Record<string, number>;
+  sends: MarketingEmailSend[];
+}
+
+export interface MarketingBudgetChannelRow {
+  channel_id: string;
+  name: string;
+  platform: string;
+  status: MarketingChannelStatus;
+  allocation_minor: number | null;
+  allocation_id: string | null;
+  period_held_minor: number;
+  period_spent_minor: number;
+  period_available_minor: number | null;
+  spent_all_time_minor: number;
+}
+
+export interface MarketingBudgetSummary {
+  currency: string;
+  payment_provider: MarketingPaymentProvider;
+  caps: {
+    budget_total_minor: number;
+    budget_period: MarketingBudgetPeriod;
+    budget_period_minor: number;
+    max_transaction_minor: number;
+    dual_approval_threshold_minor: number;
+  };
+  period: { key: string; start: string | null; end: string | null };
+  total: { held: number; spent: number; cap: number; available: number };
+  period_usage: { held: number; spent: number; cap: number | null; available: number | null };
+  allocated_total_minor: number;
+  pending_allocations: number;
+  spend_counts: Record<string, number>;
+  channels: MarketingBudgetChannelRow[];
+  text: { total: string; period: string };
+}
+
+export type MarketingAllocationStatus = 'proposed' | 'active' | 'superseded' | 'rejected';
+
+export interface MarketingAllocation {
+  id: string;
+  campaign_id: string;
+  channel_id: string;
+  batch_id: string;
+  amount_minor: number;
+  amount_text: string;
+  currency: string;
+  status: MarketingAllocationStatus;
+  rationale: string;
+  proposed_by_type: string;
+  proposed_by_name: string;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  decision_note: string;
+  supersedes_id: string | null;
+  created_at: string;
+}
+
+export type MarketingSpendStatus =
+  | 'pending' | 'approved' | 'executing' | 'paid' | 'failed' | 'unknown' | 'denied' | 'expired' | 'cancelled';
+
+export interface MarketingSpendApproval {
+  user_id: string;
+  name: string;
+  at: string;
+}
+
+export interface MarketingLedgerEntry {
+  id: string;
+  campaign_id: string;
+  channel_id: string;
+  spend_request_id: string;
+  kind: 'reserve' | 'release' | 'capture' | 'refund';
+  amount_minor: number;
+  amount_text: string;
+  currency: string;
+  period_key: string;
+  actor_type: string;
+  actor_name: string;
+  note: string;
+  created_at: string;
+}
+
+export interface MarketingSpendRequest {
+  id: string;
+  account_id: string;
+  campaign_id: string;
+  channel_id: string;
+  amount_minor: number;
+  amount_text: string;
+  currency: string;
+  payee: string;
+  payee_ref: string;
+  purpose: string;
+  expected_outcome: string;
+  provider: MarketingPaymentProvider;
+  payload: Record<string, any>;
+  /** 승인 시 그대로 돌려보내야 하는 실행 내용의 해시(사람이 본 것 = 서버가 실행하는 것). */
+  payload_sha256: string;
+  /**
+   * 요청이 들어올 때 2인 승인 대상이었는가 — 그 뒤 임계값을 바꿔도 내려가지 않는다. 서버는 승인할 때
+   * 이것과 그때의 임계값 중 더 엄격한 쪽을 쓴다. 구버전 서버는 싣지 않는다.
+   */
+  dual_required?: boolean;
+  status: MarketingSpendStatus;
+  requested_by_type: string;
+  requested_by_name: string;
+  cycle_id: string | null;
+  approvals: MarketingSpendApproval[];
+  decided_by_name: string | null;
+  decided_at: string | null;
+  decision_note: string;
+  expires_at: string;
+  period_key: string;
+  executing_at: string | null;
+  paid_at: string | null;
+  provider_ref: string;
+  receipt_url: string;
+  provider_response: Record<string, any>;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  /** GET /spend-requests/:id 에만 실린다. */
+  ledger?: MarketingLedgerEntry[];
+}
+
+export interface MarketingReportMetrics {
+  clicks: number;
+  impressions: number;
+  views: number;
+  engagements: number;
+  replies: number;
+  signups: number;
+  conversions: number;
+  revenue_minor: number;
+  followers?: number;
+  subscribers?: number;
+}
+
+export interface MarketingReportRow {
+  posts_published: number;
+  metrics: MarketingReportMetrics;
+  spent_minor: number;
+  feedback: number;
+  inbound_items: number;
+  feedback_tickets: number;
+  derived: {
+    cpc_minor: number | null;
+    cost_per_signup_minor: number | null;
+    cost_per_conversion_minor: number | null;
+    ctr: number | null;
+    conversion_rate: number | null;
+    roas: number | null;
+  };
+}
+
+export interface MarketingReportChannel extends MarketingReportRow {
+  channel_id: string;
+  name: string;
+  platform: string;
+  kind: MarketingChannelKind;
+  status: MarketingChannelStatus;
+  allocation_minor: number | null;
+}
+
+export interface MarketingReport {
+  since: string;
+  until: string;
+  currency: string;
+  channels: MarketingReportChannel[];
+  totals: MarketingReportRow;
+  lines: string[];
+  caveats: string[];
+}
+
+export interface MarketingLink {
+  id: string;
+  campaign_id: string;
+  channel_id: string;
+  post_id: string;
+  code: string;
+  /** 공개 추적 주소. 서버에 AWB_PUBLIC_URL 이 없으면 null. */
+  url: string | null;
+  destination_url: string;
+  redirect_url: string;
+  label: string;
+  clicks: number;
+  created_by_type: string;
+  created_by_name: string;
+  created_at: string;
+}
+
+export interface MarketingMetric {
+  id: string;
+  campaign_id: string;
+  channel_id: string;
+  post_id: string;
+  link_id: string;
+  metric: string;
+  value: number;
+  source: string;
+  observed_at: string;
+  note: string;
+  recorded_by_type: string;
+  recorded_by_name: string;
+  created_at: string;
+}
+
+export interface MarketingMetricObservation {
+  metric: string;
+  value: number;
+  channel_id?: string;
+  observed_at?: string;
+  note?: string;
+}
+
+export type MarketingFeedbackCategory = 'bug' | 'feature_request' | 'question' | 'praise' | 'complaint' | 'other';
+export type MarketingFeedbackSentiment = 'positive' | 'neutral' | 'negative';
+
+export interface MarketingFeedback {
+  id: string;
+  campaign_id: string;
+  channel_id: string;
+  post_id: string;
+  source_url: string;
+  /** 외부인이 쓴 글 — 데이터로만 보여 준다. */
+  author: string;
+  content: string;
+  summary: string;
+  category: MarketingFeedbackCategory;
+  sentiment: MarketingFeedbackSentiment;
+  status: 'recorded' | 'ticketed' | 'capped' | string;
+  ticket_id: string | null;
+  recorded_by_type: string;
+  recorded_by_name: string;
+  cycle_id: string | null;
+  created_at: string;
+}
+
+/** 연결된 OutreachChannel 이 폴링으로 모은 글(outreach ingest 의 분류 · 티켓). */
+export interface MarketingCollectedFeedback {
+  id: string;
+  channel_id: string;
+  channel_name: string;
+  permalink: string;
+  author: string;
+  classification: string;
+  status: string;
+  ticket_id: string | null;
+  collected_at: string;
+}
+
+export interface MarketingFeedbackList {
+  recorded: MarketingFeedback[];
+  collected: MarketingCollectedFeedback[];
+}
+
+export interface MarketingFeedbackInput {
+  category: MarketingFeedbackCategory;
+  content: string;
+  source_url: string;
+  summary?: string;
+  sentiment?: MarketingFeedbackSentiment;
+  author?: string;
+  channel_id?: string;
+}
+
+export type MarketingContactStatus = 'subscribed' | 'unsubscribed' | 'erased';
+export type MarketingConsentMethod = 'signup_form' | 'checkout' | 'event' | 'import' | 'other';
+
+export interface MarketingContact {
+  id: string;
+  account_id: string;
+  /** erase 하면 null(억제용 해시만 남는다). */
+  email: string | null;
+  name: string;
+  lists: string[];
+  status: MarketingContactStatus;
+  consent_method: MarketingConsentMethod | string;
+  consent_source: string;
+  consent_at: string;
+  consent_text_version: string;
+  night_consent: boolean;
+  country: string;
+  timezone: string;
+  unsubscribed_at: string | null;
+  unsubscribe_source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MarketingContactList {
+  total: number;
+  contacts: MarketingContact[];
+}
+
+/** POST /api/marketing/contacts/import 의 연락처 한 명. */
+export interface MarketingContactImportRow {
+  email: string;
+  name?: string;
+  lists?: string[];
+  consent_method: MarketingConsentMethod;
+  consent_source: string;
+  consent_at: string;
+  consent_text_version?: string;
+  consent_ip?: string;
+  night_consent?: boolean;
+  country?: string;
+  timezone?: string;
+}
+
+export interface MarketingContactImportResult {
+  created: number;
+  updated: number;
+  suppressed: number;
+  invalid: Array<{ index: number; email: string; error: string }>;
+}
+
+/** OutreachChannel 목록(GET /api/outreach-channels) 중 채널 연결에 필요한 부분. */
+export interface OutreachChannelSummary {
+  id: string;
+  account_id: string;
+  kind: string;
+  name: string;
+  targets: string[];
+  has_credential: boolean;
+  enabled: boolean;
+}
+
+/**
+ * GET /api/marketing/inbox — 접근 가능한 계정의 캠페인마다 사람을 기다리는 수. `actionable` · `total` 은 **이 사용자가
+ * 처리할 수 있는 것**만 센다(manage: 채널 제안 + 초안 · 기록 대기 게시물, approve_spend: 편성 제안 + 지출 대기 +
+ * 결과 불명 + 수동 결제 기록 대기). actionable 이 0 인 캠페인은 목록에 없다.
+ */
+export interface MarketingInboxCampaignCounts {
+  campaign_id: string;
+  account_id: string;
+  name: string;
+  channels_proposed: number;
+  posts_draft: number;
+  allocations_proposed: number;
+  spend_pending: number;
+  spend_unknown: number;
+  manual_awaiting_payment: number;
+  actionable: number;
+}
+
+export interface MarketingInboxSummary {
+  total: number;
+  campaigns: MarketingInboxCampaignCounts[];
+}
+
+/** `marketing_update` SSE — UI 전용. 내용은 싣지 않으니 화면이 REST 로 다시 읽는다. */
+export interface MarketingUpdateEvent {
+  event_type: 'marketing_update';
+  account_id: string;
+  campaign_id: string;
+  kind: string;
+  entity_id: string;
+  action: string;
+  timestamp: string;
+}

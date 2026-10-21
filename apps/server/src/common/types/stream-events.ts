@@ -55,7 +55,8 @@ export type StreamEventType =
   | 'terminal_output'        // Terminal: PTY 출력 청크 — UI 전용, driver 만
   | 'cli_memory_request'     // CLI Memory: 서버 → agent-manager 메모리 파일 RPC(scan/read/write/…) — 대상 agent 스코프
   | 'voice_announcement'     // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
-  | 'agent_session_proposal'; // Voice: operator 의 작업 제안이 생기거나 바뀌었다 — UI 전용, 승인할 사용자만
+  | 'agent_session_proposal' // Voice: operator 의 작업 제안이 생기거나 바뀌었다 — UI 전용, 승인할 사용자만
+  | 'marketing_update';      // Marketing: 캠페인이나 그 하위 객체(채널·게시물·지출 …)가 바뀌었다 — UI 전용, 계정 스코프
 
 export interface StreamEventScope {
   /** Legacy scope key — only `__trigger__`-style sentinels on flattened events still carry it. */
@@ -1187,4 +1188,19 @@ export interface VoiceAnnouncementPayload {
 export interface AgentSessionProposalPayload {
   proposal: SessionProposalView;
   reason: string;
+}
+
+// ─── Marketing (docs/marketing.md) ─────────────────────────────────────────
+
+/**
+ * UI 전용(그 계정에 접근할 수 있는 사용자). 무엇이 바뀌었는지만 싣는다 — 화면이 REST 로 다시 읽는다.
+ * 승인 대기 지출 · 게시물이 생기면 이것으로 사이드바 승인 수가 갱신된다. agent-manager 는 구독하지 않는다.
+ */
+export interface MarketingUpdatePayload {
+  account_id: string;
+  campaign_id: string;
+  /** MARKETING_AUDIT_ENTITY_TYPES */
+  kind: string;
+  entity_id: string;
+  action: string;
 }

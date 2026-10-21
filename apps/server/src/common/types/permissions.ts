@@ -32,6 +32,12 @@ export const PERMISSIONS = {
   // 음성(STT/TTS) — 외부 엔진을 부르는 유료 경로라 기본은 admin 전용이고, 필요한 사용자에게만 부여한다.
   // docs/voice-operator.md
   USE_VOICE: 'voice.use',
+  // Marketing — 캠페인 · 채널 · 게시물 승인 · 메일 연락처를 다룬다. 승인하면 회사 이름으로 외부에
+  // 글과 메일이 나가므로 기본은 admin 전용이다. docs/marketing.md
+  MANAGE_MARKETING: 'marketing.manage',
+  // 마케팅 예산 편성 · 지출 승인 · 결제 기록 — 실제 돈이 움직인다. 기본은 admin 전용이고,
+  // manage 와 따로 부여한다(캠페인을 운영하는 사람과 돈을 승인하는 사람을 나눌 수 있게).
+  APPROVE_MARKETING_SPEND: 'marketing.approve_spend',
 } as const;
 
 export type Permission = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -83,5 +89,7 @@ export const PERMISSION_LABELS: Record<string, { label: string; description: str
   [PERMISSIONS.USE_CLI_MEMORY]: { label: 'Use CLI Memory', description: 'Read, analyze and edit the memory files of LLM CLIs (CLAUDE.md, AGENTS.md, auto memory …) on Runtime Host machines — these steer every agent session there', group: 'Sessions' },
   [PERMISSIONS.USE_TERMINALS]: { label: 'Use Terminals', description: 'Open shell terminals on Runtime Host machines and run arbitrary commands there — effectively operator access to that machine', group: 'Sessions' },
   [PERMISSIONS.USE_AGENT_SESSIONS]: { label: 'Use Agent Sessions', description: 'Browse and drive CLI sessions (Claude Code / Codex / Hermes) on Runtime Host machines, including sessions already on those machines', group: 'Sessions' },
+  [PERMISSIONS.MANAGE_MARKETING]: { label: 'Manage Marketing', description: 'Run marketing campaigns: approve channels, posts and emails that go out under your name, and manage email contacts', group: 'Marketing' },
+  [PERMISSIONS.APPROVE_MARKETING_SPEND]: { label: 'Approve Marketing Spend', description: 'Approve budget allocations and payments requested by marketing agents, and record payment results — real money moves', group: 'Marketing' },
   [PERMISSIONS.USE_VOICE]: { label: 'Use Voice', description: 'Speak prompts and hear replies — audio goes to the configured speech-to-text / text-to-speech provider, which is billed per use', group: 'Sessions' },
 };
