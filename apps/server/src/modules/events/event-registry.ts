@@ -35,6 +35,7 @@ import {
   AgentManagerCommandPayload,
   ConsensusUpdatePayload,
   OrchestrationUpdatePayload,
+  MarketingUpdatePayload,
   TicketReadsClearedPayload,
   CliLoginProgressPayload,
   OntologyGraphProgressPayload,
@@ -1610,6 +1611,31 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'agent_session_proposal', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── marketing_update ─────────
+  // Marketing(docs/marketing.md) — 캠페인이나 그 하위 객체가 바뀌었다는 신호. orchestration_update 와 같은
+  // user-only filter + account 스코프(events.controller 가 접근 가능한 계정만 통과시킨다). 내용은 싣지 않고
+  // 화면이 REST 로 다시 읽는다. agent-manager 는 구독하지 않는다 — SSE contract 무관.
+  {
+    eventType: 'marketing_update',
+    emitterEvent: 'marketing_update',
+    map(event: any) {
+      const payload: MarketingUpdatePayload = {
+        account_id: event.account_id || '',
+        campaign_id: event.campaign_id || '',
+        kind: event.kind || '',
+        entity_id: event.entity_id || '',
+        action: event.action || '',
+      };
+      return {
+        payload,
+        scope: { account_id: event.account_id || undefined },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (_env, identity) => identity.type === 'user',
+    flatten: (env) => ({ event_type: 'marketing_update', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
 ];

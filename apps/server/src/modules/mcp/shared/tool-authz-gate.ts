@@ -240,6 +240,14 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   resume_interrupted_session: 'full',
   withdraw_session_prompt_proposal: 'full',
   list_session_prompt_proposals: 'full',
+
+  // Marketing(docs/marketing.md) — 캠페인 에이전트의 표면. 전부 'caller': 핸들러(marketing-tools.ts)가
+  // DB-backed caller 와 캠페인 **소유 계정** 접근(callerCanAccessAccount)을 직접 검사하고, 상태 ·
+  // capability · 일일 상한은 MarketingAgentService 가 본다(런북 (d)). 'full' 로 올리지 않는 이유:
+  // 캠페인 사이클은 그 계정의 실행 키로 돈다. 그리고 이 툴들은 제안 · 기록만 하고 돈 · 외부 발신은
+  // 사람이 REST 로 승인할 때만 일어난다 — 승인 툴은 존재하지 않는다.
+  list_marketing_campaigns: 'caller',
+  get_marketing_campaign: 'caller',
 };
 
 /**

@@ -456,6 +456,9 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   resume_interrupted_session: 'non-ticket',
   withdraw_session_prompt_proposal: 'non-ticket',
   list_session_prompt_proposals: 'non-ticket',
+  // Marketing(서버 marketing-tools.ts, docs/marketing.md) — 캠페인 조회. 티켓을 만들지도 바꾸지도 않는다.
+  list_marketing_campaigns: 'read',
+  get_marketing_campaign: 'read',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
   start_security_run: 'non-ticket',

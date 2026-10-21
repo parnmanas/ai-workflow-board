@@ -104,6 +104,8 @@ test/manager-drift-monitor-behavior.test.mjs
 test/manager-installed-version-heartbeat.test.mjs
 test/manager-restart-resume.test.mjs
 test/manager-update-approval-heartbeat.test.mjs
+test/marketing-campaigns-http.test.mjs
+test/marketing-logic.test.mjs
 test/mcp-harness-marker-sanitizer.test.mjs
 test/mcp-server-orphan-leak-guard.test.mjs
 test/mcp-session-shutdown-close.test.mjs

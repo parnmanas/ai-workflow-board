@@ -34,6 +34,7 @@ import { SecurityProfileService } from '../security/security-profile.service';
 import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
 import { AutomationScheduleService } from '../automation-schedule/automation-schedule.service';
+import { MarketingAgentService } from '../marketing/marketing-agent.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
 import { TicketService } from '../tickets/ticket.service';
@@ -176,6 +177,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // 작업 제안 — operator 가 다른 세션에 시킬 일을 제안하고, 사용자 승인 뒤 보낸다(VoiceModule).
     private readonly operatorProposalService: OperatorProposalService,
     private readonly interruptedSessionsService: InterruptedSessionsService,
+    // Marketing(docs/marketing.md) — marketing-tools.ts 의 캠페인 에이전트 표면.
+    private readonly marketingAgentService: MarketingAgentService,
   ) {}
 
   onModuleInit() {
@@ -280,6 +283,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       operatorDecisionService: this.operatorDecisionService,
       operatorProposalService: this.operatorProposalService,
       interruptedSessionsService: this.interruptedSessionsService,
+      marketingAgentService: this.marketingAgentService,
     };
   }
 

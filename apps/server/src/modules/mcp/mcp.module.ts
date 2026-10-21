@@ -19,6 +19,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { OntologyModule } from '../ontology/ontology.module';
 import { VoiceModule } from '../voice/voice.module';
 import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
+import { MarketingModule } from '../marketing/marketing.module';
 
 @Module({
   imports: [
@@ -58,6 +59,8 @@ import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
     VoiceModule,
     // AgentSessionsService — operator 세션의 MCP 연결을 알아본다(새 세션의 참조값 → 세션 id).
     AgentSessionsModule,
+    // MarketingAgentService — marketing-tools.ts(docs/marketing.md).
+    MarketingModule,
   ],
   controllers: [McpController],
 })

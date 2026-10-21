@@ -54,6 +54,7 @@ import type { SecurityProfileService } from '../../security/security-profile.ser
 import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import type { AutomationScheduleService } from '../../automation-schedule/automation-schedule.service';
+import type { MarketingAgentService } from '../../marketing/marketing-agent.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
 import { TicketService } from '../../tickets/ticket.service';
@@ -232,6 +233,9 @@ export interface ToolContext {
   // 재시작으로 끊긴 작업(docs/voice-operator.md) — operator 가 끊긴 세션을 고정 문구로 잇는다. 같은 이유로
   // standalone context 에는 없다.
   interruptedSessionsService?: InterruptedSessionsService;
+  // Marketing(docs/marketing.md) — 캠페인 에이전트의 MCP 표면(marketing-tools.ts). 사이클 · 승인 · 외부 발신이
+  // NestJS 프로세스의 서비스에 있으므로 standalone context 에는 없다 — 도구가 그 사유로 거절한다.
+  marketingAgentService?: MarketingAgentService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;
