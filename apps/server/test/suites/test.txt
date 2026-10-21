@@ -121,6 +121,7 @@ test/mcp-session-store-reconnect.test.mjs
 test/mcp-standalone-http-auth.test.mjs
 test/mcp-tool-authz.test.mjs
 test/mcp-tool-schema-budget.test.mjs
+test/mcp-work-ownership.test.mjs
 test/memory-metrics-observability.test.mjs
 test/mention-dispatch-profile.test.mjs
 test/mention-viewport-read.test.mjs

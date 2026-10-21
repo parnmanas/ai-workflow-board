@@ -85,6 +85,7 @@ import type { DataSource } from 'typeorm';
 import { err } from './helpers';
 import { getCallerAgent, type McpAgentContext } from './session-auth';
 import { requireFullScopeCaller } from './authz';
+import { checkToolOwnership } from './tool-ownership';
 
 export type AuthzTier = 'full' | 'caller';
 
@@ -432,15 +433,18 @@ export function installToolAuthzGate(server: McpServer, dataSource: DataSource):
     const handler = args[lastIndex];
     const tier = typeof name === 'string' ? resolveAuthzTier(name) : null;
 
-    if (!tier || typeof handler !== 'function') {
+    if (typeof name !== 'string' || typeof handler !== 'function') {
       return originalTool(...args);
     }
 
     const gatedHandler = async (...handlerArgs: unknown[]) => {
       const extra = (handlerArgs[handlerArgs.length - 1] || {}) as { sessionId?: string };
       const caller = getCallerAgent(extra);
-      const gateError = await checkAuthzTier(tier, dataSource, caller);
+      const gateError = tier ? await checkAuthzTier(tier, dataSource, caller) : null;
       if (gateError) return err(gateError);
+      const input = handlerArgs.length > 1 ? handlerArgs[0] as Record<string, any> : {};
+      const ownershipError = await checkToolOwnership(dataSource, caller, name, input || {});
+      if (ownershipError) return err(ownershipError);
       return (handler as (...a: unknown[]) => unknown)(...handlerArgs);
     };
 

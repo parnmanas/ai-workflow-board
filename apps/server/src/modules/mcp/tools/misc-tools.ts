@@ -10,6 +10,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Channel } from '../../../entities/Channel';
 import { ok, err } from '../shared/helpers';
+import { getCallerAgent } from '../shared/session-auth';
+import { resolveCallerAccountId } from '../shared/authz';
 import type { ToolContext } from './context';
 
 export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
@@ -19,10 +21,12 @@ export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_channels',
-    'List all notification channels (Discord etc.)',
+    'List notification channels in the caller account (Discord etc.)',
     {},
-    async () => {
-      const channels = await dataSource.getRepository(Channel).find({ order: { name: 'ASC' } });
+    async (_args, extra: { sessionId?: string }) => {
+      const accountId = await resolveCallerAccountId(dataSource, getCallerAgent(extra));
+      if (!accountId) return err('Account scope is required');
+      const channels = await dataSource.getRepository(Channel).find({ where: { account_id: accountId }, order: { name: 'ASC' } });
       const masked = channels.map(ch => ({
         ...ch,
         bot_token: ch.bot_token ? '***' + ch.bot_token.slice(-4) : '',
@@ -44,10 +48,12 @@ export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
       notify_on_update: z.number().optional().default(1).describe('Notify on updates'),
       notify_on_comment: z.number().optional().default(1).describe('Notify on comments'),
     },
-    async ({ name, type, bot_token, channel_id, is_active, notify_on_status_change, notify_on_update, notify_on_comment }) => {
+    async ({ name, type, bot_token, channel_id, is_active, notify_on_status_change, notify_on_update, notify_on_comment }, extra: { sessionId?: string }) => {
+      const accountId = await resolveCallerAccountId(dataSource, getCallerAgent(extra));
+      if (!accountId) return err('Account scope is required');
       const channelRepo = dataSource.getRepository(Channel);
       const channel = await channelRepo.save(channelRepo.create({
-        name, type, bot_token, channel_id, is_active,
+        account_id: accountId, name, type, bot_token, channel_id, is_active,
         notify_on_status_change, notify_on_update, notify_on_comment,
       }));
       return ok({ ...channel, bot_token: channel.bot_token ? '***' + channel.bot_token.slice(-4) : '' });

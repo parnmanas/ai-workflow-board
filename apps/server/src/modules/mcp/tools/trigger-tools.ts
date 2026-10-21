@@ -8,11 +8,13 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { sinceBoundaryParam } from '../../../common/created-at-since-param';
 import { ActivityLog } from '../../../entities/ActivityLog';
 import { Ticket } from '../../../entities/Ticket';
-import { ok } from '../shared/helpers';
+import { ok, err } from '../shared/helpers';
 import { parseTags } from '../../tickets/ticket.service';
 import { getCallerAgent } from '../shared/session-auth';
+import { resolveCallerAccountId } from '../shared/authz';
 import type { ToolContext } from './context';
 
 export function registerTriggerTools(server: McpServer, ctx: ToolContext): void {
@@ -22,7 +24,7 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
     'subscribe_events',
     'Subscribe to ticket events. Returns recent events since the given cursor (ISO timestamp or event ID). Events include ticket creation, updates, moves, comments, and agent assignments. Poll periodically to receive updates.',
     {
-      account_id: z.string().optional().describe('Filter events by account (omit for all)'),
+      account_id: z.string().optional().describe('Account (defaults to the caller account)'),
       tags: z.array(z.string()).optional().describe('Only events of tickets carrying every one of these tags'),
       since: z.string().optional().describe('ISO timestamp or activity log ID cursor — returns events after this point. Omit for last 10 minutes.'),
       limit: z.number().optional().default(50).describe('Max events to return'),
@@ -30,6 +32,8 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
     },
     async ({ account_id, tags, since, limit, assigned_to_me }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
+      const accountId = await resolveCallerAccountId(dataSource, caller);
+      if (!accountId || (account_id && account_id !== accountId)) return err('Account access denied');
       const repo = dataSource.getRepository(ActivityLog);
 
       let query = repo.createQueryBuilder('a')
@@ -39,23 +43,24 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
       if (since) {
         const sinceDate = new Date(since);
         if (!isNaN(sinceDate.getTime())) {
-          query = query.where('a.created_at > :since', { since: sinceDate.toISOString() });
+          query = query.where('a.created_at > :since', { since: sinceBoundaryParam(dataSource, sinceDate) });
         } else {
-          const ref = await repo.findOne({ where: { id: parseInt(since) as any } });
+          const ref = await repo.findOne({ where: { id: parseInt(since) as any, account_id: accountId } });
           if (ref) {
-            query = query.where('a.created_at > :since', { since: ref.created_at });
+            query = query.where('a.created_at > :since', { since: sinceBoundaryParam(dataSource, ref.created_at) });
           }
         }
       } else {
-        const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+        const tenMinAgo = sinceBoundaryParam(dataSource, new Date(Date.now() - 10 * 60 * 1000));
         query = query.where('a.created_at > :since', { since: tenMinAgo });
       }
 
+      query.andWhere('a.account_id = :accountId', { accountId });
       let events = await query.getMany();
 
       if (account_id || (tags && tags.length)) {
         const qb = dataSource.getRepository(Ticket).createQueryBuilder('t').select(['t.id', 't.parent_id', 't.tags']);
-        if (account_id) qb.where('t.account_id = :account', { account: account_id });
+        qb.where('t.account_id = :account', { account: accountId });
         const rows = await qb.getMany();
         const wanted = (tags || []).map((t) => t.toLowerCase());
         const rootOk = new Set(rows

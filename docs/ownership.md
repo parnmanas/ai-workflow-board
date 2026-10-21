@@ -42,7 +42,10 @@ Organization membership is reserved for a future implementation, without
 reviving workspace selectors or legacy role tuples.
 
 Lists, raw attachments, activity feeds, artifact references and SSE check the
-same account boundary. Operator registrations and report routing are account
+same account boundary. The common MCP registration gate validates supplied
+account IDs and stored ticket, comment, attachment and linked-object ownership
+before any handler runs, independently of API-key capability. MCP event polling
+and notification channels also default to the caller account. Operator registrations and report routing are account
 bound. MCP runtime keys cannot create, alter or delete login users; the human
 user-administration UI manages those identities. Disabling a user preserves
 its work; deleting a user that owns an Account is rejected.
