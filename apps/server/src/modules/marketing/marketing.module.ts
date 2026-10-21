@@ -48,6 +48,8 @@ import { MarketingEmailService } from './marketing-email.service';
 import { MarketingContactsController } from './marketing-contacts.controller';
 import { MarketingCycleService } from './marketing-cycle.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { MarketingInboxService } from './marketing-inbox.service';
+import { MarketingInboxController } from './marketing-inbox.controller';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -73,6 +75,7 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
   controllers: [
     MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController,
     MarketingAnalyticsController, MarketingPublicController, MarketingFeedbackController, MarketingContactsController,
+    MarketingInboxController,
   ],
   providers: [
     MarketingAuditService,
@@ -88,6 +91,7 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
     MarketingEmailService,
     MarketingAgentService,
     MarketingCycleService,
+    MarketingInboxService,
     AuthGuard,
     PermissionGuard,
   ],

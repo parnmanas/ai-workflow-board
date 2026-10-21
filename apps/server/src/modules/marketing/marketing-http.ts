@@ -46,3 +46,16 @@ export function assertCanChangeMoneySettings(req: Request, body: Record<string, 
     throw marketingError(403, `Permission required: ${PERMISSIONS.APPROVE_MARKETING_SPEND} to change ${touched.join(', ')} (money settings)`);
   }
 }
+
+/** 보기 — 캠페인 운영자(manage)나 돈 승인자(approve_spend) 중 하나면 된다. 승인자도 무엇을 승인하는지 봐야 한다. */
+export function assertCanViewMarketing(req: Request): void {
+  const user = (req as any).currentUser as { role?: string; permissions?: string[] } | undefined;
+  const ok = !!user && [PERMISSIONS.MANAGE_MARKETING, PERMISSIONS.APPROVE_MARKETING_SPEND]
+    .some((p) => hasPermission(user.role || '', user.permissions || [], p));
+  if (!ok) throw marketingError(403, `Permission required: ${PERMISSIONS.MANAGE_MARKETING} or ${PERMISSIONS.APPROVE_MARKETING_SPEND}`);
+}
+
+export function userHas(req: Request, permission: string): boolean {
+  const user = (req as any).currentUser as { role?: string; permissions?: string[] } | undefined;
+  return !!user && hasPermission(user.role || '', user.permissions || [], permission);
+}

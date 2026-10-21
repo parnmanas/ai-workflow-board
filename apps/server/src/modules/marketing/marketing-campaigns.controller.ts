@@ -10,7 +10,7 @@ import { MarketingCycleService } from './marketing-cycle.service';
 import { campaignToJson, auditToJson, cycleToJson } from './marketing-json';
 import { normalizeStatus } from './marketing-campaign.logic';
 import { errorStatus } from './marketing-errors';
-import { assertCanChangeMoneySettings, boundAccountId, listAccountIds, userActor } from './marketing-http';
+import { assertCanChangeMoneySettings, assertCanViewMarketing, boundAccountId, listAccountIds, userActor } from './marketing-http';
 
 /**
  * 캠페인 REST(docs/marketing.md). 목록은 접근 가능한 계정을 합치고, 상세 · 쓰기는
@@ -20,7 +20,6 @@ import { assertCanChangeMoneySettings, boundAccountId, listAccountIds, userActor
 @ApiTags('marketing')
 @Controller('api/marketing/campaigns')
 @UseGuards(PermissionGuard)
-@RequirePermission(PERMISSIONS.MANAGE_MARKETING)
 export class MarketingCampaignsController {
   constructor(
     private readonly campaigns: MarketingCampaignService,
@@ -31,6 +30,7 @@ export class MarketingCampaignsController {
   @Get()
   async list(@Req() req: Request, @Res() res: Response) {
     try {
+      assertCanViewMarketing(req);
       const rows = await this.campaigns.list(listAccountIds(req));
       return res.json(rows.map(campaignToJson));
     } catch (e: any) {
@@ -39,6 +39,7 @@ export class MarketingCampaignsController {
   }
 
   @Post()
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       assertCanChangeMoneySettings(req, body);
@@ -52,6 +53,7 @@ export class MarketingCampaignsController {
   @Get(':id')
   async get(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
+      assertCanViewMarketing(req);
       return res.json(campaignToJson(await this.campaigns.get(id, boundAccountId(req))));
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Campaign not found' });
@@ -59,6 +61,7 @@ export class MarketingCampaignsController {
   }
 
   @Patch(':id')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const { account_id: _ignored, ...patch } = body || {};
@@ -71,6 +74,7 @@ export class MarketingCampaignsController {
   }
 
   @Post(':id/status')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async setStatus(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const row = await this.campaigns.setStatus(id, boundAccountId(req), normalizeStatus(body?.status), userActor(req));
@@ -81,6 +85,7 @@ export class MarketingCampaignsController {
   }
 
   @Delete(':id')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async remove(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       await this.campaigns.remove(id, boundAccountId(req), userActor(req));
@@ -93,6 +98,7 @@ export class MarketingCampaignsController {
   @Get(':id/cycles')
   async listCycles(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.cycles.list(campaign)).map(cycleToJson));
     } catch (e: any) {
@@ -102,6 +108,7 @@ export class MarketingCampaignsController {
 
   /** "지금 실행" — 예약과 같은 경로(run budget · 실행 중 사이클 검사 포함). */
   @Post(':id/cycles/run')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async runCycle(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       return res.status(201).json(cycleToJson(await this.cycles.runNow(id, boundAccountId(req), userActor(req))));
@@ -119,6 +126,7 @@ export class MarketingCampaignsController {
     @Res() res: Response,
   ) {
     try {
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       const beforeDate = before ? new Date(before) : undefined;
       const rows = await this.audit.list(campaign.id, campaign.account_id, {

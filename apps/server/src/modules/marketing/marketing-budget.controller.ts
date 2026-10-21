@@ -3,21 +3,13 @@ import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '
 import type { Request, Response } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
-import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
+import { PERMISSIONS } from '../../common/types/permissions';
 import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingBudgetService } from './marketing-budget.service';
 import { MarketingSpendService } from './marketing-spend.service';
 import { allocationToJson, ledgerToJson, spendToJson } from './marketing-json';
-import { errorStatus, marketingError } from './marketing-errors';
-import { boundAccountId, userActor } from './marketing-http';
-
-/** 보기는 캠페인 운영자(manage)나 돈 승인자(approve_spend) 중 하나면 된다. */
-function assertCanView(req: Request): void {
-  const user = (req as any).currentUser as { role?: string; permissions?: string[] } | undefined;
-  const ok = !!user && [PERMISSIONS.MANAGE_MARKETING, PERMISSIONS.APPROVE_MARKETING_SPEND]
-    .some((p) => hasPermission(user.role || '', user.permissions || [], p));
-  if (!ok) throw marketingError(403, `Permission required: ${PERMISSIONS.MANAGE_MARKETING} or ${PERMISSIONS.APPROVE_MARKETING_SPEND}`);
-}
+import { errorStatus } from './marketing-errors';
+import { assertCanViewMarketing, boundAccountId, userActor } from './marketing-http';
 
 /**
  * 예산 편성 · 지출 · 원장 REST(docs/marketing.md "예산 편성 · 집행 · 결제"). 돈을 움직이는 모든 경로는
@@ -37,7 +29,7 @@ export class MarketingBudgetController {
   @Get('campaigns/:id/budget')
   async summary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
-      assertCanView(req);
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json(await this.budget.summary(campaign));
     } catch (e: any) {
@@ -48,7 +40,7 @@ export class MarketingBudgetController {
   @Get('campaigns/:id/allocations')
   async allocations(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
-      assertCanView(req);
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.budget.listAllocations(campaign)).map(allocationToJson));
     } catch (e: any) {
@@ -100,7 +92,7 @@ export class MarketingBudgetController {
   @Get('campaigns/:id/spend-requests')
   async listSpend(@Param('id') id: string, @Query('status') status: string, @Query('limit') limit: string, @Req() req: Request, @Res() res: Response) {
     try {
-      assertCanView(req);
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.spend.list(campaign, status || undefined, limit ? Number(limit) : 100)).map(spendToJson));
     } catch (e: any) {
@@ -111,7 +103,7 @@ export class MarketingBudgetController {
   @Get('spend-requests/:id')
   async getSpend(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
-      assertCanView(req);
+      assertCanViewMarketing(req);
       const row = await this.spend.get(id, boundAccountId(req));
       return res.json({ ...spendToJson(row), ledger: (await this.spend.ledgerFor(row.id)).map(ledgerToJson) });
     } catch (e: any) {
@@ -183,7 +175,7 @@ export class MarketingBudgetController {
   @Get('campaigns/:id/ledger')
   async ledger(@Param('id') id: string, @Query('limit') limit: string, @Req() req: Request, @Res() res: Response) {
     try {
-      assertCanView(req);
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.budget.listLedger(campaign, limit ? Number(limit) : 200)).map(ledgerToJson));
     } catch (e: any) {

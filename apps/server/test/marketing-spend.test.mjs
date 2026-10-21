@@ -83,10 +83,14 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   const marketer = await createUser(app, getDataSourceToken, { name: 'mkt-marketer', role: 'user' });
   await ds.getRepository('User').update(marketer.id, { permissions: JSON.stringify(['marketing.manage']) });
   await app.get(ReBACService).grant({ type: 'user', id: marketer.id }, 'member', { type: 'account', id: account.id });
+  const treasurer = await createUser(app, getDataSourceToken, { name: 'mkt-treasurer', role: 'user' });
+  await ds.getRepository('User').update(treasurer.id, { permissions: JSON.stringify(['marketing.approve_spend']) });
+  await app.get(ReBACService).grant({ type: 'user', id: treasurer.id }, 'member', { type: 'account', id: account.id });
   const auth = (user) => ({ Authorization: `Bearer ${app.get(AuthService).createSession(user.id)}`, 'X-Account-Id': account.id, 'Content-Type': 'application/json' });
   const A = auth(approverA);
   const B = auth(approverB);
   const M = auth(marketer);
+  const T = auth(treasurer);
   const api = (path, headers, init = {}) => call(`${base}/api/marketing${path}`, { headers, ...init });
   const post = (path, headers, body = {}) => api(path, headers, { method: 'POST', body: JSON.stringify(body) });
   const patch = (path, headers, body) => api(path, headers, { method: 'PATCH', body: JSON.stringify(body) });
@@ -174,6 +178,16 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   assert.equal(reqA.status, 'pending');
   assert.match(reqA.payload_sha256, /^[0-9a-f]{64}$/);
   assert.equal(reqA.payee_ref, 'ads-acct-7');
+  // 승인함 수 — 사람마다 자기가 처리할 수 있는 것만 센다. 돈 승인자는 manage 없이도 캠페인을 본다.
+  const inboxOf = async (h) => (await api('/inbox', h)).body;
+  assert.equal((await inboxOf(T)).total, 1, 'the treasurer sees the pending spend');
+  assert.equal((await inboxOf(M)).total, 0, 'a manager without approve_spend has nothing to decide here');
+  assert.equal((await inboxOf(A)).campaigns[0].spend_pending, 1);
+  assert.equal((await api('/campaigns', T)).status, 200, 'approvers can read campaigns');
+  assert.equal((await api(`/campaigns/${campaign.id}`, T)).status, 200);
+  assert.equal((await api(`/campaigns/${campaign.id}/channels`, T)).status, 200);
+  assert.equal((await post('/campaigns', T, { name: 'nope' })).status, 403, '… but cannot run campaigns');
+  assert.equal((await post(`/channels/${channel.id}/pause`, T)).status, 403);
   const dup = await ask({ amount_minor: 15000, dedupe_key: 'slot-a' });
   assert.equal(dup.duplicate, true);
   assert.equal(dup.spend_request.id, reqA.id);

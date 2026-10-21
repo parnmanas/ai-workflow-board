@@ -8,7 +8,7 @@ import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingChannelService } from './marketing-channel.service';
 import { channelToJson } from './marketing-json';
 import { errorStatus } from './marketing-errors';
-import { boundAccountId, userActor } from './marketing-http';
+import { assertCanViewMarketing, boundAccountId, userActor } from './marketing-http';
 
 /**
  * 채널 REST(docs/marketing.md "채널 탐색"). 승인 · 연결 · 거부 · 일시정지는 사람만 — MCP 에는 없다.
@@ -17,7 +17,6 @@ import { boundAccountId, userActor } from './marketing-http';
 @ApiTags('marketing')
 @Controller('api/marketing')
 @UseGuards(PermissionGuard)
-@RequirePermission(PERMISSIONS.MANAGE_MARKETING)
 export class MarketingChannelsController {
   constructor(
     private readonly campaigns: MarketingCampaignService,
@@ -27,6 +26,7 @@ export class MarketingChannelsController {
   @Get('campaigns/:id/channels')
   async list(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
+      assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
       return res.json((await this.channels.list(campaign)).map(channelToJson));
     } catch (e: any) {
@@ -36,6 +36,7 @@ export class MarketingChannelsController {
 
   /** 사람이 직접 채널을 추가한다(근거는 선택). 이후 승인은 같은 approve 로. */
   @Post('campaigns/:id/channels')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async create(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
@@ -47,6 +48,7 @@ export class MarketingChannelsController {
   }
 
   @Patch('channels/:id')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       return res.json(channelToJson(await this.channels.update(id, boundAccountId(req), body || {}, userActor(req))));
@@ -56,6 +58,7 @@ export class MarketingChannelsController {
   }
 
   @Post('channels/:id/approve')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async approve(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const accountId = boundAccountId(req);
@@ -68,6 +71,7 @@ export class MarketingChannelsController {
   }
 
   @Post('channels/:id/connect')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async connect(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const accountId = boundAccountId(req);
@@ -80,6 +84,7 @@ export class MarketingChannelsController {
   }
 
   @Post('channels/:id/reject')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async reject(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       return res.status(200).json(channelToJson(await this.channels.reject(id, boundAccountId(req), String(body?.note || ''), userActor(req))));
@@ -89,6 +94,7 @@ export class MarketingChannelsController {
   }
 
   @Post('channels/:id/pause')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async pause(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       return res.status(200).json(channelToJson(await this.channels.setPaused(id, boundAccountId(req), true, userActor(req))));
@@ -98,6 +104,7 @@ export class MarketingChannelsController {
   }
 
   @Post('channels/:id/resume')
+  @RequirePermission(PERMISSIONS.MANAGE_MARKETING)
   async resume(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       return res.status(200).json(channelToJson(await this.channels.setPaused(id, boundAccountId(req), false, userActor(req))));

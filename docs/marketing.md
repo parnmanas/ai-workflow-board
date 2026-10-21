@@ -357,7 +357,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | `marketing.manage` | 캠페인 CRUD, 채널 · 콘텐츠 승인, 추적 링크 · 지표 · 피드백, 연락처 | admin 전용 |
 | `marketing.approve_spend` | 돈 설정(한도 · 2인 임계값 · 수취인 · 통화 · 결제 방식) 변경, 편성 승인, 지출 승인 · 거부 · 취소, 결제 기록 · 대조 · 환불 | admin 전용 |
 
-예산 · 지출 · 원장 조회는 둘 중 하나만 있어도 된다.
+조회(캠페인 목록 · 상세 · 채널 · 사이클 · 감사 · 예산 · 지출 · 원장 · 승인함 수)는 둘 중 하나만 있어도 된다 — 돈 승인자도 무엇을 승인하는지 봐야 한다. 쓰기는 각 권한의 일만 한다.
 
 ## MCP 툴 (에이전트용)
 
@@ -389,6 +389,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 분석 | `GET /campaigns/:id/report`, `GET/POST /campaigns/:id/links`, `GET/POST /campaigns/:id/metrics` |
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
+| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 사이드바 배지가 쓴다. |
 
 공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`.
 
