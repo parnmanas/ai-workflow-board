@@ -3,15 +3,13 @@ import { api } from '../../api';
 import type { WorkflowFunction, WorkflowFunctionExecutor, WorkflowFunctionRisk, WorkflowFunctionRun } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { catalogOwnerLabel, globalRunAccount, type OwnerAccount } from './catalogOwner.logic';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface Props {
   globalMode?: boolean;
   catalogMode?: boolean;
   /** Owner of new Functions: an Account id, or null for Global. Never a list filter. */
   createAccountId?: string | null;
-  /** Accessible Accounts — owner names and the run Account choice. */
-  accounts?: OwnerAccount[];
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }
@@ -93,11 +91,11 @@ export default function FunctionManager({
   globalMode = false,
   catalogMode = false,
   createAccountId = null,
-  accounts = [],
   allScopes = false,
   canManageGlobal = false,
 }: Props) {
   const { showToast } = useToast();
+  const { currentAccountId } = useAuth();
   const [rows, setRows] = useState<WorkflowFunction[]>([]);
   const [runs, setRuns] = useState<WorkflowFunctionRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,9 +107,6 @@ export default function FunctionManager({
   const [ticketId, setTicketId] = useState('');
   const [runInputs, setRunInputs] = useState('{}');
   const [idempotencyKey, setIdempotencyKey] = useState('');
-  // Account a Global Function runs in; '' = not picked (see globalRunAccount).
-  const [pickedRunAccountId, setPickedRunAccountId] = useState('');
-  const runAccountForGlobal = globalRunAccount(pickedRunAccountId || null, createAccountId, accounts);
   const createScope = globalMode || createAccountId === null ? 'global' : 'account';
 
   const load = useCallback(async () => {
@@ -150,7 +145,7 @@ export default function FunctionManager({
     setEditing(null);
     setCreating(true);
     if (source) {
-      setDraft({ ...draftFrom(source), key: source.key, name: `${source.name} (account override)` });
+      setDraft({ ...draftFrom(source), key: source.key, name: `${source.name} (copy)` });
     } else {
       setDraft({ ...emptyDraft });
     }
@@ -184,8 +179,7 @@ export default function FunctionManager({
       return;
     }
     setSaving(true);
-    // An edit keeps the row's own owner; a new Function takes the owner picked
-    // for new items.
+    // Editing preserves the row's owner; creation uses the automatic default.
     const effectiveScope = editing?.scope || createScope;
     const payload = {
       scope: effectiveScope,
@@ -220,12 +214,6 @@ export default function FunctionManager({
   };
 
   const run = async (row: WorkflowFunction) => {
-    // An Account Function runs in its owner — the server refuses any other.
-    const runAccountId = row.account_id ?? runAccountForGlobal;
-    if (!runAccountId) {
-      showToast('No Account to run this Function in', 'error');
-      return;
-    }
     let inputs: Record<string, any>;
     try {
       inputs = JSON.parse(runInputs || '{}');
@@ -235,9 +223,15 @@ export default function FunctionManager({
     }
     setRunningId(row.id);
     try {
+      // A linked ticket supplies context for a shared Function; otherwise use
+      // the automatic default. Owned Functions always execute in their owner.
+      const runAccountId = row.account_id ?? (ticketId.trim()
+        ? (await api.getTicket(ticketId.trim())).account_id
+        : currentAccountId);
+      if (!runAccountId) throw new Error('No execution context is available for this Function');
       const result = await api.runFunction(row.id, {
         account_id: runAccountId,
-        ticket_id: ticketId || undefined,
+        ticket_id: ticketId.trim() || undefined,
         inputs,
         idempotency_key: idempotencyKey || undefined,
       });
@@ -255,29 +249,13 @@ export default function FunctionManager({
     <div style={{ display: 'grid', gap: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-          {globalMode
-            ? 'Global definitions are inherited by every account.'
-            : 'Account definitions override inherited Global Functions when their key is the same.'}
+          Define and run reusable automation.
         </div>
         <button style={button(true)} onClick={() => startCreate()}>New Function</button>
       </div>
 
       {!globalMode && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 2fr', gap: 10, background: tokens.colors.surfaceCard, padding: 14, borderRadius: 8 }}>
-          {/* An Account Function always runs in its owner; this picks the
-              Account a Global one runs in (its tickets, its run history). */}
-          <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-            Run Global Functions in
-            <select
-              style={{ ...control, marginTop: 5 }}
-              value={runAccountForGlobal ?? ''}
-              onChange={event => setPickedRunAccountId(event.target.value)}
-            >
-              {accounts.map(account => (
-                <option key={account.id} value={account.id}>{catalogOwnerLabel(account.id, accounts)}</option>
-              ))}
-            </select>
-          </label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 10, background: tokens.colors.surfaceCard, padding: 14, borderRadius: 8 }}>
           <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
             Ticket ID (optional)
             <input style={{ ...control, marginTop: 5 }} value={ticketId} onChange={event => setTicketId(event.target.value)} />
@@ -339,13 +317,6 @@ export default function FunctionManager({
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: tokens.colors.textPrimary, fontWeight: 700 }}>
                   <code>{row.key}</code>
-                  <span
-                    title="Owner"
-                    data-testid={`function-owner-${row.id}`}
-                    style={{ color: row.account_id === null ? tokens.colors.info : tokens.colors.accentLight, fontSize: 11 }}
-                  >
-                    {catalogOwnerLabel(row.account_id, accounts)}
-                  </span>
                   <span style={{ color: tokens.colors.textMuted, fontSize: 11 }}>v{row.version}</span>
                   {!row.enabled && <span style={{ color: tokens.colors.warning, fontSize: 11 }}>DISABLED</span>}
                 </div>
@@ -376,9 +347,8 @@ export default function FunctionManager({
           <div style={{ color: tokens.colors.textPrimary, fontWeight: 700, marginBottom: 8 }}>Recent runs</div>
           <div style={{ display: 'grid', gap: 5 }}>
             {runs.length === 0 ? <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>No Function runs yet.</div> : runs.map(runRow => (
-              <div key={runRow.id} style={{ display: 'grid', gridTemplateColumns: '1fr 160px 110px 180px', gap: 10, padding: '8px 10px', background: tokens.colors.surfaceSubtle, borderRadius: 6, fontSize: 12 }}>
+              <div key={runRow.id} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 180px', gap: 10, padding: '8px 10px', background: tokens.colors.surfaceSubtle, borderRadius: 6, fontSize: 12 }}>
                 <code style={{ color: tokens.colors.textStrong }}>{runRow.function_key}</code>
-                <span style={{ color: tokens.colors.textSecondary }}>{catalogOwnerLabel(runRow.account_id, accounts)}</span>
                 <span style={{ color: runRow.status === 'succeeded' ? tokens.colors.successLight : runRow.status === 'failed' ? tokens.colors.dangerLight : tokens.colors.warningLight }}>{runRow.status}</span>
                 <span style={{ color: tokens.colors.textMuted }}>{new Date(runRow.created_at).toLocaleString()}</span>
               </div>

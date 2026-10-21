@@ -1,12 +1,8 @@
-// 팀 Edit 모달 스코프 표시 회귀 테스트 (티켓 3e4765bb).
-//
-// 실버그는 `team.is_global && <div/>` 형태라 account 종속 팀(is_global===false)이면
-// 표현식이 false 로 평가되어 JSX 자체는 소스에 있어도 아무것도 렌더되지 않는다.
-// 소스 정규식 단언만으로는 이 버그를 잡지 못하므로(파일에 코드가 여전히 존재) 실제
-// DOM 마운트로 렌더 결과를 단언한다.
+// Teams never reintroduce the removed workspace/scope picker.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, React, act } from './helpers/jsdom.mjs';
+import { setupDom, mount, React, act, click } from './helpers/jsdom.mjs';
+import { api } from '../src/api.ts';
 import { TeamFormModal } from '../src/components/orchestration/OrchestrationTeamsPage.tsx';
 
 function baseTeam(overrides) {
@@ -33,22 +29,15 @@ function baseTeam(overrides) {
   };
 }
 
-async function mountModal(t, { team, accounts = [] }) {
+async function mountModal(t, { team }) {
   const dom = setupDom();
   const view = mount(
     React.createElement(TeamFormModal, {
       isOpen: true,
       accountId: 'ws-1',
-      // 로스터가 "Agent 고르기" 에서 "Runtime Host·CLI·모델·작업폴더 slot 선언" 으로
-      // 바뀌면서(ticket e1eeddca) 이 모달의 prop 도 agents/globalAgents →
-      // hosts/credentials/backendProfiles 로 바뀌었다. 이 테스트가 옛 prop 을 계속
-      // 넘기는 바람에 hosts 가 undefined 로 들어가 TeamSlotRuntimeFields 가
-      // `hosts.find` 에서 터졌다(main CI red). 스코프 표시만 보는 테스트라 세 목록은
-      // 비워도 충분하다 — 빈 배열은 "이 호스트에 아무것도 없다" 로 정상 렌더된다.
       hosts: [],
       credentials: [],
       backendProfiles: [],
-      accounts,
       team,
       onClose: () => {},
       onSaved: () => {},
@@ -64,31 +53,36 @@ async function mountModal(t, { team, accounts = [] }) {
   return view;
 }
 
-test('account 종속 팀 Edit은 Scope와 account 이름을 보여준다', async (t) => {
-  const team = baseTeam({ is_global: false, account_id: 'ws-1', owner_account_id: 'ws-1' });
-  const { container } = await mountModal(t, {
-    team,
-    accounts: [{ id: 'ws-1', name: 'Platform' }],
+for (const team of [
+  null,
+  baseTeam({ account_id: 'ws-1', owner_account_id: 'ws-1' }),
+  baseTeam({ is_global: true, owner_account_id: 'ws-1', allowed_account_ids: ['ws-1', 'ws-2'] }),
+]) {
+  test(`team ${team ? team.is_global ? 'shared edit' : 'owned edit' : 'creation'} has no workspace/scope controls`, async (t) => {
+    const { container } = await mountModal(t, { team });
+    assert.doesNotMatch(container.textContent, /Scope|This account|Global|Allowed accounts/);
+    for (const select of container.querySelectorAll('select')) {
+      assert.ok([...select.options].every((option) => !['ws-1', 'ws-2', 'global', 'account'].includes(option.value)));
+    }
   });
-  assert.match(container.textContent, /Scope/);
-  assert.match(container.textContent, /This account/);
-  assert.match(container.textContent, /Platform/);
-});
+}
 
-test('글로벌 팀 Edit은 account 종속 팀과 동일한 Scope 라벨/레이아웃으로 Global을 보여준다', async (t) => {
-  const team = baseTeam({ is_global: true, account_id: null, owner_account_id: 'ws-1' });
-  const { container } = await mountModal(t, { team, accounts: [] });
-  assert.match(container.textContent, /Scope/);
-  assert.match(container.textContent, /Global/);
-
-  const labels = [...container.querySelectorAll('label')].map((l) => l.textContent?.trim());
-  assert.ok(labels.includes('Scope'));
-});
-
-test('account 이름 해석에 실패해도 (undefined)나 빈 괄호를 출력하지 않는다', async (t) => {
-  const team = baseTeam({ is_global: false, account_id: 'ws-missing', owner_account_id: 'ws-missing' });
-  const { container } = await mountModal(t, { team, accounts: [] });
-  assert.match(container.textContent, /This account/);
-  assert.doesNotMatch(container.textContent, /\(undefined\)/);
-  assert.doesNotMatch(container.textContent, /This account \(\)/);
+test('editing a shared team leaves its ownership and allowed-account policy untouched', async (t) => {
+  const team = baseTeam({
+    is_global: true, owner_account_id: 'ws-1', allowed_account_ids: ['ws-1', 'ws-2'],
+    orchestrator_runtime: {
+      manager_agent_id: 'host-1', cli: 'claude', model: null,
+      runtime_config: { strategy: 'single', permission_mode: 'default' },
+    },
+  });
+  const original = api.updateOrchestrationTeam;
+  const calls = [];
+  api.updateOrchestrationTeam = async (id, body) => { calls.push({ id, body }); return team; };
+  t.after(() => { api.updateOrchestrationTeam = original; });
+  const { container } = await mountModal(t, { team });
+  await act(async () => { click([...container.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Save')); });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.account_id, 'ws-1');
+  assert.equal('is_global' in calls[0].body, false);
+  assert.equal('allowed_account_ids' in calls[0].body, false);
 });

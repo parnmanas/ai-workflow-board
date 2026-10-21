@@ -23,15 +23,6 @@ import {
   parseGoogleOAuthJson,
   type CustomRow,
 } from './credentialAgentEnv.logic';
-import {
-  agentEnvOwnerLabel,
-  catalogOwnerLabel,
-  credentialScopeOptions,
-  credentialUpdateScope,
-  ownerToSelectValue,
-  selectValueToOwner,
-  type OwnerAccount,
-} from './catalogOwner.logic';
 
 export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
@@ -192,7 +183,6 @@ export default function CredentialManager({
   globalMode = false,
   catalogMode = false,
   createAccountId = null,
-  accounts = [],
   allScopes = false,
   canManageGlobal = false,
 }: {
@@ -203,8 +193,6 @@ export default function CredentialManager({
    *  itself is never filtered by it — it shows every accessible Account's
    *  credentials plus Global ones. */
   createAccountId?: string | null;
-  /** Accessible Accounts — names the Owner column and the scope picker. */
-  accounts?: OwnerAccount[];
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }) {
@@ -236,8 +224,6 @@ export default function CredentialManager({
   const [formDescription, setFormDescription] = useState('');
   const [formProvider, setFormProvider] = useState('github');
   const [formFields, setFormFields] = useState<Record<string, string>>({});
-  // Edit dialog: the credential's owner after saving (null = Global).
-  const [formOwner, setFormOwner] = useState<string | null>(null);
   const [storedFieldPreviews, setStoredFieldPreviews] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string; fields?: string }>({});
   const [formAgentEnv, setFormAgentEnv] = useState(false);
@@ -356,7 +342,6 @@ export default function CredentialManager({
     setFormProvider('github');
     resetProviderInputs('github');
     setFormAgentEnv(false);
-    setFormOwner(effectiveCreateOwner);
     setFormErrors({});
     setEditCred(null);
     setShowForm(true);
@@ -376,7 +361,6 @@ export default function CredentialManager({
     setGoogleJson('');
     setFormAgentEnv(!!cred.agent_env);
     setFormEnvPrefix(cred.env_prefix || '');
-    setFormOwner(cred.account_id ?? null);
     setFormErrors({});
     setEditCred(cred);
     setShowForm(true);
@@ -393,10 +377,6 @@ export default function CredentialManager({
     ...Object.keys(formFields).filter((k) => formFields[k]),
     ...(isCustom ? customRows.filter((r) => r.key.trim() && r.value).map((r) => r.key.trim()) : []),
   ]));
-  // The owner the exposure will actually apply to once saved.
-  const agentEnvScopeLabel = agentEnvOwnerLabel(editCred ? formOwner : effectiveCreateOwner, accounts);
-  const scopeOptions = editCred ? credentialScopeOptions(editCred.account_id ?? null, accounts) : [];
-  const formOwnerLabel = catalogOwnerLabel(formOwner, accounts);
 
   const applyGoogleJson = () => {
     const parsed = parseGoogleOAuthJson(googleJson);
@@ -431,10 +411,9 @@ export default function CredentialManager({
     try {
       if (editCred) {
         await api.updateCredential(editCred.id, {
-          // account_id is the row's own owner (the ownership proof) for an
-          // Account credential and the destination when a global one is
-          // narrowed — see the server's update() doc comment.
-          ...credentialUpdateScope(editCred.account_id ?? null, formOwner),
+          // Editing preserves ownership; scope is not an editable form field.
+          scope: editCred.scope,
+          ...(editCred.account_id ? { account_id: editCred.account_id } : {}),
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -530,7 +509,6 @@ export default function CredentialManager({
               >
                 <th style={listHeadStyle('left')}>Name</th>
                 <th style={listHeadStyle('left')}>Provider</th>
-                {!globalMode && <th style={listHeadStyle('left')}>Owner</th>}
                 <th style={listHeadStyle('left')}>Description</th>
                 <th style={listHeadStyle('left')}>Fields</th>
                 <th style={listHeadStyle('left')}>Updated</th>
@@ -597,14 +575,6 @@ export default function CredentialManager({
                         </span>
                       )}
                     </td>
-                    {!globalMode && (
-                      <td
-                        style={{ ...listCellStyle('left'), whiteSpace: 'nowrap', color: tokens.colors.textSecondary }}
-                        data-testid={`credential-owner-${c.id}`}
-                      >
-                        {catalogOwnerLabel(c.account_id, accounts)}
-                      </td>
-                    )}
                     <td
                       style={{
                         ...listCellStyle('left'),
@@ -636,9 +606,9 @@ export default function CredentialManager({
                       {!globalMode && c.scope === 'global' && !canManageGlobal ? (
                         <span
                           style={{ fontSize: 11, color: tokens.colors.textMuted }}
-                          title="Global credentials require global management permission"
+                          title="You do not have permission to edit this credential"
                         >
-                          Inherited (read-only)
+                          Read-only
                         </span>
                       ) : (
                         <div style={{ display: 'inline-flex', gap: 6 }}>
@@ -696,43 +666,6 @@ export default function CredentialManager({
             </div>
           </div>
           <Input label="Description" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Optional note" />
-
-          {/* The owner of a new credential is the page-level "Account for new
-              item" picker; on an existing credential it is switchable, because
-              the alternative is re-pasting a secret and re-pointing every
-              binding by hand. A Global credential can be narrowed to any
-              accessible Account; an Account credential only widens to Global
-              (the server refuses Account → other Account — widen first, then
-              narrow). Non-admins get the control read-only: the Actions column
-              already hides Edit for inherited globals, so for them this row
-              only ever states which Account owns the row. */}
-          {editCred && !globalMode && (
-            <div>
-              <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Scope</label>
-              <select
-                value={ownerToSelectValue(formOwner)}
-                disabled={!canManageGlobal}
-                onChange={(e) => setFormOwner(selectValueToOwner(e.target.value))}
-                style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: canManageGlobal ? tokens.colors.textStrong : tokens.colors.textMuted, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
-              >
-                {scopeOptions.map((option) => (
-                  <option key={ownerToSelectValue(option.accountId)} value={ownerToSelectValue(option.accountId)}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                {!canManageGlobal
-                  ? 'Only an administrator can share a credential across Accounts.'
-                  : formOwner === null
-                  ? 'Readable from every Account on this instance.'
-                  : `Readable only from ${formOwnerLabel}. Agents, resources, CLI session settings and outreach channels elsewhere that use it must be re-pointed first.`}
-                {canManageGlobal && editCred.account_id
-                  ? ' To move it to another Account, widen it to Global first, then narrow it.'
-                  : ''}
-              </div>
-            </div>
-          )}
 
           {formProvider === 'google_oauth' && (
             <div>
@@ -871,7 +804,7 @@ export default function CredentialManager({
                 Expose to agents as environment variables
               </label>
               <div style={{ ...fieldHintStyle, marginTop: 4 }}>
-                Every agent run in {agentEnvScopeLabel} gets these on its CLI process — tickets, missions, chat and
+                Agent runs with access to this credential receive these variables — tickets, missions, chat and
                 sessions. A session that is already running picks a change up when it next starts.
               </div>
               {formAgentEnv && (

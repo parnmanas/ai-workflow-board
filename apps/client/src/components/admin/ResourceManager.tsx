@@ -8,7 +8,7 @@ import { Button, Input, Modal, ConfirmDialog } from '../common';
 import MediaLightbox from '../common/MediaLightbox';
 import { relativeTime } from '../../utils/time';
 import ResourceDetailPanel from './ResourceDetailPanel';
-import { catalogOwnerLabel, credentialsUsableBy, type OwnerAccount } from './catalogOwner.logic';
+import { credentialsUsableBy } from './catalogOwner.logic';
 
 // master/detail 레이아웃: 이 폭 미만이면 리스트만 보여주고 detail 은
 // 풀폭 오버레이로 전환한다(반응형). 24px 패딩 컨테이너 안에서 리스트(좌)와
@@ -42,8 +42,6 @@ interface ResourceManagerProps {
   catalogMode?: boolean;
   /** Owner of new Resources: an Account id, or null for Global. Never a list filter. */
   createAccountId?: string | null;
-  /** Accessible Accounts — owner names. */
-  accounts?: OwnerAccount[];
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }
@@ -51,7 +49,6 @@ interface ResourceManagerProps {
 export default function ResourceManager({
   catalogMode = false,
   createAccountId = null,
-  accounts = [],
   allScopes = false,
   canManageGlobal = false,
 }: ResourceManagerProps) {
@@ -407,7 +404,7 @@ export default function ResourceManager({
               whiteSpace: 'nowrap',
             }}
           >
-            {catalogMode ? `${catalogOwnerLabel(r.account_id, accounts)} · ` : ''}{typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
+            {typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
           </div>
         </div>
       </div>
@@ -448,7 +445,6 @@ export default function ResourceManager({
       onClose={isNarrow ? () => setSelectedId(null) : undefined}
       showToast={showToast}
       canManage={selectedResource.scope !== 'global' || canManageGlobal}
-      ownerLabel={catalogOwnerLabel(selectedResource.account_id, accounts)}
     />
   ) : (
     emptyDetail
@@ -742,7 +738,7 @@ export default function ResourceManager({
               >
                 <option value="">None</option>
                 {availableCredentials.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name} ({c.provider}, {catalogOwnerLabel(c.account_id, accounts)})</option>
+                  <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
                 ))}
               </select>
             </div>

@@ -18,13 +18,18 @@ choose the owner of new work.
 Canonical work list endpoints aggregate accessible accounts: tickets, projects,
 chat rooms, teams, missions, actions, automation schedules, QA and Security.
 The Function, Credential and Resource catalog pages do the same and add the
-Global rows; each row names its owning account (or Global), and new items take
-the owner picked on the page. An explicit `account_id` on those list endpoints
+Global rows. These pages have no account/scope picker or owner labels. New
+catalog items use Global automatically when the caller may manage Global items;
+otherwise they use the first accessible account. Existing items retain their
+ownership on edit. An explicit `account_id` on those list endpoints
 keeps the single-account view (that account + Global) that pickers binding one
 account's work rely on (see [catalog scopes](catalog-scopes.md)).
 Unread counters and mention inboxes use the same accessible ownership set.
 ID-addressed requests resolve the actual resource owner and check membership;
 a page's default account cannot grant access or change an existing owner.
+Teams also omit scope and allowed-account selectors: new teams use the automatic
+account, and editing preserves existing ownership and access policy. Shared
+Memory uses the automatic account without offering the old account list.
 Account administration distinguishes members from owners: members can read,
 owners or administrators can change settings and membership. Resource catalogs
 still have explicit Global (`account_id NULL`) and Account scopes. Global

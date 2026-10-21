@@ -13,7 +13,7 @@ import type {
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
-import { Button, ConfirmDialog, EmptyState, Input, Modal, Select } from '../common';
+import { Button, ConfirmDialog, EmptyState, Input, Modal } from '../common';
 import { LabeledTextarea } from './OrchestrationPage';
 import { TEAMS_CHANGED_EVENT } from '../workNavigation';
 import TeamSlotRuntimeFields, {
@@ -64,7 +64,6 @@ export default function OrchestrationTeamsPage() {
   const [hosts, setHosts] = useState<OrchestrationRuntimeHost[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [backendProfiles, setBackendProfiles] = useState<ClaudeBackendProfile[]>([]);
-  const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<OrchestrationTeam | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -80,18 +79,16 @@ export default function OrchestrationTeamsPage() {
     if (!accountId) return;
     setLoading(true);
     try {
-      const [teamList, hostList, credentialList, profileList, accountList] = await Promise.all([
+      const [teamList, hostList, credentialList, profileList] = await Promise.all([
         api.listOrchestrationTeams(accountId),
         api.listOrchestrationRuntimeHosts(accountId).catch(() => [] as OrchestrationRuntimeHost[]),
         api.listCredentials(accountId, { includeAllScopes: true }).catch(() => [] as Credential[]),
         api.listClaudeBackendProfiles().then((r) => r.profiles).catch(() => [] as ClaudeBackendProfile[]),
-        api.getAccounts().catch(() => [] as any[]),
       ]);
       setTeams(teamList);
       setHosts(hostList);
       setCredentials(credentialList);
       setBackendProfiles(profileList);
-      setAccounts(accountList.map((w: any) => ({ id: w.id, name: w.name })));
     } catch (e: any) {
       showToast(e?.message || 'Failed to load teams', 'error');
     } finally {
@@ -204,27 +201,6 @@ export default function OrchestrationTeamsPage() {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}>{team.name}</span>
-                      {team.is_global && (
-                        <span
-                          title={
-                            canWrite(team)
-                              ? 'Global team — visible from every account; this account created it and may edit it'
-                              : 'Global team — visible from every account; only the account that created it may edit it'
-                          }
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            letterSpacing: '0.04em',
-                            color: tokens.colors.accentLight,
-                            border: `1px solid ${tokens.colors.accent}55`,
-                            borderRadius: 4,
-                            padding: '1px 6px',
-                            textTransform: 'uppercase',
-                          }}
-                        >
-                          global
-                        </span>
-                      )}
                       {!team.enabled && (
                         <span style={{ fontSize: 10, color: tokens.colors.textMuted, textTransform: 'uppercase' }}>
                           disabled
@@ -244,7 +220,7 @@ export default function OrchestrationTeamsPage() {
                     variant="secondary"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'Only the account that created this global team may edit it'}
+                    title={canWrite(team) ? undefined : 'You do not have permission to edit this team'}
                     onClick={() => { setEditing(team); setShowForm(true); }}
                   >
                     Edit
@@ -253,7 +229,7 @@ export default function OrchestrationTeamsPage() {
                     variant="secondary"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'Only the account that created this global team may edit its roster'}
+                    title={canWrite(team) ? undefined : 'You do not have permission to edit this roster'}
                     onClick={() => setMemberTarget(team)}
                   >
                     Add member
@@ -262,7 +238,7 @@ export default function OrchestrationTeamsPage() {
                     variant="danger"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'Only the account that created this global team may delete it'}
+                    title={canWrite(team) ? undefined : 'You do not have permission to delete this team'}
                     onClick={() => setDeleteTarget(team)}
                   >
                     Delete
@@ -288,8 +264,7 @@ export default function OrchestrationTeamsPage() {
                     <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
                       · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel ·{' '}
                       {team.max_open_missions > 0
-                        ? `up to ${team.max_open_missions} self-created mission(s) open at once per account` +
-                          (team.is_global ? ` (× ${team.allowed_account_ids.length || 0} allowed account(s))` : '')
+                        ? `up to ${team.max_open_missions} self-created mission(s) open at once`
                         : 'agent-created missions disabled'}
                     </span>
                   </div>
@@ -357,7 +332,7 @@ export default function OrchestrationTeamsPage() {
                             variant="ghost"
                             size="sm"
                             disabled={!canWrite(team)}
-                            title={canWrite(team) ? undefined : 'Only the account that created this global team may edit its roster'}
+                            title={canWrite(team) ? undefined : 'You do not have permission to edit this roster'}
                             onClick={() => removeMember(team, m.id)}
                           >
                             Remove
@@ -381,7 +356,6 @@ export default function OrchestrationTeamsPage() {
         onHostRefreshed={replaceHost}
         credentials={credentials}
         backendProfiles={backendProfiles}
-        accounts={accounts}
         team={editing}
         onClose={() => setShowForm(false)}
         onSaved={(team) => {
@@ -471,7 +445,6 @@ export function TeamFormModal({
   credentials,
   backendProfiles,
   onHostRefreshed,
-  accounts,
   team,
   onClose,
   onSaved,
@@ -482,7 +455,6 @@ export function TeamFormModal({
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
   onHostRefreshed(host: OrchestrationRuntimeHost): void;
-  accounts: { id: string; name: string }[];
   team: OrchestrationTeam | null;
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
@@ -495,24 +467,9 @@ export function TeamFormModal({
   const [parallel, setParallel] = useState(3);
   const [openMissionsCap, setOpenMissionsCap] = useState(1);
   const [enabled, setEnabled] = useState(true);
-  // 스코프는 생성 시점에만 정해진다 — 기존 팀의 account_id는 절대 바뀌지 않으므로
-  // 이 상태는 새 팀(`!team`) UI에서만 의미가 있다.
-  const [isGlobal, setIsGlobal] = useState(false);
-  const [allowedAccountIds, setAllowedAccountIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
-  const effectiveGlobal = team ? team.is_global : isGlobal;
   const orchestratorProblem = slotDraftProblem(orchestrator);
-
-  // 편집 모달의 읽기 전용 스코프 표시용 — 생성 Select의 global 옵션 라벨과 문구를 맞춰
-  // 완료 조건("생성/편집 표기 통일")을 만족시킨다. account 이름 해석에 실패해도
-  // "(undefined)" 같은 값이 나오지 않도록 이름이 없으면 접미사를 붙이지 않는다.
-  const scopeLabel = (() => {
-    if (!team) return null;
-    if (team.is_global) return 'Global — visible to every account';
-    const wsName = accounts.find((w) => w.id === team.account_id)?.name;
-    return wsName ? `This account (${wsName})` : 'This account';
-  })();
 
   useEffect(() => {
     if (!isOpen) return;
@@ -522,14 +479,8 @@ export function TeamFormModal({
     setParallel(team?.max_parallel_steps ?? 3);
     setOpenMissionsCap(team?.max_open_missions ?? 1);
     setEnabled(team?.enabled ?? true);
-    setIsGlobal(team?.is_global ?? false);
-    setAllowedAccountIds(team?.allowed_account_ids ?? []);
     setOrchestrator(slotDraftFromRuntime(team?.orchestrator_runtime ?? null));
   }, [isOpen, team]);
-
-  const toggleAllowedAccount = (id: string) => {
-    setAllowedAccountIds((prev) => (prev.includes(id) ? prev.filter((w) => w !== id) : [...prev, id]));
-  };
 
   const submit = async () => {
     if (!name.trim()) {
@@ -552,7 +503,6 @@ export function TeamFormModal({
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
             enabled,
-            ...(team.is_global ? { allowed_account_ids: allowedAccountIds } : {}),
           })
         : await api.createOrchestrationTeam({
             account_id: accountId,
@@ -562,8 +512,7 @@ export function TeamFormModal({
             orchestrator_prompt: prompt.trim(),
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
-            is_global: isGlobal,
-            ...(isGlobal ? { allowed_account_ids: allowedAccountIds } : {}),
+            is_global: false,
           });
       showToast(team ? 'Team updated' : 'Team created', 'success');
       onSaved(saved);
@@ -594,42 +543,6 @@ export function TeamFormModal({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Input label="Team name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Platform squad" />
         <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
-        {team ? (
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
-            <label
-              style={{
-                fontSize: tokens.typography.fontSizeXs,
-                fontWeight: tokens.typography.fontWeightSemibold,
-                color: tokens.colors.textMuted,
-                textTransform: 'uppercase',
-                display: 'block',
-                marginBottom: tokens.spacing.xs,
-              }}
-            >
-              Scope
-            </label>
-            <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textStrong }}>{scopeLabel}</div>
-            <div
-              style={{
-                fontSize: tokens.typography.fontSizeXs,
-                color: tokens.colors.textSecondary,
-                marginTop: tokens.spacing.xs,
-              }}
-            >
-              Scope is fixed at creation — create a new team to use a different scope.
-            </div>
-          </div>
-        ) : (
-          <Select
-            label="Scope"
-            options={[
-              { value: 'account', label: 'This account' },
-              { value: 'global', label: 'Global — visible to every account' },
-            ]}
-            value={isGlobal ? 'global' : 'account'}
-            onChange={(e) => setIsGlobal(e.target.value === 'global')}
-          />
-        )}
         <SlotSection
           title="Orchestrator"
           subtitle="The agent that plans the mission and delegates its steps. It is created from this configuration — you do not have to make an agent first."
@@ -667,37 +580,9 @@ export function TeamFormModal({
           onChange={(e) => setOpenMissionsCap(Number(e.target.value))}
         />
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -8 }}>
-          How many missions this team&apos;s orchestrator may have open at once per account via
-          create_orchestration_mission. Set to 0 to forbid the orchestrator from self-creating missions for this
+          How many missions this team&apos;s orchestrator may keep open at once. Set to 0 to forbid the orchestrator from self-creating missions for this
           team entirely.
         </div>
-        {effectiveGlobal && (
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
-              Allowed accounts
-            </div>
-            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 8 }}>
-              Which account&apos;s run-budget this team&apos;s orchestrator may bill a self-created mission to.
-              Empty means the orchestrator cannot create missions at all until a account is checked here.
-            </div>
-            {accounts.length === 0 ? (
-              <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No accounts found.</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
-                {accounts.map((w) => (
-                  <label key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
-                    <input
-                      type="checkbox"
-                      checked={allowedAccountIds.includes(w.id)}
-                      onChange={() => toggleAllowedAccount(w.id)}
-                    />
-                    {w.name}
-                  </label>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         {team && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
@@ -961,7 +846,7 @@ function MemberEditButton({
         variant="ghost"
         size="sm"
         disabled={disabled}
-        title={disabled ? 'Only the account that created this global team may edit its roster' : undefined}
+        title={disabled ? 'You do not have permission to edit this roster' : undefined}
         onClick={() => setOpen(true)}
       >
         Edit

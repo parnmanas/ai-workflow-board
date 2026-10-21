@@ -6,6 +6,8 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 
 **Workspace 작업 개념은 제거됐다.** `/sessions`, `/tickets`, `/projects`, `/missions` 작업 페이지에는 소유 계정 전환기가 없다. `Account`는 소유권·ReBAC membership·credential·정책·예산의 관리 경계다. 목록과 unread는 접근 가능한 계정을 합치며, 상세·쓰기·artifact ref·SSE는 실제 객체의 소유 계정으로 권한을 검사한다. 새 독립 작업은 기본 접근 계정에, 선택한 Project/계정 소유 Team의 작업은 그 객체의 계정에 귀속된다. 계약: `docs/ownership.md`.
 
+**카탈로그도 workspace 선택 UI를 되살리지 않는다.** Resources·Credentials·Functions에서 예전 workspace 목록을 Account/Scope 선택기, Owner 열·상세, 실행 계정 선택기로 노출하지 말 것. 목록은 접근 가능한 객체를 합치고 생성 귀속은 자동으로 정한다(Global 쓰기 권한이 있으면 Global, 아니면 기본 접근 계정). 기존 객체의 수정·삭제는 실제 소유권을 유지한다. Teams의 Scope/허용 계정 선택, Shared Memory의 계정 선택도 두지 않는다. 새 팀과 공용 메모리는 기본 접근 계정으로 귀속하고 기존 팀의 접근 정책은 편집 시 보존한다. 계정 자체의 관리는 `/settings/ownership`에 둔다. 계약: `docs/catalog-scopes.md` → UI.
+
 **Core Value:** Agent가 MCP로 연결되어 티켓을 자율 처리하고, 큐에 쌓인 다음 티켓이 그 Agent 에게 자동으로 이어지는 연속 자동화 루프.
 
 ### Constraints

@@ -197,7 +197,7 @@ export function SharedMemoryPanel() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { currentAccountId, availableAccounts } = useAuth();
-  const [accountId, setAccountId] = useState(currentAccountId || availableAccounts[0]?.id || '');
+  const accountId = currentAccountId || availableAccounts[0]?.id || '';
   const [accountName, setAccountName] = useState('');
   const [saved, setSaved] = useState('');
   const [draft, setDraft] = useState('');
@@ -233,7 +233,7 @@ export function SharedMemoryPanel() {
       setShowDiff(false);
       showToast('Shared memory saved — the next ticket and mission step will carry it.', 'success');
     } catch (err: any) {
-      showToast(err?.status === 403 ? 'Only an owner of this account can change its shared memory.' : err?.message || 'Save failed', 'error');
+      showToast(err?.status === 403 ? 'You do not have permission to change this shared memory.' : err?.message || 'Save failed', 'error');
     } finally {
       setSaving(false);
     }
@@ -252,17 +252,12 @@ export function SharedMemoryPanel() {
       <Card style={{ display: 'grid', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
           <strong style={{ color: tokens.colors.textPrimary, fontSize: 15 }}>Shared memory</strong>
-          {availableAccounts.length > 1 && (
-            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} style={selectStyle} aria-label="Account">
-              {availableAccounts.map((a: any) => <option key={a.id} value={a.id}>{a.name || a.id.slice(0, 8)}</option>)}
-            </select>
-          )}
           <span style={{ marginLeft: 'auto', fontSize: 11.5, color: draft.length > SHARED_MEMORY_MAX ? tokens.colors.danger : tokens.colors.textMuted }}>
             {draft.length.toLocaleString()} / {SHARED_MEMORY_MAX.toLocaleString()} chars · ≈{estimateTokens(draft).toLocaleString()} tokens
           </span>
         </div>
         <div style={{ fontSize: 12.5, color: tokens.colors.textSecondary }}>
-          What every agent of this account should know — conventions, preferences, how you like work reported. Keep it short: it is read on every run.
+          Shared instructions for agents — conventions, preferences, how you like work reported. Keep it short: it is read on every run.
           <WhereItApplies items={[
             'Every ticket work order and mission step prompt (Knowledge section)',
             'Any agent via the AWB MCP tool get_knowledge — including Agent Sessions',

@@ -111,20 +111,28 @@ Function, Credential, Resource, Action, QA, Security, Schedule은 각각 독립�
 메뉴와 전역 URL(`/functions`, `/resources`, `/actions`, `/qa`, `/security`, `/schedules` 등)을
 사용한다. 중간 Automation Catalog 화면은 두지 않는다.
 
-계정 선택은 소유권 관리와 새 정의의 귀속을 정하는 곳에만 둔다. Functions,
-Credentials, Resources, Actions, Automation Schedules, QA Scenarios/Schedules,
+Functions, Credentials, Resources, Actions, Automation Schedules, QA Scenarios/Schedules,
 Security Profiles/Schedules의 목록은 접근 가능한 계정을 합친다(Global을 지원하는
 타입은 Global 행도 함께). QA Scenario는 Account 전용이며 합산 과정에서 ID로 중복을 제거한다.
-화면에 숨은 "현재 계정"은 없다 — Functions / Credentials / Resources는 행마다 소유
-계정 이름 또는 `Global`을 보여 주고(Owner), 상단 "Account for new item"은 Global(그
-타입의 Global 쓰기 권한이 있을 때만) + 접근 가능한 모든 계정을 이름으로 제시한다.
-기본값은 허용되면 Global, 아니면 첫 번째 접근 계정이다. Global을 지원하는 정의의
-생성 시 계정을 비워 두면 Global, 계정을 지정하면 Account 전용으로 저장한다.
-상세·수정·삭제는 선택한 계정이나 화면 경로 대신 해당 행의 실제 소유 계정으로
-요청하고 검사한다. Global Function의 실행 계정은 Functions 화면의 "Run Global
-Functions in"이 정한다(Account Function은 항상 소유 계정에서 실행). owner 표시 ·
-선택 규칙은 `apps/client/src/components/admin/catalogOwner.logic.ts` 한 곳에 있다
-(회귀: `apps/client/test/catalog-owner.test.mjs`).
+
+**작업·카탈로그 화면에는 계정/Scope 선택기와 Owner 표시를 두지 않는다.** 예전
+workspace 목록을 Account나 Scope라는 이름으로 다시 노출하지 않는다. 계정은
+내부 권한·소유 경계이며, 계정 관리 자체는 `/settings/ownership`에서만 다룬다.
+Functions / Credentials / Resources의 생성 소유권은 자동으로 정한다: 해당 타입의
+Global 쓰기 권한이 있으면 Global, 아니면 첫 번째 접근 계정이다. 이 기본값은
+목록 필터로 사용하지 않는다. 상세·수정·삭제는 해당 행의 실제 소유 계정으로
+요청하고 검사하며, 편집으로 소유권을 바꾸지 않는다. Credential 선택도 기존
+Resource가 사용할 수 있는 항목만 제시하지만 계정 이름은 표시하지 않는다.
+
+Account Function은 소유 계정에서 실행한다. Global Function은 연결한 Ticket의
+소유 계정, Ticket이 없으면 로그인 시 정한 기본 접근 계정에서 실행한다. 별도의
+실행 계정 선택은 없다. 내부 귀속 규칙은
+`apps/client/src/components/admin/catalogOwner.logic.ts`와 `FunctionManager.tsx`,
+회귀 검증은 `apps/client/test/catalog-owner.test.mjs`에서 다룬다.
+
+Teams도 생성·편집에서 Scope 및 허용 계정 목록을 노출하지 않는다. 새 팀은 기본
+접근 계정에 귀속되고 기존 팀의 소유권·허용 계정 정책은 편집으로 바뀌지 않는다.
+Shared Memory 역시 기본 접근 계정을 자동 사용하며 계정 선택기는 두지 않는다.
 
 기존 `/catalog` URL은 북마크 호환을 위해 Functions 메뉴로 redirect한다.
 
@@ -165,14 +173,11 @@ Outreach 채널을 전부 손으로 다시 지정해야 한다. 그래서
   실행이 그 env 를 받는다(`docs/agent-manager.md` → "Credential env for agent
   runs").
 
-생성 시 scope 는 페이지 상단 "Account for new item" 선택이 정하고,
-Edit 다이얼로그의 scope 선택기는 기존 행에만 나온다. 선택기는 위 규칙을 그대로
-보여 준다 — Global credential 에는 Global + 접근 가능한 모든 Account(고른 Account 가
-body `account_id` 로 가는 목적지), Account credential 에는 Global + 자기 소유
-Account 만(다른 Account 로 바로 옮기는 선택지는 없다). Account credential 의
-`account_id` 는 언제나 그 행의 소유 계정이다. 회귀 테스트는
-`apps/server/test/credentials-scope-switch.test.mjs` 와
-`apps/client/test/credential-scope-switch-ui.test.mjs`.
+이 API 계약은 기존 연동을 위해 유지한다. Credentials 화면은 생성·편집 모두
+Scope 선택기를 제공하지 않으며, 기존 credential 편집은 원래 소유권을 그대로
+보낸다. API의 권한·dependent 검증은 `apps/server/test/credentials-scope-switch.test.mjs`,
+화면에서 scope 선택이 없고 수정·삭제가 실제 소유권을 보존하는지는
+`apps/client/test/credential-scope-switch-ui.test.mjs`가 검증한다.
 
 다른 카탈로그 타입에 같은 것을 붙이고 싶어지면, 먼저 "새로 만들기가 왜 안
 되는가" 를 credential 의 비밀값만큼 구체적으로 답할 수 있어야 한다. 답이
