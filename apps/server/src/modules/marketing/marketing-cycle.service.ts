@@ -273,10 +273,15 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
       },
       rules: agentRules(campaign),
       limits: resolveLimits(campaign),
-      channels: overview.channels.map((c: any) => ({
-        id: c.id, name: c.name, platform: c.platform, kind: c.kind, status: c.status, target: c.target,
-        guidelines: c.guidelines, rules_summary: c.rules_summary, audience_count: c.audience_count,
-      })),
+      // 가이드 · 규칙 문장은 사람이 승인한(active · paused) 채널 것만 싣는다. 제안 단계의 문장은 에이전트가 외부 페이지를
+      // 읽고 옮긴 것이라 지시문의 신뢰 구역(비신뢰 블록 밖)에 둘 수 없다.
+      channels: overview.channels.map((c: any) => {
+        const reviewed = c.status === 'active' || c.status === 'paused';
+        return {
+          id: c.id, name: c.name, platform: c.platform, kind: c.kind, status: c.status, target: c.target,
+          guidelines: reviewed ? c.guidelines : '', rules_summary: reviewed ? c.rules_summary : '', audience_count: c.audience_count,
+        };
+      }),
       budget: [
         budget.text.total,
         budget.text.period,
