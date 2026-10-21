@@ -28,6 +28,7 @@ import {
 } from './workNavigation';
 import { useWorkNavLists } from '../hooks/useWorkNavLists';
 import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
+import { useMarketingInbox } from '../hooks/useMarketingInbox';
 import { useRoomActivity } from '../hooks/useRoomActivity';
 import { sessionActivity } from '../activity';
 import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
@@ -150,6 +151,10 @@ export default function Sidebar({
   const canUseSessions = hasPermission('agent_sessions.use');
   const canUseTerminals = hasPermission('terminals.use');
   const canUseMemory = hasPermission('cli_memory.use');
+  // Marketing(docs/marketing.md) — 캠페인 운영(manage) 또는 지출 승인(approve_spend) 중 하나면 행을 그린다.
+  // 배지는 이 사용자가 처리할 수 있는 승인 대기 수(서버 GET /api/marketing/inbox 가 계정을 합쳐 센다).
+  const canUseMarketing = hasPermission('marketing.manage') || hasPermission('marketing.approve_spend');
+  const marketingPending = useMarketingInbox(canUseMarketing).summary?.total ?? 0;
   // Knowledge — 공용·프로젝트 메모리와 skill 배정은 Agent 를 관리하는 사람이 다룬다(서버 MANAGE_AGENTS).
   const canManageKnowledge = hasPermission('admin.agents');
   // Operators(이름 붙은 Agent Session) — 등록돼 있으면 맨 위에서 어디서든 바로 연다. 머리의 스위치가
@@ -187,6 +192,16 @@ export default function Sidebar({
       // 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
       title: 'Work',
       items: [
+        ...(canUseMarketing
+          ? [{
+            key: 'marketing',
+            path: `${basePath}/marketing`,
+            label: 'Marketing',
+            icon: 'M',
+            badge: marketingPending,
+            badgeLabel: `승인 대기 ${marketingPending}건`,
+          }]
+          : []),
         // P4c-4: AI Agents 표면 제거 (Agent 테이블 삭제) — 실행 주체는
         // Sessions/Runtime Hosts 에서 본다.
         // Terminal(Runtime Host 셸) — 기본 admin 전용 권한이라 없는 사용자에게는 행 자체를

@@ -53,7 +53,8 @@ type StreamNamedEventType =
   | 'terminal_update'        // Terminal(Runtime Host 셸) — 라이브 터미널 상태 변경(driver 만)
   | 'terminal_output'        // Terminal — PTY 출력 청크(driver 만)
   | 'voice_announcement'     // Voice — 일이 끝났다는 음성 알림 한 줄(받는 사용자만)
-  | 'agent_session_proposal'; // Voice — operator 의 작업 제안이 생기거나 정해졌다(승인할 사용자만)
+  | 'agent_session_proposal' // Voice — operator 의 작업 제안이 생기거나 정해졌다(승인할 사용자만)
+  | 'marketing_update';      // Marketing — 캠페인이나 그 하위 객체가 바뀌었다(UI 전용, 화면이 REST 로 다시 읽는다)
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -276,6 +277,11 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // operator 의 작업 제안(docs/voice-operator.md "작업 제안") — 승인할 사용자에게만 온다.
       eventSource.addEventListener('agent_session_proposal', (event: MessageEvent) => {
         dispatch('agent_session_proposal', event.data);
+      });
+      // Marketing(docs/marketing.md) — 캠페인 · 채널 · 게시물 · 지출 … 이 바뀌었다는 신호만 온다(내용 없음).
+      // 열린 캠페인 화면이 campaign_id 로 거르고 REST 로 다시 읽는다.
+      eventSource.addEventListener('marketing_update', (event: MessageEvent) => {
+        dispatch('marketing_update', event.data);
       });
 
       eventSource.onerror = () => {
