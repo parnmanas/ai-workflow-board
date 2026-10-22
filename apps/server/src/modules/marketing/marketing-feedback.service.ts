@@ -193,9 +193,51 @@ export class MarketingFeedbackService {
       detail: { channel_id: channelId, source_url: sourceUrl },
     });
 
+    const result = await this.autoTicket(campaign, saved, actor);
+    this.audit.notify(campaign.account_id, campaign.id, 'feedback', saved.id, 'recorded');
+    return { ...result, duplicate: false };
+  }
+
+  /** Reclassify stored data without replacing the external text or its provenance. */
+  async classify(campaign: MarketingCampaign, id: string, body: Record<string, unknown>, actor: MarketingActor) {
+    const row = await this.get(id, campaign.account_id);
+    if (row.campaign_id !== campaign.id) throw marketingError(404, 'feedback not found');
+    const category = typeof body.category === 'string' ? body.category.trim() : '';
+    if (!(FEEDBACK_CATEGORIES as readonly string[]).includes(category)) {
+      throw marketingError(400, `category must be one of: ${FEEDBACK_CATEGORIES.join(', ')}`);
+    }
+    const sentiment = body.sentiment === undefined ? row.sentiment : String(body.sentiment).trim();
+    if (!(FEEDBACK_SENTIMENTS as readonly string[]).includes(sentiment)) {
+      throw marketingError(400, `sentiment must be one of: ${FEEDBACK_SENTIMENTS.join(', ')}`);
+    }
+    const summary = body.summary === undefined ? row.summary : typeof body.summary === 'string' ? body.summary.trim().slice(0, 120) : '';
+    if ((TICKETABLE_FEEDBACK as readonly string[]).includes(category) && !summary) {
+      throw marketingError(400, 'summary is required for bug/feature_request (it becomes the ticket title)');
+    }
+    await this.feedbackRepo.update({ id: row.id }, { category, summary, sentiment });
+    Object.assign(row, { category, summary, sentiment });
+    await this.audit.record({
+      accountId: campaign.account_id, campaignId: campaign.id, entityType: 'feedback', entityId: row.id,
+      action: 'feedback.classified', actor, summary: `피드백 분류: ${category}/${sentiment}`,
+      detail: { category, sentiment },
+    });
+    const result = await this.autoTicket(campaign, row, actor);
+    this.audit.notify(campaign.account_id, campaign.id, 'feedback', row.id, 'classified');
+    return result;
+  }
+
+  private async autoTicket(campaign: MarketingCampaign, saved: MarketingFeedback, actor: MarketingActor) {
+    if (saved.ticket_id) {
+      const ticket = await this.ticketRepo.findOneBy({ id: saved.ticket_id });
+      return { feedback: saved, ticket, note: 'already linked to a ticket' };
+    }
     let ticket: Ticket | null = null;
     let note = 'recorded';
-    const ticketable = (TICKETABLE_FEEDBACK as readonly string[]).includes(category as FeedbackCategory);
+    if (saved.status === 'capped') {
+      await this.feedbackRepo.update({ id: saved.id }, { status: 'recorded' });
+      saved.status = 'recorded';
+    }
+    const ticketable = (TICKETABLE_FEEDBACK as readonly string[]).includes(saved.category as FeedbackCategory);
     if (ticketable && hasCapability(campaign, 'feedback_to_product')) {
       const blocked = await this.capReason(campaign);
       if (blocked) {
@@ -210,8 +252,7 @@ export class MarketingFeedbackService {
     } else if (ticketable) {
       note = 'recorded (feedback_to_product is off — no ticket)';
     }
-    this.audit.notify(campaign.account_id, campaign.id, 'feedback', saved.id, 'recorded');
-    return { feedback: saved, duplicate: false, ticket, note };
+    return { feedback: saved, ticket, note };
   }
 
   /**
@@ -280,14 +321,15 @@ export class MarketingFeedbackService {
 
   private async capReason(campaign: MarketingCampaign): Promise<string | null> {
     const limits = resolveLimits(campaign);
-    const recent = await this.feedbackRepo.count({
-      where: { campaign_id: campaign.id, ticket_id: Not(IsNull()), created_at: MoreThan(new Date(Date.now() - DAY_MS)) },
-    });
+    const linked = await this.feedbackRepo.find({ where: { campaign_id: campaign.id, ticket_id: Not(IsNull()) }, select: ['ticket_id'] });
+    const ids = linked.map((f) => f.ticket_id as string);
+    // Old replies can be classified today: count ticket creation, not feedback arrival.
+    const recent = ids.length ? await this.ticketRepo.count({
+      where: { id: In(ids), created_at: MoreThan(new Date(Date.now() - DAY_MS)) },
+    }) : 0;
     if (recent >= limits.feedback_tickets_per_day) {
       return `daily feedback ticket limit reached (${limits.feedback_tickets_per_day} per 24h)`;
     }
-    const linked = await this.feedbackRepo.find({ where: { campaign_id: campaign.id, ticket_id: Not(IsNull()) }, select: ['ticket_id'] });
-    const ids = linked.map((f) => f.ticket_id as string);
     if (ids.length) {
       const open = await this.ticketRepo.count({ where: { id: In(ids), status: Not('done'), archived_at: IsNull() } });
       if (open >= limits.open_feedback_tickets) {

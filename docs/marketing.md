@@ -644,6 +644,8 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 에이전트는 `record_marketing_feedback(category, content, source_url, summary?, sentiment?, author?, channel_id?)` 로 피드백을 남긴다.
 
+이미 기록된 답장 등은 `classify_marketing_feedback(campaign_id, feedback_id, category, summary?, sentiment?)` 로 분류한다(`feedback_collect`, active 캠페인). 원문·출처·연락처 연결은 보존하고 분류·요약·감정만 바꾼다. 생략한 요약·감정은 유지하며 bug/feature_request 는 비어 있지 않은 요약이 필요하다. 연락처는 MCP 응답에 포함하지 않는다. 기존 티켓은 바꾸거나 다시 만들지 않고, 아직 티켓이 없으면 아래 자동 생성 규칙을 적용한다. 상한으로 막힌 항목은 나중에 다시 분류해 재시도할 수 있다. 일일 상한은 피드백 도착 시각이 아닌 티켓 생성 시각 기준이다.
+
 - 출처 링크는 필수이고, 같은 출처는 한 번만 기록된다. bug/feature 는 요약이 필수다(티켓 제목이 된다).
 - `feedback_to_product` 가 켜져 있으면 bug/feature_request 를 `TicketService.create` 로 제품 Project 에 넣는다.
 
@@ -753,7 +755,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | `propose_marketing_channel` | `channel_discovery` |
 | `draft_marketing_post` | `community_post` · `email`(채널 종류에 따라) |
 | `create_marketing_link`, `record_marketing_metrics` | `analytics` |
-| `record_marketing_feedback`, `list_marketing_feedback` | `feedback_collect` (list 는 읽기) |
+| `record_marketing_feedback`, `classify_marketing_feedback`, `list_marketing_feedback` | `feedback_collect` (list 는 읽기) |
 | `propose_marketing_budget_allocation`, `request_marketing_spend`, `get_marketing_spend_request` | `paid_spend` (get 은 읽기) |
 
 메일 채널의 수신 목록이 멈췄으면("목록 발송 중지") 그 채널의 `draft_marketing_post` 는 거부되고, `get_marketing_campaign` 의 그 채널에 `list_on_hold: true` 가 실린다.

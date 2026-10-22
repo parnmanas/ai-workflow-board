@@ -467,6 +467,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_marketing_report: 'read',
   // 피드백 기록 — bug/feature 면 서버가 부수효과로 티켓을 만들지만, 결과의 주인공은 피드백 행이다.
   record_marketing_feedback: 'non-ticket',
+  classify_marketing_feedback: 'non-ticket',
   list_marketing_feedback: 'read',
   propose_marketing_budget_allocation: 'non-ticket',
   request_marketing_spend: 'non-ticket',

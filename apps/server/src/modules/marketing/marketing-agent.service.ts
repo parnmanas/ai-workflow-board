@@ -159,6 +159,16 @@ export class MarketingAgentService {
     };
   }
 
+  async classifyFeedback(campaign: MarketingCampaign, id: string, body: Record<string, unknown>, actor: MarketingActor) {
+    this.assertCanAct(campaign, 'feedback_collect');
+    const { feedback, ticket, note } = await this.feedback.classify(campaign, id, body, actor);
+    return {
+      feedback: feedbackToJson(feedback, true),
+      ticket: ticket ? { id: ticket.id, status: ticket.status, title: ticket.title } : null,
+      note,
+    };
+  }
+
   /** 기록된 피드백 + 연결 채널이 모은 글. 외부인이 쓴 필드는 `_untrusted` 로 표시된다. */
   async listFeedback(campaign: MarketingCampaign, opts: { since?: Date; limit?: number }) {
     const [recorded, collected] = await Promise.all([

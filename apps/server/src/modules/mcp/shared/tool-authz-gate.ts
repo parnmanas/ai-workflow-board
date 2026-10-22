@@ -256,6 +256,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   record_marketing_metrics: 'caller',
   get_marketing_report: 'caller',
   record_marketing_feedback: 'caller',
+  classify_marketing_feedback: 'caller',
   list_marketing_feedback: 'caller',
   propose_marketing_budget_allocation: 'caller',
   request_marketing_spend: 'caller',
