@@ -350,7 +350,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
    └─cancel(사람 · 캠페인 정지)──▶ cancelled          └ manual: 사람이 "결제 완료"(거래 id 필수) 또는 "실패"를 기록
 ```
 
-자동 실행은 승인되면 서버가 스스로 보내는 결제 방식이다: `webhook` 과 직접 결제(`meta_ads` · `google_ads`, "직접 결제 어댑터").
+자동 실행은 승인되면 서버가 스스로 보내는 결제 방식이다: `webhook` 과 직접 결제(`meta_ads` · `google_ads` · `stripe_issuing`, "직접 결제 어댑터").
 
 1. **요청.** 에이전트가 `request_marketing_spend` 를 부른다.
    - 인자: `campaign_id`, `channel_id`, `amount_minor`, `currency`, `payee`, `purpose`, `expected_outcome`, `payload?`, `dedupe_key?`
@@ -393,15 +393,24 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 4. **환불.** `approve_spend` 를 가진 사람이 사유를 적어 기록한다.
    - 결제된 금액 안에서만 기록할 수 있다.
    - 환불은 capture 에 묶이고, 요청을 다시 열지 않는다(`paid` 로 남는다).
-   - 직접 결제(상한 공급자)는 환불을 기록할 수 없다("직접 결제 어댑터").
+   - 직접 결제(상한 · 카드 공급자)는 환불을 기록할 수 없다("직접 결제 어댑터").
 5. **취소.** `pending` 은 그대로, 승인됐지만 아직 보내지 않은 `approved` 는 보류한 예산을 풀며 `cancelled` 로 닫는다. `executing` 이후는 이미 나갔을 수 있으니 취소가 아니라 대조의 일이다.
 6. **정리.** 캠페인을 일시정지하거나 보관하면 `pending` 요청은 `cancelled` 가 된다. 원장이 생긴 뒤에는 통화를 바꿀 수 없고, 캠페인을 삭제할 수도 없다(보관만 된다).
 
-### 직접 결제 어댑터 (Meta Ads · Google Ads)
+### 직접 결제 어댑터 (Meta Ads · Google Ads · Stripe Issuing)
 
-서버가 광고 플랫폼에 직접 지시한다. 순수 규칙은 `common/marketing/payment-routes.ts`, 어댑터는 `marketing-payment-meta.ts` · `marketing-payment-google.ts`, 등록부는 `marketing-payment-adapters.ts` 에 있다.
+서버가 공급자에 직접 지시한다. 순수 규칙은 `common/marketing/payment-routes.ts`, 어댑터는 `marketing-payment-meta.ts` · `marketing-payment-google.ts` · `marketing-payment-stripe.ts`, 등록부는 `marketing-payment-adapters.ts` 에 있다.
 
-**돈을 보내지 않고 고정 상한을 올린다.** 광고 플랫폼은 받을 사람에게 돈을 보내는 곳이 아니라, 정해 둔 만큼 쓰게 하는 곳이다. 그래서 직접 어댑터는 **고정 상한**을 올리기만 하고, **승인 금액 = 상한이 늘어나는 양**이다.
+직접 어댑터는 **돈을 보내지 않는다.** 공급자는 두 종류다(`DIRECT_PROVIDER_SPECS` — 종류와 배타성). 공급자를 더하면 그 표와 공급자별 switch(`assertNever`)가 빠진 곳을 컴파일 오류로 알려 준다 — "Meta 가 아니면 Google" 같은 분기를 쓰지 않는다.
+
+| 종류 | 공급자 | 하는 일 | 대상마다 열린 요청 하나 |
+| --- | --- | --- | --- |
+| 상한(`ceiling`) | Meta Ads · Google Ads | 광고 캠페인의 고정 상한을 승인 금액만큼 올린다(compare-and-set) | 예(`target_key`) |
+| 카드(`card`) | Stripe Issuing | 승인 금액이 누적 한도인 가상 카드를 한 장 만든다(사람이 그 카드로 결제) | 아니오 — 카드끼리 서로 영향이 없다 |
+
+아래 "상한 공급자" 부분은 Meta · Google 의 것이고, 카드는 "카드 공급자(Stripe Issuing)" 에 따로 적는다. 결제 경로 · 계획 해시 · 사람이 바꾼 결정 · 결과 불명 · 환불 · 연결 확인의 원칙은 둘에 같다.
+
+**상한 공급자 — 돈을 보내지 않고 고정 상한을 올린다.** 광고 플랫폼은 받을 사람에게 돈을 보내는 곳이 아니라, 정해 둔 만큼 쓰게 하는 곳이다. 그래서 직접 어댑터는 **고정 상한**을 올리기만 하고, **승인 금액 = 상한이 늘어나는 양**이다.
 
 | 공급자 | 올리는 상한 | 받지 않는 것 |
 | --- | --- | --- |
@@ -414,16 +423,17 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - `paid` 는 "공급자가 새 상한을 받아들였다" 이다. 돈은 아직 다 쓰이지 않았을 수 있다. 원장은 지금처럼 `release` + 승인 금액 전체 `capture` 로 센다(보수적인 상한). 화면은 "한도 반영됨" 으로 보여 준다.
 - 공급자는 상한을 아주 조금 넘길 수 있다(Meta 는 변경 반영에 최대 15분, 지출은 추정치). 원장(`capture ≤ reserve`)에는 담기지 않으므로 대조 때 사람이 본다.
 
-**결제 경로는 수취인마다 정한다.** 수취인 항목에 `provider`(`meta_ads` · `google_ads`) · `credential_id` · `ref` 를 둔다. 경로가 없는 수취인은 캠페인 결제 방식을 쓴다. 그래서 한 캠페인이 여러 플랫폼에 돈을 댈 수 있고, 돈이 갈 수 있는 곳은 사람이 허용 목록에 넣은 상한뿐이다. 수취인은 돈 설정이다(`approve_spend`).
+**결제 경로는 수취인마다 정한다.** 수취인 항목에 `provider`(`meta_ads` · `google_ads` · `stripe_issuing`) · `credential_id` · `ref` 를 둔다. 경로가 없는 수취인은 캠페인 결제 방식을 쓴다. 그래서 한 캠페인이 여러 플랫폼에 돈을 댈 수 있고, 돈이 갈 수 있는 곳은 사람이 허용 목록에 넣은 상한 · 카드 소지자뿐이다. 수취인은 돈 설정이다(`approve_spend`).
 
 | 공급자 | `ref`(대상) | credential(`provider` 칼럼 = 공급자 이름) |
 | --- | --- | --- |
 | Meta Ads | `act_<광고 계정 id>/<캠페인 id>` — 그 캠페인의 `account_id` 와 대조한다 | `access_token`(시스템 사용자 토큰, `ads_management`), `app_secret`(선택 — appsecret_proof) |
 | Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | `client_id` · `client_secret` · `refresh_token`(adwords 범위), `login_customer_id`(선택 — 관리자 계정), `developer_token`(비워 둔다 — 2026-09-09 폐지, 지금은 무시되고 이후 API 버전은 거부한다. 있으면만 보낸다) |
+| Stripe Issuing | 카드 소지자 id `ich_…` | `secret_key` — 운영은 제한된 키 `rk_live_…`(Issuing Cards: Write · Issuing Cardholders: Read)만, 샌드박스는 `rk_test_…` · `sk_test_…`. 전체 운영 키 `sk_live_…` 는 거부한다 |
 
-- credential 은 Credentials 화면에서 그 공급자(Meta Ads · Google Ads)를 골라 **이 계정에** 만든다. 다른 종류(custom 등) · 전역 · 에이전트 노출(`agent_env`) credential 은 거부한다. 이 두 공급자는 에이전트 노출을 고를 수 없다.
+- credential 은 Credentials 화면에서 그 공급자(Meta Ads · Google Ads · Stripe Issuing)를 골라 **이 계정에** 만든다. 다른 종류(custom 등) · 전역 · 에이전트 노출(`agent_env`) credential 은 거부한다. 이 공급자들은 에이전트 노출을 고를 수 없다.
 - Google Ads API 접근 수준은 OAuth client(`client_id`)의 Google Cloud 프로젝트에 붙는다(developer token 대신). 운영 계정에 쓰려면 그 프로젝트에 Explorer 이상의 접근이 있어야 한다 — Test 수준은 테스트 계정만 부를 수 있다.
-- 수취인을 저장할 때 ref 형식(정규 형태로 저장)과 credential 을 확인한다. 같은 대상을 가리키는 수취인 둘은 거부한다.
+- 수취인을 저장할 때 ref 형식(정규 형태로 저장)과 credential 을 확인한다. 상한 공급자는 같은 대상을 가리키는 수취인 둘을 거부한다(카드는 같은 카드 소지자를 여러 수취인이 써도 된다).
 
 **요청 때 서버가 실행 계획을 만든다(읽기만).**
 - 에이전트는 수취인과 금액만 고르고 `payload` 를 넣을 수 없다.
@@ -433,7 +443,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 공급자 확인이 실패하면 저장하지 않고 거부하고 `spend.refused` 로 감사에 남긴다. 거부 문구는 "사람이 고쳐야 함" 과 "다음 사이클에 다시" 를 구분한다.
 - 금액 · 통화 단위 문제는 공급자를 읽기 전에 거절하고 쉬지 않는다. 나누어떨어지지 않는 금액은 400(금액을 고친다), 표에 없는 통화는 409(사람이 캠페인 통화나 수취인을 고친다)다.
 - 공급자를 읽은 뒤의 거절은 그 (캠페인, 대상, credential) 를 잠시 다시 묻지 않는다 — 에이전트의 되풀이가 공급자 호출로 번지지 않게. 대상 · 인증 문제는 10분, 금액에 달린 것(계정 최소 상한 · 청구 단위 · 상한 최대값)은 1분이다(금액만 바꿔 되풀이해도 그때마다 읽지 않게). 쉬는 동안의 거절 문구는 언제까지 기다리라고 알린다. 수취인이나 credential 을 고치면 키가 바뀌어 바로 다시 묻고, 연결 확인이 정상이면 풀린다.
-- **대상마다 열린 요청은 하나다**(`target_key`, 부분 유일 인덱스 `uq_marketing_spend_open_target`). 캠페인 · 계정을 넘어서도 적용된다. 같은 `from` 으로 계획된 요청 둘이 있으면 먼저 실행된 쪽이 다른 쪽의 `from` 을 바꾸고, 동시에 실행되면 둘 다 `from` 을 읽고 쓴다. 요청 · 승인 · 실행 · 결과 불명 동안 열려 있다 — 결과 불명은 대조해야 그 대상에 새 요청을 낼 수 있다.
+- **(상한 공급자) 대상마다 열린 요청은 하나다**(`target_key`, 부분 유일 인덱스 `uq_marketing_spend_open_target`). 캠페인 · 계정을 넘어서도 적용된다. 카드 공급자는 `target_key` 를 남기지 않는다(빈 값은 어떤 요청과도 맞지 않는다). 같은 `from` 으로 계획된 요청 둘이 있으면 먼저 실행된 쪽이 다른 쪽의 `from` 을 바꾸고, 동시에 실행되면 둘 다 `from` 을 읽고 쓴다. 요청 · 승인 · 실행 · 결과 불명 동안 열려 있다 — 결과 불명은 대조해야 그 대상에 새 요청을 낼 수 있다.
   - 같은 계정의 열린 요청은 공급자를 읽기 전에 그 id · 상태와 함께 알린다.
   - 다른 계정의 열린 요청은 이 계정의 credential 로 그 대상을 실제로 읽은 뒤에만 알리고, id · 상태는 싣지 않는다(연결 확인에는 `open_request: { id: '', status: 'other_account' }`). 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게 하려는 것이다.
   - 이것도 공급자를 읽은 뒤의 거절이라 그 대상을 쉰다(10분) — 되풀이할 때마다 남의 광고 계정을 읽지 않게. 그 요청이 닫히면(DB 로 본다) 바로 풀린다.
@@ -443,7 +453,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - Google 은 micros(1 단위 = 1,000,000)다. BigInt 로 계산하고, JSON 에서는 문자열로 보낸다.
 - 공급자가 준 정수는 숫자 문자열만 받는다 — `''` 가 0 으로 읽히지 않게.
 
-**실행은 compare-and-set 이다.** 두 공급자 모두 조건부 쓰기와 멱등 키가 없다. 그래서 실행 직전에 다시 읽고, 요청 때와 같은 대상 · 통화 · 형태이고 값이 `from` 일 때만 절대값 `to` 를 한 번 쓴다. 같은 값을 다시 써도 결과가 같다.
+**(상한 공급자) 실행은 compare-and-set 이다.** 두 공급자 모두 조건부 쓰기와 멱등 키가 없다. 그래서 실행 직전에 다시 읽고, 요청 때와 같은 대상 · 통화 · 형태이고 값이 `from` 일 때만 절대값 `to` 를 한 번 쓴다. 같은 값을 다시 써도 결과가 같다.
 - 값이 이미 `to` 면 쓰지 않고 `unknown` 이다. 누군가 공급자 화면에서 바꿨으니 사람이 정한다.
 - 다른 값이거나, 대상이 바뀌었거나, 읽지 못했으면 보내지 않고 `failed` 다.
 - 토큰은 `Authorization` 헤더로만 보낸다. 주소에 넣지 않는다(로그 · 오류 문자열로 샌다). 공급자 주소는 코드에 고정돼 있어 credential 로 바꿀 수 없다. 리다이렉트는 따라가지 않는다.
@@ -474,22 +484,68 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 승인한 지 1시간이 지난 직접 결제는 실행하지 않는다. 장애 · 복구 · 이관 뒤에 묵은 승인이 실행되지 않게 하려는 것이다. 보통은 승인 직후, 늦어도 sweep(5분)이 실행한다.
 
 **결과 불명 대조.**
-- 요청 카드의 "공급자에서 확인"(`POST /spend-requests/:id/inspect`, 읽기 전용)이 지금 상한이 목표값인지 · 이전 값인지 · 그 밖인지 보여 준다. 판정은 사람이 한다.
+- 요청 카드의 "공급자에서 확인"(`POST /spend-requests/:id/inspect`, 읽기 전용)이 상한 공급자는 지금 상한이 목표값인지 · 이전 값인지 · 그 밖인지, 카드 공급자는 이 요청의 카드가 있는지(아래) 보여 준다. 판정은 사람이 한다.
 - Meta 는 변경 반영에 최대 15분, Google 변경 기록은 몇 분 늦게 보인다.
 - 그래서 직접 결제의 결과 불명은 **실행 뒤 15분이 지나야 "실패" 로 기록할 수 있다**(그 전에는 409, 언제부터인지 알려 준다). "아직 안 바뀌었다" 를 보고 일찍 실패로 닫으면 나중에 반영된 상한이 원장 밖에 남는다. "결제 완료" 는 바로 기록할 수 있다 — 원장을 더 세는 쪽이다.
   - 이 판단은 캠페인 잠금 안에서 다시 읽은 상태로 한다. 실행 중에 누른 "실패" 가 잠금을 기다리는 사이 결과 불명이 된 요청을 유예 없이 닫지 않게.
-- 결제 기록 창은 거래 id 자리를 서버가 만든 기록용 값(`suggested_provider_ref`, 예: `meta_ads:act_9/77:spend_cap=130000`)으로 미리 채운다. 광고 플랫폼 상한 변경에는 거래 id 가 없다.
+- 결제 기록 창은 거래 id 자리를 서버가 만든 기록용 값(`suggested_provider_ref`, 예: `meta_ads:act_9/77:spend_cap=130000`)으로 미리 채운다. 광고 플랫폼 상한 변경에는 거래 id 가 없다. 카드는 실행이나 "공급자에서 확인" 이 찾은 카드 id(`ic_…`)다.
 
-**환불은 막는다.** 상한이 그대로인데 "미사용분" 을 돌려받았다고 적으면, 플랫폼은 그 돈을 아직 쓸 수 있는데 원장은 덜 센다. 상한을 실제로 낮추고 그만큼 환불을 기록하는 기능은 후속이다. 그때까지 원장은 승인 금액 전체를 사용으로 센다.
+**환불은 막는다.** 상한 · 카드가 그대로인데 "미사용분" 을 돌려받았다고 적으면, 그 돈은 아직 쓰일 수 있는데 원장은 덜 센다. 상한을 실제로 낮추거나 카드를 해지하고 쓴 돈을 대조해 그만큼 환불을 기록하는 기능은 후속이다. 그때까지 원장은 승인 금액 전체를 사용으로 센다.
 
 **연결 확인(읽기 전용).** `POST /campaigns/:id/payment/check`(`approve_spend`)가 직접 결제 수취인마다 credential 과 대상을 요청 · 실행과 같은 읽기 코드로 읽는다. 보여 주는 것은 정상 · 문제 · 지금 상한 · API 버전 · 열린 요청이다. 아무것도 쓰지 않고, `payment.checked` 로 감사에 남긴다. 실제(또는 테스트) 계정을 돈을 움직이지 않고 검증하는 길이다.
 - 읽기가 실패하면 공급자가 준 글도 `provider_message_untrusted` 로 보여 준다. 요청별 확인의 오류 문장도 그 글을 덧붙인다. 둘 다 사람만 부르는 REST 라 에이전트에게 가지 않는다.
 - Meta: 개발용 샌드박스 광고 계정은 광고를 내보내지 않는다.
 - Google: 테스트 관리자 계정 아래의 테스트 계정은 광고를 내보내지 않고 청구도 없다.
 
-**API 버전.** 코드에 고정한다(Meta `v26.0`, Google `v26`). 공급자가 버전을 1년 남짓 만에 닫으므로 `MARKETING_META_API_VERSION` · `MARKETING_GOOGLE_ADS_API_VERSION` 으로 코드 수정 없이 올릴 수 있다. 형식이 틀린 값은 무시한다. 버전은 계획(해시)에 넣지 않고, 실제로 쓴 버전을 응답 요약 · 연결 확인에 남긴다. 닫힌 버전은 Meta 오류 2635 등으로 거절된다(`failed`, 아무것도 바뀌지 않음).
+**API 버전.** 코드에 고정한다(Meta `v26.0`, Google `v26`, Stripe `2026-09-30.endive`). 공급자가 버전을 닫으므로 `MARKETING_META_API_VERSION` · `MARKETING_GOOGLE_ADS_API_VERSION` · `MARKETING_STRIPE_API_VERSION` 으로 코드 수정 없이 올릴 수 있다. 형식이 틀린 값은 무시한다. Stripe 는 일회용 카드가 들어온 `2026-03-25.dahlia` 보다 오래된 버전과 `.preview` 채널도 무시한다(계정 기본 버전에 기대지 않고 매 요청에 `Stripe-Version` 을 싣는다). 버전은 계획(해시)에 넣지 않고, 실제로 쓴 버전을 응답 요약 · 연결 확인에 남긴다. 닫힌 버전은 Meta 오류 2635 등으로 거절된다(`failed`, 아무것도 바뀌지 않음).
 
-**Stripe Issuing 은 아직 없다.** 승인 금액 한도의 일회용 가상 카드를 만드는 어댑터다. 미국 · 영국 · EEA 법인만 쓸 수 있고(한국 법인 불가), 카드 통화는 usd · eur · gbp 뿐이다. 한도도 완전한 상한이 아니다(팁 · 초과 매입 · 강제 매입). 법인 요건이 확인되면 후속으로 만든다.
+#### 카드 공급자(Stripe Issuing) — 승인 금액 한도의 가상 카드를 만든다
+
+승인되면 서버가 수취인의 카드 소지자(`ich_…`) 아래에 **가상 카드 한 장**을 만든다. 누적 한도(`spending_limits[].interval = all_time`)가 승인 금액이고, 사람이 Stripe 대시보드에서 카드 정보를 보고 그 카드로 결제한다. 미국 · 영국 · EEA 에 설립된 사업자만 쓸 수 있고(한국 법인 불가), 카드 통화는 지역에 따라 USD · EUR · GBP 하나다.
+
+- `paid` 는 "카드가 발급됐다" 다. 원장은 승인 금액 전체를 사용으로 센다(보수적). 화면은 "카드 발급됨" 과 대시보드 링크(`https://dashboard.stripe.com/[test/]issuing/cards/<id>`)를 보여 준다.
+- **카드 번호 · CVC 는 AWB 가 가져오지 않는다**(`expand[]=number` 를 쓰지 않는다 — PCI). Stripe 응답에 박혀 오는 카드 소지자(이름 · 주소 · 연락처)는 id 말고 읽지 않는다 — 계획 · 응답 요약 · 감사 · MCP 어디에도 없다. 카드 소지자 이름은 사람만 보는 연결 확인에만 `target_name_untrusted` 로 보인다.
+
+**수취인 카드 통제(돈 설정, `approve_spend`).** Stripe 수취인에만 둔다. 요청의 계획(해시)에 들어가고, 승인 · 실행 때 수취인의 지금 값과 다르면 실행하지 않는다(`directPayeeProblem`).
+
+| 필드 | 뜻 |
+| --- | --- |
+| `card_single_use` | 첫 결제 뒤 자동 해지(`lifecycle_controls[cancel_after][payment_count] = 1`). 기본 켬. 여러 번 청구하는 곳(광고 플랫폼 등)에는 끈다 — 누적 한도는 그대로다 |
+| `card_categories` | 허용 업종(Stripe merchant category 이름, 소문자 · 정렬 · 20개까지). 비면 업종 제한 없음. 틀린 이름은 Stripe 가 카드를 만들 때 거절한다(아무것도 만들어지지 않는다) |
+| `card_max_minor` | 카드 한 장의 최대 금액. 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 500 을 권한다 |
+
+**요청.**
+- 금액은 Stripe 를 부르기 전에 본다: 통화가 카드 통화가 아니면 409(사람이 캠페인 통화를 고친다), 일회용 카드는 승인 한 건의 고정 상한(10,000.00) 이하, 수취인의 카드당 최대 이하(400 — 쓰지 못할 예산이 묶이지 않게).
+- 카드 소지자를 읽어 본다(쓰기 없음): `status = active`, `requirements.disabled_reason` 없음, `past_due` 없음, 키의 모드(운영 · 샌드박스)와 카드 소지자의 `livemode` 가 같음.
+- 계획: `{ plan: 'issue_card', target: { cardholder }, currency, limit_minor = 금액, interval: 'all_time', single_use, allowed_categories, livemode, credential_fingerprint }`. `plan_text` 예: "Stripe Issuing 카드 소지자 ich_… 에게 누적 한도 300.00 USD 의 일회용(첫 결제 뒤 자동 해지) 가상 카드를 발급합니다(허용 업종: advertising_services)." 샌드박스면 "[샌드박스 카드 …]" 가 붙는다 — 샌드박스 카드도 캠페인 예산은 쓴다.
+
+**실행 — 2단계 발급.**
+1. 카드 소지자를 다시 본다. 막혔거나 모드가 바뀌었으면 보내지 않고 `failed` 다.
+2. 카드를 **비활성**으로 만든다(`POST /v1/issuing/cards`, `status=inactive`, 한도 · 업종 · 일회용 · `metadata[awb_spend_request_id]` 는 만들 때만 정할 수 있다). 멱등 키 `awb-spend-<요청 id>`.
+3. 돌아온 카드를 계획과 대조한다(`cardMismatches` — 카드 소지자 · 통화 · 종류 · 상태 · 모드 · metadata · 우리 누적 한도 · 업종 집합 · 일회용). 우리 누적 한도가 있으면 다른 한도는 더 좁힐 뿐이라 받는다. 다르면 **해지**하고(`-cancel` 키) `failed`, 해지하지 못하면 `unknown`.
+4. 활성화한다(`status=active`, `-activate` 키). 활성화된 카드가 계획과 같으면 `paid`(거래 id = 카드 id).
+
+그래서 모호한 생성으로 생겼을지 모르는 카드나 Stripe 장애 복구로 나중에 생긴 카드는 비활성이라 쓸 수 없고, `failed` 로 닫힌 요청에 쓸 수 있는 카드가 남지 않는다.
+
+| 응답 | 결과 |
+| --- | --- |
+| 생성 · 활성화 모두 200 이고 계획과 같음 | `paid` |
+| Stripe 오류 객체가 붙은 400 · 401 · 402 · 403 · 404 · 429(`idempotency_error` 제외) | 생성: `failed`. 활성화: 카드를 해지하고 `failed`(해지 못 하면 `unknown`) |
+| `idempotency_error`, 409, 424, 5xx, 시간 초과, Stripe 오류 객체가 아닌 본문 | `unknown` |
+
+- 응답 요약: 대상 · 한도 · 단계(`create` · `activate`) · 상태 코드 · `error_type` · `error_code` · `request_id` · `idempotent_replayed` · `card_id` · 다른 항목 이름(`mismatched`). 공급자 글은 Stripe 오류 객체의 `error.message` 만 비밀(가려진 키 조각 포함)을 지워 `message_untrusted` 로 둔다 — 응답 본문은 저장하지 않는다.
+
+**결과 불명 — 카드가 있으면 실패로 기록하지 않는다.**
+- 카드 목록에는 metadata 검색이 없어, 서버가 그 카드 소지자의 가상 카드를 실행 시각 ±1일 범위에서 100장씩 10쪽까지 넘기며 요청 id 를 찾는다(`found` · `none` · `incomplete` — 다 보지 못하면 없음으로 읽지 않는다).
+- "실패로 기록"(`mark-failed`)은 유예(실행 뒤 15분)가 지난 뒤 그 찾기를 먼저 한다(잠금 밖에서).
+  - 해지되지 않은 카드가 있으면 거부한다 — 그 카드 id 로 결제 완료를 기록하거나, 쓰지 않을 카드면 대시보드에서 해지한 뒤 다시 한다.
+  - 해지된 카드만 있거나, 다 보지 못했거나, 찾지 못했으면(Stripe 장애 · credential 없음) 사람이 대시보드에서 그 카드로 쓴 돈이 없음을 확인했다는 `confirm_no_spend` 를 함께 보내야 한다. 감사(`spend.failed`)의 `card_check` 에 남는다.
+  - 카드가 없음이 분명하면 그대로 기록한다.
+- "공급자에서 확인" 이 찾은 카드(id · 상태 · 한도)를 보여 주고, 결제 기록 창은 그 카드 id 로 미리 채운다.
+
+**한도는 완전한 상한이 아니다.** 팁 · 나중 매입 · 초과 매입 · 강제 매입 · 네트워크 폴백은 한도를 넘을 수 있고, 집계는 30초쯤 늦을 수 있다. 원장은 승인 금액을 세므로, 넘은 몫은 사람이 Stripe 거래 내역과 대조한다. 셀프 서비스 Standard 프로그램의 기본 한도는 주 25장 · 주 5,000 USD · 카드당 하루 500 USD 이고 승인 한 건은 최대 10,000 USD 다 — 일회용 카드의 한도가 500 을 넘으면 승인 창이 경고한다.
+
+**credential 발급 안내(사이트 안).** Credentials 화면에서 Meta Ads · Google Ads · Stripe Issuing 을 고르면 그 credential 을 발급받는 순서 · 칸마다 넣을 값 · 수취인 대상 · 자주 막히는 곳 · 공식 문서 링크가 펼쳐진다. 마케팅 수취인 설정에서 그 경로를 고르면 같은 안내가 붙는다. 글은 `apps/client/src/components/marketing/paymentCredentialGuides.ts` 한 곳에 있다(2026-10 공식 문서 기준 — 공급자가 화면 · 절차를 바꾸면 이 파일만 고친다). 칸 목록이 credential 필드와 같은지는 `apps/client/test/marketing-payment-contract.test.mjs` 가 본다.
 
 ## 분석
 
@@ -683,7 +739,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 메일 채널의 수신 목록이 멈췄으면("목록 발송 중지") 그 채널의 `draft_marketing_post` 는 거부되고, `get_marketing_campaign` 의 그 채널에 `list_on_hold: true` 가 실린다.
 
-직접 결제 수취인(`payees[].provider`)에게는 `request_marketing_spend` 에 `payload` 를 넣지 않는다. `amount_minor` 는 상한 증가분이다. 툴 설명 · 규칙(`agentRules`) · 사이클 지시문의 "직접 결제 수취인" 줄이 같은 것을 알린다. 그 줄은 허용 목록 줄과 따로 쓴다 — 허용 목록 줄에는 `payee` 에 그대로 넣을 이름만 둔다(이름 뒤에 설명을 붙이면 에이전트가 그대로 베껴 거부된다). 응답의 `plan_text` 가 사람이 승인할 문장이다.
+직접 결제 수취인(`payees[].provider`)에게는 `request_marketing_spend` 에 `payload` 를 넣지 않는다. `amount_minor` 는 상한 공급자에서는 상한 증가분, Stripe Issuing 에서는 카드 한도다(수취인의 카드당 최대 · 일회용 최대 안에서). 툴 설명 · 규칙(`agentRules`) · 사이클 지시문의 "직접 결제 수취인" 줄(수취인마다 하는 일)이 같은 것을 알린다. 그 줄은 허용 목록 줄과 따로 쓴다 — 허용 목록 줄에는 `payee` 에 그대로 넣을 이름만 둔다(이름 뒤에 설명을 붙이면 에이전트가 그대로 베껴 거부된다). 응답의 `plan_text` 가 사람이 승인할 문장이다.
 
 ## REST 요약 (`/api/marketing`)
 
@@ -692,7 +748,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 캠페인 | `GET/POST /campaigns`, `GET/PATCH/DELETE /campaigns/:id`, `POST /campaigns/:id/status`, `GET /campaigns/:id/audit`, `GET /campaigns/:id/cycles`, `POST /campaigns/:id/cycles/run` |
 | 채널 | `GET/POST /campaigns/:id/channels`, `PATCH /channels/:id`, `POST /channels/:id/{approve,connect,reject,pause,resume}` |
 | 게시물 | `GET /campaigns/:id/posts`, `GET /posts/:id`, `POST /posts/:id/{approve,reject,retry,mark-published}`, `GET /posts/:id/sends` |
-| 예산 | `GET /campaigns/:id/{budget,allocations,spend-requests,ledger}`, `POST /campaigns/:id/allocations`, `POST /allocations/:id/{approve,reject}`, `GET /spend-requests/:id`, `POST /spend-requests/:id/{approve,deny,cancel,mark-paid,mark-failed,refund}` |
+| 예산 | `GET /campaigns/:id/{budget,allocations,spend-requests,ledger}`, `POST /campaigns/:id/allocations`, `POST /allocations/:id/{approve,reject}`, `GET /spend-requests/:id`, `POST /spend-requests/:id/{approve,deny,cancel,mark-paid,mark-failed,refund}`(카드 공급자의 `mark-failed` 는 경우에 따라 `confirm_no_spend`) |
 | 직접 결제 확인(읽기 전용) | `POST /campaigns/:id/payment/check`(연결 확인), `POST /spend-requests/:id/inspect`(요청별 공급자 확인) |
 | 분석 | `GET /campaigns/:id/report`, `GET/POST /campaigns/:id/links`, `GET/POST /campaigns/:id/metrics` |
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
@@ -705,8 +761,8 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 ## 후속 (이 문서 범위 밖)
 
-- Stripe Issuing 직접 어댑터(일회용 가상 카드) — 미국 · 영국 · EEA 법인 확인 뒤
-- 직접 결제의 미사용 상한 반납: 서버가 상한을 낮추고(CAS) 그만큼 환불을 기록, 플랫폼 지출 보고서로 대조
+- 직접 결제의 미사용분 반납: 상한 공급자는 서버가 상한을 낮추고(CAS) 그만큼 환불을 기록, 카드는 해지한 카드의 거래를 읽어 쓴 돈만큼만 남기고 환불, 플랫폼 지출 보고서로 대조
+- 반복 청구처용 재사용 카드: 수취인마다 카드 한 장을 두고 승인마다 그 누적 한도를 올린다(상한 공급자처럼 compare-and-set)
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
 - Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
