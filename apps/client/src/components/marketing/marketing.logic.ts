@@ -5,6 +5,7 @@
 
 import type { ActivityTone } from '../../activity';
 import type {
+  Credential,
   MarketingAllocation,
   MarketingCampaign,
   MarketingCampaignInput,
@@ -14,8 +15,11 @@ import type {
   MarketingChannelApproval,
   MarketingChannelKind,
   MarketingEmailConfig,
+  MarketingDirectPaymentProvider,
   MarketingLimitKey,
+  MarketingPayee,
   MarketingPost,
+  MarketingSpendInspection,
   MarketingSpendRequest,
 } from '../../types';
 import { isEmailAddress, normalizeListName } from './marketingContacts.logic';
@@ -406,7 +410,104 @@ export const BUDGET_PERIOD_LABELS: Record<string, string> = {
 export const PAYMENT_PROVIDER_LABELS: Record<string, string> = {
   manual: '수동 — AWB 밖에서 결제하고 결과를 기록',
   webhook: '웹훅 — 승인하면 서버가 결제 엔드포인트로 보냄',
+  meta_ads: 'Meta Ads — 승인하면 서버가 광고 캠페인 지출 한도(spend_cap)를 올림',
+  google_ads: 'Google Ads — 승인하면 서버가 캠페인 총예산을 올림',
 };
+
+// ── 직접 결제 공급자(docs/marketing.md "직접 결제 어댑터") ─────────────────────
+// 서버 common/marketing/payment-routes.ts 가 정본이다 — 목록 · ref 형식 · credential 필드가 같아야 한다
+// (test/marketing-payment-contract.test.mjs 가 두 파일을 대조한다).
+
+export const DIRECT_PAYMENT_PROVIDERS: readonly MarketingDirectPaymentProvider[] = ['meta_ads', 'google_ads'];
+
+export const DIRECT_PAYMENT_PROVIDER_LABELS: Record<MarketingDirectPaymentProvider, string> = {
+  meta_ads: 'Meta Ads',
+  google_ads: 'Google Ads',
+};
+
+export const DIRECT_REF_FORMATS: Record<MarketingDirectPaymentProvider, string> = {
+  meta_ads: 'act_<광고 계정 id>/<캠페인 id> (예: act_1234567890/120210000000000)',
+  google_ads: '<고객 id>/<캠페인 id> (예: 123-456-7890/22334455)',
+};
+
+/** 직접 공급자 credential 의 필드 — Credentials 화면에서 이 공급자를 골라 만든다. */
+export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<MarketingDirectPaymentProvider, { required: readonly string[]; optional: readonly string[] }> = {
+  meta_ads: { required: ['access_token'], optional: ['app_secret'] },
+  google_ads: { required: ['client_id', 'client_secret', 'refresh_token'], optional: ['login_customer_id', 'developer_token'] },
+};
+
+export function isDirectPaymentProvider(value: unknown): value is MarketingDirectPaymentProvider {
+  return typeof value === 'string' && (DIRECT_PAYMENT_PROVIDERS as readonly string[]).includes(value);
+}
+
+const DIRECT_REF_PATTERNS: Record<MarketingDirectPaymentProvider, RegExp> = {
+  meta_ads: /^act_\d{1,30}\s*\/\s*\d{1,30}$/,
+  google_ads: /^\d{3}-?\d{3}-?\d{4}\s*\/\s*\d{1,30}$/,
+};
+
+/** 수취인 ref 가 그 공급자의 대상 형식인가 — 저장 전에 화면이 먼저 알려 준다(서버가 다시 본다). 문제 없으면 ''. */
+export function directRefProblem(provider: MarketingDirectPaymentProvider, ref: string): string {
+  return DIRECT_REF_PATTERNS[provider].test(ref.trim()) ? '' : `${DIRECT_PAYMENT_PROVIDER_LABELS[provider]} 대상은 ${DIRECT_REF_FORMATS[provider]} 형식입니다`;
+}
+
+/**
+ * 직접 공급자 수취인이 고를 수 있는 credential — 그 공급자로 만든, 이 계정의 credential 만(전역 · 에이전트 노출 제외).
+ * 서버 resolveDirectPaymentCredential 과 같은 기준이다.
+ */
+export function directPaymentCredentials(credentials: Credential[], provider: MarketingDirectPaymentProvider, accountId: string): Credential[] {
+  return credentials.filter((c) => c.provider === provider && !c.agent_env && !!c.account_id && c.account_id === accountId);
+}
+
+/** 수취인 목록 한 줄의 결제 경로 — 직접 공급자면 그 이름과 대상, 아니면 ''(캠페인 결제 방식). */
+export function payeeRouteLabel(payee: MarketingPayee): string {
+  return isDirectPaymentProvider(payee.provider) ? `${DIRECT_PAYMENT_PROVIDER_LABELS[payee.provider]} · ${payee.ref || '?'}` : '';
+}
+
+/** 지출 카드의 상태 표시 — 상한 공급자의 paid 는 돈이 나간 것이 아니라 "한도가 올라갔다" 이다. */
+export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' | 'provider'>): StatusView {
+  if (spend.status === 'paid' && isDirectPaymentProvider(spend.provider)) return { label: '한도 반영됨', tone: 'done' };
+  if (spend.status === 'executing' && isDirectPaymentProvider(spend.provider)) return { label: '한도 변경 중', tone: 'live' };
+  return spendStatusView(spend.status);
+}
+
+/** 승인 확인 창의 안내 — 이 결제 경로에서 승인하면 무엇이 일어나는가. */
+export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'>): string {
+  if (spend.provider === 'meta_ads') {
+    return '승인하면 서버가 곧바로 Meta 광고 캠페인의 지출 한도(spend_cap)를 위 계획대로 바꿉니다. 그 사이 한도가 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
+  }
+  if (spend.provider === 'google_ads') {
+    return '승인하면 서버가 곧바로 Google Ads 캠페인의 총예산을 위 계획대로 바꿉니다. 그 사이 예산이 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
+  }
+  if (spend.provider === 'webhook') return '승인하면 서버가 곧바로 결제 엔드포인트로 이 내용을 보냅니다. 자동 재시도는 없습니다.';
+  return '승인하면 이 금액이 예산에서 보류됩니다. AWB 밖에서 결제한 뒤 거래 id 와 함께 결제 완료를 기록하세요.';
+}
+
+/** 결과 불명을 대조할 곳 — 공급자마다 무엇을 보면 되는지. */
+export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provider' | 'payload'>): string {
+  const plan = spend.payload || {};
+  if (spend.provider === 'meta_ads') {
+    return `Ads Manager 에서 캠페인 ${plan.target?.campaign_id || ''} 의 지출 한도가 ${plan.to ?? '?'}(목표) 인지 ${plan.from ?? '?'}(이전) 인지 확인하세요. 한도 변경은 반영에 최대 15분이 걸릴 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
+  }
+  if (spend.provider === 'google_ads') {
+    return `Google Ads 에서 캠페인 ${plan.target?.campaign_id || ''} 의 총예산이 목표값인지 확인하세요(변경 기록은 3분쯤 늦게 보입니다). "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
+  }
+  return '결제 시스템에서 실제 결제 여부를 확인하세요.';
+}
+
+/** 공급자 확인 결과 한 줄. */
+export function inspectionSummary(insp: MarketingSpendInspection, currency: string): string {
+  const now = insp.observed_minor === null ? (insp.observed === null ? '한도 없음' : `${insp.observed}(공급자 단위)`) : formatMinor(insp.observed_minor, currency);
+  const where = insp.position === 'at_target' ? '목표값입니다 — 반영된 것으로 보입니다'
+    : insp.position === 'at_from' ? '이전 값입니다 — 반영되지 않은 것으로 보입니다'
+      : insp.position === 'no_ceiling' ? '한도가 없습니다 — 누군가 공급자 화면에서 지웠습니다'
+        : '계획의 이전 값도 목표값도 아닙니다 — 공급자 화면에서 바뀐 이력을 보세요';
+  return `지금 상한 ${now}: ${where}. (${formatMinor(insp.from_minor, currency)} → ${formatMinor(insp.to_minor, currency)} 계획)`;
+}
+
+/** 환불 기록 — 상한 공급자는 상한을 낮추기 전에는 기록할 수 없다(서버가 막는다). */
+export function canRecordRefund(spend: Pick<MarketingSpendRequest, 'status' | 'provider'>): boolean {
+  return spend.status === 'paid' && !isDirectPaymentProvider(spend.provider);
+}
 
 /** 결과가 모호한 결제(unknown)에서 사람에게 보여 주는 설명 — 자동 재전송이 없다는 것까지. */
 export const UNKNOWN_SPEND_MESSAGE =

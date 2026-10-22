@@ -115,6 +115,31 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
       registry: { label: 'Registry (optional)', placeholder: 'https://registry.npmjs.org/ (default)' },
     },
   },
+  // Marketing direct payments (docs/marketing.md "직접 결제 어댑터"). Server-only: the
+  // marketing module accepts only credentials made with these providers, and they
+  // are never exposed to agents (not in AGENT_ENV_PROVIDERS). Field names must match
+  // the server's DIRECT_PROVIDER_CREDENTIAL_FIELDS (test/marketing-payment-contract).
+  {
+    value: 'meta_ads',
+    label: 'Meta Ads (marketing payments)',
+    icon: 'M',
+    fields: {
+      access_token: { label: 'System user access token', placeholder: 'EAAB... — ads_management on the ad account; the server raises campaign spend caps with it' },
+      app_secret: { label: 'App secret (optional)', placeholder: 'Adds appsecret_proof — needed when the app has "Require App Secret" on' },
+    },
+  },
+  {
+    value: 'google_ads',
+    label: 'Google Ads (marketing payments)',
+    icon: 'G',
+    fields: {
+      client_id: { label: 'OAuth client ID', placeholder: '1234567890-abc.apps.googleusercontent.com' },
+      client_secret: { label: 'OAuth client secret', placeholder: 'GOCSPX-...' },
+      refresh_token: { label: 'Refresh token', placeholder: '1//... — adwords scope; publish the OAuth app (refresh tokens of apps in "Testing" expire in 7 days)' },
+      login_customer_id: { label: 'Manager account id (optional)', placeholder: '123-456-7890 — only when access goes through a manager (MCC) account' },
+      developer_token: { label: 'Developer token (optional)', placeholder: 'Retired by Google on 2026-09-09 — leave empty unless your setup still needs it' },
+    },
+  },
   // Custom renders a key/value editor instead of these fields; `token` is the
   // first row's default key (what outreach/resources read).
   { value: 'custom', label: 'Custom', icon: 'C', fields: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } } },

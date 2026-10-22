@@ -6,8 +6,10 @@ import type {
   MarketingBudgetPeriod,
   MarketingBudgetSummary,
   MarketingCampaignInput,
+  MarketingDirectPaymentProvider,
   MarketingLedgerEntry,
   MarketingPayee,
+  MarketingPaymentCheckResult,
   MarketingPaymentProvider,
   MarketingSpendRequest,
 } from '../../types';
@@ -15,9 +17,17 @@ import { tokens } from '../../tokens';
 import { Button, Input, Modal, Select, Textarea } from '../common';
 import {
   BUDGET_PERIOD_LABELS,
+  DIRECT_PAYMENT_PROVIDERS,
+  DIRECT_PAYMENT_PROVIDER_LABELS,
+  DIRECT_PROVIDER_CREDENTIAL_FIELDS,
+  DIRECT_REF_FORMATS,
   PAYMENT_PROVIDER_LABELS,
   allocationStatusView,
   campaignPatch,
+  directPaymentCredentials,
+  directRefProblem,
+  isDirectPaymentProvider,
+  payeeRouteLabel,
   formatDateTime,
   formatMinor,
   isCurrencyCode,
@@ -132,13 +142,21 @@ export default function MarketingBudgetTab({
             <FieldLabel>수취인 허용 목록 — 지출 요청의 수취인은 이 안에서만</FieldLabel>
             {campaign.payees.length ? (
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: tokens.colors.textStrong, lineHeight: 1.6 }}>
-                {campaign.payees.map((p) => (
-                  <li key={p.name}>{p.name}{p.ref ? ` (${p.ref})` : ''}{p.note ? ` — ${p.note}` : ''}</li>
-                ))}
+                {campaign.payees.map((p) => {
+                  const route = payeeRouteLabel(p);
+                  return (
+                    <li key={p.name} data-testid={`marketing-payee-${p.name}`}>
+                      {p.name}
+                      {route ? <span style={{ color: tokens.colors.textSecondary }}> — 직접 결제: {route}</span> : p.ref ? ` (${p.ref})` : ''}
+                      {p.note ? ` — ${p.note}` : ''}
+                    </li>
+                  );
+                })}
               </ul>
             ) : (
               <Hint>비어 있습니다 — 수취인이 없으면 어떤 지출도 요청할 수 없습니다.</Hint>
             )}
+            {campaign.payees.some((p) => isDirectPaymentProvider(p.provider)) && ctx.canApproveSpend && <PaymentCheckPanel />}
           </div>
         )}
         {!ctx.canApproveSpend && (
@@ -292,7 +310,43 @@ function moneyField(value: string, currency: string): MoneyParse {
   return parseMajorToMinor(value, currency, { allowZero: true });
 }
 
-interface PayeeDraft { name: string; ref: string; note: string }
+interface PayeeDraft { name: string; ref: string; note: string; provider: '' | MarketingDirectPaymentProvider; credential_id: string }
+
+/**
+ * 연결 확인 — 직접 결제 수취인의 credential 과 대상(광고 캠페인)을 공급자에서 읽기만 한다. 돈은 움직이지 않는다.
+ * 실제(또는 테스트) 계정의 설정이 맞는지, 상한이 걸려 있는지를 지출 요청 전에 본다.
+ */
+function PaymentCheckPanel() {
+  const ctx = useMarketingCtx();
+  const { busy, run } = useAction();
+  const [result, setResult] = useState<MarketingPaymentCheckResult | null>(null);
+  const check = async () => {
+    const out = await run(() => api.checkMarketingPayments(ctx.campaignId));
+    if (out) setResult(out);
+  };
+  return (
+    <div data-testid="marketing-payment-check" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => void check()}>{busy ? '확인 중…' : '연결 확인'}</Button>
+        <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>직접 결제 수취인의 credential · 광고 캠페인 · 지금 상한을 읽어 봅니다. 아무것도 바꾸지 않습니다.</span>
+      </div>
+      {result && (
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.6 }}>
+          {result.payees.map((r) => (
+            <li key={r.payee} data-testid={`marketing-payment-check-${r.payee}`} style={{ color: r.ok ? tokens.colors.textStrong : tokens.colors.dangerLight }}>
+              <strong>{r.ok ? '정상' : '문제'}</strong> · {r.payee} ({DIRECT_PAYMENT_PROVIDER_LABELS[r.provider] || r.provider} {r.ref})
+              {r.ceiling_text ? ` · 지금 상한 ${r.ceiling_text}` : ''}
+              {r.target_name_untrusted ? <span style={{ color: tokens.colors.textMuted }}> · 공급자 이름 “{r.target_name_untrusted}”</span> : ''}
+              {r.api_version ? ` · API ${r.api_version}` : ''}
+              {r.open_request ? ` · 열린 요청 ${r.open_request.status}` : ''}
+              {r.problems.length > 0 && <div>{r.problems.join(' / ')}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 /** 돈 설정 — 통화 · 한도 · 2인 승인 · 수취인 · 결제 방식(marketing.approve_spend + 캠페인 운영 권한). */
 function BudgetSettingsModal({ onClose }: { onClose(): void }) {
@@ -309,7 +363,9 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
   const [periodCap, setPeriodCap] = useState(minorToMajorInput(campaign.budget_period_minor, campaign.currency));
   const [maxTx, setMaxTx] = useState(minorToMajorInput(campaign.max_transaction_minor, campaign.currency));
   const [dual, setDual] = useState(minorToMajorInput(campaign.dual_approval_threshold_minor, campaign.currency));
-  const [payees, setPayees] = useState<PayeeDraft[]>(() => campaign.payees.map((p) => ({ name: p.name, ref: p.ref || '', note: p.note || '' })));
+  const [payees, setPayees] = useState<PayeeDraft[]>(() => campaign.payees.map((p) => ({
+    name: p.name, ref: p.ref || '', note: p.note || '', provider: isDirectPaymentProvider(p.provider) ? p.provider : '', credential_id: p.credential_id || '',
+  })));
   const [provider, setProvider] = useState<MarketingPaymentProvider>(campaign.payment_provider);
   const [credentialId, setCredentialId] = useState(campaign.payment_credential_id || '');
   const [credentials, setCredentials] = useState<Credential[] | null>(null);
@@ -356,10 +412,18 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
     const seen = new Set<string>();
     for (const p of payees) {
       const name = p.name.trim();
-      if (!name && !p.ref.trim() && !p.note.trim()) continue;
+      if (!name && !p.ref.trim() && !p.note.trim() && !p.provider) continue;
       if (!name) { setError('수취인 이름을 비울 수 없습니다'); return; }
       if (seen.has(name.toLowerCase())) { setError(`수취인 "${name}" 이 두 번 있습니다`); return; }
       seen.add(name.toLowerCase());
+      if (p.provider) {
+        const refProblem = directRefProblem(p.provider, p.ref);
+        if (refProblem) { setError(`수취인 "${name}": ${refProblem}`); return; }
+        if (!p.credential_id) { setError(`수취인 "${name}": ${DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]} credential 을 고르세요`); return; }
+        // 서버가 저장하는 순서(name · ref · note · provider · credential_id)와 같게 — 그대로인 수취인을 "바뀜" 으로 보내지 않는다.
+        cleaned.push({ name, ref: p.ref.trim(), ...(p.note.trim() ? { note: p.note.trim() } : {}), provider: p.provider, credential_id: p.credential_id });
+        continue;
+      }
       cleaned.push({ name, ...(p.ref.trim() ? { ref: p.ref.trim() } : {}), ...(p.note.trim() ? { note: p.note.trim() } : {}) });
     }
     if (cleaned.length > 50) { setError('수취인은 50명까지입니다'); return; }
@@ -418,26 +482,60 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
 
         <div>
           <FieldLabel>수취인 허용 목록</FieldLabel>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {payees.map((p, i) => (
-              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1.4fr auto', gap: 6, alignItems: 'end' }}>
-                <Input aria-label={`수취인 ${i + 1} 이름`} placeholder="이름(예: Reddit Ads)" value={p.name}
-                  onChange={(e) => setPayees((rows) => rows.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))} />
-                <Input aria-label={`수취인 ${i + 1} 참조`} placeholder="계정 · 참조(선택)" value={p.ref}
-                  onChange={(e) => setPayees((rows) => rows.map((r, j) => (j === i ? { ...r, ref: e.target.value } : r)))} />
-                <Input aria-label={`수취인 ${i + 1} 메모`} placeholder="메모(선택)" value={p.note}
-                  onChange={(e) => setPayees((rows) => rows.map((r, j) => (j === i ? { ...r, note: e.target.value } : r)))} />
-                <Button size="sm" variant="ghost" onClick={() => setPayees((rows) => rows.filter((_, j) => j !== i))}>삭제</Button>
-              </div>
-            ))}
-            <div><Button size="sm" variant="secondary" onClick={() => setPayees((rows) => [...rows, { name: '', ref: '', note: '' }])}>+ 수취인</Button></div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {payees.map((p, i) => {
+              const set = (patch: Partial<PayeeDraft>) => setPayees((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+              const options = p.provider ? directPaymentCredentials(credentials || [], p.provider, ctx.accountId) : [];
+              return (
+                <div key={i} data-testid={`marketing-payee-row-${i}`} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1.4fr auto', gap: 6, alignItems: 'end' }}>
+                    <Input aria-label={`수취인 ${i + 1} 이름`} placeholder="이름(예: Reddit Ads)" value={p.name} onChange={(e) => set({ name: e.target.value })} />
+                    <Input aria-label={`수취인 ${i + 1} 참조`} placeholder={p.provider ? DIRECT_REF_FORMATS[p.provider] : '계정 · 참조(선택)'} value={p.ref}
+                      onChange={(e) => set({ ref: e.target.value })} />
+                    <Input aria-label={`수취인 ${i + 1} 메모`} placeholder="메모(선택)" value={p.note} onChange={(e) => set({ note: e.target.value })} />
+                    <Button size="sm" variant="ghost" onClick={() => setPayees((rows) => rows.filter((_, j) => j !== i))}>삭제</Button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, alignItems: 'end' }}>
+                    <Select
+                      aria-label={`수취인 ${i + 1} 결제 경로`}
+                      value={p.provider}
+                      options={[
+                        { value: '', label: '캠페인 결제 방식(아래)' },
+                        ...DIRECT_PAYMENT_PROVIDERS.map((d) => ({ value: d, label: `${DIRECT_PAYMENT_PROVIDER_LABELS[d]} — 광고 캠페인 상한 올리기` })),
+                      ]}
+                      onChange={(e) => set({ provider: e.target.value as PayeeDraft['provider'], credential_id: '' })}
+                    />
+                    {p.provider && (
+                      <Select
+                        aria-label={`수취인 ${i + 1} credential`}
+                        value={p.credential_id}
+                        placeholder={credentials === null ? '불러오는 중…' : options.length ? '— credential 선택 —' : `${DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]} credential 없음`}
+                        options={options.map((c) => ({ value: c.id, label: c.name }))}
+                        onChange={(e) => set({ credential_id: e.target.value })}
+                      />
+                    )}
+                  </div>
+                  {p.provider && (
+                    <Hint>
+                      {DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]} 대상: {DIRECT_REF_FORMATS[p.provider]}. credential 은 Credentials 에서 provider
+                      “{DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]}” 로 이 계정에 만듭니다(필드 {[...DIRECT_PROVIDER_CREDENTIAL_FIELDS[p.provider].required, ...DIRECT_PROVIDER_CREDENTIAL_FIELDS[p.provider].optional.map((f) => `${f}(선택)`)].join(', ')}).
+                    </Hint>
+                  )}
+                </div>
+              );
+            })}
+            <div><Button size="sm" variant="secondary" onClick={() => setPayees((rows) => [...rows, { name: '', ref: '', note: '', provider: '', credential_id: '' }])}>+ 수취인</Button></div>
           </div>
           <Hint>에이전트는 이 목록 밖의 수취인에게 지출을 요청할 수 없습니다. 외부에서 들어온 글이 수취인을 바꾸지 못하게 하는 장치입니다.</Hint>
+          <Hint>
+            직접 결제(Meta Ads · Google Ads) 수취인은 정해 둔 광고 캠페인 하나의 고정 상한만 올립니다 — Meta 는 캠페인 지출 한도(spend_cap),
+            Google 은 공유하지 않는 캠페인 총예산. 처음 상한은 사람이 광고 화면에서 정하고, 일 예산 캠페인은 쓸 수 없습니다. 승인 금액 = 상한이 늘어나는 양입니다.
+          </Hint>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
           <Select
-            label="결제 방식"
+            label="결제 방식(직접 결제 경로가 없는 수취인)"
             value={provider}
             options={(['manual', 'webhook'] as MarketingPaymentProvider[]).map((p) => ({ value: p, label: PAYMENT_PROVIDER_LABELS[p] }))}
             onChange={(e) => setProvider(e.target.value as MarketingPaymentProvider)}

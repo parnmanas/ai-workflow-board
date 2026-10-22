@@ -3538,6 +3538,10 @@ export type MarketingCapability =
 export type MarketingCampaignStatus = 'draft' | 'active' | 'paused' | 'archived';
 export type MarketingBudgetPeriod = 'none' | 'week' | 'month';
 export type MarketingPaymentProvider = 'manual' | 'webhook';
+/** 수취인마다 정하는 직접 결제 공급자 — 광고 캠페인의 지출 상한을 올린다(docs/marketing.md "직접 결제 어댑터"). */
+export type MarketingDirectPaymentProvider = 'meta_ads' | 'google_ads';
+/** 지출 요청이 스냅샷한 결제 경로 — 캠페인 결제 방식 또는 수취인의 직접 공급자. */
+export type MarketingSpendProvider = MarketingPaymentProvider | MarketingDirectPaymentProvider;
 export type MarketingFeedbackTicketStatus = 'backlog' | 'todo';
 
 export type MarketingLimitKey =
@@ -3555,6 +3559,46 @@ export interface MarketingPayee {
   name: string;
   ref?: string;
   note?: string;
+  /** 직접 결제 공급자 — 있으면 ref 는 그 공급자의 광고 캠페인이고 credential_id 가 필요하다. 없으면 캠페인 결제 방식. */
+  provider?: MarketingDirectPaymentProvider;
+  credential_id?: string;
+}
+
+/** 연결 확인(POST /campaigns/:id/payment/check)의 수취인 한 줄 — 공급자를 읽기만 한 결과. */
+export interface MarketingPayeePaymentCheck {
+  payee: string;
+  provider: MarketingDirectPaymentProvider;
+  ref: string;
+  credential_id: string;
+  ok: boolean;
+  problems: string[];
+  ceiling_minor: number | null;
+  ceiling_text: string;
+  ceiling_units: string | null;
+  target_name_untrusted: string;
+  facts: Record<string, string | number | boolean | null>;
+  api_version: string;
+  open_request: { id: string; status: string } | null;
+}
+
+export interface MarketingPaymentCheckResult {
+  checked_at: string;
+  payees: MarketingPayeePaymentCheck[];
+}
+
+/** 요청별 공급자 확인 — 지금 상한이 계획(from → to)의 어디에 있나. 판정이 아니라 대조를 돕는 표시다. */
+export interface MarketingSpendInspection {
+  spend_request_id: string;
+  status: string;
+  from: string;
+  to: string;
+  from_minor: number;
+  to_minor: number;
+  observed: string | null;
+  observed_minor: number | null;
+  position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
+  report: Omit<MarketingPayeePaymentCheck, 'payee' | 'provider' | 'ref' | 'credential_id' | 'open_request'>;
+  checked_at: string;
 }
 
 export interface MarketingCampaign {
@@ -3912,10 +3956,14 @@ export interface MarketingSpendRequest {
   payee_ref: string;
   purpose: string;
   expected_outcome: string;
-  provider: MarketingPaymentProvider;
+  provider: MarketingSpendProvider;
   payload: Record<string, any>;
   /** 승인 시 그대로 돌려보내야 하는 실행 내용의 해시(사람이 본 것 = 서버가 실행하는 것). */
   payload_sha256: string;
+  /** 직접 공급자의 실행 계획 한 문장(서버가 쓴다). 그 밖은 ''. 구버전 서버는 싣지 않는다. */
+  plan_text?: string;
+  /** 직접 공급자의 결과를 사람이 기록할 때 거래 id 자리에 넣을 값. */
+  suggested_provider_ref?: string;
   /**
    * 요청이 들어올 때 2인 승인 대상이었는가 — 그 뒤 임계값을 바꿔도 내려가지 않는다. 서버는 승인할 때
    * 이것과 그때의 임계값 중 더 엄격한 쪽을 쓴다. 구버전 서버는 싣지 않는다.

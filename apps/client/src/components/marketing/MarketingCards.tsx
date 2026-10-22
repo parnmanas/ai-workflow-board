@@ -8,6 +8,7 @@ import type {
   MarketingChannelKind,
   MarketingPost,
   MarketingPostSends,
+  MarketingSpendInspection,
   MarketingSpendRequest,
   OutreachChannelSummary,
 } from '../../types';
@@ -25,6 +26,7 @@ import {
   buildChannelApproval,
   canCancelSpend,
   canReconcileSpend,
+  canRecordRefund,
   channelStatusView,
   channelTargetKey,
   emailConfigBody,
@@ -35,6 +37,8 @@ import {
   formatCount,
   formatDateTime,
   formatMinor,
+  inspectionSummary,
+  isDirectPaymentProvider,
   isSpendExpired,
   listHoldSummary,
   parseMajorToMinor,
@@ -45,7 +49,9 @@ import {
   sendOutcomeLine,
   shortHash,
   spendApprovalState,
-  spendStatusView,
+  spendApproveHint,
+  spendStatusViewFor,
+  unknownReconcileHint,
   validateEmailDraft,
   type EmailConfigDraft,
   type OutreachChoice,
@@ -954,7 +960,13 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
   const expired = isSpendExpired(spend);
   const pending = spend.status === 'pending';
   const unknown = spend.status === 'unknown';
+  const direct = isDirectPaymentProvider(spend.provider);
+  const [inspection, setInspection] = useState<MarketingSpendInspection | null>(null);
   const close = () => setDialog(null);
+  const inspect = async () => {
+    const out = await run(() => api.inspectMarketingSpend(spend.id));
+    if (out) setInspection(out);
+  };
 
   const actions = ctx.canApproveSpend ? (
     <>
@@ -972,7 +984,8 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
       {canReconcileSpend(spend) && (
         <Button size="sm" variant="danger" disabled={busy} onClick={() => setDialog('failed')}>실패로 기록…</Button>
       )}
-      {spend.status === 'paid' && <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog('refund')}>환불 기록…</Button>}
+      {direct && unknown && <Button size="sm" variant="secondary" disabled={busy} onClick={() => void inspect()}>공급자에서 확인</Button>}
+      {canRecordRefund(spend) && <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog('refund')}>환불 기록…</Button>}
     </>
   ) : null;
 
@@ -983,7 +996,7 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
       title={(
         <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span>지출 요청 · {spend.payee}</span>
-          <StatusPill view={spendStatusView(spend.status)} />
+          <StatusPill view={spendStatusViewFor(spend)} />
           {pending && approval.label && <span data-testid={`marketing-spend-dual-${spend.id}`}><StatusPill view={{ label: approval.label, tone: 'queued' }} /></span>}
         </span>
       )}
@@ -1007,6 +1020,18 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
           >
             ⚠ {UNKNOWN_SPEND_MESSAGE}
             {spend.error && <div style={{ fontWeight: 400, marginTop: 4 }}>사유: {spend.error}</div>}
+            {direct && <div style={{ fontWeight: 400, marginTop: 4 }}>{unknownReconcileHint(spend)}</div>}
+            {inspection && (
+              <div data-testid={`marketing-spend-inspection-${spend.id}`} style={{ fontWeight: 600, marginTop: 6 }}>
+                {inspectionSummary(inspection, currency)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {spend.plan_text && (
+          <div data-testid={`marketing-spend-plan-${spend.id}`} style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textStrong, lineHeight: 1.5 }}>
+            {spend.plan_text}
           </div>
         )}
 
@@ -1038,7 +1063,7 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
         />
 
         <div>
-          <FieldLabel>실행 payload — 승인하면 이 내용 그대로 실행됩니다</FieldLabel>
+          <FieldLabel>{direct ? '실행 계획 — 서버가 공급자를 읽어 만들었고, 승인하면 이 내용 그대로 실행됩니다' : '실행 payload — 승인하면 이 내용 그대로 실행됩니다'}</FieldLabel>
           <JsonBlock value={spend.payload} testId={`marketing-spend-payload-${spend.id}`} />
           <Hint>
             payload sha256 <code data-testid={`marketing-spend-hash-${spend.id}`}>{shortHash(spend.payload_sha256)}</code>… — 승인할 때 이 해시를 함께 보내
@@ -1064,6 +1089,12 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
           <Hint>지출 승인 · 결제 기록은 marketing.approve_spend 권한이 있는 사람만 할 수 있습니다.</Hint>
         )}
         {spend.status === 'executing' && <Hint>결제 시스템의 응답을 기다리는 중입니다 — 다시 보내지 않습니다.</Hint>}
+        {direct && spend.status === 'paid' && (
+          <Hint>
+            광고 플랫폼의 상한을 올린 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로
+            낮추는 기능과 함께 후속으로 둡니다 — 상한이 그대로인데 돌려받았다고 적으면 원장이 실제보다 적게 셉니다.
+          </Hint>
+        )}
       </div>
 
       {dialog === 'approve' && <SpendApproveModal spend={spend} channelName={channel?.name || ''} onClose={close} />}
@@ -1140,7 +1171,9 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
     if (!result) return;
     onClose();
     if (!result.final) ctx.notify(SECOND_APPROVAL_MESSAGE, 'info');
-    else if (result.status === 'paid') ctx.notify('승인했고 결제 시스템이 결제를 완료했습니다', 'success');
+    else if (result.status === 'paid') {
+      ctx.notify(isDirectPaymentProvider(result.provider) ? '승인했고 광고 플랫폼에 상한을 반영했습니다' : '승인했고 결제 시스템이 결제를 완료했습니다', 'success');
+    }
     else if (result.status === 'unknown') ctx.notify(UNKNOWN_SPEND_MESSAGE, 'error');
     else if (result.status === 'failed') ctx.notify(`승인했지만 결제가 거절됐습니다: ${result.error || ''}`, 'error');
     else if (result.provider === 'manual') ctx.notify('승인했습니다 — AWB 밖에서 결제한 뒤 결제 완료를 기록하세요', 'success');
@@ -1176,11 +1209,14 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
             ['payload sha256', <code key="hash">{shortHash(shownHash)}…</code>],
           ]}
         />
+        {spend.plan_text && (
+          <div data-testid="marketing-spend-approve-plan" style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary, lineHeight: 1.5 }}>
+            {spend.plan_text}
+          </div>
+        )}
         <JsonBlock value={spend.payload} maxHeight={180} />
         <Hint tone="warning">
-          {spend.provider === 'webhook'
-            ? '승인하면 서버가 곧바로 결제 엔드포인트로 이 내용을 보냅니다. 자동 재시도는 없습니다.'
-            : '승인하면 이 금액이 예산에서 보류됩니다. AWB 밖에서 결제한 뒤 거래 id 와 함께 결제 완료를 기록하세요.'}
+          {spendApproveHint(spend)}
           {approval.required === 2 && ' 2인 승인 대상이라 다른 승인자 한 명이 더 승인해야 실행됩니다.'}
         </Hint>
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
@@ -1200,7 +1236,8 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
 
 function MarkPaidModal({ spend, onClose }: { spend: MarketingSpendRequest; onClose(): void }) {
   const { busy, run } = useAction();
-  const [ref, setRef] = useState('');
+  // 광고 플랫폼 상한 변경에는 거래 id 가 없다 — 서버가 계획에서 만든 기록용 값을 미리 채운다(사람이 확인하고 고칠 수 있다).
+  const [ref, setRef] = useState(spend.suggested_provider_ref || '');
   const [receipt, setReceipt] = useState('');
   const [note, setNote] = useState('');
   const receiptOk = !receipt.trim() || !!safeHttpUrl(receipt);
