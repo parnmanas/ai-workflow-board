@@ -6,11 +6,13 @@ import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingPost } from '../../entities/MarketingPost';
 import { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
 import { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
+import { MarketingListHoldService } from './marketing-list-hold.service';
 
 export interface InboxCounts {
   campaign_id: string;
   account_id: string;
   name: string;
+  lists_held: number;
   channels_proposed: number;
   posts_draft: number;
   allocations_proposed: number;
@@ -31,6 +33,7 @@ export class MarketingInboxService {
     @InjectRepository(MarketingPost) private readonly postRepo: Repository<MarketingPost>,
     @InjectRepository(MarketingBudgetAllocation) private readonly allocationRepo: Repository<MarketingBudgetAllocation>,
     @InjectRepository(MarketingSpendRequest) private readonly spendRepo: Repository<MarketingSpendRequest>,
+    private readonly listHolds: MarketingListHoldService,
   ) {}
 
   async counts(accountIds: string[]): Promise<InboxCounts[]> {
@@ -58,17 +61,19 @@ export class MarketingInboxService {
       }
       return out;
     };
-    const [channels, posts, allocations, spend, manual] = await Promise.all([
+    const [channels, posts, allocations, spend, manual, holds] = await Promise.all([
       grouped(this.channelRepo, ['proposed']),
       grouped(this.postRepo, ['draft', 'approved']),
       grouped(this.allocationRepo, ['proposed']),
       grouped(this.spendRepo, ['pending', 'unknown']),
       grouped(this.spendRepo, ['approved'], (qb) => qb.andWhere('t.provider = :p', { p: 'manual' })),
+      this.listHolds.activeByCampaign(campaigns.filter((c) => c.status !== 'archived').map((c) => c.id)),
     ]);
     return campaigns.map((c) => ({
       campaign_id: c.id,
       account_id: c.account_id,
       name: c.name,
+      lists_held: holds.get(c.id)?.length || 0,
       channels_proposed: c.status === 'archived' ? 0 : channels.get(c.id)?.proposed || 0,
       // approved 게시물은 manual 채널에서 사람이 올리고 링크를 기록하기를 기다린다.
       posts_draft: c.status === 'archived' ? 0 : (posts.get(c.id)?.draft || 0) + (posts.get(c.id)?.approved || 0),

@@ -140,3 +140,22 @@ test('마케팅 권한이 없으면 행도 승인 대기 요청도 없다', asyn
   assert.equal(Boolean(marketingRow(view)), false);
   assert.equal(state.requests.some((p) => p.includes('/marketing/inbox')), false, '부를 수 없는 경로를 부르지 않는다');
 });
+
+test('목록 중지와 해제 이벤트가 관리자의 승인함 배지를 갱신한다', async (t) => {
+  const { view, state, FakeEventSource } = await mountSidebar(t, { permissions: ['marketing.manage'], inbox: inboxOf(0) });
+  const source = FakeEventSource.instances.at(-1);
+  state.inbox = { total: 1, campaigns: [{
+    campaign_id: 'c-1', account_id: 'acc-1', name: '런칭', lists_held: 1,
+    channels_proposed: 0, posts_draft: 0, allocations_proposed: 0,
+    spend_pending: 0, spend_unknown: 0, manual_awaiting_payment: 0, actionable: 1,
+  }] };
+  act(() => source.emit('marketing_update', { account_id: 'acc-1', campaign_id: 'c-1', kind: 'list', entity_id: 'hold', action: 'held' }));
+  await flush(1, MARKETING_INBOX_REFRESH_DEBOUNCE_MS + 100);
+  await flush();
+  assert.equal(marketingRow(view).querySelector('[aria-label="승인 대기 1건"]')?.textContent, '1');
+  state.inbox = inboxOf(0);
+  act(() => source.emit('marketing_update', { account_id: 'acc-1', campaign_id: 'c-1', kind: 'list', entity_id: 'hold', action: 'released' }));
+  await flush(1, MARKETING_INBOX_REFRESH_DEBOUNCE_MS + 100);
+  await flush();
+  assert.equal(marketingRow(view).querySelectorAll('[aria-label^="승인 대기"]').length, 0);
+});

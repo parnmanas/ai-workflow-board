@@ -23,6 +23,7 @@ import { InstanceQuiesceService } from '../../services/instance-quiesce.service'
 import { LogService } from '../../services/log.service';
 import { UserChannelDispatcherService } from '../../services/notification-providers';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
+import { MarketingListHoldService } from './marketing-list-hold.service';
 
 const SWEEP_MS = 60_000;
 /** 한 사람에게 보내는 것 전체의 상한. provider 는 요청마다 끊지만 바인딩 수 · 429 재시도만큼 길어진다. */
@@ -133,6 +134,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
     private readonly accountAccess: AccountAccessService,
     private readonly instanceQuiesce: InstanceQuiesceService,
     private readonly logService: LogService,
+    private readonly listHolds: MarketingListHoldService,
     hooks: MarketingCampaignHooks,
   ) {
     hooks.onDeleteChildren(async (campaign, manager) => {
@@ -216,7 +218,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
     const spendWhere: FindOptionsWhere<MarketingSpendRequest>[] = [{ status: 'unknown' }];
     if (openCampaignIds.length) spendWhere.push({ campaign_id: In(openCampaignIds), status: 'pending' });
 
-    const [channels, posts, allocations, spends] = await Promise.all([
+    const [channels, posts, allocations, spends, holds] = await Promise.all([
       unannounced(this.channelRepo, 'proposed', 'channel_proposed', ['platform', 'proposed_by_type', 'proposed_by_id']),
       unannounced(this.postRepo, 'draft', 'post_draft', ['created_by_type', 'created_by_id']),
       unannounced(this.allocationRepo, 'proposed', 'allocation_proposed', ['proposed_by_type', 'proposed_by_id']),
@@ -227,18 +229,30 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
           'requested_by_type', 'requested_by_id', 'created_at', 'updated_at',
         ],
       }),
+      this.listHolds.activeByCampaign(openCampaignIds),
     ]);
 
     const spendCandidates = spends
       .map((row) => spendNoticeCandidate(row, now))
       .filter((c): c is ApprovalNoticeCandidate => !!c);
-    const announced = spendCandidates.length
-      ? await this.noticeRepo.find({ where: { entity_id: In(spendCandidates.map((c) => c.entity_id)) }, select: ['entity_id', 'kind'] })
+    // 한 중지를 여러 캠페인이 공유한다. 캠페인마다 한 번, 같은 캠페인의 채널 수와는 무관하다.
+    const holdCandidates: ApprovalNoticeCandidate[] = [...holds].flatMap(([campaignId, rows]) => rows.map((hold) => ({
+      kind: 'list_hold',
+      entity_id: `${hold.id}:${campaignId}`,
+      account_id: hold.account_id,
+      campaign_id: campaignId,
+      at: hold.created_at,
+      exclude_user_ids: [],
+      list_hold: { name: hold.list_name, rate: Number(hold.stats.rate) },
+    })));
+    const stateCandidates = [...spendCandidates, ...holdCandidates];
+    const announced = stateCandidates.length
+      ? await this.noticeRepo.find({ where: { entity_id: In(stateCandidates.map((c) => c.entity_id)) }, select: ['entity_id', 'kind'] })
       : [];
     const seen = new Set(announced.map((n) => `${n.entity_id}:${n.kind}`));
 
     return [
-      ...spendCandidates.filter((c) => !seen.has(`${c.entity_id}:${c.kind}`)),
+      ...stateCandidates.filter((c) => !seen.has(`${c.entity_id}:${c.kind}`)),
       ...allocations.map((r) => proposalNoticeCandidate('allocation_proposed', { ...r, by_type: r.proposed_by_type, by_id: r.proposed_by_id }, now)),
       ...channels.map((r) => proposalNoticeCandidate('channel_proposed', { ...r, by_type: r.proposed_by_type, by_id: r.proposed_by_id }, now)),
       ...posts.map((r) => proposalNoticeCandidate('post_draft', { ...r, by_type: r.created_by_type, by_id: r.created_by_id }, now)),

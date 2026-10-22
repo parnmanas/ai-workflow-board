@@ -16,6 +16,7 @@ import { formatMinorAmount } from './money';
 /** 알림 종류. 이 순서가 본문 순서다 — 급한 것부터, 돈이 나갔는지 모르는 것이 맨 앞. */
 export const APPROVAL_NOTICE_KINDS = [
   'spend_unknown',
+  'list_hold',
   'spend_second_approval',
   'spend_pending',
   'allocation_proposed',
@@ -42,6 +43,12 @@ export const APPROVAL_NOTICE_RULES: Record<ApprovalNoticeKind, ApprovalNoticeRul
     permission: PERMISSIONS.APPROVE_MARKETING_SPEND,
     label: '결제 결과 불명',
     hint: '결제됐는지 확인해 결과를 기록하세요',
+    burst: false,
+  },
+  list_hold: {
+    permission: PERMISSIONS.MANAGE_MARKETING,
+    label: '목록 발송 중지',
+    hint: '메일 채널에서 목록을 확인하고 중지를 해제하세요',
     burst: false,
   },
   spend_second_approval: {
@@ -81,6 +88,7 @@ export interface ApprovalNoticeCandidate {
   spend?: { amount_minor: number; currency: string; payee: string; expires_at: Date | null };
   /** 채널 제안의 플랫폼(고정 목록 값). */
   platform?: string;
+  list_hold?: { name: string; rate: number };
 }
 
 export interface NoticeSpendRow {
@@ -170,6 +178,7 @@ export function spendNoticeCandidate(row: NoticeSpendRow, now: Date): ApprovalNo
 /**
  * 이 계정의 대기 알림을 지금 보낼지 정한다. 때가 된 항목이 하나라도 있으면 보낸다. 보낼 때는 그 계정의 미알림 항목을
  * 전부 싣는다 — 기다리던 것이 같이 가는 편이 한 통 더 보내는 것보다 낫다.
+ *   - 목록 발송 중지는 묶음 대기 없이 다음 sweep에서 즉시 보낸다.
  *   - 어떤 항목도 APPROVAL_NOTICE_MAX_WAIT_MS 를 넘겨 기다리지 않는다.
  *   - 결과 불명 · 두 번째 승인은 다른 항목을 기다리지 않는다. 생긴 지 APPROVAL_NOTICE_QUIET_MS 면 보낸다(잇달아 생긴
  *     것만 묶는다). 다른 캠페인의 사이클이 초안을 쏟아내는 중이어도 마찬가지다.
@@ -182,6 +191,7 @@ export function approvalDigestDue(
   runningCampaignIds: ReadonlySet<string>,
 ): boolean {
   if (!items.length) return false;
+  if (items.some((i) => i.kind === 'list_hold')) return true;
   const nowMs = now.getTime();
   let oldest = Infinity;
   let newest = -Infinity;
@@ -232,7 +242,15 @@ function kindLine(kind: ApprovalNoticeKind, items: ApprovalNoticeCandidate[], no
   const spends = items.filter((i) => i.spend);
   const platforms = [...new Set(items.map((i) => i.platform).filter((p): p is string => !!p))];
   let detail = '';
-  if (spends.length) {
+  if (kind === 'list_hold') {
+    const shown = items.slice(0, MAX_SPEND_LINES).map((i) => {
+      const hold = i.list_hold!;
+      const rate = Number.isFinite(hold.rate) ? `${(hold.rate * 100).toFixed(2)}%` : '확인 필요';
+      return `${oneLine(hold.name, 60)} (신고율 ${rate})`;
+    });
+    const rest = items.length - shown.length;
+    detail = `: ${shown.join(', ')}${rest > 0 ? ` 외 ${rest}건` : ''}`;
+  } else if (spends.length) {
     const shown = spends.slice(0, MAX_SPEND_LINES).map((i) => {
       const s = i.spend!;
       return `${formatMinorAmount(s.amount_minor, s.currency)} → ${oneLine(s.payee, 60)}${expiresIn(s.expires_at, now)}`;

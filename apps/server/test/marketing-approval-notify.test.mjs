@@ -306,3 +306,83 @@ test('marketing approval notices: batched, once, only to the people who decide',
   assert.deepEqual(await access.accessibleIds({ id: owner.id, role: 'admin' }), [], 'same rule as the forward direction');
   await ds.getRepository('User').update(owner.id, { status: 'active' });
 });
+
+test('held lists: per-campaign inbox, account isolation, immediate safe notices and re-hold', async (t) => {
+  const { app, port, modules } = await bootApp({ port: 0 });
+  t.after(() => closeTestApp(app));
+  const { getDataSourceToken, AuthService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const notify = app.get(MarketingApprovalNotifyService);
+  const owner = await createUser(app, getDataSourceToken, { name: 'hold-owner', role: 'user' });
+  const outsider = await createUser(app, getDataSourceToken, { name: 'hold-outsider', role: 'admin' });
+  const account = await createAccount(app, getDataSourceToken, 'hold-account', { ownerUserId: owner.id });
+  const other = await createAccount(app, getDataSourceToken, 'hold-other', { ownerUserId: outsider.id });
+  const permissions = (values) => ds.getRepository('User').update(owner.id, { permissions: JSON.stringify(values) });
+  await permissions(['marketing.manage']);
+  const delivered = [];
+  app.get(NotificationProviderRegistry).get('discord').send = async (target, _credentials, payload) => {
+    delivered.push({ target, payload });
+    return { ok: true };
+  };
+  await ds.getRepository('UserChannel').save([
+    { user_id: owner.id, provider: 'discord', target: 'hold-owner', credentials: '' },
+    { user_id: outsider.id, provider: 'discord', target: 'hold-outsider', credentials: '' },
+  ]);
+  const campaigns = ds.getRepository('MarketingCampaign');
+  const makeCampaign = (name, accountId = account.id, status = 'active') => campaigns.save(campaigns.create({ name, slug: name.toLowerCase(), account_id: accountId, status }));
+  const first = await makeCampaign('First');
+  const second = await makeCampaign('Second');
+  const archived = await makeCampaign('Archived', account.id, 'archived');
+  const foreign = await makeCampaign('Foreign', other.id);
+  const channels = ds.getRepository('MarketingChannel');
+  const addChannel = (campaign, list, suffix, kind = 'email') => channels.save(channels.create({
+    account_id: campaign.account_id, campaign_id: campaign.id, platform: 'email', kind, status: 'active',
+    name: 'AGENT-TEXT @everyone https://evil.example', target: suffix, target_key: suffix,
+    config: { list_name: list }, rationale: 'AGENT-TEXT',
+  }));
+  await addChannel(first, 'newsletter', 'first');
+  await addChannel(first, 'newsletter', 'duplicate');
+  await addChannel(second, 'newsletter', 'second');
+  await addChannel(archived, 'newsletter', 'archived');
+  await addChannel(foreign, 'newsletter', 'foreign');
+  await addChannel(first, 'foreign-only', 'wrong-account');
+  await addChannel(first, 'manual-list', 'manual', 'manual');
+  const holds = ds.getRepository('MarketingListHold');
+  const makeHold = (list, accountId = account.id, status = 'held') => holds.save(holds.create({
+    account_id: accountId, list_name: list, status, stats: { rate: 0.03, injected: 'AGENT-TEXT' },
+    release_note: 'AGENT-TEXT',
+  }));
+  const hold = await makeHold('newsletter');
+  await makeHold('foreign-only', other.id);
+  await makeHold('manual-list');
+  await makeHold('released-list', account.id, 'released');
+  await addChannel(first, 'released-list', 'released');
+  const headers = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}` };
+  const inbox = async () => {
+    const result = await call(`http://127.0.0.1:${port}/api/marketing/inbox`, { headers });
+    assert.equal(result.status, 200, result.text);
+    return result.body;
+  };
+  const counts = await inbox();
+  assert.equal(counts.total, 2);
+  assert.deepEqual(counts.campaigns.map((c) => [c.campaign_id, c.lists_held]).sort(), [[first.id, 1], [second.id, 1]].sort());
+  await permissions(['marketing.approve_spend']);
+  assert.equal((await inbox()).total, 0, 'only manage can act on holds');
+  await permissions(['marketing.manage']);
+  // Fresh holds bypass quiet time even during a running agent cycle.
+  await ds.getRepository('MarketingCycle').save({ account_id: account.id, campaign_id: first.id, status: 'running', cycle_no: 1, started_at: new Date() });
+  const result = await notify.sweep();
+  assert.equal(result.items, 2, JSON.stringify(result));
+  assert.equal(result.recipients, 1);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].target, 'hold-owner');
+  assert.match(delivered[0].payload.body, /newsletter \(신고율 3.00%\)/);
+  assert.doesNotMatch(delivered[0].payload.body, /AGENT-TEXT|Foreign|Archived|foreign-only|manual-list/);
+  assert.equal((await notify.sweep()).items, 0, 'shared hold does not cause conflicting claims or repeats');
+  await holds.update(hold.id, { status: 'released' });
+  assert.equal((await inbox()).total, 0);
+  const replacement = await makeHold('newsletter');
+  assert.notEqual(replacement.id, hold.id);
+  assert.equal((await notify.sweep()).items, 2, 'new hold episode is announced again');
+  assert.equal((await inbox()).total, 2);
+});

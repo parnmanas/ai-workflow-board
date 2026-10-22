@@ -234,10 +234,19 @@ test('digest body stays short: overflow becomes "외 n"', () => {
 
   const longName = new Map([['camp', { name: 'x'.repeat(500) }]]);
   const kinds = APPROVAL_NOTICE_KINDS.flatMap((kind) => Array.from({ length: 40 }, () => candidate(kind, {
+    list_hold: kind === 'list_hold' ? { name: 'newsletter', rate: 0.03 } : undefined,
     platform: kind === 'channel_proposed' ? 'reddit' : undefined,
     spend: kind.startsWith('spend_') ? { amount_minor: 123456789, currency: 'KRW', payee: 'p'.repeat(300), expires_at: null } : undefined,
   })));
   const huge = composeApprovalDigest(kinds, longName, { now: NOW });
   assert.ok(huge.body.length <= 1500 + 2, `body is bounded (${huge.body.length})`);
   assert.ok(huge.title.length < 120, 'campaign names are clipped in the title');
+});
+
+
+test('list holds bypass the quiet period and only reach marketing managers', () => {
+  const hold = candidate('list_hold', { at: NOW, list_hold: { name: 'newsletter', rate: 0.03 } });
+  assert.equal(approvalDigestDue([hold], NOW, new Set(['camp'])), true);
+  assert.deepEqual(approvalNoticesFor({ id: 'manager', role: 'user', permissions: ['marketing.manage'] }, [hold]), [hold]);
+  assert.deepEqual(approvalNoticesFor({ id: 'payer', role: 'user', permissions: ['marketing.approve_spend'] }, [hold]), []);
 });

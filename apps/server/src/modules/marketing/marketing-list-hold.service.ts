@@ -52,6 +52,30 @@ export class MarketingListHoldService {
     return new Map(rows.map((r) => [r.list_name, r]));
   }
 
+  /** 승인함과 알림의 공통 조회. JSON config는 JS에서 읽어 SQLite/Postgres가 같은 기준을 쓴다. */
+  async activeByCampaign(campaignIds: string[]): Promise<Map<string, MarketingListHold[]>> {
+    const result = new Map<string, MarketingListHold[]>();
+    if (!campaignIds.length) return result;
+    const channels = await this.channelRepo.find({
+      where: { campaign_id: In(campaignIds), kind: 'email' },
+      select: ['account_id', 'campaign_id', 'config'],
+    });
+    if (!channels.length) return result;
+    const holds = await this.holdRepo.find({
+      where: { account_id: In([...new Set(channels.map((c) => c.account_id))]), status: 'held' },
+    });
+    const key = (accountId: string, list: string) => JSON.stringify([accountId, list]);
+    const byList = new Map(holds.map((h) => [key(h.account_id, h.list_name), h]));
+    for (const channel of channels) {
+      const hold = byList.get(key(channel.account_id, String(channel.config?.list_name || '')));
+      if (!hold) continue;
+      const list = result.get(channel.campaign_id) || [];
+      if (!list.some((h) => h.id === hold.id)) list.push(hold);
+      result.set(channel.campaign_id, list);
+    }
+    return result;
+  }
+
   async list(accountId: string, opts: { list?: string; status?: string; limit?: number } = {}): Promise<MarketingListHold[]> {
     return this.holdRepo.find({
       where: {

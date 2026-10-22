@@ -23,7 +23,7 @@ export class MarketingApprovalNotice {
   @Column({ type: 'varchar' })
   kind: string;
 
-  /** 채널 · 게시물 · 편성 · 지출 요청의 id(kind 가 어느 테이블인지 정한다). */
+  /** 채널 · 게시물 · 편성 · 지출 요청의 id. list_hold는 중지 id:캠페인 id(kind 가 어느 테이블인지 정한다). */
   @Column({ type: 'varchar' })
   entity_id: string;
 

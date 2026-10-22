@@ -398,7 +398,7 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   assert.deepEqual(archivedInbox.campaigns, [{
     campaign_id: campaign.id, account_id: account.id, name: campaign.name,
     channels_proposed: 0, posts_draft: 0, allocations_proposed: 0, spend_pending: 0,
-    spend_unknown: 1, manual_awaiting_payment: 1, actionable: 2,
+    spend_unknown: 1, manual_awaiting_payment: 1, lists_held: 0, actionable: 2,
   }]);
   assert.equal((await inboxOf(M)).total, 0, 'manage alone cannot reconcile money');
   assert.equal((await api('/inbox', B)).status, 403, 'another admin cannot see the owner account');

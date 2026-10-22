@@ -4336,6 +4336,7 @@ export interface MarketingInboxCampaignCounts {
   campaign_id: string;
   account_id: string;
   name: string;
+  lists_held: number;
   channels_proposed: number;
   posts_draft: number;
   allocations_proposed: number;

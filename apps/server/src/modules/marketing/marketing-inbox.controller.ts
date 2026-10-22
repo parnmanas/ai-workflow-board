@@ -26,7 +26,7 @@ export class MarketingInboxController {
       const money = userHas(req, PERMISSIONS.APPROVE_MARKETING_SPEND);
       const campaigns = await this.inbox.counts(listAccountIds(req));
       const actionable = (c: (typeof campaigns)[number]) =>
-        (manage ? c.channels_proposed + c.posts_draft : 0)
+        (manage ? c.channels_proposed + c.posts_draft + c.lists_held : 0)
         + (money ? c.allocations_proposed + c.spend_pending + c.spend_unknown + c.manual_awaiting_payment : 0);
       const rows = campaigns.map((c) => ({ ...c, actionable: actionable(c) }));
       return res.json({ total: rows.reduce((sum, c) => sum + c.actionable, 0), campaigns: rows.filter((c) => c.actionable > 0) });

@@ -696,6 +696,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 종류(본문 순서) | 권한 | 알리지 않는 사람 |
 | --- | --- | --- |
 | 결제 결과 불명(`unknown`) — 대조 필요 | `marketing.approve_spend` | — |
+| 목록 발송 중지(`list_hold`) | `marketing.manage` | — |
 | 두 번째 승인 대기(2인 규칙의 첫 승인 뒤) | `marketing.approve_spend` | 이미 승인한 사람, 요청한 사람 |
 | 새 지출 요청(`pending`) | `marketing.approve_spend` | 요청한 사람 |
 | 예산 편성 제안 | `marketing.approve_spend` | 제안한 사람 |
@@ -712,14 +713,16 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - **사용자 채널의 "Mentions of me"(`notify_mention`)를 따른다.** 오케스트레이션 confirm 게이트 알림과 같은 판단이다. 시스템이 당신의 결정을 요구하고, 결정이 없으면 일이 진행되지 않는다(지출 요청은 72시간 뒤 만료된다). 기본값이 켜져 있다.
 - **묶어서 보낸다.** 계정 단위로 판단하고, 사람마다 한 통이다.
   - 지출 요청 · 편성 · 채널 · 게시물은 계정에 새 항목이 2분 동안 더 없을 때 보낸다. 그 캠페인의 에이전트 사이클이 아직 돌면 사이클이 끝날 때까지 기다린다.
+  - 목록 발송 중지는 다음 1분 sweep에서 즉시 알린다. 2분 묶음 대기와 실행 중인 사이클을 기다리지 않는다.
   - 결과 불명 · 두 번째 승인은 다른 항목을 기다리지 않는다. 생긴 지 2분이면 보낸다(잇달아 생긴 것끼리만 묶는다). 에이전트가 초안을 쏟아내는 중이어도 마찬가지다.
   - 어떤 항목도 15분을 넘겨 기다리지 않는다.
   - 보낼 때는 그 계정의 미알림 항목을 모두 싣는다. 같은 사람이 여러 계정에 접근하면 한 통으로 합친다.
 - **한 번만 보낸다.** (대상, 종류)마다 `marketing_approval_notices` 에 한 행을 **보내기 전에** 쓴다(유일 인덱스).
   - 재시작해도 다시 보내지 않는다. 서버가 둘이어도 한 계정의 묶음은 한 서버만 보낸다. 진 서버는 그 계정을 건너뛰고, 다음 sweep 이 남은 것만 본다.
   - 보내기가 실패하면 그 알림만 잃는다. 승인함과 사이드바 배지는 그대로 남는다.
+  - 목록 중지는 `(중지 id:캠페인 id, list_hold)`로 선점한다. 같은 목록을 쓰는 채널이 여럿이어도 캠페인마다 한 번이며, 해제 후 다시 중지되면 새 중지 id로 다시 알린다.
   - 같은 지출 요청도 단계가 바뀌면(새 요청 → 두 번째 승인 → 결과 불명) 다시 알린다.
-- **본문:** 캠페인별 종류 · 건수를 싣는다. 지출은 금액 · 수취인 · 만료까지 남은 시간, 채널 제안은 플랫폼을 싣는다. `AWB_PUBLIC_URL` 이 있으면 캠페인 화면 링크(여러 캠페인이면 `/marketing`)를 붙인다.
+- **본문:** 캠페인별 종류 · 건수를 싣는다. 지출은 금액 · 수취인 · 만료까지 남은 시간, 채널 제안은 플랫폼, 목록 중지는 목록 이름과 서버가 중지 시 기록한 신고율만 싣는다. `AWB_PUBLIC_URL` 이 있으면 캠페인 화면 링크(여러 캠페인이면 `/marketing`)를 붙인다.
   - **에이전트가 쓴 글은 싣지 않는다**: 지출 목적, 게시물 제목, 채널 이름, 근거. 에이전트가 읽는 외부 글에 섞인 프롬프트 주입이 AWB 이름의 알림 문구(가짜 링크 · `@everyone`)가 되지 않게 하기 위해서다. 실리는 것은 사람이 정했거나 서버가 계산한 값뿐이다.
 - `MARKETING_SCHEDULER_ENABLED=false` 이거나 인스턴스가 quiesce 중이면 보내지 않는다. quiesce 가 풀리면 다음 sweep 이 밀린 것을 보낸다.
 
@@ -769,7 +772,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
 | 목록 발송 중지 | `GET /list-holds`(`?list=&status=`), `POST /list-holds/:id/release` |
 | 동의 재확인 안내 | `GET/PUT /consent-notices/settings`(설정 + 현황), `POST /consent-notices/preview`(저장하지 않음), `POST /consent-notices/retry-failed`, `GET /consent-notices`(`?status=&limit=`) |
-| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 보관된 캠페인은 결과 불명 · 수동 결제 기록 대기만 센다. 사이드바 배지가 쓴다. 사용자 채널 알림은 사람이 스스로 시작한 기록 대기를 제외한다("승인 대기 알림"). |
+| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물 · 멈춘 목록(`lists_held`), approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 보관된 캠페인은 결과 불명 · 수동 결제 기록 대기만 센다. 사이드바 배지가 쓴다. 사용자 채널 알림은 사람이 스스로 시작한 기록 대기를 제외한다("승인 대기 알림"). |
 
 공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`(수신거부), `GET/POST /api/m/c/:token`(동의 유지), `POST /api/m/email/:credentialId/{events,inbound}`(공급자 서명이 인증).
 
@@ -779,7 +782,6 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
 - Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
-- 목록 발송 중지를 승인함 배지 · 승인 대기 알림에 싣기
 - 하드 바운스율이 높은 목록의 발송 중지(지금은 스팸 신고율만 본다)
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
 - 동의 재확인 안내에 온 회신(수신거부 제목 밖)을 사람이 보게 하기 — 지금은 이을 캠페인이 없어 기록하지 않는다
