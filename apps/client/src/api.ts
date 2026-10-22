@@ -1303,7 +1303,7 @@ export const api = {
       env_prefix?: string;
     },
   ) =>
-    request<Credential>(`/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    request<Credential & { warnings?: string[] }>(`/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteCredential: (id: string, accountId?: string) => {
     const params = new URLSearchParams();
     if (accountId) params.set('account_id', accountId);

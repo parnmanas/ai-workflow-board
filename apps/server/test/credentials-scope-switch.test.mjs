@@ -12,6 +12,9 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
+import { MarketingCampaign } from '../dist/entities/MarketingCampaign.js';
+import { MarketingChannel } from '../dist/entities/MarketingChannel.js';
+import { MarketingSpendRequest } from '../dist/entities/MarketingSpendRequest.js';
 import { Credential } from '../dist/entities/Credential.js';
 import { Resource } from '../dist/entities/Resource.js';
 import { Project } from '../dist/entities/Project.js';
@@ -42,7 +45,7 @@ describe('Credential scope switch (update)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Credential, Resource, Project, AgentSessionCliSetting, AgentSessionExecution, OutreachChannel],
+      entities: [Credential, Resource, Project, AgentSessionCliSetting, AgentSessionExecution, OutreachChannel, MarketingCampaign, MarketingChannel, MarketingSpendRequest],
       synchronize: true,
       logging: false,
     });
@@ -65,7 +68,7 @@ describe('Credential scope switch (update)', () => {
 
   beforeEach(async () => {
     audit.length = 0;
-    for (const entity of [Credential, Resource, Project, AgentSessionCliSetting, AgentSessionExecution, OutreachChannel]) {
+    for (const entity of [Credential, Resource, Project, AgentSessionCliSetting, AgentSessionExecution, OutreachChannel, MarketingCampaign, MarketingChannel, MarketingSpendRequest]) {
       await dataSource.getRepository(entity).clear();
     }
   });

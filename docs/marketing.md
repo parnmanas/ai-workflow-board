@@ -21,6 +21,7 @@
 
 1. **에이전트는 제안하고, 사람이 정하고, 서버가 집행한다.**
    - 에이전트에게 결제 키 · 메일 API 키 · 채널 토큰을 주지 않는다. `agent_env` 가 켜진 credential 은 마케팅에서 거부된다.
+   - 캠페인 결제 키 · 수취인 `payees[].credential_id` · 채널 `config.credential_id` 로 참조하는 credential 은 삭제하거나 `agent_env` 를 켤 수 없다(409). 전역 키를 한 Account 로 좁힐 때도 다른 Account 의 참조가 있으면 거부한다. 열린 지출 요청(pending · approved · executing · unknown)과 반환(executing · unknown)의 스냅샷 참조도 보호한다. 참조를 먼저 바꾸거나 열린 요청을 해결해야 한다. 키 내용 교체는 허용하되 열린 요청이 있으면 저장 응답 `warnings` 와 Credentials 화면에 실행·대조가 막힐 수 있음을 알린다. 저장 시 검사는 안내·보호용이며 실행 시 재검증도 유지한다.
    - 사람이 화면에서 본 **그 내용 그대로** 서버가 실행한다.
    - 승인 · 거부 · 결제 기록 MCP 툴은 존재하지 않는다.
 2. **돈에는 자동 모드가 없다.**

@@ -24,6 +24,9 @@ import {
   resolveAgentEnv,
   validateAgentEnvConfig,
 } from '../dist/common/credential-agent-env.js';
+import { MarketingCampaign } from '../dist/entities/MarketingCampaign.js';
+import { MarketingChannel } from '../dist/entities/MarketingChannel.js';
+import { MarketingSpendRequest } from '../dist/entities/MarketingSpendRequest.js';
 import { Credential } from '../dist/entities/Credential.js';
 import { Resource } from '../dist/entities/Resource.js';
 import { Project } from '../dist/entities/Project.js';
@@ -128,7 +131,7 @@ function response() {
 }
 
 const adminReq = { currentUser: { id: 'u-admin', name: 'Admin', role: 'admin', permissions: [] } };
-const ENTITIES = [Credential, Resource, Project, AgentSessionCliSetting, AgentSessionExecution, OutreachChannel];
+const ENTITIES = [Credential, Resource, Project, AgentSessionCliSetting, AgentSessionExecution, OutreachChannel, MarketingCampaign, MarketingChannel, MarketingSpendRequest];
 
 describe('credential agent env — REST', () => {
   let dataSource;

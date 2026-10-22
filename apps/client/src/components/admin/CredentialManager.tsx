@@ -445,7 +445,7 @@ export default function CredentialManager({
     setSaving(true);
     try {
       if (editCred) {
-        await api.updateCredential(editCred.id, {
+        const saved = await api.updateCredential(editCred.id, {
           // Editing preserves ownership; scope is not an editable form field.
           scope: editCred.scope,
           ...(editCred.account_id ? { account_id: editCred.account_id } : {}),
@@ -457,6 +457,7 @@ export default function CredentialManager({
           ...agentEnvFields,
         });
         showToast('Credential updated.', 'success');
+        for (const warning of saved.warnings ?? []) showToast(warning, 'info', { durationMs: 15000 });
       } else {
         await api.createCredential({
           scope: effectiveCreateOwner === null ? 'global' : 'account',
