@@ -155,7 +155,8 @@ function googleError(reply: ProviderReply, cred: GoogleCredential, token: string
     : '';
   const message = providerMessage(first?.message || body?.message || reply.text || '', secretsOf(cred, token), 300);
   const status = providerToken(body?.status, PROVIDER_FORMATS.enumName);
-  const codeText = /^[A-Za-z]{1,60}=[A-Z_]{1,80}(,[A-Za-z]{1,60}=[A-Z_]{1,80})*$/.test(errorCode) ? errorCode : '';
+  // GoogleAdsError.errorCode 의 키는 오류 범주 이름(`databaseError` · `quotaError` …), 값은 enum 이다 — 그 모양일 때만 싣는다.
+  const codeText = /^[a-z][A-Za-z]{0,58}Error=[A-Z_]{1,80}(,[a-z][A-Za-z]{0,58}Error=[A-Z_]{1,80})*$/.test(errorCode) ? errorCode : '';
   return {
     text: `HTTP ${reply.status}${status ? ` ${status}` : ''}${codeText ? ` (${codeText})` : ''}`,
     message,

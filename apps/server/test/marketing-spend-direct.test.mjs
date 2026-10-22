@@ -504,14 +504,7 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   const { campaign: otherCampaign, ask: otherAsk } = await campaignWith({ ...ctx, ...other }, [
     { name: 'Same ad campaign', provider: 'meta_ads', credential_id: otherCred.id, ref: 'act_9/77' },
   ]);
-  const blocked = await otherAsk({ amount_minor: 10000, payee: 'Same ad campaign' });
-  assert.equal(blocked.isError, true);
-  assert.match(errText(blocked), /this ad campaign already has an open spend request in another account/);
-  assert.equal(errText(blocked).includes(openHere.id), false, 'no id from another account');
-  assert.doesNotMatch(errText(blocked), /pending/, 'no state from another account');
-  const otherCheck = await other.post(`/campaigns/${otherCampaign.id}/payment/check`);
-  assert.equal(otherCheck.status, 200, otherCheck.text);
-  assert.deepEqual(otherCheck.body.payees[0].open_request, { id: '', status: 'other_account' });
+  // (a) 그 대상을 읽지 못하는 credential 은 열린 요청이 있다는 것도 모른다
   fake.state.overrides.push({
     match: (c) => c.host === 'graph.facebook.com' && c.headers.authorization === `Bearer ${META_TOKEN_OTHER}`,
     reply: { status: 400, body: { error: { message: 'Unsupported get request', code: 100, error_subcode: 33 } } },
@@ -519,7 +512,26 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   const unreadable = await otherAsk({ amount_minor: 20000, payee: 'Same ad campaign' });
   assert.match(errText(unreadable), /could not read Meta 77 \(HTTP 400, code 100\/33\)/);
   assert.doesNotMatch(errText(unreadable), /another account/, 'a credential that cannot read the target learns nothing about it');
+  // (b) 연결 확인은 읽을 수 있으면 있다는 것만 보여 준다(그리고 앞의 쉼을 푼다)
+  const otherCheck = await other.post(`/campaigns/${otherCampaign.id}/payment/check`);
+  assert.equal(otherCheck.status, 200, otherCheck.text);
+  assert.deepEqual(otherCheck.body.payees[0].open_request, { id: '', status: 'other_account' });
+  // (c) 요청은 읽은 뒤에 id · 상태 없이 거절하고, 그 뒤의 되풀이는 공급자를 읽지 않는다
+  const blocked = await otherAsk({ amount_minor: 10000, payee: 'Same ad campaign' });
+  assert.equal(blocked.isError, true);
+  assert.match(errText(blocked), /this ad campaign already has an open spend request in another account/);
+  assert.equal(errText(blocked).includes(openHere.id), false, 'no id from another account');
+  assert.doesNotMatch(errText(blocked), /pending/, 'no state from another account');
+  const readsBeforeRetry = fake.state.calls.length;
+  const retried = await otherAsk({ amount_minor: 10000, payee: 'Same ad campaign' });
+  assert.match(errText(retried), /in another account.*not asking Meta Ads again before .* wait until then/);
+  assert.equal(fake.state.calls.length, readsBeforeRetry, 'a retry while another account holds the target does not read the provider');
+  // (d) 그 요청이 닫히면 쉬는 것도 바로 풀린다
   assert.equal((await ctx.post(`/spend-requests/${openHere.id}/deny`, { note: 'cross-account check done' })).body.status, 'denied');
+  const freed = await otherAsk({ amount_minor: 10000, payee: 'Same ad campaign' });
+  assert.equal(freed.isError, undefined, errText(freed));
+  assert.equal(freed.spend_request.status, 'pending');
+  assert.equal((await other.post(`/spend-requests/${freed.spend_request.id}/deny`, { note: 'cross-account check done' })).body.status, 'denied');
 
   // 19. 재시작 정리(executing → unknown)는 캠페인 잠금 뒤에 선다 — 다른 서버가 잠금 안에서 기록하던 결과를 덮어쓰지 않는다
   const req13 = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
@@ -571,8 +583,21 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
       .execute();
   });
   await recordingInside;
+  // mark-failed 가 행을 (잠금 밖에서) executing 으로 읽은 뒤에 결과 불명으로 바꾼다 — 고치기 전 코드는 그 읽은 값으로 유예를 건너뛰었다.
+  let readWhileExecuting;
+  const markRead = new Promise((resolve) => { readWhileExecuting = resolve; });
+  const readRow = spend.get.bind(spend);
+  spend.get = async (id, accountId) => {
+    const row = await readRow(id, accountId);
+    if (id === req14.id && row.status === 'executing') readWhileExecuting();
+    return row;
+  };
   const markedWhileExecuting = ctx.post(`/spend-requests/${req14.id}/mark-failed`, { note: 'pressed while it was executing' });
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  try {
+    await markRead;
+  } finally {
+    delete spend.get;
+  }
   releaseRecording();
   await recording;
   const tooEarly = await markedWhileExecuting;
@@ -602,7 +627,7 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   // 22. 대상마다 열린 요청은 하나 — DB 의 부분 유일 인덱스가 직접 막는다. 닫힌 요청은 같은 대상을 몇 개든 가질 수 있다.
   const openRow = await spendRepo.findOneBy({ id: afterCheck.spend_request.id });
   const { id: _openId, created_at: _openCreated, updated_at: _openUpdated, ...openCopy } = openRow;
-  await assert.rejects(spendRepo.save(spendRepo.create({ ...openCopy })), /unique|duplicate/i, 'a second open request for the same ad campaign');
+  await assert.rejects(spendRepo.save(spendRepo.create({ ...openCopy })), /target_key|uq_marketing_spend_open_target/, 'the open-target index rejects a second open request');
   await spendRepo.save(spendRepo.create({ ...openCopy, status: 'denied' }));
   assert.equal(await spendRepo.countBy({ target_key: openRow.target_key, status: 'denied' }) >= 1, true, 'closed requests do not hold the target');
   assert.equal((await ctx.post(`/spend-requests/${openRow.id}/deny`, { note: 'index check done' })).body.status, 'denied');

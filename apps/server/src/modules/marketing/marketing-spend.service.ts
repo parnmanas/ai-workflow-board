@@ -125,8 +125,11 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
   private readonly enabled = (process.env.MARKETING_SCHEDULER_ENABLED || 'true').toLowerCase() !== 'false';
   /** 테스트가 결제 엔드포인트 · 공급자 호출을 가로챌 수 있게(기본은 전역 fetch). */
   fetchImpl: typeof fetch | undefined;
-  /** 요청 때 공급자 확인이 실패한 (캠페인, 대상, credential 지문) → 다시 묻지 않을 때까지. 수취인 · credential 을 고치면 키가 바뀐다. */
-  private readonly providerBackoff = new Map<string, { until: number; reason: string; status: number }>();
+  /**
+   * 요청 때 공급자를 읽은 뒤 거절된 (캠페인, 대상, credential 지문) → 다시 묻지 않을 때까지. 수취인 · credential 을 고치면 키가 바뀐다.
+   * `openTarget` 은 다른 계정의 열린 요청 때문에 쉬는 것 — 그 요청이 닫히면(DB 로 본다) 바로 풀린다.
+   */
+  private readonly providerBackoff = new Map<string, { until: number; reason: string; status: number; openTarget?: boolean }>();
 
   constructor(
     @InjectRepository(MarketingSpendRequest) private readonly spendRepo: Repository<MarketingSpendRequest>,
@@ -384,8 +387,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     const now = Date.now();
     for (const [key, entry] of this.providerBackoff) if (entry.until <= now) this.providerBackoff.delete(key);
     const held = this.providerBackoff.get(backoffKey);
-    if (held) {
-      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()})`);
+    if (held && held.openTarget && !open) this.providerBackoff.delete(backoffKey);
+    else if (held) {
+      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()} — wait until then${held.status === 400 ? ', then ask once with an amount that fits' : ''})`);
     }
     let plan: CeilingPlan;
     try {
@@ -395,7 +399,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       throw e;
     }
     this.providerBackoff.delete(backoffKey);
-    if (open) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
+    if (open) {
+      // 다른 계정의 열린 요청 — 이것도 공급자를 읽은 뒤의 거절이라 쉬게 한다(되풀이할 때마다 남의 광고 계정을 읽지 않게). 이 credential 이
+      // 대상을 읽을 수 있음은 방금 확인했으니 쉬는 동안 같은 문장을 보여도 된다. 그 요청이 닫히면 위에서 바로 푼다.
+      const reason = this.openTargetMessage(open, campaign.account_id);
+      this.providerBackoff.set(backoffKey, { until: Date.now() + PROVIDER_BACKOFF_MS, reason, status: 409, openTarget: true });
+      throw marketingError(409, reason);
+    }
     return { plan, targetKey };
   }
 

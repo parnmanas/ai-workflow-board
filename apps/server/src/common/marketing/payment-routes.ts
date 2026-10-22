@@ -188,11 +188,12 @@ export const PAYMENT_CURRENCIES: Readonly<Record<string, { exponent: number; met
   VES: { exponent: 2, meta_offset: 100 }, VND: { exponent: 0, meta_offset: 1 }, ZAR: { exponent: 2, meta_offset: 100 },
 };
 
+/** 통화 문제는 금액을 바꿔서는 풀리지 않는다 — 사람이 캠페인 통화나 수취인을 고쳐야 한다(409). */
 function currencySpec(currency: string): { exponent: number; meta_offset: 1 | 100 } {
   const spec = PAYMENT_CURRENCIES[String(currency || '').toUpperCase()];
-  if (!spec) throw new PaymentRuleError(`currency ${currency} is not supported by the direct payment adapters`, 400);
+  if (!spec) throw new PaymentRuleError(`currency ${currency} is not supported by the direct payment adapters`, 409);
   // money.ts 가 다른 지수를 쓰면 AWB 화면의 금액과 공급자에 보내는 금액이 어긋난다 — 그런 통화는 받지 않는다.
-  if (currencyExponent(currency) !== spec.exponent) throw new PaymentRuleError(`currency ${currency} has an inconsistent minor unit`, 400);
+  if (currencyExponent(currency) !== spec.exponent) throw new PaymentRuleError(`currency ${currency} has an inconsistent minor unit`, 409);
   return spec;
 }
 

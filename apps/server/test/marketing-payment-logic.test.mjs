@@ -47,6 +47,7 @@ import {
 } from '../dist/modules/marketing/marketing-payment-meta.js';
 import {
   googleTargetProblems, buildGooglePlan, googleExecutionCheck, classifyGoogleWrite, readGoogleCredential, googleAccessToken, resetGoogleTokenCache,
+  observeGoogleTarget,
 } from '../dist/modules/marketing/marketing-payment-google.js';
 
 // 지문 · 암호화가 쓰는 키 — 저장소의 database/.encryption_key 를 만들거나 읽지 않게 이 프로세스 전용으로 둔다.
@@ -107,7 +108,7 @@ test('currency table: closed, consistent with money.ts, Meta offsets exact', () 
   assert.throws(() => minorToMetaUnits(123456, 'TWD'), /cannot be expressed in Meta/);
   assert.equal(minorToMetaUnits(12340, 'BHD'), 1234n, 'BHD: ISO fils (1/1000) → Meta 1/100');
   assert.throws(() => minorToMetaUnits(12345, 'BHD'), /multiple of/);
-  assert.throws(() => minorToMetaUnits(100, 'KWD'), /not supported/);
+  assert.throws(() => minorToMetaUnits(100, 'KWD'), (e) => e.status === 409 && /not supported/.test(e.message), 'a currency needs a person, not another amount');
   assert.equal(metaUnitsToMinor(1234n, 'TWD'), 123400n);
   assert.equal(metaUnitsToMinor(1234n, 'BHD'), 12340n);
   assert.equal(metaUnitsToMinor(30000n, 'USD'), 30000n);
@@ -396,7 +397,7 @@ test('adapters: amount problems are refused before the provider is asked; an unr
     (e) => e instanceof PaymentRuleError && e.status === 400 && /multiple of/.test(e.message), 'HUF: Meta takes whole forints');
   await assert.rejects(
     DIRECT_PAYMENT_ADAPTERS.google_ads.plan({ ref: '1112223333/5', fields: { client_id: 'a', client_secret: 'b', refresh_token: 'c' }, fingerprint: FP, amountMinor: 100, currency: 'KWD', ctx: { fetchImpl } }),
-    (e) => e instanceof PaymentRuleError && e.status === 400 && /not supported/.test(e.message));
+    (e) => e instanceof PaymentRuleError && e.status === 409 && /not supported/.test(e.message));
   await assert.rejects(DIRECT_PAYMENT_ADAPTERS.meta_ads.execute({ plan: metaPlan(), fields: {}, fingerprint: FP, ctx: { fetchImpl } }),
     (e) => e instanceof PaymentNotSentError && /access_token/.test(e.message), 'a credential that lost its token is "not sent", never unknown');
   const g = buildCeilingPlan({
@@ -459,12 +460,27 @@ test('secrets are scrubbed before provider text is cut — a long token across t
     assert.match(e.message, /HTTP 400, invalid_grant/);
     return true;
   });
+
+  // Google API 오류 본문(검색 · mutate 가 같은 해석기를 쓴다) — access token 이 자르는 경계에 걸려도 조각이 남지 않는다
+  resetGoogleTokenCache();
+  const access = `ya29.${'K9m'.repeat(70)}`;
+  const searchRefusal = async (url) => (new URL(url).host === 'oauth2.googleapis.com'
+    ? jsonReply(200, { access_token: access, expires_in: 3599 })
+    : jsonReply(400, { error: { code: 400, status: 'INVALID_ARGUMENT', message: `${'q'.repeat(250)} ${access}`, details: [{ '@type': 'type.googleapis.com/google.ads.googleads.v26.errors.GoogleAdsFailure', errors: [{ errorCode: { queryError: 'BAD_VALUE' }, message: `${'m'.repeat(250)} ${access}` }] }] } }));
+  await assert.rejects(observeGoogleTarget({ customer_id: '1112223333', campaign_id: '5' }, { client_id: 'c', client_secret: 'GOCSPX-secret', refresh_token: '1//r-token', login_customer_id: '', developer_token: '' }, 'fp-long-api', { fetchImpl: searchRefusal }), (e) => {
+    assert.ok(e instanceof PaymentReadError);
+    assert.equal(e.message, 'could not read Google Ads customer 1112223333 (HTTP 400 INVALID_ARGUMENT (queryError=BAD_VALUE))');
+    assert.equal(e.providerMessage.includes('K9mK9m'), false, e.providerMessage);
+    assert.match(e.providerMessage, /\[redacted\]/);
+    return true;
+  });
+  resetGoogleTokenCache();
 });
 
 test('adapters convert the amount without the network first, so later refusals can be told apart', () => {
   for (const provider of DIRECT_PAYMENT_PROVIDERS) {
     assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(30000, 'USD'), provider);
-    assert.throws(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(100, 'KWD'), (e) => e instanceof PaymentRuleError && e.status === 400, provider);
+    assert.throws(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(100, 'KWD'), (e) => e instanceof PaymentRuleError && e.status === 409, `${provider}: a person fixes the currency`);
   }
   assert.throws(() => DIRECT_PAYMENT_ADAPTERS.meta_ads.checkAmount(150, 'HUF'), (e) => e.status === 400 && /multiple of/.test(e.message));
   assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS.google_ads.checkAmount(150, 'HUF'), 'Google takes HUF minor units (micros)');
