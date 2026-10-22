@@ -495,3 +495,23 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
   assert.deepEqual(body('/api/marketing/consent-notices/settings?account_id=acc-2', 'PUT'), { enabled: true, lead_days: 30 });
   assert.deepEqual(body('/api/marketing/consent-notices/preview'), { subject: 's' });
 });
+
+
+test('보관된 캠페인의 미결 결제 수가 목록에 보이고 상세로 이동한다', async (t) => {
+  const { container } = await render(t, {
+    entry: '/marketing', permissions: ['marketing.approve_spend'],
+    stubs: {
+      listMarketingCampaigns: async () => [campaign({ status: 'archived' })],
+      getMarketingInbox: async () => ({ total: 2, campaigns: [{
+        campaign_id: 'c-1', account_id: 'acc-1', name: 'AWB 런칭', channels_proposed: 0, posts_draft: 0,
+        allocations_proposed: 0, spend_pending: 0, spend_unknown: 1, manual_awaiting_payment: 1, actionable: 2,
+      }] }),
+    },
+  });
+  assert.equal(container.querySelector('[data-testid="marketing-campaign-pending-c-1"]').textContent, '승인 대기 2');
+  const link = container.querySelector('[data-testid="marketing-campaign-row-c-1"] a');
+  assert.equal(link.getAttribute('href'), '/marketing/c-1');
+  click(link);
+  await flush();
+  assert.ok(container.querySelector('[data-testid="campaign-detail-route"]'));
+});

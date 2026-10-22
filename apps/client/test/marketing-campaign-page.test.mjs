@@ -698,3 +698,32 @@ test('지표 기록 — 제안 단계 reddit 채널뿐이면 캠페인 전체 �
   assert.equal(sent.length, 1, 'ch-proposed 는 제안 단계라 서버가 읽지 않는다');
   assert.deepEqual(sent[0][2], [{ metric: 'replies', value: 2 }]);
 });
+
+
+test('보관된 캠페인의 승인함에서도 수동 결제 기록과 결과 불명 대조를 할 수 있다', async (t) => {
+  const { container, calls } = await renderPage(t, {
+    permissions: ['marketing.approve_spend'],
+    stubs: {
+      getMarketingCampaign: async () => campaign({ status: 'archived' }),
+      listMarketingAllocations: async () => [],
+      listMarketingSpendRequests: async (_id, opts = {}) => opts.status === 'pending' ? [] : SPEND_BY_STATUS[opts.status] || [],
+      markMarketingSpendPaid: async (id) => spend(id, { status: 'paid' }),
+      markMarketingSpendFailed: async (id) => spend(id, { status: 'failed' }),
+    },
+  });
+  click(buttonIn(within(container, 'marketing-spend-sp-approved'), '결제 완료 기록…'));
+  await flush();
+  const paid = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
+  typeInto(fieldIn(paid, '거래 id (필수)'), 'archived-receipt');
+  click(buttonIn(paid, '기록'));
+  await flush();
+  await flush();
+  assert.deepEqual(calls.find((c) => c[0] === 'markMarketingSpendPaid'), ['markMarketingSpendPaid', 'sp-approved', { provider_ref: 'archived-receipt' }]);
+  click(buttonIn(within(container, 'marketing-spend-sp-unknown'), '실패로 기록…'));
+  await flush();
+  const failed = dialogs().find((d) => d.textContent.includes('결제 실패로 기록'));
+  typeInto(failed.querySelector('textarea[aria-label="확인한 내용"]'), '결제 시스템에서 미결제 확인');
+  click(buttonIn(failed, '실패로 기록'));
+  await flush();
+  assert.deepEqual(calls.find((c) => c[0] === 'markMarketingSpendFailed'), ['markMarketingSpendFailed', 'sp-unknown', '결제 시스템에서 미결제 확인', false]);
+});

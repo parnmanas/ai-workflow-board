@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingPost } from '../../entities/MarketingPost';
@@ -21,7 +21,7 @@ export interface InboxCounts {
 
 /**
  * 사람의 결정을 기다리는 것의 수 — 사이드바 배지와 목록 화면이 캠페인마다 요청을 보내지 않고 한 번에 읽는다.
- * 테이블마다 GROUP BY 한 번(캠페인 수와 무관한 쿼리 수). 보관된 캠페인은 세지 않는다.
+ * 테이블마다 GROUP BY 한 번(캠페인 수와 무관한 쿼리 수). 보관된 캠페인은 미결 결제(결과 불명 · 수동 결제 기록 대기)만 센다.
  */
 @Injectable()
 export class MarketingInboxService {
@@ -36,8 +36,8 @@ export class MarketingInboxService {
   async counts(accountIds: string[]): Promise<InboxCounts[]> {
     if (!accountIds.length) return [];
     const campaigns = await this.campaignRepo.find({
-      where: { account_id: In(accountIds), status: Not('archived') },
-      select: ['id', 'account_id', 'name'],
+      where: { account_id: In(accountIds) },
+      select: ['id', 'account_id', 'name', 'status'],
     });
     if (!campaigns.length) return [];
     const ids = campaigns.map((c) => c.id);
@@ -69,11 +69,11 @@ export class MarketingInboxService {
       campaign_id: c.id,
       account_id: c.account_id,
       name: c.name,
-      channels_proposed: channels.get(c.id)?.proposed || 0,
+      channels_proposed: c.status === 'archived' ? 0 : channels.get(c.id)?.proposed || 0,
       // approved 게시물은 manual 채널에서 사람이 올리고 링크를 기록하기를 기다린다.
-      posts_draft: (posts.get(c.id)?.draft || 0) + (posts.get(c.id)?.approved || 0),
-      allocations_proposed: allocations.get(c.id)?.proposed || 0,
-      spend_pending: spend.get(c.id)?.pending || 0,
+      posts_draft: c.status === 'archived' ? 0 : (posts.get(c.id)?.draft || 0) + (posts.get(c.id)?.approved || 0),
+      allocations_proposed: c.status === 'archived' ? 0 : allocations.get(c.id)?.proposed || 0,
+      spend_pending: c.status === 'archived' ? 0 : spend.get(c.id)?.pending || 0,
       spend_unknown: spend.get(c.id)?.unknown || 0,
       manual_awaiting_payment: manual.get(c.id)?.approved || 0,
     }));

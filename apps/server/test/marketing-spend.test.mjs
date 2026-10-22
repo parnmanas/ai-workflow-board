@@ -372,6 +372,43 @@ test('marketing spend: allocations, approvals, ledger, manual + webhook payments
   assert.equal((await patch(`/campaigns/${campaign.id}`, A, { currency: 'USD' })).status, 409, 'currency is fixed once money moved');
   assert.equal((await api(`/campaigns/${campaign.id}`, A, { method: 'DELETE' })).status, 409, 'campaigns with money history are archived, not deleted');
 
+  // 보관해도 이미 승인/실행한 돈은 승인함에 남고, 대조하면 사라진다.
+  await post(`/campaigns/${campaign.id}/status`, A, { status: 'active' });
+  await patch(`/campaigns/${campaign.id}`, A, { payment_provider: 'manual', payment_credential_id: null });
+  const manual = (await ask({ amount_minor: 1000 })).spend_request;
+  assert.equal((await post(`/spend-requests/${manual.id}/approve`, A, { payload_sha256: manual.payload_sha256 })).body.status, 'approved');
+  await ds.getRepository('MarketingSpendRequest').update(reqG.id, { status: 'executing', executing_at: new Date(Date.now() - 60_000) });
+  assert.equal((await post(`/campaigns/${campaign.id}/status`, A, { status: 'archived' })).status, 200);
+  assert.equal(await spendService.recoverInterrupted(new Date()), 1, 'recovery can create unknown after archival');
+  // 남아 있는 일반 승인 대기는 제외한다. 경합/구 데이터의 pending 도 제외한다.
+  for (const [entity, fields] of [
+    ['MarketingChannel', { status: 'proposed', name: 'Archived proposal', platform: 'forum', target: 'archive', target_key: 'archive' }],
+    ['MarketingPost', { status: 'draft', channel_id: channel.id, body: 'Archived draft' }],
+    ['MarketingPost', { status: 'approved', channel_id: channel.id, body: 'Archived manual post' }],
+    ['MarketingBudgetAllocation', { status: 'proposed', channel_id: channel.id, amount_minor: 1 }],
+    ['MarketingSpendRequest', { status: 'pending', channel_id: channel.id, amount_minor: 1 }],
+    ['MarketingSpendRequest', { status: 'approved', provider: 'webhook', channel_id: channel.id, amount_minor: 1 }],
+  ]) {
+    const repo = ds.getRepository(entity);
+    const template = entity === 'MarketingSpendRequest' ? await repo.findOneByOrFail({ id: manual.id }) : {};
+    await repo.save(repo.create({ ...template, id: undefined, account_id: account.id, campaign_id: campaign.id, currency: 'KRW', ...fields }));
+  }
+  const archivedInbox = await inboxOf(T);
+  assert.equal(archivedInbox.total, 2);
+  assert.deepEqual(archivedInbox.campaigns, [{
+    campaign_id: campaign.id, account_id: account.id, name: campaign.name,
+    channels_proposed: 0, posts_draft: 0, allocations_proposed: 0, spend_pending: 0,
+    spend_unknown: 1, manual_awaiting_payment: 1, actionable: 2,
+  }]);
+  assert.equal((await inboxOf(M)).total, 0, 'manage alone cannot reconcile money');
+  assert.equal((await api('/inbox', B)).status, 403, 'another admin cannot see the owner account');
+  assert.ok((await api('/campaigns', T)).body.some((c) => c.id === campaign.id), 'archived campaign remains in the list');
+  assert.equal((await api(`/campaigns/${campaign.id}`, T)).body.status, 'archived');
+  assert.equal((await post(`/spend-requests/${manual.id}/mark-paid`, T, { provider_ref: 'archived-manual-receipt' })).body.status, 'paid');
+  assert.equal((await inboxOf(T)).total, 1);
+  assert.equal((await post(`/spend-requests/${reqG.id}/mark-failed`, T, { note: 'checked: no charge' })).body.status, 'failed');
+  assert.deepEqual(await inboxOf(T), { total: 0, campaigns: [] });
+
   const actions = new Set((await audit()).map((e) => e.action));
   for (const a of ['allocation.proposed', 'allocation.approved', 'spend.requested', 'spend.first_approval', 'spend.approved', 'spend.paid', 'spend.failed',
     'spend.refunded', 'spend.executing', 'spend.unknown', 'spend.expired', 'spend.cancelled', 'spend.denied']) {

@@ -704,7 +704,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 - **기준은 승인함과 같다.** 무엇이 결정을 기다리는지는 원래 행의 지금 상태가 정한다. 알리기 전에 결정된 것은 알리지 않는다.
   - 승인함이 세는 것 가운데 사람이 방금 스스로 시작한 대기는 알리지 않는다: manual 결제의 결제 기록, manual 게시물의 링크 기록, credential 연결 대기.
-  - 보관된 캠페인은 세지 않는다. 결과 불명 결제만은 예외다 — 결제가 나가던 중에 보관될 수 있고, 돈이 나갔는지 모르는 채로 아무에게도 보이지 않으면 안 된다.
+  - 보관된 캠페인은 승인함에서 결과 불명 · 수동 결제 기록 대기만 센다. 사용자 채널 알림은 이 중 결과 불명 결제만 알린다 — 결제가 나가던 중에 보관될 수 있고, 돈이 나갔는지 모르는 채로 아무에게도 보이지 않으면 안 된다.
 - **전이 코드는 알림을 모른다.** 요청 · 승인 · 결제 결과를 만드는 경로에서 보내지 않는다. 그래서 알림 실패가 돈 · 게시 흐름에 닿지 않고, 경로 하나를 빠뜨려 알림이 사라지는 일도 없다.
 - **받는 사람:** 그 계정에 접근할 수 있는 사용자 가운데 그 결정의 권한이 있는 사람이다(`AccountAccessService.usersWithAccess`, `accessibleIds` 의 역방향).
   - 지금은 활성 소유자 한 명이다. 그래서 두 번째 승인 대기 알림은 받을 사람이 없다 — 첫 승인을 한 소유자는 빠진다.
@@ -769,7 +769,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
 | 목록 발송 중지 | `GET /list-holds`(`?list=&status=`), `POST /list-holds/:id/release` |
 | 동의 재확인 안내 | `GET/PUT /consent-notices/settings`(설정 + 현황), `POST /consent-notices/preview`(저장하지 않음), `POST /consent-notices/retry-failed`, `GET /consent-notices`(`?status=&limit=`) |
-| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 사이드바 배지가 쓴다. 같은 기준으로 사용자 채널에도 알린다("승인 대기 알림"). |
+| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 보관된 캠페인은 결과 불명 · 수동 결제 기록 대기만 센다. 사이드바 배지가 쓴다. 사용자 채널 알림은 사람이 스스로 시작한 기록 대기를 제외한다("승인 대기 알림"). |
 
 공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`(수신거부), `GET/POST /api/m/c/:token`(동의 유지), `POST /api/m/email/:credentialId/{events,inbound}`(공급자 서명이 인증).
 
@@ -784,5 +784,4 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
 - 동의 재확인 안내에 온 회신(수신거부 제목 밖)을 사람이 보게 하기 — 지금은 이을 캠페인이 없어 기록하지 않는다
 - 정책 기반 자동 게시
-- 승인함도 보관된 캠페인의 결과 불명 · 결제 기록 대기를 세기(승인 대기 알림은 결과 불명을 이미 알린다)
 - 승인 대기 리마인더(만료가 가까운 지출 요청, 오래 대조되지 않은 결제)

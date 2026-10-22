@@ -286,7 +286,7 @@ test('marketing approval notices: batched, once, only to the people who decide',
   assert.equal((await post(`/spend-requests/${third.id}/approve`, { payload_sha256: third.payload_sha256 })).body.status, 'approved');
   await campaignRepo.update(campaign.id, { status: 'archived' });
   await posts.save(posts.create({ account_id: account.id, campaign_id: campaign.id, channel_id: forum.id, title: 'archived', body: 'x', status: 'draft' }));
-  assert.equal((await notify.sweep(later(3 * MIN))).accounts, 0, 'archived campaigns are not counted, as in the inbox');
+  assert.equal((await notify.sweep(later(3 * MIN))).accounts, 0, 'archived ordinary approvals and manual payment recording do not notify');
   assert.equal(take().length, 0);
   // … 결과 불명 결제만은 예외다. 보관해도 돈이 어디로 갔는지는 정해지지 않는다.
   await ds.getRepository('MarketingSpendRequest').update(third.id, { status: 'unknown', error: 'restarted while sending' });
