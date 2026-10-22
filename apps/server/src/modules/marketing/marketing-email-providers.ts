@@ -24,6 +24,11 @@ export interface EmailSendInput {
   message: ComposedEmail;
   /** 같은 메일의 재시도에 쓰는 고정 키(발송 행 id). */
   idempotencyKey: string;
+  /**
+   * 공급자가 이 메일의 이벤트(바운스 · 신고)에 그대로 돌려주는 값 — Resend `tags`, SendGrid `custom_args`.
+   * 발송 행 id 를 실어 webhook 이벤트를 정확한 행에 잇는다(docs/marketing.md "공급자 이벤트").
+   */
+  tags?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
@@ -49,6 +54,9 @@ export async function sendEmail(input: EmailSendInput): Promise<EmailOutcome> {
           text: input.message.text,
           ...(input.sender.reply_to ? { reply_to: input.sender.reply_to } : {}),
           headers: input.message.headers,
+          ...(input.tags && Object.keys(input.tags).length
+            ? { tags: Object.entries(input.tags).map(([name, value]) => ({ name, value })) }
+            : {}),
         }),
         signal: controller.signal,
       });
@@ -57,7 +65,10 @@ export async function sendEmail(input: EmailSendInput): Promise<EmailOutcome> {
         method: 'POST',
         headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({
-          personalizations: [{ to: [{ email: input.to.email, ...(input.to.name ? { name: input.to.name } : {}) }] }],
+          personalizations: [{
+            to: [{ email: input.to.email, ...(input.to.name ? { name: input.to.name } : {}) }],
+            ...(input.tags && Object.keys(input.tags).length ? { custom_args: input.tags } : {}),
+          }],
           from: { email: input.sender.from_address, name: input.sender.from_name },
           ...(input.sender.reply_to ? { reply_to: { email: input.sender.reply_to } } : {}),
           subject: input.message.subject,

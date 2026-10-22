@@ -62,7 +62,7 @@ export class AccountAccessService {
         campaigns: 'MarketingCampaign', channels: 'MarketingChannel', posts: 'MarketingPost',
         allocations: 'MarketingBudgetAllocation', 'spend-requests': 'MarketingSpendRequest',
         contacts: 'MarketingContact', feedback: 'MarketingFeedback', cycles: 'MarketingCycle',
-        links: 'MarketingLink',
+        links: 'MarketingLink', 'list-holds': 'MarketingListHold',
       } as Record<string, string>)[marketing[1]];
       resourceId = marketing[2];
     } else if (orchestration) {

@@ -25,6 +25,13 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   app.use('/api/voice/lab/transcribe', raw({ type: () => true, limit: '25mb' }));
   app.use('/api/voice/speaker/enroll', raw({ type: () => true, limit: '25mb' }));
 
+  // 메일 공급자 webhook(docs/marketing.md "공급자 이벤트") — 서명이 받은 바이트 그대로에 대한 것이라 raw 로 잡는다.
+  // 이벤트 묶음은 작고(5MB), Inbound Parse 는 첨부까지 한 번에 오므로 공급자 상한(30MB)에 맞춘다.
+  const emailEventsRaw = raw({ type: () => true, limit: '5mb' });
+  const emailInboundRaw = raw({ type: () => true, limit: '30mb' });
+  app.use('/api/m/email', (req: any, res: any, next: any) =>
+    (String(req.path || '').endsWith('/inbound') ? emailInboundRaw : emailEventsRaw)(req, res, next));
+
   // 매니저의 세션 RPC 응답(docs/agent-sessions.md) — 아래 10MB 보다 큰 답이 정상이다. 이미지 한 장의
   // 상한이 8MiB(매니저 MAX_IMAGE_BYTES · LOCAL_IMAGE_MAX_BYTES)라 base64 로 10.7MiB 가 되고, 기록은 6MiB 까지
   // 온다. 10MB 로 받으면 큰 이미지의 응답이 413 으로 버려져 화면은 타임아웃만 봤다. 매니저는 큰 응답을

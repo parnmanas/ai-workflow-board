@@ -8,6 +8,7 @@ import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { Credential } from '../../entities/Credential';
 import { composeMarketingEmail, consentFresh, isNightFor, nextSendableAt, type EmailSender } from '../../common/marketing/email';
+import { SEND_ID_TAG } from '../../common/marketing/email-events';
 import { SYSTEM_MARKETING_ACTOR, type MarketingActor } from '../../common/marketing/marketing-constants';
 import { LogService } from '../../services/log.service';
 import { MarketingAuditService } from './marketing-audit.service';
@@ -17,6 +18,7 @@ import { MarketingPostService } from './marketing-post.service';
 import { marketingError } from './marketing-errors';
 import { resolveMarketingSecret } from './marketing-credential';
 import { sendEmail } from './marketing-email-providers';
+import { LIST_HOLD_DEFER_PREFIX, MarketingListHoldService } from './marketing-list-hold.service';
 
 export const MAX_RECIPIENTS_PER_POST = 10_000;
 const BATCH = 50;
@@ -25,8 +27,16 @@ const MAX_ATTEMPTS = 3;
 const RETRY_MS = 10 * 60_000;
 /** 'sending' 으로 이만큼 남은 행은 프로세스가 결과를 기록하지 못한 것이다 — 다시 보내지 않고 failed 로 닫는다. */
 const STUCK_SENDING_MS = 10 * 60_000;
-/** 캠페인 · 채널이 일시정지된 동안 보류한 메일을 다시 볼 간격. */
+/** 캠페인 · 채널이 일시정지된 동안(또는 목록이 멈춘 동안) 보류한 메일을 다시 볼 간격. */
 const PAUSE_RECHECK_MS = 60 * 60_000;
+
+interface ChannelSender {
+  sender: EmailSender;
+  provider: string;
+  apiKey: string;
+  /** 이 메일을 보내는 credential — 발송 행에 남겨 그 credential 의 webhook 이벤트만 이 행에 닿게 한다. */
+  credentialId: string;
+}
 
 /** 수신거부 링크(공개). AWB_PUBLIC_URL 이 없으면 메일을 보내지 않는다 — 수신거부 링크 없는 광고 메일은 불법이다. */
 export function unsubscribeUrlFor(token: string): string {
@@ -39,8 +49,9 @@ export function unsubscribeUrlFor(token: string): string {
  * MarketingEmailService — 승인된 메일 게시물의 발송 큐(docs/marketing.md "메일").
  *
  * 승인 → 그 채널 목록의 발송 대상(subscribed · 동의 2 년 이내)마다 send 행 → 주기 처리(배치 50). 보내기 직전에
- * 연락처를 다시 본다(그 사이 수신거부 → suppressed). 수신자 현지 야간이고 야간 동의가 없으면 deferred 로 아침까지
- * 미룬다. 일시 오류는 3 번까지 다시 시도하고, 보내던 중 죽은 행은 다시 보내지 않는다(중복 발송보다 누락이 낫다).
+ * 연락처를 다시 본다(그 사이 수신거부 · 바운스 · 신고 → suppressed). 수신자 현지 야간이고 야간 동의가 없으면 deferred 로
+ * 아침까지 미룬다. 스팸 신고율로 멈춘 목록의 메일은 해제될 때까지 deferred 로 둔다(MarketingListHoldService).
+ * 일시 오류는 3 번까지 다시 시도하고, 보내던 중 죽은 행은 다시 보내지 않는다(중복 발송보다 누락이 낫다).
  */
 @Injectable()
 export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
@@ -61,6 +72,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     private readonly posts: MarketingPostService,
     private readonly audit: MarketingAuditService,
     private readonly logService: LogService,
+    private readonly listHolds: MarketingListHoldService,
     hooks: MarketingCampaignHooks,
   ) {
     posts.onEmailApproved(
@@ -99,12 +111,26 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     return out;
   }
 
+  /** 공급자 webhook 이 알려 온 결과의 수(발송 현황) — 바운스 종류별 · 스팸 신고. */
+  async outcomeCounts(postId: string): Promise<{ hard: number; soft: number; suppressed: number; complained: number }> {
+    const rows = await this.sendRepo.createQueryBuilder('s').select('s.bounce_type', 'bounce_type').addSelect('COUNT(*)', 'n')
+      .where('s.post_id = :p', { p: postId }).andWhere("s.bounce_type <> ''").groupBy('s.bounce_type').getRawMany();
+    const by = new Map(rows.map((r) => [String(r.bounce_type), Number(r.n) || 0]));
+    const complained = await this.sendRepo.createQueryBuilder('s')
+      .where('s.post_id = :p', { p: postId }).andWhere('s.complained_at IS NOT NULL').getCount();
+    return { hard: by.get('hard') || 0, soft: by.get('soft') || 0, suppressed: by.get('suppressed') || 0, complained };
+  }
+
   /** 승인 전에: 보낼 수 있는가. 못 보내면 글은 draft 로 남는다. */
   private async preflight(post: MarketingPost, channel: MarketingChannel, campaign: MarketingCampaign): Promise<void> {
     unsubscribeUrlFor('preflight');
     const config = channel.config || {};
     if (!config.list_name || !config.from_address || !config.postal_address || !config.from_name) {
       throw marketingError(409, 'the email channel is missing its sender settings — edit the channel');
+    }
+    const hold = await this.listHolds.active(campaign.account_id, String(config.list_name));
+    if (hold) {
+      throw marketingError(409, `the list "${hold.list_name}" is on hold because of its spam complaint rate — review it and release the hold on the channel before mailing it again`);
     }
     const secret = await resolveMarketingSecret(this.credentialRepo, String(config.credential_id || ''), campaign.account_id);
     if (!secret.api_key) throw marketingError(409, 'the email credential has no api_key');
@@ -139,7 +165,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       entityId: post.id,
       action: 'email.queued',
       actor,
-      summary: `메일 발송 대기: ${contacts.length}명(목록 ${listName}) — 제외: 수신거부·삭제 ${excluded.not_subscribed}, 동의 2년 경과 ${excluded.consent_expired}`,
+      summary: `메일 발송 대기: ${contacts.length}명(목록 ${listName}) — 제외: 수신거부·바운스·스팸 신고·삭제 ${excluded.not_subscribed}, 동의 2년 경과 ${excluded.consent_expired}`,
       detail: { list: listName, recipients: contacts.length, excluded },
     });
     if (!contacts.length) await this.posts.markSent(post, { sent: 0, failed: 0, suppressed: 0 });
@@ -157,10 +183,11 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
         order: { next_attempt_at: 'ASC' },
         take: BATCH,
       });
-      const senders = new Map<string, { sender: EmailSender; provider: string; apiKey: string } | null>();
+      const senders = new Map<string, ChannelSender | null>();
       const postCache = new Map<string, MarketingPost | null>();
       const campaigns = new Map<string, MarketingCampaign | null>();
       const channels = new Map<string, MarketingChannel | null>();
+      const heldLists = new Map<string, boolean>();
       const touched = new Set<string>();
       for (const row of due) {
         const claim = await this.sendRepo.createQueryBuilder().update(MarketingEmailSend)
@@ -169,7 +196,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
           .execute();
         if (!claim.affected) continue;
         touched.add(row.post_id);
-        const outcome = await this.sendOne(row, now, senders, postCache, campaigns, channels);
+        const outcome = await this.sendOne(row, now, senders, postCache, campaigns, channels, heldLists);
         stats[outcome]++;
       }
       for (const postId of touched) await this.finishIfDone(postId);
@@ -218,10 +245,11 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
   private async sendOne(
     row: MarketingEmailSend,
     now: Date,
-    senders: Map<string, { sender: EmailSender; provider: string; apiKey: string } | null>,
+    senders: Map<string, ChannelSender | null>,
     postCache: Map<string, MarketingPost | null>,
     campaigns: Map<string, MarketingCampaign | null>,
     channels: Map<string, MarketingChannel | null>,
+    heldLists: Map<string, boolean>,
   ): Promise<'sent' | 'deferred' | 'failed' | 'suppressed'> {
     const finish = async (status: string, extra: Partial<MarketingEmailSend>) => {
       await this.sendRepo.update({ id: row.id }, { status, ...extra });
@@ -261,6 +289,19 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       });
       return 'deferred';
     }
+    // 스팸 신고율로 멈춘 목록 — 버리지 않고 사람이 해제할 때까지 보류한다(해제하면 바로 다시 본다).
+    const listName = String(channel?.config?.list_name || '');
+    if (listName) {
+      const key = `${campaign.account_id}\n${listName}`;
+      if (!heldLists.has(key)) heldLists.set(key, !!(await this.listHolds.active(campaign.account_id, listName)));
+      if (heldLists.get(key)) {
+        await finish('deferred', {
+          next_attempt_at: new Date(now.getTime() + PAUSE_RECHECK_MS),
+          error: `${LIST_HOLD_DEFER_PREFIX} (spam complaint rate): "${listName}" — a person must review and release it`,
+        });
+        return 'deferred';
+      }
+    }
     if (!senders.has(row.channel_id)) {
       senders.set(row.channel_id, channel && channel.status === 'active' ? await this.senderFor(channel).catch(() => null) : null);
     }
@@ -280,29 +321,32 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       });
       outcome = await sendEmail({
         provider: sender.provider, apiKey: sender.apiKey, sender: sender.sender, to: { email: contact.email, name: contact.name },
-        message, idempotencyKey: row.id, fetchImpl: this.fetchImpl,
+        message, idempotencyKey: row.id, tags: { [SEND_ID_TAG]: row.id }, fetchImpl: this.fetchImpl,
       });
     } catch (e: any) {
       outcome = { outcome: 'failed' as const, error: String(e?.message || e).slice(0, 500) };
     }
+    const credentialId = sender.credentialId;
     if (outcome.outcome === 'sent') {
-      await finish('sent', { sent_at: new Date(), provider_message_id: outcome.message_id, error: '', attempts: row.attempts + 1 });
+      await finish('sent', { sent_at: new Date(), provider_message_id: outcome.message_id, credential_id: credentialId, error: '', attempts: row.attempts + 1 });
       return 'sent';
     }
     if (outcome.outcome === 'retry' && row.attempts + 1 < MAX_ATTEMPTS) {
-      await finish('deferred', { attempts: row.attempts + 1, next_attempt_at: new Date(now.getTime() + RETRY_MS * (row.attempts + 1)), error: outcome.error });
+      await finish('deferred', { attempts: row.attempts + 1, next_attempt_at: new Date(now.getTime() + RETRY_MS * (row.attempts + 1)), credential_id: credentialId, error: outcome.error });
       return 'deferred';
     }
-    await finish('failed', { attempts: row.attempts + 1, error: outcome.error });
+    await finish('failed', { attempts: row.attempts + 1, credential_id: credentialId, error: outcome.error });
     return 'failed';
   }
 
-  private async senderFor(channel: MarketingChannel): Promise<{ sender: EmailSender; provider: string; apiKey: string } | null> {
+  private async senderFor(channel: MarketingChannel): Promise<ChannelSender | null> {
     const config = channel.config || {};
-    const secret = await resolveMarketingSecret(this.credentialRepo, String(config.credential_id || ''), channel.account_id);
+    const credentialId = String(config.credential_id || '');
+    const secret = await resolveMarketingSecret(this.credentialRepo, credentialId, channel.account_id);
     const provider = String(secret.provider || config.provider || '').toLowerCase();
     if (!secret.api_key || !provider) return null;
     return {
+      credentialId,
       provider,
       apiKey: secret.api_key,
       sender: {

@@ -153,3 +153,4 @@ export { MarketingContact } from './MarketingContact';
 export { MarketingEmailSend } from './MarketingEmailSend';
 export { MarketingCycle } from './MarketingCycle';
 export { MarketingApprovalNotice } from './MarketingApprovalNotice';
+export { MarketingListHold } from './MarketingListHold';

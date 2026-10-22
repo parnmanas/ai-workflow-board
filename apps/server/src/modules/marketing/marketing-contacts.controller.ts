@@ -7,7 +7,8 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { MarketingContactService } from './marketing-contact.service';
 import { MarketingEmailService } from './marketing-email.service';
 import { MarketingPostService } from './marketing-post.service';
-import { contactToJson, emailSendToJson } from './marketing-json';
+import { MarketingListHoldService } from './marketing-list-hold.service';
+import { contactToJson, emailSendToJson, listHoldToJson } from './marketing-json';
 import { errorStatus } from './marketing-errors';
 import { boundAccountId, userActor } from './marketing-http';
 
@@ -24,6 +25,7 @@ export class MarketingContactsController {
     private readonly contacts: MarketingContactService,
     private readonly email: MarketingEmailService,
     private readonly posts: MarketingPostService,
+    private readonly listHolds: MarketingListHoldService,
   ) {}
 
   @Get('contacts')
@@ -75,12 +77,33 @@ export class MarketingContactsController {
     }
   }
 
+  /** 스팸 신고율로 발송을 멈춘 목록(docs/marketing.md "목록 발송 중지") — 지금 멈춘 것과 지난 이력. */
+  @Get('list-holds')
+  async holds(@Query('list') list: string, @Query('status') status: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      const rows = await this.listHolds.list(boundAccountId(req), { list: list || undefined, status: status || undefined });
+      return res.json(rows.map(listHoldToJson));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list holds' });
+    }
+  }
+
+  /** 해제 — 무엇을 확인 · 고쳤는지 사유가 필요하다. 보류된 메일은 바로 다시 보낸다. */
+  @Post('list-holds/:id/release')
+  async releaseHold(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try {
+      return res.status(200).json(listHoldToJson(await this.listHolds.release(id, boundAccountId(req), userActor(req), body?.note)));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to release the hold' });
+    }
+  }
+
   @Get('posts/:id/sends')
   async sends(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       const post = await this.posts.get(id, boundAccountId(req));
-      const [rows, counts] = await Promise.all([this.email.listSends(post), this.email.sendCounts(post.id)]);
-      return res.json({ counts, sends: rows.map(emailSendToJson) });
+      const [rows, counts, outcomes] = await Promise.all([this.email.listSends(post), this.email.sendCounts(post.id), this.email.outcomeCounts(post.id)]);
+      return res.json({ counts, outcomes, sends: rows.map(emailSendToJson) });
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list sends' });
     }

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { consentFresh, emailHash, isValidTimezone } from '../../common/marketing/email';
 import type { MarketingActor } from '../../common/marketing/marketing-constants';
@@ -53,6 +53,14 @@ export class MarketingContactService {
     const row = id ? await this.contactRepo.findOne({ where: { id } }) : null;
     if (!row || (!accountId || row.account_id !== accountId)) throw marketingError(404, 'contact not found');
     return row;
+  }
+
+  /** 그 계정의 연락처 몇 개(사람용 화면이 답장한 사람을 보여 줄 때). 다른 계정 · 없는 id 는 빠진다. */
+  async byIds(accountId: string, ids: string[]): Promise<Map<string, MarketingContact>> {
+    const unique = [...new Set(ids.filter(Boolean))];
+    if (!accountId || !unique.length) return new Map();
+    const rows = await this.contactRepo.find({ where: { account_id: accountId, id: In(unique) } });
+    return new Map(rows.map((c) => [c.id, c]));
   }
 
   /** 목록의 발송 대상 — subscribed · 주소 있음 · 동의 2 년 이내. 빠진 수도 같이 센다. */

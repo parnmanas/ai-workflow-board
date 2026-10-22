@@ -111,6 +111,8 @@ test/marketing-budget-logic.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
 test/marketing-cycle.test.mjs
+test/marketing-email-events-logic.test.mjs
+test/marketing-email-events.test.mjs
 test/marketing-email.test.mjs
 test/marketing-feedback.test.mjs
 test/marketing-logic.test.mjs

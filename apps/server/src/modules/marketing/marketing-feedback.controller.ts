@@ -6,6 +6,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
+import { MarketingContactService } from './marketing-contact.service';
 import { feedbackToJson } from './marketing-json';
 import { errorStatus } from './marketing-errors';
 import { boundAccountId, userActor } from './marketing-http';
@@ -20,6 +21,7 @@ export class MarketingFeedbackController {
   constructor(
     private readonly campaigns: MarketingCampaignService,
     private readonly feedback: MarketingFeedbackService,
+    private readonly contacts: MarketingContactService,
   ) {}
 
   @Get('campaigns/:id/feedback')
@@ -30,8 +32,16 @@ export class MarketingFeedbackController {
         this.feedback.list(campaign, { limit: limit ? Number(limit) : 100 }),
         this.feedback.collected(campaign, { limit: 50 }),
       ]);
+      // 메일 답장은 답장한 연락처를 같이 싣는다 — 사람용 화면만(에이전트 응답에는 없다).
+      const repliers = await this.contacts.byIds(campaign.account_id, recorded.map((f) => f.contact_id));
       return res.json({
-        recorded: recorded.map((f) => feedbackToJson(f)),
+        recorded: recorded.map((f) => {
+          const contact = f.contact_id ? repliers.get(f.contact_id) : undefined;
+          return {
+            ...feedbackToJson(f),
+            contact: contact ? { id: contact.id, email: contact.email, name: contact.name, status: contact.status } : null,
+          };
+        }),
         collected: collected.map(({ item, channel }) => ({
           id: item.id,
           channel_id: channel.id,

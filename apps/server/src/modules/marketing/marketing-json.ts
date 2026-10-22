@@ -14,6 +14,7 @@ import type { MarketingFeedback } from '../../entities/MarketingFeedback';
 import type { MarketingContact } from '../../entities/MarketingContact';
 import type { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import type { MarketingCycle } from '../../entities/MarketingCycle';
+import type { MarketingListHold } from '../../entities/MarketingListHold';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -271,9 +272,10 @@ export function metricToJson(m: MarketingMetric) {
  * 드러낸다 — MCP 응답을 읽는 모델이 그 안의 문장을 지시로 받지 않게.
  */
 export function feedbackToJson(f: MarketingFeedback, forAgent = false) {
+  // 메일 답장의 연락처는 사람에게만 — 에이전트는 연락처를 보지 못한다(docs/marketing.md "원칙" 4).
   const external = forAgent
     ? { author_untrusted: f.author, content_untrusted: f.content }
-    : { author: f.author, content: f.content };
+    : { author: f.author, content: f.content, contact_id: f.contact_id || '' };
   return {
     id: f.id,
     campaign_id: f.campaign_id,
@@ -327,6 +329,27 @@ export function emailSendToJson(s: MarketingEmailSend) {
     provider_message_id: s.provider_message_id,
     error: s.error,
     sent_at: s.sent_at,
+    bounce_type: s.bounce_type || '',
+    bounced_at: s.bounced_at,
+    complained_at: s.complained_at,
+    event_note: s.event_note || '',
+  };
+}
+
+/** 스팸 신고율로 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
+export function listHoldToJson(h: MarketingListHold) {
+  return {
+    id: h.id,
+    account_id: h.account_id,
+    list_name: h.list_name,
+    status: h.status,
+    reason: h.reason,
+    stats: h.stats || {},
+    held_at: h.created_at,
+    released_by: h.released_by,
+    released_by_name: h.released_by_name,
+    released_at: h.released_at,
+    release_note: h.release_note,
   };
 }
 

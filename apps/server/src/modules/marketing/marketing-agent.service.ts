@@ -14,6 +14,7 @@ import { MarketingPostService } from './marketing-post.service';
 import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
 import { MarketingEmailService } from './marketing-email.service';
+import { MarketingListHoldService } from './marketing-list-hold.service';
 import {
   allocationToJson, campaignToJson, channelToJson, feedbackToJson, linkToJson, metricToJson, postToJson, spendToJson,
 } from './marketing-json';
@@ -40,6 +41,7 @@ export class MarketingAgentService {
     private readonly analytics: MarketingAnalyticsService,
     private readonly feedback: MarketingFeedbackService,
     private readonly email: MarketingEmailService,
+    private readonly listHolds: MarketingListHoldService,
   ) {}
 
   async listCampaigns(accountIds: string[]): Promise<MarketingCampaign[]> {
@@ -85,6 +87,8 @@ export class MarketingAgentService {
       if (ch.kind === 'email' && ch.status === 'active' && ch.config?.list_name) {
         // 에이전트는 연락처를 볼 수 없다 — 몇 명에게 갈지만 안다.
         view.audience_count = await this.email.countEligible(campaign.account_id, String(ch.config.list_name));
+        // 스팸 신고율로 멈춘 목록이면 사람이 해제할 때까지 메일 초안을 받지 않는다.
+        view.list_on_hold = !!(await this.listHolds.active(campaign.account_id, String(ch.config.list_name)));
       }
       return view;
     }));
@@ -108,6 +112,9 @@ export class MarketingAgentService {
   async draftPost(campaign: MarketingCampaign, body: Record<string, unknown>, actor: MarketingActor, cycleId: string | null) {
     const channel = await this.channels.getInCampaign(campaign, String(body.channel_id || ''));
     this.assertCanAct(campaign, channel.kind === 'email' ? 'email' : 'community_post');
+    if (channel.kind === 'email' && (await this.listHolds.active(campaign.account_id, String(channel.config?.list_name || '')))) {
+      throw marketingError(409, `the mailing list of "${channel.name}" is on hold because of its spam complaint rate — do not draft email for it until a person releases the hold`);
+    }
     await this.assertDailyLimit(campaign, 'drafts_per_day', (since) => this.posts.countDraftedSince(campaign.id, since));
     const { post, duplicate } = await this.posts.draft(campaign, channel, body, actor, { cycleId });
     return {

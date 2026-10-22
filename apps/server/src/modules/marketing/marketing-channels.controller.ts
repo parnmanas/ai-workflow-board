@@ -6,7 +6,9 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { MarketingCampaignService } from './marketing-campaign.service';
 import { MarketingChannelService } from './marketing-channel.service';
-import { channelToJson } from './marketing-json';
+import { MarketingListHoldService } from './marketing-list-hold.service';
+import { MarketingEmailEventsService } from './marketing-email-events.service';
+import { channelToJson, listHoldToJson } from './marketing-json';
 import { errorStatus } from './marketing-errors';
 import { assertCanViewMarketing, boundAccountId, userActor } from './marketing-http';
 
@@ -21,14 +23,31 @@ export class MarketingChannelsController {
   constructor(
     private readonly campaigns: MarketingCampaignService,
     private readonly channels: MarketingChannelService,
+    private readonly listHolds: MarketingListHoldService,
+    private readonly emailEvents: MarketingEmailEventsService,
   ) {}
 
+  /**
+   * 메일 채널에는 두 가지를 더 싣는다(사람용 화면만 — 에이전트 개요에는 없다): 목록 발송 중지(`email_hold`)와
+   * 공급자에 붙여 넣을 webhook 주소 · 서명 키 설정 여부(`email_webhooks`, 키 값은 싣지 않는다).
+   */
   @Get('campaigns/:id/channels')
   async list(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       assertCanViewMarketing(req);
       const campaign = await this.campaigns.get(id, boundAccountId(req));
-      return res.json((await this.channels.list(campaign)).map(channelToJson));
+      const rows = await this.channels.list(campaign);
+      const listOf = (c: { config: Record<string, any> }) => String(c.config?.list_name || '');
+      const holds = await this.listHolds.activeFor(campaign.account_id, rows.filter((c) => c.kind === 'email').map(listOf));
+      return res.json(await Promise.all(rows.map(async (c) => {
+        const json: Record<string, unknown> = channelToJson(c);
+        if (c.kind === 'email') {
+          const hold = holds.get(listOf(c));
+          json.email_hold = hold ? listHoldToJson(hold) : null;
+          json.email_webhooks = await this.emailEvents.webhookInfo(c);
+        }
+        return json;
+      })));
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list channels' });
     }

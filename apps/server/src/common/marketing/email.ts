@@ -49,6 +49,36 @@ export function consentFresh(consentAt: Date, now: Date): boolean {
   return now.getTime() - new Date(consentAt).getTime() <= CONSENT_MAX_AGE_MS;
 }
 
+/**
+ * 스팸 신고율 안전장치(docs/marketing.md "목록 발송 중지"). Gmail · Yahoo 의 대량 발신자 기준은 신고율 0.1% 미만 유지,
+ * 0.3% 에는 닿지 말 것이다 — 닿은 목록은 그 발신 도메인 전체의 평판을 깎으므로 사람이 볼 때까지 그 목록의 발송을 멈춘다.
+ */
+export const COMPLAINT_HOLD_RATE = 0.003;
+/** 이보다 적은 신고로는 멈추지 않는다 — 작은 목록에서는 한 사람의 신고만으로 비율을 넘는다. */
+export const COMPLAINT_HOLD_MIN = 2;
+/** 신고율을 세는 기간: 이 기간에 보낸 메일과 그 메일의 신고. 해제한 목록은 해제 이후만 센다. */
+export const COMPLAINT_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
+export interface ListMailStats {
+  /** 기간에 공급자가 받은 메일 수. */
+  sent: number;
+  /** 그중 닿지 않은 것(바운스 · 공급자 억제). */
+  bounced: number;
+  /** 그중 스팸 신고된 것. */
+  complained: number;
+}
+
+/** 신고율 = 신고 ÷ 닿은 메일. */
+export function complaintRate(stats: ListMailStats): number {
+  const delivered = Math.max(stats.sent - stats.bounced, 0);
+  if (delivered <= 0) return stats.complained > 0 ? 1 : 0;
+  return stats.complained / delivered;
+}
+
+export function shouldHoldList(stats: ListMailStats): boolean {
+  return stats.complained >= COMPLAINT_HOLD_MIN && complaintRate(stats) >= COMPLAINT_HOLD_RATE;
+}
+
 /** 한국 수신자(또는 국가를 모르는 수신자)는 언제나 "(광고)" 로 시작한다. */
 export function adLabelFor(channelLabel: string, country: string): string {
   const c = (country || '').toUpperCase();

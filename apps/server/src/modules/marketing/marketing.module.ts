@@ -16,6 +16,7 @@ import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { MarketingCycle } from '../../entities/MarketingCycle';
 import { MarketingApprovalNotice } from '../../entities/MarketingApprovalNotice';
+import { MarketingListHold } from '../../entities/MarketingListHold';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { OutreachChannel } from '../../entities/OutreachChannel';
@@ -52,6 +53,9 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { MarketingInboxService } from './marketing-inbox.service';
 import { MarketingInboxController } from './marketing-inbox.controller';
 import { MarketingApprovalNotifyService } from './marketing-approval-notify.service';
+import { MarketingListHoldService } from './marketing-list-hold.service';
+import { MarketingEmailEventsService } from './marketing-email-events.service';
+import { MarketingEmailWebhooksController } from './marketing-email-webhooks.controller';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -64,7 +68,7 @@ import { MarketingApprovalNotifyService } from './marketing-approval-notify.serv
       MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
       MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
       MarketingContact, MarketingEmailSend, MarketingCycle, ChatRoom, ChatRoomParticipant,
-      Project, RuntimeHost, OutreachChannel, Credential, MarketingApprovalNotice,
+      Project, RuntimeHost, OutreachChannel, Credential, MarketingApprovalNotice, MarketingListHold,
     ]),
     SharedServicesModule,
     // 채널 승인이 새 OutreachChannel 을 OutreachChannelService 로 만든다(그쪽 검증을 그대로 탄다).
@@ -77,7 +81,7 @@ import { MarketingApprovalNotifyService } from './marketing-approval-notify.serv
   controllers: [
     MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController,
     MarketingAnalyticsController, MarketingPublicController, MarketingFeedbackController, MarketingContactsController,
-    MarketingInboxController,
+    MarketingInboxController, MarketingEmailWebhooksController,
   ],
   providers: [
     MarketingAuditService,
@@ -95,6 +99,8 @@ import { MarketingApprovalNotifyService } from './marketing-approval-notify.serv
     MarketingCycleService,
     MarketingInboxService,
     MarketingApprovalNotifyService,
+    MarketingListHoldService,
+    MarketingEmailEventsService,
     AuthGuard,
     PermissionGuard,
   ],
@@ -102,6 +108,7 @@ import { MarketingApprovalNotifyService } from './marketing-approval-notify.serv
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
     MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingFeedbackService,
     MarketingContactService, MarketingEmailService, MarketingAgentService, MarketingCycleService,
+    MarketingListHoldService, MarketingEmailEventsService,
   ],
 })
 export class MarketingModule {}

@@ -79,6 +79,13 @@ export type ChannelKind = typeof CHANNEL_KINDS[number];
 export const CHANNEL_STATUSES = ['proposed', 'awaiting_credential', 'active', 'paused', 'rejected'] as const;
 export type ChannelStatus = typeof CHANNEL_STATUSES[number];
 
+/**
+ * 연락처 상태. `subscribed` 에게만 보낸다 — 나머지는 모두 억제다: 수신거부, 공급자가 알려 온 바운스 · 스팸 신고
+ * (docs/marketing.md "공급자 이벤트"), 삭제(주소는 지우고 해시만).
+ */
+export const CONTACT_STATUSES = ['subscribed', 'unsubscribed', 'bounced', 'complained', 'erased'] as const;
+export type ContactStatus = typeof CONTACT_STATUSES[number];
+
 /** 메일 공급자(메일 credential 의 `provider` 필드). */
 export const EMAIL_PROVIDERS = ['resend', 'sendgrid'] as const;
 export type EmailProvider = typeof EMAIL_PROVIDERS[number];
@@ -115,7 +122,7 @@ export const CYCLE_LEASE_MS = 6 * 60 * 60_000;
 
 export const MARKETING_AUDIT_ENTITY_TYPES = [
   'campaign', 'channel', 'post', 'email', 'contact', 'allocation', 'spend_request', 'ledger',
-  'link', 'metric', 'feedback', 'cycle',
+  'link', 'metric', 'feedback', 'cycle', 'list',
 ] as const;
 export type MarketingAuditEntityType = typeof MARKETING_AUDIT_ENTITY_TYPES[number];
 

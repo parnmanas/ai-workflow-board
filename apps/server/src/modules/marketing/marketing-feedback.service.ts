@@ -214,6 +214,60 @@ export class MarketingFeedbackService {
     return { feedback: saved, duplicate: false, ticket, note };
   }
 
+  /**
+   * 메일 답장 기록(docs/marketing.md "답장") — 공급자 webhook 처리가 부른다. 본문은 이미 정리된 것(인용 원문 · 서명 ·
+   * 메일 주소 · 수신거부 링크를 뺀 것)이고, 외부인이 쓴 글이라 다른 피드백과 같은 비신뢰 경로로만 에이전트에게 간다.
+   * 무엇에 대한 글인지 서버가 판단하지 않으므로 분류는 `other` 다. 같은 메일(source_key)은 한 번만 기록한다.
+   * 연락처는 `contact_id` 로만 잇는다 — author 에 주소 · 이름을 넣지 않는다(에이전트는 연락처를 보지 못한다).
+   */
+  async recordReply(
+    campaign: MarketingCampaign,
+    input: { channelId: string; postId: string; contactId: string; content: string; summary: string; sourceKey: string },
+    actor: MarketingActor,
+  ): Promise<{ feedback: MarketingFeedback; duplicate: boolean }> {
+    const existing = await this.feedbackRepo.findOne({ where: { campaign_id: campaign.id, source_key: input.sourceKey } });
+    if (existing) return { feedback: existing, duplicate: true };
+    let saved: MarketingFeedback;
+    try {
+      saved = await this.feedbackRepo.save(this.feedbackRepo.create({
+        account_id: campaign.account_id,
+        campaign_id: campaign.id,
+        channel_id: input.channelId,
+        post_id: input.postId,
+        contact_id: input.contactId,
+        source_url: '',
+        source_key: input.sourceKey,
+        author: '',
+        content: input.content.slice(0, MAX_CONTENT),
+        summary: input.summary.slice(0, 120),
+        category: 'other',
+        sentiment: 'neutral',
+        status: 'recorded',
+        ticket_id: null,
+        recorded_by_type: actor.type,
+        recorded_by_id: actor.id,
+        recorded_by_name: actor.name,
+        cycle_id: null,
+      }));
+    } catch (e) {
+      const winner = await this.feedbackRepo.findOne({ where: { campaign_id: campaign.id, source_key: input.sourceKey } });
+      if (winner) return { feedback: winner, duplicate: true };
+      throw e;
+    }
+    await this.audit.record({
+      accountId: campaign.account_id,
+      campaignId: campaign.id,
+      entityType: 'feedback',
+      entityId: saved.id,
+      action: 'feedback.recorded',
+      actor,
+      summary: `메일 답장 기록: ${input.summary}`,
+      detail: { channel_id: input.channelId, post_id: input.postId, source: 'email_reply' },
+    });
+    this.audit.notify(campaign.account_id, campaign.id, 'feedback', saved.id, 'recorded');
+    return { feedback: saved, duplicate: false };
+  }
+
   /** 사람이 상한과 무관하게 티켓으로 만든다. */
   async ticketNow(id: string, accountId: string, campaign: MarketingCampaign, actor: MarketingActor): Promise<Ticket> {
     const row = await this.get(id, accountId);

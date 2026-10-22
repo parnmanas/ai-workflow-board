@@ -76,7 +76,10 @@ export class MarketingContact {
   @Column({ type: Date, nullable: true, default: null })
   unsubscribed_at: Date | null;
 
-  /** link | one_click | manual | bounce | complaint */
+  /**
+   * link | one_click | manual | mailto(List-Unsubscribe 메일 회신) | bounce | complaint | provider(공급자 쪽 수신거부).
+   * bounce · complaint · provider 는 공급자 webhook 이 남긴다(docs/marketing.md "공급자 이벤트").
+   */
   @Column({ type: 'varchar', default: '' })
   unsubscribe_source: string;
 

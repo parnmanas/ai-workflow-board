@@ -23,6 +23,8 @@ export interface CyclePromptChannel {
   guidelines: string;
   rules_summary: string;
   audience_count?: number;
+  /** 메일 채널의 목록이 스팸 신고율로 멈췄다(docs/marketing.md "목록 발송 중지"). */
+  on_hold?: boolean;
 }
 
 export interface CyclePromptInput {
@@ -118,6 +120,7 @@ export function buildCyclePrompt(input: CyclePromptInput): string {
     }
     const parts = [`- ${ch.name} [${ch.platform}/${ch.kind}, ${ch.status}] id=${ch.id} 대상=${ch.target}`];
     if (typeof ch.audience_count === 'number') parts.push(`수신 대상 ${ch.audience_count}명`);
+    if (ch.on_hold) parts.push('발송 중지(스팸 신고율) — 사람이 해제할 때까지 이 채널의 메일 초안을 쓰지 않는다');
     lines.push(parts.join(' · '));
     if (ch.guidelines) lines.push(`  가이드: ${ch.guidelines.replace(/\s+/g, ' ').slice(0, 500)}`);
     if (ch.rules_summary) lines.push(`  홍보 규칙: ${ch.rules_summary.replace(/\s+/g, ' ').slice(0, 500)}`);

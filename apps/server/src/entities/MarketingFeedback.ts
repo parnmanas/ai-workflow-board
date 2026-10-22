@@ -27,6 +27,13 @@ export class MarketingFeedback {
   @Column({ type: 'varchar', default: '' })
   post_id: string;
 
+  /**
+   * 메일 답장이면 보낸 연락처. 사람용 REST 만 이것으로 주소를 보여 준다 — 에이전트 응답 · 사이클 지시문에는 싣지 않는다
+   * (에이전트는 연락처를 보지 못한다).
+   */
+  @Column({ type: 'varchar', default: '' })
+  contact_id: string;
+
   @Column({ type: 'varchar', default: '' })
   source_url: string;
 

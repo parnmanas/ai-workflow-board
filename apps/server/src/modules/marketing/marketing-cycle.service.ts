@@ -257,7 +257,12 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
     ]);
     const channelNames = new Map(overview.channels.map((c: any) => [c.id, c.name]));
     const untrusted = [
-      ...recorded.map((f) => ({ source: String(channelNames.get(f.channel_id) || 'feedback'), author: f.author, category: f.category, text: f.content })),
+      ...recorded.map((f) => ({
+        source: `${String(channelNames.get(f.channel_id) || 'feedback')}${f.contact_id ? ' · 메일 답장' : ''}`,
+        author: f.author,
+        category: f.category,
+        text: f.content,
+      })),
       ...collected.map(({ item, channel }) => ({ source: channel.name, author: item.author, category: item.classification, text: `(collected item, status ${item.status})` })),
     ];
     const budget = overview.budget;
@@ -283,6 +288,7 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
         return {
           id: c.id, name: c.name, platform: c.platform, kind: c.kind, status: c.status, target: c.target,
           guidelines: reviewed ? c.guidelines : '', rules_summary: reviewed ? c.rules_summary : '', audience_count: c.audience_count,
+          on_hold: c.list_on_hold === true,
         };
       }),
       budget: [
