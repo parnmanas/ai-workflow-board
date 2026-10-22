@@ -14,7 +14,7 @@ import {
   approvalNoticesFor,
   composeApprovalDigest,
   proposalNoticeCandidate,
-  spendNoticeCandidate,
+  spendNoticeCandidates,
   type ApprovalNoticeCandidate,
   type ApprovalNoticeRecipient,
 } from '../../common/marketing/approval-notice';
@@ -232,9 +232,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
       this.listHolds.activeByCampaign(openCampaignIds),
     ]);
 
-    const spendCandidates = spends
-      .map((row) => spendNoticeCandidate(row, now))
-      .filter((c): c is ApprovalNoticeCandidate => !!c);
+    const spendCandidates = spends.flatMap((row) => spendNoticeCandidates(row, now));
     // 한 중지를 여러 캠페인이 공유한다. 캠페인마다 한 번, 같은 캠페인의 채널 수와는 무관하다.
     const holdCandidates: ApprovalNoticeCandidate[] = [...holds].flatMap(([campaignId, rows]) => rows.map((hold) => ({
       kind: 'list_hold',

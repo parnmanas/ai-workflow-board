@@ -386,3 +386,71 @@ test('held lists: per-campaign inbox, account isolation, immediate safe notices 
   assert.equal((await notify.sweep()).items, 2, 'new hold episode is announced again');
   assert.equal((await inbox()).total, 2);
 });
+
+test('spend reminders claim before delivery, survive restart and never change spending state', async (t) => {
+  const { app, modules } = await bootApp({ port: 0 });
+  t.after(() => closeTestApp(app));
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const notify = app.get(MarketingApprovalNotifyService);
+  const owner = await createUser(app, getDataSourceToken, { name: 'reminder-owner', role: 'admin' });
+  const account = await createAccount(app, getDataSourceToken, 'reminders', { ownerUserId: owner.id });
+  const campaigns = ds.getRepository('MarketingCampaign');
+  const campaign = await campaigns.save(campaigns.create({ account_id: account.id, name: 'Reminders', slug: 'reminders', status: 'active' }));
+  const archived = await campaigns.save(campaigns.create({ account_id: account.id, name: 'Archived', slug: 'archived-reminders', status: 'archived' }));
+  await ds.getRepository('UserChannel').save({ user_id: owner.id, provider: 'discord', target: 'reminder-owner', credentials: '' });
+  const spends = ds.getRepository('MarketingSpendRequest');
+  const notices = ds.getRepository('MarketingApprovalNotice');
+  const hour = 60 * MIN;
+  const now = new Date();
+  const makeSpend = (over = {}) => spends.save(spends.create({
+    account_id: account.id, campaign_id: campaign.id, channel_id: 'unused',
+    amount_minor: 1000, currency: 'KRW', payee: 'Ads Co', purpose: 'private purpose',
+    provider: 'manual', payload_sha256: 'test', status: 'pending',
+    created_at: new Date(+now - 48 * hour), updated_at: new Date(+now - 24 * hour),
+    expires_at: new Date(+now + 24 * hour), ...over,
+  }));
+  const pending = await makeSpend();
+  const unknown = await makeSpend({ campaign_id: archived.id, status: 'unknown' });
+  const hidden = await makeSpend({ campaign_id: archived.id });
+  // Initial notices have already been claimed in a previous process.
+  for (const [row, kind] of [[pending, 'spend_pending'], [unknown, 'spend_unknown']]) {
+    await notices.insert({ account_id: account.id, campaign_id: row.campaign_id, entity_id: row.id, kind });
+  }
+  const before = await spends.find({ order: { id: 'ASC' } });
+  const ledgerCount = await ds.getRepository('MarketingLedgerEntry').count();
+  const delivered = [];
+  app.get(NotificationProviderRegistry).get('discord').send = async (_target, _credentials, payload) => {
+    assert.equal(await notices.countBy({ entity_id: pending.id, kind: 'spend_expiring_24h' }), 1, 'claim precedes send');
+    assert.equal(await notices.countBy({ entity_id: unknown.id, kind: 'spend_unknown_stale' }), 1);
+    delivered.push(payload);
+    return { ok: false, error: 'simulated provider failure' };
+  };
+  const first = await notify.sweep(now);
+  assert.equal(first.items, 2, JSON.stringify(first));
+  assert.equal(first.failed, 1);
+  assert.equal(delivered.length, 1, 'one digest including archived unknown');
+  assert.match(delivered[0].body, /만료 24시간 이내/);
+  assert.match(delivered[0].body, /결제 결과 불명 24시간 경과/);
+  assert.equal(await notices.countBy({ entity_id: hidden.id }), 0);
+  assert.deepEqual(await spends.find({ order: { id: 'ASC' } }), before, 'notification does not mutate requests');
+  assert.equal(await ds.getRepository('MarketingLedgerEntry').count(), ledgerCount);
+  assert.equal((await notify.sweep(new Date(+now + MIN))).items, 0, 'failed delivery is not retried');
+
+  app.get(NotificationProviderRegistry).get('discord').send = async (_target, _credentials, payload) => {
+    delivered.push(payload);
+    return { ok: true };
+  };
+  const urgentAt = new Date(+now + 21 * hour);
+  assert.equal((await notify.sweep(urgentAt)).items, 1, 'the independent three-hour reminder still goes out');
+  assert.match(delivered.at(-1).body, /만료 3시간 이내/);
+  assert.equal((await notify.sweep(urgentAt)).items, 0);
+  const expiredAt = new Date(+now + 24 * hour);
+  assert.equal((await notify.candidates([campaign.id], expiredAt)).some((c) => c.entity_id === pending.id), false,
+    'expired pending is no longer a candidate');
+  await notify.sweep(expiredAt);
+  assert.equal(await notices.countBy({ entity_id: pending.id }), 3, 'only initial, 24h and 3h claims exist');
+  await spends.update(unknown.id, { status: 'paid' });
+  assert.equal((await notify.candidates([campaign.id], new Date(+now + 48 * hour))).some((c) => c.entity_id === unknown.id), false,
+    'reconciled unknown is no longer a candidate');
+});

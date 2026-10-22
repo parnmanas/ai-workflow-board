@@ -23,6 +23,7 @@ import {
   composeApprovalDigest,
   proposalNoticeCandidate,
   spendNoticeCandidate,
+  spendNoticeCandidates,
 } from '../dist/common/marketing/approval-notice.js';
 
 const NOW = new Date('2026-10-22T12:00:00Z');
@@ -256,4 +257,43 @@ test('hard bounce digest labels the recorded rate correctly', () => {
   const hold = candidate('list_hold', { list_hold: { name: 'newsletter', rate: 0.05, reason: 'hard_bounce_rate' } });
   const digest = composeApprovalDigest([hold], new Map([['camp', { name: 'Campaign' }]]), { now: NOW });
   assert.match(digest.body, /하드 바운스율 5.00%/);
+});
+
+
+test('reminders respect exact deadlines, current state and decision permissions', () => {
+  const kinds = (row) => spendNoticeCandidates(spendRow(row), NOW).map((c) => c.kind);
+  for (const [remaining, expected] of [
+    [24 * HOUR + 1, []], [24 * HOUR, ['spend_expiring_24h']],
+    [3 * HOUR + 1, ['spend_expiring_24h']], [3 * HOUR, ['spend_expiring_3h']],
+    [1, ['spend_expiring_3h']],
+  ]) {
+    assert.deepEqual(kinds({ expires_at: new Date(+NOW + remaining) }), ['spend_pending', ...expected]);
+  }
+  for (const remaining of [0, -1]) assert.deepEqual(kinds({ expires_at: new Date(+NOW + remaining) }), []);
+  for (const status of ['approved', 'executing', 'paid', 'failed', 'denied', 'expired', 'cancelled']) {
+    assert.deepEqual(kinds({ status, expires_at: new Date(+NOW + HOUR) }), []);
+  }
+  assert.deepEqual(kinds({ status: 'unknown', updated_at: ago(24 * HOUR - 1) }), ['spend_unknown']);
+  assert.deepEqual(kinds({ status: 'unknown', updated_at: ago(24 * HOUR) }), ['spend_unknown', 'spend_unknown_stale']);
+  assert.deepEqual(kinds({ status: 'unknown', updated_at: 'invalid', created_at: 'invalid' }), ['spend_unknown']);
+
+  const row = spendRow({
+    requested_by_type: 'user', requested_by_id: 'requester',
+    approvals: [{ user_id: 'first', at: ago(HOUR).toISOString() }],
+    expires_at: new Date(+NOW + 3 * HOUR), updated_at: ago(24 * HOUR),
+  });
+  const reminder = spendNoticeCandidates(row, NOW)[1];
+  assert.equal(reminder.kind, 'spend_expiring_3h');
+  assert.deepEqual(reminder.exclude_user_ids, ['requester', 'first']);
+  assert.equal(approvalDigestDue([reminder], NOW, new Set(['camp'])), true);
+  for (const id of ['requester', 'first']) {
+    assert.deepEqual(approvalNoticesFor({ id, role: 'admin', permissions: [] }, [reminder]), []);
+  }
+  assert.deepEqual(approvalNoticesFor({ id: 'manager', role: 'user', permissions: ['marketing.manage'] }, [reminder]), []);
+  assert.equal(approvalNoticesFor({ id: 'payer', role: 'user', permissions: ['marketing.approve_spend'] }, [reminder]).length, 1);
+  const stale = spendNoticeCandidates({ ...row, status: 'unknown' }, NOW)[1];
+  assert.deepEqual(stale.exclude_user_ids, []);
+  const digest = composeApprovalDigest([reminder, stale], new Map(), { now: NOW });
+  assert.match(digest.body, /결제 결과 불명 24시간 경과/);
+  assert.match(digest.body, /지출 요청 만료 3시간 이내/);
 });

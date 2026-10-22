@@ -15,7 +15,10 @@ import { formatMinorAmount } from './money';
 
 /** 알림 종류. 이 순서가 본문 순서다 — 급한 것부터, 돈이 나갔는지 모르는 것이 맨 앞. */
 export const APPROVAL_NOTICE_KINDS = [
+  'spend_unknown_stale',
   'spend_unknown',
+  'spend_expiring_3h',
+  'spend_expiring_24h',
   'list_hold',
   'spend_second_approval',
   'spend_pending',
@@ -39,6 +42,24 @@ interface ApprovalNoticeRule {
 }
 
 export const APPROVAL_NOTICE_RULES: Record<ApprovalNoticeKind, ApprovalNoticeRule> = {
+  spend_unknown_stale: {
+    permission: PERMISSIONS.APPROVE_MARKETING_SPEND,
+    label: '결제 결과 불명 24시간 경과',
+    hint: '예산이 묶여 있습니다. 결제됐는지 대조해 결과를 기록하세요',
+    burst: false,
+  },
+  spend_expiring_3h: {
+    permission: PERMISSIONS.APPROVE_MARKETING_SPEND,
+    label: '지출 요청 만료 3시간 이내',
+    hint: '만료 전에 승인 여부를 결정하세요',
+    burst: false,
+  },
+  spend_expiring_24h: {
+    permission: PERMISSIONS.APPROVE_MARKETING_SPEND,
+    label: '지출 요청 만료 24시간 이내',
+    hint: '만료 전에 승인 여부를 결정하세요',
+    burst: false,
+  },
   spend_unknown: {
     permission: PERMISSIONS.APPROVE_MARKETING_SPEND,
     label: '결제 결과 불명',
@@ -173,6 +194,26 @@ export function spendNoticeCandidate(row: NoticeSpendRow, now: Date): ApprovalNo
     exclude_user_ids: [...requester, ...approvals.map((a) => a.user_id).filter(Boolean)],
     spend: { ...spend, expires_at: expires },
   };
+}
+
+/**
+ * 최초 알림과 별도의 일회성 리마인더. 현재 상태의 수신자 제외 · 묶음 시각을 그대로 쓴다.
+ * 만료 3시간 안에 처음 다시 켜진 서버는 지난 24시간 알림까지 몰아 보내지 않는다.
+ * unknown의 updated_at은 결과 불명으로 들어온 시각이며, 대조로 닫히면 후보 자체가 사라진다.
+ */
+export function spendNoticeCandidates(row: NoticeSpendRow, now: Date): ApprovalNoticeCandidate[] {
+  const initial = spendNoticeCandidate(row, now);
+  if (!initial) return [];
+  const hour = 3_600_000;
+  let kind: ApprovalNoticeKind | undefined;
+  if (row.status === 'unknown') {
+    if (now.getTime() - initial.at.getTime() >= 24 * hour) kind = 'spend_unknown_stale';
+  } else {
+    const remaining = initial.spend!.expires_at!.getTime() - now.getTime();
+    if (remaining <= 3 * hour) kind = 'spend_expiring_3h';
+    else if (remaining <= 24 * hour) kind = 'spend_expiring_24h';
+  }
+  return kind ? [initial, { ...initial, kind }] : [initial];
 }
 
 /**
