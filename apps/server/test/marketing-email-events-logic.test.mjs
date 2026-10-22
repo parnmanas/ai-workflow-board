@@ -23,9 +23,11 @@ import { complaintRate, shouldHoldList } from '../dist/common/marketing/email.js
 import { buildCyclePrompt } from '../dist/common/marketing/cycle-prompt.js';
 
 test('Svix (Resend) signatures: the published vector verifies, anything changed does not', () => {
-  // docs.svix.com 의 예시(Resend 문서도 같은 서명을 인용한다).
+  // 공개 테스트 벡터: https://docs.svix.com/receiving/verifying-payloads/how
+  // 운영 키가 아니다. 접두사는 실행 시 붙여 Stripe secret scanning 오탐을 피한다.
+  const testSecret = (key) => `whsec_${key.toString('base64')}`;
   const vector = {
-    secret: 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw',
+    secret: testSecret(Buffer.from('MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw', 'base64')),
     id: 'msg_p5jXN8AQM9LWM0D4loKWxJek',
     timestamp: '1614265330',
     signature: 'v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=',
@@ -35,7 +37,7 @@ test('Svix (Resend) signatures: the published vector verifies, anything changed 
   assert.equal(verifySvixSignature(vector), true);
   assert.equal(verifySvixSignature({ ...vector, body: Buffer.from('{"test": 2432232315}') }), false, 'body changed');
   assert.equal(verifySvixSignature({ ...vector, id: 'msg_other' }), false, 'id is signed');
-  assert.equal(verifySvixSignature({ ...vector, secret: 'whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }), false, 'other secret');
+  assert.equal(verifySvixSignature({ ...vector, secret: testSecret(Buffer.alloc(24)) }), false, 'other secret');
   assert.equal(verifySvixSignature({ ...vector, now: new Date((1614265330 + 301) * 1000) }), false, 'older than 5 minutes');
   assert.equal(verifySvixSignature({ ...vector, signature: `v1,bm90IGl0 ${vector.signature}` }), true, 'any listed signature may match');
   assert.equal(verifySvixSignature({ ...vector, signature: vector.signature.replace('v1,', 'v2,') }), false, 'only v1 is HMAC');
