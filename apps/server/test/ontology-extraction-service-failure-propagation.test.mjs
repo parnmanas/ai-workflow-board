@@ -17,6 +17,11 @@
 // 페이크로 교체한다 — 프로덕션 경로는 이 필드들을 절대 재할당하지 않는다
 // (ontology-extraction.service.ts 클래스 헤더 코멘트).
 //
+// ticket dc6dfb15부터 extractRepo()는 추출만 하고 DB에 쓰지 않는다 — 저장은
+// persistExtraction()이 따로 한다(lifecycle이 추출을 트랜잭션 밖에서 끝내려고).
+// 그래서 실패 전파는 extractRepo()의 반환값에서, persist 입력에서의 제외는
+// persistExtraction()에서 확인한다.
+//
 // listTreeRecursive/getFileContentsBatch는 ticket 719ef137(blobless 캐시
 // 클론에서 `git ls-tree --long`이 blob당 promisor fetch를 유발해 타임아웃
 // 나던 버그)의 수정으로 옛 listTree(디렉터리별 BFS)/getFileContent(파일별
@@ -132,6 +137,7 @@ function buildService({ poolResults, persistImpl }) {
 describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e14ef1c9, 리뷰 라운드 2)', () => {
   it('풀에서 실패(bundle=null, error!=null)로 돌아온 파일이 filesFailedExtraction/extractionFailures로 반환값에 보존되고, persist 입력에서는 제외된다', async () => {
     let persistInputBundlePaths = null;
+    let persistTarget = null;
     const svc = buildService({
       poolResults: (tasks) =>
         tasks.map((t) =>
@@ -146,21 +152,27 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
         ),
       persistImpl: async (_dataSource, input) => {
         persistInputBundlePaths = input.bundles.map((b) => b.path);
+        persistTarget = { graphId: input.graphId, accountId: input.accountId, resourceId: input.resourceId, folderPath: input.folderPath, commit: input.commit };
         return defaultPersistImpl()(_dataSource, input);
       },
     });
 
-    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '' });
 
     assert.equal(result.filesDiscovered, 2, '두 파일 다 발견은 됐다');
     assert.equal(result.filesFailedExtraction, 1, '워커 실패 1건이 카운트에 반영돼야 한다');
     assert.equal(result.extractionFailures.length, 1);
     assert.equal(result.extractionFailures[0].path, 'b.ts');
     assert.match(result.extractionFailures[0].error, /worker exited unexpectedly/);
+    assert.equal(persistInputBundlePaths, null, 'extractRepo()는 DB에 쓰지 않는다 — 저장은 persistExtraction()의 몫');
+
     // 실패한 파일이 그래프에 섞여 들어가지 않아야 한다 — persist에는 성공한
     // 파일만 넘어간다.
+    const summary = await svc.persistExtraction(result, 'graph-1', {});
     assert.deepEqual(persistInputBundlePaths, ['a.ts']);
-    assert.equal(result.filesProcessed, 1);
+    assert.equal(summary.filesProcessed, 1);
+    // 저장 대상은 추출 결과가 싣고 온 계정·프로젝트·폴더·커밋 그대로다.
+    assert.deepEqual(persistTarget, { graphId: 'graph-1', accountId: 'ws-1', resourceId: 'res-1', folderPath: '', commit: 'c0ffee' });
   });
 
   it('워커 실패가 전혀 없으면 filesFailedExtraction=0, extractionFailures=[]다(정상 경로 회귀 없음)', async () => {
@@ -168,11 +180,11 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
       poolResults: (tasks) => tasks.map((t) => ({ path: t.path, bundle: makeBundle(t.path), decoratorFacts: [], error: null })),
     });
 
-    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '' });
 
     assert.equal(result.filesFailedExtraction, 0);
     assert.deepEqual(result.extractionFailures, []);
-    assert.equal(result.filesProcessed, 2);
+    assert.equal((await svc.persistExtraction(result, 'graph-1', {})).filesProcessed, 2);
   });
 
   it('워커 에러 메시지가 300자를 넘으면 절단(redact)된다', async () => {
@@ -181,7 +193,7 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
       poolResults: (tasks) => tasks.map((t) => ({ path: t.path, bundle: null, decoratorFacts: [], error: longError })),
     });
 
-    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '', graphId: 'graph-1' });
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '' });
 
     assert.equal(result.filesFailedExtraction, 2);
     assert.equal(result.extractionFailures.length, 2);

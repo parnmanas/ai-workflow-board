@@ -351,19 +351,49 @@ describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레
 // 아무것도 재시작하지 않았고, 특히 실패한 최초 빌드는 UI에서 영구히
 // 재시도 불가능했다. forceRebuild()(원자적 단일-승자 UPDATE)로 해소.
 
+// extractRepo()가 돌려주는 RepoExtraction 모양. 이 스위트의 페이크는 fact 를
+// 싣지 않고, 저장은 persistExtraction 페이크가 직접 행을 넣는다.
+function extractionOf(graph, commit) {
+  return {
+    accountId: graph.account_id, resourceId: graph.resource_id, folderPath: graph.folder_path, commit,
+    bundles: [], decoratorFactsByPath: new Map(),
+    filesDiscovered: 1, filesSkippedByExtension: 0, filesSkippedTooLargeOrBinary: 0, filesFailedExtraction: 0,
+    extractionFailures: [], treeWalkMs: 1, fetchMs: 1, extractMs: 1, totalLines: 1, endToEndLinesPerSecond: 1,
+  };
+}
+
+function persistSummaryOf(nodesInserted) {
+  return {
+    filesProcessed: nodesInserted, nodesInserted, edgesInserted: 0, containsEdges: 0, declaresEdges: 0,
+    decoratesEdges: 0, decoratesUnresolved: 0, parseErrorFiles: 0, skippedFiles: 0, durationMs: 1,
+  };
+}
+
+// promise 가 ms 안에 끝나면(성공이든 실패든) true. 타이머는 남기지 않는다.
+async function settlesWithin(promise, ms) {
+  let timer;
+  const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+  try {
+    return await Promise.race([promise.then(() => true, () => true), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리뷰 지적의 근본 원인)', () => {
-  it('전체 빌드 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', async () => {
+  it('교체 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', async () => {
     const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-flush-overlap', folder_path: '', status: 'building' }));
     let releaseBuild;
     const buildGate = new Promise((resolve) => { releaseBuild = resolve; });
     let inserted;
     const insertedSignal = new Promise((resolve) => { inserted = resolve; });
     const extraction = {
-      extractRepo: async ({ dataSource }) => {
-        await dataSource.getRepository(OntologyNode).insert(node('flush-overlap-node', graph.id, 'sym:flush-overlap'));
+      extractRepo: async () => extractionOf(graph, 'flush-safe'),
+      persistExtraction: async (_extraction, graphId, manager) => {
+        await manager.getRepository(OntologyNode).insert(node('flush-overlap-node', graphId, 'sym:flush-overlap'));
         inserted();
         await buildGate;
-        return { commit: 'flush-safe', filesDiscovered: 1, filesFailedExtraction: 0, nodesInserted: 1, edgesInserted: 0 };
+        return persistSummaryOf(1);
       },
     };
     const svc = new OntologyLifecycleService(AppOntologyDataSource, extraction, {
@@ -382,6 +412,66 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     assert.equal((await graphRepo.findOne({ where: { id: graph.id } })).status, 'ready');
   });
 
+  // ticket dc6dfb15 — 추출(git clone/fetch + 워커 파싱)이 트랜잭션 안에서 돌면,
+  // sql.js에서는 그동안 이 DataSource의 쓰기가 전부 트랜잭션 뒤에 줄 서서 빌드가
+  // 끝날 때까지 멈췄다(워커에는 파일별 시간 상한이 없어 무기한일 수 있다).
+  // 추출이 멈춰 있는 동안에도 다른 쓰기는 끝나야 하고, 빌드 중 표시와 동시 빌드
+  // 방지(status='building' 선점)는 그대로여야 한다.
+  it('추출이 도는 동안 다른 온톨로지 쓰기가 빌드 끝까지 기다리지 않는다 — building 표시와 동시 빌드 방지는 그대로다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx', folder_path: '', status: 'building' }));
+    const readyGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-refresh', folder_path: '', status: 'ready' }));
+    const failingGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-fail', folder_path: '', status: 'building' }));
+
+    let releaseExtraction;
+    const extractionGate = new Promise((resolve) => { releaseExtraction = resolve; });
+    let extracting;
+    const extractingSignal = new Promise((resolve) => { extracting = resolve; });
+    const extraction = {
+      extractRepo: async ({ resourceId }) => {
+        if (resourceId === failingGraph.resource_id) throw new Error('다른 빌드의 추출 실패');
+        extracting();
+        await extractionGate; // 느린 git fetch · 멈춘 워커
+        return extractionOf(graph, 'outside-tx');
+      },
+      persistExtraction: async (_extraction, graphId, manager) => {
+        await manager.getRepository(OntologyNode).insert(node('outside-tx-node', graphId, 'sym:outside-tx'));
+        return persistSummaryOf(1);
+      },
+    };
+    const svc = new OntologyLifecycleService(AppOntologyDataSource, extraction, {
+      resolveGraph: async () => ({ edgesInserted: 0 }),
+    }, { info() {}, warn() {}, error() {} });
+    // Refresh claim 까지만 본다 — 이긴 쪽이 실제 재빌드를 띄우지 않게 한다.
+    svc.kickOffInitialBuild = () => {};
+
+    const build = svc.runInitialBuild(graph);
+    try {
+      await extractingSignal;
+      const writes = Promise.all([
+        svc.getOrCreateGraph({ accountId: ACCOUNT_ID, resourceId: 'r-extract-outside-tx-new', folderPath: '' }),
+        svc.forceRebuild({ graphId: readyGraph.id, accountId: ACCOUNT_ID }),
+        assert.rejects(svc.runInitialBuild(failingGraph), /다른 빌드의 추출 실패/),
+      ]);
+      assert.equal(await settlesWithin(writes, 5000), true,
+        '추출이 멈춰 있는 동안 새 그래프 insert · Refresh claim · 다른 빌드의 error 갱신이 빌드 트랜잭션 뒤에서 기다렸다');
+      const [provisioned, refreshed] = await writes;
+      assert.equal(provisioned.created, true);
+      assert.equal(refreshed.started, true);
+      assert.equal((await graphRepo.findOne({ where: { id: failingGraph.id } })).status, 'error');
+
+      assert.equal((await graphRepo.findOne({ where: { id: graph.id } })).status, 'building', '추출 중에도 building 으로 보인다');
+      const again = await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID });
+      assert.equal(again.started, false, '추출 중인 그래프는 Refresh 가 두 번째 빌드를 띄우지 않는다');
+    } finally {
+      releaseExtraction();
+    }
+    await build;
+    const built = await graphRepo.findOne({ where: { id: graph.id } });
+    assert.equal(built.status, 'ready');
+    assert.equal(built.commit, 'outside-tx');
+    assert.deepEqual((await nodeRepo.find({ where: { graph_id: graph.id } })).map((row) => row.symbol_id), ['sym:outside-tx']);
+  });
+
   it('두 번째 실행이 첫 번째 실행의 노드/엣지/역방향색인을 정확히 교체한다 — 중복 적재도, unique 제약 위반도 없어야 한다', async () => {
     const graph = await graphRepo.save(graphRepo.create({
       account_id: ACCOUNT_ID, resource_id: 'r-idempotent', folder_path: '', status: 'ready',
@@ -389,24 +479,21 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     const nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
     const reverseRepo = AppOntologyDataSource.getRepository(OntologyReverseEdgeIndex);
 
-    // 실제 extractRepo/resolveGraph를 흉내내는 fake — 매 호출마다 진짜 repo에
-    // 행을 심는다(요약 숫자만 반환하는 다른 describe 블록의 fake와 달리,
-    // 여기서는 실제 DB 부수효과 자체를 검증해야 하므로).
+    // 실제 extractRepo/persistExtraction/resolveGraph를 흉내내는 fake — 매
+    // 실행마다 진짜 repo에 행을 심는다(요약 숫자만 반환하는 다른 describe
+    // 블록의 fake와 달리, 여기서는 실제 DB 부수효과 자체를 검증해야 하므로).
     let call = 0;
     const insertingExtraction = {
       extractRepo: async () => {
         call += 1;
+        return extractionOf(graph, `c${call}`);
+      },
+      persistExtraction: async (_extraction, graphId, manager) => {
         const rows = call === 1
-          ? [node(randomUUID(), graph.id, 'sym:a')]
-          : [node(randomUUID(), graph.id, 'sym:a', { name: 'a-v2' }), node(randomUUID(), graph.id, 'sym:b')];
-        await nodeRepo.insert(rows);
-        return {
-          commit: `c${call}`, filesDiscovered: rows.length, filesSkippedByExtension: 0, filesSkippedTooLargeOrBinary: 0,
-          filesFailedExtraction: 0, extractionFailures: [], treeWalkMs: 1, fetchMs: 1, extractMs: 1, totalLines: 1,
-          endToEndLinesPerSecond: 1, filesProcessed: rows.length, nodesInserted: rows.length, edgesInserted: 0,
-          containsEdges: 0, declaresEdges: 0, decoratesEdges: 0, decoratesUnresolved: 0, parseErrorFiles: 0,
-          skippedFiles: 0, durationMs: 1,
-        };
+          ? [node(randomUUID(), graphId, 'sym:a')]
+          : [node(randomUUID(), graphId, 'sym:a', { name: 'a-v2' }), node(randomUUID(), graphId, 'sym:b')];
+        await manager.getRepository(OntologyNode).insert(rows);
+        return persistSummaryOf(rows.length);
       },
     };
     const insertingResolver = {
@@ -446,33 +533,74 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     assert.equal(finalGraph.commit, 'c2');
   });
 
-  it('교체 도중 추출이 실패하면 트랜잭션이 기존 ready 스냅샷을 보존한다', async () => {
+  async function readyGraphWithStableNode(resourceId) {
     const graph = await graphRepo.save(graphRepo.create({
-      account_id: ACCOUNT_ID, resource_id: 'r-rollback', folder_path: '', status: 'ready', commit: 'stable-commit',
+      account_id: ACCOUNT_ID, resource_id: resourceId, folder_path: '', status: 'ready', commit: 'stable-commit',
     }));
-    const nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
-    const original = node('rollback-old', graph.id, 'sym:stable');
-    await nodeRepo.insert(original);
+    await nodeRepo.insert(node(`${resourceId}-old`, graph.id, 'sym:stable'));
+    return graph;
+  }
 
-    const failingExtraction = {
-      extractRepo: async ({ dataSource }) => {
-        await dataSource.getRepository(OntologyNode).insert(node('rollback-new', graph.id, 'sym:partial'));
-        throw new Error('의도한 추출 실패');
-      },
-    };
-    const svc = new OntologyLifecycleService(
-      AppOntologyDataSource,
-      failingExtraction,
-      { resolveGraph: async () => { throw new Error('호출되면 안 됨'); } },
-      { info() {}, warn() {}, error() {} },
-    );
-
-    await assert.rejects(() => svc.runInitialBuild(graph), /의도한 추출 실패/);
+  async function assertStableSnapshotKept(graph) {
     const rows = await nodeRepo.find({ where: { graph_id: graph.id } });
     assert.deepEqual(rows.map((row) => row.symbol_id), ['sym:stable']);
     const failedGraph = await graphRepo.findOne({ where: { id: graph.id } });
     assert.equal(failedGraph.status, 'error');
     assert.equal(failedGraph.commit, 'stable-commit', '마지막 ready 커밋 메타데이터도 보존해야 한다');
+  }
+
+  it('추출이 실패하면 교체를 시작하지 않고 기존 ready 스냅샷을 보존한다', async () => {
+    const graph = await readyGraphWithStableNode('r-extract-fails');
+    const svc = new OntologyLifecycleService(
+      AppOntologyDataSource,
+      {
+        extractRepo: async () => { throw new Error('의도한 추출 실패'); },
+        persistExtraction: async () => { throw new Error('호출되면 안 됨'); },
+      },
+      { resolveGraph: async () => { throw new Error('호출되면 안 됨'); } },
+      { info() {}, warn() {}, error() {} },
+    );
+
+    await assert.rejects(() => svc.runInitialBuild(graph), /의도한 추출 실패/);
+    await assertStableSnapshotKept(graph);
+  });
+
+  it('저장 도중 실패하면 트랜잭션이 기존 ready 스냅샷을 보존한다', async () => {
+    const graph = await readyGraphWithStableNode('r-persist-fails');
+    const svc = new OntologyLifecycleService(
+      AppOntologyDataSource,
+      {
+        extractRepo: async () => extractionOf(graph, 'partial-commit'),
+        persistExtraction: async (_extraction, graphId, manager) => {
+          await manager.getRepository(OntologyNode).insert(node('persist-fails-new', graphId, 'sym:partial'));
+          throw new Error('의도한 저장 실패');
+        },
+      },
+      { resolveGraph: async () => { throw new Error('호출되면 안 됨'); } },
+      { info() {}, warn() {}, error() {} },
+    );
+
+    await assert.rejects(() => svc.runInitialBuild(graph), /의도한 저장 실패/);
+    await assertStableSnapshotKept(graph);
+  });
+
+  it('resolve가 실패하면 이미 저장한 새 행까지 롤백해 기존 ready 스냅샷을 보존한다', async () => {
+    const graph = await readyGraphWithStableNode('r-resolve-fails');
+    const svc = new OntologyLifecycleService(
+      AppOntologyDataSource,
+      {
+        extractRepo: async () => extractionOf(graph, 'unresolved-commit'),
+        persistExtraction: async (_extraction, graphId, manager) => {
+          await manager.getRepository(OntologyNode).insert(node('resolve-fails-new', graphId, 'sym:persisted'));
+          return persistSummaryOf(1);
+        },
+      },
+      { resolveGraph: async () => { throw new Error('의도한 resolve 실패'); } },
+      { info() {}, warn() {}, error() {} },
+    );
+
+    await assert.rejects(() => svc.runInitialBuild(graph), /의도한 resolve 실패/);
+    await assertStableSnapshotKept(graph);
   });
 });
 

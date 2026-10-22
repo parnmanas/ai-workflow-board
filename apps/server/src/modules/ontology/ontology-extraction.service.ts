@@ -43,15 +43,9 @@ export interface ExtractRepoOptions {
   resourceId: string;
   /** 빈 문자열 = 저장소 루트. */
   folderPath: string;
-  /** 이 (account_id, resource_id, folder_path) 그래프의 graph_id — 이
-   *  서비스는 lifecycle/프로비저닝을 하지 않는다(ticket #6 범위), 호출자가
-   *  이미 갖고 있는 값을 그대로 받는다. */
-  graphId: string;
   /** 생략하면 Project.default_branch, 그것도 비어 있으면 저장소 HEAD. */
   ref?: string;
   poolSize?: number;
-  /** lifecycle 전체 교체 트랜잭션에서 사용할 transaction manager. */
-  dataSource?: DataSource | EntityManager;
 }
 
 export interface ExtractionFailure {
@@ -61,8 +55,19 @@ export interface ExtractionFailure {
   error: string;
 }
 
-export interface ExtractRepoResult extends PersistSummary {
+/** extractRepo()가 git과 워커 풀에서 얻은 것 — 아직 DB에 쓰지 않은 fact와
+ *  통계. persistExtraction()이 그래프 행으로 쓴다. 어느 계정·프로젝트·폴더·
+ *  커밋에서 뽑았는지도 함께 실어, 저장하는 쪽이 따로 넘기다 어긋날 일이 없다. */
+export interface RepoExtraction {
+  accountId: string;
+  resourceId: string;
+  folderPath: string;
   commit: string;
+  /** 워커가 성공한 파일의 FactBundle — 실패한 파일은 빠져 있다(아래
+   *  filesFailedExtraction). */
+  bundles: FactBundle[];
+  /** bundle.path -> 그 파일에서 뽑힌 DecoratorFact[]. */
+  decoratorFactsByPath: Map<string, DecoratorFact[]>;
   filesDiscovered: number;
   filesSkippedByExtension: number;
   filesSkippedTooLargeOrBinary: number;
@@ -87,7 +92,7 @@ export interface ExtractRepoResult extends PersistSummary {
 export class OntologyExtractionService {
   // 아래 필드들은 실제 구현이 기본값이다 — 테스트에서만 재할당해 git-repo-cache/
   // 실제 워커 풀/DB 없이 extractRepo() 자신의 조합 로직(특히 풀 실패 →
-  // ExtractRepoResult 전파)을 검증한다
+  // RepoExtraction 전파)을 검증한다
   // (test/ontology-extraction-service-failure-propagation.test.mjs). 프로덕션
   // 코드 경로는 이 필드들을 재할당하지 않는다 — Nest DI가 생성한 인스턴스는
   // 항상 아래 기본값(실제 구현)을 그대로 쓴다.
@@ -124,7 +129,10 @@ export class OntologyExtractionService {
     return { files, skippedByExtension };
   }
 
-  async extractRepo(opts: ExtractRepoOptions): Promise<ExtractRepoResult> {
+  /** 저장소 폴더를 git에서 읽어 워커 풀로 파싱한다 — 온톨로지 DB에는 쓰지
+   *  않는다. git clone/fetch와 파싱은 오래 걸리므로(파일별 시간 상한도 없다)
+   *  트랜잭션 밖에서 부르고, 저장은 persistExtraction()으로 따로 한다. */
+  async extractRepo(opts: ExtractRepoOptions): Promise<RepoExtraction> {
     const project = await this.projects.getInAccount(opts.resourceId, opts.accountId);
     if (!project) throw new Error('Project not found in account');
     if (!project.repo_url) {
@@ -188,18 +196,6 @@ export class OntologyExtractionService {
       }
     }
 
-    const dataSource = opts.dataSource ?? this.resolveOntologyDataSource();
-    const summary = await this.persistFactBundles(dataSource, {
-      graphId: opts.graphId,
-      accountId: opts.accountId,
-      resourceId: opts.resourceId,
-      folderPath: opts.folderPath,
-      commit,
-      extractionRunId: randomUUID(),
-      bundles,
-      decoratorFactsByPath,
-    });
-
     // treeWalkMs/fetchMs를 포함한 종단간(end-to-end) 처리량 — git 원격 fetch가
     // 섞여 있어 research-extraction.md §1의 "81.7k lines/s" 순수 파싱+추출
     // 수치와 직접 비교할 대상이 아니다(그 수치는 git I/O 없이 로컬 디스크를
@@ -209,8 +205,12 @@ export class OntologyExtractionService {
     // 스크립트의 산출물로 충족한다.
     const endToEndMs = treeWalkMs + fetchMs + extractMs;
     return {
-      ...summary,
+      accountId: opts.accountId,
+      resourceId: opts.resourceId,
+      folderPath: opts.folderPath,
       commit,
+      bundles,
+      decoratorFactsByPath,
       filesDiscovered: files.length,
       filesSkippedByExtension: skippedByExtension,
       filesSkippedTooLargeOrBinary: skippedTooLargeOrBinary,
@@ -222,5 +222,20 @@ export class OntologyExtractionService {
       totalLines,
       endToEndLinesPerSecond: endToEndMs > 0 ? Math.round((totalLines / endToEndMs) * 1000) : 0,
     };
+  }
+
+  /** extractRepo()의 결과를 graphId 그래프의 OntologyNode/Edge 행으로 쓴다.
+   *  lifecycle의 전체 교체는 여기에 자기 트랜잭션 manager를 넘긴다. */
+  async persistExtraction(extraction: RepoExtraction, graphId: string, dataSource?: DataSource | EntityManager): Promise<PersistSummary> {
+    return this.persistFactBundles(dataSource ?? this.resolveOntologyDataSource(), {
+      graphId,
+      accountId: extraction.accountId,
+      resourceId: extraction.resourceId,
+      folderPath: extraction.folderPath,
+      commit: extraction.commit,
+      extractionRunId: randomUUID(),
+      bundles: extraction.bundles,
+      decoratorFactsByPath: extraction.decoratorFactsByPath,
+    });
   }
 }

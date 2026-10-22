@@ -118,11 +118,13 @@ before(async () => {
   registerSession(homeSessionId, { agentId: homeAgent.id, accountId: ACCOUNT_ID, scope: 'read', source: 'db' });
 
   const fakeExtraction = {
-    extractRepo: async () => ({
-      commit: 'deadbeef',
+    extractRepo: async ({ accountId, resourceId, folderPath }) => ({
+      accountId, resourceId, folderPath, commit: 'deadbeef', bundles: [], decoratorFactsByPath: new Map(),
       filesDiscovered: 3, filesSkippedByExtension: 0, filesSkippedTooLargeOrBinary: 0,
       filesFailedExtraction: 0, extractionFailures: [], treeWalkMs: 1, fetchMs: 1, extractMs: 1,
       totalLines: 100, endToEndLinesPerSecond: 100,
+    }),
+    persistExtraction: async () => ({
       filesProcessed: 3, nodesInserted: 2, edgesInserted: 1, containsEdges: 0, declaresEdges: 0,
       decoratesEdges: 0, decoratesUnresolved: 0, parseErrorFiles: 0, skippedFiles: 0, durationMs: 1,
     }),
@@ -378,7 +380,7 @@ describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참�
     assert.equal(afterBuild.commit, 'deadbeef');
     assert.ok(afterBuild.indexed_at, 'indexed_at must be set once the build completes');
     assert.equal(afterBuild.progress.nodes_inserted, 2);
-    assert.equal(afterBuild.progress.edges_inserted, 2); // extractResult.edgesInserted(1) + resolveResult.edgesInserted(1)
+    assert.equal(afterBuild.progress.edges_inserted, 2); // persistExtraction().edgesInserted(1) + resolveResult.edgesInserted(1)
   });
 
   it('graph_status 호출은 Done-when 텔레메트리(에이전트/티켓별 호출 로그)로 기록된다', async () => {

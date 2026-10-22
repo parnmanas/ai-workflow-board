@@ -141,48 +141,57 @@ export class OntologyLifecycleService {
   }
 
   /**
-   * Tier 1(extractRepo) → Tier 1.5(resolveGraph, 전체 그래프 스코프 —
-   * scopeFilePaths를 넘기지 않는다) 전체 파이프라인을 실행하고
-   * OntologyGraph 행을 ready/error로 갱신한다. kickOffInitialBuild()가
+   * Tier 1(extractRepo → persistExtraction) → Tier 1.5(resolveGraph, 전체
+   * 그래프 스코프 — scopeFilePaths를 넘기지 않는다) 전체 파이프라인을
+   * 실행하고 OntologyGraph 행을 ready/error로 갱신한다. kickOffInitialBuild()가
    * 실제로 호출하는 실제 구현이지 테스트 전용 분기가 아니다 —
    * runFileChange와 같은 자세로 공개돼 있어 E2E 테스트가 직접 await할 수
    * 있다.
+   *
+   * 추출(git clone/fetch + 워커 파싱)은 DB에 쓰지 않으므로 트랜잭션 밖에서
+   * 먼저 끝낸다. 트랜잭션이 열린 동안 sql.js에서는 이 DataSource의 다른
+   * 쓰기(새 그래프 프로비저닝, Refresh claim, 다른 빌드의 상태 갱신)가 전부
+   * 큐에서 기다리고, Postgres에서도 커넥션 하나를 쥔다 — 추출을 안에 두면
+   * 워커 하나가 멈출 때 그 쓰기들도 함께 멈춘다(ticket dc6dfb15). 빌드 중
+   * 표시와 동시 빌드 방지는 트랜잭션이 아니라 status='building' 선점
+   * (getOrCreateGraph의 유니크 insert, forceRebuild의 CAS)이 맡는다.
    */
   async runInitialBuild(graph: OntologyGraph): Promise<void> {
     const dataSource = this.resolveOntologyDataSource();
     const repo = dataSource.getRepository(OntologyGraph);
     try {
+      const extraction = await this.extractionService.extractRepo({
+        accountId: graph.account_id,
+        resourceId: graph.resource_id,
+        folderPath: graph.folder_path,
+      });
       // 리뷰 지적(d22b83b4, "Refresh Graph" 승인 블로커) — 이 메서드는
       // 원래 그래프당 최초 1회만 호출된다는 암묵 전제로 짜여 있었다.
-      // forceRebuild()가 이제 같은 그래프에 대해 재호출하므로, 재추출 전
+      // forceRebuild()가 이제 같은 그래프에 대해 재호출하므로, 저장 전
       // 기존 행을 먼저 지워 (a) OntologyNode의 (graph_id, symbol_id)
       // 유니크 인덱스 충돌, (b) 유니크 제약이 없는 OntologyEdge/
       // OntologyReverseEdgeIndex의 조용한 중복 적재를 둘 다 막는다. 최초
-      // 빌드에서는 지울 행이 없어 사실상 no-op.
+      // 빌드에서는 지울 행이 없어 사실상 no-op. 삭제부터 ready까지 한
+      // 트랜잭션이라, 저장이나 resolve가 실패하면 마지막 ready 스냅샷이
+      // 그대로 남는다.
       await dataSource.transaction(async (manager) => {
         await this.clearExistingGraphRows(graph.id, manager);
-        const extractResult = await this.extractionService.extractRepo({
-          accountId: graph.account_id,
-          resourceId: graph.resource_id,
-          folderPath: graph.folder_path,
-          graphId: graph.id,
-          dataSource: manager,
-        });
+        const persisted = await this.extractionService.persistExtraction(extraction, graph.id, manager);
         const resolveResult = await this.resolverService.resolveGraph({
           graphId: graph.id,
           accountId: graph.account_id,
-          commit: extractResult.commit,
+          commit: extraction.commit,
           extractionRunId: randomUUID(),
         }, manager);
         await manager.getRepository(OntologyGraph).update({ id: graph.id }, {
           status: 'ready',
           indexed_at: new Date(),
-          commit: extractResult.commit,
+          commit: extraction.commit,
           progress: JSON.stringify({
-            files_discovered: extractResult.filesDiscovered,
-            files_failed_extraction: extractResult.filesFailedExtraction,
-            nodes_inserted: extractResult.nodesInserted,
-            edges_inserted: extractResult.edgesInserted + resolveResult.edgesInserted,
+            files_discovered: extraction.filesDiscovered,
+            files_failed_extraction: extraction.filesFailedExtraction,
+            nodes_inserted: persisted.nodesInserted,
+            edges_inserted: persisted.edgesInserted + resolveResult.edgesInserted,
           }),
           error: '',
         });
