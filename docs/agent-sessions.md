@@ -524,6 +524,9 @@ tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된�
    쓰기 완료 전에 화면이 요청할 수 있으므로 `readStoredImage` 가 그 약속을 기다린다.
 3. 화면은 `GET /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/image/:ref` 로
    바이트를 받는다. 서버는 `image` RPC 로 매니저에서 읽어 와 **저장하지 않고** 흘려보낸다.
+   `image`·`local_image` 를 포함한 모든 세션 RPC payload 에 검증된 Host 소유 `account_id` 를
+   반드시 싣는다. SSE envelope 에만 소유권이 있으면 매니저는 빈 payload 소유권을 거절한다.
+   재연결 재전송도 같은 계정을 유지한다(`test/agent-session-media-ownership.test.mjs`).
 4. 클라이언트는 그 응답을 **Blob URL** 로 바꿔 `<img>` 에 쓴다. `<img src>` 는 Authorization
    헤더를 못 보내는데, `rawResourceUrl` 처럼 토큰을 쿼리에 싣는 두 번째 인증 경로는 만들지
    않았다(로그·referrer 로 샌다) — 엔드포인트는 기존 가드(`agent_sessions.use`)를 그대로

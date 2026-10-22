@@ -992,7 +992,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     managerId: string,
     cli: string,
     op: keyof typeof RPC_TIMEOUT_MS,
-    args: Partial<AgentSessionRequestPayload>,
+    args: Partial<AgentSessionRequestPayload> & Pick<AgentSessionRequestPayload, 'account_id'>,
     driverUserId: string,
   ): Promise<T> {
     if (this.pending.size >= MAX_PENDING) {
@@ -1004,7 +1004,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       const timer = this.armRpcTimer(requestId, op, managerId, cli, timeoutMs);
       this.pending.set(requestId, { manager_id: managerId, op, created_at: Date.now(), resolve, timer });
     });
-    const request = { manager_id: managerId, account_id: '', cli, op, request_id: requestId, driver_user_id: driverUserId, ...args };
+    const request = { manager_id: managerId, cli, op, request_id: requestId, driver_user_id: driverUserId, ...args };
     // 스트림이 없는 매니저에게 보낸 이벤트는 사라진다 — 붙으면 다시 보내도록 표시해 둔다(onManagerReachable).
     if (REDELIVERABLE_OPS.has(op) && !this.connectivity.isReachable(managerId)) {
       const entry = this.pending.get(requestId);
@@ -1146,7 +1146,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
     if (!/^[A-Za-z0-9-]{1,80}$/.test(imageRef)) throw new AgentSessionError(400, 'image_ref_invalid');
-    const result = await this.rpc<{ base64?: string }>(managerId, cli, 'image', { session_id: sessionId, image_ref: imageRef }, userId);
+    const result = await this.rpc<{ base64?: string }>(managerId, cli, 'image', { account_id: accountId, session_id: sessionId, image_ref: imageRef }, userId);
     const base64 = typeof result?.base64 === 'string' ? result.base64 : '';
     if (!base64) throw new AgentSessionError(404, 'image_not_found');
     return Buffer.from(base64, 'base64');
@@ -1176,7 +1176,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (cwd.length > CWD_MAX) throw new AgentSessionError(400, 'cwd_too_long');
     let result: { base64?: string; mime_type?: string };
     try {
-      result = await this.rpc(managerId, cli, 'local_image', { session_id: sessionId, image_path: path, cwd }, userId);
+      result = await this.rpc(managerId, cli, 'local_image', { account_id: accountId, session_id: sessionId, image_path: path, cwd }, userId);
     } catch (err: any) {
       // 이 op 을 모르는 구버전 매니저는 `Unknown RPC op` 로 답한다 — 원인을 그대로 말해 준다.
       if (err?.code === 'bad_request') {

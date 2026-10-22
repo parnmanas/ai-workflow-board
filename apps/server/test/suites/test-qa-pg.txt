@@ -5,6 +5,7 @@ test/account-administration-access.test.mjs
 test/account-ownership-access.test.mjs
 test/account-ownership-migration.test.mjs
 test/agent-session-execution-ownership.test.mjs
+test/agent-session-media-ownership.test.mjs
 test/drop-agent-host-backfill.test.mjs
 test/marketing-analytics.test.mjs
 test/marketing-approval-notify.test.mjs
