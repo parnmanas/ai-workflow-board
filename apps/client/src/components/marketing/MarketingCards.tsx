@@ -1256,9 +1256,10 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
 
 function MarkPaidModal({ spend, prefillRef = '', onClose }: { spend: MarketingSpendRequest; prefillRef?: string; onClose(): void }) {
   const { busy, run } = useAction();
-  // 광고 플랫폼 상한 변경에는 거래 id 가 없다 — 서버가 계획에서 만든 기록용 값을, 카드는 실행이나 "공급자에서 확인" 이 찾은 카드 id 를
-  // 미리 채운다(사람이 확인하고 고칠 수 있다).
-  const [ref, setRef] = useState(prefillRef || spend.suggested_provider_ref || '');
+  // 광고 플랫폼 상한 변경에는 거래 id 가 없다 — 서버가 계획에서 만든 기록용 값을 미리 채운다(사람이 확인하고 고칠 수 있다). 카드는
+  // "공급자에서 확인" 이 찾은 활성 카드만 채운다(prefillRef) — 실행이 받아 둔 카드 id 는 활성화되지 않은 카드일 수 있다.
+  const card = isDirectPaymentProvider(spend.provider) && DIRECT_PROVIDER_SPECS[spend.provider].kind === 'card';
+  const [ref, setRef] = useState(prefillRef || (card ? '' : spend.suggested_provider_ref) || '');
   const [receipt, setReceipt] = useState('');
   const [note, setNote] = useState('');
   const receiptOk = !receipt.trim() || !!safeHttpUrl(receipt);

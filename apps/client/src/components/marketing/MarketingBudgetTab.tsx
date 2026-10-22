@@ -328,6 +328,8 @@ interface PayeeDraft {
   card_single_use: boolean;
   card_categories: string;
   card_max: string;
+  /** 통화를 바꿔 지운 카드당 최대 — 새 통화로 다시 적어야 저장한다(지운 채로 두면 한도가 사라진다). */
+  card_max_reentry?: boolean;
 }
 
 const EMPTY_PAYEE: PayeeDraft = { name: '', ref: '', note: '', provider: '', credential_id: '', card_single_use: true, card_categories: '', card_max: '' };
@@ -416,6 +418,7 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
       setPeriodCap('');
       setMaxTx('');
       setDual('');
+      setPayees((rows) => rows.map((r) => (r.card_max.trim() ? { ...r, card_max: '', card_max_reentry: true } : r)));
       setAmountsCleared(true);
     }
   };
@@ -452,6 +455,10 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
         const categories = parseCardCategories(p.card_categories);
         if (categories.problem) { setError(`수취인 "${name}": ${categories.problem}`); return; }
         let cardMax: number | null = null;
+        if (p.card_max_reentry && !p.card_max.trim()) {
+          setError(`통화를 바꿨으니 수취인 "${name}" 의 카드당 최대를 새 통화(${code})로 다시 적으세요`);
+          return;
+        }
         if (p.card_max.trim()) {
           const parsedMax = parseMajorToMinor(p.card_max, code);
           if (!parsedMax.ok) { setError(`수취인 "${name}" 카드당 최대: ${parsedMax.error}`); return; }
@@ -564,7 +571,7 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
                       </label>
                       <Input aria-label={`수취인 ${i + 1} 허용 업종`} placeholder="허용 업종(쉼표, 선택 — 예: advertising_services)" value={p.card_categories}
                         onChange={(e) => set({ card_categories: e.target.value })} />
-                      <Input aria-label={`수취인 ${i + 1} 카드당 최대`} placeholder={`카드당 최대(선택, ${code || '통화'} — 예: 500)`} value={p.card_max} inputMode="decimal"
+                      <Input aria-label={`수취인 ${i + 1} 카드당 최대`} placeholder={p.card_max_reentry ? `카드당 최대 — 새 통화(${code || '?'})로 다시 적으세요` : `카드당 최대(선택, ${code || '통화'} — 예: 500)`} value={p.card_max} inputMode="decimal"
                         onChange={(e) => set({ card_max: e.target.value })} />
                     </div>
                   )}

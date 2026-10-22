@@ -10,6 +10,8 @@
  *   execute 실행: 다시 읽어 대조하고 보낸다. 보내기 전의 실패는 PaymentNotSentError, 보낸 뒤의 모호함은 unknown.
  */
 import {
+  PROVIDER_FORMATS,
+  PaymentRuleError,
   googleMicrosToMinor,
   metaUnitsToMinor,
   minorToGoogleMicros,
@@ -17,6 +19,7 @@ import {
   parseGoogleRef,
   parseMetaRef,
   parseStripeRef,
+  providerToken,
   stripeCardAmount,
   type CardPlan,
   type CeilingPlan,
@@ -96,8 +99,10 @@ export interface DirectPaymentAdapter {
   checkAmount(amountMinor: number, currency: string, payee: PayeeLike): void;
   plan(input: { ref: string; fields: Record<string, string>; fingerprint: string; amountMinor: number; currency: string; payee: PayeeLike; ctx: DirectAdapterContext }): Promise<DirectPlan>;
   report(input: { ref: string; fields: Record<string, string>; fingerprint: string; currency: string; ctx: DirectAdapterContext }): Promise<TargetReport>;
-  inspect(input: { plan: DirectPlan; ref: string; fields: Record<string, string>; fingerprint: string; currency: string; requestId: string; around: Date; ctx: DirectAdapterContext }): Promise<DirectInspection>;
-  execute(input: { plan: DirectPlan; fields: Record<string, string>; fingerprint: string; requestId: string; ctx: DirectAdapterContext }): Promise<PaymentOutcome>;
+  /** `response` 는 실행이 남긴 공급자 응답 요약(provider_response) — 카드 공급자는 거기 적힌 카드 id 도 직접 읽는다. */
+  inspect(input: { plan: DirectPlan; ref: string; fields: Record<string, string>; fingerprint: string; currency: string; requestId: string; around: Date; response: unknown; ctx: DirectAdapterContext }): Promise<DirectInspection>;
+  /** `startedAt` 은 요청이 executing 이 된 시각이다. */
+  execute(input: { plan: DirectPlan; fields: Record<string, string>; fingerprint: string; requestId: string; startedAt: Date; ctx: DirectAdapterContext }): Promise<PaymentOutcome>;
 }
 
 /** 실행 직전에 credential 모양이 틀렸다 — 아무것도 보내기 전이다. */
@@ -254,13 +259,18 @@ const stripeAdapter: DirectPaymentAdapter = {
       api_version: obs.api_version,
     };
   },
-  async inspect({ plan, ref, fields, requestId, around, ctx }) {
-    cardPlanOf(plan);
-    const scan = await findCardsForRequest(parseStripeRef(ref), readStripeCredential(fields), requestId, around, ctx);
+  async inspect({ plan, ref, fields, fingerprint, requestId, around, response, ctx }) {
+    // 다른 키(다른 Stripe 계정일 수 있다)로 찾은 "없음" 은 이 요청의 답이 아니다 — 카드 소지자 id 는 계정마다다.
+    if (fingerprint !== cardPlanOf(plan).credential_fingerprint) {
+      throw new PaymentRuleError('the Stripe key changed since this request — its card can only be looked up with the key that issued it; check the Stripe Dashboard of that account');
+    }
+    const recorded = response && typeof response === 'object' ? (response as Record<string, unknown>).card_id : undefined;
+    const knownCardId = providerToken(recorded, PROVIDER_FORMATS.stripeId);
+    const scan = await findCardsForRequest(parseStripeRef(ref), readStripeCredential(fields), requestId, around, { ...ctx, ...(knownCardId ? { knownCardId } : {}) });
     return { kind: 'card', result: scan.result, cards: scan.cards, api_version: scan.api_version };
   },
-  async execute({ plan, fields, requestId, ctx }) {
-    return executeStripePlan(cardPlanOf(plan), notSentIfUnreadable(() => readStripeCredential(fields)), requestId, ctx);
+  async execute({ plan, fields, requestId, startedAt, ctx }) {
+    return executeStripePlan(cardPlanOf(plan), notSentIfUnreadable(() => readStripeCredential(fields)), requestId, { ...ctx, startedAt });
   },
 };
 

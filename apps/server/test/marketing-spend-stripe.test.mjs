@@ -13,6 +13,10 @@
 //      (유예 뒤) 기록한다. 요청별 확인이 카드를 찾아 주고, 결제 기록은 카드 id 를 미리 채운다.
 //   5. 요청 뒤에 수취인의 카드 통제가 바뀌면 승인하지 않는다. 카드 소지자가 실행 전에 막히면 보내지 않는다. 환불은 막는다.
 //   6. 비밀 키와 카드 소지자 개인정보는 요청 행 · 감사 · MCP 어디에도 없다(카드 소지자 이름은 사람만 보는 연결 확인에만).
+//   7. 모호한 생성 답(409 · 멱등 오류 · Stripe 오류 객체가 아닌 4xx)은 unknown. 해지가 실패하면 unknown. 활성화된 카드가 계획과 다르면
+//      해지하고 failed, 다른 카드로 답하면 이 요청의 카드만 해지하고 unknown. 실행 시작 5분이 지난 실행은 카드를 만들거나 살리지 않는다.
+//   8. 카드 찾기의 "없음" 은 같은 키로 모든 쪽 · 항목을 읽었을 때만 — 빈 쪽인데 더 있음 · 목록이 아닌 답 · 읽지 못한 항목 · 바뀐 키 ·
+//      10쪽 초과는 "쓴 돈 없음 확인" 을 받아야 실패로 기록한다. 실행이 받아 둔 카드 id 는 목록에서 못 찾아도 직접 읽는다.
 //
 // 실행: node --test --test-force-exit test/marketing-spend-stripe.test.mjs (dist 필요)
 
@@ -116,7 +120,7 @@ function fakeStripe() {
     if (i >= 0) {
       const o = state.overrides.splice(i, 1)[0];
       if (o.reply === 'timeout') { const e = new Error('The operation was aborted'); e.name = 'AbortError'; throw e; }
-      const r = typeof o.reply === 'function' ? await o.reply(entry, { createCard }) : o.reply;
+      const r = typeof o.reply === 'function' ? await o.reply(entry, { createCard, cardJson }) : o.reply;
       if (r instanceof Response) return r;
     }
     if (u.host !== 'api.stripe.com') return json(404, { error: 'unexpected host' });
@@ -129,6 +133,10 @@ function fakeStripe() {
     if (entry.method === 'GET' && (m = u.pathname.match(/^\/v1\/issuing\/cardholders\/(.+)$/))) {
       const h = state.cardholders[decodeURIComponent(m[1])];
       return h ? json(200, h) : stripeError(404, 'invalid_request_error', 'resource_missing', 'No such cardholder');
+    }
+    if (entry.method === 'GET' && (m = u.pathname.match(/^\/v1\/issuing\/cards\/(.+)$/))) {
+      const card = state.cards.find((c) => c.id === decodeURIComponent(m[1]));
+      return card ? json(200, cardJson(card)) : stripeError(404, 'invalid_request_error', 'resource_missing', 'No such card');
     }
     if (entry.method === 'GET' && u.pathname === '/v1/issuing/cards') {
       const q = entry.query;
@@ -154,7 +162,7 @@ function fakeStripe() {
     if (idem) state.idem.set(idem, reply);
     return json(reply.status, reply.body);
   };
-  return { state, fetchImpl, createCard };
+  return { state, fetchImpl, createCard, cardJson };
 }
 
 async function setup(t) {
@@ -332,11 +340,11 @@ test('Stripe Issuing: one inactive card per approval, checked against the plan, 
   assert.deepEqual(inspected.body.cards.map((c) => [c.id, c.status, c.limit_minor]), [[strayCard.id, 'inactive', 20000]]);
   const blocked = await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'no card?' });
   assert.equal(blocked.status, 409);
-  assert.match(blocked.body.error, new RegExp(`a card for this request exists \\(${strayCard.id}, inactive\\) — record "paid" with its id, or cancel the card`));
+  assert.match(blocked.body.error, new RegExp(`a card for this request exists but was never activated \\(${strayCard.id}, inactive\\) — cancel it in the Stripe Dashboard and record the failure with confirm_no_spend, or activate it there`));
   strayCard.status = 'canceled';
   const needConfirm = await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'canceled it' });
   assert.equal(needConfirm.status, 409);
-  assert.match(needConfirm.body.error, /only canceled cards exist for this request .* confirm_no_spend/);
+  assert.match(needConfirm.body.error, /only canceled cards were found for this request .* confirm_no_spend/);
   const confirmed = await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'canceled, nothing spent', confirm_no_spend: true });
   assert.equal(confirmed.body.status, 'failed', confirmed.text);
   const audit = (await ctx.api(`/campaigns/${campaign.id}/audit?limit=500`)).body;
@@ -417,4 +425,239 @@ test('Stripe Issuing: one inactive card per approval, checked against the plan, 
   for (const marker of [STRIPE_KEY, ...PII]) assert.equal(agentFacing.includes(marker), false, `${marker.slice(0, 12)}… leaked`);
   assert.equal(JSON.stringify(ctx.responses).includes(STRIPE_KEY), false, 'the key is in no response at all');
   void spend;
+});
+
+/** 카드 수취인 하나로 쓸 수 있는 캠페인 · 채널 · 배분까지 만든다. */
+async function stripeCampaign(ctx, payees) {
+  const created = await ctx.post('/campaigns', {
+    name: 'Stripe edge cases', agent_runtime: ctx.agent.runtime_spec, capabilities: ['paid_spend'], currency: 'USD',
+    budget_total_minor: 5_000_000, budget_period: 'month', budget_period_minor: 5_000_000, max_transaction_minor: 2_000_000, dual_approval_threshold_minor: 0,
+    payees, limits: { spend_requests_per_day: 100 },
+  });
+  assert.equal(created.status, 201, created.text);
+  const campaign = created.body;
+  assert.equal((await ctx.post(`/campaigns/${campaign.id}/status`, { status: 'active' })).status, 200);
+  const channel = (await ctx.post(`/campaigns/${campaign.id}/channels`, { platform: 'other', target: 'Sponsorships', name: 'Sponsorships' })).body;
+  assert.equal((await ctx.post(`/channels/${channel.id}/approve`, { mode: 'manual' })).body.status, 'active');
+  assert.equal((await ctx.post(`/campaigns/${campaign.id}/allocations`, { allocations: [{ channel_id: channel.id, amount_minor: 5_000_000 }], rationale: 'cards', approve: true })).status, 201);
+  const ask = async (fields) => {
+    const r = await ctx.mcp.callTool('request_marketing_spend', { campaign_id: campaign.id, channel_id: channel.id, currency: 'USD', purpose: 'Newsletter sponsorship', expected_outcome: '30 signups', ...fields });
+    assert.ok(r.spend_request, JSON.stringify(r));
+    return r.spend_request;
+  };
+  const approve = (req) => ctx.post(`/spend-requests/${req.id}/approve`, { payload_sha256: req.payload_sha256 });
+  return { campaign, channel, ask, approve };
+}
+
+const isCardCreate = (c) => c.method === 'POST' && c.path === '/v1/issuing/cards';
+const isCardList = (c) => c.method === 'GET' && c.path === '/v1/issuing/cards';
+const isStatusUpdate = (status) => (c) => c.method === 'POST' && /^\/v1\/issuing\/cards\/./.test(c.path) && new URLSearchParams(c.body).get('status') === status;
+
+test('Stripe Issuing: unclear answers stay unknown, a card that does not match is canceled, and a failure is never recorded past a card that could still be used', async (t) => {
+  const ctx = await setup(t);
+  const { fake, ds, spend } = ctx;
+  const cred = await ctx.makeCred('stripe-sandbox', 'stripe_issuing', { secret_key: STRIPE_KEY });
+  const { campaign, ask, approve } = await stripeCampaign(ctx, [{ name: 'Sponsor card', provider: 'stripe_issuing', credential_id: cred.id, ref: 'ich_sandbox1' }]);
+  const posts = () => fake.state.calls.filter((c) => c.method === 'POST');
+  const markFailed = (req, body = {}) => ctx.post(`/spend-requests/${req.id}/mark-failed`, { note: 'checked', ...body });
+  const failedDetail = async (req) => {
+    const audit = (await ctx.api(`/campaigns/${campaign.id}/audit?limit=500`)).body;
+    return audit.find((e) => e.entity_id === req.id && e.action === 'spend.failed')?.detail;
+  };
+
+  // 1. 생성의 모호한 답 — 같은 키 진행 중(409) · 멱등 오류 · Stripe 오류 객체가 아닌 4xx: 모두 unknown, 그 뒤로 아무것도 보내지 않는다
+  for (const [label, reply] of [
+    ['409 idempotency_key_in_use', stripeError(409, 'invalid_request_error', 'idempotency_key_in_use', 'There is currently another in-progress request using this key')],
+    ['idempotency_error', stripeError(400, 'idempotency_error', '', 'Keys for idempotent requests can only be used with the same parameters')],
+    ['403 from a proxy', new Response('<html>blocked</html>', { status: 403, headers: { 'content-type': 'text/html' } })],
+  ]) {
+    const req = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+    fake.state.overrides.push({ match: isCardCreate, reply });
+    const before = posts().length;
+    const r = await approve(req);
+    assert.equal(r.body.status, 'unknown', `${label}: ${r.text}`);
+    assert.match(r.body.error, /a card may exist \(inactive, so it cannot be used\)/, label);
+    assert.equal(posts().length, before + 1, `${label}: nothing is sent after the create`);
+  }
+
+  // 2. 만든 카드가 계획과 다르고(metadata) 해지도 실패 → unknown(카드 id 기록). 목록의 metadata 로는 못 찾는 그 카드를 직접 읽어,
+  //    해지되기 전에는 "쓴 돈 없음 확인" 이 있어도 실패로 기록하지 않는다
+  const reqM = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.mangle = (card) => ({ ...card, metadata: {} });
+  fake.state.overrides.push({ match: isStatusUpdate('canceled'), reply: stripeError(500, 'api_error', '', 'An unknown error occurred') });
+  const noCancel = await approve(reqM);
+  assert.equal(noCancel.body.status, 'unknown', noCancel.text);
+  const cardM = fake.state.cards.at(-1);
+  assert.match(noCancel.body.error, new RegExp(`did not match the plan \\(metadata\\) and could not be canceled — cancel card ${cardM.id} in the Stripe Dashboard`));
+  assert.equal(noCancel.body.provider_response.card_id, cardM.id);
+  assert.equal(cardM.status, 'inactive', 'never activated');
+  await pastFailGrace(ctx, reqM.id);
+  const inspectM = await ctx.post(`/spend-requests/${reqM.id}/inspect`);
+  assert.equal(inspectM.body.result, 'found', inspectM.text);
+  assert.deepEqual(inspectM.body.cards.map((c) => [c.id, c.status]), [[cardM.id, 'inactive']]);
+  const blockedM = await markFailed(reqM, { confirm_no_spend: true });
+  assert.equal(blockedM.status, 409, blockedM.text);
+  assert.match(blockedM.body.error, new RegExp(`exists but was never activated \\(${cardM.id}, inactive\\)`));
+  cardM.status = 'canceled';
+  assert.equal((await markFailed(reqM)).status, 409, 'a canceled card still needs the no-spend confirmation');
+  assert.equal((await markFailed(reqM, { confirm_no_spend: true })).body.status, 'failed');
+  assert.deepEqual((await failedDetail(reqM)).card_check, { result: 'found', cards: [cardM.id], confirmed_no_spend: true });
+
+  // 3. 활성화가 분명히 거절되고 해지도 실패 → unknown
+  const reqA = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({ match: isStatusUpdate('active'), reply: stripeError(402, 'invalid_request_error', 'insufficient_funds', 'Issuing balance too low') });
+  fake.state.overrides.push({ match: isStatusUpdate('canceled'), reply: 'timeout' });
+  const refusedNoCancel = await approve(reqA);
+  assert.equal(refusedNoCancel.body.status, 'unknown', refusedNoCancel.text);
+  assert.match(refusedNoCancel.body.error, /refused to activate card ic_fake\d+ \(HTTP 402 invalid_request_error \(insufficient_funds\)\) and it could not be canceled/);
+  assert.equal(fake.state.cards.at(-1).status, 'inactive');
+
+  // 4. 활성화된 카드가 계획과 다르다(같은 카드, 한도가 다름) → 해지하고 failed. 해지도 같은 Stripe-Version 과 고정 멱등 키로
+  const reqB = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({
+    match: isStatusUpdate('active'),
+    reply: (entry, { cardJson }) => {
+      const card = fake.state.cards.at(-1);
+      card.status = 'active';
+      const body = cardJson(card);
+      return json(200, { ...body, spending_controls: { ...body.spending_controls, spending_limits: [{ amount: 999_999, interval: 'all_time', categories: null }] } });
+    },
+  });
+  const activeMismatch = await approve(reqB);
+  assert.equal(activeMismatch.body.status, 'failed', activeMismatch.text);
+  const cardB = fake.state.cards.at(-1);
+  assert.equal(activeMismatch.body.error, `card ${cardB.id} did not match the plan after activation (spending_limits) and was canceled`);
+  assert.equal(cardB.status, 'canceled');
+  const cancelB = fake.state.calls.filter(isStatusUpdate('canceled')).at(-1);
+  assert.equal(cancelB.path, `/v1/issuing/cards/${cardB.id}`);
+  assert.equal(cancelB.headers['idempotency-key'], `awb-spend-${reqB.id}-cancel`);
+  assert.equal(cancelB.headers['stripe-version'], '2026-09-30.endive');
+  assert.equal(fake.state.calls.filter(isStatusUpdate('active')).at(-1).headers['stripe-version'], '2026-09-30.endive');
+
+  // 5. 활성화에 다른 카드로 답함 → unknown. 그 카드는 건드리지 않고 이 요청의 카드만 해지한다
+  const bystander = fake.createCard(new URLSearchParams({ cardholder: 'ich_sandbox1', currency: 'usd', type: 'virtual', status: 'active' }).toString());
+  const reqO = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({ match: isStatusUpdate('active'), reply: (entry, { cardJson }) => json(200, cardJson(bystander)) });
+  const otherCard = await approve(reqO);
+  assert.equal(otherCard.body.status, 'unknown', otherCard.text);
+  const cardO = fake.state.cards.at(-1);
+  assert.equal(otherCard.body.error, `Stripe answered the activation of card ${cardO.id} with a different card (card ${cardO.id} was canceled) — check this request's cards in the Stripe Dashboard`);
+  assert.equal(cardO.status, 'canceled');
+  assert.equal(bystander.status, 'active', 'a card this request did not create is never touched');
+
+  // 6. 카드를 끝까지 찾지 못하면 "쓴 돈 없음 확인" 없이는 실패로 기록하지 않는다 — 빈 쪽인데 더 있음 · 목록이 아닌 답 · 바뀐 키
+  const reqC = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({ match: isCardCreate, reply: 'timeout' });
+  assert.equal((await approve(reqC)).body.status, 'unknown');
+  await pastFailGrace(ctx, reqC.id);
+  fake.state.overrides.push({ match: isCardList, reply: json(200, { object: 'list', data: [], has_more: true }) });
+  const halfway = await markFailed(reqC);
+  assert.equal(halfway.status, 409, halfway.text);
+  assert.match(halfway.body.error, /could not look through all of this cardholder's cards/);
+  fake.state.overrides.push({ match: isCardList, reply: json(200, {}) });
+  const notAList = await markFailed(reqC);
+  assert.equal(notAList.status, 409, notAList.text);
+  assert.match(notAList.body.error, /could not check Stripe for this request's card \(could not read Stripe cards of ich_sandbox1 \(the answer is not a card list\)\)/);
+  fake.state.overrides.push({ match: isCardList, reply: json(200, { object: 'list', data: [{ id: 'ic_garbled' }], has_more: false }) });
+  assert.match((await markFailed(reqC)).body.error, /could not look through all/, 'an unreadable card in the list is not "no card"');
+  const credRepo = ds.getRepository('Credential');
+  const original = (await credRepo.findOneBy({ id: cred.id })).encrypted_data;
+  await credRepo.update({ id: cred.id }, { encrypted_data: encrypt(JSON.stringify({ secret_key: 'rk_test_anotherAccountKey0123456789' })) });
+  const listsBefore = fake.state.calls.filter(isCardList).length;
+  const otherKey = await ctx.post(`/spend-requests/${reqC.id}/inspect`);
+  assert.equal(otherKey.status, 409, otherKey.text);
+  assert.match(otherKey.body.error, /the Stripe key changed since this request/);
+  const keyChanged = await markFailed(reqC);
+  assert.equal(keyChanged.status, 409, keyChanged.text);
+  assert.match(keyChanged.body.error, /could not check Stripe for this request's card \(the Stripe key changed since this request/);
+  assert.equal(fake.state.calls.filter(isCardList).length, listsBefore, 'another key never answers for this request');
+  const confirmedC = await markFailed(reqC, { confirm_no_spend: true });
+  assert.equal(confirmedC.body.status, 'failed', confirmedC.text);
+  const detailC = await failedDetail(reqC);
+  assert.equal(detailC.card_check.result, 'unchecked');
+  assert.equal(detailC.card_check.confirmed_no_spend, true);
+  await credRepo.update({ id: cred.id }, { encrypted_data: original });
+
+  // 7. 잠금 안에서 다시 본다 — 카드를 확인하지 않은 채(실행 중으로 보고 들어옴) 그 사이 결과 불명이 된 요청은 닫지 않는다
+  const reqL = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({ match: isCardCreate, reply: 'timeout' });
+  assert.equal((await approve(reqL)).body.status, 'unknown');
+  await pastFailGrace(ctx, reqL.id);
+  const realGet = spend.get;
+  spend.get = async function staleOnce(...args) {
+    spend.get = realGet;
+    const row = await realGet.apply(this, args);
+    return Object.assign(Object.create(Object.getPrototypeOf(row)), row, { status: 'executing' });
+  };
+  t.after(() => { spend.get = realGet; });
+  const changedUnder = await markFailed(reqL);
+  assert.equal(changedUnder.status, 409, changedUnder.text);
+  assert.match(changedUnder.body.error, /the request changed while its card was being checked/);
+
+  // 8. 쪽 넘기기 — 이 요청의 카드가 둘째 쪽에 있어도 찾고, 1,000장을 넘게 봐야 하면 "다 보지 못함" 이다
+  const reqP = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({ match: isCardCreate, reply: (entry, { createCard }) => { createCard(entry.body); return stripeError(500, 'api_error', '', 'An unknown error occurred'); } });
+  assert.equal((await approve(reqP)).body.status, 'unknown');
+  const cardP = fake.state.cards.at(-1);
+  await pastFailGrace(ctx, reqP.id);
+  const filler = (n) => {
+    for (let i = 0; i < n; i++) fake.createCard(new URLSearchParams({ cardholder: 'ich_sandbox1', currency: 'usd', type: 'virtual', 'metadata[awb_spend_request_id]': 'someone-else' }).toString());
+  };
+  filler(150);
+  const pageTwo = await markFailed(reqP, { confirm_no_spend: true });
+  assert.equal(pageTwo.status, 409, pageTwo.text);
+  assert.match(pageTwo.body.error, new RegExp(`exists but was never activated \\(${cardP.id}, inactive\\)`));
+  assert.ok(fake.state.calls.filter(isCardList).at(-1).query.starting_after, 'the second page was read');
+  filler(900);
+  const tooMany = await markFailed(reqP);
+  assert.equal(tooMany.status, 409, tooMany.text);
+  assert.match(tooMany.body.error, /could not look through all of this cardholder's cards/);
+});
+
+test('Stripe Issuing executor: a stalled execution never activates a card, and a card list is "empty" only when every page was read', async () => {
+  const { executeStripePlan, findCardsForRequest, STRIPE_ACTIVATE_WITHIN_MS } = await import('../dist/modules/marketing/marketing-payment-stripe.js');
+  const plan = {
+    plan: 'issue_card', provider: 'stripe_issuing', target: { cardholder: 'ich_sandbox1' }, currency: 'USD', limit_minor: 10000, interval: 'all_time',
+    single_use: true, allowed_categories: [], livemode: false, credential_fingerprint: 'fp',
+  };
+  const cred = { secret_key: STRIPE_KEY, mode: 'test' };
+  const startedAt = new Date('2026-10-23T00:00:00Z');
+  const late = startedAt.getTime() + STRIPE_ACTIVATE_WITHIN_MS + 1;
+
+  // a. 카드를 만들기 전에 이미 늦었다 → 아무것도 보내지 않는다
+  const fake = fakeStripe();
+  await assert.rejects(
+    executeStripePlan(plan, cred, 'req-late-1', { fetchImpl: fake.fetchImpl, env: {}, startedAt, now: () => new Date(late) }),
+    (e) => e.name === 'PaymentNotSentError' && /no card is created for a stalled execution/.test(e.message),
+  );
+  assert.equal(fake.state.calls.filter((c) => c.method === 'POST').length, 0);
+
+  // b. 만드는 사이 늦었다 → 활성화하지 않고 해지(failed), 해지가 안 되면 unknown
+  let clock = startedAt.getTime();
+  const slowCreate = { match: isCardCreate, reply: (entry, { createCard, cardJson }) => { clock = late; return json(200, cardJson(createCard(entry.body))); } };
+  fake.state.overrides.push(slowCreate);
+  const canceled = await executeStripePlan(plan, cred, 'req-late-2', { fetchImpl: fake.fetchImpl, env: {}, startedAt, now: () => new Date(clock) });
+  assert.equal(canceled.outcome, 'failed', JSON.stringify(canceled));
+  assert.match(canceled.error, /more than 5 minutes passed since the execution started, so card ic_fake\d+ was canceled instead of activated/);
+  assert.equal(fake.state.cards.at(-1).status, 'canceled');
+  clock = startedAt.getTime();
+  fake.state.overrides.push({ ...slowCreate }, { match: isStatusUpdate('canceled'), reply: 'timeout' });
+  const stuck = await executeStripePlan(plan, cred, 'req-late-3', { fetchImpl: fake.fetchImpl, env: {}, startedAt, now: () => new Date(clock) });
+  assert.equal(stuck.outcome, 'unknown', JSON.stringify(stuck));
+  assert.equal(fake.state.cards.at(-1).status, 'inactive');
+  assert.equal(fake.state.calls.some(isStatusUpdate('active')), false, 'a late card is never activated');
+
+  // c. 늦지 않았으면 그대로 발급한다
+  const onTime = await executeStripePlan(plan, cred, 'req-on-time', { fetchImpl: fake.fetchImpl, env: {}, startedAt, now: () => new Date(startedAt.getTime() + 1000) });
+  assert.equal(onTime.outcome, 'paid', JSON.stringify(onTime));
+
+  // d. 목록 읽기 — "없음" 은 모든 쪽 · 모든 항목을 읽었을 때만
+  const list = (body) => async () => json(200, body);
+  const scan = (body, opts = {}) => findCardsForRequest({ cardholder: 'ich_sandbox1' }, cred, 'req-x', startedAt, { fetchImpl: list(body), env: {}, ...opts });
+  assert.equal((await scan({ object: 'list', data: [], has_more: false })).result, 'none');
+  assert.equal((await scan({ object: 'list', data: [], has_more: true })).result, 'incomplete');
+  assert.equal((await scan({ object: 'list', data: [{ id: 'ic_1' }], has_more: false })).result, 'incomplete');
+  for (const body of [{}, { data: [] }, { object: 'list', data: 'x', has_more: false }, { object: 'list', data: [] }]) {
+    await assert.rejects(scan(body), (e) => e.name === 'PaymentReadError' && /not a card list/.test(e.message), JSON.stringify(body));
+  }
 });

@@ -9,8 +9,9 @@
 //   4. 예산 설정의 수취인 편집: 결제 경로(Meta Ads · Google Ads)를 고르면 그 공급자로 만든 이 계정의 credential 만 고를 수 있고,
 //      ref 형식이 틀리면 보내지 않으며, 맞으면 provider · credential_id 를 실어 보낸다.
 //   5. 수취인 목록에 결제 경로가 보이고, "연결 확인" 이 공급자를 읽은 결과(정상 · 문제 · 지금 상한)를 보여 준다.
-//   6. Stripe Issuing(카드): 결과 불명이면 "공급자에서 확인" 이 이 요청의 카드를 찾고, 결제 기록은 그 카드 id 로 미리 채우며, 실패 기록은
-//      쓴 돈 없음 확인을 실어 보낸다. 발급된 카드는 "카드 발급됨" 과 대시보드 링크. 수취인 편집은 카드 통제 · 발급 안내를 보여 주고 저장한다.
+//   6. Stripe Issuing(카드): 결과 불명이면 "공급자에서 확인" 이 이 요청의 카드를 찾고, 결제 기록은 활성 카드의 id 로만 미리 채우며(AWB 가
+//      활성화하지 않은 카드는 채우지 않는다), 실패 기록은 쓴 돈 없음 확인을 실어 보낸다. 발급된 카드는 "카드 발급됨" 과 대시보드 링크.
+//      수취인 편집은 카드 통제 · 발급 안내를 보여 주고 저장하며, 통화를 바꾸면 카드당 최대도 새 통화로 다시 적게 한다.
 //
 // 실행: node --import tsx --test --test-force-exit test/marketing-direct-payment-ui.test.mjs
 import test from 'node:test';
@@ -344,16 +345,18 @@ const cardSpend = (id, over = {}) => spend(id, {
   payee: 'Sponsor card', payee_ref: 'ich_1', provider: 'stripe_issuing', payload: CARD_PLAN, plan_text: CARD_PLAN_TEXT, suggested_provider_ref: '', ...over,
 });
 
-test('Stripe 카드 결과 불명 — 공급자에서 이 요청의 카드를 찾고, 결제 기록은 그 카드 id 로, 실패 기록은 쓴 돈 없음 확인을 싣는다', async (t) => {
-  const unknownCard = cardSpend('sp-card', { status: 'unknown', executing_at: iso(-30), error: 'Stripe answered HTTP 500 api_error when the card was requested — a card may exist' });
+test('Stripe 카드 결과 불명 — 공급자에서 이 요청의 카드를 찾고, 결제 기록은 활성 카드 id 로만 채우고, 실패 기록은 쓴 돈 없음 확인을 싣는다', async (t) => {
+  // 실행이 받아 둔 카드 id(suggested_provider_ref)는 비활성 카드일 수 있어 채우지 않는다.
+  const unknownCard = cardSpend('sp-card', { status: 'unknown', executing_at: iso(-30), suggested_provider_ref: 'ic_77', error: 'Stripe answered HTTP 500 api_error when the card was requested — a card may exist' });
   const paid = [];
   const failed = [];
+  let cardStatus = 'inactive';
   const { container } = await renderPage(t, {
     stubs: {
       listMarketingSpendRequests: async (_id, opts = {}) => (opts.status === 'unknown' || !opts.status ? [unknownCard] : []),
       inspectMarketingSpend: async () => ({
         kind: 'card', spend_request_id: 'sp-card', status: 'unknown', limit_minor: 30000, result: 'found', api_version: '2026-09-30.endive', checked_at: iso(0),
-        cards: [{ id: 'ic_77', status: 'inactive', currency: 'USD', limit_minor: 30000, single_use: true, livemode: false, created: 0 }],
+        cards: [{ id: 'ic_77', status: cardStatus, currency: 'USD', limit_minor: 30000, single_use: true, livemode: false, created: 0 }],
       }),
       markMarketingSpendPaid: async (id, data) => { paid.push([id, data]); return { ...unknownCard, status: 'paid' }; },
       markMarketingSpendFailed: async (id, note, confirm) => { failed.push([id, note, confirm]); return { ...unknownCard, status: 'failed' }; },
@@ -364,15 +367,25 @@ test('Stripe 카드 결과 불명 — 공급자에서 이 요청의 카드를 �
   click(buttonIn(card, '공급자에서 확인'));
   await flush();
   await flush();
-  assert.match(within(container, 'marketing-spend-inspection-sp-card').textContent, /이 요청의 카드: ic_77\(inactive, 한도 300.00 USD\)/);
+  assert.match(within(container, 'marketing-spend-inspection-sp-card').textContent, /이 요청의 카드: ic_77\(inactive, 한도 300.00 USD\) — AWB 가 활성화하지 않은 카드입니다/);
 
-  click(buttonIn(card, '결제 완료 기록…'));
+  const paidRef = async () => {
+    click(buttonIn(card, '결제 완료 기록…'));
+    await flush();
+    const paidDialog = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
+    assert.ok(paidDialog);
+    const value = paidDialog.querySelector('input').value;
+    click(buttonIn(paidDialog, '취소'));
+    await flush();
+    return value;
+  };
+  assert.equal(await paidRef(), '', 'a card AWB never activated is not offered as paid');
+  cardStatus = 'active';
+  click(buttonIn(card, '공급자에서 확인'));
   await flush();
-  const paidDialog = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
-  assert.ok(paidDialog);
-  assert.equal(paidDialog.querySelector('input').value, 'ic_77', 'the card the inspection found');
-  click(buttonIn(paidDialog, '취소'));
   await flush();
+  assert.match(within(container, 'marketing-spend-inspection-sp-card').textContent, /ic_77\(active, 한도 300.00 USD\) — 활성 카드의 id 로 결제 완료를 기록하세요/);
+  assert.equal(await paidRef(), 'ic_77', 'the active card the inspection found');
 
   click(buttonIn(card, '실패로 기록…'));
   await flush();
@@ -444,4 +457,38 @@ test('수취인 편집 — Stripe Issuing 경로는 카드 통제와 발급 안�
       { name: 'Newsletter', ref: 'ich_9', note: undefined, provider: 'stripe_issuing', credential_id: 'cred-stripe', card_single_use: true, card_categories: ['advertising_services', 'software'], card_max_minor: 50000 },
     ].map((p) => JSON.parse(JSON.stringify(p))),
   }]]);
+});
+
+test('예산 설정 — 통화를 바꾸면 카드당 최대도 비우고, 새 통화로 다시 적어야 저장한다', async (t) => {
+  const patches = [];
+  const stripePayee = { name: 'Sponsor card', ref: 'ich_9', provider: 'stripe_issuing', credential_id: 'cred-stripe', card_single_use: true, card_categories: [], card_max_minor: 50000 };
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      getMarketingCampaign: async () => campaign({ payees: [stripePayee] }),
+      updateMarketingCampaign: async (id, patch) => { patches.push(patch); return { ...campaign(), ...patch }; },
+    },
+  });
+  click(buttonIn(container, '예산 설정…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const cardMax = () => dialog.querySelector('input[aria-label="수취인 1 카드당 최대"]');
+  assert.equal(cardMax().value, '500.00');
+  typeInto(fieldIn(dialog, '통화'), 'eur');
+  assert.equal(cardMax().value, '', '500 USD 가 500 EUR 로 읽히지 않게 비운다');
+  assert.match(cardMax().getAttribute('placeholder'), /새 통화\(EUR\)로 다시 적으세요/);
+  for (const [label, value] of [['총 예산 (0 = 지출 불가)', '1000'], ['기간 상한 (0 = 없음)', '500'], ['건당 상한 (0 = 없음)', '0'], ['2인 승인 기준 (0 = 끔)', '0']]) {
+    typeInto(fieldIn(dialog, label), value);
+  }
+  click(buttonIn(dialog, '저장'));
+  await flush();
+  assert.equal(patches.length, 0, '카드당 최대를 다시 적기 전에는 보내지 않는다(지운 채로 두면 한도가 사라진다)');
+  assert.match(dialog.textContent, /통화를 바꿨으니 수취인 "Sponsor card" 의 카드당 최대를 새 통화\(EUR\)로 다시 적으세요/);
+  typeInto(cardMax(), '450');
+  click(buttonIn(dialog, '저장'));
+  await flush();
+  await flush();
+  assert.equal(patches.length, 1, JSON.stringify(patches));
+  assert.equal(patches[0].currency, 'EUR');
+  assert.equal(patches[0].payees[0].card_max_minor, 45000);
 });

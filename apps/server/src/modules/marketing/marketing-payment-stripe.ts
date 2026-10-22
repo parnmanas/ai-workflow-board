@@ -47,6 +47,11 @@ const SCAN_WINDOW_MS = 24 * 60 * 60_000;
 const SCAN_MAX_PAGES = 10;
 /** 카드에 붙이는 metadata 키 — 요청과 카드를 잇는 유일한 표시다(개인정보는 넣지 않는다). */
 export const STRIPE_REQUEST_METADATA_KEY = 'awb_spend_request_id';
+/**
+ * 실행 시작에서 이만큼 지나면 카드를 만들지도 활성화하지도 않는다(만든 카드는 해지한다). 멈췄다 깨어난 실행이 늦게 카드를 살리면, 그 사이
+ * 요청은 결과 불명(10분)이 되고 사람이 "카드 없음" 을 보고 실패로 닫았을 수 있다(유예 15분) — 예산 밖의 카드가 된다.
+ */
+export const STRIPE_ACTIVATE_WITHIN_MS = 5 * 60_000;
 
 export interface StripeCredential {
   secret_key: string;
@@ -97,7 +102,14 @@ export function isDefiniteStripeRefusal(status: number, err: { isStripeError: bo
   return err.isStripeError && err.type !== 'idempotency_error' && [400, 401, 402, 403, 404, 429].includes(status);
 }
 
-async function stripeGet(path: string, query: Record<string, string>, label: string, cred: StripeCredential, opts: { fetchImpl?: typeof fetch; version: string }): Promise<any> {
+/** 읽기. `missingIsNull` 이면 Stripe 가 "없음"(404 resource_missing 오류 객체)으로 답할 때 null — 그 밖의 실패는 PaymentReadError. */
+async function stripeGet(
+  path: string,
+  query: Record<string, string>,
+  label: string,
+  cred: StripeCredential,
+  opts: { fetchImpl?: typeof fetch; version: string; missingIsNull?: boolean },
+): Promise<any> {
   const url = new URL(`${API_HOST}${path}`);
   for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   let reply: ProviderReply;
@@ -109,6 +121,7 @@ async function stripeGet(path: string, query: Record<string, string>, label: str
   }
   if (reply.status === 200 && reply.json && typeof reply.json === 'object' && !reply.json.error) return reply.json;
   const err = stripeError(reply, cred);
+  if (opts.missingIsNull && reply.status === 404 && err.isStripeError && err.code === 'resource_missing') return null;
   const retryable = reply.status >= 500 || reply.status === 429 || reply.status === 409;
   throw new PaymentReadError(`could not read Stripe ${label} (${err.text})`, retryable, err.message);
 }
@@ -248,12 +261,13 @@ function readCard(card: any): IssuedCardView {
 
 /**
  * Stripe 가 돌려준 카드가 계획과 같은가 — 다른 항목 이름 목록(비면 같다). 우리 누적 한도가 있으면 다른 한도는 더 좁힐 뿐이라
- * (한도는 모두 함께 걸린다) 받는다. 업종은 집합으로 비교한다.
+ * (한도는 모두 함께 걸린다) 받는다. 업종은 집합으로 비교한다. `expectId` 를 주면 그 카드여야 한다(활성화 응답).
  */
-export function cardMismatches(card: any, plan: CardPlan, requestId: string, expectStatus: 'inactive' | 'active'): string[] {
+export function cardMismatches(card: any, plan: CardPlan, requestId: string, expectStatus: 'inactive' | 'active', expectId?: string): string[] {
   if (!card || typeof card !== 'object' || card.object !== 'issuing.card') return ['object'];
   const out: string[] = [];
-  if (!providerToken(card.id, PROVIDER_FORMATS.stripeId)) out.push('id');
+  const id = providerToken(card.id, PROVIDER_FORMATS.stripeId);
+  if (!id || (expectId !== undefined && id !== expectId)) out.push('id');
   const cardholderId = typeof card.cardholder === 'string' ? card.cardholder : card.cardholder?.id;
   if (cardholderId !== plan.target.cardholder) out.push('cardholder');
   if (typeof card.currency !== 'string' || card.currency.toUpperCase() !== plan.currency) out.push('currency');
@@ -285,19 +299,27 @@ export interface CardScan {
 
 /**
  * 이 요청의 카드 찾기(읽기만) — 카드 목록에는 metadata 검색이 없어, 그 카드 소지자의 가상 카드를 `around` ±1일 범위에서 넘겨 보며
- * metadata 의 요청 id 를 찾는다(목록은 바로 일관). 범위를 다 보지 못하면 incomplete 다.
+ * metadata 의 요청 id 를 찾는다(목록은 바로 일관). `knownCardId`(실행이 받아 둔 카드 id)는 목록에 안 보여도 직접 읽는다 — 이 요청이
+ * 만든 카드다(metadata 가 다르게 돌아왔어도).
+ *
+ * "없음" 은 범위를 끝까지, 모든 항목을 읽었을 때만이다 — 목록 모양이 아닌 답은 PaymentReadError, 읽지 못한 항목이 있거나 더 있다는데
+ * 넘길 곳이 없거나 쪽 수를 넘기면 incomplete 다. 없음은 사람의 확인 없이 실패 기록(예산 해제)을 허락하기 때문이다.
  */
 export async function findCardsForRequest(
   target: StripeTarget,
   cred: StripeCredential,
   requestId: string,
   around: Date,
-  opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined> } = {},
+  opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; knownCardId?: string } = {},
 ): Promise<CardScan> {
   const version = paymentApiVersion('stripe_issuing', opts.env);
+  const io = { fetchImpl: opts.fetchImpl, version };
+  const label = `cards of ${target.cardholder}`;
   const gte = Math.floor((around.getTime() - SCAN_WINDOW_MS) / 1000);
   const lte = Math.ceil((around.getTime() + SCAN_WINDOW_MS) / 1000);
   const cards: IssuedCardView[] = [];
+  let complete = false;
+  let unreadable = false;
   let startingAfter = '';
   for (let page = 0; page < SCAN_MAX_PAGES; page++) {
     const body = await stripeGet('/v1/issuing/cards', {
@@ -307,17 +329,36 @@ export async function findCardsForRequest(
       'created[lte]': String(lte),
       limit: '100',
       ...(startingAfter ? { starting_after: startingAfter } : {}),
-    }, `cards of ${target.cardholder}`, cred, { fetchImpl: opts.fetchImpl, version });
-    const data: any[] = Array.isArray(body.data) ? body.data : [];
-    for (const card of data) {
-      if (card?.metadata?.[STRIPE_REQUEST_METADATA_KEY] === requestId) cards.push(readCard(card));
+    }, label, cred, io);
+    if (body.object !== 'list' || !Array.isArray(body.data) || typeof body.has_more !== 'boolean') {
+      throw new PaymentReadError(`could not read Stripe ${label} (the answer is not a card list)`, true);
     }
-    if (body.has_more !== true || !data.length) return { result: cards.length ? 'found' : 'none', cards, api_version: version };
-    const last = providerToken(data[data.length - 1]?.id, PROVIDER_FORMATS.stripeId);
+    for (const card of body.data) {
+      if (!card || typeof card !== 'object' || card.object !== 'issuing.card' || !providerToken(card.id, PROVIDER_FORMATS.stripeId)) {
+        unreadable = true;
+        continue;
+      }
+      if (card.metadata?.[STRIPE_REQUEST_METADATA_KEY] === requestId) cards.push(readCard(card));
+    }
+    if (!body.has_more) {
+      complete = true;
+      break;
+    }
+    const last = providerToken(body.data[body.data.length - 1]?.id, PROVIDER_FORMATS.stripeId);
     if (!last) break;
     startingAfter = last;
   }
-  return { result: cards.length ? 'found' : 'incomplete', cards, api_version: version };
+  if (opts.knownCardId && !cards.some((c) => c.id === opts.knownCardId)) {
+    const known = await stripeGet(`/v1/issuing/cards/${encodeURIComponent(opts.knownCardId)}`, {}, `card ${opts.knownCardId}`, cred, { ...io, missingIsNull: true });
+    if (known !== null) {
+      if (known.object !== 'issuing.card' || providerToken(known.id, PROVIDER_FORMATS.stripeId) !== opts.knownCardId) {
+        throw new PaymentReadError(`could not read Stripe card ${opts.knownCardId} (the answer is not that card)`, true);
+      }
+      cards.push(readCard(known));
+    }
+  }
+  const result = cards.length ? 'found' : complete && !unreadable ? 'none' : 'incomplete';
+  return { result, cards, api_version: version };
 }
 
 /** 쓰이기 전의 카드를 해지한다(돌이킬 수 없다). 해지됐음을 확인하면 true. */
@@ -328,18 +369,21 @@ async function cancelCard(cardId: string, idem: string, cred: StripeCredential, 
 
 /**
  * 실행 — 카드 소지자를 다시 확인하고(보내기 전 — 실패는 PaymentNotSentError) → 비활성 카드를 만들고 → 계획과 대조하고 → 활성화한다.
- * 만든 카드가 계획과 다르거나 활성화가 거절되면 해지하고 failed, 해지하지 못하면 unknown 이다. 그 밖의 모호함은 unknown 이다.
+ * 만든 카드가 계획과 다르거나, 활성화가 거절되거나, 활성화된 카드가 계획과 다르거나, 실행 시작에서 STRIPE_ACTIVATE_WITHIN_MS 가 지났으면
+ * 해지하고 failed, 해지하지 못하면 unknown 이다. 그 밖의 모호함은 unknown 이다. `startedAt` 은 요청이 executing 이 된 시각이다.
  */
 export async function executeStripePlan(
   plan: CardPlan,
   cred: StripeCredential,
   requestId: string,
-  opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined> } = {},
+  opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; startedAt?: Date; now?: () => Date } = {},
 ): Promise<PaymentOutcome> {
   const target = { cardholder: plan.target.cardholder };
   const version = paymentApiVersion('stripe_issuing', opts.env);
   const io = { fetchImpl: opts.fetchImpl, version };
   const base = { api_version: version, cardholder: target.cardholder, limit_minor: plan.limit_minor, single_use: plan.single_use, livemode: plan.livemode };
+  const tooLate = () => !!opts.startedAt && (opts.now ? opts.now() : new Date()).getTime() - opts.startedAt.getTime() > STRIPE_ACTIVATE_WITHIN_MS;
+  const lateText = `more than ${STRIPE_ACTIVATE_WITHIN_MS / 60_000} minutes passed since the execution started`;
 
   let holder: StripeCardholderObservation;
   try {
@@ -350,6 +394,7 @@ export async function executeStripePlan(
   const problems = stripeCardholderProblems(holder, target, cred);
   if (holder.livemode !== plan.livemode) problems.push('the live/sandbox mode changed since the request');
   if (problems.length) throw new PaymentNotSentError(`the cardholder changed since the request: ${problems.join('; ')}`);
+  if (tooLate()) throw new PaymentNotSentError(`${lateText} — no card is created for a stalled execution`);
 
   const idem = `awb-spend-${requestId}`;
   const form = new URLSearchParams();
@@ -414,7 +459,18 @@ export async function executeStripePlan(
     };
   }
 
-  // 2. 활성화
+  // 2. 활성화 — 만드는 사이 실행이 오래 멈췄으면 살리지 않고 해지한다(STRIPE_ACTIVATE_WITHIN_MS).
+  if (tooLate()) {
+    const response = { ...base, sent: true, step: 'create', card_id: cardId, activation_skipped: true };
+    if (await cancelCard(cardId, idem, cred, io)) {
+      return { outcome: 'failed', error: `${lateText}, so card ${cardId} was canceled instead of activated`, response: { ...response, canceled: true } };
+    }
+    return {
+      outcome: 'unknown',
+      error: `${lateText} and inactive card ${cardId} could not be canceled — cancel it in the Stripe Dashboard, then record the result`,
+      response,
+    };
+  }
   const activated = await stripePost(`/v1/issuing/cards/${encodeURIComponent(cardId)}`, new URLSearchParams({ status: 'active' }), `${idem}-activate`, cred, io);
   if (activated.kind === 'transport') {
     return {
@@ -424,12 +480,29 @@ export async function executeStripePlan(
     };
   }
   if (activated.reply.status === 200) {
-    const mismatch = cardMismatches(activated.reply.json, plan, requestId, 'active');
+    const mismatch = cardMismatches(activated.reply.json, plan, requestId, 'active', cardId);
     const response = summary(activated.reply, 'activate', { card_id: cardId, ...(mismatch.length ? { mismatched: mismatch } : {}) });
     if (!mismatch.length) {
       return { outcome: 'paid', transaction_id: cardId, receipt_url: stripeDashboardCardUrl(cardId, plan.livemode), response };
     }
-    return { outcome: 'unknown', error: `card ${cardId} does not match the plan after activation (${mismatch.join(', ')}) — check it in the Stripe Dashboard`, response };
+    // 다른 카드로 답했다 — 그 카드는 무엇인지 모르니 건드리지 않는다. 이 요청이 만든 카드만 해지해 두고 사람이 본다.
+    if (mismatch.includes('id')) {
+      const canceled = await cancelCard(cardId, idem, cred, io);
+      return {
+        outcome: 'unknown',
+        error: `Stripe answered the activation of card ${cardId} with a different card${canceled ? ` (card ${cardId} was canceled)` : ''} — check this request's cards in the Stripe Dashboard`,
+        response: canceled ? { ...response, canceled: true } : response,
+      };
+    }
+    // 승인한 계획과 다른 카드가 살아 있으면 안 된다 — 해지한다.
+    if (await cancelCard(cardId, idem, cred, io)) {
+      return { outcome: 'failed', error: `card ${cardId} did not match the plan after activation (${mismatch.join(', ')}) and was canceled`, response: { ...response, canceled: true } };
+    }
+    return {
+      outcome: 'unknown',
+      error: `card ${cardId} does not match the plan after activation (${mismatch.join(', ')}) and could not be canceled — cancel it in the Stripe Dashboard, then record the result`,
+      response,
+    };
   }
   const err = stripeError(activated.reply, cred);
   const response = summary(activated.reply, 'activate', { card_id: cardId });

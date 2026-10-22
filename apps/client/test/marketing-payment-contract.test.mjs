@@ -138,6 +138,9 @@ test('in-app credential guides cover every direct provider and every credential 
   assert.match(PAYMENT_CREDENTIAL_GUIDES.stripe_issuing.summary, /카드 번호를 가져오지 않습니다/);
   assert.match(PAYMENT_CREDENTIAL_GUIDES.stripe_issuing.summary, /미국 · 영국 · EEA/);
   assert.match(PAYMENT_CREDENTIAL_GUIDES.google_ads.summary, /developer token 은 2026-09-09 에 폐지/);
+  // 서버 stripeKeyMode 와 같은 말 — 운영 전체 키는 거부, 샌드박스만 sk_test_.
+  const stripeKeyLine = PAYMENT_CREDENTIAL_GUIDES.stripe_issuing.fields.find((f) => f.field === 'secret_key').value;
+  assert.match(stripeKeyLine, /운영의 전체 비밀 키\(sk_live_…\)는 거부됩니다 — 샌드박스에서만 sk_test_… 를 받습니다/);
 });
 
 test('Stripe Issuing reads as a card: status, approval, reconcile, inspection, limits and payee controls', () => {
@@ -151,18 +154,25 @@ test('Stripe Issuing reads as a card: status, approval, reconcile, inspection, l
   const hint = unknownReconcileHint({ provider: 'stripe_issuing', currency: 'USD', payload: plan, executing_at: null });
   assert.match(hint, /카드 소지자 ich_1 의 카드 중 이 요청의 카드를 찾습니다/);
   assert.match(hint, /해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다/);
-  assert.match(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: plan }), /500.00 USD 를 넘습니다/);
+  assert.match(hint, /비활성\(inactive\) 카드는 AWB 가 활성화하지 않은 카드입니다 — 쓰지 않으면 대시보드에서 해지한 뒤 실패로, 쓰려면 대시보드에서 활성화한 뒤 결제 완료로/);
+  assert.match(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: plan }), /500.00 USD 를 넘습니다 — .*카드당 하루 500 USD 라 첫 결제가/);
   assert.equal(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: { ...plan, limit_minor: 50000 } }), '');
   assert.equal(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: { ...plan, single_use: false } }), '');
   assert.equal(cardLimitWarning({ provider: 'meta_ads', currency: 'USD', payload: plan }), '');
+  assert.match(cardLimitWarning({ provider: 'stripe_issuing', currency: 'EUR', payload: plan }), /500.00 EUR 를 넘습니다 — .*카드당 하루 500 USD 상당이라 첫 결제가/);
 
   const base = { kind: 'card', spend_request_id: 's', status: 'unknown', limit_minor: 30000, api_version: 'v', checked_at: '' };
   const card = (id, status) => ({ id, status, currency: 'USD', limit_minor: 30000, single_use: true, livemode: false, created: 0 });
   assert.match(inspectionSummary({ ...base, result: 'none', cards: [] }, 'USD'), /이 요청의 카드가 없습니다/);
   assert.equal(inspectionSummary({ ...base, result: 'found', cards: [card('ic_1', 'active')] }, 'USD'),
-    '이 요청의 카드: ic_1(active, 한도 300.00 USD) — 해지되지 않은 카드가 있으면 그 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).');
+    '이 요청의 카드: ic_1(active, 한도 300.00 USD) — 활성 카드의 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).');
+  assert.match(inspectionSummary({ ...base, result: 'found', cards: [card('ic_2', 'inactive')] }, 'USD'),
+    /ic_2\(inactive, 한도 300.00 USD\) — AWB 가 활성화하지 않은 카드입니다\. 쓰지 않으면 Stripe 대시보드에서 해지한 뒤 실패로\(쓴 돈 없음 확인\), 쓰려면 대시보드에서 활성화한 뒤 결제 완료로/);
+  assert.match(inspectionSummary({ ...base, result: 'found', cards: [card('ic_3', 'canceled')] }, 'USD'), /모두 해지됐습니다/);
   assert.match(inspectionSummary({ ...base, result: 'incomplete', cards: [] }, 'USD'), /다 보지 못했습니다/);
-  assert.equal(inspectionCardRef({ ...base, result: 'found', cards: [card('ic_old', 'canceled'), card('ic_live', 'inactive')] }), 'ic_live');
+  // 결제 기록에 미리 채우는 것은 활성 카드뿐 — AWB 가 살리지 않은 비활성 카드를 "결제 완료" 로 이끌지 않는다.
+  assert.equal(inspectionCardRef({ ...base, result: 'found', cards: [card('ic_old', 'canceled'), card('ic_idle', 'inactive')] }), '');
+  assert.equal(inspectionCardRef({ ...base, result: 'found', cards: [card('ic_idle', 'inactive'), card('ic_live', 'active')] }), 'ic_live');
   assert.equal(inspectionCardRef({ ...base, result: 'found', cards: [card('ic_old', 'canceled')] }), '');
   assert.equal(inspectionCardRef(null), '');
 

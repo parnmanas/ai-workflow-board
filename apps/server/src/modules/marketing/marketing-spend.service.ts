@@ -730,11 +730,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         await this.settle(manager, row, 'failed', SYSTEM_MARKETING_ACTOR, { error: `not sent: ${blocker}`, from: 'approved' });
         return null;
       }
+      const executingAt = new Date();
       const won = await repo.createQueryBuilder().update(MarketingSpendRequest)
-        .set({ status: 'executing', executing_at: new Date() })
+        .set({ status: 'executing', executing_at: executingAt })
         .where('id = :id AND status = :s', { id, s: 'approved' })
         .execute();
       if (!won.affected) return null;
+      row.executing_at = executingAt;
       await this.audit.record({
         accountId: row.account_id,
         campaignId: row.campaign_id,
@@ -827,7 +829,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       throw new PaymentNotSentError(String(e?.message || e));
     }
     if (resolved.fingerprint !== plan.credential_fingerprint) throw new PaymentNotSentError('the payment credential changed since the request');
-    return DIRECT_PAYMENT_ADAPTERS[provider].execute({ plan, fields: resolved.fields, fingerprint: resolved.fingerprint, requestId: row.id, ctx: this.adapterContext() });
+    return DIRECT_PAYMENT_ADAPTERS[provider].execute({
+      plan, fields: resolved.fields, fingerprint: resolved.fingerprint, requestId: row.id, startedAt: row.executing_at || new Date(), ctx: this.adapterContext(),
+    });
   }
 
   /**
@@ -952,7 +956,8 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     let found: DirectInspection;
     try {
       found = await DIRECT_PAYMENT_ADAPTERS[row.provider].inspect({
-        plan, ref: row.payee_ref, fields, fingerprint, currency: row.currency, requestId: row.id, around: this.executionTime(row), ctx: this.adapterContext(),
+        plan, ref: row.payee_ref, fields, fingerprint, currency: row.currency, requestId: row.id, around: this.executionTime(row),
+        response: row.provider_response, ctx: this.adapterContext(),
       });
     } catch (e: any) {
       // 사람만 부르는 확인이라(approve_spend) 공급자가 준 글도 덧붙인다 — 이 문장은 에이전트에게 가지 않는다.
@@ -1004,7 +1009,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, row.provider_credential_id || '', row.account_id);
       scan = await DIRECT_PAYMENT_ADAPTERS[provider].inspect({
         plan: row.payload as DirectPlan, ref: row.payee_ref, fields, fingerprint, currency: row.currency, requestId: row.id,
-        around: this.executionTime(row), ctx: this.adapterContext(),
+        around: this.executionTime(row), response: row.provider_response, ctx: this.adapterContext(),
       });
     } catch (e: any) {
       problem = String(e?.message || e).slice(0, 300);
@@ -1013,12 +1018,16 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       if (scan.result === 'none') return { result: 'none' };
       const live = scan.cards.filter((c) => c.status !== 'canceled');
       if (live.length) {
-        throw marketingError(409, `a card for this request exists (${live[0].id}, ${live[0].status || 'status unknown'}) — record "paid" with its id, or cancel the card in the Stripe Dashboard first`);
+        // 활성화되지 않은 카드는 AWB 가 살리지 않은 카드다 — 결제 완료로 이끌지 않는다(쓸 수 없는 카드에 예산 전체가 묶인다).
+        const card = live.find((c) => c.status === 'active') || live[0];
+        throw marketingError(409, card.status === 'active'
+          ? `an active card for this request exists (${card.id}) — record "paid" with its id, or cancel the card in the Stripe Dashboard first`
+          : `a card for this request exists but was never activated (${card.id}, ${card.status || 'status unknown'}) — cancel it in the Stripe Dashboard and record the failure with confirm_no_spend, or activate it there and record "paid" with its id`);
       }
       const ids = scan.cards.map((c) => c.id);
       if (!confirmNoSpend) {
         throw marketingError(409, scan.result === 'found'
-          ? `only canceled cards exist for this request (${ids.join(', ')}) — confirm in the Stripe Dashboard that nothing was spent on them, then record the failure with confirm_no_spend`
+          ? `only canceled cards were found for this request (${ids.join(', ')}) — confirm in the Stripe Dashboard that nothing was spent on them, then record the failure with confirm_no_spend`
           : 'could not look through all of this cardholder\'s cards — check the Stripe Dashboard and, if no card was issued for this request, record the failure with confirm_no_spend');
       }
       return { result: scan.result, cards: ids, confirmed_no_spend: true };

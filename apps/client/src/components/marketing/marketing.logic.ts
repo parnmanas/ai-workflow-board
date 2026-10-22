@@ -546,7 +546,9 @@ export function cardLimitWarning(spend: Pick<MarketingSpendRequest, 'provider' |
   if (spend.provider !== 'stripe_issuing') return '';
   const plan = spend.payload || {};
   if (plan.single_use !== true || typeof plan.limit_minor !== 'number' || plan.limit_minor <= STRIPE_STANDARD_CARD_DAILY_MINOR) return '';
-  return `일회용 카드의 한도가 ${formatMinor(STRIPE_STANDARD_CARD_DAILY_MINOR, spend.currency)} 를 넘습니다 — 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 첫 결제가 거절될 수 있고, 그래도 이 금액 전체가 사용으로 묶입니다. 프로그램 한도를 확인하세요.`;
+  // Stripe 가 밝힌 한도는 USD 다 — 다른 통화 카드에는 같은 숫자를 근사로 쓴다.
+  const daily = spend.currency === 'USD' ? '500 USD 라' : '500 USD 상당이라';
+  return `일회용 카드의 한도가 ${formatMinor(STRIPE_STANDARD_CARD_DAILY_MINOR, spend.currency)} 를 넘습니다 — 셀프 서비스 Standard 프로그램은 카드당 하루 ${daily} 첫 결제가 거절될 수 있고, 그래도 이 금액 전체가 사용으로 묶입니다. 프로그램 한도를 확인하세요.`;
 }
 
 /**
@@ -575,7 +577,7 @@ export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provide
     return `Google Ads 에서 캠페인 ${campaignId} 의 총예산이 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 변경 기록은 몇 분 늦게 보이고, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
   }
   if (spend.provider === 'stripe_issuing') {
-    return `"공급자에서 확인" 이 카드 소지자 ${plan.target?.cardholder || ''} 의 카드 중 이 요청의 카드를 찾습니다(Stripe 대시보드 Issuing → Cards 의 metadata awb_spend_request_id). 카드가 있으면 그 카드 id 로 결제 완료를 기록하세요 — 쓰지 않을 카드면 대시보드에서 해지한 뒤 실패로 기록합니다. 카드가 없으면 ${failAfter} 실패로 기록할 수 있습니다. 해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다.`;
+    return `"공급자에서 확인" 이 카드 소지자 ${plan.target?.cardholder || ''} 의 카드 중 이 요청의 카드를 찾습니다(Stripe 대시보드 Issuing → Cards 의 metadata awb_spend_request_id). 활성(active) 카드면 그 카드 id 로 결제 완료를 기록하세요. 비활성(inactive) 카드는 AWB 가 활성화하지 않은 카드입니다 — 쓰지 않으면 대시보드에서 해지한 뒤 실패로, 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록합니다. 카드가 없으면 ${failAfter} 실패로 기록할 수 있습니다. 해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다.`;
   }
   return '결제 시스템에서 실제 결제 여부를 확인하세요.';
 }
@@ -592,7 +594,13 @@ export function inspectionSummary(insp: MarketingSpendInspection, currency: stri
     if (insp.result === 'none') return '이 요청의 카드가 없습니다(실행 시각 ±1일) — 발급되지 않은 것으로 보입니다.';
     const cards = insp.cards.map((c) => `${c.id}(${c.status || '상태 모름'}${c.limit_minor !== null ? `, 한도 ${formatMinor(c.limit_minor, currency)}` : ''})`).join(', ');
     if (insp.result === 'found') {
-      return `이 요청의 카드: ${cards} — 해지되지 않은 카드가 있으면 그 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).`;
+      if (insp.cards.some((c) => c.status === 'active')) {
+        return `이 요청의 카드: ${cards} — 활성 카드의 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).`;
+      }
+      if (insp.cards.some((c) => c.status !== 'canceled')) {
+        return `이 요청의 카드: ${cards} — AWB 가 활성화하지 않은 카드입니다. 쓰지 않으면 Stripe 대시보드에서 해지한 뒤 실패로(쓴 돈 없음 확인), 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록하세요.`;
+      }
+      return `이 요청의 카드: ${cards} — 모두 해지됐습니다. 그 카드로 쓴 돈이 없음을 Stripe 대시보드에서 확인한 뒤 실패로 기록하세요.`;
     }
     return `카드 소지자의 카드를 다 보지 못했습니다${cards ? `(찾은 카드: ${cards})` : ''} — Stripe 대시보드에서 확인하세요.`;
   }
@@ -604,10 +612,13 @@ export function inspectionSummary(insp: MarketingSpendInspection, currency: stri
   return `지금 상한 ${now}: ${where}. (${formatMinor(insp.from_minor, currency)} → ${formatMinor(insp.to_minor, currency)} 계획)`;
 }
 
-/** 요청별 확인이 찾은, 해지되지 않은 카드의 id — 결제 기록 창에 미리 채운다. 없으면 ''. */
+/**
+ * 요청별 확인이 찾은 활성 카드의 id — 결제 기록 창에 미리 채운다. 비활성 카드는 채우지 않는다: AWB 가 활성화하지 않은 카드라 결제
+ * 완료로 기록하면 쓸 수 없는 카드에 예산 전체가 묶인다(쓰려면 사람이 대시보드에서 활성화하고 직접 적는다). 없으면 ''.
+ */
 export function inspectionCardRef(insp: MarketingSpendInspection | null): string {
   if (!insp || insp.kind !== 'card') return '';
-  return insp.cards.find((c) => c.status !== 'canceled')?.id || '';
+  return insp.cards.find((c) => c.status === 'active')?.id || '';
 }
 
 /** 환불 기록 — 상한 공급자는 상한을 낮추기 전에는 기록할 수 없다(서버가 막는다). */

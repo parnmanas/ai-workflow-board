@@ -411,6 +411,19 @@ export function googleMicrosToMinor(micros: bigint, currency: string): bigint {
   return micros / per;
 }
 
+/**
+ * 상한 공급자마다 올리는 필드와 단위 변환 — 상한 공급자를 더하면 여기에 한 줄이 빠져 컴파일이 실패한다("Meta 가 아니면 Google"
+ * 같은 분기를 쓰지 않으려고 둔 표다).
+ */
+const CEILING_UNITS: Readonly<Record<CeilingProvider, {
+  field: CeilingPlan['field'];
+  toUnits: (minor: bigint, currency: string) => bigint;
+  toMinor: (units: bigint, currency: string) => bigint;
+}>> = {
+  meta_ads: { field: 'spend_cap', toUnits: minorToMetaUnits, toMinor: metaUnitsToMinor },
+  google_ads: { field: 'total_amount_micros', toUnits: minorToGoogleMicros, toMinor: googleMicrosToMinor },
+};
+
 function safeMinor(value: bigint, label: string): number {
   const n = Number(value);
   if (!Number.isSafeInteger(n) || n < 0) throw new PaymentRuleError(`${label} is out of range`, 502);
@@ -454,9 +467,10 @@ export function buildCeilingPlan(input: {
   credentialFingerprint: string;
   extra?: Pick<CeilingPlan, 'test_account' | 'end_date_time'>;
 }): CeilingPlan {
-  const field = input.provider === 'meta_ads' ? 'spend_cap' : 'total_amount_micros';
-  const toProvider = (minor: bigint) => (input.provider === 'meta_ads' ? minorToMetaUnits(minor, input.currency) : minorToGoogleMicros(minor, input.currency));
-  const fromProvider = (units: bigint) => (input.provider === 'meta_ads' ? metaUnitsToMinor(units, input.currency) : googleMicrosToMinor(units, input.currency));
+  const units = CEILING_UNITS[input.provider];
+  const field = units.field;
+  const toProvider = (minor: bigint) => units.toUnits(minor, input.currency);
+  const fromProvider = (value: bigint) => units.toMinor(value, input.currency);
   const fromMinor = fromProvider(input.fromUnits);
   const toUnits = input.fromUnits + toProvider(BigInt(input.amountMinor));
   if (toUnits > INT64_MAX) throw new PaymentRuleError('the raised ceiling would exceed the provider maximum', 400);
@@ -551,14 +565,14 @@ function ceilingPlanProblems(row: PlanRow, provider: CeilingProvider): string[] 
       if (!plan.target || plan.target[key] !== value) out.push(`plan target ${key} does not match the payee ref`);
     }
   }
-  const field = provider === 'meta_ads' ? 'spend_cap' : 'total_amount_micros';
-  if (plan.field !== field) out.push(`plan field must be ${field}`);
+  const units = CEILING_UNITS[provider];
+  if (plan.field !== units.field) out.push(`plan field must be ${units.field}`);
   const fp = fingerprintProblem(plan);
   if (fp) out.push(fp);
   try {
     const from = parseProviderInt(plan.from, 'plan from');
     const to = parseProviderInt(plan.to, 'plan to');
-    const minorOf = (units: bigint) => (provider === 'meta_ads' ? metaUnitsToMinor(units, row.currency) : googleMicrosToMinor(units, row.currency));
+    const minorOf = (value: bigint) => units.toMinor(value, row.currency);
     if (to <= from) out.push('plan does not raise the ceiling');
     if (Number(minorOf(from)) !== plan.from_minor || Number(minorOf(to)) !== plan.to_minor) out.push('plan amounts do not convert consistently');
     if (Number(plan.to_minor) - Number(plan.from_minor) !== Number(row.amount_minor)) out.push('plan raise does not equal the requested amount');
@@ -568,11 +582,11 @@ function ceilingPlanProblems(row: PlanRow, provider: CeilingProvider): string[] 
   return out;
 }
 
-function cardPlanProblems(row: PlanRow): string[] {
+function cardPlanProblems(row: PlanRow, provider: CardPlan['provider']): string[] {
   const out: string[] = [];
   const plan = row.payload as Partial<CardPlan> | null;
   if (!plan || typeof plan !== 'object' || plan.plan !== 'issue_card') return ['payload is not a card plan built by the server'];
-  if (plan.provider !== 'stripe_issuing') out.push('plan provider does not match the request');
+  if (plan.provider !== provider) out.push('plan provider does not match the request');
   if (plan.currency !== row.currency) out.push('plan currency does not match the request');
   try { stripeCardAmount(row.amount_minor, row.currency); } catch (e: any) { out.push(e.message); }
   let target: StripeTarget | null = null;
@@ -609,7 +623,7 @@ export function directPlanProblems(row: PlanRow): string[] {
     case 'google_ads':
       return ceilingPlanProblems(row, provider);
     case 'stripe_issuing':
-      return cardPlanProblems(row);
+      return cardPlanProblems(row, provider);
     default:
       return assertNever(provider);
   }
@@ -620,7 +634,7 @@ export function directPlanProblems(row: PlanRow): string[] {
  * 계획은 실행하지 않는다(사람이 바꾼 결정이 이긴다). 상한 공급자는 경로(provider · credential · ref) 대조로 충분하다. 문제가 없으면 null.
  */
 export function directPayeeProblem(row: { provider: string; payload: unknown }, payee: PayeeLike): string | null {
-  if (row.provider !== 'stripe_issuing') return null;
+  if (!isDirectPaymentProvider(row.provider) || DIRECT_PROVIDER_SPECS[row.provider].kind !== 'card') return null;
   const plan = row.payload as Partial<CardPlan> | null;
   if (!plan || plan.plan !== 'issue_card') return null;
   const singleUse = payee.card_single_use !== false;
@@ -643,18 +657,23 @@ export function describeDirectPlan(row: { provider: string; currency: string; pa
   if (!isDirectPaymentProvider(row.provider)) return '';
   const fmt = (n: number) => formatMinorAmount(n, row.currency);
   const provider: DirectPaymentProvider = row.provider;
+  const ceiling = (): { target: Record<string, string>; from: number; to: number } | null => {
+    const plan = row.payload as Partial<CeilingPlan> | null;
+    if (!plan || plan.plan !== 'raise_ceiling' || !plan.target) return null;
+    const from = Number(plan.from_minor);
+    const to = Number(plan.to_minor);
+    return Number.isSafeInteger(from) && Number.isSafeInteger(to) ? { target: plan.target, from, to } : null;
+  };
   switch (provider) {
-    case 'meta_ads':
+    case 'meta_ads': {
+      const c = ceiling();
+      if (!c) return '';
+      return `Meta 광고 계정 act_${c.target.ad_account_id} 의 캠페인 ${c.target.campaign_id} 지출 한도(spend_cap)를 ${fmt(c.from)} → ${fmt(c.to)} 로 올립니다(+${fmt(c.to - c.from)}).`;
+    }
     case 'google_ads': {
-      const plan = row.payload as Partial<CeilingPlan> | null;
-      if (!plan || plan.plan !== 'raise_ceiling' || !plan.target) return '';
-      const from = Number(plan.from_minor);
-      const to = Number(plan.to_minor);
-      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) return '';
-      if (provider === 'meta_ads') {
-        return `Meta 광고 계정 act_${plan.target.ad_account_id} 의 캠페인 ${plan.target.campaign_id} 지출 한도(spend_cap)를 ${fmt(from)} → ${fmt(to)} 로 올립니다(+${fmt(to - from)}).`;
-      }
-      return `Google Ads 고객 ${plan.target.customer_id} 의 캠페인 ${plan.target.campaign_id} 총예산을 ${fmt(from)} → ${fmt(to)} 로 올립니다(+${fmt(to - from)}).`;
+      const c = ceiling();
+      if (!c) return '';
+      return `Google Ads 고객 ${c.target.customer_id} 의 캠페인 ${c.target.campaign_id} 총예산을 ${fmt(c.from)} → ${fmt(c.to)} 로 올립니다(+${fmt(c.to - c.from)}).`;
     }
     case 'stripe_issuing': {
       const plan = row.payload as Partial<CardPlan> | null;
@@ -677,15 +696,14 @@ export function describeDirectPlan(row: { provider: string; currency: string; pa
 export function directSuggestedRef(row: { provider: string; payload: unknown; provider_response?: unknown }): string {
   if (!isDirectPaymentProvider(row.provider)) return '';
   const provider: DirectPaymentProvider = row.provider;
+  const plan = row.payload as Partial<CeilingPlan> | null;
+  const target = plan?.plan === 'raise_ceiling' ? plan.target : undefined;
+  const to = plan?.to;
   switch (provider) {
     case 'meta_ads':
-    case 'google_ads': {
-      const plan = row.payload as Partial<CeilingPlan> | null;
-      if (!plan || plan.plan !== 'raise_ceiling' || !plan.target) return '';
-      return provider === 'meta_ads'
-        ? `meta_ads:act_${plan.target.ad_account_id}/${plan.target.campaign_id}:spend_cap=${plan.to}`
-        : `google_ads:${plan.target.budget || `${plan.target.customer_id}/${plan.target.campaign_id}`}:total_amount_micros=${plan.to}`;
-    }
+      return target ? `meta_ads:act_${target.ad_account_id}/${target.campaign_id}:spend_cap=${to}` : '';
+    case 'google_ads':
+      return target ? `google_ads:${target.budget || `${target.customer_id}/${target.campaign_id}`}:total_amount_micros=${to}` : '';
     case 'stripe_issuing': {
       const response = row.provider_response && typeof row.provider_response === 'object' ? row.provider_response as Record<string, unknown> : {};
       return providerToken(response.card_id, PROVIDER_FORMATS.stripeId);

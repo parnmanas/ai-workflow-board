@@ -123,7 +123,7 @@ export const PAYMENT_CREDENTIAL_GUIDES: Readonly<Record<MarketingDirectPaymentPr
       '샌드박스에서는 카드 화면의 Create test purchase 로 결제를 흉내 낼 수 있습니다.',
     ],
     fields: [
-      { field: 'secret_key', value: '제한된 API 키(rk_live_… / 샌드박스 rk_test_…). 전체 비밀 키(sk_…)도 되지만 권하지 않습니다' },
+      { field: 'secret_key', value: '제한된 API 키(rk_live_… / 샌드박스 rk_test_…). 운영의 전체 비밀 키(sk_live_…)는 거부됩니다 — 샌드박스에서만 sk_test_… 를 받습니다' },
     ],
     target: '수취인 대상: 카드 소지자 id ich_… (같은 모드 — 운영 키에는 운영 카드 소지자)',
     pitfalls: [
