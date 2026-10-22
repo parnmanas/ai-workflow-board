@@ -1,4 +1,4 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, ServiceUnavailableException } from '@nestjs/common';
 import { ApiKeyService } from '../../services/api-key.service';
 
 @Injectable()
@@ -28,6 +28,7 @@ export class AgentAuthGuard implements CanActivate {
 
     // Try DB key first — provides account_id scoping
     let rejectedDbKey = false;
+    let dbValidationFailed = false;
     try {
       const dbResult = await this.apiKeyService.validateApiKey(providedKey);
       if (dbResult.valid && dbResult.apiKey?.account_id) {
@@ -47,7 +48,9 @@ export class AgentAuthGuard implements CanActivate {
       }
       rejectedDbKey = dbResult.valid || (!!dbResult.reason && dbResult.reason !== 'Key not found');
     } catch {
-      // Fall through to ENV key check
+      // An explicit ENV credential can still authenticate during a DB outage.
+      // Otherwise report a transient failure, not a rejected/rotated key.
+      dbValidationFailed = true;
     }
     if (rejectedDbKey) throw new UnauthorizedException('API key rejected');
 
@@ -59,6 +62,9 @@ export class AgentAuthGuard implements CanActivate {
       return true;
     }
 
+    if (dbValidationFailed) {
+      throw new ServiceUnavailableException('API key validation temporarily unavailable');
+    }
     throw new UnauthorizedException('Invalid or missing API key');
   }
 }
