@@ -419,9 +419,10 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 공급자 | `ref`(대상) | credential(`provider` 칼럼 = 공급자 이름) |
 | --- | --- | --- |
 | Meta Ads | `act_<광고 계정 id>/<캠페인 id>` — 그 캠페인의 `account_id` 와 대조한다 | `access_token`(시스템 사용자 토큰, `ads_management`), `app_secret`(선택 — appsecret_proof) |
-| Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | `client_id` · `client_secret` · `refresh_token`(adwords 범위), `login_customer_id`(선택 — 관리자 계정), `developer_token`(선택 — 2026-09-09 폐지, 있으면만 보냄) |
+| Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | `client_id` · `client_secret` · `refresh_token`(adwords 범위), `login_customer_id`(선택 — 관리자 계정), `developer_token`(비워 둔다 — 2026-09-09 폐지, 지금은 무시되고 이후 API 버전은 거부한다. 있으면만 보낸다) |
 
 - credential 은 Credentials 화면에서 그 공급자(Meta Ads · Google Ads)를 골라 **이 계정에** 만든다. 다른 종류(custom 등) · 전역 · 에이전트 노출(`agent_env`) credential 은 거부한다. 이 두 공급자는 에이전트 노출을 고를 수 없다.
+- Google Ads API 접근 수준은 OAuth client(`client_id`)의 Google Cloud 프로젝트에 붙는다(developer token 대신). 운영 계정에 쓰려면 그 프로젝트에 Explorer 이상의 접근이 있어야 한다 — Test 수준은 테스트 계정만 부를 수 있다.
 - 수취인을 저장할 때 ref 형식(정규 형태로 저장)과 credential 을 확인한다. 같은 대상을 가리키는 수취인 둘은 거부한다.
 
 **요청 때 서버가 실행 계획을 만든다(읽기만).**
@@ -430,7 +431,8 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 확인을 통과하면 계획을 만든다: 대상 · 필드 · `from`(지금 상한) → `to = from + 금액`, 공급자 단위와 AWB 최소 단위를 함께 담고, credential 지문을 넣는다. 공급자 화면의 이름은 `target_name_untrusted` 로 표시용으로만 담는다.
 - 이 계획이 `payload` 가 되어 해시된다. 승인 화면은 서버가 쓴 한 문장(`plan_text`)으로 보여 준다. 예: "Meta 광고 계정 act_9 의 캠페인 77 지출 한도(spend_cap)를 1,000.00 USD → 1,300.00 USD 로 올립니다(+300.00 USD)."
 - 공급자 확인이 실패하면 저장하지 않고 거부하고 `spend.refused` 로 감사에 남긴다. 거부 문구는 "사람이 고쳐야 함" 과 "다음 사이클에 다시" 를 구분한다.
-- 금액 때문이 아닌 실패는 그 (캠페인, 대상, credential) 를 10분 동안 다시 묻지 않는다 — 에이전트의 되풀이가 공급자 호출로 번지지 않게. 수취인이나 credential 을 고치면 키가 바뀌어 바로 다시 묻고, 연결 확인이 정상이면 풀린다.
+- 금액 · 통화 단위 문제(나누어떨어지지 않음 · 표에 없는 통화)는 공급자를 읽기 전에 거절하고 쉬지 않는다.
+- 공급자를 읽은 뒤의 거절은 그 (캠페인, 대상, credential) 를 잠시 다시 묻지 않는다 — 에이전트의 되풀이가 공급자 호출로 번지지 않게. 대상 · 인증 문제는 10분, 금액에 달린 것(계정 최소 상한 · 청구 단위 · 상한 최대값)은 1분이다(금액만 바꿔 되풀이해도 그때마다 읽지 않게). 수취인이나 credential 을 고치면 키가 바뀌어 바로 다시 묻고, 연결 확인이 정상이면 풀린다.
 - **대상마다 열린 요청은 하나다**(`target_key`, 부분 유일 인덱스 `uq_marketing_spend_open_target`). 캠페인 · 계정을 넘어서도 적용된다. 같은 `from` 으로 계획된 요청 둘이 있으면 먼저 실행된 쪽이 다른 쪽의 `from` 을 바꾸고, 동시에 실행되면 둘 다 `from` 을 읽고 쓴다. 요청 · 승인 · 실행 · 결과 불명 동안 열려 있다 — 결과 불명은 대조해야 그 대상에 새 요청을 낼 수 있다.
   - 같은 계정의 열린 요청은 공급자를 읽기 전에 그 id · 상태와 함께 알린다.
   - 다른 계정의 열린 요청은 이 계정의 credential 로 그 대상을 실제로 읽은 뒤에만 알리고, id · 상태는 싣지 않는다(연결 확인에는 `open_request: { id: '', status: 'other_account' }`). 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게 하려는 것이다.
@@ -457,7 +459,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 테스트 계정 ↔ 운영 계정이 바뀌었으면(Google `test_account`) 보내지 않는다.
 - 응답은 허용 목록 요약만 저장한다(`provider_response`: 대상 · from/to · 상태 코드 · 오류 코드 · `fbtrace_id`/`request-id`).
 - **오류 문장(`error`)에는 서버가 쓴 문장과 상태 코드 · 오류 코드만 넣는다.** 이 문장은 에이전트(MCP)까지 간다.
-  - 공급자가 준 글(오류 메시지)은 제어 문자를 지우고 비밀 값을 `[redacted]` 로 바꾼 뒤, 응답 요약의 `message_untrusted`(요청 때 거부는 감사의 `provider_message_untrusted`)에만 싣는다.
+  - 공급자가 준 글(오류 메시지)은 비밀 값을 **먼저** `[redacted]` 로 바꾸고(자른 뒤에 바꾸면 경계에 걸린 비밀 값의 앞부분이 남는다) 제어 문자를 지우고 자른 뒤, 응답 요약의 `message_untrusted`(요청 때 거부는 감사의 `provider_message_untrusted`)에만 싣는다(`providerMessage`).
   - 공급자가 준 값 중 형식이 정해진 것(상태 · 통화 · id · 예산 리소스 이름 · 종료 시각 · 추적 id)은 형식에 맞을 때만 받는다. 형식이 틀리면 빈 값으로 읽혀 대조에서 걸린다. 규칙 위반 문장에 자유 글이 섞이지 않게 하려는 것이다.
   - Google 은 고치는 예산이 대상 고객 계정 아래의 것(`customers/<고객 id>/campaignBudgets/…`)인지도 본다.
 - 공급자 글(오류 메시지 · 캠페인 이름)은 사이클 지시문의 신뢰 구역과 알림에 싣지 않는다.
@@ -474,6 +476,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 요청 카드의 "공급자에서 확인"(`POST /spend-requests/:id/inspect`, 읽기 전용)이 지금 상한이 목표값인지 · 이전 값인지 · 그 밖인지 보여 준다. 판정은 사람이 한다.
 - Meta 는 변경 반영에 최대 15분, Google 변경 기록은 몇 분 늦게 보인다.
 - 그래서 직접 결제의 결과 불명은 **실행 뒤 15분이 지나야 "실패" 로 기록할 수 있다**(그 전에는 409, 언제부터인지 알려 준다). "아직 안 바뀌었다" 를 보고 일찍 실패로 닫으면 나중에 반영된 상한이 원장 밖에 남는다. "결제 완료" 는 바로 기록할 수 있다 — 원장을 더 세는 쪽이다.
+  - 이 판단은 캠페인 잠금 안에서 다시 읽은 상태로 한다. 실행 중에 누른 "실패" 가 잠금을 기다리는 사이 결과 불명이 된 요청을 유예 없이 닫지 않게.
 - 결제 기록 창은 거래 id 자리를 서버가 만든 기록용 값(`suggested_provider_ref`, 예: `meta_ads:act_9/77:spend_cap=130000`)으로 미리 채운다. 광고 플랫폼 상한 변경에는 거래 id 가 없다.
 
 **환불은 막는다.** 상한이 그대로인데 "미사용분" 을 돌려받았다고 적으면, 플랫폼은 그 돈을 아직 쓸 수 있는데 원장은 덜 센다. 상한을 실제로 낮추고 그만큼 환불을 기록하는 기능은 후속이다. 그때까지 원장은 승인 금액 전체를 사용으로 센다.
