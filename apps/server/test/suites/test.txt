@@ -75,6 +75,7 @@ test/comment-tools-user-author-uuid-guard.test.mjs
 test/credential-agent-env.test.mjs
 test/credential-mask.test.mjs
 test/credential-whitespace-normalize.test.mjs
+test/credentials-marketing.test.mjs
 test/credentials-mcp.test.mjs
 test/credentials-scope-switch.test.mjs
 test/credentials-scope.test.mjs
