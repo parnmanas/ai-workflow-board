@@ -552,7 +552,7 @@ test('브랜드 동의 — 미이관 연락처를 명시적으로 선택하고 �
   click(buttonByText(document, '발신자 확인 · 이관'));
   await flush(); await flush();
   assert.deepEqual(migrated, [['acc-2', 'brand-1', ['ct-legacy']]]);
-  assert.equal(container.querySelector('input[type="checkbox"]'), null, '이미 이관한 증거는 다시 선택하지 못한다');
+  assert.equal(Boolean(container.querySelector('input[type="checkbox"]')), false, '이미 이관한 증거는 다시 선택하지 못한다');
   click(buttonByText(container, '이 브랜드 수신거부'));
   await flush();
   const dialog = document.querySelector('[role="dialog"]');
