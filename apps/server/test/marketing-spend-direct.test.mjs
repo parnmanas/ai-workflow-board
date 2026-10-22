@@ -190,11 +190,17 @@ async function setup(t, label) {
     const owner = await createUser(app, getDataSourceToken, { name: `mkt-direct-owner-${name}`, role: 'admin' });
     await ds.getRepository('Account').update(account.id, { owner_user_id: owner.id });
     const headers = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': account.id, 'Content-Type': 'application/json' };
+    // 권한은 바뀔 때만 쓴다. 20번처럼 캠페인 잠금 트랜잭션을 연 채 요청을 보내면, 요청 앞의 이 쓰기는 sql.js 큐에서
+    // 그 트랜잭션 뒤에 줄 서므로(ticket 13f5b0f6) 요청이 나가지 못한다.
+    let appliedPerms;
     const api = async (path, init = {}, perms = null) => {
-      await ds.getRepository('User').update(owner.id, {
-        role: perms ? 'user' : 'admin',
-        permissions: JSON.stringify(perms || []),
-      });
+      if (JSON.stringify(perms) !== appliedPerms) {
+        await ds.getRepository('User').update(owner.id, {
+          role: perms ? 'user' : 'admin',
+          permissions: JSON.stringify(perms || []),
+        });
+        appliedPerms = JSON.stringify(perms);
+      }
       const r = await call(`${base}/api/marketing${path}`, { headers, ...init });
       responses.push(r.text);
       return r;

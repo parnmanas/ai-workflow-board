@@ -14,14 +14,15 @@
 //   2. 주기 flush 는 열린 트랜잭션이 끝난 뒤에 쓴다 — 커밋되면 두 쓰기 모두, 롤백되면 하나도 남지 않는다.
 //   3. 종료(강제) flush 도 마찬가지이고, 부르기 전에 큐에 선 트랜잭션까지 담는다.
 //   4. repo.save() 의 암묵 트랜잭션도 끊지 않는다 — microtask 오프셋 전수와, 매크로태스크를 넘겨 열려 있는
-//      트랜잭션(느린 subscriber) 둘 다.
+//      트랜잭션(느린 subscriber) 둘 다. save 는 이제 큐 차례를 쥐므로 flush 는 그 차례를 기다린다. 큐 밖에서 열린
+//      트랜잭션(raw BEGIN)은 SQLite 에 물어 닫힐 때까지 기다린다.
 //   5. TypeORM runner 플래그가 끊긴 트랜잭션 때문에 true 로 굳어 있어도 flush 는 계속 쓴다(SQLite 에 묻는다).
 //   6. 재진입 — 트랜잭션 안의 afterSqljsTransactions(), 그 work 안의 transaction() 은 데드락 없이 돈다.
 //      트랜잭션 안에서 기다린 flush 는 자기 호출자를 끊지 않고 제한 시간 뒤 실패하며, 다음 flush 가 쓴다.
 //      그 트랜잭션 뒤에 주기 flush 가 줄 서 있어도 마찬가지다 — 강제 flush 가 그것을 기다리면 서로를
 //      기다려 큐 전체가 멈춘다.
 //   7. export 는 파일 쓰기 전에 차례를 넘긴다 — 쓰기 · 트랜잭션이 디스크 I/O 를 기다리지 않는다. 파일 쓰기는 한
-//      번에 하나다(겹친 fs.writeFile 은 파일을 섞는다).
+//      번에 하나다(겹친 fs.writeFile 은 파일을 섞는다) — 한 차례 안에서 함께 시작한 강제 flush 둘도 마찬가지다.
 //   8. 온톨로지 DataSource 의 flush 도 같은 경로를 탄다.
 //
 // 컴파일된 dist/ 를 대상으로 실행한다(`npm run build` 필요, test 스크립트가 보장). 공유 dev database/ 의
@@ -359,7 +360,7 @@ describe('sql.js flush vs open transactions (ticket d1ce6aad)', { timeout: 60_00
       const flush = flushSqljs(live, true);
       const flushState = track(flush);
       await sleep(30);
-      assert.equal(flushState.settled, false, 'the flush polls instead of exporting into the open save');
+      assert.equal(flushState.settled, false, 'the flush waits for the save\'s queue turn instead of exporting into the open save');
 
       held.release.open();
       await save;
@@ -368,6 +369,19 @@ describe('sql.js flush vs open transactions (ticket d1ce6aad)', { timeout: 60_00
     } finally {
       held.remove();
     }
+  });
+
+  it('a transaction opened outside the queue (raw BEGIN) is waited out by asking SQLite, not cut', async () => {
+    const conn = live.driver.databaseConnection;
+    conn.exec('BEGIN');
+    conn.exec("INSERT INTO accounts (id, name, description) VALUES ('raw-begin-id', 'raw-begin', 'flush-overlap')");
+    const flush = flushSqljs(live, true);
+    const flushState = track(flush);
+    await sleep(30);
+    assert.equal(flushState.settled, false, 'the export polls while SQLite reports an open transaction the queue does not know');
+    conn.exec('COMMIT');
+    assert.equal(await flush, true);
+    assert.deepEqual(namesOnDisk(PRIMARY_FILE, 'accounts', 'raw-begin'), ['raw-begin']);
   });
 
   it('a runner flag left stuck by a cut transaction does not block later flushes', async () => {
@@ -516,6 +530,40 @@ describe('sql.js flush vs open transactions (ticket d1ce6aad)', { timeout: 60_00
       delete mgr.saveDatabase;
     }
     assert.deepEqual(namesOnDisk(PRIMARY_FILE, 'accounts', 'one-write-'), ['one-write-a', 'one-write-b']);
+  });
+
+  it('two forced flushes started together inside one turn still write the file one at a time', async () => {
+    const mgr = live.sqljsManager;
+    const realSave = mgr.saveDatabase;
+    const firstWrite = gate();
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    mgr.saveDatabase = async function countedWrite(...args) {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        const out = await realSave.apply(this, args);
+        if (calls === 1) await firstWrite.wait;
+        return out;
+      } finally {
+        active -= 1;
+      }
+    };
+    try {
+      const repo = live.getRepository(Account);
+      await repo.save(repo.create({ name: 'pair-flush', description: 'flush-overlap' }));
+      // 같은 차례 안의 강제 flush 는 서로의 in-flight 를 기다리지 않는다 — 파일 쓰기 사슬만 둘을 떼어 놓는다.
+      const both = afterSqljsTransactions(live, () => Promise.all([flushSqljs(live, true), flushSqljs(live, true)]));
+      await sleep(30);
+      assert.equal(calls, 1, 'the second export waits until the first file write is done');
+      firstWrite.open();
+      assert.deepEqual(await both, [true, true]);
+      assert.equal(maxActive, 1, 'two fs.writeFile calls on one file must never overlap');
+    } finally {
+      delete mgr.saveDatabase;
+    }
   });
 
   it('ontology flush takes the same path: it waits for an open implicit save transaction', async () => {

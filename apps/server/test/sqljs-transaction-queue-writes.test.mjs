@@ -12,7 +12,8 @@
 //      typeorm/sql.js 가 바뀌어 이 전제가 사라지면 이 스위트가 먼저 알려 준다.
 //   2. 큐가 걸린 DataSource 에서는 모든 쓰기 형태가 열린 트랜잭션이 끝나기를 기다린다 — 그 롤백에 휩쓸리지 않고,
 //      커밋에 묶이지도 않는다(COMMIT 뒤에 실행된다). 트랜잭션 사이에 선 쓰기는 FIFO 순서를 지킨다.
-//   3. 읽기(SELECT, 쓰기 없는 WITH)는 기다리지 않는다. 쓰기 키워드가 든 WITH 는 기다린다.
+//   3. 읽기(SELECT, 쓰기 없는 WITH)는 기다리지 않는다. 쓰기 키워드가 든 WITH 는 기다린다 — 분류가 틀리면 쓰기 쪽으로
+//      틀려서 기다릴 뿐이다(키워드를 담은 읽기, 주석으로 시작하는 읽기).
 //   4. 같은 체인 — 트랜잭션 콜백 안의 루트 repository 쓰기 · raw 쓰기 · 중첩 트랜잭션은 데드락 없이 그 트랜잭션의
 //      일부로 돈다. 콜백이 await 없이 던진 save 가 커밋 뒤까지 이어져도 다음 트랜잭션에 섞이지 않는다.
 //   5. 큐 밖에서 여는 트랜잭션(queryRunner.startTransaction(), QueryBuilder.useTransaction())은 거부된다.
@@ -306,17 +307,37 @@ describe('sql.js: writes outside a transaction take the transaction queue (ticke
 
   it('a write queued between two transactions runs after the first and before the second (FIFO)', async () => {
     const ds = await openDataSource();
+    const log = [];
+    ds.subscribers.push({ afterQuery: (event) => log.push(event.query) });
     const accounts = ds.getRepository(Account);
     await accounts.save(accounts.create({ name: 'fifo-row', description: 'before' }));
-    const held = await openHeldTransaction(ds, 'fifo', { fail: false });
+    const held = await openHeldTransaction(ds, 'fifo'); // 롤백한다 — 그 안에 섞인 쓰기라면 함께 사라진다
     const write = accounts.update({ name: 'fifo-row' }, { description: 'written-between' });
     // update() 는 문장을 만드는 사이 몇 번 await 한다 — 문장은 보낼 때 줄을 선다. 그 문장이 줄에 선 뒤에 다음 트랜잭션을 부른다.
     await sleep(10);
     const second = ds.transaction(async (manager) => (await manager.getRepository(Account).findOneByOrFail({ name: 'fifo-row' })).description);
     held.release();
-    assert.equal(await held.done, 'committed');
+    assert.match((await held.done)?.message || '', /rolled back on purpose/);
     await write;
-    assert.equal(await second, 'written-between', 'the transaction queued after the write sees it');
+    assert.equal(await second, 'written-between', 'the write ran after the first transaction rolled back, and before the second');
+    const rollbackAt = log.findIndex((q) => /^ROLLBACK/i.test(q));
+    const updateAt = log.findIndex((q, i) => i > rollbackAt && /^UPDATE "accounts"/i.test(q));
+    const beginAt = log.findIndex((q, i) => i > rollbackAt && /^BEGIN/i.test(q));
+    assert.ok(rollbackAt >= 0 && updateAt > rollbackAt && beginAt > updateAt, `order: rollback #${rollbackAt}, update #${updateAt}, next begin #${beginAt}`);
+  });
+
+  it('statement classification errs toward writes: a read naming a write keyword, or led by a comment, only waits', async () => {
+    const ds = await openDataSource();
+    const held = await openHeldTransaction(ds, 'classify', { fail: false });
+    const keywordRead = ds.query("WITH src AS (SELECT 'update' AS w) SELECT w FROM src");
+    const commentRead = ds.query('/* note */ SELECT 1 AS one');
+    const states = [track(keywordRead), track(commentRead)];
+    await sleep(30);
+    assert.deepEqual(states.map((st) => st.settled), [false, false], 'classified as writes: they wait for the open transaction');
+    held.release();
+    assert.equal(await held.done, 'committed');
+    assert.deepEqual(await keywordRead, [{ w: 'update' }]);
+    assert.deepEqual(await commentRead, [{ one: 1 }]);
   });
 
   it('a transaction opened outside the queue is refused', async () => {

@@ -551,7 +551,7 @@ export const SQLJS_EXPORT_TXN_WAIT_MS = 1_000;
 const SQLJS_EXPORT_TXN_POLL_MS = 5;
 
 /** The file write of each DataSource's latest export — exports write one at a time (exportSqljsWhenIdle). */
-const sqljsFileWrites = new WeakMap<DataSource, Promise<void>>();
+const sqljsFileWrites = new WeakMap<DataSource, { writing: Promise<void>; done: boolean }>();
 
 /**
  * Write a sql.js DataSource to its file without ending an open transaction.
@@ -573,8 +573,11 @@ const sqljsFileWrites = new WeakMap<DataSource, Promise<void>>();
  * transaction in between. `markClean` runs in that same step. The file write that
  * follows does not touch the connection, so the turn is handed on before it:
  * writes and transactions do not wait for disk I/O. File writes still go one at a
- * time — an export first waits for the previous export's write to finish, since
- * two overlapping fs.writeFile calls on one file can interleave into a corrupt file.
+ * time, since two overlapping fs.writeFile calls on one file can interleave into a
+ * corrupt file: an export whose turn comes while the previous export is still
+ * writing waits for that write — holding its turn — and "no write in progress" is
+ * part of the same synchronous check. flushSqljs() normally keeps exports apart
+ * anyway; only forced flushes inside a held turn can meet here.
  *
  * A transaction still open after SQLJS_EXPORT_TXN_WAIT_MS is not cut: the export
  * fails, the caller keeps its dirty flag, and the next flush tries again. Only a
@@ -584,9 +587,14 @@ const sqljsFileWrites = new WeakMap<DataSource, Promise<void>>();
  */
 async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void): Promise<void> {
   const exported = await afterSqljsTransactions(dataSource, async () => {
-    await sqljsFileWrites.get(dataSource)?.catch(() => undefined);
     const deadline = Date.now() + SQLJS_EXPORT_TXN_WAIT_MS;
-    while (sqljsTransactionOpen(dataSource)) {
+    for (;;) {
+      const previous = sqljsFileWrites.get(dataSource);
+      if (previous && !previous.done) {
+        await previous.writing.catch(() => undefined);
+        continue;
+      }
+      if (!sqljsTransactionOpen(dataSource)) break;
       if (Date.now() >= deadline) {
         throw new Error(
           `sql.js export skipped: a transaction has been open for over ${SQLJS_EXPORT_TXN_WAIT_MS}ms ` +
@@ -596,10 +604,11 @@ async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void
       await new Promise((resolve) => setTimeout(resolve, SQLJS_EXPORT_TXN_POLL_MS));
     }
     markClean();
-    const writing = dataSource.sqljsManager.saveDatabase();
-    sqljsFileWrites.set(dataSource, writing);
+    const write = { writing: dataSource.sqljsManager.saveDatabase(), done: false };
+    write.writing.then(() => { write.done = true; }, () => { write.done = true; });
+    sqljsFileWrites.set(dataSource, write);
     // Wrapped, not returned: returning the promise would keep this turn until the file write is done.
-    return { writing };
+    return { writing: write.writing };
   });
   await exported.writing;
 }
