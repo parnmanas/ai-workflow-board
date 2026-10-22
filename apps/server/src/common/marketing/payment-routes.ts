@@ -58,9 +58,9 @@ export function isAutomaticPaymentProvider(value: unknown): boolean {
  * 직접 공급자의 credential 필드. Credential 의 `provider` 칼럼이 공급자 이름과 같아야 받는다(Credentials 화면의 전용 입력 칸).
  * 화면의 입력 칸은 이 목록과 같아야 한다 — apps/client/test/marketing-payment-contract.test.mjs 가 고정한다.
  */
-export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<DirectPaymentProvider, { required: readonly string[]; optional: readonly string[] }> = {
+export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<DirectPaymentProvider, { required: readonly string[]; optional: readonly string[]; required_one_of?: readonly (readonly string[])[] }> = {
   meta_ads: { required: ['access_token'], optional: ['app_secret'] },
-  google_ads: { required: ['client_id', 'client_secret', 'refresh_token'], optional: ['login_customer_id', 'developer_token'] },
+  google_ads: { required: [], optional: ['client_id', 'client_secret', 'refresh_token', 'client_email', 'private_key', 'login_customer_id', 'developer_token'], required_one_of: [['client_id', 'client_secret', 'refresh_token'], ['client_email', 'private_key']] },
   stripe_issuing: { required: ['secret_key'], optional: [] },
 };
 

@@ -441,11 +441,23 @@ export const DIRECT_REF_FORMATS: Record<MarketingDirectPaymentProvider, string> 
 };
 
 /** 직접 공급자 credential 의 필드 — Credentials 화면에서 이 공급자를 골라 만든다. */
-export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<MarketingDirectPaymentProvider, { required: readonly string[]; optional: readonly string[] }> = {
+export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<MarketingDirectPaymentProvider, { required: readonly string[]; optional: readonly string[]; required_one_of?: readonly (readonly string[])[] }> = {
   meta_ads: { required: ['access_token'], optional: ['app_secret'] },
-  google_ads: { required: ['client_id', 'client_secret', 'refresh_token'], optional: ['login_customer_id', 'developer_token'] },
+  google_ads: { required: [], optional: ['client_id', 'client_secret', 'refresh_token', 'client_email', 'private_key', 'login_customer_id', 'developer_token'], required_one_of: [['client_id', 'client_secret', 'refresh_token'], ['client_email', 'private_key']] },
   stripe_issuing: { required: ['secret_key'], optional: [] },
 };
+
+/** Alternative authentication groups are required as a set, not individually optional. */
+export function directCredentialFieldsHint(provider: MarketingDirectPaymentProvider): string {
+  const fields = DIRECT_PROVIDER_CREDENTIAL_FIELDS[provider];
+  const alternatives = fields.required_one_of || [];
+  const conditional = new Set(alternatives.flat());
+  return [
+    ...fields.required,
+    ...(alternatives.length ? [alternatives.map((group) => group.join(' + ')).join(' 또는 ') + '(한 방식 필수)'] : []),
+    ...fields.optional.filter((field) => !conditional.has(field)).map((field) => field + '(선택)'),
+  ].join(', ');
+}
 
 /** 수취인 편집기의 결제 경로 고르기 — 무엇을 하는 경로인지 함께. */
 export function directRouteOptionLabel(provider: MarketingDirectPaymentProvider): string {

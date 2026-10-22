@@ -138,6 +138,8 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
       client_id: { label: 'OAuth client ID', placeholder: '1234567890-abc.apps.googleusercontent.com' },
       client_secret: { label: 'OAuth client secret', placeholder: 'GOCSPX-...' },
       refresh_token: { label: 'Refresh token', placeholder: '1//... — adwords scope; publish the OAuth app (refresh tokens of apps in "Testing" expire in 7 days)' },
+      client_email: { label: 'Service account email (instead of OAuth fields)', placeholder: 'name@project.iam.gserviceaccount.com — add as a Google Ads account user' },
+      private_key: { label: 'Service account private key', placeholder: 'PEM private_key from the service account JSON; leave OAuth fields empty', multiline: true },
       login_customer_id: { label: 'Manager account id (optional)', placeholder: '123-456-7890 — only when access goes through a manager (MCC) account' },
       developer_token: { label: 'Developer token (leave empty)', placeholder: 'Retired by Google on 2026-09-09 — ignored now, rejected by later API versions; access follows the OAuth client\'s Cloud project' },
     },

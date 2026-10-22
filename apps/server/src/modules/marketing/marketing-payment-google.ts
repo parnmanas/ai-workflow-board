@@ -9,9 +9,10 @@
  *
  * mutate 에는 멱등 키가 없지만 partialFailure=false 이면 원자적이고, 절대값 `to` 를 쓰므로 다시 써도 결과가 같다.
  * 응답에 바뀐 값이 오도록 responseContentType=MUTABLE_RESOURCE 를 보낸다 — 이게 없으면 리소스 이름만 와서 확정할 수 없다.
- * 인증은 OAuth refresh token → access token(메모리 캐시, credential 지문을 키로). developer token 은 2026-09-09 에 폐지돼
+ * 인증은 서비스 계정 RS256 JWT 또는 OAuth refresh token → access token(메모리 캐시, credential 지문을 키로). developer token 은 2026-09-09 에 폐지돼
  * Google 이 무시한다 — credential 에 있으면만 보낸다.
  */
+import { createPrivateKey, sign } from 'node:crypto';
 import {
   PROVIDER_FORMATS,
   PaymentRuleError,
@@ -44,30 +45,45 @@ const READ_TIMEOUT_MS = 10_000;
 const WRITE_TIMEOUT_MS = 20_000;
 
 export interface GoogleCredential {
-  client_id: string;
-  client_secret: string;
-  refresh_token: string;
+  client_id?: string;
+  client_secret?: string;
+  refresh_token?: string;
+  client_email?: string;
+  private_key?: string;
   /** 관리자(MCC) 계정을 거쳐 접근할 때 그 계정 id(숫자만). */
   login_customer_id: string;
   developer_token: string;
 }
 
 export function readGoogleCredential(fields: Record<string, string>): GoogleCredential {
-  const missing = ['client_id', 'client_secret', 'refresh_token'].filter((k) => !fields[k]);
-  if (missing.length) throw marketingError(400, `Google Ads credential needs ${missing.map((k) => `"${k}"`).join(', ')} (an OAuth client and a refresh token with the adwords scope)`);
+  const serviceAccount = !!(fields.client_email || fields.private_key);
+  if (serviceAccount && (fields.client_id || fields.client_secret || fields.refresh_token)) {
+    throw marketingError(400, 'Google Ads credential must use either OAuth fields or service account fields, not both');
+  }
+  const required = serviceAccount ? ['client_email', 'private_key'] : ['client_id', 'client_secret', 'refresh_token'];
+  const missing = required.filter((k) => !fields[k]?.trim());
+  if (missing.length) throw marketingError(400, `Google Ads credential needs ${missing.map((k) => `"${k}"`).join(', ')} (OAuth client + refresh token, or service account client_email + private_key; adwords scope)`);
   const login = (fields.login_customer_id || '').replace(/-/g, '');
   if (login && !/^\d{10}$/.test(login)) throw marketingError(400, 'Google Ads credential "login_customer_id" must be a 10-digit manager account id');
+  if (serviceAccount && !/^[^\s@]+@[^\s@]+\.gserviceaccount\.com$/.test(fields.client_email.trim())) {
+    throw marketingError(400, 'Google Ads credential "client_email" must be a service account email');
+  }
   return {
-    client_id: fields.client_id,
-    client_secret: fields.client_secret,
-    refresh_token: fields.refresh_token,
+    ...(serviceAccount ? {
+      client_email: fields.client_email.trim(),
+      private_key: fields.private_key.replace(/\\n/g, '\n').trim(),
+    } : {
+      client_id: fields.client_id,
+      client_secret: fields.client_secret,
+      refresh_token: fields.refresh_token,
+    }),
     login_customer_id: login,
     developer_token: fields.developer_token || '',
   };
 }
 
 function secretsOf(cred: GoogleCredential, token = ''): string[] {
-  return [cred.client_secret, cred.refresh_token, cred.developer_token, token];
+  return [cred.client_secret || '', cred.refresh_token || '', cred.private_key || '', cred.developer_token, token];
 }
 
 // ── access token ──────────────────────────────────────────────────────────
@@ -82,7 +98,7 @@ export function resetGoogleTokenCache(): void {
 }
 
 /**
- * refresh token 으로 access token 을 받는다(만료 1분 전까지 캐시). 키는 credential 지문이다 — credential 을 다시 저장하면
+ * JWT bearer 또는 refresh token 으로 access token 을 받는다(만료 1분 전까지 캐시). 키는 credential 지문이다 — credential 을 다시 저장하면
  * 지문이 바뀌어 새 토큰을 받는다. 실패는 PaymentReadError(쓰기 전이므로 아무것도 나가지 않았다).
  */
 export async function googleAccessToken(cred: GoogleCredential, fingerprint: string, fetchImpl?: typeof fetch, now: () => number = Date.now): Promise<string> {
@@ -91,18 +107,37 @@ export async function googleAccessToken(cred: GoogleCredential, fingerprint: str
   const pending = tokenInFlight.get(fingerprint);
   if (pending) return pending;
   const run = (async () => {
+    let assertion = '';
+    let body: URLSearchParams;
+    if (cred.client_email) {
+      try {
+        const key = createPrivateKey(cred.private_key || '');
+        if (key.asymmetricKeyType !== 'rsa') throw new Error('RSA required');
+        const iat = Math.floor(now() / 1000);
+        const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+        const claims = Buffer.from(JSON.stringify({
+          iss: cred.client_email, scope: 'https://www.googleapis.com/auth/adwords',
+          aud: TOKEN_URL, iat, exp: iat + 3600,
+        })).toString('base64url');
+        const input = `${header}.${claims}`;
+        assertion = `${input}.${sign('RSA-SHA256', Buffer.from(input), key).toString('base64url')}`;
+      } catch {
+        throw new PaymentReadError('Google Ads service account private_key must be a valid RSA private key (PEM)', false);
+      }
+      body = new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion });
+    } else {
+      body = new URLSearchParams({
+        client_id: cred.client_id || '', client_secret: cred.client_secret || '',
+        refresh_token: cred.refresh_token || '', grant_type: 'refresh_token',
+      });
+    }
     let reply: ProviderReply;
     try {
       reply = await providerRequest({
         url: TOKEN_URL,
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-        body: new URLSearchParams({
-          client_id: cred.client_id,
-          client_secret: cred.client_secret,
-          refresh_token: cred.refresh_token,
-          grant_type: 'refresh_token',
-        }).toString(),
+        body: body.toString(),
         timeoutMs: READ_TIMEOUT_MS,
         fetchImpl,
       });
@@ -112,11 +147,11 @@ export async function googleAccessToken(cred: GoogleCredential, fingerprint: str
     const token = reply.json && typeof reply.json.access_token === 'string' ? reply.json.access_token : '';
     if (reply.status !== 200 || !token) {
       const code = /^[a-z_]{1,40}$/.test(String(reply.json?.error || '')) ? String(reply.json.error) : '';
-      const detail = providerMessage(reply.json?.error_description || '', secretsOf(cred), 200);
-      const hint = code === 'invalid_grant'
+      const detail = providerMessage(reply.json?.error_description || '', [...secretsOf(cred), assertion], 200);
+      const hint = code === 'invalid_grant' && !cred.client_email
         ? ' — the refresh token was revoked or expired (apps in "Testing" get 7-day tokens); issue a new one'
         : '';
-      throw new PaymentReadError(`Google refused the OAuth refresh (HTTP ${reply.status}${code ? `, ${code}` : ''})${hint}`, reply.status >= 500, detail);
+      throw new PaymentReadError(`Google refused the ${cred.client_email ? 'service account token exchange' : 'OAuth refresh'} (HTTP ${reply.status}${code ? `, ${code}` : ''})${hint}`, reply.status >= 500, detail);
     }
     const seconds = Number(reply.json.expires_in);
     const ttl = Number.isFinite(seconds) && seconds > 120 ? (seconds - 60) * 1000 : 60_000;

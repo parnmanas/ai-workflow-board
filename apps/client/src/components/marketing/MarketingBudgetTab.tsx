@@ -19,7 +19,7 @@ import {
   BUDGET_PERIOD_LABELS,
   DIRECT_PAYMENT_PROVIDERS,
   DIRECT_PAYMENT_PROVIDER_LABELS,
-  DIRECT_PROVIDER_CREDENTIAL_FIELDS,
+  directCredentialFieldsHint,
   DIRECT_REF_FORMATS,
   PAYMENT_PROVIDER_LABELS,
   allocationStatusView,
@@ -584,7 +584,7 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
                   {p.provider && (
                     <Hint>
                       {DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]} 대상: {DIRECT_REF_FORMATS[p.provider]}. credential 은 Credentials 에서 provider
-                      “{DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]}” 로 이 계정에 만듭니다(필드 {[...DIRECT_PROVIDER_CREDENTIAL_FIELDS[p.provider].required, ...DIRECT_PROVIDER_CREDENTIAL_FIELDS[p.provider].optional.map((f) => `${f}(선택)`)].join(', ')}).
+                      “{DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]}” 로 이 계정에 만듭니다(필드 {directCredentialFieldsHint(p.provider)}).
                       {DIRECT_PROVIDER_SPECS[p.provider].kind === 'card' && ' 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 카드당 최대를 500 으로 두기를 권합니다. 허용 업종을 틀리게 적으면 모든 결제가 거절됩니다.'}
                     </Hint>
                   )}

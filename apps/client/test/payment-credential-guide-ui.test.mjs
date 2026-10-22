@@ -74,6 +74,9 @@ test('choosing a marketing payment provider shows how to get its credential, in 
   const google = document.querySelector('[data-testid="payment-credential-guide-google_ads"]');
   assert.ok(google);
   assert.match(google.textContent, /gcloud auth application-default login/);
+  assert.match(google.textContent, /서비스 계정/);
+  assert.ok(document.querySelector('textarea[placeholder*="PEM private_key"]'));
+  assert.ok(document.querySelector('input[placeholder*="gserviceaccount.com"]'));
   assert.equal(Boolean(document.querySelector('[data-testid="payment-credential-guide-stripe_issuing"]')), false);
 
   choose(select, 'github');

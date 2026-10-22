@@ -432,10 +432,11 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 공급자 | `ref`(대상) | credential(`provider` 칼럼 = 공급자 이름) |
 | --- | --- | --- |
 | Meta Ads | `act_<광고 계정 id>/<캠페인 id>` — 그 캠페인의 `account_id` 와 대조한다 | `access_token`(시스템 사용자 토큰, `ads_management`), `app_secret`(선택 — appsecret_proof) |
-| Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | `client_id` · `client_secret` · `refresh_token`(adwords 범위), `login_customer_id`(선택 — 관리자 계정), `developer_token`(비워 둔다 — 2026-09-09 폐지, 지금은 무시되고 이후 API 버전은 거부한다. 있으면만 보낸다) |
+| Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | OAuth: `client_id` · `client_secret` · `refresh_token` 또는 서비스 계정: `client_email` · `private_key`(PEM, adwords 범위; 두 방식 혼용 거부), `login_customer_id`(선택 — 관리자 계정), `developer_token`(비워 둔다 — 2026-09-09 폐지, 지금은 무시되고 이후 API 버전은 거부한다. 있으면만 보낸다) |
 | Stripe Issuing | 카드 소지자 id `ich_…` | `secret_key` — 운영은 제한된 키 `rk_live_…`(Issuing Cards: Write · Issuing Cardholders/Transactions/Authorizations: Read)만, 샌드박스는 `rk_test_…` · `sk_test_…`. 전체 운영 키 `sk_live_…` 는 거부한다 |
 
 - credential 은 Credentials 화면에서 그 공급자(Meta Ads · Google Ads · Stripe Issuing)를 골라 **이 계정에** 만든다. 다른 종류(custom 등) · 전역 · 에이전트 노출(`agent_env`) credential 은 거부한다. 이 공급자들은 에이전트 노출을 고를 수 없다.
+- Google 서비스 계정 이메일은 Ads 계정의 Standard 이상 사용자로 추가합니다(도메인 위임 불필요). 이메일당 20계정 제한 때문에 관리자 계정 + `login_customer_id`를 권장합니다. 서버는 RS256 JWT(`iss`, adwords `scope`, Google token endpoint `aud`, `iat`, `exp = iat + 3600`; `sub` 없음)를 access token으로 교환합니다. Credentials에는 JSON의 `client_email`과 `private_key`만 넣고 OAuth 칸은 비웁니다.
 - Google Ads API 접근 수준은 OAuth client(`client_id`)의 Google Cloud 프로젝트에 붙는다(developer token 대신). 운영 계정에 쓰려면 그 프로젝트에 Explorer 이상의 접근이 있어야 한다 — Test 수준은 테스트 계정만 부를 수 있다.
 - 수취인을 저장할 때 ref 형식(정규 형태로 저장)과 credential 을 확인한다. 상한 공급자는 같은 대상을 가리키는 수취인 둘을 거부한다(카드는 같은 카드 소지자를 여러 수취인이 써도 된다).
 
@@ -792,7 +793,6 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 ## 후속 (이 문서 범위 밖)
 
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
-- Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
 - 동의 재확인 안내에 온 회신(수신거부 제목 밖)을 사람이 보게 하기 — 지금은 이을 캠페인이 없어 기록하지 않는다

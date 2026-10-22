@@ -63,14 +63,17 @@ export const PAYMENT_CREDENTIAL_GUIDES: Readonly<Record<MarketingDirectPaymentPr
     ],
   },
   google_ads: {
-    title: 'Google Ads — OAuth client 와 refresh token',
+    title: 'Google Ads — 서비스 계정 또는 OAuth refresh token',
     summary:
       'AWB 서버가 캠페인 총예산(CUSTOM_PERIOD)을 읽고, 승인된 만큼 올리는 데 씁니다. API 접근 수준은 OAuth client 가 속한 Google Cloud 프로젝트에 붙습니다 — developer token 은 2026-09-09 에 폐지됐습니다.',
     steps: [
       'Google Cloud 콘솔에서 이 용도 전용 프로젝트를 만듭니다.',
       'APIs & Services → Library → Google Ads API → Enable.',
       'Google Ads API Overview(console.cloud.google.com/google/ads-apis/overview)에서 접근 수준을 봅니다. Test 면 Upgrade access level → Explorer → Apply for access. Test 수준은 테스트 계정만 부를 수 있습니다.',
-      'Google Auth Platform → Branding: 앱 이름 · 지원 이메일을 넣고 Audience 는 External(같은 Workspace 사용자만 승인한다면 Internal) → Create.',
+      '서비스 계정 방식(권장): IAM & Admin → Service Accounts → Create service account → Keys → Add key → JSON. client_email 과 private_key 를 아래 칸에 넣고 OAuth 세 칸은 비웁니다. 두 인증 방식을 섞으면 거부됩니다.',
+      'Google Ads → Access and security 에 서비스 계정 이메일을 Standard 이상 사용자로 추가합니다. 도메인 전체 위임은 필요 없습니다. 이메일당 20계정까지이므로 관리자(MCC) 계정에 추가하고 login_customer_id 를 지정하는 방식을 권장합니다.',
+      '서버는 adwords 범위의 RS256 JWT(만료 1시간, 사용자 가장 없음)를 Google access token 으로 교환합니다. 서비스 계정 방식은 아래 OAuth 앱 게시·refresh token 발급 단계를 건너뜁니다.',
+      'OAuth 방식: Google Auth Platform → Branding: 앱 이름 · 지원 이메일을 넣고 Audience 는 External(같은 Workspace 사용자만 승인한다면 Internal) → Create.',
       'Data Access → Add or Remove Scopes 에 https://www.googleapis.com/auth/adwords 를 넣고 저장합니다.',
       'Audience → Publish app 으로 "In production" 으로 둡니다. Testing 이면 refresh token 이 7일 뒤 만료됩니다.',
       'Clients → Create Client → Application type: Desktop app → Create → JSON 을 바로 내려받습니다. 전체 secret 은 한 번만 보입니다.',
@@ -85,6 +88,8 @@ export const PAYMENT_CREDENTIAL_GUIDES: Readonly<Record<MarketingDirectPaymentPr
       { field: 'client_id', value: 'OAuth client JSON 의 client_id' },
       { field: 'client_secret', value: 'OAuth client JSON 의 client_secret' },
       { field: 'refresh_token', value: 'gcloud · Playground 로 받은 refresh token(1//…)' },
+      { field: 'client_email', value: '서비스 계정 JSON 의 client_email — OAuth 세 칸과 함께 넣지 않습니다' },
+      { field: 'private_key', value: '서비스 계정 JSON 의 private_key(PEM). 실제 줄바꿈 또는 JSON의 이스케이프된 줄바꿈을 받습니다' },
       { field: 'login_customer_id', value: '관리자(MCC) 계정을 거쳐 접근할 때만 그 관리자 계정 id' },
       { field: 'developer_token', value: '비워 둡니다(폐지 — 지금은 무시되고 이후 API 버전은 거부)' },
     ],
@@ -99,6 +104,7 @@ export const PAYMENT_CREDENTIAL_GUIDES: Readonly<Record<MarketingDirectPaymentPr
     links: [
       { label: '접근 수준(Cloud 프로젝트)', url: 'https://developers.google.com/google-ads/api/docs/api-policy/access-levels' },
       { label: 'developer token 폐지', url: 'https://developers.google.com/google-ads/api/docs/api-policy/developer-token' },
+      { label: '서비스 계정 인증', url: 'https://developers.google.com/google-ads/api/docs/oauth/service-accounts' },
       { label: '단일 사용자 OAuth(refresh token)', url: 'https://developers.google.com/google-ads/api/docs/oauth/single-user-authentication' },
       { label: '테스트 계정', url: 'https://developers.google.com/google-ads/api/docs/best-practices/test-accounts' },
     ],

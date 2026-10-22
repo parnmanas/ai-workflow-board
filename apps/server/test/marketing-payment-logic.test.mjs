@@ -27,7 +27,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, generateKeyPairSync, verify } from 'node:crypto';
 import {
   DIRECT_PAYMENT_PROVIDERS, PAYMENT_CURRENCIES, PROVIDER_FORMATS, PaymentRuleError,
   parseMetaRef, parseGoogleRef, canonicalDirectRef, directTargetKey,
@@ -652,4 +652,76 @@ test('Stripe cards are matched against the plan; only Stripe error objects count
   problem({ livemode: true }, /sandbox key but the cardholder is a live cardholder/);
   problem({ livemode: null }, /unknown mode/);
   problem({}, /live key but the cardholder is a sandbox cardholder/, { secret_key: 'rk_live_x', mode: 'live' });
+});
+
+
+test('Google service account signs RS256 JWT, exchanges and caches access tokens without impersonation', async () => {
+  resetGoogleTokenCache();
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const cred = readGoogleCredential({ client_email: 'awb@project.iam.gserviceaccount.com', private_key: pem.replace(/\n/g, '\\n'), login_customer_id: '123-456-7890' });
+  assert.equal(cred.private_key, pem.trim());
+  assert.equal(cred.login_customer_id, '1234567890');
+  let time = 1700000000000;
+  let calls = 0;
+  const fetchImpl = async (url, init) => {
+    calls++;
+    assert.equal(url, 'https://oauth2.googleapis.com/token');
+    assert.equal(init.method, 'POST');
+    assert.equal(init.redirect, 'manual');
+    const form = new URLSearchParams(init.body);
+    assert.deepEqual([...form.keys()].sort(), ['assertion', 'grant_type']);
+    assert.equal(form.get('grant_type'), 'urn:ietf:params:oauth:grant-type:jwt-bearer');
+    const [header, payload, signature] = form.get('assertion').split('.');
+    assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'RS256', typ: 'JWT' });
+    assert.deepEqual(JSON.parse(Buffer.from(payload, 'base64url')), {
+      iss: cred.client_email, scope: 'https://www.googleapis.com/auth/adwords', aud: url,
+      iat: Math.floor(time / 1000), exp: Math.floor(time / 1000) + 3600,
+    });
+    assert.equal(verify('RSA-SHA256', Buffer.from(header + '.' + payload), publicKey, Buffer.from(signature, 'base64url')), true);
+    return new Response(JSON.stringify({ access_token: 'access-' + calls, expires_in: 3600 }));
+  };
+  assert.deepEqual(await Promise.all([1, 2].map(() => googleAccessToken(cred, 'sa', fetchImpl, () => time))), ['access-1', 'access-1']);
+  assert.equal(await googleAccessToken(cred, 'sa', fetchImpl, () => time), 'access-1');
+  assert.equal(calls, 1);
+  time += 3540000;
+  assert.equal(await googleAccessToken(cred, 'sa', fetchImpl, () => time), 'access-2');
+  assert.equal(await googleAccessToken(cred, 'rotated', fetchImpl, () => time), 'access-3');
+  resetGoogleTokenCache();
+});
+
+test('Google service account rejects incomplete, mixed and invalid keys and redacts token errors', async () => {
+  const email = 'awb@project.iam.gserviceaccount.com';
+  assert.throws(() => readGoogleCredential({ client_email: email }), /private_key/);
+  assert.throws(() => readGoogleCredential({ private_key: 'secret' }), /client_email/);
+  assert.throws(() => readGoogleCredential({ client_email: 'user@example.com', private_key: 'secret' }), /service account email/);
+  assert.throws(() => readGoogleCredential({ client_email: email, private_key: 'secret', refresh_token: 'refresh' }), /not both/);
+  let calls = 0;
+  const neverFetch = async () => { calls++; throw new Error('must not fetch'); };
+  const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+  for (const key of ['SECRET-invalid-key', ec]) {
+    const cred = readGoogleCredential({ client_email: email, private_key: key });
+    await assert.rejects(googleAccessToken(cred, 'invalid-' + calls, neverFetch), e => {
+      assert.equal(e.retryable, false);
+      assert.match(e.message, /valid RSA private key/);
+      assert.ok(!e.message.includes(key));
+      return true;
+    });
+  }
+  assert.equal(calls, 0);
+  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const cred = readGoogleCredential({ client_email: email, private_key: pem });
+  let assertion;
+  await assert.rejects(googleAccessToken(cred, 'refused-sa', async (_url, init) => {
+    assertion = new URLSearchParams(init.body).get('assertion');
+    return new Response(JSON.stringify({ error: 'invalid_grant', error_description: assertion + ' ' + cred.private_key }), { status: 400 });
+  }), e => {
+    assert.match(e.message, /service account token exchange/);
+    assert.doesNotMatch(e.message, /refresh token|7-day/);
+    assert.ok(!e.providerMessage.includes(assertion));
+    assert.ok(!e.providerMessage.includes(cred.private_key));
+    assert.equal(e.retryable, false);
+    return true;
+  });
+  resetGoogleTokenCache();
 });

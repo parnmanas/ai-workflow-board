@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   DIRECT_FAIL_GRACE_MS, DIRECT_PAYMENT_PROVIDERS, DIRECT_PAYMENT_PROVIDER_LABELS, DIRECT_REF_FORMATS, DIRECT_PROVIDER_CREDENTIAL_FIELDS, PAYMENT_PROVIDER_LABELS,
-  DIRECT_PROVIDER_SPECS, STRIPE_SINGLE_USE_MAX_MINOR,
+  DIRECT_PROVIDER_SPECS, STRIPE_SINGLE_USE_MAX_MINOR, directCredentialFieldsHint,
   canRecordRefund, cardControlsLabel, cardLimitWarning, directPaymentCredentials, directRefProblem, directRouteOptionLabel, formatDateTime,
   inspectionCardRef, inspectionSummary, isDirectPaymentProvider, openRequestLabel, parseCardCategories,
   payeeRouteLabel, spendApproveHint, spendStatusViewFor, unknownReconcileHint,
@@ -192,4 +192,18 @@ test('reusable Stripe approvals and status describe a limit increase', () => {
   const hint = unknownReconcileHint({ ...row, currency: 'USD' });
   assert.match(hint, /ic_reuse.*누적 한도/);
   assert.doesNotMatch(hint, /해지/);
+});
+
+
+test('Google credentials offer two complete alternative authentication sets', () => {
+  assert.deepEqual(DIRECT_PROVIDER_CREDENTIAL_FIELDS.google_ads.required_one_of, [
+    ['client_id', 'client_secret', 'refresh_token'], ['client_email', 'private_key'],
+  ]);
+  const source = fs.readFileSync(CREDENTIAL_MANAGER, 'utf8');
+  assert.match(source, /private_key: \{ label:.*multiline: true/);
+  assert.equal(directCredentialFieldsHint('google_ads'), 'client_id + client_secret + refresh_token 또는 client_email + private_key(한 방식 필수), login_customer_id(선택), developer_token(선택)');
+  const guide = PAYMENT_CREDENTIAL_GUIDES.google_ads.steps.join(' ');
+  assert.match(guide, /20계정/);
+  assert.match(guide, /도메인 전체 위임은 필요 없습니다/);
+  assert.match(guide, /login_customer_id/);
 });
