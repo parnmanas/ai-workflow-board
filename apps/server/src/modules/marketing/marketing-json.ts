@@ -15,6 +15,10 @@ import type { MarketingContact } from '../../entities/MarketingContact';
 import type { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import type { MarketingCycle } from '../../entities/MarketingCycle';
 import type { MarketingListHold } from '../../entities/MarketingListHold';
+import type { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
+import type { MarketingConsentNoticeSetting } from '../../entities/MarketingConsentNoticeSetting';
+import type { ConsentNoticeSettingsValue } from '../../common/marketing/consent-notice';
+import { consentDeadline } from '../../common/marketing/email';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
@@ -296,7 +300,11 @@ export function feedbackToJson(f: MarketingFeedback, forAgent = false) {
 }
 
 /** 연락처 — 수신거부 토큰은 내보내지 않는다(그 사람의 메일에만 있다). */
-export function contactToJson(c: MarketingContact) {
+/**
+ * 연락처(사람용 REST 에만 — 에이전트는 연락처를 보지 못한다). `consent_due_at` 은 동의가 유효한 마지막 시각이고,
+ * `consent_notice` 는 그 연락처의 가장 최근 주기 재확인 안내다(docs/marketing.md "동의 재확인 안내").
+ */
+export function contactToJson(c: MarketingContact, notice?: MarketingConsentNotice | null) {
   return {
     id: c.id,
     account_id: c.account_id,
@@ -307,14 +315,52 @@ export function contactToJson(c: MarketingContact) {
     consent_method: c.consent_method,
     consent_source: c.consent_source,
     consent_at: c.consent_at,
+    consent_renewed_at: c.consent_renewed_at || null,
+    consent_due_at: consentDeadline(c).toISOString(),
     consent_text_version: c.consent_text_version,
     night_consent: c.night_consent,
     country: c.country,
     timezone: c.timezone,
     unsubscribed_at: c.unsubscribed_at,
     unsubscribe_source: c.unsubscribe_source,
+    consent_notice: notice
+      ? { id: notice.id, status: notice.status, due_at: notice.due_at, policy: notice.policy, sent_at: notice.sent_at, kept_at: notice.kept_at }
+      : null,
     created_at: c.created_at,
     updated_at: c.updated_at,
+  };
+}
+
+/** 동의 재확인 안내 한 통(사람용). 유지 링크 토큰은 내리지 않는다. */
+export function consentNoticeToJson(n: MarketingConsentNotice, contact?: Pick<MarketingContact, 'email' | 'name' | 'status'> | null) {
+  return {
+    id: n.id,
+    contact_id: n.contact_id,
+    contact_email: contact ? contact.email : null,
+    contact_name: contact?.name || '',
+    contact_status: contact?.status || '',
+    due_at: n.due_at,
+    status: n.status,
+    policy: n.policy,
+    settings_version: n.settings_version,
+    attempts: n.attempts,
+    next_attempt_at: n.next_attempt_at,
+    channel_id: n.channel_id,
+    provider_message_id: n.provider_message_id,
+    sent_at: n.sent_at,
+    kept_at: n.kept_at,
+    error: n.error,
+    created_at: n.created_at,
+  };
+}
+
+export function consentNoticeSettingsToJson(row: MarketingConsentNoticeSetting | null, value: ConsentNoticeSettingsValue) {
+  return {
+    ...value,
+    /** 저장한 적이 없으면 0 — 화면이 보여 주는 값은 기본 문구다. */
+    version: row?.version || 0,
+    updated_by_name: row?.updated_by_name || '',
+    updated_at: row?.updated_at || null,
   };
 }
 

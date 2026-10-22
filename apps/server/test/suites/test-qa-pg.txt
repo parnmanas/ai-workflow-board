@@ -10,6 +10,7 @@ test/marketing-analytics.test.mjs
 test/marketing-approval-notify.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
+test/marketing-consent-notice.test.mjs
 test/marketing-cycle.test.mjs
 test/marketing-email-events.test.mjs
 test/marketing-email.test.mjs

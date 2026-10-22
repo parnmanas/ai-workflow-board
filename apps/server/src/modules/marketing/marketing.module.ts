@@ -17,6 +17,8 @@ import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { MarketingCycle } from '../../entities/MarketingCycle';
 import { MarketingApprovalNotice } from '../../entities/MarketingApprovalNotice';
 import { MarketingListHold } from '../../entities/MarketingListHold';
+import { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
+import { MarketingConsentNoticeSetting } from '../../entities/MarketingConsentNoticeSetting';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { OutreachChannel } from '../../entities/OutreachChannel';
@@ -56,6 +58,8 @@ import { MarketingApprovalNotifyService } from './marketing-approval-notify.serv
 import { MarketingListHoldService } from './marketing-list-hold.service';
 import { MarketingEmailEventsService } from './marketing-email-events.service';
 import { MarketingEmailWebhooksController } from './marketing-email-webhooks.controller';
+import { MarketingConsentNoticeService } from './marketing-consent-notice.service';
+import { MarketingConsentNoticesController } from './marketing-consent-notices.controller';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -69,6 +73,7 @@ import { MarketingEmailWebhooksController } from './marketing-email-webhooks.con
       MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
       MarketingContact, MarketingEmailSend, MarketingCycle, ChatRoom, ChatRoomParticipant,
       Project, RuntimeHost, OutreachChannel, Credential, MarketingApprovalNotice, MarketingListHold,
+      MarketingConsentNotice, MarketingConsentNoticeSetting,
     ]),
     SharedServicesModule,
     // 채널 승인이 새 OutreachChannel 을 OutreachChannelService 로 만든다(그쪽 검증을 그대로 탄다).
@@ -81,7 +86,7 @@ import { MarketingEmailWebhooksController } from './marketing-email-webhooks.con
   controllers: [
     MarketingCampaignsController, MarketingChannelsController, MarketingBudgetController, MarketingPostsController,
     MarketingAnalyticsController, MarketingPublicController, MarketingFeedbackController, MarketingContactsController,
-    MarketingInboxController, MarketingEmailWebhooksController,
+    MarketingInboxController, MarketingEmailWebhooksController, MarketingConsentNoticesController,
   ],
   providers: [
     MarketingAuditService,
@@ -101,6 +106,7 @@ import { MarketingEmailWebhooksController } from './marketing-email-webhooks.con
     MarketingApprovalNotifyService,
     MarketingListHoldService,
     MarketingEmailEventsService,
+    MarketingConsentNoticeService,
     AuthGuard,
     PermissionGuard,
   ],
@@ -108,7 +114,7 @@ import { MarketingEmailWebhooksController } from './marketing-email-webhooks.con
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
     MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingFeedbackService,
     MarketingContactService, MarketingEmailService, MarketingAgentService, MarketingCycleService,
-    MarketingListHoldService, MarketingEmailEventsService,
+    MarketingListHoldService, MarketingEmailEventsService, MarketingConsentNoticeService,
   ],
 })
 export class MarketingModule {}

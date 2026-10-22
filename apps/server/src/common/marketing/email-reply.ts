@@ -120,20 +120,26 @@ function isCutLine(lines: string[], i: number): boolean {
 const URL_STOP = new Set([' ', '\t', '\n', '<', '>', '"', "'"]);
 const ADDRESS_STOP = new Set([' ', '\t', '\n', '<', '>', '"', "'", '(', ')', ',', ';', ':', '[', ']', '@']);
 const UNSUBSCRIBE_PATH = '/api/m/u/';
+/** 동의 재확인 안내의 "동의 유지" 링크(docs/marketing.md "동의 재확인 안내"). */
+const CONSENT_KEEP_PATH = '/api/m/c/';
 
-/** 우리 수신거부 링크(그 사람의 토큰이 들어 있다)를 통째로 지운다. */
-function redactUnsubscribeLinks(text: string): string {
+/** 우리 링크 가운데 받는 사람의 토큰이 든 것(수신거부 · 동의 유지)을 통째로 지운다 — 토큰을 쥐면 그 사람 대신 누를 수 있다. */
+function redactTokenLinks(text: string, path: string, label: string): string {
   let out = '';
   let last = 0;
-  for (let i = text.indexOf(UNSUBSCRIBE_PATH); i !== -1; i = text.indexOf(UNSUBSCRIBE_PATH, last)) {
+  for (let i = text.indexOf(path); i !== -1; i = text.indexOf(path, last)) {
     let start = i;
     while (start > last && !URL_STOP.has(text[start - 1])) start--;
-    let end = i + UNSUBSCRIBE_PATH.length;
+    let end = i + path.length;
     while (end < text.length && /[A-Za-z0-9_-]/.test(text[end])) end++;
-    out += `${text.slice(last, start)}[수신거부 링크]`;
+    out += `${text.slice(last, start)}${label}`;
     last = end;
   }
   return out + text.slice(last);
+}
+
+function redactUnsubscribeLinks(text: string): string {
+  return redactTokenLinks(redactTokenLinks(text, UNSUBSCRIBE_PATH, '[수신거부 링크]'), CONSENT_KEEP_PATH, '[동의 유지 링크]');
 }
 
 /** 메일 주소를 지운다 — '@' 를 중심으로 양쪽으로 펼쳐 찾는다. */
@@ -156,8 +162,8 @@ function redactEmails(text: string): string {
 }
 
 /**
- * 답장 본문에서 그 사람이 새로 쓴 부분만 — 인용 머리 · 서명부터 아래와 `>` 인용 줄을 버리고, 메일 주소와 우리 수신거부 링크를
- * 지우고, 자른다. 남는 글이 없으면 ''.
+ * 답장 본문에서 그 사람이 새로 쓴 부분만 — 인용 머리 · 서명부터 아래와 `>` 인용 줄을 버리고, 메일 주소와 우리 수신거부 ·
+ * 동의 유지 링크를 지우고, 자른다. 남는 글이 없으면 ''.
  */
 export function cleanReplyText(input: { text?: string; html?: string }): string {
   const source = input.text && input.text.trim() ? input.text : htmlToText(input.html || '');

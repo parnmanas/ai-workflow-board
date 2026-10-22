@@ -30,7 +30,7 @@ const STUCK_SENDING_MS = 10 * 60_000;
 /** 캠페인 · 채널이 일시정지된 동안(또는 목록이 멈춘 동안) 보류한 메일을 다시 볼 간격. */
 const PAUSE_RECHECK_MS = 60 * 60_000;
 
-interface ChannelSender {
+export interface ChannelSender {
   sender: EmailSender;
   provider: string;
   apiKey: string;
@@ -339,7 +339,8 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     return 'failed';
   }
 
-  private async senderFor(channel: MarketingChannel): Promise<ChannelSender | null> {
+  /** 메일 채널의 발신자 · 공급자 키(서버만 복호화한다). 키나 공급자가 없으면 null — 동의 재확인 안내도 이것을 쓴다. */
+  async senderFor(channel: MarketingChannel): Promise<ChannelSender | null> {
     const config = channel.config || {};
     const credentialId = String(config.credential_id || '');
     const secret = await resolveMarketingSecret(this.credentialRepo, credentialId, channel.account_id);

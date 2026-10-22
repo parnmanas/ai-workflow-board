@@ -8,6 +8,7 @@ import { MarketingContactService } from './marketing-contact.service';
 import { MarketingEmailService } from './marketing-email.service';
 import { MarketingPostService } from './marketing-post.service';
 import { MarketingListHoldService } from './marketing-list-hold.service';
+import { MarketingConsentNoticeService } from './marketing-consent-notice.service';
 import { contactToJson, emailSendToJson, listHoldToJson } from './marketing-json';
 import { errorStatus } from './marketing-errors';
 import { boundAccountId, userActor } from './marketing-http';
@@ -26,6 +27,7 @@ export class MarketingContactsController {
     private readonly email: MarketingEmailService,
     private readonly posts: MarketingPostService,
     private readonly listHolds: MarketingListHoldService,
+    private readonly consentNotices: MarketingConsentNoticeService,
   ) {}
 
   @Get('contacts')
@@ -39,11 +41,13 @@ export class MarketingContactsController {
     @Res() res: Response,
   ) {
     try {
-      const out = await this.contacts.list(boundAccountId(req), {
+      const accountId = boundAccountId(req);
+      const out = await this.contacts.list(accountId, {
         list: list || undefined, status: status || undefined, q: q || undefined,
         limit: limit ? Number(limit) : undefined, offset: offset ? Number(offset) : undefined,
       });
-      return res.json({ total: out.total, contacts: out.contacts.map(contactToJson) });
+      const notices = await this.consentNotices.latestFor(accountId, out.contacts.map((c) => c.id));
+      return res.json({ total: out.total, contacts: out.contacts.map((c) => contactToJson(c, notices.get(c.id))) });
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list contacts' });
     }

@@ -205,6 +205,8 @@ test('reply cleaning: only what the person wrote — no quoted mail, signatures,
   assert.equal(cleanReplyText({ text: inlineQuote }), 'My answer\nmore of mine');
   const unquotedFooter = `Thanks\nhttps://awb.example.com/api/m/u/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg`;
   assert.equal(cleanReplyText({ text: unquotedFooter }), 'Thanks\n[수신거부 링크]', 'the token in the unsubscribe link never reaches the agent');
+  const keepLink = 'I pressed https://awb.example.com/api/m/c/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg twice';
+  assert.equal(cleanReplyText({ text: keepLink }), 'I pressed [동의 유지 링크] twice', 'nor does the token of a consent notice keep link');
   const html = '<div dir="ltr">Works <b>great</b> &amp; fast&nbsp;&#x1F600;<br>Second line</div><div class="gmail_quote">On … wrote:<blockquote>old mail</blockquote></div>';
   assert.equal(htmlToText(html).trim(), 'Works great & fast 😀\nSecond line');
   assert.equal(cleanReplyText({ text: '', html }), 'Works great & fast 😀\nSecond line', 'html only when there is no text part');
