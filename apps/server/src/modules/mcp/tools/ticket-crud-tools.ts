@@ -110,7 +110,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
   server.tool(
     'create_ticket',
     'Create a ticket. A ticket is done end-to-end by ONE agent (`assignee`); classify it with free-form `tags` and, when it is about a repository, a `project_id`. ' +
-    'Omitting `assignee` applies the project\'s default assignee (if any); pass `assignee: null` for an unassigned ticket. ' +
+    'Omitting `assignee` inherits the current ticket\'s assignee when called from a ticket session, then falls back to the project\'s default assignee (if any); pass `assignee: null` for an unassigned ticket. ' +
     'Status defaults to `todo`, which queues it for the assignee immediately — use `backlog` for work that is not ready. ' +
     'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket. ' +
     'Do NOT create a ticket when the user asked to do the work directly in chat/session without a ticket — do the work directly instead.',
@@ -138,10 +138,21 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (!account) return err('account_id is required');
       const description = sanitizeHarnessMarkers(args.description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: caller?.agentId });
       try {
+        let assignee = args.assignee;
+        if (assignee === undefined && caller?.subagentTicketId) {
+          // The connection pins the exact ticket, even when one runtime works
+          // on several tickets. Resolve its stored owner before inheriting.
+          const source = await dataSource.getRepository(Ticket).findOne({
+            where: { id: caller.subagentTicketId, account_id: account },
+            select: ['id', 'assignee'],
+          });
+          if (!source) return err('Current ticket not found in the caller account');
+          assignee = source.assignee ?? undefined;
+        }
         const { ticket, duplicate_candidates } = await ticketService.create(account, {
           ...args,
           description,
-          ...(args.assignee === undefined ? {} : { assignee: args.assignee }),
+          ...(assignee === undefined ? {} : { assignee }),
         }, await namedCallerActor(dataSource, caller));
         // Inline checklist items.
         const repo = dataSource.getRepository(Ticket);

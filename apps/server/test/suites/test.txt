@@ -257,6 +257,7 @@ test/terminals.test.mjs
 test/test-harness-gate.test.mjs
 test/test-registration-completeness.test.mjs
 test/test-registration-merge.test.mjs
+test/ticket-create-assignee-inheritance.test.mjs
 test/ticket-dispatch.test.mjs
 test/ticket-status-work-order.test.mjs
 test/ticket-unread-badge.test.mjs

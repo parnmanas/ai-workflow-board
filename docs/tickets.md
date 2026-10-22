@@ -82,7 +82,7 @@ id**, so stored references keep resolving).
 | `clone_policy` | JSON (`common/clone-policy.ts`), project ⊕ account default. |
 | `use_pr` | Land through a pull request instead of a direct fast-forward merge. |
 | `instructions` | Free text shown to every agent that works on the project (build/test commands, conventions). |
-| `default_assignee` | `RuntimeSpec \| null`. Applied to new tickets of this project that do not name an assignee (UI, MCP, QA/Security failure tickets, CI-red tickets, outreach). |
+| `default_assignee` | `RuntimeSpec \| null`. Applied to new tickets of this project that neither name an assignee nor inherit one from the current MCP ticket session (UI, MCP, QA/Security failure tickets, CI-red tickets, outreach). |
 | `host_folders` | `[{ host_id, path }]` — the **main clone folder** of this project on each Runtime Host. |
 
 ### Main clone folder per host
@@ -201,6 +201,15 @@ handoff / benchmark / feature / merge-lease / review-drift tool,
 | `list_repo_branches` | `{ project_id }` |
 | `subscribe_events` | `{ account_id?, tags?, since?, assigned_to_me? }` (no `board_id`) |
 | `list_archived_tickets` | `{ account_id?, cursor?, limit?, q? }` (no `board_id`) |
+
+When a ticket session calls `create_ticket` without `assignee`, the new root
+ticket inherits the full assignee RuntimeSpec of the ticket pinned to that MCP
+connection (`X-AWB-Subagent-Ticket-Id`). This takes precedence over the project's
+default and keeps the same host, CLI, model, working directory and credentials.
+The source must still exist in the caller's account, and the inherited spec
+passes the usual write validation. Explicit `assignee` (including `null`) wins;
+without a ticket context or a source assignee, the project default applies.
+Checklist children remain unassigned and are not dispatched independently.
 
 ## SSE `agent_trigger` (server ↔ agent-manager contract)
 
