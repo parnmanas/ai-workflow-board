@@ -496,6 +496,54 @@ export async function getAuthenticatedLogin(token: string, opts: { fetchImpl?: t
   return data.login || '';
 }
 
+/** Reactions and comment count of one issue or issue comment (marketing engagement collection). */
+export interface GitHubEngagement {
+  /** `reactions.total_count` — every reaction type. null when the response carries no reaction rollup. */
+  reactions: number | null;
+  /** The issue's comment count; null for a comment, which has none of its own. */
+  comments: number | null;
+}
+
+function reactionTotal(reactions: any): number | null {
+  const n = Number(reactions?.total_count);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+}
+
+/** True unless `apiUrl` names a different repo — fetch follows the redirect of a transferred issue. */
+function inRepo(apiUrl: unknown, owner: string, repo: string): boolean {
+  if (typeof apiUrl !== 'string' || !apiUrl) return true;
+  const url = apiUrl.toLowerCase();
+  const path = `/repos/${owner}/${repo}`.toLowerCase();
+  return url.endsWith(path) || url.includes(`${path}/`);
+}
+
+/** An issue's reactions and comment count, or null when GitHub no longer has it there (404/410, transferred). */
+export async function getIssueEngagement(
+  owner: string, repo: string, issueNumber: number, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<GitHubEngagement | null> {
+  assertRepoRef(owner, repo);
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}`, token, { fetchImpl: opts.fetchImpl });
+  if (res.status === 404 || res.status === 410) return null;
+  await assertGitHubOk(res, `GET issue ${owner}/${repo}#${issueNumber}`);
+  const data = await res.json();
+  if (!inRepo(data.repository_url, owner, repo)) return null;
+  const comments = Number(data.comments);
+  return { reactions: reactionTotal(data.reactions), comments: Number.isFinite(comments) && comments >= 0 ? Math.trunc(comments) : null };
+}
+
+/** An issue comment's reactions, or null when GitHub no longer has it there. */
+export async function getIssueCommentEngagement(
+  owner: string, repo: string, commentId: number, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<GitHubEngagement | null> {
+  assertRepoRef(owner, repo);
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues/comments/${commentId}`, token, { fetchImpl: opts.fetchImpl });
+  if (res.status === 404 || res.status === 410) return null;
+  await assertGitHubOk(res, `GET issue comment ${owner}/${repo} ${commentId}`);
+  const data = await res.json();
+  if (!inRepo(data.issue_url, owner, repo)) return null;
+  return { reactions: reactionTotal(data.reactions), comments: null };
+}
+
 /**
  * GitHub REST v3 client with DB-backed credential resolution.
  *

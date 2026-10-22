@@ -20,6 +20,9 @@
  *     `OutreachChannel.reply_thread_ref` is operator free text nothing else
  *     checks. The lookup costs a request against the rate cap, so where a
  *     thread lives is cached process-wide (RedditThreadLocationCache).
+ *   - `readEngagement` (marketing's engagement collection) reads score and
+ *     comment counts through `/api/info`, 100 fullnames per request, and
+ *     drops anything outside `targets` from its answer.
  *   - Every request carries the caller-supplied `userAgent` (Reddit API rules
  *     require a descriptive, unique User-Agent identifying the client).
  *
@@ -48,7 +51,7 @@
  *      record it on channel state distinctly from a transient rate-limit
  *      failure.
  */
-import { InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
+import { EngagementReading, InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
 import { OutreachRateLimiter, sharedOutreachRateLimiter } from '../outreach-rate-limiter';
 
 export class RedditConnectorConfigError extends Error {
@@ -88,6 +91,9 @@ const BASE_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 
 const THREAD_LOCATION_CACHE_MAX_ENTRIES = 1_000;
+
+// /api/info takes at most this many fullnames per request.
+const INFO_MAX_IDS = 100;
 
 /**
  * Which subreddit each Reddit fullname lives in — what `reply` must know
@@ -170,6 +176,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 export class RedditConnector implements OutreachConnector {
+  readonly engagementRefsPerRequest = INFO_MAX_IDS;
   private readonly targets: Set<string>;
   private readonly userAgent: string;
   private readonly fetchImpl: typeof fetch;
@@ -350,6 +357,44 @@ export class RedditConnector implements OutreachConnector {
     };
   }
 
+  /**
+   * Score and comment count of things this channel published, up to 100
+   * fullnames per `/api/info` request. Read-only, but real API calls — each
+   * request goes through `_request` and its rate cap. A thing in a subreddit
+   * outside `targets`, or one Reddit no longer returns, is left out. A score
+   * Reddit is still hiding (`hide_score` / `score_hidden`) comes back as null
+   * rather than the placeholder Reddit reports, and a comment has no comment
+   * count of its own (null). Locations learned here are remembered like
+   * `describeThread`'s.
+   */
+  async readEngagement(refs: string[]): Promise<EngagementReading[]> {
+    const wanted = [...new Set(refs)];
+    for (const ref of wanted) this._assertFullname(ref);
+    if (this.targets.size === 0 || wanted.length === 0) return [];
+    const readings: EngagementReading[] = [];
+    for (let i = 0; i < wanted.length; i += INFO_MAX_IDS) {
+      const chunk = new Set(wanted.slice(i, i + INFO_MAX_IDS));
+      // Every id was checked by _assertFullname above, so joining them is the
+      // only way a list reaches /api/info.
+      const result = await this._request<any>('GET', `/api/info?id=${[...chunk].join(',')}`);
+      for (const child of result?.data?.children || []) {
+        const data = child?.data;
+        const name = String(data?.name || '');
+        if (!chunk.has(name) || !this._isWhitelisted(String(data.subreddit || ''))) continue;
+        this.threadLocations.remember(name, String(data.subreddit));
+        const score = Number(data.score);
+        const comments = Number(data.num_comments);
+        const hidden = data.hide_score === true || data.score_hidden === true;
+        readings.push({
+          ref: name,
+          reactions: !hidden && Number.isFinite(score) ? Math.trunc(score) : null,
+          comments: child.kind === 't3' && Number.isFinite(comments) ? Math.max(0, Math.trunc(comments)) : null,
+        });
+      }
+    }
+    return readings;
+  }
+
   // ── Internals ────────────────────────────────────────────────────────────
 
   private _isWhitelisted(subreddit: string): boolean {
@@ -363,7 +408,8 @@ export class RedditConnector implements OutreachConnector {
   }
 
   // Strict on purpose: `/api/info?id=` also accepts a comma-separated list, so
-  // anything beyond one fullname must never reach it (or `/api/comment`).
+  // anything beyond one fullname must never reach it (or `/api/comment`) —
+  // `readEngagement` builds its list itself, from ids checked one by one.
   private _assertFullname(threadRef: string): void {
     if (!threadRef || !/^t[13]_[a-z0-9]+$/i.test(threadRef)) {
       throw new RedditApiError(`threadRef must be a Reddit fullname (t1_.../t3_...), got: ${threadRef}`);

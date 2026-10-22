@@ -359,3 +359,51 @@ test('rate_limit_per_hour cap throws OutreachChannelRateLimitedError before the 
   // 3rd call overall exceeds the cap of 2.
   await assert.rejects(conn.fetchInbound(''), OutreachChannelRateLimitedError);
 });
+
+// ── readEngagement (marketing 참여 지표 자동 수집, docs/marketing.md "참여 지표 자동 수집") ──────────────
+
+test('readEngagement: issue reactions + comment count, comment reactions, gone/transferred/off-whitelist left out', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.endsWith('/repos/x/y/issues/7')) {
+      return fakeResponse({ json: { number: 7, comments: 4, repository_url: 'https://api.github.com/repos/X/Y', reactions: { total_count: 12, '+1': 8, heart: 3, rocket: 1 } } });
+    }
+    if (u.endsWith('/repos/x/y/issues/comments/555')) {
+      return fakeResponse({ json: { id: 555, issue_url: 'https://api.github.com/repos/x/y/issues/7', reactions: { total_count: 2, '+1': 2 } } });
+    }
+    if (u.endsWith('/repos/x/y/issues/8')) return fakeResponse({ status: 404, text: 'Not Found' });
+    if (u.endsWith('/repos/x/y/issues/9')) return fakeResponse({ status: 410, text: 'Gone' });
+    if (u.endsWith('/repos/x/y/issues/10')) {
+      // A transferred issue: fetch followed the redirect into another repo.
+      return fakeResponse({ json: { number: 3, comments: 1, repository_url: 'https://api.github.com/repos/x/other', reactions: { total_count: 5 } } });
+    }
+    if (u.endsWith('/repos/x/y/issues/11')) return fakeResponse({ json: { number: 11, comments: 0 } });
+    throw new Error(`unexpected url ${u}`);
+  };
+  const conn = new GitHubConnector(makeCred(), { targets: ['X/Y'], fetchImpl, sleepImpl: noopSleep });
+  assert.equal(conn.engagementRefsPerRequest, 1);
+  const readings = await conn.readEngagement([
+    'issue:x/y#7', 'comment:x/y#7:555', 'issue:x/y#8', 'issue:x/y#9', 'issue:x/y#10', 'issue:x/y#11', 'issue:other/repo#1', 'issue:x/y#7',
+  ]);
+  assert.deepEqual(readings, [
+    { ref: 'issue:x/y#7', reactions: 12, comments: 4 },
+    { ref: 'comment:x/y#7:555', reactions: 2, comments: null },
+    { ref: 'issue:x/y#11', reactions: null, comments: 0 },
+  ]);
+  assert.equal(calls.filter((c) => c.includes('/repos/other/')).length, 0, 'a repo outside the whitelist is never requested');
+  assert.equal(calls.length, 6, 'one request per distinct whitelisted ref');
+});
+
+test('readEngagement: a malformed ref throws; each request counts against rate_limit_per_hour', async () => {
+  const limiter = new OutreachRateLimiter();
+  const fetchImpl = async () => fakeResponse({ json: { comments: 1, reactions: { total_count: 1 } } });
+  const conn = new GitHubConnector(makeCred(), {
+    targets: ['x/y'], fetchImpl, sleepImpl: noopSleep, channelId: 'ch-gh-eng', rateLimitPerHour: 2, rateLimiter: limiter,
+  });
+  await assert.rejects(conn.readEngagement(['x/y#1']), GitHubApiError);
+  await conn.readEngagement(['issue:x/y#1', 'issue:x/y#2']);
+  assert.equal(limiter.remaining('ch-gh-eng', 2), 0);
+  await assert.rejects(conn.readEngagement(['issue:x/y#3']), OutreachChannelRateLimitedError);
+});

@@ -65,3 +65,17 @@ test('OutreachChannelRateLimitedError carries a positive retryAfterMs pointing a
     assert.equal(e.retryAfterMs, HOUR - 100, 'retryAfterMs = time until the oldest call ages out of the window');
   }
 });
+
+test('remaining() reports what is left in the rolling hour without recording a call (Infinity when unlimited)', () => {
+  const rl = new OutreachRateLimiter();
+  const now = 7_000_000;
+  assert.equal(rl.remaining('ch-1', 0, now), Infinity);
+  assert.equal(rl.remaining('ch-1', 3, now), 3);
+  assert.equal(rl.remaining('ch-1', 3, now), 3, 'asking does not spend');
+  rl.checkAndRecord('ch-1', 3, now);
+  rl.checkAndRecord('ch-1', 3, now + 1);
+  assert.equal(rl.remaining('ch-1', 3, now + 2), 1);
+  assert.equal(rl.remaining('ch-2', 3, now + 2), 3, 'per channel');
+  assert.equal(rl.remaining('ch-1', 1, now + 2), 0, 'never negative when the cap was lowered');
+  assert.equal(rl.remaining('ch-1', 3, now + HOUR + 2), 3, 'calls age out of the window');
+});

@@ -1,4 +1,4 @@
-import { InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
+import { EngagementReading, InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
 
 /**
  * In-memory OutreachConnector for tests and for this ticket's scope cut (real
@@ -12,6 +12,11 @@ export class FakeOutreachConnector implements OutreachConnector {
   readonly replies: Array<{ threadRef: string; body: string }> = [];
   /** describeThread 의 답 — 테스트가 채운다. 없는 ref 는 "찾을 수 없음". */
   readonly threads = new Map<string, ThreadInfo>();
+  /** readEngagement 의 답 — 테스트가 채운다. 없는 ref 는 결과에서 빠진다(지워진 글 · 채널 밖). */
+  readonly engagement = new Map<string, Omit<EngagementReading, 'ref'>>();
+  /** readEngagement 를 부를 때마다 받은 refs. */
+  readonly engagementCalls: string[][] = [];
+  engagementRefsPerRequest = 100;
   private items: InboundItem[];
 
   constructor(items: InboundItem[] = []) {
@@ -41,6 +46,11 @@ export class FakeOutreachConnector implements OutreachConnector {
     const info = this.threads.get(threadRef);
     if (!info) throw new Error(`thread ${threadRef} was not found`);
     return info;
+  }
+
+  async readEngagement(refs: string[]): Promise<EngagementReading[]> {
+    this.engagementCalls.push([...refs]);
+    return refs.filter((ref) => this.engagement.has(ref)).map((ref) => ({ ref, ...this.engagement.get(ref)! }));
   }
 
   async reply(threadRef: string, body: string): Promise<OutboundResult> {

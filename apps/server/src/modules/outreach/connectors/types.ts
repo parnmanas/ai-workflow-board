@@ -31,6 +31,30 @@ export interface OutreachConnector {
    * (docs/marketing.md "커뮤니케이션"). `title` is outsider text — display only.
    */
   describeThread?(threadRef: string): Promise<ThreadInfo>;
+  /**
+   * Optional: how things this channel published are doing — `refs` are the
+   * `OutboundResult.external_item_id`s `publish`/`reply` returned. Read-only.
+   * A ref outside the channel's `targets`, or one the platform no longer
+   * returns, is left out of the result instead of failing the call. Marketing
+   * collects engagement with it (docs/marketing.md "참여 지표 자동 수집").
+   */
+  readEngagement?(refs: string[]): Promise<EngagementReading[]>;
+  /**
+   * How many refs one `readEngagement` request covers — reddit's /api/info
+   * takes 100 fullnames at once, GitHub has no batch read (1). Each request
+   * counts against the channel's rate cap, so callers size their batches
+   * with it.
+   */
+  readonly engagementRefsPerRequest?: number;
+}
+
+export interface EngagementReading {
+  ref: string;
+  /** The platform's reaction count: reddit's score (net votes), GitHub's
+   *  total reactions. null = the platform is hiding it for now. */
+  reactions: number | null;
+  /** Comment count, or null for a thing that has none of its own (a comment). */
+  comments: number | null;
 }
 
 export interface ThreadInfo {

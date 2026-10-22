@@ -43,6 +43,17 @@ export class OutreachRateLimiter {
     recent.push(now);
     this.callTimestamps.set(channelId, recent);
   }
+
+  /** How many more calls `channelId` may make in the current rolling hour —
+   *  Infinity when `ratePerHour` is unlimited (<= 0). Records nothing. A
+   *  low-priority caller (marketing engagement collection) sizes its work
+   *  with it, so it leaves the cap to publishing and polling. */
+  remaining(channelId: string, ratePerHour: number, now: number = Date.now()): number {
+    if (!ratePerHour || ratePerHour <= 0) return Infinity;
+    const windowStart = now - WINDOW_MS;
+    const recent = (this.callTimestamps.get(channelId) || []).filter((t) => t > windowStart);
+    return Math.max(0, ratePerHour - recent.length);
+  }
 }
 
 // Process-wide singleton every production RedditConnector instance shares

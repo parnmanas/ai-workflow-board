@@ -54,7 +54,8 @@
  * Whitelist-only, same fail-closed contract as RedditConnector: `targets`
  * (OutreachChannel.targets, "owner/repo" strings) is the only universe this
  * connector ever touches — no auto-discovery; publish/reply/close reject a
- * target outside it.
+ * target outside it, and readEngagement (marketing's engagement collection)
+ * skips a ref outside it without a request.
  *
  * Rate limiting: OutreachChannel.rate_limit_per_hour (operator cap) is
  * enforced via the shared OutreachRateLimiter — the same channelId-keyed
@@ -73,10 +74,12 @@ import {
   createIssue,
   createIssueComment,
   getAuthenticatedLogin,
+  getIssueCommentEngagement,
+  getIssueEngagement,
   listIssueCommentsSince,
   listOpenIssuesSince,
 } from '../../../services/github-connector.service';
-import { InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
+import { EngagementReading, InboundItem, OutboundPost, OutboundResult, OutreachConnector, ThreadInfo } from './types';
 import { OutreachRateLimiter, sharedOutreachRateLimiter } from '../outreach-rate-limiter';
 
 export class GitHubConnectorConfigError extends Error {
@@ -119,6 +122,8 @@ function parseTarget(target: string): { owner: string; repo: string } | null {
 }
 
 export class GitHubConnector implements OutreachConnector {
+  // No batch read on the REST API — one issue or comment per request.
+  readonly engagementRefsPerRequest = 1;
   private readonly token: string;
   private readonly targets: Set<string>; // normalized lowercase "owner/repo"
   private readonly fetchImpl: typeof fetch;
@@ -247,6 +252,28 @@ export class GitHubConnector implements OutreachConnector {
     return { target: `${owner}/${repo}`, permalink: `https://github.com/${owner}/${repo}/issues/${number}`, title: '' };
   }
 
+  /**
+   * Reactions (and, for an issue, the comment count) of things this channel
+   * published — `issue:{owner}/{repo}#{number}` from `publish`,
+   * `comment:{owner}/{repo}#{number}:{id}` from `reply`. One request per ref,
+   * each through the same cap/retry path as every other call. A ref in a repo
+   * outside `targets` is skipped without a request; one GitHub no longer has
+   * there (deleted, transferred) is left out.
+   */
+  async readEngagement(refs: string[]): Promise<EngagementReading[]> {
+    const readings: EngagementReading[] = [];
+    for (const ref of [...new Set(refs)]) {
+      const { owner, repo, number, commentId } = this._parsePublishedRef(ref);
+      if (!this.targets.has(`${owner}/${repo}`.toLowerCase())) continue;
+      const opts = { fetchImpl: this.fetchImpl };
+      const reading = await this._withRetry(() => (commentId !== null
+        ? getIssueCommentEngagement(owner, repo, commentId, this.token, opts)
+        : getIssueEngagement(owner, repo, number, this.token, opts)));
+      if (reading) readings.push({ ref, ...reading });
+    }
+    return readings;
+  }
+
   // ── Internals ────────────────────────────────────────────────────────────
 
   private _assertTargetAllowed(target: string): { owner: string; repo: string } {
@@ -263,6 +290,16 @@ export class GitHubConnector implements OutreachConnector {
     const match = (ref || '').match(/^issue:([^/]+)\/([^#]+)#(\d+)$/);
     if (!match) throw new GitHubApiError(`threadRef must be "issue:{owner}/{repo}#{number}", got: ${ref}`);
     return { owner: match[1], repo: match[2], number: Number(match[3]) };
+  }
+
+  /** What `publish` (`issue:…`) or `reply` (`comment:{owner}/{repo}#{number}:{id}`) returned. */
+  private _parsePublishedRef(ref: string): { owner: string; repo: string; number: number; commentId: number | null } {
+    const comment = (ref || '').match(/^comment:([^/]+)\/([^#]+)#(\d+):(\d+)$/);
+    if (comment) return { owner: comment[1], repo: comment[2], number: Number(comment[3]), commentId: Number(comment[4]) };
+    if (!/^issue:/.test(ref || '')) {
+      throw new GitHubApiError(`ref must be "issue:{owner}/{repo}#{number}" or "comment:{owner}/{repo}#{number}:{id}", got: ${ref}`);
+    }
+    return { ...this._parseIssueRef(ref), commentId: null };
   }
 
   private async _ensureBotLogin(): Promise<string> {

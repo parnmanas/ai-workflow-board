@@ -578,3 +578,66 @@ test('RedditRateLimitError thrown after exhausting retries carries a positive re
     assert.equal(e.retryAfterMs, 3000);
   }
 });
+
+// ── readEngagement (marketing 참여 지표 자동 수집, docs/marketing.md "참여 지표 자동 수집") ──────────────
+
+test('readEngagement: one /api/info request per 100 fullnames, score + comment count, whitelist only', async () => {
+  const infoCalls = [];
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    const u = new URL(String(url));
+    if (u.pathname === '/api/info') {
+      const ids = u.searchParams.get('id').split(',');
+      infoCalls.push(ids);
+      return fakeResponse({ json: { data: { children: ids.flatMap((id) => {
+        if (id === 't3_gone') return [];
+        if (id === 't3_else') return [{ kind: 't3', data: { name: id, subreddit: 'programming', score: 99, num_comments: 9 } }];
+        if (id === 't3_hidden') return [{ kind: 't3', data: { name: id, subreddit: 'awb', score: 1, num_comments: 2, hide_score: true } }];
+        if (id.startsWith('t1_')) return [{ kind: 't1', data: { name: id, subreddit: 'AWB', score: -2, score_hidden: false } }];
+        return [{ kind: 't3', data: { name: id, subreddit: 'awb', score: 57, num_comments: 12, upvote_ratio: 0.93 } }];
+      }) } } });
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+  const conn = new RedditConnector(makeCred(), { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, sleepImpl: noopSleep, threadLocations: new RedditThreadLocationCache() });
+  assert.equal(conn.engagementRefsPerRequest, 100);
+
+  const many = Array.from({ length: 101 }, (_, i) => `t3_p${i}`);
+  const readings = await conn.readEngagement([...many, 't3_p0', 't1_c1', 't3_gone', 't3_else', 't3_hidden']);
+  assert.equal(infoCalls.length, 2, '105 distinct fullnames → two requests (100 + 5)');
+  assert.equal(infoCalls[0].length, 100);
+  assert.deepEqual(infoCalls[1], ['t3_p100', 't1_c1', 't3_gone', 't3_else', 't3_hidden']);
+  const byRef = new Map(readings.map((r) => [r.ref, r]));
+  assert.deepEqual(byRef.get('t3_p0'), { ref: 't3_p0', reactions: 57, comments: 12 });
+  assert.deepEqual(byRef.get('t1_c1'), { ref: 't1_c1', reactions: -2, comments: null }, 'a comment has a score but no comment count of its own');
+  assert.deepEqual(byRef.get('t3_hidden'), { ref: 't3_hidden', reactions: null, comments: 2 }, 'a hidden score is not reported as the placeholder');
+  assert.equal(byRef.has('t3_gone'), false, 'something Reddit no longer returns is left out');
+  assert.equal(byRef.has('t3_else'), false, 'something outside the subreddit whitelist is left out');
+  assert.equal(readings.length, 103);
+});
+
+test('readEngagement: a malformed ref is refused before any request; empty input or targets make none', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => { calls.push(String(url)); return TOKEN_OK(); };
+  const conn = new RedditConnector(makeCred(), { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, sleepImpl: noopSleep });
+  await assert.rejects(conn.readEngagement(['t3_ok', 't3_a,t3_b']), RedditApiError);
+  await assert.rejects(conn.readEngagement(['t5_subreddit']), RedditApiError);
+  assert.deepEqual(await conn.readEngagement([]), []);
+  const noTargets = new RedditConnector(makeCred(), { targets: [], userAgent: 'ua/1.0', fetchImpl, sleepImpl: noopSleep });
+  assert.deepEqual(await noTargets.readEngagement(['t3_ok']), []);
+  assert.deepEqual(calls, [], 'no network call at all');
+});
+
+test('readEngagement: each /api/info request counts against rate_limit_per_hour', async () => {
+  const limiter = new OutreachRateLimiter();
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    return fakeResponse({ json: { data: { children: [] } } });
+  };
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, sleepImpl: noopSleep, channelId: 'ch-eng', rateLimitPerHour: 2, rateLimiter: limiter,
+  });
+  await conn.readEngagement(Array.from({ length: 150 }, (_, i) => `t3_x${i}`));
+  assert.equal(limiter.remaining('ch-eng', 2), 0, 'two requests spent');
+  await assert.rejects(conn.readEngagement(['t3_more']), OutreachChannelRateLimitedError);
+});
