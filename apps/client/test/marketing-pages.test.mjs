@@ -48,7 +48,8 @@ function consentOverview({ settings = {}, counts = {} } = {}) {
       on_no_response: 'keep', version: 0, updated_by_name: '', updated_at: null, ...settings,
     },
     counts: {
-      in_window: 0, not_yet_queued: 0, waiting: 0, waiting_no_sender: 0, sent_30d: 0, failed_30d: 0, skipped_30d: 0, kept_30d: 0, expired: 0,
+      in_window: 0, not_yet_queued: 0, waiting: 0, waiting_no_sender: 0, sent_30d: 0, failed_30d: 0, failed_retryable: 0, skipped_30d: 0,
+      kept_30d: 0, expired: 0,
       ...counts,
     },
   };
@@ -310,6 +311,7 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
   });
   const previews = [];
   const saves = [];
+  const retries = [];
   const { container, calls } = await render(t, {
     entry: '/marketing/contacts?account=acc-2&campaign=c-2',
     permissions: ['marketing.manage'],
@@ -319,12 +321,21 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
         contact(),
         contact({ id: 'ct-2', email: 'old@example.com', consent_method: 'signup_form', consent_due_at: '2026-01-01T00:00:00.000Z', consent_notice: null }),
       ] }),
-      getMarketingConsentNoticeSettings: async () => consentOverview({ counts: { in_window: 3, expired: 1, waiting_no_sender: 1 } }),
+      getMarketingConsentNoticeSettings: async () => consentOverview({ counts: { in_window: 3, expired: 1, waiting_no_sender: 1, failed_retryable: 2 } }),
+      retryFailedMarketingConsentNotices: async (accountId) => {
+        retries.push(accountId);
+        return { requeued: 2, ...consentOverview({ counts: { in_window: 3, waiting: 2 } }) };
+      },
       listMarketingConsentNotices: async () => [{
         id: 'n-1', contact_id: 'ct-1', contact_email: 'kim@example.com', contact_name: 'Kim', contact_status: 'subscribed',
         due_at: '2026-10-30T00:00:00.000Z', status: 'sent', policy: 'keep', settings_version: 1, attempts: 1,
         next_attempt_at: '2026-10-01T03:00:00.000Z', channel_id: 'ch-1', provider_message_id: 're_1', sent_at: '2026-10-01T03:00:00.000Z',
-        kept_at: '2026-10-05T00:00:00.000Z', error: '', created_at: '2026-10-01T00:00:00.000Z',
+        kept_at: '2026-10-05T00:00:00.000Z', renewed_at: null, bounce_type: '', event_note: '', error: '', created_at: '2026-10-01T00:00:00.000Z',
+      }, {
+        id: 'n-2', contact_id: 'ct-3', contact_email: 'soft@example.com', contact_name: 'Soft', contact_status: 'subscribed',
+        due_at: '2026-10-30T00:00:00.000Z', status: 'sent', policy: 'keep', settings_version: 1, attempts: 1,
+        next_attempt_at: '2026-10-01T03:00:00.000Z', channel_id: 'ch-1', provider_message_id: 're_2', sent_at: '2026-10-01T03:00:00.000Z',
+        kept_at: null, renewed_at: null, bounce_type: 'soft', event_note: 'Transient/General — mailbox full', error: '', created_at: '2026-10-01T00:00:00.000Z',
       }],
       previewMarketingConsentNotice: async (accountId, body) => {
         previews.push([accountId, body]);
@@ -342,6 +353,7 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
   assert.match(panel.textContent, /꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다/);
   assert.match(panel.textContent, /1명은 그 사람의 목록을 쓰는 메일 채널이 없어/);
   assert.match(panel.textContent, /동의 기한이 이미 지난 연락처 1명/);
+  assert.match(panel.textContent, /기한 전에 실패한 안내 2통/);
   const kimLine = container.querySelector('[data-testid="marketing-contact-consent-ct-1"]').textContent;
   assert.match(kimLine, /동의 기한 2028-10-0\d · 재확인 안내 2026-10-01 보냄 · 응답 없으면 유지 · 2026-10-05 유지함/);
   assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, /재확인 안내 — 유지/, '유지 링크로 남은 동의의 방법');
@@ -354,7 +366,16 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
   assert.match(modal.textContent, /동의일부터 2년마다, 2년이 되는 날 전까지/);
   assert.match(modal.textContent, /광고 표기를 붙이지 않습니다/);
   assert.equal(calls.find((c) => c[0] === 'listMarketingConsentNotices')?.[1], 'acc-2');
-  assert.match(document.querySelector('[data-testid="marketing-consent-notice-list"]').textContent, /kim@example\.com/);
+  const recentList = document.querySelector('[data-testid="marketing-consent-notice-list"]').textContent;
+  assert.match(recentList, /kim@example\.com/);
+  assert.match(recentList, /닿지 않음\(soft\)Transient\/General — mailbox full/, '미도달과 공급자 사유');
+
+  click(buttonByText(document, '실패한 안내 다시 보내기 (2)'));
+  await flush();
+  await flush();
+  assert.deepEqual(retries, ['acc-2']);
+  assert.equal([...document.querySelectorAll('button')].some((b) => /실패한 안내 다시 보내기/.test(b.textContent || '')), false,
+    '다시 보낼 것이 없으면 버튼이 사라진다');
 
   click(modal.querySelector('input[aria-label="재확인 안내 보내기"]'));
   await flush();
@@ -425,6 +446,7 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
   await api.saveMarketingConsentNoticeSettings('acc-2', { enabled: true, lead_days: 30 });
   await api.previewMarketingConsentNotice(null, { subject: 's' });
   await api.listMarketingConsentNotices('acc-2', { status: 'failed', limit: 20 });
+  await api.retryFailedMarketingConsentNotices('acc-2');
   await api.listOutreachChannels('acc-2');
 
   assert.deepEqual(sent.map((s) => `${s.method} ${s.url}`), [
@@ -458,6 +480,7 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
     'PUT /api/marketing/consent-notices/settings?account_id=acc-2',
     'POST /api/marketing/consent-notices/preview',
     'GET /api/marketing/consent-notices?account_id=acc-2&status=failed&limit=20',
+    'POST /api/marketing/consent-notices/retry-failed?account_id=acc-2',
     'GET /api/outreach-channels?account_id=acc-2',
   ]);
   const body = (path, method = 'POST') => sent.find((x) => x.method === method && x.url === path)?.body;

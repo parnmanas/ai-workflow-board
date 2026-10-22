@@ -63,6 +63,9 @@ export function ConsentNoticePanel({ accountId }: { accountId: string | null }) 
           {counts.waiting_no_sender > 0 && (
             <Hint tone="warning">{counts.waiting_no_sender}명은 그 사람의 목록을 쓰는 메일 채널이 없어 보내지 못하고 있습니다 — 기한 전에 메일 채널을 승인하세요.</Hint>
           )}
+          {counts.failed_retryable > 0 && (
+            <Hint tone="warning">기한 전에 실패한 안내 {counts.failed_retryable}통 — 메일 설정을 고친 뒤 "설정" 에서 다시 보낼 수 있습니다.</Hint>
+          )}
           {counts.expired > 0 && (
             <Hint tone="warning">동의 기한이 이미 지난 연락처 {counts.expired}명 — 안내로는 이을 수 없고, 새로 동의를 받아 가져와야 다시 보냅니다.</Hint>
           )}
@@ -94,16 +97,33 @@ function ConsentNoticeSettingsModal({ accountId, overview, onSaved, onClose }: {
   const [serverError, setServerError] = useState('');
   const [recent, setRecent] = useState<MarketingConsentNotice[] | null>(null);
   const [recentError, setRecentError] = useState('');
+  const [recentKey, setRecentKey] = useState(0);
+  const [retrying, setRetrying] = useState(false);
   const { payload, errors } = consentNoticePayload(draft);
   const set = (patch: Partial<ConsentNoticeDraft>) => { setDraft((d) => ({ ...d, ...patch })); setPreview(null); setServerError(''); };
 
   useEffect(() => {
     let cancelled = false;
     api.listMarketingConsentNotices(accountId, { limit: 50 })
-      .then((rows) => { if (!cancelled) setRecent(rows); })
+      .then((rows) => { if (!cancelled) { setRecent(rows); setRecentError(''); } })
       .catch((err) => { if (!cancelled) setRecentError((err as Error)?.message || '최근 안내를 불러오지 못했습니다'); });
     return () => { cancelled = true; };
-  }, [accountId]);
+  }, [accountId, recentKey]);
+
+  const retryFailed = async () => {
+    setRetrying(true);
+    setServerError('');
+    try {
+      const result = await api.retryFailedMarketingConsentNotices(accountId);
+      onSaved({ settings: result.settings, counts: result.counts });
+      setRecentKey((k) => k + 1);
+      showToast(`실패한 안내 ${result.requeued}통을 다시 보냅니다`, 'success');
+    } catch (err) {
+      setServerError((err as Error)?.message || '다시 보내지 못했습니다');
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const runPreview = async () => {
     if (errors.length) return;
@@ -244,6 +264,17 @@ function ConsentNoticeSettingsModal({ accountId, overview, onSaved, onClose }: {
               </div>
             ))}
           </div>
+          {overview.counts.failed_retryable > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <Button size="sm" variant="secondary" disabled={retrying} onClick={() => void retryFailed()}>
+                {retrying ? '다시 보내는 중…' : `실패한 안내 다시 보내기 (${overview.counts.failed_retryable})`}
+              </Button>
+              <Hint tone="warning">
+                기한 전인 것만 다시 보냅니다. 공급자 시간 초과로 "닿았을 수 있음" 으로 닫힌 안내는 두 번 받을 수 있습니다 — 메일 설정(키 · 도메인)을
+                고친 뒤에 누르세요.
+              </Hint>
+            </div>
+          )}
           {overview.settings.version > 0 && (
             <Hint>문구 버전 {overview.settings.version}{overview.settings.updated_by_name ? ` · ${overview.settings.updated_by_name}` : ''} · {formatDateTime(overview.settings.updated_at)}</Hint>
           )}
@@ -278,8 +309,12 @@ function ConsentNoticeSettingsModal({ accountId, overview, onSaved, onClose }: {
                       <td style={tableStyles.td}>
                         {n.sent_at ? `${formatDateTime(n.sent_at)} · ${n.policy === 'lapse' ? '응답 없으면 철회' : '응답 없으면 유지'}` : '—'}
                         {n.kept_at && <div style={{ fontSize: 11, color: tokens.colors.successLight }}>{formatDay(n.kept_at)} 유지함</div>}
+                        {!n.kept_at && n.renewed_at && <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>응답 없어 이어짐</div>}
                       </td>
-                      <td style={{ ...tableStyles.td, fontSize: 11, color: tokens.colors.textMuted, overflowWrap: 'anywhere' }}>{n.error || ''}</td>
+                      <td style={{ ...tableStyles.td, fontSize: 11, color: tokens.colors.textMuted, overflowWrap: 'anywhere' }}>
+                        {n.bounce_type && <div style={{ color: tokens.colors.warningLight }}>닿지 않음({n.bounce_type})</div>}
+                        {n.error || n.event_note || ''}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

@@ -91,9 +91,9 @@ test('요약 · 현황 · 연락처 한 줄', () => {
   assert.equal(consentNoticeSummary({ ...settings, enabled: true }), '켜짐 · 기한 30일 전 · 응답이 없으면 동의 유지');
   assert.equal(consentNoticeSummary({ ...settings, enabled: true, lead_days: 14, on_no_response: 'lapse' }), '켜짐 · 기한 14일 전 · 응답이 없으면 동의 철회');
   const items = consentNoticeCountItems({
-    in_window: 3, not_yet_queued: 1, waiting: 2, waiting_no_sender: 1, sent_30d: 5, failed_30d: 0, skipped_30d: 1, kept_30d: 2, expired: 4,
+    in_window: 3, not_yet_queued: 1, waiting: 2, waiting_no_sender: 1, sent_30d: 5, failed_30d: 0, failed_retryable: 1, skipped_30d: 1, kept_30d: 2, expired: 4,
   });
-  assert.deepEqual(items.filter((i) => i.warn).map((i) => i.key), ['waiting_no_sender', 'expired']);
+  assert.deepEqual(items.filter((i) => i.warn).map((i) => i.key), ['waiting_no_sender', 'failed_retryable', 'expired']);
 
   const now = new Date('2026-10-22T00:00:00Z');
   const contact = (overrides = {}) => ({
@@ -111,6 +111,9 @@ test('요약 · 현황 · 연락처 한 줄', () => {
   assert.match(contactConsentLine(contact({ consent_notice: notice }), now).notice, /^재확인 안내 2026-10-0\d 보냄 · 응답 없으면 철회$/);
   assert.match(contactConsentLine(contact({ consent_notice: { ...notice, policy: 'keep', kept_at: '2026-10-05T03:00:00.000Z' } }), now).notice,
     /응답 없으면 유지 · 2026-10-0\d 유지함$/);
+  assert.match(contactConsentLine(contact({ consent_notice: { ...notice, policy: 'keep', renewed_at: '2026-11-01T00:00:00.000Z' } }), now).notice,
+    /응답 없으면 유지 · 응답 없어 이어짐$/);
+  assert.match(contactConsentLine(contact({ consent_notice: { ...notice, bounce_type: 'soft' } }), now).notice, / · 닿지 않음$/);
   assert.equal(contactConsentLine(contact({ consent_notice: { ...notice, status: 'deferred' } }), now).notice, '재확인 안내 보낼 예정');
   assert.equal(contactConsentLine(contact({ consent_notice: { ...notice, status: 'failed' } }), now).notice, '재확인 안내 실패');
   assert.equal(contactConsentLine(contact({ consent_notice: { ...notice, status: 'skipped' } }), now).notice, null);

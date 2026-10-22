@@ -2801,6 +2801,12 @@ export const api = {
       `/marketing/consent-notices/preview${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
       { method: 'POST', body: JSON.stringify(data) },
     ),
+  /** 실패한 안내를 다시 보낸다(기한 전인 것만). "닿았을 수 있음" 으로 닫힌 안내는 두 번 받을 수 있다. */
+  retryFailedMarketingConsentNotices: (accountId: string | null) =>
+    request<MarketingConsentNoticeOverview & { requeued: number }>(
+      `/marketing/consent-notices/retry-failed${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'POST' },
+    ),
   listMarketingConsentNotices: (accountId: string | null, query: { status?: string; limit?: number } = {}) => {
     const params = new URLSearchParams();
     if (accountId) params.set('account_id', accountId);

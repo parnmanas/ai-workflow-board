@@ -141,6 +141,12 @@ export function consentNoticeCountItems(counts: MarketingConsentNoticeCounts): A
     { key: 'sent_30d', label: '최근 30일 보냄', value: formatCount(counts.sent_30d) },
     { key: 'kept_30d', label: '최근 30일 유지 클릭', value: formatCount(counts.kept_30d) },
     { key: 'failed_30d', label: '최근 30일 실패', value: formatCount(counts.failed_30d), warn: counts.failed_30d > 0 },
+    {
+      key: 'failed_retryable',
+      label: '실패 — 기한 전이라 다시 보낼 수 있음',
+      value: formatCount(counts.failed_retryable),
+      warn: counts.failed_retryable > 0,
+    },
     { key: 'expired', label: '기한이 이미 지난 연락처', value: formatCount(counts.expired), warn: counts.expired > 0 },
   ];
 }
@@ -157,7 +163,9 @@ export function contactConsentLine(contact: MarketingContact, now: Date = new Da
   if (n) {
     if (n.status === 'sent') {
       notice = `재확인 안내 ${formatDay(n.sent_at)} 보냄 · ${n.policy === 'lapse' ? '응답 없으면 철회' : '응답 없으면 유지'}`;
+      if (n.bounce_type) notice += ' · 닿지 않음';
       if (n.kept_at) notice += ` · ${formatDay(n.kept_at)} 유지함`;
+      else if (n.renewed_at) notice += ' · 응답 없어 이어짐';
     } else if (n.status === 'queued' || n.status === 'deferred' || n.status === 'sending') {
       notice = '재확인 안내 보낼 예정';
     } else if (n.status === 'failed') {

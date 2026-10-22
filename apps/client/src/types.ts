@@ -4114,6 +4114,10 @@ export interface MarketingContactConsentNotice {
   policy: MarketingConsentNoticePolicy | '';
   sent_at: string | null;
   kept_at: string | null;
+  /** keep 안내의 기한이 와서 동의를 이어 준 시각. */
+  renewed_at?: string | null;
+  /** '' | hard | soft | suppressed — 닿지 않은 안내(동의를 잇지 않는다). */
+  bounce_type?: string;
 }
 
 /** GET/PUT /api/marketing/consent-notices/settings 의 settings. version 0 = 저장한 적 없음(기본 문구). */
@@ -4135,6 +4139,8 @@ export interface MarketingConsentNoticeCounts {
   waiting_no_sender: number;
   sent_30d: number;
   failed_30d: number;
+  /** 실패했지만 기한 전이라 다시 보낼 수 있는 안내. */
+  failed_retryable: number;
   skipped_30d: number;
   kept_30d: number;
   expired: number;
@@ -4177,6 +4183,9 @@ export interface MarketingConsentNotice {
   provider_message_id: string;
   sent_at: string | null;
   kept_at: string | null;
+  renewed_at: string | null;
+  bounce_type: string;
+  event_note: string;
   error: string;
   created_at: string;
 }
