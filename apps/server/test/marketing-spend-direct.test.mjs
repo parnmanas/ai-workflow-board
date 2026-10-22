@@ -524,7 +524,7 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   assert.doesNotMatch(errText(blocked), /pending/, 'no state from another account');
   const readsBeforeRetry = fake.state.calls.length;
   const retried = await otherAsk({ amount_minor: 10000, payee: 'Same ad campaign' });
-  assert.match(errText(retried), /in another account.*not asking Meta Ads again before .* wait until then/);
+  assert.match(errText(retried), /in another account.*not asking Meta Ads again before .* wait until then or until that request is decided/);
   assert.equal(fake.state.calls.length, readsBeforeRetry, 'a retry while another account holds the target does not read the provider');
   // (d) 그 요청이 닫히면 쉬는 것도 바로 풀린다
   assert.equal((await ctx.post(`/spend-requests/${openHere.id}/deny`, { note: 'cross-account check done' })).body.status, 'denied');

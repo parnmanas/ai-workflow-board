@@ -360,7 +360,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       const status = retryable ? 502 : amountProblem ? 400 : 409;
       const reason = `${label} check for payee "${payee.name}" failed: ${e.message} — ${retryable
         ? 'the platform may be unavailable; try again in a later cycle'
-        : amountProblem ? 'change the amount or ask a person' : 'a person must fix the payee, its credential or the campaign on the platform; do not retry'}`;
+        : amountProblem ? 'change the amount or ask a person' : 'a person must fix the payee, its credential, the campaign currency or the ad campaign on the platform; do not retry'}`;
       if (afterRead) this.providerBackoff.set(backoffKey, { until: Date.now() + (amountProblem ? AMOUNT_RETRY_MS : PROVIDER_BACKOFF_MS), reason, status });
       await this.audit.record({
         accountId: campaign.account_id,
@@ -389,7 +389,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     const held = this.providerBackoff.get(backoffKey);
     if (held && held.openTarget && !open) this.providerBackoff.delete(backoffKey);
     else if (held) {
-      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()} — wait until then${held.status === 400 ? ', then ask once with an amount that fits' : ''})`);
+      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()} — wait until then${held.openTarget ? ' or until that request is decided' : ''}${held.status === 400 ? ', then ask once with an amount that fits' : ''})`);
     }
     let plan: CeilingPlan;
     try {
