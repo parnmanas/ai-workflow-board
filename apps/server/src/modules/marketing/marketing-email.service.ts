@@ -191,12 +191,15 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       const channels = new Map<string, MarketingChannel | null>();
       const heldLists = new Map<string, boolean>();
       const touched = new Set<string>();
-      for (const row of due) {
+      for (const candidate of due) {
+        // Another worker may have deferred this candidate since the due query.
         const claim = await this.sendRepo.createQueryBuilder().update(MarketingEmailSend)
           .set({ status: 'sending' })
-          .where('id = :id AND status IN (:...s)', { id: row.id, s: ['queued', 'deferred'] })
+          .where('id = :id AND status IN (:...s) AND next_attempt_at <= :now', { id: candidate.id, s: ['queued', 'deferred'], now })
           .execute();
         if (!claim.affected) continue;
+        const row = await this.sendRepo.findOne({ where: { id: candidate.id } });
+        if (!row) continue;
         touched.add(row.post_id);
         const outcome = await this.sendOne(row, now, senders, postCache, campaigns, channels, heldLists);
         stats[outcome]++;

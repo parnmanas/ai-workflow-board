@@ -227,6 +227,63 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   assert.equal(secondDone.status, 'published');
   assert.match(secondDone.error, /1 message\(s\) failed/);
 
+  // Deterministically interleave two workers after the slower worker's SELECT.
+  // Real SQL claims/writes and provider responses; no parallel-transaction claim for sql.js.
+  for (const providerStatus of [429, 503]) {
+    for (const retryDue of [false, true]) {
+      await t.test(`two workers: ${providerStatus}, retry ${retryDue ? 'due' : 'still deferred'}`, async () => {
+        await contactRepo.update({ id: kim.id }, { status: 'unsubscribed' });
+        const draft = await mcp.callTool('draft_marketing_post', {
+          campaign_id: campaign.id, channel_id: channel.id,
+          title: 'Concurrent retry', body: 'Tips.', rationale: 'follow-up',
+        });
+        await post(`/posts/${draft.post.id}/approve`, {});
+        await contactRepo.update({ id: kim.id }, { status: 'subscribed' });
+        const sendRepo = ds.getRepository('MarketingEmailSend');
+        const candidate = await sendRepo.findOneBy({ post_id: draft.post.id, contact_id: bob.id });
+        const callsBefore = sent.length;
+        let deferred;
+        let selections = 0;
+        // Separate running flag and repository wrapper, with the same real dependencies.
+        const slowerWorker = Object.assign(Object.create(MarketingEmailService.prototype), emailService, {
+          running: false,
+          sendRepo: new Proxy(sendRepo, {
+            get(target, key) {
+              if (key === 'find') return async (options) => {
+                const stale = await target.find(options);
+                if (options.where.status === 'sending') return stale;
+                selections++;
+                assert.deepEqual(stale.map((row) => row.id), [candidate.id]);
+                assert.equal(stale[0].attempts, 0);
+                replies.push({ status: providerStatus, body: { message: 'busy' } });
+                assert.deepEqual(await emailService.processQueue(noon), { sent: 0, deferred: 1, failed: 0, suppressed: 0 });
+                deferred = await target.findOneBy({ id: candidate.id });
+                if (retryDue) replies.push({ status: providerStatus, body: { message: 'busy again' } });
+                return stale;
+              };
+              const value = Reflect.get(target, key);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          }),
+        });
+        const slowNow = new Date(noon.getTime() + (retryDue ? 10 * 60_000 : 0));
+        assert.deepEqual(await slowerWorker.processQueue(slowNow), {
+          sent: 0, deferred: retryDue ? 1 : 0, failed: 0, suppressed: 0,
+        });
+        assert.equal(selections, 1);
+        assert.equal(sent.length - callsBefore, retryDue ? 2 : 1);
+        const latest = await sendRepo.findOneBy({ id: candidate.id });
+        assert.equal(latest.status, 'deferred');
+        assert.equal(latest.attempts, retryDue ? 2 : 1, 'use the claimed row, not the stale candidate');
+        assert.equal(latest.next_attempt_at.getTime(), retryDue
+          ? slowNow.getTime() + 20 * 60_000 : deferred.next_attempt_at.getTime());
+        if (!retryDue) assert.deepEqual(latest, deferred, 'losing worker must leave the deferred row untouched');
+        // Finish this queue before the next interleaving.
+        assert.equal((await emailService.processQueue(latest.next_attempt_at)).sent, 1);
+      });
+    }
+  }
+
   // 5. 공개 수신거부
   const confirm = await fetch(`${base}/api/m/u/${kim.unsubscribe_token}`);
   const confirmHtml = await confirm.text();
