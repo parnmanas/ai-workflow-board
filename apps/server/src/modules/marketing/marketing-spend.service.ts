@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, LessThan, MoreThan, Repository } from 'typeorm';
+import { DataSource, In, LessThan, MoreThan, Repository, type EntityManager } from 'typeorm';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
 import { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
@@ -20,17 +20,80 @@ import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 import { MarketingChannelService } from './marketing-channel.service';
 import { MarketingBudgetService } from './marketing-budget.service';
 import { marketingError } from './marketing-errors';
-import { findPayee } from './marketing-campaign.logic';
+import { findPayee, type MarketingPayee } from './marketing-campaign.logic';
 import { activeAllocation, appendLedger, loadLedger, lockCampaign } from './marketing-ledger';
-import { resolveMarketingSecret } from './marketing-credential';
-import { executeWebhookPayment, readWebhookSecret, type PaymentOutcome } from './marketing-payments';
+import { resolveDirectPaymentCredential, resolveMarketingSecret } from './marketing-credential';
+import {
+  PaymentNotSentError,
+  PaymentReadError,
+  executeWebhookPayment,
+  readWebhookSecret,
+  type PaymentOutcome,
+} from './marketing-payments';
+import { DIRECT_PAYMENT_ADAPTERS, type DirectAdapterContext, type TargetReport } from './marketing-payment-adapters';
+import {
+  DIRECT_PAYMENT_PROVIDERS,
+  DIRECT_PAYMENT_PROVIDER_LABELS,
+  PaymentRuleError,
+  ceilingPlanProblems,
+  credentialFingerprint,
+  directTargetKey,
+  isAutomaticPaymentProvider,
+  isDirectPaymentProvider,
+  payeeRoute,
+  sameRoute,
+  type CeilingPlan,
+  type DirectPaymentProvider,
+  type PaymentRoute,
+} from '../../common/marketing/payment-routes';
 
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 const SWEEP_MS = 5 * 60_000;
 /** executing 이 이보다 오래 남아 있으면(프로세스가 응답을 기록하지 못했다) unknown 으로 돌린다. */
 const STUCK_EXECUTING_MS = 10 * 60_000;
-/** approved 인 webhook 요청이 이만큼 지나도 실행되지 않았으면(승인 직후 프로세스가 죽었다) 지금 실행한다. */
+/** approved 인 자동 실행 요청이 이만큼 지나도 실행되지 않았으면(승인 직후 프로세스가 죽었다) 지금 실행한다. */
 const STRANDED_APPROVED_MS = 60_000;
+/** 승인되면 서버가 스스로 실행하는 결제 방식. */
+const AUTOMATIC_PROVIDERS = ['webhook', ...DIRECT_PAYMENT_PROVIDERS];
+/**
+ * 직접 공급자의 승인이 이보다 오래되면 실행하지 않는다 — 장애 · 복구 · 인스턴스 이관 뒤에 며칠 묵은 승인이 실행되지 않게.
+ * 보통은 승인 직후, 늦어도 sweep(5분)이 실행한다.
+ */
+const DIRECT_APPROVAL_MAX_AGE_MS = 60 * 60_000;
+/** 직접 공급자의 대상에 열린 요청이 있다고 보는 상태(uq_marketing_spend_open_target 과 같다). */
+const OPEN_TARGET_STATUSES = ['pending', 'approved', 'executing', 'unknown'];
+/** 요청 때 공급자 확인이 실패한 대상은 이만큼 다시 묻지 않는다 — 에이전트의 반복 요청이 공급자 호출로 번지지 않게. */
+const PROVIDER_BACKOFF_MS = 10 * 60_000;
+
+export interface PayeePaymentCheck extends TargetReport {
+  payee: string;
+  provider: DirectPaymentProvider;
+  ref: string;
+  credential_id: string;
+  /** 이 대상에 열린 지출 요청(대상마다 하나). */
+  open_request: { id: string; status: string } | null;
+}
+
+export interface PaymentCheckResult {
+  checked_at: string;
+  payees: PayeePaymentCheck[];
+}
+
+export interface SpendInspection {
+  spend_request_id: string;
+  status: string;
+  from: string;
+  to: string;
+  from_minor: number;
+  to_minor: number;
+  /** 지금 상한(공급자 단위), 없으면 null. */
+  observed: string | null;
+  observed_minor: number | null;
+  /** 지금 상한이 계획의 어디에 있나 — 판정이 아니라 대조를 돕는 표시다. */
+  position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
+  report: TargetReport;
+  checked_at: string;
+}
 
 export interface SpendDecision {
   request: MarketingSpendRequest;
@@ -53,8 +116,10 @@ export interface SpendDecision {
 export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
   private readonly enabled = (process.env.MARKETING_SCHEDULER_ENABLED || 'true').toLowerCase() !== 'false';
-  /** 테스트가 결제 엔드포인트 호출을 가로챌 수 있게(기본은 전역 fetch). */
+  /** 테스트가 결제 엔드포인트 · 공급자 호출을 가로챌 수 있게(기본은 전역 fetch). */
   fetchImpl: typeof fetch | undefined;
+  /** 요청 때 공급자 확인이 실패한 (캠페인, 대상, credential 지문) → 다시 묻지 않을 때까지. 수취인 · credential 을 고치면 키가 바뀐다. */
+  private readonly providerBackoff = new Map<string, { until: number; reason: string; status: number }>();
 
   constructor(
     @InjectRepository(MarketingSpendRequest) private readonly spendRepo: Repository<MarketingSpendRequest>,
@@ -148,6 +213,8 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     if (!payee) {
       throw marketingError(400, `payee "${payeeName}" is not on the campaign's payee allowlist (${(campaign.payees || []).map((p) => p.name).join(', ') || 'empty'}) — a human adds payees`);
     }
+    const route = payeeRoute(campaign, payee);
+    const direct = isDirectPaymentProvider(route.provider) ? route.provider : null;
     const purpose = typeof body.purpose === 'string' ? body.purpose.trim() : '';
     if (!purpose || purpose.length > 2000) throw marketingError(400, 'purpose is required (max 2000 characters)');
     const expected = typeof body.expected_outcome === 'string' ? body.expected_outcome.trim() : '';
@@ -156,6 +223,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     const payload = body.payload === undefined || body.payload === null ? {} : body.payload;
     if (typeof payload !== 'object' || Array.isArray(payload)) throw marketingError(400, 'payload must be a JSON object');
     if (Buffer.byteLength(canonicalJson(payload), 'utf8') > MAX_PAYLOAD_BYTES) throw marketingError(400, `payload must be at most ${MAX_PAYLOAD_BYTES} bytes`);
+    if (direct && Object.keys(payload).length) {
+      throw marketingError(400, `payee "${payee.name}" is paid through ${DIRECT_PAYMENT_PROVIDER_LABELS[direct]} — omit payload; the server reads the target and builds the exact change people approve`);
+    }
 
     const now = new Date();
     const [ledger, allocation] = await Promise.all([
@@ -177,23 +247,27 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       throw marketingError(409, `spend request refused: ${violations.join('; ')}`);
     }
 
+    // 직접 공급자: 한도 검사(로컬)를 통과한 뒤에만 공급자를 읽는다 — 거절될 요청이 공급자 호출을 쓰지 않게.
+    const prepared = direct ? await this.prepareDirect(campaign, payee, route, direct, amount, currency, actor) : null;
+
     const fields = {
       campaign_id: campaign.id,
       channel_id: channel.id,
       amount_minor: amount,
       currency,
       payee: payee.name,
-      payee_ref: payee.ref || '',
+      payee_ref: route.ref,
       purpose,
-      provider: campaign.payment_provider || 'manual',
-      provider_credential_id: campaign.payment_provider === 'webhook' ? campaign.payment_credential_id : null,
-      payload: payload as Record<string, unknown>,
+      provider: route.provider,
+      provider_credential_id: route.credential_id,
+      payload: (prepared ? prepared.plan : payload) as Record<string, unknown>,
     };
     let saved: MarketingSpendRequest;
     try {
       saved = await this.spendRepo.save(this.spendRepo.create({
         account_id: campaign.account_id,
         ...fields,
+        target_key: prepared ? prepared.targetKey : '',
         expected_outcome: expected,
         payload_sha256: spendPayloadHash(fields),
         dual_required: campaign.dual_approval_threshold_minor > 0 && amount >= campaign.dual_approval_threshold_minor,
@@ -211,6 +285,11 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         const winner = await this.spendRepo.findOne({ where: { campaign_id: campaign.id, dedupe_key: dedupeKey } });
         if (winner) return { request: winner, duplicate: true };
       }
+      if (prepared) {
+        // 같은 대상에 열린 요청이 그 사이 생겼다(uq_marketing_spend_open_target).
+        const open = await this.openRequestForTarget(prepared.targetKey);
+        if (open) throw marketingError(409, this.openTargetMessage(open));
+      }
       throw e;
     }
     await this.audit.record({
@@ -221,10 +300,80 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       action: 'spend.requested',
       actor,
       summary: `지출 요청: ${formatMinorAmount(amount, currency)} → ${payee.name} (${channel.name}) — ${purpose.slice(0, 120)}`,
-      detail: { channel_id: channel.id, amount_minor: amount, currency, payee: payee.name, provider: saved.provider, payload_sha256: saved.payload_sha256 },
+      detail: {
+        channel_id: channel.id, amount_minor: amount, currency, payee: payee.name, provider: saved.provider, payload_sha256: saved.payload_sha256,
+        ...(prepared ? { target_key: prepared.targetKey, from_minor: prepared.plan.from_minor, to_minor: prepared.plan.to_minor } : {}),
+      },
     });
     this.audit.notify(campaign.account_id, campaign.id, 'spend_request', saved.id, 'requested');
     return { request: saved, duplicate: false };
+  }
+
+  /**
+   * 직접 공급자의 요청 준비 — 대상에 열린 요청이 없는지, credential 이 이 계정의 그 공급자 것인지 본 뒤 대상을 읽어 실행 계획을
+   * 만든다(쓰기 없음). 공급자 확인이 실패하면 저장하지 않고 거부하며(감사 `spend.refused`), 그 대상은 잠시 다시 묻지 않는다.
+   * 거부 문구는 "사람이 고쳐야 한다" 와 "다음 사이클에 다시" 를 구분한다 — 에이전트가 헛되이 되풀이하지 않게.
+   */
+  private async prepareDirect(
+    campaign: MarketingCampaign,
+    payee: MarketingPayee,
+    route: PaymentRoute,
+    provider: DirectPaymentProvider,
+    amount: number,
+    currency: string,
+    actor: MarketingActor,
+  ): Promise<{ plan: CeilingPlan; targetKey: string }> {
+    const label = DIRECT_PAYMENT_PROVIDER_LABELS[provider];
+    let targetKey: string;
+    try {
+      targetKey = directTargetKey(provider, route.ref);
+    } catch (e: any) {
+      throw marketingError(400, `payee "${payee.name}": ${e?.message || e} — a person fixes the payee ref`);
+    }
+    const open = await this.openRequestForTarget(targetKey);
+    if (open) throw marketingError(409, this.openTargetMessage(open));
+    const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, route.credential_id || '', campaign.account_id);
+    const backoffKey = `${campaign.id}\u0000${targetKey}\u0000${fingerprint}`;
+    const held = this.providerBackoff.get(backoffKey);
+    if (held && held.until > Date.now()) {
+      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()})`);
+    }
+    try {
+      const plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, ctx: this.adapterContext() });
+      this.providerBackoff.delete(backoffKey);
+      return { plan, targetKey };
+    } catch (e: any) {
+      if (!(e instanceof PaymentRuleError) && !(e instanceof PaymentReadError)) throw e;
+      const retryable = e instanceof PaymentReadError && e.retryable;
+      const reason = `${label} check for payee "${payee.name}" failed: ${e.message} — ${retryable
+        ? 'the platform may be unavailable; try again in a later cycle'
+        : e.status === 400 ? 'change the amount or ask a person' : 'a person must fix the payee, its credential or the campaign on the platform; do not retry'}`;
+      // 금액 때문에 거절된 것(단위 · 배수)은 금액을 고쳐 다시 물을 수 있어야 한다 — 대상 · 인증 문제만 쉬게 한다.
+      if (e.status !== 400) this.providerBackoff.set(backoffKey, { until: Date.now() + PROVIDER_BACKOFF_MS, reason, status: retryable ? 502 : 409 });
+      await this.audit.record({
+        accountId: campaign.account_id,
+        campaignId: campaign.id,
+        entityType: 'spend_request',
+        entityId: '',
+        action: 'spend.refused',
+        actor,
+        summary: `지출 요청 거부(${label} 확인): ${formatMinorAmount(amount, currency)} → ${payee.name}`,
+        detail: { provider, target_key: targetKey, amount_minor: amount, currency, error: e.message, retryable },
+      });
+      throw marketingError(retryable ? 502 : e.status === 400 ? 400 : 409, reason);
+    }
+  }
+
+  private async openRequestForTarget(targetKey: string): Promise<MarketingSpendRequest | null> {
+    return this.spendRepo.findOne({ where: { target_key: targetKey, status: In(OPEN_TARGET_STATUSES) } });
+  }
+
+  private openTargetMessage(open: MarketingSpendRequest): string {
+    return `another spend request for this target is still open (${open.status}, ${open.id}) — wait until it is decided or reconciled; only one open request per ad campaign`;
+  }
+
+  private adapterContext(): DirectAdapterContext {
+    return { fetchImpl: this.fetchImpl, env: process.env };
   }
 
   // ── 사람의 결정 ──────────────────────────────────────────────────────────
@@ -257,7 +406,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       approvals.push({ user_id: actor.id, name: actor.name, at: now.toISOString() });
       const dual = row.dual_required
         || (campaign.dual_approval_threshold_minor > 0 && row.amount_minor >= campaign.dual_approval_threshold_minor);
-      if (!findPayee(campaign, row.payee)) throw marketingError(409, `payee "${row.payee}" is no longer on the campaign allowlist`);
+      const routeProblem = this.routeProblem(campaign, row);
+      if (routeProblem) throw marketingError(409, routeProblem);
+      if (isDirectPaymentProvider(row.provider)) {
+        const planProblem = await this.directPlanProblem(manager, row);
+        if (planProblem) throw marketingError(409, `cannot approve: ${planProblem}`);
+      }
       const channel = await manager.getRepository(MarketingChannel).findOne({ where: { id: row.channel_id } });
       if (!channel || channel.status !== 'active') throw marketingError(409, `the channel is ${channel?.status || 'gone'} — only active channels can be paid for`);
 
@@ -314,7 +468,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     });
     this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', id, decision.final ? 'approved' : 'first_approval');
     let request = await this.get(id, accountId);
-    if (decision.final && request.provider === 'webhook') request = await this.execute(id);
+    if (decision.final && isAutomaticPaymentProvider(request.provider)) request = await this.execute(id);
     return { request, final: decision.final };
   }
 
@@ -410,6 +564,11 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     if (!note) throw marketingError(400, 'note is required (why the money came back)');
     const ref = typeof body.provider_ref === 'string' ? body.provider_ref.trim().slice(0, 200) : '';
     const pre = await this.get(id, accountId);
+    if (isDirectPaymentProvider(pre.provider)) {
+      // 직접 공급자의 결제 = 광고 플랫폼의 상한을 올린 것. 상한이 그대로인데 "미사용분" 을 돌려받았다고 적으면 플랫폼은 그 돈을 아직 쓸 수
+      // 있는데 원장은 덜 센다 — 상한을 실제로 낮추는 기능과 함께 후속으로 둔다(docs/marketing.md "직접 결제 어댑터").
+      throw marketingError(409, `${DIRECT_PAYMENT_PROVIDER_LABELS[pre.provider]} raised a spending ceiling — returning unused budget needs the ceiling to be lowered first, which AWB does not do yet; the ledger keeps the full approved amount`);
+    }
     await this.dataSource.transaction(async (manager) => {
       const campaign = await lockCampaign(manager, pre.campaign_id);
       const row = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
@@ -444,7 +603,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
   async execute(id: string): Promise<MarketingSpendRequest> {
     const pre = await this.spendRepo.findOne({ where: { id } });
     if (!pre) throw marketingError(404, 'spend request not found');
-    if (pre.provider !== 'webhook') return pre;
+    if (!isAutomaticPaymentProvider(pre.provider)) return pre;
 
     // 1. 잠금 안에서: 지금도 보내도 되는가. 승인 뒤에 캠페인이 정지됐거나 수취인이 허용 목록에서 빠졌거나 채널이
     //    멈췄으면 보내지 않고 failed(예산 해제)로 닫는다 — 승인 직후 프로세스가 죽어 sweep 이 나중에 실행하는 경우에도
@@ -455,10 +614,15 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       const row = await repo.findOne({ where: { id } });
       if (!row || row.status !== 'approved') return null;
       const channel = await manager.getRepository(MarketingChannel).findOne({ where: { id: row.channel_id } });
-      const blocker = campaign.status !== 'active' ? `the campaign is ${campaign.status}`
-        : !findPayee(campaign, row.payee) ? `payee "${row.payee}" is no longer on the campaign allowlist`
-          : !channel || channel.status !== 'active' ? `the channel is ${channel?.status || 'gone'}`
-            : spendPayloadHash(row) !== row.payload_sha256 ? 'the stored request no longer matches the approved hash' : null;
+      let blocker: string | null = campaign.status !== 'active' ? `the campaign is ${campaign.status}` : this.routeProblem(campaign, row);
+      if (!blocker && (!channel || channel.status !== 'active')) blocker = `the channel is ${channel?.status || 'gone'}`;
+      if (!blocker && spendPayloadHash(row) !== row.payload_sha256) blocker = 'the stored request no longer matches the approved hash';
+      if (!blocker && isDirectPaymentProvider(row.provider)) {
+        blocker = await this.directPlanProblem(manager, row);
+        if (!blocker && (!row.decided_at || Date.now() - row.decided_at.getTime() > DIRECT_APPROVAL_MAX_AGE_MS)) {
+          blocker = 'it was approved more than an hour ago — a stale approval is not executed; ask for a new request';
+        }
+      }
       if (blocker) {
         await this.settle(manager, row, 'failed', SYSTEM_MARKETING_ACTOR, { error: `not sent: ${blocker}`, from: 'approved' });
         return null;
@@ -475,7 +639,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         entityId: id,
         action: 'spend.executing',
         actor: SYSTEM_MARKETING_ACTOR,
-        summary: `결제 실행 시작(webhook): ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee}`,
+        summary: `결제 실행 시작(${row.provider}): ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee}`,
         detail: { payload_sha256: row.payload_sha256 },
       }, manager);
       return { row, campaign, channel: channel! };
@@ -505,36 +669,76 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       return (await this.spendRepo.findOne({ where: { id } }))!;
     }
 
-    // 3. 보낸다.
+    // 3. 보낸다. 보내기 전의 실패는 PaymentNotSentError 로만 알린다 — 그것만 failed(예산 해제)이고, 그 밖의 예외는 이미 나갔을 수 있어
+    //    unknown 이다(사람이 대조).
     let outcome: PaymentOutcome;
     try {
-      const secret = readWebhookSecret(await resolveMarketingSecret(this.credentialRepo, row.provider_credential_id || '', row.account_id));
-      const body = canonicalJson({
-        type: 'marketing.spend.execute',
-        spend_request_id: row.id,
-        campaign: { id: row.campaign_id, name: campaign.name, slug: campaign.slug },
-        channel: { id: row.channel_id, platform: channel.platform, target: channel.target },
-        amount_minor: row.amount_minor,
-        currency: row.currency,
-        payee: row.payee,
-        payee_ref: row.payee_ref,
-        purpose: row.purpose,
-        payload: row.payload || {},
-        payload_sha256: row.payload_sha256,
-        approved_by: (row.approvals || []).map((a) => ({ name: a.name, at: a.at })),
-        issued_at: new Date().toISOString(),
-      });
-      outcome = await executeWebhookPayment({ secret, body, idempotencyKey: row.id, fetchImpl: this.fetchImpl });
+      outcome = row.provider === 'webhook' ? await this.sendWebhook(row, campaign, channel) : await this.sendDirect(row);
     } catch (e: any) {
-      // 보내기 전의 실패(credential 을 못 읽음 등) — 아무것도 나가지 않았으니 failed 로 닫아도 이중 지출이 없다.
-      outcome = { outcome: 'failed', error: `not sent: ${String(e?.message || e).slice(0, 300)}`, response: {} };
+      const message = String(e?.message || e).slice(0, 300);
+      outcome = e instanceof PaymentNotSentError
+        ? { outcome: 'failed', error: `not sent: ${message}`, response: {} }
+        : { outcome: 'unknown', error: `the payment step stopped unexpectedly and may already have been sent: ${message}`, response: {} };
     }
 
     // 4. 결과를 기록한다.
+    await this.recordOutcome(row, outcome);
+    await this.persistNow().catch(() => {});
+    this.audit.notify(row.account_id, row.campaign_id, 'spend_request', id, 'executed');
+    return (await this.spendRepo.findOne({ where: { id } }))!;
+  }
+
+  private async sendWebhook(row: MarketingSpendRequest, campaign: MarketingCampaign, channel: MarketingChannel): Promise<PaymentOutcome> {
+    let secret: ReturnType<typeof readWebhookSecret>;
+    try {
+      secret = readWebhookSecret(await resolveMarketingSecret(this.credentialRepo, row.provider_credential_id || '', row.account_id));
+    } catch (e: any) {
+      throw new PaymentNotSentError(String(e?.message || e));
+    }
+    const body = canonicalJson({
+      type: 'marketing.spend.execute',
+      spend_request_id: row.id,
+      campaign: { id: row.campaign_id, name: campaign.name, slug: campaign.slug },
+      channel: { id: row.channel_id, platform: channel.platform, target: channel.target },
+      amount_minor: row.amount_minor,
+      currency: row.currency,
+      payee: row.payee,
+      payee_ref: row.payee_ref,
+      purpose: row.purpose,
+      payload: row.payload || {},
+      payload_sha256: row.payload_sha256,
+      approved_by: (row.approvals || []).map((a) => ({ name: a.name, at: a.at })),
+      issued_at: new Date().toISOString(),
+    });
+    return executeWebhookPayment({ secret, body, idempotencyKey: row.id, fetchImpl: this.fetchImpl });
+  }
+
+  /** 직접 공급자 — 실행 계획만 실행한다. credential 은 요청 때와 같은 지문이어야 한다(그 사이 키를 바꾸면 보내지 않는다). */
+  private async sendDirect(row: MarketingSpendRequest): Promise<PaymentOutcome> {
+    const provider = row.provider as DirectPaymentProvider;
+    const plan = row.payload as CeilingPlan;
+    let resolved: Awaited<ReturnType<typeof resolveDirectPaymentCredential>>;
+    try {
+      resolved = await resolveDirectPaymentCredential(this.credentialRepo, provider, row.provider_credential_id || '', row.account_id);
+    } catch (e: any) {
+      throw new PaymentNotSentError(String(e?.message || e));
+    }
+    if (resolved.fingerprint !== plan.credential_fingerprint) throw new PaymentNotSentError('the payment credential changed since the request');
+    return DIRECT_PAYMENT_ADAPTERS[provider].execute({ plan, fields: resolved.fields, fingerprint: resolved.fingerprint, ctx: this.adapterContext() });
+  }
+
+  /**
+   * 실행 결과를 기록한다. 보통은 executing 에서 닫는다. 그 사이 시스템이 unknown 으로 돌렸으면(다른 서버의 부팅 · 10분 넘은 실행)
+   * 확정 결과(paid · failed)로 그 unknown 을 닫는다 — 아직 아무도 대조하지 않았으니 이 결과가 가장 정확하다. 사람이 이미
+   * 대조했으면 결과를 버리지 않고 감사에 남긴다.
+   */
+  private async recordOutcome(row: MarketingSpendRequest, outcome: PaymentOutcome): Promise<void> {
+    const id = row.id;
     await this.dataSource.transaction(async (manager) => {
       await lockCampaign(manager, row.campaign_id);
       const current = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
-      if (!current || current.status !== 'executing') {
+      const lateSettle = current?.status === 'unknown' && outcome.outcome !== 'unknown';
+      if (!current || (current.status !== 'executing' && !lateSettle)) {
         // 그 사이 사람이 대조했다(executing 이 오래 걸려 unknown 이 된 뒤 등). 결과를 버리지 말고 감사에 남겨
         // 사람이 자기 기록과 맞춰 볼 수 있게 한다.
         await this.audit.record({
@@ -545,12 +749,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         }, manager);
         return;
       }
+      const note = lateSettle ? 'the result arrived after the request had been marked unknown' : '';
       if (outcome.outcome === 'paid') {
         await this.settle(manager, current, 'paid', SYSTEM_MARKETING_ACTOR, {
-          provider_ref: outcome.transaction_id, receipt_url: outcome.receipt_url, response: outcome.response, from: 'executing',
+          provider_ref: outcome.transaction_id, receipt_url: outcome.receipt_url, response: outcome.response, from: current.status, note,
         });
       } else if (outcome.outcome === 'failed') {
-        await this.settle(manager, current, 'failed', SYSTEM_MARKETING_ACTOR, { error: outcome.error, response: outcome.response, from: 'executing' });
+        await this.settle(manager, current, 'failed', SYSTEM_MARKETING_ACTOR, { error: outcome.error, response: outcome.response, from: current.status, note });
       } else {
         const won = await manager.getRepository(MarketingSpendRequest).createQueryBuilder().update(MarketingSpendRequest)
           .set({ status: 'unknown', error: outcome.error, provider_response: outcome.response })
@@ -570,14 +775,91 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         }
       }
     });
-    await this.persistNow().catch(() => {});
-    this.audit.notify(row.account_id, row.campaign_id, 'spend_request', id, 'executed');
-    return (await this.spendRepo.findOne({ where: { id } }))!;
   }
 
   /** sql.js 를 지금 파일로 내려 쓴다(Postgres 는 no-op). flushSqljs 가 진행 중인 트랜잭션이 끝난 뒤에 쓴다 — export 가 연결을 다시 연다. */
   private persistNow(): Promise<boolean> {
     return flushSqljs(this.dataSource, true);
+  }
+
+  // ── 공급자 확인(읽기 전용) ───────────────────────────────────────────────
+
+  /**
+   * 연결 확인 — 직접 공급자 경로가 있는 수취인마다 credential 과 대상(광고 캠페인)을 읽어 지금 상태를 보고한다. 아무것도 쓰지 않는다.
+   * 요청 · 실행과 같은 읽기 코드와 규칙을 쓴다. 운영자가 실제(또는 테스트) 계정을 돈을 움직이지 않고 검증하는 길이다.
+   * 문제가 없는 대상은 요청 백오프를 푼다(사람이 고쳤다는 뜻이다).
+   */
+  async checkPayments(campaign: MarketingCampaign, actor: MarketingActor): Promise<PaymentCheckResult> {
+    const results: PayeePaymentCheck[] = [];
+    for (const payee of campaign.payees || []) {
+      if (!isDirectPaymentProvider(payee.provider)) continue;
+      const provider = payee.provider;
+      const base = { payee: payee.name, provider, ref: payee.ref || '', credential_id: payee.credential_id || '' };
+      try {
+        const targetKey = directTargetKey(provider, payee.ref || '');
+        const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, payee.credential_id || '', campaign.account_id);
+        DIRECT_PAYMENT_ADAPTERS[provider].checkCredential(fields);
+        const report = await DIRECT_PAYMENT_ADAPTERS[provider].report({ ref: payee.ref || '', fields, fingerprint, currency: campaign.currency, ctx: this.adapterContext() });
+        const open = await this.openRequestForTarget(targetKey);
+        if (report.ok) {
+          for (const key of [...this.providerBackoff.keys()]) {
+            if (key.startsWith(`${campaign.id}\u0000${targetKey}\u0000`)) this.providerBackoff.delete(key);
+          }
+        }
+        results.push({ ...base, ...report, open_request: open ? { id: open.id, status: open.status } : null });
+      } catch (e: any) {
+        const message = String(e?.message || e).slice(0, 500);
+        results.push({
+          ...base, ok: false, problems: [message], ceiling_minor: null, ceiling_text: '', ceiling_units: null,
+          target_name_untrusted: '', facts: {}, api_version: '', open_request: null,
+        });
+      }
+    }
+    const okCount = results.filter((r) => r.ok).length;
+    await this.audit.record({
+      accountId: campaign.account_id,
+      campaignId: campaign.id,
+      entityType: 'campaign',
+      entityId: campaign.id,
+      action: 'payment.checked',
+      actor,
+      summary: `결제 연결 확인: ${results.length}곳 중 ${okCount}곳 정상`,
+      detail: { results: results.map((r) => ({ payee: r.payee, provider: r.provider, ok: r.ok, problems: r.problems })) },
+    });
+    return { checked_at: new Date().toISOString(), payees: results };
+  }
+
+  /**
+   * 요청별 공급자 확인 — 직접 공급자 요청의 대상을 지금 읽어 상한이 from · to 중 어디에 있는지 보여 준다(쓰기 없음). 결과 불명을
+   * 대조하는 사람이 "이미 올라갔는가" 를 공급자 화면을 열지 않고 볼 수 있게. 판정은 하지 않는다 — 기록은 사람이 한다.
+   */
+  async inspect(id: string, accountId: string): Promise<SpendInspection> {
+    const row = await this.get(id, accountId);
+    if (!isDirectPaymentProvider(row.provider)) throw marketingError(409, 'only direct payment providers (Meta Ads, Google Ads) can be inspected');
+    const plan = row.payload as CeilingPlan;
+    const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, row.provider, row.provider_credential_id || '', row.account_id);
+    let report: TargetReport;
+    try {
+      report = await DIRECT_PAYMENT_ADAPTERS[row.provider].report({ ref: row.payee_ref, fields, fingerprint, currency: row.currency, ctx: this.adapterContext() });
+    } catch (e: any) {
+      if (e instanceof PaymentReadError || e instanceof PaymentRuleError) throw marketingError(e.status, e.message);
+      throw e;
+    }
+    const observed = report.ceiling_units;
+    const position = observed === null ? 'no_ceiling' : observed === plan.to ? 'at_target' : observed === plan.from ? 'at_from' : 'other';
+    return {
+      spend_request_id: row.id,
+      status: row.status,
+      from: plan.from,
+      to: plan.to,
+      from_minor: plan.from_minor,
+      to_minor: plan.to_minor,
+      observed,
+      observed_minor: report.ceiling_minor,
+      position,
+      report,
+      checked_at: new Date().toISOString(),
+    };
   }
 
   // ── 주기 정리 ────────────────────────────────────────────────────────────
@@ -605,7 +887,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       if (await this.markInterrupted(row, 'execution did not record a result (process restarted or hung) — the payment may or may not have happened')) result.unknown++;
     }
     const stranded = await this.spendRepo.find({
-      where: { status: 'approved', provider: 'webhook', decided_at: LessThan(new Date(now.getTime() - STRANDED_APPROVED_MS)) },
+      where: { status: 'approved', provider: In(AUTOMATIC_PROVIDERS), decided_at: LessThan(new Date(now.getTime() - STRANDED_APPROVED_MS)) },
       take: 50,
     });
     for (const row of stranded) {
@@ -645,11 +927,36 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  /**
+   * 수취인이 아직 허용 목록에 있고, 요청 때와 같은 경로(결제 방식 · credential · 대상)인가 — 아니면 그 이유. 사람이 수취인을 다른
+   * 광고 캠페인으로 돌렸거나 결제 방식을 바꿨으면 예전 경로의 요청은 승인 · 실행되지 않는다(이름만 보면 그대로 통과한다).
+   */
+  private routeProblem(campaign: MarketingCampaign, row: MarketingSpendRequest): string | null {
+    const payee = findPayee(campaign, row.payee);
+    if (!payee) return `payee "${row.payee}" is no longer on the campaign allowlist`;
+    if (!sameRoute(row, payeeRoute(campaign, payee))) {
+      return `payee "${row.payee}" now has a different payment method, credential or target than when this was requested — ask for a new request`;
+    }
+    return null;
+  }
+
+  /** 직접 공급자: 저장된 계획이 그 요청과 맞고(단위 · to − from = 금액 · 대상), credential 이 요청 때와 같은가. */
+  private async directPlanProblem(manager: EntityManager, row: MarketingSpendRequest): Promise<string | null> {
+    const problems = ceilingPlanProblems(row);
+    if (problems.length) return `the execution plan is invalid (${problems.join('; ')})`;
+    const cred = row.provider_credential_id ? await manager.getRepository(Credential).findOne({ where: { id: row.provider_credential_id } }) : null;
+    if (!cred) return 'the payment credential is gone';
+    if (credentialFingerprint(cred) !== (row.payload as CeilingPlan).credential_fingerprint) {
+      return 'the payment credential changed since this request — ask for a new request';
+    }
+    return null;
+  }
+
   private assertReconcilable(row: MarketingSpendRequest): void {
     const ok = row.status === 'unknown' || (row.status === 'approved' && row.provider === 'manual');
     if (!ok) {
       throw marketingError(409, row.status === 'approved'
-        ? 'this request is executed by the payment webhook — wait for its result (or reconcile it once it is unknown)'
+        ? 'this request is executed by the server — wait for its result (or reconcile it once it is unknown)'
         : `spend request is ${row.status} — only approved (manual) or unknown requests can be reconciled`);
     }
   }

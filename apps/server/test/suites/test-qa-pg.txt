@@ -16,6 +16,7 @@ test/marketing-email-events.test.mjs
 test/marketing-email.test.mjs
 test/marketing-engagement.test.mjs
 test/marketing-feedback.test.mjs
+test/marketing-spend-direct.test.mjs
 test/marketing-spend.test.mjs
 test/qa-flows/activity-actor-sentinel-pg.test.mjs
 test/qa-flows/chat-attachments.test.mjs

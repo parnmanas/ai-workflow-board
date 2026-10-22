@@ -8,6 +8,11 @@
 import type { Repository } from 'typeorm';
 import { Credential } from '../../entities/Credential';
 import { decryptStrict } from '../../services/encryption.service';
+import {
+  DIRECT_PAYMENT_PROVIDER_LABELS,
+  credentialFingerprint,
+  type DirectPaymentProvider,
+} from '../../common/marketing/payment-routes';
 import { marketingError } from './marketing-errors';
 
 export async function assertCredentialInAccount(
@@ -34,6 +39,10 @@ export async function resolveMarketingSecret(
   accountId: string,
 ): Promise<Record<string, string>> {
   const cred = await assertCredentialInAccount(credRepo, credentialId, accountId);
+  return decryptCredentialFields(cred);
+}
+
+function decryptCredentialFields(cred: Credential): Record<string, string> {
   let data: unknown;
   try {
     data = JSON.parse(decryptStrict(cred.encrypted_data));
@@ -47,4 +56,29 @@ export async function resolveMarketingSecret(
     }
   }
   return out;
+}
+
+/**
+ * 직접 결제 공급자(Meta Ads · Google Ads)의 credential — 돈이 움직이는 키라 조건이 더 좁다(docs/marketing.md "직접 결제 어댑터"):
+ *   - 그 공급자 전용 credential(`provider` 칼럼이 공급자 이름)만 받는다. 다른 용도의 키를 잘못 고르는 일이 없다.
+ *   - 이 계정의 credential 만. 전역 credential 은 설치 관리자의 것이라, 한 계정의 지출에 쓰면 소유 경계를 넘는다.
+ *   - 에이전트 노출(agent_env)은 거부한다(assertCredentialInAccount).
+ * 지문은 승인 · 실행 때 요청의 계획과 대조한다 — 그 사이 키를 바꾸면 그 요청은 실행되지 않는다.
+ */
+export async function resolveDirectPaymentCredential(
+  credRepo: Repository<Credential>,
+  provider: DirectPaymentProvider,
+  credentialId: string,
+  accountId: string,
+): Promise<{ credential: Credential; fields: Record<string, string>; fingerprint: string }> {
+  const credential = await assertCredentialInAccount(credRepo, credentialId, accountId);
+  const label = DIRECT_PAYMENT_PROVIDER_LABELS[provider];
+  if (credential.account_id === null) {
+    throw marketingError(400, `a global credential cannot pay for one account — create the ${label} credential in this account`);
+  }
+  if (credential.provider !== provider) {
+    throw marketingError(400, `credential "${credential.name}" is a ${credential.provider || 'custom'} credential — ${label} payments need a credential created with the ${label} provider`);
+  }
+  // 지문과 필드를 같은 행에서 — 두 번 읽으면 그 사이 바뀐 키가 옛 지문과 짝지어질 수 있다.
+  return { credential, fields: decryptCredentialFields(credential), fingerprint: credentialFingerprint(credential) };
 }

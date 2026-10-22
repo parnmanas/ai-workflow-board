@@ -178,6 +178,32 @@ export class MarketingBudgetController {
     }
   }
 
+  /**
+   * 연결 확인(읽기 전용) — 직접 공급자 경로가 있는 수취인마다 credential 과 대상을 읽어 본다. 공급자 계정을 실제로 읽는 일이라
+   * 돈 설정과 같은 권한(approve_spend)에만 연다. 쓰기는 하나도 없다.
+   */
+  @Post('campaigns/:id/payment/check')
+  @RequirePermission(PERMISSIONS.APPROVE_MARKETING_SPEND)
+  async checkPayments(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      const campaign = await this.campaigns.get(id, boundAccountId(req));
+      return res.status(200).json(await this.spend.checkPayments(campaign, userActor(req)));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to check payment connections' });
+    }
+  }
+
+  /** 요청별 공급자 확인(읽기 전용) — 결과 불명을 대조할 때 지금 상한이 from · to 중 어디인지. */
+  @Post('spend-requests/:id/inspect')
+  @RequirePermission(PERMISSIONS.APPROVE_MARKETING_SPEND)
+  async inspectSpend(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      return res.status(200).json(await this.spend.inspect(id, boundAccountId(req)));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to inspect the payment target' });
+    }
+  }
+
   @Get('campaigns/:id/ledger')
   async ledger(@Param('id') id: string, @Query('limit') limit: string, @Req() req: Request, @Res() res: Response) {
     try {

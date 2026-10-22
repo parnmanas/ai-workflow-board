@@ -120,7 +120,9 @@ test/marketing-engagement-logic.test.mjs
 test/marketing-engagement.test.mjs
 test/marketing-feedback.test.mjs
 test/marketing-logic.test.mjs
+test/marketing-payment-logic.test.mjs
 test/marketing-posts.test.mjs
+test/marketing-spend-direct.test.mjs
 test/marketing-spend.test.mjs
 test/mcp-harness-marker-sanitizer.test.mjs
 test/mcp-server-orphan-leak-guard.test.mjs

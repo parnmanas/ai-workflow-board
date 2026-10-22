@@ -17,7 +17,23 @@ import {
   type MarketingCapability,
   type MarketingLimits,
 } from '../../common/marketing/marketing-constants';
+import {
+  DIRECT_PAYMENT_PROVIDERS,
+  PaymentRuleError,
+  canonicalDirectRef,
+  isDirectPaymentProvider,
+  type DirectPaymentProvider,
+} from '../../common/marketing/payment-routes';
 import { marketingError } from './marketing-errors';
+
+/** 수취인 허용 목록의 한 항목 — 경로(provider · credential_id)가 없으면 캠페인의 결제 방식을 쓴다. */
+export interface MarketingPayee {
+  name: string;
+  ref?: string;
+  note?: string;
+  provider?: DirectPaymentProvider;
+  credential_id?: string;
+}
 
 export const MAX_PAYEES = 50;
 export const MAX_ALLOWED_DOMAINS = 50;
@@ -115,12 +131,20 @@ export function normalizeFeedbackTicketStatus(value: unknown): string {
   return status;
 }
 
-/** 수취인 허용 목록. 이름(대소문자 무시)이 겹치면 거부 — 요청의 payee 는 이 이름으로 맞춘다. */
-export function normalizePayees(value: unknown): Array<{ name: string; ref?: string; note?: string }> {
+/**
+ * 수취인 허용 목록. 이름(대소문자 무시)이 겹치면 거부 — 요청의 payee 는 이 이름으로 맞춘다.
+ *
+ * 수취인마다 결제 경로를 둘 수 있다(docs/marketing.md "직접 결제 어댑터"): `provider` 가 직접 공급자(meta_ads · google_ads)면
+ * `credential_id` 가 필요하고 `ref` 는 그 공급자의 대상(상한이 걸린 광고 캠페인)이다 — 정규 형태로 저장한다. 같은 대상을 가리키는
+ * 수취인이 둘이면 거부한다. 경로가 없는 수취인은 캠페인의 결제 방식(manual · webhook)을 쓴다. credential 이 이 계정의 그 공급자
+ * 것인지는 DB 를 봐야 알아서 캠페인 서비스가 저장 때 따로 확인한다.
+ */
+export function normalizePayees(value: unknown): MarketingPayee[] {
   if (value === null || value === undefined) return [];
   if (!Array.isArray(value)) throw marketingError(400, 'payees must be an array');
   if (value.length > MAX_PAYEES) throw marketingError(400, `at most ${MAX_PAYEES} payees`);
   const seen = new Set<string>();
+  const targets = new Set<string>();
   return value.map((raw, i) => {
     const entry = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : { name: raw }) as Record<string, unknown>;
     const name = text(entry.name, `payees[${i}].name`, 120);
@@ -128,16 +152,35 @@ export function normalizePayees(value: unknown): Array<{ name: string; ref?: str
     const key = name.toLowerCase();
     if (seen.has(key)) throw marketingError(400, `duplicate payee "${name}"`);
     seen.add(key);
-    const ref = text(entry.ref, `payees[${i}].ref`, 200);
+    let ref = text(entry.ref, `payees[${i}].ref`, 200);
     const note = text(entry.note, `payees[${i}].note`, 500);
-    return { name, ...(ref ? { ref } : {}), ...(note ? { note } : {}) };
+    const provider = text(entry.provider, `payees[${i}].provider`, 40);
+    const credentialId = text(entry.credential_id, `payees[${i}].credential_id`, 80);
+    if (!provider) {
+      if (credentialId) throw marketingError(400, `payees[${i}].credential_id is only for a direct payment provider (${DIRECT_PAYMENT_PROVIDERS.join(', ')})`);
+      return { name, ...(ref ? { ref } : {}), ...(note ? { note } : {}) };
+    }
+    if (!isDirectPaymentProvider(provider)) {
+      throw marketingError(400, `payees[${i}].provider must be one of: ${DIRECT_PAYMENT_PROVIDERS.join(', ')} (leave it empty to use the campaign payment method)`);
+    }
+    if (!credentialId) throw marketingError(400, `payees[${i}] (${provider}) needs credential_id`);
+    try {
+      ref = canonicalDirectRef(provider, ref);
+    } catch (e) {
+      if (e instanceof PaymentRuleError) throw marketingError(400, `payees[${i}].ref: ${e.message}`);
+      throw e;
+    }
+    const target = `${provider}:${ref}`;
+    if (targets.has(target)) throw marketingError(400, `two payees point at the same ${provider} target ${ref}`);
+    targets.add(target);
+    return { name, ref, ...(note ? { note } : {}), provider, credential_id: credentialId };
   });
 }
 
 export function findPayee(
-  campaign: { payees: Array<{ name: string; ref?: string; note?: string }> | null | undefined },
+  campaign: { payees: MarketingPayee[] | null | undefined },
   name: string,
-): { name: string; ref?: string; note?: string } | null {
+): MarketingPayee | null {
   const key = name.trim().toLowerCase();
   return (campaign.payees || []).find((p) => p.name.toLowerCase() === key) || null;
 }

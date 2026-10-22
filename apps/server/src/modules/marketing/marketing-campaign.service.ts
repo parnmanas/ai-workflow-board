@@ -11,8 +11,10 @@ import { PAYMENT_PROVIDERS, type MarketingActor, type CampaignStatus } from '../
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 import { marketingError } from './marketing-errors';
-import { resolveMarketingSecret } from './marketing-credential';
+import { resolveDirectPaymentCredential, resolveMarketingSecret } from './marketing-credential';
 import { readWebhookSecret } from './marketing-payments';
+import { DIRECT_PAYMENT_ADAPTERS } from './marketing-payment-adapters';
+import { isDirectPaymentProvider } from '../../common/marketing/payment-routes';
 import {
   assertTransition,
   computeNextCycleAt,
@@ -290,6 +292,19 @@ export class MarketingCampaignService {
       }
       row.payment_provider = provider;
       row.payment_credential_id = provider === 'webhook' ? credentialId : null;
+    }
+    if (body.payees !== undefined) {
+      // 직접 공급자 수취인 — credential 이 이 계정의 그 공급자 전용이고 필드가 갖춰졌는지 저장 시점에 본다(승인 순간에 처음 알면 늦다).
+      // 대상(광고 캠페인)이 실제로 상한을 올릴 수 있는 상태인지는 연결 확인(POST /campaigns/:id/payment/check)이 읽어 본다.
+      for (const payee of row.payees || []) {
+        if (!isDirectPaymentProvider(payee.provider)) continue;
+        try {
+          const { fields } = await resolveDirectPaymentCredential(this.credentialRepo, payee.provider, payee.credential_id || '', row.account_id);
+          DIRECT_PAYMENT_ADAPTERS[payee.provider].checkCredential(fields);
+        } catch (e: any) {
+          throw marketingError(typeof e?.status === 'number' ? e.status : 400, `payee "${payee.name}": ${e?.message || e}`);
+        }
+      }
     }
     if (body.agent_runtime !== undefined) {
       row.agent_runtime = await this.normalizeSpec(body.agent_runtime, 'agent_runtime', row.account_id);

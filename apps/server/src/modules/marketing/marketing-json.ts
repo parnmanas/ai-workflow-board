@@ -22,6 +22,7 @@ import { consentDeadline } from '../../common/marketing/email';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { parseRuntimeSpec } from '../../common/runtime-spec';
 import { resolveLimits } from './marketing-campaign.logic';
+import { ceilingProviderRef, describeCeilingPlan } from '../../common/marketing/payment-routes';
 
 export function campaignToJson(c: MarketingCampaign) {
   const agent = parseRuntimeSpec(c.agent_runtime);
@@ -154,6 +155,9 @@ export function spendToJson(r: MarketingSpendRequest) {
     provider: r.provider,
     payload: r.payload || {},
     payload_sha256: r.payload_sha256,
+    // 직접 공급자의 실행 계획을 한 문장으로(승인 화면 · 에이전트가 같은 문장을 본다), 그리고 결제 기록 때 거래 id 자리에 넣을 값.
+    plan_text: describeCeilingPlan(r),
+    suggested_provider_ref: ceilingProviderRef(r),
     dual_required: r.dual_required,
     status: r.status,
     dedupe_key: r.dedupe_key,

@@ -7,6 +7,7 @@ import { MINOR_AMOUNT_TRANSFORMER } from '../common/marketing/money';
  *   pending ─approve→ approved ─execute→ executing → paid | failed | unknown
  *      ├─deny→ denied   ├─expire→ expired   └─cancel→ cancelled
  *   manual 공급자: approved 에서 사람이 "결제 완료"(paid) 또는 "실패"(failed)를 기록한다.
+ *   직접 공급자(Meta Ads · Google Ads): paid 는 "광고 플랫폼이 올린 상한을 받아들였다" 이다(docs/marketing.md "직접 결제 어댑터").
  *   unknown: 결과가 모호하다(타임아웃 · 5xx · 재시작). 다시 보내지 않고 사람이 대조해 paid | failed 로 닫는다.
  *
  * 금액 · 통화 · 수취인 · 목적 · 공급자 · payload 는 pending 을 떠나면 바뀌지 않고, 그 정규화 해시
@@ -17,6 +18,13 @@ import { MINOR_AMOUNT_TRANSFORMER } from '../common/marketing/money';
 @Index(['campaign_id', 'status'])
 @Index(['status', 'expires_at'])
 @Index('uq_marketing_spend_dedupe', ['campaign_id', 'dedupe_key'], { unique: true, where: "dedupe_key <> ''" })
+// 직접 공급자의 대상(광고 캠페인 상한)마다 열린 요청은 하나 — 캠페인 · 계정을 넘어서도. 둘이 같은 from 으로 계획되면 먼저 실행된
+// 쪽이 다른 쪽의 from 을 바꾸고, 동시에 실행되면 둘 다 from 을 읽고 써서 원장과 실제 상한이 어긋난다(docs/marketing.md
+// "직접 결제 어댑터"). 요청 · 승인 · 실행 · 결과 불명 동안 열려 있고, 결과가 확정되면 풀린다.
+@Index('uq_marketing_spend_open_target', ['target_key'], {
+  unique: true,
+  where: "target_key <> '' AND status IN ('pending', 'approved', 'executing', 'unknown')",
+})
 export class MarketingSpendRequest {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -50,16 +58,26 @@ export class MarketingSpendRequest {
   @Column({ type: 'text', default: '' })
   expected_outcome: string;
 
-  /** manual | webhook — 요청 시점 캠페인 설정의 스냅샷. 에이전트가 고르지 않는다. */
+  /**
+   * manual | webhook | meta_ads | google_ads — 요청 시점 수취인 결제 경로의 스냅샷(수취인의 직접 공급자, 없으면 캠페인의 결제
+   * 방식). 에이전트가 고르지 않는다. 승인 · 실행 때 수취인의 지금 경로와 다르면 실행하지 않는다.
+   */
   @Column({ type: 'varchar' })
   provider: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   provider_credential_id: string | null;
 
-  /** 실행 세부(에이전트 제공, 공급자에게 그대로 전달). */
+  /**
+   * 실행 세부. manual · webhook 은 에이전트가 준 것을 공급자에게 그대로 전달한다. 직접 공급자는 서버가 요청 때 대상을 읽어 만든
+   * 실행 계획(`CeilingPlan` — 대상 · 필드 · from → to)이고, 에이전트는 payload 를 줄 수 없다.
+   */
   @Column({ type: 'simple-json', default: '{}' })
   payload: Record<string, any>;
+
+  /** 직접 공급자의 대상 키(`meta_ads:act_1/2`) — 열린 요청을 대상마다 하나로 묶는다. manual · webhook 은 ''. */
+  @Column({ type: 'varchar', default: '' })
+  target_key: string;
 
   @Column({ type: 'varchar' })
   payload_sha256: string;

@@ -111,7 +111,8 @@ export class MarketingCampaign {
 
   /**
    * 결제 방식 — manual(사람이 AWB 밖에서 결제하고 기록) | webhook(운영자 결제 엔드포인트로 서명된 실행 지시).
-   * 에이전트가 고르지 않는다. 바꾸려면 marketing.approve_spend 가 필요하다.
+   * 직접 공급자(Meta Ads · Google Ads)는 캠페인이 아니라 수취인마다 정한다(payees[].provider) — 이 값은 경로가 없는
+   * 수취인의 기본값이다. 에이전트가 고르지 않는다. 바꾸려면 marketing.approve_spend 가 필요하다.
    */
   @Column({ type: 'varchar', default: 'manual' })
   payment_provider: string;
@@ -120,9 +121,13 @@ export class MarketingCampaign {
   @Column({ type: 'varchar', nullable: true, default: null })
   payment_credential_id: string | null;
 
-  /** 지출 수취인 허용 목록 — 사람만 고친다. [{ name, ref?, note? }] */
+  /**
+   * 지출 수취인 허용 목록 — 사람만 고친다. [{ name, ref?, note?, provider?, credential_id? }]
+   * provider(meta_ads · google_ads)가 있는 수취인은 그 공급자의 상한이 걸린 대상(ref)으로만 돈이 간다(docs/marketing.md
+   * "직접 결제 어댑터"). 없으면 위의 결제 방식(manual · webhook)을 쓴다.
+   */
   @Column({ type: 'simple-json', default: '[]' })
-  payees: Array<{ name: string; ref?: string; note?: string }>;
+  payees: Array<{ name: string; ref?: string; note?: string; provider?: 'meta_ads' | 'google_ads'; credential_id?: string }>;
 
   /** 추적 링크 목적지로 허용하는 도메인(오픈 리다이렉트 방지). */
   @Column({ type: 'simple-json', default: '[]' })
