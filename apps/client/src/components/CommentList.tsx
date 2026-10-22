@@ -9,6 +9,7 @@ import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
 import { useMentionViewportReader } from '../hooks/useMentionViewportReader';
 import { useNotifications } from '../contexts/NotificationContext';
 import MediaLightbox from './common/MediaLightbox';
+import { ticketExecutionFailure } from '../tickets/commentVisibility';
 
 interface CommentListProps {
   comments: Comment[];
@@ -280,6 +281,15 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           const isCompact = ctype === 'system';
           const status = c.status;
           const attachments = c.attachments || [];
+          const failure = ticketExecutionFailure(c);
+          const commentContent = (
+            <div onCopy={handleMentionAwareCopy} style={{
+              fontSize: isCompact ? '12px' : '13px',
+              color: isCompact ? tstyle.text : tokens.colors.textDisabled,
+              lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0,
+              overflowWrap: 'anywhere', wordBreak: 'break-word',
+            }}>{renderMarkdown(c.content)}</div>
+          );
 
           const isReplyTarget = replyingToCommentId === c.id;
           // Tier-1 F: row is unread if created after the user's last read
@@ -446,16 +456,16 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
               </div>
               {/* Comment content — renderMarkdown keeps XSS-safe JSX construction (T-05-02-01)
                  and pills @-mentions (both structured @[type:id|name] tokens and legacy @name). */}
-              <p
-                onCopy={handleMentionAwareCopy}
-                style={{
-                  fontSize: isCompact ? '12px' : '13px',
-                  color: isCompact ? tstyle.text : tokens.colors.textDisabled,
-                  lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0,
-                  // Long URLs / ids / code wrap instead of widening the panel.
-                  overflowWrap: 'anywhere', wordBreak: 'break-word',
-                }}
-              >{renderMarkdown(c.content)}</p>
+              {failure ? (
+                <div style={{ fontSize: '13px', lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                  <strong style={{ color: tokens.colors.warningLight }}>⚠ {failure.title}</strong>
+                  <p style={{ margin: '6px 0', color: tokens.colors.textStrong }}>{failure.guidance}</p>
+                  <details>
+                    <summary style={{ cursor: 'pointer', color: tokens.colors.textMuted }}>실행 로그 보기</summary>
+                    {commentContent}
+                  </details>
+                </div>
+              ) : commentContent}
               {attachments.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                   {attachments.map((att) => {

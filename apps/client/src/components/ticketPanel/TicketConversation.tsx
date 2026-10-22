@@ -8,6 +8,7 @@ import CommentList from '../CommentList';
 import { MentionTextarea, type MentionCandidate } from '../common/MentionTextarea';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import { panelButton, wrapText } from './panelStyles';
+import { isRoutineSystemComment } from '../../tickets/commentVisibility';
 
 // Mirrors the server's raw-upload cap (main.ts): a clear toast at pick time
 // instead of a 413 after the upload (ticket ff3e7337).
@@ -135,12 +136,12 @@ export default function TicketConversation({
     });
   }, [ticket.id]);
 
-  // A reply stays with its question: hiding system rows never hides a thread.
+  // Operational failures remain visible; only routine system history is optional.
   const visible = useMemo(
-    () => (showSystem ? comments : comments.filter(c => c.author_type !== 'system')),
+    () => (showSystem ? comments : comments.filter(c => !isRoutineSystemComment(c))),
     [comments, showSystem],
   );
-  const systemCount = comments.length - comments.filter(c => c.author_type !== 'system').length;
+  const systemCount = comments.filter(isRoutineSystemComment).length;
 
   const pickFiles = () => {
     const input = document.createElement('input');
@@ -207,7 +208,7 @@ export default function TicketConversation({
       {systemCount > 0 && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 8, cursor: 'pointer', alignSelf: 'flex-end' }}>
           <input type="checkbox" checked={showSystem} onChange={e => setShowSystem(e.target.checked)} />
-          시스템 메시지 {systemCount}개 보기
+          일반 시스템 기록 {systemCount}개 보기
         </label>
       )}
 

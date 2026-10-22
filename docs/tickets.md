@@ -12,6 +12,11 @@ they do not create separate work surfaces. See [ownership.md](ownership.md).
 
 ## Ticket
 
+티켓 대화는 실행 실패와 경고를 기본으로 표시한다. `system` 작성자라는
+이유로 `metadata.reason = silent_exit` 코멘트나 경고 메시지를 숨기지 않는다.
+일반 상태 변경 기록만 선택적으로 숨긴다. CLI 인증 실패는 원인과 credential
+확인·갱신 안내를 먼저 보여주며, 원본 실행 로그와 반복 횟수는 보존한다.
+
 | Field | Meaning |
 | --- | --- |
 | `account_id` | Owning account. Determines authorization, credentials, policy, and budget. |
