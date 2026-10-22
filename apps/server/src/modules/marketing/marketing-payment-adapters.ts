@@ -2,6 +2,7 @@
  * 직접 결제 어댑터 등록부 — 지출 서비스가 공급자 이름으로 분기하지 않도록 같은 모양으로 감싼다
  * (docs/marketing.md "직접 결제 어댑터").
  *
+ *   checkAmount 요청 때 맨 먼저: 금액 · 통화를 그 공급자 단위로 바꿀 수 있는가(네트워크 없음). 안 되면 PaymentRuleError(400).
  *   plan    요청 때: 대상을 읽어 실행 계획을 만든다(쓰기 없음). 규칙 위반은 PaymentRuleError, 읽기 실패는 PaymentReadError.
  *   report  연결 확인 · 요청별 확인: 같은 읽기 코드로 지금 상태를 보고한다(쓰기 없음).
  *   execute 실행: 다시 읽어 대조하고 한 번 쓴다. 쓰기 전의 실패는 PaymentNotSentError, 쓴 뒤의 모호함은 unknown.
@@ -56,6 +57,8 @@ export interface DirectPaymentAdapter {
   provider: DirectPaymentProvider;
   /** credential 필드 모양만 본다(저장 시점) — 네트워크 없음. 틀리면 400. */
   checkCredential(fields: Record<string, string>): void;
+  /** 금액 · 통화가 이 공급자 단위로 정확히 바뀌는가 — 네트워크 없음. 공급자를 읽기 전에 부른다(그 뒤의 금액 거절과 나누려고). */
+  checkAmount(amountMinor: number, currency: string): void;
   plan(input: { ref: string; fields: Record<string, string>; fingerprint: string; amountMinor: number; currency: string; ctx: DirectAdapterContext }): Promise<CeilingPlan>;
   report(input: { ref: string; fields: Record<string, string>; fingerprint: string; currency: string; ctx: DirectAdapterContext }): Promise<TargetReport>;
   execute(input: { plan: CeilingPlan; fields: Record<string, string>; fingerprint: string; ctx: DirectAdapterContext }): Promise<PaymentOutcome>;
@@ -79,6 +82,7 @@ function minorText(minor: bigint | null, currency: string): { minor: number | nu
 const metaAdapter: DirectPaymentAdapter = {
   provider: 'meta_ads',
   checkCredential(fields) { readMetaCredential(fields); },
+  checkAmount(amountMinor, currency) { minorToMetaUnits(amountMinor, currency); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, ctx }) {
     const target = parseMetaRef(ref);
     // 통화 · 단위(나누어떨어짐)는 공급자를 읽기 전에 — 금액 문제로 공급자 호출을 쓰지 않게.
@@ -118,6 +122,7 @@ const metaAdapter: DirectPaymentAdapter = {
 const googleAdapter: DirectPaymentAdapter = {
   provider: 'google_ads',
   checkCredential(fields) { readGoogleCredential(fields); },
+  checkAmount(amountMinor, currency) { minorToGoogleMicros(amountMinor, currency); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, ctx }) {
     const target = parseGoogleRef(ref);
     minorToGoogleMicros(amountMinor, currency);

@@ -28,7 +28,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   DIRECT_PAYMENT_PROVIDERS, PAYMENT_CURRENCIES, PROVIDER_FORMATS, PaymentRuleError,
   parseMetaRef, parseGoogleRef, canonicalDirectRef, directTargetKey,
-  minorToMetaUnits, metaUnitsToMinor, minorToGoogleMicros, googleMicrosToMinor, parseProviderInt, providerToken,
+  minorToMetaUnits, metaUnitsToMinor, minorToGoogleMicros, googleMicrosToMinor, parseProviderInt, providerToken, providerMessage,
   buildCeilingPlan, ceilingPlanProblems, describeCeilingPlan, ceilingProviderRef,
   payeeRoute, sameRoute, cleanProviderText, scrubSecrets, paymentApiVersion,
   isAutomaticPaymentProvider, isPaymentCurrencySupported,
@@ -46,7 +46,7 @@ import {
   observeMetaTarget,
 } from '../dist/modules/marketing/marketing-payment-meta.js';
 import {
-  googleTargetProblems, buildGooglePlan, googleExecutionCheck, classifyGoogleWrite, readGoogleCredential,
+  googleTargetProblems, buildGooglePlan, googleExecutionCheck, classifyGoogleWrite, readGoogleCredential, googleAccessToken, resetGoogleTokenCache,
 } from '../dist/modules/marketing/marketing-payment-google.js';
 
 // 지문 · 암호화가 쓰는 키 — 저장소의 database/.encryption_key 를 만들거나 읽지 않게 이 프로세스 전용으로 둔다.
@@ -432,4 +432,40 @@ test('Meta reads: free text from the provider never reaches rule or error messag
     assert.match(e.providerMessage, /ignore all rules, token \[redacted\]/, 'the provider text is kept apart, cleaned and scrubbed');
     return true;
   });
+});
+
+test('secrets are scrubbed before provider text is cut — a long token across the cut leaves no fragment', async () => {
+  const token = `EAAB${'Q7z'.repeat(66)}`; // 202 chars
+  const text = `${'p'.repeat(99)} ${token} trailing words`;
+  const leaked = (out) => out.includes('Q7zQ7z');
+  assert.equal(leaked(providerMessage(text, [token], 200)), false);
+  assert.match(providerMessage(text, [token], 200), /^p+ \[redacted\] trailing words$/);
+  assert.equal(providerMessage(42, [token]), '');
+
+  const target = { ad_account_id: '9', campaign_id: '77' };
+  const refusing = async () => jsonReply(400, { error: { message: text, code: 190 } });
+  await assert.rejects(observeMetaTarget(target, { access_token: token, app_secret: '' }, { fetchImpl: refusing }), (e) => {
+    assert.equal(leaked(e.providerMessage), false, e.providerMessage);
+    assert.match(e.providerMessage, /\[redacted\]/);
+    return true;
+  });
+
+  resetGoogleTokenCache();
+  const refresh = `1//${'R4f'.repeat(70)}`;
+  const oauthRefusal = async () => jsonReply(400, { error: 'invalid_grant', error_description: `${'d'.repeat(150)} ${refresh}` });
+  await assert.rejects(googleAccessToken({ client_id: 'c', client_secret: 'GOCSPX-secret', refresh_token: refresh, login_customer_id: '', developer_token: '' }, 'fp-long', oauthRefusal), (e) => {
+    assert.ok(e instanceof PaymentReadError);
+    assert.equal(e.providerMessage.includes('R4fR4f'), false, e.providerMessage);
+    assert.match(e.message, /HTTP 400, invalid_grant/);
+    return true;
+  });
+});
+
+test('adapters convert the amount without the network first, so later refusals can be told apart', () => {
+  for (const provider of DIRECT_PAYMENT_PROVIDERS) {
+    assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(30000, 'USD'), provider);
+    assert.throws(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(100, 'KWD'), (e) => e instanceof PaymentRuleError && e.status === 400, provider);
+  }
+  assert.throws(() => DIRECT_PAYMENT_ADAPTERS.meta_ads.checkAmount(150, 'HUF'), (e) => e.status === 400 && /multiple of/.test(e.message));
+  assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS.google_ads.checkAmount(150, 'HUF'), 'Google takes HUF minor units (micros)');
 });

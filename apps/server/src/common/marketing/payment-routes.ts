@@ -423,12 +423,21 @@ export function cleanProviderText(value: unknown, max = 300): string {
     .slice(0, max);
 }
 
-/** 비밀 값(6자 이상)이 글에 섞여 있으면 지운다 — 오류 문자열은 에이전트(MCP)와 감사 로그까지 간다. */
+/** 비밀 값(6자 이상)이 글에 섞여 있으면 지운다 — 온전한 값만 찾으므로 글을 자르기 전에 부른다(providerMessage). */
 export function scrubSecrets(text: string, secrets: Array<string | undefined | null>): string {
   let out = text;
   for (const secret of secrets) {
     if (typeof secret === 'string' && secret.length >= 6) out = out.split(secret).join('[redacted]');
   }
   return out;
+}
+
+/**
+ * 공급자가 준 글(오류 메시지)을 저장 · 표시할 수 있게 — 비밀 값을 **먼저** 지우고 정리 · 자른다. 자른 뒤에 지우면 경계에 걸린 비밀
+ * 값의 앞부분이 남는다. 이 글은 `*_untrusted` 로 응답 요약 · 감사에 남고, 응답 요약은 에이전트도 읽는다.
+ */
+export function providerMessage(value: unknown, secrets: Array<string | undefined | null>, max = 300): string {
+  if (typeof value !== 'string') return '';
+  return cleanProviderText(scrubSecrets(value, secrets), max);
 }
 

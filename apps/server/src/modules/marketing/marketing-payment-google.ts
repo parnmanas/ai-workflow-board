@@ -22,8 +22,8 @@ import {
   minorToGoogleMicros,
   parseProviderInt,
   paymentApiVersion,
+  providerMessage,
   providerToken,
-  scrubSecrets,
   type CeilingPlan,
   type GoogleTarget,
 } from '../../common/marketing/payment-routes';
@@ -112,7 +112,7 @@ export async function googleAccessToken(cred: GoogleCredential, fingerprint: str
     const token = reply.json && typeof reply.json.access_token === 'string' ? reply.json.access_token : '';
     if (reply.status !== 200 || !token) {
       const code = /^[a-z_]{1,40}$/.test(String(reply.json?.error || '')) ? String(reply.json.error) : '';
-      const detail = scrubSecrets(cleanProviderText(reply.json?.error_description || '', 200), secretsOf(cred));
+      const detail = providerMessage(reply.json?.error_description || '', secretsOf(cred), 200);
       const hint = code === 'invalid_grant'
         ? ' — the refresh token was revoked or expired (apps in "Testing" get 7-day tokens); issue a new one'
         : '';
@@ -145,7 +145,7 @@ function adsHeaders(cred: GoogleCredential, token: string): Record<string, strin
  * Google API 오류 본문 — `{error:{code,status,message,details:[GoogleAdsFailure]}}` 또는 래퍼 없이. `text` 는 상태 · 오류 코드만(에이전트까지
  * 가는 오류 문장), `message` 는 공급자 글을 정리하고 비밀 값을 지운 것(사람용 요약에 `message_untrusted` 로만).
  */
-function googleError(reply: ProviderReply, cred: GoogleCredential, token: string): { text: string; message: string; status: string; adsFailure: boolean; requestId: string } {
+function googleError(reply: ProviderReply, cred: GoogleCredential, token: string): { text: string; message: string; status: string; code: string; adsFailure: boolean; requestId: string } {
   const body = reply.json && typeof reply.json === 'object' ? (reply.json.error && typeof reply.json.error === 'object' ? reply.json.error : reply.json) : null;
   const details: any[] = Array.isArray(body?.details) ? body.details : [];
   const failure = details.find((d) => typeof d?.['@type'] === 'string' && d['@type'].includes('GoogleAdsFailure'));
@@ -153,13 +153,14 @@ function googleError(reply: ProviderReply, cred: GoogleCredential, token: string
   const errorCode = first && first.errorCode && typeof first.errorCode === 'object'
     ? Object.entries(first.errorCode).map(([k, v]) => `${k}=${String(v)}`).join(',')
     : '';
-  const message = scrubSecrets(cleanProviderText(first?.message || body?.message || reply.text || '', 300), secretsOf(cred, token));
+  const message = providerMessage(first?.message || body?.message || reply.text || '', secretsOf(cred, token), 300);
   const status = providerToken(body?.status, PROVIDER_FORMATS.enumName);
   const codeText = /^[A-Za-z]{1,60}=[A-Z_]{1,80}(,[A-Za-z]{1,60}=[A-Z_]{1,80})*$/.test(errorCode) ? errorCode : '';
   return {
     text: `HTTP ${reply.status}${status ? ` ${status}` : ''}${codeText ? ` (${codeText})` : ''}`,
     message,
     status,
+    code: codeText,
     adsFailure: !!failure,
     requestId: providerToken(reply.header('request-id') || failure?.requestId, PROVIDER_FORMATS.traceId),
   };
@@ -436,6 +437,8 @@ export async function executeGooglePlan(
   const verdict = classifyGoogleWrite(reply, plan, err.adsFailure);
   const response = {
     ...base, sent: true, status: reply.status,
+    ...(err.status ? { error_status: err.status } : {}),
+    ...(err.code ? { error_code: err.code } : {}),
     ...(err.requestId ? { request_id: err.requestId } : {}),
     ...(verdict !== 'ok' && err.message ? { message_untrusted: err.message } : {}),
   };

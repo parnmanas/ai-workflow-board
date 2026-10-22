@@ -64,6 +64,11 @@ const DIRECT_APPROVAL_MAX_AGE_MS = 60 * 60_000;
 const OPEN_TARGET_STATUSES = ['pending', 'approved', 'executing', 'unknown'];
 /** 요청 때 공급자 확인이 실패한 대상은 이만큼 다시 묻지 않는다 — 에이전트의 반복 요청이 공급자 호출로 번지지 않게. */
 const PROVIDER_BACKOFF_MS = 10 * 60_000;
+/**
+ * 공급자를 읽은 뒤 금액 때문에 거절된 대상(계정 최소 상한 · 청구 단위 · 상한 최대값)은 이만큼 쉰다 — 금액을 고쳐 다시 물을 수 있게
+ * 짧게, 그러나 금액만 바꿔 되풀이해도 그때마다 공급자를 읽지는 않게.
+ */
+const AMOUNT_RETRY_MS = 60_000;
 
 export interface PayeePaymentCheck extends TargetReport {
   payee: string;
@@ -342,23 +347,18 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     if (open && open.account_id === campaign.account_id) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
     const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, route.credential_id || '', campaign.account_id);
     const backoffKey = `${campaign.id}\u0000${targetKey}\u0000${fingerprint}`;
-    const now = Date.now();
-    for (const [key, entry] of this.providerBackoff) if (entry.until <= now) this.providerBackoff.delete(key);
-    const held = this.providerBackoff.get(backoffKey);
-    if (held) {
-      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()})`);
-    }
-    let plan: CeilingPlan;
-    try {
-      plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, ctx: this.adapterContext() });
-    } catch (e: any) {
-      if (!(e instanceof PaymentRuleError) && !(e instanceof PaymentReadError)) throw e;
+    /**
+     * 거절 — 감사(`spend.refused`)에 남기고 던질 오류를 돌려준다. 문구는 "다음 사이클에 다시" · "금액을 바꾼다" · "사람이 고쳐야 한다" 를
+     * 나눈다. 공급자를 읽은 뒤의 거절이면 그 (캠페인, 대상, credential) 을 쉬게 한다: 대상 · 인증 문제는 10분, 금액에 달린 것은 1분.
+     */
+    const refuse = async (e: PaymentRuleError | PaymentReadError, afterRead: boolean): Promise<Error> => {
       const retryable = e instanceof PaymentReadError && e.retryable;
+      const amountProblem = !retryable && e.status === 400;
+      const status = retryable ? 502 : amountProblem ? 400 : 409;
       const reason = `${label} check for payee "${payee.name}" failed: ${e.message} — ${retryable
         ? 'the platform may be unavailable; try again in a later cycle'
-        : e.status === 400 ? 'change the amount or ask a person' : 'a person must fix the payee, its credential or the campaign on the platform; do not retry'}`;
-      // 금액 때문에 거절된 것(단위 · 배수)은 금액을 고쳐 다시 물을 수 있어야 한다 — 대상 · 인증 문제만 쉬게 한다.
-      if (e.status !== 400) this.providerBackoff.set(backoffKey, { until: Date.now() + PROVIDER_BACKOFF_MS, reason, status: retryable ? 502 : 409 });
+        : amountProblem ? 'change the amount or ask a person' : 'a person must fix the payee, its credential or the campaign on the platform; do not retry'}`;
+      if (afterRead) this.providerBackoff.set(backoffKey, { until: Date.now() + (amountProblem ? AMOUNT_RETRY_MS : PROVIDER_BACKOFF_MS), reason, status });
       await this.audit.record({
         accountId: campaign.account_id,
         campaignId: campaign.id,
@@ -372,7 +372,27 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
           ...(e instanceof PaymentReadError && e.providerMessage ? { provider_message_untrusted: e.providerMessage } : {}),
         },
       });
-      throw marketingError(retryable ? 502 : e.status === 400 ? 400 : 409, reason);
+      return marketingError(status, reason);
+    };
+    // 금액 · 통화(단위 변환)는 공급자를 읽기 전에 본다 — 공급자 호출 없이 거절하고 쉬게 하지 않는다(금액을 고쳐 바로 다시 물을 수 있다).
+    try {
+      DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(amount, currency);
+    } catch (e: any) {
+      if (e instanceof PaymentRuleError) throw await refuse(e, false);
+      throw e;
+    }
+    const now = Date.now();
+    for (const [key, entry] of this.providerBackoff) if (entry.until <= now) this.providerBackoff.delete(key);
+    const held = this.providerBackoff.get(backoffKey);
+    if (held) {
+      throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()})`);
+    }
+    let plan: CeilingPlan;
+    try {
+      plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, ctx: this.adapterContext() });
+    } catch (e: any) {
+      if (e instanceof PaymentRuleError || e instanceof PaymentReadError) throw await refuse(e, true);
+      throw e;
     }
     this.providerBackoff.delete(backoffKey);
     if (open) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
@@ -553,17 +573,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
 
   async markFailed(id: string, accountId: string, actor: MarketingActor, note = ''): Promise<MarketingSpendRequest> {
     const pre = await this.get(id, accountId);
-    // 직접 결제의 결과 불명은 공급자 반영을 기다린 뒤에만 실패로 닫는다 — "결제 완료" 는 바로 기록할 수 있다(원장을 더 세는 쪽).
-    if (pre.status === 'unknown' && isDirectPaymentProvider(pre.provider) && pre.executing_at
-      && Date.now() - pre.executing_at.getTime() < DIRECT_FAIL_GRACE_MS) {
-      const at = new Date(pre.executing_at.getTime() + DIRECT_FAIL_GRACE_MS).toISOString();
-      throw marketingError(409, `a ceiling change can take up to ${DIRECT_FAIL_GRACE_MS / 60_000} minutes to show on ${DIRECT_PAYMENT_PROVIDER_LABELS[pre.provider]} — record a failure after ${at}, once "inspect" still shows the old value (record "paid" now if it already shows the new one)`);
-    }
     await this.dataSource.transaction(async (manager) => {
       await lockCampaign(manager, pre.campaign_id);
       const row = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
       if (!row) throw marketingError(404, 'spend request not found');
       this.assertReconcilable(row);
+      // 잠금 안에서 다시 읽은 행으로 본다 — 실행 중(executing)에 들어온 요청이, 그 사이 결과 불명이 된 행을 유예 없이 닫지 않게.
+      this.assertFailureRecordable(row, new Date());
       await this.settle(manager, row, 'failed', actor, { error: note || 'marked failed by a person', note, from: row.status });
     });
     this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', id, 'failed');
@@ -998,6 +1014,17 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       return 'the payment credential changed since this request — ask for a new request';
     }
     return null;
+  }
+
+  /**
+   * 직접 결제의 결과 불명은 실행 뒤 DIRECT_FAIL_GRACE_MS 가 지나야 실패로 기록한다 — 공급자 반영이 늦을 수 있어서, 그 전에 "아직 안
+   * 바뀌었다" 를 보고 닫으면 나중에 반영된 상한이 원장 밖에 남는다. "결제 완료" 는 바로 기록할 수 있다(원장을 더 세는 쪽).
+   */
+  private assertFailureRecordable(row: MarketingSpendRequest, now: Date): void {
+    if (row.status !== 'unknown' || !isDirectPaymentProvider(row.provider) || !row.executing_at) return;
+    const allowedAt = row.executing_at.getTime() + DIRECT_FAIL_GRACE_MS;
+    if (now.getTime() >= allowedAt) return;
+    throw marketingError(409, `a ceiling change can take up to ${DIRECT_FAIL_GRACE_MS / 60_000} minutes to show on ${DIRECT_PAYMENT_PROVIDER_LABELS[row.provider]} — record a failure after ${new Date(allowedAt).toISOString()}, once "inspect" still shows the old value (record "paid" now if it already shows the new one)`);
   }
 
   private assertReconcilable(row: MarketingSpendRequest): void {

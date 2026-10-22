@@ -19,8 +19,8 @@ import {
   metaUnitsToMinor,
   parseProviderInt,
   paymentApiVersion,
+  providerMessage,
   providerToken,
-  scrubSecrets,
   type CeilingPlan,
   type MetaTarget,
 } from '../../common/marketing/payment-routes';
@@ -90,7 +90,7 @@ function graphErrorText(reply: ProviderReply, cred: MetaCredential): { text: str
   const sub = err && Number.isInteger(err.error_subcode) ? `/${err.error_subcode}` : '';
   return {
     text: `HTTP ${reply.status}${code !== null ? `, code ${code}${sub}` : ''}`,
-    message: scrubSecrets(cleanProviderText(err?.message || reply.text || '', 300), secretsOf(cred)),
+    message: providerMessage(err?.message || reply.text || '', secretsOf(cred), 300),
     code,
     transient: err?.is_transient === true,
     fbtrace: providerToken(err?.fbtrace_id, PROVIDER_FORMATS.traceId),

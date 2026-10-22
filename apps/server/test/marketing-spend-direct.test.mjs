@@ -551,6 +551,62 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   assert.equal(await interrupted, 0, 'the restart sweep waited for the lock and found the request settled');
   assert.equal((await spendRepo.findOneBy({ id: req13.id })).status, 'failed');
 
+  // 20. 실행 중(executing)에 들어온 "실패 기록" 은, 잠금을 기다리는 사이 결과 불명이 된 행을 유예 없이 닫지 않는다
+  const req14 = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
+  spend.execute = async (id) => spend.get(id, ctx.account.id);
+  assert.equal((await ctx.post(`/spend-requests/${req14.id}/approve`, { payload_sha256: req14.payload_sha256 })).body.status, 'approved');
+  spend.execute = executeNow;
+  await spendRepo.update({ id: req14.id }, { status: 'executing', executing_at: new Date(Date.now() - 30_000) });
+  let enteredRecording;
+  const recordingInside = new Promise((resolve) => { enteredRecording = resolve; });
+  let releaseRecording;
+  const recordingGate = new Promise((resolve) => { releaseRecording = resolve; });
+  const recording = ds.transaction(async (manager) => {
+    await lockCampaign(manager, campaign.id);
+    enteredRecording();
+    await recordingGate;
+    await manager.getRepository('MarketingSpendRequest').createQueryBuilder().update()
+      .set({ status: 'unknown', error: 'Meta did not answer in time after the spend_cap change was sent' })
+      .where('id = :id AND status = :s', { id: req14.id, s: 'executing' })
+      .execute();
+  });
+  await recordingInside;
+  const markedWhileExecuting = ctx.post(`/spend-requests/${req14.id}/mark-failed`, { note: 'pressed while it was executing' });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  releaseRecording();
+  await recording;
+  const tooEarly = await markedWhileExecuting;
+  assert.equal(tooEarly.status, 409, tooEarly.text);
+  assert.match(tooEarly.body.error, /record a failure after/);
+  const stillHeld = (await ctx.api(`/spend-requests/${req14.id}`)).body;
+  assert.equal(stillHeld.status, 'unknown');
+  assert.deepEqual(stillHeld.ledger.map((e) => e.kind), ['reserve'], 'the budget stays held');
+  await pastFailGrace(ctx, req14.id);
+  assert.equal((await ctx.post(`/spend-requests/${req14.id}/mark-failed`, { note: 'after the wait' })).body.status, 'failed');
+
+  // 21. 공급자를 읽은 뒤 금액 때문에 거절되면 그 대상을 1분 쉰다 — 금액만 바꿔 되풀이해도 공급자를 다시 읽지 않는다
+  fake.state.meta.accounts[9].min_campaign_group_spend_cap = '99999999999';
+  const belowMin = await ask({ amount_minor: 10000, payee: 'Meta fall' });
+  assert.match(errText(belowMin), /below the ad account's minimum campaign spend cap/);
+  assert.match(errText(belowMin), /change the amount or ask a person/);
+  const readsAfterRefusal = fake.state.calls.length;
+  const otherAmount = await ask({ amount_minor: 20000, payee: 'Meta fall' });
+  assert.match(errText(otherAmount), /not asking Meta Ads again before/);
+  assert.equal(fake.state.calls.length, readsAfterRefusal, 'no provider read while the amount refusal rests');
+  fake.state.meta.accounts[9].min_campaign_group_spend_cap = '10000';
+  assert.equal((await ctx.post(`/campaigns/${campaign.id}/payment/check`)).status, 200, 'a clean check lifts the rest');
+  const afterCheck = await ask({ amount_minor: 10000, payee: 'Meta fall' });
+  assert.equal(afterCheck.isError, undefined, errText(afterCheck));
+  assert.equal(afterCheck.spend_request.status, 'pending');
+
+  // 22. 대상마다 열린 요청은 하나 — DB 의 부분 유일 인덱스가 직접 막는다. 닫힌 요청은 같은 대상을 몇 개든 가질 수 있다.
+  const openRow = await spendRepo.findOneBy({ id: afterCheck.spend_request.id });
+  const { id: _openId, created_at: _openCreated, updated_at: _openUpdated, ...openCopy } = openRow;
+  await assert.rejects(spendRepo.save(spendRepo.create({ ...openCopy })), /unique|duplicate/i, 'a second open request for the same ad campaign');
+  await spendRepo.save(spendRepo.create({ ...openCopy, status: 'denied' }));
+  assert.equal(await spendRepo.countBy({ target_key: openRow.target_key, status: 'denied' }) >= 1, true, 'closed requests do not hold the target');
+  assert.equal((await ctx.post(`/spend-requests/${openRow.id}/deny`, { note: 'index check done' })).body.status, 'denied');
+
   // 16. MCP 읽기에도 계획 문장 · 직접 수취인 규칙이 실린다. 비밀 값은 어디에도 없다.
   const overview = await ctx.mcp.callTool('get_marketing_campaign', { campaign_id: campaign.id });
   assert.ok(overview.rules.some((r) => /Meta Ads · Google Ads 수취인은 그 광고 캠페인의 지출 상한/.test(r)), 'the agent is told what a direct payee does');
@@ -637,6 +693,8 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   const concurrent = await ctx.post(`/spend-requests/${req3.id}/approve`, { payload_sha256: req3.payload_sha256 });
   assert.equal(concurrent.body.status, 'failed', concurrent.text);
   assert.match(concurrent.body.error, /HTTP 409 ABORTED \(databaseError=CONCURRENT_MODIFICATION\)/);
+  assert.equal(concurrent.body.provider_response.error_status, 'ABORTED');
+  assert.equal(concurrent.body.provider_response.error_code, 'databaseError=CONCURRENT_MODIFICATION', 'the summary keeps the error code too');
   const req4 = (await ask({ amount_minor: 10000, payee: 'Google total' })).spend_request;
   fake.state.overrides.push({ match: (c) => c.path.endsWith('campaignBudgets:mutate'), reply: { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE', message: 'try again' } } } });
   const unavailable = await ctx.post(`/spend-requests/${req4.id}/approve`, { payload_sha256: req4.payload_sha256 });
@@ -646,6 +704,18 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   assert.equal((await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'too early' })).status, 409);
   await pastFailGrace(ctx, req4.id);
   assert.equal((await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'change history shows nothing' })).body.status, 'failed');
+
+  // 거절이라던 쓰기가 실제로는 반영됐으면 unknown(안전망) — 예산을 풀지 않는다
+  const req7 = (await ask({ amount_minor: 10000, payee: 'Google total' })).spend_request;
+  fake.state.overrides.push({
+    match: (c) => c.path.endsWith('campaignBudgets:mutate'),
+    reply: (entry, { u, googleMutate }) => { googleMutate(u, entry.body); return json(400, { error: { code: 400, status: 'INVALID_ARGUMENT', message: 'Request contains an invalid argument.' } }); },
+  });
+  const halfApplied = await ctx.post(`/spend-requests/${req7.id}/approve`, { payload_sha256: req7.payload_sha256 });
+  assert.equal(halfApplied.body.status, 'unknown', halfApplied.text);
+  assert.match(halfApplied.body.error, /refused the change \(HTTP 400 INVALID_ARGUMENT\) but the total budget now reads \d+ micros/);
+  assert.deepEqual((await ctx.api(`/spend-requests/${req7.id}`)).body.ledger.map((e) => e.kind), ['reserve']);
+  assert.equal((await ctx.post(`/spend-requests/${req7.id}/mark-paid`, { provider_ref: halfApplied.body.suggested_provider_ref })).body.status, 'paid');
 
   // 토큰 갱신 실패(실행 때) → 보내지 않고 failed, 쓰기 없음
   const req5 = (await ask({ amount_minor: 10000, payee: 'Google total' })).spend_request;
@@ -686,7 +756,7 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   assert.equal(check.status, 200, check.text);
   const byName = Object.fromEntries(check.body.payees.map((p) => [p.payee, p]));
   assert.equal(byName['Google total'].ok, true, JSON.stringify(byName['Google total']));
-  assert.equal(byName['Google total'].ceiling_text, '1,350.00 USD');
+  assert.equal(byName['Google total'].ceiling_text, '1,450.00 USD');
   assert.equal(byName['Google daily'].ok, false);
 
   const rows = await ds.getRepository('MarketingSpendRequest').findBy({ campaign_id: campaign.id });
