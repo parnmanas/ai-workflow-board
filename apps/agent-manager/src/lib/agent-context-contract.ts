@@ -1,4 +1,5 @@
 import type { HarnessSpec, RuntimeProfileSpec } from './cli-adapters/base.js';
+import { recentComments } from './recent-comments.js';
 import type { TicketRepositoryContext } from './worktree-manager.js';
 import { columnFromStatus, ticketWorkflowStatus } from './ticket-status.js';
 
@@ -136,7 +137,7 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
     throw new AgentContextPreflightError('repository', '연결된 저장소의 준비 결과가 없습니다');
   }
 
-  const comments = Array.isArray(ticket.comments) ? ticket.comments.slice(-5) : [];
+  const comments = Array.isArray(ticket.comments) ? recentComments(ticket.comments) : [];
   const metadata = ticket.__awb_context_metadata || {};
   const boardId = compact(ticket.board_id || ticket.board?.id, 256);
   const projectId = compact(ticket.project_id || ticket.project?.id || ticket.__awb_project?.id, 256);

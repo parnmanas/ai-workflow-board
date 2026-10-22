@@ -6,6 +6,7 @@
 // --append-system-prompt (claude) at spawn time.
 
 import type { ColumnPrompt, PromptComposer } from './event-dispatcher.js';
+import { recentComments } from './recent-comments.js';
 import {
   renderAttachmentBlock,
   type PreparedAttachment,
@@ -409,7 +410,7 @@ export function composeTriggerPrompt(
       appendBaseRepoBlock(lines, ticket.base_repo ?? null, ticket.base_branch ?? null);
     }
     const comments: CommentLike[] = Array.isArray(ticket.comments)
-      ? ticket.comments.slice(-5)
+      ? recentComments<CommentLike>(ticket.comments)
       : [];
     if (comments.length > 0) {
       lines.push('');

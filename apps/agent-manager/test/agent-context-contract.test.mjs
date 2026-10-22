@@ -240,3 +240,29 @@ test('CLAUDE.md는 AGENTS.md를 가리키기만 하고 내용을 복제하지 �
     assert.ok(!claude.includes(heading), `"${heading}"가 CLAUDE.md에도 있다 — 사본이 다시 생겼다`);
   }
 });
+
+for (const order of ['newest first', 'oldest first', 'shuffled']) {
+  test(`recent comments and priorProgress select latest five chronologically: ${order}`, () => {
+    const chronological = Array.from({ length: 8 }, (_, index) => ({
+      created_at: `2026-10-22T00:0${index}:00.000Z`,
+      author: 'Operator',
+      content: `progress-${index}`,
+    }));
+    const comments = order === 'newest first' ? [...chronological].reverse()
+      : order === 'oldest first' ? chronological
+        : [4, 0, 7, 2, 6, 1, 5, 3].map((index) => chronological[index]);
+    const snapshot = structuredClone(comments);
+    Object.freeze(comments);
+    const input = decoratedTicket('stateless', { comments });
+    const contract = buildAgentContextContract({ ticket: input, role: 'assignee', repository });
+    assert.deepEqual(contract.priorProgress, chronological.slice(3).map((comment) => ({
+      at: comment.created_at, author: comment.author, content: comment.content,
+    })));
+    const prompt = composeTriggerPrompt(input, '', '', ticket.id, null);
+    const recent = prompt.split('Recent comments (newest last):')[1];
+    assert.ok(recent, 'work order includes recent comments');
+    assert.deepEqual([...recent.matchAll(/progress-\d/g)].map(([match]) => match),
+      ['progress-3', 'progress-4', 'progress-5', 'progress-6', 'progress-7']);
+    assert.deepEqual(comments, snapshot, 'neither output mutates the REST snapshot');
+  });
+}
