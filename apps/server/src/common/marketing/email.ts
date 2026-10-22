@@ -8,7 +8,11 @@
 import { createHash } from 'node:crypto';
 import { DEFAULT_EMAIL_AD_LABEL } from './marketing-constants';
 
-export const CONSENT_MAX_AGE_MS = 730 * 24 * 60 * 60_000;
+/**
+ * 동의의 유효 기간 — 729 일. 시행령 §62의3 은 "2 년이 되는 해의 동의일과 같은 날 **전까지**" 확인하게 한다. 730 일이면 윤일이
+ * 끼지 않을 때 그 날 당일이 되므로, 하루 앞(같은 날짜의 전날 같은 시각)을 기한으로 둔다 — 어느 시간대에서 봐도 그 날 전이다.
+ */
+export const CONSENT_MAX_AGE_MS = 729 * 24 * 60 * 60_000;
 const NIGHT_START_HOUR = 21;
 const NIGHT_END_HOUR = 8;
 
@@ -60,12 +64,12 @@ export function consentAnchor(c: ConsentPeriod): Date {
   return new Date(Number.isFinite(renewed) && renewed > at ? renewed : at);
 }
 
-/** 이 시각까지 동의가 유효하다 — 재확인 안내는 이 시각 **전에** 보내야 한다(시행령 §62의3). */
+/** 이 시각까지 동의가 유효하다 — 재확인 안내는 이 시각 **전에** 보내야 한다(시행령 §62의3, `CONSENT_MAX_AGE_MS`). */
 export function consentDeadline(c: ConsentPeriod): Date {
   return new Date(consentAnchor(c).getTime() + CONSENT_MAX_AGE_MS);
 }
 
-/** 동의 2 년 이내인가. 시각 하나(동의 시각)나 연락처의 동의 기간을 받는다. */
+/** 동의 기간 안인가. 시각 하나(동의 시각)나 연락처의 동의 기간을 받는다. */
 export function consentFresh(consent: Date | string | ConsentPeriod, now: Date): boolean {
   const deadline = consent instanceof Date || typeof consent === 'string'
     ? new Date(consent).getTime() + CONSENT_MAX_AGE_MS

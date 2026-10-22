@@ -324,7 +324,10 @@ export function contactToJson(c: MarketingContact, notice?: MarketingConsentNoti
     unsubscribed_at: c.unsubscribed_at,
     unsubscribe_source: c.unsubscribe_source,
     consent_notice: notice
-      ? { id: notice.id, status: notice.status, due_at: notice.due_at, policy: notice.policy, sent_at: notice.sent_at, kept_at: notice.kept_at }
+      ? {
+        id: notice.id, status: notice.status, due_at: notice.due_at, policy: notice.policy, sent_at: notice.sent_at,
+        kept_at: notice.kept_at, renewed_at: notice.renewed_at, bounce_type: notice.bounce_type || '',
+      }
       : null,
     created_at: c.created_at,
     updated_at: c.updated_at,
@@ -349,6 +352,9 @@ export function consentNoticeToJson(n: MarketingConsentNotice, contact?: Pick<Ma
     provider_message_id: n.provider_message_id,
     sent_at: n.sent_at,
     kept_at: n.kept_at,
+    renewed_at: n.renewed_at,
+    bounce_type: n.bounce_type || '',
+    event_note: n.event_note || '',
     error: n.error,
     created_at: n.created_at,
   };

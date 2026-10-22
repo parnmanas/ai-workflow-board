@@ -1,8 +1,10 @@
 // Marketing 수신 동의 재확인 안내 — 순수 규칙(docs/marketing.md "동의 재확인 안내", 정보통신망법 §50⑧ · 시행령 §62의3).
 //
 // 고정하는 것:
-//   1. 동의 기간: 기준점은 consent_at 과 consent_renewed_at 중 늦은 쪽, 기한은 거기서 730 일. 기한까지 유효하다.
-//   2. 안내 창: 기한 lead_days 일 전부터 기한 전까지만 — 지난 기한의 동의는 안내로 되살리지 않는다.
+//   1. 동의 기간: 기준점은 consent_at 과 consent_renewed_at 중 늦은 쪽, 기한은 거기서 729 일 — "2 년이 되는 해의 동의일과
+//      같은 날 전까지" 라 어느 시간대에서 봐도 그 날 전이다(윤일이 끼면 더 앞). 기한까지 유효하다.
+//   2. 안내 창: 기한 lead_days 일 전부터 기한(에서 보내기 여유 10 분을 뺀 시각) 전까지만 — 지난 기한의 동의는 안내로
+//      되살리지 않는다. 같은 주기인지는 하루 미만의 차이(저장 왕복 오차)를 넘긴다.
 //   3. 안내 메일: 운영자 문구 뒤에 서버가 법정 항목(보낸 곳 · 동의한 날짜 · 유지 · 철회 방법)과 무응답 처리를 붙인다.
 //      광고 표기를 붙이지 않고, 날짜는 받는 사람의 시간대로 쓴다. 철회는 마케팅 메일과 같은 수신거부 링크 · One-Click.
 //   4. 설정 검증: 발송 시점 범위, 무응답 처리, 제목 한 줄, 길이, 알 수 없는 자리표시자.
@@ -15,8 +17,8 @@ import {
   CONSENT_MAX_AGE_MS, consentAnchor, consentDeadline, consentFresh, localDate,
 } from '../dist/common/marketing/email.js';
 import {
-  DEFAULT_CONSENT_NOTICE_SETTINGS, composeConsentNotice, consentNoticeDueAt, renderConsentNoticeText,
-  sampleConsentNoticeContact, unknownPlaceholders, validateConsentNoticeSettings,
+  CONSENT_NOTICE_SEND_MARGIN_MS, DEFAULT_CONSENT_NOTICE_SETTINGS, composeConsentNotice, consentNoticeDueAt, renderConsentNoticeText,
+  sameConsentCycle, sampleConsentNoticeContact, unknownPlaceholders, validateConsentNoticeSettings,
 } from '../dist/common/marketing/consent-notice.js';
 import {
   CONSENT_NOTICE_LEAD_DAYS, CONSENT_NOTICE_PLACEHOLDERS, CONSENT_NOTICE_POLICIES,
@@ -28,10 +30,10 @@ const sender = {
   contact_email: 'help@awb.example.com', ad_label: '[Ad]',
 };
 
-test('consent period: the later of the consent and its renewal, valid for 730 days', () => {
+test('consent period: the later of the consent and its renewal, valid for 729 days', () => {
   const consentAt = new Date('2024-11-01T03:00:00Z');
   assert.equal(consentDeadline({ consent_at: consentAt }).getTime(), consentAt.getTime() + CONSENT_MAX_AGE_MS);
-  assert.equal(CONSENT_MAX_AGE_MS, 730 * DAY);
+  assert.equal(CONSENT_MAX_AGE_MS, 729 * DAY);
   const renewed = new Date(consentAt.getTime() + CONSENT_MAX_AGE_MS);
   assert.equal(consentAnchor({ consent_at: consentAt, consent_renewed_at: renewed }).getTime(), renewed.getTime());
   assert.equal(consentAnchor({ consent_at: consentAt, consent_renewed_at: null }).getTime(), consentAt.getTime());
@@ -47,13 +49,28 @@ test('consent period: the later of the consent and its renewal, valid for 730 da
   assert.equal(consentFresh(consentAt, new Date(deadline.getTime() + 1)), false, 'a bare consent date still works');
 });
 
-test('notice window: from lead_days before the deadline until the deadline, never after', () => {
+test('the deadline falls before the second anniversary of the consent date, in every time zone', () => {
+  const anniversary = (iso) => `${Number(iso.slice(0, 4)) + 2}${iso.slice(4)}`;
+  for (const at of ['2024-11-01T01:00:00Z', '2024-11-01T14:59:00Z', '2024-11-01T23:30:00Z', '2023-03-01T00:00:00Z', '2025-02-28T12:00:00Z']) {
+    const deadline = consentDeadline({ consent_at: at });
+    for (const tz of ['Asia/Seoul', 'UTC', 'America/New_York', 'Pacific/Kiritimati', 'Pacific/Pago_Pago']) {
+      const before = localDate(deadline, tz);
+      assert.ok(before < anniversary(localDate(at, tz)), `${at} in ${tz}: ${before} is before ${anniversary(localDate(at, tz))}`);
+    }
+  }
+});
+
+test('notice window: from lead_days before the deadline until a margin before it, never after', () => {
   const c = { consent_at: new Date('2024-11-01T03:00:00Z') };
   const deadline = consentDeadline(c);
+  assert.equal(CONSENT_NOTICE_SEND_MARGIN_MS, 10 * 60_000);
   assert.equal(consentNoticeDueAt(c, 30, new Date(deadline.getTime() - 30 * DAY - 1)), null, 'not yet');
   assert.equal(consentNoticeDueAt(c, 30, new Date(deadline.getTime() - 30 * DAY)).getTime(), deadline.getTime(), 'window opens');
-  assert.equal(consentNoticeDueAt(c, 30, new Date(deadline.getTime() - 1)).getTime(), deadline.getTime());
+  assert.equal(consentNoticeDueAt(c, 30, new Date(deadline.getTime() - CONSENT_NOTICE_SEND_MARGIN_MS - 1)).getTime(), deadline.getTime());
+  assert.equal(consentNoticeDueAt(c, 30, new Date(deadline.getTime() - CONSENT_NOTICE_SEND_MARGIN_MS)), null, 'too close to send in time');
   assert.equal(consentNoticeDueAt(c, 30, deadline), null, 'a lapsed consent is not revived by a notice');
+  assert.equal(sameConsentCycle(deadline, new Date(deadline.getTime() + 60 * 60_000)), true, 'a storage round trip (DST hour) is the same cycle');
+  assert.equal(sameConsentCycle(deadline, new Date(deadline.getTime() + DAY)), false, 'a new consent a day later is a new cycle');
   const renewed = { ...c, consent_renewed_at: deadline };
   assert.equal(consentNoticeDueAt(renewed, 30, new Date(deadline.getTime() - DAY)), null, 'the renewed cycle is not due again');
   assert.equal(consentNoticeDueAt(renewed, 30, new Date(deadline.getTime() + CONSENT_MAX_AGE_MS - DAY)).getTime(),

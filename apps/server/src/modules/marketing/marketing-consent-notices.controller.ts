@@ -52,6 +52,18 @@ export class MarketingConsentNoticesController {
     }
   }
 
+  /** 실패한 안내를 다시 보낸다(기한 전인 것만). 공급자 설정을 고친 뒤에 쓴다. */
+  @Post('consent-notices/retry-failed')
+  async retryFailed(@Req() req: Request, @Res() res: Response) {
+    try {
+      const accountId = boundAccountId(req);
+      const requeued = await this.notices.retryFailed(accountId, userActor(req));
+      return res.status(200).json({ requeued, ...(await this.overviewJson(accountId)) });
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to retry consent notices' });
+    }
+  }
+
   @Get('consent-notices')
   async list(@Query('status') status: string, @Query('limit') limit: string, @Req() req: Request, @Res() res: Response) {
     try {

@@ -7,6 +7,7 @@ import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
+import { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
 import { MarketingPost } from '../../entities/MarketingPost';
 import { emailHash } from '../../common/marketing/email';
 import {
@@ -93,6 +94,10 @@ function providerActor(provider: string): MarketingActor {
  * 이벤트는 **그 credential 로 보낸 발송 행에만** 닿는다(행의 credential_id, 그 칸 이전 행은 채널의 지금 credential).
  * 발송 행은 보낼 때 실은 발송 행 id(Resend tag · SendGrid custom_args) → 공급자 message id → 수신 주소의 최근 발송 순으로
  * 찾는다. 처리는 상태 기반이라 공급자가 같은 이벤트를 다시 보내도 결과가 같다.
+ *
+ * 동의 재확인 안내(MarketingConsentNotice)도 같은 tag 에 안내 행 id 를 싣는다. 캠페인 메일을 받은 적 없는 연락처에게 간
+ * 안내의 바운스 · 신고 · 수신거부(이벤트와 mailto 회신)도 그 연락처에 닿는다 — 안내 행에 미도달을 남기고 연락처를 억제한다.
+ * 안내는 목록 발송이 아니라 목록의 신고율에는 세지 않는다.
  */
 @Injectable()
 export class MarketingEmailEventsService {
@@ -106,6 +111,7 @@ export class MarketingEmailEventsService {
     @InjectRepository(MarketingChannel) private readonly channelRepo: Repository<MarketingChannel>,
     @InjectRepository(MarketingCampaign) private readonly campaignRepo: Repository<MarketingCampaign>,
     @InjectRepository(MarketingPost) private readonly postRepo: Repository<MarketingPost>,
+    @InjectRepository(MarketingConsentNotice) private readonly noticeRepo: Repository<MarketingConsentNotice>,
     private readonly audit: MarketingAuditService,
     private readonly feedback: MarketingFeedbackService,
     private readonly listHolds: MarketingListHoldService,
@@ -250,17 +256,41 @@ export class MarketingEmailEventsService {
       .getMany();
   }
 
-  private async findSend(credentialId: string, legacy: string[], ev: EmailProviderEvent): Promise<MarketingEmailSend | null> {
+  /** 그 주소로(이 credential 을 거쳐) 간 가장 최근 재확인 안내 — 캠페인 메일을 받은 적 없는 연락처도 안내는 받았을 수 있다. */
+  private async recentNoticeTo(credentialId: string, address: string): Promise<MarketingConsentNotice | null> {
+    if (!address) return null;
+    const contacts = await this.contactRepo.find({ where: { email_hash: emailHash(address) }, select: ['id'] });
+    if (!contacts.length) return null;
+    return this.noticeRepo.findOne({
+      where: { contact_id: In(contacts.map((c) => c.id)), credential_id: credentialId, status: In(['sent', 'failed']) },
+      order: { created_at: 'DESC' },
+    });
+  }
+
+  /**
+   * 이벤트가 가리키는 메일 — 캠페인 발송 행이나 재확인 안내 행. 실어 보낸 id → 공급자 message id → 수신 주소 순으로 찾고,
+   * 주소로 찾을 때는 캠페인 메일이 먼저다. 둘 다 그 credential 로 보낸 것만이다.
+   */
+  private async findTarget(credentialId: string, legacy: string[], ev: EmailProviderEvent): Promise<
+    { kind: 'send'; row: MarketingEmailSend } | { kind: 'notice'; row: MarketingConsentNotice } | null
+  > {
     if (ev.send_id) {
       const row = await this.sendRepo.findOne({ where: { id: ev.send_id } });
-      if (this.inScope(row, credentialId, legacy)) return row;
+      if (this.inScope(row, credentialId, legacy)) return { kind: 'send', row };
+      const notice = await this.noticeRepo.findOne({ where: { id: ev.send_id } });
+      if (notice && notice.credential_id === credentialId) return { kind: 'notice', row: notice };
     }
     if (ev.provider_message_id) {
       const rows = await this.sendRepo.find({ where: { provider_message_id: ev.provider_message_id }, take: 5 });
       const row = rows.find((r) => this.inScope(r, credentialId, legacy));
-      if (row) return row;
+      if (row) return { kind: 'send', row };
+      const notice = await this.noticeRepo.findOne({ where: { provider_message_id: ev.provider_message_id, credential_id: credentialId } });
+      if (notice) return { kind: 'notice', row: notice };
     }
-    return (await this.recentSendsTo(credentialId, legacy, ev.recipient, 1))[0] || null;
+    const recent = (await this.recentSendsTo(credentialId, legacy, ev.recipient, 1))[0];
+    if (recent) return { kind: 'send', row: recent };
+    const notice = await this.recentNoticeTo(credentialId, ev.recipient);
+    return notice ? { kind: 'notice', row: notice } : null;
   }
 
   private async applyAll(credentialId: string, provider: string, events: EmailProviderEvent[]) {
@@ -268,15 +298,45 @@ export class MarketingEmailEventsService {
     if (!events.length) return counts;
     const legacy = await this.legacyChannelIds(credentialId);
     for (const ev of events) {
-      const row = await this.findSend(credentialId, legacy, ev);
-      if (!row) {
+      const target = await this.findTarget(credentialId, legacy, ev);
+      if (!target) {
         counts.unmatched++;
         continue;
       }
-      if (await this.apply(provider, ev, row)) counts.applied++;
+      const changed = target.kind === 'send' ? await this.apply(provider, ev, target.row) : await this.applyNotice(provider, ev, target.row);
+      if (changed) counts.applied++;
       else counts.unchanged++;
     }
     return counts;
+  }
+
+  /**
+   * 재확인 안내에 온 이벤트 — 안내 행에 미도달을 남기고(닿지 않은 안내로는 동의를 잇지 않는다), 연락처를 캠페인 메일과 같은
+   * 규칙으로 억제한다. 목록 신고율에는 세지 않는다(안내는 목록 발송이 아니다).
+   */
+  private async applyNotice(provider: string, ev: EmailProviderEvent, notice: MarketingConsentNotice): Promise<boolean> {
+    let rowChanged = false;
+    const undelivered = ev.kind === 'bounce' || ev.kind === 'soft_bounce' || ev.repeat;
+    if (undelivered) {
+      const type = ev.repeat ? 'suppressed' : ev.kind === 'soft_bounce' ? 'soft' : 'hard';
+      const won = await this.noticeRepo.createQueryBuilder().update(MarketingConsentNotice)
+        .set({ bounce_type: type, event_note: ev.detail })
+        .where('id = :id', { id: notice.id })
+        .andWhere('bounce_type IN (:...from)', { from: type === 'soft' ? [''] : ['', 'soft'] })
+        .execute();
+      rowChanged = !!won.affected;
+    } else if (ev.kind === 'complaint' && notice.event_note !== ev.detail) {
+      await this.noticeRepo.update({ id: notice.id }, { event_note: ev.detail });
+      rowChanged = true;
+    }
+    let contactChanged = false;
+    if (ev.kind !== 'soft_bounce') {
+      const status: ContactStatus = ev.kind === 'bounce' ? 'bounced' : ev.kind === 'complaint' ? 'complained' : 'unsubscribed';
+      contactChanged = await this.suppressContact(notice.contact_id, status, ev.kind === 'unsubscribe' ? 'provider' : ev.kind, providerActor(provider), {
+        campaignId: '', sendId: '', postId: '', noticeId: notice.id, detail: ev.detail, repeat: ev.repeat,
+      });
+    }
+    return rowChanged || contactChanged;
   }
 
   /** 이벤트 하나를 발송 행 · 연락처에. 무엇이 바뀌었으면 true. */
@@ -323,7 +383,7 @@ export class MarketingEmailEventsService {
     status: ContactStatus,
     source: string,
     actor: MarketingActor,
-    ctx: { campaignId: string; sendId: string; postId: string; detail: string; repeat?: boolean },
+    ctx: { campaignId: string; sendId: string; postId: string; noticeId?: string; detail: string; repeat?: boolean },
   ): Promise<boolean> {
     const contact = contactId ? await this.contactRepo.findOne({ where: { id: contactId } }) : null;
     if (!contact) return false;
@@ -340,7 +400,10 @@ export class MarketingEmailEventsService {
       action: `contact.${status}`,
       actor,
       summary: `${SUPPRESS_SUMMARY[status]}(${source === 'provider' ? '공급자' : source === 'mailto' ? '메일 회신' : actor.name})${ctx.repeat ? ' — 공급자가 예전 기록으로 이번 메일을 보내지 않음' : ''}`,
-      detail: { source, send_id: ctx.sendId, post_id: ctx.postId, provider_detail: ctx.detail, previous_status: contact.status },
+      detail: {
+        source, send_id: ctx.sendId, post_id: ctx.postId, ...(ctx.noticeId ? { consent_notice_id: ctx.noticeId } : {}),
+        provider_detail: ctx.detail, previous_status: contact.status,
+      },
     });
     this.audit.notify(contact.account_id, ctx.campaignId, 'contact', contact.id, status);
     return true;
@@ -352,7 +415,8 @@ export class MarketingEmailEventsService {
     ref: ResendReceivedRef,
   ): Promise<'recorded' | 'unsubscribed' | 'ignored' | 'duplicate' | 'retry'> {
     const legacy = await this.legacyChannelIds(cred.id);
-    if (!(await this.recentSendsTo(cred.id, legacy, ref.from, 1)).length) return 'ignored';
+    // 우리 메일(캠페인 메일이나 재확인 안내)을 받은 사람이 보낸 것만 연다.
+    if (!(await this.recentSendsTo(cred.id, legacy, ref.from, 1)).length && !(await this.recentNoticeTo(cred.id, ref.from))) return 'ignored';
     const fetchImpl = this.fetchImpl || fetch;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -392,7 +456,7 @@ export class MarketingEmailEventsService {
     if (!email.from || email.auth_failed) return 'ignored';
     const legacy = await this.legacyChannelIds(credentialId);
     const candidates = await this.recentSendsTo(credentialId, legacy, email.from, REPLY_CANDIDATES);
-    if (!candidates.length) return 'ignored';
+    if (!candidates.length) return this.handleNoticeReply(credentialId, provider, email);
     if (isAutoReply(email.headers, email.subject)) return 'ignored';
     // 여러 캠페인의 메일을 받은 사람이면, 회신 주소가 이 메일의 받는 주소인 채널의 최근 발송을 고른다.
     const channels = await this.channelRepo.find({ where: { id: In([...new Set(candidates.map((r) => r.channel_id))]) } });
@@ -430,5 +494,22 @@ export class MarketingEmailEventsService {
       sourceKey: `email-reply:${provider}:${id.toLowerCase()}`.slice(0, 250),
     }, actor);
     return duplicate ? 'duplicate' : 'recorded';
+  }
+
+  /**
+   * 캠페인 메일은 받지 않았지만 재확인 안내를 받은 사람의 회신. 제목이 수신거부(List-Unsubscribe 의 mailto)면 수신거부로
+   * 처리하고 안내 메일을 보낸다 — 철회를 놓치지 않게. 그 밖의 글은 이을 캠페인이 없어 기록하지 않는다.
+   */
+  private async handleNoticeReply(credentialId: string, provider: string, email: InboundEmail): Promise<'unsubscribed' | 'ignored' | 'duplicate'> {
+    const notice = await this.recentNoticeTo(credentialId, email.from);
+    if (!notice || isAutoReply(email.headers, email.subject) || !isUnsubscribeRequest(email.subject)) return 'ignored';
+    const actor: MarketingActor = { type: 'system', id: `email-reply:${provider}`, name: '메일 답장' };
+    const changed = await this.suppressContact(notice.contact_id, 'unsubscribed', 'mailto', actor, {
+      campaignId: '', sendId: '', postId: '', noticeId: notice.id, detail: '',
+    });
+    if (!changed) return 'duplicate';
+    const contact = await this.contactRepo.findOne({ where: { id: notice.contact_id } });
+    if (contact) void this.email.sendUnsubscribeNotice(contact);
+    return 'unsubscribed';
   }
 }

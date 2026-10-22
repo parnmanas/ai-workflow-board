@@ -4,7 +4,7 @@
  * 정보통신망법 §50⑧ · 시행령 §62의3: 광고성 정보 수신 동의를 받은 자는 그 동의일부터 2 년마다(2 년이 되는 날 전까지)
  * 받는 사람에게 (1) 전송자 명칭, (2) 수신 동의 사실과 동의한 날짜, (3) 유지 · 철회 의사를 표시하는 방법을 알려야 한다.
  *   - 기산일은 원래 동의일이다. 안내를 보낸 날부터 다시 세지 않는다 — "응답이 없으면 유지" 로 안내가 나간 연락처는 그
- *     주기의 기한부터 다시 2 년이다(`consent_renewed_at`).
+ *     주기의 기한이 오면 그 기한부터 다시 기간을 센다(`consent_renewed_at`).
  *   - 받은 사람이 유지 링크를 누르면 새 동의다 — `consent_at` 이 그 시각이 되고 2 년을 그때부터 다시 센다.
  *   - 무응답의 의미는 안내가 무엇을 제시했느냐로 정해진다(KISA 해석): 철회 방법을 안내했으면 유지(`keep`), 유지 방법을
  *     안내했으면 철회(`lapse`). 아래 고정 문단이 그 정책을 받는 사람에게 그대로 말한다.
@@ -35,6 +35,17 @@ const DAY_MS = 24 * 60 * 60_000;
 /** 유지 링크를 기한 뒤에도 이만큼 받는다 — 늦게 메일을 연 사람이 누른 "유지" 는 그 자체로 새 동의다. */
 export const CONSENT_KEEP_GRACE_MS = 30 * DAY_MS;
 
+/** 기한 이만큼 전까지만 보낸다 — 공급자 호출(최대 15 초)과 서버 사이 시계 차이를 견딘다. */
+export const CONSENT_NOTICE_SEND_MARGIN_MS = 10 * 60_000;
+
+/**
+ * 두 기한이 같은 주기인가. 저장 왕복(DB 정밀도 · 서머타임이 있는 시간대)의 오차는 넘기고, 새 동의로 기한이 바뀐 것(하루
+ * 이상)만 가른다. 하루 안에 다시 동의한 것을 같은 주기로 보는 것은 무해하다.
+ */
+export function sameConsentCycle(a: Date | string, b: Date | string): boolean {
+  return Math.abs(new Date(a).getTime() - new Date(b).getTime()) < DAY_MS;
+}
+
 /** 안내의 유지 링크로 남은 동의의 방법(연락처 consent_method). 가져오기의 방법 목록과 달리 서버만 쓴다. */
 export const RECONFIRM_CONSENT_METHOD = 'reconfirm';
 
@@ -62,11 +73,11 @@ export const DEFAULT_CONSENT_NOTICE_SETTINGS: ConsentNoticeSettingsValue = {
   on_no_response: 'keep',
 };
 
-/** 이번 주기의 안내를 보낼 때인가 — 기한 leadDays 일 전부터 기한 전까지면 그 기한, 아니면 null. */
+/** 이번 주기의 안내를 보낼 때인가 — 기한 leadDays 일 전부터 기한(에서 보내기 여유를 뺀 시각) 전까지면 그 기한, 아니면 null. */
 export function consentNoticeDueAt(c: ConsentPeriod, leadDays: number, now: Date): Date | null {
   const deadline = consentDeadline(c).getTime();
   const t = now.getTime();
-  if (t >= deadline || t < deadline - leadDays * DAY_MS) return null;
+  if (t >= deadline - CONSENT_NOTICE_SEND_MARGIN_MS || t < deadline - leadDays * DAY_MS) return null;
   return new Date(deadline);
 }
 

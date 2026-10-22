@@ -6,6 +6,7 @@ import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingPost } from '../../entities/MarketingPost';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
+import { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
 import { Credential } from '../../entities/Credential';
 import { composeMarketingEmail, consentFresh, isNightFor, nextSendableAt, type EmailSender } from '../../common/marketing/email';
 import { SEND_ID_TAG } from '../../common/marketing/email-events';
@@ -68,6 +69,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(MarketingChannel) private readonly channelRepo: Repository<MarketingChannel>,
     @InjectRepository(MarketingCampaign) private readonly campaignRepo: Repository<MarketingCampaign>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
+    @InjectRepository(MarketingConsentNotice) private readonly noticeRepo: Repository<MarketingConsentNotice>,
     private readonly contacts: MarketingContactService,
     private readonly posts: MarketingPostService,
     private readonly audit: MarketingAuditService,
@@ -206,12 +208,17 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     return stats;
   }
 
-  /** 수신거부 처리 안내(법정 통지) — 그 사람에게 마지막으로 메일을 보낸 채널로, 광고 표기 없이. 실패해도 수신거부는 이미 처리됐다. */
+  /**
+   * 수신거부 처리 안내(법정 통지) — 그 사람에게 마지막으로 메일을 보낸 채널로(캠페인 메일이 없으면 재확인 안내를 보낸 채널),
+   * 광고 표기 없이. 실패해도 수신거부는 이미 처리됐다.
+   */
   async sendUnsubscribeNotice(contact: MarketingContact): Promise<boolean> {
     try {
       const last = await this.sendRepo.findOne({ where: { contact_id: contact.id, status: 'sent' }, order: { sent_at: 'DESC' } });
-      if (!last) return false;
-      const channel = await this.channelRepo.findOne({ where: { id: last.channel_id } });
+      const notice = last ? null : await this.noticeRepo.findOne({ where: { contact_id: contact.id, status: 'sent' }, order: { sent_at: 'DESC' } });
+      const channelId = last?.channel_id || notice?.channel_id;
+      if (!channelId) return false;
+      const channel = await this.channelRepo.findOne({ where: { id: channelId } });
       const sender = channel ? await this.senderFor(channel) : null;
       if (!sender || !contact.email) return false;
       const date = (contact.unsubscribed_at || new Date()).toISOString().slice(0, 10);

@@ -10,12 +10,15 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  *   queued → sending → sent | failed | skipped      deferred(야간 · 발신 채널 없음 · 꺼짐 · 일시 오류) → queued 와 같이 처리
  *
  * `token` 은 이 안내의 "동의 유지" 링크다(256-bit, REST 응답에 나가지 않는다). 철회는 연락처의 수신거부 링크를 그대로 쓴다.
+ * 공급자가 알려 온 바운스 · 스팸 신고는 `bounce_type` · `event_note` 에 남고, 닿지 않은 안내로는 동의를 잇지 않는다.
  */
 @Entity('marketing_consent_notices')
 @Index('uq_marketing_consent_notices_cycle', ['contact_id', 'due_at'], { unique: true })
 @Index('uq_marketing_consent_notices_token', ['token'], { unique: true })
 @Index(['status', 'next_attempt_at'])
+@Index(['status', 'due_at'])
 @Index(['account_id', 'created_at'])
+@Index(['provider_message_id'])
 export class MarketingConsentNotice {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -67,6 +70,18 @@ export class MarketingConsentNotice {
   /** 받은 사람이 이 안내의 유지 링크로 동의를 유지한 시각. */
   @Column({ type: Date, nullable: true, default: null })
   kept_at: Date | null;
+
+  /** "응답이 없으면 유지" 로 나간 안내의 기한이 와서 동의를 그 기한부터 이어 준 시각(연락처 consent_renewed_at). */
+  @Column({ type: Date, nullable: true, default: null })
+  renewed_at: Date | null;
+
+  /** '' | hard | soft | suppressed — 공급자가 알려 온 미도달. 닿지 않은 안내로는 동의를 잇지 않는다. */
+  @Column({ type: 'varchar', default: '' })
+  bounce_type: string;
+
+  /** 공급자가 알려 온 마지막 사유(바운스 · 스팸 신고 — 사람에게만 보이고 잘라서 둔다). */
+  @Column({ type: 'text', default: '' })
+  event_note: string;
 
   /** 마지막 사유(미룬 이유 · 공급자 거절 · 건너뛴 이유). */
   @Column({ type: 'text', default: '' })
