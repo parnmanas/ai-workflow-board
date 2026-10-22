@@ -122,6 +122,40 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, { recursive: true, force: true })));
 });
 
+test('contender result waits for inherited output pipes after process exit', async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-contender-output-'));
+  tempDirs.push(home);
+  const releaseFile = join(home, 'parent-exited');
+  // A descendant keeps the pipes open, but writes only after the parent exit
+  // event. This reproduces the exit/stdio ordering without scheduler timing.
+  const writerSource = `
+    const { existsSync } = await import('node:fs');
+    const deadline = Date.now() + 10000;
+    while (!existsSync(${JSON.stringify(releaseFile)})) {
+      if (Date.now() > deadline) process.exit(1);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    console.log('REJECTED:EAGENTLOCKED');
+    console.error('LATE_DIAGNOSTIC');
+  `;
+  const contender = spawnBarrieredContender(`
+    const { spawn } = await import('node:child_process');
+    ${BARRIER_PROLOGUE}
+    spawn(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(writerSource)}], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+    }).unref();
+  `, process.env);
+  const exited = new Promise(resolve => contender.child.once('exit', resolve));
+  await contender.ready;
+  contender.child.stdin.write('go\n');
+  await exited;
+  await fsp.writeFile(releaseFile, 'go');
+  const result = await contender.done;
+  assert.equal(result.code, 0);
+  assert.match(result.output, /REJECTED:EAGENTLOCKED/);
+  assert.match(result.stderr, /LATE_DIAGNOSTIC/);
+});
+
 test('manager 재시작 orphan 정리는 이전 CLI 종료를 확인한 뒤 sidecar를 회수한다', async () => {
   const dir = await fsp.mkdtemp(join(tmpdir(), 'awb-session-lease-'));
   tempDirs.push(dir);
