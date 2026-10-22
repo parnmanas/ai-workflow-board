@@ -113,3 +113,30 @@ test('changes: only differences are recorded, the platform value lives on the po
   assert.deepEqual(engagementChanges('github', { engagements: 3, replies: 1 }, { reactions: 3, comments: 4 }).changes,
     [{ metric: 'replies', delta: 3, note: 'GitHub comments 1 → 4' }]);
 });
+
+import { parseEngagementPermalink, manualEngagementTarget } from '../dist/common/marketing/engagement-target.js';
+
+test('manual permalinks resolve exact platform refs without following arbitrary URLs', () => {
+  for (const host of ['reddit.com', 'www.reddit.com', 'old.reddit.com', 'new.reddit.com', 'np.reddit.com']) {
+    assert.deepEqual(parseEngagementPermalink(`https://${host}/r/SelfHosted/comments/ABC123/title/?utm_source=x`), { platform: 'reddit', target: 'selfhosted', ref: 't3_abc123' });
+    assert.equal(parseEngagementPermalink(`https://${host}/r/selfhosted/comments/abc123/title/DEF456/`).ref, 't1_def456');
+  }
+  assert.deepEqual(parseEngagementPermalink('https://github.com/Acme/Widget/issues/42'), { platform: 'github', target: 'acme/widget', ref: 'issue:acme/widget#42' });
+  assert.equal(parseEngagementPermalink('https://github.com/acme/widget/issues/42#issuecomment-123').ref, 'comment:acme/widget#42:123');
+  for (const url of ['garbage', 'https://reddit.com.evil/r/test/comments/abc', 'https://reddit.com@evil/r/test/comments/abc', 'https://user@reddit.com/r/test/comments/abc', 'https://reddit.com:8080/r/test/comments/abc', 'ftp://reddit.com/r/test/comments/abc', 'https://redd.it/abc', 'https://reddit.com/r/test/s/abc', 'https://github.com/acme/widget/pull/1', 'https://github.com/acme/widget/issues/1#discussion_r123', 'https://github.com/acme/widget/issues/9007199254740993', 'https://github.com/acme/widget/issues/1/more']) {
+    assert.equal(parseEngagementPermalink(url), null, url);
+  }
+});
+
+test('manual refs require the same account and exact target; overlapping whitelists choose one stable channel', () => {
+  const post = { account_id: 'a', permalink: 'https://reddit.com/r/test/comments/abc/title' };
+  const channel = { account_id: 'a', kind: 'manual' };
+  const valid = { id: 'b', account_id: 'a', kind: 'reddit', targets: ['TEST'] };
+  assert.equal(manualEngagementTarget(post, channel, [valid]).ref, 't3_abc');
+  for (const invalid of [{ ...valid, account_id: 'other' }, { ...valid, targets: ['testing'] }, { ...valid, kind: 'github' }]) {
+    assert.equal(manualEngagementTarget(post, channel, [invalid]), null);
+  }
+  assert.equal(manualEngagementTarget(post, { ...channel, account_id: 'other' }, [valid]), null);
+  assert.equal(manualEngagementTarget(post, { ...channel, kind: 'outreach' }, [valid]), null);
+  assert.equal(manualEngagementTarget(post, channel, [valid, { ...valid, id: 'a' }]).outreachId, 'a');
+});

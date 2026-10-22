@@ -6,12 +6,14 @@ import { MarketingLink } from '../../entities/MarketingLink';
 import { MarketingMetric } from '../../entities/MarketingMetric';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
+import { OutreachChannel } from '../../entities/OutreachChannel';
+import { manualEngagementTarget } from '../../common/marketing/engagement-target';
 import { MarketingPost } from '../../entities/MarketingPost';
 import { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
 import { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { MARKETING_METRICS, type MarketingActor } from '../../common/marketing/marketing-constants';
-import { ENGAGEMENT_METRICS, engagementCollected } from '../../common/marketing/engagement';
+import { ENGAGEMENT_METRICS, ENGAGEMENT_MANUAL_ROWS, engagementCollected } from '../../common/marketing/engagement';
 import { buildReport } from '../../common/marketing/report';
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
@@ -201,7 +203,17 @@ export class MarketingAnalyticsService {
   ): Promise<MarketingMetric[]> {
     if (!Array.isArray(observations) || !observations.length) throw marketingError(400, 'observations must be a non-empty array');
     if (observations.length > MAX_OBSERVATIONS) throw marketingError(400, `at most ${MAX_OBSERVATIONS} observations per call`);
-    const channels = new Map((await this.channelRepo.find({ where: { campaign_id: campaign.id }, select: ['id', 'kind', 'platform', 'status'] })).map((c) => [c.id, c]));
+    const channels = new Map((await this.channelRepo.find({ where: { campaign_id: campaign.id }, select: ['id', 'account_id', 'kind', 'platform', 'status'] })).map((c) => [c.id, c]));
+    const [published, outreach] = await Promise.all([
+      this.postRepo.find({ where: { campaign_id: campaign.id, account_id: campaign.account_id, status: 'published' },
+        select: ['id', 'account_id', 'channel_id', 'permalink', 'engagement', 'engagement_error'] }),
+      this.channelRepo.manager.getRepository(OutreachChannel).find({ where: { account_id: campaign.account_id } }),
+    ]);
+    // Keep the guard after collection ends or its whitelist is removed: stored deltas still contribute to reports.
+    const collectedManual = published.filter((p) => channels.get(p.channel_id)?.kind === 'manual'
+      && (!!p.engagement?.read_at || (p.engagement_error !== ENGAGEMENT_MANUAL_ROWS && !!manualEngagementTarget(p, channels.get(p.channel_id), outreach))));
+    const manualPosts = new Set(collectedManual.map((p) => p.id));
+    const manualChannels = new Set(collectedManual.map((p) => p.channel_id));
     const rows = [] as MarketingMetric[];
     for (const [i, raw] of observations.entries()) {
       const o = (raw || {}) as Record<string, unknown>;
@@ -229,11 +241,11 @@ export class MarketingAnalyticsService {
           const channel = id ? channels.get(id) : undefined;
           return !!channel && engagementCollected(channel);
         });
-        if (tracked) {
-          throw marketingError(400, `observations[${i}]: ${metric} of posts on reddit/GitHub outreach channels are read from the platform by the server (source connector) — do not record them`);
+        if (tracked || manualPosts.has(postId) || manualChannels.has(channelId)) {
+          throw marketingError(400, `observations[${i}]: ${metric} of automatically collected reddit/GitHub posts are read from the platform by the server (source connector) — do not record them`);
         }
-        if (!channelId && !postChannelId && [...channels.values()].some((c) => engagementCollected(c))) {
-          throw marketingError(400, `observations[${i}]: give ${metric} a channel — the server reads it for this campaign's reddit/GitHub outreach channels, and a campaign-wide value would count those again`);
+        if (!channelId && !postChannelId && ([...channels.values()].some((c) => engagementCollected(c)) || manualPosts.size > 0)) {
+          throw marketingError(400, `observations[${i}]: give ${metric} a channel — the server reads it for this campaign's reddit/GitHub posts, and a campaign-wide value would count those again`);
         }
       }
       let at = new Date();

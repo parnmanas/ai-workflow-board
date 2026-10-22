@@ -9,6 +9,7 @@ import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import {
   ENGAGEMENT_ALIGN_MS,
+  ENGAGEMENT_MANUAL_ROWS,
   ENGAGEMENT_METRICS,
   ENGAGEMENT_SOURCE,
   ENGAGEMENT_WINDOW_MS,
@@ -16,8 +17,10 @@ import {
   engagementChanges,
   engagementRequestBudget,
   engagementTracked,
+  firstEngagementReadAt,
   nextEngagementReadAt,
 } from '../../common/marketing/engagement';
+import { manualEngagementTarget, parseEngagementPermalink } from '../../common/marketing/engagement-target';
 import { SYSTEM_MARKETING_ACTOR } from '../../common/marketing/marketing-constants';
 import { GitHubForbiddenError, GitHubRateLimitError } from '../../services/github-connector.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -40,12 +43,12 @@ const MAX_ERROR = 500;
 /** 수집기가 읽는 칸만 — 본문은 싣지 않는다. */
 const POST_FIELDS: (keyof MarketingPost)[] = [
   'id', 'account_id', 'campaign_id', 'channel_id', 'status', 'external_item_id', 'published_at', 'created_at',
-  'engagement', 'engagement_next_at', 'engagement_rev', 'engagement_error',
+  'permalink', 'engagement', 'engagement_next_at', 'engagement_rev', 'engagement_error',
 ];
 
 export const ENGAGEMENT_RATE_WAIT = 'waiting for room under the channel\'s rate limit';
 export const ENGAGEMENT_ARCHIVED = 'campaign archived — not read while it is archived';
-export const ENGAGEMENT_MANUAL_ROWS = 'not collected: engagements or replies were recorded by hand for it before automatic collection — reading it too would count them twice';
+export { ENGAGEMENT_MANUAL_ROWS } from '../../common/marketing/engagement';
 
 export interface EngagementSweepResult {
   /** 읽은 글. */
@@ -86,7 +89,7 @@ function publishedAt(post: MarketingPost): Date {
  * MarketingEngagementService — 참여 지표 자동 수집(docs/marketing.md "참여 지표 자동 수집", 규칙은
  * common/marketing/engagement.ts).
  *
- * reddit · GitHub outreach 채널에 서버가 게시한 글을 게시 후 14 일 동안 그 채널의 커넥터(`readEngagement`)로 읽고, 직전에
+ * reddit · GitHub outreach 게시물과 같은 계정 화이트리스트에 맞는 manual 게시물을 게시 후 14 일 동안 그 채널의 커넥터(`readEngagement`)로 읽고, 직전에
  * 읽은 값과의 변화량을 MarketingMetric(source `connector`)에 남긴다.
  *   - 일정: 게시 1 시간 뒤 첫 읽기, 그 뒤 글의 나이에 따라 1 · 3 · 12 시간 간격, 14 일째에 마지막으로 읽는다. 실패와 보관된
  *     캠페인의 글도 같은 간격을 따른다. rate limit 때문에 지금 읽지 못한 글은 30 분 뒤에 다시 본다 — 기간이 끝나면 그대로 끝.
@@ -161,14 +164,16 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
       ]);
       const channelById = new Map(channels.map((c) => [c.id, c]));
       const campaignById = new Map(campaigns.map((c) => [c.id, c]));
+      const outreachChannels = await this.outreachRepo.find({ where: { account_id: In([...new Set(due.map((p) => p.account_id))]) } });
       const byOutreach = new Map<string, MarketingPost[]>();
       for (const post of due) {
         const channel = channelById.get(post.channel_id);
         const campaign = campaignById.get(post.campaign_id);
+        const manual = manualEngagementTarget(post, channel, outreachChannels);
         let stop = '';
         if (!campaign || campaign.account_id !== post.account_id) stop = 'campaign not found';
-        else if (!channel || channel.account_id !== post.account_id || !engagementTracked(channel)) stop = 'not a post on a reddit/GitHub outreach channel';
-        else if (!post.external_item_id) stop = 'no platform id was recorded when it was published';
+        else if (!channel || channel.account_id !== post.account_id || (!engagementTracked(channel) && channel.kind !== 'manual')) stop = 'not a post on a reddit/GitHub outreach channel';
+        else if (channel.kind !== 'manual' && !post.external_item_id) stop = 'no platform id was recorded when it was published';
         if (stop) {
           if (await this.settle(post, { engagement_next_at: null, engagement_error: stop })) out.stopped++;
           continue;
@@ -178,13 +183,33 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
           if (await this.fail(post, now, ENGAGEMENT_ARCHIVED)) out.deferred++;
           continue;
         }
-        if (!channel!.outreach_channel_id) {
+        if (channel!.kind === 'manual' && !manual) {
+          if (await this.fail(post, now, 'no same-account outreach whitelist matches this permalink')) out.failed++;
+          continue;
+        }
+        if (manual && !post.engagement?.read_at) {
+          // A whitelist may have been added after scheduling, while manual recording was still allowed.
+          const handRecorded = { account_id: post.account_id, metric: In([...ENGAGEMENT_METRICS]), source: Not(ENGAGEMENT_SOURCE) };
+          const counted = await this.metricRepo.exists({ where: [
+            { ...handRecorded, post_id: post.id },
+            { ...handRecorded, channel_id: post.channel_id },
+            { ...handRecorded, campaign_id: post.campaign_id, channel_id: '', post_id: '' },
+          ] });
+          if (counted) {
+            if (await this.settle(post, { engagement_next_at: null, engagement_error: ENGAGEMENT_MANUAL_ROWS })) out.stopped++;
+            continue;
+          }
+        }
+        // Resolved identifiers are request-local; manual publishing provenance stays unchanged.
+        if (manual) post.external_item_id = manual.ref;
+        const outreachId = manual?.outreachId || channel!.outreach_channel_id;
+        if (!outreachId) {
           if (await this.fail(post, now, 'the channel has no outreach connection — reconnect it')) out.failed++;
           continue;
         }
-        const group = byOutreach.get(channel!.outreach_channel_id) || [];
+        const group = byOutreach.get(outreachId) || [];
         group.push(post);
-        byOutreach.set(channel!.outreach_channel_id, group);
+        byOutreach.set(outreachId, group);
       }
       for (const [outreachId, posts] of byOutreach) {
         await this.collectChannel(outreachId, posts, channelById, now, clock, out, changedCampaigns);
@@ -243,7 +268,7 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
     const perRequest = Math.max(1, Math.floor(connector.engagementRefsPerRequest || 1));
     // 한 요청에 여러 글을 읽는 채널이면 마지막 요청의 남는 자리를 곧 차례가 올 글로 채운다.
     const room = Math.ceil(usable.length / perRequest) * perRequest - usable.length;
-    const early = room > 0 ? await this.upcoming(usable, now, room) : [];
+    const early = room > 0 ? await this.upcoming(usable.filter((p) => channels.get(p.channel_id)?.kind === 'outreach'), now, room) : [];
     const queue = [...usable, ...early];
     let requests = 0;
     for (let i = 0; i < queue.length; i += perRequest) {
@@ -287,7 +312,7 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
           if (await this.fail(post, now, 'the platform did not return it (deleted, removed, or outside the channel whitelist)')) out.failed++;
           continue;
         }
-        const changed = await this.record(post, channels.get(post.channel_id)!, reading, now);
+        const changed = await this.record(post, outreach.kind, reading, now);
         if (changed === null) continue;
         out.read++;
         if (reading.availability) out.stopped++;
@@ -301,6 +326,7 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
 
   /** 같은 채널들에서 `ENGAGEMENT_ALIGN_MS` 안에 차례가 오는 글 — 이번 요청에 같이 싣는다. */
   private async upcoming(due: MarketingPost[], now: Date, limit: number): Promise<MarketingPost[]> {
+    if (!due.length) return [];
     const taken = new Set(due.map((p) => p.id));
     const rows = await this.postRepo.find({
       where: {
@@ -325,7 +351,6 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
     const legacy = await this.postRepo.find({
       where: {
         status: 'published',
-        external_item_id: Not(''),
         engagement_next_at: IsNull(),
         engagement_rev: 0,
         published_at: MoreThanOrEqual(new Date(now.getTime() - ENGAGEMENT_WINDOW_MS)),
@@ -348,8 +373,13 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
     const manualPosts = new Set(manual.map((m) => m.post_id).filter(Boolean));
     const manualCampaigns = new Set(manual.filter((m) => !m.channel_id && !m.post_id).map((m) => m.campaign_id));
     for (const post of legacy) {
+      // Non-platform manual URLs never enter the collector. Mark examined rows so they cannot starve the batch.
+      if (!post.external_item_id && !parseEngagementPermalink(post.permalink)) {
+        await this.settle(post, {});
+        continue;
+      }
       const counted = manualChannels.has(post.channel_id) || manualPosts.has(post.id) || manualCampaigns.has(post.campaign_id);
-      await this.settle(post, counted ? { engagement_error: ENGAGEMENT_MANUAL_ROWS } : { engagement_next_at: now });
+      await this.settle(post, counted ? { engagement_error: ENGAGEMENT_MANUAL_ROWS } : { engagement_next_at: new Date(Math.max(now.getTime(), firstEngagementReadAt(publishedAt(post)).getTime())) });
     }
   }
 
@@ -388,8 +418,8 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
    * 읽은 값을 남긴다 — 게시물의 값과 변화량 행을 한 트랜잭션에서, 맡은 rev 그대로일 때만(그리고 rev 를 올린다). 바뀐 것이
    * 있으면 true, 없으면 false, 그 사이 다른 서버가 맡았으면 null.
    */
-  private async record(post: MarketingPost, channel: MarketingChannel, reading: EngagementReading, now: Date): Promise<boolean | null> {
-    const { changes, value } = engagementChanges(channel.platform, post.engagement, reading);
+  private async record(post: MarketingPost, platform: string, reading: EngagementReading, now: Date): Promise<boolean | null> {
+    const { changes, value } = engagementChanges(platform, post.engagement, reading);
     value.read_at = now.toISOString();
     if (reading.availability) {
       value.availability = reading.availability;

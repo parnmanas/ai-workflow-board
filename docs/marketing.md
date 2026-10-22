@@ -600,6 +600,12 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 서버가 reddit · GitHub outreach 채널에 게시한 글은 게시 후 **14일** 동안 서버가 그 채널의 커넥터로 참여를 읽는다(`MarketingEngagementService`, 규칙은 `common/marketing/engagement.ts`). 에이전트 capability 와는 무관하다.
 
+사람이 `manual` 채널에 올리고 permalink를 기록한 글도 포함한다. reddit의 `/r/<subreddit>/comments/<id>/...`(댓글 포함), GitHub의 `/owner/repo/issues/<number>`와 `#issuecomment-<id>`를 읽는다. 단축·공유 링크, PR·discussion 링크, 임의 호스트는 해석하지 않으며 URL을 직접 요청하거나 redirect를 따라가지 않는다.
+- 같은 Account의 OutreachChannel이 해당 subreddit/repo를 정확히 화이트리스트한 경우에만 그 커넥터와 요청 예산을 쓴다. 여러 채널이 맞으면 ID 순서로 하나를 고른다. 게시 정책·폴링 enabled와 무관한 읽기이며, 기존 outreach 수집과 같이 일시정지 채널도 읽는다.
+- manual 글의 `external_item_id`와 게시 채널은 바꾸지 않는다. 플랫폼 이름과 API 참조는 permalink에서 얻고, 지표는 원래 마케팅 채널에 남긴다.
+- 다음 sweep에서 일정을 잡으며 게시 1시간 전에는 읽지 않는다. 일치하는 화이트리스트가 없으면 요청 없이 일반 실패 간격으로 재확인하고 14일 뒤 끝낸다. 처음 읽기 전에는 기존 수동 지표를 다시 확인한다.
+- 자동 수집 가능한 manual 글의 engagements/replies 및 그 글을 포함하는 채널·캠페인 전체 값은 수동 기록을 거부한다. 같은 manual 채널의 수집하지 않는 글은 post_id를 지정해 기록할 수 있다. 이미 읽은 글은 화이트리스트가 없어지거나 기간이 끝나도 중복 기록을 막는다. 기존 수동 기록 때문에 수집에서 제외된 글은 수동 기록을 계속할 수 있다.
+
 | 플랫폼 | `engagements` | `replies` | 읽는 곳 |
 | --- | --- | --- | --- |
 | reddit | score(순 추천 수) | 댓글 수(`num_comments`) | `/api/info` — 한 요청에 100개 |
@@ -805,7 +811,6 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 ## 후속 (이 문서 범위 밖)
 
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
-- 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
 - 동의 재확인 안내에 온 회신(수신거부 제목 밖)을 사람이 보게 하기 — 지금은 이을 캠페인이 없어 기록하지 않는다
 - 정책 기반 자동 게시

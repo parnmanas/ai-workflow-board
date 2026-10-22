@@ -1,7 +1,7 @@
 /**
  * 참여 지표 자동 수집의 순수 규칙 — docs/marketing.md "참여 지표 자동 수집".
  *
- * reddit · GitHub outreach 채널에 서버가 게시한 글의 참여를 게시 후 14 일 동안 커넥터로 읽는다. reddit score ·
+ * reddit · GitHub outreach 게시물과 같은 계정 화이트리스트에 맞는 manual 게시물의 참여를 게시 후 14 일 동안 커넥터로 읽는다. reddit score ·
  * GitHub 반응 합계는 `engagements`, 댓글 수는 `replies` 다. 플랫폼이 주는 값은 누적 수준값이라, 읽을 때마다 직전에
  * 읽은 값과의 **변화량**을 MarketingMetric(source `connector`)에 남긴다. 그 행들의 합이 플랫폼의 현재 값이고 기간
  * 합이 그 기간의 증가분이므로, 리포트의 누적형 합산(report.ts)을 그대로 탄다. 읽은 값 자체는 게시물
@@ -14,6 +14,8 @@ const DAY_MS = 24 * HOUR_MS;
 
 /** MarketingMetric.source — 서버가 커넥터로 읽은 값. */
 export const ENGAGEMENT_SOURCE = 'connector';
+/** Existing manual totals cannot be imported a second time. */
+export const ENGAGEMENT_MANUAL_ROWS = 'not collected: engagements or replies were recorded by hand for it before automatic collection — reading it too would count them twice';
 /** 게시 후 이 기간 동안 읽는다. 마지막 읽기는 기간 끝에 맞춘다. */
 export const ENGAGEMENT_WINDOW_MS = 14 * DAY_MS;
 /** 게시 후 첫 읽기까지. */

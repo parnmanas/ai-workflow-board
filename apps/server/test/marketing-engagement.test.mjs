@@ -547,4 +547,70 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
     assert.equal((await row(terminal.id)).engagement_next_at, null);
   }
 
+  // Manual publication uses the permalink's platform and an account-owned whitelist, not channel.platform.
+  const manualCampaign = await makeCampaign('Manual engagement');
+  const manualChannel = (await post(`/campaigns/${manualCampaign.id}/channels`, { platform: 'forum', target: 'https://example.org/manual' })).body;
+  await post(`/channels/${manualChannel.id}/approve`, { mode: 'manual' });
+  const manualPost = async (permalink) => {
+    const draft = await publish(manualChannel, { campaign_id: manualCampaign.id });
+    const result = await post(`/posts/${draft.id}/mark-published`, { permalink });
+    assert.equal(result.status, 200, result.text);
+    await postRepo.update(draft.id, { published_at: at(0) });
+    return result.body;
+  };
+  const mr = await manualPost('https://www.reddit.com/r/selfhosted/comments/manual1/title/');
+  const mg = await manualPost('https://github.com/acme/widget/issues/123');
+  const mc = await manualPost('https://github.com/acme/widget/issues/123#issuecomment-456');
+  const unlisted = await manualPost('https://reddit.com/r/notallowed/comments/manual2/title/');
+  const foreignAccount = await createAccount(app, getDataSourceToken, 'foreign-manual-engagement');
+  await ds.getRepository('OutreachChannel').save(ds.getRepository('OutreachChannel').create({
+    account_id: foreignAccount.id, kind: 'reddit', name: 'Foreign whitelist', targets: ['notallowed'],
+  }));
+  redditFake.engagement.set('t3_manual1', { reactions: 8, comments: 2 });
+  githubFake.engagement.set('issue:acme/widget#123', { reactions: 3, comments: 1 });
+  githubFake.engagement.set('comment:acme/widget#123:456', { reactions: 2, comments: null });
+  await collector.sweep(at(30 * MIN));
+  assert.equal((await row(mr.id)).engagement?.read_at, undefined, 'manual first read waits an hour');
+  await setCap(reddit, 1);
+  const manualLimited = await collector.sweep(at(HOUR));
+  assert.ok(manualLimited.deferred >= 1);
+  assert.equal((await row(mr.id)).engagement?.read_at, undefined, 'uses the matched outreach channel budget');
+  assert.equal((await row(mg.id)).engagement.engagements, 3);
+  assert.equal((await row(mc.id)).engagement.engagements, 2);
+  assert.equal((await row(unlisted.id)).engagement?.read_at, undefined, 'no matching whitelist means no request');
+  await setCap(reddit, 0);
+  await collector.sweep(at(90 * MIN));
+  assert.equal((await row(mr.id)).engagement.engagements, 8);
+  assert.equal((await row(mr.id)).external_item_id, '', 'does not pretend the server published it');
+  assert.deepEqual((await connectorRows(mr.id, 'engagements')).map((r) => r.note), ['reddit score 0 → 8']);
+  const manualRec = (observations) => post(`/campaigns/${manualCampaign.id}/metrics`, { observations });
+  for (const observation of [
+    { metric: 'engagements', value: 1, post_id: mr.id },
+    { metric: 'replies', value: 1, channel_id: manualChannel.id },
+    { metric: 'engagements', value: 1 },
+  ]) assert.equal((await manualRec([observation])).status, 400);
+  assert.equal((await manualRec([{ metric: 'engagements', value: 1, post_id: unlisted.id }])).status, 201, 'uncollected posts remain manually recordable');
+  assert.equal((await manualRec([{ metric: 'impressions', value: 100, post_id: mr.id }])).status, 201);
+  // Removing the whitelist stops new requests but cannot permit double counting old deltas.
+  await ds.getRepository('OutreachChannel').update(reddit.outreach_channel_id, { targets: [] });
+  const beforeRemoval = redditFake.engagementCalls.length;
+  await collector.sweep(at(3 * HOUR));
+  assert.equal(redditFake.engagementCalls.length, beforeRemoval);
+  assert.equal((await manualRec([{ metric: 'engagements', value: 1, post_id: mr.id }])).status, 400);
+
+  // Manual metrics written before a whitelist is added must not be imported again.
+  const lateCampaign = await makeCampaign('Late whitelist');
+  const lateChannel = await ds.getRepository('MarketingChannel').save(ds.getRepository('MarketingChannel').create({
+    account_id: account.id, campaign_id: lateCampaign.id, kind: 'manual', platform: 'reddit', status: 'active', target: 'later', target_key: 'later', name: 'Late manual',
+  }));
+  const late = await postRepo.save(postRepo.create({ account_id: account.id, campaign_id: lateCampaign.id, channel_id: lateChannel.id,
+    status: 'published', body: 'manual', permalink: 'https://reddit.com/r/later/comments/late1/title/', published_at: at(0) }));
+  await collector.sweep(at(HOUR));
+  assert.equal((await post(`/campaigns/${lateCampaign.id}/metrics`, { observations: [{ metric: 'engagements', value: 4, post_id: late.id }] })).status, 201);
+  await ds.getRepository('OutreachChannel').update(reddit.outreach_channel_id, { targets: ['selfhosted', 'later'] });
+  await collector.sweep(at(2 * HOUR));
+  assert.equal((await row(late.id)).engagement_error, ENGAGEMENT_MANUAL_ROWS);
+  assert.equal((await connectorRows(late.id, 'engagements')).length, 0);
+  assert.equal((await post(`/campaigns/${lateCampaign.id}/metrics`, { observations: [{ metric: 'engagements', value: 1, post_id: late.id }] })).status, 201, 'continues manual tracking after exclusion');
+
 });
