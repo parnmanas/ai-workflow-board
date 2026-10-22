@@ -334,10 +334,14 @@ interface SubagentRecord {
   room_id: string | null;
   started_at: number;
   expected_completion_at: number;
+  /** Per-spawn idle window; preserves an explicit SpawnSpec TTL override. */
+  ttlMs?: number;
+  /** Last non-empty stdout chunk, independent of parsing or capture limits. */
+  lastStdoutAt?: number;
   /** ticket b972b28c: set once #maybeEscalateLongRunning has logged its
    *  one-time runaway-loop notice for this record, so repeated sweep ticks
    *  don't spam the log while a genuinely long-running one-shot keeps
-   *  producing live-background-task evidence. */
+   *  producing stdout or live-background-task evidence. */
   progressEscalatedAt?: number;
   config_path: string | null;
   /** ST-6: false when config_path is a managed-agent's persistent
@@ -1120,6 +1124,7 @@ export class SubagentManager implements SubagentManagerContract {
         room_id: spec.roomId || null,
         isActionRoom: spec.kind === 'chat' && !!spec.isActionRoom,
         started_at: Date.now(),
+        ttlMs: (spec.ttlMinutes ?? this.#config.delegation.ttlMinutes ?? 15) * 60_000,
         expected_completion_at:
           Date.now() + (spec.ttlMinutes ?? this.#config.delegation.ttlMinutes ?? 15) * 60_000,
         config_path: configPath,
@@ -1851,6 +1856,12 @@ export class SubagentManager implements SubagentManagerContract {
     };
 
     if (child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        const record = this.#map.get(pid);
+        if (chunk.length > 0 && record && record.kind !== 'reservation') {
+          record.lastStdoutAt = Date.now();
+        }
+      });
       const rlOut = createInterface({ input: child.stdout });
       rlOut.on('line', (line) => {
         const rec = this.#map.get(pid);
@@ -2264,7 +2275,7 @@ export class SubagentManager implements SubagentManagerContract {
         // ticket b972b28c: a wall-clock TTL alone is not evidence of a stuck
         // subagent — a timer expiring means CHECK, not KILL (same governing
         // principle as BaseSessionManager's idle reaper, ticket 6ff827cb).
-        // Minimum signal: a live non-benign descendant process (e.g. a
+        // A live non-benign descendant process (e.g. a
         // build/test the subagent spawned and is waiting on) means real work
         // is in flight — slide the deadline instead of reaping it out from
         // under that work.
@@ -2272,14 +2283,20 @@ export class SubagentManager implements SubagentManagerContract {
         try {
           liveTasks = await findLiveBackgroundTasks(pid);
         } catch (err: any) {
-          log(`Sweep: pid=${pid} live-task probe failed, proceeding with TTL reap: ${err?.message ?? err}`);
+          log(`Sweep: pid=${pid} live-task probe failed, checking stdout before TTL reap: ${err?.message ?? err}`);
         }
         if (this.#map.get(pid) !== record) continue; // dropped while we awaited
 
-        if (liveTasks.length > 0) {
-          record.expected_completion_at = now + TTL_SWEEP_INTERVAL_MS;
+        // Re-read after the async process probe: stdout may arrive while it runs.
+        // Use the spawn's TTL as an idle window, including partial JSONL chunks.
+        const checkedAt = Date.now();
+        const stdoutDeadline = record.lastStdoutAt === undefined ? 0
+          : record.lastStdoutAt + (record.ttlMs ?? (this.#config.delegation.ttlMinutes ?? 15) * 60_000);
+        const recentStdout = stdoutDeadline > checkedAt;
+        if (recentStdout || liveTasks.length > 0) {
+          record.expected_completion_at = Math.max(stdoutDeadline, checkedAt + TTL_SWEEP_INTERVAL_MS);
           log(
-            `Sweep: pid=${pid} exceeded TTL but ${liveTasks.length} live background task(s) found — sliding expected_completion_at`,
+            `Sweep: pid=${pid} exceeded TTL but ${liveTasks.length} live background task(s), recent stdout=${recentStdout} — sliding expected_completion_at`,
           );
           this.#maybeEscalateLongRunning(pid, record);
           continue;
@@ -2330,7 +2347,7 @@ export class SubagentManager implements SubagentManagerContract {
   }
 
   /** ticket b972b28c — mirrors BaseSessionManager's gap-4 principle (ticket
-   *  6ff827cb): a one-shot that keeps producing live-background-task
+   *  6ff827cb): a one-shot that keeps producing stdout or live-background-task
    *  evidence forever is the one real risk the sliding-TTL extension opens
    *  up (a genuine runaway loop looks identical to real work from the
    *  outside). Past subagentProgressEscalationHours it is NOT killed — that
@@ -2345,7 +2362,7 @@ export class SubagentManager implements SubagentManagerContract {
     const ageHours = (ageMs / 3_600_000).toFixed(1);
     log(
       `Sweep: ESCALATION pid=${pid} ticket=${record.ticket_id ?? ''} agent=${record.agent_id ?? ''} — ` +
-        `one-shot running ${ageHours}h with continuous background-task evidence past TTL; verify this isn't a runaway loop`,
+        `one-shot running ${ageHours}h with continuous progress evidence past TTL; verify this isn't a runaway loop`,
     );
   }
 

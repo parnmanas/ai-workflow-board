@@ -11,11 +11,9 @@
 // found, the deadline slides instead of reaping the subagent out from under
 // real work it's waiting on.
 //
-// session-progress.ts (ticket 6ff827cb's checkSessionProgress) is NOT
-// imported here — that branch is still unmerged at the time of writing, and
-// SubagentManager's SubagentRecord has no SessionRecord-shaped fields to feed
-// it anyway (see the ticket's own scope-out). findLiveBackgroundTasks itself
-// is already on main (ticket 89716f04, process-tree.ts) and is reused as-is.
+// Recent stdout is also progress evidence, including chunks received during
+// the asynchronous descendant probe. The spawn TTL is its freshness window.
+// No fresh stdout and no live descendants still follows the SIGTERM path.
 //
 // Each test builds its own SubagentManager + a hand-built SubagentRecord and
 // drives the REAL #sweep pass via _sweepNow() + _trackForTest() (board lesson
@@ -26,6 +24,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
 
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
@@ -238,3 +237,53 @@ test('overlapping #sweep ticks are guarded — a synchronous second call does no
     t.mock.timers.reset();
   }
 });
+
+for (const duringProbe of [false, true]) {
+  test(`stdout activity ${duringProbe ? 'during process probe' : 'before sweep'} protects a childless session, then expires`, async (t) => {
+    const mgr = new SubagentManager(makeConfig());
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const record = makeRecord({ process_handle: child, ttlMs: 120_000 });
+    const killed = [];
+    const originalKill = process.kill.bind(process);
+    t.mock.method(process, 'kill', (pid, signal) => {
+      if (pid !== record.pid) return originalKill(pid, signal);
+      killed.push(signal);
+      return true;
+    });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      mgr._wireStdioForTest(record);
+      // Even an incomplete JSONL event is activity; no parser or capture flag required.
+      const emitOutput = () => child.stdout.write('{"type":"assistant"');
+      let sweep;
+      if (duringProbe) {
+        sweep = mgr._sweepNow();
+        emitOutput();
+      } else {
+        emitOutput();
+        sweep = mgr._sweepNow();
+      }
+      await sweep;
+      assert.equal(killed.includes('SIGTERM'), false);
+      assert.ok(record.lastStdoutAt > 0);
+      assert.equal(record.expected_completion_at, record.lastStdoutAt + record.ttlMs,
+        'uses the per-spawn TTL override instead of the manager default');
+      assert.ok(mgr._snapshot().some((r) => r.pid === record.pid));
+
+      // Output must not confer permanent immunity, and stderr diagnostics do not renew it.
+      record.lastStdoutAt = Date.now() - record.ttlMs - 1_000;
+      record.expected_completion_at = Date.now() - 1;
+      child.stderr.write('diagnostic only\n');
+      await mgr._sweepNow();
+      assert.equal(killed.filter((s) => s === 'SIGTERM').length, 1);
+      assert.equal(mgr._snapshot().some((r) => r.pid === record.pid), false);
+    } finally {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      t.mock.restoreAll();
+      t.mock.timers.reset();
+    }
+  });
+}
