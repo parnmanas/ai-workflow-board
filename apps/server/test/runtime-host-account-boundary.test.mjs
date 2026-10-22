@@ -94,6 +94,30 @@ test('host keys, host surfaces and SSE respect the authenticated account boundar
     method: 'POST', headers: { 'X-Agent-Key': ka.raw_key, 'Content-Type': 'application/json' },
     body: JSON.stringify({ key: 'rt-0123456789abcdef', account_id: b.id }),
   })).status, 403);
+  const runtimeKey = 'rt-0123456789abcdef';
+  const issued = await request('/api/agent-manager/runtime-keys/provision', {
+    method: 'POST', headers: { 'X-Agent-Key': ka.raw_key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: runtimeKey, account_id: a.id }),
+  });
+  assert.equal(issued.status, 201);
+  const validateRuntime = key => request(
+    `/api/agent-manager/runtime-keys/validate?account_id=${b.id}&host_id=${hb.id}&runtime_key=rt-ffffffffffffffff`,
+    { headers: { 'X-Agent-Key': key, 'X-Account-Id': b.id } },
+  );
+  assert.deepEqual(await validateRuntime(issued.body.raw_key), {
+    status: 200, body: { account_id: a.id, runtime_key: runtimeKey, host_id: ha.id },
+  }, 'validation reports authenticated identity and ignores caller-supplied ownership');
+  for (const key of [ka.raw_key, accountKey.raw_key]) {
+    assert.equal((await validateRuntime(key)).status, 403, 'only runtime keys validate');
+  }
+  assert.equal((await validateRuntime('invalid-runtime-key')).status, 401);
+  await keys.deleteApiKeysByHostAndNamePrefix(ha.id, runtimeKey, a.id);
+  assert.equal((await validateRuntime(issued.body.raw_key)).status, 401, 'rotated keys cannot validate');
+  const wrongRuntime = await keys.createApiKey({
+    name: `runtime:test:${runtimeKey}`, host_id: hb.id, account_id: a.id,
+  });
+  assert.equal((await validateRuntime(wrongRuntime.raw_key)).status, 401,
+    'runtime key account must match the active host owner');
   const agentHeaders = { 'X-Agent-Key': ka.raw_key };
   assert.equal((await request(`/api/agent-manager/agent-env?account_id=${b.id}`, { headers: agentHeaders })).status, 403);
   const ownEnv = await request('/api/agent-manager/agent-env', { headers: agentHeaders });

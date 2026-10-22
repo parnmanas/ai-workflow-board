@@ -1,10 +1,24 @@
-import { test } from 'node:test';
+import { loadAgentInfo } from '../dist/lib/config.js';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 
 const AGENT_ID = 'agent-chat-idempotency';
 const MESSAGE_ID = 'message-db-1';
+
+let originalFetch;
+beforeEach(() => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'test-account', runtime_key: AGENT_ID, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
+    return Response.json({});
+  };
+});
+afterEach(() => { globalThis.fetch = originalFetch; });
 
 function agentContext() {
   return {

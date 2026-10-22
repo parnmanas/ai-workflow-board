@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Integration test — shared warm-pool exhaustion recovery + durable signal (ticket d34075b5).
 //
 // Drives the REAL EventDispatcher across its worktree-provisioning gate to prove the
@@ -66,6 +67,10 @@ beforeEach(() => {
     terminal_entered_at: null,
   };
   globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/runtime-keys/validate')) return Response.json({
+      account_id: 'account-1', runtime_key: AGENT,
+      host_id: loadAgentInfo()?.host_id || loadAgentInfo()?.agent_id || 'host-1',
+    });
     const u = String(url);
     const method = init?.method || 'GET';
     if (u.endsWith('/mcp')) {

@@ -205,28 +205,13 @@ export async function readApiKey(agentId: string, accountId?: string): Promise<s
   }
 }
 
-/**
- * Read the account-scoped key used during managed-agent rehydration.
- *
- * Versions before account-scoped global agents stored the only key at
- * `apikey`. During the first restart after upgrading, config.json already has
- * a account_id but the scoped key does not exist yet. Treat that unscoped
- * key as belonging to the persisted account and copy it forward. This is
- * intentionally separate from readApiKey(): normal cross-account dispatch
- * must provision a new key instead of reusing the legacy credential.
- */
+/** Read only an explicitly owned key; legacy unscoped keys require provisioning. */
 export async function readApiKeyForRehydrate(
   agentId: string,
   accountId?: string,
 ): Promise<string | null> {
-  const scoped = await readApiKey(agentId, accountId);
-  if (scoped || !accountId) return scoped;
-
-  const legacy = await readApiKey(agentId);
-  if (!legacy) return null;
-
-  await writeApiKey(agentId, legacy, accountId);
-  return legacy;
+  if (!accountId) return null;
+  return readApiKey(agentId, accountId);
 }
 
 export async function writeApiKey(agentId: string, raw: string, accountId?: string): Promise<void> {

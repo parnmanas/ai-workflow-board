@@ -32,7 +32,7 @@ const { SUBAGENTS_BASE_DIR, SUBAGENTS_PERSIST_PATH, STOP_GRACE_MS } = await impo
 );
 
 function makeConfig() {
-  return { url: 'http://127.0.0.1:0', apiKey: 'manager-key', delegation: {} };
+  return { url: 'http://127.0.0.1:0', apiKey: 'manager-key', account_id: 'account-1', delegation: {} };
 }
 
 // Minimal stand-ins for the registries the handler mutates.
@@ -89,16 +89,21 @@ let recorded;
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   recorded = [];
+  let provisionedAgentId;
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     const body = init?.body ? JSON.parse(init.body) : null;
     recorded.push({ url: u, method: init?.method || 'GET', body });
+    if (u.endsWith('/runtime-keys/validate')) {
+      return Response.json({ account_id: 'account-1', runtime_key: provisionedAgentId, host_id: 'host-1' });
+    }
     // Per-agent credential probe → "none configured".
     if (u.includes('/credential')) {
       return new Response(null, { status: 204 });
     }
     // apiKey provision → fresh key.
     if (u.includes('/apikey/provision')) {
+      provisionedAgentId = /managed-agents\/([^/]+)/.exec(u)?.[1];
       return new Response(JSON.stringify({ raw_key: 'sk-managed-xyz', key_id: 'k1' }), {
         status: 201,
         headers: { 'content-type': 'application/json' },
@@ -107,7 +112,7 @@ beforeEach(() => {
     // Canonical managed-agent record fetch (GET .../managed-agents/:id).
     if (/\/managed-agents\/[^/]+$/.test(u) && (init?.method || 'GET') === 'GET') {
       return new Response(
-        JSON.stringify({ name: 'Rolf', type: 'claude', working_dir: '/tmp/work' }),
+        JSON.stringify({ name: 'Rolf', type: 'claude', working_dir: '/tmp/work', account_id: 'account-1' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     }

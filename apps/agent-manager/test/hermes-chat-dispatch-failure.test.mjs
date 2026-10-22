@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -17,6 +18,10 @@ beforeEach(() => {
   originalFetch = globalThis.fetch;
   chatMessagePosts = [];
   globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'test-account', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     const target = String(url);
     const method = init?.method || 'GET';
     if (target.includes('/api/agent/ordinary-work-candidates')) {

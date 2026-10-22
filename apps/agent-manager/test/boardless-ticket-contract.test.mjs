@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Board-less tickets (docs/tickets.md) — the agent-manager side of the new
 // `agent_trigger` contract, kept backward compatible with board (column) servers.
 //
@@ -262,6 +263,10 @@ function harness({ persistent }) {
   const calls = { resolve: [], tsm: [], spawn: [], credential: [], acks: [] };
   globalThis.fetch = async (url, init) => {
     const target = String(url);
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'ws-1', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     if (target.includes('/git-credential?')) {
       calls.credential.push(target);
       return Response.json({ token: 'tok' });
@@ -356,7 +361,7 @@ test('dispatcher: status trigger one-shot prompt and runtime effort (effort_pres
   const { dispatcher, calls } = harness({ persistent: false });
   const raw = JSON.parse(boardlessTrigger());
   raw.runtime = {
-    manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: '/workspace',
+    manager_agent_id: loadAgentInfo()?.host_id || loadAgentInfo()?.agent_id || 'host-1', cli: 'claude', model: null, working_dir: '/workspace',
     folder_scope: 'shared', credential_id: null, runtime_config: { extra: { effort: 'high' } },
   };
   await dispatcher.handleTrigger(JSON.stringify(raw));

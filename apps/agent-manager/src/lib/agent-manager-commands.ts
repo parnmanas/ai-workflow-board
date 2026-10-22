@@ -35,6 +35,7 @@
 import { log } from './logging.js';
 import { DEFAULT_CLI_ID } from './constants.js';
 import { acceptRuntimeCredential } from './runtime-credential.js';
+import { validateRuntimeApiKey } from './runtime-api-key.js';
 import {
   postCommandAck,
   fetchAgentRecord,
@@ -607,6 +608,9 @@ export class AgentManagerCommandHandler {
 
   async #materialize(input: RuntimeIdentityInput): Promise<RuntimeIdentityResult> {
     const { agent_id: agentId, name, cli, working_dir: workingDir, model, runtime_config: runtimeConfig, account_id: accountId } = input;
+    if (!accountId || accountId !== this.#config.account_id) {
+      throw new Error('spawn_agent: runtime account does not match the connected manager account');
+    }
     if (!workingDir) {
       throw new Error('spawn_agent: working_dir is empty — set it before spawning');
     }
@@ -627,13 +631,13 @@ export class AgentManagerCommandHandler {
       last_spawn_at: new Date().toISOString(),
     });
 
-    // apiKey: reuse on-disk if present (faster + avoids unnecessary
-    // rotation); else provision a fresh one. The server's provision
-    // endpoint is idempotent in the "rotate any prior provisioned" sense,
-    // so a fresh provision here is also safe — we just don't gratuitously
-    // rotate every spawn_agent (e.g. on a manager restart).
+    // Disk presence does not prove that the server still accepts this key.
+    // Validate ownership before reuse; only a definitive rejection rotates it.
     let rawApiKey = await readApiKey(agentId, accountId);
     let provisioned = false;
+    if (rawApiKey && !await validateRuntimeApiKey(this.#config, rawApiKey, accountId, agentId)) {
+      rawApiKey = null;
+    }
     if (!rawApiKey) {
       const issued = await provisionManagedAgentApiKey(this.#config, agentId, accountId);
       if (!issued?.raw_key) {
@@ -641,6 +645,10 @@ export class AgentManagerCommandHandler {
         throw new Error('spawn_agent: apiKey provisioning failed (server returned no key)');
       }
       rawApiKey = issued.raw_key;
+      if (!await validateRuntimeApiKey(this.#config, rawApiKey, accountId, agentId)) {
+        this.#deps.registry.markStopped(agentId, 'provisioned apiKey rejected');
+        throw new Error('spawn_agent: provisioned apiKey rejected by server');
+      }
       await writeApiKey(agentId, rawApiKey, accountId);
       provisioned = true;
     }
@@ -648,6 +656,9 @@ export class AgentManagerCommandHandler {
     // profile at spawn_agent time, so this static file always starts
     // 'full'; a subsequent ticket/chat spawn corrects it if needed.
     const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey, accountId);
+    // Existing compact files may otherwise pass the profile-only reuse check
+    // while retaining a revoked key after the full config was repaired.
+    await writeMcpConfig(agentId, this.#config.url, rawApiKey, accountId, { 'X-AWB-Tool-Profile': 'compact' });
 
     // ST-7 follow-up: per-agent CLI home dir. Created lazily here so the
     // CLI (claude/codex/antigravity) writes its sessions / plugins / settings

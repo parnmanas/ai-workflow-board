@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { loadAgentInfo } from '../dist/lib/config.js';
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 
 const AGENT = 'agent-context-preflight';
@@ -13,6 +14,10 @@ beforeEach(() => {
   acks = [];
   globalThis.fetch = async (url, init) => {
     const target = String(url);
+    if (target.endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'account-1', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     if (target.includes('/api/agent/tickets/')) {
       return new Response('null', { status: 200, headers: { 'content-type': 'application/json' } });
     }

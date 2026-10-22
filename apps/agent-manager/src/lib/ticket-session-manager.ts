@@ -554,10 +554,15 @@ export class TicketSessionManager
     // reuse; this branch only fires when the agent explicitly opted in.
     const prevForSplit = this._getSession(sessionKey);
     const agentRequestedSplit = prevForSplit?.splitRequested === true;
-    if (spec.forceRespawn === true || needsFreshTriggerSession || agentRequestedSplit) {
+    // A persistent CLI captured its MCP key at spawn; rewriting config cannot
+    // repair its already initialized MCP connection.
+    const runtimeKeyChanged = !!spec.agentContext?.api_key && !!prevForSplit
+      && prevForSplit._effectiveApiKey !== spec.agentContext.api_key;
+    if (spec.forceRespawn === true || needsFreshTriggerSession || agentRequestedSplit || runtimeKeyChanged) {
       const prev = this._getSession(sessionKey);
       if (prev) {
-        const respawnSource = agentRequestedSplit
+        if (runtimeKeyChanged) prev.stopReason = 'credential_rotation';
+        const respawnSource = runtimeKeyChanged ? 'runtime_api_key_changed' : agentRequestedSplit
           ? `agent_session_split${prev.splitReason ? ` (${prev.splitReason})` : ''}`
           : spec.triggerSource || 'manual';
         log(
@@ -1214,7 +1219,7 @@ export class TicketSessionManager
     // 7e7e23bf, #terminateTwinSiblings) is NOT a silent exit — we killed it on
     // purpose. Clean up its per-pid tracking and return without posting a
     // fallback or touching the circuit-breaker.
-    if (sess._twinTerminated) {
+    if (sess._twinTerminated || sess.stopReason === 'credential_rotation') {
       const cue = this.#movingCue.get(sess.pid);
       if (cue?.timer) clearTimeout(cue.timer);
       this.#movingCue.delete(sess.pid);

@@ -41,6 +41,8 @@ beforeEach(() => {
   server = {
     credential: { status: 200, body: { credential_id: 'cred-1', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-ticket' } } },
     credentialFetches: 0,
+    rejectedKeys: new Set(),
+    provisions: [],
     credentialTargets: [],
     chatPosts: [],
     comments: [],
@@ -63,8 +65,15 @@ beforeEach(() => {
       }
       return new Response('', { status: 202 });
     }
+    if (u.endsWith('/runtime-keys/validate')) {
+      const key = new Headers(init.headers).get('X-Agent-Key');
+      if (server.validationStatus) return new Response(null, { status: server.validationStatus });
+      if (server.rejectedKeys.has(key)) return new Response(null, { status: 403 });
+      return Response.json({ account_id: ACCOUNT, runtime_key: key.replace(/^key-/, ''), host_id: 'host-1' });
+    }
     if (u.endsWith('/runtime-keys/provision')) {
       const { key, account_id } = JSON.parse(init.body);
+      server.provisions.push({ key, account_id });
       return Response.json({ raw_key: `key-${key}`, key_id: 'k', key, account_id });
     }
     if (/\/managed-agents\/[^/]+\/credential\?/.test(u)) {
@@ -344,4 +353,55 @@ test.after(async () => {
   await fsp.rm(process.env.CLAUDE_CONFIG_DIR, { recursive: true, force: true });
   if (operatorConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = operatorConfigDir;
+});
+
+for (const rebind of [false, true]) {
+  test(`foreign rehydrated key is replaced before dispatch (server_meta=${rebind})`, async () => {
+    const { dispatcher, contexts, spawns } = host();
+    const runtime = spec('cred-1');
+    const id = runtimeIdentityKey(runtime);
+    contexts.upsert({ agent_id: id, account_id: 'old-account', api_key: 'foreign-key',
+      cli: runtime.cli, working_dir: WORKDIR, mcp_config_path: '/old-account/mcp.json',
+      credential_id: 'cred-1', credential_provider: 'claude_oauth_token' });
+    if (rebind) {
+      dispatcher.bindAccount(ACCOUNT);
+      assert.equal(contexts.get(id), null, 'server_meta must discard, never relabel the old credential tuple');
+    }
+    await dispatcher.handleTrigger(trigger(runtime));
+    await waitFor(() => spawns.length === 1, JSON.stringify(server.acks));
+    const ctx = spawns[0].agentContext;
+    assert.equal(ctx.account_id, ACCOUNT);
+    assert.equal(ctx.api_key, `key-${id}`);
+    assert.ok(ctx.mcp_config_path.includes(ACCOUNT));
+    assert.equal(JSON.parse(await fsp.readFile(ctx.mcp_config_path, 'utf8')).mcpServers.awb.headers.Authorization, `Bearer key-${id}`);
+  });
+}
+
+test('rejected in-memory and disk keys are repaired before a ticket session receives them', async () => {
+  const { dispatcher, contexts, spawns } = host();
+  const runtime = spec('cred-1');
+  await dispatcher.handleTrigger(trigger(runtime));
+  await waitFor(() => spawns.length === 1, 'initial spawn');
+  const id = runtimeIdentityKey(runtime);
+  const { writeApiKey } = await import('../dist/lib/managed-agent-store.js');
+  contexts.get(id).api_key = 'revoked-key';
+  await writeApiKey(id, 'revoked-key', ACCOUNT);
+  server.rejectedKeys.add('revoked-key');
+  await dispatcher.handleTrigger(trigger(runtime));
+  await waitFor(() => spawns.length === 2, 'repaired spawn');
+  assert.equal(spawns[1].agentContext.api_key, `key-${id}`);
+  assert.equal(server.provisions.at(-1).account_id, ACCOUNT);
+});
+
+test('validation outage cannot start a session or rotate its key', async () => {
+  const { dispatcher, spawns } = host();
+  const runtime = spec('cred-1');
+  await dispatcher.handleTrigger(trigger(runtime));
+  await waitFor(() => spawns.length === 1, 'initial spawn');
+  const issued = server.provisions.length;
+  server.validationStatus = 503;
+  await dispatcher.handleTrigger(trigger(runtime));
+  await waitFor(() => server.acks.some(a => a.outcome === 'nack' && a.reason === 'runtime_api_key_unavailable'), 'validation failure is retried');
+  assert.equal(spawns.length, 1);
+  assert.equal(server.provisions.length, issued);
 });

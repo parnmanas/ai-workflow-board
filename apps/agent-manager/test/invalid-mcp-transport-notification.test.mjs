@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Integration test — invalid_mcp_transport durable-blocker notification + pend
 // + nack, driven through the REAL EventDispatcher (ticket da4358ee review
 // round 2, blocker #2).
@@ -69,6 +70,10 @@ beforeEach(() => {
   mcpToolCalls = [];
   dispatchAcks = [];
   globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'test-account', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     const u = String(url);
     const method = init?.method || 'GET';
     if (u.endsWith('/mcp')) {

@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Integration test — durable provisioning-failure block + single-strand (ticket 52eedadf).
 //
 // Rewritten for the review (blockers #1/#2). The previous version drove a
@@ -69,6 +70,10 @@ beforeEach(() => {
     current_column_kind: 'active', comments: [], pending_user_action: false,
   };
   globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'test-account', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     const u = String(url);
     const method = init?.method || 'GET';
     if (u.endsWith('/mcp')) {

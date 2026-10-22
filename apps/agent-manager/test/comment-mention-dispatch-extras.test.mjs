@@ -20,7 +20,8 @@
 //     handleCommentMention 전체 경로로 재확인)
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { beforeEach, afterEach } from 'node:test';
+import { loadAgentInfo } from '../dist/lib/config.js';
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 
 const AGENT_ID = 'A1';
@@ -30,7 +31,7 @@ const MANAGED_AGENT_CONTEXTS = new Map([
   [AGENT_ID, {
     agent_id: AGENT_ID,
     account_id: 'W1',
-    api_key: 'test-key',
+    api_key: `key-${AGENT_ID}`,
     working_dir: WORKING_DIR,
     mcp_config_path: '/tmp/awb-test-comment-mention-mcp.json',
     cli: 'claude',
@@ -160,7 +161,7 @@ const HERMES_MANAGED_AGENT_CONTEXTS = new Map([
   [HERMES_AGENT_ID, {
     agent_id: HERMES_AGENT_ID,
     account_id: 'W1',
-    api_key: 'test-key',
+    api_key: `key-${HERMES_AGENT_ID}`,
     working_dir: HERMES_WORKING_DIR,
     mcp_config_path: '/tmp/awb-test-comment-mention-hermes-mcp.json',
     cli: 'hermes',
@@ -224,3 +225,16 @@ test('handleCommentMention (Hermes branch): no harness_config on the event falls
   assert.ok(spec, 'runtimeSupervisor.dispatch() must have been called');
   assert.equal(spec.systemContext, 'You are the assignee.');
 });
+
+let savedFetch;
+beforeEach(() => {
+  savedFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/runtime-keys/validate')) return Response.json({
+      account_id: 'W1', runtime_key: new Headers(init.headers).get('X-Agent-Key').replace(/^key-/, ''),
+      host_id: loadAgentInfo()?.host_id || loadAgentInfo()?.agent_id || 'host-1',
+    });
+    return savedFetch(url, init);
+  };
+});
+afterEach(() => { globalThis.fetch = savedFetch; });

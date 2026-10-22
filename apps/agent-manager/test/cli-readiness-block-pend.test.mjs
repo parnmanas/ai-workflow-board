@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Integration test — CLI account-trust / provider-auth dispatch preflight
 // (ticket 48aeab6e).
 //
@@ -81,6 +82,10 @@ beforeEach(() => {
   };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'test-account', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     const method = init?.method || 'GET';
     if (u.endsWith('/mcp')) {
       if (method === 'DELETE') return new Response('{}', { status: 200 });

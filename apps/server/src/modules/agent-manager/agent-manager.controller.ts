@@ -1856,6 +1856,23 @@ export class AgentManagerController {
   // user-session route exists too (below) so an operator can rotate without
   // a live manager.
 
+  @ApiSecurity('agent-api-key')
+  @Get('api/agent-manager/runtime-keys/validate')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Validate a runtime API key and return its authenticated ownership' })
+  validateRuntimeKey(@Req() req: Request, @Res() res: Response) {
+    const { currentRuntimeKey, currentHostId, currentAccountId } = req as any;
+    if (!currentRuntimeKey || !currentHostId || !currentAccountId) {
+      return res.status(403).json({ error: 'runtime_key_required' });
+    }
+    // Identity comes only from the guard's validated key, never request fields.
+    return res.status(200).json({
+      account_id: currentAccountId,
+      runtime_key: currentRuntimeKey,
+      host_id: currentHostId,
+    });
+  }
+
   // ─── P4c-2a manager → server: runtime-tuple key provisioning ─────────────
   //
   // Issues a account-scoped apiKey bound to a runtime identity

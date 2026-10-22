@@ -8,6 +8,7 @@
 // fail closed and are logged.
 
 import { log } from './logging.js';
+import { validateRuntimeApiKey } from './runtime-api-key.js';
 import type { AgentSessionRunner, AgentSessionRequest } from './agent-session-runner.js';
 import type { TerminalRunner, TerminalRequest } from './terminal-runner.js';
 import type { MemoryRunner, MemoryRequest } from './cli-memory-runner.js';
@@ -1938,7 +1939,7 @@ export class EventDispatcher {
       ?? (prepared && (prepared.credential_id || null) === (spec.credential_id || null) ? prepared : null);
     // Older dispatchers registered the selected id before applying its secret.
     // Such a context must pass through the shared materializer before reuse.
-    const entry = cached && (!spec.credential_id || cached.credential_provider)
+    const entry = cached && cached.account_id === accountId && (!spec.credential_id || cached.credential_provider)
       ? cached
       : await this.#materializeRuntime(spec, accountId);
     if (!entry) return undefined;
@@ -1957,7 +1958,7 @@ export class EventDispatcher {
       runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? entry.runtime_config ?? null,
     };
     if (!ctx.api_key || !ctx.cwd || !ctx.mcp_config_path) return undefined;
-    return this.#scopeAgentContext(ctx, accountId);
+    return ctx;
   }
 
   /**
@@ -2057,7 +2058,22 @@ export class EventDispatcher {
     if (!scope || scope !== this.#config.account_id || context.account_id !== scope) {
       throw new Error('Runtime context does not belong to this manager account');
     }
-    return context;
+    if (await validateRuntimeApiKey(this.#config, context.api_key, scope, context.agent_id)) return context;
+    const materialize = this.#agentManagerCommandHandler?.materializeRuntimeIdentity?.bind(this.#agentManagerCommandHandler);
+    if (!materialize) throw new Error('Runtime API key rejected and no materializer is available');
+    await materialize({
+      agent_id: context.agent_id,
+      name: this.#managedAgentContexts?.get(context.agent_id)?.name || context.cli,
+      cli: context.cli,
+      working_dir: context.cwd,
+      model: context.model || '',
+      runtime_config: context.runtime_config ?? null,
+      credential_id: context.credential_id || '',
+      account_id: scope,
+    });
+    const refreshed = this.#resolveAgentContext(context.agent_id);
+    if (!refreshed || refreshed.account_id !== scope) throw new Error('Runtime API key repair did not produce an owned context');
+    return { ...refreshed, model: context.model, runtime_config: context.runtime_config };
   }
 
   async #dispatchHermes(args: {
@@ -2454,7 +2470,11 @@ export class EventDispatcher {
   /** Called only with the authenticated connection's server_meta ownership. */
   bindAccount(accountId: string): void {
     this.#config.account_id = accountId;
-    for (const context of this.#managedAgentContexts?.list() ?? []) context.account_id = accountId;
+    // Ownership is part of the credential tuple, not a label that server_meta
+    // can rewrite. Foreign entries must be materialized for the new account.
+    for (const context of this.#managedAgentContexts?.list() ?? []) {
+      if (context.account_id !== accountId) this.#managedAgentContexts?.delete(context.agent_id);
+    }
   }
 
   #acceptAccount(eventType: string, raw: string): boolean {
@@ -2853,7 +2873,15 @@ export class EventDispatcher {
         agentContext = rtCtx;
       }
     }
-    agentContext = await this.#scopeAgentContext(agentContext, ev.account_id);
+    try {
+      agentContext = await this.#scopeAgentContext(agentContext, ev.account_id);
+    } catch {
+      // A rejected key or temporary validation outage must reach the server's
+      // retry queue, never disappear as an unacknowledged stream exception.
+      log('Trigger refused: runtime API key could not be prepared');
+      this.#ackDispatch(ev, 'nack', 'runtime_api_key_unavailable');
+      return;
+    }
     const envConfig = parseEnvironmentConfig(ev.environment_config);
     if (
       selfAgentId &&

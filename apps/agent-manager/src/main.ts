@@ -1247,7 +1247,13 @@ async function runRuntime(
     let skipped = 0;
     for (const id of dirs) {
       const cfg = await readManagedAgentConfig(id);
-      const apiKey = await readApiKeyForRehydrate(id, cfg?.account_id);
+      // Disk ownership may predate a host transfer. Never prepare a CLI home
+      // with a foreign account's key; dispatch will materialize it on demand.
+      if (!cfg?.account_id || cfg.account_id !== config.account_id) {
+        skipped++;
+        continue;
+      }
+      const apiKey = await readApiKeyForRehydrate(id, cfg.account_id);
       if (!cfg || !apiKey || !cfg.working_dir) {
         skipped++;
         continue;

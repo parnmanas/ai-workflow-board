@@ -68,7 +68,20 @@ slot holding that identity — a started mission's runtime roster, a ticket
 assignee, or a chat participant spec — never through an Agent row) and applied
 into that cli-home by the CLI adapter. Calls for one identity run one at a time.
 
-It runs for `spawn_agent` / `restart_agent`, and the dispatcher calls it
+Runtime credentials remain an account/key/MCP-path tuple across restart. Boot
+skips disk configs outside the saved manager account, and authenticated
+`server_meta` discards foreign contexts instead of relabeling their keys. The
+next dispatch materializes the runtime in its owning account. Unscoped legacy
+keys are never copied into account-scoped files. Before dispatch and before
+reusing a disk key, `GET /api/agent-manager/runtime-keys/validate` checks the
+key's authenticated account, host, and runtime identity. A 401/403 or identity mismatch
+causes provisioning and regeneration of full/compact MCP configs and the CLI
+home. Persistent ticket/chat sessions with the old key restart on their next
+dispatch. Transport errors and HTTP 5xx stop dispatch without rotating keys;
+ticket dispatch reports a nack for retry. Deploy the server validation endpoint
+before updating managers.
+
+The materializer runs for `spawn_agent` / `restart_agent`, and the dispatcher calls it
 whenever a ticket trigger, chat request, mention or mission step names a
 runtime the host has no context for yet. Before 2026-10-22 the dispatcher
 built a credential-less context of its own in that case while the server's

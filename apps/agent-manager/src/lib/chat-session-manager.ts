@@ -286,7 +286,22 @@ export class ChatSessionManager
     // ticket-session does. A stale record (child reaped without exit
     // handler) gets purged here so the next branch falls through to a fresh
     // spawn instead of dispatching a turn into a dead stdin.
-    const sess = this._getLiveSession(sessionKey);
+    let sess = this._getLiveSession(sessionKey);
+    // MCP authentication belongs to the child connection. A repaired key
+    // requires a fresh CLI rather than another turn on the old connection.
+    if (sess && spec.agentContext?.api_key && sess._effectiveApiKey !== spec.agentContext.api_key) {
+      this.#cancelOrphanSweep(sess);
+      sess.stopReason = 'credential_rotation';
+      if (sess.idleTimer) {
+        clearTimeout(sess.idleTimer);
+        sess.idleTimer = null;
+      }
+      try { sess.child.stdin.end(); } catch { /* already closed */ }
+      try { process.kill(sess.pid, 'SIGTERM'); } catch { /* already dead */ }
+      this._sessions.delete(sessionKey);
+      log(`[chat-session] respawning after runtime API key change room=${spec.roomId.slice(0, 8)}`);
+      sess = undefined;
+    }
 
     if (sess) {
       // ticket 89716f04 — a follow-up turn means the run is progressing, not
@@ -669,7 +684,8 @@ export class ChatSessionManager
     // 'running'` 가드) 에이전트가 이미 스스로 종료 처리한 run은 그대로
     // 유지되고 — 세션이 죽었을 때 진짜로 아직 열려 있던 run에만 실제
     // 효과가 생긴다.
-    if (sess._run) {
+    const credentialRotated = sess.stopReason === 'credential_rotation';
+    if (sess._run && !credentialRotated) {
       const run = sess._run;
       const route = resolveRunCompletionRoute(run.kind);
       // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-account 경고를
@@ -702,7 +718,9 @@ export class ChatSessionManager
     // ticket actions (before the turn-end result line), still emit their card so a
     // crash never drops a "누락 없이" ticket-action card. No-op when already flushed.
     this.#flushTicketRefs(sess);
-    const sent = this.#chatSent.has(sess.pid) || this.#reportedErrorTurn.get(sess.pid) === sess.turnCount;
+    // Rotation hands the turn to a replacement child; its predecessor's exit
+    // must not fail the run or publish an error from the revoked connection.
+    const sent = credentialRotated || this.#chatSent.has(sess.pid) || this.#reportedErrorTurn.get(sess.pid) === sess.turnCount;
     // Snapshot the buffered output BEFORE the base class clears it (the
     // base clears the ring after this hook returns).
     const body = sent ? '' : this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);

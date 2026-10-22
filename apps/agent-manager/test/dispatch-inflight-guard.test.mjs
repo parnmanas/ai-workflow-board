@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Regression tests for the provision-spanning single-flight guard (ticket
 // 3d180f85): stop a supervisor re-send from twin-spawning the same (ticket,
 // role, agent) while the first dispatch is still provisioning/spawning.
@@ -202,7 +203,7 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
       return {
         agent_id: id,
         account_id: 'account-1',
-        api_key: 'k',
+        api_key: `key-${id}`,
         working_dir: '/tmp/wd',
         mcp_config_path: '/tmp/mcp.json',
         cli: 'claude',
@@ -264,7 +265,7 @@ function assertNonce(reservation, msg = 'a placed reservation carries a generati
 let savedFetch;
 beforeEach(() => {
   savedFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => String(url).includes('/api/agent/tickets/') ? ({
+  globalThis.fetch = async (url, init) => validationResponse(url, init) || (String(url).includes('/api/agent/tickets/') ? ({
     ok: true,
     status: 200,
     async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; },
@@ -278,7 +279,7 @@ beforeEach(() => {
     async text() {
       return '';
     },
-  });
+  }));
 });
 afterEach(() => {
   globalThis.fetch = savedFetch;
@@ -407,6 +408,8 @@ test('한 hold의 억제 N건은 알림 1건과 별개로 suppressed ack N건을
   const ackBodies = [];
   const commentCalls = [];
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     const target = String(url);
     const body = typeof init?.body === 'string' ? init.body : '';
     if (target.endsWith('/api/agent-manager/dispatch/ack')) {
@@ -522,7 +525,9 @@ test("a pre-dispatchTrigger failure must NOT borrow dispatchTrigger's gate verdi
   // unrelated reason before ever reaching spawn().
   const savedFetchLocal = globalThis.fetch;
   let ticketFetchCount = 0;
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     if (typeof url !== 'string' || !url.includes('/api/agent/tickets/')) {
       return { ok: false, status: 503, async json() { return {}; }, async text() { return ''; } };
     }
@@ -956,6 +961,8 @@ test('safety-valve eviction posts an operator warning; a silent TTL eviction doe
   const captured = [];
   const savedFetchLocal = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     const body = typeof init?.body === 'string' ? init.body : '';
     if (body.includes('"initialize"')) {
       return {
@@ -1179,6 +1186,8 @@ test('column trigger에 진 role-mention은 상관 ID·역할·사유를 suppres
   const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
   const ackBodies = [];
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     if (String(url).endsWith('/api/agent-manager/dispatch/ack')) {
       ackBodies.push(JSON.parse(String(init?.body || '{}')));
     }
@@ -1218,6 +1227,8 @@ test('role-mention 상관 계약이 없거나 역할이 다르면 차감 ACK를 
     const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
     const ackBodies = [];
     globalThis.fetch = async (url, init) => {
+      const validation = validationResponse(url, init);
+      if (validation) return validation;
       if (String(url).endsWith('/api/agent-manager/dispatch/ack')) ackBodies.push(init?.body);
       if (String(url).includes('/api/agent/tickets/')) {
         return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; } };
@@ -1241,6 +1252,8 @@ test('the suppression posts a ticket comment so the mention is not silently lost
   const captured = [];
   const savedFetchLocal = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     const body = typeof init?.body === 'string' ? init.body : '';
     if (String(url).includes('/api/agent/tickets/')) {
       return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; } };
@@ -1527,6 +1540,8 @@ test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_
   const outer = globalThis.fetch;
   let ticketFetches = 0;
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     if (String(url).includes('/api/agent/tickets/')) ticketFetches++;
     return outer(url, init);
   };
@@ -1583,6 +1598,8 @@ test('round 4 (리뷰 라운드1): 신선도 조회가 실패해도 컬럼 워�
   const outer = globalThis.fetch;
   let freshnessLookupFailed = false;
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     if (!freshnessLookupFailed && String(url).includes('/api/agent/tickets/')) {
       freshnessLookupFailed = true;
       throw new Error('AWB API 일시 장애');
@@ -1614,6 +1631,8 @@ test('round 4 (리뷰 라운드1): 조회한 티켓에 current_column_id 가 없
   const outer = globalThis.fetch;
   let columnlessServed = false;
   globalThis.fetch = async (url, init) => {
+    const validation = validationResponse(url, init);
+    if (validation) return validation;
     if (!columnlessServed && String(url).includes('/api/agent/tickets/')) {
       columnlessServed = true;
       return { ok: true, status: 200, async json() { return { id: 't1', comments: [] }; }, async text() { return ''; } };
@@ -2623,4 +2642,12 @@ function isDead(pid) {
   } catch {
     return true;
   }
+}
+
+function validationResponse(url, init) {
+  if (!String(url).endsWith('/runtime-keys/validate')) return null;
+  return Response.json({ account_id: 'account-1',
+    runtime_key: new Headers(init.headers).get('X-Agent-Key').replace(/^key-/, ''),
+    host_id: loadAgentInfo()?.host_id || loadAgentInfo()?.agent_id || 'host-1',
+  });
 }

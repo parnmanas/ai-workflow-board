@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 // Integration test — harness session-limit defer, driven through the REAL
 // EventDispatcher (ticket 467f714a).
 //
@@ -84,6 +85,10 @@ beforeEach(() => {
     terminal_entered_at: null,
   };
   globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'account-1', runtime_key: AGENT, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     const u = String(url);
     const method = init?.method || 'GET';
     if (u.endsWith('/mcp')) {

@@ -23,17 +23,14 @@ const {
   writeManagedAgentConfig,
 } = await import('../dist/lib/managed-agent-store.js');
 
-test('rehydration migrates the legacy unscoped key into the persisted workspace', async () => {
+test('rehydration only reads the explicitly scoped key', async () => {
   const agentId = 'legacy-rehydrate-agent';
   await writeApiKey(agentId, 'legacy-key');
-
-  assert.equal(await readApiKey(agentId, 'workspace-a'), null);
-  assert.equal(await readApiKeyForRehydrate(agentId, 'workspace-a'), 'legacy-key');
-  assert.equal(await readApiKey(agentId, 'workspace-a'), 'legacy-key');
-
-  // Ordinary reads for another workspace remain isolated. Only the explicit
-  // boot migration helper is allowed to consume the legacy key.
-  assert.equal(await readApiKey(agentId, 'workspace-b'), null);
+  assert.equal(await readApiKeyForRehydrate(agentId, 'account-a'), null);
+  assert.equal(await readApiKey(agentId, 'account-a'), null);
+  await writeApiKey(agentId, 'scoped-key', 'account-a');
+  assert.equal(await readApiKeyForRehydrate(agentId, 'account-a'), 'scoped-key');
+  assert.equal(await readApiKeyForRehydrate(agentId, 'account-b'), null);
 });
 
 test('global agent secrets are isolated by workspace and erased together', async () => {
@@ -64,6 +61,7 @@ beforeEach(() => {
   requests = [];
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), init });
+    if (String(url).endsWith('/runtime-keys/validate')) return Response.json({ account_id: 'account', runtime_key: 'codex-agent-invalid-config', host_id: 'host' });
     return new Response('{}', {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -185,7 +183,7 @@ test('spawn_agent rejects Codex when its required native MCP config cannot be pr
   const agentId = 'codex-agent-invalid-config';
   const apiKey = 'sk-invalid-config-secret';
   await ensureCliHomeDir(agentId);
-  await writeApiKey(agentId, apiKey);
+  await writeApiKey(agentId, apiKey, 'account');
   await fsp.writeFile(join(cliHomeDirFor(agentId), 'config.toml'), '[broken\n', 'utf8');
 
   let record;
@@ -207,7 +205,7 @@ test('spawn_agent rejects Codex when its required native MCP config cannot be pr
     get() { return record; },
   };
   const handler = new AgentManagerCommandHandler(
-    { url: 'https://awb.spawn.example', apiKey: 'manager-key', delegation: {} },
+    { url: 'https://awb.spawn.example', apiKey: 'manager-key', account_id: 'account', delegation: {} },
     {
       getInstanceId: () => 'instance-1',
       registry,
@@ -222,6 +220,7 @@ test('spawn_agent rejects Codex when its required native MCP config cannot be pr
     args: {
       agent_id: agentId,
       name: 'Broken Codex Agent',
+      account_id: 'account',
       cli: 'codex',
       working_dir: tmpdir(),
     },
@@ -786,6 +785,7 @@ test('runtime spawn provisions its key and applies the configured credential; re
   let authToken = 'test-first-token';
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), init });
+    if (String(url).endsWith('/runtime-keys/validate')) return Response.json({ account_id: accountId, runtime_key: agentId, host_id: 'host' });
     if (String(url).endsWith('/runtime-keys/provision')) {
       order.push('key');
       assert.deepEqual(JSON.parse(init.body), { key: agentId, account_id: accountId });
@@ -800,7 +800,7 @@ test('runtime spawn provisions its key and applies the configured credential; re
     throw new Error(`Unexpected request: ${url}`);
   };
   const handler = new AgentManagerCommandHandler(
-    { url: 'https://awb.spawn.example', apiKey: 'manager-key', delegation: {} },
+    { url: 'https://awb.spawn.example', apiKey: 'manager-key', account_id: accountId, delegation: {} },
     {
       getInstanceId: () => 'instance-1',
       registry: { ...registryStub(), upsert: () => ({ status: 'spawning' }) },
@@ -834,11 +834,12 @@ test('a missing explicitly selected credential fails spawn instead of using oper
   let registered = false;
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), init });
+    if (String(url).endsWith('/runtime-keys/validate')) return Response.json({ account_id: 'account', runtime_key: agentId, host_id: 'host' });
     if (String(url).includes('/credential?')) return new Response(null, { status: 503 });
     return Response.json({});
   };
   const handler = new AgentManagerCommandHandler(
-    { url: 'https://awb.spawn.example', apiKey: 'manager-key', delegation: {} },
+    { url: 'https://awb.spawn.example', apiKey: 'manager-key', account_id: 'account', delegation: {} },
     { getInstanceId: () => 'instance-1', registry: { ...registryStub(), upsert: () => ({}) },
       contextRegistry: { upsert: () => { registered = true; } } },
   );

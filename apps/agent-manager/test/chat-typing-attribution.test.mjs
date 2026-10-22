@@ -1,3 +1,4 @@
+import { loadAgentInfo } from '../dist/lib/config.js';
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -35,6 +36,10 @@ beforeEach(() => {
   chatMessagePosts = [];
   globalThis.fetch = async (url, init) => {
     const target = String(url);
+    if (String(url).endsWith('/runtime-keys/validate')) {
+      const host = loadAgentInfo();
+      return Response.json({ account_id: 'test-account', runtime_key: HERMES, host_id: host?.host_id || host?.agent_id || 'host-1' });
+    }
     const method = init?.method || 'GET';
     if (target.includes('/api/agent/chat-rooms/') && target.endsWith('/typing') && method === 'POST') {
       typingPosts.push(JSON.parse(init?.body || '{}'));
