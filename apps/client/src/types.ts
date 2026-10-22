@@ -3578,7 +3578,10 @@ export interface MarketingPayeePaymentCheck {
   target_name_untrusted: string;
   facts: Record<string, string | number | boolean | null>;
   api_version: string;
+  /** 다른 계정의 열린 요청은 `{ id: '', status: 'other_account' }` 로 온다(id · 상태 없이). */
   open_request: { id: string; status: string } | null;
+  /** 읽기가 실패했을 때 공급자가 준 글(비신뢰, 표시용). */
+  provider_message_untrusted?: string;
 }
 
 export interface MarketingPaymentCheckResult {
@@ -3597,7 +3600,7 @@ export interface MarketingSpendInspection {
   observed: string | null;
   observed_minor: number | null;
   position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
-  report: Omit<MarketingPayeePaymentCheck, 'payee' | 'provider' | 'ref' | 'credential_id' | 'open_request'>;
+  report: Omit<MarketingPayeePaymentCheck, 'payee' | 'provider' | 'ref' | 'credential_id' | 'open_request' | 'provider_message_untrusted'>;
   checked_at: string;
 }
 

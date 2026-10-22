@@ -2686,16 +2686,16 @@ export const api = {
   },
   getMarketingSpendRequest: (id: string) =>
     request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}`),
-  /**
-   * 지출 승인 — `payloadSha256` 은 사람이 화면에서 본 요청의 해시 그대로여야 한다(다르면 409).
-   * `final: false` 는 2인 규칙의 첫 승인만 기록됐다는 뜻이다.
-   */
   /** 연결 확인 — 직접 결제 수취인의 credential · 대상을 공급자에서 읽기만 한다(쓰기 없음). */
   checkMarketingPayments: (campaignId: string) =>
     request<MarketingPaymentCheckResult>(`/marketing/campaigns/${encodeURIComponent(campaignId)}/payment/check`, { method: 'POST', body: JSON.stringify({}) }),
   /** 요청별 공급자 확인 — 지금 상한이 계획의 어디에 있나(결과 불명 대조용, 쓰기 없음). */
   inspectMarketingSpend: (id: string) =>
     request<MarketingSpendInspection>(`/marketing/spend-requests/${encodeURIComponent(id)}/inspect`, { method: 'POST', body: JSON.stringify({}) }),
+  /**
+   * 지출 승인 — `payloadSha256` 은 사람이 화면에서 본 요청의 해시 그대로여야 한다(다르면 409).
+   * `final: false` 는 2인 규칙의 첫 승인만 기록됐다는 뜻이다.
+   */
   approveMarketingSpend: (id: string, payloadSha256: string, note = '') =>
     request<MarketingSpendRequest & { final: boolean }>(`/marketing/spend-requests/${encodeURIComponent(id)}/approve`, {
       method: 'POST',

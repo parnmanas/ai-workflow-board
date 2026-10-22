@@ -482,16 +482,38 @@ export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'>)
   return '승인하면 이 금액이 예산에서 보류됩니다. AWB 밖에서 결제한 뒤 거래 id 와 함께 결제 완료를 기록하세요.';
 }
 
-/** 결과 불명을 대조할 곳 — 공급자마다 무엇을 보면 되는지. */
-export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provider' | 'payload'>): string {
+/**
+ * 직접 결제의 결과 불명은 실행 뒤 이만큼 지나야 "실패" 로 기록할 수 있다 — 공급자 반영이 늦을 수 있어서. 서버
+ * common/marketing/payment-routes.ts 의 DIRECT_FAIL_GRACE_MS 가 정본이다(test/marketing-payment-contract.test.mjs 가 대조한다).
+ */
+export const DIRECT_FAIL_GRACE_MS = 15 * 60_000;
+
+/**
+ * 결과 불명을 대조할 곳 — 공급자마다 무엇을 보면 되는지. 금액은 광고 화면이 보여 주는 통화 표기로(공급자 단위 정수는 센트인지
+ * 원 단위인지 헷갈린다). 실패 기록은 실행 뒤 DIRECT_FAIL_GRACE_MS 가 지나야 받으므로 그 시각을 함께 알린다.
+ */
+export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provider' | 'payload' | 'currency' | 'executing_at'>): string {
   const plan = spend.payload || {};
+  const money = (minor: unknown) => (typeof minor === 'number' && Number.isFinite(minor) ? formatMinor(minor, spend.currency) : '?');
+  const campaignId = plan.target?.campaign_id || '';
+  const minutes = DIRECT_FAIL_GRACE_MS / 60_000;
+  const executedAt = spend.executing_at ? new Date(spend.executing_at).getTime() : NaN;
+  const failAfter = Number.isFinite(executedAt)
+    ? `실행 뒤 ${minutes}분(${formatDateTime(new Date(executedAt + DIRECT_FAIL_GRACE_MS).toISOString())})이 지나야`
+    : `실행 뒤 ${minutes}분이 지나야`;
   if (spend.provider === 'meta_ads') {
-    return `Ads Manager 에서 캠페인 ${plan.target?.campaign_id || ''} 의 지출 한도가 ${plan.to ?? '?'}(목표) 인지 ${plan.from ?? '?'}(이전) 인지 확인하세요. 한도 변경은 반영에 최대 15분이 걸릴 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
+    return `Ads Manager 에서 캠페인 ${campaignId} 의 지출 한도가 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 한도 변경은 반영에 최대 15분이 걸려, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
   }
   if (spend.provider === 'google_ads') {
-    return `Google Ads 에서 캠페인 ${plan.target?.campaign_id || ''} 의 총예산이 목표값인지 확인하세요(변경 기록은 3분쯤 늦게 보입니다). "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
+    return `Google Ads 에서 캠페인 ${campaignId} 의 총예산이 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 변경 기록은 몇 분 늦게 보이고, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
   }
   return '결제 시스템에서 실제 결제 여부를 확인하세요.';
+}
+
+/** 연결 확인의 열린 요청 표시 — 다른 계정의 것은 id · 상태 없이 온다. 없으면 ''. */
+export function openRequestLabel(open: { id: string; status: string } | null): string {
+  if (!open) return '';
+  return open.id ? `열린 요청 ${open.status}` : '다른 계정에 열린 요청 있음';
 }
 
 /** 공급자 확인 결과 한 줄. */

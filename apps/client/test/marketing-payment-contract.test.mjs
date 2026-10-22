@@ -7,15 +7,16 @@
 //   2. ref 형식 판정이 서버 파서와 같은 답을 낸다(같은 표본).
 //   3. credential 후보는 그 공급자로 만든 이 계정의 것만(전역 · 다른 종류 · 에이전트 노출 제외).
 //   4. 상한 공급자의 paid 는 "한도 반영됨", 환불 기록 불가. 승인 · 대조 안내는 공급자마다 다르다. 공급자 확인 한 줄.
+//   5. 결과 불명의 실패 기록 유예(DIRECT_FAIL_GRACE_MS)가 서버와 같고, 대조 안내가 그 시각을 알린다. 다른 계정의 열린 요청은 id 없이 표시한다.
 //
 // 실행: node --import tsx --test test/marketing-payment-contract.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
-  DIRECT_PAYMENT_PROVIDERS, DIRECT_PAYMENT_PROVIDER_LABELS, DIRECT_REF_FORMATS, DIRECT_PROVIDER_CREDENTIAL_FIELDS, PAYMENT_PROVIDER_LABELS,
-  canRecordRefund, directPaymentCredentials, directRefProblem, inspectionSummary, isDirectPaymentProvider, payeeRouteLabel,
-  spendApproveHint, spendStatusViewFor, unknownReconcileHint,
+  DIRECT_FAIL_GRACE_MS, DIRECT_PAYMENT_PROVIDERS, DIRECT_PAYMENT_PROVIDER_LABELS, DIRECT_REF_FORMATS, DIRECT_PROVIDER_CREDENTIAL_FIELDS, PAYMENT_PROVIDER_LABELS,
+  canRecordRefund, directPaymentCredentials, directRefProblem, formatDateTime, inspectionSummary, isDirectPaymentProvider, openRequestLabel,
+  payeeRouteLabel, spendApproveHint, spendStatusViewFor, unknownReconcileHint,
 } from '../src/components/marketing/marketing.logic.ts';
 import { AGENT_ENV_PROVIDERS } from '../src/components/admin/credentialAgentEnv.logic.ts';
 
@@ -28,6 +29,7 @@ test('the screen mirrors the server: providers, ref formats, credential fields',
   assert.deepEqual(DIRECT_PAYMENT_PROVIDER_LABELS, server.DIRECT_PAYMENT_PROVIDER_LABELS);
   assert.deepEqual(DIRECT_REF_FORMATS, server.DIRECT_REF_FORMATS);
   assert.deepEqual(JSON.parse(JSON.stringify(DIRECT_PROVIDER_CREDENTIAL_FIELDS)), JSON.parse(JSON.stringify(server.DIRECT_PROVIDER_CREDENTIAL_FIELDS)));
+  assert.equal(DIRECT_FAIL_GRACE_MS, server.DIRECT_FAIL_GRACE_MS, 'the reconcile hint tells the same wait the server enforces');
   for (const p of DIRECT_PAYMENT_PROVIDERS) assert.ok(PAYMENT_PROVIDER_LABELS[p], `label for ${p}`);
 
   // 같은 표본에 서버 파서와 같은 답
@@ -85,8 +87,18 @@ test('ceiling providers read differently: status, refund, approval and reconcile
   assert.match(spendApproveHint({ provider: 'google_ads' }), /총예산/);
   assert.match(spendApproveHint({ provider: 'webhook' }), /결제 엔드포인트/);
   assert.match(spendApproveHint({ provider: 'manual' }), /AWB 밖에서 결제한 뒤/);
-  assert.match(unknownReconcileHint({ provider: 'meta_ads', payload: { target: { campaign_id: '77' }, from: '100000', to: '130000' } }), /캠페인 77 의 지출 한도가 130000\(목표\)/);
-  assert.match(unknownReconcileHint({ provider: 'webhook', payload: {} }), /결제 시스템에서/);
+  const metaHint = unknownReconcileHint({ provider: 'meta_ads', currency: 'USD', payload: { target: { campaign_id: '77' }, from: '100000', to: '130000', from_minor: 100000, to_minor: 130000 } });
+  assert.match(metaHint, /캠페인 77 의 지출 한도가 1,300\.00 USD\(목표\)인지 1,000\.00 USD\(이전\)인지/, 'currency, not provider units');
+  assert.match(metaHint, /실행 뒤 15분이 지나야 실패로 기록할 수 있습니다/);
+  const executingAt = '2026-10-22T06:00:00.000Z';
+  const timed = unknownReconcileHint({ provider: 'meta_ads', currency: 'USD', executing_at: executingAt, payload: { target: { campaign_id: '77' }, from_minor: 100000, to_minor: 130000 } });
+  const failAt = formatDateTime(new Date(Date.parse(executingAt) + DIRECT_FAIL_GRACE_MS).toISOString());
+  assert.ok(timed.includes(`실행 뒤 15분(${failAt})이 지나야 실패로 기록할 수 있습니다`), timed);
+  assert.match(unknownReconcileHint({ provider: 'google_ads', currency: 'KRW', payload: { target: { campaign_id: '5' }, from_minor: 500000, to_minor: 700000 } }), /총예산이 700,000 KRW\(목표\)인지/);
+  assert.match(unknownReconcileHint({ provider: 'webhook', currency: 'USD', payload: {} }), /결제 시스템에서/);
+  assert.equal(openRequestLabel(null), '');
+  assert.equal(openRequestLabel({ id: 'sp-1', status: 'pending' }), '열린 요청 pending');
+  assert.equal(openRequestLabel({ id: '', status: 'other_account' }), '다른 계정에 열린 요청 있음', 'no id or state from another account');
   const insp = { from_minor: 100000, to_minor: 130000, observed: '130000', observed_minor: 130000, position: 'at_target' };
   assert.equal(inspectionSummary(insp, 'USD'), '지금 상한 1,300.00 USD: 목표값입니다 — 반영된 것으로 보입니다. (1,000.00 USD → 1,300.00 USD 계획)');
   assert.match(inspectionSummary({ ...insp, observed: '100000', observed_minor: 100000, position: 'at_from' }, 'USD'), /반영되지 않은 것으로/);

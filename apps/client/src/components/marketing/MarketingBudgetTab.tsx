@@ -27,6 +27,7 @@ import {
   directPaymentCredentials,
   directRefProblem,
   isDirectPaymentProvider,
+  openRequestLabel,
   payeeRouteLabel,
   formatDateTime,
   formatMinor,
@@ -338,8 +339,11 @@ function PaymentCheckPanel() {
               {r.ceiling_text ? ` · 지금 상한 ${r.ceiling_text}` : ''}
               {r.target_name_untrusted ? <span style={{ color: tokens.colors.textMuted }}> · 공급자 이름 “{r.target_name_untrusted}”</span> : ''}
               {r.api_version ? ` · API ${r.api_version}` : ''}
-              {r.open_request ? ` · 열린 요청 ${r.open_request.status}` : ''}
+              {r.open_request ? ` · ${openRequestLabel(r.open_request)}` : ''}
               {r.problems.length > 0 && <div>{r.problems.join(' / ')}</div>}
+              {r.provider_message_untrusted && (
+                <div style={{ color: tokens.colors.textMuted }}>공급자 메시지 “{r.provider_message_untrusted}”</div>
+              )}
             </li>
           ))}
         </ul>

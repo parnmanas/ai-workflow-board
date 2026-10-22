@@ -217,7 +217,7 @@ test('결과 불명 — 어디를 볼지 알려 주고, 공급자에서 지금 �
   });
   const card = within(container, 'marketing-spend-sp-unknown');
   const alert = within(container, 'marketing-spend-unknown-sp-unknown');
-  assert.match(alert.textContent, /Ads Manager 에서 캠페인 77 의 지출 한도가 130000\(목표\)/);
+  assert.match(alert.textContent, /Ads Manager 에서 캠페인 77 의 지출 한도가 1,300\.00 USD\(목표\)인지 1,000\.00 USD\(이전\)인지/);
   assert.equal(hasButton(card, '환불 기록…'), false);
   click(buttonIn(card, '공급자에서 확인'));
   await flush();
@@ -300,6 +300,15 @@ test('연결 확인 — 공급자를 읽은 결과를 수취인마다 보여 준
           payee: 'Meta fall', provider: 'meta_ads', ref: 'act_9/77', credential_id: 'cred-meta', ok: false,
           problems: ['the Meta campaign has no spend cap — a person sets the first cap in Ads Manager'],
           ceiling_minor: null, ceiling_text: '', ceiling_units: null, target_name_untrusted: 'Fall promo', facts: {}, api_version: 'v26.0', open_request: null,
+        }, {
+          payee: 'Meta denied', provider: 'meta_ads', ref: 'act_9/80', credential_id: 'cred-meta', ok: false,
+          problems: ['could not read Meta 80 (HTTP 400, code 100/33)'], ceiling_minor: null, ceiling_text: '', ceiling_units: null,
+          target_name_untrusted: '', facts: {}, api_version: '', open_request: null,
+          provider_message_untrusted: 'Unsupported get request. Object with ID 80 does not exist or missing permissions',
+        }, {
+          payee: 'Google total', provider: 'google_ads', ref: '1112223333/5', credential_id: 'cred-google', ok: true, problems: [],
+          ceiling_minor: 100000, ceiling_text: '1,000.00 USD', ceiling_units: '1000000000', target_name_untrusted: '', facts: {}, api_version: 'v26',
+          open_request: { id: '', status: 'other_account' },
         }],
       }),
     },
@@ -314,4 +323,11 @@ test('연결 확인 — 공급자를 읽은 결과를 수취인마다 보여 준
   assert.match(line.textContent, /공급자 이름 “Fall promo”/);
   assert.match(line.textContent, /API v26\.0/);
   assert.match(line.textContent, /no spend cap/);
+  const denied = within(container, 'marketing-payment-check-Meta denied');
+  assert.match(denied.textContent, /could not read Meta 80 \(HTTP 400, code 100\/33\)/);
+  assert.match(denied.textContent, /공급자 메시지 “Unsupported get request\. Object with ID 80 does not exist or missing permissions”/, 'the person sees why');
+  const google = within(container, 'marketing-payment-check-Google total');
+  assert.match(google.textContent, /^정상 · Google total \(Google Ads 1112223333\/5\) · 지금 상한 1,000\.00 USD/);
+  assert.match(google.textContent, /다른 계정에 열린 요청 있음/, 'another account\'s request shows without its id or state');
+  assert.doesNotMatch(google.textContent, /other_account/);
 });
