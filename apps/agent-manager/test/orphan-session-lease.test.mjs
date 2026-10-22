@@ -89,7 +89,8 @@ function spawnBarrieredContender(source, env) {
 
   const done = new Promise((resolve, reject) => {
     child.once('error', reject);
-    child.once('exit', (code) => resolve({ code, output }));
+    // close follows stdout/stderr draining; exit alone can lose the last marker.
+    child.once('close', (code, signal) => resolve({ code, signal, output, stderr: stderrText }));
   });
   return { child, ready, done, awaitStderr };
 }
@@ -227,6 +228,7 @@ test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock
       lock.release();
     } catch (error) {
       console.log('REJECTED:' + error.code);
+      console.error('CONTENDER_ERROR:' + JSON.stringify({ pid: process.pid, code: error.code, message: error.message, stack: error.stack }));
     }
   `;
 
@@ -254,9 +256,10 @@ test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock
   // 진 contender 는 정상적으로 거절되고 스스로 빠져나가야 한다. 여기서 0 이 아닌
   // 코드가 나오면 진 쪽이 이긴 쪽에게 force-kill 당했다는 뜻이다(Windows 는
   // 원격 SIGTERM 을 TerminateProcess 로 흉내내 exit code 1 을 남긴다).
-  assert.deepEqual(results.map(({ code }) => code), [0, 0]);
-  assert.equal(results.filter(({ output }) => output.includes('ACQUIRED')).length, 1);
-  assert.equal(results.filter(({ output }) => output.includes('REJECTED:EAGENTLOCKED')).length, 1);
+  const diagnostics = JSON.stringify(results, null, 2);
+  assert.deepEqual(results.map(({ code }) => code), [0, 0], diagnostics);
+  assert.equal(results.filter(({ output }) => output.includes('ACQUIRED')).length, 1, diagnostics);
+  assert.equal(results.filter(({ output }) => output.includes('REJECTED:EAGENTLOCKED')).length, 1, diagnostics);
 });
 
 for (const fixture of [
