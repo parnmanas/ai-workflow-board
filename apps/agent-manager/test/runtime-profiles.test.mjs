@@ -78,8 +78,8 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
 if (process.env.SIMULATE_AUX_FAILURE) {
   process.stderr.write('[claude-code:title_generation_failed] simulated auxiliary failure\\n');
 }
-// BaseSessionManager awaits PID-sidecar I/O before returning. A fixed delay
-// cannot guarantee its caller has attached result/exit observers. Wait for EOF
+// A fixed delay cannot guarantee the caller has attached its fixture-specific
+// result/exit observers. Wait for EOF
 // sent by that caller after both observers are installed (one-shot needs no gate).
 if (process.env.WAIT_FOR_FIXTURE_OBSERVERS) {
   await new Promise(resolve => {

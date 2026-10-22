@@ -234,6 +234,8 @@ export interface SessionRecord {
    *  and must not be unlinked on session teardown. */
   configPathIsTemp: boolean;
   pidPath: string | null;
+  /** Exit cleanup must not unlink before a pending sidecar write creates it. */
+  pidWrite?: Promise<void>;
   runtimeLease?: RuntimeLease | null;
   turnCount: number;
   startedAt: number;
@@ -1086,7 +1088,6 @@ export class BaseSessionManager {
         // child by its tempfile. Skipped for the persistent agent-owned
         // mcp-config — the per-agent dir already groups its children.
         pidPath = configPath.replace(/\.json$/, '.pid');
-        await fsp.writeFile(pidPath, String(child.pid), { mode: 0o600 }).catch(() => {});
       }
 
       const sess: SessionRecord = {
@@ -1136,6 +1137,12 @@ export class BaseSessionManager {
         }) || null;
       this.#wireStdio(sess);
       this.#wireExit(sess);
+      // Do not yield between spawn and returning the registered session:
+      // callers stamp identity/seat-release hooks before any child I/O runs.
+      // Observe close before starting disk I/O, and let cleanup await the write.
+      if (pidPath) {
+        sess.pidWrite = fsp.writeFile(pidPath, String(child.pid), { mode: 0o600 }).catch(() => {});
+      }
 
       // Greppable counterpart to subclass "reused existing pid=…" lines. The
       // dedup ticket's acceptance asks for unambiguous "spawned new" vs
@@ -1489,6 +1496,7 @@ export class BaseSessionManager {
         }
       }
       if (sess.pidPath) {
+        await sess.pidWrite;
         try {
           await fsp.unlink(sess.pidPath);
         } catch {
