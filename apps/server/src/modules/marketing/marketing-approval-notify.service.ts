@@ -243,7 +243,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
       campaign_id: campaignId,
       at: hold.created_at,
       exclude_user_ids: [],
-      list_hold: { name: hold.list_name, rate: Number(hold.stats.rate) },
+      list_hold: { name: hold.list_name, reason: hold.reason, rate: Number(hold.stats.rate) },
     })));
     const stateCandidates = [...spendCandidates, ...holdCandidates];
     const announced = stateCandidates.length

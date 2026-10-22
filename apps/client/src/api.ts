@@ -2782,7 +2782,7 @@ export const api = {
       `/marketing/contacts/${encodeURIComponent(id)}/erase${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
       { method: 'POST' },
     ),
-  /** 스팸 신고율로 발송을 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
+  /** 신고율 · 하드 바운스율로 발송을 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
   listMarketingListHolds: (accountId: string | null, query: { list?: string; status?: string } = {}) => {
     const params = new URLSearchParams();
     if (accountId) params.set('account_id', accountId);

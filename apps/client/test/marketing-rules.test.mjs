@@ -376,3 +376,8 @@ test('메일 공급자 이벤트 화면: 목록 발송 중지 요약 · 발송 �
     assert.ok(UNSUBSCRIBE_SOURCE_LABELS[source], `source ${source}`);
   }
 });
+
+
+test('hard bounce hold summary uses the hold reason and accepted sends', () => {
+  assert.equal(listHoldSummary({ reason: 'hard_bounce_rate', stats: { sent: 40, bounced: 10, hard_bounced: 2, rate: 0.05 } }), '하드 바운스율 5.00% — 영구 실패 2 / 발송 40');
+});

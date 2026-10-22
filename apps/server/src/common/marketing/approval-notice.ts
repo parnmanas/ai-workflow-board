@@ -88,7 +88,7 @@ export interface ApprovalNoticeCandidate {
   spend?: { amount_minor: number; currency: string; payee: string; expires_at: Date | null };
   /** 채널 제안의 플랫폼(고정 목록 값). */
   platform?: string;
-  list_hold?: { name: string; rate: number };
+  list_hold?: { name: string; rate: number; reason?: string };
 }
 
 export interface NoticeSpendRow {
@@ -246,7 +246,7 @@ function kindLine(kind: ApprovalNoticeKind, items: ApprovalNoticeCandidate[], no
     const shown = items.slice(0, MAX_SPEND_LINES).map((i) => {
       const hold = i.list_hold!;
       const rate = Number.isFinite(hold.rate) ? `${(hold.rate * 100).toFixed(2)}%` : '확인 필요';
-      return `${oneLine(hold.name, 60)} (신고율 ${rate})`;
+      return `${oneLine(hold.name, 60)} (${hold.reason === 'hard_bounce_rate' ? '하드 바운스율' : '신고율'} ${rate})`;
     });
     const rest = items.length - shown.length;
     detail = `: ${shown.join(', ')}${rest > 0 ? ` 외 ${rest}건` : ''}`;

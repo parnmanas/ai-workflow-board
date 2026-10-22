@@ -60,7 +60,7 @@
 | `MarketingCycle` | `marketing_cycles` | 루프 1회 |
 | `MarketingAuditEvent` | `marketing_audit_events` | append-only 감사 로그 |
 | `MarketingApprovalNotice` | `marketing_approval_notices` | 승인 대기 알림을 보냈다는 표시. (대상, 종류)마다 한 번 |
-| `MarketingListHold` | `marketing_list_holds` | 스팸 신고율이 높아 발송을 멈춘 수신 목록. (계정, 목록)마다 `held` 는 하나, 해제한 것은 이력 |
+| `MarketingListHold` | `marketing_list_holds` | 신고율 · 하드 바운스율이 높아 발송을 멈춘 수신 목록. (계정, 목록)마다 `held` 는 하나, 해제한 것은 이력 |
 | `MarketingConsentNotice` | `marketing_consent_notices` | 수신 동의 재확인 안내 한 통. (연락처, 기한)마다 하나 — 법정 통지를 보냈다는 기록 |
 | `MarketingConsentNoticeSetting` | `marketing_consent_notice_settings` | 계정의 재확인 안내 설정(켜기 · 발송 시점 · 무응답 처리 · 문구). 계정마다 하나 |
 
@@ -192,7 +192,7 @@
   - 다시 보낼지는 "다시 보내면 두 번 받을 수 있는가" 로 정한다. Resend 에는 발송 행 id 를 `Idempotency-Key` 로 보내므로 타임아웃 · 5xx · 429 를 최대 3번까지 다시 시도한다. SendGrid 는 멱등 키가 없어 429 만 다시 시도하고, 타임아웃 · 5xx 는 `failed` 로 닫는다.
   - 보내던 중 끊긴 행은 다시 보내지 않고 `failed` 로 닫는다. 중복 발송보다 누락이 낫다.
   - 캠페인이나 채널이 일시정지되면 큐의 메일은 버리지 않고 `deferred` 로 미룬다. 재개하면 이어서 보낸다. 보관된 캠페인의 메일은 `suppressed` 다.
-  - 수신 목록이 스팸 신고율로 멈췄으면 그 목록의 메일도 `deferred` 로 미룬다("목록 발송 중지"). 해제하면 바로 보낸다.
+  - 수신 목록이 신고율 · 하드 바운스율로 멈췄으면 그 목록의 메일도 `deferred` 로 미룬다("목록 발송 중지"). 해제하면 바로 보낸다.
   - 보낼 때 발송 행 id 를 공급자에 싣는다(Resend `tags` 의 `awb_send_id`, SendGrid `custom_args.awb_send_id`). 공급자가 그 메일의 이벤트에 그대로 돌려주므로 이벤트를 정확한 발송 행에 잇는다. 발송 행에는 보낸 credential(`credential_id`)도 남는다.
 - 서버가 **강제로** 넣는 것:
   - 제목 앞 광고 표기. 한국 · 국가 미상 수신자는 항상 `(광고)`, 그 밖은 채널 `ad_label`.
@@ -246,14 +246,16 @@
 - **에이전트는 여전히 연락처를 보지 못한다.** 답장한 연락처는 `contact_id` 로만 잇고 author 는 비운다. 사람용 REST(`GET /campaigns/:id/feedback`)만 그 연락처(주소 · 이름 · 상태)를 싣는다.
 - 제목이 `unsubscribe`(List-Unsubscribe 의 mailto) · `수신거부` 인 메일은 수신거부로 처리하고(source `mailto`) 처리 안내 메일을 보낸다. 본문의 낱말로는 판단하지 않는다 — 그런 글은 답장으로 기록돼 사람이 본다.
 
-### 목록 발송 중지 (스팸 신고율)
+### 목록 발송 중지 (스팸 신고율 · 하드 바운스율)
 
 Gmail · Yahoo 의 대량 발신자 기준은 스팸 신고율 0.1% 미만 유지, 0.3% 에는 닿지 말 것이다. 닿은 목록은 발신 도메인 전체의 평판을 깎으므로 사람이 볼 때까지 멈춘다(`MarketingListHoldService`, 규칙은 `common/marketing/email.ts`).
 
 - 단위는 (계정, 수신 목록)이다. 그 계정에서 그 목록을 쓰는 모든 메일 채널(캠페인 무관)을 같이 센다.
 - 새 스팸 신고가 발송 행에 기록될 때마다 센다: 기간(30일, 그 안에 해제했으면 해제 이후)에 보낸 메일 · 그중 닿지 않은 것(`bounced_at`) · 그중 신고된 것. **신고 2건 이상이고 신고 ÷ 닿은 메일 ≥ 0.3%** 면 멈춘다(작은 목록에서 한 사람의 신고만으로 멈추지 않게 최소 2건).
+- 하드 바운스가 새로 기록되거나 soft에서 hard로 바뀔 때도 같은 기간을 센다. **하드 바운스 2건 이상이고 하드 바운스 ÷ 공급자가 받은 발송 수 ≥ 5%** 면 `hard_bounce_rate`로 멈춘다. `bounce_type = hard`만 분자에 포함하고 soft·suppressed는 제외한다. 신고 기준도 함께 넘으면 기존 `complaint_rate`를 우선한다.
+- 기준 근거: [Amazon SES 발송 검토 FAQ](https://docs.aws.amazon.com/ses/latest/dg/faqs-enforcement.html)의 하드 바운스율 5% 검토 경고선을 사용한다(10%는 발송 정지 가능). **30일 창과 최소 2건은 AWB 정책**이며 SES의 집계 방식·최소 표본을 재현하지 않는다. 한 건의 실패로 작은 목록 전체를 멈추지 않되, 두 건부터 도메인 평판 보호를 우선한다.
 - 멈추면: 그 목록의 큐는 버리지 않고 `deferred`, 새 메일은 승인되지 않고(409), 에이전트의 메일 초안도 거부된다. `get_marketing_campaign` 의 채널에 `list_on_hold`, 사이클 지시문의 채널 줄에 "발송 중지" 가 실린다. 그 목록을 쓰는 캠페인마다 감사 `list.held`.
-- 해제는 `marketing.manage` 가 사유를 적어서 한다(`POST /api/marketing/list-holds/:id/release`). 보류된 메일은 바로 나가고, 신고율은 해제 이후 보낸 메일만 다시 센다 — 해제 전 메일에 늦게 온 신고로 다시 멈추지 않는다. 감사 `list.released`.
+- 해제는 `marketing.manage` 가 사유를 적어서 한다(`POST /api/marketing/list-holds/:id/release`). 보류된 메일은 바로 나가고, 신고율 · 하드 바운스율은 해제 이후 보낸 메일만 다시 센다 — 해제 전 메일에 늦게 온 신고 · 하드 바운스로 다시 멈추지 않는다. 감사 `list.released`.
 
 ### 동의 재확인 안내 (2년)
 
@@ -722,7 +724,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
   - 보내기가 실패하면 그 알림만 잃는다. 승인함과 사이드바 배지는 그대로 남는다.
   - 목록 중지는 `(중지 id:캠페인 id, list_hold)`로 선점한다. 같은 목록을 쓰는 채널이 여럿이어도 캠페인마다 한 번이며, 해제 후 다시 중지되면 새 중지 id로 다시 알린다.
   - 같은 지출 요청도 단계가 바뀌면(새 요청 → 두 번째 승인 → 결과 불명) 다시 알린다.
-- **본문:** 캠페인별 종류 · 건수를 싣는다. 지출은 금액 · 수취인 · 만료까지 남은 시간, 채널 제안은 플랫폼, 목록 중지는 목록 이름과 서버가 중지 시 기록한 신고율만 싣는다. `AWB_PUBLIC_URL` 이 있으면 캠페인 화면 링크(여러 캠페인이면 `/marketing`)를 붙인다.
+- **본문:** 캠페인별 종류 · 건수를 싣는다. 지출은 금액 · 수취인 · 만료까지 남은 시간, 채널 제안은 플랫폼, 목록 중지는 목록 이름과 서버가 중지 시 기록한 중지 사유와 해당 비율만 싣는다. `AWB_PUBLIC_URL` 이 있으면 캠페인 화면 링크(여러 캠페인이면 `/marketing`)를 붙인다.
   - **에이전트가 쓴 글은 싣지 않는다**: 지출 목적, 게시물 제목, 채널 이름, 근거. 에이전트가 읽는 외부 글에 섞인 프롬프트 주입이 AWB 이름의 알림 문구(가짜 링크 · `@everyone`)가 되지 않게 하기 위해서다. 실리는 것은 사람이 정했거나 서버가 계산한 값뿐이다.
 - `MARKETING_SCHEDULER_ENABLED=false` 이거나 인스턴스가 quiesce 중이면 보내지 않는다. quiesce 가 풀리면 다음 sweep 이 밀린 것을 보낸다.
 
@@ -782,7 +784,6 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
 - Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
-- 하드 바운스율이 높은 목록의 발송 중지(지금은 스팸 신고율만 본다)
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
 - 동의 재확인 안내에 온 회신(수신거부 제목 밖)을 사람이 보게 하기 — 지금은 이을 캠페인이 없어 기록하지 않는다
 - 정책 기반 자동 게시

@@ -22,6 +22,7 @@ import { bootApp, closeTestApp } from './helpers/boot.mjs';
 import { createAccount, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { encrypt } from '../dist/services/encryption.service.js';
+import { MarketingListHoldService } from '../dist/modules/marketing/marketing-list-hold.service.js';
 import { MarketingEmailService } from '../dist/modules/marketing/marketing-email.service.js';
 import { MarketingEmailEventsService } from '../dist/modules/marketing/marketing-email-events.service.js';
 
@@ -378,4 +379,60 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
   for (const a of ['contact.bounced', 'contact.complained', 'contact.unsubscribed', 'list.held', 'list.released', 'feedback.recorded']) {
     assert.ok(actions.has(a), `audit has ${a}`);
   }
+
+  // Dedicated list: soft -> hard upgrade, duplicate delivery, hold, release and recount.
+  const bounceChannel = await emailChannel('email', 'old-list', resendCred, 'old-list', 'help@awb.example.com');
+  await post('/contacts/import', { lists: ['old-list'], contacts: people('b', 5) });
+  const bp = await draft(bounceChannel, 'Bounce test');
+  await post(`/posts/${bp.id}/approve`, {});
+  await emailService.processQueue(new Date());
+  const b1 = await sendOf(bp.id, 'b1@example.com');
+  const b2 = await sendOf(bp.id, 'b2@example.com');
+  const b3 = await sendOf(bp.id, 'b3@example.com');
+  const b4 = await sendOf(bp.id, 'b4@example.com');
+  const holdService = app.get(MarketingListHoldService);
+  await resendHook(bounce(b1, 'b1@example.com'));
+  await resendHook(bounce(b1, 'b1@example.com'));
+  await resendHook(bounce(b2, 'b2@example.com', 'Transient'));
+  assert.equal(await holdService.active(account.id, 'old-list'), null);
+  const queued = await draft(bounceChannel, 'Queued');
+  await post(`/posts/${queued.id}/approve`, {});
+  const unapproved = await draft(bounceChannel, 'Unapproved');
+  await resendHook(bounce(b2, 'b2@example.com'));
+  const bh = await holdService.active(account.id, 'old-list');
+  assert.equal(bh.reason, 'hard_bounce_rate');
+  assert.equal(bh.stats.hard_bounced, 2);
+  assert.equal(bh.stats.sent, 5);
+  assert.equal(bh.stats.rate, 0.4);
+  assert.equal(bh.stats.threshold, 0.05);
+  assert.equal(bh.stats.min_hard_bounces, 2);
+  assert.equal((await post(`/posts/${unapproved.id}/approve`, {})).status, 409);
+  await emailService.processQueue(new Date());
+  assert.equal((await sendOf(queued.id, 'b3@example.com')).status, 'deferred');
+  await resendHook(bounce(b2, 'b2@example.com'));
+  assert.equal((await api('/list-holds?list=old-list')).body.length, 1);
+  assert.equal((await post(`/list-holds/${bh.id}/release`, { note: 'Removed stale addresses' })).status, 200);
+  // Ensure the old cohort is strictly before the release even on coarse clocks.
+  await sendRepo.update({ post_id: bp.id }, { sent_at: new Date(Date.now() - 60_000) });
+  await resendHook(bounce(b3, 'b3@example.com'));
+  await resendHook(bounce(b4, 'b4@example.com'));
+  assert.equal(await holdService.active(account.id, 'old-list'), null, 'late old bounces cannot rehold');
+  await emailService.processQueue(new Date());
+  assert.equal((await sendOf(queued.id, 'b5@example.com')).status, 'sent');
+  // Old events outside the rolling window are excluded regardless of reason.
+  const future = new Date(Date.now() + 31 * 86_400_000);
+  assert.equal((await holdService.stats(account.id, 'old-list', future)).stats.hard_bounced, 0);
+  // Fresh sends after release can trigger a new hold, with history retained.
+  await post('/contacts/import', { lists: ['old-list'], contacts: people('fresh', 2) });
+  const freshPost = await draft(bounceChannel, 'Fresh cohort');
+  await post(`/posts/${freshPost.id}/approve`, {});
+  await emailService.processQueue(new Date());
+  for (const email of ['fresh1@example.com', 'fresh2@example.com']) {
+    await resendHook(bounce(await sendOf(freshPost.id, email), email));
+  }
+  const newHold = await holdService.active(account.id, 'old-list');
+  assert.equal(newHold.reason, 'hard_bounce_rate');
+  assert.notEqual(newHold.id, bh.id);
+  assert.equal(newHold.stats.hard_bounced, 2);
+
 });

@@ -220,7 +220,7 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
               않습니다. 큐의 메일은 버리지 않고 보류했고, 새 메일은 승인되지 않습니다. 이 목록을 쓰는 다른 캠페인도 같이 멈춥니다.
             </div>
             <div style={{ marginTop: 6 }}>
-              가져온 연락처의 동의 출처, 메일 내용 · 빈도를 확인한 뒤 해제하세요 — 해제하면 보류된 메일이 바로 나가고, 신고율은 해제 이후 것만 다시 셉니다.
+              가져온 연락처의 동의 출처, 메일 내용 · 빈도를 확인한 뒤 해제하세요 — 해제하면 보류된 메일이 바로 나가고, 신고율 · 하드 바운스율은 해제 이후 것만 다시 셉니다.
             </div>
             {ctx.canManage && (
               <div style={{ marginTop: 8 }}>

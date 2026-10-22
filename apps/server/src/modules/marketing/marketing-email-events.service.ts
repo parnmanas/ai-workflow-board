@@ -369,7 +369,7 @@ export class MarketingEmailEventsService {
         campaignId: row.campaign_id, sendId: row.id, postId: row.post_id, detail: ev.detail, repeat: ev.repeat,
       });
     }
-    if (newComplaint) {
+    if (newComplaint || (rowChanged && ev.kind === 'bounce' && !ev.repeat)) {
       const channel = await this.channelRepo.findOne({ where: { id: row.channel_id } });
       const listName = String(channel?.config?.list_name || '');
       if (channel && listName) await this.listHolds.evaluate(channel.account_id, listName);

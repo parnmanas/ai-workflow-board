@@ -3774,7 +3774,7 @@ export interface MarketingChannel {
   guidelines: string;
   outreach_channel_id: string | null;
   email: MarketingEmailConfig | null;
-  /** 메일 채널 목록(GET campaigns/:id/channels)에만 — 스팸 신고율로 멈춘 수신 목록. */
+  /** 메일 채널 목록(GET campaigns/:id/channels)에만 — 신고율 · 하드 바운스율로 멈춘 수신 목록. */
   email_hold?: MarketingListHold | null;
   /** 메일 채널 목록에만 — 공급자에 붙여 넣을 webhook 주소와 서명 키가 있는지(키 값은 없다). */
   email_webhooks?: MarketingEmailWebhooks | null;
@@ -3800,14 +3800,14 @@ export interface MarketingEmailWebhooks {
   inbound_signing: boolean;
 }
 
-/** 스팸 신고율이 높아 발송을 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
+/** 신고율 · 하드 바운스율이 높아 발송을 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
 export interface MarketingListHold {
   id: string;
   account_id: string;
   list_name: string;
   status: 'held' | 'released' | string;
   reason: string;
-  stats: { since?: string; sent?: number; bounced?: number; complained?: number; rate?: number; threshold?: number };
+  stats: { since?: string; hard_bounced?: number; sent?: number; bounced?: number; complained?: number; rate?: number; threshold?: number };
   held_at: string;
   released_by: string;
   released_by_name: string;

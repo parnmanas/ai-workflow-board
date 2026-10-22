@@ -9,7 +9,10 @@ import {
   COMPLAINT_HOLD_RATE,
   COMPLAINT_WINDOW_MS,
   complaintRate,
-  shouldHoldList,
+  listHoldReason,
+  hardBounceRate,
+  HARD_BOUNCE_HOLD_RATE,
+  HARD_BOUNCE_HOLD_MIN,
   type ListMailStats,
 } from '../../common/marketing/email';
 import { SYSTEM_MARKETING_ACTOR, type MarketingActor } from '../../common/marketing/marketing-constants';
@@ -24,10 +27,10 @@ function percent(rate: number): string {
 }
 
 /**
- * MarketingListHoldService — 스팸 신고율이 높은 수신 목록의 발송 중지(docs/marketing.md "목록 발송 중지").
+ * MarketingListHoldService — 신고율 · 하드 바운스율이 높은 수신 목록의 발송 중지(docs/marketing.md "목록 발송 중지").
  *
- * 신고가 하나 들어올 때마다 그 목록의 기간 수치를 다시 센다: 같은 계정에서 그 목록을 쓰는 모든 메일 채널(캠페인 무관)이
- * 기간(30 일, 해제했으면 해제 이후)에 보낸 메일 · 그중 닿지 않은 것 · 그중 신고된 것. 기준(`shouldHoldList`)을 넘으면
+ * 신고 · 하드 바운스가 들어올 때마다 그 목록의 기간 수치를 다시 센다: 같은 계정에서 그 목록을 쓰는 모든 메일 채널(캠페인 무관)이
+ * 기간(30 일, 해제했으면 해제 이후)에 보낸 메일 · 그중 닿지 않은 것 · 그중 신고된 것. 기준(`listHoldReason`)을 넘으면
  * 멈춘다. 멈춘 목록은 발송 큐가 보류하고(MarketingEmailService) 새 메일 승인이 거부된다. 해제는 사람만, 사유와 함께.
  */
 @Injectable()
@@ -109,22 +112,23 @@ export class MarketingListHoldService {
     });
     if (released?.released_at && new Date(released.released_at).getTime() > since.getTime()) since = new Date(released.released_at);
     const channels = await this.channelsOf(accountId, listName);
-    const stats: ListMailStats = { sent: 0, bounced: 0, complained: 0 };
+    const stats: ListMailStats = { sent: 0, bounced: 0, complained: 0, hard_bounced: 0 };
     if (!channels.length) return { since, channels, stats };
     const base = () => this.sendRepo.createQueryBuilder('s')
       .where('s.channel_id IN (:...ids)', { ids: channels.map((c) => c.id) })
       .andWhere('s.status = :sent', { sent: 'sent' })
       .andWhere('s.sent_at >= :since', { since });
-    [stats.sent, stats.bounced, stats.complained] = await Promise.all([
+    [stats.sent, stats.bounced, stats.complained, stats.hard_bounced] = await Promise.all([
       base().getCount(),
       base().andWhere('s.bounced_at IS NOT NULL').getCount(),
       base().andWhere('s.complained_at IS NOT NULL').getCount(),
+      base().andWhere('s.bounce_type = :hard', { hard: 'hard' }).getCount(),
     ]);
     return { since, channels, stats };
   }
 
   /**
-   * 스팸 신고가 새로 기록된 뒤 부른다. 기준을 넘으면 목록을 멈추고 그 목록을 쓰는 캠페인마다 감사에 남긴다.
+   * 스팸 신고 · 하드 바운스가 새로 기록된 뒤 부른다. 기준을 넘으면 목록을 멈추고 그 목록을 쓰는 캠페인마다 감사에 남긴다.
    * 이미 멈춰 있으면 그것을 돌려준다. 동시에 둘이 멈추려 하면 유일 인덱스가 하나만 남긴다.
    */
   async evaluate(accountId: string, listName: string, now: Date = new Date()): Promise<MarketingListHold | null> {
@@ -132,21 +136,28 @@ export class MarketingListHoldService {
     const existing = await this.active(accountId, listName);
     if (existing) return existing;
     const { since, channels, stats } = await this.stats(accountId, listName, now);
-    if (!shouldHoldList(stats)) return null;
-    const rate = complaintRate(stats);
+    const reason = listHoldReason(stats);
+    if (!reason) return null;
+    const hardBounce = reason === 'hard_bounce_rate';
+    const rate = hardBounce ? hardBounceRate(stats) : complaintRate(stats);
+    const threshold = hardBounce ? HARD_BOUNCE_HOLD_RATE : COMPLAINT_HOLD_RATE;
+    const minimum = hardBounce ? { min_hard_bounces: HARD_BOUNCE_HOLD_MIN } : { min_complaints: COMPLAINT_HOLD_MIN };
     let hold: MarketingListHold;
     try {
       hold = await this.holdRepo.save(this.holdRepo.create({
         account_id: accountId,
         list_name: listName,
         status: 'held',
-        reason: 'complaint_rate',
-        stats: { since: since.toISOString(), ...stats, rate, threshold: COMPLAINT_HOLD_RATE, min_complaints: COMPLAINT_HOLD_MIN },
+        reason,
+        stats: { since: since.toISOString(), ...stats, rate, threshold, ...minimum },
       }));
     } catch {
       return this.active(accountId, listName);
     }
     const delivered = Math.max(stats.sent - stats.bounced, 0);
+    const cause = hardBounce
+      ? `하드 바운스율 ${percent(rate)}(영구 실패 ${stats.hard_bounced} / 발송 ${stats.sent}, 기준 ${percent(threshold)})`
+      : `스팸 신고율 ${percent(rate)}(신고 ${stats.complained} / 닿은 메일 ${delivered}, 기준 ${percent(threshold)})`;
     const campaignIds = [...new Set(channels.map((c) => c.campaign_id))];
     for (const campaignId of campaignIds.length ? campaignIds : ['']) {
       await this.audit.record({
@@ -156,8 +167,8 @@ export class MarketingListHoldService {
         entityId: hold.id,
         action: 'list.held',
         actor: SYSTEM_MARKETING_ACTOR,
-        summary: `메일 목록 "${listName}" 발송 중지 — 스팸 신고율 ${percent(rate)}(신고 ${stats.complained} / 닿은 메일 ${delivered}, 기준 ${percent(COMPLAINT_HOLD_RATE)}). 사람이 확인하고 해제할 때까지 이 목록으로 메일이 나가지 않습니다.`,
-        detail: { list: listName, since: since.toISOString(), ...stats, rate },
+        summary: `메일 목록 "${listName}" 발송 중지 — ${cause}. 사람이 확인하고 해제할 때까지 이 목록으로 메일이 나가지 않습니다.`,
+        detail: { list: listName, since: since.toISOString(), ...stats, rate, reason },
       });
       this.audit.notify(accountId, campaignId, 'list', hold.id, 'held');
     }

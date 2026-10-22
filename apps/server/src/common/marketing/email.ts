@@ -94,6 +94,10 @@ export const COMPLAINT_HOLD_MIN = 2;
 /** 신고율을 세는 기간: 이 기간에 보낸 메일과 그 메일의 신고. 해제한 목록은 해제 이후만 센다. */
 export const COMPLAINT_WINDOW_MS = 30 * 24 * 60 * 60_000;
 
+/** SES의 5% 검토 경고선. 30일 창과 최소 2건은 AWB 정책(docs/marketing.md). */
+export const HARD_BOUNCE_HOLD_RATE = 0.05;
+export const HARD_BOUNCE_HOLD_MIN = 2;
+
 export interface ListMailStats {
   /** 기간에 공급자가 받은 메일 수. */
   sent: number;
@@ -101,6 +105,8 @@ export interface ListMailStats {
   bounced: number;
   /** 그중 스팸 신고된 것. */
   complained: number;
+  /** 영구 실패만. soft · suppressed 제외. */
+  hard_bounced?: number;
 }
 
 /** 신고율 = 신고 ÷ 닿은 메일. */
@@ -110,8 +116,19 @@ export function complaintRate(stats: ListMailStats): number {
   return stats.complained / delivered;
 }
 
+export function hardBounceRate(stats: ListMailStats): number {
+  return stats.sent > 0 ? (stats.hard_bounced || 0) / stats.sent : 0;
+}
+
+/** 둘 다 넘으면 기존 신고 사유를 우선한다. */
+export function listHoldReason(stats: ListMailStats): 'complaint_rate' | 'hard_bounce_rate' | null {
+  if (stats.complained >= COMPLAINT_HOLD_MIN && complaintRate(stats) >= COMPLAINT_HOLD_RATE) return 'complaint_rate';
+  if ((stats.hard_bounced || 0) >= HARD_BOUNCE_HOLD_MIN && hardBounceRate(stats) >= HARD_BOUNCE_HOLD_RATE) return 'hard_bounce_rate';
+  return null;
+}
+
 export function shouldHoldList(stats: ListMailStats): boolean {
-  return stats.complained >= COMPLAINT_HOLD_MIN && complaintRate(stats) >= COMPLAINT_HOLD_RATE;
+  return listHoldReason(stats) !== null;
 }
 
 /** 한국 수신자(또는 국가를 모르는 수신자)는 언제나 "(광고)" 로 시작한다. */

@@ -19,7 +19,7 @@ import {
   sendGridInboundEmail, verifySendGridSignature, verifySvixSignature,
 } from '../dist/common/marketing/email-events.js';
 import { cleanReplyText, htmlToText, isAutoReply, isUnsubscribeRequest, stripSubjectPrefixes } from '../dist/common/marketing/email-reply.js';
-import { complaintRate, shouldHoldList } from '../dist/common/marketing/email.js';
+import { complaintRate, shouldHoldList, listHoldReason, hardBounceRate } from '../dist/common/marketing/email.js';
 import { buildCyclePrompt } from '../dist/common/marketing/cycle-prompt.js';
 
 test('Svix (Resend) signatures: the published vector verifies, anything changed does not', () => {
@@ -299,4 +299,17 @@ test('SendGrid signatures made with a key generated here verify; the other key d
   const secret = `whsec_${Buffer.from('0123456789abcdef0123456789abcdef').toString('base64')}`;
   const sig = createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`msg_1.${timestamp}.`).update(body).digest('base64');
   assert.equal(verifySvixSignature({ secret, id: 'msg_1', timestamp, signature: `v1,${sig}`, body }), true);
+});
+
+
+test('hard bounce hold: 5% inclusive, minimum two, accepted sends denominator', () => {
+  const stats = { sent: 40, bounced: 20, complained: 0, hard_bounced: 2 };
+  assert.equal(hardBounceRate(stats), 0.05);
+  assert.equal(listHoldReason(stats), 'hard_bounce_rate');
+  assert.equal(shouldHoldList(stats), true);
+  assert.equal(listHoldReason({ ...stats, sent: 41 }), null);
+  assert.equal(listHoldReason({ ...stats, sent: 1, hard_bounced: 1 }), null);
+  assert.equal(listHoldReason({ ...stats, hard_bounced: 0 }), null, 'soft/suppressed do not count');
+  assert.equal(listHoldReason({ ...stats, complained: 2 }), 'complaint_rate');
+  assert.equal(hardBounceRate({ ...stats, sent: 0 }), 0);
 });

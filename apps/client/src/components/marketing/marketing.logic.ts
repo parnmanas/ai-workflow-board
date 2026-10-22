@@ -750,10 +750,11 @@ export function sendOutcomeLine(outcomes: { hard: number; soft: number; suppress
 }
 
 /** 목록 발송 중지의 수치 요약 — 서버가 멈출 때 기록한 것(stats). */
-export function listHoldSummary(hold: { stats?: { sent?: number; bounced?: number; complained?: number; rate?: number } | null }): string {
+export function listHoldSummary(hold: { reason?: string; stats?: { hard_bounced?: number; sent?: number; bounced?: number; complained?: number; rate?: number } | null }): string {
   const s = hold.stats || {};
   const delivered = Math.max((s.sent || 0) - (s.bounced || 0), 0);
   const rate = typeof s.rate === 'number' && Number.isFinite(s.rate) ? `${(s.rate * 100).toFixed(2)}%` : '—';
+  if (hold.reason === 'hard_bounce_rate') return `하드 바운스율 ${rate} — 영구 실패 ${formatCount(s.hard_bounced ?? 0)} / 발송 ${formatCount(s.sent ?? 0)}`;
   return `스팸 신고율 ${rate} — 신고 ${formatCount(s.complained ?? 0)} / 닿은 메일 ${formatCount(delivered)}`;
 }
 

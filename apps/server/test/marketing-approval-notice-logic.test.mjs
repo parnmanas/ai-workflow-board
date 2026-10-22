@@ -250,3 +250,10 @@ test('list holds bypass the quiet period and only reach marketing managers', () 
   assert.deepEqual(approvalNoticesFor({ id: 'manager', role: 'user', permissions: ['marketing.manage'] }, [hold]), [hold]);
   assert.deepEqual(approvalNoticesFor({ id: 'payer', role: 'user', permissions: ['marketing.approve_spend'] }, [hold]), []);
 });
+
+
+test('hard bounce digest labels the recorded rate correctly', () => {
+  const hold = candidate('list_hold', { list_hold: { name: 'newsletter', rate: 0.05, reason: 'hard_bounce_rate' } });
+  const digest = composeApprovalDigest([hold], new Map([['camp', { name: 'Campaign' }]]), { now: NOW });
+  assert.match(digest.body, /하드 바운스율 5.00%/);
+});
