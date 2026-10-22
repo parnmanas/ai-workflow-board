@@ -3778,8 +3778,23 @@ export interface MarketingPost {
   published_at: string | null;
   error: string;
   link_codes: string[];
+  /**
+   * 서버가 마지막으로 읽은 참여(docs/marketing.md "참여 지표 자동 수집") — reddit · GitHub outreach 채널에 서버가 게시한
+   * 글만. `engagements` 는 reddit 점수 · GitHub 반응 합계, `replies` 는 댓글 수(답글인 글은 null). 읽은 적 없으면 null.
+   */
+  engagement?: MarketingPostEngagement | null;
+  /** 다음에 읽을 시각. null = 읽지 않는다(수집 끝 · 멈춤 · 서버가 게시한 글이 아님). */
+  engagement_next_at?: string | null;
+  /** 마지막 읽기가 실패했거나 수집을 멈춘 이유. */
+  engagement_error?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface MarketingPostEngagement {
+  engagements: number | null;
+  replies: number | null;
+  read_at: string;
 }
 
 export interface MarketingEmailSend {

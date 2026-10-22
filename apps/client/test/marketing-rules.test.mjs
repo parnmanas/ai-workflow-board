@@ -18,8 +18,12 @@ import {
   MARKETING_CAPABILITIES,
   MONEY_SETTING_KEYS,
   RECORDABLE_METRICS,
+  CONNECTOR_METRICS,
   UNKNOWN_SPEND_MESSAGE,
   activationBlocker,
+  engagementSummary,
+  engagementTrackedChannel,
+  metricValueText,
   allocationStatusView,
   approvalModesFor,
   auditCursor,
@@ -52,6 +56,7 @@ import {
 import * as serverConstants from '../../server/src/common/marketing/marketing-constants.ts';
 import * as serverCampaign from '../../server/src/modules/marketing/marketing-campaign.logic.ts';
 import * as serverChannel from '../../server/src/modules/marketing/marketing-channel.logic.ts';
+import * as serverEngagement from '../../server/src/common/marketing/engagement.ts';
 import { MONEY_SETTING_KEYS as SERVER_MONEY_SETTING_KEYS } from '../../server/src/modules/marketing/marketing-http.ts';
 
 const throws = (fn) => { try { fn(); return false; } catch { return true; } };
@@ -76,6 +81,24 @@ test('상수가 서버 원천과 같다 — 기능 · 라벨 · 플랫폼 · 상
   assert.deepEqual(DEFAULT_LIMITS, { ...serverConstants.DEFAULT_MARKETING_LIMITS });
   assert.deepEqual([...RECORDABLE_METRICS].sort(), serverConstants.MARKETING_METRICS.filter((m) => m !== 'clicks').sort(), 'clicks 는 추적 링크에서만');
   assert.deepEqual([...FEEDBACK_CATEGORIES], [...serverConstants.FEEDBACK_CATEGORIES]);
+});
+
+test('참여 자동 수집 — 서버가 읽는 채널 · 지표 판정이 서버와 같고, 자동 수집 값은 부호가 붙는다', () => {
+  // 화면이 미리 막는 "이 채널의 참여 · 답글은 기록하지 않는다" 가 서버의 거부(recordMetrics)와 갈라지지 않게.
+  for (const platform of serverConstants.CHANNEL_PLATFORMS) {
+    for (const kind of serverConstants.CHANNEL_KINDS) {
+      assert.equal(engagementTrackedChannel({ kind, platform }), serverEngagement.engagementTracked({ kind, platform }), `${kind} · ${platform}`);
+    }
+  }
+  assert.equal(engagementTrackedChannel(undefined), false);
+  assert.deepEqual([...CONNECTOR_METRICS], [...serverEngagement.ENGAGEMENT_METRICS]);
+  assert.equal(engagementSummary('reddit', { engagements: 1234, replies: 12 }), '점수 1,234 · 댓글 12');
+  assert.equal(engagementSummary('github', { engagements: 5, replies: null }), '반응 5', '답글(댓글)인 글은 댓글 수가 없다');
+  assert.equal(engagementSummary('reddit', null), '');
+  assert.equal(metricValueText({ metric: 'engagements', value: 12, source: 'connector' }, 'USD'), '+12');
+  assert.equal(metricValueText({ metric: 'engagements', value: -7, source: 'connector' }, 'USD'), '-7');
+  assert.equal(metricValueText({ metric: 'engagements', value: 1200, source: 'agent' }, 'USD'), '1,200', '사람 · 에이전트 관측치는 그대로');
+  assert.equal(metricValueText({ metric: 'revenue_minor', value: 1250, source: 'user' }, 'USD'), '12.50 USD');
 });
 
 test('돈 설정 키가 서버 MONEY_SETTING_KEYS 와 같다', () => {

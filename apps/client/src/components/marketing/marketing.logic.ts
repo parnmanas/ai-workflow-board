@@ -993,6 +993,36 @@ export function formatCount(n: number | null | undefined): string {
   return n === null || n === undefined || !Number.isFinite(Number(n)) ? '—' : Number(n).toLocaleString('en-US');
 }
 
+/**
+ * 서버가 게시물의 참여를 읽는 채널 — reddit · github outreach 채널(docs/marketing.md "참여 지표 자동 수집"). 서버
+ * `common/marketing/engagement.ts` 의 `engagementTracked` 와 같은 판정이다. 이 채널의 CONNECTOR_METRICS 는 사람이
+ * 기록하지 않는다(서버가 거부한다 — 두 번 세지 않게).
+ */
+export function engagementTrackedChannel(channel: { kind?: string; platform?: string } | null | undefined): boolean {
+  return !!channel && channel.kind === 'outreach' && (channel.platform === 'reddit' || channel.platform === 'github');
+}
+
+export const CONNECTOR_METRICS = ['engagements', 'replies'] as const;
+
+/** 게시물의 마지막 참여 — reddit 은 점수, GitHub 은 반응. 답글(댓글)인 글은 댓글 수가 없다. */
+export function engagementSummary(
+  platform: string | undefined,
+  engagement: { engagements: number | null; replies: number | null } | null | undefined,
+): string {
+  if (!engagement) return '';
+  const parts: string[] = [];
+  if (engagement.engagements !== null) parts.push(`${platform === 'github' ? '반응' : '점수'} ${formatCount(engagement.engagements)}`);
+  if (engagement.replies !== null) parts.push(`댓글 ${formatCount(engagement.replies)}`);
+  return parts.join(' · ');
+}
+
+/** 지표 행의 값 — 자동 수집(source `connector`) 행은 직전에 읽은 값과의 차이라 부호를 붙인다. */
+export function metricValueText(metric: { metric: string; value: number; source: string }, currency: string): string {
+  if (metric.metric === 'revenue_minor') return formatMinor(metric.value, currency);
+  if (metric.source === 'connector' && Number(metric.value) > 0) return `+${formatCount(metric.value)}`;
+  return formatCount(metric.value);
+}
+
 export function formatRate(v: number | null | undefined): string {
   return v === null || v === undefined || !Number.isFinite(v) ? '—' : `${(v * 100).toFixed(1)}%`;
 }

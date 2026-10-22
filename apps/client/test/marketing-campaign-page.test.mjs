@@ -11,12 +11,14 @@
 //   5. 승인된(보내기 전) 지출은 "취소(보내기 전)" 로 닫을 수 있다.
 //   6. `marketing_update` 가 이 캠페인 것이면(디바운스 뒤) 다시 읽고, 다른 캠페인 것이면 읽지 않는다.
 //   7. 지출 승인 권한이 없으면 돈 버튼이 없다(읽기 전용).
+//   8. 서버가 읽은 참여(docs/marketing.md "참여 지표 자동 수집") — 게시물 카드의 읽은 값 · 다음 읽기 · 끝 · 실패, 지표 표의
+//      자동 수집 행(부호 붙은 변화량), 서버가 읽는 채널의 참여 · 답글 기록은 화면이 먼저 막는다.
 //
 // 실행: node --import tsx --test --test-force-exit test/marketing-campaign-page.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 // helpers/jsdom.mjs 를 react-router-dom(→ react-dom) 보다 먼저 import 해야 한다(그 파일 상단 주석).
-import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
+import { setupDom, mount, click, typeInto, run, React, act } from './helpers/jsdom.mjs';
 import { installFakeEventSource } from './helpers/boardStream.mjs';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { api } from '../src/api.ts';
@@ -575,4 +577,86 @@ test('운영 권한만 — 승인함 수는 처리할 수 있는 채널 · 게�
   const selected = [...container.querySelectorAll('[role="tab"]')].find((el) => el.getAttribute('aria-selected') === 'true');
   assert.equal(selected.textContent, '승인함 (2)', '채널 제안 1 + 초안 1 — 사이드바 배지와 같은 규칙');
   assert.ok(container.querySelector('[data-testid="marketing-spend-sp-1"]'), '지출은 읽기 전용으로 보인다');
+});
+
+const redditOutreach = { ...channels[0], id: 'ch-reddit', status: 'active', kind: 'outreach', outreach_channel_id: 'oc-1', name: 'r/selfhosted' };
+const githubOutreach = {
+  ...channels[0], id: 'ch-github', platform: 'github', target: 'acme/widget', status: 'active', kind: 'outreach', outreach_channel_id: 'oc-2', name: 'acme/widget',
+};
+
+function choose(select, value) {
+  run(() => {
+    Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(select, value);
+    select.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+}
+
+test('참여 자동 수집 — 게시물 카드가 읽은 값 · 다음 읽기 · 끝 · 실패를 보이고, manual 글에는 없다', async (t) => {
+  const published = (id, channelId, extra) => ({
+    ...draftPost, id, channel_id: channelId, status: 'published', permalink: 'https://www.reddit.com/r/selfhosted/comments/x', published_at: iso(-600), ...extra,
+  });
+  const posts = [
+    published('pub-live', 'ch-reddit', { engagement: { engagements: 57, replies: 12, read_at: iso(-30) }, engagement_next_at: iso(30), engagement_error: '' }),
+    published('pub-done', 'ch-github', { engagement: { engagements: 5, replies: null, read_at: iso(-60) }, engagement_next_at: null, engagement_error: '' }),
+    published('pub-fail', 'ch-reddit', { engagement: null, engagement_next_at: iso(60), engagement_error: 'Reddit API GET /api/info failed (503)' }),
+    published('pub-manual', 'ch-forum', { engagement: null, engagement_next_at: null, engagement_error: '' }),
+  ];
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=content',
+    stubs: {
+      listMarketingChannels: async () => [...channels, redditOutreach, githubOutreach],
+      listMarketingPosts: async () => posts,
+    },
+  });
+  assert.match(within(container, 'marketing-post-engagement-pub-live').textContent, /^점수 57 · 댓글 12 · .+ 읽음 · 다음 .+$/);
+  assert.match(within(container, 'marketing-post-engagement-pub-done').textContent, /^반응 5 · .+ 읽음 · 수집 끝$/, '답글(댓글 수 없음) · 기간이 끝난 글');
+  assert.match(within(container, 'marketing-post-engagement-pub-fail').textContent, /^아직 읽지 않음 · 다음 .+ · Reddit API GET \/api\/info failed \(503\)$/);
+  assert.equal(container.querySelector('[data-testid="marketing-post-engagement-pub-manual"]'), null, '사람이 올린 manual 글은 서버가 읽지 않는다');
+});
+
+test('지표 표 — 자동 수집 행은 부호 붙은 변화량으로 보이고, 서버가 읽는 채널의 참여 · 답글 기록은 화면이 막는다', async (t) => {
+  const metric = (id, fields) => ({
+    id, campaign_id: 'c-1', channel_id: 'ch-reddit', post_id: 'pub-live', link_id: '', observed_at: iso(-30), created_at: iso(-30),
+    recorded_by_type: 'system', recorded_by_name: 'Marketing', ...fields,
+  });
+  const metrics = [
+    metric('m-1', { metric: 'engagements', value: 12, source: 'connector', note: 'reddit score 45 → 57' }),
+    metric('m-2', { metric: 'replies', value: -1, source: 'connector', note: 'reddit comments 13 → 12' }),
+    metric('m-3', { channel_id: 'ch-forum', post_id: '', metric: 'impressions', value: 900, source: 'agent', recorded_by_type: 'agent', recorded_by_name: 'marketer', note: 'forum stats' }),
+  ];
+  const emptyRow = {
+    posts_published: 0, metrics: { clicks: 0, impressions: 0, views: 0, engagements: 0, replies: 0, signups: 0, conversions: 0, revenue_minor: 0 },
+    spent_minor: 0, feedback: 0, inbound_items: 0, feedback_tickets: 0,
+    derived: { cpc_minor: null, cost_per_signup_minor: null, cost_per_conversion_minor: null, ctr: null, conversion_rate: null, roas: null },
+  };
+  const { container, calls } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=analytics',
+    stubs: {
+      listMarketingChannels: async () => [...channels, redditOutreach],
+      getMarketingReport: async () => ({ since: iso(-43200), until: iso(0), currency: 'KRW', channels: [], totals: emptyRow, lines: [], caveats: [] }),
+      listMarketingLinks: async () => [],
+      listMarketingMetrics: async () => metrics,
+      recordMarketingMetrics: async () => [],
+    },
+  });
+  const rows = [...container.querySelectorAll('tbody tr')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent));
+  const byNote = (note) => rows.find((r) => r.includes(note));
+  assert.deepEqual(byNote('reddit score 45 → 57').slice(2, 5), ['+12', 'r/selfhosted', '자동 수집']);
+  assert.deepEqual(byNote('reddit comments 13 → 12').slice(2, 5), ['-1', 'r/selfhosted', '자동 수집']);
+  assert.deepEqual(byNote('forum stats').slice(2, 5), ['900', 'Dev forum', 'marketer'], '사람 · 에이전트 관측치는 그대로');
+
+  const recordCalls = () => calls.filter(([name]) => name === 'recordMarketingMetrics');
+  choose(fieldIn(container, '지표', 'select'), 'engagements');
+  choose(fieldIn(container, '채널 (선택)', 'select'), 'ch-reddit');
+  typeInto(fieldIn(container, '값'), '5');
+  await act(async () => { click(buttonIn(container, '기록')); });
+  await flush();
+  assert.equal(recordCalls().length, 0, '서버가 읽는 채널의 참여는 보내지 않는다');
+  assert.match(container.querySelector('[role="alert"]')?.textContent || '', /서버가 게시물에서 직접 읽습니다/);
+
+  choose(fieldIn(container, '채널 (선택)', 'select'), 'ch-forum');
+  await act(async () => { click(buttonIn(container, '기록')); });
+  await flush();
+  assert.equal(recordCalls().length, 1);
+  assert.deepEqual(recordCalls()[0][2], [{ metric: 'engagements', value: 5, channel_id: 'ch-forum' }]);
 });

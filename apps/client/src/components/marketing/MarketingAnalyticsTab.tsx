@@ -4,14 +4,17 @@ import type { MarketingLink, MarketingMetric, MarketingReport, MarketingReportRo
 import { tokens } from '../../tokens';
 import { Button, Input, Select } from '../common';
 import {
+  CONNECTOR_METRICS,
   METRIC_LABELS,
   RECORDABLE_METRICS,
   REPORT_PERIOD_DAYS,
+  engagementTrackedChannel,
   formatCount,
   formatDateTime,
   formatMinor,
   formatRate,
   formatRoas,
+  metricValueText,
   reportRange,
   safeHttpUrl,
 } from './marketing.logic';
@@ -53,6 +56,7 @@ export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: numb
       <td style={{ ...tableStyles.td, ...tableStyles.num }}>{formatCount(r.metrics.clicks)}</td>
       <td style={{ ...tableStyles.td, ...tableStyles.num }}>{formatCount(r.metrics.impressions)}</td>
       <td style={{ ...tableStyles.td, ...tableStyles.num }}>{formatCount(r.metrics.engagements)}</td>
+      <td style={{ ...tableStyles.td, ...tableStyles.num }}>{formatCount(r.metrics.replies)}</td>
       <td style={{ ...tableStyles.td, ...tableStyles.num }}>{formatCount(r.metrics.signups)}</td>
       <td style={{ ...tableStyles.td, ...tableStyles.num }}>{formatCount(r.metrics.conversions)}</td>
       <td style={{ ...tableStyles.td, ...tableStyles.num }}>{extra && 'allocation' in extra ? (extra.allocation === null || extra.allocation === undefined ? '—' : formatMinor(extra.allocation, currency)) : ''}</td>
@@ -96,6 +100,7 @@ export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: numb
                     <th style={{ ...tableStyles.th, ...tableStyles.num }}>클릭(raw)</th>
                     <th style={{ ...tableStyles.th, ...tableStyles.num }}>노출</th>
                     <th style={{ ...tableStyles.th, ...tableStyles.num }}>참여</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>답글</th>
                     <th style={{ ...tableStyles.th, ...tableStyles.num }}>가입</th>
                     <th style={{ ...tableStyles.th, ...tableStyles.num }}>전환</th>
                     <th style={{ ...tableStyles.th, ...tableStyles.num }}>편성액</th>
@@ -222,6 +227,10 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
 
   const record = async () => {
     if (!/^\d+$/.test(value.trim())) { setError('값은 0 이상의 정수입니다(매출은 최소 단위)'); return; }
+    if ((CONNECTOR_METRICS as readonly string[]).includes(metric) && engagementTrackedChannel(ctx.channels.get(channelId))) {
+      setError('reddit · GitHub 채널의 참여 · 답글은 서버가 게시물에서 직접 읽습니다 — 기록하지 않습니다');
+      return;
+    }
     let observed: string | undefined;
     if (observedAt) {
       const d = new Date(observedAt);
@@ -265,7 +274,10 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
           <Button variant="primary" size="md" disabled={busy} onClick={() => void record()}>기록</Button>
         </div>
       )}
-      <Hint>플랫폼 통계에서 직접 확인한 수치만 남기세요. 클릭은 추적 링크에서만 셉니다.</Hint>
+      <Hint>
+        플랫폼 통계에서 직접 확인한 수치만 남기세요. 클릭은 추적 링크에서만 셉니다. reddit · GitHub 채널에 서버가 게시한 글의
+        참여(점수 · 반응) · 답글은 서버가 게시 후 14일 동안 읽어 &apos;자동 수집&apos; 으로 남깁니다 — 값은 직전에 읽은 값과의 차이입니다.
+      </Hint>
       {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight, marginTop: 4 }}>{error}</div>}
       {metrics && metrics.length > 0 && (
         <div style={{ overflowX: 'auto', marginTop: 8 }}>
@@ -285,9 +297,9 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
                 <tr key={m.id}>
                   <td style={tableStyles.td}>{formatDateTime(m.observed_at)}</td>
                   <td style={tableStyles.td}>{METRIC_LABELS[m.metric] || m.metric}</td>
-                  <td style={{ ...tableStyles.td, ...tableStyles.num }}>{m.metric === 'revenue_minor' ? formatMinor(m.value, ctx.currency) : formatCount(m.value)}</td>
+                  <td style={{ ...tableStyles.td, ...tableStyles.num }}>{metricValueText(m, ctx.currency)}</td>
                   <td style={tableStyles.td}>{m.channel_id ? ctx.channels.get(m.channel_id)?.name || '—' : '전체'}</td>
-                  <td style={tableStyles.td}>{m.recorded_by_name || m.recorded_by_type}</td>
+                  <td style={tableStyles.td}>{m.source === 'connector' ? '자동 수집' : m.recorded_by_name || m.recorded_by_type}</td>
                   <td style={tableStyles.td}>{m.note}</td>
                 </tr>
               ))}

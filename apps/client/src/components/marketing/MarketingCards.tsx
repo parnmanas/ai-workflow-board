@@ -30,6 +30,8 @@ import {
   emailConfigBody,
   emailDraftFrom,
   emailWebhookSetup,
+  engagementSummary,
+  engagementTrackedChannel,
   formatCount,
   formatDateTime,
   formatMinor,
@@ -550,6 +552,19 @@ function approveLabel(channelKind: string | undefined, postKind: string): string
   return '승인';
 }
 
+/** 서버가 읽은 참여(docs/marketing.md "참여 지표 자동 수집") — 읽은 값 · 읽은 시각 · 다음 읽기(또는 끝) · 실패 이유. */
+function EngagementLine({ post, platform }: { post: MarketingPost; platform: string | undefined }) {
+  const summary = engagementSummary(platform, post.engagement);
+  return (
+    <span data-testid={`marketing-post-engagement-${post.id}`} title="서버가 게시 후 14일 동안 플랫폼에서 읽습니다">
+      {summary || '아직 읽지 않음'}
+      {post.engagement?.read_at ? ` · ${formatDateTime(post.engagement.read_at)} 읽음` : ''}
+      {post.engagement_next_at ? ` · 다음 ${formatDateTime(post.engagement_next_at)}` : post.engagement ? ' · 수집 끝' : ''}
+      {post.engagement_error ? <span style={{ color: tokens.colors.dangerLight }}> · {post.engagement_error}</span> : null}
+    </span>
+  );
+}
+
 export function PostCard({ post }: { post: MarketingPost }) {
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
@@ -717,6 +732,7 @@ export function PostCard({ post }: { post: MarketingPost }) {
             ['결정 메모', post.decision_note],
             ['게시 주소', post.permalink ? <ExternalLink href={post.permalink} /> : ''],
             ['게시 시각', post.published_at ? formatDateTime(post.published_at) : ''],
+            ['참여', post.status === 'published' && engagementTrackedChannel(channel) ? <EngagementLine post={post} platform={channel?.platform} /> : ''],
             ['오류', post.error ? <span style={{ color: tokens.colors.dangerLight }}>{post.error}</span> : ''],
           ]}
         />
