@@ -145,7 +145,8 @@ function host() {
     },
     subagentManager: {
       canSpawn: () => true,
-      async spawn(args) { spawns.push(args); return { spawned: true, pid: 4242 }; },
+      // Keep the fake process alive until the test explicitly fires onExit.
+      async spawn(args) { spawns.push(args); return { spawned: true, pid: process.pid }; },
     },
   });
   return { commands, dispatcher, contexts, spawns, chatSpawns, history };
@@ -181,6 +182,13 @@ async function waitFor(pred, label) {
   assert.ok(pred(), label);
 }
 
+async function finishFirstTurn(spawns) {
+  // Wait until spawn's result has promoted the seat before releasing it.
+  await waitFor(() => server.acks.some((ack) => ack.outcome === 'processed'), 'first dispatch completed');
+  assert.equal(typeof spawns[0].onExit, 'function');
+  spawns[0].onExit();
+}
+
 test('a trigger for a runtime the host has never prepared runs with its selected credential', async () => {
   const { dispatcher, spawns } = host();
   await dispatcher.handleTrigger(trigger(spec('cred-1')));
@@ -192,6 +200,9 @@ test('a trigger for a runtime the host has never prepared runs with its selected
 
   // Another model is the same identity (the key has no model): reused, not re-prepared.
   assert.equal(server.credentialFetches, 1);
+  // Finish the first turn before dispatching again; never rely on a fake PID
+  // being absent from the host to release the inflight reservation.
+  await finishFirstTurn(spawns);
   await dispatcher.handleTrigger(trigger({ ...spec('cred-1'), model: 'sonnet' }));
   await waitFor(() => spawns.length === 2, JSON.stringify(server.acks));
   assert.equal(server.credentialFetches, 1);
@@ -382,6 +393,7 @@ test('rejected in-memory and disk keys are repaired before a ticket session rece
   const runtime = spec('cred-1');
   await dispatcher.handleTrigger(trigger(runtime));
   await waitFor(() => spawns.length === 1, 'initial spawn');
+  await finishFirstTurn(spawns);
   const id = runtimeIdentityKey(runtime);
   const { writeApiKey } = await import('../dist/lib/managed-agent-store.js');
   contexts.get(id).api_key = 'revoked-key';
@@ -398,6 +410,7 @@ test('validation outage cannot start a session or rotate its key', async () => {
   const runtime = spec('cred-1');
   await dispatcher.handleTrigger(trigger(runtime));
   await waitFor(() => spawns.length === 1, 'initial spawn');
+  await finishFirstTurn(spawns);
   const issued = server.provisions.length;
   server.validationStatus = 503;
   await dispatcher.handleTrigger(trigger(runtime));
