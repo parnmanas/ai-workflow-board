@@ -63,18 +63,18 @@ export class MarketingContactService {
     return new Map(rows.map((c) => [c.id, c]));
   }
 
-  /** 목록의 발송 대상 — subscribed · 주소 있음 · 동의 2 년 이내. 빠진 수도 같이 센다. */
+  /** 목록의 발송 대상 — subscribed · 주소 있음 · 동의 2 년 이내(재확인 안내로 이어진 기간 포함). 빠진 수도 같이 센다. */
   async eligible(accountId: string, listName: string, now: Date = new Date()) {
     // 발송 판단에 필요한 칼럼만 읽는다(사이클 · get_marketing_campaign 마다 불린다).
     const all = await this.contactRepo.find({
       where: { account_id: accountId },
-      select: ['id', 'account_id', 'email', 'lists', 'status', 'consent_at'],
+      select: ['id', 'account_id', 'email', 'lists', 'status', 'consent_at', 'consent_renewed_at'],
     });
     const inList = all.filter((c) => (c.lists || []).includes(listName));
     const out = { contacts: [] as MarketingContact[], excluded: { not_subscribed: 0, consent_expired: 0 } };
     for (const c of inList) {
       if (c.status !== 'subscribed' || !c.email) out.excluded.not_subscribed++;
-      else if (!consentFresh(c.consent_at, now)) out.excluded.consent_expired++;
+      else if (!consentFresh(c, now)) out.excluded.consent_expired++;
       else out.contacts.push(c);
     }
     return out;

@@ -5,8 +5,8 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  *
  * 설치 전체의 한 목록이다(여러 캠페인의 메일 채널이 `lists` 로 골라 쓴다). **사람만** 넣는다 — 에이전트에게는 연락처를
  * 추가하는 경로가 없다(수집한 주소로 스팸을 보내는 길을 막는다). 동의 증거(방법 · 시각 · 출처 · 문구 버전 · IP)를
- * 같이 받고, 동의가 2 년을 넘으면 재확인 전까지 발송에서 빠진다(정보통신망법 §50). 야간(수신자 현지 21–08시)
- * 수신은 `night_consent` 가 있어야 한다.
+ * 같이 받고, 동의가 2 년을 넘으면 발송에서 빠진다(정보통신망법 §50). 기한 전에 재확인 안내가 나가면 이어진다
+ * (MarketingConsentNotice). 야간(수신자 현지 21–08시) 수신은 `night_consent` 가 있어야 한다.
  *
  * 수신거부 · 삭제 후에도 `email_hash` 는 남는다(억제 목록) — 같은 주소를 다시 가져와도 되살아나지 않는다.
  * 삭제(erase)는 주소 · 이름을 지우고 해시만 남긴다.
@@ -49,8 +49,17 @@ export class MarketingContact {
   @Column({ type: 'varchar' })
   consent_source: string;
 
+  /** 동의한 시각(증거). 더 새로운 동의(가져오기 · 재확인 안내의 "유지" 링크)가 오면 바뀐다. */
   @Column({ type: Date })
   consent_at: Date;
+
+  /**
+   * 재확인 안내가 "응답이 없으면 유지" 로 나간 주기의 기한 — 동의는 이 시각부터 다시 2 년이다(docs/marketing.md
+   * "동의 재확인 안내"). 기산일은 원래 동의일이라(시행령 §62의3) 안내를 보낸 날이 아니라 그 주기의 기한을 넣는다.
+   * 동의 기간의 기준점은 consent_at 과 이것 중 늦은 쪽이다(`consentAnchor`).
+   */
+  @Column({ type: Date, nullable: true, default: null })
+  consent_renewed_at: Date | null;
 
   @Column({ type: 'varchar', default: '' })
   consent_text_version: string;

@@ -45,8 +45,39 @@ export function nextSendableAt(at: Date, timezone: string): Date {
   return t;
 }
 
-export function consentFresh(consentAt: Date, now: Date): boolean {
-  return now.getTime() - new Date(consentAt).getTime() <= CONSENT_MAX_AGE_MS;
+/**
+ * 연락처의 동의 기간(docs/marketing.md "동의 재확인 안내"). `consent_at` 은 동의한 시각(증거)이고, `consent_renewed_at` 은
+ * "응답이 없으면 유지" 로 재확인 안내가 나간 주기의 기한이다 — 동의는 둘 중 늦은 시각부터 2 년이다.
+ */
+export interface ConsentPeriod {
+  consent_at: Date | string;
+  consent_renewed_at?: Date | string | null;
+}
+
+export function consentAnchor(c: ConsentPeriod): Date {
+  const at = new Date(c.consent_at).getTime();
+  const renewed = c.consent_renewed_at ? new Date(c.consent_renewed_at).getTime() : Number.NaN;
+  return new Date(Number.isFinite(renewed) && renewed > at ? renewed : at);
+}
+
+/** 이 시각까지 동의가 유효하다 — 재확인 안내는 이 시각 **전에** 보내야 한다(시행령 §62의3). */
+export function consentDeadline(c: ConsentPeriod): Date {
+  return new Date(consentAnchor(c).getTime() + CONSENT_MAX_AGE_MS);
+}
+
+/** 동의 2 년 이내인가. 시각 하나(동의 시각)나 연락처의 동의 기간을 받는다. */
+export function consentFresh(consent: Date | string | ConsentPeriod, now: Date): boolean {
+  const deadline = consent instanceof Date || typeof consent === 'string'
+    ? new Date(consent).getTime() + CONSENT_MAX_AGE_MS
+    : consentDeadline(consent).getTime();
+  return now.getTime() <= deadline;
+}
+
+/** 그 시간대의 날짜(YYYY-MM-DD) — 법정 통지의 "동의한 날짜" 는 받는 사람의 날짜로 쓴다. 모르는 시간대는 서울. */
+export function localDate(at: Date | string, timezone: string): string {
+  const d = new Date(at);
+  const tz = timezone && isValidTimezone(timezone) ? timezone : 'Asia/Seoul';
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 }
 
 /**
@@ -118,6 +149,14 @@ export interface ComposedEmail {
   headers: Record<string, string>;
 }
 
+/** 메일 앱의 수신거부(RFC 8058 One-Click) — 마케팅 메일과 동의 재확인 안내가 같이 쓴다. */
+export function listUnsubscribeHeaders(sender: EmailSender, unsubscribeUrl: string): Record<string, string> {
+  return {
+    'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${sender.contact_email}?subject=unsubscribe>`,
+    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+  };
+}
+
 export function composeMarketingEmail(input: {
   sender: EmailSender;
   title: string;
@@ -129,9 +168,6 @@ export function composeMarketingEmail(input: {
   return {
     subject: subjectWithLabel(label, input.title),
     text: `${input.body.trimEnd()}\n${emailFooter(input.sender, input.unsubscribeUrl, input.contact.consent_at)}`,
-    headers: {
-      'List-Unsubscribe': `<${input.unsubscribeUrl}>, <mailto:${input.sender.contact_email}?subject=unsubscribe>`,
-      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-    },
+    headers: listUnsubscribeHeaders(input.sender, input.unsubscribeUrl),
   };
 }

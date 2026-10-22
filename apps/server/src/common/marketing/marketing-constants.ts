@@ -86,6 +86,26 @@ export type ChannelStatus = typeof CHANNEL_STATUSES[number];
 export const CONTACT_STATUSES = ['subscribed', 'unsubscribed', 'bounced', 'complained', 'erased'] as const;
 export type ContactStatus = typeof CONTACT_STATUSES[number];
 
+/**
+ * 동의 재확인 안내(docs/marketing.md "동의 재확인 안내")에 받은 사람이 응답하지 않으면 어떻게 되는가 — 안내가 무엇을
+ * 제시했느냐로 정해진다(KISA 해석). `keep`: 철회 방법을 안내했으니 무응답은 유지. `lapse`: 유지 방법을 안내했으니
+ * 무응답은 철회 — 기한이 지나면 보내지 않는다.
+ */
+export const CONSENT_NOTICE_POLICIES = ['keep', 'lapse'] as const;
+export type ConsentNoticePolicy = typeof CONSENT_NOTICE_POLICIES[number];
+
+/** queued → sending → sent | failed | skipped. deferred(야간 · 발신 채널 없음 · 꺼짐 · 일시 오류)는 queued 와 같이 처리. */
+export const CONSENT_NOTICE_STATUSES = ['queued', 'deferred', 'sending', 'sent', 'failed', 'skipped'] as const;
+export type ConsentNoticeStatus = typeof CONSENT_NOTICE_STATUSES[number];
+
+/** 안내를 기한 며칠 전에 보내는가 — 운영자가 정한다. 이 범위 밖은 거부한다. */
+export const CONSENT_NOTICE_LEAD_DAYS = { min: 7, max: 90, default: 30 } as const;
+export const CONSENT_NOTICE_SUBJECT_MAX = 200;
+export const CONSENT_NOTICE_BODY_MAX = 5000;
+/** 운영자 문구에 쓸 수 있는 자리표시자(`{{name}}` …). 그 밖의 `{{…}}` 는 오타로 보고 거부한다. */
+export const CONSENT_NOTICE_PLACEHOLDERS = ['name', 'sender', 'consent_date', 'due_date'] as const;
+export type ConsentNoticePlaceholder = typeof CONSENT_NOTICE_PLACEHOLDERS[number];
+
 /** 메일 공급자(메일 credential 의 `provider` 필드). */
 export const EMAIL_PROVIDERS = ['resend', 'sendgrid'] as const;
 export type EmailProvider = typeof EMAIL_PROVIDERS[number];
@@ -122,7 +142,7 @@ export const CYCLE_LEASE_MS = 6 * 60 * 60_000;
 
 export const MARKETING_AUDIT_ENTITY_TYPES = [
   'campaign', 'channel', 'post', 'email', 'contact', 'allocation', 'spend_request', 'ledger',
-  'link', 'metric', 'feedback', 'cycle', 'list',
+  'link', 'metric', 'feedback', 'cycle', 'list', 'consent_notice',
 ] as const;
 export type MarketingAuditEntityType = typeof MARKETING_AUDIT_ENTITY_TYPES[number];
 

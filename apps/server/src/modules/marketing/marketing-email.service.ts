@@ -259,7 +259,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       await finish('suppressed', { error: `contact is ${contact?.status || 'gone'}` });
       return 'suppressed';
     }
-    if (!consentFresh(contact.consent_at, now)) {
+    if (!consentFresh(contact, now)) {
       await finish('suppressed', { error: 'consent is older than 2 years — reconfirm before sending' });
       return 'suppressed';
     }

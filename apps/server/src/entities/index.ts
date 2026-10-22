@@ -154,3 +154,5 @@ export { MarketingEmailSend } from './MarketingEmailSend';
 export { MarketingCycle } from './MarketingCycle';
 export { MarketingApprovalNotice } from './MarketingApprovalNotice';
 export { MarketingListHold } from './MarketingListHold';
+export { MarketingConsentNotice } from './MarketingConsentNotice';
+export { MarketingConsentNoticeSetting } from './MarketingConsentNoticeSetting';

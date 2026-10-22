@@ -110,6 +110,7 @@ test/marketing-approval-notify.test.mjs
 test/marketing-budget-logic.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
+test/marketing-consent-notice-logic.test.mjs
 test/marketing-cycle.test.mjs
 test/marketing-email-events-logic.test.mjs
 test/marketing-email-events.test.mjs
