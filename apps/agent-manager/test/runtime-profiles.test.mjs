@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { delimiter, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
@@ -77,8 +78,16 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
 if (process.env.SIMULATE_AUX_FAILURE) {
   process.stderr.write('[claude-code:title_generation_failed] simulated auxiliary failure\\n');
 }
-// 부모가 spawn 반환값에 결과 관찰자를 연결할 시간을 보장한다.
-await new Promise(resolve => setTimeout(resolve, 100));
+// BaseSessionManager awaits PID-sidecar I/O before returning. A fixed delay
+// cannot guarantee its caller has attached result/exit observers. Wait for EOF
+// sent by that caller after both observers are installed (one-shot needs no gate).
+if (process.env.WAIT_FOR_FIXTURE_OBSERVERS) {
+  await new Promise(resolve => {
+    process.stdin.on('end', resolve);
+    process.stdin.resume();
+    process.stdout.write(JSON.stringify({type:'fixture_ready'}) + '\\n');
+  });
+}
 process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'ok'}) + '\\n');
 `);
   await chmod(path, 0o755);
@@ -187,7 +196,7 @@ async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
     {
       onProgress: () => {},
       effortPreset: extra.effortPreset,
-      runtimeProfile: { ...profile, env: { ...(profile.env ?? {}), CAPTURE_FILE: captureFile } },
+      runtimeProfile: { ...profile, env: { ...(profile.env ?? {}), CAPTURE_FILE: captureFile, WAIT_FOR_FIXTURE_OBSERVERS: '1' } },
       agentContext: {
         agent_id: 'agent-base-fixture',
         api_key: 'agent-awb-key',
@@ -201,15 +210,26 @@ async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
   );
   assert.ok(sess, 'BaseSessionManager fixture 세션이 생성되어야 한다');
   const result = new Promise(resolve => { sess.onResult = resolve; });
-  const exited = once(sess.child, 'exit');
-  const [captured, mainResult] = await Promise.all([
-    withHangDeadline(
-      exited.then(async () => JSON.parse(await readFile(captureFile, 'utf8'))),
-      'BaseSessionManager Claude fixture가 종료되지 않았다',
-    ),
-    withHangDeadline(result, 'BaseSessionManager가 주 응답을 전달하지 않았다'),
-  ]);
-  return { capture: captured, mainResult };
+  const exited = once(sess.child, 'close');
+  // EOF releases the fixture only after both observers exist. close also waits
+  // for stdout to drain, so result delivery is complete before cleanup.
+  sess.child.stdin.end();
+  try {
+    const [captured, mainResult] = await Promise.all([
+      withHangDeadline(
+        exited.then(async ([code, signal]) => {
+          assert.deepEqual([code, signal], [0, null]);
+          return JSON.parse(await readFile(captureFile, 'utf8'));
+        }),
+        'BaseSessionManager Claude fixture가 종료되지 않았다',
+      ),
+      withHangDeadline(result, 'BaseSessionManager가 주 응답을 전달하지 않았다'),
+    ]);
+    return { capture: captured, mainResult };
+  } finally {
+    if (sess.child.exitCode === null && sess.child.signalCode === null) sess.child.kill();
+    await withHangDeadline(exited, 'BaseSessionManager fixture cleanup did not close');
+  }
 }
 
 /** fixture 서브프로세스가 끝나기를 기다리되, hang 이면 무한 대기 대신 실패시킨다.
@@ -533,6 +553,33 @@ test('backend profile 환경 정책은 enabled 충돌 키를 제거하고 disabl
   assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, 'high', '호출자가 소유한 원본 환경은 변경하지 않는다');
   assert.deepEqual(applyClaudeRuntimeProfileEnvPolicy(env, { ...profile, omit_effort: false }), { KEEP_ME: 'yes' });
   assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, null), env);
+});
+
+test('Claude fixture waits for observer acknowledgement instead of a startup timer', async () => {
+  const executable = await makeClaudeFixture('claude-observer-handshake.mjs');
+  const child = spawn(process.execPath, [executable], {
+    env: { ...process.env, CAPTURE_FILE: join(fixtureRoot, 'observer-handshake.json'), WAIT_FOR_FIXTURE_OBSERVERS: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const closed = once(child, 'close');
+  const lines = createInterface({ input: child.stdout });
+  const output = lines[Symbol.asyncIterator]();
+  try {
+    // Do not attach the result observer until the child has reached its gate.
+    // The old timer-based fixture emits result here and fails deterministically.
+    const ready = await withHangDeadline(output.next(), 'fixture did not reach its observer gate');
+    assert.equal(JSON.parse(ready.value).type, 'fixture_ready');
+    assert.equal(child.exitCode, null);
+    const result = output.next();
+    child.stdin.end();
+    const response = await withHangDeadline(result, 'fixture did not respond after acknowledgement');
+    assert.equal(JSON.parse(response.value).type, 'result');
+    assert.deepEqual(await withHangDeadline(closed, 'fixture did not close after acknowledgement'), [0, null]);
+  } finally {
+    child.kill();
+    await withHangDeadline(closed, 'fixture cleanup did not close');
+    lines.close();
+  }
 });
 
 test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보조 모델 매핑을 최종 자식에 적용한다', async () => {
