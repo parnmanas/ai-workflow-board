@@ -1,4 +1,4 @@
-import { randomBytes, createCipheriv, createDecipheriv, createHash } from 'crypto';
+import { randomBytes, createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -106,6 +106,16 @@ export function decrypt(ciphertext: string): string {
     console.error('[Encryption] Failed to decrypt — key mismatch or corrupted data');
     return '';
   }
+}
+
+/**
+ * 비밀 값에서 만든, 밖에 보여도 되는 지문 — HMAC-SHA256(hex). 키 없이는 거꾸로 풀거나 맞혀 볼 수 없다.
+ * HMAC 키는 암호화 키를 그대로 쓰지 않고 `purpose` 마다 HKDF 로 따로 끌어낸다 — 한 키를 AES-GCM 과 HMAC 에 함께 쓰지 않고,
+ * 용도가 다른 지문끼리 섞이지 않게. 키 자체는 이 파일 밖으로 나가지 않는다.
+ */
+export function keyedDigest(purpose: string, text: string): string {
+  const subkey = Buffer.from(hkdfSync('sha256', getEncryptionKey(), Buffer.alloc(0), `awb-keyed-digest:${purpose}`, 32));
+  return createHmac('sha256', subkey).update(text, 'utf8').digest('hex');
 }
 
 export function isEncrypted(value: string): boolean {

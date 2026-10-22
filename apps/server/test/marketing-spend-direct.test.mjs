@@ -14,7 +14,11 @@
 //   5. 사람이 바꾼 결정이 이긴다: 수취인을 다른 대상으로 돌렸거나 credential 을 바꿨으면 승인 · 실행하지 않는다. 한 시간 넘은 승인은
 //      실행하지 않는다. 다른 서버가 unknown 으로 돌린 실행의 확정 결과는 그 unknown 을 닫는다.
 //   6. 상한 공급자의 환불은 막는다. 연결 확인 · 요청별 확인은 읽기만 한다(쓰기 0).
-//   7. 비밀 값(토큰 · 키 · refresh token · access token)은 요청 행 · 감사 · MCP · REST 응답 어디에도 없다.
+//   7. 비밀 값(토큰 · 키 · refresh token · access token)은 요청 행 · 감사 · MCP · REST 응답 어디에도 없다. 오류 문장(error)에는
+//      상태 · 오류 코드만, 공급자 글은 응답 요약의 message_untrusted 에만.
+//   8. 결과 불명은 실행 뒤 15분이 지나야 실패로 기록할 수 있다(결제 완료는 바로). credential 을 같은 내용으로 다시 저장한 것은
+//      지문이 그대로라 실행된다. 다른 계정의 열린 요청은 그 대상을 읽을 수 있을 때만, id · 상태 없이 알린다. 같은 순간의 유일
+//      인덱스 충돌은 DB 문구 대신 설명으로. Google 은 401 을 받은 access token 을 캐시에서 지운다.
 //
 // 실행: node --test --test-force-exit test/marketing-spend-direct.test.mjs (dist 필요)
 
@@ -28,6 +32,7 @@ import { MarketingSpendService } from '../dist/modules/marketing/marketing-spend
 import { DIRECT_PAYMENT_ADAPTERS } from '../dist/modules/marketing/marketing-payment-adapters.js';
 import { PaymentNotSentError } from '../dist/modules/marketing/marketing-payments.js';
 import { resetGoogleTokenCache } from '../dist/modules/marketing/marketing-payment-google.js';
+import { lockCampaign } from '../dist/modules/marketing/marketing-ledger.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 process.env.AGENT_DEV_MODE = 'false';
@@ -37,11 +42,13 @@ delete process.env.MARKETING_META_API_VERSION;
 delete process.env.MARKETING_GOOGLE_ADS_API_VERSION;
 
 const META_TOKEN = 'EAAB-meta-token-marker-0123456789';
+const META_TOKEN_ROTATED = 'EAAB-meta-rotated-marker-9876543210';
+const META_TOKEN_OTHER = 'EAAB-meta-other-account-marker-555';
 const META_APP_SECRET = 'meta-app-secret-marker-abcdef';
 const GOOGLE_CLIENT_SECRET = 'GOCSPX-google-client-secret-marker';
 const GOOGLE_REFRESH = '1//google-refresh-token-marker';
 const GOOGLE_ACCESS = 'ya29.google-access-token-marker';
-const MARKERS = [META_TOKEN, META_APP_SECRET, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH, GOOGLE_ACCESS];
+const MARKERS = [META_TOKEN, META_TOKEN_ROTATED, META_TOKEN_OTHER, META_APP_SECRET, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH, GOOGLE_ACCESS];
 
 async function call(url, init) {
   const res = await fetch(url, init);
@@ -173,32 +180,41 @@ async function setup(t, label) {
   spend.fetchImpl = fake.fetchImpl;
   resetGoogleTokenCache();
 
-  const account = await createAccount(app, getDataSourceToken, `mkt-direct-${label}`);
-  const owner = await createUser(app, getDataSourceToken, { name: `mkt-direct-owner-${label}`, role: 'admin' });
-  await ds.getRepository('Account').update(account.id, { owner_user_id: owner.id });
-  const headers = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': account.id, 'Content-Type': 'application/json' };
   const responses = [];
-  const api = async (path, init = {}, perms = null) => {
-    await ds.getRepository('User').update(owner.id, {
-      role: perms ? 'user' : 'admin',
-      permissions: JSON.stringify(perms || []),
-    });
-    const r = await call(`${base}/api/marketing${path}`, { headers, ...init });
-    responses.push(r.text);
-    return r;
-  };
-  const post = (path, body = {}, perms) => api(path, { method: 'POST', body: JSON.stringify(body) }, perms);
-  const patch = (path, body, perms) => api(path, { method: 'PATCH', body: JSON.stringify(body) }, perms);
-
   const credRepo = ds.getRepository('Credential');
-  const makeCred = (name, provider, fields, extra = {}) => credRepo.save(credRepo.create({
-    account_id: account.id, name, description: '', provider, encrypted_data: encrypt(JSON.stringify(fields)), ...extra,
-  }));
-  const agent = await createAgent(app, getDataSourceToken, account.id, { name: `mkt-direct-agent-${label}`, type: 'claude', runtime: true });
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: account.id, label: `mkt-direct-${label}` });
-  const mcp = new McpClient({ baseUrl: base, apiKey: key.raw_key });
-  t.after(() => mcp.close().catch(() => {}));
-  return { app, ds, spend, fake, account, api, post, patch, makeCred, credRepo, agent, mcp, responses };
+  /** 한 계정(소유자 세션 · REST · 그 계정의 credential · 에이전트 MCP) — 같은 서버에 둘 이상 만들 수 있다. */
+  const tenant = async (name) => {
+    const account = await createAccount(app, getDataSourceToken, `mkt-direct-${name}`);
+    const owner = await createUser(app, getDataSourceToken, { name: `mkt-direct-owner-${name}`, role: 'admin' });
+    await ds.getRepository('Account').update(account.id, { owner_user_id: owner.id });
+    const headers = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': account.id, 'Content-Type': 'application/json' };
+    const api = async (path, init = {}, perms = null) => {
+      await ds.getRepository('User').update(owner.id, {
+        role: perms ? 'user' : 'admin',
+        permissions: JSON.stringify(perms || []),
+      });
+      const r = await call(`${base}/api/marketing${path}`, { headers, ...init });
+      responses.push(r.text);
+      return r;
+    };
+    const post = (path, body = {}, perms) => api(path, { method: 'POST', body: JSON.stringify(body) }, perms);
+    const patch = (path, body, perms) => api(path, { method: 'PATCH', body: JSON.stringify(body) }, perms);
+    const makeCred = (credName, provider, fields, extra = {}) => credRepo.save(credRepo.create({
+      account_id: account.id, name: credName, description: '', provider, encrypted_data: encrypt(JSON.stringify(fields)), ...extra,
+    }));
+    const agent = await createAgent(app, getDataSourceToken, account.id, { name: `mkt-direct-agent-${name}`, type: 'claude', runtime: true });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: account.id, label: `mkt-direct-${name}` });
+    const mcp = new McpClient({ baseUrl: base, apiKey: key.raw_key });
+    t.after(() => mcp.close().catch(() => {}));
+    return { account, api, post, patch, makeCred, agent, mcp };
+  };
+  const main = await tenant(label);
+  return { app, ds, spend, fake, credRepo, responses, tenant, ...main };
+}
+
+/** 결과 불명의 실패 기록 유예(15분)가 지난 것으로 — 실행 시각을 당긴다. */
+async function pastFailGrace(ctx, id) {
+  await ctx.ds.getRepository('MarketingSpendRequest').update({ id }, { executing_at: new Date(Date.now() - 16 * 60_000) });
 }
 
 /** 캠페인 · 승인된 채널 · 편성까지 — 수취인은 호출하는 쪽이 정한다. */
@@ -332,6 +348,11 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   const postsBefore = fake.state.calls.filter((c) => c.method === 'POST').length;
   await spend.sweep(new Date(Date.now() + 60 * 60_000));
   assert.equal(fake.state.calls.filter((c) => c.method === 'POST').length, postsBefore, 'unknown is never re-sent');
+  const early = await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'Ads Manager shows the old cap' });
+  assert.equal(early.status, 409, 'a ceiling change can still show up — no failure within 15 minutes of executing');
+  assert.match(early.body.error, /can take up to 15 minutes to show on Meta Ads — record a failure after \d{4}-/);
+  assert.equal((await ctx.api(`/spend-requests/${req4.id}`)).body.status, 'unknown');
+  await pastFailGrace(ctx, req4.id);
   assert.equal((await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'Ads Manager shows the old cap' })).body.status, 'failed');
 
   // 7. 거절 → failed. 거절이라던 쓰기가 실제로는 반영됐으면 unknown(안전망)
@@ -339,8 +360,11 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   fake.state.overrides.push({ match: (c) => c.method === 'POST', reply: { status: 400, body: { error: { message: `Invalid parameter (token ${META_TOKEN})`, code: 100, error_subcode: 1885272, fbtrace_id: 'Abc' } } } });
   const refused = await ctx.post(`/spend-requests/${req5.id}/approve`, { payload_sha256: req5.payload_sha256 });
   assert.equal(refused.body.status, 'failed', refused.text);
-  assert.match(refused.body.error, /Meta refused the spend_cap change \(HTTP 400, code 100\/1885272: Invalid parameter \(token \[redacted\]\)\)/);
+  assert.equal(refused.body.error, 'Meta refused the spend_cap change (HTTP 400, code 100/1885272)', 'status and codes only — this reaches the agent');
+  assert.equal(refused.body.provider_response.message_untrusted, 'Invalid parameter (token [redacted])', 'provider text is kept apart, scrubbed');
   assert.equal(refused.body.provider_response.fbtrace_id, 'Abc');
+  const refusedForAgent = await ctx.mcp.callTool('get_marketing_spend_request', { spend_request_id: req5.id });
+  assert.equal(refusedForAgent.error, 'Meta refused the spend_cap change (HTTP 400, code 100/1885272)');
   const req6 = (await ask({ amount_minor: 10000, payee: 'Meta fall' })).spend_request;
   fake.state.overrides.push({
     match: (c) => c.method === 'POST',
@@ -376,13 +400,18 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   await ctx.post(`/spend-requests/${req7.id}/deny`, { note: 'repointed' });
   assert.equal((await ctx.patch(`/campaigns/${campaign.id}`, { payees: campaign.payees })).status, 200);
 
-  // 10. credential 을 바꿨으면(지문) 승인 · 실행하지 않는다
+  // 10. credential 내용이 바뀌었으면(지문) 승인 · 실행하지 않는다. 같은 내용으로 다시 저장한 것(새 IV)은 그대로 실행된다.
   const req8 = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
-  await ctx.credRepo.update(meta.id, { encrypted_data: encrypt(JSON.stringify({ access_token: META_TOKEN, app_secret: META_APP_SECRET })) });
-  const swapped = await ctx.post(`/spend-requests/${req8.id}/approve`, { payload_sha256: req8.payload_sha256 });
+  await ctx.credRepo.update(meta.id, { encrypted_data: encrypt(JSON.stringify({ app_secret: META_APP_SECRET, access_token: META_TOKEN })) });
+  const resaved = await ctx.post(`/spend-requests/${req8.id}/approve`, { payload_sha256: req8.payload_sha256 });
+  assert.equal(resaved.status, 200, resaved.text);
+  assert.equal(resaved.body.status, 'paid', 'same content re-encrypted — same fingerprint');
+  const req8b = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
+  await ctx.credRepo.update(meta.id, { encrypted_data: encrypt(JSON.stringify({ access_token: META_TOKEN_ROTATED, app_secret: META_APP_SECRET })) });
+  const swapped = await ctx.post(`/spend-requests/${req8b.id}/approve`, { payload_sha256: req8b.payload_sha256 });
   assert.equal(swapped.status, 409);
   assert.match(swapped.body.error, /credential changed since this request/);
-  await ctx.post(`/spend-requests/${req8.id}/deny`, { note: 'credential rotated' });
+  await ctx.post(`/spend-requests/${req8b.id}/deny`, { note: 'credential rotated' });
 
   // 11. 한 시간 넘은 승인은 실행하지 않는다(승인 직후 죽어 approved 로 남은 것)
   const req9 = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
@@ -407,7 +436,8 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
     const crashed = await ctx.post(`/spend-requests/${req10.id}/approve`, { payload_sha256: req10.payload_sha256 });
     assert.equal(crashed.body.status, 'unknown', 'an exception after sending keeps the money held');
     assert.match(crashed.body.error, /may already have been sent/);
-    await ctx.post(`/spend-requests/${req10.id}/mark-failed`, { note: 'checked' });
+    await pastFailGrace(ctx, req10.id);
+    assert.equal((await ctx.post(`/spend-requests/${req10.id}/mark-failed`, { note: 'checked' })).body.status, 'failed');
     adapter.execute = async () => { throw new PaymentNotSentError('token expired before sending'); };
     const req11 = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
     const notSent = await ctx.post(`/spend-requests/${req11.id}/approve`, { payload_sha256: req11.payload_sha256 });
@@ -450,6 +480,76 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   assert.match(byName['Meta uncapped'].problems.join(' '), /no spend cap/);
   assert.equal(fake.state.writes.length, writesBeforeCheck, 'the check never writes');
   assert.ok((await ctx.api(`/campaigns/${campaign.id}/audit?limit=500`)).body.some((e) => e.action === 'payment.checked'));
+
+  // 17. 같은 순간에 같은 대상의 요청이 열려 유일 인덱스에 걸리면(다시 볼 때는 이미 닫혔다) — DB 문구가 아니라 설명으로 거부한다
+  const spendRows = spend.spendRepo;
+  spendRows.save = async () => {
+    delete spendRows.save;
+    throw Object.assign(new Error('UNIQUE constraint failed: marketing_spend_requests.target_key'), { code: 'SQLITE_CONSTRAINT' });
+  };
+  try {
+    const raced = await ask({ amount_minor: 10000, payee: 'Meta fall' });
+    assert.equal(raced.isError, true);
+    assert.match(errText(raced), /another spend request for this ad campaign was opened at the same moment/);
+    assert.doesNotMatch(errText(raced), /UNIQUE constraint/);
+  } finally {
+    delete spendRows.save;
+  }
+
+  // 18. 다른 계정의 열린 요청 — 이 계정의 credential 로 그 대상을 읽을 수 있을 때만, id · 상태 없이 알린다
+  const openHere = (await ask({ amount_minor: 10000, payee: 'Meta fall' })).spend_request;
+  assert.equal(openHere.status, 'pending');
+  const other = await ctx.tenant('meta-other');
+  const otherCred = await other.makeCred('meta-other', 'meta_ads', { access_token: META_TOKEN_OTHER });
+  const { campaign: otherCampaign, ask: otherAsk } = await campaignWith({ ...ctx, ...other }, [
+    { name: 'Same ad campaign', provider: 'meta_ads', credential_id: otherCred.id, ref: 'act_9/77' },
+  ]);
+  const blocked = await otherAsk({ amount_minor: 10000, payee: 'Same ad campaign' });
+  assert.equal(blocked.isError, true);
+  assert.match(errText(blocked), /this ad campaign already has an open spend request in another account/);
+  assert.equal(errText(blocked).includes(openHere.id), false, 'no id from another account');
+  assert.doesNotMatch(errText(blocked), /pending/, 'no state from another account');
+  const otherCheck = await other.post(`/campaigns/${otherCampaign.id}/payment/check`);
+  assert.equal(otherCheck.status, 200, otherCheck.text);
+  assert.deepEqual(otherCheck.body.payees[0].open_request, { id: '', status: 'other_account' });
+  fake.state.overrides.push({
+    match: (c) => c.host === 'graph.facebook.com' && c.headers.authorization === `Bearer ${META_TOKEN_OTHER}`,
+    reply: { status: 400, body: { error: { message: 'Unsupported get request', code: 100, error_subcode: 33 } } },
+  });
+  const unreadable = await otherAsk({ amount_minor: 20000, payee: 'Same ad campaign' });
+  assert.match(errText(unreadable), /could not read Meta 77 \(HTTP 400, code 100\/33\)/);
+  assert.doesNotMatch(errText(unreadable), /another account/, 'a credential that cannot read the target learns nothing about it');
+  assert.equal((await ctx.post(`/spend-requests/${openHere.id}/deny`, { note: 'cross-account check done' })).body.status, 'denied');
+
+  // 19. 재시작 정리(executing → unknown)는 캠페인 잠금 뒤에 선다 — 다른 서버가 잠금 안에서 기록하던 결과를 덮어쓰지 않는다
+  const req13 = (await ask({ amount_minor: 10000, payee: 'Meta second' })).spend_request;
+  const executeNow = spend.execute;
+  spend.execute = async (id) => spend.get(id, ctx.account.id);
+  assert.equal((await ctx.post(`/spend-requests/${req13.id}/approve`, { payload_sha256: req13.payload_sha256 })).body.status, 'approved');
+  spend.execute = executeNow;
+  const spendRepo = ds.getRepository('MarketingSpendRequest');
+  await spendRepo.update({ id: req13.id }, { status: 'executing', executing_at: new Date(Date.now() - 60_000) });
+  let entered;
+  const inside = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const settling = ds.transaction(async (manager) => {
+    await lockCampaign(manager, campaign.id);
+    entered();
+    await gate;
+    const won = await manager.getRepository('MarketingSpendRequest').createQueryBuilder().update()
+      .set({ status: 'failed', error: 'recorded by the executing server' })
+      .where('id = :id AND status = :s', { id: req13.id, s: 'executing' })
+      .execute();
+    return won.affected;
+  });
+  await inside;
+  const interrupted = spend.recoverInterrupted(new Date());
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release();
+  assert.equal(await settling, 1, 'the result recorded under the campaign lock is not overwritten');
+  assert.equal(await interrupted, 0, 'the restart sweep waited for the lock and found the request settled');
+  assert.equal((await spendRepo.findOneBy({ id: req13.id })).status, 'failed');
 
   // 16. MCP 읽기에도 계획 문장 · 직접 수취인 규칙이 실린다. 비밀 값은 어디에도 없다.
   const overview = await ctx.mcp.callTool('get_marketing_campaign', { campaign_id: campaign.id });
@@ -518,6 +618,14 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   assert.equal(nameOnly.body.status, 'unknown', nameOnly.text);
   const inspected = await ctx.post(`/spend-requests/${req2.id}/inspect`);
   assert.equal(inspected.body.position, 'at_target');
+  // 사람만 부르는 확인은 공급자가 준 글도 보여 준다(에이전트에게 가는 오류 문장에는 없다)
+  fake.state.overrides.push({
+    match: (c) => c.path.endsWith('googleAds:search'),
+    reply: { status: 403, body: { error: { code: 403, status: 'PERMISSION_DENIED', message: 'The caller does not have permission' } } },
+  });
+  const forbidden = await ctx.post(`/spend-requests/${req2.id}/inspect`);
+  assert.equal(forbidden.status, 409, forbidden.text);
+  assert.equal(forbidden.body.error, 'could not read Google Ads customer 1112223333 (HTTP 403 PERMISSION_DENIED) — provider says (untrusted): The caller does not have permission');
   await ctx.post(`/spend-requests/${req2.id}/mark-paid`, { provider_ref: nameOnly.body.suggested_provider_ref });
 
   // 동시 수정(409 + GoogleAdsFailure) → failed, 503 → unknown
@@ -533,7 +641,11 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   fake.state.overrides.push({ match: (c) => c.path.endsWith('campaignBudgets:mutate'), reply: { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE', message: 'try again' } } } });
   const unavailable = await ctx.post(`/spend-requests/${req4.id}/approve`, { payload_sha256: req4.payload_sha256 });
   assert.equal(unavailable.body.status, 'unknown');
-  await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'change history shows nothing' });
+  assert.equal(unavailable.body.error, 'Google Ads answered HTTP 503 UNAVAILABLE — the budget change may or may not have been applied');
+  assert.equal(unavailable.body.provider_response.message_untrusted, 'try again');
+  assert.equal((await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'too early' })).status, 409);
+  await pastFailGrace(ctx, req4.id);
+  assert.equal((await ctx.post(`/spend-requests/${req4.id}/mark-failed`, { note: 'change history shows nothing' })).body.status, 'failed');
 
   // 토큰 갱신 실패(실행 때) → 보내지 않고 failed, 쓰기 없음
   const req5 = (await ask({ amount_minor: 10000, payee: 'Google total' })).spend_request;
@@ -542,7 +654,9 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   const writesBefore = fake.state.writes.length;
   const tokenFail = await ctx.post(`/spend-requests/${req5.id}/approve`, { payload_sha256: req5.payload_sha256 });
   assert.equal(tokenFail.body.status, 'failed', tokenFail.text);
-  assert.match(tokenFail.body.error, /not sent: .*invalid_grant.*\[redacted\].*issue a new one/);
+  assert.match(tokenFail.body.error, /^not sent: Google refused the OAuth refresh \(HTTP 400, invalid_grant\) — the refresh token was revoked or expired .*issue a new one$/);
+  assert.match(tokenFail.body.provider_response.message_untrusted, /^Token has been expired or revoked \(\[redacted\]\)$/);
+  assert.equal(tokenFail.body.provider_response.sent, false);
   assert.equal(fake.state.writes.length, writesBefore);
 
   // 테스트 계정 ↔ 운영 계정이 바뀌면 보내지 않는다
@@ -553,7 +667,21 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   assert.match(switched.body.error, /switched between test and production/);
   fake.state.google.customers[1112223333].testAccount = false;
 
-  // 연결 확인
+  // 연결 확인 — 401 을 받은 access token 은 캐시에서 지운다(남겨 두면 만료까지 같은 401 이 이어진다)
+  const tokensBefore = fake.state.tokenRequests;
+  fake.state.overrides.push({
+    match: (c) => c.path.endsWith('googleAds:search'),
+    reply: { status: 401, body: { error: { code: 401, status: 'UNAUTHENTICATED', message: 'Request had invalid authentication credentials.' } } },
+  });
+  const denied = await ctx.post(`/campaigns/${campaign.id}/payment/check`);
+  assert.equal(denied.status, 200, denied.text);
+  const deniedTotal = denied.body.payees.find((p) => p.payee === 'Google total');
+  assert.equal(deniedTotal.ok, false);
+  assert.match(deniedTotal.problems.join(' '), /HTTP 401 UNAUTHENTICATED/);
+  assert.doesNotMatch(deniedTotal.problems.join(' '), /invalid authentication credentials/, 'provider text stays out of the message');
+  assert.equal(deniedTotal.provider_message_untrusted, 'Request had invalid authentication credentials.', 'the person checking sees why');
+  assert.equal(fake.state.tokenRequests, tokensBefore + 1, 'the next read fetched a new token instead of reusing the rejected one');
+
   const check = await ctx.post(`/campaigns/${campaign.id}/payment/check`);
   assert.equal(check.status, 200, check.text);
   const byName = Object.fromEntries(check.body.payees.map((p) => [p.payee, p]));

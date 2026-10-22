@@ -25,7 +25,8 @@ const RESPONSE_SNIPPET = 2000;
  * 닫고, 그 밖의 예외(보낸 뒤의 파싱 실패 · 프로그래밍 오류 …)는 unknown 으로 둔다 — 이미 나갔을 수 있다.
  */
 export class PaymentNotSentError extends Error {
-  constructor(message: string) {
+  /** 공급자가 준 글(정리 · 비밀 지움) — 사람용 응답 요약에만 `message_untrusted` 로 싣는다. */
+  constructor(message: string, readonly providerMessage = '') {
     super(message);
     this.name = 'PaymentNotSentError';
   }
@@ -37,7 +38,11 @@ export class PaymentNotSentError extends Error {
  */
 export class PaymentReadError extends Error {
   readonly status: number;
-  constructor(message: string, readonly retryable: boolean) {
+  /**
+   * `message` 는 서버가 쓴 문장과 상태 · 오류 코드뿐이다(에이전트까지 간다). 공급자가 준 글은 `providerMessage` 로 따로 두고
+   * 감사 · 응답 요약에 `*_untrusted` 로만 싣는다(docs/marketing.md "원칙" 7).
+   */
+  constructor(message: string, readonly retryable: boolean, readonly providerMessage = '') {
     super(message);
     this.name = 'PaymentReadError';
     this.status = retryable ? 502 : 409;

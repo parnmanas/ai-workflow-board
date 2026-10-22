@@ -22,7 +22,7 @@ import { MarketingBudgetService } from './marketing-budget.service';
 import { marketingError } from './marketing-errors';
 import { findPayee, type MarketingPayee } from './marketing-campaign.logic';
 import { activeAllocation, appendLedger, loadLedger, lockCampaign } from './marketing-ledger';
-import { resolveDirectPaymentCredential, resolveMarketingSecret } from './marketing-credential';
+import { credentialFingerprint, resolveDirectPaymentCredential, resolveMarketingSecret } from './marketing-credential';
 import {
   PaymentNotSentError,
   PaymentReadError,
@@ -32,11 +32,11 @@ import {
 } from './marketing-payments';
 import { DIRECT_PAYMENT_ADAPTERS, type DirectAdapterContext, type TargetReport } from './marketing-payment-adapters';
 import {
+  DIRECT_FAIL_GRACE_MS,
   DIRECT_PAYMENT_PROVIDERS,
   DIRECT_PAYMENT_PROVIDER_LABELS,
   PaymentRuleError,
   ceilingPlanProblems,
-  credentialFingerprint,
   directTargetKey,
   isAutomaticPaymentProvider,
   isDirectPaymentProvider,
@@ -70,8 +70,10 @@ export interface PayeePaymentCheck extends TargetReport {
   provider: DirectPaymentProvider;
   ref: string;
   credential_id: string;
-  /** 이 대상에 열린 지출 요청(대상마다 하나). */
+  /** 이 대상에 열린 지출 요청(대상마다 하나). 다른 계정의 것이면 `{ id: '', status: 'other_account' }`. */
   open_request: { id: string; status: string } | null;
+  /** 읽기가 실패했을 때 공급자가 준 글(정리 · 비밀 지움) — 사람이 보는 연결 확인에만 싣는다. */
+  provider_message_untrusted?: string;
 }
 
 export interface PaymentCheckResult {
@@ -286,9 +288,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         if (winner) return { request: winner, duplicate: true };
       }
       if (prepared) {
-        // 같은 대상에 열린 요청이 그 사이 생겼다(uq_marketing_spend_open_target).
+        // 같은 대상에 열린 요청이 그 사이 생겼다(uq_marketing_spend_open_target). 다시 볼 때 이미 닫혔을 수도 있다 — 그래도 DB 오류
+        // 문구를 그대로 내보내지 않는다.
         const open = await this.openRequestForTarget(prepared.targetKey);
-        if (open) throw marketingError(409, this.openTargetMessage(open));
+        if (open) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
+        if (/unique|duplicate key|23505/i.test(String((e as any)?.message || '') + String((e as any)?.code || ''))) {
+          throw marketingError(409, 'another spend request for this ad campaign was opened at the same moment — check its state and try again');
+        }
       }
       throw e;
     }
@@ -330,18 +336,21 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     } catch (e: any) {
       throw marketingError(400, `payee "${payee.name}": ${e?.message || e} — a person fixes the payee ref`);
     }
+    // 같은 계정의 열린 요청은 공급자를 읽기 전에 바로 알린다. 다른 계정의 것은 이 credential 이 그 대상을 실제로 읽을 수 있음을
+    // (계획이 만들어짐을) 확인한 뒤에만, id · 상태 없이 알린다 — 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게.
     const open = await this.openRequestForTarget(targetKey);
-    if (open) throw marketingError(409, this.openTargetMessage(open));
+    if (open && open.account_id === campaign.account_id) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
     const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, route.credential_id || '', campaign.account_id);
     const backoffKey = `${campaign.id}\u0000${targetKey}\u0000${fingerprint}`;
+    const now = Date.now();
+    for (const [key, entry] of this.providerBackoff) if (entry.until <= now) this.providerBackoff.delete(key);
     const held = this.providerBackoff.get(backoffKey);
-    if (held && held.until > Date.now()) {
+    if (held) {
       throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()})`);
     }
+    let plan: CeilingPlan;
     try {
-      const plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, ctx: this.adapterContext() });
-      this.providerBackoff.delete(backoffKey);
-      return { plan, targetKey };
+      plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, ctx: this.adapterContext() });
     } catch (e: any) {
       if (!(e instanceof PaymentRuleError) && !(e instanceof PaymentReadError)) throw e;
       const retryable = e instanceof PaymentReadError && e.retryable;
@@ -358,17 +367,26 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         action: 'spend.refused',
         actor,
         summary: `지출 요청 거부(${label} 확인): ${formatMinorAmount(amount, currency)} → ${payee.name}`,
-        detail: { provider, target_key: targetKey, amount_minor: amount, currency, error: e.message, retryable },
+        detail: {
+          provider, target_key: targetKey, amount_minor: amount, currency, error: e.message, retryable,
+          ...(e instanceof PaymentReadError && e.providerMessage ? { provider_message_untrusted: e.providerMessage } : {}),
+        },
       });
       throw marketingError(retryable ? 502 : e.status === 400 ? 400 : 409, reason);
     }
+    this.providerBackoff.delete(backoffKey);
+    if (open) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
+    return { plan, targetKey };
   }
 
   private async openRequestForTarget(targetKey: string): Promise<MarketingSpendRequest | null> {
     return this.spendRepo.findOne({ where: { target_key: targetKey, status: In(OPEN_TARGET_STATUSES) } });
   }
 
-  private openTargetMessage(open: MarketingSpendRequest): string {
+  private openTargetMessage(open: MarketingSpendRequest, accountId: string): string {
+    if (open.account_id !== accountId) {
+      return 'this ad campaign already has an open spend request in another account — only one open request per ad campaign; wait until it is decided';
+    }
     return `another spend request for this target is still open (${open.status}, ${open.id}) — wait until it is decided or reconciled; only one open request per ad campaign`;
   }
 
@@ -535,6 +553,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
 
   async markFailed(id: string, accountId: string, actor: MarketingActor, note = ''): Promise<MarketingSpendRequest> {
     const pre = await this.get(id, accountId);
+    // 직접 결제의 결과 불명은 공급자 반영을 기다린 뒤에만 실패로 닫는다 — "결제 완료" 는 바로 기록할 수 있다(원장을 더 세는 쪽).
+    if (pre.status === 'unknown' && isDirectPaymentProvider(pre.provider) && pre.executing_at
+      && Date.now() - pre.executing_at.getTime() < DIRECT_FAIL_GRACE_MS) {
+      const at = new Date(pre.executing_at.getTime() + DIRECT_FAIL_GRACE_MS).toISOString();
+      throw marketingError(409, `a ceiling change can take up to ${DIRECT_FAIL_GRACE_MS / 60_000} minutes to show on ${DIRECT_PAYMENT_PROVIDER_LABELS[pre.provider]} — record a failure after ${at}, once "inspect" still shows the old value (record "paid" now if it already shows the new one)`);
+    }
     await this.dataSource.transaction(async (manager) => {
       await lockCampaign(manager, pre.campaign_id);
       const row = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
@@ -677,7 +701,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     } catch (e: any) {
       const message = String(e?.message || e).slice(0, 300);
       outcome = e instanceof PaymentNotSentError
-        ? { outcome: 'failed', error: `not sent: ${message}`, response: {} }
+        ? { outcome: 'failed', error: `not sent: ${message}`, response: e.providerMessage ? { sent: false, message_untrusted: e.providerMessage } : { sent: false } }
         : { outcome: 'unknown', error: `the payment step stopped unexpectedly and may already have been sent: ${message}`, response: {} };
     }
 
@@ -806,12 +830,15 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
             if (key.startsWith(`${campaign.id}\u0000${targetKey}\u0000`)) this.providerBackoff.delete(key);
           }
         }
-        results.push({ ...base, ...report, open_request: open ? { id: open.id, status: open.status } : null });
+        // 다른 계정의 요청은 있다는 것만(id · 상태 없이) — 이 credential 로 그 대상을 읽을 수 있음은 방금 확인했다.
+        const openRequest = !open ? null : open.account_id === campaign.account_id ? { id: open.id, status: open.status } : { id: '', status: 'other_account' };
+        results.push({ ...base, ...report, open_request: openRequest });
       } catch (e: any) {
         const message = String(e?.message || e).slice(0, 500);
         results.push({
           ...base, ok: false, problems: [message], ceiling_minor: null, ceiling_text: '', ceiling_units: null,
           target_name_untrusted: '', facts: {}, api_version: '', open_request: null,
+          ...(e instanceof PaymentReadError && e.providerMessage ? { provider_message_untrusted: e.providerMessage } : {}),
         });
       }
     }
@@ -824,7 +851,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       action: 'payment.checked',
       actor,
       summary: `결제 연결 확인: ${results.length}곳 중 ${okCount}곳 정상`,
-      detail: { results: results.map((r) => ({ payee: r.payee, provider: r.provider, ok: r.ok, problems: r.problems })) },
+      detail: {
+        results: results.map((r) => ({
+          payee: r.payee, provider: r.provider, ok: r.ok, problems: r.problems,
+          ...(r.provider_message_untrusted ? { provider_message_untrusted: r.provider_message_untrusted } : {}),
+        })),
+      },
     });
     return { checked_at: new Date().toISOString(), payees: results };
   }
@@ -842,7 +874,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     try {
       report = await DIRECT_PAYMENT_ADAPTERS[row.provider].report({ ref: row.payee_ref, fields, fingerprint, currency: row.currency, ctx: this.adapterContext() });
     } catch (e: any) {
-      if (e instanceof PaymentReadError || e instanceof PaymentRuleError) throw marketingError(e.status, e.message);
+      // 사람만 부르는 확인이라(approve_spend) 공급자가 준 글도 덧붙인다 — 이 문장은 에이전트에게 가지 않는다.
+      if (e instanceof PaymentReadError) throw marketingError(e.status, e.providerMessage ? `${e.message} — provider says (untrusted): ${e.providerMessage}` : e.message);
+      if (e instanceof PaymentRuleError) throw marketingError(e.status, e.message);
       throw e;
     }
     const observed = report.ceiling_units;
@@ -913,18 +947,26 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
 
   // ── internals ────────────────────────────────────────────────────────────
 
+  /**
+   * executing → unknown. 캠페인 잠금 안에서 한다 — 다른 서버의 실행이 결과를 기록하는 트랜잭션(recordOutcome)과 줄을 서서, 그쪽이
+   * executing 을 읽은 뒤 여기서 바뀌어 결과가 사라지는 일이 없게(그쪽은 unknown 을 보고 확정 결과로 닫는다).
+   */
   private async markInterrupted(row: MarketingSpendRequest, error: string): Promise<boolean> {
-    const won = await this.spendRepo.createQueryBuilder().update(MarketingSpendRequest)
-      .set({ status: 'unknown', error })
-      .where('id = :id AND status = :s', { id: row.id, s: 'executing' })
-      .execute();
-    if (!won.affected) return false;
-    await this.audit.record({
-      accountId: row.account_id, campaignId: row.campaign_id, entityType: 'spend_request', entityId: row.id,
-      action: 'spend.unknown', actor: SYSTEM_MARKETING_ACTOR, summary: `결제 결과 불명 — 사람이 대조해야 함: ${error}`,
+    const won = await this.dataSource.transaction(async (manager) => {
+      await lockCampaign(manager, row.campaign_id);
+      const changed = await manager.getRepository(MarketingSpendRequest).createQueryBuilder().update(MarketingSpendRequest)
+        .set({ status: 'unknown', error })
+        .where('id = :id AND status = :s', { id: row.id, s: 'executing' })
+        .execute();
+      if (!changed.affected) return false;
+      await this.audit.record({
+        accountId: row.account_id, campaignId: row.campaign_id, entityType: 'spend_request', entityId: row.id,
+        action: 'spend.unknown', actor: SYSTEM_MARKETING_ACTOR, summary: `결제 결과 불명 — 사람이 대조해야 함: ${error}`,
+      }, manager);
+      return true;
     });
-    this.audit.notify(row.account_id, row.campaign_id, 'spend_request', row.id, 'unknown');
-    return true;
+    if (won) this.audit.notify(row.account_id, row.campaign_id, 'spend_request', row.id, 'unknown');
+    return won;
   }
 
   /**
@@ -946,7 +988,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     if (problems.length) return `the execution plan is invalid (${problems.join('; ')})`;
     const cred = row.provider_credential_id ? await manager.getRepository(Credential).findOne({ where: { id: row.provider_credential_id } }) : null;
     if (!cred) return 'the payment credential is gone';
-    if (credentialFingerprint(cred) !== (row.payload as CeilingPlan).credential_fingerprint) {
+    let fingerprint: string;
+    try {
+      fingerprint = credentialFingerprint(cred);
+    } catch {
+      return 'the payment credential is unreadable';
+    }
+    if (fingerprint !== (row.payload as CeilingPlan).credential_fingerprint) {
       return 'the payment credential changed since this request — ask for a new request';
     }
     return null;

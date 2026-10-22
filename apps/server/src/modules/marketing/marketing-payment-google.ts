@@ -13,6 +13,7 @@
  * Google 이 무시한다 — credential 에 있으면만 보낸다.
  */
 import {
+  PROVIDER_FORMATS,
   PaymentRuleError,
   buildCeilingPlan,
   cleanProviderText,
@@ -21,6 +22,7 @@ import {
   minorToGoogleMicros,
   parseProviderInt,
   paymentApiVersion,
+  providerToken,
   scrubSecrets,
   type CeilingPlan,
   type GoogleTarget,
@@ -109,12 +111,12 @@ export async function googleAccessToken(cred: GoogleCredential, fingerprint: str
     }
     const token = reply.json && typeof reply.json.access_token === 'string' ? reply.json.access_token : '';
     if (reply.status !== 200 || !token) {
-      const code = cleanProviderText(reply.json?.error || '', 60);
+      const code = /^[a-z_]{1,40}$/.test(String(reply.json?.error || '')) ? String(reply.json.error) : '';
       const detail = scrubSecrets(cleanProviderText(reply.json?.error_description || '', 200), secretsOf(cred));
       const hint = code === 'invalid_grant'
         ? ' — the refresh token was revoked or expired (apps in "Testing" get 7-day tokens); issue a new one'
         : '';
-      throw new PaymentReadError(`Google refused the OAuth refresh (HTTP ${reply.status}${code ? `, ${code}` : ''}${detail ? `: ${detail}` : ''})${hint}`, reply.status >= 500);
+      throw new PaymentReadError(`Google refused the OAuth refresh (HTTP ${reply.status}${code ? `, ${code}` : ''})${hint}`, reply.status >= 500, detail);
     }
     const seconds = Number(reply.json.expires_in);
     const ttl = Number.isFinite(seconds) && seconds > 120 ? (seconds - 60) * 1000 : 60_000;
@@ -139,8 +141,11 @@ function adsHeaders(cred: GoogleCredential, token: string): Record<string, strin
   };
 }
 
-/** Google API 오류 본문 — `{error:{code,status,message,details:[GoogleAdsFailure]}}` 또는 래퍼 없이. */
-function googleError(reply: ProviderReply, cred: GoogleCredential, token: string): { text: string; status: string; adsFailure: boolean; requestId: string } {
+/**
+ * Google API 오류 본문 — `{error:{code,status,message,details:[GoogleAdsFailure]}}` 또는 래퍼 없이. `text` 는 상태 · 오류 코드만(에이전트까지
+ * 가는 오류 문장), `message` 는 공급자 글을 정리하고 비밀 값을 지운 것(사람용 요약에 `message_untrusted` 로만).
+ */
+function googleError(reply: ProviderReply, cred: GoogleCredential, token: string): { text: string; message: string; status: string; adsFailure: boolean; requestId: string } {
   const body = reply.json && typeof reply.json === 'object' ? (reply.json.error && typeof reply.json.error === 'object' ? reply.json.error : reply.json) : null;
   const details: any[] = Array.isArray(body?.details) ? body.details : [];
   const failure = details.find((d) => typeof d?.['@type'] === 'string' && d['@type'].includes('GoogleAdsFailure'));
@@ -149,12 +154,14 @@ function googleError(reply: ProviderReply, cred: GoogleCredential, token: string
     ? Object.entries(first.errorCode).map(([k, v]) => `${k}=${String(v)}`).join(',')
     : '';
   const message = scrubSecrets(cleanProviderText(first?.message || body?.message || reply.text || '', 300), secretsOf(cred, token));
-  const status = cleanProviderText(body?.status || '', 40);
+  const status = providerToken(body?.status, PROVIDER_FORMATS.enumName);
+  const codeText = /^[A-Za-z]{1,60}=[A-Z_]{1,80}(,[A-Za-z]{1,60}=[A-Z_]{1,80})*$/.test(errorCode) ? errorCode : '';
   return {
-    text: `HTTP ${reply.status}${status ? ` ${status}` : ''}${errorCode ? ` (${cleanProviderText(errorCode, 120)})` : ''}${message ? `: ${message}` : ''}`,
+    text: `HTTP ${reply.status}${status ? ` ${status}` : ''}${codeText ? ` (${codeText})` : ''}`,
+    message,
     status,
     adsFailure: !!failure,
-    requestId: cleanProviderText(reply.header('request-id') || failure?.requestId || '', 80),
+    requestId: providerToken(reply.header('request-id') || failure?.requestId, PROVIDER_FORMATS.traceId),
   };
 }
 
@@ -163,7 +170,7 @@ async function googleSearch(
   query: string,
   cred: GoogleCredential,
   token: string,
-  opts: { fetchImpl?: typeof fetch; version: string },
+  opts: { fetchImpl?: typeof fetch; version: string; fingerprint: string },
 ): Promise<any[]> {
   let reply: ProviderReply;
   try {
@@ -182,8 +189,10 @@ async function googleSearch(
     return Array.isArray(reply.json.results) ? reply.json.results : [];
   }
   const err = googleError(reply, cred, token);
+  // 거부된 access token 은 캐시에서 지운다 — 남겨 두면 만료(최대 한 시간)까지 같은 401 이 이어진다.
+  if (reply.status === 401) tokenCache.delete(opts.fingerprint);
   const retryable = reply.status >= 500 || reply.status === 429 || reply.status === 409;
-  throw new PaymentReadError(`could not read Google Ads customer ${customerId} (${err.text})`, retryable);
+  throw new PaymentReadError(`could not read Google Ads customer ${customerId} (${err.text})`, retryable, err.message);
 }
 
 export interface GoogleObservation {
@@ -224,7 +233,7 @@ export async function observeGoogleTarget(
 ): Promise<GoogleObservation> {
   const version = paymentApiVersion('google_ads', opts.env);
   const token = await googleAccessToken(cred, fingerprint, opts.fetchImpl);
-  const rows = await googleSearch(target.customer_id, campaignQuery(target.campaign_id), cred, token, { fetchImpl: opts.fetchImpl, version });
+  const rows = await googleSearch(target.customer_id, campaignQuery(target.campaign_id), cred, token, { fetchImpl: opts.fetchImpl, version, fingerprint });
   const row = rows[0] || null;
   // proto3 JSON 은 기본값(false · 0)을 빼고 보낸다 — 빠진 값은 기본값으로 읽는다.
   const budget = row?.campaignBudget || {};
@@ -241,16 +250,17 @@ export async function observeGoogleTarget(
   } catch (e: any) {
     throw new PaymentReadError(`Google Ads answered an unexpected value: ${e?.message || e}`, false);
   }
-  const currency = cleanProviderText(customer.currencyCode, 8).toUpperCase();
+  // 형식이 정해진 값은 형식에 맞을 때만 받는다(아니면 '' — 통화 · 예산 · 종료일 대조에서 걸린다). 이름만 자유 글이다(비신뢰 표시용).
+  const currency = providerToken(typeof customer.currencyCode === 'string' ? customer.currencyCode.toUpperCase() : '', PROVIDER_FORMATS.currency);
   let billable: bigint | null = null;
-  if (row && /^[A-Z]{3}$/.test(currency)) {
+  if (row && currency) {
     billable = billableUnits.get(currency) ?? null;
     if (billable === null) {
       try {
         const units = await googleSearch(
           target.customer_id,
           `SELECT currency_constant.code, currency_constant.billable_unit_micros FROM currency_constant WHERE currency_constant.code = '${currency}'`,
-          cred, token, { fetchImpl: opts.fetchImpl, version },
+          cred, token, { fetchImpl: opts.fetchImpl, version, fingerprint },
         );
         const raw = units[0]?.currencyConstant?.billableUnitMicros;
         if (raw !== undefined) {
@@ -268,16 +278,16 @@ export async function observeGoogleTarget(
     found: !!row,
     customer: { currency, test_account: customer.testAccount === true },
     campaign: {
-      id: cleanProviderText(String(campaign.id ?? ''), 40),
+      id: providerToken(campaign.id, PROVIDER_FORMATS.digits),
       name: cleanProviderText(campaign.name, 200),
-      status: cleanProviderText(campaign.status, 40),
-      end_date_time: cleanProviderText(campaign.endDateTime, 40),
-      budget: cleanProviderText(campaign.campaignBudget, 200),
+      status: providerToken(campaign.status, PROVIDER_FORMATS.enumName),
+      end_date_time: providerToken(campaign.endDateTime, PROVIDER_FORMATS.googleDateTime),
+      budget: providerToken(campaign.campaignBudget, PROVIDER_FORMATS.googleBudget),
     },
     budget: {
-      resource_name: cleanProviderText(budget.resourceName, 200),
-      period: cleanProviderText(budget.period, 40),
-      status: cleanProviderText(budget.status, 40),
+      resource_name: providerToken(budget.resourceName, PROVIDER_FORMATS.googleBudget),
+      period: providerToken(budget.period, PROVIDER_FORMATS.enumName),
+      status: providerToken(budget.status, PROVIDER_FORMATS.enumName),
       explicitly_shared: budget.explicitlyShared === true,
       reference_count: refCount,
       total_micros: total,
@@ -300,7 +310,10 @@ export function googleTargetProblems(obs: GoogleObservation, target: GoogleTarge
   if (!isPaymentCurrencySupported(currency)) out.push(`currency ${currency} is not supported by the Google Ads adapter`);
   if (obs.customer.currency !== currency) out.push(`the Google Ads account's currency is ${obs.customer.currency || '?'}, the campaign's is ${currency}`);
   if (obs.campaign.status === 'REMOVED') out.push('the Google Ads campaign is removed');
-  if (!obs.budget.resource_name || obs.campaign.budget !== obs.budget.resource_name) out.push('could not resolve the campaign\'s own budget');
+  // 고치는 예산은 그 고객 계정 아래의 것이어야 한다(mutate 주소의 고객과 같은 곳).
+  if (!obs.budget.resource_name || obs.campaign.budget !== obs.budget.resource_name || !obs.budget.resource_name.startsWith(`customers/${target.customer_id}/`)) {
+    out.push('could not resolve the campaign\'s own budget');
+  }
   if (obs.budget.status === 'REMOVED') out.push('the campaign budget is removed');
   if (obs.budget.period !== 'CUSTOM_PERIOD' || obs.budget.total_micros === null) {
     out.push('the campaign uses a daily budget — only a campaign total budget (CUSTOM_PERIOD) is a hard cap; a daily-budget campaign cannot be converted, so create the campaign with a total budget and an end date');
@@ -383,7 +396,7 @@ export async function executeGooglePlan(
     before = await observeGoogleTarget(target, cred, fingerprint, opts);
     token = await googleAccessToken(cred, fingerprint, opts.fetchImpl);
   } catch (e: any) {
-    throw new PaymentNotSentError(e?.message || String(e));
+    throw new PaymentNotSentError(e?.message || String(e), e instanceof PaymentReadError ? e.providerMessage : '');
   }
   const base = { api_version: before.api_version, budget: plan.target.budget, field: 'total_amount_micros', from: plan.from, to: plan.to };
   const check = googleExecutionCheck(before, plan, now);
@@ -419,8 +432,13 @@ export async function executeGooglePlan(
     };
   }
   const err = googleError(reply, cred, token);
+  if (reply.status === 401) tokenCache.delete(fingerprint);
   const verdict = classifyGoogleWrite(reply, plan, err.adsFailure);
-  const response = { ...base, sent: true, status: reply.status, ...(err.requestId ? { request_id: err.requestId } : {}) };
+  const response = {
+    ...base, sent: true, status: reply.status,
+    ...(err.requestId ? { request_id: err.requestId } : {}),
+    ...(verdict !== 'ok' && err.message ? { message_untrusted: err.message } : {}),
+  };
   if (verdict === 'ok') {
     return {
       outcome: 'paid',

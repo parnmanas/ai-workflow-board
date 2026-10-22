@@ -26,7 +26,7 @@ import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
 import { marketingError } from './marketing-errors';
 import { computeNextCycleAt, resolveLimits } from './marketing-campaign.logic';
-import { payeeBriefing } from '../../common/marketing/payment-routes';
+import { DIRECT_PAYMENT_PROVIDER_LABELS, isDirectPaymentProvider } from '../../common/marketing/payment-routes';
 
 const DEFAULT_TICK_MS = 60_000;
 const MIN_TICK_MS = 5_000;
@@ -278,7 +278,10 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
         capabilities: campaign.capabilities || [],
         currency: campaign.currency,
         allowed_domains: campaign.allowed_domains || [],
-        payees: (campaign.payees || []).map((p) => payeeBriefing(p)),
+        payees: (campaign.payees || []).map((p) => p.name),
+        direct_payees: (campaign.payees || []).flatMap((p) => (isDirectPaymentProvider(p.provider)
+          ? [{ name: p.name, provider: DIRECT_PAYMENT_PROVIDER_LABELS[p.provider] }]
+          : [])),
       },
       rules: agentRules(campaign),
       limits: resolveLimits(campaign),

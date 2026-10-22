@@ -11,6 +11,7 @@
  */
 import { createHmac } from 'node:crypto';
 import {
+  PROVIDER_FORMATS,
   PaymentRuleError,
   buildCeilingPlan,
   cleanProviderText,
@@ -18,6 +19,7 @@ import {
   metaUnitsToMinor,
   parseProviderInt,
   paymentApiVersion,
+  providerToken,
   scrubSecrets,
   type CeilingPlan,
   type MetaTarget,
@@ -78,17 +80,20 @@ function graphUrl(version: string, path: string, params: Record<string, string>)
   return url.toString();
 }
 
-/** Graph 오류 한 줄 — 공급자 글은 정리하고 비밀 값을 지운다. */
-function graphErrorText(reply: ProviderReply, cred: MetaCredential): { text: string; code: number | null; transient: boolean; fbtrace: string } {
+/**
+ * Graph 오류 — `text` 는 상태 · 오류 코드만(에이전트까지 가는 오류 문장에 쓴다), `message` 는 공급자가 준 글을 정리하고 비밀 값을
+ * 지운 것(사람용 요약에 `message_untrusted` 로만 싣는다).
+ */
+function graphErrorText(reply: ProviderReply, cred: MetaCredential): { text: string; message: string; code: number | null; transient: boolean; fbtrace: string } {
   const err = reply.json && typeof reply.json === 'object' ? reply.json.error : null;
   const code = err && Number.isInteger(err.code) ? Number(err.code) : null;
   const sub = err && Number.isInteger(err.error_subcode) ? `/${err.error_subcode}` : '';
-  const message = scrubSecrets(cleanProviderText(err?.message || reply.text || '', 300), secretsOf(cred));
   return {
-    text: `HTTP ${reply.status}${code !== null ? `, code ${code}${sub}` : ''}${message ? `: ${message}` : ''}`,
+    text: `HTTP ${reply.status}${code !== null ? `, code ${code}${sub}` : ''}`,
+    message: scrubSecrets(cleanProviderText(err?.message || reply.text || '', 300), secretsOf(cred)),
     code,
     transient: err?.is_transient === true,
-    fbtrace: cleanProviderText(err?.fbtrace_id || '', 64),
+    fbtrace: providerToken(err?.fbtrace_id, PROVIDER_FORMATS.traceId),
   };
 }
 
@@ -111,7 +116,7 @@ async function graphGet(path: string, fields: string, cred: MetaCredential, opts
   if (reply.status >= 200 && reply.status < 300 && reply.json && typeof reply.json === 'object' && !reply.json.error) return reply.json;
   const err = graphErrorText(reply, cred);
   const retryable = reply.status >= 500 || err.code === 1 || err.code === 2 || (err.code !== null && isMetaThrottleCode(err.code)) || err.transient;
-  throw new PaymentReadError(`could not read Meta ${path} (${err.text})`, retryable);
+  throw new PaymentReadError(`could not read Meta ${path} (${err.text})`, retryable, err.message);
 }
 
 /** 대상의 지금 상태 — 읽기만 한다(요청 때 · 연결 확인 · 실행 직전 대조가 같은 코드를 쓴다). */
@@ -166,19 +171,20 @@ export async function observeMetaTarget(
   } catch (e: any) {
     throw new PaymentReadError(`Meta answered an unexpected value: ${e?.message || e}`, false);
   }
+  // 형식이 정해진 값은 형식에 맞을 때만 받는다(아니면 '' — 계정 · 통화 대조에서 걸린다). 이름만 자유 글이다(비신뢰 표시용).
   return {
     api_version: version,
     campaign: {
-      id: cleanProviderText(String(campaign.id ?? ''), 40),
+      id: providerToken(campaign.id, PROVIDER_FORMATS.digits),
       name: cleanProviderText(campaign.name, 200),
-      account_id: cleanProviderText(String(campaign.account_id ?? ''), 40).replace(/^act_/, ''),
-      status: cleanProviderText(campaign.status, 40),
-      effective_status: cleanProviderText(campaign.effective_status, 40),
-      buying_type: cleanProviderText(campaign.buying_type, 40),
+      account_id: providerToken(String(campaign.account_id ?? '').replace(/^act_/, ''), PROVIDER_FORMATS.digits),
+      status: providerToken(campaign.status, PROVIDER_FORMATS.enumName),
+      effective_status: providerToken(campaign.effective_status, PROVIDER_FORMATS.enumName),
+      buying_type: providerToken(campaign.buying_type, PROVIDER_FORMATS.enumName),
       spend_cap: spendCap,
     },
     account: {
-      currency: cleanProviderText(account.currency, 8).toUpperCase(),
+      currency: providerToken(typeof account.currency === 'string' ? account.currency.toUpperCase() : '', PROVIDER_FORMATS.currency),
       account_status: optionalInt(account.account_status),
       disable_reason: optionalInt(account.disable_reason),
       min_spend_cap: minCap,
@@ -223,7 +229,8 @@ export function buildMetaPlan(
     credentialFingerprint: fingerprint,
   });
   const to = BigInt(plan.to);
-  if (to >= META_NO_SPEND_CAP) throw new PaymentRuleError('the raised spend cap would reach Meta\'s "no cap" value');
+  // 금액에 달린 거절은 400 — 금액을 바꿔 다시 물을 수 있다(요청 백오프 대상이 아니다).
+  if (to >= META_NO_SPEND_CAP) throw new PaymentRuleError('the raised spend cap would reach Meta\'s "no cap" value', 400);
   if (obs.account.min_spend_cap !== null && to < obs.account.min_spend_cap) {
     const min = formatMinorAmount(Number(metaUnitsToMinor(obs.account.min_spend_cap, currency)), currency);
     // 금액을 키우면 풀린다 — 400(요청 백오프 대상이 아니다).
@@ -279,7 +286,7 @@ export async function executeMetaPlan(
   try {
     before = await observeMetaTarget(target, cred, opts);
   } catch (e: any) {
-    throw new PaymentNotSentError(e?.message || String(e));
+    throw new PaymentNotSentError(e?.message || String(e), e instanceof PaymentReadError ? e.providerMessage : '');
   }
   const base = { api_version: before.api_version, campaign_id: target.campaign_id, field: 'spend_cap', from: plan.from, to: plan.to };
   const check = metaExecutionCheck(before, plan);
@@ -317,7 +324,12 @@ export async function executeMetaPlan(
   }
   const verdict = classifyMetaWrite(reply);
   const err = graphErrorText(reply, cred);
-  const response = { ...base, sent: true, status: reply.status, ...(err.code !== null ? { error_code: err.code } : {}), ...(err.fbtrace ? { fbtrace_id: err.fbtrace } : {}) };
+  const response = {
+    ...base, sent: true, status: reply.status,
+    ...(err.code !== null ? { error_code: err.code } : {}),
+    ...(err.fbtrace ? { fbtrace_id: err.fbtrace } : {}),
+    ...(verdict.outcome !== 'ok' && err.message ? { message_untrusted: err.message } : {}),
+  };
   if (verdict.outcome === 'ok') {
     return {
       outcome: 'paid',
@@ -338,5 +350,5 @@ export async function executeMetaPlan(
     }
     return { outcome: 'failed', error: `Meta refused the spend_cap change (${err.text})`, response };
   }
-  return { outcome: 'unknown', error: `Meta answered ${err.text || `HTTP ${reply.status}`} — the spend_cap change may or may not have been applied`, response };
+  return { outcome: 'unknown', error: `Meta answered ${err.text} — the spend_cap change may or may not have been applied`, response };
 }

@@ -7,10 +7,10 @@
  */
 import type { Repository } from 'typeorm';
 import { Credential } from '../../entities/Credential';
-import { decryptStrict } from '../../services/encryption.service';
+import { decryptStrict, keyedDigest } from '../../services/encryption.service';
+import { canonicalJson } from '../../common/marketing/budget';
 import {
   DIRECT_PAYMENT_PROVIDER_LABELS,
-  credentialFingerprint,
   type DirectPaymentProvider,
 } from '../../common/marketing/payment-routes';
 import { marketingError } from './marketing-errors';
@@ -40,6 +40,15 @@ export async function resolveMarketingSecret(
 ): Promise<Record<string, string>> {
   const cred = await assertCredentialInAccount(credRepo, credentialId, accountId);
   return decryptCredentialFields(cred);
+}
+
+/**
+ * credential 내용의 지문(16 hex) — 복호화한 필드를 정규화 JSON 으로 만들어 암호화 키로 서명한다. 실행 계획에 넣어 두고 승인 · 실행 때
+ * 대조한다: 승인 대기 중에 키를 다른 계정의 키로 바꾸면 그 요청은 실행되지 않는다. 이름 · 설명만 바꿔 다시 저장한 것은 그대로다.
+ * 에이전트도 계획을 읽지만 키 없이는 지문에서 비밀 값을 알아낼 수 없다.
+ */
+export function credentialFingerprint(cred: Credential): string {
+  return keyedDigest('marketing-payment-credential', `${cred.id}\n${canonicalJson(decryptCredentialFields(cred))}`).slice(0, 16);
 }
 
 function decryptCredentialFields(cred: Credential): Record<string, string> {
@@ -80,5 +89,6 @@ export async function resolveDirectPaymentCredential(
     throw marketingError(400, `credential "${credential.name}" is a ${credential.provider || 'custom'} credential — ${label} payments need a credential created with the ${label} provider`);
   }
   // 지문과 필드를 같은 행에서 — 두 번 읽으면 그 사이 바뀐 키가 옛 지문과 짝지어질 수 있다.
-  return { credential, fields: decryptCredentialFields(credential), fingerprint: credentialFingerprint(credential) };
+  const fields = decryptCredentialFields(credential);
+  return { credential, fields, fingerprint: credentialFingerprint(credential) };
 }

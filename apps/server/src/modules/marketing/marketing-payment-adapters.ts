@@ -9,13 +9,15 @@
 import {
   googleMicrosToMinor,
   metaUnitsToMinor,
+  minorToGoogleMicros,
+  minorToMetaUnits,
   parseGoogleRef,
   parseMetaRef,
   type CeilingPlan,
   type DirectPaymentProvider,
 } from '../../common/marketing/payment-routes';
 import { formatMinorAmount } from '../../common/marketing/money';
-import type { PaymentOutcome } from './marketing-payments';
+import { PaymentNotSentError, type PaymentOutcome } from './marketing-payments';
 import {
   buildMetaPlan,
   executeMetaPlan,
@@ -59,6 +61,15 @@ export interface DirectPaymentAdapter {
   execute(input: { plan: CeilingPlan; fields: Record<string, string>; fingerprint: string; ctx: DirectAdapterContext }): Promise<PaymentOutcome>;
 }
 
+/** 실행 직전에 credential 모양이 틀렸다 — 아무것도 보내기 전이다. */
+function notSentIfUnreadable<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (e: any) {
+    throw new PaymentNotSentError(e?.message || String(e));
+  }
+}
+
 function minorText(minor: bigint | null, currency: string): { minor: number | null; text: string } {
   if (minor === null) return { minor: null, text: '' };
   const n = Number(minor);
@@ -70,6 +81,8 @@ const metaAdapter: DirectPaymentAdapter = {
   checkCredential(fields) { readMetaCredential(fields); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, ctx }) {
     const target = parseMetaRef(ref);
+    // 통화 · 단위(나누어떨어짐)는 공급자를 읽기 전에 — 금액 문제로 공급자 호출을 쓰지 않게.
+    minorToMetaUnits(amountMinor, currency);
     const obs = await observeMetaTarget(target, readMetaCredential(fields), ctx);
     return buildMetaPlan(obs, target, amountMinor, currency, fingerprint);
   },
@@ -98,7 +111,7 @@ const metaAdapter: DirectPaymentAdapter = {
     };
   },
   async execute({ plan, fields, ctx }) {
-    return executeMetaPlan(plan, readMetaCredential(fields), ctx);
+    return executeMetaPlan(plan, notSentIfUnreadable(() => readMetaCredential(fields)), ctx);
   },
 };
 
@@ -107,6 +120,7 @@ const googleAdapter: DirectPaymentAdapter = {
   checkCredential(fields) { readGoogleCredential(fields); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, ctx }) {
     const target = parseGoogleRef(ref);
+    minorToGoogleMicros(amountMinor, currency);
     const obs = await observeGoogleTarget(target, readGoogleCredential(fields), fingerprint, ctx);
     return buildGooglePlan(obs, target, amountMinor, currency, fingerprint, ctx.now ? ctx.now() : new Date());
   },
@@ -135,7 +149,7 @@ const googleAdapter: DirectPaymentAdapter = {
     };
   },
   async execute({ plan, fields, fingerprint, ctx }) {
-    return executeGooglePlan(plan, readGoogleCredential(fields), fingerprint, ctx);
+    return executeGooglePlan(plan, notSentIfUnreadable(() => readGoogleCredential(fields)), fingerprint, ctx);
   },
 };
 

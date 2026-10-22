@@ -8,7 +8,6 @@
  *   - 실행은 compare-and-set 이다: 그때도 `from` 이면 `to` 를 쓴다(절대값이라 다시 써도 같다).
  * 이 파일은 네트워크 없이 정할 수 있는 것만 둔다: 공급자 목록, 대상 ref, 통화 단위 변환, 계획 검증 · 문장, 문자열 정리.
  */
-import { createHash } from 'node:crypto';
 import { currencyExponent, formatMinorAmount } from './money';
 
 export const DIRECT_PAYMENT_PROVIDERS = ['meta_ads', 'google_ads'] as const;
@@ -52,6 +51,13 @@ export function paymentApiVersion(provider: DirectPaymentProvider, env: Record<s
   const raw = (env[spec.env] || '').trim();
   return spec.pattern.test(raw) ? raw : spec.default;
 }
+
+/**
+ * 직접 결제의 결과 불명은 실행 뒤 이만큼 지나야 "실패" 로 기록할 수 있다. 공급자 반영이 늦을 수 있어서(Meta 상한 변경은 최대 15분,
+ * Google 변경 기록은 몇 분) 그 전에 "아직 안 바뀌었다" 를 보고 실패로 닫으면, 나중에 반영된 상한이 원장 밖에 남는다. 화면의 대조
+ * 안내도 이 값을 쓴다(apps/client/test/marketing-payment-contract.test.mjs 가 대조한다).
+ */
+export const DIRECT_FAIL_GRACE_MS = 15 * 60_000;
 
 /** 규칙 위반 — 사람이 설정을 고쳐야 풀린다(같은 요청을 다시 보내도 같은 답). */
 export class PaymentRuleError extends Error {
@@ -141,12 +147,6 @@ export function payeeRoute(
   return { provider, credential_id: provider === 'webhook' ? campaign.payment_credential_id || null : null, ref: payee.ref || '' };
 }
 
-/** 사이클 지시문의 수취인 한 줄 — 직접 공급자 수취인은 무엇을 하는지(상한 올리기, payload 없음)를 함께 적는다. 사람이 쓴 이름만. */
-export function payeeBriefing(payee: PayeeLike): string {
-  if (!isDirectPaymentProvider(payee.provider)) return payee.name;
-  return `${payee.name}(${DIRECT_PAYMENT_PROVIDER_LABELS[payee.provider]} 캠페인 지출 상한 올리기 — payload 없이)`;
-}
-
 export function sameRoute(
   row: { provider: string; provider_credential_id: string | null; payee_ref: string },
   route: PaymentRoute,
@@ -200,12 +200,38 @@ export function isPaymentCurrencySupported(currency: string): boolean {
   try { currencySpec(currency); return true; } catch { return false; }
 }
 
-/** 공급자가 주는 정수 문자열(int64) — 숫자만, 19자리까지. BigInt('') 가 0 이 되는 함정을 막는다. */
+/**
+ * 공급자가 주는 정수 문자열(int64) — 숫자만, 19자리까지. BigInt('') 가 0 이 되는 함정을 막는다. 받은 값은 오류 문장에 넣지 않는다
+ * (이 문장은 에이전트까지 간다).
+ */
 export function parseProviderInt(value: unknown, label: string): bigint {
   const text = typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : value;
-  if (typeof text !== 'string' || !/^\d{1,19}$/.test(text)) throw new PaymentRuleError(`${label} is not a non-negative integer (${String(value).slice(0, 40)})`, 502);
+  if (typeof text !== 'string' || !/^\d{1,19}$/.test(text)) throw new PaymentRuleError(`${label} is not a non-negative integer`, 502);
   return BigInt(text);
 }
+
+/**
+ * 공급자가 준 값 중 형식이 정해진 것(상태 · 통화 · id · 리소스 이름 · 추적 id) — 형식에 맞을 때만 그 값, 아니면 ''. 이 값들은 규칙 위반
+ * 문장에 들어가 에이전트까지 가므로 자유 글이 섞이지 않게 하고, 형식이 틀린 값은 빈 값으로 읽혀 대조에서 걸린다(닫힌 쪽으로 실패).
+ * 사람이 붙인 이름 같은 자유 글은 cleanProviderText 로 정리해 `_untrusted` 로만 싣는다.
+ */
+export function providerToken(value: unknown, pattern: RegExp): string {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  const text = String(value).trim();
+  return pattern.test(text) ? text : '';
+}
+
+/** providerToken 에 쓰는 형식들. */
+export const PROVIDER_FORMATS = {
+  digits: /^\d{1,30}$/,
+  enumName: /^[A-Z][A-Z0-9_]{0,39}$/,
+  currency: /^[A-Z]{3}$/,
+  /** 공급자의 추적 id(Meta fbtrace_id · Google request-id). */
+  traceId: /^[A-Za-z0-9_-]{1,80}$/,
+  /** Google 종료 시각("yyyy-MM-dd HH:mm:ss", 고객 시간대). */
+  googleDateTime: /^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?$/,
+  googleBudget: /^customers\/\d{1,20}\/campaignBudgets\/\d{1,30}$/,
+} as const;
 
 const INT64_MAX = 9_223_372_036_854_775_807n;
 
@@ -273,7 +299,7 @@ export interface CeilingPlan {
   to: string;
   from_minor: number;
   to_minor: number;
-  /** 요청 때 쓴 credential 의 지문 — 그 사이 credential 내용이 바뀌면 실행하지 않는다. 비밀 값에서 만들지 않는다. */
+  /** 요청 때 쓴 credential 내용의 지문(키로 서명한 HMAC) — 그 사이 credential 내용이 바뀌면 실행하지 않는다. */
   credential_fingerprint: string;
   /** Google: 테스트 계정인가(요청 때). 실행 때 다르면 보내지 않는다. */
   test_account?: boolean;
@@ -296,7 +322,7 @@ export function buildCeilingPlan(input: {
   const fromProvider = (units: bigint) => (input.provider === 'meta_ads' ? metaUnitsToMinor(units, input.currency) : googleMicrosToMinor(units, input.currency));
   const fromMinor = fromProvider(input.fromUnits);
   const toUnits = input.fromUnits + toProvider(BigInt(input.amountMinor));
-  if (toUnits > INT64_MAX) throw new PaymentRuleError('the raised ceiling would exceed the provider maximum', 409);
+  if (toUnits > INT64_MAX) throw new PaymentRuleError('the raised ceiling would exceed the provider maximum', 400);
   const toMinor = fromProvider(toUnits);
   const plan: CeilingPlan = {
     plan: 'raise_ceiling',
@@ -406,10 +432,3 @@ export function scrubSecrets(text: string, secrets: Array<string | undefined | n
   return out;
 }
 
-/**
- * credential 의 지문 — 비밀 값이 아니라 암호문에서 만든다(에이전트도 계획을 읽는다). 내용을 다시 저장하면 바뀐다.
- * 계획에 넣어 두고 승인 · 실행 때 대조한다: 승인 대기 중에 키를 다른 계정의 키로 바꾸면 그 요청은 실행되지 않는다.
- */
-export function credentialFingerprint(cred: { id: string; encrypted_data: string }): string {
-  return createHash('sha256').update(`${cred.id}\n${cred.encrypted_data}`, 'utf8').digest('hex').slice(0, 16);
-}
