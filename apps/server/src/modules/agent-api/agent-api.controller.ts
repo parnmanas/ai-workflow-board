@@ -30,6 +30,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { lockTicketCommentWrites } from '../../common/ticket-comment-write-lock';
 import { setChatRoomSessionStatus } from './chat-session-status.store';
+import { TicketDispatchService } from '../agents/ticket-dispatch.service';
 import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
@@ -46,6 +47,7 @@ export class AgentApiController {
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
     private readonly tickets: TicketService,
+    private readonly ticketDispatch: TicketDispatchService,
   ) {}
 
   @Post('tickets/:id/mention-audit-runs/start')
@@ -320,6 +322,14 @@ export class AgentApiController {
     const scope = this.requestScope(req);
     if (!scope) return false;
     return targetAccountId !== scope;
+  }
+
+  @Post('tickets/:id/suppressed-replay')
+  async prepareSuppressedReplay(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const accountId = this.requestScope(req);
+    const hostId = (req as any).currentHostId;
+    if (!accountId || !hostId) return this.denyScope(res);
+    return res.status(200).json(await this.ticketDispatch.prepareSuppressedReplay(id, accountId, hostId, String(body?.agent_id || '')));
   }
 
   @Get('tickets/:id')

@@ -218,4 +218,49 @@ test('the work order lists the ticket\'s open child tickets by id', async () => 
   assert.ok(order.includes(`- \`${child.body.id}\` wire the screens`), order);
 });
 
+test('suppressed replay rechecks state and ownership and rebuilds the current checklist', async () => {
+  const created = await api('POST', `/accounts/${ws.id}/tickets`, { title: 'replay freshness', status: 'backlog', assignee: agent.runtime_spec, project_id: project.id });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  const hostId = agent.runtime_spec.manager_agent_id;
+  const repo = ds.getRepository('Ticket');
+  const row = await repo.findOneBy({ id });
+  const refresh = (accountId = ws.id, host = hostId, assignee = row.assignee_key) => dispatcher.prepareSuppressedReplay(id, accountId, host, assignee);
+  // Isolate the fixture from activity-driven dispatch while exercising the real
+  // DB reads and payload builder used by the replay endpoint.
+  await repo.update(id, { status: 'in_progress' });
+  const child = await api('POST', `/tickets/${id}/children`, { title: 'fresh checklist item' });
+  assert.ok(child.status < 300, JSON.stringify(child.body));
+  const fresh = await refresh();
+  assert.equal(fresh.payload.status, 'in_progress');
+  assert.match(fresh.payload.column_prompt.content, /fresh checklist item/);
+  await repo.update(child.body.id, { status: 'done' });
+  const updated = await refresh();
+  assert.match(updated.payload.column_prompt.content, /All 1 child tickets of this ticket are done/);
+  assert.doesNotMatch(updated.payload.column_prompt.content, /fresh checklist item/);
+  for (const status of ['done', 'review', 'todo', 'backlog']) {
+    await repo.update(id, { status });
+    assert.equal((await refresh()).reason, 'ticket_inactive');
+  }
+  await repo.update(id, { status: 'in_progress' });
+  for (const flag of ['pending_user_action', 'pending_on_tickets', 'pending_ci_wait']) {
+    await repo.update(id, { [flag]: true });
+    assert.equal((await refresh()).reason, 'ticket_pending');
+    await repo.update(id, { [flag]: false });
+  }
+  assert.equal((await refresh(ws.id, hostId, 'different-assignee')).reason, 'assignee_changed');
+  assert.equal((await refresh(ws.id, 'different-host')).reason, 'host_changed');
+  assert.equal((await refresh('different-account')).reason, 'ticket_not_found');
+  const devMode = process.env.AGENT_DEV_MODE;
+  process.env.AGENT_DEV_MODE = 'false';
+  const response = await fetch(`http://localhost:${port}/api/agent/tickets/${id}/suppressed-replay`, {
+    method: 'POST', headers: { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: row.assignee_key }),
+  });
+  process.env.AGENT_DEV_MODE = devMode;
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).payload.ticket_id, id);
+  await repo.update(id, { status: 'done' });
+});
+
 exitAfterTests();

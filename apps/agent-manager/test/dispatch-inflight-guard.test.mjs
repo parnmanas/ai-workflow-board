@@ -263,8 +263,12 @@ function assertNonce(reservation, msg = 'a placed reservation carries a generati
 // Fail-closed fetch so handleTrigger's REST helpers (fetchTicketContext,
 // fetchRepositoryCredential) resolve to null fast without real network.
 let savedFetch;
+let replayResponse;
+let replayRequests;
 beforeEach(() => {
   savedFetch = globalThis.fetch;
+  replayRequests = 0;
+  replayResponse = { payload: { ...JSON.parse(evJson()), agent_id: 'a1', role: 'assignee', status: 'in_progress' } };
   globalThis.fetch = async (url, init) => validationResponse(url, init) || (String(url).includes('/api/agent/tickets/') ? ({
     ok: true,
     status: 200,
@@ -2645,9 +2649,66 @@ function isDead(pid) {
 }
 
 function validationResponse(url, init) {
+  if (String(url).endsWith('/suppressed-replay')) {
+    replayRequests++;
+    return Response.json(replayResponse);
+  }
   if (!String(url).endsWith('/runtime-keys/validate')) return null;
   return Response.json({ account_id: 'account-1',
     runtime_key: new Headers(init.headers).get('X-Agent-Key').replace(/^key-/, ''),
     host_id: loadAgentInfo()?.host_id || loadAgentInfo()?.agent_id || 'host-1',
   });
 }
+
+for (const reason of ['ticket_inactive', 'ticket_pending', 'assignee_changed', 'ticket_not_found']) {
+  test(`suppressed force is dropped after holder release when refresh returns ${reason}`, async () => {
+    const gate = deferred();
+    const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+    const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+    const holder = dispatcher.handleTrigger(evJson({ field_changed: 'holder' }));
+    await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'force' }));
+    replayResponse = { reason };
+    gate.resolve();
+    await holder;
+    assert.ok(await waitFor(() => replayRequests === 1));
+    await delay(50);
+    assert.equal(mgr.spawnCount, 1);
+  });
+}
+
+test('suppressed force rebuilds prompts from server response instead of old work order', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = [];
+  const original = mgr.dispatchTrigger.bind(mgr);
+  mgr.dispatchTrigger = async (spec) => { dispatched.push(spec); return original(spec); };
+  const holder = dispatcher.handleTrigger(evJson({ field_changed: 'holder' }));
+  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'force', ticket_prompt: 'STALE' }));
+  replayResponse.payload.ticket_prompt = 'CURRENT';
+  replayResponse.payload.column_prompt = { template_id: 'builtin:ticket-work-order', name: 'Ticket work order', content: 'CURRENT CHECKLIST' };
+  gate.resolve();
+  await holder;
+  assert.ok(await waitFor(() => mgr.spawnCount === 2));
+  assert.equal(dispatched.at(-1).ticketPrompt, 'CURRENT');
+  assert.equal(dispatched.at(-1).columnPrompt.content, 'CURRENT CHECKLIST');
+});
+
+test('suppressed force does not replay stale data when refresh fails', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+  const holder = dispatcher.handleTrigger(evJson({ field_changed: 'holder' }));
+  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'force' }));
+  const fetch = globalThis.fetch;
+  let requested = false;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/suppressed-replay')) { requested = true; throw new Error('offline'); }
+    return fetch(url, init);
+  };
+  gate.resolve();
+  await holder;
+  assert.ok(await waitFor(() => requested));
+  await delay(50);
+  assert.equal(mgr.spawnCount, 1);
+});

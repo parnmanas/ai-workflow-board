@@ -1028,3 +1028,19 @@ skill bindings are removed; existing runtime-key bindings are retained.
 Host pairing aliases can be translated before the old key column disappears.
 The cleanup is idempotent on SQLite and PostgreSQL. Database backups are required
 for rollback; retired Agent data is not reconstructed by `down()`.
+
+### Suppressed supervisor replay and one-shot output liveness
+
+Ticket-bearing one-shot runs report parsed model output to the same
+`POST /api/agent-manager/output-liveness` endpoint as persistent ticket sessions,
+using `OUTPUT_LIVENESS_MIN_INTERVAL_MS` and runtime-key → manager-key auth fallback.
+Local stdout/TTL activity alone is not the server's liveness signal.
+
+When a holder releases a suppressed `force_respawn`, the manager first calls
+`POST /api/agent/tickets/:id/suppressed-replay` with the expected `agent_id`.
+`TicketDispatchService` rereads the ticket and accepts only an unarchived,
+non-pending `in_progress` root with the same assignee, Account and active Host.
+A paused Account also prevents replay. The response carries a freshly built
+trigger payload (including current child checklist and project work order), or
+a skip reason. Lookup failures skip replay; no stored work order is executed.
+The manager preserves the suppressed trigger's acknowledgement identity.

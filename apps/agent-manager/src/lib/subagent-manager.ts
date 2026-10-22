@@ -22,6 +22,7 @@ import {
   STOP_GRACE_MS,
   STOP_FORCE_KILL_SETTLE_MS,
   DEFAULT_CLI_ID,
+  OUTPUT_LIVENESS_MIN_INTERVAL_MS,
 } from './constants.js';
 import { log } from './logging.js';
 import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
@@ -78,6 +79,7 @@ import {
   failMentionAuditRetrySpawn,
   postChatRoomMessage,
   postSilentExitSystemComment,
+  postOutputLiveness,
   startMentionAuditRun,
   type AwbConfig,
 } from './rest.js';
@@ -338,6 +340,8 @@ interface SubagentRecord {
   ttlMs?: number;
   /** Last non-empty stdout chunk, independent of parsing or capture limits. */
   lastStdoutAt?: number;
+  lastLivenessPostAtMs?: number;
+  effectiveApiKey?: string;
   /** ticket b972b28c: set once #maybeEscalateLongRunning has logged its
    *  one-time runaway-loop notice for this record, so repeated sweep ticks
    *  don't spam the log while a genuinely long-running one-shot keeps
@@ -1112,6 +1116,7 @@ export class SubagentManager implements SubagentManagerContract {
       const record: SubagentRecord = {
         pid,
         kind: spec.kind,
+        effectiveApiKey,
         cli_type: adapter.cliType,
         trigger_id: spec.triggerId || null,
         audit_session_id: String(reservationId),
@@ -1876,6 +1881,7 @@ export class SubagentManager implements SubagentManagerContract {
           this._captureAssistantText(record, line);
           this._maybeEmitChatProgress(record, line);
           this.#captureUsageLine(record, line);
+          this.#reportOutputLiveness(record, line);
         }
         log(`${tagFor(record)} ${line}`);
       });
@@ -1897,6 +1903,20 @@ export class SubagentManager implements SubagentManagerContract {
         log(`${tagFor(record)}[err] ${line}`);
       });
     }
+  }
+
+  #reportOutputLiveness(record: SubagentRecord, line: string): void {
+    if (!record.ticket_id || !record.agent_id) return;
+    const parsed = this.#adapterFor(record.cli_type).parseStdoutLine(line);
+    if (!parsed.stage && !parsed.isResult) return;
+    const now = Date.now();
+    if (now - (record.lastLivenessPostAtMs ?? 0) < OUTPUT_LIVENESS_MIN_INTERVAL_MS) return;
+    record.lastLivenessPostAtMs = now;
+    void postOutputLiveness(
+      { ...this.#config, retryApiKey: this.#config.apiKey },
+      record.effectiveApiKey || this.#config.apiKey,
+      { agent_id: record.agent_id, ticket_id: record.ticket_id, role: record.role || '' },
+    );
   }
 
   /** stdout/stderr 한 줄을 silent-exit tail 링에 추가한다. 일반 텍스트 줄은
@@ -2416,12 +2436,13 @@ export class SubagentManager implements SubagentManagerContract {
     const pids: any[] = [];
     for (const rec of this.#map.values()) {
       if (rec.kind === 'reservation') continue;
-      const { process_handle, outLines, tailLines, tap, respawnSpec, ...serializable } = rec;
+      const { process_handle, outLines, tailLines, tap, respawnSpec, effectiveApiKey, ...serializable } = rec;
       void process_handle;
       void outLines;
       void tailLines;
       void tap;
       void respawnSpec;
+      void effectiveApiKey;
       pids.push(serializable);
     }
     fsp

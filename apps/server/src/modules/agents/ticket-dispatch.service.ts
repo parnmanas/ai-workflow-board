@@ -505,6 +505,24 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     return { dispatched: true, trigger_id: payload.trigger_id };
   }
 
+  /** Rebuild a suppressed supervisor dispatch without reviving a stale assignment. */
+  async prepareSuppressedReplay(ticketId: string, accountId: string, hostId: string, agentId: string) {
+    const ticket = await this.dataSource.getRepository(Ticket).findOneBy({ id: ticketId, account_id: accountId });
+    if (!ticket) return { reason: 'ticket_not_found' };
+    if (ticket.status !== 'in_progress' || ticket.archived_at || ticket.parent_id) return { reason: 'ticket_inactive' };
+    if (isTicketPending(ticket)) return { reason: 'ticket_pending' };
+    if (ticket.canonical_ticket_id) return { reason: 'duplicate' };
+    const spec = parseRuntimeSpec(ticket.assignee);
+    if (!spec || ticket.assignee_key !== agentId || runtimeIdentityKey(spec) !== agentId) return { reason: 'assignee_changed' };
+    if (!hostId || spec.manager_agent_id !== hostId) return { reason: 'host_changed' };
+    const account = await this.dataSource.getRepository(Account).findOneBy({ id: accountId });
+    if (!account) return { reason: 'account_not_found' };
+    if (account.dispatch_paused_at) return { reason: 'account_paused' };
+    const host = await this.dataSource.getRepository(RuntimeHost).findOneBy({ id: hostId, account_id: accountId, is_active: 1 });
+    if (!host) return { reason: 'host_inactive' };
+    return { payload: await this.buildPayload(ticket, spec, account, 'supervisor', true) };
+  }
+
   private async buildPayload(
     ticket: Ticket,
     spec: RuntimeSpec,

@@ -17,6 +17,7 @@ import { loadAgentInfo } from './config.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   fetchTicketContext,
+  prepareSuppressedReplay,
   fetchChatRoomHistory,
   fetchOrdinaryWorkCandidates,
   fetchAgentRecord,
@@ -2689,30 +2690,15 @@ export class EventDispatcher {
    *  carrying a `column_prompt`, so firing both would run the column workflow
    *  twice. A pending force wins — it is strictly the stronger action (it also
    *  re-enters the column workflow, just with a fresh session), which keeps this
-   *  path byte-identical to pre-c249a47e behaviour whenever a force was
-   *  suppressed. */
+   *  path selecting only one candidate. Force replay now asks the server to
+   *  revalidate the assignment and rebuild the work order before dispatch. */
   #replaySuppressedDispatch(inflightKey: string | null, ticketId: string, role: string): void {
     if (!inflightKey) return;
     const { pendingForceRaw, pendingColumnWorkflowRaw } = this.#inflightDispatch.onRelease(inflightKey);
     if (pendingForceRaw) {
-      log(
-        `[dispatch] replaying suppressed force_respawn after holder released: ` +
-          `ticket=${ticketId.slice(0, 8)} role=${role || '_'}`,
+      void this.#replaySuppressedForce(pendingForceRaw, ticketId).catch((err: any) =>
+        log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
       );
-      let forcedRaw: string | null = null;
-      try {
-        forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
-      } catch {
-        forcedRaw = null;
-      }
-      if (forcedRaw) {
-        // Fire-and-forget so we don't extend the caller's finally/onExit; the
-        // replay re-enters handleTrigger cleanly (re-acquires the slot,
-        // force-respawns fresh).
-        this.#replayWork('agent_trigger', forcedRaw).catch((err: any) =>
-          log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
-        );
-      }
       return;
     }
     if (pendingColumnWorkflowRaw) {
@@ -2727,10 +2713,28 @@ export class EventDispatcher {
     }
   }
 
+  async #replaySuppressedForce(raw: string, ticketId: string): Promise<void> {
+    const previous = JSON.parse(raw);
+    const fresh = await prepareSuppressedReplay(this.#config, ticketId, previous.actor_name || previous.agent_id || '');
+    if (!fresh) return;
+    // Keep the suppressed trigger's acknowledgement/dedup identity, but never
+    // its old runtime, project, prompts, or checklist. handleTrigger consumes
+    // the manager's normalized aliases as well as the wire payload.
+    const replay = {
+      ...fresh,
+      trigger_id: previous.trigger_id || previous.field_changed,
+      field_changed: previous.field_changed || previous.trigger_id,
+      actor_name: fresh.agent_id,
+      action: fresh.role,
+      force_respawn: true,
+    };
+    log(`[dispatch] replaying suppressed force_respawn after holder released: ticket=${ticketId}`);
+    await this.#replayWork('agent_trigger', JSON.stringify(replay));
+  }
+
   /** Replay the column-workflow trigger a mention seat swallowed (ticket
-   *  c249a47e). Split from the force path because it needs one extra check the
-   *  force path deliberately does not do: the trigger is replayed ONLY while the
-   *  ticket is still sitting on the column the server emitted it for.
+   *  c249a47e). This legacy column path compares the original destination;
+   *  force replay instead uses the server's current assignment/work order.
    *
    *  A mention strand CAN legitimately complete the column's work itself before
    *  it exits (it is the same role holder, just with a different prompt). Then

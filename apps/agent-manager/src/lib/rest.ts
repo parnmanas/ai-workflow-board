@@ -140,6 +140,25 @@ export async function fetchTicketContext(
   }
 }
 
+/** The server rechecks ownership and workflow state and rebuilds the work order. */
+export async function prepareSuppressedReplay(config: AwbConfig, ticketId: string, agentId: string): Promise<any | null> {
+  try {
+    const response = await fetch(`${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/suppressed-replay`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: agentId }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json() as any;
+    if (result.payload) return result.payload;
+    log(`[dispatch] suppressed force_respawn replay skipped: ticket=${ticketId} reason=${result.reason || 'no_payload'}`);
+  } catch (err: any) {
+    log(`[dispatch] suppressed force_respawn replay skipped: ticket=${ticketId} lookup failed: ${err?.message ?? err}`);
+  }
+  return null;
+}
+
 /** Grace delay before the silent-exit re-verification fetch below (ticket
  *  2fd06686) — gives a comment/move POSTed right as the child exited a
  *  moment to actually land before we re-check for it. */
