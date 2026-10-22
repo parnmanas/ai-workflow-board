@@ -5,10 +5,13 @@
 //      UserChannel(notify_mention)로 간다. 다음 sweep 은 같은 것을 다시 보내지 않는다. 다른 계정의 관리자는 받지 않는다.
 //      사람이 스스로 만든 것은 그 사람에게 알리지 않는다.
 //   2. 본문에 에이전트가 쓴 글(채널 이름 · 게시물 제목 · 지출 목적)은 없다. AWB_PUBLIC_URL 이 있으면 캠페인 링크를 붙인다.
-//   3. 그 사이 결정된 것은 싣지 않는다. 사이클이 돌면 기다리지만 15분을 넘기지 않는다. 결과 불명은 사이클을 기다리지 않는다.
+//   3. 그 사이 결정된 것은 싣지 않는다. 사이클이 돌면 기다리지만 15분을 넘기지 않는다. 결과 불명은 사이클도, 쏟아지는
+//      초안도 기다리지 않는다.
 //   4. 2인 승인의 두 번째 승인은 이미 승인한 사람을 뺀 승인자에게 간다(접근자가 늘어난 상황을 흉내 낸다).
-//   5. 권한: manage 만 있으면 채널 · 게시물만 받는다. quiesce 중이거나 보관된 캠페인이면 보내지 않는다.
-//   6. (대상, 종류) 표시는 유일하다. AccountAccessService.usersWithAccess 는 accessibleIds 의 역방향(활성 소유자)이다.
+//   5. 권한: manage 만 있으면 채널 · 게시물만 받는다. quiesce 중이면 보내지 않고 풀리면 이어 보낸다. 두 계정의 묶음은 한
+//      통이 된다. 보관된 캠페인은 세지 않지만 결과 불명 결제는 알린다.
+//   6. (대상, 종류) 표시는 유일하다. 다른 서버가 묶음의 일부를 먼저 선점하면 그 계정을 건너뛰고, 다음 sweep 이 나머지를
+//      보낸다. AccountAccessService.usersWithAccess 는 accessibleIds 의 역방향(활성 소유자)이다.
 //
 // 실행: node --test --test-force-exit test/marketing-approval-notify.test.mjs (dist 필요)
 
@@ -156,8 +159,28 @@ test('marketing approval notices: batched, once, only to the people who decide',
   assert.equal(take().length, 0);
   await assert.rejects(
     notices.insert({ account_id: account.id, campaign_id: campaign.id, kind: 'spend_pending', entity_id: small.id }),
+    (e) => /unique|duplicate/i.test(String(e?.driverError?.message || e?.message)),
     'the (entity, kind) mark is unique — a second server loses the claim',
   );
+
+  // 다른 서버가 이 계정 묶음의 한 항목을 먼저 선점했다. 이번 sweep 은 계정을 건너뛰고, 다음 sweep 이 남은 것만 보낸다.
+  const raced = await draft('claimed elsewhere');
+  const spared = await draft('left for the next sweep');
+  const candidatesOf = Object.getPrototypeOf(notify).candidates;
+  notify.candidates = async function (...args) {
+    delete notify.candidates;
+    const list = await candidatesOf.apply(notify, args);
+    await notices.insert({ account_id: account.id, campaign_id: campaign.id, kind: 'post_draft', entity_id: raced.post.id });
+    return list;
+  };
+  const lost = await notify.sweep(later(3 * MIN));
+  assert.deepEqual([lost.accounts, lost.items], [0, 0], 'the account is skipped when another server won part of it');
+  assert.equal(take().length, 0);
+  assert.equal(await notices.countBy({ entity_id: spared.post.id }), 0, 'a lost claim leaves nothing half-claimed');
+  const rest = await notify.sweep(later(3 * MIN));
+  assert.deepEqual([rest.accounts, rest.items], [1, 1], 'the next sweep sends what is left — the account is not wedged');
+  assert.match(digests('owner-dm')[0].payload.body, /• 게시물 초안 1건/);
+  take();
 
   // ── 3. 결정된 것 · 사이클 · 결과 불명 ────────────────────────────────────
   const rejected = await draft('decided before the digest');
@@ -178,13 +201,15 @@ test('marketing approval notices: batched, once, only to the people who decide',
 
   const approved = await post(`/spend-requests/${small.id}/approve`, { payload_sha256: small.payload_sha256 });
   assert.equal(approved.body.status, 'approved', approved.text);
-  // webhook 이 타임아웃으로 끝났다고 친다 — 결과 불명은 대조가 필요하다.
-  await ds.getRepository('MarketingSpendRequest').update(small.id, { status: 'unknown', error: 'timeout' });
-  const unknown = await notify.sweep(later(3 * MIN));
-  assert.equal(unknown.accounts, 1, 'an unknown payment does not wait for the running cycle');
+  // 3분 전 webhook 이 타임아웃으로 끝났다고 친다 — 결과 불명은 대조가 필요하다. 그 사이에도 사이클은 초안을 만든다.
+  await ds.getRepository('MarketingSpendRequest').update(small.id, { status: 'unknown', error: 'timeout', updated_at: new Date(Date.now() - 3 * MIN) });
+  await draft('still drafting');
+  const unknown = await notify.sweep();
+  assert.equal(unknown.accounts, 1, 'an unknown payment waits neither for the running cycle nor for the burst');
   const unknownDigest = digests('owner-dm')[0].payload;
-  assert.equal(unknownDigest.title, '마케팅 결정 대기 1건 — Notify Launch');
+  assert.equal(unknownDigest.title, '마케팅 결정 대기 2건 — Notify Launch');
   assert.match(unknownDigest.body, /• 결제 결과 불명 1건: 50,000 KRW → Ads Co — 결제됐는지 확인해 결과를 기록하세요/);
+  assert.match(unknownDigest.body, /• 게시물 초안 1건/, 'what the burst made so far rides along');
   assert.ok(!unknownDigest.body.includes('timeout'), 'the payment endpoint\'s response text stays out');
   take();
   await cycles.update(cycle.id, { status: 'completed', completed_at: new Date() });
@@ -206,8 +231,8 @@ test('marketing approval notices: batched, once, only to the people who decide',
     : usersWithAccess(accountId);
   t.after(() => { access.usersWithAccess = usersWithAccess; });
   await ds.getRepository('MarketingApprovalNotice').delete({ entity_id: big.id, kind: 'spend_second_approval' });
-  const second = await notify.sweep(later(3 * MIN));
-  assert.equal(second.recipients, 1);
+  const secondSweep = await notify.sweep(later(3 * MIN));
+  assert.equal(secondSweep.recipients, 1);
   assert.equal(digests('owner-dm').length, 0, 'the first approver is not asked again');
   const secondDigest = digests('treasurer-dm')[0].payload;
   assert.match(secondDigest.body, /• 두 번째 승인 대기 1건: 150,000 KRW → Ads Co \(만료까지 7[01]시간\) — 2인 승인 대상이라 다른 승인자가 필요합니다/);
@@ -234,13 +259,42 @@ test('marketing approval notices: batched, once, only to the people who decide',
   assert.equal((await notify.sweep(later(3 * MIN))).accounts, 1, '… and catches up afterwards');
   take();
 
+  // 같은 사람의 두 계정 — 두 묶음이 한 통이 된다.
+  const posts = ds.getRepository('MarketingPost');
   const campaignRepo = ds.getRepository('MarketingCampaign');
-  await campaignRepo.update(campaign.id, { status: 'archived' });
-  await ds.getRepository('MarketingPost').save(ds.getRepository('MarketingPost').create({
-    account_id: account.id, campaign_id: campaign.id, channel_id: forum.id, title: 'archived', body: 'x', status: 'draft',
+  const secondAccount = await createAccount(app, getDataSourceToken, 'mkt-notify-second');
+  assert.equal(secondAccount.owner_user_id, owner.id);
+  const secondCampaign = await campaignRepo.save(campaignRepo.create({
+    account_id: secondAccount.id, name: 'Second Launch', slug: `second-launch-${Date.now()}`, status: 'active',
   }));
+  await posts.save(posts.create({
+    account_id: secondAccount.id, campaign_id: secondCampaign.id, channel_id: 'none', body: 'x', status: 'draft',
+    created_by_type: 'agent', created_by_id: 'rt-second',
+  }));
+  await draft('first account');
+  const merged = await notify.sweep(later(3 * MIN));
+  assert.deepEqual([merged.accounts, merged.recipients], [2, 1]);
+  assert.equal(digests('owner-dm').length, 1, 'one message for both accounts');
+  const mergedDigest = digests('owner-dm')[0].payload;
+  assert.equal(mergedDigest.title, '마케팅 결정 대기 2건 (캠페인 2개)');
+  assert.equal(mergedDigest.url, 'https://awb.test/marketing', 'several campaigns link to the list');
+  assert.match(mergedDigest.body, /Notify Launch\n• 게시물 초안 1건/);
+  assert.match(mergedDigest.body, /Second Launch\n• 게시물 초안 1건/);
+  take();
+
+  const third = (await ask(30000)).spend_request;
+  assert.equal((await post(`/spend-requests/${third.id}/approve`, { payload_sha256: third.payload_sha256 })).body.status, 'approved');
+  await campaignRepo.update(campaign.id, { status: 'archived' });
+  await posts.save(posts.create({ account_id: account.id, campaign_id: campaign.id, channel_id: forum.id, title: 'archived', body: 'x', status: 'draft' }));
   assert.equal((await notify.sweep(later(3 * MIN))).accounts, 0, 'archived campaigns are not counted, as in the inbox');
   assert.equal(take().length, 0);
+  // … 결과 불명 결제만은 예외다. 보관해도 돈이 어디로 갔는지는 정해지지 않는다.
+  await ds.getRepository('MarketingSpendRequest').update(third.id, { status: 'unknown', error: 'restarted while sending' });
+  assert.equal((await notify.sweep(later(3 * MIN))).accounts, 1);
+  const archivedDigest = digests('owner-dm')[0].payload;
+  assert.equal(archivedDigest.title, '마케팅 결정 대기 1건 — Notify Launch');
+  assert.match(archivedDigest.body, /^Notify Launch\n• 결제 결과 불명 1건: 30,000 KRW → Ads Co/);
+  take();
 
   // ── 6. 역방향 접근 조회 ────────────────────────────────────────────────
   assert.deepEqual((await access.usersWithAccess(account.id)).map((u) => u.id), [owner.id]);

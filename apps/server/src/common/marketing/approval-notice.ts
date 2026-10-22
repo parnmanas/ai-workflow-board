@@ -171,8 +171,10 @@ export function spendNoticeCandidate(row: NoticeSpendRow, now: Date): ApprovalNo
  * 이 계정의 대기 알림을 지금 보낼지 정한다. 때가 된 항목이 하나라도 있으면 보낸다. 보낼 때는 그 계정의 미알림 항목을
  * 전부 싣는다 — 기다리던 것이 같이 가는 편이 한 통 더 보내는 것보다 낫다.
  *   - 어떤 항목도 APPROVAL_NOTICE_MAX_WAIT_MS 를 넘겨 기다리지 않는다.
- *   - 그 밖에는 계정의 가장 새 항목 뒤로 APPROVAL_NOTICE_QUIET_MS 동안 조용해야 한다. 한꺼번에 생기는 것을 묶는다.
- *   - 조용해졌어도 burst 종류는 그 캠페인의 사이클이 아직 돌면 기다린다. 사이클 하나의 결과를 한 통으로 보낸다.
+ *   - 결과 불명 · 두 번째 승인은 다른 항목을 기다리지 않는다. 생긴 지 APPROVAL_NOTICE_QUIET_MS 면 보낸다(잇달아 생긴
+ *     것만 묶는다). 다른 캠페인의 사이클이 초안을 쏟아내는 중이어도 마찬가지다.
+ *   - burst 종류는 계정의 가장 새 항목 뒤로 APPROVAL_NOTICE_QUIET_MS 동안 조용해야 한다. 한꺼번에 생기는 것을 묶는다.
+ *     조용해졌어도 그 캠페인의 사이클이 아직 돌면 기다린다. 사이클 하나의 결과를 한 통으로 보낸다.
  */
 export function approvalDigestDue(
   items: ApprovalNoticeCandidate[],
@@ -188,8 +190,9 @@ export function approvalDigestDue(
     newest = Math.max(newest, item.at.getTime());
   }
   if (nowMs - oldest >= APPROVAL_NOTICE_MAX_WAIT_MS) return true;
+  if (items.some((i) => !APPROVAL_NOTICE_RULES[i.kind].burst && nowMs - i.at.getTime() >= APPROVAL_NOTICE_QUIET_MS)) return true;
   if (nowMs - newest < APPROVAL_NOTICE_QUIET_MS) return false;
-  return items.some((i) => !APPROVAL_NOTICE_RULES[i.kind].burst || !runningCampaignIds.has(i.campaign_id));
+  return items.some((i) => !runningCampaignIds.has(i.campaign_id));
 }
 
 export interface ApprovalNoticeRecipient {

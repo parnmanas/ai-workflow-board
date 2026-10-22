@@ -4,8 +4,8 @@
 //   1. 지출 요청의 알림 종류는 지금 상태로 정한다: 승인 없는 pending = 새 요청(요청한 사람 제외), 승인 있는 pending =
 //      두 번째 승인(이미 승인한 사람 · 요청한 사람 제외), unknown = 결과 불명(아무도 빼지 않음). 만료가 지난 pending 과
 //      끝난 요청은 알리지 않는다. 채널 · 게시물 · 편성은 사람이 만든 것이면 그 사람을 뺀다.
-//   2. 묶음: 계정의 가장 새 항목 뒤로 2분 조용해야 보낸다. 사이클이 돌면 burst 종류는 기다리고 결과 불명 · 두 번째 승인은
-//      기다리지 않는다. 어떤 항목도 15분을 넘겨 기다리지 않는다.
+//   2. 묶음: 계정의 가장 새 항목 뒤로 2분 조용해야 보낸다. 사이클이 돌면 burst 종류는 기다린다. 결과 불명 · 두 번째 승인은
+//      사이클도, 다른 항목의 묶음도 기다리지 않는다(생긴 지 2분이면 보낸다). 어떤 항목도 15분을 넘겨 기다리지 않는다.
 //   3. 받는 사람: 그 결정의 권한(manage / approve_spend)이 있어야 하고, 빠진 사람은 받지 않는다.
 //   4. 본문: 급한 순서, 금액 · 수취인 · 만료까지 남은 시간, 캠페인 링크. 넘치는 것은 "외 n" 으로 줄인다.
 //
@@ -135,6 +135,13 @@ test('digests wait for a quiet account, for a running cycle, but never past the 
   for (const kind of ['spend_unknown', 'spend_second_approval']) {
     assert.equal(APPROVAL_NOTICE_RULES[kind].burst, false);
     assert.equal(approvalDigestDue([candidate(kind, { at: ago(3 * MIN) })], NOW, cycle), true, `${kind} does not wait for the cycle`);
+    assert.equal(approvalDigestDue([candidate(kind, { at: ago(APPROVAL_NOTICE_QUIET_MS - 1) })], NOW, none), false,
+      `${kind} still gathers others of its kind for 2 minutes`);
+    // 다른 캠페인 · 같은 캠페인의 사이클이 초안을 계속 쏟아내도 기다리지 않는다(리뷰 지적).
+    const burst = [candidate('post_draft', { at: ago(10 * 1000), campaign_id: 'other' }), candidate('post_draft', { at: ago(5 * 1000) })];
+    assert.equal(approvalDigestDue([candidate(kind, { at: ago(APPROVAL_NOTICE_QUIET_MS) }), ...burst], NOW, cycle), true,
+      `${kind} goes out in the middle of an agent's burst`);
+    assert.equal(approvalDigestDue([candidate(kind, { at: ago(APPROVAL_NOTICE_QUIET_MS - 1) }), ...burst], NOW, none), false);
   }
   for (const kind of ['spend_pending', 'allocation_proposed', 'channel_proposed', 'post_draft']) {
     assert.equal(APPROVAL_NOTICE_RULES[kind].burst, true, `${kind} is produced in bursts`);

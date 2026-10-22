@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository, type ObjectLiteral } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, In, Repository, type FindOptionsWhere, type ObjectLiteral } from 'typeorm';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingPost } from '../../entities/MarketingPost';
@@ -8,6 +8,7 @@ import { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocat
 import { MarketingSpendRequest } from '../../entities/MarketingSpendRequest';
 import { MarketingCycle } from '../../entities/MarketingCycle';
 import { MarketingApprovalNotice } from '../../entities/MarketingApprovalNotice';
+import type { User } from '../../entities/User';
 import {
   approvalDigestDue,
   approvalNoticesFor,
@@ -24,6 +25,10 @@ import { UserChannelDispatcherService } from '../../services/notification-provid
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 
 const SWEEP_MS = 60_000;
+/** 한 사람에게 보내는 것 전체의 상한. provider 는 요청마다 끊지만 바인딩 수 · 429 재시도만큼 길어진다. */
+const SEND_TIMEOUT_MS = 30_000;
+/** 선점 INSERT 한 번의 행 수. 큰 묶음도 바인드 변수 상한(sqlite · Postgres)을 넘지 않는다. */
+const CLAIM_CHUNK = 500;
 
 export interface ApprovalNoticeSweep {
   /** 이번에 선점해 보낸 계정 수 */
@@ -46,6 +51,39 @@ function parsePermissions(raw: string): string[] {
   }
 }
 
+function isUniqueConstraintError(error: unknown): boolean {
+  const value = error as {
+    code?: string;
+    errno?: number;
+    message?: string;
+    driverError?: { code?: string; errno?: number; message?: string };
+  } | null;
+  const driverError = value?.driverError;
+  const code = driverError?.code ?? value?.code;
+  const errno = driverError?.errno ?? value?.errno;
+  const message = driverError?.message ?? value?.message ?? '';
+  return code === '23505'
+    || code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || code === 'ER_DUP_ENTRY'
+    || errno === 1062
+    || /unique constraint failed/i.test(message);
+}
+
+/**
+ * provider 의 요청 단위 상한과 별개로 한 사람 몫 전체를 끊는다. 끊어도 보내던 것은 뒤에서 마저 간다 — sweep 만 기다리지
+ * 않고 다음으로 넘어간다(선점은 이미 썼으니 다음 sweep 이 다시 보내지 않는다).
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`notification send timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
+}
+
 function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> {
   const out = new Map<string, T[]>();
   for (const item of items) {
@@ -66,8 +104,8 @@ function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> {
  * 그 사이 이미 결정된 것은 저절로 빠지고, 재시작 동안 생긴 것은 다음 sweep 이 줍는다.
  *
  * ── 한 번만 ───────────────────────────────────────────────────────────────
- * (대상, 종류)마다 `marketing_approval_notices` 에 한 행을 발송 **전에** 쓴다(유일 인덱스). 계정 하나의 묶음은 INSERT
- * 한 번으로 선점한다. 서버가 둘이어도 진 쪽은 그 계정을 건너뛰고, 다음 sweep 이 남은 것을 다시 본다. 발송이 실패하면
+ * (대상, 종류)마다 `marketing_approval_notices` 에 한 행을 발송 **전에** 쓴다(유일 인덱스). 계정 하나의 묶음은 한
+ * 트랜잭션으로 선점한다. 서버가 둘이어도 진 쪽은 그 계정을 건너뛰고, 다음 sweep 이 남은 것을 다시 본다. 발송이 실패하면
  * 그 알림만 잃는다. 승인함과 사이드바 배지는 그대로 보인다. 오케스트레이션 confirm 알림과 같은 계약이다.
  *
  * ── 왜 `notify_mention` 인가 ──────────────────────────────────────────────
@@ -90,6 +128,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
     @InjectRepository(MarketingSpendRequest) private readonly spendRepo: Repository<MarketingSpendRequest>,
     @InjectRepository(MarketingCycle) private readonly cycleRepo: Repository<MarketingCycle>,
     @InjectRepository(MarketingApprovalNotice) private readonly noticeRepo: Repository<MarketingApprovalNotice>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly dispatcher: UserChannelDispatcherService,
     private readonly accountAccess: AccountAccessService,
     private readonly instanceQuiesce: InstanceQuiesceService,
@@ -120,10 +159,12 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
     try {
       // 이관 직후의 도착지는 소스가 아직 살아 있다 — 둘이 같은 사람에게 같은 알림을 보내지 않게 한다.
       if (await this.instanceQuiesce.isQuiesced()) return out;
-      // 승인함과 같다: 보관된 캠페인은 세지 않는다.
-      const campaigns = await this.campaignRepo.find({ where: { status: Not('archived') }, select: ['id', 'account_id', 'name'] });
+      const campaigns = await this.campaignRepo.find({ select: ['id', 'account_id', 'name', 'status'] });
       if (!campaigns.length) return out;
-      const candidates = await this.candidates(campaigns.map((c) => c.id), now);
+      // 승인함과 같다: 보관된 캠페인은 세지 않는다. 결과 불명 결제만은 예외다 — 결제가 나가던 중에 보관될 수 있고, 돈이
+      // 나갔는지 모르는 채로 아무에게도 보이지 않으면 안 된다.
+      const open = campaigns.filter((c) => c.status !== 'archived').map((c) => c.id);
+      const candidates = await this.candidates(open, now);
       if (!candidates.length) return out;
       const running = new Set((await this.cycleRepo.find({
         where: { status: 'running', campaign_id: In([...new Set(candidates.map((c) => c.campaign_id))]) },
@@ -149,18 +190,18 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
 
   /**
    * 아직 알리지 않은 대기 항목. 채널 · 게시물 · 편성은 결정 없이 쌓일 수 있으니 이미 알린 행을 DB 에서 거른다
-   * (NOT EXISTS). 대기 중인 지출 요청은 72시간 만료와 일일 상한으로 적다. 그래서 다 읽고, 종류는 행마다 지금 상태로
-   * 정한다(새 요청 · 두 번째 승인 · 결과 불명).
+   * (NOT EXISTS). 대기 중인 지출 요청은 72시간 만료와 일일 상한으로, 결과 불명은 드물어서 적다. 그래서 다 읽고, 종류는
+   * 행마다 지금 상태로 정한다(새 요청 · 두 번째 승인 · 결과 불명). 결과 불명은 보관된 캠페인 것도 읽는다.
    */
-  private async candidates(campaignIds: string[], now: Date): Promise<ApprovalNoticeCandidate[]> {
+  private async candidates(openCampaignIds: string[], now: Date): Promise<ApprovalNoticeCandidate[]> {
     const unannounced = <T extends ObjectLiteral>(
       repo: Repository<T>,
       status: string,
       kind: 'allocation_proposed' | 'channel_proposed' | 'post_draft',
       columns: string[],
-    ): Promise<T[]> => repo.createQueryBuilder('t')
+    ): Promise<T[]> => (!openCampaignIds.length ? Promise.resolve([]) : repo.createQueryBuilder('t')
       .select(['t.id', 't.account_id', 't.campaign_id', 't.created_at', ...columns.map((c) => `t.${c}`)])
-      .where('t.campaign_id IN (:...campaignIds)', { campaignIds })
+      .where('t.campaign_id IN (:...campaignIds)', { campaignIds: openCampaignIds })
       .andWhere('t.status = :status', { status })
       // Postgres 의 id 는 uuid, entity_id 는 varchar 다. 암묵 변환이 없어 cast 하지 않으면 sweep 마다 던진다.
       .andWhere((qb) => `NOT EXISTS ${qb.subQuery()
@@ -170,14 +211,17 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
         .andWhere('n.kind = :kind')
         .getQuery()}`)
       .setParameter('kind', kind)
-      .getMany();
+      .getMany());
+
+    const spendWhere: FindOptionsWhere<MarketingSpendRequest>[] = [{ status: 'unknown' }];
+    if (openCampaignIds.length) spendWhere.push({ campaign_id: In(openCampaignIds), status: 'pending' });
 
     const [channels, posts, allocations, spends] = await Promise.all([
       unannounced(this.channelRepo, 'proposed', 'channel_proposed', ['platform', 'proposed_by_type', 'proposed_by_id']),
       unannounced(this.postRepo, 'draft', 'post_draft', ['created_by_type', 'created_by_id']),
       unannounced(this.allocationRepo, 'proposed', 'allocation_proposed', ['proposed_by_type', 'proposed_by_id']),
       this.spendRepo.find({
-        where: { campaign_id: In(campaignIds), status: In(['pending', 'unknown']) },
+        where: spendWhere,
         select: [
           'id', 'account_id', 'campaign_id', 'status', 'amount_minor', 'currency', 'payee', 'expires_at', 'approvals',
           'requested_by_type', 'requested_by_id', 'created_at', 'updated_at',
@@ -202,21 +246,25 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
   }
 
   /**
-   * 이 계정의 묶음을 선점한다. (대상, 종류) 행을 INSERT 한 번에 모두 넣는다. 다른 서버가 그중 하나라도 먼저 넣었으면
-   * 유일 인덱스가 문장 전체를 실패시키고, 이 서버는 그 계정을 건너뛴다. 실패는 진 것으로 본다. 이겼다고 추측하면 두 서버가
-   * 함께 보낸다.
+   * 이 계정의 묶음을 선점한다. (대상, 종류) 행을 한 트랜잭션에 모두 넣는다. 다른 서버가 그중 하나라도 먼저 넣었으면
+   * 유일 인덱스가 트랜잭션 전체를 되돌리고, 이 서버는 그 계정을 건너뛴다. 다음 sweep 은 남은 것만 다시 본다. 실패는 진
+   * 것으로 본다. 이겼다고 추측하면 두 서버가 함께 보낸다. 유일 인덱스가 아닌 실패는 다음 sweep 에도 되풀이될 수 있으니
+   * error 로 남긴다.
    */
   private async claim(accountId: string, items: ApprovalNoticeCandidate[]): Promise<boolean> {
+    const rows = items.map((i) => ({ account_id: accountId, campaign_id: i.campaign_id, kind: i.kind, entity_id: i.entity_id }));
     try {
-      await this.noticeRepo.insert(items.map((i) => ({
-        account_id: accountId,
-        campaign_id: i.campaign_id,
-        kind: i.kind,
-        entity_id: i.entity_id,
-      })));
+      await this.dataSource.transaction(async (manager) => {
+        const repo = manager.getRepository(MarketingApprovalNotice);
+        for (let i = 0; i < rows.length; i += CLAIM_CHUNK) await repo.insert(rows.slice(i, i + CLAIM_CHUNK));
+      });
       return true;
     } catch (e: any) {
-      this.logService.warn('Marketing', `approval notice claim lost for account ${accountId}: ${e?.message || e}`);
+      if (isUniqueConstraintError(e)) {
+        this.logService.info('Marketing', `approval notices for account ${accountId} were claimed by another sweep`);
+      } else {
+        this.logService.error('Marketing', `approval notice claim failed for account ${accountId}: ${e?.message || e}`);
+      }
       return false;
     }
   }
@@ -234,7 +282,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
   ): Promise<void> {
     const perUser = new Map<string, { user: ApprovalNoticeRecipient; items: ApprovalNoticeCandidate[] }>();
     for (const [accountId, list] of groupBy(items, (i) => i.account_id)) {
-      let users;
+      let users: User[];
       try {
         users = await this.accountAccess.usersWithAccess(accountId);
       } catch (e: any) {
@@ -255,7 +303,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
     await Promise.all([...perUser.values()].map(async ({ user, items: mine }) => {
       try {
         const payload = composeApprovalDigest(mine, campaigns, { now, baseUrl });
-        const result = await this.dispatcher.dispatchForUser(user.id, 'notify_mention', payload);
+        const result = await withTimeout(this.dispatcher.dispatchForUser(user.id, 'notify_mention', payload), SEND_TIMEOUT_MS);
         out.sent += result.sent;
         out.failed += result.failed;
       } catch (e: any) {
