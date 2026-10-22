@@ -12,10 +12,14 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  * 그때 서버가 공개 문구를 붙인 `final_body` 를 확정한다 — 승인한 글과 나가는 글이 갈리지 않는다(outreach
  * 퍼블리셔의 "본문 수정 후 claim" 사이 틈을 따르지 않는다). `(campaign_id, dedupe_key)` 로 같은 초안이 두 번
  * 쌓이지 않는다.
+ *
+ * reddit · GitHub outreach 채널에 게시된 글은 게시 후 14 일 동안 서버가 참여를 읽는다(`engagement*`,
+ * MarketingEngagementService — docs/marketing.md "참여 지표 자동 수집").
  */
 @Entity('marketing_posts')
 @Index(['campaign_id', 'status'])
 @Index(['channel_id', 'status'])
+@Index(['engagement_next_at'])
 @Index('uq_marketing_posts_dedupe', ['campaign_id', 'dedupe_key'], { unique: true, where: "dedupe_key <> ''" })
 export class MarketingPost {
   @PrimaryGeneratedColumn('uuid')
@@ -113,6 +117,25 @@ export class MarketingPost {
   /** 본문에 들어간 추적 링크 코드. */
   @Column({ type: 'simple-json', default: '[]' })
   link_codes: string[];
+
+  /**
+   * 마지막으로 읽은 참여 { engagements, replies, read_at } — reddit 은 score · 댓글 수, GitHub 은 반응 합계 · 댓글 수.
+   * 답글(댓글)인 글은 댓글 수가 없다. MarketingMetric 의 connector 행은 이 값의 변화량이라, 그 합이 곧 이 값이다.
+   */
+  @Column({ type: 'simple-json', default: '{}' })
+  engagement: { engagements?: number; replies?: number; read_at?: string };
+
+  /** 다음에 참여를 읽을 시각. null = 읽지 않는다(서버가 게시한 글이 아님 · 기간이 끝남 · 멈춤). */
+  @Column({ type: Date, nullable: true, default: null })
+  engagement_next_at: Date | null;
+
+  /** 수집기가 이 글을 맡을 때마다 오르는 CAS 카운터 — 서버가 둘이어도 한 번만 읽는다. 0 = 맡은 적 없음. */
+  @Column({ type: 'int', default: 0 })
+  engagement_rev: number;
+
+  /** 마지막 읽기가 실패했거나 수집을 멈춘 이유(사람에게 보인다). 읽으면 지운다. */
+  @Column({ type: 'text', default: '' })
+  engagement_error: string;
 
   @CreateDateColumn()
   created_at: Date;

@@ -6,8 +6,10 @@ import { MINOR_AMOUNT_TRANSFORMER } from '../common/marketing/money';
  *
  * 누적형(clicks · impressions · engagements · replies · signups · conversions · revenue_minor · views)은 기간 안의
  * 값을 더하고, 수준형(followers · subscribers)은 기간 안의 마지막 관측값을 쓴다(MARKETING_GAUGE_METRICS).
- * 추적 링크 클릭은 서버가 시간 버킷(`bucket_start`)마다 한 행에 더한다(source `link`). 그 밖은 에이전트 · 사람이
- * 관측한 값을 남긴다(source `agent` | `user`) — 누가 남겼는지가 같이 남는다.
+ * 추적 링크 클릭은 서버가 시간 버킷(`bucket_start`)마다 한 행에 더한다(source `link`). reddit · GitHub outreach 채널에
+ * 게시된 글의 engagements · replies 는 서버가 커넥터로 읽은 **변화량**이다(source `connector`, 합이 플랫폼의 현재 값 —
+ * common/marketing/engagement.ts). 그 밖은 에이전트 · 사람이 관측한 값을 남긴다(source `agent` | `user`) — 누가
+ * 남겼는지가 같이 남는다.
  */
 @Entity('marketing_metrics')
 @Index(['campaign_id', 'bucket_start'])
@@ -40,7 +42,7 @@ export class MarketingMetric {
   @Column({ type: 'bigint', transformer: MINOR_AMOUNT_TRANSFORMER })
   value: number;
 
-  /** link | agent | user */
+  /** link | connector | agent | user */
   @Column({ type: 'varchar' })
   source: string;
 

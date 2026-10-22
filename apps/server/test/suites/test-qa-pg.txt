@@ -14,6 +14,7 @@ test/marketing-consent-notice.test.mjs
 test/marketing-cycle.test.mjs
 test/marketing-email-events.test.mjs
 test/marketing-email.test.mjs
+test/marketing-engagement.test.mjs
 test/marketing-feedback.test.mjs
 test/marketing-spend.test.mjs
 test/qa-flows/activity-actor-sentinel-pg.test.mjs

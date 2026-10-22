@@ -60,6 +60,7 @@ import { MarketingEmailEventsService } from './marketing-email-events.service';
 import { MarketingEmailWebhooksController } from './marketing-email-webhooks.controller';
 import { MarketingConsentNoticeService } from './marketing-consent-notice.service';
 import { MarketingConsentNoticesController } from './marketing-consent-notices.controller';
+import { MarketingEngagementService } from './marketing-engagement.service';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -107,6 +108,7 @@ import { MarketingConsentNoticesController } from './marketing-consent-notices.c
     MarketingListHoldService,
     MarketingEmailEventsService,
     MarketingConsentNoticeService,
+    MarketingEngagementService,
     AuthGuard,
     PermissionGuard,
   ],
@@ -114,7 +116,7 @@ import { MarketingConsentNoticesController } from './marketing-consent-notices.c
     MarketingAuditService, MarketingCampaignService, MarketingChannelService, MarketingBudgetService,
     MarketingSpendService, MarketingPostService, MarketingAnalyticsService, MarketingFeedbackService,
     MarketingContactService, MarketingEmailService, MarketingAgentService, MarketingCycleService,
-    MarketingListHoldService, MarketingEmailEventsService, MarketingConsentNoticeService,
+    MarketingListHoldService, MarketingEmailEventsService, MarketingConsentNoticeService, MarketingEngagementService,
   ],
 })
 export class MarketingModule {}

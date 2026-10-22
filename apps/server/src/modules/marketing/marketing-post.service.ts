@@ -7,6 +7,7 @@ import { MarketingChannel } from '../../entities/MarketingChannel';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { SYSTEM_MARKETING_ACTOR, type MarketingActor } from '../../common/marketing/marketing-constants';
+import { engagementTracked, firstEngagementReadAt } from '../../common/marketing/engagement';
 import { resolveChannelConnector } from '../outreach/connector-resolver';
 import type { OutreachConnector } from '../outreach/connectors/types';
 import { MarketingAuditService } from './marketing-audit.service';
@@ -390,8 +391,14 @@ export class MarketingPostService {
       error = String(e?.message || e).slice(0, 2000);
     }
     if (result) {
+      const externalId = String(result.external_item_id || '').slice(0, 300);
+      const publishedAt = new Date();
       await this.postRepo.createQueryBuilder().update(MarketingPost)
-        .set({ status: 'published', external_item_id: String(result.external_item_id || '').slice(0, 300), permalink: String(result.permalink || '').slice(0, 1000), published_at: new Date(), error: '' })
+        .set({
+          status: 'published', external_item_id: externalId, permalink: String(result.permalink || '').slice(0, 1000), published_at: publishedAt, error: '',
+          // 참여 지표 자동 수집(MarketingEngagementService)의 첫 읽기.
+          engagement_next_at: externalId && engagementTracked(channel) ? firstEngagementReadAt(publishedAt) : null,
+        })
         .where('id = :id AND status = :s', { id: post.id, s: 'publishing' })
         .execute();
       await this.audit.record({

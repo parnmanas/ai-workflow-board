@@ -16,7 +16,7 @@ import { MarketingFeedbackService } from './marketing-feedback.service';
 import { MarketingEmailService } from './marketing-email.service';
 import { MarketingListHoldService } from './marketing-list-hold.service';
 import {
-  allocationToJson, campaignToJson, channelToJson, feedbackToJson, linkToJson, metricToJson, postToJson, spendToJson,
+  allocationToJson, campaignToJson, channelToJson, feedbackToJson, linkToJson, metricToJson, postEngagementToJson, postToJson, spendToJson,
 } from './marketing-json';
 import { hasCapability, resolveLimits } from './marketing-campaign.logic';
 import { marketingError } from './marketing-errors';
@@ -103,6 +103,7 @@ export class MarketingAgentService {
       recent_posts: posts.map((p) => ({
         id: p.id, channel_id: p.channel_id, kind: p.kind, status: p.status, title: p.title.slice(0, 200),
         permalink: p.permalink, error: p.error, decision_note: p.decision_note, created_at: p.created_at,
+        engagement: postEngagementToJson(p),
       })),
       rules: agentRules(campaign),
     };
