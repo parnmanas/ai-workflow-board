@@ -15,6 +15,7 @@ import { Ticket } from '../../entities/Ticket';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { MarketingCycle } from '../../entities/MarketingCycle';
+import { MarketingApprovalNotice } from '../../entities/MarketingApprovalNotice';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { OutreachChannel } from '../../entities/OutreachChannel';
@@ -50,6 +51,7 @@ import { MarketingCycleService } from './marketing-cycle.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { MarketingInboxService } from './marketing-inbox.service';
 import { MarketingInboxController } from './marketing-inbox.controller';
+import { MarketingApprovalNotifyService } from './marketing-approval-notify.service';
 
 /**
  * Marketing — 에이전트 기반 제품 마케팅 루프(docs/marketing.md). MCP 모듈이 이것을 import 해
@@ -62,7 +64,7 @@ import { MarketingInboxController } from './marketing-inbox.controller';
       MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
       MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
       MarketingContact, MarketingEmailSend, MarketingCycle, ChatRoom, ChatRoomParticipant,
-      Project, RuntimeHost, OutreachChannel, Credential,
+      Project, RuntimeHost, OutreachChannel, Credential, MarketingApprovalNotice,
     ]),
     SharedServicesModule,
     // 채널 승인이 새 OutreachChannel 을 OutreachChannelService 로 만든다(그쪽 검증을 그대로 탄다).
@@ -92,6 +94,7 @@ import { MarketingInboxController } from './marketing-inbox.controller';
     MarketingAgentService,
     MarketingCycleService,
     MarketingInboxService,
+    MarketingApprovalNotifyService,
     AuthGuard,
     PermissionGuard,
   ],

@@ -23,6 +23,20 @@ export class AccountAccessService {
     return [personal.id, ...owned.map(a => a.id).filter(id => id !== personal.id)];
   }
 
+  /**
+   * Inverse of `accessibleIds`: the active login users who can see this account's work. Today
+   * that is its owner. Organization membership must widen both directions here together, so
+   * anything that notifies "the people of an account" follows the same rule as access.
+   */
+  async usersWithAccess(accountId: string): Promise<User[]> {
+    const account = accountId
+      ? await this.dataSource.getRepository(Account).findOne({ where: { id: accountId }, select: ['id', 'owner_user_id'] })
+      : null;
+    if (!account?.owner_user_id) return [];
+    const owner = await this.dataSource.getRepository(User).findOneBy({ id: account.owner_user_id, status: 'active' });
+    return owner ? [owner] : [];
+  }
+
   async bindRequest(req: any): Promise<void> {
     if (req.accountAccessBound) return;
     const ids = await this.accessibleIds(req.currentUser);

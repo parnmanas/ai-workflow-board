@@ -7,6 +7,7 @@ test/account-ownership-migration.test.mjs
 test/agent-session-execution-ownership.test.mjs
 test/drop-agent-host-backfill.test.mjs
 test/marketing-analytics.test.mjs
+test/marketing-approval-notify.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
 test/marketing-cycle.test.mjs
