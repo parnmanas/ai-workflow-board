@@ -326,13 +326,14 @@ interface PayeeDraft {
   credential_id: string;
   /** 카드 공급자만 — 일회용 · 허용 업종(쉼표) · 카드당 최대(통화 단위 입력). */
   card_single_use: boolean;
+  card_id: string;
   card_categories: string;
   card_max: string;
   /** 통화를 바꿔 지운 카드당 최대 — 새 통화로 다시 적어야 저장한다(지운 채로 두면 한도가 사라진다). */
   card_max_reentry?: boolean;
 }
 
-const EMPTY_PAYEE: PayeeDraft = { name: '', ref: '', note: '', provider: '', credential_id: '', card_single_use: true, card_categories: '', card_max: '' };
+const EMPTY_PAYEE: PayeeDraft = { name: '', ref: '', note: '', provider: '', credential_id: '', card_single_use: true, card_id: '', card_categories: '', card_max: '' };
 
 /**
  * 연결 확인 — 직접 결제 수취인의 credential 과 대상(광고 캠페인)을 공급자에서 읽기만 한다. 돈은 움직이지 않는다.
@@ -391,6 +392,7 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
   const [payees, setPayees] = useState<PayeeDraft[]>(() => campaign.payees.map((p) => ({
     name: p.name, ref: p.ref || '', note: p.note || '', provider: isDirectPaymentProvider(p.provider) ? p.provider : '', credential_id: p.credential_id || '',
     card_single_use: p.card_single_use !== false,
+    card_id: p.card_id || '',
     card_categories: (p.card_categories || []).join(', '),
     card_max: typeof p.card_max_minor === 'number' ? minorToMajorInput(p.card_max_minor, campaign.currency) : '',
   })));
@@ -464,7 +466,9 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
           if (!parsedMax.ok) { setError(`수취인 "${name}" 카드당 최대: ${parsedMax.error}`); return; }
           cardMax = parsedMax.minor;
         }
-        cleaned.push({ ...route, card_single_use: p.card_single_use, card_categories: categories.categories, ...(cardMax !== null ? { card_max_minor: cardMax } : {}) });
+        const cardId = p.card_single_use ? '' : p.card_id.trim();
+        if (cardId && !/^ic_[A-Za-z0-9]+$/.test(cardId)) { setError(`수취인 "${name}": 카드 id 는 ic_… 형식입니다`); return; }
+        cleaned.push({ ...route, card_single_use: p.card_single_use, card_categories: categories.categories, ...(cardId ? { card_id: cardId } : {}), ...(cardMax !== null ? { card_max_minor: cardMax } : {}) });
         continue;
       }
       cleaned.push({ name, ...(p.ref.trim() ? { ref: p.ref.trim() } : {}), ...(p.note.trim() ? { note: p.note.trim() } : {}) });
@@ -565,10 +569,12 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
                           type="checkbox"
                           aria-label={`수취인 ${i + 1} 일회용 카드`}
                           checked={p.card_single_use}
-                          onChange={(e) => set({ card_single_use: e.target.checked })}
+                          onChange={(e) => set({ card_single_use: e.target.checked, ...(e.target.checked ? { card_id: '' } : {}) })}
                         />
                         일회용(첫 결제 뒤 해지)
                       </label>
+                      {!p.card_single_use && <Input aria-label={`수취인 ${i + 1} 재사용 카드 id`} placeholder="재사용 카드 id(선택, ic_… — 비우면 첫 승인 때 생성)" value={p.card_id}
+                        onChange={(e) => set({ card_id: e.target.value })} />}
                       <Input aria-label={`수취인 ${i + 1} 허용 업종`} placeholder="허용 업종(쉼표, 선택 — 예: advertising_services)" value={p.card_categories}
                         onChange={(e) => set({ card_categories: e.target.value })} />
                       <Input aria-label={`수취인 ${i + 1} 카드당 최대`} placeholder={p.card_max_reentry ? `카드당 최대 — 새 통화(${code || '?'})로 다시 적으세요` : `카드당 최대(선택, ${code || '통화'} — 예: 500)`} value={p.card_max} inputMode="decimal"
@@ -592,7 +598,7 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
           <Hint>
             직접 결제(Meta Ads · Google Ads) 수취인은 정해 둔 광고 캠페인 하나의 고정 상한만 올립니다 — Meta 는 캠페인 지출 한도(spend_cap),
             Google 은 공유하지 않는 캠페인 총예산. 처음 상한은 사람이 광고 화면에서 정하고, 일 예산 캠페인은 쓸 수 없습니다. 승인 금액 = 상한이 늘어나는 양입니다.
-            Stripe Issuing 수취인은 정해 둔 카드 소지자 아래에 승인 금액이 누적 한도인 가상 카드를 한 장씩 만들고, 사람이 Stripe 대시보드에서 그 카드로 결제합니다.
+            Stripe Issuing 은 일회용이면 승인마다 카드를 만들고, 재사용이면 수취인 카드 한 장의 누적 한도를 승인 금액만큼 올립니다. 카드 id 를 비우면 첫 승인 때 만들어 저장합니다. 해지·교체된 카드는 수취인의 카드 id 를 고치세요. 카드당 최대는 누적 한도의 최대입니다.
           </Hint>
         </div>
 

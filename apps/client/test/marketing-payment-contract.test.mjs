@@ -182,3 +182,14 @@ test('Stripe Issuing reads as a card: status, approval, reconcile, inspection, l
   assert.equal(cardControlsLabel({ ...payee, card_single_use: false, card_categories: [], card_max_minor: undefined }, 'USD'), '여러 번 쓰는 카드 · 업종 제한 없음');
   assert.equal(cardControlsLabel({ name: 'Meta', provider: 'meta_ads', ref: 'act_1/2' }, 'USD'), '');
 });
+
+
+test('reusable Stripe approvals and status describe a limit increase', () => {
+  const row = { provider: 'stripe_issuing', status: 'paid', payload: { plan: 'issue_card', card_id: 'ic_reuse', from_minor: 100, limit_minor: 200 } };
+  assert.equal(spendStatusViewFor(row).label, '한도 반영됨');
+  assert.equal(spendStatusViewFor({ ...row, status: 'executing' }).label, '한도 변경 중');
+  assert.match(spendApproveHint(row), /같은 Stripe 카드의 누적 한도/);
+  const hint = unknownReconcileHint({ ...row, currency: 'USD' });
+  assert.match(hint, /ic_reuse.*누적 한도/);
+  assert.doesNotMatch(hint, /해지/);
+});

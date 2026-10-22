@@ -44,6 +44,7 @@ import {
   isAutomaticPaymentProvider,
   isDirectPaymentProvider,
   isExclusiveTargetProvider,
+  isReusableCardPlan,
   payeeRoute,
   sameRoute,
   type CardPlan,
@@ -294,7 +295,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     };
     let saved: MarketingSpendRequest;
     try {
-      saved = await this.spendRepo.save(this.spendRepo.create({
+      const pending = this.spendRepo.create({
         account_id: campaign.account_id,
         ...fields,
         target_key: prepared ? prepared.targetKey : '',
@@ -309,7 +310,15 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         cycle_id: opts.cycleId || null,
         approvals: [],
         expires_at: new Date(now.getTime() + SPEND_REQUEST_TTL_MS),
-      }));
+      });
+      saved = direct === 'stripe_issuing' && payee.card_single_use === false
+        ? await this.dataSource.transaction(async (manager) => {
+          const fresh = await lockCampaign(manager, campaign.id);
+          const problem = this.routeProblem(fresh, pending);
+          if (problem) throw marketingError(409, problem);
+          return manager.getRepository(MarketingSpendRequest).save(pending);
+        })
+        : await this.spendRepo.save(pending);
     } catch (e) {
       if (dedupeKey) {
         const winner = await this.spendRepo.findOne({ where: { campaign_id: campaign.id, dedupe_key: dedupeKey } });
@@ -321,7 +330,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         const open = await this.openRequestForTarget(prepared.targetKey);
         if (open) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
         if (/unique|duplicate key|23505/i.test(String((e as any)?.message || '') + String((e as any)?.code || ''))) {
-          throw marketingError(409, 'another spend request for this ad campaign was opened at the same moment — check its state and try again');
+          throw marketingError(409, `another spend request for this ${direct === 'stripe_issuing' ? 'payment target' : 'ad campaign'} was opened at the same moment — check its state and try again`);
         }
       }
       throw e;
@@ -367,15 +376,17 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     const label = DIRECT_PAYMENT_PROVIDER_LABELS[provider];
     let targetKey: string;
     try {
-      targetKey = directTargetKey(provider, route.ref);
+      targetKey = this.payeeTargetKey(campaign, payee, provider, route.ref);
     } catch (e: any) {
       throw marketingError(400, `payee "${payee.name}": ${e?.message || e} — a person fixes the payee ref`);
     }
-    // 상한 공급자만 대상마다 열린 요청이 하나다(카드는 서로 영향이 없다). 같은 계정의 열린 요청은 공급자를 읽기 전에 바로 알린다.
+    // 상한 공급자와 재사용 카드는 대상마다 열린 요청이 하나다. 같은 계정의 열린 요청은 공급자를 읽기 전에 바로 알린다.
     // 다른 계정의 것은 이 credential 이 그 대상을 실제로 읽을 수 있음을(계획이 만들어짐을) 확인한 뒤에만, id · 상태 없이 알린다 —
     // 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게.
-    const exclusive = isExclusiveTargetProvider(provider);
-    const open = exclusive ? await this.openRequestForTarget(targetKey) : null;
+    const exclusive = isExclusiveTargetProvider(provider) || (provider === 'stripe_issuing' && payee.card_single_use === false);
+    const bootstrapKey = provider === 'stripe_issuing' && payee.card_single_use === false && payee.card_id
+      ? this.payeeTargetKey(campaign, { ...payee, card_id: undefined }, provider, route.ref) : '';
+    const open = exclusive ? (await this.openRequestForTarget(targetKey) || await this.openRequestForTarget(bootstrapKey)) : null;
     if (open && open.account_id === campaign.account_id) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
     const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, route.credential_id || '', campaign.account_id);
     DIRECT_PAYMENT_ADAPTERS[provider].checkCredential(fields);
@@ -439,17 +450,26 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     return { plan, targetKey: exclusive ? targetKey : '' };
   }
 
+  private payeeTargetKey(campaign: MarketingCampaign, payee: MarketingPayee, provider: DirectPaymentProvider, ref: string): string {
+    if (provider === 'stripe_issuing' && payee.card_single_use === false) {
+      // Before the first card exists, serialize issuance for this payee as well.
+      return payee.card_id ? `stripe_issuing:${payee.card_id}` : `stripe_issuing:payee:${campaign.id}:${encodeURIComponent(payee.name.toLowerCase())}`;
+    }
+    return directTargetKey(provider, ref);
+  }
+
   private async openRequestForTarget(targetKey: string): Promise<MarketingSpendRequest | null> {
-    // '' 는 manual · webhook · 카드 요청 모두의 기본값이다 — 대상이 아니다.
+    // '' 는 manual · webhook · 일회용 카드 요청의 기본값이다 — 대상이 아니다.
     if (!targetKey) return null;
     return this.spendRepo.findOne({ where: { target_key: targetKey, status: In(OPEN_TARGET_STATUSES) } });
   }
 
   private openTargetMessage(open: MarketingSpendRequest, accountId: string): string {
+    const target = open.provider === 'stripe_issuing' ? 'payment target' : 'ad campaign';
     if (open.account_id !== accountId) {
-      return 'this ad campaign already has an open spend request in another account — only one open request per ad campaign; wait until it is decided';
+      return `this ${target} already has an open spend request in another account — only one open request per ${target}; wait until it is decided`;
     }
-    return `another spend request for this target is still open (${open.status}, ${open.id}) — wait until it is decided or reconciled; only one open request per ad campaign`;
+    return `another spend request for this target is still open (${open.status}, ${open.id}) — wait until it is decided or reconciled; only one open request per ${target}`;
   }
 
   private adapterContext(): DirectAdapterContext {
@@ -913,11 +933,11 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       const provider = payee.provider;
       const base = { payee: payee.name, provider, ref: payee.ref || '', credential_id: payee.credential_id || '' };
       try {
-        const targetKey = directTargetKey(provider, payee.ref || '');
+        const targetKey = this.payeeTargetKey(campaign, payee, provider, payee.ref || '');
         const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, payee.credential_id || '', campaign.account_id);
         DIRECT_PAYMENT_ADAPTERS[provider].checkCredential(fields);
-        const report = await DIRECT_PAYMENT_ADAPTERS[provider].report({ ref: payee.ref || '', fields, fingerprint, currency: campaign.currency, ctx: this.adapterContext() });
-        const open = isExclusiveTargetProvider(provider) ? await this.openRequestForTarget(targetKey) : null;
+        const report = await DIRECT_PAYMENT_ADAPTERS[provider].report({ ref: payee.ref || '', fields, fingerprint, currency: campaign.currency, payee, ctx: this.adapterContext() });
+        const open = isExclusiveTargetProvider(provider) || (provider === 'stripe_issuing' && payee.card_single_use === false) ? await this.openRequestForTarget(targetKey) : null;
         if (report.ok) {
           for (const key of [...this.providerBackoff.keys()]) {
             if (key.startsWith(`${campaign.id}\u0000${targetKey}\u0000`)) this.providerBackoff.delete(key);
@@ -983,7 +1003,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         result: found.result, cards: found.cards, api_version: found.api_version, checked_at: checkedAt,
       };
     }
-    const ceiling = plan as CeilingPlan;
+    const ceiling = isReusableCardPlan(plan)
+      ? { from: String(plan.from_minor), to: String(plan.limit_minor), from_minor: plan.from_minor!, to_minor: plan.limit_minor }
+      : plan as CeilingPlan;
     return {
       kind: 'ceiling',
       spend_request_id: row.id,
@@ -1029,6 +1051,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       });
     } catch (e: any) {
       problem = String(e?.message || e).slice(0, 300);
+    }
+    if (isReusableCardPlan(row.payload as DirectPlan)) {
+      // This card already held earlier approvals. Its existence cannot establish whether THIS increment happened.
+      if (scan?.kind === 'ceiling' && scan.position === 'at_from' && scan.report.ok && confirmNoSpend) {
+        return { result: 'at_from', observed: scan.observed, confirmed_no_spend: true };
+      }
+      throw marketingError(409, 'a reusable card increase can be marked failed only after inspect shows the original limit and you confirm no spend for this increase; otherwise record paid or reconcile the card in Stripe');
     }
     if (scan && scan.kind === 'card') {
       if (scan.result === 'none') return { result: 'none' };
@@ -1199,6 +1228,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       .where('id = :id AND status = :s', { id: row.id, s: info.from })
       .execute();
     if (!won.affected) throw marketingError(409, 'spend request changed concurrently');
+    if (to === 'paid') await this.rememberIssuedCard(manager, row, info.provider_ref || '');
     const ledger = await loadLedger(manager, row.campaign_id);
     const totals = requestTotals(ledger, row.id);
     const held = totals.reserve - totals.release;
@@ -1221,6 +1251,19 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         ...(info.detail || {}),
       },
     }, manager);
+  }
+
+  /** Bind a first reusable issue in the same transaction as capture; never overwrite a person's replacement. */
+  private async rememberIssuedCard(manager: EntityManager, row: MarketingSpendRequest, cardId: string): Promise<void> {
+    const plan = row.payload as Partial<CardPlan>;
+    if (row.provider !== 'stripe_issuing' || plan.plan !== 'issue_card' || plan.single_use !== false || plan.card_id) return;
+    if (!/^ic_[A-Za-z0-9]+$/.test(cardId)) throw marketingError(409, 'record the Stripe card id (ic_…) to bind this reusable card to its payee');
+    const repo = manager.getRepository(MarketingCampaign);
+    const campaign = await repo.findOneByOrFail({ id: row.campaign_id });
+    if (this.routeProblem(campaign, row)) return;
+    const payee = findPayee(campaign, row.payee)!;
+    payee.card_id = cardId;
+    await repo.update({ id: campaign.id }, { payees: campaign.payees });
   }
 
   private async closePending(

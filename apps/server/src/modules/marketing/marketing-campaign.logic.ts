@@ -40,11 +40,12 @@ export interface MarketingPayee {
   provider?: DirectPaymentProvider;
   credential_id?: string;
   card_single_use?: boolean;
+  card_id?: string;
   card_categories?: string[];
   card_max_minor?: number;
 }
 
-const CARD_FIELDS = ['card_single_use', 'card_categories', 'card_max_minor'] as const;
+const CARD_FIELDS = ['card_id', 'card_single_use', 'card_categories', 'card_max_minor'] as const;
 
 export const MAX_PAYEES = 50;
 export const MAX_ALLOWED_DOMAINS = 50;
@@ -197,6 +198,14 @@ export function normalizePayees(value: unknown): MarketingPayee[] {
     if (entry.card_single_use !== undefined && entry.card_single_use !== null && typeof entry.card_single_use !== 'boolean') {
       throw marketingError(400, `payees[${i}].card_single_use must be true or false`);
     }
+    const cardId = text(entry.card_id, `payees[${i}].card_id`, 200);
+    if (cardId) {
+      if (!/^ic_[A-Za-z0-9]+$/.test(cardId)) throw marketingError(400, `payees[${i}].card_id must be a Stripe card id (ic_…)`);
+      if (entry.card_single_use !== false) throw marketingError(400, `payees[${i}].card_id requires card_single_use false`);
+      const target = `stripe_issuing:${cardId}`;
+      if (targets.has(target)) throw marketingError(400, `two payees point at the same stripe_issuing card ${cardId}`);
+      targets.add(target);
+    }
     let categories: string[];
     try {
       categories = normalizeCardCategories(entry.card_categories);
@@ -217,6 +226,7 @@ export function normalizePayees(value: unknown): MarketingPayee[] {
       name, ref, ...(note ? { note } : {}), provider, credential_id: credentialId,
       card_single_use: entry.card_single_use !== false,
       card_categories: categories,
+      ...(cardId ? { card_id: cardId } : {}),
       ...(max !== null ? { card_max_minor: max } : {}),
     };
   });

@@ -19,6 +19,7 @@ import {
   cleanProviderText,
   normalizeCardCategories,
   paymentApiVersion,
+  parseStripeCardId,
   providerMessage,
   providerToken,
   stripeCardAmount,
@@ -290,6 +291,86 @@ export function cardMismatches(card: any, plan: CardPlan, requestId: string, exp
   return out;
 }
 
+/** Read only; raw Stripe card objects stay inside the adapter and are never persisted. */
+export async function observeStripeCard(cardId: string, cred: StripeCredential, opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined> } = {}): Promise<any> {
+  const id = parseStripeCardId(cardId);
+  return stripeGet(`/v1/issuing/cards/${encodeURIComponent(id)}`, {}, `card ${id}`, cred, { fetchImpl: opts.fetchImpl, version: paymentApiVersion('stripe_issuing', opts.env) });
+}
+
+export function reusableCardProblems(card: any, plan: CardPlan, expectedLimit?: number): string[] {
+  const observed = readCard(card);
+  // Existing cards belong to earlier approvals (or were assigned by a human); metadata is not rewritten.
+  const problems = cardMismatches(card, { ...plan, limit_minor: expectedLimit ?? observed.limit_minor ?? -1 }, '', 'active', plan.card_id).filter((p) => p !== 'metadata');
+  if (card?.replaced_by) problems.push('replaced_by — update the payee card');
+  const limits = card?.spending_controls?.spending_limits;
+  const global = Array.isArray(limits) ? limits.filter((l: any) => l?.interval === 'all_time' && (!l.categories || Array.isArray(l.categories) && !l.categories.length)) : [];
+  if (global.length !== 1 || observed.limit_minor === null) problems.push('one finite all_time spending limit is required');
+  // We replace the limits array, so refuse unknown fields instead of silently dropping controls.
+  if (Array.isArray(limits) && limits.some((l: any) => !l || Object.keys(l).some((k) => !['amount', 'interval', 'categories'].includes(k))
+    || !Number.isSafeInteger(l.amount) || l.amount < 0 || typeof l.interval !== 'string'
+    || (l.categories != null && (!Array.isArray(l.categories) || l.categories.some((c: unknown) => typeof c !== 'string'))))) problems.push('unrecognized spending limit');
+  return problems;
+}
+
+export function buildReusableStripePlan(card: any, plan: CardPlan, payee: PayeeLike, amountMinor: number): CardPlan {
+  if (payee.card_single_use !== false) throw new PaymentRuleError('a reusable card requires single-use to be disabled');
+  const cardId = parseStripeCardId(payee.card_id || '');
+  const reusable = { ...plan, card_id: cardId };
+  const problems = reusableCardProblems(card, reusable);
+  if (problems.length) throw new PaymentRuleError(`the reusable card is unavailable: ${problems.join('; ')} — correct the payee card`);
+  const from = readCard(card).limit_minor!;
+  const to = from + amountMinor;
+  if (!Number.isSafeInteger(to)) throw new PaymentRuleError('the cumulative card limit is out of range', 400);
+  checkStripeAmount(to, plan.currency, payee);
+  return { ...reusable, from_minor: from, limit_minor: to };
+}
+
+export function reusableCardObservation(card: any, plan: CardPlan): { minor: number | null; status: string; problems: string[] } {
+  const view = readCard(card);
+  return { minor: view.limit_minor, status: view.status, problems: reusableCardProblems(card, plan) };
+}
+
+async function executeReusableStripePlan(plan: CardPlan, cred: StripeCredential, requestId: string, opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; startedAt?: Date; now?: () => Date }): Promise<PaymentOutcome> {
+  let card: any;
+  try { card = await observeStripeCard(plan.card_id!, cred, opts); }
+  catch (e: any) { throw new PaymentNotSentError(e?.message || String(e)); }
+  const problems = reusableCardProblems(card, plan, plan.from_minor);
+  if (problems.length) throw new PaymentNotSentError(`the reusable card changed since the request: ${problems.join('; ')} — correct the payee card or request a new approval`);
+  if (opts.startedAt && (opts.now ? opts.now() : new Date()).getTime() - opts.startedAt.getTime() > STRIPE_ACTIVATE_WITHIN_MS) throw new PaymentNotSentError('the card limit update execution stalled');
+  const version = paymentApiVersion('stripe_issuing', opts.env);
+  const form = new URLSearchParams();
+  card.spending_controls.spending_limits.forEach((limit: any, i: number) => {
+    const global = limit.interval === 'all_time' && (!limit.categories || !limit.categories.length);
+    form.set(`spending_controls[spending_limits][${i}][amount]`, String(global ? plan.limit_minor : limit.amount));
+    form.set(`spending_controls[spending_limits][${i}][interval]`, limit.interval);
+    (limit.categories || []).forEach((c: string, j: number) => form.set(`spending_controls[spending_limits][${i}][categories][${j}]`, c));
+  });
+  const result = await stripePost(`/v1/issuing/cards/${encodeURIComponent(plan.card_id!)}`, form, `awb-spend-${requestId}-raise-limit`, cred, { fetchImpl: opts.fetchImpl, version });
+  const base = { api_version: version, sent: true, step: 'raise_limit', card_id: plan.card_id, from_minor: plan.from_minor, limit_minor: plan.limit_minor, livemode: plan.livemode };
+  if (result.kind === 'transport') return { outcome: 'unknown', error: 'Stripe did not confirm the card limit update — inspect the card before recording the result', response: { ...base, network_error: true } };
+  const reply = result.reply;
+  if (reply.status !== 200) {
+    const err = stripeError(reply, cred);
+    return { outcome: isDefiniteStripeRefusal(reply.status, err) ? 'failed' : 'unknown', error: `Stripe card limit update returned ${err.text}`, response: { ...base, status: reply.status, message_untrusted: err.message } };
+  }
+  const mismatch = reusableCardProblems(reply.json, plan, plan.limit_minor);
+  const limitShape = (limits: any[], raise: boolean) => limits.map((l: any) => !l || (l.categories != null && !Array.isArray(l.categories)) ? '#invalid' : JSON.stringify({
+    amount: raise && l.interval === 'all_time' && (!l.categories || !l.categories.length) ? plan.limit_minor : l.amount,
+    interval: l.interval, categories: [...(l.categories || [])].sort(),
+  })).sort().join('|');
+  const returnedControls = reply.json?.spending_controls;
+  if (!Array.isArray(returnedControls?.spending_limits)
+    || limitShape(card.spending_controls.spending_limits, true) !== limitShape(returnedControls.spending_limits, false)) mismatch.push('other spending limits changed');
+  for (const field of ['allowed_merchant_countries', 'blocked_merchant_countries']) {
+    const before = card.spending_controls[field];
+    const after = returnedControls?.[field];
+    if ((before != null && !Array.isArray(before)) || (after != null && !Array.isArray(after))
+      || JSON.stringify([...(before || [])].sort()) !== JSON.stringify([...(after || [])].sort())) mismatch.push(field);
+  }
+  if (mismatch.length) return { outcome: 'unknown', error: `Stripe card limit update did not match the plan (${mismatch.join(', ')}) — inspect the existing card`, response: { ...base, mismatched: mismatch } };
+  return { outcome: 'paid', transaction_id: plan.card_id!, receipt_url: stripeDashboardCardUrl(plan.card_id!, plan.livemode), response: base };
+}
+
 export interface CardScan {
   /** found: 이 요청의 카드가 있다 · none: 범위를 다 봤고 없다 · incomplete: 범위를 다 보지 못했다(없음으로 읽지 않는다). */
   result: 'found' | 'none' | 'incomplete';
@@ -413,6 +494,8 @@ export async function executeStripePlan(
   if (holder.livemode !== plan.livemode) problems.push('the live/sandbox mode changed since the request');
   if (problems.length) throw new PaymentNotSentError(`the cardholder changed since the request: ${problems.join('; ')}`);
   if (tooLate()) throw new PaymentNotSentError(`${lateText} — no card is created for a stalled execution`);
+
+  if (plan.card_id) return executeReusableStripePlan(plan, cred, requestId, opts);
 
   const idem = `awb-spend-${requestId}`;
   const form = new URLSearchParams();

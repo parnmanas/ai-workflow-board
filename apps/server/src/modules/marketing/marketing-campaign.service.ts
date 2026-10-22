@@ -9,6 +9,7 @@ import { normalizeRuntimeSpec } from '../../common/runtime-spec';
 import { normalizeCurrency, parseMinorAmount, MarketingMoneyError } from '../../common/marketing/money';
 import { PAYMENT_PROVIDERS, type MarketingActor, type CampaignStatus } from '../../common/marketing/marketing-constants';
 import { MarketingAuditService } from './marketing-audit.service';
+import { lockCampaign } from './marketing-ledger';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 import { marketingError } from './marketing-errors';
 import { resolveDirectPaymentCredential, resolveMarketingSecret } from './marketing-credential';
@@ -138,19 +139,7 @@ export class MarketingCampaignService {
   }
 
   async update(id: string, accountId: string, body: CampaignInput, actor: MarketingActor): Promise<MarketingCampaign> {
-    const row = await this.get(id, accountId);
-    const before = snapshot(row);
-    await this.applyInput(row, body, { creating: false });
-    if (body.status !== undefined) {
-      // 상태도 같은 PATCH 로 받지만 전이 규칙은 setStatus 와 같다.
-      const status = normalizeStatus(body.status);
-      if (status !== row.status) return this.setStatus(id, accountId, status, actor, row, before);
-    }
-    if (row.status === 'active') row.next_cycle_at = this.cursorAfterEdit(row, before);
-    const saved = await this.campaignRepo.save(row);
-    await this.recordUpdate(saved, before, actor);
-    this.audit.notify(saved.account_id, saved.id, 'campaign', saved.id, 'updated');
-    return saved;
+    return this.mutate(id, accountId, body, actor);
   }
 
   async setStatus(
@@ -158,23 +147,39 @@ export class MarketingCampaignService {
     accountId: string,
     status: CampaignStatus,
     actor: MarketingActor,
-    preloaded?: MarketingCampaign,
-    preloadedBefore?: ReturnType<typeof snapshot>,
   ): Promise<MarketingCampaign> {
-    const row = preloaded || await this.get(id, accountId);
-    const before = preloadedBefore || snapshot(row);
-    const from = before.status as string;
-    assertTransition(from, status);
-    if (status === 'active') {
-      if (!row.agent_runtime) throw marketingError(409, 'set agent_runtime before activating the campaign');
-      if (row.capabilities.includes('feedback_to_product') && !row.project_id) {
-        throw marketingError(409, 'feedback_to_product needs project_id (the product the feedback improves)');
-      }
-    }
-    row.status = status;
-    row.next_cycle_at = status === 'active' ? computeNextCycleAt(row, new Date()) : null;
-    const saved = await this.campaignRepo.save(row);
+    return this.mutate(id, accountId, { status }, actor, true);
+  }
+
+  /** Serialize edits with first-card binding so a stale entity save cannot erase its card id. */
+  private async mutate(id: string, accountId: string, body: CampaignInput, actor: MarketingActor, forceStatus = false): Promise<MarketingCampaign> {
+    const { saved, before, status } = await this.dataSource.transaction(async (manager) => {
+      const row = await lockCampaign(manager, id);
+      if (!accountId || row.account_id !== accountId) throw marketingError(404, 'campaign not found');
+      const before = snapshot(row);
+      await this.applyInput(row, body, { creating: false });
+      const requested = body.status === undefined ? undefined : normalizeStatus(body.status);
+      const status = requested !== undefined && (forceStatus || requested !== row.status) ? requested : undefined;
+      if (status !== undefined) {
+        assertTransition(before.status, status);
+        if (status === 'active') {
+          if (!row.agent_runtime) throw marketingError(409, 'set agent_runtime before activating the campaign');
+          if (row.capabilities.includes('feedback_to_product') && !row.project_id) {
+            throw marketingError(409, 'feedback_to_product needs project_id (the product the feedback improves)');
+          }
+        }
+        row.status = status;
+        row.next_cycle_at = status === 'active' ? computeNextCycleAt(row, new Date()) : null;
+      } else if (row.status === 'active') row.next_cycle_at = this.cursorAfterEdit(row, before);
+      const saved = await manager.getRepository(MarketingCampaign).save(row);
+      return { saved, before, status };
+    });
+    const from = before.status;
     await this.recordUpdate(saved, before, actor);
+    if (status === undefined) {
+      this.audit.notify(saved.account_id, saved.id, 'campaign', saved.id, 'updated');
+      return saved;
+    }
     await this.audit.record({
       accountId: saved.account_id,
       campaignId: saved.id,

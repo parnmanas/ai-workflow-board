@@ -135,6 +135,7 @@ export class MarketingCampaign {
     provider?: 'meta_ads' | 'google_ads' | 'stripe_issuing';
     credential_id?: string;
     card_single_use?: boolean;
+    card_id?: string;
     card_categories?: string[];
     card_max_minor?: number;
   }>;

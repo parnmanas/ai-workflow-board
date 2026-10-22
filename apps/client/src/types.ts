@@ -3564,6 +3564,7 @@ export interface MarketingPayee {
   credential_id?: string;
   /** Stripe Issuing 수취인만: 첫 결제 뒤 자동 해지(서버 기본 true). */
   card_single_use?: boolean;
+  card_id?: string;
   /** Stripe Issuing 수취인만: 허용 업종(정렬) — 비면 업종 제한 없음. */
   card_categories?: string[];
   /** Stripe Issuing 수취인만: 카드 한 장의 최대 금액(최소 단위). */

@@ -492,3 +492,31 @@ test('예산 설정 — 통화를 바꾸면 카드당 최대도 비우고, 새 �
   assert.equal(patches[0].currency, 'EUR');
   assert.equal(patches[0].payees[0].card_max_minor, 45000);
 });
+
+
+test('재사용 Stripe 카드 — 기존 카드 id 를 고쳐 저장하고 잘못된 id 는 막는다', async (t) => {
+  const patches = [];
+  const stripePayee = { name: 'Recurring', ref: 'ich_9', provider: 'stripe_issuing', credential_id: 'cred-stripe', card_single_use: false, card_id: 'ic_old', card_categories: [] };
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      getMarketingCampaign: async () => campaign({ payees: [stripePayee] }),
+      updateMarketingCampaign: async (id, patch) => { patches.push(patch); return campaign({ ...patch }); },
+    },
+  });
+  click(buttonIn(container, '예산 설정…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const input = dialog.querySelector('input[aria-label="수취인 1 재사용 카드 id"]');
+  assert.equal(input.value, 'ic_old');
+  typeInto(input, 'ich_wrong');
+  click(buttonIn(dialog, '저장'));
+  await flush();
+  assert.equal(patches.length, 0);
+  assert.match(dialog.textContent, /카드 id 는 ic_… 형식/);
+  typeInto(input, 'ic_replacement');
+  click(buttonIn(dialog, '저장'));
+  await flush();
+  assert.equal(patches[0].payees[0].card_id, 'ic_replacement');
+  assert.equal(patches[0].payees[0].card_single_use, false);
+});

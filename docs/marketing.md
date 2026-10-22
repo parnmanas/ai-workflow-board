@@ -500,25 +500,30 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 **API 버전.** 코드에 고정한다(Meta `v26.0`, Google `v26`, Stripe `2026-09-30.endive`). 공급자가 버전을 닫으므로 `MARKETING_META_API_VERSION` · `MARKETING_GOOGLE_ADS_API_VERSION` · `MARKETING_STRIPE_API_VERSION` 으로 코드 수정 없이 올릴 수 있다. 형식이 틀린 값은 무시한다. Stripe 는 일회용 카드가 들어온 `2026-03-25.dahlia` 보다 오래된 버전과 `.preview` 채널도 무시한다(계정 기본 버전에 기대지 않고 매 요청에 `Stripe-Version` 을 싣는다). 버전은 계획(해시)에 넣지 않고, 실제로 쓴 버전을 응답 요약 · 연결 확인에 남긴다. 닫힌 버전은 Meta 오류 2635 등으로 거절된다(`failed`, 아무것도 바뀌지 않음).
 
-#### 카드 공급자(Stripe Issuing) — 승인 금액 한도의 가상 카드를 만든다
+#### 카드 공급자(Stripe Issuing) — 일회용 발급과 수취인별 재사용 카드
 
-승인되면 서버가 수취인의 카드 소지자(`ich_…`) 아래에 **가상 카드 한 장**을 만든다. 누적 한도(`spending_limits[].interval = all_time`)가 승인 금액이고, 사람이 Stripe 대시보드에서 카드 정보를 보고 그 카드로 결제한다. 미국 · 영국 · EEA 에 설립된 사업자만 쓸 수 있고(한국 법인 불가), 카드 통화는 지역에 따라 USD · EUR · GBP 하나다.
+일회용이면 승인마다 서버가 수취인의 카드 소지자(`ich_…`) 아래에 **가상 카드 한 장**을 만든다. 재사용이면 수취인에 지정한 카드(`ic_…`)의 누적 한도를 승인 금액만큼 올리고, 카드 id 가 없으면 첫 승인 때 만들어 수취인에 기록한다. 첫 발급의 누적 한도(`spending_limits[].interval = all_time`)는 승인 금액이고, 사람이 Stripe 대시보드에서 카드 정보를 보고 그 카드로 결제한다. 미국 · 영국 · EEA 에 설립된 사업자만 쓸 수 있고(한국 법인 불가), 카드 통화는 지역에 따라 USD · EUR · GBP 하나다.
 
-- `paid` 는 "카드가 발급됐다" 다. 원장은 승인 금액 전체를 사용으로 센다(보수적). 화면은 "카드 발급됨" 과 대시보드 링크(`https://dashboard.stripe.com/[test/]issuing/cards/<id>`)를 보여 준다.
+- `paid` 는 첫 발급이면 "카드가 발급됐다", 재사용이면 "한도가 반영됐다" 다. 원장은 승인 금액 전체를 사용으로 센다(보수적). 화면은 "카드 발급됨" 또는 "한도 반영됨" 과 대시보드 링크(`https://dashboard.stripe.com/[test/]issuing/cards/<id>`)를 보여 준다.
 - **카드 번호 · CVC 는 AWB 가 가져오지 않는다**(`expand[]=number` 를 쓰지 않는다 — PCI). Stripe 응답에 박혀 오는 카드 소지자(이름 · 주소 · 연락처)는 id 말고 읽지 않는다 — 계획 · 응답 요약 · 감사 · MCP 어디에도 없다. 카드 소지자 이름은 사람만 보는 연결 확인에만 `target_name_untrusted` 로 보인다.
 
 **수취인 카드 통제(돈 설정, `approve_spend`).** Stripe 수취인에만 둔다. `card_single_use` · `card_categories` 는 요청의 계획(해시)에 들어가고, 승인 · 실행 때 수취인의 지금 값과 다르면 실행하지 않는다. `card_max_minor` 는 계획에 넣지 않는다 — 승인 · 실행 때 계획의 한도가 수취인의 지금 최대를 넘으면 실행하지 않는다(둘 다 `directPayeeProblem`). 예산 설정에서 캠페인 통화를 바꾸면 화면이 카드당 최대도 비우고 새 통화로 다시 적어야 저장한다(지운 채로 두면 최대가 사라지므로).
 
 | 필드 | 뜻 |
 | --- | --- |
-| `card_single_use` | 첫 결제 뒤 자동 해지(`lifecycle_controls[cancel_after][payment_count] = 1`). 기본 켬. 여러 번 청구하는 곳(광고 플랫폼 등)에는 끈다 — 누적 한도는 그대로다 |
+| `card_single_use` | 첫 결제 뒤 자동 해지(`lifecycle_controls[cancel_after][payment_count] = 1`). 기본 켬. 여러 번 청구하는 곳(광고 플랫폼 · SaaS 등)에는 끈다 — 같은 카드의 누적 한도를 승인마다 올린다 |
+| `card_id` | 재사용 카드 id(`ic_…`). Stripe · `card_single_use=false` 에서만 지정한다. 비우면 첫 승인 때 생성해 저장한다. 해지·교체된 카드는 사람이 이 값을 고친다 |
 | `card_categories` | 허용 업종(Stripe merchant category 이름, 소문자 · 정렬 · 20개까지). 비면 업종 제한 없음. 틀린 이름은 Stripe 가 카드를 만들 때 거절한다(아무것도 만들어지지 않는다) |
-| `card_max_minor` | 카드 한 장의 최대 금액. 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 500 을 권한다 |
+| `card_max_minor` | 카드 한 장의 누적 한도 최대(재사용은 현재 한도 + 이번 승인 금액). 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 500 을 권한다 |
 
 **요청.**
 - 금액은 Stripe 를 부르기 전에 본다: 통화가 카드 통화가 아니면 409(사람이 캠페인 통화를 고친다), 일회용 카드는 승인 한 건의 고정 상한(10,000.00) 이하, 수취인의 카드당 최대 이하(400 — 쓰지 못할 예산이 묶이지 않게).
 - 카드 소지자를 읽어 본다(쓰기 없음): `status = active`, `requirements.disabled_reason` 없음, `past_due` 없음, 키의 모드(운영 · 샌드박스)와 카드 소지자의 `livemode` 가 같음.
 - 계획: `{ plan: 'issue_card', target: { cardholder }, currency, limit_minor = 금액, interval: 'all_time', single_use, allowed_categories, livemode, credential_fingerprint }`. `plan_text` 예: "Stripe Issuing 카드 소지자 ich_… 에게 누적 한도 300.00 USD 의 일회용(첫 결제 뒤 자동 해지) 가상 카드를 발급합니다(허용 업종: advertising_services)." 샌드박스면 "[샌드박스 카드 …]" 가 붙는다 — 샌드박스 카드도 캠페인 예산은 쓴다.
+
+**재사용 카드의 한도 증가.** 기존 카드가 있으면 요청 때 현재 `all_time` 한도를 읽어 `from → to`(현재 한도 → 현재 한도 + 승인 금액)를 계획한다. 실행 직전 다시 읽어 카드 소지자 · 통화 · 모드 · 업종 · 상태와 한도를 대조하고, 현재 한도가 `from` 일 때만 `to` 로 수정한다. 수정 요청은 요청별 고정 멱등 키를 쓴다. 해지된 카드나 교체가 필요한 카드는 자동으로 다른 카드를 만들지 않고 수취인을 고치게 한다. 응답이 모호하면 `unknown` 으로 남긴다.
+
+`stripe_issuing:<card id>` 를 `target_key` 로 잡아 같은 카드에는 열린 요청을 하나만 허용한다. 첫 발급도 `stripe_issuing:payee:<campaign id>:<정규화한 수취인 이름>` 으로 해당 수취인의 열린 요청을 배타 처리한다. `paid` 는 이번 승인 금액만큼 한도가 반영됐다는 뜻이며 원장은 그 승인 금액 전체를 사용으로 센다. 미사용 한도를 낮춰 환불하는 기능은 별도 후속 범위다. 재사용 한도 증가의 결과 불명은 기존 카드를 자동 해지하지 않는다. 실패 기록은 공급자에서 한도가 아직 `from` 인지 확인하고 사람이 `confirm_no_spend` 를 함께 보내야 한다. 아래 생성·활성화와 카드 검색 절차는 일회용 및 재사용 카드의 첫 발급에 적용된다.
 
 **실행 — 2단계 발급.**
 1. 카드 소지자를 다시 본다. 막혔거나 모드가 바뀌었으면 보내지 않고 `failed` 다.
@@ -771,7 +776,6 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 ## 후속 (이 문서 범위 밖)
 
 - 직접 결제의 미사용분 반납: 상한 공급자는 서버가 상한을 낮추고(CAS) 그만큼 환불을 기록, 카드는 해지한 카드의 거래를 읽어 쓴 돈만큼만 남기고 환불, 플랫폼 지출 보고서로 대조
-- 반복 청구처용 재사용 카드: 수취인마다 카드 한 장을 두고 승인마다 그 누적 한도를 올린다(상한 공급자처럼 compare-and-set)
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
 - Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다

@@ -121,6 +121,7 @@ test/marketing-engagement.test.mjs
 test/marketing-feedback.test.mjs
 test/marketing-logic.test.mjs
 test/marketing-payment-logic.test.mjs
+test/marketing-stripe-reusable-adapter.test.mjs
 test/marketing-posts.test.mjs
 test/marketing-spend-direct.test.mjs
 test/marketing-spend-stripe.test.mjs

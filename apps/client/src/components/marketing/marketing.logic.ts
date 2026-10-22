@@ -480,6 +480,7 @@ export function parseCardCategories(input: string): { categories: string[]; prob
 export function cardControlsLabel(payee: MarketingPayee, currency: string): string {
   if (!isDirectPaymentProvider(payee.provider) || DIRECT_PROVIDER_SPECS[payee.provider].kind !== 'card') return '';
   const parts = [payee.card_single_use === false ? '여러 번 쓰는 카드' : '일회용'];
+  if (payee.card_id) parts.push(payee.card_id);
   parts.push(payee.card_categories?.length ? `업종 ${payee.card_categories.join(', ')}` : '업종 제한 없음');
   if (typeof payee.card_max_minor === 'number') parts.push(`카드당 최대 ${formatMinor(payee.card_max_minor, currency)}`);
   return parts.join(' · ');
@@ -514,9 +515,9 @@ export function payeeRouteLabel(payee: MarketingPayee): string {
 }
 
 /** 지출 카드의 상태 표시 — 직접 공급자의 paid 는 돈이 나간 것이 아니라 "한도가 올라갔다" · "카드가 발급됐다" 이다. */
-export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' | 'provider'>): StatusView {
+export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' | 'provider'> & Partial<Pick<MarketingSpendRequest, 'payload'>>): StatusView {
   if (isDirectPaymentProvider(spend.provider)) {
-    const card = DIRECT_PROVIDER_SPECS[spend.provider].kind === 'card';
+    const card = DIRECT_PROVIDER_SPECS[spend.provider].kind === 'card' && !spend.payload?.card_id;
     if (spend.status === 'paid') return { label: card ? '카드 발급됨' : '한도 반영됨', tone: 'done' };
     if (spend.status === 'executing') return { label: card ? '카드 발급 중' : '한도 변경 중', tone: 'live' };
   }
@@ -524,7 +525,7 @@ export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' |
 }
 
 /** 승인 확인 창의 안내 — 이 결제 경로에서 승인하면 무엇이 일어나는가. */
-export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'>): string {
+export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'> & Partial<Pick<MarketingSpendRequest, 'payload'>>): string {
   if (spend.provider === 'meta_ads') {
     return '승인하면 서버가 곧바로 Meta 광고 캠페인의 지출 한도(spend_cap)를 위 계획대로 바꿉니다. 그 사이 한도가 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
   }
@@ -532,6 +533,7 @@ export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'>)
     return '승인하면 서버가 곧바로 Google Ads 캠페인의 총예산을 위 계획대로 바꿉니다. 그 사이 예산이 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
   }
   if (spend.provider === 'stripe_issuing') {
+    if (spend.payload?.card_id) return '승인하면 같은 Stripe 카드의 누적 한도를 위 계획대로 올립니다. 실행 직전 한도가 달라졌으면 보내지 않습니다. 결과가 불분명하면 결과 불명으로 남습니다. 승인 금액 전체를 사용으로 셉니다.';
     return '승인하면 서버가 곧바로 위 계획대로 Stripe Issuing 가상 카드를 만듭니다(비활성으로 만들어 계획과 대조한 뒤 활성화). 카드 번호는 Stripe 대시보드에서 봅니다. 자동 재시도는 없습니다. 이 금액은 사용으로 셉니다.';
   }
   if (spend.provider === 'webhook') return '승인하면 서버가 곧바로 결제 엔드포인트로 이 내용을 보냅니다. 자동 재시도는 없습니다.';
@@ -577,6 +579,7 @@ export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provide
     return `Google Ads 에서 캠페인 ${campaignId} 의 총예산이 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 변경 기록은 몇 분 늦게 보이고, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
   }
   if (spend.provider === 'stripe_issuing') {
+    if (plan.card_id) return `"공급자에서 확인" 으로 카드 ${plan.card_id} 의 누적 한도가 ${money(plan.limit_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 목표 한도가 반영됐으면 그 카드 id 로 결제 완료를 기록하세요. ${failAfter} 이전 한도가 확인되고 이번 증액으로 쓴 돈이 없음을 확인한 경우에만 실패로 기록할 수 있습니다.`;
     return `"공급자에서 확인" 이 카드 소지자 ${plan.target?.cardholder || ''} 의 카드 중 이 요청의 카드를 찾습니다(Stripe 대시보드 Issuing → Cards 의 metadata awb_spend_request_id). 활성(active) 카드면 그 카드 id 로 결제 완료를 기록하세요. 비활성(inactive) 카드는 AWB 가 활성화하지 않은 카드입니다 — 쓰지 않으면 대시보드에서 해지한 뒤 실패로, 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록합니다. 카드가 없으면 ${failAfter} 실패로 기록할 수 있습니다. 해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다.`;
   }
   return '결제 시스템에서 실제 결제 여부를 확인하세요.';

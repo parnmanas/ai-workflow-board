@@ -532,6 +532,12 @@ test('Stripe Issuing: a card provider, not exclusive; the payee ref is a cardhol
   refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_categories: ['Advertising Services'] }], /not a Stripe merchant category name/);
   refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_max_minor: -5 }], /card_max_minor/);
   refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'act_1/2' }], /cardholder id/);
+  const reusable = { name: 'Recurring', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_single_use: false, card_id: ' ic_reuse1 ' };
+  assert.equal(normalizePayees([reusable])[0].card_id, 'ic_reuse1');
+  refuse([{ ...reusable, card_id: 'ich_wrong' }], /card_id must be a Stripe card id/);
+  refuse([{ ...reusable, card_single_use: true }], /card_id requires card_single_use false/);
+  refuse([{ ...reusable, provider: 'meta_ads', ref: 'act_1\/2' }], /card_id is only for a card provider/);
+  refuse([reusable, { ...reusable, name: 'Second' }], /same stripe_issuing card/);
   assert.throws(() => normalizeCardCategories(Array.from({ length: 21 }, (_, i) => `cat_${i}`)), /at most 20/);
 });
 

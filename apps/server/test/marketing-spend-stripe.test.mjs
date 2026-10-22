@@ -157,6 +157,7 @@ function fakeStripe() {
       if (!card) return stripeError(404, 'invalid_request_error', 'resource_missing', 'No such card');
       const f = parseForm(entry.body);
       if (f.status) card.status = f.status;
+      if (f.spending_limits.length) card.spending_controls.spending_limits = f.spending_limits;
       reply = { status: 200, body: cardJson(card) };
     } else {
       return stripeError(404, 'invalid_request_error', 'unknown', 'Unrecognized request URL');
@@ -724,4 +725,65 @@ test('Stripe Issuing executor: a stalled execution never activates a card, and a
   for (const body of [{}, { data: [] }, { object: 'list', data: 'x', has_more: false }, { object: 'list', data: [] }]) {
     await assert.rejects(scan(body), (e) => e.name === 'PaymentReadError' && /not a card list/.test(e.message), JSON.stringify(body));
   }
+});
+
+
+test('Stripe reusable payee: first card binds, later approvals raise its limit exclusively and capture only the increment', async (t) => {
+  const ctx = await setup(t);
+  const cred = await ctx.makeCred('reusable-stripe', 'stripe_issuing', { secret_key: STRIPE_KEY });
+  const payee = { name: 'Recurring', provider: 'stripe_issuing', credential_id: cred.id, ref: 'ich_sandbox1', card_single_use: false };
+  const { campaign, ask, approve } = await stripeCampaign(ctx, [payee]);
+  const first = await ask({ amount_minor: 10000, payee: payee.name });
+  await assert.rejects(ask({ amount_minor: 2000, payee: payee.name }), /spend request.*open/);
+  assert.equal((await approve(first)).body.status, 'paid');
+  const card = ctx.fake.state.cards.at(-1);
+  const stored = await ctx.ds.getRepository('MarketingCampaign').findOneBy({ id: campaign.id });
+  assert.equal(stored.payees[0].card_id, card.id);
+  const second = await ask({ amount_minor: 2500, payee: payee.name });
+  assert.equal((await ctx.ds.getRepository('MarketingSpendRequest').findOneBy({ id: second.id })).target_key, `stripe_issuing:${card.id}`);
+  assert.equal(second.payload.card_id, card.id);
+  assert.equal(second.payload.from_minor, 10000);
+  assert.equal(second.payload.limit_minor, 12500);
+  await assert.rejects(ask({ amount_minor: 1000, payee: payee.name }), /spend request.*open/);
+  assert.equal((await approve(second)).body.status, 'paid');
+  assert.equal(ctx.fake.state.cards.length, 1);
+  assert.equal(card.spending_controls.spending_limits[0].amount, 12500);
+  const entries = await ctx.ds.getRepository('MarketingLedgerEntry').find({ where: { campaign_id: campaign.id, kind: 'capture' } });
+  assert.deepEqual(entries.map(e => e.amount_minor).sort((a,b) => a-b), [2500, 10000]);
+  const inspection = await ctx.post(`/spend-requests/${second.id}/inspect`);
+  assert.equal(inspection.body.position, 'at_target', inspection.text);
+  assert.equal(inspection.body.from_minor, 10000);
+  assert.equal(inspection.body.to_minor, 12500);
+
+  const third = await ask({ amount_minor: 500, payee: payee.name });
+  ctx.fake.state.overrides.push({ match: e => e.method === 'POST' && e.path === `/v1/issuing/cards/${card.id}`, reply: 'timeout' });
+  assert.equal((await approve(third)).body.status, 'unknown');
+  await pastFailGrace(ctx, third.id);
+  assert.equal((await ctx.post(`/spend-requests/${third.id}/mark-failed`, { note: 'checked' })).status, 409);
+  assert.equal((await ctx.post(`/spend-requests/${third.id}/mark-failed`, { note: 'original limit remains', confirm_no_spend: true })).body.status, 'failed');
+  assert.equal(card.status, 'active');
+
+  const fourth = await ask({ amount_minor: 500, payee: payee.name });
+  ctx.fake.state.overrides.push({ match: e => e.method === 'POST' && e.path === `/v1/issuing/cards/${card.id}`, reply: () => {
+    card.spending_controls.spending_limits[0].amount = 13000;
+    throw new Error('lost response');
+  } });
+  assert.equal((await approve(fourth)).body.status, 'unknown');
+  await pastFailGrace(ctx, fourth.id);
+  assert.equal((await ctx.post(`/spend-requests/${fourth.id}/mark-failed`, { note: 'checked', confirm_no_spend: true })).status, 409);
+  const marked = await ctx.post(`/spend-requests/${fourth.id}/mark-paid`, { provider_ref: card.id, note: 'confirmed increase' });
+  assert.equal(marked.body.status, 'paid', marked.text);
+
+  // A human may pin the same card in another campaign; the card lock crosses campaign boundaries.
+  const other = await stripeCampaign(ctx, [{ ...payee, card_id: card.id }]);
+  const held = await ask({ amount_minor: 500, payee: payee.name });
+  await assert.rejects(other.ask({ amount_minor: 500, payee: payee.name }), /spend request.*open/);
+  await ctx.post(`/spend-requests/${held.id}/deny`, { note: 'test finished' });
+  const assigned = await other.ask({ amount_minor: 100, payee: payee.name });
+  assert.equal(assigned.payload.from_minor, 13000);
+  assert.equal((await other.approve(assigned)).body.status, 'paid');
+
+  // Editing unrelated campaign settings cannot erase the card bound by the first payment.
+  await ctx.patch(`/campaigns/${campaign.id}`, { goal: 'repeat billing' });
+  assert.equal((await ctx.ds.getRepository('MarketingCampaign').findOneBy({ id: campaign.id })).payees[0].card_id, card.id);
 });

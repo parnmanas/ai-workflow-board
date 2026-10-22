@@ -6,7 +6,7 @@
  *     승인 금액 = 상한이 늘어나는 양. 요청 때 대상을 읽어 계획(`from` → `to`)을 만들고, 실행은 compare-and-set 이다(그때도 `from`
  *     이면 `to` — 절대값이라 다시 써도 같다). 같은 상한을 두 요청이 올리면 서로의 from 을 덮으므로 대상마다 열린 요청은 하나다.
  *   - 카드(card) — Stripe Issuing: 승인 금액이 누적 한도인 가상 카드를 한 장 만든다(비활성으로 만들고 대조한 뒤 활성화). 사람이
- *     그 카드로 결제한다. 카드끼리는 서로 영향이 없어 열린 요청 규칙이 없다.
+ *     그 카드로 결제한다. 재사용 카드는 기존 all_time 한도를 from → to 로 올리며 카드 id 마다 열린 요청 하나만 허용한다.
  * 둘 다 결제 경로는 수취인마다 정하고(사람만 고친다), 서버가 만든 계획이 payload(해시 대상)다.
  * 이 파일은 네트워크 없이 정할 수 있는 것만 둔다: 공급자 명세, 대상 ref, 통화 단위, 계획 검증 · 문장, 카드 통제, 키 규칙, 문자열 정리.
  */
@@ -147,6 +147,12 @@ export function parseStripeRef(raw: string): StripeTarget {
   return { cardholder: m[1] };
 }
 
+export function parseStripeCardId(raw: string): string {
+  const id = String(raw || '').trim();
+  if (!/^ic_[A-Za-z0-9]{1,250}$/.test(id)) throw new PaymentRuleError('Stripe card id must start with ic_', 400);
+  return id;
+}
+
 export function parseDirectRef(provider: DirectPaymentProvider, raw: string): DirectTarget {
   switch (provider) {
     case 'meta_ads': return parseMetaRef(raw);
@@ -176,7 +182,7 @@ export function canonicalDirectRef(provider: DirectPaymentProvider, raw: string)
 
 /**
  * 대상 키(`<공급자>:<정규 ref>`) — 요청 백오프의 키이고, 배타적인 공급자(상한)에서는 열린 요청을 대상마다 하나로 묶는 DB 키다
- * (캠페인 · 계정을 넘어서도 — 같은 광고 캠페인을 두 곳에서 올리면 서로의 from 을 덮는다). 카드 공급자는 DB 에 남기지 않는다.
+ * (캠페인 · 계정을 넘어서도 — 같은 광고 캠페인을 두 곳에서 올리면 서로의 from 을 덮는다). 재사용 카드의 배타 키는 서비스가 카드 id 로 만든다.
  */
 export function directTargetKey(provider: DirectPaymentProvider, raw: string): string {
   return `${provider}:${canonicalDirectRef(provider, raw)}`;
@@ -198,6 +204,8 @@ export interface PayeeLike {
   credential_id?: string;
   /** 카드 공급자(Stripe Issuing)만: 첫 결제 뒤 자동 해지(기본 true). */
   card_single_use?: boolean;
+  /** 반복 청구용 카드. 지정하면 새로 발급하지 않고 누적 한도를 올린다. */
+  card_id?: string;
   /** 카드 공급자만: 허용 업종(Stripe merchant category 이름) — 비면 업종 제한 없음. */
   card_categories?: string[];
   /** 카드 공급자만: 카드 한 장의 최대 금액(최소 단위) — 카드 프로그램 한도(예: Standard 카드당 하루 500 USD)에 맞춘다. */
@@ -501,7 +509,10 @@ export interface CardPlan {
   provider: 'stripe_issuing';
   target: { cardholder: string };
   currency: string;
-  /** 누적 한도(최소 단위) = 승인 금액. */
+  /** 재사용 카드 id 와 승인 전 누적 한도. 없으면 신규 발급. */
+  card_id?: string;
+  from_minor?: number;
+  /** 승인 후 누적 한도(최소 단위). 신규 발급이면 승인 금액. */
   limit_minor: number;
   interval: 'all_time';
   /** 첫 결제 뒤 자동 해지(lifecycle_controls.cancel_after.payment_count = 1). */
@@ -515,6 +526,10 @@ export interface CardPlan {
 }
 
 export type DirectPlan = CeilingPlan | CardPlan;
+
+export function isReusableCardPlan(plan: unknown): plan is CardPlan & { card_id: string; from_minor: number } {
+  return !!plan && typeof plan === 'object' && (plan as CardPlan).plan === 'issue_card' && typeof (plan as CardPlan).card_id === 'string';
+}
 
 export function buildCardPlan(input: {
   target: StripeTarget;
@@ -592,9 +607,14 @@ function cardPlanProblems(row: PlanRow, provider: CardPlan['provider']): string[
   let target: StripeTarget | null = null;
   try { target = parseStripeRef(row.payee_ref); } catch (e: any) { out.push(e.message); }
   if (target && plan.target?.cardholder !== target.cardholder) out.push('plan cardholder does not match the payee ref');
-  if (!Number.isSafeInteger(plan.limit_minor) || Number(plan.limit_minor) <= 0 || plan.limit_minor !== Number(row.amount_minor)) {
+  if (!Number.isSafeInteger(plan.limit_minor) || Number(plan.limit_minor) <= 0 || Number(plan.limit_minor) - Number(plan.from_minor ?? 0) !== Number(row.amount_minor)) {
     out.push('plan card limit does not equal the requested amount');
   }
+  if (plan.card_id !== undefined) {
+    try { if (parseStripeCardId(plan.card_id) !== plan.card_id) out.push('plan card id is not canonical'); } catch { out.push('plan card id is invalid'); }
+    if (plan.single_use !== false) out.push('a reusable card cannot be single-use');
+    if (!Number.isSafeInteger(plan.from_minor) || Number(plan.from_minor) < 0) out.push('plan prior card limit is invalid');
+  } else if (plan.from_minor !== undefined) out.push('plan prior limit requires a card id');
   if (plan.interval !== 'all_time') out.push('plan card limit must be all_time');
   if (typeof plan.single_use !== 'boolean') out.push('plan does not say whether the card is single-use');
   else if (plan.single_use && Number(plan.limit_minor) > STRIPE_SINGLE_USE_MAX_MINOR) out.push('a single-use card cannot carry more than one authorization allows');
@@ -637,6 +657,7 @@ export function directPayeeProblem(row: { provider: string; payload: unknown }, 
   if (!isDirectPaymentProvider(row.provider) || DIRECT_PROVIDER_SPECS[row.provider].kind !== 'card') return null;
   const plan = row.payload as Partial<CardPlan> | null;
   if (!plan || plan.plan !== 'issue_card') return null;
+  if ((plan.card_id || '') !== (payee.card_id || '')) return 'the payee card changed since this request — ask for a new request';
   const singleUse = payee.card_single_use !== false;
   let categories: string[];
   try { categories = normalizeCardCategories(payee.card_categories); } catch { return 'the payee\'s card categories are invalid'; }
@@ -682,6 +703,7 @@ export function describeDirectPlan(row: { provider: string; currency: string; pa
         ? `허용 업종: ${plan.allowed_categories.join(', ')}`
         : '업종 제한 없음';
       const mode = plan.livemode === false ? ' [샌드박스 카드 — 실제 돈은 나가지 않지만 이 예산은 사용으로 셉니다]' : '';
+      if (plan.card_id && Number.isSafeInteger(plan.from_minor)) return `Stripe Issuing 카드 ${plan.card_id} 의 누적 한도(all_time)를 ${fmt(Number(plan.from_minor))} → ${fmt(Number(plan.limit_minor))} 로 올립니다(+${fmt(Number(plan.limit_minor) - Number(plan.from_minor))}; ${categories}).${mode}`;
       return `Stripe Issuing 카드 소지자 ${plan.target.cardholder} 에게 누적 한도 ${fmt(Number(plan.limit_minor))} 의 ${plan.single_use ? '일회용(첫 결제 뒤 자동 해지) ' : ''}가상 카드를 발급합니다(${categories}).${mode}`;
     }
     default:
@@ -706,7 +728,8 @@ export function directSuggestedRef(row: { provider: string; payload: unknown; pr
       return target ? `google_ads:${target.budget || `${target.customer_id}/${target.campaign_id}`}:total_amount_micros=${to}` : '';
     case 'stripe_issuing': {
       const response = row.provider_response && typeof row.provider_response === 'object' ? row.provider_response as Record<string, unknown> : {};
-      return providerToken(response.card_id, PROVIDER_FORMATS.stripeId);
+      const card = row.payload as Partial<CardPlan> | null;
+      return providerToken(response.card_id, PROVIDER_FORMATS.stripeId) || (card?.plan === 'issue_card' ? providerToken(card.card_id, /^ic_[A-Za-z0-9]{1,250}$/) : '');
     }
     default:
       return assertNever(provider);

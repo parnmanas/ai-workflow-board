@@ -12,6 +12,8 @@
 import {
   PROVIDER_FORMATS,
   PaymentRuleError,
+  buildCardPlan,
+  normalizeCardCategories,
   googleMicrosToMinor,
   metaUnitsToMinor,
   minorToGoogleMicros,
@@ -19,6 +21,7 @@ import {
   parseGoogleRef,
   parseMetaRef,
   parseStripeRef,
+  paymentApiVersion,
   providerToken,
   stripeCardAmount,
   type CardPlan,
@@ -45,6 +48,9 @@ import {
 } from './marketing-payment-google';
 import {
   buildStripePlan,
+  buildReusableStripePlan,
+  observeStripeCard,
+  reusableCardObservation,
   checkStripeAmount,
   executeStripePlan,
   findCardsForRequest,
@@ -98,7 +104,7 @@ export interface DirectPaymentAdapter {
   checkCredential(fields: Record<string, string>): void;
   checkAmount(amountMinor: number, currency: string, payee: PayeeLike): void;
   plan(input: { ref: string; fields: Record<string, string>; fingerprint: string; amountMinor: number; currency: string; payee: PayeeLike; ctx: DirectAdapterContext }): Promise<DirectPlan>;
-  report(input: { ref: string; fields: Record<string, string>; fingerprint: string; currency: string; ctx: DirectAdapterContext }): Promise<TargetReport>;
+  report(input: { payee?: PayeeLike; ref: string; fields: Record<string, string>; fingerprint: string; currency: string; ctx: DirectAdapterContext }): Promise<TargetReport>;
   /** `response` 는 실행이 남긴 공급자 응답 요약(provider_response) — 카드 공급자는 거기 적힌 카드 id 도 직접 읽는다. */
   inspect(input: { plan: DirectPlan; ref: string; fields: Record<string, string>; fingerprint: string; currency: string; requestId: string; around: Date; response: unknown; ctx: DirectAdapterContext }): Promise<DirectInspection>;
   /** `startedAt` 은 요청이 executing 이 된 시각이다. */
@@ -231,14 +237,28 @@ const stripeAdapter: DirectPaymentAdapter = {
     checkStripeAmount(amountMinor, currency, payee);
     const cred = readStripeCredential(fields);
     const obs = await observeStripeCardholder(target, cred, ctx);
-    return buildStripePlan(obs, target, payee, amountMinor, currency, fingerprint, cred);
+    const plan = buildStripePlan(obs, target, payee, amountMinor, currency, fingerprint, cred);
+    return payee.card_id ? buildReusableStripePlan(await observeStripeCard(payee.card_id, cred, ctx), plan, payee, amountMinor) : plan;
   },
-  async report({ ref, fields, currency, ctx }) {
+  async report({ ref, fields, currency, payee, ctx }): Promise<TargetReport> {
     const target = parseStripeRef(ref);
     const cred = readStripeCredential(fields);
     const obs = await observeStripeCardholder(target, cred, ctx);
     const problems = stripeCardholderProblems(obs, target, cred);
     try { stripeCardAmount(1, currency); } catch (e: any) { problems.push(e.message); }
+    if (payee?.card_id) {
+      const card = await observeStripeCard(payee.card_id, cred, ctx);
+      const plan = buildCardPlan({ target, currency, amountMinor: 1, singleUse: payee.card_single_use !== false, categories: normalizeCardCategories(payee.card_categories), livemode: cred.mode === 'live', credentialFingerprint: '0000000000000000' });
+      const cardObs = reusableCardObservation(card, { ...plan, card_id: payee.card_id });
+      problems.push(...cardObs.problems);
+      if (payee.card_single_use !== false) problems.push('a reusable card requires single-use to be disabled');
+      return {
+        ok: problems.length === 0, problems, ceiling_minor: cardObs.minor,
+        ceiling_text: cardObs.minor === null ? '' : formatMinorAmount(cardObs.minor, currency),
+        ceiling_units: cardObs.minor === null ? null : String(cardObs.minor), target_name_untrusted: obs.name_untrusted,
+        facts: { kind: 'card_limit', card_id: payee.card_id, card_status: cardObs.status, livemode: obs.livemode }, api_version: obs.api_version,
+      };
+    }
     const readProblem = await stripeCardReadProblem(target, cred, ctx);
     if (readProblem) problems.push(readProblem);
     return {
@@ -263,6 +283,20 @@ const stripeAdapter: DirectPaymentAdapter = {
     // 다른 키(다른 Stripe 계정일 수 있다)로 찾은 "없음" 은 이 요청의 답이 아니다 — 카드 소지자 id 는 계정마다다.
     if (fingerprint !== cardPlanOf(plan).credential_fingerprint) {
       throw new PaymentRuleError('the Stripe key changed since this request — its card can only be looked up with the key that issued it; check the Stripe Dashboard of that account');
+    }
+    const cardPlan = cardPlanOf(plan);
+    if (cardPlan.card_id) {
+      const card = await observeStripeCard(cardPlan.card_id, readStripeCredential(fields), ctx);
+      const obs = reusableCardObservation(card, cardPlan);
+      const observed = obs.minor === null ? null : String(obs.minor);
+      const report: TargetReport = {
+        ok: obs.problems.length === 0, problems: obs.problems, ceiling_minor: obs.minor,
+        ceiling_text: obs.minor === null ? '' : formatMinorAmount(obs.minor, cardPlan.currency), ceiling_units: observed,
+        target_name_untrusted: '', facts: { kind: 'card_limit', card_id: cardPlan.card_id, card_status: obs.status },
+        api_version: paymentApiVersion('stripe_issuing', ctx.env),
+      };
+      return { kind: 'ceiling', observed, observed_minor: obs.minor,
+        position: observed === null ? 'no_ceiling' : obs.minor === cardPlan.limit_minor ? 'at_target' : obs.minor === cardPlan.from_minor ? 'at_from' : 'other', report };
     }
     const recorded = response && typeof response === 'object' ? (response as Record<string, unknown>).card_id : undefined;
     const knownCardId = providerToken(recorded, PROVIDER_FORMATS.stripeId);

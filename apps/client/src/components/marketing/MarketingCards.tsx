@@ -1143,7 +1143,9 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
         title="결제 실패로 기록"
         message={unknown
           ? (cardProvider
-            ? '이 요청의 카드가 Stripe 에 없음을 확인했을 때만 실패로 기록하세요(서버도 카드를 찾아 봅니다 — 해지되지 않은 카드가 있으면 거부합니다). 보류한 예산이 풀립니다.'
+            ? spend.payload?.card_id
+              ? '공급자에서 카드의 이전 한도가 그대로이고 이번 증액으로 쓴 돈이 없음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.'
+              : '이 요청의 카드가 Stripe 에 없음을 확인했을 때만 실패로 기록하세요(서버도 카드를 찾아 봅니다 — 해지되지 않은 카드가 있으면 거부합니다). 보류한 예산이 풀립니다.'
             : '결제 시스템에서 실제로 결제되지 않았음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.')
           : 'AWB 밖 결제가 이루어지지 않았을 때 기록합니다. 보류한 예산이 풀립니다.'}
         label="확인한 내용"
@@ -1152,7 +1154,9 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
         busy={busy}
         confirmLabel="실패로 기록"
         checkboxLabel={cardProvider && unknown
-          ? 'Stripe 대시보드에서 이 요청의 카드로 쓴 돈이 없음을 확인했습니다(카드가 해지됐거나 서버가 카드를 다 확인하지 못한 경우에 필요 — 감사에 남습니다)'
+          ? spend.payload?.card_id
+            ? '이번 한도 증가가 반영되지 않았고 이번 증액으로 쓴 돈이 없음을 확인했습니다(감사에 남습니다)'
+            : 'Stripe 대시보드에서 이 요청의 카드로 쓴 돈이 없음을 확인했습니다(카드가 해지됐거나 서버가 카드를 다 확인하지 못한 경우에 필요 — 감사에 남습니다)'
           : undefined}
         onClose={close}
         onSubmit={async (note, confirmNoSpend) => {
