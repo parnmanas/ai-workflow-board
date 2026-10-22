@@ -7,7 +7,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, ErrorState, Input, Modal, PermissionNotice, Select, Textarea } from '../common';
-import { contactStatusView, formatCount, formatDateTime } from './marketing.logic';
+import { CONTACT_STATUS_FILTERS, UNSUBSCRIBE_SOURCE_LABELS, contactStatusView, formatCount, formatDateTime } from './marketing.logic';
 import {
   CONSENT_METHODS,
   CONSENT_METHOD_LABELS,
@@ -117,7 +117,7 @@ export default function MarketingContactsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
         title="Marketing Contacts"
-        description="마케팅 메일을 받는 동의 연락처 — 동의 증거와 함께 사람이 넣고, 수신거부 · 삭제한 주소는 다시 가져와도 억제됩니다."
+        description="마케팅 메일을 받는 동의 연락처 — 동의 증거와 함께 사람이 넣고, 수신거부 · 바운스 · 스팸 신고 · 삭제된 주소는 다시 가져와도 억제됩니다."
         actions={(
           <>
             {campaignId
@@ -139,7 +139,7 @@ export default function MarketingContactsPage() {
           <Select
             label="상태"
             value={status}
-            options={[{ value: '', label: '전체' }, ...['subscribed', 'unsubscribed', 'erased'].map((s) => ({ value: s, label: contactStatusView(s).label }))]}
+            options={[{ value: '', label: '전체' }, ...CONTACT_STATUS_FILTERS.map((s) => ({ value: s, label: contactStatusView(s).label }))]}
             onChange={(e) => { setStatus(e.target.value); setOffset(0); }}
           />
           <Input
@@ -193,7 +193,7 @@ export default function MarketingContactsPage() {
                         <StatusPill view={contactStatusView(c.status)} />
                         {c.unsubscribed_at && (
                           <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-                            {formatDateTime(c.unsubscribed_at)}{c.unsubscribe_source ? ` · ${c.unsubscribe_source}` : ''}
+                            {formatDateTime(c.unsubscribed_at)}{c.unsubscribe_source ? ` · ${UNSUBSCRIBE_SOURCE_LABELS[c.unsubscribe_source] || c.unsubscribe_source}` : ''}
                           </div>
                         )}
                       </td>

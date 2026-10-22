@@ -54,7 +54,7 @@ export default function MarketingFeedbackTab({ refreshKey }: { refreshKey: numbe
       ) : (
         <>
           {data.recorded.length === 0 ? (
-            <EmptyState title="기록된 피드백이 없습니다" description="에이전트가 반응 · 언급을 읽고 출처와 함께 기록합니다. 메일 답장처럼 사람이 받은 것은 직접 기록하세요." />
+            <EmptyState title="기록된 피드백이 없습니다" description="에이전트가 반응 · 언급을 읽고 출처와 함께 기록합니다. 메일 답장은 메일 채널의 공급자 webhook 을 연결하면 자동으로 들어오고, 그 밖에 사람이 받은 것은 직접 기록하세요." />
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {data.recorded.map((f) => <FeedbackCard key={f.id} feedback={f} canTicket={productLinked} />)}
@@ -127,8 +127,16 @@ function FeedbackCard({ feedback, canTicket }: { feedback: MarketingFeedback; ca
       ) : null}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <Quote label={`외부인이 쓴 글${feedback.author ? ` — ${feedback.author}` : ''}`} tone="muted">{feedback.content}</Quote>
+        <Quote
+          label={feedback.contact_id
+            ? `메일 답장 — ${feedback.contact?.email || '(삭제된 연락처)'} · 인용 원문 · 서명 · 메일 주소는 지우고 남김`
+            : `외부인이 쓴 글${feedback.author ? ` — ${feedback.author}` : ''}`}
+          tone="muted"
+        >
+          {feedback.content}
+        </Quote>
         <Meta>
+          {feedback.contact_id && <span><Chip muted>메일 답장</Chip></span>}
           <span>{SENTIMENT_LABELS[feedback.sentiment] || feedback.sentiment}</span>
           {channel && <span>· {channel.name}</span>}
           {feedback.source_url && <span>· <ExternalLink href={feedback.source_url}>출처</ExternalLink></span>}

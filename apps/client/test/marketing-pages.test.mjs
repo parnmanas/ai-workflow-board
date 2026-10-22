@@ -320,6 +320,8 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
   await api.importMarketingContacts('acc-2', { lists: ['newsletter'], contacts: [] });
   await api.unsubscribeMarketingContact('ct-1', 'phone', 'acc-2');
   await api.eraseMarketingContact('ct-1', 'acc-2');
+  await api.listMarketingListHolds('acc-2', { status: 'held' });
+  await api.releaseMarketingListHold('h-1', 'removed a scraped batch', 'acc-2');
   await api.listOutreachChannels('acc-2');
 
   assert.deepEqual(sent.map((s) => `${s.method} ${s.url}`), [
@@ -347,6 +349,8 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
     'POST /api/marketing/contacts/import?account_id=acc-2',
     'POST /api/marketing/contacts/ct-1/unsubscribe?account_id=acc-2',
     'POST /api/marketing/contacts/ct-1/erase?account_id=acc-2',
+    'GET /api/marketing/list-holds?account_id=acc-2&status=held',
+    'POST /api/marketing/list-holds/h-1/release?account_id=acc-2',
     'GET /api/outreach-channels?account_id=acc-2',
   ]);
   const body = (path, method = 'POST') => sent.find((x) => x.method === method && x.url === path)?.body;
@@ -357,4 +361,5 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
   assert.deepEqual(body('/api/marketing/spend-requests/sp-1/cancel'), { note: 'not needed' });
   assert.deepEqual(body('/api/marketing/campaigns/c-1/metrics'), { observations: [{ metric: 'signups', value: 3 }] });
   assert.deepEqual(body('/api/marketing/contacts/ct-1/unsubscribe?account_id=acc-2'), { note: 'phone' });
+  assert.deepEqual(body('/api/marketing/list-holds/h-1/release?account_id=acc-2'), { note: 'removed a scraped batch' }, '해제는 사유와 함께');
 });

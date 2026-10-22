@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import {
   CAPABILITY_LABELS,
   CHANNEL_PLATFORMS,
+  CONTACT_STATUS_FILTERS,
+  UNSUBSCRIBE_SOURCE_LABELS,
   DEFAULT_LIMITS,
   FEEDBACK_CATEGORIES,
   MARKETING_CAPABILITIES,
@@ -33,13 +35,16 @@ import {
   cycleStatusView,
   describeCadence,
   emailDraftFrom,
+  emailWebhookSetup,
   isCampaignEvent,
+  listHoldSummary,
   orderAllocationsForApproval,
   parseList,
   postStatusView,
   previewCommunityBody,
   reportRange,
   safeHttpUrl,
+  sendOutcomeLine,
   spendStatusView,
   validateEmailDraft,
   withoutMoneySettings,
@@ -84,7 +89,9 @@ test('상태마다 사람이 읽는 라벨이 있고, 사람을 기다리는 상
   for (const s of serverConstants.ALLOCATION_STATUSES) assert.notEqual(allocationStatusView(s).label, s, `allocation ${s}`);
   for (const s of ['draft', 'approved', 'publishing', 'sending', 'published', 'rejected', 'failed']) assert.notEqual(postStatusView(s).label, s, `post ${s}`);
   for (const s of ['running', 'completed', 'timed_out', 'cancelled', 'failed']) assert.notEqual(cycleStatusView(s).label, s, `cycle ${s}`);
-  for (const s of ['subscribed', 'unsubscribed', 'erased']) assert.notEqual(contactStatusView(s).label, s, `contact ${s}`);
+  for (const s of serverConstants.CONTACT_STATUSES) assert.notEqual(contactStatusView(s).label, s, `contact ${s}`);
+  assert.deepEqual([...CONTACT_STATUS_FILTERS], [...serverConstants.CONTACT_STATUSES], '연락처 상태 필터는 서버 상태 전부');
+  assert.equal(contactStatusView('complained').tone, 'failed', '스팸 신고는 경보 색');
   assert.equal(channelStatusView('proposed').tone, 'attention');
   assert.equal(spendStatusView('pending').tone, 'attention');
   assert.equal(spendStatusView('unknown').tone, 'failed', '결과 불명은 경보 색');
@@ -313,4 +320,25 @@ test('직접 편성은 줄이는 것부터 보낸다 — 서버의 한 줄씩 �
 test('감사 로그 커서 — 경계 밀리초의 행을 다시 받도록 1ms 뒤를 보낸다', () => {
   assert.equal(auditCursor('2026-10-22T01:02:03.123Z'), '2026-10-22T01:02:03.124Z');
   assert.equal(auditCursor('not-a-date'), 'not-a-date');
+});
+
+test('메일 공급자 이벤트 화면: 목록 발송 중지 요약 · 발송 결과 줄 · webhook 설정 안내 · 수신거부 출처', () => {
+  assert.equal(listHoldSummary({ stats: { sent: 400, bounced: 0, complained: 2, rate: 0.005 } }), '스팸 신고율 0.50% — 신고 2 / 닿은 메일 400');
+  assert.equal(listHoldSummary({ stats: {} }), '스팸 신고율 — — 신고 0 / 닿은 메일 0');
+  assert.equal(sendOutcomeLine({ hard: 2, soft: 0, suppressed: 1, complained: 1 }), '바운스(영구) 2 · 공급자 억제 1 · 스팸 신고 1');
+  assert.equal(sendOutcomeLine({ hard: 0, soft: 0, suppressed: 0, complained: 0 }), '');
+  assert.equal(sendOutcomeLine(undefined), '');
+
+  const resend = emailWebhookSetup({ provider: 'resend', events_url: 'https://awb.example.com/api/m/email/c1/events', inbound_url: null, events_signing: false, inbound_signing: false });
+  assert.equal(resend.items.length, 1, 'Resend 는 받은 메일도 같은 webhook 으로 온다');
+  assert.equal(resend.items[0].keyField, 'webhook_secret');
+  assert.match(resend.items[0].events, /email\.bounced.*email\.complained.*email\.received/);
+  const sendgrid = emailWebhookSetup({ provider: 'sendgrid', events_url: 'https://x/events', inbound_url: 'https://x/inbound', events_signing: true, inbound_signing: false });
+  assert.deepEqual(sendgrid.items.map((i) => [i.keyField, i.signing]), [['webhook_public_key', true], ['inbound_public_key', false]]);
+  assert.equal(emailWebhookSetup({ provider: 'resend', events_url: null, inbound_url: null, events_signing: false, inbound_signing: false }).missingUrl, true);
+
+  // 서버가 남기는 수신거부 출처(연락처 엔티티 주석)마다 사람이 읽는 라벨이 있다.
+  for (const source of ['link', 'one_click', 'manual', 'mailto', 'bounce', 'complaint', 'provider']) {
+    assert.ok(UNSUBSCRIBE_SOURCE_LABELS[source], `source ${source}`);
+  }
 });

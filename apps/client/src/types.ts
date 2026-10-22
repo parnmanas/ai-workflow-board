@@ -3694,6 +3694,10 @@ export interface MarketingChannel {
   guidelines: string;
   outreach_channel_id: string | null;
   email: MarketingEmailConfig | null;
+  /** 메일 채널 목록(GET campaigns/:id/channels)에만 — 스팸 신고율로 멈춘 수신 목록. */
+  email_hold?: MarketingListHold | null;
+  /** 메일 채널 목록에만 — 공급자에 붙여 넣을 webhook 주소와 서명 키가 있는지(키 값은 없다). */
+  email_webhooks?: MarketingEmailWebhooks | null;
   proposed_by_type: string;
   proposed_by_id: string;
   proposed_by_name: string;
@@ -3703,6 +3707,32 @@ export interface MarketingChannel {
   decision_note: string;
   created_at: string;
   updated_at: string;
+}
+
+/** 메일 공급자 webhook 설정(docs/marketing.md "공급자 이벤트"). */
+export interface MarketingEmailWebhooks {
+  provider: string;
+  /** 바운스 · 신고 · 수신거부(Resend 는 받은 메일도). AWB_PUBLIC_URL 이 없으면 null. */
+  events_url: string | null;
+  /** SendGrid Inbound Parse 주소 — Resend 는 events_url 하나라 null. */
+  inbound_url: string | null;
+  events_signing: boolean;
+  inbound_signing: boolean;
+}
+
+/** 스팸 신고율이 높아 발송을 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
+export interface MarketingListHold {
+  id: string;
+  account_id: string;
+  list_name: string;
+  status: 'held' | 'released' | string;
+  reason: string;
+  stats: { since?: string; sent?: number; bounced?: number; complained?: number; rate?: number; threshold?: number };
+  held_at: string;
+  released_by: string;
+  released_by_name: string;
+  released_at: string | null;
+  release_note: string;
 }
 
 /** POST /api/marketing/channels/:id/approve · /connect 본문. */
@@ -3762,10 +3792,17 @@ export interface MarketingEmailSend {
   provider_message_id: string;
   error: string;
   sent_at: string | null;
+  /** 공급자 webhook 이 알려 온 미도달 — '' | hard | soft | suppressed. */
+  bounce_type?: string;
+  bounced_at?: string | null;
+  complained_at?: string | null;
+  event_note?: string;
 }
 
 export interface MarketingPostSends {
   counts: Record<string, number>;
+  /** 공급자 webhook 이 알려 온 결과의 수(전체 발송 기준). */
+  outcomes?: { hard: number; soft: number; suppressed: number; complained: number };
   sends: MarketingEmailSend[];
 }
 
@@ -4002,6 +4039,9 @@ export interface MarketingFeedback {
   recorded_by_name: string;
   cycle_id: string | null;
   created_at: string;
+  /** 메일 답장이면 답장한 연락처(사람용 화면에만 — 에이전트는 연락처를 보지 못한다). */
+  contact_id?: string;
+  contact?: { id: string; email: string | null; name: string; status: string } | null;
 }
 
 /** 연결된 OutreachChannel 이 폴링으로 모은 글(outreach ingest 의 분류 · 티켓). */
@@ -4032,7 +4072,7 @@ export interface MarketingFeedbackInput {
   channel_id?: string;
 }
 
-export type MarketingContactStatus = 'subscribed' | 'unsubscribed' | 'erased';
+export type MarketingContactStatus = 'subscribed' | 'unsubscribed' | 'bounced' | 'complained' | 'erased';
 export type MarketingConsentMethod = 'signup_form' | 'checkout' | 'event' | 'import' | 'other';
 
 export interface MarketingContact {

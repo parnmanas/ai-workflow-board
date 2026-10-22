@@ -29,15 +29,18 @@ import {
   channelTargetKey,
   emailConfigBody,
   emailDraftFrom,
+  emailWebhookSetup,
   formatCount,
   formatDateTime,
   formatMinor,
   isSpendExpired,
+  listHoldSummary,
   parseMajorToMinor,
   platformLabel,
   postStatusView,
   previewCommunityBody,
   safeHttpUrl,
+  sendOutcomeLine,
   shortHash,
   spendApprovalState,
   spendStatusView,
@@ -87,9 +90,11 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
   const [approveMode, setApproveMode] = useState<'approve' | 'connect' | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [releasing, setReleasing] = useState(false);
   const evidence = (channel.evidence_urls || []).filter(Boolean);
   const proposed = channel.status === 'proposed';
   const targetUrl = safeHttpUrl(channel.target);
+  const hold = channel.kind === 'email' ? channel.email_hold || null : null;
 
   const actions = ctx.canManage ? (
     <>
@@ -123,12 +128,13 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
   return (
     <Panel
       testId={`marketing-channel-${channel.id}`}
-      tone={proposed || channel.status === 'awaiting_credential' ? 'attention' : undefined}
+      tone={hold ? 'danger' : proposed || channel.status === 'awaiting_credential' ? 'attention' : undefined}
       title={(
         <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <Chip>{platformLabel(channel.platform)}</Chip>
           <span>{channel.name}</span>
           <StatusPill view={channelStatusView(channel.status)} />
+          {hold && <StatusPill view={{ label: '발송 중지', tone: 'failed' }} testId={`marketing-channel-hold-${channel.id}`} />}
         </span>
       )}
       actions={actions}
@@ -196,12 +202,44 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
             </div>
           </div>
         )}
+        {hold && (
+          <Quote label={`발송 중지 — "${hold.list_name}" 목록 · ${formatDateTime(hold.held_at)}`} tone="warning">
+            <div data-testid={`marketing-list-hold-${hold.id}`}>
+              {listHoldSummary(hold)}. 받는 사람이 스팸으로 신고한 비율이 기준({typeof hold.stats?.threshold === 'number' ? `${(hold.stats.threshold * 100).toFixed(1)}%` : '0.3%'})을 넘어, 사람이 확인할 때까지 이 목록으로 메일이 나가지
+              않습니다. 큐의 메일은 버리지 않고 보류했고, 새 메일은 승인되지 않습니다. 이 목록을 쓰는 다른 캠페인도 같이 멈춥니다.
+            </div>
+            <div style={{ marginTop: 6 }}>
+              가져온 연락처의 동의 출처, 메일 내용 · 빈도를 확인한 뒤 해제하세요 — 해제하면 보류된 메일이 바로 나가고, 신고율은 해제 이후 것만 다시 셉니다.
+            </div>
+            {ctx.canManage && (
+              <div style={{ marginTop: 8 }}>
+                <Button size="sm" variant="secondary" disabled={busy} onClick={() => setReleasing(true)}>발송 재개…</Button>
+              </div>
+            )}
+          </Quote>
+        )}
+        {channel.kind === 'email' && channel.email_webhooks && <EmailWebhookSetup webhooks={channel.email_webhooks} channelId={channel.id} />}
         {channel.kind === 'outreach' && channel.outreach_channel_id && (
           <Meta><span>Outreach 채널에 연결됨 — 승인한 글은 서버가 커넥터로 게시합니다.</span></Meta>
         )}
       </div>
 
       {approveMode && <ChannelApproveModal channel={channel} mode={approveMode} onClose={() => setApproveMode(null)} />}
+      <NoteModal
+        isOpen={releasing}
+        title={`메일 발송 재개 — "${hold?.list_name || ''}" 목록`}
+        message="무엇을 확인하고 고쳤는지 적어 주세요(감사 기록에 남습니다). 해제하면 보류된 메일이 바로 나갑니다."
+        label="확인한 내용 · 조치"
+        required
+        busy={busy}
+        confirmLabel="발송 재개"
+        onClose={() => setReleasing(false)}
+        onSubmit={async (note) => {
+          if (!hold) return;
+          const done = await run(() => api.releaseMarketingListHold(hold.id, note, ctx.accountId), '목록 발송을 다시 열었습니다');
+          if (done) setReleasing(false);
+        }}
+      />
       {editing && <ChannelEditModal channel={channel} onClose={() => setEditing(false)} />}
       <NoteModal
         isOpen={rejecting}
@@ -219,6 +257,36 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
         }}
       />
     </Panel>
+  );
+}
+
+/** 메일 공급자 webhook 설정 — 공급자 화면에 붙여 넣을 주소와 서명 키가 들어 있는지(docs/marketing.md "공급자 이벤트"). */
+function EmailWebhookSetup({ webhooks, channelId }: { webhooks: NonNullable<MarketingChannel['email_webhooks']>; channelId: string }) {
+  const setup = emailWebhookSetup(webhooks);
+  const unsigned = setup.items.some((i) => !i.signing);
+  return (
+    <details data-testid={`marketing-channel-webhooks-${channelId}`} open={unsigned || undefined}>
+      <summary style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+        바운스 · 스팸 신고 · 답장 수신(webhook){unsigned ? ' — 설정 필요' : ''}
+      </summary>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+        {setup.missingUrl && <Hint tone="warning">AWB_PUBLIC_URL 이 없어 공급자가 부를 주소를 만들 수 없습니다.</Hint>}
+        {setup.items.map((item) => (
+          <div key={item.label} style={{ fontSize: 12, lineHeight: 1.6, color: tokens.colors.textSecondary }}>
+            <div style={{ fontWeight: 700, color: tokens.colors.textStrong }}>{item.label}</div>
+            {item.url && <code style={{ overflowWrap: 'anywhere', userSelect: 'all' }}>{item.url}</code>}
+            <div>공급자에서 켤 것: {item.events}</div>
+            <div style={{ color: item.signing ? tokens.colors.successLight : tokens.colors.warningLight }}>
+              서명 키: {item.signing ? '설정됨' : `없음 — 메일 credential 에 ${item.keyField} 칸을 넣기 전까지 이 주소로 온 것은 모두 거부됩니다`}
+            </div>
+          </div>
+        ))}
+        <Hint>
+          서명이 맞는 것만 처리하고, 그 credential 로 보낸 메일에만 반영합니다. 하드 바운스 · 스팸 신고 · 공급자 수신거부는 연락처를 발송 대상에서
+          빼고, 답장은 인용 · 서명 · 메일 주소를 지운 본문만 피드백으로 남깁니다(외부 글이라 에이전트에게는 데이터로만 갑니다).
+        </Hint>
+      </div>
+    </details>
   );
 }
 
@@ -661,6 +729,9 @@ export function PostCard({ post }: { post: MarketingPost }) {
                 ? Object.entries(sends.counts).map(([status, n]) => <span key={status}>{status} {formatCount(n)}</span>)
                 : <span>아직 발송 기록이 없습니다</span>}
             </Meta>
+            {sendOutcomeLine(sends.outcomes) && (
+              <Meta><span>공급자가 알려 온 결과: {sendOutcomeLine(sends.outcomes)}</span></Meta>
+            )}
           </div>
         )}
       </div>

@@ -130,6 +130,7 @@ import type {
   MarketingContactImportRow,
   MarketingContactImportResult,
   MarketingInboxSummary,
+  MarketingListHold,
   OutreachChannelSummary,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
@@ -2764,6 +2765,21 @@ export const api = {
     request<MarketingContact>(
       `/marketing/contacts/${encodeURIComponent(id)}/erase${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
       { method: 'POST' },
+    ),
+  /** 스팸 신고율로 발송을 멈춘 수신 목록(docs/marketing.md "목록 발송 중지"). */
+  listMarketingListHolds: (accountId: string | null, query: { list?: string; status?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (accountId) params.set('account_id', accountId);
+    if (query.list) params.set('list', query.list);
+    if (query.status) params.set('status', query.status);
+    const qs = params.toString();
+    return request<MarketingListHold[]>(`/marketing/list-holds${qs ? `?${qs}` : ''}`);
+  },
+  /** 해제 — 무엇을 확인 · 고쳤는지 사유가 필요하다. 보류된 메일은 바로 다시 나간다. */
+  releaseMarketingListHold: (id: string, note: string, accountId?: string | null) =>
+    request<MarketingListHold>(
+      `/marketing/list-holds/${encodeURIComponent(id)}/release${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'POST', body: JSON.stringify({ note }) },
     ),
   /** 채널 연결용 OutreachChannel 목록(서버 권한: admin.resources). */
   listOutreachChannels: (accountId: string) =>

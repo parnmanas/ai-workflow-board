@@ -486,7 +486,23 @@ const FEEDBACK_STATUS: Record<string, StatusView> = {
 const CONTACT_STATUS: Record<string, StatusView> = {
   subscribed: { label: '수신 동의', tone: 'done' },
   unsubscribed: { label: '수신거부', tone: 'idle' },
+  bounced: { label: '반송(바운스)', tone: 'stalled' },
+  complained: { label: '스팸 신고', tone: 'failed' },
   erased: { label: '삭제됨(억제)', tone: 'idle' },
+};
+
+/** 연락처 화면의 상태 필터 — 서버 CONTACT_STATUSES 와 같은 집합(test/marketing-rules.test.mjs). */
+export const CONTACT_STATUS_FILTERS = ['subscribed', 'unsubscribed', 'bounced', 'complained', 'erased'] as const;
+
+/** 수신거부 · 억제가 어디서 왔는가 — 연락처의 unsubscribe_source. */
+export const UNSUBSCRIBE_SOURCE_LABELS: Record<string, string> = {
+  link: '수신거부 링크',
+  one_click: '메일 앱 원클릭',
+  manual: '사람이 기록',
+  mailto: '메일 회신(unsubscribe)',
+  bounce: '공급자: 바운스',
+  complaint: '공급자: 스팸 신고',
+  provider: '공급자: 수신거부',
 };
 
 function lookup(map: Record<string, StatusView>, status: string): StatusView {
@@ -500,6 +516,46 @@ export const spendStatusView = (status: string) => lookup(SPEND_STATUS, status);
 export const cycleStatusView = (status: string) => lookup(CYCLE_STATUS, status);
 export const feedbackStatusView = (status: string) => lookup(FEEDBACK_STATUS, status);
 export const contactStatusView = (status: string) => lookup(CONTACT_STATUS, status);
+
+/** 발송 현황의 공급자 결과 한 줄(0 인 항목은 뺀다). */
+export function sendOutcomeLine(outcomes: { hard: number; soft: number; suppressed: number; complained: number } | null | undefined): string {
+  if (!outcomes) return '';
+  return [
+    outcomes.hard ? `바운스(영구) ${formatCount(outcomes.hard)}` : '',
+    outcomes.soft ? `바운스(일시) ${formatCount(outcomes.soft)}` : '',
+    outcomes.suppressed ? `공급자 억제 ${formatCount(outcomes.suppressed)}` : '',
+    outcomes.complained ? `스팸 신고 ${formatCount(outcomes.complained)}` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+/** 목록 발송 중지의 수치 요약 — 서버가 멈출 때 기록한 것(stats). */
+export function listHoldSummary(hold: { stats?: { sent?: number; bounced?: number; complained?: number; rate?: number } | null }): string {
+  const s = hold.stats || {};
+  const delivered = Math.max((s.sent || 0) - (s.bounced || 0), 0);
+  const rate = typeof s.rate === 'number' && Number.isFinite(s.rate) ? `${(s.rate * 100).toFixed(2)}%` : '—';
+  return `스팸 신고율 ${rate} — 신고 ${formatCount(s.complained ?? 0)} / 닿은 메일 ${formatCount(delivered)}`;
+}
+
+/**
+ * 메일 채널의 webhook 설정 안내(docs/marketing.md "공급자 이벤트"). 공급자 화면에 붙여 넣을 주소와, 서명 키를 credential 의
+ * 어느 칸에 넣는지를 공급자마다 말한다. 키 값 자체는 화면에 오지 않는다(있는지 여부만).
+ */
+export function emailWebhookSetup(w: {
+  provider: string; events_url: string | null; inbound_url: string | null; events_signing: boolean; inbound_signing: boolean;
+}): { items: Array<{ label: string; url: string | null; signing: boolean; keyField: string; events: string }>; missingUrl: boolean } {
+  const items = w.provider === 'sendgrid'
+    ? [
+      { label: 'Event Webhook', url: w.events_url, signing: w.events_signing, keyField: 'webhook_public_key',
+        events: 'Bounced · Dropped · Spam Reports · Unsubscribes · Group Unsubscribes, Signed Event Webhook 켬' },
+      { label: 'Inbound Parse(답장)', url: w.inbound_url, signing: w.inbound_signing, keyField: 'inbound_public_key',
+        events: '회신 주소의 도메인, 서명 검증 security policy, "POST the raw, full MIME message" 끔' },
+    ]
+    : [
+      { label: 'Webhook', url: w.events_url, signing: w.events_signing, keyField: 'webhook_secret',
+        events: 'email.bounced · email.complained · email.suppressed · email.received(받은 메일을 쓰면)' },
+    ];
+  return { items, missingUrl: !w.events_url };
+}
 
 /**
  * 게시물 상태. manual 채널의 approved 는 "사람이 직접 올리고 주소를 기록해야 함" 이라 따로 말한다 —

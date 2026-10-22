@@ -357,6 +357,51 @@ test('메일 채널 카드의 "연락처 관리" 는 캠페인의 실행 키 · 
   assert.equal(href.searchParams.get('list'), 'newsletter');
 });
 
+test('메일 채널 카드 — 스팸 신고율로 멈춘 목록을 알리고 사유와 함께 해제하며, webhook 주소 · 서명 키 설정 여부를 보여 준다', async (t) => {
+  const hold = {
+    id: 'hold-1', account_id: 'acc-org', list_name: 'newsletter', status: 'held', reason: 'complaint_rate',
+    stats: { since: iso(-1000), sent: 400, bounced: 0, complained: 2, rate: 0.005 },
+    held_at: iso(-10), released_by: '', released_by_name: '', released_at: null, release_note: '',
+  };
+  const emailChannel = {
+    ...channels[1], id: 'ch-mail', platform: 'email', kind: 'email', status: 'active', name: '뉴스레터', target: 'newsletter',
+    email: {
+      credential_id: 'cred-mail', from_name: 'AWB', from_address: 'news@awb.dev', reply_to: '', postal_address: 'Seoul',
+      contact_email: 'help@awb.dev', ad_label: '(광고)', list_name: 'newsletter', provider: 'resend',
+    },
+    email_hold: hold,
+    email_webhooks: { provider: 'resend', events_url: 'https://awb.example.com/api/m/email/cred-mail/events', inbound_url: null, events_signing: false, inbound_signing: false },
+  };
+  const released = [];
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=channels',
+    stubs: {
+      getMarketingCampaign: async () => campaign({ account_id: 'acc-org' }),
+      listMarketingChannels: async () => [...channels, emailChannel],
+      releaseMarketingListHold: async (id, note, accountId) => { released.push([id, note, accountId]); return { ...hold, status: 'released' }; },
+    },
+  });
+  const card = within(container, 'marketing-channel-ch-mail');
+  within(container, 'marketing-channel-hold-ch-mail');
+  assert.match(within(container, 'marketing-list-hold-hold-1').textContent, /스팸 신고율 0\.50% — 신고 2 \/ 닿은 메일 400/);
+  const setup = within(container, 'marketing-channel-webhooks-ch-mail');
+  assert.equal(setup.hasAttribute('open'), true, '서명 키가 없으면 설정 안내를 펼쳐 둔다');
+  assert.match(setup.textContent, /https:\/\/awb\.example\.com\/api\/m\/email\/cred-mail\/events/);
+  assert.match(setup.textContent, /webhook_secret 칸을 넣기 전까지/);
+
+  click(buttonIn(card, '발송 재개…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('메일 발송 재개'));
+  assert.ok(dialog, '해제 창이 열린다');
+  const confirm = buttonIn(dialog, '발송 재개');
+  assert.equal(confirm.disabled, true, '사유 없이 해제할 수 없다');
+  typeInto(dialog.querySelector('textarea'), '  가입 폼 밖에서 가져온 묶음을 지웠다  ');
+  click(confirm);
+  await flush();
+  await flush();
+  assert.deepEqual(released, [['hold-1', '가입 폼 밖에서 가져온 묶음을 지웠다', 'acc-org']], '캠페인의 실행 키로 해제한다');
+});
+
 test('답글 승인 카드 — 서버가 확인한 스레드(r/<대상> — 제목)를 글자로 보여 주고, 확인 안 된 답글은 경고한다', async (t) => {
   const redditChannel = {
     ...channels[0], id: 'ch-reddit', status: 'active', kind: 'outreach', outreach_channel_id: 'oc-1', name: 'r/selfhosted',
