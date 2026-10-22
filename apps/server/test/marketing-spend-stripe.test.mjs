@@ -629,6 +629,23 @@ test('Stripe Issuing: unclear answers stay unknown, a card that does not match i
   assert.equal((await markFailed(reqK, { confirm_no_spend: true })).body.status, 'failed');
   assert.deepEqual((await failedDetail(reqK)).card_check, { result: 'incomplete', cards: [cardK.id], confirmed_no_spend: true });
 
+  // 7c. 카드를 찾는 사이 늦게 온 결과가 실행의 카드 id 를 채우면, 그 카드를 보지 않은 확인으로 닫지 않는다(잠금 안에서 다시 본다)
+  const reqR = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({ match: isCardCreate, reply: 'timeout' });
+  assert.equal((await approve(reqR)).body.status, 'unknown');
+  await pastFailGrace(ctx, reqR.id);
+  fake.state.overrides.push({
+    match: isCardList,
+    reply: async () => {
+      await ds.getRepository('MarketingSpendRequest').update({ id: reqR.id }, { provider_response: { sent: true, step: 'activate', card_id: 'ic_lateArrival' } });
+      return json(200, { object: 'list', data: [], has_more: false });
+    },
+  });
+  const raced = await markFailed(reqR);
+  assert.equal(raced.status, 409, raced.text);
+  assert.match(raced.body.error, /the request changed while its card was being checked/);
+  assert.equal((await ds.getRepository('MarketingSpendRequest').findOneBy({ id: reqR.id })).status, 'unknown');
+
   // 8. 쪽 넘기기 — 이 요청의 카드가 둘째 쪽에 있어도 찾고, 1,000장을 넘게 봐야 하면 "다 보지 못함" 이다
   const reqP = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
   fake.state.overrides.push({ match: isCardCreate, reply: (entry, { createCard }) => { createCard(entry.body); return stripeError(500, 'api_error', '', 'An unknown error occurred'); } });

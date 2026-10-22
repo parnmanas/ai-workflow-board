@@ -634,7 +634,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       this.assertReconcilable(row);
       // 잠금 안에서 다시 읽은 행으로 본다 — 실행 중(executing)에 들어온 요청이, 그 사이 결과 불명이 된 행을 유예 없이 닫지 않게.
       this.assertFailureRecordable(row, new Date());
-      if (isDirectPaymentProvider(row.provider) && DIRECT_PROVIDER_SPECS[row.provider].kind === 'card' && !cardCheck) {
+      // 카드 확인은 잠금 밖에서 `pre` 로 했다. 그 사이 늦게 온 결과가 실행의 카드 id 를 채웠으면(recordOutcome) 그 확인은 그 카드를 보지 않았다.
+      if (isDirectPaymentProvider(row.provider) && DIRECT_PROVIDER_SPECS[row.provider].kind === 'card'
+        && (!cardCheck || this.recordedCardId(row) !== this.recordedCardId(pre))) {
         throw marketingError(409, 'the request changed while its card was being checked — reload and try again');
       }
       await this.settle(manager, row, 'failed', actor, {
@@ -996,6 +998,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       report: found.report,
       checked_at: checkedAt,
     };
+  }
+
+  /** 실행이 받아 둔 카드 id(`provider_response.card_id`, 카드 공급자). 없으면 ''. */
+  private recordedCardId(row: MarketingSpendRequest): string {
+    const response = row.provider_response && typeof row.provider_response === 'object' ? row.provider_response as Record<string, unknown> : {};
+    return typeof response.card_id === 'string' ? response.card_id : '';
   }
 
   /** 요청이 공급자에 닿았을 시각 — 실행 시작, 없으면 승인, 없으면 요청. 카드 찾기의 범위가 이 시각 ±1일이다. */
