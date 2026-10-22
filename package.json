@@ -27,6 +27,7 @@
     "multer": "^2.3.0",
     "hono": "^4.13.11",
     "@hono/node-server": "^2.0.10",
+    "ip-address": "^10.7.4",
     "@nestjs/swagger": {
       "js-yaml": "^5.2.3"
     },
