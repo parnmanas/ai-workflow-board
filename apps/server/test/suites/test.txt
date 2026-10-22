@@ -105,6 +105,7 @@ test/manager-installed-version-heartbeat.test.mjs
 test/manager-restart-resume.test.mjs
 test/manager-update-approval-heartbeat.test.mjs
 test/marketing-analytics.test.mjs
+test/marketing-approval-notice-logic.test.mjs
 test/marketing-budget-logic.test.mjs
 test/marketing-campaigns-http.test.mjs
 test/marketing-channels.test.mjs
