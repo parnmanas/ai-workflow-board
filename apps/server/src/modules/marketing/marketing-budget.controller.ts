@@ -162,7 +162,10 @@ export class MarketingBudgetController {
   @RequirePermission(PERMISSIONS.APPROVE_MARKETING_SPEND)
   async markFailed(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      return res.status(200).json(spendToJson(await this.spend.markFailed(id, boundAccountId(req), userActor(req), String(body?.note || ''))));
+      return res.status(200).json(spendToJson(await this.spend.markFailed(id, boundAccountId(req), userActor(req), String(body?.note || ''), {
+        // 카드 공급자: 이 요청의 카드를 확인하지 못했거나 해지된 카드만 있을 때, 사람이 Stripe 에서 쓴 돈이 없음을 확인했다는 표시(감사에 남는다).
+        confirmNoSpend: body?.confirm_no_spend === true,
+      })));
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to record failure' });
     }

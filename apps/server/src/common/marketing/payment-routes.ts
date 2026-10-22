@@ -1,25 +1,52 @@
 /**
  * 직접 결제 어댑터의 순수 규칙 — docs/marketing.md "직접 결제 어댑터".
  *
- * 직접 어댑터(Meta Ads · Google Ads)는 돈을 "보내지" 않는다. 광고 플랫폼에 **고정 상한**(Meta 캠페인 `spend_cap`,
- * Google `CUSTOM_PERIOD` 총예산)을 올리라고 지시할 뿐이다 — 승인 금액 = 상한이 늘어나는 양이다. 그래서:
- *   - 결제 경로는 수취인마다 정한다. 수취인의 `ref` 가 상한이 걸린 대상(광고 계정 + 캠페인)을 가리키고, 그 목록은 사람만 고친다.
- *   - 요청 때 서버가 대상을 읽어 실행 계획(`from` → `to`)을 만들고, 그 계획이 payload(해시 대상)가 된다.
- *   - 실행은 compare-and-set 이다: 그때도 `from` 이면 `to` 를 쓴다(절대값이라 다시 써도 같다).
- * 이 파일은 네트워크 없이 정할 수 있는 것만 둔다: 공급자 목록, 대상 ref, 통화 단위 변환, 계획 검증 · 문장, 문자열 정리.
+ * 직접 어댑터는 돈을 "보내지" 않는다. 두 종류다(DIRECT_PROVIDER_SPECS):
+ *   - 상한(ceiling) — Meta Ads(캠페인 `spend_cap`) · Google Ads(`CUSTOM_PERIOD` 총예산): 광고 플랫폼의 **고정 상한**을 올린다.
+ *     승인 금액 = 상한이 늘어나는 양. 요청 때 대상을 읽어 계획(`from` → `to`)을 만들고, 실행은 compare-and-set 이다(그때도 `from`
+ *     이면 `to` — 절대값이라 다시 써도 같다). 같은 상한을 두 요청이 올리면 서로의 from 을 덮으므로 대상마다 열린 요청은 하나다.
+ *   - 카드(card) — Stripe Issuing: 승인 금액이 누적 한도인 가상 카드를 한 장 만든다(비활성으로 만들고 대조한 뒤 활성화). 사람이
+ *     그 카드로 결제한다. 카드끼리는 서로 영향이 없어 열린 요청 규칙이 없다.
+ * 둘 다 결제 경로는 수취인마다 정하고(사람만 고친다), 서버가 만든 계획이 payload(해시 대상)다.
+ * 이 파일은 네트워크 없이 정할 수 있는 것만 둔다: 공급자 명세, 대상 ref, 통화 단위, 계획 검증 · 문장, 카드 통제, 키 규칙, 문자열 정리.
  */
 import { currencyExponent, formatMinorAmount } from './money';
 
-export const DIRECT_PAYMENT_PROVIDERS = ['meta_ads', 'google_ads'] as const;
+export const DIRECT_PAYMENT_PROVIDERS = ['meta_ads', 'google_ads', 'stripe_issuing'] as const;
 export type DirectPaymentProvider = typeof DIRECT_PAYMENT_PROVIDERS[number];
+export type CeilingProvider = 'meta_ads' | 'google_ads';
 
 export const DIRECT_PAYMENT_PROVIDER_LABELS: Record<DirectPaymentProvider, string> = {
   meta_ads: 'Meta Ads',
   google_ads: 'Google Ads',
+  stripe_issuing: 'Stripe Issuing',
+};
+
+/**
+ * 공급자 명세 — 종류와 배타성. `exclusive` 면 대상마다 열린 요청은 하나다(uq_marketing_spend_open_target · target_key).
+ * 공급자를 더하면 아래의 switch(assertNever)가 컴파일 오류로 빠진 곳을 알려 준다 — "Meta 가 아니면 Google" 같은 분기를 쓰지 말 것.
+ */
+export const DIRECT_PROVIDER_SPECS: Readonly<Record<DirectPaymentProvider, { kind: 'ceiling' | 'card'; exclusive: boolean }>> = {
+  meta_ads: { kind: 'ceiling', exclusive: true },
+  google_ads: { kind: 'ceiling', exclusive: true },
+  stripe_issuing: { kind: 'card', exclusive: false },
 };
 
 export function isDirectPaymentProvider(value: unknown): value is DirectPaymentProvider {
   return typeof value === 'string' && (DIRECT_PAYMENT_PROVIDERS as readonly string[]).includes(value);
+}
+
+export function isCeilingProvider(value: unknown): value is CeilingProvider {
+  return isDirectPaymentProvider(value) && DIRECT_PROVIDER_SPECS[value].kind === 'ceiling';
+}
+
+/** 대상마다 열린 요청이 하나여야 하는 공급자인가(상한 공급자). 아니면 target_key 를 남기지 않는다. */
+export function isExclusiveTargetProvider(value: unknown): boolean {
+  return isDirectPaymentProvider(value) && DIRECT_PROVIDER_SPECS[value].exclusive;
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unhandled direct payment provider ${String(value)}`);
 }
 
 /** 승인되면 서버가 스스로 실행하는 결제 방식 — 사람이 결과를 기록하는 manual 이 아닌 것. */
@@ -34,6 +61,7 @@ export function isAutomaticPaymentProvider(value: unknown): boolean {
 export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<DirectPaymentProvider, { required: readonly string[]; optional: readonly string[] }> = {
   meta_ads: { required: ['access_token'], optional: ['app_secret'] },
   google_ads: { required: ['client_id', 'client_secret', 'refresh_token'], optional: ['login_customer_id', 'developer_token'] },
+  stripe_issuing: { required: ['secret_key'], optional: [] },
 };
 
 /**
@@ -41,15 +69,29 @@ export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<DirectPaymentProvider, { 
  * 환경 변수로 올릴 수 있게 한다. 형식이 틀린 값은 무시하고 기본값을 쓴다. 버전은 해시 대상(계획)에 넣지 않는다 —
  * 승인 대기 중에 버전을 올려도 사람이 본 것(대상 · 값)은 그대로다. 실제로 쓴 버전은 결과 응답 요약에 남는다.
  */
-export const PAYMENT_API_VERSIONS = {
+export interface PaymentApiVersionSpec {
+  default: string;
+  env: string;
+  pattern: RegExp;
+  sunset: string;
+  /** 이보다 오래된 버전(날짜 앞부분 비교)은 무시한다 — 쓰는 기능이 그 버전부터 있다. */
+  minimum?: string;
+}
+
+export const PAYMENT_API_VERSIONS: Readonly<Record<DirectPaymentProvider, PaymentApiVersionSpec>> = {
   meta_ads: { default: 'v26.0', env: 'MARKETING_META_API_VERSION', pattern: /^v\d{1,3}\.\d{1,2}$/, sunset: '2027-08 무렵(새 버전이 나온 뒤 최소 90일)' },
   google_ads: { default: 'v26', env: 'MARKETING_GOOGLE_ADS_API_VERSION', pattern: /^v\d{1,3}$/, sunset: '2027-11 예정' },
-} as const;
+  // Stripe 는 날짜 + 이름(`YYYY-MM-DD.<name>`)이고 계정 기본값에 기대지 않고 매 요청에 고정한다. 일회용 카드(lifecycle_controls)는
+  // 2026-03-25.dahlia 부터라 그보다 오래된 버전과 preview 채널은 받지 않는다.
+  stripe_issuing: { default: '2026-09-30.endive', env: 'MARKETING_STRIPE_API_VERSION', pattern: /^\d{4}-\d{2}-\d{2}\.[a-z]{1,20}$/, sunset: '—', minimum: '2026-03-25' },
+};
 
 export function paymentApiVersion(provider: DirectPaymentProvider, env: Record<string, string | undefined> = process.env): string {
   const spec = PAYMENT_API_VERSIONS[provider];
   const raw = (env[spec.env] || '').trim();
-  return spec.pattern.test(raw) ? raw : spec.default;
+  if (!spec.pattern.test(raw)) return spec.default;
+  if (spec.minimum && (raw.slice(0, 10) < spec.minimum || raw.endsWith('.preview'))) return spec.default;
+  return raw;
 }
 
 /**
@@ -73,11 +115,13 @@ export class PaymentRuleError extends Error {
 
 export interface MetaTarget { ad_account_id: string; campaign_id: string }
 export interface GoogleTarget { customer_id: string; campaign_id: string }
-export type DirectTarget = MetaTarget | GoogleTarget;
+export interface StripeTarget { cardholder: string }
+export type DirectTarget = MetaTarget | GoogleTarget | StripeTarget;
 
 export const DIRECT_REF_FORMATS: Record<DirectPaymentProvider, string> = {
   meta_ads: 'act_<광고 계정 id>/<캠페인 id> (예: act_1234567890/120210000000000)',
   google_ads: '<고객 id>/<캠페인 id> (예: 123-456-7890/22334455)',
+  stripe_issuing: '카드 소지자 id ich_… (예: ich_1MsKAB2eZvKYlo2C)',
 };
 
 const DIGITS = /^\d{1,30}$/;
@@ -96,21 +140,44 @@ export function parseGoogleRef(raw: string): GoogleTarget {
   return { customer_id: m[1].replace(/-/g, ''), campaign_id: m[2] };
 }
 
+/** Stripe 카드 소지자 id — 카드는 이 사람(또는 회사) 아래에 만들어진다. */
+export function parseStripeRef(raw: string): StripeTarget {
+  const m = String(raw || '').trim().match(/^(ich_[A-Za-z0-9]{1,250})$/);
+  if (!m) throw new PaymentRuleError(`Stripe Issuing payee ref must be a cardholder id — ${DIRECT_REF_FORMATS.stripe_issuing}`, 400);
+  return { cardholder: m[1] };
+}
+
 export function parseDirectRef(provider: DirectPaymentProvider, raw: string): DirectTarget {
-  return provider === 'meta_ads' ? parseMetaRef(raw) : parseGoogleRef(raw);
+  switch (provider) {
+    case 'meta_ads': return parseMetaRef(raw);
+    case 'google_ads': return parseGoogleRef(raw);
+    case 'stripe_issuing': return parseStripeRef(raw);
+    default: return assertNever(provider);
+  }
 }
 
 /** 저장 형태 — 같은 대상은 언제나 같은 문자열(대상 키 · 대조에 쓴다). */
 export function canonicalDirectRef(provider: DirectPaymentProvider, raw: string): string {
-  if (provider === 'meta_ads') {
-    const t = parseMetaRef(raw);
-    return `act_${t.ad_account_id}/${t.campaign_id}`;
+  switch (provider) {
+    case 'meta_ads': {
+      const t = parseMetaRef(raw);
+      return `act_${t.ad_account_id}/${t.campaign_id}`;
+    }
+    case 'google_ads': {
+      const t = parseGoogleRef(raw);
+      return `${t.customer_id}/${t.campaign_id}`;
+    }
+    case 'stripe_issuing':
+      return parseStripeRef(raw).cardholder;
+    default:
+      return assertNever(provider);
   }
-  const t = parseGoogleRef(raw);
-  return `${t.customer_id}/${t.campaign_id}`;
 }
 
-/** 대상마다 열린 지출 요청은 하나 — 캠페인 · 계정을 넘어서도(같은 광고 캠페인을 두 곳에서 올리면 서로의 from 을 덮는다). */
+/**
+ * 대상 키(`<공급자>:<정규 ref>`) — 요청 백오프의 키이고, 배타적인 공급자(상한)에서는 열린 요청을 대상마다 하나로 묶는 DB 키다
+ * (캠페인 · 계정을 넘어서도 — 같은 광고 캠페인을 두 곳에서 올리면 서로의 from 을 덮는다). 카드 공급자는 DB 에 남기지 않는다.
+ */
 export function directTargetKey(provider: DirectPaymentProvider, raw: string): string {
   return `${provider}:${canonicalDirectRef(provider, raw)}`;
 }
@@ -129,6 +196,12 @@ export interface PayeeLike {
   note?: string;
   provider?: string;
   credential_id?: string;
+  /** 카드 공급자(Stripe Issuing)만: 첫 결제 뒤 자동 해지(기본 true). */
+  card_single_use?: boolean;
+  /** 카드 공급자만: 허용 업종(Stripe merchant category 이름) — 비면 업종 제한 없음. */
+  card_categories?: string[];
+  /** 카드 공급자만: 카드 한 장의 최대 금액(최소 단위) — 카드 프로그램 한도(예: Standard 카드당 하루 500 USD)에 맞춘다. */
+  card_max_minor?: number;
 }
 
 /**
@@ -201,6 +274,65 @@ export function isPaymentCurrencySupported(currency: string): boolean {
   try { currencySpec(currency); return true; } catch { return false; }
 }
 
+// ── 카드(Stripe Issuing) ──────────────────────────────────────────────────
+
+/** Stripe Issuing 카드 통화 — 사업자 지역마다 하나(미국 usd · EU eur · 영국 gbp). 최소 단위는 AWB 와 같다. */
+export const STRIPE_CARD_CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
+
+/** 카드 한도(최소 단위) — 통화가 카드 통화가 아니면 409(금액이 아니라 캠페인 통화 · 수취인을 사람이 고친다). */
+export function stripeCardAmount(minor: number | bigint, currency: string): bigint {
+  const code = String(currency || '').toUpperCase();
+  if (!(STRIPE_CARD_CURRENCIES as readonly string[]).includes(code)) {
+    throw new PaymentRuleError(`currency ${currency} is not a Stripe Issuing card currency (USD, EUR or GBP by the Stripe account's region)`, 409);
+  }
+  if (currencyExponent(code) !== 2) throw new PaymentRuleError(`currency ${currency} has an inconsistent minor unit`, 409);
+  return BigInt(minor);
+}
+
+/**
+ * 일회용 카드 한 장이 쓸 수 있는 최대(최소 단위) — 승인 한 건의 고정 상한(10,000 USD 상당). 일회용 카드는 첫 결제 뒤 해지되므로
+ * 이보다 큰 한도는 쓰이지 못한 채 원장에 사용으로 묶인다.
+ */
+export const STRIPE_SINGLE_USE_MAX_MINOR = 1_000_000;
+
+export const CARD_CATEGORY_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
+export const MAX_CARD_CATEGORIES = 20;
+
+/**
+ * 허용 업종 목록 — Stripe merchant category 이름(소문자 · 밑줄)만, 중복 없이 정렬해 저장한다(같은 집합은 같은 배열 — 요청 뒤 변경
+ * 감지가 집합 비교가 된다). 이름이 실제로 있는지는 Stripe 가 카드를 만들 때 본다(틀리면 거절 — 아무것도 만들어지지 않는다).
+ */
+export function normalizeCardCategories(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return [];
+  const raw = Array.isArray(value) ? value : String(value).split(',');
+  const out = new Set<string>();
+  for (const item of raw) {
+    const name = String(item ?? '').trim().toLowerCase();
+    if (!name) continue;
+    if (!CARD_CATEGORY_PATTERN.test(name)) {
+      throw new PaymentRuleError(`card category "${String(item).trim().slice(0, 40)}" is not a Stripe merchant category name (lowercase words joined by "_", e.g. advertising_services)`, 400);
+    }
+    out.add(name);
+  }
+  if (out.size > MAX_CARD_CATEGORIES) throw new PaymentRuleError(`at most ${MAX_CARD_CATEGORIES} card categories`, 400);
+  return [...out].sort();
+}
+
+/**
+ * Stripe 키의 모드 — 운영(live)에서는 제한된 키(rk_live_…)만 받는다. 전체 비밀 키(sk_live_…)는 그 계정의 모든 돈(고객 카드 결제 ·
+ * 환불 · 카드 번호 조회)을 움직일 수 있어, AWB DB 와 암호화 키를 쥔 사람에게 너무 큰 권한이 된다. 샌드박스(rk_test_ · sk_test_)는
+ * 받는다. 틀리면 PaymentRuleError(400).
+ */
+export function stripeKeyMode(key: string): 'live' | 'test' {
+  const k = String(key || '').trim();
+  if (/^rk_live_[A-Za-z0-9]{8,}$/.test(k)) return 'live';
+  if (/^(?:rk|sk)_test_[A-Za-z0-9]{8,}$/.test(k)) return 'test';
+  if (/^sk_live_/.test(k)) {
+    throw new PaymentRuleError('Stripe Issuing needs a restricted key (rk_live_…) in live mode — create one with Issuing Cards: Write and Issuing Cardholders: Read; a full secret key (sk_live_…) is refused', 400);
+  }
+  throw new PaymentRuleError('Stripe Issuing credential "secret_key" must be a restricted key (rk_live_… or sandbox rk_test_…) or a sandbox secret key (sk_test_…)', 400);
+}
+
 /**
  * 공급자가 주는 정수 문자열(int64) — 숫자만, 19자리까지. BigInt('') 가 0 이 되는 함정을 막는다. 받은 값은 오류 문장에 넣지 않는다
  * (이 문장은 에이전트까지 간다).
@@ -232,6 +364,10 @@ export const PROVIDER_FORMATS = {
   /** Google 종료 시각("yyyy-MM-dd HH:mm:ss", 고객 시간대). */
   googleDateTime: /^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?$/,
   googleBudget: /^customers\/\d{1,20}\/campaignBudgets\/\d{1,30}$/,
+  /** Stripe 객체 id(ic_ · ich_ · req_ …). 접두사는 바뀔 수 있다고 Stripe 가 말하므로 접두사는 보지 않는다. */
+  stripeId: /^[A-Za-z0-9_]{1,255}$/,
+  /** Stripe 오류 type · code(invalid_request_error · parameter_missing …). */
+  stripeCode: /^[a-z][a-z0-9_]{0,59}$/,
 } as const;
 
 const INT64_MAX = 9_223_372_036_854_775_807n;
@@ -290,7 +426,7 @@ function safeMinor(value: bigint, label: string): number {
  */
 export interface CeilingPlan {
   plan: 'raise_ceiling';
-  provider: DirectPaymentProvider;
+  provider: CeilingProvider;
   target: Record<string, string>;
   /** 공급자 화면에서 사람이 붙인 이름 — 표시용. 에이전트가 볼 때도 데이터일 뿐이다. */
   target_name_untrusted: string;
@@ -309,7 +445,7 @@ export interface CeilingPlan {
 }
 
 export function buildCeilingPlan(input: {
-  provider: DirectPaymentProvider;
+  provider: CeilingProvider;
   target: Record<string, string>;
   targetName: unknown;
   currency: string;
@@ -343,36 +479,86 @@ export function buildCeilingPlan(input: {
 }
 
 /**
- * 저장된 계획이 그 요청과 맞는가 — 승인 · 실행 직전에 부른다. 해시가 행 전체를 지키지만, 계획 자체의 산수(단위 변환,
- * to − from = 금액, 대상 = 수취인 ref)가 틀린 행은 해시가 맞아도 실행하지 않는다. 문제 목록(비면 통과).
+ * 카드 공급자의 실행 계획 — 요청 행의 `payload` 에 그대로 들어가 해시된다. 카드 소지자 아래에 누적 한도 `limit_minor` 인 가상 카드를
+ * 한 장 만든다. 카드 소지자 이름 같은 개인정보는 넣지 않는다(에이전트도 계획을 읽는다).
  */
-export function ceilingPlanProblems(row: {
+export interface CardPlan {
+  plan: 'issue_card';
+  provider: 'stripe_issuing';
+  target: { cardholder: string };
+  currency: string;
+  /** 누적 한도(최소 단위) = 승인 금액. */
+  limit_minor: number;
+  interval: 'all_time';
+  /** 첫 결제 뒤 자동 해지(lifecycle_controls.cancel_after.payment_count = 1). */
+  single_use: boolean;
+  /** 허용 업종(정렬) — 비면 업종 제한 없음. */
+  allowed_categories: string[];
+  /** 운영(true) · 샌드박스(false) — 키와 카드 소지자가 같은 모드여야 한다. */
+  livemode: boolean;
+  /** 요청 때 쓴 credential 내용의 지문(키로 서명한 HMAC) — 그 사이 credential 내용이 바뀌면 실행하지 않는다. */
+  credential_fingerprint: string;
+}
+
+export type DirectPlan = CeilingPlan | CardPlan;
+
+export function buildCardPlan(input: {
+  target: StripeTarget;
+  currency: string;
+  amountMinor: number;
+  singleUse: boolean;
+  categories: string[];
+  livemode: boolean;
+  credentialFingerprint: string;
+}): CardPlan {
+  stripeCardAmount(input.amountMinor, input.currency);
+  return {
+    plan: 'issue_card',
+    provider: 'stripe_issuing',
+    target: { cardholder: input.target.cardholder },
+    currency: input.currency,
+    limit_minor: input.amountMinor,
+    interval: 'all_time',
+    single_use: input.singleUse,
+    allowed_categories: normalizeCardCategories(input.categories),
+    livemode: input.livemode,
+    credential_fingerprint: input.credentialFingerprint,
+  };
+}
+
+interface PlanRow {
   provider: string;
   payee_ref: string;
   currency: string;
   amount_minor: number;
   payload: unknown;
-}): string[] {
+}
+
+function fingerprintProblem(plan: { credential_fingerprint?: unknown }): string | null {
+  return typeof plan.credential_fingerprint !== 'string' || !/^[0-9a-f]{16}$/.test(plan.credential_fingerprint) ? 'plan has no credential fingerprint' : null;
+}
+
+function ceilingPlanProblems(row: PlanRow, provider: CeilingProvider): string[] {
   const out: string[] = [];
-  if (!isDirectPaymentProvider(row.provider)) return ['not a direct payment provider'];
   const plan = row.payload as Partial<CeilingPlan> | null;
   if (!plan || typeof plan !== 'object' || plan.plan !== 'raise_ceiling') return ['payload is not a ceiling plan built by the server'];
-  if (plan.provider !== row.provider) out.push('plan provider does not match the request');
+  if (plan.provider !== provider) out.push('plan provider does not match the request');
   if (plan.currency !== row.currency) out.push('plan currency does not match the request');
   let target: DirectTarget | null = null;
-  try { target = parseDirectRef(row.provider, row.payee_ref); } catch (e: any) { out.push(e.message); }
+  try { target = parseDirectRef(provider, row.payee_ref); } catch (e: any) { out.push(e.message); }
   if (target) {
     for (const [key, value] of Object.entries(target)) {
       if (!plan.target || plan.target[key] !== value) out.push(`plan target ${key} does not match the payee ref`);
     }
   }
-  const field = row.provider === 'meta_ads' ? 'spend_cap' : 'total_amount_micros';
+  const field = provider === 'meta_ads' ? 'spend_cap' : 'total_amount_micros';
   if (plan.field !== field) out.push(`plan field must be ${field}`);
-  if (typeof plan.credential_fingerprint !== 'string' || !/^[0-9a-f]{16}$/.test(plan.credential_fingerprint)) out.push('plan has no credential fingerprint');
+  const fp = fingerprintProblem(plan);
+  if (fp) out.push(fp);
   try {
     const from = parseProviderInt(plan.from, 'plan from');
     const to = parseProviderInt(plan.to, 'plan to');
-    const minorOf = (units: bigint) => (row.provider === 'meta_ads' ? metaUnitsToMinor(units, row.currency) : googleMicrosToMinor(units, row.currency));
+    const minorOf = (units: bigint) => (provider === 'meta_ads' ? metaUnitsToMinor(units, row.currency) : googleMicrosToMinor(units, row.currency));
     if (to <= from) out.push('plan does not raise the ceiling');
     if (Number(minorOf(from)) !== plan.from_minor || Number(minorOf(to)) !== plan.to_minor) out.push('plan amounts do not convert consistently');
     if (Number(plan.to_minor) - Number(plan.from_minor) !== Number(row.amount_minor)) out.push('plan raise does not equal the requested amount');
@@ -382,31 +568,131 @@ export function ceilingPlanProblems(row: {
   return out;
 }
 
-/**
- * 계획을 사람이 읽는 한 문장으로 — 승인 화면 · 에이전트 응답이 같은 문장을 본다. 공급자 화면의 이름(비신뢰)은 넣지 않는다.
- * 직접 공급자가 아니거나 계획이 아니면 ''.
- */
-export function describeCeilingPlan(row: { provider: string; currency: string; payload: unknown }): string {
-  if (!isDirectPaymentProvider(row.provider)) return '';
-  const plan = row.payload as Partial<CeilingPlan> | null;
-  if (!plan || plan.plan !== 'raise_ceiling' || !plan.target) return '';
-  const from = Number(plan.from_minor);
-  const to = Number(plan.to_minor);
-  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) return '';
-  const fmt = (n: number) => formatMinorAmount(n, row.currency);
-  if (row.provider === 'meta_ads') {
-    return `Meta 광고 계정 act_${plan.target.ad_account_id} 의 캠페인 ${plan.target.campaign_id} 지출 한도(spend_cap)를 ${fmt(from)} → ${fmt(to)} 로 올립니다(+${fmt(to - from)}).`;
+function cardPlanProblems(row: PlanRow): string[] {
+  const out: string[] = [];
+  const plan = row.payload as Partial<CardPlan> | null;
+  if (!plan || typeof plan !== 'object' || plan.plan !== 'issue_card') return ['payload is not a card plan built by the server'];
+  if (plan.provider !== 'stripe_issuing') out.push('plan provider does not match the request');
+  if (plan.currency !== row.currency) out.push('plan currency does not match the request');
+  try { stripeCardAmount(row.amount_minor, row.currency); } catch (e: any) { out.push(e.message); }
+  let target: StripeTarget | null = null;
+  try { target = parseStripeRef(row.payee_ref); } catch (e: any) { out.push(e.message); }
+  if (target && plan.target?.cardholder !== target.cardholder) out.push('plan cardholder does not match the payee ref');
+  if (!Number.isSafeInteger(plan.limit_minor) || Number(plan.limit_minor) <= 0 || plan.limit_minor !== Number(row.amount_minor)) {
+    out.push('plan card limit does not equal the requested amount');
   }
-  return `Google Ads 고객 ${plan.target.customer_id} 의 캠페인 ${plan.target.campaign_id} 총예산을 ${fmt(from)} → ${fmt(to)} 로 올립니다(+${fmt(to - from)}).`;
+  if (plan.interval !== 'all_time') out.push('plan card limit must be all_time');
+  if (typeof plan.single_use !== 'boolean') out.push('plan does not say whether the card is single-use');
+  else if (plan.single_use && Number(plan.limit_minor) > STRIPE_SINGLE_USE_MAX_MINOR) out.push('a single-use card cannot carry more than one authorization allows');
+  try {
+    const categories = Array.isArray(plan.allowed_categories) ? plan.allowed_categories : null;
+    if (!categories || normalizeCardCategories(categories).join(',') !== categories.join(',')) out.push('plan card categories are not a sorted list of category names');
+  } catch (e: any) {
+    out.push(e?.message || 'plan card categories are invalid');
+  }
+  if (typeof plan.livemode !== 'boolean') out.push('plan does not say live or sandbox');
+  const fp = fingerprintProblem(plan);
+  if (fp) out.push(fp);
+  return out;
 }
 
-/** 결제 기록(사람)의 거래 id 자리에 넣을 값 — 광고 플랫폼 상한 변경에는 거래 id 가 없다. */
-export function ceilingProviderRef(row: { provider: string; payload: unknown }): string {
-  const plan = row.payload as Partial<CeilingPlan> | null;
-  if (!isDirectPaymentProvider(row.provider) || !plan || plan.plan !== 'raise_ceiling' || !plan.target) return '';
-  return row.provider === 'meta_ads'
-    ? `meta_ads:act_${plan.target.ad_account_id}/${plan.target.campaign_id}:spend_cap=${plan.to}`
-    : `google_ads:${plan.target.budget || `${plan.target.customer_id}/${plan.target.campaign_id}`}:total_amount_micros=${plan.to}`;
+/**
+ * 저장된 계획이 그 요청과 맞는가 — 승인 · 실행 직전에 부른다. 해시가 행 전체를 지키지만, 계획 자체(상한: 단위 변환 · to − from =
+ * 금액 · 대상 = 수취인 ref / 카드: 한도 = 금액 · 카드 소지자 = 수취인 ref · 통제의 모양)가 틀린 행은 해시가 맞아도 실행하지 않는다.
+ * 문제 목록(비면 통과).
+ */
+export function directPlanProblems(row: PlanRow): string[] {
+  if (!isDirectPaymentProvider(row.provider)) return ['not a direct payment provider'];
+  const provider: DirectPaymentProvider = row.provider;
+  switch (provider) {
+    case 'meta_ads':
+    case 'google_ads':
+      return ceilingPlanProblems(row, provider);
+    case 'stripe_issuing':
+      return cardPlanProblems(row);
+    default:
+      return assertNever(provider);
+  }
+}
+
+/**
+ * 계획이 수취인의 지금 카드 통제와 맞는가 — 승인 · 실행 때. 요청 뒤에 사람이 일회용 · 허용 업종 · 카드당 최대 금액을 바꿨으면 예전
+ * 계획은 실행하지 않는다(사람이 바꾼 결정이 이긴다). 상한 공급자는 경로(provider · credential · ref) 대조로 충분하다. 문제가 없으면 null.
+ */
+export function directPayeeProblem(row: { provider: string; payload: unknown }, payee: PayeeLike): string | null {
+  if (row.provider !== 'stripe_issuing') return null;
+  const plan = row.payload as Partial<CardPlan> | null;
+  if (!plan || plan.plan !== 'issue_card') return null;
+  const singleUse = payee.card_single_use !== false;
+  let categories: string[];
+  try { categories = normalizeCardCategories(payee.card_categories); } catch { return 'the payee\'s card categories are invalid'; }
+  if (plan.single_use !== singleUse || (plan.allowed_categories || []).join(',') !== categories.join(',')) {
+    return 'the payee\'s card controls (single-use or categories) changed since this request — ask for a new request';
+  }
+  if (typeof payee.card_max_minor === 'number' && Number(plan.limit_minor) > payee.card_max_minor) {
+    return 'the card limit is now above the payee\'s per-card maximum — ask for a new request';
+  }
+  return null;
+}
+
+/**
+ * 계획을 사람이 읽는 한 문장으로 — 승인 화면 · 에이전트 응답이 같은 문장을 본다. 공급자 화면의 이름 · 카드 소지자 이름(비신뢰 ·
+ * 개인정보)은 넣지 않는다. 직접 공급자가 아니거나 계획이 아니면 ''.
+ */
+export function describeDirectPlan(row: { provider: string; currency: string; payload: unknown }): string {
+  if (!isDirectPaymentProvider(row.provider)) return '';
+  const fmt = (n: number) => formatMinorAmount(n, row.currency);
+  const provider: DirectPaymentProvider = row.provider;
+  switch (provider) {
+    case 'meta_ads':
+    case 'google_ads': {
+      const plan = row.payload as Partial<CeilingPlan> | null;
+      if (!plan || plan.plan !== 'raise_ceiling' || !plan.target) return '';
+      const from = Number(plan.from_minor);
+      const to = Number(plan.to_minor);
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) return '';
+      if (provider === 'meta_ads') {
+        return `Meta 광고 계정 act_${plan.target.ad_account_id} 의 캠페인 ${plan.target.campaign_id} 지출 한도(spend_cap)를 ${fmt(from)} → ${fmt(to)} 로 올립니다(+${fmt(to - from)}).`;
+      }
+      return `Google Ads 고객 ${plan.target.customer_id} 의 캠페인 ${plan.target.campaign_id} 총예산을 ${fmt(from)} → ${fmt(to)} 로 올립니다(+${fmt(to - from)}).`;
+    }
+    case 'stripe_issuing': {
+      const plan = row.payload as Partial<CardPlan> | null;
+      if (!plan || plan.plan !== 'issue_card' || !plan.target || !Number.isSafeInteger(plan.limit_minor)) return '';
+      const categories = Array.isArray(plan.allowed_categories) && plan.allowed_categories.length
+        ? `허용 업종: ${plan.allowed_categories.join(', ')}`
+        : '업종 제한 없음';
+      const mode = plan.livemode === false ? ' [샌드박스 카드 — 실제 돈은 나가지 않지만 이 예산은 사용으로 셉니다]' : '';
+      return `Stripe Issuing 카드 소지자 ${plan.target.cardholder} 에게 누적 한도 ${fmt(Number(plan.limit_minor))} 의 ${plan.single_use ? '일회용(첫 결제 뒤 자동 해지) ' : ''}가상 카드를 발급합니다(${categories}).${mode}`;
+    }
+    default:
+      return assertNever(provider);
+  }
+}
+
+/**
+ * 결제 기록(사람)의 거래 id 자리에 미리 채울 값. 상한 변경에는 거래 id 가 없어 계획에서 만든 기록용 값을, 카드는 실행이 받은 카드 id
+ * (`provider_response.card_id`)를 쓴다. 모르면 ''.
+ */
+export function directSuggestedRef(row: { provider: string; payload: unknown; provider_response?: unknown }): string {
+  if (!isDirectPaymentProvider(row.provider)) return '';
+  const provider: DirectPaymentProvider = row.provider;
+  switch (provider) {
+    case 'meta_ads':
+    case 'google_ads': {
+      const plan = row.payload as Partial<CeilingPlan> | null;
+      if (!plan || plan.plan !== 'raise_ceiling' || !plan.target) return '';
+      return provider === 'meta_ads'
+        ? `meta_ads:act_${plan.target.ad_account_id}/${plan.target.campaign_id}:spend_cap=${plan.to}`
+        : `google_ads:${plan.target.budget || `${plan.target.customer_id}/${plan.target.campaign_id}`}:total_amount_micros=${plan.to}`;
+    }
+    case 'stripe_issuing': {
+      const response = row.provider_response && typeof row.provider_response === 'object' ? row.provider_response as Record<string, unknown> : {};
+      return providerToken(response.card_id, PROVIDER_FORMATS.stripeId);
+    }
+    default:
+      return assertNever(provider);
+  }
 }
 
 // ── 문자열 ────────────────────────────────────────────────────────────────
@@ -439,6 +725,7 @@ export function scrubSecrets(text: string, secrets: Array<string | undefined | n
  */
 export function providerMessage(value: unknown, secrets: Array<string | undefined | null>, max = 300): string {
   if (typeof value !== 'string') return '';
-  return cleanProviderText(scrubSecrets(value, secrets), max);
+  // 공급자가 가려서 되돌려 주는 키 조각(예: Stripe 의 "sk_live_****1234")도 지운다.
+  return cleanProviderText(scrubSecrets(value, secrets).replace(/\b(?:sk|rk|pk)_(?:live|test)_[*A-Za-z0-9]+/g, '[redacted]'), max);
 }
 

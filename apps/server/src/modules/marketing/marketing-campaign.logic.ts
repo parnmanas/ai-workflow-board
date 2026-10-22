@@ -19,21 +19,32 @@ import {
 } from '../../common/marketing/marketing-constants';
 import {
   DIRECT_PAYMENT_PROVIDERS,
+  DIRECT_PROVIDER_SPECS,
   PaymentRuleError,
   canonicalDirectRef,
   isDirectPaymentProvider,
+  normalizeCardCategories,
   type DirectPaymentProvider,
 } from '../../common/marketing/payment-routes';
+import { MarketingMoneyError, parseMinorAmount } from '../../common/marketing/money';
 import { marketingError } from './marketing-errors';
 
-/** 수취인 허용 목록의 한 항목 — 경로(provider · credential_id)가 없으면 캠페인의 결제 방식을 쓴다. */
+/**
+ * 수취인 허용 목록의 한 항목 — 경로(provider · credential_id)가 없으면 캠페인의 결제 방식을 쓴다. card_* 는 카드 공급자
+ * (stripe_issuing) 수취인의 카드 통제다(docs/marketing.md "직접 결제 어댑터").
+ */
 export interface MarketingPayee {
   name: string;
   ref?: string;
   note?: string;
   provider?: DirectPaymentProvider;
   credential_id?: string;
+  card_single_use?: boolean;
+  card_categories?: string[];
+  card_max_minor?: number;
 }
+
+const CARD_FIELDS = ['card_single_use', 'card_categories', 'card_max_minor'] as const;
 
 export const MAX_PAYEES = 50;
 export const MAX_ALLOWED_DOMAINS = 50;
@@ -134,10 +145,11 @@ export function normalizeFeedbackTicketStatus(value: unknown): string {
 /**
  * 수취인 허용 목록. 이름(대소문자 무시)이 겹치면 거부 — 요청의 payee 는 이 이름으로 맞춘다.
  *
- * 수취인마다 결제 경로를 둘 수 있다(docs/marketing.md "직접 결제 어댑터"): `provider` 가 직접 공급자(meta_ads · google_ads)면
- * `credential_id` 가 필요하고 `ref` 는 그 공급자의 대상(상한이 걸린 광고 캠페인)이다 — 정규 형태로 저장한다. 같은 대상을 가리키는
- * 수취인이 둘이면 거부한다. 경로가 없는 수취인은 캠페인의 결제 방식(manual · webhook)을 쓴다. credential 이 이 계정의 그 공급자
- * 것인지는 DB 를 봐야 알아서 캠페인 서비스가 저장 때 따로 확인한다.
+ * 수취인마다 결제 경로를 둘 수 있다(docs/marketing.md "직접 결제 어댑터"): `provider` 가 직접 공급자(meta_ads · google_ads ·
+ * stripe_issuing)면 `credential_id` 가 필요하고 `ref` 는 그 공급자의 대상(상한이 걸린 광고 캠페인 · 카드 소지자)이다 — 정규 형태로
+ * 저장한다. 상한 공급자는 같은 대상을 가리키는 수취인 둘을 거부한다(열린 요청이 대상마다 하나라서). 카드 공급자 수취인만 카드 통제
+ * (card_single_use 기본 true · card_categories 정렬 · card_max_minor)를 가진다. 경로가 없는 수취인은 캠페인의 결제 방식(manual ·
+ * webhook)을 쓴다. credential 이 이 계정의 그 공급자 것인지는 DB 를 봐야 알아서 캠페인 서비스가 저장 때 따로 확인한다.
  */
 export function normalizePayees(value: unknown): MarketingPayee[] {
   if (value === null || value === undefined) return [];
@@ -156,8 +168,10 @@ export function normalizePayees(value: unknown): MarketingPayee[] {
     const note = text(entry.note, `payees[${i}].note`, 500);
     const provider = text(entry.provider, `payees[${i}].provider`, 40);
     const credentialId = text(entry.credential_id, `payees[${i}].credential_id`, 80);
+    const cardField = CARD_FIELDS.find((k) => entry[k] !== undefined && entry[k] !== null && entry[k] !== '');
     if (!provider) {
       if (credentialId) throw marketingError(400, `payees[${i}].credential_id is only for a direct payment provider (${DIRECT_PAYMENT_PROVIDERS.join(', ')})`);
+      if (cardField) throw marketingError(400, `payees[${i}].${cardField} is only for a card provider (stripe_issuing)`);
       return { name, ...(ref ? { ref } : {}), ...(note ? { note } : {}) };
     }
     if (!isDirectPaymentProvider(provider)) {
@@ -170,10 +184,41 @@ export function normalizePayees(value: unknown): MarketingPayee[] {
       if (e instanceof PaymentRuleError) throw marketingError(400, `payees[${i}].ref: ${e.message}`);
       throw e;
     }
-    const target = `${provider}:${ref}`;
-    if (targets.has(target)) throw marketingError(400, `two payees point at the same ${provider} target ${ref}`);
-    targets.add(target);
-    return { name, ref, ...(note ? { note } : {}), provider, credential_id: credentialId };
+    const spec = DIRECT_PROVIDER_SPECS[provider];
+    if (spec.exclusive) {
+      const target = `${provider}:${ref}`;
+      if (targets.has(target)) throw marketingError(400, `two payees point at the same ${provider} target ${ref}`);
+      targets.add(target);
+    }
+    if (spec.kind !== 'card') {
+      if (cardField) throw marketingError(400, `payees[${i}].${cardField} is only for a card provider (stripe_issuing)`);
+      return { name, ref, ...(note ? { note } : {}), provider, credential_id: credentialId };
+    }
+    if (entry.card_single_use !== undefined && entry.card_single_use !== null && typeof entry.card_single_use !== 'boolean') {
+      throw marketingError(400, `payees[${i}].card_single_use must be true or false`);
+    }
+    let categories: string[];
+    try {
+      categories = normalizeCardCategories(entry.card_categories);
+    } catch (e) {
+      if (e instanceof PaymentRuleError) throw marketingError(400, `payees[${i}].card_categories: ${e.message}`);
+      throw e;
+    }
+    let max: number | null = null;
+    if (entry.card_max_minor !== undefined && entry.card_max_minor !== null && entry.card_max_minor !== '') {
+      try {
+        max = parseMinorAmount(entry.card_max_minor, `payees[${i}].card_max_minor`);
+      } catch (e) {
+        if (e instanceof MarketingMoneyError) throw marketingError(400, e.message);
+        throw e;
+      }
+    }
+    return {
+      name, ref, ...(note ? { note } : {}), provider, credential_id: credentialId,
+      card_single_use: entry.card_single_use !== false,
+      card_categories: categories,
+      ...(max !== null ? { card_max_minor: max } : {}),
+    };
   });
 }
 

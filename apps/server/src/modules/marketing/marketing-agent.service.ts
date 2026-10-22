@@ -20,7 +20,7 @@ import {
 } from './marketing-json';
 import { hasCapability, resolveLimits } from './marketing-campaign.logic';
 import { marketingError } from './marketing-errors';
-import { isDirectPaymentProvider } from '../../common/marketing/payment-routes';
+import { DIRECT_PROVIDER_SPECS, isDirectPaymentProvider } from '../../common/marketing/payment-routes';
 
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -228,8 +228,12 @@ export function agentRules(campaign: MarketingCampaign): string[] {
     '채널의 홍보 규칙을 지킨다. 같은 내용을 여러 곳에 반복 게시하지 않고, 사람인 척하거나 여러 계정을 쓰지 않는다.',
     '채널은 실제로 열어 본 페이지(evidence_urls)와 그곳의 홍보 규칙을 근거로 제안한다. 승인된(active) 채널만 쓸 수 있다.',
   ];
-  if ((campaign.payees || []).some((p) => isDirectPaymentProvider(p.provider))) {
+  const directKinds = new Set((campaign.payees || []).flatMap((p) => (isDirectPaymentProvider(p.provider) ? [DIRECT_PROVIDER_SPECS[p.provider].kind] : [])));
+  if (directKinds.has('ceiling')) {
     rules.push('Meta Ads · Google Ads 수취인은 그 광고 캠페인의 지출 상한(spend_cap · 총예산)을 올린다 — amount_minor 는 상한이 늘어나는 양이고 일 예산이 아니다. payload 는 넣지 않는다(서버가 대상을 읽어 계획을 만든다). 대상마다 열린 요청은 하나라 결정을 기다린다. "사람이 고쳐야 한다" 는 거부는 다시 요청하지 말고 요약에 적는다.');
+  }
+  if (directKinds.has('card')) {
+    rules.push('Stripe Issuing 수취인은 승인 금액이 누적 한도인 가상 카드를 한 장 만들고, 사람이 그 카드로 결제한다 — amount_minor 는 카드 한도다. payload 는 넣지 않는다. 수취인의 카드당 최대 금액과 일회용 카드 한도(10,000.00) 안에서 요청한다. "사람이 고쳐야 한다" 는 거부는 다시 요청하지 말고 요약에 적는다.');
   }
   if (!campaign.capabilities?.length) rules.push('이 캠페인에는 켜진 기능이 없다 — 관찰과 보고만 한다.');
   return rules;

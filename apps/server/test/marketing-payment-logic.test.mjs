@@ -19,6 +19,9 @@
 //   9. 어댑터: 금액 · 통화 문제는 공급자를 부르기 전에 400(요청 백오프 대상이 아님), 상한 최대값 초과도 400. 실행 때 credential
 //      모양이 틀리면 보내기 전 실패(PaymentNotSentError) — unknown 이 아니다.
 //  10. 에이전트 표면: 사이클 지시문의 허용 목록 줄은 이름 그대로, 직접 결제 수취인은 따로 한 줄. 규칙 한 줄.
+//  11. Stripe Issuing(카드): 공급자 명세(카드 · 배타적 아님), 카드 소지자 ref, 수취인 카드 통제(일회용 기본 · 업종 정렬 · 카드당 최대),
+//      키 규칙(운영은 rk_live 만), API 버전 최소값, 카드 계획 검증 · 문장 · 기록용 ref, 요청 뒤 통제 변경 감지, 금액 확인, 만든 카드의
+//      대조(우리 누적 한도가 있으면 다른 한도는 좁히기만 한다), 분명한 거절의 판정, 카드 소지자 문제.
 //
 // 실행: node --test test/marketing-payment-logic.test.mjs (dist 필요)
 
@@ -29,7 +32,9 @@ import {
   DIRECT_PAYMENT_PROVIDERS, PAYMENT_CURRENCIES, PROVIDER_FORMATS, PaymentRuleError,
   parseMetaRef, parseGoogleRef, canonicalDirectRef, directTargetKey,
   minorToMetaUnits, metaUnitsToMinor, minorToGoogleMicros, googleMicrosToMinor, parseProviderInt, providerToken, providerMessage,
-  buildCeilingPlan, ceilingPlanProblems, describeCeilingPlan, ceilingProviderRef,
+  buildCeilingPlan, directPlanProblems, describeDirectPlan, directSuggestedRef,
+  DIRECT_PROVIDER_SPECS, isExclusiveTargetProvider, parseStripeRef, buildCardPlan, directPayeeProblem, normalizeCardCategories,
+  stripeKeyMode, STRIPE_SINGLE_USE_MAX_MINOR,
   payeeRoute, sameRoute, cleanProviderText, scrubSecrets, paymentApiVersion,
   isAutomaticPaymentProvider, isPaymentCurrencySupported,
 } from '../dist/common/marketing/payment-routes.js';
@@ -49,6 +54,9 @@ import {
   googleTargetProblems, buildGooglePlan, googleExecutionCheck, classifyGoogleWrite, readGoogleCredential, googleAccessToken, resetGoogleTokenCache,
   observeGoogleTarget,
 } from '../dist/modules/marketing/marketing-payment-google.js';
+import {
+  cardMismatches, checkStripeAmount, isDefiniteStripeRefusal, stripeCardholderProblems, readStripeCredential, stripeDashboardCardUrl,
+} from '../dist/modules/marketing/marketing-payment-stripe.js';
 
 // 지문 · 암호화가 쓰는 키 — 저장소의 database/.encryption_key 를 만들거나 읽지 않게 이 프로세스 전용으로 둔다.
 process.env.ENCRYPTION_KEY = `marketing-payment-logic-${randomUUID()}`;
@@ -80,7 +88,7 @@ test('payee normalization keeps routes on the payee and refuses half-configured 
   assert.deepEqual(payees[1], { name: 'Meta fall', ref: 'act_9/77', note: 'fall promo', provider: 'meta_ads', credential_id: 'cred-1' });
   assert.equal(payees[2].ref, '1112223333/5', 'stored canonical');
   const refuse = (value, pattern) => assert.throws(() => normalizePayees(value), (e) => e.status === 400 && pattern.test(e.message), String(pattern));
-  refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'x' }], /provider must be one of: meta_ads, google_ads/);
+  refuse([{ name: 'X', provider: 'paypal', credential_id: 'c', ref: 'x' }], /provider must be one of: meta_ads, google_ads, stripe_issuing/);
   refuse([{ name: 'X', provider: 'meta_ads', ref: 'act_1/2' }], /needs credential_id/);
   refuse([{ name: 'X', provider: 'meta_ads', credential_id: 'c', ref: '1/2' }], /payees\[0\]\.ref/);
   refuse([{ name: 'X', credential_id: 'c', ref: 'r' }], /only for a direct payment provider/);
@@ -91,7 +99,7 @@ test('payee normalization keeps routes on the payee and refuses half-configured 
 });
 
 test('currency table: closed, consistent with money.ts, Meta offsets exact', () => {
-  assert.deepEqual([...DIRECT_PAYMENT_PROVIDERS], ['meta_ads', 'google_ads']);
+  assert.deepEqual([...DIRECT_PAYMENT_PROVIDERS], ['meta_ads', 'google_ads', 'stripe_issuing']);
   for (const [code, spec] of Object.entries(PAYMENT_CURRENCIES)) {
     assert.equal(currencyExponent(code), spec.exponent, `${code} exponent matches money.ts`);
     assert.ok(spec.meta_offset === 1 || spec.meta_offset === 100, code);
@@ -160,7 +168,7 @@ test('ceiling plans: arithmetic, target and fingerprint are checked; text and re
   assert.deepEqual([plan.from, plan.to, plan.from_minor, plan.to_minor], ['100000', '130000', 100000, 130000]);
   assert.equal(plan.field, 'spend_cap');
   assert.equal(plan.target_name_untrusted, 'Fall promo', 'direction overrides and newlines are stripped');
-  assert.deepEqual(ceilingPlanProblems(metaRow(plan)), []);
+  assert.deepEqual(directPlanProblems(metaRow(plan)), []);
   const broken = [
     [{ ...plan, to: '140000', to_minor: 140000 }, /does not equal the requested amount/],
     [{ ...plan, to_minor: 140000 }, /convert consistently/],
@@ -171,15 +179,15 @@ test('ceiling plans: arithmetic, target and fingerprint are checked; text and re
     [{ webhook: true }, /not a ceiling plan/],
   ];
   for (const [payload, pattern] of broken) {
-    const problems = ceilingPlanProblems(metaRow(payload));
+    const problems = directPlanProblems(metaRow(payload));
     assert.ok(problems.some((p) => pattern.test(p)), `${pattern} in ${problems.join(' | ')}`);
   }
-  assert.ok(ceilingPlanProblems(metaRow(plan, { amount_minor: 1 })).some((p) => /requested amount/.test(p)));
-  assert.ok(ceilingPlanProblems(metaRow(plan, { payee_ref: 'act_9/99' })).some((p) => /payee ref/.test(p)), 'payee re-pointed');
-  assert.equal(describeCeilingPlan(metaRow(plan)),
+  assert.ok(directPlanProblems(metaRow(plan, { amount_minor: 1 })).some((p) => /requested amount/.test(p)));
+  assert.ok(directPlanProblems(metaRow(plan, { payee_ref: 'act_9/99' })).some((p) => /payee ref/.test(p)), 'payee re-pointed');
+  assert.equal(describeDirectPlan(metaRow(plan)),
     'Meta 광고 계정 act_9 의 캠페인 77 지출 한도(spend_cap)를 1,000.00 USD → 1,300.00 USD 로 올립니다(+300.00 USD).');
-  assert.equal(describeCeilingPlan({ provider: 'webhook', currency: 'USD', payload: plan }), '');
-  assert.equal(ceilingProviderRef(metaRow(plan)), 'meta_ads:act_9/77:spend_cap=130000');
+  assert.equal(describeDirectPlan({ provider: 'webhook', currency: 'USD', payload: plan }), '');
+  assert.equal(directSuggestedRef(metaRow(plan)), 'meta_ads:act_9/77:spend_cap=130000');
   assert.throws(() => metaPlan({ fromUnits: 9_223_372_036_854_775_000n, amountMinor: 100000 }),
     (e) => e instanceof PaymentRuleError && e.status === 400 && /provider maximum/.test(e.message), 'depends on the amount — 400, not a backoff');
 
@@ -189,10 +197,10 @@ test('ceiling plans: arithmetic, target and fingerprint are checked; text and re
     extra: { test_account: false, end_date_time: '2026-12-31 23:59:59' },
   });
   assert.deepEqual([g.from, g.to, g.from_minor, g.to_minor], ['500000000000', '700000000000', 500000, 700000]);
-  assert.deepEqual(ceilingPlanProblems({ provider: 'google_ads', payee_ref: '1112223333/5', currency: 'KRW', amount_minor: 200000, payload: g }), []);
-  assert.equal(describeCeilingPlan({ provider: 'google_ads', currency: 'KRW', payload: g }),
+  assert.deepEqual(directPlanProblems({ provider: 'google_ads', payee_ref: '1112223333/5', currency: 'KRW', amount_minor: 200000, payload: g }), []);
+  assert.equal(describeDirectPlan({ provider: 'google_ads', currency: 'KRW', payload: g }),
     'Google Ads 고객 1112223333 의 캠페인 5 총예산을 500,000 KRW → 700,000 KRW 로 올립니다(+200,000 KRW).');
-  assert.equal(ceilingProviderRef({ provider: 'google_ads', payload: g }), 'google_ads:customers/1112223333/campaignBudgets/8:total_amount_micros=700000000000');
+  assert.equal(directSuggestedRef({ provider: 'google_ads', payload: g }), 'google_ads:customers/1112223333/campaignBudgets/8:total_amount_micros=700000000000');
 });
 
 test('routes: a payee route wins over the campaign method, and snapshots are compared', () => {
@@ -374,9 +382,9 @@ test('agent surfaces: exact payee names on the allowlist line, direct payees on 
     campaign: { id: 'k1', name: 'Launch', product_brief: 'b', goal: '', target_audience: '', capabilities: ['paid_spend'], currency: 'USD', allowed_domains: [], ...campaign },
     rules: [], limits: {}, channels: [], budget: [], pending: { drafts: 0, spend: 0, allocations: 0, channels: 0 }, decisions: [], report: [], previous: null, untrusted: [],
   });
-  const prompt = buildCyclePrompt(input({ payees: ['Newsletter', 'Meta fall'], direct_payees: [{ name: 'Meta fall', provider: 'Meta Ads' }] }));
+  const prompt = buildCyclePrompt(input({ payees: ['Newsletter', 'Meta fall'], direct_payees: [{ name: 'Meta fall', provider: 'Meta Ads', effect: '광고 캠페인 지출 상한을 amount_minor 만큼 올림' }] }));
   assert.match(prompt, /수취인 허용 목록: Newsletter, Meta fall\n/, 'names exactly as they go into payee');
-  assert.match(prompt, /- 직접 결제 수취인 — 그 광고 캠페인의 지출 상한을 올린다\(amount_minor = 상한 증가분, payload 없이\): Meta fall\(Meta Ads\)\n/);
+  assert.match(prompt, /- 직접 결제 수취인\(payload 없이 요청한다\): Meta fall\(Meta Ads — 광고 캠페인 지출 상한을 amount_minor 만큼 올림\)\n/);
   assert.doesNotMatch(buildCyclePrompt(input({ payees: ['Newsletter'] })), /직접 결제 수취인/);
   const plain = agentRules({ capabilities: ['paid_spend'], payees: [{ name: 'Newsletter' }] });
   assert.equal(plain.some((r) => /Meta Ads · Google Ads 수취인/.test(r)), false, 'no direct payees, no rule');
@@ -479,9 +487,163 @@ test('secrets are scrubbed before provider text is cut — a long token across t
 
 test('adapters convert the amount without the network first, so later refusals can be told apart', () => {
   for (const provider of DIRECT_PAYMENT_PROVIDERS) {
-    assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(30000, 'USD'), provider);
-    assert.throws(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(100, 'KWD'), (e) => e instanceof PaymentRuleError && e.status === 409, `${provider}: a person fixes the currency`);
+    assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(30000, 'USD', { name: 'P' }), provider);
+    assert.throws(() => DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(100, 'KWD', { name: 'P' }), (e) => e instanceof PaymentRuleError && e.status === 409, `${provider}: a person fixes the currency`);
   }
   assert.throws(() => DIRECT_PAYMENT_ADAPTERS.meta_ads.checkAmount(150, 'HUF'), (e) => e.status === 400 && /multiple of/.test(e.message));
   assert.doesNotThrow(() => DIRECT_PAYMENT_ADAPTERS.google_ads.checkAmount(150, 'HUF'), 'Google takes HUF minor units (micros)');
+});
+
+const cardPlan = (over = {}) => ({
+  ...buildCardPlan({
+    target: { cardholder: 'ich_123' }, currency: 'USD', amountMinor: 30000, singleUse: true, categories: ['advertising_services'],
+    livemode: false, credentialFingerprint: FP,
+  }),
+  ...over,
+});
+const cardRow = (payload, over = {}) => ({ provider: 'stripe_issuing', payee_ref: 'ich_123', currency: 'USD', amount_minor: 30000, payload, ...over });
+
+test('Stripe Issuing: a card provider, not exclusive; the payee ref is a cardholder; card controls live on the payee', () => {
+  assert.deepEqual(DIRECT_PROVIDER_SPECS.stripe_issuing, { kind: 'card', exclusive: false });
+  assert.equal(isExclusiveTargetProvider('stripe_issuing'), false);
+  assert.equal(isExclusiveTargetProvider('meta_ads'), true);
+  assert.deepEqual(parseStripeRef(' ich_1MsKAB2eZvKYlo2C '), { cardholder: 'ich_1MsKAB2eZvKYlo2C' });
+  assert.equal(canonicalDirectRef('stripe_issuing', 'ich_abc'), 'ich_abc');
+  assert.equal(directTargetKey('stripe_issuing', 'ich_abc'), 'stripe_issuing:ich_abc');
+  for (const bad of ['ic_123', 'ich_', 'ich_12-3', 'cus_1', 'act_1/2', '']) assert.throws(() => parseStripeRef(bad), PaymentRuleError, bad);
+
+  const [card, plain, meta, twin] = normalizePayees([
+    { name: 'Card', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_categories: 'software, Advertising_Services ,advertising_services' },
+    { name: 'Newsletter', ref: 'inv' },
+    { name: 'Meta', provider: 'meta_ads', credential_id: 'm', ref: 'act_1/2' },
+    { name: 'Card twin', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_single_use: false, card_max_minor: 50000 },
+  ]);
+  assert.deepEqual(card, { name: 'Card', ref: 'ich_1', provider: 'stripe_issuing', credential_id: 'c', card_single_use: true, card_categories: ['advertising_services', 'software'] },
+    'single-use by default, categories lower-cased, deduped and sorted');
+  assert.deepEqual(twin.card_single_use, false);
+  assert.equal(twin.card_max_minor, 50000);
+  assert.equal(twin.ref, card.ref, 'two card payees may share a cardholder (cards do not interfere)');
+  assert.deepEqual(plain, { name: 'Newsletter', ref: 'inv' });
+  assert.equal('card_single_use' in meta, false);
+  const refuse = (value, pattern) => assert.throws(() => normalizePayees(value), (e) => e.status === 400 && pattern.test(e.message), String(pattern));
+  refuse([{ name: 'X', ref: 'inv', card_single_use: false }], /card_single_use is only for a card provider/);
+  refuse([{ name: 'X', provider: 'meta_ads', credential_id: 'm', ref: 'act_1/2', card_categories: ['software'] }], /card_categories is only for a card provider/);
+  refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_single_use: 'yes' }], /card_single_use must be true or false/);
+  refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_categories: ['Advertising Services'] }], /not a Stripe merchant category name/);
+  refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_max_minor: -5 }], /card_max_minor/);
+  refuse([{ name: 'X', provider: 'stripe_issuing', credential_id: 'c', ref: 'act_1/2' }], /cardholder id/);
+  assert.throws(() => normalizeCardCategories(Array.from({ length: 21 }, (_, i) => `cat_${i}`)), /at most 20/);
+});
+
+test('Stripe keys: live needs a restricted key; the API version has a floor', () => {
+  assert.equal(stripeKeyMode('rk_live_abcdefgh12345'), 'live');
+  assert.equal(stripeKeyMode('rk_test_abcdefgh12345'), 'test');
+  assert.equal(stripeKeyMode('sk_test_abcdefgh12345'), 'test');
+  assert.throws(() => stripeKeyMode('sk_live_abcdefgh12345'), (e) => e.status === 400 && /restricted key \(rk_live_…\) in live mode/.test(e.message));
+  assert.throws(() => stripeKeyMode('pk_live_abcdefgh12345'), /must be a restricted key/);
+  assert.throws(() => readStripeCredential({ secret_key: 'sk_live_abcdefgh12345' }), (e) => e.status === 400);
+  assert.deepEqual(readStripeCredential({ secret_key: 'rk_test_abcdefgh12345' }), { secret_key: 'rk_test_abcdefgh12345', mode: 'test' });
+  assert.equal(paymentApiVersion('stripe_issuing', {}), '2026-09-30.endive');
+  assert.equal(paymentApiVersion('stripe_issuing', { MARKETING_STRIPE_API_VERSION: '2027-03-25.fennel' }), '2027-03-25.fennel');
+  assert.equal(paymentApiVersion('stripe_issuing', { MARKETING_STRIPE_API_VERSION: '2026-02-25.clover' }), '2026-09-30.endive', 'before single-use cards existed');
+  assert.equal(paymentApiVersion('stripe_issuing', { MARKETING_STRIPE_API_VERSION: '2026-10-28.preview' }), '2026-09-30.endive', 'no preview channel');
+  assert.equal(paymentApiVersion('stripe_issuing', { MARKETING_STRIPE_API_VERSION: 'latest' }), '2026-09-30.endive');
+  assert.equal(providerMessage('No such key: sk_live_****1234 or rk_test_abc', []), 'No such key: [redacted] or [redacted]', 'masked key echoes are scrubbed too');
+});
+
+test('Stripe card plans: limit = amount, cardholder = payee ref, controls well-formed; text, ref and drift', () => {
+  const plan = cardPlan();
+  assert.deepEqual(plan, {
+    plan: 'issue_card', provider: 'stripe_issuing', target: { cardholder: 'ich_123' }, currency: 'USD', limit_minor: 30000, interval: 'all_time',
+    single_use: true, allowed_categories: ['advertising_services'], livemode: false, credential_fingerprint: FP,
+  });
+  assert.equal(JSON.stringify(plan).includes('name'), false, 'no cardholder name in the plan (agents read plans)');
+  assert.deepEqual(directPlanProblems(cardRow(plan)), []);
+  const broken = [
+    [{ limit_minor: 40000 }, /card limit does not equal the requested amount/],
+    [{ target: { cardholder: 'ich_999' } }, /cardholder does not match the payee ref/],
+    [{ currency: 'EUR' }, /currency does not match/],
+    [{ interval: 'monthly' }, /all_time/],
+    [{ single_use: 'yes' }, /single-use/],
+    [{ allowed_categories: ['software', 'advertising_services'] }, /sorted list/],
+    [{ livemode: undefined }, /live or sandbox/],
+    [{ credential_fingerprint: '' }, /fingerprint/],
+    [{ plan: 'raise_ceiling' }, /not a card plan/],
+  ];
+  for (const [over, pattern] of broken) {
+    const problems = directPlanProblems(cardRow(cardPlan(over)));
+    assert.ok(problems.some((p) => pattern.test(p)), `${pattern} in ${problems.join(' | ')}`);
+  }
+  const big = cardPlan({ limit_minor: STRIPE_SINGLE_USE_MAX_MINOR + 1 });
+  assert.ok(directPlanProblems(cardRow(big, { amount_minor: STRIPE_SINGLE_USE_MAX_MINOR + 1 })).some((p) => /single-use card cannot carry/.test(p)));
+  assert.ok(directPlanProblems(cardRow(plan, { currency: 'KRW' })).some((p) => /not a Stripe Issuing card currency/.test(p)));
+  assert.equal(describeDirectPlan(cardRow(plan)),
+    'Stripe Issuing 카드 소지자 ich_123 에게 누적 한도 300.00 USD 의 일회용(첫 결제 뒤 자동 해지) 가상 카드를 발급합니다(허용 업종: advertising_services). [샌드박스 카드 — 실제 돈은 나가지 않지만 이 예산은 사용으로 셉니다]');
+  assert.equal(describeDirectPlan(cardRow(cardPlan({ single_use: false, allowed_categories: [], livemode: true }))),
+    'Stripe Issuing 카드 소지자 ich_123 에게 누적 한도 300.00 USD 의 가상 카드를 발급합니다(업종 제한 없음).');
+  assert.equal(directSuggestedRef({ ...cardRow(plan), provider_response: { card_id: 'ic_9' } }), 'ic_9');
+  assert.equal(directSuggestedRef({ ...cardRow(plan), provider_response: { card_id: 'ic 9; drop' } }), '', 'only an id-shaped value');
+  assert.equal(directSuggestedRef(cardRow(plan)), '');
+
+  const payee = { name: 'Card', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_123', card_single_use: true, card_categories: ['advertising_services'] };
+  assert.equal(directPayeeProblem(cardRow(plan), payee), null);
+  assert.match(directPayeeProblem(cardRow(plan), { ...payee, card_single_use: false }), /card controls .* changed since this request/);
+  assert.match(directPayeeProblem(cardRow(plan), { ...payee, card_categories: [] }), /changed since this request/);
+  assert.equal(directPayeeProblem(cardRow(plan), { ...payee, card_categories: ['advertising_services', 'advertising_services'] }), null, 'compared as sets');
+  assert.match(directPayeeProblem(cardRow(plan), { ...payee, card_max_minor: 20000 }), /above the payee's per-card maximum/);
+  assert.equal(directPayeeProblem(metaRow(metaPlan()), payee), null, 'ceiling plans are guarded by the route alone');
+});
+
+test('Stripe amounts are checked without the network: card currency, single-use limit, per-card maximum', () => {
+  const payee = { name: 'Card' };
+  assert.doesNotThrow(() => checkStripeAmount(30000, 'EUR', payee));
+  assert.throws(() => checkStripeAmount(30000, 'KRW', payee), (e) => e.status === 409 && /not a Stripe Issuing card currency/.test(e.message));
+  assert.throws(() => checkStripeAmount(STRIPE_SINGLE_USE_MAX_MINOR + 1, 'USD', payee), (e) => e.status === 400 && /single-use card can carry at most 10,000.00 USD/.test(e.message));
+  assert.doesNotThrow(() => checkStripeAmount(STRIPE_SINGLE_USE_MAX_MINOR + 1, 'USD', { ...payee, card_single_use: false }));
+  assert.throws(() => checkStripeAmount(60000, 'USD', { ...payee, card_max_minor: 50000 }), (e) => e.status === 400 && /per-card maximum is 500.00 USD/.test(e.message));
+});
+
+test('Stripe cards are matched against the plan; only Stripe error objects count as definite refusals', () => {
+  const plan = cardPlan();
+  const card = (over = {}) => ({
+    id: 'ic_1', object: 'issuing.card', cardholder: { id: 'ich_123', name: 'Jane Doe', email: 'jane@example.com' }, currency: 'usd', type: 'virtual',
+    status: 'inactive', livemode: false, metadata: { awb_spend_request_id: 'req-1' },
+    spending_controls: { spending_limits: [{ amount: 30000, interval: 'all_time', categories: null }], spending_limits_currency: 'usd', allowed_categories: ['advertising_services'], blocked_categories: null },
+    lifecycle_controls: { cancel_after: { payment_count: 1 } },
+    ...over,
+  });
+  assert.deepEqual(cardMismatches(card(), plan, 'req-1', 'inactive'), []);
+  assert.deepEqual(cardMismatches(card({ status: 'active' }), plan, 'req-1', 'active'), []);
+  const tighter = card({ spending_controls: { ...card().spending_controls, spending_limits: [{ amount: 30000, interval: 'all_time' }, { amount: 5000, interval: 'daily' }] } });
+  assert.deepEqual(cardMismatches(tighter, plan, 'req-1', 'inactive'), [], 'an extra limit only narrows what the card can spend');
+  const mismatch = (over, field) => assert.ok(cardMismatches(card(over), plan, 'req-1', 'inactive').includes(field), field);
+  mismatch({ status: 'active' }, 'status');
+  mismatch({ cardholder: { id: 'ich_999' } }, 'cardholder');
+  mismatch({ currency: 'eur' }, 'currency');
+  mismatch({ livemode: true }, 'livemode');
+  mismatch({ metadata: {} }, 'metadata');
+  mismatch({ lifecycle_controls: null }, 'lifecycle_controls');
+  mismatch({ spending_controls: { ...card().spending_controls, spending_limits: [{ amount: 300000, interval: 'all_time' }] } }, 'spending_limits');
+  mismatch({ spending_controls: { ...card().spending_controls, allowed_categories: null } }, 'allowed_categories');
+  mismatch({ spending_controls: { ...card().spending_controls, blocked_categories: ['gambling'] } }, 'blocked_categories');
+  assert.deepEqual(cardMismatches({ id: 'ic_1' }, plan, 'req-1', 'inactive'), ['object']);
+  assert.equal(stripeDashboardCardUrl('ic_1', true), 'https://dashboard.stripe.com/issuing/cards/ic_1');
+  assert.equal(stripeDashboardCardUrl('ic_1', false), 'https://dashboard.stripe.com/test/issuing/cards/ic_1');
+
+  const stripeErr = (type) => ({ isStripeError: !!type, type: type || '' });
+  for (const status of [400, 401, 402, 403, 404, 429]) assert.equal(isDefiniteStripeRefusal(status, stripeErr('invalid_request_error')), true, String(status));
+  assert.equal(isDefiniteStripeRefusal(400, stripeErr('idempotency_error')), false, 'the first request may have run');
+  assert.equal(isDefiniteStripeRefusal(400, stripeErr('')), false, 'not a Stripe error object (proxy) — ambiguous');
+  for (const status of [409, 424, 500, 502, 503]) assert.equal(isDefiniteStripeRefusal(status, stripeErr('api_error')), false, String(status));
+
+  const holder = (over = {}) => ({ api_version: 'v', id: 'ich_123', status: 'active', type: 'individual', livemode: false, disabled_reason: '', past_due: 0, name_untrusted: 'Jane', ...over });
+  const sandboxKey = { secret_key: 'rk_test_x', mode: 'test' };
+  assert.deepEqual(stripeCardholderProblems(holder(), { cardholder: 'ich_123' }, sandboxKey), []);
+  const problem = (over, pattern, key = sandboxKey) => assert.ok(stripeCardholderProblems(holder(over), { cardholder: 'ich_123' }, key).some((p) => pattern.test(p)), String(pattern));
+  problem({ status: 'inactive' }, /cardholder is inactive/);
+  problem({ disabled_reason: 'requirements.past_due' }, /disabled \(requirements\.past_due\)/);
+  problem({ past_due: 2 }, /2 past-due requirement/);
+  problem({ livemode: true }, /sandbox key but the cardholder is a live cardholder/);
+  problem({ livemode: null }, /unknown mode/);
+  problem({}, /live key but the cardholder is a sandbox cardholder/, { secret_key: 'rk_live_x', mode: 'live' });
 });

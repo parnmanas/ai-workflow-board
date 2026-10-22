@@ -26,7 +26,7 @@ import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
 import { marketingError } from './marketing-errors';
 import { computeNextCycleAt, resolveLimits } from './marketing-campaign.logic';
-import { DIRECT_PAYMENT_PROVIDER_LABELS, isDirectPaymentProvider } from '../../common/marketing/payment-routes';
+import { DIRECT_PAYMENT_PROVIDER_LABELS, DIRECT_PROVIDER_SPECS, isDirectPaymentProvider } from '../../common/marketing/payment-routes';
 
 const DEFAULT_TICK_MS = 60_000;
 const MIN_TICK_MS = 5_000;
@@ -280,7 +280,13 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
         allowed_domains: campaign.allowed_domains || [],
         payees: (campaign.payees || []).map((p) => p.name),
         direct_payees: (campaign.payees || []).flatMap((p) => (isDirectPaymentProvider(p.provider)
-          ? [{ name: p.name, provider: DIRECT_PAYMENT_PROVIDER_LABELS[p.provider] }]
+          ? [{
+            name: p.name,
+            provider: DIRECT_PAYMENT_PROVIDER_LABELS[p.provider],
+            effect: DIRECT_PROVIDER_SPECS[p.provider].kind === 'card'
+              ? 'amount_minor 한도의 가상 카드 발급'
+              : '광고 캠페인 지출 상한을 amount_minor 만큼 올림',
+          }]
           : [])),
       },
       rules: agentRules(campaign),

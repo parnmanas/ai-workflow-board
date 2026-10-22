@@ -122,12 +122,22 @@ export class MarketingCampaign {
   payment_credential_id: string | null;
 
   /**
-   * 지출 수취인 허용 목록 — 사람만 고친다. [{ name, ref?, note?, provider?, credential_id? }]
-   * provider(meta_ads · google_ads)가 있는 수취인은 그 공급자의 상한이 걸린 대상(ref)으로만 돈이 간다(docs/marketing.md
-   * "직접 결제 어댑터"). 없으면 위의 결제 방식(manual · webhook)을 쓴다.
+   * 지출 수취인 허용 목록 — 사람만 고친다. [{ name, ref?, note?, provider?, credential_id?, card_* ? }]
+   * provider(meta_ads · google_ads · stripe_issuing)가 있는 수취인은 그 공급자의 대상(ref — 광고 캠페인 상한 · 카드 소지자)으로만
+   * 돈이 간다(docs/marketing.md "직접 결제 어댑터"). card_single_use · card_categories · card_max_minor 는 stripe_issuing 수취인의
+   * 카드 통제다. provider 가 없으면 위의 결제 방식(manual · webhook)을 쓴다.
    */
   @Column({ type: 'simple-json', default: '[]' })
-  payees: Array<{ name: string; ref?: string; note?: string; provider?: 'meta_ads' | 'google_ads'; credential_id?: string }>;
+  payees: Array<{
+    name: string;
+    ref?: string;
+    note?: string;
+    provider?: 'meta_ads' | 'google_ads' | 'stripe_issuing';
+    credential_id?: string;
+    card_single_use?: boolean;
+    card_categories?: string[];
+    card_max_minor?: number;
+  }>;
 
   /** 추적 링크 목적지로 허용하는 도메인(오픈 리다이렉트 방지). */
   @Column({ type: 'simple-json', default: '[]' })

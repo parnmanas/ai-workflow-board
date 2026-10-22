@@ -59,8 +59,8 @@ export class MarketingSpendRequest {
   expected_outcome: string;
 
   /**
-   * manual | webhook | meta_ads | google_ads — 요청 시점 수취인 결제 경로의 스냅샷(수취인의 직접 공급자, 없으면 캠페인의 결제
-   * 방식). 에이전트가 고르지 않는다. 승인 · 실행 때 수취인의 지금 경로와 다르면 실행하지 않는다.
+   * manual | webhook | meta_ads | google_ads | stripe_issuing — 요청 시점 수취인 결제 경로의 스냅샷(수취인의 직접 공급자, 없으면
+   * 캠페인의 결제 방식). 에이전트가 고르지 않는다. 승인 · 실행 때 수취인의 지금 경로와 다르면 실행하지 않는다.
    */
   @Column({ type: 'varchar' })
   provider: string;
@@ -70,12 +70,12 @@ export class MarketingSpendRequest {
 
   /**
    * 실행 세부. manual · webhook 은 에이전트가 준 것을 공급자에게 그대로 전달한다. 직접 공급자는 서버가 요청 때 대상을 읽어 만든
-   * 실행 계획(`CeilingPlan` — 대상 · 필드 · from → to)이고, 에이전트는 payload 를 줄 수 없다.
+   * 실행 계획(`CeilingPlan` — 대상 · 필드 · from → to, `CardPlan` — 카드 소지자 · 한도 · 통제)이고, 에이전트는 payload 를 줄 수 없다.
    */
   @Column({ type: 'simple-json', default: '{}' })
   payload: Record<string, any>;
 
-  /** 직접 공급자의 대상 키(`meta_ads:act_1/2`) — 열린 요청을 대상마다 하나로 묶는다. manual · webhook 은 ''. */
+  /** 상한 공급자의 대상 키(`meta_ads:act_1/2`) — 열린 요청을 대상마다 하나로 묶는다. 카드 공급자 · manual · webhook 은 ''. */
   @Column({ type: 'varchar', default: '' })
   target_key: string;
 

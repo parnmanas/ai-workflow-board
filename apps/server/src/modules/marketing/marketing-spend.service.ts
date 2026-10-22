@@ -30,20 +30,26 @@ import {
   readWebhookSecret,
   type PaymentOutcome,
 } from './marketing-payments';
-import { DIRECT_PAYMENT_ADAPTERS, type DirectAdapterContext, type TargetReport } from './marketing-payment-adapters';
+import { DIRECT_PAYMENT_ADAPTERS, type DirectAdapterContext, type DirectInspection, type TargetReport } from './marketing-payment-adapters';
+import type { IssuedCardView } from './marketing-payment-stripe';
 import {
   DIRECT_FAIL_GRACE_MS,
   DIRECT_PAYMENT_PROVIDERS,
   DIRECT_PAYMENT_PROVIDER_LABELS,
+  DIRECT_PROVIDER_SPECS,
   PaymentRuleError,
-  ceilingPlanProblems,
+  directPayeeProblem,
+  directPlanProblems,
   directTargetKey,
   isAutomaticPaymentProvider,
   isDirectPaymentProvider,
+  isExclusiveTargetProvider,
   payeeRoute,
   sameRoute,
+  type CardPlan,
   type CeilingPlan,
   type DirectPaymentProvider,
+  type DirectPlan,
   type PaymentRoute,
 } from '../../common/marketing/payment-routes';
 
@@ -75,7 +81,7 @@ export interface PayeePaymentCheck extends TargetReport {
   provider: DirectPaymentProvider;
   ref: string;
   credential_id: string;
-  /** 이 대상에 열린 지출 요청(대상마다 하나). 다른 계정의 것이면 `{ id: '', status: 'other_account' }`. */
+  /** 이 대상에 열린 지출 요청(상한 공급자 — 대상마다 하나). 다른 계정의 것이면 `{ id: '', status: 'other_account' }`. 카드 공급자는 null. */
   open_request: { id: string; status: string } | null;
   /** 읽기가 실패했을 때 공급자가 준 글(정리 · 비밀 지움) — 사람이 보는 연결 확인에만 싣는다. */
   provider_message_untrusted?: string;
@@ -86,21 +92,35 @@ export interface PaymentCheckResult {
   payees: PayeePaymentCheck[];
 }
 
-export interface SpendInspection {
-  spend_request_id: string;
-  status: string;
-  from: string;
-  to: string;
-  from_minor: number;
-  to_minor: number;
-  /** 지금 상한(공급자 단위), 없으면 null. */
-  observed: string | null;
-  observed_minor: number | null;
-  /** 지금 상한이 계획의 어디에 있나 — 판정이 아니라 대조를 돕는 표시다. */
-  position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
-  report: TargetReport;
-  checked_at: string;
-}
+/** 요청별 공급자 확인 — 판정이 아니라 대조를 돕는 표시다. 상한은 지금 값의 위치, 카드는 이 요청의 카드. */
+export type SpendInspection =
+  | {
+    kind: 'ceiling';
+    spend_request_id: string;
+    status: string;
+    from: string;
+    to: string;
+    from_minor: number;
+    to_minor: number;
+    /** 지금 상한(공급자 단위), 없으면 null. */
+    observed: string | null;
+    observed_minor: number | null;
+    /** 지금 상한이 계획의 어디에 있나. */
+    position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
+    report: TargetReport;
+    checked_at: string;
+  }
+  | {
+    kind: 'card';
+    spend_request_id: string;
+    status: string;
+    limit_minor: number;
+    /** found: 이 요청의 카드가 있다 · none: 실행 시각 ±1일 범위를 다 봤고 없다 · incomplete: 다 보지 못했다(없음이 아니다). */
+    result: 'found' | 'none' | 'incomplete';
+    cards: IssuedCardView[];
+    api_version: string;
+    checked_at: string;
+  };
 
 export interface SpendDecision {
   request: MarketingSpendRequest;
@@ -295,7 +315,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         const winner = await this.spendRepo.findOne({ where: { campaign_id: campaign.id, dedupe_key: dedupeKey } });
         if (winner) return { request: winner, duplicate: true };
       }
-      if (prepared) {
+      if (prepared && prepared.targetKey) {
         // 같은 대상에 열린 요청이 그 사이 생겼다(uq_marketing_spend_open_target). 다시 볼 때 이미 닫혔을 수도 있다 — 그래도 DB 오류
         // 문구를 그대로 내보내지 않는다.
         const open = await this.openRequestForTarget(prepared.targetKey);
@@ -316,7 +336,14 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       summary: `지출 요청: ${formatMinorAmount(amount, currency)} → ${payee.name} (${channel.name}) — ${purpose.slice(0, 120)}`,
       detail: {
         channel_id: channel.id, amount_minor: amount, currency, payee: payee.name, provider: saved.provider, payload_sha256: saved.payload_sha256,
-        ...(prepared ? { target_key: prepared.targetKey, from_minor: prepared.plan.from_minor, to_minor: prepared.plan.to_minor } : {}),
+        ...(prepared
+          ? {
+            target_key: prepared.targetKey,
+            ...(prepared.plan.plan === 'raise_ceiling'
+              ? { from_minor: prepared.plan.from_minor, to_minor: prepared.plan.to_minor }
+              : { limit_minor: prepared.plan.limit_minor, single_use: prepared.plan.single_use }),
+          }
+          : {}),
       },
     });
     this.audit.notify(campaign.account_id, campaign.id, 'spend_request', saved.id, 'requested');
@@ -336,7 +363,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     amount: number,
     currency: string,
     actor: MarketingActor,
-  ): Promise<{ plan: CeilingPlan; targetKey: string }> {
+  ): Promise<{ plan: DirectPlan; targetKey: string }> {
     const label = DIRECT_PAYMENT_PROVIDER_LABELS[provider];
     let targetKey: string;
     try {
@@ -344,11 +371,14 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     } catch (e: any) {
       throw marketingError(400, `payee "${payee.name}": ${e?.message || e} — a person fixes the payee ref`);
     }
-    // 같은 계정의 열린 요청은 공급자를 읽기 전에 바로 알린다. 다른 계정의 것은 이 credential 이 그 대상을 실제로 읽을 수 있음을
-    // (계획이 만들어짐을) 확인한 뒤에만, id · 상태 없이 알린다 — 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게.
-    const open = await this.openRequestForTarget(targetKey);
+    // 상한 공급자만 대상마다 열린 요청이 하나다(카드는 서로 영향이 없다). 같은 계정의 열린 요청은 공급자를 읽기 전에 바로 알린다.
+    // 다른 계정의 것은 이 credential 이 그 대상을 실제로 읽을 수 있음을(계획이 만들어짐을) 확인한 뒤에만, id · 상태 없이 알린다 —
+    // 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게.
+    const exclusive = isExclusiveTargetProvider(provider);
+    const open = exclusive ? await this.openRequestForTarget(targetKey) : null;
     if (open && open.account_id === campaign.account_id) throw marketingError(409, this.openTargetMessage(open, campaign.account_id));
     const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, route.credential_id || '', campaign.account_id);
+    DIRECT_PAYMENT_ADAPTERS[provider].checkCredential(fields);
     const backoffKey = `${campaign.id}\u0000${targetKey}\u0000${fingerprint}`;
     /**
      * 거절 — 감사(`spend.refused`)에 남기고 던질 오류를 돌려준다. 문구는 "다음 사이클에 다시" · "금액을 바꾼다" · "사람이 고쳐야 한다" 를
@@ -379,7 +409,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     };
     // 금액 · 통화(단위 변환)는 공급자를 읽기 전에 본다 — 공급자 호출 없이 거절하고 쉬게 하지 않는다(금액을 고쳐 바로 다시 물을 수 있다).
     try {
-      DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(amount, currency);
+      DIRECT_PAYMENT_ADAPTERS[provider].checkAmount(amount, currency, payee);
     } catch (e: any) {
       if (e instanceof PaymentRuleError) throw await refuse(e, false);
       throw e;
@@ -391,9 +421,9 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     else if (held) {
       throw marketingError(held.status, `${held.reason} (not asking ${label} again before ${new Date(held.until).toISOString()} — wait until then${held.openTarget ? ' or until that request is decided' : ''}${held.status === 400 ? ', then ask once with an amount that fits' : ''})`);
     }
-    let plan: CeilingPlan;
+    let plan: DirectPlan;
     try {
-      plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, ctx: this.adapterContext() });
+      plan = await DIRECT_PAYMENT_ADAPTERS[provider].plan({ ref: route.ref, fields, fingerprint, amountMinor: amount, currency, payee, ctx: this.adapterContext() });
     } catch (e: any) {
       if (e instanceof PaymentRuleError || e instanceof PaymentReadError) throw await refuse(e, true);
       throw e;
@@ -406,10 +436,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       this.providerBackoff.set(backoffKey, { until: Date.now() + PROVIDER_BACKOFF_MS, reason, status: 409, openTarget: true });
       throw marketingError(409, reason);
     }
-    return { plan, targetKey };
+    return { plan, targetKey: exclusive ? targetKey : '' };
   }
 
   private async openRequestForTarget(targetKey: string): Promise<MarketingSpendRequest | null> {
+    // '' 는 manual · webhook · 카드 요청 모두의 기본값이다 — 대상이 아니다.
+    if (!targetKey) return null;
     return this.spendRepo.findOne({ where: { target_key: targetKey, status: In(OPEN_TARGET_STATUSES) } });
   }
 
@@ -581,8 +613,20 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     return this.get(id, accountId);
   }
 
-  async markFailed(id: string, accountId: string, actor: MarketingActor, note = ''): Promise<MarketingSpendRequest> {
+  async markFailed(
+    id: string,
+    accountId: string,
+    actor: MarketingActor,
+    note = '',
+    opts: { confirmNoSpend?: boolean } = {},
+  ): Promise<MarketingSpendRequest> {
     const pre = await this.get(id, accountId);
+    // 카드 공급자의 결과 불명: 이 요청의 카드가 있는지 Stripe 에서 먼저 찾는다(읽기 — 잠금을 쥔 채 네트워크를 부르지 않게 밖에서).
+    let cardCheck: Record<string, unknown> | null = null;
+    if (pre.status === 'unknown' && isDirectPaymentProvider(pre.provider) && DIRECT_PROVIDER_SPECS[pre.provider].kind === 'card') {
+      this.assertFailureRecordable(pre, new Date());
+      cardCheck = await this.cardFailureCheck(pre, opts.confirmNoSpend === true);
+    }
     await this.dataSource.transaction(async (manager) => {
       await lockCampaign(manager, pre.campaign_id);
       const row = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
@@ -590,7 +634,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       this.assertReconcilable(row);
       // 잠금 안에서 다시 읽은 행으로 본다 — 실행 중(executing)에 들어온 요청이, 그 사이 결과 불명이 된 행을 유예 없이 닫지 않게.
       this.assertFailureRecordable(row, new Date());
-      await this.settle(manager, row, 'failed', actor, { error: note || 'marked failed by a person', note, from: row.status });
+      if (isDirectPaymentProvider(row.provider) && DIRECT_PROVIDER_SPECS[row.provider].kind === 'card' && !cardCheck) {
+        throw marketingError(409, 'the request changed while its card was being checked — reload and try again');
+      }
+      await this.settle(manager, row, 'failed', actor, {
+        error: note || 'marked failed by a person', note, from: row.status, ...(cardCheck ? { detail: { card_check: cardCheck } } : {}),
+      });
     });
     this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', id, 'failed');
     return this.get(id, accountId);
@@ -615,9 +664,13 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     const ref = typeof body.provider_ref === 'string' ? body.provider_ref.trim().slice(0, 200) : '';
     const pre = await this.get(id, accountId);
     if (isDirectPaymentProvider(pre.provider)) {
-      // 직접 공급자의 결제 = 광고 플랫폼의 상한을 올린 것. 상한이 그대로인데 "미사용분" 을 돌려받았다고 적으면 플랫폼은 그 돈을 아직 쓸 수
-      // 있는데 원장은 덜 센다 — 상한을 실제로 낮추는 기능과 함께 후속으로 둔다(docs/marketing.md "직접 결제 어댑터").
-      throw marketingError(409, `${DIRECT_PAYMENT_PROVIDER_LABELS[pre.provider]} raised a spending ceiling — returning unused budget needs the ceiling to be lowered first, which AWB does not do yet; the ledger keeps the full approved amount`);
+      // 직접 공급자의 결제 = 광고 플랫폼의 상한을 올렸거나 그 한도의 카드를 만든 것. 상한 · 카드가 그대로인데 "미사용분" 을 돌려받았다고
+      // 적으면 그 돈은 아직 쓰일 수 있는데 원장은 덜 센다 — 상한을 낮추거나 카드를 해지하고 쓴 돈을 대조하는 기능과 함께 후속으로 둔다
+      // (docs/marketing.md "직접 결제 어댑터").
+      const label = DIRECT_PAYMENT_PROVIDER_LABELS[pre.provider];
+      throw marketingError(409, DIRECT_PROVIDER_SPECS[pre.provider].kind === 'card'
+        ? `${label} issued a card with that limit — returning unused budget needs the card to be canceled and its spending reconciled, which AWB does not do yet; the ledger keeps the full approved amount`
+        : `${label} raised a spending ceiling — returning unused budget needs the ceiling to be lowered first, which AWB does not do yet; the ledger keeps the full approved amount`);
     }
     await this.dataSource.transaction(async (manager) => {
       const campaign = await lockCampaign(manager, pre.campaign_id);
@@ -766,7 +819,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
   /** 직접 공급자 — 실행 계획만 실행한다. credential 은 요청 때와 같은 지문이어야 한다(그 사이 키를 바꾸면 보내지 않는다). */
   private async sendDirect(row: MarketingSpendRequest): Promise<PaymentOutcome> {
     const provider = row.provider as DirectPaymentProvider;
-    const plan = row.payload as CeilingPlan;
+    const plan = row.payload as DirectPlan;
     let resolved: Awaited<ReturnType<typeof resolveDirectPaymentCredential>>;
     try {
       resolved = await resolveDirectPaymentCredential(this.credentialRepo, provider, row.provider_credential_id || '', row.account_id);
@@ -774,7 +827,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       throw new PaymentNotSentError(String(e?.message || e));
     }
     if (resolved.fingerprint !== plan.credential_fingerprint) throw new PaymentNotSentError('the payment credential changed since the request');
-    return DIRECT_PAYMENT_ADAPTERS[provider].execute({ plan, fields: resolved.fields, fingerprint: resolved.fingerprint, ctx: this.adapterContext() });
+    return DIRECT_PAYMENT_ADAPTERS[provider].execute({ plan, fields: resolved.fields, fingerprint: resolved.fingerprint, requestId: row.id, ctx: this.adapterContext() });
   }
 
   /**
@@ -850,7 +903,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
         const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, payee.credential_id || '', campaign.account_id);
         DIRECT_PAYMENT_ADAPTERS[provider].checkCredential(fields);
         const report = await DIRECT_PAYMENT_ADAPTERS[provider].report({ ref: payee.ref || '', fields, fingerprint, currency: campaign.currency, ctx: this.adapterContext() });
-        const open = await this.openRequestForTarget(targetKey);
+        const open = isExclusiveTargetProvider(provider) ? await this.openRequestForTarget(targetKey) : null;
         if (report.ok) {
           for (const key of [...this.providerBackoff.keys()]) {
             if (key.startsWith(`${campaign.id}\u0000${targetKey}\u0000`)) this.providerBackoff.delete(key);
@@ -893,33 +946,87 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
    */
   async inspect(id: string, accountId: string): Promise<SpendInspection> {
     const row = await this.get(id, accountId);
-    if (!isDirectPaymentProvider(row.provider)) throw marketingError(409, 'only direct payment providers (Meta Ads, Google Ads) can be inspected');
-    const plan = row.payload as CeilingPlan;
+    if (!isDirectPaymentProvider(row.provider)) throw marketingError(409, 'only direct payment providers (Meta Ads, Google Ads, Stripe Issuing) can be inspected');
+    const plan = row.payload as DirectPlan;
     const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, row.provider, row.provider_credential_id || '', row.account_id);
-    let report: TargetReport;
+    let found: DirectInspection;
     try {
-      report = await DIRECT_PAYMENT_ADAPTERS[row.provider].report({ ref: row.payee_ref, fields, fingerprint, currency: row.currency, ctx: this.adapterContext() });
+      found = await DIRECT_PAYMENT_ADAPTERS[row.provider].inspect({
+        plan, ref: row.payee_ref, fields, fingerprint, currency: row.currency, requestId: row.id, around: this.executionTime(row), ctx: this.adapterContext(),
+      });
     } catch (e: any) {
       // 사람만 부르는 확인이라(approve_spend) 공급자가 준 글도 덧붙인다 — 이 문장은 에이전트에게 가지 않는다.
       if (e instanceof PaymentReadError) throw marketingError(e.status, e.providerMessage ? `${e.message} — provider says (untrusted): ${e.providerMessage}` : e.message);
       if (e instanceof PaymentRuleError) throw marketingError(e.status, e.message);
+      if (e instanceof PaymentNotSentError) throw marketingError(409, e.message);
       throw e;
     }
-    const observed = report.ceiling_units;
-    const position = observed === null ? 'no_ceiling' : observed === plan.to ? 'at_target' : observed === plan.from ? 'at_from' : 'other';
+    const checkedAt = new Date().toISOString();
+    if (found.kind === 'card') {
+      return {
+        kind: 'card', spend_request_id: row.id, status: row.status, limit_minor: (plan as CardPlan).limit_minor,
+        result: found.result, cards: found.cards, api_version: found.api_version, checked_at: checkedAt,
+      };
+    }
+    const ceiling = plan as CeilingPlan;
     return {
+      kind: 'ceiling',
       spend_request_id: row.id,
       status: row.status,
-      from: plan.from,
-      to: plan.to,
-      from_minor: plan.from_minor,
-      to_minor: plan.to_minor,
-      observed,
-      observed_minor: report.ceiling_minor,
-      position,
-      report,
-      checked_at: new Date().toISOString(),
+      from: ceiling.from,
+      to: ceiling.to,
+      from_minor: ceiling.from_minor,
+      to_minor: ceiling.to_minor,
+      observed: found.observed,
+      observed_minor: found.observed_minor,
+      position: found.position,
+      report: found.report,
+      checked_at: checkedAt,
     };
+  }
+
+  /** 요청이 공급자에 닿았을 시각 — 실행 시작, 없으면 승인, 없으면 요청. 카드 찾기의 범위가 이 시각 ±1일이다. */
+  private executionTime(row: MarketingSpendRequest): Date {
+    return row.executing_at || row.decided_at || row.created_at;
+  }
+
+  /**
+   * 카드 공급자의 결과 불명을 실패로 기록하기 전 — 이 요청의 카드를 Stripe 에서 찾는다(읽기만). 카드가 해지되지 않은 채 있으면 실패로
+   * 기록하지 않는다(그 카드로 돈이 나갈 수 있다 — 결제 완료로 기록하거나 사람이 먼저 해지한다). 해지된 카드만 있거나, 찾지 못했거나
+   * (읽기 실패 · 범위를 다 보지 못함), 사람이 Stripe 대시보드에서 쓴 돈이 없음을 확인했다고 밝혀야(`confirm_no_spend`) 기록한다 —
+   * 그 확인은 감사에 남는다. 카드가 없음이 분명하면 그대로 기록한다.
+   */
+  private async cardFailureCheck(row: MarketingSpendRequest, confirmNoSpend: boolean): Promise<Record<string, unknown>> {
+    let scan: DirectInspection | null = null;
+    let problem = '';
+    try {
+      const provider = row.provider as DirectPaymentProvider;
+      const { fields, fingerprint } = await resolveDirectPaymentCredential(this.credentialRepo, provider, row.provider_credential_id || '', row.account_id);
+      scan = await DIRECT_PAYMENT_ADAPTERS[provider].inspect({
+        plan: row.payload as DirectPlan, ref: row.payee_ref, fields, fingerprint, currency: row.currency, requestId: row.id,
+        around: this.executionTime(row), ctx: this.adapterContext(),
+      });
+    } catch (e: any) {
+      problem = String(e?.message || e).slice(0, 300);
+    }
+    if (scan && scan.kind === 'card') {
+      if (scan.result === 'none') return { result: 'none' };
+      const live = scan.cards.filter((c) => c.status !== 'canceled');
+      if (live.length) {
+        throw marketingError(409, `a card for this request exists (${live[0].id}, ${live[0].status || 'status unknown'}) — record "paid" with its id, or cancel the card in the Stripe Dashboard first`);
+      }
+      const ids = scan.cards.map((c) => c.id);
+      if (!confirmNoSpend) {
+        throw marketingError(409, scan.result === 'found'
+          ? `only canceled cards exist for this request (${ids.join(', ')}) — confirm in the Stripe Dashboard that nothing was spent on them, then record the failure with confirm_no_spend`
+          : 'could not look through all of this cardholder\'s cards — check the Stripe Dashboard and, if no card was issued for this request, record the failure with confirm_no_spend');
+      }
+      return { result: scan.result, cards: ids, confirmed_no_spend: true };
+    }
+    if (!confirmNoSpend) {
+      throw marketingError(409, `could not check Stripe for this request's card (${problem || 'no answer'}) — check the Stripe Dashboard and, if no card was issued, record the failure with confirm_no_spend`);
+    }
+    return { result: 'unchecked', error: problem, confirmed_no_spend: true };
   }
 
   // ── 주기 정리 ────────────────────────────────────────────────────────────
@@ -1005,12 +1112,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     if (!sameRoute(row, payeeRoute(campaign, payee))) {
       return `payee "${row.payee}" now has a different payment method, credential or target than when this was requested — ask for a new request`;
     }
-    return null;
+    return directPayeeProblem(row, payee);
   }
 
   /** 직접 공급자: 저장된 계획이 그 요청과 맞고(단위 · to − from = 금액 · 대상), credential 이 요청 때와 같은가. */
   private async directPlanProblem(manager: EntityManager, row: MarketingSpendRequest): Promise<string | null> {
-    const problems = ceilingPlanProblems(row);
+    const problems = directPlanProblems(row);
     if (problems.length) return `the execution plan is invalid (${problems.join('; ')})`;
     const cred = row.provider_credential_id ? await manager.getRepository(Credential).findOne({ where: { id: row.provider_credential_id } }) : null;
     if (!cred) return 'the payment credential is gone';
@@ -1020,7 +1127,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     } catch {
       return 'the payment credential is unreadable';
     }
-    if (fingerprint !== (row.payload as CeilingPlan).credential_fingerprint) {
+    if (fingerprint !== (row.payload as DirectPlan).credential_fingerprint) {
       return 'the payment credential changed since this request — ask for a new request';
     }
     return null;
@@ -1034,7 +1141,11 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     if (row.status !== 'unknown' || !isDirectPaymentProvider(row.provider) || !row.executing_at) return;
     const allowedAt = row.executing_at.getTime() + DIRECT_FAIL_GRACE_MS;
     if (now.getTime() >= allowedAt) return;
-    throw marketingError(409, `a ceiling change can take up to ${DIRECT_FAIL_GRACE_MS / 60_000} minutes to show on ${DIRECT_PAYMENT_PROVIDER_LABELS[row.provider]} — record a failure after ${new Date(allowedAt).toISOString()}, once "inspect" still shows the old value (record "paid" now if it already shows the new one)`);
+    const label = DIRECT_PAYMENT_PROVIDER_LABELS[row.provider];
+    const at = new Date(allowedAt).toISOString();
+    throw marketingError(409, DIRECT_PROVIDER_SPECS[row.provider].kind === 'card'
+      ? `a card request without a clear answer can still show up at ${label} — record a failure after ${at}, once "inspect" finds no card for this request (record "paid" now if it shows the card)`
+      : `a ceiling change can take up to ${DIRECT_FAIL_GRACE_MS / 60_000} minutes to show on ${label} — record a failure after ${at}, once "inspect" still shows the old value (record "paid" now if it already shows the new one)`);
   }
 
   private assertReconcilable(row: MarketingSpendRequest): void {
@@ -1052,7 +1163,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     row: MarketingSpendRequest,
     to: 'paid' | 'failed',
     actor: MarketingActor,
-    info: { provider_ref?: string; receipt_url?: string; error?: string; note?: string; response?: Record<string, any>; from: string },
+    info: { provider_ref?: string; receipt_url?: string; error?: string; note?: string; response?: Record<string, any>; from: string; detail?: Record<string, unknown> },
   ): Promise<void> {
     const repo = manager.getRepository(MarketingSpendRequest);
     const now = new Date();
@@ -1080,7 +1191,10 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       summary: to === 'paid'
         ? `결제 완료: ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee} (거래 ${info.provider_ref})`
         : `결제 실패: ${formatMinorAmount(row.amount_minor, row.currency)} → ${row.payee} — ${info.error || ''}`,
-      detail: { from: info.from, provider_ref: info.provider_ref || '', receipt_url: info.receipt_url || '', note: info.note || '', response_status: info.response?.status ?? null },
+      detail: {
+        from: info.from, provider_ref: info.provider_ref || '', receipt_url: info.receipt_url || '', note: info.note || '', response_status: info.response?.status ?? null,
+        ...(info.detail || {}),
+      },
     }, manager);
   }
 

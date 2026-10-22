@@ -40,8 +40,8 @@ export interface CyclePromptInput {
     allowed_domains: string[];
     /** 허용 목록의 정확한 이름 — 에이전트는 이 문자열 그대로 payee 에 넣는다. */
     payees: string[];
-    /** 직접 결제 수취인(이름 · 공급자 표시). 허용 목록 줄과 따로 보여 준다 — 이름에 설명을 붙이면 그대로 베껴 거부당한다. */
-    direct_payees?: Array<{ name: string; provider: string }>;
+    /** 직접 결제 수취인(이름 · 공급자 표시 · 하는 일). 허용 목록 줄과 따로 보여 준다 — 이름에 설명을 붙이면 그대로 베껴 거부당한다. */
+    direct_payees?: Array<{ name: string; provider: string; effect: string }>;
   };
   rules: string[];
   limits: Record<string, number>;
@@ -105,7 +105,7 @@ export function buildCyclePrompt(input: CyclePromptInput): string {
   lines.push(`- 통화 ${input.campaign.currency}, 금액은 최소 단위 정수. 수취인 허용 목록: ${input.campaign.payees.join(', ') || '(없음 — 지출 불가)'}`);
   const direct = input.campaign.direct_payees || [];
   if (direct.length) {
-    lines.push(`- 직접 결제 수취인 — 그 광고 캠페인의 지출 상한을 올린다(amount_minor = 상한 증가분, payload 없이): ${direct.map((d) => `${d.name}(${d.provider})`).join(', ')}`);
+    lines.push(`- 직접 결제 수취인(payload 없이 요청한다): ${direct.map((d) => `${d.name}(${d.provider} — ${d.effect})`).join(', ')}`);
   }
   lines.push(`- 추적 링크 허용 도메인: ${input.campaign.allowed_domains.join(', ') || '(없음 — 추적 링크 불가)'}`);
   lines.push(`- 일일 상한: ${Object.entries(input.limits).map(([k, v]) => `${k}=${v}`).join(', ')}`);
