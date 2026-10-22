@@ -18,7 +18,7 @@ import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
  * - D-05: This file is the single source of truth for DataSource options.
  */
 import 'reflect-metadata';
-import { DataSource, DataSourceOptions, EntityManager, EntitySubscriberInterface, EventSubscriber } from 'typeorm';
+import { DataSource, DataSourceOptions, EntityManager, EntitySubscriberInterface, EventSubscriber, QueryRunner, ReplicationMode } from 'typeorm';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -118,68 +118,105 @@ export class SqljsWriteSubscriber implements EntitySubscriberInterface {
   }
 }
 
-// ── dev sql.js 트랜잭션 직렬화 큐 (ticket 762fbe05) ──────────────────────────
+// ── dev sql.js 트랜잭션 직렬화 큐 (ticket 762fbe05, 13f5b0f6) ─────────────────
 // 배경: SqljsDriver.createQueryRunner()는 커넥션이 살아있는 동안 단 하나의
 // SqljsQueryRunner를 메모이즈해 재사용한다 — 진짜 풀링이 없고, WASM 인스턴스도
-// 커넥션도 하나뿐이다(node_modules/typeorm/driver/sqljs/SqljsDriver.js).
-// DataSource의 루트 manager에서 EntityManager.transaction()을 호출하면 항상
-// connection.createQueryRunner()로 runner를 얻으므로, 겹치는(overlapping) 두
-// transaction() 호출은 그 하나의 runner를 공유하게 된다. 진 쪽은 단순히
-// 깔끔하게 실패하지 않는다: 이미 하나가 활성 상태인데 raw "BEGIN TRANSACTION"을
-// 또 날리는 startTransaction()이 도중에 throw하고, EntityManager.transaction()은
-// 그 throw에 반응해 같은 SHARED runner에 raw ROLLBACK을 날린다 — 이때 이긴
-// 쪽의 아직 진행 중이던 트랜잭션까지 조용히 중단시켜 버린다. 서로 다른 두
-// 에러 문자열이 동시에 나타나는 이유가 여기 있다(ticket 02c85264):
-// raw BEGIN에서 나는 "cannot start a transaction within a transaction", 그리고
-// 이긴 쪽이 나중에 이미 남이 롤백해버린 runner에 커밋을 시도할 때 나는
-// "Transaction is not started yet, start transaction before committing or
-// rolling it back."
+// 커넥션도 하나뿐이다(node_modules/typeorm/driver/sqljs/SqljsDriver.js). 그래서
+// 트랜잭션은 연결 전체의 상태이고, 열려 있는 동안 그 runner 로 실행되는 문장은 누가
+// 보냈든 그 트랜잭션에 들어간다. 두 갈래로 터졌다.
 //
-// 해결: 하나의 sqljs DataSource 인스턴스 범위에서 모든 transaction() 호출을
-// FIFO 큐로 직렬화한다. Postgres/MySQL은 네이티브 풀 기반 동시 트랜잭션을
-// 그대로 유지 — sqljs가 아닌 DataSource에서는 즉시 no-op.
+// 1. 겹치는 두 transaction() (ticket 02c85264). 진 쪽은 단순히 깔끔하게 실패하지
+//    않는다: 이미 하나가 활성 상태인데 raw "BEGIN TRANSACTION"을 또 날리는
+//    startTransaction()이 도중에 throw하고, EntityManager.transaction()은 그 throw에
+//    반응해 같은 SHARED runner에 raw ROLLBACK을 날린다 — 이때 이긴 쪽의 아직 진행
+//    중이던 트랜잭션까지 조용히 중단시켜 버린다. 서로 다른 두 에러 문자열이 동시에
+//    나타나는 이유가 여기 있다: raw BEGIN에서 나는 "cannot start a transaction within
+//    a transaction", 그리고 이긴 쪽이 나중에 이미 남이 롤백해버린 runner에 커밋을
+//    시도할 때 나는 "Transaction is not started yet, start transaction before
+//    committing or rolling it back."
+// 2. 트랜잭션 밖 쓰기 (ticket 13f5b0f6). save/remove/softRemove/recover 는 runner 의
+//    isTransactionActive 가 true 면 자기 트랜잭션을 열지 않고 열린 트랜잭션에
+//    합류하고(EntityPersistExecutor), insert/update/delete · QueryBuilder execute() ·
+//    raw query() 는 그 안에서 그대로 실행된다. 무관한 요청의 쓰기가, 이미 id 와 함께
+//    성공으로 끝난 뒤에 남의 트랜잭션 롤백과 함께 사라지거나 남의 커밋에 묶였다.
 //
-// `dataSource.transaction`이 아니라 `dataSource.manager.transaction`을
-// 패치한다. `DataSource.prototype.transaction()`(typeorm/data-source/DataSource.js)
-// 자체가 `this.manager.transaction(...)`으로의 위임일 뿐이고, 이 코드베이스의
-// 여러 호출부가 `someRepo.manager.transaction(...)`을 직접 부른다.
-// `someRepo.manager`는 이 DataSource에서 얻은 어떤 repository든
-// `dataSource.manager`와 정확히 같은 EntityManager 인스턴스다(Repository의
-// `manager`는 그 repository를 만든 `getRepository()`를 호출한 EntityManager —
-// node_modules/typeorm/repository/Repository.js 참고). 그래서 manager
-// 인스턴스 하나만 패치하면 기존 ~48개 호출부를 손대지 않고도 두 호출 형태를
-// 전부 커버한다.
+// 해결: 한 sqljs DataSource 에서 연결에 쓰는 일을 FIFO 큐의 **차례**로 직렬화한다.
+//   - 이 DataSource 의 모든 EntityManager(루트 + createQueryRunner() 가 만드는 것)의
+//     transaction · save · remove · softRemove · recover — 통째로 한 차례다. 뒤의 넷은
+//     암묵 트랜잭션을 연다.
+//   - synchronize · runMigrations · undoLastMigration · dropDatabase — runner 에 직접
+//     트랜잭션을 연다.
+//   - 공유 runner 의 그 밖의 쓰기 문장(SELECT 와 쓰기 없는 WITH 를 뺀 모든 문장) — 문장
+//     하나만큼. insert/update/delete/upsert/increment, QueryBuilder execute(), raw query() 가
+//     여기다. 문장은 보낼 때 줄을 선다.
+//   - afterSqljsTransactions() 작업(파일 export).
+// 읽기(SELECT, 쓰기 없는 WITH)는 차례를 타지 않는다. 남의 트랜잭션 도중에 읽어도 잃는 것이 없고(커밋
+// 전 값을 볼 수는 있다 — 이 큐는 격리를 재현하지 않는다), 줄 세우면 모든 조회가 긴
+// 트랜잭션 뒤에 멈추며, 트랜잭션 콜백이 다른 체인이 진행 중인 조회 결과(in-flight
+// 캐시 등)를 기다리는 순간 데드락이 된다.
+// 큐 밖에서 여는 트랜잭션(queryRunner.startTransaction() 직접 호출,
+// QueryBuilder.useTransaction(true))은 거부한다 — 열려 있는 동안 다른 요청의 쓰기와
+// 구분할 방법이 없다. dataSource.transaction() 을 쓴다.
+// Postgres/MySQL은 네이티브 풀 기반 동시 트랜잭션을 그대로 유지 — sqljs가 아닌
+// DataSource에서는 즉시 no-op.
 //
-// 재진입(reentrancy): sqlite의 "nested" transactionSupport는 이미 transaction()
-// 콜백 "안에서" 또 다른 transaction()을 호출하는 것을 같은 shared runner 위의
-// SAVEPOINT로 안전하게 중첩시켜 준다 — 이건 이 패치가 고치려는 레이스가 아니고,
-// 이것까지 큐잉하면 데드락이 난다(바깥 호출은 안쪽이 끝나야 끝나는데, 안쪽은
-// 자기 큐 차례를 기다리며 바깥 뒤에 줄 서게 되므로). AsyncLocalStorage로 그
-// 콜백의 전체 비동기 체인 동안 "이 manager에서 이미 큐를 통과해 실행 중"임을
-// 표시한다.
+// 패치는 전부 인스턴스 단위다. 루트 manager 는 이미 만들어져 있으니 직접 걸고, 이후
+// manager 는 createEntityManager() 에서, runner 는 driver.createQueryRunner() 에서
+// (destroy 뒤 다시 initialize 하면 새로 만들어진다) 건다. Repository 는 자기를 만든
+// manager 를 부르므로 dataSource.transaction() · repo.manager.transaction() ·
+// repo.save() 호출부를 손대지 않고 전부 덮는다.
 //
-// 저장값은 단순 `true`가 아니라 `{ active }` 토큰이어야 한다 — AsyncLocalStorage는
-// run() 콜백이 반환한 프라미스가 settle된 뒤에도, 그 콜백 실행 중에 만들어진
-// 비동기 자손(예: await 없이 던져둔 setTimeout/fire-and-forget 프라미스)에는
-// 계속 같은 store가 전파된다. 그래서 바깥 트랜잭션이 이미 커밋/롤백까지 끝난
-// 뒤에 그 안에서 예약해 둔 지연 작업이 뒤늦게 transaction()을 부르면, 단순
-// boolean 플래그로는 getStore()가 여전히 truthy라 큐를 건너뛰고 즉시 실행돼
-// 버린다 — 그 시점에 이미 다른 트랜잭션이 큐를 통해 실행 중이라면 이 패치가
-// 막으려는 바로 그 shared-runner 중첩 레이스가 재발한다. 대신 실제 원본
-// transaction() 프라미스가 settle되는 순간 token.active를 false로 닫으면,
-// store 참조 자체는 늦게 실행되는 자손에도 계속 전파되더라도 `getStore()?.active`는
-// 그 시점엔 이미 false이므로 재진입으로 오인되지 않고 정상적으로 큐를 다시 탄다.
+// 재진입(reentrancy): 차례를 쥔 체인 안에서 부른 일은 기다리지 않고 그 차례 안에서
+// 바로 돈다 — transaction() 콜백 안의 transaction() 은 같은 runner 위 SAVEPOINT 로
+// 중첩되고, 콜백 안의 save()·쓰기는 그 트랜잭션의 일부다. 자기 뒤에 줄 세우면
+// 데드락이다(바깥은 안쪽이 끝나야 끝나는데 안쪽은 바깥 차례를 기다린다).
+// AsyncLocalStorage로 그 작업의 전체 비동기 체인 동안 차례를 표시한다.
+//
+// 차례는 첫 작업과, 그 차례 안에서 시작한 작업·쓰기 문장이 **모두** 끝나야 넘어간다.
+// 트랜잭션 콜백이 await 없이 던진 save() 가 커밋 뒤까지 이어져도 다음 차례의
+// 트랜잭션 안에서 돌지 않는다.
+//
+// 저장값은 단순 `true`가 아니라 `active` 를 가진 차례 객체여야 한다 — AsyncLocalStorage는
+// run() 콜백이 반환한 프라미스가 settle된 뒤에도, 그 콜백 실행 중에 만들어진 비동기
+// 자손(예: await 없이 던져둔 setTimeout)에는 계속 같은 store가 전파된다. 차례가
+// 넘어가는 순간 active 를 false 로 닫으므로, 그 뒤에 깨어난 자손은 재진입으로
+// 오인되지 않고 정상적으로 큐를 다시 탄다.
+//
+// 데드락 주의: 차례를 쥔 콜백이 **다른 체인의** DB 쓰기를 기다리면(그 체인이 쥔 락,
+// 남이 시작한 in-flight 작업, 이벤트 응답 등) 그 쓰기는 이 차례 뒤에 줄 서 있어서 서로를
+// 기다린다. 콜백 안에서는 자기 manager 로 쓰고, 다른 체인의 결과를 기다리지 말 것.
+
+/** 큐 차례 하나. 첫 작업과, 그 차례 안에서 시작한 작업·쓰기 문장이 모두 끝나면(pending 0) 다음으로 넘어간다. */
+type SqljsTurn = { active: boolean; pending: number; release: () => void };
+
 const sqljsWorkQueues = new WeakMap<DataSource, {
   enqueue: <T>(work: () => Promise<T>) => Promise<T>;
   holdsTurn: () => boolean;
 }>();
 
+/** 통째로 한 차례를 타는 EntityManager 메서드 — transaction 과, 암묵 트랜잭션을 여는 넷. */
+const SQLJS_QUEUED_MANAGER_METHODS = ['transaction', 'save', 'remove', 'softRemove', 'recover'] as const;
+/** runner 에 직접 트랜잭션을 여는 DataSource 메서드. */
+const SQLJS_QUEUED_DATASOURCE_METHODS = ['synchronize', 'runMigrations', 'undoLastMigration', 'dropDatabase'] as const;
+
+const SQLJS_UNQUEUED_TRANSACTION_ERROR =
+  'sql.js: open transactions with dataSource.transaction() — a transaction started outside the transaction queue ' +
+  "(queryRunner.startTransaction(), QueryBuilder.useTransaction()) would take in other requests' writes on the only connection";
+
 /**
- * 같은 sql.js 연결의 트랜잭션이 끝난 뒤 연결을 직접 만지는 작업을 실행한다. work 가 도는 동안 큐에
- * 선 트랜잭션은 시작하지 않는다. 이미 큐 차례를 쥔 체인(트랜잭션 콜백, 또는 다른 work) 안에서 부르면
- * 기다리지 않고 그 차례 안에서 바로 실행한다 — 자기 뒤에 줄 서면 데드락이다.
- * 큐를 거치지 않는 repo.save()/remove() 의 암묵 트랜잭션은 막지 못한다 — 파일 export 는 이것만으로
- * 부족하니 flushSqljs()/flushOntologySqljs() 를 쓴다(exportSqljsWhenIdle 참고).
+ * 읽기만 하는 문장 — 큐 차례를 타지 않는다. SELECT, 그리고 쓰기 키워드가 없는 WITH(온톨로지 그래프 탐색의 재귀
+ * CTE). 그 밖의 문장(PRAGMA 포함)과 키워드가 문자열·이름에만 든 WITH 는 쓰기로 본다 — 틀려도 기다릴 뿐이다.
+ */
+function isSqljsReadStatement(sql: string): boolean {
+  if (/^\s*select\b/i.test(sql)) return true;
+  return /^\s*with\b/i.test(sql) && !/\b(insert|update|delete|replace)\b/i.test(sql);
+}
+
+/**
+ * 같은 sql.js 연결에 쓰는 일(트랜잭션 · 쓰기)이 끝난 뒤 연결을 직접 만지는 작업을 실행한다. work 가 도는 동안
+ * 큐에 선 일은 시작하지 않는다. 이미 큐 차례를 쥔 체인(트랜잭션 콜백, 또는 다른 work) 안에서 부르면 기다리지
+ * 않고 그 차례 안에서 바로 실행한다 — 자기 뒤에 줄 서면 데드락이다. 그래서 트랜잭션 안에서 부르면 그 트랜잭션이
+ * 열린 채로 돈다 — 파일 export 는 flushSqljs()/flushOntologySqljs() 를 쓴다(exportSqljsWhenIdle 참고).
  */
 export function afterSqljsTransactions<T>(dataSource: DataSource, work: () => Promise<T>): Promise<T> {
   const queue = sqljsWorkQueues.get(dataSource);
@@ -193,37 +230,92 @@ function holdsSqljsTurn(dataSource: DataSource): boolean {
 
 export function serializeSqljsTransactions(dataSource: DataSource): void {
   if (dataSource.options.type !== 'sqljs') return;
+  if (sqljsWorkQueues.has(dataSource)) return;
 
-  const manager = dataSource.manager as EntityManager & {
-    transaction: (...args: unknown[]) => Promise<unknown>;
+  const reentry = new AsyncLocalStorage<SqljsTurn>();
+  let tail: Promise<void> = Promise.resolve();
+  const heldTurn = (): SqljsTurn | undefined => {
+    const turn = reentry.getStore();
+    return turn?.active ? turn : undefined;
   };
-  const original = manager.transaction.bind(manager);
-  const reentry = new AsyncLocalStorage<{ active: boolean }>();
-  let queue: Promise<void> = Promise.resolve();
-  const holdsTurn = () => reentry.getStore()?.active === true;
-  // 트랜잭션과 afterSqljsTransactions() 작업이 같은 큐 차례를 쓰고, 재진입 규칙도 같다: 트랜잭션
-  // 안의 트랜잭션은 SAVEPOINT 중첩이고, 작업 안의 작업·트랜잭션은 이미 쥔 차례의 연장이다.
+  // turn 안에서 work 를 돌리고, 끝날 때까지 그 차례를 붙잡는다.
+  const within = <T>(turn: SqljsTurn, work: () => Promise<T>): Promise<T> => {
+    turn.pending += 1;
+    let running: Promise<T>;
+    try {
+      running = Promise.resolve(work());
+    } catch (e) {
+      running = Promise.reject(e);
+    }
+    return running.finally(() => {
+      turn.pending -= 1;
+      if (turn.pending === 0) turn.release();
+    });
+  };
   const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
-    if (holdsTurn()) return work();
-    const token = { active: true };
-    const run = queue.then(() => reentry.run(token, work));
-    // Keep the chain alive regardless of outcome — a failed transaction must
-    // not wedge every transaction queued behind it. The rejection itself is
-    // still delivered to this call's own caller via `run`. Closing the token
-    // here (once the real work has actually settled) — rather than relying on
-    // run()'s callback scope — is what keeps a stale fire-and-forget
-    // descendant from reading a reentry flag that has outlived the work it
-    // was spawned from.
-    queue = run.then(() => undefined, () => undefined);
-    run.then(
-      () => { token.active = false; },
-      () => { token.active = false; },
-    );
+    const held = heldTurn();
+    if (held) return within(held, work);
+    let next!: () => void;
+    const released = new Promise<void>((resolve) => { next = resolve; });
+    const turn: SqljsTurn = {
+      active: true,
+      pending: 0,
+      release: () => {
+        turn.active = false;
+        next();
+      },
+    };
+    // 다음 차례는 결과와 무관하게 이 차례가 넘어간 뒤 시작한다 — 실패한 트랜잭션이 뒤에 선 일을 막지 않는다.
+    // 실패 자체는 `run` 으로 이 호출자에게 간다.
+    const run = tail.then(() => reentry.run(turn, () => within(turn, work)));
+    tail = released;
     return run;
   };
-  sqljsWorkQueues.set(dataSource, { enqueue, holdsTurn });
+  sqljsWorkQueues.set(dataSource, { enqueue, holdsTurn: () => heldTurn() !== undefined });
 
-  manager.transaction = (...args: unknown[]) => enqueue(() => original(...args));
+  type Method = (...args: unknown[]) => Promise<unknown>;
+  // 원본은 부를 때 prototype 에서 찾는다 — 인스턴스에 얹은 이 패치를 다시 부르지 않는다.
+  const queuedManagerMethods: Record<string, Method> = {};
+  for (const name of SQLJS_QUEUED_MANAGER_METHODS) {
+    queuedManagerMethods[name] = function queued(this: EntityManager, ...args: unknown[]) {
+      const original = (Object.getPrototypeOf(this) as Record<string, Method>)[name];
+      return enqueue(() => original.apply(this, args));
+    };
+  }
+  const queueManager = <M extends EntityManager>(manager: M): M => Object.assign(manager, queuedManagerMethods);
+  queueManager(dataSource.manager);
+  const createEntityManager = dataSource.createEntityManager.bind(dataSource);
+  dataSource.createEntityManager = (queryRunner?: QueryRunner) => queueManager(createEntityManager(queryRunner));
+
+  const queuedDataSource = dataSource as unknown as Record<(typeof SQLJS_QUEUED_DATASOURCE_METHODS)[number], Method>;
+  for (const name of SQLJS_QUEUED_DATASOURCE_METHODS) {
+    const original = queuedDataSource[name].bind(dataSource);
+    queuedDataSource[name] = (...args: unknown[]) => enqueue(() => original(...args));
+  }
+
+  const gatedRunners = new WeakSet<QueryRunner>();
+  const gateRunner = (runner: QueryRunner): QueryRunner => {
+    if (gatedRunners.has(runner)) return runner;
+    gatedRunners.add(runner);
+    const query = runner.query as Method;
+    runner.query = function gatedQuery(this: QueryRunner, sql: string, ...rest: unknown[]) {
+      const run = () => query.call(this, sql, ...rest);
+      return isSqljsReadStatement(sql) ? run() : enqueue(run);
+    } as QueryRunner['query'];
+    const startTransaction = runner.startTransaction as Method;
+    runner.startTransaction = function gatedStartTransaction(this: QueryRunner, ...args: unknown[]) {
+      if (!heldTurn()) return Promise.reject(new Error(SQLJS_UNQUEUED_TRANSACTION_ERROR));
+      return startTransaction.apply(this, args);
+    } as QueryRunner['startTransaction'];
+    return runner;
+  };
+  const driver = dataSource.driver as unknown as {
+    queryRunner?: QueryRunner;
+    createQueryRunner: (mode: ReplicationMode) => QueryRunner;
+  };
+  const createQueryRunner = driver.createQueryRunner.bind(driver);
+  driver.createQueryRunner = (mode: ReplicationMode) => gateRunner(createQueryRunner(mode));
+  if (driver.queryRunner) gateRunner(driver.queryRunner);
 }
 
 
@@ -389,13 +481,14 @@ export function resolveSqljsFlushIntervalMs(): number {
  *       re-export to guarantee the last sub-interval batch reaches disk
  *       (ticket 84a6d207).
  *
- * The export itself waits until no transaction is open on the connection (see
- * exportSqljsWhenIdle) — so a flush can take as long as the transactions it
- * waits for, and the forced shutdown flush includes every transaction that was
- * already queued when it was called. A forced flush awaited from inside a
- * transaction cannot write while its own caller is open: it does not wait for
- * the in-flight flush, which is queued behind that very transaction, and fails
- * after the export deadline instead, leaving the batch dirty.
+ * The export itself waits for its turn in the transaction queue and until no
+ * transaction is open on the connection (see exportSqljsWhenIdle) — so a flush
+ * can take as long as the transactions it waits for, and the forced shutdown
+ * flush includes every transaction and write that was already queued when it was
+ * called. A forced flush awaited from inside a transaction cannot write while its
+ * own caller is open: it does not wait for the in-flight flush, which may be
+ * queued behind that very transaction, and fails after the export deadline
+ * instead, leaving the batch dirty.
  *
  * Ordering note: the dirty flag is cleared right before the (synchronous) export
  * so a write that lands during the async file write re-marks dirty and is caught
@@ -453,9 +546,12 @@ async function doSqljsExport(dataSource: DataSource): Promise<boolean> {
   }
 }
 
-/** How long an export waits for a transaction opened outside the queue — see exportSqljsWhenIdle(). */
+/** How long an export waits for a transaction it cannot wait out in the queue — see exportSqljsWhenIdle(). */
 export const SQLJS_EXPORT_TXN_WAIT_MS = 1_000;
 const SQLJS_EXPORT_TXN_POLL_MS = 5;
+
+/** The file write of each DataSource's latest export — exports write one at a time (exportSqljsWhenIdle). */
+const sqljsFileWrites = new WeakMap<DataSource, Promise<void>>();
 
 /**
  * Write a sql.js DataSource to its file without ending an open transaction.
@@ -466,25 +562,29 @@ const SQLJS_EXPORT_TXN_POLL_MS = 5;
  * with "cannot commit - no transaction is active", while TypeORM's single
  * shared runner keeps believing a transaction is active. So the export waits:
  *
- *   1. behind the transaction queue (afterSqljsTransactions) — no queued
- *      manager.transaction() is running, and none starts until the write is done;
- *   2. then until the connection has no transaction open — repo.save() /
- *      remove() open their own transaction on the shared runner without going
- *      through the queue (EntityPersistExecutor → queryRunner.startTransaction()).
+ *   1. for its turn in the transaction queue (afterSqljsTransactions) — no queued
+ *      transaction or write is running, and none starts until the export is done;
+ *   2. then until the connection has no transaction open. Every transaction goes
+ *      through the queue, so what is still open here is the caller's own — a
+ *      flush awaited inside a transaction — or one a raw `BEGIN` statement opened.
  *
  * The last check and the export run in one synchronous step — export() happens
  * inside saveDatabase() before its first await — so nothing can open a
- * transaction in between. `markClean` runs in that same step.
+ * transaction in between. `markClean` runs in that same step. The file write that
+ * follows does not touch the connection, so the turn is handed on before it:
+ * writes and transactions do not wait for disk I/O. File writes still go one at a
+ * time — an export first waits for the previous export's write to finish, since
+ * two overlapping fs.writeFile calls on one file can interleave into a corrupt file.
  *
  * A transaction still open after SQLJS_EXPORT_TXN_WAIT_MS is not cut: the export
- * fails, the caller keeps its dirty flag, and the next flush tries again. Implicit
- * transactions finish within one event-loop turn (no entity listener awaits I/O),
- * so only a flush awaited from inside a transaction gets that far — it waits on
- * its own caller. A queued transaction that never settles holds up this export
- * (the shutdown flush included) just as it holds up every transaction behind it.
+ * fails, the caller keeps its dirty flag, and the next flush tries again. Only a
+ * flush awaited from inside a transaction gets that far — it waits on its own
+ * caller. A queued transaction that never settles holds up this export (the
+ * shutdown flush included) just as it holds up every write behind it.
  */
 async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void): Promise<void> {
-  await afterSqljsTransactions(dataSource, async () => {
+  const exported = await afterSqljsTransactions(dataSource, async () => {
+    await sqljsFileWrites.get(dataSource)?.catch(() => undefined);
     const deadline = Date.now() + SQLJS_EXPORT_TXN_WAIT_MS;
     while (sqljsTransactionOpen(dataSource)) {
       if (Date.now() >= deadline) {
@@ -496,8 +596,12 @@ async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void
       await new Promise((resolve) => setTimeout(resolve, SQLJS_EXPORT_TXN_POLL_MS));
     }
     markClean();
-    await dataSource.sqljsManager.saveDatabase();
+    const writing = dataSource.sqljsManager.saveDatabase();
+    sqljsFileWrites.set(dataSource, writing);
+    // Wrapped, not returned: returning the promise would keep this turn until the file write is done.
+    return { writing };
   });
+  await exported.writing;
 }
 
 /**

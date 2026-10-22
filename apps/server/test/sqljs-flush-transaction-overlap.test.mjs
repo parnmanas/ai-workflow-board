@@ -7,10 +7,10 @@
 // flush(SqljsFlushService)와 종료 flush 가 이 export 를 트랜잭션과 무관하게 불렀다.
 //
 // 이 스위트가 증명하는 것:
-//   1. 전제 — flush 를 거치지 않은 직접 export 는 지금도 트랜잭션을 끊는다(위 증상 넷). 트랜잭션 큐 순서만
-//      지켜서는 큐를 거치지 않는 repo.save() 의 암묵 트랜잭션을 못 막는다. saveDatabase() 는 부른 그 동기
-//      구간에서 export 한다(확인과 export 사이에 아무것도 끼지 않는 근거). typeorm/sql.js 가 바뀌어 이
-//      전제들이 사라지면 이 스위트가 먼저 알려 준다.
+//   1. 전제 — flush 를 거치지 않은 직접 export 는 지금도 트랜잭션을 끊는다(위 증상 넷). saveDatabase() 는
+//      부른 그 동기 구간에서 export 한다(확인과 export 사이에 아무것도 끼지 않는 근거). typeorm/sql.js 가
+//      바뀌어 이 전제들이 사라지면 이 스위트가 먼저 알려 준다. repo.save() 의 암묵 트랜잭션은 이제 큐를 탄다
+//      (ticket 13f5b0f6) — 큐 차례만으로도 export 가 save 안에 끼지 않는다.
 //   2. 주기 flush 는 열린 트랜잭션이 끝난 뒤에 쓴다 — 커밋되면 두 쓰기 모두, 롤백되면 하나도 남지 않는다.
 //   3. 종료(강제) flush 도 마찬가지이고, 부르기 전에 큐에 선 트랜잭션까지 담는다.
 //   4. repo.save() 의 암묵 트랜잭션도 끊지 않는다 — microtask 오프셋 전수와, 매크로태스크를 넘겨 열려 있는
@@ -20,7 +20,9 @@
 //      트랜잭션 안에서 기다린 flush 는 자기 호출자를 끊지 않고 제한 시간 뒤 실패하며, 다음 flush 가 쓴다.
 //      그 트랜잭션 뒤에 주기 flush 가 줄 서 있어도 마찬가지다 — 강제 flush 가 그것을 기다리면 서로를
 //      기다려 큐 전체가 멈춘다.
-//   7. 온톨로지 DataSource 의 flush 도 같은 경로를 탄다.
+//   7. export 는 파일 쓰기 전에 차례를 넘긴다 — 쓰기 · 트랜잭션이 디스크 I/O 를 기다리지 않는다. 파일 쓰기는 한
+//      번에 하나다(겹친 fs.writeFile 은 파일을 섞는다).
+//   8. 온톨로지 DataSource 의 flush 도 같은 경로를 탄다.
 //
 // 컴파일된 dist/ 를 대상으로 실행한다(`npm run build` 필요, test 스크립트가 보장). 공유 dev database/ 의
 // 파일을 건드리지 않도록 모든 sql.js 파일을 임시 디렉터리에 둔다.
@@ -216,23 +218,26 @@ describe('sql.js flush vs open transactions (ticket d1ce6aad)', { timeout: 60_00
     }
   });
 
-  it('premise: queue order alone does not cover repo.save(), whose implicit transaction never enters the queue', async () => {
-    const queued = await openDataSource(path.join(tmpDir, 'premise-queue.db'));
+  it('queue order alone now covers repo.save(): an export in the queue never lands inside its implicit transaction (ticket 13f5b0f6)', async () => {
+    const queued = await openDataSource(path.join(tmpDir, 'queue-covers-save.db'));
     try {
       const repo = queued.getRepository(Account);
-      let cut = null;
-      for (let offset = 0; offset < 150 && !cut; offset++) {
+      const failures = [];
+      const OFFSETS = 150; // 한 save 가 끝나기까지의 microtask 수보다 넉넉히 — 열린 구간 전체를 지나간다
+      for (let offset = 0; offset < OFFSETS; offset++) {
         const save = repo.save(repo.create({ name: `queue-only-${offset}`, description: 'flush-overlap' })).then(() => null, (e) => e);
         for (let i = 0; i < offset; i++) await Promise.resolve();
         await afterSqljsTransactions(queued, () => queued.sqljsManager.saveDatabase());
-        cut = await save;
+        const error = await save;
+        if (error) failures.push(`offset ${offset}: ${error.message}`);
       }
-      assert.match(
-        cut?.message || '',
-        CUT_COMMIT,
-        'an export queued only behind manager.transaction() must still land inside some save — that is why ' +
-          'exportSqljsWhenIdle() also waits until SQLite has no transaction open',
+      assert.deepEqual(
+        failures,
+        [],
+        'the save takes a turn in the same queue, so an export behind afterSqljsTransactions() cannot land inside it — ' +
+          'before ticket 13f5b0f6 one of these offsets failed with "cannot commit - no transaction is active"',
       );
+      assert.equal((await namesInMemory(queued, 'queue-only-')).length, OFFSETS);
     } finally {
       await queued.destroy();
     }
@@ -443,6 +448,74 @@ describe('sql.js flush vs open transactions (ticket d1ce6aad)', { timeout: 60_00
     );
     assert.equal(periodic, true, 'the queued periodic flush writes once the transaction is done');
     assert.deepEqual(namesOnDisk(PRIMARY_FILE, 'accounts', 'queued-behind'), ['queued-behind']);
+  });
+
+  it('the turn is handed on before the file write: a save completes while the export is still writing', async () => {
+    const mgr = live.sqljsManager;
+    const realSave = mgr.saveDatabase;
+    const writing = gate();
+    let exported = false;
+    mgr.saveDatabase = async function heldWrite(...args) {
+      const out = await realSave.apply(this, args); // export (same synchronous step) + the real file write
+      exported = true;
+      await writing.wait; // the file write is still going on
+      return out;
+    };
+    try {
+      const repo = live.getRepository(Account);
+      await repo.save(repo.create({ name: 'handoff-before', description: 'flush-overlap' }));
+      const flush = flushSqljs(live, true);
+      while (!exported) await new Promise((resolve) => setImmediate(resolve));
+      const saved = await withinDeadlockTimeout(repo.save(repo.create({ name: 'handoff-during', description: 'flush-overlap' })));
+      assert.ok(saved.id, 'a save must not wait for the file write — the export no longer needs the connection');
+      writing.open();
+      assert.equal(await flush, true);
+      assert.equal(isSqljsDirty(), true, 'the save that landed during the write is left for the next flush');
+    } finally {
+      delete mgr.saveDatabase;
+    }
+    await flushSqljs(live, true);
+    assert.deepEqual(namesOnDisk(PRIMARY_FILE, 'accounts', 'handoff-'), ['handoff-before', 'handoff-during']);
+  });
+
+  it('exports write one at a time: an export behind a file write still in progress waits for it', async () => {
+    const mgr = live.sqljsManager;
+    const realSave = mgr.saveDatabase;
+    const firstWrite = gate();
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    mgr.saveDatabase = async function countedWrite(...args) {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        const out = await realSave.apply(this, args);
+        if (calls === 1) await firstWrite.wait;
+        return out;
+      } finally {
+        active -= 1;
+      }
+    };
+    try {
+      const repo = live.getRepository(Account);
+      await repo.save(repo.create({ name: 'one-write-a', description: 'flush-overlap' }));
+      const periodic = flushSqljs(live);
+      while (calls === 0) await new Promise((resolve) => setImmediate(resolve));
+      await repo.save(repo.create({ name: 'one-write-b', description: 'flush-overlap' }));
+      // 차례를 쥔 강제 flush 는 진행 중인 flush 를 기다리지 않는다(자기 호출자 뒤에 줄 서 있을 수 있어서) — 두 파일
+      // 쓰기를 떼어 놓는 것은 파일 쓰기 사슬뿐이다.
+      const forced = afterSqljsTransactions(live, () => flushSqljs(live, true));
+      await sleep(30);
+      assert.equal(calls, 1, 'the second export waits until the first file write is done');
+      firstWrite.open();
+      assert.equal(await periodic, true);
+      assert.equal(await forced, true);
+      assert.equal(maxActive, 1, 'two fs.writeFile calls on one file must never overlap');
+    } finally {
+      delete mgr.saveDatabase;
+    }
+    assert.deepEqual(namesOnDisk(PRIMARY_FILE, 'accounts', 'one-write-'), ['one-write-a', 'one-write-b']);
   });
 
   it('ontology flush takes the same path: it waits for an open implicit save transaction', async () => {
