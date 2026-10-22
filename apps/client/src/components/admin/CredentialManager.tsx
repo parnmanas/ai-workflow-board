@@ -137,7 +137,7 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
       client_secret: { label: 'OAuth client secret', placeholder: 'GOCSPX-...' },
       refresh_token: { label: 'Refresh token', placeholder: '1//... — adwords scope; publish the OAuth app (refresh tokens of apps in "Testing" expire in 7 days)' },
       login_customer_id: { label: 'Manager account id (optional)', placeholder: '123-456-7890 — only when access goes through a manager (MCC) account' },
-      developer_token: { label: 'Developer token (optional)', placeholder: 'Retired by Google on 2026-09-09 — leave empty unless your setup still needs it' },
+      developer_token: { label: 'Developer token (leave empty)', placeholder: 'Retired by Google on 2026-09-09 — ignored now, rejected by later API versions; access follows the OAuth client\'s Cloud project' },
     },
   },
   // Custom renders a key/value editor instead of these fields; `token` is the
