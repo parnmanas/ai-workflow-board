@@ -223,12 +223,18 @@ export class MarketingAnalyticsService {
         postChannelId = post.channel_id;
       }
       // 서버가 커넥터로 읽는 채널의 참여 · 답글을 손으로도 남기면 리포트가 두 번 센다(docs/marketing.md "참여 지표 자동 수집").
-      const tracked = [channelId, postChannelId].some((id) => {
-        const channel = id ? channels.get(id) : undefined;
-        return !!channel && engagementTracked(channel);
-      });
-      if (tracked && (ENGAGEMENT_METRICS as readonly string[]).includes(metric)) {
-        throw marketingError(400, `observations[${i}]: ${metric} of posts on reddit/GitHub outreach channels are read from the platform by the server (source connector) — do not record them`);
+      // 채널도 글도 없는 캠페인 전체 값은 그 채널들의 몫을 다시 담을 수 있어, 그런 채널이 있는 캠페인에서는 채널을 정하게 한다.
+      if ((ENGAGEMENT_METRICS as readonly string[]).includes(metric)) {
+        const tracked = [channelId, postChannelId].some((id) => {
+          const channel = id ? channels.get(id) : undefined;
+          return !!channel && engagementTracked(channel);
+        });
+        if (tracked) {
+          throw marketingError(400, `observations[${i}]: ${metric} of posts on reddit/GitHub outreach channels are read from the platform by the server (source connector) — do not record them`);
+        }
+        if (!channelId && !postChannelId && [...channels.values()].some((c) => engagementTracked(c))) {
+          throw marketingError(400, `observations[${i}]: give ${metric} a channel — the server reads it for this campaign's reddit/GitHub outreach channels, and a campaign-wide value would count those again`);
+        }
       }
       let at = new Date();
       if (o.observed_at) {

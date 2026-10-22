@@ -3,7 +3,8 @@
 // 고정하는 것:
 //   1. 서버가 읽는 채널은 reddit · github outreach 채널뿐이다.
 //   2. 일정: 게시 1 시간 뒤 첫 읽기, 나이 1 일 미만 1 시간 · 3 일 미만 3 시간 · 그 뒤 12 시간, 14 일째에 마지막으로 읽고 끝.
-//   3. rate limit: 채널 cap 이 있으면 남은 것 가운데 절반 몫은 남긴다. cap 이 없으면 제한 없음.
+//   3. rate limit: 채널 cap 이 있으면 남은 것 가운데 절반 몫은 남긴다. cap 이 없으면 제한 없음. 지금 읽지 못한 글은 30 분 뒤 다시
+//      보되 기간 끝을 넘기지 않는다(기간이 끝났으면 끝 — 미룬 글이 영원히 남지 않는다).
 //   4. 변화량: 직전 값과의 차이만 남긴다(변화 없으면 없음, 음수 가능, 감춘 값은 직전 값 유지). 행의 합 = 마지막 값.
 //
 // 실행: node --test test/marketing-engagement-logic.test.mjs (dist 필요)
@@ -11,9 +12,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ENGAGEMENT_ALIGN_MS,
+  ENGAGEMENT_DEFER_MS,
   ENGAGEMENT_RESERVED_SHARE,
   ENGAGEMENT_SOURCE,
   ENGAGEMENT_WINDOW_MS,
+  deferEngagementReadAt,
   engagementChanges,
   engagementIntervalMs,
   engagementRequestBudget,
@@ -59,6 +63,16 @@ test('schedule: first read after an hour, interval by age, last read at the end 
     t = nextEngagementReadAt(published, t);
   }
   assert.ok(reads > 40 && reads < 80, `reads over the window: ${reads}`);
+});
+
+test('deferral: look again in 30 minutes, never past the window end, and end with the window', () => {
+  const published = new Date('2026-10-01T00:00:00Z');
+  const at = (ms) => new Date(published.getTime() + ms);
+  assert.equal(ENGAGEMENT_DEFER_MS, 30 * 60_000);
+  assert.equal(ENGAGEMENT_ALIGN_MS, 30 * 60_000);
+  assert.equal(deferEngagementReadAt(published, at(5 * HOUR)).toISOString(), at(5 * HOUR + 30 * 60_000).toISOString());
+  assert.equal(deferEngagementReadAt(published, at(14 * DAY - 10 * 60_000)).toISOString(), at(14 * DAY).toISOString());
+  assert.equal(deferEngagementReadAt(published, at(14 * DAY)), null, 'a post that could not be read before its window ended leaves the queue');
 });
 
 test('rate budget: half of the channel cap is left to publishing and polling', () => {

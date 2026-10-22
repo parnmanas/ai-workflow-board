@@ -20,6 +20,13 @@ export const ENGAGEMENT_WINDOW_MS = 14 * DAY_MS;
 export const ENGAGEMENT_FIRST_READ_MS = HOUR_MS;
 /** 채널의 `rate_limit_per_hour` 가운데 수집이 쓰지 않고 남겨 두는 몫 — 게시 · 폴링이 쓴다. */
 export const ENGAGEMENT_RESERVED_SHARE = 0.5;
+/** 지금 읽지 못한 글(rate limit 에 몫이 없음 · 플랫폼 rate limit · 보관된 캠페인)을 다시 볼 때까지. */
+export const ENGAGEMENT_DEFER_MS = 30 * 60_000;
+/**
+ * 한 요청에 여러 글을 읽는 채널(reddit)은 이만큼 안에 읽을 차례가 오는 글도 같은 요청에 싣는다. 글마다 따로 요청하지
+ * 않게 되고, 같은 채널 글들의 일정이 한 시각으로 모인다.
+ */
+export const ENGAGEMENT_ALIGN_MS = 30 * 60_000;
 
 export const ENGAGEMENT_METRICS = ['engagements', 'replies'] as const;
 export type EngagementMetric = typeof ENGAGEMENT_METRICS[number];
@@ -76,6 +83,14 @@ export function nextEngagementReadAt(publishedAt: Date, now: Date): Date | null 
   const t = now.getTime();
   if (t >= end) return null;
   return new Date(Math.min(t + engagementIntervalMs(t - publishedAt.getTime()), end));
+}
+
+/** 지금 읽지 못한 글을 다시 볼 시각 — 기간 끝을 넘기지 않고, 기간이 이미 끝났으면 null(끝). */
+export function deferEngagementReadAt(publishedAt: Date, now: Date): Date | null {
+  const end = publishedAt.getTime() + ENGAGEMENT_WINDOW_MS;
+  const t = now.getTime();
+  if (t >= end) return null;
+  return new Date(Math.min(t + ENGAGEMENT_DEFER_MS, end));
 }
 
 /**

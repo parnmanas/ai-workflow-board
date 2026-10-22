@@ -198,7 +198,6 @@ export function ledgerToJson(e: MarketingLedgerEntry) {
   };
 }
 
-/** `preview_body` 는 승인하면 실제로 나갈 본문(공개 문구 포함) — 승인 화면은 이것을 보여 준다. */
 /** 마지막으로 읽은 참여(docs/marketing.md "참여 지표 자동 수집") — 아직 읽은 적이 없으면 null. */
 export function postEngagementToJson(p: MarketingPost) {
   const e = p.engagement || {};
@@ -210,6 +209,7 @@ export function postEngagementToJson(p: MarketingPost) {
   };
 }
 
+/** `preview_body` 는 승인하면 실제로 나갈 본문(공개 문구 포함) — 승인 화면은 이것을 보여 준다. */
 export function postToJson(p: MarketingPost, previewBody?: string) {
   return {
     id: p.id,

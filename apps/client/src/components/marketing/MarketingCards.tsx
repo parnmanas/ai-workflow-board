@@ -557,7 +557,7 @@ function EngagementLine({ post, platform }: { post: MarketingPost; platform: str
   const summary = engagementSummary(platform, post.engagement);
   return (
     <span data-testid={`marketing-post-engagement-${post.id}`} title="서버가 게시 후 14일 동안 플랫폼에서 읽습니다">
-      {summary || '아직 읽지 않음'}
+      {summary || (post.engagement ? '플랫폼이 값을 아직 감춤' : '아직 읽지 않음')}
       {post.engagement?.read_at ? ` · ${formatDateTime(post.engagement.read_at)} 읽음` : ''}
       {post.engagement_next_at ? ` · 다음 ${formatDateTime(post.engagement_next_at)}` : post.engagement ? ' · 수집 끝' : ''}
       {post.engagement_error ? <span style={{ color: tokens.colors.dangerLight }}> · {post.engagement_error}</span> : null}
@@ -732,7 +732,10 @@ export function PostCard({ post }: { post: MarketingPost }) {
             ['결정 메모', post.decision_note],
             ['게시 주소', post.permalink ? <ExternalLink href={post.permalink} /> : ''],
             ['게시 시각', post.published_at ? formatDateTime(post.published_at) : ''],
-            ['참여', post.status === 'published' && engagementTrackedChannel(channel) ? <EngagementLine post={post} platform={channel?.platform} /> : ''],
+            // 수집기가 맡은 글만(이 기능 전 · 기간 밖에 게시된 글은 읽은 적도 읽을 일도 없다).
+            ['참여', post.status === 'published' && engagementTrackedChannel(channel) && (post.engagement || post.engagement_next_at || post.engagement_error)
+              ? <EngagementLine post={post} platform={channel?.platform} />
+              : ''],
             ['오류', post.error ? <span style={{ color: tokens.colors.dangerLight }}>{post.error}</span> : ''],
           ]}
         />
