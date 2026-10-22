@@ -1,6 +1,8 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { promises as fsp } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,8 +53,8 @@ const BARRIER_PROLOGUE = `
  *  `awaitStderr(needle)` 는 contender 의 진행 상황을 제품 로그로 관찰하는 용도다
  *  — 제품 로그는 stderr 로 나가므로 stdout 마커(ACQUIRED/REJECTED)와 섞이지
  *  않는다. 관찰한 내용은 CI 진단이 사라지지 않도록 부모 stderr 로도 흘린다. */
-function spawnBarrieredContender(source, env) {
-  const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+function spawnBarrieredContender(source, env, spawnChild = spawn) {
+  const child = spawnChild(process.execPath, ['--input-type=module', '-e', source], {
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -122,38 +124,27 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, { recursive: true, force: true })));
 });
 
-test('contender result waits for inherited output pipes after process exit', async () => {
-  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-contender-output-'));
-  tempDirs.push(home);
-  const releaseFile = join(home, 'parent-exited');
-  // A descendant keeps the pipes open, but writes only after the parent exit
-  // event. This reproduces the exit/stdio ordering without scheduler timing.
-  const writerSource = `
-    const { existsSync } = await import('node:fs');
-    const deadline = Date.now() + 10000;
-    while (!existsSync(${JSON.stringify(releaseFile)})) {
-      if (Date.now() > deadline) process.exit(1);
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    console.log('REJECTED:EAGENTLOCKED');
-    console.error('LATE_DIAGNOSTIC');
-  `;
-  const contender = spawnBarrieredContender(`
-    const { spawn } = await import('node:child_process');
-    ${BARRIER_PROLOGUE}
-    spawn(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(writerSource)}], {
-      stdio: ['ignore', 'inherit', 'inherit'],
-    }).unref();
-  `, process.env);
-  const exited = new Promise(resolve => contender.child.once('exit', resolve));
+test('contender result waits for output pipes after process exit', async () => {
+  // Model the documented ChildProcess ordering directly: exit may precede
+  // final pipe data. Inheriting a grandchild's stdio is not portable to Windows.
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  const contender = spawnBarrieredContender('', process.env, () => child);
+  child.stdout.write('READY\n');
   await contender.ready;
-  contender.child.stdin.write('go\n');
-  await exited;
-  await fsp.writeFile(releaseFile, 'go');
+  child.emit('exit', 0, null);
+  child.stdout.end('REJECTED:EAGENTLOCKED\n');
+  child.stderr.end('LATE_DIAGNOSTIC\n');
+  child.emit('close', 0, null);
   const result = await contender.done;
   assert.equal(result.code, 0);
+  assert.equal(result.signal, null);
   assert.match(result.output, /REJECTED:EAGENTLOCKED/);
   assert.match(result.stderr, /LATE_DIAGNOSTIC/);
+  child.stdin.destroy();
 });
 
 test('manager 재시작 orphan 정리는 이전 CLI 종료를 확인한 뒤 sidecar를 회수한다', async () => {
