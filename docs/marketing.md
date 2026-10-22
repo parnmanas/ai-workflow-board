@@ -50,7 +50,7 @@
 | `MarketingChannel` | `marketing_channels` | 캠페인의 채널(연결 테이블 + 탐색 근거). kind 는 `outreach` · `email` · `manual` |
 | `MarketingPost` | `marketing_posts` | 채널별 콘텐츠(게시글 · 답글 · 메일) |
 | `MarketingEmailSend` | `marketing_email_sends` | 메일 한 통 = (post × contact). 발송 큐이자 기록. 보낸 credential, 공급자가 알려 온 바운스 · 스팸 신고 |
-| `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 수신거부 · 바운스 · 스팸 신고, 억제 해시 |
+| `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 재확인 안내로 이어진 동의 기간, 수신거부 · 바운스 · 스팸 신고, 억제 해시 |
 | `MarketingBudgetAllocation` | `marketing_budget_allocations` | 채널별 예산 편성(버전) |
 | `MarketingSpendRequest` | `marketing_spend_requests` | 지출 요청과 그 상태 기계 |
 | `MarketingLedgerEntry` | `marketing_ledger_entries` | append-only 원장 |
@@ -61,6 +61,8 @@
 | `MarketingAuditEvent` | `marketing_audit_events` | append-only 감사 로그 |
 | `MarketingApprovalNotice` | `marketing_approval_notices` | 승인 대기 알림을 보냈다는 표시. (대상, 종류)마다 한 번 |
 | `MarketingListHold` | `marketing_list_holds` | 스팸 신고율이 높아 발송을 멈춘 수신 목록. (계정, 목록)마다 `held` 는 하나, 해제한 것은 이력 |
+| `MarketingConsentNotice` | `marketing_consent_notices` | 수신 동의 재확인 안내 한 통. (연락처, 기한)마다 하나 — 법정 통지를 보냈다는 기록 |
+| `MarketingConsentNoticeSetting` | `marketing_consent_notice_settings` | 계정의 재확인 안내 설정(켜기 · 발송 시점 · 무응답 처리 · 문구). 계정마다 하나 |
 
 ### 기존 것과의 경계 (왜 새로 만들었나 / 무엇을 재사용하나)
 
@@ -174,13 +176,14 @@
   - 필수: 방법(`signup_form|checkout|event|import|other`), 출처, 시각
   - 선택: 문구 버전, IP, 야간 수신 동의, 국가, 시간대
 - 수신거부 · 바운스 · 스팸 신고 · 삭제된 주소는 `email_hash` 로 **억제**된다. 다시 가져와도 되살아나지 않는다.
+- 동의는 2년이 지나면 발송에서 빠진다. 기한 전에 재확인 안내가 나가면 이어진다("동의 재확인 안내"). 더 새로운 동의 시각으로 다시 가져오면 증거가 바뀌고 2년을 다시 센다.
 - 상태는 `subscribed` · `unsubscribed` · `bounced` · `complained` · `erased`(`CONTACT_STATUSES`)이고, `subscribed` 에게만 보낸다. 억제가 어디서 왔는지는 `unsubscribe_source` 다: `link` · `one_click` · `manual` · `mailto`(List-Unsubscribe 메일 회신) · `bounce` · `complaint` · `provider`(공급자 쪽 수신거부).
 - 삭제(erase)하면 주소 · 이름은 지우고 해시만 남긴다.
 
 ### 발송
 
 - 승인하기 전에 preflight 로 확인한다: `AWB_PUBLIC_URL`, 발신자 설정, credential, 수신자 수(게시물당 최대 10,000). 하나라도 실패하면 글은 draft 로 남는다.
-- 승인하면 목록의 발송 대상만 큐에 넣는다. 대상은 `subscribed` 이면서 동의가 2년 이내인 연락처다.
+- 승인하면 목록의 발송 대상만 큐에 넣는다. 대상은 `subscribed` 이면서 동의 기간 안인 연락처다(동의일 또는 재확인 안내로 이어진 기한부터 2년, "동의 재확인 안내").
 - 큐는 30초마다 50통씩 처리한다.
   - **보내기 직전에 연락처 상태를 다시 본다.** 그 사이 수신거부했으면 `suppressed` 다.
   - 수신자 현지 21:00–08:00 이고 야간 동의가 없으면 `deferred` 로 두고, 아침 08:00 에 보낸다.
@@ -237,7 +240,7 @@
 - **보낸 사람이 그 credential 로 메일을 받은 연락처일 때만** 기록한다. 그 밖의 메일은 열지도 않는다(Resend 본문 API 를 부르지 않는다) — 회신 주소로 오는 아무 메일이나 피드백이 되지 않게. 자동 응답(`Auto-Submitted` · `Precedence: bulk` · "Automatic reply" · "자동 회신" …)도 기록하지 않는다. 공급자가 보낸 사람 인증이 실패했다고 알린 메일(Resend DMARC `fail`, SendGrid SPF `fail` 이면서 DKIM 통과 없음)도 버린다 — 연락처 주소를 사칭한 글 · 수신거부를 막는다. 인증 결과가 없으면 버리지 않는다.
 - 어느 메일에 대한 답장인지: 그 사람이 그 credential 로 받은 최근 메일. 여러 캠페인이면 회신 주소가 이 메일의 받는 주소인 채널의 것을 고른다.
 - 기록: `MarketingFeedback`(category `other` — 무엇에 대한 글인지 서버가 판단하지 않는다, `recorded_by_type: system`, 출처 키 `email-reply:<공급자>:<Message-ID>` 로 한 번만). summary 는 `메일 답장 — <승인된 메일 제목>` 이다 — 외부 글을 신뢰 필드에 넣지 않는다.
-- **본문은 정리한 것만 남긴다**: 인용 머리("On … wrote:" · "…님이 작성:" · Outlook From/Sent) 아래, `>` 인용 줄, 서명(`-- `) 아래를 버리고, 메일 주소는 `[메일 주소]`, 우리 수신거부 링크(그 사람의 토큰)는 `[수신거부 링크]` 로 바꾼 뒤 8000자로 자른다. HTML 만 있으면 인용 블록 앞까지만 글자로 바꾼다. 아무나 회신 주소로 보낼 수 있는 글이라 정리는 선형 스캔으로만 한다(긴 줄 하나로 처리 시간이 제곱으로 늘지 않게).
+- **본문은 정리한 것만 남긴다**: 인용 머리("On … wrote:" · "…님이 작성:" · Outlook From/Sent) 아래, `>` 인용 줄, 서명(`-- `) 아래를 버리고, 메일 주소는 `[메일 주소]`, 우리 수신거부 링크(그 사람의 토큰)는 `[수신거부 링크]`, 재확인 안내의 유지 링크는 `[동의 유지 링크]` 로 바꾼 뒤 8000자로 자른다. HTML 만 있으면 인용 블록 앞까지만 글자로 바꾼다. 아무나 회신 주소로 보낼 수 있는 글이라 정리는 선형 스캔으로만 한다(긴 줄 하나로 처리 시간이 제곱으로 늘지 않게).
 - 그 뒤는 다른 피드백과 같다: 사이클 지시문의 비신뢰 블록(출처에 "· 메일 답장"), MCP 의 `*_untrusted` 필드.
 - **에이전트는 여전히 연락처를 보지 못한다.** 답장한 연락처는 `contact_id` 로만 잇고 author 는 비운다. 사람용 REST(`GET /campaigns/:id/feedback`)만 그 연락처(주소 · 이름 · 상태)를 싣는다.
 - 제목이 `unsubscribe`(List-Unsubscribe 의 mailto) · `수신거부` 인 메일은 수신거부로 처리하고(source `mailto`) 처리 안내 메일을 보낸다. 본문의 낱말로는 판단하지 않는다 — 그런 글은 답장으로 기록돼 사람이 본다.
@@ -250,6 +253,43 @@ Gmail · Yahoo 의 대량 발신자 기준은 스팸 신고율 0.1% 미만 유�
 - 새 스팸 신고가 발송 행에 기록될 때마다 센다: 기간(30일, 그 안에 해제했으면 해제 이후)에 보낸 메일 · 그중 닿지 않은 것(`bounced_at`) · 그중 신고된 것. **신고 2건 이상이고 신고 ÷ 닿은 메일 ≥ 0.3%** 면 멈춘다(작은 목록에서 한 사람의 신고만으로 멈추지 않게 최소 2건).
 - 멈추면: 그 목록의 큐는 버리지 않고 `deferred`, 새 메일은 승인되지 않고(409), 에이전트의 메일 초안도 거부된다. `get_marketing_campaign` 의 채널에 `list_on_hold`, 사이클 지시문의 채널 줄에 "발송 중지" 가 실린다. 그 목록을 쓰는 캠페인마다 감사 `list.held`.
 - 해제는 `marketing.manage` 가 사유를 적어서 한다(`POST /api/marketing/list-holds/:id/release`). 보류된 메일은 바로 나가고, 신고율은 해제 이후 보낸 메일만 다시 센다 — 해제 전 메일에 늦게 온 신고로 다시 멈추지 않는다. 감사 `list.released`.
+
+### 동의 재확인 안내 (2년)
+
+정보통신망법 §50⑧ · 시행령 §62의3 은 광고성 정보 수신 동의를 받은 자가 **동의일부터 2년마다, 2년이 되는 날 전까지** 받는 사람에게 세 가지를 알리게 한다: 전송자 명칭, 수신 동의 사실과 동의한 날짜, 유지 · 철회 의사를 표시하는 방법. `MarketingConsentNoticeService` 가 이 안내를 보낸다(규칙은 `common/marketing/consent-notice.ts`).
+
+- **동의 기간.** 기준점은 `consent_at` 과 `consent_renewed_at` 중 늦은 쪽이고, 기한은 거기서 730일이다(`consentDeadline`). 발송 대상 판정(`consentFresh`)도 이 기간을 쓴다.
+- **설정은 계정마다 운영자가 정한다**(`marketing.manage`, 연락처 화면의 "동의 재확인 안내").
+
+  | 항목 | 값 |
+  | --- | --- |
+  | 켜기 | 기본은 꺼짐이다. 켜려면 `AWB_PUBLIC_URL` 이 있어야 한다(유지 · 철회 링크) |
+  | 발송 시점 | 기한 7–90일 전(기본 30일) |
+  | 무응답 처리 | `keep`(기본) · `lapse` |
+  | 제목 · 본문 | 자리표시자 `{{name}}` · `{{sender}}` · `{{consent_date}}` · `{{due_date}}`. 모르는 `{{…}}` 는 저장할 때 거부한다 |
+
+  문구나 무응답 처리가 바뀌면 `version` 이 오른다. 보낸 안내와 유지 기록에 그 버전이 남는다. 설정 변경은 감사 `consent_notice.settings` 로 남는다.
+- **무응답 처리.** 무응답의 의미는 안내가 무엇을 제시했느냐로 정해진다(KISA 해석). 서버가 붙이는 문단이 받는 사람에게 그대로 말한다.
+  - `keep`: 철회 방법을 안내했으니 무응답은 유지다. 안내가 나가면 그 주기의 **기한**이 `consent_renewed_at` 이 되고, 동의는 거기서 다시 2년이다. 기산일은 원래 동의일이라 안내를 보낸 날부터 세지 않는다.
+  - `lapse`: 유지 방법을 안내했으니 무응답은 철회다. 기한까지 유지 링크를 누르지 않으면 기한에 발송 대상에서 빠진다. 연락처 상태는 바꾸지 않는다 — 새 동의를 가져오면 다시 받는다.
+- **줄 세우기 · 보내기**
+  - 10분마다 줄을 세운다. 켠 계정의 `subscribed` 연락처 가운데 안내 창(기한 N일 전 ~ 기한)에 든 사람마다 (연락처, 기한) 한 행을 넣는다. 유일 인덱스라 서버가 둘이어도 한 번이다.
+  - 1분마다 50통씩 보낸다. 보내기 직전에 다시 본다. 수신거부 · 바운스 · 신고 · 삭제됐거나, 새 동의로 기한이 바뀌었거나, 기한이 지났으면 보내지 않는다(`skipped`). 꺼졌으면 미룬다.
+  - 발신자는 그 사람이 마지막으로 마케팅 메일을 받은 채널이고, 없으면 그 사람의 목록을 쓰는 채널이다(승인된 메일 채널, 보관되지 않은 캠페인). "전송자 명칭" 이 그 사람이 동의한 발신자여야 해서다. 채널이 없으면 1시간마다 다시 본다(현황의 "보낼 메일 채널 없음").
+  - 수신자 현지 야간(21–08시)이면 아침으로 미룬다. 광고가 아니라서 야간 제한 대상은 아니지만 배려다. 미루면 기한을 넘기게 될 때는 바로 보낸다.
+  - 공급자 결과는 메일 큐와 같다. Resend 는 안내 행 id 를 `Idempotency-Key` 로 3번까지 다시 보내고, SendGrid 는 429 만 다시 보낸다. 보내던 중 끊긴 행은 `failed` 로 닫는다.
+- **안내 메일.** 운영자의 제목 · 본문 뒤에 서버가 고정 문단을 붙인다.
+  - 보낸 곳, 동의한 날짜(받는 사람의 시간대), 유지 방법(무응답이면 어떻게 되는지까지), 철회(수신거부) 방법
+  - "법정 안내이며 광고가 아님", 발신자 이름 · 우편 주소 · 연락처
+  - 제목에 광고 표기를 붙이지 않는다. 확인 안내는 광고와 따로 보내야 하므로(KISA) 광고 문구를 섞지 않는다. `List-Unsubscribe` One-Click 헤더는 붙는다.
+- **이미 지난 동의는 잇지 않는다.** 동의를 다시 묻는 메일은 그 자체가 광고성 정보다. 그래서 기한이 지난 연락처에게는 보내지 않는다. 현황의 "기한이 이미 지난 연락처" 는 새로 동의를 받아 가져와야 다시 보낸다.
+- **유지 링크** `GET/POST /api/m/c/:token`. 토큰은 안내마다 256-bit 이고, REST 응답에 나가지 않는다.
+  - GET 은 확인 화면만 보여 준다. 메일 보안 스캐너가 열어도 처리되지 않게 아무것도 바꾸지 않는다.
+  - POST 는 새 동의로 기록한다: `consent_at` = 지금, method `reconfirm`, source `consent-notice:<안내 id>`, 문구 버전 `consent-notice-v<n>`. 이어진 기간(`consent_renewed_at`)은 지운다 — 2년을 그때부터 다시 센다. IP 원문은 남기지 않고, 이전 증거는 감사 `contact.consent_kept` 에 남는다.
+  - 같은 안내로 두 번 눌러도 한 번이다. 보낸 안내의 링크만, 기한 뒤 30일까지 받는다. 수신거부 · 바운스 · 신고 · 삭제된 연락처는 되살리지 않는다.
+  - 수신거부와 같은 제한(IP 당 분당 30회)을 쓴다. 철회는 연락처의 수신거부 링크(`/api/m/u/:token`) 그대로다.
+- **기록.** 보낸 안내 행이 법정 통지의 기록이다: 기한, 보낸 시각, 발신 채널 · credential, 공급자 message id, 안내한 무응답 처리와 문구 버전, 유지 클릭 시각. 연락처 목록은 연락처마다 동의 기한(`consent_due_at`)과 최근 안내를 싣는다.
+- 안내의 바운스 · 스팸 신고는 아직 안내 행에 잇지 않는다. 공급자 이벤트는 그 주소로 그 credential 을 거쳐 보낸 최근 마케팅 메일에서 찾는다(후속).
 
 ## 예산 편성 · 집행 · 결제
 
@@ -376,7 +416,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
 `MarketingCycleService` 의 tick 이 동작을 정한다.
 
-- 환경 변수: `MARKETING_SCHEDULER_TICK_MS`(기본 60초), `MARKETING_SCHEDULER_ENABLED`. 이 스위치는 지출 sweep · 메일 큐 · 승인 대기 알림도 함께 끈다.
+- 환경 변수: `MARKETING_SCHEDULER_TICK_MS`(기본 60초), `MARKETING_SCHEDULER_ENABLED`. 이 스위치는 지출 sweep · 메일 큐 · 승인 대기 알림 · 동의 재확인 안내도 함께 끈다.
 - 대상: `next_cycle_at` 이 지난 active 캠페인. 각 캠페인마다 다음 순서로 처리한다.
 
 1. **커서를 먼저 전진한다**(`qa-cron`). 겹친 tick 은 아무것도 하지 않고, 놓친 회차는 한 번만 돈다.
@@ -480,9 +520,10 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
 | 목록 발송 중지 | `GET /list-holds`(`?list=&status=`), `POST /list-holds/:id/release` |
+| 동의 재확인 안내 | `GET/PUT /consent-notices/settings`(설정 + 현황), `POST /consent-notices/preview`(저장하지 않음), `GET /consent-notices`(`?status=&limit=`) |
 | 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 사이드바 배지가 쓴다. 같은 기준으로 사용자 채널에도 알린다("승인 대기 알림"). |
 
-공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`, `POST /api/m/email/:credentialId/{events,inbound}`(공급자 서명이 인증).
+공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`(수신거부), `GET/POST /api/m/c/:token`(동의 유지), `POST /api/m/email/:credentialId/{events,inbound}`(공급자 서명이 인증).
 
 ## 후속 (이 문서 범위 밖)
 
@@ -491,7 +532,8 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 - 목록 발송 중지를 승인함 배지 · 승인 대기 알림에 싣기
 - 하드 바운스율이 높은 목록의 발송 중지(지금은 스팸 신고율만 본다)
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
-- 2년 동의 재확인 안내 메일
+- 동의 재확인 안내의 바운스 · 스팸 신고를 안내 행에 잇기(지금은 그 주소의 최근 마케팅 메일로 찾는다)
+- 실패한 동의 재확인 안내를 사람이 다시 보내기(지금은 공급자 거절이면 `failed` 로 끝난다)
 - 정책 기반 자동 게시
 - 승인함도 보관된 캠페인의 결과 불명 · 결제 기록 대기를 세기(승인 대기 알림은 결과 불명을 이미 알린다)
 - 승인 대기 리마인더(만료가 가까운 지출 요청, 오래 대조되지 않은 결제)
