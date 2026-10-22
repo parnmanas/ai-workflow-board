@@ -5,7 +5,7 @@
 // OntologyGraph 행을 원자적으로 선점하고 같은 빌드 파이프라인을 킥오프한다
 // (A1이 지적한 "agent가 graph_id를 얻을 방법이 없어 막히는" 상황을
 // 원천 차단).
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, In } from 'typeorm';
@@ -41,6 +41,9 @@ function isUniqueConstraintError(error: unknown): boolean {
     || /unique constraint failed/i.test(message);
 }
 
+/** failInterruptedBuilds()가 끊긴 빌드에 남기는 error — graph_status · 화면에 그대로 보인다. */
+const INTERRUPTED_BUILD_ERROR = 'graph build was interrupted by a server restart — refresh the graph to rebuild';
+
 export type GraphRefResolutionErrorCode = 'missing_ref' | 'not_found';
 
 export class GraphRefResolutionError extends Error {
@@ -59,7 +62,7 @@ export interface GraphRefInput {
 }
 
 @Injectable()
-export class OntologyLifecycleService {
+export class OntologyLifecycleService implements OnApplicationBootstrap {
   constructor(
     @InjectDataSource() private readonly nestDataSource: DataSource,
     private readonly extractionService: OntologyExtractionService,
@@ -71,6 +74,32 @@ export class OntologyLifecycleService {
    *  서비스와 동일한 자세(축 3). */
   private resolveOntologyDataSource(): DataSource {
     return AppOntologyDataSource ?? this.nestDataSource;
+  }
+
+  async onApplicationBootstrap(): Promise<void> {
+    await this.failInterruptedBuilds();
+  }
+
+  /**
+   * sql.js에서 부팅 때 남아 있는 building 그래프를 error로 돌린다. 추출이
+   * 트랜잭션 밖에서 도는 동안 주기 flush가 building을 파일에 쓰므로, 빌드
+   * 도중 재기동하면(nest --watch 재시작 포함) building만 남고 그 빌드는
+   * 사라진다 — forceRebuild의 CAS가 building을 영영 거부해 Refresh로도 다시
+   * 못 띄운다. sql.js DB는 한 프로세스의 메모리에만 있으니(두 프로세스가 같은
+   * 파일을 쓰면 서로 덮어쓴다) 부팅 시점의 building은 전부 끊긴 빌드다.
+   * 교체는 원자적이라 행은 마지막 ready 스냅샷 그대로고, 실패한 빌드와 같은
+   * 상태(error, 이전 commit 보존)로 둔다. Postgres는 여러 서버가 한 DB를 쓸
+   * 수 있어 부팅만으로는 끊긴 빌드를 가려낼 수 없다(ticket 461d210a).
+   */
+  async failInterruptedBuilds(): Promise<number> {
+    if (!AppOntologyDataSource?.isInitialized) return 0;
+    const result = await AppOntologyDataSource.getRepository(OntologyGraph).update(
+      { status: 'building' },
+      { status: 'error', error: INTERRUPTED_BUILD_ERROR },
+    );
+    const count = result.affected ?? 0;
+    if (count > 0) this.logService.warn('Ontology', 'graph builds interrupted by a restart marked as error', { count });
+    return count;
   }
 
   /**
@@ -154,7 +183,9 @@ export class OntologyLifecycleService {
    * 큐에서 기다리고, Postgres에서도 커넥션 하나를 쥔다 — 추출을 안에 두면
    * 워커 하나가 멈출 때 그 쓰기들도 함께 멈춘다(ticket dc6dfb15). 빌드 중
    * 표시와 동시 빌드 방지는 트랜잭션이 아니라 status='building' 선점
-   * (getOrCreateGraph의 유니크 insert, forceRebuild의 CAS)이 맡는다.
+   * (getOrCreateGraph의 유니크 insert, forceRebuild의 CAS)이 맡는다. 그
+   * building은 이 메서드가 ready/error로 끝내야 풀린다 — 재기동으로 끊긴
+   * 빌드는 sql.js에서 failInterruptedBuilds()가 부팅 때 푼다.
    */
   async runInitialBuild(graph: OntologyGraph): Promise<void> {
     const dataSource = this.resolveOntologyDataSource();

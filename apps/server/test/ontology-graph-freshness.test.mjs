@@ -401,7 +401,8 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     }, { info() {}, warn() {}, error() {} });
 
     const build = svc.runInitialBuild(graph);
-    await insertedSignal;
+    // 저장 단계에 닿기 전에 빌드가 끝나면(실패 포함) 신호를 영영 못 받는다 — 매달리지 않고 실패한다.
+    await Promise.race([insertedSignal, build.then(() => { throw new Error('빌드가 저장 단계에 닿기 전에 끝났다'); })]);
     let flushFinished = false;
     const flush = flushOntologySqljs(AppOntologyDataSource, true).then(() => { flushFinished = true; });
     await new Promise((resolve) => setImmediate(resolve));
@@ -418,7 +419,10 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
   // 추출이 멈춰 있는 동안에도 다른 쓰기는 끝나야 하고, 빌드 중 표시와 동시 빌드
   // 방지(status='building' 선점)는 그대로여야 한다.
   it('추출이 도는 동안 다른 온톨로지 쓰기가 빌드 끝까지 기다리지 않는다 — building 표시와 동시 빌드 방지는 그대로다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx', folder_path: '', status: 'building' }));
+    const graph = await graphRepo.save(graphRepo.create({
+      account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx', folder_path: '', status: 'ready', commit: 'old-commit',
+    }));
+    await nodeRepo.insert(node('outside-tx-old', graph.id, 'sym:old'));
     const readyGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-refresh', folder_path: '', status: 'ready' }));
     const failingGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-fail', folder_path: '', status: 'building' }));
 
@@ -426,6 +430,7 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     const extractionGate = new Promise((resolve) => { releaseExtraction = resolve; });
     let extracting;
     const extractingSignal = new Promise((resolve) => { extracting = resolve; });
+    let persistedInTransaction = null;
     const extraction = {
       extractRepo: async ({ resourceId }) => {
         if (resourceId === failingGraph.resource_id) throw new Error('다른 빌드의 추출 실패');
@@ -434,19 +439,24 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
         return extractionOf(graph, 'outside-tx');
       },
       persistExtraction: async (_extraction, graphId, manager) => {
-        await manager.getRepository(OntologyNode).insert(node('outside-tx-node', graphId, 'sym:outside-tx'));
+        persistedInTransaction = manager.queryRunner?.isTransactionActive === true;
+        await manager.getRepository(OntologyNode).insert(node('outside-tx-new', graphId, 'sym:outside-tx'));
         return persistSummaryOf(1);
       },
     };
     const svc = new OntologyLifecycleService(AppOntologyDataSource, extraction, {
       resolveGraph: async () => ({ edgesInserted: 0 }),
     }, { info() {}, warn() {}, error() {} });
-    // Refresh claim 까지만 본다 — 이긴 쪽이 실제 재빌드를 띄우지 않게 한다.
-    svc.kickOffInitialBuild = () => {};
+    // 빌드는 실제 Refresh 경로(forceRebuild 의 claim)로 시작한다. 다른 그래프의
+    // Refresh 는 claim 까지만 본다.
+    let build = null;
+    svc.kickOffInitialBuild = (claimed) => {
+      if (claimed.id === graph.id) build = svc.runInitialBuild(claimed);
+    };
 
-    const build = svc.runInitialBuild(graph);
+    assert.equal((await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID })).started, true);
     try {
-      await extractingSignal;
+      await Promise.race([extractingSignal, build.then(() => { throw new Error('빌드가 추출 단계에 닿기 전에 끝났다'); })]);
       const writes = Promise.all([
         svc.getOrCreateGraph({ accountId: ACCOUNT_ID, resourceId: 'r-extract-outside-tx-new', folderPath: '' }),
         svc.forceRebuild({ graphId: readyGraph.id, accountId: ACCOUNT_ID }),
@@ -462,10 +472,15 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
       assert.equal((await graphRepo.findOne({ where: { id: graph.id } })).status, 'building', '추출 중에도 building 으로 보인다');
       const again = await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID });
       assert.equal(again.started, false, '추출 중인 그래프는 Refresh 가 두 번째 빌드를 띄우지 않는다');
+      assert.deepEqual((await nodeRepo.find({ where: { graph_id: graph.id } })).map((row) => row.symbol_id), ['sym:old'],
+        '교체 전까지는 직전 스냅샷이 그대로 읽힌다');
     } finally {
       releaseExtraction();
+      // 위 단언이 실패해도 빌드를 끝내고 나간다 — 다음 테스트로 새지 않게.
+      await build?.catch(() => {});
     }
     await build;
+    assert.equal(persistedInTransaction, true, '저장은 교체 트랜잭션의 manager 로 해야 한다');
     const built = await graphRepo.findOne({ where: { id: graph.id } });
     assert.equal(built.status, 'ready');
     assert.equal(built.commit, 'outside-tx');
@@ -700,5 +715,40 @@ describe('OntologyController.refresh — "Refresh Graph" 커맨드 엔드포인�
     assert.equal(res2._status, 200);
     assert.equal(res2._body.started, false);
     assert.equal(res2._body.status, 'building');
+  });
+});
+
+// sql.js 에서는 추출이 트랜잭션 밖에서 도는 동안 주기 flush 가 building 을
+// 파일에 쓴다. 그 사이 재기동하면 building 만 남고 빌드는 사라진다 — 부팅 때
+// error 로 돌려 Refresh 가 다시 받게 한다. 이 파일의 building 행을 전부
+// 되돌리므로 맨 끝에 둔다.
+describe('OntologyLifecycleService.onApplicationBootstrap — 재기동으로 끊긴 빌드(sql.js)', () => {
+  it('남아 있던 building 을 error 로 돌리고 직전 스냅샷 · commit 은 보존한다 — 그 뒤 Refresh 가 다시 빌드를 띄운다', async () => {
+    const interrupted = await graphRepo.save(graphRepo.create({
+      account_id: ACCOUNT_ID, resource_id: 'r-boot-interrupted', folder_path: '', status: 'building', commit: 'snapshot-commit', indexed_at: new Date(),
+    }));
+    await nodeRepo.insert(node('boot-interrupted-old', interrupted.id, 'sym:snapshot'));
+    const neverBuilt = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-boot-never-built', folder_path: '', status: 'building' }));
+    const ready = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-boot-ready', folder_path: '', status: 'ready', commit: 'ready-commit' }));
+
+    const kicked = [];
+    const svc = new OntologyLifecycleService(AppOntologyDataSource, {}, {}, { info() {}, warn() {}, error() {} });
+    svc.kickOffInitialBuild = (claimed) => { kicked.push(claimed.id); };
+
+    await svc.onApplicationBootstrap();
+
+    const afterInterrupted = await graphRepo.findOne({ where: { id: interrupted.id } });
+    assert.equal(afterInterrupted.status, 'error');
+    assert.match(afterInterrupted.error, /interrupted by a server restart/);
+    assert.equal(afterInterrupted.commit, 'snapshot-commit');
+    assert.deepEqual((await nodeRepo.find({ where: { graph_id: interrupted.id } })).map((row) => row.symbol_id), ['sym:snapshot']);
+    assert.equal((await graphRepo.findOne({ where: { id: neverBuilt.id } })).status, 'error');
+    const afterReady = await graphRepo.findOne({ where: { id: ready.id } });
+    assert.equal(afterReady.status, 'ready');
+    assert.equal(afterReady.error, '');
+
+    const refreshed = await svc.forceRebuild({ graphId: interrupted.id, accountId: ACCOUNT_ID });
+    assert.equal(refreshed.started, true, 'building 이 풀려야 Refresh 가 다시 빌드를 띄운다');
+    assert.deepEqual(kicked, [interrupted.id]);
   });
 });

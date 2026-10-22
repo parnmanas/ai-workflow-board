@@ -138,6 +138,7 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
   it('풀에서 실패(bundle=null, error!=null)로 돌아온 파일이 filesFailedExtraction/extractionFailures로 반환값에 보존되고, persist 입력에서는 제외된다', async () => {
     let persistInputBundlePaths = null;
     let persistTarget = null;
+    let persistDataSource = null;
     const svc = buildService({
       poolResults: (tasks) =>
         tasks.map((t) =>
@@ -150,10 +151,11 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
                 error: 'worker exited unexpectedly (code 1) with no message or error event',
               },
         ),
-      persistImpl: async (_dataSource, input) => {
+      persistImpl: async (dataSource, input) => {
+        persistDataSource = dataSource;
         persistInputBundlePaths = input.bundles.map((b) => b.path);
         persistTarget = { graphId: input.graphId, accountId: input.accountId, resourceId: input.resourceId, folderPath: input.folderPath, commit: input.commit };
-        return defaultPersistImpl()(_dataSource, input);
+        return defaultPersistImpl()(dataSource, input);
       },
     });
 
@@ -168,11 +170,32 @@ describe('OntologyExtractionService.extractRepo() 워커 실패 전파 (ticket e
 
     // 실패한 파일이 그래프에 섞여 들어가지 않아야 한다 — persist에는 성공한
     // 파일만 넘어간다.
-    const summary = await svc.persistExtraction(result, 'graph-1', {});
+    const txManager = { transactionManager: true };
+    const summary = await svc.persistExtraction(result, 'graph-1', txManager);
     assert.deepEqual(persistInputBundlePaths, ['a.ts']);
     assert.equal(summary.filesProcessed, 1);
     // 저장 대상은 추출 결과가 싣고 온 계정·프로젝트·폴더·커밋 그대로다.
     assert.deepEqual(persistTarget, { graphId: 'graph-1', accountId: 'ws-1', resourceId: 'res-1', folderPath: '', commit: 'c0ffee' });
+    // lifecycle 이 넘긴 트랜잭션 manager 로 써야 한다 — 기본 DataSource 로 새면
+    // Postgres 에서는 그 쓰기가 교체 트랜잭션 밖에서 커밋된다.
+    assert.equal(persistDataSource, txManager);
+  });
+
+  it('트리는 브랜치 이름이 아니라 고른 커밋으로 읽는다 — 그 사이 fetch 가 브랜치를 옮겨도 commit 과 같은 트리다', async () => {
+    const svc = buildService({
+      poolResults: (tasks) => tasks.map((t) => ({ path: t.path, bundle: makeBundle(t.path), decoratorFacts: [], error: null })),
+    });
+    const walkedRefs = [];
+    const listTree = svc.listTreeRecursive;
+    svc.listTreeRecursive = async (repoPath, ref, rootPath) => {
+      walkedRefs.push(ref);
+      return listTree(repoPath, ref, rootPath);
+    };
+
+    const result = await svc.extractRepo({ accountId: 'ws-1', resourceId: 'res-1', folderPath: '' });
+
+    assert.equal(result.commit, 'c0ffee');
+    assert.deepEqual(walkedRefs, ['c0ffee'], 'Project.default_branch(main)가 아니라 listCommits 가 고른 sha 로 읽어야 한다');
   });
 
   it('워커 실패가 전혀 없으면 filesFailedExtraction=0, extractionFailures=[]다(정상 경로 회귀 없음)', async () => {

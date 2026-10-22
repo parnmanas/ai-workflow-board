@@ -147,8 +147,11 @@ export class OntologyExtractionService {
     const commits = await this.listCommits({ repoPath, ref, limit: 1 });
     const commit = commits[0]?.sha ?? ref;
 
+    // 트리는 브랜치 이름이 아니라 위에서 고른 커밋으로 읽는다 — 그 사이 다른
+    // 빌드나 신선도 조회의 fetch가 브랜치를 옮기면, 그래프에 적는 commit과
+    // 다른 트리를 추출하게 된다.
     const treeStart = Date.now();
-    const { files, skippedByExtension } = await this.walkTree(repoPath, ref, opts.folderPath);
+    const { files, skippedByExtension } = await this.walkTree(repoPath, commit, opts.folderPath);
     const treeWalkMs = Date.now() - treeStart;
 
     const fetchStart = Date.now();
