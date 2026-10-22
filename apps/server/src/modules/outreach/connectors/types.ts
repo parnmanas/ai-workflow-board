@@ -35,7 +35,8 @@ export interface OutreachConnector {
    * Optional: how things this channel published are doing — `refs` are the
    * `OutboundResult.external_item_id`s `publish`/`reply` returned. Read-only.
    * A ref outside the channel's `targets`, or one the platform no longer
-   * returns, is left out of the result instead of failing the call. Marketing
+   * returns without a definite status, is left out of the result. Definite
+   * removal/deletion/lock or access loss is reported as availability. Marketing
    * collects engagement with it (docs/marketing.md "참여 지표 자동 수집").
    */
   readEngagement?(refs: string[]): Promise<EngagementReading[]>;
@@ -50,6 +51,8 @@ export interface OutreachConnector {
 
 export interface EngagementReading {
   ref: string;
+  /** Fixed platform status only; no external removal reason or post text. */
+  availability?: 'removed' | 'deleted' | 'locked' | 'unavailable';
   /** The platform's reaction count: reddit's score (net votes), GitHub's
    *  total reactions. null = the platform is hiding it for now. */
   reactions: number | null;

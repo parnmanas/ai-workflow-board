@@ -187,12 +187,30 @@ test('marketing cycles: scheduled dispatch, lease, completion, prompt carry-over
   // 사람의 거부 사유가 다음 지시문에 실린다
   const drafted = await mcp.callTool('draft_marketing_post', { campaign_id: campaign.id, channel_id: forum.id, body: 'Buy now!!!', rationale: 'test', cycle_id: c1.id });
   await post(`/posts/${drafted.post.id}/reject`, { note: 'too salesy — lead with the answer' });
+  const postRepo = ds.getRepository('MarketingPost');
+  const stopped = await postRepo.save(postRepo.create({
+    account_id: account.id, campaign_id: campaign.id, channel_id: forum.id, status: 'published',
+    title: 'UNSAFE REMOVED TITLE', body: 'UNSAFE REMOVED BODY',
+    engagement: { read_at: new Date().toISOString(), availability: 'removed', availability_checked_at: new Date().toISOString() },
+    engagement_next_at: null,
+  }));
+  const oldStopped = await postRepo.save(postRepo.create({
+    account_id: account.id, campaign_id: campaign.id, channel_id: forum.id, status: 'published',
+    body: 'old removed body',
+    engagement: { availability: 'deleted', availability_checked_at: '2000-01-01T00:00:00.000Z' },
+  }));
   const manual = await post(`/campaigns/${campaign.id}/cycles/run`);
   assert.equal(manual.status, 201, manual.text);
   assert.equal(manual.body.cycle_no, 2);
   assert.equal(manual.body.trigger, 'manual');
   const prompt2 = (await ds.getRepository('ChatRoomMessage').find({ where: { room_id: manual.body.room_id } })).find((m) => m.sender_type === 'user').content;
   assert.match(prompt2, /직전 사이클 #1 \(completed\)/);
+  assert.match(prompt2, /커뮤니티가 제거한 글/);
+  assert.ok(prompt2.includes(stopped.id));
+  assert.ok(prompt2.includes(forum.id));
+  assert.ok(!prompt2.includes(oldStopped.id));
+  assert.doesNotMatch(prompt2, /UNSAFE REMOVED/);
+
   assert.match(prompt2, /요약: Drafted one forum answer/);
   assert.match(prompt2, /- 다음 행동: Check replies on the answer/);
   assert.match(prompt2, /too salesy — lead with the answer/);

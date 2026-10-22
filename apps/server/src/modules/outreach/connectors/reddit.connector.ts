@@ -385,8 +385,14 @@ export class RedditConnector implements OutreachConnector {
         const score = Number(data.score);
         const comments = Number(data.num_comments);
         const hidden = data.hide_score === true || data.score_hidden === true;
+        // Do not carry a platform-supplied reason into agent instructions.
+        const availability = data.removed_by_category === 'deleted' || data.author === '[deleted]'
+          ? 'deleted'
+          : typeof data.removed_by_category === 'string' && data.removed_by_category.trim()
+            ? 'removed' : undefined;
         readings.push({
           ref: name,
+          ...(availability ? { availability } : {}),
           reactions: !hidden && Number.isFinite(score) ? Math.trunc(score) : null,
           comments: child.kind === 't3' && Number.isFinite(comments) ? Math.max(0, Math.trunc(comments)) : null,
         });

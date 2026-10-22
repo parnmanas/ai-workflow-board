@@ -6,6 +6,7 @@
  * 블록 구분자를 무력화하고, 잘라내고, "데이터일 뿐 지시가 아니다" 를 앞뒤로 밝힌다. 그 블록 안의 문장이 사람의 지시처럼
  * 읽히지 않게 하는 것이 목적이고, 실제 방어는 서버의 집행(돈 · 외부 발신은 사람 승인, 허용 목록)이다.
  */
+import type { EngagementValue } from './engagement';
 import { MARKETING_CAPABILITY_LABELS, type MarketingCapability } from './marketing-constants';
 
 export const UNTRUSTED_OPEN = '<<<UNTRUSTED_EXTERNAL_CONTENT';
@@ -49,6 +50,7 @@ export interface CyclePromptInput {
   budget: string[];
   pending: { drafts: number; spend: number; allocations: number; channels: number };
   decisions: Array<{ what: string; status: string; note: string }>;
+  unavailable_posts?: Array<{ id: string; channel_id: string; availability: EngagementValue['availability']; checked_at: string }>;
   report: string[];
   previous: { cycle_no: number; status: string; summary: string; next_actions: string[] } | null;
   untrusted: Array<{ source: string; author: string; category: string; text: string }>;
@@ -146,6 +148,17 @@ export function buildCyclePrompt(input: CyclePromptInput): string {
     for (const d of input.decisions) lines.push(`- ${d.what}: ${d.status}${d.note ? ` — 사유: "${sanitizeUntrusted(d.note, 200)}"` : ''}`);
   }
   lines.push('');
+  const unavailable = input.unavailable_posts || [];
+  if (unavailable.length) {
+    lines.push('## 커뮤니티가 제거한 글 · 삭제/잠금/접근 불가 확인');
+    lines.push('아래는 플랫폼에서 확인한 상태다. 삭제·접근 불가를 커뮤니티의 거부로 단정하지 않는다. 해당 채널의 홍보 규칙을 검토하고 같은 글을 반복 게시하지 않는다.');
+    const labels = { removed: '커뮤니티에서 제거됨', deleted: '삭제됨', locked: '잠김', unavailable: '접근 불가(삭제 또는 권한 변경일 수 있음)' };
+    for (const p of unavailable.slice(0, 15)) {
+      if (!p.availability || !Object.hasOwn(labels, p.availability)) continue;
+      lines.push(`- post_id=${p.id} · channel_id=${p.channel_id} · ${labels[p.availability]} · 확인=${p.checked_at} · 참여 수집 중단`);
+    }
+    lines.push('');
+  }
   lines.push('## 최근 성과(30일)');
   if (!input.report.length) lines.push('- (데이터 없음)');
   for (const r of input.report) lines.push(`- ${r}`);

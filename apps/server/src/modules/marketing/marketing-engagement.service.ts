@@ -290,6 +290,7 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
         const changed = await this.record(post, channels.get(post.channel_id)!, reading, now);
         if (changed === null) continue;
         out.read++;
+        if (reading.availability) out.stopped++;
         if (changed) {
           out.changed++;
           changedCampaigns.set(post.campaign_id, post.account_id);
@@ -390,9 +391,13 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
   private async record(post: MarketingPost, channel: MarketingChannel, reading: EngagementReading, now: Date): Promise<boolean | null> {
     const { changes, value } = engagementChanges(channel.platform, post.engagement, reading);
     value.read_at = now.toISOString();
+    if (reading.availability) {
+      value.availability = reading.availability;
+      value.availability_checked_at = now.toISOString();
+    }
     return this.dataSource.transaction(async (manager) => {
       const won = await manager.createQueryBuilder().update(MarketingPost)
-        .set({ engagement: value, engagement_next_at: nextEngagementReadAt(publishedAt(post), now), engagement_error: '', engagement_rev: post.engagement_rev + 1 })
+        .set({ engagement: value, engagement_next_at: reading.availability ? null : nextEngagementReadAt(publishedAt(post), now), engagement_error: '', engagement_rev: post.engagement_rev + 1 })
         .where('id = :id AND engagement_rev = :rev', { id: post.id, rev: post.engagement_rev })
         .execute();
       if (!won.affected) return null;
@@ -414,7 +419,7 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
           recorded_by_name: SYSTEM_MARKETING_ACTOR.name,
         })));
       }
-      return changes.length > 0;
+      return changes.length > 0 || !!reading.availability;
     });
   }
 }

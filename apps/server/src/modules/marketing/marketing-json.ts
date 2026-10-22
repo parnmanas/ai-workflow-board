@@ -212,6 +212,7 @@ export function postEngagementToJson(p: MarketingPost) {
     engagements: typeof e.engagements === 'number' ? e.engagements : null,
     replies: typeof e.replies === 'number' ? e.replies : null,
     read_at: e.read_at,
+    ...(e.availability ? { availability: e.availability, availability_checked_at: e.availability_checked_at } : {}),
   };
 }
 

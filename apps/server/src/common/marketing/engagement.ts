@@ -36,6 +36,8 @@ export interface EngagementValue {
   engagements?: number;
   replies?: number;
   read_at?: string;
+  availability?: 'removed' | 'deleted' | 'locked' | 'unavailable';
+  availability_checked_at?: string;
 }
 
 export interface EngagementReadingValue {

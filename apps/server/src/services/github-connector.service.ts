@@ -498,6 +498,7 @@ export async function getAuthenticatedLogin(token: string, opts: { fetchImpl?: t
 
 /** Reactions and comment count of one issue or issue comment (marketing engagement collection). */
 export interface GitHubEngagement {
+  availability?: 'deleted' | 'locked' | 'unavailable';
   /** `reactions.total_count` — every reaction type. null when the response carries no reaction rollup. */
   reactions: number | null;
   /** The issue's comment count; null for a comment, which has none of its own. */
@@ -517,27 +518,37 @@ function inRepo(apiUrl: unknown, owner: string, repo: string): boolean {
   return url.endsWith(path) || url.includes(`${path}/`);
 }
 
-/** An issue's reactions and comment count, or null when GitHub no longer has it there (404/410, transferred). */
+/** An issue's counts and availability; a transfer outside the repo is omitted. */
 export async function getIssueEngagement(
   owner: string, repo: string, issueNumber: number, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<GitHubEngagement | null> {
   assertRepoRef(owner, repo);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}`, token, { fetchImpl: opts.fetchImpl });
-  if (res.status === 404 || res.status === 410) return null;
+  if (res.status === 404 || res.status === 410) {
+    // 404 also conceals private resources: never claim deletion from it.
+    return { reactions: null, comments: null, availability: res.status === 410 ? 'deleted' : 'unavailable' };
+  }
   await assertGitHubOk(res, `GET issue ${owner}/${repo}#${issueNumber}`);
   const data = await res.json();
   if (!inRepo(data.repository_url, owner, repo)) return null;
   const comments = Number(data.comments);
-  return { reactions: reactionTotal(data.reactions), comments: Number.isFinite(comments) && comments >= 0 ? Math.trunc(comments) : null };
+  return {
+    reactions: reactionTotal(data.reactions),
+    comments: Number.isFinite(comments) && comments >= 0 ? Math.trunc(comments) : null,
+    ...(data.locked === true ? { availability: 'locked' as const } : {}),
+  };
 }
 
-/** An issue comment's reactions, or null when GitHub no longer has it there. */
+/** An issue comment's reactions and availability; a transfer outside the repo is omitted. */
 export async function getIssueCommentEngagement(
   owner: string, repo: string, commentId: number, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<GitHubEngagement | null> {
   assertRepoRef(owner, repo);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues/comments/${commentId}`, token, { fetchImpl: opts.fetchImpl });
-  if (res.status === 404 || res.status === 410) return null;
+  if (res.status === 404 || res.status === 410) {
+    // 404 also conceals private resources: never claim deletion from it.
+    return { reactions: null, comments: null, availability: res.status === 410 ? 'deleted' : 'unavailable' };
+  }
   await assertGitHubOk(res, `GET issue comment ${owner}/${repo} ${commentId}`);
   const data = await res.json();
   if (!inRepo(data.issue_url, owner, repo)) return null;

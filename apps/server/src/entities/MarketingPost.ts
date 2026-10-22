@@ -1,3 +1,4 @@
+import type { EngagementValue } from '../common/marketing/engagement';
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 /**
@@ -123,7 +124,7 @@ export class MarketingPost {
    * 답글(댓글)인 글은 댓글 수가 없다. MarketingMetric 의 connector 행은 이 값의 변화량이라, 그 합이 곧 이 값이다.
    */
   @Column({ type: 'simple-json', default: '{}' })
-  engagement: { engagements?: number; replies?: number; read_at?: string };
+  engagement: EngagementValue;
 
   /** 다음에 참여를 읽을 시각. null = 읽지 않는다(서버가 게시한 글이 아님 · 기간이 끝남 · 멈춤). */
   @Column({ type: Date, nullable: true, default: null })

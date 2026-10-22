@@ -603,6 +603,10 @@ test('참여 자동 수집 — 게시물 카드가 읽은 값 · 다음 읽기 �
     // 이 기능 전 · 기간 밖에 게시돼 수집기가 맡은 적 없는 글 — 읽은 적도 읽을 일도 없다.
     published('pub-untracked', 'ch-reddit', { engagement: null, engagement_next_at: null, engagement_error: '' }),
     published('pub-hidden', 'ch-reddit', { kind: 'reply', engagement: { engagements: null, replies: null, read_at: iso(-5) }, engagement_next_at: iso(55), engagement_error: '' }),
+    ...['removed', 'deleted', 'locked', 'unavailable'].map((availability) => published(`pub-${availability}`, availability === 'locked' ? 'ch-github' : 'ch-reddit', {
+      engagement: { engagements: availability === 'removed' ? 57 : null, replies: null, read_at: iso(-30), availability, availability_checked_at: iso(-5) },
+      engagement_next_at: null, engagement_error: '',
+    })),
   ];
   const { container } = await renderPage(t, {
     entry: '/marketing/c-1?tab=content',
@@ -617,6 +621,13 @@ test('참여 자동 수집 — 게시물 카드가 읽은 값 · 다음 읽기 �
   assert.equal(Boolean(container.querySelector('[data-testid="marketing-post-engagement-pub-manual"]')), false, '사람이 올린 manual 글은 서버가 읽지 않는다');
   assert.equal(Boolean(container.querySelector('[data-testid="marketing-post-engagement-pub-untracked"]')), false, '수집기가 맡은 적 없는 글에 "아직 읽지 않음" 을 영원히 띄우지 않는다');
   assert.match(within(container, 'marketing-post-engagement-pub-hidden').textContent, /^플랫폼이 값을 아직 감춤 · .+ 읽음 · 다음 .+$/);
+  for (const [availability, label] of Object.entries({ removed: '커뮤니티에서 제거됨', deleted: '삭제됨', locked: '잠김', unavailable: '접근할 수 없음' })) {
+    const text = within(container, `marketing-post-engagement-pub-${availability}`).textContent;
+    assert.ok(text.startsWith(`${label} · 참여 수집 중단 · `));
+    assert.match(text, /확인/);
+    assert.doesNotMatch(text, /다음|플랫폼이 값을 아직 감춤/);
+  }
+  assert.match(within(container, 'marketing-post-engagement-pub-removed').textContent, /마지막 수집: 점수 57$/);
 });
 
 test('지표 표 — 자동 수집 행은 부호 붙은 변화량으로 보이고, 서버가 읽는 채널의 참여 · 답글 기록은 화면이 막는다', async (t) => {

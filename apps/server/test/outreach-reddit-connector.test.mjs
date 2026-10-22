@@ -641,3 +641,25 @@ test('readEngagement: each /api/info request counts against rate_limit_per_hour'
   assert.equal(limiter.remaining('ch-eng', 2), 0, 'two requests spent');
   await assert.rejects(conn.readEngagement(['t3_more']), OutreachChannelRateLimitedError);
 });
+
+
+test('readEngagement: removed and deleted Reddit posts expose fixed status without external reasons or text', async () => {
+  const entries = [
+    ['t3_mod', { removed_by_category: 'moderator' }, 'removed'],
+    ['t3_auto', { removed_by_category: 'automod_filtered' }, 'removed'],
+    ['t3_deleted', { removed_by_category: 'deleted' }, 'deleted'],
+    ['t3_author', { author: '[deleted]' }, 'deleted'],
+    ['t3_unknown', { removed_by_category: 'untrusted external reason' }, 'removed'],
+    ['t3_active', { removed_by_category: null, author: 'bot' }, undefined],
+  ];
+  const conn = new RedditConnector(makeCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', sleepImpl: noopSleep, threadLocations: new RedditThreadLocationCache(),
+    fetchImpl: async (url) => url === 'https://www.reddit.com/api/v1/access_token' ? TOKEN_OK() : fakeResponse({ json: { data: { children: [
+      ...entries.map(([name, extra]) => ({ kind: 't3', data: { name, subreddit: 'awb', score: 1, num_comments: 2, title: 'untrusted title', selftext: 'untrusted body', ...extra } })),
+      { kind: 't3', data: { name: 't3_other', subreddit: 'other', removed_by_category: 'moderator' } },
+    ] } } }),
+  });
+  assert.deepEqual(await conn.readEngagement([...entries.map(([name]) => name), 't3_other']), entries.map(([ref, , availability]) => ({
+    ref, reactions: 1, comments: 2, ...(availability ? { availability } : {}),
+  })));
+});

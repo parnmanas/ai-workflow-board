@@ -525,4 +525,26 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   assert.equal(proposedReddit.status, 'proposed');
   const wide = await mcp.callTool('record_marketing_metrics', { campaign_id: proposedOnly.id, observations: [{ metric: 'engagements', value: 3 }, { metric: 'replies', value: 1, channel_id: proposedReddit.id }] });
   assert.equal(wide.recorded?.length, 2, JSON.stringify(wide));
+  // Terminal platform states persist even without a metric delta and never get rescheduled.
+  for (const availability of ['removed', 'deleted', 'locked', 'unavailable']) {
+    const terminal = await postRepo.save(postRepo.create({
+      account_id: account.id, campaign_id: campaign.id, channel_id: reddit.id, status: 'published',
+      body: 'terminal fixture', external_item_id: `t3_terminal_${availability}`,
+    }));
+    await backdate(terminal.id);
+    redditFake.engagement.set(terminal.external_item_id, { ref: terminal.external_item_id, reactions: null, comments: null, availability });
+    const result = await collector.sweep(at(HOUR));
+    assert.ok(result.stopped >= 1);
+    const saved = await row(terminal.id);
+    assert.equal(saved.engagement.availability, availability);
+    assert.equal(saved.engagement.availability_checked_at, at(HOUR).toISOString());
+    assert.equal(saved.engagement_next_at, null);
+    const json = (await api(`/campaigns/${campaign.id}/posts`)).body;
+    assert.equal((Array.isArray(json) ? json : json.posts).find((p) => p.id === terminal.id).engagement.availability, availability);
+    const calls = redditFake.engagementCalls.length;
+    await collector.sweep(at(2 * HOUR));
+    assert.ok(redditFake.engagementCalls.slice(calls).every((refs) => !refs.includes(terminal.external_item_id)));
+    assert.equal((await row(terminal.id)).engagement_next_at, null);
+  }
+
 });

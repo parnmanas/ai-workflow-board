@@ -577,6 +577,17 @@ function approveLabel(channelKind: string | undefined, postKind: string): string
 /** 서버가 읽은 참여(docs/marketing.md "참여 지표 자동 수집") — 읽은 값 · 읽은 시각 · 다음 읽기(또는 끝) · 실패 이유. */
 function EngagementLine({ post, platform }: { post: MarketingPost; platform: string | undefined }) {
   const summary = engagementSummary(platform, post.engagement);
+  const availability = post.engagement?.availability;
+  if (availability) {
+    const label = { removed: '커뮤니티에서 제거됨', deleted: '삭제됨', locked: '잠김', unavailable: '접근할 수 없음' }[availability];
+    return (
+      <span data-testid={`marketing-post-engagement-${post.id}`}>
+        <span style={{ color: tokens.colors.dangerLight }}>{label} · 참여 수집 중단</span>
+        {post.engagement?.availability_checked_at ? ` · ${formatDateTime(post.engagement.availability_checked_at)} 확인` : ''}
+        {summary ? ` · 마지막 수집: ${summary}` : ''}
+      </span>
+    );
+  }
   return (
     <span data-testid={`marketing-post-engagement-${post.id}`} title="서버가 게시 후 14일 동안 플랫폼에서 읽습니다">
       {summary || (post.engagement ? '플랫폼이 값을 아직 감춤' : '아직 읽지 않음')}

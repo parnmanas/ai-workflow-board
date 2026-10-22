@@ -257,8 +257,9 @@ export class GitHubConnector implements OutreachConnector {
    * published — `issue:{owner}/{repo}#{number}` from `publish`,
    * `comment:{owner}/{repo}#{number}:{id}` from `reply`. One request per ref,
    * each through the same cap/retry path as every other call. A ref in a repo
-   * outside `targets` is skipped without a request; one GitHub no longer has
-   * there (deleted, transferred) is left out.
+   * outside `targets` is skipped without a request, as is a transferred
+   * resource outside the repo. Locked, deleted and unavailable resources
+   * carry a fixed availability status.
    */
   async readEngagement(refs: string[]): Promise<EngagementReading[]> {
     const readings: EngagementReading[] = [];

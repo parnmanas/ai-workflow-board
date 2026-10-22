@@ -362,7 +362,7 @@ test('rate_limit_per_hour cap throws OutreachChannelRateLimitedError before the 
 
 // ── readEngagement (marketing 참여 지표 자동 수집, docs/marketing.md "참여 지표 자동 수집") ──────────────
 
-test('readEngagement: issue reactions + comment count, comment reactions, gone/transferred/off-whitelist left out', async () => {
+test('readEngagement: issue reactions + comment count, comment reactions, missing/deleted status, transferred/off-whitelist left out', async () => {
   const calls = [];
   const fetchImpl = async (url) => {
     const u = String(url);
@@ -390,6 +390,8 @@ test('readEngagement: issue reactions + comment count, comment reactions, gone/t
   assert.deepEqual(readings, [
     { ref: 'issue:x/y#7', reactions: 12, comments: 4 },
     { ref: 'comment:x/y#7:555', reactions: 2, comments: null },
+    { ref: 'issue:x/y#8', reactions: null, comments: null, availability: 'unavailable' },
+    { ref: 'issue:x/y#9', reactions: null, comments: null, availability: 'deleted' },
     { ref: 'issue:x/y#11', reactions: null, comments: 0 },
   ]);
   assert.equal(calls.filter((c) => c.includes('/repos/other/')).length, 0, 'a repo outside the whitelist is never requested');
@@ -406,4 +408,18 @@ test('readEngagement: a malformed ref throws; each request counts against rate_l
   await conn.readEngagement(['issue:x/y#1', 'issue:x/y#2']);
   assert.equal(limiter.remaining('ch-gh-eng', 2), 0);
   await assert.rejects(conn.readEngagement(['issue:x/y#3']), OutreachChannelRateLimitedError);
+});
+
+
+test('readEngagement: locked issues and deleted comments report only fixed availability facts', async () => {
+  const conn = new GitHubConnector(makeCred(), {
+    targets: ['x/y'], sleepImpl: noopSleep,
+    fetchImpl: async (url) => String(url).includes('/comments/')
+      ? fakeResponse({ status: 410, text: 'external deletion explanation' })
+      : fakeResponse({ json: { locked: true, active_lock_reason: 'external reason', title: 'untrusted title', body: 'untrusted body', repository_url: 'https://api.github.com/repos/x/y', comments: 3, reactions: { total_count: 2 } } }),
+  });
+  assert.deepEqual(await conn.readEngagement(['issue:x/y#1', 'comment:x/y#1:9']), [
+    { ref: 'issue:x/y#1', reactions: 2, comments: 3, availability: 'locked' },
+    { ref: 'comment:x/y#1:9', reactions: null, comments: null, availability: 'deleted' },
+  ]);
 });

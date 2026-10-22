@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, LessThan, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
+import { DataSource, In, IsNull, LessThan, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
 import { MarketingCycle } from '../../entities/MarketingCycle';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingPost } from '../../entities/MarketingPost';
@@ -245,7 +245,7 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
     const since = previous
       ? new Date(Math.floor(new Date(previous.started_at).getTime() / 1000) * 1000)
       : new Date(Date.now() - 7 * 24 * 60 * 60_000);
-    const [overview, report, recorded, collected, drafts, spend, allocations, proposedChannels, decisions] = await Promise.all([
+    const [overview, report, recorded, collected, drafts, spend, allocations, proposedChannels, decisions, stoppedPosts] = await Promise.all([
       this.agent.overview(campaign),
       this.analytics.report(campaign).catch(() => null),
       this.feedback.list(campaign, { since, limit: 15 }),
@@ -255,6 +255,11 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
       this.allocationRepo.count({ where: { campaign_id: campaign.id, status: 'proposed' } }),
       this.channelRepo.count({ where: { campaign_id: campaign.id, status: 'proposed' } }),
       this.auditRepo.find({ where: { campaign_id: campaign.id, action: In(DECISION_ACTIONS), created_at: MoreThanOrEqual(since) }, order: { created_at: 'DESC' }, take: 10 }),
+      this.postRepo.find({
+        where: { account_id: campaign.account_id, campaign_id: campaign.id, status: 'published', engagement_next_at: IsNull(), updated_at: MoreThanOrEqual(since) },
+        select: ['id', 'channel_id', 'engagement'],
+        order: { updated_at: 'DESC' },
+      }),
     ]);
     const channelNames = new Map(overview.channels.map((c: any) => [c.id, c.name]));
     const untrusted = [
@@ -316,6 +321,11 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
         what: `${DECISION_LABELS[d.entity_type] || d.entity_type} ${d.entity_id.slice(0, 8)}`,
         status: d.action,
         note: String((d.detail as any)?.note || (d.detail as any)?.error || ''),
+      })),
+      unavailable_posts: stoppedPosts.filter((p) => p.engagement?.availability
+        && Date.parse(p.engagement.availability_checked_at || '') >= since.getTime()).slice(0, 15).map((p) => ({
+        id: p.id, channel_id: p.channel_id, availability: p.engagement.availability,
+        checked_at: p.engagement.availability_checked_at!,
       })),
       // 성과 줄도 사람이 승인한 채널 것만(제안 단계 채널의 이름은 에이전트가 쓴 글이다).
       report: report

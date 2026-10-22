@@ -3900,6 +3900,8 @@ export interface MarketingPostEngagement {
   engagements: number | null;
   replies: number | null;
   read_at: string;
+  availability?: 'removed' | 'deleted' | 'locked' | 'unavailable';
+  availability_checked_at?: string;
 }
 
 export interface MarketingEmailSend {

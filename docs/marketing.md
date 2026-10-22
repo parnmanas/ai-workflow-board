@@ -615,6 +615,8 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 점수가 내려가거나 댓글이 지워지면 음수 행이 남는다. 그래서 짧은 기간의 합은 음수일 수 있다.
 - 마지막으로 읽은 값은 게시물에 있다: `engagement`(`engagements` · `replies` · `read_at`), `engagement_next_at`(다음 읽기, 끝났으면 null), `engagement_error`(마지막 실패 · 멈춘 이유). 게시물 REST 와 `get_marketing_campaign` 의 `recent_posts` 에 실린다.
 
+**제거 · 삭제 · 잠금.** 커넥터가 확인한 상태는 `engagement.availability`와 `availability_checked_at`에 저장한다. reddit은 `removed_by_category`(deleted는 삭제, 그 밖은 제거)와 작성자 `[deleted]`, GitHub은 잠김(`locked`)과 410(삭제)을 읽는다. GitHub 404는 삭제와 권한 변경을 구별할 수 없으므로 `unavailable`(접근 불가)로 표시한다. 이 상태를 저장하는 CAS에서 `engagement_next_at`을 null로 바꿔 수집을 끝내며, 과거 지표는 보존한다. 게시물 카드에 상태와 확인 시각·수집 중단을 표시한다. 다음 사이클의 사람 결정 근처에는 이전 사이클 시작 이후 확인한 게시물 ID·채널 ID·고정 상태·시각만 최대 15개 싣는다. 외부 제목·본문·제거 사유 문자열은 싣지 않으며 삭제·접근 불가를 커뮤니티의 거부로 단정하지 않는다.
+
 **일정.**
 - 게시 1시간 뒤 처음 읽는다.
 - 그 뒤 글의 나이가 1일 미만이면 1시간, 3일 미만이면 3시간, 그 뒤는 12시간마다 읽는다.
