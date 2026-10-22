@@ -432,7 +432,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | --- | --- | --- |
 | Meta Ads | `act_<광고 계정 id>/<캠페인 id>` — 그 캠페인의 `account_id` 와 대조한다 | `access_token`(시스템 사용자 토큰, `ads_management`), `app_secret`(선택 — appsecret_proof) |
 | Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | `client_id` · `client_secret` · `refresh_token`(adwords 범위), `login_customer_id`(선택 — 관리자 계정), `developer_token`(비워 둔다 — 2026-09-09 폐지, 지금은 무시되고 이후 API 버전은 거부한다. 있으면만 보낸다) |
-| Stripe Issuing | 카드 소지자 id `ich_…` | `secret_key` — 운영은 제한된 키 `rk_live_…`(Issuing Cards: Write · Issuing Cardholders: Read)만, 샌드박스는 `rk_test_…` · `sk_test_…`. 전체 운영 키 `sk_live_…` 는 거부한다 |
+| Stripe Issuing | 카드 소지자 id `ich_…` | `secret_key` — 운영은 제한된 키 `rk_live_…`(Issuing Cards: Write · Issuing Cardholders/Transactions/Authorizations: Read)만, 샌드박스는 `rk_test_…` · `sk_test_…`. 전체 운영 키 `sk_live_…` 는 거부한다 |
 
 - credential 은 Credentials 화면에서 그 공급자(Meta Ads · Google Ads · Stripe Issuing)를 골라 **이 계정에** 만든다. 다른 종류(custom 등) · 전역 · 에이전트 노출(`agent_env`) credential 은 거부한다. 이 공급자들은 에이전트 노출을 고를 수 없다.
 - Google Ads API 접근 수준은 OAuth client(`client_id`)의 Google Cloud 프로젝트에 붙는다(developer token 대신). 운영 계정에 쓰려면 그 프로젝트에 Explorer 이상의 접근이 있어야 한다 — Test 수준은 테스트 계정만 부를 수 있다.
@@ -446,7 +446,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 공급자 확인이 실패하면 저장하지 않고 거부하고 `spend.refused` 로 감사에 남긴다. 거부 문구는 "사람이 고쳐야 함" 과 "다음 사이클에 다시" 를 구분한다.
 - 금액 · 통화 단위 문제는 공급자를 읽기 전에 거절하고 쉬지 않는다. 나누어떨어지지 않는 금액은 400(금액을 고친다), 표에 없는 통화는 409(사람이 캠페인 통화나 수취인을 고친다)다.
 - 공급자를 읽은 뒤의 거절은 그 (캠페인, 대상, credential) 를 잠시 다시 묻지 않는다 — 에이전트의 되풀이가 공급자 호출로 번지지 않게. 대상 · 인증 문제는 10분, 금액에 달린 것(계정 최소 상한 · 청구 단위 · 상한 최대값)은 1분이다(금액만 바꿔 되풀이해도 그때마다 읽지 않게). 쉬는 동안의 거절 문구는 언제까지 기다리라고 알린다. 수취인이나 credential 을 고치면 키가 바뀌어 바로 다시 묻고, 연결 확인이 정상이면 풀린다.
-- **(상한 공급자) 대상마다 열린 요청은 하나다**(`target_key`, 부분 유일 인덱스 `uq_marketing_spend_open_target`). 캠페인 · 계정을 넘어서도 적용된다. 카드 공급자는 `target_key` 를 남기지 않는다(빈 값은 어떤 요청과도 맞지 않는다). 같은 `from` 으로 계획된 요청 둘이 있으면 먼저 실행된 쪽이 다른 쪽의 `from` 을 바꾸고, 동시에 실행되면 둘 다 `from` 을 읽고 쓴다. 요청 · 승인 · 실행 · 결과 불명 동안 열려 있다 — 결과 불명은 대조해야 그 대상에 새 요청을 낼 수 있다.
+- **(상한 공급자) 대상마다 열린 요청은 하나다**(`target_key`, 부분 유일 인덱스 `uq_marketing_spend_open_target_v2`). 캠페인 · 계정을 넘어서도 적용된다. 카드 공급자는 `target_key` 를 남기지 않는다(빈 값은 어떤 요청과도 맞지 않는다). 같은 `from` 으로 계획된 요청 둘이 있으면 먼저 실행된 쪽이 다른 쪽의 `from` 을 바꾸고, 동시에 실행되면 둘 다 `from` 을 읽고 쓴다. 요청 · 승인 · 실행 · 결과 불명 동안 열려 있다 — 결과 불명은 대조해야 그 대상에 새 요청을 낼 수 있다.
   - 같은 계정의 열린 요청은 공급자를 읽기 전에 그 id · 상태와 함께 알린다.
   - 다른 계정의 열린 요청은 이 계정의 credential 로 그 대상을 실제로 읽은 뒤에만 알리고, id · 상태는 싣지 않는다(연결 확인에는 `open_request: { id: '', status: 'other_account' }`). 대상 ref 를 짐작해 다른 계정의 지출을 엿보지 못하게 하려는 것이다.
   - 이것도 공급자를 읽은 뒤의 거절이라 그 대상을 쉰다(10분) — 되풀이할 때마다 남의 광고 계정을 읽지 않게. 그 요청이 닫히면(DB 로 본다) 바로 풀린다.
@@ -493,7 +493,14 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
   - 이 판단은 캠페인 잠금 안에서 다시 읽은 상태로 한다. 실행 중에 누른 "실패" 가 잠금을 기다리는 사이 결과 불명이 된 요청을 유예 없이 닫지 않게.
 - 결제 기록 창은 거래 id 자리를 서버가 만든 기록용 값(`suggested_provider_ref`, 예: `meta_ads:act_9/77:spend_cap=130000`)으로 미리 채운다. 광고 플랫폼 상한 변경에는 거래 id 가 없다. 카드는 "공급자에서 확인" 이 찾은 **활성** 카드의 id(`ic_…`)만 채운다 — 실행이 받아 둔 카드 id(`suggested_provider_ref`)는 활성화되지 않은 카드일 수 있어 쓰지 않는다.
 
-**환불은 막는다.** 상한 · 카드가 그대로인데 "미사용분" 을 돌려받았다고 적으면, 그 돈은 아직 쓰일 수 있는데 원장은 덜 센다. 상한을 실제로 낮추거나 카드를 해지하고 쓴 돈을 대조해 그만큼 환불을 기록하는 기능은 후속이다. 그때까지 원장은 승인 금액 전체를 사용으로 센다.
+**미사용 상한 반납과 지출 대조.** 직접 결제에는 일반 `refund` 기록을 허용하지 않는다. 결제된 요청에서 사람이 공급자 지출을 조회하고, 서버가 상한을 낮추거나 카드를 해지하는 별도 반납 경로를 사용한다. 세 경로 모두 `marketing.approve_spend` 권한의 로그인 사용자만 호출하며 MCP에는 노출하지 않는다.
+
+- `POST /spend-requests/:id/spending-reconciliation`은 읽기 전용이다. Meta Insights의 십진 문자열 `spend`는 추정치, Google `metrics.cost_micros`는 서비스 비용으로 청구액과 다를 수 있다. Stripe는 카드의 거래와 미결·만료 승인 노출을 읽는다. 빈 광고 보고서를 0 지출로 간주하지 않으며, Meta 조회 기간이 캠페인 생성 시점을 포함하지 않으면 반납을 막는다. 보고서는 대상 전체의 지출과 이번 요청의 원장 잔액을 구분한다. 금액은 부동소수점으로 계산하지 않고, 지출의 최소 단위 미만은 올림해 반납액을 보수적으로 계산한다.
+- `POST /spend-requests/:id/return-unused`는 사람이 본 현재 상한(`expected_ceiling`)과 원장 순사용 잔액(`expected_net_capture_minor`), 반납 금액, 확인과 사유를 받는다. 원장 잔액도 트랜잭션 안에서 다시 비교하므로 카드 해지 후 같은 승인을 재전송해도 중복 반납하지 않는다. 실행 직전에 공급자를 다시 읽고 기대 상한과 일치할 때만 낮춘다. Meta의 0 상한은 제한 해제를 뜻하므로 0으로 낮추지 않는다. Stripe는 카드를 해지한 뒤 거래·승인을 다시 읽고 확인된 미사용분만 환불한다. 재사용 카드도 해지되므로 이후 반복 결제는 그 카드로 할 수 없다.
+- 반납 실행·결과 불명은 동일 대상의 신규 한도 증가와 다른 반납을 막는다. 외부 호출 전에 실행 의도를 저장하며, 확인된 환불과 완료 상태·감사 기록은 한 DB 트랜잭션에 쓴다. 공급자와 DB 사이에는 분산 트랜잭션이 없고, 공급자의 조건부 쓰기도 없으므로 외부 대시보드에서의 동시 수정까지 원자적으로 막지는 못한다.
+- 모호한 외부 응답이나 재시작은 예산을 먼저 풀지 않는다. `POST /spend-requests/:id/reconcile-return`으로 사람이 공급자의 결과를 다시 확인한다. 이 경로는 변경을 재전송하지 않는다. 15분이 지난 뒤에도 원래 상한·카드 상태가 그대로라면 사람이 `outcome: failed`, `confirm_no_change: true`로 변경 없음을 확인해 환불 없이 잠금을 해제할 수 있다.
+- 종료·중단된 대상의 남은 상한과 상한 초과 지출을 대조 화면에 표시한다. 초과액은 `capture ≤ reserve` 원장 규칙을 깨서 기록하지 않는다. 카드 지출이 원래 상한 이내라도 같은 계정의 그 카드 관련 요청 순사용 합계를 넘으면 `ledger_shortfall_minor`로 별도 표시한다(반납 뒤 늦은 매입 포함). 카드 해지 뒤에도 늦은 매입·팁·강제 매입이 나타날 수 있으므로 지출 대조가 최종 청구 확정을 뜻하지 않는다([Stripe 거래 계약](https://docs.stripe.com/issuing/purchases/transactions)).
+- 재사용 카드의 전체 지출을 어느 승인분이 썼는지 단정하지 않는다. 개별 요청의 반납 가능액은 전체 카드 지출을 보수적으로 차감하므로 실제 미사용액보다 작을 수 있다.
 
 **연결 확인(읽기 전용).** `POST /campaigns/:id/payment/check`(`approve_spend`)가 직접 결제 수취인마다 credential 과 대상을 요청 · 실행과 같은 읽기 코드로 읽는다. 보여 주는 것은 정상 · 문제 · 지금 상한 · API 버전 · 열린 요청이다. 아무것도 쓰지 않고, `payment.checked` 로 감사에 남긴다. 실제(또는 테스트) 계정을 돈을 움직이지 않고 검증하는 길이다.
 - 읽기가 실패하면 공급자가 준 글도 `provider_message_untrusted` 로 보여 준다. 요청별 확인의 오류 문장도 그 글을 덧붙인다. 둘 다 사람만 부르는 REST 라 에이전트에게 가지 않는다.
@@ -525,7 +532,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 **재사용 카드의 한도 증가.** 기존 카드가 있으면 요청 때 현재 `all_time` 한도를 읽어 `from → to`(현재 한도 → 현재 한도 + 승인 금액)를 계획한다. 실행 직전 다시 읽어 카드 소지자 · 통화 · 모드 · 업종 · 상태와 한도를 대조하고, 현재 한도가 `from` 일 때만 `to` 로 수정한다. 수정 요청은 요청별 고정 멱등 키를 쓴다. 해지된 카드나 교체가 필요한 카드는 자동으로 다른 카드를 만들지 않고 수취인을 고치게 한다. 응답이 모호하면 `unknown` 으로 남긴다.
 
-`stripe_issuing:<card id>` 를 `target_key` 로 잡아 같은 카드에는 열린 요청을 하나만 허용한다. 첫 발급도 `stripe_issuing:payee:<campaign id>:<정규화한 수취인 이름>` 으로 해당 수취인의 열린 요청을 배타 처리한다. `paid` 는 이번 승인 금액만큼 한도가 반영됐다는 뜻이며 원장은 그 승인 금액 전체를 사용으로 센다. 미사용 한도를 낮춰 환불하는 기능은 별도 후속 범위다. 재사용 한도 증가의 결과 불명은 기존 카드를 자동 해지하지 않는다. 실패 기록은 공급자에서 한도가 아직 `from` 인지 확인하고 사람이 `confirm_no_spend` 를 함께 보내야 한다. 아래 생성·활성화와 카드 검색 절차는 일회용 및 재사용 카드의 첫 발급에 적용된다.
+`stripe_issuing:<card id>` 를 `target_key` 로 잡아 같은 카드에는 열린 요청을 하나만 허용한다. 첫 발급도 `stripe_issuing:payee:<campaign id>:<정규화한 수취인 이름>` 으로 해당 수취인의 열린 요청을 배타 처리한다. `paid` 는 이번 승인 금액만큼 한도가 반영됐다는 뜻이며 원장은 그 승인 금액 전체를 사용으로 센다. 미사용분 반납은 위의 사람 승인 경로에서 카드를 해지한 뒤 처리한다. 재사용 한도 증가의 결과 불명은 기존 카드를 자동 해지하지 않는다. 실패 기록은 공급자에서 한도가 아직 `from` 인지 확인하고 사람이 `confirm_no_spend` 를 함께 보내야 한다. 아래 생성·활성화와 카드 검색 절차는 일회용 및 재사용 카드의 첫 발급에 적용된다.
 
 **실행 — 2단계 발급.**
 1. 카드 소지자를 다시 본다. 막혔거나 모드가 바뀌었으면 보내지 않고 `failed` 다.
@@ -770,7 +777,8 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 | 채널 | `GET/POST /campaigns/:id/channels`, `PATCH /channels/:id`, `POST /channels/:id/{approve,connect,reject,pause,resume}` |
 | 게시물 | `GET /campaigns/:id/posts`, `GET /posts/:id`, `POST /posts/:id/{approve,reject,retry,mark-published}`, `GET /posts/:id/sends` |
 | 예산 | `GET /campaigns/:id/{budget,allocations,spend-requests,ledger}`, `POST /campaigns/:id/allocations`, `POST /allocations/:id/{approve,reject}`, `GET /spend-requests/:id`, `POST /spend-requests/:id/{approve,deny,cancel,mark-paid,mark-failed,refund}`(카드 공급자의 `mark-failed` 는 경우에 따라 `confirm_no_spend`) |
-| 직접 결제 확인(읽기 전용) | `POST /campaigns/:id/payment/check`(연결 확인), `POST /spend-requests/:id/inspect`(요청별 공급자 확인) |
+| 직접 결제 확인(읽기 전용) | `POST /campaigns/:id/payment/check`(연결 확인), `POST /spend-requests/:id/{inspect,spending-reconciliation}`(요청별 확인·지출 대조) |
+| 미사용분 반납(사람 승인) | `POST /spend-requests/:id/{return-unused,reconcile-return}` |
 | 분석 | `GET /campaigns/:id/report`, `GET/POST /campaigns/:id/links`, `GET/POST /campaigns/:id/metrics` |
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
@@ -782,7 +790,6 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 
 ## 후속 (이 문서 범위 밖)
 
-- 직접 결제의 미사용분 반납: 상한 공급자는 서버가 상한을 낮추고(CAS) 그만큼 환불을 기록, 카드는 해지한 카드의 거래를 읽어 쓴 돈만큼만 남기고 환불, 플랫폼 지출 보고서로 대조
 - 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
 - Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다

@@ -142,6 +142,8 @@ export function allocationToJson(a: MarketingBudgetAllocation) {
 export function spendToJson(r: MarketingSpendRequest) {
   return {
     id: r.id,
+    return_status: r.return_status || '',
+    return_operation: r.return_operation || {},
     account_id: r.account_id,
     campaign_id: r.campaign_id,
     channel_id: r.channel_id,

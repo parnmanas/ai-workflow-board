@@ -95,6 +95,8 @@ function fakeProviders() {
 
   const metaGet = (u) => {
     const id = u.pathname.split('/').pop();
+    if (id === 'insights') return json(200, { data: [{ spend: state.meta.spend || '100.001', date_start: '2020-01-01', date_stop: '2026-10-23' }] });
+    if (u.searchParams.get('fields') === 'created_time,stop_time') return json(200, { created_time: '2020-01-01T00:00:00Z' });
     if (id.startsWith('act_')) {
       const acct = state.meta.accounts[id.slice(4)];
       return acct ? json(200, acct) : json(400, { error: { message: 'Unsupported get request', code: 100, error_subcode: 33 } });
@@ -788,4 +790,87 @@ test('Google Ads: only a non-shared total budget is raised; the value must come 
   const events = await ds.getRepository('MarketingAuditEvent').findBy({ campaign_id: campaign.id });
   const haystack = JSON.stringify([rows, events, ctx.responses]);
   for (const marker of MARKERS) assert.equal(haystack.includes(marker), false, `secret ${marker.slice(0, 8)}… leaked`);
+});
+
+test('unused returns: human approval, shared target claim, atomic ledger, ambiguous recovery and overrun', async (t) => {
+  const ctx = await setup(t, 'returns');
+  const cred = await ctx.makeCred('returns-meta', 'meta_ads', { access_token: META_TOKEN });
+  const { ask } = await campaignWith(ctx, [{ name: 'Meta return', provider: 'meta_ads', credential_id: cred.id, ref: 'act_9/77' }]);
+  const request = (await ask({ amount_minor: 30000, payee: 'Meta return' })).spend_request;
+  assert.equal((await ctx.post(`/spend-requests/${request.id}/approve`, { payload_sha256: request.payload_sha256 })).body.status, 'paid');
+  const base = `/spend-requests/${request.id}`;
+  let r = await ctx.post(`${base}/spending-reconciliation`);
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.body.spend_minor, 10001, 'decimal spend rounds upwards');
+  assert.equal(r.body.refundable_minor, 30000);
+  const approved = { amount_minor: 10000, expected_net_capture_minor: 30000, expected_ceiling: '130000', note: 'Campaign stopped', confirm: true };
+  assert.equal((await ctx.post(`${base}/return-unused`, approved, ['marketing.view'])).status, 403);
+  assert.equal((await ctx.post(`${base}/return-unused`, { ...approved, expected_ceiling: '1' })).status, 409);
+  await assert.rejects(ctx.spend.returnUnused(request.id, ctx.account.id, { type: 'agent', id: ctx.agent.id, name: 'agent' }, approved), /human/);
+
+  let unblock, entered;
+  const gate = new Promise(resolve => { unblock = resolve; });
+  const reached = new Promise(resolve => { entered = resolve; });
+  ctx.fake.state.overrides.push({ match: e => e.host === 'graph.facebook.com' && e.method === 'POST', reply: async () => { entered(); await gate; } });
+  const running = ctx.post(`${base}/return-unused`, approved);
+  await reached;
+  assert.equal((await ctx.spend.get(request.id, ctx.account.id)).return_status, 'executing');
+  assert.match(errText(await ask({ amount_minor: 10000, payee: 'Meta return' })), /still open/);
+  assert.equal((await ctx.post(`${base}/return-unused`, approved)).status, 409, 'concurrent return rejected before provider mutation');
+  unblock();
+  r = await running;
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.body.return_status, 'completed', r.text);
+  assert.equal(ctx.fake.state.meta.campaigns[77].spend_cap, '120000');
+  assert.deepEqual((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'refund').map(e => e.amount_minor), [10000]);
+  assert.equal((await ctx.post(`${base}/return-unused`, approved)).status, 409, 'stale replay cannot refund again');
+
+  // Provider applied the decrease, but the response was lost. No refund until read-back confirmation.
+  ctx.fake.state.overrides.push({ match: e => e.host === 'graph.facebook.com' && e.method === 'POST', reply: async (entry, helpers) => {
+    helpers.metaPost(helpers.u, entry.body); throw new Error('connection lost');
+  } });
+  r = await ctx.post(`${base}/return-unused`, { ...approved, expected_ceiling: '120000', expected_net_capture_minor: 20000 });
+  assert.equal(r.body.return_status, 'unknown', r.text);
+  assert.equal((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'refund').length, 1);
+  const writes = ctx.fake.state.writes.length;
+  r = await ctx.post(`${base}/reconcile-return`, { confirm: true, note: 'Read back decreased ceiling' });
+  assert.equal(r.body.return_status, 'completed', r.text);
+  assert.equal(ctx.fake.state.writes.length, writes, 'recovery never repeats external mutation');
+  assert.deepEqual((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'refund').map(e => e.amount_minor), [10000, 10000]);
+  assert.equal((await ctx.post(`${base}/reconcile-return`, { confirm: true, note: 'duplicate' })).status, 409);
+  ctx.fake.state.meta.spend = '1200.01';
+  r = await ctx.post(`${base}/spending-reconciliation`);
+  assert.equal(r.body.overrun_minor, 10001, r.text);
+  assert.equal(r.body.refundable_minor, 0);
+  assert.equal((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'capture').reduce((n,e) => n + e.amount_minor, 0), 30000, 'overrun is reported, not squeezed into capture');
+  ctx.fake.state.meta.spend = '100.001';
+  // An unknown, unchanged provider operation can be closed only after grace and explicit human proof.
+  ctx.fake.state.overrides.push({ match: e => e.host === 'graph.facebook.com' && e.method === 'POST', reply: 'timeout' });
+  r = await ctx.post(`${base}/return-unused`, { ...approved, amount_minor: 5000, expected_ceiling: '110000', expected_net_capture_minor: 10000 });
+  assert.equal(r.body.return_status, 'unknown', r.text);
+  const noChange = { confirm: true, outcome: 'failed', confirm_no_change: true, note: 'No provider change observed' };
+  assert.equal((await ctx.post(`${base}/reconcile-return`, noChange)).status, 409, 'grace period enforced');
+  let stored = await ctx.spend.get(request.id, ctx.account.id);
+  await ctx.ds.getRepository('MarketingSpendRequest').update({ id: request.id }, { return_operation: { ...stored.return_operation, started_at: new Date(Date.now() - 16 * 60000).toISOString() } });
+  r = await ctx.post(`${base}/reconcile-return`, noChange);
+  assert.equal(r.body.return_status, 'failed', r.text);
+  assert.equal((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'refund').length, 2);
+
+  // Audit failure rolls back refund AND completion together. Read-back recovery then records exactly once.
+  const originalAudit = ctx.spend.audit.record.bind(ctx.spend.audit);
+  ctx.spend.audit.record = async (...args) => {
+    if (args[0].action === 'spend.return_completed') throw new Error('test audit failure');
+    return originalAudit(...args);
+  };
+  r = await ctx.post(`${base}/return-unused`, { ...approved, amount_minor: 5000, expected_ceiling: '110000', expected_net_capture_minor: 10000 });
+  ctx.spend.audit.record = originalAudit;
+  assert.equal(r.status, 500);
+  stored = await ctx.spend.get(request.id, ctx.account.id);
+  assert.equal(stored.return_status, 'executing');
+  assert.equal((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'refund').length, 2);
+  await ctx.ds.getRepository('MarketingSpendRequest').update({ id: request.id }, { return_operation: { ...stored.return_operation, started_at: new Date(Date.now() - 16 * 60000).toISOString() } });
+  r = await ctx.post(`${base}/reconcile-return`, { confirm: true, note: 'Recovered interrupted atomic settlement' });
+  assert.equal(r.body.return_status, 'completed', r.text);
+  assert.equal((await ctx.spend.ledgerFor(request.id)).filter(e => e.kind === 'refund').length, 3);
+
 });

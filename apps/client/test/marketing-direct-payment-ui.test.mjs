@@ -520,3 +520,185 @@ test('재사용 Stripe 카드 — 기존 카드 id 를 고쳐 저장하고 잘�
   assert.equal(patches[0].payees[0].card_id, 'ic_replacement');
   assert.equal(patches[0].payees[0].card_single_use, false);
 });
+
+const SPENDING_REPORT = {
+  ceiling_minor: 130000, ceiling_units: '130000', spend_minor: 110000, spend_exact: '1100.00',
+  stopped: true, complete: true, pending_minor: 0, notes: [], status: 'PAUSED', observed_at: iso(0),
+  net_capture_minor: 30000, refundable_minor: 20000, overrun_minor: 0, return_status: '', return_operation: {},
+};
+
+test('지출 대조 — 종료 대상의 미사용 상한과 추정치를 보여 주고 확인한 금액·현재 상한을 승인한다', async (t) => {
+  const returned = [];
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      reconcileMarketingSpending: async () => SPENDING_REPORT,
+      returnUnusedMarketingSpend: async (id, data) => { returned.push([id, data]); return { ...spend(id), status: 'paid', return_status: 'completed' }; },
+    },
+  });
+  const panel = within(container, 'marketing-spending-reconciliation-sp-paid');
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  assert.match(panel.textContent, /종료·중지 대상의 반납 가능 상한/);
+  assert.match(panel.textContent, /Meta Insights spend는 추정치/);
+  assert.match(panel.textContent, /200.00 USD/);
+  click(buttonIn(panel, '미사용 상한 반납…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('미사용 상한 반납 승인'));
+  const approve = buttonIn(dialog, '반납 승인');
+  assert.equal(approve.disabled, true);
+  typeInto(dialog.querySelector('textarea'), 'Campaign paused; return unused cap');
+  click(dialog.querySelector('input[type="checkbox"]'));
+  assert.equal(approve.disabled, false);
+  typeInto(fieldIn(dialog, '반납 금액 (USD)'), '250');
+  assert.equal(approve.disabled, true, 'cannot return more than server report');
+  typeInto(fieldIn(dialog, '반납 금액 (USD)'), '150');
+  assert.equal(approve.disabled, true, 'changing money requires another confirmation');
+  click(dialog.querySelector('input[type="checkbox"]'));
+  click(approve);
+  await flush();
+  assert.deepEqual(returned, [['sp-paid', { amount_minor: 15000, expected_ceiling: '130000', expected_net_capture_minor: 30000, note: 'Campaign paused; return unused cap', confirm: true }]]);
+});
+
+test('카드 반납 — 해지의 비가역성과 미확정 승인·초과 지출을 보여 주며 불완전한 보고서는 반납하지 못한다', async (t) => {
+  const issued = cardSpend('sp-issued', { status: 'paid', provider_ref: 'ic_9' });
+  let complete = true;
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      listMarketingSpendRequests: async (_id, opts = {}) => (!opts.status || opts.status === 'paid' ? [issued] : []),
+      reconcileMarketingSpending: async () => ({ ...SPENDING_REPORT, complete, pending_minor: 1000, overrun_minor: complete ? 1500 : 0, ledger_shortfall_minor: 2500, card_id: 'ic_9' }),
+    },
+  });
+  const panel = within(container, 'marketing-spending-reconciliation-sp-issued');
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  assert.match(panel.textContent, /미확정 승인/);
+  assert.match(panel.textContent, /플랫폼 상한 초과 지출: 15.00 USD/);
+  assert.match(panel.textContent, /카드 원장 순사용 합계를 초과: 25.00 USD/);
+  assert.match(panel.textContent, /반납 뒤 늦게 매입된 금액/);
+  click(buttonIn(panel, '카드 해지 후 미사용분 반납…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('미사용 상한 반납 승인'));
+  assert.match(dialog.textContent, /해지는 되돌릴 수 없고/);
+  assert.match(dialog.textContent, /다른 결제도 중단/);
+  click(buttonIn(dialog, '취소'));
+  complete = false;
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  assert.match(panel.textContent, /완전히 확인하지 못해 반납할 수 없습니다/);
+  assert.doesNotMatch(panel.textContent, /플랫폼 상한 초과 지출:/);
+  assert.match(panel.textContent, /카드 원장 순사용 합계를 초과: 25.00 USD/, 'ledger shortfall remains visible even below the platform cap');
+  assert.equal(hasButton(panel, '카드 해지 후 미사용분 반납…'), false);
+});
+
+test('반납 결과 불명 — 상한 변경을 다시 보내지 않고 기존 작업만 대조한다', async (t) => {
+  const recovered = [];
+  const unknownReturn = spend('sp-return', { status: 'paid', return_status: 'unknown' });
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      listMarketingSpendRequests: async (_id, opts = {}) => (!opts.status || opts.status === 'paid' ? [unknownReturn] : []),
+      reconcileMarketingSpending: async () => ({ ...SPENDING_REPORT, return_status: 'unknown' }),
+      reconcileMarketingReturn: async (id, data) => { recovered.push([id, data]); return { ...unknownReturn, return_status: 'completed' }; },
+      returnUnusedMarketingSpend: async () => { assert.fail('must not resend a return'); },
+    },
+  });
+  const panel = within(container, 'marketing-spending-reconciliation-sp-return');
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  assert.equal(hasButton(panel, '미사용 상한 반납…'), false);
+  click(buttonIn(panel, '반납 결과 대조…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('반납 결과 대조 확인'));
+  assert.match(dialog.textContent, /카드 해지를 다시 보내지 않습니다/);
+  typeInto(dialog.querySelector('textarea'), 'Reconcile saved operation');
+  click([...dialog.querySelectorAll('input[type="checkbox"]')].at(-1));
+  click(buttonIn(dialog, '결과 대조'));
+  await flush();
+  assert.deepEqual(recovered, [['sp-return', { note: 'Reconcile saved operation', confirm: true }]]);
+});
+
+test('Google 비용은 청구액과 구별하고 원본 micros를 보여 준다', async (t) => {
+  const google = spend('sp-google', { status: 'paid', provider: 'google_ads' });
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      listMarketingSpendRequests: async (_id, opts = {}) => (!opts.status || opts.status === 'paid' ? [google] : []),
+      reconcileMarketingSpending: async () => ({ ...SPENDING_REPORT, provider: 'google_ads', spend_exact: '1100000000 micros' }),
+    },
+  });
+  const panel = within(container, 'marketing-spending-reconciliation-sp-google');
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  assert.match(panel.textContent, /metrics.cost_micros는 서비스 비용으로, 실제 청구액과 다를 수 있습니다/);
+  assert.match(panel.textContent, /1100000000 micros/);
+});
+
+test('승인 권한 없는 관리자는 대조·반납 버튼을 받지 않는다', async (t) => {
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      getMe: async () => ({ id: 'u-manager', name: 'Manager', status: 'active', resolved_permissions: ['marketing.manage'], accounts: [{ id: 'acc-1', name: 'Owner', slug: null, relations: ['owner'] }] }),
+    },
+  });
+  const card = within(container, 'marketing-spend-sp-paid');
+  assert.equal(hasButton(card, '플랫폼 지출 대조'), false);
+  assert.equal(hasButton(card, '미사용 상한 반납…'), false);
+  assert.match(card.textContent, /지출 승인 권한이 있는 사람이 확인/);
+});
+
+test('카드 반납은 변하지 않는 카드 상한뿐 아니라 확인한 원장 순사용도 함께 보내 재전송을 구분한다', async (t) => {
+  const returned = [];
+  const issued = cardSpend('sp-card-return', { status: 'paid', provider_ref: 'ic_9' });
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      listMarketingSpendRequests: async (_id, opts = {}) => (!opts.status || opts.status === 'paid' ? [issued] : []),
+      reconcileMarketingSpending: async () => ({ ...SPENDING_REPORT, ceiling_minor: 30000, ceiling_units: '30000', net_capture_minor: 25000, refundable_minor: 15000, status: 'canceled' }),
+      returnUnusedMarketingSpend: async (id, data) => { returned.push([id, data]); return { ...issued, return_status: 'completed' }; },
+    },
+  });
+  const panel = within(container, 'marketing-spending-reconciliation-sp-card-return');
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  click(buttonIn(panel, '카드 해지 후 미사용분 반납…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('미사용 상한 반납 승인'));
+  typeInto(dialog.querySelector('textarea'), 'Canceled card remaining budget');
+  click(dialog.querySelector('input[type="checkbox"]'));
+  click(buttonIn(dialog, '반납 승인'));
+  await flush();
+  assert.deepEqual(returned, [['sp-card-return', { amount_minor: 15000, expected_ceiling: '30000', expected_net_capture_minor: 25000, note: 'Canceled card remaining budget', confirm: true }]]);
+});
+
+test('반납 결과 불명 — 변경 없음은 별도 확인하고 환불 없이 실패로 닫는 승인을 보낸다', async (t) => {
+  const recovered = [];
+  const unknownReturn = spend('sp-return', { status: 'paid', return_status: 'unknown' });
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: {
+      listMarketingSpendRequests: async (_id, opts = {}) => (!opts.status || opts.status === 'paid' ? [unknownReturn] : []),
+      reconcileMarketingSpending: async () => ({ ...SPENDING_REPORT, return_status: 'unknown' }),
+      reconcileMarketingReturn: async (id, data) => { recovered.push([id, data]); return { ...unknownReturn, return_status: 'failed' }; },
+    },
+  });
+  const panel = within(container, 'marketing-spending-reconciliation-sp-return');
+  click(buttonIn(panel, '플랫폼 지출 대조'));
+  await flush();
+  click(buttonIn(panel, '반납 결과 대조…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('반납 결과 대조 확인'));
+  const [noChange, confirm] = dialog.querySelectorAll('input[type="checkbox"]');
+  typeInto(dialog.querySelector('textarea'), 'Provider confirms request never applied');
+  click(confirm);
+  assert.equal(buttonIn(dialog, '결과 대조').disabled, false);
+  click(noChange);
+  assert.equal(buttonIn(dialog, '결과 대조').disabled, true, 'switching resolution requires renewed confirmation');
+  assert.match(dialog.textContent, /요청 후 15분이 지나고/);
+  assert.match(dialog.textContent, /환불 없이 실패로 닫는 것을 승인/);
+  click(confirm);
+  click(buttonIn(dialog, '결과 대조'));
+  await flush();
+  assert.deepEqual(recovered, [['sp-return', { note: 'Provider confirms request never applied', confirm: true, outcome: 'failed', confirm_no_change: true }]]);
+});

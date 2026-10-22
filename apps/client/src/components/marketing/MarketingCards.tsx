@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { MarketingSpendReconciliation } from './MarketingSpendReconciliation';
 import { Link } from 'react-router-dom';
 import { api } from '../../api';
 import type {
@@ -1093,16 +1094,17 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
           <Hint>지출 승인 · 결제 기록은 marketing.approve_spend 권한이 있는 사람만 할 수 있습니다.</Hint>
         )}
         {spend.status === 'executing' && <Hint>결제 시스템의 응답을 기다리는 중입니다 — 다시 보내지 않습니다.</Hint>}
+        {direct && spend.status === 'paid' && <MarketingSpendReconciliation spend={spend} />}
         {direct && spend.status === 'paid' && (cardProvider ? (
           <Hint>
             그 한도의 카드를 만든 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 카드 정보는 Stripe 대시보드에서 봅니다(AWB 는 카드 번호를
             보여 주지 않습니다){spend.receipt_url ? <> — <ExternalLink href={spend.receipt_url}>Stripe 에서 카드 보기</ExternalLink></> : ''}. 덜 쓴 금액을 환불로 기록하는 것은
-            카드를 해지하고 쓴 돈을 대조하는 기능과 함께 후속으로 둡니다.
+            카드를 해지하고 거래·미확정 승인을 대조한 뒤에만 가능합니다.
           </Hint>
         ) : (
           <Hint>
             광고 플랫폼의 상한을 올린 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로
-            낮추는 기능과 함께 후속으로 둡니다 — 상한이 그대로인데 돌려받았다고 적으면 원장이 실제보다 적게 셉니다.
+            낮춘 뒤에만 가능합니다. 아래에서 지출 보고서와 남은 상한을 확인하세요.
           </Hint>
         ))}
       </div>

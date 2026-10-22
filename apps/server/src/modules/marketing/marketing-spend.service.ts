@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, LessThan, MoreThan, Repository, type EntityManager } from 'typeorm';
@@ -30,7 +31,7 @@ import {
   readWebhookSecret,
   type PaymentOutcome,
 } from './marketing-payments';
-import { DIRECT_PAYMENT_ADAPTERS, type DirectAdapterContext, type DirectInspection, type TargetReport } from './marketing-payment-adapters';
+import { DIRECT_PAYMENT_ADAPTERS, reconcileDirect, returnDirect, type DirectAdapterContext, type DirectInspection, type TargetReport } from './marketing-payment-adapters';
 import type { IssuedCardView } from './marketing-payment-stripe';
 import {
   DIRECT_FAIL_GRACE_MS,
@@ -461,7 +462,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
   private async openRequestForTarget(targetKey: string): Promise<MarketingSpendRequest | null> {
     // '' 는 manual · webhook · 일회용 카드 요청의 기본값이다 — 대상이 아니다.
     if (!targetKey) return null;
-    return this.spendRepo.findOne({ where: { target_key: targetKey, status: In(OPEN_TARGET_STATUSES) } });
+    return this.spendRepo.findOne({ where: [{ target_key: targetKey, status: In(OPEN_TARGET_STATUSES) }, { target_key: targetKey, return_status: In(['executing', 'unknown']) }] });
   }
 
   private openTargetMessage(open: MarketingSpendRequest, accountId: string): string {
@@ -687,12 +688,12 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     const pre = await this.get(id, accountId);
     if (isDirectPaymentProvider(pre.provider)) {
       // 직접 공급자의 결제 = 광고 플랫폼의 상한을 올렸거나 그 한도의 카드를 만든 것. 상한 · 카드가 그대로인데 "미사용분" 을 돌려받았다고
-      // 적으면 그 돈은 아직 쓰일 수 있는데 원장은 덜 센다 — 상한을 낮추거나 카드를 해지하고 쓴 돈을 대조하는 기능과 함께 후속으로 둔다
+      // 적으면 그 돈은 아직 쓰일 수 있는데 원장은 덜 센다 — 전용 returnUnused 경로가 상한 축소 · 카드 해지와 대조를 처리한다
       // (docs/marketing.md "직접 결제 어댑터").
       const label = DIRECT_PAYMENT_PROVIDER_LABELS[pre.provider];
       throw marketingError(409, DIRECT_PROVIDER_SPECS[pre.provider].kind === 'card'
-        ? `${label} issued a card with that limit — returning unused budget needs the card to be canceled and its spending reconciled, which AWB does not do yet; the ledger keeps the full approved amount`
-        : `${label} raised a spending ceiling — returning unused budget needs the ceiling to be lowered first, which AWB does not do yet; the ledger keeps the full approved amount`);
+        ? `${label} issued a card with that limit — returning unused budget needs the card to be canceled and its spending reconciled, use the spending reconciliation and return-unused action; the ledger keeps the full approved amount`
+        : `${label} raised a spending ceiling — returning unused budget needs the ceiling to be lowered first, use the spending reconciliation and return-unused action; the ledger keeps the full approved amount`);
     }
     await this.dataSource.transaction(async (manager) => {
       const campaign = await lockCampaign(manager, pre.campaign_id);
@@ -717,6 +718,161 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
     });
     this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', id, 'refunded');
     return this.get(id, accountId);
+  }
+
+  /** Provider totals are evidence, never additional capture entries: late overruns remain visible. */
+  async spendingReconciliation(id: string, accountId: string) {
+    const row = await this.get(id, accountId);
+    const input = await this.returnInput(row);
+    const report = await reconcileDirect(input);
+    const ledger = await this.ledgerFor(row.id);
+    const totals = requestTotals(ledger, row.id);
+    const net = totals.capture - totals.refund;
+    // A shared card's transactions cannot be attributed to an individual increase. Charge ALL its
+    // exposure against this request before returning anything; this deliberately understates refunds.
+    const exposure = report.spend_minor + report.pending_minor;
+    if (!Number.isSafeInteger(exposure)) throw marketingError(409, 'provider exposure exceeds safe integer range');
+    const refundable = row.provider === 'stripe_issuing'
+      ? Math.max(0, Math.min(net - exposure, report.ceiling_minor - exposure))
+      : Math.max(0, Math.min(net, report.ceiling_minor - exposure));
+    let ledgerShortfall = 0;
+    if (row.provider === 'stripe_issuing' && report.card_id) {
+      const candidates = await this.spendRepo.find({ where: { account_id: accountId, provider: row.provider, status: 'paid' } });
+      const ids = candidates.filter(r => r.payload?.card_id === report.card_id || r.provider_response?.card_id === report.card_id || r.provider_ref === report.card_id).map(r => r.id);
+      const entries = ids.length ? await this.ledgerRepo.find({ where: { spend_request_id: In(ids) } }) : [];
+      let cardNet = 0n;
+      for (const entry of entries) {
+        if (entry.kind === 'capture') cardNet += BigInt(entry.amount_minor);
+        if (entry.kind === 'refund') cardNet -= BigInt(entry.amount_minor);
+      }
+      ledgerShortfall = Number(BigInt(exposure) > cardNet ? BigInt(exposure) - cardNet : 0n);
+      if (!Number.isSafeInteger(ledgerShortfall)) throw marketingError(409, 'card ledger discrepancy exceeds safe integer range');
+    }
+    return {
+      ...report, provider: row.provider, currency: row.currency,
+      ledger_shortfall_minor: ledgerShortfall,
+      notes: [...report.notes, ...(row.provider === 'stripe_issuing' ? ['Card spending and pending authorizations are charged in full against this request; shared-card attribution is conservative. Cancellation cannot prevent later presentments.'] : [])],
+      net_capture_minor: net, refundable_minor: refundable,
+      overrun_minor: Math.max(0, exposure - report.ceiling_minor),
+      return_status: row.return_status || '', return_operation: row.return_operation || {},
+    };
+  }
+
+  private async returnInput(row: MarketingSpendRequest) {
+    if (!isDirectPaymentProvider(row.provider) || row.status !== 'paid') throw marketingError(409, 'only paid direct-provider requests can return unused budget');
+    const resolved = await resolveDirectPaymentCredential(this.credentialRepo, row.provider, row.provider_credential_id || '', row.account_id);
+    if (resolved.fingerprint !== (row.payload as DirectPlan).credential_fingerprint) throw marketingError(409, 'the payment credential changed; reconcile using the original credential');
+    return { plan: row.payload as DirectPlan, ref: row.payee_ref, ...resolved, currency: row.currency,
+      requestId: row.id, response: row.provider === 'stripe_issuing' && !row.provider_response?.card_id && /^ic_[A-Za-z0-9]+$/.test(row.provider_ref)
+        ? { ...row.provider_response, card_id: row.provider_ref } : row.provider_response, ctx: this.adapterContext() };
+  }
+
+  /** Human approval commits a durable target claim BEFORE any provider mutation. */
+  async returnUnused(id: string, accountId: string, actor: MarketingActor, body: Record<string, unknown>) {
+    if (actor.type !== 'user' || !actor.id) throw marketingError(403, 'a human must approve unused-budget returns');
+    if (body.confirm !== true) throw marketingError(400, 'explicit confirmation is required');
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 1000) : '';
+    if (!note) throw marketingError(400, 'note is required');
+    let amount: number;
+    try { amount = parseMinorAmount(body.amount_minor, 'amount_minor'); }
+    catch (e: any) { throw marketingError(400, e.message); }
+    const pre = await this.get(id, accountId);
+    const report = await this.spendingReconciliation(id, accountId);
+    if (typeof body.expected_ceiling !== 'string' || body.expected_ceiling !== report.ceiling_units) throw marketingError(409, 'the ceiling changed; read the spending reconciliation again');
+    if (!Number.isSafeInteger(body.expected_net_capture_minor) || body.expected_net_capture_minor !== report.net_capture_minor) throw marketingError(409, 'the refundable ledger balance changed; read the reconciliation again');
+    if (!report.complete || amount > report.refundable_minor) throw marketingError(409, 'amount exceeds the verified unused budget');
+    const targetKey = pre.provider === 'stripe_issuing' ? `stripe_issuing:${report.card_id}` : pre.target_key;
+    if (!targetKey || (pre.provider === 'stripe_issuing' && !/^ic_[A-Za-z0-9]+$/.test(report.card_id || ''))) throw marketingError(409, 'the provider target could not be identified');
+    const operation = { id: randomUUID(), amount_minor: amount, expected_ceiling: report.ceiling_units,
+      expected_ceiling_minor: report.ceiling_minor, expected_status: report.status, expected_net_capture_minor: report.net_capture_minor, note, actor, started_at: new Date().toISOString() };
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        await lockCampaign(manager, pre.campaign_id);
+        const repo = manager.getRepository(MarketingSpendRequest);
+        const row = await repo.findOneByOrFail({ id });
+        if (row.status !== 'paid' || ['executing', 'unknown'].includes(row.return_status)) throw marketingError(409, 'a return is already executing or needs reconciliation');
+        const totals = requestTotals(await loadLedger(manager, row.campaign_id), id);
+        if (body.expected_net_capture_minor !== totals.capture - totals.refund || amount > totals.capture - totals.refund || (row.provider === 'stripe_issuing' && amount > totals.capture - totals.refund - report.spend_minor - report.pending_minor)) throw marketingError(409, 'the refundable balance changed');
+        await repo.update({ id }, { target_key: targetKey, return_status: 'executing', return_operation: operation as any });
+        await this.audit.record({ accountId, campaignId: row.campaign_id, entityType: 'spend_request', entityId: id,
+          action: 'spend.return_approved', actor, summary: `Unused budget return approved: ${amount} ${row.currency}`, detail: operation }, manager);
+      });
+    } catch (e: any) {
+      if (/unique|duplicate key|23505/i.test(String(e?.message || '') + String(e?.code || ''))) throw marketingError(409, 'this target already has an open spend or return operation');
+      throw e;
+    }
+    let outcome: PaymentOutcome;
+    try {
+      await this.persistNow();
+    } catch (e: any) {
+      // No external request has run. Closing the durable claim is safe.
+      await this.finishReturn(pre, operation.id, { outcome: 'failed', error: 'could not persist the return claim; nothing sent', response: {} });
+      return this.get(id, accountId);
+    }
+    try {
+      outcome = await returnDirect({ ...await this.returnInput(pre), amountMinor: amount,
+        expectedCeiling: operation.expected_ceiling, operationId: operation.id });
+    } catch (e: any) {
+      outcome = { outcome: e instanceof PaymentNotSentError || e instanceof PaymentReadError || e instanceof PaymentRuleError ? 'failed' : 'unknown', error: String(e?.message || e).slice(0, 500), response: {} };
+    }
+    await this.finishReturn(pre, operation.id, outcome);
+    await this.persistNow();
+    return this.get(id, accountId);
+  }
+
+  /** Unknown returns are read back, never resent. Recovery also works after a process died mid-call. */
+  async reconcileReturn(id: string, accountId: string, actor: MarketingActor, body: Record<string, unknown>) {
+    if (actor.type !== 'user' || !actor.id) throw marketingError(403, 'a human must reconcile returns');
+    if (body.confirm !== true || typeof body.note !== 'string' || !body.note.trim()) throw marketingError(400, 'confirmation and a reconciliation note are required');
+    const row = await this.get(id, accountId);
+    const op = row.return_operation;
+    if (!['executing', 'unknown'].includes(row.return_status) || !op?.id) throw marketingError(409, 'there is no unresolved return');
+    if (row.return_status === 'executing' && Date.now() - Date.parse(op.started_at) < STUCK_EXECUTING_MS) throw marketingError(409, 'the return is still executing; wait before reconciliation');
+    const report = await this.spendingReconciliation(id, accountId);
+    if (body.outcome === 'failed') {
+      if (body.confirm_no_change !== true || Date.now() - Date.parse(op.started_at) < DIRECT_FAIL_GRACE_MS) throw marketingError(409, 'confirm no change after the 15-minute provider grace period');
+      if (!report.complete || report.ceiling_units !== op.expected_ceiling || (row.provider === 'stripe_issuing' && report.status !== op.expected_status)) throw marketingError(409, 'the provider state changed; this return cannot be closed as unchanged');
+      await this.finishReturn(row, op.id, { outcome: 'failed', error: 'human confirmed unchanged provider state after grace period', response: { report, reconciled_by: actor, reconciliation_note: body.note.trim().slice(0, 1000) } });
+      await this.persistNow();
+      return this.get(id, accountId);
+    }
+    const proven = row.provider === 'stripe_issuing'
+      ? report.status === 'canceled' && report.complete && report.refundable_minor >= op.amount_minor
+      : report.complete && report.ceiling_minor === op.expected_ceiling_minor - op.amount_minor;
+    if (!proven) throw marketingError(409, 'the provider does not yet prove this return; keep the target locked and reconcile its state on the provider');
+    await this.finishReturn(row, op.id, { outcome: 'paid', transaction_id: op.id, receipt_url: '', response: { report, reconciled_by: actor, reconciliation_note: body.note.trim().slice(0, 1000) } });
+    await this.persistNow();
+    return this.get(id, accountId);
+  }
+
+  private async finishReturn(pre: MarketingSpendRequest, operationId: string, outcome: PaymentOutcome) {
+    await this.dataSource.transaction(async (manager) => {
+      await lockCampaign(manager, pre.campaign_id);
+      const repo = manager.getRepository(MarketingSpendRequest);
+      const row = await repo.findOneByOrFail({ id: pre.id });
+      const op = row.return_operation;
+      if (op.id !== operationId || !['executing', 'unknown'].includes(row.return_status)) return;
+      if (outcome.outcome === 'paid' && row.provider === 'stripe_issuing') {
+        const latest = outcome.response?.report;
+        const totals = requestTotals(await loadLedger(manager, row.campaign_id), row.id);
+        if (!latest?.complete || latest.status !== 'canceled' || op.amount_minor > totals.capture - totals.refund - latest.spend_minor - latest.pending_minor) {
+          outcome = { outcome: 'unknown', error: 'post-cancellation exposure exceeds this request attribution; no refund recorded', response: outcome.response };
+        }
+      }
+      if (outcome.outcome === 'paid') {
+        const ledger = await loadLedger(manager, row.campaign_id);
+        const totals = requestTotals(ledger, row.id);
+        if (op.amount_minor > totals.capture - totals.refund) throw marketingError(409, 'refund exceeds the remaining capture');
+        await appendLedger(manager, ledger, this.ledgerBase(row, row.period_key), [{ kind: 'refund', amount_minor: op.amount_minor, note: `${op.note} (return ${operationId})` }], op.actor);
+      }
+      const status = outcome.outcome === 'paid' ? 'completed' : outcome.outcome;
+      await repo.update({ id: row.id }, { return_status: status, return_operation: { ...op, outcome: outcome.outcome,
+        error: outcome.outcome === 'paid' ? '' : outcome.error, finished_at: new Date().toISOString(), response: outcome.response } as any });
+      await this.audit.record({ accountId: row.account_id, campaignId: row.campaign_id, entityType: 'spend_request', entityId: row.id,
+        action: `spend.return_${status}`, actor: op.actor, summary: `Unused budget return ${status}: ${op.amount_minor} ${row.currency}`,
+        detail: { operation_id: operationId, amount_minor: op.amount_minor, outcome } }, manager);
+    });
+    this.audit.notify(pre.account_id, pre.campaign_id, 'spend_request', pre.id, 'return');
   }
 
   // ── 실행(webhook) ────────────────────────────────────────────────────────

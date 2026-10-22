@@ -97,8 +97,8 @@ function graphErrorText(reply: ProviderReply, cred: MetaCredential): { text: str
   };
 }
 
-async function graphGet(path: string, fields: string, cred: MetaCredential, opts: { fetchImpl?: typeof fetch; version: string }): Promise<any> {
-  const params: Record<string, string> = { fields };
+export async function graphGet(path: string, fields: string, cred: MetaCredential, opts: { fetchImpl?: typeof fetch; version: string; params?: Record<string, string> }): Promise<any> {
+  const params: Record<string, string> = { fields, ...opts.params };
   if (cred.app_secret) params.appsecret_proof = appSecretProof(cred);
   let reply: ProviderReply;
   try {

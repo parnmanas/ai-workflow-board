@@ -21,9 +21,9 @@ import { MINOR_AMOUNT_TRANSFORMER } from '../common/marketing/money';
 // 직접 공급자의 대상(광고 캠페인 상한)마다 열린 요청은 하나 — 캠페인 · 계정을 넘어서도. 둘이 같은 from 으로 계획되면 먼저 실행된
 // 쪽이 다른 쪽의 from 을 바꾸고, 동시에 실행되면 둘 다 from 을 읽고 써서 원장과 실제 상한이 어긋난다(docs/marketing.md
 // "직접 결제 어댑터"). 요청 · 승인 · 실행 · 결과 불명 동안 열려 있고, 결과가 확정되면 풀린다.
-@Index('uq_marketing_spend_open_target', ['target_key'], {
+@Index('uq_marketing_spend_open_target_v2', ['target_key'], {
   unique: true,
-  where: "target_key <> '' AND status IN ('pending', 'approved', 'executing', 'unknown')",
+  where: "target_key <> '' AND (status IN ('pending', 'approved', 'executing', 'unknown') OR return_status IN ('executing', 'unknown'))",
 })
 export class MarketingSpendRequest {
   @PrimaryGeneratedColumn('uuid')
@@ -152,6 +152,13 @@ export class MarketingSpendRequest {
 
   @Column({ type: 'text', default: '' })
   error: string;
+
+  /** Durable human-approved unused-budget return. Its open state shares the target lock with raises. */
+  @Column({ type: 'varchar', default: '' })
+  return_status: string;
+
+  @Column({ type: 'simple-json', default: '{}' })
+  return_operation: Record<string, any>;
 
   @CreateDateColumn()
   created_at: Date;

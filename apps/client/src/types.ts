@@ -3637,6 +3637,30 @@ export type MarketingSpendInspection =
     checked_at: string;
   };
 
+export interface MarketingSpendingReconciliation {
+  provider: MarketingDirectPaymentProvider;
+  currency: string;
+  ceiling_minor: number | null;
+  ceiling_units: string | null;
+  spend_minor: number;
+  spend_exact: string;
+  stopped: boolean;
+  complete: boolean;
+  card_id?: string;
+  pending_minor: number;
+  notes: string[];
+  status: string;
+  observed_at: string;
+  net_capture_minor: number;
+  refundable_minor: number;
+  overrun_minor: number;
+  ledger_shortfall_minor?: number;
+  return_status: MarketingSpendReturnStatus;
+  return_operation: Record<string, unknown>;
+}
+
+export type MarketingSpendReturnStatus = '' | 'executing' | 'unknown' | 'completed' | 'failed';
+
 export interface MarketingCampaign {
   id: string;
   account_id: string;
@@ -3981,6 +4005,8 @@ export interface MarketingLedgerEntry {
 }
 
 export interface MarketingSpendRequest {
+  return_status?: MarketingSpendReturnStatus;
+  return_operation?: Record<string, unknown>;
   id: string;
   account_id: string;
   campaign_id: string;

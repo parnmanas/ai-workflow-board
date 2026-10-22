@@ -104,7 +104,7 @@ export function isDefiniteStripeRefusal(status: number, err: { isStripeError: bo
 }
 
 /** 읽기. `missingIsNull` 이면 Stripe 가 "없음"(404 resource_missing 오류 객체)으로 답할 때 null — 그 밖의 실패는 PaymentReadError. */
-async function stripeGet(
+export async function stripeGet(
   path: string,
   query: Record<string, string>,
   label: string,
@@ -458,7 +458,7 @@ export async function findCardsForRequest(
 }
 
 /** 쓰이기 전의 카드를 해지한다(돌이킬 수 없다). 그 카드(id)가 해지됐다는 카드 객체로 답했을 때만 true — 그 밖은 해지를 모르는 것이다. */
-async function cancelCard(cardId: string, idem: string, cred: StripeCredential, opts: { fetchImpl?: typeof fetch; version: string }): Promise<boolean> {
+export async function cancelCard(cardId: string, idem: string, cred: StripeCredential, opts: { fetchImpl?: typeof fetch; version: string }): Promise<boolean> {
   const result = await stripePost(`/v1/issuing/cards/${encodeURIComponent(cardId)}`, new URLSearchParams({ status: 'canceled' }), `${idem}-cancel`, cred, opts);
   if (result.kind !== 'reply' || result.reply.status !== 200) return false;
   const card = result.reply.json;

@@ -30,6 +30,7 @@ import {
   type DirectPlan,
   type PayeeLike,
 } from '../../common/marketing/payment-routes';
+import { reconcileDirect, returnDirect, type DirectSpendReport, type DirectReconcileInput } from './marketing-payment-returns';
 import { formatMinorAmount } from '../../common/marketing/money';
 import { PaymentNotSentError, type PaymentOutcome } from './marketing-payments';
 import {
@@ -101,6 +102,8 @@ export type DirectInspection =
 
 export interface DirectPaymentAdapter {
   provider: DirectPaymentProvider;
+  reconcile(input: DirectReconcileInput): Promise<DirectSpendReport>;
+  returnFunds(input: DirectReconcileInput & { expectedCeiling: string; amountMinor: number; operationId: string }): Promise<PaymentOutcome>;
   checkCredential(fields: Record<string, string>): void;
   checkAmount(amountMinor: number, currency: string, payee: PayeeLike): void;
   plan(input: { ref: string; fields: Record<string, string>; fingerprint: string; amountMinor: number; currency: string; payee: PayeeLike; ctx: DirectAdapterContext }): Promise<DirectPlan>;
@@ -145,6 +148,8 @@ function ceilingInspection(plan: CeilingPlan, report: TargetReport): DirectInspe
 
 const metaAdapter: DirectPaymentAdapter = {
   provider: 'meta_ads',
+  reconcile: reconcileDirect,
+  returnFunds: returnDirect,
   checkCredential(fields) { readMetaCredential(fields); },
   checkAmount(amountMinor, currency) { minorToMetaUnits(amountMinor, currency); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, ctx }) {
@@ -188,6 +193,8 @@ const metaAdapter: DirectPaymentAdapter = {
 
 const googleAdapter: DirectPaymentAdapter = {
   provider: 'google_ads',
+  reconcile: reconcileDirect,
+  returnFunds: returnDirect,
   checkCredential(fields) { readGoogleCredential(fields); },
   checkAmount(amountMinor, currency) { minorToGoogleMicros(amountMinor, currency); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, ctx }) {
@@ -230,6 +237,8 @@ const googleAdapter: DirectPaymentAdapter = {
 
 const stripeAdapter: DirectPaymentAdapter = {
   provider: 'stripe_issuing',
+  reconcile: reconcileDirect,
+  returnFunds: returnDirect,
   checkCredential(fields) { readStripeCredential(fields); },
   checkAmount(amountMinor, currency, payee) { checkStripeAmount(amountMinor, currency, payee); },
   async plan({ ref, fields, fingerprint, amountMinor, currency, payee, ctx }) {
@@ -313,3 +322,5 @@ export const DIRECT_PAYMENT_ADAPTERS: Readonly<Record<DirectPaymentProvider, Dir
   google_ads: googleAdapter,
   stripe_issuing: stripeAdapter,
 };
+
+export { reconcileDirect, returnDirect, type DirectSpendReport, type DirectReconcileInput } from './marketing-payment-returns';

@@ -118,6 +118,7 @@ import type {
   MarketingAllocation,
   MarketingSpendRequest,
   MarketingSpendInspection,
+  MarketingSpendingReconciliation,
   MarketingPaymentCheckResult,
   MarketingLedgerEntry,
   MarketingReport,
@@ -2714,6 +2715,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(confirmNoSpend ? { note, confirm_no_spend: true } : { note }),
     }),
+  reconcileMarketingSpending: (id: string) =>
+    request<MarketingSpendingReconciliation>(`/marketing/spend-requests/${encodeURIComponent(id)}/spending-reconciliation`, { method: 'POST', body: JSON.stringify({}) }),
+  returnUnusedMarketingSpend: (id: string, data: { amount_minor: number; expected_ceiling: string; expected_net_capture_minor: number; note: string; confirm: true }) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/return-unused`, { method: 'POST', body: JSON.stringify(data) }),
+  reconcileMarketingReturn: (id: string, data: { note: string; confirm: true; outcome?: 'failed'; confirm_no_change?: true }) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/reconcile-return`, { method: 'POST', body: JSON.stringify(data) }),
   refundMarketingSpend: (id: string, data: { amount_minor: number; note: string; provider_ref?: string }) =>
     request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify(data) }),
   listMarketingLedger: (campaignId: string, limit?: number) =>

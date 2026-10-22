@@ -65,6 +65,8 @@ function fakeStripe() {
   const state = {
     cardholders: { ich_sandbox1: holder('ich_sandbox1'), ich_live1: holder('ich_live1', { livemode: true }) },
     cards: [],
+    transactions: [],
+    authorizations: [],
     idem: new Map(),
     calls: [],
     overrides: [],
@@ -139,6 +141,13 @@ function fakeStripe() {
     if (entry.method === 'GET' && (m = u.pathname.match(/^\/v1\/issuing\/cards\/(.+)$/))) {
       const card = state.cards.find((c) => c.id === decodeURIComponent(m[1]));
       return card ? json(200, cardJson(card)) : stripeError(404, 'invalid_request_error', 'resource_missing', 'No such card');
+    }
+    if (entry.method === 'GET' && ['/v1/issuing/transactions', '/v1/issuing/authorizations'].includes(u.pathname)) {
+      const rows = u.pathname.endsWith('/transactions') ? state.transactions : state.authorizations;
+      let list = rows.filter(row => row.card === entry.query.card);
+      if (entry.query.starting_after) list = list.slice(list.findIndex(row => row.id === entry.query.starting_after) + 1);
+      const limit = Number(entry.query.limit || 10);
+      return json(200, { object: 'list', data: list.slice(0, limit), has_more: list.length > limit });
     }
     if (entry.method === 'GET' && u.pathname === '/v1/issuing/cards') {
       const q = entry.query;
@@ -786,4 +795,96 @@ test('Stripe reusable payee: first card binds, later approvals raise its limit e
   // Editing unrelated campaign settings cannot erase the card bound by the first payment.
   await ctx.patch(`/campaigns/${campaign.id}`, { goal: 'repeat billing' });
   assert.equal((await ctx.ds.getRepository('MarketingCampaign').findOneBy({ id: campaign.id })).payees[0].card_id, card.id);
+});
+
+test('Stripe unused return: cancellation precedes atomic refund; duplicate approval is stale; unknown cancellation report recovers read-only', async (t) => {
+  const ctx = await setup(t);
+  const cred = await ctx.makeCred('return-stripe', 'stripe_issuing', { secret_key: STRIPE_KEY });
+  const { campaign, ask, approve } = await stripeCampaign(ctx, [{ name: 'Sponsor', provider: 'stripe_issuing', credential_id: cred.id, ref: 'ich_sandbox1' }]);
+  const refunds = (id) => ctx.ds.getRepository('MarketingLedgerEntry').find({ where: { campaign_id: campaign.id, spend_request_id: id, kind: 'refund' } });
+  const issue = async () => {
+    const request = await ask({ amount_minor: 10000, payee: 'Sponsor' });
+    assert.equal((await approve(request)).body.status, 'paid');
+    return { request, card: ctx.fake.state.cards.at(-1) };
+  };
+  const { request, card } = await issue();
+  ctx.fake.state.transactions.push({ id: 'ipi_return1', card: card.id, currency: 'usd', livemode: false, amount: -2000, type: 'capture' });
+  ctx.fake.state.authorizations.push({ id: 'iauth_return1', card: card.id, currency: 'usd', livemode: false, amount: 500, status: 'pending', approved: true });
+  const report = await ctx.post(`/spend-requests/${request.id}/spending-reconciliation`);
+  assert.ok(report.status >= 200 && report.status < 300, report.text);
+  assert.equal(report.body.refundable_minor, 7500);
+  const body = { confirm: true, note: 'Approve unused card budget return', amount_minor: 3000, expected_ceiling: report.body.ceiling_units, expected_net_capture_minor: report.body.net_capture_minor };
+  let sawCancellation = false;
+  ctx.fake.state.overrides.push({ match: isStatusUpdate('canceled'), reply: async () => {
+    sawCancellation = true;
+    assert.equal((await refunds(request.id)).length, 0, 'refund is not booked before cancellation');
+    // Continue through fake provider's ordinary cancellation mutation.
+  } });
+  const returned = await ctx.post(`/spend-requests/${request.id}/return-unused`, body);
+  assert.ok(returned.status >= 200 && returned.status < 300, returned.text);
+  assert.equal(returned.body.return_status, 'completed', returned.text);
+  assert.equal(sawCancellation, true);
+  assert.equal(card.status, 'canceled');
+  assert.deepEqual((await refunds(request.id)).map(row => row.amount_minor), [3000]);
+  const writes = ctx.fake.state.calls.filter(c => c.method === 'POST').length;
+  const duplicate = await ctx.post(`/spend-requests/${request.id}/return-unused`, body);
+  assert.equal(duplicate.status, 409, duplicate.text);
+  assert.equal((await refunds(request.id)).length, 1);
+  assert.equal(ctx.fake.state.calls.filter(c => c.method === 'POST').length, writes, 'stale human approval never issues a provider write');
+
+  const next = await issue();
+  ctx.fake.state.transactions.push({ id: 'ipi_return2', card: next.card.id, currency: 'usd', livemode: false, amount: -1000, type: 'capture' });
+  const nextReport = (await ctx.post(`/spend-requests/${next.request.id}/spending-reconciliation`)).body;
+  // Fail only the transactions read after successful cancellation.
+  ctx.fake.state.overrides.push({ match: e => e.path === '/v1/issuing/transactions' && e.query.card === next.card.id && next.card.status === 'canceled', reply: stripeError(503, 'api_error', '', 'report unavailable') });
+  const uncertain = await ctx.post(`/spend-requests/${next.request.id}/return-unused`, { confirm: true, note: 'Cancel and return', amount_minor: 8000, expected_ceiling: nextReport.ceiling_units, expected_net_capture_minor: nextReport.net_capture_minor });
+  assert.ok(uncertain.status >= 200 && uncertain.status < 300, uncertain.text);
+  assert.equal(uncertain.body.return_status, 'unknown', uncertain.text);
+  assert.equal(next.card.status, 'canceled');
+  assert.equal((await refunds(next.request.id)).length, 0);
+  const afterCancelWrites = ctx.fake.state.calls.filter(c => c.method === 'POST').length;
+  const reconciled = await ctx.post(`/spend-requests/${next.request.id}/reconcile-return`, { confirm: true, note: 'Fresh transactions prove canceled card unused balance' });
+  assert.ok(reconciled.status >= 200 && reconciled.status < 300, reconciled.text);
+  assert.equal(reconciled.body.return_status, 'completed', reconciled.text);
+  assert.deepEqual((await refunds(next.request.id)).map(row => row.amount_minor), [8000]);
+  assert.equal(ctx.fake.state.calls.filter(c => c.method === 'POST').length, afterCancelWrites, 'recovery reads provider without repeating cancellation');
+  assert.equal((await ctx.post(`/spend-requests/${next.request.id}/reconcile-return`, { confirm: true, note: 'duplicate recovery' })).status, 409);
+  assert.equal((await refunds(next.request.id)).length, 1);
+});
+
+test('Stripe reusable returns charge whole-card exposure against each increment without double refunds', async (t) => {
+  const ctx = await setup(t);
+  const cred = await ctx.makeCred('shared-return-stripe', 'stripe_issuing', { secret_key: STRIPE_KEY });
+  const { campaign, ask, approve } = await stripeCampaign(ctx, [{ name: 'Recurring return', provider: 'stripe_issuing', credential_id: cred.id, ref: 'ich_sandbox1', card_single_use: false }]);
+  const first = await ask({ amount_minor: 10000, payee: 'Recurring return' });
+  assert.equal((await approve(first)).body.status, 'paid');
+  const second = await ask({ amount_minor: 2500, payee: 'Recurring return' });
+  assert.equal((await approve(second)).body.status, 'paid');
+  const card = ctx.fake.state.cards.at(-1);
+  assert.equal(card.spending_controls.spending_limits[0].amount, 12500);
+  ctx.fake.state.transactions.push({ id: 'ipi_sharedReturn', card: card.id, currency: 'usd', livemode: false, amount: -1000, type: 'capture' });
+  const report = (await ctx.post(`/spend-requests/${second.id}/spending-reconciliation`)).body;
+  assert.equal(report.refundable_minor, 1500, 'all historical card spending is charged against the 2500 increment');
+  const body = { confirm: true, note: 'Cancel shared card and return unused increment', expected_ceiling: report.ceiling_units, expected_net_capture_minor: report.net_capture_minor };
+  assert.equal((await ctx.post(`/spend-requests/${second.id}/return-unused`, { ...body, amount_minor: 1501 })).status, 409);
+  assert.equal(card.status, 'active');
+  const returned = await ctx.post(`/spend-requests/${second.id}/return-unused`, { ...body, amount_minor: 1500 });
+  assert.equal(returned.body.return_status, 'completed', returned.text);
+  assert.equal(card.status, 'canceled');
+  assert.equal((await ctx.post(`/spend-requests/${second.id}/spending-reconciliation`)).body.refundable_minor, 0);
+  const firstReport = (await ctx.post(`/spend-requests/${first.id}/spending-reconciliation`)).body;
+  assert.equal(firstReport.refundable_minor, 9000);
+  const firstReturn = await ctx.post(`/spend-requests/${first.id}/return-unused`, { confirm: true, note: 'Return earlier unused approval after card cancellation', amount_minor: 9000, expected_ceiling: firstReport.ceiling_units, expected_net_capture_minor: firstReport.net_capture_minor });
+  assert.equal(firstReturn.body.return_status, 'completed', firstReturn.text);
+  const rows = await ctx.ds.getRepository('MarketingLedgerEntry').find({ where: { campaign_id: campaign.id, kind: 'refund' } });
+  assert.equal(rows.reduce((sum, row) => sum + row.amount_minor, 0), 10500);
+  assert.ok(12500 - rows.reduce((sum, row) => sum + row.amount_minor, 0) >= 1000, 'remaining captures conservatively cover actual whole-card spend');
+  assert.equal(ctx.fake.state.calls.filter(isStatusUpdate('canceled')).length, 1);
+  ctx.fake.state.transactions.push({ id: 'ipi_lateCapture', card: card.id, currency: 'usd', livemode: false, amount: -2000, type: 'capture' });
+  const late = (await ctx.post(`/spend-requests/${second.id}/spending-reconciliation`)).body;
+  assert.equal(late.spend_minor, 3000);
+  assert.equal(late.overrun_minor, 0, 'late capture is still below the original card limit');
+  assert.equal(late.ledger_shortfall_minor, 1000, 'late capture exceeds aggregate net captures after both refunds');
+  assert.equal(late.refundable_minor, 0);
+  assert.equal((await ctx.ds.getRepository('MarketingLedgerEntry').find({ where: { campaign_id: campaign.id, kind: 'refund' } })).length, 2, 'reporting late spend never rewrites the ledger');
 });

@@ -167,7 +167,7 @@ function googleError(reply: ProviderReply, cred: GoogleCredential, token: string
   };
 }
 
-async function googleSearch(
+export async function googleSearch(
   customerId: string,
   query: string,
   cred: GoogleCredential,
@@ -188,7 +188,9 @@ async function googleSearch(
     throw new PaymentReadError(`could not read Google Ads customer ${customerId}: ${e?.message || e}`, true);
   }
   if (reply.status === 200 && reply.json && typeof reply.json === 'object') {
-    return Array.isArray(reply.json.results) ? reply.json.results : [];
+    if (reply.json.nextPageToken) throw new PaymentReadError('Google report is incomplete (unexpected pagination)', false);
+    if (reply.json.results !== undefined && !Array.isArray(reply.json.results)) throw new PaymentReadError('Google returned malformed results', false);
+    return reply.json.results || [];
   }
   const err = googleError(reply, cred, token);
   // 거부된 access token 은 캐시에서 지운다 — 남겨 두면 만료(최대 한 시간)까지 같은 401 이 이어진다.
@@ -353,9 +355,9 @@ export function buildGooglePlan(
   });
 }
 
-export function googleExecutionCheck(obs: GoogleObservation, plan: CeilingPlan, now: Date = new Date()): { blocker: string | null; atTarget: boolean } {
+export function googleExecutionCheck(obs: GoogleObservation, plan: CeilingPlan, now: Date = new Date(), lowering = false): { blocker: string | null; atTarget: boolean } {
   const target = { customer_id: plan.target.customer_id, campaign_id: plan.target.campaign_id };
-  const problems = googleTargetProblems(obs, target, plan.currency, now);
+  const problems = googleTargetProblems(obs, target, plan.currency, now).filter((p) => !lowering || !p.startsWith('the campaign ended ('));
   if (problems.length) return { blocker: `the target changed since the request: ${problems.join('; ')}`, atTarget: false };
   if (obs.budget.resource_name !== plan.target.budget) return { blocker: 'the campaign now uses a different budget', atTarget: false };
   if (obs.customer.test_account !== (plan.test_account === true)) return { blocker: 'the Google Ads account switched between test and production', atTarget: false };
@@ -388,7 +390,7 @@ export async function executeGooglePlan(
   plan: CeilingPlan,
   cred: GoogleCredential,
   fingerprint: string,
-  opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; now?: () => Date } = {},
+  opts: { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; now?: () => Date; lowering?: boolean } = {},
 ): Promise<PaymentOutcome> {
   const target = { customer_id: plan.target.customer_id, campaign_id: plan.target.campaign_id };
   const now = opts.now ? opts.now() : new Date();
@@ -401,7 +403,7 @@ export async function executeGooglePlan(
     throw new PaymentNotSentError(e?.message || String(e), e instanceof PaymentReadError ? e.providerMessage : '');
   }
   const base = { api_version: before.api_version, budget: plan.target.budget, field: 'total_amount_micros', from: plan.from, to: plan.to };
-  const check = googleExecutionCheck(before, plan, now);
+  const check = googleExecutionCheck(before, plan, now, opts.lowering);
   if (check.atTarget) {
     return {
       outcome: 'unknown',

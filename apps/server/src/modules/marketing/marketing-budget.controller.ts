@@ -207,6 +207,37 @@ export class MarketingBudgetController {
     }
   }
 
+  @Post('spend-requests/:id/spending-reconciliation')
+  @RequirePermission(PERMISSIONS.APPROVE_MARKETING_SPEND)
+  async spendingReconciliation(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      userActor(req);
+      return res.status(200).json(await this.spend.spendingReconciliation(id, boundAccountId(req)));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to reconcile platform spending' });
+    }
+  }
+
+  @Post('spend-requests/:id/return-unused')
+  @RequirePermission(PERMISSIONS.APPROVE_MARKETING_SPEND)
+  async returnUnused(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try {
+      return res.status(200).json(spendToJson(await this.spend.returnUnused(id, boundAccountId(req), userActor(req), body || {})));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to return unused budget' });
+    }
+  }
+
+  @Post('spend-requests/:id/reconcile-return')
+  @RequirePermission(PERMISSIONS.APPROVE_MARKETING_SPEND)
+  async reconcileReturn(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try {
+      return res.status(200).json(spendToJson(await this.spend.reconcileReturn(id, boundAccountId(req), userActor(req), body || {})));
+    } catch (e: any) {
+      return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to reconcile unused-budget return' });
+    }
+  }
+
   @Get('campaigns/:id/ledger')
   async ledger(@Param('id') id: string, @Query('limit') limit: string, @Req() req: Request, @Res() res: Response) {
     try {

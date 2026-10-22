@@ -147,7 +147,7 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
     label: 'Stripe Issuing (marketing payments)',
     icon: 'S',
     fields: {
-      secret_key: { label: 'Restricted API key', placeholder: 'rk_live_... (sandbox rk_test_...) — Issuing Cards: Write, Issuing Cardholders: Read; a full live key sk_live_ is refused' },
+      secret_key: { label: 'Restricted API key', placeholder: 'rk_live_... (sandbox rk_test_...) — Issuing Cards: Write; Cardholders, Transactions, Authorizations: Read; a full live key sk_live_ is refused' },
     },
   },
   // Custom renders a key/value editor instead of these fields; `token` is the

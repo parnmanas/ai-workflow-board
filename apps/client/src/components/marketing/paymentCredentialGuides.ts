@@ -115,7 +115,7 @@ export const PAYMENT_CREDENTIAL_GUIDES: Readonly<Record<MarketingDirectPaymentPr
       'Issuing → Cardholders → Create cardholder: 개인(법적 이름 · 생년월일) 또는 회사(세금 id, 두 단어 이상의 이름) + 청구지 주소. 이름은 24자 이내입니다.',
       '만든 카드 소지자의 id(ich_…)를 복사합니다 — 마케팅 수취인 대상에 넣습니다.',
       'Developers → API keys(dashboard.stripe.com/apikeys) → Create restricted key.',
-      '권한: Issuing 의 Cards 를 Write, Cardholders 를 Read 로 두고 나머지는 None 으로 둡니다(권한 이름 issuing_card_write · issuing_cardholder_read).',
+      '권한: Issuing 의 Cards 를 Write, Cardholders 를 Read 로 둡니다(권한 이름 issuing_card_write · issuing_cardholder_read). 지출 대조·미사용분 반납에는 Issuing Transactions 와 Authorizations 의 Read 도 필요합니다. 나머지는 None 으로 둡니다.',
       'Create key → 키(운영 rk_live_…, 샌드박스 rk_test_…)를 바로 복사합니다. 운영 키는 다시 볼 수 없습니다.',
       '(선택) Access policies 로 IP 정책을 만들어 그 키를 AWB 서버 주소에서만 쓰게 합니다.',
       '운영(live)에서는 5–10 을 다시 합니다 — 샌드박스의 키 · 카드 소지자는 운영에 없습니다.',
