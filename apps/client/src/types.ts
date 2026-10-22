@@ -3539,7 +3539,7 @@ export type MarketingCampaignStatus = 'draft' | 'active' | 'paused' | 'archived'
 export type MarketingBudgetPeriod = 'none' | 'week' | 'month';
 export type MarketingPaymentProvider = 'manual' | 'webhook';
 /** 수취인마다 정하는 직접 결제 공급자 — 광고 캠페인의 지출 상한을 올린다(docs/marketing.md "직접 결제 어댑터"). */
-export type MarketingDirectPaymentProvider = 'meta_ads' | 'google_ads';
+export type MarketingDirectPaymentProvider = 'meta_ads' | 'google_ads' | 'stripe_issuing';
 /** 지출 요청이 스냅샷한 결제 경로 — 캠페인 결제 방식 또는 수취인의 직접 공급자. */
 export type MarketingSpendProvider = MarketingPaymentProvider | MarketingDirectPaymentProvider;
 export type MarketingFeedbackTicketStatus = 'backlog' | 'todo';
@@ -3559,9 +3559,15 @@ export interface MarketingPayee {
   name: string;
   ref?: string;
   note?: string;
-  /** 직접 결제 공급자 — 있으면 ref 는 그 공급자의 광고 캠페인이고 credential_id 가 필요하다. 없으면 캠페인 결제 방식. */
+  /** 직접 결제 공급자 — 있으면 ref 는 그 공급자의 대상(광고 캠페인 · 카드 소지자)이고 credential_id 가 필요하다. 없으면 캠페인 결제 방식. */
   provider?: MarketingDirectPaymentProvider;
   credential_id?: string;
+  /** Stripe Issuing 수취인만: 첫 결제 뒤 자동 해지(서버 기본 true). */
+  card_single_use?: boolean;
+  /** Stripe Issuing 수취인만: 허용 업종(정렬) — 비면 업종 제한 없음. */
+  card_categories?: string[];
+  /** Stripe Issuing 수취인만: 카드 한 장의 최대 금액(최소 단위). */
+  card_max_minor?: number;
 }
 
 /** 연결 확인(POST /campaigns/:id/payment/check)의 수취인 한 줄 — 공급자를 읽기만 한 결과. */
@@ -3589,20 +3595,46 @@ export interface MarketingPaymentCheckResult {
   payees: MarketingPayeePaymentCheck[];
 }
 
-/** 요청별 공급자 확인 — 지금 상한이 계획(from → to)의 어디에 있나. 판정이 아니라 대조를 돕는 표시다. */
-export interface MarketingSpendInspection {
-  spend_request_id: string;
+/** 요청별 공급자 확인의 카드 한 장 — 번호 · 소지자 정보는 없다. */
+export interface MarketingIssuedCard {
+  id: string;
   status: string;
-  from: string;
-  to: string;
-  from_minor: number;
-  to_minor: number;
-  observed: string | null;
-  observed_minor: number | null;
-  position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
-  report: Omit<MarketingPayeePaymentCheck, 'payee' | 'provider' | 'ref' | 'credential_id' | 'open_request' | 'provider_message_untrusted'>;
-  checked_at: string;
+  currency: string;
+  limit_minor: number | null;
+  single_use: boolean;
+  livemode: boolean | null;
+  created: number | null;
 }
+
+/**
+ * 요청별 공급자 확인 — 판정이 아니라 대조를 돕는 표시다. 상한 공급자는 지금 상한이 계획(from → to)의 어디에 있나,
+ * 카드 공급자는 이 요청의 카드가 있나(실행 시각 ±1일 범위).
+ */
+export type MarketingSpendInspection =
+  | {
+    kind: 'ceiling';
+    spend_request_id: string;
+    status: string;
+    from: string;
+    to: string;
+    from_minor: number;
+    to_minor: number;
+    observed: string | null;
+    observed_minor: number | null;
+    position: 'at_target' | 'at_from' | 'other' | 'no_ceiling';
+    report: Omit<MarketingPayeePaymentCheck, 'payee' | 'provider' | 'ref' | 'credential_id' | 'open_request' | 'provider_message_untrusted'>;
+    checked_at: string;
+  }
+  | {
+    kind: 'card';
+    spend_request_id: string;
+    status: string;
+    limit_minor: number;
+    result: 'found' | 'none' | 'incomplete';
+    cards: MarketingIssuedCard[];
+    api_version: string;
+    checked_at: string;
+  };
 
 export interface MarketingCampaign {
   id: string;

@@ -28,7 +28,11 @@ import {
   directRefProblem,
   isDirectPaymentProvider,
   openRequestLabel,
+  parseCardCategories,
   payeeRouteLabel,
+  cardControlsLabel,
+  directRouteOptionLabel,
+  DIRECT_PROVIDER_SPECS,
   formatDateTime,
   formatMinor,
   isCurrencyCode,
@@ -41,6 +45,7 @@ import {
 } from './marketing.logic';
 import { AllocationCard, SpendCard } from './MarketingCards';
 import { FieldLabel, Hint, KeyValue, Panel, StatusPill, tableStyles, useAction, useMarketingCtx } from './MarketingUi';
+import { PaymentCredentialGuide } from './PaymentCredentialGuide';
 
 const LEDGER_KIND_LABELS: Record<string, string> = {
   reserve: '보류(승인)',
@@ -145,10 +150,12 @@ export default function MarketingBudgetTab({
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: tokens.colors.textStrong, lineHeight: 1.6 }}>
                 {campaign.payees.map((p) => {
                   const route = payeeRouteLabel(p);
+                  const controls = cardControlsLabel(p, campaign.currency);
                   return (
                     <li key={p.name} data-testid={`marketing-payee-${p.name}`}>
                       {p.name}
                       {route ? <span style={{ color: tokens.colors.textSecondary }}> — 직접 결제: {route}</span> : p.ref ? ` (${p.ref})` : ''}
+                      {controls ? <span style={{ color: tokens.colors.textSecondary }}> ({controls})</span> : ''}
                       {p.note ? ` — ${p.note}` : ''}
                     </li>
                   );
@@ -311,7 +318,19 @@ function moneyField(value: string, currency: string): MoneyParse {
   return parseMajorToMinor(value, currency, { allowZero: true });
 }
 
-interface PayeeDraft { name: string; ref: string; note: string; provider: '' | MarketingDirectPaymentProvider; credential_id: string }
+interface PayeeDraft {
+  name: string;
+  ref: string;
+  note: string;
+  provider: '' | MarketingDirectPaymentProvider;
+  credential_id: string;
+  /** 카드 공급자만 — 일회용 · 허용 업종(쉼표) · 카드당 최대(통화 단위 입력). */
+  card_single_use: boolean;
+  card_categories: string;
+  card_max: string;
+}
+
+const EMPTY_PAYEE: PayeeDraft = { name: '', ref: '', note: '', provider: '', credential_id: '', card_single_use: true, card_categories: '', card_max: '' };
 
 /**
  * 연결 확인 — 직접 결제 수취인의 credential 과 대상(광고 캠페인)을 공급자에서 읽기만 한다. 돈은 움직이지 않는다.
@@ -369,6 +388,9 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
   const [dual, setDual] = useState(minorToMajorInput(campaign.dual_approval_threshold_minor, campaign.currency));
   const [payees, setPayees] = useState<PayeeDraft[]>(() => campaign.payees.map((p) => ({
     name: p.name, ref: p.ref || '', note: p.note || '', provider: isDirectPaymentProvider(p.provider) ? p.provider : '', credential_id: p.credential_id || '',
+    card_single_use: p.card_single_use !== false,
+    card_categories: (p.card_categories || []).join(', '),
+    card_max: typeof p.card_max_minor === 'number' ? minorToMajorInput(p.card_max_minor, campaign.currency) : '',
   })));
   const [provider, setProvider] = useState<MarketingPaymentProvider>(campaign.payment_provider);
   const [credentialId, setCredentialId] = useState(campaign.payment_credential_id || '');
@@ -424,8 +446,18 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
         const refProblem = directRefProblem(p.provider, p.ref);
         if (refProblem) { setError(`수취인 "${name}": ${refProblem}`); return; }
         if (!p.credential_id) { setError(`수취인 "${name}": ${DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]} credential 을 고르세요`); return; }
-        // 서버가 저장하는 순서(name · ref · note · provider · credential_id)와 같게 — 그대로인 수취인을 "바뀜" 으로 보내지 않는다.
-        cleaned.push({ name, ref: p.ref.trim(), ...(p.note.trim() ? { note: p.note.trim() } : {}), provider: p.provider, credential_id: p.credential_id });
+        // 서버가 저장하는 순서(name · ref · note · provider · credential_id · card_*)와 같게 — 그대로인 수취인을 "바뀜" 으로 보내지 않는다.
+        const route = { name, ref: p.ref.trim(), ...(p.note.trim() ? { note: p.note.trim() } : {}), provider: p.provider, credential_id: p.credential_id };
+        if (DIRECT_PROVIDER_SPECS[p.provider].kind !== 'card') { cleaned.push(route); continue; }
+        const categories = parseCardCategories(p.card_categories);
+        if (categories.problem) { setError(`수취인 "${name}": ${categories.problem}`); return; }
+        let cardMax: number | null = null;
+        if (p.card_max.trim()) {
+          const parsedMax = parseMajorToMinor(p.card_max, code);
+          if (!parsedMax.ok) { setError(`수취인 "${name}" 카드당 최대: ${parsedMax.error}`); return; }
+          cardMax = parsedMax.minor;
+        }
+        cleaned.push({ ...route, card_single_use: p.card_single_use, card_categories: categories.categories, ...(cardMax !== null ? { card_max_minor: cardMax } : {}) });
         continue;
       }
       cleaned.push({ name, ...(p.ref.trim() ? { ref: p.ref.trim() } : {}), ...(p.note.trim() ? { note: p.note.trim() } : {}) });
@@ -505,7 +537,7 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
                       value={p.provider}
                       options={[
                         { value: '', label: '캠페인 결제 방식(아래)' },
-                        ...DIRECT_PAYMENT_PROVIDERS.map((d) => ({ value: d, label: `${DIRECT_PAYMENT_PROVIDER_LABELS[d]} — 광고 캠페인 상한 올리기` })),
+                        ...DIRECT_PAYMENT_PROVIDERS.map((d) => ({ value: d, label: directRouteOptionLabel(d) })),
                       ]}
                       onChange={(e) => set({ provider: e.target.value as PayeeDraft['provider'], credential_id: '' })}
                     />
@@ -519,21 +551,41 @@ function BudgetSettingsModal({ onClose }: { onClose(): void }) {
                       />
                     )}
                   </div>
+                  {p.provider && DIRECT_PROVIDER_SPECS[p.provider].kind === 'card' && (
+                    <div data-testid={`marketing-payee-card-${i}`} style={{ display: 'grid', gridTemplateColumns: 'auto 1.4fr 1fr', gap: 6, alignItems: 'end' }}>
+                      <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: tokens.colors.textPrimary, paddingBottom: 8 }}>
+                        <input
+                          type="checkbox"
+                          aria-label={`수취인 ${i + 1} 일회용 카드`}
+                          checked={p.card_single_use}
+                          onChange={(e) => set({ card_single_use: e.target.checked })}
+                        />
+                        일회용(첫 결제 뒤 해지)
+                      </label>
+                      <Input aria-label={`수취인 ${i + 1} 허용 업종`} placeholder="허용 업종(쉼표, 선택 — 예: advertising_services)" value={p.card_categories}
+                        onChange={(e) => set({ card_categories: e.target.value })} />
+                      <Input aria-label={`수취인 ${i + 1} 카드당 최대`} placeholder={`카드당 최대(선택, ${code || '통화'} — 예: 500)`} value={p.card_max} inputMode="decimal"
+                        onChange={(e) => set({ card_max: e.target.value })} />
+                    </div>
+                  )}
                   {p.provider && (
                     <Hint>
                       {DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]} 대상: {DIRECT_REF_FORMATS[p.provider]}. credential 은 Credentials 에서 provider
                       “{DIRECT_PAYMENT_PROVIDER_LABELS[p.provider]}” 로 이 계정에 만듭니다(필드 {[...DIRECT_PROVIDER_CREDENTIAL_FIELDS[p.provider].required, ...DIRECT_PROVIDER_CREDENTIAL_FIELDS[p.provider].optional.map((f) => `${f}(선택)`)].join(', ')}).
+                      {DIRECT_PROVIDER_SPECS[p.provider].kind === 'card' && ' 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 카드당 최대를 500 으로 두기를 권합니다. 허용 업종을 틀리게 적으면 모든 결제가 거절됩니다.'}
                     </Hint>
                   )}
+                  {p.provider && <PaymentCredentialGuide provider={p.provider} />}
                 </div>
               );
             })}
-            <div><Button size="sm" variant="secondary" onClick={() => setPayees((rows) => [...rows, { name: '', ref: '', note: '', provider: '', credential_id: '' }])}>+ 수취인</Button></div>
+            <div><Button size="sm" variant="secondary" onClick={() => setPayees((rows) => [...rows, { ...EMPTY_PAYEE }])}>+ 수취인</Button></div>
           </div>
           <Hint>에이전트는 이 목록 밖의 수취인에게 지출을 요청할 수 없습니다. 외부에서 들어온 글이 수취인을 바꾸지 못하게 하는 장치입니다.</Hint>
           <Hint>
             직접 결제(Meta Ads · Google Ads) 수취인은 정해 둔 광고 캠페인 하나의 고정 상한만 올립니다 — Meta 는 캠페인 지출 한도(spend_cap),
             Google 은 공유하지 않는 캠페인 총예산. 처음 상한은 사람이 광고 화면에서 정하고, 일 예산 캠페인은 쓸 수 없습니다. 승인 금액 = 상한이 늘어나는 양입니다.
+            Stripe Issuing 수취인은 정해 둔 카드 소지자 아래에 승인 금액이 누적 한도인 가상 카드를 한 장씩 만들고, 사람이 Stripe 대시보드에서 그 카드로 결제합니다.
           </Hint>
         </div>
 

@@ -412,29 +412,78 @@ export const PAYMENT_PROVIDER_LABELS: Record<string, string> = {
   webhook: '웹훅 — 승인하면 서버가 결제 엔드포인트로 보냄',
   meta_ads: 'Meta Ads — 승인하면 서버가 광고 캠페인 지출 한도(spend_cap)를 올림',
   google_ads: 'Google Ads — 승인하면 서버가 캠페인 총예산을 올림',
+  stripe_issuing: 'Stripe Issuing — 승인하면 서버가 승인 금액이 한도인 가상 카드를 만듦',
 };
 
 // ── 직접 결제 공급자(docs/marketing.md "직접 결제 어댑터") ─────────────────────
 // 서버 common/marketing/payment-routes.ts 가 정본이다 — 목록 · ref 형식 · credential 필드가 같아야 한다
 // (test/marketing-payment-contract.test.mjs 가 두 파일을 대조한다).
 
-export const DIRECT_PAYMENT_PROVIDERS: readonly MarketingDirectPaymentProvider[] = ['meta_ads', 'google_ads'];
+export const DIRECT_PAYMENT_PROVIDERS: readonly MarketingDirectPaymentProvider[] = ['meta_ads', 'google_ads', 'stripe_issuing'];
 
 export const DIRECT_PAYMENT_PROVIDER_LABELS: Record<MarketingDirectPaymentProvider, string> = {
   meta_ads: 'Meta Ads',
   google_ads: 'Google Ads',
+  stripe_issuing: 'Stripe Issuing',
+};
+
+/** 공급자 명세 — 상한(광고 캠페인의 고정 상한을 올린다)과 카드(그 한도의 가상 카드를 만든다). 상한만 대상마다 열린 요청이 하나다. */
+export const DIRECT_PROVIDER_SPECS: Readonly<Record<MarketingDirectPaymentProvider, { kind: 'ceiling' | 'card'; exclusive: boolean }>> = {
+  meta_ads: { kind: 'ceiling', exclusive: true },
+  google_ads: { kind: 'ceiling', exclusive: true },
+  stripe_issuing: { kind: 'card', exclusive: false },
 };
 
 export const DIRECT_REF_FORMATS: Record<MarketingDirectPaymentProvider, string> = {
   meta_ads: 'act_<광고 계정 id>/<캠페인 id> (예: act_1234567890/120210000000000)',
   google_ads: '<고객 id>/<캠페인 id> (예: 123-456-7890/22334455)',
+  stripe_issuing: '카드 소지자 id ich_… (예: ich_1MsKAB2eZvKYlo2C)',
 };
 
 /** 직접 공급자 credential 의 필드 — Credentials 화면에서 이 공급자를 골라 만든다. */
 export const DIRECT_PROVIDER_CREDENTIAL_FIELDS: Record<MarketingDirectPaymentProvider, { required: readonly string[]; optional: readonly string[] }> = {
   meta_ads: { required: ['access_token'], optional: ['app_secret'] },
   google_ads: { required: ['client_id', 'client_secret', 'refresh_token'], optional: ['login_customer_id', 'developer_token'] },
+  stripe_issuing: { required: ['secret_key'], optional: [] },
 };
+
+/** 수취인 편집기의 결제 경로 고르기 — 무엇을 하는 경로인지 함께. */
+export function directRouteOptionLabel(provider: MarketingDirectPaymentProvider): string {
+  return `${DIRECT_PAYMENT_PROVIDER_LABELS[provider]} — ${DIRECT_PROVIDER_SPECS[provider].kind === 'card' ? '승인 금액 한도의 가상 카드 발급' : '광고 캠페인 상한 올리기'}`;
+}
+
+/** Stripe 일회용 카드 한 장의 최대(서버 STRIPE_SINGLE_USE_MAX_MINOR 와 같다 — 승인 한 건의 고정 상한). */
+export const STRIPE_SINGLE_USE_MAX_MINOR = 1_000_000;
+
+/** 셀프 서비스 Standard 프로그램의 카드당 하루 한도(500.00) — 그 이상인 일회용 카드는 첫 결제가 거절될 수 있다. */
+export const STRIPE_STANDARD_CARD_DAILY_MINOR = 50_000;
+
+const CARD_CATEGORY_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
+
+/**
+ * 허용 업종 입력(쉼표로 구분)을 저장 형태로 — 소문자 · 중복 없이 정렬. 서버 normalizeCardCategories 와 같은 규칙이다(서버가 다시 본다).
+ * 형식이 틀린 이름이 있으면 problem 에 담는다.
+ */
+export function parseCardCategories(input: string): { categories: string[]; problem: string } {
+  const out = new Set<string>();
+  for (const raw of input.split(',')) {
+    const name = raw.trim().toLowerCase();
+    if (!name) continue;
+    if (!CARD_CATEGORY_PATTERN.test(name)) return { categories: [], problem: `"${raw.trim()}" 는 Stripe 업종 이름 형식이 아닙니다(소문자와 _ — 예: advertising_services)` };
+    out.add(name);
+  }
+  if (out.size > 20) return { categories: [], problem: '허용 업종은 20개까지입니다' };
+  return { categories: [...out].sort(), problem: '' };
+}
+
+/** 수취인의 카드 통제 한 줄(목록 표시용). 카드 공급자가 아니면 ''. */
+export function cardControlsLabel(payee: MarketingPayee, currency: string): string {
+  if (!isDirectPaymentProvider(payee.provider) || DIRECT_PROVIDER_SPECS[payee.provider].kind !== 'card') return '';
+  const parts = [payee.card_single_use === false ? '여러 번 쓰는 카드' : '일회용'];
+  parts.push(payee.card_categories?.length ? `업종 ${payee.card_categories.join(', ')}` : '업종 제한 없음');
+  if (typeof payee.card_max_minor === 'number') parts.push(`카드당 최대 ${formatMinor(payee.card_max_minor, currency)}`);
+  return parts.join(' · ');
+}
 
 export function isDirectPaymentProvider(value: unknown): value is MarketingDirectPaymentProvider {
   return typeof value === 'string' && (DIRECT_PAYMENT_PROVIDERS as readonly string[]).includes(value);
@@ -443,6 +492,7 @@ export function isDirectPaymentProvider(value: unknown): value is MarketingDirec
 const DIRECT_REF_PATTERNS: Record<MarketingDirectPaymentProvider, RegExp> = {
   meta_ads: /^act_\d{1,30}\s*\/\s*\d{1,30}$/,
   google_ads: /^\d{3}-?\d{3}-?\d{4}\s*\/\s*\d{1,30}$/,
+  stripe_issuing: /^ich_[A-Za-z0-9]{1,250}$/,
 };
 
 /** 수취인 ref 가 그 공급자의 대상 형식인가 — 저장 전에 화면이 먼저 알려 준다(서버가 다시 본다). 문제 없으면 ''. */
@@ -463,10 +513,13 @@ export function payeeRouteLabel(payee: MarketingPayee): string {
   return isDirectPaymentProvider(payee.provider) ? `${DIRECT_PAYMENT_PROVIDER_LABELS[payee.provider]} · ${payee.ref || '?'}` : '';
 }
 
-/** 지출 카드의 상태 표시 — 상한 공급자의 paid 는 돈이 나간 것이 아니라 "한도가 올라갔다" 이다. */
+/** 지출 카드의 상태 표시 — 직접 공급자의 paid 는 돈이 나간 것이 아니라 "한도가 올라갔다" · "카드가 발급됐다" 이다. */
 export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' | 'provider'>): StatusView {
-  if (spend.status === 'paid' && isDirectPaymentProvider(spend.provider)) return { label: '한도 반영됨', tone: 'done' };
-  if (spend.status === 'executing' && isDirectPaymentProvider(spend.provider)) return { label: '한도 변경 중', tone: 'live' };
+  if (isDirectPaymentProvider(spend.provider)) {
+    const card = DIRECT_PROVIDER_SPECS[spend.provider].kind === 'card';
+    if (spend.status === 'paid') return { label: card ? '카드 발급됨' : '한도 반영됨', tone: 'done' };
+    if (spend.status === 'executing') return { label: card ? '카드 발급 중' : '한도 변경 중', tone: 'live' };
+  }
   return spendStatusView(spend.status);
 }
 
@@ -478,8 +531,22 @@ export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'>)
   if (spend.provider === 'google_ads') {
     return '승인하면 서버가 곧바로 Google Ads 캠페인의 총예산을 위 계획대로 바꿉니다. 그 사이 예산이 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
   }
+  if (spend.provider === 'stripe_issuing') {
+    return '승인하면 서버가 곧바로 위 계획대로 Stripe Issuing 가상 카드를 만듭니다(비활성으로 만들어 계획과 대조한 뒤 활성화). 카드 번호는 Stripe 대시보드에서 봅니다. 자동 재시도는 없습니다. 이 금액은 사용으로 셉니다.';
+  }
   if (spend.provider === 'webhook') return '승인하면 서버가 곧바로 결제 엔드포인트로 이 내용을 보냅니다. 자동 재시도는 없습니다.';
   return '승인하면 이 금액이 예산에서 보류됩니다. AWB 밖에서 결제한 뒤 거래 id 와 함께 결제 완료를 기록하세요.';
+}
+
+/**
+ * 승인 전에 알릴 카드 한도 주의 — 일회용 Stripe 카드가 셀프 서비스 Standard 프로그램의 카드당 하루 한도(500.00)를 넘으면 첫 결제가
+ * 거절될 수 있고, 그래도 승인 금액 전체가 사용으로 묶인다. 해당 없으면 ''.
+ */
+export function cardLimitWarning(spend: Pick<MarketingSpendRequest, 'provider' | 'payload' | 'currency'>): string {
+  if (spend.provider !== 'stripe_issuing') return '';
+  const plan = spend.payload || {};
+  if (plan.single_use !== true || typeof plan.limit_minor !== 'number' || plan.limit_minor <= STRIPE_STANDARD_CARD_DAILY_MINOR) return '';
+  return `일회용 카드의 한도가 ${formatMinor(STRIPE_STANDARD_CARD_DAILY_MINOR, spend.currency)} 를 넘습니다 — 셀프 서비스 Standard 프로그램은 카드당 하루 500 USD 라 첫 결제가 거절될 수 있고, 그래도 이 금액 전체가 사용으로 묶입니다. 프로그램 한도를 확인하세요.`;
 }
 
 /**
@@ -507,6 +574,9 @@ export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provide
   if (spend.provider === 'google_ads') {
     return `Google Ads 에서 캠페인 ${campaignId} 의 총예산이 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 변경 기록은 몇 분 늦게 보이고, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
   }
+  if (spend.provider === 'stripe_issuing') {
+    return `"공급자에서 확인" 이 카드 소지자 ${plan.target?.cardholder || ''} 의 카드 중 이 요청의 카드를 찾습니다(Stripe 대시보드 Issuing → Cards 의 metadata awb_spend_request_id). 카드가 있으면 그 카드 id 로 결제 완료를 기록하세요 — 쓰지 않을 카드면 대시보드에서 해지한 뒤 실패로 기록합니다. 카드가 없으면 ${failAfter} 실패로 기록할 수 있습니다. 해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다.`;
+  }
   return '결제 시스템에서 실제 결제 여부를 확인하세요.';
 }
 
@@ -518,12 +588,26 @@ export function openRequestLabel(open: { id: string; status: string } | null): s
 
 /** 공급자 확인 결과 한 줄. */
 export function inspectionSummary(insp: MarketingSpendInspection, currency: string): string {
+  if (insp.kind === 'card') {
+    if (insp.result === 'none') return '이 요청의 카드가 없습니다(실행 시각 ±1일) — 발급되지 않은 것으로 보입니다.';
+    const cards = insp.cards.map((c) => `${c.id}(${c.status || '상태 모름'}${c.limit_minor !== null ? `, 한도 ${formatMinor(c.limit_minor, currency)}` : ''})`).join(', ');
+    if (insp.result === 'found') {
+      return `이 요청의 카드: ${cards} — 해지되지 않은 카드가 있으면 그 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).`;
+    }
+    return `카드 소지자의 카드를 다 보지 못했습니다${cards ? `(찾은 카드: ${cards})` : ''} — Stripe 대시보드에서 확인하세요.`;
+  }
   const now = insp.observed_minor === null ? (insp.observed === null ? '한도 없음' : `${insp.observed}(공급자 단위)`) : formatMinor(insp.observed_minor, currency);
   const where = insp.position === 'at_target' ? '목표값입니다 — 반영된 것으로 보입니다'
     : insp.position === 'at_from' ? '이전 값입니다 — 반영되지 않은 것으로 보입니다'
       : insp.position === 'no_ceiling' ? '한도가 없습니다 — 누군가 공급자 화면에서 지웠습니다'
         : '계획의 이전 값도 목표값도 아닙니다 — 공급자 화면에서 바뀐 이력을 보세요';
   return `지금 상한 ${now}: ${where}. (${formatMinor(insp.from_minor, currency)} → ${formatMinor(insp.to_minor, currency)} 계획)`;
+}
+
+/** 요청별 확인이 찾은, 해지되지 않은 카드의 id — 결제 기록 창에 미리 채운다. 없으면 ''. */
+export function inspectionCardRef(insp: MarketingSpendInspection | null): string {
+  if (!insp || insp.kind !== 'card') return '';
+  return insp.cards.find((c) => c.status !== 'canceled')?.id || '';
 }
 
 /** 환불 기록 — 상한 공급자는 상한을 낮추기 전에는 기록할 수 없다(서버가 막는다). */

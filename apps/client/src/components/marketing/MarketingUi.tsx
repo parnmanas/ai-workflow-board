@@ -292,7 +292,9 @@ export interface NoteModalProps {
   confirmLabel: string;
   danger?: boolean;
   busy?: boolean;
-  onSubmit(note: string): void;
+  /** 있으면 메모 아래에 확인 체크박스를 둔다(선택 — 체크 여부가 onSubmit 의 두 번째 인자). */
+  checkboxLabel?: string;
+  onSubmit(note: string, checked: boolean): void;
   onClose(): void;
 }
 
@@ -306,12 +308,14 @@ export function NoteModal({
   confirmLabel,
   danger = false,
   busy = false,
+  checkboxLabel,
   onSubmit,
   onClose,
 }: NoteModalProps) {
   const [note, setNote] = useState('');
+  const [checked, setChecked] = useState(false);
   useEffect(() => {
-    if (isOpen) setNote('');
+    if (isOpen) { setNote(''); setChecked(false); }
   }, [isOpen]);
   const ok = !required || note.trim().length > 0;
   return (
@@ -323,7 +327,7 @@ export function NoteModal({
       footer={(
         <>
           <Button variant="secondary" onClick={onClose}>취소</Button>
-          <Button variant={danger ? 'danger' : 'primary'} disabled={!ok || busy} onClick={() => onSubmit(note.trim())}>
+          <Button variant={danger ? 'danger' : 'primary'} disabled={!ok || busy} onClick={() => onSubmit(note.trim(), checked)}>
             {busy ? '처리 중…' : confirmLabel}
           </Button>
         </>
@@ -338,6 +342,12 @@ export function NoteModal({
         placeholder={placeholder}
         onChange={(e) => setNote(e.target.value)}
       />
+      {checkboxLabel && (
+        <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12, color: tokens.colors.textPrimary, marginTop: 8, lineHeight: 1.5 }}>
+          <input type="checkbox" aria-label={checkboxLabel} checked={checked} onChange={(e) => setChecked(e.target.checked)} style={{ marginTop: 2 }} />
+          {checkboxLabel}
+        </label>
+      )}
     </Modal>
   );
 }

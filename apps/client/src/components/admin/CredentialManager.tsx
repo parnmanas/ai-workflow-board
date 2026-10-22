@@ -7,6 +7,8 @@ import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { useAuth } from '../../contexts/AuthContext';
 import CliCredentialImport from './CliCredentialImport';
+import { PaymentCredentialGuide } from '../marketing/PaymentCredentialGuide';
+import { isDirectPaymentProvider } from '../marketing/marketing.logic';
 import CliAutoLogin from './CliAutoLogin';
 import { cliCredentialProviders, useCliCatalog, type FlattenedCredentialProvider } from '../../cli/catalog';
 import { providerColor, providerIcon } from '../../cli/presentation';
@@ -138,6 +140,14 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
       refresh_token: { label: 'Refresh token', placeholder: '1//... — adwords scope; publish the OAuth app (refresh tokens of apps in "Testing" expire in 7 days)' },
       login_customer_id: { label: 'Manager account id (optional)', placeholder: '123-456-7890 — only when access goes through a manager (MCC) account' },
       developer_token: { label: 'Developer token (leave empty)', placeholder: 'Retired by Google on 2026-09-09 — ignored now, rejected by later API versions; access follows the OAuth client\'s Cloud project' },
+    },
+  },
+  {
+    value: 'stripe_issuing',
+    label: 'Stripe Issuing (marketing payments)',
+    icon: 'S',
+    fields: {
+      secret_key: { label: 'Restricted API key', placeholder: 'rk_live_... (sandbox rk_test_...) — Issuing Cards: Write, Issuing Cardholders: Read; a full live key sk_live_ is refused' },
     },
   },
   // Custom renders a key/value editor instead of these fields; `token` is the
@@ -686,11 +696,19 @@ export default function CredentialManager({
                 onChange={(e) => { setFormProvider(e.target.value); resetProviderInputs(e.target.value); }}
                 style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
               >
-                {providerOptions.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                {providerOptions.filter((p) => !isDirectPaymentProvider(p.value)).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                {/* 마케팅 직접 결제 — 서버만 쓰고 에이전트에게는 노출할 수 없다. 고르면 아래에 발급 방법이 나온다. */}
+                <optgroup label="Marketing payments (server only)">
+                  {providerOptions.filter((p) => isDirectPaymentProvider(p.value)).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </optgroup>
               </select>
             </div>
           </div>
           <Input label="Description" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Optional note" />
+
+          {isDirectPaymentProvider(formProvider) && (
+            <PaymentCredentialGuide provider={formProvider} defaultOpen={!editCred} />
+          )}
 
           {formProvider === 'google_oauth' && (
             <div>

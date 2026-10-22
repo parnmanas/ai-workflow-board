@@ -9,6 +9,8 @@
 //   4. 예산 설정의 수취인 편집: 결제 경로(Meta Ads · Google Ads)를 고르면 그 공급자로 만든 이 계정의 credential 만 고를 수 있고,
 //      ref 형식이 틀리면 보내지 않으며, 맞으면 provider · credential_id 를 실어 보낸다.
 //   5. 수취인 목록에 결제 경로가 보이고, "연결 확인" 이 공급자를 읽은 결과(정상 · 문제 · 지금 상한)를 보여 준다.
+//   6. Stripe Issuing(카드): 결과 불명이면 "공급자에서 확인" 이 이 요청의 카드를 찾고, 결제 기록은 그 카드 id 로 미리 채우며, 실패 기록은
+//      쓴 돈 없음 확인을 실어 보낸다. 발급된 카드는 "카드 발급됨" 과 대시보드 링크. 수취인 편집은 카드 통제 · 발급 안내를 보여 주고 저장한다.
 //
 // 실행: node --import tsx --test --test-force-exit test/marketing-direct-payment-ui.test.mjs
 import test from 'node:test';
@@ -93,6 +95,7 @@ const SPEND_BY_STATUS = {
 };
 
 const credentials = [
+  { id: 'cred-stripe', account_id: 'acc-1', name: 'Stripe restricted key', provider: 'stripe_issuing', agent_env: false, credential_fields: {} },
   { id: 'cred-meta', account_id: 'acc-1', name: 'Meta system user', provider: 'meta_ads', agent_env: false, credential_fields: {} },
   { id: 'cred-meta-2', account_id: 'acc-1', name: 'Meta backup', provider: 'meta_ads', agent_env: false, credential_fields: {} },
   { id: 'cred-google', account_id: 'acc-1', name: 'Google Ads OAuth', provider: 'google_ads', agent_env: false, credential_fields: {} },
@@ -330,4 +333,115 @@ test('연결 확인 — 공급자를 읽은 결과를 수취인마다 보여 준
   assert.match(google.textContent, /^정상 · Google total \(Google Ads 1112223333\/5\) · 지금 상한 1,000\.00 USD/);
   assert.match(google.textContent, /다른 계정에 열린 요청 있음/, 'another account\'s request shows without its id or state');
   assert.doesNotMatch(google.textContent, /other_account/);
+});
+
+const CARD_PLAN = {
+  plan: 'issue_card', provider: 'stripe_issuing', target: { cardholder: 'ich_1' }, currency: 'USD', limit_minor: 30000, interval: 'all_time',
+  single_use: true, allowed_categories: ['advertising_services'], livemode: false, credential_fingerprint: '0123456789abcdef',
+};
+const CARD_PLAN_TEXT = 'Stripe Issuing 카드 소지자 ich_1 에게 누적 한도 300.00 USD 의 일회용(첫 결제 뒤 자동 해지) 가상 카드를 발급합니다(허용 업종: advertising_services).';
+const cardSpend = (id, over = {}) => spend(id, {
+  payee: 'Sponsor card', payee_ref: 'ich_1', provider: 'stripe_issuing', payload: CARD_PLAN, plan_text: CARD_PLAN_TEXT, suggested_provider_ref: '', ...over,
+});
+
+test('Stripe 카드 결과 불명 — 공급자에서 이 요청의 카드를 찾고, 결제 기록은 그 카드 id 로, 실패 기록은 쓴 돈 없음 확인을 싣는다', async (t) => {
+  const unknownCard = cardSpend('sp-card', { status: 'unknown', executing_at: iso(-30), error: 'Stripe answered HTTP 500 api_error when the card was requested — a card may exist' });
+  const paid = [];
+  const failed = [];
+  const { container } = await renderPage(t, {
+    stubs: {
+      listMarketingSpendRequests: async (_id, opts = {}) => (opts.status === 'unknown' || !opts.status ? [unknownCard] : []),
+      inspectMarketingSpend: async () => ({
+        kind: 'card', spend_request_id: 'sp-card', status: 'unknown', limit_minor: 30000, result: 'found', api_version: '2026-09-30.endive', checked_at: iso(0),
+        cards: [{ id: 'ic_77', status: 'inactive', currency: 'USD', limit_minor: 30000, single_use: true, livemode: false, created: 0 }],
+      }),
+      markMarketingSpendPaid: async (id, data) => { paid.push([id, data]); return { ...unknownCard, status: 'paid' }; },
+      markMarketingSpendFailed: async (id, note, confirm) => { failed.push([id, note, confirm]); return { ...unknownCard, status: 'failed' }; },
+    },
+  });
+  const card = within(container, 'marketing-spend-sp-card');
+  assert.match(within(container, 'marketing-spend-unknown-sp-card').textContent, /"공급자에서 확인" 이 카드 소지자 ich_1 의 카드 중 이 요청의 카드를 찾습니다/);
+  click(buttonIn(card, '공급자에서 확인'));
+  await flush();
+  await flush();
+  assert.match(within(container, 'marketing-spend-inspection-sp-card').textContent, /이 요청의 카드: ic_77\(inactive, 한도 300.00 USD\)/);
+
+  click(buttonIn(card, '결제 완료 기록…'));
+  await flush();
+  const paidDialog = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
+  assert.ok(paidDialog);
+  assert.equal(paidDialog.querySelector('input').value, 'ic_77', 'the card the inspection found');
+  click(buttonIn(paidDialog, '취소'));
+  await flush();
+
+  click(buttonIn(card, '실패로 기록…'));
+  await flush();
+  const failDialog = dialogs().find((d) => d.textContent.includes('결제 실패로 기록'));
+  assert.match(failDialog.textContent, /이 요청의 카드가 Stripe 에 없음을 확인했을 때만/);
+  typeInto(failDialog.querySelector('textarea'), 'canceled in the dashboard, nothing spent');
+  const confirmBox = failDialog.querySelector('input[type="checkbox"]');
+  assert.ok(confirmBox, 'a card request asks for the no-spend confirmation');
+  click(confirmBox);
+  click(buttonIn(failDialog, '실패로 기록'));
+  await flush();
+  assert.deepEqual(failed, [['sp-card', 'canceled in the dashboard, nothing spent', true]]);
+});
+
+test('Stripe 카드 발급됨 — 상태 표시와 대시보드 링크, 승인 창의 카드 한도 주의', async (t) => {
+  const issued = cardSpend('sp-issued', { status: 'paid', provider_ref: 'ic_9', receipt_url: 'https://dashboard.stripe.com/test/issuing/cards/ic_9' });
+  const pendingBig = cardSpend('sp-big', { amount_minor: 80000, payload: { ...CARD_PLAN, limit_minor: 80000 } });
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: { listMarketingSpendRequests: async (_id, opts = {}) => (opts.status === 'paid' ? [issued] : opts.status === 'pending' ? [pendingBig] : !opts.status ? [issued, pendingBig] : []) },
+  });
+  const card = within(container, 'marketing-spend-sp-issued');
+  assert.match(card.textContent, /카드 발급됨/);
+  assert.match(card.textContent, /AWB 는 카드 번호를\s*보여 주지 않습니다/);
+  const link = [...card.querySelectorAll('a')].find((a) => a.textContent === 'Stripe 에서 카드 보기');
+  assert.ok(link, 'a link to the card in the Stripe Dashboard');
+  assert.equal(link.getAttribute('href'), 'https://dashboard.stripe.com/test/issuing/cards/ic_9');
+  assert.equal(hasButton(card, '환불 기록…'), false);
+
+  const big = within(container, 'marketing-spend-sp-big');
+  click(buttonIn(big, '승인…'));
+  await flush();
+  const dialog = within(document, 'marketing-spend-approve-dialog');
+  assert.match(dialog.textContent, /가상 카드를 만듭니다\(비활성으로 만들어 계획과 대조한 뒤 활성화\)/);
+  assert.match(dialog.textContent, /일회용 카드의 한도가 500.00 USD 를 넘습니다/);
+});
+
+test('수취인 편집 — Stripe Issuing 경로는 카드 통제와 발급 안내를 보여 주고, 서버 순서대로 저장한다', async (t) => {
+  const patches = [];
+  const { container } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=budget',
+    stubs: { updateMarketingCampaign: async (id, patch) => { patches.push([id, patch]); return { ...campaign(), ...patch }; } },
+  });
+  click(buttonIn(container, '예산 설정…'));
+  await flush();
+  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const row = within(dialog, 'marketing-payee-row-1');
+  const route = row.querySelector('select[aria-label="수취인 2 결제 경로"]');
+  assert.ok([...route.querySelectorAll('option')].some((o) => o.textContent === 'Stripe Issuing — 승인 금액 한도의 가상 카드 발급'));
+  choose(route, 'stripe_issuing');
+  await flush();
+  const controls = within(row, 'marketing-payee-card-1');
+  assert.equal(controls.querySelector('input[type="checkbox"]').checked, true, 'single-use by default');
+  const guide = within(row, 'payment-credential-guide-stripe_issuing');
+  assert.match(guide.textContent, /credential 발급 방법 — Stripe Issuing/);
+  assert.match(guide.textContent, /Create restricted key/);
+  const credSelect = row.querySelector('select[aria-label="수취인 2 credential"]');
+  assert.deepEqual([...credSelect.querySelectorAll('option')].map((o) => o.value).filter(Boolean), ['cred-stripe']);
+  choose(credSelect, 'cred-stripe');
+  typeInto(row.querySelector('input[aria-label="수취인 2 참조"]'), 'ich_9');
+  typeInto(row.querySelector('input[aria-label="수취인 2 허용 업종"]'), 'software, Advertising_Services');
+  typeInto(row.querySelector('input[aria-label="수취인 2 카드당 최대"]'), '500');
+  click(buttonIn(dialog, '저장'));
+  await flush();
+  await flush();
+  assert.deepEqual(patches, [['c-1', {
+    payees: [
+      { name: 'Meta fall', ref: 'act_9/77', provider: 'meta_ads', credential_id: 'cred-meta' },
+      { name: 'Newsletter', ref: 'ich_9', note: undefined, provider: 'stripe_issuing', credential_id: 'cred-stripe', card_single_use: true, card_categories: ['advertising_services', 'software'], card_max_minor: 50000 },
+    ].map((p) => JSON.parse(JSON.stringify(p))),
+  }]]);
 });

@@ -8,6 +8,8 @@
 //   3. credential 후보는 그 공급자로 만든 이 계정의 것만(전역 · 다른 종류 · 에이전트 노출 제외).
 //   4. 상한 공급자의 paid 는 "한도 반영됨", 환불 기록 불가. 승인 · 대조 안내는 공급자마다 다르다. 공급자 확인 한 줄.
 //   5. 결과 불명의 실패 기록 유예(DIRECT_FAIL_GRACE_MS)가 서버와 같고, 대조 안내가 그 시각을 알린다. 다른 계정의 열린 요청은 id 없이 표시한다.
+//   6. Stripe Issuing(카드): 공급자 명세 · 일회용 최대 · 업종 정규화가 서버와 같고, 카드 상태 · 승인 · 대조 · 확인 문장이 카드에 맞다.
+//   7. credential 발급 안내가 모든 직접 공급자에 있고, 칸 목록이 credential 필드와 같고, 링크는 공식 문서(https)다.
 //
 // 실행: node --import tsx --test test/marketing-payment-contract.test.mjs
 import test from 'node:test';
@@ -15,9 +17,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   DIRECT_FAIL_GRACE_MS, DIRECT_PAYMENT_PROVIDERS, DIRECT_PAYMENT_PROVIDER_LABELS, DIRECT_REF_FORMATS, DIRECT_PROVIDER_CREDENTIAL_FIELDS, PAYMENT_PROVIDER_LABELS,
-  canRecordRefund, directPaymentCredentials, directRefProblem, formatDateTime, inspectionSummary, isDirectPaymentProvider, openRequestLabel,
+  DIRECT_PROVIDER_SPECS, STRIPE_SINGLE_USE_MAX_MINOR,
+  canRecordRefund, cardControlsLabel, cardLimitWarning, directPaymentCredentials, directRefProblem, directRouteOptionLabel, formatDateTime,
+  inspectionCardRef, inspectionSummary, isDirectPaymentProvider, openRequestLabel, parseCardCategories,
   payeeRouteLabel, spendApproveHint, spendStatusViewFor, unknownReconcileHint,
 } from '../src/components/marketing/marketing.logic.ts';
+import { PAYMENT_CREDENTIAL_GUIDES } from '../src/components/marketing/paymentCredentialGuides.ts';
 import { AGENT_ENV_PROVIDERS } from '../src/components/admin/credentialAgentEnv.logic.ts';
 
 const SERVER_RULES = new URL('../../server/src/common/marketing/payment-routes.ts', import.meta.url);
@@ -30,12 +35,21 @@ test('the screen mirrors the server: providers, ref formats, credential fields',
   assert.deepEqual(DIRECT_REF_FORMATS, server.DIRECT_REF_FORMATS);
   assert.deepEqual(JSON.parse(JSON.stringify(DIRECT_PROVIDER_CREDENTIAL_FIELDS)), JSON.parse(JSON.stringify(server.DIRECT_PROVIDER_CREDENTIAL_FIELDS)));
   assert.equal(DIRECT_FAIL_GRACE_MS, server.DIRECT_FAIL_GRACE_MS, 'the reconcile hint tells the same wait the server enforces');
+  assert.deepEqual(JSON.parse(JSON.stringify(DIRECT_PROVIDER_SPECS)), JSON.parse(JSON.stringify(server.DIRECT_PROVIDER_SPECS)));
+  assert.equal(STRIPE_SINGLE_USE_MAX_MINOR, server.STRIPE_SINGLE_USE_MAX_MINOR);
+  for (const input of ['', 'advertising_services', ' Software , advertising_services,software', 'a b', 'x', 'ok_1,bad-name']) {
+    let serverOut;
+    try { serverOut = server.normalizeCardCategories(input); } catch { serverOut = null; }
+    const client = parseCardCategories(input);
+    assert.deepEqual(client.problem ? null : client.categories, serverOut, `categories ${JSON.stringify(input)}`);
+  }
   for (const p of DIRECT_PAYMENT_PROVIDERS) assert.ok(PAYMENT_PROVIDER_LABELS[p], `label for ${p}`);
 
   // 같은 표본에 서버 파서와 같은 답
   const samples = {
     meta_ads: ['act_123/456', ' act_123 / 456 ', '123/456', 'act_12a/4', 'act_1', 'act_1/2/3', ''],
     google_ads: ['123-456-7890/99', '1234567890/99', '123456789/9', '12345678901/9', 'abc/9', '1234567890'],
+    stripe_issuing: ['ich_1MsKAB2eZvKYlo2C', ' ich_abc ', 'ic_123', 'ich_', 'ich_1-2', 'cus_1', ''],
   };
   for (const [provider, refs] of Object.entries(samples)) {
     for (const ref of refs) {
@@ -103,4 +117,58 @@ test('ceiling providers read differently: status, refund, approval and reconcile
   assert.equal(inspectionSummary(insp, 'USD'), '지금 상한 1,300.00 USD: 목표값입니다 — 반영된 것으로 보입니다. (1,000.00 USD → 1,300.00 USD 계획)');
   assert.match(inspectionSummary({ ...insp, observed: '100000', observed_minor: 100000, position: 'at_from' }, 'USD'), /반영되지 않은 것으로/);
   assert.match(inspectionSummary({ ...insp, observed: null, observed_minor: null, position: 'no_ceiling' }, 'USD'), /^지금 상한 한도 없음: 한도가 없습니다/);
+});
+
+test('in-app credential guides cover every direct provider and every credential field', () => {
+  const officialHosts = ['developers.facebook.com', 'developers.google.com', 'docs.stripe.com'];
+  for (const provider of DIRECT_PAYMENT_PROVIDERS) {
+    const guide = PAYMENT_CREDENTIAL_GUIDES[provider];
+    assert.ok(guide, `guide for ${provider}`);
+    const fields = DIRECT_PROVIDER_CREDENTIAL_FIELDS[provider];
+    assert.deepEqual(guide.fields.map((f) => f.field), [...fields.required, ...fields.optional], `${provider}: one line per credential field, in form order`);
+    assert.ok(guide.steps.length >= 8, `${provider}: a real step list`);
+    assert.ok(guide.links.length >= 2);
+    for (const link of guide.links) {
+      const u = new URL(link.url);
+      assert.equal(u.protocol, 'https:', link.url);
+      assert.ok(officialHosts.includes(u.hostname), `${link.url} is an official doc host`);
+    }
+    assert.match(guide.target, /수취인 대상/);
+  }
+  assert.match(PAYMENT_CREDENTIAL_GUIDES.stripe_issuing.summary, /카드 번호를 가져오지 않습니다/);
+  assert.match(PAYMENT_CREDENTIAL_GUIDES.stripe_issuing.summary, /미국 · 영국 · EEA/);
+  assert.match(PAYMENT_CREDENTIAL_GUIDES.google_ads.summary, /developer token 은 2026-09-09 에 폐지/);
+});
+
+test('Stripe Issuing reads as a card: status, approval, reconcile, inspection, limits and payee controls', () => {
+  assert.equal(directRouteOptionLabel('stripe_issuing'), 'Stripe Issuing — 승인 금액 한도의 가상 카드 발급');
+  assert.equal(directRouteOptionLabel('meta_ads'), 'Meta Ads — 광고 캠페인 상한 올리기');
+  assert.equal(spendStatusViewFor({ status: 'paid', provider: 'stripe_issuing' }).label, '카드 발급됨');
+  assert.equal(spendStatusViewFor({ status: 'executing', provider: 'stripe_issuing' }).label, '카드 발급 중');
+  assert.equal(canRecordRefund({ status: 'paid', provider: 'stripe_issuing' }), false);
+  assert.match(spendApproveHint({ provider: 'stripe_issuing' }), /가상 카드를 만듭니다\(비활성으로 만들어 계획과 대조한 뒤 활성화\)/);
+  const plan = { plan: 'issue_card', target: { cardholder: 'ich_1' }, limit_minor: 80000, single_use: true };
+  const hint = unknownReconcileHint({ provider: 'stripe_issuing', currency: 'USD', payload: plan, executing_at: null });
+  assert.match(hint, /카드 소지자 ich_1 의 카드 중 이 요청의 카드를 찾습니다/);
+  assert.match(hint, /해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다/);
+  assert.match(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: plan }), /500.00 USD 를 넘습니다/);
+  assert.equal(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: { ...plan, limit_minor: 50000 } }), '');
+  assert.equal(cardLimitWarning({ provider: 'stripe_issuing', currency: 'USD', payload: { ...plan, single_use: false } }), '');
+  assert.equal(cardLimitWarning({ provider: 'meta_ads', currency: 'USD', payload: plan }), '');
+
+  const base = { kind: 'card', spend_request_id: 's', status: 'unknown', limit_minor: 30000, api_version: 'v', checked_at: '' };
+  const card = (id, status) => ({ id, status, currency: 'USD', limit_minor: 30000, single_use: true, livemode: false, created: 0 });
+  assert.match(inspectionSummary({ ...base, result: 'none', cards: [] }, 'USD'), /이 요청의 카드가 없습니다/);
+  assert.equal(inspectionSummary({ ...base, result: 'found', cards: [card('ic_1', 'active')] }, 'USD'),
+    '이 요청의 카드: ic_1(active, 한도 300.00 USD) — 해지되지 않은 카드가 있으면 그 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).');
+  assert.match(inspectionSummary({ ...base, result: 'incomplete', cards: [] }, 'USD'), /다 보지 못했습니다/);
+  assert.equal(inspectionCardRef({ ...base, result: 'found', cards: [card('ic_old', 'canceled'), card('ic_live', 'inactive')] }), 'ic_live');
+  assert.equal(inspectionCardRef({ ...base, result: 'found', cards: [card('ic_old', 'canceled')] }), '');
+  assert.equal(inspectionCardRef(null), '');
+
+  const payee = { name: 'Card', provider: 'stripe_issuing', credential_id: 'c', ref: 'ich_1', card_single_use: true, card_categories: ['advertising_services'], card_max_minor: 50000 };
+  assert.equal(payeeRouteLabel(payee), 'Stripe Issuing · ich_1');
+  assert.equal(cardControlsLabel(payee, 'USD'), '일회용 · 업종 advertising_services · 카드당 최대 500.00 USD');
+  assert.equal(cardControlsLabel({ ...payee, card_single_use: false, card_categories: [], card_max_minor: undefined }, 'USD'), '여러 번 쓰는 카드 · 업종 제한 없음');
+  assert.equal(cardControlsLabel({ name: 'Meta', provider: 'meta_ads', ref: 'act_1/2' }, 'USD'), '');
 });

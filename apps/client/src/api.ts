@@ -2708,8 +2708,12 @@ export const api = {
   /** manual 승인 건 또는 결과 불명(unknown) 건을 결제 완료로 닫는다 — 거래 id 필수. */
   markMarketingSpendPaid: (id: string, data: { provider_ref: string; receipt_url?: string; note?: string }) =>
     request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/mark-paid`, { method: 'POST', body: JSON.stringify(data) }),
-  markMarketingSpendFailed: (id: string, note: string) =>
-    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/mark-failed`, { method: 'POST', body: JSON.stringify({ note }) }),
+  /** 실패 기록 — 카드 공급자는 해지된 카드만 있거나 카드를 다 확인하지 못했을 때 `confirmNoSpend`(쓴 돈 없음 확인, 감사에 남음)가 필요하다. */
+  markMarketingSpendFailed: (id: string, note: string, confirmNoSpend = false) =>
+    request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/mark-failed`, {
+      method: 'POST',
+      body: JSON.stringify(confirmNoSpend ? { note, confirm_no_spend: true } : { note }),
+    }),
   refundMarketingSpend: (id: string, data: { amount_minor: number; note: string; provider_ref?: string }) =>
     request<MarketingSpendRequest>(`/marketing/spend-requests/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify(data) }),
   listMarketingLedger: (campaignId: string, limit?: number) =>

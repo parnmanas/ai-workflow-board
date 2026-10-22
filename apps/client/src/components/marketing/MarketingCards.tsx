@@ -37,6 +37,9 @@ import {
   formatCount,
   formatDateTime,
   formatMinor,
+  cardLimitWarning,
+  DIRECT_PROVIDER_SPECS,
+  inspectionCardRef,
   inspectionSummary,
   isDirectPaymentProvider,
   isSpendExpired,
@@ -961,6 +964,7 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
   const pending = spend.status === 'pending';
   const unknown = spend.status === 'unknown';
   const direct = isDirectPaymentProvider(spend.provider);
+  const cardProvider = isDirectPaymentProvider(spend.provider) && DIRECT_PROVIDER_SPECS[spend.provider].kind === 'card';
   const [inspection, setInspection] = useState<MarketingSpendInspection | null>(null);
   const close = () => setDialog(null);
   const inspect = async () => {
@@ -1089,12 +1093,18 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
           <Hint>지출 승인 · 결제 기록은 marketing.approve_spend 권한이 있는 사람만 할 수 있습니다.</Hint>
         )}
         {spend.status === 'executing' && <Hint>결제 시스템의 응답을 기다리는 중입니다 — 다시 보내지 않습니다.</Hint>}
-        {direct && spend.status === 'paid' && (
+        {direct && spend.status === 'paid' && (cardProvider ? (
+          <Hint>
+            그 한도의 카드를 만든 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 카드 정보는 Stripe 대시보드에서 봅니다(AWB 는 카드 번호를
+            보여 주지 않습니다){spend.receipt_url ? <> — <ExternalLink href={spend.receipt_url}>Stripe 에서 카드 보기</ExternalLink></> : ''}. 덜 쓴 금액을 환불로 기록하는 것은
+            카드를 해지하고 쓴 돈을 대조하는 기능과 함께 후속으로 둡니다.
+          </Hint>
+        ) : (
           <Hint>
             광고 플랫폼의 상한을 올린 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로
             낮추는 기능과 함께 후속으로 둡니다 — 상한이 그대로인데 돌려받았다고 적으면 원장이 실제보다 적게 셉니다.
           </Hint>
-        )}
+        ))}
       </div>
 
       {dialog === 'approve' && <SpendApproveModal spend={spend} channelName={channel?.name || ''} onClose={close} />}
@@ -1132,20 +1142,25 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
         isOpen={dialog === 'failed'}
         title="결제 실패로 기록"
         message={unknown
-          ? '결제 시스템에서 실제로 결제되지 않았음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.'
+          ? (cardProvider
+            ? '이 요청의 카드가 Stripe 에 없음을 확인했을 때만 실패로 기록하세요(서버도 카드를 찾아 봅니다 — 해지되지 않은 카드가 있으면 거부합니다). 보류한 예산이 풀립니다.'
+            : '결제 시스템에서 실제로 결제되지 않았음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.')
           : 'AWB 밖 결제가 이루어지지 않았을 때 기록합니다. 보류한 예산이 풀립니다.'}
         label="확인한 내용"
         required
         danger
         busy={busy}
         confirmLabel="실패로 기록"
+        checkboxLabel={cardProvider && unknown
+          ? 'Stripe 대시보드에서 이 요청의 카드로 쓴 돈이 없음을 확인했습니다(카드가 해지됐거나 서버가 카드를 다 확인하지 못한 경우에 필요 — 감사에 남습니다)'
+          : undefined}
         onClose={close}
-        onSubmit={async (note) => {
-          const done = await run(() => api.markMarketingSpendFailed(spend.id, note), '결제 실패를 기록했습니다');
+        onSubmit={async (note, confirmNoSpend) => {
+          const done = await run(() => api.markMarketingSpendFailed(spend.id, note, cardProvider && confirmNoSpend), '결제 실패를 기록했습니다');
           if (done) close();
         }}
       />
-      {dialog === 'paid' && <MarkPaidModal spend={spend} onClose={close} />}
+      {dialog === 'paid' && <MarkPaidModal spend={spend} prefillRef={inspectionCardRef(inspection)} onClose={close} />}
       {dialog === 'refund' && <RefundModal spend={spend} onClose={close} />}
     </Panel>
   );
@@ -1172,7 +1187,11 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
     onClose();
     if (!result.final) ctx.notify(SECOND_APPROVAL_MESSAGE, 'info');
     else if (result.status === 'paid') {
-      ctx.notify(isDirectPaymentProvider(result.provider) ? '승인했고 광고 플랫폼에 상한을 반영했습니다' : '승인했고 결제 시스템이 결제를 완료했습니다', 'success');
+      ctx.notify(!isDirectPaymentProvider(result.provider)
+        ? '승인했고 결제 시스템이 결제를 완료했습니다'
+        : DIRECT_PROVIDER_SPECS[result.provider].kind === 'card'
+          ? '승인했고 Stripe 카드를 발급했습니다 — 카드 정보는 Stripe 대시보드에서 봅니다'
+          : '승인했고 광고 플랫폼에 상한을 반영했습니다', 'success');
     }
     else if (result.status === 'unknown') ctx.notify(UNKNOWN_SPEND_MESSAGE, 'error');
     else if (result.status === 'failed') ctx.notify(`승인했지만 결제가 거절됐습니다: ${result.error || ''}`, 'error');
@@ -1219,6 +1238,7 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
           {spendApproveHint(spend)}
           {approval.required === 2 && ' 2인 승인 대상이라 다른 승인자 한 명이 더 승인해야 실행됩니다.'}
         </Hint>
+        {cardLimitWarning(spend) && <Hint tone="danger">{cardLimitWarning(spend)}</Hint>}
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
           <input
             type="checkbox"
@@ -1234,10 +1254,11 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
   );
 }
 
-function MarkPaidModal({ spend, onClose }: { spend: MarketingSpendRequest; onClose(): void }) {
+function MarkPaidModal({ spend, prefillRef = '', onClose }: { spend: MarketingSpendRequest; prefillRef?: string; onClose(): void }) {
   const { busy, run } = useAction();
-  // 광고 플랫폼 상한 변경에는 거래 id 가 없다 — 서버가 계획에서 만든 기록용 값을 미리 채운다(사람이 확인하고 고칠 수 있다).
-  const [ref, setRef] = useState(spend.suggested_provider_ref || '');
+  // 광고 플랫폼 상한 변경에는 거래 id 가 없다 — 서버가 계획에서 만든 기록용 값을, 카드는 실행이나 "공급자에서 확인" 이 찾은 카드 id 를
+  // 미리 채운다(사람이 확인하고 고칠 수 있다).
+  const [ref, setRef] = useState(prefillRef || spend.suggested_provider_ref || '');
   const [receipt, setReceipt] = useState('');
   const [note, setNote] = useState('');
   const receiptOk = !receipt.trim() || !!safeHttpUrl(receipt);
