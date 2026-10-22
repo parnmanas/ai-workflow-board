@@ -46,13 +46,13 @@
 
 | 엔티티 | 테이블 | 역할 |
 | --- | --- | --- |
-| `MarketingCampaign` | `marketing_campaigns` | 제품(Project), 브리프 · 목표 · 대상, capabilities, 에이전트 RuntimeSpec, 주기, 통화, 한도, 결제 방식, 수취인 허용 목록, 링크 허용 도메인, 공개 문구, 일일 상한, 피드백 티켓 설정 |
+| `MarketingCampaign` | `marketing_campaigns` | 제품(Project), 브리프 · 목표 · 대상, capabilities, 에이전트 RuntimeSpec, 주기, 통화, 한도, 결제 방식, 수취인 허용 목록(수취인별 직접 결제 경로), 링크 허용 도메인, 공개 문구, 일일 상한, 피드백 티켓 설정 |
 | `MarketingChannel` | `marketing_channels` | 캠페인의 채널(연결 테이블 + 탐색 근거). kind 는 `outreach` · `email` · `manual` |
 | `MarketingPost` | `marketing_posts` | 채널별 콘텐츠(게시글 · 답글 · 메일). 서버가 게시한 reddit · GitHub 글은 마지막으로 읽은 참여도 담는다 |
 | `MarketingEmailSend` | `marketing_email_sends` | 메일 한 통 = (post × contact). 발송 큐이자 기록. 보낸 credential, 공급자가 알려 온 바운스 · 스팸 신고 |
 | `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 재확인 안내로 이어진 동의 기간, 수신거부 · 바운스 · 스팸 신고, 억제 해시 |
 | `MarketingBudgetAllocation` | `marketing_budget_allocations` | 채널별 예산 편성(버전) |
-| `MarketingSpendRequest` | `marketing_spend_requests` | 지출 요청과 그 상태 기계 |
+| `MarketingSpendRequest` | `marketing_spend_requests` | 지출 요청과 그 상태 기계. 직접 결제는 실행 계획과 대상 키(`target_key`)도 담는다 |
 | `MarketingLedgerEntry` | `marketing_ledger_entries` | append-only 원장 |
 | `MarketingLink` | `marketing_links` | 추적 링크 |
 | `MarketingMetric` | `marketing_metrics` | 지표 관측치(링크 클릭은 시간 버킷 합산, 커넥터가 읽은 참여는 변화량) |
@@ -325,9 +325,11 @@ Gmail · Yahoo 의 대량 발신자 기준은 스팸 신고율 0.1% 미만 유�
   - active 편성 합이 기간 한도(없으면 총 한도)를 넘으면 승인이 거부된다.
   - **편성이 없는 채널에는 지출할 수 없다.**
 - **수취인 허용 목록**(`payees`): 요청의 `payee` 는 이 목록 안이어야 한다. 요청 · 승인 · 실행 때마다 다시 본다.
+  - 이름만이 아니라 **경로**(결제 방식 · credential · `ref`)까지 본다. 사람이 요청 뒤에 수취인을 다른 대상으로 돌렸거나 결제 방식을 바꿨으면, 예전 경로의 요청은 승인 · 실행되지 않는다.
+  - 수취인마다 직접 결제 경로(`provider` · `credential_id`)를 둘 수 있다("직접 결제 어댑터").
 - **돈 설정의 권한:** 한도 · 임계값 · 수취인 · 통화 · 결제 방식을 바꾸는 것은 `marketing.approve_spend` 의 일이다. 임계값을 0 으로 내리면 혼자 승인할 수 있고 수취인을 넣으면 돈이 갈 곳이 생기므로, 캠페인 운영 권한(manage)만으로는 바꾸지 못한다.
 - **결제 방식**(`payment_provider`, `payment_credential_id`)
-  - 캠페인 설정이고, 에이전트가 고르지 않는다.
+  - 캠페인 설정이고, 에이전트가 고르지 않는다. 직접 결제 경로가 없는 수취인이 이 방식을 쓴다(`manual` · `webhook`).
   - 바꾸려면 `approve_spend` 가 있어야 한다.
   - webhook credential 에는 `webhook_url` 과 `secret`(16자 이상) 필드가 있어야 한다. webhook_url 은 https 여야 한다(loopback 만 http 허용).
 
@@ -341,29 +343,34 @@ Gmail · Yahoo 의 대량 발신자 기준은 스팸 신고율 0.1% 미만 유�
 ### 상태 기계
 
 ```
-pending ──approve──▶ approved ──(webhook)──▶ executing ──▶ paid
+pending ──approve──▶ approved ──(자동 실행)──▶ executing ──▶ paid
    │  (2인 규칙: 첫 승인은 pending 유지)          │       ├──▶ failed  (release)
    ├─deny──▶ denied                               │       └──▶ unknown (사람이 대조: paid | failed)
    ├─expire(72h)──▶ expired                        │
    └─cancel(사람 · 캠페인 정지)──▶ cancelled          └ manual: 사람이 "결제 완료"(거래 id 필수) 또는 "실패"를 기록
 ```
 
+자동 실행은 승인되면 서버가 스스로 보내는 결제 방식이다: `webhook` 과 직접 결제(`meta_ads` · `google_ads`, "직접 결제 어댑터").
+
 1. **요청.** 에이전트가 `request_marketing_spend` 를 부른다.
    - 인자: `campaign_id`, `channel_id`, `amount_minor`, `currency`, `payee`, `purpose`, `expected_outcome`, `payload?`, `dedupe_key?`
    - 한도 · 통화 · 허용 수취인 · 편성을 미리 검사한다. 넘으면 **저장하지 않고** 거부하고, 사유는 감사 로그(`spend.refused`)에 남긴다.
    - 금액 · 수취인 · 목적 · 공급자 · payload 의 정규화 JSON 해시를 `payload_sha256` 으로 저장한다. 요청 행은 pending 을 떠나면 바뀌지 않는다.
+   - 수취인의 경로(결제 방식 · credential · `ref`)를 요청에 스냅샷으로 남긴다(`provider` · `provider_credential_id` · `payee_ref`).
+   - 직접 결제 수취인이면 에이전트의 `payload` 를 받지 않는다. 한도 검사를 통과한 뒤에 서버가 대상을 읽어 실행 계획을 만들고, 그 계획이 `payload` 가 된다("직접 결제 어댑터").
 2. **승인.** 한 트랜잭션에서 다음 순서로 처리한다.
    1. 캠페인 행의 `spend_version` 을 올린다. Postgres 에서는 행 잠금, sql.js 에서는 직렬화 큐가 된다.
    2. 요청을 다시 읽는다: pending 인지, 만료 전인지 본다.
    3. **승인자가 화면에서 본 `payload_sha256`** 이 일치하는지, 저장된 해시와 다시 계산한 해시가 일치하는지 본다.
-   4. 원장 합을 다시 계산하고 한도를 재검사한다.
-   5. 상태를 CAS 로 바꾸고, `reserve` 행과 감사 행을 쓴다.
+   4. 수취인의 지금 경로가 요청 때와 같은지 본다. 직접 결제는 계획의 산수와 credential 지문도 본다.
+   5. 원장 합을 다시 계산하고 한도를 재검사한다.
+   6. 상태를 CAS 로 바꾸고, `reserve` 행과 감사 행을 쓴다.
 
    승인자 identity 는 로그인 세션에서만 온다. 2인 규칙 대상이면 첫 승인은 `approvals` 에 기록만 하고, 같은 사람은 두 번 승인할 수 없다.
-3. **실행(webhook).** 다음 순서로 진행한다.
-   1. 캠페인 잠금 트랜잭션 안에서 **지금도 보내도 되는지** 다시 본다: 캠페인 active, 수취인이 아직 허용 목록에 있음, 채널 active, 저장된 해시 일치. 하나라도 어긋나면 보내지 않고 `failed`(예산 해제)로 닫는다. 통과하면 같은 트랜잭션에서 `approved → executing` 을 CAS 로 커밋한다.
+3. **실행(자동 실행).** 다음 순서로 진행한다. 3–4 는 webhook 의 것이고, 직접 결제는 "직접 결제 어댑터" 의 실행을 따른다.
+   1. 캠페인 잠금 트랜잭션 안에서 **지금도 보내도 되는지** 다시 본다: 캠페인 active, 수취인이 아직 허용 목록에 있고 경로가 같음, 채널 active, 저장된 해시 일치. 직접 결제는 계획 · credential 지문 · 승인 1시간 이내도 본다. 하나라도 어긋나면 보내지 않고 `failed`(예산 해제)로 닫는다. 통과하면 같은 트랜잭션에서 `approved → executing` 을 CAS 로 커밋한다.
    2. sql.js 는 이때 파일로 즉시 내려 쓴다(`flushSqljs` — 진행 중인 트랜잭션이 끝난 뒤에 쓴다). 내려 쓰지 못하면 보내지 않는다.
-   3. 정규화 JSON 본문을 POST 한다. 헤더는 다음과 같다.
+   3. (webhook) 정규화 JSON 본문을 POST 한다. 헤더는 다음과 같다.
       - `X-AWB-Signature: t=<unix>,v1=<hex hmac-sha256(secret, "<t>.<body>")>`
       - `Idempotency-Key: <spend request id>` (재시도해도 바뀌지 않는다)
    4. 응답으로 결과를 나눈다.
@@ -374,18 +381,100 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
    | 명확한 거절(400 · 401 · 402 · 403 · 404 · 422) | `failed` | `release` |
    | 그 밖(타임아웃 · 5xx · 리다이렉트 · 408 · 409 · 425 · 429 · `transaction_id` 없는 2xx) | `unknown` | 그대로 보류 |
 
-   409 는 멱등 키 중복(= 이미 처리됐을 수 있음)인 경우가 많아 거절로 보지 않는다. 사람이 이미 대조한 뒤에 도착한 결과는 버리지 않고 `spend.late_result` 로 감사에 남긴다.
+   409 는 멱등 키 중복(= 이미 처리됐을 수 있음)인 경우가 많아 거절로 보지 않는다.
 
    - **자동 재전송은 없다.**
+   - **보내기 전에 멈춘 것만 `failed` 다.** 어댑터는 그런 실패를 `PaymentNotSentError` 로만 알린다. 그 밖의 예외(보낸 뒤의 해석 실패 · 프로그래밍 오류)는 이미 나갔을 수 있어 `unknown` 이다.
    - 재시작하거나 10분 넘게 걸린 `executing` 은 `unknown` 이 된다.
-   - 승인 직후 프로세스가 죽어서 `approved` 로 남은 webhook 요청은 sweep 이 실행한다. 아직 아무것도 보내지 않은 상태라 안전하다.
+   - 그렇게 시스템이 `unknown` 으로 돌린 뒤에 실행이 확정 결과(`paid` · `failed`)를 받으면, 그 결과로 `unknown` 을 닫는다. 서버가 둘일 때 한쪽이 부팅하며 다른 쪽의 실행을 `unknown` 으로 돌리는 경우다. 사람이 이미 대조했으면 결과를 버리지 않고 `spend.late_result` 로 감사에 남긴다.
+   - 승인 직후 프로세스가 죽어서 `approved` 로 남은 자동 실행 요청은 sweep 이 실행한다. 아직 아무것도 보내지 않은 상태라 안전하다.
 
    본문 필드: `type`, `spend_request_id`, `campaign{id,name,slug}`, `channel{id,platform,target}`, `amount_minor`, `currency`, `payee`, `payee_ref`, `purpose`, `payload`, `payload_sha256`, `approved_by[{name,at}]`, `issued_at`
 4. **환불.** `approve_spend` 를 가진 사람이 사유를 적어 기록한다.
    - 결제된 금액 안에서만 기록할 수 있다.
    - 환불은 capture 에 묶이고, 요청을 다시 열지 않는다(`paid` 로 남는다).
+   - 직접 결제(상한 공급자)는 환불을 기록할 수 없다("직접 결제 어댑터").
 5. **취소.** `pending` 은 그대로, 승인됐지만 아직 보내지 않은 `approved` 는 보류한 예산을 풀며 `cancelled` 로 닫는다. `executing` 이후는 이미 나갔을 수 있으니 취소가 아니라 대조의 일이다.
 6. **정리.** 캠페인을 일시정지하거나 보관하면 `pending` 요청은 `cancelled` 가 된다. 원장이 생긴 뒤에는 통화를 바꿀 수 없고, 캠페인을 삭제할 수도 없다(보관만 된다).
+
+### 직접 결제 어댑터 (Meta Ads · Google Ads)
+
+서버가 광고 플랫폼에 직접 지시한다. 순수 규칙은 `common/marketing/payment-routes.ts`, 어댑터는 `marketing-payment-meta.ts` · `marketing-payment-google.ts`, 등록부는 `marketing-payment-adapters.ts` 에 있다.
+
+**돈을 보내지 않고 고정 상한을 올린다.** 광고 플랫폼은 받을 사람에게 돈을 보내는 곳이 아니라, 정해 둔 만큼 쓰게 하는 곳이다. 그래서 직접 어댑터는 **고정 상한**을 올리기만 하고, **승인 금액 = 상한이 늘어나는 양**이다.
+
+| 공급자 | 올리는 상한 | 받지 않는 것 |
+| --- | --- | --- |
+| Meta Ads (Graph API v26.0) | 캠페인 `spend_cap` — Meta 가 문서화한 캠페인 단위의 유일한 고정 상한. 광고 세트 일 예산 · 예산 일정 · 예산 공유도 이 안에 묶인다 | 일 예산(하루 1.75배 · 주 7배 · 예산 일정 8배까지 쓴다), 한도가 없는 캠페인 |
+| Google Ads (REST v26) | 공유하지 않고 이 캠페인에만 붙은 `CUSTOM_PERIOD` 총예산(`total_amount_micros`, 종료일 필요) — Google 이 "hard cap" 으로 명시 | 일 예산(하루 2배 · 월 30.4배, 기간 끝이 없음), 공유 예산, 계정 예산(월 청구서 결제 계정 전용 · 비동기 심사) |
+
+- 일 예산은 기간 끝이 없거나 하루 상한을 넘어 쓰이므로, 원장이 승인 금액으로 묶을 수 없다.
+- 처음 상한은 사람이 광고 화면에서 정한다. AWB 는 있는 상한을 올리기만 한다. 그래서 처음 상한(Meta 는 최소 약 100 USD)은 원장 밖이다.
+- Google 은 일 예산 캠페인을 총예산으로 바꿀 수 없다. 이 경로를 쓰려면 캠페인을 처음부터 총예산 + 종료일로 만든다.
+- `paid` 는 "공급자가 새 상한을 받아들였다" 이다. 돈은 아직 다 쓰이지 않았을 수 있다. 원장은 지금처럼 `release` + 승인 금액 전체 `capture` 로 센다(보수적인 상한). 화면은 "한도 반영됨" 으로 보여 준다.
+- 공급자는 상한을 아주 조금 넘길 수 있다(Meta 는 변경 반영에 최대 15분, 지출은 추정치). 원장(`capture ≤ reserve`)에는 담기지 않으므로 대조 때 사람이 본다.
+
+**결제 경로는 수취인마다 정한다.** 수취인 항목에 `provider`(`meta_ads` · `google_ads`) · `credential_id` · `ref` 를 둔다. 경로가 없는 수취인은 캠페인 결제 방식을 쓴다. 그래서 한 캠페인이 여러 플랫폼에 돈을 댈 수 있고, 돈이 갈 수 있는 곳은 사람이 허용 목록에 넣은 상한뿐이다. 수취인은 돈 설정이다(`approve_spend`).
+
+| 공급자 | `ref`(대상) | credential(`provider` 칼럼 = 공급자 이름) |
+| --- | --- | --- |
+| Meta Ads | `act_<광고 계정 id>/<캠페인 id>` — 그 캠페인의 `account_id` 와 대조한다 | `access_token`(시스템 사용자 토큰, `ads_management`), `app_secret`(선택 — appsecret_proof) |
+| Google Ads | `<고객 id>/<캠페인 id>`(10자리, 대시 허용 — 저장은 숫자만) | `client_id` · `client_secret` · `refresh_token`(adwords 범위), `login_customer_id`(선택 — 관리자 계정), `developer_token`(선택 — 2026-09-09 폐지, 있으면만 보냄) |
+
+- credential 은 Credentials 화면에서 그 공급자(Meta Ads · Google Ads)를 골라 **이 계정에** 만든다. 다른 종류(custom 등) · 전역 · 에이전트 노출(`agent_env`) credential 은 거부한다. 이 두 공급자는 에이전트 노출을 고를 수 없다.
+- 수취인을 저장할 때 ref 형식(정규 형태로 저장)과 credential 을 확인한다. 같은 대상을 가리키는 수취인 둘은 거부한다.
+
+**요청 때 서버가 실행 계획을 만든다(읽기만).**
+- 에이전트는 수취인과 금액만 고르고 `payload` 를 넣을 수 없다.
+- 서버가 대상을 읽어 확인한다: 계정 일치, 통화 일치, 계정 · 캠페인 상태, 상한 형태(Meta: `spend_cap` 있음 · 경매 캠페인 · 계정 최소 상한, Google: `CUSTOM_PERIOD` · 비공유 · 이 캠페인에만 붙음 · 종료일 · 청구 단위 배수).
+- 확인을 통과하면 계획을 만든다: 대상 · 필드 · `from`(지금 상한) → `to = from + 금액`, 공급자 단위와 AWB 최소 단위를 함께 담고, credential 지문을 넣는다. 공급자 화면의 이름은 `target_name_untrusted` 로 표시용으로만 담는다.
+- 이 계획이 `payload` 가 되어 해시된다. 승인 화면은 서버가 쓴 한 문장(`plan_text`)으로 보여 준다. 예: "Meta 광고 계정 act_9 의 캠페인 77 지출 한도(spend_cap)를 1,000.00 USD → 1,300.00 USD 로 올립니다(+300.00 USD)."
+- 공급자 확인이 실패하면 저장하지 않고 거부하고 `spend.refused` 로 감사에 남긴다. 거부 문구는 "사람이 고쳐야 함" 과 "다음 사이클에 다시" 를 구분한다.
+- 금액 때문이 아닌 실패는 그 (캠페인, 대상, credential) 를 10분 동안 다시 묻지 않는다 — 에이전트의 되풀이가 공급자 호출로 번지지 않게. 수취인이나 credential 을 고치면 키가 바뀌어 바로 다시 묻고, 연결 확인이 정상이면 풀린다.
+- **대상마다 열린 요청은 하나다**(`target_key`, 부분 유일 인덱스 `uq_marketing_spend_open_target`). 캠페인 · 계정을 넘어서도 적용된다. 같은 `from` 으로 계획된 요청 둘이 있으면 먼저 실행된 쪽이 다른 쪽의 `from` 을 바꾸고, 동시에 실행되면 둘 다 `from` 을 읽고 쓴다. 요청 · 승인 · 실행 · 결과 불명 동안 열려 있다 — 결과 불명은 대조해야 그 대상에 새 요청을 낼 수 있다.
+
+**통화 단위는 닫힌 표로만 바꾼다**(`PAYMENT_CURRENCIES`). 표에 없는 통화는 거부한다. 모르는 통화를 기본 지수로 추측하면 상한이 100배로 움직일 수 있다.
+- Meta 는 통화마다 offset 이 있다. COP · CRC · HUF · IDR · TWD 는 Meta 가 정수 단위(ISO 는 소수 둘째 자리), BHD · JOD 는 1/100(ISO 는 1/1000)이다. 나누어떨어지지 않는 금액은 거부한다. KWD · OMR · TND 는 Meta 표에 없어 받지 않는다.
+- Google 은 micros(1 단위 = 1,000,000)다. BigInt 로 계산하고, JSON 에서는 문자열로 보낸다.
+- 공급자가 준 정수는 숫자 문자열만 받는다 — `''` 가 0 으로 읽히지 않게.
+
+**실행은 compare-and-set 이다.** 두 공급자 모두 조건부 쓰기와 멱등 키가 없다. 그래서 실행 직전에 다시 읽고, 요청 때와 같은 대상 · 통화 · 형태이고 값이 `from` 일 때만 절대값 `to` 를 한 번 쓴다. 같은 값을 다시 써도 결과가 같다.
+- 값이 이미 `to` 면 쓰지 않고 `unknown` 이다. 누군가 공급자 화면에서 바꿨으니 사람이 정한다.
+- 다른 값이거나, 대상이 바뀌었거나, 읽지 못했으면 보내지 않고 `failed` 다.
+- 토큰은 `Authorization` 헤더로만 보낸다. 주소에 넣지 않는다(로그 · 오류 문자열로 샌다). 공급자 주소는 코드에 고정돼 있어 credential 로 바꿀 수 없다. 리다이렉트는 따라가지 않는다.
+- Google 은 `partialFailure: false` 로 한 operation 만, `responseContentType: MUTABLE_RESOURCE` 로 보낸다. 돌아온 `totalAmountMicros` 가 `to` 일 때만 확정이다.
+
+| 응답 | Meta | Google |
+| --- | --- | --- |
+| `paid` | 2xx 이고 본문이 `{"success":true}` | 200 이고 결과가 하나, 그 리소스 · `totalAmountMicros` 가 계획과 같음 |
+| `failed`(예산 해제) | 4xx Graph 오류 중 코드 100 · 102 · 190 · 10 · 200–299 · 368 · 2635 · 801, 호출 제한(4 · 17 · 32 · 341 · 613 · 80000–80014). 처리 전에 막힌 것이다. 그 밖의 `is_transient` 는 제외 | 400 · 401 · 403 · 404(원자적 mutate 의 거절), `GoogleAdsFailure` 본문이 붙은 409(동시 수정) · 429(할당량) |
+| `unknown`(보류 유지) | 그 밖: 코드 1 · 2, 모르는 코드, Graph 본문이 아닌 4xx, 5xx, 시간 초과, 다른 2xx | 그 밖: 499 · 5xx, 본문 없는 409 · 429, 시간 초과, 리소스 이름만 온 200 |
+
+- `failed` 로 분류해도 한 번 다시 읽는다. 이미 `to` 이면 `unknown` 으로 둔다 — 거절이라던 쓰기가 반영됐는데 예산을 풀면 원장이 덜 센다.
+- 토큰 갱신 실패(`invalid_grant` 등)는 보내기 전이라 `failed` 다. "Testing" 상태 OAuth 앱의 refresh token 은 7일 뒤 만료된다 — 앱을 게시한다.
+- 테스트 계정 ↔ 운영 계정이 바뀌었으면(Google `test_account`) 보내지 않는다.
+- 응답은 허용 목록 요약만 저장한다(`provider_response`: 대상 · from/to · 상태 코드 · 오류 코드 · `fbtrace_id`/`request-id`). 오류 문자열은 제어 문자를 지우고 비밀 값을 `[redacted]` 로 바꾼다. 이 문자열은 에이전트(MCP)까지 간다.
+- 공급자 글(오류 메시지 · 캠페인 이름)은 사이클 지시문의 신뢰 구역과 알림에 싣지 않는다.
+
+**사람이 바꾼 결정이 이긴다.**
+- 승인 · 실행 때 수취인의 지금 경로가 요청 때와 같아야 한다.
+- credential 지문이 같아야 한다. 지문은 암호문에서 만들어서, 키를 다시 저장하면 바뀐다. 그 사이 키를 다른 계정의 키로 바꾸면 그 요청은 실행되지 않는다.
+- 승인한 지 1시간이 지난 직접 결제는 실행하지 않는다. 장애 · 복구 · 이관 뒤에 묵은 승인이 실행되지 않게 하려는 것이다. 보통은 승인 직후, 늦어도 sweep(5분)이 실행한다.
+
+**결과 불명 대조.**
+- 요청 카드의 "공급자에서 확인"(`POST /spend-requests/:id/inspect`, 읽기 전용)이 지금 상한이 목표값인지 · 이전 값인지 · 그 밖인지 보여 준다. 판정은 사람이 한다.
+- Meta 는 변경 반영에 최대 15분, Google 변경 기록은 3분쯤 늦게 보인다.
+- 결제 기록 창은 거래 id 자리를 서버가 만든 기록용 값(`suggested_provider_ref`, 예: `meta_ads:act_9/77:spend_cap=130000`)으로 미리 채운다. 광고 플랫폼 상한 변경에는 거래 id 가 없다.
+
+**환불은 막는다.** 상한이 그대로인데 "미사용분" 을 돌려받았다고 적으면, 플랫폼은 그 돈을 아직 쓸 수 있는데 원장은 덜 센다. 상한을 실제로 낮추고 그만큼 환불을 기록하는 기능은 후속이다. 그때까지 원장은 승인 금액 전체를 사용으로 센다.
+
+**연결 확인(읽기 전용).** `POST /campaigns/:id/payment/check`(`approve_spend`)가 직접 결제 수취인마다 credential 과 대상을 요청 · 실행과 같은 읽기 코드로 읽는다. 보여 주는 것은 정상 · 문제 · 지금 상한 · API 버전 · 열린 요청이다. 아무것도 쓰지 않고, `payment.checked` 로 감사에 남긴다. 실제(또는 테스트) 계정을 돈을 움직이지 않고 검증하는 길이다.
+- Meta: 개발용 샌드박스 광고 계정은 광고를 내보내지 않는다.
+- Google: 테스트 관리자 계정 아래의 테스트 계정은 광고를 내보내지 않고 청구도 없다.
+
+**API 버전.** 코드에 고정한다(Meta `v26.0`, Google `v26`). 공급자가 버전을 1년 남짓 만에 닫으므로 `MARKETING_META_API_VERSION` · `MARKETING_GOOGLE_ADS_API_VERSION` 으로 코드 수정 없이 올릴 수 있다. 형식이 틀린 값은 무시한다. 버전은 계획(해시)에 넣지 않고, 실제로 쓴 버전을 응답 요약 · 연결 확인에 남긴다. 닫힌 버전은 Meta 오류 2635 등으로 거절된다(`failed`, 아무것도 바뀌지 않음).
+
+**Stripe Issuing 은 아직 없다.** 승인 금액 한도의 일회용 가상 카드를 만드는 어댑터다. 미국 · 영국 · EEA 법인만 쓸 수 있고(한국 법인 불가), 카드 통화는 usd · eur · gbp 뿐이다. 한도도 완전한 상한이 아니다(팁 · 초과 매입 · 강제 매입). 법인 요건이 확인되면 후속으로 만든다.
 
 ## 분석
 
@@ -554,7 +643,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 권한 | 할 수 있는 일 | 기본 |
 | --- | --- | --- |
 | `marketing.manage` | 캠페인 CRUD, 채널 · 콘텐츠 승인, 추적 링크 · 지표 · 피드백, 연락처 | admin 전용 |
-| `marketing.approve_spend` | 돈 설정(한도 · 2인 임계값 · 수취인 · 통화 · 결제 방식) 변경, 편성 승인, 지출 승인 · 거부 · 취소, 결제 기록 · 대조 · 환불 | admin 전용 |
+| `marketing.approve_spend` | 돈 설정(한도 · 2인 임계값 · 수취인과 그 결제 경로 · 통화 · 결제 방식) 변경, 편성 승인, 지출 승인 · 거부 · 취소, 결제 기록 · 대조 · 환불, 결제 연결 확인 · 요청별 공급자 확인 | admin 전용 |
 
 조회(캠페인 목록 · 상세 · 채널 · 사이클 · 감사 · 예산 · 지출 · 원장 · 승인함 수)는 둘 중 하나만 있어도 된다 — 돈 승인자도 무엇을 승인하는지 봐야 한다. 쓰기는 각 권한의 일만 한다.
 
@@ -579,6 +668,8 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
 메일 채널의 수신 목록이 멈췄으면("목록 발송 중지") 그 채널의 `draft_marketing_post` 는 거부되고, `get_marketing_campaign` 의 그 채널에 `list_on_hold: true` 가 실린다.
 
+직접 결제 수취인(`payees[].provider`)에게는 `request_marketing_spend` 에 `payload` 를 넣지 않는다. `amount_minor` 는 상한 증가분이다. 툴 설명 · 규칙(`agentRules`) · 사이클 지시문의 수취인 줄(`payeeBriefing`)이 같은 것을 알린다. 응답의 `plan_text` 가 사람이 승인할 문장이다.
+
 ## REST 요약 (`/api/marketing`)
 
 | 묶음 | 엔드포인트 |
@@ -587,6 +678,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 채널 | `GET/POST /campaigns/:id/channels`, `PATCH /channels/:id`, `POST /channels/:id/{approve,connect,reject,pause,resume}` |
 | 게시물 | `GET /campaigns/:id/posts`, `GET /posts/:id`, `POST /posts/:id/{approve,reject,retry,mark-published}`, `GET /posts/:id/sends` |
 | 예산 | `GET /campaigns/:id/{budget,allocations,spend-requests,ledger}`, `POST /campaigns/:id/allocations`, `POST /allocations/:id/{approve,reject}`, `GET /spend-requests/:id`, `POST /spend-requests/:id/{approve,deny,cancel,mark-paid,mark-failed,refund}` |
+| 직접 결제 확인(읽기 전용) | `POST /campaigns/:id/payment/check`(연결 확인), `POST /spend-requests/:id/inspect`(요청별 공급자 확인) |
 | 분석 | `GET /campaigns/:id/report`, `GET/POST /campaigns/:id/links`, `GET/POST /campaigns/:id/metrics` |
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
@@ -598,7 +690,10 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
 ## 후속 (이 문서 범위 밖)
 
-- 결제 공급자 직접 어댑터(Stripe Issuing · Google Ads · Meta Ads)
+- Stripe Issuing 직접 어댑터(일회용 가상 카드) — 미국 · 영국 · EEA 법인 확인 뒤
+- 직접 결제의 미사용 상한 반납: 서버가 상한을 낮추고(CAS) 그만큼 환불을 기록, 플랫폼 지출 보고서로 대조
+- 마케팅이 쓰는 credential 보호(사용 중 삭제 · 범위 좁히기 · 에이전트 노출 전환 막기)
+- Google Ads 서비스 계정 인증(지금은 OAuth refresh token 만)
 - 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
 - 목록 발송 중지를 승인함 배지 · 승인 대기 알림에 싣기
 - 하드 바운스율이 높은 목록의 발송 중지(지금은 스팸 신고율만 본다)
