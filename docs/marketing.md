@@ -59,6 +59,7 @@
 | `MarketingFeedback` | `marketing_feedback` | 에이전트 · 사람이 기록한 피드백과 연결 티켓 |
 | `MarketingCycle` | `marketing_cycles` | 루프 1회 |
 | `MarketingAuditEvent` | `marketing_audit_events` | append-only 감사 로그 |
+| `MarketingApprovalNotice` | `marketing_approval_notices` | 승인 대기 알림을 보냈다는 표시. (대상, 종류)마다 한 번 |
 
 ### 기존 것과의 경계 (왜 새로 만들었나 / 무엇을 재사용하나)
 
@@ -325,7 +326,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
 `MarketingCycleService` 의 tick 이 동작을 정한다.
 
-- 환경 변수: `MARKETING_SCHEDULER_TICK_MS`(기본 60초), `MARKETING_SCHEDULER_ENABLED`. 이 스위치는 지출 sweep 과 메일 큐도 함께 끈다.
+- 환경 변수: `MARKETING_SCHEDULER_TICK_MS`(기본 60초), `MARKETING_SCHEDULER_ENABLED`. 이 스위치는 지출 sweep · 메일 큐 · 승인 대기 알림도 함께 끈다.
 - 대상: `next_cycle_at` 이 지난 active 캠페인. 각 캠페인마다 다음 순서로 처리한다.
 
 1. **커서를 먼저 전진한다**(`qa-cron`). 겹친 tick 은 아무것도 하지 않고, 놓친 회차는 한 번만 돈다.
@@ -352,6 +353,40 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
 - 수동 "지금 실행"(`POST /campaigns/:id/cycles/run`)도 같은 경로를 탄다.
 - 캠페인을 일시정지하거나 보관하면 실행 중 사이클은 `cancelled` 가 된다.
+
+## 승인 대기 알림
+
+사람의 결정을 기다리는 것을 그 사람의 Discord · Slack · Telegram(사용자 채널, `UserChannel`)으로 알린다. `MarketingApprovalNotifyService` 가 1분마다 돌고, 규칙은 `common/marketing/approval-notice.ts` 에 있다.
+
+| 종류(본문 순서) | 권한 | 알리지 않는 사람 |
+| --- | --- | --- |
+| 결제 결과 불명(`unknown`) — 대조 필요 | `marketing.approve_spend` | — |
+| 두 번째 승인 대기(2인 규칙의 첫 승인 뒤) | `marketing.approve_spend` | 이미 승인한 사람, 요청한 사람 |
+| 새 지출 요청(`pending`) | `marketing.approve_spend` | 요청한 사람 |
+| 예산 편성 제안 | `marketing.approve_spend` | 제안한 사람 |
+| 채널 제안 | `marketing.manage` | 제안한 사람 |
+| 게시물 초안 | `marketing.manage` | 만든 사람 |
+
+- **기준은 승인함과 같다.** 무엇이 결정을 기다리는지는 원래 행의 지금 상태가 정한다. 알리기 전에 결정된 것은 알리지 않는다.
+  - 승인함이 세는 것 가운데 사람이 방금 스스로 시작한 대기는 알리지 않는다: manual 결제의 결제 기록, manual 게시물의 링크 기록, credential 연결 대기.
+  - 보관된 캠페인은 세지 않는다.
+- **전이 코드는 알림을 모른다.** 요청 · 승인 · 결제 결과를 만드는 경로에서 보내지 않는다. 그래서 알림 실패가 돈 · 게시 흐름에 닿지 않고, 경로 하나를 빠뜨려 알림이 사라지는 일도 없다.
+- **받는 사람:** 그 계정에 접근할 수 있는 사용자 가운데 그 결정의 권한이 있는 사람이다(`AccountAccessService.usersWithAccess`, `accessibleIds` 의 역방향).
+  - 지금은 활성 소유자 한 명이다. 그래서 두 번째 승인 대기 알림은 받을 사람이 없다 — 첫 승인을 한 소유자는 빠진다.
+  - 조직 멤버십이 들어오면 같은 조회가 넓어지면서 그대로 닿는다.
+- **사용자 채널의 "Mentions of me"(`notify_mention`)를 따른다.** 오케스트레이션 confirm 게이트 알림과 같은 판단이다. 시스템이 당신의 결정을 요구하고, 결정이 없으면 일이 진행되지 않는다(지출 요청은 72시간 뒤 만료된다). 기본값이 켜져 있다.
+- **묶어서 보낸다.** 계정 단위로 판단하고, 사람마다 한 통이다.
+  - 계정에 새 항목이 2분 동안 더 없을 때 보낸다.
+  - 그 캠페인의 에이전트 사이클이 아직 돌면, 사이클이 만드는 종류(지출 요청 · 편성 · 채널 · 게시물)는 사이클이 끝날 때까지 기다린다. 결과 불명 · 두 번째 승인은 기다리지 않는다.
+  - 어떤 항목도 15분을 넘겨 기다리지 않는다.
+  - 보낼 때는 그 계정의 미알림 항목을 모두 싣는다. 같은 사람이 여러 계정에 접근하면 한 통으로 합친다.
+- **한 번만 보낸다.** (대상, 종류)마다 `marketing_approval_notices` 에 한 행을 **보내기 전에** 쓴다(유일 인덱스).
+  - 재시작해도 다시 보내지 않는다. 서버가 둘이어도 한 계정의 묶음은 한 서버만 보낸다.
+  - 보내기가 실패하면 그 알림만 잃는다. 승인함과 사이드바 배지는 그대로 남는다.
+  - 같은 지출 요청도 단계가 바뀌면(새 요청 → 두 번째 승인 → 결과 불명) 다시 알린다.
+- **본문:** 캠페인별 종류 · 건수를 싣는다. 지출은 금액 · 수취인 · 만료까지 남은 시간, 채널 제안은 플랫폼을 싣는다. `AWB_PUBLIC_URL` 이 있으면 캠페인 화면 링크(여러 캠페인이면 `/marketing`)를 붙인다.
+  - **에이전트가 쓴 글은 싣지 않는다**: 지출 목적, 게시물 제목, 채널 이름, 근거. 에이전트가 읽는 외부 글에 섞인 프롬프트 주입이 AWB 이름의 알림 문구(가짜 링크 · `@everyone`)가 되지 않게 하기 위해서다. 실리는 것은 사람이 정했거나 서버가 계산한 값뿐이다.
+- `MARKETING_SCHEDULER_ENABLED=false` 이거나 인스턴스가 quiesce 중이면 보내지 않는다. quiesce 가 풀리면 다음 sweep 이 밀린 것을 보낸다.
 
 ## 권한
 
@@ -392,7 +427,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 분석 | `GET /campaigns/:id/report`, `GET/POST /campaigns/:id/links`, `GET/POST /campaigns/:id/metrics` |
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
-| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 사이드바 배지가 쓴다. |
+| 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 사이드바 배지가 쓴다. 같은 기준으로 사용자 채널에도 알린다("승인 대기 알림"). |
 
 공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`.
 
@@ -402,5 +437,4 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 - 플랫폼 참여 지표 자동 수집(reddit score · 댓글 수)
 - 메일 답장 · 바운스 · 스팸 신고 수집(webhook)
 - 2년 동의 재확인 안내 메일
-- 승인 대기 알림의 사용자 채널(Discord/Slack/Telegram) 발송
 - 정책 기반 자동 게시

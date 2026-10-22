@@ -274,9 +274,9 @@ with the Agent table, P4c-4.)
 - Exports: `ClassificationBridgeService`
 
 ### `MarketingModule`
-- Imports: Marketing{Campaign,AuditEvent,Channel,BudgetAllocation,SpendRequest,LedgerEntry,Post,Link,Metric,Feedback,Contact,EmailSend,Cycle}, Project, RuntimeHost, OutreachChannel, OutreachInboundItem, Credential, Ticket, ChatRoom(+Participant) repositories; `OutreachModule` (`OutreachChannelService`), `AgentsModule` (`TicketService` for feedback tickets), `ChatRoomsModule` (cycle dispatch), `SharedServicesModule`
-- Controllers: campaigns, channels, budget, posts, analytics, feedback, contacts (all `/api/marketing`), `MarketingPublicController` (`/api/m/:code`, `/api/m/u/:token`, no auth)
-- Providers: audit, campaign hooks, campaign, channel, budget, spend, post, analytics, feedback, contact, email, agent (MCP facade), cycle services
+- Imports: Marketing{Campaign,AuditEvent,Channel,BudgetAllocation,SpendRequest,LedgerEntry,Post,Link,Metric,Feedback,Contact,EmailSend,Cycle,ApprovalNotice}, Project, RuntimeHost, OutreachChannel, OutreachInboundItem, Credential, Ticket, ChatRoom(+Participant) repositories; `OutreachModule` (`OutreachChannelService`), `AgentsModule` (`TicketService` for feedback tickets), `ChatRoomsModule` (cycle dispatch), `SharedServicesModule`
+- Controllers: campaigns, channels, budget, posts, analytics, feedback, contacts, inbox (all `/api/marketing`), `MarketingPublicController` (`/api/m/:code`, `/api/m/u/:token`, no auth)
+- Providers: audit, campaign hooks, campaign, channel, budget, spend, post, analytics, feedback, contact, email, agent (MCP facade), cycle, inbox services, `MarketingApprovalNotifyService` (approval digests to user channels)
 - Exports: the services the MCP module needs (`MarketingAgentService`, `MarketingCycleService`, …)
 - Money, external sends and channel activation are human decisions over REST; agents only propose through MCP — [`docs/marketing.md`](../marketing.md).
 
