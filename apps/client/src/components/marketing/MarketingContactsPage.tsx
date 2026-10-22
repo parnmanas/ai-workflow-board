@@ -22,6 +22,8 @@ import {
   type ContactMapping,
 } from './marketingContacts.logic';
 import { FieldLabel, Hint, NoteModal, StatusPill, tableStyles } from './MarketingUi';
+import { ConsentNoticePanel } from './MarketingConsentNotice';
+import { contactConsentLine } from './consentNotice.logic';
 
 const PAGE_SIZE = 50;
 
@@ -128,6 +130,7 @@ export default function MarketingContactsPage() {
         )}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <ConsentNoticePanel accountId={accountId} />
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(200px, 2fr) auto', gap: 8, alignItems: 'end' }}>
           <Input
             label="수신 목록"
@@ -184,7 +187,9 @@ export default function MarketingContactsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.contacts.map((c) => (
+                  {data.contacts.map((c) => {
+                    const consent = contactConsentLine(c);
+                    return (
                     <tr key={c.id}>
                       <td style={tableStyles.td}>{c.email || <span style={{ color: tokens.colors.textMuted }}>(삭제됨)</span>}</td>
                       <td style={tableStyles.td}>{c.name}</td>
@@ -202,6 +207,15 @@ export default function MarketingContactsPage() {
                         <div style={{ fontSize: 11, color: tokens.colors.textMuted, overflowWrap: 'anywhere' }}>
                           {c.consent_source}{c.consent_text_version ? ` · 문구 ${c.consent_text_version}` : ''}
                         </div>
+                        {c.status === 'subscribed' && c.consent_due_at && (
+                          <div
+                            data-testid={`marketing-contact-consent-${c.id}`}
+                            style={{ fontSize: 11, marginTop: 2, color: consent.expired ? tokens.colors.dangerLight : tokens.colors.textSecondary }}
+                          >
+                            {consent.expired ? `동의 기한 ${consent.due} 지남 — 새 동의가 있어야 보냅니다` : `동의 기한 ${consent.due}`}
+                            {consent.notice ? ` · ${consent.notice}` : ''}
+                          </div>
+                        )}
                       </td>
                       <td style={tableStyles.td}>{c.night_consent ? '동의' : '—'}</td>
                       <td style={tableStyles.td}>{[c.country, c.timezone].filter(Boolean).join(' · ')}</td>
@@ -214,7 +228,8 @@ export default function MarketingContactsPage() {
                         )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -354,7 +369,7 @@ function ImportContactsModal({ accountId, defaultList, onClose, onImported }: {
         <div style={{ fontSize: 12.5, color: tokens.colors.warningLight, lineHeight: 1.55 }}>
           마케팅 메일은 받는 사람이 동의한 경우에만 보낼 수 있습니다(정보통신망법 §50 · CAN-SPAM). 그래서 연락처마다
           <b> 동의 방법 · 동의 시각 · 동의 출처</b>가 법적 증거로 필요하고, 증거가 없는 행은 가져오지 않습니다.
-          이미 수신거부했거나 삭제된 주소는 다시 가져와도 억제되어 메일이 가지 않습니다. 동의 2년이 지난 연락처는 재확인 전까지 발송에서 빠집니다.
+          이미 수신거부했거나 삭제된 주소는 다시 가져와도 억제되어 메일이 가지 않습니다. 동의 2년이 지나면 발송에서 빠집니다 — 기한 전에 재확인 안내가 나가면 이어지고(연락처 화면의 "동의 재확인 안내"), 지난 뒤에는 새 동의가 있어야 합니다.
         </div>
 
         {result ? (

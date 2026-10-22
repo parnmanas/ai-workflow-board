@@ -41,6 +41,19 @@ function campaign(overrides = {}) {
   };
 }
 
+function consentOverview({ settings = {}, counts = {} } = {}) {
+  return {
+    settings: {
+      enabled: false, subject: '[{{sender}}] 수신 동의 확인 안내', body: '{{name}}님, {{sender}}입니다.', lead_days: 30,
+      on_no_response: 'keep', version: 0, updated_by_name: '', updated_at: null, ...settings,
+    },
+    counts: {
+      in_window: 0, not_yet_queued: 0, waiting: 0, waiting_no_sender: 0, sent_30d: 0, failed_30d: 0, skipped_30d: 0, kept_30d: 0, expired: 0,
+      ...counts,
+    },
+  };
+}
+
 async function render(t, { entry, permissions, stubs = {} }) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
@@ -65,6 +78,8 @@ async function render(t, { entry, permissions, stubs = {} }) {
         spend_pending: 0, spend_unknown: 0, manual_awaiting_payment: 0, actionable: 2,
       }],
     }),
+    getMarketingConsentNoticeSettings: async () => consentOverview(),
+    listMarketingConsentNotices: async () => [],
     ...stubs,
   };
   for (const [key, fn] of Object.entries(all)) {
@@ -284,6 +299,90 @@ test('연락처 — 캠페인 계정(?account=)을 모든 호출에 account_id �
   assert.match(container.querySelector('[data-testid="marketing-contacts-import-result"]').textContent, /새로 1 · 갱신 0 · 억제 0 · 거부 0/);
 });
 
+test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, 연락처마다 동의 기한과 안내 상태', async (t) => {
+  const contact = (overrides) => ({
+    id: 'ct-1', account_id: 'acc-2', email: 'kim@example.com', name: 'Kim', lists: ['newsletter'], status: 'subscribed',
+    consent_method: 'reconfirm', consent_source: 'consent-notice:n-1', consent_at: '2026-10-05T00:00:00.000Z',
+    consent_due_at: '2028-10-04T00:00:00.000Z', consent_renewed_at: null, consent_text_version: 'consent-notice-v1', night_consent: false,
+    country: 'KR', timezone: 'Asia/Seoul', unsubscribed_at: null, unsubscribe_source: '',
+    consent_notice: { id: 'n-1', status: 'sent', due_at: '2026-10-30T00:00:00.000Z', policy: 'keep', sent_at: '2026-10-01T03:00:00.000Z', kept_at: '2026-10-05T00:00:00.000Z' },
+    created_at: '2024-10-30T00:00:00.000Z', updated_at: '2026-10-05T00:00:00.000Z', ...overrides,
+  });
+  const previews = [];
+  const saves = [];
+  const { container, calls } = await render(t, {
+    entry: '/marketing/contacts?account=acc-2&campaign=c-2',
+    permissions: ['marketing.manage'],
+    stubs: {
+      getMarketingCampaign: async () => campaign({ id: 'c-2', account_id: 'acc-2', name: 'Org 캠페인' }),
+      listMarketingContacts: async () => ({ total: 2, contacts: [
+        contact(),
+        contact({ id: 'ct-2', email: 'old@example.com', consent_method: 'signup_form', consent_due_at: '2026-01-01T00:00:00.000Z', consent_notice: null }),
+      ] }),
+      getMarketingConsentNoticeSettings: async () => consentOverview({ counts: { in_window: 3, expired: 1, waiting_no_sender: 1 } }),
+      listMarketingConsentNotices: async () => [{
+        id: 'n-1', contact_id: 'ct-1', contact_email: 'kim@example.com', contact_name: 'Kim', contact_status: 'subscribed',
+        due_at: '2026-10-30T00:00:00.000Z', status: 'sent', policy: 'keep', settings_version: 1, attempts: 1,
+        next_attempt_at: '2026-10-01T03:00:00.000Z', channel_id: 'ch-1', provider_message_id: 're_1', sent_at: '2026-10-01T03:00:00.000Z',
+        kept_at: '2026-10-05T00:00:00.000Z', error: '', created_at: '2026-10-01T00:00:00.000Z',
+      }],
+      previewMarketingConsentNotice: async (accountId, body) => {
+        previews.push([accountId, body]);
+        return { subject: '[AWB Team] 수신 동의 확인 안내', text: '홍길동님, AWB Team입니다.\n\n--\n[광고성 정보 수신 동의 확인]', sender: { channel_id: 'ch-1', campaign_id: 'c-2', channel_name: 'newsletter', from_name: 'AWB Team', from_address: 'hi@awb.example.com' }, warnings: [] };
+      },
+      saveMarketingConsentNoticeSettings: async (accountId, body) => {
+        saves.push([accountId, body]);
+        return consentOverview({ settings: { ...body, version: 1, updated_by_name: 'Tester' }, counts: { in_window: 3 } });
+      },
+    },
+  });
+
+  assert.equal(calls.find((c) => c[0] === 'getMarketingConsentNoticeSettings')?.[1], 'acc-2', '연락처와 같은 계정');
+  const panel = container.querySelector('[data-testid="marketing-consent-notice"]');
+  assert.match(panel.textContent, /꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다/);
+  assert.match(panel.textContent, /1명은 그 사람의 목록을 쓰는 메일 채널이 없어/);
+  assert.match(panel.textContent, /동의 기한이 이미 지난 연락처 1명/);
+  const kimLine = container.querySelector('[data-testid="marketing-contact-consent-ct-1"]').textContent;
+  assert.match(kimLine, /동의 기한 2028-10-0\d · 재확인 안내 2026-10-01 보냄 · 응답 없으면 유지 · 2026-10-05 유지함/);
+  assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, /재확인 안내 — 유지/, '유지 링크로 남은 동의의 방법');
+  assert.match(container.querySelector('[data-testid="marketing-contact-consent-ct-2"]').textContent, /지남 — 새 동의가 있어야 보냅니다/);
+
+  click(buttonByText(panel, '설정'));
+  await flush();
+  const modal = document.querySelector('[data-testid="marketing-consent-notice-settings"]');
+  assert.ok(modal, '설정 창');
+  assert.match(modal.textContent, /동의일부터 2년마다, 2년이 되는 날 전까지/);
+  assert.match(modal.textContent, /광고 표기를 붙이지 않습니다/);
+  assert.equal(calls.find((c) => c[0] === 'listMarketingConsentNotices')?.[1], 'acc-2');
+  assert.match(document.querySelector('[data-testid="marketing-consent-notice-list"]').textContent, /kim@example\.com/);
+
+  click(modal.querySelector('input[aria-label="재확인 안내 보내기"]'));
+  await flush();
+  assert.match(modal.textContent, /안내 기간에 든 연락처 3명에게 10분 안에 보내기 시작합니다/);
+  const lead = fieldByLabel(modal, '기한 며칠 전에 보낼까요 (7–90일)');
+  typeInto(lead, '3');
+  await flush();
+  assert.match(modal.textContent, /기한 7–90일 전 사이의 정수여야 합니다/);
+  assert.equal(buttonByText(document, '저장').disabled, true, '서버가 거부할 값은 보내지 않는다');
+  typeInto(lead, '14');
+  click(modal.querySelector('[data-testid="marketing-consent-notice-policy-lapse"]'));
+  await flush();
+  assert.equal(buttonByText(document, '저장').disabled, false);
+
+  click(buttonByText(document, '미리보기'));
+  await flush();
+  await flush();
+  const expected = { enabled: true, subject: '[{{sender}}] 수신 동의 확인 안내', body: '{{name}}님, {{sender}}입니다.', lead_days: 14, on_no_response: 'lapse' };
+  assert.deepEqual(previews, [['acc-2', expected]]);
+  assert.match(document.querySelector('[data-testid="marketing-consent-notice-preview"]').textContent, /보내는 채널: newsletter · AWB Team/);
+
+  click(buttonByText(document, '저장'));
+  await flush();
+  await flush();
+  assert.deepEqual(saves, [['acc-2', expected]]);
+  assert.match(container.querySelector('[data-testid="marketing-consent-notice-summary"]').textContent, /켜짐 · 기한 14일 전 · 응답이 없으면 동의 철회/);
+});
+
 test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 account_id 를 쿼리로 싣는다', async (t) => {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
@@ -322,6 +421,10 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
   await api.eraseMarketingContact('ct-1', 'acc-2');
   await api.listMarketingListHolds('acc-2', { status: 'held' });
   await api.releaseMarketingListHold('h-1', 'removed a scraped batch', 'acc-2');
+  await api.getMarketingConsentNoticeSettings('acc-2');
+  await api.saveMarketingConsentNoticeSettings('acc-2', { enabled: true, lead_days: 30 });
+  await api.previewMarketingConsentNotice(null, { subject: 's' });
+  await api.listMarketingConsentNotices('acc-2', { status: 'failed', limit: 20 });
   await api.listOutreachChannels('acc-2');
 
   assert.deepEqual(sent.map((s) => `${s.method} ${s.url}`), [
@@ -351,6 +454,10 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
     'POST /api/marketing/contacts/ct-1/erase?account_id=acc-2',
     'GET /api/marketing/list-holds?account_id=acc-2&status=held',
     'POST /api/marketing/list-holds/h-1/release?account_id=acc-2',
+    'GET /api/marketing/consent-notices/settings?account_id=acc-2',
+    'PUT /api/marketing/consent-notices/settings?account_id=acc-2',
+    'POST /api/marketing/consent-notices/preview',
+    'GET /api/marketing/consent-notices?account_id=acc-2&status=failed&limit=20',
     'GET /api/outreach-channels?account_id=acc-2',
   ]);
   const body = (path, method = 'POST') => sent.find((x) => x.method === method && x.url === path)?.body;
@@ -362,4 +469,6 @@ test('API — 경로 · 본문이 서버 컨트롤러와 맞고, 연락처는 ac
   assert.deepEqual(body('/api/marketing/campaigns/c-1/metrics'), { observations: [{ metric: 'signups', value: 3 }] });
   assert.deepEqual(body('/api/marketing/contacts/ct-1/unsubscribe?account_id=acc-2'), { note: 'phone' });
   assert.deepEqual(body('/api/marketing/list-holds/h-1/release?account_id=acc-2'), { note: 'removed a scraped batch' }, '해제는 사유와 함께');
+  assert.deepEqual(body('/api/marketing/consent-notices/settings?account_id=acc-2', 'PUT'), { enabled: true, lead_days: 30 });
+  assert.deepEqual(body('/api/marketing/consent-notices/preview'), { subject: 's' });
 });

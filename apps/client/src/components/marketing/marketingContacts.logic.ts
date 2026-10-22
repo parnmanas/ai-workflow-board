@@ -148,6 +148,8 @@ export const CONSENT_METHOD_LABELS: Record<string, string> = {
   event: '이벤트 · 행사',
   import: '다른 시스템에서 이전',
   other: '기타',
+  // 가져오기로는 쓸 수 없다 — 재확인 안내의 유지 링크를 누른 사람(서버 RECONFIRM_CONSENT_METHOD).
+  reconfirm: '재확인 안내 — 유지',
 };
 
 /** 공백 · _ · - · . 을 지우고 소문자로 — `Consent At` 와 `consent_at` 이 같은 열이 된다. */

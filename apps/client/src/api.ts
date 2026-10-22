@@ -131,6 +131,10 @@ import type {
   MarketingContactImportResult,
   MarketingInboxSummary,
   MarketingListHold,
+  MarketingConsentNotice,
+  MarketingConsentNoticeOverview,
+  MarketingConsentNoticePreview,
+  MarketingConsentNoticeSettingsInput,
   OutreachChannelSummary,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
@@ -2781,6 +2785,30 @@ export const api = {
       `/marketing/list-holds/${encodeURIComponent(id)}/release${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
       { method: 'POST', body: JSON.stringify({ note }) },
     ),
+  /** 수신 동의 재확인 안내(docs/marketing.md "동의 재확인 안내") — 연락처처럼 계정 단위다. */
+  getMarketingConsentNoticeSettings: (accountId: string | null) =>
+    request<MarketingConsentNoticeOverview>(
+      `/marketing/consent-notices/settings${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+    ),
+  saveMarketingConsentNoticeSettings: (accountId: string | null, data: MarketingConsentNoticeSettingsInput) =>
+    request<MarketingConsentNoticeOverview>(
+      `/marketing/consent-notices/settings${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'PUT', body: JSON.stringify(data) },
+    ),
+  /** 저장하기 전의 문구를 실제로 나갈 모양으로(아무것도 저장하지 않는다). */
+  previewMarketingConsentNotice: (accountId: string | null, data: MarketingConsentNoticeSettingsInput) =>
+    request<MarketingConsentNoticePreview>(
+      `/marketing/consent-notices/preview${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  listMarketingConsentNotices: (accountId: string | null, query: { status?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (accountId) params.set('account_id', accountId);
+    if (query.status) params.set('status', query.status);
+    if (query.limit) params.set('limit', String(query.limit));
+    const qs = params.toString();
+    return request<MarketingConsentNotice[]>(`/marketing/consent-notices${qs ? `?${qs}` : ''}`);
+  },
   /** 채널 연결용 OutreachChannel 목록(서버 권한: admin.resources). */
   listOutreachChannels: (accountId: string) =>
     request<OutreachChannelSummary[]>(`/outreach-channels?account_id=${encodeURIComponent(accountId)}`),

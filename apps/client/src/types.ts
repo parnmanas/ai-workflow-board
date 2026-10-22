@@ -4083,17 +4083,102 @@ export interface MarketingContact {
   name: string;
   lists: string[];
   status: MarketingContactStatus;
-  consent_method: MarketingConsentMethod | string;
+  /** 가져온 방법(MarketingConsentMethod) 또는 재확인 안내의 유지 링크(`reconfirm`). */
+  consent_method: MarketingConsentMethod | 'reconfirm' | string;
   consent_source: string;
   consent_at: string;
+  /** "응답이 없으면 유지" 로 재확인 안내가 나간 주기의 기한 — 동의는 이때부터 다시 2년(docs/marketing.md "동의 재확인 안내"). */
+  consent_renewed_at?: string | null;
+  /** 동의가 유효한 마지막 시각. 재확인 안내는 이 전에 나간다. */
+  consent_due_at?: string;
   consent_text_version: string;
   night_consent: boolean;
   country: string;
   timezone: string;
   unsubscribed_at: string | null;
   unsubscribe_source: string;
+  /** 가장 최근 주기의 재확인 안내. */
+  consent_notice?: MarketingContactConsentNotice | null;
   created_at: string;
   updated_at: string;
+}
+
+export type MarketingConsentNoticeStatus = 'queued' | 'deferred' | 'sending' | 'sent' | 'failed' | 'skipped';
+/** keep: 응답이 없으면 유지 · lapse: 응답이 없으면 철회(유지 링크를 눌러야 계속). */
+export type MarketingConsentNoticePolicy = 'keep' | 'lapse';
+
+export interface MarketingContactConsentNotice {
+  id: string;
+  status: MarketingConsentNoticeStatus | string;
+  due_at: string;
+  policy: MarketingConsentNoticePolicy | '';
+  sent_at: string | null;
+  kept_at: string | null;
+}
+
+/** GET/PUT /api/marketing/consent-notices/settings 의 settings. version 0 = 저장한 적 없음(기본 문구). */
+export interface MarketingConsentNoticeSettings {
+  enabled: boolean;
+  subject: string;
+  body: string;
+  lead_days: number;
+  on_no_response: MarketingConsentNoticePolicy;
+  version: number;
+  updated_by_name: string;
+  updated_at: string | null;
+}
+
+export interface MarketingConsentNoticeCounts {
+  in_window: number;
+  not_yet_queued: number;
+  waiting: number;
+  waiting_no_sender: number;
+  sent_30d: number;
+  failed_30d: number;
+  skipped_30d: number;
+  kept_30d: number;
+  expired: number;
+}
+
+export interface MarketingConsentNoticeOverview {
+  settings: MarketingConsentNoticeSettings;
+  counts: MarketingConsentNoticeCounts;
+}
+
+export interface MarketingConsentNoticeSettingsInput {
+  enabled?: boolean;
+  subject?: string;
+  body?: string;
+  lead_days?: number;
+  on_no_response?: MarketingConsentNoticePolicy;
+}
+
+export interface MarketingConsentNoticePreview {
+  subject: string;
+  text: string;
+  sender: { channel_id: string; campaign_id: string; channel_name: string; from_name: string; from_address: string } | null;
+  warnings: string[];
+}
+
+/** GET /api/marketing/consent-notices 의 한 통(사람용 — 받은 사람의 주소가 실린다). */
+export interface MarketingConsentNotice {
+  id: string;
+  contact_id: string;
+  contact_email: string | null;
+  contact_name: string;
+  contact_status: string;
+  due_at: string;
+  status: MarketingConsentNoticeStatus | string;
+  policy: MarketingConsentNoticePolicy | '';
+  settings_version: number;
+  attempts: number;
+  next_attempt_at: string;
+  channel_id: string;
+  provider_message_id: string;
+  sent_at: string | null;
+  kept_at: string | null;
+  error: string;
+  created_at: string;
 }
 
 export interface MarketingContactList {
