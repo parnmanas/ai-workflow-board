@@ -323,7 +323,8 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'request_marketing_spend',
-    'Ask a person to approve a payment (ad spend, sponsorship, tool fee …) for an approved channel. Nothing is paid until a person with marketing.approve_spend approves it; the payment method is set by people on the campaign, not by you. Refused immediately when it would exceed the per-transaction cap, the remaining campaign/period budget, or the channel\'s approved allocation, or when payee is not on the campaign payee allowlist. Amounts are integers in minor units. Use dedupe_key to make retries safe. Needs capability paid_spend.',
+    'Ask a person to approve a payment (ad spend, sponsorship, tool fee …) for an approved channel. Nothing is paid until a person with marketing.approve_spend approves it; the payment method is set by people on the campaign and its payees, not by you. Refused immediately when it would exceed the per-transaction cap, the remaining campaign/period budget, or the channel\'s approved allocation, or when payee is not on the campaign payee allowlist. Amounts are integers in minor units. Use dedupe_key to make retries safe. ' +
+      'Payees routed to Meta Ads or Google Ads (payees[].provider in get_marketing_campaign) each point at one ad campaign: omit payload — the server reads that campaign and builds the exact change people approve — and amount_minor is how much its hard spending ceiling (Meta spend_cap / Google total budget) rises, not a daily budget. Only one open request per such payee; wait for the decision. A refusal that says a person must fix something will not pass on retry. Needs capability paid_spend.',
     {
       campaign_id: z.string(),
       channel_id: z.string(),
@@ -332,7 +333,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
       payee: z.string().describe('Exact name from the campaign payees allowlist'),
       purpose: z.string().describe('What the money buys'),
       expected_outcome: z.string().describe('What it should achieve and how you will measure it'),
-      payload: z.record(z.string(), z.any()).optional().describe('Execution details the payment endpoint needs (ad set, dates, targeting …). Max 8 KB. Never put secrets here.'),
+      payload: z.record(z.string(), z.any()).optional().describe('Execution details a manual/webhook payment needs (ad set, dates, targeting …). Omit it for Meta Ads / Google Ads payees. Max 8 KB. Never put secrets here.'),
       dedupe_key: z.string().optional(),
       cycle_id: z.string().optional().describe('The marketing cycle this belongs to, if any'),
     },

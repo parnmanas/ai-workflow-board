@@ -451,13 +451,19 @@ test('Meta Ads: a payee pins one campaign; the server raises its spend_cap by co
   assert.equal(fake.state.writes.length, writesBeforeCheck, 'the check never writes');
   assert.ok((await ctx.api(`/campaigns/${campaign.id}/audit?limit=500`)).body.some((e) => e.action === 'payment.checked'));
 
-  // 16. MCP 읽기에도 계획 문장이 실린다. 비밀 값은 어디에도 없다.
+  // 16. MCP 읽기에도 계획 문장 · 직접 수취인 규칙이 실린다. 비밀 값은 어디에도 없다.
+  const overview = await ctx.mcp.callTool('get_marketing_campaign', { campaign_id: campaign.id });
+  assert.ok(overview.rules.some((r) => /Meta Ads · Google Ads 수취인은 그 광고 캠페인의 지출 상한/.test(r)), 'the agent is told what a direct payee does');
+  assert.equal(overview.campaign.payees.find((p) => p.name === 'Meta fall').provider, 'meta_ads');
+  const tools = await ctx.mcp.listTools();
+  const spendTool = (Array.isArray(tools) ? tools : tools?.tools || []).find((x) => x.name === 'request_marketing_spend');
+  assert.match(spendTool.description, /omit payload/);
   const mcpView = await ctx.mcp.callTool('get_marketing_spend_request', { spend_request_id: req1.id });
   assert.equal(mcpView.status, 'paid');
   assert.match(mcpView.plan_text, /Meta 광고 계정 act_9 의 캠페인 77/);
   const rows = await ds.getRepository('MarketingSpendRequest').findBy({ campaign_id: campaign.id });
   const events = await ds.getRepository('MarketingAuditEvent').findBy({ campaign_id: campaign.id });
-  const haystack = JSON.stringify([rows, events, ctx.responses, mcpView, r1]);
+  const haystack = JSON.stringify([rows, events, ctx.responses, mcpView, r1, overview]);
   for (const marker of MARKERS) assert.equal(haystack.includes(marker), false, `secret ${marker.slice(0, 8)}… leaked`);
 });
 

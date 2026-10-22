@@ -25,8 +25,9 @@ import {
   minorToMetaUnits, metaUnitsToMinor, minorToGoogleMicros, googleMicrosToMinor, parseProviderInt,
   buildCeilingPlan, ceilingPlanProblems, describeCeilingPlan, ceilingProviderRef,
   payeeRoute, sameRoute, cleanProviderText, scrubSecrets, credentialFingerprint, paymentApiVersion,
-  isAutomaticPaymentProvider, isPaymentCurrencySupported,
+  isAutomaticPaymentProvider, isPaymentCurrencySupported, payeeBriefing,
 } from '../dist/common/marketing/payment-routes.js';
+import { agentRules } from '../dist/modules/marketing/marketing-agent.service.js';
 import { currencyExponent } from '../dist/common/marketing/money.js';
 import { normalizePayees } from '../dist/modules/marketing/marketing-campaign.logic.js';
 import {
@@ -311,4 +312,16 @@ test('Google credential fields', () => {
   assert.throws(() => readGoogleCredential({ client_id: 'a', client_secret: 'b', refresh_token: 'c', login_customer_id: '12' }), /10-digit/);
   assert.deepEqual(readGoogleCredential({ client_id: 'a', client_secret: 'b', refresh_token: 'c', login_customer_id: '999-888-7777' }),
     { client_id: 'a', client_secret: 'b', refresh_token: 'c', login_customer_id: '9998887777', developer_token: '' });
+});
+
+test('agent surfaces: the briefing says what a direct payee does, and the rules explain it once', () => {
+  assert.equal(payeeBriefing({ name: 'Newsletter', ref: 'inv' }), 'Newsletter');
+  assert.equal(payeeBriefing({ name: 'Meta fall', provider: 'meta_ads', credential_id: 'c', ref: 'act_1/2' }), 'Meta fall(Meta Ads 캠페인 지출 상한 올리기 — payload 없이)');
+  const plain = agentRules({ capabilities: ['paid_spend'], payees: [{ name: 'Newsletter' }] });
+  assert.equal(plain.some((r) => /Meta Ads · Google Ads 수취인/.test(r)), false, 'no direct payees, no rule');
+  const direct = agentRules({ capabilities: ['paid_spend'], payees: [{ name: 'G', provider: 'google_ads', credential_id: 'c', ref: '1112223333/5' }] });
+  const rule = direct.find((r) => /Meta Ads · Google Ads 수취인/.test(r));
+  assert.match(rule, /amount_minor 는 상한이 늘어나는 양이고 일 예산이 아니다/);
+  assert.match(rule, /payload 는 넣지 않는다/);
+  assert.match(rule, /다시 요청하지 말고/);
 });

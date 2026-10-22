@@ -26,6 +26,7 @@ import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
 import { marketingError } from './marketing-errors';
 import { computeNextCycleAt, resolveLimits } from './marketing-campaign.logic';
+import { payeeBriefing } from '../../common/marketing/payment-routes';
 
 const DEFAULT_TICK_MS = 60_000;
 const MIN_TICK_MS = 5_000;
@@ -277,7 +278,7 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
         capabilities: campaign.capabilities || [],
         currency: campaign.currency,
         allowed_domains: campaign.allowed_domains || [],
-        payees: (campaign.payees || []).map((p) => p.name),
+        payees: (campaign.payees || []).map((p) => payeeBriefing(p)),
       },
       rules: agentRules(campaign),
       limits: resolveLimits(campaign),
@@ -298,7 +299,7 @@ export class MarketingCycleService implements OnModuleInit, OnModuleDestroy {
           const fmt = (n: number) => formatMinorAmount(n, budget.currency);
           return `${c.name}: 편성 ${fmt(c.allocation_minor)}, 이번 기간 지출 ${fmt(c.period_spent_minor)} + 보류 ${fmt(c.period_held_minor)}, 남음 ${fmt(c.period_available_minor ?? 0)}`;
         }),
-        `결제 방식: ${budget.payment_provider}`,
+        `결제 방식(경로가 없는 수취인): ${budget.payment_provider}`,
       ],
       pending: { drafts, spend, allocations, channels: proposedChannels },
       // 결정은 "무엇(종류 · id) · 결과 · 사람의 사유" 만 — 감사 요약에는 에이전트가 쓴 제목이 섞여 있어 싣지 않는다.

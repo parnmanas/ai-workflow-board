@@ -141,6 +141,12 @@ export function payeeRoute(
   return { provider, credential_id: provider === 'webhook' ? campaign.payment_credential_id || null : null, ref: payee.ref || '' };
 }
 
+/** 사이클 지시문의 수취인 한 줄 — 직접 공급자 수취인은 무엇을 하는지(상한 올리기, payload 없음)를 함께 적는다. 사람이 쓴 이름만. */
+export function payeeBriefing(payee: PayeeLike): string {
+  if (!isDirectPaymentProvider(payee.provider)) return payee.name;
+  return `${payee.name}(${DIRECT_PAYMENT_PROVIDER_LABELS[payee.provider]} 캠페인 지출 상한 올리기 — payload 없이)`;
+}
+
 export function sameRoute(
   row: { provider: string; provider_credential_id: string | null; payee_ref: string },
   route: PaymentRoute,
