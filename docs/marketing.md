@@ -48,14 +48,14 @@
 | --- | --- | --- |
 | `MarketingCampaign` | `marketing_campaigns` | 제품(Project), 브리프 · 목표 · 대상, capabilities, 에이전트 RuntimeSpec, 주기, 통화, 한도, 결제 방식, 수취인 허용 목록, 링크 허용 도메인, 공개 문구, 일일 상한, 피드백 티켓 설정 |
 | `MarketingChannel` | `marketing_channels` | 캠페인의 채널(연결 테이블 + 탐색 근거). kind 는 `outreach` · `email` · `manual` |
-| `MarketingPost` | `marketing_posts` | 채널별 콘텐츠(게시글 · 답글 · 메일) |
+| `MarketingPost` | `marketing_posts` | 채널별 콘텐츠(게시글 · 답글 · 메일). 서버가 게시한 reddit · GitHub 글은 마지막으로 읽은 참여도 담는다 |
 | `MarketingEmailSend` | `marketing_email_sends` | 메일 한 통 = (post × contact). 발송 큐이자 기록. 보낸 credential, 공급자가 알려 온 바운스 · 스팸 신고 |
 | `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 재확인 안내로 이어진 동의 기간, 수신거부 · 바운스 · 스팸 신고, 억제 해시 |
 | `MarketingBudgetAllocation` | `marketing_budget_allocations` | 채널별 예산 편성(버전) |
 | `MarketingSpendRequest` | `marketing_spend_requests` | 지출 요청과 그 상태 기계 |
 | `MarketingLedgerEntry` | `marketing_ledger_entries` | append-only 원장 |
 | `MarketingLink` | `marketing_links` | 추적 링크 |
-| `MarketingMetric` | `marketing_metrics` | 지표 관측치(링크 클릭은 시간 버킷 합산) |
+| `MarketingMetric` | `marketing_metrics` | 지표 관측치(링크 클릭은 시간 버킷 합산, 커넥터가 읽은 참여는 변화량) |
 | `MarketingFeedback` | `marketing_feedback` | 에이전트 · 사람이 기록한 피드백과 연결 티켓 |
 | `MarketingCycle` | `marketing_cycles` | 루프 1회 |
 | `MarketingAuditEvent` | `marketing_audit_events` | append-only 감사 로그 |
@@ -69,6 +69,7 @@
 - **커넥터는 outreach 것을 그대로 쓴다.**
   - `resolveChannelConnector` · 공용 rate limiter · credential 경계 규칙을 재사용한다.
   - 게시 대상은 그 OutreachChannel 의 `targets` 화이트리스트 안이어야 한다. 글은 자기 채널의 대상으로만 간다.
+  - 게시된 글의 참여도 그 커넥터(`readEngagement`)로 읽는다("참여 지표 자동 수집").
 - **게시물 원장은 따로 둔다**(`MarketingPost` ≠ `OutreachOutboundPost`).
   - 권한이 다르다: `marketing.manage` 대 `MANAGE_RESOURCES`.
   - OutreachChannel 이 없는 `manual` · `email` 채널이 있다.
@@ -399,11 +400,55 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
   - 프록시 뒤에서는 X-Forwarded-For 를 쓰므로 조작될 수 있다. 그래서 클릭은 **raw** 로 표시하고, 클릭만 근거로 돈을 쓰지 말라고 리포트가 적는다.
 - **지표** (`record_marketing_metrics`)
   - 에이전트나 사람이 관측한 값을 남기고, 출처도 같이 남는다. clicks 는 링크로만 센다.
+  - reddit · GitHub outreach 채널(과 그 게시물)의 engagements · replies 는 서버가 읽으므로 기록하지 못한다("참여 지표 자동 수집").
   - 누적형(합): impressions · views · engagements · replies · signups · conversions · revenue_minor
   - 수준형(마지막 값): followers · subscribers
 - **리포트** (`get_marketing_report`, `common/marketing/report.ts`)
   - 채널별: 게시 수 · 클릭 · 지표 · 지출(원장 capture − refund) · CPC · 가입/전환당 비용 · CTR · 전환율 · ROAS · 편성액 · 피드백 · 수집 글 · 티켓 수
   - 요약 줄과 경고 문구가 함께 나온다.
+
+### 참여 지표 자동 수집
+
+서버가 reddit · GitHub outreach 채널에 게시한 글은 게시 후 **14일** 동안 서버가 그 채널의 커넥터로 참여를 읽는다(`MarketingEngagementService`, 규칙은 `common/marketing/engagement.ts`). 에이전트 capability 와는 무관하다.
+
+| 플랫폼 | `engagements` | `replies` | 읽는 곳 |
+| --- | --- | --- | --- |
+| reddit | score(순 추천 수) | 댓글 수(`num_comments`) | `/api/info` — 한 요청에 100개 |
+| GitHub | 반응 합계(`reactions.total_count`) | 댓글 수(`comments`) | 이슈 · 이슈 댓글 GET — 한 요청에 하나 |
+
+- 답글(댓글)로 올린 글은 자기 댓글 수가 없어 `engagements` 만 읽는다.
+- reddit 이 아직 점수를 감춘 글(`hide_score` · `score_hidden`)은 점수를 건너뛴다.
+- 채널 화이트리스트 밖이거나 플랫폼이 돌려주지 않은 글(지워짐 · 다른 저장소로 옮겨진 이슈)은 결과에서 빠진다.
+
+**변화량으로 남긴다.** 플랫폼이 주는 값은 누적 수준값이다. 그대로 누적형 행에 넣으면 읽을 때마다 다시 더해진다.
+- 그래서 읽을 때마다 직전에 읽은 값과의 차이를 `MarketingMetric`(source `connector`, 메모 `reddit score 45 → 57`)에 남긴다. 변화가 없으면 행이 없다.
+- 행의 합이 곧 플랫폼의 현재 값이다. 리포트의 누적형 합이 그대로 맞고, 기간 합은 그 기간의 증가분이다.
+- 점수가 내려가거나 댓글이 지워지면 음수 행이 남는다. 그래서 짧은 기간의 합은 음수일 수 있다.
+- 마지막으로 읽은 값은 게시물에 있다: `engagement`(`engagements` · `replies` · `read_at`), `engagement_next_at`(다음 읽기, 끝났으면 null), `engagement_error`(마지막 실패 · 멈춘 이유). 게시물 REST 와 `get_marketing_campaign` 의 `recent_posts` 에 실린다.
+
+**일정.**
+- 게시 1시간 뒤 처음 읽는다.
+- 그 뒤 글의 나이가 1일 미만이면 1시간, 3일 미만이면 3시간, 그 뒤는 12시간마다 읽는다.
+- 14일째(기간 끝)에 마지막으로 읽고 멈춘다. 글 하나를 기간 동안 60번쯤 읽는다.
+- 실패해도 같은 간격을 따른다(막힌 채널을 몇 분마다 두드리지 않는다). 직전 값은 그대로 둔다.
+- 이 기능 전에 게시된 글도 기간 안이면 다음 sweep 에 일정에 들어간다.
+
+**rate limit.**
+- 연결된 OutreachChannel 의 `rate_limit_per_hour` 가 있으면, 지난 한 시간에 남은 요청 가운데 **절반은 게시 · 폴링 몫으로 남긴다.** 사람이 승인한 글이 수집 때문에 rate limit 에 걸리지 않게 하기 위해서다.
+- 몫이 없으면 그 채널의 글은 다음 sweep(5분 뒤)으로 미룬다. sweep 한 번에 한 채널로는 30요청까지만 보낸다.
+- 플랫폼 자체의 제한(reddit `x-ratelimit-*`, GitHub 429 · secondary limit)은 커넥터가 그대로 다룬다. rate limit · 403 이 나면 그 채널에는 그 sweep 동안 더 묻지 않는다.
+- 공용 rate limiter 는 서버 프로세스마다 따로 센다(outreach 와 같은 한계).
+
+**한 번만.** 글을 맡을 때 `engagement_rev` 를 CAS 로 올리고, 다음 읽기를 15분 lease 로 민다. 게시물의 값과 변화량 행은 한 트랜잭션에서, 맡은 rev 가 그대로일 때만 쓴다. 서버가 둘이어도 같은 변화를 두 번 남기지 않는다.
+
+**멈춤과 계속.**
+- 보관된 캠페인의 글은 멈춘다(`engagement_error` 에 이유).
+- 일시정지된 캠페인 · 채널의 글은 계속 읽는다. 읽기만 하고 아무것도 보내지 않는다.
+- OutreachChannel 의 차단 · rate limit 표시는 건드리지 않는다. 읽기가 된다고 게시가 되는 것은 아니라서, 읽기 성공이 게시 경로가 남긴 차단 표시를 지우면 안 된다.
+
+**두 번 세지 않는다.** 서버가 읽는 채널(과 그 게시물)의 `engagements` · `replies` 는 `record_marketing_metrics` 와 `POST /campaigns/:id/metrics` 가 거부한다. 클릭과 같은 규칙이고, 화면도 보내기 전에 막는다.
+
+화면에서는 게시물 카드의 "참여"(읽은 값 · 시각 · 다음 읽기 또는 끝 · 실패)와 분석 탭 지표 표의 "자동 수집" 행(부호 붙은 변화량)으로 보인다.
 
 ## 피드백 → 제품
 
@@ -428,7 +473,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 
 `MarketingCycleService` 의 tick 이 동작을 정한다.
 
-- 환경 변수: `MARKETING_SCHEDULER_TICK_MS`(기본 60초), `MARKETING_SCHEDULER_ENABLED`. 이 스위치는 지출 sweep · 메일 큐 · 승인 대기 알림 · 동의 재확인 안내도 함께 끈다.
+- 환경 변수: `MARKETING_SCHEDULER_TICK_MS`(기본 60초), `MARKETING_SCHEDULER_ENABLED`. 이 스위치는 지출 sweep · 메일 큐 · 승인 대기 알림 · 동의 재확인 안내 · 참여 지표 수집도 함께 끈다.
 - 대상: `next_cycle_at` 이 지난 active 캠페인. 각 캠페인마다 다음 순서로 처리한다.
 
 1. **커서를 먼저 전진한다**(`qa-cron`). 겹친 tick 은 아무것도 하지 않고, 놓친 회차는 한 번만 돈다.
@@ -540,7 +585,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 ## 후속 (이 문서 범위 밖)
 
 - 결제 공급자 직접 어댑터(Stripe Issuing · Google Ads · Meta Ads)
-- 플랫폼 참여 지표 자동 수집(reddit score · 댓글 수)
+- 사람이 직접 올린 manual 채널 글(reddit · GitHub 주소)의 참여 읽기 — 지금은 서버가 게시한 글만 읽는다
 - 목록 발송 중지를 승인함 배지 · 승인 대기 알림에 싣기
 - 하드 바운스율이 높은 목록의 발송 중지(지금은 스팸 신고율만 본다)
 - 메일 답장 분류 → 제품 티켓(지금은 `other` 로만 기록하고, 티켓은 사람이 카드에서 만든다)
