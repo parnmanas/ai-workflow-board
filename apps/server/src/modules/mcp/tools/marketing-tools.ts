@@ -210,7 +210,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'record_marketing_metrics',
-    'Record channel or post metrics you observed (impressions, views, engagements, replies, signups, conversions, revenue_minor, followers, subscribers) — e.g. from the platform\'s stats page or the product\'s analytics. Clicks are counted by tracked links, not recorded here. Each observation is stored with you as its source; report only what you actually saw. Needs capability analytics.',
+    'Record channel or post metrics you observed (impressions, views, engagements, replies, signups, conversions, revenue_minor, followers, subscribers) — e.g. from the platform\'s stats page or the product\'s analytics. Clicks are counted by tracked links, not recorded here, and engagements/replies of posts on reddit/GitHub outreach channels are read from the platform by the server (source connector) — do not record those. Each observation is stored with you as its source; report only what you actually saw. Needs capability analytics.',
     {
       campaign_id: z.string(),
       observations: z.array(z.object({
@@ -235,7 +235,7 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'get_marketing_report',
-    'Per-channel performance for a period (default last 30 days): posts published, tracked clicks, recorded metrics, spend, CPC, cost per signup/conversion, CTR, ROAS, allocation, feedback and tickets. Use it to decide which channels deserve more effort or budget.',
+    'Per-channel performance for a period (default last 30 days): posts published, tracked clicks, metrics (engagements and replies of reddit/GitHub posts are read from the platform by the server for 14 days after publishing; the rest are recorded observations), spend, CPC, cost per signup/conversion, CTR, ROAS, allocation, feedback and tickets. Use it to decide which channels deserve more effort or budget.',
     {
       campaign_id: z.string(),
       since: z.string().optional().describe('ISO start (default 30 days ago)'),

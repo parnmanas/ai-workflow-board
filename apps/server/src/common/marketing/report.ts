@@ -3,10 +3,12 @@
  *
  * 화면 · get_marketing_report · 사이클 지시문이 같은 숫자를 보도록 집계를 한곳에 둔다.
  * 지출은 원장에서(capture − refund, 그 행이 쓰인 시각 기준), 지표는 marketing_metrics 에서(누적형은 합,
- * 수준형은 마지막 값), 게시 수는 기간 안에 published 된 글이다. 클릭은 raw 다 — 봇 · 반복을 걸렀지만
- * 사람 클릭이라고 증명하지는 못하므로 돈을 쓰는 판단의 유일한 근거로 쓰지 말라고 리포트가 적어 둔다.
+ * 수준형은 마지막 값 — 커넥터가 읽은 참여는 변화량 행이라 합이 그대로 맞다), 게시 수는 기간 안에 published 된
+ * 글이다. 클릭은 raw 다 — 봇 · 반복을 걸렀지만 사람 클릭이라고 증명하지는 못하므로 돈을 쓰는 판단의 유일한 근거로
+ * 쓰지 말라고 리포트가 적어 둔다.
  */
 import { MARKETING_COUNTER_METRICS, MARKETING_GAUGE_METRICS } from './marketing-constants';
+import { ENGAGEMENT_WINDOW_MS } from './engagement';
 import { formatMinorAmount } from './money';
 
 export interface ReportChannel { id: string; name: string; platform: string; kind: string; status: string }
@@ -111,6 +113,8 @@ export function buildReport(input: ReportInput) {
       `clicks ${c.metrics.clicks}`,
     ];
     if (c.metrics.impressions) parts.push(`impressions ${c.metrics.impressions}`);
+    if (c.metrics.engagements) parts.push(`engagements ${c.metrics.engagements}`);
+    if (c.metrics.replies) parts.push(`replies ${c.metrics.replies}`);
     if (c.metrics.signups) parts.push(`signups ${c.metrics.signups}`);
     if (c.metrics.conversions) parts.push(`conversions ${c.metrics.conversions}`);
     if (c.spent_minor) parts.push(`spent ${fmt(c.spent_minor)}`);
@@ -130,7 +134,8 @@ export function buildReport(input: ReportInput) {
     lines,
     caveats: [
       'clicks are raw counts from tracked links (bots, HEAD/prefetch and repeats within 30 minutes are excluded) — not proof of human visits; do not base spend on clicks alone.',
-      'metrics other than clicks are observations recorded by agents or people (see marketing_metrics.source).',
+      `engagements and replies on reddit/GitHub outreach channels are read from the platform by the server (source connector): the change in score/reactions and comment counts of each post it published, for ${ENGAGEMENT_WINDOW_MS / 86_400_000} days after publishing — a period shows what changed in it, and can be negative.`,
+      'other metrics are observations recorded by agents or people (see marketing_metrics.source).',
     ],
   };
 }

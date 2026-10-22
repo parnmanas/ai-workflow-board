@@ -11,6 +11,7 @@ import { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
 import { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { MARKETING_METRICS, type MarketingActor } from '../../common/marketing/marketing-constants';
+import { ENGAGEMENT_METRICS, engagementTracked } from '../../common/marketing/engagement';
 import { buildReport } from '../../common/marketing/report';
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
@@ -200,7 +201,7 @@ export class MarketingAnalyticsService {
   ): Promise<MarketingMetric[]> {
     if (!Array.isArray(observations) || !observations.length) throw marketingError(400, 'observations must be a non-empty array');
     if (observations.length > MAX_OBSERVATIONS) throw marketingError(400, `at most ${MAX_OBSERVATIONS} observations per call`);
-    const channelIds = new Set((await this.channelRepo.find({ where: { campaign_id: campaign.id }, select: ['id'] })).map((c) => c.id));
+    const channels = new Map((await this.channelRepo.find({ where: { campaign_id: campaign.id }, select: ['id', 'kind', 'platform'] })).map((c) => [c.id, c]));
     const rows = [] as MarketingMetric[];
     for (const [i, raw] of observations.entries()) {
       const o = (raw || {}) as Record<string, unknown>;
@@ -212,12 +213,22 @@ export class MarketingAnalyticsService {
       const value = Number(o.value);
       if (!Number.isSafeInteger(value) || value < 0) throw marketingError(400, `observations[${i}].value must be a non-negative integer`);
       const channelId = typeof o.channel_id === 'string' ? o.channel_id : '';
-      if (channelId && !channelIds.has(channelId)) throw marketingError(404, `observations[${i}]: channel not found in this campaign`);
+      if (channelId && !channels.has(channelId)) throw marketingError(404, `observations[${i}]: channel not found in this campaign`);
       let postId = '';
+      let postChannelId = '';
       if (o.post_id) {
         const post = await this.postRepo.findOne({ where: { id: String(o.post_id), campaign_id: campaign.id } });
         if (!post) throw marketingError(404, `observations[${i}]: post not found in this campaign`);
         postId = post.id;
+        postChannelId = post.channel_id;
+      }
+      // 서버가 커넥터로 읽는 채널의 참여 · 답글을 손으로도 남기면 리포트가 두 번 센다(docs/marketing.md "참여 지표 자동 수집").
+      const tracked = [channelId, postChannelId].some((id) => {
+        const channel = id ? channels.get(id) : undefined;
+        return !!channel && engagementTracked(channel);
+      });
+      if (tracked && (ENGAGEMENT_METRICS as readonly string[]).includes(metric)) {
+        throw marketingError(400, `observations[${i}]: ${metric} of posts on reddit/GitHub outreach channels are read from the platform by the server (source connector) — do not record them`);
       }
       let at = new Date();
       if (o.observed_at) {

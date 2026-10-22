@@ -8,6 +8,7 @@
 //   4. rate limit: 채널 cap 의 절반은 남긴다(몫이 없으면 미룬다). reddit 은 한 요청에 여러 글. 채널 전체 오류면 그 채널은 미룬다.
 //   5. claim: 읽는 사이 다른 서버가 맡으면(rev 가 바뀌면) 값도 행도 남기지 않고, lease 뒤에 다시 읽는다.
 //   6. 보관된 캠페인은 멈추고 다시 잡히지 않는다. 일시정지된 캠페인은 계속 읽는다. 기능 전 게시물도 기간 안이면 잡힌다.
+//   7. 이중 집계 방지: 서버가 읽는 채널(과 그 게시물)의 engagements · replies 는 사람 · 에이전트가 기록하지 못한다.
 //
 // 실행: node --test --test-force-exit test/marketing-engagement.test.mjs (dist 필요)
 
@@ -94,6 +95,7 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: account.id, label: 'mkt-eng' });
   const mcp = new McpClient({ baseUrl: base, apiKey: key.raw_key });
   t.after(() => mcp.close().catch(() => {}));
+  const errText = (r) => (typeof r?.error === 'string' ? r.error : r?.error?.error || JSON.stringify(r));
 
   let n = 0;
   const publish = async (channel, fields = {}) => {
@@ -160,6 +162,8 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   const redditRow = report.channels.find((c) => c.channel_id === reddit.id);
   assert.equal(redditRow.metrics.engagements, 50);
   assert.equal(redditRow.metrics.replies, 12);
+  assert.ok(report.lines.some((l) => l.includes('engagements 50') && l.includes('replies 12')), report.lines.join('\n'));
+  assert.ok(report.caveats.some((c) => /connector/.test(c) && /14 days/.test(c)), report.caveats.join('\n'));
   const window = await mcp.callTool('get_marketing_report', { campaign_id: campaign.id, since: at(3 * HOUR).toISOString(), until: at(4 * HOUR).toISOString() });
   assert.equal(window.channels.find((c) => c.channel_id === reddit.id).metrics.engagements, -7);
 
@@ -300,4 +304,16 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   assert.ok(q1row.engagement_rev > 0, 'stopped posts are not picked up again as untracked');
   assert.equal((await connectorRows(q1.id, 'engagements')).length, 0);
 
+  // 7. 이중 집계 방지 — 서버가 읽는 채널의 engagements · replies 는 기록하지 못한다.
+  const rec = (observations) => mcp.callTool('record_marketing_metrics', { campaign_id: campaign.id, observations });
+  assert.match(errText(await rec([{ metric: 'engagements', value: 5, channel_id: reddit.id }])), /read from the platform/);
+  assert.match(errText(await rec([{ metric: 'replies', value: 5, post_id: g1.id }])), /read from the platform/);
+  const humanRec = await post(`/campaigns/${campaign.id}/metrics`, { observations: [{ metric: 'replies', value: 1, channel_id: github.id }] });
+  assert.equal(humanRec.status, 400, humanRec.text);
+  const allowed = await rec([
+    { metric: 'impressions', value: 900, channel_id: reddit.id },
+    { metric: 'engagements', value: 4, channel_id: forum.id },
+    { metric: 'engagements', value: 2 },
+  ]);
+  assert.equal(allowed.recorded?.length, 3, JSON.stringify(allowed));
 });
