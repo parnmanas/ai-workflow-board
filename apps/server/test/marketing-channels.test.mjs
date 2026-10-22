@@ -142,7 +142,8 @@ test('marketing channels: agent proposals, human approval modes, outreach linkag
   // 4. 메일 채널
   const noProvider = await mkCred('mail-bad', { api_key: 're_x' });
   const mailCred = await mkCred('mail', { provider: 'resend', api_key: 're_x' });
-  const email = { credential_id: mailCred.id, from_name: 'AWB', from_address: 'hello@awb.example.com', list_name: 'Early Access', postal_address: '' };
+  const brand = (await post('/brands', { name: 'AWB' })).body;
+  const email = { brand_id: brand.id, credential_id: mailCred.id, from_name: 'AWB', from_address: 'hello@awb.example.com', list_name: 'Early Access', postal_address: '' };
   assert.equal((await post(`/channels/${news.channel.id}/approve`, { mode: 'email', email })).status, 400, 'postal address is mandatory');
   assert.equal((await post(`/channels/${news.channel.id}/approve`, { mode: 'email', email: { ...email, postal_address: 'Seoul', credential_id: noProvider.id } })).status, 400,
     'the credential must name a provider');

@@ -87,7 +87,7 @@ export class MarketingAgentService {
       const view: Record<string, unknown> = channelToJson(ch);
       if (ch.kind === 'email' && ch.status === 'active' && ch.config?.list_name) {
         // 에이전트는 연락처를 볼 수 없다 — 몇 명에게 갈지만 안다.
-        view.audience_count = await this.email.countEligible(campaign.account_id, String(ch.config.list_name));
+        view.audience_count = await this.email.countEligible(campaign.account_id, String(ch.config.list_name), String(ch.config.brand_id || ''));
         // 스팸 신고율로 멈춘 목록이면 사람이 해제할 때까지 메일 초안을 받지 않는다.
         view.list_on_hold = !!(await this.listHolds.active(campaign.account_id, String(ch.config.list_name)));
       }

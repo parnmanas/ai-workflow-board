@@ -61,13 +61,13 @@ export function ConsentNoticePanel({ accountId }: { accountId: string | null }) 
             </div>
           )}
           {counts.waiting_no_sender > 0 && (
-            <Hint tone="warning">{counts.waiting_no_sender}명은 그 사람의 목록을 쓰는 메일 채널이 없어 보내지 못하고 있습니다 — 기한 전에 메일 채널을 승인하세요.</Hint>
+            <Hint tone="warning">{counts.waiting_no_sender}건은 같은 브랜드 · 목록의 메일 채널이 없어 보내지 못하고 있습니다 — 기한 전에 메일 채널을 승인하세요.</Hint>
           )}
           {counts.failed_retryable > 0 && (
             <Hint tone="warning">기한 전에 실패한 안내 {counts.failed_retryable}통 — 메일 설정을 고친 뒤 "설정" 에서 다시 보낼 수 있습니다.</Hint>
           )}
           {counts.expired > 0 && (
-            <Hint tone="warning">동의 기한이 이미 지난 연락처 {counts.expired}명 — 안내로는 이을 수 없고, 새로 동의를 받아 가져와야 다시 보냅니다.</Hint>
+            <Hint tone="warning">기한이 지난 브랜드 동의 {counts.expired}건 — 안내로는 이을 수 없고, 새로 동의를 받아 가져와야 다시 보냅니다.</Hint>
           )}
         </div>
       )}
@@ -190,8 +190,8 @@ function ConsentNoticeSettingsModal({ accountId, overview, onSaved, onClose }: {
         </label>
         {turningOn && (
           <Hint tone="warning">
-            저장하면 안내 기간에 든 연락처 {overview.counts.in_window}명에게 10분 안에 보내기 시작합니다. 발신자는 그 사람에게 메일을 보내는
-            메일 채널입니다(최근 받은 메일의 채널, 없으면 그 사람의 목록을 쓰는 채널).
+            저장하면 안내 기간에 든 브랜드 동의 {overview.counts.in_window}건에 대해 10분 안에 보내기 시작합니다. 발신자는 같은 브랜드로 메일을 보내는
+            메일 채널입니다(최근 받은 메일의 채널, 없으면 같은 브랜드이며 그 사람의 목록을 쓰는 채널).
           </Hint>
         )}
 

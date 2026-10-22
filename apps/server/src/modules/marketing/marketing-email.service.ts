@@ -2,6 +2,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, LessThan, LessThanOrEqual, Repository } from 'typeorm';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
+import { MarketingBrand } from '../../entities/MarketingBrand';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingPost } from '../../entities/MarketingPost';
 import { MarketingChannel } from '../../entities/MarketingChannel';
@@ -97,8 +98,8 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     this.timer = null;
   }
 
-  async countEligible(accountId: string, listName: string): Promise<number> {
-    return (await this.contacts.eligible(accountId, listName)).contacts.length;
+  async countEligible(accountId: string, listName: string, brandId = ''): Promise<number> {
+    return (await this.contacts.eligible(accountId, listName, new Date(), brandId)).contacts.length;
   }
 
   async listSends(post: MarketingPost, limit = 200): Promise<MarketingEmailSend[]> {
@@ -130,13 +131,14 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     if (!config.list_name || !config.from_address || !config.postal_address || !config.from_name) {
       throw marketingError(409, 'the email channel is missing its sender settings — edit the channel');
     }
+    await this.contacts.getBrand(String(config.brand_id || ''), campaign.account_id);
     const hold = await this.listHolds.active(campaign.account_id, String(config.list_name));
     if (hold) {
       throw marketingError(409, `the list "${hold.list_name}" is on hold because of its spam complaint rate — review it and release the hold on the channel before mailing it again`);
     }
     const secret = await resolveMarketingSecret(this.credentialRepo, String(config.credential_id || ''), campaign.account_id);
     if (!secret.api_key) throw marketingError(409, 'the email credential has no api_key');
-    const { contacts } = await this.contacts.eligible(campaign.account_id, String(config.list_name));
+    const { contacts } = await this.contacts.eligible(campaign.account_id, String(config.list_name), new Date(), String(config.brand_id || ''));
     if (contacts.length > MAX_RECIPIENTS_PER_POST) {
       throw marketingError(409, `the list has ${contacts.length} recipients — more than ${MAX_RECIPIENTS_PER_POST} per email; split the list`);
     }
@@ -145,7 +147,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
 
   private async enqueue(post: MarketingPost, channel: MarketingChannel, campaign: MarketingCampaign, actor: MarketingActor): Promise<void> {
     const listName = String(channel.config?.list_name || '');
-    const { contacts, excluded } = await this.contacts.eligible(campaign.account_id, listName);
+    const { contacts, excluded } = await this.contacts.eligible(campaign.account_id, listName, new Date(), String(channel.config?.brand_id || ''));
     const now = new Date();
     for (let i = 0; i < contacts.length; i += 200) {
       const chunk = contacts.slice(i, i + 200).map((c) => this.sendRepo.create({
@@ -154,6 +156,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
         channel_id: channel.id,
         post_id: post.id,
         contact_id: c.id,
+        brand_id: String(channel.config?.brand_id || ''),
         status: 'queued',
         attempts: 0,
         next_attempt_at: now,
@@ -215,13 +218,14 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
    * 수신거부 처리 안내(법정 통지) — 그 사람에게 마지막으로 메일을 보낸 채널로(캠페인 메일이 없으면 재확인 안내를 보낸 채널),
    * 광고 표기 없이. 실패해도 수신거부는 이미 처리됐다.
    */
-  async sendUnsubscribeNotice(contact: MarketingContact): Promise<boolean> {
+  async sendUnsubscribeNotice(contact: MarketingContact & { brand_id?: string }): Promise<boolean> {
     try {
-      const last = await this.sendRepo.findOne({ where: { contact_id: contact.id, status: 'sent' }, order: { sent_at: 'DESC' } });
-      const notice = last ? null : await this.noticeRepo.findOne({ where: { contact_id: contact.id, status: 'sent' }, order: { sent_at: 'DESC' } });
+      const last = await this.sendRepo.findOne({ where: { contact_id: contact.id, status: 'sent', ...(contact.brand_id ? { brand_id: contact.brand_id } : {}) }, order: { sent_at: 'DESC' } });
+      const notice = last ? null : await this.noticeRepo.findOne({ where: { contact_id: contact.id, status: 'sent', ...(contact.brand_id ? { brand_id: contact.brand_id } : {}) }, order: { sent_at: 'DESC' } });
       const channelId = last?.channel_id || notice?.channel_id;
       if (!channelId) return false;
       const channel = await this.channelRepo.findOne({ where: { id: channelId } });
+      if (contact.brand_id && channel?.config?.brand_id !== contact.brand_id) return false;
       const sender = channel ? await this.senderFor(channel) : null;
       if (!sender || !contact.email) return false;
       const date = (contact.unsubscribed_at || new Date()).toISOString().slice(0, 10);
@@ -233,14 +237,14 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
         message: {
           subject: '수신거부 처리 안내 / Unsubscribe confirmed',
           text: [
-            `${date}에 광고성 정보 수신거부가 처리되었습니다. 앞으로 이 주소로 마케팅 메일을 보내지 않습니다.`,
-            `Your unsubscribe request was processed on ${date}. You will not receive marketing email from us at this address.`,
+            `${date}에 광고성 정보 수신거부가 처리되었습니다. 앞으로 ${contact.brand_id ? '이 발신자의' : '이 계정의 모든 발신자에서'} 마케팅 메일을 보내지 않습니다.`,
+            `Your unsubscribe request was processed on ${date}. You will not receive marketing email from ${contact.brand_id ? 'this sender' : 'any sender in this account'}.`,
             '',
             `${sender.sender.from_name} · ${sender.sender.postal_address} · ${sender.sender.contact_email}`,
           ].join('\n'),
           headers: {},
         },
-        idempotencyKey: `unsubscribe-notice-${contact.id}-${date}`,
+        idempotencyKey: `unsubscribe-notice-${contact.id}-${contact.brand_id || 'global'}-${date}`,
         fetchImpl: this.fetchImpl,
       });
       return outcome.outcome === 'sent';
@@ -265,15 +269,16 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       await this.sendRepo.update({ id: row.id }, { status, ...extra });
     };
     const contact = await this.contactRepo.findOne({ where: { id: row.contact_id } });
-    if (!contact || contact.status !== 'subscribed' || !contact.email) {
+    if (!contact || contact.account_id !== row.account_id || contact.status !== 'subscribed' || !contact.email) {
       await finish('suppressed', { error: `contact is ${contact?.status || 'gone'}` });
       return 'suppressed';
     }
-    if (!consentFresh(contact, now)) {
-      await finish('suppressed', { error: 'consent is older than 2 years — reconfirm before sending' });
+    const consent = await this.contacts.consentFor(contact.id, row.account_id, row.brand_id);
+    if (!consent || consent.status !== 'subscribed' || !consentFresh(consent, now)) {
+      await finish('suppressed', { error: 'brand consent is missing, withdrawn or older than 2 years' });
       return 'suppressed';
     }
-    if (!contact.night_consent && isNightFor(now, contact.timezone || 'Asia/Seoul')) {
+    if (!consent.night_consent && isNightFor(now, contact.timezone || 'Asia/Seoul')) {
       await finish('deferred', { next_attempt_at: nextSendableAt(now, contact.timezone || 'Asia/Seoul'), error: 'deferred: night hours in the recipient\'s timezone' });
       return 'deferred';
     }
@@ -291,6 +296,10 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
     }
     if (!channels.has(row.channel_id)) channels.set(row.channel_id, await this.channelRepo.findOne({ where: { id: row.channel_id } }));
     const channel = channels.get(row.channel_id);
+    if (!row.brand_id || channel?.config?.brand_id !== row.brand_id || channel.account_id !== row.account_id) {
+      await finish('suppressed', { error: 'the sender brand changed or is unassigned — approve a new send' });
+      return 'suppressed';
+    }
     // 일시정지는 "멈춤" 이지 "버림" 이 아니다 — 재개하면 이어서 보낸다.
     if (campaign.status !== 'active' || channel?.status === 'paused') {
       await finish('deferred', {
@@ -326,8 +335,8 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
         sender: sender.sender,
         title: post.title,
         body: post.final_body || post.body,
-        unsubscribeUrl: unsubscribeUrlFor(contact.unsubscribe_token),
-        contact,
+        unsubscribeUrl: unsubscribeUrlFor(consent.unsubscribe_token),
+        contact: { ...contact, consent_at: consent.consent_at },
       });
       outcome = await sendEmail({
         provider: sender.provider, apiKey: sender.apiKey, sender: sender.sender, to: { email: contact.email, name: contact.name },
@@ -352,6 +361,8 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
   /** 메일 채널의 발신자 · 공급자 키(서버만 복호화한다). 키나 공급자가 없으면 null — 동의 재확인 안내도 이것을 쓴다. */
   async senderFor(channel: MarketingChannel): Promise<ChannelSender | null> {
     const config = channel.config || {};
+    const brand = config.brand_id ? await this.channelRepo.manager.getRepository(MarketingBrand).findOneBy({ id: String(config.brand_id), account_id: channel.account_id }) : null;
+    if (!brand) return null;
     const credentialId = String(config.credential_id || '');
     const secret = await resolveMarketingSecret(this.credentialRepo, credentialId, channel.account_id);
     const provider = String(secret.provider || config.provider || '').toLowerCase();
@@ -361,7 +372,7 @@ export class MarketingEmailService implements OnModuleInit, OnModuleDestroy {
       provider,
       apiKey: secret.api_key,
       sender: {
-        from_name: String(config.from_name || ''),
+        from_name: brand.name,
         from_address: String(config.from_address || ''),
         reply_to: String(config.reply_to || ''),
         postal_address: String(config.postal_address || ''),

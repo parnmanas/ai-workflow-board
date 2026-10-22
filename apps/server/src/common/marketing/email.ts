@@ -172,8 +172,10 @@ export interface ComposedEmail {
 
 /** 메일 앱의 수신거부(RFC 8058 One-Click) — 마케팅 메일과 동의 재확인 안내가 같이 쓴다. */
 export function listUnsubscribeHeaders(sender: EmailSender, unsubscribeUrl: string): Record<string, string> {
+  const token = /\/u\/([A-Za-z0-9_-]{40,64})$/.exec(unsubscribeUrl)?.[1];
+  const subject = token ? `unsubscribe%20${token}` : 'unsubscribe';
   return {
-    'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${sender.contact_email}?subject=unsubscribe>`,
+    'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${sender.contact_email}?subject=${subject}>`,
     'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
   };
 }

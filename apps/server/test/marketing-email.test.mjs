@@ -109,6 +109,7 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   const api = (path, init = {}) => call(`${base}/api/marketing${path}`, { headers: H, ...init });
   const post = (path, body = {}) => api(path, { method: 'POST', body: JSON.stringify(body) });
 
+  const brand = (await post('/brands', { name: 'AWB Team' })).body;
   const agent = await createAgent(app, getDataSourceToken, account.id, { name: 'mkt-mail-agent', type: 'claude', runtime: true });
   const campaign = (await post('/campaigns', { name: 'Mail', agent_runtime: agent.runtime_spec, capabilities: ['email'] })).body;
   await post(`/campaigns/${campaign.id}/status`, { status: 'active' });
@@ -116,7 +117,7 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
     account_id: account.id, name: 'resend', description: '', provider: 'custom', encrypted_data: encrypt(JSON.stringify({ provider: 'resend', api_key: 're_secret_key' })),
   }));
   const channel = (await post(`/campaigns/${campaign.id}/channels`, { platform: 'email', target: 'early access' })).body;
-  const approvedChannel = await post(`/channels/${channel.id}/approve`, { mode: 'email', email: {
+  const approvedChannel = await post(`/channels/${channel.id}/approve`, { mode: 'email', email: { brand_id: brand.id,
     credential_id: cred.id, from_name: 'AWB Team', from_address: 'hello@awb.example.com', reply_to: 'help@awb.example.com',
     postal_address: '1 Main St, Seoul', list_name: 'early access', ad_label: '[Ad]',
   } });
@@ -125,7 +126,7 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   // 2. 연락처
   const day = 24 * 60 * 60_000;
   const consent = (overrides = {}) => ({ consent_method: 'signup_form', consent_source: 'https://awb.example.com/signup', consent_at: new Date(Date.now() - 30 * day).toISOString(), consent_text_version: 'v1', ...overrides });
-  const imported = await post('/contacts/import', { lists: ['Early Access'], contacts: [
+  const imported = await post('/contacts/import', { brand_id: brand.id, lists: ['Early Access'], contacts: [
     { email: 'Kim@Example.com', name: 'Kim', country: 'KR', timezone: 'Asia/Seoul', ...consent() },
     { email: 'bob@example.com', name: 'Bob', country: 'US', timezone: 'America/New_York', night_consent: true, ...consent() },
     { email: 'old@example.com', name: 'Old', country: 'KR', ...consent({ consent_at: new Date(Date.now() - 800 * day).toISOString() }) },
@@ -142,17 +143,18 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   const bob = await contactRepo.findOneBy({ email: 'bob@example.com' });
   const gone = await contactRepo.findOneBy({ email: 'gone@example.com' });
   const old = await contactRepo.findOneBy({ email: 'old@example.com' });
+  const bobConsent = await ds.getRepository('MarketingContactConsent').findOneBy({ contact_id: bob.id, brand_id: brand.id });
   assert.deepEqual(kim.lists, ['early access']);
   const listed = await api('/contacts?list=early%20access');
   assert.equal(listed.body.total, 4);
   assert.ok(!JSON.stringify(listed.body).includes(kim.unsubscribe_token), 'unsubscribe tokens never leave the server');
   assert.equal((await post(`/contacts/${gone.id}/unsubscribe`, { note: 'asked by phone' })).body.status, 'unsubscribed');
-  assert.equal((await post('/contacts/import', { lists: ['early access'], contacts: [{ email: 'gone@example.com', ...consent() }] })).body.suppressed, 1,
+  assert.equal((await post('/contacts/import', { brand_id: brand.id, lists: ['early access'], contacts: [{ email: 'gone@example.com', ...consent() }] })).body.suppressed, 1,
     'an unsubscribed address is not resubscribed by import');
   const erased = await post(`/contacts/${old.id}/erase`);
   assert.equal(erased.body.email, null);
   assert.equal(erased.body.status, 'erased');
-  assert.equal((await post('/contacts/import', { lists: ['early access'], contacts: [{ email: 'OLD@example.com', ...consent() }] })).body.suppressed, 1,
+  assert.equal((await post('/contacts/import', { brand_id: brand.id, lists: ['early access'], contacts: [{ email: 'OLD@example.com', ...consent() }] })).body.suppressed, 1,
     'an erased address stays suppressed by its hash');
 
   // 에이전트는 연락처를 못 보고 인원만 안다.
@@ -188,7 +190,7 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
   assert.equal(sent[0].body.subject, '[Ad] AWB 1.0 is here', 'non-KR recipients get the channel label');
   assert.equal(sent[0].body.from, '"AWB Team" <hello@awb.example.com>');
   assert.equal(sent[0].body.reply_to, 'help@awb.example.com');
-  assert.match(sent[0].body.text, new RegExp(`${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/api/m/u/${bob.unsubscribe_token}`));
+  assert.match(sent[0].body.text, new RegExp(`${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/api/m/u/${bobConsent.unsubscribe_token}`));
   assert.match(sent[0].body.text, /AWB Team · 1 Main St, Seoul · help@awb\.example\.com/);
   assert.equal(sent[0].body.headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
   const bobSend = await ds.getRepository('MarketingEmailSend').findOneBy({ post_id: drafted.post.id, contact_id: bob.id });
@@ -283,6 +285,35 @@ test('marketing email: consented contacts, queue, night deferral, compliance foo
       });
     }
   }
+
+  // Two brands share identities/lists, but queue selection and withdrawal remain independent.
+  const brandB = (await post('/brands', { name: 'Second Brand' })).body;
+  await post('/contacts/import', { brand_id: brandB.id, lists: ['early access'], contacts: [
+    { email: 'kim@example.com', ...consent(), night_consent: true },
+    { email: 'bob@example.com', ...consent(), night_consent: true },
+  ] });
+  const channelB = (await post(`/campaigns/${campaign.id}/channels`, { platform: 'email', target: 'brand-b' })).body;
+  assert.equal((await post(`/channels/${channelB.id}/approve`, { mode: 'email', email: {
+    brand_id: brandB.id, credential_id: cred.id, from_name: 'Untrusted display name', from_address: 'hello@awb.example.com',
+    postal_address: 'Seoul', list_name: 'early access',
+  } })).status, 200);
+  const brandDraft = await mcp.callTool('draft_marketing_post', { campaign_id: campaign.id, channel_id: channelB.id, title: 'Brand B', body: 'Hello', rationale: 'test' });
+  await post(`/posts/${brandDraft.post.id}/approve`, {});
+  assert.equal((await api(`/posts/${brandDraft.post.id}/sends`)).body.counts.queued, 2);
+  const kimB = await ds.getRepository('MarketingContactConsent').findOneBy({ contact_id: kim.id, brand_id: brandB.id });
+  await fetch(`${base}/api/m/u/${kimB.unsubscribe_token}`, { method: 'POST' });
+  assert.equal((await contactRepo.findOneBy({ id: kim.id })).status, 'subscribed');
+  assert.deepEqual(await emailService.processQueue(noon), { sent: 1, deferred: 0, failed: 0, suppressed: 1 });
+  const brandMessage = sent.find(m => m.body.subject.includes('Brand B'));
+  assert.match(brandMessage.body.from, /Second Brand/);
+  assert.ok(!brandMessage.body.from.includes('Untrusted display name'));
+  assert.equal((await mcp.callTool('get_marketing_campaign', { campaign_id: campaign.id })).channels.find(c => c.id === channel.id).audience_count, 2);
+  const changedDraft = await mcp.callTool('draft_marketing_post', { campaign_id: campaign.id, channel_id: channelB.id, title: 'Pinned brand', body: 'Hello', rationale: 'test' });
+  await post(`/posts/${changedDraft.post.id}/approve`, {});
+  const channelRepo = ds.getRepository('MarketingChannel');
+  const changedChannel = await channelRepo.findOneBy({ id: channelB.id });
+  await channelRepo.update({ id: channelB.id }, { config: { ...changedChannel.config, brand_id: brand.id } });
+  assert.deepEqual(await emailService.processQueue(noon), { sent: 0, deferred: 0, failed: 0, suppressed: 1 }, 'queued brand cannot silently change');
 
   // 5. 공개 수신거부
   const confirm = await fetch(`${base}/api/m/u/${kim.unsubscribe_token}`);

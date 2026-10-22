@@ -85,9 +85,11 @@ async function setup(t, name, credentialData = {}) {
   const session = (user) => `Bearer ${app.get(AuthService).createSession(user.id)}`;
   const H = { Authorization: session(admin), 'X-Account-Id': account.id, 'Content-Type': 'application/json' };
   const api = (path, init = {}) => call(`${base}/api/marketing${path}`, { headers: H, ...init });
-  const post = (path, body = {}) => api(path, { method: 'POST', body: JSON.stringify(body) });
+  let brand;
+  const post = (path, body = {}) => api(path, { method: 'POST', body: JSON.stringify(path === '/contacts/import' ? { ...body, brand_id: brand.id } : body) });
   const put = (path, body = {}) => api(path, { method: 'PUT', body: JSON.stringify(body) });
 
+  brand = await ds.getRepository('MarketingBrand').save({ account_id: account.id, name: 'AWB Team' });
   const agent = await createAgent(app, getDataSourceToken, account.id, { name: `${name}-agent`, type: 'claude', runtime: true });
   const campaign = (await post('/campaigns', { name, agent_runtime: agent.runtime_spec, capabilities: ['email'] })).body;
   await post(`/campaigns/${campaign.id}/status`, { status: 'active' });
@@ -99,7 +101,7 @@ async function setup(t, name, credentialData = {}) {
   const approveEmail = async (target, fromName, from) => {
     const proposed = (await post(`/campaigns/${campaign.id}/channels`, { platform: 'email', target })).body;
     const approved = await post(`/channels/${proposed.id}/approve`, { mode: 'email', email: {
-      credential_id: cred.id, from_name: fromName, from_address: from, reply_to: 'help@awb.example.com', postal_address: '1 Main St, Seoul',
+      brand_id: brand.id, credential_id: cred.id, from_name: fromName, from_address: from, reply_to: 'help@awb.example.com', postal_address: '1 Main St, Seoul',
       contact_email: 'help@awb.example.com', list_name: target,
     } });
     assert.equal(approved.body.status, 'active', approved.text);
@@ -107,9 +109,16 @@ async function setup(t, name, credentialData = {}) {
   };
   const contactRepo = ds.getRepository('MarketingContact');
   const noticeRepo = ds.getRepository('MarketingConsentNotice');
+  const consentRepo = ds.getRepository('MarketingContactConsent');
+  const consentOf = (contact) => consentRepo.findOneBy({ account_id: account.id, contact_id: contact.id, brand_id: brand.id });
+  const withConsent = async (contact) => {
+    if (!contact) return null;
+    const consent = await consentOf(contact);
+    return { ...contact, ...consent, id: contact.id };
+  };
   return {
-    app, ds, base, notices, sent, replies, account, admin, session, H, api, post, put, cred, approveEmail, contactRepo, noticeRepo, modules,
-    byEmail: (email) => contactRepo.findOneBy({ account_id: account.id, email }),
+    app, ds, base, notices, sent, replies, account, admin, session, H, api, post, put, cred, brand, approveEmail, contactRepo, consentRepo, consentOf, noticeRepo, modules,
+    byEmail: async (email) => withConsent(await contactRepo.findOneBy({ account_id: account.id, email })),
     noticeOf: (contact) => noticeRepo.findOneBy({ contact_id: contact.id }),
   };
 }
@@ -208,7 +217,7 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.match(kimMail.body.text, /아무것도 하지 않으셔도 됩니다/);
   assert.equal(kimMail.body.headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
   const leeMail = sent.find((m) => m.body.to[0] === 'lee@example.com');
-  assert.equal(leeMail.body.from, '"Beta Team" <beta@awb.example.com>', 'the channel of the contact\'s list signs it');
+  assert.equal(leeMail.body.from, '"AWB Team" <beta@awb.example.com>', 'the channel of the contact\'s list signs it');
   assert.equal(kimNotice.status, 'sent');
   assert.equal(kimNotice.policy, 'keep');
   assert.equal(kimNotice.settings_version, 1);
@@ -219,16 +228,16 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.match(orphanNotice.error, /^deferred: no email channel/);
 
   // keep 으로 나갔다 — 보낼 때가 아니라 기한에 그 기한부터 잇는다. 원래 기한을 넘겨도 보낸다.
-  assert.equal((await contactRepo.findOneBy({ id: kim.id })).consent_renewed_at, null, 'not renewed when the notice goes out');
+  assert.equal((await env.consentOf({ id: kim.id })).consent_renewed_at, null, 'not renewed when the notice goes out');
   assert.equal(await notices.renewDue(new Date(kimDeadline.getTime() - 2 * 60 * MINUTE)), 0, 'not yet');
   assert.equal(await notices.renewDue(new Date(kimDeadline.getTime() - 30 * MINUTE)), 1);
-  const kimAfter = await contactRepo.findOneBy({ id: kim.id });
+  const kimAfter = await env.consentOf({ id: kim.id });
   assert.equal(new Date(kimAfter.consent_renewed_at).getTime(), kimDeadline.getTime(), 'renewed from the deadline, not from the notice');
   assert.equal(new Date(kimAfter.consent_at).getTime(), new Date(kim.consent_at).getTime(), 'the consent date itself does not move');
   assert.ok((await noticeOf(kim)).renewed_at);
   assert.equal(await notices.renewDue(new Date(kimDeadline.getTime() - 20 * MINUTE)), 0, 'once');
   const afterKimDeadline = new Date(kimDeadline.getTime() + DAY);
-  const eligible = await contactsService.eligible(account.id, 'early access', afterKimDeadline);
+  const eligible = await contactsService.eligible(account.id, 'early access', afterKimDeadline, env.brand.id);
   assert.ok(eligible.contacts.some((c) => c.id === kim.id), 'kim stays eligible past the original deadline');
   overview = (await api('/consent-notices/settings')).body.counts;
   assert.equal(overview.sent_30d, 2);
@@ -242,8 +251,8 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.deepEqual(listed.body.map((n) => n.contact_email).sort(), ['kim@example.com', 'lee@example.com']);
   assert.ok(!listed.text.includes(kimNotice.token), 'keep tokens never leave the server');
   assert.equal((await api('/consent-notices?status=bogus')).status, 400);
-  const contactsJson = await api('/contacts?list=early%20access');
-  const kimJson = contactsJson.body.contacts.find((c) => c.id === kim.id);
+  const contactsJson = await api('/contacts?list=early%20access&brand_id=' + env.brand.id);
+  const kimJson = contactsJson.body.contacts.find((c) => c.id === kim.id).consents.find((c) => c.brand_id === env.brand.id);
   assert.equal(kimJson.consent_notice.status, 'sent');
   assert.ok(kimJson.consent_notice.renewed_at);
   assert.equal(new Date(kimJson.consent_due_at).getTime(), kimDeadline.getTime() + CONSENT_MAX_AGE_MS, 'the due date shows the renewal');
@@ -255,13 +264,13 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.equal(confirm.status, 200);
   assert.match(confirmHtml, /<form method="post">/);
   assert.ok(!confirmHtml.includes('kim@example.com'));
-  assert.equal((await contactRepo.findOneBy({ id: kim.id })).consent_method, 'signup_form', 'GET changes nothing (mail scanners open links)');
+  assert.equal((await env.consentOf({ id: kim.id })).consent_method, 'signup_form', 'GET changes nothing (mail scanners open links)');
   const bogus = await (await fetch(`${base}/api/m/c/${'x'.repeat(43)}`, { method: 'POST' })).text();
   assert.match(bogus, /처리할 수 없는 링크/);
   const before = Date.now();
   const kept = await (await fetch(`${base}/api/m/c/${kimNotice.token}`, { method: 'POST' })).text();
   assert.match(kept, /수신 동의 유지됨/);
-  const kimKept = await contactRepo.findOneBy({ id: kim.id });
+  const kimKept = await env.consentOf({ id: kim.id });
   assert.ok(new Date(kimKept.consent_at).getTime() >= before - 1000, 'a keep click is a new consent, dated now');
   assert.equal(kimKept.consent_method, 'reconfirm');
   assert.equal(kimKept.consent_source, `consent-notice:${kimNotice.id}`);
@@ -270,7 +279,7 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.ok((await noticeRepo.findOneBy({ id: kimNotice.id })).kept_at);
   const again = await (await fetch(`${base}/api/m/c/${kimNotice.token}`, { method: 'POST' })).text();
   assert.match(again, /수신 동의 유지됨/);
-  assert.equal(new Date((await contactRepo.findOneBy({ id: kim.id })).consent_at).getTime(), new Date(kimKept.consent_at).getTime(),
+  assert.equal(new Date((await env.consentOf({ id: kim.id })).consent_at).getTime(), new Date(kimKept.consent_at).getTime(),
     'pressing it twice keeps once');
   const keptAudit = await auditRepo.find({ where: { entity_id: kim.id, action: 'contact.consent_kept' } });
   assert.equal(keptAudit.length, 1);
@@ -279,9 +288,9 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   // 철회는 수신거부 링크 그대로 — 그 뒤의 유지 클릭은 되살리지 않는다.
   const leeNotice = await noticeOf(lee);
   await fetch(`${base}/api/m/u/${lee.unsubscribe_token}`, { method: 'POST' });
-  assert.equal((await contactRepo.findOneBy({ id: lee.id })).status, 'unsubscribed');
+  assert.equal((await env.consentOf({ id: lee.id })).status, 'unsubscribed');
   assert.match(await (await fetch(`${base}/api/m/c/${leeNotice.token}`, { method: 'POST' })).text(), /처리할 수 없는 링크/);
-  assert.equal((await contactRepo.findOneBy({ id: lee.id })).status, 'unsubscribed', 'a keep link does not resubscribe');
+  assert.equal((await env.consentOf({ id: lee.id })).status, 'unsubscribed', 'a keep link does not resubscribe');
 
   // 두 번째 주기 — 이미 한 번 이어진 동의도 다음 기한에서 다시 이어진다(기산일은 계속 원래 주기를 따른다).
   const firstDue = new Date(Date.now() + 10 * DAY - CONSENT_MAX_AGE_MS);
@@ -289,13 +298,13 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
     { email: 'second@example.com', name: '두번째', lists: ['early access'], ...evidence, consent_at: new Date(firstDue.getTime() - CONSENT_MAX_AGE_MS).toISOString() },
   ] });
   const second = await byEmail('second@example.com');
-  await contactRepo.update({ id: second.id }, { consent_renewed_at: firstDue });
+  await env.consentRepo.update({ contact_id: second.id, brand_id: env.brand.id }, { consent_renewed_at: firstDue });
   assert.equal(await notices.plan(new Date()), 1);
   assert.equal((await notices.processQueue(noon)).sent, 1);
   const secondDue = new Date(firstDue.getTime() + CONSENT_MAX_AGE_MS);
   assert.equal(new Date((await noticeOf(second)).due_at).getTime(), secondDue.getTime());
   assert.equal(await notices.renewDue(new Date(secondDue.getTime() - 30 * MINUTE)), 1);
-  assert.equal(new Date((await contactRepo.findOneBy({ id: second.id })).consent_renewed_at).getTime(), secondDue.getTime(),
+  assert.equal(new Date((await env.consentOf({ id: second.id })).consent_renewed_at).getTime(), secondDue.getTime(),
     'the renewal moves on to the next deadline');
 
   // 안내 기간 중에 새 동의가 들어왔다 — 기한에 잇지 않는다(새 동의가 다음 주기를 정한다).
@@ -308,7 +317,7 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   const winReconsent = new Date().toISOString();
   assert.equal((await post('/contacts/import', { contacts: [{ email: 'win@example.com', lists: ['early access'], ...evidence, consent_at: winReconsent }] })).body.updated, 1);
   await notices.renewDue(new Date(winDeadline.getTime() - 30 * MINUTE));
-  const winAfter = await contactRepo.findOneBy({ id: win.id });
+  const winAfter = await env.consentOf({ id: win.id });
   assert.equal(winAfter.consent_renewed_at, null, 'a consent given during the window is not overridden');
   assert.equal(new Date(winAfter.consent_at).getTime(), new Date(winReconsent).getTime(), 'the period counts from the new consent');
 
@@ -344,8 +353,8 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.equal(minaNotice.settings_version, 2);
   const minaDeadline = new Date(new Date(mina.consent_at).getTime() + CONSENT_MAX_AGE_MS);
   await notices.renewDue(new Date(minaDeadline.getTime() - 30 * MINUTE));
-  assert.equal((await contactRepo.findOneBy({ id: mina.id })).consent_renewed_at, null, 'lapse does not renew');
-  const afterMina = await contactsService.eligible(account.id, 'early access', new Date(minaDeadline.getTime() + MINUTE));
+  assert.equal((await env.consentOf({ id: mina.id })).consent_renewed_at, null, 'lapse does not renew');
+  const afterMina = await contactsService.eligible(account.id, 'early access', new Date(minaDeadline.getTime() + MINUTE), env.brand.id);
   assert.ok(!afterMina.contacts.some((c) => c.id === mina.id), 'no keep click → out on the deadline');
   assert.match((await noticeOf(jun)).error, /renewed meanwhile/);
   assert.equal((await noticeOf(reject)).status, 'failed');
@@ -359,12 +368,12 @@ test('consent reconfirmation notices: settings, queue, keep and lapse, keep link
   assert.match(k1, /수신 동의 유지됨/);
   assert.match(k2, /수신 동의 유지됨/);
   assert.equal((await auditRepo.find({ where: { entity_id: mina.id, action: 'contact.consent_kept' } })).length, 1, 'concurrent clicks keep once');
-  assert.equal((await contactRepo.findOneBy({ id: mina.id })).consent_method, 'reconfirm');
+  assert.equal((await env.consentOf({ id: mina.id })).consent_method, 'reconfirm');
   const rejectNotice = await noticeOf(reject);
   assert.equal((await notices.keep(rejectNotice.token, new Date(new Date(rejectNotice.due_at).getTime() + 31 * DAY))).kept, false,
     'not 30 days after the deadline');
   assert.equal((await notices.keep(rejectNotice.token)).kept, true, 'a failed row may still have been delivered');
-  assert.equal((await contactRepo.findOneBy({ id: reject.id })).consent_method, 'reconfirm');
+  assert.equal((await env.consentOf({ id: reject.id })).consent_method, 'reconfirm');
 
   // 7. 일시 오류는 3 번까지, 공급자 거절은 failed — 사람이 기한 전에 다시 보낸다.
   await post('/contacts/import', { contacts: [{ email: 'retry@example.com', name: '재시도', lists: ['early access'], ...evidence, consent_at: consentFor(25) }] });
@@ -476,10 +485,10 @@ test('consent notice events: complaints, bounces and mailto withdrawals reach co
 
   // mailto 수신거부(List-Unsubscribe) — 안내만 받은 사람의 것도 처리하고, 처리 안내를 안내의 채널로 보낸다.
   const received = (id, from, subject) => ({ type: 'email.received', created_at: at, data: { email_id: id, from, to: ['help@awb.example.com'], subject, message_id: `<${id}@mail.example.com>` } });
-  inbox.set('in_quiet', { status: 200, body: { from: 'quiet@example.com', subject: 'unsubscribe', text: '' } });
-  const unsub = await hook(received('in_quiet', 'quiet@example.com', 'unsubscribe'));
+  inbox.set('in_quiet', { status: 200, body: { from: 'quiet@example.com', subject: 'unsubscribe ' + contacts.quiet.unsubscribe_token, text: '' } });
+  const unsub = await hook(received('in_quiet', 'quiet@example.com', 'unsubscribe ' + contacts.quiet.unsubscribe_token));
   assert.equal(unsub.body.reply, 'unsubscribed', unsub.text);
-  const quietAfter = await contactRepo.findOneBy({ id: contacts.quiet.id });
+  const quietAfter = await env.consentOf(contacts.quiet);
   assert.deepEqual([quietAfter.status, quietAfter.unsubscribe_source], ['unsubscribed', 'mailto']);
   await new Promise((r) => setTimeout(r, 200));
   assert.ok(sent.some((m) => m.body.to[0] === 'quiet@example.com' && /수신거부 처리 안내/.test(m.body.subject)), 'the withdrawal is confirmed');
@@ -493,9 +502,9 @@ test('consent notice events: complaints, bounces and mailto withdrawals reach co
   // 기한 — 신고 · 바운스 · 철회 · 닿지 않은 안내는 잇지 않고, 닿은 안내(chatty)만 잇는다.
   const deadline = new Date(new Date(contacts.chatty.consent_at).getTime() + CONSENT_MAX_AGE_MS);
   await notices.renewDue(new Date(deadline.getTime() - 30 * MINUTE));
-  assert.ok((await contactRepo.findOneBy({ id: contacts.chatty.id })).consent_renewed_at);
+  assert.ok((await env.consentOf(contacts.chatty)).consent_renewed_at);
   for (const n of ['spam', 'hard', 'quiet']) {
-    assert.equal((await contactRepo.findOneBy({ id: contacts[n].id })).consent_renewed_at, null, `${n} is not renewed`);
+    assert.equal((await env.consentOf(contacts[n])).consent_renewed_at, null, `${n} is not renewed`);
   }
-  assert.equal((await contactRepo.findOneBy({ id: contacts.soft.id })).consent_renewed_at, null, 'an undelivered notice does not renew');
+  assert.equal((await env.consentOf(contacts.soft)).consent_renewed_at, null, 'an undelivered notice does not renew');
 });

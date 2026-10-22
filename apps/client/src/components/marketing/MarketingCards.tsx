@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../api';
 import type {
   Credential,
+  MarketingBrand,
   MarketingAllocation,
   MarketingChannel,
   MarketingChannelKind,
@@ -320,6 +321,15 @@ function EmailConfigFields({ value, onChange, credentials }: {
   onChange(next: EmailConfigDraft): void;
   credentials: Credential[] | null;
 }) {
+  const ctx = useMarketingCtx();
+  const [brands, setBrands] = useState<MarketingBrand[]>([]);
+  const [brandError, setBrandError] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    api.listMarketingBrands(ctx.accountId).then((rows) => { if (!cancelled) setBrands(rows); })
+      .catch((err) => { if (!cancelled) setBrandError((err as Error).message); });
+    return () => { cancelled = true; };
+  }, [ctx.accountId]);
   const set = (patch: Partial<EmailConfigDraft>) => onChange({ ...value, ...patch });
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
@@ -330,7 +340,9 @@ function EmailConfigFields({ value, onChange, credentials }: {
         options={(credentials || []).map((c) => ({ value: c.id, label: c.name }))}
         onChange={(e) => set({ credential_id: e.target.value })}
       />
-      <Input label="발신자 이름" value={value.from_name} onChange={(e) => set({ from_name: e.target.value })} />
+      <Select label="동의 발신자(브랜드)" value={value.brand_id} options={[{ value: '', label: '— 브랜드 선택 —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} onChange={(e) => set({ brand_id: e.target.value, from_name: brands.find((b) => b.id === e.target.value)?.name || '' })} />
+      <div style={{ gridColumn: '1 / -1' }}><Link to={contactsPath(ctx.accountId)}>연락처에서 브랜드 만들기</Link>{brandError && <div role="alert">{brandError}</div>}</div>
+      <Input label="발신자 이름 (선택한 브랜드)" value={brands.find((b) => b.id === value.brand_id)?.name || value.from_name} readOnly />
       <Input label="발신 주소" value={value.from_address} placeholder="news@example.com" onChange={(e) => set({ from_address: e.target.value })} />
       <Input label="회신 주소 (선택)" value={value.reply_to} onChange={(e) => set({ reply_to: e.target.value })} />
       <Input label="연락처 메일 (선택)" value={value.contact_email} placeholder="비우면 회신/발신 주소" onChange={(e) => set({ contact_email: e.target.value })} />
@@ -340,7 +352,7 @@ function EmailConfigFields({ value, onChange, credentials }: {
       <div style={{ gridColumn: '1 / -1' }}>
         <Hint>
           발신자 이름 · 주소 · 연락처와 수신거부 링크, 제목 앞 광고 표기는 정보통신망법 §50 · CAN-SPAM 이 요구하는 법정 표기라
-          서버가 모든 메일에 강제로 붙입니다(한국 수신자에게는 항상 “(광고)”). 수신자는 이 목록의 동의 연락처뿐입니다.
+          서버가 모든 메일에 강제로 붙입니다(한국 수신자에게는 항상 “(광고)”). 수신자는 이 목록에 속하면서 선택한 브랜드에 동의한 연락처뿐입니다.
         </Hint>
       </div>
     </div>

@@ -81,6 +81,7 @@ async function render(t, { entry, permissions, stubs = {} }) {
     }),
     getMarketingConsentNoticeSettings: async () => consentOverview(),
     listMarketingConsentNotices: async () => [],
+    listMarketingBrands: async () => [{ id: 'brand-1', account_id: 'acc-2', name: 'AWB Team' }],
     ...stubs,
   };
   for (const [key, fn] of Object.entries(all)) {
@@ -273,6 +274,8 @@ test('연락처 — 캠페인 계정(?account=)을 모든 호출에 account_id �
   assert.ok(modal, '가져오기 창');
   assert.match(modal.textContent, /동의 방법 · 동의 시각 · 동의 출처/, '동의 증거가 법적으로 필요하다는 설명');
   assert.match(modal.textContent, /다시 가져와도 억제/);
+  assert.equal(buttonByText(document, '0명 가져오기').disabled, true, '브랜드를 먼저 고른다');
+  selectValue(fieldByLabel(modal, '동의를 받은 발신자(브랜드)', 'select'), 'brand-1');
   assert.equal(fieldByLabel(modal, '모든 행에 더할 수신 목록 (쉼표로 여러 개)').value, 'newsletter');
 
   typeInto(modal.querySelector('textarea[aria-label="CSV 내용"]'), [
@@ -291,6 +294,7 @@ test('연락처 — 캠페인 계정(?account=)을 모든 호출에 account_id �
   const [accountId, body] = imports[0];
   assert.equal(accountId, 'acc-2', '가져오기도 캠페인의 계정으로');
   assert.deepEqual(body, {
+    brand_id: 'brand-1',
     lists: ['newsletter'],
     contacts: [{
       email: 'kim@example.com', name: 'Kim, Minji', consent_method: 'signup_form',
@@ -320,7 +324,7 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
       listMarketingContacts: async () => ({ total: 2, contacts: [
         contact(),
         contact({ id: 'ct-2', email: 'old@example.com', consent_method: 'signup_form', consent_due_at: '2026-01-01T00:00:00.000Z', consent_notice: null }),
-      ] }),
+      ].map((c) => ({ ...c, legacy_consent_migrated: true, consents: [{ ...c, id: `consent-${c.id}`, brand_id: 'brand-1' }] })) }),
       getMarketingConsentNoticeSettings: async () => consentOverview({ counts: { in_window: 3, expired: 1, waiting_no_sender: 1, failed_retryable: 2 } }),
       retryFailedMarketingConsentNotices: async (accountId) => {
         retries.push(accountId);
@@ -351,13 +355,13 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
   assert.equal(calls.find((c) => c[0] === 'getMarketingConsentNoticeSettings')?.[1], 'acc-2', '연락처와 같은 계정');
   const panel = container.querySelector('[data-testid="marketing-consent-notice"]');
   assert.match(panel.textContent, /꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다/);
-  assert.match(panel.textContent, /1명은 그 사람의 목록을 쓰는 메일 채널이 없어/);
-  assert.match(panel.textContent, /동의 기한이 이미 지난 연락처 1명/);
+  assert.match(panel.textContent, /1건은 같은 브랜드 · 목록의 메일 채널이 없어/);
+  assert.match(panel.textContent, /기한이 지난 브랜드 동의 1건/);
   assert.match(panel.textContent, /기한 전에 실패한 안내 2통/);
-  const kimLine = container.querySelector('[data-testid="marketing-contact-consent-ct-1"]').textContent;
+  const kimLine = container.querySelector('[data-testid="marketing-contact-consent-ct-1-brand-1"]').textContent;
   assert.match(kimLine, /동의 기한 2028-10-0\d · 재확인 안내 2026-10-01 보냄 · 응답 없으면 유지 · 2026-10-05 유지함/);
   assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, /재확인 안내 — 유지/, '유지 링크로 남은 동의의 방법');
-  assert.match(container.querySelector('[data-testid="marketing-contact-consent-ct-2"]').textContent, /지남 — 새 동의가 있어야 보냅니다/);
+  assert.match(container.querySelector('[data-testid="marketing-contact-consent-ct-2-brand-1"]').textContent, /지남 — 발송 제외/);
 
   click(buttonByText(panel, '설정'));
   await flush();
@@ -379,7 +383,7 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
 
   click(modal.querySelector('input[aria-label="재확인 안내 보내기"]'));
   await flush();
-  assert.match(modal.textContent, /안내 기간에 든 연락처 3명에게 10분 안에 보내기 시작합니다/);
+  assert.match(modal.textContent, /안내 기간에 든 브랜드 동의 3건에 대해 10분 안에 보내기 시작합니다/);
   const lead = fieldByLabel(modal, '기한 며칠 전에 보낼까요 (7–90일)');
   typeInto(lead, '3');
   await flush();
@@ -514,4 +518,47 @@ test('보관된 캠페인의 미결 결제 수가 목록에 보이고 상세로 
   click(link);
   await flush();
   assert.ok(container.querySelector('[data-testid="campaign-detail-route"]'));
+});
+
+test('브랜드 동의 — 미이관 연락처를 명시적으로 선택하고 확인한 뒤 한 브랜드에 이관한다', async (t) => {
+  const migrated = [];
+  const unsubscribed = [];
+  const contact = {
+    id: 'ct-legacy', account_id: 'acc-2', email: 'legacy@example.com', name: 'Legacy', lists: ['newsletter'], status: 'subscribed',
+    consent_method: 'signup_form', consent_source: 'signup', consent_at: '2026-01-01T00:00:00Z',
+    legacy_consent_migrated: false, consents: [],
+  };
+  const { container } = await render(t, {
+    entry: '/marketing/contacts?account=acc-2', permissions: ['marketing.manage'],
+    stubs: {
+      listMarketingContacts: async () => ({ total: 1, contacts: [contact] }),
+      migrateMarketingLegacyConsent: async (...args) => {
+        migrated.push(args);
+        contact.legacy_consent_migrated = true;
+        contact.consents = [{ id: 'consent-1', brand_id: 'brand-1', status: 'subscribed', consent_method: 'signup_form', consent_source: 'signup', consent_at: contact.consent_at }];
+        return { migrated: 1 };
+      },
+      unsubscribeMarketingContact: async (...args) => { unsubscribed.push(args); return contact; },
+    },
+  });
+  assert.match(container.textContent, /브랜드 동의 없음 — 발송 제외/);
+  assert.equal(buttonByText(container, '선택 0명 기존 동의 이관').disabled, true);
+  selectValue(fieldByLabel(container, '가져오기 · 기존 동의 이관 대상 브랜드', 'select'), 'brand-1');
+  click(container.querySelector('input[type="checkbox"]'));
+  click(buttonByText(container, '선택 1명 기존 동의 이관'));
+  await flush();
+  assert.equal(migrated.length, 0, '확인 전에는 이관하지 않는다');
+  assert.match(document.querySelector('[role="dialog"]').textContent, /한 브랜드에만 이관/);
+  click(buttonByText(document, '발신자 확인 · 이관'));
+  await flush(); await flush();
+  assert.deepEqual(migrated, [['acc-2', 'brand-1', ['ct-legacy']]]);
+  assert.equal(container.querySelector('input[type="checkbox"]'), null, '이미 이관한 증거는 다시 선택하지 못한다');
+  click(buttonByText(container, '이 브랜드 수신거부'));
+  await flush();
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent, /AWB Team 수신거부/);
+  typeInto(dialog.querySelector('textarea'), '전화로 브랜드 수신거부 요청');
+  click(buttonByText(dialog, '수신거부 기록'));
+  await flush();
+  assert.deepEqual(unsubscribed, [['ct-legacy', '전화로 브랜드 수신거부 요청', 'acc-2', 'brand-1']]);
 });

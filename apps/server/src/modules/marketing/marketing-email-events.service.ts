@@ -5,6 +5,7 @@ import { Brackets, In, Repository } from 'typeorm';
 import { Credential } from '../../entities/Credential';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
+import { MarketingContactConsent } from '../../entities/MarketingContactConsent';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
@@ -287,6 +288,14 @@ export class MarketingEmailEventsService {
       const notice = await this.noticeRepo.findOne({ where: { provider_message_id: ev.provider_message_id, credential_id: credentialId } });
       if (notice) return { kind: 'notice', row: notice };
     }
+    if (ev.kind === 'unsubscribe') {
+      const sends = await this.recentSendsTo(credentialId, legacy, ev.recipient, 10000);
+      const contacts = ev.recipient ? await this.contactRepo.find({ where: { email_hash: emailHash(ev.recipient) } }) : [];
+      const notices = contacts.length ? await this.noticeRepo.find({ where: { contact_id: In(contacts.map(c => c.id)), credential_id: credentialId, status: In(['sent', 'failed']) } }) : [];
+      const brands = new Set([...sends, ...notices].map(r => r.brand_id || ''));
+      if (brands.size !== 1 || sends.length === 10000) return null;
+      return sends[0] ? { kind: 'send', row: sends[0] } : notices[0] ? { kind: 'notice', row: notices[0] } : null;
+    }
     const recent = (await this.recentSendsTo(credentialId, legacy, ev.recipient, 1))[0];
     if (recent) return { kind: 'send', row: recent };
     const notice = await this.recentNoticeTo(credentialId, ev.recipient);
@@ -333,7 +342,7 @@ export class MarketingEmailEventsService {
     if (ev.kind !== 'soft_bounce') {
       const status: ContactStatus = ev.kind === 'bounce' ? 'bounced' : ev.kind === 'complaint' ? 'complained' : 'unsubscribed';
       contactChanged = await this.suppressContact(notice.contact_id, status, ev.kind === 'unsubscribe' ? 'provider' : ev.kind, providerActor(provider), {
-        campaignId: '', sendId: '', postId: '', noticeId: notice.id, detail: ev.detail, repeat: ev.repeat,
+        campaignId: '', sendId: '', postId: '', noticeId: notice.id, brandId: notice.brand_id, detail: ev.detail, repeat: ev.repeat,
       });
     }
     return rowChanged || contactChanged;
@@ -366,7 +375,7 @@ export class MarketingEmailEventsService {
     if (ev.kind !== 'soft_bounce') {
       const status: ContactStatus = ev.kind === 'bounce' ? 'bounced' : ev.kind === 'complaint' ? 'complained' : 'unsubscribed';
       contactChanged = await this.suppressContact(row.contact_id, status, ev.kind === 'unsubscribe' ? 'provider' : ev.kind, providerActor(provider), {
-        campaignId: row.campaign_id, sendId: row.id, postId: row.post_id, detail: ev.detail, repeat: ev.repeat,
+        campaignId: row.campaign_id, sendId: row.id, postId: row.post_id, brandId: row.brand_id, detail: ev.detail, repeat: ev.repeat,
       });
     }
     if (newComplaint || (rowChanged && ev.kind === 'bounce' && !ev.repeat)) {
@@ -383,13 +392,16 @@ export class MarketingEmailEventsService {
     status: ContactStatus,
     source: string,
     actor: MarketingActor,
-    ctx: { campaignId: string; sendId: string; postId: string; noticeId?: string; detail: string; repeat?: boolean },
+    ctx: { campaignId: string; sendId: string; postId: string; noticeId?: string; brandId?: string; detail: string; repeat?: boolean },
   ): Promise<boolean> {
     const contact = contactId ? await this.contactRepo.findOne({ where: { id: contactId } }) : null;
     if (!contact) return false;
-    const won = await this.contactRepo.createQueryBuilder().update(MarketingContact)
+    const scoped = status === 'unsubscribed' && !!ctx.brandId;
+    const consent = scoped ? await this.contactRepo.manager.getRepository(MarketingContactConsent).findOneBy({ contact_id: contact.id, account_id: contact.account_id, brand_id: ctx.brandId }) : null;
+    if (scoped && !consent) return false;
+    const won = await this.contactRepo.manager.createQueryBuilder().update(scoped ? MarketingContactConsent : MarketingContact)
       .set({ status, unsubscribed_at: new Date(), unsubscribe_source: source })
-      .where('id = :id AND status IN (:...from)', { id: contact.id, from: SUPPRESS_FROM[status] })
+      .where('id = :id AND status IN (:...from)', { id: consent?.id || contact.id, from: SUPPRESS_FROM[status] })
       .execute();
     if (!won.affected) return false;
     await this.audit.record({
@@ -401,7 +413,7 @@ export class MarketingEmailEventsService {
       actor,
       summary: `${SUPPRESS_SUMMARY[status]}(${source === 'provider' ? '공급자' : source === 'mailto' ? '메일 회신' : actor.name})${ctx.repeat ? ' — 공급자가 예전 기록으로 이번 메일을 보내지 않음' : ''}`,
       detail: {
-        source, send_id: ctx.sendId, post_id: ctx.postId, ...(ctx.noticeId ? { consent_notice_id: ctx.noticeId } : {}),
+        source, brand_id: ctx.brandId || '', send_id: ctx.sendId, post_id: ctx.postId, ...(ctx.noticeId ? { consent_notice_id: ctx.noticeId } : {}),
         provider_detail: ctx.detail, previous_status: contact.status,
       },
     });
@@ -452,8 +464,28 @@ export class MarketingEmailEventsService {
    * 받은 메일 한 통 → 답장 기록(또는 mailto 수신거부). 보낸 사람이 이 credential 로 메일을 받은 연락처가 아니면 무시한다 —
    * 회신 주소로 오는 아무 메일이나 피드백이 되지 않게. 자동 응답과, 공급자가 보낸 사람 인증 실패(사칭)라고 알린 메일도 버린다.
    */
+  private async unsubscribeReplyToken(credentialId: string, provider: string, email: InboundEmail, token: string): Promise<'unsubscribed' | 'ignored' | 'duplicate'> {
+    if (isAutoReply(email.headers, email.subject)) return 'ignored';
+    const consent = await this.contactRepo.manager.getRepository(MarketingContactConsent).findOneBy({ unsubscribe_token: token });
+    if (!consent) return 'ignored';
+    const contact = await this.contactRepo.findOneBy({ id: consent.contact_id, account_id: consent.account_id, email_hash: emailHash(email.from) });
+    if (!contact) return 'ignored';
+    const scope = { contact_id: contact.id, account_id: contact.account_id, brand_id: consent.brand_id, credential_id: credentialId };
+    const send = await this.sendRepo.findOneBy({ ...scope, status: 'sent' });
+    const notice = send ? null : await this.noticeRepo.findOneBy({ ...scope, status: 'sent' });
+    if (!send && !notice) return 'ignored';
+    const changed = await this.suppressContact(contact.id, 'unsubscribed', 'mailto', providerActor(provider), {
+      campaignId: send?.campaign_id || '', sendId: send?.id || '', postId: send?.post_id || '',
+      noticeId: notice?.id, brandId: consent.brand_id, detail: '',
+    });
+    if (changed) void this.email.sendUnsubscribeNotice({ ...contact, brand_id: consent.brand_id });
+    return changed ? 'unsubscribed' : 'duplicate';
+  }
+
   private async handleReply(credentialId: string, provider: string, email: InboundEmail): Promise<'recorded' | 'unsubscribed' | 'ignored' | 'duplicate'> {
     if (!email.from || email.auth_failed) return 'ignored';
+    const token = /^(?:re:\s*)?unsubscribe ([A-Za-z0-9_-]{40,64})$/i.exec(email.subject.trim())?.[1];
+    if (token) return this.unsubscribeReplyToken(credentialId, provider, email, token);
     const legacy = await this.legacyChannelIds(credentialId);
     const candidates = await this.recentSendsTo(credentialId, legacy, email.from, REPLY_CANDIDATES);
     if (!candidates.length) return this.handleNoticeReply(credentialId, provider, email);
@@ -469,12 +501,13 @@ export class MarketingEmailEventsService {
     const actor: MarketingActor = { type: 'system', id: `email-reply:${provider}`, name: '메일 답장' };
 
     if (isUnsubscribeRequest(email.subject)) {
+      if (row.brand_id) return 'ignored';
       const changed = await this.suppressContact(row.contact_id, 'unsubscribed', 'mailto', actor, {
-        campaignId: row.campaign_id, sendId: row.id, postId: row.post_id, detail: '',
+        campaignId: row.campaign_id, sendId: row.id, postId: row.post_id, brandId: row.brand_id, detail: '',
       });
       if (!changed) return 'duplicate';
       const contact = await this.contactRepo.findOne({ where: { id: row.contact_id } });
-      if (contact) void this.email.sendUnsubscribeNotice(contact);
+      if (contact) void this.email.sendUnsubscribeNotice({ ...contact, brand_id: row.brand_id });
       return 'unsubscribed';
     }
 
@@ -502,14 +535,14 @@ export class MarketingEmailEventsService {
    */
   private async handleNoticeReply(credentialId: string, provider: string, email: InboundEmail): Promise<'unsubscribed' | 'ignored' | 'duplicate'> {
     const notice = await this.recentNoticeTo(credentialId, email.from);
-    if (!notice || isAutoReply(email.headers, email.subject) || !isUnsubscribeRequest(email.subject)) return 'ignored';
+    if (!notice || notice.brand_id || isAutoReply(email.headers, email.subject) || !isUnsubscribeRequest(email.subject)) return 'ignored';
     const actor: MarketingActor = { type: 'system', id: `email-reply:${provider}`, name: '메일 답장' };
     const changed = await this.suppressContact(notice.contact_id, 'unsubscribed', 'mailto', actor, {
-      campaignId: '', sendId: '', postId: '', noticeId: notice.id, detail: '',
+      campaignId: '', sendId: '', postId: '', noticeId: notice.id, brandId: notice.brand_id, detail: '',
     });
     if (!changed) return 'duplicate';
     const contact = await this.contactRepo.findOne({ where: { id: notice.contact_id } });
-    if (contact) void this.email.sendUnsubscribeNotice(contact);
+    if (contact) void this.email.sendUnsubscribeNotice({ ...contact, brand_id: notice.brand_id });
     return 'unsubscribed';
   }
 }

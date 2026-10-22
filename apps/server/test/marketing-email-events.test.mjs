@@ -87,9 +87,10 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
   const sgCred = await saveCred('sendgrid', { provider: 'sendgrid', api_key: 'SG.key', webhook_public_key: der(sgEvents.publicKey), inbound_public_key: der(sgInbound.publicKey) });
   const bareCred = await saveCred('resend-bare', { provider: 'resend', api_key: 're_bare' });
 
+  const brand = (await post('/brands', { name: 'AWB Team' })).body;
   const emailChannel = async (platform, target, credential, list, replyTo) => {
     const ch = (await post(`/campaigns/${campaign.id}/channels`, { platform, target })).body;
-    const approved = await post(`/channels/${ch.id}/approve`, { mode: 'email', email: {
+    const approved = await post(`/channels/${ch.id}/approve`, { mode: 'email', email: { brand_id: brand.id,
       credential_id: credential.id, from_name: 'AWB Team', from_address: 'hello@awb.example.com', reply_to: replyTo,
       postal_address: '1 Main St, Seoul', list_name: list,
     } });
@@ -101,8 +102,8 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
 
   const consent = { consent_method: 'signup_form', consent_source: 'https://awb.example.com/signup', consent_at: new Date(Date.now() - 30 * 86_400_000).toISOString(), night_consent: true };
   const people = (prefix, n) => Array.from({ length: n }, (_, i) => ({ email: `${prefix}${i + 1}@example.com`, name: `${prefix}${i + 1}`, country: 'US', timezone: 'UTC', ...consent }));
-  assert.equal((await post('/contacts/import', { lists: ['news'], contacts: people('n', 6) })).body.created, 6);
-  assert.equal((await post('/contacts/import', { lists: ['weekly'], contacts: people('w', 5) })).body.created, 5);
+  assert.equal((await post('/contacts/import', { brand_id: brand.id, lists: ['news'], contacts: people('n', 6) })).body.created, 6);
+  assert.equal((await post('/contacts/import', { brand_id: brand.id, lists: ['weekly'], contacts: people('w', 5) })).body.created, 5);
   const contactRepo = ds.getRepository('MarketingContact');
   const sendRepo = ds.getRepository('MarketingEmailSend');
   const contact = async (email) => contactRepo.findOneBy({ email });
@@ -280,7 +281,9 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
   const w3Row = await sendOf(p2.id, 'w3@example.com');
   assert.deepEqual([w3Row.bounce_type, w3Row.complained_at], ['suppressed', null], 'a repeat is not counted as a new complaint');
   const w4 = await contact('w4@example.com');
-  assert.deepEqual([w4.status, w4.unsubscribe_source], ['unsubscribed', 'provider']);
+  const w4Consent = await ds.getRepository('MarketingContactConsent').findOneBy({ contact_id: w4.id, brand_id: brand.id });
+  assert.equal(w4.status, 'subscribed');
+  assert.deepEqual([w4Consent.status, w4Consent.unsubscribe_source], ['unsubscribed', 'provider']);
   assert.equal((await contact('w5@example.com')).status, 'subscribed');
   assert.deepEqual((await api('/list-holds?status=held')).body, [], 'one new complaint on weekly is not enough');
 
@@ -323,11 +326,15 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
   assert.equal((await resendHook(received('in_403', 'n2@example.com'))).body.reply, 'recorded');
   assert.match((await feedbackRepo.findOneBy({ source_key: 'email-reply:resend:<in_403@mail.example.com>' })).content, /^\(본문을 읽지 못했습니다/);
 
-  inbox.set('in_unsub', { status: 200, body: { from: 'n2@example.com', subject: 'unsubscribe', text: '' } });
+  const n2Consent = await ds.getRepository('MarketingContactConsent').findOneBy({ contact_id: (await contact('n2@example.com')).id, brand_id: brand.id });
+  const unsubSubject = `unsubscribe ${n2Consent.unsubscribe_token}`;
+  inbox.set('in_unsub', { status: 200, body: { from: 'n2@example.com', subject: unsubSubject, text: '' } });
   const sentBefore = sent.length;
-  assert.equal((await resendHook(received('in_unsub', 'n2@example.com', 'unsubscribe'))).body.reply, 'unsubscribed');
+  assert.equal((await resendHook(received('in_unsub', 'n2@example.com', unsubSubject))).body.reply, 'unsubscribed');
   const n2 = await contact('n2@example.com');
-  assert.deepEqual([n2.status, n2.unsubscribe_source], ['unsubscribed', 'mailto'], 'the List-Unsubscribe mailto works');
+  const n2After = await ds.getRepository('MarketingContactConsent').findOneBy({ id: n2Consent.id });
+  assert.equal(n2.status, 'subscribed');
+  assert.deepEqual([n2After.status, n2After.unsubscribe_source], ['unsubscribed', 'mailto'], 'the List-Unsubscribe mailto works within the brand');
   await new Promise((r) => setTimeout(r, 200));
   assert.ok(sent.slice(sentBefore).some((m) => m.body.to?.[0] === 'n2@example.com' && /수신거부 처리 안내/.test(m.body.subject)), 'the recipient is told');
 
@@ -382,7 +389,7 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
 
   // Dedicated list: soft -> hard upgrade, duplicate delivery, hold, release and recount.
   const bounceChannel = await emailChannel('email', 'old-list', resendCred, 'old-list', 'help@awb.example.com');
-  await post('/contacts/import', { lists: ['old-list'], contacts: people('b', 5) });
+  await post('/contacts/import', { brand_id: brand.id, lists: ['old-list'], contacts: people('b', 5) });
   const bp = await draft(bounceChannel, 'Bounce test');
   await post(`/posts/${bp.id}/approve`, {});
   await emailService.processQueue(new Date());
@@ -423,7 +430,7 @@ test('marketing email webhooks: signatures, bounces, complaints, list hold, repl
   const future = new Date(Date.now() + 31 * 86_400_000);
   assert.equal((await holdService.stats(account.id, 'old-list', future)).stats.hard_bounced, 0);
   // Fresh sends after release can trigger a new hold, with history retained.
-  await post('/contacts/import', { lists: ['old-list'], contacts: people('fresh', 2) });
+  await post('/contacts/import', { brand_id: brand.id, lists: ['old-list'], contacts: people('fresh', 2) });
   const freshPost = await draft(bounceChannel, 'Fresh cohort');
   await post(`/posts/${freshPost.id}/approve`, {});
   await emailService.processQueue(new Date());

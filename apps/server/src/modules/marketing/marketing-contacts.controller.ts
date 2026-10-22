@@ -30,9 +30,28 @@ export class MarketingContactsController {
     private readonly consentNotices: MarketingConsentNoticeService,
   ) {}
 
+  @Get('brands')
+  async brands(@Req() req: Request, @Res() res: Response) {
+    try { return res.json(await this.contacts.listBrands(boundAccountId(req))); }
+    catch (e: any) { return res.status(errorStatus(e)).json({ error: e?.message }); }
+  }
+
+  @Post('brands')
+  async createBrand(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try { return res.status(201).json(await this.contacts.createBrand(boundAccountId(req), body?.name, userActor(req))); }
+    catch (e: any) { return res.status(errorStatus(e)).json({ error: e?.message }); }
+  }
+
+  @Post('brands/:id/migrate-legacy')
+  async migrateLegacy(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try { return res.json(await this.contacts.migrateLegacy(boundAccountId(req), id, body?.contact_ids, userActor(req))); }
+    catch (e: any) { return res.status(errorStatus(e)).json({ error: e?.message }); }
+  }
+
   @Get('contacts')
   async list(
     @Query('list') list: string,
+    @Query('brand_id') brandId: string,
     @Query('status') status: string,
     @Query('q') q: string,
     @Query('limit') limit: string,
@@ -43,11 +62,19 @@ export class MarketingContactsController {
     try {
       const accountId = boundAccountId(req);
       const out = await this.contacts.list(accountId, {
-        list: list || undefined, status: status || undefined, q: q || undefined,
+        brand_id: brandId || undefined, list: list || undefined, status: status || undefined, q: q || undefined,
         limit: limit ? Number(limit) : undefined, offset: offset ? Number(offset) : undefined,
       });
-      const notices = await this.consentNotices.latestFor(accountId, out.contacts.map((c) => c.id));
-      return res.json({ total: out.total, contacts: out.contacts.map((c) => contactToJson(c, notices.get(c.id))) });
+      const brandIds = [...new Set(out.contacts.flatMap((c) => c.consents.map((v) => v.brand_id)))];
+      const notices = new Map(await Promise.all(brandIds.map(async (brandId) => [brandId,
+        await this.consentNotices.latestFor(accountId, out.contacts.map((c) => c.id), brandId)] as const)));
+      return res.json({ total: out.total, contacts: out.contacts.map((c) => ({
+        ...contactToJson(c), legacy_consent_migrated: c.legacy_consent_migrated,
+        consents: c.consents.map(({ unsubscribe_token, consent_ip, ...consent }) => {
+          const json = contactToJson({ ...c, ...consent }, notices.get(consent.brand_id)?.get(c.id));
+          return { ...consent, consent_due_at: json.consent_due_at, consent_notice: json.consent_notice };
+        }),
+      })) });
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list contacts' });
     }
@@ -66,7 +93,7 @@ export class MarketingContactsController {
   @Post('contacts/:id/unsubscribe')
   async unsubscribe(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      return res.status(200).json(contactToJson(await this.contacts.markUnsubscribed(id, boundAccountId(req), userActor(req), String(body?.note || ''))));
+      return res.status(200).json(contactToJson(await this.contacts.markUnsubscribed(id, boundAccountId(req), userActor(req), String(body?.note || ''), body?.brand_id ? String(body.brand_id) : undefined)));
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to unsubscribe contact' });
     }

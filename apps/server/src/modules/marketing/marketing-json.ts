@@ -359,6 +359,8 @@ export function consentNoticeToJson(n: MarketingConsentNotice, contact?: Pick<Ma
   return {
     id: n.id,
     contact_id: n.contact_id,
+    brand_id: n.brand_id,
+    consent_id: n.consent_id,
     contact_email: contact ? contact.email : null,
     contact_name: contact?.name || '',
     contact_status: contact?.status || '',
@@ -395,6 +397,7 @@ export function emailSendToJson(s: MarketingEmailSend) {
     id: s.id,
     post_id: s.post_id,
     contact_id: s.contact_id,
+    brand_id: s.brand_id,
     status: s.status,
     attempts: s.attempts,
     next_attempt_at: s.next_attempt_at,

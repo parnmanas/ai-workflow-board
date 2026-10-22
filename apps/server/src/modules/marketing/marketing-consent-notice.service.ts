@@ -4,6 +4,8 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, LessThan, LessThanOrEqual, Repository } from 'typeorm';
 import { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
 import { MarketingConsentNoticeSetting } from '../../entities/MarketingConsentNoticeSetting';
+import { MarketingBrand } from '../../entities/MarketingBrand';
+import { MarketingContactConsent } from '../../entities/MarketingContactConsent';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
@@ -36,7 +38,7 @@ import { sendEmail, type EmailOutcome } from './marketing-email-providers';
 import { marketingError } from './marketing-errors';
 
 const TICK_MS = 60_000;
-/** 줄 세우기(연락처 전체를 훑는다)는 이 간격으로만 — 보내기는 매 tick. */
+/** 줄 세우기(브랜드별 동의를 훑는다)는 이 간격으로만 — 보내기는 매 tick. */
 const PLAN_EVERY_MS = 10 * 60_000;
 const BATCH = 50;
 const MAX_ATTEMPTS = 3;
@@ -75,7 +77,7 @@ function chunks<T>(items: T[], size: number): T[][] {
 }
 
 export interface ConsentNoticeCounts {
-  /** 지금 안내 창(기한 lead_days 일 전 ~ 기한) 안의 연락처. */
+  /** 지금 안내 창(기한 lead_days 일 전 ~ 기한) 안의 브랜드별 동의. */
   in_window: number;
   /** 그중 아직 안내 행이 없는 것 — 다음 줄 세우기가 넣는다. */
   not_yet_queued: number;
@@ -89,7 +91,7 @@ export interface ConsentNoticeCounts {
   failed_retryable: number;
   skipped_30d: number;
   kept_30d: number;
-  /** 기한이 이미 지나 안내로 이을 수 없는 연락처(새 동의가 있어야 다시 보낸다). */
+  /** 기한이 이미 지나 안내로 이을 수 없는 브랜드별 동의(새 동의가 있어야 다시 보낸다). */
   expired: number;
 }
 
@@ -102,10 +104,10 @@ interface SendContext {
 /**
  * MarketingConsentNoticeService — 수신 동의 재확인 안내(docs/marketing.md "동의 재확인 안내", 정보통신망법 §50⑧).
  *
- * 1. 줄 세우기: 안내를 켠 계정의 subscribed 연락처 가운데 동의 기한이 `lead_days` 일 안으로 들어온 사람마다 (연락처, 기한)
+ * 1. 줄 세우기: 안내를 켠 계정의 subscribed 연락처 가운데 동의 기한이 `lead_days` 일 안으로 들어온 브랜드별 동의마다 (연락처, 브랜드, 기한)
  *    한 행을 넣는다(유일 인덱스 — 서버가 둘이어도 한 번).
  * 2. 보내기: 보내기 직전에 다시 본다 — 그 사이 수신거부 · 새 동의(기한이 바뀜) · 기한 지남이면 보내지 않는다(skipped).
- *    발신자는 그 사람에게 메일을 보내는 채널이다(최근 받은 메일의 채널, 없으면 그 사람의 목록을 쓰는 채널). 수신자 현지
+ *    발신자는 같은 브랜드의 채널이다(최근 받은 메일의 채널, 없으면 그 사람의 목록을 쓰는 채널). 수신자 현지
  *    야간이면 아침까지 미룬다(기한을 넘기게 되면 미루지 않는다). 일시 오류는 3 번까지 다시 시도한다. 공급자에 넘긴 뒤에는
  *    무슨 일이 있어도 다시 보내지 않는다(받았을 수 있는 법정 통지를 두 번 보내지 않게).
  * 3. 기한: 무응답이면 유지(`keep`)로 안내했고 그 사이 철회 · 새 동의 · 미도달(바운스)이 없으면 그 기한부터 동의를 잇는다
@@ -242,18 +244,18 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
     };
     if (!accountId) return { row, settings, counts };
     const contacts = await this.subscribedContacts(accountId);
-    const due: Array<{ contactId: string; dueAt: Date }> = [];
+    const due: Array<{ contactId: string; consentId: string; brandId: string; dueAt: Date }> = [];
     for (const c of contacts) {
       if (!consentFresh(c, now)) {
         counts.expired++;
         continue;
       }
       const dueAt = consentNoticeDueAt(c, settings.lead_days, now);
-      if (dueAt) due.push({ contactId: c.id, dueAt });
+      if (dueAt) due.push({ contactId: c.contact_id, consentId: c.id, brandId: c.brand_id, dueAt });
     }
     counts.in_window = due.length;
-    const have = await this.existingCycles(due.map((d) => d.contactId));
-    counts.not_yet_queued = due.filter((d) => !(have.get(d.contactId) || []).some((at) => sameConsentCycle(at, d.dueAt))).length;
+    const have = await this.existingCycles(due.map((d) => d.consentId));
+    counts.not_yet_queued = due.filter((d) => !(have.get(d.consentId) || []).some((at) => sameConsentCycle(at, d.dueAt))).length;
     const since = new Date(now.getTime() - RECENT_MS);
     const base = () => this.noticeRepo.createQueryBuilder('n').where('n.account_id = :a', { a: accountId });
     [counts.waiting, counts.waiting_no_sender, counts.sent_30d, counts.failed_30d, counts.failed_retryable, counts.skipped_30d, counts.kept_30d] = await Promise.all([
@@ -287,13 +289,13 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
   }
 
   /** 연락처마다 가장 최근 주기의 안내(연락처 목록이 동의 기한 옆에 보여 준다). */
-  async latestFor(accountId: string, contactIds: string[]): Promise<Map<string, MarketingConsentNotice>> {
+  async latestFor(accountId: string, contactIds: string[], brandId?: string): Promise<Map<string, MarketingConsentNotice>> {
     const out = new Map<string, MarketingConsentNotice>();
     const ids = [...new Set(contactIds.filter(Boolean))];
     if (!accountId || !ids.length) return out;
     for (const part of chunks(ids, IN_CHUNK)) {
       const rows = await this.noticeRepo.find({
-        where: { account_id: accountId, contact_id: In(part) },
+        where: { account_id: accountId, contact_id: In(part), ...(brandId ? { brand_id: brandId } : {}) },
         order: { due_at: 'DESC', created_at: 'DESC' },
       });
       for (const r of rows) if (!out.has(r.contact_id)) out.set(r.contact_id, r);
@@ -360,22 +362,28 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
     const refused = { kept: false, at: null };
     if (!/^[A-Za-z0-9_-]{40,64}$/.test(token || '')) return refused;
     const notice = await this.noticeRepo.findOne({ where: { token } });
-    if (!notice) return refused;
+    if (!notice || !await this.consentForNotice(notice)) return refused;
     try {
       const result = await this.dataSource.transaction(async (m) => {
         const contacts = m.getRepository(MarketingContact);
         const noticeRepo = m.getRepository(MarketingConsentNotice);
         const contact = await contacts.findOne({ where: { id: notice.contact_id } });
         if (!contact || contact.account_id !== notice.account_id || contact.status !== 'subscribed' || !contact.email) throw new KeepRefused();
+        const consent = await m.getRepository(MarketingContactConsent).findOneBy({
+          id: notice.consent_id, account_id: notice.account_id, contact_id: contact.id, brand_id: notice.brand_id, status: 'subscribed',
+        });
+        if (!consent) throw new KeepRefused();
         const current = await noticeRepo.findOne({ where: { id: notice.id } });
         if (current?.kept_at) return { at: current.kept_at, changed: null };
+        if (!sameConsentCycle(consentDeadline(consent), notice.due_at)
+          && !(consent.consent_renewed_at && sameConsentCycle(consent.consent_renewed_at, notice.due_at))) throw new KeepRefused();
         if (now.getTime() > new Date(notice.due_at).getTime() + CONSENT_KEEP_GRACE_MS) throw new KeepRefused();
         const claim = await m.createQueryBuilder().update(MarketingConsentNotice)
           .set({ kept_at: now })
           .where('id = :id AND kept_at IS NULL', { id: notice.id })
           .execute();
         if (!claim.affected) return { at: (await noticeRepo.findOne({ where: { id: notice.id } }))?.kept_at || now, changed: null };
-        const updated = await m.createQueryBuilder().update(MarketingContact)
+        const updated = await m.createQueryBuilder().update(MarketingContactConsent)
           .set({
             consent_at: now,
             consent_method: RECONFIRM_CONSENT_METHOD,
@@ -385,7 +393,10 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
             consent_ip: '',
             consent_renewed_at: null,
           })
-          .where('id = :id AND status = :s', { id: contact.id, s: 'subscribed' })
+          .where('id = :id AND status = :s', { id: consent.id, s: 'subscribed' })
+          .andWhere('consent_at = :original', { original: consent.consent_at })
+          .andWhere(consent.consent_renewed_at ? 'consent_renewed_at = :renewed' : 'consent_renewed_at IS NULL', { renewed: consent.consent_renewed_at })
+          .andWhere("EXISTS (SELECT 1 FROM marketing_contacts c WHERE c.id = :contact AND c.account_id = :account AND c.status = 'subscribed' AND c.email IS NOT NULL)", { contact: contact.id, account: notice.account_id })
           .execute();
         if (!updated.affected) throw new KeepRefused();
         await this.audit.record({
@@ -398,13 +409,15 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
           summary: '수신 동의 유지(재확인 안내의 유지 링크) — 동의일을 오늘로 갱신',
           detail: {
             notice_id: notice.id,
+            brand_id: notice.brand_id,
+            consent_id: notice.consent_id,
             due_at: new Date(notice.due_at).toISOString(),
             previous: {
-              consent_method: contact.consent_method,
-              consent_source: contact.consent_source,
-              consent_at: new Date(contact.consent_at).toISOString(),
-              consent_text_version: contact.consent_text_version,
-              consent_renewed_at: contact.consent_renewed_at ? new Date(contact.consent_renewed_at).toISOString() : null,
+              consent_method: consent.consent_method,
+              consent_source: consent.consent_source,
+              consent_at: new Date(consent.consent_at).toISOString(),
+              consent_text_version: consent.consent_text_version,
+              consent_renewed_at: consent.consent_renewed_at ? new Date(consent.consent_renewed_at).toISOString() : null,
             },
           },
         }, m);
@@ -456,6 +469,7 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
     const rows = await this.noticeRepo.createQueryBuilder('n')
       .where('n.status = :s', { s: 'sent' })
       .andWhere('n.policy = :p', { p: 'keep' })
+      .andWhere("n.brand_id <> '' AND n.consent_id <> ''")
       .andWhere('n.renewed_at IS NULL')
       .andWhere('n.kept_at IS NULL')
       .andWhere("n.bounce_type = ''")
@@ -467,15 +481,18 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
     let renewed = 0;
     for (const row of rows) {
       const contact = await this.contactRepo.findOne({
-        where: { id: row.contact_id },
-        select: ['id', 'status', 'email', 'consent_at', 'consent_renewed_at'],
+        where: { id: row.contact_id, account_id: row.account_id },
+        select: ['id', 'status', 'email'],
       });
       if (!contact || contact.status !== 'subscribed' || !contact.email) continue;
-      if (!sameConsentCycle(consentDeadline(contact), row.due_at)) continue;
-      const won = await this.contactRepo.createQueryBuilder().update(MarketingContact)
+      const consent = await this.consentForNotice(row);
+      if (!consent || !sameConsentCycle(consentDeadline(consent), row.due_at)) continue;
+      const won = await this.dataSource.getRepository(MarketingContactConsent).createQueryBuilder().update(MarketingContactConsent)
         .set({ consent_renewed_at: row.due_at })
-        .where('id = :id AND status = :s', { id: contact.id, s: 'subscribed' })
-        .andWhere('(consent_renewed_at IS NULL OR consent_renewed_at < :due)', { due: row.due_at })
+        .where('id = :id AND status = :s', { id: consent.id, s: 'subscribed' })
+        .andWhere('consent_at = :original', { original: consent.consent_at })
+        .andWhere(consent.consent_renewed_at ? 'consent_renewed_at = :renewed' : 'consent_renewed_at IS NULL', { renewed: consent.consent_renewed_at })
+        .andWhere("EXISTS (SELECT 1 FROM marketing_contacts c WHERE c.id = :contact AND c.account_id = :account AND c.status = 'subscribed' AND c.email IS NOT NULL)", { contact: contact.id, account: row.account_id })
         .execute();
       await this.noticeRepo.update({ id: row.id }, { renewed_at: now });
       if (won.affected) renewed++;
@@ -549,39 +566,67 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
 
   // ── internals ────────────────────────────────────────────────────────────
 
-  private async subscribedContacts(accountId: string): Promise<MarketingContact[]> {
-    const rows = await this.contactRepo.find({
-      where: { account_id: accountId, status: 'subscribed' },
-      select: ['id', 'email', 'consent_at', 'consent_renewed_at'],
+  private async subscribedContacts(accountId: string): Promise<MarketingContactConsent[]> {
+    const contacts = await this.contactRepo.find({
+      where: { account_id: accountId, status: 'subscribed' }, select: ['id', 'email'],
     });
-    return rows.filter((c) => !!c.email);
+    const ids = contacts.filter((c) => !!c.email).map((c) => c.id);
+    const rows: MarketingContactConsent[] = [];
+    const brands = new Set((await this.dataSource.getRepository(MarketingBrand).find({
+      where: { account_id: accountId }, select: ['id'],
+    })).map((b) => b.id));
+    for (const part of chunks(ids, IN_CHUNK)) {
+      rows.push(...await this.dataSource.getRepository(MarketingContactConsent).find({
+        where: { account_id: accountId, contact_id: In(part), status: 'subscribed' },
+      }));
+    }
+    return rows.filter((c) => brands.has(c.brand_id));
   }
 
-  /** 연락처마다 이미 있는 안내의 기한. */
-  private async existingCycles(contactIds: string[]): Promise<Map<string, Date[]>> {
+  private async existingCycles(consentIds: string[]): Promise<Map<string, Date[]>> {
     const have = new Map<string, Date[]>();
-    for (const part of chunks([...new Set(contactIds)], IN_CHUNK)) {
-      const rows = await this.noticeRepo.find({ where: { contact_id: In(part) }, select: ['id', 'contact_id', 'due_at'] });
-      for (const r of rows) have.set(r.contact_id, [...(have.get(r.contact_id) || []), new Date(r.due_at)]);
+    for (const part of chunks([...new Set(consentIds)], IN_CHUNK)) {
+      const rows = await this.noticeRepo.find({ where: { consent_id: In(part) }, select: ['id', 'consent_id', 'due_at'] });
+      for (const r of rows) have.set(r.consent_id, [...(have.get(r.consent_id) || []), new Date(r.due_at)]);
     }
     return have;
   }
 
+  private async consentForNotice(row: MarketingConsentNotice): Promise<MarketingContactConsent | null> {
+    if (!row.brand_id || !row.consent_id) return null;
+    const brand = await this.dataSource.getRepository(MarketingBrand).findOneBy({ id: row.brand_id, account_id: row.account_id });
+    if (!brand) return null;
+    return this.dataSource.getRepository(MarketingContactConsent).findOneBy({
+      id: row.consent_id, account_id: row.account_id, contact_id: row.contact_id, brand_id: row.brand_id, status: 'subscribed',
+    });
+  }
+
+  async keepBrand(token: string): Promise<string | null> {
+    if (!/^[A-Za-z0-9_-]{40,64}$/.test(token || '')) return null;
+    const notice = await this.noticeRepo.findOneBy({ token });
+    if (!notice || !await this.consentForNotice(notice)) return null;
+    return (await this.dataSource.getRepository(MarketingBrand).findOneBy({
+      id: notice.brand_id, account_id: notice.account_id,
+    }))?.name || null;
+  }
+
   private async planAccount(settings: MarketingConsentNoticeSetting, now: Date): Promise<number> {
-    const due: Array<{ contactId: string; dueAt: Date }> = [];
+    const due: Array<{ contactId: string; consentId: string; brandId: string; dueAt: Date }> = [];
     for (const c of await this.subscribedContacts(settings.account_id)) {
       const dueAt = consentNoticeDueAt(c, settings.lead_days, now);
-      if (dueAt) due.push({ contactId: c.id, dueAt });
+      if (dueAt) due.push({ contactId: c.contact_id, consentId: c.id, brandId: c.brand_id, dueAt });
     }
     if (!due.length) return 0;
-    const have = await this.existingCycles(due.map((d) => d.contactId));
+    const have = await this.existingCycles(due.map((d) => d.consentId));
     let queued = 0;
     for (const d of due) {
-      if ((have.get(d.contactId) || []).some((at) => sameConsentCycle(at, d.dueAt))) continue;
+      if ((have.get(d.consentId) || []).some((at) => sameConsentCycle(at, d.dueAt))) continue;
       try {
         await this.noticeRepo.insert({
           account_id: settings.account_id,
           contact_id: d.contactId,
+          consent_id: d.consentId,
+          brand_id: d.brandId,
           due_at: d.dueAt,
           status: 'queued',
           attempts: 0,
@@ -591,7 +636,7 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
         queued++;
       } catch (e) {
         // 다른 서버가 먼저 넣었다 — 유일 인덱스가 한 번을 보장한다. 그 밖의 실패는 던진다.
-        const exists = await this.noticeRepo.findOne({ where: { contact_id: d.contactId, due_at: d.dueAt }, select: ['id'] });
+        const exists = await this.noticeRepo.findOne({ where: { contact_id: d.contactId, brand_id: d.brandId, due_at: d.dueAt }, select: ['id'] });
         if (!exists) throw e;
       }
     }
@@ -618,15 +663,15 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
   }
 
   /**
-   * 그 사람에게 보낼 발신자 — 그 사람이 마지막으로 마케팅 메일을 받은 채널(지금도 쓸 수 있으면), 없으면 그 사람의 목록을 쓰는
+   * 같은 브랜드 안에서 그 사람에게 보낼 발신자 — 그 사람이 마지막으로 마케팅 메일을 받은 채널(지금도 쓸 수 있으면), 없으면 그 사람의 목록을 쓰는
    * 채널. 동의를 받은 그 발신자의 이름으로 알리기 위해서다(법정 항목 "전송자의 명칭").
    */
-  private async senderForContact(contact: MarketingContact, ctx: SendContext): Promise<{ channel: MarketingChannel; sender: ChannelSender } | null> {
+  private async senderForContact(contact: MarketingContact, brandId: string, ctx: SendContext): Promise<{ channel: MarketingChannel; sender: ChannelSender } | null> {
     if (!ctx.channels.has(contact.account_id)) ctx.channels.set(contact.account_id, await this.candidateChannels(contact.account_id));
-    const channels = ctx.channels.get(contact.account_id) || [];
+    const channels = (ctx.channels.get(contact.account_id) || []).filter((c) => c.config?.brand_id === brandId);
     if (!channels.length) return null;
     const ordered: MarketingChannel[] = [];
-    const last = await this.sendRepo.findOne({ where: { contact_id: contact.id, status: 'sent' }, order: { sent_at: 'DESC' }, select: ['id', 'channel_id'] });
+    const last = await this.sendRepo.findOne({ where: { contact_id: contact.id, account_id: contact.account_id, brand_id: brandId, status: 'sent' }, order: { sent_at: 'DESC' }, select: ['id', 'channel_id'] });
     const lastChannel = last ? channels.find((c) => c.id === last.channel_id) : undefined;
     if (lastChannel) ordered.push(lastChannel);
     const lists = new Set(contact.lists || []);
@@ -655,10 +700,12 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
     };
     const t = clock();
     const contact = await this.contactRepo.findOne({ where: { id: row.contact_id } });
-    if (!contact || contact.status !== 'subscribed' || !contact.email) return skip(`contact is ${contact?.status || 'gone'}`);
+    if (!contact || contact.account_id !== row.account_id || contact.status !== 'subscribed' || !contact.email) return skip(`contact is ${contact?.status || 'gone'}`);
+    const consent = await this.consentForNotice(row);
+    if (!consent) return skip('brand consent is absent or withdrawn');
     const dueAt = new Date(row.due_at);
     // 그 사이 새 동의(가져오기 · 유지 링크)로 기한이 바뀌었으면 이 주기의 안내는 필요 없다.
-    if (!sameConsentCycle(consentDeadline(contact), dueAt)) return skip('the consent was renewed meanwhile — this notice is no longer needed');
+    if (!sameConsentCycle(consentDeadline(consent), dueAt)) return skip('the consent was renewed meanwhile — this notice is no longer needed');
     // 기한이 지난 동의는 안내로 되살리지 않는다 — 동의를 다시 묻는 메일은 그 자체가 광고성 정보다.
     const lastSend = dueAt.getTime() - CONSENT_NOTICE_SEND_MARGIN_MS;
     if (t.getTime() >= lastSend) return skip('the deadline passed before the notice could be sent — the consent has lapsed');
@@ -670,7 +717,7 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
       const morning = nextSendableAt(t, tz);
       if (morning.getTime() < lastSend) return defer(morning, 'deferred: night hours in the recipient\'s timezone');
     }
-    const pick = await this.senderForContact(contact, ctx);
+    const pick = await this.senderForContact(contact, row.brand_id, ctx);
     if (!pick) {
       return defer(
         new Date(Math.min(t.getTime() + RECHECK_MS, lastSend)),
@@ -681,7 +728,7 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
     let unsubscribeUrl: string;
     try {
       keepUrl = consentKeepUrlFor(row.token);
-      unsubscribeUrl = unsubscribeUrlFor(contact.unsubscribe_token);
+      unsubscribeUrl = unsubscribeUrlFor(consent.unsubscribe_token);
     } catch (e: any) {
       return defer(new Date(t.getTime() + RECHECK_MS), `deferred: ${e?.message || e}`);
     }
@@ -695,7 +742,7 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
         subject: settings.subject,
         body: settings.body,
         policy,
-        contact: { name: contact.name, email: contact.email, consent_at: contact.consent_at, timezone: tz },
+        contact: { name: contact.name, email: contact.email, consent_at: consent.consent_at, timezone: tz },
         dueAt,
         keepUrl,
         unsubscribeUrl,

@@ -61,7 +61,7 @@ export class AccountAccessService {
       entity = ({
         campaigns: 'MarketingCampaign', channels: 'MarketingChannel', posts: 'MarketingPost',
         allocations: 'MarketingBudgetAllocation', 'spend-requests': 'MarketingSpendRequest',
-        contacts: 'MarketingContact', feedback: 'MarketingFeedback', cycles: 'MarketingCycle',
+        contacts: 'MarketingContact', brands: 'MarketingBrand', feedback: 'MarketingFeedback', cycles: 'MarketingCycle',
         links: 'MarketingLink', 'list-holds': 'MarketingListHold',
       } as Record<string, string>)[marketing[1]];
       resourceId = marketing[2];

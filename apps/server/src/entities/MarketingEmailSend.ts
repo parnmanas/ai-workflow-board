@@ -36,6 +36,10 @@ export class MarketingEmailSend {
   @Column({ type: 'varchar' })
   contact_id: string;
 
+  /** Immutable sender identity captured when queued; blank means legacy/global. */
+  @Column({ type: 'varchar', default: '' })
+  brand_id: string;
+
   /** queued | deferred | sent | failed | suppressed */
   @Column({ type: 'varchar', default: 'queued' })
   status: string;

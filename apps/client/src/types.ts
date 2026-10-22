@@ -3768,6 +3768,7 @@ export type MarketingChannelStatus = 'proposed' | 'awaiting_credential' | 'activ
 
 /** 메일 채널 설정 — 비밀 값은 credential 에만 있고 여기에는 id 만 있다. */
 export interface MarketingEmailConfig {
+  brand_id: string;
   credential_id: string;
   from_name: string;
   from_address: string;
@@ -4200,7 +4201,29 @@ export interface MarketingFeedbackInput {
 export type MarketingContactStatus = 'subscribed' | 'unsubscribed' | 'bounced' | 'complained' | 'erased';
 export type MarketingConsentMethod = 'signup_form' | 'checkout' | 'event' | 'import' | 'other';
 
+export interface MarketingBrand {
+  id: string;
+  account_id: string;
+  name: string;
+}
+
+export interface MarketingContactConsent {
+  id: string;
+  brand_id: string;
+  status: MarketingContactStatus;
+  consent_method: string;
+  consent_source: string;
+  consent_at: string;
+  consent_renewed_at?: string | null;
+  consent_due_at?: string;
+  consent_text_version: string;
+  night_consent: boolean;
+  consent_notice?: MarketingContactConsentNotice | null;
+}
+
 export interface MarketingContact {
+  consents?: MarketingContactConsent[];
+  legacy_consent_migrated?: boolean;
   id: string;
   account_id: string;
   /** erase 하면 null(억제용 해시만 남는다). */

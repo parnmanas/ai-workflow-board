@@ -12,6 +12,8 @@ import { MarketingMetric } from '../../entities/MarketingMetric';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { MarketingFeedback } from '../../entities/MarketingFeedback';
 import { Ticket } from '../../entities/Ticket';
+import { MarketingBrand } from '../../entities/MarketingBrand';
+import { MarketingContactConsent } from '../../entities/MarketingContactConsent';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { MarketingCycle } from '../../entities/MarketingCycle';
@@ -72,7 +74,7 @@ import { MarketingEngagementService } from './marketing-engagement.service';
       MarketingCampaign, MarketingAuditEvent, MarketingChannel,
       MarketingBudgetAllocation, MarketingSpendRequest, MarketingLedgerEntry, MarketingPost,
       MarketingLink, MarketingMetric, OutreachInboundItem, MarketingFeedback, Ticket,
-      MarketingContact, MarketingEmailSend, MarketingCycle, ChatRoom, ChatRoomParticipant,
+      MarketingContact, MarketingBrand, MarketingContactConsent, MarketingEmailSend, MarketingCycle, ChatRoom, ChatRoomParticipant,
       Project, RuntimeHost, OutreachChannel, Credential, MarketingApprovalNotice, MarketingListHold,
       MarketingConsentNotice, MarketingConsentNoticeSetting,
     ]),

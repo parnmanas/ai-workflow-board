@@ -129,6 +129,7 @@ import type {
   MarketingFeedbackList,
   MarketingFeedbackInput,
   MarketingContact,
+  MarketingBrand,
   MarketingContactList,
   MarketingContactImportRow,
   MarketingContactImportResult,
@@ -2759,29 +2760,36 @@ export const api = {
 
   // 연락처는 계정 단위다. 계정 선택기는 두지 않는다(AGENTS.md) — 캠페인에서 열면 그 캠페인의 계정을
   // `account_id` 로 명시하고(서버가 접근을 검사한다), 없으면 서버가 기본 접근 계정으로 묶는다.
+  listMarketingBrands: (accountId?: string | null) =>
+    request<MarketingBrand[]>(`/marketing/brands${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`),
+  createMarketingBrand: (accountId: string | null, name: string) =>
+    request<MarketingBrand>(`/marketing/brands${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`, { method: 'POST', body: JSON.stringify({ name }) }),
+  migrateMarketingLegacyConsent: (accountId: string | null, brandId: string, contactIds: string[]) =>
+    request<{ migrated: number }>(`/marketing/brands/${encodeURIComponent(brandId)}/migrate-legacy${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`, { method: 'POST', body: JSON.stringify({ contact_ids: contactIds }) }),
   listMarketingContacts: (
     accountId: string | null,
-    query: { list?: string; status?: string; q?: string; limit?: number; offset?: number } = {},
+    query: { brand_id?: string; list?: string; status?: string; q?: string; limit?: number; offset?: number } = {},
   ) => {
     const params = new URLSearchParams();
     if (accountId) params.set('account_id', accountId);
     if (query.list) params.set('list', query.list);
     if (query.status) params.set('status', query.status);
     if (query.q) params.set('q', query.q);
+    if (query.brand_id) params.set('brand_id', query.brand_id);
     if (query.limit) params.set('limit', String(query.limit));
     if (query.offset) params.set('offset', String(query.offset));
     const qs = params.toString();
     return request<MarketingContactList>(`/marketing/contacts${qs ? `?${qs}` : ''}`);
   },
-  importMarketingContacts: (accountId: string | null, data: { lists: string[]; contacts: MarketingContactImportRow[] }) =>
+  importMarketingContacts: (accountId: string | null, data: { brand_id: string; lists: string[]; contacts: MarketingContactImportRow[] }) =>
     request<MarketingContactImportResult>(
       `/marketing/contacts/import${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
       { method: 'POST', body: JSON.stringify(data) },
     ),
-  unsubscribeMarketingContact: (id: string, note: string, accountId?: string | null) =>
+  unsubscribeMarketingContact: (id: string, note: string, accountId?: string | null, brandId?: string) =>
     request<MarketingContact>(
       `/marketing/contacts/${encodeURIComponent(id)}/unsubscribe${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`,
-      { method: 'POST', body: JSON.stringify({ note }) },
+      { method: 'POST', body: JSON.stringify({ note, brand_id: brandId }) },
     ),
   /** 주소 · 이름을 지우고 억제용 해시만 남긴다(되돌릴 수 없다). */
   eraseMarketingContact: (id: string, accountId?: string | null) =>

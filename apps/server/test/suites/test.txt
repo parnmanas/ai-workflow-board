@@ -111,6 +111,8 @@ test/marketing-approval-notice-logic.test.mjs
 test/marketing-approval-notify.test.mjs
 test/marketing-budget-logic.test.mjs
 test/marketing-campaigns-http.test.mjs
+test/marketing-brand-consent-notice.test.mjs
+test/marketing-brand-consent.test.mjs
 test/marketing-channels.test.mjs
 test/marketing-consent-notice-logic.test.mjs
 test/marketing-consent-notice.test.mjs

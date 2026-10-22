@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThan, Repository } from 'typeorm';
+import { MarketingBrand } from '../../entities/MarketingBrand';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { OutreachChannel } from '../../entities/OutreachChannel';
@@ -337,6 +338,8 @@ export class MarketingChannelService {
 
   private async normalizeEmail(raw: unknown, accountId: string): Promise<Record<string, any>> {
     const config = normalizeEmailChannelConfig(raw);
+    const brand = await this.channelRepo.manager.getRepository(MarketingBrand).findOneBy({ id: config.brand_id, account_id: accountId });
+    if (!brand) throw marketingError(404, 'brand not found');
     const secret = await resolveMarketingSecret(this.credentialRepo, config.credential_id, accountId);
     const provider = (secret.provider || '').toLowerCase();
     if (!(EMAIL_PROVIDERS as readonly string[]).includes(provider)) {

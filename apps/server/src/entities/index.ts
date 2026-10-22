@@ -156,3 +156,6 @@ export { MarketingApprovalNotice } from './MarketingApprovalNotice';
 export { MarketingListHold } from './MarketingListHold';
 export { MarketingConsentNotice } from './MarketingConsentNotice';
 export { MarketingConsentNoticeSetting } from './MarketingConsentNoticeSetting';
+
+export { MarketingBrand } from './MarketingBrand';
+export { MarketingContactConsent } from './MarketingContactConsent';

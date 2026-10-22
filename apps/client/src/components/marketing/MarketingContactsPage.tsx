@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
-import type { MarketingContact, MarketingContactImportResult } from '../../types';
+import type { MarketingBrand, MarketingContact, MarketingContactImportResult } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -43,6 +43,12 @@ export default function MarketingContactsPage() {
   const [list, setList] = useState(searchParams.get('list') || '');
   const [appliedList, setAppliedList] = useState((searchParams.get('list') || '').trim().toLowerCase());
   const [status, setStatus] = useState('');
+  const [brands, setBrands] = useState<MarketingBrand[]>([]);
+  const [brandId, setBrandId] = useState('');
+  const [brandName, setBrandName] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
+  const [migrating, setMigrating] = useState(false);
+  const [unsubscribeBrandId, setUnsubscribeBrandId] = useState<string | undefined>();
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
   const [offset, setOffset] = useState(0);
@@ -55,6 +61,14 @@ export default function MarketingContactsPage() {
   const [busy, setBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
+  useEffect(() => {
+    if (!canManage) return;
+    let cancelled = false;
+    api.listMarketingBrands(accountId).then((rows) => { if (!cancelled) setBrands(rows); })
+      .catch((err) => { if (!cancelled) setError((err as Error).message); });
+    return () => { cancelled = true; };
+  }, [accountId, canManage, reloadKey]);
+  useEffect(() => { setSelected([]); }, [accountId, appliedList, status, appliedQuery, offset]);
   const applyFilters = () => {
     setAppliedList(list.trim().toLowerCase());
     setAppliedQuery(query.trim());
@@ -89,7 +103,7 @@ export default function MarketingContactsPage() {
   const runUnsubscribe = async (contact: MarketingContact, note: string) => {
     setBusy(true);
     try {
-      await api.unsubscribeMarketingContact(contact.id, note, accountId);
+      await api.unsubscribeMarketingContact(contact.id, note, accountId, unsubscribeBrandId);
       showToast('수신거부를 기록했습니다', 'success');
       setUnsubscribing(null);
       reload();
@@ -114,6 +128,25 @@ export default function MarketingContactsPage() {
     }
   };
 
+  const createBrand = async () => {
+    if (!brandName.trim() || busy) return;
+    setBusy(true);
+    try {
+      const brand = await api.createMarketingBrand(accountId, brandName.trim());
+      setBrandId(brand.id); setBrandName(''); reload();
+    } catch (err) { showToast((err as Error).message, 'error'); }
+    finally { setBusy(false); }
+  };
+  const migrate = async () => {
+    if (!brandId || !selected.length || busy) return;
+    setBusy(true);
+    try {
+      await api.migrateMarketingLegacyConsent(accountId, brandId, selected);
+      setSelected([]); setMigrating(false); reload();
+      showToast('선택한 기존 동의를 브랜드에 이관했습니다', 'success');
+    } catch (err) { showToast((err as Error).message, 'error'); }
+    finally { setBusy(false); }
+  };
   const total = data?.total ?? 0;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -131,6 +164,13 @@ export default function MarketingContactsPage() {
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <ConsentNoticePanel accountId={accountId} />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
+          <Select label="가져오기 · 기존 동의 이관 대상 브랜드" value={brandId} options={[{ value: '', label: '— 브랜드 선택 —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} onChange={(e) => setBrandId(e.target.value)} />
+          <Input label="새 브랜드 이름" value={brandName} onChange={(e) => setBrandName(e.target.value)} />
+          <Button disabled={busy || !brandName.trim()} onClick={() => void createBrand()}>브랜드 만들기</Button>
+          <Button disabled={busy || !brandId || !selected.length} onClick={() => setMigrating(true)}>선택 {selected.length}명 기존 동의 이관</Button>
+        </div>
+        <Hint>기존 동의의 실제 발신자가 확인된 연락처만 선택해 브랜드 하나에 이관하세요. 이관 전 연락처는 브랜드 발송에서 제외됩니다. 목록은 분류이고, 같은 브랜드의 여러 목록은 동의를 공유합니다.</Hint>
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(200px, 2fr) auto', gap: 8, alignItems: 'end' }}>
           <Input
             label="수신 목록"
@@ -176,6 +216,7 @@ export default function MarketingContactsPage() {
               <table style={tableStyles.table} data-testid="marketing-contacts">
                 <thead>
                   <tr>
+                    <th style={tableStyles.th}>기존 동의 이관</th>
                     <th style={tableStyles.th}>주소</th>
                     <th style={tableStyles.th}>이름</th>
                     <th style={tableStyles.th}>목록</th>
@@ -188,9 +229,9 @@ export default function MarketingContactsPage() {
                 </thead>
                 <tbody>
                   {data.contacts.map((c) => {
-                    const consent = contactConsentLine(c);
                     return (
                     <tr key={c.id}>
+                      <td style={tableStyles.td}>{!c.legacy_consent_migrated && c.status === 'subscribed' ? <input type="checkbox" aria-label={`${c.email} 기존 동의 이관 선택`} checked={selected.includes(c.id)} onChange={(e) => setSelected((ids) => e.target.checked ? [...ids, c.id] : ids.filter((id) => id !== c.id))} /> : '—'}</td>
                       <td style={tableStyles.td}>{c.email || <span style={{ color: tokens.colors.textMuted }}>(삭제됨)</span>}</td>
                       <td style={tableStyles.td}>{c.name}</td>
                       <td style={tableStyles.td}>{c.lists.join(', ')}</td>
@@ -203,25 +244,25 @@ export default function MarketingContactsPage() {
                         )}
                       </td>
                       <td style={tableStyles.td}>
-                        <div>{CONSENT_METHOD_LABELS[c.consent_method] || c.consent_method} · {formatDateTime(c.consent_at)}</div>
-                        <div style={{ fontSize: 11, color: tokens.colors.textMuted, overflowWrap: 'anywhere' }}>
-                          {c.consent_source}{c.consent_text_version ? ` · 문구 ${c.consent_text_version}` : ''}
-                        </div>
-                        {c.status === 'subscribed' && c.consent_due_at && (
-                          <div
-                            data-testid={`marketing-contact-consent-${c.id}`}
-                            style={{ fontSize: 11, marginTop: 2, color: consent.expired ? tokens.colors.dangerLight : tokens.colors.textSecondary }}
-                          >
-                            {consent.expired ? `동의 기한 ${consent.due} 지남 — 새 동의가 있어야 보냅니다` : `동의 기한 ${consent.due}`}
-                            {consent.notice ? ` · ${consent.notice}` : ''}
-                          </div>
-                        )}
+                        {(c.consents || []).length === 0 && <span>브랜드 동의 없음 — 발송 제외</span>}
+                        {(c.consents || []).map((entry) => {
+                          const consent = contactConsentLine({ ...c, ...entry });
+                          return <div key={entry.id} style={{ marginBottom: 8 }}>
+                            <b>{brands.find((b) => b.id === entry.brand_id)?.name || entry.brand_id}</b> · {contactStatusView(entry.status).label}
+                            <div>{CONSENT_METHOD_LABELS[entry.consent_method] || entry.consent_method} · {formatDateTime(entry.consent_at)}</div>
+                            <div>{entry.consent_source}{entry.consent_text_version ? ` · 문구 ${entry.consent_text_version}` : ''}</div>
+                            {entry.consent_due_at && <div data-testid={`marketing-contact-consent-${c.id}-${entry.brand_id}`} style={{ color: consent.expired ? tokens.colors.dangerLight : tokens.colors.textSecondary }}>동의 기한 {consent.due}{consent.expired ? ' 지남 — 발송 제외' : ''}{consent.notice ? ` · ${consent.notice}` : ''}</div>}
+                            <div>야간 수신: {entry.night_consent ? '동의' : '미동의'}</div>
+                            {c.status === 'subscribed' && entry.status === 'subscribed' && <Button size="sm" variant="ghost" onClick={() => { setUnsubscribeBrandId(entry.brand_id); setUnsubscribing(c); }}>이 브랜드 수신거부</Button>}
+                          </div>;
+                        })}
+                        {!c.legacy_consent_migrated && <div>미이관 증거: {formatDateTime(c.consent_at)} · {c.consent_source}</div>}
                       </td>
-                      <td style={tableStyles.td}>{c.night_consent ? '동의' : '—'}</td>
+                      <td style={tableStyles.td}>브랜드별 동의 참조</td>
                       <td style={tableStyles.td}>{[c.country, c.timezone].filter(Boolean).join(' · ')}</td>
                       <td style={{ ...tableStyles.td, whiteSpace: 'nowrap' }}>
                         {c.status === 'subscribed' && (
-                          <Button size="sm" variant="ghost" onClick={() => setUnsubscribing(c)}>수신거부 기록</Button>
+                          <Button size="sm" variant="ghost" onClick={() => { setUnsubscribeBrandId(undefined); setUnsubscribing(c); }}>전체 브랜드 수신거부</Button>
                         )}
                         {c.status !== 'erased' && (
                           <Button size="sm" variant="danger" onClick={() => setErasing(c)}>삭제</Button>
@@ -244,6 +285,8 @@ export default function MarketingContactsPage() {
       {importing && (
         <ImportContactsModal
           accountId={accountId}
+          brands={brands}
+          defaultBrandId={brandId}
           defaultList={searchParams.get('list') || ''}
           onClose={() => setImporting(false)}
           onImported={reload}
@@ -251,13 +294,21 @@ export default function MarketingContactsPage() {
       )}
       <NoteModal
         isOpen={!!unsubscribing}
-        title="수신거부 기록"
-        message={unsubscribing ? `${unsubscribing.email} — 전화 · 답장처럼 다른 경로로 받은 수신거부를 기록합니다. 즉시 발송 대상에서 빠집니다.` : undefined}
+        title={unsubscribeBrandId ? `${brands.find((b) => b.id === unsubscribeBrandId)?.name || '브랜드'} 수신거부` : '전체 브랜드 수신거부'}
+        message={unsubscribing ? `${unsubscribing.email} — 전화 · 답장처럼 다른 경로로 받은 수신거부를 기록합니다. ${unsubscribeBrandId ? '이 브랜드의' : '모든 브랜드의'} 발송 대상에서 빠집니다.` : undefined}
         label="받은 경로 · 메모"
         busy={busy}
         confirmLabel="수신거부 기록"
         onClose={() => setUnsubscribing(null)}
         onSubmit={(note) => { if (unsubscribing) void runUnsubscribe(unsubscribing, note); }}
+      />
+      <ConfirmDialog
+        isOpen={migrating}
+        title="기존 동의를 이 브랜드에 이관할까요?"
+        message={`선택한 ${selected.length}명의 기존 동의 발신자가 “${brands.find((b) => b.id === brandId)?.name || ''}”임을 확인했습니다. 이 동의는 한 브랜드에만 이관할 수 있으며 다른 브랜드에 복제되지 않습니다. 불명확한 연락처는 선택에서 제외하세요.`}
+        confirmLabel={busy ? '이관 중…' : '발신자 확인 · 이관'}
+        onConfirm={() => void migrate()}
+        onCancel={() => { if (!busy) setMigrating(false); }}
       />
       <ConfirmDialog
         isOpen={!!erasing}
@@ -273,12 +324,15 @@ export default function MarketingContactsPage() {
   );
 }
 
-function ImportContactsModal({ accountId, defaultList, onClose, onImported }: {
+function ImportContactsModal({ accountId, brands, defaultBrandId, defaultList, onClose, onImported }: {
+  brands: MarketingBrand[];
+  defaultBrandId: string;
   accountId: string | null;
   defaultList: string;
   onClose(): void;
   onImported(): void;
 }) {
+  const [brandId, setBrandId] = useState(defaultBrandId);
   const [text, setText] = useState('');
   const [lists, setLists] = useState(defaultList);
   const [method, setMethod] = useState('');
@@ -314,7 +368,7 @@ function ImportContactsModal({ accountId, defaultList, onClose, onImported }: {
   };
 
   const submit = async () => {
-    if (!plan || !plan.valid.length) return;
+    if (!brandId || !plan || !plan.valid.length) return;
     setBusy(true);
     setSubmitError('');
     const totals: MarketingContactImportResult = { created: 0, updated: 0, suppressed: 0, invalid: [] };
@@ -324,7 +378,7 @@ function ImportContactsModal({ accountId, defaultList, onClose, onImported }: {
       const chunks = chunkContacts(plan.valid);
       let base = 0;
       for (const chunk of chunks) {
-        const r = await api.importMarketingContacts(accountId, { lists: normalizedLists, contacts: chunk });
+        const r = await api.importMarketingContacts(accountId, { brand_id: brandId, lists: normalizedLists, contacts: chunk });
         totals.created += r.created;
         totals.updated += r.updated;
         totals.suppressed += r.suppressed;
@@ -358,7 +412,7 @@ function ImportContactsModal({ accountId, defaultList, onClose, onImported }: {
         <>
           <Button variant="secondary" onClick={onClose}>{result ? '닫기' : '취소'}</Button>
           {!result && (
-            <Button variant="primary" disabled={busy || !plan || !plan.valid.length} onClick={() => void submit()}>
+            <Button variant="primary" disabled={busy || !brandId || !plan || !plan.valid.length} onClick={() => void submit()}>
               {busy ? '가져오는 중…' : `${formatCount(plan?.valid.length || 0)}명 가져오기`}
             </Button>
           )}
@@ -388,6 +442,7 @@ function ImportContactsModal({ accountId, defaultList, onClose, onImported }: {
         ) : (
           <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+              <Select label="동의를 받은 발신자(브랜드)" value={brandId} options={[{ value: '', label: '— 브랜드 선택 —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} onChange={(e) => setBrandId(e.target.value)} />
               <Input label="모든 행에 더할 수신 목록 (쉼표로 여러 개)" value={lists} placeholder="newsletter" onChange={(e) => setLists(e.target.value)} />
               <Select
                 label="동의 방법 — 열이 없을 때"

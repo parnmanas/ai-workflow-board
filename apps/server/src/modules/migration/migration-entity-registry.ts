@@ -138,7 +138,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   // 나머지는 campaign_id 로 붙는다. 감사 로그는 append-only 기록이라 이관 대상이다.
   'MarketingCampaign', 'MarketingAuditEvent', 'MarketingChannel',
   'MarketingBudgetAllocation', 'MarketingSpendRequest', 'MarketingLedgerEntry', 'MarketingPost',
-  'MarketingLink', 'MarketingMetric', 'MarketingFeedback', 'MarketingContact', 'MarketingEmailSend',
+  'MarketingLink', 'MarketingMetric', 'MarketingFeedback', 'MarketingContact', 'MarketingBrand', 'MarketingContactConsent', 'MarketingEmailSend',
   'MarketingCycle', 'MarketingApprovalNotice', 'MarketingListHold', 'MarketingConsentNotice',
   'MarketingConsentNoticeSetting',
 

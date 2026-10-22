@@ -130,7 +130,7 @@ export function consentNoticeSummary(settings: MarketingConsentNoticeSettings): 
 /** 현황 숫자(0 이어도 보여 준다 — 무엇을 세는지가 설명이다). */
 export function consentNoticeCountItems(counts: MarketingConsentNoticeCounts): Array<{ key: string; label: string; value: string; warn?: boolean }> {
   return [
-    { key: 'in_window', label: '안내 기간에 든 연락처', value: formatCount(counts.in_window) },
+    { key: 'in_window', label: '안내 기간에 든 브랜드 동의', value: formatCount(counts.in_window) },
     { key: 'waiting', label: '보낼 예정 · 미룸', value: formatCount(counts.waiting) },
     {
       key: 'waiting_no_sender',
@@ -147,7 +147,7 @@ export function consentNoticeCountItems(counts: MarketingConsentNoticeCounts): A
       value: formatCount(counts.failed_retryable),
       warn: counts.failed_retryable > 0,
     },
-    { key: 'expired', label: '기한이 이미 지난 연락처', value: formatCount(counts.expired), warn: counts.expired > 0 },
+    { key: 'expired', label: '기한이 이미 지난 브랜드 동의', value: formatCount(counts.expired), warn: counts.expired > 0 },
   ];
 }
 

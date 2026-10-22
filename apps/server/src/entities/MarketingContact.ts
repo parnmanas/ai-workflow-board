@@ -1,11 +1,12 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 /**
- * MarketingContact — 마케팅 메일 수신자와 그 동의 증거(docs/marketing.md "메일").
+ * MarketingContact — 마케팅 메일 수신자와 기존 동의 증거(docs/marketing.md "메일").
  *
- * 설치 전체의 한 목록이다(여러 캠페인의 메일 채널이 `lists` 로 골라 쓴다). **사람만** 넣는다 — 에이전트에게는 연락처를
+ * 계정 소유의 주소 목록이다(여러 캠페인의 메일 채널이 `lists` 로 골라 쓴다). **사람만** 넣는다 — 에이전트에게는 연락처를
  * 추가하는 경로가 없다(수집한 주소로 스팸을 보내는 길을 막는다). 동의 증거(방법 · 시각 · 출처 · 문구 버전 · IP)를
- * 같이 받고, 동의가 2 년을 넘으면 발송에서 빠진다(정보통신망법 §50). 기한 전에 재확인 안내가 나가면 이어진다
+ * 같이 받는다. 현재 동의는 MarketingContactConsent의 브랜드별 행에 저장하고 이 행의 증거는 명시적 이관용으로 보존한다.
+ * 동의가 2 년을 넘으면 발송에서 빠진다(정보통신망법 §50). 기한 전에 재확인 안내가 나가면 이어진다
  * (MarketingConsentNotice). 야간(수신자 현지 21–08시) 수신은 `night_consent` 가 있어야 한다.
  *
  * 수신거부 · 삭제 후에도 `email_hash` 는 남는다(억제 목록) — 같은 주소를 다시 가져와도 되살아나지 않는다.
@@ -40,6 +41,10 @@ export class MarketingContact {
   /** subscribed | unsubscribed | bounced | complained | erased */
   @Column({ type: 'varchar', default: 'subscribed' })
   status: string;
+
+  /** Legacy evidence can be explicitly assigned to only one brand. New imports never create migratable legacy evidence. */
+  @Column({ type: 'boolean', default: false })
+  legacy_consent_migrated: boolean;
 
   /** signup_form | checkout | event | import | other */
   @Column({ type: 'varchar' })

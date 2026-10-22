@@ -138,6 +138,7 @@ export function normalizeChannelProposal(body: Record<string, unknown>, opts: { 
 }
 
 export interface EmailChannelConfig {
+  brand_id: string;
   credential_id: string;
   from_name: string;
   from_address: string;
@@ -161,6 +162,8 @@ export function isEmailAddress(value: string): boolean {
 export function normalizeEmailChannelConfig(raw: unknown): EmailChannelConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw marketingError(400, 'email config is required');
   const body = raw as Record<string, unknown>;
+  const brandId = text(body.brand_id, 'email.brand_id', 100);
+  if (!brandId) throw marketingError(400, 'email.brand_id is required');
   const credentialId = text(body.credential_id, 'email.credential_id', 100);
   if (!credentialId) throw marketingError(400, 'email.credential_id is required (a credential with provider resend|sendgrid and api_key)');
   const fromAddress = text(body.from_address, 'email.from_address', 254);
@@ -179,6 +182,7 @@ export function normalizeEmailChannelConfig(raw: unknown): EmailChannelConfig {
   const listName = normalizeListName(body.list_name);
   const adLabel = text(body.ad_label, 'email.ad_label', 30) || DEFAULT_EMAIL_AD_LABEL;
   return {
+    brand_id: brandId,
     credential_id: credentialId,
     from_name: fromName,
     from_address: fromAddress,

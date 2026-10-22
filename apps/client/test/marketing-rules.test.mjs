@@ -228,7 +228,7 @@ test('채널 승인 방식은 서버의 커넥터 · 메일 규칙과 같다', (
 });
 
 const goodEmail = {
-  credential_id: 'cred-1', from_name: 'AWB', from_address: 'news@awb.dev', reply_to: '', postal_address: 'Seoul 1',
+  brand_id: 'brand-1', credential_id: 'cred-1', from_name: 'AWB', from_address: 'news@awb.dev', reply_to: '', postal_address: 'Seoul 1',
   contact_email: '', list_name: 'Newsletter', ad_label: '(광고)',
 };
 
@@ -236,6 +236,7 @@ test('메일 설정 검증 — 법정 표기가 비면 거부한다(서버 norma
   const drafts = [
     goodEmail,
     { ...goodEmail, credential_id: '' },
+    { ...goodEmail, brand_id: '' },
     { ...goodEmail, from_name: '  ' },
     { ...goodEmail, from_address: 'not-mail' },
     { ...goodEmail, reply_to: 'bad' },

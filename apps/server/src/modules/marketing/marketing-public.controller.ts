@@ -19,14 +19,14 @@ function page(title: string, body: string): string {
 
 /** 수신거부 확인 화면 — 토큰이 맞든 틀리든 같은 화면(누구의 주소인지 · 유효한지 드러내지 않는다). */
 const CONFIRM_PAGE = page('수신거부 / Unsubscribe',
-  '<h1>수신거부 / Unsubscribe</h1><p>이 주소로 오는 마케팅 메일 수신을 거부하시겠습니까? 비용은 들지 않습니다.</p>'
-  + '<p>Stop receiving marketing email at this address? It is free.</p>'
+  '<h1>수신거부 / Unsubscribe</h1><p>이 링크에 해당하는 마케팅 수신 동의를 철회하시겠습니까? 기존 전체 수신거부 링크는 모든 발신자에 적용됩니다. 비용은 들지 않습니다.</p>'
+  + '<p>Withdraw the marketing consent covered by this link? Older account-wide links apply to all senders. It is free.</p>'
   + '<form method="post"><button type="submit">수신거부 / Unsubscribe</button></form>');
 
 function donePage(date: string): string {
   return page('수신거부 완료 / Unsubscribed',
-    `<h1>수신거부 처리됨 / Unsubscribed</h1><p>${date}에 수신거부가 처리되었습니다. 앞으로 마케팅 메일을 보내지 않습니다.</p>`
-    + `<p>Your request was processed on ${date}. You will not receive marketing email from us.</p>`);
+    `<h1>수신거부 처리됨 / Unsubscribed</h1><p>${date}에 수신거부가 처리되었습니다. 이 링크에 해당하는 수신 동의를 철회했습니다.</p>`
+    + `<p>Your request was processed on ${date}. The consent covered by this link has been withdrawn.</p>`);
 }
 
 /** 동의 유지 확인 화면(재확인 안내의 유지 링크) — GET 은 아무것도 바꾸지 않는다. 토큰과 무관하게 같은 화면이다. */
@@ -104,9 +104,11 @@ export class MarketingPublicController {
 
   /** 동의 유지 확인 화면(docs/marketing.md "동의 재확인 안내"). GET 은 아무것도 바꾸지 않는다. */
   @Get('c/:token')
-  keepPage(@Res() res: Response) {
+  async keepPage(@Param('token') token: string, @Res() res: Response) {
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(200).type('text/html; charset=utf-8').send(KEEP_CONFIRM_PAGE);
+    const brand = await this.consentNotices.keepBrand(token);
+    const escaped = (brand || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+    return res.status(200).type('text/html; charset=utf-8').send(brand ? KEEP_CONFIRM_PAGE.replace('<h1>', `<p>${escaped}</p><h1>`) : KEEP_UNAVAILABLE_PAGE);
   }
 
   /** 동의 유지 — 새 동의로 기록한다(동의일 = 지금). 수신거부 · 삭제된 주소나 기한이 지난 링크는 되살리지 않는다. */

@@ -224,6 +224,7 @@ export function channelTargetKey(platform: string, target: string): string {
 
 /** 메일 채널 설정 입력칸. 서버 normalizeEmailChannelConfig 와 같은 필수 항목(법정 표기)을 미리 본다. */
 export interface EmailConfigDraft {
+  brand_id: string;
   credential_id: string;
   from_name: string;
   from_address: string;
@@ -238,6 +239,7 @@ export const DEFAULT_EMAIL_AD_LABEL = '(광고)';
 
 export function emailDraftFrom(config: Partial<MarketingEmailConfig> | null | undefined): EmailConfigDraft {
   return {
+    brand_id: config?.brand_id || '',
     credential_id: config?.credential_id || '',
     from_name: config?.from_name || '',
     from_address: config?.from_address || '',
@@ -252,6 +254,7 @@ export function emailDraftFrom(config: Partial<MarketingEmailConfig> | null | un
 /** 틀린 첫 항목의 설명, 없으면 null. */
 export function validateEmailDraft(d: EmailConfigDraft): string | null {
   if (!d.credential_id) return '메일 credential 을 고르세요 (provider = resend | sendgrid, api_key 필드)';
+  if (!d.brand_id) return '동의를 받은 발신자 브랜드를 고르세요';
   if (!d.from_name.trim()) return '발신자 이름은 법정 표기라 비울 수 없습니다';
   if (!isEmailAddress(d.from_address.trim())) return '발신 주소가 메일 주소가 아닙니다';
   if (d.reply_to.trim() && !isEmailAddress(d.reply_to.trim())) return '회신 주소가 메일 주소가 아닙니다';
@@ -265,6 +268,7 @@ export function validateEmailDraft(d: EmailConfigDraft): string | null {
 
 export function emailConfigBody(d: EmailConfigDraft): Partial<MarketingEmailConfig> {
   return {
+    brand_id: d.brand_id,
     credential_id: d.credential_id,
     from_name: d.from_name.trim(),
     from_address: d.from_address.trim(),
