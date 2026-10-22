@@ -49,8 +49,8 @@
 | `MarketingCampaign` | `marketing_campaigns` | 제품(Project), 브리프 · 목표 · 대상, capabilities, 에이전트 RuntimeSpec, 주기, 통화, 한도, 결제 방식, 수취인 허용 목록, 링크 허용 도메인, 공개 문구, 일일 상한, 피드백 티켓 설정 |
 | `MarketingChannel` | `marketing_channels` | 캠페인의 채널(연결 테이블 + 탐색 근거). kind 는 `outreach` · `email` · `manual` |
 | `MarketingPost` | `marketing_posts` | 채널별 콘텐츠(게시글 · 답글 · 메일) |
-| `MarketingEmailSend` | `marketing_email_sends` | 메일 한 통 = (post × contact). 발송 큐이자 기록 |
-| `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 수신거부, 억제 해시 |
+| `MarketingEmailSend` | `marketing_email_sends` | 메일 한 통 = (post × contact). 발송 큐이자 기록. 보낸 credential, 공급자가 알려 온 바운스 · 스팸 신고 |
+| `MarketingContact` | `marketing_contacts` | 메일 수신자(설치 전체의 한 목록), 동의 증거, 수신거부 · 바운스 · 스팸 신고, 억제 해시 |
 | `MarketingBudgetAllocation` | `marketing_budget_allocations` | 채널별 예산 편성(버전) |
 | `MarketingSpendRequest` | `marketing_spend_requests` | 지출 요청과 그 상태 기계 |
 | `MarketingLedgerEntry` | `marketing_ledger_entries` | append-only 원장 |
@@ -60,6 +60,7 @@
 | `MarketingCycle` | `marketing_cycles` | 루프 1회 |
 | `MarketingAuditEvent` | `marketing_audit_events` | append-only 감사 로그 |
 | `MarketingApprovalNotice` | `marketing_approval_notices` | 승인 대기 알림을 보냈다는 표시. (대상, 종류)마다 한 번 |
+| `MarketingListHold` | `marketing_list_holds` | 스팸 신고율이 높아 발송을 멈춘 수신 목록. (계정, 목록)마다 `held` 는 하나, 해제한 것은 이력 |
 
 ### 기존 것과의 경계 (왜 새로 만들었나 / 무엇을 재사용하나)
 
@@ -72,7 +73,7 @@
   - 공개 문구 · 추적 링크 같은 캠페인 고유 필드가 붙는다.
   - 승인 claim(조건부 UPDATE)과 `(campaign, dedupe_key)` 유일 인덱스는 같은 패턴을 쓴다.
   - 다만 사람이 고친 본문은 **같은 UPDATE 에서** 확정한다. 그래서 승인한 글과 나가는 글 사이에 틈이 없다.
-- **폴링 피드백은 `OutreachInboundItem` 에 남는다.** 수집 · 분류 · 티켓은 outreach ingest 가 맡는다. `MarketingFeedback` 은 그 밖의 것만 담는다(manual 채널의 댓글, 메일 답장, 에이전트가 옮긴 글).
+- **폴링 피드백은 `OutreachInboundItem` 에 남는다.** 수집 · 분류 · 티켓은 outreach ingest 가 맡는다. `MarketingFeedback` 은 그 밖의 것만 담는다(manual 채널의 댓글, 메일 답장, 에이전트가 옮긴 글). 메일 답장은 공급자 webhook 이 직접 넣는다("답장").
 - **사이클은 자기 tick 을 갖는다.** Automation Schedule 행을 만들지 않는다. 다음 세 가지 때문이다.
   - 지시문은 발화 시점의 상태로 만들어야 한다.
   - 앞 사이클이 아직 돌면 건너뛰어야 한다.
@@ -137,7 +138,7 @@
   - 연결할 것이 없으면 `awaiting_credential` 로 두고, 나중에 `connect` 한다.
 - **`email`** (email/newsletter)
   - 필수 설정: 메일 credential(`provider`: resend|sendgrid, `api_key`), 발신자 이름 · 주소, 우편 주소, 연락처, 수신 목록 이름.
-  - 선택: 광고 표기(기본 `(광고)`).
+  - 선택: 광고 표기(기본 `(광고)`). 바운스 · 스팸 신고 · 답장을 받으려면 credential 에 webhook 서명 키를 넣는다("공급자 이벤트").
 - **`manual`**: 사람이 직접 올리고 링크를 기록한다.
 
 상태 전이: `proposed → active | awaiting_credential | rejected`, `active ↔ paused`.
@@ -172,7 +173,8 @@
 - 동의 증거를 같이 받는다.
   - 필수: 방법(`signup_form|checkout|event|import|other`), 출처, 시각
   - 선택: 문구 버전, IP, 야간 수신 동의, 국가, 시간대
-- 수신거부 · 삭제된 주소는 `email_hash` 로 **억제**된다. 다시 가져와도 되살아나지 않는다.
+- 수신거부 · 바운스 · 스팸 신고 · 삭제된 주소는 `email_hash` 로 **억제**된다. 다시 가져와도 되살아나지 않는다.
+- 상태는 `subscribed` · `unsubscribed` · `bounced` · `complained` · `erased`(`CONTACT_STATUSES`)이고, `subscribed` 에게만 보낸다. 억제가 어디서 왔는지는 `unsubscribe_source` 다: `link` · `one_click` · `manual` · `mailto`(List-Unsubscribe 메일 회신) · `bounce` · `complaint` · `provider`(공급자 쪽 수신거부).
 - 삭제(erase)하면 주소 · 이름은 지우고 해시만 남긴다.
 
 ### 발송
@@ -186,6 +188,8 @@
   - 다시 보낼지는 "다시 보내면 두 번 받을 수 있는가" 로 정한다. Resend 에는 발송 행 id 를 `Idempotency-Key` 로 보내므로 타임아웃 · 5xx · 429 를 최대 3번까지 다시 시도한다. SendGrid 는 멱등 키가 없어 429 만 다시 시도하고, 타임아웃 · 5xx 는 `failed` 로 닫는다.
   - 보내던 중 끊긴 행은 다시 보내지 않고 `failed` 로 닫는다. 중복 발송보다 누락이 낫다.
   - 캠페인이나 채널이 일시정지되면 큐의 메일은 버리지 않고 `deferred` 로 미룬다. 재개하면 이어서 보낸다. 보관된 캠페인의 메일은 `suppressed` 다.
+  - 수신 목록이 스팸 신고율로 멈췄으면 그 목록의 메일도 `deferred` 로 미룬다("목록 발송 중지"). 해제하면 바로 보낸다.
+  - 보낼 때 발송 행 id 를 공급자에 싣는다(Resend `tags` 의 `awb_send_id`, SendGrid `custom_args.awb_send_id`). 공급자가 그 메일의 이벤트에 그대로 돌려주므로 이벤트를 정확한 발송 행에 잇는다. 발송 행에는 보낸 credential(`credential_id`)도 남는다.
 - 서버가 **강제로** 넣는 것:
   - 제목 앞 광고 표기. 한국 · 국가 미상 수신자는 항상 `(광고)`, 그 밖은 채널 `ad_label`.
   - 본문 끝 꼬리말: 발신자명 · 우편 주소 · 연락처, 무료 수신거부 링크, 수신 동의일.
@@ -200,6 +204,52 @@
 - 토큰은 256-bit 난수이고 REST 응답에 나가지 않는다.
 
 에이전트는 연락처를 볼 수 없다. 메일 채널의 수신 대상 인원(`audience_count`)만 안다.
+
+### 공급자 이벤트 (바운스 · 스팸 신고 · 수신거부)
+
+공급자는 2xx 로 메일을 받은 뒤에 일어난 일을 webhook 으로 알린다. 받는 주소는 **메일 credential 마다 하나**다 — 공급자는 한 계정의 모든 메일 이벤트를 한 주소로 보내므로 채널이 아니라 credential(= 공급자 계정)이 단위다. 메일 채널 카드가 붙여 넣을 주소와 서명 키 설정 여부를 보여 준다(키 값은 화면에 오지 않는다).
+
+| 공급자 | 주소 | 서명 | credential 칸 | 켤 이벤트 |
+| --- | --- | --- | --- | --- |
+| Resend | `POST /api/m/email/<credential id>/events` | Svix: `svix-id` · `svix-timestamp` · `svix-signature`, HMAC-SHA256(`<id>.<timestamp>.<raw body>`), 5분 | `webhook_secret`(`whsec_…`) | `email.bounced` · `email.complained` · `email.suppressed` · `email.received`(답장) |
+| SendGrid Event Webhook | 같은 `/events` | ECDSA P-256: `X-Twilio-Email-Event-Webhook-Signature`(base64 DER) · `…-Timestamp`, 대상은 `<timestamp><raw body>`, 3일 | `webhook_public_key`(SendGrid 화면의 base64 키) | Bounced · Dropped · Spam Reports · Unsubscribes · Group Unsubscribes, Signed Event Webhook 켬 |
+| SendGrid Inbound Parse | `POST /api/m/email/<credential id>/inbound` | Event 와 같은 방식, 키는 Parse security policy 의 것 | `inbound_public_key` | 회신 주소 도메인, "raw, full MIME" 은 끈다 |
+
+- **서명이 곧 인증이다.** 서명이 없거나 틀리거나, credential 에 키가 없거나, 없는 credential 이거나, `agent_env` credential 이면 아무것도 하지 않고 같은 401 을 돌려준다. 본문은 서명을 검증하려고 raw 로 받고(events 5MB, inbound 30MB), 검증이 끝나기 전에는 해석하지 않는다.
+- 시각 허용: Resend(Svix)는 재시도도 새로 서명하므로 5분. SendGrid 는 재시도가 새로 서명되는지 공급자 문서가 말하지 않아 3일로 넓게 둔다. 처리가 상태 기반이라 같은 이벤트를 다시 받아도 결과가 같다.
+- **이벤트는 그 credential 로 보낸 발송 행에만 닿는다**(행의 `credential_id`, 그 칸이 생기기 전 행은 채널의 지금 credential). 발송 행은 실어 보낸 발송 행 id → 공급자 message id(Resend `email_id`, SendGrid `sg_message_id` 의 첫 `.` 앞 = 발송 응답의 `X-Message-Id`) → 수신 주소로 그 credential 을 거쳐 보낸 최근 발송 순으로 찾는다. 못 찾으면 무시한다.
+
+| 이벤트 | 발송 행 | 연락처 |
+| --- | --- | --- |
+| 하드 바운스(Resend `Permanent`, SendGrid `bounce`) | `bounce_type` hard | `bounced`(source `bounce`) |
+| 소프트 바운스(Resend 그 밖, SendGrid `type: blocked`) | `bounce_type` soft | 그대로 |
+| 스팸 신고(Resend `email.complained`, SendGrid `spamreport`) | `complained_at` — 목록 신고율에 센다 | `complained`(source `complaint`, `bounced` 에서도) |
+| 공급자 쪽 수신거부(SendGrid `unsubscribe` · `group_unsubscribe`) | — | `unsubscribed`(source `provider`) |
+| 공급자가 보내지 않음(Resend `email.suppressed` · subType `Suppressed`, SendGrid `dropped`) | `bounce_type` suppressed | 그 사유대로(예전 바운스 · 잘못된 주소 → `bounced`, 신고 목록 → `complained`, 수신거부 목록 → `unsubscribed`) — 예전 신고의 반복이라 **새 신고로 세지 않는다** |
+
+- 연락처는 이전 상태가 맞을 때만 바꾼다(CAS). 억제는 약해지지 않는다: `erased` · `unsubscribed` 는 그대로고, 신고가 바운스를 덮는다. 바뀌면 감사(`contact.bounced` · `contact.complained` · `contact.unsubscribed`)를 그 메일의 캠페인에 남긴다.
+- 공급자의 사유(수신 서버의 SMTP 응답)는 발송 행의 `event_note` 에만 잘라서 둔다 — 사람에게만 보인다.
+- 게시물의 발송 현황(`GET /posts/:id/sends`)은 `outcomes`(바운스 종류별 · 스팸 신고 수)를 같이 준다.
+
+### 답장
+
+- 받는 길: Resend 는 같은 webhook 의 `email.received`(본문이 없어 `GET https://api.resend.com/emails/receiving/{id}` 로 읽는다 — credential 의 `api_key` 가 받은 메일을 읽을 수 있어야 한다), SendGrid 는 Inbound Parse(`/inbound`).
+- **보낸 사람이 그 credential 로 메일을 받은 연락처일 때만** 기록한다. 그 밖의 메일은 열지도 않는다(Resend 본문 API 를 부르지 않는다) — 회신 주소로 오는 아무 메일이나 피드백이 되지 않게. 자동 응답(`Auto-Submitted` · `Precedence: bulk` · "Automatic reply" · "자동 회신" …)도 기록하지 않는다. 공급자가 보낸 사람 인증이 실패했다고 알린 메일(Resend DMARC `fail`, SendGrid SPF `fail` 이면서 DKIM 통과 없음)도 버린다 — 연락처 주소를 사칭한 글 · 수신거부를 막는다. 인증 결과가 없으면 버리지 않는다.
+- 어느 메일에 대한 답장인지: 그 사람이 그 credential 로 받은 최근 메일. 여러 캠페인이면 회신 주소가 이 메일의 받는 주소인 채널의 것을 고른다.
+- 기록: `MarketingFeedback`(category `other` — 무엇에 대한 글인지 서버가 판단하지 않는다, `recorded_by_type: system`, 출처 키 `email-reply:<공급자>:<Message-ID>` 로 한 번만). summary 는 `메일 답장 — <승인된 메일 제목>` 이다 — 외부 글을 신뢰 필드에 넣지 않는다.
+- **본문은 정리한 것만 남긴다**: 인용 머리("On … wrote:" · "…님이 작성:" · Outlook From/Sent) 아래, `>` 인용 줄, 서명(`-- `) 아래를 버리고, 메일 주소는 `[메일 주소]`, 우리 수신거부 링크(그 사람의 토큰)는 `[수신거부 링크]` 로 바꾼 뒤 8000자로 자른다. HTML 만 있으면 인용 블록 앞까지만 글자로 바꾼다. 아무나 회신 주소로 보낼 수 있는 글이라 정리는 선형 스캔으로만 한다(긴 줄 하나로 처리 시간이 제곱으로 늘지 않게).
+- 그 뒤는 다른 피드백과 같다: 사이클 지시문의 비신뢰 블록(출처에 "· 메일 답장"), MCP 의 `*_untrusted` 필드.
+- **에이전트는 여전히 연락처를 보지 못한다.** 답장한 연락처는 `contact_id` 로만 잇고 author 는 비운다. 사람용 REST(`GET /campaigns/:id/feedback`)만 그 연락처(주소 · 이름 · 상태)를 싣는다.
+- 제목이 `unsubscribe`(List-Unsubscribe 의 mailto) · `수신거부` 인 메일은 수신거부로 처리하고(source `mailto`) 처리 안내 메일을 보낸다. 본문의 낱말로는 판단하지 않는다 — 그런 글은 답장으로 기록돼 사람이 본다.
+
+### 목록 발송 중지 (스팸 신고율)
+
+Gmail · Yahoo 의 대량 발신자 기준은 스팸 신고율 0.1% 미만 유지, 0.3% 에는 닿지 말 것이다. 닿은 목록은 발신 도메인 전체의 평판을 깎으므로 사람이 볼 때까지 멈춘다(`MarketingListHoldService`, 규칙은 `common/marketing/email.ts`).
+
+- 단위는 (계정, 수신 목록)이다. 그 계정에서 그 목록을 쓰는 모든 메일 채널(캠페인 무관)을 같이 센다.
+- 새 스팸 신고가 발송 행에 기록될 때마다 센다: 기간(30일, 그 안에 해제했으면 해제 이후)에 보낸 메일 · 그중 닿지 않은 것(`bounced_at`) · 그중 신고된 것. **신고 2건 이상이고 신고 ÷ 닿은 메일 ≥ 0.3%** 면 멈춘다(작은 목록에서 한 사람의 신고만으로 멈추지 않게 최소 2건).
+- 멈추면: 그 목록의 큐는 버리지 않고 `deferred`, 새 메일은 승인되지 않고(409), 에이전트의 메일 초안도 거부된다. `get_marketing_campaign` 의 채널에 `list_on_hold`, 사이클 지시문의 채널 줄에 "발송 중지" 가 실린다. 그 목록을 쓰는 캠페인마다 감사 `list.held`.
+- 해제는 `marketing.manage` 가 사유를 적어서 한다(`POST /api/marketing/list-holds/:id/release`). 보류된 메일은 바로 나가고, 신고율은 해제 이후 보낸 메일만 다시 센다 — 해제 전 메일에 늦게 온 신고로 다시 멈추지 않는다. 감사 `list.released`.
 
 ## 예산 편성 · 집행 · 결제
 
@@ -416,6 +466,8 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | `record_marketing_feedback`, `list_marketing_feedback` | `feedback_collect` (list 는 읽기) |
 | `propose_marketing_budget_allocation`, `request_marketing_spend`, `get_marketing_spend_request` | `paid_spend` (get 은 읽기) |
 
+메일 채널의 수신 목록이 멈췄으면("목록 발송 중지") 그 채널의 `draft_marketing_post` 는 거부되고, `get_marketing_campaign` 의 그 채널에 `list_on_hold: true` 가 실린다.
+
 ## REST 요약 (`/api/marketing`)
 
 | 묶음 | 엔드포인트 |
@@ -427,15 +479,17 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 | 분석 | `GET /campaigns/:id/report`, `GET/POST /campaigns/:id/links`, `GET/POST /campaigns/:id/metrics` |
 | 피드백 | `GET/POST /campaigns/:id/feedback`, `POST /feedback/:id/ticket` |
 | 연락처 | `GET /contacts`, `POST /contacts/import`, `POST /contacts/:id/{unsubscribe,erase}` |
+| 목록 발송 중지 | `GET /list-holds`(`?list=&status=`), `POST /list-holds/:id/release` |
 | 승인함 | `GET /inbox` — 접근 가능한 캠페인의 결정 대기 수. `total` 은 이 사람이 처리할 수 있는 것만 센다(manage: 채널 제안 · 초안 · 기록 대기 게시물, approve_spend: 편성 제안 · 지출 대기 · 결과 불명 · 결제 기록 대기). 사이드바 배지가 쓴다. 같은 기준으로 사용자 채널에도 알린다("승인 대기 알림"). |
 
-공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`.
+공개 엔드포인트(인증 없음): `GET /api/m/:code`, `GET/POST /api/m/u/:token`, `POST /api/m/email/:credentialId/{events,inbound}`(공급자 서명이 인증).
 
 ## 후속 (이 문서 범위 밖)
 
 - 결제 공급자 직접 어댑터(Stripe Issuing · Google Ads · Meta Ads)
 - 플랫폼 참여 지표 자동 수집(reddit score · 댓글 수)
-- 메일 답장 · 바운스 · 스팸 신고 수집(webhook)
+- 목록 발송 중지를 승인함 배지 · 승인 대기 알림에 싣기
+- 하드 바운스율이 높은 목록의 발송 중지(지금은 스팸 신고율만 본다)
 - 2년 동의 재확인 안내 메일
 - 정책 기반 자동 게시
 - 승인함도 보관된 캠페인의 결과 불명 · 결제 기록 대기를 세기(승인 대기 알림은 결과 불명을 이미 알린다)
