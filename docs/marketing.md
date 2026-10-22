@@ -387,6 +387,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
    - **보내기 전에 멈춘 것만 `failed` 다.** 어댑터는 그런 실패를 `PaymentNotSentError` 로만 알린다. 그 밖의 예외(보낸 뒤의 해석 실패 · 프로그래밍 오류)는 이미 나갔을 수 있어 `unknown` 이다.
    - 재시작하거나 10분 넘게 걸린 `executing` 은 `unknown` 이 된다. 이 전이도 캠페인 잠금 안에서 한다 — 결과를 기록하는 트랜잭션과 줄을 서서, 기록하던 결과가 사라지지 않게.
    - 그렇게 시스템이 `unknown` 으로 돌린 뒤에 실행이 확정 결과(`paid` · `failed`)를 받으면, 그 결과로 `unknown` 을 닫는다. 서버가 둘일 때 한쪽이 부팅하며 다른 쪽의 실행을 `unknown` 으로 돌리는 경우다. 사람이 이미 대조했으면 결과를 버리지 않고 `spend.late_result` 로 감사에 남긴다.
+   - 늦게 온 결과도 `unknown` 이면 상태는 그대로 두고 오류 문장과 응답 요약(`provider_response` — 카드 id 같은 대조 근거)만 채운다. 시스템이 돌릴 때는 공급자 응답이 없어서, 그대로 두면 대조할 근거가 행에 남지 않는다.
    - 승인 직후 프로세스가 죽어서 `approved` 로 남은 자동 실행 요청은 sweep 이 실행한다. 아직 아무것도 보내지 않은 상태라 안전하다.
 
    본문 필드: `type`, `spend_request_id`, `campaign{id,name,slug}`, `channel{id,platform,target}`, `amount_minor`, `currency`, `payee`, `payee_ref`, `purpose`, `payload`, `payload_sha256`, `approved_by[{name,at}]`, `issued_at`
@@ -522,12 +523,12 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 **실행 — 2단계 발급.**
 1. 카드 소지자를 다시 본다. 막혔거나 모드가 바뀌었으면 보내지 않고 `failed` 다.
 2. 카드를 **비활성**으로 만든다(`POST /v1/issuing/cards`, `status=inactive`, 한도 · 업종 · 일회용 · `metadata[awb_spend_request_id]` 는 만들 때만 정할 수 있다). 멱등 키 `awb-spend-<요청 id>`.
-3. 돌아온 카드를 계획과 대조한다(`cardMismatches` — 카드 소지자 · 통화 · 종류 · 상태 · 모드 · metadata · 우리 누적 한도 · 업종 집합 · 일회용). 우리 누적 한도가 있으면 다른 한도는 더 좁힐 뿐이라 받는다. 다르면 **해지**하고(`-cancel` 키) `failed`, 해지하지 못하면 `unknown`.
+3. 돌아온 카드를 계획과 대조한다(`cardMismatches` — 카드 소지자 · 통화 · 종류 · 상태 · 모드 · metadata · 우리 누적 한도 · 업종 집합 · 일회용). 우리 누적 한도가 있으면 다른 한도는 더 좁힐 뿐이라 받는다. 다르면 **해지**하고(`-cancel` 키) `failed`, 해지하지 못하면 `unknown`. 해지는 Stripe 가 **그 카드(id)가 `canceled` 인 카드 객체**로 답했을 때만 된 것으로 본다 — 다른 카드 · 빈 본문은 해지를 모르는 것이다(이 문서의 "해지하고 `failed`" 는 모두 이 확인을 거친다).
 4. 활성화한다(`status=active`, `-activate` 키). 돌아온 카드가 만든 그 카드(id)이고 계획과 같으면 `paid`(거래 id = 카드 id).
    - 같은 카드인데 계획과 다르면 해지하고 `failed`(해지 못 하면 `unknown`) — 승인한 계획과 다른 카드가 살아 있으면 안 된다.
    - 다른 카드로 답하면 그 카드는 무엇인지 모르니 건드리지 않고, 이 요청이 만든 카드만 해지해 두고 `unknown` 이다.
 
-**멈췄던 실행은 카드를 살리지 않는다.** 실행 시작(`executing_at`)에서 5분(`STRIPE_ACTIVATE_WITHIN_MS`)이 지났으면 카드를 만들지 않고(보내지 않았으니 `failed`), 이미 만들었으면 활성화하지 않고 해지한다(`failed`, 해지 못 하면 `unknown`). 멈췄다 깨어난 실행이 늦게 카드를 살리면, 그 사이 요청은 결과 불명(10분)이 되고 사람이 "카드 없음" 을 보고 실패로 닫았을 수 있다(유예 15분) — 예산 밖의 카드가 된다. 요청 시간 초과(읽기 10초 · 쓰기 20초)로 보통은 닿지 않는 한계다.
+**멈췄던 실행은 카드를 살리지 않는다.** 실행 시작(`executing_at`)에서 5분(`STRIPE_ACTIVATE_WITHIN_MS`)이 지났으면 카드를 만들지 않고(보내지 않았으니 `failed`), 이미 만들었으면 활성화하지 않고 해지한다(`failed`, 해지 못 하면 `unknown`). 멈췄다 깨어난 실행이 늦게 카드를 살리면, 그 사이 요청은 결과 불명(10분)이 되고 사람이 "카드 없음" 을 보고 실패로 닫았을 수 있다(유예 15분) — 예산 밖의 카드가 된다. 요청 시간 초과(읽기 10초 · 쓰기 20초)로 보통은 닿지 않는 한계다. 실행 시각은 실행한 서버의 시계로, 유예는 실패를 기록하는 서버의 시계로 재므로 서버가 여럿이면 시계가 맞아야 한다(NTP).
 
 그래서 모호한 생성으로 생겼을지 모르는 카드나 Stripe 장애 복구로 나중에 생긴 카드는 비활성이라 쓸 수 없고, `failed` 로 닫힌 요청에 쓸 수 있는 카드가 남지 않는다.
 
@@ -541,7 +542,7 @@ pending ──approve──▶ approved ──(자동 실행)──▶ executing
 - 응답 요약: 대상 · 한도 · 단계(`create` · `activate`) · 상태 코드 · `error_type` · `error_code` · `request_id` · `idempotent_replayed` · `card_id` · 다른 항목 이름(`mismatched`). 공급자 글은 Stripe 오류 객체의 `error.message` 만 비밀(가려진 키 조각 포함)을 지워 `message_untrusted` 로 둔다 — 응답 본문은 저장하지 않는다.
 
 **결과 불명 — 카드가 있으면 실패로 기록하지 않는다.**
-- 카드 목록에는 metadata 검색이 없어, 서버가 그 카드 소지자의 가상 카드를 실행 시각 ±1일 범위에서 100장씩 10쪽까지 넘기며 요청 id 를 찾는다(`found` · `none` · `incomplete`). 실행이 받아 둔 카드 id(`provider_response.card_id`)는 목록에서 못 찾아도(metadata 가 다르게 돌아온 카드) 직접 읽는다.
+- 카드 목록에는 metadata 검색이 없어, 서버가 그 카드 소지자의 가상 카드를 실행 시각 ±1일 범위에서 100장씩 10쪽까지 넘기며 요청 id 를 찾는다(`found` · `none` · `incomplete`). 실행이 받아 둔 카드 id(`provider_response.card_id`)는 목록과 따로 직접 읽는다 — metadata 가 다르게 돌아와 목록에서 못 찾는 카드도, 목록을 못 읽을 때(Stripe 장애)도 그 카드가 살아 있으면 실패 기록을 막는다. 두 읽기 중 하나만 실패하면 찾은 카드로 `incomplete` 다.
 - **"없음"(`none`)은 범위를 끝까지, 모든 항목을 읽었을 때만이다** — 없음은 사람의 확인 없이 실패 기록(예산 해제)을 허락하기 때문이다. 목록 모양(`object: 'list'` · `data` 배열 · `has_more` 참거짓)이 아닌 답은 읽기 실패, 읽지 못한 항목이 있거나 더 있다는데 넘길 곳이 없거나 10쪽을 넘으면 `incomplete` 다.
 - 요청 때와 다른 키(credential 지문)로는 찾지 않는다 — 카드 소지자 id 는 Stripe 계정마다라, 다른 계정의 "없음" 은 이 요청의 답이 아니다. "공급자에서 확인" 은 409, "실패로 기록" 은 찾지 못한 것으로 본다.
 - "실패로 기록"(`mark-failed`)은 유예(실행 뒤 15분)가 지난 뒤 그 찾기를 먼저 한다(잠금 밖에서).

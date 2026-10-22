@@ -13,10 +13,12 @@
 //      (유예 뒤) 기록한다. 요청별 확인이 카드를 찾아 주고, 결제 기록은 카드 id 를 미리 채운다.
 //   5. 요청 뒤에 수취인의 카드 통제가 바뀌면 승인하지 않는다. 카드 소지자가 실행 전에 막히면 보내지 않는다. 환불은 막는다.
 //   6. 비밀 키와 카드 소지자 개인정보는 요청 행 · 감사 · MCP 어디에도 없다(카드 소지자 이름은 사람만 보는 연결 확인에만).
-//   7. 모호한 생성 답(409 · 멱등 오류 · Stripe 오류 객체가 아닌 4xx)은 unknown. 해지가 실패하면 unknown. 활성화된 카드가 계획과 다르면
+//   7. 모호한 생성 답(409 · 멱등 오류 · Stripe 오류 객체가 아닌 4xx)은 unknown. 해지가 실패하거나 해지 답이 그 카드의 canceled 카드
+//      객체가 아니면 unknown. 활성화된 카드가 계획과 다르면
 //      해지하고 failed, 다른 카드로 답하면 이 요청의 카드만 해지하고 unknown. 실행 시작 5분이 지난 실행은 카드를 만들거나 살리지 않는다.
 //   8. 카드 찾기의 "없음" 은 같은 키로 모든 쪽 · 항목을 읽었을 때만 — 빈 쪽인데 더 있음 · 목록이 아닌 답 · 읽지 못한 항목 · 바뀐 키 ·
-//      10쪽 초과는 "쓴 돈 없음 확인" 을 받아야 실패로 기록한다. 실행이 받아 둔 카드 id 는 목록에서 못 찾아도 직접 읽는다.
+//      10쪽 초과는 "쓴 돈 없음 확인" 을 받아야 실패로 기록한다. 실행이 받아 둔 카드 id 는 목록과 따로 직접 읽는다 — 목록을 못 읽어도
+//      그 카드가 살아 있으면 확인이 있어도 거부한다. 다른 서버의 부팅이 먼저 결과 불명으로 돌린 요청도 늦게 온 결과의 카드 id 를 남긴다.
 //
 // 실행: node --test --test-force-exit test/marketing-spend-stripe.test.mjs (dist 필요)
 
@@ -594,6 +596,39 @@ test('Stripe Issuing: unclear answers stay unknown, a card that does not match i
   assert.equal(changedUnder.status, 409, changedUnder.text);
   assert.match(changedUnder.body.error, /the request changed while its card was being checked/);
 
+  // 7b. 활성화 답을 잃었는데 카드는 살아 있다(시간 초과) — 그 사이 다른 서버의 부팅이 요청을 결과 불명으로 돌렸어도 늦게 온 결과의
+  //     카드 id 가 행에 남고, 실패 기록 때 목록을 못 읽어도(500) 그 카드를 직접 읽어 "쓴 돈 없음 확인" 이 있어도 거부한다.
+  const reqK = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
+  fake.state.overrides.push({
+    match: isStatusUpdate('active'),
+    reply: async () => {
+      fake.state.cards.at(-1).status = 'active';
+      assert.equal(await spend.recoverInterrupted(new Date(Date.now() + 60_000)), 1, 'another server boots and marks the execution unknown');
+      const e = new Error('The operation was aborted');
+      e.name = 'AbortError';
+      throw e;
+    },
+  });
+  await approve(reqK);
+  const cardK = fake.state.cards.at(-1);
+  const rowK = await ds.getRepository('MarketingSpendRequest').findOneBy({ id: reqK.id });
+  assert.equal(rowK.status, 'unknown');
+  assert.equal(rowK.provider_response.card_id, cardK.id, 'the late unknown result keeps the card id on the row');
+  assert.match(rowK.error, new RegExp(`did not answer in time while card ${cardK.id} was being activated`));
+  await pastFailGrace(ctx, reqK.id);
+  fake.state.overrides.push({ match: isCardList, reply: stripeError(500, 'api_error', '', 'An unknown error occurred') });
+  const listDown = await markFailed(reqK, { confirm_no_spend: true });
+  assert.equal(listDown.status, 409, listDown.text);
+  assert.match(listDown.body.error, new RegExp(`an active card for this request exists \\(${cardK.id}\\)`), 'the recorded card is read even when the list is not');
+  cardK.status = 'canceled';
+  fake.state.overrides.push({ match: isCardList, reply: stripeError(500, 'api_error', '', 'An unknown error occurred') });
+  const canceledListDown = await markFailed(reqK);
+  assert.equal(canceledListDown.status, 409, canceledListDown.text);
+  assert.match(canceledListDown.body.error, new RegExp(`could not look through all of this cardholder's cards \\(found only canceled cards: ${cardK.id}\\)`));
+  fake.state.overrides.push({ match: isCardList, reply: stripeError(500, 'api_error', '', 'An unknown error occurred') });
+  assert.equal((await markFailed(reqK, { confirm_no_spend: true })).body.status, 'failed');
+  assert.deepEqual((await failedDetail(reqK)).card_check, { result: 'incomplete', cards: [cardK.id], confirmed_no_spend: true });
+
   // 8. 쪽 넘기기 — 이 요청의 카드가 둘째 쪽에 있어도 찾고, 1,000장을 넘게 봐야 하면 "다 보지 못함" 이다
   const reqP = await ask({ amount_minor: 10000, payee: 'Sponsor card' });
   fake.state.overrides.push({ match: isCardCreate, reply: (entry, { createCard }) => { createCard(entry.body); return stripeError(500, 'api_error', '', 'An unknown error occurred'); } });
@@ -646,6 +681,18 @@ test('Stripe Issuing executor: a stalled execution never activates a card, and a
   assert.equal(stuck.outcome, 'unknown', JSON.stringify(stuck));
   assert.equal(fake.state.cards.at(-1).status, 'inactive');
   assert.equal(fake.state.calls.some(isStatusUpdate('active')), false, 'a late card is never activated');
+
+  // b2. 해지 답은 그 카드(id)가 해지됐다는 카드 객체여야 한다 — 다른 카드 · 빈 본문이면 해지를 모르는 것이라 unknown
+  for (const [label, reply] of [
+    ['bare status', () => json(200, { status: 'canceled' })],
+    ['another card', (entry, { cardJson }) => json(200, { ...cardJson(fake.state.cards[0]), status: 'canceled' })],
+  ]) {
+    fake.state.mangle = (card) => ({ ...card, metadata: {} });
+    fake.state.overrides.push({ match: isStatusUpdate('canceled'), reply });
+    const notCanceled = await executeStripePlan(plan, cred, `req-cancel-${label.replace(' ', '-')}`, { fetchImpl: fake.fetchImpl, env: {}, startedAt, now: () => new Date(startedAt.getTime() + 1000) });
+    assert.equal(notCanceled.outcome, 'unknown', `${label}: ${JSON.stringify(notCanceled)}`);
+    assert.match(notCanceled.error, /could not be canceled/, label);
+  }
 
   // c. 늦지 않았으면 그대로 발급한다
   const onTime = await executeStripePlan(plan, cred, 'req-on-time', { fetchImpl: fake.fetchImpl, env: {}, startedAt, now: () => new Date(startedAt.getTime() + 1000) });

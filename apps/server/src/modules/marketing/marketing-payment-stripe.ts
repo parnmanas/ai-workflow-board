@@ -299,11 +299,13 @@ export interface CardScan {
 
 /**
  * 이 요청의 카드 찾기(읽기만) — 카드 목록에는 metadata 검색이 없어, 그 카드 소지자의 가상 카드를 `around` ±1일 범위에서 넘겨 보며
- * metadata 의 요청 id 를 찾는다(목록은 바로 일관). `knownCardId`(실행이 받아 둔 카드 id)는 목록에 안 보여도 직접 읽는다 — 이 요청이
- * 만든 카드다(metadata 가 다르게 돌아왔어도).
+ * metadata 의 요청 id 를 찾는다(목록은 바로 일관). `knownCardId`(실행이 받아 둔 카드 id)는 목록과 따로 직접 읽는다 — 이 요청이 만든
+ * 카드다(metadata 가 다르게 돌아왔어도).
  *
  * "없음" 은 범위를 끝까지, 모든 항목을 읽었을 때만이다 — 목록 모양이 아닌 답은 PaymentReadError, 읽지 못한 항목이 있거나 더 있다는데
  * 넘길 곳이 없거나 쪽 수를 넘기면 incomplete 다. 없음은 사람의 확인 없이 실패 기록(예산 해제)을 허락하기 때문이다.
+ * 두 읽기 중 하나가 실패해도 다른 쪽이 찾은 카드는 버리지 않는다(incomplete 로 답한다) — 살아 있는 카드는 "쓴 돈 없음 확인" 이 있어도
+ * 실패 기록을 막아야 하므로. 찾은 카드 없이 읽기가 실패하면 그 오류를 던진다.
  */
 export async function findCardsForRequest(
   target: StripeTarget,
@@ -318,53 +320,69 @@ export async function findCardsForRequest(
   const gte = Math.floor((around.getTime() - SCAN_WINDOW_MS) / 1000);
   const lte = Math.ceil((around.getTime() + SCAN_WINDOW_MS) / 1000);
   const cards: IssuedCardView[] = [];
+  let readError: unknown = null;
+  if (opts.knownCardId) {
+    try {
+      const known = await stripeGet(`/v1/issuing/cards/${encodeURIComponent(opts.knownCardId)}`, {}, `card ${opts.knownCardId}`, cred, { ...io, missingIsNull: true });
+      if (known !== null) {
+        if (known.object !== 'issuing.card' || providerToken(known.id, PROVIDER_FORMATS.stripeId) !== opts.knownCardId) {
+          throw new PaymentReadError(`could not read Stripe card ${opts.knownCardId} (the answer is not that card)`, true);
+        }
+        cards.push(readCard(known));
+      }
+    } catch (e) {
+      readError = e;
+    }
+  }
   let complete = false;
   let unreadable = false;
-  let startingAfter = '';
-  for (let page = 0; page < SCAN_MAX_PAGES; page++) {
-    const body = await stripeGet('/v1/issuing/cards', {
-      cardholder: target.cardholder,
-      type: 'virtual',
-      'created[gte]': String(gte),
-      'created[lte]': String(lte),
-      limit: '100',
-      ...(startingAfter ? { starting_after: startingAfter } : {}),
-    }, label, cred, io);
-    if (body.object !== 'list' || !Array.isArray(body.data) || typeof body.has_more !== 'boolean') {
-      throw new PaymentReadError(`could not read Stripe ${label} (the answer is not a card list)`, true);
-    }
-    for (const card of body.data) {
-      if (!card || typeof card !== 'object' || card.object !== 'issuing.card' || !providerToken(card.id, PROVIDER_FORMATS.stripeId)) {
-        unreadable = true;
-        continue;
+  try {
+    let startingAfter = '';
+    for (let page = 0; page < SCAN_MAX_PAGES; page++) {
+      const body = await stripeGet('/v1/issuing/cards', {
+        cardholder: target.cardholder,
+        type: 'virtual',
+        'created[gte]': String(gte),
+        'created[lte]': String(lte),
+        limit: '100',
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      }, label, cred, io);
+      if (body.object !== 'list' || !Array.isArray(body.data) || typeof body.has_more !== 'boolean') {
+        throw new PaymentReadError(`could not read Stripe ${label} (the answer is not a card list)`, true);
       }
-      if (card.metadata?.[STRIPE_REQUEST_METADATA_KEY] === requestId) cards.push(readCard(card));
+      for (const card of body.data) {
+        if (!card || typeof card !== 'object' || card.object !== 'issuing.card' || !providerToken(card.id, PROVIDER_FORMATS.stripeId)) {
+          unreadable = true;
+          continue;
+        }
+        if (card.metadata?.[STRIPE_REQUEST_METADATA_KEY] === requestId && !cards.some((c) => c.id === card.id)) cards.push(readCard(card));
+      }
+      if (!body.has_more) {
+        complete = true;
+        break;
+      }
+      const last = providerToken(body.data[body.data.length - 1]?.id, PROVIDER_FORMATS.stripeId);
+      if (!last) break;
+      startingAfter = last;
     }
-    if (!body.has_more) {
-      complete = true;
-      break;
-    }
-    const last = providerToken(body.data[body.data.length - 1]?.id, PROVIDER_FORMATS.stripeId);
-    if (!last) break;
-    startingAfter = last;
+  } catch (e) {
+    readError = readError || e;
   }
-  if (opts.knownCardId && !cards.some((c) => c.id === opts.knownCardId)) {
-    const known = await stripeGet(`/v1/issuing/cards/${encodeURIComponent(opts.knownCardId)}`, {}, `card ${opts.knownCardId}`, cred, { ...io, missingIsNull: true });
-    if (known !== null) {
-      if (known.object !== 'issuing.card' || providerToken(known.id, PROVIDER_FORMATS.stripeId) !== opts.knownCardId) {
-        throw new PaymentReadError(`could not read Stripe card ${opts.knownCardId} (the answer is not that card)`, true);
-      }
-      cards.push(readCard(known));
-    }
+  if (readError) {
+    if (!cards.length) throw readError;
+    return { result: 'incomplete', cards, api_version: version };
   }
   const result = cards.length ? 'found' : complete && !unreadable ? 'none' : 'incomplete';
   return { result, cards, api_version: version };
 }
 
-/** 쓰이기 전의 카드를 해지한다(돌이킬 수 없다). 해지됐음을 확인하면 true. */
+/** 쓰이기 전의 카드를 해지한다(돌이킬 수 없다). 그 카드(id)가 해지됐다는 카드 객체로 답했을 때만 true — 그 밖은 해지를 모르는 것이다. */
 async function cancelCard(cardId: string, idem: string, cred: StripeCredential, opts: { fetchImpl?: typeof fetch; version: string }): Promise<boolean> {
   const result = await stripePost(`/v1/issuing/cards/${encodeURIComponent(cardId)}`, new URLSearchParams({ status: 'canceled' }), `${idem}-cancel`, cred, opts);
-  return result.kind === 'reply' && result.reply.status === 200 && result.reply.json?.status === 'canceled';
+  if (result.kind !== 'reply' || result.reply.status !== 200) return false;
+  const card = result.reply.json;
+  return !!card && typeof card === 'object' && card.object === 'issuing.card'
+    && providerToken(card.id, PROVIDER_FORMATS.stripeId) === cardId && card.status === 'canceled';
 }
 
 /**

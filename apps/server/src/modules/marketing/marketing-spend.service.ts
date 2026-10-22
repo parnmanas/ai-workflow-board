@@ -845,6 +845,14 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       await lockCampaign(manager, row.campaign_id);
       const current = await manager.getRepository(MarketingSpendRequest).findOne({ where: { id } });
       const lateSettle = current?.status === 'unknown' && outcome.outcome !== 'unknown';
+      // 그 사이 시스템이 unknown 으로 돌렸고(markInterrupted — 공급자 응답 없이) 늦게 온 결과도 unknown 이면, 상태는 그대로 두고 공급자
+      // 응답 요약만 채운다. 실행이 받아 둔 카드 id 같은 대조 근거가 행에 남아야 실패 기록 전 확인이 그것을 읽는다.
+      if (current?.status === 'unknown' && outcome.outcome === 'unknown') {
+        await manager.getRepository(MarketingSpendRequest).createQueryBuilder().update(MarketingSpendRequest)
+          .set({ error: outcome.error, provider_response: outcome.response })
+          .where('id = :id AND status = :s', { id, s: 'unknown' })
+          .execute();
+      }
       if (!current || (current.status !== 'executing' && !lateSettle)) {
         // 그 사이 사람이 대조했다(executing 이 오래 걸려 unknown 이 된 뒤 등). 결과를 버리지 말고 감사에 남겨
         // 사람이 자기 기록과 맞춰 볼 수 있게 한다.
@@ -1028,7 +1036,7 @@ export class MarketingSpendService implements OnModuleInit, OnModuleDestroy {
       if (!confirmNoSpend) {
         throw marketingError(409, scan.result === 'found'
           ? `only canceled cards were found for this request (${ids.join(', ')}) — confirm in the Stripe Dashboard that nothing was spent on them, then record the failure with confirm_no_spend`
-          : 'could not look through all of this cardholder\'s cards — check the Stripe Dashboard and, if no card was issued for this request, record the failure with confirm_no_spend');
+          : `could not look through all of this cardholder's cards${ids.length ? ` (found only canceled cards: ${ids.join(', ')})` : ''} — check the Stripe Dashboard and, if nothing was spent for this request, record the failure with confirm_no_spend`);
       }
       return { result: scan.result, cards: ids, confirmed_no_spend: true };
     }
