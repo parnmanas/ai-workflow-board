@@ -77,7 +77,12 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    await this.failInterruptedBuilds();
+    // 정리가 실패해도 서버 부팅은 막지 않는다 — 남는 것은 그 그래프의 building 뿐이다.
+    try {
+      await this.failInterruptedBuilds();
+    } catch (e) {
+      this.logService.error('Ontology', 'failed to release graph builds interrupted by a restart', { err: String(e) });
+    }
   }
 
   /**

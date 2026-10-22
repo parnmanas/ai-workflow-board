@@ -381,7 +381,8 @@ async function settlesWithin(promise, ms) {
 }
 
 describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리뷰 지적의 근본 원인)', () => {
-  it('교체 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', async () => {
+  // 빌드를 기다리는 두 테스트는 상한을 둔다 — 교체 트랜잭션이 데드락하면 파일째 매달리는 대신 실패한다.
+  it('교체 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', { timeout: 30_000 }, async () => {
     const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-flush-overlap', folder_path: '', status: 'building' }));
     let releaseBuild;
     const buildGate = new Promise((resolve) => { releaseBuild = resolve; });
@@ -418,7 +419,7 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
   // 끝날 때까지 멈췄다(워커에는 파일별 시간 상한이 없어 무기한일 수 있다).
   // 추출이 멈춰 있는 동안에도 다른 쓰기는 끝나야 하고, 빌드 중 표시와 동시 빌드
   // 방지(status='building' 선점)는 그대로여야 한다.
-  it('추출이 도는 동안 다른 온톨로지 쓰기가 빌드 끝까지 기다리지 않는다 — building 표시와 동시 빌드 방지는 그대로다', async () => {
+  it('추출이 도는 동안 다른 온톨로지 쓰기가 빌드 끝까지 기다리지 않는다 — building 표시와 동시 빌드 방지는 그대로다', { timeout: 30_000 }, async () => {
     const graph = await graphRepo.save(graphRepo.create({
       account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx', folder_path: '', status: 'ready', commit: 'old-commit',
     }));
@@ -750,5 +751,18 @@ describe('OntologyLifecycleService.onApplicationBootstrap — 재기동으로 �
     const refreshed = await svc.forceRebuild({ graphId: interrupted.id, accountId: ACCOUNT_ID });
     assert.equal(refreshed.started, true, 'building 이 풀려야 Refresh 가 다시 빌드를 띄운다');
     assert.deepEqual(kicked, [interrupted.id]);
+  });
+
+  it('정리가 실패해도 부팅을 막지 않고 에러 로그만 남긴다', async () => {
+    const errors = [];
+    const svc = new OntologyLifecycleService(AppOntologyDataSource, {}, {}, {
+      info() {}, warn() {}, error: (category, message, meta) => { errors.push({ category, message, meta }); },
+    });
+    svc.failInterruptedBuilds = async () => { throw new Error('ontology db unavailable'); };
+
+    await assert.doesNotReject(svc.onApplicationBootstrap());
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].category, 'Ontology');
+    assert.match(errors[0].meta.err, /ontology db unavailable/);
   });
 });
