@@ -21,6 +21,7 @@ import {
   CONNECTOR_METRICS,
   UNKNOWN_SPEND_MESSAGE,
   activationBlocker,
+  engagementCollectedChannel,
   engagementSummary,
   engagementTrackedChannel,
   metricValueText,
@@ -91,6 +92,16 @@ test('참여 자동 수집 — 서버가 읽는 채널 · 지표 판정이 서�
     }
   }
   assert.equal(engagementTrackedChannel(undefined), false);
+  // 기록 폼이 막는 기준 — 연결된(active · paused) 채널만. 제안 · 연결 대기 · 거부된 채널은 서버가 읽지 않는다.
+  for (const platform of serverConstants.CHANNEL_PLATFORMS) {
+    for (const kind of serverConstants.CHANNEL_KINDS) {
+      for (const status of serverConstants.CHANNEL_STATUSES) {
+        assert.equal(engagementCollectedChannel({ kind, platform, status }), serverEngagement.engagementCollected({ kind, platform, status }), `${kind} · ${platform} · ${status}`);
+      }
+    }
+  }
+  assert.equal(engagementCollectedChannel({ kind: 'outreach', platform: 'reddit', status: 'proposed' }), false);
+  assert.equal(engagementCollectedChannel({ kind: 'outreach', platform: 'reddit', status: 'paused' }), true);
   assert.deepEqual([...CONNECTOR_METRICS], [...serverEngagement.ENGAGEMENT_METRICS]);
   assert.equal(engagementSummary('reddit', { engagements: 1234, replies: 12 }), '점수 1,234 · 댓글 12');
   assert.equal(engagementSummary('github', { engagements: 5, replies: null }), '반응 5', '답글(댓글)인 글은 댓글 수가 없다');

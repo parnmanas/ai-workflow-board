@@ -11,7 +11,7 @@ import { MarketingLedgerEntry } from '../../entities/MarketingLedgerEntry';
 import { MarketingBudgetAllocation } from '../../entities/MarketingBudgetAllocation';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { MARKETING_METRICS, type MarketingActor } from '../../common/marketing/marketing-constants';
-import { ENGAGEMENT_METRICS, engagementTracked } from '../../common/marketing/engagement';
+import { ENGAGEMENT_METRICS, engagementCollected } from '../../common/marketing/engagement';
 import { buildReport } from '../../common/marketing/report';
 import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
@@ -201,7 +201,7 @@ export class MarketingAnalyticsService {
   ): Promise<MarketingMetric[]> {
     if (!Array.isArray(observations) || !observations.length) throw marketingError(400, 'observations must be a non-empty array');
     if (observations.length > MAX_OBSERVATIONS) throw marketingError(400, `at most ${MAX_OBSERVATIONS} observations per call`);
-    const channels = new Map((await this.channelRepo.find({ where: { campaign_id: campaign.id }, select: ['id', 'kind', 'platform'] })).map((c) => [c.id, c]));
+    const channels = new Map((await this.channelRepo.find({ where: { campaign_id: campaign.id }, select: ['id', 'kind', 'platform', 'status'] })).map((c) => [c.id, c]));
     const rows = [] as MarketingMetric[];
     for (const [i, raw] of observations.entries()) {
       const o = (raw || {}) as Record<string, unknown>;
@@ -227,12 +227,12 @@ export class MarketingAnalyticsService {
       if ((ENGAGEMENT_METRICS as readonly string[]).includes(metric)) {
         const tracked = [channelId, postChannelId].some((id) => {
           const channel = id ? channels.get(id) : undefined;
-          return !!channel && engagementTracked(channel);
+          return !!channel && engagementCollected(channel);
         });
         if (tracked) {
           throw marketingError(400, `observations[${i}]: ${metric} of posts on reddit/GitHub outreach channels are read from the platform by the server (source connector) — do not record them`);
         }
-        if (!channelId && !postChannelId && [...channels.values()].some((c) => engagementTracked(c))) {
+        if (!channelId && !postChannelId && [...channels.values()].some((c) => engagementCollected(c))) {
           throw marketingError(400, `observations[${i}]: give ${metric} a channel — the server reads it for this campaign's reddit/GitHub outreach channels, and a campaign-wide value would count those again`);
         }
       }

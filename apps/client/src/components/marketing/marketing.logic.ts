@@ -1002,6 +1002,14 @@ export function engagementTrackedChannel(channel: { kind?: string; platform?: st
   return !!channel && channel.kind === 'outreach' && (channel.platform === 'reddit' || channel.platform === 'github');
 }
 
+/**
+ * 서버가 지금 그 채널 글의 참여를 읽는가 — 연결된(active · paused) reddit · github outreach 채널. 서버
+ * `engagementCollected` 와 같은 판정이고, 기록 폼이 CONNECTOR_METRICS 를 막는 기준이다(제안 · 연결 대기 채널은 막지 않는다).
+ */
+export function engagementCollectedChannel(channel: { kind?: string; platform?: string; status?: string } | null | undefined): boolean {
+  return engagementTrackedChannel(channel) && (channel?.status === 'active' || channel?.status === 'paused');
+}
+
 export const CONNECTOR_METRICS = ['engagements', 'replies'] as const;
 
 /** 게시물의 마지막 참여 — reddit 은 점수, GitHub 은 반응. 답글(댓글)인 글은 댓글 수가 없다. */

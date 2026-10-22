@@ -8,7 +8,7 @@ import {
   METRIC_LABELS,
   RECORDABLE_METRICS,
   REPORT_PERIOD_DAYS,
-  engagementTrackedChannel,
+  engagementCollectedChannel,
   formatCount,
   formatDateTime,
   formatMinor,
@@ -228,11 +228,11 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
   const record = async () => {
     if (!/^\d+$/.test(value.trim())) { setError('값은 0 이상의 정수입니다(매출은 최소 단위)'); return; }
     if ((CONNECTOR_METRICS as readonly string[]).includes(metric)) {
-      if (engagementTrackedChannel(ctx.channels.get(channelId))) {
+      if (engagementCollectedChannel(ctx.channels.get(channelId))) {
         setError('reddit · GitHub 채널의 참여 · 답글은 서버가 게시물에서 직접 읽습니다 — 기록하지 않습니다');
         return;
       }
-      if (!channelId && [...ctx.channels.values()].some((c) => engagementTrackedChannel(c))) {
+      if (!channelId && [...ctx.channels.values()].some((c) => engagementCollectedChannel(c))) {
         setError('채널을 고르세요 — 서버가 읽는 reddit · GitHub 채널이 있어, 캠페인 전체 참여 · 답글은 그 몫을 두 번 셀 수 있습니다');
         return;
       }

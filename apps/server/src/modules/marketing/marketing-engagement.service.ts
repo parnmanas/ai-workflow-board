@@ -33,7 +33,7 @@ const TICK_MS = 5 * 60_000;
 /** sweep 한 번에 보는 글 수. */
 const BATCH = 500;
 /** sweep 한 번에 한 채널로 보내는 요청의 상한 — rate limit 이 없는 채널(GitHub 토큰은 시간당 5,000)도 몰아 쓰지 않게. */
-const MAX_REQUESTS_PER_SWEEP = 30;
+export const MAX_REQUESTS_PER_SWEEP = 30;
 /** 맡은 글을 읽다가 프로세스가 죽으면 이만큼 뒤에 다시 읽는다. */
 const LEASE_MS = 15 * 60_000;
 const MAX_ERROR = 500;
@@ -64,10 +64,13 @@ function message(e: unknown): string {
   return String((e as any)?.message ?? e).slice(0, MAX_ERROR);
 }
 
-/** 요청을 아예 못 했거나(채널 cap) 플랫폼이 rate limit 을 걸었다 — 읽기를 미룬다. */
+/**
+ * 요청을 아예 못 했거나(채널 cap) 플랫폼이 rate limit 을 걸었다 — 읽기를 미룬다. GitHub 은 시간당 한도를 다 쓰면 Retry-After
+ * 없는 403("API rate limit exceeded …")을 준다 — 권한 403 과는 본문으로 가른다.
+ */
 function rateLimited(e: unknown): boolean {
   return e instanceof OutreachChannelRateLimitedError || e instanceof RedditRateLimitError || e instanceof GitHubRateLimitError
-    || (e instanceof GitHubForbiddenError && e.retryAfterMs !== undefined);
+    || (e instanceof GitHubForbiddenError && (e.retryAfterMs !== undefined || /rate limit/i.test(e.message)));
 }
 
 /** 이 오류면 이번 sweep 에 그 채널에 더 묻지 않는다 — 다음 글도 같은 답(rate limit · 차단)을 받는다. */
@@ -106,6 +109,8 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
   connectorFactory: ConnectorFactory = resolveChannelConnector;
   /** 실제 커넥터가 요청마다 기록하는 공용 리미터(테스트는 바꿔 낀다). */
   rateLimiter: OutreachRateLimiter = sharedOutreachRateLimiter;
+  /** sweep 한 번에 한 채널로 보내는 요청의 상한(테스트는 낮춘다). */
+  maxRequestsPerSweep = MAX_REQUESTS_PER_SWEEP;
 
   constructor(
     @InjectRepository(MarketingPost) private readonly postRepo: Repository<MarketingPost>,
@@ -243,9 +248,15 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
     let requests = 0;
     for (let i = 0; i < queue.length; i += perRequest) {
       const chunk = queue.slice(i, i + perRequest);
-      if (requests >= MAX_REQUESTS_PER_SWEEP || budget() <= 0) {
+      const rest = () => queue.slice(i).filter((p) => !early.includes(p));
+      if (requests >= this.maxRequestsPerSweep) {
+        // rate limit 이 아니다 — 쓰지 않고 due 로 둔다. 다음 sweep(5 분 뒤)이 이어서 읽는다.
+        out.deferred += rest().length;
+        return;
+      }
+      if (budget() <= 0) {
         // 아직 차례가 아닌 글(early)은 그대로 둔다.
-        await deferRest(queue.slice(i).filter((p) => !early.includes(p)), ENGAGEMENT_RATE_WAIT);
+        await deferRest(rest(), ENGAGEMENT_RATE_WAIT);
         return;
       }
       const claimed: MarketingPost[] = [];
@@ -263,7 +274,8 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
           for (const post of claimed) if (await this.fail(post, now, message(e))) out.failed++;
         }
         if (channelWide(e)) {
-          await deferRest(queue.slice(i + perRequest).filter((p) => !early.includes(p)), ENGAGEMENT_RATE_WAIT);
+          const reason = rateLimited(e) ? ENGAGEMENT_RATE_WAIT : `not tried after the channel refused a request: ${message(e)}`;
+          await deferRest(queue.slice(i + perRequest).filter((p) => !early.includes(p)), reason);
           return;
         }
         continue;
@@ -305,8 +317,8 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
 
   /**
    * 이 기능 전에 게시된 글을 일정에 넣는다 — 기간 안이고 수집기가 맡은 적 없는(rev 0) 글. 새 글은 게시할 때 첫 읽기가
-   * 잡히고, 수집기가 한 번이라도 쓴 글은 rev 가 올라 있어 다시 잡히지 않는다. 그 글이나 그 채널에 사람 · 에이전트가 손으로
-   * 남긴 참여 · 답글이 있으면 읽지 않는다 — 읽은 값 전체가 첫 변화량이 되어 손으로 남긴 값과 두 번 세어진다.
+   * 잡히고, 수집기가 한 번이라도 쓴 글은 rev 가 올라 있어 다시 잡히지 않는다. 그 글 · 그 채널 · 그 캠페인 전체로 사람 ·
+   * 에이전트가 손으로 남긴 참여 · 답글이 있으면 읽지 않는다 — 읽은 값 전체가 첫 변화량이 되어 손으로 남긴 값과 두 번 세어진다.
    */
   private async scheduleUntracked(now: Date): Promise<void> {
     const legacy = await this.postRepo.find({
@@ -321,17 +333,21 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
       take: BATCH,
     });
     if (!legacy.length) return;
+    const handRecorded = { metric: In([...ENGAGEMENT_METRICS]), source: Not(ENGAGEMENT_SOURCE) };
     const manual = await this.metricRepo.find({
       where: [
-        { metric: In([...ENGAGEMENT_METRICS]), source: Not(ENGAGEMENT_SOURCE), channel_id: In([...new Set(legacy.map((p) => p.channel_id))]) },
-        { metric: In([...ENGAGEMENT_METRICS]), source: Not(ENGAGEMENT_SOURCE), post_id: In(legacy.map((p) => p.id)) },
+        { ...handRecorded, channel_id: In([...new Set(legacy.map((p) => p.channel_id))]) },
+        { ...handRecorded, post_id: In(legacy.map((p) => p.id)) },
+        // 캠페인 전체 값(채널도 글도 없음)은 캠페인 합계에서 겹친다.
+        { ...handRecorded, campaign_id: In([...new Set(legacy.map((p) => p.campaign_id))]), channel_id: '', post_id: '' },
       ],
-      select: ['channel_id', 'post_id'],
+      select: ['campaign_id', 'channel_id', 'post_id'],
     });
     const manualChannels = new Set(manual.map((m) => m.channel_id).filter(Boolean));
     const manualPosts = new Set(manual.map((m) => m.post_id).filter(Boolean));
+    const manualCampaigns = new Set(manual.filter((m) => !m.channel_id && !m.post_id).map((m) => m.campaign_id));
     for (const post of legacy) {
-      const counted = manualChannels.has(post.channel_id) || manualPosts.has(post.id);
+      const counted = manualChannels.has(post.channel_id) || manualPosts.has(post.id) || manualCampaigns.has(post.campaign_id);
       await this.settle(post, counted ? { engagement_error: ENGAGEMENT_MANUAL_ROWS } : { engagement_next_at: now });
     }
   }
@@ -362,7 +378,9 @@ export class MarketingEngagementService implements OnModuleInit, OnModuleDestroy
 
   /** 지금은 읽지 않는다 — 30 분 뒤에 다시 본다(기간이 끝났으면 끝). 미룬 글이 due 목록 앞을 계속 차지하지 않게 한다. */
   private defer(post: MarketingPost, now: Date, reason: string): Promise<boolean> {
-    return this.settle(post, { engagement_next_at: deferEngagementReadAt(publishedAt(post), now), engagement_error: reason.slice(0, MAX_ERROR) });
+    const next = deferEngagementReadAt(publishedAt(post), now);
+    const error = next ? reason : `the 14-day window ended before it could be read again (${reason})`;
+    return this.settle(post, { engagement_next_at: next, engagement_error: error.slice(0, MAX_ERROR) });
   }
 
   /**

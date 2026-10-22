@@ -433,13 +433,15 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 - 실패해도 같은 간격을 따른다(막힌 채널을 몇 분마다 두드리지 않는다). 직전 값은 그대로 둔다.
 - rate limit 때문에 지금 읽지 못한 글은 30분 뒤에 다시 본다. 기간이 끝날 때까지 몫이 나지 않으면 그대로 끝난다 — 미룬 글이 목록에 영원히 남지 않고, 다음 읽기가 뒤로 밀려 다른 채널의 글을 막지 않는다.
 - reddit 처럼 한 요청에 여러 글을 읽는 채널은, 30분 안에 차례가 올 같은 채널의 글도 같은 요청에 싣는다. 글마다 따로 요청하지 않고, 같은 채널 글들의 일정이 한 시각으로 모인다.
-- 이 기능 전에 게시된 글도 기간 안이면 다음 sweep 에 일정에 들어간다. 다만 그 글이나 그 채널에 사람 · 에이전트가 손으로 남긴 `engagements` · `replies` 가 있으면 읽지 않는다 — 처음 읽은 값 전체가 첫 변화량이 되어 손으로 남긴 값과 두 번 세어진다. 그 이유가 `engagement_error` 에 남는다.
+- 이 기능 전에 게시된 글도 기간 안이면 다음 sweep 에 일정에 들어간다. 다만 그 글 · 그 채널 · 그 캠페인 전체로 사람 · 에이전트가 손으로 남긴 `engagements` · `replies` 가 있으면 읽지 않는다 — 처음 읽은 값 전체가 첫 변화량이 되어 손으로 남긴 값과 두 번 세어진다. 그 이유가 `engagement_error` 에 남는다.
 
 **rate limit.**
 - 연결된 OutreachChannel 의 `rate_limit_per_hour` 가 있으면, 지난 한 시간에 남은 요청이 cap 의 절반보다 많을 때만 그 넘는 만큼 읽는다. **cap 의 절반은 게시 · 폴링 몫으로 남는다.** 요청마다 리미터를 다시 본다 — 커넥터의 재시도(401 · 429)도 같은 cap 에 기록되기 때문이다. 마지막 요청의 재시도만큼은 넘을 수 있다.
 - 마케팅이 만든 연결의 기본 cap 은 시간당 6이다. 그러면 수집은 시간당 3요청까지 쓰고, 게시에는 적어도 3요청이 남는다. reddit 은 한 요청에 100개를 읽으므로 보통 채널마다 시간당 한 요청이면 된다. GitHub 은 글마다 한 요청이라, 젊은 글이 많으면 읽기가 늦어진다.
-- 몫이 없으면 그 채널의 글은 30분 뒤로 미룬다(위 "일정"). sweep 한 번에 한 채널로는 30요청까지만 보낸다.
-- 플랫폼 자체의 제한(reddit `x-ratelimit-*`, GitHub 429 · secondary limit)은 커넥터가 그대로 다룬다. 그래도 rate limit 에 걸리면(채널 cap 초과 포함) 실패로 세지 않고 미룬다. rate limit · 403 이 나면 그 채널에는 그 sweep 동안 더 묻지 않는다.
+- 몫이 없으면 그 채널의 글은 30분 뒤로 미룬다(위 "일정"). 미룬 이유가 `engagement_error` 에 남고, 미루다 기간이 끝나면 그렇게 적힌다.
+- sweep 한 번에 한 채널로는 30요청까지만 보낸다. 이것은 rate limit 이 아니어서, 넘은 글은 쓰지 않고 due 로 두어 다음 sweep(5분 뒤)이 바로 잇는다.
+- 플랫폼 자체의 제한(reddit `x-ratelimit-*`, GitHub 429 · secondary limit)은 커넥터가 그대로 다룬다. 그래도 rate limit 에 걸리면 실패로 세지 않고 미룬다. 채널 cap 초과와, GitHub 이 시간당 한도를 다 썼을 때 주는 Retry-After 없는 403("API rate limit exceeded")도 rate limit 으로 본다.
+- rate limit · 403 이 나면 그 채널에는 그 sweep 동안 더 묻지 않는다. 진짜 403(차단 · 권한)은 실패라 다음 간격에 다시 읽고, 아직 묻지 않은 글은 그 거절을 적어 미룬다.
 - 공용 rate limiter 는 서버 프로세스마다 따로 센다(outreach 와 같은 한계).
 
 **한 번만.**
@@ -454,7 +456,7 @@ pending ──approve──▶ approved ──(webhook)──▶ executing ─�
 - OutreachChannel 의 차단 · rate limit 표시는 건드리지 않는다. 읽기가 된다고 게시가 되는 것은 아니라서, 읽기 성공이 게시 경로가 남긴 차단 표시를 지우면 안 된다.
 
 **두 번 세지 않는다.**
-- 서버가 읽는 채널(과 그 게시물)의 `engagements` · `replies` 는 `record_marketing_metrics` 와 `POST /campaigns/:id/metrics` 가 거부한다. 클릭과 같은 규칙이다.
+- 서버가 읽는 채널 — 연결된(active · paused) reddit · GitHub outreach 채널 — 과 그 게시물의 `engagements` · `replies` 는 `record_marketing_metrics` 와 `POST /campaigns/:id/metrics` 가 거부한다. 클릭과 같은 규칙이다. 제안 · 연결 대기 · 거부된 채널은 서버가 게시한 글이 없어 막지 않는다.
 - 그런 채널이 있는 캠페인에서는 채널을 정하지 않은 캠페인 전체 `engagements` · `replies` 도 거부한다. 그 채널들의 몫을 다시 담을 수 있어서다.
 - 화면도 보내기 전에 막는다. 기간이 끝난 글의 참여도 손으로 남기지 못한다.
 

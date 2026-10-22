@@ -6,13 +6,14 @@
 //      마지막 값. 리포트(누적형 합)는 기간의 증가분을 보이고, 게시물 JSON · 에이전트 개요에 마지막 값이 실린다.
 //   3. 나이별 간격, 14 일째 마지막 읽기 뒤 끝. 플랫폼이 돌려주지 않은 글은 실패로 남고 같은 간격으로 다시 읽는다.
 //   4. rate limit: 채널 cap 의 절반은 남긴다 — 몫이 없으면 30 분 뒤로 미루고(요청마다 다시 본다), 기간이 끝나면 끝낸다.
-//      플랫폼 · 채널 rate limit 오류도 미룬다. reddit 은 한 요청에 여러 글, 곧 차례가 올 글까지 같이 읽는다.
+//      플랫폼 · 채널 rate limit 오류(GitHub 의 Retry-After 없는 한도 403 포함)도 미룬다. 진짜 403 은 실패다. sweep 당 요청
+//      상한을 넘은 글은 쓰지 않고 due 로 둔다. reddit 은 한 요청에 여러 글, 곧 차례가 올 글까지 같이 읽는다.
 //   5. 한 번만: 읽는 사이 다른 서버가 맡으면 값도 행도 남기지 않고 lease 뒤에 다시 읽는다. 다른 서버가 낡은 직전 값을 들고
 //      있다가 뒤늦게 맡으려 해도 막힌다(두 번 세지 않는다).
 //   6. 보관된 캠페인은 보관된 동안 읽지 않고, 되살리면 다시 읽는다. 일시정지된 캠페인은 계속 읽는다. 기능 전 게시물도 기간
-//      안이면 잡히되, 그 글 · 채널에 손으로 남긴 참여 · 답글이 있으면 읽지 않는다.
-//   7. 이중 집계 방지: 서버가 읽는 채널(과 그 게시물)의 engagements · replies, 그런 채널이 있는 캠페인의 캠페인 전체
-//      engagements · replies 는 사람 · 에이전트가 기록하지 못한다.
+//      안이면 잡히되, 그 글 · 채널 · 캠페인 전체로 손으로 남긴 참여 · 답글이 있으면 읽지 않는다.
+//   7. 이중 집계 방지: 서버가 읽는 채널(연결된 reddit · GitHub outreach 채널)과 그 게시물의 engagements · replies, 그런 채널이
+//      있는 캠페인의 캠페인 전체 engagements · replies 는 사람 · 에이전트가 기록하지 못한다. 제안 단계 채널뿐이면 막지 않는다.
 //
 // 실행: node --test --test-force-exit test/marketing-engagement.test.mjs (dist 필요)
 
@@ -30,6 +31,8 @@ import {
   ENGAGEMENT_ARCHIVED, ENGAGEMENT_MANUAL_ROWS, ENGAGEMENT_RATE_WAIT, MarketingEngagementService,
 } from '../dist/modules/marketing/marketing-engagement.service.js';
 import { FakeOutreachConnector } from '../dist/modules/outreach/connectors/fake.connector.js';
+import { RedditForbiddenError } from '../dist/modules/outreach/connectors/reddit.connector.js';
+import { GitHubForbiddenError } from '../dist/services/github-connector.service.js';
 import { OutreachRateLimiter, OutreachChannelRateLimitedError } from '../dist/modules/outreach/outreach-rate-limiter.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
@@ -300,11 +303,17 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   await backdate(a1.id, 10 * HOUR);
   await backdate(a2.id, 10 * HOUR + 20 * MIN);
   await backdate(a3.id, 10 * HOUR + 45 * MIN);
+  for (const a of [a1, a2, a3]) redditFake.engagement.set(a.external_item_id, { reactions: 4, comments: 1 });
   const callsBeforeAlign = redditFake.engagementCalls.length;
   await collector.sweep(at(10 * HOUR));
   assert.equal(redditFake.engagementCalls.length, callsBeforeAlign + 1);
   assert.deepEqual(redditFake.engagementCalls.at(-1).slice().sort(), [a1.external_item_id, a2.external_item_id].sort(), 'a post due within 30 minutes joins the request; one due later does not');
-  assert.equal(await nextAt(a1.id), await nextAt(a2.id), 'their schedules now line up');
+  for (const a of [a1, a2]) {
+    assert.deepEqual((await row(a.id)).engagement, { engagements: 4, replies: 1, read_at: at(10 * HOUR).toISOString() }, 'the early post is read and recorded too');
+    assert.equal(sum(await connectorRows(a.id, 'engagements')), 4);
+  }
+  assert.equal(await nextAt(a1.id), at(11 * HOUR).getTime());
+  assert.equal(await nextAt(a2.id), at(11 * HOUR).getTime(), 'their schedules now line up');
   assert.equal(await nextAt(a3.id), at(10 * HOUR + 45 * MIN).getTime());
   await park(a1.id, a2.id, a3.id);
 
@@ -358,7 +367,49 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   p3row = await row(p3.id);
   assert.match(p3row.engagement_error, /channel cap/);
   assert.equal(new Date(p3row.engagement_next_at).getTime(), at(DAY + HOUR + 35 * MIN).getTime(), 'looked at again in 30 minutes, not a whole interval later');
+  // 진짜 403(차단 · 권한)은 실패다 — 아직 묻지 않은 글은 "rate limit 몫" 이 아니라 거절 때문에 미룬다.
+  override = () => ({ engagementRefsPerRequest: 1, readEngagement: async () => { throw new RedditForbiddenError('Reddit forbidden (403): banned', 403); } });
+  await spread(DAY + 2 * HOUR, [p3, p4]);
+  const refused = await collector.sweep(at(DAY + 2 * HOUR + 5 * MIN));
+  override = null;
+  assert.equal(refused.failed, 1);
+  assert.equal(refused.deferred, 1);
+  p3row = await row(p3.id);
+  assert.match(p3row.engagement_error, /banned/);
+  assert.equal(new Date(p3row.engagement_next_at).getTime(), at(DAY + 5 * HOUR + 5 * MIN).getTime(), 'a refused read waits a whole interval (3 hours at this age)');
+  assert.match((await row(p4.id)).engagement_error, /^not tried after the channel refused a request: /);
   await park(p2.id, p3.id, p4.id);
+
+  // GitHub 은 시간당 한도를 다 쓰면 Retry-After 없는 403 을 준다 — 본문으로 rate limit 으로 알아보고 미룬다.
+  const g2 = await publish(github);
+  const g3 = await publish(github);
+  await spread(2 * DAY, [g2, g3]);
+  override = () => ({
+    engagementRefsPerRequest: 1,
+    readEngagement: async () => { throw new GitHubForbiddenError('GitHub forbidden (403) on GET issue acme/widget#2: {"message":"API rate limit exceeded for user ID 1."}', 403); },
+  });
+  const limited = await collector.sweep(at(2 * DAY + 5 * MIN));
+  override = null;
+  assert.equal(limited.failed, 0);
+  assert.equal(limited.deferred, 2);
+  assert.match((await row(g2.id)).engagement_error, /API rate limit exceeded/);
+  assert.equal(await nextAt(g2.id), at(2 * DAY + 35 * MIN).getTime());
+  // sweep 당 요청 상한은 rate limit 이 아니다 — 넘은 글은 쓰지 않고 due 로 두어 다음 sweep 이 바로 잇는다.
+  githubFake.engagement.set(g2.external_item_id, { reactions: 1, comments: 0 });
+  githubFake.engagement.set(g3.external_item_id, { reactions: 1, comments: 0 });
+  await spread(2 * DAY + HOUR, [g2, g3]);
+  const g3before = await row(g3.id);
+  collector.maxRequestsPerSweep = 1;
+  const capped = await collector.sweep(at(2 * DAY + HOUR + 5 * MIN));
+  collector.maxRequestsPerSweep = 30;
+  assert.equal(capped.read, 1);
+  assert.equal(capped.deferred, 1);
+  const g3after = await row(g3.id);
+  assert.equal(g3after.engagement_rev, g3before.engagement_rev, 'left due without a write');
+  assert.equal(g3after.engagement_next_at.getTime(), at(2 * DAY + HOUR + MIN).getTime());
+  await collector.sweep(at(2 * DAY + HOUR + 10 * MIN));
+  assert.equal((await row(g3.id)).engagement.engagements, 1, 'the next sweep picks it up');
+  await park(g2.id, g3.id);
 
   // GitHub · 답글(댓글 수 없음).
   const g1 = await publish(github);
@@ -400,6 +451,8 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   const ancientRow = await row(ancient.id);
   assert.equal(ancientRow.engagement_next_at, null, 'one older than the window is left alone');
   assert.equal(ancientRow.engagement_rev, 0);
+  // 뒤 단계는 더 이른 시각으로 sweep 한다 — 그때는 기간 안이 되므로 빼 둔다.
+  await park(ancient.id);
   for (const skipped of [counted, countedChannel]) {
     const r = await row(skipped.id);
     assert.equal(r.engagement_next_at, null, 'engagement recorded by hand for the post or its channel is not counted again');
@@ -407,6 +460,18 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
     assert.equal((await connectorRows(skipped.id, 'engagements')).length, 0);
   }
   await park(legacy.id);
+  // 캠페인 전체로 손으로 남긴 참여도 캠페인 합계에서 겹친다.
+  const wideCampaign = await makeCampaign('Wide');
+  const wideReddit = await outreachChannel(wideCampaign, 'reddit', 'devops');
+  const wideLegacy = await postRepo.save(postRepo.create({
+    account_id: account.id, campaign_id: wideCampaign.id, channel_id: wideReddit.id, kind: 'post', title: 'Old', body: 'old', final_body: 'old',
+    status: 'published', external_item_id: 't3_wide', permalink: 'https://example.org/t3_wide', published_at: at(13 * DAY),
+  }));
+  await manualRow({ campaign_id: wideCampaign.id, channel_id: '', post_id: '' });
+  fakeFor({ id: wideReddit.outreach_channel_id }).engagement.set('t3_wide', { reactions: 7, comments: 3 });
+  await collector.sweep(at(13 * DAY + 3 * HOUR));
+  assert.equal((await row(wideLegacy.id)).engagement_error, ENGAGEMENT_MANUAL_ROWS, 'a campaign-wide value recorded by hand would overlap in the campaign total');
+  assert.equal((await connectorRows(wideLegacy.id, 'engagements')).length, 0);
 
   // 보관된 캠페인 — 보관된 동안 읽지 않고, 되살리면(archived → paused) 다시 읽는다.
   const archivedCampaign = await makeCampaign('Archived');
@@ -437,6 +502,7 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
   assert.equal((await row(c1.id)).engagement_error, ENGAGEMENT_RATE_WAIT);
   await collector.sweep(at(14 * DAY));
   assert.equal((await row(c1.id)).engagement_next_at, null, 'a post that never got room leaves the queue when its window ends');
+  assert.match((await row(c1.id)).engagement_error, /window ended before it could be read again/);
   await setCap(reddit, 0);
 
   // 7. 이중 집계 방지 — 서버가 읽는 채널의 engagements · replies 는 기록하지 못한다.
@@ -452,4 +518,11 @@ test('marketing engagement collection: schedule, deltas, report, rate budget, cl
     { metric: 'impressions', value: 1000 },
   ]);
   assert.equal(allowed.recorded?.length, 3, JSON.stringify(allowed));
+  // 제안 단계 reddit 채널은 서버가 읽지 않는다 — 캠페인 전체 값을 막지 않는다.
+  const proposedOnly = await makeCampaign('Proposed only');
+  const proposedReddit = (await post(`/campaigns/${proposedOnly.id}/channels`, { platform: 'reddit', target: 'golang' })).body;
+  assert.equal(proposedReddit.kind, 'outreach');
+  assert.equal(proposedReddit.status, 'proposed');
+  const wide = await mcp.callTool('record_marketing_metrics', { campaign_id: proposedOnly.id, observations: [{ metric: 'engagements', value: 3 }, { metric: 'replies', value: 1, channel_id: proposedReddit.id }] });
+  assert.equal(wide.recorded?.length, 2, JSON.stringify(wide));
 });

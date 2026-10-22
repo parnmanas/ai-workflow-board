@@ -63,6 +63,14 @@ export function engagementTracked(channel: { kind: string; platform: string }): 
   return channel.kind === 'outreach' && !!OUTREACH_PLATFORMS[channel.platform as keyof typeof OUTREACH_PLATFORMS];
 }
 
+/**
+ * 서버가 지금 이 채널 글의 참여를 읽는가 — 연결된(active · paused) reddit · github outreach 채널. 제안 · 연결 대기 · 거부된
+ * 채널은 서버가 게시한 글이 없다(outreach 채널은 연결돼야 active 가 된다). 사람 · 에이전트 기록을 막는 기준이다.
+ */
+export function engagementCollected(channel: { kind: string; platform: string; status: string }): boolean {
+  return engagementTracked(channel) && (channel.status === 'active' || channel.status === 'paused');
+}
+
 /** 글의 나이에 따른 읽기 간격 — 참여가 몰리는 첫날은 자주, 그 뒤로는 드물게. */
 export function engagementIntervalMs(ageMs: number): number {
   if (ageMs < DAY_MS) return HOUR_MS;

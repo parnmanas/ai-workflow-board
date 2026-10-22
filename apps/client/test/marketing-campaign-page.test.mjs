@@ -671,3 +671,30 @@ test('지표 표 — 자동 수집 행은 부호 붙은 변화량으로 보이�
   assert.equal(recordCalls().length, 1);
   assert.deepEqual(recordCalls()[0][2], [{ metric: 'engagements', value: 5, channel_id: 'ch-forum' }]);
 });
+
+test('지표 기록 — 제안 단계 reddit 채널뿐이면 캠페인 전체 참여를 막지 않는다(서버가 읽는 채널이 없다)', async (t) => {
+  const { container, calls } = await renderPage(t, {
+    entry: '/marketing/c-1?tab=analytics',
+    stubs: {
+      listMarketingChannels: async () => channels,
+      getMarketingReport: async () => ({
+        since: iso(-43200), until: iso(0), currency: 'KRW', channels: [], lines: [], caveats: [],
+        totals: {
+          posts_published: 0, metrics: { clicks: 0, impressions: 0, views: 0, engagements: 0, replies: 0, signups: 0, conversions: 0, revenue_minor: 0 },
+          spent_minor: 0, feedback: 0, inbound_items: 0, feedback_tickets: 0,
+          derived: { cpc_minor: null, cost_per_signup_minor: null, cost_per_conversion_minor: null, ctr: null, conversion_rate: null, roas: null },
+        },
+      }),
+      listMarketingLinks: async () => [],
+      listMarketingMetrics: async () => [],
+      recordMarketingMetrics: async () => [],
+    },
+  });
+  choose(fieldIn(container, '지표', 'select'), 'replies');
+  typeInto(fieldIn(container, '값'), '2');
+  await act(async () => { click(buttonIn(container, '기록')); });
+  await flush();
+  const sent = calls.filter(([name]) => name === 'recordMarketingMetrics');
+  assert.equal(sent.length, 1, 'ch-proposed 는 제안 단계라 서버가 읽지 않는다');
+  assert.deepEqual(sent[0][2], [{ metric: 'replies', value: 2 }]);
+});
