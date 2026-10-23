@@ -1000,7 +1000,9 @@ test('가드 자리의 끊긴 심볼릭 링크도 상한이 지나면 회수하�
   const diagnostics = JSON.stringify(result, null, 2);
   assert.match(result.output, /ACQUIRED/, `끝없이 기다리면 안 된다: ${diagnostics}`);
   assert.equal(result.code, 0, diagnostics);
-  assert.match(result.stderr, /reclaiming stale recovery guard — guard_expired/, diagnostics);
+  // 어느 규칙으로 회수하는지는 러너가 언제 부팅했는지에 달렸다 — 10분 전 시각은 막 뜬 CI
+  // 러너에서는 "이번 부팅보다 이른 가드", 오래 켜진 호스트에서는 "상한이 지난 가드" 다.
+  assert.match(result.stderr, /reclaiming stale recovery guard — (guard_expired|guard_predates_boot)/, diagnostics);
 });
 
 // force 인수가 가드를 잡고 보니 owner 가 이미 없을 수 있다(기다리는 사이 죽었다). 그때는
