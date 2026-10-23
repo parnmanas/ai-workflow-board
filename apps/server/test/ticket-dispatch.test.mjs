@@ -10,12 +10,13 @@
 //     does not;
 //   - unpend re-sends; a paused account starts nothing until resumed;
 //   - the supervisor re-sends a dead in_progress ticket (force respawn) and
-//     parks it for a human after MAX_SUPERVISOR_REDISPATCHES.
+//     parks it for a human after MAX_SUPERVISOR_REDISPATCHES;
+//   - an agent comment restarts that count; a silent-exit warning does not.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createProject, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createProject, createTicket, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { VirtualAgent } from './helpers/virtual-agent.mjs';
 
 const { app, port, modules } = await bootApp({ port: 0 });
@@ -146,6 +147,28 @@ test('the supervisor re-sends a dead ticket, then parks it for a human', async (
   const parked = await ds.getRepository('Ticket').findOneBy({ id: third.id });
   assert.equal(parked.pending_user_action, true);
   assert.match(parked.pending_reason, /stopped/);
+});
+
+test('a silent-exit warning keeps the supervisor count; an agent comment restarts it', async () => {
+  // Unassigned, so neither the queue nor the supervisor sweep touches it.
+  const ticket = await createTicket(app, gdst, { accountId: ws.id, title: 'silent exit', status: 'in_progress' });
+  const tickets = ds.getRepository('Ticket');
+  const redispatches = async () => (await tickets.findOneBy({ id: ticket.id })).supervisor_redispatches;
+  await tickets.update({ id: ticket.id }, { supervisor_redispatches: 2 });
+
+  const warning = await fetch(`http://localhost:${port}/api/agent/tickets/${ticket.id}/silent-exit-comment`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: 'subagent exited without a trace', exit_code: 0, role: 'assignee' }),
+  });
+  assert.equal(warning.status, 201);
+  await settle();
+  assert.equal(await redispatches(), 2, 'an agent that stopped without a trace made no progress');
+
+  const progress = await vagent.mcp.callTool('add_comment', { ticket_id: ticket.id, content: 'parser implemented, tests pass' });
+  assert.ok(progress?.id, `the agent comment was written: ${JSON.stringify(progress)}`);
+  for (let i = 0; i < 50 && (await redispatches()) !== 0; i += 1) await settle(100);
+  assert.equal(await redispatches(), 0, 'the agent writing on the ticket is progress');
 });
 
 test('tickets list filters by status, tags and project', async () => {

@@ -272,8 +272,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (!ticket || ticket.parent_id) return;
     if (comment.author_type !== 'user') {
       // The agent writing on its own ticket is progress — the supervisor's
-      // dead-agent counter starts over.
-      if (ticket.supervisor_redispatches > 0) {
+      // dead-agent counter starts over. A system comment is not: the
+      // silent-exit warning reports an agent that stopped without a trace.
+      if (comment.author_type === 'agent' && ticket.supervisor_redispatches > 0) {
         await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { supervisor_redispatches: 0 });
       }
       return;
