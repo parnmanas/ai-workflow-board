@@ -16,10 +16,10 @@
 // classifyRunSuiteArgv)로 한다 — 두 벌이 되면 가드가 통과시킨 argv 를 러너가
 // 거부하는, 고치는 쪽이 더 헷갈리는 상태가 만들어진다.
 //
-// 대상은 `TEST_ENTRY_SCRIPTS` 가 아니라 **러너를 부르는 모든 스크립트** 다. 사고
+// 대상은 `CI_ENTRY_SCRIPTS` 가 아니라 **러너를 부르는 모든 스크립트** 다. 사고
 // 당사자인 `test` 는 그 목록에 있지만 `pretest`/`posttest`/`pretest:qa`/
-// `pretest:qa:pg`/`test:qa` 는 없고, 러너를 부르는 커맨드는 도달 가능성과 무관하게
-// 유효해야 한다 — 전수가 더 단순하고 더 넓다.
+// `pretest:qa:pg`/`test:qa` 와 사람이 쓰는 `test:qa:fast` 는 없고, 러너를 부르는
+// 커맨드는 도달 가능성과 무관하게 유효해야 한다 — 전수가 더 단순하고 더 넓다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
