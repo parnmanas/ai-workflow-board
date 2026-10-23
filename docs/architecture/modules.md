@@ -260,12 +260,18 @@ with the Agent table, P4c-4.)
 - Providers / Exports: extraction, resolver, query, lifecycle, incremental-scheduler and stale-sweep services
 - Graphs are keyed by the repository's project id — [`docs/ontology-graph/DESIGN.md`](../ontology-graph/DESIGN.md).
 - Build lifecycle (`OntologyLifecycleService`). `status='building'` is both the in-progress marker and the lock against a second build.
-  - **Claim.** The first reference and Refresh each claim the row with a fresh `build_id` and a 5-minute lease (`build_lease_until`). The claim commits before the build runs.
-  - **Heartbeat.** The build renews its lease every 30 s, and once more right before the replacement transaction. On sql.js, renewals wait in the queue while that transaction runs.
+  - **Claim.** The first reference and Refresh each claim the row with a fresh `build_id` and a 2-minute lease (`build_lease_until_ms`). The claim commits before the build runs.
+    - The lease is epoch milliseconds, not a `Date` column. Postgres `timestamp without time zone` would store each writer's local wall clock, so servers in different time zones, or a DST fall-back, would misread each other's leases.
+  - **Heartbeat (Postgres).** The build renews its lease every 30 s so other servers can see it is alive.
+    - It also renews once right before the replacement transaction; that renewal is also the "do I still own it" check.
+    - Every lease time is taken inside a short transaction, when the write actually runs. A renewal that waited in the sql.js queue or the connection pool must not write an already-expired lease.
+    - sql.js skips the periodic renewals. The DB lives in one process, and renewals would only dirty `ontology.db` for a full export on every flush.
+  - **This server's own builds** are never released or reclaimed by this server, whatever their lease says (`liveBuilds`). A stalled queue, event loop or pool therefore cannot make a server throw away its own build.
+  - **Maximum build age.** A build older than 2 h is no longer protected: its heartbeat stops and the next read releases it.
   - **Fencing.** The build finishes (`ready`, or `error` on failure) only while the row still carries its `build_id`. A build that lost its claim discards its result; the replacement transaction checks at its end and rolls back.
   - **Abandoned builds.** If the server running a build restarts or crashes, its lease expires. The next read of the graph (REST status/graph or any MCP `graph_` tool) turns it into `error`, keeping the last ready snapshot and its commit. Refresh also reclaims it directly.
-  - Postgres may be shared by several servers, so boot cannot tell a dead build from a live one; the lease decides. sql.js lives in one process, so it also releases every `building` row at boot.
-  - **Per-file limit.** Extraction gives each file 30 s (`AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS`). A worker past it is terminated and the file counts in `files_failed_extraction`.
+  - Postgres may be shared by several servers, so boot cannot tell a dead build from a live one; the lease decides. Upgrade all servers sharing a database together: an older server claims without a lease, and a newer one releases that build on first read. sql.js lives in one process, so it also releases every `building` row at boot.
+  - **Per-file limit.** Extraction gives each file 30 s (`AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS`, positive milliseconds). A fresh worker's first file gets 10 s more for start-up. A worker past its limit is terminated and the file counts in `files_failed_extraction`.
 
 ### `OrchestrationModule`
 - Imports: Orchestration{Team,TeamMember,Mission,Step,Event}, ChatRoom(+Participant/Message), RuntimeHost, ApiKey, Action, ActionRun, Account, Credential repositories; `ChatRoomsModule`, `AgentManagerModule`, `ActionsModule`, `SharedServicesModule`

@@ -9,6 +9,16 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 // 부수효과 전에 DB로 선점).
 export type OntologyGraphStatus = 'building' | 'ready' | 'stale' | 'error';
 
+// bigint 는 Postgres 드라이버가 문자열로 돌려준다 — 숫자로 맞춘다.
+const EPOCH_MS_TRANSFORMER = {
+  to: (value: number | null | undefined) => value,
+  from: (value: unknown): number | null => {
+    if (value === null || value === undefined) return null;
+    const n = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(n) ? n : null;
+  },
+};
+
 // STORAGE: OntologyNode/Edge와 같은 자세 — sql.js에서는
 // buildOntologyDataSourceOptions()의 독립 DataSource, Postgres에서는 기존
 // 단일 DataSource(db.ts 참고).
@@ -57,12 +67,15 @@ export class OntologyGraph {
   @Column({ type: 'varchar', default: '' })
   build_id: string;
 
-  // building 의 주인(빌드를 돌리는 서버)이 살아 있다고 볼 시각의 끝. 빌드가 도는 동안
-  // heartbeat 가 계속 미루고, 지나면 그 building 은 끊긴 빌드다 — 읽기가 error 로
-  // 돌리고 Refresh 가 다시 claim 한다(ontology-lifecycle.service.ts). building 이
-  // 아닐 때, 그리고 이 컬럼이 생기기 전에 남은 building 행은 null 이다.
-  @Column({ type: Date, nullable: true, default: null })
-  build_lease_until: Date | null;
+  // building 의 주인(빌드를 돌리는 서버)이 살아 있다고 볼 시각의 끝, epoch ms. 빌드가
+  // 도는 동안 heartbeat 가 계속 미루고, 지나면 그 building 은 끊긴 빌드다 — 읽기가
+  // error 로 돌리고 Refresh 가 다시 claim 한다(ontology-lifecycle.service.ts).
+  // Date 컬럼이 아니라 숫자인 이유: Postgres 의 `type: Date` 는 timestamp without
+  // time zone 이라 쓰는 프로세스의 지역 시각을 담는다 — 시간대가 다른 서버끼리, 또는
+  // DST 가 되돌아가는 시간에는 남의 lease 를 몇 시간씩 잘못 읽는다. building 이 아닐
+  // 때, 그리고 이 컬럼이 생기기 전에 남은 building 행은 null 이다.
+  @Column({ type: 'bigint', nullable: true, default: null, transformer: EPOCH_MS_TRANSFORMER })
+  build_lease_until_ms: number | null;
 
   @CreateDateColumn()
   created_at: Date;

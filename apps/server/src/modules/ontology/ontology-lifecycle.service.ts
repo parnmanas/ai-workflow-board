@@ -8,7 +8,7 @@
 import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { DataSource, In } from 'typeorm';
+import { DataSource, EntityManager, In } from 'typeorm';
 import { AppOntologyDataSource } from '../../db';
 import { OntologyGraph } from '../../entities/OntologyGraph';
 import { OntologyNode } from '../../entities/OntologyNode';
@@ -45,20 +45,28 @@ function isUniqueConstraintError(error: unknown): boolean {
 const INTERRUPTED_BUILD_ERROR = 'graph build was interrupted by a server restart — refresh the graph to rebuild';
 
 /** releaseAbandonedBuild()가 lease 가 지난 빌드에 남기는 error. */
-const ABANDONED_BUILD_ERROR = 'graph build was abandoned — the server running it stopped (restart or crash) — refresh the graph to rebuild';
+const ABANDONED_BUILD_ERROR = 'graph build was abandoned — the server running it stopped (restart or crash) or the build hung — refresh the graph to rebuild';
 
 /**
  * 빌드의 lease(ticket 461d210a). claim 이 lease 를 주고, 빌드가 도는 동안
  * heartbeat 가 미룬다. 빌드를 돌리던 서버가 사라지면(재기동 · 크래시) 마지막
- * 연장에서 이만큼 뒤에 그 building 이 풀린다. sql.js 에서는 교체 트랜잭션 동안
- * 연장이 큐에서 기다리므로, 교체 직전에 한 번 더 미뤄 트랜잭션에 lease 전체를 준다.
+ * 연장에서 이만큼 뒤에 그 building 이 풀린다. 자기 서버가 돌리는 빌드는 lease 와
+ * 상관없이 liveBuilds 가 지키므로, 이 값은 다른 서버가 기다리는 시간이자 재기동 뒤
+ * Refresh 를 다시 받기까지의 시간이다.
  */
-const BUILD_LEASE_MS = 5 * 60_000;
+const BUILD_LEASE_MS = 2 * 60_000;
 /** lease 안에 여러 번 연장해 DB 가 잠깐 쓰기를 못 받아도 lease 를 잃지 않게 한다. */
 const BUILD_HEARTBEAT_MS = 30_000;
+/**
+ * 빌드 하나가 주인 자리를 쥘 수 있는 가장 긴 시간. 추출은 git 명령과 파일마다 시간
+ * 상한이 있지만 빌드 전체에는 없다 — 여기를 넘긴 빌드는 멈춘 것으로 보고 더 지키지
+ * 않는다(연장을 멈추고 liveBuilds 도 놓는다). 그 뒤의 읽기가 풀고, 멈췄던 빌드가
+ * 나중에 끝나도 그 사이 다시 claim 됐으면 결과는 버려진다.
+ */
+const BUILD_MAX_MS = 2 * 60 * 60_000;
 
-/** lease 가 지났거나 없는(이 컬럼 전에 남은) building — 해제 · 재claim 의 조건. `:now` 를 넘긴다. */
-const BUILD_LEASE_EXPIRED_SQL = '(build_lease_until IS NULL OR build_lease_until < :now)';
+/** lease 가 지났거나 없는(이 컬럼 전에 남은) building — 해제 · 재claim 의 조건. `:nowMs` 를 넘긴다. */
+const BUILD_LEASE_EXPIRED_SQL = '(build_lease_until_ms IS NULL OR build_lease_until_ms < :nowMs)';
 
 /** 빌드가 끝내기 전에 주인 자리(build_id)를 잃었다 — 결과를 버리고 조용히 끝낸다. */
 class SupersededBuildError extends Error {
@@ -88,6 +96,22 @@ export interface GraphRefInput {
 export class OntologyLifecycleService implements OnApplicationBootstrap {
   private buildLeaseMs = BUILD_LEASE_MS;
   private buildHeartbeatMs = BUILD_HEARTBEAT_MS;
+  private buildMaxMs = BUILD_MAX_MS;
+  /**
+   * 주기 연장은 다른 서버가 이 서버의 빌드를 보는 Postgres 에서만 한다. sql.js DB 는
+   * 이 프로세스에만 있어 살아 있는 빌드는 liveBuilds 가 지키고 끊긴 빌드는 부팅 때
+   * 풀린다 — 거기서 연장은 ontology.db 를 dirty 로 만들어 flush 마다 전체 export 만
+   * 부른다.
+   */
+  private renewPeriodically = !AppOntologyDataSource;
+  /**
+   * 이 서버가 지금 돌리는 빌드(build_id → 시작 시각). 읽기와 Refresh 는 여기 있는
+   * 빌드를 lease 와 상관없이 끊긴 것으로 보지 않는다 — 이 프로세스가 잠깐 멈췄거나
+   * (sql.js 큐 · 이벤트 루프 · 커넥션 풀) 연장이 늦어 lease 가 지나 보여도, 자기
+   * 빌드를 스스로 풀어 결과를 버리지 않게(리뷰 지적). 서버마다 이 서비스는 하나다
+   * (OntologyModule 만 provide 한다).
+   */
+  private readonly liveBuilds = new Map<string, number>();
 
   constructor(
     @InjectDataSource() private readonly nestDataSource: DataSource,
@@ -97,13 +121,28 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
   ) {}
 
   /** 테스트 전용 — lease 가 지나는 것과 heartbeat 를 실제로 몇 분씩 기다리지 않고 본다. */
-  __setBuildLeaseForTests(timing: { leaseMs?: number; heartbeatMs?: number }): void {
+  __setBuildLeaseForTests(timing: { leaseMs?: number; heartbeatMs?: number; maxBuildMs?: number; renewPeriodically?: boolean }): void {
     if (timing.leaseMs !== undefined) this.buildLeaseMs = timing.leaseMs;
     if (timing.heartbeatMs !== undefined) this.buildHeartbeatMs = timing.heartbeatMs;
+    if (timing.maxBuildMs !== undefined) this.buildMaxMs = timing.maxBuildMs;
+    if (timing.renewPeriodically !== undefined) this.renewPeriodically = timing.renewPeriodically;
   }
 
-  private nextLeaseEnd(): Date {
-    return new Date(Date.now() + this.buildLeaseMs);
+  /** 이 서버가 돌리는 빌드이고 아직 BUILD_MAX_MS 를 넘기지 않았다. */
+  private isLiveHere(buildId: string | null | undefined): boolean {
+    const startedAt = buildId ? this.liveBuilds.get(buildId) : undefined;
+    return startedAt !== undefined && Date.now() - startedAt < this.buildMaxMs;
+  }
+
+  /**
+   * lease 를 쓰거나 견주는 문장은 짧은 트랜잭션 안에서, 그 문장이 실제로 돌 차례에
+   * 잰 시각으로 만든다. sql.js 에서는 쓰기가 큐에서, Postgres 에서는 커넥션 풀에서
+   * 기다리는데, 기다리기 전에 시각을 재 두면 오래 기다린 연장이 이미 지난 lease 를
+   * 쓰고 그 뒤의 해제 CAS 에 걸린다(리뷰 지적). transaction() 은 차례 · 커넥션을
+   * 받은 뒤에 콜백을 부른다.
+   */
+  private atWriteTime<T>(work: (manager: EntityManager, nowMs: number) => Promise<T>): Promise<T> {
+    return this.resolveOntologyDataSource().transaction((manager) => work(manager, Date.now()));
   }
 
   /** 온톨로지 엔티티가 실제로 synchronize된 DataSource — 다른 온톨로지
@@ -137,7 +176,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
     if (!AppOntologyDataSource?.isInitialized) return 0;
     const result = await AppOntologyDataSource.getRepository(OntologyGraph).update(
       { status: 'building' },
-      { status: 'error', error: INTERRUPTED_BUILD_ERROR, build_id: '', build_lease_until: null },
+      { status: 'error', error: INTERRUPTED_BUILD_ERROR, build_id: '', build_lease_until_ms: null },
     );
     const count = result.affected ?? 0;
     if (count > 0) this.logService.warn('Ontology', 'graph builds interrupted by a restart marked as error', { count });
@@ -159,9 +198,9 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
     if (existing) return { graph: existing, created: false };
 
     try {
-      const created = await repo.save(repo.create({
-        ...where, status: 'building', build_id: randomUUID(), build_lease_until: this.nextLeaseEnd(),
-      }));
+      const created = await this.atWriteTime((manager, nowMs) => manager.save(manager.create(OntologyGraph, {
+        ...where, status: 'building', build_id: randomUUID(), build_lease_until_ms: nowMs + this.buildLeaseMs,
+      })));
       return { graph: created, created: true };
     } catch (e) {
       if (!isUniqueConstraintError(e)) throw e;
@@ -207,40 +246,40 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
   }
 
   /**
-   * lease 가 지난 building 을 error 로 돌린다 — 그 빌드를 돌리던 서버가 사라졌다
-   * (재기동 · 크래시). claim 은 빌드 트랜잭션 전에 커밋되므로 빌드가 사라져도
-   * building 은 남고, 그대로 두면 Refresh(forceRebuild 의 CAS)도 화면(building
-   * 동안 Refresh 를 막는다)도 다시 띄울 길이 없다. 다른 서버가 실제로 빌드 중이면
-   * heartbeat 가 lease 를 살려 두므로 건드리지 않는다 — 부팅 때 일괄로 풀 수
-   * 없는 Postgres 를 위한 길이다(sql.js 는 failInterruptedBuilds 가 부팅 때 먼저
-   * 푼다). 실패한 빌드와 같은 상태로 둔다: 교체는 원자적이라 행은 마지막 ready
-   * 스냅샷과 그 commit 그대로다.
+   * lease 가 지난 building 을 error 로 돌린다 — 그 빌드를 돌리던 서버가 사라졌거나
+   * (재기동 · 크래시) 빌드가 BUILD_MAX_MS 를 넘겨 멈췄다. claim 은 빌드 트랜잭션
+   * 전에 커밋되므로 빌드가 사라져도 building 은 남고, 그대로 두면 Refresh
+   * (forceRebuild 의 CAS)도 화면(building 동안 Refresh 를 막는다)도 다시 띄울 길이
+   * 없다. 부팅 때 일괄로 풀 수 없는 Postgres 를 위한 길이다(sql.js 는
+   * failInterruptedBuilds 가 부팅 때 먼저 푼다). 실패한 빌드와 같은 상태로 둔다:
+   * 교체는 원자적이라 행은 마지막 ready 스냅샷과 그 commit 그대로다.
    *
-   * 판정은 CAS 의 결과로 한다. 읽은 행의 lease 는 낡았을 수 있다 — sql.js 에서는
-   * 교체 트랜잭션이 도는 동안 heartbeat 가 큐에서 기다리고, 이 UPDATE 도 그 뒤에
-   * 줄 서서 커밋 뒤에는(이미 ready) 맞지 않는다. 그 사이 주인이 연장했거나 다른
-   * 빌드가 다시 claim 했어도 맞지 않는다.
+   * 살아 있는 빌드는 건드리지 않는다 — 다른 서버의 빌드는 heartbeat 가 lease 를
+   * 미루고, 이 서버의 빌드는 liveBuilds 가 지킨다. 그래서 이 서버가 자기 빌드의
+   * 교체 트랜잭션 뒤에 해제 UPDATE 를 줄 세워 읽기를 붙잡는 일도 없다(sql.js 큐).
+   * 판정은 CAS 의 결과로 한다 — 읽은 행이 낡았어도(그 사이 주인이 연장했거나, 빌드가
+   * 끝났거나, 다른 빌드가 다시 claim 했어도) 맞지 않는다.
    */
   private async releaseAbandonedBuild(graph: OntologyGraph): Promise<OntologyGraph> {
-    if (graph.status !== 'building') return graph;
-    const now = new Date();
-    if (graph.build_lease_until && new Date(graph.build_lease_until).getTime() >= now.getTime()) return graph;
+    if (graph.status !== 'building' || this.isLiveHere(graph.build_id)) return graph;
+    if (graph.build_lease_until_ms != null && graph.build_lease_until_ms >= Date.now()) return graph;
 
-    const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
-    const released = await repo
+    // build_id 까지 맞춰 본다 — 읽은 뒤 다른 빌드가 다시 claim 했으면, 그 빌드가 이
+    // 서버에서 돌고 있어 lease 와 상관없이 살아 있을 수 있다(sql.js 는 주기 연장이 없다).
+    const released = await this.atWriteTime((manager, nowMs) => manager
       .createQueryBuilder()
       .update(OntologyGraph)
-      .set({ status: 'error', error: ABANDONED_BUILD_ERROR, build_id: '', build_lease_until: null })
+      .set({ status: 'error', error: ABANDONED_BUILD_ERROR, build_id: '', build_lease_until_ms: null })
       .where('id = :id AND build_id = :buildId', { id: graph.id, buildId: graph.build_id ?? '' })
       .andWhere("status = 'building'")
-      .andWhere(BUILD_LEASE_EXPIRED_SQL, { now })
-      .execute();
+      .andWhere(BUILD_LEASE_EXPIRED_SQL, { nowMs })
+      .execute());
     if ((released.affected ?? 0) > 0) {
       this.logService.warn('Ontology', 'abandoned graph build released — its lease expired', {
-        graphId: graph.id, buildId: graph.build_id, leaseUntil: graph.build_lease_until,
+        graphId: graph.id, buildId: graph.build_id, leaseUntilMs: graph.build_lease_until_ms,
       });
     }
-    return (await repo.findOne({ where: { id: graph.id } })) ?? graph;
+    return (await this.resolveOntologyDataSource().getRepository(OntologyGraph).findOne({ where: { id: graph.id } })) ?? graph;
   }
 
   /**
@@ -282,17 +321,21 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
    */
   async runInitialBuild(graph: OntologyGraph): Promise<void> {
     const dataSource = this.resolveOntologyDataSource();
-    const buildId = graph.build_id ?? '';
-    const heartbeat = this.startBuildHeartbeat(graph.id, buildId);
+    const buildId = graph.build_id;
+    // 빌드는 언제나 claim 아래에서 돈다 — 빈 토큰은 빌드가 없는 행(ready · error)에도 맞아 fence 가 되지 않는다.
+    if (!buildId) throw new Error('graph build needs a claim (build_id) — start it through getOrCreateGraph or forceRebuild');
+    const startedAt = Date.now();
+    this.liveBuilds.set(buildId, startedAt);
+    const heartbeat = this.renewPeriodically ? this.startBuildHeartbeat(graph.id, buildId, startedAt) : { stop() {} };
     try {
       const extraction = await this.extractionService.extractRepo({
         accountId: graph.account_id,
         resourceId: graph.resource_id,
         folderPath: graph.folder_path,
       });
-      // 교체 직전에 lease 를 한 번 더 미룬다 — sql.js 에서는 트랜잭션이 도는 동안
-      // heartbeat 가 큐에서 기다리므로, 트랜잭션이 lease 전체를 쓰게 한다. 이미
-      // 주인 자리를 잃었으면 교체를 시작하지 않는다.
+      // 교체 직전에 lease 를 한 번 더 미룬다 — 트랜잭션이 lease 전체를 쓰게 한다(sql.js
+      // 에서는 트랜잭션이 도는 동안 연장이 큐에서 기다린다). 이미 주인 자리를 잃었으면
+      // 교체를 시작하지 않는다.
       if (!(await this.renewBuildLease(graph.id, buildId))) throw new SupersededBuildError();
       // 리뷰 지적(d22b83b4, "Refresh Graph" 승인 블로커) — 이 메서드는
       // 원래 그래프당 최초 1회만 호출된다는 암묵 전제로 짜여 있었다.
@@ -329,7 +372,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
             }),
             error: '',
             build_id: '',
-            build_lease_until: null,
+            build_lease_until_ms: null,
           })
           .where('id = :id AND build_id = :buildId', { id: graph.id, buildId })
           .execute();
@@ -348,6 +391,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
       throw e;
     } finally {
       heartbeat.stop();
+      this.liveBuilds.delete(buildId);
     }
   }
 
@@ -360,7 +404,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
       .getRepository(OntologyGraph)
       .createQueryBuilder()
       .update(OntologyGraph)
-      .set({ status: 'error', error: String((e as Error)?.message || e).slice(0, 500), build_id: '', build_lease_until: null })
+      .set({ status: 'error', error: String((e as Error)?.message || e).slice(0, 500), build_id: '', build_lease_until_ms: null })
       .where('id = :id AND build_id = :buildId', { id: graphId, buildId })
       .execute();
     if ((failed.affected ?? 0) === 0) {
@@ -372,24 +416,23 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
 
   /** 이 빌드의 lease 를 미룬다. 주인 자리(build_id)를 이미 잃었으면 false. */
   private async renewBuildLease(graphId: string, buildId: string): Promise<boolean> {
-    const renewed = await this.resolveOntologyDataSource()
-      .getRepository(OntologyGraph)
+    const renewed = await this.atWriteTime((manager, nowMs) => manager
       .createQueryBuilder()
       .update(OntologyGraph)
-      .set({ build_lease_until: this.nextLeaseEnd() })
+      .set({ build_lease_until_ms: nowMs + this.buildLeaseMs })
       .where('id = :id AND build_id = :buildId', { id: graphId, buildId })
-      .execute();
+      .execute());
     return (renewed.affected ?? 0) > 0;
   }
 
   /**
-   * 빌드가 도는 동안 buildHeartbeatMs 마다 lease 를 미룬다. 연장은 한 번에 하나씩
-   * — 앞 연장이 끝나야 다음 연장을 건다(sql.js 교체 트랜잭션 동안 큐에서 기다리는
-   * 연장이 쌓이지 않게). 연장이 실패해도(DB 가 잠깐 못 받음) 다음 주기에 다시
-   * 하고, 주인 자리를 잃었으면 멈춘다. 빌드를 막지 않도록 어떤 경우에도 던지지
-   * 않는다.
+   * 빌드가 도는 동안 buildHeartbeatMs 마다 lease 를 미룬다(Postgres — renewPeriodically).
+   * 연장은 한 번에 하나씩 — 앞 연장이 끝나야 다음 연장을 건다(교체 트랜잭션 동안
+   * 기다리는 연장이 쌓이지 않게). 연장이 실패해도(DB 가 잠깐 못 받음) 다음 주기에
+   * 다시 하고, 주인 자리를 잃었거나 빌드가 BUILD_MAX_MS 를 넘겼으면 멈춘다. 빌드를
+   * 막지 않도록 어떤 경우에도 던지지 않는다.
    */
-  private startBuildHeartbeat(graphId: string, buildId: string): { stop(): void } {
+  private startBuildHeartbeat(graphId: string, buildId: string, startedAt: number): { stop(): void } {
     let stopped = false;
     let failing = false;
     let timer: NodeJS.Timeout | null = null;
@@ -400,6 +443,13 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
     const tick = () => {
       timer = null;
       if (stopped) return;
+      if (Date.now() - startedAt >= this.buildMaxMs) {
+        stopped = true;
+        this.logService.warn('Ontology', 'graph build ran past its maximum duration — stopped renewing its lease', {
+          graphId, buildId, maxBuildMs: this.buildMaxMs,
+        });
+        return;
+      }
       this.renewBuildLease(graphId, buildId)
         .then(
           (held) => {
@@ -488,9 +538,10 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
    * 처리(?? 0).
    *
    * lease 가 지난 building 도 다시 claim 한다(ticket 461d210a) — 그 빌드를 돌리던
-   * 서버는 사라졌다. 살아 있는 빌드는 heartbeat 가 lease 를 미루므로 그대로
-   * started=false 다. 이긴 claim 은 새 build_id 를 쓰므로, 사라진 줄 알았던 옛 빌드가
-   * 나중에 끝나도 그 결과는 버려진다(runInitialBuild).
+   * 서버는 사라졌다. 살아 있는 빌드는 그대로 started=false 다: 다른 서버의 빌드는
+   * heartbeat 가 lease 를 미루고, 이 서버의 빌드는 liveBuilds 가 지킨다. 이긴 claim 은
+   * 새 build_id 를 쓰므로, 사라진 줄 알았던 옛 빌드가 나중에 끝나도 그 결과는
+   * 버려진다(runInitialBuild).
    */
   async forceRebuild(input: { graphId: string; accountId: string }): Promise<{ graph: OntologyGraph; started: boolean }> {
     const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
@@ -500,14 +551,18 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
     }
 
     const buildId = randomUUID();
-    const leaseUntil = this.nextLeaseEnd();
-    const claim = await repo
+    // 이 서버가 돌리는 빌드는 lease 가 지나 보여도 다시 claim 하지 않는다(liveBuilds).
+    const liveHere = [...this.liveBuilds.keys()].filter((id) => this.isLiveHere(id));
+    const claim = await this.atWriteTime((manager, nowMs) => manager
       .createQueryBuilder()
       .update(OntologyGraph)
-      .set({ status: 'building', error: '', build_id: buildId, build_lease_until: leaseUntil })
+      .set({ status: 'building', error: '', build_id: buildId, build_lease_until_ms: nowMs + this.buildLeaseMs })
       .where('id = :id', { id: graph.id })
-      .andWhere(`(status != 'building' OR ${BUILD_LEASE_EXPIRED_SQL})`, { now: new Date() })
-      .execute();
+      .andWhere(
+        `(status != 'building' OR (${BUILD_LEASE_EXPIRED_SQL}${liveHere.length ? ' AND build_id NOT IN (:...liveHere)' : ''}))`,
+        { nowMs, liveHere },
+      )
+      .execute());
     const won = (claim.affected ?? 0) > 0;
 
     if (!won) {
@@ -515,8 +570,10 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
       return { graph: latest ?? graph, started: false };
     }
 
+    // 띄우는 빌드는 방금 claim 한 build_id 의 주인이다 — 다시 읽은 행의 build_id 를 쓰지
+    // 않는다. 그 사이 다른 빌드가 다시 claim 했다면 그 토큰으로 두 빌드가 함께 돌게 된다.
     const updated = await repo.findOne({ where: { id: graph.id } });
-    const started = updated ?? Object.assign(graph, { status: 'building' as const, error: '', build_id: buildId, build_lease_until: leaseUntil });
+    const started = Object.assign(updated ?? graph, { status: 'building' as const, error: '', build_id: buildId });
     this.kickOffInitialBuild(started);
     return { graph: started, started: true };
   }

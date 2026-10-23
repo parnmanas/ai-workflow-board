@@ -88,7 +88,13 @@ function node(id, graphId, symbolId, overrides = {}) {
 // 빌드가 도는 중인 행 — 주인이 lease 를 쥐고 있다. lease 가 없거나 지난 building 은
 // 서버가 사라진 빌드로 보고 읽기가 error 로 푼다(ticket 461d210a).
 function liveBuild() {
-  return { status: 'building', build_id: randomUUID(), build_lease_until: new Date(Date.now() + 10 * 60_000) };
+  return { status: 'building', build_id: randomUUID(), build_lease_until_ms: Date.now() + 10 * 60_000 };
+}
+
+// runInitialBuild 는 claim(build_id) 아래에서만 돈다 — Refresh(forceRebuild)가 남기는 claim 을 직접 남긴다.
+async function claim(graph) {
+  await graphRepo.update({ id: graph.id }, liveBuild());
+  return graphRepo.findOne({ where: { id: graph.id } });
 }
 
 function fakeRes() {
@@ -389,7 +395,7 @@ async function settlesWithin(promise, ms) {
 describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리뷰 지적의 근본 원인)', () => {
   // 빌드를 기다리는 두 테스트는 상한을 둔다 — 교체 트랜잭션이 데드락하면 파일째 매달리는 대신 실패한다.
   it('교체 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', { timeout: 30_000 }, async () => {
-    const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-flush-overlap', folder_path: '', status: 'building' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-flush-overlap', folder_path: '', ...liveBuild() }));
     let releaseBuild;
     const buildGate = new Promise((resolve) => { releaseBuild = resolve; });
     let inserted;
@@ -431,7 +437,7 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     }));
     await nodeRepo.insert(node('outside-tx-old', graph.id, 'sym:old'));
     const readyGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-refresh', folder_path: '', status: 'ready' }));
-    const failingGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-fail', folder_path: '', status: 'building' }));
+    const failingGraph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-extract-outside-tx-fail', folder_path: '', ...liveBuild() }));
 
     let releaseExtraction;
     const extractionGate = new Promise((resolve) => { releaseExtraction = resolve; });
@@ -532,13 +538,13 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
 
     const svc = new OntologyLifecycleService(AppOntologyDataSource, insertingExtraction, insertingResolver, { info() {}, warn() {}, error() {} });
 
-    await svc.runInitialBuild(graph);
+    await svc.runInitialBuild(await claim(graph));
     assert.equal((await nodeRepo.find({ where: { graph_id: graph.id } })).length, 1, '1회차 후 노드 1개');
     assert.equal((await edgeRepo.find({ where: { graph_id: graph.id } })).length, 1, '1회차 후 엣지 1개');
 
     const afterFirst = await graphRepo.findOne({ where: { id: graph.id } });
     await assert.doesNotReject(
-      svc.runInitialBuild(afterFirst),
+      svc.runInitialBuild(await claim(afterFirst)),
       '재실행이 OntologyNode의 (graph_id, symbol_id) 유니크 인덱스 위반으로 죽으면 안 된다(첫 실행도 sym:a를 심었으므로, 지우지 않고 재실행하면 반드시 충돌한다)',
     );
 
@@ -555,12 +561,13 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     assert.equal(finalGraph.commit, 'c2');
   });
 
+  // ready 스냅샷이 있는 그래프를 Refresh 가 막 claim 한 상태로 돌려준다.
   async function readyGraphWithStableNode(resourceId) {
     const graph = await graphRepo.save(graphRepo.create({
       account_id: ACCOUNT_ID, resource_id: resourceId, folder_path: '', status: 'ready', commit: 'stable-commit',
     }));
     await nodeRepo.insert(node(`${resourceId}-old`, graph.id, 'sym:stable'));
-    return graph;
+    return claim(graph);
   }
 
   async function assertStableSnapshotKept(graph) {
@@ -750,7 +757,7 @@ describe('OntologyLifecycleService.onApplicationBootstrap — 재기동으로 �
     assert.match(afterInterrupted.error, /interrupted by a server restart/);
     assert.equal(afterInterrupted.commit, 'snapshot-commit');
     assert.equal(afterInterrupted.build_id, '', '끝난 빌드의 주인 자리와 lease 도 비운다');
-    assert.equal(afterInterrupted.build_lease_until, null);
+    assert.equal(afterInterrupted.build_lease_until_ms, null);
     assert.deepEqual((await nodeRepo.find({ where: { graph_id: interrupted.id } })).map((row) => row.symbol_id), ['sym:snapshot']);
     assert.equal((await graphRepo.findOne({ where: { id: neverBuilt.id } })).status, 'error');
     const afterReady = await graphRepo.findOne({ where: { id: ready.id } });
