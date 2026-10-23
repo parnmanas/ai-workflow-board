@@ -593,9 +593,8 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
     return { reclaim: false, detail: `가드 owner pid=${facts.owner.pid} 를 회수할 근거 없음` };
   }
 
-  // owner 로 읽히는 것이 없다(owner 파일이 없거나 깨진 것뿐) — 디렉터리 자체로만 판정한다. 깨진
-  // owner 는 owner 를 다 적기 전에 죽은 잔해거나 아직 적는 중인 contender 다. 쥔 holder 의 owner 는
-  // 다 적힌 뒤에야 쥐므로(claimRecoveryGuard) 여기 오지 않는다.
+  // owner 파일이 없거나, 이름에 든 PID 가 죽었다고 확인한 쓰다 만 파일뿐이다.
+  // 살아 있을 수 있는 writer 의 쓰다 만 파일은 ownerUnreadable 로 보존한다.
   if (guardPredatesBoot(facts)) {
     return {
       reclaim: true,
@@ -648,7 +647,19 @@ function readRecoveryOwnerFile(name: string): RecoveryOwnerRead {
   } catch {
     /* 아래 */
   }
-  return { torn: true };
+  // 내용은 아직 쓰는 중일 수 있다. 판정 뒤 writer 가 기록과 claim 확인을 끝낼 수 있으므로
+  // 오래된 mtime 만으로 이 이름을 지우면 살아 있는 holder 를 지운다. 고유 이름에 든 PID 가
+  // 확실히 죽었을 때만 쓰다 만 잔해로 본다. PID 없는 구버전/알 수 없는 이름은 보존한다.
+  const match = /^owner-([1-9]\d*)-/.exec(name);
+  const pid = match ? Number(match[1]) : NaN;
+  if (Number.isSafeInteger(pid) && pid <= 2_147_483_647) {
+    try {
+      process.kill(pid, 0);
+    } catch (err: any) {
+      if (err?.code === 'ESRCH') return { torn: true };
+    }
+  }
+  return { unreadable: `${name}: incomplete owner with a possibly live writer` };
 }
 
 function probeRecoveryGuard(): { facts: RecoveryGuardFacts; snapshot: RecoveryGuardSnapshot } {
@@ -688,7 +699,7 @@ function probeRecoveryGuard(): { facts: RecoveryGuardFacts; snapshot: RecoveryGu
   for (const read of reads) {
     if ('unreadable' in read) facts.ownerUnreadable ??= read.unreadable;
     else if ('owner' in read) parsed.push(read.owner);
-    // 깨진 owner 는 판정에서 빠지고, 회수 판정이 나면 함께 지운다.
+    // writer PID 가 죽었다고 확인한 쓰다 만 owner 는 회수 판정이 나면 함께 지운다.
   }
   if (ownerNames.length === 1 && parsed.length === 1) {
     facts.owner = parsed[0];
@@ -1331,13 +1342,11 @@ function releaseRecoveryGuard(ownerName: string): void {
  *
  *  그래서 지우는 연산마다 "지금 그 자리가 판정한 그 가드일 때만" 성공하게 한다.
  *  - 판정 때 본 owner 파일을 그 이름으로 먼저 unlink 한다. 회수 판정은 그 하나하나가 회수
- *    대상(죽은 owner 등)이거나 owner 로 읽히지 않는(쓰다 만) 파일일 때만 난다 — 못 읽은 owner 나
+ *    대상(죽은 owner 등)이거나 writer PID 가 죽었다고 확인한 쓰다 만 파일일 때만 난다 — 못 읽은 owner 나
  *    살아 있을 수 있는 owner 가 하나라도 있으면 판정이 막는다. 새 가드의 owner 이름은 가드마다
  *    고유하므로 이 unlink 는 판정한 가드에서만 성공한다 — 자리가 바뀌었으면 ENOENT 로 지고
  *    아무것도 더 지우지 않는다. 구버전 이름(owner.json)은 고유하지 않지만 새 가드에는 그 이름이
- *    없다. 쓰다 만 owner 를 지워도 그 contender 가 아직 살아 있다면 적은 뒤의 확인에서 자기 owner 가
- *    없는 것을 보고 물러난다(claimRecoveryGuard) — 쥔 holder 의 owner 는 다 적힌 뒤라 쓰다 만
- *    파일일 수 없다.
+ *    없다. 쓰다 만 파일은 판정 뒤 기록이 완성될 수 있으므로, writer 생존을 모르면 보존한다.
  *  - 그 밖에 본 항목(owner 가 아닌 잡동사니)은 본 이름으로 지운다.
  *  - 마지막 rmdir 는 빈 디렉터리만 지운다. owner 가 적힌 남의 가드는 지울 수 없다.
  *  - 가드 자리의 디렉터리가 아닌 것(끊긴 링크)은 unlink 로 지운다 — unlink 는 디렉터리를 지울

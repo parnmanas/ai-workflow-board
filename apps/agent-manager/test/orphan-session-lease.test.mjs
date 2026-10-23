@@ -1365,6 +1365,104 @@ for (const scene of [
   });
 }
 
+// 쓰다 만 owner 를 읽은 뒤 writer 가 기록과 취득 확인을 끝낼 수 있다. 과거의 torn snapshot 을
+// 시각만으로 회수하면, 같은 고유 파일 이름이라도 이제 살아 있는 holder 의 owner 를 지운다.
+test('쓰다 만 owner 를 읽은 뒤 writer 가 가드를 쥐어도 과거 snapshot 으로 그 owner 를 지우지 않는다', { timeout: 90_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-torn-to-live-'));
+  tempDirs.push(home);
+  const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+  const guard = join(home, 'agent.lock.recovery');
+  await fsp.writeFile(join(home, 'agent.lock'), JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  const writer = `{
+    const realWrite = fs.writeFileSync;
+    fs.writeFileSync = function (path, data, options) {
+      if (typeof path === 'string' && path.startsWith(guard + sep + 'owner-')) {
+        const fd = fs.openSync(path, 'wx');
+        try {
+          park('owner-torn');
+          return realWrite.call(this, fd, data);
+        } finally { fs.closeSync(fd); }
+      }
+      return realWrite.call(this, path, data, options);
+    };
+  }`;
+  const reader = `{
+    const realRead = fs.readFileSync;
+    let first = true;
+    fs.readFileSync = function (path, ...rest) {
+      const raw = realRead.call(this, path, ...rest);
+      if (typeof path === 'string' && path.startsWith(guard + sep + 'owner-')) {
+        if (first) {
+          first = false;
+          fs.writeSync(2, 'TORN_SNAPSHOT:' + JSON.stringify(raw) + '\\n');
+          park('torn-read');
+        } else {
+          fs.writeSync(2, 'OWNER_RECHECKED\\n');
+        }
+      }
+      return raw;
+    };
+  }`;
+  const c = spawnBarrieredContender(parkPrologue({ name: 'C', home, parks: ['owner-torn', 'lock-unlink'], extra: writer }) + ACQUIRE_AND_HOLD, env);
+  let w;
+  try {
+    await untilParked(c, 'C', 'owner-torn');
+    const longAgo = new Date(Date.now() - 10 * 60_000);
+    await fsp.utimes(guard, longAgo, longAgo);
+    w = spawnBarrieredContender(parkPrologue({ name: 'W', home, parks: ['torn-read', 'lock-unlink'], extra: reader }) + ACQUIRE_AND_HOLD, env);
+    await untilParked(w, 'W', 'torn-read');
+    assert.match(w.stderrNow(), /TORN_SNAPSHOT:""/);
+    await resumeParked(home, 'C', 'owner-torn');
+    await untilParked(c, 'C', 'lock-unlink');
+    await resumeParked(home, 'W', 'torn-read');
+    const outcome = await enteredOrBackedOff(w, 'W', 'OWNER_RECHECKED');
+    assert.equal(outcome, 'backed_off', `writer 가 이미 가드를 쥐었다: ${w.stderrNow()}`);
+    await assertHoldsGuard(home, c.child.pid, 'torn snapshot 뒤 writer 의 가드 보존');
+  } finally {
+    await resumeParked(home, 'C', 'owner-torn');
+    await resumeParked(home, 'W', 'torn-read');
+    await resumeAll(home, ['C', 'W']);
+  }
+});
+
+for (const name of ['owner.json', 'owner-unknown-writer.json']) {
+  test(`쓰다 만 ${name} 의 writer 를 알 수 없으면 오래되어도 보존한다`, { timeout: 60_000 }, async () => {
+    const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-torn-unknown-'));
+    tempDirs.push(home);
+    const guard = join(home, 'agent.lock.recovery');
+    const ownerPath = join(guard, name);
+    await fsp.writeFile(join(home, 'agent.lock'), JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+    await fsp.mkdir(guard);
+    await fsp.writeFile(ownerPath, '');
+    const longAgo = new Date(Date.now() - 10 * 60_000);
+    await fsp.utimes(guard, longAgo, longAgo);
+    const source = `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const original = fs.readFileSync;
+      let reads = 0;
+      fs.readFileSync = function (path, ...rest) {
+        const raw = original.call(this, path, ...rest);
+        if (String(path) === ${JSON.stringify(ownerPath)} && ++reads === 2) fs.writeSync(2, 'TORN_OWNER_REPROBED\\n');
+        return raw;
+      };
+      syncBuiltinESMExports();
+    `;
+    const w = spawnBarrieredContender(source + ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home });
+    const outcome = await Promise.race([
+      w.awaitStderr('TORN_OWNER_REPROBED').then(() => 'waiting'),
+      w.done.then((result) => `ended:${JSON.stringify(result)}`),
+      sleep(20_000, 'timeout'),
+    ]);
+    assert.equal(outcome, 'waiting', w.stderrNow());
+    assert.equal(await fsp.readFile(ownerPath, 'utf8'), '');
+    assert.doesNotMatch(w.stderrNow(), /reclaiming stale recovery guard/);
+    await fsp.rm(guard, { recursive: true, force: true });
+    const result = await w.done;
+    assert.match(result.output, /ACQUIRED/, JSON.stringify(result));
+  });
+}
+
 // owner 를 적은 바로 뒤 가드가 통째로 치워지면(확인하는 readdir 가 ENOENT) 우리 owner 도 함께
 // 사라진 것이다 — 쥔 것이 아니다. 기다렸다 다시 만들어 쥐어야 하고, 가드 안에서는 그 가드가 우리를
 // owner 로 담고 있어야 한다. 흉내: 확인하는 readdir 직전에 그 가드를 지운다.
