@@ -24,6 +24,8 @@ import { ConfirmProvider } from '../src/contexts/ConfirmContext.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { NotificationProvider } from '../src/contexts/NotificationContext.tsx';
 import { TICKET_VIEW_STORAGE_KEY } from '../src/tickets/ticketList.ts';
+import TicketFilterBar from '../src/components/tickets/TicketFilterBar.tsx';
+import { EMPTY_TICKET_FILTERS } from '../src/tickets/ticketFilters.ts';
 
 // @hello-pangea/dnd reads `Element.prototype` at module load — expose the
 // bootstrap jsdom window's DOM constructors before importing the page.
@@ -33,6 +35,43 @@ const { default: TicketsPage } = await import('../src/components/tickets/Tickets
 const { LegacyBoardsRedirect } = await import('../src/App.tsx');
 
 const h = React.createElement;
+
+test('filter edits compose while URL rendering is deferred, including local dialog renders', () => {
+  const dom = setupDom();
+  let view;
+  try {
+    const changes = [];
+    const props = {
+      filters: { ...EMPTY_TICKET_FILTERS, q: 'mobile' },
+      onChange: next => changes.push(next),
+      tagFacet: Array.from({ length: 16 }, (_, i) => ({ tag: `tag-${i}`, count: 1, selected: false })),
+      projects: [{ id: 'p1', name: 'Project' }], assigneeOptions: [], view: 'kanban',
+      onViewChange() {}, ticketCount: 1, unreadCount: 0, onCreate() {}, onMarkAllRead() {},
+    };
+    view = mount(h(TicketFilterBar, props));
+    click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+    const button = text => [...view.container.querySelectorAll('[role="dialog"] button')].find(el => el.textContent === text);
+    click(button('To Do'));
+    const project = view.container.querySelector('[aria-label="프로젝트 필터"]');
+    act(() => {
+      project.value = 'p1';
+      project.dispatchEvent(new window.Event('change', { bubbles: true }));
+    });
+    click(button('+2개 더')); // local render must not erase pending URL edits
+    click([...view.container.querySelectorAll('button')].find(el => el.textContent.startsWith('#tag-15')));
+    assert.deepEqual(changes.at(-1), { ...props.filters, statuses: ['todo'], projectId: 'p1', tags: ['tag-15'] });
+    click(button('To Do'));
+    assert.deepEqual(changes.at(-1).statuses, []);
+    // A subsequent external URL navigation still replaces the pending values.
+    view.rerender(h(TicketFilterBar, { ...props, filters: { ...EMPTY_TICKET_FILTERS, statuses: ['done'] } }));
+    click(button('To Do'));
+    assert.deepEqual(changes.at(-1), { ...EMPTY_TICKET_FILTERS, statuses: ['done', 'todo'] });
+  } finally {
+    view?.unmount();
+    dom.cleanup();
+  }
+});
+
 const WS_ID = 'ws-1';
 const BASE = ``;
 
