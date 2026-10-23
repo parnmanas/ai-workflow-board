@@ -19,6 +19,7 @@ test/agent-chain-depth.test.mjs
 test/agent-error-logs-hermes.test.mjs
 test/agent-fullname-display.test.mjs
 test/agent-fullname-orchestration-typing.test.mjs
+test/agent-manager-instance-supersede.test.mjs
 test/agent-manager-privileged-command.test.mjs
 test/agent-manager-refresh-available-models.test.mjs
 test/agent-manager-slot-credential.test.mjs
@@ -219,6 +220,7 @@ test/outreach-release-consistency.test.mjs
 test/outreach-release-summary.test.mjs
 test/outreach-resolve-notifier.test.mjs
 test/personal-account-migration.test.mjs
+test/postgres-schema-search-path.test.mjs
 test/proxy-passthrough.test.mjs
 test/published-deps-audit-guard.test.mjs
 test/qa-batch-dispatch-inflight-guard.test.mjs
