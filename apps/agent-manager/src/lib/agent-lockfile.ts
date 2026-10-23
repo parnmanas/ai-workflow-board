@@ -240,10 +240,24 @@ export function decideForceTakeover(input: {
 }
 
 function readLock(): ParsedLock | null {
+  return readLockFile().lock;
+}
+
+/** readLock 과 같은 결과에, 못 읽었을 때 그 까닭을 붙인다(진단용). readLock 은 없음 ·
+ *  읽기 실패 · 파싱 실패를 모두 null 로 접는데, 인수 로그에서는 그 셋을 가려야 한다 — 읽기
+ *  일시 오류를 "lock 없음" 으로 읽고 지우는 것과 정말 없는 것은 전혀 다른 사건이다. */
+function readLockFile(): { lock: ParsedLock | null; problem: string | null } {
+  let raw: string;
   try {
-    return parseLockPayload(JSON.parse(readFileSync(LOCK_PATH, 'utf8')));
+    raw = readFileSync(LOCK_PATH, 'utf8');
+  } catch (err: any) {
+    return { lock: null, problem: err?.code === 'ENOENT' ? 'no lock' : `unreadable lock (${err?.code ?? err})` };
+  }
+  try {
+    const lock = parseLockPayload(JSON.parse(raw));
+    return lock ? { lock, problem: null } : { lock: null, problem: 'unparseable lock' };
   } catch {
-    return null;
+    return { lock: null, problem: 'unparseable lock' };
   }
 }
 
@@ -691,7 +705,8 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
   );
   const releaseRecovery = await acquireRecoveryLock();
   try {
-    const owner = readLock();
+    const read = readLockFile();
+    const owner = read.lock;
     if (owner && isPidAlive(owner.pid)) {
       if (owner.pid !== existing.pid) throw lockedBy(owner);
 
@@ -729,7 +744,7 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
       // 죽일 owner 없이 그 자리를 지운다 — 무엇을 읽었는지 남긴다. 둘이 함께 가드를 쥐는
       // 일이 다시 생기면, 이 줄과 release 의 "not removing" 줄이 그것을 바로 드러낸다.
       log(
-        `[lockfile] --force: no live owner at takeover (read ${owner ? `pid=${owner.pid}, not alive` : 'no lock'}; ` +
+        `[lockfile] --force: no live owner at takeover (read ${owner ? `pid=${owner.pid}, not alive` : read.problem}; ` +
           `observed pid=${existing.pid})`,
       );
     }
@@ -1071,9 +1086,13 @@ function safeUnlinkOwn(myPid: number): void {
       return;
     }
   } catch (err: any) {
-    if (err?.code !== 'ENOENT') {
-      log(`[lockfile] release: could not read ${LOCK_PATH} (${err?.code ?? err}) — not removing`);
-    }
+    // 쥐고 있던 lock 이 없어졌거나 못 읽는 것도 정상 경로에서는 일어나지 않는다 — 누가 우리
+    // lock 을 지웠다. 남긴다.
+    log(
+      err?.code === 'ENOENT'
+        ? `[lockfile] release: ${LOCK_PATH} is already gone — someone removed this process's lock`
+        : `[lockfile] release: could not read ${LOCK_PATH} (${err?.code ?? err}) — not removing`,
+    );
     return;
   }
   try {

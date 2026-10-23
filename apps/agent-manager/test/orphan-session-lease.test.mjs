@@ -1011,52 +1011,75 @@ test('가드 자리의 끊긴 심볼릭 링크도 상한이 지나면 회수하�
 // force 인수가 가드를 잡고 보니 owner 가 이미 없을 수 있다(기다리는 사이 죽었다). 그때는
 // 죽일 것 없이 그 자리를 지우고 취득하되, 무엇을 읽었는지 남긴다 — 둘이 함께 가드를 쥐는
 // 일이 다시 생기면 이 줄이 그것을 바로 드러낸다(티켓 b14c5669 의 CI 실측은 이 줄이 없어
-// 로그만으로는 갈리지 않았다).
-test('force 인수: 기다리는 사이 owner 가 죽었으면 죽이지 않고 취득하며, 읽은 것을 남긴다', { timeout: 60_000 }, async () => {
-  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-force-owner-gone-'));
-  tempDirs.push(home);
-  const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
-  const recoveryLock = join(home, 'agent.lock.recovery');
-  const owner = await startLockOwner(env, 'old');
-  await fsp.mkdir(recoveryLock);
-  await fsp.writeFile(join(recoveryLock, 'owner.json'), JSON.stringify({ pid: process.pid }));
-  const contender = spawnBarrieredContender(ACQUIRE_ONCE(true), env);
-  await contender.awaitStderr(`--force: waiting for takeover guard (owner pid=${owner.pid}`);
-  owner.kill('SIGKILL');
-  await waitForExit(owner);
-  await fsp.rm(recoveryLock, { recursive: true, force: true });
-  const result = await contender.done;
-  const diagnostics = JSON.stringify(result, null, 2);
-  assert.equal(result.code, 0, diagnostics);
-  assert.match(result.output, /ACQUIRED/, diagnostics);
-  assert.doesNotMatch(result.stderr, /SIGTERM previous owner/, diagnostics);
-  assert.match(
-    result.stderr,
-    new RegExp(`--force: no live owner at takeover \\(read pid=${owner.pid}, not alive; observed pid=${owner.pid}\\)`),
-    diagnostics,
-  );
-});
+// 로그만으로는 갈리지 않았다). 죽은 owner 의 lock, 깨진 lock, 없는 lock 을 서로 다르게
+// 적어야 한다 — 읽기 실패를 "없음" 으로 읽고 지우는 것과 정말 없는 것은 다른 사건이다.
+for (const scene of [
+  { name: '죽은 owner 의 lock 이 남음', after: async () => {}, read: (pid) => `pid=${pid}, not alive` },
+  { name: 'lock 이 깨짐', after: (lockPath) => fsp.writeFile(lockPath, '{not-json'), read: () => 'unparseable lock' },
+  { name: 'lock 에 pid 가 없음', after: (lockPath) => fsp.writeFile(lockPath, JSON.stringify({ pid: 0 })), read: () => 'unparseable lock' },
+  { name: 'lock 이 없음', after: (lockPath) => fsp.rm(lockPath, { force: true }), read: () => 'no lock' },
+]) {
+  test(`force 인수: 기다리는 사이 owner 가 죽었으면 죽이지 않고 취득하며, 읽은 것을 남긴다 (${scene.name})`, { timeout: 60_000 }, async () => {
+    const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-force-owner-gone-'));
+    tempDirs.push(home);
+    const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+    const lockPath = join(home, 'agent.lock');
+    const recoveryLock = `${lockPath}.recovery`;
+    const owner = await startLockOwner(env, 'old');
+    await fsp.mkdir(recoveryLock);
+    await fsp.writeFile(join(recoveryLock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+    const contender = spawnBarrieredContender(ACQUIRE_ONCE(true), env);
+    await contender.awaitStderr(`--force: waiting for takeover guard (owner pid=${owner.pid}`);
+    owner.kill('SIGKILL');
+    await waitForExit(owner);
+    await scene.after(lockPath);
+    await fsp.rm(recoveryLock, { recursive: true, force: true });
+    const result = await contender.done;
+    const diagnostics = JSON.stringify(result, null, 2);
+    assert.equal(result.code, 0, diagnostics);
+    assert.match(result.output, /ACQUIRED/, diagnostics);
+    assert.doesNotMatch(result.stderr, /SIGTERM previous owner/, diagnostics);
+    assert.ok(
+      result.stderr.includes(`--force: no live owner at takeover (read ${scene.read(owner.pid)}; observed pid=${owner.pid})`),
+      diagnostics,
+    );
+  });
+}
 
-// release 는 lock 이 자기를 가리킬 때만 지운다. 남의 것이 돼 있으면 지우지 않고 그 사실을
-// 남긴다 — 정상 경로에서는 일어나지 않는 일이라(누가 우리 lock 을 지우고 자기 것을 세웠다)
+// release 는 lock 이 자기를 가리킬 때만 지운다. 남의 것이 돼 있거나 이미 없으면 지우지 않고
+// 그 사실을 남긴다 — 정상 경로에서는 일어나지 않는 일이라(누가 우리 lock 을 지웠다)
 // 상호 배제가 깨진 흔적이다.
-test('release 는 lock 이 남의 것이 됐으면 지우지 않고 그 사실을 남긴다', { timeout: 60_000 }, async () => {
-  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-release-foreign-'));
-  tempDirs.push(home);
-  const lockPath = join(home, 'agent.lock');
-  const foreign = JSON.stringify({ pid: 4242, role: 'manager' });
-  const result = await spawnBarrieredContender(`
-    import fs from 'node:fs';
-    const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
-    const lock = await acquireAgentLock({ role: 'manager', version: 'new' });
-    fs.writeFileSync(${JSON.stringify(lockPath)}, ${JSON.stringify(foreign)});
-    lock.release();
-  `, { ...process.env, AWB_AGENT_MANAGER_HOME: home }).done;
-  const diagnostics = JSON.stringify(result, null, 2);
-  assert.equal(result.code, 0, diagnostics);
-  assert.match(result.stderr, /release: .*agent\.lock now names pid=4242, not this process — not removing/, diagnostics);
-  assert.equal(await fsp.readFile(lockPath, 'utf8'), foreign, diagnostics);
-});
+for (const scene of [
+  {
+    name: '남의 것이 됨',
+    tamper: (lockPath) => `fs.writeFileSync(${JSON.stringify(lockPath)}, ${JSON.stringify(JSON.stringify({ pid: 4242, role: 'manager' }))});`,
+    logged: /release: .*agent\.lock now names pid=4242, not this process — not removing/,
+    left: JSON.stringify({ pid: 4242, role: 'manager' }),
+  },
+  {
+    name: '이미 없음',
+    tamper: (lockPath) => `fs.rmSync(${JSON.stringify(lockPath)});`,
+    logged: /release: .*agent\.lock is already gone — someone removed this process's lock/,
+    left: null,
+  },
+]) {
+  test(`release 는 lock 이 자기 것이 아니면 지우지 않고 그 사실을 남긴다 (${scene.name})`, { timeout: 60_000 }, async () => {
+    const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-release-foreign-'));
+    tempDirs.push(home);
+    const lockPath = join(home, 'agent.lock');
+    const result = await spawnBarrieredContender(`
+      import fs from 'node:fs';
+      const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
+      const lock = await acquireAgentLock({ role: 'manager', version: 'new' });
+      ${scene.tamper(lockPath)}
+      lock.release();
+    `, { ...process.env, AWB_AGENT_MANAGER_HOME: home }).done;
+    const diagnostics = JSON.stringify(result, null, 2);
+    assert.equal(result.code, 0, diagnostics);
+    assert.match(result.stderr, scene.logged, diagnostics);
+    assert.equal(await fsp.readFile(lockPath, 'utf8').catch(() => null), scene.left, diagnostics);
+  });
+}
 
 // 크래시로 남은 회수 가드를 회수할 때, 격리한 잔해의 rm 이 실패해도(Windows 에서 아직
 // 열린 핸들, 다른 사용자가 남긴 가드) 회수는 rename 으로 이미 끝났다 — 가드 경로는
