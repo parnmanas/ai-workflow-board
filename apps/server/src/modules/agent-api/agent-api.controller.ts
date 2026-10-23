@@ -350,8 +350,9 @@ export class AgentApiController {
    * spawned CLI — is a trusted operator that needs to mark "subagent finished
    * without leaving a trace" with the same provenance the SystemCommentService
    * uses for column moves. This endpoint is gated by `AgentAuthGuard` (manager
-   * key) and creates a `type='system'` Comment + emits the `activity` event so
-   * board_update SSE cascades to Reviewer triggers normally.
+   * key) and creates a `type='system'` Comment + its activity row in one
+   * transaction, then emits the `activity` event after commit so the
+   * board_update SSE and the ticket listeners see the committed comment.
    *
    * Body shape (all optional except content):
    *   - content: rendered fallback body (code-block-wrapped CLI tail).
@@ -451,7 +452,7 @@ export class AgentApiController {
           `Silent-exit suppressed by persisted cycle comment: ticket=${ticketId.slice(0, 8)} comment=${persisted.id.slice(0, 8)}`,
           { ticket_id: ticketId, comment_id: persisted.id, cycle_trigger_id: cycleTriggerId },
         );
-        return { status: 200, body: { suppressed: true, comment_id: persisted.id } };
+        return { status: 200, body: { suppressed: true, comment_id: persisted.id }, activity: null };
       }
     }
 
@@ -490,7 +491,7 @@ export class AgentApiController {
         last_repeated_at: now,
       });
 
-      await this.activityService.logActivity({
+      const activity = await this.activityService.logActivityTx(manager, {
         entity_type: 'comment',
         entity_id: lastComment.id,
         action: 'updated',
@@ -519,7 +520,7 @@ export class AgentApiController {
       );
 
       const refreshed = await commentRepo.findOne({ where: { id: lastComment.id } });
-      return { status: 200, body: refreshed };
+      return { status: 200, body: refreshed, activity };
     }
 
     const comment = await commentRepo.save(commentRepo.create({
@@ -534,11 +535,11 @@ export class AgentApiController {
 
     // Same activity-event contract the MCP add_comment / REST add-comment
     // paths use — entity_type='comment' + action='created' flows through
-    // event-registry's board_update mapping and reaches SSE subscribers, which
-    // is how the Reviewer-trigger cascade gets notified. Without this emit the
-    // comment lands silently in the DB and the board never re-renders until a
-    // user reloads.
-    await this.activityService.logActivity({
+    // event-registry's board_update mapping to SSE subscribers and reaches the
+    // ticket listeners. Without this event the comment lands silently in the
+    // DB and the board never re-renders until a user reloads. Emitted after
+    // commit — see below the transaction.
+    const activity = await this.activityService.logActivityTx(manager, {
       entity_type: 'comment',
       entity_id: comment.id,
       action: 'created',
@@ -559,8 +560,15 @@ export class AgentApiController {
       `Silent-exit system comment posted: ticket=${ticketId.slice(0, 8)} exit=${exitCode ?? '-'} trigger=${cycleTriggerId.slice(0, 8) || '-'}`,
       { ticket_id: ticketId, comment_id: comment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId },
     );
-    return { status: 201, body: comment };
+    return { status: 201, body: comment, activity };
     });
+    // The activity row commits or rolls back with the comment; its event goes
+    // out only after the commit. Written outside the transaction, the row
+    // would autocommit on another Postgres connection and outlive a rollback,
+    // and listeners (board_update SSE, TicketDispatchService) would run before
+    // the comment is visible to them. On sql.js they would run inside this
+    // transaction's queue turn, against the uncommitted comment.
+    if (outcome.activity) this.activityService.emitLogged([outcome.activity]);
     // Do not expose success until the transaction has committed. In
     // PostgreSQL, writing the HTTP response inside the callback lets a caller
     // immediately recheck on another connection before the warning/comment is

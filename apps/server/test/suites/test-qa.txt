@@ -63,6 +63,7 @@ test/qa-flows/security-checklist-refresh.test.mjs
 test/qa-flows/security-failure-ticket.test.mjs
 test/qa-flows/security-inspection-lifecycle.test.mjs
 test/qa-flows/security-schedule-checklist-refresh.test.mjs
+test/qa-flows/silent-exit-activity-commit.test.mjs
 test/qa-flows/silent-exit-dedupe.test.mjs
 test/qa-flows/supervisor-cadence-diagnostic.test.mjs
 test/qa-flows/ticket-lifecycle.test.mjs
