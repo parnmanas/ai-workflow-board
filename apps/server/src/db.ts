@@ -220,16 +220,21 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 // tick 사이에 끝났다)는 풀릴 때 알린다 — 기준을 넘긴 차례는 어느 쪽으로든 한 번 알려진다.
 //
 // 뒤에서 기다리는 차례 (ticket c495ceaa): 데드락에서 쥔 콜백이 기다리는 다른 체인의 쓰기는 이 차례 뒤에 줄 서 있다. 그래서
-// 쥔 동안 남기는 경고에 기다리는 차례들을 싣는다 — 이름, 기다린 시간, 호출 위치. 그 쓰기는 다른 체인이 그것을 보낼 때, 그때
-// 줄 서 있던 모든 쓰기 뒤에 선다. 대개 쥔 차례가 시작된 직후다(콜백이 그 체인을 부르거나 기다리기 시작할 때). 그런데 쥔
-// 차례가 자기 차례를 기다리던 동안 그 뒤에 쌓인 무관한 쓰기는 늘 그보다 앞에 있다 — 앞에서만 세면 바쁜 dev 서버에서 그것들이
-// 목록을 채워 그 쓰기가 밀려난다. 그래서 쥔 차례가 시작될 때 이미 기다리던 무리와 그 뒤에 줄 선 무리로 나누고, 무리마다 줄
-// 선 순서대로 앞에서 SQLJS_WAITING_TURNS_IN_WARNING 개를 싣는다. 번호는 줄에서의 자리다. 이미 기다리던 무리도 싣는 이유: 콜백이
-// 기다리는 체인이 쥔 차례가 줄 서 있던 동안 쓰기를 보냈을 수 있다(그 체인이 쥔 앱 수준 잠금을 콜백이 기다리는 경우). 무리
-// 안에서도 하나가 아니라 여럿인 이유: 그 사이에 들어온 무관한 쓰기가 앞에 설 수 있다.
-// 경고는 차례마다 한 번이라, 경고 뒤에 줄 선 쓰기는 실리지 않는다 — 목록에 그럴듯한 쓰기가 없다고 데드락이 아닌 것은
-// 아니다. 풀릴 때 남기는 보고에는 싣지 않는다 — 풀리는 차례는 데드락이 아니었고, 뒤의 쓰기는 곧 시작한다. 기다리는 차례의
-// 위치도 줄 설 때 기록한 것이라(아래 — 호출 위치), 플래그 없이는 데드락의 첫 경고 전에 줄 선 쓰기에 위치가 없다.
+// 쥔 동안 남기는 경고에 기다리는 차례들을 싣는다 — 줄에서의 자리, 이름, 기다린 시간, 호출 위치. 그 쓰기는 다른 체인이 그것을
+// 보낼 때, 그때 줄 서 있던 모든 쓰기 뒤에 선다.
+//   - 쥔 차례가 시작될 때 이미 기다리던 무리와 그 뒤에 줄 선 무리로 나눈다. 쥔 차례가 자기 차례를 기다리던 동안 그 뒤에
+//     쌓인 무관한 쓰기는 늘 그 쓰기보다 앞이라, 나누지 않으면 바쁜 dev 서버에서 그것들이 목록을 채운다. 그 쓰기는 콜백이 그
+//     체인을 부르거나 기다리는 체인이 나중에 보내면 뒤 무리에, 쥔 차례가 줄 서 있던 동안 보냈으면(콜백이 그 체인이 쥔 앱
+//     수준 잠금을 기다린다) 앞 무리에 있다.
+//   - 무리마다 이름과 위치가 같은 차례는 한 항목으로 묶어 수를 단다(위치를 기록하지 않았으면 이름이 같은 차례끼리) — 주기
+//     작업 · 묶음 쓰기가 되풀이되며 목록을 채우지 않게. 그 사이에 다른 쓰기가 끼어 있어도 묶는다. 항목의 자리와 기다린 시간은
+//     그중 첫 차례의 것이다.
+//   - 무리마다 처음 나타난 순서대로 SQLJS_WAITING_TURNS_IN_WARNING 개 항목을 싣고, 나머지는 수로만 남긴다. 묶으려면 차례마다
+//     위치를 꾸며야 해서(수십 µs) 무리마다 앞의 SQLJS_WAITING_TURNS_EXAMINED 개만 살펴본다 — 경고는 tick 안에서 만든다.
+// 그래서 그 쓰기가 목록에 없을 수 있다 — 경고 뒤에 줄 섰거나(경고는 차례마다 한 번이다), 자기 무리에서 다른 항목 다섯이
+// 앞서거나, 살펴본 범위 밖에 있을 때. 목록에 없다고 데드락이 아닌 것은 아니다. 풀릴 때 남기는 보고에는 싣지 않는다 — 풀리는
+// 차례는 데드락이 아니었고, 뒤의 쓰기는 곧 시작한다. 기다리는 차례의 위치도 줄 설 때 기록한 것이라(아래 — 호출 위치),
+// 플래그 없이는 데드락의 첫 경고 전에 줄 선 쓰기에 위치가 없다.
 // 기다리는 차례는 감시가 Set 으로 든다 — 차례는 FIFO 로 시작하므로 넣은 순서가 줄 선 순서다. 줄 설 때 넣고 시작할 때 뺀다.
 // 쥔 동안에는 뒤에 붙기만 하므로, 쥔 차례가 시작될 때 센 수만큼의 앞쪽이 이미 기다리던 무리다.
 // 차례끼리 서로를 가리키게(링크) 하지 말 것 — 넘어간 차례는 그 안에서 만든 비동기 자원의 AsyncLocalStorage 값으로 오래
@@ -250,8 +255,10 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 export const DEFAULT_SQLJS_TURN_WARN_MS = 30_000;
 const MIN_SQLJS_TURN_WARN_MS = 50;
 const MAX_SQLJS_TURN_WATCH_TICK_MS = 5_000;
-/** 쥔 동안 남기는 경고에 싣는, 뒤에서 기다리는 차례 수 — 쥔 차례가 시작될 때 이미 기다리던 무리와 그 뒤에 줄 선 무리에서 각각, 줄 선 순서대로 앞에서부터. */
+/** 쥔 동안 남기는 경고에 싣는, 뒤에서 기다리는 차례의 항목 수 — 쥔 차례가 시작될 때 이미 기다리던 무리와 그 뒤에 줄 선 무리에서 각각. */
 export const SQLJS_WAITING_TURNS_IN_WARNING = 5;
+/** 경고가 한 무리에서 살펴보는 기다리는 차례 수 — 그 뒤의 차례는 세기만 한다(위 주석 — 묶으려면 위치를 꾸며야 한다). */
+export const SQLJS_WAITING_TURNS_EXAMINED = 1_000;
 
 // 감시 주기의 타이머 함수는 이 모듈을 불러올 때 잡아 둔다. 테스트가 나중에 전역 setInterval 을 가짜로 바꾸면(node:test
 // mock timers), 가짜에 걸린 주기는 되돌린 뒤로 돌지 않아 그 DataSource 의 감시가 꺼지고, 가짜 clearInterval 은 진짜 주기를
@@ -309,37 +316,50 @@ function sqljsLongTurnWarning(
   return released || waiting.size === 0 ? warning : `${warning}\n${sqljsWaitingTurns(waiting, alreadyWaiting)}`;
 }
 
+/** 경고의 한 항목 — 이름과 위치가 같은 기다리는 차례들(위치를 기록하지 않았으면 이름이 같은 차례들). 자리 · 기다린 시간은 그중 첫 차례의 것. */
+type SqljsWaitingEntry = { position: number; label: string; waitedMs: number; frames: string | null; count: number };
+
 /**
  * 쥔 차례 뒤에서 기다리는 차례들 — 그 차례가 시작될 때 이미 기다리던 무리(waiting 의 앞 `alreadyWaiting` 개)와 그 뒤에 줄 선
- * 무리로 나눠, 무리마다 줄 선 순서대로 앞에서 SQLJS_WAITING_TURNS_IN_WARNING 개(위 주석 — 왜 나누는가). 각각 줄에서의 자리 ·
- * 이름 · 기다린 시간 · 위치.
+ * 무리로 나누고, 무리마다 같은 차례를 한 항목으로 묶어 처음 나타난 순서대로 SQLJS_WAITING_TURNS_IN_WARNING 개를 싣는다. 싣지
+ * 못한 차례는 수로 남긴다 — 무리의 모든 차례가 어느 항목의 수나 그 수에 든다(위 주석 — 왜 나누고 묶는가).
  */
 function sqljsWaitingTurns(waiting: ReadonlySet<SqljsTurn>, alreadyWaiting: number): string {
   const now = performance.now();
-  const before: string[] = [];
-  const after: string[] = [];
+  const groups = [
+    { title: 'Already waiting when it started', size: alreadyWaiting, examined: 0, entries: new Map<string, SqljsWaitingEntry>() },
+    { title: 'Queued after it started', size: waiting.size - alreadyWaiting, examined: 0, entries: new Map<string, SqljsWaitingEntry>() },
+  ];
   let position = 0;
   for (const turn of waiting) {
     position += 1;
-    const group = position <= alreadyWaiting ? before : after;
-    if (group.length === SQLJS_WAITING_TURNS_IN_WARNING) {
-      if (group === after) break;
+    const group = groups[position <= alreadyWaiting ? 0 : 1];
+    if (group.examined === SQLJS_WAITING_TURNS_EXAMINED) {
+      if (group === groups[1]) break;
       continue;
     }
-    const entry = `    ${position}. "${turn.label}", waiting for ${sqljsSeconds(now - turn.queuedAt)}`;
-    group.push(
-      turn.site
-        ? `${entry}, queued at:\n${sqljsCallSiteFrames(turn.site).replace(/^/gm, '    ')}`
-        : `${entry} (call site not recorded)`,
-    );
+    group.examined += 1;
+    const frames = turn.site ? sqljsCallSiteFrames(turn.site) : null;
+    const key = `${turn.label}\n${frames ?? ''}`;
+    const same = group.entries.get(key);
+    if (same) same.count += 1;
+    else group.entries.set(key, { position, label: turn.label, waitedMs: now - turn.queuedAt, frames, count: 1 });
   }
-  const heading = (title: string, entries: string[], size: number) =>
-    `  ${title} (${size > entries.length ? `the first ${entries.length} of ${size}` : size}):\n${entries.join('\n')}`;
-  const groups = [
-    before.length ? heading('Already waiting when it started', before, alreadyWaiting) : '',
-    after.length ? heading('Queued after it started', after, waiting.size - alreadyWaiting) : '',
-  ];
-  return ['Waiting behind it, in queue order — if the turn waits for one of these, that is a deadlock:', ...groups.filter(Boolean)].join('\n');
+  const lines = ['Waiting behind it, in queue order — if the turn waits for one of these, that is a deadlock:'];
+  for (const { title, size, entries } of groups) {
+    if (size === 0) continue;
+    lines.push(`  ${title} (${size}):`);
+    let listed = 0;
+    for (const { position: at, label, waitedMs, frames, count } of [...entries.values()].slice(0, SQLJS_WAITING_TURNS_IN_WARNING)) {
+      listed += count;
+      const entry = count > 1
+        ? `    ${at}. "${label}" ×${count}, the first waiting for ${sqljsSeconds(waitedMs)}`
+        : `    ${at}. "${label}", waiting for ${sqljsSeconds(waitedMs)}`;
+      lines.push(frames === null ? `${entry} (call site not recorded)` : `${entry}, queued at:\n${frames.replace(/^/gm, '    ')}`);
+    }
+    if (size > listed) lines.push(`    … and ${size - listed} more`);
+  }
+  return lines.join('\n');
 }
 
 /** 위치의 프레임들. 꾸미지 못하면(Error.prepareStackTrace 가 던짐) 그 사실만 적는다 — 경고의 나머지는 그대로 남는다. */
