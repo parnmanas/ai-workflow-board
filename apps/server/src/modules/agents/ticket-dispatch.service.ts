@@ -241,7 +241,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     }
     if (!activity?.ticket_id) return;
     if (activity.entity_type === 'comment' && activity.action === 'created') {
-      await this.onComment(String(activity.entity_id), activity.ticket_id);
+      await this.onComment(String(activity.entity_id), activity.ticket_id, activity.actor_id || '');
       return;
     }
     if (activity.entity_type !== 'ticket') return;
@@ -265,7 +265,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     await this.startQueued({ accountId: ticket.account_id || undefined });
   }
 
-  private async onComment(commentId: string, ticketId: string): Promise<void> {
+  private async onComment(commentId: string, ticketId: string, actorId: string): Promise<void> {
     const comment = await this.dataSource.getRepository(Comment).findOne({ where: { id: commentId } });
     if (!comment) return;
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
@@ -274,7 +274,11 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       // The agent writing on its own ticket is progress — the supervisor's
       // dead-agent counter starts over. A system comment is not: the
       // silent-exit warning reports an agent that stopped without a trace.
-      if (comment.author_type === 'agent' && ticket.supervisor_redispatches > 0) {
+      // Neither is a manager auto-notice: the Host's own add_comment with
+      // `auto_notice` is stored as an agent comment, but its activity row is
+      // stamped actor 'system' (comment-tools.ts). It reports on the dispatch
+      // (a suppressed duplicate, a blocked spawn), not on the work.
+      if (comment.author_type === 'agent' && actorId !== 'system' && ticket.supervisor_redispatches > 0) {
         await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { supervisor_redispatches: 0 });
       }
       return;

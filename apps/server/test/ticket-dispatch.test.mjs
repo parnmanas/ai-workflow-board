@@ -11,7 +11,8 @@
 //   - unpend re-sends; a paused account starts nothing until resumed;
 //   - the supervisor re-sends a dead in_progress ticket (force respawn) and
 //     parks it for a human after MAX_SUPERVISOR_REDISPATCHES;
-//   - an agent comment restarts that count; a silent-exit warning does not.
+//   - an agent comment restarts that count; a silent-exit warning does not,
+//     and neither does a manager auto-notice (add_comment with auto_notice).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -169,6 +170,73 @@ test('a silent-exit warning keeps the supervisor count; an agent comment restart
   assert.ok(progress?.id, `the agent comment was written: ${JSON.stringify(progress)}`);
   for (let i = 0; i < 50 && (await redispatches()) !== 0; i += 1) await settle(100);
   assert.equal(await redispatches(), 0, 'the agent writing on the ticket is progress');
+});
+
+// Runs `write` (which creates one comment) and resolves once the dispatcher has
+// finished handling that comment's activity, so a count that did not change is
+// read after the listener ran rather than before it.
+async function afterDispatcherHandles(write) {
+  const runs = [];
+  dispatcher.onActivity = function (activity) {
+    const run = TicketDispatchService.prototype.onActivity.call(this, activity);
+    runs.push({ activity, run });
+    return run;
+  };
+  try {
+    const comment = await write();
+    assert.ok(comment?.id, `the comment was written: ${JSON.stringify(comment)}`);
+    const handled = runs.find(({ activity }) =>
+      activity.entity_type === 'comment' && activity.action === 'created' && activity.entity_id === comment.id);
+    assert.ok(handled, 'the dispatcher saw the comment');
+    await handled.run;
+    return { comment, activity: handled.activity };
+  } finally {
+    delete dispatcher.onActivity;
+  }
+}
+
+const autoNotice = (ticketId, content) => vagent.mcp.callTool('add_comment', {
+  ticket_id: ticketId, content, metadata: { auto_notice: true },
+});
+
+test('a manager auto-notice keeps the supervisor count; the same Host writing without it restarts it', async () => {
+  // Unassigned, so neither the queue nor the supervisor sweep touches it.
+  const ticket = await createTicket(app, gdst, { accountId: ws.id, title: 'auto notice', status: 'in_progress' });
+  const tickets = ds.getRepository('Ticket');
+  const redispatches = async () => (await tickets.findOneBy({ id: ticket.id })).supervisor_redispatches;
+  await tickets.update({ id: ticket.id }, { supervisor_redispatches: 2 });
+
+  const notice = await afterDispatcherHandles(() => autoNotice(ticket.id, '⚠️ duplicate dispatch suppressed'));
+  assert.equal(notice.comment.author_type, 'agent', 'the notice is stored under the Host');
+  assert.equal(notice.activity.actor_id, 'system', 'the Host\'s auto-notice is logged as a system actor');
+  assert.equal(await redispatches(), 2, 'a notice about the dispatch is not the agent making progress');
+
+  const plain = await afterDispatcherHandles(() => vagent.mcp.callTool('add_comment', {
+    ticket_id: ticket.id, content: 'parser implemented, tests pass',
+  }));
+  assert.notEqual(plain.activity.actor_id, 'system');
+  assert.equal(await redispatches(), 0, 'without auto_notice the same caller is the agent reporting progress');
+});
+
+test('re-sends that only draw manager auto-notices still end in a park', async () => {
+  // The manager holds the seat (say, a spawn stuck in provisioning) while the
+  // server sees nothing running: every supervisor re-send is dropped with a
+  // notice. Those notices must not keep the ticket away from a human forever.
+  const ticket = await createTicket(app, gdst, { accountId: ws.id, title: 'stuck spawn', status: 'in_progress', assignee: agent });
+  const later = Date.now() + 3 * 60 * 60 * 1000;
+  for (let i = 0; i < MAX_SUPERVISOR_REDISPATCHES; i += 1) {
+    await dispatcher.supervise(later + i * 60 * 60 * 1000);
+    await afterDispatcherHandles(() => autoNotice(ticket.id, `⚠️ duplicate dispatch suppressed (${i + 1})`));
+  }
+  const supervisorSends = () => vagent.triggersFor(ticket.id).filter((t) => t.trigger_source === 'supervisor');
+  for (let i = 0; i < 50 && supervisorSends().length < MAX_SUPERVISOR_REDISPATCHES; i += 1) await settle(100);
+  assert.equal(supervisorSends().length, MAX_SUPERVISOR_REDISPATCHES);
+  assert.equal((await ds.getRepository('Ticket').findOneBy({ id: ticket.id })).supervisor_redispatches, MAX_SUPERVISOR_REDISPATCHES);
+
+  await dispatcher.supervise(later + 10 * 60 * 60 * 1000);
+  const parked = await ds.getRepository('Ticket').findOneBy({ id: ticket.id });
+  assert.equal(parked.pending_user_action, true);
+  assert.match(parked.pending_reason, /stopped/);
 });
 
 test('tickets list filters by status, tags and project', async () => {
