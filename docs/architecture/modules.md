@@ -271,6 +271,7 @@ with the Agent table, P4c-4.)
     - Past that it is no longer protected: its heartbeat stops, and the first read after its lease lapses releases it.
     - If it reaches the replacement anyway, it fails with "ran past its maximum duration" instead of replacing.
     - A replacement that has started stays protected, and keeps renewing, until it ends.
+    - On Postgres the replacement transaction sets `lock_timeout` (10 min). If another session holds the graph's rows (a frozen server's old replacement, an idle psql transaction), the build fails instead of staying `building`.
   - **Fencing.** The build finishes (`ready`, or `error` on failure) only while the row still carries its `build_id`. A build that lost its claim discards its result; the replacement transaction checks at its end and rolls back.
   - **Abandoned builds.** If the server running a build restarts or crashes, its lease expires. The next read of the graph (REST status/graph or any MCP `graph_` tool) turns it into `error`, keeping the last ready snapshot and its commit. Refresh also reclaims it directly.
   - Postgres may be shared by several servers, so boot cannot tell a dead build from a live one; the lease decides. Upgrade all servers sharing a database together: an older server claims without a lease, and a newer one releases that build on first read. sql.js lives in one process, so it also releases every `building` row at boot.

@@ -656,6 +656,42 @@ describe('fencing — 주인 자리를 잃은 빌드는 끝내는 쓰기를 하�
   });
 });
 
+// 교체를 시작한 빌드는 끝날 때까지 지킨다. 그래서 다른 세션이 이 그래프의 행을 쥔 채 멈추면 — 트랜잭션을
+// 연 채 둔 psql, 멈춘 서버의 옛 교체 트랜잭션 — 교체 트랜잭션의 잠금 상한(lock_timeout)만이 그 빌드를 끝낸다.
+describe('교체 트랜잭션의 잠금 대기 — Postgres', () => {
+  it('다른 세션이 쥔 행을 기다리는 교체는 상한 뒤에 실패로 끝난다 — building 에 머물지 않는다', {
+    timeout: 30_000,
+    skip: IS_POSTGRES ? false : 'sql.js 는 연결이 하나라 다른 세션의 잠금을 기다리는 일이 없다',
+  }, async () => {
+    const graph = await seedGraph('lease-replace-lock-timeout', { status: 'ready', commit: 'snapshot-commit' });
+    await seedSnapshotNode(graph);
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    try {
+      await holder.query('SELECT id FROM ontology_nodes WHERE graph_id = $1 FOR UPDATE', [graph.id]);
+      const svc = server({
+        timing: { replaceLockTimeoutMs: 300 },
+        extraction: { extractRepo: async () => extractionOf(graph, 'blocked-commit'), persistExtraction: async () => persistSummaryOf(0) },
+      });
+      let build = null;
+      svc.kickOffInitialBuild = (claimed) => { build = svc.runInitialBuild(claimed); };
+      assert.equal((await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID })).started, true);
+      assert.equal(await settlesWithin(build, 10_000), true, '다른 세션의 잠금을 기다리는 교체가 끝나지 않는다');
+      await assert.rejects(build, /lock timeout/i);
+      const stored = await readGraph(graph);
+      assert.equal(stored.status, 'error');
+      assert.match(stored.error, /lock timeout/i);
+      assert.equal(stored.commit, 'snapshot-commit');
+      assertNoLiveBuilds(svc);
+    } finally {
+      await holder.rollbackTransaction().catch(() => {});
+      await holder.release();
+    }
+    assert.deepEqual(await snapshotSymbols(graph), ['sym:snapshot']);
+  });
+});
+
 // 읽기는 행을 읽은 뒤 해제 UPDATE 를 건다. 그 사이 행이 바뀌었으면(주인이 연장했거나, 빌드가 끝났거나,
 // 다른 빌드가 다시 claim 했으면) UPDATE 의 조건이 막아야 한다 — 읽은 값만으로 판정하면 안 된다.
 // 공개 경로는 그때그때 새로 읽으므로, 낡은 스냅샷을 해제 단계에 직접 넘긴다.

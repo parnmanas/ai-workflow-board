@@ -69,6 +69,15 @@ const BUILD_RENEW_RETRY_MS = 5_000;
  */
 const BUILD_MAX_MS = 2 * 60 * 60_000;
 const MAX_DURATION_ERROR = 'graph build ran past its maximum duration before it could replace the graph — refresh the graph to rebuild';
+/**
+ * Postgres 교체 트랜잭션이 잠금을 기다릴 수 있는 가장 긴 시간. 교체를 시작한 빌드는 끝날
+ * 때까지 지키므로(BUILD_MAX_MS 무관), 다른 세션이 이 그래프의 행을 쥔 채 멈추면 — 멈춘
+ * 서버의 옛 교체 트랜잭션, 트랜잭션을 연 채 둔 psql — 그래프가 building 에 머문다(리뷰
+ * 지적). 넘기면 빌드가 실패로 끝나 Refresh 를 다시 받는다. 정상적인 기다림은 앞선 교체
+ * 트랜잭션이 끝나기를 기다리는 것뿐이라 넉넉하게 잡는다. MySQL 은 innodb_lock_wait_timeout
+ * (기본 50초)이, sql.js 는 연결 하나라 잠금 대기가 없다.
+ */
+const BUILD_REPLACE_LOCK_TIMEOUT_MS = 10 * 60_000;
 
 /** lease 가 지났거나 없는(이 컬럼 전에 남은) building — 해제 · 재claim 의 조건. `:nowMs` 를 넘긴다. */
 const BUILD_LEASE_EXPIRED_SQL = '(build_lease_until_ms IS NULL OR build_lease_until_ms < :nowMs)';
@@ -110,6 +119,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
   private buildHeartbeatMs = BUILD_HEARTBEAT_MS;
   private buildMaxMs = BUILD_MAX_MS;
   private buildRenewRetryMs = BUILD_RENEW_RETRY_MS;
+  private replaceLockTimeoutMs = BUILD_REPLACE_LOCK_TIMEOUT_MS;
   /**
    * 주기 연장은 다른 서버가 이 서버의 빌드를 보는 Postgres 에서만 한다. sql.js DB 는
    * 이 프로세스에만 있어 살아 있는 빌드는 liveBuilds 가 지키고 끊긴 빌드는 부팅 때
@@ -136,12 +146,14 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
   /** 테스트 전용 — lease 가 지나는 것과 heartbeat 를 실제로 몇 분씩 기다리지 않고 본다. */
   __setBuildLeaseForTests(timing: {
     leaseMs?: number; heartbeatMs?: number; renewRetryMs?: number; maxBuildMs?: number; renewPeriodically?: boolean;
+    replaceLockTimeoutMs?: number;
   }): void {
     if (timing.leaseMs !== undefined) this.buildLeaseMs = timing.leaseMs;
     if (timing.heartbeatMs !== undefined) this.buildHeartbeatMs = timing.heartbeatMs;
     if (timing.renewRetryMs !== undefined) this.buildRenewRetryMs = timing.renewRetryMs;
     if (timing.maxBuildMs !== undefined) this.buildMaxMs = timing.maxBuildMs;
     if (timing.renewPeriodically !== undefined) this.renewPeriodically = timing.renewPeriodically;
+    if (timing.replaceLockTimeoutMs !== undefined) this.replaceLockTimeoutMs = timing.replaceLockTimeoutMs;
   }
 
   /** 이 서버가 돌리는 빌드이고, 교체 중이거나 아직 BUILD_MAX_MS 를 넘기지 않았다. */
@@ -373,6 +385,10 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
       // 트랜잭션이라, 저장이나 resolve가 실패하면 마지막 ready 스냅샷이
       // 그대로 남는다.
       await dataSource.transaction(async (manager) => {
+        if (dataSource.options.type === 'postgres') {
+          // SET 은 바인드 변수를 받지 않는다 — 정수로 맞춘 값만 넣는다.
+          await manager.query(`SET LOCAL lock_timeout = ${Math.max(1, Math.round(this.replaceLockTimeoutMs))}`);
+        }
         await this.clearExistingGraphRows(graph.id, manager);
         const persisted = await this.extractionService.persistExtraction(extraction, graph.id, manager);
         const resolveResult = await this.resolverService.resolveGraph({
