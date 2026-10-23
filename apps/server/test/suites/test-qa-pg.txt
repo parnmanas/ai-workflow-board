@@ -32,6 +32,7 @@ test/qa-flows/comment-dedupe-pg.test.mjs
 test/qa-flows/comment-pagination.test.mjs
 test/qa-flows/confirmed-duplicate-correction-pg-race.test.mjs
 test/qa-flows/mcp-agent-roundtrip.test.mjs
+test/qa-flows/mention-audit-retry.test.mjs
 test/qa-flows/multi-user-chat.test.mjs
 test/qa-flows/orchestration-confirm-reminder-pg-cast.test.mjs
 test/qa-flows/orchestration-event-write-seq-backfill-pg.test.mjs

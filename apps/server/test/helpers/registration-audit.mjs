@@ -30,9 +30,6 @@ export const CI_ENTRY_SCRIPTS = ['test', 'test:qa:pg'];
 // 예외는 필요한 동안만 둔다: 그 파일이 CI 에 등록되거나 디스크에서 사라지면 가드가
 // 낡은 예외로 신고하니, 등록하는 쪽이 이 줄을 함께 지운다.
 export const CI_EXEMPT_TESTS = {
-  'test/qa-flows/mention-audit-retry.test.mjs':
-    '보드 제거(d51ee84d) 뒤 없어진 fixture(setupKanbanScene)를 import 해 로드부터 실패한다. '
-    + '보드 없는 fixture 로 옮겨 매니페스트에 넣는 일은 티켓 0d5a2fb0 이 맡는다.',
 };
 
 // 러너(run-suite)와 이 가드가 아는 테스트 파일 자리 — test/ 바로 아래와 test/qa-flows/.
