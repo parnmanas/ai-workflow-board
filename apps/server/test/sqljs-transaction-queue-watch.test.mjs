@@ -1,5 +1,7 @@
 // 회귀 테스트 — ticket 61622dbb
 // "sql.js 트랜잭션 큐: 한 차례가 오래 잡히면 어디서 잡았는지 경고로 남긴다 (데드락 · 느린 콜백 진단)"
+// 와 그 후속 ticket c495ceaa
+// "sql.js 큐 경고: 데드락이면 차례 뒤에서 기다리는 쓰기의 위치도 남긴다 (데드락의 다른 쪽)"
 //
 // 배경: sql.js(dev)에서는 연결에 쓰는 모든 일이 serializeSqljsTransactions() 큐의 차례를 탄다(ticket 13f5b0f6). 차례를 쥔
 // 콜백이 다른 체인의 쓰기를 기다리거나(데드락) 느린 I/O 를 하면 그 연결의 모든 쓰기가 소리 없이 멈췄고, 멈춘 뒤에는
@@ -21,13 +23,17 @@
 //   6. 기준값 해석 — 비었거나 숫자가 아니면 30초, 하한 50ms.
 //   7. 넘어간 차례는 호출자를 붙잡지 않는다 — 차례 안에서 만든 타이머가 차례 객체를 AsyncLocalStorage 값으로 오래 물고
 //      있어도, 기록한 위치(프레임의 receiver)와 차례의 work(콜백이 쓰는 this)를 거쳐 호출자가 남지 않는다.
+//   8. 데드락의 다른 쪽 (c495ceaa) — 쥔 동안 남기는 경고에 뒤에서 기다리는 차례가 줄 선 순서대로 앞에서 5개 실린다(이름,
+//      기다린 시간, 호출 위치 — 위치는 줄 설 때 기록한 것이다). 쥔 콜백이 다른 체인의 쓰기를 기다리는 데드락에서는 그
+//      쓰기와 그것을 부른 함수가 나온다. 더 기다리면 수만 센다. 시작한 차례는 목록에서 빠진다. 차례 안의 재진입 쓰기는
+//      목록에 없다. 풀릴 때 남기는 보고에는 목록이 없다 — 풀리는 차례는 데드락이 아니었다.
 //
 // 컴파일된 dist/ 를 대상으로 실행한다(`npm run build` 필요, test 스크립트가 보장). 공유 dev database/ 의
 // 파일을 건드리지 않도록 모든 sql.js 파일을 임시 디렉터리에 둔다.
 
 import { describe, it, beforeEach, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -61,6 +67,7 @@ const {
   flushSqljs,
   resolveSqljsTurnWarnMs,
   DEFAULT_SQLJS_TURN_WARN_MS,
+  SQLJS_WAITING_TURNS_IN_WARNING,
   SQLJS_EXPORT_TXN_WAIT_MS,
 } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 // db.js 가 갈고리를 잡았다. 전역은 되돌린다 — 다른 코드와 mock timers 는 진짜 함수를 본다.
@@ -173,6 +180,23 @@ function captureQueueWarnings() {
   return { lines, restore: () => { console.warn = original; } };
 }
 
+/** 경고에서 뒤에서 기다리는 차례들을 적은 부분 — 없으면 null. */
+function waitingSectionOf(warning) {
+  const at = warning.indexOf('\nWaiting behind it');
+  return at === -1 ? null : warning.slice(at + 1);
+}
+
+/** 기다리는 차례 목록의 항목들 — 번호, 이름, 기다린 시간(초), 위치의 프레임들(기록하지 않았으면 null). */
+function waitingEntriesOf(warning) {
+  const entry = /^ {2}(\d+)\. "([^"]*)", waiting for (\d+\.\d)s(?:, queued at:\n((?: {8}.*(?:\n|$))+)| \(call site not recorded\)$)/gm;
+  return [...(waitingSectionOf(warning) ?? '').matchAll(entry)].map(([, n, label, waited, frames]) => ({
+    n: Number(n),
+    label,
+    waited: Number(waited),
+    frames: frames ?? null,
+  }));
+}
+
 describe('sql.js: a queue turn held too long is reported with where it was opened (ticket 61622dbb)', { timeout: 60_000 }, () => {
   let warnings;
   beforeEach(() => { warnings = captureQueueWarnings(); });
@@ -209,6 +233,19 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     );
     const heldFor = Number(/held for (\d+\.\d)s/.exec(warning)[1]);
     assert.ok(heldFor >= WARN_MS / 1000, `held for ${heldFor}s when it warned — not before the threshold`);
+    // 뒤에서 기다리는 쓰기들 (c495ceaa) — SQLJS_TURN_STACKS 없이는 이름과 기다린 시간뿐이다.
+    assert.match(
+      waitingSectionOf(warning) ?? '',
+      /^Waiting behind it, in queue order — if the turn waits for one of these, that is a deadlock:\n(?: {2}\d\. "[^"]+", waiting for \d+\.\ds \(call site not recorded\)(?:\n|$)){3}$/,
+      'each write waiting behind it, by name and how long it has waited — their call sites were not recorded',
+    );
+    const waitingEntries = waitingEntriesOf(warning);
+    assert.deepEqual(waitingEntries.map(({ n }) => n), [1, 2, 3]);
+    assert.deepEqual(
+      waitingEntries.map(({ label }) => label).sort(),
+      ['UPDATE', 'save', 'transaction'],
+      'the save inside the callback ran in the held turn and is not listed',
+    );
 
     held.release();
     assert.equal(await withinDeadlockTimeout(held.done), 'once: committed');
@@ -278,6 +315,11 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     );
     const heldFor = Number(/was held for (\d+\.\d)s/.exec(lines[0])[1]);
     assert.ok(heldFor >= WARN_MS / 1000, `held for ${heldFor}s — past the threshold`);
+    assert.equal(
+      waitingSectionOf(lines[0]),
+      null,
+      'a report made as the turn is released counts the writes waiting but does not list them — the turn was not deadlocked',
+    );
 
     // 쥔 동안 남긴 경고와 마찬가지로, 그 뒤로 이 연결은 호출 위치를 기록한다.
     const next = openSecondLongTransaction(ds);
@@ -467,6 +509,131 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     });
   });
 
+  describe('the turns waiting behind it — the other side of a deadlock (ticket c495ceaa)', () => {
+    it('a deadlock — the held callback waits for a write another request queued behind it — names that write and the function that called it', async () => {
+      const ds = await openDataSource({ stacks: '1' });
+      const accounts = ds.getRepository(Account);
+      await accounts.save(accounts.create({ name: 'deadlock-row', description: 'watch' }));
+      // 다른 요청 — HTTP 핸들러처럼 따로 시작한 비동기 체인이다. 거기서 부른 쓰기는 차례를 쥔 콜백의 재진입이 아니라 줄을 선다.
+      const inAnotherRequest = AsyncResource.bind((handle) => handle());
+      async function updateFromApiHelper() {
+        await ds.getRepository(Account).update({ name: 'deadlock-row' }, { description: 'from the other request' });
+      }
+      const breakDeadlock = gate();
+      let otherRequest;
+      async function holdTurnWaitingForAnotherRequest() {
+        return ds.transaction(async (manager) => {
+          const inside = manager.getRepository(Account);
+          await inside.save(inside.create({ name: 'deadlock-inside', description: 'watch' }));
+          otherRequest = inAnotherRequest(updateFromApiHelper);
+          // 그 요청의 쓰기를 기다린다 — 쓰기는 이 차례 뒤에 줄 서 있어 서로를 기다린다. 테스트가 확인한 뒤 끊어 준다.
+          await Promise.race([otherRequest, breakDeadlock.wait]);
+          return 'holder: committed';
+        });
+      }
+      let holderSettled = false;
+      const holder = holdTurnWaitingForAnotherRequest().finally(() => { holderSettled = true; });
+      let warning;
+      try {
+        await until(() => warningsFor(ds).length === 1, 'the long-turn warning');
+        [warning] = warningsFor(ds);
+        await sleep(WARN_MS * 2);
+        assert.equal(holderSettled, false, 'the turn is deadlocked: it cannot end until the write behind it runs');
+        assert.equal(warningsFor(ds).length, 1, 'and no release line follows');
+      } finally {
+        breakDeadlock.open();
+      }
+
+      assert.match(
+        warning,
+        /the turn opened by "transaction" has been held for \d+\.\ds, 1 waiting behind it — every write on this connection waits until it is released\. Opened at:\n {4}at /,
+      );
+      assert.match(warning, /at holdTurnWaitingForAnotherRequest \(/, 'one side of the deadlock: where the held turn was opened');
+      const waiting = waitingSectionOf(warning) ?? '';
+      assert.match(
+        waiting,
+        /^Waiting behind it, in queue order — if the turn waits for one of these, that is a deadlock:\n {2}1\. "UPDATE", waiting for \d+\.\ds, queued at:\n {8}at /,
+        'the other side: the write waiting behind the held turn',
+      );
+      assert.match(waiting, /\n {8}at (async )?updateFromApiHelper \(/, 'and the function that called it');
+      assert.ok(waiting.includes(THIS_FILE), 'and the file it is in');
+      assert.doesNotMatch(waiting, QUEUE_INTERNALS, 'the frames of db.js that queued the write are not a call site');
+      assert.doesNotMatch(waiting, /"save"/, 'the save inside the held callback ran in its turn — it never waited behind it');
+
+      assert.equal(await withinDeadlockTimeout(holder), 'holder: committed');
+      await withinDeadlockTimeout(otherRequest);
+      const row = await accounts.findOneBy({ name: 'deadlock-row' });
+      assert.equal(row.description, 'from the other request', 'the waiting write ran once the turn was released');
+      await until(() => warningsFor(ds).length === 2, 'the release line');
+      assert.match(warningsFor(ds)[1], /the turn opened by "transaction" was released after \d+\.\ds$/);
+    });
+
+    it('the first five waiting are named in queue order with how long each has waited and where it was queued; the rest are counted', async () => {
+      assert.equal(SQLJS_WAITING_TURNS_IN_WARNING, 5);
+      const ds = await openDataSource({ stacks: '1' });
+      const held = holdTransaction(ds, 'crowded');
+      await held.inside;
+      async function queueBehindHeldTurn(i) {
+        return afterSqljsTransactions(ds, async () => i, `waiter-${i}`);
+      }
+      const queuedFrom = performance.now();
+      const waiters = Array.from({ length: 7 }, (_, i) => queueBehindHeldTurn(i + 1));
+      await until(() => warningsFor(ds).length === 1, 'the warning');
+      const sinceQueued = (performance.now() - queuedFrom) / 1000;
+      const [warning] = warningsFor(ds);
+
+      assert.match(warning, /has been held for \d+\.\ds, 7 waiting behind it/);
+      assert.match(
+        waitingSectionOf(warning) ?? '',
+        /^Waiting behind it, the first 5 of 7 in queue order — if the turn waits for one of these, that is a deadlock:\n/,
+      );
+      const entries = waitingEntriesOf(warning);
+      assert.deepEqual(
+        entries.map(({ n, label }) => [n, label]),
+        [[1, 'waiter-1'], [2, 'waiter-2'], [3, 'waiter-3'], [4, 'waiter-4'], [5, 'waiter-5']],
+        'the front of the queue, in the order the turns will start',
+      );
+      assert.doesNotMatch(warning, /waiter-[67]/, 'the rest are counted, not named');
+      for (const { label, waited, frames } of entries) {
+        assert.match(frames ?? '', /^ {8}at queueBehindHeldTurn \(/, `${label} — where it was queued`);
+        assert.doesNotMatch(frames, QUEUE_INTERNALS);
+        // 차례가 시작된 직후에 줄 섰다 — 기준을 넘길 때까지 기다렸고, 줄 선 뒤로 흐른 시간보다 오래 기다리지는 않았다.
+        assert.ok(waited >= WARN_MS / 1000 - 0.1, `${label} waiting for ${waited}s — it has waited since the held turn started`);
+        assert.ok(waited <= sinceQueued + 0.05, `${label} waiting for ${waited}s — no longer than since it was queued (${sinceQueued.toFixed(3)}s)`);
+      }
+
+      held.release();
+      assert.equal(await withinDeadlockTimeout(held.done), 'crowded: committed');
+      assert.deepEqual(await withinDeadlockTimeout(Promise.all(waiters)), [1, 2, 3, 4, 5, 6, 7]);
+    });
+
+    it('a waiting turn leaves the list when it starts — the next long turn lists only what still waits behind it', async () => {
+      const ds = await openDataSource({ stacks: '1' });
+      const first = holdTransaction(ds, 'first-holder');
+      await first.inside;
+      const second = holdTransaction(ds, 'second-holder'); // 첫 차례 뒤에 줄 섰다가, 시작하면 자기도 오래 쥔다
+      const third = afterSqljsTransactions(ds, async () => 'third: done', 'third-waiter');
+      await until(() => warningsFor(ds).length === 1, 'the first turn\'s warning');
+      assert.deepEqual(waitingEntriesOf(warningsFor(ds)[0]).map(({ label }) => label), ['transaction', 'third-waiter']);
+
+      first.release();
+      assert.equal(await withinDeadlockTimeout(first.done), 'first-holder: committed');
+      await second.inside;
+      await until(() => warningsFor(ds).length === 3, 'the second turn\'s warning, after the first one\'s release line');
+      const secondWarning = warningsFor(ds)[2];
+      assert.match(secondWarning, /the turn opened by "transaction" has been held for \d+\.\ds, 1 waiting behind it/);
+      assert.deepEqual(
+        waitingEntriesOf(secondWarning).map(({ n, label }) => [n, label]),
+        [[1, 'third-waiter']],
+        'the turn that started is not listed as waiting behind itself',
+      );
+
+      second.release();
+      assert.equal(await withinDeadlockTimeout(second.done), 'second-holder: committed');
+      assert.equal(await withinDeadlockTimeout(third), 'third: done');
+    });
+  });
+
   it('the watch is one unref\'d interval per busy DataSource, not one per turn, and stops itself once the queue is idle', async () => {
     const tickMs = tickMsFor(WARN_MS);
     const created = [];
@@ -578,6 +745,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     const ds = await openDataSource({ stacks: '1' });
     const held = holdTransaction(ds, 'unformattable');
     await held.inside;
+    const waiter = afterSqljsTransactions(ds, async () => 'waiter: done', 'unformattable-waiter');
     const formatter = Error.prepareStackTrace;
     // 진짜 Error 만 받는다고 여기는 포매터 — 위치를 담은 평범한 객체에는 message 가 없다.
     Error.prepareStackTrace = (error) => error.message.trim();
@@ -590,10 +758,19 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     }
     assert.match(
       warning,
-      /the turn opened by "transaction" has been held for \d+\.\ds, 0 waiting behind it — .* Opened at:\n {4}\(the call site could not be formatted — Error\.prepareStackTrace threw\)$/s,
+      new RegExp(
+        'the turn opened by "transaction" has been held for \\d+\\.\\ds, 1 waiting behind it — .* Opened at:\\n' +
+          ' {4}\\(the call site could not be formatted — Error\\.prepareStackTrace threw\\)\\n' +
+          'Waiting behind it, in queue order — .*:\\n' +
+          ' {2}1\\. "unformattable-waiter", waiting for \\d+\\.\\ds, queued at:\\n' +
+          ' {8}\\(the call site could not be formatted — Error\\.prepareStackTrace threw\\)$',
+        's',
+      ),
+      'neither call site could be formatted — the holder, the turn waiting behind it and the rest of the warning remain',
     );
     held.release();
     assert.equal(await withinDeadlockTimeout(held.done), 'unformattable: committed');
+    assert.equal(await withinDeadlockTimeout(waiter), 'waiter: done');
   });
 
   it('the watch runs in the async context its queue was set up in, not in the request that happened to start it', async () => {

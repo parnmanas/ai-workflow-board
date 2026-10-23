@@ -194,6 +194,8 @@ type SqljsTurn = {
   release: () => void;
   /** 차례를 연 일 — manager · DataSource 메서드 이름, 쓰기 문장의 첫 단어, afterSqljsTransactions() 의 이름('export'). */
   label: string;
+  /** 줄을 선 시각(performance.now()) — 뒤에서 기다리는 차례로 경고에 실릴 때 기다린 시간이 된다. */
+  queuedAt: number;
   /** 차례가 시작된 시각(performance.now()) — 줄 서 있던 시간은 세지 않는다. */
   startedAt: number;
   /** 차례를 연 호출 위치. 기록하는 동안, 차례가 넘어갈 때까지만 있다(watchSqljsTurns 참고). */
@@ -217,6 +219,16 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 // 풀림 줄이 끝내 없으면 데드락이고, 있으면 느린 콜백이다. 쥔 동안 감시가 보지 못한 긴 차례(이벤트 루프가 막혔거나 두
 // tick 사이에 끝났다)는 풀릴 때 알린다 — 기준을 넘긴 차례는 어느 쪽으로든 한 번 알려진다.
 //
+// 뒤에서 기다리는 차례 (ticket c495ceaa): 데드락에서 쥔 콜백이 기다리는 다른 체인의 쓰기는 이 차례 뒤에 줄 서 있다. 그래서
+// 쥔 동안 남기는 경고에 기다리는 차례를 줄 선 순서대로 앞에서 SQLJS_WAITING_TURNS_IN_WARNING 개 싣는다 — 이름, 기다린 시간,
+// 호출 위치. 콜백이 기다리는 쓰기는 콜백이 await 에 닿을 때(대개 시작 직후) 줄을 서서 앞쪽에 있고, 그 뒤로 쌓이는 쓰기는
+// 피해자다. 하나가 아니라 여럿인 이유: 바쁜 dev 서버에서는 그 사이에 들어온 무관한 쓰기가 앞에 설 수 있다. 풀릴 때 남기는
+// 보고에는 싣지 않는다 — 풀리는 차례는 데드락이 아니었고, 뒤의 쓰기는 곧 시작한다. 기다리는 차례의 위치도 줄 설 때 기록한
+// 것이라(아래 — 호출 위치), 플래그 없이는 데드락의 첫 경고 전에 줄 선 쓰기에 위치가 없다.
+// 기다리는 차례는 감시가 Set 으로 든다 — 차례는 FIFO 로 시작하므로 넣은 순서가 줄 선 순서다. 줄 설 때 넣고 시작할 때 뺀다.
+// 차례끼리 서로를 가리키게(링크) 하지 말 것 — 넘어간 차례는 그 안에서 만든 비동기 자원의 AsyncLocalStorage 값으로 오래
+// 남으므로, 링크가 있으면 뒤의 차례들과 그 위치(호출자)까지 붙잡는다.
+//
 // 감시 주기는 DataSource 마다 하나이고 unref 다 — 차례마다 타이머를 만들지 않는다. 큐가 바쁜 동안만 돈다. 차례가
 // 시작될 때 주기가 없으면 걸고, 쥔 차례도 기다리는 일도 없는 것을 본 tick 에서 스스로 멈춘다. 그래서 큐가 빈 DataSource
 // 에는(닫힌 것도) 타이머가 남지 않는다. 주기는 큐를 건(serializeSqljsTransactions) 비동기 문맥에서 건다 — 차례를 시작한
@@ -232,6 +244,8 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 export const DEFAULT_SQLJS_TURN_WARN_MS = 30_000;
 const MIN_SQLJS_TURN_WARN_MS = 50;
 const MAX_SQLJS_TURN_WATCH_TICK_MS = 5_000;
+/** 쥔 동안 남기는 경고에 싣는, 뒤에서 기다리는 차례 수 — 줄 선 순서대로 앞에서부터. */
+export const SQLJS_WAITING_TURNS_IN_WARNING = 5;
 
 // 감시 주기의 타이머 함수는 이 모듈을 불러올 때 잡아 둔다. 테스트가 나중에 전역 setInterval 을 가짜로 바꾸면(node:test
 // mock timers), 가짜에 걸린 주기는 되돌린 뒤로 돌지 않아 그 DataSource 의 감시가 꺼지고, 가짜 clearInterval 은 진짜 주기를
@@ -263,19 +277,45 @@ function sqljsStatementLabel(sql: string): string {
 
 const sqljsSeconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 
-/** 기준을 넘겨 쥔 차례의 경고. `released` — 쥔 동안 감시가 보지 못해 풀린 뒤에 남긴다. */
-function sqljsLongTurnWarning(connection: string, turn: SqljsTurn, heldMs: number, waiting: number, released: boolean): string {
+/**
+ * 기준을 넘겨 쥔 차례의 경고. `waiting` — 그 뒤에 줄 선 차례들(줄 선 순서). `released` — 쥔 동안 감시가 보지 못해 풀린
+ * 뒤에 남긴다. 그때는 기다리는 차례를 세기만 한다(위 주석 — 풀리는 차례는 데드락이 아니었다).
+ */
+function sqljsLongTurnWarning(
+  connection: string,
+  turn: SqljsTurn,
+  heldMs: number,
+  waiting: ReadonlySet<SqljsTurn>,
+  released: boolean,
+): string {
   const opened = `[DB] sql.js write queue (${connection}): the turn opened by "${turn.label}"`;
   const head = released
-    ? `${opened} was held for ${sqljsSeconds(heldMs)} before it was released, ${waiting} waiting behind it — ` +
+    ? `${opened} was held for ${sqljsSeconds(heldMs)} before it was released, ${waiting.size} waiting behind it — ` +
       'the watch could not check it while it was held (the event loop was blocked, or the turn ended between checks).'
-    : `${opened} has been held for ${sqljsSeconds(heldMs)}, ${waiting} waiting behind it — ` +
+    : `${opened} has been held for ${sqljsSeconds(heldMs)}, ${waiting.size} waiting behind it — ` +
       'every write on this connection waits until it is released.';
-  if (!turn.site) {
-    return `${head} Its call site was not recorded; turns opened from now on record theirs. ` +
+  const warning = turn.site
+    ? `${head} Opened at:\n${sqljsCallSiteFrames(turn.site)}`
+    : `${head} Its call site was not recorded; turns opened from now on record theirs. ` +
       'Set SQLJS_TURN_STACKS=1 to record them from the start.';
+  return released || waiting.size === 0 ? warning : `${warning}\n${sqljsWaitingTurns(waiting)}`;
+}
+
+/** 쥔 차례 뒤에서 기다리는 차례들 — 줄 선 순서대로 앞에서 SQLJS_WAITING_TURNS_IN_WARNING 개, 각각 이름 · 기다린 시간 · 위치. */
+function sqljsWaitingTurns(waiting: ReadonlySet<SqljsTurn>): string {
+  const now = performance.now();
+  const entries: string[] = [];
+  for (const turn of waiting) {
+    if (entries.length === SQLJS_WAITING_TURNS_IN_WARNING) break;
+    const entry = `  ${entries.length + 1}. "${turn.label}", waiting for ${sqljsSeconds(now - turn.queuedAt)}`;
+    entries.push(
+      turn.site
+        ? `${entry}, queued at:\n${sqljsCallSiteFrames(turn.site).replace(/^/gm, '    ')}`
+        : `${entry} (call site not recorded)`,
+    );
   }
-  return `${head} Opened at:\n${sqljsCallSiteFrames(turn.site)}`;
+  const shown = waiting.size > entries.length ? `the first ${entries.length} of ${waiting.size} in queue order` : 'in queue order';
+  return `Waiting behind it, ${shown} — if the turn waits for one of these, that is a deadlock:\n${entries.join('\n')}`;
 }
 
 /** 위치의 프레임들. 꾸미지 못하면(Error.prepareStackTrace 가 던짐) 그 사실만 적는다 — 경고의 나머지는 그대로 남는다. */
@@ -311,7 +351,8 @@ function watchSqljsTurns(connection: string) {
   const tickMs = Math.min(MAX_SQLJS_TURN_WATCH_TICK_MS, Math.ceil(warnMs / 4));
   let recordSites = sqljsTurnStacksRequested();
   let current: SqljsTurn | null = null;
-  let waiting = 0;
+  /** 줄 서 있는(아직 시작하지 않은) 차례들 — 넣은 순서가 줄 선 순서다. 시작하면 뺀다(위 주석 — 차례끼리 잇지 않는다). */
+  const waiting = new Set<SqljsTurn>();
   let timer: ReturnType<typeof setInterval> | null = null;
 
   /** 기준을 넘겨 쥔 차례를 알린다 — 그 뒤로 이 연결은 차례를 연 호출 위치를 기록한다. */
@@ -324,7 +365,7 @@ function watchSqljsTurns(connection: string) {
   const tick = () => {
     const turn = current;
     if (!turn) {
-      if (waiting === 0 && timer) {
+      if (waiting.size === 0 && timer) {
         sqljsWatchTimers.clearInterval(timer);
         timer = null;
       }
@@ -345,11 +386,12 @@ function watchSqljsTurns(connection: string) {
       Error.captureStackTrace(site, above);
       return site;
     },
-    queued() {
-      waiting += 1;
+    queued(turn: SqljsTurn) {
+      turn.queuedAt = performance.now();
+      waiting.add(turn);
     },
     begin(turn: SqljsTurn) {
-      waiting -= 1;
+      waiting.delete(turn);
       turn.startedAt = performance.now();
       current = turn;
       if (timer) return;
@@ -460,6 +502,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
       active: true,
       pending: 0,
       label,
+      queuedAt: 0,
       startedAt: 0,
       site: watch.callSite(above),
       warned: false,
@@ -469,7 +512,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
         next();
       },
     };
-    watch.queued();
+    watch.queued(turn);
     // 다음 차례는 결과와 무관하게 이 차례가 넘어간 뒤 시작한다 — 실패한 트랜잭션이 뒤에 선 일을 막지 않는다.
     // 실패 자체는 `run` 으로 이 호출자에게 간다.
     const run = startAfter(tail, turn, work);
