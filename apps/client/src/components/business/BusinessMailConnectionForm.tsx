@@ -1,0 +1,72 @@
+import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { api } from '../../api';
+import { useAuth } from '../../contexts/AuthContext';
+import type { BusinessCompany } from '../../business.types';
+import type { MailConnection, MailConnectionInput, MailConnections, MailEndpoint } from '../../business-mail.types';
+import { Button, Input, Modal, Select } from '../common';
+
+export const MAIL_PURPOSES = [{ value: 'general', label: '대표' }, { value: 'accounting', label: '회계' }, { value: 'marketing', label: '마케팅' }, { value: 'operations', label: '운영' }];
+export function BusinessMailConnectionForm({ row, catalog, companies, onClose, onSaved }: {
+  row?: MailConnection; catalog: MailConnections; companies: BusinessCompany[]; onClose(): void; onSaved(): void;
+}) {
+  const { hasPermission, currentAccountId } = useAuth();
+  const [input, setInput] = useState<MailConnectionInput>(row || { name: '', provider: 'smtp_imap', company_id: null, purpose: 'operations', credential_id: '', enabled: true, interval_minutes: 5,
+    config: { addresses: [], imap: { host: '', port: 993, tls: 'implicit', username: '', folder: 'INBOX' }, smtp: { host: '', port: 587, tls: 'starttls', username: '' } } });
+  const [addresses, setAddresses] = useState(row?.config.addresses.join(', ') || '');
+  const [newSecret, setNewSecret] = useState<Record<string, string>>({});
+  const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const owner = row?.account_id || companies.find(c => c.id === input.company_id)?.account_id;
+  const keys = catalog.credentials.filter(c => !owner || c.account_id === owner);
+  const patch = (changes: Partial<MailConnectionInput>) => setInput(old => ({ ...old, ...changes }));
+  const endpoint = (kind: 'smtp' | 'imap') => {
+    const value = input.config[kind];
+    const change = (delta: Partial<MailEndpoint>) => patch({ config: { ...input.config, [kind]: { ...value, ...delta } } });
+    return <fieldset className="business-options"><legend>{kind.toUpperCase()} {kind === 'smtp' ? '발신' : '수신'}</legend>
+      <label><input type="checkbox" checked={!!value} disabled={!!row} onChange={e => patch({ config: { ...input.config, [kind]: e.target.checked ? { host: '', port: kind === 'smtp' ? 587 : 993, tls: kind === 'smtp' ? 'starttls' : 'implicit', username: '', ...(kind === 'imap' ? { folder: 'INBOX' } : {}) } : undefined } })} />사용</label>
+      {value && <div className="business-form-grid">
+        <Input aria-label={`${kind.toUpperCase()} 서버`} label={`${kind.toUpperCase()} 서버`} value={value.host} disabled={!!row} onChange={e => change({ host: e.target.value })} />
+        <Input aria-label={`${kind.toUpperCase()} 포트`} label={`${kind.toUpperCase()} 포트`} type="number" value={value.port} disabled={!!row} onChange={e => change({ port: Number(e.target.value) })} />
+        <Input aria-label={`${kind.toUpperCase()} 로그인 이름`} label={`${kind.toUpperCase()} 로그인 이름`} value={value.username} disabled={!!row} onChange={e => change({ username: e.target.value })} />
+        <Select aria-label={`${kind.toUpperCase()} 보안`} label={`${kind.toUpperCase()} 보안`} value={value.tls} disabled={!!row} options={[{ value: 'implicit', label: 'TLS' }, { value: 'starttls', label: 'STARTTLS' }]} onChange={e => change({ tls: e.target.value as MailEndpoint['tls'] })} />
+        {kind === 'imap' && <Input aria-label="수집할 폴더" label="수집할 폴더" value={value.folder || 'INBOX'} disabled={!!row} onChange={e => change({ folder: e.target.value })} />}
+      </div>}
+    </fieldset>;
+  };
+  const save = async () => {
+    setBusy(true); setError('');
+    try {
+      let credentialId = input.credential_id;
+      if (credentialId === '__new__') {
+        const credential = await api.createCredential({ name: `${input.name} · Mail`, provider: 'mail', account_id: owner || currentAccountId || undefined, scope: 'account', credentials: newSecret, agent_env: false });
+        credentialId = credential.id; patch({ credential_id: credentialId });
+      }
+      await api.configureBusinessMail({ ...input, credential_id: credentialId, config: { ...input.config, addresses: addresses.split(/[,\n]/).map(s => s.trim()).filter(Boolean) } });
+      onSaved();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  return <Modal isOpen onClose={() => { if (!busy) onClose(); }} title={row ? '메일 연결 설정' : '메일 커넥터 추가'} maxWidth={650}
+    footer={<><Button variant="secondary" disabled={busy} onClick={onClose}>취소</Button><Button loading={busy} disabled={!input.name.trim() || !input.credential_id || !addresses.trim()} onClick={() => void save()}>연결 저장</Button></>}>
+    <div className="business-form">
+      {error && <div role="alert" className="business-error">{error}</div>}
+      <Input aria-label="연결 이름" label="연결 이름" value={input.name} maxLength={120} placeholder="예: 운영 메일 · NAS" onChange={e => patch({ name: e.target.value })} />
+      <div className="business-form-grid">
+        <Select aria-label="회사" label="회사" value={input.company_id || ''} options={[{ value: '', label: '공통 · 회사 미지정' }, ...companies.filter(c => !row || c.account_id === row.account_id).map(c => ({ value: c.id, label: c.name }))]} onChange={e => patch({ company_id: e.target.value || null, ...(!row ? { credential_id: '' } : {}) })} />
+        <Select aria-label="업무 용도" label="업무 용도" value={input.purpose} options={MAIL_PURPOSES} onChange={e => patch({ purpose: e.target.value })} />
+      </div>
+      <Select aria-label="메일 커넥터" label="메일 커넥터" value={input.provider} disabled={!!row} options={catalog.connectors.map(c => ({ value: c.id, label: c.name }))} onChange={e => patch({ provider: e.target.value as MailConnectionInput['provider'], config: e.target.value === 'jmap' ? { addresses: [], jmap_url: '' } : { addresses: [], imap: { host: '', port: 993, tls: 'implicit', username: '', folder: 'INBOX' }, smtp: { host: '', port: 587, tls: 'starttls', username: '' } } })} />
+      <p className="business-muted">{catalog.connectors.find(c => c.id === input.provider)?.note}</p>
+      <Input aria-label="메일 주소" label="메일 주소" value={addresses} placeholder="ops@example.com, support@example.com" onChange={e => setAddresses(e.target.value)} />
+      <p className="business-muted">서버에서 사용 권한을 설정한 주소와 별칭을 쉼표로 구분하세요.</p>
+      {input.provider === 'smtp_imap' ? <>{endpoint('imap')}{endpoint('smtp')}</> : <>
+        <Input aria-label="JMAP Session URL" label="JMAP Session URL" value={input.config.jmap_url || ''} disabled={!!row} placeholder="https://mail.example.com/.well-known/jmap" onChange={e => patch({ config: { ...input.config, jmap_url: e.target.value } })} />
+        <Input aria-label="JMAP 계정 ID (선택)" label="JMAP 계정 ID (선택)" value={input.config.jmap_account_id || ''} disabled={!!row} onChange={e => patch({ config: { ...input.config, jmap_account_id: e.target.value || undefined } })} />
+      </>}
+      <Select aria-label="메일 인증 정보" label="메일 인증 정보" value={input.credential_id} options={[{ value: '', label: '서버 전용 Mail credential 선택' }, ...keys.map(k => ({ value: k.id, label: k.name })), ...(hasPermission('admin.credentials') ? [{ value: '__new__', label: '+ 인증 정보 등록' }] : []), ...(input.credential_id && input.credential_id !== '__new__' && !keys.some(k => k.id === input.credential_id) ? [{ value: input.credential_id, label: '등록한 인증 정보' }] : [])]} onChange={e => patch({ credential_id: e.target.value })} />
+      {input.credential_id === '__new__' && (input.provider === 'jmap' ? ['jmap_token'] : [...(input.config.imap ? ['imap_password'] : []), ...(input.config.smtp ? ['smtp_password'] : [])]).map(key => <Input key={key} aria-label={key === 'jmap_token' ? 'JMAP API 토큰' : `${key.startsWith('imap') ? 'IMAP' : 'SMTP'} 비밀번호 · 앱 비밀번호`} label={key === 'jmap_token' ? 'JMAP API 토큰' : `${key.startsWith('imap') ? 'IMAP' : 'SMTP'} 비밀번호 · 앱 비밀번호`} type="password" autoComplete="new-password" value={newSecret[key] || ''} onChange={e => setNewSecret({ ...newSecret, [key]: e.target.value })} />)}
+      {hasPermission('admin.credentials') && <Link to="/settings/credentials" target="_blank">저장된 인증 정보 관리 ↗</Link>}
+      <Select aria-label="자동 수집 간격" label="자동 수집 간격" value={String(input.interval_minutes)} options={[5, 15, 60].map(n => ({ value: String(n), label: `${n}분` }))} onChange={e => patch({ interval_minutes: Number(e.target.value) })} />
+      <label><input type="checkbox" checked={input.enabled} onChange={e => patch({ enabled: e.target.checked })} />연결 사용 · 자동 수집</label>
+    </div>
+  </Modal>;
+}

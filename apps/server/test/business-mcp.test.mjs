@@ -14,11 +14,14 @@ import { createStandaloneContext } from '../dist/modules/mcp/tools/context.js';
 import { registerBusinessTools } from '../dist/modules/mcp/tools/business-tools.js';
 import { registerBusinessTrademarkTools } from '../dist/modules/mcp/tools/business-trademark-tools.js';
 import { registerBusinessCashbookTools } from '../dist/modules/mcp/tools/business-cashbook-tools.js';
+import { registerBusinessMailTools } from '../dist/modules/mcp/tools/business-mail-tools.js';
+import { MAIL_CONNECTORS } from '../dist/modules/business/mail/mail-registry.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 
 // Every business REST operation must have an MCP counterpart. Browser OAuth callbacks
 // and signed provider webhooks are transports, not agent-callable operations.
 const REST_TO_MCP = {
+  BusinessMailController: { connections: 'list_business_mail_connections', configure: 'configure_business_mail_connection', sync: 'sync_business_mail', list: 'list_business_mail', detail: 'get_business_mail', confirm: 'confirm_business_mail', send: 'send_business_mail' },
   BusinessController: {
     catalog: 'list_business_connectors', credentials: 'list_business_credentials', list: 'list_business_companies',
     create: 'create_business_company', detail: 'get_business_company', update: 'update_business_company',
@@ -94,7 +97,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
     assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
-    assert.equal(tools.length, 50);
+    assert.equal(tools.length, 57);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
     assert.ok(tools.find(t => t.name === 'send_business_trademark_action').inputSchema.required.includes('confirm'));
     assert.ok(tools.find(t => t.name === 'prepare_business_formation').inputSchema.properties.application.properties.address);
@@ -305,10 +308,35 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     await hosts.update({ id: host.id }, { account_id: mine.id });
   });
 
+  await t.test('standard mail automation uses account-scoped tools and idempotent submission', async () => {
+    const connector = MAIL_CONNECTORS.find(c => c.descriptor.id === 'smtp_imap');
+    const originalSync = connector.sync; const originalSend = connector.send;
+    let sends = 0;
+    connector.sync = async () => ({ messages: [{ source_id: 'in-1', message_id: '<in-1@example.com>', from: 'vendor@example.com', to: ['ops@example.com'], subject: 'Automation input', text: 'Untrusted input', date: new Date().toISOString(), attachments: [] }], cursor: { seen: true } });
+    connector.send = async () => { sends++; };
+    try {
+      const key = await ds.getRepository('Credential').save({ account_id: mine.id, name: 'Mail key', provider: 'mail', agent_env: false, encrypted_data: encrypt(JSON.stringify({ imap_password: 'private-mail-secret', smtp_password: 'private-mail-secret' })) });
+      const catalog = await call('list_business_mail_connections', {}, read); assert.equal(catalog.connectors.length, 2);
+      const input = { name: 'Operations', credential_id: key.id, company_id: company.id, provider: 'smtp_imap', config: { addresses: ['ops@example.com'], imap: { host: 'imap.example.com', port: 993, tls: 'implicit', username: 'ops' }, smtp: { host: 'smtp.example.com', port: 587, tls: 'starttls', username: 'ops' } } };
+      await denied('configure_business_mail_connection', input, read);
+      const connection = await call('configure_business_mail_connection', input);
+      await denied('sync_business_mail', { connection_id: connection.id }, foreign);
+      await call('sync_business_mail', { connection_id: connection.id });
+      const mail = await call('list_business_mail', { confirmation: 'pending' }, read); assert.equal(mail.total, 1);
+      const row = await call('get_business_mail', { message_id: mail.messages[0].id }, read); assert.equal(row.text, 'Untrusted input');
+      await denied('get_business_mail', { message_id: row.id }, foreign);
+      await call('confirm_business_mail', { message_id: row.id, revision: row.revision, confirmed: true, note: 'Processed by automation' });
+      const send = { connection_id: connection.id, request_id: randomUUID(), from: 'ops@example.com', to: ['vendor@example.com'], subject: 'Re: Automation input', text: 'Authorized reply', reply_to_message_id: row.id, confirm: true };
+      await denied('send_business_mail', send, read);
+      const result = await call('send_business_mail', send); assert.equal(result.status, 'accepted');
+      assert.equal((await call('send_business_mail', send)).id, result.id); assert.equal(sends, 1);
+    } finally { connector.sync = originalSync; connector.send = originalSend; }
+  });
+
   await t.test('standalone context wires all services and rechecks session/account ownership', async () => {
     const ctx = createStandaloneContext(ds); const handlers = new Map();
     const capture = { tool: (name, description, schema, handler) => handlers.set(name, handler) };
-    registerBusinessTools(capture, ctx); registerBusinessTrademarkTools(capture, ctx); registerBusinessCashbookTools(capture, ctx);
+    registerBusinessTools(capture, ctx); registerBusinessTrademarkTools(capture, ctx); registerBusinessCashbookTools(capture, ctx); registerBusinessMailTools(capture, ctx);
     assert.equal(handlers.size, tools.length);
     const sid = randomUUID(); sessionStore.register(sid, { close: async () => {} }, {}, { source: 'db', agentId: host.id, accountId: mine.id, scope: 'full' });
     t.after(() => sessionStore.remove(sid));

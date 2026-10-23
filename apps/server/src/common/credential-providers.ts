@@ -26,6 +26,7 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   intercom: { label: 'Intercom', fields: ['access_token'] },
   zendesk: { label: 'Zendesk Support OAuth', fields: ['access_token'] },
   freshdesk: { label: 'Freshdesk', fields: ['api_key'] },
+  mail: { label: 'Mail (SMTP · IMAP · JMAP)', fields: ['smtp_password', 'imap_password', 'jmap_token'] },
   resend: { label: 'Resend', fields: ['api_key'] },
   resend_inbound: { label: 'Resend Receiving', fields: ['api_key', 'webhook_secret'] },
   microsoft_oauth: { label: 'Microsoft Graph OAuth', fields: ['client_id', 'client_secret'] },

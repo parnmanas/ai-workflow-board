@@ -96,6 +96,13 @@ export type AuthzTier = 'full' | 'caller';
  */
 export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // Business lifecycle: shared handlers also enforce live Host/Account ownership and business.manage.
+  list_business_mail_connections: 'caller',
+  configure_business_mail_connection: 'full',
+  sync_business_mail: 'full',
+  list_business_mail: 'caller',
+  get_business_mail: 'caller',
+  confirm_business_mail: 'full',
+  send_business_mail: 'full',
   get_business_workflow_guide: 'caller',
   assess_business_self_service: 'caller',
   get_business_cashbook: 'caller',

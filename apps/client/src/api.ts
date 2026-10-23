@@ -1,3 +1,4 @@
+import type { MailConnections, MailConnection, MailConnectionInput, MailList, BusinessMailMessage } from './business-mail.types';
 import type { AgentTemplate } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
 import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
@@ -2620,6 +2621,12 @@ export const api = {
   submitBusinessFormation: (id: string, action: BusinessFormation) => request<BusinessFormation>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(action.id)}/submit`, { method: 'POST', body: JSON.stringify({ payload_digest: action.payload_digest, revision: action.revision, confirm: true }) }),
   discardBusinessFormation: (id: string, action: BusinessFormation) => request<{ success: boolean }>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(action.id)}`, { method: 'DELETE', body: JSON.stringify({ payload_digest: action.payload_digest }) }),
   signBusinessFormation: (id: string, actionId: string, document_type: 'SS4' | 'FORM8821') => request<{ url: string; expires_at: string }>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(actionId)}/signature`, { method: 'POST', body: JSON.stringify({ document_type }) }),
+  listBusinessMailConnections: () => request<MailConnections>('/business/mail/connections'),
+  configureBusinessMail: (input: MailConnectionInput) => request<MailConnection>('/business/mail/connections', { method: 'POST', body: JSON.stringify(input) }),
+  syncBusinessMail: (id: string) => request<{ collected: number; has_more: boolean }>(`/business/mail/connections/${encodeURIComponent(id)}/sync`, { method: 'POST' }),
+  listBusinessMail: (filters: Record<string, string> = {}) => request<MailList>(`/business/mail/messages?${new URLSearchParams(filters)}`),
+  getBusinessMail: (id: string) => request<BusinessMailMessage>(`/business/mail/messages/${encodeURIComponent(id)}`),
+  confirmBusinessMail: (id: string, input: { revision: number; confirmed: boolean; note: string }) => request<BusinessMailMessage>(`/business/mail/messages/${encodeURIComponent(id)}/confirm`, { method: 'POST', body: JSON.stringify(input) }),
   listBusinessConnectors: () => request<BusinessConnector[]>('/business/connectors'),
   listBusinessCredentials: (accountId: string) => request<Array<{ id: string; name: string; provider: string }>>(`/business/credentials?account_id=${encodeURIComponent(accountId)}`),
   saveBusinessTask: (companyId: string, taskId: string | null, input: BusinessTaskInput & { revision: number }) => request<BusinessTask>(`/business/companies/${encodeURIComponent(companyId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ''}`, { method: taskId ? 'PATCH' : 'POST', body: JSON.stringify(input) }),

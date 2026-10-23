@@ -382,5 +382,5 @@ test('DIY formation checks every condition, explains overseas routes and saves c
   const saved = calls.find(([name]) => name === 'chooseBusinessService');
   assert.equal(saved[3].self_service_answers.operator_abroad, true); assert.equal(saved[3].self_service_answers.responsible_tax_id, false);
   assert.match(container.textContent, /직접 처리 진행 안내/);
-  assert.equal(container.querySelector('[role="dialog"]'), null);
+  assert.equal(Boolean(container.querySelector('[role="dialog"]')), false);
 });

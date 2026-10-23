@@ -174,3 +174,6 @@ export { BusinessTrademarkMail } from './BusinessTrademarkMail';
 export { BusinessTrademarkIntegration } from './BusinessTrademarkIntegration';
 export { BusinessTrademarkRecord } from './BusinessTrademarkRecord';
 export { BusinessTrademarkAction } from './BusinessTrademarkAction';
+
+export { BusinessMailConnection } from './BusinessMailConnection';
+export { BusinessMailMessage } from './BusinessMailMessage';

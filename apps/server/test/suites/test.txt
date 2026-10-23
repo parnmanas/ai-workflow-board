@@ -48,6 +48,8 @@ test/boot-port-guard.test.mjs
 test/business-connectors.test.mjs
 test/business-formation.test.mjs
 test/business-http.test.mjs
+test/business-mail-connectors.test.mjs
+test/business-mail.test.mjs
 test/business-mcp.test.mjs
 test/business-self-service.test.mjs
 test/business-trademark-integrations.test.mjs

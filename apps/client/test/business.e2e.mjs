@@ -131,6 +131,38 @@ async function fixture(page) {
 }
 
 for (const width of [1440, 390, 320]) {
+  test(`Automation mail unified filters and confirmation fit ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { errors } = await fixture(page);
+    const connection = { id: 'mail-1', account_id: account.id, company_id: company.id, name: '운영 메일 · NAS', provider: 'smtp_imap', purpose: 'operations', credential_id: 'mail-key', enabled: true, revision: 0, interval_minutes: 5, status: 'connected', synced_at: '2026-10-24T01:00:00Z', busy: false, last_error: '', config: { addresses: ['ops@example.com', 'support@example.com'], imap: { host: 'mail.example.com', port: 993, username: 'ops@example.com', tls: 'implicit', folder: 'INBOX' }, smtp: { host: 'mail.example.com', port: 587, username: 'ops@example.com', tls: 'starttls' } } };
+    const message = { id: 'mail-message-1', connection_id: connection.id, direction: 'inbound', status: 'received', from: 'vendor@example.com', to: ['ops@example.com'], subject: '10월 운영 정산 확인 요청', text: '정산 내역 확인을 요청드립니다.\n<img src="https://tracker.example.com/private">', date: '2026-10-24T00:00:00Z', confirmed: false, revision: 0, note: '', attachments: [{ name: 'invoice.pdf', size: 1200 }], last_error: '' };
+    const filters = [];
+    await page.route('**/api/business/mail/**', async route => {
+      const path = new URL(route.request().url()).pathname; let body;
+      if (path.endsWith('/connections')) body = { connections: [connection], connectors: [{ id: 'smtp_imap', name: 'SMTP · IMAP', note: '메일 서버의 비밀번호 또는 앱 비밀번호로 연결합니다.' }, { id: 'jmap', name: 'JMAP' }], credentials: [{ id: 'mail-key', name: 'NAS Mail', account_id: account.id }] };
+      else if (path.endsWith('/confirm')) { Object.assign(message, route.request().postDataJSON(), { revision: 1, confirmed_at: new Date().toISOString() }); body = message; }
+      else if (path.endsWith('/messages')) { filters.push(new URL(route.request().url()).search); body = { messages: [message], total: 1, offset: 0, limit: 50 }; }
+      else body = message;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    await page.goto('/business/mail');
+    await expect(page.getByRole('heading', { name: '비즈니스 메일', exact: true })).toBeVisible();
+    await page.getByLabel('모든 업무 용도', { exact: true }).selectOption('operations');
+    await expect.poll(() => filters.at(-1)).toContain('purpose=operations');
+    await page.locator('.business-mail-row').click();
+    await expect(page.locator('.business-mail-body')).toContainText('<img');
+    await expect(page.locator('.business-mail-body img')).toHaveCount(0);
+    await page.getByLabel('처리 메모', { exact: true }).fill('회계 기록과 대조 완료');
+    await page.getByRole('button', { name: '확인 완료', exact: true }).click();
+    await expect(page.getByRole('button', { name: '미확인으로 되돌리기' })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: `/tmp/awb-mail-${width}.png`, fullPage: true });
+    await page.getByRole('button', { name: '메일 연결 추가', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect.poll(() => page.getByRole('dialog').evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
   test(`Overseas DIY conditions and cashbook through reconciliation, close and correction at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const { errors, cashbook } = await fixture(page);

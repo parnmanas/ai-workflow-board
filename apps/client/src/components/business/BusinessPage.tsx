@@ -173,6 +173,7 @@ export default function BusinessPage({ view }: { view: View }) {
         <Button variant="secondary" onClick={() => setCompanyModal('new')}><BusinessIcon name="plus" size={15} />회사 추가</Button>
       </div>
     </header>
+    {view === 'connectors' && <section className="business-panel business-mail-catalog"><div><h2>메일 자동화 커넥터</h2><p className="business-muted">SMTP · IMAP · JMAP 연결을 등록하고 여러 업무 주소의 수신·발신 결과를 함께 확인합니다.</p></div><Link to="/business/mail?connections=1">메일 연결 관리 →</Link></section>}
     {error && <ErrorState message={error} onRetry={() => void (companies === null ? bootstrap() : loadDetail())} />}
     {companies === null && !error && <div className="business-loading" role="status">비즈니스를 불러오는 중…</div>}
     {companies?.length === 0 && !error && <section className="business-welcome">

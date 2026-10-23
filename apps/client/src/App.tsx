@@ -43,6 +43,7 @@ const OntologyGraphPage = lazy(() => import('./components/ontology/OntologyGraph
 // Marketing — 에이전트가 돌리는 제품 마케팅 캠페인과 사람의 승인함(docs/marketing.md).
 const MarketingPage = lazy(() => import('./components/marketing/MarketingPage'));
 const BusinessLayout = lazy(() => import('./components/business/BusinessLayout'));
+const BusinessMailPage = lazy(() => import('./components/business/BusinessMailPage'));
 const BusinessPage = lazy(() => import('./components/business/BusinessPage'));
 const MarketingCampaignPage = lazy(() => import('./components/marketing/MarketingCampaignPage'));
 const MarketingContactsPage = lazy(() => import('./components/marketing/MarketingContactsPage'));
@@ -219,6 +220,7 @@ function AppContent() {
             <Route element={<BusinessLayout />}>
               <Route path="business" element={<BusinessPage view="overview" />} />
               <Route path="business/operations" element={<BusinessPage view="operations" />} />
+              <Route path="business/mail" element={<BusinessMailPage />} />
               <Route path="business/connectors" element={<BusinessPage view="connectors" />} />
               <Route path="marketing" element={<MarketingPage />} />
               <Route path="marketing/contacts" element={<MarketingContactsPage />} />

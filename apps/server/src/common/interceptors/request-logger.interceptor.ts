@@ -95,7 +95,7 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     if (req.path.startsWith('/api/events')) return next.handle();
     if (req.path.startsWith('/mcp')) return next.handle();
     // OAuth callbacks contain authorization codes in their query; signed webhooks contain legal correspondence.
-    if (req.path.startsWith('/api/business-integrations/')) return next.handle();
+    if (req.path.startsWith('/api/business-integrations/') || /^\/api\/business\/mail(?:\/|$)/.test(req.path)) return next.handle();
     // Skip log-query endpoints. Logging the query itself stuffs the returned
     // log array into `resBody`, which on the NEXT poll gets stuffed into
     // *that* request's log, and so on — the buffer grows quadratically until

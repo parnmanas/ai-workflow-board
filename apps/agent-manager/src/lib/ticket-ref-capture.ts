@@ -332,6 +332,13 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  */
 export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // Business records/actions never mutate a Ticket; explicit ticket creation is classified above.
+  list_business_mail_connections: 'read',
+  configure_business_mail_connection: 'non-ticket',
+  sync_business_mail: 'non-ticket',
+  list_business_mail: 'read',
+  get_business_mail: 'read',
+  confirm_business_mail: 'non-ticket',
+  send_business_mail: 'non-ticket',
   get_business_workflow_guide: 'read',
   assess_business_self_service: 'read',
   get_business_cashbook: 'read',

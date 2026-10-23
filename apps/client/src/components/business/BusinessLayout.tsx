@@ -17,6 +17,7 @@ export default function BusinessLayout() {
         {business && <>
           <NavLink to={`/business${suffix}`} end><BusinessIcon name="overview" size={17} />전체 흐름</NavLink>
           <NavLink to={`/business/operations${suffix}`}><BusinessIcon name="workflow" size={17} />운영</NavLink>
+          <NavLink to="/business/mail"><BusinessIcon name="mail" size={17} />메일</NavLink>
           <NavLink to={`/business/connectors${suffix}`}><BusinessIcon name="connector" size={17} />커넥터</NavLink>
         </>}
         {marketing && <NavLink to="/marketing"><BusinessIcon name="growth" size={17} />마케팅</NavLink>}
