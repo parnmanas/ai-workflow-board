@@ -58,6 +58,8 @@ import {
   DELEGATION_RE,
   TEST_PATH_RE,
   auditRegistration,
+  auditPostgresRegistration,
+  requiresPostgres,
   compareCiEntries,
 } from './helpers/registration-audit.mjs';
 import { ciServerNpmInvocations, npmrcProblems } from './helpers/ci-workflow.mjs';
@@ -201,7 +203,9 @@ test('선언된 CI 진입점 스크립트는 모두 package.json 에 실재한�
 // 단독 스크립트가 섞여 있었다.
 test('CI 진입점 목록은 ci.yml 이 apps/server 에서 명령 하나뿐인 step 으로 부르는 테스트 스크립트와 같다', () => {
   assert.ok(fs.existsSync(CI_WORKFLOW), `CI 워크플로가 없다: ${CI_WORKFLOW}`);
-  const { invoked, uncounted } = ciServerNpmInvocations(fs.readFileSync(CI_WORKFLOW, 'utf8'));
+  const { invoked, uncounted } = ciServerNpmInvocations(fs.readFileSync(CI_WORKFLOW, 'utf8'), {
+    requiredEnvByScript: { 'test:qa:pg': { DB_TYPE: 'postgres' } },
+  });
   const { notInvoked, undeclared } = compareCiEntries({
     declared: CI_ENTRY_SCRIPTS,
     invoked,
@@ -789,4 +793,35 @@ test('빈 매니페스트도 성공으로 끝나지 않는다', (t) => {
     0,
     '빈 매니페스트가 성공으로 끝났다 — 아무것도 안 돌고 통과로 보인다',
   );
+});
+
+test('Postgres-gated files must be reachable from the PG CI entry', () => {
+  const missing = auditPostgresRegistration({
+    scripts: readPackageScripts(), manifests: readManifests(), ciEntryScripts: CI_ENTRY_SCRIPTS,
+    testSources: new Map(listDiskTestPaths().map((file) => [file, fs.readFileSync(path.join(SERVER_ROOT, file), 'utf8')])),
+  });
+  assert.deepEqual(missing, [], `Postgres-only tests would only skip: ${missing.join(', ')}. Register in test-qa-pg.txt or pretest-qa-pg.txt (test:qa:pg).`);
+});
+
+test('PG registration: SQLite-only fails; PG lifecycle and delegated manifests pass', () => {
+  const file = 'test/qa-flows/example.test.mjs';
+  const scripts = {
+    test: 'node test/run-suite.mjs --suite test',
+    'test:qa:pg': 'node test/run-suite.mjs --suite pg',
+    'pretest:qa:pg': 'node test/run-suite.mjs --suite pre-pg',
+    nested: 'node test/run-suite.mjs --suite nested',
+  };
+  for (const source of ["const IS_PG = process.env.DB_TYPE === 'postgres';\nconst SKIP = !IS_PG;", '// @requires-db postgres']) {
+    const input = { scripts, ciEntryScripts: CI_ENTRY_SCRIPTS, testSources: new Map([[file, source]]) };
+    const manifests = new Map([['test', [file]], ['pg', []], ['pre-pg', []], ['nested', [file]]]);
+    assert.deepEqual(auditPostgresRegistration({ ...input, manifests }), [file]);
+    manifests.set('pre-pg', [file]);
+    assert.deepEqual(auditPostgresRegistration({ ...input, manifests }), []);
+    manifests.set('pre-pg', []);
+    manifests.set('pg', ['npm run nested']);
+    assert.deepEqual(auditPostgresRegistration({ ...input, manifests }), []);
+    assert.deepEqual(auditPostgresRegistration({ ...input, manifests, ciEntryScripts: ['test'] }), [file]);
+  }
+  assert.equal(requiresPostgres('// IS_PG is mentioned only in documentation'), false);
+  assert.equal(requiresPostgres('const ordinary = true;'), false);
 });

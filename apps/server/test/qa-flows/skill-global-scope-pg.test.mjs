@@ -1,3 +1,4 @@
+// @requires-db postgres
 // Postgres-only: the GLOBAL skill slug constraint.
 //
 // `Skill` keeps `@Index(['account_id','slug'], {unique:true})` for the sql.js

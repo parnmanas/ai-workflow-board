@@ -154,6 +154,25 @@ function testPathsOf(scripts, manifests, scriptNames) {
 
 const sorted = (it) => [...it].sort();
 
+// Conservative source convention: any IS_PG declaration needs PG coverage, even in
+// mixed-dialect files. A different gate must carry // @requires-db postgres.
+// This is a source convention check, not a JavaScript control-flow proof.
+export function requiresPostgres(source) {
+  return /^\s*(?:const|let|var)\s+IS_PG\s*=/m.test(source)
+    || /^\s*\/\/\s*@requires-db\s+postgres\s*$/m.test(source);
+}
+
+export function auditPostgresRegistration({ scripts, manifests, testSources, ciEntryScripts }) {
+  const runnable = resolveRunnableScripts({
+    scripts, manifests,
+    entryScripts: ciEntryScripts.includes('test:qa:pg') ? ['test:qa:pg'] : [],
+  });
+  const registered = testPathsOf(scripts, manifests, runnable);
+  return sorted([...testSources]
+    .filter(([file, source]) => requiresPostgres(source) && !registered.has(file))
+    .map(([file]) => file));
+}
+
 // 입력 형태 — scripts 는 { 이름: 커맨드 }, manifests 는 Map<스위트, step 목록>,
 // ciEntryScripts 는 CI 가 부르는 스크립트 이름, exemptions 는 { 경로: 사유 },
 // diskTestPaths 는 test/ 아래 모든 *.test.mjs 의 "test/..." 경로(하위 디렉터리 포함)다.

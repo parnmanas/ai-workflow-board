@@ -1325,3 +1325,54 @@ jobs:
     assert.match(uncounted[0]?.why ?? '', new RegExp(`npm 옵션 ${option}`), option);
   }
 });
+
+test('required PG environment: missing, wrong and dynamic DB_TYPE cannot count as PG coverage', () => {
+  const options = { requiredEnvByScript: { 'test:qa:pg': { DB_TYPE: 'postgres' } } };
+  const workflow = ({ global = '', job = '', step = '', command = 'npm run test:qa:pg' } = {}) => onMainPush(`
+${global}
+jobs:
+  pg:
+${job}
+    steps:
+      - working-directory: apps/server
+${step}
+        run: ${command}
+`);
+  for (const input of [
+    {},
+    { job: '    env:\n      DB_TYPE: sqlite' },
+    { job: '    env:\n      DB_TYPE: ${{ matrix.db }}' },
+    { job: '    env:\n      DB_TYPE: postgres', step: '        env:\n          DB_TYPE: sqlite' },
+    { job: '    env:\n      DB_TYPE: postgres', command: 'DB_TYPE=sqlite npm run test:qa:pg' },
+    { global: 'env:\n  DB_TYPE: postgres', job: '    env:\n      DB_TYPE: sqlite' },
+  ]) {
+    const result = ciServerNpmInvocations(workflow(input), options);
+    assert.equal(result.invoked.has('test:qa:pg'), false, JSON.stringify(input));
+    assert.match(result.uncounted[0].why, /DB_TYPE=postgres/);
+  }
+  for (const input of [
+    { job: '    env:\n      DB_TYPE: postgres' },
+    { global: 'env:\n  DB_TYPE: postgres' },
+    { job: '    env:\n      DB_TYPE: sqlite', step: '        env:\n          DB_TYPE: postgres' },
+    { command: 'DB_TYPE=postgres npm run test:qa:pg' },
+  ]) {
+    assert.equal(ciServerNpmInvocations(workflow(input), options).invoked.has('test:qa:pg'), true, JSON.stringify(input));
+  }
+  assert.equal(ciServerNpmInvocations(workflow({ command: 'npm test' }), options).invoked.has('test'), true);
+});
+
+
+test('required PG environment cannot rely on YAML after a GITHUB_ENV write', () => {
+  const result = ciServerNpmInvocations(onMainPush(`
+jobs:
+  pg:
+    env:
+      DB_TYPE: postgres
+    steps:
+      - run: echo 'DB_TYPE=sqlite' >> "$GITHUB_ENV"
+      - run: npm run test:qa:pg
+        working-directory: apps/server
+`), { requiredEnvByScript: { 'test:qa:pg': { DB_TYPE: 'postgres' } } });
+  assert.equal(result.invoked.has('test:qa:pg'), false);
+  assert.match(result.uncounted[0].why, /DB_TYPE=postgres/);
+});

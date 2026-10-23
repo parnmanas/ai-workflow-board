@@ -31,8 +31,8 @@
 //     같은 모양) — 거기 실린 게이트를 놓치지 않으려고 못 읽으면 세지 않는 쪽으로 정한다
 // 맞는 호출을 못 세면 대조가 빨개지고, 메시지가 무엇을 못 읽었는지 알려 준다. 이 모듈이 보지
 // 못하는 것: 워크플로 밖의 npm 설정(러너 이미지의 ~/.npmrc — 저장소의 .npmrc 는 npmrcProblems 가
-// 본다), `uses:` step(액션)이 남기는 env, 잡의 env 를 바꿔 테스트가 스스로 skip 하게 하는 것처럼
-// YAML · 셸 밖에서 테스트를 무력하게 만드는 변경.
+// 본다), `uses:` step(액션)이 남기는 env, package 스크립트 내부의 환경 변경.
+// Postgres 진입점의 DB_TYPE 은 호출자가 requiredEnvByScript 로 요구한다.
 //
 // 의존성 없이 읽는다(scripts/audit-ci-branch-coverage.mjs 와 같은 이유 — YAML 파서 의존성을
 // 들이지 않는다).
@@ -669,7 +669,9 @@ function taintOf(run) {
 // step 의 working-directory, 잡과 워크플로의 defaults.run.working-directory, 루트에서 쓰는
 // `-w server` · `--prefix` · `-C` 를 따라간다. 명령이 여럿인 step 의 `cd` 는 그 step 에서
 // 찾은 호출을 알리는 데만 쓴다(그 호출은 어차피 세지 않는다).
-export function ciServerNpmInvocations(text) {
+// Optional per-entry requirements are checked at the actual invocation, including
+// narrower env scopes and inline assignments. Dynamic values cannot prove coverage.
+export function ciServerNpmInvocations(text, { requiredEnvByScript = {} } = {}) {
   const workflow = parseWorkflowYaml(text);
   const invoked = new Set();
   const uncounted = [];
@@ -686,6 +688,7 @@ export function ciServerNpmInvocations(text) {
       ? null
       : jobDefaults.dir ?? workflowDefaults.dir ?? '.';
     let tainted = null;
+    const changedEnv = new Set();
     for (const step of spec.steps) {
       if (!isMap(step) || typeof step.run !== 'string') continue;
       const ownDir = step['working-directory'];
@@ -694,6 +697,16 @@ export function ciServerNpmInvocations(text) {
         ?? (absent(ownDir) || typeof ownDir === 'string' ? null : unread('working-directory'))
         ?? tainted;
       tainted ??= taintOf(step.run);
+      // GITHUB_ENV is applied to later steps. Do not infer dynamic writes as a
+      // proven required value, even when the YAML originally declared it.
+      const previouslyChangedEnv = new Set(changedEnv);
+      if (/GITHUB_ENV/.test(step.run)) {
+        for (const requirements of Object.values(requiredEnvByScript)) {
+          for (const name of Object.keys(requirements)) {
+            if (step.run.includes(name)) changedEnv.add(name);
+          }
+        }
+      }
       const commands = shellCommands(step.run);
       const single = commands.length === 1 && [null, '\n', ';'].includes(commands[0].next);
       const startDir = typeof ownDir === 'string' ? ownDir : absent(ownDir) ? jobDir : null;
@@ -705,10 +718,20 @@ export function ciServerNpmInvocations(text) {
         }
         const call = serverNpmCall(words, cwd ?? SERVER_DIR);
         if (call === null) continue;
+        const env = { ...workflow.env, ...spec.container?.env, ...spec.env, ...step.env };
+        for (const word of words) {
+          const assignment = /^([A-Za-z_][\w-]*)=(.*)$/.exec(word);
+          if (!assignment) break;
+          env[assignment[1]] = assignment[2];
+        }
+        const missingEnv = Object.entries(requiredEnvByScript[call.script] ?? {})
+          .filter(([name, value]) => env[name] !== value || previouslyChangedEnv.has(name))
+          .map(([name, value]) => `${name}=${value}`);
         const why = gate
           ?? (call.script.includes('$') ? '스크립트 이름을 실행 때 정한다 — 무엇을 부르는지 알 수 없다' : null)
           ?? (single ? null : NOT_ALONE)
-          ?? call.problem;
+          ?? call.problem
+          ?? (missingEnv.length ? `필수 실행 환경을 확인할 수 없다: ${missingEnv.join(', ')}` : null);
         if (why === null) invoked.add(call.script);
         else uncounted.push({ job, script: call.script, why });
       }
