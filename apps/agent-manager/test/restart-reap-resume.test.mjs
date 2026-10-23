@@ -229,7 +229,7 @@ test('restart_agent with no in-flight work skips the resume re-push', async () =
 // guard for the leak: stopForAgent removes the record from #map up front, which
 // makes the per-child exit handler early-return — so the temp credential-bearing
 // mcp-config must be unlinked by stopForAgent itself, not by that handler.
-test('stopForAgent reaps the victim and unlinks its temp mcp-config', async () => {
+test('stopForAgent reaps the victim and unlinks its temp mcp-config', async (t) => {
   // A real long-lived process stands in for a zombie one-shot subagent that
   // outlived a credential rotation. We seed it through the persist file (the
   // same reconcile path used on manager restart) because #map is private.
@@ -237,6 +237,10 @@ test('stopForAgent reaps the victim and unlinks its temp mcp-config', async () =
     stdio: 'ignore',
   });
   child.on('error', () => {});
+  t.after(() => {
+    // Also reap the helper if setup or an assertion fails.
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  });
   child.unref();
   const pid = child.pid;
   assert.ok(pid, 'helper child spawned');
@@ -291,16 +295,24 @@ test('stopForAgent reaps the victim and unlinks its temp mcp-config', async () =
     'in-flight (ticket, role) reported for immediate re-push',
   );
 
-  // SIGKILL escalation + the temp-config unlink both fire inside the
-  // STOP_GRACE_MS grace timer — wait past it before asserting.
-  await new Promise((r) => setTimeout(r, STOP_GRACE_MS + 800));
-
-  assert.ok(!existsSync(cfgPath), 'reaped victim temp config was unlinked (no stranded credential)');
+  // The grace timer sends SIGKILL and starts an asynchronous unlink; neither
+  // means the OS has finished reaping the child. Loaded Windows runners can
+  // take longer than the old fixed 800ms allowance. Wait for both outcomes,
+  // with a bound so an actual reap/cleanup regression still fails.
+  const deadline = performance.now() + STOP_GRACE_MS + 10_000;
   let alive = true;
-  try {
-    process.kill(pid, 0);
-  } catch {
-    alive = false;
-  }
+  do {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if (err.code !== 'ESRCH') throw err;
+      alive = false;
+    }
+    if (!alive && !existsSync(cfgPath)) break;
+    await new Promise((r) => setTimeout(r, 50));
+  } while (performance.now() < deadline);
+
+  t.diagnostic(`reap pid=${pid} alive=${alive} exitCode=${child.exitCode} signalCode=${child.signalCode} configExists=${existsSync(cfgPath)}`);
+  assert.ok(!existsSync(cfgPath), 'reaped victim temp config was unlinked (no stranded credential)');
   assert.ok(!alive, 'reaped child process is dead');
 });
