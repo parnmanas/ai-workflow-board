@@ -85,6 +85,12 @@ function node(id, graphId, symbolId, overrides = {}) {
   };
 }
 
+// 빌드가 도는 중인 행 — 주인이 lease 를 쥐고 있다. lease 가 없거나 지난 building 은
+// 서버가 사라진 빌드로 보고 읽기가 error 로 푼다(ticket 461d210a).
+function liveBuild() {
+  return { status: 'building', build_id: randomUUID(), build_lease_until: new Date(Date.now() + 10 * 60_000) };
+}
+
 function fakeRes() {
   return {
     _status: 200,
@@ -210,7 +216,7 @@ describe('OntologyController.graph — 브라우저 렌더링 스냅샷', () => 
   });
 
   it('building 그래프는 불완전 스냅샷 대신 409를 반환한다', async () => {
-    const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'render-building', folder_path: '', status: 'building' }));
+    const graph = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'render-building', folder_path: '', ...liveBuild() }));
     const res = fakeRes();
     await controller.graph(ACCOUNT_ID, graph.id, res);
     assert.equal(res._status, 409);
@@ -642,7 +648,7 @@ describe('OntologyLifecycleService.forceRebuild — "Refresh Graph" 액션의 �
 
   it('이미 building 중인 그래프를 refresh하면 새 빌드를 킥오프하지 않는다(started=false)', async () => {
     const graph = await graphRepo.save(graphRepo.create({
-      account_id: ACCOUNT_ID, resource_id: 'r-refresh-building', folder_path: '', status: 'building',
+      account_id: ACCOUNT_ID, resource_id: 'r-refresh-building', folder_path: '', ...liveBuild(),
     }));
     const result = await lifecycleService.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID });
     assert.equal(result.started, false);
@@ -725,8 +731,9 @@ describe('OntologyController.refresh — "Refresh Graph" 커맨드 엔드포인�
 // 되돌리므로 맨 끝에 둔다.
 describe('OntologyLifecycleService.onApplicationBootstrap — 재기동으로 끊긴 빌드(sql.js)', () => {
   it('남아 있던 building 을 error 로 돌리고 직전 스냅샷 · commit 은 보존한다 — 그 뒤 Refresh 가 다시 빌드를 띄운다', async () => {
+    // 재기동 직전까지 살아 있던 빌드 — lease 가 아직 남아 있어도 sql.js 부팅 시점에는 끊긴 빌드다.
     const interrupted = await graphRepo.save(graphRepo.create({
-      account_id: ACCOUNT_ID, resource_id: 'r-boot-interrupted', folder_path: '', status: 'building', commit: 'snapshot-commit', indexed_at: new Date(),
+      account_id: ACCOUNT_ID, resource_id: 'r-boot-interrupted', folder_path: '', ...liveBuild(), commit: 'snapshot-commit', indexed_at: new Date(),
     }));
     await nodeRepo.insert(node('boot-interrupted-old', interrupted.id, 'sym:snapshot'));
     const neverBuilt = await graphRepo.save(graphRepo.create({ account_id: ACCOUNT_ID, resource_id: 'r-boot-never-built', folder_path: '', status: 'building' }));
@@ -742,6 +749,8 @@ describe('OntologyLifecycleService.onApplicationBootstrap — 재기동으로 �
     assert.equal(afterInterrupted.status, 'error');
     assert.match(afterInterrupted.error, /interrupted by a server restart/);
     assert.equal(afterInterrupted.commit, 'snapshot-commit');
+    assert.equal(afterInterrupted.build_id, '', '끝난 빌드의 주인 자리와 lease 도 비운다');
+    assert.equal(afterInterrupted.build_lease_until, null);
     assert.deepEqual((await nodeRepo.find({ where: { graph_id: interrupted.id } })).map((row) => row.symbol_id), ['sym:snapshot']);
     assert.equal((await graphRepo.findOne({ where: { id: neverBuilt.id } })).status, 'error');
     const afterReady = await graphRepo.findOne({ where: { id: ready.id } });

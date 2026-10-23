@@ -165,6 +165,7 @@ test/ontology-extraction-population-nonblocking.test.mjs
 test/ontology-extraction-service-failure-propagation.test.mjs
 test/ontology-git-blobless-lazy-fetch.test.mjs
 test/ontology-git-diff-rename-detection.test.mjs
+test/ontology-graph-build-lease.test.mjs
 test/ontology-graph-controller-postgres-types.test.mjs
 test/ontology-graph-freshness.test.mjs
 test/ontology-graph-progress-sse-wiring.test.mjs

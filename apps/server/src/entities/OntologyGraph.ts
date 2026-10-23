@@ -50,6 +50,20 @@ export class OntologyGraph {
   @Column({ type: 'varchar', default: '' })
   error: string;
 
+  // 지금 이 그래프를 빌드하는 실행의 토큰(ticket 461d210a). 빌드를 시작할 때(claim)
+  // 새로 만들고, 빌드를 끝내는 쓰기(ready · error)와 lease 연장은 이 값이 그대로일
+  // 때만 한다 — lease 가 지나 다른 빌드가 다시 claim 하면 값이 바뀌므로, 주인을 잃은
+  // 빌드가 새 빌드의 결과나 상태를 덮지 못한다. building 이 아닐 때는 빈 문자열.
+  @Column({ type: 'varchar', default: '' })
+  build_id: string;
+
+  // building 의 주인(빌드를 돌리는 서버)이 살아 있다고 볼 시각의 끝. 빌드가 도는 동안
+  // heartbeat 가 계속 미루고, 지나면 그 building 은 끊긴 빌드다 — 읽기가 error 로
+  // 돌리고 Refresh 가 다시 claim 한다(ontology-lifecycle.service.ts). building 이
+  // 아닐 때, 그리고 이 컬럼이 생기기 전에 남은 building 행은 null 이다.
+  @Column({ type: Date, nullable: true, default: null })
+  build_lease_until: Date | null;
+
   @CreateDateColumn()
   created_at: Date;
 

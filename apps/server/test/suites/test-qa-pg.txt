@@ -20,6 +20,7 @@ test/marketing-feedback.test.mjs
 test/marketing-spend-direct.test.mjs
 test/marketing-spend-stripe.test.mjs
 test/marketing-spend.test.mjs
+test/ontology-graph-build-lease.test.mjs
 test/qa-flows/activity-actor-sentinel-pg.test.mjs
 test/qa-flows/chat-attachments.test.mjs
 test/qa-flows/chat-dm-promotion-pg-race.test.mjs

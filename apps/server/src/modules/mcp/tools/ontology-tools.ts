@@ -174,6 +174,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     'If this is the first time this repo+folder pair has ever been referenced, this call creates the OntologyGraph ' +
     'row and kicks off Tier 1 (tree-sitter extraction) + Tier 1.5 (cross-file resolver) as an async background job — ' +
     'the response returns immediately with status="building"; call again later to poll for "ready" (or "error"). ' +
+    'A build whose server went away (restart or crash) shows up as "error" once its lease expires — graph_refresh starts it again. ' +
     'This is the entry point every other graph_ tool\'s graph_id ultimately comes from: pass its graph_id to them, ' +
     'or just pass the same (resource_id, folder_path) and they resolve it the same way internally.',
     {
@@ -208,7 +209,7 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
     '현재 작업 중인 티켓의 기존 온톨로지 그래프를 비동기로 1회 재빌드합니다. ' +
     'DB 기반 full-scope 에이전트 API 키가 필요하고, 호출자가 ticket_id 의 담당자(assignee)여야 하며, ' +
     '그래프의 프로젝트(resource_id)가 그 티켓의 project_id(같은 계정)와 같아야 합니다. ' +
-    '그래프가 이미 building이면 bounded no-op으로 즉시 started=false를 반환합니다. ' +
+    '그래프가 이미 building이면 bounded no-op으로 즉시 started=false를 반환합니다 — 단 그 빌드를 돌리던 서버가 사라져 lease가 지난 building은 다시 시작합니다. ' +
     '후속 읽기 전용 graph_status 호출로 확인할 수 있도록 graph_id/status를 반환합니다.',
     {
       account_id: z.string().describe('계정 ID'),
