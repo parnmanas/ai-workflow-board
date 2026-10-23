@@ -185,14 +185,155 @@ export class SqljsWriteSubscriber implements EntitySubscriberInterface {
 // 데드락 주의: 차례를 쥔 콜백이 **다른 체인의** DB 쓰기를 기다리면(그 체인이 쥔 락,
 // 남이 시작한 in-flight 작업, 이벤트 응답 등) 그 쓰기는 이 차례 뒤에 줄 서 있어서 서로를
 // 기다린다. 콜백 안에서는 자기 manager 로 쓰고, 다른 체인의 결과를 기다리지 말 것.
+// 그렇게 멈춘 차례는 아래 감시(watchSqljsTurns)가 경고로 알린다.
 
 /** 큐 차례 하나. 첫 작업과, 그 차례 안에서 시작한 작업·쓰기 문장이 모두 끝나면(pending 0) 다음으로 넘어간다. */
-type SqljsTurn = { active: boolean; pending: number; release: () => void };
+type SqljsTurn = {
+  active: boolean;
+  pending: number;
+  release: () => void;
+  /** 차례를 연 일 — manager · DataSource 메서드 이름, 쓰기 문장의 첫 단어, afterSqljsTransactions() 의 이름('export'). */
+  label: string;
+  /** 차례가 시작된 시각(performance.now()) — 줄 서 있던 시간은 세지 않는다. */
+  startedAt: number;
+  /** 차례를 연 호출 위치. 기록하는 동안에만 있다(watchSqljsTurns 참고). */
+  site?: { stack?: string };
+  /** 오래 쥔 차례 경고를 남겼는가 — 차례마다 한 번이다. */
+  warned: boolean;
+};
+
+/** 차례를 여는 함수. `above` 는 호출 위치에서 뺄 프레임 — 그 함수와 그 위(큐 안쪽)는 위치가 아니다. */
+type SqljsEnqueue = <T>(work: () => Promise<T>, label: string, above: Function) => Promise<T>;
 
 const sqljsWorkQueues = new WeakMap<DataSource, {
-  enqueue: <T>(work: () => Promise<T>) => Promise<T>;
+  enqueue: SqljsEnqueue;
   holdsTurn: () => boolean;
 }>();
+
+// ── 오래 쥔 차례 경고 (ticket 61622dbb) ──
+// 차례를 쥔 콜백이 다른 체인의 쓰기를 기다리거나(데드락) 느린 I/O 를 하면, 그 연결의 모든 쓰기가 소리 없이 멈춘다.
+// 그래서 차례마다 이름과 시작 시각을 남기고, 한 차례가 SQLJS_TURN_WARN_MS(기본 30초) 넘게 잡혀 있으면 경고를 한 번
+// 남긴다 — 쥔 일, 쥔 시간, 기다리는 일 수, 차례를 연 호출 위치. 경고한 차례가 풀리면 걸린 시간을 한 줄 더 남긴다.
+// 풀림 줄이 끝내 없으면 데드락이고, 있으면 느린 콜백이다.
+//
+// 감시 주기는 DataSource 마다 하나이고 unref 다 — 차례마다 타이머를 만들지 않는다. 큐가 바쁜 동안만 돈다. 차례가
+// 시작될 때 주기가 없으면 걸고, 쥔 차례도 기다리는 일도 없는 것을 본 tick 에서 스스로 멈춘다. 그래서 쉬는 DataSource ·
+// 닫힌 DataSource 에는 타이머가 남지 않는다.
+//
+// 호출 위치(stack)는 늘 걷지 않는다. 쓰기 차례 하나가 100–450µs 인데 걷는 데 6–11µs 가 든다(티켓 61622dbb 측정).
+// SQLJS_TURN_STACKS=1 이면 처음부터 걷고, 아니면 그 연결에서 첫 경고를 남긴 뒤부터 걷는다. 반복되는 느린 콜백은 다음
+// 경고에 위치가 실린다. 데드락은 그 뒤로 시작하는 차례가 없어서 첫 경고뿐이다 — 플래그를 켜고 재현해야 위치가 나온다.
+
+export const DEFAULT_SQLJS_TURN_WARN_MS = 30_000;
+const MIN_SQLJS_TURN_WARN_MS = 50;
+const MAX_SQLJS_TURN_WATCH_TICK_MS = 5_000;
+
+/** 차례를 이만큼 넘게 쥐면 경고한다. SQLJS_TURN_WARN_MS 가 비었거나 틀리면 기본값, 너무 작으면 하한. */
+export function resolveSqljsTurnWarnMs(): number {
+  const raw = Number.parseInt(process.env.SQLJS_TURN_WARN_MS || '', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SQLJS_TURN_WARN_MS;
+  return Math.max(MIN_SQLJS_TURN_WARN_MS, raw);
+}
+
+function sqljsTurnStacksRequested(): boolean {
+  const raw = (process.env.SQLJS_TURN_STACKS || '').trim().toLowerCase();
+  return raw === '1' || raw === 'true';
+}
+
+/** 경고에 쓰는 연결 이름 — sql.js 파일 이름(data.db, ontology.db). */
+function sqljsConnectionName(dataSource: DataSource): string {
+  const { location } = dataSource.options as { location?: string };
+  return location ? path.basename(location) : 'in-memory';
+}
+
+/** 쓰기 문장 차례의 이름 — 문장의 첫 단어(INSERT, UPDATE, PRAGMA …). */
+function sqljsStatementLabel(sql: string): string {
+  return (/^\s*(\S+)/.exec(sql)?.[1] ?? 'statement').slice(0, 32).toUpperCase();
+}
+
+const sqljsSeconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+
+function sqljsLongTurnWarning(connection: string, turn: SqljsTurn, heldMs: number, waiting: number): string {
+  const head =
+    `[DB] sql.js write queue (${connection}): the turn opened by "${turn.label}" has been held for ${sqljsSeconds(heldMs)}, ` +
+    `${waiting} waiting behind it — every write on this connection waits until it is released.`;
+  if (!turn.site) {
+    return `${head} Its call site was not recorded; turns opened from now on record theirs. ` +
+      'Set SQLJS_TURN_STACKS=1 to record them from the start.';
+  }
+  // String(): Error.prepareStackTrace 를 바꾼 라이브러리는 문자열이 아닌 stack 을 돌려줄 수 있다.
+  const frames = String(turn.site.stack ?? '').split('\n').slice(1).join('\n');
+  return `${head} Opened at:\n${frames || '    (no stack frames — Error.stackTraceLimit is 0)'}`;
+}
+
+/**
+ * 감시의 경고는 tick(타이머 — 던지면 프로세스가 죽는다)과 차례 넘기기(던지면 큐가 멈춘다) 안에서 남는다. 그래서 경고를
+ * 만들거나 쓰다 실패하면 경고만 버린다.
+ */
+function warnSqljsQueue(message: () => string): void {
+  try {
+    console.warn(message());
+  } catch {
+    // 경고를 못 남겼을 뿐이다 — 큐와 프로세스는 그대로 간다.
+  }
+}
+
+/** 한 DataSource 의 차례를 지켜보는 감시 — serializeSqljsTransactions() 가 차례의 시작 · 끝을 알린다. */
+function watchSqljsTurns(connection: string) {
+  const warnMs = resolveSqljsTurnWarnMs();
+  const tickMs = Math.min(MAX_SQLJS_TURN_WATCH_TICK_MS, Math.ceil(warnMs / 4));
+  let recordSites = sqljsTurnStacksRequested();
+  let current: SqljsTurn | null = null;
+  let waiting = 0;
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const tick = () => {
+    const turn = current;
+    if (!turn) {
+      if (waiting === 0 && timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      return;
+    }
+    if (turn.warned) return;
+    const heldMs = performance.now() - turn.startedAt;
+    if (heldMs < warnMs) return;
+    turn.warned = true;
+    recordSites = true;
+    warnSqljsQueue(() => sqljsLongTurnWarning(connection, turn, heldMs, waiting));
+  };
+
+  return {
+    /** 새 차례를 연 호출 위치. 기록하지 않는 동안은 undefined 다. */
+    callSite(above: Function): SqljsTurn['site'] {
+      if (!recordSites) return undefined;
+      const site: { stack?: string } = {};
+      Error.captureStackTrace(site, above);
+      return site;
+    },
+    queued() {
+      waiting += 1;
+    },
+    begin(turn: SqljsTurn) {
+      waiting -= 1;
+      turn.startedAt = performance.now();
+      current = turn;
+      if (!timer) {
+        timer = setInterval(tick, tickMs);
+        if (typeof timer.unref === 'function') timer.unref();
+      }
+    },
+    end(turn: SqljsTurn) {
+      if (current === turn) current = null;
+      if (!turn.warned) return;
+      const heldMs = performance.now() - turn.startedAt;
+      warnSqljsQueue(
+        () => `[DB] sql.js write queue (${connection}): the turn opened by "${turn.label}" was released after ${sqljsSeconds(heldMs)}`,
+      );
+    },
+  };
+}
 
 /** 통째로 한 차례를 타는 EntityManager 메서드 — transaction 과, 암묵 트랜잭션을 여는 넷. */
 const SQLJS_QUEUED_MANAGER_METHODS = ['transaction', 'save', 'remove', 'softRemove', 'recover'] as const;
@@ -217,10 +358,15 @@ function isSqljsReadStatement(sql: string): boolean {
  * 큐에 선 일은 시작하지 않는다. 이미 큐 차례를 쥔 체인(트랜잭션 콜백, 또는 다른 work) 안에서 부르면 기다리지
  * 않고 그 차례 안에서 바로 실행한다 — 자기 뒤에 줄 서면 데드락이다. 그래서 트랜잭션 안에서 부르면 그 트랜잭션이
  * 열린 채로 돈다 — 파일 export 는 flushSqljs()/flushOntologySqljs() 를 쓴다(exportSqljsWhenIdle 참고).
+ * `label` 은 이 work 가 차례를 오래 쥘 때 경고에 실리는 이름이다.
  */
-export function afterSqljsTransactions<T>(dataSource: DataSource, work: () => Promise<T>): Promise<T> {
+export function afterSqljsTransactions<T>(
+  dataSource: DataSource,
+  work: () => Promise<T>,
+  label = 'afterSqljsTransactions',
+): Promise<T> {
   const queue = sqljsWorkQueues.get(dataSource);
-  return queue ? queue.enqueue(work) : work();
+  return queue ? queue.enqueue(work, label, afterSqljsTransactions) : work();
 }
 
 /** 지금 호출 체인이 이 연결의 큐 차례를 이미 쥐고 있는가 — 트랜잭션 콜백이나 afterSqljsTransactions() work 안. */
@@ -233,6 +379,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
   if (sqljsWorkQueues.has(dataSource)) return;
 
   const reentry = new AsyncLocalStorage<SqljsTurn>();
+  const watch = watchSqljsTurns(sqljsConnectionName(dataSource));
   let tail: Promise<void> = Promise.resolve();
   const heldTurn = (): SqljsTurn | undefined => {
     const turn = reentry.getStore();
@@ -252,7 +399,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
       if (turn.pending === 0) turn.release();
     });
   };
-  const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+  const enqueue: SqljsEnqueue = (work, label, above) => {
     const held = heldTurn();
     if (held) return within(held, work);
     let next!: () => void;
@@ -260,14 +407,23 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
     const turn: SqljsTurn = {
       active: true,
       pending: 0,
+      label,
+      startedAt: 0,
+      site: watch.callSite(above),
+      warned: false,
       release: () => {
         turn.active = false;
+        watch.end(turn);
         next();
       },
     };
+    watch.queued();
     // 다음 차례는 결과와 무관하게 이 차례가 넘어간 뒤 시작한다 — 실패한 트랜잭션이 뒤에 선 일을 막지 않는다.
     // 실패 자체는 `run` 으로 이 호출자에게 간다.
-    const run = tail.then(() => reentry.run(turn, () => within(turn, work)));
+    const run = tail.then(() => {
+      watch.begin(turn);
+      return reentry.run(turn, () => within(turn, work));
+    });
     tail = released;
     return run;
   };
@@ -279,7 +435,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
   for (const name of SQLJS_QUEUED_MANAGER_METHODS) {
     queuedManagerMethods[name] = function queued(this: EntityManager, ...args: unknown[]) {
       const original = (Object.getPrototypeOf(this) as Record<string, Method>)[name];
-      return enqueue(() => original.apply(this, args));
+      return enqueue(() => original.apply(this, args), name, queued);
     };
   }
   const queueManager = <M extends EntityManager>(manager: M): M => Object.assign(manager, queuedManagerMethods);
@@ -290,7 +446,9 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
   const queuedDataSource = dataSource as unknown as Record<(typeof SQLJS_QUEUED_DATASOURCE_METHODS)[number], Method>;
   for (const name of SQLJS_QUEUED_DATASOURCE_METHODS) {
     const original = queuedDataSource[name].bind(dataSource);
-    queuedDataSource[name] = (...args: unknown[]) => enqueue(() => original(...args));
+    queuedDataSource[name] = function queuedDataSourceMethod(...args: unknown[]) {
+      return enqueue(() => original(...args), name, queuedDataSourceMethod);
+    };
   }
 
   const gatedRunners = new WeakSet<QueryRunner>();
@@ -300,7 +458,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
     const query = runner.query as Method;
     runner.query = function gatedQuery(this: QueryRunner, sql: string, ...rest: unknown[]) {
       const run = () => query.call(this, sql, ...rest);
-      return isSqljsReadStatement(sql) ? run() : enqueue(run);
+      return isSqljsReadStatement(sql) ? run() : enqueue(run, sqljsStatementLabel(sql), gatedQuery);
     } as QueryRunner['query'];
     const startTransaction = runner.startTransaction as Method;
     runner.startTransaction = function gatedStartTransaction(this: QueryRunner, ...args: unknown[]) {
@@ -629,7 +787,7 @@ async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void
     }
     // Wrapped, not returned: returning the promise would keep this turn until the file write is done.
     return { writing: write.writing, restoreFailure };
-  });
+  }, 'export');
   await exported.writing;
   if (exported.restoreFailure) throw exported.restoreFailure.error;
 }
