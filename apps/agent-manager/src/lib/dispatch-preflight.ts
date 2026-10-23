@@ -858,7 +858,7 @@ export class InflightDispatchTracker {
   tryAcquireFallback(
     key: string,
     meta: InflightDispatchMeta,
-  ): { acquired: boolean; nonce?: string; evicted?: 'stale' | 'dead_pid' } {
+  ): { acquired: boolean; holderAlive?: boolean; nonce?: string; evicted?: 'stale' | 'dead_pid' } {
     const existing = this.#fallback.get(key);
     if (existing) {
       // Pid-liveness escape hatch (ticket fdf6714e, mirrors TicketSessionManager
@@ -871,7 +871,7 @@ export class InflightDispatchTracker {
       // waiting out the TTL — a stronger-than-timer signal, same as the
       // authoritative 'dead_pid' backstop.
       if (existing.pid != null) {
-        if (isPidAlive(existing.pid)) return { acquired: false };
+        if (isPidAlive(existing.pid)) return { acquired: false, holderAlive: true };
         const nonce = randomUUID();
         this.#fallback.set(key, { ...meta, reservedAt: Date.now(), nonce });
         return { acquired: true, nonce, evicted: 'dead_pid' };

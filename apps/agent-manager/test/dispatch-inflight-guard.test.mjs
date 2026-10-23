@@ -2712,3 +2712,40 @@ test('suppressed force does not replay stale data when refresh fails', async () 
   await delay(50);
   assert.equal(mgr.spawnCount, 1);
 });
+
+for (const persistent of [true, false]) {
+  test(`suppressed ACK distinguishes a live one-shot PID from provisioning (${persistent ? 'authoritative' : 'fallback'})`, async () => {
+    const h = makeDispatcher({ persistent });
+    const key = KEY('t1', 'assignee', 'a1');
+    const reservation = persistent
+      ? h.mgr.tryReserveDispatch('t1', 'assignee', 'a1')
+      : h.tracker.tryAcquireFallback(key, { ticketId: 't1', role: 'assignee', agentId: 'a1' });
+    const acks = [];
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith('/api/agent-manager/dispatch/ack')) {
+        acks.push(JSON.parse(init.body));
+        return { ok: true, status: 200, headers: { get: () => null }, async json() { return {}; }, async text() { return ''; } };
+      }
+      return previousFetch(url, init);
+    };
+    await h.dispatcher.handleTrigger(evJson({ field_changed: 'no-pid' }));
+    assert.equal(await waitFor(() => acks.length === 1), true);
+    assert.equal(acks[0].reason, 'inflight_dispatch');
+
+    const child = spawnDummyChild();
+    if (persistent) h.mgr.attachDispatchPid('t1', 'assignee', 'a1', reservation.nonce, child.pid);
+    else h.tracker.attachDispatchPid(key, reservation.nonce, child.pid);
+    // Repeated supervisor probes must carry live-process evidence even when
+    // the per-hold automatic notice has already been emitted.
+    for (const trigger of ['live-pid-1', 'live-pid-2']) {
+      await h.dispatcher.handleTrigger(evJson({ field_changed: trigger, force_respawn: true }));
+    }
+    assert.equal(await waitFor(() => acks.length === 3), true);
+    assert.deepEqual(acks.slice(1).map(({ trigger_id, outcome, reason }) => ({ trigger_id, outcome, reason })), [
+      { trigger_id: 'live-pid-1', outcome: 'suppressed', reason: 'inflight_live_process' },
+      { trigger_id: 'live-pid-2', outcome: 'suppressed', reason: 'inflight_live_process' },
+    ]);
+    assert.equal(h.calls.spawn.length, 0, 'all probes retain the existing holder');
+  });
+}

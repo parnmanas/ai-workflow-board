@@ -27,7 +27,7 @@ const { app, port, modules } = await bootApp({ port: 0 });
 const gdst = modules.getDataSourceToken;
 const ds = app.get(gdst());
 const { AuthService } = await import('../dist/services/auth.service.js');
-const { TicketDispatchService, MAX_SUPERVISOR_REDISPATCHES } = await import('../dist/modules/agents/ticket-dispatch.service.js');
+const { TicketDispatchService, MAX_SUPERVISOR_REDISPATCHES, SUPERVISOR_LIVE_QUIET_LIMIT_MS, SUPERVISOR_LIVE_ACK_TTL_MS } = await import('../dist/modules/agents/ticket-dispatch.service.js');
 const dispatcher = app.get(TicketDispatchService);
 const { Ticket } = await import('../dist/entities/Ticket.js');
 
@@ -503,5 +503,186 @@ for (const count of [1, MAX_SUPERVISOR_REDISPATCHES]) {
     }
   });
 }
+
+
+// Seed the same durable correlation row dispatch() writes before SSE emission.
+// Avoid spawning a fake worker: these tests exercise manager acknowledgements
+// and supervisor decisions when the real worker produces no output.
+async function liveProbe(ticket, triggerId, createdAt = new Date()) {
+  await ds.getRepository('ActivityLog').save({
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+    account_id: ws.id, action: 'trigger_emitted', field_changed: triggerId,
+    new_value: agent.id, role: 'assignee', trigger_source: 'supervisor',
+    created_at: createdAt,
+  });
+  return {
+    ticketId: ticket.id, triggerId, outcome: 'suppressed',
+    reason: 'inflight_live_process', managerAgentId: agent.runtime_spec.manager_agent_id,
+  };
+}
+
+test('live-PID ACKs require a fresh latest trigger and do not renew on replay', async () => {
+  const repo = ds.getRepository(Ticket);
+  const ticket = await createTicket(app, gdst, {
+    accountId: ws.id, title: 'live ACK contract', status: 'in_progress', assignee: agent,
+  });
+  try {
+    await repo.update(ticket.id, { last_dispatched_at: new Date(), supervisor_redispatches: 1 });
+    const stale = await liveProbe(ticket, 'stale-live-probe', new Date(Date.now() - SUPERVISOR_LIVE_ACK_TTL_MS - 1000));
+    assert.equal((await dispatcher.applyManagerAck(stale)).applied, false);
+    const current = await liveProbe(ticket, 'current-live-probe');
+    assert.equal((await dispatcher.applyManagerAck({ ...current, triggerId: 'unknown' })).applied, false);
+    assert.equal((await dispatcher.applyManagerAck({ ...current, managerAgentId: 'wrong-host' })).applied, false);
+    assert.equal((await dispatcher.applyManagerAck(stale)).applied, false);
+    assert.equal((await repo.findOneBy({ id: ticket.id })).supervisor_live_since, null);
+
+    // Exercise the REST contract and its authenticated manager guard too.
+    const devMode = process.env.AGENT_DEV_MODE;
+    process.env.AGENT_DEV_MODE = 'false';
+    let response;
+    try {
+      response = await fetch(`http://localhost:${port}/api/agent-manager/dispatch/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': runtimeHostKeyForAgent(agent.id) },
+        body: JSON.stringify({
+          ticket_id: ticket.id, trigger_id: current.triggerId, role: 'assignee',
+          outcome: current.outcome, reason: current.reason,
+        }),
+      });
+    } finally {
+      process.env.AGENT_DEV_MODE = devMode;
+    }
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).applied, true);
+    const confirmed = await repo.findOneBy({ id: ticket.id });
+    assert.ok(confirmed.supervisor_live_since instanceof Date);
+    assert.ok(confirmed.supervisor_live_at instanceof Date);
+    assert.equal(confirmed.supervisor_redispatches, 1, 'PID confirmation is not progress');
+    assert.equal((await dispatcher.applyManagerAck(current)).applied, false);
+    const replayed = await repo.findOneBy({ id: ticket.id });
+    assert.equal(+replayed.supervisor_live_since, +confirmed.supervisor_live_since);
+    assert.equal(+replayed.supervisor_live_at, +confirmed.supervisor_live_at);
+
+    await dispatcher.applyManagerAck({ ...stale, outcome: 'processed' });
+    assert.equal(+(await repo.findOneBy({ id: ticket.id })).supervisor_live_since, +confirmed.supervisor_live_since,
+      'a stale processed ACK cannot clear the current holder');
+    const replacement = await liveProbe(ticket, 'replacement-live-probe', new Date(Date.now() + 1000));
+    await dispatcher.applyManagerAck({ ...replacement, outcome: 'processed' });
+    const replaced = await repo.findOneBy({ id: ticket.id });
+    assert.equal(replaced.supervisor_live_since, null, 'a matching processed ACK clears the previous quiet holder');
+    assert.equal(replaced.supervisor_live_at, null);
+
+    await repo.update(ticket.id, { pending_user_action: true });
+    const pending = await liveProbe(ticket, 'pending-live-probe', new Date(Date.now() + 2000));
+    assert.equal((await dispatcher.applyManagerAck(pending)).applied, false);
+  } finally {
+    await repo.update(ticket.id, { status: 'done' });
+  }
+});
+
+test('a quiet live PID retains capacity beyond three probes but reaches its durable time limit', async () => {
+  const repo = ds.getRepository(Ticket);
+  const ticket = await createTicket(app, gdst, {
+    accountId: ws.id, title: 'quiet live PID', status: 'in_progress', assignee: agent,
+  });
+  const originalCadence = (await ds.getRepository('Account').findOneBy({ id: ws.id })).supervisor_resend_ms;
+  try {
+    await ds.getRepository('Account').update(ws.id, { supervisor_resend_ms: 60 * 60_000 });
+    const now = Date.now();
+    const since = new Date(now - 45 * 60_000);
+    await repo.update(ticket.id, {
+      last_dispatched_at: new Date(now - 10 * 60_000),
+      supervisor_redispatches: MAX_SUPERVISOR_REDISPATCHES,
+      supervisor_live_since: since, supervisor_live_at: new Date(now),
+    });
+    const ack = await liveProbe(ticket, 'quiet-live-probe');
+    assert.equal((await dispatcher.applyManagerAck(ack)).applied, true);
+    assert.equal(+(await repo.findOneBy({ id: ticket.id })).supervisor_live_since, +since,
+      'another live ACK cannot restart the quiet episode');
+    await dispatcher.supervise(now);
+    let fresh = await repo.findOneBy({ id: ticket.id });
+    assert.equal(fresh.pending_user_action, false, 'a live process survives the ordinary three-send park');
+    assert.equal(fresh.supervisor_redispatches, MAX_SUPERVISOR_REDISPATCHES + 1);
+    assert.ok((await dispatcher.runningCounts([agent.id])).get(agent.id) >= 1,
+      'the live quiet ticket still consumes its assignee capacity');
+
+    await afterDispatcherHandles(() => autoNotice(ticket.id, 'process still alive, automatic notice'));
+    fresh = await repo.findOneBy({ id: ticket.id });
+    assert.equal(+fresh.supervisor_live_since, +since, 'auto-notice does not extend the quiet limit');
+    // These persisted timestamps also survive a dispatcher/server restart:
+    // no in-memory confirmation is needed to make the next decision.
+    await repo.update(ticket.id, { supervisor_live_since: new Date(now - SUPERVISOR_LIVE_QUIET_LIMIT_MS) });
+    await dispatcher.supervise(now);
+    fresh = await repo.findOneBy({ id: ticket.id });
+    assert.equal(fresh.pending_user_action, true);
+    assert.match(fresh.pending_reason, /alive.*no progress.*2 hours/);
+    assert.doesNotMatch(fresh.pending_reason, /stopped 3 times/);
+  } finally {
+    await ds.getRepository('Account').update(ws.id, { supervisor_resend_ms: originalCadence });
+    await repo.update(ticket.id, { status: 'done' });
+  }
+});
+
+test('expired PID evidence and no-PID reservations retain ordinary stalled-ticket recovery', async () => {
+  const repo = ds.getRepository(Ticket);
+  for (const stalePid of [false, true]) {
+    const ticket = await createTicket(app, gdst, {
+      accountId: ws.id, title: `no live worker ${stalePid}`, status: 'in_progress', assignee: agent,
+    });
+    try {
+      const now = Date.now();
+      await repo.update(ticket.id, {
+        supervisor_redispatches: MAX_SUPERVISOR_REDISPATCHES,
+        last_dispatched_at: new Date(now - 10 * 60_000),
+        supervisor_live_since: stalePid ? new Date(now - 30 * 60_000) : null,
+        supervisor_live_at: stalePid ? new Date(now - SUPERVISOR_LIVE_ACK_TTL_MS - 1) : null,
+      });
+      const ack = await liveProbe(ticket, `reservation-probe-${stalePid}`);
+      await dispatcher.applyManagerAck({ ...ack, reason: 'inflight_dispatch' });
+      await dispatcher.supervise(now);
+      const fresh = await repo.findOneBy({ id: ticket.id });
+      assert.equal(fresh.pending_user_action, true);
+      assert.match(fresh.pending_reason, /stopped/);
+    } finally {
+      await repo.update(ticket.id, { status: 'done' });
+    }
+  }
+});
+
+test('actual output and an agent comment restart a quiet live episode', async () => {
+  const repo = ds.getRepository(Ticket);
+  const ticket = await createTicket(app, gdst, {
+    accountId: ws.id, title: 'live worker progresses', status: 'in_progress', assignee: agent,
+  });
+  const agentStatus = dispatcher.agentStatus;
+  const originalOutput = agentStatus.getLatestOutputLivenessForTicket;
+  try {
+    const now = Date.now();
+    await repo.update(ticket.id, {
+      supervisor_redispatches: MAX_SUPERVISOR_REDISPATCHES,
+      last_dispatched_at: new Date(now),
+      supervisor_live_since: new Date(now - SUPERVISOR_LIVE_QUIET_LIMIT_MS),
+      supervisor_live_at: new Date(now),
+    });
+    agentStatus.getLatestOutputLivenessForTicket = function (id) {
+      return id === ticket.id ? now - 1000 : originalOutput.call(this, id);
+    };
+    await dispatcher.supervise(now);
+    let fresh = await repo.findOneBy({ id: ticket.id });
+    assert.equal(fresh.pending_user_action, false);
+    assert.equal(+fresh.supervisor_live_since, now - 1000, 'real output advances the quiet baseline');
+    assert.equal(fresh.supervisor_redispatches, 0, 'real output restarts the resend count');
+    await afterDispatcherHandles(() => vagent.mcp.callTool('add_comment', {
+      ticket_id: ticket.id, content: 'tool finished; validating the implementation',
+    }));
+    fresh = await repo.findOneBy({ id: ticket.id });
+    assert.equal(fresh.supervisor_redispatches, 0);
+    assert.equal(fresh.supervisor_live_since, null);
+    assert.equal(fresh.supervisor_live_at, null);
+  } finally {
+    agentStatus.getLatestOutputLivenessForTicket = originalOutput;
+    await repo.update(ticket.id, { status: 'done' });
+  }
+});
 
 exitAfterTests();

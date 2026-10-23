@@ -1082,7 +1082,10 @@ export class AgentManagerController {
    * = the subagent was spawned; `nack` = the spawn was aborted (worktree pool
    * exhausted, CLI not ready, …) and TicketDispatchService retries it with
    * backoff from its sweep; `suppressed` = a twin dispatch the manager folded
-   * into a live one. Every outcome is recorded on the ticket's activity log.
+   * into an existing reservation. Reason `inflight_live_process` means the
+   * manager checked a live OS PID; `inflight_dispatch` gives no such guarantee.
+   * Live-process ACKs grant a bounded quiet grace, never output progress.
+   * Every outcome is recorded on the ticket's activity log.
    *
    * Auth: AgentAuthGuard (X-Agent-Key). A bogus ack can at most schedule an
    * extra retry of an in-progress ticket — the dispatcher re-checks every gate.
@@ -1107,6 +1110,9 @@ export class AgentManagerController {
     const skillSnapshotRunId = String(body?.skill_snapshot_run_id || '').trim();
     if (!ticket_id || !role || !outcome) {
       return res.status(400).json({ error: 'ticket_id, role and outcome (processed|nack|suppressed) are required' });
+    }
+    if (outcome === 'suppressed' && reason === 'inflight_live_process' && role !== 'assignee') {
+      return res.status(400).json({ error: 'live-process outcome requires assignee role' });
     }
     if (outcome === 'suppressed' && !trigger_id) {
       return res.status(400).json({ error: 'suppressed outcome requires trigger_id' });

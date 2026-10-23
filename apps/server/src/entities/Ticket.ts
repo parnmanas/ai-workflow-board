@@ -103,6 +103,14 @@ export class Ticket {
   @Column({ type: 'int', default: 0 })
   supervisor_redispatches: number;
 
+  // A manager-confirmed live PID is not progress. Persist the bounded quiet
+  // episode separately so repeated ACKs / server restarts cannot extend it.
+  @Column({ type: Date, nullable: true, default: null })
+  supervisor_live_since: Date | null;
+
+  @Column({ type: Date, nullable: true, default: null })
+  supervisor_live_at: Date | null;
+
   // Optional pointer to the next ticket to pick up once this one is done. When
   // this ticket enters `done`, TicketDispatchService moves a backlog next
   // ticket to `todo` (and so queues it for its assignee). Same-account +

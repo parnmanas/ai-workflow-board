@@ -54,6 +54,8 @@ export type DispatchSource =
 
 /** Supervisor re-sends without the agent making progress before the ticket is parked. */
 export const MAX_SUPERVISOR_REDISPATCHES = 3;
+export const SUPERVISOR_LIVE_QUIET_LIMIT_MS = 2 * 60 * 60_000;
+export const SUPERVISOR_LIVE_ACK_TTL_MS = 15 * 60_000;
 const SWEEP_INTERVAL_MS = 30_000;
 const NACK_RETRY_BASE_MS = 60_000;
 const OFFLINE_NOTICE_COOLDOWN_MS = 60 * 60_000;
@@ -207,6 +209,54 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   }): Promise<{ applied: boolean }> {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: args.ticketId } });
     if (!ticket) return { applied: false };
+    if (args.outcome === 'suppressed' && args.reason === 'inflight_live_process') {
+      // Only the latest emitted trigger for the current assignment can assert
+      // liveness. Delayed/replayed ACKs must not renew a lease or revive work.
+      const emitted = await this.dataSource.getRepository(ActivityLog).findOne({
+        where: { ticket_id: ticket.id, action: 'trigger_emitted' },
+        order: { created_at: 'DESC' },
+      });
+      const now = Date.now();
+      if (ticket.status !== 'in_progress' || isTicketPending(ticket) || ticket.archived_at
+        || ticket.parent_id || ticket.canonical_ticket_id
+        || args.managerAgentId !== ticket.assignee?.manager_agent_id
+        || !emitted || emitted.field_changed !== args.triggerId
+        || emitted.new_value !== ticket.assignee_key || emitted.account_id !== ticket.account_id
+        || now - emitted.created_at.getTime() >= SUPERVISOR_LIVE_ACK_TTL_MS) return { applied: false };
+      const duplicate = await this.dataSource.getRepository(ActivityLog).existsBy({
+        ticket_id: ticket.id, action: 'dispatch_ack_suppressed', field_changed: args.triggerId,
+        new_value: 'inflight_live_process',
+      });
+      if (duplicate) return { applied: false };
+      const recorded = await this.dataSource.getRepository(Ticket).update({
+        id: ticket.id, assignee_key: ticket.assignee_key, status: 'in_progress',
+        last_dispatched_at: ticket.last_dispatched_at ?? IsNull(),
+        pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
+        supervisor_redispatches: ticket.supervisor_redispatches,
+        supervisor_live_since: ticket.supervisor_live_since ?? IsNull(),
+        supervisor_live_at: ticket.supervisor_live_at ?? IsNull(),
+      }, {
+        supervisor_live_since: ticket.supervisor_live_since ?? new Date(now),
+        supervisor_live_at: new Date(now),
+      });
+      if (!recorded.affected) return { applied: false };
+    }
+    if (args.outcome === 'processed' && ticket.supervisor_live_since) {
+      const emitted = await this.dataSource.getRepository(ActivityLog).findOne({
+        where: { ticket_id: ticket.id, action: 'trigger_emitted' },
+        order: { created_at: 'DESC' },
+      });
+      if (emitted?.field_changed === args.triggerId && emitted.new_value === ticket.assignee_key
+        && args.managerAgentId === ticket.assignee?.manager_agent_id) {
+        // A replacement actually spawned: it is no longer the quiet holder.
+        await this.dataSource.getRepository(Ticket).update({
+          id: ticket.id, assignee_key: ticket.assignee_key,
+          last_dispatched_at: ticket.last_dispatched_at ?? IsNull(),
+          supervisor_live_since: ticket.supervisor_live_since,
+          supervisor_live_at: ticket.supervisor_live_at ?? IsNull(),
+        }, { supervisor_live_since: null, supervisor_live_at: null });
+      }
+    }
     await this.dataSource.getRepository(ActivityLog).save({
       entity_type: 'ticket',
       entity_id: args.ticketId,
@@ -253,8 +303,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (ticket.parent_id) return; // children are a checklist, never dispatched
 
     const byAgent = activity.actor_id ? !(await this.isUser(activity.actor_id)) : false;
-    if (byAgent && activity.action !== 'created' && ticket.supervisor_redispatches > 0) {
-      await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { supervisor_redispatches: 0 });
+    if (byAgent && activity.action !== 'created' && (ticket.supervisor_redispatches > 0 || ticket.supervisor_live_since)) {
+      await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { supervisor_redispatches: 0, supervisor_live_since: null, supervisor_live_at: null });
     }
 
     // Re-sends of an in_progress ticket (unpend, reassignment, …) are explicit
@@ -278,8 +328,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       // `auto_notice` is stored as an agent comment, but its activity row is
       // stamped actor 'system' (comment-tools.ts). It reports on the dispatch
       // (a suppressed duplicate, a blocked spawn), not on the work.
-      if (comment.author_type === 'agent' && actorId !== 'system' && ticket.supervisor_redispatches > 0) {
-        await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { supervisor_redispatches: 0 });
+      if (comment.author_type === 'agent' && actorId !== 'system' && (ticket.supervisor_redispatches > 0 || ticket.supervisor_live_since)) {
+        await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { supervisor_redispatches: 0, supervisor_live_since: null, supervisor_live_at: null });
       }
       return;
     }
@@ -502,8 +552,11 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       action: 'trigger_emitted', field_changed: payload.trigger_id, new_value: payload.agent_id,
       role: 'assignee', actor_name: 'AWB', trigger_source: source,
     });
+    await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, {
+      last_dispatched_at: new Date(),
+      ...(source !== 'supervisor' ? { supervisor_live_since: null, supervisor_live_at: null } : {}),
+    });
     activityEvents.emit('agent_trigger', { ...payload, timestamp: new Date().toISOString() });
-    await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, { last_dispatched_at: new Date() });
     this.logService.info('Dispatch', `agent_trigger ticket=${ticket.id.slice(0, 8)} source=${source} agent=${payload.agent_id}`, {
       ticket_id: ticket.id, trigger_id: payload.trigger_id, source,
     });
@@ -699,6 +752,29 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       }
       if (nack) continue;
 
+      const latestOutput = this.agentStatus.getLatestOutputLivenessForTicket(ticket.id) ?? 0;
+      // Output is real progress, unlike process-alive probes and auto-notices.
+      if (ticket.supervisor_live_since && latestOutput > ticket.supervisor_live_since.getTime()) {
+        const progressed = await repo.update({
+          id: ticket.id, supervisor_redispatches: ticket.supervisor_redispatches,
+          supervisor_live_since: ticket.supervisor_live_since,
+          supervisor_live_at: ticket.supervisor_live_at ?? IsNull(),
+        }, {
+          supervisor_live_since: new Date(latestOutput),
+          supervisor_redispatches: 0,
+        });
+        if (!progressed.affected) continue;
+        ticket.supervisor_live_since = new Date(latestOutput);
+        ticket.supervisor_redispatches = 0;
+      }
+      const liveSince = ticket.supervisor_live_since?.getTime();
+      const liveAt = ticket.supervisor_live_at?.getTime();
+      const liveConfirmed = liveAt != null && now - liveAt < SUPERVISOR_LIVE_ACK_TTL_MS;
+      const quietExpired = liveSince != null && now - liveSince >= SUPERVISOR_LIVE_QUIET_LIMIT_MS;
+      if (liveConfirmed && quietExpired) {
+        await this.parkStalled(ticket, true);
+        continue;
+      }
       const latestComment = await this.latestCommentAt(ticket.id);
       if (this.agentStatus.hasLiveRoleStrand(ticket.assignee_key, ticket.id, 'assignee')) continue;
       const lastSignal = Math.max(
@@ -708,12 +784,15 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       );
       // First re-send after supervisor_stale_ms of silence; each further one
       // after supervisor_resend_ms (the agent already had its long chance).
-      const waitMs = ticket.supervisor_redispatches > 0
+      const cadenceMs = ticket.supervisor_redispatches > 0
         ? Math.max(60_000, account.supervisor_resend_ms || 300_000)
         : Math.max(60_000, account.supervisor_stale_ms || 1_800_000);
+      // Probe before the 15-minute evidence expires even when the account's
+      // resend cadence is longer. A lost manager stops renewing the evidence.
+      const waitMs = liveConfirmed ? Math.min(cadenceMs, 5 * 60_000) : cadenceMs;
       if (now - lastSignal < waitMs) continue;
 
-      if (ticket.supervisor_redispatches >= MAX_SUPERVISOR_REDISPATCHES) {
+      if (ticket.supervisor_redispatches >= MAX_SUPERVISOR_REDISPATCHES && !liveConfirmed) {
         await this.parkStalled(ticket);
         continue;
       }
@@ -737,11 +816,20 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** The agent keeps stopping without finishing — hand the ticket to a human. */
-  private async parkStalled(ticket: Ticket): Promise<void> {
-    const reason = `The assignee stopped ${MAX_SUPERVISOR_REDISPATCHES} times without finishing or reporting progress. ` +
+  private async parkStalled(ticket: Ticket, liveQuiet = false): Promise<void> {
+    if (liveQuiet && (this.agentStatus.getLatestOutputLivenessForTicket(ticket.id) ?? 0)
+      > (ticket.supervisor_live_since?.getTime() ?? 0)) return;
+    const reason = liveQuiet
+      ? 'The assignee process is alive but has reported no progress for 2 hours since live-process confirmation. '
+        + 'Check for a stuck tool call or a background process keeping the session open; stop or resolve it before resuming.'
+      : `The assignee stopped ${MAX_SUPERVISOR_REDISPATCHES} times without finishing or reporting progress. ` +
       'Check the Runtime Host and the agent log, then unpend to retry.';
     const parked = await this.dataSource.getRepository(Ticket).update({
       id: ticket.id, supervisor_redispatches: ticket.supervisor_redispatches,
+      status: 'in_progress', assignee_key: ticket.assignee_key, archived_at: IsNull(),
+      pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
+      supervisor_live_since: ticket.supervisor_live_since ?? IsNull(),
+      supervisor_live_at: ticket.supervisor_live_at ?? IsNull(),
     }, {
       pending_user_action: true,
       pending_reason: reason,

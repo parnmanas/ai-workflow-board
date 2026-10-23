@@ -324,7 +324,7 @@ export class TicketSessionManager
       // (onExit) or confirmed death (below) frees the seat.
       if (existing.pid != null) {
         if (this._isPidAlive(existing.pid)) {
-          return { acquired: false, live: false };
+          return { acquired: false, live: false, holderAlive: true };
         }
         // pid attached but confirmed dead at the OS level — the owner
         // crashed/was killed without its onExit release running. A

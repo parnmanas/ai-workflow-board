@@ -342,6 +342,8 @@ export class TicketService {
         ticket.assignee = assignee as any;
         ticket.assignee_key = assignee_key;
         ticket.supervisor_redispatches = 0;
+        ticket.supervisor_live_since = null;
+        ticket.supervisor_live_at = null;
         changes.push({ field: 'assignee', old: prevLabel, next: assignee?.label || '' });
         assigneeChanged = true;
       }
@@ -407,7 +409,11 @@ export class TicketService {
     // A finished ticket stops answering for its dedupe key, so the next
     // request with that key files fresh work instead of folding into this one.
     if (status === 'done') ticket.operational_dedupe_key = null;
-    if (prev === 'in_progress' || status !== 'in_progress') ticket.supervisor_redispatches = 0;
+    if (prev === 'in_progress' || status !== 'in_progress') {
+      ticket.supervisor_redispatches = 0;
+      ticket.supervisor_live_since = null;
+      ticket.supervisor_live_at = null;
+    }
     await repo.save(ticket);
     if (position !== null) await this.reposition(ticket, status, position);
     await this.activityService.logActivity({
@@ -471,6 +477,8 @@ export class TicketService {
     ticket.pending_set_at = null;
     ticket.pending_set_by = '';
     ticket.supervisor_redispatches = 0;
+    ticket.supervisor_live_since = null;
+    ticket.supervisor_live_at = null;
     await repo.save(ticket);
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,

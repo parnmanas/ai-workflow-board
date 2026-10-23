@@ -1076,18 +1076,33 @@ that kept going around that cycle (hold, notice, silent exit) was re-sent every
 `supervisor_stale_ms` and never parked. Now it parks after the third re-send
 without progress.
 
-A live one-shot is parked the same way when it holds the seat but has produced
-no parsed output for `supervisor_stale_ms`. The server cannot see it:
-`hasLiveRoleStrand` needs output or a `current_task` within 15 minutes, and
-one-shots never send `set_current_task`. The manager suppresses each re-send
-because the pid is alive. It keeps the first suppressed force-respawn and replays
-it once when the process exits, unless the ticket is pending by then. The ticket
-parks after stale + 3 × resend (45 minutes with the defaults), where the first
-suppression notice of the hold used to buy another `supervisor_stale_ms`. A park
-also frees that identity's capacity slot, so its next `todo` ticket can start
-while the parked process is still running.
+A quiet one-shot has a separate, bounded process-alive grace. The manager
+checks the holder's OS PID when suppressing a duplicate dispatch and sends
+`POST /api/agent-manager/dispatch/ack` with outcome `suppressed`, reason
+`inflight_live_process`. A no-pid provisioning reservation still reports
+`inflight_dispatch`; older managers also retain their existing behavior.
+This applies to both persistent-session and one-shot fallback reservations.
 
-An agent that expects to wait without output (a background review, a long tool
-call) should comment on the ticket at least every `supervisor_stale_ms`. A CI
-wait should be registered with `await_ci_run`, since a pending ticket is never
-supervised.
+The server accepts live-process evidence only from the owning manager for the
+latest emitted trigger and current assignee of an active, non-pending ticket.
+Duplicate, unmatched, stale (15 minutes), or superseded live ACKs do not refresh
+it. `supervisor_live_since` and `supervisor_live_at` persist the quiet episode
+and last confirmation on the ticket, surviving server restarts. ACKs are not
+output and do not reset the supervisor count or extend the episode. While the
+confirmation is fresh, the usual three-retry park is deferred; probes continue
+at the account's resend cadence (capped at five minutes to renew the evidence).
+The ticket retains its capacity slot during this grace.
+
+After two hours without real progress from the first live confirmation, a fresh
+confirmation causes a park that explicitly says the process is alive but quiet
+and asks the operator to inspect a stuck tool or lingering background process.
+Parsed output resets the retry count and advances the quiet deadline; genuine
+agent progress clears the episode. Automatic notices do neither. Reassignment,
+status resets, unpend, non-supervisor dispatches, and a matched `processed` ACK
+for a replacement clear the old episode.
+If confirmation expires, the normal retry/park policy takes over. A park still
+frees capacity; the operator should stop or resolve the lingering process before
+resuming. Process existence alone is deliberately not proof of useful work.
+
+An agent that expects a long wait should record meaningful progress; a CI wait
+should use `await_ci_run`, since a pending ticket is never supervised.

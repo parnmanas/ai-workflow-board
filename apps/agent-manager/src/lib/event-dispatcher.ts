@@ -928,6 +928,8 @@ export interface DispatchReservation {
    *  the dispatch will reuse it as a follow-up turn). false → the provisioning→
    *  spawn reservation was just placed and the caller MUST release it. */
   live: boolean;
+  /** Refused reservation has an OS-confirmed live process; distinct from provisioning. */
+  holderAlive?: boolean;
   /** 좀비 예약을 강제 회수하고 이 dispatch 가 새 예약을 잡았다는 신호
    *  (ticket 7c3ba9cf). 'stale' = TTL(`INFLIGHT_RESERVATION_STALE_MS`) 초과
    *  예약을 evict, 'safety_valve' = TTL 미도달이나 연속 억제가 임계에 도달해
@@ -1406,10 +1408,10 @@ export class EventDispatcher {
         '않으며, 재설정 후 **정확히 1회** 재개됩니다' +
         (resetLabel ? ` (reset: ${resetLabel})` : '') +
         '. (ticket 467f714a)',
-      // ticket 3c8b8026: 이 파일의 모든 순수 자동 알림 add_comment 호출은
-      // auto_notice:true 를 실어 서버가 activity-log actor_id 를 'system' 으로
-      // 남기게 한다 — 그래야 이 알림이 스스로를 재트리거해 억제→알림→재트리거의
-      // 자기증폭 루프를 만들지 않는다(코멘트 본문의 author 표시는 그대로 유지).
+      // 순수 자동 알림은 auto_notice:true 로 activity-log actor_id 를 'system' 으로
+      // 남긴다. TicketDispatchService.onComment 는 이를 실제 작업 진전으로
+      // 세지 않으므로 supervisor 재시도 카운트를 초기화하지 않는다.
+      // 코멘트 본문의 author 표시는 그대로 유지한다.
       metadata: { auto_notice: true },
     });
   }
@@ -1613,7 +1615,7 @@ export class EventDispatcher {
         `⛔ **shared worktree 풀 고갈 지속 — 자동 재시도 한도 초과, pend** — 매니저가 ${entry.attempts}회 자동 재시도했지만 슬롯이 반납/회수되지 않아 디스패치를 pend 했습니다.\n\n` +
         `leaked lease 는 이미 회수 grace(20분) 를 넘겨 재조정 대상이었으므로, 남은 원인은 이 working_dir 를 공유하는 보드들의 실제 동시 실행 수가 풀 크기 N 을 초과하는 과다구독입니다.\n\n` +
         `**조치:** max_concurrent_tickets_per_agent 를 늘리거나, 이 working_dir 를 공유하는 보드/에이전트 구성을 분리한 뒤 unpend 하세요. (원인-불문 no-progress 백스톱: e7c87517)`,
-      metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+      metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
     });
     log(`[pool-retry] pended ticket=${entry.ticketId.slice(0, 8)} role=${entry.role} after ${entry.attempts} exhausted retries`);
   }
@@ -2038,7 +2040,7 @@ export class EventDispatcher {
       await fireAndForgetTool(this.#config, 'add_comment', {
         ticket_id: where.ticketId,
         content: `${text} 디스패치는 자동으로 다시 시도됩니다.`,
-        metadata: { auto_notice: true }, // 자기 재트리거 방지 — #postDeferAuditComment 주석 참고
+        metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
       });
       return;
     }
@@ -2290,7 +2292,7 @@ export class EventDispatcher {
       content:
         `⚠️ **Hermes 런타임 실행 실패** (\`${chatCode}\`)\n\n` +
         '이 멘션에 응답하지 못했습니다. Agent Manager 로그를 확인한 뒤 다시 멘션해 주세요.',
-      metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+      metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
     });
   }
 
@@ -3003,7 +3005,7 @@ export class EventDispatcher {
         });
         // ticket 6de97a41 (fdf6714e 후속): acq.evicted를 버리지 않고 그대로 전파해야
         // 아래의 zombie reservation reclaimed 로그가 fallback 모드에서도 발화한다.
-        reservation = { acquired: acq.acquired, live: false, nonce: acq.nonce, evicted: acq.evicted };
+        reservation = { acquired: acq.acquired, live: false, holderAlive: acq.holderAlive, nonce: acq.nonce, evicted: acq.evicted };
       }
       if (!reservation.acquired) {
         // A fresh spawn for this exact key is already provisioning/spawning →
@@ -3025,9 +3027,12 @@ export class EventDispatcher {
             columnWorkflow: !MENTION_HOLDER_SERVES_TRIGGER_SOURCES.has(String(ev.trigger_source || '')),
           },
         );
-        this.#ackDispatch(ev, 'suppressed', 'inflight_dispatch');
+        // Process existence is liveness, not model progress. The server applies
+        // a bounded quiet-process grace without resetting the supervisor count.
+        const reason = reservation.holderAlive ? 'inflight_live_process' : 'inflight_dispatch';
+        this.#ackDispatch(ev, 'suppressed', reason);
         log(
-          `[dispatch] twin suppressed (inflight_dispatch): another dispatch is already ` +
+          `[dispatch] twin suppressed (${reason}): another dispatch is already ` +
             `provisioning/spawning ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'} ` +
             `agent=${dispatchAgentId.slice(0, 8) || '_'} force_respawn=${isForce} ` +
             `(suppressed_total=${this.#inflightDispatch.suppressedCount()})`,
@@ -3052,14 +3057,9 @@ export class EventDispatcher {
               '새 트리거를 무시했습니다. force-respawn 이었다면 완료 직후 1회 재실행됩니다.',
             metadata: {
               dedupe_key: `dispatch_suppress:inflight:${ev.ticket_id}:${ev.action || '_'}:${dispatchAgentId || '_'}`,
-              // ticket 3c8b8026: 이 알림 자체가 코멘트→트리거 경로를 다시 타
-              // 새 trigger_emitted 를 낳고, 그 트리거가 또 억제되며 알림을 한
-              // 번 더 남기는 자기증폭 루프였다(재현: hard-budget 30회를
-              // 16분만에 소진, 그중 27%가 순수 이 알림의 자기메아리). 서버는
-              // auto_notice:true 인 코멘트의 activity-log actor_id 를
-              // 'system' 으로 남겨 trigger-loop 의 기존 system-actor 가드가
-              // 그대로 걸러내게 한다 — dedupe_key 로 합쳐지지 않는(=티켓의
-              // 마지막 코멘트가 아닌) 최초 알림 발생 건에도 적용된다.
+              // 자동 억제 알림은 activity-log actor_id='system' 으로 기록한다.
+              // TicketDispatchService.onComment 가 이 알림을 작업 진전으로
+              // 세어 supervisor 재시도 카운트를 초기화하지 않게 한다.
               auto_notice: true,
             },
           });
@@ -3088,7 +3088,7 @@ export class EventDispatcher {
             content:
               '⚠️ 디스패치 dedupe 강제 해제 (safety valve) — 좀비 예약을 회수하고 재-dispatch 했습니다. ' +
               '반복되면 매니저 로그에서 프로비저닝 hang / codex exit-1 원인을 확인하세요.',
-            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+            metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
           });
         }
       }
@@ -3222,7 +3222,7 @@ export class EventDispatcher {
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content: PI_TICKET_DISPATCH_BLOCK_COMMENT,
-          metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+          metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
         });
       }
       await fireAndForgetTool(this.#config, 'pend_ticket', {
@@ -3334,7 +3334,7 @@ export class EventDispatcher {
           await fireAndForgetTool(this.#config, 'add_comment', {
             ticket_id: ev.ticket_id,
             content: POOL_EXHAUSTED_RETRY_COMMENT,
-            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+            metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
           });
         }
         log(
@@ -3377,7 +3377,7 @@ export class EventDispatcher {
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content,
-          metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+          metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
         });
       }
       // ticket 52eedadf: the cooldown backoff above thins the supervisor storm
@@ -3530,7 +3530,7 @@ export class EventDispatcher {
           await fireAndForgetTool(this.#config, 'add_comment', {
             ticket_id: ev.ticket_id,
             content,
-            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+            metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
           });
         }
         if (provisionBlock.shouldPend) {
@@ -3594,7 +3594,7 @@ export class EventDispatcher {
               `3. 이 Agent 를 승인 요청을 지원하는 런타임(현재 \`hermes\`)으로 이동\n\n` +
               `_동일 사유의 supervisor 자동 재트리거는 억제됩니다 — 값을 고친 뒤 티켓을 ` +
               `unpend(User 탭의 ▶ Resume) 하세요._`,
-            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지
+            metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음
           });
         }
         if (provisionBlock.shouldPend) {
@@ -3656,7 +3656,7 @@ export class EventDispatcher {
               `원인: \`${readiness.detail || 'push credential unavailable'}\`\n\n` +
               `이 repository resource 에 GitHub 자격 증명(토큰)을 설정하거나 push 가능한 환경으로 전환한 뒤 다시 트리거하세요. ` +
               `(Merging 단계의 push 실패로 CLI 세션을 낭비하지 않도록 dispatch 전에 검증합니다.)`,
-            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+            metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
           });
         }
         // ticket 52eedadf: a missing push credential is likewise durable (an
@@ -4166,7 +4166,7 @@ export class EventDispatcher {
                 `마지막 오류: \`${result.detail || `invalid transport in ${mcpServerPath}`}\`\n\n` +
                 `이 agent의 CLI 홈(config.toml)의 \`${mcpServerPath}\` 테이블(또는 harness/자격 증명 설정)을 점검해 고친 뒤 이 티켓을 unpend 하세요.\n\n` +
                 `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — 설정을 고친 뒤 unpend 하세요._`,
-              metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+              metadata: { auto_notice: true }, // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음 — #postDeferAuditComment 참고
             });
           }
           if (provisionBlock.shouldPend) {
@@ -4812,9 +4812,8 @@ export class EventDispatcher {
             '멘션 dispatch 를 무시했습니다. 이 코멘트는 진행 중인 세션이 함께 읽습니다.',
           metadata: {
             dedupe_key: `dispatch_suppress:mention_seat:${ticketId || '_'}:${mention.role_shortcut}:${targetAgentId || '_'}`,
-            // ticket 3c8b8026 — 자기 재트리거 방지. 위 inflight_dispatch
-            // 사이트의 주석 참고(동일 근거: 이 알림이 코멘트→트리거 경로를
-            // 다시 타 자기증폭 루프를 만들던 문제).
+            // 자동 알림은 supervisor 재시도 카운트를 초기화하지 않음.
+            // #postDeferAuditComment 의 activity-log actor 설명 참고.
             auto_notice: true,
           },
         });
