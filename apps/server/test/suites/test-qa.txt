@@ -29,6 +29,7 @@ test/qa-flows/mcp-agent-roundtrip.test.mjs
 test/qa-flows/mcp-schema-version.test.mjs
 test/qa-flows/mcp-tool-profile-cache.test.mjs
 test/qa-flows/mcp-tools-surface.test.mjs
+test/qa-flows/mention-audit-retry.test.mjs
 test/qa-flows/multi-user-chat.test.mjs
 test/qa-flows/on-ticket-done-hook.test.mjs
 test/qa-flows/orchestration-confirm-node.test.mjs

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createTicket } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createTicket } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_MENTION_AUDIT_PORT || '0';
 
@@ -16,15 +16,13 @@ async function post(port, path, body) {
 
 test('mention audit run atomically claims one retry and recognizes persisted work', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
-  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => app.close());
   const { getDataSourceToken } = modules;
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
-    accountName: 'mention-audit-retry',
-  });
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'Audit Agent' });
+  const account = await createAccount(app, getDataSourceToken, 'mention-audit-retry');
+  const agent = await createAgent(app, getDataSourceToken, account.id, { name: 'Audit Agent' });
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id,
-    accountId: ws.id,
+    status: 'in_progress',
+    accountId: account.id,
     title: 'mention retry',
   });
   const trigger = `mention:comment-1:${agent.id}`;
@@ -69,14 +67,14 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(success.body.audit_comment_count, 1);
 
   const mutationTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id, accountId: ws.id, title: 'mutation only',
+    status: 'in_progress', accountId: account.id, title: 'mutation only',
   });
   const mutationTrigger = `mention:comment-2:${agent.id}`;
   const mutationRun = await post(port, `/api/agent/tickets/${mutationTicket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: mutationTrigger, agent_id: agent.id, role: 'assignee', attempt: 0,
   });
   await ds.getRepository('ActivityLog').save({
-    account_id: ws.id, entity_type: 'ticket', entity_id: mutationTicket.id,
+    account_id: account.id, entity_type: 'ticket', entity_id: mutationTicket.id,
     ticket_id: mutationTicket.id, action: 'updated', field_changed: 'title',
     old_value: 'before', new_value: 'after', actor_id: agent.id,
     actor_name: agent.name, role: 'assignee', trigger_source: mutationRun.body.run_token,
@@ -90,7 +88,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(mutationSuccess.body.entity_change_count, 1);
 
   const exhaustedTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id, accountId: ws.id, title: 'retry exhausted',
+    status: 'in_progress', accountId: account.id, title: 'retry exhausted',
   });
   const exhausted = await post(port, `/api/agent/tickets/${exhaustedTicket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: `mention:comment-3:${agent.id}`, agent_id: agent.id,
@@ -105,7 +103,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   assert.equal(exhaustedResult.body.reason, 'silent_exit_retry_exhausted');
 
   const spawnFailedTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id, accountId: ws.id, title: 'retry spawn failed',
+    status: 'in_progress', accountId: account.id, title: 'retry spawn failed',
   });
   const spawnFailed = await post(port, `/api/agent/tickets/${spawnFailedTicket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: `mention:comment-4:${agent.id}`, agent_id: agent.id,
@@ -124,13 +122,15 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   });
   assert.equal(failedRows.length, 1);
 
-  const { ws: otherWs } = await setupKanbanScene(app, getDataSourceToken, {
-    accountName: 'mention-audit-other-account',
-  });
-  const foreignAgent = await createAgent(app, getDataSourceToken, otherWs.id, { name: 'Foreign Agent' });
+  const otherAccount = await createAccount(app, getDataSourceToken, 'mention-audit-other-account');
+  const foreignAgent = await createAgent(app, getDataSourceToken, otherAccount.id, { name: 'Foreign Agent' });
   const rejected = await post(port, `/api/agent/tickets/${ticket.id}/mention-audit-runs/start`, {
     cycle_trigger_id: `mention:foreign:${foreignAgent.id}`,
     agent_id: foreignAgent.id, role: 'assignee', attempt: 0,
   });
   assert.equal(rejected.status, 400);
+  assert.equal(rejected.body.error, 'agent does not belong to ticket account');
+  assert.equal(await ds.getRepository('ActivityLog').countBy({
+    ticket_id: ticket.id, action: 'mention_audit_started', actor_id: foreignAgent.id,
+  }), 0);
 });

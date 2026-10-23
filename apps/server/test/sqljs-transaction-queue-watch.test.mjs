@@ -8,7 +8,7 @@
 // 무엇이 차례를 쥐었는지 볼 수단이 없었다.
 //
 // 이 스위트가 증명하는 것:
-//   1. 기준(SQLJS_TURN_WARN_MS)보다 오래 쥔 차례는 경고를 한 번 남긴다 — 연결 이름, 차례를 연 일, 쥔 시간, 뒤에서
+//   1. 기준(SQLJS_TURN_WARN_MS)보다 오래 쥔 차례는 첫 경고를 남긴다 — 연결 이름, 차례를 연 일, 쥔 시간, 뒤에서
 //      기다리는 일 수(차례 안의 재진입 쓰기는 세지 않는다). 그 차례가 풀리면 걸린 시간을 한 줄 더 남긴다. 쥔 동안 감시가
 //      보지 못한 차례(이벤트 루프를 막았다)는 풀릴 때 한 번 알린다. 기준보다 짧은 차례는 조용하다 — 줄 서 있던 시간은
 //      쥔 시간에 들지 않는다.
@@ -211,7 +211,7 @@ function waitingGroupsOf(warning) {
   const groups = {};
   let group;
   for (const line of lines) {
-    const heading = /^ {2}(Already waiting when it started|Queued after it started) \((\d+)\):$/.exec(line);
+    const heading = /^ {2}(Already waiting when it started|Queued after it started|Queued since the previous warning) \((\d+)\):$/.exec(line);
     const entry = new RegExp(
       '^ {4}(\\d+)\\. "([^"]*)"(?: ×(\\d+), the first|,) waiting for (\\d+\\.\\d)s' +
         `(, queued at:| \\(call site not recorded\\)| \\(${escapeRe(MERGED_UNRECORDED)}\\))$`,
@@ -219,7 +219,7 @@ function waitingGroupsOf(warning) {
     const more = /^ {4}… and ([1-9]\d*) more$/.exec(line);
     if (heading) {
       group = { total: Number(heading[2]), entries: [], more: 0 };
-      groups[heading[1] === 'Queued after it started' ? 'after' : 'before'] = group;
+      groups[heading[1] === 'Already waiting when it started' ? 'before' : 'after'] = group;
     } else if (entry && group && !group.more) {
       const recorded = entry[5] === ', queued at:';
       const merged = entry[3] !== undefined;
@@ -262,7 +262,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 
-  it('a turn held past the threshold warns once — connection, what opened it, how long, how many wait behind — and its release adds how long it took', async () => {
+  it('a turn held past the threshold with no later arrivals warns once — connection, what opened it, how long, how many wait behind — and its release adds how long it took', async () => {
     const ds = await openDataSource();
     const held = holdTransaction(ds, 'once');
     await held.inside;
@@ -590,6 +590,103 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
   describe('the turns waiting behind it — the other side of a deadlock (ticket c495ceaa)', () => {
     // 다른 요청 — HTTP 핸들러처럼 따로 시작한 비동기 체인이다. 거기서 부른 쓰기는 차례를 쥔 콜백의 재진입이 아니라 줄을 선다.
     const inAnotherRequest = AsyncResource.bind((handle) => handle());
+
+    it('follow-ups skip the old prefix and retain grouping, five-entry and 1000-turn limits', async () => {
+      const ds = await openDataSource();
+      const held = holdTransaction(ds, 'bounded-follow-up');
+      await held.inside;
+      const writes = [];
+      try {
+        for (let i = 0; i < 1001; i++) writes.push(afterSqljsTransactions(ds, async () => {}, 'old'));
+        await until(() => warningsFor(ds).length === 1, 'initial busy report');
+        for (let i = 0; i < 995; i++) writes.push(afterSqljsTransactions(ds, async () => {}, 'repeated-new'));
+        for (let i = 0; i < 6; i++) writes.push(afterSqljsTransactions(ds, async () => {}, `new-${i}`));
+        await until(() => warningsFor(ds).length === 2, 'bounded follow-up');
+        const report = warningsFor(ds)[1];
+        assert.doesNotMatch(report, /"old"/);
+        const { after } = waitingGroupsOf(report);
+        assert.equal(after.total, 1001);
+        assert.deepEqual(entriesOf(after), [
+          [1002, 'repeated-new', 995], [1997, 'new-0', 1], [1998, 'new-1', 1],
+          [1999, 'new-2', 1], [2000, 'new-3', 1],
+        ]);
+        assert.equal(after.more, 2);
+      } finally {
+        held.release();
+        await withinDeadlockTimeout(held.done);
+        await withinDeadlockTimeout(Promise.all(writes));
+      }
+    });
+
+    it('reports a late deadlock without the stack flag, then only new arrivals with exponential spacing', async () => {
+      const ds = await openDataSource();
+      const sendWrite = gate();
+      const breakDeadlock = gate();
+      const queued = gate();
+      let otherRequest;
+      let settled = false;
+      async function lateApiWrite() {
+        await ds.getRepository(Account).update({ name: 'late-row' }, { description: 'late' });
+      }
+      const holder = ds.transaction(async () => {
+        await sendWrite.wait;
+        otherRequest = inAnotherRequest(lateApiWrite);
+        queued.open();
+        await Promise.race([otherRequest, breakDeadlock.wait]);
+      }).finally(() => { settled = true; });
+      const later = [];
+      try {
+        await until(() => warningsFor(ds).length === 1, 'initial warning with no waiters');
+        assert.match(warningsFor(ds)[0], /0 waiting behind it/);
+        assert.match(warningsFor(ds)[0], /call site was not recorded/);
+        // Even arrivals long after the initial warning must be reported.
+        await sleep(WARN_MS * 2);
+        sendWrite.open();
+        await queued.wait;
+        await until(() => warningsFor(ds).length === 2, 'late deadlock report');
+        const report = warningsFor(ds)[1];
+        assert.match(report, /is still held.*1 waiting behind it; 1 queued since the previous warning/);
+        assert.match(report, /Queued since the previous warning \(1\)/);
+        assert.match(report, /1\. "UPDATE accounts"/);
+        assert.match(report, /at (async )?lateApiWrite \(/);
+        assert.equal(settled, false);
+        await sleep(WARN_MS * 2.5);
+        assert.equal(warningsFor(ds).length, 2, 'unchanged queue stays quiet');
+        later.push(afterSqljsTransactions(ds, async () => {}, 'second-batch'));
+        await until(() => warningsFor(ds).length === 3, 'next new batch');
+        assert.doesNotMatch(warningsFor(ds)[2], /UPDATE accounts|lateApiWrite/);
+        assert.match(warningsFor(ds)[2], /2\. "second-batch"/);
+        const lastReport = performance.now();
+        later.push(afterSqljsTransactions(ds, async () => {}, 'third-batch'));
+        await sleep(WARN_MS * 2);
+        assert.equal(warningsFor(ds).length, 3, 'next minimum interval doubled to four thresholds');
+        await until(() => warningsFor(ds).length === 4, 'third new batch');
+        assert.ok(performance.now() - lastReport >= WARN_MS * 3.5);
+        assert.match(warningsFor(ds)[3], /3\. "third-batch"/);
+        assert.doesNotMatch(warningsFor(ds)[3], /second-batch|lateApiWrite/);
+      } finally {
+        sendWrite.open();
+        breakDeadlock.open();
+        await withinDeadlockTimeout(holder);
+        await withinDeadlockTimeout(Promise.all([otherRequest, ...later]));
+      }
+      assert.match(warningsFor(ds).at(-1), /was released after/);
+      const next = holdTransaction(ds, 'reset');
+      await next.inside;
+      try {
+        const count = warningsFor(ds).length;
+        await until(() => warningsFor(ds).length > count, 'next holder initial warning');
+        const waiter = afterSqljsTransactions(ds, async () => {}, 'released-early');
+        next.release();
+        await withinDeadlockTimeout(Promise.all([next.done, waiter]));
+        const finalCount = warningsFor(ds).length;
+        await sleep(WARN_MS * 2);
+        assert.equal(warningsFor(ds).length, finalCount, 'no delayed report after release');
+      } finally {
+        next.release();
+        await withinDeadlockTimeout(next.done);
+      }
+    });
 
     it('a deadlock — the held callback waits for a write another request queued behind it — names that write and the function that called it', async () => {
       const ds = await openDataSource({ stacks: '1' });

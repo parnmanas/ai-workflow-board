@@ -369,3 +369,20 @@ Each row is one ticket-sized unit of work with its concrete starting point alrea
 | 10 | `graph_search_symbols` + ontology-node embeddings | 3, 6 | `scout-server.md` §5 | Deferred per §10a item 5; gated behind `embeddingService.isEnabled()`. |
 
 Documents this design carries forward: `research-extraction.md`, `research-ontology.md`, `research-storage.md`, `research-incremental.md`, `research-visualization.md`, `research-agent-consumption.md`, `research-prior-art.md`, `scout-client.md`, `scout-server.md` — all in `docs/ontology-graph/`. **This document's own v1.1 revision history and the adversarial review that drove it are recorded in `REVIEW-NOTES.md`, also in `docs/ontology-graph/`.**
+
+### Full-build concurrency
+
+`ONTOLOGY_BUILD_CONCURRENCY` limits initial builds and Refresh rebuilds per server
+process (default `1`; positive safe integer; invalid values fall back to `1`). It
+is read when the first build requests a slot; restart to apply a changed value.
+All accounts and lifecycle service instances share the same FIFO queue. Multiple
+server processes each have their own limit; this is not a distributed quota.
+
+A build acquires its slot before git/extraction and holds it through graph
+replacement, so parsed results waiting for a DB transaction also count toward the
+limit. Waiting graphs remain `building`, with live-build protection and PostgreSQL
+lease renewal. Queue time does not consume the two-hour execution budget. On
+admission the claim is checked again; superseded queued builds skip extraction.
+Failure releases the slot. Waiting does not hold a DB transaction. Each admitted
+build still uses its normal extraction worker count; incremental file extraction
+is outside this full-build limit.

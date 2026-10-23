@@ -34,6 +34,9 @@
 // SQLJS_ONTOLOGY_DB_PATH 임시 파일을 써서 공유 dev database/*.db는 절대
 // 건드리지 않는다.
 
+// Exercise concurrent builds so the DB transaction regression below remains meaningful.
+process.env.ONTOLOGY_BUILD_CONCURRENCY = '2';
+
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';

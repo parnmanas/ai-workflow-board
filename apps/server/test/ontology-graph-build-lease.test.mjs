@@ -27,6 +27,7 @@ import { bootApp, closeTestApp, exitAfterTests } from './helpers/boot.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', 'dist');
 const IS_POSTGRES = process.env.DB_TYPE === 'postgres';
+process.env.ONTOLOGY_BUILD_CONCURRENCY = '1';
 
 const ACCOUNT_ID = 'build-lease-account';
 const MINUTE = 60_000;
@@ -499,7 +500,12 @@ describe('heartbeat — 다른 서버가 보기에도 살아 있다', () => {
     const attempts = [];
     let started = 0;
     const realRenew = builder.renewBuildLease;
+    let admission = true;
     builder.renewBuildLease = async function (...args) {
+      if (admission) {
+        admission = false;
+        return realRenew.apply(this, args);
+      }
       attempts.push(Date.now() - started);
       // 교체 직전 연장은 이 테스트가 보지 않는다 — 주기 연장의 첫 번째만 실패시킨다.
       if (attempts.length === 1) throw new Error('DB 가 잠깐 못 받는다');
@@ -734,5 +740,92 @@ describe('해제 CAS — 읽은 행이 낡았어도 UPDATE 가 판정한다', ()
     }
     await run.build;
     assert.equal((await readGraph(graph)).status, 'ready');
+  });
+});
+
+describe('process-wide build admission', { timeout: 30_000 }, () => {
+  it('queues across service instances, protects queued leases, and holds the slot through persistence', async () => {
+    const extracting = gate();
+    const allowPersist = gate();
+    const persisting = gate();
+    const allowFinish = gate();
+    const first = await seedGraph(randomUUID(), liveBuild());
+    const second = await seedGraph(randomUUID(), liveBuild());
+    let secondExtracted = false;
+    const a = server({ extraction: {
+      extractRepo: async () => {
+        extracting.open();
+        await allowPersist.opened;
+        return extractionOf(first, 'first');
+      },
+      persistExtraction: async () => {
+        persisting.open();
+        await allowFinish.opened;
+        return persistSummaryOf(0);
+      },
+    } });
+    const b = server({ extraction: {
+      extractRepo: async () => { secondExtracted = true; return extractionOf(second, 'second'); },
+      persistExtraction: async () => persistSummaryOf(0),
+    }, timing: { maxBuildMs: 500, leaseMs: 2000, heartbeatMs: 10, renewPeriodically: true } });
+    const buildA = a.runInitialBuild(first);
+    let buildB;
+    try {
+      await reached(extracting.opened, buildA, 'extraction');
+      buildB = b.runInitialBuild(second);
+      await expireLease(second);
+      await sleep(650); // exceeds execution budget while waiting, but must remain live
+      assert.equal(secondExtracted, false);
+      const queued = await b.resolveOrProvision({ accountId: ACCOUNT_ID, graphId: second.id });
+      assert.equal(queued.status, 'building');
+      assert.ok(queued.build_lease_until_ms > Date.now(), 'queued heartbeat renews the lease');
+      assert.equal((await b.forceRebuild({ accountId: ACCOUNT_ID, graphId: second.id })).started, false);
+      allowPersist.open();
+      await reached(persisting.opened, buildA, 'persistence');
+      assert.equal(secondExtracted, false, 'parsed results retain their slot until persisted');
+    } finally {
+      allowPersist.open();
+      allowFinish.open();
+      await Promise.all([buildA, buildB]);
+    }
+    assert.equal((await readGraph(second)).status, 'ready');
+    assertNoLiveBuilds(a);
+    assertNoLiveBuilds(b);
+  });
+
+  it('releases a failed extraction slot and skips a queued build that lost its claim', async () => {
+    const extracting = gate();
+    const fail = gate();
+    const first = await seedGraph(randomUUID(), liveBuild());
+    const second = await seedGraph(randomUUID(), liveBuild());
+    const third = await seedGraph(randomUUID(), liveBuild());
+    const a = server({ extraction: { extractRepo: async () => {
+      extracting.open();
+      await fail.opened;
+      throw new Error('extraction failed');
+    } } });
+    const calls = [];
+    const b = server({ extraction: {
+      extractRepo: async ({ resourceId }) => { calls.push(resourceId); return extractionOf(third, 'third'); },
+      persistExtraction: async () => persistSummaryOf(0),
+    } });
+    const buildA = assert.rejects(a.runInitialBuild(first), /extraction failed/);
+    let buildB;
+    let buildC;
+    try {
+      await reached(extracting.opened, buildA, 'extraction');
+      buildB = b.runInitialBuild(second);
+      buildC = b.runInitialBuild(third);
+      await graphRepo.update({ id: second.id }, { build_id: 'new-owner', status: 'ready' });
+    } finally {
+      fail.open();
+      await Promise.all([buildA, buildB, buildC]);
+    }
+    assert.deepEqual(calls, [third.resource_id]);
+    assert.equal((await readGraph(first)).status, 'error');
+    assert.equal((await readGraph(second)).build_id, 'new-owner');
+    assert.equal((await readGraph(third)).status, 'ready');
+    assertNoLiveBuilds(a);
+    assertNoLiveBuilds(b);
   });
 });

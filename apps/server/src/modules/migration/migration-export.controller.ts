@@ -6,7 +6,7 @@ import { DataSource } from 'typeorm';
 import * as entitiesBarrel from '../../entities';
 import { MigrationExportGuard } from '../../common/guards/migration-export.guard';
 import { computeSchemaFingerprint, decryptRowForExport } from './migration-crypto';
-import { getAppVersion } from './migration-preflight';
+import { getAppVersion, checkSourceForeignKeys } from './migration-preflight';
 import { DeploymentService } from '../deployments/deployment.service';
 import { ActivityService } from '../../services/activity.service';
 import { SELF_DEPLOY_ENV_DEFAULT } from '../../common/deployment-options';
@@ -59,11 +59,14 @@ export class MigrationExportController {
       return res.status(503).json({ error: 'Export audit logging failed — refusing to return data without an audit trail' });
     }
 
+    const foreignKeyCheck = await checkSourceForeignKeys(this.dataSource);
+
     return res.json({
       app_version: getAppVersion(),
       commit_sha: selfDeploy?.deployed_commit_sha || '',
       schema_fingerprint: computeSchemaFingerprint(this.dataSource),
       tables,
+      foreign_key_check: foreignKeyCheck,
     });
   }
 

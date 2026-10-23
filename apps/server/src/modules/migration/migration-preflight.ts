@@ -2,8 +2,27 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DataSource } from 'typeorm';
 import { computeSchemaFingerprint } from './migration-crypto';
-import { MigrationSourceMeta } from './migration-client';
-import { MIGRATION_ENTITY_ORDER, MIGRATION_EXCLUDED_TABLE_PREFIX, MIGRATION_CONTROL_ENTITY_NAMES } from './migration-entity-registry';
+import { MigrationSourceMeta, MigrationForeignKeyViolation } from './migration-client';
+import { MIGRATION_ENTITY_ORDER, MIGRATION_EXCLUDED_TABLE_PREFIX, MIGRATION_CONTROL_ENTITY_NAMES, listMigratableEntityMetadata } from './migration-entity-registry';
+import { afterSqljsTransactions } from '../../db';
+
+/** Read-only diagnosis; never delete or silently skip source data. */
+export async function checkSourceForeignKeys(dataSource: DataSource): Promise<MigrationSourceMeta['foreign_key_check']> {
+  if (dataSource.options.type !== 'sqljs') return null;
+  const tables = new Set(listMigratableEntityMetadata(dataSource).map((t) => t.table));
+  try {
+    // Wait for pending writes so we do not report a transaction's temporary
+    // state. Aggregate in SQLite: the response stays bounded by table count.
+    // All migrated tables have rowids, including composite-PK prerequisites.
+    const violations: MigrationForeignKeyViolation[] = await afterSqljsTransactions(dataSource, () => dataSource.query(
+      'SELECT "table", COUNT(DISTINCT rowid) AS orphan_row_count, COUNT(*) AS violation_count ' +
+      'FROM pragma_foreign_key_check GROUP BY "table" ORDER BY "table"',
+    ), 'migration foreign_key_check');
+    return { tables: violations.filter((v) => tables.has(v.table)) };
+  } catch {
+    throw new Error('Source PRAGMA foreign_key_check failed — cannot verify foreign-key integrity; inspect the source database before retrying migration');
+  }
+}
 
 let _cachedVersion: string | null = null;
 
@@ -63,6 +82,14 @@ export interface PreflightComparison {
  */
 export function comparePreflight(source: MigrationSourceMeta, local: LocalPreflightMeta): PreflightComparison {
   const reasons: string[] = [];
+
+  const violations = source.foreign_key_check?.tables || [];
+  if (violations.length) {
+    reasons.push(
+      `Source PRAGMA foreign_key_check found orphan rows: ${violations.map((v) => `${v.table}: ${v.orphan_row_count} orphan row(s), ${v.violation_count} FK violation(s)`).join(', ')}. ` +
+      'Back up the source database, inspect PRAGMA foreign_key_check and PRAGMA foreign_key_list(table), then restore missing parents or remove confirmed orphan rows and retry. Migration does not delete or skip these rows.',
+    );
+  }
 
   if (source.schema_fingerprint !== local.schema_fingerprint) {
     reasons.push(

@@ -4,12 +4,16 @@ import { DataSource } from 'typeorm';
 import { buildDataSourceOptions, serializeSqljsTransactions } from '../db';
 import * as entitiesBarrel from '../entities';
 import { LogService } from '../services/log.service';
+import { InstantDataSource } from './instant-data-source';
 
 const entityList = Object.values(entitiesBarrel);
 
 @Module({
   imports: [
-    TypeOrmModule.forRoot(buildDataSourceOptions()),
+    TypeOrmModule.forRootAsync({
+      useFactory: () => buildDataSourceOptions(),
+      dataSourceFactory: async (options) => new InstantDataSource(options!),
+    }),
     TypeOrmModule.forFeature(entityList),
   ],
   exports: [TypeOrmModule],
