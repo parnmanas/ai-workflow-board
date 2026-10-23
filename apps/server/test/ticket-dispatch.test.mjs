@@ -29,6 +29,7 @@ const ds = app.get(gdst());
 const { AuthService } = await import('../dist/services/auth.service.js');
 const { TicketDispatchService, MAX_SUPERVISOR_REDISPATCHES } = await import('../dist/modules/agents/ticket-dispatch.service.js');
 const dispatcher = app.get(TicketDispatchService);
+const { Ticket } = await import('../dist/entities/Ticket.js');
 
 const ws = await createAccount(app, gdst, 'dispatch');
 const admin = await createUser(app, gdst, { name: 'admin', role: 'admin' });
@@ -399,5 +400,108 @@ test('suppressed replay rechecks state and ownership and rebuilds the current ch
   assert.equal((await response.json()).payload.ticket_id, id);
   await repo.update(id, { status: 'done' });
 });
+
+test('supervisor refreshes progress after waiting for an earlier runtime ack', { timeout: 15_000 }, async () => {
+  const repo = ds.getRepository(Ticket);
+  const fixtures = [];
+  for (const count of [0, 0, 1, MAX_SUPERVISOR_REDISPATCHES]) {
+    const ticket = await createTicket(app, gdst, {
+      accountId: ws.id, title: `supervisor race ${fixtures.length}`,
+      status: 'in_progress', assignee: agent.runtime_spec,
+    });
+    await repo.update(ticket.id, { supervisor_redispatches: count });
+    fixtures.push(ticket);
+  }
+  const [blocker, ...progressing] = fixtures;
+  const originalCommands = dispatcher.commands;
+  const originalFind = repo.find;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let entered;
+  const preparing = new Promise((resolve) => { entered = resolve; });
+  let pending;
+  const preparations = [];
+  try {
+    // SQL row order is unspecified; put the slow ticket first in the pass.
+    repo.find = async function (options) {
+      const rows = await originalFind.call(this, options);
+      return rows.sort((a, b) => Number(b.id === blocker.id) - Number(a.id === blocker.id));
+    };
+    dispatcher.commands = {
+      provisionSlotIdentity: async (spec, opts) => {
+        preparations.push(opts.label);
+        if (opts.label.startsWith(`ticket:${blocker.id.slice(0, 8)}/`)) {
+          entered();
+          await gate;
+        }
+        return { ok: true, reason: 'provisioned' };
+      },
+    };
+    pending = dispatcher.supervise();
+    await preparing;
+    for (const ticket of progressing) {
+      await afterDispatcherHandles(() => vagent.mcp.callTool('add_comment', {
+        ticket_id: ticket.id, content: 'progress while the earlier runtime is preparing',
+      }));
+      assert.equal((await repo.findOneBy({ id: ticket.id })).supervisor_redispatches, 0);
+    }
+    release();
+    await pending;
+    await vagent.waitForTrigger((t) => t.ticket_id === blocker.id && t.trigger_source === 'supervisor', 5000);
+    for (const ticket of progressing) {
+      const fresh = await repo.findOneBy({ id: ticket.id });
+      assert.equal(fresh.supervisor_redispatches, 0, 'progress reset survives the sweep');
+      assert.equal(fresh.pending_user_action, false, 'recent progress must not be parked');
+      assert.equal(fresh.last_dispatched_at, null, 'recent progress must not force a respawn');
+      assert.equal(preparations.some((label) => label.startsWith(`ticket:${ticket.id.slice(0, 8)}/`)), false);
+      assert.equal(await ds.getRepository('ActivityLog').countBy({
+        ticket_id: ticket.id, field_changed: 'pending_user_action', trigger_source: 'supervisor',
+      }), 0, 'no spurious park activity');
+    }
+  } finally {
+    release();
+    if (pending) await pending;
+    dispatcher.commands = originalCommands;
+    repo.find = originalFind;
+    for (const ticket of fixtures) await repo.update(ticket.id, { status: 'done' });
+  }
+});
+
+for (const count of [1, MAX_SUPERVISOR_REDISPATCHES]) {
+  test(`supervisor skips a conditional write when progress resets count ${count}`, { timeout: 15_000 }, async () => {
+    const repo = ds.getRepository(Ticket);
+    const ticket = await createTicket(app, gdst, {
+      accountId: ws.id, title: 'progress just before supervisor write',
+      status: 'in_progress', assignee: agent.runtime_spec,
+    });
+    await repo.update(ticket.id, { supervisor_redispatches: count });
+    const originalUpdate = repo.update;
+    let raced = false;
+    try {
+      repo.update = async function (criteria, patch) {
+        if (!raced && criteria.id === ticket.id &&
+            (patch.supervisor_redispatches === count + 1 || patch.pending_user_action === true)) {
+          raced = true;
+          await afterDispatcherHandles(() => vagent.mcp.callTool('add_comment', {
+            ticket_id: ticket.id, content: 'progress after the supervisor read',
+          }));
+        }
+        return originalUpdate.call(this, criteria, patch);
+      };
+      await dispatcher.supervise();
+      assert.equal(raced, true, 'progress arrived immediately before the supervisor write');
+      const fresh = await repo.findOneBy({ id: ticket.id });
+      assert.equal(fresh.supervisor_redispatches, 0);
+      assert.equal(fresh.pending_user_action, false);
+      assert.equal(fresh.last_dispatched_at, null);
+      assert.equal(await ds.getRepository('ActivityLog').countBy({
+        ticket_id: ticket.id, field_changed: 'pending_user_action', trigger_source: 'supervisor',
+      }), 0);
+    } finally {
+      repo.update = originalUpdate;
+      await repo.update(ticket.id, { status: 'done' });
+    }
+  });
+}
 
 exitAfterTests();

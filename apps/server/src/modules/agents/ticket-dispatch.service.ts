@@ -679,8 +679,15 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     });
     if (working.length === 0) return;
     const accounts = await this.accountsById([...new Set(working.map((t) => t.account_id).filter(Boolean))]);
-    const latestComment = await this.latestCommentAt(working.map((t) => t.id));
-    for (const ticket of working) {
+    for (const snapshot of working) {
+      // Earlier dispatches can spend seconds waiting for a runtime ack. Read
+      // progress and eligibility again when this ticket actually gets its turn.
+      const ticket = await repo.findOne({ where: {
+        id: snapshot.id, status: 'in_progress', archived_at: IsNull(),
+        parent_id: IsNull(), canonical_ticket_id: IsNull(), assignee_key: Not(''),
+        pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
+      } });
+      if (!ticket) continue;
       const account = accounts.get(ticket.account_id);
       if (!account || account.dispatch_paused_at) continue;
 
@@ -692,10 +699,11 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       }
       if (nack) continue;
 
+      const latestComment = await this.latestCommentAt(ticket.id);
       if (this.agentStatus.hasLiveRoleStrand(ticket.assignee_key, ticket.id, 'assignee')) continue;
       const lastSignal = Math.max(
         ticket.last_dispatched_at ? new Date(ticket.last_dispatched_at).getTime() : 0,
-        latestComment.get(ticket.id) ?? 0,
+        latestComment,
         this.agentStatus.getLatestOutputLivenessForTicket(ticket.id) ?? 0,
       );
       // First re-send after supervisor_stale_ms of silence; each further one
@@ -709,36 +717,39 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
         await this.parkStalled(ticket);
         continue;
       }
-      await repo.update({ id: ticket.id }, { supervisor_redispatches: ticket.supervisor_redispatches + 1 });
+      const claimed = await repo.update({ id: ticket.id, supervisor_redispatches: ticket.supervisor_redispatches }, {
+        supervisor_redispatches: ticket.supervisor_redispatches + 1,
+      });
+      if (!claimed.affected) continue;
       await this.dispatch(ticket, 'supervisor', { forceRespawn: true });
     }
   }
 
-  private async latestCommentAt(ticketIds: string[]): Promise<Map<string, number>> {
-    const out = new Map<string, number>();
-    if (ticketIds.length === 0) return out;
-    const rows = await this.dataSource.getRepository(Comment)
-      .createQueryBuilder('c')
-      .select('c.ticket_id', 'ticket_id')
-      .addSelect('MAX(c.created_at)', 'last')
-      .where('c.ticket_id IN (:...ids)', { ids: ticketIds })
-      .groupBy('c.ticket_id')
-      .getRawMany();
-    for (const row of rows) out.set(row.ticket_id, new Date(row.last).getTime());
-    return out;
+  private async latestCommentAt(ticketId: string): Promise<number> {
+    // Let TypeORM hydrate the timestamp: SQLite's raw UTC strings have no
+    // timezone suffix and Date would otherwise interpret them as local time.
+    const comment = await this.dataSource.getRepository(Comment).findOne({
+      where: { ticket_id: ticketId },
+      select: ['created_at'],
+      order: { created_at: 'DESC' },
+    });
+    return comment?.created_at.getTime() ?? 0;
   }
 
   /** The agent keeps stopping without finishing — hand the ticket to a human. */
   private async parkStalled(ticket: Ticket): Promise<void> {
     const reason = `The assignee stopped ${MAX_SUPERVISOR_REDISPATCHES} times without finishing or reporting progress. ` +
       'Check the Runtime Host and the agent log, then unpend to retry.';
-    await this.dataSource.getRepository(Ticket).update({ id: ticket.id }, {
+    const parked = await this.dataSource.getRepository(Ticket).update({
+      id: ticket.id, supervisor_redispatches: ticket.supervisor_redispatches,
+    }, {
       pending_user_action: true,
       pending_reason: reason,
       pending_set_at: new Date(),
       pending_set_by: 'AWB',
       supervisor_redispatches: 0,
     });
+    if (!parked.affected) return;
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
       action: 'updated', field_changed: 'pending_user_action', old_value: 'false', new_value: 'true',
