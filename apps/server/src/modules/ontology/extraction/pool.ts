@@ -20,11 +20,27 @@ export interface ExtractionPoolOptions {
   /** 진행 콜백 — 완료될 때마다 1회, 순서 보장 없음(어느 워커가 먼저
    *  끝내느냐에 따라 달라짐). */
   onProgress?: (completed: number, total: number) => void;
+  /** 파일 하나에 주는 시간(ms) — 기본 DEFAULT_TASK_TIMEOUT_MS. 넘기면 그 워커를
+   *  terminate 하고 새 워커로 바꾼 뒤, 그 파일은 에러로 기록하고 나머지를
+   *  계속한다(ticket 461d210a). */
+  taskTimeoutMs?: number;
   /** 테스트 전용 — 실제 worker.js 대신 다른 워커 스크립트를 스폰한다(예:
    *  비정상 종료를 흉내내는 픽스처). 프로덕션 호출부는 절대 설정하지
    *  않는다 — 생략하면 항상 resolveWorkerScriptPath()가 쓰인다. */
   workerScriptPath?: string;
 }
+
+/** 워커가 파일 하나를 붙잡을 수 있는 시간. 상한이 없던 동안 멈춘 워커 하나가
+ *  풀 전체를 끝나지 않게 해, 그 그래프가 building 에 영영 머물렀다(ticket
+ *  461d210a). 파싱은 큰 파일도 대개 1초 안이라 넉넉하게 잡는다 — 정말 오래
+ *  걸리는 저장소는 AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS 로 늘린다. */
+export const DEFAULT_TASK_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+})();
+
+// setTimeout 은 이보다 긴 지연을 1ms 로 바꾼다 — 그대로 두면 모든 파일이 곧바로 시간을 넘긴다.
+const MAX_TIMER_MS = 2_147_483_647;
 
 function resolveWorkerScriptPath(): string {
   // pool.ts 자신이 컴파일된 위치(dist/modules/ontology/extraction/pool.js)
@@ -45,7 +61,9 @@ interface WorkerSlot {
  *  진행한다 — 파일 하나의 결함이 771개 파일 전체 배치를 멈추게 두지 않는다.
  *  이 보장은 `error` 이벤트뿐 아니라(리뷰 지적 라운드 1) 메시지/에러 없이
  *  워커가 그냥 죽는 `exit`(예: OOM, 시그널로 강제 종료)까지 커버한다 — 그
- *  경우를 못 잡으면 그 태스크를 기다리던 Promise가 영구 대기했다. */
+ *  경우를 못 잡으면 그 태스크를 기다리던 Promise가 영구 대기했다. 죽지도
+ *  답하지도 않는 워커(무한 루프 · 멈춘 파서)는 파일별 시간 상한
+ *  (taskTimeoutMs)으로 같은 길을 탄다. */
 export async function runExtractionPool(
   tasks: ExtractionTask[],
   opts: ExtractionPoolOptions = {},
@@ -54,6 +72,7 @@ export async function runExtractionPool(
 
   const poolSize = Math.max(1, Math.min(opts.poolSize ?? os.availableParallelism(), tasks.length));
   const workerScript = opts.workerScriptPath ?? resolveWorkerScriptPath();
+  const taskTimeoutMs = Math.min(opts.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS, MAX_TIMER_MS);
   const results: ExtractionTaskResult[] = new Array(tasks.length);
   let nextIndex = 0;
   let completed = 0;
@@ -115,7 +134,25 @@ export async function runExtractionPool(
         replaceWorker(slot);
         finishIfDone();
       };
+      // 답도 에러도 exit 도 없이 붙잡고 있는 워커 — replaceWorker 가 terminate 한다.
+      // 늦게 오는 답은 cleanup 이 리스너를 떼어 버려진다.
+      const onTimeout = () => {
+        timer = null;
+        if (taskSettled || settled) return;
+        finalizeTask({
+          path: tasks[idx].path,
+          bundle: null,
+          decoratorFacts: [],
+          error: `extraction timed out after ${taskTimeoutMs}ms — the worker was stopped`,
+        });
+        replaceWorker(slot);
+        finishIfDone();
+      };
+      let timer: NodeJS.Timeout | null = setTimeout(onTimeout, taskTimeoutMs);
+      timer.unref();
       const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        timer = null;
         slot.worker.off('message', onMessage);
         slot.worker.off('error', onError);
         slot.worker.off('exit', onExit);
