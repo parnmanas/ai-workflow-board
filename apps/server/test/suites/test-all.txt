@@ -1,0 +1,5 @@
+# Run every phase even if an earlier phase fails. Numeric prefixes preserve execution order when sorted.
+# Build remains in npm pretest so a failed build prevents all phases.
+npm run test:suite:1-pretest
+npm run test:suite:2-test
+npm run test:suite:3-posttest

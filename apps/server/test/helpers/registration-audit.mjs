@@ -91,8 +91,10 @@ function testPathsRunBy(command) {
   return out;
 }
 
-// `npm run <name>` 은 pre<name> → <name> → post<name> 순으로 돈다. pre/post 자신에는
-// 다시 pre/post 가 붙지 않으므로 한 겹만 펼친다(`npm test` 는 prepretest 를 돌리지 않는다).
+// `npm run <name>` 은 pre<name> → <name> → post<name> 순으로 돈다.
+// 실패하면 뒤 lifecycle 은 생략된다. 여기는 성공 경로의 도달 가능성 모델이며,
+// 실패 뒤 실행 보장은 run-suite-lifecycle.test.mjs 가 실제 npm 으로 확인한다.
+// pre/post 자신에는 다시 pre/post 가 붙지 않으므로 한 겹만 펼친다(`npm test` 는 prepretest 를 돌리지 않는다).
 function lifecycleNames(name, scripts) {
   return [`pre${name}`, name, `post${name}`].filter((n) => hasScript(scripts, n));
 }

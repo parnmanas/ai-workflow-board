@@ -50,7 +50,6 @@ import {
   listSuiteNames,
   parseSuiteManifest,
   readSuiteSteps,
-  suiteFromScriptCommand,
   suiteManifestPath,
 } from './helpers/suite-manifest.mjs';
 import {
@@ -156,16 +155,13 @@ test('npm run 위임은 모두 실재하는 스크립트로 간다', () => {
   );
 });
 
-test('이 가드 파일 자신이 test 스위트에 등록돼 있다 (자기 커버리지)', () => {
-  const suite = suiteFromScriptCommand(readPackageScripts().test);
-  assert.ok(suite, 'package.json 의 "test" 스크립트가 --suite <name> 형태여야 한다');
-
+test('이 가드 파일 자신이 CI test 진입점에서 도달한다 (자기 커버리지)', () => {
   const selfRef = `test/${SELF_BASENAME}`;
-  assert.ok(
-    readSuiteSteps(suite).includes(selfRef),
-    `${selfRef} 는 test/suites/${suite}.txt 에 있어야 한다 — 없으면 이 가드가 자기 자신을 `
-      + '덮지 못한 채 조용히 안 돌 수 있다',
-  );
+  const { registered } = auditRegistration({
+    scripts: readPackageScripts(), manifests: readManifests(),
+    ciEntryScripts: ['test'], diskTestPaths: [selfRef],
+  });
+  assert.ok(registered.has(selfRef), `${selfRef} 는 npm test 에서 도달해야 한다`);
 });
 
 test('--suite 를 쓰는 스크립트는 모두 실재하는 매니페스트를 가리킨다', () => {

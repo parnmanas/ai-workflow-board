@@ -19,8 +19,9 @@
 // apps/server 에서 `npm run test:suites:sort` 를 돌려라 — 가드는 이 저장소의
 // 랜딩 방식상 main 에 들어간 뒤에야 도는데, 그때는 이미 main 이 빨갛다.
 //
-// 매니페스트 이름은 npm 스크립트 이름에서 `:` 를 `-` 로 바꾼 것이다
-// (`test:qa:pg` → `test-qa-pg.txt`). 다른 매핑 규칙은 없다.
+// 매니페스트 이름은 보통 npm 스크립트 이름에서 `:` 를 `-` 로 바꾼 것이다.
+// 실제 매핑은 스크립트의 --suite 인자가 정한다. test 는 test-all 을 열고,
+// 번호가 붙은 test:suite:* 위임이 기존 pretest/test/posttest 목록을 순서대로 연다.
 //
 // 새 매니페스트를 만들 때: 이 디렉터리에 파일을 두는 것만으로는 등록이 아니다.
 // CI 가 부르는 진입점(test · test:qa:pg)에서 `--suite` 로 도달하지 않는 목록은 CI 에서
