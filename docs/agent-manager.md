@@ -1044,3 +1044,38 @@ A paused Account also prevents replay. The response carries a freshly built
 trigger payload (including current child checklist and project work order), or
 a skip reason. Lookup failures skip replay; no stored work order is executed.
 The manager preserves the suppressed trigger's acknowledgement identity.
+
+### What restarts the supervisor count
+
+`supervisor_redispatches` counts supervisor re-sends since the assignee last
+made progress; once it reaches `MAX_SUPERVISOR_REDISPATCHES`, the next due
+re-send parks the ticket for a human instead. The agent's own writes restart
+it: a comment it authors, or a change it makes to the ticket. Two kinds of
+comment do not:
+
+- the silent-exit warning (`author_type: 'system'`), which reports that the
+  agent stopped without a trace;
+- manager auto-notices — `add_comment` with `metadata.auto_notice: true` from
+  the Runtime Host's own session (duplicate dispatch suppressed, safety-valve
+  release, preflight blocked, session-limit defer, …). They are stored as agent
+  comments under the Host, but `comment-tools.ts` stamps their activity row
+  actor `system` once it has verified the caller, and
+  `TicketDispatchService.onComment` does not restart the count for that actor.
+  Any other agent's `auto_notice` is ignored, so its comment still counts as
+  progress.
+
+A dispatch the manager keeps holding while the agent gets nowhere (a spawn hung
+in provisioning, re-sends answered only by notices) therefore parks after the
+third re-send instead of being re-sent every `supervisor_stale_ms` forever.
+
+A live one-shot is parked the same way when it holds the seat but has produced
+no parsed output for `supervisor_stale_ms`. The server cannot see it:
+`hasLiveRoleStrand` needs output or a `current_task` within 15 minutes, and
+one-shots never send `set_current_task`. It parks after stale + 3 × resend
+(45 minutes with the defaults). Before this rule, the first suppression notice
+of a hold, when it landed as a new comment, restarted the count once and bought
+another `supervisor_stale_ms`.
+
+An agent that expects to wait that long (a background review, a long tool call)
+should comment on the ticket first. A CI wait should be registered with
+`await_ci_run`, since a pending ticket is never supervised.

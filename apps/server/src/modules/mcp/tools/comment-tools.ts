@@ -366,9 +366,9 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if (deduped) {
         // action:'updated' + actor_id:'system' — resolvedAuthorId/'created' 가
         // 아니다. silent-exit 선례의 131,068-사이클 런어웨이 인시던트
-        // (2026-05-28) 가 못박은 바로 그 규칙이다: trigger-loop 의
-        // system-actor 가드는 이 조합에서만 재디스패치를 건너뛰므로, bump 된
-        // 합치기 row 는 원인 agent 를 절대 스스로 재트리거할 수 없다.
+        // (2026-05-28) 가 못박은 바로 그 규칙이다. bump 는 새 코멘트가 아니라서
+        // TicketDispatchService 는 이 row 를 지나친다('created' 만 본다) — 누구도
+        // 깨우지 않고 supervisor 카운트도 건드리지 않는다.
         await activityService.logActivity({
           entity_type: 'comment', entity_id: comment.id, action: 'updated',
           ticket_id, actor_id: 'system', actor_name: authorName,
@@ -383,14 +383,17 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       //
       // ticket 3c8b8026: metadata.auto_notice===true(system/manager 자동 알림,
       // 예: dispatch 억제 공지)은 이 첫 insert 에서도 위 deduped 분기와 동일하게
-      // actor_id='system' 으로 남긴다 — trigger-loop.service.ts의 system-actor
-      // 가드가 이 값 하나만으로 재트리거를 건너뛰므로, 접히지 않은(=새 row 로
-      // 들어가는) 알림도 스스로를 재트리거할 수 없다. 코멘트 자체의
+      // actor_id='system' 으로 남긴다. 이 값을 읽는 곳은
+      // TicketDispatchService.onComment 다 — 에이전트 코멘트는 supervisor 의
+      // 재전송 카운트(supervisor_redispatches)를 되돌리지만, 이 알림은 dispatch
+      // 에 대한 보고이지 작업 진전이 아니라서 되돌리지 않는다(ticket 193a7392).
+      // (예전에 이 값으로 재트리거를 막던 trigger-loop 는 없어졌다 — 지금
+      // 코멘트로 티켓을 다시 보내는 것은 사람 코멘트뿐이다.) 코멘트 자체의
       // author/author_id는 실제 호출자(예: Manager 에이전트) 그대로 저장되어
-      // 화면 귀속은 바뀌지 않는다 — 이 스탬프는 activity-log 의 트리거 판단에만
-      // 영향을 준다. 리뷰 라운드1 지적1: 값 자체가 아니라 발신자를 검증한다
-      // (인증 세션의 manager 신원과 저장 author 일치) — 임의 agent 의 요청값
-      // 위조로는 이 경로를 탈 수 없다.
+      // 화면 귀속은 바뀌지 않는다 — 이 스탬프는 activity-log 에만 남는다.
+      // 리뷰 라운드1 지적1: 값 자체가 아니라 발신자를 검증한다(인증 세션의
+      // manager 신원과 저장 author 일치) — 임의 agent 의 요청값 위조로는 이
+      // 경로를 탈 수 없다.
       const isAutoNotice = finalMetadata.auto_notice === true
         && await isAuthenticatedManagerAutoNotice(caller, resolvedAuthorType, resolvedAuthorId);
       await activityService.logActivity({
