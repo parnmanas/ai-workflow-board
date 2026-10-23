@@ -452,10 +452,12 @@ test('owner.json 을 못 읽는 가드는 기존 규칙(상한 60s)을 그대로
   assert.equal(expired.reason, 'guard_expired');
 });
 
-test('가드 디렉터리가 이미 사라졌으면 곧바로 재시도한다', () => {
+// 사라진 가드는 회수(rename) 대상이 아니다. rename 은 판정한 가드가 아니라 그 순간 그
+// 경로에 있는 것을 옮겨, 판정과 rename 사이에 남이 새로 만든 가드를 지운다(티켓
+// b14c5669 — 가드 holder 둘). 다시 만들면 된다.
+test('가드 디렉터리가 이미 사라졌으면 회수하지 않는다 — 다시 만들면 된다', () => {
   const verdict = judgeRecoveryGuard(guardFacts({ guardMtimeMs: null }));
-  assert.equal(verdict.reclaim, true);
-  assert.equal(verdict.reason, 'guard_gone');
+  assert.equal(verdict.reclaim, false);
 });
 
 async function writeRecoveryGuard(home, owner, mtime) {

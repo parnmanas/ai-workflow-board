@@ -447,7 +447,7 @@ export interface RecoveryGuardFacts {
 }
 
 export type RecoveryGuardVerdict =
-  | { reclaim: true; reason: 'guard_gone' | 'owner_stale' | 'guard_predates_boot' | 'guard_expired'; detail: string }
+  | { reclaim: true; reason: 'owner_stale' | 'guard_predates_boot' | 'guard_expired'; detail: string }
   | { reclaim: false; detail: string };
 
 /** 가드 디렉터리 자체가 이번 부팅보다 확실히 이른가. boot 필드가 없는 구버전
@@ -509,7 +509,13 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
 
   // owner.json 을 못 읽는다 — 디렉터리 자체로만 판정한다.
   if (facts.guardMtimeMs === null) {
-    return { reclaim: true, reason: 'guard_gone', detail: '가드 디렉터리가 이미 사라짐' };
+    // 이미 사라진 가드는 회수할 것이 없다 — 한 박자 쉬고 다시 만들면 된다. 회수(rename)로
+    // 답하면 안 된다. rename 은 판정한 가드가 아니라 **그 순간 그 경로에 있는 것**을
+    // 옮기므로, 판정과 rename 사이에 남이 새로 만든 가드를 격리해 지우고 그 남과 함께
+    // 가드를 쥐게 된다(Windows CI 실측, 티켓 b14c5669 — 동시 force contender 둘 다
+    // ACQUIRED). Windows 는 지워지는 중인 디렉터리의 stat 도 실패로 돌려줘, 가드를 놓는
+    // 순간마다 이 판정이 나온다.
+    return { reclaim: false, detail: '가드 디렉터리가 이미 사라짐 — 회수 없이 다시 만든다' };
   }
   if (guardPredatesBoot(facts)) {
     return {
@@ -868,10 +874,8 @@ export interface RecoveryGuardOps {
  *  - EEXIST: 남이 쥐고 있다. stale 이면 회수하고 바로, 아니면 한 박자 쉬고 다시.
  *  - 삭제 대기 errno(EPERM·EACCES·EBUSY): 남이 가드를 **막 놓는 중**이다 — Windows
  *    는 지워지는 중인 경로의 mkdir 을 EEXIST 가 아니라 이 코드로 거절한다. 가드는
- *    아직 남의 것이니 EEXIST 와 같이 기다린다. 다만 회수는 시도하지 않는다. 지워지는
- *    중인 경로에는 회수할 것이 없고, 진짜 권한 오류라면 경로가 아예 없어 판정이
- *    "이미 사라짐" 으로 떨어진다 — rename 이 ENOENT 를 받아 쉬지 않고 다시 도는
- *    바쁜 루프가 된다.
+ *    아직 남의 것이니 EEXIST 와 같이 기다린다. 다만 회수 판정은 하지 않는다 — 지워지는
+ *    중인 경로에는 회수할 것이 없다.
  *  - 삭제 대기 errno 가 `transientLimit` 번 **연달아** 나면 원본 오류를 그대로 올린다.
  *    삭제 대기였다면 그 안에 끝나 EEXIST 나 성공이 섞였어야 한다 — 진짜 권한 오류를
  *    무한 대기나 합성 코드로 가리지 않는다.
@@ -982,9 +986,7 @@ function createRecoveryGuard(): void {
 function reclaimStaleRecoveryLock(): boolean {
   const verdict = judgeRecoveryGuard(probeRecoveryGuard());
   if (!verdict.reclaim) return false;
-  if (verdict.reason !== 'guard_gone') {
-    log(`[lockfile] reclaiming stale recovery guard — ${verdict.reason}: ${verdict.detail}`);
-  }
+  log(`[lockfile] reclaiming stale recovery guard — ${verdict.reason}: ${verdict.detail}`);
 
   const quarantine = `${RECOVERY_LOCK_PATH}.stale-${process.pid}-${Date.now()}`;
   try {
