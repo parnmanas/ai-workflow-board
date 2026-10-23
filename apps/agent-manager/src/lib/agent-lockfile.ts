@@ -858,8 +858,7 @@ export function resolveLostCreateRace(
  *  삭제 대기를 재현하지 않고도 대기 규칙을 결정적으로 검증할 수 있다
  *  (`resolveLostCreateRace` 와 같은 주입 스타일). */
 export interface RecoveryGuardOps {
-  /** 가드를 만든다(디렉터리 + owner). 이미 있으면 EEXIST 를 던지고, 실패하면 아무것도
-   *  남기지 않는다. */
+  /** 가드 디렉터리를 만든다. 이미 있으면 EEXIST 를 던진다. */
   create(): void;
   /** 남이 쥔 가드가 회수 대상이면 치우고 true. */
   reclaimStale(): boolean;
@@ -914,7 +913,7 @@ export async function waitForRecoveryGuard(
 async function acquireRecoveryLock(): Promise<() => void> {
   try {
     await waitForRecoveryGuard({
-      create: createRecoveryGuard,
+      create: () => mkdirSync(RECOVERY_LOCK_PATH),
       reclaimStale: reclaimStaleRecoveryLock,
       pause: () => delay(25),
       onTransient: (err, streak) => {
@@ -938,6 +937,7 @@ async function acquireRecoveryLock(): Promise<() => void> {
     }
     throw err;
   }
+  recordRecoveryGuardOwner();
   return () => {
     try {
       rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
@@ -949,11 +949,19 @@ async function acquireRecoveryLock(): Promise<() => void> {
   };
 }
 
-/** 가드 디렉터리를 만들고 owner 를 적는다. owner 를 못 적으면 만든 디렉터리를 치우고
- *  같은 오류를 던진다 — 그 오류도 waitForRecoveryGuard 가 mkdir 의 것과 같은 규칙으로
- *  가른다. owner 없는 가드를 남기면 모든 대기자가 상한(60초)까지 멈춘다. */
-function createRecoveryGuard(): void {
-  mkdirSync(RECOVERY_LOCK_PATH);
+/** 방금 만든 가드에 owner 를 적는다. 못 적으면 가드를 치우고 원본 오류로 끝낸다.
+ *
+ *  다시 시도하지 않는다. 우리가 방금 만든 디렉터리에 쓰기가 실패하는 것은 경합이 아니라
+ *  환경 문제다(umask · ACL · 백신 · 디스크) — 정상적인 경합에서는 다른 참여자가 그
+ *  디렉터리를 만들지도 지우지도 못한다. 다시 시도하면 실패할 때마다 잠깐 생겼다 사라지는
+ *  우리 디렉터리가 다른 대기자의 mkdir 에 EEXIST 를 주어 그들의 연속 횟수를 되돌린다.
+ *  그러면 같은 문제를 가진 참여자끼리 서로를 끝없이 붙잡는다(리뷰 B1 — 대기 상한이
+ *  영영 오지 않는다).
+ *
+ *  치우기는 한다. owner 없는 가드를 남기면 모든 대기자가 그 가드의 상한(60초)까지
+ *  멈춘다. 다만 ENOENT 는 그 디렉터리가 이미 우리 것이 아니라는 뜻이다(남이 회수해
+ *  옮겼다). 그 자리에 새로 생긴 남의 가드를 지우지 않도록 건드리지 않는다. */
+function recordRecoveryGuardOwner(): void {
   try {
     // 주 lock 과 같은 페이로드를 적는다 — 부팅 세대가 없으면 이 가드가 다음
     // 부팅에서 회수 불가능한 유령이 된다.
@@ -970,8 +978,6 @@ function createRecoveryGuard(): void {
       }),
     );
   } catch (err: any) {
-    // ENOENT 면 그 디렉터리는 이미 우리 것이 아니다(남이 회수해 옮겼다). 그 자리에
-    // 새로 생긴 남의 가드를 지우지 않도록 건드리지 않는다.
     if (err?.code !== 'ENOENT') {
       try {
         rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
@@ -979,6 +985,7 @@ function createRecoveryGuard(): void {
         /* 못 치우면 owner 없는 가드로 남고, 대기자가 상한 뒤 회수한다 */
       }
     }
+    log(`[lockfile] could not record the recovery guard owner (${err?.code ?? err}); giving up`);
     throw err;
   }
 }

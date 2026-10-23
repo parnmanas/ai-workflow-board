@@ -22,6 +22,12 @@ const lockModuleUrl = pathToFileURL(
   join(fileURLToPath(new URL('.', import.meta.url)), '../dist/lib/agent-lockfile.js'),
 ).href;
 
+/** 결과 경쟁(Promise.race)에 쓰는 대기. unref 해 두어, 상대가 먼저 끝나면 남은 타이머가
+ *  테스트 프로세스를 붙잡지 않는다. */
+function sleep(ms, value) {
+  return new Promise((resolve) => setTimeout(resolve, ms, value).unref());
+}
+
 function alive(pid) {
   try {
     process.kill(pid, 0);
@@ -774,8 +780,9 @@ test('stale lock 회수 중 가드 mkdir 권한 오류가 계속되면 회수를
  *  머리말. `syncBuiltinESMExports` 가 lock 모듈의 named import 까지 바꾼다 — Windows 의
  *  삭제 대기나 지워지지 않는 잔해를 이 호스트에서 만들지 않고 결정적으로 흉내 낸다.
  *  걸릴 때마다 stderr 에 `SIMULATED_FAULT` 를 남겨, 흉내가 실제로 걸렸는지 단언한다.
- *  `matches` 는 `(path, rest) => boolean` 함수의 소스다. */
-function faultPrologue({ fn, matches, code, times = 1 }) {
+ *  `matches` 는 `(path, rest) => boolean` 함수의 소스다. `delayMs` 는 실패하기 전에
+ *  동기로 머무는 시간이다 — 느린 디스크처럼 실패 창을 넓힌다. */
+function faultPrologue({ fn, matches, code, times = 1, delayMs = 0 }) {
   return `
     import fs from 'node:fs';
     import { syncBuiltinESMExports } from 'node:module';
@@ -785,6 +792,7 @@ function faultPrologue({ fn, matches, code, times = 1 }) {
     fs[${JSON.stringify(fn)}] = function (path, ...rest) {
       if (faults < ${times} && matches(String(path), rest)) {
         faults += 1;
+        if (${delayMs} > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delayMs});
         process.stderr.write('SIMULATED_FAULT\\n');
         throw Object.assign(new Error(${JSON.stringify(`${code}: simulated, ${fn}`)} + " '" + path + "'"), {
           code: ${JSON.stringify(code)}, syscall: ${JSON.stringify(fn)}, path,
@@ -890,7 +898,7 @@ test('stale 회수는 가드를 쥔 채 lock 을 지우고 다시 만든다 — 
   await first.awaitStderr('FIRST_RECLAIMER_HELD');
   const second = spawnBarrieredContender(body, env);
   await second.awaitStderr('waiting for recovery guard before stale-cleanup');
-  await Promise.race([second.done, new Promise((resolve) => setTimeout(resolve, 1_500))]);
+  await Promise.race([second.done, sleep(1_500)]);
   await fsp.writeFile(resumeFirst, '');
   const [held, late] = await Promise.all([first.done, second.done]);
   const diagnostics = JSON.stringify({ held, late }, null, 2);
@@ -959,7 +967,7 @@ test('가드가 막 사라졌다는 판정 뒤 그 자리에 새로 생긴 남�
   await waiter.awaitStderr('PEER_GUARD_CREATED');
   // 옮겼다면 대기자는 곧바로 자기 가드를 만들어 끝까지 간다. 그럴 시간을 준다 — 이
   // 대기는 느린 러너에서 버그를 놓칠 수만 있고 올바른 코드를 빨갛게 만들지는 않는다.
-  await Promise.race([waiter.done, new Promise((resolve) => setTimeout(resolve, 1_500))]);
+  await Promise.race([waiter.done, sleep(1_500)]);
   const peerGuardBeforeRelease = await fsp.readFile(peerOwnerPath, 'utf8').catch(() => null);
   // 남이 할 일을 마치고 가드를 놓는다 — 이제 대기자가 들어갈 수 있다.
   await fsp.rm(recoveryLock, { recursive: true, force: true });
@@ -1007,17 +1015,13 @@ for (const force of [false, true]) {
   });
 }
 
-// 가드 디렉터리는 만들었는데 owner 를 못 적으면, 만든 디렉터리를 치우고 그 오류를 mkdir
-// 의 것과 같은 규칙으로 가른다. owner 없는 가드를 남기면 자기 자신을 포함한 모든 대기자가
-// 그 가드의 상한(60초)까지 멈춘다 — main 에서는 그렇게 60초 뒤에야 취득했다.
-//   - 삭제 대기 errno(EPERM): 기다렸다 다시 만들어 곧바로 취득한다.
-//   - 그 밖의 오류(ENOSPC): 기다리지 않고 원본 오류로 끝난다. 디렉터리는 역시 치운다 —
-//     다음 기동이 owner 없는 가드에 60초 멈추지 않게.
-for (const fault of [
-  { code: 'EPERM', transient: true },
-  { code: 'ENOSPC', transient: false },
-]) {
-  test(`회수 가드 owner 기록 실패(${fault.code}): 가드를 치우고 ${fault.transient ? '다시 만들어 곧바로 취득한다' : '기다리지 않고 원본 오류로 끝난다'}`, { timeout: 90_000 }, async () => {
+// 가드 디렉터리는 만들었는데 owner 를 못 적으면, 만든 디렉터리를 치우고 원본 오류로 바로
+// 끝난다. 그 디렉터리는 우리가 방금 만든 것이라 정상적인 경합으로는 쓰기가 실패하지 않는다
+// — 실패는 환경 문제(umask · ACL · 백신 · 디스크)다. 그래서 삭제 대기처럼 기다리지 않는다
+// (EPERM 이어도). owner 없는 가드를 남기면 자기 자신을 포함한 모든 대기자가 그 가드의
+// 상한(60초)까지 멈추므로 치우기는 한다 — main 에서는 그렇게 60초 뒤에야 취득했다.
+for (const code of ['EPERM', 'ENOSPC']) {
+  test(`회수 가드 owner 기록 실패(${code}): 가드를 치우고 기다리지 않고 원본 오류로 끝난다`, { timeout: 90_000 }, async () => {
     const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-owner-write-'));
     tempDirs.push(home);
     const lockPath = join(home, 'agent.lock');
@@ -1028,7 +1032,7 @@ for (const fault of [
       faultPrologue({
         fn: 'writeFileSync',
         matches: `(path) => path === ${JSON.stringify(join(recoveryLock, 'owner.json'))}`,
-        code: fault.code,
+        code,
       }) + ACQUIRE_ONCE(false),
       { ...process.env, AWB_AGENT_MANAGER_HOME: home },
     );
@@ -1037,20 +1041,46 @@ for (const fault of [
     const diagnostics = JSON.stringify({ elapsedMs, ...result }, null, 2);
     assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), 1, `흉내가 걸려야 한다: ${diagnostics}`);
     assert.equal(result.code, 0, diagnostics);
+    assert.match(result.output, new RegExp(`REJECTED:${code}`), `원본 errno 가 보존돼야 한다: ${diagnostics}`);
+    assert.doesNotMatch(result.stderr, /recovery guard \S+ hit \S+; waiting/, `owner 기록 실패를 기다리면 안 된다: ${diagnostics}`);
     assert.ok(elapsedMs < 20_000, `owner 없는 가드에 막혀 그 상한까지 기다리면 안 된다: ${diagnostics}`);
     await assert.rejects(fsp.access(recoveryLock), `가드가 남으면 안 된다: ${diagnostics}`);
-    const waited = new RegExp(`recovery guard \\S+ hit ${fault.code}; waiting`);
-    if (fault.transient) {
-      assert.match(result.output, /ACQUIRED/, diagnostics);
-      // 오류를 삼키지 않고 삭제 대기와 같은 규칙으로 기다렸다 다시 만들었다 — 삼키면
-      // owner 도 디렉터리도 없는 "가드" 를 쥔 채 회수를 돌게 된다.
-      assert.match(result.stderr, waited, diagnostics);
-    } else {
-      assert.match(result.output, new RegExp(`REJECTED:${fault.code}`), `원본 errno 가 보존돼야 한다: ${diagnostics}`);
-      assert.doesNotMatch(result.stderr, waited, `영구 오류를 기다리면 안 된다: ${diagnostics}`);
-    }
   });
 }
+
+// owner 기록이 계속 실패하는 참여자가 여럿이면, 기다렸다 다시 시도하는 설계는 끝나지
+// 않는다(리뷰 B1). 실패할 때마다 잠깐 생겼다 사라지는 서로의 가드 디렉터리가 상대의 mkdir
+// 에 EEXIST 를 주어 연속 횟수를 되돌리기 때문이다. 다섯이 동시에 출발해도 모두 정해진
+// 시간 안에 원본 오류로 끝나고 가드를 남기지 않아야 한다. 실패를 3ms 끌어 그 창을 넓힌다.
+test('owner 기록이 계속 실패하는 참여자 다섯은 서로를 붙잡지 않고 모두 원본 오류로 끝난다', { timeout: 90_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-owner-livelock-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const recoveryLock = `${lockPath}.recovery`;
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  const source =
+    faultPrologue({
+      fn: 'writeFileSync',
+      matches: `(path) => path === ${JSON.stringify(join(recoveryLock, 'owner.json'))}`,
+      code: 'EPERM',
+      times: 'Infinity',
+      delayMs: 3,
+    }) +
+    BARRIER_PROLOGUE +
+    ACQUIRE_ONCE(false);
+  const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+  const contenders = Array.from({ length: 5 }, () => spawnBarrieredContender(source, env));
+  await Promise.all(contenders.map((c) => c.ready));
+  for (const c of contenders) c.child.stdin.write('go\n');
+  const STILL_WAITING = { output: 'STILL_WAITING', stderr: '' };
+  const results = await Promise.all(
+    contenders.map((c) => Promise.race([c.done, sleep(20_000, STILL_WAITING)])),
+  );
+  const leftovers = (await fsp.readdir(home)).filter((name) => name.startsWith('agent.lock.recovery'));
+  const diagnostics = JSON.stringify({ outputs: results.map((r) => r.output), leftovers }, null, 2);
+  for (const result of results) assert.match(result.output, /REJECTED:EPERM/, diagnostics);
+  assert.deepEqual(leftovers, [], diagnostics);
+});
 
 // 같은 자리에서 ENOENT 는 다르다. 우리가 만든 디렉터리를 남이 이미 회수해 옮겼다는
 // 뜻이라, 그 자리에 지금 있는 것은 남의 새 가드일 수 있다 — 치우면 남의 가드를 지운다.
