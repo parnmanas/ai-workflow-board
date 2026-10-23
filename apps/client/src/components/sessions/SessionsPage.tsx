@@ -15,6 +15,7 @@ import type {
   AgentSessionLiveSnapshot,
   AgentSessionSummary,
   AgentSessionUpdateEvent,
+  VoiceOperator,
 } from '../../types';
 import { ActivityPill, Button, EmptyState, ErrorState } from '../common';
 import PageHeader from '../PageHeader';
@@ -206,8 +207,8 @@ function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
 
 // ─── 호스트 세션 목록 — cwd 기준 그룹 ─────────────────────────────────────
 
-function CwdGroupCard({ group, accountId, managerId, onNew }: {
-  group: CwdGroup; accountId: string; managerId: string; onNew: (cwd: string) => void;
+function CwdGroupCard({ group, accountId, managerId, operators, onNew }: {
+  group: CwdGroup; accountId: string; managerId: string; operators: readonly VoiceOperator[]; onNew: (cwd: string) => void;
 }) {
   const navigate = useNavigate();
   const [showOlder, setShowOlder] = useState(false);
@@ -257,7 +258,7 @@ function CwdGroupCard({ group, accountId, managerId, onNew }: {
         >
           <CliBadge cli={s.cli} />
           <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {sessionDisplayTitle(s)}
+            {operatorForSession(operators, managerId, s.cli, s.session_id)?.name ?? sessionDisplayTitle(s)}
           </span>
           {s.source === 'awb' && (
             <span style={{ fontSize: 10, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: 999, padding: '0 6px', whiteSpace: 'nowrap' }}>AWB</span>
@@ -289,6 +290,8 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
   accountId: string; managerId: string; host: AgentSessionHost | null; onNew: () => void; onNewWithCwd: (cwd: string) => void;
 }) {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
+  const operators = useVoiceOperators(hasPermission('voice.use'));
   const [sessionsByCli, setSessionsByCli] = useState<Record<string, AgentSessionSummary[]>>({});
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState<string[]>([]);
@@ -386,7 +389,7 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 960 }}>
             {groups.map((group) => (
-              <CwdGroupCard key={group.cwd} group={group} accountId={accountId} managerId={managerId} onNew={onNewWithCwd} />
+              <CwdGroupCard key={group.cwd} group={group} accountId={accountId} managerId={managerId} operators={operators} onNew={onNewWithCwd} />
             ))}
           </div>
         )}
@@ -438,7 +441,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   // 여기를 열고, "헤이 <이름>" 으로 부르면 여기서 깨어난다(docs/voice-operator.md "음성 지원 · 잠들기").
   const { hasPermission } = useAuth();
   const canManageOperators = !!voiceConfig && hasPermission('admin.access');
-  const operators = useVoiceOperators(!!voiceConfig);
+  const operators = useVoiceOperators(hasPermission('voice.use'));
   const thisOperator = operatorForSession(operators, managerId, cli, sessionId);
   // operator 의 작업 제안 — 이 세션에 시키자는 것과, 이 세션이 operator 면 그 operator 가 낸 것.
   const allProposals = useSessionProposals();
@@ -893,7 +896,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
         ? `Last error: ${live.last_error}`
         : null;
 
-  const displayTitle = sessionDisplayTitle({ title, cli, session_id: sessionId });
+  const displayTitle = thisOperator?.name ?? sessionDisplayTitle({ title, cli, session_id: sessionId });
   const hostName = host?.name || live?.manager_name || managerId.slice(0, 8);
   const { primary: headerOptions, secondary: menuOptions } = splitHeaderConfigOptions(configOptions);
   // 여는 중(starting)에만 잠근다. 턴 중이나 승인 대기 중에도 어댑터는 변경을 받아들이고,

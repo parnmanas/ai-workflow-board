@@ -32,7 +32,7 @@ import { useMarketingInbox } from '../hooks/useMarketingInbox';
 import { useRoomActivity } from '../hooks/useRoomActivity';
 import { sessionActivity } from '../activity';
 import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
-import { useVoiceOperators } from '../voice/operator';
+import { operatorForSession, useVoiceOperators } from '../voice/operator';
 import { useWakeState } from '../voice/wakeState';
 import WakeToggle from '../voice/WakeToggle';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
@@ -1028,6 +1028,7 @@ export default function Sidebar({
                                           {displayed.map((s) => {
                                             const sPath = sessionPath(``, host.manager_id, s.cli, s.session_id);
                                             const sActive = location.pathname === sPath;
+                                            const displayTitle = operatorForSession(operators, host.manager_id, s.cli, s.session_id)?.name ?? sessionDisplayTitle(s);
                                             // 세션 목록·세션 헤더와 **같은** 어휘. 예전엔 여기에만
                                             // 따로 색 표가 있어 같은 'busy' 세션이 사이드바에선
                                             // 노란 점, 세션 화면에선 파란 pill 로 보였다.
@@ -1038,7 +1039,7 @@ export default function Sidebar({
                                                 type="button"
                                                 onClick={() => handleNavClick(sPath)}
                                                 aria-current={sActive ? 'page' : undefined}
-                                                title={sessionDisplayTitle(s)}
+                                                title={displayTitle}
                                                 style={{
                                                   width: '100%', textAlign: 'left', border: 'none',
                                                   borderLeft: `3px solid ${sActive ? tokens.colors.accent : 'transparent'}`,
@@ -1055,7 +1056,7 @@ export default function Sidebar({
                                                   {runtimeLabel(s.cli).slice(0, 2).toUpperCase()}
                                                 </span>
                                                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                  {sessionDisplayTitle(s)}
+                                                  {displayTitle}
                                                 </span>
                                                 <ActivityDot view={activity} size={6} />
                                               </button>
