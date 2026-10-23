@@ -226,9 +226,10 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 //     쌓인 무관한 쓰기는 늘 그 쓰기보다 앞이라, 나누지 않으면 바쁜 dev 서버에서 그것들이 목록을 채운다. 그 쓰기는 콜백이 그
 //     체인을 부르거나 기다리는 체인이 나중에 보내면 뒤 무리에, 쥔 차례가 줄 서 있던 동안 보냈으면(콜백이 그 체인이 쥔 앱
 //     수준 잠금을 기다린다) 앞 무리에 있다.
-//   - 무리마다 이름과 위치가 같은 차례는 한 항목으로 묶어 수를 단다(위치를 기록하지 않았으면 이름이 같은 차례끼리) — 주기
-//     작업 · 묶음 쓰기가 되풀이되며 목록을 채우지 않게. 그 사이에 다른 쓰기가 끼어 있어도 묶는다. 항목의 자리와 기다린 시간은
-//     그중 첫 차례의 것이다.
+//   - 무리마다 이름과 위치가 같은 차례는 한 항목으로 묶어 수를 단다 — 주기 작업 · 묶음 쓰기가 되풀이되며 목록을 채우지 않게.
+//     그 사이에 다른 쓰기가 끼어 있어도 묶는다. 항목의 자리와 기다린 시간은 그중 첫 차례의 것이다. 위치를 기록하지 않았으면
+//     이름이 같은 차례끼리 묶이고, 그 항목은 다른 쓰기들일 수 있다고 적는다. 위치에 TypeORM 프레임만 남는 쓰기(repo.insert() ·
+//     upsert())는 부른 곳이 달라도 위치가 같아서, 문장 차례의 이름에 붙은 테이블로만 갈린다(sqljsStatementLabel).
 //   - 무리마다 처음 나타난 순서대로 SQLJS_WAITING_TURNS_IN_WARNING 개 항목을 싣고, 나머지는 수로만 남긴다. 묶으려면 차례마다
 //     위치를 꾸며야 해서(수십 µs) 무리마다 앞의 SQLJS_WAITING_TURNS_EXAMINED 개만 살펴본다 — 경고는 tick 안에서 만든다.
 // 그래서 그 쓰기가 목록에 없을 수 있다 — 경고 뒤에 줄 섰거나(경고는 차례마다 한 번이다), 자기 무리에서 다른 항목 다섯이
@@ -250,7 +251,8 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 // 같은 정당한 긴 차례 하나로도 켜진다. 반복되는 느린 콜백은 다음 경고에 위치가 실린다. 데드락은 그 뒤로 시작하는 차례가
 // 없어서 첫 경고뿐이다 — 플래그를 켜고 재현해야 위치가 나온다.
 // 위치는 차례를 연 순간의 stack 이다. transaction · save · export 차례에는 그것을 부른 앱 코드가 남는다. 쓰기 문장 차례는
-// TypeORM 이 문장을 보내는 자리라서, TypeORM 안에서 async stack 이 끊기는 경로(repo.insert() · upsert())는 TypeORM 프레임만 남는다.
+// TypeORM 이 문장을 보내는 자리라서, TypeORM 안에서 async stack 이 끊기는 경로(repo.insert() · upsert())는 TypeORM 프레임만 남는다
+// — 그래서 문장 차례의 이름에 대상 테이블을 붙인다.
 
 export const DEFAULT_SQLJS_TURN_WARN_MS = 30_000;
 const MIN_SQLJS_TURN_WARN_MS = 50;
@@ -283,9 +285,15 @@ function sqljsConnectionName(dataSource: DataSource): string {
   return location ? path.basename(location) : 'in-memory';
 }
 
-/** 쓰기 문장 차례의 이름 — 문장의 첫 단어(INSERT, UPDATE, PRAGMA …). */
+/**
+ * 쓰기 문장 차례의 이름 — 문장의 첫 단어(INSERT, UPDATE, PRAGMA …). INSERT · REPLACE · UPDATE · DELETE 는 대상 테이블까지 붙인다:
+ * TypeORM 안에서 async stack 이 끊기는 쓰기(repo.insert() · upsert())는 위치에 TypeORM 프레임만 남아, 테이블이 그 쓰기를 가르는
+ * 단서다 — 기다리는 차례를 묶을 때도 이름이 다르면 따로다(ticket c495ceaa).
+ */
 function sqljsStatementLabel(sql: string): string {
-  return (/^\s*(\S+)/.exec(sql)?.[1] ?? 'statement').slice(0, 32).toUpperCase();
+  const verb = (/^\s*(\S+)/.exec(sql)?.[1] ?? 'statement').slice(0, 32).toUpperCase();
+  const target = /^\s*(?:(?:insert|replace)(?:\s+or\s+\w+)?\s+into|update(?:\s+or\s+\w+)?|delete\s+from)\s+([^\s(]+)/i.exec(sql)?.[1];
+  return target ? `${verb} ${target.replace(/^["`[]|["`\]]$/g, '').slice(0, 64)}` : verb;
 }
 
 const sqljsSeconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
@@ -340,7 +348,7 @@ function sqljsWaitingTurns(waiting: ReadonlySet<SqljsTurn>, alreadyWaiting: numb
     }
     group.examined += 1;
     const frames = turn.site ? sqljsCallSiteFrames(turn.site) : null;
-    const key = `${turn.label}\n${frames ?? ''}`;
+    const key = `${turn.label}\u0000${frames ?? ''}`;
     const same = group.entries.get(key);
     if (same) same.count += 1;
     else group.entries.set(key, { position, label: turn.label, waitedMs: now - turn.queuedAt, frames, count: 1 });
@@ -355,7 +363,9 @@ function sqljsWaitingTurns(waiting: ReadonlySet<SqljsTurn>, alreadyWaiting: numb
       const entry = count > 1
         ? `    ${at}. "${label}" ×${count}, the first waiting for ${sqljsSeconds(waitedMs)}`
         : `    ${at}. "${label}", waiting for ${sqljsSeconds(waitedMs)}`;
-      lines.push(frames === null ? `${entry} (call site not recorded)` : `${entry}, queued at:\n${frames.replace(/^/gm, '    ')}`);
+      if (frames !== null) lines.push(`${entry}, queued at:\n${frames.replace(/^/gm, '    ')}`);
+      // 위치가 없으면 이름으로만 묶였다 — 같은 쓰기가 되풀이된 것으로 읽지 않게 적는다.
+      else lines.push(count > 1 ? `${entry} (call sites not recorded — different writes with this name count together)` : `${entry} (call site not recorded)`);
     }
     if (size > listed) lines.push(`    … and ${size - listed} more`);
   }

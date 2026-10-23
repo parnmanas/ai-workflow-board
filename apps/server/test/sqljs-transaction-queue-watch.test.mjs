@@ -14,7 +14,8 @@
 //      쥔 시간에 들지 않는다.
 //   2. 호출 위치 — SQLJS_TURN_STACKS=1 이면 첫 경고부터 실린다. 아니면 첫 경고는 위치 없이 플래그를 안내하고, 그 연결에서
 //      그 뒤에 열린 차례부터 위치가 실린다(연결마다 따로). 위치에는 큐 안쪽 프레임이 없다.
-//   3. 차례를 연 일마다 이름이 있다 — transaction, save, 문장의 첫 단어, synchronize, afterSqljsTransactions() 의 이름, export.
+//   3. 차례를 연 일마다 이름이 있다 — transaction, save, 문장의 첫 단어(쓰기 문장은 대상 테이블까지 — c495ceaa), synchronize,
+//      afterSqljsTransactions() 의 이름, export.
 //   4. 감시 주기는 차례마다 만들지 않는다 — 바쁜 DataSource 마다 하나(unref)이고, 큐가 쉬면 스스로 멈춘다. 차례가 없던
 //      DataSource 에는 주기가 없다. 주기는 큐를 건 비동기 문맥에서 돈다 — 그것을 건 요청의 문맥이 아니다. 주기의 타이머는
 //      db.js 를 불러올 때 잡혀서, 나중에 켠 가짜 타이머(node:test mock timers)가 감시를 끄지 못한다.
@@ -26,7 +27,8 @@
 //   8. 데드락의 다른 쪽 (c495ceaa) — 쥔 동안 남기는 경고에 뒤에서 기다리는 차례가 실린다. 쥔 차례가 시작될 때 이미 기다리던
 //      무리와 그 뒤에 줄 선 무리로 나뉘고, 무리마다 이름 · 위치가 같은 차례는 한 항목으로 묶여 수가 달린다(사이에 다른 쓰기가
 //      끼어도). 항목은 처음 나타난 순서대로 무리마다 5개까지다(줄에서의 자리, 이름, 각자 줄 선 때부터 센 기다린 시간, 호출
-//      위치 — 위치는 줄 설 때 기록한 것이다). 나머지는 수로 남고, 무리마다 앞의 1000개만 살펴본다. 쥔 콜백이 다른 체인의
+//      위치 — 위치는 줄 설 때 기록한 것이다). 나머지는 수로 남고, 무리마다 앞의 1000개만 살펴본다. 위치가 없으면 이름으로만
+//      묶이고 그 항목은 다른 쓰기들일 수 있다고 적는다 — 쓰기 문장의 이름에는 테이블이 붙어 있다. 쥔 콜백이 다른 체인의
 //      쓰기를 기다리는 데드락에서는 그 쓰기와 그것을 부른 함수가 나온다 — 쥔 차례가 줄 서 있던 동안이든 시작한 뒤든, 같은
 //      쓰기가 되풀이되며 앞에 쌓였어도 밀려나지 않는다. 시작한 차례는 목록에서 빠지고, 차례 안의 재진입 쓰기는 목록에 없고,
 //      연결마다 자기 목록이다. 풀릴 때 남기는 보고에는 목록이 없다 — 풀리는 차례는 데드락이 아니었다. 경고를 만들다 실패해도
@@ -79,6 +81,7 @@ const {
 globalThis.setInterval = realSetInterval;
 globalThis.clearInterval = realClearInterval;
 const { Account } = await import('file://' + path.join(DIST_ROOT, 'entities', 'Account.js'));
+const { Channel } = await import('file://' + path.join(DIST_ROOT, 'entities', 'Channel.js'));
 const { DataSource } = await import('typeorm');
 
 const WARN_MS = 200;
@@ -192,6 +195,8 @@ function waitingSectionOf(warning) {
 }
 
 const WAITING_HEADER = 'Waiting behind it, in queue order — if the turn waits for one of these, that is a deadlock:';
+/** 위치 없이 이름으로만 묶인 항목의 덧붙임 — 같은 쓰기가 되풀이된 것으로 읽지 않게. */
+const MERGED_UNRECORDED = 'call sites not recorded — different writes with this name count together';
 
 /**
  * 경고의 기다리는 차례 목록을 무리별로 읽는다 — `before`(쥔 차례가 시작될 때 이미 기다리던) · `after`(그 뒤에 줄 선), 없는
@@ -206,13 +211,18 @@ function waitingGroupsOf(warning) {
   let group;
   for (const line of lines) {
     const heading = /^ {2}(Already waiting when it started|Queued after it started) \((\d+)\):$/.exec(line);
-    const entry = /^ {4}(\d+)\. "([^"]*)"(?: ×(\d+), the first|,) waiting for (\d+\.\d)s(, queued at:| \(call site not recorded\))$/.exec(line);
+    const entry = new RegExp(
+      '^ {4}(\\d+)\\. "([^"]*)"(?: ×(\\d+), the first|,) waiting for (\\d+\\.\\d)s' +
+        `(, queued at:| \\(call site not recorded\\)| \\(${escapeRe(MERGED_UNRECORDED)}\\))$`,
+    ).exec(line);
     const more = /^ {4}… and ([1-9]\d*) more$/.exec(line);
     if (heading) {
       group = { total: Number(heading[2]), entries: [], more: 0 };
       groups[heading[1] === 'Queued after it started' ? 'after' : 'before'] = group;
     } else if (entry && group && !group.more) {
       const recorded = entry[5] === ', queued at:';
+      const merged = entry[3] !== undefined;
+      if (!recorded && merged !== entry[5].includes(MERGED_UNRECORDED)) throw new Error(`wrong note for ${merged ? 'a merged' : 'a single'} entry: ${line}`);
       group.entries.push({
         position: Number(entry[1]),
         label: entry[2],
@@ -288,7 +298,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     assert.deepEqual(after.entries.map(({ position }) => position), [1, 2, 3]);
     assert.deepEqual(
       after.entries.map(({ label }) => label).sort(),
-      ['UPDATE', 'save', 'transaction'],
+      ['UPDATE accounts', 'save', 'transaction'],
       'the save inside the callback ran in the held turn and is not listed',
     );
     for (const { label, waited, frames } of after.entries) {
@@ -458,23 +468,41 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.match(warningsFor(ds)[1], /the turn opened by "save" was released after/);
     });
 
-    for (const { kind, label, write } of [
+    const heldStatement = (event) => event.parameters?.includes('held-statement');
+    for (const { kind, label, write, holds = heldStatement, callerOnSite = true } of [
       {
-        kind: 'a repository update',
-        label: 'UPDATE',
+        kind: 'a repository update — the statement\'s first word and its table',
+        label: 'UPDATE accounts',
         write: async function updateHeldAccount(ds) {
           await ds.getRepository(Account).update({ name: 'statement-row' }, { description: 'held-statement' });
         },
       },
       {
-        kind: 'a raw statement',
-        label: 'DELETE',
+        kind: 'a raw statement — the statement\'s first word and its table',
+        label: 'DELETE accounts',
         write: async function deleteHeldAccount(ds) {
           await ds.query('  DELETE FROM accounts WHERE name = ? AND description <> ?', ['nobody', 'held-statement']);
         },
       },
+      {
+        // TypeORM 이 async stack 을 끊어 위치에 부른 함수가 없을 수 있다 — 그래서 문장 차례의 이름에 테이블을 붙인다.
+        kind: 'a repository insert — the statement\'s first word and its table, which tell it apart when its call site has only TypeORM frames',
+        label: 'INSERT accounts',
+        write: async function insertHeldAccount(ds) {
+          await ds.getRepository(Account).insert({ name: 'inserted-row', description: 'held-statement' });
+        },
+        callerOnSite: false,
+      },
+      {
+        kind: 'a raw statement without a table — the statement\'s first word',
+        label: 'PRAGMA',
+        write: async function setUserVersion(ds) {
+          await ds.query('PRAGMA user_version = 7');
+        },
+        holds: (event) => event.query === 'PRAGMA user_version = 7',
+      },
     ]) {
-      it(`${kind} — the statement's first word`, async () => {
+      it(kind, async () => {
         const ds = await openDataSource({ stacks: '1' });
         const accounts = ds.getRepository(Account);
         await accounts.save(accounts.create({ name: 'statement-row', description: 'watch' }));
@@ -482,7 +510,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
         const inside = gate();
         ds.subscribers.push({
           async beforeQuery(event) {
-            if (!event.parameters?.includes('held-statement')) return;
+            if (!holds(event)) return;
             inside.open();
             await hold.wait;
           },
@@ -491,7 +519,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
         await reached(inside.wait, writing);
         const warning = await warningFor(ds, label);
         assert.match(warning, new RegExp(`the turn opened by "${label}" has been held`));
-        assert.match(warning, new RegExp(`at (async )?${write.name} \\(`), 'the write\'s caller is on the call site');
+        if (callerOnSite) assert.match(warning, new RegExp(`at (async )?${write.name} \\(`), 'the write\'s caller is on the call site');
         assert.doesNotMatch(warning, QUEUE_INTERNALS);
         hold.open();
         await withinDeadlockTimeout(writing);
@@ -604,7 +632,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.doesNotMatch(heldSide, /updateFromApiHelper/);
       const { before, after } = waitingGroupsOf(warning);
       assert.equal(before, undefined);
-      assert.deepEqual(entriesOf(after), [[1, 'UPDATE', 1]], 'the other side: the write waiting behind the held turn');
+      assert.deepEqual(entriesOf(after), [[1, 'UPDATE accounts', 1]], 'the other side: the write waiting behind the held turn');
       const [{ frames }] = after.entries;
       assert.match(frames ?? '', /^ {8}at (async )?updateFromApiHelper \(/m, 'and the function that called it');
       assert.ok(frames.includes(THIS_FILE), 'and the file it is in');
@@ -691,7 +719,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.equal(after.total, 7);
       assert.deepEqual(
         entriesOf(after),
-        [[9, 'heartbeat', 3], [10, 'activity', 3], [15, 'UPDATE', 1]],
+        [[9, 'heartbeat', 3], [10, 'activity', 3], [15, 'UPDATE accounts', 1]],
         'each group has its own entries — the identical writes queued after it started are not counted into the first group; ' +
           'identical writes are one entry even when other writes come between them; the write the callback waits for is listed',
       );
@@ -756,7 +784,7 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.deepEqual(await withinDeadlockTimeout(Promise.all(waiters)), [1, 2, 3, 4, 5, 6, 7]);
     });
 
-    it(`a group is examined up to its first ${SQLJS_WAITING_TURNS_EXAMINED} turns — the turns after them are counted, not examined, and the next group is still examined`, async () => {
+    it(`each group is examined up to its first ${SQLJS_WAITING_TURNS_EXAMINED} turns — the turns after them are counted, not examined`, async () => {
       assert.equal(SQLJS_WAITING_TURNS_EXAMINED, 1_000);
       const ds = await openDataSource();
       const ahead = gate();
@@ -767,20 +795,77 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       waiters.push(afterSqljsTransactions(ds, async () => 'last', 'last-before'));
       ahead.open();
       await held.inside;
-      waiters.push(afterSqljsTransactions(ds, async () => 'after', 'after-write'));
+      // 시작한 뒤에도 — 데드락이면 줄은 이쪽에서 자란다.
+      waiters.push(...Array.from({ length: 1_500 }, (_, i) => afterSqljsTransactions(ds, async () => i, 'bulk-after')));
+      waiters.push(afterSqljsTransactions(ds, async () => 'last', 'last-after'));
       await until(() => warningsFor(ds).length === 1, 'the warning');
       const [warning] = warningsFor(ds);
-      assert.match(warning, /has been held for \d+\.\ds, 1502 waiting behind it/);
+      assert.match(warning, /has been held for \d+\.\ds, 3002 waiting behind it/);
       const { before, after } = waitingGroupsOf(warning);
       assert.equal(before.total, 1_501);
       assert.deepEqual(entriesOf(before), [[1, 'bulk-write', 1_000]], 'the first thousand were examined — one entry');
       assert.equal(before.more, 501, 'the turns after them, the different one at the end too, are counted');
-      assert.deepEqual(entriesOf(after), [[1_502, 'after-write', 1]], 'the next group is still examined');
+      assert.equal(after.total, 1_501);
+      assert.deepEqual(entriesOf(after), [[1_502, 'bulk-after', 1_000]], 'the next group is examined too, and is capped the same way');
+      assert.equal(after.more, 501);
       held.release();
       assert.equal(await withinDeadlockTimeout(held.done), 'bulk: committed');
       await withinDeadlockTimeout(aheadDone);
-      assert.equal((await withinDeadlockTimeout(Promise.all(waiters))).length, 1_502);
+      assert.equal((await withinDeadlockTimeout(Promise.all(waiters))).length, 3_002);
     });
+    it('entries keep the order their first turns queued in — a write that came once is not pushed out by writes that repeat after it', async () => {
+      const ds = await openDataSource();
+      const held = holdTransaction(ds, 'order');
+      await held.inside;
+      const waiters = [afterSqljsTransactions(ds, async () => 'once', 'came-once')];
+      for (let round = 0; round < 2; round++) {
+        for (let i = 1; i <= 5; i++) waiters.push(afterSqljsTransactions(ds, async () => i, `repeated-${i}`));
+      }
+      await until(() => warningsFor(ds).length === 1, 'the warning');
+      const { after } = waitingGroupsOf(warningsFor(ds)[0]);
+      assert.deepEqual(
+        entriesOf(after),
+        [[1, 'came-once', 1], [2, 'repeated-1', 2], [3, 'repeated-2', 2], [4, 'repeated-3', 2], [5, 'repeated-4', 2]],
+        'first come, first listed — not the ones that repeat most',
+      );
+      assert.equal(after.more, 2, 'repeated-5, twice');
+      held.release();
+      assert.equal(await withinDeadlockTimeout(held.done), 'order: committed');
+      assert.equal((await withinDeadlockTimeout(Promise.all(waiters))).length, 11);
+    });
+
+    it('without call sites, waiting writes are told apart by name — a write statement\'s name carries its table — and an entry that merges several says they may be different writes', async () => {
+      const ds = await openDataSource();
+      const held = holdTransaction(ds, 'names');
+      await held.inside;
+      async function saveFromHeartbeat() {
+        return ds.getRepository(Account).save(ds.getRepository(Account).create({ name: 'from-heartbeat', description: 'watch' }));
+      }
+      async function saveFromActivity() {
+        return ds.getRepository(Account).save(ds.getRepository(Account).create({ name: 'from-activity', description: 'watch' }));
+      }
+      async function insertAccount(name) {
+        await ds.getRepository(Account).insert({ name, description: 'watch' });
+      }
+      async function insertChannel() {
+        await ds.getRepository(Channel).insert({ name: 'watch-channel' });
+      }
+      const waiters = [saveFromHeartbeat(), saveFromActivity(), insertAccount('inserted-a'), insertAccount('inserted-b'), insertChannel()];
+      await until(() => warningsFor(ds).length === 1, 'the warning');
+      const [warning] = warningsFor(ds);
+      const { after } = waitingGroupsOf(warning);
+      assert.deepEqual(
+        entriesOf(after).map(([, label, count]) => [label, count]),
+        [['save', 2], ['INSERT accounts', 2], ['INSERT channels', 1]],
+        'inserts into different tables are different entries',
+      );
+      assert.match(warning, new RegExp(`\\n {4}1\\. "save" ×2, the first waiting for \\d+\\.\\ds \\(${escapeRe(MERGED_UNRECORDED)}\\)\\n`));
+      assert.match(warning, /\n {4}\d+\. "INSERT channels", waiting for \d+\.\ds \(call site not recorded\)$/);
+      held.release();
+      assert.equal(await withinDeadlockTimeout(held.done), 'names: committed');
+      assert.equal((await withinDeadlockTimeout(Promise.all(waiters))).length, 5);
+    });
+
     it('each connection lists only its own waiting turns, split by when its own held turn started; five entries are all listed', async () => {
       const one = await openDataSource();
       const two = await openDataSource();
