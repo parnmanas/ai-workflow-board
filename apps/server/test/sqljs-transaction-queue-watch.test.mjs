@@ -72,6 +72,7 @@ const {
   afterSqljsTransactions,
   flushSqljs,
   resolveSqljsTurnWarnMs,
+  sqljsStatementLabel,
   DEFAULT_SQLJS_TURN_WARN_MS,
   SQLJS_WAITING_TURNS_IN_WARNING,
   SQLJS_WAITING_TURNS_EXAMINED,
@@ -784,35 +785,45 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.deepEqual(await withinDeadlockTimeout(Promise.all(waiters)), [1, 2, 3, 4, 5, 6, 7]);
     });
 
-    it(`each group is examined up to its first ${SQLJS_WAITING_TURNS_EXAMINED} turns — the turns after them are counted, not examined`, async () => {
-      assert.equal(SQLJS_WAITING_TURNS_EXAMINED, 1_000);
-      const ds = await openDataSource();
-      const ahead = gate();
-      const aheadDone = afterSqljsTransactions(ds, () => ahead.wait, 'ahead');
-      const held = holdTransaction(ds, 'bulk');
-      // 쥔 차례가 줄 서 있는 동안 같은 쓰기 천오백 개와 다른 쓰기 하나가 그 뒤에 선다.
-      const waiters = Array.from({ length: 1_500 }, (_, i) => afterSqljsTransactions(ds, async () => i, 'bulk-write'));
-      waiters.push(afterSqljsTransactions(ds, async () => 'last', 'last-before'));
-      ahead.open();
-      await held.inside;
-      // 시작한 뒤에도 — 데드락이면 줄은 이쪽에서 자란다.
-      waiters.push(...Array.from({ length: 1_500 }, (_, i) => afterSqljsTransactions(ds, async () => i, 'bulk-after')));
-      waiters.push(afterSqljsTransactions(ds, async () => 'last', 'last-after'));
-      await until(() => warningsFor(ds).length === 1, 'the warning');
-      const [warning] = warningsFor(ds);
-      assert.match(warning, /has been held for \d+\.\ds, 3002 waiting behind it/);
-      const { before, after } = waitingGroupsOf(warning);
-      assert.equal(before.total, 1_501);
-      assert.deepEqual(entriesOf(before), [[1, 'bulk-write', 1_000]], 'the first thousand were examined — one entry');
-      assert.equal(before.more, 501, 'the turns after them, the different one at the end too, are counted');
-      assert.equal(after.total, 1_501);
-      assert.deepEqual(entriesOf(after), [[1_502, 'bulk-after', 1_000]], 'the next group is examined too, and is capped the same way');
-      assert.equal(after.more, 501);
-      held.release();
-      assert.equal(await withinDeadlockTimeout(held.done), 'bulk: committed');
-      await withinDeadlockTimeout(aheadDone);
-      assert.equal((await withinDeadlockTimeout(Promise.all(waiters))).length, 3_002);
-    });
+    // 앞 무리가 상한을 넘을 때와, 작은 앞 무리 뒤에서 뒤 무리만 넘을 때 — 무리마다 자기 상한이다(두 무리가 나눠 쓰지 않는다).
+    for (const alreadyWaiting of [1_500, 10]) {
+      it(`each group is examined up to its first ${SQLJS_WAITING_TURNS_EXAMINED} turns — the turns after them are counted, not examined (${alreadyWaiting} identical turns already waiting)`, async () => {
+        assert.equal(SQLJS_WAITING_TURNS_EXAMINED, 1_000);
+        const ds = await openDataSource();
+        const ahead = gate();
+        const aheadDone = afterSqljsTransactions(ds, () => ahead.wait, 'ahead');
+        const held = holdTransaction(ds, 'bulk');
+        // 쥔 차례가 줄 서 있는 동안 같은 쓰기들과 다른 쓰기 하나가 그 뒤에 선다.
+        const waiters = Array.from({ length: alreadyWaiting }, (_, i) => afterSqljsTransactions(ds, async () => i, 'bulk-write'));
+        waiters.push(afterSqljsTransactions(ds, async () => 'last', 'last-before'));
+        ahead.open();
+        await held.inside;
+        // 시작한 뒤에도 — 데드락이면 줄은 이쪽에서 자란다.
+        waiters.push(...Array.from({ length: 1_500 }, (_, i) => afterSqljsTransactions(ds, async () => i, 'bulk-after')));
+        waiters.push(afterSqljsTransactions(ds, async () => 'last', 'last-after'));
+        await until(() => warningsFor(ds).length === 1, 'the warning');
+        const [warning] = warningsFor(ds);
+        const beforeTotal = alreadyWaiting + 1;
+        assert.match(warning, new RegExp(`has been held for \\d+\\.\\ds, ${beforeTotal + 1_501} waiting behind it`));
+        const { before, after } = waitingGroupsOf(warning);
+        assert.equal(before.total, beforeTotal);
+        if (alreadyWaiting >= SQLJS_WAITING_TURNS_EXAMINED) {
+          assert.deepEqual(entriesOf(before), [[1, 'bulk-write', 1_000]], 'the first thousand were examined — one entry');
+          assert.equal(before.more, beforeTotal - 1_000, 'the turns after them, the different one at the end too, are counted');
+        } else {
+          assert.deepEqual(entriesOf(before), [[1, 'bulk-write', alreadyWaiting], [beforeTotal, 'last-before', 1]]);
+          assert.equal(before.more, 0);
+        }
+        assert.equal(after.total, 1_501);
+        assert.deepEqual(entriesOf(after), [[beforeTotal + 1, 'bulk-after', 1_000]], 'the next group is examined too, up to its own limit');
+        assert.equal(after.more, 501);
+        held.release();
+        assert.equal(await withinDeadlockTimeout(held.done), 'bulk: committed');
+        await withinDeadlockTimeout(aheadDone);
+        assert.equal((await withinDeadlockTimeout(Promise.all(waiters))).length, beforeTotal + 1_501);
+      });
+    }
+
     it('entries keep the order their first turns queued in — a write that came once is not pushed out by writes that repeat after it', async () => {
       const ds = await openDataSource();
       const held = holdTransaction(ds, 'order');
@@ -1271,6 +1282,27 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.equal(alive, 0, `${alive} of 3 callers are still alive after their turns, held through each turn's work by the timer it started`);
     } finally {
       for (const timer of leftRunning) clearInterval(timer);
+    }
+  });
+
+  it('a write statement is named by its first word, and INSERT · REPLACE · UPDATE · DELETE by their table too (ticket c495ceaa)', () => {
+    for (const [sql, expected] of [
+      ['INSERT INTO "accounts"("id", "name") VALUES (?, ?)', 'INSERT accounts'],
+      ['INSERT INTO "accounts"("id") VALUES (?) ON CONFLICT ( "id" ) DO UPDATE SET "name" = EXCLUDED."name"', 'INSERT accounts'],
+      ['insert or replace into accounts (id) values (1)', 'INSERT accounts'],
+      ['INSERT OR IGNORE INTO `channels` (id) VALUES (1)', 'INSERT channels'],
+      ['REPLACE INTO [accounts] (id) VALUES (1)', 'REPLACE accounts'],
+      ['UPDATE "accounts" SET "name" = ? WHERE "id" = ?', 'UPDATE accounts'],
+      ['UPDATE OR IGNORE [channels] SET name = 1', 'UPDATE channels'],
+      ['  DELETE FROM accounts WHERE name = ?', 'DELETE accounts'],
+      ['\n\tdelete from "channels"', 'DELETE channels'],
+      [`INSERT INTO "${'t'.repeat(80)}"(id) VALUES (1)`, `INSERT ${'t'.repeat(64)}`],
+      ['PRAGMA user_version = 7', 'PRAGMA'],
+      ['CREATE TABLE "x" ("id" integer)', 'CREATE'],
+      ['WITH t AS (SELECT 1) INSERT INTO accounts SELECT * FROM t', 'WITH'],
+      ['', 'STATEMENT'],
+    ]) {
+      assert.equal(sqljsStatementLabel(sql), expected, JSON.stringify(sql));
     }
   });
 

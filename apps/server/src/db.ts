@@ -192,7 +192,7 @@ type SqljsTurn = {
   active: boolean;
   pending: number;
   release: () => void;
-  /** 차례를 연 일 — manager · DataSource 메서드 이름, 쓰기 문장의 첫 단어, afterSqljsTransactions() 의 이름('export'). */
+  /** 차례를 연 일 — manager · DataSource 메서드 이름, 쓰기 문장의 이름(sqljsStatementLabel), afterSqljsTransactions() 의 이름('export'). */
   label: string;
   /** 줄을 선 시각(performance.now()) — 뒤에서 기다리는 차례로 경고에 실릴 때 기다린 시간이 된다. */
   queuedAt: number;
@@ -229,7 +229,8 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 //   - 무리마다 이름과 위치가 같은 차례는 한 항목으로 묶어 수를 단다 — 주기 작업 · 묶음 쓰기가 되풀이되며 목록을 채우지 않게.
 //     그 사이에 다른 쓰기가 끼어 있어도 묶는다. 항목의 자리와 기다린 시간은 그중 첫 차례의 것이다. 위치를 기록하지 않았으면
 //     이름이 같은 차례끼리 묶이고, 그 항목은 다른 쓰기들일 수 있다고 적는다. 위치에 TypeORM 프레임만 남는 쓰기(repo.insert() ·
-//     upsert())는 부른 곳이 달라도 위치가 같아서, 문장 차례의 이름에 붙은 테이블로만 갈린다(sqljsStatementLabel).
+//     upsert(), await 없이 돌려준 쓰기)는 부른 곳이 달라도 위치가 같아서, 문장 차례의 이름에 붙은 테이블로만 갈린다
+//     (sqljsStatementLabel) — 같은 테이블이면 한 항목이다.
 //   - 무리마다 처음 나타난 순서대로 SQLJS_WAITING_TURNS_IN_WARNING 개 항목을 싣고, 나머지는 수로만 남긴다. 묶으려면 차례마다
 //     위치를 꾸며야 해서(수십 µs) 무리마다 앞의 SQLJS_WAITING_TURNS_EXAMINED 개만 살펴본다 — 경고는 tick 안에서 만든다.
 // 그래서 그 쓰기가 목록에 없을 수 있다 — 경고 뒤에 줄 섰거나(경고는 차례마다 한 번이다), 자기 무리에서 다른 항목 다섯이
@@ -290,7 +291,7 @@ function sqljsConnectionName(dataSource: DataSource): string {
  * TypeORM 안에서 async stack 이 끊기는 쓰기(repo.insert() · upsert())는 위치에 TypeORM 프레임만 남아, 테이블이 그 쓰기를 가르는
  * 단서다 — 기다리는 차례를 묶을 때도 이름이 다르면 따로다(ticket c495ceaa).
  */
-function sqljsStatementLabel(sql: string): string {
+export function sqljsStatementLabel(sql: string): string {
   const verb = (/^\s*(\S+)/.exec(sql)?.[1] ?? 'statement').slice(0, 32).toUpperCase();
   const target = /^\s*(?:(?:insert|replace)(?:\s+or\s+\w+)?\s+into|update(?:\s+or\s+\w+)?|delete\s+from)\s+([^\s(]+)/i.exec(sql)?.[1];
   return target ? `${verb} ${target.replace(/^["`[]|["`\]]$/g, '').slice(0, 64)}` : verb;
