@@ -29,6 +29,11 @@
 //   5. force 인수는 kill 까지 통째로 회수 가드 안에서 한다. 가드를 잡은 뒤 owner
 //      를 다시 읽어, 대기 중 동료 force contender 가 먼저 인수를 끝냈으면(관측한
 //      pid 와 다르면) 그 새 owner 를 죽이지 않고 EAGENTLOCKED 로 거절한다.
+//   6. 가드 mkdir 이 Windows 삭제 대기 errno(EPERM·EACCES·EBUSY)로 거절되면 "남이
+//      가드를 막 놓는 중" 으로 보고 **그 자리에서** 기다린다(waitForRecoveryGuard).
+//      바깥에서 처음부터 다시 돌면 force 경로가 관측한 owner 를 잃고, 그사이 인수를
+//      끝낸 동료를 새 owner 로 읽어 죽인다 — 5번 규칙이 무너진다. 그 errno 가 연달아
+//      상한을 넘으면 원본 errno 를 올린다(진짜 권한 오류를 가리지 않는다).
 //
 // Release rules:
 //   - On clean shutdown call release(); only unlinks if pid still matches ours.
@@ -65,6 +70,11 @@ const RECOVERY_LOCK_STALE_MS = 60_000;
 // 회수 경로가 create 레이스에서 졌는데 승자마저 이미 죽어 있을 때만 재시도한다.
 // 살아 있는 승자에게 진 경우는 재시도 없이 곧바로 EAGENTLOCKED 다.
 const MAX_ACQUIRE_ATTEMPTS = 5;
+
+// 회수 가드 mkdir 이 삭제 대기 errno 를 **연달아** 받아도 기다리는 횟수. 한 번에
+// 25ms 를 쉬므로 약 2초다. 삭제 대기는 지우는 쪽이 핸들을 닫으면 끝나 보통 수 ms
+// 안에 닫힌다 — 그보다 길게 이어지면 경합이 아니라 진짜 권한 문제로 본다.
+export const RECOVERY_GUARD_TRANSIENT_LIMIT = 80;
 
 // 부팅 시각 근사치(Date.now() - os.uptime())는 같은 부팅 안에서도 부팅 이후의
 // wall-clock 조정(NTP step) 때문에 흔들린다. 이 폭을 넘게 어긋났을 때만 "다른 부팅"
@@ -725,19 +735,25 @@ async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandl
   // 완전히 멎은 것처럼 보였다(성공할 때까지 단 한 줄도 안 남음). 회수는 드문
   // 경로라 항상 남겨도 소음이 되지 않는다.
   log(`[lockfile] waiting for recovery guard before stale-cleanup (role=${payload.role} pid=${process.pid})`);
-  // 회수 구간 전체를 감싼다 — 가드 획득(`mkdirSync`)·`unlinkSync`·재생성 어디서
-  // 나오든 Windows 의 삭제 대기 errno 는 같은 뜻이라 한 곳에서 접는 편이 맞다.
-  // `lockedBy`(EAGENTLOCKED)·`ELOCKRACE` 는 코드가 달라 그대로 통과한다.
+  // 가드 획득은 Windows 삭제 대기 errno 를 그 자리에서 기다린다(6번 규칙). 거기서
+  // 올라온 오류는 상한을 다 쓴 영구 오류라 바깥 루프로 다시 돌리지 않는다 — 접는
+  // 것은 가드 **안**의 unlink·재생성뿐이다(reclaimAndCreate).
+  const releaseRecovery = await acquireRecoveryLock();
   try {
-    return await reclaimAndCreate(payload);
-  } catch (err: any) {
-    if (isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
-    throw err;
+    reclaimAndCreate(payload);
+  } finally {
+    releaseRecovery();
   }
+  log(`[lockfile] acquired after stale-cleanup (role=${payload.role} pid=${process.pid})`);
+  return makeReleaseHandle(payload);
 }
 
-async function reclaimAndCreate(payload: LockPayload): Promise<LockHandle> {
-  const releaseRecovery = await acquireRecoveryLock();
+/** 회수 가드 안에서 lock 을 다시 판정하고, 지운 뒤 새로 만든다.
+ *
+ *  unlink·재생성이 Windows 삭제 대기 errno 를 받으면 ELOCKRACE 로 접어 처음부터
+ *  다시 판정하게 한다 — stale 경로는 아무도 죽이지 않으므로 다시 관측해도 잃는
+ *  것이 없다. `lockedBy`(EAGENTLOCKED)·`ELOCKRACE` 는 코드가 달라 그대로 통과한다. */
+function reclaimAndCreate(payload: LockPayload): void {
   try {
     // 가드를 잡는 사이 lock 이 바뀌었을 수 있으니 다시 읽어 판정한다. 여기서
     // pid liveness 만 보면 회수 근거(다른 부팅 등)를 무시하고 EAGENTLOCKED 로
@@ -755,11 +771,10 @@ async function reclaimAndCreate(payload: LockPayload): Promise<LockHandle> {
       if (err?.code !== 'ENOENT') throw err;
     }
     createAfterCleanup(payload);
-  } finally {
-    releaseRecovery();
+  } catch (err: any) {
+    if (isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
+    throw err;
   }
-  log(`[lockfile] acquired after stale-cleanup (role=${payload.role} pid=${process.pid})`);
-  return makeReleaseHandle(payload);
 }
 
 /** 회수 가드(acquireRecoveryLock) 안에서 unlink 직후 새 lock 을 만든다.
@@ -799,8 +814,14 @@ function createAfterCleanup(payload: LockPayload): void {
  *  이건 `createAfterCleanup` 이 이미 EEXIST 에 대해 고쳐 둔 것과 **같은 결함
  *  클래스**이고(다만 Windows 가 내는 errno 가 다를 뿐), 실측으로 확인됐다 —
  *  flake-repro shard2 round4 에서 진 contender 가 `REJECTED:EPERM` 을 냈다.
- *  그래서 같은 방식으로 재판정 대상(ELOCKRACE)으로 접는다. 무한 재시도는
- *  `MAX_ACQUIRE_ATTEMPTS` 가 막으므로, 진짜 권한 오류라면 상한 뒤 그대로 드러난다. */
+ *  처리는 두 갈래다.
+ *   - 가드 mkdir: 그 자리에서 기다린다(`waitForRecoveryGuard`). 바깥으로 나가면
+ *     force 경로가 관측한 owner 를 잃는다. 이 처리가 stale 경로에만 있던 동안
+ *     force 경로에서 같은 `REJECTED:EPERM` 이 다시 났다(티켓 b14c5669).
+ *   - happy path 의 create, stale 경로 가드 안의 unlink·재생성: 재판정 대상
+ *     (ELOCKRACE)으로 접어 처음부터 다시 돈다. 무한 재시도는 `MAX_ACQUIRE_ATTEMPTS`
+ *     가 막는다.
+ *  어느 쪽이든 상한을 넘기면 원본 errno 가 그대로 드러난다(진짜 권한 오류). */
 export function isTransientLockRaceCode(code: unknown): boolean {
   return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
 }
@@ -826,38 +847,100 @@ export function resolveLostCreateRace(
   return { outcome: 'retry' };
 }
 
-async function acquireRecoveryLock(): Promise<() => void> {
+/** waitForRecoveryGuard 가 보는 부작용 전부. 주입 가능하게 분리해 두면 Windows 의
+ *  삭제 대기를 재현하지 않고도 대기 규칙을 결정적으로 검증할 수 있다
+ *  (`resolveLostCreateRace` 와 같은 주입 스타일). */
+export interface RecoveryGuardOps {
+  /** 가드 디렉터리를 만든다. 이미 있으면 EEXIST 를 던진다. */
+  create(): void;
+  /** 남이 쥔 가드가 회수 대상이면 치우고 true. */
+  reclaimStale(): boolean;
+  /** 다음 시도 전에 한 박자 쉰다. */
+  pause(): Promise<void>;
+  /** 삭제 대기 errno 를 받을 때마다 불린다. `streak` 은 1부터 센 연속 횟수. */
+  onTransient?(err: any, streak: number): void;
+}
+
+/** 회수 가드 디렉터리를 만들 때까지 기다린다.
+ *
+ *  - EEXIST: 남이 쥐고 있다. stale 이면 회수하고 바로, 아니면 한 박자 쉬고 다시.
+ *  - 삭제 대기 errno(EPERM·EACCES·EBUSY): 남이 가드를 **막 놓는 중**이다 — Windows
+ *    는 지워지는 중인 경로의 mkdir 을 EEXIST 가 아니라 이 코드로 거절한다. 가드는
+ *    아직 남의 것이니 EEXIST 와 같이 기다린다. 다만 회수는 시도하지 않는다. 지워지는
+ *    중인 경로에는 회수할 것이 없고, 진짜 권한 오류라면 경로가 아예 없어 판정이
+ *    "이미 사라짐" 으로 떨어진다 — rename 이 ENOENT 를 받아 쉬지 않고 다시 도는
+ *    바쁜 루프가 된다.
+ *  - 삭제 대기 errno 가 `transientLimit` 번 **연달아** 나면 원본 오류를 그대로 올린다.
+ *    삭제 대기였다면 그 안에 끝나 EEXIST 나 성공이 섞였어야 한다 — 진짜 권한 오류를
+ *    무한 대기나 합성 코드로 가리지 않는다.
+ *  - 그 밖의 오류는 바로 올린다.
+ *
+ *  호출자 쪽에서 다시 돌지 않고 여기서 기다리는 것이 핵심이다. force 경로는 가드를
+ *  기다리기 **전에** owner 를 관측해 두고, 가드를 잡은 뒤 그 owner 가 그대로인지로
+ *  "동료가 먼저 인수했는가" 를 가린다(5번 규칙). 처음부터 다시 돌면 그 관측을 잃고,
+ *  먼저 인수를 끝낸 동료를 새 owner 로 읽어 죽인다. */
+export async function waitForRecoveryGuard(
+  ops: RecoveryGuardOps,
+  transientLimit: number = RECOVERY_GUARD_TRANSIENT_LIMIT,
+): Promise<void> {
+  let transientStreak = 0;
   for (;;) {
     try {
-      mkdirSync(RECOVERY_LOCK_PATH);
-      // 주 lock 과 같은 페이로드를 적는다 — 부팅 세대가 없으면 이 가드가 다음
-      // 부팅에서 회수 불가능한 유령이 된다.
-      const guardBoot = currentBootIdentity();
-      writeFileSync(
-        RECOVERY_OWNER_PATH,
-        JSON.stringify({
-          pid: process.pid,
-          role: 'recovery-guard',
-          started_at: new Date().toISOString(),
-          boot_id: guardBoot.id,
-          boot_time_ms: guardBoot.approxBootTimeMs,
-          pid_start_ticks: readProcessStartTicks(process.pid),
-        }),
-      );
-      return () => {
-        try {
-          rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
-        } catch {
-          /* 프로세스 종료 시 stale 회수 가드가 안전하게 정리한다 */
-        }
-      };
+      ops.create();
+      return;
     } catch (err: any) {
+      if (isTransientLockRaceCode(err?.code)) {
+        transientStreak += 1;
+        ops.onTransient?.(err, transientStreak);
+        if (transientStreak >= transientLimit) throw err;
+        await ops.pause();
+        continue;
+      }
       if (err?.code !== 'EEXIST') throw err;
     }
 
-    if (reclaimStaleRecoveryLock()) continue;
-    await delay(25);
+    transientStreak = 0;
+    if (ops.reclaimStale()) continue;
+    await ops.pause();
   }
+}
+
+async function acquireRecoveryLock(): Promise<() => void> {
+  await waitForRecoveryGuard({
+    create: () => mkdirSync(RECOVERY_LOCK_PATH),
+    reclaimStale: reclaimStaleRecoveryLock,
+    pause: () => delay(25),
+    onTransient: (err, streak) => {
+      // 연속 구간마다 한 줄만 — 25ms 마다 찍으면 소음이다.
+      if (streak === 1) {
+        log(
+          `[lockfile] recovery guard mkdir hit ${err?.code}; waiting as if another process is releasing it ` +
+            `(delete-pending), up to ${RECOVERY_GUARD_TRANSIENT_LIMIT} tries in a row`,
+        );
+      }
+    },
+  });
+  // 주 lock 과 같은 페이로드를 적는다 — 부팅 세대가 없으면 이 가드가 다음
+  // 부팅에서 회수 불가능한 유령이 된다.
+  const guardBoot = currentBootIdentity();
+  writeFileSync(
+    RECOVERY_OWNER_PATH,
+    JSON.stringify({
+      pid: process.pid,
+      role: 'recovery-guard',
+      started_at: new Date().toISOString(),
+      boot_id: guardBoot.id,
+      boot_time_ms: guardBoot.approxBootTimeMs,
+      pid_start_ticks: readProcessStartTicks(process.pid),
+    }),
+  );
+  return () => {
+    try {
+      rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
+    } catch {
+      /* 프로세스 종료 시 stale 회수 가드가 안전하게 정리한다 */
+    }
+  };
 }
 
 function reclaimStaleRecoveryLock(): boolean {
