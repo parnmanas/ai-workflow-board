@@ -256,8 +256,9 @@ describe('sql.js flush vs open transactions (ticket d1ce6aad)', { timeout: 60_00
       assert.equal(
         exported,
         true,
-        'exportSqljsWhenIdle() checks for an open transaction and exports in one synchronous step — if TypeORM ' +
-          'now awaits before export(), a transaction can open in between and be cut',
+        'exportSqljsWhenIdle() checks for an open transaction, exports and restores foreign_keys in one synchronous ' +
+          'step — if TypeORM now awaits before export(), a transaction can open in between and be cut, and the ' +
+          'restore runs before the export turns foreign keys off (ticket 7e8b1d0c)',
       );
       await saving;
     } finally {

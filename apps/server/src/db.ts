@@ -568,9 +568,17 @@ const sqljsFileWrites = new WeakMap<DataSource, { writing: Promise<void>; done: 
  *      through the queue, so what is still open here is the caller's own — a
  *      flush awaited inside a transaction — or one a raw `BEGIN` statement opened.
  *
+ * Reopening also puts every PRAGMA back to its default, and TypeORM sets
+ * foreign_keys = ON only when it opens the connection — after the first flush,
+ * foreign keys went unchecked until the process ended (ticket 7e8b1d0c). So the
+ * export sets foreign_keys again right after export() (foreignKeysAfterExport).
+ *
  * The last check and the export run in one synchronous step — export() happens
  * inside saveDatabase() before its first await — so nothing can open a
- * transaction in between. `markClean` runs in that same step. The file write that
+ * transaction in between. `markClean` and the foreign_keys restore run in that
+ * same step, so no statement runs with foreign keys off (a restore that fails
+ * fails the flush, and the next flush that takes its own turn sets them again).
+ * The file write that
  * follows does not touch the connection, so the turn is handed on before it:
  * writes and transactions do not wait for disk I/O. File writes still go one at a
  * time, since two overlapping fs.writeFile calls on one file can interleave into a
@@ -586,6 +594,8 @@ const sqljsFileWrites = new WeakMap<DataSource, { writing: Promise<void>; done: 
  * shutdown flush included) just as it holds up every write behind it.
  */
 async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void): Promise<void> {
+  // Asked before taking the turn — inside the work below, this chain always holds one.
+  const callerHoldsTurn = holdsSqljsTurn(dataSource);
   const exported = await afterSqljsTransactions(dataSource, async () => {
     const deadline = Date.now() + SQLJS_EXPORT_TXN_WAIT_MS;
     for (;;) {
@@ -604,13 +614,24 @@ async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void
       await new Promise((resolve) => setTimeout(resolve, SQLJS_EXPORT_TXN_POLL_MS));
     }
     markClean();
+    const foreignKeys = foreignKeysAfterExport(dataSource, callerHoldsTurn);
     const write = { writing: dataSource.sqljsManager.saveDatabase(), done: false };
     write.writing.then(() => { write.done = true; }, () => { write.done = true; });
     sqljsFileWrites.set(dataSource, write);
+    // A failed restore is reported after the write's own outcome: a failed export can leave the
+    // connection closed, and then the restore fails too. Boxed so that any thrown value counts —
+    // sql.js throws bare strings.
+    let restoreFailure: { error: unknown } | null = null;
+    try {
+      sqljsConnection(dataSource).exec(`PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`);
+    } catch (error) {
+      restoreFailure = { error };
+    }
     // Wrapped, not returned: returning the promise would keep this turn until the file write is done.
-    return { writing: write.writing };
+    return { writing: write.writing, restoreFailure };
   });
   await exported.writing;
+  if (exported.restoreFailure) throw exported.restoreFailure.error;
 }
 
 /**
@@ -623,7 +644,7 @@ async function exportSqljsWhenIdle(dataSource: DataSource, markClean: () => void
  * and then no export would ever run again.
  */
 function sqljsTransactionOpen(dataSource: DataSource): boolean {
-  const db = (dataSource.driver as unknown as { databaseConnection: { exec(sql: string): unknown } }).databaseConnection;
+  const db = sqljsConnection(dataSource);
   try {
     db.exec('BEGIN');
   } catch (e) {
@@ -632,6 +653,35 @@ function sqljsTransactionOpen(dataSource: DataSource): boolean {
   }
   db.exec('ROLLBACK');
   return false;
+}
+
+/**
+ * What foreign_keys goes back to after an export — the reopened connection has it
+ * off. exportSqljsWhenIdle() asks before Database.export() and sets the answer
+ * right after.
+ *
+ * On, for an export that waited for its own queue turn. TypeORM turns the checks
+ * on when it opens the connection, and only synchronize, migrations and
+ * dropDatabase turn them off (beforeMigration … afterMigration, clearDatabase),
+ * each inside the one queue turn it holds — the boot synchronize runs before
+ * anything can flush — so such an export never lands in that window. Setting them
+ * on also undoes whatever left them off: a restore that failed, or a migration
+ * that threw before afterMigration.
+ *
+ * An export called from inside a turn its caller already holds may be in that
+ * window, so it puts back the value it found instead.
+ */
+function foreignKeysAfterExport(dataSource: DataSource, callerHoldsTurn: boolean): boolean {
+  if (!callerHoldsTurn) return true;
+  const [[on]] = sqljsConnection(dataSource).exec('PRAGMA foreign_keys')[0].values;
+  return on === 1;
+}
+
+type SqljsConnection = { exec(sql: string): { values: unknown[][] }[] };
+
+/** The sql.js Database a sqljs DataSource runs every statement on — the same object across export(). */
+function sqljsConnection(dataSource: DataSource): SqljsConnection {
+  return (dataSource.driver as unknown as { databaseConnection: SqljsConnection }).databaseConnection;
 }
 
 /**

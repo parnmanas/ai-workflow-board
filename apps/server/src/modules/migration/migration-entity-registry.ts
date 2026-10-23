@@ -5,8 +5,8 @@
  * 전체 64개 이관 대상 엔티티를 전수 조사한 결과, 실제 DB 레벨 FK 제약은
  * 정확히 7개뿐이고 나머지는 앱이 관례로 지키는 평문 id 컬럼(FK
  * 미강제)이다 — 그래서 이 순서는 그 7개 제약만 정확히 지키면 되고, 나머지는
- * "대략 의존 방향"으로만 배치했다(정확도가 필요 없음 — sqlite/dev는
- * 기본적으로 FK 자체를 강제하지 않고, Postgres도 나머지엔 제약이 없다).
+ * "대략 의존 방향"으로만 배치했다(정확도가 필요 없음 — 나머지엔 sql.js 에도
+ * Postgres 에도 제약이 없다).
  *
  * 실제 FK 7개 (P4c-4: ApiKey.agent_id → Agent 실FK가 Agent 테이블과 함께,
  * 보드 제거: Board.account_id · BoardColumn.board_id · Ticket.column_id 가
@@ -23,8 +23,9 @@
  * ★ Ticket.parent_id 자기참조: PK가 랜덤 UUID라 "id ASC" keyset pagination
  * 순서와 부모/자식 관계 사이에 아무 상관이 없다 — 그대로 페이지 단위 삽입하면
  * 자식이 부모보다 먼저 오는 페이지가 반드시 생기고, Postgres는 그 순간 FK
- * 위반으로 즉시 실패한다(반면 sqlite/dev는 기본 FK 미강제라 조용히 통과 —
- * 완료 기준 5의 sqlite→Postgres 시나리오에서만 터지는 클래스의 버그). 그래서
+ * 위반으로 즉시 실패한다. sql.js 도 FK 를 강제해 같이 실패한다 — 예전엔 첫
+ * flush 의 export 가 foreign_keys 를 꺼서 조용히 통과했고(ticket 7e8b1d0c),
+ * 그래서 완료 기준 5의 sqlite→Postgres 시나리오에서만 터지는 버그로 보였다. 그래서
  * MigrationRunService는 Ticket 테이블 pull 시 매 행의 parent_id를 NULL로
  * 바꿔서 삽입한 뒤, 전체 pull이 끝나면 별도의 재개 가능한 backfill 패스로
  * 원래 parent_id 값을 UPDATE한다 — 이 파일은 그 사실만 문서화하고 실제 로직은
