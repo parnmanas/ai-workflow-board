@@ -183,7 +183,8 @@ export class TicketService {
 
   // ── create ────────────────────────────────────────────────────────────
 
-  async create(accountId: string, body: any, actor: TicketActor): Promise<{ ticket: Ticket; duplicate_candidates: any[] }> {
+  /** linkInTransaction lets a producer atomically attach its source record. Use only the supplied manager for DB writes. */
+  async create(accountId: string, body: any, actor: TicketActor, linkInTransaction?: (manager: EntityManager, ticket: Ticket) => Promise<void>): Promise<{ ticket: Ticket; duplicate_candidates: any[] }> {
     if (!accountId) throw new TicketInputError('account_id is required');
     body = body || {};
     const title = str(body.title);
@@ -225,10 +226,8 @@ export class TicketService {
     const pendingReason = duplicateAssessment.ambiguous
       ? `Confirm whether this ${duplicateAssessment.source_kind || 'chat'} report duplicates one of the suggested tickets.`
       : (body.pending_user_action === true ? str(body.pending_reason) : '');
-    // A report with duplicate candidates commits together with its decision
-    // rows and 'created' row — a half-written one would lose them for good.
-    // Plain tickets skip the explicit transaction: sql.js has one connection,
-    // and an open transaction there breaks any other request's save.
+    // Duplicate decisions and producer links commit with the ticket and its
+    // activity. A failed link must not leave an orphan ticket or emit an event.
     let created: ActivityLog | null = null;
     const write = async (manager: EntityManager): Promise<Ticket> => {
       const repo = manager.getRepository(Ticket);
@@ -272,9 +271,10 @@ export class TicketService {
         entity_type: 'ticket', entity_id: saved.id, ticket_id: saved.id, account_id: accountId,
         action: 'created', actor_id: actor.id || undefined, actor_name: actor.name,
       });
+      if (linkInTransaction) await linkInTransaction(manager, saved);
       return saved;
     };
-    const ticket = duplicateAssessment.candidates.length > 0
+    const ticket = linkInTransaction || duplicateAssessment.candidates.length > 0
       ? await this.dataSource.transaction(write)
       : await write(this.dataSource.manager);
     if (created) this.activityService.emitLogged([created]);

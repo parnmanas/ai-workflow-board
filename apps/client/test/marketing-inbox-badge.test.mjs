@@ -77,10 +77,10 @@ async function mountSidebar(t, { permissions, inbox }) {
   return { view, state, FakeEventSource };
 }
 
-/** WORK 섹션의 Marketing 행 — 아이콘 span(aria-hidden)을 뺀 라벨로 찾는다. */
+/** Business 섹션의 Marketing 행 — 기존 승인 배지 계약은 그대로 유지한다. */
 function marketingRow(view) {
-  const section = view.container.querySelector('section[aria-labelledby="sidebar-work"]');
-  assert.ok(section, 'WORK 섹션이 없다');
+  const section = view.container.querySelector('section[aria-labelledby="sidebar-business"]');
+  if (!section) return null;
   return [...section.querySelectorAll('button')].find((b) => {
     const span = [...b.querySelectorAll('span')].find((s) => s.getAttribute('aria-hidden') !== 'true');
     return span?.textContent?.trim() === 'Marketing';

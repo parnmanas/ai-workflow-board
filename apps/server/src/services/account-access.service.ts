@@ -56,7 +56,11 @@ export class AccountAccessService {
     const nested = path.match(/\/api\/(qa|security|actions|functions)\/(scenarios|profiles|schedules|runs|batches)\/([^/]+)/);
     const orchestration = path.match(/\/orchestration\/(missions|teams|steps)\/([^/]+)/);
     const marketing = path.match(/\/api\/marketing\/([a-z-]+)\/([^/]+)/);
-    if (marketing) {
+    const business = path.match(/\/api\/business\/companies\/([^/]+)/);
+    if (business) {
+      entity = 'BusinessCompany';
+      resourceId = business[1];
+    } else if (marketing) {
       // docs/marketing.md — 캠페인과 그 하위 객체는 각자 account_id 를 들고 있다.
       entity = ({
         campaigns: 'MarketingCampaign', channels: 'MarketingChannel', posts: 'MarketingPost',

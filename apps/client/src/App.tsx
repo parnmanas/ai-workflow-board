@@ -42,6 +42,8 @@ const MissionDetailPage = lazy(() => import('./components/orchestration/MissionD
 const OntologyGraphPage = lazy(() => import('./components/ontology/OntologyGraphPage'));
 // Marketing — 에이전트가 돌리는 제품 마케팅 캠페인과 사람의 승인함(docs/marketing.md).
 const MarketingPage = lazy(() => import('./components/marketing/MarketingPage'));
+const BusinessLayout = lazy(() => import('./components/business/BusinessLayout'));
+const BusinessPage = lazy(() => import('./components/business/BusinessPage'));
 const MarketingCampaignPage = lazy(() => import('./components/marketing/MarketingCampaignPage'));
 const MarketingContactsPage = lazy(() => import('./components/marketing/MarketingContactsPage'));
 
@@ -214,9 +216,14 @@ function AppContent() {
             <Route path="teams" element={<OrchestrationTeamsPage />} />
             <Route path="missions" element={<OrchestrationPage />} />
             <Route path="missions/:missionId" element={<MissionDetailPage />} />
-            <Route path="marketing" element={<MarketingPage />} />
-            <Route path="marketing/contacts" element={<MarketingContactsPage />} />
-            <Route path="marketing/:campaignId" element={<MarketingCampaignPage />} />
+            <Route element={<BusinessLayout />}>
+              <Route path="business" element={<BusinessPage view="overview" />} />
+              <Route path="business/operations" element={<BusinessPage view="operations" />} />
+              <Route path="business/connectors" element={<BusinessPage view="connectors" />} />
+              <Route path="marketing" element={<MarketingPage />} />
+              <Route path="marketing/contacts" element={<MarketingContactsPage />} />
+              <Route path="marketing/:campaignId" element={<MarketingCampaignPage />} />
+            </Route>
             <Route path="orchestration/*" element={<LegacyPathRedirect />} />
             <Route path="chat" element={<ChatPage />} />
             <Route path="chat/:roomId" element={<ChatPage />} />

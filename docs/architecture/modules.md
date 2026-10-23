@@ -57,6 +57,7 @@ AppModule
 ├── ArtifactRefsModule          /api/artifact-refs
 ├── OutreachModule              /api/outreach-channels/*
 ├── MarketingModule             /api/marketing/*, public /api/m/*   (docs/marketing.md)
+├── BusinessModule              /api/business/*                    (docs/business.md)
 ├── OrchestrationModule         /api/orchestration/*
 ├── OntologyModule              /api/ontology/*
 └── MigrationModule             /api/admin/migration/*, /api/migration/export/*
@@ -272,6 +273,13 @@ with the Agent table, P4c-4.)
 - Controllers: `OutreachController`
 - Providers: ingest/polling/channel services, `ClassificationBridgeService`, `AgentDispatchClassifier`, publisher, resolve notifier, release consistency
 - Exports: `ClassificationBridgeService`
+
+### `BusinessModule`
+- Imports: `SharedServicesModule`, `AgentsModule` (the shared `TicketService`); the database module registers `BusinessCompany`, `BusinessTask`, `BusinessConnection`, `BusinessEvent`, and `BusinessFormation`.
+- Controller: `BusinessController` (`/api/business/*`); authenticated `business.manage` access plus Account ownership.
+- Providers: `BusinessService`, `BusinessFormationService`; company workflows, atomic task-to-ticket creation, service/price comparison and preferences, credential references, read synchronization, reviewed doola formation submissions and activity history.
+- Connectors: capability descriptors and provider adapters under `modules/business/connectors`; see [`docs/business.md`](../business.md).
+- Formation submissions require an explicit review and confirmation; operations adapters read provider data. Existing Marketing and Ticket execution remain independent, with no runtime dispatch or manager contract changes.
 
 ### `MarketingModule`
 - Imports: Marketing{Campaign,AuditEvent,Channel,BudgetAllocation,SpendRequest,LedgerEntry,Post,Link,Metric,Feedback,Contact,EmailSend,Cycle,ApprovalNotice}, Project, RuntimeHost, OutreachChannel, OutreachInboundItem, Credential, Ticket, ChatRoom(+Participant) repositories; `OutreachModule` (`OutreachChannelService`), `AgentsModule` (`TicketService` for feedback tickets), `ChatRoomsModule` (cycle dispatch), `SharedServicesModule`

@@ -161,3 +161,9 @@ export { MarketingBrand } from './MarketingBrand';
 export { MarketingContactConsent } from './MarketingContactConsent';
 
 export { MarketingContactReply } from './MarketingContactReply';
+export { BusinessCompany } from './BusinessCompany';
+export { BusinessTask } from './BusinessTask';
+export { BusinessConnection } from './BusinessConnection';
+export { BusinessEvent } from './BusinessEvent';
+
+export { BusinessFormation } from './BusinessFormation';

@@ -1,4 +1,5 @@
 import type { AgentTemplate } from './types';
+import type { BusinessFormation, FormationApplication, FormationReferences, FormationReview, BusinessStage, BusinessCompany, BusinessCompanyInput, BusinessConnection, BusinessConnector, BusinessDetail, BusinessTask, BusinessTaskInput } from './business.types';
 import type { CliDescriptor } from './cli/catalog';
 import type { HostModelsView } from './cli/hostModels';
 import type {
@@ -2569,6 +2570,27 @@ export const api = {
     request<OntologyGraphSnapshotResponse>(
       `/ontology/graph?account_id=${encodeURIComponent(accountId)}&graph_id=${encodeURIComponent(graphId)}`,
     ),
+
+  // ─── Business (docs/business.md) ───────────────────────
+  listBusinessCompanies: () => request<BusinessCompany[]>('/business/companies'),
+  getBusinessCompany: (id: string) => request<BusinessDetail>(`/business/companies/${encodeURIComponent(id)}`),
+  createBusinessCompany: (input: BusinessCompanyInput) => request<BusinessCompany>('/business/companies', { method: 'POST', body: JSON.stringify(input) }),
+  updateBusinessCompany: (id: string, input: Partial<BusinessCompanyInput> & { revision: number }) => request<BusinessCompany>(`/business/companies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  chooseBusinessService: (id: string, stage: BusinessStage, input: { provider: string; plan: string; revision: number }) => request<BusinessCompany>(`/business/companies/${encodeURIComponent(id)}/services/${stage}`, { method: 'POST', body: JSON.stringify(input) }),
+  businessFormationReferences: (id: string, provider: string, input: { credential_id: string; environment: 'live' | 'sandbox' }) => request<FormationReferences>(`/business/companies/${encodeURIComponent(id)}/formation/${encodeURIComponent(provider)}/references`, { method: 'POST', body: JSON.stringify(input) }),
+  prepareBusinessFormation: (id: string, provider: string, input: { credential_id: string; environment: 'live' | 'sandbox'; revision: number; application: FormationApplication }) => request<BusinessFormation>(`/business/companies/${encodeURIComponent(id)}/formation/${encodeURIComponent(provider)}/prepare`, { method: 'POST', body: JSON.stringify(input) }),
+  reviewBusinessFormation: (id: string, actionId: string) => request<FormationReview>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(actionId)}/review`),
+  submitBusinessFormation: (id: string, action: BusinessFormation) => request<BusinessFormation>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(action.id)}/submit`, { method: 'POST', body: JSON.stringify({ payload_digest: action.payload_digest, revision: action.revision, confirm: true }) }),
+  discardBusinessFormation: (id: string, action: BusinessFormation) => request<{ success: boolean }>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(action.id)}`, { method: 'DELETE', body: JSON.stringify({ payload_digest: action.payload_digest }) }),
+  signBusinessFormation: (id: string, actionId: string, document_type: 'SS4' | 'FORM8821') => request<{ url: string; expires_at: string }>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(actionId)}/signature`, { method: 'POST', body: JSON.stringify({ document_type }) }),
+  listBusinessConnectors: () => request<BusinessConnector[]>('/business/connectors'),
+  listBusinessCredentials: (accountId: string) => request<Array<{ id: string; name: string; provider: string }>>(`/business/credentials?account_id=${encodeURIComponent(accountId)}`),
+  saveBusinessTask: (companyId: string, taskId: string | null, input: BusinessTaskInput & { revision: number }) => request<BusinessTask>(`/business/companies/${encodeURIComponent(companyId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ''}`, { method: taskId ? 'PATCH' : 'POST', body: JSON.stringify(input) }),
+  createBusinessTaskTicket: (companyId: string, taskId: string, revision: number) => request<{ ticket: NonNullable<BusinessTask['ticket']> }>(`/business/companies/${encodeURIComponent(companyId)}/tasks/${encodeURIComponent(taskId)}/ticket`, { method: 'POST', body: JSON.stringify({ revision }) }),
+  deleteBusinessTask: (companyId: string, taskId: string, revision: number) => request<{ success: boolean }>(`/business/companies/${encodeURIComponent(companyId)}/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE', body: JSON.stringify({ revision }) }),
+  connectBusiness: (companyId: string, provider: string, input: { credential_id: string; environment: 'live' | 'sandbox'; config: Record<string, string>; revision: number }) => request<BusinessConnection>(`/business/companies/${encodeURIComponent(companyId)}/connections/${encodeURIComponent(provider)}`, { method: 'POST', body: JSON.stringify(input) }),
+  disconnectBusiness: (companyId: string, provider: string, revision: number) => request<{ success: boolean }>(`/business/companies/${encodeURIComponent(companyId)}/connections/${encodeURIComponent(provider)}`, { method: 'DELETE', body: JSON.stringify({ revision }) }),
+  syncBusiness: (companyId: string, provider: string) => request<BusinessConnection>(`/business/companies/${encodeURIComponent(companyId)}/connections/${encodeURIComponent(provider)}/sync`, { method: 'POST' }),
 
   // ─── Marketing (docs/marketing.md) ─────────────────────
   // 목록은 접근 가능한 계정을 합치고, 상세·쓰기는 서버(AccountAccessService)가 객체의 실제 소유

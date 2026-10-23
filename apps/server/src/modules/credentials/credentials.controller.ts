@@ -25,7 +25,7 @@ import {
 import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
 import { catalogListAccountIds, catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
-import { findMarketingCredentialDependents } from './marketing-credential-dependents';
+import { findServerCredentialDependents } from './server-credential-dependents';
 import { Resource } from '../../entities/Resource';
 import { Project } from '../../entities/Project';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
@@ -212,7 +212,7 @@ export class CredentialsController {
       const outside = rows.filter((r: any) => (r.account_id ?? null) !== targetAccountId);
       if (outside.length > 0) blockers.push(`${outside.length} ${label}`);
     }
-    for (const { label, rows } of await findMarketingCredentialDependents(this.dataSource, credentialId)) {
+    for (const { label, rows } of await findServerCredentialDependents(this.dataSource, credentialId)) {
       const outside = rows.filter(row => row.account_id !== targetAccountId);
       if (outside.length) blockers.push(`${outside.length} ${label}`);
     }
@@ -558,7 +558,7 @@ export class CredentialsController {
     );
     if ('error' in agentEnv) return res.status(400).json({ error: agentEnv.error });
     if (agentEnv.agent_env && !cred.agent_env) {
-      const dependents = await findMarketingCredentialDependents(this.dataSource, id);
+      const dependents = await findServerCredentialDependents(this.dataSource, id);
       const blockers = dependents.filter(group => group.rows.length);
       if (blockers.length) return res.status(409).json({
         error: `Cannot expose this credential to agents — ${blockers.map(group => `${group.rows.length} ${group.label}`).join(', ')} still reference it. Re-point or remove them first.`,
@@ -567,7 +567,7 @@ export class CredentialsController {
     const warnings: string[] = [];
     const secretChanged = fieldsChanged && JSON.stringify(storedFields) !== JSON.stringify(existing);
     if (secretChanged) {
-      const dependents = await findMarketingCredentialDependents(this.dataSource, id);
+      const dependents = await findServerCredentialDependents(this.dataSource, id);
       const openRequests = dependents.find(group => group.label === 'open marketing payment request(s)');
       if (openRequests?.rows.length) warnings.push(
         `${openRequests.rows.length} open marketing payment request(s) use this credential. Changing its keys can prevent execution or reconciliation. Review those requests before proceeding with payments.`,
@@ -627,9 +627,9 @@ export class CredentialsController {
         return res.status(409).json({ error: 'Cannot delete a credential referenced by CLI settings or saved sessions. Change CLI defaults first; keep credentials used by existing sessions and update them in place.' });
       }
     }
-    const marketing = (await findMarketingCredentialDependents(this.dataSource, id)).filter(group => group.rows.length);
-    if (marketing.length) return res.status(409).json({
-      error: `Cannot delete this credential — ${marketing.map(group => `${group.rows.length} ${group.label}`).join(', ')} still reference it. Re-point or remove them first; resolve open payments before deleting their credentials.`,
+    const dependents = (await findServerCredentialDependents(this.dataSource, id)).filter(group => group.rows.length);
+    if (dependents.length) return res.status(409).json({
+      error: `Cannot delete this credential — ${dependents.map(group => `${group.rows.length} ${group.label}`).join(', ')} still reference it. Re-point or remove them first; resolve open payments before deleting their credentials.`,
     });
     await this.credRepo.delete({ id });
     return res.json({ success: true, id });

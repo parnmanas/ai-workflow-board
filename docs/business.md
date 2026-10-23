@@ -1,0 +1,171 @@
+# Business: 회사 설립부터 운영과 성장까지
+
+Business 대메뉴는 회사 설립, 은행, 결제, 회계, 고객지원과 기존 마케팅을 하나의 운영 흐름으로 묶는다.
+`/business`는 전체 흐름, `/business/operations`는 영역별 업무와 외부 조회 데이터,
+`/business/connectors`는 서비스 가격·기능 비교, 회사별 선택과 연결을 관리한다. 기존 `/marketing` 및 상세 URL과
+승인·예산·실행 계약은 유지하며, 같은 Business 내비게이션에서 접근한다.
+
+## 현재 제공하는 기능
+
+- 회사 등록·수정, 회사별 캠페인 연결. 새 회사에는 6개 영역, 13개의 기본 업무를 생성한다.
+- 단계 진행률, 다음에 할 수 있는 업무, 기한 초과, 최근 활동. 숫자는 저장된 업무와 조회 결과에서만 계산한다.
+- 전체 흐름의 이용 순서와 운영 영역별 진행 가이드: 준비 자료 → 실제 처리 장소와 서비스 링크 →
+  AWB에서 확인할 결과, 업무 완료 기준, 연결 제약, 공식 사용자 가이드를 화면에서 제공한다.
+  회사 등록 화면에도 관리용 등록과 실제 법인 설립 신청을 구분해 안내한다.
+- 사용자 정의 업무, 선행 조건, 담당자 이름, 기한, 진행 메모, 기존 AWB 티켓 연결 및 새 티켓 생성.
+  티켓의 실행 상태를 함께 보여 주되 회사 업무를 자동 완료하지 않는다.
+- 20개 서비스 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
+- doola Partner API로 1인 LLC(WY·DE) 신청서 작성 → 비용 검토 → 명시적 제출 → 서명 링크 → 상태 조회.
+- 커넥터별 키 등록/선택, 테스트·운영 환경, 연결 설정, 명시적인 조회, 연결 해제.
+- 마케팅의 캠페인 실행·승인함·예산·고객 피드백은 기존 마케팅 구현을 사용한다.
+
+회사를 AWB에 등록하거나 체크리스트를 완료하는 것은 법인 설립·계좌 개설·신고 완료를 뜻하지 않는다.
+doola는 파트너 계약과 키를 갖춘 사용자의 내부 설립 신청을 지원한다. 다른 설립 서비스는 외부에서
+신청하고 AWB에서 업무를 기록한다. 실제 API 조회 어댑터는 9개이며 나머지 11개는 비교·선택·외부
+진행용이다. 공급자 자체의 API 제공 여부와 AWB가 구현한 기능을 별도로 표시한다.
+KYB, 송금, 결제 생성·환불, 장부 쓰기·세무 신고, 고객 응답은 해당 서비스에서 처리한다.
+
+## 연결 가능한 서비스
+
+공식 API 문서를 2026-10-23에 확인했다. 실제 계정 키와 공급자 권한이 있어야 조회할 수 있다.
+
+| 커넥터 | 이번 구현 | 인증 / 환경 | 공식 문서 |
+| --- | --- | --- | --- |
+| doola | 1인 LLC 신청·서명 링크, 기존/신규 회사의 설립 상태, EIN 발급 여부, 연차 보고 기한 | Partner API 키, 회사 ID. sandbox/live | [Partner API](https://docs.doola.com/api/introduction), [Get company](https://docs.doola.com/api/api-reference/companies/get-a-company), [Compliance calendar](https://docs.doola.com/api/api-reference/compliance/get-a-companys-compliance-calendar) |
+| Mercury | 계좌 수, 최근 입출금 최대 40건 | 읽기 전용 API 토큰. sandbox/live | [Accounts](https://docs.mercury.com/reference/getaccounts), [Transactions](https://docs.mercury.com/reference/listtransactions) |
+| Stripe | 통화별 사용 가능·대기 잔액, 최근 순액 정산 거래 25건 | 조회 권한을 가진 secret/restricted key. sandbox/live | [Balance](https://docs.stripe.com/api/balance), [Balance transactions](https://docs.stripe.com/api/balance_transactions/list) |
+| Xero | 조직 정보, 승인된 매출 청구서 첫 페이지(최대 50건) | OAuth access token + tenant ID. live | [Accounting API](https://developer.xero.com/documentation/api/accounting/overview/) |
+| Chatwoot Cloud | 진행 중·미배정 대화 수, 인박스 목록 | 사용자 API 토큰 + Chatwoot 숫자 account ID. live | [Conversation counts](https://developers.chatwoot.com/api-reference/conversations/get-conversation-counts) |
+| Stripe Atlas | 외부 신청 화면 바로가기 | AWB에 키를 저장하지 않음 | [Atlas](https://docs.stripe.com/atlas) |
+| QuickBooks Online | 미수 청구서 메타데이터 최대 50건 | OAuth access token + realm ID. sandbox/live | [Invoice API](https://developer.intuit.com/docs/api/accounting/invoice) |
+| Intercom | 전체 상담 수, 최근 목록 30건의 상태 | 미국 리전 private app access token, API 2.17 | [Conversations](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/conversations/listconversations) |
+| Zendesk | 최근 티켓 30건의 상태 | Support OAuth read 토큰 + subdomain | [Tickets](https://developer.zendesk.com/api-reference/ticketing/tickets/tickets/) |
+| Freshdesk | 최근 30일 생성 티켓 중 30건의 상태 | API 키 + subdomain | [Tickets](https://developers.freshdesk.com/api/#list_all_tickets) |
+
+외부 진행용 설립 서비스: Stripe Atlas, Firstbase, Clemta, LegalZoom, ZenBusiness, CorpNet.
+은행·결제 외부 진행용: Relay, Brex, Wise Business, PayPal, Paddle. 이들의 API가 공급자에 있더라도
+AWB에 어댑터가 구현된 것으로 표시하지 않는다. CorpNet은 파트너 계약 후 확장 가능한 설립 API다.
+
+가격 데이터는 `connectors/service-offerings.ts` 한 곳에서 관리한다. 공식 가격표 링크·2026-10-23
+확인일·플랜·과금 단위·포함/별도 비용을 유지한다. 프로모션 대신 정가를 기본으로 표시하고 USD
+소비자 가격과 파트너 API 계약 가격을 구분한다. 실시간 견적·세금 포함 총비용·자동 최저가 정렬은
+제공하지 않는다. 가격 변경은 이 파일을 공식 출처로 갱신한다.
+
+Xero·QuickBooks는 발급된 access token을 사용하며 OAuth 동의/자동 갱신은 제공하지 않는다.
+Chatwoot은 Cloud만, Intercom은 미국 리전만 지원한다. Zendesk/Freshdesk는 검증한 단일 subdomain을
+공급자 고정 도메인에 넣으며 임의 URL·도메인·경로를 받지 않는다.
+금융 내역은 제한된 조회 샘플이며 원장 전체나 회계 대사 결과로 취급하지 않는다. 통화별 금액을 합산하지 않는다.
+
+## 내부 설립 신청
+
+공식 계약: [Company formation](https://docs.doola.com/api/formation),
+[인증·중복 방지](https://docs.doola.com/api/authentication),
+[SS-4·8821 서명](https://docs.doola.com/api/non-us-formation).
+
+1. 회사 정보를 미국 LLC로 등록하고 doola 카드의 **설립 신청 · 기록**을 연다.
+2. 파트너 키와 sandbox/live 환경을 고르고 공식 reference API에서 업종과 주정부 수수료를 가져온다.
+3. 1인 자연인 소유(100%)·책임자의 영문 이름·주소·이메일·전화, WY/DE와 사업 내용을 입력한다.
+   회사 우편 수취 주소는 소유자 주소, 사업장 주소는 등록 대리인 주소다. 다인 소유·C-Corp·다른 주는
+   외부 신청을 이용한다. SSN은 수집하지 않으므로 SS-4 서명 단계가 남는다.
+4. 서버에서 다시 확인한 주정부 수수료와 정규화된 신청 내용 전체를 검토한다. 파트너 계약 비용은
+   별도이며 일반 doola 구독 가격을 합산해 API 청구 총액으로 표시하지 않는다. 검토는 30분 유효하다.
+5. 확인 체크 후 **실제/테스트 신청 제출**. 서버는 원래 키 지문·payload digest·수수료를 대조하고
+   DB claim 후 고객 생성 → 회사 생성을 호출한다. 네트워크 I/O는 DB 트랜잭션 밖에서 수행한다.
+6. 접수 후 기존 doola 연결이 없을 때 조회 연결을 만든다. 기존 연결은 덮어쓰지 않는다. SS-4 또는
+   공급자가 추가 요청한 Form 8821 서명 링크를 발급받아 본인이 서명한다. 접수는 설립 완료가 아니다.
+   상태는 조회 버튼으로 확인하며 업무 완료는 증빙을 확인한 사람이 기록한다.
+
+`draft → submitting → submitted | uncertain`. 회사·공급자·환경별 기록은 하나이며 제출을 시도한
+신청은 수정/삭제하거나 새로 만들 수 없다. 제출 전 초안만 삭제·재작성할 수 있다. 모호한 결과는
+실패로 단정하지 않고 사용자가 원래 신청서·고정 Idempotency-Key로 재확인한다. 자동 재전송하지
+않으며 동시 제출은 CAS로 차단한다. 프로세스 중단 후 `submitting`은 2분 뒤 같은 요청으로 재확인한다.
+수수료나 원래 키가 달라진 제출 시도는 재확인도 막고 공급자 확인을 안내한다.
+
+고객 정보는 `BusinessFormation.encrypted_request`에 암호화해 저장하고 성공 확정 후 지운다.
+일반 회사 상세에는 요약만 반환한다. 본인 Account의 검토 REST만 원문을 복호화하며 `no-store`다.
+SSN·EIN 원문·고객 메시지·서명 URL은 조회 스냅샷이나 활동 기록에 넣지 않는다. HTTP body logging을
+켜도 설립 경로와 credential 쓰기의 본문은 기록하지 않는다. 서명 URL은 브라우저에만 반환한다.
+인스턴스 이관 시 원문은 기존 credential과 같은 TLS 복호화/재암호화 경로를 사용한다. 키 지문과
+신청 digest는 공급자 키에서 안정적으로 계산해 AWB 암호화 키가 달라져도 재시도 정체성을 보존한다.
+웹훅 수신·자동 주기 동기화·파트너 비용 결제 화면은 아직 제공하지 않는다.
+
+## 소유권과 저장
+
+`BusinessCompany`는 Account 소유의 별도 업무 객체다. Account를 법인으로 바꾸거나 Project를
+회사로 재해석하지 않는다. Account/Scope 선택기도 추가하지 않는다. 회사 선택기는 같은 사용자에게
+허용된 실제 회사 레코드 중 관리할 회사를 고르는 기능이다.
+
+| 엔티티 | 저장 내용 |
+| --- | --- |
+| `BusinessCompany` | 회사 기본 정보, 연결 캠페인 ID, 서비스/플랜 선택, revision |
+| `BusinessTask` | 단계별 업무, 선행 업무, 상태, 담당자·기한·메모, 티켓 참조 |
+| `BusinessConnection` | 공급자, credential 참조, 환경·외부 ID, 마지막 조회 결과·시각·오류, revision |
+| `BusinessFormation` | 환경별 신청, 검토 digest·비용, 암호화 원문, 키 지문, 제출 상태·외부 ID, revision |
+| `BusinessEvent` | 변경 주체와 활동 기록. append-only, REST 수정/삭제 없음 |
+
+전부 `account_id`를 저장하며 엔티티 배럴과 이관 레지스트리에 함께 등록한다.
+회사 상세 경로의 실제 소유자는 `AccountAccessService`가 판정한다. 서비스 조회에도 소유 조건을
+반복 적용한다. 관리자도 다른 사용자의 회사에 접근할 수 없다. 하위 업무는 회사 ID와 Account를
+동시에 검사하며, 연결 티켓·캠페인도 같은 Account에 있어야 한다.
+
+`business.manage`는 기본 admin 권한이다. 다른 사용자에게 명시적으로 부여할 수 있으며
+회사·운영 데이터·서버 커넥터를 관리한다. 마케팅을 조회·연결하려면 별도의 기존 마케팅 권한이 필요하다.
+새 티켓 생성은 `tickets.create` 권한도 필요하다. 선행 조건을 마친 미완료 업무에서 만들 수 있으며,
+저장된 회사·업무·메모·기한을 가져와 **Backlog, 에이전트 미지정**으로 생성하고 티켓 상세를 연다.
+담당 에이전트와 실행 상태는 기존 티켓 화면에서 지정한다. 업무의 담당자 이름을 RuntimeSpec으로
+해석하지 않으며, 티켓 실행 상태와 회사의 선행 조건을 자동 동기화하지 않는다.
+새 키 등록은 기존 `admin.credentials` 권한을 검사한다. 키 선택 API는 해당 Account의 서버 전용
+credential 이름·ID·provider만 반환한다.
+
+커넥터 키는 기존 Credential 암호화를 사용하며 회사 테이블에 비밀을 저장하지 않는다. Global 키,
+다른 Account 키, 다른 provider 키, `agent_env` 키는 연결할 수 없다. 연결 또는 설립 기록이 참조하는 credential의 삭제,
+다른 Account로 이동 및 에이전트 노출도 기존 credential 관리 경로에서 거부한다. 연결 해제는
+credential을 삭제하지 않는다. 조회 시에도 유효 소유권·provider·agent_env를 다시 확인한다.
+
+## 상태와 동시성
+
+- 업무 상태: `todo`, `in_progress`, `waiting`, `done`. `waiting`은 외부 심사·응답 등을 기다린다는
+  사람의 기록이다. `blocked_by`는 선행 업무에서 계산하며 별도로 저장하지 않는다.
+- 진행 시작과 완료에는 모든 선행 업무 완료가 필요하다. 순환 연결과 다른 회사의 선행 업무는
+  거부한다. 진행/완료된 후속 업무가 있는 선행 업무를 미완료로 되돌릴 수도 없다.
+- 회사 설정·업무·커넥터 설정 수정은 화면이 읽은 `revision`으로 회사 행을 조건부 갱신한 뒤
+  한 트랜잭션에서 처리한다. 충돌은 409이며 일부만 쓰지 않는다. SQLite와 PostgreSQL 모두 같은 경로다.
+- 업무에서 티켓을 만들 때도 `TicketService.create`를 사용한다. 생성·활동 기록·업무 연결을 같은
+  트랜잭션에 넣어 충돌이나 저장 오류 시 함께 되돌린다. 이미 연결된 업무의 재요청은 기존 티켓을
+  반환한다. 티켓 변경 이벤트는 커밋 이후에 발생하며 생성으로 에이전트를 바로 실행하지 않는다.
+- 커넥터는 `configured → syncing → connected | error`. 설정 저장만으로 연결됐다고 표시하지 않는다.
+- API 조회 전 연결 revision으로 단일 실행을 claim한다. 네트워크는 DB 트랜잭션 밖에서 호출한다.
+  완료 시 같은 revision에만 응답을 반영하므로 연결 변경·해제 뒤 옛 데이터가 덮어쓰이지 않는다.
+- 연속 조회는 10초, 진행 중 조회는 60초 동안 중복을 막는다. 프로세스가 끊겨 `syncing`으로 남으면
+  60초 후 사용자가 다시 조회할 수 있다. 외부 변경을 실행하지 않으므로 조회 재시도는 지출을 발생시키지 않는다.
+- 조회 실패 시 이전 성공 스냅샷과 기준 시각을 유지하고 오래된 데이터라는 표시를 붙인다.
+  공급자 오류 본문·헤더·키를 응답이나 활동 이력에 복사하지 않는다.
+- 조회는 GET 전용, 설립은 별도의 `FormationConnector`의 POST다. 공급자가 정한 HTTPS 주소만 사용하며 redirect 거부, 요청 제한 시간 15초, 응답 최대 2 MB를 적용한다.
+
+## 커넥터 추가
+
+1. `apps/server/src/modules/business/connectors/`에 `BusinessConnector` 어댑터를 추가한다.
+   `descriptor`에 영역, 환경, 키 종류, 외부 ID 필드, 조회 기능, 문서·서비스 링크를 선언한다.
+2. `service-offerings.ts`에 가격·기능·API 조건·공식 출처를 추가하고 `registry.ts`에 등록한다. 화면은 같은 descriptor로 카탈로그와 설정 폼을 렌더한다.
+3. 새 키 종류라면 `common/credential-providers.ts`에 provider와 비밀 필드를 추가한다.
+4. `sync(context)`에서 명시된 공식 API만 호출하고 `ConnectorSnapshot`으로 필요한 값만 변환한다.
+   계정 정보가 응답에 없으면 성공 수치 0을 만들어 내지 말고 실패시킨다. 페이지 제한·기간·단위는 note에 표시한다.
+5. 인증·환경·응답 매핑 테스트를 추가한다. 사용자 지정 URL이 필요해지면 기존 SSRF 가드와
+   DNS/redirect 방어를 함께 도입한다. 현재는 임의 origin·헤더를 입력받지 않는다. CS subdomain은 공급자의 고정 도메인 안에서만 선택한다.
+
+설립 어댑터는 `FormationConnector`와 `BusinessFormationService`의 검토/제출 경로를 사용한다. 쓰기 커넥터를 확장할 때는 조회 함수에 POST를 끼워 넣지 않는다. 승인 대상 payload 고정,
+idempotency, 실행 claim, 모호한 결과 대조 및 감사 기록을 별도 계약으로 먼저 설계해야 한다.
+기존 마케팅 결제/외부 발신의 승인 경로도 유지한다.
+
+## 검증
+
+- `npm run build`
+- 서버: `node --test --test-force-exit test/business-http.test.mjs test/business-connectors.test.mjs test/business-formation.test.mjs`
+- 클라이언트: `node --import tsx --test --test-force-exit test/business-page.test.mjs`
+- 브라우저: 루트에서 `npm run test:e2e:business -w client` (서버 dist가 먼저 필요)
+
+HTTP 회귀는 임시 DB에서 소유권·권한·선행 조건·동시 수정·키 보호와 조회 중 연결 변경을 검증한다.
+설립은 초안 암호화·이관·명시적 확인·키 변경·가격 변경·동시 제출·모호한 결과와 같은 키 재시도·원문 삭제·HTTP 로그 제외를 검증한다. 브라우저는 비교표와 신청→검토→제출→서명 링크를 1440/390/320px에서 확인한다.
+티켓 생성은 중복 요청, 링크 저장 실패 시 티켓·활동의 롤백, 커밋 이후 이벤트 발생도 확인한다.
+어댑터·브라우저 테스트는 명시적인 공급자 응답 fixture를 사용한다. 실제 공급자 sandbox/운영 키를
+이용한 승인·호출 검증을 대체하지 않는다.

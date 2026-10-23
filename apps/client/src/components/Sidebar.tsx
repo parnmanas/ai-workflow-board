@@ -154,6 +154,7 @@ export default function Sidebar({
   // Marketing(docs/marketing.md) — 캠페인 운영(manage) 또는 지출 승인(approve_spend) 중 하나면 행을 그린다.
   // 배지는 이 사용자가 처리할 수 있는 승인 대기 수(서버 GET /api/marketing/inbox 가 계정을 합쳐 센다).
   const canUseMarketing = hasPermission('marketing.manage') || hasPermission('marketing.approve_spend');
+  const canUseBusiness = hasPermission('business.manage');
   const marketingPending = useMarketingInbox(canUseMarketing).summary?.total ?? 0;
   // Knowledge — 공용·프로젝트 메모리와 skill 배정은 Agent 를 관리하는 사람이 다룬다(서버 MANAGE_AGENTS).
   const canManageKnowledge = hasPermission('admin.agents');
@@ -192,16 +193,6 @@ export default function Sidebar({
       // 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
       title: 'Work',
       items: [
-        ...(canUseMarketing
-          ? [{
-            key: 'marketing',
-            path: `${basePath}/marketing`,
-            label: 'Marketing',
-            icon: 'M',
-            badge: marketingPending,
-            badgeLabel: `승인 대기 ${marketingPending}건`,
-          }]
-          : []),
         // P4c-4: AI Agents 표면 제거 (Agent 테이블 삭제) — 실행 주체는
         // Sessions/Runtime Hosts 에서 본다.
         // Terminal(Runtime Host 셸) — 기본 admin 전용 권한이라 없는 사용자에게는 행 자체를
@@ -212,6 +203,26 @@ export default function Sidebar({
             path: `${basePath}/terminals`,
             label: 'Terminals',
             icon: 'T',
+          }]
+          : []),
+      ],
+    },
+    {
+      title: 'Business',
+      items: [
+        ...(canUseBusiness ? [
+          { key: 'business', path: '/business', label: '회사 · 전체 흐름', icon: '◈', exact: true },
+          { key: 'business-operations', path: '/business/operations', label: '운영 워크플로', icon: '↗' },
+          { key: 'business-connectors', path: '/business/connectors', label: '커넥터', icon: '⌘' },
+        ] : []),
+        ...(canUseMarketing
+          ? [{
+            key: 'marketing',
+            path: `${basePath}/marketing`,
+            label: 'Marketing',
+            icon: 'M',
+            badge: marketingPending,
+            badgeLabel: `승인 대기 ${marketingPending}건`,
           }]
           : []),
       ],
@@ -1270,6 +1281,7 @@ export default function Sidebar({
 
         <div style={{ paddingBottom: 8 }}>
           {featureSections.map((section) => {
+            if (section.title === 'Business' && !section.items.length) return null;
             const sKey = section.title.toLowerCase();
             const isCollapsed = sectionCollapsed[sKey] ?? false;
             return (

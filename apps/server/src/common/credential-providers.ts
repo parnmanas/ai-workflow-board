@@ -17,6 +17,15 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   github: { label: 'GitHub', fields: ['token'] },
   gitlab: { label: 'GitLab', fields: ['token'] },
   cloudflare: { label: 'Cloudflare', fields: ['api_token'] },
+  doola: { label: 'doola Partner', fields: ['api_key'] },
+  mercury: { label: 'Mercury', fields: ['api_token'] },
+  stripe: { label: 'Stripe', fields: ['secret_key'] },
+  xero: { label: 'Xero', fields: ['access_token'] },
+  chatwoot: { label: 'Chatwoot Cloud', fields: ['api_token'] },
+  quickbooks: { label: 'QuickBooks Online', fields: ['access_token'] },
+  intercom: { label: 'Intercom', fields: ['access_token'] },
+  zendesk: { label: 'Zendesk Support OAuth', fields: ['access_token'] },
+  freshdesk: { label: 'Freshdesk', fields: ['api_key'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
   // OAuth 2.0 client from Google Cloud Console. refresh_token is optional but
   // an agent cannot call a Google API with the client pair alone — it needs a

@@ -28,6 +28,8 @@ const REDACTED_BODY_KEYS = new Set([
 
 const MAX_PAYLOAD_BYTES = 10_000;
 const CREDENTIAL_REVEAL_PATH = /^\/api\/credentials\/[^/]+\/reveal\/?$/;
+// Formation requests/reviews contain founder addresses; signatures return bearer-like URLs.
+const BUSINESS_FORMATION_PATH = /^\/api\/business\/companies\/[^/]+\/formations?\//;
 
 // Body capture is the dominant CPU cost in this interceptor: capPayload
 // runs `JSON.stringify(responseBody)` on EVERY HTTP response that lands
@@ -111,7 +113,8 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     // secret fields. Key-based sanitizing cannot safely cover arbitrary
     // providers, so never capture either body for this route, even when an
     // operator temporarily enables HTTP body logging.
-    const captureBodies = CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path);
+    const credentialWrite = ['POST', 'PATCH'].includes(method) && /^\/api\/credentials(?:\/|$)/.test(req.path);
+    const captureBodies = !credentialWrite && CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path) && !BUSINESS_FORMATION_PATH.test(req.path);
 
     const reqHeaders = sanitizeHeaders(req.headers as any);
     // capPayload runs JSON.stringify on the entire body before truncating —

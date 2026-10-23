@@ -10,7 +10,7 @@ const [sidebarSource, appSource, appLayoutSource, chatPageSource] = await Promis
 ]);
 
 test('sidebar keeps the chat-first category order', () => {
-  const labels = ["title: 'Work'", "title: 'Automation'", "title: 'Knowledge'", "title: 'Quality'", "title: 'Settings'"];
+  const labels = ["title: 'Work'", "title: 'Business'", "title: 'Automation'", "title: 'Knowledge'", "title: 'Quality'", "title: 'Settings'"];
   let previousIndex = -1;
 
   for (const label of labels) {
@@ -119,13 +119,16 @@ test('보드가 없어졌다: /tickets · /projects 라우트가 있고 예전 /
   assert.doesNotMatch(appLayoutSource, /\/boards/);
 });
 
-test('Marketing 은 WORK 의 한 줄이고 권한이 있는 사람에게만 보이며, 목록 · 연락처 · 캠페인 라우트가 있다', () => {
+test('Business groups company workflows and Marketing while preserving permissions and existing routes', () => {
   // docs/marketing.md — 캠페인 운영(marketing.manage) 또는 지출 승인(marketing.approve_spend) 중 하나면 행을 그린다.
   assert.match(sidebarSource, /hasPermission\('marketing\.manage'\) \|\| hasPermission\('marketing\.approve_spend'\)/);
-  const work = sidebarSource.indexOf("title: 'Work'");
+  const work = sidebarSource.indexOf("title: 'Business'");
   const automation = sidebarSource.indexOf("title: 'Automation'");
   const marketingRow = sidebarSource.indexOf("key: 'marketing'");
-  assert.ok(work < marketingRow && marketingRow < automation, 'Marketing 행은 WORK 섹션 안에 있다');
+  assert.ok(work < marketingRow && marketingRow < automation, 'Marketing 행은 Business 섹션 안에 있다');
+  assert.match(sidebarSource.slice(work, automation), /canUseBusiness/);
+  for (const path of ['business', 'business/operations', 'business/connectors']) assert.ok(appSource.includes(`path="${path}"`));
+  assert.ok(appSource.includes('element={<BusinessLayout />}'));
   assert.match(sidebarSource.slice(work, automation), /\.\.\.\(canUseMarketing\s*\?/, '권한이 없으면 행 자체를 그리지 않는다');
   // 배지는 서버 승인함 합계(이 사용자가 처리할 수 있는 것) — 렌더 계약은 marketing-inbox-badge.test.mjs 가 본다.
   assert.match(sidebarSource, /useMarketingInbox\(canUseMarketing\)/);
