@@ -200,7 +200,7 @@ type SqljsTurn = {
   startedAt: number;
   /** 차례를 연 호출 위치. 기록하는 동안, 차례가 넘어갈 때까지만 있다(watchSqljsTurns 참고). */
   site?: { stack?: string };
-  /** 오래 쥔 차례 경고를 남겼는가 — 차례마다 한 번이다. */
+  /** 오래 쥔 차례의 첫 경고를 남겼는가. */
   warned: boolean;
 };
 
@@ -214,10 +214,10 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 
 // ── 오래 쥔 차례 경고 (ticket 61622dbb) ──
 // 차례를 쥔 콜백이 다른 체인의 쓰기를 기다리거나(데드락) 느린 I/O 를 하면, 그 연결의 모든 쓰기가 소리 없이 멈춘다.
-// 그래서 차례마다 이름과 시작 시각을 남기고, 한 차례가 SQLJS_TURN_WARN_MS(기본 30초) 넘게 잡혀 있으면 경고를 한 번
+// 그래서 차례마다 이름과 시작 시각을 남기고, 한 차례가 SQLJS_TURN_WARN_MS(기본 30초) 넘게 잡혀 있으면 첫 경고를
 // 남긴다 — 쥔 일, 쥔 시간, 기다리는 일 수, 차례를 연 호출 위치. 경고한 차례가 풀리면 걸린 시간을 한 줄 더 남긴다.
 // 풀림 줄이 끝내 없으면 데드락이고, 있으면 느린 콜백이다. 쥔 동안 감시가 보지 못한 긴 차례(이벤트 루프가 막혔거나 두
-// tick 사이에 끝났다)는 풀릴 때 알린다 — 기준을 넘긴 차례는 어느 쪽으로든 한 번 알려진다.
+// tick 사이에 끝났다)는 풀릴 때 알린다 — 기준을 넘긴 차례는 어느 쪽으로든 알려진다.
 //
 // 뒤에서 기다리는 차례 (ticket c495ceaa): 데드락에서 쥔 콜백이 기다리는 다른 체인의 쓰기는 이 차례 뒤에 줄 서 있다. 그래서
 // 쥔 동안 남기는 경고에 기다리는 차례들을 싣는다 — 줄에서의 자리, 이름, 기다린 시간, 호출 위치. 그 쓰기는 다른 체인이 그것을
@@ -233,7 +233,10 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 //     (sqljsStatementLabel) — 같은 테이블이면 한 항목이다.
 //   - 무리마다 처음 나타난 순서대로 SQLJS_WAITING_TURNS_IN_WARNING 개 항목을 싣고, 나머지는 수로만 남긴다. 묶으려면 차례마다
 //     위치를 꾸며야 해서(수십 µs) 무리마다 앞의 SQLJS_WAITING_TURNS_EXAMINED 개만 살펴본다 — 경고는 tick 안에서 만든다.
-// 그래서 그 쓰기가 목록에 없을 수 있다 — 경고 뒤에 줄 섰거나(경고는 차례마다 한 번이다), 자기 무리에서 다른 항목 다섯이
+// 첫 경고 뒤 새 차례가 줄 서면, 그 첫 차례가 기준 시간만큼 기다린 뒤 추가 보고한다(ticket ea04642b).
+// 직전 보고 이후 줄 선 차례만 같은 묶기/검사 한도로 싣는다. 보고 간 최소 간격은 기준값부터 매번 두 배로 늘린다.
+// 새 차례가 없으면 반복하지 않는다. 긴 마이그레이션도 알림 대상이지만, 계속 유입되어도 로그는 지수 간격으로 제한된다.
+// 그래서 그 쓰기가 목록에 없을 수 있다 — 아직 추가 보고 시각 전이거나, 자기 무리에서 다른 항목 다섯이
 // 앞서거나, 살펴본 범위 밖에 있을 때. 목록에 없다고 데드락이 아닌 것은 아니다. 풀릴 때 남기는 보고에는 싣지 않는다 — 풀리는
 // 차례는 데드락이 아니었고, 뒤의 쓰기는 곧 시작한다. 기다리는 차례의 위치도 줄 설 때 기록한 것이라(아래 — 호출 위치),
 // 플래그 없이는 데드락의 첫 경고 전에 줄 선 쓰기에 위치가 없다.
@@ -250,7 +253,7 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 // 호출 위치(stack)는 늘 걷지 않는다. 쓰기 차례 하나가 100–450µs 인데 걷는 데 6–11µs 가 든다(티켓 61622dbb 측정).
 // SQLJS_TURN_STACKS=1 이면 처음부터 걷고, 아니면 그 연결에서 첫 경고를 남긴 뒤부터 재시작할 때까지 걷는다 — 긴 마이그레이션
 // 같은 정당한 긴 차례 하나로도 켜진다. 반복되는 느린 콜백은 다음 경고에 위치가 실린다. 데드락은 그 뒤로 시작하는 차례가
-// 없어서 첫 경고뿐이다 — 플래그를 켜고 재현해야 위치가 나온다.
+// 없어 쥔 쪽의 위치는 플래그를 켜고 재현해야 나온다. 첫 경고 뒤 줄 선 쓰기는 플래그 없이도 추가 보고에 위치가 실린다.
 // 위치는 차례를 연 순간의 stack 이다. transaction · save · export 차례에는 그것을 부른 앱 코드가 남는다. 쓰기 문장 차례는
 // TypeORM 이 문장을 보내는 자리라서, TypeORM 안에서 async stack 이 끊기는 경로(repo.insert() · upsert())는 TypeORM 프레임만 남는다
 // — 그래서 문장 차례의 이름에 대상 테이블을 붙인다.
@@ -332,16 +335,18 @@ type SqljsWaitingEntry = { position: number; label: string; waitedMs: number; fr
  * 쥔 차례 뒤에서 기다리는 차례들 — 그 차례가 시작될 때 이미 기다리던 무리(waiting 의 앞 `alreadyWaiting` 개)와 그 뒤에 줄 선
  * 무리로 나누고, 무리마다 같은 차례를 한 항목으로 묶어 처음 나타난 순서대로 SQLJS_WAITING_TURNS_IN_WARNING 개를 싣는다. 싣지
  * 못한 차례는 수로 남긴다 — 무리의 모든 차례가 어느 항목의 수나 그 수에 든다(위 주석 — 왜 나누고 묶는가).
+ * 추가 보고는 alreadyWaiting=0 과 reported(직전 보고 때의 대기 수)를 넘겨, 그 뒤에 줄 선 차례만 싣는다.
  */
-function sqljsWaitingTurns(waiting: ReadonlySet<SqljsTurn>, alreadyWaiting: number): string {
+function sqljsWaitingTurns(waiting: ReadonlySet<SqljsTurn>, alreadyWaiting: number, reported?: number): string {
   const now = performance.now();
   const groups = [
     { title: 'Already waiting when it started', size: alreadyWaiting, examined: 0, entries: new Map<string, SqljsWaitingEntry>() },
-    { title: 'Queued after it started', size: waiting.size - alreadyWaiting, examined: 0, entries: new Map<string, SqljsWaitingEntry>() },
+    { title: reported !== undefined ? 'Queued since the previous warning' : 'Queued after it started', size: waiting.size - alreadyWaiting - (reported ?? 0), examined: 0, entries: new Map<string, SqljsWaitingEntry>() },
   ];
   let position = 0;
   for (const turn of waiting) {
     position += 1;
+    if (position <= (reported ?? 0)) continue;
     const group = groups[position <= alreadyWaiting ? 0 : 1];
     if (group.examined === SQLJS_WAITING_TURNS_EXAMINED) {
       if (group === groups[1]) break;
@@ -411,11 +416,18 @@ function watchSqljsTurns(connection: string) {
   /** current 가 시작될 때 이미 기다리던 차례 수 — 쥔 동안 waiting 의 앞에서 그만큼이 그 차례가 시작되기 전에 줄 섰다. */
   let alreadyWaiting = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
+  // 숫자만 보관한다 — 넘어간 차례나 호출 위치를 감시가 붙잡지 않는다.
+  let reportedWaiting = 0;
+  let firstUnreportedAt: number | null = null;
+  let lastReportAt = 0;
+  let repeatDelay = warnMs;
 
   /** 기준을 넘겨 쥔 차례를 알린다 — 그 뒤로 이 연결은 차례를 연 호출 위치를 기록한다. */
   const warnLongTurn = (turn: SqljsTurn, heldMs: number, released: boolean) => {
     turn.warned = true;
     recordSites = true;
+    reportedWaiting = waiting.size;
+    lastReportAt = performance.now();
     warnSqljsQueue(() => sqljsLongTurnWarning(connection, turn, heldMs, waiting, alreadyWaiting, released));
   };
 
@@ -428,8 +440,22 @@ function watchSqljsTurns(connection: string) {
       }
       return;
     }
-    if (turn.warned) return;
-    const heldMs = performance.now() - turn.startedAt;
+    const now = performance.now();
+    const heldMs = now - turn.startedAt;
+    if (turn.warned) {
+      if (firstUnreportedAt === null || now - firstUnreportedAt < warnMs || now - lastReportAt < repeatDelay) return;
+      const previouslyReported = reportedWaiting;
+      reportedWaiting = waiting.size;
+      firstUnreportedAt = null;
+      lastReportAt = now;
+      repeatDelay *= 2;
+      // 실패한 보고도 간격을 소비한다 — 망가진 console/formatter 를 매 tick 재시도하지 않는다.
+      warnSqljsQueue(() =>
+        `[DB] sql.js write queue (${connection}): the turn opened by "${turn.label}" is still held after ${sqljsSeconds(heldMs)}, ` +
+        `${waiting.size} waiting behind it; ${waiting.size - previouslyReported} queued since the previous warning.\n` +
+        sqljsWaitingTurns(waiting, 0, previouslyReported));
+      return;
+    }
     if (heldMs >= warnMs) warnLongTurn(turn, heldMs, false);
   };
   // 주기는 큐를 건 비동기 문맥에서 건다(위 주석 — 차례를 시작한 요청의 문맥이 아니다).
@@ -446,12 +472,16 @@ function watchSqljsTurns(connection: string) {
     queued(turn: SqljsTurn) {
       turn.queuedAt = performance.now();
       waiting.add(turn);
+      if (current?.warned && firstUnreportedAt === null) firstUnreportedAt = turn.queuedAt;
     },
     begin(turn: SqljsTurn) {
       waiting.delete(turn);
       turn.startedAt = performance.now();
       current = turn;
       alreadyWaiting = waiting.size;
+      reportedWaiting = 0;
+      firstUnreportedAt = null;
+      repeatDelay = warnMs;
       if (timer) return;
       try {
         timer = startTicking();
