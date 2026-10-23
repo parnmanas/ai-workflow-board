@@ -167,3 +167,8 @@ export { BusinessConnection } from './BusinessConnection';
 export { BusinessEvent } from './BusinessEvent';
 
 export { BusinessFormation } from './BusinessFormation';
+export { BusinessTrademark } from './BusinessTrademark';
+export { BusinessTrademarkMail } from './BusinessTrademarkMail';
+export { BusinessTrademarkIntegration } from './BusinessTrademarkIntegration';
+export { BusinessTrademarkRecord } from './BusinessTrademarkRecord';
+export { BusinessTrademarkAction } from './BusinessTrademarkAction';

@@ -28,8 +28,8 @@ const REDACTED_BODY_KEYS = new Set([
 
 const MAX_PAYLOAD_BYTES = 10_000;
 const CREDENTIAL_REVEAL_PATH = /^\/api\/credentials\/[^/]+\/reveal\/?$/;
-// Formation requests/reviews contain founder addresses; signatures return bearer-like URLs.
-const BUSINESS_FORMATION_PATH = /^\/api\/business\/companies\/[^/]+\/formations?\//;
+// Formation and trademark records contain personal data, legal correspondence and private signing URLs.
+const BUSINESS_PRIVATE_PATH = /^\/api\/business\/companies\/[^/]+\/(?:formations?\/|trademarks(?:\/|$))/;
 
 // Body capture is the dominant CPU cost in this interceptor: capPayload
 // runs `JSON.stringify(responseBody)` on EVERY HTTP response that lands
@@ -94,6 +94,8 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     // Skip SSE/streaming endpoints (headers already sent — interceptor tap causes crash)
     if (req.path.startsWith('/api/events')) return next.handle();
     if (req.path.startsWith('/mcp')) return next.handle();
+    // OAuth callbacks contain authorization codes in their query; signed webhooks contain legal correspondence.
+    if (req.path.startsWith('/api/business-integrations/')) return next.handle();
     // Skip log-query endpoints. Logging the query itself stuffs the returned
     // log array into `resBody`, which on the NEXT poll gets stuffed into
     // *that* request's log, and so on — the buffer grows quadratically until
@@ -114,7 +116,7 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     // providers, so never capture either body for this route, even when an
     // operator temporarily enables HTTP body logging.
     const credentialWrite = ['POST', 'PATCH'].includes(method) && /^\/api\/credentials(?:\/|$)/.test(req.path);
-    const captureBodies = !credentialWrite && CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path) && !BUSINESS_FORMATION_PATH.test(req.path);
+    const captureBodies = !credentialWrite && CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path) && !BUSINESS_PRIVATE_PATH.test(req.path);
 
     const reqHeaders = sanitizeHeaders(req.headers as any);
     // capPayload runs JSON.stringify on the entire body before truncating —

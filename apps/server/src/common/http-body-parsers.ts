@@ -31,6 +31,7 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   const emailInboundRaw = raw({ type: () => true, limit: '30mb' });
   app.use('/api/m/email', (req: any, res: any, next: any) =>
     (String(req.path || '').endsWith('/inbound') ? emailInboundRaw : emailEventsRaw)(req, res, next));
+  app.use('/api/business-integrations/webhooks', raw({ type: () => true, limit: '1mb' }));
 
   // 매니저의 세션 RPC 응답(docs/agent-sessions.md) — 아래 10MB 보다 큰 답이 정상이다. 이미지 한 장의
   // 상한이 8MiB(매니저 MAX_IMAGE_BYTES · LOCAL_IMAGE_MAX_BYTES)라 base64 로 10.7MiB 가 되고, 기록은 6MiB 까지

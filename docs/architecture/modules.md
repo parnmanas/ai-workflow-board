@@ -57,7 +57,7 @@ AppModule
 ├── ArtifactRefsModule          /api/artifact-refs
 ├── OutreachModule              /api/outreach-channels/*
 ├── MarketingModule             /api/marketing/*, public /api/m/*   (docs/marketing.md)
-├── BusinessModule              /api/business/*                    (docs/business.md)
+├── BusinessModule              /api/business/*, /api/business-integrations/* (docs/business.md)
 ├── OrchestrationModule         /api/orchestration/*
 ├── OntologyModule              /api/ontology/*
 └── MigrationModule             /api/admin/migration/*, /api/migration/export/*
@@ -113,7 +113,7 @@ and events reach it without an import edge.
 
 | Imports | Controllers | Notes |
 |---|---|---|
-| `TypeOrmModule.forFeature([ApiKey])`, `AgentsModule`, `McpServicesModule`, `ChatRoomsModule`, `ActionsModule`, `QaScenarioModule`, `BuildsModule`, `DeploymentsModule`, `SecurityProfileModule`, `AutomationScheduleModule`, `WorkflowFunctionsModule`, `ArtifactRefsModule`, `OutreachModule`, `OrchestrationModule`, `AgentManagerModule`, `OntologyModule`, `VoiceModule`, `AgentSessionsModule` | `McpController` | Streamable HTTP transport at `/mcp`. Builds `ToolContext` with DI-injected services and hands it to `registerAllTools(server, ctx)`. |
+| `TypeOrmModule.forFeature([ApiKey])`, `AgentsModule`, `McpServicesModule`, `ChatRoomsModule`, `ActionsModule`, `QaScenarioModule`, `BuildsModule`, `DeploymentsModule`, `SecurityProfileModule`, `AutomationScheduleModule`, `WorkflowFunctionsModule`, `ArtifactRefsModule`, `OutreachModule`, `OrchestrationModule`, `AgentManagerModule`, `OntologyModule`, `VoiceModule`, `AgentSessionsModule`, `MarketingModule`, `BusinessModule` | `McpController` | Streamable HTTP transport at `/mcp`. Builds `ToolContext` with DI-injected services and hands it to `registerAllTools(server, ctx)`. |
 
 ### `McpServicesModule`
 
@@ -292,11 +292,12 @@ with the Agent table, P4c-4.)
 - Exports: `ClassificationBridgeService`
 
 ### `BusinessModule`
-- Imports: `SharedServicesModule`, `AgentsModule` (the shared `TicketService`); the database module registers `BusinessCompany`, `BusinessTask`, `BusinessConnection`, `BusinessEvent`, and `BusinessFormation`.
-- Controller: `BusinessController` (`/api/business/*`); authenticated `business.manage` access plus Account ownership.
-- Providers: `BusinessService`, `BusinessFormationService`; company workflows, atomic task-to-ticket creation, service/price comparison and preferences, credential references, read synchronization, reviewed doola formation submissions and activity history.
+- Imports: `SharedServicesModule`, `AgentsModule` (the shared `TicketService`); the database module registers `BusinessCompany`, `BusinessTask`, `BusinessConnection`, `BusinessEvent`, `BusinessFormation`, `BusinessTrademark`, `BusinessTrademarkMail`, `BusinessTrademarkIntegration`, `BusinessTrademarkRecord`, and `BusinessTrademarkAction`.
+- Controllers: `BusinessController`, `BusinessTrademarkController`, `BusinessTrademarkIntegrationsController` (`/api/business/*`); authenticated `business.manage` access plus Account ownership. `BusinessTrademarkIntegrationCallbacksController` exposes single-use browser-bound OAuth callbacks and signed webhooks at `/api/business-integrations/*`.
+- Providers: `BusinessService`, `BusinessFormationService`, `BusinessTrademarkService`, `BusinessTrademarkIntegrationsService`; company workflows, atomic task-to-ticket creation, service/price comparison and preferences, credential references, read synchronization, reviewed doola formation submissions, encrypted trademark records, reviewed Resend/Gmail/Microsoft correspondence, DocuSign signature requests and downloads, automatic inbound/TSDR/Clio synchronization, OAuth token refresh and activity history.
+- Exports: all four services to `McpModule`. The full MCP profile exposes 43 Business tools over the same services; standalone constructs the same services without a duplicate poller. Shared access checks enforce live Host/Account ownership, active owner `business.manage`, and full-scope DB keys for writes. Browser consent and provider-signed callbacks remain transport-specific. `business-mcp.test.mjs` guards REST/MCP coverage and executes every tool over HTTP.
 - Connectors: capability descriptors and provider adapters under `modules/business/connectors`; see [`docs/business.md`](../business.md).
-- Formation submissions require an explicit review and confirmation; operations adapters read provider data. Existing Marketing and Ticket execution remain independent, with no runtime dispatch or manager contract changes.
+- Formation submissions and attorney email require an explicit review and confirmation; operations adapters read provider data. Trademark filing, personal signatures and legal decisions use the provider or counsel. Six trademark integration adapters implement Resend Receiving, Gmail, Microsoft Graph, DocuSign, Clio Manage and USPTO TSDR. Shared leases, encrypted tokens/records/reviews, background read synchronization and provider-specific webhooks are independent from confirmed external writes. MCP confirmation is the agent caller's assertion, not authenticated human approval; existing Marketing human-only approvals remain intact. See [`docs/trademarks.md`](../trademarks.md). Task-to-ticket creation requires an explicit user request and records the returned ticket in both MCP session and Agent Manager capture; other Business tools do not dispatch tickets.
 
 ### `MarketingModule`
 - Imports: Marketing{Campaign,AuditEvent,Channel,BudgetAllocation,SpendRequest,LedgerEntry,Post,Link,Metric,Feedback,Contact,EmailSend,Cycle,ApprovalNotice}, Project, RuntimeHost, OutreachChannel, OutreachInboundItem, Credential, Ticket, ChatRoom(+Participant) repositories; `OutreachModule` (`OutreachChannelService`), `AgentsModule` (`TicketService` for feedback tickets), `ChatRoomsModule` (cycle dispatch), `SharedServicesModule`

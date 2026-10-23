@@ -80,6 +80,14 @@ test('resolveTicketRef CREATE: ticket id + title come from the result object', (
   assert.deepEqual(ref, { action: 'create', ticket_id: 'T-new', title: 'New One' });
 });
 
+test('Business task ticket creation captures the returned Ticket, never the company or task ID', () => {
+  const context = trackedTicketTool('mcp__awb__create_business_task_ticket', { company_id: 'company-1', task_id: 'task-1', user_requested_ticket: true });
+  const result = { id: 'ticket-1', title: '[Orbit] Prepare filing', status: 'backlog' };
+  assert.deepEqual(resolveTicketRef(context, result, false), { action: 'create', ticket_id: 'ticket-1', title: result.title });
+  assert.equal(resolveTicketRef(context, { error: 'Forbidden' }, true), null);
+  assert.equal(trackedTicketTool('mcp__awb__save_business_task', { company_id: 'company-1', task_id: 'task-1' }), null);
+});
+
 test('resolveTicketRef add_comment: uses INPUT ticket_id, never the comment result id', () => {
   const ctx = trackedTicketTool('mcp__awb__add_comment', { ticket_id: 'T-real', content: 'hi' });
   // add_comment returns the COMMENT (its own id + ticket_id, no title).

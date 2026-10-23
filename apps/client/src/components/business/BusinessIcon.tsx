@@ -1,6 +1,8 @@
 import React from 'react';
 
 const paths: Record<string, React.ReactNode> = {
+  trademark: <><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z" /><path d="M8 9h8m-4 0v7" /></>,
+  mail: <><rect x="3" y="5" width="18" height="14" rx="3" /><path d="m3 7 9 6 9-6" /></>,
   formation: <><path d="M4 21V7l8-4 8 4v14M2 21h20M9 21v-5h6v5" /><path d="M8 9h1m6 0h1M8 12h1m6 0h1" /></>,
   banking: <><path d="m3 9 9-6 9 6H3ZM3 21h18M5 18v-6m7 6v-6m7 6v-6" /></>,
   payments: <><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M3 10h18M7 15h3" /></>,

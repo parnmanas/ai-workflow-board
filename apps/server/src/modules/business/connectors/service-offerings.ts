@@ -5,6 +5,26 @@ const checked = '2026-10-23';
 const price = (url: string, extra: string, plans: ServiceOffering['pricing']['plans']): ServiceOffering['pricing'] => ({ url, extra, plans, checked_at: checked });
 const plan = (id: string, name: string, price: string, detail: string) => ({ id, name, price, detail });
 export const SERVICE_OFFERINGS: Record<string, ServiceOffering> = {
+  uspto: {
+    best_for: '공식 미국 상표 검색·출원·사건 확인', features: ['Trademark Search · ID Manual', 'Trademark Center 온라인 출원', 'TSDR 사건·문서 조회'],
+    api_access: 'public', api_note: 'TSDR은 키 기반 상태·문서 조회 API입니다. 공개 출원 제출 API는 확인하지 못했습니다. AWB 상표별 커넥터에서 TSDR 상태·문서를 자동 수집하며 공식 출원은 Trademark Center 또는 대리인에게 진행합니다.', external_steps: ['계정 인증 · 본인 서명 · 접수', '해외 본점 출원인은 미국 변호사 대리', '심사 대응 · 사용증명 · 유지 신고'],
+    pricing: price('https://www.uspto.gov/trademarks/trademark-fee-information', 'Section 1/44 기본 요건 충족 기준. 정보 누락 $100/류, 자유기재 $200/류 등 추가료 가능. 사용증명 $150/류, 연장 $125/류 별도. 변호사 비용 별도이며 Madrid 수수료는 다릅니다.', [plan('base', '미국 기본 출원', '$350 / 상품·서비스류', '관납료 · 심사 결과나 등록을 보장하지 않음')]),
+  },
+  legalzoom_trademark: {
+    best_for: '검색·변호사 검토·출원 대행을 묶어서 진행', features: ['연방 · common-law 검색', '변호사 상품류 선정 · 제출', '일부 절차적 Office Action 대응'],
+    api_access: 'unverified', api_note: '공개 상표 출원 API는 확인되지 않았습니다. 온라인 신청 후 담당 변호사와 진행합니다.', external_steps: ['범위 · 견적 · 수임계약 확인', '본인 서명 · 추가 자료 제출', '실체적 거절 대응 비용 별도 확인'],
+    pricing: price('https://www.legalzoom.com/business/intellectual-property/trademark-registration-overview.html', '관납료 별도. 모니터링은 3개월 후 $249/년 자동 갱신 조건을 확인하세요. 포함되는 보정 대응과 추가 법률 비용을 계약에서 확인하세요.', [plan('premium', 'Premium Trademark', '$899 + 관납료', '변호사 지원 출원 패키지')]),
+  },
+  trademarkia: {
+    best_for: '변호사 출원 지원과 국제 상표 상담', features: ['담당 변호사 · 사전 상담', '검색 · 모니터링 옵션', '국제 상표 지원'],
+    api_access: 'partner', api_note: '개발자용 데이터 API 제휴를 안내합니다. 이것이 출원 제출 API를 뜻하지는 않으며 제출 API 계약은 확인이 필요합니다.', external_steps: ['온라인 신청 · 변호사 수임', '계약 · 서명', '관할·상품류별 범위 확인'],
+    pricing: price('https://www.trademarkia.com/', '관납료 별도. 상품류별 요금과 추가 법률업무는 견적 확인. Entry 모니터링 1개월/Premium 1년 이후 $99/분기 조건을 확인하세요.', [plan('entry', 'Entry', '$499 + 관납료', '기본 변호사 지원'), plan('standard', 'Standard', '$599 + 관납료', '확장 법률 지원'), plan('premium', 'Premium', '$699 + 관납료', '확장 검색 · 모니터링')]),
+  },
+  trademark_engine: {
+    best_for: '온라인 자료 입력과 변호사 검토 출원', features: ['온라인 신청 정보 수집', '미국 변호사 검토', 'Standard 전담 변호사 · 상담'],
+    api_access: 'unverified', api_note: '공개 출원 API는 확인되지 않았습니다. 법률서비스는 Swyft Legal의 수임 범위와 해외 출원인 지원 여부를 확인하세요.', external_steps: ['관납료 · 플랫폼 비용 확인', '수임 범위 · 본인 서명', '담당 법률팀과 접수 확인'],
+    pricing: price('https://www.trademarkengine.com/trademark-registration/', '공식 페이지의 applicable fees에는 $350/류 관납료 외 $100 서비스·플랫폼 비용이 포함됩니다. 기본 표시가만으로 총액을 판단하지 마세요.', [plan('basic', 'Basic', '$49 + 적용 수수료', '표시 시작가 · 추가 비용 별도'), plan('standard', 'Standard', '$299 + 적용 수수료', '전담 변호사 · 15분 상담')]),
+  },
   doola: {
     best_for: '설립부터 미국 세금 신고까지 한 서비스로 운영', features: ['LLC · C-Corp 설립', 'EIN · 등록 대리인', '세금 신고 · 장부 옵션'],
     api_access: 'partner', api_note: '파트너 승인·계약과 API 키 필요. 일반 구독 가격과 API 계약 가격은 다릅니다.', external_steps: ['본인 서명', '추가 서류 · 주정부 심사', '세금 신고 서비스 계약'],
@@ -113,6 +133,10 @@ const handoff = (id: string, name: string, stage: BusinessStage, color: string, 
   docs_url: docs, portal_url: portal, fields: [], secret_fields: [], environments: [],
 } });
 export const HANDOFF_CONNECTORS = [
+  handoff('uspto', 'USPTO', 'trademark', '#93c5fd', 'https://trademarkcenter.uspto.gov/', 'https://www.uspto.gov/trademarks/apply/check-status-view-documents/trademark-bulk-data'),
+  handoff('legalzoom_trademark', 'LegalZoom Trademark', 'trademark', '#a5b4fc', 'https://www.legalzoom.com/business/intellectual-property/trademark-registration-overview.html', 'https://www.legalzoom.com/business/intellectual-property/trademark-registration-overview.html'),
+  handoff('trademarkia', 'Trademarkia', 'trademark', '#f9a8d4', 'https://www.trademarkia.com/', 'https://www.trademarkia.com/faqs/about-trademarkia/how-do-i-contact-trademarkia-for-business-development-opportunities'),
+  handoff('trademark_engine', 'Trademark Engine', 'trademark', '#fcd34d', 'https://www.trademarkengine.com/trademark-registration/', 'https://www.trademarkengine.com/trademark-registration/'),
   handoff('atlas', 'Stripe Atlas', 'formation', '#c7d2fe', 'https://dashboard.stripe.com/atlas', 'https://docs.stripe.com/atlas'),
   handoff('firstbase', 'Firstbase', 'formation', '#93c5fd', 'https://www.firstbase.io', 'https://www.firstbase.io/pricing'),
   handoff('clemta', 'Clemta', 'formation', '#c4b5fd', 'https://clemta.com', 'https://clemta.com/pricing'),

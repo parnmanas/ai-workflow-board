@@ -2,6 +2,7 @@ import type { BusinessStage, BusinessTask, BusinessTaskStatus } from '../../busi
 
 export const STAGES: Array<{ id: BusinessStage; label: string; eyebrow: string; color: string; description: string }> = [
   { id: 'formation', label: '회사 설립', eyebrow: 'FOUNDATION', color: '#c4b5fd', description: '설립 계획부터 서명, EIN까지' },
+  { id: 'trademark', label: '상표 · 브랜드 보호', eyebrow: 'BRAND PROTECTION', color: '#f9a8d4', description: '선행 조사, 변호사 선임과 계약, 출원과 등록 후 관리' },
   { id: 'banking', label: '계좌 · 입출금', eyebrow: 'BANKING', color: '#7dd3fc', description: '사업자 계좌와 자금 흐름' },
   { id: 'payments', label: '결제 · 정산', eyebrow: 'PAYMENTS', color: '#a5b4fc', description: '결제 수취와 정산 확인' },
   { id: 'accounting', label: '회계 · 신고', eyebrow: 'ACCOUNTING', color: '#6ee7b7', description: '장부, 증빙과 결산 일정' },

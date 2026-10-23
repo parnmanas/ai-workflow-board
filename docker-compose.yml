@@ -29,6 +29,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 7701
+      # Public HTTPS origin registered in trademark provider OAuth applications.
+      AWB_PUBLIC_URL: ${AWB_PUBLIC_URL:-}
       # Memory pressure mitigation. Default V8 heap limit on Node 22 is ~4 GB;
       # on a long-running AWB server it has been observed to crawl to 4 GB,
       # GC-thrash at mu=0.02 (98% time in GC, pinning node at 100% CPU), then

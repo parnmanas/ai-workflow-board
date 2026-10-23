@@ -19,7 +19,7 @@ import { connectorGet, externalId } from './connectors/connector-http';
 import { TicketService, type TicketActor } from '../tickets/ticket.service';
 import { parseTicketStatus } from '../../common/ticket-status';
 
-const companySchema = z.object({
+export const companySchema = z.object({
   name: z.string().trim().min(1).max(120),
   entity_type: z.enum(['LLC', 'CCorp', 'other']),
   country: z.string().regex(/^[A-Z]{2}$/),
@@ -31,7 +31,7 @@ const dueDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v => {
   const date = new Date(v);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === v;
 }, '유효한 날짜를 입력하세요.').nullable();
-const taskSchema = z.object({
+export const taskSchema = z.object({
   title: z.string().trim().min(1).max(200), stage: z.enum(BUSINESS_STAGES),
   description: z.string().trim().max(2000), status: z.enum(['todo', 'in_progress', 'waiting', 'done']),
   depends_on: z.array(z.string().uuid()).max(30), due_on: dueDate,
@@ -128,6 +128,24 @@ export class BusinessService {
       await manager.getRepository(BusinessCompany).update({ id, account_id: accountId }, input);
       await this.event(manager, company, actor, 'company', '회사 정보와 연결 캠페인을 수정했습니다.');
       return { ...company, ...input };
+    });
+  }
+
+  async initializeTrademark(id: string, accountId: string, revision: unknown, actor: string) {
+    return this.ds.transaction(async manager => {
+      const company = await this.claim(manager, id, accountId, revision);
+      const repo = manager.getRepository(BusinessTask);
+      const tasks = await repo.findBy({ company_id: id, account_id: accountId });
+      if (tasks.some(task => task.stage === 'trademark')) return { created: 0 };
+      const template = BUSINESS_TEMPLATE.filter(task => task.stage === 'trademark');
+      if (tasks.length + template.length > 200) throw new BadRequestException('회사당 업무 한도 200개를 확인하세요.');
+      const ids = new Map(template.map(task => [task.key, randomUUID()]));
+      const offset = Math.max(-1, ...tasks.map(task => task.position)) + 1;
+      await repo.save(template.map((task, index) => ({ id: ids.get(task.key), company_id: id, account_id: accountId, stage: task.stage,
+        title: task.title, description: task.description, status: 'todo' as const, depends_on: task.requires.map(key => ids.get(key)!),
+        due_on: null, owner: '', notes: '', ticket_id: null, position: offset + index })));
+      await this.event(manager, company, actor, 'task', '상표 출원부터 유지·갱신까지의 기본 업무를 추가했습니다.');
+      return { created: template.length };
     });
   }
 

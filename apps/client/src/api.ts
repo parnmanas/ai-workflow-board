@@ -1,4 +1,6 @@
 import type { AgentTemplate } from './types';
+import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
+import type { TrademarkIntegrationsView, TrademarkIntegrationInput, TrademarkIntegration, TrademarkIntegrationAction } from './business.types';
 import type { BusinessFormation, FormationApplication, FormationReferences, FormationReview, BusinessStage, BusinessCompany, BusinessCompanyInput, BusinessConnection, BusinessConnector, BusinessDetail, BusinessTask, BusinessTaskInput } from './business.types';
 import type { CliDescriptor } from './cli/catalog';
 import type { HostModelsView } from './cli/hostModels';
@@ -283,6 +285,11 @@ async function fetchOk(path: string, init: RequestInit & { contentType?: string 
   }
   return res;
 }
+
+const trademarkPath = (companyId: string, ...parts: string[]) => `/business/companies/${encodeURIComponent(companyId)}/trademarks${parts.map(part => `/${encodeURIComponent(part)}`).join('')}`;
+const mailApproval = (mail: TrademarkMail) => ({ revision: mail.revision, payload_digest: mail.payload_digest, confirm: true });
+const integrationPath = (companyId: string, trademarkId: string, ...parts: string[]) => trademarkPath(companyId, trademarkId, 'integrations', ...parts);
+const actionApproval = (action: TrademarkIntegrationAction) => ({ revision: action.revision, payload_digest: action.payload_digest, confirm: true });
 
 export const api = {
   resolveArtifactRefs: (
@@ -2573,6 +2580,28 @@ export const api = {
 
   // ─── Business (docs/business.md) ───────────────────────
   listBusinessCompanies: () => request<BusinessCompany[]>('/business/companies'),
+  listTrademarkIntegrations: (companyId: string, id: string) => request<TrademarkIntegrationsView>(integrationPath(companyId, id)),
+  configureTrademarkIntegration: (companyId: string, id: string, input: TrademarkIntegrationInput) => request<TrademarkIntegration>(integrationPath(companyId, id), { method: 'POST', body: JSON.stringify(input) }),
+  disconnectTrademarkIntegration: (companyId: string, id: string, connection: TrademarkIntegration) => request<{ success: boolean }>(integrationPath(companyId, id, connection.id), { method: 'DELETE', body: JSON.stringify({ revision: connection.revision }) }),
+  authorizeTrademarkIntegration: (companyId: string, id: string, connectionId: string) => request<{ url: string }>(integrationPath(companyId, id, connectionId, 'authorize'), { method: 'POST', credentials: 'include' }),
+  syncTrademarkIntegration: (companyId: string, id: string, connectionId: string) => request<{ success: boolean }>(integrationPath(companyId, id, connectionId, 'sync'), { method: 'POST' }),
+  trademarkIntegrationOptions: (companyId: string, id: string, connectionId: string) => request<{ name?: string; roles?: Array<{ role: string; name: string; email: string; type?: string }> }>(integrationPath(companyId, id, connectionId, 'options'), { method: 'POST' }),
+  prepareTrademarkAction: (companyId: string, trademark: BusinessTrademark, connectionId: string, payload: unknown) => request<TrademarkIntegrationAction>(integrationPath(companyId, trademark.id, connectionId, 'actions'), { method: 'POST', body: JSON.stringify({ trademark_revision: trademark.revision, payload }) }),
+  reviewTrademarkAction: (companyId: string, id: string, actionId: string) => request<TrademarkIntegrationAction>(integrationPath(companyId, id, 'actions', actionId)),
+  discardTrademarkAction: (companyId: string, id: string, action: TrademarkIntegrationAction) => request<{ success: boolean }>(integrationPath(companyId, id, 'actions', action.id), { method: 'DELETE', body: JSON.stringify(actionApproval(action)) }),
+  sendTrademarkAction: (companyId: string, id: string, action: TrademarkIntegrationAction) => request<TrademarkIntegrationAction>(integrationPath(companyId, id, 'actions', action.id, 'send'), { method: 'POST', body: JSON.stringify(actionApproval(action)) }),
+  reconcileTrademarkAction: (companyId: string, id: string, action: TrademarkIntegrationAction, external_id: string) => request<TrademarkIntegrationAction>(integrationPath(companyId, id, 'actions', action.id, 'reconcile'), { method: 'POST', body: JSON.stringify({ ...actionApproval(action), external_id }) }),
+  downloadTrademarkAgreement: async (companyId: string, id: string, actionId: string, preview?: number) => (await fetchOk(`${integrationPath(companyId, id, 'actions', actionId, 'document')}${preview === undefined ? '' : `?preview=${preview}`}`)).blob(),
+  initializeTrademarkTasks: (companyId: string, revision: number) => request<{ created: number }>(`/business/companies/${encodeURIComponent(companyId)}/stages/trademark`, { method: 'POST', body: JSON.stringify({ revision }) }),
+  listBusinessTrademarks: (companyId: string) => request<TrademarkList>(trademarkPath(companyId)),
+  saveBusinessTrademark: (companyId: string, id: string | null, input: TrademarkInput & { revision?: number }) => request<BusinessTrademark>(trademarkPath(companyId, ...(id ? [id] : [])), { method: id ? 'PATCH' : 'POST', body: JSON.stringify(input) }),
+  draftTrademarkMail: (companyId: string, id: string, kind: TrademarkMailKind) => request<Pick<TrademarkMailPayload, 'to' | 'subject' | 'text'>>(trademarkPath(companyId, id, 'draft'), { method: 'POST', body: JSON.stringify({ kind }) }),
+  prepareTrademarkMail: (companyId: string, id: string, input: { provider: string; credential_id: string; trademark_revision: number; payload: TrademarkMailPayload }) => request<TrademarkMail>(trademarkPath(companyId, id, 'mail'), { method: 'POST', body: JSON.stringify(input) }),
+  reviewTrademarkMail: (companyId: string, id: string, mailId: string) => request<TrademarkMailReview>(trademarkPath(companyId, id, 'mail', mailId)),
+  sendTrademarkMail: (companyId: string, id: string, mail: TrademarkMail) => request<TrademarkMail>(trademarkPath(companyId, id, 'mail', mail.id, 'send'), { method: 'POST', body: JSON.stringify(mailApproval(mail)) }),
+  discardTrademarkMail: (companyId: string, id: string, mail: TrademarkMail) => request<{ success: boolean }>(trademarkPath(companyId, id, 'mail', mail.id), { method: 'DELETE', body: JSON.stringify({ payload_digest: mail.payload_digest }) }),
+  trademarkMailDelivery: (companyId: string, id: string, mailId: string) => request<TrademarkMail>(trademarkPath(companyId, id, 'mail', mailId, 'delivery'), { method: 'POST' }),
+  reconcileTrademarkMail: (companyId: string, id: string, mail: TrademarkMail, provider_message_id: string) => request<TrademarkMail>(trademarkPath(companyId, id, 'mail', mail.id, 'reconcile'), { method: 'POST', body: JSON.stringify({ ...mailApproval(mail), provider_message_id }) }),
   getBusinessCompany: (id: string) => request<BusinessDetail>(`/business/companies/${encodeURIComponent(id)}`),
   createBusinessCompany: (input: BusinessCompanyInput) => request<BusinessCompany>('/business/companies', { method: 'POST', body: JSON.stringify(input) }),
   updateBusinessCompany: (id: string, input: Partial<BusinessCompanyInput> & { revision: number }) => request<BusinessCompany>(`/business/companies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) }),

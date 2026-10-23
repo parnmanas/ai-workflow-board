@@ -8,6 +8,8 @@ import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import BusinessPage from '../src/components/business/BusinessPage.tsx';
 import BusinessLayout from '../src/components/business/BusinessLayout.tsx';
 import { money, nextTasks, overdue } from '../src/components/business/business.logic.ts';
+import { emptyTrademark } from '../src/components/business/trademark.logic.ts';
+import { TRADEMARK_CONNECTORS } from '../../server/dist/modules/business/connectors/trademark-registry.js';
 
 const h = React.createElement;
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
@@ -28,6 +30,7 @@ async function render(t, { entry = '/business', permissions = ['business.manage'
   for (const [key, fn] of Object.entries({
     getMe: async () => ({ id: 'u1', name: 'Owner', status: 'active', resolved_permissions: permissions, accounts: [{ id: 'account-1', name: 'Personal' }] }),
     listBusinessCompanies: async () => [{ ...company }], listBusinessConnectors: async () => [connector], getBusinessCompany: async () => detail(),
+    listTrademarkIntegrations: async () => ({ connectors: TRADEMARK_CONNECTORS.map(c => c.descriptor), connections: [], records: [], actions: [] }),
     listBusinessCredentials: async () => [{ id: 'cred-1', name: 'Stripe read key', provider: 'stripe' }], ...stubs,
   })) {
     original[key] = api[key]; api[key] = async (...args) => { calls.push([key, ...args]); return fn(...args); };
@@ -78,7 +81,7 @@ test('empty state creates a persistent workflow and opens the new company withou
   assert.equal(saved.name, 'New Company LLC');
   assert.equal(Object.hasOwn(saved, 'account_id'), false);
   assert.match(container.textContent, /New Company LLC/);
-  assert.equal(container.querySelectorAll('[role="progressbar"]').length, 6);
+  assert.equal(container.querySelectorAll('[role="progressbar"]').length, 7);
   assert.equal(Boolean(container.querySelector('[role="dialog"]')), false);
 });
 
@@ -207,4 +210,135 @@ test('formation review requires explicit consent; an ambiguous result stays visi
   assert.match(dialog.textContent, /동일 요청으로 결과 재확인/); assert.equal(button(dialog, '동일 요청으로 결과 재확인').disabled, true);
   assert.equal(field(dialog, '설립 제출 확인').checked, false);
   assert.equal(calls.filter(([name]) => name === 'submitBusinessFormation').length, 1);
+});
+
+const trademark = { ...emptyTrademark(company.name), id: 'mark-1', company_id: company.id, account_id: company.account_id, revision: 0, mark: 'Orbit', domicile_country: 'KR', classes: [9, 42], attorney_email: 'lawyer@example.invalid', attorney_name: 'Counsel', created_at: '2026-10-23T00:00:00Z' };
+const trademarkPayload = { from: 'legal@example.invalid', to: trademark.attorney_email, reply_to: 'owner@example.invalid', subject: 'Trademark inquiry', text: 'Please send an engagement agreement for review.' };
+const trademarkMail = { id: 'mail-1', company_id: company.id, trademark_id: trademark.id, provider: 'resend', credential_id: 'resend-1', payload_digest: 'a'.repeat(64), revision: 0, status: 'draft', to: trademark.attorney_email, subject: trademarkPayload.subject, created_at: '2026-10-23T00:00:00Z', first_attempted_at: null, last_error: '' };
+
+test('a trademark connector saves server credentials and polling settings without sending or starting OAuth', async t => {
+  const state = { connectors: TRADEMARK_CONNECTORS.map(c => c.descriptor), connections: [], records: [], actions: [] };
+  const { container, calls } = await render(t, { entry: '/business/operations?stage=trademark', permissions: ['business.manage', 'admin.credentials'], stubs: {
+    listBusinessTrademarks: async () => ({ cases: [trademark], mail: [] }), listTrademarkIntegrations: async () => structuredClone(state),
+    createCredential: async () => ({ id: 'tsdr-key', name: 'TSDR key' }),
+    configureTrademarkIntegration: async (_company, _mark, input) => { state.connections.push({ ...input, id: 'tsdr-connection', status: 'configured', ready: true, revision: 0 }); },
+  } });
+  click(button(field(container, 'USPTO · TSDR 커넥터'), '연결 설정')); await flush();
+  const dialog = document.querySelector('[role="dialog"]');
+  const key = field(dialog, '연동 credential'); run(() => { key.value = '__new__'; key.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  const secret = field(dialog, '연동 api_key'); assert.equal(secret.type, 'password'); typeInto(secret, 'test-tsdr-secret');
+  const interval = field(dialog, '자동 수집 간격'); run(() => { interval.value = '60'; interval.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  assert.equal(calls.some(([name]) => name === 'createCredential'), false);
+  click(button(dialog, '연결 설정 저장')); await flush(); await flush();
+  const credentials = calls.find(([name]) => name === 'createCredential')[1];
+  assert.equal(credentials.agent_env, false); assert.equal(credentials.account_id, company.account_id); assert.equal(credentials.provider, 'uspto_tsdr');
+  assert.deepEqual(calls.find(([name]) => name === 'configureTrademarkIntegration').slice(1), [company.id, trademark.id, { provider: 'uspto_tsdr', credential_id: 'tsdr-key', config: {}, auto_sync: true, interval_minutes: 60, revision: undefined }]);
+  assert.equal(calls.some(([name]) => /sendTrademark|authorizeTrademark/.test(name)), false);
+  assert.doesNotMatch(container.textContent, /test-tsdr-secret/); assert.match(container.textContent, /60분마다 자동 수집/);
+});
+
+test('a lost contract response reloads its durable state and only allows read reconciliation', async t => {
+  const connection = { id: 'doc-1', provider: 'docusign', ready: true, status: 'connected', auto_sync: true, interval_minutes: 15, config: {}, identity: { name: 'Contract owner' } };
+  let action = { id: 'contract-1', integration_id: connection.id, kind: 'contract', status: 'draft', payload_digest: 'b'.repeat(64), revision: 0, title: 'Orbit agreement', review: { subject: 'Orbit agreement', template_name: 'Approved terms', roles: [{ role: 'Client', name: 'Owner', email: 'owner@example.invalid' }], documents: ['Agreement.pdf'] } };
+  const { container, calls } = await render(t, { entry: '/business/operations?stage=trademark', stubs: {
+    listBusinessTrademarks: async () => ({ cases: [trademark], mail: [] }),
+    listTrademarkIntegrations: async () => ({ connectors: TRADEMARK_CONNECTORS.map(c => c.descriptor), connections: [connection], records: [], actions: [structuredClone(action)] }),
+    reviewTrademarkAction: async () => structuredClone(action),
+    sendTrademarkAction: async () => { action = { ...action, status: 'uncertain', revision: 2 }; throw new Error('HTTP response lost'); },
+    reconcileTrademarkAction: async () => { action = { ...action, status: 'sent', revision: 3, external_id: 'confirmed-envelope', external_status: 'completed' }; return structuredClone(action); },
+  } });
+  click(button(field(container, 'DocuSign 커넥터'), '검토·발송 이어가기')); await flush(); await flush();
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent, /Approved terms/); assert.match(dialog.textContent, /owner@example.invalid/); assert.match(dialog.textContent, /Agreement.pdf/);
+  assert.equal(button(dialog, '검토한 요청 실제 발송').disabled, true);
+  click(dialog.querySelector('input[type="checkbox"]')); click(button(dialog, '검토한 요청 실제 발송')); await flush(); await flush();
+  assert.match(dialog.textContent, /HTTP response lost/);
+  assert.equal([...dialog.querySelectorAll('button')].some(el => el.textContent.includes('검토한 요청 실제 발송')), false);
+  assert.equal(button(dialog, '기존 발송 원문 대조').disabled, true);
+  click(dialog.querySelector('input[type="checkbox"]')); click(button(dialog, '기존 발송 원문 대조')); await flush(); await flush();
+  assert.equal(calls.filter(([name]) => name === 'sendTrademarkAction').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'reconcileTrademarkAction').length, 1);
+  assert.equal(button(dialog, '완료된 서명본 다운로드').disabled, false);
+});
+
+test('existing companies can add a trademark checklist and configure each implemented integration', async t => {
+  let current = detail();
+  const { container, calls } = await render(t, { entry: '/business/operations?stage=trademark', stubs: {
+    getBusinessCompany: async () => structuredClone(current), listBusinessTrademarks: async () => ({ cases: [trademark], mail: [] }),
+    initializeTrademarkTasks: async () => { current.tasks.push(task({ id: 'tm-task', stage: 'trademark', title: '상표 자료 정리' })); current.company.revision++; return { created: 8 }; },
+  } });
+  assert.match(container.textContent, /미국 변호사 대리 필요/); assert.match(container.textContent, /\$700\.00/);
+  for (const { descriptor } of TRADEMARK_CONNECTORS) assert.ok(field(container, `${descriptor.name} 커넥터`));
+  assert.match(container.textContent, /0개 사용 가능/);
+  assert.match(container.textContent, /자동 수집은 서버에서 계속/);
+  click(button(container, '상표 출원 절차 추가')); await flush(); await flush();
+  assert.deepEqual(calls.find(([name]) => name === 'initializeTrademarkTasks').slice(1), [company.id, 0]);
+  assert.equal([...container.querySelectorAll('button')].some(el => el.textContent.includes('상표 출원 절차 추가')), false);
+  assert.match(container.textContent, /상표 자료 정리/);
+});
+
+test('a US territory domicile is not shown as requiring counsel under the foreign domicile rule', async t => {
+  const { container } = await render(t, { entry: '/business/operations?stage=trademark', stubs: {
+    listBusinessTrademarks: async () => ({ cases: [{ ...trademark, domicile_country: 'PR' }], mail: [] }),
+  } });
+  const facts = container.querySelector('.business-trademark-facts');
+  assert.match(facts.textContent, /PR/);
+  assert.doesNotMatch(facts.textContent, /미국 변호사 대리 필요/);
+  assert.match(facts.textContent, /설립 주소와 별도로 확인/);
+});
+
+test('trademark form keeps actual domicile separate from incorporation and persists attorney, contract and deadlines', async t => {
+  let saved;
+  const { container } = await render(t, { entry: '/business/operations?stage=trademark', stubs: {
+    listBusinessTrademarks: async () => ({ cases: saved ? [{ ...trademark, ...saved }] : [], mail: [] }),
+    saveBusinessTrademark: async (_companyId, _id, input) => { saved = input; return { ...trademark, ...input }; },
+  } });
+  click(button(container, '상표 추가'));
+  const dialog = container.querySelector('[role="dialog"]'); assert.ok(dialog);
+  assert.equal(field(dialog, '실제 본점 국가 코드').value, '', 'incorporating in the US does not infer US domicile');
+  typeInto(field(dialog, '상표명 · 로고 식별명'), 'New Brand'); typeInto(field(dialog, '실제 본점 국가 코드'), 'KR'); typeInto(field(dialog, '검토할 상품류'), '9, 42');
+  click(button(dialog, '변호사 · 계약'));
+  typeInto(field(dialog, '변호사 이메일'), 'lawyer@example.invalid'); typeInto(field(dialog, '계약 · 서명 서비스 링크'), 'https://sign.example.invalid/agreement');
+  click(button(dialog, '진행 · 회신')); typeInto(field(dialog, '기한 출처 · 확인 내용'), 'Counsel confirmation'); typeInto(field(dialog, '변호사 회신 · 진행 메모'), 'Awaiting agreement');
+  click(button(dialog, '상표 기록 저장')); await flush(); await flush();
+  assert.equal(saved.domicile_country, 'KR'); assert.deepEqual(saved.classes, [9, 42]); assert.equal(saved.attorney_email, 'lawyer@example.invalid');
+  assert.equal(saved.phase, 'preparing'); assert.equal(saved.notes, 'Awaiting agreement');
+  assert.ok(container.querySelector('a[href="https://sign.example.invalid/agreement"]'));
+});
+
+test('trademark mail needs explicit review consent and never automatically retries an ambiguous send', async t => {
+  let resolveSend;
+  const { container, calls } = await render(t, { entry: '/business/operations?stage=trademark', stubs: {
+    listBusinessTrademarks: async () => ({ cases: [trademark], mail: [trademarkMail] }),
+    reviewTrademarkMail: async () => ({ mail: trademarkMail, payload: trademarkPayload }),
+    sendTrademarkMail: () => new Promise(resolve => { resolveSend = resolve; }),
+  } });
+  click(button(container, '검토·발송 기록 이어가기')); await flush();
+  const dialog = container.querySelector('[role="dialog"]'); assert.ok(dialog);
+  assert.match(dialog.textContent, /lawyer@example.invalid/); assert.equal(button(dialog, '확인한 메일 실제 발송').disabled, true);
+  const checkbox = dialog.querySelector('input[type="checkbox"]'); assert.ok(checkbox); click(checkbox);
+  click(button(dialog, '확인한 메일 실제 발송')); assert.equal(button(dialog, '닫기').disabled, true);
+  await act(async () => resolveSend({ ...trademarkMail, status: 'uncertain', revision: 2, first_attempted_at: new Date().toISOString(), last_error: '접수 결과 확인 필요' })); await flush();
+  assert.equal(button(dialog, '같은 요청으로 접수 재확인').disabled, true); assert.equal(checkbox.checked, false);
+  assert.equal(calls.filter(([name]) => name === 'sendTrademarkMail').length, 1);
+  assert.match(dialog.textContent, /발송 원문 대조/);
+});
+
+test('failed server review retrieval blocks mail sending after a draft was persisted', async t => {
+  const { container, calls } = await render(t, { entry: '/business/operations?stage=trademark', stubs: {
+    listBusinessTrademarks: async () => ({ cases: [trademark], mail: [] }),
+    listBusinessCredentials: async () => [{ id: 'resend-1', provider: 'resend', name: 'Legal mail' }],
+    draftTrademarkMail: async () => trademarkPayload,
+    prepareTrademarkMail: async () => trademarkMail,
+    reviewTrademarkMail: async () => { throw new Error('Review unavailable'); },
+  } });
+  click(button(container, '변호사 메일 작성')); await flush();
+  const dialog = container.querySelector('[role="dialog"]'); assert.ok(dialog);
+  const key = field(dialog, 'Resend 연결 키'); run(() => { key.value = 'resend-1'; key.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  click(button(dialog, '발송 전 검토')); await flush(); await flush();
+  assert.equal(calls.filter(([name]) => name === 'prepareTrademarkMail').length, 1);
+  assert.match(dialog.textContent, /발송은 차단되어 있습니다/);
+  const checkbox = dialog.querySelector('input[type="checkbox"]'); assert.ok(checkbox); click(checkbox);
+  assert.equal(button(dialog, '확인한 메일 실제 발송').disabled, true);
+  assert.equal(calls.some(([name]) => name === 'sendTrademarkMail'), false);
 });

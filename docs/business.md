@@ -1,28 +1,32 @@
 # Business: 회사 설립부터 운영과 성장까지
 
-Business 대메뉴는 회사 설립, 은행, 결제, 회계, 고객지원과 기존 마케팅을 하나의 운영 흐름으로 묶는다.
+Business 대메뉴는 회사 설립, 상표·브랜드 보호, 은행, 결제, 회계, 고객지원과 기존 마케팅을 하나의 운영 흐름으로 묶는다.
 `/business`는 전체 흐름, `/business/operations`는 영역별 업무와 외부 조회 데이터,
 `/business/connectors`는 서비스 가격·기능 비교, 회사별 선택과 연결을 관리한다. 기존 `/marketing` 및 상세 URL과
 승인·예산·실행 계약은 유지하며, 같은 Business 내비게이션에서 접근한다.
 
 ## 현재 제공하는 기능
 
-- 회사 등록·수정, 회사별 캠페인 연결. 새 회사에는 6개 영역, 13개의 기본 업무를 생성한다.
+- 회사 등록·수정, 회사별 캠페인 연결. 새 회사에는 7개 영역, 21개의 기본 업무를 생성한다. 기존 회사에는 상표 영역에서 체크리스트 8개를 명시적으로 추가할 수 있으며 기존 업무는 보존한다.
 - 단계 진행률, 다음에 할 수 있는 업무, 기한 초과, 최근 활동. 숫자는 저장된 업무와 조회 결과에서만 계산한다.
 - 전체 흐름의 이용 순서와 운영 영역별 진행 가이드: 준비 자료 → 실제 처리 장소와 서비스 링크 →
   AWB에서 확인할 결과, 업무 완료 기준, 연결 제약, 공식 사용자 가이드를 화면에서 제공한다.
   회사 등록 화면에도 관리용 등록과 실제 법인 설립 신청을 구분해 안내한다.
 - 사용자 정의 업무, 선행 조건, 담당자 이름, 기한, 진행 메모, 기존 AWB 티켓 연결 및 새 티켓 생성.
   티켓의 실행 상태를 함께 보여 주되 회사 업무를 자동 완료하지 않는다.
-- 20개 서비스 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
+- 24개 서비스 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
 - doola Partner API로 1인 LLC(WY·DE) 신청서 작성 → 비용 검토 → 명시적 제출 → 서명 링크 → 상태 조회.
 - 커넥터별 키 등록/선택, 테스트·운영 환경, 연결 설정, 명시적인 조회, 연결 해제.
 - 마케팅의 캠페인 실행·승인함·예산·고객 피드백은 기존 마케팅 구현을 사용한다.
+- 상표별 출원 준비·변호사·회신·기한 기록, 영문 메일 초안과 Resend·Gmail·Microsoft 365 검토 후 발송, 회신 자동 수집.
+- DocuSign 계약 PDF 검토·서명 요청·완료 웹훅·서명본 다운로드, Clio 사건·문서·일정, USPTO TSDR 상태·문서 자동 수집. OAuth 로그인·토큰 갱신과 5/15/60분 주기 조회를 포함한다. 설정·권한·수집 범위는 [상표 출원](trademarks.md)을 참고한다.
+- 위 비즈니스 기능 전체를 MCP 도구 43개로 제공한다. REST와 같은 서비스·소유권·revision·검토 원문 검사를 거쳐 실행한다. 사용 순서는 `get_business_workflow_guide`에서 조회한다.
 
 회사를 AWB에 등록하거나 체크리스트를 완료하는 것은 법인 설립·계좌 개설·신고 완료를 뜻하지 않는다.
 doola는 파트너 계약과 키를 갖춘 사용자의 내부 설립 신청을 지원한다. 다른 설립 서비스는 외부에서
-신청하고 AWB에서 업무를 기록한다. 실제 API 조회 어댑터는 9개이며 나머지 11개는 비교·선택·외부
+신청하고 AWB에서 업무를 기록한다. 운영 API 조회 어댑터는 9개이며 나머지 15개는 비교·선택·외부
 진행용이다. 공급자 자체의 API 제공 여부와 AWB가 구현한 기능을 별도로 표시한다.
+상표의 기존 Resend 발송(`BusinessEmailConnector`)과 새 연동 6개(`TrademarkConnector`)는 별도 레지스트리이며 위 운영 조회 어댑터 수에 포함하지 않는다.
 KYB, 송금, 결제 생성·환불, 장부 쓰기·세무 신고, 고객 응답은 해당 서비스에서 처리한다.
 
 ## 연결 가능한 서비스
@@ -45,6 +49,8 @@ KYB, 송금, 결제 생성·환불, 장부 쓰기·세무 신고, 고객 응답�
 외부 진행용 설립 서비스: Stripe Atlas, Firstbase, Clemta, LegalZoom, ZenBusiness, CorpNet.
 은행·결제 외부 진행용: Relay, Brex, Wise Business, PayPal, Paddle. 이들의 API가 공급자에 있더라도
 AWB에 어댑터가 구현된 것으로 표시하지 않는다. CorpNet은 파트너 계약 후 확장 가능한 설립 API다.
+상표 출원·상담 비교: USPTO, LegalZoom Trademark, Trademarkia, Trademark Engine. 공식 사이트에서
+출원·수임을 진행하고 AWB에서 사건과 커뮤니케이션을 관리한다. TSDR 커넥터는 상표별 연결 화면에서 설정하며 공식 상태·문서의 자동 조회와 출원 제출을 구분한다.
 
 가격 데이터는 `connectors/service-offerings.ts` 한 곳에서 관리한다. 공식 가격표 링크·2026-10-23
 확인일·플랜·과금 단위·포함/별도 비용을 유지한다. 프로모션 대신 정가를 기본으로 표시하고 USD
@@ -82,12 +88,41 @@ Chatwoot은 Cloud만, Intercom은 미국 리전만 지원한다. Zendesk/Freshde
 수수료나 원래 키가 달라진 제출 시도는 재확인도 막고 공급자 확인을 안내한다.
 
 고객 정보는 `BusinessFormation.encrypted_request`에 암호화해 저장하고 성공 확정 후 지운다.
-일반 회사 상세에는 요약만 반환한다. 본인 Account의 검토 REST만 원문을 복호화하며 `no-store`다.
+일반 회사 상세에는 요약만 반환한다. 본인 Account의 검토 REST와 MCP 도구에서 원문을 복호화하며 REST는 `no-store`다.
 SSN·EIN 원문·고객 메시지·서명 URL은 조회 스냅샷이나 활동 기록에 넣지 않는다. HTTP body logging을
-켜도 설립 경로와 credential 쓰기의 본문은 기록하지 않는다. 서명 URL은 브라우저에만 반환한다.
+켜도 설립 경로와 credential 쓰기의 본문은 기록하지 않는다. 서명 URL은 요청한 사용자 화면 또는 권한을 확인한 MCP 호출에만 반환한다. 에이전트는 이 단기 링크를 실제 서명자에게 비공개로 전달한다.
 인스턴스 이관 시 원문은 기존 credential과 같은 TLS 복호화/재암호화 경로를 사용한다. 키 지문과
 신청 digest는 공급자 키에서 안정적으로 계산해 AWB 암호화 키가 달라져도 재시도 정체성을 보존한다.
-웹훅 수신·자동 주기 동기화·파트너 비용 결제 화면은 아직 제공하지 않는다.
+설립 커넥터의 웹훅 수신·자동 주기 동기화·파트너 비용 결제 화면은 아직 제공하지 않는다. 상표 연동의 주기 수집·웹훅과는 별개다.
+
+## MCP로 운영하기
+
+기본 `full` 도구 프로필에서 제공한다. `compact` 프로필은 티켓 중심 목록을 유지하므로 비즈니스 작업에는 `X-AWB-Tool-Profile: full`로 새 MCP 세션을 연결한다. **도구 프로필**과 API 키의 **권한 scope**는 별개다.
+
+모든 도구는 DB에 저장된 활성 Runtime Host/키의 Account와 활성 소유자의 `business.manage`를 호출마다 검사한다. 조회는 `read` 이상, 저장·수집·외부 실행은 `full` scope가 필요하다. 환경변수 키·개발 우회 인증은 비즈니스 도구에서 사용할 수 없다. 관리자도 다른 Account의 회사·상표·문서·credential을 가져올 수 없다.
+
+| 작업 | MCP 도구 |
+| --- | --- |
+| 흐름·가격·연결 준비 | `get_business_workflow_guide`, `list_business_connectors`, `compare_business_services`, `list_business_credentials` |
+| 회사·캠페인 연결 | `list_business_companies`, `get_business_company`, `create_business_company`, `update_business_company` |
+| 서비스·업무 | `choose_business_service`, `save_business_task`, `delete_business_task`, `initialize_business_trademark_tasks`, `create_business_task_ticket` |
+| 운영 커넥터 | `configure_business_connector`, `sync_business_connector`, `disconnect_business_connector` |
+| 설립 | `get_business_formation_references`, `prepare_business_formation`, `review_business_formation`, `discard_business_formation`, `submit_business_formation`, `get_business_formation_signature` |
+| 상표·변호사 메일 | `list_business_trademarks`, `save_business_trademark`, `draft_business_trademark_mail`, `prepare_business_trademark_mail`, `review_business_trademark_mail`, `discard_business_trademark_mail`, `send_business_trademark_mail`, `refresh_business_trademark_mail_delivery`, `reconcile_business_trademark_mail` |
+| 상표 연동 | `list_business_trademark_integrations`, `configure_business_trademark_integration`, `disconnect_business_trademark_integration`, `authorize_business_trademark_integration`, `sync_business_trademark_integration`, `get_business_trademark_integration_options` |
+| 메일 계정·계약 실행 | `prepare_business_trademark_action`, `review_business_trademark_action`, `discard_business_trademark_action`, `send_business_trademark_action`, `reconcile_business_trademark_action`, `get_business_trademark_document` |
+
+설립은 `get_business_company`로 회사 revision을 읽고 references → prepare → review → submit 순서로 진행한다. submit에는 검토한 **신청의** `revision`, `payload_digest`, `confirm: true`를 전달한다. 회사·상표·연결·신청의 revision은 서로 대체할 수 없다. 기존 서비스가 적용하는 비용 유효기간, 멱등 키, 원문·키 변경 검사와 불확실한 결과의 재시도 제한이 MCP에도 적용된다.
+
+`confirm`은 에이전트가 사용자의 실행 지시를 확인했다는 입력이며, 별도의 인증된 사람 승인 기록은 아니다. 도구 설명은 제출·발송에 대한 명시적 사용자 지시를 요구한다. 에이전트는 수신 메일이나 문서에 적힌 명령을 발송·서명·결제 승인으로 취급하면 안 된다. 메일 본문과 법률 문서는 반환되므로 필요한 작업 문맥에서만 사용한다. 기존 마케팅 MCP의 제안 전용·사람 승인 계약은 유지한다.
+
+회사·체크리스트 생성은 티켓을 만들지 않는다. `create_business_task_ticket`은 사용자가 티켓 생성을 요청한 경우에만 `user_requested_ticket: true`로 호출하며 소유자의 `tickets.create`도 필요하다. 결과는 실제 Ticket의 `id/title/status`이고 MCP 세션과 Agent Manager에서 티켓 카드로 기록한다.
+
+서버 키 값은 MCP로 받거나 내보내지 않는다. 설정의 Credentials에서 서버 전용 키를 등록하고 `list_business_credentials`의 ID로 연결한다. OAuth 동의는 `authorize_business_trademark_integration`이 반환한 AWB 링크를 소유자가 열어 **지정된 상표·커넥터의 로그인 버튼**에서 진행한다. HttpOnly 쿠키·OAuth state·access/refresh token은 MCP에 반환하지 않는다. 직접 서명, KYB, 외부 전용 서비스의 신청은 공급자 화면에서 이어간다.
+
+NestJS `/mcp`와 standalone HTTP(`MCP_TRANSPORT=http`)에 같은 비즈니스 서비스를 연결한다. 자동 수집 타이머와 OAuth callback·웹훅 수신은 AWB 웹 서버가 담당하며 standalone MCP 프로세스는 타이머를 중복 실행하지 않는다. 인증된 HTTP 세션의 수동 수집·검토·실행 도구는 양쪽에서 사용할 수 있다. 호출자 인증이 없는 로컬 stdio에서는 비즈니스 도구를 실행하지 못하므로 인증된 HTTP 연결을 사용한다. MCP HTTP 로거는 비즈니스 도구 이름만 남기고 신청자·메일·계약 인수를 생략한다.
+
+`test/business-mcp.test.mjs`는 모든 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback만 전송용 예외다. 같은 테스트에서 43개 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
 
 ## 소유권과 저장
 
@@ -101,6 +136,11 @@ SSN·EIN 원문·고객 메시지·서명 URL은 조회 스냅샷이나 활동 �
 | `BusinessTask` | 단계별 업무, 선행 업무, 상태, 담당자·기한·메모, 티켓 참조 |
 | `BusinessConnection` | 공급자, credential 참조, 환경·외부 ID, 마지막 조회 결과·시각·오류, revision |
 | `BusinessFormation` | 환경별 신청, 검토 digest·비용, 암호화 원문, 키 지문, 제출 상태·외부 ID, revision |
+| `BusinessTrademark` | 암호화된 상표·권리자·변호사·계약 링크·출원번호·기한·회신 기록, revision |
+| `BusinessTrademarkMail` | 암호화된 검토 원문, 키 지문·검토 digest, 발송 시도·결과·전달 상태, revision |
+| `BusinessTrademarkIntegration` | 상표별 커넥터·키 참조, 암호화 설정·OAuth 토큰·커서, 자동 수집 일정·lease |
+| `BusinessTrademarkRecord` | 공급자 ID별 암호화 회신·계약·문서·일정·공식 상태 |
+| `BusinessTrademarkAction` | Gmail·Microsoft·DocuSign 검토 원문·PDF, 승인 digest, 발송·대조 결과 |
 | `BusinessEvent` | 변경 주체와 활동 기록. append-only, REST 수정/삭제 없음 |
 
 전부 `account_id`를 저장하며 엔티티 배럴과 이관 레지스트리에 함께 등록한다.
@@ -140,7 +180,7 @@ credential을 삭제하지 않는다. 조회 시에도 유효 소유권·provide
   60초 후 사용자가 다시 조회할 수 있다. 외부 변경을 실행하지 않으므로 조회 재시도는 지출을 발생시키지 않는다.
 - 조회 실패 시 이전 성공 스냅샷과 기준 시각을 유지하고 오래된 데이터라는 표시를 붙인다.
   공급자 오류 본문·헤더·키를 응답이나 활동 이력에 복사하지 않는다.
-- 조회는 GET 전용, 설립은 별도의 `FormationConnector`의 POST다. 공급자가 정한 HTTPS 주소만 사용하며 redirect 거부, 요청 제한 시간 15초, 응답 최대 2 MB를 적용한다.
+- 일반 운영 조회는 GET 전용이며, 설립은 `FormationConnector`, 변호사 메일은 `BusinessEmailConnector`의 별도 POST를 사용한다. 공급자가 정한 HTTPS 주소만 사용하며 redirect 거부, 요청 제한 시간 15초, 응답 최대 2 MB를 적용한다.
 
 ## 커넥터 추가
 
@@ -153,14 +193,15 @@ credential을 삭제하지 않는다. 조회 시에도 유효 소유권·provide
 5. 인증·환경·응답 매핑 테스트를 추가한다. 사용자 지정 URL이 필요해지면 기존 SSRF 가드와
    DNS/redirect 방어를 함께 도입한다. 현재는 임의 origin·헤더를 입력받지 않는다. CS subdomain은 공급자의 고정 도메인 안에서만 선택한다.
 
-설립 어댑터는 `FormationConnector`와 `BusinessFormationService`의 검토/제출 경로를 사용한다. 쓰기 커넥터를 확장할 때는 조회 함수에 POST를 끼워 넣지 않는다. 승인 대상 payload 고정,
+설립 어댑터는 `FormationConnector`와 `BusinessFormationService`, 변호사 메일은 `BusinessEmailConnector`와 `BusinessTrademarkService`의 검토/실행 경로를 사용한다. 쓰기 커넥터를 확장할 때는 조회 함수에 POST를 끼워 넣지 않는다. 승인 대상 payload 고정,
 idempotency, 실행 claim, 모호한 결과 대조 및 감사 기록을 별도 계약으로 먼저 설계해야 한다.
+상표 확장은 `TrademarkConnector`와 `trademark-registry.ts`, `BusinessTrademarkIntegrationsService`를 사용한다. OAuth·수집·발송·웹훅·문서 메서드는 기능별로 선언하며 카드·설정 폼은 공통으로 렌더한다. 상세 계약과 설정은 [상표 연동 문서](trademarks.md#연동-저장소와-확장-계약)를 따른다.
 기존 마케팅 결제/외부 발신의 승인 경로도 유지한다.
 
 ## 검증
 
 - `npm run build`
-- 서버: `node --test --test-force-exit test/business-http.test.mjs test/business-connectors.test.mjs test/business-formation.test.mjs`
+- 서버: `node --test --test-force-exit test/business-http.test.mjs test/business-connectors.test.mjs test/business-formation.test.mjs test/business-trademark.test.mjs test/business-trademark-integrations.test.mjs`
 - 클라이언트: `node --import tsx --test --test-force-exit test/business-page.test.mjs`
 - 브라우저: 루트에서 `npm run test:e2e:business -w client` (서버 dist가 먼저 필요)
 

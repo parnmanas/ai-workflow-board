@@ -36,6 +36,9 @@ export class BusinessController {
   @Post('companies/:id/tasks') addTask(@Param('id') id: string, @Req() req: any, @Body() body: any) {
     return this.business.saveTask(id, req.currentAccountId, null, body, req.currentUser.id);
   }
+  @Post('companies/:id/stages/trademark') initializeTrademark(@Param('id') id: string, @Req() req: any, @Body() body: any) {
+    return this.business.initializeTrademark(id, req.currentAccountId, body?.revision, req.currentUser.id);
+  }
   @Patch('companies/:id/tasks/:taskId') task(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Body() body: any) {
     return this.business.saveTask(id, req.currentAccountId, taskId, body, req.currentUser.id);
   }

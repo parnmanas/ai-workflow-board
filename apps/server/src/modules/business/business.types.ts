@@ -1,5 +1,5 @@
 import type { FormationConnector } from './connectors/formation-connector';
-export const BUSINESS_STAGES = ['formation', 'banking', 'payments', 'accounting', 'support', 'growth'] as const;
+export const BUSINESS_STAGES = ['formation', 'trademark', 'banking', 'payments', 'accounting', 'support', 'growth'] as const;
 export type BusinessStage = typeof BUSINESS_STAGES[number];
 export type TaskStatus = 'todo' | 'in_progress' | 'waiting' | 'done';
 

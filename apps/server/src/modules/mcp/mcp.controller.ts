@@ -34,6 +34,11 @@ import { SecurityProfileService } from '../security/security-profile.service';
 import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
 import { AutomationScheduleService } from '../automation-schedule/automation-schedule.service';
+import { mcpRequestPreview } from './shared/request-preview';
+import { BusinessService } from '../business/business.service';
+import { BusinessFormationService } from '../business/business-formation.service';
+import { BusinessTrademarkService } from '../business/business-trademark.service';
+import { BusinessTrademarkIntegrationsService } from '../business/business-trademark-integrations.service';
 import { MarketingAgentService } from '../marketing/marketing-agent.service';
 import { MarketingCycleService } from '../marketing/marketing-cycle.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
@@ -178,6 +183,11 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // 작업 제안 — operator 가 다른 세션에 시킬 일을 제안하고, 사용자 승인 뒤 보낸다(VoiceModule).
     private readonly operatorProposalService: OperatorProposalService,
     private readonly interruptedSessionsService: InterruptedSessionsService,
+    // Shared lifecycle services keep REST and MCP ownership/review checks aligned.
+    private readonly businessService: BusinessService,
+    private readonly businessFormationService: BusinessFormationService,
+    private readonly businessTrademarkService: BusinessTrademarkService,
+    private readonly businessTrademarkIntegrationsService: BusinessTrademarkIntegrationsService,
     // Marketing(docs/marketing.md) — marketing-tools.ts 의 캠페인 에이전트 표면.
     private readonly marketingAgentService: MarketingAgentService,
     private readonly marketingCycleService: MarketingCycleService,
@@ -285,6 +295,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       operatorDecisionService: this.operatorDecisionService,
       operatorProposalService: this.operatorProposalService,
       interruptedSessionsService: this.interruptedSessionsService,
+      businessService: this.businessService,
+      businessFormationService: this.businessFormationService,
+      businessTrademarkService: this.businessTrademarkService,
+      businessTrademarkIntegrationsService: this.businessTrademarkIntegrationsService,
       marketingAgentService: this.marketingAgentService,
       marketingCycleService: this.marketingCycleService,
     };
@@ -362,7 +376,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         sessionId: sessionId || '(none)',
         contentType: req.headers['content-type'],
         accept: req.headers['accept'],
-        bodyPreview: req.method === 'POST' ? JSON.stringify(req.body)?.slice(0, 300) : '(n/a)',
+        bodyPreview: req.method === 'POST' ? mcpRequestPreview(req.body) : '(n/a)',
       });
 
       // DELETE: terminate session

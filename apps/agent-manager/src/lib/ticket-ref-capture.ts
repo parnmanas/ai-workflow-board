@@ -34,6 +34,7 @@
 export const TICKET_ACTION_TOOLS: Record<string, string> = {
   create_ticket: 'create',
   create_child_ticket: 'create',
+  create_business_task_ticket: 'create',
   move_ticket: 'move',
   update_ticket: 'update',
   update_child_ticket: 'update',
@@ -77,7 +78,7 @@ export const ARTIFACT_ACTION_TOOLS: Record<string, string> = {
 /** Tools whose NEW ticket id is only in the tool RESULT (not the input). For every
  *  other tracked tool the input `ticket_id` is authoritative — the result `id` may
  *  be a comment id (add_comment) etc., so it must NOT be used as the ticket id. */
-export const TICKET_CREATE_TOOLS = new Set(['create_ticket', 'create_child_ticket']);
+export const TICKET_CREATE_TOOLS = new Set(['create_ticket', 'create_child_ticket', 'create_business_task_ticket']);
 /** Korean action label for the fallback content line — rendered on surfaces that
  *  don't understand metadata (history replay, notifications, legacy clients). */
 export const TICKET_ACTION_LABEL_KO: Record<string, string> = {
@@ -330,6 +331,49 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 이관 — EXCLUDE 아님.)
  */
 export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
+  // Business records/actions never mutate a Ticket; explicit ticket creation is classified above.
+  get_business_workflow_guide: 'read',
+  list_business_connectors: 'read',
+  compare_business_services: 'read',
+  list_business_credentials: 'read',
+  list_business_companies: 'read',
+  get_business_company: 'read',
+  create_business_company: 'non-ticket',
+  update_business_company: 'non-ticket',
+  choose_business_service: 'non-ticket',
+  save_business_task: 'non-ticket',
+  delete_business_task: 'non-ticket',
+  initialize_business_trademark_tasks: 'non-ticket',
+  configure_business_connector: 'non-ticket',
+  disconnect_business_connector: 'non-ticket',
+  sync_business_connector: 'non-ticket',
+  get_business_formation_references: 'read',
+  prepare_business_formation: 'non-ticket',
+  review_business_formation: 'read',
+  discard_business_formation: 'non-ticket',
+  submit_business_formation: 'non-ticket',
+  get_business_formation_signature: 'non-ticket',
+  list_business_trademarks: 'read',
+  save_business_trademark: 'non-ticket',
+  draft_business_trademark_mail: 'read',
+  prepare_business_trademark_mail: 'non-ticket',
+  review_business_trademark_mail: 'read',
+  discard_business_trademark_mail: 'non-ticket',
+  send_business_trademark_mail: 'non-ticket',
+  refresh_business_trademark_mail_delivery: 'non-ticket',
+  reconcile_business_trademark_mail: 'non-ticket',
+  list_business_trademark_integrations: 'read',
+  configure_business_trademark_integration: 'non-ticket',
+  disconnect_business_trademark_integration: 'non-ticket',
+  authorize_business_trademark_integration: 'non-ticket',
+  sync_business_trademark_integration: 'non-ticket',
+  get_business_trademark_integration_options: 'non-ticket',
+  prepare_business_trademark_action: 'non-ticket',
+  review_business_trademark_action: 'read',
+  discard_business_trademark_action: 'non-ticket',
+  send_business_trademark_action: 'non-ticket',
+  reconcile_business_trademark_action: 'non-ticket',
+  get_business_trademark_document: 'non-ticket',
   // 권한 상승 승인 흐름 — 티켓을 만들지도 바꾸지도 않는다. 결과는 호출한 agent 가
   // 자기 턴에서 읽고 쓰는 것이고, 채팅에 카드로 띄울 티켓 참조가 없다.
   request_privileged_command: 'non-ticket',

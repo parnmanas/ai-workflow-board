@@ -38,8 +38,8 @@ test('Business: owned workflows, dependency transitions, credential protection a
   const detail = async () => (await call(url)).body;
   let state = await detail();
   assert.equal(state.company.account_id, mine.id);
-  assert.equal(state.tasks.length, 13);
-  assert.equal(new Set(state.tasks.map(task => task.stage)).size, 6);
+  assert.equal(state.tasks.length, 21);
+  assert.equal(new Set(state.tasks.map(task => task.stage)).size, 7);
   assert.equal((await call(url, { user: other, account: theirs.id })).status, 403, 'administrators cannot cross company owners');
   assert.equal((await call('/business/companies', { user: other, account: theirs.id })).body.length, 0);
   assert.equal((await post('/business/companies', { name: 'Forged owner', account_id: theirs.id })).status, 403);

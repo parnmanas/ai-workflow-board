@@ -26,6 +26,12 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   intercom: { label: 'Intercom', fields: ['access_token'] },
   zendesk: { label: 'Zendesk Support OAuth', fields: ['access_token'] },
   freshdesk: { label: 'Freshdesk', fields: ['api_key'] },
+  resend: { label: 'Resend', fields: ['api_key'] },
+  resend_inbound: { label: 'Resend Receiving', fields: ['api_key', 'webhook_secret'] },
+  microsoft_oauth: { label: 'Microsoft Graph OAuth', fields: ['client_id', 'client_secret'] },
+  docusign_oauth: { label: 'DocuSign OAuth / Connect', fields: ['client_id', 'client_secret', 'hmac_secret'] },
+  clio_oauth: { label: 'Clio Manage OAuth', fields: ['client_id', 'client_secret'] },
+  uspto_tsdr: { label: 'USPTO TSDR', fields: ['api_key'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
   // OAuth 2.0 client from Google Cloud Console. refresh_token is optional but
   // an agent cannot call a Google API with the client pair alone — it needs a

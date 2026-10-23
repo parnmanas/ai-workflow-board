@@ -31,7 +31,7 @@ export function BusinessStageGuide({ stage, connectors, connectorsPath, canMarke
       <div className="business-guide-step-heading"><span className="business-guide-step-number">{i + 1}</span><BusinessIcon name={step.icon} size={18} /><h4>{step.label}</h4></div>
       <ul>{step.items.map(item => <li key={item}>{item}</li>)}</ul>
       {i === 1 && <div className="business-guide-actions">{providers.map(c => <a key={c.id} href={c.portal_url} target="_blank" rel="noreferrer">{c.name} 열기 <BusinessIcon name="external" size={12} /></a>)}{stage === 'growth' && (canMarketing ? <Link to="/marketing">마케팅 열기 <BusinessIcon name="arrow" size={12} /></Link> : <span className="business-muted">캠페인 실행에는 마케팅 권한이 필요합니다.</span>)}</div>}
-      {i === 2 && stage !== 'growth' && <div className="business-guide-actions"><Link to={connectorsPath}>조회 커넥터 설정 <BusinessIcon name="arrow" size={12} /></Link></div>}
+      {i === 2 && stage !== 'growth' && <div className="business-guide-actions"><Link to={connectorsPath}>{stage === 'trademark' ? '출원 서비스 비교' : '조회 커넥터 설정'} <BusinessIcon name="arrow" size={12} /></Link></div>}
     </li>)}</ol>
     <div className="business-guide-completion"><BusinessIcon name="check" size={19} /><div><strong>언제 완료로 표시하나요?</strong><p>{guide.completed}</p></div></div>
     <details className="business-guide-details"><summary>연결 전에 알아둘 점{guide.sources.length ? ' · 공식 진행 안내' : ''}</summary><p>{guide.connectionNote}</p>

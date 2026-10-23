@@ -6,6 +6,10 @@ import { BusinessController } from './business.controller';
 import { BusinessFormationService } from './business-formation.service';
 import { BusinessService } from './business.service';
 import { AgentsModule } from '../agents/agents.module';
+import { BusinessTrademarkController } from './business-trademark.controller';
+import { BusinessTrademarkService } from './business-trademark.service';
+import { BusinessTrademarkIntegrationsService } from './business-trademark-integrations.service';
+import { BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController } from './business-trademark-integrations.controller';
 
-@Module({ imports: [SharedServicesModule, AgentsModule], controllers: [BusinessController], providers: [AuthGuard, PermissionGuard, BusinessService, BusinessFormationService] })
+@Module({ imports: [SharedServicesModule, AgentsModule], controllers: [BusinessController, BusinessTrademarkController, BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController], providers: [AuthGuard, PermissionGuard, BusinessService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService], exports: [BusinessService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService] })
 export class BusinessModule {}

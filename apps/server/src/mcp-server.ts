@@ -36,6 +36,7 @@ import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-ser
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
 import { sessionStore } from './modules/mcp/internal/session-store';
 import { authenticateMcpRequest } from './modules/mcp/shared/mcp-http-auth';
+import { mcpRequestPreview } from './modules/mcp/shared/request-preview';
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -104,7 +105,7 @@ async function startHttp() {
         sessionId: sessionId || '(none)',
         contentType: req.headers['content-type'],
         accept: req.headers['accept'],
-        bodyPreview: req.method === 'POST' ? JSON.stringify(req.body)?.slice(0, 300) : '(n/a)',
+        bodyPreview: req.method === 'POST' ? mcpRequestPreview(req.body) : '(n/a)',
       });
 
       // ─ DELETE ─────────────────────────────────────────

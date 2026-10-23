@@ -58,7 +58,7 @@ test('Business formation: reviewed partner requests, owner boundaries, prices an
   const prepare = async (path = url, overrides = {}) => call(`${path}/formation/doola/prepare`, { credential_id: credential.id, environment: 'sandbox', revision: (await call(path)).body.company.revision, application, ...overrides });
   const submit = (action, path = url, extra = {}) => call(`${path}/formations/${action.id}/submit`, { payload_digest: action.payload_digest, revision: action.revision, confirm: true, ...extra });
   const catalog = (await call('/business/connectors')).body;
-  assert.equal(catalog.length, 20); assert.equal(catalog.filter(c => c.mode === 'api').length, 9);
+  assert.equal(catalog.length, 24); assert.equal(catalog.filter(c => c.mode === 'api').length, 9);
   assert.equal(catalog.find(c => c.id === 'corpnet').offering.api_access, 'partner');
   assert.equal(catalog.find(c => c.id === 'corpnet').mode, 'handoff');
   assert.equal((await call(`${url}/services/banking`, { provider: 'doola', plan: 'starter', revision: 0 })).status, 400);

@@ -143,6 +143,8 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'MarketingCycle', 'MarketingApprovalNotice', 'MarketingListHold', 'MarketingConsentNotice',
   'MarketingConsentNoticeSetting', 'MarketingContactReply',
   'BusinessCompany', 'BusinessTask', 'BusinessConnection', 'BusinessEvent', 'BusinessFormation',
+  'BusinessTrademark', 'BusinessTrademarkMail',
+  'BusinessTrademarkIntegration', 'BusinessTrademarkRecord', 'BusinessTrademarkAction',
 
   // 완전 다형적(polymorphic)/미강제 — 어디에 있어도 안전, 맨 뒤에 배치
   'ActivityLog',

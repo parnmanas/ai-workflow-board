@@ -11,6 +11,7 @@ import { dateTime, money, nextTasks, overdue, STAGES, TASK_STATUS } from './busi
 import { BusinessHowItWorks, BusinessStageGuide } from './BusinessGuide';
 import { BusinessCatalog, BusinessConnectorCard } from './BusinessCatalog';
 import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
+import { BusinessTrademarks } from './BusinessTrademarks';
 
 type View = 'overview' | 'operations' | 'connectors';
 
@@ -164,7 +165,7 @@ export default function BusinessPage({ view }: { view: View }) {
       <div><span className="business-eyebrow">YOUR BUSINESS, CONNECTED</span><h1>{view === 'overview' ? '비즈니스 전체 흐름' : view === 'operations' ? '운영 워크플로' : '커넥터'}</h1></div>
       <div className="business-heading-actions">
         {selectedId && <Button variant="ghost" aria-label="워크플로 새로고침" disabled={loading || !!busy} onClick={() => void reload().catch(e => showToast(e.message, 'error'))}><BusinessIcon name="refresh" size={16} /></Button>}
-        {!!companies?.length && <select className="business-company-picker" aria-label="관리할 회사" value={selectedId} onChange={e => { const next = new URLSearchParams(params); next.set('company', e.target.value); setParams(next); }}>{!companies.some(c => c.id === selectedId) && <option value={selectedId}>회사 선택</option>}{companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
+        {!!companies?.length && <select className="business-company-picker" aria-label="관리할 회사" value={selectedId} onChange={e => { const next = new URLSearchParams(params); next.set('company', e.target.value); next.delete('trademark'); next.delete('authorize'); setParams(next); }}>{!companies.some(c => c.id === selectedId) && <option value={selectedId}>회사 선택</option>}{companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
         <Button variant="secondary" onClick={() => setCompanyModal('new')}><BusinessIcon name="plus" size={15} />회사 추가</Button>
       </div>
     </header>
@@ -213,6 +214,7 @@ export default function BusinessPage({ view }: { view: View }) {
         <div className="business-operations-heading"><div><span className="business-eyebrow" style={{ color: stage.color }}>{stage.eyebrow}</span><h2>{stage.label}</h2><p>{stage.description}</p></div><Button onClick={() => setTaskModal('new')}><BusinessIcon name="plus" size={16} />업무 추가</Button></div>
         {stage.id === 'formation' && (detail.formations || []).length > 0 && <div className="business-formation-history">{detail.formations.map(f => <button key={f.id} onClick={() => setFormationModal(connectors.find(c => c.id === f.provider) || null)}><BusinessIcon name="formation" size={20} /><span><strong>{f.summary.name}</strong><small>{f.environment === 'sandbox' ? '테스트' : '실제 신청'} · {FORMATION_STATUS[f.status]}</small></span><BusinessIcon name="arrow" size={16} /></button>)}</div>}
         <BusinessStageGuide stage={stage.id} connectors={connectors} connectorsPath={path('connectors')} canMarketing={canMarketing} />
+        {stage.id === 'trademark' && <BusinessTrademarks key={company.id} company={company} hasTasks={activeStageTasks.length > 0} onChanged={reload} />}
         <section className="business-panel"><div className="business-section-heading"><h3>업무 <span className="business-count">{activeStageTasks.length}</span></h3><select className="business-filter" aria-label="업무 필터" value={filter} onChange={e => setFilter(e.target.value)}><option value="all">모든 업무</option><option value="open">미완료</option><option value="attention">기한 초과 · 응답 대기</option><option value="done">완료</option></select></div>
           {visibleTasks.length ? visibleTasks.map(renderTask) : <div className="business-small-empty"><BusinessIcon name={stage.id} size={28} /><p>표시할 업무가 없습니다.</p><Button variant="ghost" onClick={() => setTaskModal('new')}>새 업무 추가</Button></div>}
         </section>

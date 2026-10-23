@@ -9,7 +9,7 @@ const addressSchema = z.object({
   postalCode: z.string().trim().min(1).max(30), country: z.string().regex(/^[A-Z]{3}$/),
   phone: z.string().regex(/^\+[1-9]\d{6,14}$/),
 }).strict();
-const inputSchema = z.object({
+export const doolaApplicationSchema = z.object({
   name: z.string().trim().min(1).max(100).refine(v => !/\b(?:LLC|L\.L\.C\.|Limited Liability Company)\s*$/i.test(v), '회사명에서 LLC 접미사를 빼세요.'),
   state: z.enum(['WY', 'DE']), industry: z.string().trim().min(1).max(250), description: z.string().trim().min(1).max(50),
   first_name: z.string().trim().min(1).max(100), last_name: z.string().trim().min(1).max(100), email: z.email().max(254),
@@ -40,7 +40,7 @@ export const doolaFormation: FormationConnector = {
     };
   },
   prepare(input, references) {
-    const result = inputSchema.safeParse(input);
+    const result = doolaApplicationSchema.safeParse(input);
     if (!result.success) throw new BadRequestException(result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; '));
     const v = result.data;
     if (!references.industries.includes(v.industry) || !references.fees.some(f => f.state === v.state)) throw new BadRequestException('doola에서 확인된 업종과 설립 주를 선택하세요.');

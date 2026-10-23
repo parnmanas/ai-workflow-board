@@ -19,6 +19,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { OntologyModule } from '../ontology/ontology.module';
 import { VoiceModule } from '../voice/voice.module';
 import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
+import { BusinessModule } from '../business/business.module';
 import { MarketingModule } from '../marketing/marketing.module';
 
 @Module({
@@ -61,6 +62,7 @@ import { MarketingModule } from '../marketing/marketing.module';
     AgentSessionsModule,
     // MarketingAgentService — marketing-tools.ts(docs/marketing.md).
     MarketingModule,
+    BusinessModule,
   ],
   controllers: [McpController],
 })

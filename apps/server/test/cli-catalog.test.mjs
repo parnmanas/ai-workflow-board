@@ -63,6 +63,12 @@ const OLD_PROVIDER_FIELDS = {
   intercom: { label: 'Intercom', fields: ['access_token'] },
   zendesk: { label: 'Zendesk Support OAuth', fields: ['access_token'] },
   freshdesk: { label: 'Freshdesk', fields: ['api_key'] },
+  resend: { label: 'Resend', fields: ['api_key'] },
+  resend_inbound: { label: 'Resend Receiving', fields: ['api_key', 'webhook_secret'] },
+  microsoft_oauth: { label: 'Microsoft Graph OAuth', fields: ['client_id', 'client_secret'] },
+  docusign_oauth: { label: 'DocuSign OAuth / Connect', fields: ['client_id', 'client_secret', 'hmac_secret'] },
+  clio_oauth: { label: 'Clio Manage OAuth', fields: ['client_id', 'client_secret'] },
+  uspto_tsdr: { label: 'USPTO TSDR', fields: ['api_key'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
   google_oauth: { label: 'Google OAuth', fields: ['client_id', 'client_secret', 'refresh_token'] },
   git_http: { label: 'Git (HTTPS host)', fields: ['url', 'username', 'token'] },
@@ -233,7 +239,7 @@ test('derived constants equal the old hand-written literals', () => {
   }
   assert.deepEqual(
     Object.keys(NON_CLI_CREDENTIAL_PROVIDERS),
-    ['github', 'gitlab', 'cloudflare', 'doola', 'mercury', 'stripe', 'xero', 'chatwoot', 'quickbooks', 'intercom', 'zendesk', 'freshdesk', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
+    ['github', 'gitlab', 'cloudflare', 'doola', 'mercury', 'stripe', 'xero', 'chatwoot', 'quickbooks', 'intercom', 'zendesk', 'freshdesk', 'resend', 'resend_inbound', 'microsoft_oauth', 'docusign_oauth', 'clio_oauth', 'uspto_tsdr', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
   );
   assert.deepEqual(plain(REVEALABLE_OAUTH_FIELDS), OLD_REVEALABLE_OAUTH_FIELDS);
 

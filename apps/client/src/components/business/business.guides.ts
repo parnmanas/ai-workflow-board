@@ -12,6 +12,19 @@ interface BusinessGuide {
 // Product guidance, separate from editable tasks. Existing companies also see updates.
 // Provider instructions verified against the linked official guides on 2026-10-23.
 export const BUSINESS_GUIDES: Record<BusinessStage, BusinessGuide> = {
+  trademark: {
+    prepare: ['상표명·로고, 실제 권리자와 본점 소재지, 상품·서비스와 사용 증빙을 정리합니다. 법인명 등록과 상표권은 별개입니다.', 'USPTO 검색과 실제 시장 사용을 조사하고 변호사에게 상품류·출원 근거·충돌 여부 검토를 요청합니다.'],
+    execute: ['온라인으로 변호사 상담·견적·수임계약을 진행합니다. 아래 상표 기록에서 영문 메일 초안을 만들고 검토 후 Resend로 보낼 수 있습니다.', '권한 있는 사람이 직접 서명하고 Trademark Center 또는 대리인을 통해 접수합니다. 실제 본점이 미국·미국 영토 밖인 미국 LLC도 미국 변호사의 대리가 필요합니다. 일반 이메일은 USPTO 출원 접수 수단이 아닙니다.'],
+    track: ['상표별 출원번호, 변호사, 계약 링크, 회신과 확인된 기한을 저장합니다. 공식 TSDR 커넥터로 심사·문서를 수집하고 공식 기록을 확인하세요.', '메일 접수·전달과 수임·계약·출원·등록은 각각 확인합니다. Resend 수신 주소나 Gmail·Microsoft 365 대화를 연결하면 회신이 자동 수집됩니다.'],
+    completed: '출원은 공식 접수증과 출원번호, 계약은 양측의 서명된 계약, 등록은 등록증을 근거로 기록하세요. 기한은 실제 통지서와 변호사 확인을 바탕으로 지정합니다.',
+    connectionNote: '미국을 우선 지원합니다. Resend 회신, Gmail·Microsoft 365 송수신, DocuSign 서명 요청·서명본, Clio 사건·문서·일정, TSDR 상태를 아래 커넥터에서 연결합니다. OAuth·API 키와 자동 수집 간격을 설정하세요. 외부 발송은 검토 후 실행하고 본인 서명·법률 판단은 담당자가 진행합니다.',
+    sources: [
+      { label: 'USPTO 출원 절차', url: 'https://www.uspto.gov/trademarks/basics/trademark-process' },
+      { label: '해외 본점과 변호사 요건', url: 'https://www.uspto.gov/trademarks/laws/trademark-rule-requires-foreign-applicants-and-registrants-have-us' },
+      { label: '서명 주체 확인', url: 'https://www.uspto.gov/trademarks/laws/verified-statement' },
+      { label: '공식 관납료', url: 'https://www.uspto.gov/trademarks/trademark-fee-information' },
+    ],
+  },
   formation: {
     prepare: ['회사 이름, 사업 내용, 소유자 정보를 정리합니다.', '설립 주와 LLC / C-Corp 형태, 필요한 서비스를 확인합니다.'],
     execute: ['커넥터에서 설립 서비스를 비교합니다. doola 파트너 키가 있으면 AWB의 설립 신청에서 1인 LLC(WY·DE)를 입력·검토·제출할 수 있습니다.', '다른 서비스는 외부 신청 화면으로 이어집니다. doola 접수 후 서명 링크에서 본인 서명을 하고, 추가 자료·설립 문서·EIN 결과를 확인합니다.'],
