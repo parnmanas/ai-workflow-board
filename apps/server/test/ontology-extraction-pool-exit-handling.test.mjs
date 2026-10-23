@@ -133,7 +133,7 @@ describe('worker pool task timeout (ticket 461d210a)', () => {
       taskTimeoutMs: 200,
       workerScriptPath: HANGING_WORKER,
       onProgress: (completed) => {
-        if (completed === 1) setImmediate(() => blockMainThread(800));
+        if (completed === 1) setImmediate(() => blockMainThread(1_500));
       },
     });
     assert.equal(results[1].error, null, '멈춘 동안 도착한 답이 시간 초과로 버려졌다');
@@ -148,5 +148,15 @@ describe('worker pool task timeout (ticket 461d210a)', () => {
     ];
     const results = await runExtractionPool(tasks, { poolSize: 2, taskTimeoutMs: 1 });
     assert.deepEqual(results.map((r) => r.error), [null, null]);
+  });
+
+  it('a non-positive taskTimeoutMs falls back to the default instead of failing every warmed file at once', { timeout: 20_000 }, async () => {
+    // 한 워커가 차례로 처리한다 — 첫 파일 뒤로는 기동 유예가 없고, 픽스처는 'slow' 파일에 50ms 뒤에 답한다.
+    // 0ms · 음수 상한을 그대로 쓰면 그 답보다 타이머가 먼저 돈다.
+    const tasks = ['a.ts', 'slow-b.ts', 'slow-c.ts'].map((p) => ({ path: p, content: 'export const x = 1;', lang: 'typescript' }));
+    for (const taskTimeoutMs of [0, -5]) {
+      const results = await runExtractionPool(tasks, { poolSize: 1, taskTimeoutMs, workerScriptPath: HANGING_WORKER });
+      assert.deepEqual(results.map((r) => r.error), [null, null, null], `taskTimeoutMs=${taskTimeoutMs}`);
+    }
   });
 });

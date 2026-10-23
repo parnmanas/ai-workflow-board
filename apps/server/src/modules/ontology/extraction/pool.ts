@@ -23,7 +23,7 @@ export interface ExtractionPoolOptions {
   /** 파일 하나에 주는 시간(ms) — 기본 DEFAULT_TASK_TIMEOUT_MS. 넘기면 그 워커를
    *  terminate 하고 새 워커로 바꾼 뒤, 그 파일은 에러로 기록하고 나머지를
    *  계속한다(ticket 461d210a). 새 워커의 첫 파일에는 기동 시간
-   *  (WORKER_STARTUP_GRACE_MS)을 더 준다. */
+   *  (WORKER_STARTUP_GRACE_MS)을 더 준다. 양수가 아니면 기본값을 쓴다. */
   taskTimeoutMs?: number;
   /** 테스트 전용 — 실제 worker.js 대신 다른 워커 스크립트를 스폰한다(예:
    *  비정상 종료를 흉내내는 픽스처). 프로덕션 호출부는 절대 설정하지
@@ -48,10 +48,11 @@ const WORKER_STARTUP_GRACE_MS = 10_000;
 // setTimeout 은 이보다 긴 지연을 1ms 로 바꾼다 — 그대로 두면 모든 파일이 곧바로 시간을 넘긴다.
 const MAX_TIMER_MS = 2_147_483_647;
 
+// 양수 ms 만 상한으로 받는다 — 0 · 음수는 곧바로 시간을 넘기는 값이라 환경변수처럼 기본값으로 둔다.
 function resolveTaskTimeoutMs(requested: number | undefined): number {
   const ms = requested ?? DEFAULT_TASK_TIMEOUT_MS;
-  if (!Number.isFinite(ms)) return DEFAULT_TASK_TIMEOUT_MS;
-  return Math.min(Math.max(1, ms), MAX_TIMER_MS - WORKER_STARTUP_GRACE_MS);
+  if (!Number.isFinite(ms) || ms <= 0) return DEFAULT_TASK_TIMEOUT_MS;
+  return Math.min(ms, MAX_TIMER_MS - WORKER_STARTUP_GRACE_MS);
 }
 
 function resolveWorkerScriptPath(): string {

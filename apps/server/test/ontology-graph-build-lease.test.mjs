@@ -142,6 +142,12 @@ async function settlesWithin(promise, ms) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 끝난 빌드(성공 · 실패 · 자리 잃음)는 서버의 liveBuilds 에서 빠져야 한다 — 남으면 Refresh 의
+// NOT IN 목록과 함께 프로세스가 사는 동안 자란다.
+function assertNoLiveBuilds(svc) {
+  assert.equal(svc.liveBuilds.size, 0, '끝난 빌드가 liveBuilds 에 남았다');
+}
+
 // 추출 단계에서 멈춰 서는 빌드를 서버 svc 에서 띄운다. Refresh(forceRebuild 의 claim)로 시작하고,
 // 그 뒤의 claim 은 띄우지 않고 적어만 둔다.
 async function startGatedBuild(svc, graph) {
@@ -251,6 +257,29 @@ describe('Refresh — lease 가 지난 building 을 바로 다시 claim 한다',
     assert.equal(kicked[0].build_id, stored.build_id);
   });
 
+  it('띄우는 빌드는 방금 claim 한 build_id 를 쓴다 — claim 뒤에 다시 읽은 행이 달라도', async () => {
+    const graph = await seedGraph('lease-claim-token', { status: 'ready' });
+    const svc = server();
+    const kicked = [];
+    svc.kickOffInitialBuild = (claimed) => { kicked.push(claimed); };
+    // forceRebuild 는 그래프를 읽고(1), claim 한 뒤 다시 읽는다(2). 그 사이 다른 서버가 다시 claim 한 것처럼 꾸민다.
+    let reads = 0;
+    const realFindOne = graphRepo.findOne;
+    graphRepo.findOne = async function (...args) {
+      const row = await realFindOne.apply(this, args);
+      reads += 1;
+      return reads === 2 && row ? { ...row, build_id: 'someone-elses-claim' } : row;
+    };
+    try {
+      assert.equal((await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID })).started, true);
+    } finally {
+      delete graphRepo.findOne;
+    }
+    assert.equal(reads, 2);
+    assert.equal(kicked.length, 1);
+    assert.equal(kicked[0].build_id, (await readGraph(graph)).build_id, '두 빌드가 한 토큰으로 돌게 된다');
+  });
+
   it('build_id 없이는 빌드를 돌리지 않는다 — 빈 토큰은 빌드가 없는 행에도 맞아 fence 가 되지 않는다', async () => {
     const graph = await seedGraph('lease-unclaimed', { status: 'ready', commit: 'kept' });
     const svc = server({ extraction: { extractRepo: async () => { throw new Error('호출되면 안 됨'); } } });
@@ -282,6 +311,85 @@ describe('이 서버가 돌리는 빌드 — lease 가 지나 보여도 스스�
     const built = await readGraph(graph);
     assert.equal(built.status, 'ready');
     assert.equal(built.commit, 'gated-commit');
+    assertNoLiveBuilds(svc);
+  });
+
+  it('BUILD_MAX_MS 를 넘긴 빌드는 이 서버의 Refresh 도 다시 claim 한다', { timeout: 30_000 }, async () => {
+    const graph = await seedGraph('lease-max-age-reclaim', { status: 'ready', commit: 'old-commit' });
+    const svc = server({ timing: { renewPeriodically: false, leaseMs: 200, maxBuildMs: 300 } });
+    const run = await startGatedBuild(svc, graph);
+    try {
+      await sleep(600); // 최대 시간과 lease 를 둘 다 넘긴다
+      assert.equal((await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID })).started, true, '멈춘 빌드는 그 서버의 Refresh 가 다시 띄운다');
+      assert.deepEqual(run.laterClaims.map((claimed) => claimed.build_id), [(await readGraph(graph)).build_id]);
+    } finally {
+      run.release();
+      await run.build.catch(() => {});
+    }
+    await assert.doesNotReject(run.build);
+    assert.equal((await readGraph(graph)).build_id, run.laterClaims[0].build_id, '늦게 끝난 옛 빌드는 새 claim 을 덮지 않는다');
+    assertNoLiveBuilds(svc);
+  });
+
+  it('최대 시간을 넘겨 교체에 닿은 빌드는 교체하지 않고 실패로 끝난다', { timeout: 30_000 }, async () => {
+    const graph = await seedGraph('lease-max-age-deadline', { status: 'ready', commit: 'old-commit' });
+    await seedSnapshotNode(graph);
+    let persistCalls = 0;
+    const svc = server({
+      timing: { renewPeriodically: false, leaseMs: 10 * MINUTE, maxBuildMs: 300 },
+      extraction: { persistExtraction: async () => { persistCalls += 1; return persistSummaryOf(0); } },
+    });
+    const run = await startGatedBuild(svc, graph);
+    await sleep(500);
+    run.release();
+    await assert.rejects(run.build, /maximum duration/);
+    const stored = await readGraph(graph);
+    assert.equal(stored.status, 'error');
+    assert.match(stored.error, /maximum duration/);
+    assert.equal(stored.commit, 'old-commit');
+    assert.equal(persistCalls, 0, '교체 트랜잭션을 열지 않는다');
+    assert.deepEqual(await snapshotSymbols(graph), ['sym:snapshot']);
+    assertNoLiveBuilds(svc);
+  });
+
+  it('교체를 시작한 빌드는 최대 시간을 넘겨도 끝날 때까지 지킨다', { timeout: 30_000 }, async () => {
+    const graph = await seedGraph('lease-max-age-replacing', { status: 'ready', commit: 'old-commit' });
+    const persisting = gate();
+    const persisted = gate();
+    // 주기 연장은 백엔드 기본값 그대로(Postgres 만 연장한다).
+    const svc = server({
+      timing: { leaseMs: 300, heartbeatMs: 50, maxBuildMs: 400 },
+      extraction: {
+        extractRepo: async () => extractionOf(graph, 'replaced-commit'),
+        persistExtraction: async () => {
+          persisting.open();
+          await persisted.opened;
+          return persistSummaryOf(0);
+        },
+      },
+    });
+    let build = null;
+    svc.kickOffInitialBuild = (claimed) => { build = svc.runInitialBuild(claimed); };
+    assert.equal((await svc.forceRebuild({ graphId: graph.id, accountId: ACCOUNT_ID })).started, true);
+    try {
+      await reached(persisting.opened, build, '저장');
+      await sleep(900); // 최대 시간(400ms) 과 lease(300ms) 를 둘 다 넘긴다
+      const read = svc.resolveOrProvision({ accountId: ACCOUNT_ID, graphId: graph.id });
+      assert.equal(await settlesWithin(read, 1_000), true, '읽기가 교체 트랜잭션 뒤에서 기다렸다');
+      assert.equal((await read).status, 'building', '교체 중인 빌드를 이 서버가 풀었다');
+      if (IS_POSTGRES) {
+        // 다른 서버가 보기에도 살아 있다 — 교체 중에는 최대 시간이 지나도 연장을 멈추지 않는다.
+        assert.equal((await server().resolveOrProvision({ accountId: ACCOUNT_ID, graphId: graph.id })).status, 'building');
+      }
+    } finally {
+      persisted.open();
+      await build?.catch(() => {});
+    }
+    await build;
+    const built = await readGraph(graph);
+    assert.equal(built.status, 'ready');
+    assert.equal(built.commit, 'replaced-commit');
+    assertNoLiveBuilds(svc);
   });
 
   it('BUILD_MAX_MS 를 넘긴 빌드는 더 지키지 않는다 — 연장을 멈추고, 읽기가 풀고, 늦게 끝난 결과는 버린다', { timeout: 30_000 }, async () => {
@@ -340,6 +448,7 @@ describe('이 서버가 돌리는 빌드 — lease 가 지나 보여도 스스�
     assert.equal(stored.status, 'error');
     assert.match(stored.error, /교체 트랜잭션의 진짜 실패/, '끊긴 빌드로 덮이지 않고 실패 원인이 남는다');
     assert.equal(stored.commit, 'old-commit');
+    assertNoLiveBuilds(svc);
   });
 });
 
@@ -377,6 +486,31 @@ describe('heartbeat — 다른 서버가 보기에도 살아 있다', () => {
       const later = (await readGraph(graph)).build_lease_until_ms;
       if (IS_POSTGRES) assert.ok(later > first, 'Postgres 에서는 다른 서버가 보도록 lease 를 미룬다');
       else assert.equal(later, first, 'sql.js 에서는 lease 를 미루지 않는다(liveBuilds · 부팅 정리가 맡는다)');
+    } finally {
+      run.release();
+      await run.build.catch(() => {});
+    }
+    await run.build;
+  });
+
+  it('연장이 실패하면 주기 전체를 기다리지 않고 곧 다시 한다', { timeout: 30_000 }, async () => {
+    const graph = await seedGraph('lease-renew-retry', { status: 'ready' });
+    const builder = server({ timing: { renewPeriodically: true, heartbeatMs: 400, renewRetryMs: 20 } });
+    const attempts = [];
+    let started = 0;
+    const realRenew = builder.renewBuildLease;
+    builder.renewBuildLease = async function (...args) {
+      attempts.push(Date.now() - started);
+      // 교체 직전 연장은 이 테스트가 보지 않는다 — 주기 연장의 첫 번째만 실패시킨다.
+      if (attempts.length === 1) throw new Error('DB 가 잠깐 못 받는다');
+      return realRenew.apply(this, args);
+    };
+    started = Date.now();
+    const run = await startGatedBuild(builder, graph);
+    try {
+      await sleep(650);
+      assert.ok(attempts.length >= 2, `실패한 연장을 곧 다시 하지 않았다 (시도 ${JSON.stringify(attempts)})`);
+      assert.ok(attempts[1] - attempts[0] < 200, `다시 하기까지 주기 전체를 기다렸다 (시도 ${JSON.stringify(attempts)})`);
     } finally {
       run.release();
       await run.build.catch(() => {});
@@ -439,7 +573,7 @@ describe('fencing — 주인 자리를 잃은 빌드는 끝내는 쓰기를 하�
     const claimB = await readGraph(graph);
     assert.notEqual(claimB.build_id, run.buildId);
     assert.deepEqual(claimsB.map((claimed) => claimed.build_id), [claimB.build_id]);
-    return { graph, logs, run, claimB, persistCalls: () => persistCalls };
+    return { graph, logs, run, claimB, serverA, persistCalls: () => persistCalls };
   }
 
   function assertClaimBKept(stored, claimB) {
@@ -450,9 +584,10 @@ describe('fencing — 주인 자리를 잃은 빌드는 끝내는 쓰기를 하�
   }
 
   it('추출 중에 다시 claim 되면 옛 빌드는 교체를 시작하지 않고 끝난다 — 새 claim 과 직전 스냅샷이 그대로다', { timeout: 30_000 }, async () => {
-    const { graph, logs, run, claimB, persistCalls } = await supersede('lease-fence-before-replace');
+    const { graph, logs, run, claimB, serverA, persistCalls } = await supersede('lease-fence-before-replace');
     run.release();
     await assert.doesNotReject(run.build, '자리를 잃은 빌드는 실패가 아니라 조용히 끝난다');
+    assertNoLiveBuilds(serverA);
 
     assertClaimBKept(await readGraph(graph), claimB);
     assert.equal(persistCalls(), 0, '교체 트랜잭션을 열지 않는다');
@@ -461,9 +596,10 @@ describe('fencing — 주인 자리를 잃은 빌드는 끝내는 쓰기를 하�
   });
 
   it('옛 빌드가 실패해도 새 claim 을 error 로 덮지 않는다', { timeout: 30_000 }, async () => {
-    const { graph, logs, run, claimB } = await supersede('lease-fence-failure');
+    const { graph, logs, run, claimB, serverA } = await supersede('lease-fence-failure');
     run.fail(new Error('옛 빌드의 추출 실패'));
     await assert.rejects(run.build, /옛 빌드의 추출 실패/);
+    assertNoLiveBuilds(serverA);
 
     assertClaimBKept(await readGraph(graph), claimB);
     assert.ok(logs.some((entry) => entry.level === 'warn' && /failed after losing its claim/.test(entry.message)));
