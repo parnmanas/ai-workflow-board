@@ -7,14 +7,16 @@
 //
 // 이 스위트가 증명하는 것:
 //   1. 기준(SQLJS_TURN_WARN_MS)보다 오래 쥔 차례는 경고를 한 번 남긴다 — 연결 이름, 차례를 연 일, 쥔 시간, 뒤에서
-//      기다리는 일 수(차례 안의 재진입 쓰기는 세지 않는다). 그 차례가 풀리면 걸린 시간을 한 줄 더 남긴다. 기준보다 짧은
-//      차례는 조용하다 — 줄 서 있던 시간은 쥔 시간에 들지 않는다.
+//      기다리는 일 수(차례 안의 재진입 쓰기는 세지 않는다). 그 차례가 풀리면 걸린 시간을 한 줄 더 남긴다. 쥔 동안 감시가
+//      보지 못한 차례(이벤트 루프를 막았다)는 풀릴 때 한 번 알린다. 기준보다 짧은 차례는 조용하다 — 줄 서 있던 시간은
+//      쥔 시간에 들지 않는다.
 //   2. 호출 위치 — SQLJS_TURN_STACKS=1 이면 첫 경고부터 실린다. 아니면 첫 경고는 위치 없이 플래그를 안내하고, 그 연결에서
 //      그 뒤에 열린 차례부터 위치가 실린다(연결마다 따로). 위치에는 큐 안쪽 프레임이 없다.
 //   3. 차례를 연 일마다 이름이 있다 — transaction, save, 문장의 첫 단어, synchronize, afterSqljsTransactions() 의 이름, export.
 //   4. 감시 주기는 차례마다 만들지 않는다 — 바쁜 DataSource 마다 하나(unref)이고, 큐가 쉬면 스스로 멈춘다. 차례가 없던
-//      DataSource 에는 주기가 없다.
-//   5. 경고를 쓰다 실패해도(console.warn 이 던짐) 큐와 프로세스는 그대로 간다.
+//      DataSource 에는 주기가 없다. 주기는 DataSource 를 만든 비동기 문맥에서 돈다 — 그것을 건 요청의 문맥이 아니다.
+//   5. 감시가 실패해도 쓰기 결과와 큐는 그대로 간다 — 경고를 못 씀(console.warn 이 던짐), 주기를 못 걺(setInterval 이
+//      던짐 — 다음 차례가 다시 건다).
 //   6. 기준값 해석 — 비었거나 틀리면 30초, 하한 50ms.
 //
 // 컴파일된 dist/ 를 대상으로 실행한다(`npm run build` 필요, test 스크립트가 보장). 공유 dev database/ 의
@@ -22,6 +24,7 @@
 
 import { describe, it, beforeEach, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -221,6 +224,44 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
     assert.equal(lines.length, 2, `only the turn ahead warned, then was released: ${JSON.stringify(lines)}`);
     assert.match(lines[0], /has been held for .*, 1 waiting behind it/);
     assert.match(lines[1], /was released after/);
+  });
+
+  it('a turn the watch could not check while it was held — it blocked the event loop — is reported once, when it is released', async () => {
+    const ds = await openDataSource();
+    const blocking = ds.transaction(async (manager) => {
+      const accounts = manager.getRepository(Account);
+      await accounts.save(accounts.create({ name: 'blocking-inside', description: 'watch' }));
+      const busyUntil = performance.now() + WARN_MS * 1.5;
+      while (performance.now() < busyUntil) {
+        // 이벤트 루프를 막는다 — 그동안 감시 tick 이 돌 틈이 없다.
+      }
+      return 'blocking: committed';
+    });
+    const accounts = ds.getRepository(Account);
+    const waiter = accounts.save(accounts.create({ name: 'blocking-waiter', description: 'watch' }));
+    assert.equal(await withinDeadlockTimeout(blocking), 'blocking: committed');
+    assert.ok((await withinDeadlockTimeout(waiter)).id);
+    await sleep(tickMsFor(WARN_MS) * 2);
+    const lines = warningsFor(ds);
+    assert.equal(lines.length, 1, `one report, made when the turn was released, and no separate release line: ${JSON.stringify(lines)}`);
+    assert.match(
+      lines[0],
+      new RegExp(
+        `^\\[DB\\] sql\\.js write queue \\(${escapeRe(connectionOf(ds))}\\): the turn opened by "transaction" was held for \\d+\\.\\ds ` +
+          'before it was released, 1 waiting behind it — the watch could not check it while it was held ' +
+          '\\(it blocked the event loop, or ended between checks\\)\\. Its call site was not recorded;',
+      ),
+    );
+    const heldFor = Number(/was held for (\d+\.\d)s/.exec(lines[0])[1]);
+    assert.ok(heldFor >= WARN_MS / 1000, `held for ${heldFor}s — past the threshold`);
+
+    // 쥔 동안 남긴 경고와 마찬가지로, 그 뒤로 이 연결은 호출 위치를 기록한다.
+    const next = openSecondLongTransaction(ds);
+    await next.inside;
+    await until(() => warningsFor(ds).length === 2, 'the next warning');
+    assert.match(warningsFor(ds)[1], /has been held for .* Opened at:\n.*at openSecondLongTransaction \(/s);
+    next.release();
+    await withinDeadlockTimeout(next.done);
   });
 
   it('without SQLJS_TURN_STACKS the first warning has no call site and says how to get one; turns opened after it on that connection carry theirs', async () => {
@@ -458,6 +499,59 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       assert.equal(await withinDeadlockTimeout(held.done), 'throwing: committed', 'the release line failed, the transaction still resolves as it did');
       assert.equal(attempts, 2, 'the release line was attempted');
       assert.ok((await withinDeadlockTimeout(waiter)).id, 'the queue moved on to the waiting write');
+    } finally {
+      console.warn = capturing;
+    }
+  });
+
+  it('a watch that cannot start its interval neither fails the write nor stops the queue — the next turn tries again', async () => {
+    const ds = await openDataSource();
+    const accounts = ds.getRepository(Account);
+    const realSetInterval = globalThis.setInterval;
+    globalThis.setInterval = () => { throw new Error('setInterval is unavailable'); };
+    try {
+      // 차례는 줄을 선 뒤에 시작하므로, 쓰기가 끝날 때까지 setInterval 을 망가뜨린 채 둔다.
+      const writes = await withinDeadlockTimeout(Promise.allSettled([
+        accounts.save(accounts.create({ name: 'no-interval-1', description: 'watch' })),
+        accounts.save(accounts.create({ name: 'no-interval-2', description: 'watch' })),
+      ]));
+      assert.deepEqual(writes.map((w) => w.reason?.message ?? w.status), ['fulfilled', 'fulfilled'], 'the writes resolve as they would without the watch');
+      // 주기가 없어도 기준을 넘긴 차례는 풀릴 때 알린다.
+      await withinDeadlockTimeout(afterSqljsTransactions(ds, () => sleep(WARN_MS * 1.5), 'no-interval'));
+      assert.match(warningsFor(ds)[0] ?? '', /the turn opened by "no-interval" was held for \d+\.\ds before it was released/);
+    } finally {
+      globalThis.setInterval = realSetInterval;
+    }
+    const held = holdTransaction(ds, 'interval-back');
+    await held.inside;
+    await until(
+      () => warningsFor(ds).some((line) => line.includes('the turn opened by "transaction" has been held')),
+      'a warning while the turn is still held, from the interval the next turn started',
+    );
+    held.release();
+    assert.equal(await withinDeadlockTimeout(held.done), 'interval-back: committed');
+  });
+
+  it('the watch runs in the async context the DataSource was set up in, not in the request that happened to start it', async () => {
+    const request = new AsyncLocalStorage();
+    const ds = await openDataSource();
+    const accounts = ds.getRepository(Account);
+    const capturing = console.warn;
+    const written = [];
+    console.warn = (...args) => {
+      written.push({ request: request.getStore(), text: args.map(String).join(' ') });
+      capturing.apply(console, args);
+    };
+    try {
+      // 쉬던 DataSource 의 첫 차례 — 요청 A 가 감시 주기를 걸고 곧 끝난다.
+      await request.run('request A', () => accounts.save(accounts.create({ name: 'context-a', description: 'watch' })));
+      const held = request.run('request B', () => holdTransaction(ds, 'context-b'));
+      await held.inside;
+      await until(() => warningsFor(ds).length === 1, 'the warning for the turn request B holds');
+      const warning = written.find(({ text }) => text.includes('has been held'));
+      assert.equal(warning?.request, undefined, `the warning was written in the context of ${warning?.request}`);
+      held.release();
+      await withinDeadlockTimeout(held.done);
     } finally {
       console.warn = capturing;
     }
