@@ -168,6 +168,7 @@ test/nest-app-boot-smoke.test.mjs
 test/never-started-agent-feedback.test.mjs
 test/notification-provider-timeout.test.mjs
 test/on-ticket-done-hook-grep.test.mjs
+test/ontology-build-slots.test.mjs
 test/ontology-edge-resolution-check.test.mjs
 test/ontology-extraction-decorator-dogfood.test.mjs
 test/ontology-extraction-fact-bundle.test.mjs

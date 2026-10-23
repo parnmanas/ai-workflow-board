@@ -18,6 +18,7 @@ import { deleteChunked, NODE_CHUNK_SIZE, EDGE_CHUNK_SIZE } from './persist';
 import { LogService } from '../../services/log.service';
 import { OntologyExtractionService } from './ontology-extraction.service';
 import { OntologyResolverService } from './ontology-resolver.service';
+import { ontologyBuildSlots } from './build-slots';
 
 // outreach-ingest.service.ts의 isUniqueConstraintError()와 동일한 패턴(운영
 // 교훈: 외부 입력 idempotency는 부수효과 전에 DB 유니크 제약으로 선점) —
@@ -83,8 +84,8 @@ const BUILD_REPLACE_LOCK_TIMEOUT_MS = 10 * 60_000;
 const BUILD_LEASE_EXPIRED_SQL = '(build_lease_until_ms IS NULL OR build_lease_until_ms < :nowMs)';
 
 interface LiveBuild {
-  /** performance.now() 기준. */
-  startedAt: number;
+  /** performance.now() 기준. 슬롯을 기다리는 동안은 null. */
+  startedAt: number | null;
   /** 교체 트랜잭션을 시작했다 — BUILD_MAX_MS 와 상관없이 끝날 때까지 지킨다. */
   replacing: boolean;
 }
@@ -163,7 +164,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
   }
 
   private pastMaxDuration(live: LiveBuild): boolean {
-    return performance.now() - live.startedAt >= this.buildMaxMs;
+    return live.startedAt !== null && performance.now() - live.startedAt >= this.buildMaxMs;
   }
 
   /**
@@ -358,10 +359,16 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
     const buildId = graph.build_id;
     // 빌드는 언제나 claim 아래에서 돈다 — 빈 토큰은 빌드가 없는 행(ready · error)에도 맞아 fence 가 되지 않는다.
     if (!buildId) throw new Error('graph build needs a claim (build_id) — start it through getOrCreateGraph or forceRebuild');
-    const live: LiveBuild = { startedAt: performance.now(), replacing: false };
+    const live: LiveBuild = { startedAt: null, replacing: false };
     this.liveBuilds.set(buildId, live);
     const heartbeat = this.renewPeriodically ? this.startBuildHeartbeat(graph.id, buildId, live) : { stop() {} };
+    let releaseSlot: (() => void) | undefined;
     try {
+      // DB 트랜잭션 밖에서 기다린다. 결과가 교체 차례를 기다리는 메모리까지
+      // 제한하려고 저장이 끝날 때까지 슬롯을 유지한다. 대기 중에도 lease 는 연장한다.
+      releaseSlot = await ontologyBuildSlots.acquire();
+      live.startedAt = performance.now();
+      if (!(await this.renewBuildLease(graph.id, buildId))) throw new SupersededBuildError();
       const extraction = await this.extractionService.extractRepo({
         accountId: graph.account_id,
         resourceId: graph.resource_id,
@@ -434,6 +441,7 @@ export class OntologyLifecycleService implements OnApplicationBootstrap {
     } finally {
       heartbeat.stop();
       this.liveBuilds.delete(buildId);
+      releaseSlot?.();
     }
   }
 
