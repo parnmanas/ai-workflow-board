@@ -864,7 +864,9 @@ jobs:
     [push('branches: main'), '문자열 하나인 branches'],
     [push("branches: ['*']"), '* 는 main 을 고른다'],
     [push("branches: ['**']"), '** 는 main 을 고른다'],
-    [push("branches: ['ma?n']"), '? 는 한 글자다'],
+    [push("branches: ['mai?n']"), '? 는 앞 글자가 없거나 하나다'],
+    [push("branches: ['ma+in']"), '+ 는 앞 글자가 하나 이상이다'],
+    [push("branches:\n  - 'm[a-z]in'"), '[] 는 한 글자 범위다'],
     [push("branches: ['!main', main]"), '마지막으로 맞은 패턴이 정한다'],
     [push('branches-ignore: [release, "rel/**"]'), 'main 을 빼지 않는 branches-ignore'],
     [push('branches: [main]\ntags: [v*]'), 'branches 가 있으면 tags 는 상관없다'],
@@ -883,7 +885,13 @@ jobs:
     [push("branches-ignore: ['**']\ntags: [v*]"), /branches-ignore 가 main 을 뺀다/, 'tags 만 받는 흔한 모양'],
     [push('tags: [v*]'), /tags 필터만/, 'tags 만'],
     [push('tags-ignore: [v*]'), /tags 필터만/, 'tags-ignore 만'],
-    [push("branches: ['rel[0-9]']"), /on\.push\.branches 를 읽지 못했다/, '읽지 않는 패턴 문법'],
+    [push("branches: ['ma?n']"), /main 을 고르지 않는다/, '? 는 한 글자가 아니다 — ma?n 은 mn · man 이다'],
+    [push("branches: ['m.in']"), /main 을 고르지 않는다/, '. 은 글자 그대로다'],
+    [push("branches-ignore: ['mai?n']"), /branches-ignore 가 main 을 뺀다/, 'branches-ignore 의 ?'],
+    [push("branches:\n  - '[main'"), /on\.push\.branches 를 읽지 못했다/, '닫히지 않은 []'],
+    [push("branches: ['m[a-z]in']"), /on\.push\.branches 를 읽지 못했다/, '펼치지 못한 흐름 시퀀스'],
+    [push("branches-ignore:\n  - '[main'"), /on\.push\.branches-ignore 를 읽지 못했다/, 'branches-ignore 의 닫히지 않은 []'],
+    [push("branches: ['?main']"), /on\.push\.branches 를 읽지 못했다/, '앞 글자가 없는 ?'],
     [push('branches: { a: b }'), /on\.push\.branches 를 읽지 못했다/, '흐름 맵 branches'],
     [push('branches-ignore: { a: b }'), /on\.push\.branches-ignore 를 읽지 못했다/, '흐름 맵 branches-ignore'],
     [push('branches:\n  a: b'), /on\.push\.branches 를 읽지 못했다/, '블록 맵 branches'],
@@ -928,20 +936,41 @@ jobs:
         run: NODE_OPTIONS=--max-old-space-size=4096 npm run test:node-options
       - working-directory: apps/server
         run: npm run test:ignore-true --ignore-scripts=true
+      - working-directory: apps/server
+        run: npm run test:all-workspaces -ws
+      - working-directory: apps/server
+        run: npm run test:ignore-zero --ignore-scripts=0
+      - working-directory: apps/server
+        run: npm run test:ignore-upper --ignore-scripts=FALSE
+      - working-directory: apps/server
+        run: npm_config_ignore_scripts=FALSE npm run test:prefix-upper-false
+      - working-directory: apps/server
+        run: NODE_OPTIONS=--test-skip-pattern=flaky npm run test:node-skip
+      - working-directory: apps/server
+        run: npm run test:harmless-flags -q -d --color=always --no-update-notifier --no-fund --no-audit --no-progress --no-ignore-scripts
 `));
-  assert.deepEqual([...invoked], ['test:node-options'], 'npm 설정이 아닌 환경 변수는 괜찮다');
+  assert.deepEqual(
+    [...invoked].sort(),
+    ['test:harmless-flags', 'test:node-options'],
+    '스크립트를 도는 방식과 무관한 옵션 · 환경 변수는 괜찮다',
+  );
   const why = Object.fromEntries(uncounted.map((u) => [u.script, u.why]));
   assert.deepEqual(Object.keys(why).sort(), [
     'test',
     'test:after-dashes',
+    'test:all-workspaces',
     'test:bash-env',
     'test:extra-arg',
     'test:if-present',
     'test:ignore-true',
+    'test:ignore-upper',
+    'test:ignore-zero',
+    'test:node-skip',
     'test:prefix-env',
     'test:prefix-env-upper',
+    'test:prefix-upper-false',
     'test:script-shell',
-  ]);
+  ], 'npm 은 명령 옵션의 ignore-scripts 를 정확히 false 일 때만 끈다 — =0 · =FALSE 는 켠다');
   assert.match(why['test:ignore-true'], /npm 옵션 --ignore-scripts=true/);
   assert.match(why['test:if-present'], /npm 옵션 --if-present/);
   assert.match(why.test, /npm 옵션 --ignore-script/, 'npm 은 옵션 이름의 줄임도 받아들인다');
@@ -969,10 +998,18 @@ test('CI 호출: env 의 npm · 셸 설정 — 스크립트를 도는 방식을 
           ${env}
         run: npm run test:${name}`;
   const yaml = onMainPush(`
-jobs:${step('bash-env', 'BASH_ENV: /tmp/x')}${step('userconfig', 'npm_config_userconfig: /tmp/npmrc')}${step('hyphen', "npm_config_ignore-scripts: 'true'")}${step('zero', "npm_config_ignore_scripts: '0'")}${step('audit', "npm_config_audit: 'false'")}${step('registry', 'NPM_CONFIG_REGISTRY: https://r.example')}
+jobs:${step('bash-env', 'BASH_ENV: /tmp/x')}${step('userconfig', 'npm_config_userconfig: /tmp/npmrc')}${step('hyphen', "npm_config_ignore-scripts: 'true'")}${step('zero', "npm_config_ignore_scripts: '0'")}${step('audit', "npm_config_audit: 'false'")}${step('registry', 'NPM_CONFIG_REGISTRY: https://r.example')}${step('fetch', "NPM_CONFIG_FETCH_RETRIES: '5'")}${step('empty', "npm_config_ignore_scripts: ''")}${step('upper-false', "npm_config_ignore_scripts: 'FALSE'")}${step('globalconfig', 'npm_config_globalconfig: /tmp/npmrc')}${step('npm-node-options', 'npm_config_node_options: --max-old-space-size=4096')}${step('node-test-skip', "NODE_OPTIONS: '--test-skip-pattern=flaky'")}${step('node-memory', "NODE_OPTIONS: '--max-old-space-size=4096'")}
 `);
-  assert.deepEqual(invokedIn(yaml), ['test:audit', 'test:registry', 'test:zero']);
-  assert.deepEqual(uncountedIn(yaml), ['bash-env test:bash-env', 'hyphen test:hyphen', 'userconfig test:userconfig']);
+  assert.deepEqual(invokedIn(yaml), ['test:audit', 'test:empty', 'test:fetch', 'test:node-memory', 'test:registry', 'test:zero']);
+  assert.deepEqual(uncountedIn(yaml), [
+    'bash-env test:bash-env',
+    'globalconfig test:globalconfig',
+    'hyphen test:hyphen',
+    'node-test-skip test:node-test-skip',
+    'npm-node-options test:npm-node-options',
+    'upper-false test:upper-false',
+    'userconfig test:userconfig',
+  ], 'env 의 ignore-scripts 는 false · 0 · 빈 값만 끈다');
 });
 
 // GITHUB_ENV 와 사용자 .npmrc 는 같은 잡의 뒤 step 들로 이어진다.
@@ -996,9 +1033,60 @@ jobs:
       - run: echo "FOO=1" >> "$GITHUB_ENV"
       - working-directory: apps/server
         run: npm run test:after-other-env
+  harmless-env:
+    steps:
+      - run: echo "npm_config_registry=https://r.example" >> "$GITHUB_ENV"
+      - run: npm config set registry https://r.example
+      - run: npm config set registry=https://r.example
+      - run: echo "npm_config_ignore_scripts=false" >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-harmless
+  bash-env:
+    steps:
+      - run: echo "BASH_ENV=/tmp/x" >> $GITHUB_ENV
+      - working-directory: apps/server
+        run: npm run test:after-bash-env
+  upper-env:
+    steps:
+      - run: echo NPM_CONFIG_IGNORE_SCRIPTS=1 >> $GITHUB_ENV
+      - working-directory: apps/server
+        run: npm run test:after-upper-env
+  npm-set:
+    steps:
+      - run: npm set ignore-scripts true
+      - working-directory: apps/server
+        run: npm run test:after-npm-set
+  c-set:
+    steps:
+      - run: npm c set ignore-scripts true
+      - working-directory: apps/server
+        run: npm run test:after-c-set
+  located-set:
+    steps:
+      - run: npm --location=user config set ignore-scripts=true
+      - working-directory: apps/server
+        run: npm run test:after-located-set
+  npmrc-write:
+    steps:
+      - run: echo "ignore-scripts=true" >> ~/.npmrc
+      - working-directory: apps/server
+        run: npm run test:after-npmrc
 `);
-  assert.deepEqual(invokedIn(yaml), ['test:after-other-env', 'test:before-taint'], '앞 step 만 뒤 step 에 걸리고, 잡을 넘지 않는다');
-  assert.deepEqual(uncountedIn(yaml), ['github-env test:after-github-env', 'npm-config-set test:after-config-set']);
+  assert.deepEqual(
+    invokedIn(yaml),
+    ['test:after-harmless', 'test:after-other-env', 'test:before-taint'],
+    '앞 step 만 뒤 step 에 걸리고, 잡을 넘지 않는다. 스크립트와 무관한 설정은 걸리지 않는다',
+  );
+  assert.deepEqual(uncountedIn(yaml), [
+    'bash-env test:after-bash-env',
+    'c-set test:after-c-set',
+    'github-env test:after-github-env',
+    'located-set test:after-located-set',
+    'npm-config-set test:after-config-set',
+    'npm-set test:after-npm-set',
+    'npmrc-write test:after-npmrc',
+    'upper-env test:after-upper-env',
+  ]);
 });
 
 test('CI 호출: 보통 셸이 아닌 shell: 은 세지 않는다', () => {
@@ -1014,6 +1102,21 @@ jobs:
       - working-directory: apps/server
         shell: pwsh
         run: npm run test:pwsh
+      - working-directory: apps/server
+        shell: sh
+        run: npm run test:sh
+      - working-directory: apps/server
+        shell: cmd
+        run: npm run test:cmd
+      - working-directory: apps/server
+        shell: powershell
+        run: npm run test:powershell
+      - working-directory: apps/server
+        shell: bash -eo pipefail {0}
+        run: npm run test:bash-template
+      - working-directory: apps/server
+        shell: bash --noprofile --norc -euxo pipefail {0}
+        run: npm run test:bash-long-template
   custom-step:
     steps:
       - working-directory: apps/server
@@ -1032,7 +1135,15 @@ jobs:
         shell: [bash]
         run: npm run test:list-shell
 `);
-  assert.deepEqual(invokedIn(yaml), ['test:defaults-bash', 'test:pwsh']);
+  assert.deepEqual(invokedIn(yaml), [
+    'test:bash-long-template',
+    'test:bash-template',
+    'test:cmd',
+    'test:defaults-bash',
+    'test:powershell',
+    'test:pwsh',
+    'test:sh',
+  ], 'bash · sh 에 흔한 옵션만 붙인 템플릿은 보통 셸이다');
   const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
   assert.match(why['test:custom-step'], /^shell: true \{0\}/);
   assert.match(why['test:custom-defaults'], /^shell: bash -c/);
@@ -1093,13 +1204,43 @@ test('.npmrc: 스크립트를 도는 방식을 바꾸는 설정만 문제로 신
       '# 주석',
       'fund=false',
       'engine-strict=true',
+      'fetch-retries=5',
       'ignore-scripts=false',
+      'ignore-scripts=0',
     ].join('\n')),
     [],
   );
   assert.deepEqual(
-    npmrcProblems('ignore-scripts=true\nscript-shell = /bin/true\nuserconfig=/tmp/x\nignore-scripts\n'),
-    ['ignore-scripts=true', 'script-shell = /bin/true', 'userconfig=/tmp/x', 'ignore-scripts'],
-    '값 없는 설정은 true 다',
+    npmrcProblems('ignore-scripts=true\nscript-shell = /bin/true\nuserconfig=/tmp/x\nignore-scripts\nignore-scripts=\nignore-scripts=FALSE\n'),
+    ['ignore-scripts=true', 'script-shell = /bin/true', 'userconfig=/tmp/x', 'ignore-scripts', 'ignore-scripts=', 'ignore-scripts=FALSE'],
+    '값 없는 줄과 빈 값은 켠다. 끄는 값은 false · 0 뿐이다',
   );
+});
+
+test('CI 호출: 잡 container 의 env 도 본다', () => {
+  const yaml = onMainPush(`
+jobs:
+  in-container:
+    container:
+      image: node:22
+      env:
+        npm_config_ignore_scripts: 'true'
+    steps:
+      - working-directory: apps/server
+        run: npm run test:container-env
+  image-only:
+    container: node:22
+    steps:
+      - working-directory: apps/server
+        run: npm run test:image-only
+  odd-container:
+    container: [node]
+    steps:
+      - working-directory: apps/server
+        run: npm run test:odd-container
+`);
+  assert.deepEqual(invokedIn(yaml), ['test:image-only']);
+  const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
+  assert.match(why['test:container-env'], /env 의 npm_config_ignore_scripts/);
+  assert.match(why['test:odd-container'], /^container 를 읽지 못했다/);
 });
