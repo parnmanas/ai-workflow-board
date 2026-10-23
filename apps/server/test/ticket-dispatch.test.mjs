@@ -249,9 +249,14 @@ test('re-sends that only draw manager auto-notices still end in a park', async (
   // server sees nothing running: every supervisor re-send is dropped with a
   // notice. Those notices must not keep the ticket away from a human forever.
   const ticket = await createTicket(app, gdst, { accountId: ws.id, title: 'stuck spawn', status: 'in_progress', assignee: agent });
+  // A fresh dispatch stamp keeps the app's own sweep, which runs on real time,
+  // off this ticket; the passes below run hours ahead.
+  await ds.getRepository('Ticket').update({ id: ticket.id }, { last_dispatched_at: new Date() });
   const later = Date.now() + 3 * 60 * 60 * 1000;
   for (let i = 0; i < MAX_SUPERVISOR_REDISPATCHES; i += 1) {
     await dispatcher.supervise(later + i * 60 * 60 * 1000);
+    // A new row each time, as after a silent-exit warning broke the merge — a
+    // merged repeat is an 'updated' row the dispatcher never looks at.
     await afterDispatcherHandles(() => autoNotice(ticket.id, `⚠️ duplicate dispatch suppressed (${i + 1})`));
   }
   const supervisorSends = () => vagent.triggersFor(ticket.id).filter((t) => t.trigger_source === 'supervisor');
@@ -263,6 +268,21 @@ test('re-sends that only draw manager auto-notices still end in a park', async (
   const parked = await ds.getRepository('Ticket').findOneBy({ id: ticket.id });
   assert.equal(parked.pending_user_action, true);
   assert.match(parked.pending_reason, /stopped/);
+});
+
+test('on a ticket the supervisor watches, an agent comment starts the count over', async () => {
+  const tickets = ds.getRepository('Ticket');
+  const ticket = await createTicket(app, gdst, { accountId: ws.id, title: 'watched', status: 'in_progress', assignee: agent });
+  // As if already re-sent MAX times; the fresh stamp keeps the real-time sweep off.
+  await tickets.update({ id: ticket.id }, { supervisor_redispatches: MAX_SUPERVISOR_REDISPATCHES, last_dispatched_at: new Date() });
+  await afterDispatcherHandles(() => vagent.mcp.callTool('add_comment', { ticket_id: ticket.id, content: 'still on it: the parser is done' }));
+  assert.equal((await tickets.findOneBy({ id: ticket.id })).supervisor_redispatches, 0);
+
+  await dispatcher.supervise(Date.now() + 3 * 60 * 60 * 1000);
+  const after = await tickets.findOneBy({ id: ticket.id });
+  assert.equal(after.pending_user_action, false, 'the next silence is re-sent, not parked');
+  assert.equal(after.supervisor_redispatches, 1);
+  await tickets.update({ id: ticket.id }, { status: 'done' });
 });
 
 test('tickets list filters by status, tags and project', async () => {
