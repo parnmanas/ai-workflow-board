@@ -450,18 +450,37 @@ test('owner.json 을 못 읽는 가드는 기존 규칙(상한 60s)을 그대로
   const expired = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 90_000 }));
   assert.equal(expired.reclaim, true);
   assert.equal(expired.reason, 'guard_expired');
+  // 비었는지 확인하지 못한 가드(목록을 못 읽음 · 디렉터리가 아님)는 빈 가드의 짧은 상한을 쓰지 않는다.
+  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 30_000, guardEmpty: false })).reclaim, false);
 });
 
-// 사라진 가드는 회수(rename) 대상이 아니다. rename 은 판정한 가드가 아니라 그 순간 그
-// 경로에 있는 것을 옮겨, 판정과 rename 사이에 남이 새로 만든 가드를 지운다(티켓
-// b14c5669 — 가드 holder 둘). 다시 만들면 된다.
+// 쥔 가드는 언제나 자기 owner 를 담는다. 비어 있는 가드는 mkdir 와 owner 기록 사이의 순간이거나,
+// owner 만 지우고 디렉터리는 못 지운 잔해다(Windows 에서 owner 가 삭제 대기면 rmdir 이 진다).
+// 잔해를 owner 미상 가드의 상한(60s)에 맡기면 모든 대기자가 그만큼 멈춘다. 상호 배제는 이
+// 상한에 기대지 않는다 — 기록 직전의 디렉터리를 치워도 그 contender 는 기록이 ENOENT 로 진다.
+test('빈 가드 디렉터리는 짧은 상한(수 초) 뒤 회수한다 — 갓 만든 것은 건드리지 않는다', () => {
+  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 500, guardEmpty: true })).reclaim, false);
+  const empty = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 5_000, guardEmpty: true }));
+  assert.equal(empty.reclaim, true);
+  assert.equal(empty.reason, 'guard_empty');
+  // 이전 부팅의 것이면 그 근거가 먼저다.
+  const previousBoot = judgeRecoveryGuard(
+    guardFacts({ guardMtimeMs: BOOT_TIME - 24 * 3_600_000, guardEmpty: true }),
+  );
+  assert.equal(previousBoot.reason, 'guard_predates_boot');
+});
+
+// 사라진 가드는 회수 대상이 아니다 — 지울 것이 없으니 다시 만들면 된다. 회수가 가드 경로를
+// rename 하던 때는 이 판정이 곧 버그였다. rename 은 판정한 가드가 아니라 그 순간 그 경로에
+// 있는 것을 옮겨, 판정과 rename 사이에 남이 새로 만든 가드를 지웠다(티켓 b14c5669 — 가드
+// holder 둘). 이제 회수는 판정한 가드만 지우지만(티켓 4fb0f842), 헛걸음할 까닭은 없다.
 test('가드 디렉터리가 이미 사라졌으면 회수하지 않는다 — 다시 만들면 된다', () => {
   const verdict = judgeRecoveryGuard(guardFacts({ guardMtimeMs: null }));
   assert.equal(verdict.reclaim, false);
 });
 
 // 사라지기 직전에 읽은 owner 가 그 사이 끝났어도(가드를 놓고 종료) 마찬가지다. owner 쪽을
-// 먼저 보면 stale 로 답해 같은 rename 에 이른다(리뷰 E10 — 셋 이상이 겹칠 때).
+// 먼저 보면 stale 로 답해 회수하러 간다(리뷰 E10 — 셋 이상이 겹칠 때).
 test('사라진 가드는 그 전에 읽은 owner 가 죽었어도 회수하지 않는다', () => {
   const verdict = judgeRecoveryGuard(
     guardFacts({ owner: { pid: 999_999_999 }, ownerFacts: facts({ pidPresence: 'dead' }), guardMtimeMs: null }),
