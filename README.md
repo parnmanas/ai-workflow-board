@@ -352,7 +352,7 @@ npm run dev:server
 
 The guard only applies to local sql.js files; it does not replace a PostgreSQL database. See [host troubleshooting](docs/agent-manager.md#troubleshooting) for CLI/update problems.
 
-Local sql.js runs every write through one queue, so one stuck write holds up all the others. When writes stall, look for a `[DB] sql.js write queue (<file>)` warning. It names what holds the queue, for how long, and how many writes wait behind it. A later `released after` line means a slow callback. No release line means a deadlock — usually a transaction callback waiting for another request's write. To see where the turn was opened, restart with `SQLJS_TURN_STACKS=1` and reproduce.
+Local sql.js runs every write through one queue, so one stuck write holds up all the others. When writes stall, look for a `[DB] sql.js write queue (<file>)` warning. It names what holds the queue, for how long, and how many writes wait behind it. A later `released after` line means a slow callback. No release line means a deadlock — usually a transaction callback waiting for another request's write. A turn the watch could only see after it ended (for example one that blocked the event loop) is reported once, with `before it was released`. To see where the turn was opened, restart with `SQLJS_TURN_STACKS=1` and reproduce.
 
 ## Development
 
