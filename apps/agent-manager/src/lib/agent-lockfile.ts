@@ -72,8 +72,9 @@ const RECOVERY_LOCK_STALE_MS = 60_000;
 const MAX_ACQUIRE_ATTEMPTS = 5;
 
 // 회수 가드 mkdir 이 삭제 대기 errno 를 **연달아** 받아도 기다리는 횟수. 한 번에
-// 25ms 를 쉬므로 약 2초다. 삭제 대기는 지우는 쪽이 핸들을 닫으면 끝나 보통 수 ms
-// 안에 닫힌다 — 그보다 길게 이어지면 경합이 아니라 진짜 권한 문제로 본다.
+// 25ms 를 쉬므로 약 2초다(Windows 타이머 해상도로 조금 더 길다). 삭제 대기는 그
+// 경로를 연 마지막 핸들(지우는 쪽, 판정 중인 대기자, 백신 등)이 닫히면 끝나 보통
+// 수 ms 안에 닫힌다 — 그보다 길게 이어지면 경합이 아니라 진짜 권한 문제로 본다.
 export const RECOVERY_GUARD_TRANSIENT_LIMIT = 80;
 
 // 부팅 시각 근사치(Date.now() - os.uptime())는 같은 부팅 안에서도 부팅 이후의
@@ -851,7 +852,8 @@ export function resolveLostCreateRace(
  *  삭제 대기를 재현하지 않고도 대기 규칙을 결정적으로 검증할 수 있다
  *  (`resolveLostCreateRace` 와 같은 주입 스타일). */
 export interface RecoveryGuardOps {
-  /** 가드 디렉터리를 만든다. 이미 있으면 EEXIST 를 던진다. */
+  /** 가드를 만든다(디렉터리 + owner). 이미 있으면 EEXIST 를 던지고, 실패하면 아무것도
+   *  남기지 않는다. */
   create(): void;
   /** 남이 쥔 가드가 회수 대상이면 치우고 true. */
   reclaimStale(): boolean;
@@ -906,41 +908,75 @@ export async function waitForRecoveryGuard(
 }
 
 async function acquireRecoveryLock(): Promise<() => void> {
-  await waitForRecoveryGuard({
-    create: () => mkdirSync(RECOVERY_LOCK_PATH),
-    reclaimStale: reclaimStaleRecoveryLock,
-    pause: () => delay(25),
-    onTransient: (err, streak) => {
-      // 연속 구간마다 한 줄만 — 25ms 마다 찍으면 소음이다.
-      if (streak === 1) {
-        log(
-          `[lockfile] recovery guard mkdir hit ${err?.code}; waiting as if another process is releasing it ` +
-            `(delete-pending), up to ${RECOVERY_GUARD_TRANSIENT_LIMIT} tries in a row`,
-        );
-      }
-    },
-  });
-  // 주 lock 과 같은 페이로드를 적는다 — 부팅 세대가 없으면 이 가드가 다음
-  // 부팅에서 회수 불가능한 유령이 된다.
-  const guardBoot = currentBootIdentity();
-  writeFileSync(
-    RECOVERY_OWNER_PATH,
-    JSON.stringify({
-      pid: process.pid,
-      role: 'recovery-guard',
-      started_at: new Date().toISOString(),
-      boot_id: guardBoot.id,
-      boot_time_ms: guardBoot.approxBootTimeMs,
-      pid_start_ticks: readProcessStartTicks(process.pid),
-    }),
-  );
+  try {
+    await waitForRecoveryGuard({
+      create: createRecoveryGuard,
+      reclaimStale: reclaimStaleRecoveryLock,
+      pause: () => delay(25),
+      onTransient: (err, streak) => {
+        // 연속 구간마다 한 줄만 — 25ms 마다 찍으면 소음이다.
+        if (streak === 1) {
+          log(
+            `[lockfile] recovery guard ${err?.syscall ?? 'create'} hit ${err?.code}; waiting as if another process ` +
+              `is releasing it (delete-pending), up to ${RECOVERY_GUARD_TRANSIENT_LIMIT} tries in a row`,
+          );
+        }
+      },
+    });
+  } catch (err: any) {
+    // 상한을 다 쓴 것은 경합이 아니라 영구 오류다. 위의 "기다린다" 줄만 남기면 로그
+    // 파일에서는 권한 문제가 경합처럼 읽힌다(치명 스택은 stderr 로만 나간다).
+    if (isTransientLockRaceCode(err?.code)) {
+      log(
+        `[lockfile] recovery guard: gave up after ${RECOVERY_GUARD_TRANSIENT_LIMIT} consecutive ${err.code}; ` +
+          `treating it as a permanent error`,
+      );
+    }
+    throw err;
+  }
   return () => {
     try {
       rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
-    } catch {
-      /* 프로세스 종료 시 stale 회수 가드가 안전하게 정리한다 */
+    } catch (err: any) {
+      // 남은 가드는 다음 대기자가 판정해 회수한다. 다만 조용히 넘기면 그 대기자가
+      // 왜 멈춰 있었는지 아무 단서도 남지 않는다.
+      log(`[lockfile] could not remove recovery guard ${RECOVERY_LOCK_PATH}: ${err?.code ?? err}`);
     }
   };
+}
+
+/** 가드 디렉터리를 만들고 owner 를 적는다. owner 를 못 적으면 만든 디렉터리를 치우고
+ *  같은 오류를 던진다 — 그 오류도 waitForRecoveryGuard 가 mkdir 의 것과 같은 규칙으로
+ *  가른다. owner 없는 가드를 남기면 모든 대기자가 상한(60초)까지 멈춘다. */
+function createRecoveryGuard(): void {
+  mkdirSync(RECOVERY_LOCK_PATH);
+  try {
+    // 주 lock 과 같은 페이로드를 적는다 — 부팅 세대가 없으면 이 가드가 다음
+    // 부팅에서 회수 불가능한 유령이 된다.
+    const guardBoot = currentBootIdentity();
+    writeFileSync(
+      RECOVERY_OWNER_PATH,
+      JSON.stringify({
+        pid: process.pid,
+        role: 'recovery-guard',
+        started_at: new Date().toISOString(),
+        boot_id: guardBoot.id,
+        boot_time_ms: guardBoot.approxBootTimeMs,
+        pid_start_ticks: readProcessStartTicks(process.pid),
+      }),
+    );
+  } catch (err: any) {
+    // ENOENT 면 그 디렉터리는 이미 우리 것이 아니다(남이 회수해 옮겼다). 그 자리에
+    // 새로 생긴 남의 가드를 지우지 않도록 건드리지 않는다.
+    if (err?.code !== 'ENOENT') {
+      try {
+        rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
+      } catch {
+        /* 못 치우면 owner 없는 가드로 남고, 대기자가 상한 뒤 회수한다 */
+      }
+    }
+    throw err;
+  }
 }
 
 function reclaimStaleRecoveryLock(): boolean {
@@ -958,7 +994,14 @@ function reclaimStaleRecoveryLock(): boolean {
   } catch (err: any) {
     return err?.code === 'ENOENT';
   }
-  rmSync(quarantine, { recursive: true, force: true });
+  // 회수는 rename 으로 끝났다 — 가드 경로는 이미 비었다. 격리한 잔해를 못 지워도
+  // (Windows 에서 아직 열린 핸들, 다른 사용자가 남긴 가드) 획득을 실패시키지 않는다.
+  // 잔해 이름은 pid·시각으로 유일해 다음 가드와 부딪히지 않는다.
+  try {
+    rmSync(quarantine, { recursive: true, force: true });
+  } catch (err: any) {
+    log(`[lockfile] could not remove quarantined recovery guard ${quarantine}: ${err?.code ?? err}`);
+  }
   return true;
 }
 
