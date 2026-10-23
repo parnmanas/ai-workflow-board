@@ -22,7 +22,8 @@ import { shellCommands } from './shell-commands.mjs';
 // 이것뿐이다 — test 는 server-tests 잡(sqlite), test:qa:pg 는 postgres-dialect-matrix 잡.
 // 손으로 적는 목록이라 CI 와 어긋날 수 있으므로 test-registration-completeness 가
 // ci.yml 을 읽어 대조한다(ci-workflow.mjs · compareCiEntries). 이 목록에 스크립트를
-// 보태려면 ci.yml 이 그 스크립트를 main push 와 PR 마다, 실패하면 빨개지게 불러야 한다.
+// 보태려면 ci.yml 이 그 스크립트를 명령 하나뿐인 step 으로, main push 마다 도는 잡에서
+// 불러야 한다(ci-workflow.mjs 머리말).
 export const CI_ENTRY_SCRIPTS = ['test', 'test:qa:pg'];
 
 // 일부러 CI 밖에 두는 테스트 파일과 그 사유. 사유가 빈 항목은 가드가 거부한다.
@@ -45,8 +46,13 @@ export function hasScript(scripts, name) {
 }
 
 // npm 은 스크립트를 sh -c 로 돌린다. 따옴표 · 주석 · 명령 구분자를 셸처럼 읽어야
-// `echo test/x.test.mjs` 나 주석 안의 `npm run x` 를 실행으로 세지 않는다.
-const commandsOf = (command) => shellCommands(String(command ?? ''));
+// `echo test/x.test.mjs` 나 주석 안의 `npm run x` 를 실행으로 세지 않는다. 명령 앞의
+// 환경 변수 대입(`FOO=1 npm run x`)과 `./` 은 걷어 낸다.
+const commandsOf = (command) => shellCommands(String(command ?? '')).map(({ words, next }) => {
+  let at = 0;
+  while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at])) at++;
+  return { words: words.slice(at).map((w) => w.replace(/^\.\//, '')), next };
+});
 
 // 다른 패키지(-w · --workspace · --prefix · -C)로 가는 npm 호출은 이 package.json 의
 // 스크립트가 아니다.
@@ -70,9 +76,10 @@ function delegationsInCommand(command) {
 }
 
 // 커맨드가 실제로 실행하는 테스트 경로 — `node --test …` 나 러너(`node test/run-suite.mjs …`)
-// 에 인자로 준 것만. echo 나 주석에 적힌 경로는 실행이 아니다. `a || node --test x` 같은
-// 조건부 실행이나 --test-name-pattern 같은 거르기는 따지지 않는다 — 지금 CI 에서 닿는
-// 스크립트는 모두 매니페스트로 돈다(ci.yml 쪽은 ci-workflow.mjs 가 그런 것까지 본다).
+// 에 인자로 준 것만. echo 나 주석에 적힌 경로는 실행이 아니다. 셸 흐름은 따지지 않는다:
+// `a || node --test x` 같은 조건부 실행, --test-name-pattern 같은 거르기, 그리고 sh -c 가
+// -e 없이 돌아 `node --test a; node --test b` 에서 a 의 실패가 덮이는 것도. 지금 CI 에서
+// 닿는 스크립트는 모두 매니페스트로 돌고, 러너는 실패한 step 이 있으면 0 이 아닌 코드로 끝난다.
 function testPathsRunBy(command) {
   const out = [];
   for (const { words } of commandsOf(command)) {
@@ -149,6 +156,7 @@ const sorted = (it) => [...it].sort();
 // ciEntryScripts 는 CI 가 부르는 스크립트 이름, exemptions 는 { 경로: 사유 },
 // diskTestPaths 는 test/ 아래 모든 *.test.mjs 의 "test/..." 경로(하위 디렉터리 포함)다.
 export function auditRegistration({ scripts, manifests, ciEntryScripts, exemptions = {}, diskTestPaths }) {
+  const everyOnDisk = new Set(diskTestPaths);
   const onDisk = new Set(diskTestPaths.filter((p) => TEST_PATH_RE.test(p)));
   const exempt = new Map(Object.entries(exemptions));
   const runnableScripts = resolveRunnableScripts({ scripts, manifests, entryScripts: ciEntryScripts });
@@ -197,9 +205,10 @@ export function auditRegistration({ scripts, manifests, ciEntryScripts, exemptio
     // 디스크에 있는데 CI 가 실행하는 등록이 없다 — 티켓 0b4f089d 버그 클래스. 단독
     // 스크립트에만 적힌 파일도 여기 걸린다(티켓 6ad5989a).
     orphans: sorted([...onDisk].filter((p) => !registered.has(p) && !exempt.has(p))),
-    // 러너도 이 가드도 모르는 자리(test/ 의 다른 하위 디렉터리)의 테스트 파일 — 매니페스트에
-    // 적을 수도 없으니 한 번도 돌지 않는다.
-    misplacedTests: sorted(diskTestPaths.filter((p) => !TEST_PATH_RE.test(p))),
+    // 러너도 이 가드도 모르는 모양의 경로(test/ 의 다른 하위 디렉터리, 허용하지 않는 글자가 든
+    // 이름)에 있는 테스트 파일 — 매니페스트에 적을 수도 없으니 한 번도 돌지 않는다. 일부러 둔
+    // fixture 라면 예외로 적는다.
+    misplacedTests: sorted(diskTestPaths.filter((p) => !TEST_PATH_RE.test(p) && !exempt.has(p))),
     // 어딘가에 경로가 적혀 있는데 그 경로에 파일이 없다 — 오타·rename·삭제.
     dangling: sorted([...namedAt.keys()].filter((p) => !onDisk.has(p))),
     namedAt,
@@ -219,7 +228,7 @@ export function auditRegistration({ scripts, manifests, ciEntryScripts, exemptio
     missingEntryScripts: sorted(ciEntryScripts.filter((n) => !hasScript(scripts, n))),
     // 더는 필요 없는 예외 — 이미 CI 에 등록됐거나(registered) 파일이 없다(missing).
     staleExemptions: sorted(exempt.keys())
-      .filter((p) => registered.has(p) || !onDisk.has(p))
+      .filter((p) => registered.has(p) || !everyOnDisk.has(p))
       .map((p) => ({ path: p, problem: registered.has(p) ? 'registered' : 'missing' })),
     // 사유 없이 CI 밖에 둔 예외 — 왜 안 도는지 아무도 모르게 된다.
     exemptionsWithoutReason: sorted(
@@ -229,7 +238,8 @@ export function auditRegistration({ scripts, manifests, ciEntryScripts, exemptio
 }
 
 // 손으로 적은 CI 진입점 목록과 ci.yml 이 실제로 부르는 것(ci-workflow.mjs 의
-// ciServerNpmInvocations().invoked — 실패하면 CI 가 빨개지는 호출만)을 맞춰 본다.
+// ciServerNpmInvocations().invoked — 명령 하나뿐인 step 으로, main push 마다 도는 잡에서 부르는
+// 호출만)을 맞춰 본다.
 //   notInvoked — 목록에는 있는데 CI 가 그렇게 부르지 않는다. 그 진입점으로만 닿는 파일이
 //                "등록됨" 으로 보이면서 CI 에서는 안 돈다 — 티켓 6ad5989a 의 버그다.
 //   undeclared — CI 가 그렇게 부르고 테스트를 도는데 목록에 없다. 그쪽으로만 닿는 파일이

@@ -691,7 +691,7 @@ promptOnBehalf(그 세션의 계정·사용자, "[AWB 재개] Agent Manager 가 
 
 - `voice_announcement` 는 user-only UI 이벤트다(`orchestration_update` 와 같은 패턴) → agent-manager contract 무관.
 - operator 의 사이트 전체 권한은 서버 쪽 판정이다 — agent-manager contract 무관. (전용 키를 open RPC 로 넘기는 방식으로 바꾸면 그때는 `agent_session_request` contract 가 바뀐다 → server · agent-manager 같은 PR.)
-- 새 엔티티는 배럴 export + `MIGRATION_ENTITY_ORDER` 한 쌍. 새 테스트는 등록(client `package.json`, server 는 CI 가 도는 매니페스트 `test/suites/test.txt` · `test-qa.txt` · `test-qa-pg.txt` — 사람용 `test-qa-fast.txt` 와 단독 npm 스크립트는 등록이 아니다).
+- 새 엔티티는 배럴 export + `MIGRATION_ENTITY_ORDER` 한 쌍. 새 테스트는 등록(client `package.json`, server 는 CI 가 도는 `test/suites/` 매니페스트 — 새 파일은 보통 `test.txt` · `test-qa.txt` · `test-qa-pg.txt` 에 넣는다. 사람용 `test-qa-fast.txt` 와 단독 npm 스크립트는 등록이 아니다).
 
 ## 비용 감 (2026-10-04 정가)
 

@@ -1,14 +1,15 @@
 // ci.yml 읽기 — 티켓 6ad5989a.
 //
 // 등록 가드(test-registration-completeness)는 CI 진입점 목록을 ci.yml 과 대조한다. 그
-// 대조가 믿을 만하려면 ci.yml 을 YAML 과 셸이 읽는 대로 읽어야 한다. 독립 리뷰에서 나온
-// 실패가 다 그 어긋남이었다:
-//   - `run: >` 의 두 줄은 명령 하나인데 둘로 읽었다.
-//   - 주석으로 막은 `# npm run build && npm run test:qa:pg` 를 호출로 셌다.
-//   - 이어진 줄의 꼬리 주석을 명령으로 읽었다.
-// 셋 다 CI 가 부르지 않는 스크립트를 부른다고 믿게 해서 가드를 조용히 초록으로 둔다.
-// 여기서는 그런 모양을 하나씩 고정한다. 기대값은 js-yaml · bash 가 읽는 결과와 같다 — 이 파서가
-// 일부러 원문으로 두는 모양(맵 · 중첩 흐름 컬렉션)만 빼고.
+// 대조가 믿을 만하려면 두 가지가 맞아야 한다.
+//   - ci.yml 을 YAML 이 읽는 대로 읽는다. 아래 YAML fixture 의 기대값은 js-yaml 과 같다 —
+//     이 파서가 일부러 원문으로 두는 모양(맵 · 중첩 흐름 컬렉션, 주석이 낀 여러 줄 흐름
+//     시퀀스, 흐름 시퀀스 안의 별칭)과 펼치지 않는 병합 키(<<)만 빼고. 그런 모양이 게이트
+//     필드(if · needs · env …)에 오면 CI 읽기가 "못 읽음" 으로 다뤄 세지 않는다.
+//   - 셀 수 없는 호출을 세지 않는다. 독립 리뷰 두 번이 셸을 흉내 내는 규칙마다 구멍을
+//     찾았다 — pipefail 없는 기본 셸(bash -e)의 파이프, 끝이 아닌 &&, || 가 덮는 범위,
+//     here-doc, 서브셸. 그래서 명령 하나뿐인 step 만 센다. 아래 CI fixture 는 그 규칙과,
+//     그것이 막는 모양들을 고정한다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,6 +17,9 @@ import { shellCommands } from './helpers/shell-commands.mjs';
 import { ALWAYS_RUN_CONDITIONS, ciServerNpmInvocations, parseWorkflowYaml } from './helpers/ci-workflow.mjs';
 
 const invokedIn = (yaml) => [...ciServerNpmInvocations(yaml).invoked].sort();
+const uncountedIn = (yaml) => ciServerNpmInvocations(yaml).uncounted.map(({ job, script }) => `${job} ${script}`).sort();
+// main push 에 걸린 워크플로 — 트리거를 보지 않는 fixture 는 이것으로 감싼다.
+const onMainPush = (body) => `on:\n  push:\n    branches: [main]\n${body}`;
 
 // ── YAML 부분집합 ──────────────────────────────────────────────────────────
 
@@ -129,6 +133,10 @@ nested: [[a], b]
   assert.equal(doc.nested, '[[a], b]');
 });
 
+test('YAML: 파일 맨 앞의 BOM 은 내용이 아니다', () => {
+  assert.deepEqual(parseWorkflowYaml('\uFEFFon: push\njobs: {}\n'), { on: 'push', jobs: '{}' });
+});
+
 test('YAML: __proto__ 키는 프로토타입을 바꾸지 않는다', () => {
   const doc = parseWorkflowYaml('__proto__:\n  polluted: yes\nok: 1\n');
   assert.equal(Object.getPrototypeOf(doc), Object.prototype);
@@ -136,6 +144,74 @@ test('YAML: __proto__ 키는 프로토타입을 바꾸지 않는다', () => {
   assert.equal(doc.polluted, undefined);
 });
 
+
+test('YAML: 앵커와 별칭 — 스칼라 · 맵 · 시퀀스 · 시퀀스 항목, 앵커가 키 앞에 붙은 항목', () => {
+  const doc = parseWorkflowYaml(`
+a: &heavy github.ref != 'x' && y
+b: *heavy # 꼬리 주석
+x:
+  env: &hardened
+    npm_config_ignore_scripts: "true"
+y:
+  env: *hardened
+deps: &deps [build, gated]
+needs: *deps
+steps:
+  - &checkout
+    uses: actions/checkout@x
+  - *checkout
+  - &named name: n
+    run: r
+unknown: *nope
+`);
+  assert.equal(doc.b, "github.ref != 'x' && y");
+  assert.deepEqual(doc.y.env, { npm_config_ignore_scripts: 'true' });
+  assert.deepEqual(doc.needs, ['build', 'gated']);
+  assert.deepEqual(doc.steps, [{ uses: 'actions/checkout@x' }, { uses: 'actions/checkout@x' }, { name: 'n', run: 'r' }]);
+  assert.equal(doc.unknown, '*nope', '모르는 별칭은 원문으로 남는다');
+});
+
+test('YAML: 병합 키(<<)는 펼치지 않고 보통 키로 둔다', () => {
+  const doc = parseWorkflowYaml(`
+base: &base
+  if: false
+job:
+  <<: *base
+  steps: []
+`);
+  assert.deepEqual(doc.job, { '<<': { if: 'false' }, steps: [] });
+});
+
+test('YAML: 문서 표시 · 들여쓰기 지시자 · 큰따옴표 이스케이프 · 항목 · 값 뒤의 주석 · 단어 안의 #', () => {
+  const doc = parseWorkflowYaml(`---
+indented: |2
+    two extra
+  base
+tabbed: "a\\tb"
+'it''s': quoted key
+items:
+  - # 주석 뒤에 맵이 온다
+    a: 1
+nested: # 주석 뒤에 맵이 온다
+  b: 2
+hash: b#c
+trailing: |
+  only
+
+plainBlank: one
+  two
+
+  three
+`);
+  assert.equal(doc.indented, '  two extra\nbase');
+  assert.equal(doc.tabbed, 'a\tb');
+  assert.equal(doc["it's"], 'quoted key');
+  assert.deepEqual(doc.items, [{ a: '1' }]);
+  assert.deepEqual(doc.nested, { b: '2' });
+  assert.equal(doc.hash, 'b#c');
+  assert.equal(doc.trailing, 'only');
+  assert.equal(doc.plainBlank, 'one two\nthree');
+});
 // ── 셸 분해 ────────────────────────────────────────────────────────────────
 
 test('셸: 따옴표 안의 구분자 · 주석은 그대로 낱말이다', () => {
@@ -173,16 +249,27 @@ test('셸: 줄 끝 \\ 는 다음 줄과 잇는다', () => {
   ]);
 });
 
+
+test('셸: 탭 · CR 은 공백이고, 작은따옴표 안의 \\ 와 <& 는 그대로 둔다', () => {
+  assert.deepEqual(shellCommands("npm\ttest\r\necho 'a\\b' <&3"), [
+    { words: ['npm', 'test'], next: '\n' },
+    { words: ['echo', 'a\\b', '<&3'], next: null },
+  ]);
+});
+
 // ── CI 호출 ────────────────────────────────────────────────────────────────
 
-// 실제 ci.yml 의 모양을 줄여 옮겼다: 무거운 잡의 if: 조건, step 키 사이의 주석과 env 맵,
-// 루트에서 부르는 `-w server`, 다른 workspace, npm 이 아닌 직접 실행.
+// 실제 ci.yml 의 모양을 줄여 옮겼다: push 트리거, 무거운 잡의 if: 조건, step 키 사이의
+// 주석과 env 맵, 루트에서 부르는 `-w server`, 다른 workspace, npm 이 아닌 직접 실행,
+// 명령이 둘인 smoke step.
 const FIXTURE_WORKFLOW = `
 name: CI
 on:
+  pull_request:
   push:
     branches:
       - main
+      - production.private
 jobs:
   server-tests:
     if: github.ref != 'refs/heads/production.private' && github.event_name != 'schedule'
@@ -200,6 +287,8 @@ jobs:
   pg:
     if: \${{ github.ref != 'refs/heads/production.private'   && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
+    env:
+      DB_TYPE: postgres
     steps:
       - name: Build server
         run: npm run build -w server
@@ -217,9 +306,11 @@ jobs:
       - name: Direct guard
         working-directory: apps/server
         run: node --test --test-force-exit test/chat-room-join-cast-guard.test.mjs
+      - name: Smoke
+        run: npm run build -w server && npm run test:e2e:ontology -w client
 `;
 
-test('CI 호출: apps/server 에서 부르는 npm 스크립트만 모은다', () => {
+test('CI 호출: apps/server 의 npm 스크립트를 명령 하나뿐인 step 으로 부르는 것만 센다', () => {
   const { invoked, uncounted } = ciServerNpmInvocations(FIXTURE_WORKFLOW);
   assert.deepEqual(
     [...invoked].sort(),
@@ -227,53 +318,68 @@ test('CI 호출: apps/server 에서 부르는 npm 스크립트만 모은다', ()
     'working-directory 의 npm test · npm run, 루트의 -w server 만 apps/server 호출이다 — '
       + 'client · agent-manager 와 npm 이 아닌 직접 실행은 아니다. ${{ }} 로 감싼 알려진 조건도 같은 조건이다',
   );
-  assert.deepEqual(uncounted, []);
+  assert.deepEqual(
+    uncounted.map(({ job, script }) => `${job} ${script}`),
+    ['other build'],
+    '명령이 둘인 step 의 build 는 찾되 세지 않는다',
+  );
 });
 
-test('CI 호출: cd · --prefix · -C · workspace 형태 · 환경 변수 접두 · 여러 줄 명령을 따라간다', () => {
-  const yaml = `
+test('CI 호출: 명령 하나를 적는 여러 모양을 읽는다', () => {
+  const yaml = onMainPush(`
 jobs:
   a:
     steps:
-      - name: block
-        run: |
-          echo start
-          cd apps/server && npm run test:block
-          npm run test:args -- -w client
-      - name: prefix and line continuation
-        run: |
-          npm --prefix apps/server run test:prefix
-          npm -C apps/server --loglevel warn run test:short-prefix
-          npm --prefix apps/server \\
-            run test:continued
-      - name: workspace forms
-        run: npm run test:ws-path -w apps/server && npm run test:ws-inline --workspace=server
-      - name: env assignment
-        working-directory: apps/server
+      - run: npm --prefix apps/server run test:prefix
+      - run: npm --prefix=apps/server run test:prefix-inline
+      - run: npm -C apps/server --loglevel warn run test:short-prefix
+      - run: npm run test:ws-path -w apps/server
+      - run: npm run test:ws-inline --workspace=server
+      - run: npm --workspace server run test:ws-first
+      - working-directory: apps/server
         run: NODE_OPTIONS=--max-old-space-size=4096 npm run test:env
-      - name: folded plain
-        working-directory: apps/server
-        run: npm run build
-          && npm run test:folded
-      - name: cd does not leak into the next step
-        run: npm run test:root-only
-`;
+      - working-directory: apps/server
+        run: |
+          npm run test:block   # 꼬리 주석
+
+      - working-directory: apps/server
+        run: >-
+          npm run
+          test:folded
+      - working-directory: apps/server
+        run: "npm run test:quoted"
+      - working-directory: \${{ github.workspace }}/apps/server
+        run: npm run test:workspace-expr
+      - working-directory: apps\\\\server
+        run: npm run test:backslash
+      - working-directory: apps/server
+        run: npm run test:args -- -w client
+      - working-directory: apps/server
+        run: npm run test:semicolon;
+      - working-directory: apps/server
+        run: npm run
+      - run: npm run test:root-only
+`);
   assert.deepEqual(invokedIn(yaml), [
-    'build',
     'test:args',
+    'test:backslash',
     'test:block',
-    'test:continued',
     'test:env',
     'test:folded',
     'test:prefix',
+    'test:prefix-inline',
+    'test:quoted',
+    'test:semicolon',
     'test:short-prefix',
+    'test:workspace-expr',
+    'test:ws-first',
     'test:ws-inline',
     'test:ws-path',
-  ], '`--` 뒤의 -w 는 스크립트 인자다. cd 는 그 step 안에서만 유효하다');
+  ], '`--` 뒤의 -w 는 스크립트 인자다. 이름 없는 `npm run` 은 호출이 아니다. 루트의 npm run 은 apps/server 가 아니다');
 });
 
 test('CI 호출: 잡과 워크플로의 defaults.run.working-directory 를 따른다', () => {
-  const yaml = `
+  const yaml = onMainPush(`
 defaults:
   run:
     working-directory: apps/server
@@ -289,13 +395,93 @@ jobs:
         working-directory: apps/agent-manager
     steps:
       - run: npm run test:job-default
-`;
+`);
   assert.deepEqual(invokedIn(yaml), ['test:workflow-default']);
 });
 
-// 리뷰가 실험으로 만든 "조용한 초록" 모양들 — YAML · 셸이 읽는 대로 읽으면 호출이 아니다.
+// 두 리뷰가 찾은 모양들이다. GitHub 의 기본 셸은 `bash -e {0}` 이라 pipefail 이 없고, 끝이
+// 아닌 && 의 실패에는 멈추지 않으며, || 는 앞의 목록 전체를 덮는다. 그런 것을 하나씩 흉내
+// 내는 대신, 그 명령 하나가 아니면 세지 않는다. 찾은 호출은 이유와 함께 알린다.
+test('CI 호출: step 의 run 이 그 명령 하나가 아니면 세지 않는다 — 셸이 실패를 덮을 수 있다', () => {
+  const yaml = onMainPush(`
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: npm run test:pipe 2>&1 | tee pg.log
+      - working-directory: apps/server
+        run: |
+          npm run test:and-not-last && echo done
+          echo next
+      - working-directory: apps/server
+        run: npm run test:and-or && echo ok || echo failed
+      - working-directory: apps/server
+        run: npm run test:or-handler || { echo "::error::failed"; exit 1; }
+      - working-directory: apps/server
+        run: npm run test:background &
+      - working-directory: apps/server
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            npm run test:in-if
+          fi
+      - working-directory: apps/server
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          Re-enable with:
+          npm run test:heredoc
+          EOF
+      - working-directory: apps/server
+        run: |
+          exit 0  # disabled
+          npm run test:after-exit
+      - run: |
+          (
+            cd apps/server
+            npm run test:subshell
+          ) || echo continuing
+      - run: cd "$GITHUB_WORKSPACE/apps/server" && npm run test:after-cd
+      - working-directory: apps/client
+        run: cd "$GITHUB_WORKSPACE/apps/server" && npm run test:abs-cd
+      - run: |
+          cd apps
+          cd server
+          npm run test:after-two-cds
+`);
+  const { invoked, uncounted } = ciServerNpmInvocations(yaml);
+  assert.deepEqual([...invoked], []);
+  assert.deepEqual(uncounted.map((u) => u.script).sort(), [
+    'test:abs-cd',
+    'test:after-cd',
+    'test:after-exit',
+    'test:after-two-cds',
+    'test:and-not-last',
+    'test:and-or',
+    'test:background',
+    'test:heredoc',
+    'test:in-if',
+    'test:or-handler',
+    'test:pipe',
+    'test:subshell',
+  ], '명령이 여럿인 step 의 cd 를 따라가 그 안의 호출을 찾는다');
+  for (const { script, why } of uncounted) assert.match(why, /이 명령 하나가 아니다/, script);
+});
+
+test('CI 호출: npm 앞에 다른 명령이 있으면 세지 않고 이유를 남긴다', () => {
+  const { invoked, uncounted } = ciServerNpmInvocations(onMainPush(`
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: timeout 45m npm run test:qa:pg
+`));
+  assert.deepEqual([...invoked], []);
+  assert.equal(uncounted.length, 1);
+  assert.match(uncounted[0].why, /timeout-minutes/);
+});
+
+// 리뷰가 만든 "조용한 초록" 모양 — YAML · 셸이 읽는 대로 읽으면 애초에 호출이 아니다.
 test('CI 호출: 주석으로 막은 줄 · 접힌 블록 · 이어진 줄의 주석 · 따옴표 안의 명령은 호출이 아니다', () => {
-  const yaml = `
+  const yaml = onMainPush(`
 jobs:
   a:
     steps:
@@ -316,36 +502,12 @@ jobs:
       - name: quoted separator
         working-directory: apps/server
         run: echo "skipping; npm run test:quoted"
-`;
+`);
   assert.deepEqual(invokedIn(yaml), []);
 });
 
-test('CI 호출: 접힌 블록이 한 명령을 두 줄로 나눠 써도 하나로 읽는다', () => {
-  const yaml = `
-jobs:
-  a:
-    steps:
-      - working-directory: apps/server
-        run: >-
-          npm run
-          test:qa:pg
-`;
-  assert.deepEqual(invokedIn(yaml), ['test:qa:pg']);
-});
-
-test('CI 호출: 따옴표 안의 이스케이프를 지나 뒤의 명령까지 읽는다', () => {
-  const yaml = `
-jobs:
-  a:
-    steps:
-      - working-directory: apps/server
-        run: "echo \\"go\\" && npm run test:after-quote"
-`;
-  assert.deepEqual(invokedIn(yaml), ['test:after-quote']);
-});
-
-test('CI 호출: 실패해도 CI 를 빨갛게 하지 못하는 호출은 세지 않고 이유를 남긴다', () => {
-  const yaml = `
+test('CI 호출: 실패해도 CI 를 빨갛게 하지 못하는 잡 · step 의 호출은 세지 않고 이유를 남긴다', () => {
+  const yaml = onMainPush(`
 jobs:
   dispatch-only:
     if: github.event_name == 'workflow_dispatch'
@@ -365,95 +527,201 @@ jobs:
       - continue-on-error: 'true'
         working-directory: apps/server
         run: npm run test:step-coe
-      - continue-on-error: false
+      - continue-on-error: False
         if: \${{ !cancelled() }}
         working-directory: apps/server
         run: npm run test:counted
-  shell-swallowed:
-    steps:
-      - working-directory: apps/server
-        run: |
-          npm run test:or-true || true
-          npm run test:background &
-          npm run test:and && echo done
-          npm run test:redirect 2>&1 | tee log.txt
+      - if: true
+        working-directory: apps/server
+        run: npm run test:if-true
+      - if: success()
+        working-directory: apps/server
+        run: npm run test:if-success
+      - if: always()
+        working-directory: apps/server
+        run: npm run test:if-always
   ignore-scripts:
     env:
       npm_config_ignore_scripts: 'true'
     steps:
       - working-directory: apps/server
-        run: npm run test:env-ignore
-  ignore-scripts-flag:
+        run: npm run test:job-env-ignore
+  ignore-scripts-step:
     steps:
       - working-directory: apps/server
-        run: npm test --ignore-scripts && npm run test:flag-off --ignore-scripts=false
+        env:
+          NPM_CONFIG_IGNORE_SCRIPTS: 'true'
+        run: npm run test:step-env-ignore
       - working-directory: apps/server
         env:
           NPM_CONFIG_IGNORE_SCRIPTS: 'false'
         run: npm run test:env-off
+      - working-directory: apps/server
+        run: npm test --ignore-scripts
+      - working-directory: apps/server
+        run: npm run test:flag-off --ignore-scripts=false
   dynamic:
     steps:
       - working-directory: apps/server
         run: npm run \${{ matrix.suite }}
-  shell-flow:
-    steps:
-      - working-directory: apps/server
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            npm run test:in-if
-          fi
-          if [ -n "$X" ]; then npm run test:in-if-line; fi
-          for suite in a b; do npm run test:in-loop; done
-          [ -n "$RUN_PG" ] && echo pg && npm run test:after-check
-          npm run build || npm run test:after-or
-          ! npm run test:negated
-          { npm run test:grouped; }
-          npm run test:after-blocks
-`;
+`);
   const { invoked, uncounted } = ciServerNpmInvocations(yaml);
   assert.deepEqual(
     [...invoked].sort(),
-    ['test:after-blocks', 'test:and', 'test:counted', 'test:env-off', 'test:flag-off', 'test:grouped', 'test:redirect'],
-    '&& · 파이프(pipefail) · 2>&1 · { } 묶음, 그리고 셸 블록이 닫힌 뒤의 명령은 실패가 그대로 드러난다',
+    ['test:counted', 'test:env-off', 'test:flag-off', 'test:if-always', 'test:if-success', 'test:if-true'],
   );
-  assert.deepEqual(
-    uncounted.map(({ job, script }) => `${job} ${script}`).sort(),
-    [
-      'allowed-to-fail test:job-coe',
-      'dispatch-only test:dispatch-only',
-      'dynamic ${{',
-      'ignore-scripts test:env-ignore',
-      'ignore-scripts-flag test',
-      'shell-flow build',
-      'shell-flow test:after-check',
-      'shell-flow test:after-or',
-      'shell-flow test:in-if',
-      'shell-flow test:in-if-line',
-      'shell-flow test:in-loop',
-      'shell-flow test:negated',
-      'shell-swallowed test:background',
-      'shell-swallowed test:or-true',
-      'steps-gated test:step-coe',
-      'steps-gated test:step-if',
-    ],
-  );
+  assert.deepEqual(uncounted.map(({ job, script }) => `${job} ${script}`).sort(), [
+    'allowed-to-fail test:job-coe',
+    'dispatch-only test:dispatch-only',
+    'dynamic ${{',
+    'ignore-scripts test:job-env-ignore',
+    'ignore-scripts-step test',
+    'ignore-scripts-step test:step-env-ignore',
+    'steps-gated test:step-coe',
+    'steps-gated test:step-if',
+  ]);
   const why = Object.fromEntries(uncounted.map((u) => [u.script, u.why]));
   assert.match(why['test:dispatch-only'], /^if: github\.event_name == 'workflow_dispatch'/);
   assert.match(why['test:job-coe'], /continue-on-error/);
-  assert.match(why['test:or-true'], /\|\|/);
-  assert.match(why['test:background'], /&/);
+  assert.match(why['test:step-env-ignore'], /ignore-scripts/);
   assert.match(why.test, /ignore-scripts/);
   assert.match(why['${{'], /실행 때/);
-  assert.match(why['test:in-if'], /if · 반복/);
-  assert.match(why['test:after-check'], /앞 명령의 결과/);
-  assert.match(why['test:after-or'], /앞 명령의 결과/);
-  assert.match(why['test:negated'], /!/);
+});
+
+test('CI 호출: 워크플로 env 의 ignore-scripts 는 모든 호출에 걸린다', () => {
+  const yaml = onMainPush(`
+env:
+  npm_config_ignore_scripts: '1'
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: npm test
+`);
+  assert.deepEqual(invokedIn(yaml), []);
+  assert.deepEqual(uncountedIn(yaml), ['a test']);
+});
+
+// 게이트를 실은 필드를 못 읽었는데 세면, 그 게이트가 CI 를 조용히 초록으로 둔다. 못 읽으면
+// 세지 않는다 — 대조가 빨개지고 메시지가 무엇을 못 읽었는지 알린다.
+test('CI 호출: 게이트 필드를 못 읽으면 세지 않는다 — 흐름 맵 · 모르는 별칭 · 병합 키 · 주석이 낀 needs', () => {
+  const yaml = onMainPush(`
+jobs:
+  build:
+    steps:
+      - run: echo build
+  gated:
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - run: echo gated
+  flow-env:
+    env: { npm_config_ignore_scripts: 'true' }
+    steps:
+      - working-directory: apps/server
+        run: npm run test:flow-env
+  alias-env:
+    env: *nope
+    steps:
+      - working-directory: apps/server
+        run: npm run test:alias-env
+  merged:
+    <<: *base
+    steps:
+      - working-directory: apps/server
+        run: npm run test:merged
+  comment-in-needs:
+    needs: [build, # build first
+      gated]
+    steps:
+      - working-directory: apps/server
+        run: npm run test:comment-in-needs
+  ghost-needs:
+    needs: [ghost]
+    steps:
+      - working-directory: apps/server
+        run: npm run test:ghost-needs
+  odd-fields:
+    steps:
+      - if: [a]
+        working-directory: apps/server
+        run: npm run test:list-if
+      - continue-on-error: [x]
+        working-directory: apps/server
+        run: npm run test:list-coe
+      - working-directory: [apps/server]
+        run: npm run test:list-dir
+  flow-defaults:
+    defaults: { run: { working-directory: apps/server } }
+    steps:
+      - run: npm run test:flow-defaults
+`);
+  assert.deepEqual(invokedIn(yaml), []);
+  const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
+  assert.deepEqual(Object.keys(why).sort(), [
+    'test:alias-env',
+    'test:comment-in-needs',
+    'test:flow-defaults',
+    'test:flow-env',
+    'test:ghost-needs',
+    'test:list-coe',
+    'test:list-dir',
+    'test:list-if',
+    'test:merged',
+  ]);
+  for (const [script, reason] of Object.entries(why)) assert.match(reason, /읽지 못했다/, script);
+  assert.match(why['test:comment-in-needs'], /^needs /);
+  assert.match(why['test:merged'], /병합 키/);
+  assert.match(why['test:flow-defaults'], /^defaults /);
+  assert.match(why['test:list-dir'], /^working-directory /);
+  assert.match(why['test:list-if'], /^if /);
+  assert.match(why['test:list-coe'], /^continue-on-error /);
+  assert.match(why['test:flow-env'], /^env /);
+});
+
+test('CI 호출: 앵커로 나눠 쓴 조건 · env · needs 를 따라간다', () => {
+  const yaml = onMainPush(`
+jobs:
+  first:
+    if: &heavy github.ref != 'refs/heads/production.private' && github.event_name != 'schedule'
+    env: &hardened
+      npm_config_ignore_scripts: 'true'
+    steps:
+      - working-directory: apps/server
+        run: npm run test:first
+  second:
+    if: *heavy
+    steps:
+      - working-directory: apps/server
+        run: npm run test:second
+  third:
+    env: *hardened
+    steps:
+      - working-directory: apps/server
+        run: npm run test:third
+  gated:
+    if: false
+    steps:
+      - run: echo gated
+  fourth:
+    needs: &deps [gated]
+    steps:
+      - working-directory: apps/server
+        run: npm run test:fourth
+  fifth:
+    needs: *deps
+    steps:
+      - working-directory: apps/server
+        run: npm run test:fifth
+`);
+  assert.deepEqual(invokedIn(yaml), ['test:second']);
+  assert.deepEqual(uncountedIn(yaml), ['fifth test:fifth', 'first test:first', 'fourth test:fourth', 'third test:third']);
 });
 
 // 잡은 needs 로 기다리는 잡이 건너뛰어지면 함께 건너뛰어진다. 기다리는 잡이 조건부면 이
-// 잡도 조건부다 — continue-on-error 는 다르다(실패해도 기다리던 잡은 돈다).
+// 잡도 조건부다 — 이 잡 자신이 always() · !cancelled() 면 다르고, 기다리는 잡의
+// continue-on-error 도 다르다(실패해도 기다리던 잡은 돈다).
 test('CI 호출: needs 로 기다리는 잡이 조건부면 그 호출도 세지 않는다', () => {
-  const yaml = `
+  const yaml = onMainPush(`
 jobs:
   gated:
     if: github.event_name == 'workflow_dispatch'
@@ -486,14 +754,52 @@ jobs:
     steps:
       - working-directory: apps/server
         run: npm run test:after-coe
-`;
+  always-after-gated:
+    if: always()
+    needs: gated
+    steps:
+      - working-directory: apps/server
+        run: npm run test:always-after-gated
+  cycle-a:
+    needs: cycle-b
+    steps:
+      - working-directory: apps/server
+        run: npm run test:cycle
+  cycle-b:
+    needs: cycle-a
+    steps:
+      - run: echo b
+`);
   const { invoked, uncounted } = ciServerNpmInvocations(yaml);
-  assert.deepEqual([...invoked].sort(), ['test:after-build', 'test:after-coe']);
+  assert.deepEqual([...invoked].sort(), ['test:after-build', 'test:after-coe', 'test:always-after-gated', 'test:cycle']);
   assert.deepEqual(
     uncounted.map(({ script, why }) => [script, why.split(' — ')[0]]),
     [['test:after-gated', 'needs: gated'], ['test:chain', 'needs: after-gated']],
   );
   assert.match(uncounted[1].why, /needs: after-gated — needs: gated — if: github\.event_name/);
+});
+
+test('CI 호출: 워크플로가 main push 에 걸려 있지 않으면 세지 않는다', () => {
+  const job = `
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: npm test
+`;
+  const counted = (on) => invokedIn(`on: ${on}${job}`).length === 1;
+  const reason = (on) => ciServerNpmInvocations(`on: ${on}${job}`).uncounted[0]?.why ?? '';
+
+  assert.ok(counted('push'), 'on: push');
+  assert.ok(counted('[push, pull_request]'), '흐름 시퀀스');
+  assert.ok(counted('\n  push:\n    branches-ignore: [release]'), 'main 을 빼지 않는 branches-ignore');
+  assert.match(reason('[pull_request, workflow_dispatch]'), /push 가 없다/);
+  assert.match(reason('\n  push:\n    paths: [docs/**]'), /paths 필터/);
+  assert.match(reason('\n  push:\n    branches: [release]'), /main 이 없다/);
+  assert.match(reason('\n  push:\n    branches-ignore: [main]'), /branches-ignore/);
+  assert.match(reason('\n  push:\n    tags: [v*]'), /tags 필터만/);
+  assert.match(reason('{ push: {} }'), /on 를 읽지 못했다/);
+  assert.match(ciServerNpmInvocations(job).uncounted[0].why, /on 를 읽지 못했다/, 'on: 이 없는 워크플로');
 });
 
 test('CI 호출: 알려진 조건 목록은 지금 ci.yml 의 무거운 잡 조건을 담는다', () => {

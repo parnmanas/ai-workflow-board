@@ -26,7 +26,8 @@
 //   4. delegation  — 없는 스크립트로 가는 `npm run`.
 //   5. dead        — 어떤 스크립트도 --suite 로 열지 않는 매니페스트.
 //   6. broken      — --suite 가 없는 매니페스트를 가리키는 스크립트.
-//   7. CI 대조     — CI_ENTRY_SCRIPTS 가 ci.yml 이 실패하면 빨개지게 부르는 것과 같은가.
+//   7. CI 대조     — CI_ENTRY_SCRIPTS 가 ci.yml 이 명령 하나뿐인 step 으로, main push 마다
+//                    도는 잡에서 부르는 것과 같은가(helpers/ci-workflow.mjs).
 //   8. 예외        — 일부러 CI 밖에 둔 파일(CI_EXEMPT_TESTS)에 사유가 있고, 아직 필요한가.
 //
 // 티켓 5dc241d8 로 실행 목록이 package.json 한 줄에서 test/suites/*.txt 로
@@ -125,13 +126,14 @@ test('test/qa-flows/*.test.mjs 는 모두 CI 가 도는 곳에 등록돼 있다'
   );
 });
 
-test('테스트 파일은 러너가 아는 자리(test/ · test/qa-flows/)에만 있다', () => {
+test('테스트 파일은 러너가 아는 경로(test/ · test/qa-flows/ 바로 아래)에만 있다', () => {
   const { misplacedTests } = auditRepo();
   assert.deepEqual(
     misplacedTests,
     [],
-    '러너와 이 가드가 모르는 하위 디렉터리의 테스트 파일 — 매니페스트에 적을 수도 없어 CI 에서 '
-      + `한 번도 돌지 않는다. test/ 나 test/qa-flows/ 로 옮겨라: ${misplacedTests.join(', ')}`,
+    '러너와 이 가드가 모르는 경로의 테스트 파일 — 매니페스트에 적을 수도 없어 CI 에서 한 번도 돌지 '
+      + '않는다. test/ 나 test/qa-flows/ 바로 아래에, 이름은 A-Z a-z 0-9 _ . - 로 둔다. 일부러 둔 '
+      + `fixture 면 registration-audit.mjs 의 CI_EXEMPT_TESTS 에 사유와 함께 적는다: ${misplacedTests.join(', ')}`,
   );
 });
 
@@ -201,7 +203,7 @@ test('선언된 CI 진입점 스크립트는 모두 package.json 에 실재한�
 // 이 대조가 없으면 CI_ENTRY_SCRIPTS 는 다시 "CI 가 부른다고 믿는 목록" 이 된다. 티켓
 // 6ad5989a 의 버그가 바로 그 믿음이 틀린 경우였다 — 진입점 목록에 CI 가 부르지 않는
 // 단독 스크립트가 섞여 있었다.
-test('CI 진입점 목록은 ci.yml 이 apps/server 에서 실패하면 빨개지게 부르는 테스트 스크립트와 같다', () => {
+test('CI 진입점 목록은 ci.yml 이 apps/server 에서 명령 하나뿐인 step 으로 부르는 테스트 스크립트와 같다', () => {
   assert.ok(fs.existsSync(CI_WORKFLOW), `CI 워크플로가 없다: ${CI_WORKFLOW}`);
   const { invoked, uncounted } = ciServerNpmInvocations(fs.readFileSync(CI_WORKFLOW, 'utf8'));
   const { notInvoked, undeclared } = compareCiEntries({
@@ -217,9 +219,11 @@ test('CI 진입점 목록은 ci.yml 이 apps/server 에서 실패하면 빨개�
     [],
     'CI_ENTRY_SCRIPTS 에 있는데 .github/workflows/ci.yml 이 apps/server 에서 그렇게 부르지 않는 스크립트 — '
       + '그 스크립트로만 닿는 파일이 등록으로 세어지지만 CI 에서 돌지 않거나, 돌아도 실패가 CI 를 '
-      + `빨갛게 하지 못한다: ${notInvoked.join(', ')}. 센 호출: ${[...invoked].sort().join(', ') || '없음'}. `
-      + `찾았지만 세지 않은 호출: ${seen.join('; ') || '없음'}. ci.yml 에서 main push 와 PR 마다 부르게 하거나 `
-      + '목록에서 빼라. 잡의 if: 를 바꿨고 여전히 매번 돈다면 helpers/ci-workflow.mjs 의 ALWAYS_RUN_CONDITIONS 에 보태라',
+      + `빨갛게 하지 못할 수 있다: ${notInvoked.join(', ')}. 센 호출: ${[...invoked].sort().join(', ') || '없음'}. `
+      + `찾았지만 세지 않은 호출: ${seen.join('; ') || '없음'}. ci.yml 에서 그 스크립트를 명령 하나뿐인 step 으로, `
+      + 'main push 마다 도는 잡에서 부르게 하거나 목록에서 빼라. 잡의 if: 를 바꿨고 여전히 매번 돈다면 '
+      + 'helpers/ci-workflow.mjs 의 ALWAYS_RUN_CONDITIONS 에 보태라. 찾은 호출이 없다면 그 step 의 모양을 '
+      + 'helpers/ci-workflow.mjs 가 못 읽는 것일 수 있다',
   );
   assert.deepEqual(
     undeclared,
@@ -532,14 +536,18 @@ test('CI 진입점에서 도달하는 스크립트가 직접 나열한 파일은
   const audit = fixtureAudit({
     scripts: {
       test: 'node test/run-suite.mjs --suite test',
-      'test:inline': 'node --test test/inline.test.mjs',
-      'test:runner-args': 'node test/run-suite.mjs test/direct.test.mjs',
+      'test:inline': 'NODE_OPTIONS=--no-warnings node --test test/inline.test.mjs',
+      'test:runner-args': 'node ./test/run-suite.mjs test/direct.test.mjs',
     },
     manifests: { test: ['test/live.test.mjs', 'npm run test:inline', 'npm run test:runner-args'] },
     diskTestPaths: ['test/live.test.mjs', 'test/inline.test.mjs', 'test/direct.test.mjs'],
   });
 
-  assert.deepEqual(audit.orphans, [], 'node --test 나 러너에 경로를 직접 준 스크립트라도 CI 에서 도달하면 등록이다');
+  assert.deepEqual(
+    audit.orphans,
+    [],
+    'node --test 나 러너에 경로를 직접 준 스크립트라도 CI 에서 도달하면 등록이다 — 환경 변수 대입 · ./ 이 앞에 붙어도',
+  );
 });
 
 // 커맨드에 경로가 적혀 있다고 실행되는 것은 아니다. node --test · 러너의 인자만 실행이다.
@@ -587,7 +595,8 @@ test('없는 스크립트로 가는 위임이 잡힌다 — --if-present 와 다
   const audit = fixtureAudit({
     scripts: {
       test: 'node test/run-suite.mjs --suite test',
-      pretest: 'npm run nope && npm run maybe --if-present && npm run e2e -w client && npm run nope2 -- -w client',
+      pretest: 'npm run nope && npm run maybe --if-present && npm run e2e -w client && npm run nope2 -- -w client '
+        + '&& npm run e2e --prefix ../client && npm run e2e -C ../client && npm run e2e --workspace=client',
     },
     manifests: { test: ['test/live.test.mjs', 'npm run test:gone'] },
     diskTestPaths: ['test/live.test.mjs'],
@@ -600,15 +609,27 @@ test('없는 스크립트로 가는 위임이 잡힌다 — --if-present 와 다
   ], '`--` 뒤의 -w 는 스크립트 인자라 이 package.json 의 위임이다');
 });
 
-test('러너가 모르는 자리의 테스트 파일은 따로 신고된다', () => {
+test('러너가 모르는 자리 · 이름의 테스트 파일은 따로 신고된다 — 일부러 둔 fixture 는 예외로', () => {
   const audit = fixtureAudit({
     scripts: { test: 'node test/run-suite.mjs --suite test' },
     manifests: { test: ['test/live.test.mjs'] },
-    diskTestPaths: ['test/live.test.mjs', 'test/unit/hidden.test.mjs', 'test/qa-flows/deep/nested.test.mjs'],
+    diskTestPaths: [
+      'test/live.test.mjs',
+      'test/unit/hidden.test.mjs',
+      'test/qa-flows/deep/nested.test.mjs',
+      'test/한글.test.mjs',
+      'test/fixtures/sample.test.mjs',
+    ],
+    exemptions: { 'test/fixtures/sample.test.mjs': 'run-suite 가 읽는 fixture 다 — 테스트가 아니다' },
   });
 
-  assert.deepEqual(audit.misplacedTests, ['test/qa-flows/deep/nested.test.mjs', 'test/unit/hidden.test.mjs']);
+  assert.deepEqual(audit.misplacedTests, [
+    'test/qa-flows/deep/nested.test.mjs',
+    'test/unit/hidden.test.mjs',
+    'test/한글.test.mjs',
+  ]);
   assert.deepEqual(audit.orphans, [], '자리부터 틀린 파일은 고아 목록에 섞지 않는다');
+  assert.deepEqual(audit.staleExemptions, [], '디스크에 있는 fixture 의 예외는 낡지 않았다');
 });
 
 test('--suite 가 없는 매니페스트를 가리키면 broken 으로 잡힌다', () => {
