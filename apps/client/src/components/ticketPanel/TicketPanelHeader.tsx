@@ -8,6 +8,7 @@ import { panelButton } from './panelStyles';
 
 interface TicketPanelHeaderProps {
   ticket: Ticket;
+  title: string;
   /** Root tickets run and archive; checklist children do neither. */
   isRoot: boolean;
   canGoBack: boolean;
@@ -20,47 +21,51 @@ interface TicketPanelHeaderProps {
   onToggleArchive(): void;
   onDelete(): void;
   onClose(): void;
+  onShowOverview(): void;
 }
 
 /**
- * A short row: identity on the left (it may shrink and wrap), then the hamburger
+ * A short row: title and identity on the left, then the hamburger
  * menu and Close. Run / park / Archive / Delete and the full id live in the menu
  * so the header keeps one shape at every width; Close is always last so it stays
  * reachable. `.awb-ticket-header` carries the narrow-screen rules (responsive.css).
  */
 export default function TicketPanelHeader({
-  ticket, isRoot, canGoBack, running, archiveBusy,
-  onBack, onCopyId, onRun, onPark, onToggleArchive, onDelete, onClose,
+  ticket, title, isRoot, canGoBack, running, archiveBusy,
+  onBack, onCopyId, onRun, onPark, onToggleArchive, onDelete, onClose, onShowOverview,
 }: TicketPanelHeaderProps) {
   const archived = !!ticket.archived_at;
   const runBlocked = running || !ticket.assignee || archived;
   return (
     <div className="awb-ticket-header" style={{
-      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8,
+      display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: 8,
       padding: '10px 14px', borderBottom: `1px solid ${tokens.colors.border}`, flexShrink: 0,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: '1 1 auto', minWidth: 0, flexWrap: 'wrap' }}>
-        {canGoBack && (
-          <button type="button" onClick={onBack} style={panelButton('plain')} title="상위 티켓으로">← 상위</button>
-        )}
-        <button
-          type="button"
-          onClick={onCopyId}
-          title={`클릭하여 Ticket ID 복사 (${ticket.id})`}
-          aria-label={`Ticket ID ${ticket.id}, 클릭하여 클립보드에 복사`}
-          style={{
-            background: tokens.colors.surfaceCard, border: 'none', borderRadius: tokens.radii.sm,
-            color: tokens.colors.textMuted, fontSize: '11px', fontFamily: 'monospace',
-            padding: '3px 7px', cursor: 'pointer',
-          }}
-        >#{ticket.id.slice(0, 8)}</button>
-        <ActivityPill view={ticketActivity(ticket)} />
-        {archived && (
-          <span style={{
-            fontSize: '10px', fontWeight: 700, padding: '2px 6px', borderRadius: tokens.radii.sm,
-            textTransform: 'uppercase', background: tokens.colors.surfaceSubtle, color: tokens.colors.textMuted,
-          }}>보관됨</span>
-        )}
+      {canGoBack && (
+        <button type="button" onClick={onBack} style={{ ...panelButton('plain'), padding: '5px 10px', flexShrink: 0 }} aria-label="상위 티켓으로" title="상위 티켓으로">←</button>
+      )}
+      <div className="awb-ticket-heading">
+        <h2 className="awb-ticket-heading-title" title={title} style={{ color: tokens.colors.textPrimary }}>{title}</h2>
+        <div className="awb-ticket-heading-meta">
+          <button
+            type="button"
+            onClick={onCopyId}
+            title={`클릭하여 Ticket ID 복사 (${ticket.id})`}
+            aria-label={`Ticket ID ${ticket.id}, 클릭하여 클립보드에 복사`}
+            style={{
+              background: tokens.colors.surfaceCard, border: 'none', borderRadius: tokens.radii.sm,
+              color: tokens.colors.textMuted, fontSize: '11px', fontFamily: 'monospace',
+              padding: '2px 0', cursor: 'pointer',
+            }}
+          >#{ticket.id.slice(0, 8)}</button>
+          <ActivityPill view={ticketActivity(ticket)} />
+          {archived && (
+            <span style={{
+              fontSize: '10px', fontWeight: 700, padding: '2px 6px', borderRadius: tokens.radii.sm,
+              textTransform: 'uppercase', background: tokens.colors.surfaceSubtle, color: tokens.colors.textMuted,
+            }}>보관됨</span>
+          )}
+        </div>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
@@ -102,6 +107,12 @@ export default function TicketPanelHeader({
                 />
               </SessionMenuSection>
               <SessionMenuSection title="Ticket">
+                <div style={{ padding: '2px 8px 8px', fontSize: 13, lineHeight: 1.5, color: tokens.colors.textPrimary }}>{title}</div>
+                <SessionMenuItem
+                  icon="⚙"
+                  label="상세 정보·설정"
+                  onSelect={() => { close(); onShowOverview(); }}
+                />
                 <SessionMenuItem
                   icon="#"
                   label={ticket.id}

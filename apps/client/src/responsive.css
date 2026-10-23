@@ -108,9 +108,35 @@
 
 .awb-ticket-tabs { overflow-x: auto; }
 .awb-ticket-tabs > button { flex-shrink: 0; }
-.awb-ticket-header { flex-wrap: wrap; gap: 8px; }
-.awb-ticket-header > div { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.awb-ticket-header { gap: 8px; position: relative; }
+.awb-ticket-header .awb-session-menu { position: static; }
+.awb-ticket-header .awb-session-menu-panel { top: calc(100% + 4px); right: 14px; width: min(380px, calc(100% - 28px)); max-height: min(560px, 50dvh); }
+.awb-ticket-header > div { min-width: 0; }
 .awb-ticket-header [aria-label^="Ticket ID"] { max-width: 100%; overflow-wrap: anywhere; }
+.awb-ticket-heading { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
+.awb-ticket-heading-title { margin: 0; font-size: 15px; font-weight: 700; line-height: 1.35; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.awb-ticket-heading-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.awb-ticket-heading-meta > * { flex-shrink: 0; }
+.awb-tickets-toolbar { container-type: inline-size; padding: 10px 16px; }
+.awb-tickets-toolbar-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 340px) auto; grid-template-areas: "heading search actions"; align-items: center; gap: 10px 14px; }
+.awb-tickets-heading { grid-area: heading; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.awb-tickets-search { grid-area: search; }
+.awb-tickets-toolbar-actions { grid-area: actions; display: flex; align-items: center; gap: 8px; }
+.awb-tickets-toolbar-actions > button { min-height: 40px; white-space: nowrap; }
+.awb-tickets-menu-trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; font-size: 18px; border: 1px solid; border-radius: 8px; background: transparent; cursor: pointer; flex-shrink: 0; }
+.awb-tickets-filter-count { position: absolute; top: -5px; right: -5px; min-width: 17px; height: 17px; padding: 0 3px; border-radius: 9px; font-size: 10px; line-height: 17px; font-weight: 700; }
+.awb-tickets-unread { border: 1px solid; border-radius: 10px; padding: 3px 6px; background: transparent; font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.awb-tickets-filter-summary { display: flex; align-items: center; gap: 10px; padding-top: 6px; font-size: 12px; }
+.awb-tickets-filter-summary > button { border: 0; padding: 5px 0; background: transparent; font: inherit; cursor: pointer; }
+.awb-tickets-filter-summary > button:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.awb-tickets-filter-summary > button:last-child { margin-left: auto; flex-shrink: 0; }
+.awb-ticket-filter-settings button { min-height: 40px; }
+.awb-ticket-filter-footer { display: flex; gap: 8px; }
+.awb-ticket-filter-footer button { min-height: 40px; }
+@container (max-width: 660px) {
+  .awb-tickets-toolbar-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "heading actions" "search search"; gap: 8px; }
+  .awb-tickets-unread { max-width: 70px; overflow: hidden; text-overflow: ellipsis; }
+}
 .awb-mission-rail { display: flex; min-height: 0; }
 .awb-mission-rail[hidden] { display: none; }
 .awb-mission-tabs { overflow-x: auto; flex-shrink: 0; }
@@ -121,6 +147,7 @@
   .awb-mission-rail { max-height: 35%; flex-shrink: 0; }
   .awb-mission-rail > div { width: 100% !important; border-right: none !important; border-bottom: 1px solid var(--awb-border); }
   .awb-ticket-header button { min-height: 40px; }
+  .awb-ticket-heading-meta > button { display: none; }
 }
 
 .awb-artifact-overlay { bottom: auto !important; height: var(--awb-viewport-height, 100dvh); }

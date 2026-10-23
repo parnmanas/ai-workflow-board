@@ -21,7 +21,7 @@ const room = { id: 'responsive-room', account_id: account.id, type: 'group', nam
 const mission = { id: 'mission', account_id: account.id, title, team_id: 'responsive-team', team_name: 'Responsive team', status: 'running', briefing: '반응형 미션 상세', acceptance_criteria: '', room_id: room.id, user_chat_mode: 'open', steps: [], events: [], graph_spec: null, step_timeout_minutes: 30, counts: { total: 0, done: 0, inFlight: 0, failed: 0, awaitingUser: 0, pending: 0 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at };
 const team = { id: 'responsive-team', account_id: account.id, name: 'Responsive team', enabled: true, members: [], orchestrator_spec: null };
 
-async function fixture(page, { busy = false, withStep = false } = {}) {
+async function fixture(page, { busy = false, withStep = false, ticketTitle = title, manyTags = false } = {}) {
   const errors = [];
   const prompts = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -53,7 +53,7 @@ async function fixture(page, { busy = false, withStep = false } = {}) {
     else if (path === '/chat-rooms/responsive-room') body = room;
     else if (path.includes('/mention-candidates')) body = { users: [], agents: [] };
     else if (path.includes('/presence')) body = { viewers: [] };
-    else if (path === '/tickets/responsive-ticket') body = ticket;
+    else if (path === '/tickets/responsive-ticket') body = { ...ticket, title: ticketTitle };
     else if (path === '/projects' || path.endsWith('/projects')) body = [project];
     else if (path === '/agent-templates/hosts') body = [{ id: host.manager_id, name: host.name }];
     else if (path === '/orchestration/missions/mission') body = withStep ? { ...mission, steps: [{ id: 'step-review', step_key: 'review', title: '모바일에서 단계 세션 보기', instructions: 'Check the responsive UI', acceptance_criteria: '', depends_on: [], assignee_name: 'Ralf', assignee_online: true, status: 'running', position: 0, plan_version: 1, room_id: room.id, result_summary: '', artifacts: [], attempt: 1, max_attempts: 2, workspace_folder: cwd, visit: 1, verdict: '', retry_policy: 'auto', recovery_reason: '', last_heartbeat_at: null, confirm_decision: null, activity: null }], counts: { ...mission.counts, total: 1, inFlight: 1 } } : mission;
@@ -61,7 +61,7 @@ async function fixture(page, { busy = false, withStep = false } = {}) {
     else if (path === '/orchestration/teams') body = [team];
     else if (path === '/orchestration/missions') body = [{ id: 'mission', title, team_name: team.name, status: 'running', counts: { total: 4, done: 1, inFlight: 2, failed: 0, awaitingUser: 1 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at, live_steps: [] }];
     else if (path === '/claude-backend-profiles' || path === '/admin/claude-backend-profiles') body = { profiles: [], default_profile_id: null };
-    else if (path.endsWith('/tickets')) body = { tickets: [ticket], tags: [{ tag: 'ui', count: 1 }] };
+    else if (path.endsWith('/tickets')) body = { tickets: [{ ...ticket, title: ticketTitle }], tags: manyTags ? Array.from({ length: 30 }, (_, i) => ({ tag: `mobile-layout-${i}`, count: 1 })) : [{ tag: 'ui', count: 1 }] };
     else if (path.includes('/unread') || path.endsWith('counts') || path.includes('/mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
@@ -251,5 +251,78 @@ for (const width of [320, 768]) {
     await page.getByRole('button', { name: 'Back to mission', exact: true }).click();
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
     expect(f.errors).toEqual([]);
+  });
+}
+
+
+for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 667, height: 375 }, { width: 1440, height: 900 }]) {
+  test(`ticket toolbar keeps content visible and settings usable at ${size.width}×${size.height}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(size);
+    const longTitle = title.repeat(5);
+    const f = await fixture(page, { manyTags: true, ticketTitle: longTitle });
+    await page.goto('/tickets');
+    const toolbar = page.getByTestId('ticket-filter-bar');
+    await expect(toolbar).toBeVisible();
+    expect((await toolbar.boundingBox()).height).toBeLessThanOrEqual(120);
+    await expect(page.getByRole('combobox', { name: '프로젝트 필터' })).toBeHidden();
+    const search = page.getByRole('searchbox', { name: '티켓 검색' });
+    await search.fill('mobile');
+    await expect(page).toHaveURL(/q=mobile/);
+    const trigger = page.getByRole('button', { name: '티켓 필터 및 보기', exact: true });
+    await trigger.click();
+    const dialog = page.getByRole('dialog', { name: '티켓 필터 및 보기', exact: true });
+    await expect(dialog).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(size.width);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(size.height);
+    await dialog.getByRole('button', { name: 'To Do', exact: true }).click();
+    await dialog.getByRole('combobox', { name: '프로젝트 필터' }).selectOption(project.id);
+    await dialog.getByRole('button', { name: 'List', exact: true }).click();
+    await dialog.getByRole('button', { name: /개 더$/ }).click();
+    await dialog.getByRole('button', { name: /#mobile-layout-29/ }).click();
+    await expect(page).toHaveURL(/status=todo/);
+    await expect(page).toHaveURL(/project=responsive-project/);
+    await expect(page).toHaveURL(/tags=mobile-layout-29/);
+    await dialog.getByRole('button', { name: '결과 보기', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await expect(search).toHaveValue('mobile');
+    await expect(toolbar.locator('.awb-tickets-filter-summary')).toContainText('To Do');
+    expect((await toolbar.boundingBox()).height).toBeLessThanOrEqual(155);
+    await expectFits(page);
+    await page.screenshot({ path: testInfo.outputPath('ticket-toolbar.png') });
+    await trigger.click();
+    await expect(dialog.getByRole('button', { name: 'List', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await dialog.getByRole('button', { name: '필터 지우기' }).click();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/tickets$/);
+    await expect(search).toHaveValue('');
+
+    await page.goto('/tickets?ticket=responsive-ticket');
+    await page.getByRole('tab', { name: /^대화/ }).click();
+    expect((await page.locator('.awb-ticket-header').boundingBox()).height).toBeLessThanOrEqual(100);
+    const content = await page.locator('.awb-ticket-content').boundingBox();
+    expect(content.height).toBeGreaterThan(size.height * 0.45);
+    const menu = page.getByRole('button', { name: 'Ticket menu', exact: true });
+    await menu.click();
+    await expect(page.locator('.awb-session-menu-panel')).toContainText(longTitle);
+    const menuBounds = await page.locator('.awb-session-menu-panel').boundingBox();
+    expect(menuBounds.x).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(size.width);
+    expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(size.height);
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByRole('button', { name: 'Close ticket' })).toBeVisible();
+    await page.getByRole('tab', { name: '개요', exact: true }).click();
+    const titleInput = page.getByRole('textbox', { name: '제목', exact: true });
+    await titleInput.fill('수정 중인 제목');
+    await page.getByRole('tab', { name: /^대화/ }).click();
+    await page.setViewportSize({ width: size.width, height: size.height + 50 });
+    await page.getByRole('tab', { name: '개요', exact: true }).click();
+    await expect(titleInput).toHaveValue('수정 중인 제목');
+    expect(f.errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('ticket-detail.png') });
   });
 }

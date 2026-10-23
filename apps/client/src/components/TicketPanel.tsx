@@ -78,7 +78,7 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 /**
- * Ticket detail (docs/tickets.md). Header and title stay put; the body is one of
+ * Ticket detail (docs/tickets.md). A compact title stays put; the body is one of
  * three tabs — 개요 (everything editable, buffered behind Save), 대화 (comments)
  * and 기록 (activity). Subtasks open in place with a back button.
  */
@@ -146,7 +146,7 @@ export default function TicketPanel({
   }, [isDirty, confirm, onClose]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') void requestClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) void requestClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [requestClose]);
@@ -245,6 +245,7 @@ export default function TicketPanel({
     }}>
       <TicketPanelHeader
         ticket={active}
+        title={draft.title}
         isRoot={isRoot}
         canGoBack={navStack.length > 1}
         running={runningId === active.id}
@@ -256,11 +257,8 @@ export default function TicketPanel({
         onToggleArchive={() => void toggleArchive()}
         onDelete={() => onDelete(active.id)}
         onClose={() => void requestClose()}
+        onShowOverview={() => setTab('overview')}
       />
-
-      <div style={{ padding: '10px 14px 0', flexShrink: 0 }}>
-        <TitleField value={draft.title} onChange={v => setDraft(prev => ({ ...prev, title: v }))} />
-      </div>
 
       <div role="tablist" className="awb-ticket-tabs" style={{
         display: 'flex', gap: 2, padding: '0 10px', borderBottom: `1px solid ${tokens.colors.border}`,
@@ -292,33 +290,38 @@ export default function TicketPanel({
 
       {/* The bottom padding keeps the last control clear of the app-wide
           sound toggle that floats at the bottom-right corner (ToastContext). */}
-      <div style={{
+      <div className="awb-ticket-content" style={{
         flex: 1, minHeight: 0, overflowY: tab === 'conversation' ? 'hidden' : 'auto', overflowX: 'hidden', padding: '14px 14px 60px',
         display: 'flex', flexDirection: 'column',
       }}>
         {tab === 'overview' && (
-          <TicketOverview
-            ticket={active}
-            draft={draft}
-            setDraft={setDraft}
-            isRoot={isRoot}
-            accountId={resolvedAccountId}
-            accountTickets={accountTickets}
-            savingDraft={saving}
-            runNote={runRefusal?.id === active.id ? runRefusal.reason : null}
-            pendingStatus={pendingStatus}
-            onStatusChange={s => void changeStatus(s)}
-            parkRequested={parkRequested}
-            onParkDone={() => setParkRequested(false)}
-            onAddComment={(id, content) => onAddComment(id, content)}
-            onCreateChild={onCreateChild}
-            onMoveChild={(id, s) => void move(id, s)}
-            onDeleteChild={onDeleteChild}
-            onReparentChild={onReparentChild}
-            onSelectChild={child => setNavStack(prev => [...prev, child.id])}
-            onOpenTicket={onSelectTicket}
-            onPreview={onPreview}
-          />
+          <>
+            <div style={{ marginBottom: 14 }}>
+              <TitleField value={draft.title} onChange={v => setDraft(prev => ({ ...prev, title: v }))} />
+            </div>
+            <TicketOverview
+              ticket={active}
+              draft={draft}
+              setDraft={setDraft}
+              isRoot={isRoot}
+              accountId={resolvedAccountId}
+              accountTickets={accountTickets}
+              savingDraft={saving}
+              runNote={runRefusal?.id === active.id ? runRefusal.reason : null}
+              pendingStatus={pendingStatus}
+              onStatusChange={s => void changeStatus(s)}
+              parkRequested={parkRequested}
+              onParkDone={() => setParkRequested(false)}
+              onAddComment={(id, content) => onAddComment(id, content)}
+              onCreateChild={onCreateChild}
+              onMoveChild={(id, s) => void move(id, s)}
+              onDeleteChild={onDeleteChild}
+              onReparentChild={onReparentChild}
+              onSelectChild={child => setNavStack(prev => [...prev, child.id])}
+              onOpenTicket={onSelectTicket}
+              onPreview={onPreview}
+            />
+          </>
         )}
         {tab === 'conversation' && (
           <TicketConversation

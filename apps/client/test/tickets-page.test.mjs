@@ -189,6 +189,8 @@ test('② 필터 없으면 5 lane 전부, 상태 칩을 누르면 URL 과 쿼리
   const { view, state } = await mountPage(t);
   assert.deepEqual(laneStatuses(view), ['backlog', 'todo', 'in_progress', 'review', 'done']);
   const before = ticketListCalls(state).length;
+  click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+  await flush();
   const reviewChip = [...view.container.querySelectorAll('[aria-label="상태 필터"] button')].find((b) => b.textContent.includes('Review'));
   assert.ok(reviewChip, 'Review 상태 칩');
   click(reviewChip);
@@ -255,6 +257,8 @@ test('④-b 일시정지가 아니면 배너 없음', async (t) => {
 
 test('⑤ List 보기는 저장되고 표로 그린다', async (t) => {
   const { view } = await mountPage(t);
+  click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+  await flush();
   const listBtn = [...view.container.querySelectorAll('[aria-label="보기"] button')].find((b) => b.textContent === 'List');
   assert.ok(listBtn);
   click(listBtn);

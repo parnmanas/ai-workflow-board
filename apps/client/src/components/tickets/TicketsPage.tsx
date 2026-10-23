@@ -20,10 +20,8 @@ import { assigneeDisplayName, assigneeOptions, type AssigneeOption } from '../..
 import { computeMovePosition, findTicketInTree, groupByStatus, treeIds } from '../../tickets/kanban';
 import { readTicketView, writeTicketView, type TicketView } from '../../tickets/ticketList';
 import { sumUnread } from '../ticketUnreadRollup';
-import PageHeader from '../PageHeader';
 import TicketPanel from '../TicketPanel';
 import CreateTicketForm from '../CreateTicketForm';
-import { Button } from '../common';
 import TicketFilterBar from './TicketFilterBar';
 import StatusLane, { LANE_DROPPABLE_PREFIX } from './StatusLane';
 import TicketListView from './TicketListView';
@@ -368,16 +366,6 @@ export default function TicketsPage() {
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, position: 'relative' }}>
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, visibility: compact && panel ? 'hidden' : undefined }}>
-      <PageHeader
-        title="Tickets"
-        description={filters.archived
-          ? `보관된 티켓 ${rootCount}개`
-          : `티켓 ${rootCount}개 — 상태·태그·프로젝트로 분류하고, 담당자 한 명이 끝까지 처리합니다.`}
-        actions={
-          <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>+ New ticket</Button>
-        }
-      />
-
       {account?.dispatch_paused_at && (
         <div
           role="status"
@@ -406,29 +394,6 @@ export default function TicketsPage() {
         </div>
       )}
 
-      {counts.tickets.total > 0 && (
-        <div
-          role="status"
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-            padding: '6px 16px', background: `${tokens.colors.accent}12`, color: tokens.colors.textSecondary,
-            fontSize: 12, borderBottom: `1px solid ${tokens.colors.border}`,
-          }}
-        >
-          <span>
-            <strong>읽지 않은 코멘트 {counts.tickets.total}건</strong>이 있습니다 — 카드 오른쪽 위 숫자가 원인 티켓입니다.
-          </span>
-          <button
-            type="button"
-            onClick={() => void handleMarkAllRead()}
-            style={{
-              background: 'transparent', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm,
-              padding: '3px 10px', color: tokens.colors.accent, fontSize: 11, fontWeight: 600, cursor: 'pointer', flexShrink: 0,
-            }}
-          >모두 읽음</button>
-        </div>
-      )}
-
       <TicketFilterBar
         filters={filters}
         onChange={setFilters}
@@ -437,6 +402,10 @@ export default function TicketsPage() {
         assigneeOptions={assigneeOpts}
         view={view}
         onViewChange={setView}
+        ticketCount={rootCount}
+        unreadCount={counts.tickets.total}
+        onCreate={() => setCreateOpen(true)}
+        onMarkAllRead={() => void handleMarkAllRead()}
       />
 
       {/* One DragDropContext around lanes + panel (the list view has no
