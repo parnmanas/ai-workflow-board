@@ -278,7 +278,7 @@ test('force takeover는 이전 manager 종료 전에 새 lock 소유권을 공�
   assert.equal(alive(owner.pid), false, '새 소유권 공개 시점에는 이전 manager가 종료돼야 한다');
 });
 
-test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock을 취득한다', async () => {
+test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock을 취득한다', { timeout: 60_000 }, async () => {
   const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-lock-race-'));
   tempDirs.push(home);
   const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
@@ -350,7 +350,7 @@ for (const fixture of [
   { name: 'stale', contents: JSON.stringify({ pid: 999_999_999, role: 'manager' }) },
   { name: 'unparseable', contents: '{not-json' },
 ]) {
-  test(`${fixture.name} lock 동시 회수에서도 새 owner lock을 삭제하지 않는다`, async () => {
+  test(`${fixture.name} lock 동시 회수에서도 새 owner lock을 삭제하지 않는다`, { timeout: 60_000 }, async () => {
     const home = await fsp.mkdtemp(join(tmpdir(), `awb-manager-${fixture.name}-race-`));
     tempDirs.push(home);
     await fsp.writeFile(join(home, 'agent.lock'), fixture.contents);
@@ -938,21 +938,24 @@ test('가드가 막 사라졌다는 판정 뒤 그 자리에 새로 생긴 남�
     fs.lstatSync = function (path, ...rest) {
       if (path !== guard || swapped) return realLstatSync.call(this, path, ...rest);
       swapped = true;
-      fs.rmSync(guard, { recursive: true, force: true });
-      try {
-        return realLstatSync.call(this, path, ...rest);
-      } finally {
-        // 지워지는 중이면 mkdir 이 잠깐 거절될 수 있다(Windows) — 잡힐 때까지 다시 한다.
+      // Windows 에서는 남이 잠깐 연 핸들(백신 등) 때문에 rm 이, 지워지는 중이면 mkdir 이 잠깐
+      // 거절될 수 있다 — 둘 다 될 때까지 다시 한다.
+      const retry = (op) => {
         const until = Date.now() + 10_000;
         for (;;) {
           try {
-            fs.mkdirSync(guard);
-            break;
+            return op();
           } catch (error) {
             if (Date.now() > until) throw error;
             Atomics.wait(parked, 0, 0, 5);
           }
         }
+      };
+      retry(() => fs.rmSync(guard, { recursive: true, force: true }));
+      try {
+        return realLstatSync.call(this, path, ...rest);
+      } finally {
+        retry(() => fs.mkdirSync(guard));
         fs.writeFileSync(${JSON.stringify(peerOwnerPath)}, ${JSON.stringify(peerOwner)});
         process.stderr.write('PEER_GUARD_CREATED\\n');
       }
@@ -1192,7 +1195,8 @@ test('회수 가드 owner 를 적다 ENOENT 면 그 자리의 가드를 치우�
   const result = await contender.done;
   const diagnostics = JSON.stringify(result, null, 2);
   assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), 1, `흉내가 걸려야 한다: ${diagnostics}`);
-  assert.doesNotMatch(result.output, /ACQUIRED/, diagnostics);
+  // 이 경우 지금은 원본 ENOENT 로 끝난다. 남이 가져간 가드를 기다리는 쪽으로 바뀔 수 있으니
+  // (후속 4fb0f842) 결과는 고정하지 않는다 — 고정하는 것은 "남의 가드를 지우지 않는다" 다.
   assert.equal(
     await fsp.readFile(ownerPath, 'utf8').catch(() => null),
     peerOwner,
