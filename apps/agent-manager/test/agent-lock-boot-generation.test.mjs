@@ -459,8 +459,8 @@ test('owner.json 을 못 읽는 가드는 기존 규칙(상한 60s)을 그대로
 // 잔해를 owner 미상 가드의 상한(60s)에 맡기면 모든 대기자가 그만큼 멈춘다. 상호 배제는 이
 // 상한에 기대지 않는다 — 기록 직전의 디렉터리를 치워도 그 contender 는 기록이 ENOENT 로 진다.
 test('빈 가드 디렉터리는 짧은 상한(수 초) 뒤 회수한다 — 갓 만든 것은 건드리지 않는다', () => {
-  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 500, guardEmpty: true })).reclaim, false);
-  const empty = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 5_000, guardEmpty: true }));
+  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 2_000, guardEmpty: true })).reclaim, false);
+  const empty = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 6_000, guardEmpty: true }));
   assert.equal(empty.reclaim, true);
   assert.equal(empty.reason, 'guard_empty');
   // 이전 부팅의 것이면 그 근거가 먼저다.
@@ -468,6 +468,32 @@ test('빈 가드 디렉터리는 짧은 상한(수 초) 뒤 회수한다 — 갓
     guardFacts({ guardMtimeMs: BOOT_TIME - 24 * 3_600_000, guardEmpty: true }),
   );
   assert.equal(previousBoot.reason, 'guard_predates_boot');
+});
+
+// 시각은 마지막으로 항목이 바뀐 때일 뿐 owner 가 살아 있는지 말해 주지 않는다(리뷰 B1). owner 를 못
+// 읽었으면, 그리고 owner 가 여럿이면 그 하나하나를 판정하기 전에는 오래됐다는 것만으로 회수하지 않는다.
+test('못 읽은 owner 가 있으면 아무리 오래된 가드라도 회수하지 않는다', () => {
+  for (const guardMtimeMs of [NOW - 90_000, BOOT_TIME - 24 * 3_600_000]) {
+    const verdict = judgeRecoveryGuard(guardFacts({ guardMtimeMs, ownerUnreadable: 'owner-a.json: EBUSY' }));
+    assert.equal(verdict.reclaim, false);
+    assert.match(verdict.detail, /owner-a\.json: EBUSY/);
+  }
+});
+
+test('owner 가 여럿이면 모두 회수 대상일 때만 회수한다', () => {
+  const dead = { owner: lockOf({ pid: 999_999_999 }), ownerFacts: facts({ pidPresence: 'dead' }) };
+  const live = { owner: lockOf(), ownerFacts: facts() };
+  // 하나라도 살아 있으면 — 오래됐어도 — 회수하지 않는다.
+  const withLive = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 90_000, owners: [dead, live] }));
+  assert.equal(withLive.reclaim, false);
+  assert.match(withLive.detail, /owner 가 여럿/);
+  // 모두 죽었으면 시각과 상관없이 곧 회수한다.
+  const allDead = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 1_000, owners: [dead, dead] }));
+  assert.equal(allDead.reclaim, true);
+  assert.equal(allDead.reason, 'owner_stale');
+  // owner 로 읽히는 것이 없으면(깨진 owner 뿐) 디렉터리 규칙을 쓴다.
+  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 30_000, owners: [] })).reclaim, false);
+  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 90_000, owners: [] })).reason, 'guard_expired');
 });
 
 // 사라진 가드는 회수 대상이 아니다 — 지울 것이 없으니 다시 만들면 된다. 회수가 가드 경로를

@@ -15,6 +15,7 @@ import {
   waitForRecoveryGuard,
   RECOVERY_GUARD_TRANSIENT_LIMIT,
 } from '../dist/lib/agent-lockfile.js';
+import { currentBootIdentity, readProcessStartTicks } from '../dist/lib/boot-identity.js';
 
 const tempDirs = [];
 const children = [];
@@ -152,7 +153,7 @@ function spawnBarrieredContender(source, env, spawnChild = spawn) {
     // close follows stdout/stderr draining; exit alone can lose the last marker.
     child.once('close', (code, signal) => resolve({ code, signal, output, stderr: stderrText }));
   });
-  return { child, ready, done, awaitStderr };
+  return { child, ready, done, awaitStderr, stderrNow: () => stderrText };
 }
 
 /** 둘 다 READY 가 될 때까지 기다린 뒤 동시에 출발시키고 결과를 모은다.
@@ -1010,8 +1011,9 @@ test('가드가 막 사라졌다는 판정 뒤 그 자리에 새로 생긴 남�
 //   - guard-lstat: 가드 경로의 첫 lstat. 회수 판정은 owner 를 읽은 뒤 이것을 한다.
 //   - owner-write: 가드 안에 대한 첫 writeFileSync(갓 만든 가드에 owner 를 적기 직전)
 // 선 자리는 stderr 의 `<이름>:<자리> PARKED` 로 알리고, 홈의 `resume-<이름>-<자리>`
-// 파일이 생길 때까지 기다린다(상한 30초 — 테스트가 죽어도 contender 가 끝나게).
-function parkPrologue({ name, home, parks }) {
+// 파일이 생길 때까지 기다린다(상한 30초 — 테스트가 죽어도 contender 가 끝나게). `extra` 는 같은
+// `fs` 로 함수를 더 감싸는 소스다(흉내 낼 실패 등) — 맨 바깥에 감긴다.
+function parkPrologue({ name, home, parks, extra = '' }) {
   const lockPath = join(home, 'agent.lock');
   return `
     import fs from 'node:fs';
@@ -1044,6 +1046,7 @@ function parkPrologue({ name, home, parks }) {
     parkBefore('unlinkSync', 'lock-unlink', (path) => String(path) === lockPath);
     parkBefore('lstatSync', 'guard-lstat', (path) => String(path) === guard);
     parkBefore('writeFileSync', 'owner-write', (path) => typeof path === 'string' && path.startsWith(guard + sep));
+    ${extra}
     syncBuiltinESMExports();
   `;
 }
@@ -1099,6 +1102,46 @@ async function resumeAll(home, names) {
   }
 }
 
+/** 가드 안(주 lock unlink)에 선 holder 가 정말 가드를 쥐고 있는지 — 가드에 owner 파일이 하나뿐이고
+ *  그것이 holder 의 pid 를 적고 있어야 한다. 가드 없이 들어왔거나(확인을 건너뜀) 남이 그 owner 를
+ *  지웠으면 여기서 드러난다. 물러난 쪽이 물러나며 무엇을 지웠는지도 이것으로 본다 — 물러난다는 줄은
+ *  물러나는 일을 다 마친 뒤에 남는다. */
+async function assertHoldsGuard(home, pid, why) {
+  const guard = join(home, 'agent.lock.recovery');
+  let names;
+  try {
+    names = await fsp.readdir(guard);
+  } catch (error) {
+    assert.fail(`${why}: 가드가 없다 (${error.code})`);
+  }
+  const owners = names.filter((name) => name === 'owner.json' || /^owner-.+\.json$/.test(name));
+  assert.equal(owners.length, 1, `${why}: 가드의 owner 가 하나여야 한다 — ${JSON.stringify(names)}`);
+  const owner = JSON.parse(await fsp.readFile(join(guard, owners[0]), 'utf8'));
+  assert.equal(owner.pid, pid, `${why}: 가드 owner 가 holder 여야 한다 — ${JSON.stringify(owner)}`);
+}
+
+/** 물러난 뒤 잠깐 동안의 stderr. 그 사이 holder 는 가드 안에 서 있으므로, 물러난 쪽이 가드에 손대려
+ *  했다면 그 흔적은 이 안에 있다. 그 뒤(holder 가 놓은 다음)의 일은 정상 경합이라 보지 않는다 —
+ *  Windows 의 일시적 실패가 거기서 날 수 있다. */
+async function stderrShortlyAfter(contender, ms = 300) {
+  await sleep(ms);
+  return contender.stderrNow();
+}
+
+/** 이 테스트 프로세스를 owner 로 적은, 살아 있는 holder 의 가드 owner. 부팅 세대까지 담아 구버전
+ *  owner 의 벽시계 상한에도 걸리지 않는다. */
+function liveGuardOwner() {
+  const boot = currentBootIdentity();
+  return JSON.stringify({
+    pid: process.pid,
+    role: 'recovery-guard',
+    started_at: new Date().toISOString(),
+    boot_id: boot.id,
+    boot_time_ms: boot.approxBootTimeMs,
+    pid_start_ticks: readProcessStartTicks(process.pid),
+  });
+}
+
 // E5 — 크래시로 남은 가드(owner 가 죽은 pid)를 두 대기자가 함께 stale 로 판정한다. 먼저
 // 회수한 쪽은 자기 가드를 만들고 그 안에 선다. 그때 늦은 쪽이 회수를 마저 하면, 회수가
 // 판정한 가드가 아니라 지금 그 자리에 있는 것(먼저 회수한 쪽의 새 가드)을 지운다. 그러면
@@ -1131,15 +1174,21 @@ for (const debris of [
       // W1 이 회수를 마치고 자기 가드 안(주 lock unlink)에 선다.
       await resumeParked(home, 'W1', 'guard-removal');
       await untilParked(w1, 'W1', 'lock-unlink');
+      await assertHoldsGuard(home, w1.child.pid, 'W1 이 가드 안에 섰다');
       // 그 사이 W2 의 회수를 놓는다.
       await resumeParked(home, 'W2', 'guard-removal');
       const w2Outcome = await enteredOrBackedOff(w2, 'W2', RECLAIM_BACKED_OFF);
+      let afterBackOff = '';
+      if (w2Outcome === 'backed_off') {
+        afterBackOff = await stderrShortlyAfter(w2);
+        await assertHoldsGuard(home, w1.child.pid, 'W2 가 물러난 뒤에도 W1 이 가드를 쥔다');
+      }
       await resumeAll(home, ['W1', 'W2']);
       const [first, late] = await Promise.all([w1.done, w2.done]);
       const diagnostics = JSON.stringify({ w2Outcome, first, late }, null, 2);
       assert.equal(w2Outcome, 'backed_off', `W1 이 가드 안에 있는 동안 W2 가 들어오면 안 된다: ${diagnostics}`);
       // 판정한 가드가 이미 없으면 지금 그 자리의 가드에는 손대지 않는다(지우려다 실패하는 것도 아니다).
-      assert.doesNotMatch(late.stderr, /recovery guard reclaim: could not remove/, diagnostics);
+      assert.doesNotMatch(afterBackOff, /recovery guard reclaim: could not remove/, diagnostics);
       assert.match(first.output, /ACQUIRED/, diagnostics);
       assert.match(late.output, /REJECTED:EAGENTLOCKED/, diagnostics);
     } finally {
@@ -1180,14 +1229,20 @@ test('먼저 읽은 owner 가 그 사이 놓고 죽어도, 그 자리에 새로 
     // C 가 새 가드를 만들어 그 안에 선다.
     c = spawnBarrieredContender(parkPrologue({ name: 'C', home, parks: ['lock-unlink'] }) + ACQUIRE_AND_HOLD, env);
     await untilParked(c, 'C', 'lock-unlink');
+    await assertHoldsGuard(home, c.child.pid, 'C 가 가드 안에 섰다');
     // W 가 판정을 이어 간다.
     await resumeParked(home, 'W', 'guard-lstat');
     const wOutcome = await enteredOrBackedOff(w, 'W', RECLAIM_BACKED_OFF);
+    let afterBackOff = '';
+    if (wOutcome === 'backed_off') {
+      afterBackOff = await stderrShortlyAfter(w);
+      await assertHoldsGuard(home, c.child.pid, 'W 가 물러난 뒤에도 C 가 가드를 쥔다');
+    }
     await resumeAll(home, ['W', 'C']);
     const [held, late] = await Promise.all([c.done, w.done]);
     const diagnostics = JSON.stringify({ wOutcome, held, late }, null, 2);
     assert.equal(wOutcome, 'backed_off', `C 가 가드 안에 있는 동안 W 가 들어오면 안 된다: ${diagnostics}`);
-    assert.doesNotMatch(late.stderr, /recovery guard reclaim: could not remove/, diagnostics);
+    assert.doesNotMatch(afterBackOff, /recovery guard reclaim: could not remove/, diagnostics);
     assert.match(held.output, /ACQUIRED/, diagnostics);
     assert.match(late.output, /REJECTED:EAGENTLOCKED/, diagnostics);
   } finally {
@@ -1200,6 +1255,8 @@ test('먼저 읽은 owner 가 그 사이 놓고 죽어도, 그 자리에 새로 
 // 둘의 owner 기록이 둘 다 그 새 디렉터리로 들어간다. 경로로 적는 한 이것은 막을 수 없다.
 // 그래서 적은 뒤 그 가드에 자기 owner 하나만 있는지 확인해야 한다 — 확인이 없으면 둘 다
 // 쥔다. 흉내: C 가 owner 를 적기 직전에 테스트가 C 의 가드를 치우고, D 가 새 가드를 만든다.
+// D 를 먼저 띄워 pid 를 작게 한다 — D 의 owner 이름(owner-<pid>-…)이 C 보다 앞서 정렬되게. 나중에
+// 적은 쪽은 이름 순서와 상관없이 물러나야 한다("이름이 앞서는 쪽이 쥔다" 같은 확인은 여기서 진다).
 test('갓 만든 가드가 owner 기록 전에 바뀌어 둘이 같은 가드에 적어도 하나만 쥔다', { timeout: 90_000 }, async () => {
   const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-double-claim-'));
   tempDirs.push(home);
@@ -1208,18 +1265,22 @@ test('갓 만든 가드가 owner 기록 전에 바뀌어 둘이 같은 가드에
   const guard = `${lockPath}.recovery`;
   await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
   const parks = ['owner-write', 'lock-unlink'];
-  const c = spawnBarrieredContender(parkPrologue({ name: 'C', home, parks }) + ACQUIRE_AND_HOLD, env);
-  let d;
+  const d = spawnBarrieredContender(parkPrologue({ name: 'D', home, parks }) + BARRIER_PROLOGUE + ACQUIRE_AND_HOLD, env);
+  let c;
   try {
+    await Promise.race([d.ready, d.done.then((result) => assert.fail(`D 가 준비 전에 끝남: ${JSON.stringify(result)}`))]);
+    c = spawnBarrieredContender(parkPrologue({ name: 'C', home, parks }) + ACQUIRE_AND_HOLD, env);
     await untilParked(c, 'C', 'owner-write');
     await fsp.rm(guard, { recursive: true, force: true });
-    d = spawnBarrieredContender(parkPrologue({ name: 'D', home, parks }) + ACQUIRE_AND_HOLD, env);
+    d.child.stdin.write('go\n');
     await untilParked(d, 'D', 'owner-write');
     // C 가 먼저 적고 가드 안에 선다. 그다음 D 가 같은 가드에 적는다.
     await resumeParked(home, 'C', 'owner-write');
     await untilParked(c, 'C', 'lock-unlink');
+    await assertHoldsGuard(home, c.child.pid, 'C 가 가드 안에 섰다');
     await resumeParked(home, 'D', 'owner-write');
     const dOutcome = await enteredOrBackedOff(d, 'D', CLAIM_BACKED_OFF);
+    if (dOutcome === 'backed_off') await assertHoldsGuard(home, c.child.pid, 'D 가 물러난 뒤에도 C 가 가드를 쥔다');
     await resumeAll(home, ['C', 'D']);
     const [held, late] = await Promise.all([c.done, d.done]);
     const diagnostics = JSON.stringify({ dOutcome, held, late }, null, 2);
@@ -1261,28 +1322,264 @@ test('가드를 쥔 동안 그 자리가 남의 것이 되면, 놓을 때 남의
   }
 });
 
-// owner 를 적다 죽으면(파일은 'wx' 로 먼저 생기고 내용은 나중에 들어간다) 깨진 owner 하나가 든
-// 가드가 남는다. 판정은 owner 미상 가드의 상한을 쓴다. 회수는 판정할 때 본 항목을 그 이름으로
-// 지운 뒤 빈 디렉터리를 치운다 — 본 항목을 지우지 않으면 rmdir 가 비지 않은 가드에서 져 끝내
-// 취득하지 못한다. 덤으로 낯선 파일 하나(탐색기가 남기는 desktop.ini 같은)도 함께 둔다.
-test('깨진 owner 와 낯선 파일만 남은 오래된 가드도 회수하고 취득한다', { timeout: 60_000 }, async () => {
-  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-torn-owner-'));
+// 회수는 판정할 때 본 owner 를 그 이름으로 지운 뒤, 그 밖에 본 항목(낯선 파일 — 탐색기가 남기는
+// desktop.ini 같은)도 지우고 빈 디렉터리를 치운다. 낯선 파일을 남기면 rmdir 가 비지 않은 가드에서
+// 진다. 두 장면:
+//   - owner 를 적다 죽은 잔해: owner 파일은 'wx' 로 먼저 생기고 내용은 나중에 들어가, 깨진 owner
+//     하나가 남는다. owner 로 읽히지 않으니 owner 미상 가드의 상한(오래된 시각)으로 회수한다.
+//   - 죽은 owner 의 잔해: owner 로 판정하므로 시각과 상관없이 곧 회수한다.
+for (const scene of [
+  {
+    name: '깨진 owner 와 낯선 파일만 남은 오래된 가드',
+    owner: ['owner-999999999-torn.json', '{"pid": 9999'],
+    old: true,
+    // 어느 규칙인지는 러너가 언제 부팅했는지에 달렸다(위 끊긴 링크 테스트와 같다).
+    reclaimedAs: /reclaiming stale recovery guard — (guard_expired|guard_predates_boot)/,
+  },
+  {
+    name: '죽은 owner 와 낯선 파일이 든 가드',
+    owner: ['owner.json', JSON.stringify({ pid: 999_999_999, role: 'recovery-guard' })],
+    old: false,
+    reclaimedAs: /reclaiming stale recovery guard — owner_stale/,
+  },
+]) {
+  test(`${scene.name}도 곧 회수하고 취득한다`, { timeout: 60_000 }, async () => {
+    const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-debris-junk-'));
+    tempDirs.push(home);
+    const lockPath = join(home, 'agent.lock');
+    const guard = `${lockPath}.recovery`;
+    await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+    await fsp.mkdir(guard);
+    await fsp.writeFile(join(guard, scene.owner[0]), scene.owner[1]);
+    await fsp.writeFile(join(guard, 'desktop.ini'), '[.ShellClassInfo]');
+    if (scene.old) {
+      const longAgo = new Date(Date.now() - 10 * 60_000);
+      await fsp.utimes(guard, longAgo, longAgo);
+    }
+    const contender = spawnBarrieredContender(ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home });
+    const result = await Promise.race([contender.done, sleep(20_000, { code: null, output: 'STILL_WAITING', stderr: '' })]);
+    const diagnostics = JSON.stringify(result, null, 2);
+    assert.equal(result.code, 0, diagnostics);
+    assert.match(result.output, /ACQUIRED/, diagnostics);
+    assert.match(result.stderr, scene.reclaimedAs, diagnostics);
+  });
+}
+
+// owner 를 적은 바로 뒤 가드가 통째로 치워지면(확인하는 readdir 가 ENOENT) 우리 owner 도 함께
+// 사라진 것이다 — 쥔 것이 아니다. 기다렸다 다시 만들어 쥐어야 하고, 가드 안에서는 그 가드가 우리를
+// owner 로 담고 있어야 한다. 흉내: 확인하는 readdir 직전에 그 가드를 지운다.
+test('owner 를 적은 직후 가드가 치워지면 쥔 것으로 보지 않고 다시 만들어 쥔다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-verify-gone-'));
+  tempDirs.push(home);
+  await fsp.writeFile(join(home, 'agent.lock'), JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  const extra = `{
+    const realReaddirSync = fs.readdirSync;
+    let removed = false;
+    fs.readdirSync = function (path, ...rest) {
+      if (!removed && String(path) === guard) {
+        removed = true;
+        fs.rmSync(guard, { recursive: true, force: true });
+        fs.writeSync(2, 'GUARD_REMOVED_BEFORE_VERIFY\\n');
+      }
+      return realReaddirSync.call(this, path, ...rest);
+    };
+  }`;
+  const x = spawnBarrieredContender(
+    parkPrologue({ name: 'X', home, parks: ['lock-unlink'], extra }) + ACQUIRE_ONCE(false),
+    { ...process.env, AWB_AGENT_MANAGER_HOME: home },
+  );
+  try {
+    await untilParked(x, 'X', 'lock-unlink');
+    await assertHoldsGuard(home, x.child.pid, 'X 가 가드 안에 섰다');
+    await resumeParked(home, 'X', 'lock-unlink');
+    const result = await x.done;
+    const diagnostics = JSON.stringify(result, null, 2);
+    assert.match(result.stderr, /GUARD_REMOVED_BEFORE_VERIFY/, diagnostics);
+    assert.match(result.stderr, /recovery guard claim: the guard was removed right after its owner was recorded/, diagnostics);
+    assert.match(result.output, /ACQUIRED/, diagnostics);
+  } finally {
+    await resumeAll(home, ['X']);
+  }
+});
+
+// 가드에는 owner 가 여럿 있을 수 있다 — 같은 가드에 적은 두 contender 중 물러나지 못하고 죽은 쪽의
+// 잔해가 holder 의 owner 와 함께 남는다. 디렉터리 시각은 마지막으로 항목이 바뀐 때일 뿐이라
+// (오래 쥔 force 인수, 절전 · VM 정지, 벽시계 조정) 오래됐어도 holder 는 살아 있을 수 있다. owner
+// 를 하나하나 판정해, 살아 있는 owner 가 있으면 회수하지 않아야 한다(리뷰 B1). 이 테스트
+// 프로세스가 holder 다. 시각은 owner 미상 가드의 상한(60초)은 넘고 이번 부팅보다는 늦게 단다.
+test('owner 가 여럿인 가드는 그중 하나라도 살아 있으면 오래됐어도 회수하지 않는다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-multi-owner-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const guard = `${lockPath}.recovery`;
+  const livePath = join(guard, 'owner-live-holder.json');
+  const deadPath = join(guard, 'owner-dead-claimant.json');
+  const live = liveGuardOwner();
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  await fsp.mkdir(guard);
+  await fsp.writeFile(livePath, live);
+  await fsp.writeFile(deadPath, JSON.stringify({ pid: 999_999_999, role: 'recovery-guard' }));
+  const ninetySecondsAgo = new Date(Date.now() - 90_000);
+  await fsp.utimes(guard, ninetySecondsAgo, ninetySecondsAgo);
+  const contender = spawnBarrieredContender(ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home });
+  await contender.awaitStderr('waiting for recovery guard before stale-cleanup');
+  // 회수했다면 곧바로 취득까지 간다. 이 대기는 느린 러너에서 버그를 놓칠 수만 있다.
+  await Promise.race([contender.done, sleep(1_500)]);
+  const liveBeforeRelease = await fsp.readFile(livePath, 'utf8').catch(() => null);
+  await fsp.rm(guard, { recursive: true, force: true }); // holder 가 놓는다
+  const result = await contender.done;
+  const diagnostics = JSON.stringify({ liveBeforeRelease, ...result }, null, 2);
+  assert.equal(liveBeforeRelease, live, `살아 있는 holder 의 owner 를 지우면 안 된다: ${diagnostics}`);
+  assert.doesNotMatch(result.stderr, /reclaiming stale recovery guard/, diagnostics);
+  assert.match(result.output, /ACQUIRED/, diagnostics);
+});
+
+// 하나뿐인 owner 를 잠깐 못 읽는 것(Windows 백신이 연 핸들 등)은 owner 가 없는 것이 아니다. 그때
+// 디렉터리 시각으로 판정하면 살아 있는 holder 의 owner 를 지운다(리뷰 B1b). 흉내: owner 읽기를 세 번
+// EBUSY 로 거절한다. 그 뒤로는 읽혀 살아 있는 owner 로 판정되고, holder 가 놓을 때까지 기다린다.
+test('가드 owner 를 잠깐 못 읽어도 오래된 가드라고 회수하지 않는다 — 살아 있는 holder 일 수 있다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-owner-unreadable-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const guard = `${lockPath}.recovery`;
+  const livePath = join(guard, 'owner-live-holder.json');
+  const live = liveGuardOwner();
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  await fsp.mkdir(guard);
+  await fsp.writeFile(livePath, live);
+  const ninetySecondsAgo = new Date(Date.now() - 90_000);
+  await fsp.utimes(guard, ninetySecondsAgo, ninetySecondsAgo);
+  const contender = spawnBarrieredContender(
+    faultPrologue({
+      fn: 'readFileSync',
+      matches: `(path) => path.startsWith(${JSON.stringify(join(guard, 'owner-'))})`,
+      code: 'EBUSY',
+      times: 3,
+    }) + ACQUIRE_ONCE(false),
+    { ...process.env, AWB_AGENT_MANAGER_HOME: home },
+  );
+  await contender.awaitStderr('waiting for recovery guard before stale-cleanup');
+  await Promise.race([contender.done, sleep(1_500)]);
+  const liveBeforeRelease = await fsp.readFile(livePath, 'utf8').catch(() => null);
+  await fsp.rm(guard, { recursive: true, force: true }); // holder 가 놓는다
+  const result = await contender.done;
+  const diagnostics = JSON.stringify({ liveBeforeRelease, ...result }, null, 2);
+  assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), 3, `흉내가 걸려야 한다: ${diagnostics}`);
+  assert.equal(liveBeforeRelease, live, `살아 있는 holder 의 owner 를 지우면 안 된다: ${diagnostics}`);
+  assert.doesNotMatch(result.stderr, /reclaiming stale recovery guard/, diagnostics);
+  assert.match(result.output, /ACQUIRED/, diagnostics);
+});
+
+// 같은 가드에 적었다 물러나는 contender 가 자기 owner 를 못 지우면(Windows 백신 등), 그 owner 는
+// 살아 있는 그 contender 를 가리킨 채 남는다. holder 가 놓아도 그 가드는 그 owner 하나를 담고 남아,
+// 그 contender 자신을 포함한 모든 대기자가 끝없이 기다렸다(리뷰 B2). 물러난 쪽은 기다리는 동안 자기
+// owner 를 다시 지워야 한다. 흉내: 위 이중 기록 장면에서 D 가 물러날 때 자기 owner 지우기를 한 번
+// EBUSY 로 거절한다.
+test('물러나다 자기 owner 를 못 지운 contender 는 기다리는 동안 다시 지운다 — 자기 owner 에 갇히지 않는다', { timeout: 90_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-abandoned-owner-'));
+  tempDirs.push(home);
+  const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+  const lockPath = join(home, 'agent.lock');
+  const guard = `${lockPath}.recovery`;
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  const parks = ['owner-write', 'lock-unlink'];
+  const failOwnUnlinkOnce = `{
+    const realUnlinkSync = fs.unlinkSync;
+    let failed = false;
+    fs.unlinkSync = function (path, ...rest) {
+      if (!failed && String(path).startsWith(guard + sep + 'owner-')) {
+        failed = true;
+        fs.writeSync(2, 'SIMULATED_FAULT\\n');
+        throw Object.assign(new Error("EBUSY: simulated, unlink '" + path + "'"), { code: 'EBUSY', syscall: 'unlink', path: String(path) });
+      }
+      return realUnlinkSync.call(this, path, ...rest);
+    };
+  }`;
+  const c = spawnBarrieredContender(parkPrologue({ name: 'C', home, parks }) + ACQUIRE_AND_HOLD, env);
+  let d;
+  try {
+    await untilParked(c, 'C', 'owner-write');
+    await fsp.rm(guard, { recursive: true, force: true });
+    d = spawnBarrieredContender(parkPrologue({ name: 'D', home, parks, extra: failOwnUnlinkOnce }) + ACQUIRE_AND_HOLD, env);
+    await untilParked(d, 'D', 'owner-write');
+    await resumeParked(home, 'C', 'owner-write');
+    await untilParked(c, 'C', 'lock-unlink');
+    await resumeParked(home, 'D', 'owner-write');
+    await d.awaitStderr(CLAIM_BACKED_OFF);
+    await resumeAll(home, ['C', 'D']);
+    const STILL_WAITING = { code: null, output: 'STILL_WAITING', stderr: '' };
+    const [held, late] = await Promise.all([c.done, Promise.race([d.done, sleep(30_000, STILL_WAITING)])]);
+    const diagnostics = JSON.stringify({ held, late: { ...late, stderr: d.stderrNow() } }, null, 2);
+    assert.equal(countOf(d.stderrNow(), 'SIMULATED_FAULT'), 1, `흉내가 걸려야 한다: ${diagnostics}`);
+    assert.match(held.output, /ACQUIRED/, diagnostics);
+    assert.match(late.output, /REJECTED:EAGENTLOCKED/, `자기 owner 에 갇히지 않고 판정을 받아야 한다: ${diagnostics}`);
+    assert.match(d.stderrNow(), /recovery guard: removed this process's leftover owner owner-/, diagnostics);
+  } finally {
+    await resumeAll(home, ['C', 'D']);
+  }
+});
+
+// 가드 자리의 디렉터리가 아닌 것(끊긴 링크)은 unlink 로만 지운다 — 판정과 지우기 사이에 그 자리에
+// 살아 있는 가드(디렉터리)가 서면 unlink 는 그것을 지우지 못한다. 경로째 지우는 연산(rm -r)이면 그
+// 가드를 지운다. 흉내: 링크를 회수하려는 순간 테스트가 그 자리를 살아 있는 가드로 바꾼다.
+test('가드 자리의 링크를 회수하는 사이 그 자리에 살아 있는 가드가 서면 그 가드를 지우지 않는다', { timeout: 60_000 }, async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows 러너는 심볼릭 링크를 만들 권한이 없을 수 있다');
+    return;
+  }
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-link-swap-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const guard = `${lockPath}.recovery`;
+  const livePath = join(guard, 'owner-live-holder.json');
+  const live = liveGuardOwner();
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  await fsp.symlink(join(home, 'nowhere'), guard);
+  const longAgo = new Date(Date.now() - 10 * 60_000);
+  await fsp.lutimes(guard, longAgo, longAgo);
+  const w = spawnBarrieredContender(
+    parkPrologue({ name: 'W', home, parks: ['guard-removal'] }) + ACQUIRE_ONCE(false),
+    { ...process.env, AWB_AGENT_MANAGER_HOME: home },
+  );
+  try {
+    await untilParked(w, 'W', 'guard-removal');
+    await fsp.unlink(guard);
+    await fsp.mkdir(guard);
+    await fsp.writeFile(livePath, live);
+    await resumeParked(home, 'W', 'guard-removal');
+    await Promise.race([w.done, sleep(1_500)]);
+    const liveBeforeRelease = await fsp.readFile(livePath, 'utf8').catch(() => null);
+    await fsp.rm(guard, { recursive: true, force: true }); // holder 가 놓는다
+    const result = await w.done;
+    const diagnostics = JSON.stringify({ liveBeforeRelease, ...result }, null, 2);
+    assert.equal(liveBeforeRelease, live, `그 자리에 선 살아 있는 가드를 지우면 안 된다: ${diagnostics}`);
+    assert.match(result.output, /ACQUIRED/, diagnostics);
+  } finally {
+    await resumeAll(home, ['W']);
+  }
+});
+
+// 빈 가드를 끝내 지우지 못하면(rmdir 가 계속 실패) 상한까지 다시 시도한 뒤 원본 errno 로 끝나야
+// 한다. 지우지 못한 것을 지운 것으로 치면 판정 → rmdir 실패 → mkdir EEXIST → 판정을 쉬지 않고
+// 되풀이한다(바쁜 루프). 흉내: 가드 rmdir 를 계속 ENOTEMPTY 로 거절한다. owner 는 죽은 pid 라 곧
+// 지워지고, 남은 빈 가드는 빈 가드의 상한 뒤 다시 회수 대상이 된다.
+test('빈 가드를 끝내 지우지 못하면 상한까지 다시 시도한 뒤 원본 errno 로 끝난다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-rmdir-denied-'));
   tempDirs.push(home);
   const lockPath = join(home, 'agent.lock');
   const guard = `${lockPath}.recovery`;
   await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
   await fsp.mkdir(guard);
-  await fsp.writeFile(join(guard, 'owner-999999999-torn.json'), '{"pid": 9999');
-  await fsp.writeFile(join(guard, 'desktop.ini'), '[.ShellClassInfo]');
-  const longAgo = new Date(Date.now() - 10 * 60_000);
-  await fsp.utimes(guard, longAgo, longAgo);
-  const contender = spawnBarrieredContender(ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home });
-  const result = await Promise.race([contender.done, sleep(20_000, { code: null, output: 'STILL_WAITING', stderr: '' })]);
-  const diagnostics = JSON.stringify(result, null, 2);
-  assert.equal(result.code, 0, diagnostics);
-  assert.match(result.output, /ACQUIRED/, diagnostics);
-  // 어느 규칙으로 회수하는지는 러너가 언제 부팅했는지에 달렸다(위 끊긴 링크 테스트와 같다).
-  assert.match(result.stderr, /reclaiming stale recovery guard — (guard_expired|guard_predates_boot)/, diagnostics);
+  await fsp.writeFile(join(guard, 'owner.json'), JSON.stringify({ pid: 999_999_999, role: 'recovery-guard' }));
+  const contender = spawnBarrieredContender(
+    faultPrologue({ fn: 'rmdirSync', matches: `(path) => path === ${JSON.stringify(guard)}`, code: 'ENOTEMPTY', times: 'Infinity' }) +
+      ACQUIRE_ONCE(false),
+    { ...process.env, AWB_AGENT_MANAGER_HOME: home },
+  );
+  const result = await Promise.race([contender.done, sleep(30_000, { code: null, output: 'STILL_WAITING', stderr: '' })]);
+  const diagnostics = JSON.stringify({ output: result.output, stderrTail: result.stderr.slice(-2_000) }, null, 2);
+  assert.match(result.output, /REJECTED:ENOTEMPTY/, `원본 errno 로 끝나야 한다: ${diagnostics}`);
+  assert.match(result.stderr, /recovery guard reclaim: gave up after \d+ consecutive failures \(ENOTEMPTY\)/, diagnostics);
 });
 
 // 가드 자리에 디렉터리가 아닌 것이 있으면(끊긴 심볼릭 링크) mkdir 은 EEXIST 인데 stat
@@ -1399,8 +1696,23 @@ for (const scene of [
 //     가드의 상한(60초)으로는 한참 멈추지만, 빈 가드의 짧은 상한(수 초)으로 곧 다시 회수한다.
 for (const force of [false, true]) {
   for (const step of [
-    { name: 'owner 지우기', fn: 'unlinkSync', target: (guard) => join(guard, 'owner.json'), reclaimedAs: /owner_stale/ },
-    { name: '빈 디렉터리 치우기', fn: 'rmdirSync', target: (guard) => guard, reclaimedAs: /guard_empty/ },
+    {
+      name: 'owner 지우기',
+      fn: 'unlinkSync',
+      target: (guard) => join(guard, 'owner.json'),
+      failed: () => 'recovery guard reclaim: could not remove the judged owner owner.json (EBUSY); will retry',
+      // 아무것도 지우지 못했으니 같은 판정으로 곧바로 다시 회수한다(연달아 실패하는 동안은 회수
+      // 줄을 다시 남기지 않는다).
+      lastReclaim: /owner_stale/,
+    },
+    {
+      name: '빈 디렉터리 치우기',
+      fn: 'rmdirSync',
+      target: (guard) => guard,
+      failed: (guard) => `recovery guard reclaim: could not remove ${guard} (EBUSY); will retry`,
+      // owner 는 지워져 빈 가드가 남았다 — 빈 가드의 상한으로 다시 회수한다.
+      lastReclaim: /guard_empty/,
+    },
   ]) {
     test(`${force ? 'force' : 'stale'} 경로: 남은 회수 가드의 ${step.name}가 한 번 실패해도 곧 취득한다`, { timeout: 90_000 }, async () => {
       const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-reclaim-retry-'));
@@ -1428,9 +1740,8 @@ for (const force of [false, true]) {
       assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), 1, `지우기 실패 흉내가 걸려야 한다: ${diagnostics}`);
       assert.equal(result.code, 0, diagnostics);
       assert.match(result.output, /ACQUIRED/, diagnostics);
-      // 실패 뒤 다시 회수한 근거. 빈 디렉터리가 남은 경우는 빈 가드의 상한으로 회수해야 한다.
-      assert.equal(countOf(result.stderr, 'reclaiming stale recovery guard'), 2, diagnostics);
-      assert.match(result.stderr.split('reclaiming stale recovery guard').pop(), step.reclaimedAs, diagnostics);
+      assert.ok(result.stderr.includes(step.failed(recoveryLock)), diagnostics);
+      assert.match(result.stderr.split('reclaiming stale recovery guard').pop(), step.lastReclaim, diagnostics);
       if (owner) {
         await waitForExit(owner);
         assert.equal(alive(owner.pid), false, diagnostics);
@@ -1588,6 +1899,42 @@ test('회수 가드 owner 를 적다 ENOENT 면 그 자리의 가드를 치우�
   assert.match(result.stderr, /recovery guard claim: .*\(ENOENT\); waiting/, diagnostics);
   assert.equal(result.code, 0, diagnostics);
   assert.match(result.output, /ACQUIRED/, `ENOENT 로 실패하지 않고 기다렸다 취득해야 한다: ${diagnostics}`);
+});
+
+// Windows 에서는 치워지는 중인(삭제 대기) 디렉터리에 적으면 ENOENT 가 아니라 삭제 대기 errno(EPERM
+// 등)가 난다. 그 errno 에 가드 자리가 비어 있으면 같은 경합이다 — 환경 오류로 보고 끝내면 안 된다
+// (가드 자리가 그대로 있으면 위 "owner 기록 실패" 테스트처럼 끝낸다). 흉내: owner 를 적으려는 순간
+// 가드를 지우고 EPERM 을 낸다.
+test('회수 가드 owner 를 적다 삭제 대기 errno 인데 가드가 이미 치워졌으면 기다렸다 취득한다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-owner-delete-pending-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const recoveryLock = `${lockPath}.recovery`;
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  const contender = spawnBarrieredContender(`
+    import fs from 'node:fs';
+    import { sep } from 'node:path';
+    import { syncBuiltinESMExports } from 'node:module';
+    const guard = ${JSON.stringify(recoveryLock)};
+    const realWriteFileSync = fs.writeFileSync;
+    let failed = false;
+    fs.writeFileSync = function (path, ...rest) {
+      if (typeof path === 'string' && path.startsWith(guard + sep + 'owner-') && !failed) {
+        failed = true;
+        process.stderr.write('SIMULATED_FAULT\\n');
+        fs.rmSync(guard, { recursive: true, force: true });
+        throw Object.assign(new Error("EPERM: simulated, open '" + path + "'"), { code: 'EPERM', syscall: 'open', path });
+      }
+      return realWriteFileSync.call(this, path, ...rest);
+    };
+    syncBuiltinESMExports();
+  ` + ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home });
+  const result = await Promise.race([contender.done, sleep(20_000, { code: null, output: 'STILL_WAITING', stderr: '' })]);
+  const diagnostics = JSON.stringify(result, null, 2);
+  assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), 1, `흉내가 걸려야 한다: ${diagnostics}`);
+  assert.match(result.stderr, /recovery guard claim: .*\(EPERM\); waiting/, diagnostics);
+  assert.equal(result.code, 0, diagnostics);
+  assert.match(result.output, /ACQUIRED/, `환경 오류로 끝내지 않고 다시 만들어 취득해야 한다: ${diagnostics}`);
 });
 
 // force 경로도 상한을 다 쓴 가드 대기를 처음부터 다시 돌리지 않는다 — 다시 돌면 owner 를

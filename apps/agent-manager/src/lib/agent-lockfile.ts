@@ -30,8 +30,11 @@
 //      끝은 빈 디렉터리만 지우는 rmdir 다. 놓기도 자기 owner 이름으로 한다. 가드를 만든 쪽은
 //      owner 를 적은 뒤 그 가드의 owner 가 자기 하나뿐인지 확인하고서야 쥔다 — owner 는 경로로
 //      적으므로 mkdir 와 기록 사이에 자리가 바뀌면 둘이 같은 디렉터리에 적을 수 있다. 기록이
-//      ENOENT(우리 디렉터리가 치워짐)거나 확인에 실패하면 물러나 기다린다. owner 없는 빈 가드는
-//      짧은 상한 뒤 회수한다(owner 만 지우고 디렉터리는 못 지운 잔해).
+//      ENOENT(우리 디렉터리가 치워짐)거나 확인에 실패하면 물러나 기다린다. 그래서 가드에는 owner
+//      가 여럿 있을 수 있다 — 회수는 그 하나하나가 회수 대상일 때만, 못 읽은 owner 가 하나라도
+//      있으면 하지 않는다(시각은 owner 가 살아 있는지 말해 주지 않는다). 물러나다 못 지운 자기
+//      owner 는 기다리는 동안 다시 지운다. owner 없는 빈 가드는 짧은 상한 뒤 회수한다(owner 만
+//      지우고 디렉터리는 못 지운 잔해).
 //   4. 2·3 의 회수(remove→create)는 회수 가드로 직렬화되지만, 그 가드는 회수
 //      경로에 들어온 contender 만 붙잡는다 — 1번 happy path 의 create 는 가드를
 //      거치지 않으므로 remove 와 create 사이를 파고들 수 있다. 그렇게 create 가
@@ -90,9 +93,11 @@ const RECOVERY_LOCK_STALE_MS = 60_000;
 // (claimRecoveryGuard 가 그것을 확인한 뒤에야 쥔다) 빈 디렉터리는 mkdir 와 owner 기록 사이의
 // 아주 짧은 순간이거나, 놓기·회수가 owner 만 지우고 디렉터리는 못 지운 잔해다(Windows 에서
 // owner 파일이 삭제 대기면 rmdir 이 ENOTEMPTY 로 진다). 잔해를 60초 상한에 맡기면 모든 대기자가
-// 그만큼 멈춘다. 상호 배제는 이 값에 기대지 않는다 — 기록 직전의 디렉터리를 치워도 그 contender
-// 는 기록이 ENOENT 로 지고 물러난다. 이 값은 그런 헛걸음을 피하는 데만 쓰인다.
-const RECOVERY_GUARD_EMPTY_STALE_MS = 2_000;
+// 그만큼 멈춘다. 이 버전끼리의 상호 배제는 이 값에 기대지 않는다 — 기록 직전의 디렉터리를 치워도
+// 그 contender 는 기록이 ENOENT 로 지고 물러난다. 다만 owner 를 적은 뒤 확인하지 않는 구버전
+// contender 는 그 사이 남의 새 가드에 적고 그대로 쥘 수 있으므로, 기록 직전에 그만큼 멈춰 있는
+// 일이 없을 만큼은 길게 잡는다.
+const RECOVERY_GUARD_EMPTY_STALE_MS = 5_000;
 // 회수 경로가 create 레이스에서 졌는데 승자마저 이미 죽어 있을 때만 재시도한다.
 // 살아 있는 승자에게 진 경우는 재시도 없이 곧바로 EAGENTLOCKED 다.
 const MAX_ACQUIRE_ATTEMPTS = 5;
@@ -294,14 +299,6 @@ async function readLockForAcquire(): Promise<ParsedLock | null> {
   }
 }
 
-function readRecoveryOwner(name: string): ParsedLock | null {
-  try {
-    return parseLockPayload(JSON.parse(readFileSync(join(RECOVERY_LOCK_PATH, name), 'utf8')));
-  } catch {
-    return null;
-  }
-}
-
 function isRecoveryOwnerName(name: string): boolean {
   return name === LEGACY_RECOVERY_OWNER_NAME || RECOVERY_OWNER_NAME_RE.test(name);
 }
@@ -487,11 +484,17 @@ export function probeLockOwner(lock: ParsedLock): LockOwnerFacts {
 }
 
 export interface RecoveryGuardFacts {
-  /** 가드의 owner 파일 파싱 결과. owner 파일이 없거나 둘 이상이거나, 못 읽거나, pid 가
-   *  유효하지 않으면 null. */
+  /** 가드의 owner 파일이 **하나**이고 owner 로 읽힐 때 그 owner. 아니면 null. */
   owner: ParsedLock | null;
   /** owner 가 있을 때 그 pid 에 대한 OS 사실. 없으면 null. */
   ownerFacts: LockOwnerFacts | null;
+  /** owner 파일이 **둘 이상**일 때 owner 로 읽힌 것 전부(깨진 파일은 빠진다). 두 contender 가
+   *  같은 가드에 적은 순간이거나(claimRecoveryGuard), 그 가운데 물러나지 못하고 죽은 쪽의 잔해가
+   *  남은 것이다 — 살아 있는 holder 가 그 안에 있을 수 있다. */
+  owners?: Array<{ owner: ParsedLock; ownerFacts: LockOwnerFacts }>;
+  /** owner 파일을 읽지 못했다(어느 파일 · 오류 코드). 읽기 일시 오류(Windows 백신 등)는 살아
+   *  있는 holder 의 파일에서도 난다. */
+  ownerUnreadable?: string;
   /** 가드 디렉터리 mtime(epoch ms). stat 실패면 null(= 이미 사라짐). */
   guardMtimeMs: number | null;
   /** 가드 자리가 항목이 하나도 없는 디렉터리임을 읽어서 확인했다. 확인하지 못했으면(목록을
@@ -538,6 +541,24 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
   if (facts.guardMtimeMs === null) {
     return { reclaim: false, detail: '가드 디렉터리가 이미 사라짐 — 회수 없이 다시 만든다' };
   }
+  // 못 읽은 owner 는 판정하지 않는다. 디렉터리 시각만 보고 회수하면 일시적으로 읽히지 않은
+  // 살아 있는 holder 의 owner 를 지운다 — 시각은 마지막으로 항목이 바뀐 때일 뿐 owner 가 살아
+  // 있는지와는 무관하다(오래 쥔 force 인수, 절전 · VM 정지, 벽시계 조정).
+  if (facts.ownerUnreadable) {
+    return { reclaim: false, detail: `owner 파일을 읽지 못함(${facts.ownerUnreadable}) — 살아 있는 owner 일 수 있다` };
+  }
+  // owner 가 여럿이면 그 하나하나가 회수 대상일 때만 회수한다 — 하나라도 아니면 그 owner 가
+  // 쥐고 있을 수 있다. 각 owner 는 owner 가 하나인 가드와 같은 규칙으로 본다.
+  if (!facts.owner && facts.owners && facts.owners.length > 0) {
+    let first: Extract<RecoveryGuardVerdict, { reclaim: true }> | null = null;
+    for (const one of facts.owners) {
+      const verdict = judgeRecoveryGuard({ ...facts, owner: one.owner, ownerFacts: one.ownerFacts, owners: undefined });
+      if (!verdict.reclaim) return { reclaim: false, detail: `owner 가 여럿 — ${verdict.detail}` };
+      first ??= verdict;
+    }
+    const all = first as Extract<RecoveryGuardVerdict, { reclaim: true }>;
+    return { reclaim: true, reason: all.reason, detail: `owner ${facts.owners.length}개 모두 회수 대상 — ${all.detail}` };
+  }
   if (facts.owner && facts.ownerFacts) {
     const verdict = judgeLockOwner(facts.owner, facts.ownerFacts);
     if (verdict.stale) {
@@ -572,7 +593,9 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
     return { reclaim: false, detail: `가드 owner pid=${facts.owner.pid} 를 회수할 근거 없음` };
   }
 
-  // owner 를 못 읽는다(없음 · 둘 이상 · 깨짐) — 디렉터리 자체로만 판정한다.
+  // owner 로 읽히는 것이 없다(owner 파일이 없거나 깨진 것뿐) — 디렉터리 자체로만 판정한다. 깨진
+  // owner 는 owner 를 다 적기 전에 죽은 잔해거나 아직 적는 중인 contender 다. 쥔 holder 의 owner 는
+  // 다 적힌 뒤에야 쥐므로(claimRecoveryGuard) 여기 오지 않는다.
   if (guardPredatesBoot(facts)) {
     return {
       reclaim: true,
@@ -599,31 +622,48 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
 }
 
 /** probe 가 본 가드 자리. 회수는 여기 적힌 것만 지운다(reclaimStaleRecoveryLock).
- *  - `dir`: 디렉터리. `entries` 는 본 항목 이름(목록을 못 읽었으면 null), `ownerName` 은
- *    판정에 쓴 owner 파일 이름(owner 파일이 정확히 하나일 때만).
+ *  - `dir`: 디렉터리. `ownerNames` 는 본 owner 파일 이름(판정에 쓴 것 — 회수 판정이 나면 전부
+ *    회수 대상이다), `others` 는 그 밖에 본 항목 이름, `listed` 는 목록을 읽었는지.
  *  - `other`: 디렉터리가 아닌 것(끊긴 심볼릭 링크 등).
  *  - `gone`: 아무것도 없다(또는 Windows 에서 지워지는 중이라 stat 이 실패한다). */
 type RecoveryGuardSnapshot =
-  | { kind: 'dir'; entries: string[] | null; ownerName: string | null }
+  | { kind: 'dir'; listed: boolean; ownerNames: string[]; others: string[] }
   | { kind: 'other' }
   | { kind: 'gone' };
+
+/** owner 파일 하나를 읽은 결과 — owner 로 읽힘 · 읽었지만 owner 가 아님(쓰다 만 파일) · 못 읽음. */
+type RecoveryOwnerRead = { owner: ParsedLock } | { torn: true } | { unreadable: string };
+
+function readRecoveryOwnerFile(name: string): RecoveryOwnerRead {
+  let raw: string;
+  try {
+    raw = readFileSync(join(RECOVERY_LOCK_PATH, name), 'utf8');
+  } catch (err: any) {
+    // ENOENT 도 여기 든다 — 목록에 있던 owner 가 그 사이 사라졌으면 자리가 바뀌는 중이다.
+    return { unreadable: `${name}: ${err?.code ?? err}` };
+  }
+  try {
+    const owner = parseLockPayload(JSON.parse(raw));
+    if (owner) return { owner };
+  } catch {
+    /* 아래 */
+  }
+  return { torn: true };
+}
 
 function probeRecoveryGuard(): { facts: RecoveryGuardFacts; snapshot: RecoveryGuardSnapshot } {
   // 항목과 owner 를 먼저 읽고 시각을 나중에 읽는다. 그 사이 자리가 바뀌었으면 시각은 새 자리의
   // 것(더 최근)이 되어, owner 미상 가드의 상한 판정이 기다리는 쪽으로 틀린다 — 옛 자리의 오래된
-  // 시각에 새 자리를 붙여 갓 만든 가드를 오래된 잔해로 읽는 일은 없다.
+  // 시각에 새 자리를 붙여 갓 만든 가드를 오래된 잔해로 읽는 일은 없다. 안전은 이 순서에 기대지
+  // 않는다(지우는 연산이 판정한 그 가드에서만 성공한다 — 3-2번 규칙). 헛걸음을 줄일 뿐이다.
   let entries: string[] | null;
   try {
     entries = readdirSync(RECOVERY_LOCK_PATH);
   } catch {
     entries = null;
   }
-  // owner 파일이 둘 이상이면 어느 쪽으로도 판정하지 않는다 — 두 contender 가 같은 가드에 적은
-  // 순간이고(claimRecoveryGuard), 둘 다 곧 물러나거나 하나만 남는다. 그동안은 owner 미상 가드처럼
-  // 시각으로만 본다.
   const ownerNames = (entries ?? []).filter(isRecoveryOwnerName);
-  const ownerName = ownerNames.length === 1 ? ownerNames[0] : null;
-  let owner = ownerName ? readRecoveryOwner(ownerName) : null;
+  const reads = ownerNames.map(readRecoveryOwnerFile);
   let stat: Stats | null;
   try {
     // lstat — 링크를 따라가지 않는다. 가드 자리에 디렉터리가 아닌 것(끊긴 심볼릭 링크 등)이
@@ -633,27 +673,38 @@ function probeRecoveryGuard(): { facts: RecoveryGuardFacts; snapshot: RecoveryGu
   } catch {
     stat = null;
   }
-  let snapshot: RecoveryGuardSnapshot;
-  if (!stat) {
-    snapshot = { kind: 'gone' };
-  } else if (!stat.isDirectory()) {
-    // readdir 는 링크를 따라가므로 위에서 읽은 것은 이 자리의 것이 아니다.
-    owner = null;
-    entries = null;
-    snapshot = { kind: 'other' };
-  } else {
-    snapshot = { kind: 'dir', entries, ownerName };
+  const facts: RecoveryGuardFacts = {
+    owner: null,
+    ownerFacts: null,
+    guardMtimeMs: stat ? stat.mtimeMs : null,
+    bootTimeMs: currentBootIdentity().approxBootTimeMs,
+    nowMs: Date.now(),
+  };
+  if (!stat) return { facts, snapshot: { kind: 'gone' } };
+  // readdir 는 링크를 따라가므로, 디렉터리가 아니면 위에서 읽은 것은 이 자리의 것이 아니다.
+  if (!stat.isDirectory()) return { facts, snapshot: { kind: 'other' } };
+
+  const parsed: ParsedLock[] = [];
+  for (const read of reads) {
+    if ('unreadable' in read) facts.ownerUnreadable ??= read.unreadable;
+    else if ('owner' in read) parsed.push(read.owner);
+    // 깨진 owner 는 판정에서 빠지고, 회수 판정이 나면 함께 지운다.
   }
+  if (ownerNames.length === 1 && parsed.length === 1) {
+    facts.owner = parsed[0];
+    facts.ownerFacts = probeLockOwner(parsed[0]);
+  } else if (ownerNames.length > 1) {
+    facts.owners = parsed.map((owner) => ({ owner, ownerFacts: probeLockOwner(owner) }));
+  }
+  facts.guardEmpty = entries !== null && entries.length === 0;
   return {
-    facts: {
-      owner,
-      ownerFacts: owner ? probeLockOwner(owner) : null,
-      guardMtimeMs: stat ? stat.mtimeMs : null,
-      guardEmpty: snapshot.kind === 'dir' && entries !== null && entries.length === 0,
-      bootTimeMs: currentBootIdentity().approxBootTimeMs,
-      nowMs: Date.now(),
+    facts,
+    snapshot: {
+      kind: 'dir',
+      listed: entries !== null,
+      ownerNames,
+      others: (entries ?? []).filter((name) => !isRecoveryOwnerName(name)),
     },
-    snapshot,
   };
 }
 
@@ -1039,16 +1090,45 @@ export async function waitForRecoveryGuard(
   }
 }
 
+/** 물러나다 지우지 못한 이 프로세스의 owner 이름. 그대로 두면 그 가드에 살아 있는 이 프로세스가
+ *  owner 로 남는다. 남이 놓은 뒤 그 가드에는 이 owner 만 남아, 이 프로세스를 포함한 모든 대기자가
+ *  끝없이 기다린다(리뷰 B2). 가드를 기다리는 동안 다시 지운다 — 이름이 시도마다 고유하므로 지금 그
+ *  자리의 남의 owner 를 지우지 않는다. */
+const abandonedRecoveryOwners = new Set<string>();
+
+/** 남은 owner 를 다시 지운다. 아직 못 지운 것이 있으면 그 오류, 없으면 null. */
+function retryAbandonedRecoveryOwners(): any {
+  let failure: any = null;
+  for (const name of [...abandonedRecoveryOwners]) {
+    try {
+      unlinkSync(join(RECOVERY_LOCK_PATH, name));
+      log(`[lockfile] recovery guard: removed this process's leftover owner ${name}`);
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') {
+        failure = err;
+        continue;
+      }
+    }
+    abandonedRecoveryOwners.delete(name);
+  }
+  return failure;
+}
+
 async function acquireRecoveryLock(): Promise<() => void> {
   // 회수 대상으로 판정한 가드를 연달아 못 지운 횟수. 판정한 그 가드만 지우므로(3-2번 규칙) 지울
   // 수 없는 잔해(다른 사용자가 남긴 가드 등)를 옆으로 옮겨 치울 길이 없다 — 옮기는 것은 그 순간
   // 그 자리에 있는 것이라 남의 새 가드일 수 있다. 끝없이 25ms 마다 다시 시도하는 대신, 삭제 대기
-  // errno 와 같은 상한에서 원본 오류로 끝낸다(진짜 권한 문제를 무한 대기로 가리지 않는다).
+  // errno 와 같은 상한에서 원본 오류로 끝낸다(진짜 권한 문제를 무한 대기로 가리지 않는다). 이
+  // 프로세스의 남은 owner 를 못 지우는 것도 같이 센다 — 그것이 남아 있는 동안은 그 가드를 회수할
+  // 수 없고(살아 있는 우리가 owner 다), 끝내면 우리 pid 가 죽어 남들이 그 가드를 회수한다.
   let failedReclaims = 0;
   let reclaimGaveUp = false;
   const reclaimStale = (): boolean => {
-    const outcome = reclaimStaleRecoveryLock();
-    if (!('failure' in outcome)) {
+    const leftover = retryAbandonedRecoveryOwners();
+    const outcome: ReclaimOutcome = leftover
+      ? { ok: false, failure: leftover, detail: `could not remove this process's leftover owner (${leftover?.code ?? leftover})` }
+      : reclaimStaleRecoveryLock(failedReclaims > 0);
+    if (outcome.ok) {
       failedReclaims = 0;
       return outcome.reclaimed;
     }
@@ -1110,7 +1190,8 @@ async function acquireRecoveryLock(): Promise<() => void> {
  *  쥐는 쪽은 많아야 하나다. 둘 다 상대를 보면 둘 다 물러나고 다시 시도한다.
  *
  *  - ENOENT: 우리 디렉터리가 이미 치워졌다. 경합이지 오류가 아니므로 기다린다(false). 그 자리에
- *    지금 있는 것은 남의 가드일 수 있으니 건드리지 않는다.
+ *    지금 있는 것은 남의 가드일 수 있으니 건드리지 않는다. Windows 에서는 치워지는 중인(삭제
+ *    대기) 디렉터리에 적으면 삭제 대기 errno 가 나므로, 그 errno 에 가드 자리가 비어 있으면 같게 본다.
  *  - 그 밖의 기록 실패: 다시 시도하지 않고 치운 뒤 원본 오류로 끝낸다. 우리가 방금 만든 디렉터리에
  *    쓰기가 실패하는 것은 경합이 아니라 환경 문제다(umask · ACL · 백신 · 디스크). 다시 시도하면
  *    실패할 때마다 잠깐 생겼다 사라지는 우리 디렉터리가 다른 대기자의 mkdir 에 EEXIST 를 주어
@@ -1134,10 +1215,10 @@ function claimRecoveryGuard(ownerName: string): boolean {
       { flag: 'wx' },
     );
   } catch (err: any) {
-    if (err?.code === 'ENOENT') {
+    if (err?.code === 'ENOENT' || (isTransientLockRaceCode(err?.code) && !recoveryGuardPresent())) {
       log(
         `[lockfile] recovery guard claim: the guard this process created was removed before its owner was ` +
-          `recorded (ENOENT); waiting for the guard`,
+          `recorded (${err?.code}); waiting for the guard`,
       );
       return false;
     }
@@ -1159,25 +1240,43 @@ function claimRecoveryGuard(ownerName: string): boolean {
     throw err;
   }
   if (owners.length === 1 && owners[0] === ownerName) return true;
-  log(
-    `[lockfile] recovery guard claim: the guard holds other owners too ` +
-      `(${owners.filter((name) => name !== ownerName).join(', ') || 'none'}${owners.includes(ownerName) ? '' : '; ours is missing'}); ` +
-      `backing off`,
-  );
+  // 물러난 뒤에 남긴다 — 이 줄이 보이면 우리 owner 는 이미 치워졌다(또는 다시 지울 목록에 있다).
   discardRecoveryGuardClaim(ownerName);
+  log(
+    owners.includes(ownerName)
+      ? `[lockfile] recovery guard claim: the guard holds other owners too ` +
+          `(${owners.filter((name) => name !== ownerName).join(', ')}); backing off`
+      : `[lockfile] recovery guard claim: this process's owner is no longer in the guard ` +
+          `(it holds ${owners.join(', ') || 'no owner'}); backing off`,
+  );
   return false;
+}
+
+function recoveryGuardPresent(): boolean {
+  try {
+    lstatSync(RECOVERY_LOCK_PATH);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 이 시도의 owner 를 지우고, 가드가 비었으면 치운다. 이름이 시도마다 고유하므로 남의 owner 를
  *  지우지 않고, rmdir 는 빈 디렉터리만 지우므로 owner 가 적힌 남의 가드를 지우지 않는다. 빈
  *  디렉터리라면 남이 막 만들어 아직 owner 를 적지 않은 가드일 수도 있다 — 그 contender 는 기록이
- *  ENOENT 로 져 기다리므로 상호 배제는 깨지지 않는다. 실패는 삼킨다(남은 빈 가드는 대기자가
- *  짧은 상한 뒤 회수한다). */
+ *  ENOENT 로 져 기다리므로 상호 배제는 깨지지 않는다. rmdir 실패는 삼킨다(남은 빈 가드는 대기자가
+ *  짧은 상한 뒤 회수한다). owner 를 못 지우면 기다리는 동안 다시 지운다(abandonedRecoveryOwners). */
 function discardRecoveryGuardClaim(ownerName: string): void {
   try {
     unlinkSync(join(RECOVERY_LOCK_PATH, ownerName));
-  } catch {
-    /* 적지 못했거나 이미 없다 */
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      abandonedRecoveryOwners.add(ownerName);
+      log(
+        `[lockfile] recovery guard claim: could not remove this process's owner ${ownerName} ` +
+          `(${err?.code ?? err}); will remove it while waiting`,
+      );
+    }
   }
   try {
     rmdirSync(RECOVERY_LOCK_PATH);
@@ -1206,9 +1305,14 @@ function releaseRecoveryGuard(ownerName: string): void {
   try {
     rmdirSync(RECOVERY_LOCK_PATH);
   } catch (err: any) {
-    // 남은 빈 가드는 대기자가 짧은 상한 뒤 회수한다(Windows 에서 owner 가 아직 삭제 대기면
-    // ENOTEMPTY). 비지 않은 가드면 남의 owner 가 들어 있다는 뜻이라 그대로 둔다.
-    if (err?.code !== 'ENOENT') {
+    // 남은 빈 가드는 대기자가 짧은 상한 뒤 회수한다. 비지 않은 가드면 그대로 둔다 — 물러나는
+    // contender 의 owner 이거나, Windows 가 아직 다 지우지 못한(삭제 대기) 우리 owner 다.
+    if (err?.code === 'ENOTEMPTY') {
+      log(
+        `[lockfile] recovery guard release: left ${RECOVERY_LOCK_PATH} in place — it still holds another entry ` +
+          `(a claimant backing off, or a file still being deleted); waiters reclaim it once it is empty`,
+      );
+    } else if (err?.code !== 'ENOENT') {
       log(`[lockfile] could not remove recovery guard ${RECOVERY_LOCK_PATH}: ${err?.code ?? err}`);
     }
   }
@@ -1226,20 +1330,27 @@ function releaseRecoveryGuard(ownerName: string): void {
  *  그 사이의 창은 남는다.
  *
  *  그래서 지우는 연산마다 "지금 그 자리가 판정한 그 가드일 때만" 성공하게 한다.
- *  - owner 로 판정했으면 그 owner 파일 이름을 먼저 unlink 한다. 새 가드의 owner 이름은 가드마다
+ *  - 판정 때 본 owner 파일을 그 이름으로 먼저 unlink 한다. 회수 판정은 그 하나하나가 회수
+ *    대상(죽은 owner 등)이거나 owner 로 읽히지 않는(쓰다 만) 파일일 때만 난다 — 못 읽은 owner 나
+ *    살아 있을 수 있는 owner 가 하나라도 있으면 판정이 막는다. 새 가드의 owner 이름은 가드마다
  *    고유하므로 이 unlink 는 판정한 가드에서만 성공한다 — 자리가 바뀌었으면 ENOENT 로 지고
- *    아무것도 지우지 않는다. 구버전 이름(owner.json)은 고유하지 않지만 새 가드에는 그 이름이
- *    없다.
- *  - 그 밖에 본 항목(깨진 owner, 둘 이상의 owner, 잡동사니)은 본 이름으로만 지운다. 살아 있는
- *    가드의 owner 는 막 적혀 시각이 새로우므로 상한 판정을 받지 않는다 — 여기 오는 것은 잔해다.
+ *    아무것도 더 지우지 않는다. 구버전 이름(owner.json)은 고유하지 않지만 새 가드에는 그 이름이
+ *    없다. 쓰다 만 owner 를 지워도 그 contender 가 아직 살아 있다면 적은 뒤의 확인에서 자기 owner 가
+ *    없는 것을 보고 물러난다(claimRecoveryGuard) — 쥔 holder 의 owner 는 다 적힌 뒤라 쓰다 만
+ *    파일일 수 없다.
+ *  - 그 밖에 본 항목(owner 가 아닌 잡동사니)은 본 이름으로 지운다.
  *  - 마지막 rmdir 는 빈 디렉터리만 지운다. owner 가 적힌 남의 가드는 지울 수 없다.
  *  - 가드 자리의 디렉터리가 아닌 것(끊긴 링크)은 unlink 로 지운다 — unlink 는 디렉터리를 지울
- *    수 없다. */
-function reclaimStaleRecoveryLock(): { reclaimed: boolean } | { reclaimed: false; failure: any; detail: string } {
+ *    수 없다.
+ *
+ *  `quiet` 이면 회수한다는 줄을 남기지 않는다(연달아 실패하는 동안 — 첫 시도에서 이미 남겼다). */
+type ReclaimOutcome = { ok: true; reclaimed: boolean } | { ok: false; failure: any; detail: string };
+
+function reclaimStaleRecoveryLock(quiet = false): ReclaimOutcome {
   const { facts, snapshot } = probeRecoveryGuard();
   const verdict = judgeRecoveryGuard(facts);
-  if (!verdict.reclaim || snapshot.kind === 'gone') return { reclaimed: false }; // 사라진 가드는 판정이 이미 걸렀다
-  log(`[lockfile] reclaiming stale recovery guard — ${verdict.reason}: ${verdict.detail}`);
+  if (!verdict.reclaim || snapshot.kind === 'gone') return { ok: true, reclaimed: false }; // 사라진 가드는 판정이 이미 걸렀다
+  if (!quiet) log(`[lockfile] reclaiming stale recovery guard — ${verdict.reason}: ${verdict.detail}`);
 
   if (snapshot.kind === 'other') {
     try {
@@ -1247,34 +1358,28 @@ function reclaimStaleRecoveryLock(): { reclaimed: boolean } | { reclaimed: false
     } catch (err: any) {
       // EISDIR · EPERM: 그 사이 그 자리에 디렉터리(남의 가드)가 생겼다 — unlink 는 그것을 지우지 못한다.
       if (err?.code !== 'ENOENT') {
-        return { reclaimed: false, failure: err, detail: `could not remove ${RECOVERY_LOCK_PATH} (${err?.code ?? err})` };
+        return { ok: false, failure: err, detail: `could not remove ${RECOVERY_LOCK_PATH} (${err?.code ?? err})` };
       }
     }
-    return { reclaimed: true };
+    return { ok: true, reclaimed: true };
   }
 
-  // owner 로 판정한 가드 — 그 owner 이름이 지금 그 자리에 있을 때만 이어 간다.
-  const judgedOwner = facts.owner ? snapshot.ownerName : null;
-  if (judgedOwner) {
+  // 판정한 owner 파일 — 그 이름이 지금 그 자리에 있을 때만 이어 간다.
+  for (const name of snapshot.ownerNames) {
     try {
-      unlinkSync(join(RECOVERY_LOCK_PATH, judgedOwner));
+      unlinkSync(join(RECOVERY_LOCK_PATH, name));
     } catch (err: any) {
       if (err?.code !== 'ENOENT') {
-        return {
-          reclaimed: false,
-          failure: err,
-          detail: `could not remove the judged owner ${judgedOwner} (${err?.code ?? err})`,
-        };
+        return { ok: false, failure: err, detail: `could not remove the judged owner ${name} (${err?.code ?? err})` };
       }
       log(
-        `[lockfile] recovery guard reclaim: the judged owner ${judgedOwner} is already gone — another process ` +
+        `[lockfile] recovery guard reclaim: the judged owner ${name} is already gone — another process ` +
           `reclaimed or released that guard first; leaving the guard now at ${RECOVERY_LOCK_PATH} alone`,
       );
-      return { reclaimed: false };
+      return { ok: true, reclaimed: false };
     }
   }
-  for (const name of snapshot.entries ?? []) {
-    if (name === judgedOwner) continue;
+  for (const name of snapshot.others) {
     try {
       rmSync(join(RECOVERY_LOCK_PATH, name), { recursive: true, force: true });
     } catch {
@@ -1287,10 +1392,10 @@ function reclaimStaleRecoveryLock(): { reclaimed: boolean } | { reclaimed: false
     // 비지 않았으면 우리가 못 지운 항목이 남았거나, 그 자리에 남의 owner 가 있다(그러면 다음 판정이
     // 그 owner 를 보고 기다린다). 빈 가드로 남았으면 빈 가드의 짧은 상한 뒤 다시 회수된다.
     if (err?.code !== 'ENOENT') {
-      return { reclaimed: false, failure: err, detail: `could not remove ${RECOVERY_LOCK_PATH} (${err?.code ?? err})` };
+      return { ok: false, failure: err, detail: `could not remove ${RECOVERY_LOCK_PATH} (${err?.code ?? err})` };
     }
   }
-  return { reclaimed: true };
+  return { ok: true, reclaimed: true };
 }
 
 function lockedBy(existing: ParsedLock, why?: string): Error {
