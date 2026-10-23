@@ -279,7 +279,7 @@ Source npm scripts run the backend in `apps/server`, where `dotenv/config` loads
 | `SQLJS_DB_PATH`, `SQLJS_ONTOLOGY_DB_PATH` | Override SQLite file paths. Absolute paths avoid ambiguity; relative values resolve under `database/`. |
 | `AWB_DB_AUTORECOVER` | `1` backs up a corrupt local sql.js file and recreates an empty one on startup. |
 | `SQLJS_TURN_WARN_MS` | Local sql.js only. Warn once when a single turn of the write queue (a transaction, save, write statement or file export) holds the connection longer than this many milliseconds. Default `30000`. |
-| `SQLJS_TURN_STACKS` | `1` records where every sql.js write-queue turn was opened, so the first long-turn warning already shows it. Otherwise a connection records call sites only after its first warning. Adds a few microseconds per write. |
+| `SQLJS_TURN_STACKS` | `1` records where every sql.js write-queue turn was opened, so the first long-turn warning already shows it. Otherwise a connection starts recording call sites after its first warning and keeps recording until restart. Adds a few microseconds per write. |
 
 To forward a custom origin with Compose, for example, add `compose.override.yaml`:
 
@@ -352,7 +352,7 @@ npm run dev:server
 
 The guard only applies to local sql.js files; it does not replace a PostgreSQL database. See [host troubleshooting](docs/agent-manager.md#troubleshooting) for CLI/update problems.
 
-Local sql.js runs every write through one queue, so one stuck write holds up all the others. When writes stall, look for a `[DB] sql.js write queue (<file>)` warning. It names what holds the queue, for how long, and how many writes wait behind it. A later `released after` line means a slow callback. No release line means a deadlock — usually a transaction callback waiting for another request's write. A turn the watch could only see after it ended (for example one that blocked the event loop) is reported once, with `before it was released`. To see where the turn was opened, restart with `SQLJS_TURN_STACKS=1` and reproduce.
+Local sql.js runs every write through one queue, so one stuck write holds up all the others. When writes stall, look for a `[DB] sql.js write queue (<file>)` warning. It names what holds the queue, for how long, and how many writes wait behind it. A later `released after` line means a slow callback. If no release line ever follows, the turn is stuck — usually a deadlock: a transaction callback waiting for another request's write (a long migration also stays held until it ends). A turn the watch could only see after it ended (for example while the event loop was blocked) is reported once, with `before it was released`. To see where the turn was opened, restart with `SQLJS_TURN_STACKS=1` and reproduce.
 
 ## Development
 
