@@ -581,7 +581,7 @@ test('재확인 회신함: 계정 범위, 평문 표시, 연락처 찾기와 페
   const panel = container.querySelector('[data-testid="marketing-contact-replies"]');
   assert.ok(panel);
   assert.ok(panel.textContent.includes(content));
-  assert.equal(panel.querySelector('img, a'), null, 'external content stays plain text');
+  assert.equal(Boolean(panel.querySelector('img, a')), false, 'external content stays plain text');
   assert.equal(calls.find((c) => c[0] === 'listMarketingContactReplies')[1], 'acc-2');
   click(buttonByText(panel, '연락처 찾기'));
   await flush();

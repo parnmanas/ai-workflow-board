@@ -78,6 +78,9 @@ for (const [code, failWrite] of [[0, false], [7, false], [0, true]]) {
     try {
       sess = await manager._spawnSession('pid-race', '', 'first turn', { onProgress: () => {} });
       assert.ok(sess);
+      // The manager unrefs persistent children. Keep this fixture alive until
+      // close even if both output pipes drain before the process exits.
+      sess.child.ref();
       // Mirrors ticket/chat callers: these fields and listeners are installed
       // immediately after await _spawnSession, before any child event may run.
       sess.identityReady = true;
