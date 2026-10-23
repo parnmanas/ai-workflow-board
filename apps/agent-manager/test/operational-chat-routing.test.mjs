@@ -17,13 +17,13 @@ import { ordinaryWorkCandidatesForChat } from '../dist/lib/event-dispatcher.js';
 
 const config = { url: 'https://awb.invalid', apiKey: 'key', account_id: 'account-1' };
 const marker = (operation = 'deploy awb') =>
-  `진행 수단을 확인했습니다.\nAWB_OPERATIONAL_FALLBACK: ${JSON.stringify({ operation, missing_capability: 'awb deploy mcp', original_request: 'AWB 올려줘' })}`;
+  `진행 수단을 확인했습니다.\nAWB_OPERATIONAL_FALLBACK: ${JSON.stringify({ operation, missing_capability: 'awb deploy mcp', original_request: 'AWB 배포 도구 추가 티켓을 만들어줘' })}`;
 
 test('persistent chat derives native MCP routing from the selected adapter', () => {
   assert.equal(new CodexCliAdapter().has(ADAPTER_CAPABILITIES.NATIVE_MCP), true);
 });
 
-test('non-native missing MCP output creates one capability ticket through REST boundary', async () => {
+test('non-native output for an explicit capability-ticket request creates one ticket through REST boundary', async () => {
   const request = parseOperationalFallback(marker());
   assert.ok(request);
   const calls = [];
@@ -123,7 +123,7 @@ test('manager oneshot exit replaces the marker with the server ticket result at 
   }
 });
 
-test('non-native one-shot ordinary code change creates one focused ticket linked to the source room', async () => {
+test('non-native one-shot explicit ticket request creates one focused ticket linked to the source room', async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, init) => {
@@ -137,7 +137,7 @@ test('non-native one-shot ordinary code change creates one focused ticket linked
   try {
     const output = `처리하겠습니다.\nAWB_ORDINARY_WORK_FALLBACK: ${JSON.stringify({
       title: '로그인 오류 수정', description: '재현 테스트를 추가하고 오류를 수정한다.',
-      tags: ['bug', 'auth'], project_id: 'project-web', original_request: '로그인 오류를 고쳐줘',
+      tags: ['bug', 'auth'], project_id: 'project-web', original_request: '로그인 오류 수정 티켓을 만들어줘',
     })}`;
     assert.ok(parseOrdinaryWorkFallback(output));
     const manager = new SubagentManager({ ...config, delegation: { enabled: true, maxConcurrent: 2, ttlMinutes: 15 } });
@@ -193,7 +193,7 @@ test('non-native prompt receives real project + tag candidates before filing a t
   assert.doesNotMatch(prompt, /board_id|existing board/);
 });
 
-test('empty project list still files a ticket (tags only) instead of a direct-chat exception', async () => {
+test('empty project list keeps tickets optional and allows explicit tickets with tags only', async () => {
   const candidates = await fetchOrdinaryWorkCandidates(config, async () =>
     new Response(JSON.stringify({ projects: [], tags: [] }), { status: 200 }));
   const prompt = composeChatRoomPrompt(
@@ -203,6 +203,8 @@ test('empty project list still files a ticket (tags only) instead of a direct-ch
   assert.match(prompt, /\(none; leave project_id null\)/);
   assert.match(prompt, /Existing tags: \(none yet\)/);
   assert.match(prompt, /AWB_ORDINARY_WORK_FALLBACK/);
+  assert.match(prompt, /only when the user explicitly requests ticket creation/);
+  assert.match(prompt, /Do not emit this marker for ordinary work requests/);
 });
 
 test('ordinary-work candidate HTTP failure stops routing instead of becoming a direct-chat exception', async () => {
@@ -255,7 +257,7 @@ test('pre-board-less server (404) falls back to legacy board candidates and boar
     'room-1', [], { content: '작업해줘', sender_name: '사용자', sender_id: 'user-1' },
     undefined, false, undefined, '', false, '', boards,
   );
-  assert.match(empty, /none; treat this as the no-suitable-existing-board direct-chat exception/);
+  assert.match(empty, /none; if the user requested a ticket, report that no suitable existing board is available/);
 });
 
 for (const dispatchPath of ['Hermes', 'non-native one-shot']) {

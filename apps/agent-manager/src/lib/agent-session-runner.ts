@@ -1,5 +1,6 @@
 import { SESSION_PERMISSION_KEY, SESSION_WORKFLOW_KEY, validateSessionLaunchOptions } from './session-launch-options.js';
 import { SessionWorkspaces, sessionWorkflowInstruction, type SessionWorkspace } from './session-workspace.js';
+import { DIRECT_WORK_POLICY } from './ticket-creation-policy.js';
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
 // 세션의 단위는 **(이 Runtime Host, CLI, CLI 네이티브 세션 id)** 다. AWB 서버는
@@ -1601,7 +1602,8 @@ export class AgentSessionRunner {
       return;
     }
     // Native slash commands must remain unwrapped for adapter command dispatch.
-    const instruction = text.trimStart().startsWith('/') ? '' : sessionWorkflowInstruction(live.workspace);
+    const instruction = text.trimStart().startsWith('/') ? ''
+      : [DIRECT_WORK_POLICY, sessionWorkflowInstruction(live.workspace)].filter(Boolean).join('\n\n');
     const content = this.#promptContent(live, turnId, text, images, instruction);
     if (!content) return;
     const { blocks, validImages } = content;

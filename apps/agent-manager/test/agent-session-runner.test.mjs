@@ -323,6 +323,37 @@ test('open(new) → prompt stream → permission relay → turn finished, and th
   assert.equal(server.events(sid).at(-1).state.status, 'closed');
 });
 
+for (const mode of ['folder', 'repository', 'existing']) {
+  test(`${mode} sessions send the explicit-ticket policy on initial and subsequent turns`, async (t) => {
+    const captureDir = await mkdtemp(join(tmpdir(), 'awb-work-policy-'));
+    const captureFile = join(captureDir, 'prompt.json');
+    const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_PROMPT_CAPTURE_FILE: captureFile });
+    t.after(() => rm(captureDir, { recursive: true, force: true }));
+    if (mode === 'repository') {
+      execFileSync('git', ['init', '-b', 'main', cwd]);
+      execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'init']);
+    }
+    await runner.handle(request('open', { request_id: 'policy-open', session_id: mode === 'existing' ? CLAUDE_ID : null, cwd }));
+    const sid = server.rpc('policy-open').result.session_id;
+    for (const [i, text] of ['Implement this large feature', 'Continue and fix what you find'].entries()) {
+      const turnId = `policy-${i}`;
+      const turn = runner.handle(request('prompt', { session_id: sid, turn_id: turnId, text }));
+      await waitFor(() => server.events(sid).some((e) => e.turn_id === turnId && e.type === 'permission_request'), 'prompt captured');
+      const sent = JSON.parse(await readFile(captureFile, 'utf8'));
+      assert.equal(sent.prompt.length, 2);
+      assert.match(sent.prompt[0].text, /Perform requested work directly.*regardless of task size/);
+      assert.match(sent.prompt[0].text, /only when the user explicitly requests ticket creation/);
+      assert.match(sent.prompt[0].text, /missing tools and newly discovered work do not authorize ticket creation/);
+      assert.deepEqual(sent.prompt[1], { type: 'text', text }, 'the user message is preserved');
+      if (mode === 'repository') assert.match(sent.prompt[0].text, /Session Git workflow: main/);
+      else assert.doesNotMatch(sent.prompt[0].text, /Session Git workflow:/, 'policy also reaches sessions without managed Git metadata');
+      const permission = server.events(sid).find((e) => e.turn_id === turnId && e.type === 'permission_request');
+      await runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
+      await turn;
+    }
+  });
+}
+
 test('prompt with images sends ACP image blocks and echoes them as image events', async (t) => {
   // 세션에 이미지를 올려 opencode 같은 CLI 가 보게 한다 — 텍스트 전용이던 prompt 에
   // Image 블록을 덧붙이는 네이티브 경로다(opencode `promptCapabilities.image` 실측).
@@ -348,7 +379,8 @@ test('prompt with images sends ACP image blocks and echoes them as image events'
   await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
   // 어댑터가 받은 모양 — 텍스트 뒤에 Image 블록 하나(SVG 는 빠진다).
   const sent = JSON.parse(await readFile(captureFile, 'utf8'));
-  assert.deepEqual(sent.prompt, [
+  assert.match(sent.prompt[0].text, /only when the user explicitly requests ticket creation/);
+  assert.deepEqual(sent.prompt.slice(1), [
     { type: 'text', text: 'look at this' },
     { type: 'image', data: png, mimeType: 'image/png' },
   ]);

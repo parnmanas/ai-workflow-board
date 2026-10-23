@@ -96,6 +96,9 @@ test('the work order spells out how to work child tickets and lists the open one
   assert.match(none, /update_child_ticket\(status: "done"\)`\. One at a time as you go — never in a batch at the end/);
   assert.match(none, /Do not pass `force`/);
   assert.match(none, /no child tickets yet/);
+  assert.match(none, /Create child tickets only when the user explicitly requests them/);
+  assert.match(none, /Create follow-up tickets only when the user explicitly requests them/);
+  assert.doesNotMatch(none, /Scope you discover on the way gets a child too|File follow-ups you noticed as new tickets/);
   assert.match(none, /Every child ticket is already `done`/, 'the finish step checks the list');
   assert.ok(none.indexOf('## Child tickets') < none.indexOf('## 1. Understand'), 'read before the steps');
 

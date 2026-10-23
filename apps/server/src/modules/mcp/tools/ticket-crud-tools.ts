@@ -109,11 +109,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'create_ticket',
-    'Create a ticket. A ticket is done end-to-end by ONE agent (`assignee`); classify it with free-form `tags` and, when it is about a repository, a `project_id`. ' +
+    'Create a ticket only when the user explicitly requests ticket creation for this work. Ordinary implementation, bug-fix, investigation, planning, and operational requests should be performed directly in the current session/chat; they do not authorize ticket creation. ' +
+    'A ticket is done end-to-end by ONE agent (`assignee`); classify it with free-form `tags` and, when it is about a repository, a `project_id`. ' +
     'Omitting `assignee` inherits the current ticket\'s assignee when called from a ticket session, then falls back to the project\'s default assignee (if any); pass `assignee: null` for an unassigned ticket. ' +
     'Status defaults to `todo`, which queues it for the assignee immediately — use `backlog` for work that is not ready. ' +
-    'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket. ' +
-    'Do NOT create a ticket when the user asked to do the work directly in chat/session without a ticket — do the work directly instead.',
+    'Report discovered follow-ups in your reply or existing ticket comment. Only when their ticket creation was explicitly requested, use status `backlog`, the same project/tags, and a description that links back to the existing ticket. Do not ask whether to create a ticket before doing ordinary work.',
     {
       account_id: z.string().optional().describe('Account (defaults to the caller\'s account)'),
       title: z.string().describe('Ticket title'),

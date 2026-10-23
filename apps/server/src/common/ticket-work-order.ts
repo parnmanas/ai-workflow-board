@@ -66,7 +66,7 @@ export function renderChildTicketsSection(children: TicketWorkOrderContext['chil
       ].join('\n');
   return `## Child tickets (your checklist)
 Child tickets are this ticket's checklist. They have no assignee and are never dispatched: you do every one of them yourself (with your own subagents if you like) — nobody else will pick them up.
-- Splitting big work: one child per part you can implement and verify on its own (\`mcp__awb__create_child_ticket\`). Scope you discover on the way gets a child too.
+- Create child tickets only when the user explicitly requests them (\`mcp__awb__create_child_ticket\`). Otherwise track the plan in your comments; task size or newly discovered work does not authorize child ticket creation.
 - **Close each item as soon as its part is implemented and verified**: comment the result on that child (\`mcp__awb__add_comment\` with the child's id), then \`mcp__awb__update_child_ticket(status: "done")\`. One at a time as you go — never in a batch at the end. People follow your progress through this list.
 - Children only track open / done (\`todo\` / \`done\`); \`move_ticket\` does not apply to them.
 - Dropping an item: comment why on the child, then close it.
@@ -164,7 +164,7 @@ ${renderChildTicketsSection(ctx.children)}
 
 ## 2. Plan
 - For anything non-trivial, post a short plan as a comment before you start.
-- Big work: split it. Fan independent parts out to your own subagents and integrate their results yourself, or make them child tickets (see **Child tickets** above). Do not hand the work to other agents.
+- Big work: split the plan into verifiable parts. Fan independent parts out to your own subagents and integrate their results yourself. Create child tickets only when explicitly requested (see **Child tickets** above). Do not hand the work to other agents.
 - Before building, check the work is not already done or in flight: \`git log origin/${base}\`, and \`mcp__awb__list_tickets\` with this ticket's project/tags.
 
 ## 3. Implement
@@ -179,7 +179,7 @@ ${project ? landingSection(project.use_pr) : '## 5. Land\nNothing to land.'}
 ## 6. Report and finish
 - \`mcp__awb__add_comment\` with: what changed, how you verified it (paste the key output), commit SHA / PR URL, anything left over.
 - Every child ticket is already \`done\` (see **Child tickets** above).
-- File follow-ups you noticed as new tickets (\`mcp__awb__create_ticket\`, status \`backlog\`, same project and tags, description starting with a link to this ticket).
+- Report suggested follow-ups in your comment. Create follow-up tickets only when the user explicitly requests them (\`mcp__awb__create_ticket\`, status \`backlog\`, same project and tags, description starting with a link to this ticket).
 - Then finish with exactly one of:
   - \`mcp__awb__move_ticket(status: "done")\` — the work is complete and landed.
   - \`mcp__awb__move_ticket(status: "review")\` — a human should check the result first; say what to check.

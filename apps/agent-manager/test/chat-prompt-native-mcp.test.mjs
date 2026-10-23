@@ -145,29 +145,26 @@ test('composeChatRoomPrompt ordinary chat uses capability-first operational poli
     'Action lookup and execution precede fallback',
   );
   assert.ok(p.includes('required MCP/tool itself is unavailable'));
-  assert.ok(p.includes('create one AWB capability ticket'));
+  assert.ok(p.includes('Only when the user explicitly requests a capability ticket'));
+  assert.ok(p.includes('report the missing capability and blocker in your reply'));
   assert.ok(p.includes('Never ask the user to run commands'));
   assert.ok(!p.includes('This is an ACTION run'), 'Action framing never leaks into ordinary chat');
 });
 
-test('ordinary chat routes change requests ticket-first with narrow direct-chat exceptions', () => {
-  for (const usesNativeMcp of [true, false]) {
-    const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
-    assert.ok(p.includes('ticket-first is the default for ordinary implementation'));
-    // board-less (docs/tickets.md): no board to search — one ticket classified by
-    // tags and, when it is about a repository, a project.
-    assert.ok(p.includes('File exactly one focused AWB ticket'));
-    assert.ok(p.includes('`tags`') && p.includes('project_id'));
-    assert.ok(!/existing board/.test(p), 'board-less prompt must not ask for a board');
-    assert.ok(p.includes('genuinely small one-off work'));
-    assert.ok(p.includes('explicitly asks you to perform directly in chat'));
-    assert.ok(p.includes('in this session without a ticket'), 'session-direct request must count as a direct-chat exception');
-    assert.ok(p.includes('do NOT file a ticket'), 'session-direct work must not file a ticket');
-    assert.ok(p.includes('For a direct-chat exception, perform the requested work now'));
-    assert.ok(
-      !p.includes('an AWB ticket is optional, not the default for every request'),
-      '기존 direct-chat 기본 문구가 다시 나타나면 안 된다',
-    );
+test('ordinary chat works directly regardless of size; tickets require an explicit request in every adapter', () => {
+  for (const usesNativeMcp of [true, false, 'agent_manager_delivers']) {
+    for (const candidates of [null, { projects: [], tags: [], boards: [{ id: 'legacy-board', name: 'Legacy' }] }]) {
+      const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp, undefined, '', false, '', candidates);
+      assert.match(p, /Perform requested work directly.*regardless of task size/);
+      assert.match(p, /including child tickets and follow-up tickets, only when the user explicitly requests ticket creation/);
+      assert.match(p, /Do not ask whether to create a ticket as a prerequisite/);
+      assert.match(p, /missing tools and newly discovered work do not authorize ticket creation/);
+      assert.doesNotMatch(p, /ticket-first|Use direct chat only|direct-chat exception|create and execute the ticket now/);
+      if (!candidates) assert.doesNotMatch(p, /existing board/);
+    }
+    const legacy = composeChatPrompt('', [], 'please fix this', ROOM, usesNativeMcp);
+    assert.match(legacy, /only when the user explicitly requests ticket creation/);
+    assert.doesNotMatch(legacy, /ticket-first|create and execute the ticket now/);
   }
   const native = composeChatRoomPrompt(ROOM, [], MSG, undefined, true);
   assert.ok(native.includes('use `mcp__awb__create_ticket` with `title`, `description`, `tags`'));
@@ -190,13 +187,14 @@ test('ordinary chat teaches session-to-session requests; Action rooms stay direc
   }
 });
 
-test('ticket-first routing treats future intent as actionable and preserves one room-linked ticket', () => {
+test('future intent authorizes direct work; explicit tickets retain room links and deduplication', () => {
   for (const usesNativeMcp of [true, false]) {
     const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
-    assert.ok(p.includes('expressing future intent'));
-    assert.ok(p.includes('create and execute the ticket now'));
+    assert.ok(p.includes('Treat future intent'));
+    assert.ok(p.includes('do the work now, without creating a ticket'));
     assert.ok(p.includes('source_chat_room_id'));
-    assert.ok(p.includes('create only one focused ticket'));
+    assert.ok(p.includes('check for an existing ticket for that work before creating one'));
+    assert.ok(p.includes('Create only the requested tickets'));
   }
 });
 
@@ -214,10 +212,12 @@ test('direct chat file changes use a dedicated safe branch without touching unre
   }
 });
 
-test('non-native chat routes missing capability to manager fallback, never the user', () => {
+test('non-native ticket markers require explicit ticket requests, including missing capabilities', () => {
   const p = composeChatRoomPrompt(ROOM, [], { ...MSG, content: 'Deploy AWB' }, undefined, false);
   assert.ok(p.includes('agent-manager fallback can create/reuse the capability ticket'));
-  assert.ok(p.includes('never tell the user to file it'));
+  assert.ok(p.includes('Only when the user explicitly requests a capability ticket'));
+  assert.ok(p.includes('Without that request, report the blocker inline and do not emit the marker'));
+  assert.ok(p.includes('Do not emit this marker for ordinary work requests'));
   assert.ok(p.includes('room/source ids'));
 });
 
@@ -226,12 +226,12 @@ test('persistent follow-up policy preserves run/ticket dedupe and rechecks Actio
   assert.ok(p.includes('Action search/run first'));
   assert.ok(p.includes('Reuse any run id or open capability ticket'));
   assert.ok(p.includes('re-checking whether a matching Action has since appeared'));
-  assert.ok(p.includes('apply ticket-first routing again'));
-  assert.ok(p.includes('small one-off'));
-  assert.ok(p.includes('directly in chat/session without a ticket'), 'follow-up policy must honor session-direct requests');
+  assert.ok(p.includes('only when the user explicitly requests ticket creation'));
+  assert.ok(p.includes('For ordinary change requests, do the work directly'));
+  assert.doesNotMatch(p, /ticket-first|create and execute the ticket now|otherwise one deduplicated capability ticket/);
   assert.ok(p.includes('Future-intent wording is still actionable'));
   assert.ok(p.includes('source_chat_room_id'));
-  assert.ok(!p.includes('ask the user'));
+  assert.ok(p.includes('Do not ask whether to create a ticket as a prerequisite'));
 });
 
 test('Action-room follow-up stays direct and never recursively delegates', () => {

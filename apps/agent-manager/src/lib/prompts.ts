@@ -21,6 +21,7 @@ import {
 } from './agent-context-contract.js';
 import { TICKET_STATUS_LABELS, ticketWorkflowStatus, type TicketStatus } from './ticket-status.js';
 import type { OrdinaryWorkBoardCandidate, OrdinaryWorkCandidates } from './rest.js';
+import { DIRECT_WORK_POLICY } from './ticket-creation-policy.js';
 
 interface CommentLike {
   author_name?: string;
@@ -95,7 +96,7 @@ export const SINGLE_AGENT_EXECUTION_CONTRACT = [
   '- Finish by calling `mcp__awb__move_ticket` with status `done`, or `review` when a human must check the result before it is done.',
   '- When the work is blocked by a concrete product decision, unavailable credential or permission, missing required input, or irreversible risk, comment exactly what is needed and call `mcp__awb__pend_ticket` instead of guessing.',
   '- Inspect the ticket, repository, and available AWB context before asking the user. Make safe, reversible assumptions and proceed autonomously.',
-  '- Stay within the ticket scope. File worthwhile follow-up work as a separate ticket (`mcp__awb__create_ticket`) instead of doing it here.',
+  '- Stay within the ticket scope. Report suggested follow-ups in your comment; create follow-up tickets only when the user explicitly requests them.',
 ].join('\n');
 
 /** Board-less (status) trigger? The trigger's status is authoritative; the
@@ -485,12 +486,12 @@ export type ChatReplyMode = boolean | 'agent_manager_delivers';
  *
  *  `isActionRoom` (ticket e6d32e9d) flips the WORK-POLICY line only — the reply
  *  CHANNEL lines are identical. An Action Run reuses the chat-room pipeline but
- *  its intent is the opposite of a chat: the message is a task the subagent must
- *  perform DIRECTLY, not defer into an AWB ticket. So for Action rooms we drop
+ *  the message is an assigned task the subagent must perform DIRECTLY,
+ *  not defer into an AWB ticket. So for Action rooms we drop
  *  the ordinary-chat work-routing rule and substitute a
- *  "do the work directly, do NOT create a ticket" 규칙으로 바꾼다. 일반 채팅방
- *  (isActionRoom = false, 기본값)은 일반 구현 작업을 태그·프로젝트를 고른 티켓 하나로
- *  보내며(board-less, docs/tickets.md), direct-chat은 좁게 정의된 예외에만 사용한다.
+ *  "do the work directly, do NOT create a ticket" 규칙으로 바꾼다. 일반 채팅방도
+ *  직접 수행이 기본이며, 사용자가 티켓 생성을 명시적으로 요청했을 때만
+ *  태그·프로젝트를 고른 티켓으로 보낸다(board-less, docs/tickets.md).
  *
  *  `legacyBoards` 는 board-less 이전 서버(후보 API 가 보드 목록을 돌려준 경우)에서만
  *  켜진다 — 그때는 종전 "기존 보드 선택" 문구와 `board_id` 마커를 그대로 쓴다. */
@@ -514,20 +515,17 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
     '- For an operational request, first search available Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
     '- If no Action matches but a relevant MCP/tool exists, perform the operation with that tool. For safe repeatable work, register a narrow idempotent Action with `save_action` and run it. Ask for user input only when a concrete permission, approval, secret, or irreversible-risk gate requires it, and request only that minimum input.',
-    '- If the required MCP/tool itself is unavailable, create one AWB capability ticket (title prefix `[운영 자동화]`; labels `automation`, `mcp`, `mcp-missing`, `source:chat`) instead of delegating work to the user. Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
+    '- If the required MCP/tool itself is unavailable, report the missing capability and blocker in your reply. Only when the user explicitly requests a capability ticket, create one (title prefix `[운영 자동화]`; tags `automation`, `mcp`, `mcp-missing`, `source:chat`). Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
     '- REPEATED-TURN RULE: inspect conversation history for an existing run id or open capability ticket for the same normalized operation. Reuse it and report its current state; do not create a duplicate run/ticket. Re-check Actions on a later turn so a newly registered Action can supersede an earlier missing-capability result.',
   ];
-  const ordinaryWorkPolicy = legacyBoards ? [
-    '- ORDINARY WORK ROUTING: ticket-first is the default for ordinary implementation, bug-fix, refactor, configuration, and other change requests. First search for a suitable existing board; when one exists, create exactly one focused AWB ticket on that board and carry out the work through its workflow.',
-    '- A ticket-first request is not satisfied by merely proposing, describing, or promising future work. Treat user language expressing future intent (for example, "I want to add", "we should change", or "please implement") as a request to create and execute the ticket now unless the user is only asking a question, explicitly asks for planning/advice only, or explicitly asks to do it directly without a ticket.',
-    '- Use direct chat only for these exceptions: (1) genuinely small one-off work, (2) work for which no suitable existing board exists, or (3) work the user explicitly asks you to perform directly in chat or in this session without a ticket. Do not create a new board merely to avoid the boardless exception.',
-    '- When creating the ticket, pass this chat room id as `source_chat_room_id`, leave roles unset for board defaults, and create only one focused ticket for the request. Do not split it into speculative or duplicate tickets.',
-  ] : [
-    '- ORDINARY WORK ROUTING: ticket-first is the default for ordinary implementation, bug-fix, refactor, configuration, and other change requests. File exactly one focused AWB ticket for the request — classify it with `tags` (kind / area; prefer existing tags) and, when the work concerns a repository, the matching project (`project_id` from the project candidates or `mcp__awb__list_projects`) — and carry out the work through that ticket.',
-    '- A ticket-first request is not satisfied by merely proposing, describing, or promising future work. Treat user language expressing future intent (for example, "I want to add", "we should change", or "please implement") as a request to create and execute the ticket now unless the user is only asking a question, explicitly asks for planning/advice only, or explicitly asks to do it directly in chat/session without a ticket.',
-    '- Use direct chat only for these exceptions: (1) genuinely small one-off work, or (2) work the user explicitly asks you to perform directly in chat or in this session without a ticket. When the user asks for session-direct work, do the work now and do NOT file a ticket.',
-    '- When creating the ticket, pass this chat room id as `source_chat_room_id`, leave the assignee unset unless the user named one (the project default assignee applies), and create only one focused ticket for the request. Do not split it into speculative or duplicate tickets.',
-    '- For a direct-chat exception, perform the requested work now and report the result inline; do not stop after describing what you could do.',
+  const ordinaryWorkPolicy = [
+    '- ORDINARY WORK ROUTING: perform implementation, bug-fix, refactor, configuration, and other change requests directly and report the result inline. Treat future intent (for example, "I want to add", "we should change", or "please implement") as a request to do the work now, without creating a ticket. Questions and requests for planning/advice stay inline.',
+    ...(legacyBoards ? [
+      '- Only when the user explicitly requests a ticket, select a suitable existing board, pass this chat room id as `source_chat_room_id`, and leave roles unset for board defaults. If no suitable board exists, report that limitation; do not create a board automatically.',
+    ] : [
+      '- Only when the user explicitly requests a ticket, classify it with `tags` (kind / area; prefer existing tags) and, when it concerns a repository, the matching `project_id` from the candidates or `mcp__awb__list_projects`. Pass this chat room id as `source_chat_room_id` and leave the assignee unset unless the user named one (the project default assignee applies).',
+    ]),
+    '- For an explicit ticket request, check for an existing ticket for that work before creating one. Create only the requested tickets; do not split the request into speculative or duplicate tickets.',
     '- DIRECT-CHAT GIT POLICY: before changing tracked repository files, inspect the current branch, working tree, remote default branch, and repository instructions. Pure inspection and environment-only work that does not change tracked files needs no branch.',
     '- For direct-chat file changes, use the branch explicitly requested by the user when safe. Otherwise create or reuse one dedicated branch for this chat task, named `chat/<room-id-short>-<slug>`, from the latest remote default branch. Never make direct-chat edits on shared/protected branches such as `main`, `master`, `production`, `production.private`, or release branches.',
     '- If the working tree already has changes, continue on the current branch only when those changes clearly belong to this same chat task. If they are unrelated or ownership is uncertain, preserve them and stop before switching branches, stashing, overwriting, or mixing work; report the conflict and ask for direction.',
@@ -551,12 +549,13 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
           : '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, feature implementation, bug fixes, refactors, migrations, config changes, and any committing/merging/branch work the task calls for). Do NOT create an AWB ticket to defer it and do NOT tell anyone to file one — you ARE the agent meant to do this work. Perform the requested task, then use send_chat_room_message to report your result / progress / summary.',
       );
     } else {
+      lines.push(DIRECT_WORK_POLICY);
       lines.push(...operationalPolicy);
       lines.push(...ordinaryWorkPolicy);
       lines.push(...sessionReachPolicy(true));
       lines.push(legacyBoards
-        ? '- For ticket-first work, use `mcp__awb__create_ticket` with the suitable existing board and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.'
-        : '- For ticket-first work, use `mcp__awb__create_ticket` with `title`, `description`, `tags`, the matching `project_id` when it concerns a repository, and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.');
+        ? '- For an explicit ticket request, use `mcp__awb__create_ticket` with the suitable existing board and `source_chat_room_id` set to this room.'
+        : '- For an explicit ticket request, use `mcp__awb__create_ticket` with `title`, `description`, `tags`, the matching `project_id` when it concerns a repository, and `source_chat_room_id` set to this room.');
     }
     lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
     return lines;
@@ -570,13 +569,14 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
       '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, fixes, refactors, migrations, config changes — whatever the task asks). Do NOT defer it to an AWB ticket; you are the agent meant to do this work. Write your result / summary as your final message.',
     );
   } else {
+    lines.push(DIRECT_WORK_POLICY);
     lines.push(...operationalPolicy);
     lines.push(...ordinaryWorkPolicy);
     lines.push(...sessionReachPolicy(false));
-    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it.');
+    lines.push('- This adapter cannot call AWB MCP directly. Only when the user explicitly requests a capability ticket, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically. Without that request, report the blocker inline and do not emit the marker.');
     lines.push(legacyBoards
-      ? '- For ticket-first ordinary work, on a legacy server, select the suitable existing board from the available context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.'
-      : '- For ticket-first ordinary work, end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"title":"<focused ticket title>","description":"<acceptance criteria and context>","tags":["<tag>"],"project_id":"<project UUID from the candidates, or null>","original_request":"<request>"}`. Choose tags that classify the work and a project only from the listed candidates. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.');
+      ? '- Only when the user explicitly requests a ticket, on a legacy server, select a suitable existing board and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses one ticket and binds this room as `source_chat_room_id`. Do not emit this marker for ordinary work requests.'
+      : '- Only when the user explicitly requests a ticket, end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"title":"<focused ticket title>","description":"<acceptance criteria and context>","tags":["<tag>"],"project_id":"<project UUID from the candidates, or null>","original_request":"<request>"}`. Choose tags that classify the work and a project only from the listed candidates. The agent-manager creates or reuses one ticket and binds this room as `source_chat_room_id`. Do not emit this marker for ordinary work requests.');
   }
   lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   return lines;
@@ -589,10 +589,10 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
 export function chatFollowupPolicy(isActionRoom = false): string {
   if (isActionRoom) return '- Continue this Action directly; do not defer it to another ticket or Action.';
   return [
-    '- Apply the operational-request policy again on this turn: Action search/run first, then an available MCP/tool, otherwise one deduplicated capability ticket; never delegate commands or ticket creation to the user.',
+    DIRECT_WORK_POLICY,
+    '- Apply the operational-request policy again on this turn: Action search/run first, then an available MCP/tool; otherwise report the blocker inline. A capability ticket also requires an explicit user request for ticket creation.',
     '- Reuse any run id or open capability ticket already recorded in this conversation for the same normalized operation, while re-checking whether a matching Action has since appeared.',
-    '- For ordinary change requests, apply ticket-first routing again: file one focused ticket (tags, plus the project when it concerns a repository) linked with this room as `source_chat_room_id`; use direct chat only for a small one-off or an explicit user request to work directly in chat/session without a ticket.',
-    '- Future-intent wording is still actionable: create and execute the ticket now instead of only acknowledging or promising the work.',
+    '- For ordinary change requests, do the work directly. Future-intent wording is still actionable; it does not authorize ticket creation. For an explicit ticket request, reuse a suitable existing ticket or create the requested ticket with tags, the matching project, and this room as `source_chat_room_id`.',
   ].join('\n');
 }
 
@@ -698,9 +698,9 @@ export function composeChatRoomPrompt(
   // see a non-empty name and the instruction is omitted (one-time naming).
   roomName = '',
   // ticket e6d32e9d: true when this room was minted by an Action dispatch. Flips
-  // the work-policy instruction from "this is a chat, file a ticket" to "perform
-  // the task directly" and suppresses the auto-title prompt (Action rooms are
-  // already named `Action: … · <id>`). Default false → ordinary chat behavior.
+  // the work-policy instruction to the Action's assigned task and suppresses
+  // the auto-title prompt (Action rooms are already named `Action: … · <id>`).
+  // Default false → ordinary chat behavior.
   isActionRoom = false,
   // ticket 9fd27487 — 이번 턴이 실제로 프로비저닝된 절대경로 cwd:
   // Action Run이면 `.awb/act/<action8>` (opt-in 없이 항상 프로비저닝됨),
@@ -799,9 +799,9 @@ function normalizeOrdinaryWorkCandidates(
 function ordinaryWorkCandidateLines(c: OrdinaryWorkCandidates): string[] {
   const lines: string[] = [];
   if (Array.isArray(c.boards)) {
-    lines.push('Existing board candidates for ordinary work (use only these UUIDs):');
+    lines.push('Existing board candidates for explicitly requested tickets (use only these UUIDs):');
     if (c.boards.length === 0) {
-      lines.push('- (none; treat this as the no-suitable-existing-board direct-chat exception)');
+      lines.push('- (none; if the user requested a ticket, report that no suitable existing board is available)');
     } else {
       for (const board of c.boards) {
         lines.push(`- ${board.name} | ${board.id}${board.description ? ` | ${board.description.slice(0, 500)}` : ''}`);
@@ -809,7 +809,7 @@ function ordinaryWorkCandidateLines(c: OrdinaryWorkCandidates): string[] {
     }
     return lines;
   }
-  lines.push('Project candidates for ordinary work tickets (use only these UUIDs as project_id):');
+  lines.push('Project candidates for explicitly requested tickets (use only these UUIDs as project_id):');
   if (c.projects.length === 0) {
     lines.push('- (none; leave project_id null)');
   } else {

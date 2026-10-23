@@ -22,7 +22,7 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
 
   server.tool(
     'create_child_ticket',
-    'Create a child ticket (a checklist item) under a parent ticket. Children are worked by the parent\'s assignee; mark each done with update_child_ticket(status="done").',
+    'Create a child ticket (a checklist item) under a parent ticket only when the user explicitly requests child ticket creation. Task size or discovered work alone does not authorize new child tickets. Children are worked by the parent\'s assignee; mark each done with update_child_ticket(status="done").',
     {
       parent_id: z.string().describe('Parent ticket ID'),
       title: z.string().describe('Child ticket title'),

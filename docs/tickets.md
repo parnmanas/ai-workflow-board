@@ -245,6 +245,9 @@ Repository credentials: `GET /api/agent-manager/projects/:projectId/git-credenti
 projects by id).
 
 Chat "ordinary work" fallback (manager → server):
+- Ordinary work runs directly in the session/chat. These ticket-creation markers
+  are used only when the user explicitly requests a ticket, including for missing
+  operational capabilities; task size, future intent, and missing tools are not consent.
 - `GET /api/agent/ordinary-work-candidates?account_id=` →
   `{ projects: [{ id, name, repo_url }], tags: [{ tag, count }] }` (replaces
   `ordinary-work-board-candidates`).
