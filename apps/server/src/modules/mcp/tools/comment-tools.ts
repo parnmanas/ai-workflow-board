@@ -100,6 +100,16 @@ function extractWriteSeq(metadata: unknown): number {
   return typeof seq === 'number' && Number.isFinite(seq) ? seq : -1;
 }
 
+// 코멘트 activity 의 actor 'system' 은 서버만 찍는다 — 검증된 매니저 auto_notice,
+// 합치기 bump, silent-exit. TicketDispatchService 는 actor 'system' 인 에이전트
+// 코멘트를 진전으로 세지 않는다(ticket 193a7392). author_id 는 호출자가 정하는
+// 인자라 그 값이 'system' 이면 actor 로 쓰지 않고 인증된 호출자를 남긴다 —
+// 그대로 쓰면 아무 호출자나 제 코멘트를 서버 알림처럼 남길 수 있다.
+function commentActivityActor(authorId: string, caller: ReturnType<typeof getCallerAgent>): string {
+  if (authorId !== 'system') return authorId;
+  return caller?.runtimeKey || caller?.agentId || '';
+}
+
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
   const {
     dataSource, activityService, mentionService, logger, artifactRefsService,
@@ -398,7 +408,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         && await isAuthenticatedManagerAutoNotice(caller, resolvedAuthorType, resolvedAuthorId);
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
-        ticket_id, actor_id: isAutoNotice ? 'system' : resolvedAuthorId, actor_name: authorName,
+        ticket_id, actor_id: isAutoNotice ? 'system' : commentActivityActor(resolvedAuthorId, caller), actor_name: authorName,
         new_value: content,
         field_changed: resolvedType,
       });
@@ -534,20 +544,18 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   }
 
   // ─── Helper: auto_notice 발신자 검증 (ticket 3c8b8026 리뷰 라운드1 지적1) ──
-  // metadata.auto_notice 는 값 자체만으로 activity-log actor_id 를 'system'
-  // 으로 바꿔 코멘트→트리거 경로를 끊는, 행동에 실질적 영향을 주는 신호다.
-  // 값을 자기선언만으로 신뢰하면 아무 agent 나 평범한 코멘트에 이 값을 실어
-  // routed-role 의 정상 comment wake 를 조용히 숨길 수 있어, 티켓의 위험
-  // 조건("판정은 작성자 종류(system/manager 자동 알림) 기준으로 좁게")을
-  // 어긴다. 그래서 값이 아니라 "이 값을 존중해도 되는 발신자인가"를 검증한다
-  // — 요청 author가 아니라 인증 세션을 기준으로 하며, agent-manager 가 이
-  // 알림들을 남길 때 인증하는 신원은 항상 페어링으로
-  // 발급된 매니저 전용 Agent(type='manager') 다(개별 티켓 역할 agent 의
-  // per-agent 키가 아니라 EventDispatcher 자신의 공유 config.apiKey, 참고
+  // metadata.auto_notice 를 존중하면 activity-log actor_id 가 'system' 이 되고,
+  // TicketDispatchService 는 그 코멘트를 에이전트의 진전으로 세지 않는다
+  // (supervisor 재전송 카운트를 되돌리지 않는다, ticket 193a7392). 값을
+  // 자기선언만으로 믿으면 아무 agent 나 제 코멘트를 서버 알림처럼 남길 수
+  // 있으므로, 값이 아니라 "이 값을 존중해도 되는 발신자인가"를 검증한다 —
+  // 요청 author 가 아니라 인증 세션을 기준으로 한다. agent-manager 가 이
+  // 알림들을 남길 때 인증하는 신원은 항상 페어링으로 발급된 Host 의 매니저
+  // 키다(EventDispatcher 의 공유 config.apiKey, 참고
   // apps/agent-manager/src/lib/mcp-client.ts 의 fireAndForgetTool). 그 외
-  // caller 가 auto_notice 를 실어 보내면 에러 없이 조용히 무시하고(다른
-  // 옵트인 메타데이터 필드들과 같은 관용 방식) 평범한 코멘트로 저장한다 —
-  // 즉 activity-log 는 여전히 실제 caller 를 actor_id 로 남겨 정상 트리거된다.
+  // caller 가 auto_notice 를 실어 보내면 에러 없이 조용히 무시하고(다른 옵트인
+  // 메타데이터 필드들과 같은 관용 방식) 평범한 코멘트로 저장한다 — activity-log
+  // 는 실제 caller 를 actor_id 로 남긴다.
   async function isAuthenticatedManagerAutoNotice(
     caller: ReturnType<typeof getCallerAgent>,
     authorType: 'user' | 'agent',
@@ -556,6 +564,9 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     // 요청의 author_id는 호환성을 위해 호출자가 지정할 수 있으므로 권한 근거로
     // 삼지 않는다. 인증 세션의 agentId가 저장 author와 일치하는 경우에만 조회한다.
     if (authorType !== 'agent' || !caller?.agentId || caller.agentId !== authorId) return false;
+    // 런타임(rt-) 키도 Host 에 묶여 있어 caller.agentId 가 같은 Host id 다 —
+    // runtimeKey 가 없는 매니저 키만 매니저를 대신한다.
+    if (caller.runtimeKey) return false;
     // P4c-4: host-keyed 매니저 세션 (agentId = Host uuid, Agent 행 없음).
     const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: caller.agentId } });
     return !!host;
@@ -616,7 +627,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
-        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        ticket_id, actor_id: commentActivityActor(resolved.authorId, callerCtx), actor_name: resolved.authorName,
         new_value: content, field_changed: 'question',
       });
 
@@ -747,7 +758,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: answer.id, action: 'created',
-        ticket_id: question.ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        ticket_id: question.ticket_id, actor_id: commentActivityActor(resolved.authorId, callerCtx), actor_name: resolved.authorName,
         new_value: content, field_changed: 'answer',
       });
 
@@ -809,7 +820,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
-        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        ticket_id, actor_id: commentActivityActor(resolved.authorId, callerCtx), actor_name: resolved.authorName,
         new_value: content, field_changed: 'decision',
       });
 

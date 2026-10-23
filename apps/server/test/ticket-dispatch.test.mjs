@@ -12,12 +12,15 @@
 //   - the supervisor re-sends a dead in_progress ticket (force respawn) and
 //     parks it for a human after MAX_SUPERVISOR_REDISPATCHES;
 //   - an agent comment restarts that count; a silent-exit warning does not,
-//     and neither does a manager auto-notice (add_comment with auto_notice).
+//     and neither does a manager auto-notice (add_comment with auto_notice) —
+//     which only the Host's manager key can post: a runtime key's comment is
+//     progress whatever author or flag it claims.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createProject, createTicket, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createProject, createTicket, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { McpClient } from './helpers/mcp-client.mjs';
 import { VirtualAgent } from './helpers/virtual-agent.mjs';
 
 const { app, port, modules } = await bootApp({ port: 0 });
@@ -216,6 +219,29 @@ test('a manager auto-notice keeps the supervisor count; the same Host writing wi
   }));
   assert.notEqual(plain.activity.actor_id, 'system');
   assert.equal(await redispatches(), 0, 'without auto_notice the same caller is the agent reporting progress');
+});
+
+test('a runtime key cannot pass its own comment off as a manager notice', async () => {
+  // A runtime (rt-) key is bound to the same Host as the manager key, so the
+  // session's agentId is the Host id too. Only the manager key is the manager.
+  const ticket = await createTicket(app, gdst, { accountId: ws.id, title: 'runtime key notice', status: 'in_progress' });
+  const tickets = ds.getRepository('Ticket');
+  const hostId = agent.runtime_spec.manager_agent_id;
+  const key = await createApiKey(app, gdst, agent.id, { accountId: ws.id, label: 'worker', hostId });
+  const runtime = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
+  for (const claim of [
+    { metadata: { auto_notice: true } },
+    { author_id: hostId, metadata: { auto_notice: true } },
+    { author_id: 'system' },
+  ]) {
+    await tickets.update({ id: ticket.id }, { supervisor_redispatches: 2 });
+    const { activity } = await afterDispatcherHandles(() => runtime.callTool('add_comment', {
+      ticket_id: ticket.id, content: 'parser implemented, tests pass', ...claim,
+    }));
+    assert.notEqual(activity.actor_id, 'system', JSON.stringify(claim));
+    assert.equal((await tickets.findOneBy({ id: ticket.id })).supervisor_redispatches, 0,
+      `${JSON.stringify(claim)}: the agent's own comment is progress`);
+  }
 });
 
 test('re-sends that only draw manager auto-notices still end in a park', async () => {

@@ -18,6 +18,12 @@
 // 임의의 agent 가 자기선언만으로 자신의 코멘트를 트리거 경로에서 숨길 수
 // 없다는 것을 아래 거부/대조 테스트들로 증명한다.
 //
+// 지금(ticket 193a7392) 이 스탬프를 읽는 곳은 trigger-loop 가 아니라
+// TicketDispatchService.onComment 다 — actor 'system' 인 에이전트 코멘트는
+// supervisor 재전송 카운트를 되돌리지 않는다. 그래서 'system' 은 검증된 매니저
+// 알림에만 남아야 한다: 같은 Host 에 묶인 런타임(rt-) 키는 매니저가 아니고,
+// author_id 로 'system' 을 대도 activity actor 는 인증된 호출자다.
+//
 // 컴파일된 dist/ 를 real sql.js DataSource 로 실행한다 — 레시피는
 // test/comment-tools-dedupe.test.mjs 와 동일.
 
@@ -97,6 +103,14 @@ function authenticatedExtra(agent) {
   });
   return { sessionId };
 }
+/** 같은 Host 에 묶인 런타임(rt-) 키 세션 — agentId 가 Host id 다(mcp-http-auth). */
+function runtimeKeyExtra(host, runtimeKey) {
+  const sessionId = `auto-notice-rt-${runtimeKey}-${Math.random()}`;
+  sessionStore.register(sessionId, { close: async () => {} }, {}, {
+    agentId: host.id, runtimeKey, agentName: `runtime:worker:${runtimeKey}`, accountId: 'w1', source: 'db',
+  });
+  return { sessionId };
+}
 async function lastActivityFor(commentId) {
   const rows = await activityRepo.find({
     where: { entity_type: 'comment', entity_id: commentId },
@@ -125,7 +139,7 @@ test('auto_notice:true from a manager-tier agent (Agent.type=manager) stamps act
   const log = await lastActivityFor(comment.id);
   assert.equal(log.action, 'created');
   assert.equal(log.actor_id, 'system',
-    'auto_notice from a genuine manager-tier agent must stamp actor_id=system so trigger-loop\'s system-actor guard skips it');
+    'auto_notice from the Host\'s manager key must stamp actor_id=system so the dispatcher does not count it as progress');
 });
 
 test('auto_notice:true does not change the saved comment\'s own author attribution', async () => {
@@ -328,4 +342,53 @@ test('일반 에이전트 인증 세션이 Manager author_id를 주입해도 aut
   const log = await lastActivityFor(comment.id);
   assert.equal(log.actor_id, manager.id,
     '요청 author가 manager여도 인증 호출자가 다르면 system actor로 바뀌지 않아야 한다');
+});
+
+test('a runtime key on the same Host cannot post the manager\'s notice, even naming the Host as author', async () => {
+  const handlers = registerTools();
+  const addComment = handlers.get('add_comment');
+  const t = await makeTicket();
+  const host = await makeManagerAgent('Runtime Host');
+
+  const comment = parse(await addComment({
+    ticket_id: t.id, content: '진행 보고를 매니저 알림처럼',
+    author_type: 'agent', author_id: host.id,
+    metadata: { auto_notice: true },
+  }, runtimeKeyExtra(host, 'rt-0123456789abcdef')));
+
+  const log = await lastActivityFor(comment.id);
+  assert.equal(log.actor_id, host.id, 'only the Host\'s manager key (no runtime key) speaks for the manager');
+});
+
+test('no caller gets actor system by naming itself the author — on any of the four comment tools', async () => {
+  const handlers = registerTools();
+  const t = await makeTicket();
+  const host = await makeManagerAgent('Runtime Host');
+  const regular = await makeRegularAgent();
+  const callers = [
+    { name: 'agent session', extra: () => authenticatedExtra(regular), actor: regular.id },
+    { name: 'runtime key', extra: () => runtimeKeyExtra(host, 'rt-fedcba9876543210'), actor: 'rt-fedcba9876543210' },
+    { name: 'manager key', extra: () => authenticatedExtra(host), actor: host.id },
+    { name: 'no session', extra: () => ({}), actor: '' },
+  ];
+  for (const caller of callers) {
+    const question = parse(await handlers.get('ask_question')({
+      ticket_id: t.id, content: 'q', author_id: 'system',
+    }, caller.extra()));
+    const written = [
+      question,
+      parse(await handlers.get('add_comment')({ ticket_id: t.id, content: 'c', author_id: 'system' }, caller.extra())),
+      parse(await handlers.get('add_comment')({
+        ticket_id: t.id, content: 'n', author_id: 'system', metadata: { auto_notice: true },
+      }, caller.extra())),
+      parse(await handlers.get('answer_question')({ question_comment_id: question.id, content: 'a', author_id: 'system' }, caller.extra())),
+      parse(await handlers.get('record_decision')({ ticket_id: t.id, content: 'd', author_id: 'system' }, caller.extra())),
+    ];
+    for (const comment of written) {
+      assert.ok(comment.id, `${caller.name}: written ${JSON.stringify(comment)}`);
+      assert.equal(comment.author_id, 'system', `${caller.name}: the comment keeps the author it was given`);
+      const log = await lastActivityFor(comment.id);
+      assert.equal(log.actor_id, caller.actor, `${caller.name} ${comment.type}: the activity names the caller, not 'system'`);
+    }
+  }
 });
