@@ -442,6 +442,15 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
       if (turn.pending === 0) turn.release();
     });
   };
+  // 줄 선 차례는 앞 차례(ahead)가 넘어간 뒤 시작한다. 이 closure 를 enqueue 밖에서 만드는 이유: V8 은 한 scope 의 closure
+  // 들에 context 하나를 함께 쓴다. work 를 잡는 closure 가 차례의 release 와 같은 scope 에 있으면, 차례 객체(그 안에서 만든
+  // 타이머 · 프라미스의 AsyncLocalStorage 값으로 오래 남는다)가 release 를 거쳐 work 와 그 인자(트랜잭션 콜백 · 저장할
+  // 엔티티 — 콜백이 쓰는 호출자까지)를 붙잡는다.
+  const startAfter = <T>(ahead: Promise<void>, turn: SqljsTurn, work: () => Promise<T>): Promise<T> =>
+    ahead.then(() => {
+      watch.begin(turn);
+      return reentry.run(turn, () => within(turn, work));
+    });
   const enqueue: SqljsEnqueue = (work, label, above) => {
     const held = heldTurn();
     if (held) return within(held, work);
@@ -463,10 +472,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
     watch.queued();
     // 다음 차례는 결과와 무관하게 이 차례가 넘어간 뒤 시작한다 — 실패한 트랜잭션이 뒤에 선 일을 막지 않는다.
     // 실패 자체는 `run` 으로 이 호출자에게 간다.
-    const run = tail.then(() => {
-      watch.begin(turn);
-      return reentry.run(turn, () => within(turn, work));
-    });
+    const run = startAfter(tail, turn, work);
     tail = released;
     return run;
   };

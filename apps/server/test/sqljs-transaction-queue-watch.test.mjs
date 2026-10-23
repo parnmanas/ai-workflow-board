@@ -11,8 +11,7 @@
 //      보지 못한 차례(이벤트 루프를 막았다)는 풀릴 때 한 번 알린다. 기준보다 짧은 차례는 조용하다 — 줄 서 있던 시간은
 //      쥔 시간에 들지 않는다.
 //   2. 호출 위치 — SQLJS_TURN_STACKS=1 이면 첫 경고부터 실린다. 아니면 첫 경고는 위치 없이 플래그를 안내하고, 그 연결에서
-//      그 뒤에 열린 차례부터 위치가 실린다(연결마다 따로). 위치에는 큐 안쪽 프레임이 없다. 넘어간 차례의 위치는 버린다 —
-//      차례 안에서 만든 타이머가 호출자를 붙잡지 않는다.
+//      그 뒤에 열린 차례부터 위치가 실린다(연결마다 따로). 위치에는 큐 안쪽 프레임이 없다.
 //   3. 차례를 연 일마다 이름이 있다 — transaction, save, 문장의 첫 단어, synchronize, afterSqljsTransactions() 의 이름, export.
 //   4. 감시 주기는 차례마다 만들지 않는다 — 바쁜 DataSource 마다 하나(unref)이고, 큐가 쉬면 스스로 멈춘다. 차례가 없던
 //      DataSource 에는 주기가 없다. 주기는 큐를 건 비동기 문맥에서 돈다 — 그것을 건 요청의 문맥이 아니다. 주기의 타이머는
@@ -20,6 +19,8 @@
 //   5. 감시가 실패해도 쓰기 결과와 큐는 그대로 간다 — 경고를 못 씀(console.warn 이 던짐), 주기를 못 걺(setInterval 이
 //      던짐 — 다음 차례가 다시 건다). 위치를 꾸미지 못하면(Error.prepareStackTrace 가 던짐) 위치만 빠지고 경고는 남는다.
 //   6. 기준값 해석 — 비었거나 숫자가 아니면 30초, 하한 50ms.
+//   7. 넘어간 차례는 호출자를 붙잡지 않는다 — 차례 안에서 만든 타이머가 차례 객체를 AsyncLocalStorage 값으로 오래 물고
+//      있어도, 기록한 위치(프레임의 receiver)와 차례의 work(콜백이 쓰는 this)를 거쳐 호출자가 남지 않는다.
 //
 // 컴파일된 dist/ 를 대상으로 실행한다(`npm run build` 필요, test 스크립트가 보장). 공유 dev database/ 의
 // 파일을 건드리지 않도록 모든 sql.js 파일을 임시 디렉터리에 둔다.
@@ -649,6 +650,43 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
       }
       const alive = callers.filter((caller) => caller.deref() !== undefined).length;
       assert.equal(alive, 0, `${alive} of 3 callers are still alive after their turns, held by the timers their turns started`);
+    } finally {
+      for (const timer of leftRunning) clearInterval(timer);
+    }
+  });
+
+  it('a turn handed over does not keep its work alive — a timer the turn left running does not keep what the callback used', async () => {
+    const ds = await openDataSource(); // 위치를 기록하지 않는다 — 위치가 아니라 차례 자신이 붙잡는 것을 본다
+    const collectGarbage = exposeGc();
+    const leftRunning = [];
+    // 차례 안에서 오래 사는 타이머를 건다. 타이머 자신의 closure 에는 요청의 것이 없다.
+    function startLongLived() {
+      const timer = setInterval(() => {}, 3_600_000);
+      timer.unref();
+      leftRunning.push(timer);
+    }
+    class RequestScopedCaller {
+      async write() {
+        return ds.transaction(async () => {
+          this.writes = (this.writes ?? 0) + 1; // 콜백이 호출자를 쓴다 — 서비스의 콜백이 this.repo 를 쓰듯이
+          startLongLived();
+        });
+      }
+    }
+    async function writeFromRequest() {
+      const caller = new RequestScopedCaller();
+      await caller.write();
+      return new WeakRef(caller);
+    }
+    try {
+      const callers = [];
+      for (let i = 0; i < 3; i++) callers.push(await writeFromRequest());
+      for (let i = 0; i < 5; i++) {
+        collectGarbage();
+        await sleep(10);
+      }
+      const alive = callers.filter((caller) => caller.deref() !== undefined).length;
+      assert.equal(alive, 0, `${alive} of 3 callers are still alive after their turns, held through each turn's work by the timer it started`);
     } finally {
       for (const timer of leftRunning) clearInterval(timer);
     }
