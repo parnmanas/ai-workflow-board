@@ -1064,8 +1064,10 @@ restart it either:
   `TicketDispatchService.onComment` does not restart the count for that actor.
   Only the Host's manager key gets that stamp. A runtime key is bound to the
   same Host, but its `auto_notice` is ignored even when it names the Host as
-  author. A caller-supplied `author_id: 'system'` is logged as the
-  authenticated caller, so every other agent comment still counts.
+  author. A caller-supplied `author_id: 'system'` is logged as the caller's
+  runtime key or Host id (empty when the session has neither), so every other
+  new agent comment on the ticket still counts. A comment on a checklist item
+  never reaches the parent's count.
 
 Before this rule, a notice that landed as a new comment restarted the count.
 That happened once per hold, and again whenever a silent-exit warning broke
@@ -1077,11 +1079,13 @@ without progress.
 A live one-shot is parked the same way when it holds the seat but has produced
 no parsed output for `supervisor_stale_ms`. The server cannot see it:
 `hasLiveRoleStrand` needs output or a `current_task` within 15 minutes, and
-one-shots never send `set_current_task`. The manager drops each re-send because
-the pid is alive. The ticket parks after stale + 3 × resend (45 minutes with the
-defaults), where the first suppression notice of the hold used to buy another
-`supervisor_stale_ms`. A park also frees that identity's capacity slot, so its
-next `todo` ticket can start while the parked process is still running.
+one-shots never send `set_current_task`. The manager suppresses each re-send
+because the pid is alive. It keeps the first suppressed force-respawn and replays
+it once when the process exits, unless the ticket is pending by then. The ticket
+parks after stale + 3 × resend (45 minutes with the defaults), where the first
+suppression notice of the hold used to buy another `supervisor_stale_ms`. A park
+also frees that identity's capacity slot, so its next `todo` ticket can start
+while the parked process is still running.
 
 An agent that expects to wait without output (a background review, a long tool
 call) should comment on the ticket at least every `supervisor_stale_ms`. A CI

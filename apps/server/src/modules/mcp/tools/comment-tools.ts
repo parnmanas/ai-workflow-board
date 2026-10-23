@@ -555,7 +555,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   // apps/agent-manager/src/lib/mcp-client.ts 의 fireAndForgetTool). 그 외
   // caller 가 auto_notice 를 실어 보내면 에러 없이 조용히 무시하고(다른 옵트인
   // 메타데이터 필드들과 같은 관용 방식) 평범한 코멘트로 저장한다 — activity-log
-  // 는 실제 caller 를 actor_id 로 남긴다.
+  // actor_id 는 그 코멘트의 author_id 다('system' 이면 인증된 호출자,
+  // commentActivityActor).
   async function isAuthenticatedManagerAutoNotice(
     caller: ReturnType<typeof getCallerAgent>,
     authorType: 'user' | 'agent',
