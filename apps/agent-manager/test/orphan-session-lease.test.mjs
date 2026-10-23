@@ -912,8 +912,8 @@ test('stale 회수는 가드를 쥔 채 lock 을 지우고 다시 만든다 — 
 // 판정 뒤에 대기자가 그 경로를 rename 하면, 판정과 rename 사이에 남이 새로 만든 가드를
 // 격리해 지운다. 둘이 함께 가드를 쥐고, 늦게 끝난 쪽의 unlink 가 먼저 세운 lock 을 지워
 // owner 가 둘이 된다(Windows CI 실측, run 39991446432: 동시 force contender 둘 다
-// ACQUIRED). 흉내: 대기자의 가드 stat 한 번을 감싸, stat 직전에 가드를 지우고(놓음)
-// stat 직후에 남의 새 가드를 세운다(다시 잡음). 남의 가드 owner 는 살아 있는 이
+// ACQUIRED). 흉내: 대기자의 가드 lstat 한 번을 감싸, lstat 직전에 가드를 지우고(놓음)
+// lstat 직후에 남의 새 가드를 세운다(다시 잡음). 남의 가드 owner 는 살아 있는 이
 // 테스트 프로세스다. 대기자는 그 가드를 건드리지 말고 놓일 때까지 기다려야 한다.
 test('가드가 막 사라졌다는 판정 뒤 그 자리에 새로 생긴 남의 가드를 옮기지 않는다', { timeout: 60_000 }, async () => {
   const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-gone-'));
@@ -931,16 +931,16 @@ test('가드가 막 사라졌다는 판정 뒤 그 자리에 새로 생긴 남�
     import fs from 'node:fs';
     import { syncBuiltinESMExports } from 'node:module';
     const guard = ${JSON.stringify(recoveryLock)};
-    const realStatSync = fs.statSync;
+    const realLstatSync = fs.lstatSync;
     const realRenameSync = fs.renameSync;
     const parked = new Int32Array(new SharedArrayBuffer(4));
     let swapped = false;
-    fs.statSync = function (path, ...rest) {
-      if (path !== guard || swapped) return realStatSync.call(this, path, ...rest);
+    fs.lstatSync = function (path, ...rest) {
+      if (path !== guard || swapped) return realLstatSync.call(this, path, ...rest);
       swapped = true;
       fs.rmSync(guard, { recursive: true, force: true });
       try {
-        return realStatSync.call(this, path, ...rest);
+        return realLstatSync.call(this, path, ...rest);
       } finally {
         // 지워지는 중이면 mkdir 이 잠깐 거절될 수 있다(Windows) — 잡힐 때까지 다시 한다.
         const until = Date.now() + 10_000;
@@ -977,6 +977,80 @@ test('가드가 막 사라졌다는 판정 뒤 그 자리에 새로 생긴 남�
   assert.doesNotMatch(result.stderr, /RENAMED_GUARD_PATH/, `사라진 가드 판정 뒤 그 경로를 rename 하면 안 된다: ${diagnostics}`);
   assert.equal(result.code, 0, diagnostics);
   assert.match(result.output, /ACQUIRED/, diagnostics);
+});
+
+// 가드 자리에 디렉터리가 아닌 것이 있으면(끊긴 심볼릭 링크) mkdir 은 EEXIST 인데 stat
+// 은 실패한다. 그것을 "사라짐" 으로만 읽으면 끝없이, 아무 말 없이 기다린다. 판정은
+// lstat 으로 그 자리의 시각을 읽어 owner 미상 가드의 상한(60초) 규칙으로 회수한다.
+test('가드 자리의 끊긴 심볼릭 링크도 상한이 지나면 회수하고 취득한다', { timeout: 60_000 }, async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows 러너는 심볼릭 링크를 만들 권한이 없을 수 있다');
+    return;
+  }
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-guard-dangling-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const recoveryLock = `${lockPath}.recovery`;
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  await fsp.symlink(join(home, 'nowhere'), recoveryLock);
+  const longAgo = new Date(Date.now() - 10 * 60_000);
+  await fsp.lutimes(recoveryLock, longAgo, longAgo);
+  const contender = spawnBarrieredContender(ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home });
+  const result = await Promise.race([contender.done, sleep(20_000, { code: null, output: 'STILL_WAITING', stderr: '' })]);
+  const diagnostics = JSON.stringify(result, null, 2);
+  assert.match(result.output, /ACQUIRED/, `끝없이 기다리면 안 된다: ${diagnostics}`);
+  assert.equal(result.code, 0, diagnostics);
+  assert.match(result.stderr, /reclaiming stale recovery guard — guard_expired/, diagnostics);
+});
+
+// force 인수가 가드를 잡고 보니 owner 가 이미 없을 수 있다(기다리는 사이 죽었다). 그때는
+// 죽일 것 없이 그 자리를 지우고 취득하되, 무엇을 읽었는지 남긴다 — 둘이 함께 가드를 쥐는
+// 일이 다시 생기면 이 줄이 그것을 바로 드러낸다(티켓 b14c5669 의 CI 실측은 이 줄이 없어
+// 로그만으로는 갈리지 않았다).
+test('force 인수: 기다리는 사이 owner 가 죽었으면 죽이지 않고 취득하며, 읽은 것을 남긴다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-force-owner-gone-'));
+  tempDirs.push(home);
+  const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+  const recoveryLock = join(home, 'agent.lock.recovery');
+  const owner = await startLockOwner(env, 'old');
+  await fsp.mkdir(recoveryLock);
+  await fsp.writeFile(join(recoveryLock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+  const contender = spawnBarrieredContender(ACQUIRE_ONCE(true), env);
+  await contender.awaitStderr(`--force: waiting for takeover guard (owner pid=${owner.pid}`);
+  owner.kill('SIGKILL');
+  await waitForExit(owner);
+  await fsp.rm(recoveryLock, { recursive: true, force: true });
+  const result = await contender.done;
+  const diagnostics = JSON.stringify(result, null, 2);
+  assert.equal(result.code, 0, diagnostics);
+  assert.match(result.output, /ACQUIRED/, diagnostics);
+  assert.doesNotMatch(result.stderr, /SIGTERM previous owner/, diagnostics);
+  assert.match(
+    result.stderr,
+    new RegExp(`--force: no live owner at takeover \\(read pid=${owner.pid}, not alive; observed pid=${owner.pid}\\)`),
+    diagnostics,
+  );
+});
+
+// release 는 lock 이 자기를 가리킬 때만 지운다. 남의 것이 돼 있으면 지우지 않고 그 사실을
+// 남긴다 — 정상 경로에서는 일어나지 않는 일이라(누가 우리 lock 을 지우고 자기 것을 세웠다)
+// 상호 배제가 깨진 흔적이다.
+test('release 는 lock 이 남의 것이 됐으면 지우지 않고 그 사실을 남긴다', { timeout: 60_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-release-foreign-'));
+  tempDirs.push(home);
+  const lockPath = join(home, 'agent.lock');
+  const foreign = JSON.stringify({ pid: 4242, role: 'manager' });
+  const result = await spawnBarrieredContender(`
+    import fs from 'node:fs';
+    const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
+    const lock = await acquireAgentLock({ role: 'manager', version: 'new' });
+    fs.writeFileSync(${JSON.stringify(lockPath)}, ${JSON.stringify(foreign)});
+    lock.release();
+  `, { ...process.env, AWB_AGENT_MANAGER_HOME: home }).done;
+  const diagnostics = JSON.stringify(result, null, 2);
+  assert.equal(result.code, 0, diagnostics);
+  assert.match(result.stderr, /release: .*agent\.lock now names pid=4242, not this process — not removing/, diagnostics);
+  assert.equal(await fsp.readFile(lockPath, 'utf8'), foreign, diagnostics);
 });
 
 // 크래시로 남은 회수 가드를 회수할 때, 격리한 잔해의 rm 이 실패해도(Windows 에서 아직

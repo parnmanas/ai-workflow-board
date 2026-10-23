@@ -460,6 +460,15 @@ test('가드 디렉터리가 이미 사라졌으면 회수하지 않는다 — �
   assert.equal(verdict.reclaim, false);
 });
 
+// 사라지기 직전에 읽은 owner 가 그 사이 끝났어도(가드를 놓고 종료) 마찬가지다. owner 쪽을
+// 먼저 보면 stale 로 답해 같은 rename 에 이른다(리뷰 E10 — 셋 이상이 겹칠 때).
+test('사라진 가드는 그 전에 읽은 owner 가 죽었어도 회수하지 않는다', () => {
+  const verdict = judgeRecoveryGuard(
+    guardFacts({ owner: { pid: 999_999_999 }, ownerFacts: facts({ pidPresence: 'dead' }), guardMtimeMs: null }),
+  );
+  assert.equal(verdict.reclaim, false);
+});
+
 async function writeRecoveryGuard(home, owner, mtime) {
   const dir = join(home, 'agent.lock.recovery');
   await fsp.mkdir(dir, { recursive: true });

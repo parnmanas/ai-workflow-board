@@ -46,7 +46,7 @@ import {
   mkdirSync,
   renameSync,
   rmSync,
-  statSync,
+  lstatSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -473,6 +473,16 @@ function hasBootGeneration(owner: ParsedLock): boolean {
  *  lock 을 아무리 정확히 stale 로 판정해도 `acquireAfterStaleCleanup` 이 가드 앞에서
  *  25ms 루프를 무한히 돌아, "반창고 없이 스스로 기동" 이 성립하지 않는다. */
 export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerdict {
+  // 가드가 이미 사라졌으면 회수할 것이 없다 — 한 박자 쉬고 다시 만들면 된다. 회수(rename)로
+  // 답하면 안 된다. rename 은 판정한 가드가 아니라 **그 순간 그 경로에 있는 것**을
+  // 옮기므로, 판정과 rename 사이에 남이 새로 만든 가드를 격리해 지우고 그 남과 함께
+  // 가드를 쥐게 된다(Windows CI 실측, 티켓 b14c5669 — 동시 force contender 둘 다
+  // ACQUIRED). Windows 는 지워지는 중인 디렉터리의 stat 도 실패로 돌려줘, 가드를 놓는
+  // 순간마다 이 판정이 나온다. owner 판정보다 먼저 본다 — 사라지기 직전에 읽은 owner 가
+  // 그 사이 끝났으면(놓고 종료) owner 쪽이 stale 로 답해 같은 rename 에 이른다.
+  if (facts.guardMtimeMs === null) {
+    return { reclaim: false, detail: '가드 디렉터리가 이미 사라짐 — 회수 없이 다시 만든다' };
+  }
   if (facts.owner && facts.ownerFacts) {
     const verdict = judgeLockOwner(facts.owner, facts.ownerFacts);
     if (verdict.stale) {
@@ -508,15 +518,6 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
   }
 
   // owner.json 을 못 읽는다 — 디렉터리 자체로만 판정한다.
-  if (facts.guardMtimeMs === null) {
-    // 이미 사라진 가드는 회수할 것이 없다 — 한 박자 쉬고 다시 만들면 된다. 회수(rename)로
-    // 답하면 안 된다. rename 은 판정한 가드가 아니라 **그 순간 그 경로에 있는 것**을
-    // 옮기므로, 판정과 rename 사이에 남이 새로 만든 가드를 격리해 지우고 그 남과 함께
-    // 가드를 쥐게 된다(Windows CI 실측, 티켓 b14c5669 — 동시 force contender 둘 다
-    // ACQUIRED). Windows 는 지워지는 중인 디렉터리의 stat 도 실패로 돌려줘, 가드를 놓는
-    // 순간마다 이 판정이 나온다.
-    return { reclaim: false, detail: '가드 디렉터리가 이미 사라짐 — 회수 없이 다시 만든다' };
-  }
   if (guardPredatesBoot(facts)) {
     return {
       reclaim: true,
@@ -524,7 +525,7 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
       detail: `owner 미상 가드의 mtime(${new Date(facts.guardMtimeMs).toISOString()})이 이번 부팅보다 이른 시각`,
     };
   }
-  const ageMs = guardAgeMs(facts) as number;
+  const ageMs = guardAgeMs(facts) as number; // 위에서 사라진 가드는 이미 걸렀다
   if (ageMs >= RECOVERY_LOCK_STALE_MS) {
     return {
       reclaim: true,
@@ -539,7 +540,10 @@ function probeRecoveryGuard(): RecoveryGuardFacts {
   const owner = readRecoveryOwner();
   let guardMtimeMs: number | null = null;
   try {
-    guardMtimeMs = statSync(RECOVERY_LOCK_PATH).mtimeMs;
+    // lstat — 링크를 따라가지 않는다. 가드 자리에 디렉터리가 아닌 것(끊긴 심볼릭 링크 등)이
+    // 있으면 mkdir 은 EEXIST 인데 stat 은 실패해 "사라짐" 판정이 끝없이 이어진다. 그 자리의
+    // 시각을 읽으면 owner 미상 가드의 상한(60초) 규칙으로 회수된다.
+    guardMtimeMs = lstatSync(RECOVERY_LOCK_PATH).mtimeMs;
   } catch {
     guardMtimeMs = null;
   }
@@ -721,6 +725,13 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
       const current = readLock();
       if (current && current.pid !== owner.pid) throw lockedBy(current);
       if (current && isPidAlive(current.pid)) throw lockedBy(current);
+    } else {
+      // 죽일 owner 없이 그 자리를 지운다 — 무엇을 읽었는지 남긴다. 둘이 함께 가드를 쥐는
+      // 일이 다시 생기면, 이 줄과 release 의 "not removing" 줄이 그것을 바로 드러낸다.
+      log(
+        `[lockfile] --force: no live owner at takeover (read ${owner ? `pid=${owner.pid}, not alive` : 'no lock'}; ` +
+          `observed pid=${existing.pid})`,
+      );
     }
     try {
       unlinkSync(LOCK_PATH);
@@ -1053,8 +1064,16 @@ function safeUnlinkOwn(myPid: number): void {
   try {
     const raw = readFileSync(LOCK_PATH, 'utf8');
     const parsed = JSON.parse(raw);
-    if (parsed?.pid !== myPid) return;
-  } catch {
+    if (parsed?.pid !== myPid) {
+      // 쥐고 있던 lock 이 남의 것이 됐다 — 정상 경로에서는 일어나지 않는다(누가 우리 lock 을
+      // 지우고 자기 것을 세웠다). 상호 배제가 깨진 흔적이라 남긴다.
+      log(`[lockfile] release: ${LOCK_PATH} now names pid=${parsed?.pid ?? '?'}, not this process — not removing`);
+      return;
+    }
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      log(`[lockfile] release: could not read ${LOCK_PATH} (${err?.code ?? err}) — not removing`);
+    }
     return;
   }
   try {
