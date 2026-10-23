@@ -206,16 +206,17 @@ describe('sql.js: a queue turn held too long is reported with where it was opene
   });
 
   it('time spent waiting in the queue is not time held: a quick turn behind a long one stays quiet', async () => {
-    const ds = await openDataSource();
+    const warnMs = 400;
+    const ds = await openDataSource({ warnMs });
     const ahead = holdTransaction(ds, 'ahead');
     await ahead.inside;
-    // 앞 차례가 기준을 넘길 때까지 줄 서 있다가, 자기 차례는 tick 한두 번 동안만 쥔다.
-    const behind = ds.transaction(async () => { await sleep(tickMsFor(WARN_MS) * 1.5); return 'behind: done'; });
+    // 앞 차례가 기준을 넘길 때까지 줄 서 있다가, 자기 차례는 tick 한두 번 동안만 쥔다(기준까지 250ms 여유).
+    const behind = ds.transaction(async () => { await sleep(tickMsFor(warnMs) * 1.5); return 'behind: done'; });
     await until(() => warningsFor(ds).length === 1, 'the warning for the turn ahead');
     ahead.release();
     await withinDeadlockTimeout(ahead.done);
     assert.equal(await withinDeadlockTimeout(behind), 'behind: done');
-    await sleep(tickMsFor(WARN_MS) * 2);
+    await sleep(tickMsFor(warnMs) * 2);
     const lines = warningsFor(ds);
     assert.equal(lines.length, 2, `only the turn ahead warned, then was released: ${JSON.stringify(lines)}`);
     assert.match(lines[0], /has been held for .*, 1 waiting behind it/);
