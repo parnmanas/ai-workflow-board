@@ -196,7 +196,7 @@ type SqljsTurn = {
   label: string;
   /** 차례가 시작된 시각(performance.now()) — 줄 서 있던 시간은 세지 않는다. */
   startedAt: number;
-  /** 차례를 연 호출 위치. 기록하는 동안에만 있다(watchSqljsTurns 참고). */
+  /** 차례를 연 호출 위치. 기록하는 동안, 차례가 넘어갈 때까지만 있다(watchSqljsTurns 참고). */
   site?: { stack?: string };
   /** 오래 쥔 차례 경고를 남겼는가 — 차례마다 한 번이다. */
   warned: boolean;
@@ -214,17 +214,18 @@ const sqljsWorkQueues = new WeakMap<DataSource, {
 // 차례를 쥔 콜백이 다른 체인의 쓰기를 기다리거나(데드락) 느린 I/O 를 하면, 그 연결의 모든 쓰기가 소리 없이 멈춘다.
 // 그래서 차례마다 이름과 시작 시각을 남기고, 한 차례가 SQLJS_TURN_WARN_MS(기본 30초) 넘게 잡혀 있으면 경고를 한 번
 // 남긴다 — 쥔 일, 쥔 시간, 기다리는 일 수, 차례를 연 호출 위치. 경고한 차례가 풀리면 걸린 시간을 한 줄 더 남긴다.
-// 풀림 줄이 끝내 없으면 데드락이고, 있으면 느린 콜백이다. 쥔 동안 감시가 보지 못한 긴 차례(이벤트 루프를 막았거나 두
+// 풀림 줄이 끝내 없으면 데드락이고, 있으면 느린 콜백이다. 쥔 동안 감시가 보지 못한 긴 차례(이벤트 루프가 막혔거나 두
 // tick 사이에 끝났다)는 풀릴 때 알린다 — 기준을 넘긴 차례는 어느 쪽으로든 한 번 알려진다.
 //
 // 감시 주기는 DataSource 마다 하나이고 unref 다 — 차례마다 타이머를 만들지 않는다. 큐가 바쁜 동안만 돈다. 차례가
-// 시작될 때 주기가 없으면 걸고, 쥔 차례도 기다리는 일도 없는 것을 본 tick 에서 스스로 멈춘다. 그래서 쉬는 DataSource ·
-// 닫힌 DataSource 에는 타이머가 남지 않는다. 주기는 DataSource 를 만든 비동기 문맥에서 건다 — 차례를 시작한 요청의
-// 문맥에서 걸면 주기가 그 요청의 AsyncLocalStorage 값을 붙잡고, 다른 요청이 쥔 차례의 경고도 그 문맥에서 남는다.
+// 시작될 때 주기가 없으면 걸고, 쥔 차례도 기다리는 일도 없는 것을 본 tick 에서 스스로 멈춘다. 그래서 큐가 빈 DataSource
+// 에는(닫힌 것도) 타이머가 남지 않는다. 주기는 큐를 건(serializeSqljsTransactions) 비동기 문맥에서 건다 — 차례를 시작한
+// 요청의 문맥에서 걸면 주기가 그 요청의 AsyncLocalStorage 값을 붙잡고, 다른 요청이 쥔 차례의 경고도 그 문맥에서 남는다.
 //
 // 호출 위치(stack)는 늘 걷지 않는다. 쓰기 차례 하나가 100–450µs 인데 걷는 데 6–11µs 가 든다(티켓 61622dbb 측정).
-// SQLJS_TURN_STACKS=1 이면 처음부터 걷고, 아니면 그 연결에서 첫 경고를 남긴 뒤부터 걷는다. 반복되는 느린 콜백은 다음
-// 경고에 위치가 실린다. 데드락은 그 뒤로 시작하는 차례가 없어서 첫 경고뿐이다 — 플래그를 켜고 재현해야 위치가 나온다.
+// SQLJS_TURN_STACKS=1 이면 처음부터 걷고, 아니면 그 연결에서 첫 경고를 남긴 뒤부터 재시작할 때까지 걷는다 — 긴 마이그레이션
+// 같은 정당한 긴 차례 하나로도 켜진다. 반복되는 느린 콜백은 다음 경고에 위치가 실린다. 데드락은 그 뒤로 시작하는 차례가
+// 없어서 첫 경고뿐이다 — 플래그를 켜고 재현해야 위치가 나온다.
 // 위치는 차례를 연 순간의 stack 이다. transaction · save · export 차례에는 그것을 부른 앱 코드가 남는다. 쓰기 문장 차례는
 // TypeORM 이 문장을 보내는 자리라서, TypeORM 안에서 async stack 이 끊기는 경로(repo.insert() · upsert())는 TypeORM 프레임만 남는다.
 
@@ -232,11 +233,16 @@ export const DEFAULT_SQLJS_TURN_WARN_MS = 30_000;
 const MIN_SQLJS_TURN_WARN_MS = 50;
 const MAX_SQLJS_TURN_WATCH_TICK_MS = 5_000;
 
-/** 차례를 이만큼 넘게 쥐면 경고한다. SQLJS_TURN_WARN_MS 가 비었거나 틀리면 기본값, 너무 작으면 하한. */
+// 감시 주기의 타이머 함수는 이 모듈을 불러올 때 잡아 둔다. 테스트가 나중에 전역 setInterval 을 가짜로 바꾸면(node:test
+// mock timers), 가짜에 걸린 주기는 되돌린 뒤로 돌지 않아 그 DataSource 의 감시가 꺼지고, 가짜 clearInterval 은 진짜 주기를
+// 멈추지 못한다.
+const sqljsWatchTimers = { setInterval, clearInterval };
+
+/** 차례를 이만큼 넘게 쥐면 경고한다. SQLJS_TURN_WARN_MS 가 비었거나 숫자가 아니면(`30s`) 기본값, 너무 작으면 하한. */
 export function resolveSqljsTurnWarnMs(): number {
-  const raw = Number.parseInt(process.env.SQLJS_TURN_WARN_MS || '', 10);
+  const raw = Number(process.env.SQLJS_TURN_WARN_MS || '');
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SQLJS_TURN_WARN_MS;
-  return Math.max(MIN_SQLJS_TURN_WARN_MS, raw);
+  return Math.max(MIN_SQLJS_TURN_WARN_MS, Math.round(raw));
 }
 
 function sqljsTurnStacksRequested(): boolean {
@@ -262,16 +268,25 @@ function sqljsLongTurnWarning(connection: string, turn: SqljsTurn, heldMs: numbe
   const opened = `[DB] sql.js write queue (${connection}): the turn opened by "${turn.label}"`;
   const head = released
     ? `${opened} was held for ${sqljsSeconds(heldMs)} before it was released, ${waiting} waiting behind it — ` +
-      'the watch could not check it while it was held (it blocked the event loop, or ended between checks).'
+      'the watch could not check it while it was held (the event loop was blocked, or the turn ended between checks).'
     : `${opened} has been held for ${sqljsSeconds(heldMs)}, ${waiting} waiting behind it — ` +
       'every write on this connection waits until it is released.';
   if (!turn.site) {
     return `${head} Its call site was not recorded; turns opened from now on record theirs. ` +
       'Set SQLJS_TURN_STACKS=1 to record them from the start.';
   }
-  // String(): Error.prepareStackTrace 를 바꾼 라이브러리는 문자열이 아닌 stack 을 돌려줄 수 있다.
-  const frames = String(turn.site.stack ?? '').split('\n').slice(1).join('\n');
-  return `${head} Opened at:\n${frames || '    (no stack frames — Error.stackTraceLimit is 0)'}`;
+  return `${head} Opened at:\n${sqljsCallSiteFrames(turn.site)}`;
+}
+
+/** 위치의 프레임들. 꾸미지 못하면(Error.prepareStackTrace 가 던짐) 그 사실만 적는다 — 경고의 나머지는 그대로 남는다. */
+function sqljsCallSiteFrames(site: { stack?: string }): string {
+  try {
+    // String(): Error.prepareStackTrace 를 바꾼 라이브러리는 문자열이 아닌 stack 을 돌려줄 수 있다.
+    const frames = String(site.stack ?? '').split('\n').slice(1).join('\n');
+    return frames || '    (no stack frames were captured)';
+  } catch {
+    return '    (the call site could not be formatted — Error.prepareStackTrace threw)';
+  }
 }
 
 /**
@@ -310,7 +325,7 @@ function watchSqljsTurns(connection: string) {
     const turn = current;
     if (!turn) {
       if (waiting === 0 && timer) {
-        clearInterval(timer);
+        sqljsWatchTimers.clearInterval(timer);
         timer = null;
       }
       return;
@@ -319,8 +334,8 @@ function watchSqljsTurns(connection: string) {
     const heldMs = performance.now() - turn.startedAt;
     if (heldMs >= warnMs) warnLongTurn(turn, heldMs, false);
   };
-  // 주기는 이 DataSource 를 만든 비동기 문맥에서 건다(위 주석 — 차례를 시작한 요청의 문맥이 아니다).
-  const startTicking = AsyncResource.bind(() => setInterval(tick, tickMs));
+  // 주기는 큐를 건 비동기 문맥에서 건다(위 주석 — 차례를 시작한 요청의 문맥이 아니다).
+  const startTicking = AsyncResource.bind(() => sqljsWatchTimers.setInterval(tick, tickMs));
 
   return {
     /** 새 차례를 연 호출 위치. 기록하지 않는 동안은 undefined 다. */
@@ -353,9 +368,12 @@ function watchSqljsTurns(connection: string) {
           () => `[DB] sql.js write queue (${connection}): the turn opened by "${turn.label}" was released after ${sqljsSeconds(heldMs)}`,
         );
       } else if (heldMs >= warnMs) {
-        // 쥔 동안 tick 이 보지 못했다 — 이벤트 루프를 막았거나 두 tick 사이에 끝났다.
+        // 쥔 동안 tick 이 보지 못했다 — 이벤트 루프가 막혔거나 두 tick 사이에 끝났다.
         warnLongTurn(turn, heldMs, true);
       }
+      // 위치는 .stack 을 읽기 전까지 각 프레임의 receiver · 함수를 붙잡는다. 차례 객체는 그 안에서 만든 비동기 자원(타이머 ·
+      // 프라미스)마다 AsyncLocalStorage 값으로 남으므로, 넘어간 차례의 위치는 버린다 — 아니면 그 자원이 사는 동안 호출자가 산다.
+      turn.site = undefined;
     },
   };
 }
@@ -383,7 +401,7 @@ function isSqljsReadStatement(sql: string): boolean {
  * 큐에 선 일은 시작하지 않는다. 이미 큐 차례를 쥔 체인(트랜잭션 콜백, 또는 다른 work) 안에서 부르면 기다리지
  * 않고 그 차례 안에서 바로 실행한다 — 자기 뒤에 줄 서면 데드락이다. 그래서 트랜잭션 안에서 부르면 그 트랜잭션이
  * 열린 채로 돈다 — 파일 export 는 flushSqljs()/flushOntologySqljs() 를 쓴다(exportSqljsWhenIdle 참고).
- * `label` 은 이 work 가 차례를 오래 쥘 때 경고에 실리는 이름이다.
+ * `label` 은 이 work 가 차례를 오래 쥘 때 경고에 실리는 이름이다 — 이미 쥔 차례 안에서 부르면 그 차례의 이름이 실린다.
  */
 export function afterSqljsTransactions<T>(
   dataSource: DataSource,
