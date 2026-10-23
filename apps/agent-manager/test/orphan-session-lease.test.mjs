@@ -1388,15 +1388,15 @@ test('쓰다 만 owner 를 읽은 뒤 writer 가 가드를 쥐어도 과거 snap
   }`;
   const reader = `{
     const realRead = fs.readFileSync;
-    let first = true;
+    let reads = 0;
     fs.readFileSync = function (path, ...rest) {
       const raw = realRead.call(this, path, ...rest);
       if (typeof path === 'string' && path.startsWith(guard + sep + 'owner-')) {
-        if (first) {
-          first = false;
+        if (++reads === 1) {
           fs.writeSync(2, 'TORN_SNAPSHOT:' + JSON.stringify(raw) + '\\n');
           park('torn-read');
-        } else {
+        } else if (reads === 3) {
+          // 두 번째 읽기의 완전한 owner 를 보존한 뒤 다음 probe 에 도착해야 성공이다.
           fs.writeSync(2, 'OWNER_RECHECKED\\n');
         }
       }
@@ -1407,7 +1407,9 @@ test('쓰다 만 owner 를 읽은 뒤 writer 가 가드를 쥐어도 과거 snap
   let w;
   try {
     await untilParked(c, 'C', 'owner-torn');
-    const longAgo = new Date(Date.now() - 10 * 60_000);
+    // 부팅 직후 CI 에서 발견한 경로도 항상 검증한다. 완성된 owner 의 부팅 세대는
+    // 이 디렉터리 mtime 보다 우선해야 한다.
+    const longAgo = new Date(currentBootIdentity().approxBootTimeMs - 10 * 60_000);
     await fsp.utimes(guard, longAgo, longAgo);
     w = spawnBarrieredContender(parkPrologue({ name: 'W', home, parks: ['torn-read', 'lock-unlink'], extra: reader }) + ACQUIRE_AND_HOLD, env);
     await untilParked(w, 'W', 'torn-read');

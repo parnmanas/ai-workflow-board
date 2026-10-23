@@ -564,7 +564,9 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
     if (verdict.stale) {
       return { reclaim: true, reason: 'owner_stale', detail: `${verdict.reason}: ${verdict.detail}` };
     }
-    if (guardPredatesBoot(facts)) {
+    // 이번 부팅의 살아 있는 owner 라는 증거가 있으면 디렉터리 벽시계보다 우선한다.
+    // mtime 은 시계 조정으로 부팅보다 과거일 수 있고, owner 기록은 mtime 을 갱신하지 않는다.
+    if (!hasBootGeneration(facts.owner) && guardPredatesBoot(facts)) {
       return {
         reclaim: true,
         reason: 'guard_predates_boot',

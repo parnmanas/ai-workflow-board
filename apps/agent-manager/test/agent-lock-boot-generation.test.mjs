@@ -399,6 +399,17 @@ test('가드 owner 가 이번 부팅에서 살아 있으면 회수하지 않는�
   assert.equal(verdict.reclaim, false);
 });
 
+test('이번 부팅의 살아 있는 가드는 부팅보다 오래된 디렉터리 mtime 으로 회수하지 않는다', () => {
+  for (const boot_id of [THIS_BOOT, undefined]) {
+    const verdict = judgeRecoveryGuard(guardFacts({
+      owner: lockOf({ boot_id }),
+      ownerFacts: facts(),
+      guardMtimeMs: BOOT_TIME - 24 * 3_600_000,
+    }));
+    assert.equal(verdict.reclaim, false);
+  }
+});
+
 test('부팅 세대 없는 구버전 가드는 디렉터리 mtime 이 이번 부팅보다 이르면 회수한다', () => {
   const verdict = judgeRecoveryGuard(
     guardFacts({
