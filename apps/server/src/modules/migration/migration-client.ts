@@ -11,6 +11,14 @@ export interface MigrationSourceMeta {
   commit_sha: string;
   schema_fingerprint: string;
   tables: MigrationSourceTableMeta[];
+  // Absent on older sources; null on non-sql.js sources (not checked).
+  foreign_key_check?: { tables: MigrationForeignKeyViolation[] } | null;
+}
+
+export interface MigrationForeignKeyViolation {
+  table: string;
+  orphan_row_count: number;
+  violation_count: number;
 }
 
 export interface MigrationTablePage {

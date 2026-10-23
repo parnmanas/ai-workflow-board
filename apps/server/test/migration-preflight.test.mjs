@@ -37,7 +37,7 @@ process.env.DB_TYPE = 'sqlite';
 process.env.SQLJS_DB_PATH = path.join(tmpDir, 'migration-preflight-test.db');
 process.env.NODE_ENV = 'test';
 
-const { buildDataSourceOptions } = await import(modPath('db.js'));
+const { buildDataSourceOptions, serializeSqljsTransactions, afterSqljsTransactions } = await import(modPath('db.js'));
 const { MigrationRun } = await import(modPath('entities', 'MigrationRun.js'));
 const { Account } = await import(modPath('entities', 'Account.js'));
 const { MigrationRunService } = await import(modPath('modules', 'migration', 'migration-run.service.js'));
@@ -45,6 +45,7 @@ const { MigrationExportController } = await import(modPath('modules', 'migration
 const { computeSchemaFingerprint } = await import(modPath('modules', 'migration', 'migration-crypto.js'));
 const { listMigratableEntityMetadata } = await import(modPath('modules', 'migration', 'migration-entity-registry.js'));
 const { DataSource } = await import('typeorm');
+const { checkSourceForeignKeys, comparePreflight, computeLocalPreflightMeta } = await import(modPath('modules', 'migration', 'migration-preflight.js'));
 
 const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
@@ -217,4 +218,106 @@ test('6. [review round 1 P1] the REAL MigrationExportController.meta() output fo
     await sourceDs.destroy();
     fs.rmSync(tmpDir3, { recursive: true, force: true });
   }
+});
+
+
+test('7. real sql.js orphan rows are counted once per row and block before any import side effects', async () => {
+  const source = new DataSource({ ...buildDataSourceOptions(), location: undefined, autoSave: false });
+  serializeSqljsTransactions(source);
+  await source.initialize();
+  try {
+    await afterSqljsTransactions(source, async () => {
+      await source.query('PRAGMA foreign_keys = OFF');
+      try {
+        await source.query("INSERT INTO ticket_prerequisites (ticket_id, prerequisite_ticket_id) VALUES ('missing-a', 'missing-b'), ('missing-c', 'missing-d')");
+        await source.getRepository('Comment').save({ ticket_id: 'missing-a', author: 'test', content: 'orphan' });
+      } finally {
+        await source.query('PRAGMA foreign_keys = ON');
+      }
+    });
+    const meta = await realExportMeta(source);
+    assert.deepEqual(meta.foreign_key_check, { tables: [
+      { table: 'comments', orphan_row_count: 1, violation_count: 1 },
+      { table: 'ticket_prerequisites', orphan_row_count: 2, violation_count: 4 },
+    ] });
+    const runCount = await runRepo.count();
+    let quiesced = false;
+    const svc = new TestableMigrationRunService(ds, runRepo, logStub, {
+      setQuiesced: async () => { quiesced = true; },
+    });
+    svc.fakeMeta = meta;
+    svc.createClient = () => ({
+      getMeta: async () => meta,
+      getTablePage: async () => assert.fail('must not pull any table'),
+    });
+    await assert.rejects(
+      () => svc.startRun({ sourceUrl: 'https://source.invalid', sourceToken: 'tok', skipAttachments: true, allowMerge: true, createdBy: 'test' }),
+      (err) => {
+        assert.equal(err.status, 409);
+        assert.match(err.message, /comments: 1 orphan row\(s\), 1 FK violation/);
+        assert.match(err.message, /ticket_prerequisites: 2 orphan row\(s\), 4 FK violation/);
+        assert.match(err.message, /Back up the source database/);
+        return true;
+      },
+    );
+    assert.equal(await runRepo.count(), runCount);
+    assert.equal(quiesced, false);
+    assert.equal(await source.getRepository('Comment').count(), 1, 'diagnosis preserves source data');
+    assert.deepEqual(await source.query('PRAGMA foreign_keys'), [{ foreign_keys: 1 }]);
+
+    // Explicit operator cleanup, not a side effect of preflight.
+    await source.query('DELETE FROM comments');
+    await source.query('DELETE FROM ticket_prerequisites');
+    const clean = await realExportMeta(source);
+    assert.deepEqual(clean.foreign_key_check, { tables: [] });
+    assert.equal(comparePreflight(clean, computeLocalPreflightMeta(ds)).ok, true);
+
+    // Tables outside the export registry must not block migration.
+    await source.query('CREATE TABLE ontology_orphan_test (id INTEGER PRIMARY KEY, parent_id varchar REFERENCES tickets(id))');
+    await afterSqljsTransactions(source, async () => {
+      await source.query('PRAGMA foreign_keys = OFF');
+      try {
+        await source.query("INSERT INTO ontology_orphan_test VALUES (1, 'absent')");
+      } finally {
+        await source.query('PRAGMA foreign_keys = ON');
+      }
+    });
+    assert.equal((await source.query('PRAGMA foreign_key_check')).length, 1);
+    assert.deepEqual(await checkSourceForeignKeys(source), { tables: [] });
+
+    // A read during another transaction could see temporary inconsistencies.
+    // The diagnostic must wait for the serialized write turn to finish.
+    let release;
+    let started;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const entered = new Promise((resolve) => { started = resolve; });
+    const write = source.transaction(async () => { started(); await gate; });
+    await entered;
+    let checked = false;
+    const check = checkSourceForeignKeys(source).then((result) => { checked = true; return result; });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(checked, false, 'inspection waits for the active transaction');
+    } finally {
+      release();
+      await write;
+    }
+    assert.deepEqual(await check, { tables: [] });
+  } finally {
+    await source.destroy();
+  }
+});
+
+test('8. non-sql.js sources never execute SQLite diagnostics; older metadata remains compatible', async () => {
+  for (const type of ['postgres', 'mysql']) {
+    assert.equal(await checkSourceForeignKeys({ options: { type }, query: () => assert.fail('SQLite query on another backend') }), null);
+  }
+  assert.equal(comparePreflight(fakeMetaFrom(ds), computeLocalPreflightMeta(ds)).ok, true);
+});
+
+test('9. failed FK inspection is not reported as a clean source', async () => {
+  await assert.rejects(() => checkSourceForeignKeys({
+    options: { type: 'sqljs' }, entityMetadatas: [],
+    query: async () => { throw new Error('inspection failed'); },
+  }), /Source PRAGMA foreign_key_check failed/);
 });
