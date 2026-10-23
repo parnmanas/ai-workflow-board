@@ -558,8 +558,9 @@ jobs:
         run: npm ci
       - name: Run apps/server full test suite (build + top-level + qa-flows)
         working-directory: apps/server
-        # sql.js 큐 차례를 연 호출 위치를 처음부터 기록한다. 테스트가 차례를 쥔 채 멈추면 30초 뒤 경고에 그 위치가
-        # 실린다 — 플래그 없이는 첫 경고에 위치가 없고, 데드락은 그 뒤로 차례가 없다(db.ts watchSqljsTurns, ticket 61622dbb).
+        # sql.js 큐 차례를 연 호출 위치를 처음부터 기록한다. 테스트가 차례를 쥔 채 멈추면 30초 뒤 경고에 그 위치와 뒤에서
+        # 기다리는 쓰기들의 위치가 실린다 — 플래그 없이는 첫 경고에 위치가 없고, 데드락은 그 뒤로 차례가 없다(db.ts
+        # watchSqljsTurns, ticket 61622dbb · c495ceaa).
         env:
           SQLJS_TURN_STACKS: '1'
         run: npm test
