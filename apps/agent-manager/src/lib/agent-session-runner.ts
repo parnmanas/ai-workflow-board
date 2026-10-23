@@ -896,6 +896,9 @@ export class AgentSessionRunner {
     const agentEnv = await agentCredentialEnvFor(this.#config, request.account_id, this.#authEnvKeys(cli), tag);
 
     let live: LiveSession | null = null;
+    // initialize's response and auth push can share a stdout chunk: notifications
+    // run before the awaiting continuation creates live. Keep the latest identity.
+    let pendingAuthStatus: AcpAuthStatus | null = null;
     const env = this.#buildEnv(cli, requestedSessionId || 'new', auth, agentEnv);
     const client = await AcpClient.spawn({
       command,
@@ -906,7 +909,10 @@ export class AgentSessionRunner {
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
       onElicitation: (elicitation) => (live ? this.#onElicitation(live, elicitation) : Promise.resolve({ action: 'cancel' as const })),
-      onAuthStatus: (status) => { if (live) this.#onAuthStatus(live, status); },
+      onAuthStatus: (status) => {
+        if (live) this.#onAuthStatus(live, status);
+        else pendingAuthStatus = status;
+      },
       // 한 줄이 상한을 넘으면 그 메시지만 버리고 세션은 살려 둔다 — 잃는 것은 그 출력 하나다.
       maxLineBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
       maxMessageBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
@@ -992,6 +998,10 @@ export class AgentSessionRunner {
         closing: false,
         exited: false,
       };
+      if (pendingAuthStatus) {
+        this.#onAuthStatus(live, pendingAuthStatus);
+        pendingAuthStatus = null;
+      }
 
       let modes: unknown;
       let configOptions: unknown;

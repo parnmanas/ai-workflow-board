@@ -1049,6 +1049,34 @@ test('re-applying skips options already at the wanted value, and a resumed sessi
 // 어댑터가 `_auth/status_update` 로 자기 로그인 신원을 민다(claude-agent-acp · codex-acp 공통 확장).
 // 매니저는 거기에 **출처**(계정 Credential 인지 장비 운영자 로그인인지 — 어댑터는 모르는 사실)를
 // 더해 상태로 올리고, history 의 live 에도 실어 화면이 다시 들어와도 볼 수 있게 한다.
+for (const timing of ['before-initialize', 'with-initialize']) {
+  for (const source of ['operator', 'credential']) {
+    for (const resumed of [false, true]) {
+      test(`startup auth survives ${timing}: ${source}, ${resumed ? 'load' : 'new'}`, async (t) => {
+        const { cwd, server, runner } = await harness(t, {
+          credentialFetcher: async () => ({ credential_id: 'cred-auth', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-xxxxxxxxxxxx' } }),
+        }, { FAKE_ACP_AUTH_TIMING: timing });
+        await runner.handle(request('open', {
+          request_id: 'rpc-startup-auth', session_id: resumed ? CLAUDE_ID : null, cwd,
+          ...(source === 'credential' ? { credential_id: 'cred-auth', account_id: 'ws-1' } : {}),
+        }));
+        const opened = server.rpc('rpc-startup-auth');
+        assert.equal(opened.ok, true, JSON.stringify(opened));
+        const sid = opened.result.session_id;
+        const expected = {
+          source, kind: 'account', label: 'Fake Max',
+          account: { email: 'probe@example.com', organization: 'Fake Org', plan: 'max' },
+        };
+        // Startup identity must already be in the ready patch; waiting cannot recover a lost push.
+        assert.deepEqual(server.states(sid).find((s) => s.status === 'ready')?.auth, expected);
+        await runner.handle(request('history', { request_id: 'rpc-startup-history', session_id: sid }));
+        assert.deepEqual(server.rpc('rpc-startup-history').result.live.auth, expected);
+        await runner.handle(request('close', { session_id: sid }));
+      });
+    }
+  }
+}
+
 test('the adapter-reported account is relayed with the credential source the manager knows', async (t) => {
   const { cwd, server, runner } = await harness(t);
   await runner.handle(request('open', { request_id: 'rpc-open-auth', session_id: null, cwd }));

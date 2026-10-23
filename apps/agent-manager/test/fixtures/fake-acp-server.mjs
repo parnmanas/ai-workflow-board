@@ -174,24 +174,35 @@ rl.on('line', (line) => {
   }
 
   switch (message.method) {
-    case 'initialize':
+    case 'initialize': {
       clientCapabilities = message.params?.clientCapabilities ?? {};
-      // 실제 어댑터(claude-agent-acp · codex-acp)는 initialize 뒤 자기 로그인 신원을 push 한다.
-      // 요청 경로가 없는 알림이고, 클라이언트가 모르면 그냥 버린다.
-      setTimeout(() => send({
+      const authUpdate = {
         jsonrpc: '2.0',
         method: '_auth/status_update',
         params: { authStatus: { kind: 'account', label: 'Fake Max', account: { email: 'probe@example.com', organization: 'Fake Org', plan: 'max' } } },
-      }), 5);
-      result(message.id, {
-        protocolVersion: 1,
-        agentInfo: { name: 'fake-hermes', version: '0.1.0' },
-        agentCapabilities: { loadSession: true },
-        authMethods: [],
-        // claude-agent-acp · codex-acp 의 광고 — 진행 중인 턴에 `_session/steering` 으로 끼워 넣을 수 있다.
-        ...(process.env.FAKE_ACP_STEERING === '1' ? { _meta: { steering: { supported: true } } } : {}),
-      });
+      };
+      const initialized = {
+        jsonrpc: '2.0', id: message.id,
+        result: {
+          protocolVersion: 1,
+          agentInfo: { name: 'fake-hermes', version: '0.1.0' },
+          agentCapabilities: { loadSession: true },
+          authMethods: [],
+          ...(process.env.FAKE_ACP_STEERING === '1' ? { _meta: { steering: { supported: true } } } : {}),
+        },
+      };
+      // Force the startup race without relying on scheduler load or a short timer.
+      if (process.env.FAKE_ACP_AUTH_TIMING === 'before-initialize') {
+        send(authUpdate);
+        send(initialized);
+      } else if (process.env.FAKE_ACP_AUTH_TIMING === 'with-initialize') {
+        process.stdout.write(`${JSON.stringify(initialized)}\n${JSON.stringify(authUpdate)}\n`);
+      } else {
+        send(initialized);
+        setTimeout(() => send(authUpdate), 5);
+      }
       break;
+    }
     case '_session/steering': {
       const steerText = (message.params?.prompt ?? []).map((b) => b?.text ?? '').join(' ').trim();
       const idleBehavior = message.params?._meta?.steering?.idleBehavior ?? 'none';
