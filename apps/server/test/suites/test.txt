@@ -74,6 +74,7 @@ test/cli-memory.test.mjs
 test/clone-policy.test.mjs
 test/comment-author-role.test.mjs
 test/comment-dedupe-created-at-precision.test.mjs
+test/comment-tools-auto-notice.test.mjs
 test/comment-tools-dedupe.test.mjs
 test/comment-tools-user-author-uuid-guard.test.mjs
 test/credential-agent-env.test.mjs
