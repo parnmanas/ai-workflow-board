@@ -278,6 +278,8 @@ Source npm scripts run the backend in `apps/server`, where `dotenv/config` loads
 | `AGENT_DEV_MODE` | Optional local agent-API bypass: only outside production and when `AGENT_API_KEY` is absent. Defaults to no bypass. |
 | `SQLJS_DB_PATH`, `SQLJS_ONTOLOGY_DB_PATH` | Override SQLite file paths. Absolute paths avoid ambiguity; relative values resolve under `database/`. |
 | `AWB_DB_AUTORECOVER` | `1` backs up a corrupt local sql.js file and recreates an empty one on startup. |
+| `SQLJS_TURN_WARN_MS` | Local sql.js only. Warn once when a single turn of the write queue (a transaction, save, write statement or file export) holds the connection longer than this many milliseconds. Default `30000`. |
+| `SQLJS_TURN_STACKS` | `1` records where every sql.js write-queue turn was opened, so the first long-turn warning already shows it. Otherwise a connection records call sites only after its first warning. Adds a few microseconds per write. |
 
 To forward a custom origin with Compose, for example, add `compose.override.yaml`:
 
@@ -349,6 +351,8 @@ npm run dev:server
 ```
 
 The guard only applies to local sql.js files; it does not replace a PostgreSQL database. See [host troubleshooting](docs/agent-manager.md#troubleshooting) for CLI/update problems.
+
+Local sql.js runs every write through one queue, so one stuck write holds up all the others. When writes stall, look for a `[DB] sql.js write queue (<file>)` warning. It names what holds the queue, for how long, and how many writes wait behind it. A later `released after` line means a slow callback. No release line means a deadlock — usually a transaction callback waiting for another request's write. To see where the turn was opened, restart with `SQLJS_TURN_STACKS=1` and reproduce.
 
 ## Development
 
