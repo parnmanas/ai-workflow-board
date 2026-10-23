@@ -947,7 +947,7 @@ jobs:
       - working-directory: apps/server
         run: NODE_OPTIONS=--test-skip-pattern=flaky npm run test:node-skip
       - working-directory: apps/server
-        run: npm run test:harmless-flags -q -d --color=always --no-update-notifier --no-fund --no-audit --no-progress --no-ignore-scripts
+        run: npm run test:harmless-flags -q -d -dd --verbose --foreground-scripts --color=always --no-update-notifier --no-fund --no-audit --no-progress --no-ignore-scripts
 `));
   assert.deepEqual(
     [...invoked].sort(),
@@ -998,7 +998,7 @@ test('CI 호출: env 의 npm · 셸 설정 — 스크립트를 도는 방식을 
           ${env}
         run: npm run test:${name}`;
   const yaml = onMainPush(`
-jobs:${step('bash-env', 'BASH_ENV: /tmp/x')}${step('userconfig', 'npm_config_userconfig: /tmp/npmrc')}${step('hyphen', "npm_config_ignore-scripts: 'true'")}${step('zero', "npm_config_ignore_scripts: '0'")}${step('audit', "npm_config_audit: 'false'")}${step('registry', 'NPM_CONFIG_REGISTRY: https://r.example')}${step('fetch', "NPM_CONFIG_FETCH_RETRIES: '5'")}${step('empty', "npm_config_ignore_scripts: ''")}${step('upper-false', "npm_config_ignore_scripts: 'FALSE'")}${step('globalconfig', 'npm_config_globalconfig: /tmp/npmrc')}${step('npm-node-options', 'npm_config_node_options: --max-old-space-size=4096')}${step('node-test-skip', "NODE_OPTIONS: '--test-skip-pattern=flaky'")}${step('node-memory', "NODE_OPTIONS: '--max-old-space-size=4096'")}
+jobs:${step('bash-env', 'BASH_ENV: /tmp/x')}${step('userconfig', 'npm_config_userconfig: /tmp/npmrc')}${step('hyphen', "npm_config_ignore-scripts: 'true'")}${step('zero', "npm_config_ignore_scripts: '0'")}${step('audit', "npm_config_audit: 'false'")}${step('registry', 'NPM_CONFIG_REGISTRY: https://r.example')}${step('fetch', "NPM_CONFIG_FETCH_RETRIES: '5'")}${step('empty', "npm_config_ignore_scripts: ''")}${step('upper-false', "npm_config_ignore_scripts: 'FALSE'")}${step('globalconfig', 'npm_config_globalconfig: /tmp/npmrc')}${step('npm-node-options', 'npm_config_node_options: --max-old-space-size=4096')}${step('node-test-skip', "NODE_OPTIONS: '--test-skip-pattern=flaky'")}${step('node-test-underscore', "NODE_OPTIONS: '--test_skip_pattern=flaky'")}${step('node-memory', "NODE_OPTIONS: '--max-old-space-size=4096'")}
 `);
   assert.deepEqual(invokedIn(yaml), ['test:audit', 'test:empty', 'test:fetch', 'test:node-memory', 'test:registry', 'test:zero']);
   assert.deepEqual(uncountedIn(yaml), [
@@ -1006,6 +1006,7 @@ jobs:${step('bash-env', 'BASH_ENV: /tmp/x')}${step('userconfig', 'npm_config_use
     'globalconfig test:globalconfig',
     'hyphen test:hyphen',
     'node-test-skip test:node-test-skip',
+    'node-test-underscore test:node-test-underscore',
     'npm-node-options test:npm-node-options',
     'upper-false test:upper-false',
     'userconfig test:userconfig',
@@ -1071,22 +1072,86 @@ jobs:
       - run: echo "ignore-scripts=true" >> ~/.npmrc
       - working-directory: apps/server
         run: npm run test:after-npmrc
+  workspace-npmrc:
+    steps:
+      - run: echo "ignore-scripts=true" > .npmrc
+      - working-directory: apps/server
+        run: npm run test:after-workspace-npmrc
+  home-npmrc:
+    steps:
+      - run: cp .github/ci.npmrc "$HOME/.npmrc"
+      - working-directory: apps/server
+        run: npm run test:after-home-npmrc
+  env-spaced:
+    steps:
+      - run: echo "NODE_OPTIONS=--max-old-space-size=4096 --test-skip-pattern=flaky" >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-env-spaced
+  env-quoted-value:
+    steps:
+      - run: echo 'npm_config_ignore_scripts="true"' >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-env-quoted
+  env-heredoc:
+    steps:
+      - run: |
+          cat >> "$GITHUB_ENV" <<EOF
+          NODE_OPTIONS=--max-old-space-size=4096 --test-skip-pattern=flaky
+          EOF
+      - working-directory: apps/server
+        run: npm run test:after-env-heredoc
+  env-multiline:
+    steps:
+      - run: |
+          echo "NODE_OPTIONS<<EOF" >> "$GITHUB_ENV"
+          echo "--max-old-space-size=4096" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-env-multiline
+  env-node-options:
+    steps:
+      - run: echo "NODE_OPTIONS=--test-skip-pattern=flaky" >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-env-node-options
+  set-from-variables:
+    steps:
+      - run: npm config set "$KEY" "$VALUE"
+      - working-directory: apps/server
+        run: npm run test:after-set-variables
+  set-with-location:
+    steps:
+      - run: npm config set registry https://r.example --location user
+      - working-directory: apps/server
+        run: npm run test:after-set-with-location
 `);
   assert.deepEqual(
     invokedIn(yaml),
-    ['test:after-harmless', 'test:after-other-env', 'test:before-taint'],
-    '앞 step 만 뒤 step 에 걸리고, 잡을 넘지 않는다. 스크립트와 무관한 설정은 걸리지 않는다',
+    ['test:after-harmless', 'test:after-other-env', 'test:after-set-with-location', 'test:before-taint'],
+    '앞 step 만 뒤 step 에 걸리고, 잡을 넘지 않는다. 스크립트와 무관한 설정은 걸리지 않는다 — '
+      + '--location user 의 user 는 설정 이름이 아니다',
   );
   assert.deepEqual(uncountedIn(yaml), [
     'bash-env test:after-bash-env',
     'c-set test:after-c-set',
+    'env-heredoc test:after-env-heredoc',
+    'env-multiline test:after-env-multiline',
+    'env-node-options test:after-env-node-options',
+    'env-quoted-value test:after-env-quoted',
+    'env-spaced test:after-env-spaced',
     'github-env test:after-github-env',
+    'home-npmrc test:after-home-npmrc',
     'located-set test:after-located-set',
     'npm-config-set test:after-config-set',
     'npm-set test:after-npm-set',
     'npmrc-write test:after-npmrc',
+    'set-from-variables test:after-set-variables',
     'upper-env test:after-upper-env',
-  ]);
+    'workspace-npmrc test:after-workspace-npmrc',
+  ], 'GITHUB_ENV 값은 따옴표째 · 줄 끝까지 읽고, 여러 줄 문법은 읽지 않고 문제로 본다');
+  const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
+  assert.match(why['test:after-npmrc'], /actions\/setup-node/, '.npmrc 를 쓰는 까닭(인증)에 맞는 길을 알린다');
+  assert.doesNotMatch(why['test:after-bash-env'], /HARMLESS_NPM_CONFIG/, 'npm 설정이 아닌 것에 npm 설정 목록을 권하지 않는다');
+  assert.match(why['test:after-c-set'], /HARMLESS_NPM_CONFIG/);
 });
 
 test('CI 호출: 보통 셸이 아닌 shell: 은 세지 않는다', () => {
@@ -1243,4 +1308,20 @@ jobs:
   const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
   assert.match(why['test:container-env'], /env 의 npm_config_ignore_scripts/);
   assert.match(why['test:odd-container'], /^container 를 읽지 못했다/);
+});
+
+// npm 은 --help · --version · --usage · -h · -v 를 받으면 아무 스크립트도 돌리지 않고 0 으로 끝난다.
+// 그러니 이것들은 "무관한 설정" 이 아니다 — 허용 목록에 잘못 보태지면 여기가 빨개진다.
+test('CI 호출: 스크립트를 돌리지 않는 npm 옵션(--help · --version · --usage · -h · -v)은 세지 않는다', () => {
+  for (const option of ['--help', '--version', '--usage', '-h', '-v']) {
+    const { invoked, uncounted } = ciServerNpmInvocations(onMainPush(`
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: npm test ${option}
+`));
+    assert.deepEqual([...invoked], [], option);
+    assert.match(uncounted[0]?.why ?? '', new RegExp(`npm 옵션 ${option}`), option);
+  }
 });

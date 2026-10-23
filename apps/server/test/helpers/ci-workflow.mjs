@@ -324,6 +324,7 @@ const HARMLESS_NPM_CONFIG = new Set([
   'registry', 'strict_ssl', 'ca', 'cafile', 'always_auth', 'proxy', 'https_proxy', 'noproxy',
   'fetch_retries', 'fetch_retry_factor', 'fetch_retry_mintimeout', 'fetch_retry_maxtimeout', 'fetch_timeout', 'maxsockets',
   'prefer_offline', 'prefer_online', 'engine_strict', 'legacy_peer_deps', 'save_exact', 'save_prefix', 'package_lock',
+  'verbose', 'foreground_scripts',
 ]);
 // channel 은 값이 들어온 길이다 — npm 은 길마다 ignore-scripts 의 값을 다르게 읽는다(@npmcli/config):
 //   cli   `--name=value` · `--name` · `--no-name`: 끄는 값은 정확히 `false` 뿐이다(`=0` · `=FALSE` 는 켠다)
@@ -338,24 +339,26 @@ function npmConfigProblem(option, value, channel) {
   return true;
 }
 
-// 환경 변수 하나가 npm · 셸 · node 가 스크립트를 도는 방식을 바꾸는가. BASH_ENV 는 bash 가 step
-// 스크립트보다 먼저 읽고, NODE_OPTIONS 의 --test-* (--test-skip-pattern 등)는 node --test 가 고른
-// 테스트를 바꾼다.
+// 환경 변수 하나가 npm · 셸 · node 가 스크립트를 도는 방식을 바꾸는가 — 바꾸면 'npm' · 'shell' ·
+// 'node', 아니면 null. BASH_ENV 는 bash 가 step 스크립트보다 먼저 읽고, NODE_OPTIONS 의 --test*
+// (--test-skip-pattern · --test_skip_pattern 등)는 node --test 가 고른 테스트를 바꾼다.
 function envVarProblem(name, value) {
   const key = String(name);
-  if (/^bash_env$/i.test(key)) return true;
-  if (/^node_options$/i.test(key)) return /--test/.test(String(value ?? ''));
+  if (/^bash_env$/i.test(key)) return 'shell';
+  if (/^node_options$/i.test(key)) return /--test/.test(String(value ?? '')) ? 'node' : null;
   const npm = /^npm_config_(.+)$/i.exec(key);
-  return npm !== null && npmConfigProblem(npm[1], String(value ?? ''), 'env');
+  return npm !== null && npmConfigProblem(npm[1], String(value ?? ''), 'env') ? 'npm' : null;
 }
-const configGate = (what) => `${what} — npm · 셸 · node 가 스크립트를 도는 방식을 바꿀 수 있다(스크립트와 무관한 npm `
-  + '설정이면 ci-workflow.mjs 의 HARMLESS_NPM_CONFIG 에 보탠다)';
+const NPM_HINT = '스크립트와 무관한 npm 설정이면 ci-workflow.mjs 의 HARMLESS_NPM_CONFIG 에 보탠다';
+const configGate = (what, kind = 'npm') => `${what} — npm · 셸 · node 가 스크립트를 도는 방식을 바꿀 수 있다`
+  + (kind === 'npm' ? `(${NPM_HINT})` : '');
 
 function envGate(env) {
   if (absent(env)) return null;
   if (!readableMap(env)) return unread('env');
   for (const [name, value] of Object.entries(env)) {
-    if (envVarProblem(name, value)) return configGate(`env 의 ${name}`);
+    const kind = envVarProblem(name, value);
+    if (kind !== null) return configGate(`env 의 ${name}`, kind);
   }
   return null;
 }
@@ -523,7 +526,7 @@ const SERVER_WORKSPACES = new Set(['server', SERVER_DIR]);
 // npmConfigProblem 에 묻는다 — --if-present 는 스크립트가 없어도 0 으로 끝나고, npm 은 옵션 이름의
 // 줄임(`--ignore-script`)도 받아들이므로 아는 이름만 통과한다. 짧은 옵션은 로그 수준만 받는다.
 const NPM_VALUE_FLAGS = new Set(['-w', '--workspace', '--prefix', '-C', '--loglevel']);
-const NPM_SHORT_FLAGS = new Set(['-s', '-q', '-d']);
+const NPM_SHORT_FLAGS = new Set(['-s', '-q', '-d', '-dd', '-ddd']);
 
 // 단순 명령 하나가 `npm test` · `npm run <script>` 로 apps/server 의 스크립트를 부르면
 // { script, problem } 을, 아니면 null 을 돌려준다. problem 은 그 호출을 세지 못하는 이유다
@@ -533,7 +536,8 @@ function serverNpmCall(words, cwd) {
   let problem = null;
   for (; at < words.length && /^[A-Za-z_][\w-]*=/.test(words[at]); at++) {
     const [name, ...value] = words[at].split('=');
-    if (envVarProblem(name, value.join('='))) problem ??= configGate(`명령 앞의 ${name}=`);
+    const kind = envVarProblem(name, value.join('='));
+    if (kind !== null) problem ??= configGate(`명령 앞의 ${name}=`, kind);
   }
   if (words[at] !== 'npm') {
     problem = 'npm 앞에 다른 명령(timeout · time · env …)이 있다 — 그 명령이 npm 의 종료 코드를 그대로 '
@@ -590,28 +594,70 @@ const NOT_ALONE = 'step 의 run 이 이 명령 하나가 아니다 — 다른 �
   + '것이 실패를 덮을 수 있어서다. 이 명령 하나만 있는 step 으로 부르고, 실패 때 할 일은 `if: failure()` '
   + 'step 으로 둔다';
 
-// 앞 step 이 같은 잡의 뒤 step 들의 npm · 셸 · node 설정을 바꾸는가 — 그 까닭, 아니면 null.
+// npm 명령의 자리 인자(명령 · 하위 명령 · 설정 쌍). 값을 따로 받는 옵션의 값은 건너뛴다 —
+// `npm config set registry r --location user` 의 user 는 설정 이름이 아니다.
+const NPM_FLAGS_WITH_VALUE = new Set(['-w', '--workspace', '--prefix', '-C', '--loglevel', '-L', '--location', '--userconfig', '--globalconfig']);
+function npmPositionals(args) {
+  const out = [];
+  for (let k = 0; k < args.length; k++) {
+    if (args[k] === '--') break;
+    if (args[k].startsWith('-')) {
+      if (!args[k].includes('=') && NPM_FLAGS_WITH_VALUE.has(args[k])) k++;
+      continue;
+    }
+    out.push(args[k]);
+  }
+  return out;
+}
+
+// GITHUB_ENV 에 쓰는 대입: `echo "NAME=값" >> $GITHUB_ENV` 의 인자(따옴표째 한 낱말)와, here-doc
+// 본문처럼 줄 첫머리에 놓인 `NAME=값`(줄 끝까지).
+const TAINT_ENV_NAME = '(npm_config_[\\w-]+|BASH_ENV|NODE_OPTIONS)';
+function githubEnvAssignments(run) {
+  const found = [];
+  for (const { words } of shellCommands(run)) {
+    for (const word of words) {
+      const assignment = new RegExp(`^${TAINT_ENV_NAME}=([\\s\\S]*)$`, 'i').exec(word);
+      if (assignment) found.push([assignment[1], assignment[2]]);
+    }
+  }
+  for (const line of run.split('\n')) {
+    const assignment = new RegExp(`^\\s*${TAINT_ENV_NAME}=(.*)$`, 'i').exec(line);
+    if (assignment) found.push([assignment[1], assignment[2].trim()]);
+  }
+  return found;
+}
+
+const NPMRC_HINT = '레지스트리 인증은 actions/setup-node 의 registry-url 과 NODE_AUTH_TOKEN 으로 둔다';
+
+// 앞 step 이 같은 잡의 뒤 step 들의 npm · 셸 · node 설정을 바꾸는가 — 그 까닭을 담은 메시지, 아니면 null.
 //   - .npmrc 를 언급한다(쓰기 · 복사 — 무엇을 쓰는지는 읽지 않는다)
-//   - GITHUB_ENV 에 쓰는 npm_config_* · BASH_ENV · NODE_OPTIONS 대입 가운데 문제가 되는 것
-//   - npm config set · npm set · npm c set(옵션이 앞뒤에 붙어도)으로 바꾼 문제가 되는 설정
+//   - GITHUB_ENV 에 쓰는 npm_config_* · BASH_ENV · NODE_OPTIONS 대입 가운데 문제가 되는 것.
+//     여러 줄 문법(`NAME<<EOF`)으로 쓰면 값을 읽지 않고 문제로 본다
+//   - npm config set · npm set · npm c set(옵션이 섞여도)으로 바꾼 문제가 되는 설정
 function taintOf(run) {
-  if (/\.npmrc\b/.test(run)) return '앞 step 이 .npmrc 를 건드린다';
+  if (/\.npmrc\b/.test(run)) return `앞 step 이 .npmrc 를 건드린다 — 뒤 step 의 npm 설정이 바뀔 수 있다(${NPMRC_HINT})`;
   if (/GITHUB_ENV/.test(run)) {
-    for (const [, name, value] of run.matchAll(/\b(npm_config_[\w-]+|BASH_ENV|NODE_OPTIONS)=([^\s"'`;|&]*)/gi)) {
-      if (envVarProblem(name, value)) return `앞 step 이 GITHUB_ENV 에 ${name} 를 쓴다`;
+    if (new RegExp(`${TAINT_ENV_NAME}\\s*<<`, 'i').test(run)) {
+      return configGate('앞 step 이 GITHUB_ENV 에 여러 줄 값으로 npm · 셸 · node 설정을 쓴다', 'shell');
+    }
+    for (const [name, value] of githubEnvAssignments(run)) {
+      const kind = envVarProblem(name, value);
+      if (kind !== null) return configGate(`앞 step 이 GITHUB_ENV 에 ${name} 를 쓴다`, kind);
     }
   }
   for (const { words } of shellCommands(run)) {
     if (words[0] !== 'npm') continue;
-    const positional = words.slice(1).filter((w) => !w.startsWith('-'));
+    const positional = npmPositionals(words.slice(1));
     const at = positional[0] === 'set' ? 1 : ['config', 'c'].includes(positional[0]) && positional[1] === 'set' ? 2 : -1;
     if (at === -1) continue;
+    // 쌍이 없으면 npm 이 그 step 에서 실패한다. `$KEY $VALUE` 처럼 실행 때 정하는 이름은 무해한
+    // 설정이 아니므로 문제로 남는다.
     const pairs = positional.slice(at);
-    if (pairs.length === 0) return '앞 step 의 npm config set 을 읽지 못했다';
     for (let k = 0; k < pairs.length; k++) {
       const eq = pairs[k].indexOf('=');
       const [name, value] = eq === -1 ? [pairs[k], pairs[++k] ?? ''] : [pairs[k].slice(0, eq), pairs[k].slice(eq + 1)];
-      if (npmConfigProblem(name, value, 'npmrc')) return `앞 step 이 npm config set 으로 ${name} 를 바꾼다`;
+      if (npmConfigProblem(name, value, 'npmrc')) return configGate(`앞 step 이 npm config set 으로 ${name} 를 바꾼다`);
     }
   }
   return null;
@@ -647,8 +693,7 @@ export function ciServerNpmInvocations(text) {
         ?? gateOf(step)
         ?? (absent(ownDir) || typeof ownDir === 'string' ? null : unread('working-directory'))
         ?? tainted;
-      const taint = taintOf(step.run);
-      if (taint !== null) tainted ??= configGate(taint);
+      tainted ??= taintOf(step.run);
       const commands = shellCommands(step.run);
       const single = commands.length === 1 && [null, '\n', ';'].includes(commands[0].next);
       const startDir = typeof ownDir === 'string' ? ownDir : absent(ownDir) ? jobDir : null;
