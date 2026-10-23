@@ -100,7 +100,7 @@ if (!team.orchestrator_agent_id || !callerHoldsId(caller, team.orchestrator_agen
   ```sh
   cd apps/server && npm run build && node --test --test-force-exit test/mcp-tool-authz.test.mjs
   ```
-- 새 `*.test.mjs` **파일**을 추가했다면(기존 파일에 `it()`만 추가한 게 아니라) → `apps/server/test/test-registration-completeness.test.mjs`도 통과해야 한다. `apps/server/package.json`의 `test`(또는 `pretest`) 스크립트 인자 목록에 파일 경로를 직접 추가하지 않으면 `npm test`가 그 파일을 영원히 실행하지 않는다 — 등록을 빠뜨리면 이 가드 자체가 실패로 알려준다.
+- 새 `*.test.mjs` **파일**을 추가했다면(기존 파일에 `it()`만 추가한 게 아니라) → CI 가 도는 매니페스트에 경로를 한 줄 넣는다. sqlite 로 도는 파일은 `apps/server/test/suites/test.txt`, Postgres 가 필요한 파일은 `test-qa-pg.txt` 다. 넣은 뒤 `npm run test:suites:sort` 를 돌린다. CI 는 apps/server 에서 `test` · `test:qa:pg` 만 부르므로, 단독 npm 스크립트(`test:catalog-scope` 같은)에만 적은 파일은 CI 에서 한 번도 돌지 않는다. 등록을 빠뜨리면 `apps/server/test/test-registration-completeness.test.mjs` 가 실패로 알려준다.
 - 도구가 속한 도메인에 전용 테스트 파일이 있다면 그것도 같이 실행(예: orchestration 계열이면 `orchestration-plan-dag.test.mjs`).
 - **`apps/agent-manager/test/tool-surface-parity.test.mjs`** — 필수, (g) 참고. authz와 별개인 agent-manager 카드-캡처 완전성 가드라 위 authz 테스트를 통과해도 이건 따로 돌려야 한다. 마찬가지로 **먼저 빌드**해야 한다.
 
