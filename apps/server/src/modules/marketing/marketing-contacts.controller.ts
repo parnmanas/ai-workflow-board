@@ -48,6 +48,12 @@ export class MarketingContactsController {
     catch (e: any) { return res.status(errorStatus(e)).json({ error: e?.message }); }
   }
 
+  @Get('contacts/replies')
+  async replies(@Query('offset') offset: string, @Req() req: Request, @Res() res: Response) {
+    try { return res.json(await this.contacts.listReplies(boundAccountId(req), Number(offset || 0))); }
+    catch (e: any) { return res.status(errorStatus(e)).json({ error: e?.message }); }
+  }
+
   @Get('contacts')
   async list(
     @Query('list') list: string,

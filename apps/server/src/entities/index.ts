@@ -159,3 +159,5 @@ export { MarketingConsentNoticeSetting } from './MarketingConsentNoticeSetting';
 
 export { MarketingBrand } from './MarketingBrand';
 export { MarketingContactConsent } from './MarketingContactConsent';
+
+export { MarketingContactReply } from './MarketingContactReply';

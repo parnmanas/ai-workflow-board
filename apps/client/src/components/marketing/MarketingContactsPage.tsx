@@ -22,6 +22,7 @@ import {
   type ContactMapping,
 } from './marketingContacts.logic';
 import { FieldLabel, Hint, NoteModal, StatusPill, tableStyles } from './MarketingUi';
+import { MarketingContactReplies } from './MarketingContactReplies';
 import { ConsentNoticePanel } from './MarketingConsentNotice';
 import { contactConsentLine } from './consentNotice.logic';
 
@@ -164,6 +165,7 @@ export default function MarketingContactsPage() {
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <ConsentNoticePanel accountId={accountId} />
+        <MarketingContactReplies key={accountId || 'default'} accountId={accountId} brands={brands} onContact={(email) => { setQuery(email); setAppliedQuery(email); setList(''); setAppliedList(''); setStatus(''); setOffset(0); }} />
         <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
           <Select label="가져오기 · 기존 동의 이관 대상 브랜드" value={brandId} options={[{ value: '', label: '— 브랜드 선택 —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} onChange={(e) => setBrandId(e.target.value)} />
           <Input label="새 브랜드 이름" value={brandName} onChange={(e) => setBrandName(e.target.value)} />

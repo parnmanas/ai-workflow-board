@@ -140,7 +140,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'MarketingBudgetAllocation', 'MarketingSpendRequest', 'MarketingLedgerEntry', 'MarketingPost',
   'MarketingLink', 'MarketingMetric', 'MarketingFeedback', 'MarketingContact', 'MarketingBrand', 'MarketingContactConsent', 'MarketingEmailSend',
   'MarketingCycle', 'MarketingApprovalNotice', 'MarketingListHold', 'MarketingConsentNotice',
-  'MarketingConsentNoticeSetting',
+  'MarketingConsentNoticeSetting', 'MarketingContactReply',
 
   // 완전 다형적(polymorphic)/미강제 — 어디에 있어도 안전, 맨 뒤에 배치
   'ActivityLog',

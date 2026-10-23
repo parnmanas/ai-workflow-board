@@ -2766,6 +2766,14 @@ export const api = {
     request<MarketingBrand>(`/marketing/brands${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`, { method: 'POST', body: JSON.stringify({ name }) }),
   migrateMarketingLegacyConsent: (accountId: string | null, brandId: string, contactIds: string[]) =>
     request<{ migrated: number }>(`/marketing/brands/${encodeURIComponent(brandId)}/migrate-legacy${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''}`, { method: 'POST', body: JSON.stringify({ contact_ids: contactIds }) }),
+  listMarketingContactReplies: (accountId: string | null, offset = 0) => {
+    const params = new URLSearchParams({ offset: String(offset) });
+    if (accountId) params.set('account_id', accountId);
+    return request<{ total: number; replies: Array<{
+      id: string; contact_id: string; notice_id: string; brand_id: string; content: string; created_at: string;
+      contact: { id: string; email: string | null; name: string } | null;
+    }> }>(`/marketing/contacts/replies?${params}`);
+  },
   listMarketingContacts: (
     accountId: string | null,
     query: { brand_id?: string; list?: string; status?: string; q?: string; limit?: number; offset?: number } = {},

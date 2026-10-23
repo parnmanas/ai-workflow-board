@@ -81,6 +81,7 @@ async function render(t, { entry, permissions, stubs = {} }) {
     }),
     getMarketingConsentNoticeSettings: async () => consentOverview(),
     listMarketingConsentNotices: async () => [],
+    listMarketingContactReplies: async () => ({ total: 0, replies: [] }),
     listMarketingBrands: async () => [{ id: 'brand-1', account_id: 'acc-2', name: 'AWB Team' }],
     ...stubs,
   };
@@ -561,4 +562,33 @@ test('브랜드 동의 — 미이관 연락처를 명시적으로 선택하고 �
   click(buttonByText(dialog, '수신거부 기록'));
   await flush();
   assert.deepEqual(unsubscribed, [['ct-legacy', '전화로 브랜드 수신거부 요청', 'acc-2', 'brand-1']]);
+});
+
+
+test('재확인 회신함: 계정 범위, 평문 표시, 연락처 찾기와 페이지 이동', async (t) => {
+  const content = '<img src=x onerror=alert(1)> 그만 보내 주세요. [link](https://example.com)';
+  const { container, calls } = await render(t, {
+    entry: '/marketing/contacts?account=acc-2&list=newsletter',
+    permissions: ['marketing.manage'],
+    stubs: {
+      listMarketingContacts: async () => ({ total: 0, contacts: [] }),
+      listMarketingContactReplies: async (_account, offset) => ({ total: 51, replies: [{
+        id: `reply-${offset}`, brand_id: 'brand-1', created_at: '2026-10-23T00:00:00Z', content,
+        contact: { id: 'ct-1', email: 'reader@example.com', name: 'Reader' },
+      }] }),
+    },
+  });
+  const panel = container.querySelector('[data-testid="marketing-contact-replies"]');
+  assert.ok(panel);
+  assert.ok(panel.textContent.includes(content));
+  assert.equal(panel.querySelector('img, a'), null, 'external content stays plain text');
+  assert.equal(calls.find((c) => c[0] === 'listMarketingContactReplies')[1], 'acc-2');
+  click(buttonByText(panel, '연락처 찾기'));
+  await flush();
+  const search = calls.filter((c) => c[0] === 'listMarketingContacts').at(-1);
+  assert.equal(search[2].q, 'reader@example.com');
+  assert.equal(search[2].list, undefined, 'clear unrelated list filters so the reply author can be found');
+  click(buttonByText(panel, '다음 회신'));
+  await flush();
+  assert.deepEqual(calls.filter((c) => c[0] === 'listMarketingContactReplies').at(-1).slice(1), ['acc-2', 50]);
 });

@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { MarketingBrand } from '../../entities/MarketingBrand';
 import { MarketingContactConsent } from '../../entities/MarketingContactConsent';
+import { MarketingContactReply } from '../../entities/MarketingContactReply';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { consentFresh, emailHash, isValidTimezone } from '../../common/marketing/email';
 import type { MarketingActor } from '../../common/marketing/marketing-constants';
@@ -41,6 +42,21 @@ export class MarketingContactService {
 
   private get consents() { return this.contactRepo.manager.getRepository(MarketingContactConsent); }
   private get brands() { return this.contactRepo.manager.getRepository(MarketingBrand); }
+
+  /** Human-only account inbox, independent of campaign feedback. */
+  async listReplies(accountId: string, offset = 0) {
+    const skip = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+    const [rows, total] = await this.contactRepo.manager.getRepository(MarketingContactReply).findAndCount({
+      where: { account_id: accountId }, order: { created_at: 'DESC', id: 'DESC' }, take: 50, skip,
+    });
+    const contacts = rows.length ? await this.contactRepo.find({
+      where: { account_id: accountId, id: In(rows.map((r) => r.contact_id)) }, select: ['id', 'email', 'name'],
+    }) : [];
+    const byId = new Map(contacts.map((c) => [c.id, c]));
+    return { total, replies: rows.map(({ source_key, account_id, ...row }) => ({
+      ...row, contact: byId.get(row.contact_id) || null,
+    })) };
+  }
 
   async listBrands(accountId: string) {
     return this.brands.find({ where: { account_id: accountId }, order: { created_at: 'ASC' } });

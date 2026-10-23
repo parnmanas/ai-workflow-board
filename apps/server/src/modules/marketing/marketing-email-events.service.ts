@@ -6,6 +6,7 @@ import { Credential } from '../../entities/Credential';
 import { MarketingCampaign } from '../../entities/MarketingCampaign';
 import { MarketingChannel } from '../../entities/MarketingChannel';
 import { MarketingContactConsent } from '../../entities/MarketingContactConsent';
+import { MarketingContactReply } from '../../entities/MarketingContactReply';
 import { MarketingContact } from '../../entities/MarketingContact';
 import { MarketingEmailSend } from '../../entities/MarketingEmailSend';
 import { MarketingConsentNotice } from '../../entities/MarketingConsentNotice';
@@ -531,11 +532,32 @@ export class MarketingEmailEventsService {
 
   /**
    * 캠페인 메일은 받지 않았지만 재확인 안내를 받은 사람의 회신. 제목이 수신거부(List-Unsubscribe 의 mailto)면 수신거부로
-   * 처리하고 안내 메일을 보낸다 — 철회를 놓치지 않게. 그 밖의 글은 이을 캠페인이 없어 기록하지 않는다.
+   * 처리하고 안내 메일을 보낸다. 그 밖의 글은 계정 연락처 회신함에만 남긴다(에이전트 경로 없음).
    */
-  private async handleNoticeReply(credentialId: string, provider: string, email: InboundEmail): Promise<'unsubscribed' | 'ignored' | 'duplicate'> {
+  private async handleNoticeReply(credentialId: string, provider: string, email: InboundEmail): Promise<'recorded' | 'unsubscribed' | 'ignored' | 'duplicate'> {
     const notice = await this.recentNoticeTo(credentialId, email.from);
-    if (!notice || notice.brand_id || isAutoReply(email.headers, email.subject) || !isUnsubscribeRequest(email.subject)) return 'ignored';
+    if (!notice || isAutoReply(email.headers, email.subject)) return 'ignored';
+    if (!isUnsubscribeRequest(email.subject)) {
+      const content = cleanReplyText({ text: email.text, html: email.html });
+      if (!content) return 'ignored';
+      const contact = await this.contactRepo.findOneBy({ id: notice.contact_id, account_id: notice.account_id });
+      if (!contact || contact.status === 'erased') return 'ignored';
+      const sourceKey = createHash('sha256').update(JSON.stringify([
+        credentialId, provider, email.message_id || [email.from, email.subject, content],
+      ])).digest('hex');
+      const replies = this.contactRepo.manager.getRepository(MarketingContactReply);
+      const scope = { account_id: notice.account_id, source_key: sourceKey };
+      if (await replies.findOneBy(scope)) return 'duplicate';
+      try {
+        await replies.insert({ ...scope, contact_id: contact.id, notice_id: notice.id, brand_id: notice.brand_id, content });
+      } catch (error) {
+        // Concurrent deliveries of the same webhook are serialized by the unique source index.
+        if (await replies.findOneBy(scope)) return 'duplicate';
+        throw error;
+      }
+      return 'recorded';
+    }
+    if (notice.brand_id) return 'ignored';
     const actor: MarketingActor = { type: 'system', id: `email-reply:${provider}`, name: '메일 답장' };
     const changed = await this.suppressContact(notice.contact_id, 'unsubscribed', 'mailto', actor, {
       campaignId: '', sendId: '', postId: '', noticeId: notice.id, brandId: notice.brand_id, detail: '',
