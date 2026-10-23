@@ -6,28 +6,32 @@
 // 만든다 — 티켓 6ad5989a 의 버그가 그것이었다. 그래서 가드가 이 모듈로 ci.yml 을 읽어
 // 목록과 맞춰 본다.
 //
-// 세는 호출의 계약은 좁다: **명령 하나뿐인 step**(`npm test`, `npm run <script>`)이
+// 세는 호출의 계약은 좁다: **명령 하나뿐인 step**(`npm test`, `npm run <script>`, 아는 옵션만)이
 // main push 마다 도는 잡에 있어야 한다. 셸을 해석해 "이 호출의 실패가 CI 를 빨갛게
 // 하는가" 를 따지지 않는다 — GitHub 의 기본 셸은 `bash -e`(pipefail 없음)라 파이프 ·
 // 끝이 아닌 && · || · 서브셸 · here-doc · set +e 가 저마다 실패를 덮고, 그것을 하나씩
-// 흉내 내다 틀린 만큼 가드가 조용히 초록이 된다. 명령이 하나뿐이면 셸 종류와 옵션이
-// 결과를 바꾸지 않는다. 실패 때 할 일(로그 덤프 등)은 `if: failure()` step 으로 둔다.
+// 흉내 내다 틀린 만큼 가드가 조용히 초록이 된다. 명령이 하나뿐이면 보통 셸(bash · sh · pwsh ·
+// powershell · cmd)에서는 그 종료 코드가 step 의 결과다. 실패 때 할 일(로그 덤프 등)은
+// `if: failure()` step 으로 둔다.
 //
 // 부르기는 하지만 세지 않는 호출은 이유와 함께 따로 돌려준다:
-//   - step 의 run 이 그 명령 하나가 아니다(파이프 · && · || · & · if · here-doc …), 또는 npm
-//     앞에 다른 명령(timeout · env …)이 있다
+//   - step 의 run 이 그 명령 하나가 아니다(다른 줄 · 파이프 · && · || · & · if · here-doc …),
+//     npm 앞에 다른 명령(timeout · env …)이 있다, 스크립트에 인자를 넘긴다
+//   - 모르는 npm 옵션(--if-present · --ignore-scripts 와 그 줄임 · --script-shell …)이나
+//     npm · 셸 설정을 바꾸는 환경 변수(npm_config_* · BASH_ENV) — 명령 앞 대입, step · 잡 ·
+//     워크플로 env, 앞 step 이 GITHUB_ENV 나 `npm config set` 으로 남긴 것
+//   - 보통 셸이 아닌 shell:
 //   - 알려진 모양이 아닌 job · step `if:` (식을 계산하지 못한다 — ALWAYS_RUN_CONDITIONS),
 //     또는 needs 로 기다리는 잡의 그런 if:
 //   - `continue-on-error`
-//   - ignore-scripts(옵션이나 npm_config_ignore_scripts env) — pre/post 스위트가 빠진다
 //   - 실행 때 정하는 스크립트 이름(`npm run ${{ matrix.suite }}`)
-//   - 워크플로가 main push 에 걸려 있지 않다(push 트리거 · branches · paths 필터)
-//   - 위 판단에 쓰는 필드(if · continue-on-error · needs · env · defaults · 병합 키)를 읽지
-//     못했다 — 흐름 맵이나 읽지 못한 별칭에 실린 게이트를 놓치지 않으려고, 못 읽으면 세지
-//     않는 쪽으로 정한다
-// 그래서 이 모듈은 셀 수 없는 것을 세는 쪽으로 틀리지 않게 짰다. 반대로 맞는 호출을 못
-// 세면 대조가 빨개지고, 메시지가 무엇을 못 읽었는지 알려 준다. YAML · 셸 밖에서 테스트를
-// 무력하게 만드는 변경(잡의 env 를 바꿔 테스트가 스스로 skip 하게 하는 것 등)은 보지 못한다.
+//   - 워크플로가 main push 에 걸려 있지 않다(push 트리거 · branches 패턴 · paths · tags 필터)
+//   - 위 판단에 쓰는 필드를 읽지 못했다(흐름 맵 · 모르는 별칭 · 태그 · 앵커를 붙인 키 · 병합 키
+//     같은 모양) — 거기 실린 게이트를 놓치지 않으려고 못 읽으면 세지 않는 쪽으로 정한다
+// 맞는 호출을 못 세면 대조가 빨개지고, 메시지가 무엇을 못 읽었는지 알려 준다. 이 모듈이 보지
+// 못하는 것: 저장소 밖의 npm 설정(러너의 ~/.npmrc — 저장소의 .npmrc 는 npmrcProblems 가 본다),
+// 잡의 env 를 바꿔 테스트가 스스로 skip 하게 하는 것처럼 YAML · 셸 밖에서 테스트를 무력하게
+// 만드는 변경.
 //
 // 의존성 없이 읽는다(scripts/audit-ci-branch-coverage.mjs 와 같은 이유 — YAML 파서 의존성을
 // 들이지 않는다).
@@ -72,6 +76,10 @@ function flowSequence(value) {
     .map((item) => item.trim().replace(/^(['"])(.*)\1$/, '$2'))
     .filter((item) => item !== '');
 }
+
+// 맵 안에서 키로 읽지 못한 줄(앵커 · 태그 · `?` 를 붙인 키 등)이 있었다는 표시. 그 줄이 게이트
+// 키(if: false 같은)였을 수 있으니, 읽는 쪽은 이 표시가 있는 맵을 못 읽은 것으로 다룬다.
+export const UNREADABLE_KEY = '\u0000못 읽은 키';
 
 // `__proto__` 같은 키가 프로토타입을 바꾸지 않게 정의로 넣는다.
 function put(map, key, value) {
@@ -139,7 +147,8 @@ export function parseWorkflowYaml(text) {
         const name = key[1] !== undefined ? unescapeDouble(key[1]) : key[2] !== undefined ? key[2].replace(/''/g, "'") : key[3];
         put(map, name, value(body.slice(key[0].length), col));
       } else {
-        i++; // 맵 안의 읽을 수 없는 줄
+        put(map, UNREADABLE_KEY, true);
+        i++;
       }
       skipDeeperThan(col);
       if (i >= lines.length || indentOf(lines[i]) !== col) break;
@@ -265,6 +274,7 @@ export function parseWorkflowYaml(text) {
   return node(0);
 }
 
+
 // ── CI 가 apps/server 에서 부르는 npm 스크립트 ─────────────────────────────
 
 // job · step `if:` 가운데 "main push 마다 돈다" 로 받는 모양. 식을 계산하지 못하므로 아는
@@ -278,7 +288,8 @@ export const ALWAYS_RUN_CONDITIONS = [
   'always()',
   '!cancelled()',
 ];
-// needs 로 기다리는 잡이 건너뛰어져도 도는 조건(상태 함수가 success() 를 대신한다).
+// needs 로 기다리는 잡이 건너뛰어져도 도는 조건. 상태 함수가 없거나 success() 면 GitHub 가
+// 건너뛴 needs 뒤의 잡도 건너뛴다.
 const RUNS_AFTER_SKIPPED_NEEDS = new Set(['always()', '!cancelled()']);
 
 function normalizeCondition(condition) {
@@ -287,8 +298,11 @@ function normalizeCondition(condition) {
   return (wrapped ? wrapped[1] : text).replace(/\s+/g, ' ').trim();
 }
 
-const unread = (field) => `${field} 를 읽지 못했다 — 이 호출이 매번 실패를 드러내는지 판단하지 않는다`;
 const absent = (v) => v === undefined || v === null;
+// 맵이면서, 키로 읽지 못한 줄이나 펼치지 않은 병합 키가 없다.
+const readableMap = (v) => isMap(v) && !Object.hasOwn(v, UNREADABLE_KEY) && !Object.hasOwn(v, '<<');
+const unread = (field) => `${field} 를 읽지 못했다(흐름 맵 · 모르는 별칭 · 태그 · 앵커를 붙인 키 · 병합 키 같은 `
+  + '모양) — 거기 게이트가 실려 있을 수 있어 세지 않는다. 블록 맵 · 시퀀스로 적으면 읽는다';
 
 function conditionGate(node) {
   if (absent(node.if)) return null;
@@ -299,33 +313,60 @@ function conditionGate(node) {
     : `if: ${condition} — main push 마다 도는지 알 수 없다(ALWAYS_RUN_CONDITIONS)`;
 }
 
-const IGNORE_SCRIPTS = 'ignore-scripts — pre/post 스크립트(스위트)가 돌지 않는다';
+// npm 은 npm_config_* 환경 변수(대소문자 · - 와 _ 를 가리지 않는다)와 .npmrc 를 설정으로 읽는다.
+// 스크립트를 도는 방식과 무관하다고 아는 설정(레지스트리 · 인증 · 출력 · 설치 정책) 말고는 바꾸는
+// 것으로 본다 — ignore_scripts 는 pre/post 스위트를 빼고, script_shell 은 스크립트를 아무것도 안
+// 하는 셸로 돌릴 수 있고, userconfig 는 그런 설정이 든 다른 파일을 읽힌다. BASH_ENV 는 bash 가
+// step 스크립트보다 먼저 읽는다.
+const HARMLESS_NPM_CONFIG = new Set([
+  'loglevel', 'color', 'progress', 'fund', 'audit', 'audit_level', 'update_notifier', 'cache',
+  'registry', 'strict_ssl', 'ca', 'cafile', 'always_auth', 'prefer_offline', 'prefer_online',
+  'engine_strict', 'legacy_peer_deps', 'save_exact', 'save_prefix', 'package_lock',
+]);
+function envProblem(name, value) {
+  const key = String(name).toLowerCase().replace(/-/g, '_');
+  if (key === 'bash_env') return name;
+  if (!key.startsWith('npm_config_')) return null;
+  const option = key.slice('npm_config_'.length);
+  // `//registry.example/:_authToken` · `@scope:registry` — 레지스트리별 인증 · 주소다.
+  if (HARMLESS_NPM_CONFIG.has(option) || option.startsWith('//') || option.startsWith('@')) return null;
+  if (option === 'ignore_scripts' && /^\s*(false|0)?\s*$/i.test(String(value ?? ''))) return null;
+  return name;
+}
+const configGate = (what) => `${what} — npm · 셸이 스크립트를 도는 방식을 바꿀 수 있다`;
 
-// npm 은 npm_config_* 환경 변수를 설정으로 읽는다(이름의 대소문자를 가리지 않는다).
 function envGate(env) {
   if (absent(env)) return null;
-  if (!isMap(env)) return unread('env');
-  const ignores = Object.entries(env).some(
-    ([name, value]) => /^npm_config_ignore[-_]scripts$/i.test(name) && !/^\s*(false|0)?\s*$/i.test(String(value ?? '')),
-  );
-  return ignores ? IGNORE_SCRIPTS : null;
+  if (!readableMap(env)) return unread('env');
+  for (const [name, value] of Object.entries(env)) {
+    if (envProblem(name, value) !== null) return configGate(`env 의 ${name}`);
+  }
+  return null;
 }
 
-// defaults.run.working-directory — 없으면 null, 있으면 { dir } , 못 읽으면 { gate }.
+// 보통 셸이 아닌 shell: — 사용자 템플릿(`true {0}` 같은)은 그 명령의 종료 코드를 버릴 수 있다.
+const PLAIN_SHELLS = new Set(['bash', 'sh', 'pwsh', 'powershell', 'cmd']);
+function shellGate(shell) {
+  if (absent(shell)) return null;
+  if (typeof shell !== 'string') return unread('shell');
+  return PLAIN_SHELLS.has(shell.trim()) ? null : `shell: ${shell.trim()} — 보통 셸(bash · sh · pwsh · powershell · cmd)이 아니다`;
+}
+
+// defaults.run 의 working-directory · shell — 없으면 { dir: null, gate: null }.
 function runDefaults(node) {
-  if (absent(node.defaults)) return null;
-  if (!isMap(node.defaults)) return { gate: unread('defaults') };
+  if (absent(node.defaults)) return { dir: null, gate: null };
+  if (!readableMap(node.defaults)) return { dir: null, gate: unread('defaults') };
   const run = node.defaults.run;
-  if (absent(run)) return null;
-  if (!isMap(run)) return { gate: unread('defaults.run') };
+  if (absent(run)) return { dir: null, gate: null };
+  if (!readableMap(run)) return { dir: null, gate: unread('defaults.run') };
   const dir = run['working-directory'];
-  if (absent(dir)) return null;
-  return typeof dir === 'string' ? { dir } : { gate: unread('defaults.run.working-directory') };
+  if (!absent(dir) && typeof dir !== 'string') return { dir: null, gate: unread('defaults.run.working-directory') };
+  return { dir: absent(dir) ? null : dir, gate: shellGate(run.shell) };
 }
 
 // 잡 · step(그리고 워크플로) 자신이 그 안의 호출을 세지 못하게 하는 이유. 없으면 null.
 function gateOf(node) {
-  if (Object.hasOwn(node, '<<')) return unread('병합 키(<<)');
+  if (!readableMap(node)) return unread('키');
   const continueOnError = node['continue-on-error'];
   const coe = absent(continueOnError)
     ? null
@@ -334,7 +375,7 @@ function gateOf(node) {
       : continueOnError.trim().toLowerCase() === 'false'
         ? null
         : 'continue-on-error — 실패해도 CI 가 빨개지지 않는다';
-  return conditionGate(node) ?? coe ?? envGate(node.env) ?? runDefaults(node)?.gate ?? null;
+  return conditionGate(node) ?? coe ?? envGate(node.env) ?? shellGate(node.shell) ?? runDefaults(node).gate;
 }
 
 // 잡은 needs 로 기다리는 잡이 건너뛰어지면 함께 건너뛰어진다. 그래서 기다리는 잡의 if: 도
@@ -357,27 +398,52 @@ function needsGate(jobs, id, seen = new Set()) {
   return null;
 }
 
+// GitHub 필터 패턴이 main 을 고르는가. *, **, ? 만 읽는다 — 그 밖의 문법([] · + · {})이면 null.
+// main 에는 / 가 없으니 * 와 ** 의 차이(/ 를 넘는가)는 여기서 상관없다.
+function patternMatchesMain(pattern) {
+  if (typeof pattern !== 'string' || /[[\]{}+]/.test(pattern)) return null;
+  const source = pattern
+    .replace(/[.^$()|\\]/g, '\\$&')
+    .replace(/\*+|\?/g, (glob) => (glob === '?' ? '.' : '.*'));
+  return new RegExp(`^${source}$`).test('main');
+}
+
+const unreadTrigger = (field) => `${field} 를 읽지 못했다 — 워크플로가 main push 에 도는지 판단하지 않는다`;
+
 // 워크플로가 main push 에 걸려 있는가 — 아니면 거기 있는 호출은 main 에 들어갈 때 돌지 않는다.
-// GitHub 규칙: branches(-ignore) 없이 tags(-ignore) 만 있으면 브랜치 push 에는 돌지 않는다.
+// GitHub 규칙: branches 는 차례대로 보고 마지막으로 맞은 패턴이 정한다(! 는 뺀다). branches
+// (-ignore) 없이 tags(-ignore) 만 있으면 브랜치 push 에는 돌지 않는다.
 function triggerGate(on) {
-  const events = typeof on === 'string' && /^\w+$/.test(on) ? [on] : Array.isArray(on) ? on : isMap(on) ? Object.keys(on) : null;
-  if (events === null) return unread('on');
+  const events = typeof on === 'string' && /^\w+$/.test(on) ? [on] : Array.isArray(on) ? on : readableMap(on) ? Object.keys(on) : null;
+  if (events === null) return unreadTrigger('on');
   if (!events.includes('push')) return 'on: 에 push 가 없다 — main 에 들어갈 때 돌지 않는다';
   const push = isMap(on) ? on.push : null;
   if (absent(push)) return null;
-  if (!isMap(push)) return unread('on.push');
+  if (!readableMap(push)) return unreadTrigger('on.push');
   if (!absent(push.paths) || !absent(push['paths-ignore'])) {
     return 'on.push 에 paths 필터가 있다 — 서버를 바꾼 push 에도 돌지 않을 수 있다';
   }
   const list = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v : null);
   if (!absent(push.branches)) {
     const branches = list(push.branches);
-    if (branches === null) return unread('on.push.branches');
-    if (!branches.includes('main')) return 'on.push.branches 에 main 이 없다';
+    if (branches === null) return unreadTrigger('on.push.branches');
+    let picked = false;
+    for (const pattern of branches) {
+      const negated = typeof pattern === 'string' && pattern.startsWith('!');
+      const match = patternMatchesMain(negated ? pattern.slice(1) : pattern);
+      if (match === null) return unreadTrigger('on.push.branches');
+      if (match) picked = !negated;
+    }
+    if (!picked) return 'on.push.branches 가 main 을 고르지 않는다';
   }
   if (!absent(push['branches-ignore'])) {
     const ignored = list(push['branches-ignore']);
-    if (ignored === null || ignored.includes('main')) return 'on.push.branches-ignore 가 main 을 뺄 수 있다';
+    if (ignored === null) return unreadTrigger('on.push.branches-ignore');
+    for (const pattern of ignored) {
+      const match = patternMatchesMain(pattern);
+      if (match === null) return unreadTrigger('on.push.branches-ignore');
+      if (match) return 'on.push.branches-ignore 가 main 을 뺀다';
+    }
   }
   if (absent(push.branches) && absent(push['branches-ignore']) && (!absent(push.tags) || !absent(push['tags-ignore']))) {
     return 'on.push 에 tags 필터만 있다 — 브랜치 push 에는 돌지 않는다';
@@ -386,68 +452,98 @@ function triggerGate(on) {
 }
 
 // 저장소 루트 기준 상대 디렉터리를 한 모양으로 — './apps/server/', 'apps/server',
-// '${{ github.workspace }}/apps/server', '$GITHUB_WORKSPACE/apps/server' 는 같다.
-const WORKSPACE_RE = /^(?:\$\{\{\s*github\.workspace\s*\}\}|\$\{?GITHUB_WORKSPACE\}?)(?:\/|$)/;
+// '${{ github.workspace }}/apps/server' 는 같다. working-directory 는 ${{ }} 만 풀린다 —
+// `$GITHUB_WORKSPACE` 는 셸이 푸는 것이라 `cd` 대상에서만 같은 뜻이다(joinDir).
+const WORKSPACE_EXPR_RE = /^\$\{\{\s*github\.workspace\s*\}\}(?:\/|$)/;
+const WORKSPACE_ENV_RE = /^\$\{?GITHUB_WORKSPACE\}?(?:\/|$)/;
 function normalizeDir(dir) {
-  const relative = String(dir).replace(/\\/g, '/').replace(WORKSPACE_RE, '');
+  const relative = String(dir).replace(/\\/g, '/').replace(WORKSPACE_EXPR_RE, '');
   const normalized = path.posix.normalize(relative === '' ? '.' : relative);
   return normalized.length > 1 ? normalized.replace(/\/$/, '') : normalized;
 }
-const joinDir = (cwd, target) => (WORKSPACE_RE.test(target) ? normalizeDir(target) : normalizeDir(path.posix.join(cwd, target)));
+function joinDir(cwd, target) {
+  if (WORKSPACE_ENV_RE.test(target)) return normalizeDir(target.replace(WORKSPACE_ENV_RE, ''));
+  if (WORKSPACE_EXPR_RE.test(target)) return normalizeDir(target);
+  return normalizeDir(path.posix.join(cwd, target));
+}
 
 const SERVER_DIR = 'apps/server';
 // apps/server 의 npm workspace 이름. 루트에서 `npm run build -w server` 로 부른다.
 const SERVER_WORKSPACES = new Set(['server', SERVER_DIR]);
-// 값을 받는 npm 옵션. 그 밖의 옵션은 값을 받지 않는다고 본다(--silent · --if-present 등).
+// 세어도 되는 npm 옵션 — 값을 받는 것과 받지 않는 것. 이 밖의 옵션은 스크립트가 도는 방식을
+// 바꿀 수 있다고 본다(--if-present 는 스크립트가 없어도 0 으로 끝나고, npm 은 옵션 이름의
+// 줄임 `--ignore-script` 도 받아들인다).
 const NPM_VALUE_FLAGS = new Set(['-w', '--workspace', '--prefix', '-C', '--loglevel']);
+const NPM_PLAIN_FLAGS = new Set(['--silent', '-s', '--quiet', '-q', '--color', '--no-color']);
 
 // 단순 명령 하나가 `npm test` · `npm run <script>` 로 apps/server 의 스크립트를 부르면
-// { script, ignoreScripts, wrapped } 를, 아니면 null 을 돌려준다. cwd 는 저장소 루트 기준이다.
-// wrapped 는 npm 앞에 다른 명령(timeout · time · env …)이 있다는 뜻이다.
+// { script, problem } 을, 아니면 null 을 돌려준다. problem 은 그 호출을 세지 못하는 이유다
+// (없으면 null). cwd 는 저장소 루트 기준이다.
 function serverNpmCall(words, cwd) {
   let at = 0;
-  while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at])) at++; // FOO=1 npm …
-  const wrapped = words[at] !== 'npm';
-  if (wrapped) at = words.indexOf('npm', at);
-  if (at === -1) return null;
+  let problem = null;
+  for (; at < words.length && /^[A-Za-z_][\w-]*=/.test(words[at]); at++) {
+    const [name, ...value] = words[at].split('=');
+    if (envProblem(name, value.join('=')) !== null) problem ??= configGate(`명령 앞의 ${name}=`);
+  }
+  if (words[at] !== 'npm') {
+    problem = 'npm 앞에 다른 명령(timeout · time · env …)이 있다 — 그 명령이 npm 의 종료 코드를 그대로 '
+      + '넘기는지 가드는 모른다. 시간 제한은 `timeout-minutes:`, 환경 변수는 step `env:` 로 둔다';
+    at = words.indexOf('npm', at);
+    if (at === -1) return null;
+  }
 
   const workspaces = [];
   let prefix = null;
-  let ignoreScripts = false;
   const positional = [];
+  let passesArgs = false;
   for (let j = at + 1; j < words.length; j++) {
     const word = words[j];
-    if (word === '--') break;
+    if (word === '--') {
+      passesArgs = j + 1 < words.length;
+      break;
+    }
     const inline = /^(--?[\w-]+)=(.*)$/.exec(word);
     const flag = inline ? inline[1] : word;
-    if (flag === '--ignore-scripts') {
-      ignoreScripts = !inline || !/^(false|0)$/i.test(inline[2]);
-    } else if (NPM_VALUE_FLAGS.has(flag)) {
+    if (NPM_VALUE_FLAGS.has(flag)) {
       const value = inline ? inline[2] : words[++j];
       if (value === undefined) break;
       if (flag === '--prefix' || flag === '-C') prefix = value;
       else if (flag === '-w' || flag === '--workspace') workspaces.push(value);
-    } else if (!word.startsWith('-')) {
+    } else if (flag === '--ignore-scripts' && inline && /^(false|0)$/i.test(inline[2])) {
+      // 명시적으로 끈 것은 괜찮다.
+    } else if (word.startsWith('-')) {
+      if (!NPM_PLAIN_FLAGS.has(word)) problem ??= configGate(`npm 옵션 ${word}`);
+    } else {
       positional.push(word);
     }
   }
 
-  const [command, name] = positional;
+  const [command, name, ...extra] = positional;
   const script = command === 'test' ? 'test' : command === 'run' ? name : undefined;
   if (script === undefined) return null;
+  if (command === 'test' && name !== undefined) extra.unshift(name);
+  if (extra.length > 0 || passesArgs) {
+    problem ??= '스크립트에 인자를 넘긴다 — 무엇이 도는지 바뀔 수 있다. 인자가 필요하면 그 인자를 담은 '
+      + 'package.json 스크립트를 따로 둔다';
+  }
 
   const inServer = workspaces.length > 0
     ? workspaces.some((w) => SERVER_WORKSPACES.has(normalizeDir(w)))
     : (prefix === null ? cwd : joinDir(cwd, prefix)) === SERVER_DIR;
-  return inServer ? { script, ignoreScripts, wrapped } : null;
+  return inServer ? { script, problem } : null;
 }
 
-const NOT_ALONE = 'step 의 run 이 이 명령 하나가 아니다 — 기본 셸(bash -e, pipefail 없음)에서는 파이프 · '
-  + '&& · || · & · if 같은 것이 실패를 덮을 수 있어 세지 않는다. 이 명령 하나만 있는 step 으로 부르고, '
-  + '실패 때 할 일은 `if: failure()` step 으로 둔다';
+const NOT_ALONE = 'step 의 run 이 이 명령 하나가 아니다 — 다른 줄이 하나라도 있으면(set -euo pipefail · '
+  + 'echo ::group:: 도) 세지 않는다. 기본 셸(bash -e, pipefail 없음)에서는 파이프 · && · || · & · if 같은 '
+  + '것이 실패를 덮을 수 있어서다. 이 명령 하나만 있는 step 으로 부르고, 실패 때 할 일은 `if: failure()` '
+  + 'step 으로 둔다';
 
-const WRAPPED = 'npm 앞에 다른 명령(timeout · time · env …)이 있다 — 그 명령이 npm 의 종료 코드를 그대로 '
-  + '넘기는지 가드는 모른다. 시간 제한은 `timeout-minutes:`, 환경 변수는 step `env:` 로 둔다';
+// 앞 step 이 뒤 step 들의 npm · 셸 설정을 바꿨는가 — GITHUB_ENV 에 npm_config_* · BASH_ENV 를
+// 쓰거나, `npm config set` · `npm set` 으로 사용자 .npmrc 를 바꾼다.
+function taintsLaterSteps(run) {
+  return (/GITHUB_ENV/.test(run) && /npm_config_|BASH_ENV/i.test(run)) || /\bnpm\s+(?:config\s+)?set\b/.test(run);
+}
 
 // 워크플로가 apps/server 에서 부르는 npm 스크립트.
 //   invoked   — 명령 하나뿐인 step 으로, main push 마다 도는 잡에서 부르는 스크립트 이름
@@ -461,21 +557,27 @@ export function ciServerNpmInvocations(text) {
   const uncounted = [];
   if (!isMap(workflow) || !isMap(workflow.jobs)) return { invoked, uncounted };
 
+  const workflowDefaults = runDefaults(workflow);
   const workflowGate = triggerGate(workflow.on) ?? gateOf(workflow);
-  // 디렉터리를 못 읽은 곳(null)의 호출은 apps/server 일 수도 있다 — 세지는 않되 알린다.
-  const dirOf = (defaults, inherited) => (defaults === null ? inherited : defaults.gate ? null : defaults.dir);
-  const workflowDir = dirOf(runDefaults(workflow), '.');
   for (const [job, spec] of Object.entries(workflow.jobs)) {
     if (!isMap(spec) || !Array.isArray(spec.steps)) continue;
+    const jobDefaults = runDefaults(spec);
     const jobGate = workflowGate ?? gateOf(spec) ?? needsGate(workflow.jobs, job);
-    const jobDir = dirOf(runDefaults(spec), workflowDir);
+    // 디렉터리를 못 읽었으면(null) 그 까닭(defaults · working-directory)이 이미 gate 에 있다.
+    const jobDir = jobDefaults.gate !== null || workflowDefaults.gate !== null
+      ? null
+      : jobDefaults.dir ?? workflowDefaults.dir ?? '.';
+    let tainted = null;
     for (const step of spec.steps) {
       if (!isMap(step) || typeof step.run !== 'string') continue;
       const ownDir = step['working-directory'];
-      const gate = jobGate ?? gateOf(step) ?? (absent(ownDir) || typeof ownDir === 'string' ? null : unread('working-directory'));
+      const gate = jobGate
+        ?? gateOf(step)
+        ?? (absent(ownDir) || typeof ownDir === 'string' ? null : unread('working-directory'))
+        ?? tainted;
+      if (taintsLaterSteps(step.run)) tainted ??= configGate('앞 step 이 GITHUB_ENV 나 npm config set 으로 설정을 남겼다');
       const commands = shellCommands(step.run);
       const single = commands.length === 1 && [null, '\n', ';'].includes(commands[0].next);
-      // 디렉터리를 못 읽었으면(null) 그 까닭(defaults · working-directory)이 이미 gate 에 있다.
       const startDir = typeof ownDir === 'string' ? ownDir : absent(ownDir) ? jobDir : null;
       let cwd = startDir === null ? null : normalizeDir(startDir);
       for (const { words } of commands) {
@@ -488,12 +590,26 @@ export function ciServerNpmInvocations(text) {
         const why = gate
           ?? (call.script.includes('$') ? '스크립트 이름을 실행 때 정한다 — 무엇을 부르는지 알 수 없다' : null)
           ?? (single ? null : NOT_ALONE)
-          ?? (call.wrapped ? WRAPPED : null)
-          ?? (call.ignoreScripts ? IGNORE_SCRIPTS : null);
+          ?? call.problem;
         if (why === null) invoked.add(call.script);
         else uncounted.push({ job, script: call.script, why });
       }
     }
   }
   return { invoked, uncounted };
+}
+
+// 저장소에 둔 .npmrc 가 스크립트를 도는 방식을 바꾸는가 — 그러면 CI 의 모든 npm 호출에 걸린다.
+// 반환: 문제가 된 설정 줄들. `;` · `#` 주석과 빈 줄은 건너뛴다.
+export function npmrcProblems(text) {
+  return String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith(';') && !line.startsWith('#'))
+    .filter((line) => {
+      const at = line.indexOf('=');
+      const name = (at === -1 ? line : line.slice(0, at)).trim();
+      const value = at === -1 ? 'true' : line.slice(at + 1).trim();
+      return envProblem(`npm_config_${name}`, value) !== null;
+    });
 }

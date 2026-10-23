@@ -61,7 +61,7 @@ import {
   auditRegistration,
   compareCiEntries,
 } from './helpers/registration-audit.mjs';
-import { ciServerNpmInvocations } from './helpers/ci-workflow.mjs';
+import { ciServerNpmInvocations, npmrcProblems } from './helpers/ci-workflow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = path.resolve(__dirname, '..');
@@ -230,6 +230,21 @@ test('CI 진입점 목록은 ci.yml 이 apps/server 에서 명령 하나뿐인 s
     [],
     'ci.yml 이 apps/server 에서 main push 와 PR 마다 부르고 테스트를 도는데 CI_ENTRY_SCRIPTS 에 없는 스크립트 — '
       + `그 스크립트로만 닿는 파일이 고아로 잘못 신고된다. 목록에 보태라: ${undeclared.join(', ')}`,
+  );
+});
+
+// npm 은 작업 디렉터리와 저장소 루트의 .npmrc 를 읽는다. 거기서 ignore-scripts · script-shell 같은
+// 것을 켜면 CI 의 모든 npm 호출에서 pre/post 스위트가 빠지거나 스크립트가 아무것도 하지 않는다 —
+// ci.yml 대조가 볼 수 없는 자리라 여기서 본다.
+test('저장소의 .npmrc 는 npm 이 스크립트를 도는 방식을 바꾸지 않는다', () => {
+  const problems = [path.resolve(SERVER_ROOT, '..', '..', '.npmrc'), path.join(SERVER_ROOT, '.npmrc')]
+    .filter((file) => fs.existsSync(file))
+    .flatMap((file) => npmrcProblems(fs.readFileSync(file, 'utf8')).map((line) => `${path.relative(SERVER_ROOT, file)}: ${line}`));
+  assert.deepEqual(
+    problems,
+    [],
+    '.npmrc 가 스크립트를 도는 방식을 바꾼다 — CI 의 npm test · npm run test:qa:pg 가 pre/post 스위트를 빼거나 '
+      + `아무것도 안 하고 끝날 수 있다: ${problems.join('; ')}`,
   );
 });
 

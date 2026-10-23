@@ -14,7 +14,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shellCommands } from './helpers/shell-commands.mjs';
-import { ALWAYS_RUN_CONDITIONS, ciServerNpmInvocations, parseWorkflowYaml } from './helpers/ci-workflow.mjs';
+import {
+  ALWAYS_RUN_CONDITIONS,
+  UNREADABLE_KEY,
+  ciServerNpmInvocations,
+  npmrcProblems,
+  parseWorkflowYaml,
+} from './helpers/ci-workflow.mjs';
 
 const invokedIn = (yaml) => [...ciServerNpmInvocations(yaml).invoked].sort();
 const uncountedIn = (yaml) => ciServerNpmInvocations(yaml).uncounted.map(({ job, script }) => `${job} ${script}`).sort();
@@ -169,6 +175,14 @@ unknown: *nope
   assert.deepEqual(doc.needs, ['build', 'gated']);
   assert.deepEqual(doc.steps, [{ uses: 'actions/checkout@x' }, { uses: 'actions/checkout@x' }, { name: 'n', run: 'r' }]);
   assert.equal(doc.unknown, '*nope', '모르는 별칭은 원문으로 남는다');
+});
+
+test('YAML: 키로 읽지 못한 줄은 버리지 않고 표시를 남긴다', () => {
+  const doc = parseWorkflowYaml('a: 1\n&x b: 2\nc: 3\n');
+  assert.equal(doc.a, '1');
+  assert.equal(doc.c, '3');
+  assert.equal(doc[UNREADABLE_KEY], true, '그 줄이 게이트 키였을 수 있다 — 읽는 쪽이 이 맵을 못 읽은 것으로 다룬다');
+  assert.equal(Object.hasOwn(parseWorkflowYaml('a: 1\n'), UNREADABLE_KEY), false);
 });
 
 test('YAML: 병합 키(<<)는 펼치지 않고 보통 키로 둔다', () => {
@@ -350,19 +364,27 @@ jobs:
         run: "npm run test:quoted"
       - working-directory: \${{ github.workspace }}/apps/server
         run: npm run test:workspace-expr
+      - working-directory: \${{github.workspace}}/apps/server
+        run: npm run test:workspace-expr-tight
+      - working-directory: $GITHUB_WORKSPACE/apps/server
+        run: npm run test:literal-env-dir
       - working-directory: apps\\\\server
         run: npm run test:backslash
       - working-directory: apps/server
-        run: npm run test:args -- -w client
+        run: npm run test:bare-dashes --
       - working-directory: apps/server
         run: npm run test:semicolon;
+      - working-directory: apps/server
+        run: "npm run test:trailing-newline\\n"
+      - working-directory: apps/server
+        run: npm --silent run test:silent -s --loglevel=warn --ignore-scripts=false
       - working-directory: apps/server
         run: npm run
       - run: npm run test:root-only
 `);
   assert.deepEqual(invokedIn(yaml), [
-    'test:args',
     'test:backslash',
+    'test:bare-dashes',
     'test:block',
     'test:env',
     'test:folded',
@@ -371,11 +393,15 @@ jobs:
     'test:quoted',
     'test:semicolon',
     'test:short-prefix',
+    'test:silent',
+    'test:trailing-newline',
     'test:workspace-expr',
+    'test:workspace-expr-tight',
     'test:ws-first',
     'test:ws-inline',
     'test:ws-path',
-  ], '`--` 뒤의 -w 는 스크립트 인자다. 이름 없는 `npm run` 은 호출이 아니다. 루트의 npm run 은 apps/server 가 아니다');
+  ], '이름 없는 `npm run` 은 호출이 아니다. 루트의 npm run 은 apps/server 가 아니다. working-directory 는 '
+    + '${{ }} 만 풀린다 — $GITHUB_WORKSPACE 를 그대로 적은 디렉터리는 apps/server 가 아니다');
 });
 
 test('CI 호출: 잡과 워크플로의 defaults.run.working-directory 를 따른다', () => {
@@ -446,6 +472,7 @@ jobs:
           cd apps
           cd server
           npm run test:after-two-cds
+      - run: cd "\${GITHUB_WORKSPACE}/apps/server" && npm run test:brace-env-cd
 `);
   const { invoked, uncounted } = ciServerNpmInvocations(yaml);
   assert.deepEqual([...invoked], []);
@@ -457,6 +484,7 @@ jobs:
     'test:and-not-last',
     'test:and-or',
     'test:background',
+    'test:brace-env-cd',
     'test:heredoc',
     'test:in-if',
     'test:or-handler',
@@ -583,7 +611,7 @@ jobs:
   const why = Object.fromEntries(uncounted.map((u) => [u.script, u.why]));
   assert.match(why['test:dispatch-only'], /^if: github\.event_name == 'workflow_dispatch'/);
   assert.match(why['test:job-coe'], /continue-on-error/);
-  assert.match(why['test:step-env-ignore'], /ignore-scripts/);
+  assert.match(why['test:step-env-ignore'], /NPM_CONFIG_IGNORE_SCRIPTS/);
   assert.match(why.test, /ignore-scripts/);
   assert.match(why['${{'], /실행 때/);
 });
@@ -682,14 +710,14 @@ test('CI 호출: 앵커로 나눠 쓴 조건 · env · needs 를 따라간다', 
   const yaml = onMainPush(`
 jobs:
   first:
-    if: &heavy github.ref != 'refs/heads/production.private' && github.event_name != 'schedule'
+    if: &heavy-cond github.ref != 'refs/heads/production.private' && github.event_name != 'schedule'
     env: &hardened
       npm_config_ignore_scripts: 'true'
     steps:
       - working-directory: apps/server
         run: npm run test:first
   second:
-    if: *heavy
+    if: *heavy-cond
     steps:
       - working-directory: apps/server
         run: npm run test:second
@@ -760,6 +788,30 @@ jobs:
     steps:
       - working-directory: apps/server
         run: npm run test:always-after-gated
+  wrapped-always-after-gated:
+    if: \${{ always() }}
+    needs: gated
+    steps:
+      - working-directory: apps/server
+        run: npm run test:wrapped-always-after-gated
+  not-cancelled-after-gated:
+    if: '!cancelled()'
+    needs: gated
+    steps:
+      - working-directory: apps/server
+        run: npm run test:not-cancelled-after-gated
+  success-after-gated:
+    if: success()
+    needs: gated
+    steps:
+      - working-directory: apps/server
+        run: npm run test:success-after-gated
+  true-after-gated:
+    if: true
+    needs: gated
+    steps:
+      - working-directory: apps/server
+        run: npm run test:true-after-gated
   cycle-a:
     needs: cycle-b
     steps:
@@ -771,10 +823,23 @@ jobs:
       - run: echo b
 `);
   const { invoked, uncounted } = ciServerNpmInvocations(yaml);
-  assert.deepEqual([...invoked].sort(), ['test:after-build', 'test:after-coe', 'test:always-after-gated', 'test:cycle']);
+  assert.deepEqual([...invoked].sort(), [
+    'test:after-build',
+    'test:after-coe',
+    'test:always-after-gated',
+    'test:cycle',
+    'test:not-cancelled-after-gated',
+    'test:wrapped-always-after-gated',
+  ]);
   assert.deepEqual(
     uncounted.map(({ script, why }) => [script, why.split(' — ')[0]]),
-    [['test:after-gated', 'needs: gated'], ['test:chain', 'needs: after-gated']],
+    [
+      ['test:after-gated', 'needs: gated'],
+      ['test:chain', 'needs: after-gated'],
+      ['test:success-after-gated', 'needs: gated'],
+      ['test:true-after-gated', 'needs: gated'],
+    ],
+    '상태 함수가 없거나 success() 면 건너뛴 needs 뒤의 잡도 건너뛴다',
   );
   assert.match(uncounted[1].why, /needs: after-gated — needs: gated — if: github\.event_name/);
 });
@@ -787,23 +852,254 @@ jobs:
       - working-directory: apps/server
         run: npm test
 `;
-  const counted = (on) => invokedIn(`on: ${on}${job}`).length === 1;
-  const reason = (on) => ciServerNpmInvocations(`on: ${on}${job}`).uncounted[0]?.why ?? '';
+  const reason = (on) => {
+    const { invoked, uncounted } = ciServerNpmInvocations(`on: ${on}${job}`);
+    return invoked.size === 1 ? null : uncounted[0]?.why ?? '';
+  };
+  const push = (body) => `\n  push:\n${body.split('\n').map((line) => `    ${line}`).join('\n')}`;
 
-  assert.ok(counted('push'), 'on: push');
-  assert.ok(counted('[push, pull_request]'), '흐름 시퀀스');
-  assert.ok(counted('\n  push:\n    branches-ignore: [release]'), 'main 을 빼지 않는 branches-ignore');
-  assert.match(reason('[pull_request, workflow_dispatch]'), /push 가 없다/);
-  assert.match(reason('\n  push:\n    paths: [docs/**]'), /paths 필터/);
-  assert.match(reason('\n  push:\n    branches: [release]'), /main 이 없다/);
-  assert.match(reason('\n  push:\n    branches-ignore: [main]'), /branches-ignore/);
-  assert.match(reason('\n  push:\n    tags: [v*]'), /tags 필터만/);
-  assert.match(reason('{ push: {} }'), /on 를 읽지 못했다/);
+  for (const [on, label] of [
+    ['push', 'on: push'],
+    ['[push, pull_request]', '흐름 시퀀스'],
+    [push('branches: main'), '문자열 하나인 branches'],
+    [push("branches: ['*']"), '* 는 main 을 고른다'],
+    [push("branches: ['**']"), '** 는 main 을 고른다'],
+    [push("branches: ['ma?n']"), '? 는 한 글자다'],
+    [push("branches: ['!main', main]"), '마지막으로 맞은 패턴이 정한다'],
+    [push('branches-ignore: [release, "rel/**"]'), 'main 을 빼지 않는 branches-ignore'],
+    [push('branches: [main]\ntags: [v*]'), 'branches 가 있으면 tags 는 상관없다'],
+  ]) {
+    assert.equal(reason(on), null, label);
+  }
+
+  for (const [on, pattern, label] of [
+    ['[pull_request, workflow_dispatch]', /push 가 없다/, 'push 가 없다'],
+    [push('paths: [docs/**]'), /paths 필터/, 'paths'],
+    [push('paths-ignore: [apps/server/**]'), /paths 필터/, 'paths-ignore'],
+    [push('branches: [release]'), /main 을 고르지 않는다/, 'main 이 없는 branches'],
+    [push("branches: [main, '!main']"), /main 을 고르지 않는다/, '뒤의 ! 가 main 을 뺀다'],
+    [push('branches-ignore: [main]'), /branches-ignore 가 main 을 뺀다/, 'branches-ignore: main'],
+    [push("branches-ignore: ['ma*']"), /branches-ignore 가 main 을 뺀다/, 'branches-ignore 패턴'],
+    [push("branches-ignore: ['**']\ntags: [v*]"), /branches-ignore 가 main 을 뺀다/, 'tags 만 받는 흔한 모양'],
+    [push('tags: [v*]'), /tags 필터만/, 'tags 만'],
+    [push('tags-ignore: [v*]'), /tags 필터만/, 'tags-ignore 만'],
+    [push("branches: ['rel[0-9]']"), /on\.push\.branches 를 읽지 못했다/, '읽지 않는 패턴 문법'],
+    [push('branches: { a: b }'), /on\.push\.branches 를 읽지 못했다/, '흐름 맵 branches'],
+    [push('branches-ignore: { a: b }'), /on\.push\.branches-ignore 를 읽지 못했다/, '흐름 맵 branches-ignore'],
+    [push('branches:\n  a: b'), /on\.push\.branches 를 읽지 못했다/, '블록 맵 branches'],
+    [push('branches-ignore:\n  a: b'), /on\.push\.branches-ignore 를 읽지 못했다/, '블록 맵 branches-ignore'],
+    ['\n  push:\n  !!str other: y', /on 를 읽지 못했다/, '키로 읽지 못한 줄이 있는 on'],
+    ['\n  push: anything', /on\.push 를 읽지 못했다/, '맵이 아닌 push'],
+    ['{ push: {} }', /on 를 읽지 못했다 — 워크플로가 main push 에 도는지/, '흐름 맵 on'],
+  ]) {
+    assert.match(reason(on) ?? '(셌다)', pattern, label);
+  }
   assert.match(ciServerNpmInvocations(job).uncounted[0].why, /on 를 읽지 못했다/, 'on: 이 없는 워크플로');
 });
 
 test('CI 호출: 알려진 조건 목록은 지금 ci.yml 의 무거운 잡 조건을 담는다', () => {
   assert.ok(
     ALWAYS_RUN_CONDITIONS.includes("github.ref != 'refs/heads/production.private' && github.event_name != 'schedule'"),
+  );
+});
+
+test('CI 호출: 모르는 npm 옵션 · 스크립트 인자 · 명령 앞의 npm 설정은 세지 않는다', () => {
+  const { invoked, uncounted } = ciServerNpmInvocations(onMainPush(`
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: npm run test:if-present --if-present
+      - working-directory: apps/server
+        run: npm test --ignore-script
+      - working-directory: apps/server
+        run: npm run test:script-shell --script-shell=true
+      - working-directory: apps/server
+        run: npm_config_ignore_scripts=true npm run test:prefix-env
+      - working-directory: apps/server
+        run: NPM_CONFIG_IGNORE_SCRIPTS=1 npm run test:prefix-env-upper
+      - working-directory: apps/server
+        run: BASH_ENV=/tmp/x npm run test:bash-env
+      - working-directory: apps/server
+        run: npm run test:extra-arg extra
+      - working-directory: apps/server
+        run: npm run test:after-dashes -- -w client
+      - working-directory: apps/server
+        run: NODE_OPTIONS=--max-old-space-size=4096 npm run test:node-options
+      - working-directory: apps/server
+        run: npm run test:ignore-true --ignore-scripts=true
+`));
+  assert.deepEqual([...invoked], ['test:node-options'], 'npm 설정이 아닌 환경 변수는 괜찮다');
+  const why = Object.fromEntries(uncounted.map((u) => [u.script, u.why]));
+  assert.deepEqual(Object.keys(why).sort(), [
+    'test',
+    'test:after-dashes',
+    'test:bash-env',
+    'test:extra-arg',
+    'test:if-present',
+    'test:ignore-true',
+    'test:prefix-env',
+    'test:prefix-env-upper',
+    'test:script-shell',
+  ]);
+  assert.match(why['test:ignore-true'], /npm 옵션 --ignore-scripts=true/);
+  assert.match(why['test:if-present'], /npm 옵션 --if-present/);
+  assert.match(why.test, /npm 옵션 --ignore-script/, 'npm 은 옵션 이름의 줄임도 받아들인다');
+  assert.match(why['test:prefix-env'], /명령 앞의 npm_config_ignore_scripts=/);
+  assert.match(why['test:extra-arg'], /인자를 넘긴다/);
+  assert.match(why['test:after-dashes'], /인자를 넘긴다/);
+
+  const testWithArg = ciServerNpmInvocations(onMainPush(`
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        run: npm test extra
+`));
+  assert.deepEqual([...testWithArg.invoked], []);
+  assert.match(testWithArg.uncounted[0].why, /인자를 넘긴다/, '`npm test <인자>` 도 스크립트에 인자를 넘긴다');
+});
+
+test('CI 호출: env 의 npm · 셸 설정 — 스크립트를 도는 방식을 바꾸는 것만 막는다', () => {
+  const step = (name, env) => `
+  ${name}:
+    steps:
+      - working-directory: apps/server
+        env:
+          ${env}
+        run: npm run test:${name}`;
+  const yaml = onMainPush(`
+jobs:${step('bash-env', 'BASH_ENV: /tmp/x')}${step('userconfig', 'npm_config_userconfig: /tmp/npmrc')}${step('hyphen', "npm_config_ignore-scripts: 'true'")}${step('zero', "npm_config_ignore_scripts: '0'")}${step('audit', "npm_config_audit: 'false'")}${step('registry', 'NPM_CONFIG_REGISTRY: https://r.example')}
+`);
+  assert.deepEqual(invokedIn(yaml), ['test:audit', 'test:registry', 'test:zero']);
+  assert.deepEqual(uncountedIn(yaml), ['bash-env test:bash-env', 'hyphen test:hyphen', 'userconfig test:userconfig']);
+});
+
+// GITHUB_ENV 와 사용자 .npmrc 는 같은 잡의 뒤 step 들로 이어진다.
+test('CI 호출: 앞 step 이 GITHUB_ENV 나 npm config set 으로 남긴 설정은 뒤 step 의 호출에 걸린다', () => {
+  const yaml = onMainPush(`
+jobs:
+  github-env:
+    steps:
+      - working-directory: apps/server
+        run: npm run test:before-taint
+      - run: echo "npm_config_ignore_scripts=true" >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-github-env
+  npm-config-set:
+    steps:
+      - run: npm config set ignore-scripts true
+      - working-directory: apps/server
+        run: npm run test:after-config-set
+  other-env:
+    steps:
+      - run: echo "FOO=1" >> "$GITHUB_ENV"
+      - working-directory: apps/server
+        run: npm run test:after-other-env
+`);
+  assert.deepEqual(invokedIn(yaml), ['test:after-other-env', 'test:before-taint'], '앞 step 만 뒤 step 에 걸리고, 잡을 넘지 않는다');
+  assert.deepEqual(uncountedIn(yaml), ['github-env test:after-github-env', 'npm-config-set test:after-config-set']);
+});
+
+test('CI 호출: 보통 셸이 아닌 shell: 은 세지 않는다', () => {
+  const yaml = onMainPush(`
+jobs:
+  plain:
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - working-directory: apps/server
+        run: npm run test:defaults-bash
+      - working-directory: apps/server
+        shell: pwsh
+        run: npm run test:pwsh
+  custom-step:
+    steps:
+      - working-directory: apps/server
+        shell: true {0}
+        run: npm run test:custom-step
+  custom-defaults:
+    defaults:
+      run:
+        shell: bash -c 'exit 0' {0}
+    steps:
+      - working-directory: apps/server
+        run: npm run test:custom-defaults
+  list-shell:
+    steps:
+      - working-directory: apps/server
+        shell: [bash]
+        run: npm run test:list-shell
+`);
+  assert.deepEqual(invokedIn(yaml), ['test:defaults-bash', 'test:pwsh']);
+  const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
+  assert.match(why['test:custom-step'], /^shell: true \{0\}/);
+  assert.match(why['test:custom-defaults'], /^shell: bash -c/);
+  assert.match(why['test:list-shell'], /^shell 를 읽지 못했다/);
+});
+
+// 키로 읽지 못한 줄이 게이트 키(if: false)였을 수 있다 — 그 맵은 못 읽은 것으로 다룬다.
+test('CI 호출: 앵커 · 태그 · ? 를 붙인 키처럼 키로 읽지 못한 줄이 있는 step 은 세지 않는다', () => {
+  const yaml = onMainPush(`
+jobs:
+  a:
+    steps:
+      - working-directory: apps/server
+        &g if: false
+        run: npm run test:anchored-key
+      - working-directory: apps/server
+        !!str if: false
+        run: npm run test:tagged-key
+      - working-directory: apps/server
+        ? if
+        : false
+        run: npm run test:explicit-key
+`);
+  const { invoked, uncounted } = ciServerNpmInvocations(yaml);
+  assert.deepEqual([...invoked], []);
+  assert.deepEqual(uncounted.map((u) => u.script).sort(), ['test:anchored-key', 'test:explicit-key', 'test:tagged-key']);
+  for (const { script, why } of uncounted) assert.match(why, /^키 를 읽지 못했다/, script);
+});
+
+test('CI 호출: defaults.run 이나 그 working-directory 를 못 읽으면 세지 않는다', () => {
+  const yaml = onMainPush(`
+jobs:
+  run-string:
+    defaults:
+      run: apps/server
+    steps:
+      - run: npm run test:run-string
+  dir-list:
+    defaults:
+      run:
+        working-directory: [apps/server]
+    steps:
+      - run: npm run test:dir-list
+`);
+  assert.deepEqual(invokedIn(yaml), []);
+  const why = Object.fromEntries(ciServerNpmInvocations(yaml).uncounted.map((u) => [u.script, u.why]));
+  assert.match(why['test:run-string'], /^defaults\.run 를 읽지 못했다/);
+  assert.match(why['test:dir-list'], /^defaults\.run\.working-directory 를 읽지 못했다/);
+});
+
+test('.npmrc: 스크립트를 도는 방식을 바꾸는 설정만 문제로 신고한다', () => {
+  assert.deepEqual(
+    npmrcProblems([
+      'registry=https://r.example',
+      '//r.example/:_authToken=${TOKEN}',
+      '@acme:registry=https://acme.example',
+      '; 주석',
+      '# 주석',
+      'fund=false',
+      'engine-strict=true',
+      'ignore-scripts=false',
+    ].join('\n')),
+    [],
+  );
+  assert.deepEqual(
+    npmrcProblems('ignore-scripts=true\nscript-shell = /bin/true\nuserconfig=/tmp/x\nignore-scripts\n'),
+    ['ignore-scripts=true', 'script-shell = /bin/true', 'userconfig=/tmp/x', 'ignore-scripts'],
+    '값 없는 설정은 true 다',
   );
 });
