@@ -12,8 +12,10 @@ const {
   parseProcListUnix,
   parseProcListUnixWithGroup,
   parseProcListWin,
+  listAllProcesses,
   isBenignCmd,
   collectNonBenignDescendants,
+  resolveSweepRoot,
   collectNonBenignGroupMembers,
   isGroupLeaderReused,
   BENIGN_CMD_PATTERNS,
@@ -59,6 +61,52 @@ test('parseProcListWin handles array, single-object, null CommandLine, and junk'
   assert.deepEqual(parseProcListWin('not json'), []);
   assert.deepEqual(parseProcListWin('null'), []);
   assert.deepEqual(parseProcListWin(''), []);
+});
+
+test('Windows creation times reject PID reuse edges at every level without pruning real children', () => {
+  const table = parseProcListWin(JSON.stringify([
+    { ProcessId: 100, ParentProcessId: 1, CommandLine: 'node dummy', CreatedAtMs: 2000 },
+    // PPID still names the predecessor of pid 100; its whole subtree is unrelated.
+    { ProcessId: 200, ParentProcessId: 100, CommandLine: 'old service', CreatedAtMs: 1000 },
+    { ProcessId: 201, ParentProcessId: 200, CommandLine: 'service child', CreatedAtMs: 3000 },
+    { ProcessId: 300, ParentProcessId: 100, CommandLine: 'real task', CreatedAtMs: 2100 },
+    { ProcessId: 301, ParentProcessId: 300, CommandLine: 'real grandchild', CreatedAtMs: 2200 },
+    { ProcessId: 302, ParentProcessId: 300, CommandLine: 'stale grandchild', CreatedAtMs: 2050 },
+    { ProcessId: 400, ParentProcessId: 100, CommandLine: 'same timestamp', CreatedAtMs: 2000 },
+  ]));
+  assert.equal(table[0].createdAtMs, 2000);
+  assert.deepEqual(pids(collectNonBenignDescendants(table, 100)), [300, 301, 400]);
+  assert.deepEqual(collectNonBenignDescendants(table.slice(0, 3), 100), []);
+});
+
+test('Windows missing creation times remain unknown, not epoch-zero stale children', () => {
+  const table = parseProcListWin(JSON.stringify([
+    { ProcessId: 100, ParentProcessId: 1, CommandLine: 'root', CreatedAtMs: 2000 },
+    ...[null, undefined, 'bad'].map((CreatedAtMs, i) => ({
+      ProcessId: 200 + i, ParentProcessId: 100, CommandLine: 'task', CreatedAtMs,
+    })),
+  ]));
+  assert.equal(table[1].createdAtMs, undefined);
+  assert.deepEqual(pids(collectNonBenignDescendants(table, 100)), [200, 201, 202]);
+});
+
+test('shell wrapper resolution ignores children belonging to a previous PID owner', () => {
+  const root = { pid: 100, ppid: 1, cmd: 'cmd.exe /c cli.cmd', createdAtMs: 2000 };
+  const stale = { pid: 200, ppid: 100, cmd: 'old service', createdAtMs: 1000 };
+  assert.equal(resolveSweepRoot([root, stale], 100), 100);
+  const live = { pid: 300, ppid: 100, cmd: 'cli.exe', createdAtMs: 2100 };
+  assert.equal(resolveSweepRoot([root, stale, live], 100), 300);
+});
+
+test('Windows enumeration includes the current process UTC creation time', {
+  skip: process.platform !== 'win32' && 'requires real Windows CIM process enumeration',
+}, async () => {
+  const expectedStart = Date.now() - process.uptime() * 1000;
+  const self = (await listAllProcesses()).find((row) => row.pid === process.pid);
+  assert.ok(self, 'CIM enumeration includes this live test process');
+  assert.equal(typeof self.createdAtMs, 'number', 'PowerShell must project a numeric creation time');
+  assert.ok(Math.abs(self.createdAtMs - expectedStart) < 10_000,
+    `creation time must be UTC: actual=${self.createdAtMs}, expected approximately=${expectedStart}`);
 });
 
 test('isBenignCmd matches managed CLI infrastructure', () => {

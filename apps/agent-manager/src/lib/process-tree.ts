@@ -20,6 +20,8 @@ import { log } from './logging.js';
 export interface ProcNode {
   pid: number;
   ppid: number;
+  /** Windows creation time (UTC milliseconds), used to reject stale PPID edges after PID reuse. */
+  createdAtMs?: number;
   /** POSIX process-group id. Only populated by the `*WithGroup` parser (the
    *  one-shot exit path keys on it); undefined on the ppid-only parsers used by
    *  the persistent sweep. */
@@ -84,9 +86,29 @@ export function parseProcListWin(jsonText: string): ProcNode[] {
     const pid = Number(r?.ProcessId);
     if (!Number.isFinite(pid)) continue;
     const ppid = Number(r?.ParentProcessId);
-    out.push({ pid, ppid: Number.isFinite(ppid) ? ppid : 0, cmd: String(r?.CommandLine ?? '') });
+    const createdAtMs = r?.CreatedAtMs;
+    out.push({
+      pid, ppid: Number.isFinite(ppid) ? ppid : 0, cmd: String(r?.CommandLine ?? ''),
+      ...(typeof createdAtMs === 'number' && Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
+    });
   }
   return out;
+}
+
+// Windows keeps the original PPID after a parent exits. That pid may now
+// belong to a younger process: its predecessor's children are not its children.
+// Unknown timestamps preserve the existing best-effort graph (also used on POSIX).
+function indexChildren(all: ProcNode[]): Map<number, ProcNode[]> {
+  const byPid = new Map(all.map((p) => [p.pid, p]));
+  const byParent = new Map<number, ProcNode[]>();
+  for (const p of all) {
+    const parent = byPid.get(p.ppid);
+    if (parent?.createdAtMs !== undefined && p.createdAtMs !== undefined && p.createdAtMs < parent.createdAtMs) continue;
+    const arr = byParent.get(p.ppid);
+    if (arr) arr.push(p);
+    else byParent.set(p.ppid, [p]);
+  }
+  return byParent;
 }
 
 /** Walk the ppid graph from `rootPid` and return every live descendant,
@@ -99,12 +121,7 @@ export function collectNonBenignDescendants(
   rootPid: number,
   patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS,
 ): ProcNode[] {
-  const byParent = new Map<number, ProcNode[]>();
-  for (const p of all) {
-    const arr = byParent.get(p.ppid);
-    if (arr) arr.push(p);
-    else byParent.set(p.ppid, [p]);
-  }
+  const byParent = indexChildren(all);
   const out: ProcNode[] = [];
   const seen = new Set<number>([rootPid]);
   const stack: number[] = [rootPid];
@@ -129,7 +146,7 @@ export async function listAllProcesses(): Promise<ProcNode[]> {
   if (hostPlatform() === 'win32') {
     const script =
       'Get-CimInstance Win32_Process | ' +
-      "Select-Object ProcessId,ParentProcessId,@{Name='CommandLine';Expression={if ($_.CommandLine) {$_.CommandLine} else {$_.Name}}} | " +
+      "Select-Object ProcessId,ParentProcessId,@{Name='CreatedAtMs';Expression={if ($_.CreationDate) {([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()}}},@{Name='CommandLine';Expression={if ($_.CommandLine) {$_.CommandLine} else {$_.Name}}} | " +
       'ConvertTo-Json -Compress';
     const res = await runPowerShell(script, { timeoutMs: 15_000 });
     if (res.spawnFailed || res.code !== 0) return [];
@@ -166,12 +183,7 @@ export async function listAllProcesses(): Promise<ProcNode[]> {
  * Pure — unit-tested.
  */
 export function resolveSweepRoot(all: ProcNode[], rootPid: number): number {
-  const byParent = new Map<number, ProcNode[]>();
-  for (const p of all) {
-    const arr = byParent.get(p.ppid);
-    if (arr) arr.push(p);
-    else byParent.set(p.ppid, [p]);
-  }
+  const byParent = indexChildren(all);
   const byPid = new Map(all.map((p) => [p.pid, p]));
   let cur = rootPid;
   // 래퍼가 래퍼를 부르는 경우(`cmd /c` → `sh -c`)까지만 허용한다. 상한이 없으면

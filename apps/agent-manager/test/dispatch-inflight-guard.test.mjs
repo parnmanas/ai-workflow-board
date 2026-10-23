@@ -798,6 +798,8 @@ test('SubagentManager idle-reap: _sweepNow delivers a REAL SIGTERM via #wireExit
 
   await sub._sweepNow(); // drop-first delete + real SIGTERM to the real child (ticket b972b28c: awaits the live-task probe first — this dummy child has no descendants)
 
+  assert.equal(sub._snapshot().some((r) => r.pid === child.pid), false,
+    'the childless process was reaped, not mistaken for the parent of an old Windows PID owner’s descendants');
   // The real child actually dies from the SIGTERM.
   const died = await waitFor(() => !liveChildren.has(child) || isDead(child.pid), { timeoutMs: 4000 });
   assert.equal(died, true, 'the real child received the SIGTERM and exited');
