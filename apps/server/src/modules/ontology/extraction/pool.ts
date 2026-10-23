@@ -22,7 +22,8 @@ export interface ExtractionPoolOptions {
   onProgress?: (completed: number, total: number) => void;
   /** 파일 하나에 주는 시간(ms) — 기본 DEFAULT_TASK_TIMEOUT_MS. 넘기면 그 워커를
    *  terminate 하고 새 워커로 바꾼 뒤, 그 파일은 에러로 기록하고 나머지를
-   *  계속한다(ticket 461d210a). */
+   *  계속한다(ticket 461d210a). 새 워커의 첫 파일에는 기동 시간
+   *  (WORKER_STARTUP_GRACE_MS)을 더 준다. */
   taskTimeoutMs?: number;
   /** 테스트 전용 — 실제 worker.js 대신 다른 워커 스크립트를 스폰한다(예:
    *  비정상 종료를 흉내내는 픽스처). 프로덕션 호출부는 절대 설정하지
@@ -33,14 +34,25 @@ export interface ExtractionPoolOptions {
 /** 워커가 파일 하나를 붙잡을 수 있는 시간. 상한이 없던 동안 멈춘 워커 하나가
  *  풀 전체를 끝나지 않게 해, 그 그래프가 building 에 영영 머물렀다(ticket
  *  461d210a). 파싱은 큰 파일도 대개 1초 안이라 넉넉하게 잡는다 — 정말 오래
- *  걸리는 저장소는 AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS 로 늘린다. */
+ *  걸리는 저장소는 AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS(양수 ms)로 늘린다. */
 export const DEFAULT_TASK_TIMEOUT_MS = (() => {
   const raw = Number(process.env.AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
 })();
 
+/** 새 워커의 첫 파일에 더 주는 시간 — 그 시간에는 스레드 기동 · 모듈 로드 · 첫 문법
+ *  로드가 들어 있다(실측 0.1–0.3초). 이것 없이 상한이 기동보다 짧으면, 시간을 넘길
+ *  때마다 띄우는 새 워커도 다시 기동하다 넘겨 모든 파일이 실패한다(리뷰 지적). */
+const WORKER_STARTUP_GRACE_MS = 10_000;
+
 // setTimeout 은 이보다 긴 지연을 1ms 로 바꾼다 — 그대로 두면 모든 파일이 곧바로 시간을 넘긴다.
 const MAX_TIMER_MS = 2_147_483_647;
+
+function resolveTaskTimeoutMs(requested: number | undefined): number {
+  const ms = requested ?? DEFAULT_TASK_TIMEOUT_MS;
+  if (!Number.isFinite(ms)) return DEFAULT_TASK_TIMEOUT_MS;
+  return Math.min(Math.max(1, ms), MAX_TIMER_MS - WORKER_STARTUP_GRACE_MS);
+}
 
 function resolveWorkerScriptPath(): string {
   // pool.ts 자신이 컴파일된 위치(dist/modules/ontology/extraction/pool.js)
@@ -52,6 +64,8 @@ function resolveWorkerScriptPath(): string {
 interface WorkerSlot {
   worker: Worker;
   busy: boolean;
+  /** 파일 하나를 끝낸 적이 있다 — 기동 시간이 더는 다음 파일의 시간에 들지 않는다. */
+  warmed: boolean;
 }
 
 /** ExtractionTask[]를 고정 크기 worker_threads 풀로 처리한다. 한 워커가
@@ -72,7 +86,7 @@ export async function runExtractionPool(
 
   const poolSize = Math.max(1, Math.min(opts.poolSize ?? os.availableParallelism(), tasks.length));
   const workerScript = opts.workerScriptPath ?? resolveWorkerScriptPath();
-  const taskTimeoutMs = Math.min(opts.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS, MAX_TIMER_MS);
+  const taskTimeoutMs = resolveTaskTimeoutMs(opts.taskTimeoutMs);
   const results: ExtractionTaskResult[] = new Array(tasks.length);
   let nextIndex = 0;
   let completed = 0;
@@ -111,6 +125,7 @@ export async function runExtractionPool(
         opts.onProgress?.(completed, tasks.length);
       };
       const onMessage = (result: ExtractionTaskResult) => {
+        slot.warmed = true;
         finalizeTask(result);
         finishIfDone();
         if (!settled) dispatchNext(slot);
@@ -135,20 +150,25 @@ export async function runExtractionPool(
         finishIfDone();
       };
       // 답도 에러도 exit 도 없이 붙잡고 있는 워커 — replaceWorker 가 terminate 한다.
-      // 늦게 오는 답은 cleanup 이 리스너를 떼어 버려진다.
+      // 늦게 오는 답은 cleanup 이 리스너를 떼어 버려진다. 판정은 한 턴 미룬다: 메인
+      // 스레드가 상한보다 오래 멈췄다 풀리면 타이머가 이미 도착해 있는 답보다 먼저
+      // 돈다 — setImmediate 는 그 답을 전하는 poll 단계 뒤에 돈다(리뷰 지적).
+      const limitMs = slot.warmed ? taskTimeoutMs : taskTimeoutMs + WORKER_STARTUP_GRACE_MS;
       const onTimeout = () => {
         timer = null;
-        if (taskSettled || settled) return;
-        finalizeTask({
-          path: tasks[idx].path,
-          bundle: null,
-          decoratorFacts: [],
-          error: `extraction timed out after ${taskTimeoutMs}ms — the worker was stopped`,
+        setImmediate(() => {
+          if (taskSettled || settled) return;
+          finalizeTask({
+            path: tasks[idx].path,
+            bundle: null,
+            decoratorFacts: [],
+            error: `extraction timed out after ${limitMs}ms — the worker was stopped`,
+          });
+          replaceWorker(slot);
+          finishIfDone();
         });
-        replaceWorker(slot);
-        finishIfDone();
       };
-      let timer: NodeJS.Timeout | null = setTimeout(onTimeout, taskTimeoutMs);
+      let timer: NodeJS.Timeout | null = setTimeout(onTimeout, limitMs);
       timer.unref();
       const cleanup = () => {
         if (timer) clearTimeout(timer);
@@ -168,14 +188,26 @@ export async function runExtractionPool(
       void deadSlot.worker.terminate().catch(() => {});
       const idx = slots.indexOf(deadSlot);
       if (idx < 0) return;
-      const fresh = makeSlot();
+      // 남은 파일이 없으면 새 워커를 띄우지 않는다 — 띄우자마자 끝낼 워커다.
+      if (nextIndex >= tasks.length) return;
+      let fresh: WorkerSlot;
+      try {
+        fresh = makeSlot();
+      } catch (e) {
+        // 워커를 더 띄울 수 없다(스레드 · 메모리 한계). 이벤트 핸들러 · 타이머 안이라
+        // 던지면 서버 프로세스의 uncaught exception 이 된다 — 풀을 실패로 끝낸다.
+        settled = true;
+        for (const s of slots) void s.worker.terminate().catch(() => {});
+        rejectPool(e as Error);
+        return;
+      }
       slots[idx] = fresh;
       dispatchNext(fresh);
     }
 
     function makeSlot(): WorkerSlot {
       const worker = new Worker(workerScript);
-      const slot: WorkerSlot = { worker, busy: false };
+      const slot: WorkerSlot = { worker, busy: false, warmed: false };
       // 태스크 배정 전(워커 생성 직후) 죽는 경우 — dispatchNext가 아직
       // message/error/exit 리스너를 안 붙였을 수 있으므로 별도로 받는다.
       let startupSettled = false;

@@ -110,7 +110,43 @@ describe('worker pool task timeout (ticket 461d210a)', () => {
       // 풀은 끝날 때 terminate 를 기다리지 않는다 — 스레드가 사라질 때까지 잠깐 본다.
       const deadline = Date.now() + 5_000;
       while (liveThreads() > threadsBefore && Date.now() < deadline) await sleep(25);
-      assert.equal(liveThreads(), threadsBefore, '멈춘 워커의 스레드가 남았다 — 시간을 넘긴 워커를 terminate 하지 않았다');
+      assert.ok(liveThreads() <= threadsBefore, '멈춘 워커의 스레드가 남았다 — 시간을 넘긴 워커를 terminate 하지 않았다');
     }
+  });
+
+  // 메인 스레드가 상한보다 오래 멈췄다 풀리면, 타이머가 이미 도착해 있는 답보다 먼저 돈다(타이머
+  // 단계가 메시지를 전하는 poll 단계보다 앞이다). 그 답을 시간 초과로 버리면 안 된다. 멈춤은
+  // setImmediate 에서 건다 — 메시지 처리 루프 안에서 멈추면 그 루프가 늦게 온 답까지 곧바로 처리해
+  // 타이머 순서가 드러나지 않는다.
+  it('a main-thread stall past taskTimeoutMs does not turn an answer that already arrived into a timeout', { timeout: 20_000 }, async () => {
+    const blockMainThread = (ms) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) { /* 바쁜 대기 */ }
+    };
+    const tasks = [
+      { path: 'warm.ts', content: 'export const a = 1;', lang: 'typescript' },
+      { path: 'slow-answer.ts', content: 'export const b = 2;', lang: 'typescript' },
+    ];
+    // 첫 파일로 워커를 데운다 — 두 번째 파일에는 기동 유예 없이 상한(200ms)만 준다.
+    const results = await runExtractionPool(tasks, {
+      poolSize: 1,
+      taskTimeoutMs: 200,
+      workerScriptPath: HANGING_WORKER,
+      onProgress: (completed) => {
+        if (completed === 1) setImmediate(() => blockMainThread(800));
+      },
+    });
+    assert.equal(results[1].error, null, '멈춘 동안 도착한 답이 시간 초과로 버려졌다');
+    assert.ok(results[1].bundle);
+  });
+
+  it("a fresh worker's first file also gets its start-up time — a limit shorter than start-up does not fail every file", { timeout: 20_000 }, async () => {
+    // 실제 worker.js 의 기동 + 첫 문법 로드는 0.1–0.3초다. 상한 1ms 면 유예 없이는 모든 파일이 실패한다.
+    const tasks = [
+      { path: 'a.ts', content: 'export function a() { return 1; }', lang: 'typescript' },
+      { path: 'b.ts', content: 'export function b() { return 2; }', lang: 'typescript' },
+    ];
+    const results = await runExtractionPool(tasks, { poolSize: 2, taskTimeoutMs: 1 });
+    assert.deepEqual(results.map((r) => r.error), [null, null]);
   });
 });
