@@ -377,3 +377,51 @@
   .business-trademark-mail-row { flex-wrap: wrap; }.business-trademark-mail-row .business-pill { margin-left: 30px; }
   .business-trademark-envelope { grid-template-columns: minmax(0, 1fr); gap: 5px; }.business-trademark-envelope dd { margin-bottom: 9px; }
 }
+
+.business-self-intro { display: flex; gap: 16px; align-items: center; padding: 18px; background: #132a2d; border: 1px solid #28504b; border-radius: 12px; }
+.business-self-intro p { margin-bottom: 0; font-size: 12px; line-height: 1.7; color: #b6d5ce; }
+.business-self-progress { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 15px 0; color: #99f6e4; font-size: 12px; }
+.business-self-questions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 15px 0 24px; }
+.business-self-questions fieldset { border: 1px solid #334155; border-radius: 12px; min-width: 0; padding: 16px; }
+.business-self-questions legend { padding: 0 6px; font-weight: 600; font-size: 13px; line-height: 1.7; }
+.business-self-questions p, .business-self-steps p { color: #94a3b8; font-size: 12px; line-height: 1.85; }
+.business-self-questions small { color: #5eead4; font-size: 11px; }
+.business-self-answer { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; font-size: 12px; }
+.business-self-answer label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.business-self-blockers { padding: 16px 16px 16px 32px; border-radius: 9px; background: #30271c; color: #fcd34d; font-size: 12px; line-height: 1.8; }
+.business-self-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; padding: 0; list-style: none; }
+.business-self-steps li { min-width: 0; display: flex; gap: 12px; padding: 16px; background: #131f31; border: 1px solid #334155; border-radius: 10px; }
+.business-self-steps h4 { margin: 7px 0; font-size: 14px; }.business-self-steps small { color: #5eead4; font-size: 11px; }
+.business-self-step-number { display: grid; flex-shrink: 0; place-items: center; width: 26px; height: 26px; border: 1px solid #3c6d64; color: #99f6e4; border-radius: 50%; font-size: 12px; }
+.business-self-steps a, .business-self-sources a { color: #99f6e4; font-size: 12px; }
+.business-self-notices { border-left: 3px solid #b89a60; padding-left: 15px; color: #cbd5e1; font-size: 12px; line-height: 1.85; }
+.business-self-sources { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 0; }
+.business-self-summary, .business-cashbook { margin: 24px 0; min-width: 0; }
+.business-self-summary .business-section-heading h3, .business-cashbook .business-section-heading h3 { display: flex; align-items: center; gap: 10px; }
+.business-cash-toolbar, .business-cash-close { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 18px 0; }
+.business-cash-toolbar label { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.business-cash-toolbar input, .business-cash-form input:not([type=checkbox]), .business-cash-form textarea, .business-cash-form select { box-sizing: border-box; background: #0f172a; border: 1px solid #475569; color: #e2e8f0; border-radius: 8px; padding: 10px 12px; min-width: 0; max-width: 100%; }
+.business-cash-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.business-cash-totals > div { padding: 20px 15px; min-width: 0; border: 1px solid #334155; background: #131f31; border-radius: 10px; }
+.business-cash-totals small { display: block; margin-bottom: 12px; color: #94a3b8; font-size: 11px; }
+.business-cash-totals strong { font-size: clamp(16px, 2vw, 25px); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.business-cash-close { background: #14252d; border: 1px solid #2b4c51; border-radius: 10px; padding: 18px; }
+.business-cash-close > div { flex: 1; min-width: 180px; }.business-cash-close p, .business-cash-close small { display: block; font-size: 12px; line-height: 1.7; color: #b2c5c9; overflow-wrap: anywhere; }
+.business-cash-entries article { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 16px 0; border-bottom: 1px solid #263347; }
+.business-cash-direction { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: #163c36; color: #5eead4; font-size: 20px; }.business-cash-direction.out { background: #30271c; color: #fcd34d; }
+.business-cash-entry-copy { display: flex; flex: 1; min-width: 120px; flex-direction: column; gap: 7px; overflow-wrap: anywhere; }
+.business-cash-entry-copy strong { font-size: 13px; }.business-cash-entry-copy small { color: #94a3b8; font-size: 11px; line-height: 1.6; }
+.business-cash-amount { font-size: 15px; font-variant-numeric: tabular-nums; }.business-cash-entries .is-void { opacity: .6; }.business-cash-entries .is-void .business-cash-amount { text-decoration: line-through; }
+.business-cash-form fieldset { display: grid; gap: 16px; border: 0; padding: 0; margin: 0; min-width: 0; }.business-cash-form label { display: grid; gap: 8px; font-size: 12px; line-height: 1.8; }
+.business-cash-form .business-cash-check { display: flex; align-items: flex-start; padding: 15px; border-radius: 10px; background: #14252d; }.business-cash-check input { margin-top: 5px; flex-shrink: 0; }
+.business-cash-form input:focus-visible, .business-cash-form select:focus-visible, .business-self-answer input:focus-visible { outline: 2px solid #5eead4; outline-offset: 2px; }
+@media (max-width: 640px) {
+  .business-self-questions, .business-self-steps { grid-template-columns: minmax(0, 1fr); }
+  .business-cash-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }.business-cash-totals > div { padding: 14px 10px; }
+  .business-cash-toolbar { justify-content: flex-start; }.business-cash-entries .business-card-actions { flex-basis: 100%; margin-left: 48px; }
+}
+.business-residency-guide { margin: 20px 0; }
+.business-residency-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.business-residency-grid article { min-width: 0; padding: 18px; border: 1px solid #36515a; border-radius: 10px; background: #14232d; }
+.business-residency-grid h4 { font-size: 14px; margin: 12px 0 8px; }.business-residency-grid p { font-size: 12px; line-height: 1.85; color: #b5c4ce; margin: 0; }
+@media (max-width: 640px) { .business-residency-grid { grid-template-columns: minmax(0, 1fr); } }

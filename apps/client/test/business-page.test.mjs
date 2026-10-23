@@ -10,6 +10,8 @@ import BusinessLayout from '../src/components/business/BusinessLayout.tsx';
 import { money, nextTasks, overdue } from '../src/components/business/business.logic.ts';
 import { emptyTrademark } from '../src/components/business/trademark.logic.ts';
 import { TRADEMARK_CONNECTORS } from '../../server/dist/modules/business/connectors/trademark-registry.js';
+import { SELF_SERVICE_CONNECTORS, assessSelfService } from '../../server/dist/modules/business/business-self-service.js';
+import { cashbookCsv, parseCashAmount } from '../src/components/business/cashbook.logic.ts';
 
 const h = React.createElement;
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
@@ -30,6 +32,7 @@ async function render(t, { entry = '/business', permissions = ['business.manage'
   for (const [key, fn] of Object.entries({
     getMe: async () => ({ id: 'u1', name: 'Owner', status: 'active', resolved_permissions: permissions, accounts: [{ id: 'account-1', name: 'Personal' }] }),
     listBusinessCompanies: async () => [{ ...company }], listBusinessConnectors: async () => [connector], getBusinessCompany: async () => detail(),
+    getBusinessCashbook: async (_id, month) => ({ month, company_revision: 0, currency: 'USD', entries: [], period: null, summary: { active_count: 0, unreconciled_count: 0, inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0 } }),
     listTrademarkIntegrations: async () => ({ connectors: TRADEMARK_CONNECTORS.map(c => c.descriptor), connections: [], records: [], actions: [] }),
     listBusinessCredentials: async () => [{ id: 'cred-1', name: 'Stripe read key', provider: 'stripe' }], ...stubs,
   })) {
@@ -341,4 +344,43 @@ test('failed server review retrieval blocks mail sending after a draft was persi
   const checkbox = dialog.querySelector('input[type="checkbox"]'); assert.ok(checkbox); click(checkbox);
   assert.equal(button(dialog, '확인한 메일 실제 발송').disabled, true);
   assert.equal(calls.some(([name]) => name === 'sendTrademarkMail'), false);
+});
+
+test('cashbook decimal entry and CSV preserve cents and neutralize formula fields', () => {
+  assert.equal(parseCashAmount('0.29'), 29);
+  assert.equal(parseCashAmount('-100.05', true), -10005);
+  for (const value of ['1.001', '1e3', 'NaN', '-1', '0', '20000000.01']) assert.throws(() => parseCashAmount(value));
+  const csv = cashbookCsv({ entries: [{ id: 'row', date: '2020-01-01', kind: 'capital_in', amount_minor: 29, currency: 'USD', description: '=HYPERLINK("bad")', evidence: '+command', reconciled: true, voided: true, void_reason: 'duplicate' }] });
+  assert.ok(csv.includes('"29"')); assert.ok(csv.includes("'=HYPERLINK")); assert.ok(csv.includes("'+command")); assert.ok(csv.includes('"true","true"'));
+});
+
+test('DIY formation checks every condition, explains overseas routes and saves confirmed facts', async t => {
+  let current = detail();
+  const manual = SELF_SERVICE_CONNECTORS[0].descriptor;
+  const { container, calls } = await render(t, { entry: '/business/connectors?company=company-1', stubs: {
+    listBusinessConnectors: async () => [manual], getBusinessCompany: async () => structuredClone(current),
+    assessBusinessSelfService: async (_id, provider, plan, answers) => ({ ...assessSelfService(current.company, provider, plan, answers ?? current.company.self_service?.[provider]?.answers ?? {}), company_revision: current.company.revision, stale: false }),
+    chooseBusinessService: async (_id, stage, input) => { current.company.service_choices = { [stage]: { provider: input.provider, plan: input.plan } }; current.company.self_service = { [input.provider]: { answers: input.self_service_answers } }; current.company.revision++; return current.company; },
+  } });
+  const select = field(container, '직접 LLC 설립 가격 플랜'); run(() => { select.value = 'DE'; select.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  click(button(container, '조건 확인 · 직접 선택')); await flush(); await flush();
+  const dialog = container.querySelector('[role="dialog"]'); assert.ok(dialog);
+  assert.equal(button(dialog, '조건을 확인하고 직접 처리 선택').disabled, true);
+  assert.match(dialog.textContent, /해외에서 운영해도/);
+  const answer = async (key, yes) => {
+    const inputs = dialog.querySelectorAll(`input[name="${key}"]`); assert.ok(inputs.length); click(inputs[yes ? 0 : 1]); await flush(); await flush();
+  };
+  await answer('operator_abroad', true);
+  assert.ok(dialog.querySelector('input[name="residence_reviewed"]'));
+  for (const key of ['standard_llc', 'name_checked', 'registered_agent', 'authorized_filer', 'compliance_plan', 'residence_reviewed']) await answer(key, true);
+  for (const key of ['principal_us', 'responsible_tax_id']) await answer(key, false);
+  await answer('foreign_owned', true);
+  assert.match(dialog.textContent, /IRS 전화·팩스·우편/);
+  assert.match(dialog.textContent, /5472/);
+  assert.equal(button(dialog, '조건을 확인하고 직접 처리 선택').disabled, false);
+  click(button(dialog, '조건을 확인하고 직접 처리 선택')); await flush(); await flush(); await flush();
+  const saved = calls.find(([name]) => name === 'chooseBusinessService');
+  assert.equal(saved[3].self_service_answers.operator_abroad, true); assert.equal(saved[3].self_service_answers.responsible_tax_id, false);
+  assert.match(container.textContent, /직접 처리 진행 안내/);
+  assert.equal(container.querySelector('[role="dialog"]'), null);
 });

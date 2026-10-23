@@ -33,6 +33,9 @@ export class BusinessController {
   @Post('companies/:id/services/:stage') chooseService(@Param('id') id: string, @Param('stage') stage: string, @Req() req: any, @Body() body: any) {
     return this.business.chooseService(id, req.currentAccountId, stage, body, req.currentUser.id);
   }
+  @Post('companies/:id/self-service/assess') assessSelfService(@Param('id') id: string, @Req() req: any, @Body() body: any) {
+    return this.business.assessSelfService(id, req.currentAccountId, body?.provider, body?.plan, body?.answers);
+  }
   @Post('companies/:id/tasks') addTask(@Param('id') id: string, @Req() req: any, @Body() body: any) {
     return this.business.saveTask(id, req.currentAccountId, null, body, req.currentUser.id);
   }

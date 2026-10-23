@@ -18,6 +18,7 @@ import { businessConnector } from './connectors/registry';
 import { connectorGet, externalId } from './connectors/connector-http';
 import { TicketService, type TicketActor } from '../tickets/ticket.service';
 import { parseTicketStatus } from '../../common/ticket-status';
+import { assessSelfService, isSelfProvider, SELF_SERVICE_VERSION, selfAnswersSchema } from './business-self-service';
 
 export const companySchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -54,12 +55,12 @@ export class BusinessService {
     return company;
   }
 
-  private async event(manager: EntityManager, company: BusinessCompany, actor: string, kind: string, message: string) {
+  async event(manager: EntityManager, company: BusinessCompany, actor: string, kind: string, message: string) {
     await manager.getRepository(BusinessEvent).save({ company_id: company.id, account_id: company.account_id, actor_id: actor, kind, message: message.slice(0, 500) });
   }
 
   /** Claim the company row before changing its task graph, on both SQL backends. */
-  private async claim(manager: EntityManager, id: string, accountId: string, revision: unknown) {
+  async claim(manager: EntityManager, id: string, accountId: string, revision: unknown) {
     if (!Number.isSafeInteger(revision) || Number(revision) < 0) throw new BadRequestException('revision이 필요합니다.');
     const company = await this.company(id, accountId, manager);
     const result = await manager.getRepository(BusinessCompany).update({ id, account_id: accountId, revision: Number(revision) }, { revision: Number(revision) + 1 });
@@ -125,7 +126,9 @@ export class BusinessService {
     return this.ds.transaction(async manager => {
       const company = await this.claim(manager, id, accountId, body?.revision);
       if (input.campaign_ids) await this.checkCampaigns(input.campaign_ids, accountId, canViewMarketing, manager);
-      await manager.getRepository(BusinessCompany).update({ id, account_id: accountId }, input);
+      const resetConditions = ['name', 'country', 'entity_type', 'jurisdiction'].some(key => key in input && input[key] !== company[key]);
+      if (resetConditions) company.self_service = {};
+      await manager.getRepository(BusinessCompany).update({ id, account_id: accountId }, { ...input, ...(resetConditions ? { self_service: {} } : {}) });
       await this.event(manager, company, actor, 'company', '회사 정보와 연결 캠페인을 수정했습니다.');
       return { ...company, ...input };
     });
@@ -150,16 +153,29 @@ export class BusinessService {
   }
 
   async chooseService(id: string, accountId: string, stage: string, body: any, actor: string) {
-    const input = parse(z.object({ provider: z.string(), plan: z.string(), revision: z.number().int().nonnegative() }), body);
+    const input = parse(z.object({ provider: z.string(), plan: z.string(), revision: z.number().int().nonnegative(), self_service_answers: selfAnswersSchema.optional() }), body);
     const descriptor = businessConnector(input.provider).descriptor;
     if (descriptor.stage !== stage || !descriptor.offering?.pricing.plans.some(p => p.id === input.plan)) throw new BadRequestException('영역과 서비스 플랜을 확인하세요.');
     return this.ds.transaction(async manager => {
       const company = await this.claim(manager, id, accountId, input.revision);
+      if (isSelfProvider(input.provider)) {
+        const assessment = assessSelfService(company, input.provider, input.plan, input.self_service_answers || {});
+        if (!assessment.eligible) throw new BadRequestException(['직접 처리 조건을 확인하세요.', ...assessment.blockers, ...assessment.unanswered.map(key => `미응답: ${key}`)].join(' '));
+        company.self_service = { ...company.self_service, [input.provider]: { answers: assessment.answers, version: SELF_SERVICE_VERSION, confirmed_at: new Date().toISOString(), actor_id: actor } };
+      }
       company.service_choices = { ...company.service_choices, [stage]: { provider: input.provider, plan: input.plan } };
-      await manager.getRepository(BusinessCompany).update({ id, account_id: accountId }, { service_choices: company.service_choices });
+      await manager.getRepository(BusinessCompany).update({ id, account_id: accountId }, { service_choices: company.service_choices, self_service: company.self_service });
       await this.event(manager, company, actor, 'service_choice', `${descriptor.name} 서비스 선택을 저장했습니다. 가입·구매는 실행되지 않았습니다.`);
       return company;
     });
+  }
+
+  async assessSelfService(id: string, accountId: string, provider: string, plan: string, answers?: Record<string, boolean>) {
+    const company = await this.company(id, accountId);
+    const saved = company.self_service?.[provider];
+    const assessment = assessSelfService(company, provider, plan, answers ?? saved?.answers ?? {});
+    const stale = answers === undefined && saved?.version !== SELF_SERVICE_VERSION;
+    return { ...assessment, eligible: assessment.eligible && !stale, stale, company_revision: company.revision, confirmed_at: saved?.confirmed_at || null };
   }
 
   async saveTask(id: string, accountId: string, taskId: string | null, body: any, actor: string) {

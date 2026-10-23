@@ -5,6 +5,7 @@ import { BUSINESS_TEMPLATE } from '../../server/dist/modules/business/business-t
 import { BUSINESS_CONNECTORS } from '../../server/dist/modules/business/connectors/registry.js';
 import { TRADEMARK_CONNECTORS } from '../../server/dist/modules/business/connectors/trademark-registry.js';
 import { emptyTrademark } from '../src/components/business/trademark.logic.ts';
+import { assessSelfService, SELF_SERVICE_VERSION } from '../../server/dist/modules/business/business-self-service.js';
 
 const account = { id: 'business-browser-account', name: 'Personal' };
 const company = { id: 'business-browser-company', account_id: account.id, name: 'Orbit Labs LLC', entity_type: 'LLC', country: 'US', jurisdiction: 'Delaware', description: '아이디어를 제품으로, 제품을 지속 가능한 비즈니스로.', campaign_ids: ['campaign-1'], revision: 3 };
@@ -12,6 +13,7 @@ const tasks = BUSINESS_TEMPLATE.map((item, i) => ({ id: item.key, account_id: ac
 
 async function fixture(page) {
   const errors = [];
+  const cashbook = { entries: [], period: null };
   const trademarkState = { cases: [], mail: [], payload: null, sends: 0 };
   const integrationState = { connectors: TRADEMARK_CONNECTORS.map(c => c.descriptor), connections: [], records: [], actions: [], sends: 0 };
   page.on('pageerror', error => errors.push(error.message));
@@ -37,6 +39,34 @@ async function fixture(page) {
     else if (path === '/business/companies') body = [company];
     else if (path === '/business/connectors') body = BUSINESS_CONNECTORS.map(c => c.descriptor);
     else if (path === `/business/companies/${company.id}`) body = detail;
+    else if (path.endsWith('/self-service/assess')) {
+      const input = request.postDataJSON();
+      body = { ...assessSelfService(detail.company, input.provider, input.plan, input.answers ?? detail.company.self_service?.[input.provider]?.answers ?? {}), company_revision: detail.company.revision, stale: false };
+    }
+    else if (path.includes('/services/')) {
+      const input = request.postDataJSON(); const stage = path.split('/').at(-1);
+      detail.company.service_choices[stage] = { provider: input.provider, plan: input.plan };
+      detail.company.self_service = { ...detail.company.self_service, [input.provider]: { answers: input.self_service_answers, version: SELF_SERVICE_VERSION } };
+      detail.company.revision++; body = detail.company;
+    }
+    else if (path.includes('/cashbook/')) {
+      const input = request.method() === 'POST' ? request.postDataJSON() : null;
+      if (path.endsWith('/entries')) {
+        body = { ...input, id: 'entry-browser', reconciled: false, voided: false, void_reason: '' }; cashbook.entries.push(body); detail.company.revision++;
+      } else if (path.endsWith('/reconcile')) {
+        Object.assign(cashbook.entries[0], { evidence: input.evidence, reconciled: input.reconciled }); detail.company.revision++; body = cashbook.entries[0];
+      } else if (path.endsWith('/void')) {
+        Object.assign(cashbook.entries[0], { voided: true, void_reason: input.reason }); detail.company.revision++; body = cashbook.entries[0];
+      } else if (path.endsWith('/close')) {
+        cashbook.period = { ...input, month: path.split('/').at(-2), closed: true }; detail.company.revision++; body = cashbook.period;
+      } else if (path.endsWith('/reopen')) {
+        cashbook.period.closed = false; cashbook.period.reopen_reason = input.reason; detail.company.revision++; body = cashbook.period;
+      } else {
+        const month = path.split('/').at(-1); const entries = cashbook.entries.filter(e => e.date.startsWith(month)); const active = entries.filter(e => !e.voided);
+        const total = active.reduce((sum, e) => sum + e.amount_minor, 0);
+        body = { month, currency: 'USD', company_revision: detail.company.revision, entries, period: cashbook.period, summary: { inflow_minor: total, outflow_minor: 0, net_minor: total, operating_in_minor: total, operating_out_minor: 0, active_count: active.length, unreconciled_count: active.filter(e => !e.reconciled).length } };
+      }
+    }
     else if (path === '/business/credentials') body = [{ id: 'doola-fixture-key', provider: 'doola', name: 'doola Sandbox' }, { id: 'resend-fixture-key', provider: 'resend', name: 'Legal mail' }, { id: 'tsdr-fixture-key', provider: 'uspto_tsdr', name: 'TSDR read key' }];
     else if (path.endsWith('/trademarks/trademark-fixture/integrations')) {
       if (request.method() === 'POST') {
@@ -97,10 +127,74 @@ async function fixture(page) {
     else if (path.includes('/unread') || path.endsWith('counts') || path.includes('/mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  return { errors, trademarkState, integrationState };
+  return { errors, trademarkState, integrationState, cashbook };
 }
 
 for (const width of [1440, 390, 320]) {
+  test(`Overseas DIY conditions and cashbook through reconciliation, close and correction at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { errors, cashbook } = await fixture(page);
+    await page.goto(`/business/connectors?company=${company.id}`);
+    await page.getByLabel('연동 방식', { exact: true }).selectOption('manual');
+    await expect(page.locator('.business-connector-card')).toHaveCount(2);
+    const formation = page.getByRole('article', { name: '직접 LLC 설립 서비스', exact: true });
+    await formation.getByLabel('직접 LLC 설립 가격 플랜').selectOption('DE');
+    await formation.getByRole('button', { name: '조건 확인 · 직접 선택' }).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('button', { name: '조건을 확인하고 직접 처리 선택' })).toBeDisabled();
+    for (const key of ['operator_abroad', 'standard_llc', 'name_checked', 'registered_agent', 'authorized_filer', 'compliance_plan', 'foreign_owned', 'residence_reviewed']) await dialog.locator(`input[name="${key}"]`).nth(0).check();
+    for (const key of ['principal_us', 'responsible_tax_id']) await dialog.locator(`input[name="${key}"]`).nth(1).check();
+    await expect(dialog).toContainText('IRS 전화·팩스·우편');
+    await expect(dialog).toContainText('전자신고 대신 지정 팩스·우편');
+    await expect(dialog.getByRole('button', { name: '조건을 확인하고 직접 처리 선택' })).toBeEnabled();
+    const sizes = await dialog.evaluate(el => [el, ...el.querySelectorAll('.business-self-questions, .business-residency-grid')].map(n => [n.scrollWidth, n.clientWidth]));
+    expect(sizes.every(([scroll, client]) => scroll <= client + 1)).toBe(true);
+    await dialog.screenshot({ path: `/tmp/awb-diy-conditions-${width}.png` });
+    await dialog.getByRole('button', { name: '조건을 확인하고 직접 처리 선택' }).click();
+    await expect(page.getByRole('region', { name: '직접 처리 진행 안내' })).toBeVisible();
+    await page.getByRole('group', { name: '운영 영역' }).getByRole('button', { name: /회계/ }).click();
+    const book = page.getByRole('region', { name: '직접 회계 장부' });
+    await book.getByRole('button', { name: '직접 회계 선택' }).click();
+    dialog = page.getByRole('dialog');
+    for (const key of ['operator_abroad', 'single_usd_account', 'settled_only', 'evidence_plan', 'separate_tax_filing', 'foreign_owned', 'residence_reviewed']) await dialog.locator(`input[name="${key}"]`).nth(0).check();
+    await dialog.locator('input[name="complex_activity"]').nth(1).check();
+    await dialog.getByRole('button', { name: '조건을 확인하고 직접 처리 선택' }).click();
+    await expect(dialog).toHaveCount(0);
+    await book.getByLabel('장부 월', { exact: true }).fill('2020-01');
+    await book.getByRole('button', { name: '입출금 기록', exact: true }).click();
+    dialog = page.getByRole('dialog');
+    await dialog.getByLabel('금액 (USD)', { exact: true }).fill('10.29');
+    await dialog.getByLabel('상대방 · 거래 용도').fill('첫 고객 입금');
+    await dialog.getByLabel('증빙 위치 · 참조').fill('receipt-01');
+    await dialog.getByRole('button', { name: '확인하고 저장' }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(book.getByRole('button', { name: '잔액 확인 · 월 마감' })).toBeDisabled();
+    await book.getByRole('button', { name: '증빙 · 대사', exact: true }).click();
+    dialog = page.getByRole('dialog'); await dialog.getByRole('checkbox').check(); await dialog.getByRole('button', { name: '확인하고 저장' }).click();
+    await expect(dialog).toHaveCount(0);
+    await book.getByRole('button', { name: '잔액 확인 · 월 마감' }).click();
+    dialog = page.getByRole('dialog');
+    await dialog.getByLabel('은행 기초 잔액 (USD)', { exact: true }).fill('0');
+    await dialog.getByLabel('은행 기말 잔액 (USD)', { exact: true }).fill('10.28');
+    await dialog.getByLabel('은행 명세서 위치 · 참조').fill('bank-january');
+    await dialog.getByRole('checkbox').check(); await expect(dialog.getByRole('button', { name: '확인하고 저장' })).toBeDisabled();
+    await dialog.getByLabel('은행 기말 잔액 (USD)', { exact: true }).fill('10.29');
+    await dialog.getByRole('button', { name: '확인하고 저장' }).click();
+    await expect(book).toContainText('내부 월 마감 완료');
+    await expect(book.getByRole('button', { name: '입출금 기록', exact: true })).toBeDisabled();
+    expect(cashbook.entries[0].amount_minor).toBe(1029);
+    await book.screenshot({ path: `/tmp/awb-diy-cashbook-${width}.png` });
+    const downloadEvent = page.waitForEvent('download'); await book.getByRole('button', { name: 'CSV 내보내기' }).click(); expect((await downloadEvent).suggestedFilename()).toContain('2020-01.csv');
+    await book.getByRole('button', { name: '마감 재개', exact: true }).click();
+    dialog = page.getByRole('dialog'); await dialog.getByLabel('처리 사유').fill('중복 거래 정정'); await dialog.getByRole('button', { name: '확인하고 저장' }).click();
+    await expect(dialog).toHaveCount(0);
+    await book.getByRole('button', { name: '취소', exact: true }).click();
+    dialog = page.getByRole('dialog'); await dialog.getByLabel('처리 사유').fill('중복 거래'); await dialog.getByRole('button', { name: '확인하고 저장' }).click();
+    await expect(book).toContainText('취소: 중복 거래');
+    expect(cashbook.entries[0].voided).toBe(true); expect(errors).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
+  });
+
   test(`MCP OAuth link selects the exact trademark and connection at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const { errors, trademarkState, integrationState } = await fixture(page);
@@ -237,7 +331,7 @@ for (const viewport of [{ width: 1440, height: 1080 }, { width: 390, height: 844
     await fits();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await guide.getByRole('link', { name: '조회 커넥터 설정' }).click();
+    await guide.getByRole('link', { name: '직접 처리 · 서비스 비교' }).click();
     await expect(page).toHaveURL(/business\/connectors\?company=business-browser-company/);
     await expect(page.locator('.business-connector-card')).toHaveCount(BUSINESS_CONNECTORS.length);
     await page.locator('.business-connector-card').filter({ has: page.getByRole('heading', { name: 'Mercury', exact: false }) }).getByRole('button', { name: '조회 연결' }).click();

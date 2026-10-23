@@ -1,6 +1,7 @@
 export type BusinessStage = 'formation' | 'trademark' | 'banking' | 'payments' | 'accounting' | 'support' | 'growth';
 export type BusinessTaskStatus = 'todo' | 'in_progress' | 'waiting' | 'done';
 export interface BusinessCompany {
+  self_service?: Record<string, { answers: Record<string, boolean>; version: string; confirmed_at: string; actor_id: string }>;
   id: string; account_id: string; name: string; entity_type: 'LLC' | 'CCorp' | 'other'; country: string;
   service_choices: Partial<Record<BusinessStage, { provider: string; plan: string }>>;
   jurisdiction: string; description: string; campaign_ids: string[]; revision: number;
@@ -12,12 +13,12 @@ export interface BusinessTask {
   ticket_id: string | null; ticket: { id: string; title: string; status: string } | null; position: number;
 }
 export interface ServiceOffering {
-  best_for: string; features: string[]; api_access: 'public' | 'partner' | 'unverified'; api_note: string; external_steps: string[];
+  best_for: string; features: string[]; api_access: 'public' | 'partner' | 'unverified' | 'not_applicable'; api_note: string; external_steps: string[];
   pricing: { plans: Array<{ id: string; name: string; price: string; detail: string }>; extra: string; url: string; checked_at: string };
 }
 export interface BusinessConnector {
   offering?: ServiceOffering; formation?: { states: string[]; entity_types: string[] };
-  id: string; name: string; stage: BusinessStage; color: string; monogram: string; mode: 'api' | 'handoff';
+  id: string; name: string; stage: BusinessStage; color: string; monogram: string; mode: 'api' | 'handoff' | 'manual';
   summary: string; capabilities: string[]; setup_note: string; docs_url: string; portal_url: string;
   credential_provider?: string; secret_fields: string[];
   fields: Array<{ key: string; label: string; placeholder: string }>; environments: Array<'live' | 'sandbox'>;
@@ -39,6 +40,24 @@ export interface BusinessDetail {
 }
 export type BusinessCompanyInput = Pick<BusinessCompany, 'name' | 'entity_type' | 'country' | 'jurisdiction' | 'description' | 'campaign_ids'>;
 export type BusinessTaskInput = Partial<Pick<BusinessTask, 'title' | 'stage' | 'status' | 'description' | 'notes' | 'owner' | 'due_on' | 'depends_on' | 'ticket_id'>>;
+
+export interface SelfServiceAssessment {
+  residency: Array<{ subject: string; status: string; condition: string }>;
+  provider: string; plan: string; checked_at: string; scope: string; eligible: boolean; stale: boolean; company_revision: number; confirmed_at: string | null;
+  questions: Array<{ key: string; label: string; detail: string; required_yes: boolean }>;
+  answers: Record<string, boolean>; unanswered: string[]; blockers: string[]; notices: string[];
+  ein_route: 'online' | 'international' | 'ss4' | 'unknown' | null;
+  steps: Array<{ title: string; where: string; detail: string; url: string }>;
+  sources: Array<{ label: string; url: string }>;
+}
+export type CashKind = 'income' | 'expense' | 'capital_in' | 'capital_out' | 'loan_in' | 'loan_out' | 'transfer_in' | 'transfer_out' | 'refund_in' | 'refund_out';
+export interface CashEntryInput { request_id: string; date: string; kind: CashKind; amount_minor: number; currency: 'USD'; description: string; evidence: string }
+export interface CashEntry extends CashEntryInput { id: string; reconciled: boolean; voided: boolean; void_reason: string }
+export interface CashPeriod { month: string; opening_minor: number; closing_minor: number; statement_reference: string; closed: boolean; closed_at: string; reopen_reason: string }
+export interface Cashbook {
+  month: string; currency: 'USD'; company_revision: number; entries: CashEntry[]; period: CashPeriod | null; note: string;
+  summary: { inflow_minor: number; outflow_minor: number; net_minor: number; operating_in_minor: number; operating_out_minor: number; active_count: number; unreconciled_count: number };
+}
 
 export interface BusinessFormation {
   id: string; company_id: string; provider: string; credential_id: string; environment: 'sandbox' | 'live';

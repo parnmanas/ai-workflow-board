@@ -11,12 +11,13 @@ import { intercomConnector } from './intercom';
 import { zendeskConnector } from './zendesk';
 import { freshdeskConnector } from './freshdesk';
 import { HANDOFF_CONNECTORS, SERVICE_OFFERINGS } from './service-offerings';
+import { SELF_SERVICE_CONNECTORS } from '../business-self-service';
 
 // Descriptors drive setup, comparison and action availability; suppliers' features stay separate.
 export const BUSINESS_CONNECTORS: readonly BusinessConnector[] = [
   doolaConnector, mercuryConnector, stripeConnector, xeroConnector, quickbooksConnector,
-  chatwootConnector, intercomConnector, zendeskConnector, freshdeskConnector, ...HANDOFF_CONNECTORS,
-].map(connector => ({ ...connector, descriptor: { ...connector.descriptor, offering: SERVICE_OFFERINGS[connector.descriptor.id] } }));
+  chatwootConnector, intercomConnector, zendeskConnector, freshdeskConnector, ...HANDOFF_CONNECTORS, ...SELF_SERVICE_CONNECTORS,
+].map(connector => ({ ...connector, descriptor: { ...connector.descriptor, offering: connector.descriptor.offering || SERVICE_OFFERINGS[connector.descriptor.id] } }));
 
 export function businessConnector(id: string): BusinessConnector {
   const connector = BUSINESS_CONNECTORS.find(c => c.descriptor.id === id);

@@ -36,6 +36,7 @@ import { SecurityScheduleService } from '../security/security-schedule.service';
 import { AutomationScheduleService } from '../automation-schedule/automation-schedule.service';
 import { mcpRequestPreview } from './shared/request-preview';
 import { BusinessService } from '../business/business.service';
+import { BusinessCashbookService } from '../business/business-cashbook.service';
 import { BusinessFormationService } from '../business/business-formation.service';
 import { BusinessTrademarkService } from '../business/business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from '../business/business-trademark-integrations.service';
@@ -185,6 +186,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly interruptedSessionsService: InterruptedSessionsService,
     // Shared lifecycle services keep REST and MCP ownership/review checks aligned.
     private readonly businessService: BusinessService,
+    private readonly businessCashbookService: BusinessCashbookService,
     private readonly businessFormationService: BusinessFormationService,
     private readonly businessTrademarkService: BusinessTrademarkService,
     private readonly businessTrademarkIntegrationsService: BusinessTrademarkIntegrationsService,
@@ -296,6 +298,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       operatorProposalService: this.operatorProposalService,
       interruptedSessionsService: this.interruptedSessionsService,
       businessService: this.businessService,
+      businessCashbookService: this.businessCashbookService,
       businessFormationService: this.businessFormationService,
       businessTrademarkService: this.businessTrademarkService,
       businessTrademarkIntegrationsService: this.businessTrademarkIntegrationsService,

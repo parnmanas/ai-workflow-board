@@ -4,8 +4,8 @@ import { Button, Modal } from '../common';
 import { BusinessIcon } from './BusinessIcon';
 import { CONNECTION_STATUS, dateTime, STAGES } from './business.logic';
 
-const API_LABEL = { public: '공개 API', partner: '파트너 API · 승인 필요', unverified: '공개 API 미확인' };
-export const executionLabel = (c: BusinessConnector) => c.formation ? '내부 신청 + 상태 조회' : c.mode === 'api' ? '외부 처리 + 내부 조회' : '외부 처리 + 업무 기록';
+const API_LABEL = { public: '공개 API', partner: '파트너 API · 승인 필요', unverified: '공개 API 미확인', not_applicable: '직접 처리 · 외부 키 불필요' };
+export const executionLabel = (c: BusinessConnector) => c.mode === 'manual' ? c.stage === 'accounting' ? 'AWB에서 직접 기록 · 대사 · 마감' : '직접 접수 + AWB 절차 · 기록' : c.formation ? '내부 신청 + 상태 조회' : c.mode === 'api' ? '외부 처리 + 내부 조회' : '외부 처리 + 업무 기록';
 
 export function BusinessConnectorCard({ connector: c, company, connection, busy, onSetup, onSync, onChoose, onFormation, comparing, onCompare, onOpenData }: {
   connector: BusinessConnector; company: BusinessCompany; connection?: BusinessConnection; busy: boolean;
@@ -32,7 +32,7 @@ export function BusinessConnectorCard({ connector: c, company, connection, busy,
       {connection && <small className="business-connection-line"><span className={`business-pill ${connection.status}`}>{CONNECTION_STATUS[connection.status]}</span>{connection.environment === 'sandbox' ? '테스트 · ' : ''}{dateTime(connection.synced_at)}</small>}
       {connection?.last_error && <p className="business-inline-error" role="status">{connection.last_error}</p>}
       <div className="business-card-actions">
-        {plan && <Button variant={chosen ? 'secondary' : 'primary'} disabled={busy || (chosen && selected?.plan === plan.id)} onClick={() => onChoose(plan.id)}>{chosen && selected?.plan === plan.id ? '선택됨' : '이 서비스 선택'}</Button>}
+        {plan && <Button variant={chosen ? 'secondary' : 'primary'} disabled={busy || (c.mode !== 'manual' && chosen && selected?.plan === plan.id)} onClick={() => onChoose(plan.id)}>{c.mode === 'manual' ? chosen ? '조건 · 절차 다시 보기' : '조건 확인 · 직접 선택' : chosen && selected?.plan === plan.id ? '선택됨' : '이 서비스 선택'}</Button>}
         {c.formation && <Button variant="secondary" onClick={onFormation}>설립 신청 · 기록 <BusinessIcon name="arrow" size={14} /></Button>}
         {c.mode === 'api' && <Button variant="ghost" onClick={onSetup}>{connection ? '연결 설정' : '조회 연결'}</Button>}
         {connection && <Button variant="ghost" disabled={busy} onClick={onSync}><BusinessIcon name="refresh" size={14} />조회</Button>}
@@ -68,7 +68,7 @@ export function BusinessCatalog({ connectors, company, renderCard, initialStage 
       return <button key={s.id} onClick={() => setStage(s.id)}><BusinessIcon name={s.id} size={19} /><small>{s.label}</small><strong>{provider?.name || '서비스 선택'}</strong><span>{provider?.offering?.pricing.plans.find(p => p.id === choice?.plan)?.name || '가격·기능 비교'}</span></button>;
     })}</div>
     <div className="business-chip-filters" role="group" aria-label="커넥터 영역 필터"><button aria-pressed={stage === 'all'} onClick={() => setStage('all')}>전체 {connectors.length}</button>{STAGES.filter(s => s.id !== 'growth').map(s => <button key={s.id} aria-pressed={stage === s.id} onClick={() => setStage(s.id)}><BusinessIcon name={s.id} size={15} />{s.label} {connectors.filter(c => c.stage === s.id).length}</button>)}</div>
-    <div className="business-catalog-toolbar"><input className="business-filter" type="search" aria-label="서비스 검색" placeholder="서비스 · 기능 검색" value={query} onChange={e => setQuery(e.target.value)} /><select className="business-filter" aria-label="연동 방식" value={mode} onChange={e => setMode(e.target.value)}><option value="all">모든 진행 방식</option><option value="native">내부 신청 가능</option><option value="api">내부 조회 가능</option><option value="handoff">외부 서비스</option></select><span>{visible.length}개 서비스</span></div>
+    <div className="business-catalog-toolbar"><input className="business-filter" type="search" aria-label="서비스 검색" placeholder="서비스 · 기능 검색" value={query} onChange={e => setQuery(e.target.value)} /><select className="business-filter" aria-label="연동 방식" value={mode} onChange={e => setMode(e.target.value)}><option value="all">모든 진행 방식</option><option value="native">내부 신청 가능</option><option value="api">내부 조회 가능</option><option value="handoff">외부 서비스</option><option value="manual">직접 처리</option></select><span>{visible.length}개 서비스</span></div>
     <p className="business-catalog-note">선택은 회사의 사용 계획을 저장합니다. 가입·구매·기존 연결 변경은 실행하지 않습니다. 정가·과금 단위와 별도 비용을 함께 비교하세요.</p>
     {notice && <p className="business-stale" role="status">{notice}</p>}
     <div className="business-connectors-grid">{visible.map(c => renderCard(c, compareIds.includes(c.id), () => toggle(c)))}</div>
@@ -84,6 +84,7 @@ function ServiceComparison({ connectors, onClose }: { connectors: BusinessConnec
     { title: '가격 · 플랜', content: c => c.offering?.pricing.plans.map(p => <div className="business-compare-plan" key={p.id}><strong>{p.price}</strong><span>{p.name}</span><small>{p.detail}</small></div>) },
     { title: '별도 비용 · 조건', content: c => c.offering?.pricing.extra },
     { title: '공급자 기능', content: c => <ul>{c.offering?.features.map(f => <li key={f}>{f}</li>)}</ul> },
+    { title: '사용 조건 · 지원 범위', content: c => c.setup_note },
     { title: 'AWB 진행 방식', content: c => <><strong>{executionLabel(c)}</strong><p>{c.capabilities.join(' · ')}</p>{c.formation && <small>현재 내부 신청: 1인 LLC · WY/DE</small>}</> },
     { title: 'API 이용 조건', content: c => <><span className="business-pill">{c.offering && API_LABEL[c.offering.api_access]}</span><p>{c.offering?.api_note}</p></> },
     { title: '외부에서 할 일', content: c => <ul>{c.offering?.external_steps.map(f => <li key={f}>{f}</li>)}</ul> },

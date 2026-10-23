@@ -58,7 +58,7 @@ test('Business formation: reviewed partner requests, owner boundaries, prices an
   const prepare = async (path = url, overrides = {}) => call(`${path}/formation/doola/prepare`, { credential_id: credential.id, environment: 'sandbox', revision: (await call(path)).body.company.revision, application, ...overrides });
   const submit = (action, path = url, extra = {}) => call(`${path}/formations/${action.id}/submit`, { payload_digest: action.payload_digest, revision: action.revision, confirm: true, ...extra });
   const catalog = (await call('/business/connectors')).body;
-  assert.equal(catalog.length, 24); assert.equal(catalog.filter(c => c.mode === 'api').length, 9);
+  assert.equal(catalog.length, 26); assert.equal(catalog.filter(c => c.mode === 'api').length, 9);
   assert.equal(catalog.find(c => c.id === 'corpnet').offering.api_access, 'partner');
   assert.equal(catalog.find(c => c.id === 'corpnet').mode, 'handoff');
   assert.equal((await call(`${url}/services/banking`, { provider: 'doola', plan: 'starter', revision: 0 })).status, 400);
@@ -93,6 +93,9 @@ test('Business formation: reviewed partner requests, owner boundaries, prices an
       await lastValueFrom(interceptor.intercept({ switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }) }, { handle: () => of(responseBody) }));
     };
     await invoke('/api/business/companies', 'GET', undefined, { visible: 'control' });
+    for (const path of [`/api${url}`, `/api${url}/cashbook/entries`, `/api${url}/cashbook/months/2020-01`, `/api${url}/self-service/assess`, `/api${url}/services/accounting`]) {
+      await invoke(path, 'POST', { description: 'private-founder' }, { evidence: '123 Test Road' });
+    }
     for (const [path, method] of [[`/api${url}/formation/doola/prepare`, 'POST'], [`/api${url}/formations/${draft.id}/review`, 'GET'], [`/api${url}/formations/${draft.id}/signature`, 'POST'], ['/api/credentials', 'POST'], [`/api/credentials/${credential.id}`, 'PATCH']]) {
       await invoke(path, method, { application, credentials: { api_key: 'dk_test_fixture' } }, review.body);
     }

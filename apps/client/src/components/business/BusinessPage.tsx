@@ -9,6 +9,8 @@ import { BusinessIcon } from './BusinessIcon';
 import { CompanyForm, ConnectorForm, TaskForm } from './BusinessForms';
 import { dateTime, money, nextTasks, overdue, STAGES, TASK_STATUS } from './business.logic';
 import { BusinessHowItWorks, BusinessStageGuide } from './BusinessGuide';
+import { BusinessSelfServiceForm, BusinessSelfServiceSummary } from './BusinessSelfService';
+import { BusinessCashbook } from './BusinessCashbook';
 import { BusinessCatalog, BusinessConnectorCard } from './BusinessCatalog';
 import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
 import { BusinessTrademarks } from './BusinessTrademarks';
@@ -76,6 +78,7 @@ export default function BusinessPage({ view }: { view: View }) {
   const [busy, setBusy] = useState('');
   const [filter, setFilter] = useState('all');
   const [formationModal, setFormationModal] = useState<BusinessConnector | null>(null);
+  const [selfModal, setSelfModal] = useState<{ connector: BusinessConnector; plan: string } | null>(null);
   const rememberedId = rememberedCompany(user?.id || '');
   const selectedId = params.get('company') || companies?.find(c => c.id === rememberedId)?.id || companies?.[0]?.id || '';
   const selectedRef = useRef(selectedId); selectedRef.current = selectedId;
@@ -106,7 +109,7 @@ export default function BusinessPage({ view }: { view: View }) {
     finally { if (request === generation.current) setLoading(false); }
   }, [selectedId, canUse]);
   useEffect(() => {
-    setDetail(null); setTaskModal(null); setConnectorModal(null); setCompanyModal(null); setFormationModal(null);
+    setDetail(null); setTaskModal(null); setConnectorModal(null); setCompanyModal(null); setFormationModal(null); setSelfModal(null);
     void loadDetail();
     return () => { generation.current++; };
   }, [loadDetail]);
@@ -153,6 +156,7 @@ export default function BusinessPage({ view }: { view: View }) {
   const renderTask = (task: BusinessTask) => <TaskRow key={task.id} task={task} busy={!!busy || loading} onOpen={() => setTaskModal(task)} onToggle={() => void toggleTask(task)} onCreateTicket={hasPermission('tickets.create') ? () => void createTicket(task) : undefined} />;
   const chooseService = async (connector: BusinessConnector, plan: string) => {
     if (!company) return;
+    if (connector.mode === 'manual') { setSelfModal({ connector, plan }); return; }
     setBusy(connector.id);
     try { await api.chooseBusinessService(company.id, connector.stage, { provider: connector.id, plan, revision: company.revision }); await reload(); showToast('사용할 서비스를 저장했습니다. 가입·구매는 해당 신청 단계에서 진행하세요.', 'success'); }
     catch (e) { showToast((e as Error).message, 'error'); await loadDetail(); }
@@ -214,6 +218,8 @@ export default function BusinessPage({ view }: { view: View }) {
         <div className="business-operations-heading"><div><span className="business-eyebrow" style={{ color: stage.color }}>{stage.eyebrow}</span><h2>{stage.label}</h2><p>{stage.description}</p></div><Button onClick={() => setTaskModal('new')}><BusinessIcon name="plus" size={16} />업무 추가</Button></div>
         {stage.id === 'formation' && (detail.formations || []).length > 0 && <div className="business-formation-history">{detail.formations.map(f => <button key={f.id} onClick={() => setFormationModal(connectors.find(c => c.id === f.provider) || null)}><BusinessIcon name="formation" size={20} /><span><strong>{f.summary.name}</strong><small>{f.environment === 'sandbox' ? '테스트' : '실제 신청'} · {FORMATION_STATUS[f.status]}</small></span><BusinessIcon name="arrow" size={16} /></button>)}</div>}
         <BusinessStageGuide stage={stage.id} connectors={connectors} connectorsPath={path('connectors')} canMarketing={canMarketing} />
+        {stage.id === 'formation' && company.service_choices?.formation?.provider === 'self_formation' && <BusinessSelfServiceSummary key={company.id} company={company} provider="self_formation" plan={company.service_choices.formation.plan} onReview={() => { const connector = connectors.find(c => c.id === 'self_formation'); if (connector) setSelfModal({ connector, plan: company.service_choices!.formation!.plan }); }} />}
+        {stage.id === 'accounting' && <BusinessCashbook key={company.id} company={company} onChanged={reload} onSetup={() => { const connector = connectors.find(c => c.id === 'self_bookkeeping'); if (connector) setSelfModal({ connector, plan: 'cashbook' }); }} />}
         {stage.id === 'trademark' && <BusinessTrademarks key={company.id} company={company} hasTasks={activeStageTasks.length > 0} onChanged={reload} />}
         <section className="business-panel"><div className="business-section-heading"><h3>업무 <span className="business-count">{activeStageTasks.length}</span></h3><select className="business-filter" aria-label="업무 필터" value={filter} onChange={e => setFilter(e.target.value)}><option value="all">모든 업무</option><option value="open">미완료</option><option value="attention">기한 초과 · 응답 대기</option><option value="done">완료</option></select></div>
           {visibleTasks.length ? visibleTasks.map(renderTask) : <div className="business-small-empty"><BusinessIcon name={stage.id} size={28} /><p>표시할 업무가 없습니다.</p><Button variant="ghost" onClick={() => setTaskModal('new')}>새 업무 추가</Button></div>}
@@ -233,6 +239,7 @@ export default function BusinessPage({ view }: { view: View }) {
     {companyModal && <CompanyForm key={`${companyModal}-${selectedId}`} company={companyModal === 'edit' ? company : undefined} onClose={() => setCompanyModal(null)} onSaved={async id => { setCompanyModal(null); setCompanies(await api.listBusinessCompanies()); if (id !== selectedId) setParams({ company: id }); else await loadDetail(); showToast('회사의 워크플로를 저장했습니다.', 'success'); }} />}
     {company && taskModal && <TaskForm key={typeof taskModal === 'string' ? 'new' : taskModal.id} company={company} task={taskModal === 'new' ? undefined : taskModal} tasks={tasks} stage={stage.id} onClose={() => setTaskModal(null)} onSaved={async () => { setTaskModal(null); await reload(); }} />}
     {company && formationModal && <BusinessFormationForm key={`${company.id}-${formationModal.id}`} company={company} connector={formationModal} formations={(detail?.formations || []).filter(f => f.provider === formationModal.id)} onClose={() => setFormationModal(null)} onChanged={reload} />}
+    {company && selfModal && <BusinessSelfServiceForm key={`${company.id}-${selfModal.connector.id}-${selfModal.plan}`} company={company} connector={selfModal.connector} plan={selfModal.plan} onClose={() => setSelfModal(null)} onSaved={async () => { const stageId = selfModal.connector.stage; setSelfModal(null); await reload(); chooseStage(stageId); }} />}
     {company && connectorModal && <ConnectorForm key={connectorModal.id} company={company} connector={connectorModal} connection={detail?.connections.find(c => c.provider === connectorModal.id)} onClose={() => setConnectorModal(null)} onSaved={async () => { setConnectorModal(null); await reload(); }} />}
   </div>;
 }

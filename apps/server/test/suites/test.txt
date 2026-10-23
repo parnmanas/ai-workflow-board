@@ -49,6 +49,7 @@ test/business-connectors.test.mjs
 test/business-formation.test.mjs
 test/business-http.test.mjs
 test/business-mcp.test.mjs
+test/business-self-service.test.mjs
 test/business-trademark-integrations.test.mjs
 test/business-trademark.test.mjs
 test/catalog-list-aggregation.test.mjs

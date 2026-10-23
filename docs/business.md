@@ -14,20 +14,20 @@ Business 대메뉴는 회사 설립, 상표·브랜드 보호, 은행, 결제, �
   회사 등록 화면에도 관리용 등록과 실제 법인 설립 신청을 구분해 안내한다.
 - 사용자 정의 업무, 선행 조건, 담당자 이름, 기한, 진행 메모, 기존 AWB 티켓 연결 및 새 티켓 생성.
   티켓의 실행 상태를 함께 보여 주되 회사 업무를 자동 완료하지 않는다.
-- 24개 서비스 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
+- 26개 서비스·직접 처리 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
 - doola Partner API로 1인 LLC(WY·DE) 신청서 작성 → 비용 검토 → 명시적 제출 → 서명 링크 → 상태 조회.
 - 커넥터별 키 등록/선택, 테스트·운영 환경, 연결 설정, 명시적인 조회, 연결 해제.
 - 마케팅의 캠페인 실행·승인함·예산·고객 피드백은 기존 마케팅 구현을 사용한다.
 - 상표별 출원 준비·변호사·회신·기한 기록, 영문 메일 초안과 Resend·Gmail·Microsoft 365 검토 후 발송, 회신 자동 수집.
 - DocuSign 계약 PDF 검토·서명 요청·완료 웹훅·서명본 다운로드, Clio 사건·문서·일정, USPTO TSDR 상태·문서 자동 수집. OAuth 로그인·토큰 갱신과 5/15/60분 주기 조회를 포함한다. 설정·권한·수집 범위는 [상표 출원](trademarks.md)을 참고한다.
-- 위 비즈니스 기능 전체를 MCP 도구 43개로 제공한다. REST와 같은 서비스·소유권·revision·검토 원문 검사를 거쳐 실행한다. 사용 순서는 `get_business_workflow_guide`에서 조회한다.
+- 위 비즈니스 기능 전체를 MCP 도구 50개로 제공한다. REST와 같은 서비스·소유권·revision·검토 원문 검사를 거쳐 실행한다. 사용 순서는 `get_business_workflow_guide`에서 조회한다.
 
 회사를 AWB에 등록하거나 체크리스트를 완료하는 것은 법인 설립·계좌 개설·신고 완료를 뜻하지 않는다.
 doola는 파트너 계약과 키를 갖춘 사용자의 내부 설립 신청을 지원한다. 다른 설립 서비스는 외부에서
 신청하고 AWB에서 업무를 기록한다. 운영 API 조회 어댑터는 9개이며 나머지 15개는 비교·선택·외부
-진행용이다. 공급자 자체의 API 제공 여부와 AWB가 구현한 기능을 별도로 표시한다.
+진행용이다. 여기에 키가 필요 없는 직접 설립·직접 회계 옵션 2개를 제공한다. 공급자 자체의 API 제공 여부와 AWB가 구현한 기능을 별도로 표시한다.
 상표의 기존 Resend 발송(`BusinessEmailConnector`)과 새 연동 6개(`TrademarkConnector`)는 별도 레지스트리이며 위 운영 조회 어댑터 수에 포함하지 않는다.
-KYB, 송금, 결제 생성·환불, 장부 쓰기·세무 신고, 고객 응답은 해당 서비스에서 처리한다.
+KYB, 송금, 결제 생성·환불, 공급자 장부 쓰기·세무 신고, 고객 응답은 해당 서비스에서 처리한다. 직접 회계는 아래 범위의 AWB 입출금 보조 장부에 기록한다.
 
 ## 연결 가능한 서비스
 
@@ -55,12 +55,63 @@ AWB에 어댑터가 구현된 것으로 표시하지 않는다. CorpNet은 파�
 가격 데이터는 `connectors/service-offerings.ts` 한 곳에서 관리한다. 공식 가격표 링크·2026-10-23
 확인일·플랜·과금 단위·포함/별도 비용을 유지한다. 프로모션 대신 정가를 기본으로 표시하고 USD
 소비자 가격과 파트너 API 계약 가격을 구분한다. 실시간 견적·세금 포함 총비용·자동 최저가 정렬은
-제공하지 않는다. 가격 변경은 이 파일을 공식 출처로 갱신한다.
+제공하지 않는다. 가격 변경은 이 파일을 공식 출처로 갱신한다. 직접 처리 조건·가격·공식 근거는 `business-self-service.ts`에서 관리한다(확인 2026-10-24).
 
 Xero·QuickBooks는 발급된 access token을 사용하며 OAuth 동의/자동 갱신은 제공하지 않는다.
 Chatwoot은 Cloud만, Intercom은 미국 리전만 지원한다. Zendesk/Freshdesk는 검증한 단일 subdomain을
 공급자 고정 도메인에 넣으며 임의 URL·도메인·경로를 받지 않는다.
 금융 내역은 제한된 조회 샘플이며 원장 전체나 회계 대사 결과로 취급하지 않는다. 통화별 금액을 합산하지 않는다.
+
+## 직접 설립·직접 회계와 해외 운영자
+
+서비스 카탈로그의 **직접 처리** 필터에서 `직접 LLC 설립`과 `직접 회계 · AWB 장부`를 선택한다.
+대행 서비스와 같은 영역에서 가격·기능을 비교할 수 있다. `manual` 방식은 외부 API 키가 필요 없다.
+조건 점검은 서버가 제공하며 미응답을 충족으로 간주하지 않는다. 조건이 충족되어야 선택을 저장한다.
+운영자 해외 거주와 소유자의 미국 세법상 외국인 여부는 독립 질문이다. 해외 운영자는 거주·실제 운영 국가의 의무를 확인하는 추가 질문에 답한다.
+이는 AWB 사용 전 준비 확인이며 법적 자격·면세·세무 신고 완료를 보증하는 판정이 아니다.
+
+| 작업 | 직접 처리 조건·범위 |
+| --- | --- |
+| 일반 LLC 설립 | 현재 가이드는 US · LLC · WY/DE만 지원. 회사 정보와 선택한 주가 같고 명칭·신청/서명 권한·주내 Registered Agent·후속 의무를 확인해야 한다. 다른 주·형태가 법적으로 직접 설립 불가라는 뜻은 아니다. |
+| 해외에서 LLC 설립 | 해외 거주·SSN 미보유만으로 일반 LLC 설립을 금지하지 않는다. WY는 주내 실제 주소와 대리인 동의, DE는 주내 적격 대리인·실제 주소가 필요하다. 직접 대리인을 맡는 자격과 회사 소유·운영 자격은 구분한다. |
+| EIN 온라인 | 미국/미국령의 **주된 사업장**과 책임자의 SSN/ITIN이 필요하다. Registered Agent·우편 주소만으로 주된 사업장 요건을 충족하지 않는다. 실제 주정부 설립 후 IRS에서 신청한다. |
+| EIN 대체 경로 | 해외 주된 사업장은 전화·팩스·우편, 온라인 식별번호 조건을 못 맞추면 SS-4 팩스·우편 경로를 확인한다. SS-4 7b의 foreign/N/A는 번호 미보유 **및 발급 자격 없음** 조건을 확인해 적용한다. IRS 신청 자체는 무료다. |
+| 직접 장부 | 해외에서도 사용 가능. 단일 USD 계좌의 실제 입출금만 기록하고 증빙 원본·은행 명세서를 보관한다. AWB는 증빙 참조를 저장하며 은행 커넥터 샘플을 자동 전기하지 않는다. |
+| 직접 세금 신고 | 해외 거주 자체가 회계사 선임 의무가 되지는 않는다. 서식별 서명 권한·식별번호·전자/팩스/우편 제출 요건·기한을 확인해야 한다. AWB는 신고서 작성·제출이나 세액 계산을 수행하지 않는다. |
+
+일반 LLC의 설립자와 대리인 조건은 [WY §17-29-201](https://wyoleg.gov/statutes/compress/title17.pdf),
+[WY 대리인 지침](https://sos.wyo.gov/Business/Docs/HowToFindOrBecomeARegisteredAgent.pdf),
+[DE 설립 안내](https://corp.delaware.gov/howtoform/)와 [DE의 member/person 정의](https://delcode.delaware.gov/title6/c018/sc01/index.html)를 따른다.
+온라인 EIN과 SS-4 경로는 [IRS EIN](https://www.irs.gov/businesses/small-businesses-self-employed/get-an-employer-identification-number),
+[해외 신청](https://www.irs.gov/businesses/employer-identification-number), [SS-4 지침](https://www.irs.gov/instructions/iss4)을 근거로 한다.
+직접 작성과 서명 권한은 [1120 지침](https://www.irs.gov/instructions/i1120)의 Who Must Sign / Paid Preparer 항목에서 구분된다.
+
+설립 기본비용은 WY $100, DE $110. WY 연간세는 $60과 WY 내 자산 × 0.0002 중 큰 금액이며 설립 기념월 1일까지 연차 보고한다.
+DE는 2026 세액부터 연간 $400, 다음 해 6월 1일까지 납부한다. 이전 $300 안내가 남은 페이지 대신
+[2026 개정 법안](https://legis.delaware.gov/BillDetail/143069), [2026-08 공식 설립 서식](https://corpfiles.delaware.gov/LLC_Forms/LLC%20Formation.pdf),
+[WY 2026 수수료표](https://sos.wyo.gov/Business/docs/BusinessFees.pdf)를 적용한다. 대리인·결제·급행·인허가·세무 비용은 별도다.
+
+외국 소유 회사의 신고를 매출 유무만으로 판정하지 않는다. **외국인이 전부 소유한 미국 disregarded entity에 보고 대상 관계자 거래가 있으면**
+Form 5472 + pro forma 1120이 필요하다. 출자·분배·설립 관련 지급도 보고 대상이 될 수 있다.
+이 경우 IRS는 현재 전자신고 대신 지정 팩스·우편 경로를 안내한다. [IRS Form 5472 지침](https://www.irs.gov/instructions/i5472).
+파트너십은 1065 등 신고를 검토하고, 외국 파트너에 귀속되는 미국 사업 관련 과세소득이 있으면
+[1446 원천징수](https://www.irs.gov/individuals/international-taxpayers/partnership-withholding)를 검토한다.
+[비거주 외국인은 S-Corp 주주 요건에 맞지 않는다](https://www.irs.gov/businesses/small-businesses-self-employed/s-corporations).
+해외에 사는 미국 시민권자와 미국 세법상 외국 소유자를 같은 것으로 취급하지 않는다.
+거주 국가·실제 사업 지역의 등록·과세·해외투자/계좌 신고는 미국 절차와 별도로 확인한다.
+
+### AWB 입출금 장부
+
+- `BusinessCashEntry`: USD 정수 센트, 거래일·용도·증빙 참조. 영업 입출금, 출자/인출, 대출 원금, 이체, 환불을 분리한다. 금액/일자/구분은 불변이며 취소 사유를 남긴 뒤 새 거래로 정정한다. `request_id`의 동일 재시도는 기존 기록을 반환하고 내용이 다르면 거부한다.
+- `BusinessCashMonth`: 모든 유효 거래의 증빙·은행 대사 확인, 전체 명세서 기록 확인, 기초+순입출금=기말 잔액, 인접 전월 마감 잔액 일치를 검사한다. 현재/미래 월은 마감할 수 없다. 후속 월이 마감됐으면 이전 월을 수정할 수 없고 가장 최근 월부터 사유를 남겨 재개한다.
+- 월별 CSV는 취소 기록까지 포함한다. 문자열 수식은 이스케이프하고 금액은 센트로 내보낸다. 서비스 변경 뒤에도 조회·내보내기·마감 재개는 가능하며 새 기록/대사는 직접 회계 조건을 다시 확인해야 한다.
+- 월 5,000건(취소 포함), 건별 금액 최대 $20,000,000, 마감 잔액 ±$20,000,000. 보조 장부이므로 복식부기·재고·발생주의·급여·감가상각·여러 통화·세무 결산은 별도 도구와 연결한다. 순입출금과 영업 입출금 차이를 회계이익이나 과세소득으로 표시하지 않는다.
+- Account/Company 소유권과 회사 revision을 모든 변경에서 검사한다. 회사명·형태·국가·주 변경은 확인 답변을 초기화한다. 기록·대사·취소·마감·재개는 감사 이벤트를 남기며 금융/조건 본문을 HTTP/MCP 디버그 로그에 남기지 않는다.
+
+MCP에서도 `assess_business_self_service`로 조건을 조회·미리 평가하고 `choose_business_service.self_service_answers`로 확인 답변을 저장한다.
+`get_business_cashbook`, `add_business_cashbook_entry`, `reconcile_business_cashbook_entry`, `void_business_cashbook_entry`,
+`close_business_cashbook_month`, `reopen_business_cashbook_month`가 화면과 같은 서비스를 호출한다. 미확인 사실에 대한 답을 에이전트가 추측해서 채우면 안 된다.
+조회/조건 평가는 읽기 키로, 변경은 full 키로 가능하다. 장부 변경 자체가 외부 송금·세금 신고를 실행하지 않는다.
 
 ## 내부 설립 신청
 
@@ -122,7 +173,7 @@ SSN·EIN 원문·고객 메시지·서명 URL은 조회 스냅샷이나 활동 �
 
 NestJS `/mcp`와 standalone HTTP(`MCP_TRANSPORT=http`)에 같은 비즈니스 서비스를 연결한다. 자동 수집 타이머와 OAuth callback·웹훅 수신은 AWB 웹 서버가 담당하며 standalone MCP 프로세스는 타이머를 중복 실행하지 않는다. 인증된 HTTP 세션의 수동 수집·검토·실행 도구는 양쪽에서 사용할 수 있다. 호출자 인증이 없는 로컬 stdio에서는 비즈니스 도구를 실행하지 못하므로 인증된 HTTP 연결을 사용한다. MCP HTTP 로거는 비즈니스 도구 이름만 남기고 신청자·메일·계약 인수를 생략한다.
 
-`test/business-mcp.test.mjs`는 모든 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback만 전송용 예외다. 같은 테스트에서 43개 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
+`test/business-mcp.test.mjs`는 모든 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback만 전송용 예외다. 같은 테스트에서 50개 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
 
 ## 소유권과 저장
 

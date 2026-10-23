@@ -55,6 +55,7 @@ import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import type { AutomationScheduleService } from '../../automation-schedule/automation-schedule.service';
 import { BusinessService } from '../../business/business.service';
+import { BusinessCashbookService } from '../../business/business-cashbook.service';
 import { BusinessFormationService } from '../../business/business-formation.service';
 import { BusinessTrademarkService } from '../../business/business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from '../../business/business-trademark-integrations.service';
@@ -241,6 +242,7 @@ export interface ToolContext {
   // Marketing(docs/marketing.md) — 캠페인 에이전트의 MCP 표면(marketing-tools.ts). 사이클 · 승인 · 외부 발신이
   // NestJS 프로세스의 서비스에 있으므로 standalone context 에는 없다 — 도구가 그 사유로 거절한다.
   businessService?: BusinessService;
+  businessCashbookService?: BusinessCashbookService;
   businessFormationService?: BusinessFormationService;
   businessTrademarkService?: BusinessTrademarkService;
   businessTrademarkIntegrationsService?: BusinessTrademarkIntegrationsService;
@@ -347,12 +349,13 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   const deploymentService = new DeploymentService(dataSource, logService);
 
   const businessService = new BusinessService(dataSource, ticketService);
+  const businessCashbookService = new BusinessCashbookService(dataSource, businessService);
   const businessFormationService = new BusinessFormationService(dataSource, businessService);
   const businessTrademarkService = new BusinessTrademarkService(dataSource, businessService);
   const businessTrademarkIntegrationsService = new BusinessTrademarkIntegrationsService(dataSource, businessService);
 
   return {
-    businessService, businessFormationService, businessTrademarkService, businessTrademarkIntegrationsService,
+    businessService, businessCashbookService, businessFormationService, businessTrademarkService, businessTrademarkIntegrationsService,
     dataSource,
     activityService,
     apiKeyService,

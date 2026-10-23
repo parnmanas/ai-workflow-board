@@ -27,7 +27,7 @@ export const BUSINESS_GUIDES: Record<BusinessStage, BusinessGuide> = {
   },
   formation: {
     prepare: ['회사 이름, 사업 내용, 소유자 정보를 정리합니다.', '설립 주와 LLC / C-Corp 형태, 필요한 서비스를 확인합니다.'],
-    execute: ['커넥터에서 설립 서비스를 비교합니다. doola 파트너 키가 있으면 AWB의 설립 신청에서 1인 LLC(WY·DE)를 입력·검토·제출할 수 있습니다.', '다른 서비스는 외부 신청 화면으로 이어집니다. doola 접수 후 서명 링크에서 본인 서명을 하고, 추가 자료·설립 문서·EIN 결과를 확인합니다.'],
+    execute: ['커넥터에서 설립 서비스를 비교합니다. doola 파트너 키가 있으면 AWB의 설립 신청에서 1인 LLC(WY·DE)를 입력·검토·제출할 수 있습니다.', '직접 LLC 설립을 선택하면 WY·DE 주정부 접수와 조건별 EIN 경로를 안내합니다. 해외 거주자도 주내 대리인 등 조건을 충족하면 직접 진행할 수 있습니다. 다른 서비스는 외부 신청 화면으로 이어집니다.'],
     track: ['아래 업무에 담당자와 기한을 지정하고, 심사 중에는 외부 응답 대기로 기록합니다.', 'doola 조회를 연결하거나 서비스에서 확인한 결과를 업무 메모에 남깁니다.'],
     completed: '설립 신청 업무는 주정부 등록 문서와 서명 완료를, EIN 업무는 발급 확인서를 확인한 뒤 각각 완료로 표시하세요.',
     connectionNote: 'doola는 내부 신청 또는 기존 회사 ID 연결을 지원합니다. 파트너 계약 비용은 일반 구독료와 별개이며, 제출 성공은 설립 완료를 뜻하지 않습니다. Atlas·Firstbase·Clemta·LegalZoom·ZenBusiness·CorpNet은 현재 외부 진행과 업무 기록을 지원합니다.',
@@ -60,7 +60,7 @@ export const BUSINESS_GUIDES: Record<BusinessStage, BusinessGuide> = {
   },
   accounting: {
     prepare: ['은행 거래, 매출·비용 증빙과 기존 장부를 정리합니다.', '회계 담당자와 결산 주기, 회사에 적용되는 신고 일정을 정합니다.'],
-    execute: ['Xero 또는 QuickBooks에서 회사 장부와 은행 연결을 설정합니다.', '거래를 분류하고 증빙과 대사한 뒤 결산·신고를 담당자와 진행합니다.'],
+    execute: ['직접 회계의 조건을 확인해 AWB USD 입출금 장부를 사용하거나 Xero·QuickBooks에서 장부와 은행 연결을 설정합니다.', '직접 회계는 실제 입출금·출자·대출·이체·환불을 구분하고 증빙·은행 명세서와 대사합니다. 월 마감 후 필요한 결산·세금 신고는 따로 진행합니다.'],
     track: ['월별 결산·신고 업무를 추가하고 담당자, 기한, 확인 결과를 기록합니다.', 'Xero의 조직·청구서 또는 QuickBooks Online의 미수 청구서를 연결해 조회합니다.'],
     completed: '결산 업무는 대사·검토 결과를, 신고 업무는 실제 제출 확인을 근거로 완료하세요. 청구서 조회 성공만으로 결산이나 신고가 완료되지는 않습니다.',
     connectionNote: 'Xero는 OAuth access token과 tenant ID, QuickBooks Online은 access token과 realm ID를 사용합니다. 두 서비스 모두 토큰 만료 시 직접 갱신해야 하며 장부 쓰기·신고는 공급자에서 진행합니다.',

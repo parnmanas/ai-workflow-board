@@ -12,6 +12,7 @@ export class BusinessCompany {
   @Column({ type: 'text', default: '' }) description: string;
   @Column({ type: 'simple-json' }) campaign_ids: string[];
   @Column({ type: 'simple-json', default: '{}' }) service_choices: Record<string, { provider: string; plan: string }>;
+  @Column({ type: 'simple-json', default: '{}' }) self_service: Record<string, { answers: Record<string, boolean>; version: string; confirmed_at: string; actor_id: string }>;
   @Column({ type: 'integer', default: 0 }) revision: number;
   @CreateDateColumn() created_at: Date;
   @UpdateDateColumn() updated_at: Date;

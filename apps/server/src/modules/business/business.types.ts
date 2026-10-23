@@ -33,7 +33,7 @@ export interface ConnectorDescriptor {
   stage: BusinessStage;
   color: string;
   monogram: string;
-  mode: 'api' | 'handoff';
+  mode: 'api' | 'handoff' | 'manual';
   summary: string;
   capabilities: string[];
   setup_note: string;
@@ -49,7 +49,7 @@ export interface ConnectorDescriptor {
 export interface ServiceOffering {
   best_for: string;
   features: string[];
-  api_access: 'public' | 'partner' | 'unverified';
+  api_access: 'public' | 'partner' | 'unverified' | 'not_applicable';
   api_note: string;
   external_steps: string[];
   pricing: {

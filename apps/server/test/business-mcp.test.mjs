@@ -13,6 +13,7 @@ import { mcpRequestPreview } from '../dist/modules/mcp/shared/request-preview.js
 import { createStandaloneContext } from '../dist/modules/mcp/tools/context.js';
 import { registerBusinessTools } from '../dist/modules/mcp/tools/business-tools.js';
 import { registerBusinessTrademarkTools } from '../dist/modules/mcp/tools/business-trademark-tools.js';
+import { registerBusinessCashbookTools } from '../dist/modules/mcp/tools/business-cashbook-tools.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 
 // Every business REST operation must have an MCP counterpart. Browser OAuth callbacks
@@ -22,11 +23,16 @@ const REST_TO_MCP = {
     catalog: 'list_business_connectors', credentials: 'list_business_credentials', list: 'list_business_companies',
     create: 'create_business_company', detail: 'get_business_company', update: 'update_business_company',
     chooseService: 'choose_business_service', addTask: 'save_business_task', task: 'save_business_task',
+    assessSelfService: 'assess_business_self_service',
     removeTask: 'delete_business_task', initializeTrademark: 'initialize_business_trademark_tasks', createTaskTicket: 'create_business_task_ticket',
     formationReferences: 'get_business_formation_references', prepareFormation: 'prepare_business_formation',
     reviewFormation: 'review_business_formation', submitFormation: 'submit_business_formation',
     discardFormation: 'discard_business_formation', formationSignature: 'get_business_formation_signature',
     connect: 'configure_business_connector', disconnect: 'disconnect_business_connector', sync: 'sync_business_connector',
+  },
+  BusinessCashbookController: {
+    read: 'get_business_cashbook', add: 'add_business_cashbook_entry', reconcile: 'reconcile_business_cashbook_entry',
+    void: 'void_business_cashbook_entry', close: 'close_business_cashbook_month', reopen: 'reopen_business_cashbook_month',
   },
   BusinessTrademarkController: {
     list: 'list_business_trademarks', create: 'save_business_trademark', update: 'save_business_trademark',
@@ -88,12 +94,12 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
     assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
-    assert.equal(tools.length, 43);
+    assert.equal(tools.length, 50);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
     assert.ok(tools.find(t => t.name === 'send_business_trademark_action').inputSchema.required.includes('confirm'));
     assert.ok(tools.find(t => t.name === 'prepare_business_formation').inputSchema.properties.application.properties.address);
     const guide = await call('get_business_workflow_guide', {}, read); assert.ok(guide.stages.includes('trademark'));
-    const catalog = await call('list_business_connectors', {}, read); assert.equal(catalog.length, 24);
+    const catalog = await call('list_business_connectors', {}, read); assert.equal(catalog.length, 26);
     const compare = await call('compare_business_services', { providers: ['doola', 'atlas'] }, read); assert.equal(compare.services.length, 2);
     await denied('compare_business_services', { providers: ['doola', 'mercury'] });
   });
@@ -102,6 +108,26 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
   const detail = () => call('get_business_company', companyArgs, read);
   const companyRevision = async () => (await detail()).company.revision;
   const privateCompany = await call('create_business_company', { name: 'Foreign LLC' }, foreign);
+  await t.test('DIY assessment and all cashbook operations are available through real MCP', async () => {
+    const assessmentArgs = { ...companyArgs, provider: 'self_bookkeeping', plan: 'cashbook' };
+    const assessment = await call('assess_business_self_service', assessmentArgs, read);
+    assert.equal(assessment.eligible, false);
+    const answers = Object.fromEntries(assessment.questions.map(q => [q.key, q.required_yes]));
+    await denied('choose_business_service', { ...assessmentArgs, stage: 'accounting', revision: await companyRevision() });
+    await call('choose_business_service', { ...assessmentArgs, stage: 'accounting', revision: await companyRevision(), self_service_answers: answers });
+    const entryArgs = { ...companyArgs, request_id: randomUUID(), date: '2020-01-15', kind: 'income', amount_minor: 12345, currency: 'USD', description: 'Cashbook source record', evidence: 'receipt-1' };
+    for (const client of [read, write, foreign]) await denied('add_business_cashbook_entry', { ...entryArgs, revision: await companyRevision() }, client);
+    const row = await call('add_business_cashbook_entry', { ...entryArgs, revision: await companyRevision() });
+    await denied('get_business_cashbook', { ...companyArgs, month: '2020-01' }, foreign);
+    const book = await call('get_business_cashbook', { ...companyArgs, month: '2020-01' }, read);
+    assert.equal(book.summary.net_minor, 12345);
+    await call('reconcile_business_cashbook_entry', { ...companyArgs, entry_id: row.id, evidence: 'receipt-1 / bank-1', reconciled: true, revision: await companyRevision() });
+    await call('close_business_cashbook_month', { ...companyArgs, month: '2020-01', opening_minor: 0, closing_minor: 12345, statement_reference: 'bank-1', confirm_complete: true, revision: await companyRevision() });
+    await denied('void_business_cashbook_entry', { ...companyArgs, entry_id: row.id, reason: 'Wrong duplicate', revision: await companyRevision() });
+    await call('reopen_business_cashbook_month', { ...companyArgs, month: '2020-01', reason: 'Review duplicate', revision: await companyRevision() });
+    await call('void_business_cashbook_entry', { ...companyArgs, entry_id: row.id, reason: 'Wrong duplicate', revision: await companyRevision() });
+    assert.equal((await call('get_business_cashbook', { ...companyArgs, month: '2020-01' })).summary.net_minor, 0);
+  });
   const nativeFetch = globalThis.fetch; t.after(() => { globalThis.fetch = nativeFetch; });
   const publicUrl = process.env.AWB_PUBLIC_URL; process.env.AWB_PUBLIC_URL = `http://localhost:${port}`;
   t.after(() => { if (publicUrl === undefined) delete process.env.AWB_PUBLIC_URL; else process.env.AWB_PUBLIC_URL = publicUrl; });
@@ -147,7 +173,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
 
   await t.test('company/task mutations preserve revisions and require explicit ticket intent', async () => {
     assert.deepEqual((await call('list_business_companies', {}, read)).map(c => c.id), [company.id]);
-    const changed = await call('update_business_company', { ...companyArgs, revision: 0, changes: { description: 'Private owner instructions' } }); assert.equal(changed.name, company.name);
+    const changed = await call('update_business_company', { ...companyArgs, revision: await companyRevision(), changes: { description: 'Private owner instructions' } }); assert.equal(changed.name, company.name);
     await denied('update_business_company', { ...companyArgs, revision: 0, changes: { name: 'stale' } }, full, /409/);
     await call('choose_business_service', { ...companyArgs, stage: 'formation', provider: 'doola', plan: 'tax', revision: await companyRevision() });
     const task = await call('save_business_task', { ...companyArgs, revision: await companyRevision(), changes: { title: 'Explicit execution test', stage: 'formation' } });
@@ -282,12 +308,13 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
   await t.test('standalone context wires all services and rechecks session/account ownership', async () => {
     const ctx = createStandaloneContext(ds); const handlers = new Map();
     const capture = { tool: (name, description, schema, handler) => handlers.set(name, handler) };
-    registerBusinessTools(capture, ctx); registerBusinessTrademarkTools(capture, ctx);
+    registerBusinessTools(capture, ctx); registerBusinessTrademarkTools(capture, ctx); registerBusinessCashbookTools(capture, ctx);
     assert.equal(handlers.size, tools.length);
     const sid = randomUUID(); sessionStore.register(sid, { close: async () => {} }, {}, { source: 'db', agentId: host.id, accountId: mine.id, scope: 'full' });
     t.after(() => sessionStore.remove(sid));
     const invoke = (name, args = {}) => handlers.get(name)(args, { sessionId: sid });
     const created = JSON.parse((await invoke('create_business_company', { name: 'Standalone LLC' })).content[0].text); assert.equal(created.account_id, mine.id);
+    const cashbook = JSON.parse((await invoke('get_business_cashbook', { ...companyArgs, month: '2020-01' })).content[0].text); assert.equal(cashbook.entries.length, 1);
     const listed = JSON.parse((await invoke('list_business_trademarks', companyArgs)).content[0].text); assert.ok(listed.cases.some(row => row.id === trademark.id));
     sessionStore.setAuth(sid, { source: 'env', agentId: host.id, accountId: mine.id, scope: 'full' }); assert.equal((await invoke('list_business_companies')).isError, true);
     sessionStore.setAuth(sid, { source: 'db', agentId: host.id, accountId: theirs.id, scope: 'full' }); assert.equal((await invoke('list_business_companies')).isError, true);
