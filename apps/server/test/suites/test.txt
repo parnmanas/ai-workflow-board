@@ -168,6 +168,7 @@ test/ontology-extraction-population-nonblocking.test.mjs
 test/ontology-extraction-service-failure-propagation.test.mjs
 test/ontology-git-blobless-lazy-fetch.test.mjs
 test/ontology-git-diff-rename-detection.test.mjs
+test/ontology-graph-build-lease.test.mjs
 test/ontology-graph-controller-postgres-types.test.mjs
 test/ontology-graph-freshness.test.mjs
 test/ontology-graph-progress-sse-wiring.test.mjs
@@ -261,6 +262,7 @@ test/spa-fallback-guard.test.mjs
 test/sqljs-batched-flush.test.mjs
 test/sqljs-export-foreign-keys.test.mjs
 test/sqljs-flush-transaction-overlap.test.mjs
+test/sqljs-transaction-queue-watch.test.mjs
 test/sqljs-transaction-queue-writes.test.mjs
 test/sqljs-transaction-serialize-queue.test.mjs
 test/subagent-appendlocks-eviction.test.mjs
