@@ -109,6 +109,7 @@ test/host-models-single-source.test.mjs
 test/host-models.test.mjs
 test/inflight-strand-output-liveness.test.mjs
 test/instance-registry-list-for-agent.test.mjs
+test/instant-data-source.test.mjs
 test/knowledge-scopes.test.mjs
 test/library.test.mjs
 test/lockfile-advisory-audit-guard.test.mjs

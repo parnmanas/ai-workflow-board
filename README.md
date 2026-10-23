@@ -267,6 +267,7 @@ Source npm scripts run the backend in `apps/server`, where `dotenv/config` loads
 | `DB_TYPE` | `sqlite` locally; Compose sets `postgres`. These are the supported development/production paths. |
 | `DB_HOST`, `DB_PORT` | PostgreSQL host/port (`localhost`, `5432` outside Compose; `db` inside it). |
 | `DB_NAME`, `DB_USER`, `DB_PASS` | Database name, user, password. Compose requires `DB_PASS`. |
+| `AWB_LEGACY_TIMESTAMP_TIMEZONE` | Verified IANA writer timezone for converting legacy PostgreSQL timestamps; see the [instant storage upgrade guide](docs/runbooks/postgres-instants.md). |
 | `AWB_DATA_DIR` | Server file storage. Docker sets `/app/data` and persists it in `awbdata`. |
 | `ENCRYPTION_KEY` | Optional stable secret for credential encryption. If absent, a key file is generated under the server data directory. Preserve the secret or that file. |
 | `CORS_ORIGIN` | Explicit allowed origin for cross-origin browser access. Development reflects origins when unset; production rejects cross-origin requests when unset. Same-origin UI/API deployment works without it. |
@@ -313,6 +314,8 @@ docker compose logs --tail=100 server
 ```
 
 For a source deployment, update your checkout, reinstall from the lockfile, run `npm run build`, and restart `npm start` with production/PostgreSQL configuration. The built server serves `apps/client/dist` on port 7701. Merging into `main` alone does not update another user's deployment; this repository does not include a general server auto-deployment workflow.
+
+PostgreSQL instant columns now use `timestamptz`. Existing databases are converted before schema synchronization, preserving their previous timezone interpretation. Back up first and stop old server instances; review the [legacy timestamp conversion and rollback procedure](docs/runbooks/postgres-instants.md) before upgrading.
 
 agent-manager releases independently through the [npm workflow](.github/workflows/publish-agent-manager.yml). Versions are computed at publish time; do not manually bump its source package version. Hosts report running and installed versions separately; an installed update may need a restart. See [release procedure](docs/runbooks/agent-manager-release.md) and [self-update policy](docs/agent-manager.md#self-update-policy).
 

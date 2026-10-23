@@ -1,6 +1,7 @@
 import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
 import { preSyncAccountOwnership } from './database/pre-sync-account-ownership';
 import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
+import { InstantDataSource } from './database/instant-data-source';
 /**
  * Database compatibility module
  *
@@ -780,7 +781,7 @@ export function buildDataSourceOptions(): DataSourceOptions {
   };
 }
 
-export const AppDataSource = new DataSource(buildDataSourceOptions());
+export const AppDataSource = new InstantDataSource(buildDataSourceOptions());
 // standalone 진입점(mcp-server.ts, mcp-tools.ts)은 이 인스턴스에 직접
 // .transaction()을 호출한다 — NestJS 서버는 TypeOrmModule.forRoot()가 만든
 // 별도의 DataSource 인스턴스를 쓰므로 database.module.ts의 DatabaseModule
