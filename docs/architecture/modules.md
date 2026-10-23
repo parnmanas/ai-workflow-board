@@ -259,6 +259,13 @@ with the Agent table, P4c-4.)
 - Controllers: `OntologyController`
 - Providers / Exports: extraction, resolver, query, lifecycle, incremental-scheduler and stale-sweep services
 - Graphs are keyed by the repository's project id — [`docs/ontology-graph/DESIGN.md`](../ontology-graph/DESIGN.md).
+- Build lifecycle (`OntologyLifecycleService`). `status='building'` is both the in-progress marker and the lock against a second build.
+  - **Claim.** The first reference and Refresh each claim the row with a fresh `build_id` and a 5-minute lease (`build_lease_until`). The claim commits before the build runs.
+  - **Heartbeat.** The build renews its lease every 30 s, and once more right before the replacement transaction. On sql.js, renewals wait in the queue while that transaction runs.
+  - **Fencing.** The build finishes (`ready`, or `error` on failure) only while the row still carries its `build_id`. A build that lost its claim discards its result; the replacement transaction checks at its end and rolls back.
+  - **Abandoned builds.** If the server running a build restarts or crashes, its lease expires. The next read of the graph (REST status/graph or any MCP `graph_` tool) turns it into `error`, keeping the last ready snapshot and its commit. Refresh also reclaims it directly.
+  - Postgres may be shared by several servers, so boot cannot tell a dead build from a live one; the lease decides. sql.js lives in one process, so it also releases every `building` row at boot.
+  - **Per-file limit.** Extraction gives each file 30 s (`AWB_ONTOLOGY_EXTRACT_FILE_TIMEOUT_MS`). A worker past it is terminated and the file counts in `files_failed_extraction`.
 
 ### `OrchestrationModule`
 - Imports: Orchestration{Team,TeamMember,Mission,Step,Event}, ChatRoom(+Participant/Message), RuntimeHost, ApiKey, Action, ActionRun, Account, Credential repositories; `ChatRoomsModule`, `AgentManagerModule`, `ActionsModule`, `SharedServicesModule`
