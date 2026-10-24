@@ -22,7 +22,7 @@
  *      latest 를 publish 했는데 태그 push 만 실패한 상태. 그 버전을 재사용(범프 X).
  *      npm 은 publish 시 tarball manifest 에 gitHead(=배포 당시 커밋 SHA)를
  *      박아두므로, 태그가 없어도 provenance 로 '이 커밋 산출물'임을 검증한다.
- *   4. 그 외 → latest + patch (정상 신규 릴리스).
+ *   4. 그 외 → max(latest, 기록된 릴리스 태그) + patch (registry 반영 지연 방어).
  *
  * 실패 정책 (fail-closed): `npm view` 가 **명시적 E404 가 아닌** 오류
  *   (인증 E401 / 네트워크 / 5xx / 빈 출력 / 파싱 불가)면 절대 seed 로 폴백하지 않고
@@ -183,11 +183,12 @@ export function classifyPublishGuard(classification, version) {
  * @param {object}   p.latest           classifyNpmView 결과 (`npm view <pkg> version`)
  * @param {string|null} p.latestGitHead latest 의 gitHead (태그 없을 때만 참조)
  * @param {string}   p.headSha          HEAD 커밋 SHA
+ * @param {string|null} p.latestReleasedVersion 기록된 가장 높은 안정 릴리스 태그
  * @param {string}   p.seed             package.json version (E404 최초배포 floor)
  * @returns {{version:string, reason:'tag'|'seed'|'provenance'|'bump'}}
  * @throws  latest 가 error(=E404 아님)거나 seed 파싱 불가 시 (fail-closed)
  */
-export function decideVersion({ tagVersionOnHead, latest, latestGitHead, headSha, seed }) {
+export function decideVersion({ tagVersionOnHead, latest, latestGitHead, headSha, seed, latestReleasedVersion = null }) {
   // 1. HEAD 태그 = 이 커밋의 확정 버전 (재실행 멱등성 1차 근거).
   if (tagVersionOnHead) {
     parseVersion(tagVersionOnHead);
@@ -198,6 +199,7 @@ export function decideVersion({ tagVersionOnHead, latest, latestGitHead, headSha
     throw new Error(`레지스트리 최신 버전 조회 실패 (fail-closed): ${latest?.detail || 'unknown'}`);
   }
   if (latest.kind === 'not_found') {
+    if (latestReleasedVersion) throw new Error('릴리스 태그가 있지만 npm 패키지가 없음 (fail-closed)');
     parseVersion(seed); // seed 가 유효 semver 인지 검증
     return { version: seed, reason: 'seed' };
   }
@@ -209,7 +211,9 @@ export function decideVersion({ tagVersionOnHead, latest, latestGitHead, headSha
     return { version: latestV, reason: 'provenance' };
   }
   // 4. 정상 신규 릴리스.
-  return { version: bumpPatch(latestV), reason: 'bump' };
+  const floor = latestReleasedVersion && compareVersions(latestReleasedVersion, latestV) > 0
+    ? latestReleasedVersion : latestV;
+  return { version: bumpPatch(floor), reason: 'bump' };
 }
 
 // ─── 임퓨어 CLI (npm/git 호출) ────────────────────────────────────────────
@@ -252,6 +256,16 @@ function tagVersionOnHead() {
     });
   if (!versions.length) return null;
   return versions.sort((a, b) => compareVersions(a, b)).pop();
+}
+
+/** 이전 publish 성공의 태그는 registry 조회가 뒤처져도 이미 사용한 버전이다. */
+function latestReleasedVersion() {
+  const r = runCapture('git', ['tag', '--list', `${TAG_PREFIX}*`]);
+  if (r.status !== 0) throw new Error('릴리스 태그 조회 실패 (fail-closed)');
+  const versions = r.stdout.split('\n')
+    .map((tag) => tag.trim().slice(TAG_PREFIX.length))
+    .filter((v) => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(v));
+  return versions.sort(compareVersions).pop() || null;
 }
 
 /** 이 스크립트 옆 package.json 의 version (seed floor). */
@@ -328,6 +342,7 @@ export function main() {
   const seed = readSeed();
 
   const tagOnHead = tagVersionOnHead();
+  const releasedVersion = latestReleasedVersion();
 
   // bump 경로 선점(동시성) 방어: 최신값을 다시 읽어 재계산하는 bounded 루프.
   let attempt = 0;
@@ -336,7 +351,7 @@ export function main() {
     const latest = npmView(PACKAGE_NAME, 'version');
     let latestGitHead = null;
     if (!tagOnHead && latest.kind === 'found') {
-      const gh = npmView(PACKAGE_NAME, 'gitHead');
+      const gh = npmView(`${PACKAGE_NAME}@${latest.value}`, 'gitHead');
       // gitHead 없음/에러는 provenance 복구를 못 할 뿐 치명적이지 않다 → null 로 두고
       // 정상 bump 로 진행 (태그가 없으면 어차피 새 버전을 내는 게 맞다).
       latestGitHead = gh.kind === 'found' ? gh.value : null;
@@ -348,6 +363,7 @@ export function main() {
       latestGitHead,
       headSha,
       seed,
+      latestReleasedVersion: releasedVersion,
     });
 
     const action = resolveAction(version, reason, headSha, tagOnHead);

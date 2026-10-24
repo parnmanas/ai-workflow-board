@@ -284,3 +284,14 @@ test('decideVersion: 최초 배포인데 seed 가 깨졌으면 throw', () => {
     /파싱 불가/,
   );
 });
+
+// A previous publish can be staged before registry reads expose it (E409 incident).
+test('decideVersion: released tag prevents reusing a version hidden by stale registry reads', () => {
+  const input = { latest: { kind: 'found', value: '1.6.316' }, headSha: 'new', seed: '1.6.94', latestReleasedVersion: '1.6.317' };
+  assert.deepEqual(decideVersion(input), { version: '1.6.318', reason: 'bump' });
+  assert.deepEqual(decideVersion({ ...input, latest: { kind: 'found', value: '1.6.319' } }), { version: '1.6.320', reason: 'bump' });
+  assert.deepEqual(decideVersion({ ...input, tagVersionOnHead: '1.6.317' }), { version: '1.6.317', reason: 'tag' });
+  assert.deepEqual(decideVersion({ ...input, latestGitHead: 'new' }), { version: '1.6.316', reason: 'provenance' });
+  assert.throws(() => decideVersion({ ...input, latest: { kind: 'error', detail: 'network' } }), /fail-closed/);
+  assert.throws(() => decideVersion({ ...input, latest: { kind: 'not_found' } }), /fail-closed/);
+});

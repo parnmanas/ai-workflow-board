@@ -48,6 +48,15 @@
 > 보장하고, 부분 실패(publish 됐는데 태그만 실패)는 다음 run 이 npm 의 gitHead
 > provenance(배포 당시 커밋 SHA)로 복구한다.
 
+### Registry 반영 지연과 E409
+
+이전 publish가 성공했어도 registry 조회가 잠시 이전 latest 또는 E404를 반환할 수 있다.
+`Cannot publish over previously staged version` E409가 발생하면 이전 run의 발행 버전과
+릴리스 태그를 확인한다. 신규 버전 계산은 `max(registry latest, 기록된 안정 릴리스 태그) + patch`로
+이미 사용한 버전을 피한다. HEAD 태그와 정확한 버전의 gitHead를 통한 멱등 복구는 유지한다.
+인증·네트워크 오류는 계속 실패로 처리하며, 태그가 있는데 패키지 조회가 E404이면 seed로 되돌리지 않는다.
+실패한 run은 registry 상태를 확인한 후 재실행할 수 있다. 버전을 수동으로 범프하거나 기존 버전을 덮어쓰지 않는다.
+
 ## SSE contract rule
 
 If you add or change an **SSE event type**, the server side (`apps/server/src/modules/agent-manager/`) must change **in the same PR**. The agent-manager and the AWB server consume the same contract; splitting the two halves across PRs ships a window where one side speaks a dialect the other doesn't understand.
