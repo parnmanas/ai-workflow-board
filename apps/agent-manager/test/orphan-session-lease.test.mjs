@@ -176,11 +176,37 @@ async function raceContenders(source, env, afterGo) {
   return Promise.all(contenders.map((c) => c.done));
 }
 
+async function stopChild(child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = waitForExit(child);
+  child.kill('SIGKILL');
+  await exited;
+}
+
 afterEach(async () => {
-  for (const child of children.splice(0)) {
-    if (child.pid && alive(child.pid)) process.kill(child.pid, 'SIGKILL');
-  }
-  await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, { recursive: true, force: true })));
+  // A kill request is not termination: contenders may still create lock files.
+  // Wait before removing their homes, then tolerate Windows deletion-pending handles.
+  await Promise.all(children.splice(0).map(stopChild));
+  await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, {
+    recursive: true, force: true, maxRetries: 5, retryDelay: 100,
+  })));
+});
+
+test('cleanup waits for child exit after requesting termination', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 123, exitCode: null, signalCode: null,
+    kill(signal) { assert.equal(signal, 'SIGKILL'); return true; },
+  });
+  let stopped = false;
+  const stopping = stopChild(child).then(() => { stopped = true; });
+  await Promise.resolve();
+  assert.equal(stopped, false, 'a kill request must not allow directory cleanup');
+  child.signalCode = 'SIGKILL';
+  child.emit('exit', null, 'SIGKILL');
+  await stopping;
+  assert.equal(stopped, true);
+  child.kill = () => { throw new Error('must not signal an exited child'); };
+  await stopChild(child);
 });
 
 test('contender result waits for output pipes after process exit', async () => {
