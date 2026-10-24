@@ -164,3 +164,75 @@ test('successor published between release unlink and rmdir is preserved', async 
   await run(async () => {});
   assert.equal(await fs.readFile(successor, 'utf8'), 'partial');
 });
+
+for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+  test(`delete-pending mkdir ${code} retries without touching the existing owner`, async (t) => {
+    const { dir, run } = await fixture(t);
+    const owner = await seed(dir, ownerName(process.pid));
+    const mkdir = fs.mkdir.bind(fs);
+    let attempts = 0;
+    t.mock.method(fs, 'mkdir', async (path, ...args) => {
+      if (path === dir && ++attempts <= 2) {
+        assert.equal(await fs.readFile(owner, 'utf8'), 'partial');
+        throw Object.assign(new Error('delete pending'), { code });
+      }
+      if (path === dir && attempts === 3) {
+        assert.equal(await fs.readFile(owner, 'utf8'), 'partial');
+        await fs.unlink(owner);
+        await fs.rmdir(dir);
+      }
+      return mkdir(path, ...args);
+    });
+    let entered = 0;
+    await run(async () => { entered++; });
+    assert.equal(attempts, 3);
+    assert.equal(entered, 1);
+  });
+
+  test(`persistent mkdir ${code} preserves the original error at the deadline`, async (t) => {
+    const { dir, run } = await fixture(t);
+    const mkdir = fs.mkdir.bind(fs);
+    const denied = Object.assign(new Error('permission denied'), { code });
+    let now = 0;
+    t.mock.method(Date, 'now', () => now);
+    let attempts = 0;
+    t.mock.method(fs, 'mkdir', async (path, ...args) => {
+      if (path === dir) {
+        attempts++;
+        now += 25;
+        throw denied;
+      }
+      return mkdir(path, ...args);
+    });
+    await assert.rejects(run(async () => assert.fail('must not enter'), { timeoutMs: 30 }), err => err === denied);
+    assert.equal(attempts, 2);
+    await assert.rejects(fs.stat(dir), { code: 'ENOENT' });
+  });
+}
+
+test('owner publication permission errors are not retried as mkdir contention', async (t) => {
+  const { dir, run } = await fixture(t);
+  const denied = Object.assign(new Error('owner write denied'), { code: 'EPERM' });
+  let attempts = 0;
+  t.mock.method(fs, 'writeFile', async () => { attempts++; throw denied; });
+  await assert.rejects(run(async () => assert.fail('must not enter')), err => err === denied);
+  assert.equal(attempts, 1);
+  await assert.rejects(fs.stat(dir), { code: 'ENOENT' });
+});
+
+test('persistent mkdir denial is bounded even if the clock does not advance', async (t) => {
+  const { dir, run } = await fixture(t);
+  const mkdir = fs.mkdir.bind(fs);
+  const denied = Object.assign(new Error('permission denied'), { code: 'EPERM' });
+  t.mock.method(Date, 'now', () => 0);
+  // This branch only schedules its retry pause; run it immediately so the
+  // attempt bound is tested independently of wall-clock progress.
+  t.mock.method(globalThis, 'setTimeout', callback => { queueMicrotask(callback); });
+  let attempts = 0;
+  t.mock.method(fs, 'mkdir', async (path, ...args) => {
+    if (path === dir) { attempts++; throw denied; }
+    return mkdir(path, ...args);
+  });
+  await assert.rejects(run(async () => assert.fail('must not enter')), err => err === denied);
+  assert.equal(attempts, 80);
+});

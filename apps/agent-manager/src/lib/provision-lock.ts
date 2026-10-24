@@ -50,6 +50,7 @@ export async function withProvisionDirectoryLock<T>(
   const lockDir = join(worktreesRoot, '.provision.lock');
   const deadline = Date.now() + options.timeoutMs;
   await fs.mkdir(worktreesRoot, { recursive: true });
+  let mkdirRetries = 0;
   for (;;) {
     const token = randomUUID();
     const name = `owner-${process.pid}-${token}.json`;
@@ -58,6 +59,7 @@ export async function withProvisionDirectoryLock<T>(
     let acquired = false;
     try {
       await fs.mkdir(lockDir);
+      mkdirRetries = 0;
       created = true;
       await fs.writeFile(ownerPath, JSON.stringify({ token, pid: process.pid }), { flag: 'wx' });
       // A stale empty directory may have been removed while this creator was
@@ -65,6 +67,16 @@ export async function withProvisionDirectoryLock<T>(
       const names = await fs.readdir(lockDir);
       acquired = names.length === 1 && names[0] === name;
     } catch (err: any) {
+      // Windows may leave a just-removed directory delete-pending. Its mkdir
+      // then reports a permission/busy error instead of EEXIST. This grants
+      // no ownership or recovery rights: retry mkdir only, with a short bound,
+      // and retain the original error for a real permission failure.
+      if (!created && ['EPERM', 'EACCES', 'EBUSY'].includes(err?.code)) {
+        if (++mkdirRetries >= 80 || Date.now() >= deadline) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        continue;
+      }
+      mkdirRetries = 0;
       if (err?.code !== 'EEXIST' && err?.code !== 'ENOENT') throw err;
     } finally {
       if (created && !acquired) await removeOwner(lockDir, ownerPath);
