@@ -152,7 +152,8 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     const input = parseMail(mailFiltersSchema, filters);
     if (!accountIds.length) return { messages: [], total: 0, offset: input.offset, limit: input.limit };
     const query = this.ds.getRepository(BusinessMailMessage).createQueryBuilder('m')
-      .innerJoin(BusinessMailConnection, 'c', 'c.id = m.connection_id AND c.account_id = m.account_id')
+      // PostgreSQL stores generated IDs as uuid, but plain references as varchar.
+      .innerJoin(BusinessMailConnection, 'c', 'CAST(c.id AS varchar) = m.connection_id AND c.account_id = m.account_id')
       .where('m.account_id IN (:...accounts)', { accounts: accountIds });
     if (input.company_id) query.andWhere('c.company_id = :company', { company: input.company_id });
     if (input.connection_id) query.andWhere('c.id = :connection', { connection: input.connection_id });
