@@ -1071,6 +1071,7 @@ test('withinMaintenanceWindowNow: 환경변수 미설정이면 항상 창 안이
 });
 
 test('runSelfUpdate: 창 밖에서는 설치 실패 재시도가 프로덕션 경로에서 멈춘다', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 2, 12, 0) });
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1083,12 +1084,8 @@ test('runSelfUpdate: 창 밖에서는 설치 실패 재시도가 프로덕션 �
   );
   writeBootVerificationRecord(failed, dir);
 
-  // 지금 시각을 확실히 벗어나는 창을 만든다(현재 +2시간 ~ +3시간).
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const shift = (h) => pad((now.getHours() + h) % 24);
   const prev = process.env[UPDATE_WINDOW_ENV];
-  process.env[UPDATE_WINDOW_ENV] = `${shift(2)}:${pad(now.getMinutes())}-${shift(3)}:${pad(now.getMinutes())}`;
+  process.env[UPDATE_WINDOW_ENV] = '02:00-04:00';
   t.after(() => {
     if (prev === undefined) delete process.env[UPDATE_WINDOW_ENV];
     else process.env[UPDATE_WINDOW_ENV] = prev;
@@ -1103,6 +1100,9 @@ test('runSelfUpdate: 창 밖에서는 설치 실패 재시도가 프로덕션 �
 });
 
 test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된다 (창 배선의 양성 대조)', { skip: SKIP_ON_WIN32 }, async (t) => {
+  // 00:00-23:59 excludes the last minute of the day. Fix the local clock at
+  // that former CI failure time and use a window that actually contains it.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 2, 23, 59, 30) });
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1115,7 +1115,7 @@ test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된
   writeBootVerificationRecord(failed, dir);
 
   const prev = process.env[UPDATE_WINDOW_ENV];
-  process.env[UPDATE_WINDOW_ENV] = '00:00-23:59';
+  process.env[UPDATE_WINDOW_ENV] = '23:00-01:00';
   t.after(() => {
     if (prev === undefined) delete process.env[UPDATE_WINDOW_ENV];
     else process.env[UPDATE_WINDOW_ENV] = prev;
