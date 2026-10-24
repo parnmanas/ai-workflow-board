@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import type { Project } from '../../types';
 import { TICKET_STATUSES, TICKET_STATUS_LABELS, ticketStatusColor } from '../../tickets/status';
@@ -51,16 +51,22 @@ export default function TicketFilterBar({
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAllTags, setShowAllTags] = useState(false);
   const filtersRef = useRef(filters);
-  filtersRef.current = filters;
+  // Router navigation can commit after the next input event. Keep pending edits
+  // together until the URL props catch up, including across local menu renders.
+  useLayoutEffect(() => { filtersRef.current = filters; }, [filters]);
+  const set = useCallback((patch: Partial<TicketFilters>) => {
+    const next = { ...filtersRef.current, ...patch };
+    filtersRef.current = next;
+    onChange(next);
+  }, [onChange]);
   useEffect(() => { setQ(filters.q); }, [filters.q]);
   useEffect(() => {
     if (q === filtersRef.current.q) return;
-    const timer = setTimeout(() => onChange({ ...filtersRef.current, q }), SEARCH_DEBOUNCE_MS);
+    const timer = setTimeout(() => set({ q }), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [q, onChange]);
+  }, [q, set]);
 
-  const set = (patch: Partial<TicketFilters>) => onChange({ ...filters, ...patch });
-  const clear = () => { setQ(''); onChange({ ...EMPTY_TICKET_FILTERS }); };
+  const clear = () => { setQ(''); set({ ...EMPTY_TICKET_FILTERS }); };
   const tags = showAllTags ? tagFacet : tagFacet.slice(0, Math.max(VISIBLE_TAGS, tagFacet.filter(t => t.selected).length));
   const hiddenTagCount = tagFacet.length - tags.length;
   const projectKnown = !filters.projectId || projects.some(p => p.id === filters.projectId);
@@ -135,7 +141,7 @@ export default function TicketFilterBar({
               {TICKET_STATUSES.map(s => (
                 <button
                   key={s} type="button" aria-pressed={filters.statuses.includes(s)}
-                  onClick={() => set({ statuses: toggleInList(filters.statuses, s) })}
+                  onClick={() => set({ statuses: toggleInList(filtersRef.current.statuses, s) })}
                   style={chipStyle(filters.statuses.includes(s), ticketStatusColor(s))}
                 >
                   <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: '50%', background: ticketStatusColor(s), flexShrink: 0 }} />
@@ -166,7 +172,7 @@ export default function TicketFilterBar({
                   <button
                     key={t.tag} type="button" aria-pressed={t.selected}
                     title={t.selected ? `#${t.tag} 필터 해제` : `#${t.tag} 가 붙은 티켓만 (다른 선택 태그와 AND)`}
-                    onClick={() => set({ tags: toggleInList(filters.tags, t.tag) })}
+                    onClick={() => set({ tags: toggleInList(filtersRef.current.tags, t.tag) })}
                     style={chipStyle(t.selected)}
                   >
                     #{t.tag}<span style={{ fontSize: 10, color: tokens.colors.textMuted }}>{t.count}</span>

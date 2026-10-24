@@ -202,6 +202,29 @@ test('② 필터 없으면 5 lane 전부, 상태 칩을 누르면 URL 과 쿼리
   assert.deepEqual(laneStatuses(view), ['review']);
 });
 
+test('rapid status and project changes preserve both URL filters before the next render', async (t) => {
+  const { view } = await mountPage(t);
+  click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+  await flush();
+  const status = [...view.container.querySelectorAll('[aria-label="상태 필터"] button')].find(b => b.textContent.includes('To Do'));
+  const project = view.container.querySelector('[aria-label="프로젝트 필터"]');
+  act(() => {
+    status.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    project.value = 'p1';
+    project.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+  await flush();
+  const params = new URLSearchParams(probe.search);
+  assert.equal(params.get('status'), 'todo');
+  assert.equal(params.get('project'), 'p1');
+  act(() => {
+    status.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    status.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  });
+  await flush();
+  assert.equal(new URLSearchParams(probe.search).get('status'), 'todo', 'two rapid toggles restore the selection');
+});
+
 test('③ ?ticket= 은 상세 패널을 열고, 카드 클릭은 파라미터를 싣고, 닫으면 지운다', async (t) => {
   const { view, state } = await mountPage(t, { entry: `${BASE}/tickets?ticket=t2&status=in_progress` });
   assert.ok(state.calls.some((c) => c.method === 'GET' && c.path === '/tickets/t2'), 'GET /tickets/t2');
