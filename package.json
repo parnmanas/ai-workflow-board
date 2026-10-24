@@ -24,7 +24,7 @@
     "turbo": "^2.4.0"
   },
   "overrides": {
-    "multer": "^2.3.0",
+    "multer": "^2.5.0",
     "hono": "^4.13.11",
     "@hono/node-server": "^2.0.10",
     "ip-address": "^10.7.4",
@@ -42,7 +42,9 @@
     },
     "vite": {
       "picomatch": "^4.0.4"
-    }
+    },
+    "body-parser": "^2.4.0",
+    "fast-uri": "^3.1.9"
   },
   "scarfSettings": {
     "enabled": false
