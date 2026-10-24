@@ -121,7 +121,8 @@ export class OutreachChannel {
 
   // deploy_post_mode='reply_to_existing' only — the fixed thread every deploy
   // reply targets (a channel-native thread ref, e.g. a Reddit fullname).
-  // Unused by the other three modes.
+  // CRUD verifies its target before saving reply settings (credentials required;
+  // Reddit lookup consumes the channel rate cap). Unused by the other modes.
   @Column({ type: 'varchar', nullable: true, default: null })
   reply_thread_ref: string | null;
 

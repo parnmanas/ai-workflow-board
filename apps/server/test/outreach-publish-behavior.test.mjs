@@ -337,8 +337,8 @@ test('deploy_post_mode=reply_to_existing never replies into a reply_thread_ref o
   const dataSource = await setupDb();
   try {
     const cred = await seedCredential(dataSource);
-    // reply_thread_ref is operator free text — nothing checks where it points
-    // until the connector does, right before the reply.
+    // Legacy rows can predate save-time validation. The connector must still
+    // check the whitelist right before the reply.
     const channel = await seedChannel(dataSource, cred.id, {
       publish_policy: 'auto', deploy_post_mode: 'reply_to_existing', reply_thread_ref: 't3_offwhitelist',
     });

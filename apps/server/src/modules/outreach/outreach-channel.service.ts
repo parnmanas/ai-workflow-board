@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { resolveChannelConnector } from './connector-resolver';
 import { normalizeRuntimeSpec } from '../../common/runtime-spec';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 /**
@@ -77,6 +79,8 @@ export interface ChannelStatus {
 
 @Injectable()
 export class OutreachChannelService {
+  connectorFactory: typeof resolveChannelConnector = resolveChannelConnector;
+
   constructor(
     @InjectRepository(OutreachChannel) private readonly channelRepo: Repository<OutreachChannel>,
     @InjectRepository(OutreachInboundItem) private readonly itemRepo: Repository<OutreachInboundItem>,
@@ -111,6 +115,8 @@ export class OutreachChannelService {
     this._assertReplyThreadRefPresence(deployPostMode, replyThreadRef);
 
     const draft = this.channelRepo.create({
+      // The validation request and subsequent polling share this rate-limit key.
+      id: randomUUID(),
       account_id: input.accountId,
       kind: input.kind,
       name: input.name.trim(),
@@ -134,6 +140,7 @@ export class OutreachChannelService {
       target_environment: (input.targetEnvironment ?? '').trim(),
       close_on_resolve: input.closeOnResolve === true,
     });
+    await this._validateReplyThread(draft);
     draft.next_poll_at = this.pollingService.computeNextPoll(draft, new Date());
     return this.channelRepo.save(draft);
   }
@@ -190,6 +197,10 @@ export class OutreachChannelService {
       channel.next_poll_at = this.pollingService.computeNextPoll(channel, new Date());
     }
 
+    if (patch.deployPostMode !== undefined || patch.replyThreadRef !== undefined
+      || patch.targets !== undefined || patch.kind !== undefined || patch.credentialId !== undefined) {
+      await this._validateReplyThread(channel);
+    }
     return this.channelRepo.save(channel);
   }
 
@@ -226,6 +237,26 @@ export class OutreachChannelService {
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /** Validate before any write; a failed lookup must not persist a partial patch.
+   * Unrelated edits and switching replies off remain possible during an outage. */
+  private async _validateReplyThread(channel: OutreachChannel): Promise<void> {
+    if (channel.deploy_post_mode !== 'reply_to_existing') return;
+    let target: string;
+    try {
+      const connector = await this.connectorFactory(channel, this.credentialRepo);
+      if (!connector.describeThread) throw new Error('thread lookup is not supported on this channel');
+      const info = await connector.describeThread(channel.reply_thread_ref!);
+      target = String(info.target || '').trim().toLowerCase();
+    } catch {
+      // Connector/auth errors may contain remote response bodies or credential
+      // details. Expose a fixed actionable message at the CRUD boundary.
+      throw makeError(400, 'Could not verify reply_thread_ref. Check the credential, thread reference and channel rate limit, then retry; use deploy_post_mode=off to save without reply validation.');
+    }
+    if (!target || !channel.targets.some((allowed) => allowed.trim().toLowerCase() === target)) {
+      throw makeError(400, 'reply_thread_ref is outside this channel target whitelist');
+    }
+  }
 
   private _sanitizeTargets(targets: string[] | undefined): string[] {
     return Array.isArray(targets) ? targets.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()) : [];
