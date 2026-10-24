@@ -63,6 +63,7 @@ const OLD_PROVIDER_FIELDS = {
   intercom: { label: 'Intercom', fields: ['access_token'] },
   zendesk: { label: 'Zendesk Support OAuth', fields: ['access_token'] },
   freshdesk: { label: 'Freshdesk', fields: ['api_key'] },
+  mail: { label: 'Mail (SMTP · IMAP · JMAP)', fields: ['smtp_password', 'imap_password', 'jmap_token'] },
   resend: { label: 'Resend', fields: ['api_key'] },
   resend_inbound: { label: 'Resend Receiving', fields: ['api_key', 'webhook_secret'] },
   microsoft_oauth: { label: 'Microsoft Graph OAuth', fields: ['client_id', 'client_secret'] },
@@ -239,7 +240,7 @@ test('derived constants equal the old hand-written literals', () => {
   }
   assert.deepEqual(
     Object.keys(NON_CLI_CREDENTIAL_PROVIDERS),
-    ['github', 'gitlab', 'cloudflare', 'doola', 'mercury', 'stripe', 'xero', 'chatwoot', 'quickbooks', 'intercom', 'zendesk', 'freshdesk', 'resend', 'resend_inbound', 'microsoft_oauth', 'docusign_oauth', 'clio_oauth', 'uspto_tsdr', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
+    ['github', 'gitlab', 'cloudflare', 'doola', 'mercury', 'stripe', 'xero', 'chatwoot', 'quickbooks', 'intercom', 'zendesk', 'freshdesk', 'mail', 'resend', 'resend_inbound', 'microsoft_oauth', 'docusign_oauth', 'clio_oauth', 'uspto_tsdr', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
   );
   assert.deepEqual(plain(REVEALABLE_OAUTH_FIELDS), OLD_REVEALABLE_OAUTH_FIELDS);
 
