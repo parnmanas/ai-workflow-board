@@ -24,7 +24,8 @@ function fixture(t) {
   // The runner normally lives in the server, outside node:test.
   delete process.env.NODE_TEST_CONTEXT;
   process.env.DB_TYPE = 'sqlite';
-  process.env.PORT = '7701';
+  // A nonempty parent value must be cleared in children; no fixed port is needed.
+  process.env.PORT = '0';
   const child = path.join(dir, 'probe.test.mjs');
   fs.writeFileSync(child, `
     import test from 'node:test';
