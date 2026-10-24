@@ -9,8 +9,9 @@ import BusinessPage from '../src/components/business/BusinessPage.tsx';
 import BusinessLayout from '../src/components/business/BusinessLayout.tsx';
 import { money, nextTasks, overdue } from '../src/components/business/business.logic.ts';
 import { emptyTrademark } from '../src/components/business/trademark.logic.ts';
-import { TRADEMARK_CONNECTORS } from '../../server/dist/modules/business/connectors/trademark-registry.js';
-import { SELF_SERVICE_CONNECTORS, assessSelfService } from '../../server/dist/modules/business/business-self-service.js';
+// Client CI runs with tsx and does not build server/dist first.
+import { TRADEMARK_CONNECTORS } from '../../server/src/modules/business/connectors/trademark-registry.ts';
+import { SELF_SERVICE_CONNECTORS, assessSelfService } from '../../server/src/modules/business/business-self-service.ts';
 import { cashbookCsv, parseCashAmount } from '../src/components/business/cashbook.logic.ts';
 
 const h = React.createElement;
