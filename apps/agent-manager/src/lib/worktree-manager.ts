@@ -66,7 +66,8 @@
 import { promises as fsp } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { withProvisionDirectoryLock } from './provision-lock.js';
 import { log } from './logging.js';
 import { gitProcessEnv } from './git-host-env.js';
 import { readRunWorkspaceLeaves, forgetRunWorkspaceLeaf } from './run-workspace-manifest.js';
@@ -100,11 +101,6 @@ const BASE_FETCH_REF_LOCK_RETRY_DELAY_MS = 250;
 const PROVISION_LOCK_TIMEOUT_MS = 20_000;
 const PROVISION_LOCK_STALE_MS = 60_000;
 const PROVISION_LOCK_HEARTBEAT_MS = 10_000;
-
-interface ProvisionLockOwner {
-  token: string;
-  pid: number;
-}
 
 /** Board worktree placement mode (mirrors the server's worktree-config enum —
  *  kept as a local literal so agent-manager doesn't depend on the server pkg). */
@@ -2009,73 +2005,12 @@ export class WorktreeManager {
     const tail = prev.then(() => gate);
     this.#provisionLocks.set(key, tail);
     await prev.catch(() => {});
-    const lockDir = join(worktreesRoot, '.provision.lock');
-    const ownerPath = join(lockDir, 'owner.json');
-    const owner: ProvisionLockOwner = { token: randomUUID(), pid: process.pid };
-    const deadline = Date.now() + this.#provisionLockTimeoutMs;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
-      await fsp.mkdir(worktreesRoot, { recursive: true });
-      for (;;) {
-        try {
-          await fsp.mkdir(lockDir);
-          await fsp.writeFile(ownerPath, JSON.stringify(owner), { flag: 'wx' });
-          break;
-        } catch (err: any) {
-          if (err?.code !== 'EEXIST') throw err;
-          try {
-            const stat = await fsp.stat(lockDir);
-            if (Date.now() - stat.mtimeMs > this.#provisionLockStaleMs) {
-              let current: ProvisionLockOwner | undefined;
-              try {
-                const parsed = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as Partial<ProvisionLockOwner>;
-                if (typeof parsed.token === 'string' && parsed.token && Number.isInteger(parsed.pid)) {
-                  current = parsed as ProvisionLockOwner;
-                }
-              } catch {
-                // A crash can leave the directory behind before owner.json is
-                // written (or while it is being written). Once the directory
-                // itself is stale, missing/corrupt metadata cannot identify a
-                // live owner and is safe to quarantine via atomic rename.
-              }
-              let ownerAlive = false;
-              if (current && current.pid > 0) {
-                try {
-                  process.kill(current.pid, 0);
-                  ownerAlive = true;
-                } catch (signalErr: any) {
-                  ownerAlive = signalErr?.code === 'EPERM';
-                }
-              }
-              if (!ownerAlive) {
-                const staleDir = `${lockDir}.stale-${randomUUID()}`;
-                await fsp.rename(lockDir, staleDir);
-                await fsp.rm(staleDir, { recursive: true, force: true });
-                continue;
-              }
-            }
-          } catch {}
-          if (Date.now() >= deadline) throw new Error(`provision lock timeout: ${lockDir}`);
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-      }
-      heartbeat = setInterval(() => {
-        void fsp.utimes(lockDir, new Date(), new Date()).catch(() => {});
-      }, this.#provisionLockHeartbeatMs);
-      heartbeat.unref?.();
-      try {
-        return await fn();
-      } finally {
-        if (heartbeat) clearInterval(heartbeat);
-        try {
-          const current = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as ProvisionLockOwner;
-          if (current.token === owner.token) {
-            const releasedDir = `${lockDir}.released-${owner.token}`;
-            await fsp.rename(lockDir, releasedDir);
-            await fsp.rm(releasedDir, { recursive: true, force: true });
-          }
-        } catch {}
-      }
+      return await withProvisionDirectoryLock(worktreesRoot, {
+        timeoutMs: this.#provisionLockTimeoutMs,
+        staleMs: this.#provisionLockStaleMs,
+        heartbeatMs: this.#provisionLockHeartbeatMs,
+      }, fn);
     } finally {
       release();
       if (this.#provisionLocks.get(key) === tail) this.#provisionLocks.delete(key);

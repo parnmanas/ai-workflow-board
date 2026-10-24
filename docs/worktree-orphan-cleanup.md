@@ -271,3 +271,18 @@ terminal cleanup 은 경로 소유권과 branch 소유권을 분리해 판정한
 확정되면 checkout 을 회수하고, ref 삭제는 full UUID 가 들어간 `ticket/<uuid>-*`
 에만 허용한다. clean 이 아니거나, detached HEAD 가 base 에 포함되지 않거나,
 우리 티켓 것도 공용 branch 도 아닌 ref 위에 있으면 그대로 보류한다.
+
+## Provision lock recovery
+
+Per-ticket provisioning serializes each worktrees root with `.provision.lock`.
+Owners use a fresh `owner-<pid>-<uuid>.json` name for every attempt. Recovery
+unlinks only a stale owner's unique file after its PID is confirmed dead, then
+removes only an empty directory. Release and heartbeat also target the unique
+owner file. A creator checks that its owner is the only entry before proceeding.
+
+Legacy `owner.json` and unrecognized entries are preserved and can cause
+`provision lock timeout`. Their reusable names cannot be safely reclaimed by
+checking contents and then deleting the path. Stop all managers sharing that
+root and confirm no provisioning is running before manually removing a leftover
+lock. Upgrade all managers sharing a root together: an older manager still uses
+unsafe directory rename recovery and cannot honor the new protocol.
