@@ -196,3 +196,25 @@ for (const force of [false, true]) {
     `);
   });
 }
+
+test('force losing publication to a departed winner does not restart takeover', async () => {
+  await scenario(`
+    fs.writeFileSync(path, owner);
+    let links = 0, signals = 0, dead = false;
+    process.kill = (pid, signal) => {
+      if (pid !== 999999999) return true;
+      if (dead) throw Object.assign(new Error(), { code: 'ESRCH' });
+      if (signal !== 0) { dead = true; signals++; }
+      return true;
+    };
+    fs.linkSync = (src, dst) => {
+      if (++links === 2) throw Object.assign(new Error(), { code: 'EEXIST' });
+      return realLink(src, dst);
+    };
+    const { acquireAgentLock } = await load();
+    await assert.rejects(acquireAgentLock({ ...opts, force: true }), { code: 'EAGENTTAKEOVER' });
+    assert.equal(links, 2);
+    assert.equal(signals, 1);
+    assert.equal(fs.existsSync(path), false);
+  `);
+});

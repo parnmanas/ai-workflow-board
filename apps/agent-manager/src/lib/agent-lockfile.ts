@@ -39,7 +39,8 @@
 //      경로에 들어온 contender 만 붙잡는다 — 1번 happy path 의 create 는 가드를
 //      거치지 않으므로 remove 와 create 사이를 파고들 수 있다. 그렇게 create 가
 //      EEXIST 로 지면 raw fs 오류를 올리지 않고 승자를 다시 읽어 판정한다:
-//      살아 있으면 EAGENTLOCKED, 그마저 죽었으면 처음부터 재시도(createAfterCleanup).
+//      살아 있으면 EAGENTLOCKED, 그마저 죽었으면 stale 경로만 처음부터 재시도한다.
+//      force 는 새 owner 를 다시 관측해 죽이지 않도록 EAGENTTAKEOVER 로 끝낸다.
 //   5. force 인수는 kill 까지 통째로 회수 가드 안에서 한다. 가드를 잡은 뒤 owner
 //      를 다시 읽어, 대기 중 동료 force contender 가 먼저 인수를 끝냈으면(관측한
 //      pid 와 다르면) 그 새 owner 를 죽이지 않고 EAGENTLOCKED 로 거절한다.
@@ -48,6 +49,8 @@
 //      바깥에서 처음부터 다시 돌면 force 경로가 관측한 owner 를 잃고, 그사이 인수를
 //      끝낸 동료를 새 owner 로 읽어 죽인다 — 5번 규칙이 무너진다. 그 errno 가 연달아
 //      상한을 넘으면 원본 errno 를 올린다(진짜 권한 오류를 가리지 않는다).
+//      force 의 unlink·재생성과 가드 해제도 단계별로 제한 재시도한다. 회수 불가 가드는
+//      60초 대기 뒤 EAGENTGUARDTIMEOUT 으로 끝내며 살아 있을 수 있는 owner 를 보존한다.
 //
 // Release rules:
 //   - On clean shutdown call release(); only unlinks if pid still matches ours.
@@ -630,7 +633,7 @@ export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerd
 type RecoveryGuardSnapshot =
   | { kind: 'dir'; listed: boolean; ownerNames: string[]; others: string[] }
   | { kind: 'other' }
-  | { kind: 'gone' };
+  | { kind: 'gone'; failure?: any };
 
 /** owner 파일 하나를 읽은 결과 — owner 로 읽힘 · 읽었지만 owner 가 아님(쓰다 만 파일) · 못 읽음. */
 type RecoveryOwnerRead = { owner: ParsedLock } | { torn: true } | { unreadable: string };
@@ -678,12 +681,14 @@ function probeRecoveryGuard(): { facts: RecoveryGuardFacts; snapshot: RecoveryGu
   const ownerNames = (entries ?? []).filter(isRecoveryOwnerName);
   const reads = ownerNames.map(readRecoveryOwnerFile);
   let stat: Stats | null;
+  let statFailure: any;
   try {
     // lstat — 링크를 따라가지 않는다. 가드 자리에 디렉터리가 아닌 것(끊긴 심볼릭 링크 등)이
     // 있으면 mkdir 은 EEXIST 인데 stat 은 실패해 "사라짐" 판정이 끝없이 이어진다. 그 자리의
     // 시각을 읽으면 owner 미상 가드의 상한(60초) 규칙으로 회수된다.
     stat = lstatSync(RECOVERY_LOCK_PATH);
-  } catch {
+  } catch (err) {
+    statFailure = err;
     stat = null;
   }
   const facts: RecoveryGuardFacts = {
@@ -693,7 +698,7 @@ function probeRecoveryGuard(): { facts: RecoveryGuardFacts; snapshot: RecoveryGu
     bootTimeMs: currentBootIdentity().approxBootTimeMs,
     nowMs: Date.now(),
   };
-  if (!stat) return { facts, snapshot: { kind: 'gone' } };
+  if (!stat) return { facts, snapshot: { kind: 'gone', failure: statFailure } };
   // readdir 는 링크를 따라가므로, 디렉터리가 아니면 위에서 읽은 것은 이 자리의 것이 아니다.
   if (!stat.isDirectory()) return { facts, snapshot: { kind: 'other' } };
 
@@ -912,14 +917,33 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
           `observed pid=${existing.pid})`,
       );
     }
+    let removeCurrent = false;
+    await retryGuardOperation('force unlink', () => {
+      try {
+        if (removeCurrent) unlinkSync(LOCK_PATH);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+    }, async () => {
+      // Re-read before each unlink, outside the write retry's catch. Read failures
+      // have their own bounded policy and must not restart this force operation.
+      const latest = await readLockForAcquire();
+      removeCurrent = latest !== null;
+      if (latest && (!current || latest.pid !== current.pid || isPidAlive(latest.pid))) throw lockedBy(latest);
+    });
     try {
-      if (current) unlinkSync(LOCK_PATH);
+      await createAfterCleanup(payload, false, true);
     } catch (err: any) {
-      if (err?.code !== 'ENOENT') throw err;
+      // Never restart force with a newly observed owner after losing publication.
+      if (err?.code === 'ELOCKRACE') {
+        throw Object.assign(new Error('AWB force takeover lost publication; refusing to observe and terminate another owner'), {
+          code: 'EAGENTTAKEOVER', cause: err,
+        });
+      }
+      throw err;
     }
-    await createAfterCleanup(payload);
   } finally {
-    releaseRecovery();
+    await releaseRecovery();
   }
   log(`[lockfile] --force: acquired after previous owner exit (role=${payload.role} pid=${process.pid})`);
   return makeReleaseHandle(payload);
@@ -939,7 +963,7 @@ async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandl
   try {
     await reclaimAndCreate(payload);
   } finally {
-    releaseRecovery();
+    await releaseRecovery();
   }
   log(`[lockfile] acquired after stale-cleanup (role=${payload.role} pid=${process.pid})`);
   return makeReleaseHandle(payload);
@@ -986,9 +1010,10 @@ async function reclaimAndCreate(payload: LockPayload): Promise<void> {
  *
  *  창 자체는 exclusive create 의미상 없앨 수 없으므로 결과를 다시 판정한다 —
  *  살아 있는 승자에게 졌으면 EAGENTLOCKED, 승자마저 죽었으면 재시도. */
-async function createAfterCleanup(payload: LockPayload, retryTransient = false): Promise<void> {
+async function createAfterCleanup(payload: LockPayload, retryTransient = false, retryInGuard = false): Promise<void> {
   try {
-    writeLockAtomic(payload);
+    if (retryInGuard) await retryGuardOperation('force create', () => writeLockAtomic(payload));
+    else writeLockAtomic(payload);
   } catch (err: any) {
     if (retryTransient && isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
     if (err?.code !== 'EEXIST') throw err;
@@ -1127,7 +1152,33 @@ function retryAbandonedRecoveryOwners(): any {
   return failure;
 }
 
-async function acquireRecoveryLock(): Promise<() => void> {
+/** Retry only this operation while retaining the guard; never repeat a completed unlink.
+ *  Keep the same bounded policy on every platform: filesystem filters can also
+ *  report transient errors outside Windows. Permanent errors retain their errno. */
+async function retryGuardOperation(
+  label: string,
+  operation: () => void | Promise<void>,
+  beforeAttempt?: () => Promise<void>,
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    await beforeAttempt?.();
+    try {
+      await operation();
+      return;
+    } catch (err: any) {
+      if (!isTransientLockRaceCode(err?.code)) throw err;
+      if (attempt >= RECOVERY_GUARD_TRANSIENT_LIMIT) {
+        log(`[lockfile] ${label}: gave up after ${attempt} attempts (${err.code})`);
+        throw err;
+      }
+      if (attempt === 1) log(`[lockfile] ${label}: ${err.code}; will retry while holding the recovery guard`);
+      await delay(25);
+    }
+  }
+}
+
+async function acquireRecoveryLock(): Promise<() => Promise<void>> {
+  const startedAt = performance.now();
   // 회수 대상으로 판정한 가드를 연달아 못 지운 횟수. 판정한 그 가드만 지우므로(3-2번 규칙) 지울
   // 수 없는 잔해(다른 사용자가 남긴 가드 등)를 옆으로 옮겨 치울 길이 없다 — 옮기는 것은 그 순간
   // 그 자리에 있는 것이라 남의 새 가드일 수 있다. 끝없이 25ms 마다 다시 시도하는 대신, 삭제 대기
@@ -1143,6 +1194,15 @@ async function acquireRecoveryLock(): Promise<() => void> {
       : reclaimStaleRecoveryLock(failedReclaims > 0);
     if (outcome.ok) {
       failedReclaims = 0;
+      // A timeout is diagnostic only: suspension and PID reuse are indistinguishable
+      // on platforms without process birth identity. Never evict a possible holder.
+      if (!outcome.reclaimed && performance.now() - startedAt >= RECOVERY_LOCK_STALE_MS) {
+        const err = Object.assign(new Error(
+          `Timed out waiting for recovery guard ${RECOVERY_LOCK_PATH}; inspect its owner before removing it`,
+        ), { code: 'EAGENTGUARDTIMEOUT' });
+        log(`[lockfile] ${err.message}`);
+        throw err;
+      }
       return outcome.reclaimed;
     }
     failedReclaims += 1;
@@ -1300,9 +1360,9 @@ function discardRecoveryGuardClaim(ownerName: string): void {
 
 /** 쥐었던 가드를 놓는다 — 우리 owner 이름을 지운 뒤 빈 디렉터리만 치운다. 경로째 지우면(rm -r)
  *  그 자리가 바뀌었을 때 남의 가드를 지운다. */
-function releaseRecoveryGuard(ownerName: string): void {
+async function releaseRecoveryGuard(ownerName: string): Promise<void> {
   try {
-    unlinkSync(join(RECOVERY_LOCK_PATH, ownerName));
+    await retryGuardOperation('guard owner release', () => unlinkSync(join(RECOVERY_LOCK_PATH, ownerName)));
   } catch (err: any) {
     // 우리 owner 가 없으면 그 자리의 가드는 우리 것이 아니다 — 정상 경로에서는 일어나지 않는다.
     // 못 지우면 가드가 우리 owner 로 남아, 대기자는 이 프로세스가 끝날 때까지 기다린다. 어느
@@ -1316,7 +1376,7 @@ function releaseRecoveryGuard(ownerName: string): void {
     return;
   }
   try {
-    rmdirSync(RECOVERY_LOCK_PATH);
+    await retryGuardOperation('guard directory release', () => rmdirSync(RECOVERY_LOCK_PATH));
   } catch (err: any) {
     // 남은 빈 가드는 대기자가 짧은 상한 뒤 회수한다. 비지 않은 가드면 그대로 둔다 — 물러나는
     // contender 의 owner 이거나, Windows 가 아직 다 지우지 못한(삭제 대기) 우리 owner 다.
@@ -1359,6 +1419,9 @@ type ReclaimOutcome = { ok: true; reclaimed: boolean } | { ok: false; failure: a
 
 function reclaimStaleRecoveryLock(quiet = false): ReclaimOutcome {
   const { facts, snapshot } = probeRecoveryGuard();
+  if (snapshot.kind === 'gone' && snapshot.failure?.code !== 'ENOENT') {
+    return { ok: false, failure: snapshot.failure, detail: `could not inspect ${RECOVERY_LOCK_PATH} (${snapshot.failure?.code})` };
+  }
   const verdict = judgeRecoveryGuard(facts);
   if (!verdict.reclaim || snapshot.kind === 'gone') return { ok: true, reclaimed: false }; // 사라진 가드는 판정이 이미 걸렀다
   if (!quiet) log(`[lockfile] reclaiming stale recovery guard — ${verdict.reason}: ${verdict.detail}`);

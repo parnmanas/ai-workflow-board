@@ -2105,3 +2105,100 @@ test('force 경로: 가드 mkdir 권한 오류가 계속되면 owner 를 건드�
   assert.equal(countOf(result.stderr, '--force: waiting for takeover guard'), 1, `owner 를 다시 관측하면 안 된다: ${diagnostics}`);
   assert.equal(alive(owner.pid), true, `가드를 못 잡았으면 owner 를 건드리면 안 된다: ${diagnostics}`);
 });
+
+for (const step of ['unlink', 'create', 'release', 'directory']) {
+  for (const permanent of [false, true]) {
+    test(`force ${step}: ${permanent ? 'bounded permanent error' : 'transient retry'} inside guard`, { timeout: 30_000 }, async () => {
+      const home = await fsp.mkdtemp(join(tmpdir(), 'awb-force-guard-retry-'));
+      tempDirs.push(home);
+      const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+      const owner = await startLockOwner(env, 'old');
+      const lockPath = join(home, 'agent.lock');
+      const guard = `${lockPath}.recovery`;
+      const matches = step === 'directory'
+        ? `(path) => path === ${JSON.stringify(guard)}`
+        : step === 'unlink'
+        ? `(path) => path === ${JSON.stringify(lockPath)}`
+        : step === 'release'
+          ? `(path) => path.startsWith(${JSON.stringify(guard)}) && /owner-.*json$/.test(path)`
+          : `(() => { let n = 0; return (path, rest) => rest[0] === ${JSON.stringify(lockPath)} && ++n >= 2; })()`;
+      const contender = spawnBarrieredContender(
+        faultPrologue({ fn: step === 'create' ? 'linkSync' : step === 'directory' ? 'rmdirSync' : 'unlinkSync', matches, code: 'EBUSY', times: permanent ? 'Infinity' : 3 }) + ACQUIRE_ONCE(true), env,
+      );
+      const result = await contender.done;
+      const diagnostics = JSON.stringify(result);
+      assert.equal(result.code, 0, diagnostics);
+      assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), permanent ? RECOVERY_GUARD_TRANSIENT_LIMIT : 3, diagnostics);
+      assert.match(result.output, permanent && ['unlink', 'create'].includes(step) ? /REJECTED:EBUSY/ : /ACQUIRED/, diagnostics);
+      assert.equal(countOf(result.stderr, 'SIGTERM previous owner'), 1, diagnostics);
+      if (!permanent) await assert.rejects(fsp.stat(guard), { code: 'ENOENT' });
+      await waitForExit(owner);
+    });
+  }
+}
+
+for (const permanent of [false, true]) {
+  test(`guard lstat EACCES: ${permanent ? 'bounded original errno' : 'recovers after transient fault'}`, { timeout: 30_000 }, async () => {
+    const home = await fsp.mkdtemp(join(tmpdir(), 'awb-guard-probe-retry-'));
+    tempDirs.push(home);
+    const guard = join(home, 'agent.lock.recovery');
+    await fsp.writeFile(join(home, 'agent.lock'), JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+    await fsp.mkdir(guard);
+    await fsp.writeFile(join(guard, 'owner.json'), JSON.stringify({ pid: 999_999_999 }));
+    const result = await spawnBarrieredContender(faultPrologue({
+      fn: 'lstatSync', matches: `(path) => path === ${JSON.stringify(guard)}`, code: 'EACCES', times: permanent ? 'Infinity' : 3,
+    }) + ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home }).done;
+    assert.equal(result.code, 0, JSON.stringify(result));
+    assert.match(result.output, permanent ? /REJECTED:EACCES/ : /ACQUIRED/);
+    assert.equal(countOf(result.stderr, 'SIMULATED_FAULT'), permanent ? RECOVERY_GUARD_TRANSIENT_LIMIT : 3);
+  });
+}
+
+test('guard wait timeout preserves a possibly live owner', { timeout: 30_000 }, async () => {
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-guard-wait-timeout-'));
+  tempDirs.push(home);
+  const guard = join(home, 'agent.lock.recovery');
+  await fsp.writeFile(join(home, 'agent.lock'), JSON.stringify({ pid: 999_999_999, role: 'manager' }));
+  await fsp.mkdir(guard);
+  const owner = JSON.stringify({ pid: process.pid, boot_time_ms: currentBootIdentity().approxBootTimeMs });
+  await fsp.writeFile(join(guard, 'owner.json'), owner);
+  const result = await spawnBarrieredContender(`
+    let clock = 0;
+    Object.defineProperty(performance, 'now', { value: () => (clock += 61_000) });
+  ` + ACQUIRE_ONCE(false), { ...process.env, AWB_AGENT_MANAGER_HOME: home }).done;
+  assert.match(result.output, /REJECTED:EAGENTGUARDTIMEOUT/);
+  assert.equal(await fsp.readFile(join(guard, 'owner.json'), 'utf8'), owner);
+  assert.match(result.stderr, /inspect its owner before removing/);
+});
+
+for (const step of ['unlink', 'create']) {
+  test(`force ${step} retry preserves a new happy-path owner`, { timeout: 30_000 }, async () => {
+    const home = await fsp.mkdtemp(join(tmpdir(), 'awb-force-new-owner-'));
+    tempDirs.push(home);
+    const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
+    const old = await startLockOwner(env, 'old');
+    const path = join(home, 'agent.lock');
+    const replacement = JSON.stringify({ pid: process.pid, role: 'manager' });
+    const result = await spawnBarrieredContender(`
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const target = ${JSON.stringify(path)};
+      const original = fs.${step === 'unlink' ? 'unlinkSync' : 'linkSync'};
+      let injected = false;
+      let links = 0;
+      fs.${step === 'unlink' ? 'unlinkSync' : 'linkSync'} = function(path, ...rest) {
+        if (!injected && (${step === 'unlink' ? 'path === target' : 'rest[0] === target && ++links === 2'})) {
+          injected = true;
+          fs.writeFileSync(target, ${JSON.stringify(replacement)});
+          throw Object.assign(new Error('pending'), { code: 'EPERM' });
+        }
+        return original.call(this, path, ...rest);
+      };
+      syncBuiltinESMExports();
+    ` + ACQUIRE_ONCE(true), env).done;
+    assert.match(result.output, /REJECTED:EAGENTLOCKED/, JSON.stringify(result));
+    assert.equal(await fsp.readFile(path, 'utf8'), replacement);
+    assert.equal(countOf(result.stderr, 'SIGTERM previous owner'), 1);
+    await waitForExit(old);
+  });
+}
