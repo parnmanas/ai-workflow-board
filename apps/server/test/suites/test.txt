@@ -236,6 +236,7 @@ test/published-deps-audit-guard.test.mjs
 test/qa-batch-dispatch-inflight-guard.test.mjs
 test/qa-cron.test.mjs
 test/qa-dispatch-failfast.test.mjs
+test/qa-flow-db-isolation.test.mjs
 test/qa-live-agent-status.test.mjs
 test/qa-liveness-policy.test.mjs
 test/qa-phases-e2e.test.mjs

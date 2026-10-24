@@ -667,8 +667,8 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
  *
  * Allow the QA flow-test subprocess to target an isolated db file via env.
  * Two processes writing sqljs to the same file clobber each other on
- * autoSave, so the admin "Run Flow Tests" endpoint sets SQLJS_DB_PATH to e.g.
- * database/qa-flows.db before spawning node --test.
+ * autoSave, so the admin "Run Flow Tests" endpoint sets SQLJS_DB_PATH to a
+ * file in a fresh temporary directory before spawning node --test.
  */
 export function resolveSqljsLocation(): { dbDir: string; location: string } {
   const dbDir = path.join(__dirname, '..', '..', '..', 'database');
