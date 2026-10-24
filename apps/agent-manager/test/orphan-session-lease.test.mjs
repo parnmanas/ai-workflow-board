@@ -368,6 +368,12 @@ for (const fixture of [
         ${MARK_LOSER_DECIDED}
       }
     `;
+    if (fixture.name === 'unparseable') {
+      const results = await raceContenders(contenderSource, env);
+      assert.ok(results.every(({ output }) => output.includes('REJECTED:EAGENTLOCKINVALID')));
+      assert.equal(await fsp.readFile(join(home, 'agent.lock'), 'utf8'), fixture.contents);
+      return;
+    }
     // ── 회수 진입 배리어 ──────────────────────────────────────────────────
     //
     // READY/go 배리어는 두 contender 의 **출발**만 맞춘다. 출발한 뒤 회수 경로에
@@ -738,9 +744,19 @@ test('stale lock 회수 중 가드 mkdir 권한 오류가 계속되면 회수를
   await fsp.writeFile(join(home, 'agent.lock'), JSON.stringify({ pid: 999_999_999, role: 'manager' }));
   // lock 은 이미 있어 첫 create 는 EEXIST 로 지고 stale 회수로 들어간다. 가드 mkdir 만
   // 권한 오류를 받는다.
-  await fsp.chmod(home, 0o500);
 
   const source = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const read = fs.readFileSync;
+    fs.readFileSync = (path, ...args) => {
+      // The initial temporary file has already been cleaned up. Deny only
+      // subsequent guard creation, preserving this test's original boundary.
+      if (path === ${JSON.stringify(join(home, 'agent.lock'))}) fs.chmodSync(${JSON.stringify(home)}, 0o500);
+      return read(path, ...args);
+    };
+    syncBuiltinESMExports();
+
     const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
     try {
       await acquireAgentLock({ role: 'manager', version: 'new' });
@@ -829,9 +845,9 @@ for (const fault of [
   { subject: 'unlink 가', fn: 'unlinkSync', matches: (lockPath) => `(path) => path === ${JSON.stringify(lockPath)}` },
   {
     subject: '재생성이',
-    fn: 'writeFileSync',
+    fn: 'linkSync',
     matches: (lockPath) =>
-      `(() => { let wx = 0; return (path, rest) => path === ${JSON.stringify(lockPath)} && rest[1]?.flag === 'wx' && ++wx === 2; })()`,
+      `(() => { let links = 0; return (path, rest) => rest[0] === ${JSON.stringify(lockPath)} && ++links === 2; })()`,
   },
 ]) {
   test(`stale 회수의 ${fault.subject} 삭제 대기 errno 를 받으면 처음부터 다시 판정해 취득한다`, { timeout: 60_000 }, async () => {
@@ -1011,15 +1027,15 @@ test('가드 자리의 끊긴 심볼릭 링크도 상한이 지나면 회수하�
 // force 인수가 가드를 잡고 보니 owner 가 이미 없을 수 있다(기다리는 사이 죽었다). 그때는
 // 죽일 것 없이 그 자리를 지우고 취득하되, 무엇을 읽었는지 남긴다 — 둘이 함께 가드를 쥐는
 // 일이 다시 생기면 이 줄이 그것을 바로 드러낸다(티켓 b14c5669 의 CI 실측은 이 줄이 없어
-// 로그만으로는 갈리지 않았다). 죽은 owner 의 lock, 깨진 lock, 없는 lock 을 서로 다르게
-// 적어야 한다 — 읽기 실패를 "없음" 으로 읽고 지우는 것과 정말 없는 것은 다른 사건이다.
+// 로그만으로는 갈리지 않았다). 죽은 owner 와 없는 lock 은 회수하지만, 깨진 lock 은
+// 새 작성자가 생겼을 수 있어 보존하고 오류로 끝낸다.
 for (const scene of [
   { name: '죽은 owner 의 lock 이 남음', after: async () => {}, read: (pid) => `pid=${pid}, not alive` },
-  { name: 'lock 이 깨짐', after: (lockPath) => fsp.writeFile(lockPath, '{not-json'), read: () => 'unparseable lock' },
-  { name: 'lock 에 pid 가 없음', after: (lockPath) => fsp.writeFile(lockPath, JSON.stringify({ pid: 0 })), read: () => 'unparseable lock' },
+  { name: 'lock 이 깨짐', after: (lockPath) => fsp.writeFile(lockPath, '{not-json'), invalid: true },
+  { name: 'lock 에 pid 가 없음', after: (lockPath) => fsp.writeFile(lockPath, JSON.stringify({ pid: 0 })), invalid: true },
   { name: 'lock 이 없음', after: (lockPath) => fsp.rm(lockPath, { force: true }), read: () => 'no lock' },
 ]) {
-  test(`force 인수: 기다리는 사이 owner 가 죽었으면 죽이지 않고 취득하며, 읽은 것을 남긴다 (${scene.name})`, { timeout: 60_000 }, async () => {
+  test(`force 인수: 대기 중 owner 종료 후 읽은 상태에 따라 취득하거나 보존한다 (${scene.name})`, { timeout: 60_000 }, async () => {
     const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-force-owner-gone-'));
     tempDirs.push(home);
     const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
@@ -1033,10 +1049,17 @@ for (const scene of [
     owner.kill('SIGKILL');
     await waitForExit(owner);
     await scene.after(lockPath);
+    const invalidContents = scene.invalid ? await fsp.readFile(lockPath, 'utf8') : null;
     await fsp.rm(recoveryLock, { recursive: true, force: true });
     const result = await contender.done;
     const diagnostics = JSON.stringify(result, null, 2);
     assert.equal(result.code, 0, diagnostics);
+    if (scene.invalid) {
+      assert.match(result.output, /REJECTED:EAGENTLOCKINVALID/, diagnostics);
+      assert.equal(await fsp.readFile(lockPath, 'utf8'), invalidContents);
+      assert.doesNotMatch(result.stderr, /SIGTERM previous owner/, diagnostics);
+      return;
+    }
     assert.match(result.output, /ACQUIRED/, diagnostics);
     assert.doesNotMatch(result.stderr, /SIGTERM previous owner/, diagnostics);
     assert.ok(
@@ -1245,10 +1268,21 @@ test('force 경로: 가드 mkdir 권한 오류가 계속되면 owner 를 건드�
   const owner = await startLockOwner(env, 'old');
   // owner 의 lock 이 이미 있어 첫 create 는 EEXIST 로 지고 인수 경로로 간다. 가드
   // mkdir 만 권한 오류를 받는다.
-  await fsp.chmod(home, 0o500);
+
   let result;
   try {
-    result = await spawnBarrieredContender(ACQUIRE_ONCE(true), env).done;
+    result = await spawnBarrieredContender(`
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const read = fs.readFileSync;
+    fs.readFileSync = (path, ...args) => {
+      // The initial temporary file has already been cleaned up. Deny only
+      // subsequent guard creation, preserving this test's original boundary.
+      if (path === ${JSON.stringify(join(home, 'agent.lock'))}) fs.chmodSync(${JSON.stringify(home)}, 0o500);
+      return read(path, ...args);
+    };
+    syncBuiltinESMExports();
+` + ACQUIRE_ONCE(true), env).done;
   } finally {
     await fsp.chmod(home, 0o700);
   }

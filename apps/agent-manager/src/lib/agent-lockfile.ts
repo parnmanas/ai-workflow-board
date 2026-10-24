@@ -3,7 +3,7 @@
 // startup aborts unless launched with --force.
 //
 // Acquisition rules:
-//   1. Try atomic create (O_EXCL via writeFile flag 'wx').
+//   1. Publish a complete temporary file with an exclusive hard link.
 //   2. On EEXIST: judge the existing lock (judgeLockOwner). pid liveness alone is
 //      NOT enough — 재부팅하면 pid 가 낮은 번호부터 다시 배분되므로 이전 부팅의
 //      매니저가 적어 둔 pid 를 대개 root 소유 초기 데몬이 차지한다. 그러면
@@ -15,7 +15,7 @@
 //      - alive   → owner is real. Abort unless force=true. With force=true,
 //                  SIGTERM the owner, wait briefly, overwrite the lock.
 //      판정이 애매하면 stale 로 보지 않는다 — 상호 배제가 자가 복구보다 우선이다.
-//   3. Garbage on disk (unparseable JSON / pid=0): treat as stale, remove.
+//   3. Unreadable / malformed lock: retry briefly, then fail without removing it.
 //   3-1. 회수 가드(agent.lock.recovery) 자체도 같은 판정을 받는다. 가드를 쥔 채
 //      전원이 나가면 디렉터리가 남는데, 그 owner 판정이 pid liveness 뿐이면 주 락을
 //      아무리 정확히 stale 로 판정해도 회수 경로가 가드 앞에서 영원히 대기한다
@@ -47,7 +47,9 @@ import {
   renameSync,
   rmSync,
   lstatSync,
+  linkSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AGENT_MANAGER_HOME } from './constants.js';
@@ -70,6 +72,7 @@ const RECOVERY_LOCK_STALE_MS = 60_000;
 // 회수 경로가 create 레이스에서 졌는데 승자마저 이미 죽어 있을 때만 재시도한다.
 // 살아 있는 승자에게 진 경우는 재시도 없이 곧바로 EAGENTLOCKED 다.
 const MAX_ACQUIRE_ATTEMPTS = 5;
+const MAX_LOCK_READ_ATTEMPTS = 5;
 
 // 회수 가드 mkdir 이 삭제 대기 errno 를 **연달아** 받아도 기다리는 횟수. 한 번에
 // 25ms 를 쉬므로 약 2초다(Windows 타이머 해상도로 조금 더 길다). 삭제 대기는 그
@@ -239,25 +242,31 @@ export function decideForceTakeover(input: {
   };
 }
 
-function readLock(): ParsedLock | null {
-  return readLockFile().lock;
-}
-
-/** readLock 과 같은 결과에, 못 읽었을 때 그 까닭을 붙인다(진단용). readLock 은 없음 ·
- *  읽기 실패 · 파싱 실패를 모두 null 로 접는데, 인수 로그에서는 그 셋을 가려야 한다 — 읽기
- *  일시 오류를 "lock 없음" 으로 읽고 지우는 것과 정말 없는 것은 전혀 다른 사건이다. */
-function readLockFile(): { lock: ParsedLock | null; problem: string | null } {
-  let raw: string;
-  try {
-    raw = readFileSync(LOCK_PATH, 'utf8');
-  } catch (err: any) {
-    return { lock: null, problem: err?.code === 'ENOENT' ? 'no lock' : `unreadable lock (${err?.code ?? err})` };
-  }
-  try {
-    const lock = parseLockPayload(JSON.parse(raw));
-    return lock ? { lock, problem: null } : { lock: null, problem: 'unparseable lock' };
-  } catch {
-    return { lock: null, problem: 'unparseable lock' };
+/** Acquisition must never infer absence from an unreadable or unfinished file.
+ * A paused legacy writer is indistinguishable from garbage, even after a timeout. */
+async function readLockForAcquire(): Promise<ParsedLock | null> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      let raw: string;
+      try {
+        raw = readFileSync(LOCK_PATH, 'utf8');
+      } catch (err: any) {
+        if (err?.code === 'ENOENT') return null;
+        throw err;
+      }
+      let lock: ParsedLock | null = null;
+      try {
+        lock = parseLockPayload(JSON.parse(raw));
+      } catch { /* incomplete legacy publication */ }
+      if (lock) return lock;
+      throw Object.assign(new Error(
+        `Cannot identify owner of ${LOCK_PATH}; leaving malformed lock untouched. ` +
+        'Stop all managers and confirm no writer remains before removing it manually.',
+      ), { code: 'EAGENTLOCKINVALID' });
+    } catch (err: any) {
+      if (attempt + 1 >= MAX_LOCK_READ_ATTEMPTS || (!isTransientLockRaceCode(err?.code) && err?.code !== 'EAGENTLOCKINVALID')) throw err;
+      await delay(25);
+    }
   }
 }
 
@@ -576,8 +585,21 @@ function writeLockAtomic(payload: LockPayload): void {
   } catch {
     /* ignore */
   }
-  // 'wx' = O_CREAT | O_EXCL. Throws EEXIST if anyone beat us.
-  writeFileSync(LOCK_PATH, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
+  const temporary = `${LOCK_PATH}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(temporary, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
+    // link never replaces an existing destination; readers only see complete JSON.
+    // Unsupported filesystems fail closed: an open-then-write fallback is unsafe.
+    linkSync(temporary, LOCK_PATH);
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch (err: any) {
+      // Publication may already have succeeded. Do not abandon the owned lock
+      // just because Windows temporarily prevents removal of its extra name.
+      if (err?.code !== 'ENOENT') log(`[lockfile] could not remove temporary lock ${temporary}: ${err?.code ?? err}`);
+    }
+  }
 }
 
 /**
@@ -635,7 +657,7 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
     if (err?.code !== 'EEXIST') throw err;
   }
 
-  const existing = readLock();
+  const existing = await readLockForAcquire();
   if (!existing) {
     return acquireAfterStaleCleanup(payload);
   }
@@ -705,8 +727,8 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
   );
   const releaseRecovery = await acquireRecoveryLock();
   try {
-    const read = readLockFile();
-    const owner = read.lock;
+    const owner = await readLockForAcquire();
+    let current = owner;
     if (owner && isPidAlive(owner.pid)) {
       if (owner.pid !== existing.pid) throw lockedBy(owner);
 
@@ -737,23 +759,23 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
       // 죽인 owner 는 종료 훅으로 자기 lock 을 지운다. 그 사이 가드를 거치지 않는
       // happy path 로 새 프로세스가 lock 을 만들었을 수 있으니, 우리가 죽인 그
       // owner 의 lock 이 아니면 지우지 않는다.
-      const current = readLock();
+      current = await readLockForAcquire();
       if (current && current.pid !== owner.pid) throw lockedBy(current);
       if (current && isPidAlive(current.pid)) throw lockedBy(current);
     } else {
       // 죽일 owner 없이 그 자리를 지운다 — 무엇을 읽었는지 남긴다. 둘이 함께 가드를 쥐는
       // 일이 다시 생기면, 이 줄과 release 의 "not removing" 줄이 그것을 바로 드러낸다.
       log(
-        `[lockfile] --force: no live owner at takeover (read ${owner ? `pid=${owner.pid}, not alive` : read.problem}; ` +
+        `[lockfile] --force: no live owner at takeover (read ${owner ? `pid=${owner.pid}, not alive` : 'no lock'}; ` +
           `observed pid=${existing.pid})`,
       );
     }
     try {
-      unlinkSync(LOCK_PATH);
+      if (current) unlinkSync(LOCK_PATH);
     } catch (err: any) {
       if (err?.code !== 'ENOENT') throw err;
     }
-    createAfterCleanup(payload);
+    await createAfterCleanup(payload);
   } finally {
     releaseRecovery();
   }
@@ -773,7 +795,7 @@ async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandl
   // 것은 가드 **안**의 unlink·재생성뿐이다(reclaimAndCreate).
   const releaseRecovery = await acquireRecoveryLock();
   try {
-    reclaimAndCreate(payload);
+    await reclaimAndCreate(payload);
   } finally {
     releaseRecovery();
   }
@@ -786,12 +808,13 @@ async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandl
  *  unlink·재생성이 Windows 삭제 대기 errno 를 받으면 ELOCKRACE 로 접어 처음부터
  *  다시 판정하게 한다 — stale 경로는 아무도 죽이지 않으므로 다시 관측해도 잃는
  *  것이 없다. `lockedBy`(EAGENTLOCKED)·`ELOCKRACE` 는 코드가 달라 그대로 통과한다. */
-function reclaimAndCreate(payload: LockPayload): void {
+async function reclaimAndCreate(payload: LockPayload): Promise<void> {
+  // Read errors must retain their errno, not restart the outer acquisition.
+  const current = await readLockForAcquire();
   try {
     // 가드를 잡는 사이 lock 이 바뀌었을 수 있으니 다시 읽어 판정한다. 여기서
     // pid liveness 만 보면 회수 근거(다른 부팅 등)를 무시하고 EAGENTLOCKED 로
     // 되돌아가 위의 stale 판정이 통째로 무력해진다.
-    const current = readLock();
     if (current) {
       const currentVerdict = judgeLockOwner(current, probeLockOwner(current));
       if (!currentVerdict.stale) {
@@ -799,34 +822,36 @@ function reclaimAndCreate(payload: LockPayload): void {
       }
     }
     try {
-      unlinkSync(LOCK_PATH);
+      if (current) unlinkSync(LOCK_PATH);
     } catch (err: any) {
       if (err?.code !== 'ENOENT') throw err;
     }
-    createAfterCleanup(payload);
   } catch (err: any) {
     if (isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
     throw err;
   }
+  await createAfterCleanup(payload, true);
 }
 
 /** 회수 가드(acquireRecoveryLock) 안에서 unlink 직후 새 lock 을 만든다.
  *
- *  가드는 **회수 경로에 들어온 contender 만** 직렬화한다. 첫 시도의 O_EXCL
+ *  가드는 **회수 경로에 들어온 contender 만** 직렬화한다. 첫 시도의 exclusive
  *  create(위 attemptAcquire happy path)는 가드를 거치지 않으므로, 회수 경로가
  *  unlink 한 뒤 create 하기 전 사이에 갓 시작한 contender 의 첫 시도가 파일을
  *  선점할 수 있다. 그 창은 Windows CI 에서 실제로 관측됐다(파일 연산이 느려
  *  창이 넓다): 회수 경로가 raw `EEXIST` 를 그대로 올려, `EAGENTLOCKED` 를
  *  기대하는 호출자에게 fs 오류 코드가 새어 나갔다.
  *
- *  창 자체는 O_EXCL 의미상 없앨 수 없으므로 결과를 다시 판정한다 —
+ *  창 자체는 exclusive create 의미상 없앨 수 없으므로 결과를 다시 판정한다 —
  *  살아 있는 승자에게 졌으면 EAGENTLOCKED, 승자마저 죽었으면 재시도. */
-function createAfterCleanup(payload: LockPayload): void {
+async function createAfterCleanup(payload: LockPayload, retryTransient = false): Promise<void> {
   try {
     writeLockAtomic(payload);
   } catch (err: any) {
+    if (retryTransient && isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
     if (err?.code !== 'EEXIST') throw err;
-    const verdict = resolveLostCreateRace(readLock, isPidAlive);
+    const winner = await readLockForAcquire();
+    const verdict = resolveLostCreateRace(() => winner, isPidAlive);
     if (verdict.outcome === 'locked') throw lockedBy(verdict.owner);
     const retry: any = new Error(
       'AWB agent-manager lock create lost a race to an owner that is already gone; retrying',
@@ -1105,5 +1130,9 @@ function safeUnlinkOwn(myPid: number): void {
 
 /** Pure inspector — does not touch the lockfile. */
 export function inspectAgentLock(): ParsedLock | null {
-  return readLock();
+  try {
+    return parseLockPayload(JSON.parse(readFileSync(LOCK_PATH, 'utf8')));
+  } catch {
+    return null;
+  }
 }

@@ -147,6 +147,18 @@ Legacy `workspace_id` config is still read as `account_id`. The owner UUID and e
 | `-h, --help` | Show commands and current options. |
 | `-v, --version` | Print the installed binary's version. |
 
+The manager publishes `agent.lock` as a hard link to a fully written temporary
+file in the same home directory. The home filesystem must support hard links;
+unsupported operations fail with the filesystem error instead of falling back to
+an unsafe partial publication. Temporary names left by an interrupted process are
+not ownership locks.
+
+Lock reads make up to five attempts on transient access errors or incomplete JSON
+(25 ms between attempts). Persistent access errors retain their original errno. An
+unparseable lock fails with `EAGENTLOCKINVALID` and is preserved, including with
+`--force`: a paused older manager may still be writing it. Before manually removing
+such a file, stop all managers using that home and confirm no writer remains.
+
 Signals on platforms that support them:
 
 | Signal | Behavior |
