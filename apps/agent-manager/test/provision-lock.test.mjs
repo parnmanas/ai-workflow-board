@@ -37,7 +37,10 @@ test('independent contenders serialize, heartbeat uses owner, and failures relea
     assert.ok((await fs.stat(path)).mtimeMs > 1000);
     active--;
   };
-  await Promise.all([run(work), run(work), run(work)]);
+  // Full Windows suites can delay filesystem work beyond the short timeout
+  // used by rejection tests. Success here checks exclusion, not latency.
+  const successOptions = { timeoutMs: 10_000 };
+  await Promise.all([run(work, successOptions), run(work, successOptions), run(work, successOptions)]);
   await assert.rejects(run(async () => { throw new Error('callback failed'); }), /callback failed/);
   await assert.rejects(fs.stat(dir), { code: 'ENOENT' });
 });
