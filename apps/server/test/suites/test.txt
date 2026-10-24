@@ -228,6 +228,7 @@ test/outreach-rate-limiter.test.mjs
 test/outreach-reddit-connector.test.mjs
 test/outreach-release-consistency.test.mjs
 test/outreach-release-summary.test.mjs
+test/outreach-reply-thread-validation.test.mjs
 test/outreach-resolve-notifier.test.mjs
 test/personal-account-migration.test.mjs
 test/postgres-schema-search-path.test.mjs
