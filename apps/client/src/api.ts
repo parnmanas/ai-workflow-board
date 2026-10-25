@@ -1,4 +1,4 @@
-import type { MailConnections, MailConnection, MailConnectionInput, MailList, BusinessMailMessage } from './business-mail.types';
+import type { MailConnections, MailConnection, MailConnectionInput, MailList, MailReply, BusinessMailMessage } from './business-mail.types';
 import type { AgentTemplate } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
 import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
@@ -649,6 +649,7 @@ export const api = {
     notify_mention?: number;
     notify_chat?: number;
     notify_ticket?: number;
+    notify_mail?: number;
   }) =>
     request<UserNotificationChannel>('/me/channels', { method: 'POST', body: JSON.stringify(data) }),
   updateMyChannel: (id: string, data: Record<string, any>) =>
@@ -2627,6 +2628,10 @@ export const api = {
   listBusinessMail: (filters: Record<string, string> = {}) => request<MailList>(`/business/mail/messages?${new URLSearchParams(filters)}`),
   getBusinessMail: (id: string) => request<BusinessMailMessage>(`/business/mail/messages/${encodeURIComponent(id)}`),
   confirmBusinessMail: (id: string, input: { revision: number; confirmed: boolean; note: string }) => request<BusinessMailMessage>(`/business/mail/messages/${encodeURIComponent(id)}/confirm`, { method: 'POST', body: JSON.stringify(input) }),
+  getBusinessMailReply: (id: string) => request<MailReply | null>(`/business/mail/messages/${encodeURIComponent(id)}/reply`),
+  startBusinessMailReply: (id: string) => request<MailReply>(`/business/mail/messages/${encodeURIComponent(id)}/reply`, { method: 'POST' }),
+  editBusinessMailReply: (id: string, input: { revision: number; subject: string; text: string; decision: 'review'; note: string }) => request<MailReply>(`/business/mail/replies/${encodeURIComponent(id)}/draft`, { method: 'POST', body: JSON.stringify(input) }),
+  decideBusinessMailReply: (id: string, input: { revision: number; action: 'approve' | 'reject' }) => request<MailReply>(`/business/mail/replies/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify(input) }),
   listBusinessConnectors: () => request<BusinessConnector[]>('/business/connectors'),
   listBusinessCredentials: (accountId: string) => request<Array<{ id: string; name: string; provider: string }>>(`/business/credentials?account_id=${encodeURIComponent(accountId)}`),
   saveBusinessTask: (companyId: string, taskId: string | null, input: BusinessTaskInput & { revision: number }) => request<BusinessTask>(`/business/companies/${encodeURIComponent(companyId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ''}`, { method: taskId ? 'PATCH' : 'POST', body: JSON.stringify(input) }),

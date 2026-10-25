@@ -177,3 +177,4 @@ export { BusinessTrademarkAction } from './BusinessTrademarkAction';
 
 export { BusinessMailConnection } from './BusinessMailConnection';
 export { BusinessMailMessage } from './BusinessMailMessage';
+export { BusinessMailTask } from './BusinessMailTask';

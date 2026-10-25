@@ -56,6 +56,7 @@ export type StreamEventType =
   | 'cli_memory_request'     // CLI Memory: 서버 → agent-manager 메모리 파일 RPC(scan/read/write/…) — 대상 agent 스코프
   | 'voice_announcement'     // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
   | 'agent_session_proposal' // Voice: operator 의 작업 제안이 생기거나 바뀌었다 — UI 전용, 승인할 사용자만
+  | 'business_mail_update'  // Private mail receipt / reply changes, owner only.
   | 'marketing_update';      // Marketing: 캠페인이나 그 하위 객체(채널·게시물·지출 …)가 바뀌었다 — UI 전용, 계정 스코프
 
 export interface StreamEventScope {
@@ -1203,4 +1204,15 @@ export interface MarketingUpdatePayload {
   kind: string;
   entity_id: string;
   action: string;
+}
+
+/** Private mail metadata; only the current account owner's user SSE connection may receive this. */
+export interface BusinessMailUpdatePayload {
+  account_id: string;
+  message_id: string;
+  task_id: string;
+  action: string;
+  title?: string;
+  body?: string;
+  notification_id?: string;
 }

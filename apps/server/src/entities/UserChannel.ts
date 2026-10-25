@@ -47,6 +47,9 @@ export class UserChannel {
   @Column({ type: 'int', default: 0 })
   notify_ticket: number;
 
+  @Column({ type: 'int', default: 1 })
+  notify_mail: number;
+
   @Column({ type: Date, nullable: true, default: null })
   verified_at: Date | null;
 

@@ -12,6 +12,7 @@ const ENCRYPTED_FIELD_BY_ENTITY: Record<string, string> = {
   Credential: 'encrypted_data',
   BusinessMailConnection: 'encrypted_data',
   BusinessMailMessage: 'encrypted_data',
+  BusinessMailTask: 'encrypted_data',
   BusinessFormation: 'encrypted_request',
   BusinessTrademark: 'encrypted_details',
   BusinessTrademarkMail: 'encrypted_payload',

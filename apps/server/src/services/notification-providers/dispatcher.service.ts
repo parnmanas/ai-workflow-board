@@ -105,7 +105,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
    */
   async dispatchForUser(
     user_id: string,
-    notifyKey: 'notify_mention' | 'notify_chat' | 'notify_ticket',
+    notifyKey: 'notify_mention' | 'notify_chat' | 'notify_ticket' | 'notify_mail',
     payload: NotifyPayload,
   ): Promise<{ sent: number; failed: number }> {
     const bindings = await this.userChannelRepo.find({ where: { user_id, is_active: 1 } });

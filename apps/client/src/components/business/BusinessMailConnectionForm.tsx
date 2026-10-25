@@ -4,13 +4,17 @@ import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import type { BusinessCompany } from '../../business.types';
 import type { MailConnection, MailConnectionInput, MailConnections, MailEndpoint } from '../../business-mail.types';
-import { Button, Input, Modal, Select } from '../common';
+import { Button, Input, Modal, Select, Textarea } from '../common';
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
+import { useHostNames } from '../../runtime/useHostNames';
+import { assigneeDisplayName } from '../../tickets/assignee';
 
 export const MAIL_PURPOSES = [{ value: 'general', label: '대표' }, { value: 'accounting', label: '회계' }, { value: 'marketing', label: '마케팅' }, { value: 'operations', label: '운영' }];
 export function BusinessMailConnectionForm({ row, catalog, companies, onClose, onSaved }: {
   row?: MailConnection; catalog: MailConnections; companies: BusinessCompany[]; onClose(): void; onSaved(): void;
 }) {
   const { hasPermission, currentAccountId } = useAuth();
+  const hostNames = useHostNames();
   const [input, setInput] = useState<MailConnectionInput>(row || { name: '', provider: 'smtp_imap', company_id: null, purpose: 'operations', credential_id: '', enabled: true, interval_minutes: 5,
     config: { addresses: [], imap: { host: '', port: 993, tls: 'implicit', username: '', folder: 'INBOX' }, smtp: { host: '', port: 587, tls: 'starttls', username: '' } } });
   const [addresses, setAddresses] = useState(row?.config.addresses.join(', ') || '');
@@ -19,6 +23,9 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
   const owner = row?.account_id || companies.find(c => c.id === input.company_id)?.account_id;
   const keys = catalog.credentials.filter(c => !owner || c.account_id === owner);
   const patch = (changes: Partial<MailConnectionInput>) => setInput(old => ({ ...old, ...changes }));
+  const automation = input.automation || { mode: 'off' as const, agent_runtime: null, objective: '', max_replies_per_day: 20 };
+  const runtimeAccount = owner || catalog.credentials.find(c => c.id === input.credential_id)?.account_id || currentAccountId || '';
+  const setAutomation = (delta: Partial<typeof automation>) => patch({ automation: { ...automation, ...delta } });
   const endpoint = (kind: 'smtp' | 'imap') => {
     const value = input.config[kind];
     const change = (delta: Partial<MailEndpoint>) => patch({ config: { ...input.config, [kind]: { ...value, ...delta } } });
@@ -66,6 +73,19 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
       {input.credential_id === '__new__' && (input.provider === 'jmap' ? ['jmap_token'] : [...(input.config.imap ? ['imap_password'] : []), ...(input.config.smtp ? ['smtp_password'] : [])]).map(key => <Input key={key} aria-label={key === 'jmap_token' ? 'JMAP API 토큰' : `${key.startsWith('imap') ? 'IMAP' : 'SMTP'} 비밀번호 · 앱 비밀번호`} label={key === 'jmap_token' ? 'JMAP API 토큰' : `${key.startsWith('imap') ? 'IMAP' : 'SMTP'} 비밀번호 · 앱 비밀번호`} type="password" autoComplete="new-password" value={newSecret[key] || ''} onChange={e => setNewSecret({ ...newSecret, [key]: e.target.value })} />)}
       {hasPermission('admin.credentials') && <Link to="/settings/credentials" target="_blank">저장된 인증 정보 관리 ↗</Link>}
       <Select aria-label="자동 수집 간격" label="자동 수집 간격" value={String(input.interval_minutes)} options={[5, 15, 60].map(n => ({ value: String(n), label: `${n}분` }))} onChange={e => patch({ interval_minutes: Number(e.target.value) })} />
+      <p className="business-muted">IMAP IDLE 또는 JMAP 실시간 알림을 지원하면 새 메일을 바로 수집합니다. 위 간격은 연결 복구 시 누락 확인에도 사용합니다.</p>
+      <label><input type="checkbox" checked={input.notify_incoming !== false} onChange={e => patch({ notify_incoming: e.target.checked })} />새 메일마다 알림</label>
+      <fieldset className="business-options"><legend>답장 자동화</legend>
+        <Select label="답장 모드" aria-label="답장 모드" value={automation.mode} options={[{ value: 'off', label: '자동화 끔' }, { value: 'review', label: '반자동 · 사람이 승인한 뒤 발송' }, { value: 'automatic', label: '자동 · 에이전트 작성 후 발송' }]} onChange={e => setAutomation({ mode: e.target.value as typeof automation.mode })} />
+        {automation.mode !== 'off' && <>
+          <Textarea label="업무 목적 · 답장 기준" aria-label="업무 목적 · 답장 기준" rows={4} maxLength={8000} value={automation.objective} placeholder="예: 제품 사용 문의에 한국어로 간단히 답장. 환불·계약·금액 약속은 사람에게 확인 요청." onChange={e => setAutomation({ objective: e.target.value })} />
+          <p>담당 에이전트: {automation.agent_runtime ? assigneeDisplayName(automation.agent_runtime, hostNames) : '지정 안 함'}</p>
+          <DeclareRuntimeSection key={runtimeAccount} accountId={runtimeAccount} initialValue={automation.agent_runtime} onResolved={spec => setAutomation({ agent_runtime: spec })} />
+          <Select label="자동 답장 발신 주소" value={automation.from || ''} options={[{ value: '', label: '연결의 첫 번째 주소' }, ...addresses.split(/[,\n]/).map(a => a.trim()).filter(Boolean).map(a => ({ value: a, label: a }))]} onChange={e => setAutomation({ from: e.target.value || undefined })} />
+          <Input label="하루 최대 답장 처리 수" type="number" min={1} max={100} value={automation.max_replies_per_day} onChange={e => setAutomation({ max_replies_per_day: Number(e.target.value) })} />
+          <p className="business-muted">저장 후 새로 수집하는 메일부터 적용합니다. 과거 메일은 ‘답장 작성 요청’으로 처리할 수 있습니다. 자동 모드에서도 판단이 어려운 답장은 승인 대기로 남깁니다.</p>
+        </>}
+      </fieldset>
       <label><input type="checkbox" checked={input.enabled} onChange={e => patch({ enabled: e.target.checked })} />연결 사용 · 자동 수집</label>
     </div>
   </Modal>;

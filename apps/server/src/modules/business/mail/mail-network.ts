@@ -55,3 +55,40 @@ export async function mailJson(value: string, token: string, body?: unknown): Pr
     req.end(payload);
   });
 }
+
+/** JMAP EventSource with the same HTTPS/origin/DNS policy as JSON calls; bounded SSE frames. */
+export async function mailEvents(value: string, token: string, signal: AbortSignal, onState: (state: any) => void, onReady: () => void): Promise<void> {
+  const url = mailUrl(value); const target = await resolveMailHost(url.hostname);
+  if (!token || /[\r\n]/.test(token)) throw new BadRequestException('JMAP API 토큰을 등록하세요.');
+  if (signal.aborted) return;
+  return new Promise((resolve, reject) => {
+    const req = request(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(30 * 60_000)]),
+      lookup: ((_host: string, options: any, callback: any) => options.all
+        ? callback(null, [{ address: target.address, family: isIP(target.address) }])
+        : callback(null, target.address, isIP(target.address))) as any,
+      headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+    }, response => {
+      if (response.statusCode !== 200 || !response.headers['content-type']?.includes('text/event-stream')) {
+        response.resume(); reject(new BadGatewayException('JMAP 실시간 수신을 지원하지 않는 응답입니다.')); return;
+      }
+      onReady(); response.setEncoding('utf8');
+      let buffer = '';
+      response.on('data', (chunk: string) => {
+        buffer += chunk;
+        if (buffer.length > 128_000) { response.destroy(new Error('JMAP event too large')); return; }
+        let match: RegExpExecArray | null;
+        while ((match = /\r?\n\r?\n/.exec(buffer))) {
+          const frame = buffer.slice(0, match.index); buffer = buffer.slice(match.index + match[0].length);
+          const lines = frame.split(/\r?\n/);
+          const type = lines.find(l => l.startsWith('event:'))?.slice(6).trim();
+          if (type !== 'state') continue;
+          const data = lines.filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
+          try { onState(JSON.parse(data)); } catch { /* Ignore a malformed event; cursor polling repairs any gap. */ }
+        }
+      });
+      response.on('error', reject); response.on('end', resolve);
+      response.on('close', resolve);
+    });
+    req.on('error', reject); req.end();
+  });
+}

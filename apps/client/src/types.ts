@@ -992,6 +992,7 @@ export interface UserNotificationChannel {
   notify_mention: number;
   notify_chat: number;
   notify_ticket: number;
+  notify_mail: number;
   has_credentials: boolean;
   verified_at: string | null;
   created_at: string;

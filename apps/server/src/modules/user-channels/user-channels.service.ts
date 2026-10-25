@@ -18,6 +18,7 @@ interface CreateChannelInput {
   notify_mention?: number;
   notify_chat?: number;
   notify_ticket?: number;
+  notify_mail?: number;
 }
 
 interface UpdateChannelInput {
@@ -28,6 +29,7 @@ interface UpdateChannelInput {
   notify_mention?: number;
   notify_chat?: number;
   notify_ticket?: number;
+  notify_mail?: number;
 }
 
 /**
@@ -46,6 +48,7 @@ export interface PublicUserChannel {
   notify_mention: number;
   notify_chat: number;
   notify_ticket: number;
+  notify_mail: number;
   has_credentials: boolean;
   verified_at: string | null;
   created_at: string;
@@ -93,6 +96,7 @@ export class UserChannelsService {
         notify_mention: input.notify_mention ?? 1,
         notify_chat: input.notify_chat ?? 1,
         notify_ticket: input.notify_ticket ?? 0,
+        notify_mail: input.notify_mail ?? 1,
         verified_at: null,
       }),
     );
@@ -107,6 +111,7 @@ export class UserChannelsService {
     if (input.notify_mention !== undefined) row.notify_mention = input.notify_mention ? 1 : 0;
     if (input.notify_chat !== undefined) row.notify_chat = input.notify_chat ? 1 : 0;
     if (input.notify_ticket !== undefined) row.notify_ticket = input.notify_ticket ? 1 : 0;
+    if (input.notify_mail !== undefined) row.notify_mail = input.notify_mail ? 1 : 0;
 
     if (input.credentials !== undefined) {
       // Merge: caller may PATCH only the bot_token without re-supplying
@@ -163,6 +168,7 @@ export class UserChannelsService {
       notify_mention: row.notify_mention,
       notify_chat: row.notify_chat,
       notify_ticket: row.notify_ticket,
+      notify_mail: row.notify_mail,
       has_credentials: !!row.credentials,
       verified_at: row.verified_at ? row.verified_at.toISOString() : null,
       created_at: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),

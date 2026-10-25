@@ -21,7 +21,7 @@ import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 // Every business REST operation must have an MCP counterpart. Browser OAuth callbacks
 // and signed provider webhooks are transports, not agent-callable operations.
 const REST_TO_MCP = {
-  BusinessMailController: { connections: 'list_business_mail_connections', configure: 'configure_business_mail_connection', sync: 'sync_business_mail', list: 'list_business_mail', detail: 'get_business_mail', confirm: 'confirm_business_mail', send: 'send_business_mail' },
+  BusinessMailController: { connections: 'list_business_mail_connections', configure: 'configure_business_mail_connection', sync: 'sync_business_mail', list: 'list_business_mail', detail: 'get_business_mail', confirm: 'confirm_business_mail', send: 'send_business_mail', reply: 'get_business_mail_reply', startReply: 'start_business_mail_reply', replies: 'list_business_mail_replies', editReply: 'submit_business_mail_reply' },
   BusinessController: {
     catalog: 'list_business_connectors', credentials: 'list_business_credentials', list: 'list_business_companies',
     create: 'create_business_company', detail: 'get_business_company', update: 'update_business_company',
@@ -49,7 +49,8 @@ const REST_TO_MCP = {
     send: 'send_business_trademark_action', reconcile: 'reconcile_business_trademark_action', document: 'get_business_trademark_document',
   },
 };
-const TRANSPORT_ONLY = ['BusinessTrademarkIntegrationCallbacksController.callback', 'BusinessTrademarkIntegrationCallbacksController.webhook'];
+// Review approval is intentionally human-only: MCP sessions cannot authenticate a human decision.
+const TRANSPORT_ONLY = ['BusinessMailController.decideReply', 'BusinessTrademarkIntegrationCallbacksController.callback', 'BusinessTrademarkIntegrationCallbacksController.webhook'];
 const approval = row => ({ payload_digest: row.payload_digest, revision: row.revision, confirm: true });
 
 test('Business MCP: full surface, real HTTP execution and live ownership', { timeout: 120000 }, async t => {
@@ -63,7 +64,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
   const foreignHost = await createAgent(app, token, theirs.id, { name: 'Other host', type: 'manager' });
   const clients = [];
   const clientFor = async (scope, account = mine, actor = host) => {
-    const key = await createApiKey(app, token, actor.id, { scope, accountId: account.id, hostId: actor.id });
+    const key = await createApiKey(app, token, actor.id, { scope, accountId: account.id, hostId: actor.manager_agent_id || actor.id });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key }); clients.push(client);
     await client.initialize(); return client;
   };
@@ -97,7 +98,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
     assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
-    assert.equal(tools.length, 57);
+    assert.equal(tools.length, 61);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
     assert.ok(tools.find(t => t.name === 'send_business_trademark_action').inputSchema.required.includes('confirm'));
     assert.ok(tools.find(t => t.name === 'prepare_business_formation').inputSchema.properties.application.properties.address);
@@ -330,6 +331,25 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
       await denied('send_business_mail', send, read);
       const result = await call('send_business_mail', send); assert.equal(result.status, 'accepted');
       assert.equal((await call('send_business_mail', send)).id, result.id); assert.equal(sends, 1);
+      const { BusinessMailService } = await import('../dist/modules/business/business-mail.service.js');
+      const { BusinessMailWorkflowService } = await import('../dist/modules/business/business-mail-workflow.service.js');
+      const runtime = await createAgent(app, token, mine.id, { name: 'Mail responder', runtime: true });
+      const runtimeClient = await clientFor('full', mine, runtime);
+      const current = (await call('list_business_mail_connections', {}, read)).connections.find(c => c.id === connection.id);
+      await call('configure_business_mail_connection', { ...current, automation: { mode: 'review', agent_runtime: runtime.runtime_spec, objective: '제품 문의 답장 작성', max_replies_per_day: 20 } });
+      const pending = await call('start_business_mail_reply', { message_id: row.id });
+      const workflow = new BusinessMailWorkflowService(ds, app.get(BusinessMailService), { sendMessage: async () => {} });
+      await workflow.tick();
+      const drafted = await call('get_business_mail_reply', { task_id: pending.id }, read);
+      assert.equal(drafted.status, 'drafting');
+      const replies = await call('list_business_mail_replies', { status: 'drafting' }, read); assert.ok(replies.some(r => r.id === pending.id));
+      await denied('get_business_mail_reply', { task_id: pending.id }, foreign);
+      await denied('submit_business_mail_reply', { task_id: pending.id, revision: drafted.revision, text: 'unauthorized' }, full);
+      await denied('send_business_mail', { ...send, request_id: randomUUID() }, runtimeClient);
+      await denied('configure_business_mail_connection', { ...current, enabled: false }, runtimeClient);
+      const reply = await call('submit_business_mail_reply', { task_id: pending.id, revision: drafted.revision, text: '확인했습니다.', decision: 'reply' }, runtimeClient);
+      assert.equal(reply.status, 'review'); assert.equal(sends, 1, 'the assigned MCP agent cannot approve a review draft');
+
     } finally { connector.sync = originalSync; connector.send = originalSend; }
   });
 

@@ -16,6 +16,13 @@ export const mailConfigSchema = z.object({
   jmap_url: z.string().url().max(2000).optional(),
   jmap_account_id: line(200).optional(),
 });
+export const mailAutomationSchema = z.object({
+  mode: z.enum(['off', 'review', 'automatic']).default('off'),
+  agent_runtime: z.record(z.string(), z.unknown()).nullable().default(null).describe('RuntimeSpec: manager_agent_id (own Account Host UUID), cli, absolute working_dir; optional model, credential_id, label, runtime_config.'),
+  objective: z.string().trim().max(8000).default(''),
+  from: addressSchema.optional(),
+  max_replies_per_day: z.number().int().min(1).max(100).default(20),
+});
 export const mailConnectionSchema = z.object({
   id: z.string().uuid().optional(), revision: z.number().int().nonnegative().optional(),
   company_id: z.string().uuid().nullable().default(null),
@@ -23,6 +30,8 @@ export const mailConnectionSchema = z.object({
   purpose: z.enum(['general', 'accounting', 'marketing', 'operations']).default('operations'),
   credential_id: z.string().uuid(), config: mailConfigSchema,
   enabled: z.boolean().default(true), interval_minutes: z.union([z.literal(5), z.literal(15), z.literal(60)]).default(5),
+  notify_incoming: z.boolean().optional(),
+  automation: mailAutomationSchema.optional(),
 });
 export const mailFiltersSchema = z.object({
   address: addressSchema.optional(),
@@ -31,6 +40,7 @@ export const mailFiltersSchema = z.object({
   direction: z.enum(['inbound', 'outbound']).optional(),
   status: z.enum(['received', 'sending', 'accepted', 'uncertain']).optional(),
   confirmation: z.enum(['pending', 'confirmed']).optional(),
+  reply_status: z.enum(['queued', 'drafting', 'review', 'sending', 'sent', 'uncertain', 'skipped', 'failed', 'cancelled']).optional(),
   offset: z.coerce.number().int().min(0).max(1000000).default(0),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
@@ -44,22 +54,35 @@ export const mailSendSchema = z.object({
 export const mailConfirmSchema = z.object({
   revision: z.number().int().nonnegative(), confirmed: z.boolean(), note: z.string().max(2000).default(''),
 });
+export const mailReplyDraftSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  decision: z.enum(['reply', 'review', 'skip']).default('reply'),
+  subject: line(500).min(1).optional(), text: z.string().max(100000).default(''),
+  note: z.string().max(2000).default(''),
+});
+export const mailReplyDecisionSchema = z.object({
+  revision: z.number().int().nonnegative(), action: z.enum(['approve', 'reject']),
+});
 export function parseMail<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new BadRequestException('메일 연결 또는 입력 값을 확인하세요.');
   return parsed.data;
 }
 export type MailConfig = z.infer<typeof mailConfigSchema>;
-export interface MailData { config: MailConfig; cursor?: Record<string, any> }
+export type MailAutomation = z.infer<typeof mailAutomationSchema>;
+export interface MailData { config: MailConfig; cursor?: Record<string, any>; notify_incoming?: boolean; automation?: MailAutomation }
 export interface MailContent {
   source_id: string; message_id: string; from: string; to: string[]; reply_to?: string;
   subject: string; text: string; date: string; truncated?: boolean;
   attachments: Array<{ name: string; type: string; size: number }>;
   in_reply_to?: string; references?: string[]; note?: string;
+  auto_submitted?: string; precedence?: string; list_id?: string; return_path?: string; auto_response_suppress?: string;
 }
 export interface MailContext { config: MailConfig; cursor: Record<string, any>; secrets: Record<string, string> }
 export interface MailConnector {
   descriptor: { id: string; name: string; credential_provider: string; note: string };
-  sync(context: MailContext): Promise<{ messages: MailContent[]; cursor: Record<string, any>; has_more?: boolean }>;
+  sync(context: MailContext): Promise<{ messages: MailContent[]; cursor: Record<string, any>; has_more?: boolean; baseline?: boolean }>;
   send(context: MailContext, content: MailContent): Promise<void>;
+  /** Resolves on disconnect. The watcher restarts it with fresh credentials and a checked DNS address. */
+  watch?(context: MailContext, onChange: () => void, signal: AbortSignal): Promise<void>;
 }

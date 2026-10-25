@@ -74,3 +74,32 @@ test('JMAP snapshots before initial query, consumes incremental changes and subm
   await jmapConnector.send(context, { from: 'ops@example.com', to: ['vendor@example.com'], subject: 'Reply', text: 'Recorded', message_id: '<out@example.com>' });
   assert.equal(submission.create.send.identityId, 'identity1'); assert.equal(submission.create.send.emailId, 'out1');
 });
+
+test('IMAP IDLE wakes on arrivals, catches reconnect gaps and closes on cancellation', async t => {
+  t.mock.method(network, 'resolveMailHost', async host => ({ host, address: '203.0.113.10' }));
+  const proto = require('imapflow').ImapFlow.prototype; let client; let opened = 0; let changes = 0;
+  t.mock.method(proto, 'connect', async function() { client = this; this.capabilities.set('IDLE', true); });
+  t.mock.method(proto, 'mailboxOpen', async function(_name, options) { opened++; assert.equal(options.readOnly, true); return {}; });
+  t.mock.method(proto, 'close', function() { this.emit('close'); });
+  const controller = new AbortController();
+  const watching = smtpImapConnector.watch({ config: { imap: { host: 'imap.example.com', port: 993, tls: 'implicit', username: 'ops', folder: 'INBOX' } }, secrets: { imap_password: 'secret' } }, () => { changes++; }, controller.signal);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opened, 1); assert.equal(changes, 1, 'resync once after the watch is established');
+  client.emit('exists', { count: 3, prevCount: 2 }); assert.equal(changes, 2);
+  client.emit('exists', { count: 2, prevCount: 3 }); assert.equal(changes, 2);
+  controller.abort(); await watching; assert.equal(client.options.tls.rejectUnauthorized, true);
+});
+
+test('JMAP push pins same-origin EventSource and wakes only for this account Email state', async t => {
+  const MAIL = 'urn:ietf:params:jmap:mail'; let events; let changes = 0;
+  const info = { apiUrl: 'https://mail.example.com/api', eventSourceUrl: 'https://mail.example.com/events?types={types}&closeafter={closeafter}&ping={ping}',
+    primaryAccounts: { [MAIL]: 'a1' }, accounts: { a1: { accountCapabilities: { [MAIL]: {} } } } };
+  t.mock.method(network, 'mailJson', async () => info);
+  t.mock.method(network, 'mailEvents', async (url, token, _signal, onState, onReady) => { events = onState; assert.equal(token, 'secret'); assert.equal(url, 'https://mail.example.com/events?types=Email&closeafter=no&ping=30'); onReady(); });
+  const context = { config: { jmap_url: 'https://mail.example.com/.well-known/jmap' }, secrets: { jmap_token: 'secret' } };
+  await jmapConnector.watch(context, () => { changes++; }, new AbortController().signal);
+  events({ changed: { foreign: { Email: 'a' } } }); assert.equal(changes, 1);
+  events({ changed: { a1: { Email: 'b' } } }); assert.equal(changes, 2);
+  info.eventSourceUrl = 'https://evil.example.net/events';
+  await assert.rejects(jmapConnector.watch(context, () => {}, new AbortController().signal), /origin/);
+});

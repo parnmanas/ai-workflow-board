@@ -446,3 +446,4 @@
 .business-mail-connections .business-pill { margin-left: 10px; }
 .business-mail-pagination { justify-content: space-between; margin-top: 14px; }
 @media (max-width: 800px) { .business-mail-workspace { grid-template-columns: 1fr; } .business-mail-filters select { flex: 1; min-width: 120px; max-width: 100%; } }
+.business-mail-reply { border-top: 1px solid var(--border-color, #8885); margin-top: 24px; padding-top: 16px; display: flex; flex-direction: column; gap: 12px; }

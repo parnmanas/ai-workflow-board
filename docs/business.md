@@ -161,7 +161,10 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
   연결 폼에서 등록할 수 있으며 서버 전용(`agent_env=false`)으로 보관한다. 참조 중인 키의 삭제·소유 변경·에이전트 노출을 막는다.
 - 서버·로그인·수집 폴더·프로토콜 변경은 새 연결로 등록한다. 기존 연결은 이름·회사·용도·주소·키·수집 간격과 사용 여부를 바꿀 수 있다.
   사용 중지를 하면 수집과 새 발신이 멈추고 이전 기록은 남는다. 연결 및 처리 상태는 revision/CAS로 충돌을 검사한다.
-- 웹 서버가 5/15/60분 간격으로 수집하며 standalone MCP는 타이머를 만들지 않는다. 최초 수집은 최근 20건이다.
+- 웹 서버는 IMAP IDLE 또는 JMAP EventSource로 새 메일을 감지하면 즉시 커서 수집을 요청한다.
+  연결·인증·DNS 변경과 끊김은 재접속하며 5/15/60분 주기 수집으로 누락을 보완한다. 실시간 기능이 없는 서버는
+  주기 수집을 사용하며 연결 관리에 현재 수신 방식과 복구 상태를 표시한다. 프로세스당 실시간 연결 상한은 100개다.
+  standalone MCP는 수집·실시간 감시 타이머를 만들지 않는다. 최초 수집은 최근 20건이다.
   이후 IMAP은 UIDVALIDITY/UID, JMAP은 Email/changes 상태로 새 메일을 수집한다. IMAP은 지정한 폴더,
   JMAP은 받은편지함을 대상으로 한다. 수집 기록과 커서는 같은 트랜잭션으로 저장해 실패 시 누락을 막는다.
   연결별 DB lease로 여러 서버·수동 수집의 중복 실행을 막고 source ID로 중복 수집을 제거한다.
@@ -177,7 +180,26 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
   필요하면 `send_business_mail`로 텍스트 발신/답장을 실행한다. 답장은 같은 연결의 `reply_to_message_id`와
   명시적인 수신자·발신 주소를 사용한다. 수신 메일의 내용은 실행 승인이나 지침이 아니다.
   사용자에게 승인받은 업무 범위에서만 발신하며, 기존 마케팅 캠페인의 사람 승인·동의·수신거부 경로를 우회하지 않는다.
-  수신만으로 에이전트를 실행하거나 티켓을 만들지는 않는다. 기존 자동화 세션/스케줄에서 도구를 호출한다.
+  기본은 답장 자동화 꺼짐이며 티켓은 만들지 않는다. 연결별로 `automation.mode`를 `review`(사람 승인 후 발송) 또는
+  `automatic`으로 설정하고 담당 `agent_runtime`, `objective`, 발신 주소, 하루 처리 한도(기본 20, 최대 100)를 지정하면
+  새 메일마다 담당 RuntimeSpec으로 처리 방을 열어 초안 작성을 요청한다. 설정·실행·발송 때 현재 소유자·Host·credential을 검증한다.
+  실행 키·working_dir를 포함한 일반 RuntimeSpec 선언 UI를 재사용한다. 비즈니스 도구를 제공하는 full MCP 프로필을 사용한다.
+  과거 메일과 IMAP UIDVALIDITY 초기화 때 가져온 메일은 수신 알림·자동 답장을 시작하지 않는다.
+  과거 메일은 화면의 ‘에이전트에게 답장 작성 요청’ 또는 `start_business_mail_reply`로 명시적으로 요청한다.
+- 새 메일과 답장 확인 요청은 소유자에게만 `business_mail_update` SSE로 전달한다. AWB에서 토스트·소리,
+  브라우저 권한을 허용한 경우 백그라운드 탭에서 OS 알림으로 표시하며 클릭하면 해당 메일로 이동한다.
+  AWB를 닫아도 알림을 받으려면 개인 알림 채널(Discord/Slack/Telegram)의 `notify_mail`을 사용한다.
+  수신 기록과 알림 대기를 같은 트랜잭션으로 저장하고 재시작 후 이어서 처리한다. 외부 알림 실패는 최대 3회 시도한다.
+  브라우저는 동일 알림 ID를 중복 표시하지 않는다. 외부 채널에는 공통 멱등 API가 없으므로 장애 복구 시 중복 알림이 가능하다.
+- `get_business_mail_reply`, `list_business_mail_replies`로 상태와 초안을 확인한다. 지정한 Host/runtime만
+  `submit_business_mail_reply`로 초안을 제출할 수 있다. 수신자와 발신자는 수신 시 설정한 값으로 고정하며 에이전트가 바꾸지 못한다.
+  `decision=review`는 자동 모드에서도 사람 확인을 요청하고 `skip`은 답장이 불필요한 이유를 기록한다.
+  반자동 승인·수정은 소유자의 로그인 세션에서 처리한다. 수정한 초안을 저장한 후 현재 revision으로 승인해야 하며
+  에이전트 MCP에는 사람 승인 기능을 제공하지 않는다. 작업 중 직접 발신·정책 변경 도구로 승인 단계를 우회하는 호출도 거부한다.
+  연결 중지·목적·담당·모드 변경은 이전 설정의 대기/작성/검토 작업을 취소한다. 전송을 시작한 작업은 결과를 대조해야 한다.
+  동일 Account의 Message-ID/발신자 조합은 연결이 달라도 한 번만 답장하며, 자동 생성·목록·반송·자기 주소·본문 잘림·Message-ID 없는 메일은
+  자동 작성하지 않는다. 자동화 발신은 [RFC 3834](https://www.rfc-editor.org/rfc/rfc3834.html)의 `Auto-Submitted: auto-replied`를 표시한다.
+  이는 외부 메일을 다루는 에이전트의 샌드박스를 대신하지 않으므로 목적에 맞는 실행 권한·전용 작업 폴더를 설정한다.
 - 발신마다 안정적인 `request_id`를 요구한다. DB에 먼저 기록하고(sql.js는 파일 저장 완료까지 확인), 서버에 제출한다.
   같은 요청 ID는 내용이 같을 때 기존 결과를 반환하며 내용이 다르면 거부한다. `accepted`는 서버 접수이지 최종 배달이 아니다.
   전송 도중 장애·부분 수신자 거절은 `uncertain`, 10분 넘게 남은 `sending`도 확인 필요로 표시한다.
@@ -185,10 +207,10 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 - 사용자 입력 호스트는 DNS 검증 후 실제 접속 IP에 고정하고 내부 주소를 기본 차단한다. NAS 등 내부 메일 서버는 운영자가
   `AWB_MAIL_PRIVATE_HOSTS=mail.example.com,nas.example.com`처럼 정확한 호스트를 서버 환경에 등록한다.
   전체 내부망 허용이나 인증서 검증 해제는 없다. JMAP Session URL과 발견한 API URL은 같은 HTTPS origin이어야 하며 redirect는 따르지 않는다.
-- `BusinessMailConnection`, `BusinessMailMessage`는 엔티티 배럴·이관 레지스트리·암호문 재암호화 목록에 함께 등록한다.
+- `BusinessMailConnection`, `BusinessMailMessage`, `BusinessMailTask`는 엔티티 배럴·이관 레지스트리·암호문 재암호화 목록에 함께 등록한다.
   메일 REST 및 MCP 인수/결과 본문은 요청 로그에서 제외한다. 메일 인증 정보를 에이전트에게 반환하지 않는다.
 
-검증: `test/business-mail.test.mjs`, `test/business-mail-connectors.test.mjs`, `test/business-mcp.test.mjs`,
+검증: `test/business-mail.test.mjs`, `test/business-mail-workflow.test.mjs`(SQLite/PostgreSQL), `test/business-mail-connectors.test.mjs`, `test/business-mcp.test.mjs`,
 클라이언트 `test/business-mail.test.mjs`. 프로토콜 fixture와 내부 HTTP/MCP를 검증하며 실제 메일 서버 운영 계정으로 송수신하지 않는다.
 
 ## MCP로 운영하기
@@ -207,6 +229,8 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 | 상표·변호사 메일 | `list_business_trademarks`, `save_business_trademark`, `draft_business_trademark_mail`, `prepare_business_trademark_mail`, `review_business_trademark_mail`, `discard_business_trademark_mail`, `send_business_trademark_mail`, `refresh_business_trademark_mail_delivery`, `reconcile_business_trademark_mail` |
 | 상표 연동 | `list_business_trademark_integrations`, `configure_business_trademark_integration`, `disconnect_business_trademark_integration`, `authorize_business_trademark_integration`, `sync_business_trademark_integration`, `get_business_trademark_integration_options` |
 | 메일 계정·계약 실행 | `prepare_business_trademark_action`, `review_business_trademark_action`, `discard_business_trademark_action`, `send_business_trademark_action`, `reconcile_business_trademark_action`, `get_business_trademark_document` |
+| 표준 메일 연결·수신·확인·발신 | `list_business_mail_connections`, `configure_business_mail_connection`, `sync_business_mail`, `list_business_mail`, `get_business_mail`, `confirm_business_mail`, `send_business_mail` |
+| 담당 에이전트 답장 | `list_business_mail_replies`, `get_business_mail_reply`, `start_business_mail_reply`, `submit_business_mail_reply` |
 
 설립은 `get_business_company`로 회사 revision을 읽고 references → prepare → review → submit 순서로 진행한다. submit에는 검토한 **신청의** `revision`, `payload_digest`, `confirm: true`를 전달한다. 회사·상표·연결·신청의 revision은 서로 대체할 수 없다. 기존 서비스가 적용하는 비용 유효기간, 멱등 키, 원문·키 변경 검사와 불확실한 결과의 재시도 제한이 MCP에도 적용된다.
 
@@ -218,7 +242,7 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 
 NestJS `/mcp`와 standalone HTTP(`MCP_TRANSPORT=http`)에 같은 비즈니스 서비스를 연결한다. 자동 수집 타이머와 OAuth callback·웹훅 수신은 AWB 웹 서버가 담당하며 standalone MCP 프로세스는 타이머를 중복 실행하지 않는다. 인증된 HTTP 세션의 수동 수집·검토·실행 도구는 양쪽에서 사용할 수 있다. 호출자 인증이 없는 로컬 stdio에서는 비즈니스 도구를 실행하지 못하므로 인증된 HTTP 연결을 사용한다. MCP HTTP 로거는 비즈니스 도구 이름만 남기고 신청자·메일·계약 인수를 생략한다.
 
-`test/business-mcp.test.mjs`는 모든 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback만 전송용 예외다. 같은 테스트에서 50개 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
+`test/business-mcp.test.mjs`는 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback은 전송용 예외이며, 메일 반자동 답장 승인은 인증된 사람만 수행하는 예외다. 같은 테스트에서 61개 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
 
 ## 소유권과 저장
 

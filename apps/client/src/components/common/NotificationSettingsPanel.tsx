@@ -186,6 +186,7 @@ export function NotificationSettingsPanel() {
           <div style={{ fontSize: 10, fontWeight: 700, color: tokens.colors.borderStrong, textTransform: 'uppercase', marginBottom: 4 }}>
             When notified
           </div>
+          <Toggle label="메일 수신 · 답장 확인" checked={prefs.mail} onChange={(v) => setPref('mail', v)} rowStyle={rowStyle} />
           <Toggle label="Mentions" checked={prefs.mentions} onChange={(v) => setPref('mentions', v)} rowStyle={rowStyle} />
           <Toggle label="Chat messages" checked={prefs.chat} onChange={(v) => setPref('chat', v)} rowStyle={rowStyle} />
           <Toggle label="Ticket comments" checked={prefs.tickets} onChange={(v) => setPref('tickets', v)} rowStyle={rowStyle} />

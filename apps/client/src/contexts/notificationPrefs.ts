@@ -20,6 +20,7 @@ import { isNotificationSound, type NotificationSound } from '../voice/notificati
 
 export interface NotificationPrefs {
   /** Per-source OS/toast notification toggles. Default: all enabled. */
+  mail: boolean;
   mentions: boolean;
   chat: boolean;
   tickets: boolean;
@@ -37,6 +38,7 @@ export interface NotificationPrefs {
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
+  mail: true,
   mentions: true,
   chat: true,
   tickets: true,

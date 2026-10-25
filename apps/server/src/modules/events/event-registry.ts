@@ -36,6 +36,7 @@ import {
   ConsensusUpdatePayload,
   OrchestrationUpdatePayload,
   MarketingUpdatePayload,
+  BusinessMailUpdatePayload,
   TicketReadsClearedPayload,
   CliLoginProgressPayload,
   OntologyGraphProgressPayload,
@@ -1611,6 +1612,18 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'agent_session_proposal', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // Mail notifications contain private metadata: only the current owner, never a Runtime Host.
+  {
+    eventType: 'business_mail_update', emitterEvent: 'business_mail_update',
+    map(event: any) {
+      const payload: BusinessMailUpdatePayload = { account_id: event.account_id, message_id: event.message_id, task_id: event.task_id,
+        action: event.action, title: event.title, body: event.body, notification_id: event.notification_id };
+      return { payload, scope: { user_id: event.user_id, account_id: event.account_id }, timestamp: event.timestamp };
+    },
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'business_mail_update', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
   // ───────── marketing_update ─────────

@@ -4,6 +4,7 @@ import { DataSource, In, LessThanOrEqual } from 'typeorm';
 import { createHash, randomUUID } from 'node:crypto';
 import { BusinessMailConnection } from '../../entities/BusinessMailConnection';
 import { BusinessMailMessage } from '../../entities/BusinessMailMessage';
+import { BusinessMailTask } from '../../entities/BusinessMailTask';
 import { BusinessCompany } from '../../entities/BusinessCompany';
 import { Credential } from '../../entities/Credential';
 import { Account } from '../../entities/Account';
@@ -14,6 +15,8 @@ import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import { MAIL_CONNECTORS, mailConnector } from './mail/mail-registry';
 import { mailConfigSchema, mailConnectionSchema, mailConfirmSchema, mailFiltersSchema, mailSendSchema, parseMail, type MailContent, type MailData, type MailContext } from './mail/mail.types';
 import { mailUrl } from './mail/mail-network';
+import { activityEvents } from '../../services/activity.service';
+import { automationFingerprint, mailAutomation, validateMailRuntime, type MailTaskData } from './mail/mail-automation';
 
 const now = () => new Date().toISOString();
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -23,13 +26,14 @@ const UNCERTAIN = '발신 결과를 확정하지 못했습니다. 서버의 발�
 
 @Injectable()
 export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
+  readonly watchStates = new Map<string, { mode: 'idle' | 'push' | 'polling'; error?: string }>();
   private timer?: ReturnType<typeof setInterval>;
   private ticking = false;
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
   onModuleInit() { this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 30_000); this.timer.unref(); }
   onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
 
-  private async connection(id: string, accountIds: string[]) {
+  async connection(id: string, accountIds: string[]) {
     const row = accountIds.length ? await this.ds.getRepository(BusinessMailConnection).findOneBy({ id, account_id: In(accountIds) }) : null;
     if (!row) throw new NotFoundException('메일 연결을 찾을 수 없습니다.');
     return row;
@@ -39,14 +43,17 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     if (!row) throw new BadRequestException('같은 소유 계정의 서버 전용 Mail credential을 선택하세요.');
     return read<Record<string, string>>(row.encrypted_data);
   }
-  private async activeOwner(accountId: string) {
+  async activeOwner(accountId: string) {
     const account = await this.ds.getRepository(Account).findOneBy({ id: accountId });
     const user = account?.owner_user_id ? await this.ds.getRepository(User).findOneBy({ id: account.owner_user_id, status: 'active' }) : null;
     if (!user || !hasPermission(user.role, JSON.parse(user.permissions || '[]'), PERMISSIONS.MANAGE_BUSINESS)) throw new UnauthorizedException('메일 소유자의 비즈니스 권한을 확인하세요.');
+    return user;
   }
   private publicConnection(row: BusinessMailConnection) {
     const { encrypted_data, lease_token, lease_until, ...safe } = row;
-    return { ...safe, config: read<MailData>(encrypted_data).config, busy: lease_until > now() };
+    const data = read<MailData>(encrypted_data);
+    return { ...safe, config: data.config, notify_incoming: data.notify_incoming !== false, automation: mailAutomation(data),
+      receiving: this.watchStates.get(row.id) || { mode: 'polling' }, busy: lease_until > now() };
   }
   private publicMessage(row: BusinessMailMessage, full = false) {
     const { encrypted_data, source_key, address_keys, payload_digest, ...safe } = row;
@@ -79,6 +86,14 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     const secrets = await this.credential(input.credential_id, accountId);
     const required = input.provider === 'jmap' ? ['jmap_token'] : [...(input.config.smtp ? ['smtp_password'] : []), ...(input.config.imap ? ['imap_password'] : [])];
     if (required.some(k => typeof secrets[k] !== 'string' || !secrets[k])) throw new BadRequestException('메일 credential의 필수 비밀번호·토큰을 등록하세요.');
+    const automation = input.automation || mailAutomation(previous ? read<MailData>(previous.encrypted_data) : { config: input.config });
+    if (automation.mode !== 'off') {
+      if (!automation.objective) throw new BadRequestException('자동 답장 업무 목적을 입력하세요.');
+      automation.agent_runtime = { ...await validateMailRuntime(this.ds, automation.agent_runtime, accountId) };
+      if (input.provider === 'smtp_imap' && (!input.config.smtp || !input.config.imap)) throw new BadRequestException('답장 자동화에는 SMTP와 IMAP이 모두 필요합니다.');
+      automation.from ||= input.config.addresses[0];
+      if (!input.config.addresses.some(a => a.toLowerCase() === automation.from!.toLowerCase())) throw new BadRequestException('등록된 자동 답장 발신 주소를 선택하세요.');
+    }
     return this.ds.transaction(async manager => {
       const repo = manager.getRepository(BusinessMailConnection);
       let data: MailData = { config: input.config };
@@ -90,19 +105,26 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
         if (input.provider !== previous.provider || digest(oldServer) !== digest(newServer)) throw new BadRequestException('메일 서버·로그인 변경은 새 연결로 등록하세요. 기존 메일의 출처를 보존합니다.');
         data = { ...old, config: input.config };
       }
+      data.automation = automation;
+      data.notify_incoming = input.notify_incoming ?? data.notify_incoming ?? true;
       const patch = { account_id: accountId, company_id: input.company_id, name: input.name, provider: input.provider, purpose: input.purpose,
         credential_id: input.credential_id, encrypted_data: encrypt(JSON.stringify(data)), enabled: input.enabled, interval_minutes: input.interval_minutes,
         next_sync_at: now(), revision: (previous?.revision ?? -1) + 1 };
       if (previous) {
         const result = await repo.update({ id: previous.id, revision: input.revision, lease_until: LessThanOrEqual(now()) }, patch);
         if (result.affected !== 1) throw new ConflictException('연결을 사용 중이거나 변경되었습니다. 새로고침하세요.');
+        if (!input.enabled || automationFingerprint(read<MailData>(previous.encrypted_data)) !== automationFingerprint(data)) {
+          await manager.getRepository(BusinessMailTask).update({ connection_id: previous.id, status: In(['queued', 'drafting', 'review']) }, {
+            status: 'cancelled', last_error: '연결 또는 자동화 설정이 변경되어 이전 답장 작업을 취소했습니다.', review_notification_state: 'none', revision: () => 'revision + 1',
+          });
+        }
         return this.publicConnection({ ...previous, ...patch });
       }
       return this.publicConnection(await repo.save(repo.create(patch)));
     });
   }
 
-  private async locked<T>(row: BusinessMailConnection, work: (data: MailData, context: MailContext) => Promise<T>): Promise<T> {
+  async locked<T>(row: BusinessMailConnection, work: (data: MailData, context: MailContext) => Promise<T>): Promise<T> {
     if (!row.enabled) throw new ConflictException('중지된 메일 연결입니다.');
     await this.activeOwner(row.account_id);
     const secrets = await this.credential(row.credential_id, row.account_id);
@@ -114,6 +136,12 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     const data = read<MailData>(row.encrypted_data);
     try { return await work(data, { config: parseMail(mailConfigSchema, data.config), cursor: data.cursor || {}, secrets }); }
     finally { await repo.update({ id: row.id, lease_token: lease }, { lease_token: '', lease_until: '', revision: () => 'revision + 1' }); }
+  }
+
+  async watchContext(row: BusinessMailConnection): Promise<MailContext> {
+    await this.activeOwner(row.account_id);
+    const data = read<MailData>(row.encrypted_data);
+    return { config: parseMail(mailConfigSchema, data.config), cursor: data.cursor || {}, secrets: await this.credential(row.credential_id, row.account_id) };
   }
 
   async sync(accountIds: string[], id: string) {
@@ -133,12 +161,24 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
           for (const message of result.messages) {
             const key = `in:${digest(message.source_id)}`;
             if (await repo.existsBy({ connection_id: id, source_key: key })) continue;
-            await repo.insert({ account_id: row.account_id, connection_id: id, source_key: key, direction: 'inbound',
+            const messageId = randomUUID();
+            await repo.insert({ id: messageId, account_id: row.account_id, connection_id: id, source_key: key, direction: 'inbound',
               encrypted_data: encrypt(JSON.stringify(message)), status: 'received',
               address_keys: '\n' + context.config.addresses.filter(a => message.to.some(to => to.toLowerCase() === a.toLowerCase())).map(a => a.toLowerCase()).join('\n') + '\n' });
+            // A first import (or UIDVALIDITY reset) is history, not a fresh arrival.
+            if (data.cursor && Object.keys(data.cursor).length && !result.baseline) {
+              const automation = mailAutomation(data);
+              const taskData: MailTaskData = { automation, fingerprint: automationFingerprint(data), from: automation.from || data.config.addresses[0],
+                to: message.reply_to || message.from, subject: /^re:/i.test(message.subject) ? message.subject.slice(0, 500) : `Re: ${message.subject || '(제목 없음)'}`.slice(0, 500), text: '', note: '' };
+              await manager.getRepository(BusinessMailTask).insert({ account_id: row.account_id, connection_id: id, message_id: messageId,
+                status: automation.mode === 'off' ? 'skipped' : 'queued', notification_state: data.notify_incoming === false ? 'disabled' : 'pending',
+                encrypted_data: encrypt(JSON.stringify(taskData)) });
+            }
             collected++;
           }
         });
+        await flushSqljs(this.ds, true);
+        if (collected) activityEvents.emit('business_mail_intake', { account_id: row.account_id, connection_id: id });
         return { collected, has_more: !!result.has_more };
       } catch {
         await this.ds.getRepository(BusinessMailConnection).update({ id, lease_token: row.lease_token }, { status: 'error', last_error: SAFE_ERROR,
@@ -165,8 +205,10 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     else if (input.status) query.andWhere('m.status = :status', { status: input.status });
     if (input.address) query.andWhere("m.address_keys LIKE :address ESCAPE '!'", { address: `%\n${input.address.toLowerCase().replace(/[!%_]/g, c => '!' + c)}\n%` });
     if (input.confirmation) query.andWhere('m.confirmed = :confirmed', { confirmed: input.confirmation === 'confirmed' });
+    if (input.reply_status) query.andWhere('EXISTS (SELECT 1 FROM business_mail_tasks t WHERE t.message_id = CAST(m.id AS varchar) AND t.account_id = m.account_id AND t.status = :replyStatus)', { replyStatus: input.reply_status });
     const [rows, total] = await query.orderBy('m.created_at', 'DESC').addOrderBy('m.id', 'DESC').skip(input.offset).take(input.limit).getManyAndCount();
-    return { messages: rows.map(r => this.publicMessage(r)), total, offset: input.offset, limit: input.limit };
+    const tasks = rows.length ? await this.ds.getRepository(BusinessMailTask).find({ where: { message_id: In(rows.map(r => r.id)), account_id: In(accountIds) }, select: ['id', 'message_id', 'status'] }) : [];
+    return { messages: rows.map(r => ({ ...this.publicMessage(r), reply: tasks.find(t => t.message_id === r.id) || null })), total, offset: input.offset, limit: input.limit };
   }
   private async message(accountIds: string[], id: string) {
     const row = accountIds.length ? await this.ds.getRepository(BusinessMailMessage).findOneBy({ id, account_id: In(accountIds) }) : null;
@@ -185,7 +227,7 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     return this.detail(accountIds, id);
   }
 
-  async send(accountIds: string[], id: string, body: unknown, actor: string) {
+  async send(accountIds: string[], id: string, body: unknown, actor: string, automated?: { taskId: string; fingerprint: string }) {
     const input = parseMail(mailSendSchema, body); const connection = await this.connection(id, accountIds);
     const payloadDigest = digest(input); const sourceKey = `out:${input.request_id}`;
     const existing = await this.ds.getRepository(BusinessMailMessage).findOneBy({ connection_id: id, source_key: sourceKey });
@@ -203,9 +245,18 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
       const value = read<MailContent>(reply.encrypted_data).message_id;
       if (/^<[^<>\s]{1,990}>$/.test(value)) inReplyTo = value;
     }
-    return this.locked(connection, async (_data, context) => {
+    return this.locked(connection, async (data, context) => {
+      if (automated) {
+        if (automationFingerprint(data) !== automated.fingerprint || mailAutomation(data).mode === 'off') throw new ConflictException('자동화 설정이 변경되어 발송을 중단했습니다.');
+        const task = await this.ds.getRepository(BusinessMailTask).findOneBy({ id: automated.taskId, account_id: connection.account_id, connection_id: id, status: 'sending' });
+        if (!task || task.id !== input.request_id || task.message_id !== input.reply_to_message_id) throw new ConflictException('답장 발송 상태를 확인하세요.');
+        const draft = read<MailTaskData>(task.encrypted_data);
+        if (draft.from !== input.from || input.to.length !== 1 || draft.to !== input.to[0] || draft.subject !== input.subject || draft.text !== input.text) throw new ConflictException('승인한 답장이 변경되었습니다.');
+        await validateMailRuntime(this.ds, draft.automation.agent_runtime, connection.account_id);
+      }
       const content: MailContent = { source_id: input.request_id, message_id: `<awb-${input.request_id}@${input.from.split('@')[1]}>`,
         from: input.from, to: input.to, subject: input.subject, text: input.text, date: now(), attachments: [],
+        ...(automated ? { auto_submitted: 'auto-replied' } : {}),
         ...(inReplyTo ? { in_reply_to: inReplyTo, references: [inReplyTo] } : {}) };
       const repo = this.ds.getRepository(BusinessMailMessage);
       // Durable claim BEFORE network I/O. An uncertain SMTP attempt is never automatically replayed.

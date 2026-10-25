@@ -61,9 +61,13 @@ export const smtpImapConnector: MailConnector = {
           truncated: oversized || body.length > 100000,
           attachments: (parsed?.attachments || []).slice(0, 100).map(a => ({ name: header(a.filename || 'attachment'), type: header(a.contentType), size: a.size })),
           in_reply_to: header(parsed?.inReplyTo || env?.inReplyTo),
+          auto_submitted: header(parsed?.headers.get('auto-submitted')) || (parsed?.headers.has('auto-submitted') ? 'unknown' : ''), precedence: header(parsed?.headers.get('precedence')),
+          list_id: parsed?.headers.has('list-id') ? 'present' : '',
+          return_path: parsed?.headerLines.find(h => h.key === 'return-path')?.line.slice('Return-Path:'.length).trim(),
+          auto_response_suppress: header(parsed?.headers.get('x-auto-response-suppress')),
         });
       }
-      return { messages, cursor: { uid_validity: validity, last_uid: high }, has_more: high < end };
+      return { messages, cursor: { uid_validity: validity, last_uid: high }, has_more: high < end, baseline: previous === null };
     } finally { clearTimeout(deadline); client.close(); }
   },
   async send({ config, secrets }, content) {
@@ -71,8 +75,34 @@ export const smtpImapConnector: MailConnector = {
     try {
       const result = await transport.sendMail({ from: content.from, to: content.to, subject: content.subject, text: content.text,
         messageId: content.message_id, inReplyTo: content.in_reply_to, references: content.references,
+        ...(content.auto_submitted ? { headers: { 'Auto-Submitted': content.auto_submitted, 'X-Auto-Response-Suppress': 'All' }, envelope: { from: '', to: content.to } } : {}),
         disableFileAccess: true, disableUrlAccess: true });
       if (result.rejected?.length || !result.accepted?.length) throw new Error('Recipients not all accepted');
     } finally { transport.close(); }
+  },
+  async watch({ config, secrets }, onChange, signal) {
+    if (!config.imap) return;
+    const settings = config.imap;
+    const target = await resolveMailHost(settings.host);
+    if (signal.aborted) return;
+    const client = new ImapFlow({ host: target.address, servername: target.host, port: settings.port,
+      secure: settings.tls === 'implicit', doSTARTTLS: settings.tls === 'starttls' ? true : undefined,
+      auth: { user: settings.username, pass: secrets.imap_password }, logger: false,
+      tls: { rejectUnauthorized: true, servername: target.host }, maxIdleTime: 60_000,
+      connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 120_000 });
+    const stop = () => client.close();
+    signal.addEventListener('abort', stop, { once: true });
+    let closed = false;
+    const finished = new Promise<void>(resolve => client.once('close', () => { closed = true; resolve(); }));
+    client.on('error', stop);
+    client.on('exists', event => { if (event.count > event.prevCount) onChange(); });
+    try {
+      await client.connect();
+      if (signal.aborted || closed) return;
+      if (!client.capabilities.has('IDLE')) throw new Error('IMAP IDLE is not supported');
+      await client.mailboxOpen(settings.folder, { readOnly: true });
+      onChange(); // Catch mail received between the previous sync and opening IDLE.
+      await finished;
+    } finally { signal.removeEventListener('abort', stop); client.close(); }
   },
 };

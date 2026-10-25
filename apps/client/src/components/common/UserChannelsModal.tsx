@@ -78,6 +78,7 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
           notify_mention: state.notify_mention,
           notify_chat: state.notify_chat,
           notify_ticket: state.notify_ticket,
+          notify_mail: state.notify_mail,
         };
         // Only include credentials if user typed a new token; otherwise
         // server-side `existing.has_credentials` continues to apply.
@@ -94,6 +95,7 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
           notify_mention: state.notify_mention,
           notify_chat: state.notify_chat,
           notify_ticket: state.notify_ticket,
+          notify_mail: state.notify_mail,
         });
         showToast('Channel created', 'success');
       }
@@ -205,6 +207,7 @@ interface ChannelFormState {
   notify_mention: number;
   notify_chat: number;
   notify_ticket: number;
+  notify_mail: number;
 }
 
 function ChannelForm({
@@ -228,6 +231,7 @@ function ChannelForm({
     notify_mention: initial?.notify_mention ?? 1,
     notify_chat: initial?.notify_chat ?? 1,
     notify_ticket: initial?.notify_ticket ?? 0,
+    notify_mail: initial?.notify_mail ?? 1,
   });
 
   const isEdit = !!initial;
@@ -297,6 +301,7 @@ function ChannelForm({
         <ToggleRow label="Mentions of me" checked={!!state.notify_mention} onChange={(v) => setState({ ...state, notify_mention: v ? 1 : 0 })} />
         <ToggleRow label="Chat messages in my rooms" checked={!!state.notify_chat} onChange={(v) => setState({ ...state, notify_chat: v ? 1 : 0 })} />
         <ToggleRow label="Ticket activity (assigned/reported/reviewed)" checked={!!state.notify_ticket} onChange={(v) => setState({ ...state, notify_ticket: v ? 1 : 0 })} />
+        <ToggleRow label="메일 수신 · 답장 확인" checked={!!state.notify_mail} onChange={(v) => setState({ ...state, notify_mail: v ? 1 : 0 })} />
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, marginTop: 6, paddingTop: 6 }}>
           <ToggleRow label="Channel active" checked={!!state.is_active} onChange={(v) => setState({ ...state, is_active: v ? 1 : 0 })} />
         </div>

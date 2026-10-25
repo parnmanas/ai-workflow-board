@@ -1,6 +1,6 @@
 import { BadGatewayException, BadRequestException } from '@nestjs/common';
 import { simpleParser } from 'mailparser';
-import { mailJson, mailUrl } from './mail-network';
+import { mailEvents, mailJson, mailUrl } from './mail-network';
 import type { MailConnector, MailContext, MailContent } from './mail.types';
 
 const CORE = 'urn:ietf:params:jmap:core';
@@ -23,7 +23,7 @@ async function session(context: MailContext) {
     if (!response || response[0] !== method || response[1]?.accountId !== accountId) throw new BadGatewayException('JMAP 요청이 거부되었습니다. 권한과 동기화 상태를 확인하세요.');
     return response[1];
   };
-  return { call, accountId };
+  return { call, accountId, info, origin: url.origin };
 }
 
 export const jmapConnector: MailConnector = {
@@ -46,7 +46,7 @@ export const jmapConnector: MailConnector = {
     if (!Array.isArray(ids) || ids.length > 100 || typeof state !== 'string') throw new BadGatewayException('JMAP 수집 상태를 확인하지 못했습니다.');
     const messages: MailContent[] = [];
     if (ids.length) {
-      const result = await call('Email/get', { ids, properties: ['id', 'messageId', 'from', 'to', 'replyTo', 'subject', 'receivedAt', 'textBody', 'htmlBody', 'bodyValues', 'attachments', 'mailboxIds', 'inReplyTo'], fetchTextBodyValues: true, fetchHTMLBodyValues: true, maxBodyValueBytes: 100000 });
+      const result = await call('Email/get', { ids, properties: ['id', 'messageId', 'from', 'to', 'replyTo', 'subject', 'receivedAt', 'textBody', 'htmlBody', 'bodyValues', 'attachments', 'mailboxIds', 'inReplyTo', 'header:Auto-Submitted:asText', 'header:Precedence:asText', 'header:List-Id:asText', 'header:Return-Path:asText', 'header:X-Auto-Response-Suppress:asText'], fetchTextBodyValues: true, fetchHTMLBodyValues: true, maxBodyValueBytes: 100000 });
       if (!Array.isArray(result.list)) throw new BadGatewayException('JMAP 메일 목록을 확인하지 못했습니다.');
       for (const email of result.list) {
         if (typeof email.id !== 'string' || !ids.includes(email.id)) throw new BadGatewayException('JMAP 메일 식별자가 요청과 다릅니다.');
@@ -60,6 +60,8 @@ export const jmapConnector: MailConnector = {
           from: clean(email.from?.[0]?.email), to: (email.to || []).slice(0, 100).map((a: any) => clean(a.email)), reply_to: clean(email.replyTo?.[0]?.email),
           subject: clean(email.subject), date: clean(email.receivedAt), text: body.slice(0, 100000), truncated,
           in_reply_to: email.inReplyTo?.[0] ? `<${clean(email.inReplyTo[0])}>` : '',
+          auto_submitted: clean(email['header:Auto-Submitted:asText']), precedence: clean(email['header:Precedence:asText']),
+          list_id: clean(email['header:List-Id:asText']), return_path: clean(email['header:Return-Path:asText']), auto_response_suppress: clean(email['header:X-Auto-Response-Suppress:asText']),
           attachments: (email.attachments || []).slice(0, 100).map((a: any) => ({ name: clean(a.name), type: clean(a.type), size: Number(a.size) || 0 })),
         });
       }
@@ -78,6 +80,7 @@ export const jmapConnector: MailConnector = {
     const created = await call('Email/set', { create: { message: { mailboxIds: { [draft]: true }, keywords: { '$draft': true },
       from: [{ email: content.from }], to: content.to.map(email => ({ email })), subject: content.subject,
       messageId: [content.message_id.replace(/^<|>$/g, '')],
+      ...(content.auto_submitted ? { 'header:Auto-Submitted:asText': content.auto_submitted, 'header:X-Auto-Response-Suppress:asText': 'All' } : {}),
       ...(content.in_reply_to ? { inReplyTo: [content.in_reply_to.replace(/^<|>$/g, '')] } : {}),
       textBody: [{ partId: 'body', type: 'text/plain' }], bodyValues: { body: { value: content.text } },
     } } });
@@ -87,5 +90,13 @@ export const jmapConnector: MailConnector = {
       ...(sent ? { onSuccessUpdateEmail: { '#send': { mailboxIds: { [sent]: true }, keywords: {} } } } : {}),
     }, true);
     if (!submitted.created?.send?.id) throw new BadGatewayException('JMAP 발신 접수를 확인하지 못했습니다.');
+  },
+  async watch(context, onChange, signal) {
+    const { info, accountId, origin } = await session(context);
+    if (typeof info.eventSourceUrl !== 'string') throw new BadRequestException('JMAP EventSource가 없습니다.');
+    const endpoint = info.eventSourceUrl.replaceAll('{types}', 'Email').replaceAll('{closeafter}', 'no').replaceAll('{ping}', '30');
+    await mailEvents(mailUrl(endpoint, origin).toString(), context.secrets.jmap_token, signal, state => {
+      if (state?.changed?.[accountId]?.Email) onChange();
+    }, onChange);
   },
 };

@@ -476,7 +476,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       tag: string;
       navigateTo?: string;
     }) => {
-      if (!notiArmed.current) return;
+      if (!notiArmed.current && opts.source !== 'mail') return;
       if (!prefsRef.current[opts.source]) return;
       const go = opts.navigateTo ? () => navigate(opts.navigateTo!) : undefined;
       if (document.hidden) {
@@ -492,6 +492,15 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   );
 
   // ─── SSE-driven live updates ────────────────────────────────────────
+  const mailNotices = useRef(new Set<string>());
+  useBoardStreamEvent('business_mail_update', (frame: any) => {
+    const event = unwrapStreamEvent(frame);
+    if (!user || !event?.notification_id || !event.message_id || mailNotices.current.has(event.notification_id)) return;
+    mailNotices.current.add(event.notification_id);
+    if (mailNotices.current.size > 500) mailNotices.current.delete(mailNotices.current.values().next().value!);
+    announce({ source: 'mail', title: event.title || '메일 알림', body: event.body || '', tag: `mail:${event.notification_id}`,
+      navigateTo: `/business/mail?message=${encodeURIComponent(event.message_id)}` });
+  });
   useBoardStreamEvent('user_mention', (rawFrame: any) => {
     if (!user) return;
     const raw = unwrapStreamEvent(rawFrame);
