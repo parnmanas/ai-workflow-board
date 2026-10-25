@@ -110,6 +110,7 @@ export class RoomCrudService {
       // them through here would dump every mission's room into the sidebar of
       // every user in the account, which is exactly what the filters prevent.
       .andWhere('r.orchestration_mission_id IS NULL')
+      .andWhere("(r.run_kind IS NULL OR r.run_kind <> 'mail')")
       // Unread count: messages after last_read_at (datetime comparison per CHAT-12).
       // Progress rows are agent-manager tool-call heartbeats — the user
       // sees them live but they shouldn't pump the unread badge, which is
@@ -654,6 +655,7 @@ export class RoomCrudService {
       .where('r.account_id = :accountId', { accountId: accountId })
       .andWhere('r.action_id IS NULL')
       .andWhere('r.orchestration_mission_id IS NULL')
+      .andWhere("(r.run_kind IS NULL OR r.run_kind <> 'mail')")
       .orderBy('r.last_message_at', 'DESC')
       .getMany();
     if (rooms.length === 0) return [];

@@ -150,10 +150,11 @@ export class BusinessMailWorkflowService implements OnModuleInit, OnModuleDestro
       if (!won.affected) return;
       const room = await this.ds.transaction(async manager => {
         const roomRepo = manager.getRepository(ChatRoom);
-        const room = await roomRepo.save(roomRepo.create({ account_id: row.account_id, type: 'group', name: `메일 답장 · ${connection.name}`.slice(0, 200), last_message_at: null }));
+        const room = await roomRepo.save(roomRepo.create({ account_id: row.account_id, type: 'group', run_kind: 'mail', name: `메일 답장 · ${connection.name}`.slice(0, 200), last_message_at: null }));
         await manager.getRepository(ChatRoomParticipant).save([
           { room_id: room.id, participant_type: 'agent', participant_id: runtimeIdentityKey(spec), runtime_spec: { ...spec }, last_read_at: new Date(), left_at: null },
           { room_id: room.id, participant_type: 'user', participant_id: owner.id, last_read_at: new Date(), left_at: null },
+          { room_id: room.id, participant_type: 'user', participant_id: 'system', last_read_at: new Date(), left_at: null },
         ]);
         await manager.getRepository(BusinessMailTask).update({ id: row.id, status: 'drafting' }, { room_id: room.id });
         return room;

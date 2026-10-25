@@ -184,6 +184,8 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
   `automatic`으로 설정하고 담당 `agent_runtime`, `objective`, 발신 주소, 하루 처리 한도(기본 20, 최대 100)를 지정하면
   새 메일마다 담당 RuntimeSpec으로 처리 방을 열어 초안 작성을 요청한다. 설정·실행·발송 때 현재 소유자·Host·credential을 검증한다.
   실행 키·working_dir를 포함한 일반 RuntimeSpec 선언 UI를 재사용한다. 비즈니스 도구를 제공하는 full MCP 프로필을 사용한다.
+  처리 방은 `run_kind=mail`이며 소유자·담당 runtime·서버 발화자(system)를 참여자로 등록한다. 일반 채팅 목록과 알림에서는
+  제외하고 메일 상세의 처리 기록으로 접근한다. 기존 `is_action_room` 이벤트 계약으로 담당 에이전트에게 작업 실행임을 알린다.
   과거 메일과 IMAP UIDVALIDITY 초기화 때 가져온 메일은 수신 알림·자동 답장을 시작하지 않는다.
   과거 메일은 화면의 ‘에이전트에게 답장 작성 요청’ 또는 `start_business_mail_reply`로 명시적으로 요청한다.
 - 새 메일과 답장 확인 요청은 소유자에게만 `business_mail_update` SSE로 전달한다. AWB에서 토스트·소리,

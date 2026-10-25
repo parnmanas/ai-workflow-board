@@ -6,6 +6,8 @@ import { encrypt, decryptStrict } from '../dist/services/encryption.service.js';
 import { BusinessMailService } from '../dist/modules/business/business-mail.service.js';
 import { BusinessMailWorkflowService } from '../dist/modules/business/business-mail-workflow.service.js';
 import { BusinessMailWatchService } from '../dist/modules/business/business-mail-watch.service.js';
+import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
+import { RoomCrudService } from '../dist/modules/chat-rooms/room-crud.service.js';
 import { MAIL_CONNECTORS } from '../dist/modules/business/mail/mail-registry.js';
 import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 import { EVENT_TYPES } from '../dist/modules/events/event-registry.js';
@@ -109,6 +111,24 @@ test('mail intake, durable notifications, assigned replies and human approval', 
     const duplicate = await arrive({ message_id: original.message_id }); await workflow.tick();
     assert.equal((await task(duplicate)).status, 'skipped');
     assert.match((await task(duplicate)).last_error, /동일한 메일/);
+  });
+  await t.test('the real chat dispatcher authorizes the system sender and publishes the assigned runtime', async () => {
+    await settings('review'); const live = await arrive();
+    const frames = []; const listener = event => frames.push(event);
+    activityEvents.on('chat_room_message', listener);
+    try {
+      const realWorkflow = new BusinessMailWorkflowService(ds, mail, app.get(RoomMessagingService), notifications);
+      await realWorkflow.tick();
+      const row = await task(live); assert.equal(row.status, 'drafting', row.last_error);
+      const frame = frames.find(f => f.room_id === row.room_id);
+      assert.ok(frame, 'dispatch must reach the manager SSE pipeline');
+      assert.equal(frame.sender_id, 'system'); assert.equal(frame.sender_type, 'user');
+      assert.equal(frame.is_action_room, true, 'automation must not produce a second ordinary-chat notification');
+      assert.equal(frame.agent_member_runtimes[agent.id].manager_agent_id, spec.manager_agent_id);
+      assert.ok(frame.member_ids.has(owner.id));
+      const rooms = await app.get(RoomCrudService).listRooms(account.id, owner.id);
+      assert.ok(!rooms.some(r => r.id === row.room_id), 'mail processing is accessed through the business inbox');
+    } finally { activityEvents.off('chat_room_message', listener); }
   });
   await t.test('daily processing cap stops new agent runs before dispatch', async () => {
     await settings('automatic', { max_replies_per_day: 1 });
