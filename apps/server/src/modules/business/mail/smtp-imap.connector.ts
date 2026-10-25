@@ -75,7 +75,9 @@ export const smtpImapConnector: MailConnector = {
     try {
       const result = await transport.sendMail({ from: content.from, to: content.to, subject: content.subject, text: content.text,
         messageId: content.message_id, inReplyTo: content.in_reply_to, references: content.references,
-        ...(content.auto_submitted ? { headers: { 'Auto-Submitted': content.auto_submitted, 'X-Auto-Response-Suppress': 'All' }, envelope: { from: '', to: content.to } } : {}),
+        // Authenticated submission servers (including NAS relays) may reject a null reverse path.
+        // Keep the verified sender envelope and mark automatic responses in their headers.
+        ...(content.auto_submitted ? { headers: { 'Auto-Submitted': content.auto_submitted, 'X-Auto-Response-Suppress': 'All' } } : {}),
         disableFileAccess: true, disableUrlAccess: true });
       if (result.rejected?.length || !result.accepted?.length) throw new Error('Recipients not all accepted');
     } finally { transport.close(); }

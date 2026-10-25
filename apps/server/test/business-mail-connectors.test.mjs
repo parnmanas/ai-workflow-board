@@ -46,6 +46,9 @@ test('SMTP enforces TLS, safe content and stable Message-ID; partial recipients 
   await smtpImapConnector.send({ config, secrets: { smtp_password: 'secret' }, cursor: {} }, message);
   assert.equal(options.requireTLS, true); assert.equal(options.tls.servername, 'smtp.example.com'); assert.equal(options.host, '203.0.113.10');
   assert.equal(options.disableFileAccess, true); assert.equal(options.disableUrlAccess, true); assert.equal(payload.messageId, '<stable@example.com>');
+  await smtpImapConnector.send({ config, secrets: { smtp_password: 'secret' }, cursor: {} }, { ...message, auto_submitted: 'auto-replied' });
+  assert.equal(payload.headers['Auto-Submitted'], 'auto-replied'); assert.equal(payload.headers['X-Auto-Response-Suppress'], 'All');
+  assert.equal(payload.envelope, undefined, 'authenticated submission uses the verified From address, not a rejected null reverse path');
   t.mock.method(require('nodemailer'), 'createTransport', () => ({ sendMail: async () => ({ accepted: ['target@example.com'], rejected: ['other@example.com'] }), close() {} }));
   await assert.rejects(smtpImapConnector.send({ config, secrets: { smtp_password: 'secret' }, cursor: {} }, message), /not all accepted/);
 });
