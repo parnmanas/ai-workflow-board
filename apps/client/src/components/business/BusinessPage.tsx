@@ -14,6 +14,7 @@ import { BusinessCashbook } from './BusinessCashbook';
 import { BusinessCatalog, BusinessConnectorCard } from './BusinessCatalog';
 import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
 import { BusinessTrademarks } from './BusinessTrademarks';
+import { BusinessPageHeader } from './BusinessPageHeader';
 
 type View = 'overview' | 'operations' | 'connectors';
 
@@ -83,7 +84,23 @@ export default function BusinessPage({ view }: { view: View }) {
   const selectedId = params.get('company') || companies?.find(c => c.id === rememberedId)?.id || companies?.[0]?.id || '';
   const selectedRef = useRef(selectedId); selectedRef.current = selectedId;
   const generation = useRef(0);
+  const stageTabsRef = useRef<HTMLDivElement>(null);
   const stage = STAGES.find(s => s.id === params.get('stage')) || STAGES[0];
+
+  useEffect(() => {
+    // Deep links and browser Back must reveal the selected stage without moving the page vertically.
+    const tabs = stageTabsRef.current;
+    const selected = tabs?.querySelector<HTMLElement>('[aria-pressed=true]');
+    if (!tabs || !selected) return;
+    const reveal = () => {
+      const parent = tabs.getBoundingClientRect(); const child = selected.getBoundingClientRect();
+      if (child.left < parent.left || child.right > parent.right) tabs.scrollLeft += child.left - parent.left - (parent.width - child.width) / 2;
+    };
+    reveal();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(reveal); observer.observe(tabs);
+    return () => observer.disconnect();
+  }, [stage.id, view, !!detail]);
 
   useEffect(() => {
     if (user?.id && companies?.some(c => c.id === selectedId)) {
@@ -165,14 +182,12 @@ export default function BusinessPage({ view }: { view: View }) {
   const renderConnector = (connector: BusinessConnector, comparing?: boolean, onCompare?: () => void) => company && <BusinessConnectorCard key={connector.id} connector={connector} company={company} connection={detail?.connections.find(c => c.provider === connector.id)} busy={!!busy || loading} onSetup={() => setConnectorModal(connector)} onSync={() => void sync(connector.id)} onChoose={plan => void chooseService(connector, plan)} onFormation={() => setFormationModal(connector)} comparing={comparing} onCompare={onCompare} onOpenData={view === 'connectors' ? () => chooseStage(connector.stage) : undefined} />;
 
   return <div className="business-page" aria-busy={loading}>
-    <header className="business-page-heading">
-      <div><span className="business-eyebrow">YOUR BUSINESS, CONNECTED</span><h1>{view === 'overview' ? '비즈니스 전체 흐름' : view === 'operations' ? '운영 워크플로' : '커넥터'}</h1></div>
-      <div className="business-heading-actions">
-        {selectedId && <Button variant="ghost" aria-label="워크플로 새로고침" disabled={loading || !!busy} onClick={() => void reload().catch(e => showToast(e.message, 'error'))}><BusinessIcon name="refresh" size={16} /></Button>}
-        {!!companies?.length && <select className="business-company-picker" aria-label="관리할 회사" value={selectedId} onChange={e => { const next = new URLSearchParams(params); next.set('company', e.target.value); next.delete('trademark'); next.delete('authorize'); setParams(next); }}>{!companies.some(c => c.id === selectedId) && <option value={selectedId}>회사 선택</option>}{companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
-        <Button variant="secondary" onClick={() => setCompanyModal('new')}><BusinessIcon name="plus" size={15} />회사 추가</Button>
-      </div>
-    </header>
+    <BusinessPageHeader
+      title={view === 'overview' ? '비즈니스 전체 흐름' : view === 'operations' ? '운영 워크플로' : '커넥터'}
+      context={!!companies?.length && <select className="business-company-picker" aria-label="관리할 회사" title={companies.find(c => c.id === selectedId)?.name} value={selectedId} onChange={e => { const next = new URLSearchParams(params); next.set('company', e.target.value); next.delete('trademark'); next.delete('authorize'); setParams(next); }}>{!companies.some(c => c.id === selectedId) && <option value={selectedId}>회사 선택</option>}{companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
+      actions={<Button variant="secondary" aria-label="회사 추가" title="회사 추가" onClick={() => setCompanyModal('new')}><BusinessIcon name="plus" size={18} /><span className="business-header-action-label">회사 추가</span></Button>}
+      moreActions={selectedId ? close => <Button variant="ghost" disabled={loading || !!busy} onClick={() => { close(); void reload().catch(e => showToast(e.message, 'error')); }}><BusinessIcon name="refresh" size={16} />워크플로 새로고침</Button> : undefined}
+    />
     {view === 'connectors' && <section className="business-panel business-mail-catalog"><div><h2>메일 자동화 커넥터</h2><p className="business-muted">SMTP · IMAP · JMAP 연결을 등록하고 여러 업무 주소의 수신·발신 결과를 함께 확인합니다.</p></div><Link to="/business/mail?connections=1">메일 연결 관리 →</Link></section>}
     {error && <ErrorState message={error} onRetry={() => void (companies === null ? bootstrap() : loadDetail())} />}
     {companies === null && !error && <div className="business-loading" role="status">비즈니스를 불러오는 중…</div>}
@@ -215,7 +230,7 @@ export default function BusinessPage({ view }: { view: View }) {
         {canMarketing && <GrowthPanel detail={detail} onLink={() => setCompanyModal('edit')} />}
       </>}
       {view === 'operations' && <>
-        <div className="business-stage-tabs" role="group" aria-label="운영 영역">{STAGES.map(s => <button key={s.id} aria-pressed={stage.id === s.id} onClick={() => chooseStage(s.id)} style={{ '--stage-color': s.color } as React.CSSProperties}><BusinessIcon name={s.id} size={19} /><span>{s.label}</span><small>{tasks.filter(t => t.stage === s.id && t.status !== 'done').length}</small></button>)}</div>
+        <div ref={stageTabsRef} className="business-stage-tabs" role="group" aria-label="운영 영역">{STAGES.map(s => <button key={s.id} aria-pressed={stage.id === s.id} onClick={() => chooseStage(s.id)} style={{ '--stage-color': s.color } as React.CSSProperties}><BusinessIcon name={s.id} size={19} /><span>{s.label}</span><small>{tasks.filter(t => t.stage === s.id && t.status !== 'done').length}</small></button>)}</div>
         <div className="business-operations-heading"><div><span className="business-eyebrow" style={{ color: stage.color }}>{stage.eyebrow}</span><h2>{stage.label}</h2><p>{stage.description}</p></div><Button onClick={() => setTaskModal('new')}><BusinessIcon name="plus" size={16} />업무 추가</Button></div>
         {stage.id === 'formation' && (detail.formations || []).length > 0 && <div className="business-formation-history">{detail.formations.map(f => <button key={f.id} onClick={() => setFormationModal(connectors.find(c => c.id === f.provider) || null)}><BusinessIcon name="formation" size={20} /><span><strong>{f.summary.name}</strong><small>{f.environment === 'sandbox' ? '테스트' : '실제 신청'} · {FORMATION_STATUS[f.status]}</small></span><BusinessIcon name="arrow" size={16} /></button>)}</div>}
         <BusinessStageGuide stage={stage.id} connectors={connectors} connectorsPath={path('connectors')} canMarketing={canMarketing} />

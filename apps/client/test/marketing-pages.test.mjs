@@ -107,7 +107,7 @@ async function render(t, { entry, permissions, stubs = {} }) {
 }
 
 function buttonByText(root, label) {
-  const found = [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+  const found = [...root.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.textContent?.trim()) === label);
   assert.ok(found, `"${label}" 버튼이 없습니다`);
   return found;
 }
@@ -259,7 +259,10 @@ test('연락처 — 캠페인 계정(?account=)을 모든 호출에 account_id �
   assert.ok(listCall, '연락처 목록을 묻는다');
   assert.equal(listCall[1], 'acc-2', '캠페인의 계정을 명시한다');
   assert.equal(listCall[2].list, 'newsletter', '메일 채널의 수신 목록으로 거른다');
+  const headerMenu = container.querySelector('[aria-label="Marketing Contacts 메뉴"]');
+  click(headerMenu); await flush();
   assert.match(container.textContent, /← Org 캠페인/, '열어 온 캠페인으로 돌아가는 길');
+  click(headerMenu); await flush();
   assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, /old@example\.com/);
 
   click(buttonByText(container, '삭제'));

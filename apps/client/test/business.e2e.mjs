@@ -142,15 +142,17 @@ for (const width of [1440, 390, 320]) {
       if (path.endsWith('/connections')) body = { connections: [connection], connectors: [{ id: 'smtp_imap', name: 'SMTP · IMAP', note: '메일 서버의 비밀번호 또는 앱 비밀번호로 연결합니다.' }, { id: 'jmap', name: 'JMAP' }], credentials: [{ id: 'mail-key', name: 'NAS Mail', account_id: account.id }] };
       else if (path.endsWith('/confirm')) { Object.assign(message, route.request().postDataJSON(), { revision: 1, confirmed_at: new Date().toISOString() }); body = message; }
       else if (path.endsWith('/messages')) { filters.push(new URL(route.request().url()).search); body = { messages: [message], total: 1, offset: 0, limit: 50 }; }
+      else if (path.endsWith('/reply')) body = null;
       else body = message;
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     });
     await page.goto('/business/mail');
     await expect(page.getByRole('heading', { name: '비즈니스 메일', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '필터', exact: true }).click();
     await page.getByLabel('모든 업무 용도', { exact: true }).selectOption('operations');
     await expect.poll(() => filters.at(-1)).toContain('purpose=operations');
     await page.locator('.business-mail-row').click();
-    await expect(page.locator('.business-mail-body')).toContainText('<img');
+    await expect(page.locator('.business-mail-detail > .business-mail-body')).toContainText('<img');
     await expect(page.locator('.business-mail-body img')).toHaveCount(0);
     await page.getByLabel('처리 메모', { exact: true }).fill('회계 기록과 대조 완료');
     await page.getByRole('button', { name: '확인 완료', exact: true }).click();
@@ -161,6 +163,7 @@ for (const width of [1440, 390, 320]) {
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect.poll(() => page.getByRole('dialog').evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await page.getByRole('button', { name: '취소', exact: true }).click();
+    await page.getByRole('button', { name: '비즈니스 메일 메뉴', exact: true }).click();
     await page.getByRole('button', { name: /연결 관리/ }).click();
     await page.getByRole('button', { name: '설정', exact: true }).click();
     const dialog = page.getByRole('dialog');

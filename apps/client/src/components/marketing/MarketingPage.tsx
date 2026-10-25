@@ -7,7 +7,8 @@ import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useMarketingInbox } from '../../hooks/useMarketingInbox';
 import { tokens } from '../../tokens';
-import PageHeader from '../PageHeader';
+import { BusinessPageHeader } from '../business/BusinessPageHeader';
+import { BusinessIcon } from '../business/BusinessIcon';
 import { Button, EmptyState, ErrorState, PermissionNotice } from '../common';
 import { relativeTime } from '../../utils/time';
 import { CAPABILITY_LABELS, MARKETING_REFRESH_DEBOUNCE_MS, campaignStatusView, describeCadence, formatDateTime } from './marketing.logic';
@@ -56,8 +57,8 @@ export default function MarketingPage() {
 
   if (!canView) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-        <PageHeader title="Marketing" description="에이전트가 돌리는 제품 마케팅 — 돈 · 외부 발신 · 채널 개설은 사람이 정합니다." />
+      <div className="business-marketing-page">
+        <BusinessPageHeader title="Marketing" description="에이전트가 돌리는 제품 마케팅 — 돈 · 외부 발신 · 채널 개설은 사람이 정합니다." />
         <div style={{ padding: 24 }}>
           <PermissionNotice
             title="마케팅 권한이 필요합니다"
@@ -69,16 +70,12 @@ export default function MarketingPage() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <PageHeader
+    <div className="business-marketing-page">
+      <BusinessPageHeader
         title="Marketing"
         description="캠페인 에이전트가 주기마다 채널을 찾고 글 · 메일 · 예산을 제안합니다. 돈 · 외부 발신 · 채널 개설은 사람이 승인합니다."
-        actions={canManage ? (
-          <>
-            <Link to="/marketing/contacts" style={{ fontSize: 12, color: tokens.colors.accentLight }}>메일 연락처</Link>
-            <Button variant="primary" size="md" onClick={() => setCreating(true)}>+ 새 캠페인</Button>
-          </>
-        ) : undefined}
+        actions={canManage ? <Button variant="primary" aria-label="+ 새 캠페인" title="새 캠페인" onClick={() => setCreating(true)}><BusinessIcon name="plus" size={18} /><span className="business-header-action-label">새 캠페인</span></Button> : undefined}
+        moreActions={canManage ? close => <Link to="/marketing/contacts" onClick={close}>메일 연락처</Link> : undefined}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         {campaigns === null && !error ? (

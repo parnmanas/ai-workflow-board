@@ -15,12 +15,12 @@ export default function BusinessLayout() {
       <div className="business-brand"><span className="business-brand-icon"><BusinessIcon name="formation" /></span><span>Business <small>설립부터 성장까지</small></span></div>
       <nav className="business-nav" aria-label="Business 메뉴">
         {business && <>
-          <NavLink to={`/business${suffix}`} end><BusinessIcon name="overview" size={17} />전체 흐름</NavLink>
-          <NavLink to={`/business/operations${suffix}`}><BusinessIcon name="workflow" size={17} />운영</NavLink>
-          <NavLink to="/business/mail"><BusinessIcon name="mail" size={17} />메일</NavLink>
-          <NavLink to={`/business/connectors${suffix}`}><BusinessIcon name="connector" size={17} />커넥터</NavLink>
+          <NavLink to={`/business${suffix}`} end><BusinessIcon name="overview" size={17} /><span>전체 흐름</span></NavLink>
+          <NavLink to={`/business/operations${suffix}`}><BusinessIcon name="workflow" size={17} /><span>운영</span></NavLink>
+          <NavLink to="/business/mail"><BusinessIcon name="mail" size={17} /><span>메일</span></NavLink>
+          <NavLink to={`/business/connectors${suffix}`}><BusinessIcon name="connector" size={17} /><span>커넥터</span></NavLink>
         </>}
-        {marketing && <NavLink to="/marketing"><BusinessIcon name="growth" size={17} />마케팅</NavLink>}
+        {marketing && <NavLink to="/marketing"><BusinessIcon name="growth" size={17} /><span>마케팅</span></NavLink>}
       </nav>
     </div>
     <div className="business-content"><Outlet /></div>

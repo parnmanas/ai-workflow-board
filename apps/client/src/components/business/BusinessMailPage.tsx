@@ -10,6 +10,7 @@ import { BusinessIcon } from './BusinessIcon';
 import { BusinessMailConnectionForm, MAIL_PURPOSES } from './BusinessMailConnectionForm';
 import BusinessMailReplyPanel, { MAIL_REPLY_STATUS } from './BusinessMailReplyPanel';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
+import { BusinessPageHeader } from './BusinessPageHeader';
 
 const STATUS = { received: '수신', sending: '발신 중', accepted: '서버 접수', uncertain: '발신 확인 필요' };
 const when = (value: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('ko-KR') : '—';
@@ -26,8 +27,10 @@ export default function BusinessMailPage() {
   const [editor, setEditor] = useState<MailConnection | 'new' | null>(null);
   const [error, setError] = useState(''); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState('');
   const [refresh, setRefresh] = useState(0);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const filters = Object.fromEntries(['company_id', 'connection_id', 'address', 'purpose', 'direction', 'status', 'confirmation', 'reply_status', 'offset'].map(k => [k, params.get(k) || (k === 'company_id' ? params.get('company') : '')]).filter((pair): pair is [string, string] => !!pair[1]));
   const filterKey = JSON.stringify(filters);
+  const extraFilterCount = Object.keys(filters).filter(k => k !== 'company_id' && k !== 'offset').length;
   const connectionsOpen = params.get('connections') === '1';
   useEffect(() => { if (params.get('message')) setSelected(params.get('message')!); }, [params]);
   useBoardStreamEvent('business_mail_update', () => { if (allowed) setRefresh(n => n + 1); });
@@ -65,9 +68,13 @@ export default function BusinessMailPage() {
   };
   if (!allowed) return <div className="business-page">비즈니스 메일을 보려면 business.manage 권한이 필요합니다.</div>;
   return <div className="business-page business-mail-page">
-    <header className="business-page-heading"><div><span className="business-eyebrow">AUTOMATION MAIL</span><h1>비즈니스 메일</h1><p className="business-muted">자동으로 수집한 메일과 발신 결과를 확인하고, 처리 기록을 남깁니다.</p></div>
-      <div className="business-heading-actions"><Button variant="ghost" disabled={loading} onClick={() => setRefresh(n => n + 1)} aria-label="메일 새로고침"><BusinessIcon name="refresh" size={16} /></Button><Button variant="secondary" onClick={() => { const next = new URLSearchParams(params); connectionsOpen ? next.delete('connections') : next.set('connections', '1'); setParams(next); }}>연결 관리 ({catalog.connections.length})</Button><Button onClick={() => setEditor('new')}>메일 연결 추가</Button></div>
-    </header>
+    <BusinessPageHeader title="비즈니스 메일" description="자동으로 수집한 메일과 발신 결과를 확인하고, 처리 기록을 남깁니다."
+      actions={<Button aria-label="메일 연결 추가" title="메일 연결 추가" onClick={() => setEditor('new')}><BusinessIcon name="plus" size={18} /><span className="business-header-action-label">메일 연결 추가</span></Button>}
+      moreActions={close => <>
+        <Button variant="ghost" disabled={loading} onClick={() => { close(); setRefresh(n => n + 1); }}><BusinessIcon name="refresh" size={16} />메일 새로고침</Button>
+        <Button variant="ghost" aria-pressed={connectionsOpen} onClick={() => { close(); const next = new URLSearchParams(params); connectionsOpen ? next.delete('connections') : next.set('connections', '1'); setParams(next); }}><BusinessIcon name="connector" size={16} />연결 관리 ({catalog.connections.length})</Button>
+      </>}
+    />
     {error && <div role="alert" className="business-error">{error}<Button variant="ghost" onClick={() => setRefresh(n => n + 1)}>다시 불러오기</Button></div>}
     {(connectionsOpen || (!loading && !catalog.connections.length)) && <section className="business-panel business-mail-connections" aria-label="메일 연결">
       {!catalog.connections.length && <p>대표·회계·마케팅·운영 메일을 연결하면 한 목록에서 확인할 수 있습니다.</p>}
@@ -75,14 +82,17 @@ export default function BusinessMailPage() {
     </section>}
     <div className="business-mail-filters" aria-label="메일 필터">
       {select('company_id', '모든 회사', companies.map(c => ({ value: c.id, label: c.name })))}
-      {select('connection_id', '모든 연결', catalog.connections.map(c => ({ value: c.id, label: c.name })))}
-      {select('address', '모든 메일 주소', [...new Set(catalog.connections.flatMap(c => c.config.addresses))].map(a => ({ value: a, label: a })))}
-      {select('purpose', '모든 업무 용도', MAIL_PURPOSES)}
-      {select('direction', '수신·발신 전체', [{ value: 'inbound', label: '수신' }, { value: 'outbound', label: '발신' }])}
-      {select('confirmation', '처리 상태 전체', [{ value: 'pending', label: '미확인' }, { value: 'confirmed', label: '확인 완료' }])}
-      {select('status', '발신·수신 상태 전체', Object.entries(STATUS).map(([value, label]) => ({ value, label })))}
-      {select('reply_status', '답장 상태 전체', Object.entries(MAIL_REPLY_STATUS).map(([value, label]) => ({ value, label })))}
-      <Button variant="ghost" onClick={() => { setParams(connectionsOpen ? { connections: '1' } : {}); setSelected(''); }}>필터 초기화</Button>
+      <Button variant="secondary" aria-expanded={filtersOpen} aria-controls="business-mail-filter-fields" onClick={() => setFiltersOpen(!filtersOpen)}><BusinessIcon name="filter" size={16} />필터{extraFilterCount > 0 && ` (${extraFilterCount})`}</Button>
+      <div id="business-mail-filter-fields" className="business-mail-filter-fields" hidden={!filtersOpen}>
+        {select('connection_id', '모든 연결', catalog.connections.map(c => ({ value: c.id, label: c.name })))}
+        {select('address', '모든 메일 주소', [...new Set(catalog.connections.flatMap(c => c.config.addresses))].map(a => ({ value: a, label: a })))}
+        {select('purpose', '모든 업무 용도', MAIL_PURPOSES)}
+        {select('direction', '수신·발신 전체', [{ value: 'inbound', label: '수신' }, { value: 'outbound', label: '발신' }])}
+        {select('confirmation', '처리 상태 전체', [{ value: 'pending', label: '미확인' }, { value: 'confirmed', label: '확인 완료' }])}
+        {select('status', '발신·수신 상태 전체', Object.entries(STATUS).map(([value, label]) => ({ value, label })))}
+        {select('reply_status', '답장 상태 전체', Object.entries(MAIL_REPLY_STATUS).map(([value, label]) => ({ value, label })))}
+        <Button variant="ghost" onClick={() => { setParams(connectionsOpen ? { connections: '1' } : {}); setSelected(''); }}>필터 초기화</Button>
+      </div>
     </div>
     <div className="business-mail-workspace">
       <section className="business-panel business-mail-list" aria-label="통합 메일 목록" aria-busy={loading}>

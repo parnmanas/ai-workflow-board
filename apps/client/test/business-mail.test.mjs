@@ -55,6 +55,7 @@ test('Business mail opens a unified list and preserves other filters while selec
   assert.equal(Boolean(container.querySelector('.business-company-picker')), false);
   assert.match(container.textContent, /비즈니스 메일/);
   assert.deepEqual(calls.find(c => c[0] === 'listBusinessMail')[1], {});
+  click(button(container, '필터')); await flush();
   const company = container.querySelector('[aria-label="모든 회사"]');
   run(() => { company.value = 'co1'; company.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush(); await flush();
   const purpose = container.querySelector('[aria-label="모든 업무 용도"]');

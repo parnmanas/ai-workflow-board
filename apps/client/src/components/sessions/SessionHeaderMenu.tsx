@@ -11,9 +11,10 @@ import { tokens } from '../../tokens';
  * HeaderOverflowMenu 와 달리 안에 설정 컨트롤이 있어서 항목을 누를 때마다 닫지 않는다.
  * 동작 항목은 넘겨받은 `close` 로 스스로 닫는다. 바깥 클릭 · Esc 로 닫힌다.
  */
-export default function SessionHeaderMenu({ children, label = 'Session menu' }: {
+export default function SessionHeaderMenu({ children, label = 'Session menu', icon = '☰' }: {
   children: (close: () => void) => React.ReactNode;
   label?: string;
+  icon?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -62,7 +63,7 @@ export default function SessionHeaderMenu({ children, label = 'Session menu' }: 
           color: open ? tokens.colors.textPrimary : tokens.colors.textSecondary,
         }}
       >
-        <span aria-hidden="true">☰</span>
+        <span aria-hidden="true">{icon}</span>
       </button>
       {open && (
         <div

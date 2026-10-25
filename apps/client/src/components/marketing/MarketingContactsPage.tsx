@@ -5,7 +5,8 @@ import type { MarketingBrand, MarketingContact, MarketingContactImportResult } f
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import PageHeader from '../PageHeader';
+import { BusinessPageHeader } from '../business/BusinessPageHeader';
+import { BusinessIcon } from '../business/BusinessIcon';
 import { Button, ConfirmDialog, EmptyState, ErrorState, Input, Modal, PermissionNotice, Select, Textarea } from '../common';
 import { CONTACT_STATUS_FILTERS, UNSUBSCRIBE_SOURCE_LABELS, contactStatusView, formatCount, formatDateTime } from './marketing.logic';
 import {
@@ -150,18 +151,14 @@ export default function MarketingContactsPage() {
   };
   const total = data?.total ?? 0;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <PageHeader
+    <div className="business-marketing-page">
+      <BusinessPageHeader
         title="Marketing Contacts"
         description="마케팅 메일을 받는 동의 연락처 — 동의 증거와 함께 사람이 넣고, 수신거부 · 바운스 · 스팸 신고 · 삭제된 주소는 다시 가져와도 억제됩니다."
-        actions={(
-          <>
-            {campaignId
-              ? <Link to={`/marketing/${encodeURIComponent(campaignId)}?tab=channels`} style={{ fontSize: 12, color: tokens.colors.textSecondary }}>← {campaignName || '캠페인'}</Link>
-              : <Link to="/marketing" style={{ fontSize: 12, color: tokens.colors.textSecondary }}>← 캠페인 목록</Link>}
-            <Button variant="primary" size="md" onClick={() => setImporting(true)}>CSV 가져오기</Button>
-          </>
-        )}
+        actions={<Button variant="primary" aria-label="CSV 가져오기" title="CSV 가져오기" onClick={() => setImporting(true)}><BusinessIcon name="plus" size={18} /><span className="business-header-action-label">CSV 가져오기</span></Button>}
+        moreActions={close => campaignId
+          ? <Link to={`/marketing/${encodeURIComponent(campaignId)}?tab=channels`} onClick={close}>← {campaignName || '캠페인'}</Link>
+          : <Link to="/marketing" onClick={close}>← 캠페인 목록</Link>}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <ConsentNoticePanel accountId={accountId} />

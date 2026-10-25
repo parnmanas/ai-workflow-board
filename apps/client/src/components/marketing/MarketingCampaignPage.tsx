@@ -14,7 +14,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useProjects } from '../../projects/useProjects';
 import { tokens } from '../../tokens';
-import PageHeader from '../PageHeader';
+import { BusinessPageHeader } from '../business/BusinessPageHeader';
 import PageTabs from '../PageTabs';
 import { Button, ConfirmDialog, ErrorState, PermissionNotice } from '../common';
 import {
@@ -318,29 +318,19 @@ export default function MarketingCampaignPage() {
 
   return (
     <MarketingCtxProvider value={ctx}>
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-        <PageHeader
+      <div className="business-marketing-page">
+        <BusinessPageHeader
           title={campaign ? campaign.name : 'Marketing'}
           description={campaign
             ? `${describeCadence(campaign)}${campaign.status === 'active' && campaign.next_cycle_at ? ` · 다음 사이클 ${formatDateTime(campaign.next_cycle_at)}` : ''} · 사이클 ${campaign.cycle_count}회${spendOnly ? ' · 지출 승인 권한으로 열었습니다(돈 항목만)' : ''}`
             : undefined}
-          actions={(
+          status={campaign && <StatusPill testId="marketing-campaign-status" view={campaignStatusView(campaign.status)} />}
+          actions={campaign && canManage && <Button variant="secondary" disabled={busy || campaign.status !== 'active'} title={campaign.status !== 'active' ? '진행 중인 캠페인만 실행할 수 있습니다' : '예약과 같은 경로로 사이클을 지금 시작합니다'} onClick={() => void runNow()}>지금 실행</Button>}
+          moreActions={close => (
             <>
-              {campaign && <StatusPill testId="marketing-campaign-status" view={campaignStatusView(campaign.status)} />}
-              <Link to="/marketing" style={{ fontSize: 12, color: tokens.colors.textSecondary }}>← 목록</Link>
+              <Link to="/marketing" onClick={close}>← 목록</Link>
               {hasEmail && campaign && (
-                <Link to={contactsPath(campaign.account_id, { campaignId: campaign.id })} style={{ fontSize: 12, color: tokens.colors.accentLight }}>연락처</Link>
-              )}
-              {campaign && canManage && (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy || campaign.status !== 'active'}
-                  title={campaign.status !== 'active' ? '진행 중인 캠페인만 실행할 수 있습니다' : '예약과 같은 경로로 사이클을 지금 시작합니다'}
-                  onClick={() => void runNow()}
-                >
-                  지금 실행
-                </Button>
+                <Link to={contactsPath(campaign.account_id, { campaignId: campaign.id })} onClick={close}>연락처</Link>
               )}
               {statusActions.map((action) => {
                 const blocked = action.to === 'active' ? blocker : null;
@@ -351,14 +341,14 @@ export default function MarketingCampaignPage() {
                     variant={action.danger ? 'ghost' : action.to === 'active' ? 'primary' : 'secondary'}
                     disabled={busy || !!blocked}
                     title={blocked || undefined}
-                    onClick={() => setPendingStatus(action)}
+                    onClick={() => { close(); setPendingStatus(action); }}
                   >
                     {action.label}
                   </Button>
                 );
               })}
-              {campaign && canManage && <Button size="sm" variant="secondary" disabled={busy} onClick={() => setEditing(true)}>설정</Button>}
-              {campaign && canManage && <Button size="sm" variant="danger" disabled={busy} onClick={() => setDeleting(true)}>삭제</Button>}
+              {campaign && canManage && <Button size="sm" variant="secondary" disabled={busy} onClick={() => { close(); setEditing(true); }}>설정</Button>}
+              {campaign && canManage && <Button size="sm" variant="danger" disabled={busy} onClick={() => { close(); setDeleting(true); }}>삭제</Button>}
             </>
           )}
         />
