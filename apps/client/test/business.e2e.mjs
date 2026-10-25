@@ -160,6 +160,20 @@ for (const width of [1440, 390, 320]) {
     await page.getByRole('button', { name: '메일 연결 추가', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect.poll(() => page.getByRole('dialog').evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    await page.getByRole('button', { name: '취소', exact: true }).click();
+    await page.getByRole('button', { name: /연결 관리/ }).click();
+    await page.getByRole('button', { name: '설정', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('답장 모드', { exact: true }).selectOption('review');
+    await expect(dialog.getByLabel('Agent 템플릿 (선택 사항)', { exact: true })).toHaveCount(1);
+    await expect.poll(() => dialog.locator('fieldset').evaluateAll(nodes => nodes.every(node => node.scrollHeight <= node.clientHeight + 1))).toBe(true);
+    await dialog.getByRole('button', { name: '연결 저장', exact: true }).click();
+    const saveError = dialog.getByTestId('mail-connection-save').getByRole('alert');
+    await expect(saveError).toContainText('업무 목적');
+    await expect(saveError).toBeInViewport();
+    await expect(dialog.getByRole('button', { name: '연결 저장', exact: true })).toBeInViewport();
+    await expect.poll(() => dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    await dialog.screenshot({ path: `/tmp/awb-mail-review-settings-${width}.png` });
     expect(errors).toEqual([]);
   });
 

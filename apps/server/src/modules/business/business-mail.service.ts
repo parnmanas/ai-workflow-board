@@ -96,10 +96,16 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     }
     return this.ds.transaction(async manager => {
       const repo = manager.getRepository(BusinessMailConnection);
+      let current = previous;
       let data: MailData = { config: input.config };
       if (previous) {
         if (previous.revision !== input.revision) throw new ConflictException('연결이 변경되었습니다. 새로고침하세요.');
-        const old = read<MailData>(previous.encrypted_data);
+        // Reserve the settings revision before reading the cursor. A sync may
+        // have completed while credentials/runtime were being validated.
+        const reserved = await repo.update({ id: previous.id, revision: input.revision, lease_until: LessThanOrEqual(now()) }, { revision: previous.revision + 1 });
+        if (reserved.affected !== 1) throw new ConflictException('연결을 사용 중이거나 변경되었습니다. 잠시 후 다시 저장하세요.');
+        current = await repo.findOneByOrFail({ id: previous.id });
+        const old = read<MailData>(current.encrypted_data);
         const { addresses: _old, ...oldServer } = old.config;
         const { addresses: _new, ...newServer } = input.config;
         if (input.provider !== previous.provider || digest(oldServer) !== digest(newServer)) throw new BadRequestException('메일 서버·로그인 변경은 새 연결로 등록하세요. 기존 메일의 출처를 보존합니다.');
@@ -109,16 +115,15 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
       data.notify_incoming = input.notify_incoming ?? data.notify_incoming ?? true;
       const patch = { account_id: accountId, company_id: input.company_id, name: input.name, provider: input.provider, purpose: input.purpose,
         credential_id: input.credential_id, encrypted_data: encrypt(JSON.stringify(data)), enabled: input.enabled, interval_minutes: input.interval_minutes,
-        next_sync_at: now(), revision: (previous?.revision ?? -1) + 1 };
+        next_sync_at: now(), lease_token: '', lease_until: '', revision: (previous?.revision ?? -1) + 1 };
       if (previous) {
-        const result = await repo.update({ id: previous.id, revision: input.revision, lease_until: LessThanOrEqual(now()) }, patch);
-        if (result.affected !== 1) throw new ConflictException('연결을 사용 중이거나 변경되었습니다. 새로고침하세요.');
-        if (!input.enabled || automationFingerprint(read<MailData>(previous.encrypted_data)) !== automationFingerprint(data)) {
+        await repo.update({ id: previous.id }, patch);
+        if (!input.enabled || automationFingerprint(read<MailData>(current!.encrypted_data)) !== automationFingerprint(data)) {
           await manager.getRepository(BusinessMailTask).update({ connection_id: previous.id, status: In(['queued', 'drafting', 'review']) }, {
             status: 'cancelled', last_error: '연결 또는 자동화 설정이 변경되어 이전 답장 작업을 취소했습니다.', review_notification_state: 'none', revision: () => 'revision + 1',
           });
         }
-        return this.publicConnection({ ...previous, ...patch });
+        return this.publicConnection({ ...current!, ...patch });
       }
       return this.publicConnection(await repo.save(repo.create(patch)));
     });
@@ -129,13 +134,16 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     await this.activeOwner(row.account_id);
     const secrets = await this.credential(row.credential_id, row.account_id);
     const lease = randomUUID(); const repo = this.ds.getRepository(BusinessMailConnection);
+    // Background work uses a fenced lease, not the user-facing settings revision.
     const result = await repo.update({ id: row.id, revision: row.revision, lease_until: LessThanOrEqual(now()) },
-      { lease_token: lease, lease_until: new Date(Date.now() + 10 * 60_000).toISOString(), revision: row.revision + 1 });
+      { lease_token: lease, lease_until: new Date(Date.now() + 10 * 60_000).toISOString() });
     if (result.affected !== 1) throw new ConflictException('다른 메일 작업이 진행 중입니다. 잠시 후 다시 확인하세요.');
-    row.lease_token = lease;
-    const data = read<MailData>(row.encrypted_data);
-    try { return await work(data, { config: parseMail(mailConfigSchema, data.config), cursor: data.cursor || {}, secrets }); }
-    finally { await repo.update({ id: row.id, lease_token: lease }, { lease_token: '', lease_until: '', revision: () => 'revision + 1' }); }
+    try {
+      // Another worker may have advanced the cursor since this row was loaded.
+      Object.assign(row, await repo.findOneByOrFail({ id: row.id, lease_token: lease }));
+      const data = read<MailData>(row.encrypted_data);
+      return await work(data, { config: parseMail(mailConfigSchema, data.config), cursor: data.cursor || {}, secrets });
+    } finally { await repo.update({ id: row.id, lease_token: lease }, { lease_token: '', lease_until: '' }); }
   }
 
   async watchContext(row: BusinessMailConnection): Promise<MailContext> {

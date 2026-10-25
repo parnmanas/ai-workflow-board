@@ -1,11 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import type { BusinessCompany } from '../../business.types';
 import type { MailConnection, MailConnectionInput, MailConnections, MailEndpoint } from '../../business-mail.types';
 import { Button, Input, Modal, Select, Textarea } from '../common';
-import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
+import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeSpecDraft } from '../runtime/RuntimeSpecEditor';
+import { isRuntimeSpecComplete } from '../../runtime/runtimeSpec';
 import { useHostNames } from '../../runtime/useHostNames';
 import { assigneeDisplayName } from '../../tickets/assignee';
 
@@ -18,8 +19,11 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
   const [input, setInput] = useState<MailConnectionInput>(row || { name: '', provider: 'smtp_imap', company_id: null, purpose: 'operations', credential_id: '', enabled: true, interval_minutes: 5,
     config: { addresses: [], imap: { host: '', port: 993, tls: 'implicit', username: '', folder: 'INBOX' }, smtp: { host: '', port: 587, tls: 'starttls', username: '' } } });
   const [addresses, setAddresses] = useState(row?.config.addresses.join(', ') || '');
+  const [runtimeDraft, setRuntimeDraft] = useState<RuntimeSpecDraft>(() => ({ ...emptyRuntimeSpec(), ...row?.automation?.agent_runtime }));
   const [newSecret, setNewSecret] = useState<Record<string, string>>({});
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const saveFooter = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (error) saveFooter.current?.scrollIntoView?.({ block: 'nearest' }); }, [error]);
   const owner = row?.account_id || companies.find(c => c.id === input.company_id)?.account_id;
   const keys = catalog.credentials.filter(c => !owner || c.account_id === owner);
   const patch = (changes: Partial<MailConnectionInput>) => setInput(old => ({ ...old, ...changes }));
@@ -43,19 +47,29 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
   const save = async () => {
     setBusy(true); setError('');
     try {
+      let resolvedAutomation = automation;
+      if (automation.mode !== 'off') {
+        if (!automation.objective.trim()) throw new Error('업무 목적 · 답장 기준을 입력하세요.');
+        if (!isRuntimeSpecComplete(runtimeDraft)) throw new Error('담당 에이전트의 Host·CLI·작업 폴더를 설정하세요.');
+        const resolved = await api.validateRuntimeSpec(runtimeAccount, runtimeDraft);
+        if (!resolved.ok || !resolved.spec) throw new Error(resolved.error || '담당 에이전트 설정을 확인하세요.');
+        resolvedAutomation = { ...automation, agent_runtime: resolved.spec };
+      }
       let credentialId = input.credential_id;
       if (credentialId === '__new__') {
         const credential = await api.createCredential({ name: `${input.name} · Mail`, provider: 'mail', account_id: owner || currentAccountId || undefined, scope: 'account', credentials: newSecret, agent_env: false });
         credentialId = credential.id; patch({ credential_id: credentialId });
       }
-      await api.configureBusinessMail({ ...input, credential_id: credentialId, config: { ...input.config, addresses: addresses.split(/[,\n]/).map(s => s.trim()).filter(Boolean) } });
+      await api.configureBusinessMail({ ...input, automation: resolvedAutomation, credential_id: credentialId, config: { ...input.config, addresses: addresses.split(/[,\n]/).map(s => s.trim()).filter(Boolean) } });
       onSaved();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
   return <Modal isOpen onClose={() => { if (!busy) onClose(); }} title={row ? '메일 연결 설정' : '메일 커넥터 추가'} maxWidth={650}
-    footer={<><Button variant="secondary" disabled={busy} onClick={onClose}>취소</Button><Button loading={busy} disabled={!input.name.trim() || !input.credential_id || !addresses.trim()} onClick={() => void save()}>연결 저장</Button></>}>
-    <div className="business-form">
-      {error && <div role="alert" className="business-error">{error}</div>}
+    footer={<div ref={saveFooter} data-testid="mail-connection-save" style={{ width: '100%' }}>
+      {error && <div role="alert" className="business-error" style={{ marginBottom: 8 }}>{error}</div>}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><Button variant="secondary" disabled={busy} onClick={onClose}>취소</Button><Button loading={busy} disabled={!input.name.trim() || !input.credential_id || !addresses.trim()} onClick={() => void save()}>연결 저장</Button></div>
+    </div>}>
+    <div className="business-form business-mail-form">
       <Input aria-label="연결 이름" label="연결 이름" value={input.name} maxLength={120} placeholder="예: 운영 메일 · NAS" onChange={e => patch({ name: e.target.value })} />
       <div className="business-form-grid">
         <Select aria-label="회사" label="회사" value={input.company_id || ''} options={[{ value: '', label: '공통 · 회사 미지정' }, ...companies.filter(c => !row || c.account_id === row.account_id).map(c => ({ value: c.id, label: c.name }))]} onChange={e => patch({ company_id: e.target.value || null, ...(!row ? { credential_id: '' } : {}) })} />
@@ -79,8 +93,9 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
         <Select label="답장 모드" aria-label="답장 모드" value={automation.mode} options={[{ value: 'off', label: '자동화 끔' }, { value: 'review', label: '반자동 · 사람이 승인한 뒤 발송' }, { value: 'automatic', label: '자동 · 에이전트 작성 후 발송' }]} onChange={e => setAutomation({ mode: e.target.value as typeof automation.mode })} />
         {automation.mode !== 'off' && <>
           <Textarea label="업무 목적 · 답장 기준" aria-label="업무 목적 · 답장 기준" rows={4} maxLength={8000} value={automation.objective} placeholder="예: 제품 사용 문의에 한국어로 간단히 답장. 환불·계약·금액 약속은 사람에게 확인 요청." onChange={e => setAutomation({ objective: e.target.value })} />
-          <p>담당 에이전트: {automation.agent_runtime ? assigneeDisplayName(automation.agent_runtime, hostNames) : '지정 안 함'}</p>
-          <DeclareRuntimeSection key={runtimeAccount} accountId={runtimeAccount} initialValue={automation.agent_runtime} onResolved={spec => setAutomation({ agent_runtime: spec })} />
+          <p>담당 에이전트: {isRuntimeSpecComplete(runtimeDraft) ? assigneeDisplayName(runtimeDraft, hostNames) : '지정 안 함'}</p>
+          <RuntimeSpecEditor key={runtimeAccount} accountId={runtimeAccount} value={runtimeDraft} onChange={setRuntimeDraft}
+            hosts={Object.entries(hostNames).map(([id, name]) => ({ id, name }))} disabled={busy} />
           <Select label="자동 답장 발신 주소" value={automation.from || ''} options={[{ value: '', label: '연결의 첫 번째 주소' }, ...addresses.split(/[,\n]/).map(a => a.trim()).filter(Boolean).map(a => ({ value: a, label: a }))]} onChange={e => setAutomation({ from: e.target.value || undefined })} />
           <Input label="하루 최대 답장 처리 수" type="number" min={1} max={100} value={automation.max_replies_per_day} onChange={e => setAutomation({ max_replies_per_day: Number(e.target.value) })} />
           <p className="business-muted">저장 후 새로 수집하는 메일부터 적용합니다. 과거 메일은 ‘답장 작성 요청’으로 처리할 수 있습니다. 자동 모드에서도 판단이 어려운 답장은 승인 대기로 남깁니다.</p>

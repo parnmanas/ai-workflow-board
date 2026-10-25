@@ -29,7 +29,12 @@ async function render(t, { entry = '/business/mail', permissions = ['business.ma
     listBusinessMail: async () => ({ messages: [message], total: 1, offset: 0, limit: 50 }),
     getBusinessMail: async () => ({ ...message }),
     getBusinessMailReply: async () => null,
-    listTemplateHosts: async () => [],
+    listTemplateHosts: async () => [{ id: 'mail-host', name: 'Mail host' }],
+    listAgentTemplates: async () => [{ id: 'mail-template', name: 'Mail responder', host_id: 'mail-host', cli: 'codex', model: null, effort: null, runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
+    listCredentials: async () => [],
+    getProjects: async () => [],
+    getHostModels: async () => ({ models: { codex: [] }, labels: {}, refreshed_at: new Date().toISOString() }),
+    validateRuntimeSpec: async (_accountId, spec) => ({ ok: true, spec }),
     getUnreadMentions: async () => ({ count: 0, items: [] }),
     getChatUnreadCounts: async () => ({ total: 0, perRoom: {} }),
     getTicketUnreadCounts: async () => ({ total: 0, perTicket: {} }),
@@ -86,6 +91,48 @@ test('missing business permission does not fetch private mail', async t => {
   const { container, calls } = await render(t, { permissions: [] });
   assert.match(container.textContent, /business.manage 권한/);
   assert.equal(calls.some(c => c[0] === 'listBusinessMail'), false);
+});
+
+test('review mode saves the entered runtime and objective with one connection save', async t => {
+  const { container, calls } = await render(t, { entry: '/business/mail?connections=1' });
+  click(button(container, '설정')); await flush();
+  const dialog = container.querySelector('[role="dialog"]');
+  const mode = dialog.querySelector('[aria-label="답장 모드"]');
+  run(() => { mode.value = 'review'; mode.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
+  const template = dialog.querySelector('[aria-label="Agent 템플릿 (선택 사항)"]');
+  assert.ok(template, 'runtime fields are immediately available in review mode');
+  run(() => { template.value = 'mail-template'; template.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
+  const workingDir = dialog.querySelector('input[placeholder="/home/user/work"]'); assert.ok(workingDir);
+  typeInto(workingDir, '/srv/mail');
+  typeInto(dialog.querySelector('[aria-label="업무 목적 · 답장 기준"]'), '제품 문의에 답장 초안 작성');
+  click(button(container, '연결 저장')); await flush(); await flush();
+  const validated = calls.find(c => c[0] === 'validateRuntimeSpec'); assert.ok(validated);
+  assert.equal(validated[1], 'a1');
+  const saved = calls.find(c => c[0] === 'configureBusinessMail')?.[1]; assert.ok(saved);
+  assert.equal(saved.automation.mode, 'review');
+  assert.equal(saved.automation.objective, '제품 문의에 답장 초안 작성');
+  assert.equal(saved.automation.agent_runtime.manager_agent_id, 'mail-host');
+  assert.equal(saved.automation.agent_runtime.cli, 'codex');
+  assert.equal(saved.automation.agent_runtime.working_dir, '/srv/mail');
+  assert.equal(container.querySelector('[role="dialog"]'), null);
+});
+
+test('missing reply requirements remain visible next to save without discarding edits', async t => {
+  const { container, calls } = await render(t, { entry: '/business/mail?connections=1' });
+  click(button(container, '설정')); await flush();
+  const dialog = container.querySelector('[role="dialog"]');
+  const mode = dialog.querySelector('[aria-label="답장 모드"]');
+  run(() => { mode.value = 'review'; mode.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
+  click(button(container, '연결 저장')); await flush();
+  let alert = dialog.querySelector('[role="alert"]'); assert.ok(alert);
+  assert.match(alert.textContent, /업무 목적/);
+  assert.ok(alert.closest('[data-testid="mail-connection-save"]'), 'save errors stay beside the action, outside the scrolled form');
+  typeInto(dialog.querySelector('[aria-label="업무 목적 · 답장 기준"]'), '문의 초안');
+  click(button(container, '연결 저장')); await flush();
+  alert = dialog.querySelector('[role="alert"]');
+  assert.match(alert.textContent, /담당 에이전트/);
+  assert.equal(dialog.querySelector('[aria-label="업무 목적 · 답장 기준"]').value, '문의 초안');
+  assert.equal(calls.some(c => c[0] === 'configureBusinessMail'), false);
 });
 
 test('a notification link opens its message; live receipt refreshes mail and announces only once', async t => {

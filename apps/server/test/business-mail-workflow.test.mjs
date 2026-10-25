@@ -65,6 +65,67 @@ test('mail intake, durable notifications, assigned replies and human approval', 
     assert.equal(definition.filter(envelope, { type: 'user', userId: other.id }), false);
     assert.equal(definition.filter(envelope, { type: 'agent', agentId: spec.manager_agent_id }), false);
   });
+  await t.test('review settings save after background collection without losing the cursor or accepting a stale edit', async () => {
+    await settings('off');
+    const opened = (await mail.connections([account.id])).connections[0];
+    await arrive();
+    const saved = await mail.configure([account.id], { ...opened, automation: { mode: 'review', agent_runtime: spec, objective: '문의에 답장 초안 작성' } });
+    assert.equal(saved.automation.mode, 'review');
+    assert.equal(saved.revision, opened.revision + 1);
+    const raw = await mail.connection(connection.id, [account.id]);
+    assert.equal(JSON.parse(decryptStrict(raw.encrypted_data)).cursor.last_uid, uid);
+    await assert.rejects(mail.configure([account.id], { ...opened, name: 'Stale settings' }), /변경/);
+  });
+  await t.test('a worker reads the current cursor after acquiring its lease, even when it loaded the row before another sync', async () => {
+    await settings('off');
+    const loaded = await mail.connection(connection.id, [account.id]);
+    await arrive();
+    await mail.locked(loaded, async (data, context) => {
+      assert.equal(data.cursor.last_uid, uid);
+      assert.equal(context.cursor.last_uid, uid);
+    });
+  });
+  await t.test('collection completing while configuration is validated cannot roll the cursor back', async t => {
+    await settings('off');
+    const opened = (await mail.connections([account.id])).connections[0];
+    const original = mail.credential.bind(mail);
+    let begin; const ready = new Promise(resolve => { begin = resolve; });
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    let calls = 0;
+    t.mock.method(mail, 'credential', async (...args) => {
+      if (++calls === 1) { begin(); await gate; }
+      return original(...args);
+    });
+    const saving = mail.configure([account.id], { ...opened, name: 'Updated settings' });
+    await ready;
+    try { await arrive(); } finally { release(); }
+    const saved = await saving;
+    assert.equal(saved.name, 'Updated settings');
+    const raw = await mail.connection(connection.id, [account.id]);
+    assert.equal(JSON.parse(decryptStrict(raw.encrypted_data)).cursor.last_uid, uid);
+  });
+  await t.test('saving settings fences an expired sync so it cannot overwrite the saved policy or cursor', async t => {
+    await settings('off');
+    const opened = (await mail.connections([account.id])).connections[0];
+    let begin; const ready = new Promise(resolve => { begin = resolve; });
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    t.mock.method(connector, 'sync', async () => {
+      begin(); await gate;
+      return { messages: [], cursor: { last_uid: uid + 1000 } };
+    });
+    const collecting = assert.rejects(mail.sync([account.id], connection.id), /메일 연결/);
+    await ready;
+    try {
+      await ds.getRepository('BusinessMailConnection').update(connection.id, { lease_until: '' });
+      await mail.configure([account.id], { ...opened, automation: { mode: 'review', agent_runtime: spec, objective: '새 답장 기준' } });
+    } finally { release(); }
+    await collecting;
+    const raw = await mail.connection(connection.id, [account.id]);
+    const saved = JSON.parse(decryptStrict(raw.encrypted_data));
+    assert.equal(saved.automation.mode, 'review');
+    assert.equal(saved.automation.objective, '새 답장 기준');
+    assert.equal(saved.cursor.last_uid, uid);
+  });
   await t.test('review mode uses assigned runtime, fixed recipient and a revision-bound human decision', async () => {
     await settings('review'); const live = await arrive(); await workflow.tick(); let row = await task(live);
     assert.equal(row.status, 'drafting'); assert.equal(prompts.length, 1);
