@@ -140,7 +140,7 @@ export default function RuntimeSpecEditor({
             label="Backend profile id (선택)"
             value={value.cli_runtime_profile || ''}
             disabled={disabled}
-            placeholder="비워두면 상속"
+            placeholder="비워두면 Anthropic"
             onChange={(e) => set({ cli_runtime_profile: (e.target as HTMLInputElement).value.trim() || null })}
           />
         </div>

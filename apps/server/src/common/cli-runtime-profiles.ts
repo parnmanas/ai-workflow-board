@@ -241,7 +241,7 @@ export function resolveCliRuntimeProfile(
   selections: Array<{ source: string; value: string | null | undefined }>,
 ): CliRuntimeProfile | null {
   const selected = selections.find(({ value }) => value !== null && value !== undefined);
-  if (!selected || selected.value === CLI_RUNTIME_NONE || selected.value === '') return null;
+  if (!selected || selected.value === CLI_RUNTIME_NONE || selected.value === 'default' || selected.value === '') return null;
   const profile = profiles.find(item => item.id === selected.value);
   if (!profile) throw new Error(`Claude backend profile "${selected.value}" selected by ${selected.source} does not exist`);
   return profile;

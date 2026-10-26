@@ -325,12 +325,12 @@ describe('Claude backend profile integration', () => {
       key: 'claude_backend_profiles.default',
     })).value, globalProfile.id);
 
-    // detach 뒤에는 어떤 핀도 남지 않으므로 전역 기본값으로 떨어져야 한다.
+    // detach 뒤에는 명시적 선택이 없으므로 Anthropic을 사용한다.
     const { resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js');
     const resolved = await resolveClaudeBackendProfileForDispatch(ds, [
       { source: 'agent', value: null },
     ]);
-    assert.equal(resolved?.id, globalProfile.id);
+    assert.equal(resolved, null);
   });
 
   // 1760000000066-BackfillGlobalClaudeBackendProfiles 는 보드 제거와 함께

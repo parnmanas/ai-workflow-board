@@ -9,6 +9,8 @@ import {
   validateCliRuntimeProfiles,
 } from '../dist/common/cli-runtime-profiles.js';
 import {
+  resolveClaudeBackendProfileForDispatch,
+  validateCliRuntimeProfileSelection,
   profileEntityToRuntime,
   publicProfile,
   runtimeToProfileEntity,
@@ -50,7 +52,7 @@ const accountControllerSource = await readFile(
   'utf8',
 );
 
-// 보드 제거 후 디스패치 체인은 assignee spec 핀(`agent`) → 전역 기본값이다.
+// 디스패치는 실행 설정의 명시적 프로필만 전달한다.
 // 해석기 자체는 selector 목록에 무관하게 "처음으로 null 이 아닌 값" 을 고른다.
 test('validates a configuration-only backend catalog and resolves the first pinned selector', () => {
   const checked = validateCliRuntimeProfiles(profiles);
@@ -66,7 +68,7 @@ test('validates a configuration-only backend catalog and resolves the first pinn
   ]), null);
 });
 
-test('resolves run > Agent > Global and explicit none stops inheritance', () => {
+test('pure selector resolution honors the supplied order and explicit none', () => {
   assert.equal(resolveCliRuntimeProfile(profiles, [
     { source: 'run', value: null },
     { source: 'agent', value: null },
@@ -255,7 +257,7 @@ test('ticket dispatch resolves and validates Claude backend profiles only for Cl
     /if \(cliDescriptor\(spec\.cli\)\?\.sessions\.backend_profile\) \{[\s\S]*?runtimeProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
   );
   assert.ok(guard, 'runtime profile resolution and credential validation share the catalog guard');
-  // 체인은 assignee spec 핀 하나 → (resolveClaudeBackendProfileForDispatch 가 붙이는) 전역 기본값.
+  // 디스패치는 assignee spec의 명시적 선택만 해석한다.
   assert.match(guard[0], /\{ source: 'agent', value: spec\.cli_runtime_profile \?\? null \}/);
   assert.doesNotMatch(guard[0], /source: 'board'/, 'there is no board layer any more');
   assert.match(
@@ -303,3 +305,33 @@ test('a non-admin catalog route exists and still masks credential refs', () => {
 
 // 1760000000066-BackfillGlobalClaudeBackendProfiles 는 보드 제거와 함께 삭제됐다 —
 // 그 마이그레이션 소스를 고정하던 테스트도 함께 제거.
+
+for (const selection of [undefined, null, '', 'default', 'none']) {
+  test(`unselected backend ${JSON.stringify(selection)} uses Anthropic without reading global configuration`, async () => {
+    const ds = { getRepository() { throw new Error('No ambient catalog/default lookup for native Anthropic'); } };
+    assert.equal(await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'runtime', value: selection }]), null);
+    const validated = await validateCliRuntimeProfileSelection(ds, selection);
+    assert.equal(validated.ok, true);
+  });
+}
+
+test('an explicitly selected backend is still resolved and unknown selections fail', async () => {
+  const rows = profiles.map((p) => runtimeToProfileEntity(p, p.id));
+  const ds = { getRepository() { return { find: async () => rows }; } };
+  const resolved = await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'runtime', value: profiles[0].id }]);
+  assert.equal(resolved.id, profiles[0].id);
+  await assert.rejects(resolveClaudeBackendProfileForDispatch(ds, [{ source: 'runtime', value: 'missing' }]), /does not exist/);
+});
+
+test('team slot default backend normalizes to Anthropic without changing its credential', async () => {
+  const { normalizeTeamSlotSpec } = await import('../dist/common/orchestration-member-spec.js');
+  for (const backend of [undefined, null, '', 'default', 'none', 'local-anthropic']) {
+    const spec = normalizeTeamSlotSpec({
+      manager_agent_id: 'host-1', cli: 'claude', model: 'opus',
+      credential_id: 'selected-claude-credential', cli_runtime_profile: backend,
+      runtime_config: { strategy: 'single', permission_mode: 'trusted' },
+    }, 'member');
+    assert.equal(spec.credential_id, 'selected-claude-credential');
+    assert.equal(spec.cli_runtime_profile, backend === 'default' || !backend ? null : backend);
+  }
+});

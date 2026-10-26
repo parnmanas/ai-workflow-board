@@ -152,7 +152,7 @@ test('권한 등급이 바뀌면 permission 으로 귀속되는 인자도 따라
 
 test('런타임 프로파일 인자는 descriptor 뒤에 붙고 runtime_profile 로 귀속된다', () => {
   const spec = computeAgentLaunchSpec(ctx(), {
-    runtimeProfileOverride: {
+    runtimeProfile: {
       id: 'vllm-local',
       protocol: 'openai-compatible',
       base_url: 'http://127.0.0.1:8000',
@@ -183,7 +183,7 @@ test('프로파일 활성 시 raw profile model 이 argv 에 오르지 않는다
   // 실제로는 붙지 않는 플래그를 실행 명령이라고 주장하게 된다.
   const RAW = 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
   const spec = computeAgentLaunchSpec(ctx(), {
-    runtimeProfileOverride: {
+    runtimeProfile: {
       id: 'vllm', protocol: 'openai-compatible', base_url: 'http://127.0.0.1:8000',
       model: RAW,
       // 폴백 후보가 있어도 프로파일 활성 세션에서는 무시된다(아래 체인 단언).
@@ -263,7 +263,7 @@ test('두 경로의 argv 가 실제 spawn 사이트 입력으로 만든 descript
   const profile = {
     id: 'vllm', protocol: 'openai-compatible', base_url: 'http://x', model: 'raw-served-model',
   };
-  const spec = computeAgentLaunchSpec(ctx(), { runtimeProfileOverride: profile });
+  const spec = computeAgentLaunchSpec(ctx(), { runtimeProfile: profile });
 
   const spawnSiteSpec = {
     rolePrompt: 'role',
@@ -302,7 +302,7 @@ test('cwd 는 프로파일이 고정했을 때만 exact 이고 그 외에는 bas
   // 런타임 프로파일이 cwd 를 고정하면 그 값이 실제 cwd 다 — spawn 사이트도
   // `claudeRuntimeProfile?.cwd || effectiveCwd` 로 프로파일을 먼저 본다.
   const pinned = computeAgentLaunchSpec(ctx(), {
-    runtimeProfileOverride: {
+    runtimeProfile: {
       id: 'p', protocol: 'openai-compatible', base_url: 'http://x',
       model: 'm', cwd: '/opt/pinned',
     },
@@ -315,7 +315,7 @@ test('마스킹 — 자격증명이 args·env 어디에도 원문으로 나오�
   const spec = computeAgentLaunchSpec(
     ctx({ extra_env: { ANTHROPIC_API_KEY: SECRET, AWB_PLAIN: 'plain-value-0123' } }),
     {
-      runtimeProfileOverride: {
+      runtimeProfile: {
         id: 'p', protocol: 'openai-compatible', base_url: 'http://x', model: 'm',
         args: [], env: { PROFILE_AUTH_TOKEN: SECRET },
       },
@@ -405,7 +405,7 @@ test('claude 가 아닌 CLI 에는 claude 런타임 프로파일이 적용되지
   // 같은 게이팅. 이게 없으면 codex 에이전트 화면에 claude 프로파일 인자가
   // 붙은 것처럼 보인다.
   const spec = computeAgentLaunchSpec(ctx({ cli: 'codex', model: 'gpt-5-codex' }), {
-    runtimeProfileOverride: {
+    runtimeProfile: {
       id: 'vllm', protocol: 'openai-compatible', base_url: 'http://x',
       model: 'qwen3', args: ['--settings', '/etc/x.json'],
     },
@@ -413,4 +413,17 @@ test('claude 가 아닌 CLI 에는 claude 런타임 프로파일이 적용되지
   assert.equal(spec.runtime_profile, null);
   assert.equal(spec.modes.some((m) => m.args.some((a) => a.source === 'runtime_profile')), false);
   assert.equal(spec.model, 'gpt-5-codex');
+});
+
+// Old integrations may still pass a host override. It must not be advertised as
+// the execution backend, model, cwd, or environment for an unselected runtime.
+test('launch preview ignores a legacy host backend override', () => {
+  const spec = computeAgentLaunchSpec(ctx(), { runtimeProfileOverride: {
+    id: 'host-vllm', protocol: 'anthropic-compatible', base_url: 'http://localhost:8000',
+    model: 'qwen', cwd: '/host-only', env: { ANTHROPIC_MODEL: 'qwen' },
+  } });
+  assert.equal(spec.runtime_profile, null);
+  assert.equal(spec.model, 'claude-opus-5');
+  assert.equal(spec.cwd, '/srv/work');
+  assert.equal(spec.env.some((e) => e.source === 'runtime_profile'), false);
 });

@@ -160,8 +160,8 @@ export default function TeamSlotRuntimeFields({
           value={value.cli_runtime_profile}
           disabled={disabled}
           options={[
-            { value: '', label: 'Inherit the global default' },
-            { value: 'none', label: 'None — plain Claude Code' },
+            { value: '', label: 'Anthropic (default)' },
+            { value: 'none', label: 'Anthropic (no custom backend)' },
             ...backendProfiles.map((p) => ({ value: p.id, label: p.name })),
           ]}
           onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ cli_runtime_profile: e.target.value })}

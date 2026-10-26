@@ -1340,13 +1340,8 @@ export class RoomMessagingService {
       });
       throw err;
     }
-    if (!profile) {
-      this.logService.warn(
-        'ChatRooms',
-        `DM 대상의 backend profile "${raw}" 을(를) 해석할 수 없어 프로필 없이 전달합니다`,
-      );
-      return { profile: null, blocked: null };
-    }
+    // Native/default is a valid selection; unknown profile IDs throw above.
+    if (!profile) return { profile: null, blocked: null };
     if (profile.credential_required && profile.credential_ref !== (spec?.credential_id ?? null)) {
       this.logService.warn(
         'ChatRooms',

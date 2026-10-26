@@ -152,7 +152,7 @@ function normalizeSlotCore(raw: Record<string, unknown>, label: string): TeamSlo
     cli,
     model: str(raw.model) || null,
     credential_id: str(raw.credential_id) || null,
-    cli_runtime_profile: str(raw.cli_runtime_profile) || null,
+    cli_runtime_profile: str(raw.cli_runtime_profile) === 'default' ? null : str(raw.cli_runtime_profile) || null,
     runtime_config,
   };
 }

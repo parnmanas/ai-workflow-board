@@ -1,6 +1,5 @@
 import { DataSource } from 'typeorm';
 import { ClaudeBackendProfile } from '../entities/ClaudeBackendProfile';
-import { SystemSetting } from '../entities/SystemSetting';
 import {
   CLI_RUNTIME_NONE, CliRuntimeProfile, ClaudeBackendProfileSchema, resolveCliRuntimeProfile,
 } from './cli-runtime-profiles';
@@ -61,7 +60,7 @@ export async function globalRuntimeProfiles(dataSource: DataSource): Promise<Cli
 /**
  * `cli_runtime_profile` 쓰기를 전역 프로필 목록에 대해 검증한다 — REST PATCH
  * 핸들러(agents.controller.ts / boards.controller.ts)가 인라인으로 도는 것과
- * 같은 fail-closed 검사다. `null`/undefined 는 핀을 지운다(= 다시 상속),
+ * 같은 fail-closed 검사다. `null`/undefined/default 는 Anthropic 기본값이다,
  * CLI_RUNTIME_NONE 은 명시적 옵트아웃 sentinel 이라 목록 조회 없이 통과하며,
  * 그 외 값은 전역 프로필 id 와 일치해야 하고 아니면 쓰기를 거부한다.
  */
@@ -69,7 +68,7 @@ export async function validateCliRuntimeProfileSelection(
   dataSource: DataSource,
   raw: unknown,
 ): Promise<{ ok: true; value: string | null } | { ok: false; error: string }> {
-  const selected = raw == null ? null : String(raw);
+  const selected = raw == null || raw === 'default' ? null : String(raw);
   if (selected && selected !== CLI_RUNTIME_NONE) {
     const profiles = await globalRuntimeProfiles(dataSource);
     if (!profiles.some(profile => profile.id === selected)) {
@@ -79,25 +78,13 @@ export async function validateCliRuntimeProfileSelection(
   return { ok: true, value: selected };
 }
 
-/**
- * 디스패치 시점의 프로필 해석 — 체인은 **핀 → 전역 기본값** 2단계다.
- * 예전에 있던 계정 단계는 제거됐다(티켓 e616dbfc): 계정
- * 기본값이 그 계정의 무관한 claude 에이전트에게 새어나가던 경로가
- * 이 단계와 함께 사라진다.
- *
- * 상속 시맨틱은 그대로다 — `null`/undefined 핀은 다음 selector 로 넘어가고,
- * `'none'`(CLI_RUNTIME_NONE)은 명시적 옵트아웃이라 그 자리에서 null 로 끝난다.
- */
+/** Resolve only an explicit execution selection. Legacy global defaults must
+ * not redirect an unselected Claude runtime away from Anthropic. */
 export async function resolveClaudeBackendProfileForDispatch(
   dataSource: DataSource,
   selectors: Array<{ source: string; value: string | null | undefined }>,
 ) {
-  const profiles = await globalRuntimeProfiles(dataSource);
-  const globalDefault = (await dataSource.getRepository(SystemSetting).findOne({
-    where: { key: CLAUDE_BACKEND_DEFAULT_KEY },
-  }))?.value || null;
-  return resolveCliRuntimeProfile(profiles, [
-    ...selectors,
-    { source: 'global', value: globalDefault },
-  ]);
+  const selected = selectors.find(({ value }) => value !== null && value !== undefined);
+  if (!selected || !selected.value || selected.value === 'default' || selected.value === CLI_RUNTIME_NONE) return null;
+  return resolveCliRuntimeProfile(await globalRuntimeProfiles(dataSource), [selected]);
 }

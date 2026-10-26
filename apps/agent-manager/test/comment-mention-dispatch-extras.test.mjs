@@ -15,8 +15,7 @@
 //   - 다섯 다 없으면 트리거 경로와 동일하게 전부 null/기본값으로 degrade하고
 //     spawn() 자체는 여전히 성공한다(멘션 전달이 프로필 파싱 실패로 막히지 않음 —
 //     mention-dispatch-profile.ts의 fail-closed degrade와 대칭인 agent-manager 쪽 계약)
-//   - 인스턴스 `--runtime-profile` 오버라이드가 per-agent DB 프로필 부재 시 여전히
-//     폴백으로 적용된다(trigger-runtime-profile-priority.test.mjs와 동일한 계약을
+//   - 인스턴스 `--runtime-profile` 오버라이드가 있어도 미선택은 Anthropic을 쓴다(trigger-runtime-profile-priority.test.mjs와 동일한 계약을
 //     handleCommentMention 전체 경로로 재확인)
 
 import assert from 'node:assert/strict';
@@ -124,13 +123,13 @@ test('handleCommentMention: one-shot spawn degrades to null/defaults (never bloc
   assert.equal(spec.envVars.AWB_TICKET_ID, 'T2');
 });
 
-test('handleCommentMention: instance --runtime-profile override still applies as a fallback when the event carries no per-agent profile', async () => {
+test('handleCommentMention: instance --runtime-profile never overrides an unselected backend', async () => {
   const { dispatcher, getSpawnedSpec } = makeDispatcher({ runtimeProfileOverride: RUNTIME_PROFILE });
   await dispatcher.handleCommentMention(JSON.stringify(baseEvent({ ticket_id: 'T3', comment_id: 'C3' })));
 
   const spec = getSpawnedSpec();
   assert.ok(spec, 'one-shot subagentManager.spawn() must have been called');
-  assert.deepEqual(spec.runtimeProfile, RUNTIME_PROFILE);
+  assert.equal(spec.runtimeProfile, null);
 });
 
 test('handleCommentMention: a per-agent profile on the event wins over a DIFFERENT instance override (cross-contamination guard, mirrors resolveTriggerRuntimeProfile)', async () => {
@@ -238,3 +237,28 @@ beforeEach(() => {
   };
 });
 afterEach(() => { globalThis.fetch = savedFetch; });
+
+for (const backend of [undefined, null, '', 'default', 'none', RUNTIME_PROFILE]) {
+  test(`mission chat_request preserves selected credentials and ignores host fallback: ${JSON.stringify(backend)}`, async () => {
+    let dispatched;
+    const context = {
+      ...MANAGED_AGENT_CONTEXTS.get(AGENT_ID),
+      credential_provider: 'claude_oauth_token',
+      extra_env: { CLAUDE_CODE_OAUTH_TOKEN: 'test-selected-token' },
+    };
+    const { dispatcher } = makeDispatcher({
+      runtimeProfileOverride: { ...RUNTIME_PROFILE, id: 'host-override' },
+      managedAgentContexts: new Map([[AGENT_ID, context]]),
+      chatSessionManager: { async dispatch(spec) { dispatched = spec; return { dispatched: true, pid: 4242 }; } },
+    });
+    await dispatcher.handleChatRequest(JSON.stringify({
+      type: 'chat_request', timestamp: '2026-10-26T00:00:00Z',
+      payload: { account_id: 'W1', agent_id: AGENT_ID, room_id: 'mission-step-room',
+        user_id: 'orchestrator', new_message: 'Assigned task', cli_runtime_profile: backend },
+    }));
+    assert.ok(dispatched, 'the mission step reaches the persistent session runner');
+    assert.deepEqual(dispatched.runtimeProfile, backend === RUNTIME_PROFILE ? RUNTIME_PROFILE : null);
+    assert.equal(dispatched.agentContext.credential_provider, 'claude_oauth_token');
+    assert.equal(dispatched.agentContext.extra_env.CLAUDE_CODE_OAUTH_TOKEN, 'test-selected-token');
+  });
+}

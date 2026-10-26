@@ -26,7 +26,6 @@ function impactSummary(impact: {
 export default function ClaudeBackendProfilesManager({ accountId }: { accountId: string }) {
   const { showToast } = useToast();
   const [profiles, setProfiles] = useState<ClaudeBackendProfile[]>([]);
-  const [defaultId, setDefaultId] = useState('');
   const [profilesError, setProfilesError] = useState('');
   const [editing, setEditing] = useState<ClaudeBackendProfile>(empty());
   const [isNew, setIsNew] = useState(true);
@@ -44,7 +43,6 @@ export default function ClaudeBackendProfilesManager({ accountId }: { accountId:
     try {
       const data = await api.getClaudeBackendProfiles();
       setProfiles(data.profiles);
-      setDefaultId(data.default_profile_id || '');
     } catch (error: any) {
       setProfiles([]);
       setProfilesError(error?.message || '프로필 목록을 불러오지 못했습니다.');
@@ -92,7 +90,7 @@ export default function ClaudeBackendProfilesManager({ accountId }: { accountId:
     finally { setSaving(false); }
   };
   // 삭제는 두 단계다 — 먼저 서버에 영향 범위를 물어 확인 다이얼로그 본문에 담고,
-  // 사용자가 승인하면 detach 로 지운다(참조하던 대상은 상속으로 되돌아간다).
+  // 사용자가 승인하면 detach 로 지운다(참조하던 대상은 Anthropic 기본 연결로 되돌아간다).
   const requestRemove = async (profile: ClaudeBackendProfile) => {
     try {
       const impact = await api.getClaudeBackendProfileImpact(profile.id);
@@ -155,14 +153,9 @@ export default function ClaudeBackendProfilesManager({ accountId }: { accountId:
             <div><strong style={{ color: tokens.colors.textStrong }}>프로필 목록</strong><div style={{ color: tokens.colors.textMuted, fontSize: tokens.typography.fontSizeXs }}>{profiles.length}개 등록됨</div></div>
             <Button size="sm" variant="primary" onClick={() => edit()}>새 프로필</Button>
           </div>
-          <Select label="전역 기본값" aria-label="전역 기본값" value={defaultId} options={[
-            { value: '', label: 'Native Anthropic 상속' }, { value: 'none', label: 'Anthropic 기본값 명시' },
-            ...profiles.map(profile => ({ value: profile.id, label: profile.name })),
-          ]} onChange={async e => {
-            const value = e.target.value; setDefaultId(value);
-            try { await api.setDefaultClaudeBackendProfile(value || null); }
-            catch (error: any) { showToast(error.message, 'error'); await load(); }
-          }} />
+          <p style={{ color: tokens.colors.textMuted, fontSize: tokens.typography.fontSizeMd }}>
+            기본 연결은 Anthropic입니다. 다른 백엔드는 실행 설정에서 프로필을 직접 선택한 경우에만 적용됩니다.
+          </p>
           <div style={{ display: 'grid', gap: tokens.spacing.sm, marginTop: tokens.spacing.md }}>
             {profilesError
               ? <ErrorState message={profilesError} onRetry={() => { load(); }} />
@@ -240,7 +233,7 @@ export default function ClaudeBackendProfilesManager({ accountId }: { accountId:
           <>
             <strong>{deleteTarget?.name}</strong> 프로필을 삭제합니다. 현재 참조: {deleteSummary}.
             {'\n\n'}
-            참조하던 계정·에이전트·티켓은 핀이 해제되어 전역 기본값을 상속합니다.
+            참조하던 실행의 프로필 선택이 해제되면 Anthropic 기본 연결을 사용합니다.
           </>
         }
         onConfirm={confirmRemove}

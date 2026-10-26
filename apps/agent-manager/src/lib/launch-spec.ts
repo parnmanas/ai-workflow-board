@@ -162,9 +162,8 @@ export interface ComputeLaunchSpecDeps {
     codexBin?: string | null;
     persistentTicketSessions?: boolean;
   } | null;
-  /** 인스턴스 단위 `--runtime-profile` 오버라이드. 티켓별 프로파일이 오면
-   *  디스패치 시점에 대체되므로 `varies_per_dispatch` 에도 적힌다. */
-  runtimeProfileOverride?: RuntimeProfileSpec | null;
+  /** Explicitly selected execution profile, when known. Never a host default. */
+  runtimeProfile?: RuntimeProfileSpec | null;
   /** 테스트 주입용 시계. */
   now?: () => Date;
 }
@@ -181,7 +180,7 @@ export function computeAgentLaunchSpec(
   deps: ComputeLaunchSpecDeps = {},
 ): AgentLaunchSpecEntry {
   const now = (deps.now ?? (() => new Date()))().toISOString();
-  const profile = cliDispatch(ctx.cli).runtimeProfile ? (deps.runtimeProfileOverride ?? null) : null;
+  const profile = cliDispatch(ctx.cli).runtimeProfile ? (deps.runtimeProfile ?? null) : null;
   const permission = resolveEffectivePermissionPolicy({
     trust: ctx.runtime_config?.permission_mode ?? null,
     // harness 는 디스패치 시점 입력이라 여기서는 비어 있다. 지어내지 않는다 —

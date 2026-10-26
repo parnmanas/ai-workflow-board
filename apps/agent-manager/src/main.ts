@@ -91,7 +91,7 @@ import {
 } from './lib/managed-agent-store.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
-import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
+import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles } from './lib/runtime-profiles.js';
 import { AgentSessionRunner, detectAcpSessionClis } from './lib/agent-session-runner.js';
 import { TerminalRunner } from './lib/terminal-runner.js';
 import { MemoryRunner } from './lib/cli-memory-runner.js';
@@ -109,7 +109,6 @@ import {
   claimPrivilegedCommand,
   postPrivilegedCommandResult,
 } from './lib/rest.js';
-import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
 import { postRuntimeChildEvent } from './lib/rest.js';
 import { CliLoginManager } from './lib/cli-login.js';
@@ -189,8 +188,8 @@ Options:
   -c, --config <path>     Path to config.json (default: ${CONFIG_PATH})
       --account <id>      Override account_id from config
   -w, --workspace <id>    Deprecated alias for --account
-      --runtime-profile <path|none>
-                            Use a JSON profile for this manager run, without DB changes
+      --runtime-profile <path|none> (deprecated; ignored)
+                            Select backends explicitly per execution; default is Anthropic
   -f, --force             Take over the lockfile from a stale or running owner
       --dry-run           Load config and exit without starting runtime
   -h, --help              Show this help text
@@ -234,7 +233,7 @@ Signals:
   SIGUSR2         unconditional restart: re-exec the running binary in place
                   (no version check, no npm install/build). Use this to pick
                   up on-disk config changes that are only read at startup
-                  (e.g. --runtime-profile), where self-update would no-op
+                  (e.g. service configuration), where self-update would no-op
                   because the package version hasn't changed.
 `);
 }
@@ -383,17 +382,9 @@ async function main(): Promise<void> {
 
   installCrashHandlers();
 
-  let runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
-  if (flags.runtimeProfile === 'none') {
-    runtimeProfileOverride = null;
-  } else if (flags.runtimeProfile) {
-    const path = resolve(flags.runtimeProfile);
-    try {
-      runtimeProfileOverride = JSON.parse(readFileSync(path, 'utf8')) as RuntimeProfileSpec;
-      validateRuntimeProfile(runtimeProfileOverride);
-    } catch (err: any) {
-      throw new Error(`Invalid --runtime-profile ${path}: ${err?.message ?? err}`);
-    }
+  // Accept old service command lines without inheriting their backend settings.
+  if (flags.runtimeProfile) {
+    log('--runtime-profile is ignored: select a Claude backend explicitly for each execution; the default is Anthropic.');
   }
 
   const version = readPkgVersion();
@@ -443,7 +434,6 @@ async function main(): Promise<void> {
     version,
     flags,
     argv,
-    runtimeProfileOverride,
   );
 }
 
@@ -452,7 +442,6 @@ async function runRuntime(
   version: string,
   flags: CliFlags,
   argv: string[],
-  runtimeProfileOverride: RuntimeProfileSpec | null | undefined,
 ): Promise<void> {
   void argv; // reserved for future re-exec hook
 
@@ -1361,7 +1350,6 @@ async function runRuntime(
       inflightDispatchTracker,
       dispatchBlockTracker,
       sessionLimitDeferStore,
-      runtimeProfileOverride,
       runtimeSupervisor,
       agentSessionRunner,
       terminalRunner,
@@ -1761,7 +1749,6 @@ async function runRuntime(
       agentLaunchSpecProvider: (): AgentLaunchSpecEntry[] =>
         computeAgentLaunchSpecs(managedAgentContexts.list(), {
           delegation: config.delegation,
-          runtimeProfileOverride,
         }),
       // Live worktrees + pool-lease state across every supervised agent (ticket
       // 72fc244f). Best-effort/async like the credential provider — a git failure
@@ -1975,9 +1962,8 @@ async function runRuntime(
 
   // SIGUSR2 → unconditional restart (ticket ad5a81da). runSelfUpdate/SIGUSR1
   // only re-execs when the npm registry has a newer version, so it silently
-  // no-ops for config-only changes (e.g. editing the on-disk --runtime-profile
-  // JSON, which main.ts only reads once at startup — see flags.runtimeProfile
-  // above). restartManager() shares self-update's in-flight mutex but skips
+  // no-ops for config-only changes. restartManager() shares self-update's
+  // in-flight mutex but skips
   // the version/provenance check entirely, so it always re-execs in place.
   process.on('SIGUSR2', async () => {
     try {

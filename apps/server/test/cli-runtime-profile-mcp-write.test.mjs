@@ -6,7 +6,7 @@
 // (docs/tickets.md), 프로필 핀은 그 spec 의 `cli_runtime_profile` 에 실린다 —
 // MCP `create_ticket` / `update_ticket` 의 `assignee` 가 그 쓰기 표면이다.
 // 디스패치는 ticket-dispatch.service.ts 가 `[{ source: 'agent', value:
-// spec.cli_runtime_profile }]` → 전역 기본값 순으로 해석한다.
+// spec.cli_runtime_profile }]`의 명시적 선택만 해석한다.
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -112,9 +112,9 @@ describe('MCP cli_runtime_profile write (ticket 0d2c53bf)', () => {
     const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'agent', value: pinned }]);
     assert.equal(withOptOut, null, "assignee 'none' must not inherit the global default");
 
-    // 대조군: 핀이 없으면 같은 체인이 전역 기본값으로 떨어진다.
+    // 핀이 없어도 전역 기본값을 상속하지 않고 Anthropic을 사용한다.
     const inherited = await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'agent', value: null }]);
-    assert.equal(inherited?.id, profile.id);
+    assert.equal(inherited, null);
   });
 
   it('전역 기본값이 비어 있으면 아무 핀도 없을 때 null 로 해석한다', async () => {

@@ -5,12 +5,14 @@ AWB MCP tools, heartbeat, and tool loop on Claude CLI. They change only the LLM
 endpoint and model used by that CLI.
 
 Profiles are one instance-wide list (`ClaudeBackendProfile`, managed on the
-**Claude Profiles** settings page). Selection is a two-step chain
-(`resolveClaudeBackendProfileForDispatch`, `apps/server/src/common/claude-backend-registry.ts`):
-the run's RuntimeSpec pin (`cli_runtime_profile` on a ticket assignee, chat
-participant, mention target, …), then the instance default
-(`claude_backend_profiles.default` system setting). There is no Board or
-Account layer. `none` explicitly keeps Claude's normal Anthropic configuration. A selected
+**Claude Profiles** settings page). Only the run's explicit RuntimeSpec selection
+(`cli_runtime_profile` on a ticket assignee, mission member, chat participant,
+mention target, …) changes the backend. Empty, omitted, `default`, and `none`
+mean native Anthropic with the selected Claude credential (or native credential
+lookup when none was selected). Neither the legacy `claude_backend_profiles.default`
+system setting nor the manager's deprecated `--runtime-profile` flag supplies a
+fallback. Existing stored global defaults are ignored for dispatch; explicitly
+selected profiles continue to work. A selected
 profile is a public declarative snapshot on SSE; `credential_ref` is an id and
 the referenced secret is resolved only on the manager host.
 

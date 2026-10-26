@@ -141,7 +141,7 @@ Legacy `workspace_id` config is still read as `account_id`. The owner UUID and e
 | `-c, --config <path>` | Override config path. |
 | `--account <id>` | Optional manual `account_id` override. |
 | `-w, --workspace <id>` | Deprecated alias for `--account`. |
-| `--runtime-profile <path\|none>` | Manager-run profile override. |
+| `--runtime-profile <path\|none>` | Deprecated; ignored. Select a backend per execution. Empty/default uses Anthropic. |
 | `-f, --force` | Lock takeover; supervised managers hand restart to their service. |
 | `--dry-run` | Load config and exit without starting execution. |
 | `-h, --help` | Show commands and current options. |

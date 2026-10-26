@@ -280,7 +280,7 @@ function isRuntimeProfileShape(value: any): value is RuntimeProfileSpec {
 }
 
 export function parseRuntimeProfile(raw: unknown): RuntimeProfileSpec | null {
-  if (raw === null || raw === undefined) return null;
+  if (raw === null || raw === undefined || raw === '' || raw === 'default' || raw === 'none') return null;
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     log(`parseRuntimeProfile: expected an object, got ${Array.isArray(raw) ? 'array' : typeof raw} — dropping`);
     return null;
@@ -296,53 +296,27 @@ export function parseRuntimeProfile(raw: unknown): RuntimeProfileSpec | null {
   return value as RuntimeProfileSpec;
 }
 
-/** 티켓 0fbe802c: ticket-dispatch 경로(#dispatchTriggerBody)의 runtime profile
- *  우선순위 결정 — per-agent DB 프로필(rawCliRuntimeProfile로 전달된
- *  ev.cli_runtime_profile)이 정상 파싱되면 그것을 최우선으로 쓰고, 없을 때만
- *  인스턴스 전역 `--runtime-profile` 오버라이드(instanceOverride)로 폴백한다.
- *  오버라이드조차 없으면(undefined) null → CLI 기본값.
- *
- *  이전에는 인스턴스 오버라이드가 설정되어 있으면(!== undefined) 항상
- *  최우선이라 다중-agent 호스트에서 오버라이드가 모든 agent의 티켓 작업을
- *  자신의 per-agent 프로필과 무관하게 그 백엔드로 강제했다 — chat 경로에서
- *  7d8ea7c9가 고친 것과 동일한 교차 오염. chat 경로는 오버라이드를 아예
- *  참조하지 않지만(전적으로 per-agent 소스), ticket-dispatch 경로는 per-agent
- *  프로필이 없는 agent에게는 여전히 인스턴스 단위 오버라이드가 유효한
- *  폴백으로 남는다 — 단일-agent 호스트가 `--runtime-profile <file>`로 DB
- *  변경 없이 전체를 그 백엔드로 돌리는 기존 용법을 보존하기 위함. */
+/** Only a backend selected for this execution may change Claude's endpoint.
+ * Empty/default means native Anthropic, even on a host started with a legacy
+ * --runtime-profile flag. The optional second argument is ignored for callers
+ * still passing the old host override. */
 export function resolveTriggerRuntimeProfile(
   rawCliRuntimeProfile: unknown,
-  instanceOverride: RuntimeProfileSpec | null | undefined,
+  _instanceOverride?: RuntimeProfileSpec | null,
 ): RuntimeProfileSpec | null {
-  return parseRuntimeProfile(rawCliRuntimeProfile) ?? instanceOverride ?? null;
+  return parseRuntimeProfile(rawCliRuntimeProfile);
 }
 
-/** ticket 7d8ea7c9 (review round 1 + round 2): chat_room_message broadcast의
- *  agent별 profile map에서 바로 이 responder의 Claude backend profile을
- *  골라낸다. chat_request(단일 대상 agent → 평면 cli_runtime_profile
- *  필드)와 달리 chat_room_message는 방의 모든 멤버에게 팬아웃되므로, 서버는
- *  해석된 profile을 agent_id로 키잉해 보낸다(RoomMessagingService가
- *  Claude-type 멤버마다 하나씩 항목을 해석) — 각 매니저는 단일 ambient
- *  필드에 의존하는 대신 맵에서 자기 responder의 항목을 먼저 골라 쓴다.
- *
- *  라운드 2 P1: 이 responder의 map 항목이 없거나(또는 형식 오류) 해석
- *  실패하면 resolveTriggerRuntimeProfile과 동일하게 instanceOverride로
- *  폴백한다 — 라운드 1은 오버라이드를 아예 참조하지 않아 per-agent 프로필이
- *  없는 chat agent가 인스턴스 `--runtime-profile` 플래그까지 무시하고
- *  CLI 기본값(Anthropic 클라우드)으로 떨어지는 회귀가 있었다. 우선순위는
- *  동일: 이 responder의 map 항목 > 인스턴스 오버라이드 > null.
- *  responderAgentId가 빈 값(매니저 자신의 ambient identity, 해석된 managed
- *  agent 없음)인 경우는 이 라운드의 논의 대상이 아니었으므로 라운드 1의
- *  기존 계약(map을 보지 않고 즉시 null)을 그대로 보존한다. */
+/** Broadcasts resolve only the current responder's explicitly selected profile. */
 export function resolveRoomBroadcastRuntimeProfile(
   payload: any,
   responderAgentId: string,
-  instanceOverride: RuntimeProfileSpec | null | undefined,
+  _instanceOverride?: RuntimeProfileSpec | null,
 ): RuntimeProfileSpec | null {
   if (!responderAgentId) return null;
   const map = payload?.cli_runtime_profiles;
   const raw = map && typeof map === 'object' ? map[responderAgentId] : undefined;
-  return parseRuntimeProfile(raw) ?? instanceOverride ?? null;
+  return resolveTriggerRuntimeProfile(raw);
 }
 
 /** Valid claude `--effort` levels (current AWB vocabulary). A preset slice
@@ -1147,6 +1121,7 @@ export interface EventDispatcherDeps {
   ticketSessionManager?: TicketSessionManager | null;
   /** Process-lifetime CLI override. undefined inherits the event snapshot;
    * null explicitly disables runtimes. Never persists to the server. */
+  /** @deprecated Host profiles do not apply to dispatched work. */
   runtimeProfileOverride?: RuntimeProfileSpec | null;
   // Agent Session(CLI 직접 세션) 러너 — `agent_session_request` SSE 를 처리한다.
   // 선택적이라 러너 없는 하네스/테스트는 그 이벤트를 조용히 버린다.
@@ -1214,7 +1189,6 @@ export class EventDispatcher {
   #agentManagerCommandHandler: AgentManagerCommandSink | null;
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
-  #runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
   #runtimeSupervisor: RuntimeSupervisor | null;
   #agentSessionRunner: AgentSessionRunner | null;
   #terminalRunner: TerminalRunner | null;
@@ -1431,7 +1405,6 @@ export class EventDispatcher {
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
-    this.#runtimeProfileOverride = deps.runtimeProfileOverride;
     this.#runtimeSupervisor = deps.runtimeSupervisor ?? null;
     this.#agentSessionRunner = deps.agentSessionRunner ?? null;
     this.#terminalRunner = deps.terminalRunner ?? null;
@@ -3723,9 +3696,8 @@ export class EventDispatcher {
     // CLI-readiness gate); both the persistent-session and one-shot paths
     // below ship it to their spawn site.
     //
-    // 티켓 0fbe802c: 우선순위는 resolveTriggerRuntimeProfile 참고 — per-agent
-    // cli_runtime_profile > 인스턴스 --runtime-profile 오버라이드 > null.
-    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile, this.#runtimeProfileOverride);
+    // An unselected backend stays native; host flags never supply a fallback.
+    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile);
     if (harness) {
       log(
         `Trigger carries harness_config: ticket=${ev.ticket_id} keys=${Object.keys(harness).join(',')}`,
@@ -4288,24 +4260,8 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    // ticket 7d8ea7c9: RoomMessagingService resolves agent > account Claude
-    // backend profile server-side (mirrors trigger-loop.service.ts's ticket
-    // resolution) and stamps it on chat_request. chat_request is
-    // envelope-native (see comment above), so this reads payload.* — NOT the
-    // ev.cli_runtime_profile flattened field, which is agent_trigger-only.
-    //
-    // (리뷰 라운드 2, P1): 라운드 1은 여기서 멈추고 `this.#runtimeProfileOverride`를
-    // 전혀 참조하지 않았다 — 인스턴스 전역 `--runtime-profile` 플래그가 켜져 있으면
-    // 모든 채팅 참가자가 자신의 cli_runtime_profile과 무관하게 같은 backend로
-    // 강제된다는 논리였다(root cause C). 그 논리는 "오버라이드로 절대 폴백하지
-    // 않는다"와 "둘 다 설정됐을 때 per-agent가 오버라이드를 이긴다"를 혼동한 것이다
-    // — 후자만이 실제로 교차 오염을 막으면서도, per-agent DB 프로필이 없는
-    // agent에게는 여전히 오버라이드가 폴백으로 남는다. ticket-dispatch 경로의
-    // resolveTriggerRuntimeProfile(티켓 0fbe802c, trigger-runtime-profile-priority.test.mjs로
-    // 우선순위 검증됨)과 정확히 같은 방식이므로 여기서도 그대로 재사용해, 두 진입점이
-    // 하나의 우선순위 계약(agent cli_runtime_profile > 인스턴스 오버라이드 > null)을
-    // 공유하도록 한다.
-    const runtimeProfile = resolveTriggerRuntimeProfile(payload.cli_runtime_profile, this.#runtimeProfileOverride);
+    // The server resolves the participant's explicit backend selection.
+    const runtimeProfile = resolveTriggerRuntimeProfile(payload.cli_runtime_profile);
 
     // ticket 9fd27487: handleChatRoomMessage의 run-workspace 프로비저닝에 대응하는
     // DM / @-멘션 쪽 짝. `chat_request`는 (chat_room_message와 달리) DM이나 명시적
@@ -4606,7 +4562,7 @@ export class EventDispatcher {
     // one-shot spawn() 양쪽에서 재사용한다 — 리뷰 지적(71532b4f): Hermes 분기가
     // harness를 계산 시점보다 먼저 실행·반환해 harness가 계속 무시되던 버그.
     const harness = parseHarnessConfig(ev.harness_config);
-    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile, this.#runtimeProfileOverride);
+    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile);
     const effortPreset = parseEffortPreset(ev.effort_preset);
     const envConfig = parseEnvironmentConfig(ev.environment_config);
     const worktreeMode = parseWorktreeMode(ev.worktree_mode);
@@ -5458,19 +5414,8 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    // ticket 7d8ea7c9 (review round 1): RoomMessagingService가 이제 그룹방
-    // broadcast용 agent별 profile map(p.cli_runtime_profiles, agent_id로
-    // 키잉)을 해석해 보낸다 — chat_room_message는 모든 멤버에게 팬아웃되므로,
-    // chat_request의 단일 대상 필드처럼 평면 필드 하나로는 "지금 응답할 그
-    // agent에게 맞는 backend"를 표현할 수 없다. roomResponderId(타이핑
-    // 표시용으로 위에서 이미 계산됨)가 정확히 이 dispatch가 spawn할 그
-    // agent이므로, 맵 키로 그대로 재사용한다.
-    //
-    // (리뷰 라운드 2, P1): resolveRoomBroadcastRuntimeProfile은 이제
-    // chat_request와 동일하게 인스턴스 오버라이드로 폴백한다 — 위
-    // handleChatRequest 호출부의 상세 사유 참고. 우선순위: 이 responder의
-    // map 항목 > 인스턴스 오버라이드 > null.
-    const runtimeProfile = resolveRoomBroadcastRuntimeProfile(p, roomResponderId, this.#runtimeProfileOverride);
+    // Each responder uses its own selected backend, never the host default.
+    const runtimeProfile = resolveRoomBroadcastRuntimeProfile(p, roomResponderId);
 
     if (runContext && isAcpRuntime(runContext.cli)) {
       try {

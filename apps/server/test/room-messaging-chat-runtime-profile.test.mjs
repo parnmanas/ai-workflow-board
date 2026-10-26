@@ -386,3 +386,22 @@ test('Group room broadcast: a progress heartbeat never triggers profile resoluti
     capture.off();
   }
 });
+
+for (const selection of [null, '', 'default', 'none']) {
+  test(`mission-style Claude chat with ${JSON.stringify(selection)} uses native Anthropic without a profile warning`, async () => {
+    const svc = makeSvc({ agent: {
+      id: 'agent-native', type: 'claude', cli_runtime_profile: selection,
+      credential_id: 'selected-credential',
+    }, account: optedOutWs });
+    const before = warnLogs.length;
+    const capture = captureEmit();
+    try {
+      await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'assigned work');
+      const payload = capture.get();
+      assert.ok(payload, 'chat_request is emitted');
+      assert.equal(payload.cli_runtime_profile, undefined);
+      assert.deepEqual(warnLogs.slice(before).filter((entry) => /backend profile/i.test(String(entry[1]))), [],
+        'native/default is not a profile error');
+    } finally { capture.off(); }
+  });
+}
