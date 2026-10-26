@@ -8,6 +8,8 @@ import 'katex/dist/katex.min.css';
 import './components/common/markdown.css';
 import { tokens } from './tokens';
 import { shouldReloadForChunkError } from './utils/chunkReload';
+import { initializeLocale } from './i18n/core';
+import { LocaleProvider } from './i18n/react';
 
 // 배포 후 stale 탭에서 라우트 청크(해시가 바뀌어 사라진 파일)를 lazy-import 하면
 // Vite 런타임이 `vite:preloadError` 를 던진다(ticket 2cae7314). 이번 세션에서
@@ -133,10 +135,12 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   });
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+void initializeLocale().then(() => ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <LocaleProvider>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </LocaleProvider>
   </React.StrictMode>
-);
+));

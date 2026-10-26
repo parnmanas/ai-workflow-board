@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../i18n/core';
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
@@ -16,7 +19,7 @@ function formatSize(bytes: number): string {
 
 function formatDate(iso: string): string {
   try {
-    return new Date(iso).toLocaleString();
+    return new Date(iso).toLocaleString(getLocaleTag());
   } catch {
     return iso;
   }
@@ -28,6 +31,7 @@ function formatDate(iso: string): string {
  * 앱 설치도 브라우저가 받아서 연다.
  */
 export default function LibraryPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const { showToast } = useToast();
   const [items, setItems] = useState<LibraryItem[]>([]);
@@ -49,7 +53,7 @@ export default function LibraryPage() {
       const res = await api.listLibraryItems(currentAccountId);
       setItems(res.items || []);
     } catch (err: any) {
-      showToast(err?.message || '자료를 불러오지 못했습니다', 'error');
+      showToast(err?.message || translate('자료를 불러오지 못했습니다'), 'error');
     } finally {
       setLoading(false);
     }
@@ -63,7 +67,7 @@ export default function LibraryPage() {
     const file = fileRef.current?.files?.[0];
     if (!currentAccountId) return;
     if (!file) {
-      showToast('파일을 먼저 고르세요', 'error');
+      showToast(translate('파일을 먼저 고르세요'), 'error');
       return;
     }
     setUploading(true);
@@ -81,10 +85,10 @@ export default function LibraryPage() {
       setVersion('');
       setDescription('');
       if (fileRef.current) fileRef.current.value = '';
-      showToast('자료실에 올렸습니다', 'success');
+      showToast(translate('자료실에 올렸습니다'), 'success');
       await refresh();
     } catch (err: any) {
-      showToast(err?.message || '올리지 못했습니다', 'error');
+      showToast(err?.message || translate('올리지 못했습니다'), 'error');
     } finally {
       setUploading(false);
     }
@@ -92,13 +96,13 @@ export default function LibraryPage() {
 
   const onDelete = async (item: LibraryItem) => {
     if (!currentAccountId) return;
-    if (!window.confirm(`'${item.title}' 을(를) 자료실에서 지울까요?`)) return;
+    if (!window.confirm(translate('\'{0}\' 을(를) 자료실에서 지울까요?', { 0: item.title }))) return;
     try {
       await api.deleteLibraryItem(item.id, currentAccountId);
-      showToast('지웠습니다', 'success');
+      showToast(translate('지웠습니다'), 'success');
       await refresh();
     } catch (err: any) {
-      showToast(err?.message || '지우지 못했습니다', 'error');
+      showToast(err?.message || translate('지우지 못했습니다'), 'error');
     }
   };
 
@@ -110,7 +114,7 @@ export default function LibraryPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <PageHeader title="Library" description="Installable apps and shared files for this account" />
+      <PageHeader title={translate('Library')} description={translate('Installable apps and shared files for this account')} />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         <div style={{ maxWidth: 880, display: 'flex', flexDirection: 'column', gap: 20 }}>
           <GithubApkCard />
@@ -119,15 +123,14 @@ export default function LibraryPage() {
             borderRadius: tokens.radii.lg, padding: 16,
           }}>
             <h2 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>
-              올리기
-            </h2>
+              {translate('올리기')}</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <input ref={fileRef} type="file" aria-label="올릴 파일" style={{ color: tokens.colors.textSecondary, fontSize: 13 }} />
-              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="제목 (비우면 파일 이름)" aria-label="제목" style={inputStyle} />
+              <input ref={fileRef} type="file" aria-label={translate('올릴 파일')} style={{ color: tokens.colors.textSecondary, fontSize: 13 }} />
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={translate('제목 (비우면 파일 이름)')} aria-label={translate('제목')} style={inputStyle} />
               <div style={{ display: 'flex', gap: 10 }}>
-                <input value={version} onChange={(e) => setVersion(e.target.value)} placeholder="버전 (예: 1.0)" aria-label="버전" style={{ ...inputStyle, flex: 1 }} />
+                <input value={version} onChange={(e) => setVersion(e.target.value)} placeholder={translate('버전 (예: 1.0)')} aria-label={translate('버전')} style={{ ...inputStyle, flex: 1 }} />
               </div>
-              <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="설명 (선택)" aria-label="설명" rows={2} style={{ ...inputStyle, resize: 'vertical' }} />
+              <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder={translate('설명 (선택)')} aria-label={translate('설명')} rows={2} style={{ ...inputStyle, resize: 'vertical' }} />
               <button
                 type="button" onClick={onUpload} disabled={uploading}
                 style={{
@@ -136,24 +139,22 @@ export default function LibraryPage() {
                   cursor: uploading ? 'not-allowed' : 'pointer', opacity: uploading ? 0.6 : 1,
                 }}
               >
-                {uploading ? '올리는 중…' : '자료실에 올리기'}
+                {uploading ? translate('올리는 중…') : translate('자료실에 올리기')}
               </button>
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                .apk는 설치물로 분류되어 최신본이 “앱 다운로드”에 뜹니다. 받는 쪽은 로그인한 멤버만 가능합니다.
-              </div>
+                {translate('.apk는 설치물로 분류되어 최신본이 “앱 다운로드”에 뜹니다. 받는 쪽은 로그인한 멤버만 가능합니다.')}</div>
             </div>
           </section>
 
           <section>
             <h2 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>
-              자료 {items.length > 0 && `(${items.length})`}
+              {translate('자료')} {items.length > 0 && `(${items.length})`}
             </h2>
             {loading ? (
               <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>Loading...</div>
             ) : items.length === 0 ? (
               <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>
-                아직 자료가 없습니다. APK나 공유 파일을 올려보세요.
-              </div>
+                {translate('아직 자료가 없습니다. APK나 공유 파일을 올려보세요.')}</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {items.map((item) => (
@@ -173,7 +174,7 @@ export default function LibraryPage() {
                             border: `1px solid ${tokens.colors.successDark}`, borderRadius: 999, padding: '1px 7px',
                             flexShrink: 0,
                           }}>
-                            APP{item.version ? ` ${item.version}` : ''}
+                            {translate('APP')}{item.version ? ` ${item.version}` : ''}
                           </span>
                         )}
                       </div>
@@ -190,18 +191,16 @@ export default function LibraryPage() {
                         textDecoration: 'none', flexShrink: 0,
                       }}
                     >
-                      받기
-                    </a>
+                      {translate('받기')}</a>
                     <button
-                      type="button" onClick={() => onDelete(item)} aria-label={`${item.title} 지우기`}
+                      type="button" onClick={() => onDelete(item)} aria-label={translate('{0} 지우기', { 0: item.title })}
                       style={{
                         padding: '7px 10px', background: 'transparent',
                         color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`,
                         borderRadius: tokens.radii.md, fontSize: 12, cursor: 'pointer', flexShrink: 0,
                       }}
                     >
-                      지우기
-                    </button>
+                      {translate('지우기')}</button>
                   </div>
                 ))}
               </div>

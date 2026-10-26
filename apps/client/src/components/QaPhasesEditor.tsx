@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React from 'react';
 import { tokens } from '../tokens';
 import { Button } from './common';
@@ -66,11 +68,11 @@ export function qaPhasesError(phases: QaPhase[]): string | null {
   const ids = new Set<string>();
   for (const p of phases) {
     const id = (p.id ?? '').trim();
-    if (!id) return 'Every phase needs a non-empty id.';
-    if (ids.has(id)) return `Duplicate phase id "${id}" — ids must be unique.`;
+    if (!id) return translate('Every phase needs a non-empty id.');
+    if (ids.has(id)) return translate('Duplicate phase id "{0}" — ids must be unique.', { 0: id });
     ids.add(id);
     if (!Number.isFinite(p.timeout_sec) || p.timeout_sec <= 0) {
-      return `Phase "${id}" needs a positive timeout (seconds).`;
+      return translate('Phase "{0}" needs a positive timeout (seconds).', { 0: id });
     }
   }
   return null;
@@ -89,6 +91,7 @@ interface QaPhaseRowsEditorProps {
  * and work identically inside the modal scenario form.
  */
 export function QaPhaseRowsEditor({ phases, onChange }: QaPhaseRowsEditorProps) {
+  useLocale();
   const fieldLabel: React.CSSProperties = {
     display: 'block', fontSize: 10, color: tokens.colors.textMuted,
     marginBottom: 3, textTransform: 'uppercase', fontWeight: 600,
@@ -146,7 +149,7 @@ export function QaPhaseRowsEditor({ phases, onChange }: QaPhaseRowsEditorProps) 
                   style={{ ...arrowBtn, opacity: idx === 0 ? 0.4 : 1 }}
                   disabled={idx === 0}
                   onClick={() => movePhase(idx, -1)}
-                  title="Move up"
+                  title={translate('Move up')}
                 >
                   ▲
                 </button>
@@ -155,7 +158,7 @@ export function QaPhaseRowsEditor({ phases, onChange }: QaPhaseRowsEditorProps) 
                   style={{ ...arrowBtn, opacity: idx === phases.length - 1 ? 0.4 : 1 }}
                   disabled={idx === phases.length - 1}
                   onClick={() => movePhase(idx, 1)}
-                  title="Move down"
+                  title={translate('Move down')}
                 >
                   ▼
                 </button>
@@ -164,25 +167,25 @@ export function QaPhaseRowsEditor({ phases, onChange }: QaPhaseRowsEditorProps) 
                 #{idx + 1}
               </div>
               <div style={{ flex: 1.2 }}>
-                <label style={fieldLabel}>Id (slug)</label>
+                <label style={fieldLabel}>{translate('Id (slug)')}</label>
                 <input
                   value={p.id}
-                  placeholder="import"
+                  placeholder={translate('import')}
                   onChange={(e) => updatePhase(idx, { id: e.target.value })}
                   style={inputStyle}
                 />
               </div>
               <div style={{ flex: 1.2 }}>
-                <label style={fieldLabel}>Label</label>
+                <label style={fieldLabel}>{translate('Label')}</label>
                 <input
                   value={p.label ?? ''}
-                  placeholder={p.id || '(defaults to id)'}
+                  placeholder={p.id || translate('(defaults to id)')}
                   onChange={(e) => updatePhase(idx, { label: e.target.value })}
                   style={inputStyle}
                 />
               </div>
               <div style={{ flex: 1 }}>
-                <label style={fieldLabel}>Timeout (sec)</label>
+                <label style={fieldLabel}>{translate('Timeout (sec)')}</label>
                 <input
                   type="number"
                   min={1}
@@ -195,16 +198,14 @@ export function QaPhaseRowsEditor({ phases, onChange }: QaPhaseRowsEditorProps) 
                 </div>
               </div>
               <Button variant="secondary" size="sm" onClick={() => removePhase(idx)}>
-                Remove
-              </Button>
+                {translate('Remove')}</Button>
             </div>
           </div>
         ))}
       </div>
       <div style={{ marginTop: 10 }}>
         <Button variant="secondary" size="sm" onClick={addPhase}>
-          Add phase
-        </Button>
+          {translate('Add phase')}</Button>
       </div>
     </div>
   );

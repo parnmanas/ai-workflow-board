@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
@@ -34,6 +37,7 @@ const POLL_MS = 3000;
  * 자리에 project.id 를 그대로 넘긴다.
  */
 export default function OntologyGraphPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const { showToast } = useToast();
@@ -61,7 +65,7 @@ export default function OntologyGraphPage() {
         const resp = await api.getOntologyGraphStatus(accountId, { resourceId: projectId, folderPath });
         setStatusResp(resp);
       } catch (e: any) {
-        if (!opts?.silent) showToast(e?.message || 'Failed to load graph status', 'error');
+        if (!opts?.silent) showToast(e?.message || translate('Failed to load graph status'), 'error');
       } finally {
         if (!opts?.silent) setLoading(false);
       }
@@ -107,7 +111,7 @@ export default function OntologyGraphPage() {
     try {
       await api.refreshOntologyGraph(accountId, statusResp.graph_id);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to refresh graph', 'error');
+      showToast(e?.message || translate('Failed to refresh graph'), 'error');
     } finally {
       setRefreshing(false);
     }
@@ -137,7 +141,7 @@ export default function OntologyGraphPage() {
     setGraphLoading(true);
     api.getOntologyGraph(accountId, graphId)
       .then((next) => { if (!cancelled) setSnapshot(next); })
-      .catch((error: any) => { if (!cancelled) { setSnapshot(null); setGraphError(error?.message || 'Failed to load graph'); } })
+      .catch((error: any) => { if (!cancelled) { setSnapshot(null); setGraphError(error?.message || translate('Failed to load graph')); } })
       .finally(() => { if (!cancelled) setGraphLoading(false); });
     return () => { cancelled = true; };
   }, [accountId, statusResp?.graph_id, statusResp?.status, statusResp?.indexed_at]);
@@ -172,15 +176,15 @@ export default function OntologyGraphPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Ontology Graph"
-        description="Extracted structural and semantic graph of a repository — symbols, calls, imports, and how they relate."
+        title={translate('Ontology Graph')}
+        description={translate('Extracted structural and semantic graph of a repository — symbols, calls, imports, and how they relate.')}
         actions={
           <Button
             variant="primary"
             onClick={() => void handleBuildOrRefresh()}
             disabled={!projectId || loading || refreshing || isBuilding}
           >
-            {statusResp ? 'Refresh Graph' : 'Build Graph'}
+            {statusResp ? translate('Refresh Graph') : translate('Build Graph')}
           </Button>
         }
       />
@@ -188,17 +192,17 @@ export default function OntologyGraphPage() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <Select
-            label="Project"
+            label={translate('Project')}
             value={projectId}
             onChange={(e) => setProjectId(e.target.value)}
             options={[
-              { value: '', label: projects.length ? 'Select a project…' : 'No projects in this account yet', disabled: true },
+              { value: '', label: projects.length ? translate('Select a project…') : translate('No projects in this account yet'), disabled: true },
               ...projects.map((p) => ({ value: p.id, label: p.name })),
             ]}
           />
           <Input
-            label="Folder (optional)"
-            placeholder="repo root"
+            label={translate('Folder (optional)')}
+            placeholder={translate('repo root')}
             value={folderPath}
             onChange={(e) => setFolderPath(e.target.value)}
           />
@@ -206,8 +210,8 @@ export default function OntologyGraphPage() {
 
         {!projectId && (
           <EmptyState
-            title="Pick a project"
-            description="Select a project (and optionally a folder) to build or view the Ontology Graph of its repository."
+            title={translate('Pick a project')}
+            description={translate('Select a project (and optionally a folder) to build or view the Ontology Graph of its repository.')}
           />
         )}
 
@@ -234,30 +238,29 @@ export default function OntologyGraphPage() {
 
         {projectId && statusResp?.status === 'error' && (
           <EmptyState
-            title="Graph build failed"
-            description={statusResp.error || 'The last build attempt failed — try Refresh Graph to retry.'}
+            title={translate('Graph build failed')}
+            description={statusResp.error || translate('The last build attempt failed — try Refresh Graph to retry.')}
           />
         )}
 
-        {projectId && loading && <EmptyState title="Loading graph" description="Checking the graph build and loading its latest snapshot…" />}
-        {projectId && !loading && graphLoading && <EmptyState title="Loading graph" description="Preparing the latest bounded graph snapshot…" />}
+        {projectId && loading && <EmptyState title={translate('Loading graph')} description={translate('Checking the graph build and loading its latest snapshot…')} />}
+        {projectId && !loading && graphLoading && <EmptyState title={translate('Loading graph')} description={translate('Preparing the latest bounded graph snapshot…')} />}
 
         {projectId && graphError && (
-          <EmptyState title="Graph could not be loaded" description={graphError} />
+          <EmptyState title={translate('Graph could not be loaded')} description={graphError} />
         )}
 
         {projectId && snapshot && snapshot.nodes.length === 0 && (
           <EmptyState
-            title="Graph is empty"
-            description="The build completed but produced no active nodes. Refresh the graph after checking the selected project and folder."
+            title={translate('Graph is empty')}
+            description={translate('The build completed but produced no active nodes. Refresh the graph after checking the selected project and folder.')}
           />
         )}
 
         {projectId && snapshot && snapshot.nodes.length > 0 && (
           <>
             <div style={{ color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs }}>
-              {snapshot.nodes.length.toLocaleString()} nodes · {snapshot.edges.length.toLocaleString()} edges
-              {snapshot.truncated ? ` · showing a centrality-ranked sample of ${snapshot.total_nodes.toLocaleString()} nodes and ${snapshot.total_edges.toLocaleString()} edges` : ''}
+              {snapshot.nodes.length.toLocaleString(getLocaleTag())} {translate('nodes ·')} {snapshot.edges.length.toLocaleString(getLocaleTag())} {translate('edges')}{snapshot.truncated ? translate(' · showing a centrality-ranked sample of {0} nodes and {1} edges', { 0: snapshot.total_nodes.toLocaleString(getLocaleTag()), 1: snapshot.total_edges.toLocaleString(getLocaleTag()) }) : ''}
             </div>
             <OntologyGraphCanvas snapshot={snapshot} />
           </>

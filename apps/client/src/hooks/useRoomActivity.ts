@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { useEffect, useRef, useState } from 'react';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { roomActivity } from '../activity';
@@ -34,7 +35,7 @@ export function applyTypingFrame(
   if (!roomId || !agentId) return map;
   const room = map[roomId] || {};
   if (frame.is_typing) {
-    return { ...map, [roomId]: { ...room, [agentId]: { name: frame.agent_name || 'Agent', atMs: nowMs } } };
+    return { ...map, [roomId]: { ...room, [agentId]: { name: frame.agent_name || translate('Agent'), atMs: nowMs } } };
   }
   if (!room[agentId]) return map;
   const nextRoom = { ...room };

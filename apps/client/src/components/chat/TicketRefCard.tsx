@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import { tokens } from '../../tokens';
 import { useOpenTicketArtifact } from '../../contexts/ticketArtifactOpener';
@@ -27,11 +29,11 @@ import { useTicketMeta } from '../../contexts/TicketMetaContext';
 // agent-manager 의 TICKET_ACTION_LABEL_KO(ticket-ref-capture.ts)와 동일 집합을 유지 —
 // 캡처가 방출하는 모든 action 코드가 여기서 한글 배지로 렌더된다(계약 일치, 수용기준 #3).
 const ACTION_LABEL: Record<string, string> = {
-  create: '생성', move: '이동', update: '수정', comment: '코멘트',
-  question: '질문', answer: '답변', decision: '결정',
-  claim: '클레임', release: '클레임 해제', pend: '보류', unpend: '보류 해제',
-  archive: '아카이브', unarchive: '아카이브 해제', prereq: '선행조건',
-  handoff: '핸드오프', propose: '이동 제안', consensus: '합의', reject: '반려', delete: '삭제',
+  get create() { return translate('생성'); }, get move() { return translate('이동'); }, get update() { return translate('수정'); }, get comment() { return translate('코멘트'); },
+  get question() { return translate('질문'); }, get answer() { return translate('답변'); }, get decision() { return translate('결정'); },
+  get claim() { return translate('클레임'); }, get release() { return translate('클레임 해제'); }, get pend() { return translate('보류'); }, get unpend() { return translate('보류 해제'); },
+  get archive() { return translate('아카이브'); }, get unarchive() { return translate('아카이브 해제'); }, get prereq() { return translate('선행조건'); },
+  get handoff() { return translate('핸드오프'); }, get propose() { return translate('이동 제안'); }, get consensus() { return translate('합의'); }, get reject() { return translate('반려'); }, get delete() { return translate('삭제'); },
 };
 
 // ⓑ 승인 카드 대상 action(제안/합의). 이 두 action 은 승인 변형으로 구분 렌더한다.
@@ -45,6 +47,7 @@ const PRIORITY_CHIP_TONE: Record<string, { bg: string; fg: string }> = {
 };
 
 function MetaChip({ label, tone }: { label: string; tone: { bg: string; fg: string } }) {
+  useLocale();
   return (
     <span
       data-meta-chip=""
@@ -75,11 +78,12 @@ export default function TicketRefCard({
   action?: string;
   detail?: string;
 }) {
+  useLocale();
   const openTicket = useOpenTicketArtifact();
   const meta = useTicketMeta(id);
   const [hover, setHover] = useState(false);
 
-  const label = title || '티켓';
+  const label = title || translate('티켓');
   const actionLabel = action ? (ACTION_LABEL[action] ?? action) : '';
   const isApproval = !!action && APPROVAL_ACTIONS.has(action);
 
@@ -91,7 +95,7 @@ export default function TicketRefCard({
       onClick={() => openTicket(id, title)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      aria-label={`${actionLabel ? `티켓 ${actionLabel} — ` : ''}티켓 열기: ${label}`}
+      aria-label={translate('{0}티켓 열기: {1}', { 0: actionLabel ? translate('티켓 {0} — ', { 0: actionLabel }) : '', 1: label })}
       title={label}
       style={{
         // 메시지 텍스트 흐름 안에 자연스럽게 놓이는 인라인 카드.

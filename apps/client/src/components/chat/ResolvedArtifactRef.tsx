@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -18,13 +20,13 @@ type Resolution = {
 };
 
 const REASON: Record<string, string> = {
-  malformed_id: '잘못된 UUID',
-  account_access_denied: '소유 계정 접근 권한 없음',
-  not_found: '존재하지 않음',
-  outside_account: '다른 소유 계정의 엔터티',
-  no_detail_surface: '상세 화면 없음',
-  resolving: '확인 중',
-  resolver_failed: '확인 실패',
+  get malformed_id() { return translate('잘못된 UUID'); },
+  get account_access_denied() { return translate('소유 계정 접근 권한 없음'); },
+  get not_found() { return translate('존재하지 않음'); },
+  get outside_account() { return translate('다른 소유 계정의 엔터티'); },
+  get no_detail_surface() { return translate('상세 화면 없음'); },
+  get resolving() { return translate('확인 중'); },
+  get resolver_failed() { return translate('확인 실패'); },
 };
 
 export default function ResolvedArtifactRef({
@@ -34,6 +36,7 @@ export default function ResolvedArtifactRef({
   id: string;
   claimedLabel: string;
 }) {
+  useLocale();
   const [resolved, setResolved] = useState<Resolution | null>(null);
   const [failure, setFailure] = useState('resolving');
 
@@ -68,7 +71,7 @@ export default function ResolvedArtifactRef({
   if (resolved?.available && resolved.deepLink) {
     const context = resolved.accountName || '';
     return (
-      <a {...common} href={resolved.deepLink} aria-label={`${type} 열기: ${resolved.label}`}>
+      <a {...common} href={resolved.deepLink} aria-label={translate('{0} 열기: {1}', { 0: type, 1: resolved.label })}>
         {ICON[type]} {resolved.label}{context ? ` · ${context}` : ''}
       </a>
     );
@@ -78,7 +81,7 @@ export default function ResolvedArtifactRef({
   return (
     <span {...common} aria-disabled="true">
       {ICON[type]} {type} · {resolved?.label || claimedLabel || type}
-      {context ? ` · ${context}` : ''} ({id}) — 연결 불가: {reason}
+      {context ? ` · ${context}` : ''} ({id}{translate(') — 연결 불가:')} {reason}
     </span>
   );
 }

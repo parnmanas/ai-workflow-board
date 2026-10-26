@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 
@@ -39,6 +41,7 @@ export function NavBadge({
   size = 'md',
   label,
 }: NavBadgeProps) {
+  useLocale();
   if (!dot && count <= 0) return null;
   const colors = variantStyles[variant];
   if (dot) {
@@ -61,7 +64,7 @@ export function NavBadge({
   const text = count > max ? `${max}+` : String(count);
   return (
     <span
-      aria-label={label ?? `${count} unread`}
+      aria-label={label ?? translate('{0} unread', { 0: count })}
       title={label}
       style={{
         minWidth: size === 'sm' ? 14 : 16,

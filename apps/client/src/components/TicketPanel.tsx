@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Ticket, TicketCard, TicketStatus } from '../types';
 import { api, getActiveAccountId } from '../api';
@@ -87,6 +89,7 @@ export default function TicketPanel({
   onClose, onMove, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSaveDraft,
   onAddComment, onSetCommentStatus, onSelectTicket, scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
+  useLocale();
   const { showToast } = useToast();
   const confirm = useConfirm();
   const { markRead: markBadgeRead } = useNotifications();
@@ -125,9 +128,9 @@ export default function TicketPanel({
       await onSaveDraft(active.id, dirtyFields);
       // Edits typed while the save was in flight survive.
       setDraft(cur => settleSavedDraft(cur, committed));
-      showToast('저장했습니다', 'success');
+      showToast(translate('저장했습니다'), 'success');
     } catch (e: any) {
-      showToast(`저장하지 못했습니다: ${e?.message || 'unknown error'}`, 'error');
+      showToast(translate('저장하지 못했습니다: {0}', { 0: e?.message || translate('unknown error') }), 'error');
     } finally {
       setSaving(false);
     }
@@ -138,7 +141,7 @@ export default function TicketPanel({
     if (isDirty) {
       if (confirmingClose.current) return;
       confirmingClose.current = true;
-      const ok = await confirm({ title: '변경 버리기', message: '저장하지 않은 수정 내용을 버릴까요?', confirmLabel: '버리기' });
+      const ok = await confirm({ title: translate('변경 버리기'), message: translate('저장하지 않은 수정 내용을 버릴까요?'), confirmLabel: translate('버리기') });
       confirmingClose.current = false;
       if (!ok) return;
     }
@@ -158,7 +161,7 @@ export default function TicketPanel({
     try {
       await Promise.resolve(onMove ? onMove(id, status) : api.moveTicket(id, status));
     } catch (e: any) {
-      showToast(`상태를 바꾸지 못했습니다: ${e?.message || 'unknown error'}`, 'error');
+      showToast(translate('상태를 바꾸지 못했습니다: {0}', { 0: e?.message || translate('unknown error') }), 'error');
     }
   }, [onMove, showToast]);
   const changeStatus = useCallback(async (status: TicketStatus) => {
@@ -178,14 +181,14 @@ export default function TicketPanel({
     try {
       const res = await api.triggerTicket(id);
       if (res?.dispatched) {
-        showToast('담당자에게 보냈습니다', 'success');
+        showToast(translate('담당자에게 보냈습니다'), 'success');
       } else {
         const reason = triggerReasonLabel(res?.reason);
         setRunRefusal({ id, reason });
-        showToast(res?.reason === 'queued' ? reason : `보내지 않았습니다: ${reason}`, 'info');
+        showToast(res?.reason === 'queued' ? reason : translate('보내지 않았습니다: {0}', { 0: reason }), 'info');
       }
     } catch (e: any) {
-      showToast(`실행하지 못했습니다: ${e?.message || 'unknown error'}`, 'error');
+      showToast(translate('실행하지 못했습니다: {0}', { 0: e?.message || translate('unknown error') }), 'error');
     } finally {
       setRunningId(cur => (cur === id ? null : cur));
     }
@@ -200,9 +203,9 @@ export default function TicketPanel({
     try {
       if (archived) await api.unarchiveTicket(id);
       else await api.archiveTicket(id);
-      showToast(archived ? '보관을 해제했습니다' : '보관했습니다', 'success');
+      showToast(archived ? translate('보관을 해제했습니다') : translate('보관했습니다'), 'success');
     } catch (e: any) {
-      showToast(`${archived ? '보관 해제' : '보관'}하지 못했습니다: ${e?.message || 'unknown error'}`, 'error');
+      showToast(translate('{0}하지 못했습니다: {1}', { 0: archived ? translate('보관 해제') : translate('보관'), 1: e?.message || translate('unknown error') }), 'error');
     } finally {
       setArchivingId(cur => (cur === id ? null : cur));
     }
@@ -210,7 +213,7 @@ export default function TicketPanel({
 
   const copyId = useCallback(async () => {
     const ok = await copyText(active.id);
-    showToast(ok ? `티켓 ID 를 복사했습니다 (${active.id})` : '복사하지 못했습니다 — 클립보드 권한을 확인하세요', ok ? 'success' : 'error');
+    showToast(ok ? translate('티켓 ID 를 복사했습니다 ({0})', { 0: active.id }) : translate('복사하지 못했습니다 — 클립보드 권한을 확인하세요'), ok ? 'success' : 'error');
   }, [active.id, showToast]);
 
   // ── Read marker: opening counts as read; leaving records "read up to now".
@@ -233,9 +236,9 @@ export default function TicketPanel({
 
   const commentCount = (active.comments || []).filter(c => c.author_type !== 'system').length;
   const tabs: Array<{ id: Tab; label: string; badge?: string; attention?: boolean }> = [
-    { id: 'overview', label: '개요', attention: !!active.pending_user_action },
-    { id: 'conversation', label: '대화', badge: commentCount ? `${commentCount}${active.comments_has_more ? '+' : ''}` : undefined },
-    { id: 'activity', label: '기록' },
+    { id: 'overview', label: translate('개요'), attention: !!active.pending_user_action },
+    { id: 'conversation', label: translate('대화'), badge: commentCount ? `${commentCount}${active.comments_has_more ? '+' : ''}` : undefined },
+    { id: 'activity', label: translate('기록') },
   ];
 
   return (
@@ -280,7 +283,7 @@ export default function TicketPanel({
             }}
           >
             {t.label}
-            {t.attention && <span aria-label="확인 필요" style={{ width: 7, height: 7, borderRadius: '50%', background: tokens.colors.warning }} />}
+            {t.attention && <span aria-label={translate('확인 필요')} style={{ width: 7, height: 7, borderRadius: '50%', background: tokens.colors.warning }} />}
             {t.badge && (
               <span style={{ fontSize: '10px', background: tokens.colors.border, color: tokens.colors.textMuted, borderRadius: 8, padding: '1px 5px' }}>{t.badge}</span>
             )}
@@ -344,17 +347,17 @@ export default function TicketPanel({
           // Right padding leaves room for the floating sound toggle.
           padding: '8px 64px 8px 14px', borderTop: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard,
         }}>
-          <span style={{ fontSize: '12px', color: tokens.colors.textMuted, flex: '1 1 auto' }}>저장하지 않은 변경이 있습니다</span>
-          <button type="button" onClick={() => setDraft(draftFromTicket(active))} disabled={saving} style={panelButton('plain', saving)}>되돌리기</button>
+          <span style={{ fontSize: '12px', color: tokens.colors.textMuted, flex: '1 1 auto' }}>{translate('저장하지 않은 변경이 있습니다')}</span>
+          <button type="button" onClick={() => setDraft(draftFromTicket(active))} disabled={saving} style={panelButton('plain', saving)}>{translate('되돌리기')}</button>
           <button type="button" onClick={() => void save()} disabled={saving} style={panelButton('primary', saving)}>
-            {saving ? '저장 중…' : '저장'}
+            {saving ? translate('저장 중…') : translate('저장')}
           </button>
         </div>
       )}
 
       {preview && (
         <MediaLightbox
-          items={[{ src: preview.src, kind: preview.mimetype?.startsWith('video/') ? 'video' : 'image', caption: '미리보기' }]}
+          items={[{ src: preview.src, kind: preview.mimetype?.startsWith('video/') ? 'video' : 'image', caption: translate('미리보기') }]}
           index={0}
           onIndexChange={() => {}}
           onClose={() => setPreview(null)}

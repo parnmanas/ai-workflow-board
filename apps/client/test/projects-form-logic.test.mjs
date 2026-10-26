@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Projects 화면의 순수 로직(projects/projectForm.logic.ts) — 폼 ⇄ payload, 검증,
 // 자격증명 후보, 연결 테스트 표시, Host 폴더 행, 삭제 409(project_in_use) 집계.
 // 컴포넌트가 실제로 import 하는 모듈을 그대로 검증한다(docs/tickets.md → Project).
@@ -60,7 +61,7 @@ test('새 프로젝트 폼은 비어 있고, 이름·URL 없이는 저장되지 
 test('URL 에 공백이 있으면 거부한다', () => {
   const r = buildProjectPayload({ ...emptyProjectForm(), name: 'x', repoUrl: 'https://a b/c.git' });
   assert.equal(r.ok, false);
-  assert.match(r.errors.repoUrl, /공백/);
+  assert.match(r.errors.repoUrl, uiPattern("URL 에 공백이 들어갈 수 없습니다."));
 });
 
 test('저장된 프로젝트 → 폼 → payload 왕복은 모든 필드를 보존한다', () => {
@@ -135,8 +136,8 @@ test('연결 테스트 성공은 브랜치 수와 원격 기본 브랜치를 보
   assert.equal(v.ok, true);
   assert.deepEqual(v.branches, ['main', 'dev']);
   assert.equal(v.suggestedDefault, 'main');
-  assert.match(v.message, /브랜치 2개/);
-  assert.match(v.message, /기본: main/);
+  assert.match(v.message, uiPattern('연결 성공 — 브랜치 {0}개{1}', { 0: 2, 1: ui(' (기본: {0})', {0: 'main'}) }));
+  assert.match(v.message, uiPattern(' (기본: {0})', {0: 'main'}));
 });
 
 test('연결 테스트 실패는 서버 오류 문구를 그대로 보여준다', () => {
@@ -150,7 +151,7 @@ test('연결 테스트 실패는 서버 오류 문구를 그대로 보여준다'
 test('빈 원격도 성공이다 — 브랜치 없음 안내', () => {
   const v = testConnectionView({ ok: true, branches: [] });
   assert.equal(v.ok, true);
-  assert.match(v.message, /브랜치가 없습니다/);
+  assert.match(v.message, uiPattern('연결 성공 — 원격에 브랜치가 없습니다.'));
 });
 
 test('기본 브랜치 선택지는 원격 목록에 없는 현재 값도 보존한다', () => {
@@ -197,22 +198,22 @@ test('409 project_in_use 의 counts 를 그대로 펼친다 — 아는 키는 �
   const err = apiError('project_in_use', { error: 'project_in_use', counts: { tickets: 3, qa_scenarios: 1, actions: 0, widgets: 2 } });
   assert.equal(isProjectInUseError(err), true);
   assert.deepEqual(projectInUseCounts(err), [
-    { key: 'tickets', label: '티켓', count: 3 },
-    { key: 'qa_scenarios', label: 'QA 시나리오', count: 1 },
+    { key: 'tickets', label: ui('티켓'), count: 3 },
+    { key: 'qa_scenarios', label: ui('QA 시나리오'), count: 1 },
     { key: 'widgets', label: 'widgets', count: 2 },
   ]);
-  assert.equal(describeProjectUsage(projectInUseCounts(err)), '티켓 3 · QA 시나리오 1 · widgets 2');
+  assert.equal(describeProjectUsage(projectInUseCounts(err)), `${ui('티켓')} 3 · ${ui('QA 시나리오')} 1 · widgets 2`);
 });
 
 test('counts 가 목록 형태여도 읽는다', () => {
   const err = apiError('project_in_use', { counts: [{ kind: 'missions', count: 2 }, { key: 'security_profiles', count: '1' }] });
-  assert.deepEqual(projectInUseCounts(err).map((c) => `${c.label}:${c.count}`), ['미션:2', '보안 프로파일:1']);
+  assert.deepEqual(projectInUseCounts(err).map((c) => `${c.label}:${c.count}`), [`${ui('미션')}:2`, `${ui('보안 프로파일')}:1`]);
 });
 
 test('slug 가 body 에만 있어도 project_in_use 로 본다, counts 가 없으면 빈 목록', () => {
   const err = apiError(undefined, { error: 'project_in_use' });
   assert.deepEqual(projectInUseCounts(err), []);
-  assert.match(describeProjectUsage([]), /참조/);
+  assert.match(describeProjectUsage([]), uiPattern('다른 항목이 아직 이 프로젝트를 참조하고 있습니다.'));
 });
 
 test('다른 오류는 project_in_use 가 아니다', () => {

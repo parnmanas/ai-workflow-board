@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import { useNotifications } from '../../contexts/NotificationContext';
@@ -38,6 +40,7 @@ export function popupPlacement(anchor: { left: number; right: number; bottom: nu
 }
 
 export function NotificationSettingsPanel() {
+  useLocale();
   const { prefs, setPref, notificationPermission, requestNotificationPermission } = useNotifications();
   const voiceConfig = useVoiceConfig();
   const [open, setOpen] = useState(false);
@@ -73,15 +76,15 @@ export function NotificationSettingsPanel() {
     <div ref={wrapRef} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen((v) => !v)}
-        aria-label="Notification settings"
+        aria-label={translate('Notification settings')}
         title={
           !hasNotificationAPI
-            ? 'Browser does not support notifications'
+            ? translate('Browser does not support notifications')
             : permission === 'granted'
-              ? 'Notification settings'
+              ? translate('Notification settings')
               : permission === 'denied'
-                ? 'Notifications blocked in browser settings'
-                : 'Enable browser notifications'
+                ? translate('Notifications blocked in browser settings')
+                : translate('Enable browser notifications')
         }
         style={{
           width: 28,
@@ -127,13 +130,10 @@ export function NotificationSettingsPanel() {
           onClick={(e) => e.stopPropagation()}
         >
           <div style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 6 }}>
-            Notifications
-          </div>
+            {translate('Notifications')}</div>
           {!hasNotificationAPI ? (
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-              This browser does not expose the Notification API. Only in-app
-              toasts and audio will work.
-            </div>
+              {translate('This browser does not expose the Notification API. Only in-app toasts and audio will work.')}</div>
           ) : permission === 'default' ? (
             <button
               onClick={async () => {
@@ -152,8 +152,7 @@ export function NotificationSettingsPanel() {
                 marginBottom: 8,
               }}
             >
-              Enable browser notifications
-            </button>
+              {translate('Enable browser notifications')}</button>
           ) : permission === 'denied' ? (
             <div
               style={{
@@ -167,9 +166,7 @@ export function NotificationSettingsPanel() {
                 marginBottom: 8,
               }}
             >
-              Browser notifications are blocked. Re-enable them in your
-              browser's site settings, then reload.
-            </div>
+              {translate('Browser notifications are blocked. Re-enable them in your browser\'s site settings, then reload.')}</div>
           ) : (
             <div
               style={{
@@ -178,31 +175,28 @@ export function NotificationSettingsPanel() {
                 marginBottom: 8,
               }}
             >
-              Browser notifications enabled.
-            </div>
+              {translate('Browser notifications enabled.')}</div>
           )}
 
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '6px 0' }} />
           <div style={{ fontSize: 10, fontWeight: 700, color: tokens.colors.borderStrong, textTransform: 'uppercase', marginBottom: 4 }}>
-            When notified
-          </div>
-          <Toggle label="메일 수신 · 답장 확인" checked={prefs.mail} onChange={(v) => setPref('mail', v)} rowStyle={rowStyle} />
-          <Toggle label="Mentions" checked={prefs.mentions} onChange={(v) => setPref('mentions', v)} rowStyle={rowStyle} />
-          <Toggle label="Chat messages" checked={prefs.chat} onChange={(v) => setPref('chat', v)} rowStyle={rowStyle} />
-          <Toggle label="Ticket comments" checked={prefs.tickets} onChange={(v) => setPref('tickets', v)} rowStyle={rowStyle} />
-          <Toggle label="Admin (pending users, agent errors)" checked={prefs.admin} onChange={(v) => setPref('admin', v)} rowStyle={rowStyle} />
+            {translate('When notified')}</div>
+          <Toggle label={translate('메일 수신 · 답장 확인')} checked={prefs.mail} onChange={(v) => setPref('mail', v)} rowStyle={rowStyle} />
+          <Toggle label={translate('Mentions')} checked={prefs.mentions} onChange={(v) => setPref('mentions', v)} rowStyle={rowStyle} />
+          <Toggle label={translate('Chat messages')} checked={prefs.chat} onChange={(v) => setPref('chat', v)} rowStyle={rowStyle} />
+          <Toggle label={translate('Ticket comments')} checked={prefs.tickets} onChange={(v) => setPref('tickets', v)} rowStyle={rowStyle} />
+          <Toggle label={translate('Admin (pending users, agent errors)')} checked={prefs.admin} onChange={(v) => setPref('admin', v)} rowStyle={rowStyle} />
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '6px 0' }} />
-          <Toggle label="Audio cue" checked={prefs.audio} onChange={(v) => setPref('audio', v)} rowStyle={rowStyle} />
+          <Toggle label={translate('Audio cue')} checked={prefs.audio} onChange={(v) => setPref('audio', v)} rowStyle={rowStyle} />
           {voiceConfig && (
             <>
-              <Toggle label="Work updates (sound, details on request)" checked={prefs.voice} onChange={(v) => setPref('voice', v)} rowStyle={rowStyle} />
-              <Toggle label="Open operator and microphone on notification" checked={prefs.listenAfterWorkSound} onChange={(v) => setPref('listenAfterWorkSound', v)} rowStyle={rowStyle} />
-              <label style={rowStyle}>Work update sound
-                <select value={prefs.workSound} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)}>
+              <Toggle label={translate('Work updates (sound, details on request)')} checked={prefs.voice} onChange={(v) => setPref('voice', v)} rowStyle={rowStyle} />
+              <Toggle label={translate('Open operator and microphone on notification')} checked={prefs.listenAfterWorkSound} onChange={(v) => setPref('listenAfterWorkSound', v)} rowStyle={rowStyle} />
+              <label style={rowStyle}>{translate('Work update sound')}<select value={prefs.workSound} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)}>
                   {NOTIFICATION_SOUNDS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </select>
               </label>
-              <button onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>Preview sound</button>
+              <button onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>{translate('Preview sound')}</button>
             </>
           )}
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '8px 0 6px' }} />
@@ -221,8 +215,7 @@ export function NotificationSettingsPanel() {
               textAlign: 'left',
             }}
           >
-            External channels (Discord / Slack / Telegram)…
-          </button>
+            {translate('External channels (Discord / Slack / Telegram)…')}</button>
         </div>
       )}
       <UserChannelsModal isOpen={channelsModalOpen} onClose={() => setChannelsModalOpen(false)} />
@@ -241,6 +234,7 @@ function Toggle({
   onChange: (v: boolean) => void;
   rowStyle: React.CSSProperties;
 }) {
+  useLocale();
   return (
     <label style={{ ...rowStyle, cursor: 'pointer' }}>
       <span>{label}</span>

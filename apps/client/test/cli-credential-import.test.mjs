@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -62,7 +63,7 @@ test('Codex config is optional and credential scope follows the host page scope 
 });
 
 function buttonsByText(container, label) {
-  return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === label);
+  return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === ui(label));
 }
 
 async function flush() {

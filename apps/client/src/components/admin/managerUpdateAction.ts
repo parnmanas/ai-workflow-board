@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * Agent Manager 카드의 "버전 액션" 순수 로직 — 어떤 버튼을 어떤 문구로 보여줄지.
  * 컴포넌트에서 분리해 node:test 로 직접 구동한다(viewMode.ts 선례).
@@ -37,40 +38,40 @@ export function managerUpdateAction(inst: ManagerUpdateActionInput): ManagerUpda
   if (inst.restart_required && inst.installed_version) {
     return {
       kind: 'restart',
-      label: `Restart to apply v${inst.installed_version}`,
+      label: translate('Restart to apply v{0}', { 0: inst.installed_version }),
       title:
-        `v${inst.installed_version} is already installed on this host but the running manager is still v${inst.plugin_version}. ` +
-        'Restarting loads the installed build (no reinstall).',
+        translate('v{0} is already installed on this host but the running manager is still v{1}. ', { 0: inst.installed_version, 1: inst.plugin_version }) +
+        translate('Restarting loads the installed build (no reinstall).'),
       confirm:
-        `v${inst.installed_version} is already installed on this host (running v${inst.plugin_version}). ` +
-        'Restart the manager now to load it? ' + INTERRUPTED_WORK_NOTE,
+        translate('v{0} is already installed on this host (running v{1}). ', { 0: inst.installed_version, 1: inst.plugin_version }) +
+        translate('Restart the manager now to load it? ') + translate(INTERRUPTED_WORK_NOTE),
     };
   }
   if (inst.update_available) {
     const target = inst.latest_version || '?';
     return {
       kind: 'update',
-      label: `Update → v${target}`,
+      label: translate('Update → v{0}', { 0: target }),
       title:
         inst.install_mode === 'npm-global'
-          ? `Update from v${inst.plugin_version} → v${target} (npm i -g --ignore-scripts awb-agent-manager@latest, then restart).`
-          : `Update from v${inst.plugin_version} → v${target} (git pull + npm ci + build, then re-exec).`,
+          ? translate('Update from v{0} → v{1} (npm i -g --ignore-scripts awb-agent-manager@latest, then restart).', { 0: inst.plugin_version, 1: target })
+          : translate('Update from v{0} → v{1} (git pull + npm ci + build, then re-exec).', { 0: inst.plugin_version, 1: target }),
       confirm:
         inst.install_mode === 'npm-global'
-          ? 'Update this manager? It will reinstall from npm (npm i -g --ignore-scripts awb-agent-manager@latest) and restart. ' + INTERRUPTED_WORK_NOTE
-          : 'Update this manager? It will pull the latest source, rebuild, and restart. ' + INTERRUPTED_WORK_NOTE,
+          ? translate('Update this manager? It will reinstall from npm (npm i -g --ignore-scripts awb-agent-manager@latest) and restart. ') + translate(INTERRUPTED_WORK_NOTE)
+          : translate('Update this manager? It will pull the latest source, rebuild, and restart. ') + translate(INTERRUPTED_WORK_NOTE),
     };
   }
   if (inst.update_available === undefined) {
-    return { kind: 'unknown', label: '업데이트 확인 불가', title: '이 매니저는 업데이트 확인을 보고하지 않는다 (구버전).' };
+    return { kind: 'unknown', label: translate('업데이트 확인 불가'), title: translate('이 매니저는 업데이트 확인을 보고하지 않는다 (구버전).') };
   }
-  return { kind: 'latest', label: '최신', title: '올릴 것이 없다.' };
+  return { kind: 'latest', label: translate('최신'), title: translate('올릴 것이 없다.') };
 }
 
 /** 버전 옆 배지 문구 — restart 가 필요할 때만. */
 export function installedVersionBadge(inst: ManagerUpdateActionInput): string | null {
   if (!inst.restart_required || !inst.installed_version) return null;
-  return `installed v${inst.installed_version} — restart required`;
+  return translate('installed v{0} — restart required', { 0: inst.installed_version });
 }
 
 /**
@@ -83,7 +84,7 @@ export function updateFailureBadge(inst: ManagerUpdateActionInput): { label: str
   if (!failed && !reason) return null;
   const skipped = inst.update_skipped_version;
   return {
-    label: skipped && skipped === failed ? `(v${failed} skipped)` : `(v${failed || '?'} failed before)`,
+    label: skipped && skipped === failed ? translate('(v{0} skipped)', { 0: failed }) : translate('(v{0} failed before)', { 0: failed || '?' }),
     title: [
       failed ? `v${failed} failed to update` : 'A previous update failed',
       reason || 'no reason recorded',

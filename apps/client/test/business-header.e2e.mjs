@@ -1,6 +1,16 @@
 // Headers need height, hit-target and clipped-control checks, not just document scrollWidth.
 import { test, expect } from '@playwright/test';
 import { cliCatalog } from '../src/cli/catalog.ts';
+import english from '../src/i18n/locales/en.json' with { type: 'json' };
+import korean from '../src/i18n/locales/ko.json' with { type: 'json' };
+import japanese from '../src/i18n/locales/ja.json' with { type: 'json' };
+import chinese from '../src/i18n/locales/zh-CN.json' with { type: 'json' };
+const catalogs = { en: english, ko: korean, ja: japanese, 'zh-CN': chinese };
+let activeLocale = 'en';
+function ui(key, values = {}) {
+  return (catalogs[activeLocale][key] ?? english[key] ?? key).replace(/\{(\w+)\}/g, (slot, name) => Object.hasOwn(values, name) ? String(values[name]) : slot);
+}
+test.beforeEach(() => { activeLocale = 'en'; });
 
 const account = { id: 'business-header-account', name: 'Personal' };
 const longName = '해외에서 운영하는 아주 긴 이름의 비즈니스 International Product and Customer Operations LLC';
@@ -10,10 +20,11 @@ const campaign = { id: 'campaign-header', account_id: account.id, name: longName
 async function fixture(page, permissions = ['business.manage', 'marketing.manage']) {
   const errors = []; const requests = [];
   page.on('pageerror', e => errors.push(e.message));
-  await page.addInitScript(accountId => {
+  await page.addInitScript(({ accountId, locale }) => {
+    localStorage.setItem('awb.locale', locale);
     localStorage.setItem('auth_token', 'header-test'); localStorage.setItem('currentAccountId', accountId);
     window.EventSource = class extends EventTarget { readyState = 1; close() {} };
-  }, account.id);
+  }, { accountId: account.id, locale: activeLocale });
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname.replace(/^\/api/, ''); requests.push(path);
     let body = [];
@@ -69,26 +80,28 @@ async function expectHeaderFits(page) {
   }
 }
 
-for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 1024, height: 768 }, { width: 1440, height: 900 }, { width: 667, height: 375 }]) {
-  test(`Business headers keep navigation and actions usable at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
+const sizes = [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 1024, height: 768 }, { width: 1440, height: 900 }, { width: 667, height: 375 }];
+for (const [locale, size] of ['en', 'ko', 'ja', 'zh-CN'].flatMap(locale => (locale === 'en' ? sizes : [sizes[0], sizes[2], sizes[5]]).map(size => [locale, size]))) {
+  test(`Business headers keep navigation and actions usable in ${locale} at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
+    activeLocale = locale;
     await page.setViewportSize(size);
     const f = await fixture(page);
     for (const [path, title] of [
-      ['/business?company=company-header', '비즈니스 전체 흐름'],
-      ['/business/operations?company=company-header&stage=growth', '운영 워크플로'],
-      ['/business/connectors?company=company-header', '커넥터'],
-      ['/business/mail', '비즈니스 메일'],
-      ['/marketing', 'Marketing'],
-      ['/marketing/contacts', 'Marketing Contacts'],
+      ['/business?company=company-header', ui("비즈니스 전체 흐름")],
+      ['/business/operations?company=company-header&stage=growth', ui("운영 워크플로")],
+      ['/business/connectors?company=company-header', ui("커넥터")],
+      ['/business/mail', ui("비즈니스 메일")],
+      ['/marketing', ui('Marketing')],
+      ['/marketing/contacts', ui('Marketing Contacts')],
       ['/marketing/campaign-header?tab=audit', longName],
     ]) {
       await page.goto(path);
       await expect(page.locator('.business-page-heading h1')).toHaveText(title);
-      if (path.includes('company=')) await expect(page.getByLabel('관리할 회사')).toHaveValue(company.id);
+      if (path.includes('company=')) await expect(page.getByLabel(ui("관리할 회사"))).toHaveValue(company.id);
       await expectHeaderFits(page);
       const file = path.split('?')[0].replaceAll('/', '-');
       await page.screenshot({ path: testInfo.outputPath(`${file}.png`) });
-      const menu = page.getByRole('button', { name: `${title} 메뉴`, exact: true });
+      const menu = page.getByRole('button', { name: ui("{0} 메뉴", {0: title}), exact: true });
       await menu.click();
       const panel = page.locator('.business-heading-actions .awb-session-menu-panel');
       await expect(panel).toBeInViewport();
@@ -102,7 +115,7 @@ for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { 
       await expect(menu).toBeFocused();
       await expect(menu).toHaveAttribute('aria-expanded', 'false');
       if (path.includes('/operations')) {
-        const tabs = page.getByRole('group', { name: '운영 영역' });
+        const tabs = page.getByRole('group', { name: ui("운영 영역") });
         const active = tabs.locator('[aria-pressed=true]');
         const tabBounds = await tabs.boundingBox(); const activeBounds = await active.boundingBox();
         expect(tabBounds.height).toBeLessThanOrEqual(60);
@@ -111,22 +124,22 @@ for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { 
         await expect(page.locator('.business-operations-heading')).toBeInViewport();
       }
       if (path === '/business/mail') {
-        await expect(page.getByRole('region', { name: '통합 메일 목록' })).toBeInViewport();
-        await page.getByRole('button', { name: '필터', exact: true }).click();
-        await page.getByLabel('모든 업무 용도', { exact: true }).selectOption('accounting');
-        await page.getByRole('button', { name: '필터 (1)', exact: true }).click();
-        await expect(page.getByLabel('모든 업무 용도', { exact: true })).toBeHidden();
+        await expect(page.getByRole('region', { name: ui("통합 메일 목록") })).toBeInViewport();
+        await page.getByRole('button', { name: ui("필터"), exact: true }).click();
+        await page.getByLabel(ui("모든 업무 용도"), { exact: true }).selectOption('accounting');
+        await page.getByRole('button', { name: ui('필터') + ' (1)', exact: true }).click();
+        await expect(page.getByLabel(ui("모든 업무 용도"), { exact: true })).toBeHidden();
         await expect(page).toHaveURL(/purpose=accounting/);
         await menu.click();
-        await page.getByRole('button', { name: '연결 관리 (1)', exact: true }).click();
-        await expect(page.getByRole('region', { name: '메일 연결', exact: true })).toBeVisible();
+        await page.getByRole('button', { name: ui('연결 관리 (') + '1)', exact: true }).click();
+        await expect(page.getByRole('region', { name: ui("메일 연결"), exact: true })).toBeVisible();
         await expect(menu).toHaveAttribute('aria-expanded', 'false');
       }
       if (path.includes('/campaign-header')) {
         await menu.click();
-        await panel.getByRole('button', { name: '일시정지', exact: true }).click();
-        await expect(page.getByRole('dialog', { name: '캠페인 일시정지', exact: true })).toBeVisible();
-        await page.getByRole('button', { name: '취소', exact: true }).click();
+        await panel.getByRole('button', { name: ui("일시정지"), exact: true }).click();
+        await expect(page.getByRole('dialog', { name: ui('캠페인 {0}', {0: ui('일시정지')}), exact: true })).toBeVisible();
+        await page.getByRole('button', { name: ui("취소"), exact: true }).click();
         await expect(menu).toHaveAttribute('aria-expanded', 'false');
       }
       expect(f.errors).toEqual([]);
@@ -138,23 +151,23 @@ test('Business stage navigation survives rotation and menus preserve company con
   const f = await fixture(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/business/operations?company=company-header&stage=growth');
-  await expect(page.getByLabel('관리할 회사')).toHaveValue(company.id);
+  await expect(page.getByLabel(ui("관리할 회사"))).toHaveValue(company.id);
   for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(size);
     await expectHeaderFits(page);
-    const tabs = page.getByRole('group', { name: '운영 영역' });
+    const tabs = page.getByRole('group', { name: ui("운영 영역") });
     await expect.poll(() => tabs.evaluate(n => {
       const a = n.querySelector('[aria-pressed=true]').getBoundingClientRect(); const b = n.getBoundingClientRect();
       return a.left >= b.left && a.right <= b.right + 1;
     })).toBe(true);
   }
-  await page.getByRole('navigation', { name: 'Business 메뉴' }).getByRole('link', { name: '커넥터', exact: true }).click();
+  await page.getByRole('navigation', { name: ui("Business 메뉴") }).getByRole('link', { name: ui("커넥터"), exact: true }).click();
   await expect(page).toHaveURL(/company=company-header/);
-  await page.getByRole('button', { name: '커넥터 메뉴', exact: true }).click();
+  await page.getByRole('button', { name: ui('{0} 메뉴', {0: ui('커넥터')}), exact: true }).click();
   const before = f.requests.filter(p => p === '/business/companies/company-header').length;
-  await page.getByRole('button', { name: '워크플로 새로고침', exact: true }).click();
+  await page.getByRole('button', { name: ui("워크플로 새로고침"), exact: true }).click();
   await expect.poll(() => f.requests.filter(p => p === '/business/companies/company-header').length).toBeGreaterThan(before);
-  await page.getByRole('button', { name: '회사 추가', exact: true }).click();
+  await page.getByRole('button', { name: ui("회사 추가"), exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   expect(f.errors).toEqual([]);
 });
@@ -164,14 +177,14 @@ test('Marketing-only permissions keep Business navigation and menus scoped', asy
   await page.setViewportSize({ width: 320, height: 568 });
   await page.goto('/marketing/campaign-header?tab=audit');
   await expect(page.locator('.business-page-heading h1')).toHaveText(longName);
-  await expect(page.getByRole('navigation', { name: 'Business 메뉴' }).getByRole('link')).toHaveCount(1);
-  await page.getByRole('button', { name: `${longName} 메뉴`, exact: true }).click();
-  await expect(page.locator('.business-heading-menu-actions').getByRole('link', { name: '← 목록' })).toBeVisible();
-  await expect(page.locator('.business-page-heading').getByRole('button', { name: /지금 실행|설정|삭제/ })).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: ui("Business 메뉴") }).getByRole('link')).toHaveCount(1);
+  await page.getByRole('button', { name: ui("{0} 메뉴", {0: longName}), exact: true }).click();
+  await expect(page.locator('.business-heading-menu-actions').getByRole('link', { name: ui("← 목록") })).toBeVisible();
+  await expect(page.locator('.business-page-heading').getByRole('button', { name: new RegExp([ui('지금 실행'), ui('설정'), ui('삭제')].join('|')) })).toHaveCount(0);
   await page.goto('/marketing');
-  await page.getByRole('button', { name: 'Marketing 메뉴', exact: true }).click();
-  await expect(page.locator('.business-heading-menu-info')).toContainText('사람이 승인합니다');
-  await expect(page.getByRole('button', { name: '+ 새 캠페인', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: ui('{0} 메뉴', {0: ui('Marketing')}), exact: true }).click();
+  await expect(page.locator('.business-heading-menu-info')).toContainText(ui("캠페인 에이전트가 주기마다 채널을 찾고 글 · 메일 · 예산을 제안합니다. 돈 · 외부 발신 · 채널 개설은 사람이 승인합니다."));
+  await expect(page.getByRole('button', { name: ui("+ 새 캠페인"), exact: true })).toHaveCount(0);
   expect(f.requests.some(p => p.startsWith('/business/'))).toBe(false);
   expect(f.errors).toEqual([]);
 });

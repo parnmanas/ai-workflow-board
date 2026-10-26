@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api, getActiveAccountId } from '../../api';
 import { tokens } from '../../tokens';
@@ -40,6 +42,7 @@ function makeLocalId(): string {
 }
 
 export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
+  useLocale();
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -165,7 +168,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
       if (err?.name === 'AbortError') return; // user removed mid-upload
       updateOne(localId, {
         status: 'error',
-        errorMsg: err?.message || 'Upload failed',
+        errorMsg: err?.message || translate('Upload failed'),
       });
     }
   }, [roomId, updateOne]);
@@ -178,11 +181,11 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
     const rejected: string[] = [];
     for (const f of files) {
       if (accepted.length >= remainingSlots) {
-        rejected.push(`${f.name}: too many attachments (max ${MAX_CLIENT_ATTACHMENTS})`);
+        rejected.push(translate('{0}: too many attachments (max {1})', { 0: f.name, 1: MAX_CLIENT_ATTACHMENTS }));
         continue;
       }
       if (f.size > MAX_CLIENT_ATTACHMENT_BYTES) {
-        rejected.push(`${f.name}: exceeds 10 MB limit`);
+        rejected.push(translate('{0}: exceeds 10 MB limit', { 0: f.name }));
         continue;
       }
       accepted.push(f);
@@ -340,8 +343,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             pointerEvents: 'none',
           }}
         >
-          Drop to attach
-        </div>
+          {translate('Drop to attach')}</div>
       )}
 
       {pendingAttachments.length > 0 && (
@@ -400,8 +402,8 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={!canAttach}
-            aria-label="Attach files"
-            title="Attach files"
+            aria-label={translate('Attach files')}
+            title={translate('Attach files')}
             style={{
               background: 'transparent',
               border: 'none',
@@ -433,7 +435,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             // handleSend (`|| sending` early-return) and by the Send button's
             // canSend gate, so keeping the field editable is safe.
             ariaLabel="Message"
-            placeholder="Type a message…"
+            placeholder={translate('Type a message…')}
             style={{
               flex: 1,
               background: tokens.colors.surface,
@@ -455,8 +457,8 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
           <button
             onClick={handleSend}
             disabled={!canSend}
-            aria-label={isMobile ? 'Send message' : undefined}
-            title={hasUploading ? 'Wait for uploads to finish' : undefined}
+            aria-label={isMobile ? translate('Send message') : undefined}
+            title={hasUploading ? translate('Wait for uploads to finish') : undefined}
             style={{
               background: tokens.colors.accent,
               color: 'white',
@@ -473,12 +475,11 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
               height: 44,
             }}
           >
-            {isMobile ? '▶' : 'Send Message'}
+            {isMobile ? '▶' : translate('Send Message')}
           </button>
         </div>
         <div className="awb-chat-composer-help" style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs }}>
-          Enter to send · Shift+Enter for new line · @ to tag · Drop or paste files to attach
-        </div>
+          {translate('Enter to send · Shift+Enter for new line · @ to tag · Drop or paste files to attach')}</div>
       </div>
     </div>
   );
@@ -494,6 +495,7 @@ interface PendingAttachmentChipProps {
 }
 
 function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChipProps) {
+  useLocale();
   const isImg = !!entry.previewUrl;
   return (
     <div
@@ -517,7 +519,7 @@ function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChi
         <button
           type="button"
           onClick={onOpen}
-          aria-label={`Preview ${entry.fileName}`}
+          aria-label={translate('Preview {0}', { 0: entry.fileName })}
           style={{ display: 'block', width: '100%', height: '100%', padding: 0, border: 'none', background: 'transparent', cursor: onOpen ? 'zoom-in' : 'default' }}
         >
           <img
@@ -550,7 +552,7 @@ function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChi
           </div>
           <div style={{ fontSize: 10, color: tokens.colors.textSecondary, marginTop: 2 }}>
             {entry.status === 'error'
-              ? entry.errorMsg || 'Upload failed'
+              ? entry.errorMsg || translate('Upload failed')
               : entry.status === 'uploading'
                 ? `${entry.progress}%`
                 : formatBytes(entry.fileSize)}
@@ -560,7 +562,7 @@ function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChi
       {/* Progress bar overlay for uploading state */}
       {entry.status === 'uploading' && (
         <div
-          aria-label={`Uploading ${entry.fileName} (${entry.progress}%)`}
+          aria-label={translate('Uploading {0} ({1}%)', { 0: entry.fileName, 1: entry.progress })}
           style={{
             position: 'absolute',
             left: 0,
@@ -592,7 +594,7 @@ function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChi
       )}
       {isImg && entry.status === 'error' && (
         <div
-          title={entry.errorMsg || 'Upload failed'}
+          title={entry.errorMsg || translate('Upload failed')}
           style={{
             position: 'absolute',
             inset: 0,
@@ -610,7 +612,7 @@ function PendingAttachmentChip({ entry, onRemove, onOpen }: PendingAttachmentChi
       )}
       <button
         onClick={onRemove}
-        aria-label={`Remove ${entry.fileName}`}
+        aria-label={translate('Remove {0}', { 0: entry.fileName })}
         style={{
           position: 'absolute',
           top: -6,

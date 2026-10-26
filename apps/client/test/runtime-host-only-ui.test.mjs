@@ -32,8 +32,8 @@ test('client has no standalone session routing controls or legacy topology choic
 test('Runtime declaration requires an explicit Host and an absolute working dir', () => {
   const source = read('components/runtime/RuntimeSpecEditor.tsx') + read('components/runtime/RuntimeSelectionFields.tsx');
 
-  assert.match(source, /label="Runtime Host"/);
-  assert.match(source, /value:\s*''\s*,\s*label:\s*'선택…'/);
+  assert.match(source, /label=\{["']Runtime Host["']\}/);
+  assert.match(source, /value:\s*''\s*,\s*label:\s*translate\([\"']선택…[\"']\)/);
   assert.match(source, /isAbsoluteHostPath/);
   assert.match(source, /dirError/);
   assert.doesNotMatch(source, /cli:\s*['"]claude['"]/);

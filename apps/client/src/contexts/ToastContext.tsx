@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { tokens } from '../tokens';
 import {
@@ -39,9 +41,10 @@ const ToastContext = createContext<ToastContextType>({
   toggleMute: () => {},
   playNotifySound: () => {},
 });
-export const useToast = () => useContext(ToastContext);
+export const useToast = () => { useLocale(); return (useContext(ToastContext)); };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
+  useLocale();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextIdRef = useRef(0);
 
@@ -164,15 +167,16 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
  * read as one control shown twice.
  */
 export function NotificationMuteButton() {
+  useLocale();
   const { muted, toggleMute } = useToast();
   return (
     <button
       type="button"
       className="awb-notification-mute"
       onClick={toggleMute}
-      aria-label={muted ? 'Unmute notification sound' : 'Mute notification sound'}
+      aria-label={muted ? translate('Unmute notification sound') : translate('Mute notification sound')}
       aria-pressed={muted}
-      title={muted ? 'Unmute notification sound' : 'Mute notification sound'}
+      title={muted ? translate('Unmute notification sound') : translate('Mute notification sound')}
       style={{
         width: 32, height: 32, flexShrink: 0, borderRadius: tokens.radii.md,
         background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,

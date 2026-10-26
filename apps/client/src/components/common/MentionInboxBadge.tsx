@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { tokens } from '../../tokens';
@@ -17,9 +20,9 @@ interface Props {
  *  source "chat", so a row whose source_type never arrived claimed to be a
  *  chat message and then navigated nowhere. */
 function sourceLabel(sourceType: string | null | undefined): string {
-  if (sourceType === 'comment') return '티켓 코멘트';
-  if (sourceType === 'chat_message') return '채팅';
-  return '알 수 없음';
+  if (sourceType === 'comment') return translate('티켓 코멘트');
+  if (sourceType === 'chat_message') return translate('채팅');
+  return translate('알 수 없음');
 }
 
 /** Empty string for a missing/uninterpretable timestamp so the row omits the
@@ -27,7 +30,7 @@ function sourceLabel(sourceType: string | null | undefined): string {
 function formatMentionTime(value: string | null | undefined): string {
   if (!value) return '';
   const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(getLocaleTag());
 }
 
 /**
@@ -41,6 +44,7 @@ function formatMentionTime(value: string | null | undefined): string {
  * number that will not go away.
  */
 export function MentionInboxBadge({ accountId }: Props) {
+  useLocale();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { unreadCount, unreadItems, hasMoreThanListed, refresh, markRead, markAllRead } = useMentions(accountId);
@@ -83,15 +87,15 @@ export function MentionInboxBadge({ accountId }: Props) {
       return;
     }
 
-    showToast('이 멘션은 연결된 대상이 없습니다', 'error');
+    showToast(translate('이 멘션은 연결된 대상이 없습니다'), 'error');
   };
 
   return (
     <div style={{ position: 'relative' }}>
       <button
         onClick={openInbox}
-        aria-label={unreadCount > 0 ? `읽지 않은 멘션 ${unreadCount}건` : '멘션 함 (읽지 않은 항목 없음)'}
-        title={unreadCount > 0 ? `읽지 않은 멘션 ${unreadCount}건` : '멘션'}
+        aria-label={unreadCount > 0 ? translate('읽지 않은 멘션 {0}건', { 0: unreadCount }) : translate('멘션 함 (읽지 않은 항목 없음)')}
+        title={unreadCount > 0 ? translate('읽지 않은 멘션 {0}건', { 0: unreadCount }) : translate('멘션')}
         style={{
           position: 'relative',
           display: 'flex',
@@ -111,7 +115,7 @@ export function MentionInboxBadge({ accountId }: Props) {
         {/* Same NavBadge every other nav count uses, so "3" here and "3" in
             the nav rows are visually the same object — and it caps at 99+
             instead of stretching the sidebar header. */}
-        {unreadCount > 0 && <NavBadge count={unreadCount} label={`읽지 않은 멘션 ${unreadCount}건`} />}
+        {unreadCount > 0 && <NavBadge count={unreadCount} label={translate('읽지 않은 멘션 {0}건', { 0: unreadCount })} />}
       </button>
 
       {open && (
@@ -143,7 +147,7 @@ export function MentionInboxBadge({ accountId }: Props) {
               padding: '4px 8px', marginBottom: 6,
             }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}>
-                Mentions ({unreadCount})
+                {translate('Mentions (')}{unreadCount})
               </span>
               {unreadCount > 0 && (
                 <button
@@ -156,23 +160,20 @@ export function MentionInboxBadge({ accountId }: Props) {
                     cursor: 'pointer',
                   }}
                 >
-                  Mark all read
-                </button>
+                  {translate('Mark all read')}</button>
               )}
             </div>
 
             {unreadItems.length === 0 ? (
               <div style={{ padding: 16, textAlign: 'center', color: tokens.colors.textMuted, fontSize: 12 }}>
-                No unread mentions.
-              </div>
+                {translate('No unread mentions.')}</div>
             ) : (
               <>
               {/* The list is server-capped; say so instead of letting the
                   header count silently disagree with the rows below it. */}
               {hasMoreThanListed && (
                 <div style={{ padding: '4px 8px 6px', fontSize: 10, color: tokens.colors.textMuted }}>
-                  최근 {unreadItems.length}건만 표시 · 전체 {unreadCount}건
-                </div>
+                  {translate('최근')} {unreadItems.length}{translate('건만 표시 · 전체')} {unreadCount}{translate('건')}</div>
               )}
               {unreadItems.map(item => (
                 <button
@@ -195,7 +196,7 @@ export function MentionInboxBadge({ accountId }: Props) {
                   onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
                 >
                   <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 2 }}>
-                    {item.actor_name || '누군가'} · {sourceLabel(item.source_type)}
+                    {item.actor_name || translate('누군가')} · {sourceLabel(item.source_type)}
                     {formatMentionTime(item.created_at) && ` · ${formatMentionTime(item.created_at)}`}
                   </div>
                   <div style={{
@@ -209,7 +210,7 @@ export function MentionInboxBadge({ accountId }: Props) {
                     {/* The stored preview is a raw slice of the comment /
                         message and still contains `@[user:<uuid>|이름]`
                         tokens, which used to render literally here. */}
-                    {renderMentionPreview(item.preview) || '(내용 없음)'}
+                    {renderMentionPreview(item.preview) || translate('(내용 없음)')}
                   </div>
                 </button>
               ))}

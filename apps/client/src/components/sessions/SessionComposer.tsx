@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import type { AgentSessionCommand } from '../../types';
@@ -91,23 +93,24 @@ export interface VoiceWakeBinding {
 
 /** 깨어 있는 동안의 상태 줄 — 이름 없이 말하면 된다는 것과 언제 잠드는지를 알려 준다. */
 function awakePhaseLabel(phase: ConversationPhase, name: string): string {
-  if (phase === 'listening') return `🟢 ${name} 깨어 있음 — 이름 없이 말하면 됩니다 (${Math.round(WAKE_IDLE_SLEEP_MS / 1000)}초 조용하면 잠듭니다)`;
-  if (phase === 'starting') return `🟢 ${name} 깨어나는 중…`;
+  if (phase === 'listening') return translate('🟢 {0} 깨어 있음 — 이름 없이 말하면 됩니다 ({1}초 조용하면 잠듭니다)', { 0: name, 1: Math.round(WAKE_IDLE_SLEEP_MS / 1000) });
+  if (phase === 'starting') return translate('🟢 {0} 깨어나는 중…', { 0: name });
   return CONVERSATION_PHASE_LABEL[phase];
 }
 
 const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
   off: '',
-  starting: '마이크 준비 중… (처음 한 번은 음성 감지 모델을 받느라 몇 초 걸립니다)',
-  'waiting-gesture': '화면을 한 번 누르면 마이크 소리를 듣기 시작합니다',
-  listening: '🎙 듣는 중 — 말을 멈추면 자동으로 보냅니다',
-  hearing: '🔴 말하는 중…',
-  transcribing: '보내는 중…',
-  'paused-for-reply': '🔈 답을 읽는 중 — 끝나면 다시 듣습니다',
+  get starting() { return translate('마이크 준비 중… (처음 한 번은 음성 감지 모델을 받느라 몇 초 걸립니다)'); },
+  get 'waiting-gesture'() { return translate('화면을 한 번 누르면 마이크 소리를 듣기 시작합니다'); },
+  get listening() { return translate('🎙 듣는 중 — 말을 멈추면 자동으로 보냅니다'); },
+  get hearing() { return translate('🔴 말하는 중…'); },
+  get transcribing() { return translate('보내는 중…'); },
+  get 'paused-for-reply'() { return translate('🔈 답을 읽는 중 — 끝나면 다시 듣습니다'); },
 };
 
 
 export default function SessionComposer({ disabled, busy, placeholder, hint, commands, onSend, onCancel, voiceInput }: SessionComposerProps) {
+  useLocale();
   const [text, setText] = useState('');
   const [images, setImages] = useState<SessionPromptImage[]>([]);
   // 보내기 전에 첨부한 그림을 크게 확인한다(대화 속 첨부와 같은 라이트박스).
@@ -147,15 +150,15 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     for (const file of list) {
       const mime = (file.type || '').toLowerCase();
       if (!ACCEPTED_IMAGE_MIMES.has(mime)) {
-        error = `이미지만 보낼 수 있습니다 (png/jpeg/gif/webp/bmp/avif) — ${file.name || '이름 없음'} 건너뜀`;
+        error = translate('이미지만 보낼 수 있습니다 (png/jpeg/gif/webp/bmp/avif) — {0} 건너뜀', { 0: file.name || translate('이름 없음') });
         continue;
       }
       if (file.size > MAX_IMAGE_BYTES) {
-        error = `8MB 이하만 보낼 수 있습니다 — ${file.name || '이름 없음'} 건너뜀`;
+        error = translate('8MB 이하만 보낼 수 있습니다 — {0} 건너뜀', { 0: file.name || translate('이름 없음') });
         continue;
       }
       if (imagesRef.current.length + pendings.length >= MAX_IMAGES_PER_PROMPT) {
-        error = `한 번에 ${MAX_IMAGES_PER_PROMPT}장까지 보낼 수 있습니다`;
+        error = translate('한 번에 {0}장까지 보낼 수 있습니다', { 0: MAX_IMAGES_PER_PROMPT });
         break;
       }
       pendings.push({ localId: mkId(), file, mime, previewUrl: URL.createObjectURL(file) });
@@ -169,14 +172,14 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     for (const p of pendings) {
       try {
         const base64 = await readFileAsBase64(p.file);
-        if (!base64) throw new Error('empty');
+        if (!base64) throw new Error(translate('empty'));
         setImages((prev) => prev.map((img) => (img.localId === p.localId
           ? { base64, mime_type: p.mime, name: p.file.name || 'image', size: p.file.size, previewUrl: p.previewUrl, localId: p.localId }
           : img)));
       } catch {
         URL.revokeObjectURL(p.previewUrl);
         setImages((prev) => prev.filter((img) => img.localId !== p.localId));
-        setAttachError(`읽지 못한 파일이 있습니다 — ${p.file.name || '이름 없음'}`);
+        setAttachError(translate('읽지 못한 파일이 있습니다 — {0}', { 0: p.file.name || translate('이름 없음') }));
       }
     }
   }, []);
@@ -194,7 +197,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     void addFiles(files);
   }, [addFiles]);
 
-  const slash = useMemo(() => matchSlashCommands(text, commands ?? []), [text, commands]);
+  const slash = useMemo(() => matchSlashCommands(text, commands ?? []), [text, commands, getLocale()]);
   const popupOpen = slash.active && slash.matches.length > 0 && dismissedFor !== text;
   const commandListRef = useRef<HTMLUListElement>(null);
   useEffect(() => { setSelected(0); }, [slash.query, slash.matches.length]);
@@ -336,11 +339,11 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, marginBottom: 6 }}>{hint}</div>
       )}
       {images.length > 0 && (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }} aria-label="Attached images">
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }} aria-label={translate('Attached images')}>
           {images.map((img) => (
             <div
               key={img.localId}
-              title={img.name || '읽는 중…'}
+              title={img.name || translate('읽는 중…')}
               style={{
                 position: 'relative', width: 56, height: 56, borderRadius: tokens.radii.md, overflow: 'hidden',
                 border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface,
@@ -349,15 +352,15 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
               <button
                 type="button"
                 onClick={() => setPreviewId(img.localId)}
-                aria-label={`Preview image ${img.name || 'attached'}`}
+                aria-label={translate('Preview image {0}', { 0: img.name || 'attached' })}
                 style={{ display: 'block', width: '100%', height: '100%', padding: 0, border: 'none', background: 'transparent', cursor: 'zoom-in' }}
               >
-                <img src={img.previewUrl} alt={img.name || 'attached image'} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: img.base64 ? 1 : 0.5, display: 'block' }} />
+                <img src={img.previewUrl} alt={img.name || translate('attached image')} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: img.base64 ? 1 : 0.5, display: 'block' }} />
               </button>
               <button
                 type="button"
                 onClick={() => removeImage(img.localId)}
-                aria-label={`Remove image ${img.name || 'attached'}`}
+                aria-label={translate('Remove image {0}', { 0: img.name || 'attached' })}
                 style={{
                   position: 'absolute', top: 0, right: 0, border: 'none', background: 'rgba(0,0,0,0.55)', color: '#fff',
                   fontSize: 12, lineHeight: 1, cursor: 'pointer', padding: '2px 5px', borderBottomLeftRadius: 6,
@@ -371,7 +374,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       )}
       {previewIndex >= 0 && (
         <MediaLightbox
-          items={images.map((img) => ({ src: img.previewUrl, kind: 'image' as const, caption: img.name || '첨부 이미지', filename: img.name || 'image' }))}
+          items={images.map((img) => ({ src: img.previewUrl, kind: 'image' as const, caption: img.name || translate('첨부 이미지'), filename: img.name || 'image' }))}
           index={previewIndex}
           onIndexChange={(next) => setPreviewId(images[next]?.localId ?? null)}
           onClose={() => setPreviewId(null)}
@@ -404,21 +407,20 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             <button
               type="button"
               onClick={() => wakeRef.current?.onSleep('mic-off')}
-              title="지금 잠듭니다 — 다시 이름을 부르면 깨어납니다"
+              title={translate('지금 잠듭니다 — 다시 이름을 부르면 깨어납니다')}
               style={{
                 marginLeft: 'auto', flexShrink: 0, padding: '1px 8px', fontSize: 11.5, borderRadius: 999, cursor: 'pointer',
                 border: `1px solid ${tokens.colors.border}`, background: 'transparent', color: tokens.colors.textSecondary,
               }}
             >
-              💤 잠들기
-            </button>
+              {translate('💤 잠들기')}</button>
           )}
         </div>
       )}
       {popupOpen && (
         <ul
           role="listbox"
-          aria-label="Slash commands"
+          aria-label={translate('Slash commands')}
           style={{
             listStyle: 'none', margin: '0 0 6px', padding: 4, maxHeight: 220, overflowY: 'auto', maxWidth: 520,
             border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, background: tokens.colors.surfaceCard,
@@ -448,8 +450,8 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         {!!commands?.length && (
           <button
             type="button"
-            aria-label="Browse slash commands"
-            title="Browse this CLI's commands (or type /). Terminal-only commands may be unavailable here."
+            aria-label={translate('Browse slash commands')}
+            title={translate('Browse this CLI\'s commands (or type /). Terminal-only commands may be unavailable here.')}
             disabled={locked || (!!text.trim() && !slash.active)}
             onClick={() => { setText('/'); setDismissedFor(null); ref.current?.focus(); }}
             style={{ height: 40, minWidth: 40, borderRadius: tokens.radii.lg, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textSecondary }}
@@ -463,15 +465,15 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           accept={ACCEPT_ATTR}
           multiple
           style={{ display: 'none' }}
-          aria-label="Attach images"
+          aria-label={translate('Attach images')}
           onChange={(e) => { void addFiles(e.target.files ?? []); e.target.value = ''; }}
         />
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
           disabled={locked}
-          title="이미지 첨부 (png/jpeg/gif/webp/bmp/avif, 장당 8MB, 최대 5장)"
-          aria-label="Attach images"
+          title={translate('이미지 첨부 (png/jpeg/gif/webp/bmp/avif, 장당 8MB, 최대 5장)')}
+          aria-label={translate('Attach images')}
           style={{
             height: 40, minWidth: 40, padding: '0 10px', borderRadius: tokens.radii.lg,
             border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface,
@@ -486,11 +488,11 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             type="button"
             onClick={conversation.toggle}
             disabled={disabled}
-            aria-label={conversing ? 'Stop conversation mode' : 'Start conversation mode'}
+            aria-label={conversing ? translate('Stop conversation mode') : translate('Start conversation mode')}
             aria-pressed={conversing}
             title={conversing
-              ? '대화 모드 끄기 — 마이크를 닫습니다'
-              : '대화 모드 — 켜 두고 말하면, 말을 멈출 때마다 자동으로 보냅니다'}
+              ? translate('대화 모드 끄기 — 마이크를 닫습니다')
+              : translate('대화 모드 — 켜 두고 말하면, 말을 멈출 때마다 자동으로 보냅니다')}
             style={{
               height: 40, minWidth: 40, padding: '0 10px', borderRadius: tokens.radii.lg,
               border: `1px solid ${conversing ? tokens.colors.danger : tokens.colors.border}`,
@@ -513,7 +515,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           rows={1}
           disabled={disabled}
           placeholder={placeholder}
-          aria-label="Prompt"
+          aria-label={translate('Prompt')}
           aria-expanded={popupOpen}
           aria-autocomplete={commands && commands.length ? 'list' : undefined}
           onChange={(e) => { setText(e.target.value); if (dismissedFor !== null && e.target.value !== dismissedFor) setDismissedFor(null); }}
@@ -553,15 +555,14 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
               cursor: 'pointer',
             }}
           >
-            Cancel
-          </button>
+            {translate('Cancel')}</button>
         )}
         <button
           type="button"
           className="awb-composer-send"
           onClick={() => void submit()}
           disabled={locked || !canSend || stillReading}
-          title={busy ? '진행 중인 턴에 바로 보냅니다 — 에이전트가 작업 중에 읽고 이어서 답합니다' : undefined}
+          title={busy ? translate('진행 중인 턴에 바로 보냅니다 — 에이전트가 작업 중에 읽고 이어서 답합니다') : undefined}
           style={{
             height: 40,
             padding: '0 16px',
@@ -574,11 +575,11 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             cursor: locked || !canSend || stillReading ? 'not-allowed' : 'pointer',
           }}
         >
-          {sending ? 'Sending…' : 'Send'}
+          {sending ? translate('Sending…') : translate('Send')}
         </button>
       </div>
       <div className="awb-composer-help" style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
-        {busy ? 'Enter sends into the running turn — the agent reads it mid-task' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 conversation mode: just talk, pause to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
+        {busy ? translate('Enter sends into the running turn — the agent reads it mid-task') : translate('Enter to send')} {translate('· Shift+Enter for a new line · 📎 or paste images to attach')}{showMic ? translate(' · 🎙 conversation mode: just talk, pause to send') : ''}{commands && commands.length ? translate(' · type / for {0} commands', { 0: commands.length }) : translate(' · slash commands go straight to the CLI')}
       </div>
     </div>
   );

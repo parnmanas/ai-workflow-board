@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // QA / Security on_failure_ticket ⇄ editor form (docs/tickets.md → QA / Security
 // failure tickets). Boards are gone: the auto-filed fix ticket lands in the
 // account pool with a status, tags and an optional project.
@@ -134,5 +135,5 @@ test('project select keeps an unknown stored id visible instead of snapping to n
   const withUnknown = projectSelectOptions(projects, 'deleted-project-id', '(none)');
   assert.equal(withUnknown.length, 4);
   assert.equal(withUnknown[3].value, 'deleted-project-id');
-  assert.match(withUnknown[3].label, /알 수 없는 프로젝트/);
+  assert.match(withUnknown[3].label, uiPattern('알 수 없는 프로젝트 ({0}…)', {0: 'deleted-'}));
 });

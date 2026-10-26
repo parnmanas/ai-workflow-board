@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 실브라우저(jsdom) 스모크: TicketArtifact 컨테이너의 SSE 실시간 갱신 + 단절 배너
 // (종합 상태 설계 · F2-3 · 98d0936e).
 //
@@ -96,7 +97,7 @@ test('SSE 단절 배너: 미연결이면 노출, onopen 후 사라짐', async ()
     await flush();
 
     // onopen 전 → isConnected=false → 단절 배너 노출.
-    assert.match(view.container.textContent, /실시간 갱신이 일시중단/);
+    assert.match(view.container.textContent, uiPattern("연결이 끊겨 실시간 갱신이 일시중단됐습니다. 재연결되면 자동으로 최신 내용을 불러옵니다."));
 
     const es = FakeEventSource.instances[0];
     await act(async () => {
@@ -104,7 +105,7 @@ test('SSE 단절 배너: 미연결이면 노출, onopen 후 사라짐', async ()
       await Promise.resolve();
     });
 
-    assert.doesNotMatch(view.container.textContent, /실시간 갱신이 일시중단/, 'onopen 후 배너 사라짐');
+    assert.doesNotMatch(view.container.textContent, uiPattern("연결이 끊겨 실시간 갱신이 일시중단됐습니다. 재연결되면 자동으로 최신 내용을 불러옵니다."), 'onopen 후 배너 사라짐');
 
     view.unmount();
   } finally {

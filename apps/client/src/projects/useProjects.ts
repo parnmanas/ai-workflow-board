@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import type { Project } from '../types';
@@ -36,7 +37,7 @@ export function useProjects(accountId: string | null | undefined) {
       setProjects(await fetchProjects(accountId));
       setError(null);
     } catch (e: any) {
-      setError(e?.message || '프로젝트 목록을 불러오지 못했습니다');
+      setError(e?.message || translate('프로젝트 목록을 불러오지 못했습니다'));
     } finally {
       setLoading(false);
     }
@@ -48,7 +49,7 @@ export function useProjects(accountId: string | null | undefined) {
     setLoading(true);
     fetchProjects(accountId)
       .then((rows) => { if (!cancelled) { setProjects(rows); setError(null); } })
-      .catch((e) => { if (!cancelled) setError(e?.message || '프로젝트 목록을 불러오지 못했습니다'); })
+      .catch((e) => { if (!cancelled) setError(e?.message || translate('프로젝트 목록을 불러오지 못했습니다')); })
       .finally(() => { if (!cancelled) setLoading(false); });
     const onChanged = () => { void reload(); };
     window.addEventListener(PROJECTS_CHANGED, onChanged);

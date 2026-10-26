@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -47,14 +49,14 @@ function degradedReason(inst: AgentManagerInstance): string | null {
   // 를 null 로 지우므로, 회복된 호스트는 여기서 사라진다.
   if (inst.last_spawn_error) {
     const cli = inst.last_spawn_error_cli ? `${inst.last_spawn_error_cli} ` : '';
-    return `${cli}spawn failing: ${inst.last_spawn_error}`;
+    return translate('{0}spawn failing: {1}', { 0: cli, 1: inst.last_spawn_error });
   }
   const breakerCount = inst.open_breaker_count ?? 0;
   const errorAt = inst.last_error_upload_at ? new Date(inst.last_error_upload_at).getTime() : 0;
   const recentError = Number.isFinite(errorAt) && errorAt > 0 && Date.now() - errorAt <= RECENT_ERROR_WINDOW_MS;
   if (breakerCount > 0 && recentError) return `${breakerCount} open breaker(s); recent error upload`;
-  if (breakerCount > 0) return `${breakerCount} open circuit breaker(s)`;
-  if (recentError) return `recent error upload (${formatRelative(inst.last_error_upload_at)})`;
+  if (breakerCount > 0) return translate('{0} open circuit breaker(s)', { 0: breakerCount });
+  if (recentError) return translate('recent error upload ({0})', { 0: formatRelative(inst.last_error_upload_at) });
   return null;
 }
 
@@ -64,13 +66,13 @@ function formatRelative(ts: string | null | undefined): string {
     const then = new Date(ts).getTime();
     if (!Number.isFinite(then)) return ts;
     const diffSec = Math.max(0, Math.round((Date.now() - then) / 1000));
-    if (diffSec < 60) return `${diffSec}s ago`;
+    if (diffSec < 60) return translate('{0}s ago', { 0: diffSec });
     const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffMin < 60) return translate('{0}m ago', { 0: diffMin });
     const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
+    if (diffHr < 24) return translate('{0}h ago', { 0: diffHr });
     const diffDay = Math.floor(diffHr / 24);
-    return `${diffDay}d ago`;
+    return translate('{0}d ago', { 0: diffDay });
   } catch {
     return ts ?? '—';
   }
@@ -85,9 +87,9 @@ function formatDuration(startIso: string): string {
     const min = Math.floor(sec / 60);
     if (min < 60) return `${min}m`;
     const hr = Math.floor(min / 60);
-    if (hr < 24) return `${hr}h ${min % 60}m`;
+    if (hr < 24) return translate('{0}h {1}m', { 0: hr, 1: min % 60 });
     const days = Math.floor(hr / 24);
-    return `${days}d ${hr % 24}h`;
+    return translate('{0}d {1}h', { 0: days, 1: hr % 24 });
   } catch {
     return '—';
   }
@@ -100,6 +102,7 @@ interface InstanceRowProps {
 }
 
 function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
+  useLocale();
   const stale = Date.now() - new Date(inst.last_seen_at).getTime() > 60_000;
   const degraded = degradedReason(inst);
   return (
@@ -134,11 +137,10 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
               flexShrink: 0,
             }}
           >
-            Runtime Host
-          </span>
+            {"Runtime Host"}</span>
           <span
             style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-            title={inst.agent_name && inst.agent_name !== inst.hostname ? `host: ${inst.hostname}` : inst.hostname}
+            title={inst.agent_name && inst.agent_name !== inst.hostname ? translate('host: {0}', { 0: inst.hostname }) : inst.hostname}
           >
             {inst.agent_name || inst.hostname}
           </span>
@@ -148,8 +150,7 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
             style={{ fontSize: 10, fontWeight: 700, color: tokens.colors.warning, textTransform: 'uppercase' }}
             title={degraded}
           >
-            degraded
-          </span>
+            {translate('degraded')}</span>
         )}
         <span
           style={{
@@ -159,14 +160,14 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
             background: stale || degraded ? tokens.colors.warning : tokens.colors.success,
             flexShrink: 0,
           }}
-          title={stale ? 'Heartbeat stale' : degraded || 'Heartbeating'}
+          title={stale ? translate('Heartbeat stale') : degraded || translate('Heartbeating')}
         />
       </div>
       <div style={{ marginTop: 4, fontSize: 11, color: tokens.colors.textMuted }}>
-        v{inst.plugin_version} · {inst.cli_adapters.join(', ') || 'CLI 정보 없음'}
+        {translate('v')}{inst.plugin_version} · {inst.cli_adapters.join(', ') || translate('CLI 정보 없음')}
       </div>
       <div style={{ marginTop: 2, fontSize: 11, color: tokens.colors.textMuted }}>
-        last seen {formatRelative(inst.last_seen_at)} · up {formatDuration(inst.started_at)}
+        {translate('last seen')} {formatRelative(inst.last_seen_at)} {translate('· up')} {formatDuration(inst.started_at)}
       </div>
     </button>
   );
@@ -176,6 +177,7 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
  *  (ticket 20fff298). 페이지 전체를 띄우지 않고 이 컴포넌트만 렌더하면 되므로,
  *  버튼 렌더 조건을 소스 정규식이 아니라 실제 DOM 으로 단언할 수 있다. */
 export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance; onRenamed?: (hostId: string, name: string) => void }) {
+  useLocale();
   const { showToast } = useToast();
   const confirm = useConfirm();
   const degraded = degradedReason(inst);
@@ -206,7 +208,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
       const data = await api.getAgentManagerInstanceLogs(inst.instance_id, 100);
       setLogs(data);
     } catch (err: any) {
-      showToast(`Failed to load logs: ${err?.message || err}`, 'error');
+      showToast(translate('Failed to load logs: {0}', { 0: err?.message || err }), 'error');
       setLogs([]);
     }
   }, [inst.instance_id, showToast]);
@@ -224,9 +226,9 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
     const id = inst.instance_id;
     if (restartPending) return;
     const ok = await confirm({
-      title: 'Restart manager',
-      message: 'Restart this manager? Every in-flight subagent, chat session, and ticket session on this host will be terminated. The manager will re-exec in place and reappear in ~30s.',
-      confirmLabel: 'Restart',
+      title: translate('Restart manager'),
+      message: translate('Restart this manager? Every in-flight subagent, chat session, and ticket session on this host will be terminated. The manager will re-exec in place and reappear in ~30s.'),
+      confirmLabel: translate('Restart'),
     });
     if (!ok) return;
     if (!startInstanceOp(id, INSTANCE_OP.restart)) return;
@@ -234,11 +236,11 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
       const resp: any = await api.restartAgentManagerInstance(id);
       const idTail = typeof resp?.command_id === 'string' ? ` (id=${resp.command_id.slice(0, 8)})` : '';
       showToast(
-        `${resp?.message || 'restart_manager dispatched'}${idTail} — manager will reappear in ~30s.`,
+        translate('{0}{1} — manager will reappear in ~30s.', { 0: resp?.message || translate('restart_manager dispatched'), 1: idTail }),
         'success',
       );
     } catch (err: any) {
-      showToast(`Restart failed: ${err?.message || err}`, 'error');
+      showToast(translate('Restart failed: {0}', { 0: err?.message || err }), 'error');
     } finally {
       finishInstanceOp(id, INSTANCE_OP.restart);
     }
@@ -249,12 +251,12 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
     if (updatePending) return;
     const action = managerUpdateAction(inst);
     const ok = await confirm({
-      title: action.kind === 'restart' ? 'Restart manager' : 'Update manager',
+      title: action.kind === 'restart' ? translate('Restart manager') : translate('Update manager'),
       message:
         action.kind === 'restart' || action.kind === 'update'
           ? action.confirm
-          : 'Update this manager? It will reinstall from npm and restart.',
-      confirmLabel: action.kind === 'restart' ? 'Restart' : 'Update',
+          : translate('Update this manager? It will reinstall from npm and restart.'),
+      confirmLabel: action.kind === 'restart' ? translate('Restart') : translate('Update'),
       danger: false,
     });
     if (!ok) return;
@@ -263,13 +265,13 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
       const resp = await api.sendAgentManagerCommand(id, { command: 'update_manager' });
       showToast(
         action.kind === 'restart'
-          ? `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — the installed build is already on disk; the manager restarts into it and reappears in ~30s.`
-          : `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — manager will rebuild + re-exec; ` +
-            `it'll reappear in ~30s with the new version.`,
+          ? translate('update_manager dispatched (id={0}) — the installed build is already on disk; the manager restarts into it and reappears in ~30s.', { 0: resp.command_id.slice(0, 8) })
+          : translate('update_manager dispatched (id={0}) — manager will rebuild + re-exec; ', { 0: resp.command_id.slice(0, 8) }) +
+            translate('it\'ll reappear in ~30s with the new version.'),
         'success',
       );
     } catch (err: any) {
-      showToast(`update_manager failed: ${err?.message || err}`, 'error');
+      showToast(translate('update_manager failed: {0}', { 0: err?.message || err }), 'error');
     } finally {
       finishInstanceOp(id, INSTANCE_OP.updateManager);
     }
@@ -289,11 +291,11 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
     try {
       // 모든 모델 화면과 같은 경로 — 서버가 재열거 커맨드의 ack 를 기다린 뒤 새 목록을 준다.
       const fresh = await refreshHostModels(inst.agent_id);
-      if (!fresh) throw new Error('갱신 결과를 받지 못했습니다');
+      if (!fresh) throw new Error(translate('갱신 결과를 받지 못했습니다'));
       const summary = summarizeHostModels(fresh);
-      showToast(`모델 목록 갱신 완료${summary ? ` — ${summary}` : ''}`, 'success');
+      showToast(translate('모델 목록 갱신 완료{0}', { 0: summary ? ` — ${summary}` : '' }), 'success');
     } catch (err: any) {
-      showToast(`refresh_available_models failed: ${err?.message || err}`, 'error');
+      showToast(translate('refresh_available_models failed: {0}', { 0: err?.message || err }), 'error');
     } finally {
       finishInstanceOp(id, INSTANCE_OP.refreshModels);
     }
@@ -325,20 +327,20 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
       // CLI 업데이터는 모델 재열거보다 훨씬 오래 걸리므로 창을 넓게 잡는다(~4분).
       const ack = await waitForCommandAck(resp.command_id, { attempts: 120, intervalMs: 2000 });
       if (ack.state === 'error') {
-        showToast(`[${host}] ${cli} 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        showToast(translate('[{0}] {1} 업데이트 실패{2} — {3}', { 0: host, 1: cli, 2: idTail, 3: ack.detail || translate('사유 미상') }), 'error');
         return;
       }
       if (ack.state !== 'ok') {
         showToast(
-          `[${host}] update_cli 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
+          translate('[{0}] update_cli 전송됨{1} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.', { 0: host, 1: idTail }),
           'info',
         );
         return;
       }
       await reloadInstance(id);
-      showToast(`[${host}] ${ack.detail || `${cli} 업데이트 완료${idTail}`}`, 'success');
+      showToast(`[${host}] ${ack.detail || translate('{0} 업데이트 완료{1}', { 0: cli, 1: idTail })}`, 'success');
     } catch (err: any) {
-      showToast(`[${host}] update_cli failed: ${err?.message || err}`, 'error');
+      showToast(translate('[{0}] update_cli failed: {1}', { 0: host, 1: err?.message || err }), 'error');
     } finally {
       finishInstanceOp(id, op);
     }
@@ -357,17 +359,17 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
       const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
       const ack = await waitForCommandAck(resp.command_id, { attempts: 150, intervalMs: 2000 });
       if (ack.state === 'error') {
-        showToast(`[${host}] ${cli} 어댑터 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        showToast(translate('[{0}] {1} 어댑터 업데이트 실패{2} — {3}', { 0: host, 1: cli, 2: idTail, 3: ack.detail || translate('사유 미상') }), 'error');
         return;
       }
       if (ack.state !== 'ok') {
-        showToast(`[${host}] update_acp_adapter 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`, 'info');
+        showToast(translate('[{0}] update_acp_adapter 전송됨{1} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.', { 0: host, 1: idTail }), 'info');
         return;
       }
       await reloadInstance(id);
-      showToast(`[${host}] ${ack.detail || `${cli} 어댑터 업데이트 완료${idTail}`}`, 'success');
+      showToast(`[${host}] ${ack.detail || translate('{0} 어댑터 업데이트 완료{1}', { 0: cli, 1: idTail })}`, 'success');
     } catch (err: any) {
-      showToast(`[${host}] update_acp_adapter failed: ${err?.message || err}`, 'error');
+      showToast(translate('[{0}] update_acp_adapter failed: {1}', { 0: host, 1: err?.message || err }), 'error');
     } finally {
       finishInstanceOp(id, op);
     }
@@ -381,13 +383,13 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
     const host = inst.hostname;
     if (updateAllCliPending) return;
     const ok = await confirm({
-      title: '모든 CLI 업데이트',
+      title: translate('모든 CLI 업데이트'),
       message:
-        `${inst.hostname} 에서 올릴 수 있는 CLI 설치본과 뒤처진 ACP 어댑터를 전부 최신으로 올립니다. ` +
-        '같은 설치 디렉터리를 공유하는 설치본끼리만 차례로 돌고, 나머지는 동시에 올라갑니다. ' +
-        'sudo 가 필요한 설치본은 건너뛰고 결과에 그렇다고 적습니다. ' +
-        '이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?',
-      confirmLabel: '전부 업데이트',
+        translate('{0} 에서 올릴 수 있는 CLI 설치본과 뒤처진 ACP 어댑터를 전부 최신으로 올립니다. ', { 0: inst.hostname }) +
+        translate('같은 설치 디렉터리를 공유하는 설치본끼리만 차례로 돌고, 나머지는 동시에 올라갑니다. ') +
+        translate('sudo 가 필요한 설치본은 건너뛰고 결과에 그렇다고 적습니다. ') +
+        translate('이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?'),
+      confirmLabel: translate('전부 업데이트'),
       danger: false,
     });
     if (!ok) return;
@@ -401,20 +403,20 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
       // 여러 벌을 올리므로 한 벌짜리(~4분)보다 창을 넓게 잡는다.
       const ack = await waitForCommandAck(resp.command_id, { attempts: 240, intervalMs: 2000 });
       if (ack.state === 'error') {
-        showToast(`[${host}] CLI 전체 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        showToast(translate('[{0}] CLI 전체 업데이트 실패{1} — {2}', { 0: host, 1: idTail, 2: ack.detail || translate('사유 미상') }), 'error');
         return;
       }
       if (ack.state !== 'ok') {
         showToast(
-          `[${host}] update_all_clis 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
+          translate('[{0}] update_all_clis 전송됨{1} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.', { 0: host, 1: idTail }),
           'info',
         );
         return;
       }
       await reloadInstance(id);
-      showToast(`[${host}] ${ack.detail || `CLI 전체 업데이트 완료${idTail}`}`, 'success');
+      showToast(`[${host}] ${ack.detail || translate('CLI 전체 업데이트 완료{0}', { 0: idTail })}`, 'success');
     } catch (err: any) {
-      showToast(`[${host}] update_all_clis failed: ${err?.message || err}`, 'error');
+      showToast(translate('[{0}] update_all_clis failed: {1}', { 0: host, 1: err?.message || err }), 'error');
     } finally {
       finishInstanceOp(id, INSTANCE_OP.updateAllClis);
     }
@@ -459,8 +461,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
               letterSpacing: '0.05em',
             }}
           >
-            Runtime Host
-          </span>
+            {"Runtime Host"}</span>
           <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: tokens.colors.textPrimary }}>
             {inst.agent_name || inst.hostname}
           </h2>
@@ -469,9 +470,9 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
           {inst.agent_name && inst.agent_name !== inst.hostname && (
             <span
               style={{ fontSize: 12, color: tokens.colors.textMuted }}
-              title="매니저가 실행되는 장비의 호스트 이름"
+              title={translate('매니저가 실행되는 장비의 호스트 이름')}
             >
-              host: {inst.hostname}
+              {translate('host:')} {inst.hostname}
             </span>
           )}
           <span style={{ fontSize: 12, color: tokens.colors.textMuted, fontFamily: 'monospace', overflowWrap: 'anywhere' }}>
@@ -482,7 +483,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
               style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 4, color: tokens.colors.warning, background: tokens.colors.warningBg }}
               title={degraded}
             >
-              DEGRADED · {degraded}
+              {translate('DEGRADED ·')} {degraded}
             </span>
           )}
         </div>
@@ -498,40 +499,35 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
         >
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Host ID
-            </dt>
+              {translate('Host ID')}</dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', overflowWrap: 'anywhere' }}>
               {inst.host_id || inst.agent_id}
             </dd>
           </div>
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              PID / CLI
-            </dt>
+              {translate('PID / CLI')}</dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
               {inst.pid || '—'} / {inst.cli}
             </dd>
           </div>
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Started
-            </dt>
+              {translate('Started')}</dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
-              {formatRelative(inst.started_at)} (up {formatDuration(inst.started_at)})
+              {formatRelative(inst.started_at)} {translate('(up')} {formatDuration(inst.started_at)})
             </dd>
           </div>
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Last heartbeat
-            </dt>
+              {translate('Last heartbeat')}</dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
               {formatRelative(inst.last_seen_at)}
             </dd>
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Registered CLI adapters
-            </dt>
+              {translate('Registered CLI adapters')}</dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
               {inst.cli_adapters.length === 0 ? '—' : inst.cli_adapters.join(', ')}
             </dd>
@@ -541,8 +537,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
               {inst.paired_at && (
                 <div>
                   <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Paired
-                  </dt>
+                    {translate('Paired')}</dt>
                   <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
                     {formatRelative(inst.paired_at)}
                   </dd>
@@ -558,8 +553,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
               {inst.dispatch_block_counts && Object.keys(inst.dispatch_block_counts).length > 0 && (
                 <div style={{ gridColumn: '1 / -1' }}>
                   <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Dispatch blocks (cumulative since boot)
-                  </dt>
+                    {translate('Dispatch blocks (cumulative since boot)')}</dt>
                   <dd style={{ margin: '4px 0 0', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                     {Object.entries(inst.dispatch_block_counts)
                       .sort((a, b) => b[1] - a[1])
@@ -570,8 +564,8 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
                             key={kind}
                             title={
                               isPool
-                                ? 'Shared warm-pool exhausted — every slot was an active lease (usually a leaked lease from a worker that died uncleanly). The manager reclaims on-demand + on a 5-min tick; a persistent count signals a leaking or undersized pool.'
-                                : 'Dispatch dropped at the worktree / push-credential preflight gate.'
+                                ? translate('Shared warm-pool exhausted — every slot was an active lease (usually a leaked lease from a worker that died uncleanly). The manager reclaims on-demand + on a 5-min tick; a persistent count signals a leaking or undersized pool.')
+                                : translate('Dispatch dropped at the worktree / push-credential preflight gate.')
                             }
                             style={{
                               fontSize: 11,
@@ -602,20 +596,19 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
         {inst.mode === 'manager' && (
           <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${tokens.colors.border}` }}>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: tokens.colors.textMuted, marginBottom: 8 }}>
-              Agent Manager
-            </div>
+              {translate('Agent Manager')}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textStrong, fontFamily: 'monospace' }}>
-                v{inst.plugin_version}
+                {translate('v')}{inst.plugin_version}
               </span>
               <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                {inst.install_mode || 'install mode unknown'}
+                {inst.install_mode || translate('install mode unknown')}
               </span>
               {installedVersionBadge(inst) && (
                 <span
                   data-testid="manager-restart-required"
                   style={{ fontSize: 11, color: tokens.colors.warning, fontFamily: 'monospace' }}
-                  title="The package on disk was replaced (e.g. npm i -g from a shell or session) while this process kept running the older build. Restart to load it."
+                  title={translate('The package on disk was replaced (e.g. npm i -g from a shell or session) while this process kept running the older build. Restart to load it.')}
                 >
                   ({installedVersionBadge(inst)})
                 </span>
@@ -640,7 +633,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
                   }}
                   title={managerUpdateAction(inst).title}
                 >
-                  {updatePending ? (managerUpdateAction(inst).kind === 'restart' ? 'Restarting…' : 'Updating…') : managerUpdateAction(inst).label}
+                  {updatePending ? (managerUpdateAction(inst).kind === 'restart' ? translate('Restarting…') : translate('Updating…')) : managerUpdateAction(inst).label}
                 </button>
               ) : (
                 // 버튼을 숨기지 않고 비활성으로 남긴다 — "여기가 매니저를 올리는
@@ -674,8 +667,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
         {inst.mode === 'manager' && (
           <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${tokens.colors.border}` }}>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: tokens.colors.textMuted, marginBottom: 8 }}>
-              CLI 설치본
-            </div>
+              {translate('CLI 설치본')}</div>
             <InstalledCliVersions
               inst={inst}
               hideLabel
@@ -716,12 +708,12 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
                 opacity: refreshModelsPending ? 0.6 : 1,
               }}
               title={
-                '이 호스트에 설치된 CLI 들의 모델 목록을 다시 열거합니다. ' +
-                '매니저는 재시작되지 않고 실행 중인 세션도 끊기지 않습니다. ' +
-                'CLI 를 업그레이드한 뒤 Agent 템플릿과 실행 설정의 모델 목록을 갱신할 때 쓰세요.'
+                translate('이 호스트에 설치된 CLI 들의 모델 목록을 다시 열거합니다. ') +
+                translate('매니저는 재시작되지 않고 실행 중인 세션도 끊기지 않습니다. ') +
+                translate('CLI 를 업그레이드한 뒤 Agent 템플릿과 실행 설정의 모델 목록을 갱신할 때 쓰세요.')
               }
             >
-              {refreshModelsPending ? '모델 갱신 중…' : 'Refresh models'}
+              {refreshModelsPending ? translate('모델 갱신 중…') : translate('Refresh models')}
             </button>
           )}
           <button
@@ -738,10 +730,9 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
               cursor: restartPending ? 'wait' : 'pointer',
               fontFamily: 'inherit',
             }}
-            title="이 Host의 매니저를 재시작합니다. 실행 중인 세션과 작업이 종료됩니다."
+            title={translate('이 Host의 매니저를 재시작합니다. 실행 중인 세션과 작업이 종료됩니다.')}
           >
-            매니저 재시작
-          </button>
+            {translate('매니저 재시작')}</button>
           <button
             onClick={() => { loadLogs(); }}
             style={{
@@ -756,8 +747,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
               fontFamily: 'inherit',
             }}
           >
-            Refresh
-          </button>
+            {translate('Refresh')}</button>
         </div>
       </div>
 
@@ -775,15 +765,14 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
         }}
       >
         <h3 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-          Recent logs ({logs?.length ?? 0})
+          {translate('Recent logs (')}{logs?.length ?? 0})
         </h3>
         <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
           {logs === null ? (
-            <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
+            <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
           ) : logs.length === 0 ? (
             <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-              No matching log entries in the in-memory buffer.
-            </div>
+              {translate('No matching log entries in the in-memory buffer.')}</div>
           ) : (
             <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
               {logs.map((entry, idx) => (
@@ -820,6 +809,7 @@ export function InstanceDetail({ inst, onRenamed }: { inst: AgentManagerInstance
 function HostNameEditor({ hostId, name, onRenamed }: {
   hostId: string; name: string; onRenamed?: (hostId: string, name: string) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
@@ -835,27 +825,28 @@ function HostNameEditor({ hostId, name, onRenamed }: {
       invalidateHostNames();
       window.dispatchEvent(new window.Event(AGENT_SESSIONS_CHANGED_EVENT));
       setEditing(false);
-      showToast('Host 이름을 변경했습니다.', 'success');
+      showToast(translate('Host 이름을 변경했습니다.'), 'success');
     } catch (err: any) {
-      setError(err?.message || 'Host 이름을 변경하지 못했습니다.');
+      setError(err?.message || translate('Host 이름을 변경하지 못했습니다.'));
     } finally {
       setSaving(false);
     }
   };
   if (!editing) return <Button variant="ghost" size="sm" onClick={() => {
     setDraft(name); setError(null); setEditing(true);
-  }}>이름 변경</Button>;
+  }}>{translate('이름 변경')}</Button>;
   return (
     <form onSubmit={(e) => { e.preventDefault(); void save(); }} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: '100%' }}>
-      <Input label="Host 이름" aria-label="Host 이름" value={draft} maxLength={200} disabled={saving} onChange={(e) => setDraft(e.target.value)} />
-      <Button type="submit" variant="primary" size="sm" disabled={saving || !draft.trim() || draft.trim() === name} loading={saving}>저장</Button>
-      <Button type="button" variant="secondary" size="sm" disabled={saving} onClick={() => setEditing(false)}>취소</Button>
+      <Input label={translate('Host 이름')} aria-label={translate('Host 이름')} value={draft} maxLength={200} disabled={saving} onChange={(e) => setDraft(e.target.value)} />
+      <Button type="submit" variant="primary" size="sm" disabled={saving || !draft.trim() || draft.trim() === name} loading={saving}>{translate('저장')}</Button>
+      <Button type="button" variant="secondary" size="sm" disabled={saving} onClick={() => setEditing(false)}>{translate('취소')}</Button>
       {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>}
     </form>
   );
 }
 
 export default function AgentManagerPage() {
+  useLocale();
   const isMobile = useMediaQuery('(max-width: 1100px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -869,7 +860,7 @@ export default function AgentManagerPage() {
       setInstances(data);
       setLoadError(null);
     } catch (err: any) {
-      setLoadError(err?.message || 'Runtime Host 목록을 불러오지 못했습니다.');
+      setLoadError(err?.message || translate('Runtime Host 목록을 불러오지 못했습니다.'));
     } finally {
       setLoading(false);
     }
@@ -897,7 +888,7 @@ export default function AgentManagerPage() {
       byHost.set(inst.hostname, list);
     }
     return Array.from(byHost.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [instances]);
+  }, [instances, getLocale()]);
 
   // Auto-select the first instance once data arrives so the right pane has
   // something to render. Drops the selection if the instance disappears.
@@ -934,16 +925,15 @@ export default function AgentManagerPage() {
           }}
         >
           <span style={{ fontSize: 11, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            {loading ? 'Loading…' : `연결된 인스턴스 ${instances.length}`}
+            {loading ? translate('Loading…') : translate('연결된 인스턴스 {0}', { 0: instances.length })}
           </span>
           <Button size="sm" variant="primary" onClick={() => setPairOpen(true)}>
-            Host 연결
-          </Button>
+            {translate('Host 연결')}</Button>
         </div>
         {loadError && (
           <div role="alert" style={{ marginBottom: 12, fontSize: 12, color: tokens.colors.dangerLight }}>
             {loadError}
-            <Button size="sm" variant="secondary" onClick={refresh} style={{ marginTop: 8 }}>다시 시도</Button>
+            <Button size="sm" variant="secondary" onClick={refresh} style={{ marginTop: 8 }}>{translate('다시 시도')}</Button>
           </div>
         )}
         <div
@@ -962,9 +952,7 @@ export default function AgentManagerPage() {
                 textAlign: 'center',
               }}
             >
-              현재 연결된 Runtime Host가 없습니다.
-              ‘Host 연결’에서 코드를 발급받아 실행할 장비의 <code>awb-agent-manager</code>와 연결하세요.
-            </div>
+              {translate('현재 연결된 Runtime Host가 없습니다. ‘Host 연결’에서 코드를 발급받아 실행할 장비의')} <code>awb-agent-manager</code>{translate('와 연결하세요.')}</div>
           )}
           {grouped.map(([host, list]) => (
             <div key={host} style={{ marginBottom: 12 }}>
@@ -1007,8 +995,7 @@ export default function AgentManagerPage() {
       >
         {isMobile && selected && (
           <Button size="sm" variant="secondary" onClick={() => setSelectedId(null)} style={{ alignSelf: 'flex-start' }}>
-            ← Host 목록
-          </Button>
+            {translate('← Host 목록')}</Button>
         )}
         <div
           data-testid="mainframe-detail-scroll"
@@ -1036,8 +1023,7 @@ export default function AgentManagerPage() {
                 borderRadius: tokens.radii.md,
               }}
             >
-              Host를 선택하면 연결 상태, 매니저·CLI 버전과 로그를 확인할 수 있습니다.
-            </div>
+              {translate('Host를 선택하면 연결 상태, 매니저·CLI 버전과 로그를 확인할 수 있습니다.')}</div>
           )}
         </div>
       </div>
@@ -1055,6 +1041,7 @@ interface PairingDialogProps {
 }
 
 function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
+  useLocale();
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [pairings, setPairings] = useState<PairingTokenSafe[] | null>(null);
@@ -1067,7 +1054,7 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
       const data = await api.listAgentManagerPairings();
       setPairings(data);
     } catch (err: any) {
-      showToast(`Failed to load pairings: ${err?.message || err}`, 'error');
+      showToast(translate('Failed to load pairings: {0}', { 0: err?.message || err }), 'error');
       setPairings([]);
     }
   }, [showToast]);
@@ -1087,7 +1074,7 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
       setHostName('');
       refresh();
     } catch (err: any) {
-      showToast(`Mint failed: ${err?.message || err}`, 'error');
+      showToast(translate('Mint failed: {0}', { 0: err?.message || err }), 'error');
     } finally {
       setBusy(false);
     }
@@ -1095,25 +1082,23 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
 
   const handleRevoke = async (id: string) => {
     const ok = await confirm({
-      title: 'Revoke pairing token',
-      message: 'Revoke this pairing token? Any in-flight bootstrap using it will fail.',
-      confirmLabel: 'Revoke',
+      title: translate('Revoke pairing token'),
+      message: translate('Revoke this pairing token? Any in-flight bootstrap using it will fail.'),
+      confirmLabel: translate('Revoke'),
     });
     if (!ok) return;
     try {
       await api.revokeAgentManagerPairing(id);
       refresh();
     } catch (err: any) {
-      showToast(`Revoke failed: ${err?.message || err}`, 'error');
+      showToast(translate('Revoke failed: {0}', { 0: err?.message || err }), 'error');
     }
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Runtime Host 연결" maxWidth={640}>
+    <Modal isOpen={isOpen} onClose={onClose} title={translate('Runtime Host 연결')} maxWidth={640}>
       <p style={{ margin: '0 0 12px 0', fontSize: 12, color: tokens.colors.textSecondary }}>
-        Mint a one-time token, hand it to <code>awb-agent-manager pair --code &lt;CODE&gt;</code> on the host that
-        will run the manager process. Tokens expire in 10 minutes; they cannot be retrieved after the modal closes.
-      </p>
+        {translate('Mint a one-time token, hand it to')} <code>awb-agent-manager pair --code &lt;CODE&gt;</code> {translate('on the host that will run the manager process. Tokens expire in 10 minutes; they cannot be retrieved after the modal closes.')}</p>
 
       {minted && <MintedTokenPanel rec={minted} onDismiss={() => setMinted(null)} />}
 
@@ -1121,28 +1106,26 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 16 }}>
           <div style={{ flex: 1 }}>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
-              Host 이름 (선택 사항)
-            </label>
+              {translate('Host 이름 (선택 사항)')}</label>
             <Input
               type="text"
               value={hostName}
-              placeholder="e.g. desktop-mac-mini"
+              placeholder={translate('e.g. desktop-mac-mini')}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHostName(e.target.value)}
             />
           </div>
           <Button onClick={handleMint} disabled={busy} variant="primary">
-            Mint token
-          </Button>
+            {translate('Mint token')}</Button>
         </div>
       )}
 
       <h3 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-        Active tokens ({pairings?.length ?? 0})
+        {translate('Active tokens (')}{pairings?.length ?? 0})
       </h3>
       {pairings === null ? (
-        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
       ) : pairings.length === 0 ? (
-        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No pairing tokens outstanding.</div>
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No pairing tokens outstanding.')}</div>
       ) : (
         <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
           {pairings.map((t) => (
@@ -1176,14 +1159,13 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
                   <span style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}>· {t.agent_name}</span>
                 )}
                 <div style={{ marginTop: 2, fontSize: 11, color: tokens.colors.textMuted }}>
-                  expires {formatRelative(t.expires_at)}
-                  {t.redeemed_at && ` · redeemed ${formatRelative(t.redeemed_at)}`}
+                  {translate('expires')} {formatRelative(t.expires_at)}
+                  {t.redeemed_at && translate(' · redeemed {0}', { 0: formatRelative(t.redeemed_at) })}
                 </div>
               </div>
               {!t.redeemed_at && (
                 <Button size="sm" variant="danger" onClick={() => handleRevoke(t.id)}>
-                  Revoke
-                </Button>
+                  {translate('Revoke')}</Button>
               )}
             </li>
           ))}
@@ -1199,17 +1181,18 @@ interface MintedTokenPanelProps {
 }
 
 function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
+  useLocale();
   const { showToast } = useToast();
 
   const copy = (value: string, label: string) => {
     if (!navigator.clipboard) {
-      showToast(`Copy not supported in this browser — value: ${value}`, 'info');
+      showToast(translate('Copy not supported in this browser — value: {0}', { 0: value }), 'info');
       return;
     }
     navigator.clipboard
       .writeText(value)
-      .then(() => showToast(`${label} copied`, 'success'))
-      .catch(() => showToast('Copy failed', 'error'));
+      .then(() => showToast(translate('{0} copied', { 0: label }), 'success'))
+      .catch(() => showToast(translate('Copy failed'), 'error'));
   };
 
   return (
@@ -1226,10 +1209,9 @@ function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
       }}
     >
       <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.warning }}>
-        ⚠ Show ONCE. The raw token is not retrievable later.
-      </div>
+        {translate('⚠ Show ONCE. The raw token is not retrievable later.')}</div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>Display code</span>
+        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('Display code')}</span>
         <code
           style={{
             fontSize: 18,
@@ -1243,12 +1225,11 @@ function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
         >
           {rec.code}
         </code>
-        <Button size="sm" variant="secondary" onClick={() => copy(rec.code, 'Code')}>
-          Copy code
-        </Button>
+        <Button size="sm" variant="secondary" onClick={() => copy(rec.code, translate('Code'))}>
+          {translate('Copy code')}</Button>
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>Raw token</span>
+        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('Raw token')}</span>
         <code
           style={{
             fontSize: 11,
@@ -1264,17 +1245,15 @@ function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
         >
           {rec.token}
         </code>
-        <Button size="sm" variant="secondary" onClick={() => copy(rec.token, 'Token')}>
-          Copy token
-        </Button>
+        <Button size="sm" variant="secondary" onClick={() => copy(rec.token, translate('Token'))}>
+          {translate('Copy token')}</Button>
       </div>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-        Expires {formatRelative(rec.expires_at)}.
+        {translate('Expires')} {formatRelative(rec.expires_at)}.
       </div>
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button size="sm" variant="ghost" onClick={onDismiss}>
-          Dismiss (acknowledge that I copied it)
-        </Button>
+          {translate('Dismiss (acknowledge that I copied it)')}</Button>
       </div>
     </div>
   );
@@ -1292,6 +1271,7 @@ function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
 // 기본값은 거부다: 아무도 결정하지 않으면 창이 지나며 만료된다. 그래서 이 패널은
 // "대기 중일 때만" 나타나고, 평소에는 아무것도 그리지 않는다.
 function PrivilegedCommandApprovals() {
+  useLocale();
   const { showToast } = useToast();
   const [requests, setRequests] = useState<PrivilegedCommandRequest[]>([]);
   const [decidingId, setDecidingId] = useState<string | null>(null);
@@ -1324,11 +1304,11 @@ function PrivilegedCommandApprovals() {
       await api.approvePrivilegedCommand(deciding.request_id, password);
       setPassword('');
       setDecidingId(null);
-      showToast(`승인됨 — ${deciding.hostname} 에서 실행 중입니다.`, 'success');
+      showToast(translate('승인됨 — {0} 에서 실행 중입니다.', { 0: deciding.hostname }), 'success');
       await refresh();
     } catch (err: any) {
       setPassword('');
-      showToast(`승인 실패: ${err?.message || err}`, 'error');
+      showToast(translate('승인 실패: {0}', { 0: err?.message || err }), 'error');
     } finally {
       setBusy(false);
     }
@@ -1337,10 +1317,10 @@ function PrivilegedCommandApprovals() {
   const deny = async (req: PrivilegedCommandRequest) => {
     try {
       await api.denyPrivilegedCommand(req.request_id);
-      showToast('거부했습니다.', 'info');
+      showToast(translate('거부했습니다.'), 'info');
       await refresh();
     } catch (err: any) {
-      showToast(`거부 실패: ${err?.message || err}`, 'error');
+      showToast(translate('거부 실패: {0}', { 0: err?.message || err }), 'error');
     }
   };
 
@@ -1354,13 +1334,9 @@ function PrivilegedCommandApprovals() {
       }}
     >
       <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
-        루트 권한 요청 {requests.length}건 — 승인 대기
-      </div>
+        {translate('루트 권한 요청')} {requests.length}{translate('건 — 승인 대기')}</div>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 12, lineHeight: 1.6 }}>
-        아래 명령은 <strong>그대로</strong> root 로 실행됩니다. 승인할 때 입력하는 비밀번호는 저장되지
-        않으며, 일회용 티켓으로 해당 호스트의 매니저에게 한 번만 전달됩니다. 결정하지 않으면 만료되어
-        아무 일도 일어나지 않습니다.
-      </div>
+        {translate('아래 명령은')} <strong>{translate('그대로')}</strong> {translate('root 로 실행됩니다. 승인할 때 입력하는 비밀번호는 저장되지 않으며, 일회용 티켓으로 해당 호스트의 매니저에게 한 번만 전달됩니다. 결정하지 않으면 만료되어 아무 일도 일어나지 않습니다.')}</div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {requests.map((req) => (
@@ -1398,7 +1374,7 @@ function PrivilegedCommandApprovals() {
                     type="password"
                     autoFocus
                     value={password}
-                    placeholder={`${req.hostname} 의 sudo 비밀번호`}
+                    placeholder={translate('{0} 의 sudo 비밀번호', { 0: req.hostname })}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
                     onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                       if (e.key === 'Enter') void approve();
@@ -1406,7 +1382,7 @@ function PrivilegedCommandApprovals() {
                   />
                 </div>
                 <Button size="sm" variant="primary" onClick={approve} disabled={!password || busy}>
-                  {busy ? '실행 중…' : '승인하고 실행'}
+                  {busy ? translate('실행 중…') : translate('승인하고 실행')}
                 </Button>
                 <Button
                   size="sm"
@@ -1417,17 +1393,14 @@ function PrivilegedCommandApprovals() {
                     setDecidingId(null);
                   }}
                 >
-                  취소
-                </Button>
+                  {translate('취소')}</Button>
               </div>
             ) : (
               <div style={{ display: 'flex', gap: 6 }}>
                 <Button size="sm" variant="primary" onClick={() => setDecidingId(req.request_id)}>
-                  승인…
-                </Button>
+                  {translate('승인…')}</Button>
                 <Button size="sm" variant="danger" onClick={() => deny(req)}>
-                  거부
-                </Button>
+                  {translate('거부')}</Button>
               </div>
             )}
           </div>
@@ -1459,6 +1432,7 @@ function SudoPasswordModal({
   onClose: () => void;
   onTicket: (ticketId: string) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1478,7 +1452,7 @@ function SudoPasswordModal({
       onTicket(ticket_id);
     } catch (err: any) {
       setPassword('');
-      showToast(`sudo 티켓 발급 실패: ${err?.message || err}`, 'error');
+      showToast(translate('sudo 티켓 발급 실패: {0}', { 0: err?.message || err }), 'error');
     } finally {
       setBusy(false);
     }
@@ -1488,34 +1462,28 @@ function SudoPasswordModal({
     <Modal
       isOpen
       onClose={onClose}
-      title={`sudo 비밀번호 — ${hostname}`}
+      title={translate('sudo 비밀번호 — {0}', { 0: hostname })}
       maxWidth={520}
       footer={
         <>
           <Button variant="ghost" onClick={onClose} disabled={busy}>
-            취소
-          </Button>
+            {translate('취소')}</Button>
           <Button variant="primary" onClick={submit} disabled={!password || busy}>
-            {busy ? '확인 중…' : '업데이트'}
+            {busy ? translate('확인 중…') : translate('업데이트')}
           </Button>
         </>
       }
     >
       <p style={{ margin: '0 0 10px 0', fontSize: 12, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
-        <code>{target.bin}</code> 는 root 소유라 현재 권한으로는 올릴 수 없습니다.
-        {target.method ? <> 올리는 방법: <code>{target.method}</code>.</> : null}
+        <code>{target.bin}</code> {translate('는 root 소유라 현재 권한으로는 올릴 수 없습니다.')}{target.method ? <> {translate('올리는 방법:')} <code>{target.method}</code>.</> : null}
       </p>
       <p style={{ margin: '0 0 12px 0', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
-        입력한 비밀번호는 <strong>저장되지 않습니다</strong>. 서버 메모리에서 120초만 유지되는 일회용
-        티켓으로 바뀌고, 그 호스트의 매니저가 <strong>한 번만</strong> 받아 가 <code>sudo</code> 의 stdin 으로
-        전달합니다. 실행되는 명령은 매니저가 그 설치본의 설치 방식에서 직접 만든 것이며, 이 화면이
-        명령 문자열을 보내지는 않습니다.
-      </p>
+        {translate('입력한 비밀번호는')} <strong>{translate('저장되지 않습니다')}</strong>{translate('. 서버 메모리에서 120초만 유지되는 일회용 티켓으로 바뀌고, 그 호스트의 매니저가')} <strong>{translate('한 번만')}</strong> {translate('받아 가')} <code>sudo</code> {translate('의 stdin 으로 전달합니다. 실행되는 명령은 매니저가 그 설치본의 설치 방식에서 직접 만든 것이며, 이 화면이 명령 문자열을 보내지는 않습니다.')}</p>
       <Input
         type="password"
         autoFocus
         value={password}
-        placeholder={`${hostname} 의 sudo 비밀번호`}
+        placeholder={translate('{0} 의 sudo 비밀번호', { 0: hostname })}
         onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
         onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
           if (e.key === 'Enter') void submit();
@@ -1564,6 +1532,7 @@ export function InstalledCliVersions({
   /** 제목 달린 섹션 안에 놓을 때는 자체 라벨을 끈다 — 같은 말이 두 줄 겹친다. */
   hideLabel?: boolean;
 }) {
+  useLocale();
   // 매니저가 설치본 목록을 보내면 그것이 진실이다. 안 보내면(구버전) cli_versions
   // 를 CLI 당 한 줄짜리 가짜 설치본으로 접어 같은 렌더 경로를 태운다.
   const installs: CliInstallEntry[] = inst.cli_installs?.length
@@ -1623,8 +1592,7 @@ export function InstalledCliVersions({
     <div style={{ gridColumn: '1 / -1' }}>
       {!hideLabel && (
         <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-          Installed CLI versions
-        </dt>
+          {translate('Installed CLI versions')}</dt>
       )}
       <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', flexDirection: 'column', gap: 4 }}>
         {sorted.map((row) => {
@@ -1646,10 +1614,10 @@ export function InstalledCliVersions({
             ? sorted.find((r) => r.cli === row.cli && r.version === newestOnHost) ?? null
             : null;
           const supersededTitle = newerRow
-            ? `이 설치본은 자기 배포 채널에서는 최신이지만, 같은 호스트의 ` +
-              `${newerRow.path || '다른 설치본'} 이 ${newerRow.version} 으로 더 새롭습니다` +
-              `${newerRow.active ? ' (AWB 는 그쪽을 실행합니다)' : ''}. ` +
-              '이 채널에서는 더 올라갈 곳이 없으므로, 쓰지 않는다면 지우는 편이 낫습니다.'
+            ? translate('이 설치본은 자기 배포 채널에서는 최신이지만, 같은 호스트의 ') +
+              translate('{0} 이 {1} 으로 더 새롭습니다', { 0: newerRow.path || translate('다른 설치본'), 1: newerRow.version }) +
+              `${newerRow.active ? translate(' (AWB 는 그쪽을 실행합니다)') : ''}. ` +
+              translate('이 채널에서는 더 올라갈 곳이 없으므로, 쓰지 않는다면 지우는 편이 낫습니다.')
             : '';
           const key = row.path || row.cli;
           const busy = pending.has(key);
@@ -1675,40 +1643,37 @@ export function InstalledCliVersions({
               }}
             >
               <span style={{ fontFamily: 'monospace' }}>
-                {row.cli} {row.version ?? 'unknown'}
+                {row.cli} {row.version ?? translate('unknown')}
               </span>
               {state === 'outdated' && (
                 <span style={{ fontWeight: 600, color: tokens.colors.success }}>→ {latest}</span>
               )}
-              {upToDate && !superseded && <span style={{ color: tokens.colors.textMuted }}>최신</span>}
+              {upToDate && !superseded && <span style={{ color: tokens.colors.textMuted }}>{translate('최신')}</span>}
               {superseded && (
                 <span style={{ color: tokens.colors.warning, fontWeight: 600 }} title={supersededTitle}>
-                  뒤처짐 · 이 채널 최신
-                </span>
+                  {translate('뒤처짐 · 이 채널 최신')}</span>
               )}
               {row.active && (perCli.get(row.cli) ?? 0) > 1 && (
                 <span
                   style={{ color: tokens.colors.textMuted }}
-                  title="지정 없이 spawn 하면 실행되는 설치본입니다."
+                  title={translate('지정 없이 spawn 하면 실행되는 설치본입니다.')}
                 >
-                  · 활성
-                </span>
+                  {translate('· 활성')}</span>
               )}
               {showPath && (
                 <span style={{ fontFamily: 'monospace', color: tokens.colors.textMuted }}>{row.path}</span>
               )}
               {row.method && (
-                <span style={{ color: tokens.colors.textMuted }} title="이 설치본을 올리는 방법">
+                <span style={{ color: tokens.colors.textMuted }} title={translate('이 설치본을 올리는 방법')}>
                   ({row.method})
                 </span>
               )}
               {row.needs_sudo && (
                 <span
                   style={{ color: tokens.colors.warning }}
-                  title="이 설치본은 root 소유라, Update 를 누르면 sudo 비밀번호를 한 번 묻습니다. 비밀번호는 저장되지 않습니다."
+                  title={translate('이 설치본은 root 소유라, Update 를 누르면 sudo 비밀번호를 한 번 묻습니다. 비밀번호는 저장되지 않습니다.')}
                 >
-                  🔒 sudo
-                </span>
+                  {translate('🔒 sudo')}</span>
               )}
               {row.updatable && (
                 <button
@@ -1730,14 +1695,14 @@ export function InstalledCliVersions({
                     superseded
                       ? supersededTitle
                       : upToDate
-                      ? `${row.cli} 는 이 설치본의 배포 채널 기준 최신입니다 (${latest}).`
-                      : `update_cli — ${row.path || `이 장비의 ${row.cli}`} 를 올립니다` +
+                      ? translate('{0} 는 이 설치본의 배포 채널 기준 최신입니다 ({1}).', { 0: row.cli, 1: latest })
+                      : translate('update_cli — {0} 를 올립니다', { 0: row.path || translate('이 장비의 {0}', { 0: row.cli }) }) +
                         `${row.method ? ` (${row.method})` : ''}` +
-                        `${state === 'outdated' ? ` · ${row.version} → ${latest}` : ' · 최신 버전 확인 불가 — 눌러서 시도할 수 있습니다'}. ` +
-                        '매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.'
+                        `${state === 'outdated' ? ` · ${row.version} → ${latest}` : translate(' · 최신 버전 확인 불가 — 눌러서 시도할 수 있습니다')}. ` +
+                        translate('매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.')
                   }
                 >
-                  {busy ? '업데이트 중…' : 'Update'}
+                  {busy ? translate('업데이트 중…') : translate('Update')}
                 </button>
               )}
             </span>
@@ -1765,14 +1730,14 @@ export function InstalledCliVersions({
                 fontFamily: 'inherit',
               }}
               title={
-                `update_all_clis — 올릴 수 있는 설치본 ${updatableRows.length}개` +
-                `${behindAdapters.length ? `와 뒤처진 ACP 어댑터 ${behindAdapters.length}개` : ''}를 한 번에 올립니다 ` +
+                translate('update_all_clis — 올릴 수 있는 설치본 {0}개', { 0: updatableRows.length }) +
+                translate('{0}를 한 번에 올립니다 ', { 0: behindAdapters.length ? translate('와 뒤처진 ACP 어댑터 {0}개', { 0: behindAdapters.length }) : '' }) +
                 `(${[...updatableRows.map((r) => r.cli), ...behindAdapters.map((a) => `${a.cli}-acp`)].join(', ')}). ` +
-                '같은 설치 디렉터리를 공유하는 것끼리만 차례로 돌고 나머지는 동시에 올라갑니다. ' +
-                'sudo 가 필요한 설치본은 건너뛰고 그렇다고 알려줍니다 — 그건 행의 Update 로 올리세요.'
+                translate('같은 설치 디렉터리를 공유하는 것끼리만 차례로 돌고 나머지는 동시에 올라갑니다. ') +
+                translate('sudo 가 필요한 설치본은 건너뛰고 그렇다고 알려줍니다 — 그건 행의 Update 로 올리세요.')
               }
             >
-              {updateAllPending ? `전부 업데이트 중…` : `전부 업데이트 (${updatableRows.length + behindAdapters.length})`}
+              {updateAllPending ? translate('전부 업데이트 중…') : translate('전부 업데이트 ({0})', { 0: updatableRows.length + behindAdapters.length })}
             </button>
           </div>
         )}
@@ -1819,6 +1784,7 @@ function AcpAdapterVersions({
   pending: ReadonlySet<string>;
   onUpdate?: (cli: string) => void;
 }) {
+  useLocale();
   const rows = (inst.acp_adapters ?? []).filter((a) => a.source !== 'builtin');
   if (rows.length === 0) return null;
   const latestOf = (pkg: string | null): string | null =>
@@ -1827,12 +1793,10 @@ function AcpAdapterVersions({
   return (
     <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
       <div style={{ fontSize: 10.5, color: tokens.colors.textMuted }}>
-        ACP 어댑터 — 세션의 모델 목록을 정합니다
-      </div>
+        {translate('ACP 어댑터 — 세션의 모델 목록을 정합니다')}</div>
       {!supported && onUpdate && (
         <div data-acp-adapter-unsupported style={{ fontSize: 10.5, color: tokens.colors.warning }}>
-          이 매니저(v{inst.plugin_version})는 어댑터 업데이트를 지원하지 않습니다 — 매니저를 먼저 업데이트하세요.
-        </div>
+          {translate('이 매니저(v')}{inst.plugin_version}{translate(')는 어댑터 업데이트를 지원하지 않습니다 — 매니저를 먼저 업데이트하세요.')}</div>
       )}
       {rows.map((a) => {
         const latest = latestOf(a.package);
@@ -1849,25 +1813,24 @@ function AcpAdapterVersions({
             style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: tokens.colors.textSecondary }}
           >
             <span style={{ fontWeight: 600 }}>{a.cli}</span>
-            <span style={{ fontFamily: 'monospace' }}>{a.version ?? '버전 미상'}</span>
+            <span style={{ fontFamily: 'monospace' }}>{a.version ?? translate('버전 미상')}</span>
             {behind && (
-              <span style={{ color: tokens.colors.warning }} title={`npm 최신 ${latest}`}>
-                → {latest} 뒤처짐
-              </span>
+              <span style={{ color: tokens.colors.warning }} title={translate('npm 최신 {0}', { 0: latest })}>
+                → {latest} {translate('뒤처짐')}</span>
             )}
-            {upToDate && <span style={{ color: tokens.colors.textMuted }}>(최신)</span>}
+            {upToDate && <span style={{ color: tokens.colors.textMuted }}>{translate('(최신)')}</span>}
             <span
               style={{ color: a.source === 'bundled' || a.source === 'managed' ? tokens.colors.textMuted : tokens.colors.warning }}
               title={
                 a.source === 'managed'
-                  ? '운영자가 올린 어댑터(매니저 홈)를 쓰고 있습니다 — 매니저 번들본보다 새 버전입니다.'
+                  ? translate('운영자가 올린 어댑터(매니저 홈)를 쓰고 있습니다 — 매니저 번들본보다 새 버전입니다.')
                   : a.source === 'bundled'
-                  ? '매니저와 함께 설치된 어댑터를 쓰고 있습니다.'
+                  ? translate('매니저와 함께 설치된 어댑터를 쓰고 있습니다.')
                   : a.source === 'path'
-                  ? '장비에 전역 설치된 어댑터를 쓰고 있습니다 — 이 매니저는 어댑터를 번들하지 않는 구버전입니다.'
+                  ? translate('장비에 전역 설치된 어댑터를 쓰고 있습니다 — 이 매니저는 어댑터를 번들하지 않는 구버전입니다.')
                   : a.source === 'npx'
-                  ? '설치돼 있지 않아 실행할 때마다 npx 로 당겨옵니다.'
-                  : '운영자가 AWB_ACP_COMMAND 로 어댑터 명령을 고정했습니다 — 버전은 AWB 가 알 수 없습니다.'
+                  ? translate('설치돼 있지 않아 실행할 때마다 npx 로 당겨옵니다.')
+                  : translate('운영자가 AWB_ACP_COMMAND 로 어댑터 명령을 고정했습니다 — 버전은 AWB 가 알 수 없습니다.')
               }
             >
               ({a.source})
@@ -1890,13 +1853,13 @@ function AcpAdapterVersions({
                 }}
                 title={
                   upToDate
-                    ? `${a.package} 는 최신입니다 (${latest}).`
-                    : `update_acp_adapter — ${a.package} 를 최신으로 올립니다` +
-                      `${latest ? ` (${a.version} → ${latest})` : ' (최신 버전 확인 불가 — 눌러서 시도할 수 있습니다)'}. ` +
-                      '매니저 홈에 설치하므로 매니저는 재시작되지 않습니다. 이미 열린 세션은 Restart 해야 새 어댑터를 씁니다.'
+                    ? translate('{0} 는 최신입니다 ({1}).', { 0: a.package, 1: latest })
+                    : translate('update_acp_adapter — {0} 를 최신으로 올립니다', { 0: a.package }) +
+                      `${latest ? ` (${a.version} → ${latest})` : translate(' (최신 버전 확인 불가 — 눌러서 시도할 수 있습니다)')}. ` +
+                      translate('매니저 홈에 설치하므로 매니저는 재시작되지 않습니다. 이미 열린 세션은 Restart 해야 새 어댑터를 씁니다.')
                 }
               >
-                {busy ? '업데이트 중…' : 'Update'}
+                {busy ? translate('업데이트 중…') : translate('Update')}
               </button>
             )}
           </div>
@@ -1910,6 +1873,7 @@ function AcpAdapterVersions({
 // 오퍼는 막지 않으므로, 이 배지는 "왜 저 버전이 안 뜨나"의 답이다. 핀이 없으면(구버전
 // 매니저) 아무것도 그리지 않는다. 핀 해제는 호스트의 핀 파일 삭제(사람만).
 function UpdateFailureBadge({ inst }: { inst: AgentManagerInstance }) {
+  useLocale();
   const badge = updateFailureBadge(inst);
   if (!badge) return null;
   return (
@@ -1928,6 +1892,7 @@ function UpdateFailureBadge({ inst }: { inst: AgentManagerInstance }) {
 // so we don't gaslight operators on instances that genuinely don't ship the
 // self-update path.
 function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
+  useLocale();
   // Field absence vs `false` matters here: undefined === pre-update manager
   // (silent fallback), false === checker ran and there's no update, true ===
   // checker ran and an update is on origin.
@@ -1940,10 +1905,9 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
-        title="This manager can't auto-update — upgrade it manually with npm i -g --ignore-scripts awb-agent-manager@latest."
+        title={translate('This manager can\'t auto-update — upgrade it manually with npm i -g --ignore-scripts awb-agent-manager@latest.')}
       >
-        (manual updates only)
-      </span>
+        {translate('(manual updates only)')}</span>
     );
   }
   // Operator pinned this build (AWB_AGENT_MANAGER_UPDATE_CHANNEL=off) — the
@@ -1952,10 +1916,9 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
-        title="Auto-update is off (AWB_AGENT_MANAGER_UPDATE_CHANNEL=off) — this build is pinned."
+        title={translate('Auto-update is off (AWB_AGENT_MANAGER_UPDATE_CHANNEL=off) — this build is pinned.')}
       >
-        (pinned)
-      </span>
+        {translate('(pinned)')}</span>
     );
   }
   if (inst.update_last_error && !inst.latest_version) {
@@ -1963,10 +1926,9 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.warning }}
-        title={`Self-update checker error: ${inst.update_last_error}`}
+        title={translate('Self-update checker error: {0}', { 0: inst.update_last_error })}
       >
-        (update check failed)
-      </span>
+        {translate('(update check failed)')}</span>
     );
   }
   if (!inst.update_available) {
@@ -1975,25 +1937,23 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
         title={
           inst.update_skipped_version
-            ? `v${inst.update_skipped_version} was skipped (failed before) — newer versions are still offered. Up to date otherwise${inst.update_last_checked_at ? ` as of ${inst.update_last_checked_at}` : ''}`
+            ? translate('v{0} was skipped (failed before) — newer versions are still offered. Up to date otherwise{1}', { 0: inst.update_skipped_version, 1: inst.update_last_checked_at ? translate(' as of {0}', { 0: inst.update_last_checked_at }) : '' })
             : inst.update_last_checked_at
-              ? `Up to date as of ${inst.update_last_checked_at}`
-              : 'Update checker has not yet completed its first poll'
+              ? translate('Up to date as of {0}', { 0: inst.update_last_checked_at })
+              : translate('Update checker has not yet completed its first poll')
         }
       >
-        (up to date)
-      </span>
+        {translate('(up to date)')}</span>
     );
   }
   return (
     <span
       style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: tokens.colors.success }}
       title={
-        `Latest on the ${inst.update_channel || 'latest'} npm channel: v${inst.latest_version}. ` +
-        'Use the Update button to reinstall (npm i -g) + restart.'
+        translate('Latest on the {0} npm channel: v{1}. ', { 0: inst.update_channel || 'latest', 1: inst.latest_version }) +
+        translate('Use the Update button to reinstall (npm i -g) + restart.')
       }
     >
-      → v{inst.latest_version} available
-    </span>
+      {translate('→ v')}{inst.latest_version} {translate('available')}</span>
   );
 }

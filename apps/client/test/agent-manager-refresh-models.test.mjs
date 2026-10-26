@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 모델 목록 갱신 — 모든 화면이 같은 경로를 쓴다 (src/cli/hostModels.ts).
 //
 // 예전(ticket 40110b64)에는 Runtime Hosts 화면과 Agent 다이얼로그가 각자 admin 전용
@@ -69,7 +70,7 @@ function stubApi(t, overrides) {
 
 function findButton(container, label) {
   return [...container.querySelectorAll('button')].find(
-    (button) => button.textContent.trim() === label,
+    (button) => button.textContent.trim() === ui(label),
   );
 }
 

@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isRoutineSystemComment, ticketExecutionFailure } from '../src/tickets/commentVisibility.ts';
@@ -25,17 +26,17 @@ test('default conversation keeps persisted failures and replies while hiding sta
 test('legacy refresh-token failures show the cause and recovery steps without changing the stored log', () => {
   const original = structuredClone(authFailure);
   const notice = ticketExecutionFailure(authFailure);
-  assert.match(notice.title, /인증 실패/);
-  assert.match(notice.guidance, /이미 사용된 refresh token/);
-  assert.match(notice.guidance, /다시 로그인.*재실행/);
+  assert.match(notice.title, uiPattern("CLI 인증 실패로 실행이 중단되었습니다."));
+  assert.match(notice.guidance, uiPattern("이미 사용된 refresh token으로 로그인 갱신에 실패했습니다. 선택한 CLI credential을 다시 로그인해 갱신한 뒤 티켓을 재실행하세요."));
+  assert.match(notice.guidance, uiPattern("이미 사용된 refresh token으로 로그인 갱신에 실패했습니다. 선택한 CLI credential을 다시 로그인해 갱신한 뒤 티켓을 재실행하세요."));
   assert.deepEqual(authFailure, original);
 });
 
 test('other silent exits remain visible even without a warning prefix or auth classifier', () => {
   const comment = { ...authFailure, content: 'Process exited', metadata: { reason: 'silent_exit', exit_code: 0 } };
   assert.equal(isRoutineSystemComment(comment), false);
-  assert.match(ticketExecutionFailure(comment).title, /결과를 확인/);
-  assert.doesNotMatch(ticketExecutionFailure(comment).guidance, /로그인/);
+  assert.match(ticketExecutionFailure(comment).title, uiPattern('에이전트 실행이 종료되어 결과를 확인해야 합니다.'));
+  assert.doesNotMatch(ticketExecutionFailure(comment).guidance, uiPattern("로그인 갱신"));
 });
 
 test('other operational warnings remain visible while normal system records stay optional', () => {
@@ -46,5 +47,5 @@ test('other operational warnings remain visible while normal system records stay
 test('user text or quoted auth_failure output does not become a credential failure notice', () => {
   assert.equal(ticketExecutionFailure({ ...authFailure, author_type: 'user' }), null);
   const comment = { ...authFailure, content: '⚠️ Process exited\n\n_cli=codex · exit_code=1_\n\n```\nreason=auth_failure\n```' };
-  assert.doesNotMatch(ticketExecutionFailure(comment).title, /인증 실패/);
+  assert.doesNotMatch(ticketExecutionFailure(comment).title, uiPattern("CLI 인증 실패로 실행이 중단되었습니다."));
 });

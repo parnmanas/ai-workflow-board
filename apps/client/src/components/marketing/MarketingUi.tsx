@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { tokens } from '../../tokens';
 import { toneStyle } from '../../activity';
@@ -48,13 +50,15 @@ const MarketingContext = createContext<MarketingCtx | null>(null);
 export const MarketingCtxProvider = MarketingContext.Provider;
 
 export function useMarketingCtx(): MarketingCtx {
+  useLocale();
   const ctx = useContext(MarketingContext);
-  if (!ctx) throw new Error('useMarketingCtx must be used inside a marketing campaign view');
+  if (!ctx) throw new Error(translate('useMarketingCtx must be used inside a marketing campaign view'));
   return ctx;
 }
 
 /** 버튼 하나의 비동기 동작 — 겹쳐 누르지 않게 busy 를 들고, 실패는 toast 로 알린다. */
 export function useAction() {
+  useLocale();
   const ctx = useMarketingCtx();
   const [busy, setBusy] = useState(false);
   const run = async <T,>(fn: () => Promise<T>, success?: string | ((result: T) => string | null)): Promise<T | null> => {
@@ -67,7 +71,7 @@ export function useAction() {
       ctx.refresh();
       return result;
     } catch (err) {
-      ctx.notify((err as Error)?.message || '요청에 실패했습니다', 'error');
+      ctx.notify((err as Error)?.message || translate('요청에 실패했습니다'), 'error');
       return null;
     } finally {
       setBusy(false);
@@ -79,6 +83,7 @@ export function useAction() {
 // ── 표시 조각 ───────────────────────────────────────────────────────────────
 
 export function StatusPill({ view, testId, title }: { view: StatusView; testId?: string; title?: string }) {
+  useLocale();
   const { color, background } = toneStyle(view.tone);
   return (
     <span
@@ -102,6 +107,7 @@ export function StatusPill({ view, testId, title }: { view: StatusView; testId?:
 }
 
 export function Chip({ children, muted = false, title }: { children: React.ReactNode; muted?: boolean; title?: string }) {
+  useLocale();
   return (
     <span
       title={title}
@@ -124,6 +130,7 @@ export function Chip({ children, muted = false, title }: { children: React.React
 
 /** http(s) 만 링크가 된다. 새 창 + noopener noreferrer — 외부 페이지가 이 탭을 조작하지 못하게. */
 export function ExternalLink({ href, children }: { href: string; children?: React.ReactNode }) {
+  useLocale();
   const safe = safeHttpUrl(href);
   if (!safe) return <span style={{ color: tokens.colors.textMuted, wordBreak: 'break-all' }}>{children ?? href}</span>;
   return (
@@ -147,6 +154,7 @@ export function Panel({
   /** 경보(결과 불명 결제 등) — 테두리를 위험 색으로. */
   tone?: 'danger' | 'attention';
 }) {
+  useLocale();
   const border = tone === 'danger' ? tokens.colors.danger : tone === 'attention' ? tokens.colors.warning : tokens.colors.border;
   return (
     <section
@@ -172,6 +180,7 @@ export function Panel({
 
 /** 라벨 · 값 두 칸 격자. 값이 없는 줄은 그리지 않는다. */
 export function KeyValue({ items }: { items: Array<[string, React.ReactNode]> }) {
+  useLocale();
   const shown = items.filter(([, v]) => v !== null && v !== undefined && v !== '');
   if (!shown.length) return null;
   return (
@@ -187,12 +196,14 @@ export function KeyValue({ items }: { items: Array<[string, React.ReactNode]> })
 }
 
 export function Hint({ children, tone }: { children: React.ReactNode; tone?: 'danger' | 'warning' }) {
+  useLocale();
   const color = tone === 'danger' ? tokens.colors.dangerLight : tone === 'warning' ? tokens.colors.warningLight : tokens.colors.textMuted;
   return <div style={{ fontSize: 11, color, lineHeight: 1.5, marginTop: 4 }}>{children}</div>;
 }
 
 /** 여러 줄 글 — 사람이나 에이전트가 쓴 문단을 줄바꿈 그대로. */
 export function Prose({ text, empty = '—' }: { text: string | null | undefined; empty?: string }) {
+  useLocale();
   const value = (text || '').trim();
   return (
     <div style={{ fontSize: 13, color: value ? tokens.colors.textStrong : tokens.colors.textMuted, whiteSpace: 'pre-wrap', lineHeight: 1.55, overflowWrap: 'anywhere' }}>
@@ -203,6 +214,7 @@ export function Prose({ text, empty = '—' }: { text: string | null | undefined
 
 /** 인용 블록 — 홍보 규칙 · 외부인이 쓴 글처럼 "남의 말" 을 그대로 보여 줄 때. */
 export function Quote({ label, children, tone }: { label?: string; children: React.ReactNode; tone?: 'warning' | 'muted' }) {
+  useLocale();
   const border = tone === 'warning' ? tokens.colors.warning : tokens.colors.borderStrong;
   return (
     <div style={{ borderLeft: `3px solid ${border}`, padding: '6px 10px', background: tokens.colors.surfaceSubtle, borderRadius: tokens.radii.sm }}>
@@ -213,6 +225,7 @@ export function Quote({ label, children, tone }: { label?: string; children: Rea
 }
 
 export function JsonBlock({ value, testId, maxHeight = 260 }: { value: unknown; testId?: string; maxHeight?: number }) {
+  useLocale();
   return (
     <pre
       data-testid={testId}
@@ -237,6 +250,7 @@ export function JsonBlock({ value, testId, maxHeight = 260 }: { value: unknown; 
 }
 
 export function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
+  useLocale();
   return (
     <label
       htmlFor={htmlFor}
@@ -255,6 +269,7 @@ export function FieldLabel({ children, htmlFor }: { children: React.ReactNode; h
 }
 
 export function Meta({ children }: { children: React.ReactNode }) {
+  useLocale();
   return <div style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>{children}</div>;
 }
 
@@ -302,7 +317,7 @@ export function NoteModal({
   isOpen,
   title,
   message,
-  label = '메모',
+  label = translate('메모'),
   placeholder,
   required = false,
   confirmLabel,
@@ -312,6 +327,7 @@ export function NoteModal({
   onSubmit,
   onClose,
 }: NoteModalProps) {
+  useLocale();
   const [note, setNote] = useState('');
   const [checked, setChecked] = useState(false);
   useEffect(() => {
@@ -326,16 +342,16 @@ export function NoteModal({
       maxWidth={520}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>취소</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('취소')}</Button>
           <Button variant={danger ? 'danger' : 'primary'} disabled={!ok || busy} onClick={() => onSubmit(note.trim(), checked)}>
-            {busy ? '처리 중…' : confirmLabel}
+            {busy ? translate('처리 중…') : confirmLabel}
           </Button>
         </>
       )}
     >
       {message && <div style={{ fontSize: 13, color: tokens.colors.textSecondary, lineHeight: 1.5, marginBottom: 10 }}>{message}</div>}
       <Textarea
-        label={required ? `${label} (필수)` : `${label} (선택)`}
+        label={required ? translate('{0} (필수)', { 0: label }) : translate('{0} (선택)', { 0: label })}
         aria-label={label}
         value={note}
         rows={4}

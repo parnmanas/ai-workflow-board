@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api, getActiveAccountId } from '../../api';
 import { tokens } from '../../tokens';
@@ -106,14 +108,14 @@ export function buildWorkspaceFolderPayload(state: WorkspaceFolderFormState): {
 }
 
 const CHECKOUT_OPTIONS: { value: CheckoutMode; label: string }[] = [
-  { value: 'reuse', label: 'reuse (폴더 재사용)' },
-  { value: 'fresh', label: 'fresh (매번 새 체크아웃)' },
+  { value: 'reuse', get label() { return translate('reuse (폴더 재사용)'); } },
+  { value: 'fresh', get label() { return translate('fresh (매번 새 체크아웃)'); } },
 ];
 
 const BUILD_OPTIONS: { value: BuildMode; label: string }[] = [
-  { value: 'cold_then_warm', label: 'cold_then_warm (첫 빌드 cold, 이후 warm)' },
-  { value: 'always_cold', label: 'always_cold (매번 클린 빌드)' },
-  { value: 'always_warm', label: 'always_warm (매번 증분 빌드)' },
+  { value: 'cold_then_warm', get label() { return translate('cold_then_warm (첫 빌드 cold, 이후 warm)'); } },
+  { value: 'always_cold', get label() { return translate('always_cold (매번 클린 빌드)'); } },
+  { value: 'always_warm', get label() { return translate('always_warm (매번 증분 빌드)'); } },
 ];
 
 // 서버 runWorkspaceRootForKind()와 동일한 매핑(티켓 9fd27487). qa/security는
@@ -172,6 +174,7 @@ interface RepoRefPickerProps {
  *    낮다는 사실(프로젝트 선택 시 무시)을 UI 로 드러낸다.
  */
 export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps) {
+  useLocale();
   const { projects, loading: projectsLoading, error: projectsError, reload } = useProjects(accountId);
   const [projectSearch, setProjectSearch] = useState('');
   const [branchReload, setBranchReload] = useState(0);
@@ -206,7 +209,7 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
         if (cancelled) return;
         setBranches([]);
         setDefaultBranch('');
-        setBranchesError(err?.message || '브랜치 목록을 불러오지 못했습니다.');
+        setBranchesError(err?.message || translate('브랜치 목록을 불러오지 못했습니다.'));
       })
       .finally(() => { if (!cancelled) setBranchesLoading(false); });
     return () => { cancelled = true; };
@@ -227,13 +230,13 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
   // 있는 건 목록을 실제로 다 받아본 뒤뿐이다 — 로딩 중이거나 조회가 실패한
   // 상태에서 그렇게 쓰면 멀쩡한 id 를 없는 것처럼 표시하게 된다.
   const danglingLabel = projectsLoading
-    ? `${selectedProjectId} (프로젝트 목록 불러오는 중…)`
+    ? translate('{0} (프로젝트 목록 불러오는 중…)', { 0: selectedProjectId })
     : projectsError
-      ? `${selectedProjectId} (프로젝트 목록을 불러오지 못했습니다)`
-      : `알 수 없는 프로젝트 (${selectedProjectId})`;
+      ? translate('{0} (프로젝트 목록을 불러오지 못했습니다)', { 0: selectedProjectId })
+      : translate('알 수 없는 프로젝트 ({0})', { 0: selectedProjectId });
 
   const projectOptions = [
-    { value: '', label: '— 지정 안 함 —' },
+    { value: '', label: translate('— 지정 안 함 —') },
     ...(selectedProjectId && !selectedProject ? [{ value: selectedProjectId, label: danglingLabel }] : []),
     ...visibleProjects.map((p) => ({ value: p.id, label: p.repo_url ? `${p.name} · ${p.repo_url}` : p.name })),
   ];
@@ -246,11 +249,11 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
   const branchOptions = [
     {
       value: '',
-      label: defaultBranch ? `— 프로젝트 기본 브랜치 (${defaultBranch}) —` : '— 프로젝트 기본 브랜치 —',
+      label: defaultBranch ? translate('— 프로젝트 기본 브랜치 ({0}) —', { 0: defaultBranch }) : translate('— 프로젝트 기본 브랜치 —'),
     },
     // 저장된 브랜치가 원격에서 지워졌거나 목록에 없어도 선택 상태로 남긴다.
     ...(state.repoBranch && !branches.some((b) => b.name === state.repoBranch)
-      ? [{ value: state.repoBranch, label: `${state.repoBranch} (목록에 없음)` }]
+      ? [{ value: state.repoBranch, label: translate('{0} (목록에 없음)', { 0: state.repoBranch }) }]
       : []),
     ...branches.map((b) => ({ value: b.name, label: b.name })),
   ];
@@ -261,19 +264,19 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
 
   return (
     <div>
-      <label style={fieldLabel}>repo_ref (작업폴더로 체크아웃할 저장소 — 프로젝트를 고르세요)</label>
+      <label style={fieldLabel}>{translate('repo_ref (작업폴더로 체크아웃할 저장소 — 프로젝트를 고르세요)')}</label>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <Input
           type="search"
-          aria-label="프로젝트 검색"
-          placeholder="이름 또는 URL 로 검색"
+          aria-label={translate('프로젝트 검색')}
+          placeholder={translate('이름 또는 URL 로 검색')}
           value={projectSearch}
           disabled={projectsLoading || projects.length === 0}
           onChange={(e) => setProjectSearch((e.target as HTMLInputElement).value)}
         />
         <Select
-          aria-label="프로젝트 선택"
+          aria-label={translate('프로젝트 선택')}
           value={selectedProjectId}
           options={projectOptions}
           onChange={(e) => {
@@ -289,29 +292,27 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
             onChange({ repoProjectId: next, repoBranch: '', ...(next ? {} : { repoUrl: '' }) });
           }}
         />
-        {projectsLoading && <div style={helpText}>프로젝트 목록을 불러오는 중…</div>}
+        {projectsLoading && <div style={helpText}>{translate('프로젝트 목록을 불러오는 중…')}</div>}
         {!projectsLoading && projectsError && (
           <div style={{ ...helpText, color: tokens.colors.danger }}>
-            {projectsError} 아래에서 project_id 를 직접 입력할 수 있습니다.{' '}
-            <button type="button" onClick={() => { void reload(); }} style={linkButton}>다시 시도</button>
+            {projectsError} {translate('아래에서 project_id 를 직접 입력할 수 있습니다.')}{' '}
+            <button type="button" onClick={() => { void reload(); }} style={linkButton}>{translate('다시 시도')}</button>
           </div>
         )}
         {!projectsLoading && !projectsError && projects.length === 0 && (
           <div style={helpText}>
-            등록된 프로젝트가 없습니다.
-            {accountId && (
+            {translate('등록된 프로젝트가 없습니다.')}{accountId && (
               <>
-                {' '}<a href={`/projects`} style={{ color: tokens.colors.accent }}>Projects</a>
-                {' '}에서 저장소를 프로젝트로 등록하세요.
-              </>
+                {' '}<a href={`/projects`} style={{ color: tokens.colors.accent }}>{translate('Projects')}</a>
+                {' '}{translate('에서 저장소를 프로젝트로 등록하세요.')}</>
             )}
           </div>
         )}
         {projectListUnusable && (
           <Input
-            label="project_id 직접 입력"
-            aria-label="project_id 직접 입력"
-            placeholder="등록된 프로젝트의 id"
+            label={translate('project_id 직접 입력')}
+            aria-label={translate('project_id 직접 입력')}
+            placeholder={translate('등록된 프로젝트의 id')}
             value={state.repoProjectId}
             onChange={(e) => onChange({ repoProjectId: (e.target as HTMLInputElement).value })}
           />
@@ -321,26 +322,26 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
       <div style={{ marginTop: 8 }}>
         {branchSelectable ? (
           <Select
-            label="branch"
-            aria-label="브랜치 선택"
+            label={translate('branch')}
+            aria-label={translate('브랜치 선택')}
             value={state.repoBranch}
             options={branchOptions}
             onChange={(e) => onChange({ repoBranch: (e.target as HTMLSelectElement).value })}
           />
         ) : (
           <Input
-            label="branch"
-            aria-label="브랜치 직접 입력"
-            placeholder="기본 브랜치"
+            label={translate('branch')}
+            aria-label={translate('브랜치 직접 입력')}
+            placeholder={translate('기본 브랜치')}
             value={state.repoBranch}
             onChange={(e) => onChange({ repoBranch: (e.target as HTMLInputElement).value })}
           />
         )}
-        {selectedProjectId && branchesLoading && <div style={helpText}>브랜치 목록을 불러오는 중…</div>}
+        {selectedProjectId && branchesLoading && <div style={helpText}>{translate('브랜치 목록을 불러오는 중…')}</div>}
         {selectedProjectId && !branchesLoading && branchesError && (
           <div style={{ ...helpText, color: tokens.colors.danger }}>
-            {branchesError} 브랜치 이름을 직접 입력하세요.{' '}
-            <button type="button" onClick={() => setBranchReload((n) => n + 1)} style={linkButton}>다시 시도</button>
+            {branchesError} {translate('브랜치 이름을 직접 입력하세요.')}{' '}
+            <button type="button" onClick={() => setBranchReload((n) => n + 1)} style={linkButton}>{translate('다시 시도')}</button>
           </div>
         )}
       </div>
@@ -351,26 +352,22 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
         style={{ marginTop: 10 }}
       >
         <summary style={{ ...fieldLabel, marginBottom: 0, cursor: 'pointer' }}>
-          프로젝트로 등록되지 않은 저장소를 URL 로 직접 지정 (고급)
-        </summary>
+          {translate('프로젝트로 등록되지 않은 저장소를 URL 로 직접 지정 (고급)')}</summary>
         <div style={{ marginTop: 8 }}>
           <Input
-            label="repo URL"
-            aria-label="repo URL"
+            label={translate('repo URL')}
+            aria-label={translate('repo URL')}
             placeholder="https://github.com/org/repo.git"
             value={state.repoUrl}
             onChange={(e) => onChange({ repoUrl: (e.target as HTMLInputElement).value })}
           />
           <div style={helpText}>
-            위에서 프로젝트를 선택하면 이 URL 은 <b>무시됩니다</b>. 위 branch 값은 두 경로 모두에 적용됩니다.
-          </div>
+            {translate('위에서 프로젝트를 선택하면 이 URL 은')} <b>{translate('무시됩니다')}</b>{translate('. 위 branch 값은 두 경로 모두에 적용됩니다.')}</div>
         </div>
       </details>
 
       <div style={helpText}>
-        프로젝트가 있으면 그 저장소를, 없고 URL 이 있으면 url+branch 를 씁니다. 둘 다 비우면 저장소를
-        지정하지 않습니다.
-      </div>
+        {translate('프로젝트가 있으면 그 저장소를, 없고 URL 이 있으면 url+branch 를 씁니다. 둘 다 비우면 저장소를 지정하지 않습니다.')}</div>
     </div>
   );
 }
@@ -380,28 +377,25 @@ export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps
  * read 표시 + 변경 시 onChange(patch) 로 상위 상태를 갱신한다(저장은 상위 폼이).
  */
 export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = true, accountId }: WorkspaceFolderOptionsProps) {
+  useLocale();
   const defaultFolderHint = `${FOLDER_ROOT_BY_KIND[kind]}/<id>`;
   const effectiveAccountId = accountId || getActiveAccountId() || '';
   return (
     <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>작업폴더 옵션</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>{translate('작업폴더 옵션')}</div>
       <div style={{ ...helpText, marginTop: 4 }}>
-        run 이 “어느 폴더에서 어떻게 빌드할지”를 고정합니다. 기본값(<b>reuse + cold_then_warm</b>)은
-        같은 폴더를 재사용하면서 첫 run 만 클린 빌드(cold)하고 이후 run 은 증분 빌드(warm)합니다.
-        cold/warm 판정은 서버가 합니다 — 폼은 노브만 정합니다.
-      </div>
+        {translate('run 이 “어느 폴더에서 어떻게 빌드할지”를 고정합니다. 기본값(')}<b>{translate('reuse + cold_then_warm')}</b>{translate(')은 같은 폴더를 재사용하면서 첫 run 만 클린 빌드(cold)하고 이후 run 은 증분 빌드(warm)합니다. cold/warm 판정은 서버가 합니다 — 폼은 노브만 정합니다.')}</div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
         <div>
           <Input
-            label="작업폴더 (workspace_folder)"
-            placeholder={`비우면 기본값 ${defaultFolderHint}`}
+            label={translate('작업폴더 (workspace_folder)')}
+            placeholder={translate('비우면 기본값 {0}', { 0: defaultFolderHint })}
             value={state.workspaceFolder}
             onChange={(e) => onChange({ workspaceFolder: (e.target as HTMLInputElement).value })}
           />
           <div style={helpText}>
-            agent home 아래 상대 경로. 비우면 서버가 결정적 기본값 <code>{defaultFolderHint}</code> 을 씁니다.
-          </div>
+            {translate('agent home 아래 상대 경로. 비우면 서버가 결정적 기본값')} <code>{defaultFolderHint}</code> {translate('을 씁니다.')}</div>
         </div>
 
         <div style={{ display: 'flex', gap: 10 }}>
@@ -412,7 +406,7 @@ export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = 
               options={CHECKOUT_OPTIONS}
               onChange={(e) => onChange({ checkoutMode: (e.target as HTMLSelectElement).value as CheckoutMode })}
             />
-            <div style={helpText}>reuse = 폴더 유지, fresh = run 마다 새로 체크아웃.</div>
+            <div style={helpText}>{translate('reuse = 폴더 유지, fresh = run 마다 새로 체크아웃.')}</div>
           </div>
           {showBuildMode && (
             <div style={{ flex: 1 }}>
@@ -422,7 +416,7 @@ export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = 
                 options={BUILD_OPTIONS}
                 onChange={(e) => onChange({ buildMode: (e.target as HTMLSelectElement).value as BuildMode })}
               />
-              <div style={helpText}>cold = 클린 빌드, warm = 증분 빌드.</div>
+              <div style={helpText}>{translate('cold = 클린 빌드, warm = 증분 빌드.')}</div>
             </div>
           )}
         </div>

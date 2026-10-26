@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 import type { OrchestrationCounts, OrchestrationGraphSpec, OrchestrationStep } from '../../types';
@@ -41,6 +43,7 @@ export default function MissionStepRail({
   /** step 이 아직 없을 때 레일에 적을 한 줄. */
   emptyHint: string;
 }) {
+  useLocale();
   const depths = computeDepths(steps, graph);
   const maxDepth = steps.reduce((max, s) => Math.max(max, depths.get(s.step_key) ?? 0), 0);
   const stages: OrchestrationStep[][] = Array.from({ length: maxDepth + 1 }, () => []);
@@ -67,10 +70,9 @@ export default function MissionStepRail({
           accent={tokens.colors.accentLight}
           testId="rail-mission-row"
         >
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: tokens.colors.textPrimary }}>Mission conversation</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: tokens.colors.textPrimary }}>{translate('Mission conversation')}</div>
           <div style={{ marginTop: 2, fontSize: 10.5, color: tokens.colors.textMuted }}>
-            orchestrator · plan v{planVersion} · {counts.done}/{counts.total} done
-          </div>
+            {translate('orchestrator · plan v')}{planVersion} · {counts.done}/{counts.total} {translate('done')}</div>
         </RailRow>
       </div>
 
@@ -92,7 +94,7 @@ export default function MissionStepRail({
                   padding: '2px 2px 5px',
                 }}
               >
-                {index === 0 ? 'Stage 1 · starts immediately' : `Stage ${index + 1}`}
+                {index === 0 ? translate('Stage 1 · starts immediately') : translate('Stage {0}', { 0: index + 1 })}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                 {stage.map((step) => (
@@ -129,6 +131,7 @@ function StepRailRow({
   selected: boolean;
   onClick: () => void;
 }) {
+  useLocale();
   const style = stepStyle(step.status);
   const activity = describeStepActivity(step, now);
   const quiet = style.live ? describeStepQuiet(step, stepTimeoutMinutes, now) : null;
@@ -160,15 +163,15 @@ function StepRailRow({
           />
         )}
         {step.attempt > 1 && (
-          <span style={{ fontSize: 9, color: tokens.colors.warningLight }}>retry {step.attempt}/{step.max_attempts}</span>
+          <span style={{ fontSize: 9, color: tokens.colors.warningLight }}>{translate('retry')} {step.attempt}/{step.max_attempts}</span>
         )}
         {step.status === 'awaiting_user' && (
-          <span style={{ fontSize: 9, color: tokens.colors.warningLight, fontWeight: 700 }}>답변 필요</span>
+          <span style={{ fontSize: 9, color: tokens.colors.warningLight, fontWeight: 700 }}>{translate('답변 필요')}</span>
         )}
         {(step.evidence_count ?? 0) > 0 && (
           <span
             data-testid="rail-evidence-badge"
-            title={`검증 증거 ${step.evidence_count}개 (스크린샷·녹화)`}
+            title={translate('검증 증거 {0}개 (스크린샷·녹화)', { 0: step.evidence_count })}
             style={{ marginLeft: 'auto', fontSize: 9.5, color: tokens.colors.textMuted }}
           >
             📎 {step.evidence_count}
@@ -203,7 +206,7 @@ function StepRailRow({
           whiteSpace: 'nowrap',
         }}
       >
-        {step.assignee_name || 'unassigned'}
+        {step.assignee_name || translate('unassigned')}
       </div>
 
       {/* 진행 중인 행만 활동을 붙인다. 끝난 step 은 상태가 이미 답이고, 레일이 조용해야
@@ -253,6 +256,7 @@ function RailRow({
   testId: string;
   children: React.ReactNode;
 }) {
+  useLocale();
   return (
     <button
       type="button"

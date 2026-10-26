@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, {
   createContext,
   useCallback,
@@ -206,6 +208,7 @@ type BroadcastMsg =
   | { type: 'refresh' };
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
+  useLocale();
   const { user, hasPermission } = useAuth();
   const navigate = useNavigate();
   const { showToast, playNotifySound } = useToast();
@@ -498,7 +501,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     if (!user || !event?.notification_id || !event.message_id || mailNotices.current.has(event.notification_id)) return;
     mailNotices.current.add(event.notification_id);
     if (mailNotices.current.size > 500) mailNotices.current.delete(mailNotices.current.values().next().value!);
-    announce({ source: 'mail', title: event.title || '메일 알림', body: event.body || '', tag: `mail:${event.notification_id}`,
+    announce({ source: 'mail', title: event.title || translate('메일 알림'), body: event.body || '', tag: `mail:${event.notification_id}`,
       navigateTo: `/business/mail?message=${encodeURIComponent(event.message_id)}` });
   });
   useBoardStreamEvent('user_mention', (rawFrame: any) => {
@@ -508,7 +511,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     mutateCounts((prev) => ({ ...prev, mentions: prev.mentions + 1 }));
     announce({
       source: 'mentions',
-      title: `${raw?.actor_name || '누군가'}님이 회원님을 멘션했습니다`,
+      title: translate('{0}님이 회원님을 멘션했습니다', { 0: raw?.actor_name || translate('누군가') }),
       // The stored preview is raw comment/message text and still carries the
       // `@[user:<uuid>|이름]` tokens — printing it as-is put a UUID in the
       // middle of the notification body.
@@ -546,7 +549,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     });
     announce({
       source: 'chat',
-      title: raw?.sender_name || 'New message',
+      title: raw?.sender_name || translate('New message'),
       body: typeof raw?.content === 'string' ? raw.content.slice(0, 140) : '',
       tag: `chat:${roomId}`,
       navigateTo: `/chat/${encodeURIComponent(roomId)}`,
@@ -616,8 +619,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     });
     announce({
       source: 'tickets',
-      title: `New comment from ${raw?.actor_name || 'someone'}`,
-      body: raw?.status ? `in ${ticketStatusLabel(raw.status)}` : '',
+      title: translate('New comment from {0}', { 0: raw?.actor_name || 'someone' }),
+      body: raw?.status ? translate('in {0}', { 0: ticketStatusLabel(raw.status) }) : '',
       tag: `ticket-comment:${ticketId}`,
       navigateTo: ticketTarget(ticketId),
     });
@@ -687,15 +690,16 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       noteMentionsCleared,
       markAgentErrorsSeen,
     }),
-    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, markAllTicketsReadLocal, noteMentionsCleared, markAgentErrorsSeen],
+    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, markAllTicketsReadLocal, noteMentionsCleared, markAgentErrorsSeen, getLocale()],
   );
 
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
 }
 
 export function useNotifications(): NotificationContextValue {
+  useLocale();
   const ctx = useContext(NotificationContext);
-  if (!ctx) throw new Error('useNotifications must be used within <NotificationProvider>');
+  if (!ctx) throw new Error(translate('useNotifications must be used within <NotificationProvider>'));
   return ctx;
 }
 

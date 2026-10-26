@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { CommentType } from '../types';
 import { tokens } from '../tokens';
 
@@ -21,7 +22,7 @@ export interface CommentTypeStyle {
 
 export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
   note: {
-    label: 'Note',
+    get label() { return translate('Note'); },
     icon: '\u00B7',
     border: tokens.colors.border,
     bg: tokens.colors.surface,
@@ -30,7 +31,7 @@ export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
     composable: true,
   },
   question: {
-    label: 'Question',
+    get label() { return translate('Question'); },
     icon: '?',
     border: tokens.colors.warning,
     bg: tokens.colors.surfaceSubtle,
@@ -39,7 +40,7 @@ export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
     composable: true,
   },
   answer: {
-    label: 'Answer',
+    get label() { return translate('Answer'); },
     icon: '\u2192',
     border: tokens.colors.info,
     bg: tokens.colors.surfaceSubtle,
@@ -48,7 +49,7 @@ export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
     composable: false,
   },
   decision: {
-    label: 'Decision',
+    get label() { return translate('Decision'); },
     icon: '\u2605',
     border: tokens.colors.success,
     bg: tokens.colors.surfaceSubtle,
@@ -57,7 +58,7 @@ export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
     composable: true,
   },
   chat: {
-    label: 'Chat',
+    get label() { return translate('Chat'); },
     icon: '\u00B7',
     border: tokens.colors.accentMid,
     bg: tokens.colors.surface,
@@ -66,7 +67,7 @@ export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
     composable: true,
   },
   system: {
-    label: 'System',
+    get label() { return translate('System'); },
     icon: '\u2699',
     border: tokens.colors.badgeSystemBorder,
     bg: tokens.colors.badgeSystemSurface,
@@ -75,7 +76,7 @@ export const COMMENT_TYPE_STYLES: Record<CommentType, CommentTypeStyle> = {
     composable: false,
   },
   handoff: {
-    label: 'Handoff',
+    get label() { return translate('Handoff'); },
     icon: '\u21C4',
     border: tokens.colors.accentViolet,
     bg: tokens.colors.surfaceSubtle,

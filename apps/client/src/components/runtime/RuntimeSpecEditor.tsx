@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import RuntimeSelectionFields from './RuntimeSelectionFields';
 import ProjectFolderHelper from './ProjectFolderHelper';
 import React, { useEffect, useState } from 'react';
@@ -64,6 +66,7 @@ export default function RuntimeSpecEditor({
   folderOptionalHint = null,
   disabled = false,
 }: RuntimeSpecEditorProps) {
+  useLocale();
   const set = (patch: Partial<RuntimeSpecDraft>) => onChange({ ...value, ...patch });
   const [credentials, setCredentials] = useState<Credential[]>([]);
 
@@ -78,7 +81,7 @@ export default function RuntimeSpecEditor({
   }, [accountId]);
 
   const dirError = value.working_dir.trim() && !isAbsoluteHostPath(value.working_dir.trim())
-    ? 'Host 절대 경로여야 합니다 (예: /home/user/work)'
+    ? translate('Host 절대 경로여야 합니다 (예: /home/user/work)')
     : '';
 
   return (
@@ -96,10 +99,10 @@ export default function RuntimeSpecEditor({
 
       <div style={{ marginTop: 12 }}>
         <Input
-          label={folderOptionalHint ? 'Working dir (선택 · Host 절대 경로)' : 'Working dir (Host 절대 경로)'}
+          label={folderOptionalHint ? translate('Working dir (선택 · Host 절대 경로)') : translate('Working dir (Host 절대 경로)')}
           value={value.working_dir}
           disabled={disabled}
-          placeholder={folderOptionalHint ? '비워 두면 채팅 전용 폴더' : '/home/user/work'}
+          placeholder={folderOptionalHint ? translate('비워 두면 채팅 전용 폴더') : "/home/user/work"}
           onChange={(e) => set({ working_dir: (e.target as HTMLInputElement).value })}
         />
         {dirError && <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 4 }}>{dirError}</div>}
@@ -122,11 +125,11 @@ export default function RuntimeSpecEditor({
       {cliSupportsCredential(value.cli) && (
         <div style={{ marginTop: 12 }}>
           <Select
-            label="Credential (선택)"
+            label={translate('Credential (선택)')}
             value={value.credential_id || ''}
             disabled={disabled}
             options={[
-              { value: '', label: 'Host 로그인 그대로 사용' },
+              { value: '', label: translate('Host 로그인 그대로 사용') },
               ...credentials.map((c) => ({ value: c.id, label: c.name })),
             ]}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ credential_id: e.target.value || null })}
@@ -137,10 +140,10 @@ export default function RuntimeSpecEditor({
       {cliSupportsBackendProfile(value.cli) && (
         <div style={{ marginTop: 12 }}>
           <Input
-            label="Backend profile id (선택)"
+            label={translate('Backend profile id (선택)')}
             value={value.cli_runtime_profile || ''}
             disabled={disabled}
-            placeholder="비워두면 Anthropic"
+            placeholder={translate('비워두면 Anthropic')}
             onChange={(e) => set({ cli_runtime_profile: (e.target as HTMLInputElement).value.trim() || null })}
           />
         </div>
@@ -149,12 +152,12 @@ export default function RuntimeSpecEditor({
       {showFolderScope && (
         <div style={{ marginTop: 12 }}>
           <Select
-            label="Folder scope"
+            label={translate('Folder scope')}
             value={value.folder_scope}
             disabled={disabled}
             options={[
-              { value: 'shared', label: 'shared — working_dir 자체에서 실행' },
-              { value: 'isolated', label: 'isolated — step별 격리 폴더' },
+              { value: 'shared', label: translate('shared — working_dir 자체에서 실행') },
+              { value: 'isolated', label: translate('isolated — step별 격리 폴더') },
             ]}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ folder_scope: e.target.value as 'shared' | 'isolated' })}
           />
@@ -163,20 +166,20 @@ export default function RuntimeSpecEditor({
 
       <div style={{ marginTop: 12 }}>
         <Input
-          label="Label (표시명, 선택)"
+          label={translate('Label (표시명, 선택)')}
           value={value.label}
           disabled={disabled}
-          placeholder="비워두면 폴더/CLI 로 자동 표시"
+          placeholder={translate('비워두면 폴더/CLI 로 자동 표시')}
           onChange={(e) => set({ label: (e.target as HTMLInputElement).value })}
         />
       </div>
 
       <div style={{ marginTop: 12 }}>
         <Input
-          label="Role prompt (선택)"
+          label={translate('Role prompt (선택)')}
           value={value.role_prompt}
           disabled={disabled}
-          placeholder="실행 시 주입할 지시문"
+          placeholder={translate('실행 시 주입할 지시문')}
           onChange={(e) => set({ role_prompt: (e.target as HTMLInputElement).value })}
         />
       </div>

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -33,6 +35,7 @@ export default function ProjectBranchFields({
   projects, projectsLoading, projectId, baseBranch, savedProject,
   onProjectChange, onBranchChange, labelStyle, disabled,
 }: ProjectBranchFieldsProps) {
+  useLocale();
   const [branches, setBranches] = useState<RepoBranch[]>([]);
   const [defaultBranch, setDefaultBranch] = useState('');
   const [loading, setLoading] = useState(false);
@@ -51,7 +54,7 @@ export default function ProjectBranchFields({
         setBranches(res?.branches || []);
         setDefaultBranch(res?.default_branch || '');
       })
-      .catch(err => { if (!cancelled) setError(err?.message || 'Failed to list branches'); })
+      .catch(err => { if (!cancelled) setError(err?.message || translate('Failed to list branches')); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [projectId]);
@@ -59,32 +62,32 @@ export default function ProjectBranchFields({
   const selected = projects.find(p => p.id === projectId) || null;
   const knownDefault = defaultBranch || selected?.default_branch
     || (savedProject?.id === projectId ? savedProject?.default_branch : '') || 'origin/HEAD';
-  const defaultLabel = `프로젝트 기본값 (${knownDefault})`;
+  const defaultLabel = translate('프로젝트 기본값 ({0})', { 0: knownDefault });
   const freeText = !!projectId && !loading && (!!error || branches.length === 0);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12, marginBottom: 16 }}>
       <div>
-        <label style={labelStyle}>프로젝트{projectsLoading ? ' · 불러오는 중' : ''}</label>
+        <label style={labelStyle}>{translate('프로젝트')}{projectsLoading ? translate(' · 불러오는 중') : ''}</label>
         <select
           value={projectId}
           disabled={disabled}
           onChange={e => onProjectChange(e.target.value)}
           style={{ ...fieldStyle, cursor: disabled ? 'not-allowed' : 'pointer' }}
         >
-          <option value="">— 없음 —</option>
+          <option value="">{translate('— 없음 —')}</option>
           {/* The saved project may be missing from the list (still loading,
               deleted, or not visible) — keep it selectable by name. */}
           {projectId && !selected && (
             <option value={projectId}>
-              {savedProject?.id === projectId ? savedProject.name : (projectsLoading ? '…' : '(알 수 없는 프로젝트)')}
+              {savedProject?.id === projectId ? savedProject.name : (projectsLoading ? '…' : translate('(알 수 없는 프로젝트)'))}
             </option>
           )}
           {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
       </div>
       <div>
-        <label style={labelStyle}>기준 브랜치{projectId && loading ? ' · 불러오는 중' : ''}</label>
+        <label style={labelStyle}>{translate('기준 브랜치')}{projectId && loading ? translate(' · 불러오는 중') : ''}</label>
         {freeText ? (
           <input
             value={baseBranch}
@@ -100,7 +103,7 @@ export default function ProjectBranchFields({
             onChange={e => onBranchChange(e.target.value)}
             style={{ ...fieldStyle, cursor: disabled || !projectId || loading ? 'not-allowed' : 'pointer' }}
           >
-            <option value="">{projectId ? defaultLabel : '— 프로젝트를 먼저 고르세요 —'}</option>
+            <option value="">{projectId ? defaultLabel : translate('— 프로젝트를 먼저 고르세요 —')}</option>
             {/* A pinned branch may be gone upstream or the list still loading —
                 show it anyway so the picker reflects the persisted value. */}
             {baseBranch && !branches.some(b => b.name === baseBranch) && (
@@ -111,8 +114,7 @@ export default function ProjectBranchFields({
         )}
         {error && (
           <div title={error} style={{ fontSize: '11px', color: tokens.colors.warningLight, marginTop: 4 }}>
-            브랜치 목록을 불러오지 못했습니다 — 이름을 직접 입력하세요
-          </div>
+            {translate('브랜치 목록을 불러오지 못했습니다 — 이름을 직접 입력하세요')}</div>
         )}
       </div>
     </div>

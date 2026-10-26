@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // Credential forms never expose legacy ownership scopes. Updates preserve each row’s owner.
 
 import test from 'node:test';
@@ -43,7 +44,7 @@ const secondAccountCred = cred({
 });
 
 function buttonsByText(container, label) {
-  return [...container.querySelectorAll('button')].filter((b) => b.textContent?.trim() === label);
+  return [...container.querySelectorAll('button')].filter((b) => b.textContent?.trim() === ui(label));
 }
 
 function scopeSelect(container) {
@@ -84,7 +85,7 @@ async function mountManager(t, { credentials, ...props }) {
 }
 
 function rowOf(container, rowText) {
-  const row = [...container.querySelectorAll('tr')].find((r) => r.textContent?.includes(rowText));
+  const row = [...container.querySelectorAll('tr')].find((r) => r.textContent?.includes(ui(rowText)));
   assert.ok(row, `row "${rowText}" must be rendered`);
   return row;
 }

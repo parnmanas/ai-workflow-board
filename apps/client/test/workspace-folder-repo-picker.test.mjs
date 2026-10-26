@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 작업폴더 옵션의 repo_ref 피커 회귀 테스트 (티켓 af31e92d).
 //
 // 예전엔 Action/QA/Security 편집 폼에서 작업 저장소를 지정하려면 repo 리소스의
@@ -60,15 +61,15 @@ function change(element, value) {
 }
 
 function button(container, label) {
-  const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === label)
-    || [...container.querySelectorAll('button')].find((b) => b.textContent?.includes(label));
+  const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === ui(label))
+    || [...container.querySelectorAll('button')].find((b) => b.textContent?.includes(ui(label)));
   assert.ok(found, `"${label}" 버튼을 찾을 수 없습니다.`);
   return found;
 }
 
 /** 공용 Input/Select 는 label 요소에 htmlFor 가 없어서 래퍼 div 를 거쳐 찾는다. */
 function fieldByLabel(container, labelText, tag = 'input') {
-  const label = [...container.querySelectorAll('label')].find((l) => l.textContent?.trim() === labelText);
+  const label = [...container.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(labelText));
   assert.ok(label, `"${labelText}" 라벨을 찾을 수 없습니다.`);
   const field = label.parentElement?.querySelector(tag);
   assert.ok(field, `"${labelText}" 라벨에 대응하는 <${tag}> 를 찾을 수 없습니다.`);
@@ -76,13 +77,13 @@ function fieldByLabel(container, labelText, tag = 'input') {
 }
 
 function repoSelect(container) {
-  const el = container.querySelector('select[aria-label="프로젝트 선택"]');
+  const el = container.querySelector(`select[aria-label="${ui("프로젝트 선택")}"]`);
   assert.ok(el, '프로젝트 드롭다운이 없습니다.');
   return el;
 }
 
 function repoSearch(container) {
-  const el = container.querySelector('input[aria-label="프로젝트 검색"]');
+  const el = container.querySelector(`input[aria-label="${ui("프로젝트 검색")}"]`);
   assert.ok(el, '프로젝트 검색 입력이 없습니다.');
   return el;
 }
@@ -94,7 +95,7 @@ function optionLabels(select) {
 /** DeclareRuntimeSection 에 Host/CLI/dir 을 채워 Resolve 한다 (P4c-4 대상 선언). */
 async function declareRuntime(container) {
   const toggle = [...container.querySelectorAll('label')]
-    .find((l) => l.textContent.includes('실행 설정'));
+    .find((l) => l.textContent.includes(ui("실행 설정")));
   assert.ok(toggle, 'runtime 선언 토글이 없다');
   click(toggle.querySelector('input[type="checkbox"]'));
   await flush();
@@ -107,7 +108,7 @@ async function declareRuntime(container) {
   change(hostSelect, 'host-1');
   change(cliSelect, 'claude');
   typeInto(dirInput, '/wt/repo-test');
-  const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('이 설정 사용'));
+  const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes(ui("이 설정 사용")));
   assert.ok(resolveBtn, 'Resolve 버튼이 없다');
   click(resolveBtn);
 }
@@ -171,7 +172,7 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 프로젝�
   // 검색으로 후보를 좁힌 뒤 드롭다운에서 고른다 — 어디에도 UUID 를 입력하지 않는다.
   typeInto(repoSearch(container), 'game');
   assert.deepEqual(optionLabels(repoSelect(container)), [
-    '— 지정 안 함 —',
+    ui('— 지정 안 함 —'),
     'GameClient · https://github.com/example/game-client.git',
   ], '검색어가 프로젝트 목록을 좁혀야 합니다.');
 
@@ -179,9 +180,9 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 프로젝�
   await flush();
 
   // 프로젝트를 고르면 브랜치도 목록에서 고를 수 있어야 한다.
-  const branch = container.querySelector('select[aria-label="브랜치 선택"]');
+  const branch = container.querySelector(`select[aria-label="${ui("브랜치 선택")}"]`);
   assert.ok(branch, '프로젝트를 고른 뒤에는 브랜치 드롭다운이 나와야 합니다.');
-  assert.deepEqual(optionLabels(branch), ['— 프로젝트 기본 브랜치 (main) —', 'main', 'release']);
+  assert.deepEqual(optionLabels(branch), [ui('— 프로젝트 기본 브랜치 ({0}) —', {0: 'main'}), 'main', 'release']);
   change(branch, 'release');
 
   // P4c-4: 대상 없는 저장은 검증에 막힌다 — runtime 1개를 선언한다.
@@ -196,7 +197,7 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 프로젝�
   assert.equal(created[0].target_runtimes.length, 1, '선언한 runtime 이 함께 저장돼야 한다');
   // 사용자가 UUID 를 친 적이 없다 — 어떤 자유 텍스트 입력에도 project id 가 남지 않는다.
   assert.equal(
-    Boolean(container.querySelector('input[aria-label="project_id 직접 입력"]')),
+    Boolean(container.querySelector(`input[aria-label="${ui("project_id 직접 입력")}"]`)),
     false,
     '자유 텍스트 경로에도 project_id 직접 입력 필드가 남으면 안 된다',
   );
@@ -216,7 +217,7 @@ test('Actions: 저장된 프로젝트 선택이 재편집 시 이름·URL 라벨
     '프로젝트는 이름 + URL 로 식별 가능하게 표시돼야 합니다.',
   );
   assert.ok(
-    !optionLabels(select).some((l) => l.includes('알 수 없는 프로젝트')),
+    !optionLabels(select).some((l) => l.includes(ui("(알 수 없는 프로젝트)"))),
     '목록에 있는 프로젝트를 "알 수 없는 프로젝트" 로 표시하면 안 됩니다.',
   );
 });
@@ -245,7 +246,7 @@ test('Actions: 삭제된(목록에 없는) project_id 도 보존해 표시하고
   const select = repoSelect(container);
   assert.equal(select.value, 'repo-deleted');
   assert.ok(
-    optionLabels(select).includes('알 수 없는 프로젝트 (repo-deleted)'),
+    optionLabels(select).includes(ui('알 수 없는 프로젝트 ({0})', {0: 'repo-deleted'})),
     `보존 문구가 없습니다: ${JSON.stringify(optionLabels(select))}`,
   );
 
@@ -273,13 +274,13 @@ test('Actions: 프로젝트 목록 조회가 실패해도 폼이 동작하고 �
   const select = repoSelect(container);
   assert.equal(select.value, 'repo-awb', '조회 실패해도 저장된 값은 선택 상태로 남아야 합니다.');
   assert.ok(
-    optionLabels(select).includes('repo-awb (프로젝트 목록을 불러오지 못했습니다)'),
+    optionLabels(select).includes(ui('{0} (프로젝트 목록을 불러오지 못했습니다)', {0: 'repo-awb'})),
     '목록을 못 받은 것을 "알 수 없는 프로젝트" 로 단정하면 안 됩니다: '
       + JSON.stringify(optionLabels(select)),
   );
 
   // 목록을 못 쓰는 사용자를 위한 수동 입력 경로가 남아 있어야 한다.
-  const manual = container.querySelector('input[aria-label="project_id 직접 입력"]');
+  const manual = container.querySelector(`input[aria-label="${ui("project_id 직접 입력")}"]`);
   assert.ok(manual, '목록 조회 실패 시 project_id 수동 입력이 제공돼야 합니다.');
   assert.equal(manual.value, 'repo-awb');
 
@@ -298,9 +299,9 @@ test('Actions: 브랜치 조회가 실패하면 자유 입력으로 폴백하고
   click(button(container, 'Edit'));
   await flush();
 
-  assert.equal(Boolean(container.querySelector('select[aria-label="브랜치 선택"]')), false,
+  assert.equal(Boolean(container.querySelector(`select[aria-label="${ui("브랜치 선택")}"]`)), false,
     '브랜치 목록을 못 받았으면 드롭다운을 강요하면 안 됩니다.');
-  const manualBranch = container.querySelector('input[aria-label="브랜치 직접 입력"]');
+  const manualBranch = container.querySelector(`input[aria-label="${ui("브랜치 직접 입력")}"]`);
   assert.ok(manualBranch, '브랜치 자유 입력 폴백이 없습니다.');
 
   typeInto(manualBranch, 'hotfix/urgent');
@@ -317,10 +318,10 @@ test('Actions: 원격에서 사라진 저장 브랜치도 선택 상태로 보�
   click(button(container, 'Edit'));
   await flush();
 
-  const branch = container.querySelector('select[aria-label="브랜치 선택"]');
+  const branch = container.querySelector(`select[aria-label="${ui("브랜치 선택")}"]`);
   assert.ok(branch);
   assert.equal(branch.value, 'gone-upstream');
-  assert.ok(optionLabels(branch).includes('gone-upstream (목록에 없음)'),
+  assert.ok(optionLabels(branch).includes(ui('{0} (목록에 없음)', {0: 'gone-upstream'})),
     `보존 문구가 없습니다: ${JSON.stringify(optionLabels(branch))}`);
 });
 
@@ -360,7 +361,7 @@ test('Actions: repo_ref 우선순위 — 프로젝트 없이 URL 만 있으면 u
   click(button(container, 'Edit'));
   await flush();
   typeInto(container.querySelector('input[aria-label="repo URL"]'), 'https://github.com/example/raw.git');
-  typeInto(container.querySelector('input[aria-label="브랜치 직접 입력"]'), 'trunk');
+  typeInto(container.querySelector(`input[aria-label="${ui("브랜치 직접 입력")}"]`), 'trunk');
   click(button(container, 'Save Changes'));
   await flush();
 
@@ -422,7 +423,7 @@ test('QA 시나리오 폼도 같은 드롭다운으로 프로젝트를 지정하
 
   // 목록에 없는 기존 값이 보존된 채로 열린다.
   assert.equal(repoSelect(container).value, 'repo-deleted');
-  assert.ok(optionLabels(repoSelect(container)).includes('알 수 없는 프로젝트 (repo-deleted)'));
+  assert.ok(optionLabels(repoSelect(container)).includes(ui('알 수 없는 프로젝트 ({0})', {0: 'repo-deleted'})));
 
   // 드롭다운만으로 실제 프로젝트로 교체한다.
   change(repoSelect(container), 'repo-awb');
@@ -468,7 +469,7 @@ test('Security 프로파일 폼도 같은 드롭다운으로 프로젝트·브�
 
   change(repoSelect(container), 'repo-game');
   await flush();
-  const branch = container.querySelector('select[aria-label="브랜치 선택"]');
+  const branch = container.querySelector(`select[aria-label="${ui("브랜치 선택")}"]`);
   assert.ok(branch, 'Security 폼에도 브랜치 드롭다운이 있어야 합니다.');
   change(branch, 'release');
 

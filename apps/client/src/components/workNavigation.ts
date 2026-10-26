@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { missionStyle } from './orchestration/status';
 import type { ActivityView } from '../activity';
 
@@ -103,12 +104,12 @@ export function buildTicketsNavItem(input: {
   const total = input.ticketUnreadTotal || 0;
   return {
     key: 'tickets',
-    label: 'Tickets',
+    label: translate('Tickets'),
     icon: '#',
     path,
     active: isUnder(input.pathname, path),
     badge: total,
-    badgeLabel: `읽지 않은 티켓 코멘트 ${total}건`,
+    badgeLabel: translate('읽지 않은 티켓 코멘트 {0}건', { 0: total }),
   };
 }
 
@@ -133,7 +134,7 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
   return [
     {
       key: 'teams',
-      label: 'Teams',
+      label: translate('Teams'),
       icon: 'T',
       path: teamsPath,
       active: isUnder(pathname, teamsPath),
@@ -145,12 +146,12 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
         // 쿼리 파라미터로 표현되므로 active 도 그걸로 판정한다.
         active: isUnder(pathname, teamsPath) && selectedTeamId === team.id,
       })),
-      emptyLabel: 'No teams yet',
+      emptyLabel: translate('No teams yet'),
       loading: teamsLoading,
     },
     {
       key: 'orchestrations',
-      label: 'Missions',
+      label: translate('Missions'),
       icon: 'O',
       path: orchestrationsPath,
       active: isUnder(pathname, orchestrationsPath),
@@ -161,7 +162,7 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
         active: pathname === `${orchestrationsPath}/${mission.id}`,
         activity: mission.status ? missionActivityView(mission.status) : undefined,
       })),
-      emptyLabel: 'No missions yet',
+      emptyLabel: translate('No missions yet'),
       loading: missionsLoading,
     },
   ];

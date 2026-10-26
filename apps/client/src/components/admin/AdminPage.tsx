@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import PageHeader from '../PageHeader';
@@ -13,22 +15,23 @@ import { tokens } from '../../tokens';
 import { useAuth } from '../../contexts/AuthContext';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
-  users: { title: 'Users', description: 'Manage user accounts' },
-  logs: { title: 'Server Logs', description: 'View server logs' },
-  'agent-logs': { title: 'Agent Logs', description: 'Per-agent plugin error reports' },
-  skills: { title: 'Skills', description: 'Immutable skill versions, assignments, and runtime proposals' },
+  users: { get title() { return translate('Users'); }, get description() { return translate('Manage user accounts'); } },
+  logs: { get title() { return translate('Server Logs'); }, get description() { return translate('View server logs'); } },
+  'agent-logs': { get title() { return translate('Agent Logs'); }, get description() { return translate('Per-agent plugin error reports'); } },
+  skills: { get title() { return translate('Skills'); }, get description() { return translate('Immutable skill versions, assignments, and runtime proposals'); } },
   'skill-registry': {
-    title: 'Skill Registry',
-    description: 'Global skills, the built-in pack, and external git taps',
+    get title() { return translate('Skill Registry'); },
+    get description() { return translate('Global skills, the built-in pack, and external git taps'); },
   },
-  'workflow-health': { title: 'Workflow Health', description: 'Agent token usage and cost — recent window and all-time' },
-  settings: { title: 'Settings', description: 'System configuration' },
-  voice: { title: 'Voice', description: 'Speech engines for voice input, spoken replies and announcements — and the lab to choose them' },
-  migration: { title: 'Live Import', description: 'Pull this instance\'s data from a live source AWB server' },
+  'workflow-health': { get title() { return translate('Workflow Health'); }, get description() { return translate('Agent token usage and cost — recent window and all-time'); } },
+  settings: { get title() { return translate('Settings'); }, get description() { return translate('System configuration'); } },
+  voice: { get title() { return translate('Voice'); }, get description() { return translate('Speech engines for voice input, spoken replies and announcements — and the lab to choose them'); } },
+  migration: { get title() { return translate('Live Import'); }, get description() { return translate('Pull this instance\'s data from a live source AWB server'); } },
 };
 
 function AdminRoute({ page, children }: { page: string; children: React.ReactNode }) {
-  const info = pageTitles[page] || { title: 'Admin' };
+  useLocale();
+  const info = pageTitles[page] || { title: translate('Admin') };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: tokens.colors.surface, minHeight: 0 }}>
       <PageHeader title={info.title} description={info.description} />
@@ -40,10 +43,12 @@ function AdminRoute({ page, children }: { page: string; children: React.ReactNod
 }
 
 function WorkRouteRedirect({ path }: { path: string }) {
+  useLocale();
   return <Navigate to={`/${path}`} replace />;
 }
 
 export default function AdminPage() {
+  useLocale();
   return (
     <Routes>
       <Route index element={<Navigate to="/admin/users" replace />} />

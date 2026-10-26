@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
 import { ApiKey } from '../../types';
@@ -19,6 +22,7 @@ const apiKeyCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
 });
 
 export default function ApiKeyManager({ accountId }: { accountId?: string } = {}) {
+  useLocale();
   const confirm = useConfirm();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -76,9 +80,9 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
 
   const handleRevoke = async (id: string) => {
     const ok = await confirm({
-      title: 'Revoke API key',
-      message: 'Revoke this API key? It will no longer be usable.',
-      confirmLabel: 'Revoke',
+      title: translate('Revoke API key'),
+      message: translate('Revoke this API key? It will no longer be usable.'),
+      confirmLabel: translate('Revoke'),
     });
     if (!ok) return;
     await api.revokeApiKey(id);
@@ -86,7 +90,7 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
   };
 
   const handleDelete = async (id: string) => {
-    const ok = await confirm({ title: 'Delete API key', message: 'Permanently delete this API key?' });
+    const ok = await confirm({ title: translate('Delete API key'), message: translate('Permanently delete this API key?') });
     if (!ok) return;
     await api.deleteApiKey(id);
     await load();
@@ -99,31 +103,31 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
   };
 
   const getKeyStatus = (key: ApiKey): { label: string; variant: 'success' | 'danger' | 'warning' } => {
-    if (!key.is_active) return { label: 'REVOKED', variant: 'danger' };
-    if (key.expires_at && new Date(key.expires_at) < new Date()) return { label: 'EXPIRED', variant: 'warning' };
-    return { label: 'ACTIVE', variant: 'success' };
+    if (!key.is_active) return { label: translate('REVOKED'), variant: 'danger' };
+    if (key.expires_at && new Date(key.expires_at) < new Date()) return { label: translate('EXPIRED'), variant: 'warning' };
+    return { label: translate('ACTIVE'), variant: 'success' };
   };
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{keys.length} keys</span>
-        <Button variant="primary" onClick={() => { resetForm(); setShowForm(true); }}>+ Create Key</Button>
+        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{keys.length} {translate('keys')}</span>
+        <Button variant="primary" onClick={() => { resetForm(); setShowForm(true); }}>{translate('+ Create Key')}</Button>
       </div>
 
       {/* Create / Edit Modal (also shows created key) */}
       <Modal
         isOpen={showForm || !!createdKey}
         onClose={resetForm}
-        title={createdKey ? 'API Key Created' : (editingId ? 'Edit API Key' : 'Create API Key')}
+        title={createdKey ? translate('API Key Created') : (editingId ? translate('Edit API Key') : translate('Create API Key'))}
         maxWidth={520}
         footer={
           createdKey ? (
-            <Button variant="secondary" onClick={resetForm}>Done</Button>
+            <Button variant="secondary" onClick={resetForm}>{translate('Done')}</Button>
           ) : (
             <>
-              <Button variant="secondary" onClick={resetForm}>Cancel</Button>
-              <Button variant="primary" onClick={handleSave}>{editingId ? 'Update' : 'Create'}</Button>
+              <Button variant="secondary" onClick={resetForm}>{translate('Cancel')}</Button>
+              <Button variant="primary" onClick={handleSave}>{editingId ? translate('Update') : translate('Create')}</Button>
             </>
           )
         }
@@ -131,11 +135,9 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
         {createdKey ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontSize: '12px', fontWeight: 600, color: tokens.colors.successLight }}>
-              API Key Created Successfully
-            </div>
+              {translate('API Key Created Successfully')}</div>
             <div style={{ fontSize: '11px', color: tokens.colors.warningLight }}>
-              Copy this key now. It will NOT be shown again.
-            </div>
+              {translate('Copy this key now. It will NOT be shown again.')}</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <code style={{
                 flex: 1, background: tokens.colors.surface, padding: '8px 12px', borderRadius: tokens.radii.md,
@@ -143,7 +145,7 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
                 wordBreak: 'break-all', border: `1px solid ${tokens.colors.border}`,
               }}>{createdKey}</code>
               <Button variant="secondary" onClick={() => handleCopy(createdKey)}>
-                {copied ? 'Copied!' : 'Copy'}
+                {copied ? translate('Copied!') : translate('Copy')}
               </Button>
             </div>
           </div>
@@ -151,29 +153,29 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <Input
-                label="Name *"
+                label={translate('Name *')}
                 value={form.name}
                 onChange={e => setForm({ ...form, name: e.target.value })}
-                placeholder="e.g. claude-prod"
+                placeholder={translate('e.g. claude-prod')}
               />
               <Select
-                label="Scope"
+                label={translate('Scope')}
                 value={form.scope}
                 onChange={e => setForm({ ...form, scope: (e.target as HTMLSelectElement).value })}
                 options={[
-                  { value: 'full', label: 'Full (Read + Write)' },
-                  { value: 'read', label: 'Read Only' },
-                  { value: 'write', label: 'Write Only' },
-                  { value: 'migration_export', label: 'Migration Export (server-to-server pull)' },
+                  { value: 'full', label: translate('Full (Read + Write)') },
+                  { value: 'read', label: translate('Read Only') },
+                  { value: 'write', label: translate('Write Only') },
+                  { value: 'migration_export', label: translate('Migration Export (server-to-server pull)') },
                 ]}
               />
 
               <Input
-                label="Expires In (Days)"
+                label={translate('Expires In (Days)')}
                 type="number"
                 value={form.expires_in_days}
                 onChange={e => setForm({ ...form, expires_in_days: e.target.value })}
-                placeholder="Empty = never"
+                placeholder={translate('Empty = never')}
               />
             </div>
           </div>
@@ -203,15 +205,15 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
                 letterSpacing: '0.05em',
               }}
             >
-              <th style={apiKeyHeadStyle('left')}>Name</th>
-              <th style={apiKeyHeadStyle('left')}>Status</th>
-              <th style={apiKeyHeadStyle('left')}>Scope</th>
-              <th style={apiKeyHeadStyle('left')}>Masked Key</th>
-              <th style={apiKeyHeadStyle('left')}>Host</th>
-              <th style={apiKeyHeadStyle('right')}>Used</th>
-              <th style={apiKeyHeadStyle('left')}>Last Used</th>
-              <th style={apiKeyHeadStyle('left')}>Expires</th>
-              <th style={apiKeyHeadStyle('right')}>Actions</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Name')}</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Status')}</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Scope')}</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Masked Key')}</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Host')}</th>
+              <th style={apiKeyHeadStyle('right')}>{translate('Used')}</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Last Used')}</th>
+              <th style={apiKeyHeadStyle('left')}>{translate('Expires')}</th>
+              <th style={apiKeyHeadStyle('right')}>{translate('Actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -276,7 +278,7 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : '—'}
+                    {key.last_used_at ? new Date(key.last_used_at).toLocaleDateString(getLocaleTag()) : '—'}
                   </td>
                   <td
                     style={{
@@ -285,23 +287,20 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'never'}
+                    {key.expires_at ? new Date(key.expires_at).toLocaleDateString(getLocaleTag()) : translate('never')}
                   </td>
                   <td style={{ ...apiKeyCellStyle('right'), whiteSpace: 'nowrap' }}>
                     <div style={{ display: 'inline-flex', gap: 6 }}>
                       {key.is_active ? (
                         <>
                           <Button variant="secondary" size="sm" onClick={() => handleEdit(key)}>
-                            Edit
-                          </Button>
+                            {translate('Edit')}</Button>
                           <Button variant="danger" size="sm" onClick={() => handleRevoke(key.id)}>
-                            Revoke
-                          </Button>
+                            {translate('Revoke')}</Button>
                         </>
                       ) : (
                         <Button variant="danger" size="sm" onClick={() => handleDelete(key.id)}>
-                          Delete
-                        </Button>
+                          {translate('Delete')}</Button>
                       )}
                     </div>
                   </td>
@@ -319,11 +318,9 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
                       marginBottom: 8,
                     }}
                   >
-                    No API keys yet
-                  </div>
+                    {translate('No API keys yet')}</div>
                   <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-                    Create your first key to enable MCP authentication.
-                  </div>
+                    {translate('Create your first key to enable MCP authentication.')}</div>
                 </td>
               </tr>
             )}
@@ -333,11 +330,11 @@ export default function ApiKeyManager({ accountId }: { accountId?: string } = {}
 
       {/* Usage Guide */}
       <Card style={{ marginTop: 20 }} padding={14}>
-        <div style={{ fontSize: '12px', fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 8 }}>Usage</div>
+        <div style={{ fontSize: '12px', fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 8 }}>{translate('Usage')}</div>
         <div style={{ fontSize: '11px', color: tokens.colors.textMuted, lineHeight: 1.8, fontFamily: 'monospace' }}>
-          <div>Authorization: Bearer awb_your_key_here</div>
-          <div style={{ color: tokens.colors.borderStrong }}>or</div>
-          <div>x-api-key: awb_your_key_here</div>
+          <div>{translate('Authorization: Bearer awb_your_key_here')}</div>
+          <div style={{ color: tokens.colors.borderStrong }}>{translate('or')}</div>
+          <div>{translate('x-api-key: awb_your_key_here')}</div>
         </div>
       </Card>
     </div>

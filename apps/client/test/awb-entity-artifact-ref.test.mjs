@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
@@ -32,7 +33,7 @@ test('parses all five entity artifact types but SSR never creates an unverified 
     assert.match(html, new RegExp(`data-entity-ref="${type}:${ids[type]}"`));
   }
   assert.doesNotMatch(html, /<a /);
-  assert.match(html, /확인 중/);
+  assert.match(html, uiPattern("확인 중"));
 });
 
 test('short ids remain plain text instead of becoming fake links', () => {

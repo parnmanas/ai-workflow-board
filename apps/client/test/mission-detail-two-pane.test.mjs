@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 미션 화면 개편의 회귀 테스트 (운영 요청 2026-09-25: "한 페이지에 너무 많은 내용이 다
 // 나와서 보기 힘들다. step 을 선택하면 그 step 의 작업 session, 선택을 풀면 main session").
 //
@@ -72,7 +73,7 @@ test('mission menu exposes the full reference ID and guards edit/delete by lifec
   };
   const view = mount(React.createElement(MissionHeaderMenu, props));
   t.after(() => { view.unmount(); dom.cleanup(); });
-  const button = (label) => [...view.container.querySelectorAll('button')].find((b) => b.textContent.includes(label));
+  const button = (label) => [...view.container.querySelectorAll('button')].find((b) => b.textContent.includes(ui(label)));
   await act(async () => view.container.querySelector('[aria-label="Mission menu"]').click());
   assert.match(view.container.textContent, new RegExp(id));
   await act(async () => view.container.querySelector('[aria-label="Copy mission ID"]').click());
@@ -309,7 +310,7 @@ test('step 세션은 지시·CLI 하트비트·에이전트 보고·실행 이�
   assert.doesNotMatch(text, /다른 step 의 이벤트/, '다른 step 의 이벤트는 섞이지 않는다');
   assert.match(text, /Back to mission/, '선택을 푸는 길이 패널 안에도 있다');
   assert.equal(container.querySelectorAll('textarea, input[type="text"]').length, 0, 'step 방에는 쓰기 입구가 없다');
-  assert.match(text, /읽기 전용/, '왜 쓸 수 없는지 화면이 설명한다');
+  assert.match(text, uiPattern('읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지 않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.'), '왜 쓸 수 없는지 화면이 설명한다');
 });
 
 test('지시 블록을 펼치면 본문이 나온다', async (t) => {
@@ -346,7 +347,7 @@ test('진행 중인 step 세션 헤더는 카드와 같은 두 시계를 보여�
 test('아직 디스패치되지 않은 step 은 방이 없다고 말한다', async (t) => {
   const s = step('later', { status: 'pending', room_id: null });
   const { container } = await renderSession(t, { step: s, items: [] });
-  assert.match(container.textContent, /디스패치되지 않았습니다/);
+  assert.match(container.textContent, uiPattern("아직 디스패치되지 않았습니다 — 작업 방은 디스패치 시점에 만들어집니다."));
 });
 
 test('복구 불가 상태는 세션 헤더에서 사유까지 보인다', async (t) => {

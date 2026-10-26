@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
 import type { RepoCommitSummary, RepoCommitDetail } from '../../types';
@@ -20,6 +22,7 @@ interface RepoHistoryTabProps {
 }
 
 export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHistoryTabProps) {
+  useLocale();
   const [commits, setCommits] = useState<RepoCommitSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +45,7 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
       setCommits(res.commits);
       setHasMore(res.commits.length === PAGE);
     } catch (err: any) {
-      setError(err?.message || '커밋 히스토리를 불러오지 못했습니다.');
+      setError(err?.message || translate('커밋 히스토리를 불러오지 못했습니다.'));
       setCommits([]);
       setHasMore(false);
     } finally {
@@ -61,7 +64,7 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
       setCommits((prev) => [...prev, ...res.commits]);
       setHasMore(res.commits.length === PAGE);
     } catch (err: any) {
-      setError(err?.message || '더 불러오지 못했습니다.');
+      setError(err?.message || translate('더 불러오지 못했습니다.'));
       setHasMore(false);
     } finally {
       setLoadingMore(false);
@@ -77,7 +80,7 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
       const d = await api.getProjectCommit(projectId, accountId, sha);
       setDetail(d);
     } catch (err: any) {
-      setDetailError(err?.message || '커밋 상세를 불러오지 못했습니다.');
+      setDetailError(err?.message || translate('커밋 상세를 불러오지 못했습니다.'));
     } finally {
       setDetailLoading(false);
     }
@@ -88,12 +91,10 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
     return (
       <div data-testid="repo-commit-detail">
         <Button variant="secondary" size="sm" onClick={() => { setSelectedSha(null); setDetail(null); }}>
-          ← 커밋 목록
-        </Button>
+          {translate('← 커밋 목록')}</Button>
         {detailLoading && (
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>
-            커밋 상세 불러오는 중…
-          </div>
+            {translate('커밋 상세 불러오는 중…')}</div>
         )}
         {!detailLoading && detailError && <ErrorBox message={detailError} />}
         {!detailLoading && detail && <CommitDetailView detail={detail} />}
@@ -106,14 +107,12 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
     <div data-testid="repo-history-list">
       {loading && (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>
-          커밋 히스토리 불러오는 중…
-        </div>
+          {translate('커밋 히스토리 불러오는 중…')}</div>
       )}
       {!loading && error && <ErrorBox message={error} />}
       {!loading && !error && commits.length === 0 && (
         <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: '16px 4px', lineHeight: 1.5 }}>
-          이 ref 에서 커밋을 찾지 못했습니다.
-        </div>
+          {translate('이 ref 에서 커밋을 찾지 못했습니다.')}</div>
       )}
       {!loading && !error && commits.length > 0 && (
         <>
@@ -166,7 +165,7 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
                   }}
                   title={c.subject}
                 >
-                  {c.subject || '(빈 커밋 메시지)'}
+                  {c.subject || translate('(빈 커밋 메시지)')}
                 </span>
                 <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }} title={c.author_email}>
                   {c.author_name}
@@ -183,8 +182,7 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
           {hasMore && (
             <div style={{ textAlign: 'center', marginTop: 10 }}>
               <Button variant="secondary" size="sm" onClick={loadOlder} disabled={loadingMore} loading={loadingMore}>
-                이전 커밋 더 보기
-              </Button>
+                {translate('이전 커밋 더 보기')}</Button>
             </div>
           )}
         </>
@@ -195,6 +193,7 @@ export default function RepoHistoryTab({ projectId, accountId, refKey }: RepoHis
 
 // ── 커밋 상세 본문 ─────────────────────────────────────────
 function CommitDetailView({ detail }: { detail: RepoCommitDetail }) {
+  useLocale();
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ marginBottom: 12 }}>
@@ -208,7 +207,7 @@ function CommitDetailView({ detail }: { detail: RepoCommitDetail }) {
             wordBreak: 'break-word',
           }}
         >
-          {detail.subject || '(빈 커밋 메시지)'}
+          {detail.subject || translate('(빈 커밋 메시지)')}
         </div>
         {detail.body && detail.body.trim() && (
           <pre
@@ -232,15 +231,14 @@ function CommitDetailView({ detail }: { detail: RepoCommitDetail }) {
           <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
             {detail.author_name} · {relativeTime(detail.committed_at || detail.authored_at)}
           </span>
-          {detail.parents.length > 1 && <Badge variant="neutral">merge</Badge>}
+          {detail.parents.length > 1 && <Badge variant="neutral">{translate('merge')}</Badge>}
         </div>
       </div>
 
       {detail.files.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
-            {detail.files.length} files changed
-          </div>
+            {detail.files.length} {translate('files changed')}</div>
           <div
             style={{
               border: `1px solid ${tokens.colors.border}`,
@@ -275,7 +273,7 @@ function CommitDetailView({ detail }: { detail: RepoCommitDetail }) {
                   {f.old_path ? `${f.old_path} → ${f.path}` : f.path}
                 </span>
                 {f.binary ? (
-                  <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>binary</span>
+                  <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>{translate('binary')}</span>
                 ) : (
                   <span style={{ fontSize: 11, flexShrink: 0, fontFamily: MONO }}>
                     <span style={{ color: tokens.colors.success }}>+{f.additions}</span>{' '}
@@ -295,11 +293,11 @@ function CommitDetailView({ detail }: { detail: RepoCommitDetail }) {
 
 // 라인 단위 색칠 unified diff 뷰. 대용량 패치는 서버에서 잘려오고 truncated 표시.
 function DiffView({ diff, truncated }: { diff: string; truncated: boolean }) {
+  useLocale();
   if (!diff || !diff.trim()) {
     return (
       <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '8px 0' }}>
-        표시할 diff 가 없습니다 (바이너리 변경이거나 변경 내용이 없습니다).
-      </div>
+        {translate('표시할 diff 가 없습니다 (바이너리 변경이거나 변경 내용이 없습니다).')}</div>
     );
   }
   const lines = diff.split('\n');
@@ -339,8 +337,7 @@ function DiffView({ diff, truncated }: { diff: string; truncated: boolean }) {
       </pre>
       {truncated && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-          diff 가 너무 커서 일부만 표시했습니다.
-        </div>
+          {translate('diff 가 너무 커서 일부만 표시했습니다.')}</div>
       )}
     </div>
   );

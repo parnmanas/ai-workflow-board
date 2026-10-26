@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 사이드바 Sessions 트리 실렌더 회귀 테스트 (티켓 7957aedb).
 //
 // 이 계약은 원래 sessions-navigation.test.mjs 가 Sidebar.tsx 의 *소스 텍스트*를 정규식으로
@@ -260,7 +261,7 @@ const hasRow = (root, title) => Boolean(rowByTitle(root, title));
 const cliBadgeOf = (row) => row.querySelector('span')?.textContent?.trim() ?? '';
 
 const buttonByText = (root, text) =>
-  [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text) || null;
+  [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === ui(text)) || null;
 
 test('① Sessions 섹션이 Chat 섹션보다 위에 그려지고 자체 New session 액션을 갖는다', async (t) => {
   const { view } = await mountSidebar(t);
@@ -363,7 +364,7 @@ test('⑥ 3일 넘은 세션은 더보기 뒤로 접히고, 눌러 펴면 드러
   click(more);
   assert.ok(rowByTitle(tree(), '묵은 세션 하나') && rowByTitle(tree(), '묵은 세션 둘'), '펴면 묵은 세션이 드러난다');
 
-  const fold = buttonByText(tree(), '접기 ↑');
+  const fold = buttonByText(tree(), ui("접기 ↑"));
   assert.ok(fold, '펼친 뒤에는 접기 버튼이 나와야 한다');
   click(fold);
   assert.equal(hasRow(tree(), '묵은 세션 하나'), false, '다시 접으면 묵은 세션이 숨는다');
@@ -410,7 +411,7 @@ test('⑧ 최근 세션이 없는 작업 폴더는 더보기 뒤로 접히고, �
   click(more);
   assert.ok(rowByTitle(tree(), LEGACY_CWD) && rowByTitle(tree(), '/srv/ancient'), '펴면 잠든 폴더가 드러난다');
 
-  const fold = buttonByText(tree(), '접기 ↑');
+  const fold = buttonByText(tree(), ui("접기 ↑"));
   assert.ok(fold, '펼친 뒤에는 접기 버튼이 나와야 한다');
   click(fold);
   assert.equal(hasRow(tree(), LEGACY_CWD), false, '다시 접으면 잠든 폴더가 숨는다');

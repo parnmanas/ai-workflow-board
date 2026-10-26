@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import { tokens } from '../tokens';
 import type { VoiceOperator } from '../types';
 import { speechPlayer } from './speechPlayer';
@@ -9,28 +11,28 @@ export function describeWake(state: WakeSnapshot, operators: readonly VoiceOpera
   if (unavailable) return unavailable;
   if (state.mode === 'awake') {
     const name = operators.find((op) => op.id === state.operatorId)?.name || 'operator';
-    return `${name} 깨어 있음 — 이름 없이 말하면 됩니다`;
+    return translate('{0} 깨어 있음 — 이름 없이 말하면 됩니다', { 0: name });
   }
-  const names = operators.map((op) => `"헤이 ${op.name}"`).join(', ');
+  const names = operators.map((op) => translate('"헤이 {0}"', { 0: op.name })).join(', ');
   const answering = state.followUp ? operators.find((op) => op.id === state.followUp!.operatorId) : null;
   if (answering) {
-    if (state.listener === 'error') return `음성 입력 오류: ${state.error || '마이크를 열지 못했습니다'}`;
-    if (state.listener === 'other-tab') return `다른 탭에서 ${answering.name}에게 듣고 있습니다`;
-    if (state.listener === 'starting') return `${answering.name}의 마이크 여는 중…`;
-    if (state.listener === 'waiting-gesture') return '화면을 한 번 누르면 알림을 보낸 operator에게 듣기 시작합니다';
-    return `${answering.name}에게 듣는 중 — 이름 없이 "보고해"라고 말하세요`;
+    if (state.listener === 'error') return translate('음성 입력 오류: {0}', { 0: state.error || translate('마이크를 열지 못했습니다') });
+    if (state.listener === 'other-tab') return translate('다른 탭에서 {0}에게 듣고 있습니다', { 0: answering.name });
+    if (state.listener === 'starting') return translate('{0}의 마이크 여는 중…', { 0: answering.name });
+    if (state.listener === 'waiting-gesture') return translate('화면을 한 번 누르면 알림을 보낸 operator에게 듣기 시작합니다');
+    return translate('{0}에게 듣는 중 — 이름 없이 "보고해"라고 말하세요', { 0: answering.name });
   }
   const reporting = operators.find((op) => op.id === reportOperatorId);
-  if (!state.enabled) return reporting ? `마이크 꺼짐 — 누르면 "보고해"로 ${reporting.name}의 알림 내용을 들을 수 있습니다`
-    : '음성 지원 꺼짐 — 누르면 켜집니다 ("헤이 <이름>" 듣기 + 답 낭독). 꺼져 있으면 세션 완료 소식도 operator 에게 가지 않습니다(다른 단말이 켜져 있으면 갑니다)';
+  if (!state.enabled) return reporting ? translate('마이크 꺼짐 — 누르면 "보고해"로 {0}의 알림 내용을 들을 수 있습니다', { 0: reporting.name })
+    : translate('음성 지원 꺼짐 — 누르면 켜집니다 ("헤이 <이름>" 듣기 + 답 낭독). 꺼져 있으면 세션 완료 소식도 operator 에게 가지 않습니다(다른 단말이 켜져 있으면 갑니다)');
   switch (state.listener) {
-    case 'waiting-gesture': return '화면을 한 번 누르면 듣기 시작합니다(브라우저가 사용자 동작 전에는 마이크 소리를 막습니다)';
-    case 'other-tab': return '다른 탭이 듣고 있습니다';
-    case 'starting': return '마이크 여는 중…';
-    case 'checking': return '들은 말이 이름인지 확인하는 중…';
-    case 'error': return `음성 지원 오류: ${state.error || '알 수 없음'}`;
-    case 'listening': return `듣는 중 — ${names}${reporting ? ` 또는 "보고해" (${reporting.name})` : ''}`;
-    default: return state.micClaims > 0 ? '대화 모드가 마이크를 쓰는 동안 쉽니다' : `켜짐 — ${names}`;
+    case 'waiting-gesture': return translate('화면을 한 번 누르면 듣기 시작합니다(브라우저가 사용자 동작 전에는 마이크 소리를 막습니다)');
+    case 'other-tab': return translate('다른 탭이 듣고 있습니다');
+    case 'starting': return translate('마이크 여는 중…');
+    case 'checking': return translate('들은 말이 이름인지 확인하는 중…');
+    case 'error': return translate('음성 지원 오류: {0}', { 0: state.error || translate('알 수 없음') });
+    case 'listening': return translate('듣는 중 — {0}{1}', { 0: names, 1: reporting ? translate(' 또는 "보고해" ({0})', { 0: reporting.name }) : '' });
+    default: return state.micClaims > 0 ? translate('대화 모드가 마이크를 쓰는 동안 쉽니다') : translate('켜짐 — {0}', { 0: names });
   }
 }
 
@@ -41,10 +43,11 @@ export function describeWake(state: WakeSnapshot, operators: readonly VoiceOpera
  * 누르는 동작이 사용자 제스처라, 나중에 제스처 없이 낼 소리(답 낭독)를 여기서 깨워 둔다.
  */
 export default function WakeToggle({ operators }: { operators: readonly VoiceOperator[] }) {
+  useLocale();
   const config = useVoiceConfig();
   const state = useWakeState();
-  const unavailable = !config ? '음성 설정을 읽는 중…'
-    : !config.wake.ready ? (config.wake.error || `음성 인식이 준비되지 않았습니다${config.stt.error ? ` — ${config.stt.error}` : ''}`)
+  const unavailable = !config ? translate('음성 설정을 읽는 중…')
+    : !config.wake.ready ? (config.wake.error || translate('음성 인식이 준비되지 않았습니다{0}', { 0: config.stt.error ? ` — ${config.stt.error}` : '' }))
       : null;
   const label = describeWake(state, operators, unavailable, wakeStore.reportOperator());
   const on = (state.enabled || !!state.followUp || state.mode === 'awake') && !unavailable;
@@ -75,8 +78,8 @@ export default function WakeToggle({ operators }: { operators: readonly VoiceOpe
       }}
     >
       <span aria-hidden="true">{state.mode === 'awake' && on ? '●' : state.listener === 'error' && on ? '!' : '👂'}</span>
-      {on ? (state.mode === 'awake' ? 'awake' : state.listener === 'error' ? 'error' : state.listener === 'starting' ? 'starting'
-        : state.listener === 'waiting-gesture' ? 'tap' : state.followUp ? 'listen' : 'on') : 'off'}
+      {on ? (state.mode === 'awake' ? translate('awake') : state.listener === 'error' ? translate('error') : state.listener === 'starting' ? translate('starting')
+        : state.listener === 'waiting-gesture' ? translate('tap') : state.followUp ? translate('listen') : translate('on')) : translate('off')}
     </button>
   );
 }

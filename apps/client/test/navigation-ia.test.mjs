@@ -21,7 +21,7 @@ test('sidebar keeps the chat-first category order', () => {
 
   const chatSectionIndex = sidebarSource.indexOf('<section aria-labelledby="sidebar-chat-heading"');
   const featureSectionsIndex = sidebarSource.indexOf('featureSections.map');
-  const operationsIndex = sidebarSource.indexOf('<span id="sidebar-operations">Operations</span>');
+  const operationsIndex = sidebarSource.indexOf('id="sidebar-operations"');
   assert.ok(chatSectionIndex >= 0 && chatSectionIndex < featureSectionsIndex);
   assert.ok(featureSectionsIndex < operationsIndex);
 });
@@ -41,9 +41,9 @@ test('sidebar nav is a single scroll container (no nested chat-room scroll area)
   // 이중 스크롤 제거(티켓 0f3a0ec9) — Chat 방 목록은 더 이상 자체 maxHeight/overflowY 를
   // 갖지 않는다. <nav> 하나가 Chat 섹션 + Work/Automation/... 섹션을 함께 스크롤한다.
   assert.doesNotMatch(sidebarSource, /maxHeight:\s*220/);
-  assert.match(sidebarSource, /aria-label="Primary navigation"[\s\S]*?overflowY:\s*'auto'/);
+  assert.match(sidebarSource, /aria-label=\{translate\(["\x27]Primary navigation["\x27]\)\}[\s\S]*?overflowY:\s*'auto'/);
   assert.match(sidebarSource, /const roomPath = `\$\{basePath\}\/chat\/\$\{room\.id\}`/);
-  assert.match(sidebarSource, /aria-label="New chat"/);
+  assert.match(sidebarSource, /aria-label=\{translate\(["\x27]New chat["\x27]\)\}/);
   assert.match(sidebarSource, /`\$\{basePath\}\/chat\?new=1`/);
   assert.match(appSource, /path="chat\/:roomId" element=\{<ChatPage \/>\}/);
   assert.match(chatPageSource, /navigate\(`\/chat\/\$\{roomId\}`/);
@@ -77,8 +77,8 @@ test('settings remain one click away and own canonical nested routes', () => {
     assert.match(appSource, new RegExp(`path="settings/${segment}"`));
   }
 
-  assert.match(sidebarSource, /label:\s*'User Administration'/);
-  assert.match(sidebarSource, /label:\s*'System Settings'/);
+  assert.match(sidebarSource, /label:\s*translate\(["\x27]User Administration["\x27]\)/);
+  assert.match(sidebarSource, /label:\s*translate\(["\x27]System Settings["\x27]\)/);
 
   // Account roles 는 보드와 함께 없어졌다(docs/tickets.md) — 메뉴도 라우트도 없다.
   assert.doesNotMatch(sidebarSource, /settings\/roles/);
@@ -132,7 +132,7 @@ test('Business groups company workflows and Marketing while preserving permissio
   assert.match(sidebarSource.slice(work, automation), /\.\.\.\(canUseMarketing\s*\?/, '권한이 없으면 행 자체를 그리지 않는다');
   // 배지는 서버 승인함 합계(이 사용자가 처리할 수 있는 것) — 렌더 계약은 marketing-inbox-badge.test.mjs 가 본다.
   assert.match(sidebarSource, /useMarketingInbox\(canUseMarketing\)/);
-  assert.match(sidebarSource, /badgeLabel: `승인 대기 \$\{marketingPending\}건`/);
+  assert.match(sidebarSource, /badgeLabel: translate\(["\x27]승인 대기 \{0\}건["\x27], \{ 0: marketingPending \}\)/);
   assert.match(appSource, /path="marketing" element=\{<MarketingPage \/>\}/);
   assert.match(appSource, /path="marketing\/contacts" element=\{<MarketingContactsPage \/>\}/);
   assert.match(appSource, /path="marketing\/:campaignId" element=\{<MarketingCampaignPage \/>\}/);

@@ -23,9 +23,9 @@ test('skill surface (Knowledge → Skills) exposes scoped assignments, catalog, 
   assert.match(page, /Publish immutable version/);
   assert.match(page, /Assign this version/);
   // 배정 범위: 공용 · 프로젝트 · 특정 실행
-  assert.match(page, /'account', 'Shared — every agent'/);
-  assert.match(page, /'project', 'A project'/);
-  assert.match(page, /'runtime', 'One runtime'/);
+  assert.match(page, /'account', translate\([\"']Shared — every agent[\"']\)/);
+  assert.match(page, /'project', translate\([\"']A project[\"']\)/);
+  assert.match(page, /'runtime', translate\([\"']One runtime[\"']\)/);
   assert.match(panel, /unassignSkill/);
   assert.match(panel, /repinSkillAssignment/);
   assert.match(page, /Runtime learning creates proposals only/);

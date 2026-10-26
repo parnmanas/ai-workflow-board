@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import { HeaderAction } from './HeaderAction';
@@ -19,7 +21,8 @@ export interface HeaderOverflowMenuProps {
   label?: string;
 }
 
-export function HeaderOverflowMenu({ children, label = 'More actions' }: HeaderOverflowMenuProps) {
+export function HeaderOverflowMenu({ children, label = translate('More actions') }: HeaderOverflowMenuProps) {
+  useLocale();
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);

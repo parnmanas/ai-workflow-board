@@ -1,3 +1,4 @@
+import { t as translate } from '../../../i18n/core';
 // Shared helpers for chat-room attachment upload + render.
 
 // Match server-side MAX_ATTACHMENT_SIZE (10 MB). The server is still the
@@ -75,7 +76,7 @@ export function readFileAsBase64(file: File): Promise<string> {
       const base64 = result.includes(',') ? result.split(',')[1] : result;
       resolve(base64 || '');
     };
-    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.onerror = () => reject(new Error(translate('Failed to read file')));
     reader.readAsDataURL(file);
   });
 }

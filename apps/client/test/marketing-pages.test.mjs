@@ -1,3 +1,7 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Marketing 목록 · 새 캠페인 · 메일 연락처 화면 렌더 회귀(docs/marketing.md).
 //
 // 고정하는 계약:
@@ -107,13 +111,13 @@ async function render(t, { entry, permissions, stubs = {} }) {
 }
 
 function buttonByText(root, label) {
-  const found = [...root.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.textContent?.trim()) === label);
+  const found = [...root.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.textContent?.trim()) === ui(label));
   assert.ok(found, `"${label}" 버튼이 없습니다`);
   return found;
 }
 
 function fieldByLabel(root, labelText, tag = 'input') {
-  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === labelText);
+  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(labelText));
   assert.ok(label, `"${labelText}" 라벨이 없습니다`);
   const field = label.parentElement?.querySelector(tag);
   assert.ok(field, `"${labelText}" 의 <${tag}> 가 없습니다`);
@@ -128,7 +132,7 @@ function selectValue(select, value) {
   });
 }
 
-const hasLabel = (root, text) => [...root.querySelectorAll('label')].some((l) => l.textContent?.trim() === text);
+const hasLabel = (root, text) => [...root.querySelectorAll('label')].some((l) => l.textContent?.trim() === ui(text));
 
 test('목록 — 접근 가능한 계정의 캠페인을 합쳐 보여 주고, 계정 선택기가 없다', async (t) => {
   const { container } = await render(t, { entry: '/marketing', permissions: ['marketing.manage'] });
@@ -137,12 +141,12 @@ test('목록 — 접근 가능한 계정의 캠페인을 합쳐 보여 주고, �
   const first = container.querySelector('[data-testid="marketing-campaign-row-c-1"]');
   const second = container.querySelector('[data-testid="marketing-campaign-row-c-2"]');
   assert.ok(first && second, '두 계정의 캠페인이 같이 보인다');
-  assert.match(first.textContent, /진행 중/);
-  assert.match(first.textContent, /채널 탐색/);
-  assert.match(first.textContent, /예산 집행 · 결제/);
+  assert.match(first.textContent, uiPattern("진행 중"));
+  assert.match(first.textContent, uiPattern("채널 탐색"));
+  assert.match(first.textContent, uiPattern("예산 집행 · 결제"));
   assert.match(first.textContent, /24시간마다/);
-  assert.match(second.textContent, /초안/);
-  assert.match(second.textContent, /수동 실행만/);
+  assert.match(second.textContent, uiPattern("초안"));
+  assert.match(second.textContent, uiPattern("수동 실행만"));
   assert.equal(container.querySelector('[data-testid="marketing-campaign-pending-c-1"]').textContent, '승인 대기 2', '/marketing/inbox 의 actionable');
   assert.equal(container.querySelector('[data-testid="marketing-campaign-pending-c-2"]').textContent, '—');
   const headerText = container.querySelector('header')?.textContent || '';
@@ -157,21 +161,21 @@ test('새 캠페인(운영 권한만) — 돈 설정 칸이 없고, 본문에 ac
     permissions: ['marketing.manage'],
     stubs: { createMarketingCampaign: async (body) => { bodies.push(body); return campaign({ id: 'c-new', name: body.name, status: 'draft' }); } },
   });
-  click(buttonByText(container, '+ 새 캠페인'));
+  click(buttonByText(container, ui("+ 새 캠페인")));
   await flush();
   const form = container.querySelector('[data-testid="marketing-campaign-form"]');
   assert.ok(form, '새 캠페인 창');
   assert.equal(hasLabel(form, '통화 (ISO 4217)'), false, '운영 권한만으로는 통화를 정하지 않는다');
   assert.match(form.textContent, /marketing\.approve_spend/);
 
-  typeInto(fieldByLabel(form, '이름'), '가을 런칭');
-  selectValue(fieldByLabel(form, '제품 Project (선택)', 'select'), 'p-org');
-  typeInto(fieldByLabel(form, '제품 브리프 — 무엇을 알리는가', 'textarea'), '셀프호스팅 에이전트 보드');
-  click(form.querySelector('input[aria-label="메일 발송"]'));
-  click([...form.querySelectorAll('input[type="radio"]')].find((r) => r.parentElement?.textContent?.includes('시간 간격')));
+  typeInto(fieldByLabel(form, ui("이름")), '가을 런칭');
+  selectValue(fieldByLabel(form, ui("제품 Project (선택)"), 'select'), 'p-org');
+  typeInto(fieldByLabel(form, ui("제품 브리프 — 무엇을 알리는가"), 'textarea'), '셀프호스팅 에이전트 보드');
+  click(form.querySelector(`input[aria-label="${ui("메일 발송")}"]`));
+  click([...form.querySelectorAll('input[type="radio"]')].find((r) => r.parentElement?.textContent?.includes(ui("시간 간격"))));
   await flush();
-  typeInto(fieldByLabel(form, '몇 시간마다'), '12');
-  click(buttonByText(document, '캠페인 만들기'));
+  typeInto(fieldByLabel(form, ui("몇 시간마다")), '12');
+  click(buttonByText(document, ui("캠페인 만들기")));
   await flush();
   await flush();
 
@@ -196,14 +200,14 @@ test('새 캠페인(지출 승인 권한) — 통화를 정하고 보낸다', as
     permissions: ['marketing.manage', 'marketing.approve_spend'],
     stubs: { createMarketingCampaign: async (body) => { bodies.push(body); return campaign({ id: 'c-usd', name: body.name }); } },
   });
-  click(buttonByText(container, '+ 새 캠페인'));
+  click(buttonByText(container, ui("+ 새 캠페인")));
   await flush();
   const form = container.querySelector('[data-testid="marketing-campaign-form"]');
-  typeInto(fieldByLabel(form, '이름'), 'US launch');
-  const currency = fieldByLabel(form, '통화 (ISO 4217)');
+  typeInto(fieldByLabel(form, ui("이름")), 'US launch');
+  const currency = fieldByLabel(form, ui("통화 (ISO 4217)"));
   assert.equal(currency.value, 'KRW', '기본 통화');
   typeInto(currency, 'usd');
-  click(buttonByText(document, '캠페인 만들기'));
+  click(buttonByText(document, ui("캠페인 만들기")));
   await flush();
   await flush();
   assert.equal(bodies.length, 1);
@@ -229,7 +233,7 @@ test('지출 승인 권한만 있어도 목록 · 승인 대기 수를 본다 �
   assert.ok(container.querySelector('[data-testid="marketing-campaign-row-c-1"]'), '목록이 보인다');
   assert.equal(container.querySelector('[data-testid="marketing-campaign-pending-c-2"]').textContent, '승인 대기 3', '이 사람이 처리할 수 있는 돈 항목만');
   assert.equal(container.querySelector('[data-testid="marketing-campaign-pending-c-1"]').textContent, '—');
-  assert.equal([...container.querySelectorAll('button')].some((b) => b.textContent?.trim() === '+ 새 캠페인'), false, '캠페인은 운영 권한이 만든다');
+  assert.equal([...container.querySelectorAll('button')].some((b) => b.textContent?.trim() === ui("+ 새 캠페인")), false, '캠페인은 운영 권한이 만든다');
   assert.equal(/메일 연락처/.test(container.textContent), false, '연락처는 운영 권한의 일이다');
   assert.equal(/권한이 필요합니다|권한으로 열립니다/.test(container.textContent), false, '막혔다는 안내가 없다');
   assert.deepEqual([...new Set(calls.map((c) => c[0]))].sort(), ['getMarketingInbox', 'getMe', 'listMarketingCampaigns'], '부를 수 있는 경로만 부른다');
@@ -259,30 +263,30 @@ test('연락처 — 캠페인 계정(?account=)을 모든 호출에 account_id �
   assert.ok(listCall, '연락처 목록을 묻는다');
   assert.equal(listCall[1], 'acc-2', '캠페인의 계정을 명시한다');
   assert.equal(listCall[2].list, 'newsletter', '메일 채널의 수신 목록으로 거른다');
-  const headerMenu = container.querySelector('[aria-label="Marketing Contacts 메뉴"]');
+  const headerMenu = container.querySelector(`[aria-label="${ui('{0} 메뉴', {0: ui('Marketing Contacts')})}"]`);
   click(headerMenu); await flush();
   assert.match(container.textContent, /← Org 캠페인/, '열어 온 캠페인으로 돌아가는 길');
   click(headerMenu); await flush();
   assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, /old@example\.com/);
 
-  click(buttonByText(container, '삭제'));
+  click(buttonByText(container, ui("삭제")));
   await flush();
-  click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === '삭제'));
+  click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === ui("삭제")));
   await flush();
   await flush();
   assert.deepEqual(erased, [['ct-1', 'acc-2']]);
 
-  click(buttonByText(container, 'CSV 가져오기'));
+  click(buttonByText(container, ui("CSV 가져오기")));
   await flush();
   const modal = container.querySelector('[data-testid="marketing-contacts-import"]');
   assert.ok(modal, '가져오기 창');
-  assert.match(modal.textContent, /동의 방법 · 동의 시각 · 동의 출처/, '동의 증거가 법적으로 필요하다는 설명');
-  assert.match(modal.textContent, /다시 가져와도 억제/);
+  assert.match(modal.textContent, uiPattern("동의 방법 · 동의 시각 · 동의 출처"), '동의 증거가 법적으로 필요하다는 설명');
+  assert.match(modal.textContent, /이미 수신거부했거나 삭제된 주소는 다시 가져와도 억제/);
   assert.equal(buttonByText(document, '0명 가져오기').disabled, true, '브랜드를 먼저 고른다');
-  selectValue(fieldByLabel(modal, '동의를 받은 발신자(브랜드)', 'select'), 'brand-1');
-  assert.equal(fieldByLabel(modal, '모든 행에 더할 수신 목록 (쉼표로 여러 개)').value, 'newsletter');
+  selectValue(fieldByLabel(modal, ui("동의를 받은 발신자(브랜드)"), 'select'), 'brand-1');
+  assert.equal(fieldByLabel(modal, ui("모든 행에 더할 수신 목록 (쉼표로 여러 개)")).value, 'newsletter');
 
-  typeInto(modal.querySelector('textarea[aria-label="CSV 내용"]'), [
+  typeInto(modal.querySelector(`textarea[aria-label="${ui("CSV 내용")}"]`), [
     'Email,Name,Consent Method,Consent Source,Consent At',
     'kim@example.com,"Kim, Minji",signup_form,https://ex.com/signup,2026-09-01T10:00:00Z',
     'broken-address,Lee,signup_form,https://ex.com/signup,2026-09-01T10:00:00Z',
@@ -358,21 +362,21 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
 
   assert.equal(calls.find((c) => c[0] === 'getMarketingConsentNoticeSettings')?.[1], 'acc-2', '연락처와 같은 계정');
   const panel = container.querySelector('[data-testid="marketing-consent-notice"]');
-  assert.match(panel.textContent, /꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다/);
+  assert.match(panel.textContent, uiPattern("꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다"));
   assert.match(panel.textContent, /1건은 같은 브랜드 · 목록의 메일 채널이 없어/);
   assert.match(panel.textContent, /기한이 지난 브랜드 동의 1건/);
   assert.match(panel.textContent, /기한 전에 실패한 안내 2통/);
   const kimLine = container.querySelector('[data-testid="marketing-contact-consent-ct-1-brand-1"]').textContent;
   assert.match(kimLine, /동의 기한 2028-10-0\d · 재확인 안내 2026-10-01 보냄 · 응답 없으면 유지 · 2026-10-05 유지함/);
-  assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, /재확인 안내 — 유지/, '유지 링크로 남은 동의의 방법');
-  assert.match(container.querySelector('[data-testid="marketing-contact-consent-ct-2-brand-1"]').textContent, /지남 — 발송 제외/);
+  assert.match(container.querySelector('[data-testid="marketing-contacts"]').textContent, uiPattern("재확인 안내 — 유지"), '유지 링크로 남은 동의의 방법');
+  assert.match(container.querySelector('[data-testid="marketing-contact-consent-ct-2-brand-1"]').textContent, uiPattern(" 지남 — 발송 제외"));
 
-  click(buttonByText(panel, '설정'));
+  click(buttonByText(panel, ui("설정")));
   await flush();
   const modal = document.querySelector('[data-testid="marketing-consent-notice-settings"]');
   assert.ok(modal, '설정 창');
-  assert.match(modal.textContent, /동의일부터 2년마다, 2년이 되는 날 전까지/);
-  assert.match(modal.textContent, /광고 표기를 붙이지 않습니다/);
+  assert.match(modal.textContent, uiPattern("동의일부터 2년마다, 2년이 되는 날 전까지"));
+  assert.match(modal.textContent, uiPattern("을 붙이고, 아래 무응답 처리를 받는 사람에게 그대로 알립니다. 법정 통지라 광고 표기를 붙이지 않습니다 — 광고 문구를 섞지 마세요. 기한이 지난 동의는 안내로 잇지 않습니다(동의를 다시 묻는 메일도 광고성 정보입니다)."));
   assert.equal(calls.find((c) => c[0] === 'listMarketingConsentNotices')?.[1], 'acc-2');
   const recentList = document.querySelector('[data-testid="marketing-consent-notice-list"]').textContent;
   assert.match(recentList, /kim@example\.com/);
@@ -385,27 +389,27 @@ test('연락처 — 동의 재확인 안내: 요약 · 미리보기 · 저장, �
   assert.equal([...document.querySelectorAll('button')].some((b) => /실패한 안내 다시 보내기/.test(b.textContent || '')), false,
     '다시 보낼 것이 없으면 버튼이 사라진다');
 
-  click(modal.querySelector('input[aria-label="재확인 안내 보내기"]'));
+  click(modal.querySelector(`input[aria-label="${ui("재확인 안내 보내기")}"]`));
   await flush();
   assert.match(modal.textContent, /안내 기간에 든 브랜드 동의 3건에 대해 10분 안에 보내기 시작합니다/);
   const lead = fieldByLabel(modal, '기한 며칠 전에 보낼까요 (7–90일)');
   typeInto(lead, '3');
   await flush();
   assert.match(modal.textContent, /기한 7–90일 전 사이의 정수여야 합니다/);
-  assert.equal(buttonByText(document, '저장').disabled, true, '서버가 거부할 값은 보내지 않는다');
+  assert.equal(buttonByText(document, ui("저장")).disabled, true, '서버가 거부할 값은 보내지 않는다');
   typeInto(lead, '14');
   click(modal.querySelector('[data-testid="marketing-consent-notice-policy-lapse"]'));
   await flush();
-  assert.equal(buttonByText(document, '저장').disabled, false);
+  assert.equal(buttonByText(document, ui("저장")).disabled, false);
 
-  click(buttonByText(document, '미리보기'));
+  click(buttonByText(document, ui("미리보기")));
   await flush();
   await flush();
   const expected = { enabled: true, subject: '[{{sender}}] 수신 동의 확인 안내', body: '{{name}}님, {{sender}}입니다.', lead_days: 14, on_no_response: 'lapse' };
   assert.deepEqual(previews, [['acc-2', expected]]);
   assert.match(document.querySelector('[data-testid="marketing-consent-notice-preview"]').textContent, /보내는 채널: newsletter · AWB Team/);
 
-  click(buttonByText(document, '저장'));
+  click(buttonByText(document, ui("저장")));
   await flush();
   await flush();
   assert.deepEqual(saves, [['acc-2', expected]]);
@@ -545,24 +549,24 @@ test('브랜드 동의 — 미이관 연락처를 명시적으로 선택하고 �
       unsubscribeMarketingContact: async (...args) => { unsubscribed.push(args); return contact; },
     },
   });
-  assert.match(container.textContent, /브랜드 동의 없음 — 발송 제외/);
+  assert.match(container.textContent, uiPattern("브랜드 동의 없음 — 발송 제외"));
   assert.equal(buttonByText(container, '선택 0명 기존 동의 이관').disabled, true);
-  selectValue(fieldByLabel(container, '가져오기 · 기존 동의 이관 대상 브랜드', 'select'), 'brand-1');
+  selectValue(fieldByLabel(container, ui("가져오기 · 기존 동의 이관 대상 브랜드"), 'select'), 'brand-1');
   click(container.querySelector('input[type="checkbox"]'));
   click(buttonByText(container, '선택 1명 기존 동의 이관'));
   await flush();
   assert.equal(migrated.length, 0, '확인 전에는 이관하지 않는다');
-  assert.match(document.querySelector('[role="dialog"]').textContent, /한 브랜드에만 이관/);
-  click(buttonByText(document, '발신자 확인 · 이관'));
+  assert.match(document.querySelector('[role="dialog"]').textContent, uiPattern("선택한 {0}명의 기존 동의 발신자가 “{1}”임을 확인했습니다. 이 동의는 한 브랜드에만 이관할 수 있으며 다른 브랜드에 복제되지 않습니다. 불명확한 연락처는 선택에서 제외하세요."));
+  click(buttonByText(document, ui("발신자 확인 · 이관")));
   await flush(); await flush();
   assert.deepEqual(migrated, [['acc-2', 'brand-1', ['ct-legacy']]]);
   assert.equal(Boolean(container.querySelector('input[type="checkbox"]')), false, '이미 이관한 증거는 다시 선택하지 못한다');
-  click(buttonByText(container, '이 브랜드 수신거부'));
+  click(buttonByText(container, ui("이 브랜드 수신거부")));
   await flush();
   const dialog = document.querySelector('[role="dialog"]');
   assert.match(dialog.textContent, /AWB Team 수신거부/);
   typeInto(dialog.querySelector('textarea'), '전화로 브랜드 수신거부 요청');
-  click(buttonByText(dialog, '수신거부 기록'));
+  click(buttonByText(dialog, ui("수신거부 기록")));
   await flush();
   assert.deepEqual(unsubscribed, [['ct-legacy', '전화로 브랜드 수신거부 요청', 'acc-2', 'brand-1']]);
 });
@@ -586,12 +590,12 @@ test('재확인 회신함: 계정 범위, 평문 표시, 연락처 찾기와 페
   assert.ok(panel.textContent.includes(content));
   assert.equal(Boolean(panel.querySelector('img, a')), false, 'external content stays plain text');
   assert.equal(calls.find((c) => c[0] === 'listMarketingContactReplies')[1], 'acc-2');
-  click(buttonByText(panel, '연락처 찾기'));
+  click(buttonByText(panel, ui("연락처 찾기")));
   await flush();
   const search = calls.filter((c) => c[0] === 'listMarketingContacts').at(-1);
   assert.equal(search[2].q, 'reader@example.com');
   assert.equal(search[2].list, undefined, 'clear unrelated list filters so the reply author can be found');
-  click(buttonByText(panel, '다음 회신'));
+  click(buttonByText(panel, ui("다음 회신")));
   await flush();
   assert.deepEqual(calls.filter((c) => c[0] === 'listMarketingContactReplies').at(-1).slice(1), ['acc-2', 50]);
 });

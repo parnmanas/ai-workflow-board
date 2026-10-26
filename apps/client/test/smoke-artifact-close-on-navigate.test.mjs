@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 실브라우저(jsdom) 스모크: 아티팩트 → 실제 화면 이동 시 Artifact 패널이 닫힌다.
 //
 // 아티팩트에서 "티켓 열기"(TicketArtifact) 같은 링크를 누르면 목적지가 그
@@ -69,7 +70,7 @@ function setupEnv() {
 /** 라벨로 버튼을 찾아 클릭. 없으면 무엇이 렌더됐는지 함께 실패시킨다. */
 function clickButton(view, label) {
   const btn = [...view.container.querySelectorAll('button')].find((b) =>
-    (b.textContent || '').includes(label),
+    (b.textContent || '').includes(ui(label)),
   );
   assert.ok(btn, `"${label}" 버튼이 렌더돼야 한다 — 실제: ${view.container.textContent}`);
   click(btn);
@@ -89,7 +90,7 @@ test('TicketArtifact "티켓 열기" — Tickets 페이지의 그 티켓으로 �
     await flush();
     assert.match(view.container.textContent, /OPEN/, '초기엔 패널이 열려 있다');
 
-    await act(async () => { clickButton(view, '티켓 열기'); });
+    await act(async () => { clickButton(view, ui("티켓 열기")); });
     await flush();
 
     assert.match(

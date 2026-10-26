@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 import { Select } from '../common';
@@ -26,15 +28,16 @@ interface Props {
 }
 
 export default function OnFailureTicketTargetFields({ accountId, form, onChange, defaultTagsHint }: Props) {
+  useLocale();
   const { projects, loading, error } = useProjects(accountId);
-  const projectOptions = projectSelectOptions(projects, form.projectId, loading ? '(불러오는 중…)' : '(프로젝트 없음)');
+  const projectOptions = projectSelectOptions(projects, form.projectId, loading ? translate('(불러오는 중…)') : translate('(프로젝트 없음)'));
 
   return (
     <>
       <div style={{ display: 'flex', gap: 10 }}>
         <div style={{ flex: 1 }}>
           <Select
-            label="Priority"
+            label={translate('Priority')}
             value={form.priority}
             options={TICKET_PRIORITIES.map((p) => ({ value: p, label: p }))}
             onChange={(e) => onChange({ priority: (e.target as HTMLSelectElement).value as TicketPriority })}
@@ -42,7 +45,7 @@ export default function OnFailureTicketTargetFields({ accountId, form, onChange,
         </div>
         <div style={{ flex: 1 }}>
           <Select
-            label="생성 상태 (status)"
+            label={translate('생성 상태 (status)')}
             value={form.status}
             options={ON_FAILURE_TICKET_STATUSES.map((s) => ({ value: s, label: TICKET_STATUS_LABELS[s] }))}
             onChange={(e) => onChange({ status: (e.target as HTMLSelectElement).value as OnFailureTicketStatus })}
@@ -50,43 +53,42 @@ export default function OnFailureTicketTargetFields({ accountId, form, onChange,
         </div>
         <div style={{ flex: 1 }}>
           <Select
-            label="중복 방지 (dedupe)"
+            label={translate('중복 방지 (dedupe)')}
             value={form.dedupe}
             options={[
-              { value: 'per_run', label: 'per_run (run당 1개)' },
-              { value: 'per_open_ticket', label: 'per_open_ticket (열린 티켓에 코멘트)' },
+              { value: 'per_run', label: translate('per_run (run당 1개)') },
+              { value: 'per_open_ticket', label: translate('per_open_ticket (열린 티켓에 코멘트)') },
             ]}
             onChange={(e) => onChange({ dedupe: (e.target as HTMLSelectElement).value as OnFailureTicketDedupe })}
           />
         </div>
       </div>
       <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: -4 }}>
-        To Do 는 담당 에이전트에게 바로 디스패치되고, Backlog 는 사람이 To Do 로 옮길 때까지 대기합니다.
-      </div>
+        {translate('To Do 는 담당 에이전트에게 바로 디스패치되고, Backlog 는 사람이 To Do 로 옮길 때까지 대기합니다.')}</div>
 
       <div>
         <Select
-          label="프로젝트 (선택)"
+          label={translate('프로젝트 (선택)')}
           value={form.projectId}
           options={projectOptions}
           onChange={(e) => onChange({ projectId: (e.target as HTMLSelectElement).value })}
         />
         <div style={{ fontSize: 12, color: error ? tokens.colors.danger : tokens.colors.textMuted, marginTop: 4 }}>
           {error
-            ? `프로젝트 목록을 불러오지 못했습니다: ${error}`
-            : '티켓이 다룰 저장소. 실행 설정을 비우면 타깃 설정 → 이 프로젝트의 기본 담당자 순으로 배정됩니다.'}
+            ? translate('프로젝트 목록을 불러오지 못했습니다: {0}', { 0: error })
+            : translate('티켓이 다룰 저장소. 실행 설정을 비우면 타깃 설정 → 이 프로젝트의 기본 담당자 순으로 배정됩니다.')}
         </div>
       </div>
 
       <div>
         <TagInput
-          label="티켓 태그"
+          label={translate('티켓 태그')}
           value={form.tags}
           onChange={(tags) => onChange({ tags })}
-          placeholder="태그 입력 후 Enter (쉼표로 여러 개)"
+          placeholder={translate('태그 입력 후 Enter (쉼표로 여러 개)')}
         />
         <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 4 }}>
-          {form.tags.length > 0 ? '생성되는 티켓에 이 태그가 붙습니다.' : defaultTagsHint}
+          {form.tags.length > 0 ? translate('생성되는 티켓에 이 태그가 붙습니다.') : defaultTagsHint}
         </div>
       </div>
     </>

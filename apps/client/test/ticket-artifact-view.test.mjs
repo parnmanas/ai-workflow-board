@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 티켓 Artifact 상세 뷰 렌더 계약 테스트 (에픽 bf65ca00 · Phase 1 · S3).
 //
 // 카드 클릭 → 우측 패널에 주입되는 read-only 상세의 상태별(로딩·오류·로드) 마크업을
@@ -27,13 +28,13 @@ test('티켓 상세의 duplicate 선택 UI는 확인된 duplicate pending 원인
 
 test('로딩 상태: 로딩 문구', () => {
   const html = render({ status: 'loading' });
-  assert.match(html, /불러오는 중/);
+  assert.match(html, uiPattern('티켓을 불러오는 중…'));
 });
 
 test('오류 상태: role=alert + 메시지', () => {
   const html = render({ status: 'error', message: 'HTTP 404' });
   assert.match(html, /role="alert"/);
-  assert.match(html, /불러오지 못했습니다/);
+  assert.match(html, uiPattern('티켓을 불러오지 못했습니다'));
   assert.match(html, /HTTP 404/);
 });
 
@@ -41,16 +42,16 @@ test('오류 상태: onRetry 주면 재시도 버튼 노출 (F2-3)', () => {
   const html = renderToStaticMarkup(
     React.createElement(TicketArtifactView, { state: { status: 'error', message: 'x' }, onRetry: () => {} }),
   );
-  assert.match(html, /다시 시도/);
+  assert.match(html, uiPattern("다시 시도"));
 });
 
 test('로드 상태 + disconnected: SSE 단절 배너 노출, 연결 시 미노출 (F2-3)', () => {
   const state = { status: 'loaded', ticket: { title: 'T' } };
   const off = renderToStaticMarkup(React.createElement(TicketArtifactView, { state, disconnected: true }));
   assert.match(off, /role="status"/);
-  assert.match(off, /실시간 갱신이 일시중단/);
+  assert.match(off, uiPattern("연결이 끊겨 실시간 갱신이 일시중단됐습니다. 재연결되면 자동으로 최신 내용을 불러옵니다."));
   const on = renderToStaticMarkup(React.createElement(TicketArtifactView, { state, disconnected: false }));
-  assert.doesNotMatch(on, /실시간 갱신이 일시중단/);
+  assert.doesNotMatch(on, uiPattern("연결이 끊겨 실시간 갱신이 일시중단됐습니다. 재연결되면 자동으로 최신 내용을 불러옵니다."));
 });
 
 test('로드 상태: 제목·우선순위·상태·태그·프로젝트·담당자·설명·하위작업·코멘트', () => {
@@ -104,7 +105,7 @@ test('서버가 해석한 assignee_name(<Host>/<label>)을 우선 쓴다', () =>
 
 test('담당자가 없으면 미지정 안내', () => {
   const html = render({ status: 'loaded', ticket: { title: 'T', assignee: null } });
-  assert.match(html, /미지정/);
+  assert.match(html, uiPattern("미지정"));
 });
 
 test('설명에 티켓 토큰이 있으면 중첩 카드로 렌더', () => {
@@ -119,7 +120,7 @@ test('설명에 티켓 토큰이 있으면 중첩 카드로 렌더', () => {
 test('onOpen 없으면 열기 버튼 미노출', () => {
   const ticket = { id: 't1', title: 'T', account_id: 'w1' };
   const html = render({ status: 'loaded', ticket });
-  assert.doesNotMatch(html, /티켓 열기/);
+  assert.doesNotMatch(html, uiPattern("티켓 열기"));
 });
 
 test('account_id 가 있으면 활성 버튼 (보관된 티켓도 Tickets 페이지가 id 로 연다)', () => {
@@ -130,7 +131,7 @@ test('account_id 가 있으면 활성 버튼 (보관된 티켓도 Tickets 페이
     const html = renderToStaticMarkup(
       React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpen: () => {} }),
     );
-    assert.match(html, /티켓 열기/);
+    assert.match(html, uiPattern("티켓 열기"));
     assert.doesNotMatch(html, /disabled=""/);
   }
 });
@@ -141,5 +142,5 @@ test('ticket id가 있으면 owner 메타데이터 없이도 직접 열 수 있�
     React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpen: () => {} }),
   );
   assert.doesNotMatch(html, /disabled=""/);
-  assert.match(html, /티켓 열기/);
+  assert.match(html, uiPattern("티켓 열기"));
 });

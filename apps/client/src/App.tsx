@@ -1,3 +1,5 @@
+import { t as translate } from './i18n/core';
+import { useLocale } from './i18n/react';
 import React, { useEffect, useRef, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -50,6 +52,7 @@ const MarketingContactsPage = lazy(() => import('./components/marketing/Marketin
 
 // 지연 로드되는 라우트 청크를 가져오는 동안 보여줄 폴백.
 function RouteFallback() {
+  useLocale();
   return (
     <div style={{
       minHeight: '60vh',
@@ -66,28 +69,34 @@ function RouteFallback() {
 
 // Old links keep their query and fragment while work uses stable routes.
 export function GlobalRedirect({ to }: { to: string }) {
+  useLocale();
   const { search, hash } = useLocation();
   return <Navigate to={`/${to}${search}${hash}`} replace />;
 }
 
 export function DefaultRedirect() {
+  useLocale();
   return <GlobalRedirect to="sessions" />;
 }
 
 export function LegacyPathRedirect() {
+  useLocale();
   const { pathname, search, hash } = useLocation();
   return <Navigate to={`${canonicalWorkPath(pathname)}${search}${hash}`} replace />;
 }
 
 export function LegacyBoardsRedirect() {
+  useLocale();
   return <GlobalRedirect to="tickets" />;
 }
 
 export function LegacyOrchestrationTeamsRedirect() {
+  useLocale();
   return <GlobalRedirect to="teams" />;
 }
 
 function AppContent() {
+  useLocale();
   const { isAuthenticated, isLoading, serverUnavailable } = useAuth();
   const { showToast } = useToast();
   const wasAuthenticated = useRef(false);
@@ -96,7 +105,7 @@ function AppContent() {
   useEffect(() => {
     if (isLoading) return;
     if (wasAuthenticated.current && !isAuthenticated) {
-      showToast('Session expired. Please log in again.', 'error');
+      showToast(translate('Session expired. Please log in again.'), 'error');
     }
     wasAuthenticated.current = isAuthenticated;
   }, [isAuthenticated, isLoading, showToast]);
@@ -152,11 +161,9 @@ function AppContent() {
             fontSize: '24px', fontWeight: 700, color: tokens.colors.textMuted,
           }}>W</div>
           <div style={{ fontSize: '16px', fontWeight: 700, color: tokens.colors.textPrimary }}>
-            Server Unavailable
-          </div>
+            {translate('Server Unavailable')}</div>
           <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-            Unable to connect to the AWB server. Make sure the server is running and try again.
-          </div>
+            {translate('Unable to connect to the AWB server. Make sure the server is running and try again.')}</div>
           <button
             onClick={() => window.location.reload()}
             style={{
@@ -172,8 +179,7 @@ function AppContent() {
               fontFamily: 'inherit',
             }}
           >
-            Retry
-          </button>
+            {translate('Retry')}</button>
           {/* 막다른 해소: 서버에 못 닿아 로그인 화면조차 안 뜰 때 여기서 주소를 바꾼다
               (Android 앱에서는 앱의 연결 화면을 연다). */}
           <div style={{
@@ -260,6 +266,7 @@ function AppContent() {
 }
 
 export default function App() {
+  useLocale();
   return (
     <ToastProvider>
       <AuthProvider>

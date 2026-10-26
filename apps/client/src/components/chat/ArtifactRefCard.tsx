@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 import type { ChatMessageArtifactRef } from '../../types';
@@ -13,8 +15,8 @@ import type { ChatMessageArtifactRef } from '../../types';
  * 순수 프레젠테이션(부수효과·api 없음) — react-dom/server 로 상태별 마크업을 계약 검증한다.
  */
 const KIND_LABEL: Record<string, string> = {
-  build: '빌드',
-  deploy: '배포',
+  get build() { return translate('빌드'); },
+  get deploy() { return translate('배포'); },
 };
 const KIND_ICON: Record<string, string> = {
   build: '🔨',
@@ -29,8 +31,9 @@ function statusTone(status?: string): { bg: string; fg: string } {
 }
 
 export default function ArtifactRefCard({ artifact }: { artifact: ChatMessageArtifactRef }) {
+  useLocale();
   const { kind, title, status, commit, url } = artifact;
-  const kindLabel = KIND_LABEL[kind] || kind || '결과물';
+  const kindLabel = KIND_LABEL[kind] || kind || translate('결과물');
   const icon = KIND_ICON[kind] || '📦';
   const tone = statusTone(status);
   const shortCommit = commit ? commit.slice(0, 7) : '';
@@ -123,7 +126,7 @@ export default function ArtifactRefCard({ artifact }: { artifact: ChatMessageArt
         href={url}
         target="_blank"
         rel="noopener noreferrer"
-        aria-label={`${kindLabel} 결과물: ${title}${status ? ` (${status})` : ''} — 열기`}
+        aria-label={translate('{0} 결과물: {1}{2} — 열기', { 0: kindLabel, 1: title, 2: status ? ` (${status})` : '' })}
         title={`${title}${url ? ` · ${url}` : ''}`}
         style={{ ...baseStyle, cursor: 'pointer' }}
       >
@@ -135,7 +138,7 @@ export default function ArtifactRefCard({ artifact }: { artifact: ChatMessageArt
   return (
     <span
       data-artifact-ref={kind}
-      aria-label={`${kindLabel} 결과물: ${title}${status ? ` (${status})` : ''}`}
+      aria-label={translate('{0} 결과물: {1}{2}', { 0: kindLabel, 1: title, 2: status ? ` (${status})` : '' })}
       title={title}
       style={baseStyle}
     >

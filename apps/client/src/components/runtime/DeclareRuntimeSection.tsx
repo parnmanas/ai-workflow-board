@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { Button } from '../common';
@@ -20,6 +22,7 @@ interface DeclareRuntimeSectionProps {
  * Agent 행 없음). Host 후보는 runtime-hosts 카탈로그에서 직접 읽는다.
  */
 export default function DeclareRuntimeSection({ accountId, onResolved, initialValue }: DeclareRuntimeSectionProps) {
+  useLocale();
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<RuntimeSpecDraft>(() => ({ ...emptyRuntimeSpec(), ...initialValue }));
@@ -43,16 +46,16 @@ export default function DeclareRuntimeSection({ accountId, onResolved, initialVa
 
   const handleResolve = async () => {
     if (!isRuntimeSpecComplete(draft)) {
-      showToast('Host·CLI·절대경로를 모두 입력하세요', 'error');
+      showToast(translate('Host·CLI·절대경로를 모두 입력하세요'), 'error');
       return;
     }
     setResolving(true);
     try {
       const result = await api.validateRuntimeSpec(accountId, draft);
-      if (!result.ok || !result.spec) throw new Error(result.error || 'Invalid runtime');
+      if (!result.ok || !result.spec) throw new Error(result.error || translate('Invalid runtime'));
       onResolved(result.spec);
     } catch (err: any) {
-      showToast(err?.message || 'Runtime 해석에 실패했습니다', 'error');
+      showToast(err?.message || translate('Runtime 해석에 실패했습니다'), 'error');
     } finally {
       setResolving(false);
     }
@@ -62,8 +65,7 @@ export default function DeclareRuntimeSection({ accountId, onResolved, initialVa
     <div style={{ border: `1px dashed ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 10 }}>
       <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
         <input type="checkbox" checked={open} onChange={(e) => setOpen(e.target.checked)} />
-        실행 설정
-      </label>
+        {translate('실행 설정')}</label>
       {open && (
         <div style={{ marginTop: 10 }}>
           <RuntimeSpecEditor
@@ -75,12 +77,11 @@ export default function DeclareRuntimeSection({ accountId, onResolved, initialVa
           />
           <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
             <Button variant="primary" size="sm" onClick={handleResolve} disabled={resolving}>
-              {resolving ? '해석 중…' : '이 설정 사용'}
+              {resolving ? translate('해석 중…') : translate('이 설정 사용')}
             </Button>
           </div>
           <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-            설정을 이 작업에 복사합니다. 작업 폴더는 이 실행에만 적용됩니다.
-          </div>
+            {translate('설정을 이 작업에 복사합니다. 작업 폴더는 이 실행에만 적용됩니다.')}</div>
         </div>
       )}
     </div>

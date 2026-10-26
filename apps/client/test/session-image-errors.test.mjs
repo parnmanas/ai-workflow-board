@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
@@ -43,16 +44,16 @@ for (const [kind, load] of Object.entries(loaders)) {
     let unmounted = false;
     t.after(() => { if (!unmounted) view.unmount(); });
     await act(async () => {});
-    assert.match(view.container.textContent, /서버 응답 시간이 초과되었습니다.*HTTP 504/);
+    assert.match(view.container.textContent, uiPattern('서버 응답 시간이 초과되었습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', {0: 504}));
     assert.doesNotMatch(view.container.textContent, /DOCTYPE|<html|Cloudflare|private diagnostic/);
     assert.equal(calls, 1, 'failed images do not retry in a loop');
-    const retry = [...view.container.querySelectorAll('button')].find((button) => button.textContent === '다시 시도');
+    const retry = [...view.container.querySelectorAll('button')].find((button) => button.textContent === ui("다시 시도"));
     assert.ok(retry);
     await act(async () => { click(retry); });
     await act(async () => {});
     assert.equal(calls, 2);
     assert.equal(view.container.querySelector('img')?.getAttribute('src'), 'blob:retried-image');
-    assert.doesNotMatch(view.container.textContent, /이미지를 가져오지 못했습니다/);
+    assert.doesNotMatch(view.container.textContent, uiPattern("이미지를 가져오지 못했습니다"));
     view.unmount();
     unmounted = true;
     assert.equal(revoke.mock.calls.length, 1, 'retry image URL is released on unmount');

@@ -26,9 +26,9 @@ test('legacy Agent Manager URL redirects into account HOSTS management', () => {
 
 test('HOSTS is reachable above Sessions and uses the guarded runtime management page', async () => {
   const hostsPage = await readFile(new URL('../src/components/HostsPage.tsx', import.meta.url), 'utf8');
-  const nav = sidebarSource.slice(sidebarSource.indexOf('aria-label="Primary navigation"'));
-  assert.match(nav, /canAdmin && renderNavItem\(\{[\s\S]*?path: `\$\{basePath\}\/hosts`,[\s\S]*?label: 'HOSTS'/);
-  assert.ok(nav.indexOf("label: 'HOSTS'") < nav.indexOf('sidebar-sessions-heading'));
+  const nav = sidebarSource.slice(sidebarSource.indexOf('<nav'));
+  assert.match(nav, /canAdmin && renderNavItem\(\{[\s\S]*?path: `\$\{basePath\}\/hosts`,[\s\S]*?label: translate\(["']HOSTS["']\)/);
+  assert.ok(nav.search(/label: translate\(["']HOSTS["']\)/) < nav.indexOf('sidebar-sessions-heading'));
   assert.match(appSource, /path="hosts" element=\{<HostsPage \/>\}/);
   assert.match(hostsPage, /hasPermission\('admin.access'\)/);
   assert.match(hostsPage, /canManage \? \([\s\S]*<AgentManagerPage \/>/);

@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // "프로젝트 폴더 사용" 헬퍼 (docs/tickets.md → Main clone folder per host).
 //
 // 고정하는 계약:
@@ -27,7 +28,7 @@ const PROJECTS = [
 test('Host 미선택 — 전체 비활성 + 이유', () => {
   const v = projectFolderHelperView(PROJECTS, '');
   assert.equal(v.disabled, true);
-  assert.equal(v.hint, NO_HOST_HINT);
+  assert.equal(v.hint, ui(NO_HOST_HINT));
   assert.ok(v.options.slice(1).every((o) => o.disabled && o.path === null));
 });
 
@@ -39,20 +40,20 @@ test('폴더가 있는 프로젝트만 고를 수 있고, 없는 프로젝트는
   assert.equal(placeholder.value, '');
   assert.deepEqual(awb, { value: 'awb', label: 'AWB — /srv/awb', disabled: false, path: '/srv/awb' });
   assert.equal(game.disabled, true);
-  assert.equal(game.label, `Game — ${NO_FOLDER_HINT}`);
+  assert.equal(game.label, `Game — ${ui(NO_FOLDER_HINT)}`);
 });
 
 test('Host id + 레거시 별칭 둘 다로 찾는다, 이미 쓰는 폴더는 표시한다', () => {
   const v = projectFolderHelperView(PROJECTS, ['host-ragnar', 'legacy-ragnar'], '/data/awb');
   assert.equal(v.options[1].path, '/data/awb', '별칭으로 저장된 폴더도 찾는다');
-  assert.match(v.options[1].label, /\(사용 중\)$/);
+  assert.match(v.options[1].label, uiPattern(" (사용 중)"));
   assert.equal(v.options[2].path, '/data/game');
 });
 
 test('어느 프로젝트도 이 Host 에 폴더가 없으면 Projects 화면으로 안내한다', () => {
   const v = projectFolderHelperView(PROJECTS, 'host-unknown');
   assert.equal(v.disabled, false);
-  assert.match(v.hint, /Projects 화면/);
+  assert.match(v.hint, uiPattern("{0} — Projects 화면에서 이 Host 의 폴더를 지정하세요."));
   assert.ok(v.options.slice(1).every((o) => o.disabled));
 });
 
@@ -84,11 +85,11 @@ test('RuntimeSpecEditor — 프로젝트를 고르면 선택된 Host 의 메인 
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   t.after(() => { view.unmount(); Object.assign(api, originals); dom.cleanup(); });
 
-  const helper = view.container.querySelector('select[aria-label="프로젝트 폴더 사용"]');
+  const helper = view.container.querySelector(`select[aria-label="${ui("프로젝트 폴더 사용")}"]`);
   assert.ok(helper, 'working dir 아래에 "프로젝트 폴더 사용" 헬퍼가 있다');
   const game = [...helper.options].find((o) => o.value === 'game');
   assert.equal(game.disabled, true, '이 Host 에 폴더가 없는 프로젝트는 고를 수 없다');
-  assert.match(game.textContent, /이 Host 에 프로젝트 폴더가 없습니다/);
+  assert.match(game.textContent, uiPattern("이 Host 에 프로젝트 폴더가 없습니다"));
 
   change(helper, 'awb');
   assert.equal(changes.at(-1)?.working_dir, '/srv/awb', '명시적으로 고르면 기존 working_dir 를 덮어쓴다');
@@ -109,5 +110,5 @@ test('RuntimeSpecEditor — showProjectFolderHelper={false} 면 헬퍼를 숨긴
   }));
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   t.after(() => { view.unmount(); Object.assign(api, originals); dom.cleanup(); });
-  assert.equal(Boolean(view.container.querySelector('select[aria-label="프로젝트 폴더 사용"]')), false, '프로젝트가 없으면 helper 를 그리지 않는다');
+  assert.equal(Boolean(view.container.querySelector(`select[aria-label="${ui("프로젝트 폴더 사용")}"]`)), false, '프로젝트가 없으면 helper 를 그리지 않는다');
 });

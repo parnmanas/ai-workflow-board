@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../i18n/core';
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { Account } from '../types';
@@ -26,6 +29,7 @@ import {
 // key from its own Clone Policy, ticket bddb63ee). The authenticated account
 // owner may edit these defaults; the server checks the actual owner.
 export default function AccountSettingsPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const { showToast } = useToast();
@@ -37,7 +41,7 @@ export default function AccountSettingsPage() {
       const account = await api.getAccount(accountId);
       setAccount(account);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load account', 'error');
+      showToast(err?.message || translate('Failed to load account'), 'error');
     }
   }, [accountId, showToast]);
 
@@ -56,54 +60,46 @@ export default function AccountSettingsPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <PageHeader title="Work defaults" />
+      <PageHeader title={translate('Work defaults')} />
       <div style={pageStyle}>
         {!account ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading…')}</div>
         ) : (
           <>
             <TicketDispatchSettings account={account} onSaved={setAccount} />
             <HarnessConfigEditor
               raw={account.harness_config}
-              title="Agent Harness (account default)"
+              title={translate('Agent Harness (account default)')}
               description={
                 <>
-                  Harness shipped with <strong>every ticket dispatch</strong> in this account:
-                  extra system prompt, tool allow/deny lists, model and permission mode. Leave
-                  everything empty for the current (no-harness) behaviour.
-                </>
+                  {translate('Harness shipped with')} <strong>{translate('every ticket dispatch')}</strong> {translate('in this account: extra system prompt, tool allow/deny lists, model and permission mode. Leave everything empty for the current (no-harness) behaviour.')}</>
               }
               onSave={async (config) => {
                 try {
                   await api.updateAccount(account.id, { harness_config: config });
                   await load();
-                  showToast(config === null ? 'Account default harness cleared' : 'Account default harness saved', 'success');
+                  showToast(config === null ? translate('Account default harness cleared') : translate('Account default harness saved'), 'success');
                 } catch (err: any) {
                   // Server zod rejection (400) surfaces its message here.
-                  showToast(err?.message || 'Failed to save harness', 'error');
+                  showToast(err?.message || translate('Failed to save harness'), 'error');
                 }
               }}
             />
             <ClonePolicyEditor
               raw={account.clone_policy}
-              title="Repository Clone Policy (account default)"
+              title={translate('Repository Clone Policy (account default)')}
               description={
                 <>
-                  Default clone budget and strategy for <strong>every project repository</strong> checked
-                  out in this account: wall-clock timeout, idle-stall timeout, and the
-                  shallow / partial / single-branch flags. A project overrides individual keys from
-                  its own Clone Policy. Leave everything empty for the system defaults (clone
-                  timeout 3600s, idle timeout off, full clone).
-                </>
+                  {translate('Default clone budget and strategy for')} <strong>{translate('every project repository')}</strong> {translate('checked out in this account: wall-clock timeout, idle-stall timeout, and the shallow / partial / single-branch flags. A project overrides individual keys from its own Clone Policy. Leave everything empty for the system defaults (clone timeout 3600s, idle timeout off, full clone).')}</>
               }
               onSave={async (policy) => {
                 try {
                   await api.updateAccount(account.id, { clone_policy: policy });
                   await load();
-                  showToast(policy === null ? 'Account clone policy cleared' : 'Account clone policy saved', 'success');
+                  showToast(policy === null ? translate('Account clone policy cleared') : translate('Account clone policy saved'), 'success');
                 } catch (err: any) {
                   // 서버 zod 거부(400) 메시지가 여기로 올라온다.
-                  showToast(err?.message || 'Failed to save clone policy', 'error');
+                  showToast(err?.message || translate('Failed to save clone policy'), 'error');
                 }
               }}
             />
@@ -126,6 +122,7 @@ interface TicketDispatchSettingsProps {
  * immediately — it is an operational stop, not a draft.
  */
 export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSettingsProps) {
+  useLocale();
   const { showToast } = useToast();
   const [form, setForm] = useState<DispatchSettingsForm>(() => dispatchSettingsToForm(account));
   const [saving, setSaving] = useState(false);
@@ -151,9 +148,9 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
     try {
       const saved = await api.updateAccount(account.id, patch);
       onSaved({ ...account, ...patch, ...(saved || {}) });
-      showToast('Ticket dispatch settings saved', 'success');
+      showToast(translate('Ticket dispatch settings saved'), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save ticket dispatch settings', 'error');
+      showToast(err?.message || translate('Failed to save ticket dispatch settings'), 'error');
     } finally {
       setSaving(false);
     }
@@ -165,9 +162,9 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
     try {
       const saved = await api.updateAccount(account.id, pausePatch);
       onSaved({ ...account, ...pausePatch, ...(saved || {}) });
-      showToast(nextPaused ? 'Ticket dispatch paused' : 'Ticket dispatch resumed', 'success');
+      showToast(nextPaused ? translate('Ticket dispatch paused') : translate('Ticket dispatch resumed'), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to change ticket dispatch', 'error');
+      showToast(err?.message || translate('Failed to change ticket dispatch'), 'error');
     } finally {
       setPausing(false);
     }
@@ -177,7 +174,7 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
 
   return (
     <section
-      aria-label="Ticket dispatch"
+      aria-label={translate('Ticket dispatch')}
       style={{
         padding: 16,
         marginBottom: 16,
@@ -187,11 +184,9 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
       }}
     >
       <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-        Ticket dispatch
-      </h3>
+        {translate('Ticket dispatch')}</h3>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
-        How tickets in this account are handed to their assignee agents.
-      </div>
+        {translate('How tickets in this account are handed to their assignee agents.')}</div>
 
       <label
         style={{
@@ -211,12 +206,11 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
         />
         <span>
           <span style={{ fontSize: 13, fontWeight: 600, color: paused ? tokens.colors.danger : tokens.colors.textPrimary }}>
-            Pause ticket dispatch
-          </span>
+            {translate('Pause ticket dispatch')}</span>
           <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
             {paused
-              ? `Paused since ${formatPausedAt(account.dispatch_paused_at)} — no ticket is sent to an agent. People can still edit, comment on and move tickets.`
-              : 'Stops every ticket dispatch in this account until resumed. People can still edit, comment on and move tickets.'}
+              ? translate('Paused since {0} — no ticket is sent to an agent. People can still edit, comment on and move tickets.', { 0: formatPausedAt(account.dispatch_paused_at) })
+              : translate('Stops every ticket dispatch in this account until resumed. People can still edit, comment on and move tickets.')}
           </span>
         </span>
       </label>
@@ -224,17 +218,17 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
         <div style={{ flex: '1 1 200px', minWidth: 200 }}>
           <Input
-            label="Language"
+            label={translate('Language')}
             value={form.language}
-            placeholder="e.g. Korean (empty = agent default)"
+            placeholder={translate('e.g. Korean (empty = agent default)')}
             onChange={(e) => patchForm({ language: (e.target as HTMLInputElement).value })}
             error={errors.language}
           />
-          <div style={hintStyle}>Language agents write in when working a ticket here.</div>
+          <div style={hintStyle}>{translate('Language agents write in when working a ticket here.')}</div>
         </div>
         <div style={{ flex: '0 1 200px', minWidth: 180 }}>
           <Input
-            label="Max concurrent tickets per agent"
+            label={translate('Max concurrent tickets per agent')}
             type="number"
             min={1}
             max={MAX_CONCURRENT_TICKETS_PER_AGENT_MAX}
@@ -243,29 +237,28 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
             onChange={(e) => patchForm({ maxConcurrent: (e.target as HTMLInputElement).value })}
             error={errors.maxConcurrent}
           />
-          <div style={hintStyle}>In-progress tickets one agent works at once; the rest wait in To Do.</div>
+          <div style={hintStyle}>{translate('In-progress tickets one agent works at once; the rest wait in To Do.')}</div>
         </div>
         <div style={{ flex: '0 1 200px', minWidth: 180 }}>
           <Input
-            label="Auto-archive done tickets (days)"
+            label={translate('Auto-archive done tickets (days)')}
             type="number"
             min={AUTO_ARCHIVE_DAYS_MIN}
             max={AUTO_ARCHIVE_DAYS_MAX}
             step={1}
             value={form.autoArchiveDays}
-            placeholder="off"
+            placeholder={translate('off')}
             onChange={(e) => patchForm({ autoArchiveDays: (e.target as HTMLInputElement).value })}
             error={errors.autoArchiveDays}
           />
           <div style={hintStyle}>
-            Done tickets idle this long are archived ({AUTO_ARCHIVE_DAYS_MIN}–{AUTO_ARCHIVE_DAYS_MAX}). Empty = never.
-          </div>
+            {translate('Done tickets idle this long are archived (')}{AUTO_ARCHIVE_DAYS_MIN}–{AUTO_ARCHIVE_DAYS_MAX}{translate('). Empty = never.')}</div>
         </div>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
         <Button variant="primary" size="sm" disabled={!dirty || saving} onClick={() => { void save(); }}>
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? translate('Saving…') : translate('Save')}
         </Button>
       </div>
     </section>
@@ -275,5 +268,5 @@ export function TicketDispatchSettings({ account, onSaved }: TicketDispatchSetti
 function formatPausedAt(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(getLocaleTag());
 }

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import { useBoardStream, useBoardStreamEvent } from '../../contexts/BoardStreamContext';
@@ -26,6 +28,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
   terminalId: string;
   onTerminalChange?: (terminal: TerminalSummary) => void;
 }) {
+  useLocale();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<any>(null);
   const fitRef = useRef<any>(null);
@@ -60,7 +63,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
     try {
       await api.writeHostTerminal(managerId, terminalId, data);
     } catch (err: any) {
-      setError(err?.message || 'Failed to send input');
+      setError(err?.message || translate('Failed to send input'));
     } finally {
       sendingRef.current = false;
       if (inputQueueRef.current.length) void flushInput();
@@ -87,7 +90,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
       const snapshot = await api.attachHostTerminal(managerId, terminalId, size);
       if (disposedRef.current) return;
       term.reset();
-      if (snapshot.truncated) term.write(`${dim('[earlier output trimmed]')}\r\n`);
+      if (snapshot.truncated) term.write(`${dim(translate('[earlier output trimmed]'))}\r\n`);
       term.write(decodeBase64(snapshot.data));
       lastSeqRef.current = snapshot.seq;
       attachedRef.current = true;
@@ -99,7 +102,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
       onTerminalChange?.(snapshot.terminal);
       setError(null);
     } catch (err: any) {
-      if (!disposedRef.current) setError(err?.message || 'Failed to attach to this terminal');
+      if (!disposedRef.current) setError(err?.message || translate('Failed to attach to this terminal'));
     } finally {
       if (!disposedRef.current) setLoading(false);
     }
@@ -159,7 +162,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
       term.focus();
     })().catch((err: any) => {
       if (!disposedRef.current) {
-        setError(err?.message || 'Failed to load the terminal view');
+        setError(err?.message || translate('Failed to load the terminal view'));
         setLoading(false);
       }
     });
@@ -197,7 +200,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
     onTerminalChange?.(next);
     if (!isLiveTerminal(next)) {
       const code = next.exit_code !== null && next.exit_code !== undefined ? ` (code ${next.exit_code})` : '';
-      termRef.current?.write(`\r\n${dim(`[terminal exited${code}]`)}\r\n`);
+      termRef.current?.write(`\r\n${dim(translate('[terminal exited{0}]', { 0: code }))}\r\n`);
     }
   }, [managerId, terminalId, onTerminalChange]));
 
@@ -220,8 +223,8 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
       {dead && (
         <div style={{ padding: '6px 12px', fontSize: 12, color: tokens.colors.textMuted, borderBottom: `1px solid ${tokens.colors.border}` }}>
           {status.label}
-          {terminal?.exit_code !== null && terminal?.exit_code !== undefined ? ` — exit code ${terminal.exit_code}` : ''}
-          {' · this terminal is gone; open a new one.'}
+          {terminal?.exit_code !== null && terminal?.exit_code !== undefined ? translate(' — exit code {0}', { 0: terminal.exit_code }) : ''}
+          {translate(' · this terminal is gone; open a new one.')}
         </div>
       )}
       <div
@@ -230,7 +233,7 @@ export default function TerminalView({ managerId, terminalId, onTerminalChange }
         style={{ flex: 1, minHeight: 0, background: '#0b0e14', padding: 8, overflow: 'hidden' }}
       />
       {loading && (
-        <div style={{ padding: '4px 12px', fontSize: 11.5, color: tokens.colors.textMuted }}>Attaching…</div>
+        <div style={{ padding: '4px 12px', fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Attaching…')}</div>
       )}
     </div>
   );

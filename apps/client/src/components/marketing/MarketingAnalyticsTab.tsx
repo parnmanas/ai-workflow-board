@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import type { MarketingLink, MarketingMetric, MarketingReport, MarketingReportRow } from '../../types';
@@ -25,6 +27,7 @@ import { ExternalLink, Hint, Panel, tableStyles, useAction, useMarketingCtx } fr
  * 사람의 방문이라고 증명하지 못하므로 그것만으로 돈을 쓰는 판단을 하지 말라는 주의를 그대로 보여 준다.
  */
 export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: number }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const [days, setDays] = useState<number>(30);
   const [report, setReport] = useState<MarketingReport | null>(null);
@@ -37,7 +40,7 @@ export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: numb
     setReportError('');
     api.getMarketingReport(ctx.campaignId, reportRange(days))
       .then((r) => { if (!cancelled) setReport(r); })
-      .catch((err) => { if (!cancelled) { setReport(null); setReportError((err as Error)?.message || '리포트를 만들지 못했습니다'); } });
+      .catch((err) => { if (!cancelled) { setReport(null); setReportError((err as Error)?.message || translate('리포트를 만들지 못했습니다')); } });
     return () => { cancelled = true; };
   }, [ctx.campaignId, days, refreshKey]);
 
@@ -74,13 +77,12 @@ export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: numb
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Panel
         testId="marketing-report"
-        title="채널별 성과"
+        title={translate('채널별 성과')}
         actions={(
-          <div role="group" aria-label="기간" style={{ display: 'flex', gap: 4 }}>
+          <div role="group" aria-label={translate('기간')} style={{ display: 'flex', gap: 4 }}>
             {REPORT_PERIOD_DAYS.map((d) => (
               <Button key={d} size="sm" variant={d === days ? 'primary' : 'secondary'} aria-pressed={d === days} onClick={() => setDays(d)}>
-                {d}일
-              </Button>
+                {d}{translate('일')}</Button>
             ))}
           </div>
         )}
@@ -88,34 +90,34 @@ export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: numb
         {reportError ? (
           <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{reportError}</div>
         ) : !report ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>불러오는 중…</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('불러오는 중…')}</div>
         ) : (
           <>
             <div style={{ overflowX: 'auto' }}>
               <table style={tableStyles.table}>
                 <thead>
                   <tr>
-                    <th style={tableStyles.th}>채널</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>게시</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>클릭(raw)</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>노출</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>참여</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>답글</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>가입</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>전환</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>편성액</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>지출</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>CPC</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>전환당 비용</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>CTR</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>ROAS</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>피드백</th>
-                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>티켓</th>
+                    <th style={tableStyles.th}>{translate('채널')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('게시')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('클릭(raw)')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('노출')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('참여')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('답글')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('가입')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('전환')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('편성액')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('지출')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('CPC')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('전환당 비용')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('CTR')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('ROAS')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('피드백')}</th>
+                    <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('티켓')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {report.channels.map((c) => row(c.name, c, c.channel_id, { status: c.status, allocation: c.allocation_minor }))}
-                  {row(<strong>합계</strong>, report.totals, '__totals')}
+                  {row(<strong>{translate('합계')}</strong>, report.totals, "__totals")}
                 </tbody>
               </table>
             </div>
@@ -138,6 +140,7 @@ export default function MarketingAnalyticsTab({ refreshKey }: { refreshKey: numb
 }
 
 function LinksPanel({ links }: { links: MarketingLink[] | null }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const usable = [...ctx.channels.values()].filter((c) => c.status === 'active' || c.status === 'paused');
@@ -148,58 +151,57 @@ function LinksPanel({ links }: { links: MarketingLink[] | null }) {
   const domains = ctx.campaign?.allowed_domains || [];
 
   const create = async () => {
-    if (!channelId) { setError('채널을 고르세요'); return; }
+    if (!channelId) { setError(translate('채널을 고르세요')); return; }
     const destinationUrl = safeHttpUrl(destination);
-    if (!destinationUrl) { setError('목적지는 http(s) 주소여야 합니다'); return; }
+    if (!destinationUrl) { setError(translate('목적지는 http(s) 주소여야 합니다')); return; }
     setError('');
     const saved = await run(
       () => api.createMarketingLink(ctx.campaignId, { channel_id: channelId, destination_url: destinationUrl, ...(label.trim() ? { label: label.trim() } : {}) }),
-      (link) => (link.url ? `추적 링크를 만들었습니다: ${link.url}` : '추적 링크를 만들었습니다'),
+      (link) => (link.url ? translate('추적 링크를 만들었습니다: {0}', { 0: link.url }) : translate('추적 링크를 만들었습니다')),
     );
     if (saved) { setDestination(''); setLabel(''); }
   };
 
   return (
-    <Panel title="추적 링크">
+    <Panel title={translate('추적 링크')}>
       {ctx.canManage && (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1fr) minmax(220px, 2fr) minmax(140px, 1fr) auto', gap: 8, alignItems: 'end', marginBottom: 6 }}>
           <Select
-            label="채널"
+            label={translate('채널')}
             value={channelId}
-            placeholder="— 채널 —"
+            placeholder={translate('— 채널 —')}
             options={usable.map((c) => ({ value: c.id, label: c.name }))}
             onChange={(e) => setChannelId(e.target.value)}
           />
-          <Input label="목적지 URL" value={destination} placeholder="https://example.com/landing" onChange={(e) => setDestination(e.target.value)} />
-          <Input label="라벨 (선택)" value={label} onChange={(e) => setLabel(e.target.value)} />
-          <Button variant="primary" size="md" disabled={busy} onClick={() => void create()}>만들기</Button>
+          <Input label={translate('목적지 URL')} value={destination} placeholder="https://example.com/landing" onChange={(e) => setDestination(e.target.value)} />
+          <Input label={translate('라벨 (선택)')} value={label} onChange={(e) => setLabel(e.target.value)} />
+          <Button variant="primary" size="md" disabled={busy} onClick={() => void create()}>{translate('만들기')}</Button>
         </div>
       )}
       <Hint>
-        목적지는 허용 도메인({domains.length ? domains.join(', ') : '없음 — 캠페인 설정에서 추가'}) 안이어야 합니다. 링크를 열면 서버가 UTM 을 붙여 목적지로 보냅니다.
-      </Hint>
+        {translate('목적지는 허용 도메인(')}{domains.length ? domains.join(', ') : translate('없음 — 캠페인 설정에서 추가')}{translate(') 안이어야 합니다. 링크를 열면 서버가 UTM 을 붙여 목적지로 보냅니다.')}</Hint>
       {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight, marginTop: 4 }}>{error}</div>}
       {links === null ? (
-        <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8 }}>불러오는 중…</div>
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8 }}>{translate('불러오는 중…')}</div>
       ) : links.length === 0 ? (
-        <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8 }}>추적 링크가 없습니다.</div>
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8 }}>{translate('추적 링크가 없습니다.')}</div>
       ) : (
         <div style={{ overflowX: 'auto', marginTop: 8 }}>
           <table style={tableStyles.table}>
             <thead>
               <tr>
-                <th style={tableStyles.th}>링크</th>
-                <th style={tableStyles.th}>목적지</th>
-                <th style={tableStyles.th}>채널</th>
-                <th style={tableStyles.th}>라벨</th>
-                <th style={{ ...tableStyles.th, ...tableStyles.num }}>클릭(raw)</th>
-                <th style={tableStyles.th}>만든 이</th>
+                <th style={tableStyles.th}>{translate('링크')}</th>
+                <th style={tableStyles.th}>{translate('목적지')}</th>
+                <th style={tableStyles.th}>{translate('채널')}</th>
+                <th style={tableStyles.th}>{translate('라벨')}</th>
+                <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('클릭(raw)')}</th>
+                <th style={tableStyles.th}>{translate('만든 이')}</th>
               </tr>
             </thead>
             <tbody>
               {links.map((l) => (
                 <tr key={l.id}>
-                  <td style={tableStyles.td}>{l.url ? <ExternalLink href={l.url}>{l.url}</ExternalLink> : <code title="서버에 AWB_PUBLIC_URL 이 없어 공개 주소를 만들 수 없습니다">{l.code}</code>}</td>
+                  <td style={tableStyles.td}>{l.url ? <ExternalLink href={l.url}>{l.url}</ExternalLink> : <code title={translate('서버에 AWB_PUBLIC_URL 이 없어 공개 주소를 만들 수 없습니다')}>{l.code}</code>}</td>
                   <td style={tableStyles.td}><ExternalLink href={l.destination_url} /></td>
                   <td style={tableStyles.td}>{ctx.channels.get(l.channel_id)?.name || '—'}</td>
                   <td style={tableStyles.td}>{l.label}</td>
@@ -216,6 +218,7 @@ function LinksPanel({ links }: { links: MarketingLink[] | null }) {
 }
 
 function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const [metric, setMetric] = useState<string>('impressions');
@@ -226,22 +229,22 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
   const [error, setError] = useState('');
 
   const record = async () => {
-    if (!/^\d+$/.test(value.trim())) { setError('값은 0 이상의 정수입니다(매출은 최소 단위)'); return; }
+    if (!/^\d+$/.test(value.trim())) { setError(translate('값은 0 이상의 정수입니다(매출은 최소 단위)')); return; }
     if ((CONNECTOR_METRICS as readonly string[]).includes(metric)) {
       if (engagementCollectedChannel(ctx.channels.get(channelId))) {
-        setError('reddit · GitHub 채널의 참여 · 답글은 서버가 게시물에서 직접 읽습니다 — 기록하지 않습니다');
+        setError(translate('reddit · GitHub 채널의 참여 · 답글은 서버가 게시물에서 직접 읽습니다 — 기록하지 않습니다'));
         return;
       }
       if (!channelId && [...ctx.channels.values()].some((c) => engagementCollectedChannel(c))) {
-        setError('채널을 고르세요 — 서버가 읽는 reddit · GitHub 채널이 있어, 캠페인 전체 참여 · 답글은 그 몫을 두 번 셀 수 있습니다');
+        setError(translate('채널을 고르세요 — 서버가 읽는 reddit · GitHub 채널이 있어, 캠페인 전체 참여 · 답글은 그 몫을 두 번 셀 수 있습니다'));
         return;
       }
     }
     let observed: string | undefined;
     if (observedAt) {
       const d = new Date(observedAt);
-      if (Number.isNaN(d.getTime())) { setError('관측 시각을 읽을 수 없습니다'); return; }
-      if (d.getTime() > Date.now() + 5 * 60_000) { setError('관측 시각이 미래입니다'); return; }
+      if (Number.isNaN(d.getTime())) { setError(translate('관측 시각을 읽을 수 없습니다')); return; }
+      if (d.getTime() > Date.now() + 5 * 60_000) { setError(translate('관측 시각이 미래입니다')); return; }
       observed = d.toISOString();
     }
     setError('');
@@ -253,49 +256,47 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
         ...(observed ? { observed_at: observed } : {}),
         ...(note.trim() ? { note: note.trim() } : {}),
       }]),
-      '지표를 기록했습니다',
+      translate('지표를 기록했습니다'),
     );
     if (saved) { setValue(''); setNote(''); }
   };
 
   return (
-    <Panel title="지표 기록">
+    <Panel title={translate('지표 기록')}>
       {ctx.canManage && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, alignItems: 'end', marginBottom: 6 }}>
           <Select
-            label="지표"
+            label={translate('지표')}
             value={metric}
             options={RECORDABLE_METRICS.map((m) => ({ value: m, label: METRIC_LABELS[m] || m }))}
             onChange={(e) => setMetric(e.target.value)}
           />
-          <Input label="값" value={value} inputMode="numeric" onChange={(e) => setValue(e.target.value)} />
+          <Input label={translate('값')} value={value} inputMode="numeric" onChange={(e) => setValue(e.target.value)} />
           <Select
-            label="채널 (선택)"
+            label={translate('채널 (선택)')}
             value={channelId}
-            options={[{ value: '', label: '캠페인 전체' }, ...[...ctx.channels.values()].map((c) => ({ value: c.id, label: c.name }))]}
+            options={[{ value: '', label: translate('캠페인 전체') }, ...[...ctx.channels.values()].map((c) => ({ value: c.id, label: c.name }))]}
             onChange={(e) => setChannelId(e.target.value)}
           />
-          <Input label="관측 시각 (선택)" type="datetime-local" value={observedAt} onChange={(e) => setObservedAt(e.target.value)} />
-          <Input label="출처 메모 (선택)" value={note} onChange={(e) => setNote(e.target.value)} />
-          <Button variant="primary" size="md" disabled={busy} onClick={() => void record()}>기록</Button>
+          <Input label={translate('관측 시각 (선택)')} type="datetime-local" value={observedAt} onChange={(e) => setObservedAt(e.target.value)} />
+          <Input label={translate('출처 메모 (선택)')} value={note} onChange={(e) => setNote(e.target.value)} />
+          <Button variant="primary" size="md" disabled={busy} onClick={() => void record()}>{translate('기록')}</Button>
         </div>
       )}
       <Hint>
-        플랫폼 통계에서 직접 확인한 수치만 남기세요. 클릭은 추적 링크에서만 셉니다. reddit · GitHub 채널에 서버가 게시한 글의
-        참여(점수 · 반응) · 답글은 서버가 게시 후 14일 동안 읽어 &apos;자동 수집&apos; 으로 남깁니다 — 값은 직전에 읽은 값과의 차이입니다.
-      </Hint>
+        {translate('플랫폼 통계에서 직접 확인한 수치만 남기세요. 클릭은 추적 링크에서만 셉니다. reddit · GitHub 채널에 서버가 게시한 글의 참여(점수 · 반응) · 답글은 서버가 게시 후 14일 동안 읽어 \'자동 수집\' 으로 남깁니다 — 값은 직전에 읽은 값과의 차이입니다.')}</Hint>
       {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight, marginTop: 4 }}>{error}</div>}
       {metrics && metrics.length > 0 && (
         <div style={{ overflowX: 'auto', marginTop: 8 }}>
           <table style={tableStyles.table}>
             <thead>
               <tr>
-                <th style={tableStyles.th}>관측</th>
-                <th style={tableStyles.th}>지표</th>
-                <th style={{ ...tableStyles.th, ...tableStyles.num }}>값</th>
-                <th style={tableStyles.th}>채널</th>
-                <th style={tableStyles.th}>기록</th>
-                <th style={tableStyles.th}>메모</th>
+                <th style={tableStyles.th}>{translate('관측')}</th>
+                <th style={tableStyles.th}>{translate('지표')}</th>
+                <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('값')}</th>
+                <th style={tableStyles.th}>{translate('채널')}</th>
+                <th style={tableStyles.th}>{translate('기록')}</th>
+                <th style={tableStyles.th}>{translate('메모')}</th>
               </tr>
             </thead>
             <tbody>
@@ -304,8 +305,8 @@ function MetricsPanel({ metrics }: { metrics: MarketingMetric[] | null }) {
                   <td style={tableStyles.td}>{formatDateTime(m.observed_at)}</td>
                   <td style={tableStyles.td}>{METRIC_LABELS[m.metric] || m.metric}</td>
                   <td style={{ ...tableStyles.td, ...tableStyles.num }}>{metricValueText(m, ctx.currency)}</td>
-                  <td style={tableStyles.td}>{m.channel_id ? ctx.channels.get(m.channel_id)?.name || '—' : '전체'}</td>
-                  <td style={tableStyles.td}>{m.source === 'connector' ? '자동 수집' : m.recorded_by_name || m.recorded_by_type}</td>
+                  <td style={tableStyles.td}>{m.channel_id ? ctx.channels.get(m.channel_id)?.name || '—' : translate('전체')}</td>
+                  <td style={tableStyles.td}>{m.source === 'connector' ? translate('자동 수집') : m.recorded_by_name || m.recorded_by_type}</td>
                   <td style={tableStyles.td}>{m.note}</td>
                 </tr>
               ))}

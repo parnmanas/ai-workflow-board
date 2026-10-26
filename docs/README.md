@@ -78,6 +78,7 @@ document uses boards, configurable columns, account navigation, or Agent rows.
 | [Display names](runbooks/agent-display-name.md) | Host/runtime labels and snapshot-carried names. |
 | [Server QA tests](../apps/server/test/qa-flows/README.md) | QA suites and SQLite/PostgreSQL test execution. |
 | [Client tests](../apps/client/test/README.md) | Client tests and browser smoke tests. |
+| [Interface languages](i18n.md) | English default, language selection, translated copy, and localization tests. |
 
 See the [responsive UI audit](audit/2026-10-responsive-ui.md) for tested viewports, interaction checks, and browser test limits.
 

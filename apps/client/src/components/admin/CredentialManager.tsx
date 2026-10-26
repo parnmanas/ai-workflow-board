@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../../api';
 import type { Credential } from '../../types';
@@ -81,41 +83,41 @@ interface ProviderOption {
 /** Providers that are NOT tied to an LLM CLI (git hosts, generic API key,
  *  free-form secret). These stay local — the CLI catalog only knows CLIs. */
 const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDef> }> = [
-  { value: 'github', label: 'GitHub', icon: 'G', fields: { token: { label: 'Personal Access Token', placeholder: 'ghp_...' } } },
-  { value: 'gitlab', label: 'GitLab', icon: 'L', fields: { token: { label: 'Access Token', placeholder: 'glpat-...' } } },
-  { value: 'cloudflare', label: 'Cloudflare', icon: 'C', fields: { api_token: { label: 'API Token', placeholder: 'Paste your Cloudflare API token' } } },
-  { value: 'resend', label: 'Resend', icon: 'R', fields: { api_key: { label: 'API Key', placeholder: 're_...' } } },
-  { value: 'openai', label: 'OpenAI', icon: 'O', fields: { api_key: { label: 'API Key', placeholder: 'sk-...' } } },
+  { value: 'github', label: 'GitHub', icon: 'G', fields: { token: { get label() { return translate('Personal Access Token'); }, placeholder: 'ghp_...' } } },
+  { value: 'gitlab', label: 'GitLab', icon: 'L', fields: { token: { get label() { return translate('Access Token'); }, placeholder: 'glpat-...' } } },
+  { value: 'cloudflare', get label() { return translate('Cloudflare'); }, icon: 'C', fields: { api_token: { get label() { return translate('API Token'); }, get placeholder() { return translate('Paste your Cloudflare API token'); } } } },
+  { value: 'resend', label: 'Resend', icon: 'R', fields: { api_key: { get label() { return translate('API Key'); }, placeholder: 're_...' } } },
+  { value: 'openai', label: 'OpenAI', icon: 'O', fields: { api_key: { get label() { return translate('API Key'); }, placeholder: 'sk-...' } } },
   {
     value: 'google_oauth',
     label: 'Google OAuth',
     icon: 'G',
     fields: {
-      client_id: { label: 'Client ID', placeholder: '1234567890-abc.apps.googleusercontent.com' },
-      client_secret: { label: 'Client secret', placeholder: 'GOCSPX-...' },
+      client_id: { get label() { return translate('Client ID'); }, get placeholder() { return translate('1234567890-abc.apps.googleusercontent.com'); } },
+      client_secret: { get label() { return translate('Client secret'); }, placeholder: 'GOCSPX-...' },
       refresh_token: {
-        label: 'Refresh token (optional)',
-        placeholder: '1//... — without it an agent cannot call Google APIs (no browser for the consent screen)',
+        get label() { return translate('Refresh token (optional)'); },
+        get placeholder() { return translate('1//... — without it an agent cannot call Google APIs (no browser for the consent screen)'); },
       },
     },
   },
   {
     value: 'git_http',
-    label: 'Git (HTTPS host)',
+    get label() { return translate('Git (HTTPS host)'); },
     icon: 'G',
     fields: {
-      url: { label: 'Host URL', placeholder: 'https://lfs.example.com — any URL on the host works (e.g. the .lfsconfig url)' },
-      username: { label: 'Username', placeholder: 'Account the token belongs to' },
-      token: { label: 'Access token', placeholder: 'Personal access token (used as the password)' },
+      url: { get label() { return translate('Host URL'); }, get placeholder() { return translate('https://lfs.example.com — any URL on the host works (e.g. the .lfsconfig url)'); } },
+      username: { get label() { return translate('Username'); }, get placeholder() { return translate('Account the token belongs to'); } },
+      token: { get label() { return translate('Access token'); }, get placeholder() { return translate('Personal access token (used as the password)'); } },
     },
   },
   {
     value: 'npm',
-    label: 'npm registry',
+    get label() { return translate('npm registry'); },
     icon: 'N',
     fields: {
-      token: { label: 'Access token', placeholder: 'npm_... — granular access token from npmjs.com' },
-      registry: { label: 'Registry (optional)', placeholder: 'https://registry.npmjs.org/ (default)' },
+      token: { get label() { return translate('Access token'); }, get placeholder() { return translate('npm_... — granular access token from npmjs.com'); } },
+      registry: { get label() { return translate('Registry (optional)'); }, get placeholder() { return translate('https://registry.npmjs.org/ (default)'); } },
     },
   },
   // Marketing direct payments (docs/marketing.md "직접 결제 어댑터"). Server-only: the
@@ -124,38 +126,38 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
   // the server's DIRECT_PROVIDER_CREDENTIAL_FIELDS (test/marketing-payment-contract).
   {
     value: 'meta_ads',
-    label: 'Meta Ads (marketing payments)',
+    get label() { return translate('Meta Ads (marketing payments)'); },
     icon: 'M',
     fields: {
-      access_token: { label: 'System user access token', placeholder: 'EAAB... — ads_management on the ad account; the server raises campaign spend caps with it' },
-      app_secret: { label: 'App secret (optional)', placeholder: 'Adds appsecret_proof — needed when the app has "Require App Secret" on' },
+      access_token: { get label() { return translate('System user access token'); }, get placeholder() { return translate('EAAB... — ads_management on the ad account; the server raises campaign spend caps with it'); } },
+      app_secret: { get label() { return translate('App secret (optional)'); }, get placeholder() { return translate('Adds appsecret_proof — needed when the app has "Require App Secret" on'); } },
     },
   },
   {
     value: 'google_ads',
-    label: 'Google Ads (marketing payments)',
+    get label() { return translate('Google Ads (marketing payments)'); },
     icon: 'G',
     fields: {
-      client_id: { label: 'OAuth client ID', placeholder: '1234567890-abc.apps.googleusercontent.com' },
-      client_secret: { label: 'OAuth client secret', placeholder: 'GOCSPX-...' },
-      refresh_token: { label: 'Refresh token', placeholder: '1//... — adwords scope; publish the OAuth app (refresh tokens of apps in "Testing" expire in 7 days)' },
-      client_email: { label: 'Service account email (instead of OAuth fields)', placeholder: 'name@project.iam.gserviceaccount.com — add as a Google Ads account user' },
-      private_key: { label: 'Service account private key', placeholder: 'PEM private_key from the service account JSON; leave OAuth fields empty', multiline: true },
-      login_customer_id: { label: 'Manager account id (optional)', placeholder: '123-456-7890 — only when access goes through a manager (MCC) account' },
-      developer_token: { label: 'Developer token (leave empty)', placeholder: 'Retired by Google on 2026-09-09 — ignored now, rejected by later API versions; access follows the OAuth client\'s Cloud project' },
+      client_id: { get label() { return translate('OAuth client ID'); }, get placeholder() { return translate('1234567890-abc.apps.googleusercontent.com'); } },
+      client_secret: { get label() { return translate('OAuth client secret'); }, placeholder: 'GOCSPX-...' },
+      refresh_token: { get label() { return translate('Refresh token'); }, get placeholder() { return translate('1//... — adwords scope; publish the OAuth app (refresh tokens of apps in "Testing" expire in 7 days)'); } },
+      client_email: { get label() { return translate('Service account email (instead of OAuth fields)'); }, get placeholder() { return translate('name@project.iam.gserviceaccount.com — add as a Google Ads account user'); } },
+      private_key: { get label() { return translate('Service account private key'); }, get placeholder() { return translate('PEM private_key from the service account JSON; leave OAuth fields empty'); }, multiline: true },
+      login_customer_id: { get label() { return translate('Manager account id (optional)'); }, get placeholder() { return translate('123-456-7890 — only when access goes through a manager (MCC) account'); } },
+      developer_token: { get label() { return translate('Developer token (leave empty)'); }, get placeholder() { return translate('Retired by Google on 2026-09-09 — ignored now, rejected by later API versions; access follows the OAuth client\'s Cloud project'); } },
     },
   },
   {
     value: 'stripe_issuing',
-    label: 'Stripe Issuing (marketing payments)',
+    get label() { return translate('Stripe Issuing (marketing payments)'); },
     icon: 'S',
     fields: {
-      secret_key: { label: 'Restricted API key', placeholder: 'rk_live_... (sandbox rk_test_...) — Issuing Cards: Write; Cardholders, Transactions, Authorizations: Read; a full live key sk_live_ is refused' },
+      secret_key: { get label() { return translate('Restricted API key'); }, get placeholder() { return translate('rk_live_... (sandbox rk_test_...) — Issuing Cards: Write; Cardholders, Transactions, Authorizations: Read; a full live key sk_live_ is refused'); } },
     },
   },
   // Custom renders a key/value editor instead of these fields; `token` is the
   // first row's default key (what outreach/resources read).
-  { value: 'custom', label: 'Custom', icon: 'C', fields: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } } },
+  { value: 'custom', get label() { return translate('Custom'); }, icon: 'C', fields: { token: { get label() { return translate('Token / Secret'); }, get placeholder() { return translate('Enter secret value'); } } } },
 ];
 
 /** Labels / placeholders for CLI credential fields, keyed by FIELD NAME (the
@@ -166,37 +168,37 @@ const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDe
 const FIELD_LABELS: Record<string, FieldDef> = {
   credentials_json: {
     label: '.credentials.json',
-    placeholder: 'Paste the contents of ~/.claude/.credentials.json here (the file `claude login` produced).',
+    get placeholder() { return translate('Paste the contents of ~/.claude/.credentials.json here (the file `claude login` produced).'); },
   },
-  api_key: { label: 'API Key', placeholder: 'sk-...' },
+  api_key: { get label() { return translate('API Key'); }, placeholder: 'sk-...' },
   'claude_api_key:api_key': { label: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...' },
-  'deepseek_api_key:api_key': { label: 'DeepSeek API Key', placeholder: 'sk-... (from platform.deepseek.com)' },
+  'deepseek_api_key:api_key': { get label() { return translate('DeepSeek API Key'); }, get placeholder() { return translate('sk-... (from platform.deepseek.com)'); } },
   'codex_api_key:api_key': { label: 'OPENAI_API_KEY', placeholder: 'sk-...' },
   'antigravity_api_key:api_key': { label: 'GEMINI_API_KEY', placeholder: 'AI...' },
-  'opencode_api_key:api_key': { label: 'OPENCODE_API_KEY', placeholder: 'OpenCode Go key — create one at https://opencode.ai/auth (the CLI calls this provider "OpenCode Zen")' },
+  'opencode_api_key:api_key': { label: 'OPENCODE_API_KEY', get placeholder() { return translate('OpenCode Go key — create one at https://opencode.ai/auth (the CLI calls this provider "OpenCode Zen")'); } },
   oauth_token: {
     label: 'CLAUDE_CODE_OAUTH_TOKEN',
-    placeholder: 'Run `claude setup-token` on one machine and paste the output (sk-ant-oat...). Valid ~1 year, does NOT rotate, shared by every agent — no per-machine daily re-login.',
+    get placeholder() { return translate('Run `claude setup-token` on one machine and paste the output (sk-ant-oat...). Valid ~1 year, does NOT rotate, shared by every agent — no per-machine daily re-login.'); },
     multiline: true,
   },
-  model: { label: 'Model', placeholder: 'deepseek-chat (default) · or deepseek-reasoner' },
-  base_url: { label: 'Base URL', placeholder: 'https://api.deepseek.com/anthropic (default)' },
+  model: { get label() { return translate('Model'); }, get placeholder() { return translate('deepseek-chat (default) · or deepseek-reasoner'); } },
+  base_url: { get label() { return translate('Base URL'); }, get placeholder() { return translate('https://api.deepseek.com/anthropic (default)'); } },
   auth_json: {
     label: 'auth.json',
-    placeholder: 'Paste the contents of the auth.json the CLI login produced (`codex login` → ~/.codex/auth.json, `opencode auth login` → ~/.local/share/opencode/auth.json; one opencode file can hold several providers — paste it whole).',
+    get placeholder() { return translate('Paste the contents of the auth.json the CLI login produced (`codex login` → ~/.codex/auth.json, `opencode auth login` → ~/.local/share/opencode/auth.json; one opencode file can hold several providers — paste it whole).'); },
   },
   config_toml: {
     label: 'config.toml',
-    placeholder: 'Paste the contents of ~/.codex/config.toml — model / provider preferences. Leave blank to use codex defaults.',
+    get placeholder() { return translate('Paste the contents of ~/.codex/config.toml — model / provider preferences. Leave blank to use codex defaults.'); },
   },
   oauth_creds_json: {
     label: 'oauth_creds.json',
-    placeholder: 'Paste the contents of the Antigravity OAuth credential file (from the OAuth flow at antigravity.google).',
+    get placeholder() { return translate('Paste the contents of the Antigravity OAuth credential file (from the OAuth flow at antigravity.google).'); },
   },
 };
 
 function genericFieldDef(field: string): FieldDef {
-  return { label: field.replace(/_/g, ' '), placeholder: `Enter ${field.replace(/_/g, ' ')}` };
+  return { label: field.replace(/_/g, ' '), placeholder: translate('Enter {0}', { 0: field.replace(/_/g, ' ') }) };
 }
 
 /** Field definitions for a CLI credential provider from its catalog
@@ -210,7 +212,7 @@ function cliProviderFieldDefs(provider: FlattenedCredentialProvider): Record<str
     const base = FIELD_LABELS[`${provider.id}:${field}`] ?? FIELD_LABELS[field] ?? genericFieldDef(field);
     defs[field] = {
       ...base,
-      label: required.has(field) ? base.label : `${base.label} (optional)`,
+      label: required.has(field) ? base.label : translate('{0} (optional)', { 0: base.label }),
       multiline: base.multiline || multiline.has(field),
     };
   }
@@ -234,6 +236,7 @@ export default function CredentialManager({
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const { user } = useAuth();
   // CLI credential providers come from the catalog (re-rendered once the
@@ -284,7 +287,7 @@ export default function CredentialManager({
           });
       setCredentials(list);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load credentials', 'error');
+      showToast(err?.message || translate('Failed to load credentials'), 'error');
     } finally {
       setLoading(false);
     }
@@ -331,7 +334,7 @@ export default function CredentialManager({
     } catch (err: any) {
       if (revealRequestGeneration.current !== requestGeneration) return;
       clearRevealedSecret();
-      showToast(err?.message || 'Failed to reveal credential', 'error');
+      showToast(err?.message || translate('Failed to reveal credential'), 'error');
     } finally {
       if (revealRequestGeneration.current === requestGeneration) {
         setRevealing(false);
@@ -353,7 +356,7 @@ export default function CredentialManager({
       textarea.remove();
     }
     setCopiedField(field);
-    showToast('Copied to clipboard.', 'success');
+    showToast(translate('Copied to clipboard.'), 'success');
     setTimeout(() => setCopiedField((current) => current === field ? '' : current), 2_000);
   };
 
@@ -423,15 +426,15 @@ export default function CredentialManager({
     setGoogleJson('');
     showToast(
       parsed.fields.refresh_token
-        ? 'Filled client ID, client secret and refresh token.'
-        : 'Filled client ID and client secret. Add a refresh token for agents to call Google APIs.',
+        ? translate('Filled client ID, client secret and refresh token.')
+        : translate('Filled client ID and client secret. Add a refresh token for agents to call Google APIs.'),
       'success',
     );
   };
 
   const handleSave = async () => {
     const errors: { name?: string; fields?: string } = {};
-    if (!formName.trim()) errors.name = 'Name is required.';
+    if (!formName.trim()) errors.name = translate('Name is required.');
     const customProblem = isCustom ? customRowsProblem(customRows, keptStoredKeys) : null;
     if (customProblem) errors.fields = customProblem;
     if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
@@ -459,7 +462,7 @@ export default function CredentialManager({
           ...(removedFields.length ? { remove_fields: removedFields } : {}),
           ...agentEnvFields,
         });
-        showToast('Credential updated.', 'success');
+        showToast(translate('Credential updated.'), 'success');
         for (const warning of saved.warnings ?? []) showToast(warning, 'info', { durationMs: 15000 });
       } else {
         await api.createCredential({
@@ -471,13 +474,13 @@ export default function CredentialManager({
           credentials,
           ...agentEnvFields,
         });
-        showToast('Credential created.', 'success');
+        showToast(translate('Credential created.'), 'success');
       }
       setShowForm(false);
       setEditCred(null);
       await loadCredentials();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save credential', 'error');
+      showToast(err?.message || translate('Failed to save credential'), 'error');
     } finally {
       setSaving(false);
     }
@@ -488,18 +491,18 @@ export default function CredentialManager({
     try {
       // The row's own owner — never the page's owner for new items.
       await api.deleteCredential(deleteTarget.id, deleteTarget.account_id ?? undefined);
-      showToast('Credential deleted.', 'success');
+      showToast(translate('Credential deleted.'), 'success');
       setDeleteTarget(null);
       await loadCredentials();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete credential', 'error');
+      showToast(err?.message || translate('Failed to delete credential'), 'error');
     }
   };
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} credentials</span>
+        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} {translate('credentials')}</span>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <CliAutoLogin
             credentials={credentials.filter((c) => c.scope !== 'global' || canManageGlobal)}
@@ -513,18 +516,17 @@ export default function CredentialManager({
             createScope={effectiveCreateOwner === null ? 'global' : 'account'}
             onCreated={loadCredentials}
           />
-          <Button variant="primary" size="md" onClick={startCreate}>+ New Credential</Button>
+          <Button variant="primary" size="md" onClick={startCreate}>{translate('+ New Credential')}</Button>
         </div>
       </div>
 
       {loading ? (
-        <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>
+        <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>{translate('Loading…')}</div>
       ) : credentials.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No credentials yet</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>{translate('No credentials yet')}</div>
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-            Add credentials for GitHub, GitLab, or other services. Resources can reference these for authenticated access.
-          </div>
+            {translate('Add credentials for GitHub, GitLab, or other services. Resources can reference these for authenticated access.')}</div>
         </div>
       ) : (
         <div
@@ -546,19 +548,19 @@ export default function CredentialManager({
                   letterSpacing: '0.05em',
                 }}
               >
-                <th style={listHeadStyle('left')}>Name</th>
-                <th style={listHeadStyle('left')}>Provider</th>
-                <th style={listHeadStyle('left')}>Description</th>
-                <th style={listHeadStyle('left')}>Fields</th>
-                <th style={listHeadStyle('left')}>Updated</th>
-                <th style={listHeadStyle('right')}>Actions</th>
+                <th style={listHeadStyle('left')}>{translate('Name')}</th>
+                <th style={listHeadStyle('left')}>{translate('Provider')}</th>
+                <th style={listHeadStyle('left')}>{translate('Description')}</th>
+                <th style={listHeadStyle('left')}>{translate('Fields')}</th>
+                <th style={listHeadStyle('left')}>{translate('Updated')}</th>
+                <th style={listHeadStyle('right')}>{translate('Actions')}</th>
               </tr>
             </thead>
             <tbody>
               {credentials.map((c) => {
                 const fieldKeys = Object.keys(c.credential_fields);
                 const fieldsLabel = c.credential_status === 'unreadable'
-                  ? 'Encryption key mismatch — re-enter credential'
+                  ? translate('Encryption key mismatch — re-enter credential')
                   : fieldKeys.length === 0
                   ? '—'
                   : fieldKeys.map((k) => {
@@ -595,7 +597,7 @@ export default function CredentialManager({
                           verticalAlign: 'middle',
                         }}
                       >
-                        {providerOptions.find((p) => p.value === c.provider)?.icon || 'C'}
+                        {providerOptions.find((p) => p.value === c.provider)?.icon || translate('C')}
                       </span>
                       {c.name}
                     </td>
@@ -610,7 +612,7 @@ export default function CredentialManager({
                             (c.agent_env_names ?? []).length ? `Env: ${(c.agent_env_names ?? []).join(', ')}` : '',
                           ].filter(Boolean).join(' · ') || '—'}
                         >
-                          <Badge variant="success">agent env</Badge>
+                          <Badge variant="success">{translate('agent env')}</Badge>
                         </span>
                       )}
                     </td>
@@ -645,7 +647,7 @@ export default function CredentialManager({
                       {!globalMode && c.scope === 'global' && !canManageGlobal ? (
                         <span
                           style={{ fontSize: 11, color: tokens.colors.textMuted }}
-                          title="You do not have permission to edit this credential"
+                          title={translate('You do not have permission to edit this credential')}
                         >
                           Read-only
                         </span>
@@ -661,11 +663,10 @@ export default function CredentialManager({
                                 setRevealTarget(c);
                               }}
                             >
-                              Reveal
-                            </Button>
+                              {translate('Reveal')}</Button>
                           )}
-                          <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>Edit</Button>
-                          <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>Delete</Button>
+                          <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>{translate('Edit')}</Button>
+                          <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>{translate('Delete')}</Button>
                         </div>
                       )}
                     </td>
@@ -681,20 +682,20 @@ export default function CredentialManager({
       <Modal
         isOpen={showForm}
         onClose={cancelForm}
-        title={editCred ? 'Edit Credential' : 'New Credential'}
+        title={editCred ? translate('Edit Credential') : translate('New Credential')}
         maxWidth={480}
         footer={
           <>
-            <Button variant="secondary" onClick={cancelForm} disabled={saving}>Cancel</Button>
-            <Button variant="primary" onClick={handleSave} disabled={saving} loading={saving}>Save Credential</Button>
+            <Button variant="secondary" onClick={cancelForm} disabled={saving}>{translate('Cancel')}</Button>
+            <Button variant="primary" onClick={handleSave} disabled={saving} loading={saving}>{translate('Save Credential')}</Button>
           </>
         }
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
-            <Input label="Name" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g. My GitHub PAT" error={formErrors.name} />
+            <Input label={translate('Name')} value={formName} onChange={(e) => setFormName(e.target.value)} placeholder={translate('e.g. My GitHub PAT')} error={formErrors.name} />
             <div>
-              <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Provider</label>
+              <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>{translate('Provider')}</label>
               <select
                 value={formProvider}
                 onChange={(e) => { setFormProvider(e.target.value); resetProviderInputs(e.target.value); }}
@@ -702,13 +703,13 @@ export default function CredentialManager({
               >
                 {providerOptions.filter((p) => !isDirectPaymentProvider(p.value)).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 {/* 마케팅 직접 결제 — 서버만 쓰고 에이전트에게는 노출할 수 없다. 고르면 아래에 발급 방법이 나온다. */}
-                <optgroup label="Marketing payments (server only)">
+                <optgroup label={translate('Marketing payments (server only)')}>
                   {providerOptions.filter((p) => isDirectPaymentProvider(p.value)).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </optgroup>
               </select>
             </div>
           </div>
-          <Input label="Description" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Optional note" />
+          <Input label={translate('Description')} value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder={translate('Optional note')} />
 
           {isDirectPaymentProvider(formProvider) && (
             <PaymentCredentialGuide provider={formProvider} defaultOpen={!editCred} />
@@ -716,32 +717,28 @@ export default function CredentialManager({
 
           {formProvider === 'google_oauth' && (
             <div>
-              <label style={fieldLabelStyle}>Import from JSON (optional)</label>
+              <label style={fieldLabelStyle}>{translate('Import from JSON (optional)')}</label>
               <div style={fieldHintStyle}>
-                Paste the client JSON downloaded from Google Cloud Console, or an authorized-user JSON that also
-                carries a refresh_token. Only client_id, client_secret and refresh_token are kept.
-              </div>
+                {translate('Paste the client JSON downloaded from Google Cloud Console, or an authorized-user JSON that also carries a refresh_token. Only client_id, client_secret and refresh_token are kept.')}</div>
               <textarea
                 value={googleJson}
                 onChange={(e) => setGoogleJson(e.target.value)}
-                placeholder='{"installed": {"client_id": "…", "client_secret": "…"}}'
+                placeholder={translate('{"installed": {"client_id": "…", "client_secret": "…"}}')}
                 rows={4}
                 style={{ ...secretInputStyle, fontSize: '12px', resize: 'vertical' }}
               />
               <div style={{ marginTop: 6 }}>
                 <Button variant="secondary" size="sm" onClick={applyGoogleJson} disabled={!googleJson.trim()}>
-                  Fill fields from JSON
-                </Button>
+                  {translate('Fill fields from JSON')}</Button>
               </div>
             </div>
           )}
 
           {isCustom && (
             <div>
-              <label style={fieldLabelStyle}>Fields</label>
+              <label style={fieldLabelStyle}>{translate('Fields')}</label>
               <div style={fieldHintStyle}>
-                Encrypted at rest (AES-256-GCM). One secret per key — e.g. CLIENT_ID and CLIENT_SECRET.
-              </div>
+                {translate('Encrypted at rest (AES-256-GCM). One secret per key — e.g. CLIENT_ID and CLIENT_SECRET.')}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {storedKeys.map((key) => {
                   const removed = removedFields.includes(key);
@@ -751,14 +748,14 @@ export default function CredentialManager({
                         {key}
                       </code>
                       {removed ? (
-                        <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>Removed on save</span>
+                        <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Removed on save')}</span>
                       ) : (
                         <input
                           type="password"
                           autoComplete="new-password"
                           value={formFields[key] || ''}
                           onChange={(e) => setFormFields((prev) => ({ ...prev, [key]: e.target.value }))}
-                          placeholder={`Stored: ${storedFieldPreviews[key] || '(empty)'} — blank keeps it`}
+                          placeholder={translate('Stored: {0} — blank keeps it', { 0: storedFieldPreviews[key] || translate('(empty)') })}
                           style={secretInputStyle}
                         />
                       )}
@@ -767,7 +764,7 @@ export default function CredentialManager({
                         size="sm"
                         onClick={() => setRemovedFields((prev) => (removed ? prev.filter((k) => k !== key) : [...prev, key]))}
                       >
-                        {removed ? 'Undo' : 'Remove'}
+                        {removed ? translate('Undo') : translate('Remove')}
                       </Button>
                     </div>
                   );
@@ -777,7 +774,7 @@ export default function CredentialManager({
                     <input
                       value={row.key}
                       onChange={(e) => setCustomRows((prev) => prev.map((r, i) => (i === index ? { ...r, key: e.target.value } : r)))}
-                      placeholder="KEY"
+                      placeholder={translate('KEY')}
                       style={secretInputStyle}
                     />
                     <input
@@ -785,7 +782,7 @@ export default function CredentialManager({
                       autoComplete="new-password"
                       value={row.value}
                       onChange={(e) => setCustomRows((prev) => prev.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)))}
-                      placeholder="Secret value"
+                      placeholder={translate('Secret value')}
                       style={secretInputStyle}
                     />
                     <Button variant="secondary" size="sm" onClick={() => setCustomRows((prev) => prev.filter((_, i) => i !== index))}>
@@ -796,8 +793,7 @@ export default function CredentialManager({
               </div>
               <div style={{ marginTop: 6 }}>
                 <Button variant="secondary" size="sm" onClick={() => setCustomRows((prev) => [...prev, { key: '', value: '' }])}>
-                  + Add field
-                </Button>
+                  {translate('+ Add field')}</Button>
               </div>
               {formErrors.fields && (
                 <div style={{ fontSize: '12px', color: tokens.colors.danger, marginTop: 6 }}>{formErrors.fields}</div>
@@ -810,17 +806,17 @@ export default function CredentialManager({
               <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>
                 {fieldDef.label}
               </label>
-              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>Encrypted at rest (AES-256-GCM)</div>
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>{translate('Encrypted at rest (AES-256-GCM)')}</div>
               {storedFieldPreviews[fieldKey] && (
                 <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 6 }}>
-                  Stored: <code style={{ color: tokens.colors.textStrong }}>{storedFieldPreviews[fieldKey]}</code>
+                  {translate('Stored:')} <code style={{ color: tokens.colors.textStrong }}>{storedFieldPreviews[fieldKey]}</code>
                 </div>
               )}
               {fieldDef.multiline ? (
                 <textarea
                   value={formFields[fieldKey] || ''}
                   onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
-                  placeholder={editCred ? 'Leave blank to keep the stored value' : fieldDef.placeholder}
+                  placeholder={editCred ? translate('Leave blank to keep the stored value') : fieldDef.placeholder}
                   rows={8}
                   style={{ width: '100%', minHeight: 140, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none', resize: 'vertical' }}
                 />
@@ -830,7 +826,7 @@ export default function CredentialManager({
                   autoComplete="new-password"
                   value={formFields[fieldKey] || ''}
                   onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
-                  placeholder={editCred ? 'Leave blank to keep the stored value' : fieldDef.placeholder}
+                  placeholder={editCred ? translate('Leave blank to keep the stored value') : fieldDef.placeholder}
                   style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none' }}
                 />
               )}
@@ -848,44 +844,39 @@ export default function CredentialManager({
                     if (e.target.checked && !formEnvPrefix) setFormEnvPrefix(DEFAULT_AGENT_ENV_PREFIX[formProvider] ?? '');
                   }}
                 />
-                Expose to agents as environment variables
-              </label>
+                {translate('Expose to agents as environment variables')}</label>
               <div style={{ ...fieldHintStyle, marginTop: 4 }}>
-                Agent runs with access to this credential receive these variables — tickets, missions, chat and
-                sessions. A session that is already running picks a change up when it next starts.
-              </div>
+                {translate('Agent runs with access to this credential receive these variables — tickets, missions, chat and sessions. A session that is already running picks a change up when it next starts.')}</div>
               {formAgentEnv && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
                   {formProvider === GIT_HOST_PROVIDER && (
                     <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
-                      Agents' git and git-lfs authenticate to{' '}
+                      {translate('Agents\' git and git-lfs authenticate to')}{' '}
                       <code style={{ color: tokens.colors.textStrong }}>
-                        {gitHostOrigin(formFields.url || '') || editCred?.agent_git_host || '(enter the host URL)'}
+                        {gitHostOrigin(formFields.url || '') || editCred?.agent_git_host || translate('(enter the host URL)')}
                       </code>
-                      {' '}with this token — so does the Runtime Host when it prepares their worktrees.
-                    </div>
+                      {' '}{translate('with this token — so does the Runtime Host when it prepares their worktrees.')}</div>
                   )}
                   {formProvider === NPM_PROVIDER && (
                     <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
-                      Agents' npm authenticates to{' '}
+                      {translate('Agents\' npm authenticates to')}{' '}
                       <code style={{ color: tokens.colors.textStrong }}>
-                        {npmRegistryUrl(formFields.registry || '') || editCred?.agent_npm_registry || '(enter a valid registry URL)'}
+                        {npmRegistryUrl(formFields.registry || '') || editCred?.agent_npm_registry || translate('(enter a valid registry URL)')}
                       </code>
-                      {' '}with this token (npm publish, private installs) — no .npmrc needed.
-                    </div>
+                      {' '}{translate('with this token (npm publish, private installs) — no .npmrc needed.')}</div>
                   )}
                   <Input
-                    label={formProvider === GIT_HOST_PROVIDER || formProvider === NPM_PROVIDER ? 'Env prefix (optional)' : 'Env prefix'}
+                    label={formProvider === GIT_HOST_PROVIDER || formProvider === NPM_PROVIDER ? translate('Env prefix (optional)') : translate('Env prefix')}
                     value={formEnvPrefix}
                     onChange={(e) => setFormEnvPrefix(e.target.value.toUpperCase())}
                     placeholder={formProvider === GIT_HOST_PROVIDER
-                      ? 'e.g. FORGEJO — also export the token as env vars; blank = git only'
+                      ? translate('e.g. FORGEJO — also export the token as env vars; blank = git only')
                       : formProvider === NPM_PROVIDER
-                      ? 'e.g. NPM — also export NPM_TOKEN for .npmrc ${NPM_TOKEN}; blank = npm auth only'
-                      : 'e.g. GOOGLE — blank uses the keys as-is'}
+                      ? translate('e.g. NPM — also export NPM_TOKEN for .npmrc ${NPM_TOKEN}; blank = npm auth only')
+                      : translate('e.g. GOOGLE — blank uses the keys as-is')}
                   />
                   <div style={{ fontSize: '12px', color: tokens.colors.textSecondary }}>
-                    Env vars:{' '}
+                    {translate('Env vars:')}{' '}
                     <code style={{ color: tokens.colors.textStrong }}>
                       {agentEnvNames(formProvider, formEnvPrefix, previewFieldKeys).join(', ') || '—'}
                     </code>
@@ -900,11 +891,11 @@ export default function CredentialManager({
       <Modal
         isOpen={!!revealTarget}
         onClose={closeReveal}
-        title="Reveal credential"
+        title={translate('Reveal credential')}
         maxWidth={520}
         footer={
           <>
-            <Button variant="secondary" onClick={closeReveal}>Close</Button>
+            <Button variant="secondary" onClick={closeReveal}>{translate('Close')}</Button>
             {Object.keys(revealedFields).length === 0 && (
               <Button
                 variant="primary"
@@ -912,8 +903,7 @@ export default function CredentialManager({
                 disabled={!revealPassword || revealing}
                 loading={revealing}
               >
-                Confirm and Reveal
-              </Button>
+                {translate('Confirm and Reveal')}</Button>
             )}
           </>
         }
@@ -921,10 +911,9 @@ export default function CredentialManager({
         {Object.keys(revealedFields).length === 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <p style={{ margin: 0, color: tokens.colors.textSecondary, fontSize: 13 }}>
-              Re-enter your password to reveal {revealTarget?.name}. The value will be hidden again after 30 seconds.
-            </p>
+              {translate('Re-enter your password to reveal')} {revealTarget?.name}{translate('. The value will be hidden again after 30 seconds.')}</p>
             <Input
-              label="Password"
+              label={translate('Password')}
               type="password"
               autoComplete="current-password"
               value={revealPassword}
@@ -933,7 +922,7 @@ export default function CredentialManager({
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>Automatically masks again after 30 seconds.</div>
+            <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>{translate('Automatically masks again after 30 seconds.')}</div>
             {Object.entries(revealedFields).map(([field, value]) => (
               <div key={field}>
                 <div style={{ color: tokens.colors.textMuted, fontSize: 11, marginBottom: 4 }}>{field}</div>
@@ -942,7 +931,7 @@ export default function CredentialManager({
                     {value}
                   </code>
                   <Button variant="secondary" size="sm" onClick={() => copySecret(field, value)}>
-                    {copiedField === field ? 'Copied' : 'Copy'}
+                    {copiedField === field ? translate('Copied') : translate('Copy')}
                   </Button>
                 </div>
               </div>
@@ -954,9 +943,9 @@ export default function CredentialManager({
       {/* Delete confirmation */}
       <ConfirmDialog
         isOpen={!!deleteTarget}
-        title="Delete credential?"
-        confirmLabel="Delete Credential"
-        message={<><strong>{deleteTarget?.name}</strong> will be permanently removed. Resources using this credential will lose access.</>}
+        title={translate('Delete credential?')}
+        confirmLabel={translate('Delete Credential')}
+        message={<><strong>{deleteTarget?.name}</strong> {translate('will be permanently removed. Resources using this credential will lose access.')}</>}
         onConfirm={handleConfirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />

@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * 수신 동의 재확인 안내 화면의 규칙(docs/marketing.md "동의 재확인 안내", 정보통신망법 §50⑧).
  *
@@ -24,29 +25,29 @@ export const CONSENT_NOTICE_STATUSES = ['queued', 'deferred', 'sending', 'sent',
 /** 무응답 처리 — 안내가 무엇을 제시했느냐로 정해진다(KISA 해석). 받는 사람에게 실제로 그렇게 안내된다. */
 export const CONSENT_NOTICE_POLICY_LABELS: Record<MarketingConsentNoticePolicy, { label: string; detail: string }> = {
   keep: {
-    label: '응답이 없으면 동의 유지',
-    detail: '안내에 철회 방법을 알립니다. 철회하지 않으면 동의가 이어지고, 원래 주기의 기한부터 다시 2년입니다. 유지 링크는 누르지 않아도 됩니다.',
+    get label() { return translate('응답이 없으면 동의 유지'); },
+    get detail() { return translate('안내에 철회 방법을 알립니다. 철회하지 않으면 동의가 이어지고, 원래 주기의 기한부터 다시 2년입니다. 유지 링크는 누르지 않아도 됩니다.'); },
   },
   lapse: {
-    label: '응답이 없으면 동의 철회',
-    detail: '안내에 유지 방법을 알립니다. 기한까지 유지 링크를 누른 사람에게만 계속 보내고, 누르지 않은 사람은 기한에 발송 대상에서 빠집니다.',
+    get label() { return translate('응답이 없으면 동의 철회'); },
+    get detail() { return translate('안내에 유지 방법을 알립니다. 기한까지 유지 링크를 누른 사람에게만 계속 보내고, 누르지 않은 사람은 기한에 발송 대상에서 빠집니다.'); },
   },
 };
 
 export const CONSENT_NOTICE_PLACEHOLDER_LABELS: Record<ConsentNoticePlaceholder, string> = {
-  name: '받는 사람 이름(없으면 주소의 @ 앞)',
-  sender: '보내는 채널의 발신자 이름',
-  consent_date: '동의한 날짜',
-  due_date: '동의 기한',
+  get name() { return translate('받는 사람 이름(없으면 주소의 @ 앞)'); },
+  get sender() { return translate('보내는 채널의 발신자 이름'); },
+  get consent_date() { return translate('동의한 날짜'); },
+  get due_date() { return translate('동의 기한'); },
 };
 
 const STATUS: Record<string, StatusView> = {
-  queued: { label: '보낼 예정', tone: 'queued' },
-  deferred: { label: '미룸', tone: 'stalled' },
-  sending: { label: '보내는 중', tone: 'live' },
-  sent: { label: '보냄', tone: 'done' },
-  failed: { label: '실패', tone: 'failed' },
-  skipped: { label: '건너뜀', tone: 'idle' },
+  queued: { get label() { return translate('보낼 예정'); }, tone: 'queued' },
+  deferred: { get label() { return translate('미룸'); }, tone: 'stalled' },
+  sending: { get label() { return translate('보내는 중'); }, tone: 'live' },
+  sent: { get label() { return translate('보냄'); }, tone: 'done' },
+  failed: { get label() { return translate('실패'); }, tone: 'failed' },
+  skipped: { get label() { return translate('건너뜀'); }, tone: 'idle' },
 };
 
 export function consentNoticeStatusView(status: string): StatusView {
@@ -100,14 +101,14 @@ export function consentNoticePayload(draft: ConsentNoticeDraft): { payload: Mark
   const leadText = draft.lead_days.trim();
   const lead = /^\d+$/.test(leadText) ? Number(leadText) : Number.NaN;
   if (!Number.isInteger(lead) || lead < CONSENT_NOTICE_LEAD_DAYS.min || lead > CONSENT_NOTICE_LEAD_DAYS.max) {
-    errors.push(`발송 시점은 기한 ${CONSENT_NOTICE_LEAD_DAYS.min}–${CONSENT_NOTICE_LEAD_DAYS.max}일 전 사이의 정수여야 합니다`);
+    errors.push(translate('발송 시점은 기한 {0}–{1}일 전 사이의 정수여야 합니다', { 0: CONSENT_NOTICE_LEAD_DAYS.min, 1: CONSENT_NOTICE_LEAD_DAYS.max }));
   }
-  if (!subject) errors.push('제목을 적어 주세요');
-  if (subject.length > CONSENT_NOTICE_SUBJECT_MAX) errors.push(`제목은 ${CONSENT_NOTICE_SUBJECT_MAX}자까지입니다`);
-  if (body.length > CONSENT_NOTICE_BODY_MAX) errors.push(`본문은 ${CONSENT_NOTICE_BODY_MAX}자까지입니다`);
+  if (!subject) errors.push(translate('제목을 적어 주세요'));
+  if (subject.length > CONSENT_NOTICE_SUBJECT_MAX) errors.push(translate('제목은 {0}자까지입니다', { 0: CONSENT_NOTICE_SUBJECT_MAX }));
+  if (body.length > CONSENT_NOTICE_BODY_MAX) errors.push(translate('본문은 {0}자까지입니다', { 0: CONSENT_NOTICE_BODY_MAX }));
   const unknown = unknownPlaceholders(`${subject}\n${body}`);
   if (unknown.length) {
-    errors.push(`모르는 자리표시자: ${unknown.join(', ')} — ${CONSENT_NOTICE_PLACEHOLDERS.map((p) => `{{${p}}}`).join(', ')} 만 쓸 수 있습니다`);
+    errors.push(translate('모르는 자리표시자: {0} — {1} 만 쓸 수 있습니다', { 0: unknown.join(', '), 1: CONSENT_NOTICE_PLACEHOLDERS.map((p) => `{{${p}}}`).join(', ') }));
   }
   return {
     payload: {
@@ -123,31 +124,31 @@ export function consentNoticePayload(draft: ConsentNoticeDraft): { payload: Mark
 
 /** 연락처 화면 위 한 줄 — 켜졌는지 · 언제 · 무응답이면 어떻게. */
 export function consentNoticeSummary(settings: MarketingConsentNoticeSettings): string {
-  if (!settings.enabled) return '꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다';
-  return `켜짐 · 기한 ${settings.lead_days}일 전 · ${CONSENT_NOTICE_POLICY_LABELS[settings.on_no_response]?.label || settings.on_no_response}`;
+  if (!settings.enabled) return translate('꺼짐 — 동의 2년이 지난 연락처는 발송에서 빠지기만 합니다');
+  return translate('켜짐 · 기한 {0}일 전 · {1}', { 0: settings.lead_days, 1: CONSENT_NOTICE_POLICY_LABELS[settings.on_no_response]?.label || settings.on_no_response });
 }
 
 /** 현황 숫자(0 이어도 보여 준다 — 무엇을 세는지가 설명이다). */
 export function consentNoticeCountItems(counts: MarketingConsentNoticeCounts): Array<{ key: string; label: string; value: string; warn?: boolean }> {
   return [
-    { key: 'in_window', label: '안내 기간에 든 브랜드 동의', value: formatCount(counts.in_window) },
-    { key: 'waiting', label: '보낼 예정 · 미룸', value: formatCount(counts.waiting) },
+    { key: 'in_window', label: translate('안내 기간에 든 브랜드 동의'), value: formatCount(counts.in_window) },
+    { key: 'waiting', label: translate('보낼 예정 · 미룸'), value: formatCount(counts.waiting) },
     {
       key: 'waiting_no_sender',
-      label: '그중 보낼 메일 채널 없음',
+      label: translate('그중 보낼 메일 채널 없음'),
       value: formatCount(counts.waiting_no_sender),
       warn: counts.waiting_no_sender > 0,
     },
-    { key: 'sent_30d', label: '최근 30일 보냄', value: formatCount(counts.sent_30d) },
-    { key: 'kept_30d', label: '최근 30일 유지 클릭', value: formatCount(counts.kept_30d) },
-    { key: 'failed_30d', label: '최근 30일 실패', value: formatCount(counts.failed_30d), warn: counts.failed_30d > 0 },
+    { key: 'sent_30d', label: translate('최근 30일 보냄'), value: formatCount(counts.sent_30d) },
+    { key: 'kept_30d', label: translate('최근 30일 유지 클릭'), value: formatCount(counts.kept_30d) },
+    { key: 'failed_30d', label: translate('최근 30일 실패'), value: formatCount(counts.failed_30d), warn: counts.failed_30d > 0 },
     {
       key: 'failed_retryable',
-      label: '실패 — 기한 전이라 다시 보낼 수 있음',
+      label: translate('실패 — 기한 전이라 다시 보낼 수 있음'),
       value: formatCount(counts.failed_retryable),
       warn: counts.failed_retryable > 0,
     },
-    { key: 'expired', label: '기한이 이미 지난 브랜드 동의', value: formatCount(counts.expired), warn: counts.expired > 0 },
+    { key: 'expired', label: translate('기한이 이미 지난 브랜드 동의'), value: formatCount(counts.expired), warn: counts.expired > 0 },
   ];
 }
 
@@ -162,14 +163,14 @@ export function contactConsentLine(contact: MarketingContact, now: Date = new Da
   let notice: string | null = null;
   if (n) {
     if (n.status === 'sent') {
-      notice = `재확인 안내 ${formatDay(n.sent_at)} 보냄 · ${n.policy === 'lapse' ? '응답 없으면 철회' : '응답 없으면 유지'}`;
-      if (n.bounce_type) notice += ' · 닿지 않음';
-      if (n.kept_at) notice += ` · ${formatDay(n.kept_at)} 유지함`;
-      else if (n.renewed_at) notice += ' · 응답 없어 이어짐';
+      notice = translate('재확인 안내 {0} 보냄 · {1}', { 0: formatDay(n.sent_at), 1: n.policy === 'lapse' ? translate('응답 없으면 철회') : translate('응답 없으면 유지') });
+      if (n.bounce_type) notice += translate(' · 닿지 않음');
+      if (n.kept_at) notice += translate(' · {0} 유지함', { 0: formatDay(n.kept_at) });
+      else if (n.renewed_at) notice += translate(' · 응답 없어 이어짐');
     } else if (n.status === 'queued' || n.status === 'deferred' || n.status === 'sending') {
-      notice = '재확인 안내 보낼 예정';
+      notice = translate('재확인 안내 보낼 예정');
     } else if (n.status === 'failed') {
-      notice = '재확인 안내 실패';
+      notice = translate('재확인 안내 실패');
     }
   }
   return { due: formatDay(contact.consent_due_at), expired, notice };

@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // ConfirmRequestPanel — 사용자 Pass/Fail 화면의 렌더링·상호작용 회귀 테스트
 // (티켓 5dbe4aa2).
 //
@@ -124,7 +125,7 @@ const cardOf = (container) => {
 };
 const cardButtons = (container) => [...cardOf(container).querySelectorAll('button')];
 const buttonNamed = (container, label) =>
-  cardButtons(container).find((b) => (b.textContent || '').trim() === label);
+  cardButtons(container).find((b) => (b.textContent || '').trim() === ui(label));
 
 /** 다음 마이크로태스크까지 흘려보내 제출 후 상태 갱신을 반영한다. */
 async function settle() {

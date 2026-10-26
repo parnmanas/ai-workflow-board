@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // Render the actual New session → session header flow. Compare every option's value,
 // name and order, and keep the two lists equal after a live ACP update.
 import assert from 'node:assert/strict';
@@ -20,8 +21,8 @@ const fixtures = {
 };
 const choices = (select) => [...select.options].map((option) => [option.value, option.textContent]);
 const modelSelect = (scope = document) => scope.querySelector('select[data-config-category="model"]');
-const button = (label) => [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === label);
-const menuItem = (label) => [...document.querySelectorAll('.awb-session-menu-item')].find((node) => node.textContent.includes(label));
+const button = (label) => [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === ui(label));
+const menuItem = (label) => [...document.querySelectorAll('.awb-session-menu-item')].find((node) => node.textContent.includes(ui(label)));
 async function settle() {
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise((done) => setTimeout(done, 0)); });
 }

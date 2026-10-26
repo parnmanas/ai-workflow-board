@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
@@ -23,6 +25,7 @@ const textareaStyle: React.CSSProperties = {
 };
 
 export default function SkillsPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const { showToast } = useToast();
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -39,7 +42,7 @@ export default function SkillsPage() {
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [body, setBody] = useState('# Skill\n');
+  const [body, setBody] = useState(translate('# Skill\n'));
   const [newVersionBody, setNewVersionBody] = useState('');
   const [assignmentRuntime, setAssignmentRuntime] = useState<Record<string, any> | null>(null);
   const [assignmentVersion, setAssignmentVersion] = useState('');
@@ -67,7 +70,7 @@ export default function SkillsPage() {
         setAssignmentVersion(fresh.versions[0]?.id || '');
       }
     } catch (error: any) {
-      showToast(error?.message || 'Failed to load governed skills', 'error');
+      showToast(error?.message || translate('Failed to load governed skills'), 'error');
     } finally {
       setLoading(false);
     }
@@ -91,11 +94,11 @@ export default function SkillsPage() {
     try {
       const detail = await api.getSkill(currentAccountId, skill.id);
       setSelected(detail);
-      setNewVersionBody(detail.versions[0]?.body || '# Skill\n');
+      setNewVersionBody(detail.versions[0]?.body || translate('# Skill\n'));
       setAssignmentVersion(detail.versions[0]?.id || '');
       setAssignmentRuntime(null);
     } catch (error: any) {
-      showToast(error?.message || 'Failed to load skill', 'error');
+      showToast(error?.message || translate('Failed to load skill'), 'error');
     }
   };
 
@@ -109,15 +112,15 @@ export default function SkillsPage() {
         description,
         body,
       });
-      showToast('Governed skill created at version 1', 'success');
+      showToast(translate('Governed skill created at version 1'), 'success');
       setCreating(false);
       setSlug('');
       setName('');
       setDescription('');
-      setBody('# Skill\n');
+      setBody(translate('# Skill\n'));
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Failed to create skill', 'error');
+      showToast(error?.message || translate('Failed to create skill'), 'error');
     } finally {
       setSaving(false);
     }
@@ -130,10 +133,10 @@ export default function SkillsPage() {
       await api.publishSkillVersion(currentAccountId, selected.id, {
         body: newVersionBody,
       });
-      showToast('New immutable skill version published', 'success');
+      showToast(translate('New immutable skill version published'), 'success');
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Failed to publish version', 'error');
+      showToast(error?.message || translate('Failed to publish version'), 'error');
     } finally {
       setSaving(false);
     }
@@ -153,37 +156,34 @@ export default function SkillsPage() {
         skill_version_id: assignmentVersion,
         target,
       });
-      showToast(assignScope === 'account' ? 'Assigned to every agent in this account' : assignScope === 'project' ? 'Assigned to the project' : 'Assigned to that runtime', 'success');
+      showToast(assignScope === 'account' ? translate('Assigned to every agent in this account') : assignScope === 'project' ? translate('Assigned to the project') : translate('Assigned to that runtime'), 'success');
       setAssignmentsNonce((n) => n + 1);
     } catch (error: any) {
-      showToast(error?.message || 'Failed to assign skill', 'error');
+      showToast(error?.message || translate('Failed to assign skill'), 'error');
     } finally {
       setSaving(false);
     }
   };
 
   if (!currentAccountId) {
-    return <div style={{ color: tokens.colors.textMuted }}>Ownership defaults are unavailable.</div>;
+    return <div style={{ color: tokens.colors.textMuted }}>{translate('Ownership defaults are unavailable.')}</div>;
   }
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <Card style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <strong style={{ color: tokens.colors.textPrimary }}>Skills agents can use</strong>
+          <strong style={{ color: tokens.colors.textPrimary }}>{translate('Skills agents can use')}</strong>
           <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>
-            Assign a version to every agent (Shared), to a project, or to one runtime. Versions are immutable; ticket runs pin them. Runtime learning creates proposals only.
-          </div>
+            {translate('Assign a version to every agent (Shared), to a project, or to one runtime. Versions are immutable; ticket runs pin them. Runtime learning creates proposals only.')}</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <Button variant={tab === 'assignments' ? 'primary' : 'secondary'} onClick={() => setTab('assignments')}>
-            Assignments
-          </Button>
+            {translate('Assignments')}</Button>
           <Button variant={tab === 'catalog' ? 'primary' : 'secondary'} onClick={() => setTab('catalog')}>
-            Catalog
-          </Button>
+            {translate('Catalog')}</Button>
           <Button variant={tab === 'proposals' ? 'primary' : 'secondary'} onClick={() => setTab('proposals')}>
-            Proposals ({proposals.filter((proposal) => proposal.status === 'pending').length})
+            {translate('Proposals (')}{proposals.filter((proposal) => proposal.status === 'pending').length})
           </Button>
         </div>
       </Card>
@@ -197,7 +197,7 @@ export default function SkillsPage() {
         />
       ) : tab === 'proposals' ? (
         <div style={{ display: 'grid', gap: 12 }}>
-          {proposals.length === 0 && <Card><span style={{ color: tokens.colors.textMuted }}>No proposals.</span></Card>}
+          {proposals.length === 0 && <Card><span style={{ color: tokens.colors.textMuted }}>{translate('No proposals.')}</span></Card>}
           {proposals.map((proposal) => (
             <SkillProposalReview
               key={proposal.id}
@@ -212,18 +212,18 @@ export default function SkillsPage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 0.8fr) minmax(420px, 2fr)', gap: 16 }}>
           <div style={{ display: 'grid', gap: 10, alignContent: 'start' }}>
             <Button onClick={() => setCreating((value) => !value)}>
-              {creating ? 'Close creator' : 'New skill'}
+              {creating ? translate('Close creator') : translate('New skill')}
             </Button>
             {creating && (
               <Card style={{ display: 'grid', gap: 10 }}>
-                <Input label="Slug" value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="review-checklist" />
-                <Input label="Name" value={name} onChange={(event) => setName(event.target.value)} />
-                <Input label="Description" value={description} onChange={(event) => setDescription(event.target.value)} />
+                <Input label={translate('Slug')} value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="review-checklist" />
+                <Input label={translate('Name')} value={name} onChange={(event) => setName(event.target.value)} />
+                <Input label={translate('Description')} value={description} onChange={(event) => setDescription(event.target.value)} />
                 <textarea value={body} onChange={(event) => setBody(event.target.value)} rows={8} style={textareaStyle} />
-                <Button onClick={create} loading={saving}>Create version 1</Button>
+                <Button onClick={create} loading={saving}>{translate('Create version 1')}</Button>
               </Card>
             )}
-            {loading && <div style={{ color: tokens.colors.textMuted }}>Loading…</div>}
+            {loading && <div style={{ color: tokens.colors.textMuted }}>{translate('Loading…')}</div>}
             {skills.map((skill) => (
               <Card key={skill.id} onClick={() => void openSkill(skill)} selected={selected?.id === skill.id}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
@@ -235,14 +235,14 @@ export default function SkillsPage() {
                   {/* Scope is the first thing to know about a row: a global
                       skill is read-only here and is edited by forking. */}
                   <Badge variant={skill.account_id ? 'info' : 'neutral'} size="sm">
-                    {skill.account_id ? 'account' : 'global'}
+                    {skill.account_id ? translate('account') : translate('global')}
                   </Badge>
                   {skill.source_kind && skill.source_kind !== 'local' && (
                     <Badge variant="neutral" size="sm">{skill.source_kind}</Badge>
                   )}
                   {skill.shadowed && (
-                    <span title="An account skill with this slug overrides it">
-                      <Badge variant="warning" size="sm">shadowed</Badge>
+                    <span title={translate('An account skill with this slug overrides it')}>
+                      <Badge variant="warning" size="sm">{translate('shadowed')}</Badge>
                     </span>
                   )}
                 </div>
@@ -268,47 +268,44 @@ export default function SkillsPage() {
                           setForking(true);
                           try {
                             await api.forkSkill(currentAccountId, selected.id, selected.versions[0]?.id);
-                            showToast('Forked into this account — it now shadows the global skill', 'success');
+                            showToast(translate('Forked into this account — it now shadows the global skill'), 'success');
                             setSelected(null);
                             await load();
                           } catch (error: any) {
-                            showToast(error?.message || 'Fork failed', 'error');
+                            showToast(error?.message || translate('Fork failed'), 'error');
                           } finally {
                             setForking(false);
                           }
                         }}
                       >
-                        Fork into account
-                      </Button>
+                        {translate('Fork into account')}</Button>
                     ) : selected.status === 'active' && (
                       <Button
                         variant="danger"
                         size="sm"
                         onClick={async () => {
                           await api.quarantineSkill(currentAccountId, selected.id);
-                          showToast('Skill quarantined for future snapshots', 'success');
+                          showToast(translate('Skill quarantined for future snapshots'), 'success');
                           await load();
                         }}
                       >
-                        Quarantine
-                      </Button>
+                        {translate('Quarantine')}</Button>
                     )}
                   </div>
                 </div>
                 {isGlobal && (
                   <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
-                    Global skill{selected.source_kind && selected.source_kind !== 'local'
-                      ? ` · managed by the ${selected.source_kind === 'builtin' ? 'built-in pack' : 'skill tap'} it came from`
+                    {translate('Global skill')}{selected.source_kind && selected.source_kind !== 'local'
+                      ? translate(' · managed by the {0} it came from', { 0: selected.source_kind === 'builtin' ? translate('built-in pack') : translate('skill tap') })
                       : ''}
                     {selected.source_author ? ` · ${selected.source_author}` : ''}
                     {selected.source_license ? ` · ${selected.source_license}` : ''}
-                    . Read-only here — fork it to diverge, or manage it in Admin → Skill registry.
-                  </div>
+                    {translate('. Read-only here — fork it to diverge, or manage it in Admin → Skill registry.')}</div>
                 )}
-                <div style={{ color: tokens.colors.textMuted }}>{selected.description || 'No description'}</div>
+                <div style={{ color: tokens.colors.textMuted }}>{selected.description || translate('No description')}</div>
                 {selected.versions.map((version) => (
                   <div key={version.id} style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
-                    <strong style={{ color: tokens.colors.textSecondary }}>v{version.version}</strong>
+                    <strong style={{ color: tokens.colors.textSecondary }}>{translate('v')}{version.version}</strong>
                     <div style={{
                       color: tokens.colors.textMuted,
                       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
@@ -322,18 +319,18 @@ export default function SkillsPage() {
               </Card>
 
               <Card style={{ display: 'grid', gap: 10 }}>
-                <strong style={{ color: tokens.colors.textPrimary }}>Publish a new version</strong>
+                <strong style={{ color: tokens.colors.textPrimary }}>{translate('Publish a new version')}</strong>
                 <textarea value={newVersionBody} onChange={(event) => setNewVersionBody(event.target.value)} rows={10} style={textareaStyle} />
-                <Button onClick={publish} loading={saving}>Publish immutable version</Button>
+                <Button onClick={publish} loading={saving}>{translate('Publish immutable version')}</Button>
               </Card>
 
               <Card style={{ display: 'grid', gap: 10 }}>
-                <strong style={{ color: tokens.colors.textPrimary }}>Assign</strong>
+                <strong style={{ color: tokens.colors.textPrimary }}>{translate('Assign')}</strong>
                 <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 13, color: tokens.colors.textPrimary }}>
                   {([
-                    ['account', 'Shared — every agent'],
-                    ['project', 'A project'],
-                    ['runtime', 'One runtime'],
+                    ['account', translate('Shared — every agent')],
+                    ['project', translate('A project')],
+                    ['runtime', translate('One runtime')],
                   ] as Array<[AssignScope, string]>).map(([value, label]) => (
                     <label key={value} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
                       <input type="radio" name="skill-assign-scope" checked={assignScope === value} onChange={() => setAssignScope(value)} />
@@ -342,8 +339,8 @@ export default function SkillsPage() {
                   ))}
                 </div>
                 {assignScope === 'project' && (
-                  <select value={assignProject} onChange={(event) => setAssignProject(event.target.value)} style={textareaStyle} aria-label="Project">
-                    <option value="">Choose a project…</option>
+                  <select value={assignProject} onChange={(event) => setAssignProject(event.target.value)} style={textareaStyle} aria-label={translate('Project')}>
+                    <option value="">{translate('Choose a project…')}</option>
                     {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
                   </select>
                 )}
@@ -355,7 +352,7 @@ export default function SkillsPage() {
                 )}
                 <select value={assignmentVersion} onChange={(event) => setAssignmentVersion(event.target.value)} style={textareaStyle}>
                   {selected.versions.map((version) => (
-                    <option key={version.id} value={version.id}>v{version.version} · {version.digest.slice(0, 12)}</option>
+                    <option key={version.id} value={version.id}>{translate('v')}{version.version} · {version.digest.slice(0, 12)}</option>
                   ))}
                 </select>
                 <Button
@@ -363,12 +360,11 @@ export default function SkillsPage() {
                   loading={saving}
                   disabled={(assignScope === 'project' && !assignProject) || (assignScope === 'runtime' && !assignmentRuntime)}
                 >
-                  Assign this version
-                </Button>
+                  {translate('Assign this version')}</Button>
               </Card>
             </div>
           ) : (
-            <Card><span style={{ color: tokens.colors.textMuted }}>Choose a skill to inspect immutable versions and assignments.</span></Card>
+            <Card><span style={{ color: tokens.colors.textMuted }}>{translate('Choose a skill to inspect immutable versions and assignments.')}</span></Card>
           )}
         </div>
       )}

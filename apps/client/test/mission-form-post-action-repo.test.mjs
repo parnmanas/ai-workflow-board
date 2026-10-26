@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // Mission 생성/편집 모달 — post_actions / projects 라운드트립 회귀 테스트
 // (리뷰 지적 반영, 티켓 2dc3c62f). 반려 사유: API 타입에는 post_actions/repo_ref가
 // 있는데도 생성 모달 상태·submit이 이를 다루지 않았고 별도 편집 UI도 없었다.
@@ -174,7 +175,7 @@ test('기존 미션 편집 — post_actions/projects가 채워진 미션은 Adva
 
   assert.match(container.textContent, /Post-completion actions/, 'Advanced 섹션이 자동으로 펼쳐져 post-action 편집기가 보인다');
   assert.equal(
-    Boolean(container.querySelector('select[aria-label="프로젝트 선택"]')),
+    Boolean(container.querySelector(`select[aria-label="${ui("프로젝트 선택")}"]`)),
     false,
     '구 repo_ref 피커(RepoRefPicker)는 더 이상 렌더링되지 않는다',
   );

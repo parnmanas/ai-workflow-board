@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 미션 검증 증거(스크린샷·동영상) 표시 회귀 테스트 (운영 요청 2026-09-25).
 //
 // 계약:
@@ -178,7 +179,7 @@ test('바이트는 왔는데 디코드가 안 되면 "깨진 파일"로 말한�
     view.container.querySelector('[data-testid="evidence-thumb-broken"]'),
     '디코드 실패는 깨진 파일이라고 말해야 한다',
   );
-  assert.match(view.container.textContent, /깨진 파일/);
+  assert.match(view.container.textContent, uiPattern("⚠ 깨진 파일"));
 });
 
 test('잘린 파일은 남은 부분을 보여주되 "일부만" 이라고 말한다', async (t) => {
@@ -218,7 +219,7 @@ test('증거가 없으면 어떻게 올리는지 안내한다', async (t) => {
   await settle();
   t.after(() => { view.unmount(); dom.cleanup(); });
   assert.ok(view.container.querySelector('[data-testid="evidence-empty"]'));
-  assert.match(view.container.textContent, /step 방에/);
+  assert.match(view.container.textContent, uiPattern("아직 올라온 검증 증거가 없습니다. 담당 agent 는 work order 의 안내대로 자기 step 방에 스크린샷이나 짧은 녹화를 올리고, 사람은 미션 대화에 첨부할 수 있습니다. 이미지와 동영상이 여기에 step 별로 모입니다."));
 });
 
 // ── step 세션의 첨부 ────────────────────────────────────────────────────────

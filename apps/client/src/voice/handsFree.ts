@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 /**
  * 대화 모드(docs/voice-operator.md "대화 모드") — 마이크를 켜 두면 말이 시작되고 끝나는 것을
  * 브라우저가 스스로 알아챈다. 버튼으로 녹음을 끊지 않아도, 말을 멈추면(약 1초) 그 발화가 통째로
@@ -97,14 +98,14 @@ export function ensureAudioRunning(context: AudioContext, signal?: AbortSignal, 
       signal?.removeEventListener('abort', aborted);
     };
     const finish = (error?: unknown) => { cleanup(); error ? reject(error) : resolve(); };
-    const aborted = () => finish(new DOMException('마이크 시작이 취소됐습니다', 'AbortError'));
+    const aborted = () => finish(new DOMException(translate('마이크 시작이 취소됐습니다'), 'AbortError'));
     const changed = () => {
       if (context.state === 'running') finish();
-      else if (context.state === 'closed') finish(new Error('오디오 입력이 닫혔습니다'));
+      else if (context.state === 'closed') finish(new Error(translate('오디오 입력이 닫혔습니다')));
     };
     const resume = () => { try { void context.resume().then(changed, finish); } catch (error) { finish(error); } };
     if (signal?.aborted) { aborted(); return; }
-    if (context.state === 'closed') { finish(new Error('오디오 입력이 닫혔습니다')); return; }
+    if (context.state === 'closed') { finish(new Error(translate('오디오 입력이 닫혔습니다'))); return; }
     const isRunning = () => context.state === 'running';
     if (isRunning()) { resolve(); return; }
     context.addEventListener('statechange', changed);

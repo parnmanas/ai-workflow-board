@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 음성 알림의 화면 쪽 규칙 회귀 테스트(docs/voice-operator.md "음성 알림").
 // 실행: node --import tsx --test apps/client/test/voice-announcements.test.mjs
 //
@@ -269,7 +270,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   api.transcribeVoice = async () => ({ text: '', ignored: 'speaker_mismatch' });
   act(speech); await flush();
   assert.equal(wakeStore.state.listener, 'error');
-  assert.match(wakeStore.state.error, /등록한 내 목소리/);
+  assert.match(wakeStore.state.error, uiPattern("등록한 내 목소리와 일치하지 않아 제외했습니다. VOICE에서 목소리 테스트나 추가 샘플 등록을 해 주세요."));
   api.transcribeVoice = async () => ({ text: '커피' });
   act(speech); await flush();
   assert.equal(wakeStore.state.mode, 'sleeping', 'unrelated speech does not address a stale notification');

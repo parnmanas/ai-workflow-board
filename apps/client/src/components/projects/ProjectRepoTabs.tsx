@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import type { Project, RepoBranch, RepoRefs } from '../../types';
@@ -22,6 +24,7 @@ interface ProjectRepoTabsProps {
 }
 
 export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepoTabsProps) {
+  useLocale();
   // Branches 탭 상태 — 마운트 시 1회 + 새로고침.
   const [branchLoading, setBranchLoading] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
@@ -47,7 +50,7 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
       setBranches(result?.branches || []);
       setRemoteDefault(result?.default_branch || '');
     } catch (err: any) {
-      setBranchError(err?.message || '브랜치 목록을 불러오지 못했습니다.');
+      setBranchError(err?.message || translate('브랜치 목록을 불러오지 못했습니다.'));
       setBranches(null);
     } finally {
       setBranchLoading(false);
@@ -68,7 +71,7 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
       // 기본 선택 = 원격 HEAD, 없으면 첫 브랜치, 그것도 없으면 빈 값(서버가 HEAD).
       setSelectedRef((prev) => prev || result.head || result.branches[0] || '');
     } catch (err: any) {
-      setRefsError(err?.message || 'ref 목록을 불러오지 못했습니다.');
+      setRefsError(err?.message || translate('ref 목록을 불러오지 못했습니다.'));
       setRefsErrorSshOnly(err?.code === 'ssh_unsupported');
       setRefs(null);
     } finally {
@@ -92,54 +95,49 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
       if (ad !== bd) return ad - bd;
       return a.name.localeCompare(b.name);
     });
-  }, [branches, branchQuery, defaultBranch]);
+  }, [branches, branchQuery, defaultBranch, getLocale()]);
 
   if (tab === 'branches') {
     return (
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
           <div style={{ flex: 1 }}>
-            <Input value={branchQuery} onChange={(e) => setBranchQuery(e.target.value)} placeholder="브랜치 검색…" />
+            <Input value={branchQuery} onChange={(e) => setBranchQuery(e.target.value)} placeholder={translate('브랜치 검색…')} />
           </div>
           <Button variant="secondary" size="md" onClick={() => void loadBranches()} disabled={branchLoading} loading={branchLoading}>
-            새로고침
-          </Button>
+            {translate('새로고침')}</Button>
         </div>
 
         {branchLoading && (
-          <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>브랜치 불러오는 중…</div>
+          <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>{translate('브랜치 불러오는 중…')}</div>
         )}
 
         {!branchLoading && branchError && (
           <div data-testid="project-branch-error">
-            <ErrorBox message={`브랜치를 불러오지 못했습니다: ${branchError}`} />
+            <ErrorBox message={translate('브랜치를 불러오지 못했습니다: {0}', { 0: branchError })} />
             {/^(ssh:\/\/|git@)/i.test(project.repo_url || '') && (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, lineHeight: 1.5 }}>
-                SSH 전용 URL은 서버 측 SSH 키가 필요합니다. HTTPS URL + credential을 사용해 주세요.
-              </div>
+                {translate('SSH 전용 URL은 서버 측 SSH 키가 필요합니다. HTTPS URL + credential을 사용해 주세요.')}</div>
             )}
           </div>
         )}
 
         {!branchLoading && !branchError && branches && branches.length === 0 && (
           <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: '16px 4px', lineHeight: 1.5 }}>
-            원격에서 브랜치를 찾지 못했습니다. 빈 저장소이거나, SSH 전용 URL 이라 인증 키가 필요할 수 있습니다.
-          </div>
+            {translate('원격에서 브랜치를 찾지 못했습니다. 빈 저장소이거나, SSH 전용 URL 이라 인증 키가 필요할 수 있습니다.')}</div>
         )}
 
         {!branchLoading && !branchError && branches && branches.length > 0 && (
           <div>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
-              {filteredBranches.length} / {branches.length} branches
-            </div>
+              {filteredBranches.length} / {branches.length} {translate('branches')}</div>
             <div
               data-testid="project-branch-list"
               style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden' }}
             >
               {filteredBranches.length === 0 ? (
                 <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: 12 }}>
-                  "{branchQuery}" 과 일치하는 브랜치가 없습니다.
-                </div>
+                  "{branchQuery}{translate('" 과 일치하는 브랜치가 없습니다.')}</div>
               ) : (
                 filteredBranches.map((b, idx) => {
                   const isDefault = b.name === defaultBranch;
@@ -170,7 +168,7 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
                       >
                         {b.name}
                       </span>
-                      {isDefault && <Badge variant="info">default</Badge>}
+                      {isDefault && <Badge variant="info">{translate('default')}</Badge>}
                       <span style={{ fontSize: 11, fontFamily: MONO, color: tokens.colors.textMuted, flexShrink: 0 }} title={b.sha}>
                         {(b.sha || '').slice(0, 8)}
                       </span>
@@ -190,8 +188,7 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
   if (refsLoading && !refs) {
     return (
       <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>
-        저장소 캐시 준비 중… (최초 1회 클론이 필요해 시간이 걸릴 수 있습니다)
-      </div>
+        {translate('저장소 캐시 준비 중… (최초 1회 클론이 필요해 시간이 걸릴 수 있습니다)')}</div>
     );
   }
   if (refsError) {
@@ -200,14 +197,11 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
         <ErrorBox message={refsError} />
         {refsErrorSshOnly && (
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, lineHeight: 1.5 }}>
-            SSH 전용 URL 은 서버에 인증 키가 없어 지원되지 않습니다. HTTPS URL + credential 로
-            연결된 프로젝트만 히스토리/파일 조회가 가능합니다.
-          </div>
+            {translate('SSH 전용 URL 은 서버에 인증 키가 없어 지원되지 않습니다. HTTPS URL + credential 로 연결된 프로젝트만 히스토리/파일 조회가 가능합니다.')}</div>
         )}
         <div style={{ marginTop: 10 }}>
           <Button variant="secondary" size="sm" onClick={() => void loadRefs(true)} loading={refsLoading}>
-            다시 시도
-          </Button>
+            {translate('다시 시도')}</Button>
         </div>
       </div>
     );
@@ -218,7 +212,7 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <select
           data-testid="repo-ref-select"
-          aria-label="ref 선택"
+          aria-label={translate('ref 선택')}
           value={selectedRef}
           onChange={(e) => setSelectedRef(e.target.value)}
           disabled={refsLoading || !refs}
@@ -229,22 +223,21 @@ export default function ProjectRepoTabs({ project, accountId, tab }: ProjectRepo
           }}
         >
           {refs && refs.branches.length > 0 && (
-            <optgroup label="Branches">
+            <optgroup label={translate('Branches')}>
               {refs.branches.map((b) => <option key={`b/${b}`} value={b}>{b}</option>)}
             </optgroup>
           )}
           {refs && refs.tags.length > 0 && (
-            <optgroup label="Tags">
+            <optgroup label={translate('Tags')}>
               {refs.tags.map((t) => <option key={`t/${t}`} value={t}>{t}</option>)}
             </optgroup>
           )}
           {(!refs || (refs.branches.length === 0 && refs.tags.length === 0)) && (
-            <option value="">{refsLoading ? '불러오는 중…' : 'HEAD'}</option>
+            <option value="">{refsLoading ? translate('불러오는 중…') : translate('HEAD')}</option>
           )}
         </select>
         <Button variant="secondary" size="md" onClick={() => void loadRefs(true)} disabled={refsLoading} loading={refsLoading}>
-          새로고침
-        </Button>
+          {translate('새로고침')}</Button>
       </div>
       {tab === 'history'
         ? <RepoHistoryTab projectId={project.id} accountId={accountId} refKey={selectedRef} />

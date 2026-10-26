@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import type { ActivityLog } from '../../types';
 import { api } from '../../api';
@@ -6,36 +9,36 @@ import { isTicketStatus, ticketStatusLabel } from '../../tickets/status';
 import { wrapText } from './panelStyles';
 
 const ACTION_LABELS: Record<string, string> = {
-  created: '만듦',
-  updated: '수정',
-  moved: '상태 변경',
-  status_changed: '상태 변경',
-  archived: '보관',
-  unarchived: '보관 해제',
-  deleted: '삭제',
-  trigger_emitted: '담당자에게 보냄',
-  dispatch_failed: '보내기 실패',
-  dispatch_deferred: '보내기 보류',
-  dispatch_ack_accepted: '담당자가 받음',
-  dispatch_ack_rejected: '담당자가 거절',
-  duplicate_link_corrected: '중복 연결 해제',
+  get created() { return translate('만듦'); },
+  get updated() { return translate('수정'); },
+  get moved() { return translate('상태 변경'); },
+  get status_changed() { return translate('상태 변경'); },
+  get archived() { return translate('보관'); },
+  get unarchived() { return translate('보관 해제'); },
+  get deleted() { return translate('삭제'); },
+  get trigger_emitted() { return translate('담당자에게 보냄'); },
+  get dispatch_failed() { return translate('보내기 실패'); },
+  get dispatch_deferred() { return translate('보내기 보류'); },
+  get dispatch_ack_accepted() { return translate('담당자가 받음'); },
+  get dispatch_ack_rejected() { return translate('담당자가 거절'); },
+  get duplicate_link_corrected() { return translate('중복 연결 해제'); },
 };
 
 const FIELD_LABELS: Record<string, string> = {
-  title: '제목',
-  description: '설명',
-  priority: '우선순위',
-  tags: '태그',
-  assignee: '담당',
-  project_id: '프로젝트',
-  base_branch: '기준 브랜치',
-  next_ticket_id: '다음 티켓',
-  on_done_action_ids: '완료 시 실행',
-  pending_user_action: '보류',
-  pending_reason: '보류 사유',
-  prerequisite_added: '선행 티켓 추가',
-  prerequisite_removed: '선행 티켓 제거',
-  parent_id: '상위 티켓',
+  get title() { return translate('제목'); },
+  get description() { return translate('설명'); },
+  get priority() { return translate('우선순위'); },
+  get tags() { return translate('태그'); },
+  get assignee() { return translate('담당'); },
+  get project_id() { return translate('프로젝트'); },
+  get base_branch() { return translate('기준 브랜치'); },
+  get next_ticket_id() { return translate('다음 티켓'); },
+  get on_done_action_ids() { return translate('완료 시 실행'); },
+  get pending_user_action() { return translate('보류'); },
+  get pending_reason() { return translate('보류 사유'); },
+  get prerequisite_added() { return translate('선행 티켓 추가'); },
+  get prerequisite_removed() { return translate('선행 티켓 제거'); },
+  get parent_id() { return translate('상위 티켓'); },
 };
 
 const valueText = (value: string | null | undefined) => {
@@ -46,7 +49,7 @@ const valueText = (value: string | null | undefined) => {
 function describe(log: ActivityLog): string {
   if (log.entity_type === 'comment') {
     const text = valueText(log.new_value);
-    return `코멘트${log.action === 'created' ? '' : ` ${ACTION_LABELS[log.action] || log.action}`}${text ? ` · ${text}` : ''}`;
+    return translate('코멘트{0}{1}', { 0: log.action === 'created' ? '' : ` ${ACTION_LABELS[log.action] || log.action}`, 1: text ? ` · ${text}` : '' });
   }
   const label = ACTION_LABELS[log.action] || log.action.replace(/_/g, ' ');
   const fieldName = log.field_changed && log.field_changed !== 'status'
@@ -60,6 +63,7 @@ function describe(log: ActivityLog): string {
 
 /** The ticket's audit trail, newest first — who changed what, and what was sent to the assignee. */
 export default function TicketActivityLog({ ticketId, refreshKey }: { ticketId: string; refreshKey?: string }) {
+  useLocale();
   const [rows, setRows] = useState<ActivityLog[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,13 +72,13 @@ export default function TicketActivityLog({ ticketId, refreshKey }: { ticketId: 
     setError(null);
     api.getTicketActivity(ticketId)
       .then(list => { if (!cancelled) setRows(list); })
-      .catch((e: any) => { if (!cancelled) setError(e?.message || '기록을 불러오지 못했습니다'); });
+      .catch((e: any) => { if (!cancelled) setError(e?.message || translate('기록을 불러오지 못했습니다')); });
     return () => { cancelled = true; };
   }, [ticketId, refreshKey]);
 
   if (error) return <div role="alert" style={{ fontSize: '12px', color: tokens.colors.dangerLight }}>{error}</div>;
-  if (!rows) return <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>불러오는 중…</div>;
-  if (rows.length === 0) return <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>기록이 없습니다.</div>;
+  if (!rows) return <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>{translate('불러오는 중…')}</div>;
+  if (rows.length === 0) return <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>{translate('기록이 없습니다.')}</div>;
 
   return (
     <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -84,7 +88,7 @@ export default function TicketActivityLog({ ticketId, refreshKey }: { ticketId: 
           padding: '6px 2px', borderBottom: `1px solid ${tokens.colors.border}`, fontSize: '12px',
         }}>
           <time style={{ color: tokens.colors.textMuted, fontSize: '11px', flexShrink: 0 }}>
-            {new Date(log.created_at).toLocaleString()}
+            {new Date(log.created_at).toLocaleString(getLocaleTag())}
           </time>
           {log.actor_name && <span style={{ color: tokens.colors.textSecondary, fontWeight: 600, ...wrapText }}>{log.actor_name}</span>}
           <span style={{ color: tokens.colors.textStrong, flex: '1 1 200px', ...wrapText }}>{describe(log)}</span>

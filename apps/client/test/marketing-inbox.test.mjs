@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
 // 승인함(inbox) 모으기와 지출 승인 상태(docs/marketing.md) — buildInbox / spendApprovalState.
 //
 // 고정하는 계약:

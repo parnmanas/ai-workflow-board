@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Modal } from './Modal';
 import { tokens } from '../../tokens';
@@ -7,21 +10,21 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import type { UserNotificationChannel } from '../../types';
 
 const PROVIDER_LABELS: Record<string, string> = {
-  discord: 'Discord',
-  slack: 'Slack',
-  telegram: 'Telegram',
+  get discord() { return translate('Discord'); },
+  get slack() { return translate('Slack'); },
+  get telegram() { return translate('Telegram'); },
 };
 
 const PROVIDER_TARGET_HINT: Record<string, string> = {
-  discord: 'Recipient Discord user ID (snowflake) — bot must share a guild with the user, or a Discord channel ID.',
-  slack: 'Slack member ID (e.g. U12345) for DMs, or a channel ID (C…) the bot has access to.',
-  telegram: 'Telegram chat ID — usually the user\'s id after they /start the bot.',
+  get discord() { return translate('Recipient Discord user ID (snowflake) — bot must share a guild with the user, or a Discord channel ID.'); },
+  get slack() { return translate('Slack member ID (e.g. U12345) for DMs, or a channel ID (C…) the bot has access to.'); },
+  get telegram() { return translate('Telegram chat ID — usually the user\'s id after they /start the bot.'); },
 };
 
 const PROVIDER_TOKEN_HINT: Record<string, string> = {
-  discord: 'Discord bot token (starts with MTk… etc.)',
-  slack: 'Slack bot user OAuth token (xoxb-…)',
-  telegram: 'Telegram bot token (<bot_id>:<secret>)',
+  get discord() { return translate('Discord bot token (starts with MTk… etc.)'); },
+  get slack() { return translate('Slack bot user OAuth token (xoxb-…)'); },
+  get telegram() { return translate('Telegram bot token (<bot_id>:<secret>)'); },
 };
 
 interface UserChannelsModalProps {
@@ -36,6 +39,7 @@ interface UserChannelsModalProps {
  * configured provider.
  */
 export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
+  useLocale();
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [items, setItems] = useState<UserNotificationChannel[]>([]);
@@ -51,7 +55,7 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
       setItems(list);
       setProviders(provs);
     } catch (err: any) {
-      showToast(err.message || 'Failed to load channels', 'error');
+      showToast(err.message || translate('Failed to load channels'), 'error');
     } finally {
       setLoading(false);
     }
@@ -84,7 +88,7 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
         // server-side `existing.has_credentials` continues to apply.
         if (state.bot_token) patch.credentials = credentials;
         await api.updateMyChannel(existing.id, patch);
-        showToast('Channel updated', 'success');
+        showToast(translate('Channel updated'), 'success');
       } else {
         await api.createMyChannel({
           provider: state.provider,
@@ -97,28 +101,28 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
           notify_ticket: state.notify_ticket,
           notify_mail: state.notify_mail,
         });
-        showToast('Channel created', 'success');
+        showToast(translate('Channel created'), 'success');
       }
       setAdding(false);
       setEditing(null);
       await refresh();
     } catch (err: any) {
-      showToast(err.message || 'Failed to save channel', 'error');
+      showToast(err.message || translate('Failed to save channel'), 'error');
     }
   };
 
   const handleDelete = async (id: string) => {
     const ok = await confirm({
-      title: 'Delete notification channel',
-      message: 'Delete this notification channel? This cannot be undone.',
+      title: translate('Delete notification channel'),
+      message: translate('Delete this notification channel? This cannot be undone.'),
     });
     if (!ok) return;
     try {
       await api.deleteMyChannel(id);
-      showToast('Channel deleted', 'success');
+      showToast(translate('Channel deleted'), 'success');
       await refresh();
     } catch (err: any) {
-      showToast(err.message || 'Failed to delete channel', 'error');
+      showToast(err.message || translate('Failed to delete channel'), 'error');
     }
   };
 
@@ -126,24 +130,21 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
     try {
       const res = await api.testMyChannel(id);
       if (res.success) {
-        showToast('Test message sent', 'success');
+        showToast(translate('Test message sent'), 'success');
         await refresh();
       } else {
-        showToast(res.error || 'Test failed', 'error');
+        showToast(res.error || translate('Test failed'), 'error');
       }
     } catch (err: any) {
-      showToast(err.message || 'Test failed', 'error');
+      showToast(err.message || translate('Test failed'), 'error');
     }
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="My notification channels" maxWidth={640}>
+    <Modal isOpen={isOpen} onClose={onClose} title={translate('My notification channels')} maxWidth={640}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.spacing.md }}>
         <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-          AWB sends mention pings, chat-room messages, and ticket activity to the
-          channels you bind here. Bot tokens are encrypted at rest and never
-          echoed back over the API.
-        </div>
+          {translate('AWB sends mention pings, chat-room messages, and ticket activity to the channels you bind here. Bot tokens are encrypted at rest and never echoed back over the API.')}</div>
 
         {(adding || editing) ? (
           <ChannelForm
@@ -159,11 +160,10 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
                 onClick={() => setAdding(true)}
                 style={primaryButton}
               >
-                + Add channel
-              </button>
+                {translate('+ Add channel')}</button>
             </div>
             {loading ? (
-              <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
+              <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
             ) : items.length === 0 ? (
               <div
                 style={{
@@ -175,9 +175,7 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
                   borderRadius: tokens.radii.md,
                 }}
               >
-                No channels yet. Add Discord / Slack / Telegram targets to start
-                receiving notifications outside AWB.
-              </div>
+                {translate('No channels yet. Add Discord / Slack / Telegram targets to start receiving notifications outside AWB.')}</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {items.map((ch) => (
@@ -221,7 +219,8 @@ function ChannelForm({
   onSubmit: (state: ChannelFormState) => void | Promise<void>;
   onCancel: () => void;
 }) {
-  const defaultProvider = useMemo(() => initial?.provider || providers[0]?.id || 'discord', [initial, providers]);
+  useLocale();
+  const defaultProvider = useMemo(() => initial?.provider || providers[0]?.id || 'discord', [initial, providers, getLocale()]);
   const [state, setState] = useState<ChannelFormState>({
     provider: defaultProvider,
     target: initial?.target || '',
@@ -236,8 +235,8 @@ function ChannelForm({
 
   const isEdit = !!initial;
   const tokenPlaceholder = isEdit && initial?.has_credentials
-    ? 'Leave blank to keep existing token'
-    : PROVIDER_TOKEN_HINT[state.provider] || 'Bot token';
+    ? translate('Leave blank to keep existing token')
+    : PROVIDER_TOKEN_HINT[state.provider] || translate('Bot token');
 
   return (
     <form
@@ -245,11 +244,11 @@ function ChannelForm({
       style={{ display: 'flex', flexDirection: 'column', gap: tokens.spacing.sm }}
     >
       <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textPrimary }}>
-        {isEdit ? `Edit ${PROVIDER_LABELS[initial!.provider] || initial!.provider} channel` : 'New channel'}
+        {isEdit ? translate('Edit {0} channel', { 0: PROVIDER_LABELS[initial!.provider] || initial!.provider }) : translate('New channel')}
       </div>
 
       {!isEdit && (
-        <Field label="Provider">
+        <Field label={translate('Provider')}>
           <select
             value={state.provider}
             onChange={(e) => setState({ ...state, provider: e.target.value })}
@@ -262,28 +261,28 @@ function ChannelForm({
         </Field>
       )}
 
-      <Field label="Label" hint="Friendly name shown in this list">
+      <Field label={translate('Label')} hint={translate('Friendly name shown in this list')}>
         <input
           type="text"
           value={state.label}
           onChange={(e) => setState({ ...state, label: e.target.value })}
-          placeholder={`My ${PROVIDER_LABELS[state.provider] || state.provider}`}
+          placeholder={translate('My {0}', { 0: PROVIDER_LABELS[state.provider] || state.provider })}
           style={inputStyle}
         />
       </Field>
 
-      <Field label="Target" hint={PROVIDER_TARGET_HINT[state.provider] || ''}>
+      <Field label={translate('Target')} hint={PROVIDER_TARGET_HINT[state.provider] || ''}>
         <input
           type="text"
           required
           value={state.target}
           onChange={(e) => setState({ ...state, target: e.target.value })}
-          placeholder="e.g. 123456789012345678"
+          placeholder={translate('e.g. 123456789012345678')}
           style={inputStyle}
         />
       </Field>
 
-      <Field label="Bot token" hint={tokenPlaceholder}>
+      <Field label={translate('Bot token')} hint={tokenPlaceholder}>
         <input
           type="password"
           autoComplete="new-password"
@@ -296,20 +295,19 @@ function ChannelForm({
 
       <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: tokens.spacing.sm }}>
         <div style={{ fontSize: 11, color: tokens.colors.borderStrong, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4 }}>
-          Notify on
-        </div>
-        <ToggleRow label="Mentions of me" checked={!!state.notify_mention} onChange={(v) => setState({ ...state, notify_mention: v ? 1 : 0 })} />
-        <ToggleRow label="Chat messages in my rooms" checked={!!state.notify_chat} onChange={(v) => setState({ ...state, notify_chat: v ? 1 : 0 })} />
-        <ToggleRow label="Ticket activity (assigned/reported/reviewed)" checked={!!state.notify_ticket} onChange={(v) => setState({ ...state, notify_ticket: v ? 1 : 0 })} />
-        <ToggleRow label="메일 수신 · 답장 확인" checked={!!state.notify_mail} onChange={(v) => setState({ ...state, notify_mail: v ? 1 : 0 })} />
+          {translate('Notify on')}</div>
+        <ToggleRow label={translate('Mentions of me')} checked={!!state.notify_mention} onChange={(v) => setState({ ...state, notify_mention: v ? 1 : 0 })} />
+        <ToggleRow label={translate('Chat messages in my rooms')} checked={!!state.notify_chat} onChange={(v) => setState({ ...state, notify_chat: v ? 1 : 0 })} />
+        <ToggleRow label={translate('Ticket activity (assigned/reported/reviewed)')} checked={!!state.notify_ticket} onChange={(v) => setState({ ...state, notify_ticket: v ? 1 : 0 })} />
+        <ToggleRow label={translate('메일 수신 · 답장 확인')} checked={!!state.notify_mail} onChange={(v) => setState({ ...state, notify_mail: v ? 1 : 0 })} />
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, marginTop: 6, paddingTop: 6 }}>
-          <ToggleRow label="Channel active" checked={!!state.is_active} onChange={(v) => setState({ ...state, is_active: v ? 1 : 0 })} />
+          <ToggleRow label={translate('Channel active')} checked={!!state.is_active} onChange={(v) => setState({ ...state, is_active: v ? 1 : 0 })} />
         </div>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
-        <button type="button" onClick={onCancel} style={secondaryButton}>Cancel</button>
-        <button type="submit" style={primaryButton}>{isEdit ? 'Save' : 'Create'}</button>
+        <button type="button" onClick={onCancel} style={secondaryButton}>{translate('Cancel')}</button>
+        <button type="submit" style={primaryButton}>{isEdit ? translate('Save') : translate('Create')}</button>
       </div>
     </form>
   );
@@ -326,11 +324,12 @@ function ChannelRow({
   onDelete: () => void;
   onTest: () => void;
 }) {
+  useLocale();
   const status = channel.verified_at
-    ? `verified ${new Date(channel.verified_at).toLocaleDateString()}`
+    ? `verified ${new Date(channel.verified_at).toLocaleDateString(getLocaleTag())}`
     : channel.has_credentials
       ? 'unverified'
-      : 'no credentials';
+      : translate('no credentials');
   return (
     <div
       style={{
@@ -353,17 +352,16 @@ function ChannelRow({
           )}
           {!channel.is_active && (
             <span style={{ fontSize: 10, color: tokens.colors.textMuted, padding: '1px 6px', border: `1px solid ${tokens.colors.border}`, borderRadius: 6 }}>
-              inactive
-            </span>
+              {translate('inactive')}</span>
           )}
         </div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-          target: {channel.target} · {status}
+          {translate('target:')} {channel.target} · {status}
         </div>
       </div>
-      <button onClick={onTest} style={smallButton}>Test</button>
-      <button onClick={onEdit} style={smallButton}>Edit</button>
-      <button onClick={onDelete} style={{ ...smallButton, color: tokens.colors.dangerLight, borderColor: tokens.colors.dangerBg }}>Delete</button>
+      <button onClick={onTest} style={smallButton}>{translate('Test')}</button>
+      <button onClick={onEdit} style={smallButton}>{translate('Edit')}</button>
+      <button onClick={onDelete} style={{ ...smallButton, color: tokens.colors.dangerLight, borderColor: tokens.colors.dangerBg }}>{translate('Delete')}</button>
     </div>
   );
 }
@@ -377,6 +375,7 @@ function Field({
   hint?: string;
   children: React.ReactNode;
 }) {
+  useLocale();
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary }}>{label}</span>
@@ -387,6 +386,7 @@ function Field({
 }
 
 function ToggleRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  useLocale();
   return (
     <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', fontSize: 12, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
       <span>{label}</span>

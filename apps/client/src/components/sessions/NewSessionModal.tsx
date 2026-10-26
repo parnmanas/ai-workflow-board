@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import RuntimeSelectionFields, { emptyRuntimeSelection, type RuntimeSelectionValue } from '../runtime/RuntimeSelectionFields';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
@@ -60,6 +62,7 @@ function rememberCwd(managerId: string, cli: string, cwd: string): void {
 }
 
 export default function NewSessionModal({ open, onClose, hosts, initialManagerId, initialCli, initialCwd, onCreated }: NewSessionModalProps) {
+  useLocale();
   const [managerId, setManagerId] = useState('');
   const [cli, setCli] = useState('');
   const [selection, setSelection] = useState<RuntimeSelectionValue>(emptyRuntimeSelection());
@@ -156,7 +159,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
         }
       } catch (err: any) {
         if (cancelled) return;
-        setSettingsError(err?.message || 'Failed to load CLI settings. Refresh before starting the session.');
+        setSettingsError(err?.message || translate('Failed to load CLI settings. Refresh before starting the session.'));
         settingsKey.current = '';
       } finally { if (!cancelled) setSettingsLoading(false); }
     })();
@@ -174,10 +177,10 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
         .filter((o) => o.type === 'select' && o.category === 'mode' && o.options.length > 0
           && !settings?.launch_options?.some((launch) => launch.config_id === '__permission_mode')),
     ],
-    [settings, knownOptions, hostModels.models, hostModels.labels],
+    [settings, knownOptions, hostModels.models, hostModels.labels, getLocale()],
   );
 
-  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
+  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId, getLocale()]);
   // 하트비트 TTL 사이에 잠깐 목록에서 빠진 호스트는 선택을 유지한다(다음 하트비트에 돌아온다).
   const selectedHostMissing = !!managerId && !host;
   const credentialUnavailable = !!credentialId && !!settings
@@ -196,7 +199,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     if (!managerId || !cli || creating || settingsLoading || !settings || settingsError || credentialUnavailable) return;
     const trimmed = cwd.trim();
     if (!trimmed) {
-      setError('A working directory on the Runtime Host is required.');
+      setError(translate('A working directory on the Runtime Host is required.'));
       return;
     }
     setCreating(true);
@@ -213,8 +216,8 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       }
       const modelOption = withHostModelOption(knownOptions, hostModels.models, hostModels.labels).find((o) => o.category === 'model');
       const effortOption = hostEffortReport(hostModels.view, cli, selection.model);
-      if (selectionEdited.current && selection.effort && (!effortOption?.config_id || !effortOption.options.some((o) => o.value === selection.effort))) throw new Error('선택한 모델의 Effort 지원 여부를 확인할 수 없습니다. CLI 기본값을 선택하거나 목록을 새로고침하세요.');
-      if (selection.model && !modelOption) throw new Error('이 CLI의 model 설정을 아직 확인할 수 없습니다.');
+      if (selectionEdited.current && selection.effort && (!effortOption?.config_id || !effortOption.options.some((o) => o.value === selection.effort))) throw new Error(translate('선택한 모델의 Effort 지원 여부를 확인할 수 없습니다. CLI 기본값을 선택하거나 목록을 새로고침하세요.'));
+      if (selection.model && !modelOption) throw new Error(translate('이 CLI의 model 설정을 아직 확인할 수 없습니다.'));
       if (modelOption && (selection.model || selectionEdited.current)) changed[modelOption.config_id] = selection.model;
       if (effortOption?.config_id && (selection.effort || selectionEdited.current)) changed[effortOption.config_id] = selection.effort;
       // Clear remembered effort on model changes even when the new model has no reported selector.
@@ -229,7 +232,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       rememberCwd(managerId, cli, trimmed);
       onCreated(live);
     } catch (err: any) {
-      setError(err?.message || 'Failed to open the session');
+      setError(err?.message || translate('Failed to open the session'));
     } finally {
       setCreating(false);
     }
@@ -239,22 +242,19 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     <Modal
       isOpen={open}
       onClose={onClose}
-      title="New session"
+      title={translate('New session')}
       maxWidth={520}
       footer={(
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button variant="secondary" onClick={onClose} disabled={creating}>Cancel</Button>
+          <Button variant="secondary" onClick={onClose} disabled={creating}>{translate('Cancel')}</Button>
           <Button variant="primary" onClick={() => void create()} disabled={!managerId || !cli || creating || settingsLoading || !settings || !!settingsError || credentialUnavailable} loading={creating}>
-            Start session
-          </Button>
+            {translate('Start session')}</Button>
         </div>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <p style={{ margin: 0, fontSize: 12.5, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          Choose how the CLI signs in on the Runtime Host. Its session history stays on that machine,
-          and output streams here. Choose permissions and a Git workflow before starting.
-        </p>
+          {translate('Choose how the CLI signs in on the Runtime Host. Its session history stays on that machine, and output streams here. Choose permissions and a Git workflow before starting.')}</p>
 
         <RuntimeSelectionFields session idPrefix="new-session"
           value={{ ...selection, host_id: managerId, cli }}
@@ -271,38 +271,38 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
 
         {managerId && cli && (
           <div>
-            {settingsLoading && <div role="status" style={labelStyle}>Loading CLI settings…</div>}
+            {settingsLoading && <div role="status" style={labelStyle}>{translate('Loading CLI settings…')}</div>}
             {settings?.supports_credential && (
               <>
-                <label htmlFor="new-session-credential" style={labelStyle}>Credential</label>
-                <select id="new-session-credential" aria-label="Session credential" style={selectStyle}
+                <label htmlFor="new-session-credential" style={labelStyle}>{translate('Credential')}</label>
+                <select id="new-session-credential" aria-label={translate('Session credential')} style={selectStyle}
                   value={credentialId} disabled={creating || settingsLoading}
                   onChange={(e) => setCredentialId(e.target.value)}>
-                  <option value="">Host&apos;s own login (no AWB credential)</option>
-                  {credentialUnavailable && <option value={credentialId} disabled>Unavailable credential · {credentialId.slice(0, 8)}</option>}
+                  <option value="">{translate('Host\'s own login (no AWB credential)')}</option>
+                  {credentialUnavailable && <option value={credentialId} disabled>{translate('Unavailable credential ·')} {credentialId.slice(0, 8)}</option>}
                   {settings.candidates.map((candidate) => (
                     <option key={candidate.id} value={candidate.id}>
-                      {candidate.name} · {candidate.provider}{candidate.scope === 'global' ? ' · global' : ''}
+                      {candidate.name} · {candidate.provider}{candidate.scope === 'global' ? translate(' · global') : ''}
                     </option>
                   ))}
                 </select>
                 <p style={{ ...labelStyle, marginTop: 6, lineHeight: 1.5 }}>
                   {credentialUnavailable
-                    ? 'The saved credential is unavailable. Choose another credential or the host’s own login.'
+                    ? translate('The saved credential is unavailable. Choose another credential or the host’s own login.')
                     : credentialId
-                    ? 'Remembered for new sessions on this host and CLI. Existing sessions keep their saved login.'
-                    : 'The host must already be signed in. On a new host, select an AWB credential or add one below.'}
+                    ? translate('Remembered for new sessions on this host and CLI. Existing sessions keep their saved login.')
+                    : translate('The host must already be signed in. On a new host, select an AWB credential or add one below.')}
                 </p>
                 <a href="/settings/credentials" target="_blank" rel="noopener noreferrer"
-                  style={{ fontSize: 12, color: tokens.colors.accent }}>Add / manage credentials ↗</a>
+                  style={{ fontSize: 12, color: tokens.colors.accent }}>{translate('Add / manage credentials ↗')}</a>
               </>
             )}
             {settings && !settings.supports_credential && (
-              <p style={labelStyle}>{runtimeLabel(cli)} uses the host&apos;s own login. Sign in on the host before starting.</p>
+              <p style={labelStyle}>{runtimeLabel(cli)} {translate('uses the host\'s own login. Sign in on the host before starting.')}</p>
             )}
             {settingsError && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{settingsError}</div>}
             <Button variant="ghost" size="sm" disabled={creating || settingsLoading}
-              onClick={() => setSettingsRefresh((value) => value + 1)}>Refresh credentials</Button>
+              onClick={() => setSettingsRefresh((value) => value + 1)}>{translate('Refresh credentials')}</Button>
           </div>
         )}
 
@@ -310,9 +310,9 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
             <div style={{ flex: 1 }}>
               <Input
-                label="Working directory (on the Runtime Host)"
+                label={translate('Working directory (on the Runtime Host)')}
                 value={cwd}
-                placeholder="/path/to/repo"
+                placeholder={"/path/to/repo"}
                 onChange={(e) => setCwd(e.target.value)}
               />
             </div>
@@ -323,8 +323,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
               onClick={() => setPickerOpen(true)}
               style={{ marginBottom: 1, whiteSpace: 'nowrap' }}
             >
-              Browse…
-            </Button>
+              {translate('Browse…')}</Button>
           </div>
         </div>
         {managerId && (
@@ -348,7 +347,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
                   onClick={() => void hostModels.refresh()}
                   style={{ marginLeft: 8, fontSize: 11, background: 'none', border: 'none', color: tokens.colors.textSecondary, cursor: hostModels.refreshing ? 'wait' : 'pointer', textDecoration: 'underline' }}
                 >
-                  {hostModels.refreshing ? 'refreshing…' : 'refresh'}
+                  {hostModels.refreshing ? translate('refreshing…') : translate('refresh')}
                 </button>
               )}
             </label>
@@ -360,7 +359,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
               value={typeof chosenConfig[option.config_id] === 'string' ? String(chosenConfig[option.config_id]) : ''}
               onChange={(e) => setChosenConfig((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
             >
-              <option value="">{option.config_id === '__git_workflow' ? 'Main / master (default)' : `${runtimeLabel(cli)} default`}</option>
+              <option value="">{option.config_id === '__git_workflow' ? translate('Main / master (default)') : translate('{0} default', { 0: runtimeLabel(cli) })}</option>
               {option.options.map((choice) => (
                 <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
               ))}
@@ -374,13 +373,12 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
         <label style={{ ...labelStyle, display: 'flex', gap: 8, alignItems: 'center' }}>
           <input type="checkbox" checked={saveDefaults} disabled={creating || settingsLoading}
             onChange={(e) => setSaveDefaults(e.target.checked)} />
-          Save these options as defaults for new sessions on this host and CLI
-        </label>
+          {translate('Save these options as defaults for new sessions on this host and CLI')}</label>
 
         <Input
-          label="Title (optional)"
+          label={translate('Title (optional)')}
           value={title}
-          placeholder="Defaults to your first prompt"
+          placeholder={translate('Defaults to your first prompt')}
           onChange={(e) => setTitle(e.target.value)}
         />
 

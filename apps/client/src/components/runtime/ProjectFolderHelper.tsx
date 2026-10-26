@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo } from 'react';
 import { getActiveAccountId } from '../../api';
 import type { Project } from '../../types';
@@ -35,11 +37,12 @@ export default function ProjectFolderHelper({
   onPick,
   disabled = false,
 }: ProjectFolderHelperProps) {
+  useLocale();
   const resolvedAccountId = accountId || getActiveAccountId() || '';
   const { projects } = useProjects(resolvedAccountId);
   const view = useMemo(
     () => projectFolderHelperView(projects, hostIds, currentDir),
-    [projects, hostIds, currentDir],
+    [projects, hostIds, currentDir, getLocale()],
   );
 
   if (!projects.length) return null;
@@ -47,7 +50,7 @@ export default function ProjectFolderHelper({
   return (
     <div data-testid="project-folder-helper" style={{ marginTop: 6 }}>
       <Select
-        aria-label="프로젝트 폴더 사용"
+        aria-label={translate('프로젝트 폴더 사용')}
         value=""
         disabled={disabled || view.disabled}
         options={view.options.map((o) => ({ value: o.value, label: o.label, disabled: o.disabled }))}

@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 import type { OrchestrationStep } from '../../types';
 import { shortDuration } from '../../utils/time';
 
@@ -76,15 +77,15 @@ export function describeStepQuiet(
     minutes,
     timeoutMinutes,
     overdue: minutes >= timeoutMinutes,
-    label: `quiet ${minutes}m / ${timeoutMinutes}m`,
+    label: translate('quiet {0}m / {1}m', { 0: minutes, 1: timeoutMinutes }),
   };
 }
 
 /** 레일처럼 좁은 자리에서 쓰는 한 줄 요약. 활동이 없으면 그 사실 자체를 문구로 만든다. */
 export function compactActivityLabel(view: StepActivityView): string {
   if (view.text) return view.text;
-  if (view.stalled) return '⚠ no CLI activity since dispatch';
-  return 'waiting for the CLI to start…';
+  if (view.stalled) return translate('⚠ no CLI activity since dispatch');
+  return translate('waiting for the CLI to start…');
 }
 
 /** 실행 시간 라벨(`running 33m`). 기준 시각이 없으면 빈 문자열. */

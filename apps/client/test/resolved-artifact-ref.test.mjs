@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import React, { act } from 'react';
@@ -68,6 +69,6 @@ test('no_detail_surface renders type, canonical name, context, and unavailable s
   assert.ok(chip);
   assert.match(chip.textContent, /action · Canonical action/);
   assert.match(chip.textContent, / · Platform /);
-  assert.match(chip.textContent, /연결 불가: 상세 화면 없음/);
+  assert.match(chip.textContent, new RegExp(ui(') — 연결 불가:').slice(1).trim() + ' ' + ui('상세 화면 없음')));
   root.unmount();
 });

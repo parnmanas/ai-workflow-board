@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 // Projects page — React-free form / validation / delete-409 logic
 // (docs/tickets.md → Project). `test/projects-form-logic.test.mjs` imports this
 // module directly; the components in `components/projects/*` only render it.
@@ -78,9 +79,9 @@ export function buildProjectPayload(
   const errors: ProjectFormErrors = {};
   const name = form.name.trim();
   const repoUrl = form.repoUrl.trim();
-  if (!name) errors.name = '이름을 입력하세요.';
-  if (!repoUrl) errors.repoUrl = '저장소 URL 을 입력하세요.';
-  else if (/\s/.test(repoUrl)) errors.repoUrl = 'URL 에 공백이 들어갈 수 없습니다.';
+  if (!name) errors.name = translate('이름을 입력하세요.');
+  if (!repoUrl) errors.repoUrl = translate('저장소 URL 을 입력하세요.');
+  else if (/\s/.test(repoUrl)) errors.repoUrl = translate('URL 에 공백이 들어갈 수 없습니다.');
   let clonePolicy: ClonePolicy | null = null;
   const built = formToClonePolicy(form.clonePolicy);
   if (!built.ok) errors.clonePolicy = built.error;
@@ -140,17 +141,17 @@ export interface TestConnectionView {
 }
 
 export function testConnectionView(result: ProjectTestConnectionResult | null | undefined): TestConnectionView {
-  if (!result) return { ok: false, message: '응답이 없습니다.', branches: [], suggestedDefault: '' };
+  if (!result) return { ok: false, message: translate('응답이 없습니다.'), branches: [], suggestedDefault: '' };
   const branches = (result.branches || [])
     .map((b: any) => (typeof b === 'string' ? b : b?.name))
     .filter((n: unknown): n is string => typeof n === 'string' && n.length > 0);
   if (!result.ok) {
-    return { ok: false, message: result.error || '연결에 실패했습니다.', branches: [], suggestedDefault: '' };
+    return { ok: false, message: result.error || translate('연결에 실패했습니다.'), branches: [], suggestedDefault: '' };
   }
   const suggestedDefault = (result.default_branch || '').trim();
   const message = branches.length === 0
-    ? '연결 성공 — 원격에 브랜치가 없습니다.'
-    : `연결 성공 — 브랜치 ${branches.length}개${suggestedDefault ? ` (기본: ${suggestedDefault})` : ''}`;
+    ? translate('연결 성공 — 원격에 브랜치가 없습니다.')
+    : translate('연결 성공 — 브랜치 {0}개{1}', { 0: branches.length, 1: suggestedDefault ? translate(' (기본: {0})', { 0: suggestedDefault }) : '' });
   return { ok: true, message, branches, suggestedDefault };
 }
 
@@ -165,8 +166,8 @@ export function defaultBranchOptions(
 ): Array<{ value: string; label: string }> {
   const cur = current.trim();
   return [
-    { value: '', label: '— 지정 안 함 (origin/HEAD) —' },
-    ...(cur && !branches.includes(cur) ? [{ value: cur, label: `${cur} (원격 목록에 없음)` }] : []),
+    { value: '', label: translate('— 지정 안 함 (origin/HEAD) —') },
+    ...(cur && !branches.includes(cur) ? [{ value: cur, label: translate('{0} (원격 목록에 없음)', { 0: cur }) }] : []),
     ...branches.map((b) => ({ value: b, label: b })),
   ];
 }
@@ -215,8 +216,8 @@ export function hostFolderRows(
 /** Validation for a main clone folder path; null when it may be saved. */
 export function hostFolderPathError(path: string): string | null {
   const p = path.trim();
-  if (!p) return '경로를 입력하세요.';
-  if (!isAbsoluteHostPath(p)) return 'Host 절대 경로여야 합니다 (예: /home/user/repo, C:\\repo).';
+  if (!p) return translate('경로를 입력하세요.');
+  if (!isAbsoluteHostPath(p)) return translate('Host 절대 경로여야 합니다 (예: /home/user/repo, C:\\repo).');
   return null;
 }
 
@@ -229,16 +230,16 @@ export interface ProjectUsageCount {
 }
 
 const USAGE_LABELS: Record<string, string> = {
-  tickets: '티켓',
-  qa_scenarios: 'QA 시나리오',
-  security_profiles: '보안 프로파일',
-  actions: 'Action',
-  missions: '미션',
-  orchestration_missions: '미션',
-  schedules: '스케줄',
-  automation_schedules: '스케줄',
-  ontology_graphs: '온톨로지 그래프',
-  references: 'QA·보안·Action·미션·outreach 설정',
+  get tickets() { return translate('티켓'); },
+  get qa_scenarios() { return translate('QA 시나리오'); },
+  get security_profiles() { return translate('보안 프로파일'); },
+  get actions() { return translate('Action'); },
+  get missions() { return translate('미션'); },
+  get orchestration_missions() { return translate('미션'); },
+  get schedules() { return translate('스케줄'); },
+  get automation_schedules() { return translate('스케줄'); },
+  get ontology_graphs() { return translate('온톨로지 그래프'); },
+  get references() { return translate('QA·보안·Action·미션·outreach 설정'); },
 };
 
 export function usageLabel(key: string): string {
@@ -280,7 +281,7 @@ export function projectInUseCounts(err: unknown): ProjectUsageCount[] | null {
 
 /** One line for the force-delete dialog: "티켓 3 · QA 시나리오 1". */
 export function describeProjectUsage(counts: ProjectUsageCount[]): string {
-  if (!counts.length) return '다른 항목이 아직 이 프로젝트를 참조하고 있습니다.';
+  if (!counts.length) return translate('다른 항목이 아직 이 프로젝트를 참조하고 있습니다.');
   return counts.map((c) => `${c.label} ${c.count}`).join(' · ');
 }
 

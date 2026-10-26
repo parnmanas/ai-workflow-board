@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 실브라우저(jsdom) 스모크: 티켓 카드 클릭 → Artifact 패널 오픈 + 포커스 관리.
 // 티켓 98d0936e · F2-1 · §회귀 안전망 ①(카드 클릭→패널) + ④(포커스트랩·복귀).
 //
@@ -79,7 +80,7 @@ test('① 데스크톱: 티켓 카드 클릭 → 패널(role=complementary) 오�
     assert.match(panel.textContent, /상세 본문 XYZ/);
 
     // 열리면 닫기 버튼으로 포커스 이동(기본 a11y)
-    const closeBtn = document.querySelector('[aria-label="Artifact 패널 닫기"]');
+    const closeBtn = document.querySelector(`[aria-label="${ui("Artifact 패널 닫기")}"]`);
     assert.ok(closeBtn, '닫기 버튼 존재');
     assertFocused(closeBtn, '열리면 닫기 버튼에 포커스');
   } finally {
@@ -96,7 +97,7 @@ test('④ 데스크톱: 닫기 버튼 클릭 → 패널 닫힘 + 오프너(카�
     card.focus();
     click(card);
 
-    const closeBtn = document.querySelector('[aria-label="Artifact 패널 닫기"]');
+    const closeBtn = document.querySelector(`[aria-label="${ui("Artifact 패널 닫기")}"]`);
     click(closeBtn);
 
     assert.equal(Boolean(document.querySelector('[role="complementary"]')), false, '닫기 후 패널 사라짐');
@@ -155,7 +156,7 @@ test('③④ 모바일: 패널이 role=dialog+aria-modal 로 열리고 Tab 이 �
     assert.ok(dialog, '모바일은 오버레이 시트(role=dialog)로 열림');
     assert.equal(dialog.getAttribute('aria-modal'), 'true');
 
-    const closeBtn = document.querySelector('[aria-label="Artifact 패널 닫기"]');
+    const closeBtn = document.querySelector(`[aria-label="${ui("Artifact 패널 닫기")}"]`);
     assertFocused(closeBtn, '열리면 닫기 버튼 포커스');
 
     // Tab: 시트 내부 포커스 가능 요소는 닫기 버튼뿐 → 랩되어 배경으로 새지 않고 유지

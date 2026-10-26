@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 공통 상태 뷰(EmptyState·ErrorState·PermissionNotice) 렌더 계약 테스트
 // (종합 상태 설계 · F2-3 · 98d0936e).
 //
@@ -34,27 +35,27 @@ test('EmptyState: 설명 없으면 제목만', () => {
 test('ErrorState: role=alert + 기본 제목 + 메시지', () => {
   const html = render(h(ErrorState, { message: 'HTTP 500' }));
   assert.match(html, /role="alert"/);
-  assert.match(html, /문제가 발생했습니다/);
+  assert.match(html, uiPattern("문제가 발생했습니다"));
   assert.match(html, /HTTP 500/);
 });
 
 test('ErrorState: onRetry 있으면 재시도 버튼, 없으면 미노출', () => {
   const withRetry = render(h(ErrorState, { message: 'x', onRetry: () => {} }));
-  assert.match(withRetry, /다시 시도/);
+  assert.match(withRetry, uiPattern("다시 시도"));
   const withoutRetry = render(h(ErrorState, { message: 'x' }));
-  assert.doesNotMatch(withoutRetry, /다시 시도/);
+  assert.doesNotMatch(withoutRetry, uiPattern("다시 시도"));
 });
 
 test('ErrorState: 커스텀 title 로 문맥 좁히기', () => {
   const html = render(h(ErrorState, { title: '티켓을 불러오지 못했습니다', message: 'HTTP 404' }));
-  assert.match(html, /불러오지 못했습니다/);
+  assert.match(html, /티켓을 불러오지 못했습니다/);
   assert.match(html, /HTTP 404/);
 });
 
 test('PermissionNotice: role=note + 기본 제목', () => {
   const html = render(h(PermissionNotice, {}));
   assert.match(html, /role="note"/);
-  assert.match(html, /접근 권한이 없습니다/);
+  assert.match(html, uiPattern("접근 권한이 없습니다"));
 });
 
 test('PermissionNotice: 커스텀 title/message (영문 화면 언어 보존)', () => {

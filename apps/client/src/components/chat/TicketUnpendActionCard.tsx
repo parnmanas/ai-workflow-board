@@ -1,9 +1,12 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatMessageTicketAction } from '../../types';
 
 export default function TicketUnpendActionCard({ action }: { action: ChatMessageTicketAction }) {
+  useLocale();
   const [resolved, setResolved] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -29,7 +32,7 @@ export default function TicketUnpendActionCard({ action }: { action: ChatMessage
       await api.updateTicket(action.ticket_id, { pending_user_action: false });
       setResolved(true);
     } catch (e: any) {
-      setError(e?.message || 'Failed to resume ticket');
+      setError(e?.message || translate('Failed to resume ticket'));
     } finally {
       setSubmitting(false);
     }
@@ -48,13 +51,12 @@ export default function TicketUnpendActionCard({ action }: { action: ChatMessage
       }}
     >
       <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginBottom: 4 }}>
-        Human approval required
-      </div>
+        {translate('Human approval required')}</div>
       <div style={{ fontSize: tokens.typography.fontSizeMd, fontWeight: 700, color: tokens.colors.textPrimary }}>
         {action.title}
       </div>
       <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary, marginTop: 4 }}>
-        {resolved ? 'This ticket has been resumed.' : 'Resume this ticket and restart dispatch?'}
+        {resolved ? translate('This ticket has been resumed.') : translate('Resume this ticket and restart dispatch?')}
       </div>
       <button
         type="button"
@@ -72,7 +74,7 @@ export default function TicketUnpendActionCard({ action }: { action: ChatMessage
           opacity: submitting ? 0.7 : 1,
         }}
       >
-        {resolved ? '✓ Resumed' : submitting ? 'Resuming…' : '▶ Resume (Unpend)'}
+        {resolved ? translate('✓ Resumed') : submitting ? translate('Resuming…') : translate('▶ Resume (Unpend)')}
       </button>
       {error && (
         <div role="alert" style={{ marginTop: 6, fontSize: tokens.typography.fontSizeXs, color: tokens.colors.danger }}>

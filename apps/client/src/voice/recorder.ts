@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 /**
  * 발화 하나를 녹음한다(push-to-talk / tap). 결과는 공급자에 그대로 넘길 수 있는 압축 오디오다 —
  * Chrome·Android WebView 는 webm/opus, Safari 는 mp4/aac 를 낸다. 서버가 형식을 그대로 넘기고
@@ -91,7 +92,7 @@ export async function startVoiceRecording(onAutoStop?: () => void): Promise<Acti
   return {
     stop: () => new Promise<VoiceRecording>((resolve, reject) => {
       if (finished) {
-        reject(new Error('recording already finished'));
+        reject(new Error(translate('recording already finished')));
         return;
       }
       recorder.onstop = () => {
@@ -101,7 +102,7 @@ export async function startVoiceRecording(onAutoStop?: () => void): Promise<Acti
       };
       recorder.onerror = (e: any) => {
         release();
-        reject(e?.error || new Error('recording failed'));
+        reject(e?.error || new Error(translate('recording failed')));
       };
       recorder.stop();
     }),

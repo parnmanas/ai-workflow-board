@@ -1,3 +1,4 @@
+import { t as translate } from './i18n/core';
 /**
  * PWA/하이브리드 앱의 서버 주소 설정 — docs/tickets.md·ownership 계약과 무관한 순수 클라이언트 설정.
  *
@@ -20,10 +21,10 @@ export function normalizeServerUrl(raw: string): string {
   try {
     u = new URL(v);
   } catch {
-    throw new Error('주소가 올바르지 않습니다. 예: https://awb.example.com 또는 http://192.168.1.10:7701');
+    throw new Error(translate('주소가 올바르지 않습니다. 예: https://awb.example.com 또는 http://192.168.1.10:7701'));
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    throw new Error('http:// 또는 https:// 주소만 입력할 수 있습니다');
+    throw new Error(translate('http:// 또는 https:// 주소만 입력할 수 있습니다'));
   }
   const path = u.pathname === '/' ? '' : u.pathname.replace(/\/+$/, '');
   return `${u.origin}${path}`;
@@ -69,19 +70,19 @@ export async function checkServerHealth(raw: string, timeoutMs = 8000): Promise<
   try {
     base = normalizeServerUrl(raw);
   } catch (err: any) {
-    return { ok: false, error: err?.message || '주소가 올바르지 않습니다' };
+    return { ok: false, error: err?.message || translate('주소가 올바르지 않습니다') };
   }
   const url = `${base}/api/health`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) return { ok: false, error: `서버 응답 오류 (HTTP ${res.status})` };
+    if (!res.ok) return { ok: false, error: translate('서버 응답 오류 (HTTP {0})', { 0: res.status }) };
     const data = await res.json().catch(() => null);
     return { ok: true, status: data?.status || 'ok' };
   } catch (err: any) {
-    if (err?.name === 'AbortError') return { ok: false, error: '시간 초과 — 주소·방화벽을 확인해 주세요' };
-    return { ok: false, error: '연결 실패 — 주소·HTTPS·CORS를 확인해 주세요' };
+    if (err?.name === 'AbortError') return { ok: false, error: translate('시간 초과 — 주소·방화벽을 확인해 주세요') };
+    return { ok: false, error: translate('연결 실패 — 주소·HTTPS·CORS를 확인해 주세요') };
   } finally {
     clearTimeout(timer);
   }

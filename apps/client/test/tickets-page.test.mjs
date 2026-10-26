@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Tickets 페이지 실마운트 스모크 (board-less, docs/tickets.md).
 //
 // 순수 로직(필터 ⇄ URL, lane 위치 계산, 정렬)은 ticket-filters / ticket-kanban /
@@ -49,10 +50,10 @@ test('filter edits compose while URL rendering is deferred, including local dial
       onViewChange() {}, ticketCount: 1, unreadCount: 0, onCreate() {}, onMarkAllRead() {},
     };
     view = mount(h(TicketFilterBar, props));
-    click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
-    const button = text => [...view.container.querySelectorAll('[role="dialog"] button')].find(el => el.textContent === text);
+    click(view.container.querySelector(`[aria-label="${ui("티켓 필터 및 보기")}"]`));
+    const button = text => [...view.container.querySelectorAll('[role="dialog"] button')].find(el => el.textContent === ui(text));
     click(button('To Do'));
-    const project = view.container.querySelector('[aria-label="프로젝트 필터"]');
+    const project = view.container.querySelector(`[aria-label="${ui("프로젝트 필터")}"]`);
     act(() => {
       project.value = 'p1';
       project.dispatchEvent(new window.Event('change', { bubbles: true }));
@@ -228,9 +229,9 @@ test('② 필터 없으면 5 lane 전부, 상태 칩을 누르면 URL 과 쿼리
   const { view, state } = await mountPage(t);
   assert.deepEqual(laneStatuses(view), ['backlog', 'todo', 'in_progress', 'review', 'done']);
   const before = ticketListCalls(state).length;
-  click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+  click(view.container.querySelector(`[aria-label="${ui("티켓 필터 및 보기")}"]`));
   await flush();
-  const reviewChip = [...view.container.querySelectorAll('[aria-label="상태 필터"] button')].find((b) => b.textContent.includes('Review'));
+  const reviewChip = [...view.container.querySelectorAll(`[aria-label="${ui("상태 필터")}"] button`)].find((b) => b.textContent.includes('Review'));
   assert.ok(reviewChip, 'Review 상태 칩');
   click(reviewChip);
   await flush();
@@ -243,10 +244,10 @@ test('② 필터 없으면 5 lane 전부, 상태 칩을 누르면 URL 과 쿼리
 
 test('rapid status and project changes preserve both URL filters before the next render', async (t) => {
   const { view } = await mountPage(t);
-  click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+  click(view.container.querySelector(`[aria-label="${ui("티켓 필터 및 보기")}"]`));
   await flush();
-  const status = [...view.container.querySelectorAll('[aria-label="상태 필터"] button')].find(b => b.textContent.includes('To Do'));
-  const project = view.container.querySelector('[aria-label="프로젝트 필터"]');
+  const status = [...view.container.querySelectorAll(`[aria-label="${ui("상태 필터")}"] button`)].find(b => b.textContent.includes('To Do'));
+  const project = view.container.querySelector(`[aria-label="${ui("프로젝트 필터")}"]`);
   act(() => {
     status.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     project.value = 'p1';
@@ -309,7 +310,7 @@ test('④ dispatch_paused_at 이면 일시정지 배너', async (t) => {
   const { view } = await mountPage(t, { pausedAt: '2026-10-05T01:00:00Z' });
   const banner = view.container.querySelector('[data-testid="dispatch-paused-banner"]');
   assert.ok(banner, '배너가 보여야 한다');
-  assert.match(banner.textContent, /일시정지/);
+  assert.match(banner.textContent, uiPattern('의 티켓 디스패치가 일시정지되어 있습니다'));
 });
 
 test('④-b 일시정지가 아니면 배너 없음', async (t) => {
@@ -319,9 +320,9 @@ test('④-b 일시정지가 아니면 배너 없음', async (t) => {
 
 test('⑤ List 보기는 저장되고 표로 그린다', async (t) => {
   const { view } = await mountPage(t);
-  click(view.container.querySelector('[aria-label="티켓 필터 및 보기"]'));
+  click(view.container.querySelector(`[aria-label="${ui("티켓 필터 및 보기")}"]`));
   await flush();
-  const listBtn = [...view.container.querySelectorAll('[aria-label="보기"] button')].find((b) => b.textContent === 'List');
+  const listBtn = [...view.container.querySelectorAll(`[aria-label="${ui("보기")}"] button`)].find((b) => b.textContent === 'List');
   assert.ok(listBtn);
   click(listBtn);
   await flush(2);

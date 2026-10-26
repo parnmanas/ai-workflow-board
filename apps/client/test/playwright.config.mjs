@@ -3,7 +3,7 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: '.',
   testMatch: !process.env.PLAYWRIGHT_TEST_MATCH || process.env.PLAYWRIGHT_TEST_MATCH === 'responsive-layout.e2e.mjs'
-    ? ['responsive-layout.e2e.mjs', 'business-header.e2e.mjs', 'markdown-rendering.e2e.mjs']
+    ? ['responsive-layout.e2e.mjs', 'business-header.e2e.mjs', 'markdown-rendering.e2e.mjs', 'i18n.e2e.mjs']
     : process.env.PLAYWRIGHT_TEST_MATCH,
   workers: 1,
   reporter: 'line',

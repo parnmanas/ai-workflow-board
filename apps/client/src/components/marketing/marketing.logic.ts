@@ -1,3 +1,5 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
 // Marketing 화면의 순수 규칙(docs/marketing.md) — React · DOM 없음. test/marketing-*.test.mjs 가
 // 직접 import 한다. 서버가 정본이고(검증 · 집행 · 한도) 여기의 판정은 사람이 보내기 전에 미리
 // 알려 주는 용도다. 금액 표기는 서버 `common/marketing/money.ts` 의 formatMinorAmount 와 같은 모양을
@@ -70,7 +72,7 @@ function splitMinor(amount: number, currency: string): { negative: boolean; whol
 export function formatMinor(amount: number | null | undefined, currency: string): string {
   if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) return '—';
   const { negative, whole, frac } = splitMinor(Number(amount), currency);
-  return `${negative ? '-' : ''}${whole.toLocaleString('en-US')}${frac ? `.${frac}` : ''} ${normalizeCurrencyCode(currency)}`;
+  return `${negative ? '-' : ''}${whole.toLocaleString(getLocaleTag())}${frac ? `.${frac}` : ''} ${normalizeCurrencyCode(currency)}`;
 }
 
 /** 입력칸을 채울 때 — 구분 쉼표 없는 major 단위 글자(`1250, 'USD'` → `12.50`). */
@@ -95,34 +97,34 @@ export function parseMajorToMinor(
 ): MoneyParse {
   const code = normalizeCurrencyCode(currency);
   const raw = String(input ?? '').trim();
-  if (!raw) return { ok: false, error: '금액을 입력하세요' };
-  if (raw.startsWith('-')) return { ok: false, error: '음수 금액은 쓸 수 없습니다' };
+  if (!raw) return { ok: false, error: translate('금액을 입력하세요') };
+  if (raw.startsWith('-')) return { ok: false, error: translate('음수 금액은 쓸 수 없습니다') };
   let text = raw;
   if (text.includes(',')) {
     if (!/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(text)) {
-      return { ok: false, error: '쉼표는 세 자리 구분에만 쓸 수 있습니다 (예: 12,500)' };
+      return { ok: false, error: translate('쉼표는 세 자리 구분에만 쓸 수 있습니다 (예: 12,500)') };
     }
     text = text.replace(/,/g, '');
   }
   const m = /^(\d+)(?:\.(\d+))?$/.exec(text);
-  if (!m) return { ok: false, error: '숫자로 입력하세요 (예: 12500 또는 12.50)' };
+  if (!m) return { ok: false, error: translate('숫자로 입력하세요 (예: 12500 또는 12.50)') };
   const exp = currencyExponent(code);
   const fraction = m[2] || '';
   if (fraction.length > exp) {
     return {
       ok: false,
       error: exp === 0
-        ? `${code} 는 소수점 아래 금액이 없습니다`
-        : `${code} 는 소수점 아래 ${exp}자리까지만 쓸 수 있습니다`,
+        ? translate('{0} 는 소수점 아래 금액이 없습니다', { 0: code })
+        : translate('{0} 는 소수점 아래 {1}자리까지만 쓸 수 있습니다', { 0: code, 1: exp }),
     };
   }
   const digits = `${m[1]}${fraction.padEnd(exp, '0')}`.replace(/^0+(?=\d)/, '');
-  if (digits.length > 16) return { ok: false, error: `금액이 너무 큽니다 (최대 ${formatMinor(MAX_MINOR_AMOUNT, code)})` };
+  if (digits.length > 16) return { ok: false, error: translate('금액이 너무 큽니다 (최대 {0})', { 0: formatMinor(MAX_MINOR_AMOUNT, code) }) };
   const minor = Number(digits);
   if (!Number.isSafeInteger(minor) || minor > MAX_MINOR_AMOUNT) {
-    return { ok: false, error: `금액이 너무 큽니다 (최대 ${formatMinor(MAX_MINOR_AMOUNT, code)})` };
+    return { ok: false, error: translate('금액이 너무 큽니다 (최대 {0})', { 0: formatMinor(MAX_MINOR_AMOUNT, code) }) };
   }
-  if (minor === 0 && !opts.allowZero) return { ok: false, error: '0보다 큰 금액을 입력하세요' };
+  if (minor === 0 && !opts.allowZero) return { ok: false, error: translate('0보다 큰 금액을 입력하세요') };
   return { ok: true, minor };
 }
 
@@ -144,23 +146,23 @@ export const MARKETING_CAPABILITIES: MarketingCapability[] = [
 ];
 
 export const CAPABILITY_LABELS: Record<MarketingCapability, string> = {
-  channel_discovery: '채널 탐색',
-  community_post: '커뮤니티 게시',
-  email: '메일 발송',
-  feedback_collect: '피드백 수집',
-  feedback_to_product: '피드백 → 제품 개선',
-  analytics: '채널별 성과 분석',
-  paid_spend: '예산 집행 · 결제',
+  get channel_discovery() { return translate('채널 탐색'); },
+  get community_post() { return translate('커뮤니티 게시'); },
+  get email() { return translate('메일 발송'); },
+  get feedback_collect() { return translate('피드백 수집'); },
+  get feedback_to_product() { return translate('피드백 → 제품 개선'); },
+  get analytics() { return translate('채널별 성과 분석'); },
+  get paid_spend() { return translate('예산 집행 · 결제'); },
 };
 
 export const CAPABILITY_DESCRIPTIONS: Record<MarketingCapability, string> = {
-  channel_discovery: '에이전트가 근거와 함께 채널 후보를 제안합니다. 여는 것은 사람입니다.',
-  community_post: '커뮤니티 게시글 · 댓글 초안을 씁니다. 승인해야 나갑니다.',
-  email: '동의한 연락처에게 보낼 메일 초안을 씁니다. 승인해야 발송됩니다.',
-  feedback_collect: '반응 · 언급을 피드백으로 기록하고, 연결된 채널의 수집 결과를 봅니다.',
-  feedback_to_product: '버그 · 기능 요청 피드백을 제품 Project 의 티켓으로 만듭니다.',
-  analytics: '추적 링크 · 지표 기록 · 채널별 성과 리포트를 씁니다.',
-  paid_spend: '예산 편성을 제안하고 지출을 요청합니다. 돈은 승인자가 정합니다.',
+  get channel_discovery() { return translate('에이전트가 근거와 함께 채널 후보를 제안합니다. 여는 것은 사람입니다.'); },
+  get community_post() { return translate('커뮤니티 게시글 · 댓글 초안을 씁니다. 승인해야 나갑니다.'); },
+  get email() { return translate('동의한 연락처에게 보낼 메일 초안을 씁니다. 승인해야 발송됩니다.'); },
+  get feedback_collect() { return translate('반응 · 언급을 피드백으로 기록하고, 연결된 채널의 수집 결과를 봅니다.'); },
+  get feedback_to_product() { return translate('버그 · 기능 요청 피드백을 제품 Project 의 티켓으로 만듭니다.'); },
+  get analytics() { return translate('추적 링크 · 지표 기록 · 채널별 성과 리포트를 씁니다.'); },
+  get paid_spend() { return translate('예산 편성을 제안하고 지출을 요청합니다. 돈은 승인자가 정합니다.'); },
 };
 
 export function capabilityLabel(key: string): string {
@@ -176,18 +178,18 @@ export const CHANNEL_PLATFORMS = [
 const PLATFORM_LABELS: Record<string, string> = {
   reddit: 'Reddit',
   github: 'GitHub',
-  hacker_news: 'Hacker News',
-  product_hunt: 'Product Hunt',
+  get hacker_news() { return translate('Hacker News'); },
+  get product_hunt() { return translate('Product Hunt'); },
   x: 'X',
   linkedin: 'LinkedIn',
-  discord: 'Discord',
-  slack: 'Slack',
-  forum: '포럼',
-  blog: '블로그',
-  newsletter: '뉴스레터',
+  get discord() { return translate('Discord'); },
+  get slack() { return translate('Slack'); },
+  get forum() { return translate('포럼'); },
+  get blog() { return translate('블로그'); },
+  get newsletter() { return translate('뉴스레터'); },
   youtube: 'YouTube',
-  email: '메일',
-  other: '기타',
+  get email() { return translate('메일'); },
+  get other() { return translate('기타'); },
 };
 
 export function platformLabel(platform: string): string {
@@ -195,9 +197,9 @@ export function platformLabel(platform: string): string {
 }
 
 export const CHANNEL_KIND_LABELS: Record<MarketingChannelKind, string> = {
-  outreach: '자동 게시(Outreach 커넥터)',
-  email: '메일 발송',
-  manual: '수동 게시',
+  get outreach() { return translate('자동 게시(Outreach 커넥터)'); },
+  get email() { return translate('메일 발송'); },
+  get manual() { return translate('수동 게시'); },
 };
 
 /**
@@ -253,16 +255,16 @@ export function emailDraftFrom(config: Partial<MarketingEmailConfig> | null | un
 
 /** 틀린 첫 항목의 설명, 없으면 null. */
 export function validateEmailDraft(d: EmailConfigDraft): string | null {
-  if (!d.credential_id) return '메일 credential 을 고르세요 (provider = resend | sendgrid, api_key 필드)';
-  if (!d.brand_id) return '동의를 받은 발신자 브랜드를 고르세요';
-  if (!d.from_name.trim()) return '발신자 이름은 법정 표기라 비울 수 없습니다';
-  if (!isEmailAddress(d.from_address.trim())) return '발신 주소가 메일 주소가 아닙니다';
-  if (d.reply_to.trim() && !isEmailAddress(d.reply_to.trim())) return '회신 주소가 메일 주소가 아닙니다';
-  if (d.contact_email.trim() && !isEmailAddress(d.contact_email.trim())) return '연락처 메일이 메일 주소가 아닙니다';
-  if (!d.postal_address.trim()) return '발신자 주소(우편)는 법정 표기라 비울 수 없습니다';
-  if (!d.list_name.trim()) return '이 채널의 메일을 받을 수신 목록 이름을 적으세요';
-  if (!normalizeListName(d.list_name)) return '수신 목록 이름은 영문 소문자 · 숫자 · 공백 · _ . - 만 쓸 수 있습니다';
-  if (d.ad_label.trim().length > 30) return '광고 표기는 30자까지입니다';
+  if (!d.credential_id) return translate('메일 credential 을 고르세요 (provider = resend | sendgrid, api_key 필드)');
+  if (!d.brand_id) return translate('동의를 받은 발신자 브랜드를 고르세요');
+  if (!d.from_name.trim()) return translate('발신자 이름은 법정 표기라 비울 수 없습니다');
+  if (!isEmailAddress(d.from_address.trim())) return translate('발신 주소가 메일 주소가 아닙니다');
+  if (d.reply_to.trim() && !isEmailAddress(d.reply_to.trim())) return translate('회신 주소가 메일 주소가 아닙니다');
+  if (d.contact_email.trim() && !isEmailAddress(d.contact_email.trim())) return translate('연락처 메일이 메일 주소가 아닙니다');
+  if (!d.postal_address.trim()) return translate('발신자 주소(우편)는 법정 표기라 비울 수 없습니다');
+  if (!d.list_name.trim()) return translate('이 채널의 메일을 받을 수신 목록 이름을 적으세요');
+  if (!normalizeListName(d.list_name)) return translate('수신 목록 이름은 영문 소문자 · 숫자 · 공백 · _ . - 만 쓸 수 있습니다');
+  if (d.ad_label.trim().length > 30) return translate('광고 표기는 30자까지입니다');
   return null;
 }
 
@@ -304,24 +306,24 @@ export function buildChannelApproval(
   const note = draft.note.trim();
   const withNote = (body: MarketingChannelApproval): MarketingChannelApproval => (note ? { ...body, note } : body);
   if (draft.kind === 'manual') {
-    if (opts.connect) return { ok: false, error: '연결은 Outreach 채널로만 합니다' };
+    if (opts.connect) return { ok: false, error: translate('연결은 Outreach 채널로만 합니다') };
     return { ok: true, body: withNote({ mode: 'manual' }) };
   }
   if (draft.kind === 'email') {
-    if (opts.connect) return { ok: false, error: '연결은 Outreach 채널로만 합니다' };
+    if (opts.connect) return { ok: false, error: translate('연결은 Outreach 채널로만 합니다') };
     const error = validateEmailDraft(draft.email);
     if (error) return { ok: false, error };
     return { ok: true, body: withNote({ mode: 'email', email: emailConfigBody(draft.email) }) };
   }
   if (draft.outreachChoice === 'existing') {
-    if (!draft.outreachChannelId) return { ok: false, error: '연결할 Outreach 채널을 고르세요' };
+    if (!draft.outreachChannelId) return { ok: false, error: translate('연결할 Outreach 채널을 고르세요') };
     return { ok: true, body: withNote({ mode: 'outreach', outreach_channel_id: draft.outreachChannelId }) };
   }
   if (draft.outreachChoice === 'create') {
-    if (!draft.credentialId) return { ok: false, error: '게시에 쓸 credential 을 고르세요' };
+    if (!draft.credentialId) return { ok: false, error: translate('게시에 쓸 credential 을 고르세요') };
     const rate = draft.rateLimitPerHour.trim();
     if (!/^\d+$/.test(rate) || Number(rate) < 1 || Number(rate) > 1000) {
-      return { ok: false, error: '시간당 게시 상한은 1 이상의 정수여야 합니다' };
+      return { ok: false, error: translate('시간당 게시 상한은 1 이상의 정수여야 합니다') };
     }
     return {
       ok: true,
@@ -331,7 +333,7 @@ export function buildChannelApproval(
       }),
     };
   }
-  if (opts.connect) return { ok: false, error: '연결할 Outreach 채널이나 credential 을 고르세요' };
+  if (opts.connect) return { ok: false, error: translate('연결할 Outreach 채널이나 credential 을 고르세요') };
   return { ok: true, body: withNote({ mode: 'outreach' }) };
 }
 
@@ -348,15 +350,15 @@ export const LIMIT_KEYS: MarketingLimitKey[] = [
 ];
 
 export const LIMIT_LABELS: Record<MarketingLimitKey, string> = {
-  drafts_per_day: '초안 / 24시간',
-  spend_requests_per_day: '지출 요청 / 24시간',
-  allocation_proposals_per_day: '편성 제안 / 24시간',
-  links_per_day: '추적 링크 / 24시간',
-  channel_proposals_per_day: '채널 제안 / 24시간',
-  feedback_per_day: '피드백 기록 / 24시간',
-  metrics_per_day: '지표 기록 / 24시간',
-  feedback_tickets_per_day: '피드백 티켓 / 24시간',
-  open_feedback_tickets: '열린 피드백 티켓 상한',
+  get drafts_per_day() { return translate('초안 / 24시간'); },
+  get spend_requests_per_day() { return translate('지출 요청 / 24시간'); },
+  get allocation_proposals_per_day() { return translate('편성 제안 / 24시간'); },
+  get links_per_day() { return translate('추적 링크 / 24시간'); },
+  get channel_proposals_per_day() { return translate('채널 제안 / 24시간'); },
+  get feedback_per_day() { return translate('피드백 기록 / 24시간'); },
+  get metrics_per_day() { return translate('지표 기록 / 24시간'); },
+  get feedback_tickets_per_day() { return translate('피드백 티켓 / 24시간'); },
+  get open_feedback_tickets() { return translate('열린 피드백 티켓 상한'); },
 };
 
 /** 서버 DEFAULT_MARKETING_LIMITS — 입력칸의 "기본값" 안내용. 정본은 캠페인 응답의 `limits`. */
@@ -378,45 +380,45 @@ export const RECORDABLE_METRICS = [
 ] as const;
 
 export const METRIC_LABELS: Record<string, string> = {
-  clicks: '클릭(raw)',
-  impressions: '노출',
-  views: '조회',
-  engagements: '참여',
-  replies: '답글',
-  signups: '가입',
-  conversions: '전환',
-  revenue_minor: '매출(최소 단위)',
-  followers: '팔로워',
-  subscribers: '구독자',
+  get clicks() { return translate('클릭(raw)'); },
+  get impressions() { return translate('노출'); },
+  get views() { return translate('조회'); },
+  get engagements() { return translate('참여'); },
+  get replies() { return translate('답글'); },
+  get signups() { return translate('가입'); },
+  get conversions() { return translate('전환'); },
+  get revenue_minor() { return translate('매출(최소 단위)'); },
+  get followers() { return translate('팔로워'); },
+  get subscribers() { return translate('구독자'); },
 };
 
 export const FEEDBACK_CATEGORIES = ['bug', 'feature_request', 'question', 'praise', 'complaint', 'other'] as const;
 export const FEEDBACK_CATEGORY_LABELS: Record<string, string> = {
-  bug: '버그',
-  feature_request: '기능 요청',
-  question: '질문',
-  praise: '칭찬',
-  complaint: '불만',
-  other: '기타',
+  get bug() { return translate('버그'); },
+  get feature_request() { return translate('기능 요청'); },
+  get question() { return translate('질문'); },
+  get praise() { return translate('칭찬'); },
+  get complaint() { return translate('불만'); },
+  get other() { return translate('기타'); },
 };
 /** 기록하면 제품 티켓이 되는 분류(feedback_to_product 가 켜져 있을 때). */
 export const TICKETABLE_CATEGORIES = ['bug', 'feature_request'];
 
 export const FEEDBACK_SENTIMENTS = ['positive', 'neutral', 'negative'] as const;
-export const SENTIMENT_LABELS: Record<string, string> = { positive: '긍정', neutral: '중립', negative: '부정' };
+export const SENTIMENT_LABELS: Record<string, string> = { get positive() { return translate('긍정'); }, get neutral() { return translate('중립'); }, get negative() { return translate('부정'); } };
 
 export const BUDGET_PERIOD_LABELS: Record<string, string> = {
-  none: '기간 상한 없음',
-  week: '주 단위(UTC, 월요일 시작)',
-  month: '월 단위(UTC)',
+  get none() { return translate('기간 상한 없음'); },
+  get week() { return translate('주 단위(UTC, 월요일 시작)'); },
+  get month() { return translate('월 단위(UTC)'); },
 };
 
 export const PAYMENT_PROVIDER_LABELS: Record<string, string> = {
-  manual: '수동 — AWB 밖에서 결제하고 결과를 기록',
-  webhook: '웹훅 — 승인하면 서버가 결제 엔드포인트로 보냄',
-  meta_ads: 'Meta Ads — 승인하면 서버가 광고 캠페인 지출 한도(spend_cap)를 올림',
-  google_ads: 'Google Ads — 승인하면 서버가 캠페인 총예산을 올림',
-  stripe_issuing: 'Stripe Issuing — 승인하면 서버가 승인 금액이 한도인 가상 카드를 만듦',
+  get manual() { return translate('수동 — AWB 밖에서 결제하고 결과를 기록'); },
+  get webhook() { return translate('웹훅 — 승인하면 서버가 결제 엔드포인트로 보냄'); },
+  get meta_ads() { return translate('Meta Ads — 승인하면 서버가 광고 캠페인 지출 한도(spend_cap)를 올림'); },
+  get google_ads() { return translate('Google Ads — 승인하면 서버가 캠페인 총예산을 올림'); },
+  get stripe_issuing() { return translate('Stripe Issuing — 승인하면 서버가 승인 금액이 한도인 가상 카드를 만듦'); },
 };
 
 // ── 직접 결제 공급자(docs/marketing.md "직접 결제 어댑터") ─────────────────────
@@ -439,9 +441,9 @@ export const DIRECT_PROVIDER_SPECS: Readonly<Record<MarketingDirectPaymentProvid
 };
 
 export const DIRECT_REF_FORMATS: Record<MarketingDirectPaymentProvider, string> = {
-  meta_ads: 'act_<광고 계정 id>/<캠페인 id> (예: act_1234567890/120210000000000)',
-  google_ads: '<고객 id>/<캠페인 id> (예: 123-456-7890/22334455)',
-  stripe_issuing: '카드 소지자 id ich_… (예: ich_1MsKAB2eZvKYlo2C)',
+  get meta_ads() { return translate('act_<광고 계정 id>/<캠페인 id> (예: act_1234567890/120210000000000)'); },
+  get google_ads() { return translate('<고객 id>/<캠페인 id> (예: 123-456-7890/22334455)'); },
+  get stripe_issuing() { return translate('카드 소지자 id ich_… (예: ich_1MsKAB2eZvKYlo2C)'); },
 };
 
 /** 직접 공급자 credential 의 필드 — Credentials 화면에서 이 공급자를 골라 만든다. */
@@ -458,14 +460,14 @@ export function directCredentialFieldsHint(provider: MarketingDirectPaymentProvi
   const conditional = new Set(alternatives.flat());
   return [
     ...fields.required,
-    ...(alternatives.length ? [alternatives.map((group) => group.join(' + ')).join(' 또는 ') + '(한 방식 필수)'] : []),
-    ...fields.optional.filter((field) => !conditional.has(field)).map((field) => field + '(선택)'),
+    ...(alternatives.length ? [alternatives.map((group) => group.join(' + ')).join(translate(' 또는 ')) + translate('(한 방식 필수)')] : []),
+    ...fields.optional.filter((field) => !conditional.has(field)).map((field) => field + translate('(선택)')),
   ].join(', ');
 }
 
 /** 수취인 편집기의 결제 경로 고르기 — 무엇을 하는 경로인지 함께. */
 export function directRouteOptionLabel(provider: MarketingDirectPaymentProvider): string {
-  return `${DIRECT_PAYMENT_PROVIDER_LABELS[provider]} — ${DIRECT_PROVIDER_SPECS[provider].kind === 'card' ? '승인 금액 한도의 가상 카드 발급' : '광고 캠페인 상한 올리기'}`;
+  return `${DIRECT_PAYMENT_PROVIDER_LABELS[provider]} — ${DIRECT_PROVIDER_SPECS[provider].kind === 'card' ? translate('승인 금액 한도의 가상 카드 발급') : translate('광고 캠페인 상한 올리기')}`;
 }
 
 /** Stripe 일회용 카드 한 장의 최대(서버 STRIPE_SINGLE_USE_MAX_MINOR 와 같다 — 승인 한 건의 고정 상한). */
@@ -485,20 +487,20 @@ export function parseCardCategories(input: string): { categories: string[]; prob
   for (const raw of input.split(',')) {
     const name = raw.trim().toLowerCase();
     if (!name) continue;
-    if (!CARD_CATEGORY_PATTERN.test(name)) return { categories: [], problem: `"${raw.trim()}" 는 Stripe 업종 이름 형식이 아닙니다(소문자와 _ — 예: advertising_services)` };
+    if (!CARD_CATEGORY_PATTERN.test(name)) return { categories: [], problem: translate('"{0}" 는 Stripe 업종 이름 형식이 아닙니다(소문자와 _ — 예: advertising_services)', { 0: raw.trim() }) };
     out.add(name);
   }
-  if (out.size > 20) return { categories: [], problem: '허용 업종은 20개까지입니다' };
+  if (out.size > 20) return { categories: [], problem: translate('허용 업종은 20개까지입니다') };
   return { categories: [...out].sort(), problem: '' };
 }
 
 /** 수취인의 카드 통제 한 줄(목록 표시용). 카드 공급자가 아니면 ''. */
 export function cardControlsLabel(payee: MarketingPayee, currency: string): string {
   if (!isDirectPaymentProvider(payee.provider) || DIRECT_PROVIDER_SPECS[payee.provider].kind !== 'card') return '';
-  const parts = [payee.card_single_use === false ? '여러 번 쓰는 카드' : '일회용'];
+  const parts = [payee.card_single_use === false ? translate('여러 번 쓰는 카드') : translate('일회용')];
   if (payee.card_id) parts.push(payee.card_id);
-  parts.push(payee.card_categories?.length ? `업종 ${payee.card_categories.join(', ')}` : '업종 제한 없음');
-  if (typeof payee.card_max_minor === 'number') parts.push(`카드당 최대 ${formatMinor(payee.card_max_minor, currency)}`);
+  parts.push(payee.card_categories?.length ? translate('업종 {0}', { 0: payee.card_categories.join(', ') }) : translate('업종 제한 없음'));
+  if (typeof payee.card_max_minor === 'number') parts.push(translate('카드당 최대 {0}', { 0: formatMinor(payee.card_max_minor, currency) }));
   return parts.join(' · ');
 }
 
@@ -514,7 +516,7 @@ const DIRECT_REF_PATTERNS: Record<MarketingDirectPaymentProvider, RegExp> = {
 
 /** 수취인 ref 가 그 공급자의 대상 형식인가 — 저장 전에 화면이 먼저 알려 준다(서버가 다시 본다). 문제 없으면 ''. */
 export function directRefProblem(provider: MarketingDirectPaymentProvider, ref: string): string {
-  return DIRECT_REF_PATTERNS[provider].test(ref.trim()) ? '' : `${DIRECT_PAYMENT_PROVIDER_LABELS[provider]} 대상은 ${DIRECT_REF_FORMATS[provider]} 형식입니다`;
+  return DIRECT_REF_PATTERNS[provider].test(ref.trim()) ? '' : translate('{0} 대상은 {1} 형식입니다', { 0: DIRECT_PAYMENT_PROVIDER_LABELS[provider], 1: DIRECT_REF_FORMATS[provider] });
 }
 
 /**
@@ -534,8 +536,8 @@ export function payeeRouteLabel(payee: MarketingPayee): string {
 export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' | 'provider'> & Partial<Pick<MarketingSpendRequest, 'payload'>>): StatusView {
   if (isDirectPaymentProvider(spend.provider)) {
     const card = DIRECT_PROVIDER_SPECS[spend.provider].kind === 'card' && !spend.payload?.card_id;
-    if (spend.status === 'paid') return { label: card ? '카드 발급됨' : '한도 반영됨', tone: 'done' };
-    if (spend.status === 'executing') return { label: card ? '카드 발급 중' : '한도 변경 중', tone: 'live' };
+    if (spend.status === 'paid') return { label: card ? translate('카드 발급됨') : translate('한도 반영됨'), tone: 'done' };
+    if (spend.status === 'executing') return { label: card ? translate('카드 발급 중') : translate('한도 변경 중'), tone: 'live' };
   }
   return spendStatusView(spend.status);
 }
@@ -543,17 +545,17 @@ export function spendStatusViewFor(spend: Pick<MarketingSpendRequest, 'status' |
 /** 승인 확인 창의 안내 — 이 결제 경로에서 승인하면 무엇이 일어나는가. */
 export function spendApproveHint(spend: Pick<MarketingSpendRequest, 'provider'> & Partial<Pick<MarketingSpendRequest, 'payload'>>): string {
   if (spend.provider === 'meta_ads') {
-    return '승인하면 서버가 곧바로 Meta 광고 캠페인의 지출 한도(spend_cap)를 위 계획대로 바꿉니다. 그 사이 한도가 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
+    return translate('승인하면 서버가 곧바로 Meta 광고 캠페인의 지출 한도(spend_cap)를 위 계획대로 바꿉니다. 그 사이 한도가 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.');
   }
   if (spend.provider === 'google_ads') {
-    return '승인하면 서버가 곧바로 Google Ads 캠페인의 총예산을 위 계획대로 바꿉니다. 그 사이 예산이 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.';
+    return translate('승인하면 서버가 곧바로 Google Ads 캠페인의 총예산을 위 계획대로 바꿉니다. 그 사이 예산이 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다.');
   }
   if (spend.provider === 'stripe_issuing') {
-    if (spend.payload?.card_id) return '승인하면 같은 Stripe 카드의 누적 한도를 위 계획대로 올립니다. 실행 직전 한도가 달라졌으면 보내지 않습니다. 결과가 불분명하면 결과 불명으로 남습니다. 승인 금액 전체를 사용으로 셉니다.';
-    return '승인하면 서버가 곧바로 위 계획대로 Stripe Issuing 가상 카드를 만듭니다(비활성으로 만들어 계획과 대조한 뒤 활성화). 카드 번호는 Stripe 대시보드에서 봅니다. 자동 재시도는 없습니다. 이 금액은 사용으로 셉니다.';
+    if (spend.payload?.card_id) return translate('승인하면 같은 Stripe 카드의 누적 한도를 위 계획대로 올립니다. 실행 직전 한도가 달라졌으면 보내지 않습니다. 결과가 불분명하면 결과 불명으로 남습니다. 승인 금액 전체를 사용으로 셉니다.');
+    return translate('승인하면 서버가 곧바로 위 계획대로 Stripe Issuing 가상 카드를 만듭니다(비활성으로 만들어 계획과 대조한 뒤 활성화). 카드 번호는 Stripe 대시보드에서 봅니다. 자동 재시도는 없습니다. 이 금액은 사용으로 셉니다.');
   }
-  if (spend.provider === 'webhook') return '승인하면 서버가 곧바로 결제 엔드포인트로 이 내용을 보냅니다. 자동 재시도는 없습니다.';
-  return '승인하면 이 금액이 예산에서 보류됩니다. AWB 밖에서 결제한 뒤 거래 id 와 함께 결제 완료를 기록하세요.';
+  if (spend.provider === 'webhook') return translate('승인하면 서버가 곧바로 결제 엔드포인트로 이 내용을 보냅니다. 자동 재시도는 없습니다.');
+  return translate('승인하면 이 금액이 예산에서 보류됩니다. AWB 밖에서 결제한 뒤 거래 id 와 함께 결제 완료를 기록하세요.');
 }
 
 /**
@@ -565,8 +567,8 @@ export function cardLimitWarning(spend: Pick<MarketingSpendRequest, 'provider' |
   const plan = spend.payload || {};
   if (plan.single_use !== true || typeof plan.limit_minor !== 'number' || plan.limit_minor <= STRIPE_STANDARD_CARD_DAILY_MINOR) return '';
   // Stripe 가 밝힌 한도는 USD 다 — 다른 통화 카드에는 같은 숫자를 근사로 쓴다.
-  const daily = spend.currency === 'USD' ? '500 USD 라' : '500 USD 상당이라';
-  return `일회용 카드의 한도가 ${formatMinor(STRIPE_STANDARD_CARD_DAILY_MINOR, spend.currency)} 를 넘습니다 — 셀프 서비스 Standard 프로그램은 카드당 하루 ${daily} 첫 결제가 거절될 수 있고, 그래도 이 금액 전체가 사용으로 묶입니다. 프로그램 한도를 확인하세요.`;
+  const daily = spend.currency === 'USD' ? translate('500 USD 라') : translate('500 USD 상당이라');
+  return translate('일회용 카드의 한도가 {0} 를 넘습니다 — 셀프 서비스 Standard 프로그램은 카드당 하루 {1} 첫 결제가 거절될 수 있고, 그래도 이 금액 전체가 사용으로 묶입니다. 프로그램 한도를 확인하세요.', { 0: formatMinor(STRIPE_STANDARD_CARD_DAILY_MINOR, spend.currency), 1: daily });
 }
 
 /**
@@ -586,49 +588,49 @@ export function unknownReconcileHint(spend: Pick<MarketingSpendRequest, 'provide
   const minutes = DIRECT_FAIL_GRACE_MS / 60_000;
   const executedAt = spend.executing_at ? new Date(spend.executing_at).getTime() : NaN;
   const failAfter = Number.isFinite(executedAt)
-    ? `실행 뒤 ${minutes}분(${formatDateTime(new Date(executedAt + DIRECT_FAIL_GRACE_MS).toISOString())})이 지나야`
-    : `실행 뒤 ${minutes}분이 지나야`;
+    ? translate('실행 뒤 {0}분({1})이 지나야', { 0: minutes, 1: formatDateTime(new Date(executedAt + DIRECT_FAIL_GRACE_MS).toISOString()) })
+    : translate('실행 뒤 {0}분이 지나야', { 0: minutes });
   if (spend.provider === 'meta_ads') {
-    return `Ads Manager 에서 캠페인 ${campaignId} 의 지출 한도가 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 한도 변경은 반영에 최대 15분이 걸려, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
+    return translate('Ads Manager 에서 캠페인 {0} 의 지출 한도가 {1}(목표)인지 {2}(이전)인지 확인하세요. 한도 변경은 반영에 최대 15분이 걸려, {3} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.', { 0: campaignId, 1: money(plan.to_minor), 2: money(plan.from_minor), 3: failAfter });
   }
   if (spend.provider === 'google_ads') {
-    return `Google Ads 에서 캠페인 ${campaignId} 의 총예산이 ${money(plan.to_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 변경 기록은 몇 분 늦게 보이고, ${failAfter} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.`;
+    return translate('Google Ads 에서 캠페인 {0} 의 총예산이 {1}(목표)인지 {2}(이전)인지 확인하세요. 변경 기록은 몇 분 늦게 보이고, {3} 실패로 기록할 수 있습니다. "공급자에서 확인" 이 지금 값을 읽어 옵니다.', { 0: campaignId, 1: money(plan.to_minor), 2: money(plan.from_minor), 3: failAfter });
   }
   if (spend.provider === 'stripe_issuing') {
-    if (plan.card_id) return `"공급자에서 확인" 으로 카드 ${plan.card_id} 의 누적 한도가 ${money(plan.limit_minor)}(목표)인지 ${money(plan.from_minor)}(이전)인지 확인하세요. 목표 한도가 반영됐으면 그 카드 id 로 결제 완료를 기록하세요. ${failAfter} 이전 한도가 확인되고 이번 증액으로 쓴 돈이 없음을 확인한 경우에만 실패로 기록할 수 있습니다.`;
-    return `"공급자에서 확인" 이 카드 소지자 ${plan.target?.cardholder || ''} 의 카드 중 이 요청의 카드를 찾습니다(Stripe 대시보드 Issuing → Cards 의 metadata awb_spend_request_id). 활성(active) 카드면 그 카드 id 로 결제 완료를 기록하세요. 비활성(inactive) 카드는 AWB 가 활성화하지 않은 카드입니다 — 쓰지 않으면 대시보드에서 해지한 뒤 실패로, 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록합니다. 카드가 없으면 ${failAfter} 실패로 기록할 수 있습니다. 해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다.`;
+    if (plan.card_id) return translate('"공급자에서 확인" 으로 카드 {0} 의 누적 한도가 {1}(목표)인지 {2}(이전)인지 확인하세요. 목표 한도가 반영됐으면 그 카드 id 로 결제 완료를 기록하세요. {3} 이전 한도가 확인되고 이번 증액으로 쓴 돈이 없음을 확인한 경우에만 실패로 기록할 수 있습니다.', { 0: plan.card_id, 1: money(plan.limit_minor), 2: money(plan.from_minor), 3: failAfter });
+    return translate('"공급자에서 확인" 이 카드 소지자 {0} 의 카드 중 이 요청의 카드를 찾습니다(Stripe 대시보드 Issuing → Cards 의 metadata awb_spend_request_id). 활성(active) 카드면 그 카드 id 로 결제 완료를 기록하세요. 비활성(inactive) 카드는 AWB 가 활성화하지 않은 카드입니다 — 쓰지 않으면 대시보드에서 해지한 뒤 실패로, 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록합니다. 카드가 없으면 {1} 실패로 기록할 수 있습니다. 해지된 카드만 있으면 그 카드로 쓴 돈이 없음을 확인해야 합니다.', { 0: plan.target?.cardholder || '', 1: failAfter });
   }
-  return '결제 시스템에서 실제 결제 여부를 확인하세요.';
+  return translate('결제 시스템에서 실제 결제 여부를 확인하세요.');
 }
 
 /** 연결 확인의 열린 요청 표시 — 다른 계정의 것은 id · 상태 없이 온다. 없으면 ''. */
 export function openRequestLabel(open: { id: string; status: string } | null): string {
   if (!open) return '';
-  return open.id ? `열린 요청 ${open.status}` : '다른 계정에 열린 요청 있음';
+  return open.id ? translate('열린 요청 {0}', { 0: open.status }) : translate('다른 계정에 열린 요청 있음');
 }
 
 /** 공급자 확인 결과 한 줄. */
 export function inspectionSummary(insp: MarketingSpendInspection, currency: string): string {
   if (insp.kind === 'card') {
-    if (insp.result === 'none') return '이 요청의 카드가 없습니다(실행 시각 ±1일) — 발급되지 않은 것으로 보입니다.';
-    const cards = insp.cards.map((c) => `${c.id}(${c.status || '상태 모름'}${c.limit_minor !== null ? `, 한도 ${formatMinor(c.limit_minor, currency)}` : ''})`).join(', ');
+    if (insp.result === 'none') return translate('이 요청의 카드가 없습니다(실행 시각 ±1일) — 발급되지 않은 것으로 보입니다.');
+    const cards = insp.cards.map((c) => `${c.id}(${c.status || translate('상태 모름')}${c.limit_minor !== null ? translate(', 한도 {0}', { 0: formatMinor(c.limit_minor, currency) }) : ''})`).join(', ');
     if (insp.result === 'found') {
       if (insp.cards.some((c) => c.status === 'active')) {
-        return `이 요청의 카드: ${cards} — 활성 카드의 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).`;
+        return translate('이 요청의 카드: {0} — 활성 카드의 id 로 결제 완료를 기록하세요(쓰지 않을 카드면 Stripe 대시보드에서 해지한 뒤 실패로).', { 0: cards });
       }
       if (insp.cards.some((c) => c.status !== 'canceled')) {
-        return `이 요청의 카드: ${cards} — AWB 가 활성화하지 않은 카드입니다. 쓰지 않으면 Stripe 대시보드에서 해지한 뒤 실패로(쓴 돈 없음 확인), 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록하세요.`;
+        return translate('이 요청의 카드: {0} — AWB 가 활성화하지 않은 카드입니다. 쓰지 않으면 Stripe 대시보드에서 해지한 뒤 실패로(쓴 돈 없음 확인), 쓰려면 대시보드에서 활성화한 뒤 결제 완료로 기록하세요.', { 0: cards });
       }
-      return `이 요청의 카드: ${cards} — 모두 해지됐습니다. 그 카드로 쓴 돈이 없음을 Stripe 대시보드에서 확인한 뒤 실패로 기록하세요.`;
+      return translate('이 요청의 카드: {0} — 모두 해지됐습니다. 그 카드로 쓴 돈이 없음을 Stripe 대시보드에서 확인한 뒤 실패로 기록하세요.', { 0: cards });
     }
-    return `카드 소지자의 카드를 다 보지 못했습니다${cards ? `(찾은 카드: ${cards})` : ''} — Stripe 대시보드에서 확인하세요.`;
+    return translate('카드 소지자의 카드를 다 보지 못했습니다{0} — Stripe 대시보드에서 확인하세요.', { 0: cards ? translate('(찾은 카드: {0})', { 0: cards }) : '' });
   }
-  const now = insp.observed_minor === null ? (insp.observed === null ? '한도 없음' : `${insp.observed}(공급자 단위)`) : formatMinor(insp.observed_minor, currency);
-  const where = insp.position === 'at_target' ? '목표값입니다 — 반영된 것으로 보입니다'
-    : insp.position === 'at_from' ? '이전 값입니다 — 반영되지 않은 것으로 보입니다'
-      : insp.position === 'no_ceiling' ? '한도가 없습니다 — 누군가 공급자 화면에서 지웠습니다'
-        : '계획의 이전 값도 목표값도 아닙니다 — 공급자 화면에서 바뀐 이력을 보세요';
-  return `지금 상한 ${now}: ${where}. (${formatMinor(insp.from_minor, currency)} → ${formatMinor(insp.to_minor, currency)} 계획)`;
+  const now = insp.observed_minor === null ? (insp.observed === null ? translate('한도 없음') : translate('{0}(공급자 단위)', { 0: insp.observed })) : formatMinor(insp.observed_minor, currency);
+  const where = insp.position === 'at_target' ? translate('목표값입니다 — 반영된 것으로 보입니다')
+    : insp.position === 'at_from' ? translate('이전 값입니다 — 반영되지 않은 것으로 보입니다')
+      : insp.position === 'no_ceiling' ? translate('한도가 없습니다 — 누군가 공급자 화면에서 지웠습니다')
+        : translate('계획의 이전 값도 목표값도 아닙니다 — 공급자 화면에서 바뀐 이력을 보세요');
+  return translate('지금 상한 {0}: {1}. ({2} → {3} 계획)', { 0: now, 1: where, 2: formatMinor(insp.from_minor, currency), 3: formatMinor(insp.to_minor, currency) });
 }
 
 /**
@@ -663,69 +665,69 @@ export interface StatusView {
 }
 
 const CAMPAIGN_STATUS: Record<string, StatusView> = {
-  draft: { label: '초안', tone: 'idle' },
-  active: { label: '진행 중', tone: 'live' },
-  paused: { label: '일시정지', tone: 'stalled' },
-  archived: { label: '보관됨', tone: 'idle' },
+  draft: { get label() { return translate('초안'); }, tone: 'idle' },
+  active: { get label() { return translate('진행 중'); }, tone: 'live' },
+  paused: { get label() { return translate('일시정지'); }, tone: 'stalled' },
+  archived: { get label() { return translate('보관됨'); }, tone: 'idle' },
 };
 
 const CHANNEL_STATUS: Record<string, StatusView> = {
-  proposed: { label: '승인 대기', tone: 'attention' },
-  awaiting_credential: { label: '연결 대기', tone: 'attention' },
-  active: { label: '활성', tone: 'done' },
-  paused: { label: '일시정지', tone: 'stalled' },
-  rejected: { label: '거부됨', tone: 'idle' },
+  proposed: { get label() { return translate('승인 대기'); }, tone: 'attention' },
+  awaiting_credential: { get label() { return translate('연결 대기'); }, tone: 'attention' },
+  active: { get label() { return translate('활성'); }, tone: 'done' },
+  paused: { get label() { return translate('일시정지'); }, tone: 'stalled' },
+  rejected: { get label() { return translate('거부됨'); }, tone: 'idle' },
 };
 
 const POST_STATUS: Record<string, StatusView> = {
-  draft: { label: '승인 대기', tone: 'attention' },
-  approved: { label: '승인됨', tone: 'queued' },
-  publishing: { label: '게시 중', tone: 'live' },
-  sending: { label: '발송 중', tone: 'live' },
-  published: { label: '게시됨', tone: 'done' },
-  rejected: { label: '거부됨', tone: 'idle' },
-  failed: { label: '실패', tone: 'failed' },
+  draft: { get label() { return translate('승인 대기'); }, tone: 'attention' },
+  approved: { get label() { return translate('승인됨'); }, tone: 'queued' },
+  publishing: { get label() { return translate('게시 중'); }, tone: 'live' },
+  sending: { get label() { return translate('발송 중'); }, tone: 'live' },
+  published: { get label() { return translate('게시됨'); }, tone: 'done' },
+  rejected: { get label() { return translate('거부됨'); }, tone: 'idle' },
+  failed: { get label() { return translate('실패'); }, tone: 'failed' },
 };
 
 const ALLOCATION_STATUS: Record<string, StatusView> = {
-  proposed: { label: '승인 대기', tone: 'attention' },
-  active: { label: '적용 중', tone: 'done' },
-  superseded: { label: '대체됨', tone: 'idle' },
-  rejected: { label: '거부됨', tone: 'idle' },
+  proposed: { get label() { return translate('승인 대기'); }, tone: 'attention' },
+  active: { get label() { return translate('적용 중'); }, tone: 'done' },
+  superseded: { get label() { return translate('대체됨'); }, tone: 'idle' },
+  rejected: { get label() { return translate('거부됨'); }, tone: 'idle' },
 };
 
 const SPEND_STATUS: Record<string, StatusView> = {
-  pending: { label: '승인 대기', tone: 'attention' },
-  approved: { label: '승인됨', tone: 'queued' },
-  executing: { label: '결제 중', tone: 'live' },
-  paid: { label: '결제 완료', tone: 'done' },
-  failed: { label: '결제 실패', tone: 'failed' },
-  unknown: { label: '결과 불명 — 확인 필요', tone: 'failed' },
-  denied: { label: '거부됨', tone: 'idle' },
-  expired: { label: '만료됨', tone: 'idle' },
-  cancelled: { label: '취소됨', tone: 'idle' },
+  pending: { get label() { return translate('승인 대기'); }, tone: 'attention' },
+  approved: { get label() { return translate('승인됨'); }, tone: 'queued' },
+  executing: { get label() { return translate('결제 중'); }, tone: 'live' },
+  paid: { get label() { return translate('결제 완료'); }, tone: 'done' },
+  failed: { get label() { return translate('결제 실패'); }, tone: 'failed' },
+  unknown: { get label() { return translate('결과 불명 — 확인 필요'); }, tone: 'failed' },
+  denied: { get label() { return translate('거부됨'); }, tone: 'idle' },
+  expired: { get label() { return translate('만료됨'); }, tone: 'idle' },
+  cancelled: { get label() { return translate('취소됨'); }, tone: 'idle' },
 };
 
 const CYCLE_STATUS: Record<string, StatusView> = {
-  running: { label: '실행 중', tone: 'live' },
-  completed: { label: '완료', tone: 'done' },
-  timed_out: { label: '시간 초과', tone: 'failed' },
-  cancelled: { label: '취소됨', tone: 'idle' },
-  failed: { label: '실패', tone: 'failed' },
+  running: { get label() { return translate('실행 중'); }, tone: 'live' },
+  completed: { get label() { return translate('완료'); }, tone: 'done' },
+  timed_out: { get label() { return translate('시간 초과'); }, tone: 'failed' },
+  cancelled: { get label() { return translate('취소됨'); }, tone: 'idle' },
+  failed: { get label() { return translate('실패'); }, tone: 'failed' },
 };
 
 const FEEDBACK_STATUS: Record<string, StatusView> = {
-  recorded: { label: '기록됨', tone: 'idle' },
-  ticketed: { label: '티켓 생성', tone: 'done' },
-  capped: { label: '상한 — 티켓 보류', tone: 'stalled' },
+  recorded: { get label() { return translate('기록됨'); }, tone: 'idle' },
+  ticketed: { get label() { return translate('티켓 생성'); }, tone: 'done' },
+  capped: { get label() { return translate('상한 — 티켓 보류'); }, tone: 'stalled' },
 };
 
 const CONTACT_STATUS: Record<string, StatusView> = {
-  subscribed: { label: '수신 동의', tone: 'done' },
-  unsubscribed: { label: '수신거부', tone: 'idle' },
-  bounced: { label: '반송(바운스)', tone: 'stalled' },
-  complained: { label: '스팸 신고', tone: 'failed' },
-  erased: { label: '삭제됨(억제)', tone: 'idle' },
+  subscribed: { get label() { return translate('수신 동의'); }, tone: 'done' },
+  unsubscribed: { get label() { return translate('수신거부'); }, tone: 'idle' },
+  bounced: { get label() { return translate('반송(바운스)'); }, tone: 'stalled' },
+  complained: { get label() { return translate('스팸 신고'); }, tone: 'failed' },
+  erased: { get label() { return translate('삭제됨(억제)'); }, tone: 'idle' },
 };
 
 /** 연락처 화면의 상태 필터 — 서버 CONTACT_STATUSES 와 같은 집합(test/marketing-rules.test.mjs). */
@@ -733,13 +735,13 @@ export const CONTACT_STATUS_FILTERS = ['subscribed', 'unsubscribed', 'bounced', 
 
 /** 수신거부 · 억제가 어디서 왔는가 — 연락처의 unsubscribe_source. */
 export const UNSUBSCRIBE_SOURCE_LABELS: Record<string, string> = {
-  link: '수신거부 링크',
-  one_click: '메일 앱 원클릭',
-  manual: '사람이 기록',
-  mailto: '메일 회신(unsubscribe)',
-  bounce: '공급자: 바운스',
-  complaint: '공급자: 스팸 신고',
-  provider: '공급자: 수신거부',
+  get link() { return translate('수신거부 링크'); },
+  get one_click() { return translate('메일 앱 원클릭'); },
+  get manual() { return translate('사람이 기록'); },
+  get mailto() { return translate('메일 회신(unsubscribe)'); },
+  get bounce() { return translate('공급자: 바운스'); },
+  get complaint() { return translate('공급자: 스팸 신고'); },
+  get provider() { return translate('공급자: 수신거부'); },
 };
 
 function lookup(map: Record<string, StatusView>, status: string): StatusView {
@@ -770,8 +772,8 @@ export function listHoldSummary(hold: { reason?: string; stats?: { hard_bounced?
   const s = hold.stats || {};
   const delivered = Math.max((s.sent || 0) - (s.bounced || 0), 0);
   const rate = typeof s.rate === 'number' && Number.isFinite(s.rate) ? `${(s.rate * 100).toFixed(2)}%` : '—';
-  if (hold.reason === 'hard_bounce_rate') return `하드 바운스율 ${rate} — 영구 실패 ${formatCount(s.hard_bounced ?? 0)} / 발송 ${formatCount(s.sent ?? 0)}`;
-  return `스팸 신고율 ${rate} — 신고 ${formatCount(s.complained ?? 0)} / 닿은 메일 ${formatCount(delivered)}`;
+  if (hold.reason === 'hard_bounce_rate') return translate('하드 바운스율 {0} — 영구 실패 {1} / 발송 {2}', { 0: rate, 1: formatCount(s.hard_bounced ?? 0), 2: formatCount(s.sent ?? 0) });
+  return translate('스팸 신고율 {0} — 신고 {1} / 닿은 메일 {2}', { 0: rate, 1: formatCount(s.complained ?? 0), 2: formatCount(delivered) });
 }
 
 /**
@@ -783,14 +785,14 @@ export function emailWebhookSetup(w: {
 }): { items: Array<{ label: string; url: string | null; signing: boolean; keyField: string; events: string }>; missingUrl: boolean } {
   const items = w.provider === 'sendgrid'
     ? [
-      { label: 'Event Webhook', url: w.events_url, signing: w.events_signing, keyField: 'webhook_public_key',
-        events: 'Bounced · Dropped · Spam Reports · Unsubscribes · Group Unsubscribes, Signed Event Webhook 켬' },
-      { label: 'Inbound Parse(답장)', url: w.inbound_url, signing: w.inbound_signing, keyField: 'inbound_public_key',
-        events: '회신 주소의 도메인, 서명 검증 security policy, "POST the raw, full MIME message" 끔' },
+      { label: translate('Event Webhook'), url: w.events_url, signing: w.events_signing, keyField: 'webhook_public_key',
+        events: translate('Bounced · Dropped · Spam Reports · Unsubscribes · Group Unsubscribes, Signed Event Webhook 켬') },
+      { label: translate('Inbound Parse(답장)'), url: w.inbound_url, signing: w.inbound_signing, keyField: 'inbound_public_key',
+        events: translate('회신 주소의 도메인, 서명 검증 security policy, "POST the raw, full MIME message" 끔') },
     ]
     : [
-      { label: 'Webhook', url: w.events_url, signing: w.events_signing, keyField: 'webhook_secret',
-        events: 'email.bounced · email.complained · email.suppressed · email.received(받은 메일을 쓰면)' },
+      { label: translate('Webhook'), url: w.events_url, signing: w.events_signing, keyField: 'webhook_secret',
+        events: translate('email.bounced · email.complained · email.suppressed · email.received(받은 메일을 쓰면)') },
     ];
   return { items, missingUrl: !w.events_url };
 }
@@ -800,7 +802,7 @@ export function emailWebhookSetup(w: {
  * 그냥 "승인됨" 이면 끝난 일처럼 읽힌다.
  */
 export function postStatusView(status: string, channelKind?: string | null): StatusView {
-  if (status === 'approved' && channelKind === 'manual') return { label: '게시 후 링크 기록 필요', tone: 'attention' };
+  if (status === 'approved' && channelKind === 'manual') return { label: translate('게시 후 링크 기록 필요'), tone: 'attention' };
   return lookup(POST_STATUS, status);
 }
 
@@ -816,13 +818,13 @@ export interface StatusAction {
 export function campaignStatusActions(status: string): StatusAction[] {
   switch (status) {
     case 'draft':
-      return [{ to: 'active', label: '시작' }, { to: 'archived', label: '보관', danger: true }];
+      return [{ to: 'active', label: translate('시작') }, { to: 'archived', label: translate('보관'), danger: true }];
     case 'active':
-      return [{ to: 'paused', label: '일시정지' }, { to: 'archived', label: '보관', danger: true }];
+      return [{ to: 'paused', label: translate('일시정지') }, { to: 'archived', label: translate('보관'), danger: true }];
     case 'paused':
-      return [{ to: 'active', label: '재개' }, { to: 'archived', label: '보관', danger: true }];
+      return [{ to: 'active', label: translate('재개') }, { to: 'archived', label: translate('보관'), danger: true }];
     case 'archived':
-      return [{ to: 'paused', label: '보관 해제' }];
+      return [{ to: 'paused', label: translate('보관 해제') }];
     default:
       return [];
   }
@@ -830,9 +832,9 @@ export function campaignStatusActions(status: string): StatusAction[] {
 
 /** 시작(active)을 막는 이유 — 서버 setStatus 와 같은 두 조건. 없으면 null. */
 export function activationBlocker(campaign: Pick<MarketingCampaign, 'agent_runtime' | 'capabilities' | 'project_id'>): string | null {
-  if (!campaign.agent_runtime) return '캠페인 에이전트를 먼저 지정하세요 (설정 → 캠페인 에이전트).';
+  if (!campaign.agent_runtime) return translate('캠페인 에이전트를 먼저 지정하세요 (설정 → 캠페인 에이전트).');
   if ((campaign.capabilities || []).includes('feedback_to_product') && !campaign.project_id) {
-    return '"피드백 → 제품 개선" 에는 제품 Project 가 필요합니다.';
+    return translate('"피드백 → 제품 개선" 에는 제품 Project 가 필요합니다.');
   }
   return null;
 }
@@ -878,17 +880,17 @@ export function cadencePayload(draft: CadenceDraft): CadencePayload {
   if (draft.kind === 'manual') return { ok: true, cycle_cron: null, cycle_interval_ms: null };
   if (draft.kind === 'cron') {
     const cron = draft.cron.trim();
-    if (cron.split(/\s+/).length !== 5) return { ok: false, error: 'cron 은 UTC 기준 5개 필드여야 합니다 (예: "0 1 * * *")' };
+    if (cron.split(/\s+/).length !== 5) return { ok: false, error: translate('cron 은 UTC 기준 5개 필드여야 합니다 (예: "0 1 * * *")') };
     return { ok: true, cycle_cron: cron, cycle_interval_ms: null };
   }
   const text = draft.hours.trim();
   if (draft.originalMs && draft.originalMs > 0 && text === trimNumber(draft.originalMs / 3_600_000)) {
     return { ok: true, cycle_cron: null, cycle_interval_ms: draft.originalMs };
   }
-  if (!/^\d+(\.\d+)?$/.test(text)) return { ok: false, error: '주기는 시간 단위 숫자로 입력하세요 (예: 24 또는 0.5)' };
+  if (!/^\d+(\.\d+)?$/.test(text)) return { ok: false, error: translate('주기는 시간 단위 숫자로 입력하세요 (예: 24 또는 0.5)') };
   const ms = Math.round(Number(text) * 3_600_000);
-  if (ms < MIN_CYCLE_INTERVAL_MS) return { ok: false, error: '주기는 10분(약 0.17시간) 이상이어야 합니다' };
-  if (ms > MAX_CYCLE_INTERVAL_MS) return { ok: false, error: '주기가 너무 깁니다 (최대 약 596시간)' };
+  if (ms < MIN_CYCLE_INTERVAL_MS) return { ok: false, error: translate('주기는 10분(약 0.17시간) 이상이어야 합니다') };
+  if (ms > MAX_CYCLE_INTERVAL_MS) return { ok: false, error: translate('주기가 너무 깁니다 (최대 약 596시간)') };
   return { ok: true, cycle_cron: null, cycle_interval_ms: ms };
 }
 
@@ -896,11 +898,11 @@ export function describeCadence(c: { cycle_cron: string | null; cycle_interval_m
   if (c.cycle_cron) return `cron ${c.cycle_cron} (UTC)`;
   const ms = c.cycle_interval_ms || 0;
   if (ms > 0) {
-    if (ms % 3_600_000 === 0) return `${ms / 3_600_000}시간마다`;
-    if (ms % 60_000 === 0) return `${ms / 60_000}분마다`;
-    return `${Math.round(ms / 1000)}초마다`;
+    if (ms % 3_600_000 === 0) return translate('{0}시간마다', { 0: ms / 3_600_000 });
+    if (ms % 60_000 === 0) return translate('{0}분마다', { 0: ms / 60_000 });
+    return translate('{0}초마다', { 0: Math.round(ms / 1000) });
   }
-  return '수동 실행만';
+  return translate('수동 실행만');
 }
 
 // ── 승인함(inbox) ───────────────────────────────────────────────────────────
@@ -910,12 +912,12 @@ export type InboxSection = 'spend_unknown' | 'spend_pending' | 'allocations' | '
 export const INBOX_SECTIONS: InboxSection[] = ['spend_unknown', 'spend_pending', 'allocations', 'posts', 'channels', 'follow_up'];
 
 export const INBOX_SECTION_LABELS: Record<InboxSection, string> = {
-  spend_unknown: '결제 결과 확인 필요',
-  spend_pending: '지출 승인',
-  allocations: '예산 편성 승인',
-  posts: '발신 승인 — 게시글 · 댓글 · 메일',
-  channels: '채널 승인',
-  follow_up: '사람이 마무리해야 하는 일',
+  get spend_unknown() { return translate('결제 결과 확인 필요'); },
+  get spend_pending() { return translate('지출 승인'); },
+  get allocations() { return translate('예산 편성 승인'); },
+  get posts() { return translate('발신 승인 — 게시글 · 댓글 · 메일'); },
+  get channels() { return translate('채널 승인'); },
+  get follow_up() { return translate('사람이 마무리해야 하는 일'); },
 };
 
 export type InboxItem =
@@ -1062,7 +1064,7 @@ export function spendApprovalState(
   const approvals = Array.isArray(spend.approvals) ? spend.approvals : [];
   const given = approvals.length;
   const mine = !!userId && approvals.some((a) => a.user_id === userId);
-  const label = required === 2 ? (given === 0 ? '2인 승인 필요' : `${Math.min(given, 2)}/2 승인`) : null;
+  const label = required === 2 ? (given === 0 ? translate('2인 승인 필요') : translate('{0}/2 승인', { 0: Math.min(given, 2) })) : null;
   return { required, given, mine, label };
 }
 
@@ -1228,7 +1230,7 @@ export function reportRange(days: number, now: Date = new Date()): { since: stri
 }
 
 export function formatCount(n: number | null | undefined): string {
-  return n === null || n === undefined || !Number.isFinite(Number(n)) ? '—' : Number(n).toLocaleString('en-US');
+  return n === null || n === undefined || !Number.isFinite(Number(n)) ? '—' : Number(n).toLocaleString(getLocaleTag());
 }
 
 /**
@@ -1257,8 +1259,8 @@ export function engagementSummary(
 ): string {
   if (!engagement) return '';
   const parts: string[] = [];
-  if (engagement.engagements !== null) parts.push(`${platform === 'github' ? '반응' : '점수'} ${formatCount(engagement.engagements)}`);
-  if (engagement.replies !== null) parts.push(`댓글 ${formatCount(engagement.replies)}`);
+  if (engagement.engagements !== null) parts.push(`${platform === 'github' ? translate('반응') : translate('점수')} ${formatCount(engagement.engagements)}`);
+  if (engagement.replies !== null) parts.push(translate('댓글 {0}', { 0: formatCount(engagement.replies) }));
   return parts.join(' · ');
 }
 
@@ -1301,10 +1303,10 @@ export function auditCursor(lastCreatedAt: string): string {
 }
 
 export function actorLabel(event: { actor_type: string; actor_name: string }): string {
-  if (event.actor_type === 'agent') return `에이전트${event.actor_name ? ` · ${event.actor_name}` : ''}`;
-  if (event.actor_type === 'system') return '시스템';
-  if (event.actor_type === 'public') return '수신자';
-  return event.actor_name || '사람';
+  if (event.actor_type === 'agent') return translate('에이전트{0}', { 0: event.actor_name ? ` · ${event.actor_name}` : '' });
+  if (event.actor_type === 'system') return translate('시스템');
+  if (event.actor_type === 'public') return translate('수신자');
+  return event.actor_name || translate('사람');
 }
 
 /** 날짜 · 시각 — 목록의 짧은 표기(로컬 시간대). */

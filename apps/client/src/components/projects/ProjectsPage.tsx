@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -29,6 +31,7 @@ const NARROW_BREAKPOINT = 720;
 const NEW = '__new__';
 
 export default function ProjectsPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const [searchParams] = useSearchParams();
@@ -37,7 +40,7 @@ export default function ProjectsPage() {
 
   // 마지막 쓰기 결과 — 공유 목록 재조회가 따라오기 전까지 화면에 먼저 반영한다.
   const [lastSaved, setLastSaved] = useState<Project | null>(null);
-  const projects = useMemo(() => mergeSavedProject(listed, lastSaved), [listed, lastSaved]);
+  const projects = useMemo(() => mergeSavedProject(listed, lastSaved), [listed, lastSaved, getLocale()]);
   useEffect(() => {
     if (!lastSaved) return;
     const row = listed.find((p) => p.id === lastSaved.id);
@@ -106,7 +109,7 @@ export default function ProjectsPage() {
     setDeleting(true);
     try {
       await api.deleteProject(project.id, force ? { force: true } : undefined);
-      showToast(`${project.name} 프로젝트를 삭제했습니다.`, 'success');
+      showToast(translate('{0} 프로젝트를 삭제했습니다.', { 0: project.name }), 'success');
       setDeleteTarget(null);
       setInUse(null);
       if (selectedId === project.id) setSelectedId(null);
@@ -119,7 +122,7 @@ export default function ProjectsPage() {
         setInUse({ project, counts });
       } else {
         setInUse(null);
-        showToast((err as Error)?.message || '프로젝트를 삭제하지 못했습니다.', 'error');
+        showToast((err as Error)?.message || translate('프로젝트를 삭제하지 못했습니다.'), 'error');
       }
     } finally {
       setDeleting(false);
@@ -148,33 +151,33 @@ export default function ProjectsPage() {
     />
   ) : (
     <div style={{ minHeight: 240, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', color: tokens.colors.textMuted, padding: 24 }}>
-      <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textSecondary, marginBottom: 6 }}>프로젝트를 선택하세요</div>
-      <div style={{ fontSize: 12 }}>왼쪽 목록에서 프로젝트를 고르거나 새 프로젝트를 만드세요.</div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textSecondary, marginBottom: 6 }}>{translate('프로젝트를 선택하세요')}</div>
+      <div style={{ fontSize: 12 }}>{translate('왼쪽 목록에서 프로젝트를 고르거나 새 프로젝트를 만드세요.')}</div>
     </div>
   );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Projects"
-        description="Git 저장소와 그 저장소를 작업하는 데 필요한 지식 — 티켓·QA·보안·Action·미션이 같은 프로젝트를 가리킵니다."
-        actions={<Button variant="primary" size="md" onClick={() => setSelectedId(NEW)}>+ 새 프로젝트</Button>}
+        title={translate('Projects')}
+        description={translate('Git 저장소와 그 저장소를 작업하는 데 필요한 지식 — 티켓·QA·보안·Action·미션이 같은 프로젝트를 가리킵니다.')}
+        actions={<Button variant="primary" size="md" onClick={() => setSelectedId(NEW)}>{translate('+ 새 프로젝트')}</Button>}
       />
       <div ref={containerRef} style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         {loading && projects.length === 0 ? (
-          <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: 24 }}>불러오는 중…</div>
+          <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: 24 }}>{translate('불러오는 중…')}</div>
         ) : error && projects.length === 0 ? (
           <div style={{ fontSize: 13, color: tokens.colors.danger, padding: 24 }}>
             {error}{' '}
-            <Button variant="secondary" size="sm" onClick={() => void reload()}>다시 시도</Button>
+            <Button variant="secondary" size="sm" onClick={() => void reload()}>{translate('다시 시도')}</Button>
           </div>
         ) : (
           <div style={{ display: 'flex', gap: tokens.spacing.md, alignItems: 'flex-start' }}>
             <div style={{ width: isNarrow ? '100%' : 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
               <Input
                 type="search"
-                aria-label="프로젝트 검색"
-                placeholder={`${projects.length}개 프로젝트 — 이름·URL 검색`}
+                aria-label={translate('프로젝트 검색')}
+                placeholder={translate('{0}개 프로젝트 — 이름·URL 검색', { 0: projects.length })}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
@@ -185,8 +188,8 @@ export default function ProjectsPage() {
                 {visible.length === 0 ? (
                   <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: 16, lineHeight: 1.5 }}>
                     {projects.length === 0
-                      ? '아직 프로젝트가 없습니다. "+ 새 프로젝트" 로 저장소를 등록하세요.'
-                      : `"${query}" 와 일치하는 프로젝트가 없습니다.`}
+                      ? translate('아직 프로젝트가 없습니다. "+ 새 프로젝트" 로 저장소를 등록하세요.')
+                      : translate('"{0}" 와 일치하는 프로젝트가 없습니다.', { 0: query })}
                   </div>
                 ) : visible.map((p) => (
                   <ProjectRow key={p.id} project={p} selected={p.id === selectedId} onSelect={() => setSelectedId(p.id)} />
@@ -211,7 +214,7 @@ export default function ProjectsPage() {
         <div
           role="dialog"
           aria-modal="true"
-          aria-label={selectedProject?.name || '새 프로젝트'}
+          aria-label={selectedProject?.name || translate('새 프로젝트')}
           style={{ position: 'fixed', inset: 0, background: tokens.colors.surface, zIndex: 9000, overflow: 'auto', padding: 20 }}
         >
           {detail}
@@ -220,30 +223,30 @@ export default function ProjectsPage() {
 
       <ConfirmDialog
         isOpen={!!deleteTarget}
-        title="프로젝트를 삭제할까요?"
-        confirmLabel={deleting ? '삭제 중…' : '삭제'}
-        cancelLabel="취소"
+        title={translate('프로젝트를 삭제할까요?')}
+        confirmLabel={deleting ? translate('삭제 중…') : translate('삭제')}
+        cancelLabel={translate('취소')}
         danger
-        message={deleteTarget ? `${deleteTarget.name} 프로젝트와 Host 폴더 지정이 삭제됩니다. 저장소 자체와 Host 의 체크아웃은 지워지지 않습니다.` : undefined}
+        message={deleteTarget ? translate('{0} 프로젝트와 Host 폴더 지정이 삭제됩니다. 저장소 자체와 Host 의 체크아웃은 지워지지 않습니다.', { 0: deleteTarget.name }) : undefined}
         onConfirm={() => { if (deleteTarget && !deleting) void runDelete(deleteTarget, false); }}
         onCancel={() => setDeleteTarget(null)}
       />
 
       <ConfirmDialog
         isOpen={!!inUse}
-        title="아직 이 프로젝트를 쓰는 항목이 있습니다"
-        confirmLabel={deleting ? '삭제 중…' : '강제 삭제'}
-        cancelLabel="취소"
+        title={translate('아직 이 프로젝트를 쓰는 항목이 있습니다')}
+        confirmLabel={deleting ? translate('삭제 중…') : translate('강제 삭제')}
+        cancelLabel={translate('취소')}
         danger
         message={inUse ? (
           <div data-testid="project-in-use">
-            <div style={{ marginBottom: 8 }}>{inUse.project.name} 를 참조하는 항목: {describeProjectUsage(inUse.counts)}</div>
+            <div style={{ marginBottom: 8 }}>{inUse.project.name} {translate('를 참조하는 항목:')} {describeProjectUsage(inUse.counts)}</div>
             {inUse.counts.length > 0 && (
               <ul style={{ margin: '0 0 8px 18px', padding: 0 }}>
                 {inUse.counts.map((c) => <li key={c.key}>{c.label}: {c.count}</li>)}
               </ul>
             )}
-            <div>강제 삭제하면 이 참조들은 프로젝트를 잃습니다(티켓·실행은 남고 저장소 지정만 빠집니다).</div>
+            <div>{translate('강제 삭제하면 이 참조들은 프로젝트를 잃습니다(티켓·실행은 남고 저장소 지정만 빠집니다).')}</div>
           </div>
         ) : undefined}
         onConfirm={() => { if (inUse && !deleting) void runDelete(inUse.project, true); }}
@@ -254,6 +257,7 @@ export default function ProjectsPage() {
 }
 
 function ProjectRow({ project, selected, onSelect }: { project: Project; selected: boolean; onSelect(): void }) {
+  useLocale();
   const folderCount = (project.host_folders || []).filter((f) => (f.path || '').trim()).length;
   return (
     <div
@@ -276,10 +280,10 @@ function ProjectRow({ project, selected, onSelect }: { project: Project; selecte
         {project.name}
       </div>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {project.repo_url || '(URL 없음)'}
+        {project.repo_url || translate('(URL 없음)')}
       </div>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-        {project.default_branch ? `${project.default_branch} · ` : ''}Host 폴더 {folderCount}
+        {project.default_branch ? `${project.default_branch} · ` : ''}{translate('Host 폴더')} {folderCount}
       </div>
     </div>
   );

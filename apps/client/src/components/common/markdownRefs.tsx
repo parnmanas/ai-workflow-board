@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 import React from 'react';
 import { tokens } from '../../tokens';
 import TicketRefCard from '../chat/TicketRefCard';
@@ -26,7 +27,7 @@ function renderMentionPill(
   return (
     <span
       key={key}
-      aria-label={`Mention: ${display}`}
+      aria-label={translate('Mention: {0}', { 0: display })}
       // data-mention-raw lets handleMentionAwareCopy swap the visible "@Name"
       // back to the structured `@[type:id|Name]` token on copy, so pasted
       // text is round-trippable through MentionTextarea.

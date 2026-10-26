@@ -1,3 +1,6 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
+import LanguageSelect from './LanguageSelect';
 import React from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -72,8 +75,8 @@ interface NavItem {
 }
 
 function roomDisplayName(room: ChatRoomListItem): string {
-  if (room.type === 'dm') return room.name || room.dm_partner_name || 'Direct Message';
-  return room.name || 'Unnamed Group';
+  if (room.type === 'dm') return room.name || room.dm_partner_name || translate('Direct Message');
+  return room.name || translate('Unnamed Group');
 }
 
 function roomInitials(room: ChatRoomListItem): string {
@@ -95,6 +98,7 @@ export default function Sidebar({
   roomsLoading,
   containerRef,
 }: SidebarProps) {
+  useLocale();
   const { user, logout, hasPermission } = useAuth();
   const { counts, countsLoaded, markAllTicketsReadLocal } = useNotifications();
   const { showToast } = useToast();
@@ -136,9 +140,9 @@ export default function Sidebar({
     try {
       await api.markAllTicketsRead();
       markAllTicketsReadLocal();
-      showToast('읽지 않은 티켓 코멘트를 모두 읽음으로 표시했습니다', 'success');
+      showToast(translate('읽지 않은 티켓 코멘트를 모두 읽음으로 표시했습니다'), 'success');
     } catch (err: any) {
-      showToast(err?.message || '읽음 처리에 실패했습니다', 'error');
+      showToast(err?.message || translate('읽음 처리에 실패했습니다'), 'error');
     } finally {
       setMarkingAllTicketsRead(false);
     }
@@ -201,7 +205,7 @@ export default function Sidebar({
           ? [{
             key: 'terminals',
             path: `${basePath}/terminals`,
-            label: 'Terminals',
+            label: translate('Terminals'),
             icon: 'T',
           }]
           : []),
@@ -211,18 +215,18 @@ export default function Sidebar({
       title: 'Business',
       items: [
         ...(canUseBusiness ? [
-          { key: 'business', path: '/business', label: '회사 · 전체 흐름', icon: '◈', exact: true },
-          { key: 'business-operations', path: '/business/operations', label: '운영 워크플로', icon: '↗' },
-          { key: 'business-connectors', path: '/business/connectors', label: '커넥터', icon: '⌘' },
+          { key: 'business', path: '/business', label: translate('회사 · 전체 흐름'), icon: '◈', exact: true },
+          { key: 'business-operations', path: '/business/operations', label: translate('운영 워크플로'), icon: '↗' },
+          { key: 'business-connectors', path: '/business/connectors', label: translate('커넥터'), icon: '⌘' },
         ] : []),
         ...(canUseMarketing
           ? [{
             key: 'marketing',
             path: `${basePath}/marketing`,
-            label: 'Marketing',
+            label: translate('Marketing'),
             icon: 'M',
             badge: marketingPending,
-            badgeLabel: `승인 대기 ${marketingPending}건`,
+            badgeLabel: translate('승인 대기 {0}건', { 0: marketingPending }),
           }]
           : []),
       ],
@@ -230,23 +234,23 @@ export default function Sidebar({
     {
       title: 'Automation',
       items: [
-        { key: 'functions', path: `${basePath}/functions`, label: 'Functions', icon: 'F' },
-        { key: 'actions', path: `${basePath}/actions`, label: 'Actions', icon: 'A' },
-        { key: 'schedules', path: `${basePath}/schedules`, label: 'Schedules', icon: 'S' },
+        { key: 'functions', path: `${basePath}/functions`, label: translate('Functions'), icon: 'F' },
+        { key: 'actions', path: `${basePath}/actions`, label: translate('Actions'), icon: 'A' },
+        { key: 'schedules', path: `${basePath}/schedules`, label: translate('Schedules'), icon: 'S' },
       ],
     },
     {
       title: 'Knowledge',
       items: [
         // 저장소(repository) — 티켓/미션/QA 가 가리키는 프로젝트와 Host 별 메인 클론 폴더.
-        { key: 'projects', path: `${basePath}/projects`, label: 'Projects', icon: 'P' },
-        { key: 'resources', path: `${basePath}/resources`, label: 'Resources', icon: 'R' },
+        { key: 'projects', path: `${basePath}/projects`, label: translate('Projects'), icon: 'P' },
+        { key: 'resources', path: `${basePath}/resources`, label: translate('Resources'), icon: 'R' },
         // 설치물(APK)·공유 파일 자료실 — 바이트는 Resource, 겉장은 LibraryItem.
-        { key: 'library', path: `${basePath}/library`, label: 'Library', icon: 'L' },
+        { key: 'library', path: `${basePath}/library`, label: translate('Library'), icon: 'L' },
         {
           key: 'ontology-graph',
           path: `${basePath}/ontology-graph`,
-          label: 'Ontology Graph',
+          label: translate('Ontology Graph'),
           icon: 'G',
         },
         // Memory · Skills — Agent 가 아는 것(docs/skills.md "Knowledge"): 공용 / 프로젝트별 메모리와 호스트 CLI 파일,
@@ -255,7 +259,7 @@ export default function Sidebar({
           ? [{
             key: 'memory',
             path: `${basePath}/memory`,
-            label: 'Memory',
+            label: translate('Memory'),
             icon: 'M',
           }]
           : []),
@@ -263,7 +267,7 @@ export default function Sidebar({
           ? [{
             key: 'skills',
             path: `${basePath}/skills`,
-            label: 'Skills',
+            label: translate('Skills'),
             icon: 'S',
           }]
           : []),
@@ -272,8 +276,8 @@ export default function Sidebar({
     {
       title: 'Quality',
       items: [
-        { key: 'qa', path: `${basePath}/qa`, label: 'QA', icon: 'Q' },
-        { key: 'security', path: `${basePath}/security`, label: 'Security', icon: 'S' },
+        { key: 'qa', path: `${basePath}/qa`, label: translate('QA'), icon: 'Q' },
+        { key: 'security', path: `${basePath}/security`, label: translate('Security'), icon: 'S' },
       ],
     },
     {
@@ -282,19 +286,19 @@ export default function Sidebar({
         {
           key: 'settings-overview',
           path: `${basePath}/settings`,
-          label: 'Settings Overview',
+          label: translate('Settings Overview'),
           icon: 'S',
           exact: true,
         },
-        { key: 'work-defaults', path: `${basePath}/settings/defaults`, label: 'Work defaults', icon: 'O' },
-        { key: 'users', path: `${basePath}/settings/users`, label: 'Users', icon: 'U' },
-        { key: 'credentials', path: `${basePath}/settings/credentials`, label: 'Credentials', icon: 'C' },
-        { key: 'channels', path: `${basePath}/settings/channels`, label: 'Channels', icon: 'N' },
-        { key: 'api-keys', path: `${basePath}/settings/api-keys`, label: 'API Keys', icon: 'K' },
+        { key: 'work-defaults', path: `${basePath}/settings/defaults`, label: translate('Work defaults'), icon: 'O' },
+        { key: 'users', path: `${basePath}/settings/users`, label: translate('Users'), icon: 'U' },
+        { key: 'credentials', path: `${basePath}/settings/credentials`, label: translate('Credentials'), icon: 'C' },
+        { key: 'channels', path: `${basePath}/settings/channels`, label: translate('Channels'), icon: 'N' },
+        { key: 'api-keys', path: `${basePath}/settings/api-keys`, label: translate('API Keys'), icon: 'K' },
         {
           key: 'claude-profiles',
           path: `${basePath}/settings/claude-profiles`,
-          label: 'Claude Profiles',
+          label: translate('Claude Profiles'),
           icon: 'C',
         },
         ...(canAdmin
@@ -302,14 +306,14 @@ export default function Sidebar({
               {
                 key: 'admin-users',
                 path: '/admin/users',
-                label: 'User Administration',
+                label: translate('User Administration'),
                 icon: 'U',
                 badge: counts.pendingUsers,
-                badgeLabel: `승인 대기 중인 가입 요청 ${counts.pendingUsers}건`,
+                badgeLabel: translate('승인 대기 중인 가입 요청 {0}건', { 0: counts.pendingUsers }),
               },
-              { key: 'system-settings', path: '/admin/settings', label: 'System Settings', icon: 'S' },
-              { key: 'voice', path: '/admin/voice', label: 'Voice', icon: 'V' },
-              { key: 'migration', path: '/admin/migration', label: 'Live Import', icon: 'M' },
+              { key: 'system-settings', path: '/admin/settings', label: translate('System Settings'), icon: 'S' },
+              { key: 'voice', path: '/admin/voice', label: translate('Voice'), icon: 'V' },
+              { key: 'migration', path: '/admin/migration', label: translate('Live Import'), icon: 'M' },
             ]
           : []),
       ],
@@ -320,23 +324,23 @@ export default function Sidebar({
     {
       key: 'workflow-health',
       path: '/admin/workflow-health',
-      label: 'Workflow Health',
+      label: translate('Workflow Health'),
       icon: 'H',
     },
     {
       key: 'skill-registry',
       path: '/admin/skill-registry',
-      label: 'Skill Registry',
+      label: translate('Skill Registry'),
       icon: 'R',
     },
-    { key: 'server-logs', path: '/admin/logs', label: 'Server Logs', icon: 'L' },
+    { key: 'server-logs', path: '/admin/logs', label: translate('Server Logs'), icon: 'L' },
     {
       key: 'agent-logs',
       path: '/admin/agent-logs',
-      label: 'Agent Logs',
+      label: translate('Agent Logs'),
       icon: 'G',
       badge: counts.agentErrors,
-      badgeLabel: `마지막 확인 이후 새 에러 로그 ${counts.agentErrors}건`,
+      badgeLabel: translate('마지막 확인 이후 새 에러 로그 {0}건', { 0: counts.agentErrors }),
     },
   ];
 
@@ -684,7 +688,7 @@ export default function Sidebar({
           </button>
           <button
             type="button"
-            aria-label={expanded ? `Collapse ${group.label} list` : `Expand ${group.label} list`}
+            aria-label={expanded ? translate('Collapse {0} list', { 0: group.label }) : translate('Expand {0} list', { 0: group.label })}
             aria-expanded={expanded}
             onClick={() => setCollapsedGroups((prev) => ({ ...prev, [group.key]: expanded }))}
             style={{
@@ -705,9 +709,9 @@ export default function Sidebar({
         </div>
 
         {expanded && (
-          <div aria-label={`${group.label} list`}>
+          <div aria-label={translate('{0} list', { 0: group.label })}>
             {group.loading && group.children.length === 0 ? (
-              <div style={subListTextStyle}>{`Loading ${group.label.toLowerCase()}...`}</div>
+              <div style={subListTextStyle}>{translate('Loading {0}...', { 0: group.label.toLowerCase() })}</div>
             ) : group.children.length === 0 ? (
               <div style={subListTextStyle}>{group.emptyLabel}</div>
             ) : (
@@ -742,8 +746,8 @@ export default function Sidebar({
                 aria-expanded={hiddenItems.length === 0}
                 aria-label={
                   hiddenItems.length > 0
-                    ? `${group.label} 더보기, ${hiddenItems.length}개 더 보기`
-                    : `${group.label} 목록 접기`
+                    ? translate('{0} 더보기, {1}개 더 보기', { 0: group.label, 1: hiddenItems.length })
+                    : translate('{0} 목록 접기', { 0: group.label })
                 }
                 style={navRowStyle(false, true)}
                 onMouseEnter={(event) => {
@@ -754,7 +758,7 @@ export default function Sidebar({
                 }}
               >
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  {hiddenItems.length > 0 ? `더보기 (${hiddenItems.length})` : '접기'}
+                  {hiddenItems.length > 0 ? translate('더보기 ({0})', { 0: hiddenItems.length }) : translate('접기')}
                 </span>
               </button>
             )}
@@ -804,7 +808,7 @@ export default function Sidebar({
       }}
       role={overlay ? 'dialog' : undefined}
       aria-modal={overlay ? true : undefined}
-      aria-label={overlay ? 'Navigation' : undefined}
+      aria-label={overlay ? translate('Navigation') : undefined}
     >
       <div
         style={{
@@ -820,7 +824,7 @@ export default function Sidebar({
         <button
           type="button"
           onClick={() => handleNavClick('/sessions')}
-          aria-label="AWB home"
+          aria-label={translate('AWB home')}
           style={{
             width: 34,
             height: 34,
@@ -833,8 +837,7 @@ export default function Sidebar({
             cursor: 'pointer',
           }}
         >
-          W
-        </button>
+          {translate('W')}</button>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
           <div style={{ marginTop: 1, fontSize: 10, color: tokens.colors.textMuted }}>AI Workflow Board</div>
@@ -850,7 +853,7 @@ export default function Sidebar({
       </div>
 
       <nav
-        aria-label="Primary navigation"
+        aria-label={translate('Primary navigation')}
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
         {/* OPERATORS — HOSTS 와 같은 높이의 메뉴 줄이고, 등록된 operator 들이 그 아래 한 단계 들여 나온다
@@ -869,22 +872,21 @@ export default function Sidebar({
                   onClick={toggle}
                   aria-expanded={expanded}
                   aria-controls="sidebar-operators-list"
-                  title={awakeOperator ? `Operators — ${awakeOperator.name} 깨어 있음` : 'Operators — 이름을 불러 깨우는 세션들'}
+                  title={awakeOperator ? translate('Operators — {0} 깨어 있음', { 0: awakeOperator.name }) : translate('Operators — 이름을 불러 깨우는 세션들')}
                   style={{ ...navRowStyle(false), width: 'auto', flex: 1, minWidth: 0 }}
                   onMouseEnter={(event) => { event.currentTarget.style.background = tokens.colors.surfaceHover; }}
                   onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
                 >
                   <span style={iconStyle(false)} aria-hidden="true">🎙</span>
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    OPERATORS
-                  </span>
+                    {translate('OPERATORS')}</span>
                   {/* 접어 둬도 누가 깨어 있는지는 보인다. */}
-                  {!expanded && awakeOperator && <ActivityDot view={{ label: `${awakeOperator.name} 깨어 있음`, tone: 'live', live: true }} size={6} />}
+                  {!expanded && awakeOperator && <ActivityDot view={{ label: translate('{0} 깨어 있음', { 0: awakeOperator.name }), tone: 'live', live: true }} size={6} />}
                 </button>
                 <WakeToggle operators={operators} />
                 <button
                   type="button"
-                  aria-label={expanded ? 'Collapse Operators list' : 'Expand Operators list'}
+                  aria-label={expanded ? translate('Collapse Operators list') : translate('Expand Operators list')}
                   aria-expanded={expanded}
                   onClick={toggle}
                   style={{ width: 24, height: 24, marginRight: 8, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 10, flexShrink: 0 }}
@@ -893,7 +895,7 @@ export default function Sidebar({
                 </button>
               </div>
               {expanded && (
-                <div id="sidebar-operators-list" aria-label="Operators list">
+                <div id="sidebar-operators-list" aria-label={translate('Operators list')}>
                   {operators.map((op) => {
                     const awake = awakeOperator?.id === op.id;
                     return renderNavItem({
@@ -901,8 +903,8 @@ export default function Sidebar({
                       path: sessionPath(``, op.manager_id, op.cli, op.session_id),
                       label: op.name,
                       icon: (op.name.trim()[0] || 'O').toUpperCase(),
-                      title: `${op.name} — ${op.title || runtimeLabel(op.cli)}${awake ? ' (깨어 있음)' : ''}`,
-                      ...(awake ? { activity: { label: '깨어 있음', tone: 'live' as const, live: true } } : {}),
+                      title: `${op.name} — ${op.title || runtimeLabel(op.cli)}${awake ? translate(' (깨어 있음)') : ''}`,
+                      ...(awake ? { activity: { label: translate('깨어 있음'), tone: 'live' as const, live: true } } : {}),
                     }, true);
                   })}
                 </div>
@@ -913,7 +915,7 @@ export default function Sidebar({
         {canAdmin && renderNavItem({
           key: 'hosts',
           path: `${basePath}/hosts`,
-          label: 'HOSTS',
+          label: translate('HOSTS'),
           icon: 'H',
         })}
         {canUseSessions && (
@@ -929,12 +931,12 @@ export default function Sidebar({
                 <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
                   {sessionsCollapsed ? '▶' : '▼'}
                 </span>
-                <span id="sidebar-sessions-heading">Sessions</span>
+                <span id="sidebar-sessions-heading">{translate('Sessions')}</span>
               </button>
               <button
                 type="button"
-                aria-label="New session"
-                title="New session"
+                aria-label={translate('New session')}
+                title={translate('New session')}
                 onClick={() => handleNavClick(`${basePath}/sessions?new=1`)}
                 style={{ width: 24, height: 24, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 17, lineHeight: 1 }}
               >
@@ -944,11 +946,11 @@ export default function Sidebar({
 
             {/* 호스트 > cwd > 세션 트리 */}
             {!sessionsCollapsed && (
-              <div aria-label="Runtime Hosts" style={{ paddingBottom: 4 }}>
+              <div aria-label={translate('Runtime Hosts')} style={{ paddingBottom: 4 }}>
                 {sessionHostsLoading && sessionHosts.length === 0 ? (
-                  <div style={subListTextStyle}>Loading hosts...</div>
+                  <div style={subListTextStyle}>{translate('Loading hosts...')}</div>
                 ) : sessionHosts.length === 0 ? (
-                  <div style={subListTextStyle}>No Runtime Host connected</div>
+                  <div style={subListTextStyle}>{translate('No Runtime Host connected')}</div>
                 ) : (
                   sessionHosts.map((host) => {
                     const hostExpanded = !collapsedHosts.has(host.manager_id);
@@ -969,7 +971,7 @@ export default function Sidebar({
                             onMouseLeave={(e) => { if (!hostActive) e.currentTarget.style.background = 'transparent'; }}
                           >
                             <span style={iconStyle(hostActive)} aria-hidden="true">
-                              {(host.name[0] || 'H').toUpperCase()}
+                              {(host.name[0] || translate('H')).toUpperCase()}
                             </span>
                             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               {host.name}
@@ -977,7 +979,7 @@ export default function Sidebar({
                           </button>
                           <button
                             type="button"
-                            aria-label={hostExpanded ? `Collapse ${host.name}` : `Expand ${host.name}`}
+                            aria-label={hostExpanded ? translate('Collapse {0}', { 0: host.name }) : translate('Expand {0}', { 0: host.name })}
                             aria-expanded={hostExpanded}
                             onClick={() => toggleHostSessions(host)}
                             style={{ width: 24, height: 24, marginRight: 6, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 8, flexShrink: 0 }}
@@ -990,9 +992,9 @@ export default function Sidebar({
                         {hostExpanded && (
                           <div>
                             {hostData?.loading && !hostData.loaded ? (
-                              <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted }}>Loading…</div>
+                              <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
                             ) : !hostData?.groups.length ? (
-                              <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted, fontStyle: 'italic' }}>No sessions</div>
+                              <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted, fontStyle: 'italic' }}>{translate('No sessions')}</div>
                             ) : (
                               (() => {
                                 // 최근 세션이 없는 작업 폴더는 접어 둔다 — 목록 화면이 세션 행에 쓰는 것과 같은 3일 창.
@@ -1012,7 +1014,7 @@ export default function Sidebar({
                                     <button
                                       type="button"
                                       onClick={() => toggleCwd(cwdKey)}
-                                      title={group.cwd || '(unknown directory)'}
+                                      title={group.cwd || translate('(unknown directory)')}
                                       style={{
                                         width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
                                         display: 'flex', alignItems: 'center', gap: 5,
@@ -1089,7 +1091,7 @@ export default function Sidebar({
                                               onMouseEnter={(e) => { e.currentTarget.style.color = tokens.colors.textSecondary; }}
                                               onMouseLeave={(e) => { e.currentTarget.style.color = tokens.colors.textMuted; }}
                                             >
-                                              {olderExpanded ? '접기 ↑' : `+${hidden.length}개 더 보기`}
+                                              {olderExpanded ? translate('접기 ↑') : translate('+{0}개 더 보기', { 0: hidden.length })}
                                             </button>
                                           )}
                                         </>
@@ -1115,7 +1117,7 @@ export default function Sidebar({
                                   onMouseEnter={(e) => { e.currentTarget.style.color = tokens.colors.textSecondary; }}
                                   onMouseLeave={(e) => { e.currentTarget.style.color = tokens.colors.textMuted; }}
                                 >
-                                  {olderHostExpanded ? '접기 ↑' : `+${olderGroups.length}개 폴더 더 보기`}
+                                  {olderHostExpanded ? translate('접기 ↑') : translate('+{0}개 폴더 더 보기', { 0: olderGroups.length })}
                                 </button>
                               )}
                                 </>);
@@ -1145,12 +1147,12 @@ export default function Sidebar({
               <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
                 {chatsCollapsed ? '▶' : '▼'}
               </span>
-              <span id="sidebar-chat-heading">Chat</span>
+              <span id="sidebar-chat-heading">{translate('Chat')}</span>
             </button>
             <button
               type="button"
-              aria-label="New chat"
-              title="New chat"
+              aria-label={translate('New chat')}
+              title={translate('New chat')}
               onClick={() => handleNavClick(`${basePath}/chat?new=1`)}
               style={{
                 width: 24,
@@ -1171,15 +1173,15 @@ export default function Sidebar({
           {!chatsCollapsed && renderNavItem({
             key: 'all-chats',
             path: `${basePath}/chat`,
-            label: 'All chats',
+            label: translate('All chats'),
             icon: 'C',
             badge: counts.chat.total,
-            badgeLabel: `읽지 않은 채팅 메시지 ${counts.chat.total}건`,
+            badgeLabel: translate('읽지 않은 채팅 메시지 {0}건', { 0: counts.chat.total }),
             exact: true,
           })}
 
           {!chatsCollapsed && <div
-            aria-label="Chat rooms"
+            aria-label={translate('Chat rooms')}
             style={{
               minHeight: roomsLoading ? 40 : undefined,
               paddingBottom: 4,
@@ -1187,12 +1189,10 @@ export default function Sidebar({
           >
             {roomsLoading && rooms.length === 0 ? (
               <div style={{ padding: '8px 14px 10px 46px', fontSize: 11, color: tokens.colors.textMuted }}>
-                Loading chats...
-              </div>
+                {translate('Loading chats...')}</div>
             ) : rooms.length === 0 ? (
               <div style={{ padding: '8px 14px 10px 46px', fontSize: 11, color: tokens.colors.textMuted }}>
-                No chats yet
-              </div>
+                {translate('No chats yet')}</div>
             ) : (
               displayRooms.map((room) => {
                 const roomPath = `${basePath}/chat/${room.id}`;
@@ -1238,7 +1238,7 @@ export default function Sidebar({
                     {unread > 0 && (
                       <NavBadge
                         count={unread}
-                        label={`${roomDisplayName(room)} 읽지 않은 메시지 ${unread}건`}
+                        label={translate('{0} 읽지 않은 메시지 {1}건', { 0: roomDisplayName(room), 1: unread })}
                       />
                     )}
                   </button>
@@ -1252,8 +1252,8 @@ export default function Sidebar({
                 aria-expanded={hiddenRooms.length === 0}
                 aria-label={
                   hiddenRooms.length > 0
-                    ? `더보기, ${hiddenRooms.length}개 더 보기`
-                    : '채팅 목록 접기'
+                    ? translate('더보기, {0}개 더 보기', { 0: hiddenRooms.length })
+                    : translate('채팅 목록 접기')
                 }
                 style={navRowStyle(false, true)}
                 onMouseEnter={(event) => {
@@ -1264,12 +1264,12 @@ export default function Sidebar({
                 }}
               >
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  {hiddenRooms.length > 0 ? `더보기 (${hiddenRooms.length})` : '접기'}
+                  {hiddenRooms.length > 0 ? translate('더보기 ({0})', { 0: hiddenRooms.length }) : translate('접기')}
                 </span>
                 {hiddenRooms.length > 0 && hiddenUnreadTotal > 0 && (
                   <NavBadge
                     count={hiddenUnreadTotal}
-                    label={`숨겨진 채팅의 읽지 않은 메시지 ${hiddenUnreadTotal}건`}
+                    label={translate('숨겨진 채팅의 읽지 않은 메시지 {0}건', { 0: hiddenUnreadTotal })}
                   />
                 )}
               </button>
@@ -1296,7 +1296,7 @@ export default function Sidebar({
                     <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
                       {isCollapsed ? '▶' : '▼'}
                     </span>
-                    <span id={`sidebar-${sKey}`}>{section.title}</span>
+                    <span id={`sidebar-${sKey}`}>{translate(section.title)}</span>
                   </button>
                   {section.title === 'Work' && !isCollapsed && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -1305,7 +1305,7 @@ export default function Sidebar({
                           type="button"
                           onClick={handleMarkAllTicketsRead}
                           disabled={markingAllTicketsRead}
-                          title={`읽지 않은 티켓 코멘트 ${counts.tickets.total}건을 모두 읽음으로 표시`}
+                          title={translate('읽지 않은 티켓 코멘트 {0}건을 모두 읽음으로 표시', { 0: counts.tickets.total })}
                           style={{
                             border: 'none', background: 'transparent', color: tokens.colors.accent,
                             fontSize: 10, fontWeight: 700, textTransform: 'none', letterSpacing: 'normal',
@@ -1313,7 +1313,7 @@ export default function Sidebar({
                             opacity: markingAllTicketsRead ? 0.5 : 1, padding: '2px 4px',
                           }}
                         >
-                          {`${counts.tickets.total}건 모두 읽음`}
+                          {translate('{0}건 모두 읽음', { 0: counts.tickets.total })}
                         </button>
                       )}
                     </div>
@@ -1339,7 +1339,7 @@ export default function Sidebar({
                   <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
                     {(sectionCollapsed['operations'] ?? false) ? '▶' : '▼'}
                   </span>
-                  <span id="sidebar-operations">Operations</span>
+                  <span id="sidebar-operations">{translate('Operations')}</span>
                 </button>
               </div>
               {!(sectionCollapsed['operations'] ?? false) && operations.map((item) => renderNavItem(item))}
@@ -1348,6 +1348,9 @@ export default function Sidebar({
         </div>
       </nav>
 
+      <div style={{ padding: '8px 12px', borderTop: `1px solid ${tokens.colors.border}` }}>
+        <LanguageSelect />
+      </div>
       {user && (
         <div
           style={{
@@ -1387,17 +1390,26 @@ export default function Sidebar({
                 whiteSpace: 'nowrap',
               }}
             >
-              {user.name || 'User'}
+              {user.name || translate('User')}
             </div>
-            <div style={{ marginTop: 1, fontSize: 9, color: tokens.colors.textMuted }}>
+            <div
+              style={{
+                marginTop: 1,
+                fontSize: 9,
+                color: tokens.colors.textMuted,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
               {(user.role || '').toUpperCase()}
             </div>
           </div>
           <button
             type="button"
             onClick={async () => logout()}
-            title="Logout"
-            aria-label="Logout"
+            title={translate('Logout')}
+            aria-label={translate('Logout')}
             style={{
               width: 30,
               height: 30,

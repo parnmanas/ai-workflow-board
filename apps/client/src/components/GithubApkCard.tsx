@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { tokens } from '../tokens';
 import {
@@ -17,6 +19,7 @@ import {
  * none(릴리즈가 정말 없음 — 버튼 없이 안내만).
  */
 export default function GithubApkCard() {
+  useLocale();
   const [state, setState] = useState<{ status: 'loading' | 'ready' | 'none' | 'unreachable'; app?: ApkAsset }>({ status: 'loading' });
 
   useEffect(() => {
@@ -40,19 +43,17 @@ export default function GithubApkCard() {
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         fontSize: 24, fontWeight: 700, color: '#fff', flexShrink: 0,
       }}>
-        W
-      </div>
+        {translate('W')}</div>
       <div style={{ flex: 1, minWidth: 200 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>
-          Android 앱
-        </div>
+          {translate('Android 앱')}</div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 3, lineHeight: 1.5 }}>
-          {state.status === 'loading' && '최신 버전 확인 중…'}
+          {state.status === 'loading' && translate('최신 버전 확인 중…')}
           {state.status === 'ready' && app && (
-            <>최신 {app.tag}{formatApkSize(app.size) ? ` · ${formatApkSize(app.size)}` : ''} — GitHub 릴리즈에서 받습니다</>
+            <>{translate('최신')} {app.tag}{formatApkSize(app.size) ? ` · ${formatApkSize(app.size)}` : ''} {translate('— GitHub 릴리즈에서 받습니다')}</>
           )}
-          {state.status === 'none' && '아직 게시된 릴리즈가 없습니다 — 첫 릴리즈가 올라오면 여기 버튼이 생깁니다'}
-          {state.status === 'unreachable' && '버전 확인이 안 됩니다(차단·접속 제한) — 아래 버튼은 고정 링크라 그대로 받습니다'}
+          {state.status === 'none' && translate('아직 게시된 릴리즈가 없습니다 — 첫 릴리즈가 올라오면 여기 버튼이 생깁니다')}
+          {state.status === 'unreachable' && translate('버전 확인이 안 됩니다(차단·접속 제한) — 아래 버튼은 고정 링크라 그대로 받습니다')}
         </div>
       </div>
       {(state.status === 'ready' || state.status === 'unreachable') && (
@@ -64,8 +65,7 @@ export default function GithubApkCard() {
             textDecoration: 'none', flexShrink: 0,
           }}
         >
-          APK 받기
-        </a>
+          {translate('APK 받기')}</a>
       )}
       <a
         href={GITHUB_RELEASES_URL}
@@ -73,8 +73,7 @@ export default function GithubApkCard() {
         rel="noreferrer"
         style={{ fontSize: 11, color: tokens.colors.accentMid, flexShrink: 0 }}
       >
-        모든 버전
-      </a>
+        {translate('모든 버전')}</a>
     </section>
   );
 }

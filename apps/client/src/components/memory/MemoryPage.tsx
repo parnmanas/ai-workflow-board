@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
@@ -20,6 +22,7 @@ type MemoryTab = 'shared' | 'projects' | 'hosts';
  *   /memory/:managerId     그 장비의 CLI 별 메모리 — 분석 · 편집 · 다른 CLI 에 적용 · import/export
  */
 export default function MemoryPage() {
+  useLocale();
   const { managerId = '' } = useParams();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
@@ -37,7 +40,7 @@ export default function MemoryPage() {
     try {
       setHosts(await api.listMemoryHosts());
     } catch (err: any) {
-      setError(err?.message || 'Failed to list Runtime Hosts.');
+      setError(err?.message || translate('Failed to list Runtime Hosts.'));
     } finally {
       setLoading(false);
     }
@@ -61,14 +64,14 @@ export default function MemoryPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Memory"
-        description="What agents know — shared by every agent, per project, and the memory files each LLM CLI keeps on your Runtime Hosts."
+        title={translate('Memory')}
+        description={translate('What agents know — shared by every agent, per project, and the memory files each LLM CLI keeps on your Runtime Hosts.')}
       />
       <div style={{ display: 'flex', gap: 4, padding: '8px 20px', borderBottom: `1px solid ${tokens.colors.border}` }}>
         {([
-          ['shared', 'Shared'],
-          ['projects', 'Projects'],
-          ...(canHostFiles ? [['hosts', 'Host files']] : []),
+          ['shared', translate('Shared')],
+          ['projects', translate('Projects')],
+          ...(canHostFiles ? [['hosts', translate('Host files')]] : []),
         ] as Array<[MemoryTab, string]>).map(([key, label]) => (
           <button
             key={key}
@@ -93,9 +96,9 @@ export default function MemoryPage() {
         ) : error ? (
           <ErrorState message={error} onRetry={() => void load()} />
         ) : loading && hosts.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading Runtime Hosts…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading Runtime Hosts…')}</div>
         ) : hosts.length === 0 ? (
-          <EmptyState title="No Runtime Host is connected" description="Memory lives on machines running awb-agent-manager. Pair one from Runtime Hosts." />
+          <EmptyState title={translate('No Runtime Host is connected')} description={translate('Memory lives on machines running awb-agent-manager. Pair one from Runtime Hosts.')} />
         ) : (
           <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
             {hosts.map((host) => (
@@ -106,12 +109,12 @@ export default function MemoryPage() {
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                   <span style={{ fontSize: 14, fontWeight: 600, color: tokens.colors.textPrimary }}>{host.name}</span>
                   <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{host.hostname}{host.platform ? ` · ${host.platform}` : ''}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>seen {relativeTime(host.last_seen_at)}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>{translate('seen')} {relativeTime(host.last_seen_at)}</span>
                 </div>
                 <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
                   {host.supported
-                    ? `${host.project_count} project folder${host.project_count === 1 ? '' : 's'} on this host`
-                    : `agent-manager ${host.plugin_version} has no memory support — update it from Runtime Hosts.`}
+                    ? translate('{0} project folder{1} on this host', { 0: host.project_count, 1: host.project_count === 1 ? '' : translate('s') })
+                    : translate('agent-manager {0} has no memory support — update it from Runtime Hosts.', { 0: host.plugin_version })}
                 </div>
                 {host.supported && (
                   <div>
@@ -123,8 +126,7 @@ export default function MemoryPage() {
                         borderRadius: tokens.radii.md, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
                       }}
                     >
-                      Open memory →
-                    </button>
+                      {translate('Open memory →')}</button>
                   </div>
                 )}
               </div>

@@ -1,14 +1,16 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
 import type { Cashbook, CashKind } from '../../business.types';
 
-export const CASH_LABELS: Record<CashKind, string> = { income: '영업 입금', expense: '영업 출금', capital_in: '출자 입금', capital_out: '소유자 인출', loan_in: '대출 입금', loan_out: '대출 원금 상환', transfer_in: '계좌 이체 입금', transfer_out: '계좌 이체 출금', refund_in: '환불 입금', refund_out: '환불 출금' };
+export const CASH_LABELS: Record<CashKind, string> = { get income() { return translate('영업 입금'); }, get expense() { return translate('영업 출금'); }, get capital_in() { return translate('출자 입금'); }, get capital_out() { return translate('소유자 인출'); }, get loan_in() { return translate('대출 입금'); }, get loan_out() { return translate('대출 원금 상환'); }, get transfer_in() { return translate('계좌 이체 입금'); }, get transfer_out() { return translate('계좌 이체 출금'); }, get refund_in() { return translate('환불 입금'); }, get refund_out() { return translate('환불 출금'); } };
 export const cashIncoming = (kind: CashKind) => kind === 'income' || kind.endsWith('_in');
-export const cashMoney = (minor: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(minor / 100);
+export const cashMoney = (minor: number) => new Intl.NumberFormat(getLocaleTag(), { style: 'currency', currency: 'USD' }).format(minor / 100);
 export function parseCashAmount(value: string, signed = false): number {
   const text = value.trim();
-  if (!(signed ? /^-?\d+(\.\d{1,2})?$/ : /^\d+(\.\d{1,2})?$/).test(text)) throw new Error('금액은 USD 소수 둘째 자리까지 입력하세요.');
+  if (!(signed ? /^-?\d+(\.\d{1,2})?$/ : /^\d+(\.\d{1,2})?$/).test(text)) throw new Error(translate('금액은 USD 소수 둘째 자리까지 입력하세요.'));
   const [whole, decimal = ''] = text.replace(/^-/, '').split('.');
   const minor = (Number(whole) * 100 + Number(decimal.padEnd(2, '0'))) * (text.startsWith('-') ? -1 : 1);
-  if (!Number.isSafeInteger(minor) || Math.abs(minor) > 2_000_000_000 || (!signed && minor <= 0)) throw new Error('거래 금액은 $0 초과 $20,000,000 이하로 입력하세요. 잔액은 ±$20,000,000 범위입니다.');
+  if (!Number.isSafeInteger(minor) || Math.abs(minor) > 2_000_000_000 || (!signed && minor <= 0)) throw new Error(translate('거래 금액은 $0 초과 $20,000,000 이하로 입력하세요. 잔액은 ±$20,000,000 범위입니다.'));
   return minor;
 }
 export function cashbookCsv(book: Cashbook): string {

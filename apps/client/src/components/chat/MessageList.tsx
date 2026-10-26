@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -20,6 +22,7 @@ export interface MessageListProps {
 }
 
 export default function MessageList({ messages, participantCount, participants = [], currentUserId }: MessageListProps) {
+  useLocale();
   // 갤러리 라이트박스 — 클릭이 곧 다운로드가 아니라 팝업 + prev/next.
   // key 기반이라 썸네일 로딩이 늦어 갤러리가 커져도 열린 위치가 흔들리지 않는다.
   const [lightboxKey, setLightboxKey] = useState<string | null>(null);
@@ -72,7 +75,7 @@ export default function MessageList({ messages, participantCount, participants =
     if (!id || !roomId) return;
     try {
       const full = await api.getChatAttachment(roomId, id);
-      if (!full?.file_data) throw new Error('No data');
+      if (!full?.file_data) throw new Error(translate('No data'));
       const blob = base64ToBlob(full.file_data, full.mime_type || att.mime_type || '');
       triggerBlobDownload(blob, full.filename || att.filename || 'download');
     } catch {
@@ -96,7 +99,7 @@ export default function MessageList({ messages, participantCount, participants =
                 key: `legacy:${msg.id}:${idx}`,
                 src: `data:${img.mimetype || 'image/png'};base64,${img.data}`,
                 kind: 'image',
-                caption: img.filename || `Image ${idx + 1}`,
+                caption: img.filename || translate('Image {0}', { 0: idx + 1 }),
                 filename: img.filename,
               });
             });
@@ -117,7 +120,7 @@ export default function MessageList({ messages, participantCount, participants =
       }
     }
     return out;
-  }, [messages, previewUrls]);
+  }, [messages, previewUrls, getLocale()]);
 
   const lightboxIndex = lightboxKey ? gallery.findIndex((g) => g.key === lightboxKey) : -1;
 
@@ -341,7 +344,7 @@ export default function MessageList({ messages, participantCount, participants =
                     {msg.sender_name}
                   </span>
                   {isAgent && (
-                    <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>(agent)</span>
+                    <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>{translate('(agent)')}</span>
                   )}
                   <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
                     {formatClockTime(msg.created_at)}
@@ -411,7 +414,7 @@ export default function MessageList({ messages, participantCount, participants =
                   <img
                     key={idx}
                     src={`data:${img.mimetype};base64,${img.data}`}
-                    alt={img.filename || `Image ${idx + 1}`}
+                    alt={img.filename || translate('Image {0}', { 0: idx + 1 })}
                     style={{
                       width: 64,
                       height: 64,
@@ -453,7 +456,7 @@ export default function MessageList({ messages, participantCount, participants =
                       {url ? (
                         <img
                           src={url}
-                          alt={att.filename || 'Image'}
+                          alt={att.filename || translate('Image')}
                           style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                         />
                       ) : (
@@ -483,8 +486,8 @@ export default function MessageList({ messages, participantCount, participants =
                       />
                       <button
                         type="button"
-                        title="크게 보기 (갤러리)"
-                        aria-label={`Expand ${att.filename || 'video'}`}
+                        title={translate('크게 보기 (갤러리)')}
+                        aria-label={translate('Expand {0}', { 0: att.filename || 'video' })}
                         onClick={() => setLightboxKey(id)}
                         style={{
                           position: 'absolute',
@@ -541,7 +544,7 @@ export default function MessageList({ messages, participantCount, participants =
                       <span style={{ fontSize: 18 }} aria-hidden>📄</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 12, color: tokens.colors.textPrimary, fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
-                          {att.filename || att.file_name || 'File'}
+                          {att.filename || att.file_name || translate('File')}
                         </div>
                         <div style={{ fontSize: 10, color: tokens.colors.textSecondary }}>
                           {formatBytes(att.size_bytes ?? att.file_size ?? 0)}
@@ -549,7 +552,7 @@ export default function MessageList({ messages, participantCount, participants =
                       </div>
                       <button
                         onClick={() => downloadAttachment(att)}
-                        aria-label={`Download ${att.filename || 'file'}`}
+                        aria-label={translate('Download {0}', { 0: att.filename || 'file' })}
                         style={{
                           background: 'transparent',
                           border: `1px solid ${tokens.colors.border}`,
@@ -561,8 +564,7 @@ export default function MessageList({ messages, participantCount, participants =
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        Download
-                      </button>
+                        {translate('Download')}</button>
                     </div>
                   );
                 })}
@@ -572,7 +574,7 @@ export default function MessageList({ messages, participantCount, participants =
           {/* Read receipt below last message */}
           {isLast && participantCount > 1 && (
             <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs, textAlign: isMe ? 'right' : 'left' }}>
-              Read by {participantCount - 1}
+              {translate('Read by')} {participantCount - 1}
             </div>
           )}
         </div>

@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../i18n/core';
+import { t as translate, getLocale } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useRef, useMemo, useCallback, useEffect, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment, CommentType } from '../types';
@@ -52,6 +55,7 @@ interface CommentListProps {
 }
 
 export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes, scrollToCommentId, onScrollToCommentConsumed, onLoadOlder, hasMoreOlder, loadingOlder, ticketIdForMentions }: CommentListProps) {
+  useLocale();
   const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
   const { noteMentionsCleared } = useNotifications();
   const parentRef = useRef<HTMLDivElement>(null);
@@ -74,7 +78,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
       }
     }
     return out;
-  }, [comments]);
+  }, [comments, getLocale()]);
   const lightboxIndex = lightboxId ? gallery.findIndex((g) => g.key === lightboxId) : -1;
   const openPreview = useCallback((src: string, mimetype?: string) => {
     const found = gallery.find((g) => g.src === src);
@@ -136,7 +140,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
       if (!consumed.has(c.id)) out.push({ comment: c, indent: 0, orphan: true });
     }
     return out;
-  }, [comments]);
+  }, [comments, getLocale()]);
 
   const virtualizer = useVirtualizer({
     count: flatRows.length,
@@ -250,8 +254,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
         flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
         color: tokens.colors.borderStrong, fontSize: '12px', textAlign: 'center',
       }}>
-        No comments yet.
-      </div>
+        {translate('No comments yet.')}</div>
     );
   }
 
@@ -272,10 +275,10 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           // type chip), which means a single comment communicates both axes:
           //   "who said it"  +  "what kind of thing they said".
           const authorBadge = c.author_type === 'system'
-            ? { bg: tokens.colors.badgeSystemBg, color: tokens.colors.badgeSystemText, label: 'System' }
+            ? { bg: tokens.colors.badgeSystemBg, color: tokens.colors.badgeSystemText, label: translate('System') }
             : isAgent
-            ? { bg: tokens.colors.badgeAgentBg, color: tokens.colors.accentLight, label: 'Agent' }
-            : { bg: tokens.colors.badgeUserBg, color: tokens.colors.infoLight, label: 'User' };
+            ? { bg: tokens.colors.badgeAgentBg, color: tokens.colors.accentLight, label: translate('Agent') }
+            : { bg: tokens.colors.badgeUserBg, color: tokens.colors.infoLight, label: translate('User') };
           const ctype = resolveCommentType(c.type as string | null | undefined);
           const tstyle = COMMENT_TYPE_STYLES[ctype];
           const isCompact = ctype === 'system';
@@ -341,34 +344,34 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     <button
                       type="button"
                       onClick={() => onReply(c.id)}
-                      title="Write an answer to this question"
+                      title={translate('Write an answer to this question')}
                       style={{
                         fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
                         background: 'transparent', color: tokens.colors.infoLight,
                         border: `1px solid ${tokens.colors.info}`, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: 0.4,
                       }}
-                    >{'\u2192'} Answer</button>
+                    >{'\u2192'} {translate('Answer')}</button>
                   )}
                   {ctype === 'question' && status && (
                     onSetCommentStatus ? (
                       <button
                         type="button"
                         onClick={() => onSetCommentStatus(c.id, status === 'resolved' ? 'open' : 'resolved')}
-                        title={status === 'resolved' ? 'Reopen this question' : 'Mark this question as resolved'}
+                        title={status === 'resolved' ? translate('Reopen this question') : translate('Mark this question as resolved')}
                         style={{
                           fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
                           background: status === 'resolved' ? tokens.colors.successBg : tokens.colors.warningBg,
                           color: status === 'resolved' ? tokens.colors.successPale : tokens.colors.warningLight,
                           border: 'none', cursor: 'pointer', textTransform: 'uppercase',
                         }}
-                      >{status === 'resolved' ? '\u2713 Resolved' : 'Open'}</button>
+                      >{status === 'resolved' ? translate('✓ Resolved') : translate('Open')}</button>
                     ) : (
                       <span style={{
                         fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
                         background: status === 'resolved' ? tokens.colors.successBg : tokens.colors.warningBg,
                         color: status === 'resolved' ? tokens.colors.successPale : tokens.colors.warningLight,
                         textTransform: 'uppercase',
-                      }}>{status === 'resolved' ? '\u2713 Resolved' : 'Open'}</span>
+                      }}>{status === 'resolved' ? translate('✓ Resolved') : translate('Open')}</span>
                     )
                   )}
                   {!isCompact && (
@@ -386,13 +389,13 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     if (!slug) return null;
                     return (
                       <span
-                        title={`as ${slug}`}
+                        title={translate('as {0}', { 0: slug })}
                         style={{
                           fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
                           background: 'transparent', color: tokens.colors.textPrimary,
                           border: `1px solid ${tokens.colors.border}`, textTransform: 'uppercase', letterSpacing: 0.4,
                         }}
-                      >as {slug}</span>
+                      >{translate('as')} {slug}</span>
                     );
                   })()}
                   {/* Dedupe counter — server collapses repeated same-fingerprint
@@ -404,9 +407,9 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     const count = typeof c.repeat_count === 'number' ? c.repeat_count : null;
                     if (count === null || count <= 1) return null;
                     const lastRepeated = typeof c.last_repeated_at === 'string' ? c.last_repeated_at : null;
-                    const titleParts: string[] = [`Repeated ${count} times`];
+                    const titleParts: string[] = [translate('Repeated {0} times', { 0: count })];
                     if (lastRepeated) {
-                      titleParts.push(`last at ${new Date(lastRepeated).toLocaleString()}`);
+                      titleParts.push(translate('last at {0}', { 0: new Date(lastRepeated).toLocaleString(getLocaleTag()) }));
                     }
                     return (
                       <span
@@ -428,14 +431,14 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                      marker would otherwise paint every row as "new", which is
                      just noise on first load). */}
                   {isUnread && lastReadMs !== null && (
-                    <span title="Unread" style={{
+                    <span title={translate('Unread')} style={{
                       width: 6, height: 6, borderRadius: '50%',
                       background: tokens.colors.accentMid,
                       display: 'inline-block',
                     }} />
                   )}
                   <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>
-                    {new Date(c.created_at).toLocaleString()}
+                    {new Date(c.created_at).toLocaleString(getLocaleTag())}
                   </span>
                   {/* When the row is a dedupe survivor, show the last-occurrence
                      time inline so the user doesn't have to hover the ×N pill
@@ -447,9 +450,9 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     if (!count || count <= 1 || !lastRepeated) return null;
                     return (
                       <span
-                        title={`Last repeat: ${new Date(lastRepeated).toLocaleString()}`}
+                        title={translate('Last repeat: {0}', { 0: new Date(lastRepeated).toLocaleString(getLocaleTag()) })}
                         style={{ fontSize: '10px', color: tokens.colors.textMuted, opacity: 0.85 }}
-                      >· last {new Date(lastRepeated).toLocaleTimeString()}</span>
+                      >{translate('· last')} {new Date(lastRepeated).toLocaleTimeString(getLocaleTag())}</span>
                     );
                   })()}
                 </span>
@@ -461,7 +464,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                   <strong style={{ color: tokens.colors.warningLight }}>⚠ {failure.title}</strong>
                   <p style={{ margin: '6px 0', color: tokens.colors.textStrong }}>{failure.guidance}</p>
                   <details>
-                    <summary style={{ cursor: 'pointer', color: tokens.colors.textMuted }}>실행 로그 보기</summary>
+                    <summary style={{ cursor: 'pointer', color: tokens.colors.textMuted }}>{translate('실행 로그 보기')}</summary>
                     {commentContent}
                   </details>
                 </div>
@@ -487,7 +490,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                           src={src}
                           alt={att.file_name}
                           onClick={() => openPreview(src, mt)}
-                          title={`${att.file_name} — 클릭하면 크게 보기`}
+                          title={translate('{0} — 클릭하면 크게 보기', { 0: att.file_name })}
                           style={{
                             width: 70, height: 70, objectFit: 'cover', borderRadius: tokens.radii.sm,
                             cursor: 'pointer',
@@ -502,7 +505,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                         <div
                           key={att.id}
                           onClick={() => openPreview(src, mt)}
-                          title={`${att.file_name} — 클릭하면 크게 보기`}
+                          title={translate('{0} — 클릭하면 크게 보기', { 0: att.file_name })}
                           style={{
                             width: 120, height: 70, borderRadius: tokens.radii.sm,
                             cursor: 'pointer',
@@ -565,8 +568,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                   display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
                 }}>
                   <span style={{ fontSize: '10px', fontWeight: 700, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                    References:
-                  </span>
+                    {translate('References:')}</span>
                   {((c.metadata as any).references as unknown[]).map((rawId, idx) => {
                     if (typeof rawId !== 'string') return null;
                     const refId = rawId;
@@ -581,7 +583,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                       <button
                         key={`ref-${refId}-${idx}`}
                         type="button"
-                        title={inList ? `Jump to ${refId}` : `${refId} (not in current view)`}
+                        title={inList ? translate('Jump to {0}', { 0: refId }) : translate('{0} (not in current view)', { 0: refId })}
                         disabled={!inList}
                         onClick={inList ? () => handleJumpToComment(refId) : undefined}
                         style={{
@@ -608,8 +610,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           textAlign: 'center', padding: '8px 0', fontSize: '11px',
           color: tokens.colors.textMuted,
         }}>
-          Loading older comments…
-        </div>
+          {translate('Loading older comments…')}</div>
       )}
       {lightboxIndex >= 0 && gallery[lightboxIndex] && (
         <MediaLightbox

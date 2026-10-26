@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * CLI Memory 화면 상태 — 순수 함수. 스냅샷을 쓰기 결과로 고치고, 파일 트리를 묶는다.
  */
@@ -46,7 +47,7 @@ export function newFileInDir(platform: string, dir: MemoryDirInfo, name: string)
     scope: dir.scope,
     kind: dir.kind,
     format: 'markdown',
-    label: dir.kind === 'auto_topic' ? `Auto memory · ${name.replace(/\.md$/i, '')}` : `${dir.label} · ${name.replace(/\.md$/i, '')}`,
+    label: dir.kind === 'auto_topic' ? translate('Auto memory · {0}', { 0: name.replace(/\.md$/i, '') }) : `${dir.label} · ${name.replace(/\.md$/i, '')}`,
     group: dir.group,
     project_dir: dir.project_dir,
     loaded: dir.kind === 'auto_topic' ? 'on_demand' : 'always',
@@ -84,9 +85,9 @@ function projectName(snapshot: MemoryHostSnapshot, dir: string | null): string |
 
 /** 그룹 이름 — `global` / `project:<dir>` / `auto:<key>` / `memories` / `knowledge`. */
 export function groupTitle(snapshot: MemoryHostSnapshot, group: string, sample: { project_dir: string | null } | undefined): { title: string; subtitle: string } {
-  if (group === 'global') return { title: 'Global', subtitle: 'Applies to every session' };
-  if (group === 'memories') return { title: 'Generated memories', subtitle: 'Distilled by the CLI from past sessions' };
-  if (group === 'knowledge') return { title: 'Knowledge items', subtitle: 'Collected by the CLI' };
+  if (group === 'global') return { title: translate('Global'), subtitle: translate('Applies to every session') };
+  if (group === 'memories') return { title: translate('Generated memories'), subtitle: translate('Distilled by the CLI from past sessions') };
+  if (group === 'knowledge') return { title: translate('Knowledge items'), subtitle: translate('Collected by the CLI') };
   if (group.startsWith('project:')) {
     const dir = group.slice('project:'.length);
     return { title: projectName(snapshot, dir) || basenameOf(dir), subtitle: dir };
@@ -94,7 +95,7 @@ export function groupTitle(snapshot: MemoryHostSnapshot, group: string, sample: 
   if (group.startsWith('auto:')) {
     const key = group.slice('auto:'.length);
     const dir = sample?.project_dir ?? null;
-    return { title: `Auto memory · ${projectName(snapshot, dir) || (dir ? basenameOf(dir) : key)}`, subtitle: dir || key };
+    return { title: translate('Auto memory · {0}', { 0: projectName(snapshot, dir) || (dir ? basenameOf(dir) : key) }), subtitle: dir || key };
   }
   return { title: group, subtitle: '' };
 }
@@ -130,17 +131,17 @@ export function treeGroups(snapshot: MemoryHostSnapshot, cli: CliMemorySnapshot,
 
 export function loadedBadge(file: MemoryFileInfo): { label: string; tone: 'accent' | 'muted' | 'warning' } {
   switch (file.loaded) {
-    case 'always': return { label: 'every session', tone: 'accent' };
-    case 'index_head': return { label: `first ${file.load_limit_lines ?? ''} lines`, tone: 'accent' };
-    case 'conditional': return { label: 'when paths match', tone: 'muted' };
-    default: return { label: 'on demand', tone: 'muted' };
+    case 'always': return { label: translate('every session'), tone: 'accent' };
+    case 'index_head': return { label: translate('first {0} lines', { 0: file.load_limit_lines ?? '' }), tone: 'accent' };
+    case 'conditional': return { label: translate('when paths match'), tone: 'muted' };
+    default: return { label: translate('on demand'), tone: 'muted' };
   }
 }
 
 export function homeTitle(home: CliMemorySnapshot['homes'][number]): string {
-  if (home.kind === 'operator') return 'Operator home';
-  if (home.kind === 'profile') return `Profile · ${home.profile}`;
-  return `Session home · ${home.credential_name || home.credential_id?.slice(0, 8) || 'credential'}`;
+  if (home.kind === 'operator') return translate('Operator home');
+  if (home.kind === 'profile') return translate('Profile · {0}', { 0: home.profile });
+  return translate('Session home · {0}', { 0: home.credential_name || home.credential_id?.slice(0, 8) || 'credential' });
 }
 
 export function fileTokenCount(file: MemoryFileInfo): number {
@@ -158,12 +159,12 @@ export function relativeTime(iso: string | null | undefined, now = Date.now()): 
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return '';
   const min = Math.round((now - t) / 60_000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min}m ago`;
+  if (min < 1) return translate('just now');
+  if (min < 60) return translate('{0}m ago', { 0: min });
   const h = Math.round(min / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return translate('{0}h ago', { 0: h });
   const d = Math.round(h / 24);
-  return d < 60 ? `${d}d ago` : `${Math.round(d / 30)}mo ago`;
+  return d < 60 ? translate('{0}d ago', { 0: d }) : translate('{0}mo ago', { 0: Math.round(d / 30) });
 }
 
 /** 새 파일 템플릿 — Claude auto memory 는 frontmatter 를 갖춘 채로 시작한다. */

@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -39,6 +41,7 @@ function lastCwdKey(managerId: string): string {
 }
 
 export default function NewTerminalModal({ open, onClose, hosts, initialManagerId, onCreated }: NewTerminalModalProps) {
+  useLocale();
   const [managerId, setManagerId] = useState('');
   const [shell, setShell] = useState('');
   const [cwd, setCwd] = useState('');
@@ -47,7 +50,7 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
+  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId, getLocale()]);
 
   useEffect(() => {
     if (open) return;
@@ -99,7 +102,7 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
       }
       onCreated(terminal);
     } catch (err: any) {
-      setError(err?.message || 'Failed to open the terminal');
+      setError(err?.message || translate('Failed to open the terminal'));
     } finally {
       setCreating(false);
     }
@@ -109,27 +112,24 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
     <Modal
       isOpen={open}
       onClose={onClose}
-      title="New terminal"
+      title={translate('New terminal')}
       maxWidth={520}
       footer={(
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button variant="secondary" onClick={onClose} disabled={creating}>Cancel</Button>
+          <Button variant="secondary" onClick={onClose} disabled={creating}>{translate('Cancel')}</Button>
           <Button variant="primary" onClick={() => void create()} disabled={!managerId || creating} loading={creating}>
-            Start terminal
-          </Button>
+            {translate('Start terminal')}</Button>
         </div>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <p style={{ margin: 0, fontSize: 12.5, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          Opens a real shell on that machine, running as the user that runs the Runtime Host.
-          It lives only while it runs — nothing is recorded, and closing it ends the process.
-        </p>
+          {translate('Opens a real shell on that machine, running as the user that runs the Runtime Host. It lives only while it runs — nothing is recorded, and closing it ends the process.')}</p>
 
         <div>
-          <label htmlFor="new-terminal-host" style={labelStyle}>Runtime Host</label>
+          <label htmlFor="new-terminal-host" style={labelStyle}>{"Runtime Host"}</label>
           <select id="new-terminal-host" style={selectStyle} value={managerId} disabled={hosts.length === 0 && !managerId} onChange={(e) => setManagerId(e.target.value)}>
-            {hosts.length === 0 && !managerId && <option value="">No Runtime Host can open terminals</option>}
+            {hosts.length === 0 && !managerId && <option value="">{translate('No Runtime Host can open terminals')}</option>}
             {hosts.map((h) => (
               <option key={h.manager_id} value={h.manager_id}>{h.name}{h.hostname && h.hostname !== h.name ? ` (${h.hostname})` : ''}</option>
             ))}
@@ -137,11 +137,11 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
         </div>
 
         <div>
-          <label htmlFor="new-terminal-shell" style={labelStyle}>Shell</label>
+          <label htmlFor="new-terminal-shell" style={labelStyle}>{translate('Shell')}</label>
           <select id="new-terminal-shell" style={selectStyle} value={shell} disabled={!host || host.shells.length === 0} onChange={(e) => setShell(e.target.value)}>
-            {(!host || host.shells.length === 0) && <option value="">No shell reported</option>}
+            {(!host || host.shells.length === 0) && <option value="">{translate('No shell reported')}</option>}
             {host?.shells.map((s) => (
-              <option key={s.id} value={s.id} title={s.path}>{s.label}{s.default ? ' (default)' : ''}</option>
+              <option key={s.id} value={s.id} title={s.path}>{s.label}{s.default ? translate(' (default)') : ''}</option>
             ))}
           </select>
         </div>
@@ -150,9 +150,9 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
             <div style={{ flex: 1 }}>
               <Input
-                label="Working directory (optional)"
+                label={translate('Working directory (optional)')}
                 value={cwd}
-                placeholder="Defaults to the host user's home"
+                placeholder={translate('Defaults to the host user\'s home')}
                 onChange={(e) => setCwd(e.target.value)}
               />
             </div>
@@ -163,8 +163,7 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
               onClick={() => setPickerOpen(true)}
               style={{ marginBottom: 1, whiteSpace: 'nowrap' }}
             >
-              Browse…
-            </Button>
+              {translate('Browse…')}</Button>
           </div>
         </div>
         {managerId && (
@@ -178,9 +177,9 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
         )}
 
         <Input
-          label="Title (optional)"
+          label={translate('Title (optional)')}
           value={title}
-          placeholder="Defaults to the shell and folder"
+          placeholder={translate('Defaults to the shell and folder')}
           onChange={(e) => setTitle(e.target.value)}
         />
 

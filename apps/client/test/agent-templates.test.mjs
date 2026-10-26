@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, act, click, typeInto, React } from './helpers/jsdom.mjs';
@@ -19,7 +20,7 @@ test('shared runtime selection renders host, CLI, model, effort and editable tem
     value: { host_id: 'h', cli: 'codex', model: 'saved-model', effort: 'high', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
     hosts: [{ id: 'h', name: 'Host', clis: ['codex'] }], onChange() {},
   }));
-  for (const label of ['Agent 템플릿 (선택 사항)', '사용 안 함', 'Runtime Host', 'Model', 'Effort', 'saved-model']) assert.ok(markup.includes(label), label);
+  for (const label of ['Agent 템플릿 (선택 사항)', '사용 안 함', 'Runtime Host', 'Model', 'Effort', 'saved-model']) assert.ok(markup.includes(ui(label)), label);
   assert.equal(markup.includes('Working dir'), false);
 });
 
@@ -83,16 +84,16 @@ test('Hosts registers a named Agent template and exposes it for editing', async 
   t.after(() => { view?.unmount(); dom.cleanup(); });
   view = mount(React.createElement(AgentTemplatesPanel));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  const button = (text) => [...document.querySelectorAll('button')].find((node) => node.textContent === text);
-  click(button('템플릿 등록'));
-  assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 등록');
-  assert.equal(button('등록').disabled, true);
-  typeInto(document.querySelector('input[aria-label="템플릿 이름"]'), 'Code review');
+  const button = (text) => [...document.querySelectorAll('button')].find((node) => node.textContent === ui(text));
+  click(button(ui("템플릿 등록")));
+  assert.equal(document.querySelector('[role="dialog"] h2').textContent, ui("Agent 템플릿 등록"));
+  assert.equal(button(ui("등록")).disabled, true);
+  typeInto(document.querySelector(`input[aria-label="${ui("템플릿 이름")}"]`), 'Code review');
   const host = document.querySelector('select[id$="-host"]');
   act(() => { host.value = 'registration-host'; host.dispatchEvent(new window.Event('change', { bubbles: true })); });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  assert.equal(button('등록').disabled, false);
-  click(button('등록'));
+  assert.equal(button(ui("등록")).disabled, false);
+  click(button(ui("등록")));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   assert.equal(create.mock.callCount(), 1);
   assert.deepEqual(create.mock.calls[0].arguments[0], {
@@ -101,9 +102,9 @@ test('Hosts registers a named Agent template and exposes it for editing', async 
   });
   assert.equal(document.querySelector('[role="dialog"]') === null, true);
   assert.equal(document.querySelector('strong').textContent, 'Code review');
-  click(button('편집'));
-  assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 편집');
-  assert.equal(document.querySelector('input[aria-label="템플릿 이름"]').value, 'Code review');
+  click(button(ui("편집")));
+  assert.equal(document.querySelector('[role="dialog"] h2').textContent, ui("Agent 템플릿 편집"));
+  assert.equal(document.querySelector(`input[aria-label="${ui("템플릿 이름")}"]`).value, 'Code review');
 });
 
 test('unreported effort stays a dropdown with default and a disabled saved value, never guessed choices', () => {
@@ -113,6 +114,6 @@ test('unreported effort stays a dropdown with default and a disabled saved value
   }));
   assert.match(markup, /<select[^>]*aria-label="Effort"/);
   assert.match(markup, /<option value="old-effort" disabled="" selected="">/);
-  assert.match(markup, /아직 보고되지 않았습니다/);
+  assert.match(markup, uiPattern("이 Host·CLI·모델의 Effort 선택지가 아직 보고되지 않았습니다. 해당 모델로 세션을 연결한 뒤 새로고침하세요."));
   assert.doesNotMatch(markup, /<input[^>]*value="old-effort"/);
 });

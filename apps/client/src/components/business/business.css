@@ -80,7 +80,7 @@
 .business-stage-number { font-size: 11px; color: #94a3b8; font-variant-numeric: tabular-nums; }
 .business-stage-card.complete .business-stage-number { color: #6ee7b7; }
 .business-stage-card > small { color: #94a3b8; font-size: 8px; letter-spacing: 1px; }
-.business-stage-card h3 { font-size: 13px; margin: 7px 0 20px; white-space: nowrap; }
+.business-stage-card h3 { font-size: 13px; margin: 7px 0 20px; overflow-wrap: anywhere; }
 .business-progress-track { width: 100%; height: 4px; border-radius: 3px; background: #334155; overflow: hidden; }
 .business-progress-track span { display: block; height: 100%; border-radius: 3px; background: var(--stage-color); }
 .business-stage-footer { display: flex; align-items: center; justify-content: space-between; gap: 4px; font-size: 10px; color: #94a3b8; margin-top: 10px; }
@@ -245,7 +245,8 @@
   .business-topbar { padding: 6px 12px; }
   .business-brand { display: none; }
   .business-nav { width: 100%; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; }
-  .business-nav a { flex-direction: column; padding: 5px 2px; font-size: 11px; gap: 4px; min-height: 48px; }
+  .business-nav a { flex-direction: column; padding: 5px 2px; font-size: 11px; gap: 4px; min-height: 48px; min-width: 0; white-space: normal; text-align: center; }
+  .business-nav a span { overflow-wrap: anywhere; }
   .business-page { padding: 16px 16px 35px; }
   .business-page-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-bottom: 18px; }
   .business-page-heading h1 { font-size: 18px; }
@@ -268,6 +269,12 @@
   .business-marketing-flow { padding: 18px; font-size: 12px; }.business-marketing-flow a { margin-left: 0; }
 }
 @container business (max-width: 420px) {
+  .business-topbar { padding-inline: 6px; }
+  .business-nav { gap: 2px; }
+  .business-nav a { font-size: 10px; }
+  .business-nav a span { overflow-wrap: normal; }
+  .business-stats > button { flex-wrap: wrap; min-width: 0; }
+  .business-stats > button > span { min-width: 0; overflow-wrap: anywhere; }
   .business-hero { align-items: flex-start; }.business-ring { width: 82px; height: 82px; }.business-ring strong { font-size: 21px; }.business-ring span > small { font-size: 8px; }
   .business-journey { grid-template-columns: repeat(2, minmax(0, 1fr)); }.business-stage-card:nth-child(3)::after { display: block; }.business-stage-card:nth-child(2n)::after { display: none; }
   .business-form-grid { grid-template-columns: 1fr; }

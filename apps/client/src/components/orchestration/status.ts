@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 import { toneStyle } from '../../activity';
 import type { ActivityTone } from '../../activity';
 import type { OrchestrationMissionStatus, OrchestrationStepStatus } from '../../types';
@@ -28,34 +29,34 @@ function style(label: string, tone: ActivityTone, live: boolean): StatusStyle {
 }
 
 export const MISSION_STATUS_STYLES: Record<OrchestrationMissionStatus, StatusStyle> = {
-  draft: style('Draft', 'idle', false),
-  planning: style('Planning', 'live', true),
-  running: style('Running', 'live', true),
-  paused: style('Paused', 'stalled', false),
-  completed: style('Completed', 'done', false),
-  failed: style('Failed', 'failed', false),
-  cancelled: style('Cancelled', 'idle', false),
+  get draft() { return style(translate('Draft'), 'idle', false); },
+  get planning() { return style(translate('Planning'), 'live', true); },
+  get running() { return style(translate('Running'), 'live', true); },
+  get paused() { return style(translate('Paused'), 'stalled', false); },
+  get completed() { return style(translate('Completed'), 'done', false); },
+  get failed() { return style(translate('Failed'), 'failed', false); },
+  get cancelled() { return style(translate('Cancelled'), 'idle', false); },
 };
 
 export const STEP_STATUS_STYLES: Record<OrchestrationStepStatus, StatusStyle> = {
-  pending: style('Waiting', 'idle', false),
-  ready: style('Ready', 'queued', false),
-  dispatched: style('Dispatched', 'live', true),
-  running: style('Working', 'live', true),
-  done: style('Done', 'done', false),
-  failed: style('Failed', 'failed', false),
-  blocked: style('Blocked', 'stalled', false),
-  skipped: style('Skipped', 'idle', false),
-  cancelled: style('Cancelled', 'idle', false),
+  get pending() { return style(translate('Waiting'), 'idle', false); },
+  get ready() { return style(translate('Ready'), 'queued', false); },
+  get dispatched() { return style(translate('Dispatched'), 'live', true); },
+  get running() { return style(translate('Working'), 'live', true); },
+  get done() { return style(translate('Done'), 'done', false); },
+  get failed() { return style(translate('Failed'), 'failed', false); },
+  get blocked() { return style(translate('Blocked'), 'stalled', false); },
+  get skipped() { return style(translate('Skipped'), 'idle', false); },
+  get cancelled() { return style(translate('Cancelled'), 'idle', false); },
   // 여기 없으면 stepStyle 의 fallback 이 걸려 가장 급한 상태가 조용히 "Waiting"
   // (muted 회색)으로 그려진다 — 운영자가 개입해야 하는 상태를 대기 중으로 오인하게
   // 만드는 조용한 오표시라, 상태 추가와 스타일 추가는 반드시 같이 가야 한다.
-  needs_recovery: style('Needs recovery', 'failed', false),
+  get needs_recovery() { return style(translate('Needs recovery'), 'failed', false); },
   // 사람이 답해야 진행되는 상태라 가장 눈에 띄어야 한다 — 대기(muted)나 진행중(live)과
   // 같은 색이면 "누가 뭘 해야 하는가" 가 화면에서 사라진다(티켓 5dbe4aa2).
   // live:false — 스스로 바뀌지 않는다(사람의 입력이 있어야 한다). 'attention' tone 이
   // 숨쉬기 대신 링 펄스를 켜 "곧 알아서 진행될 것" 으로 읽히지 않게 한다.
-  awaiting_user: style('Needs your decision', 'attention', false),
+  get awaiting_user() { return style(translate('Needs your decision'), 'attention', false); },
 };
 
 export function missionStyle(status: string): StatusStyle {

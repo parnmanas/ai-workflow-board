@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 import React from 'react';
 import { ErrorState } from './ErrorState';
 import { isChunkLoadError } from '../../utils/chunkReload';
@@ -34,14 +35,14 @@ export class ChunkLoadErrorBoundary extends React.Component<Props, State> {
       const chunkError = isChunkLoadError(this.state.error);
       return (
         <ErrorState
-          title={chunkError ? '새 버전이 배포되었습니다' : '문제가 발생했습니다'}
+          title={chunkError ? translate('새 버전이 배포되었습니다') : translate('문제가 발생했습니다')}
           message={
             chunkError
-              ? '페이지의 새 버전이 배포되어 일부 파일을 불러오지 못했습니다. 새로고침하면 최신 버전을 불러옵니다.'
-              : '페이지를 새로고침한 뒤 다시 시도해 주세요.'
+              ? translate('페이지의 새 버전이 배포되어 일부 파일을 불러오지 못했습니다. 새로고침하면 최신 버전을 불러옵니다.')
+              : translate('페이지를 새로고침한 뒤 다시 시도해 주세요.')
           }
           onRetry={() => window.location.reload()}
-          retryLabel="새로고침"
+          retryLabel={translate('새로고침')}
         />
       );
     }

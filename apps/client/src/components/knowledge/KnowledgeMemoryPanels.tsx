@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
@@ -23,6 +26,7 @@ const selectStyle: React.CSSProperties = {
 };
 
 function WhereItApplies({ items }: { items: string[] }) {
+  useLocale();
   return (
     <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
       {items.map((t) => <li key={t}>{t}</li>)}
@@ -31,26 +35,26 @@ function WhereItApplies({ items }: { items: string[] }) {
 }
 
 function SkillChips({ items, empty, onManage }: { items: SkillAssignment[]; empty: string; onManage: () => void }) {
+  useLocale();
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
       {items.length === 0 && <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>{empty}</span>}
       {items.map((a) => (
         <span key={a.id} title={a.skill_name} style={{ border: `1px solid ${tokens.colors.accent}55`, color: tokens.colors.accentSubtle, borderRadius: 999, padding: '2px 9px', fontSize: 11.5, fontWeight: 600 }}>
-          {a.skill_slug} v{a.version ?? '?'}
+          {a.skill_slug} {translate('v')}{a.version ?? '?'}
         </span>
       ))}
       <button type="button" onClick={onManage} style={{ border: 'none', background: 'none', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 12 }}>
-        Manage in Skills →
-      </button>
+        {translate('Manage in Skills →')}</button>
     </div>
   );
 }
 
 const STATUS_LABEL: Record<SyncStatus, { text: string; color: string }> = {
-  current: { text: 'up to date', color: tokens.colors.success },
-  outdated: { text: 'outdated', color: tokens.colors.warning },
-  missing: { text: 'not synced', color: tokens.colors.textMuted },
-  unknown: { text: 'large file — checked on sync', color: tokens.colors.textMuted },
+  current: { get text() { return translate('up to date'); }, color: tokens.colors.success },
+  outdated: { get text() { return translate('outdated'); }, color: tokens.colors.warning },
+  missing: { get text() { return translate('not synced'); }, color: tokens.colors.textMuted },
+  unknown: { get text() { return translate('large file — checked on sync'); }, color: tokens.colors.textMuted },
 };
 
 /**
@@ -59,6 +63,7 @@ const STATUS_LABEL: Record<SyncStatus, { text: string; color: string }> = {
  * 다시 동기화하면 블록만 바뀐다. 매니저가 쓰기 전에 백업한다(Memory → Host files → History).
  */
 function HostSync({ accountId, body }: { accountId: string; body: string }) {
+  useLocale();
   const { showToast } = useToast();
   const [hosts, setHosts] = useState<MemoryHostInfo[] | null>(null);
   const [hostError, setHostError] = useState<string | null>(null);
@@ -78,7 +83,7 @@ function HostSync({ accountId, body }: { accountId: string; body: string }) {
         setHosts(usable);
         if (usable.length === 1) setHostId(usable[0].manager_id);
       })
-      .catch((err: any) => setHostError(err?.status === 403 ? 'Syncing to hosts needs the CLI Memory permission.' : err?.message || 'Failed to list hosts'));
+      .catch((err: any) => setHostError(err?.status === 403 ? translate('Syncing to hosts needs the CLI Memory permission.') : err?.message || translate('Failed to list hosts')));
   }, []);
 
   const loadSnapshot = useCallback(async (managerId: string) => {
@@ -87,7 +92,7 @@ function HostSync({ accountId, body }: { accountId: string; body: string }) {
     try {
       setSnapshot(await api.getMemorySnapshot(managerId));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to read that host', 'error');
+      showToast(err?.message || translate('Failed to read that host'), 'error');
       setSnapshot(null);
     } finally {
       setLoading(false);
@@ -96,7 +101,7 @@ function HostSync({ accountId, body }: { accountId: string; body: string }) {
 
   useEffect(() => { if (hostId) void loadSnapshot(hostId); else setSnapshot(null); }, [hostId, loadSnapshot]);
 
-  const targets = useMemo(() => (snapshot ? syncTargets(snapshot) : []), [snapshot]);
+  const targets = useMemo(() => (snapshot ? syncTargets(snapshot) : []), [snapshot, getLocale()]);
   const keyOf = (t: SyncTarget) => `${t.cli.cli}|${t.file.path}`;
   useEffect(() => {
     setSelected(new Set(targets.filter((t) => syncStatus(t.file, id, body) !== 'current').map(keyOf)));
@@ -117,46 +122,46 @@ function HostSync({ accountId, body }: { accountId: string; body: string }) {
       }
       const ops = syncOps(chosen, id, body);
       if (!ops.length) {
-        showToast('Everything selected is already up to date.', 'info');
+        showToast(translate('Everything selected is already up to date.'), 'info');
         return;
       }
       const { results: out } = await api.memoryBatch(snapshot.manager_id, ops);
       setResults(out);
       const ok = out.filter((r) => r.ok).length;
-      showToast(`Synced ${ok} of ${out.length} file(s).`, ok === out.length ? 'success' : 'error');
+      showToast(translate('Synced {0} of {1} file(s).', { 0: ok, 1: out.length }), ok === out.length ? 'success' : 'error');
       await loadSnapshot(snapshot.manager_id);
     } catch (err: any) {
-      showToast(err?.message || 'Sync failed', 'error');
+      showToast(err?.message || translate('Sync failed'), 'error');
     } finally {
       setRunning(false);
     }
   };
 
   if (hostError) return <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{hostError}</div>;
-  if (!hosts) return <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading hosts…</div>;
-  if (!hosts.length) return <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No Runtime Host with an up-to-date agent-manager is connected.</div>;
+  if (!hosts) return <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading hosts…')}</div>;
+  if (!hosts.length) return <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No Runtime Host with an up-to-date agent-manager is connected.')}</div>;
 
   return (
     <div style={{ display: 'grid', gap: 8 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <select value={hostId} onChange={(e) => setHostId(e.target.value)} style={selectStyle} aria-label="Runtime Host">
-          <option value="">Choose a Runtime Host…</option>
+        <select value={hostId} onChange={(e) => setHostId(e.target.value)} style={selectStyle} aria-label={"Runtime Host"}>
+          <option value="">{translate('Choose a Runtime Host…')}</option>
           {hosts.map((h) => <option key={h.manager_id} value={h.manager_id}>{h.name}</option>)}
         </select>
         <button type="button" onClick={() => setPreview(preview === null ? body : null)} style={{ border: 'none', background: 'none', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 12 }}>
-          {preview === null ? 'Show the block' : 'Hide the block'}
+          {preview === null ? translate('Show the block') : translate('Hide the block')}
         </button>
         {snapshot && (
           <Button size="sm" variant="primary" disabled={running || !selected.size} onClick={() => void run()} style={{ marginLeft: 'auto' }}>
-            {running ? 'Syncing…' : `Sync ${selected.size} file${selected.size === 1 ? '' : 's'}`}
+            {running ? translate('Syncing…') : translate('Sync {0} file{1}', { 0: selected.size, 1: selected.size === 1 ? '' : translate('s') })}
           </Button>
         )}
       </div>
       {preview !== null && <pre style={{ margin: 0, padding: 10, borderRadius: tokens.radii.md, background: tokens.colors.surfaceSubtle, fontFamily: MONO, fontSize: 11.5, whiteSpace: 'pre-wrap', color: tokens.colors.textPrimary }}>{preview}</pre>}
-      {loading && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Reading that host…</div>}
+      {loading && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Reading that host…')}</div>}
       {snapshot && !loading && (
         targets.length === 0 ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No CLI global instruction file on this host.</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No CLI global instruction file on this host.')}</div>
         ) : (
           <div style={{ display: 'grid', gap: 2 }}>
             {targets.map((t) => {
@@ -177,10 +182,10 @@ function HostSync({ accountId, body }: { accountId: string; body: string }) {
                   <b style={{ minWidth: 100 }}>{t.cli.label}</b>
                   <span style={{ fontFamily: MONO, fontSize: 11.5, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.file.display_path}</span>
                   {home && home.kind !== 'operator' && (
-                    <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>({home.kind === 'session' ? `session · ${home.credential_name || home.credential_id?.slice(0, 8)}` : `profile · ${home.profile}`})</span>
+                    <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>({home.kind === 'session' ? translate('session · {0}', { 0: home.credential_name || home.credential_id?.slice(0, 8) }) : translate('profile · {0}', { 0: home.profile })})</span>
                   )}
                   <span style={{ marginLeft: 'auto', fontSize: 11.5, color: result ? (result.ok ? tokens.colors.success : tokens.colors.danger) : STATUS_LABEL[status].color, whiteSpace: 'nowrap' }}>
-                    {result ? (result.ok ? '✓ synced' : `✗ ${result.code || result.error}`) : STATUS_LABEL[status].text}
+                    {result ? (result.ok ? translate('✓ synced') : `✗ ${result.code || result.error}`) : STATUS_LABEL[status].text}
                   </span>
                 </label>
               );
@@ -194,6 +199,7 @@ function HostSync({ accountId, body }: { accountId: string; body: string }) {
 
 /** 공용 메모리 — 계정의 모든 Agent 가 알아야 할 것. */
 export function SharedMemoryPanel() {
+  useLocale();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { currentAccountId, availableAccounts } = useAuth();
@@ -216,7 +222,7 @@ export function SharedMemoryPanel() {
       setDraft(account.knowledge_memory || '');
       setAssignments(await api.listSkillAssignments(accountId).catch(() => [] as SkillAssignment[]));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load the account', 'error');
+      showToast(err?.message || translate('Failed to load the account'), 'error');
     } finally {
       setLoading(false);
     }
@@ -231,9 +237,9 @@ export function SharedMemoryPanel() {
       setSaved(account.knowledge_memory ?? draft);
       setDraft(account.knowledge_memory ?? draft);
       setShowDiff(false);
-      showToast('Shared memory saved — the next ticket and mission step will carry it.', 'success');
+      showToast(translate('Shared memory saved — the next ticket and mission step will carry it.'), 'success');
     } catch (err: any) {
-      showToast(err?.status === 403 ? 'You do not have permission to change this shared memory.' : err?.message || 'Save failed', 'error');
+      showToast(err?.status === 403 ? translate('You do not have permission to change this shared memory.') : err?.message || translate('Save failed'), 'error');
     } finally {
       setSaving(false);
     }
@@ -251,34 +257,32 @@ export function SharedMemoryPanel() {
     <div style={{ display: 'grid', gap: 14 }}>
       <Card style={{ display: 'grid', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-          <strong style={{ color: tokens.colors.textPrimary, fontSize: 15 }}>Shared memory</strong>
+          <strong style={{ color: tokens.colors.textPrimary, fontSize: 15 }}>{translate('Shared memory')}</strong>
           <span style={{ marginLeft: 'auto', fontSize: 11.5, color: draft.length > SHARED_MEMORY_MAX ? tokens.colors.danger : tokens.colors.textMuted }}>
-            {draft.length.toLocaleString()} / {SHARED_MEMORY_MAX.toLocaleString()} chars · ≈{estimateTokens(draft).toLocaleString()} tokens
-          </span>
+            {draft.length.toLocaleString(getLocaleTag())} / {SHARED_MEMORY_MAX.toLocaleString(getLocaleTag())} {translate('chars · ≈')}{estimateTokens(draft).toLocaleString(getLocaleTag())} {translate('tokens')}</span>
         </div>
         <div style={{ fontSize: 12.5, color: tokens.colors.textSecondary }}>
-          Shared instructions for agents — conventions, preferences, how you like work reported. Keep it short: it is read on every run.
-          <WhereItApplies items={[
+          {translate('Shared instructions for agents — conventions, preferences, how you like work reported. Keep it short: it is read on every run.')}<WhereItApplies items={[
             'Every ticket work order and mission step prompt (Knowledge section)',
             'Any agent via the AWB MCP tool get_knowledge — including Agent Sessions',
             'CLI sessions you open yourself, once synced to a host below',
           ]} />
         </div>
         {loading ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
         ) : (
           <>
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               spellCheck={false}
-              placeholder={'- Report what changed and how you verified it.\n- Never push red builds to main.\n- Prefer small commits.'}
+              placeholder={translate('- Report what changed and how you verified it.\n- Never push red builds to main.\n- Prefer small commits.')}
               style={textareaStyle}
             />
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              {dirty && <button type="button" onClick={() => setShowDiff((v) => !v)} style={{ border: 'none', background: 'none', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 12 }}>{showDiff ? 'Hide changes' : 'Show changes'}</button>}
-              <Button size="sm" variant="secondary" disabled={!dirty || saving} onClick={() => setDraft(saved)} style={{ marginLeft: 'auto' }}>Revert</Button>
-              <Button size="sm" variant="primary" disabled={!dirty || saving || draft.length > SHARED_MEMORY_MAX} onClick={() => void save()}>{saving ? 'Saving…' : 'Save'}</Button>
+              {dirty && <button type="button" onClick={() => setShowDiff((v) => !v)} style={{ border: 'none', background: 'none', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 12 }}>{showDiff ? translate('Hide changes') : translate('Show changes')}</button>}
+              <Button size="sm" variant="secondary" disabled={!dirty || saving} onClick={() => setDraft(saved)} style={{ marginLeft: 'auto' }}>{translate('Revert')}</Button>
+              <Button size="sm" variant="primary" disabled={!dirty || saving || draft.length > SHARED_MEMORY_MAX} onClick={() => void save()}>{saving ? translate('Saving…') : translate('Save')}</Button>
             </div>
             {showDiff && dirty && <MemoryDiffView before={saved} after={draft} maxHeight={260} />}
           </>
@@ -286,17 +290,14 @@ export function SharedMemoryPanel() {
       </Card>
 
       <Card style={{ display: 'grid', gap: 8 }}>
-        <strong style={{ color: tokens.colors.textPrimary }}>Shared skills</strong>
+        <strong style={{ color: tokens.colors.textPrimary }}>{translate('Shared skills')}</strong>
         <SkillChips items={shared} empty="No skill is assigned to every agent yet." onManage={() => navigate('/skills')} />
       </Card>
 
       <Card style={{ display: 'grid', gap: 8 }}>
-        <strong style={{ color: tokens.colors.textPrimary }}>Sync to a host's CLI files</strong>
+        <strong style={{ color: tokens.colors.textPrimary }}>{translate('Sync to a host\'s CLI files')}</strong>
         <div style={{ fontSize: 12.5, color: tokens.colors.textSecondary }}>
-          Writes the shared memory and the shared skill list as one managed block into each CLI's global instruction file
-          ({'CLAUDE.md, AGENTS.md, GEMINI.md'} …), including AWB credential session homes. The rest of each file stays as it is;
-          syncing again replaces only the block, and every write is backed up first.
-          {dirty && <b style={{ color: tokens.colors.warning }}> Save first — the block uses the saved memory.</b>}
+          {translate('Writes the shared memory and the shared skill list as one managed block into each CLI\'s global instruction file (')}{translate('CLAUDE.md, AGENTS.md, GEMINI.md')} {translate('…), including AWB credential session homes. The rest of each file stays as it is; syncing again replaces only the block, and every write is backed up first.')}{dirty && <b style={{ color: tokens.colors.warning }}> {translate('Save first — the block uses the saved memory.')}</b>}
         </div>
         {accountId && <HostSync accountId={accountId} body={body} />}
       </Card>
@@ -306,6 +307,7 @@ export function SharedMemoryPanel() {
 
 /** 프로젝트 메모리 — 그 프로젝트의 작업에만(Project.instructions). */
 export function ProjectMemoryPanel() {
+  useLocale();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { currentAccountId } = useAuth();
@@ -323,7 +325,7 @@ export function ProjectMemoryPanel() {
       setProjects(rows);
       setProjectId((prev) => prev || rows[0]?.id || '');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load projects', 'error');
+      showToast(err?.message || translate('Failed to load projects'), 'error');
     } finally {
       setLoading(false);
     }
@@ -346,17 +348,17 @@ export function ProjectMemoryPanel() {
     try {
       const updated = await api.updateProject(project.id, { instructions: draft });
       setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-      showToast(`Saved — ${project.name}'s next ticket and mission step will carry it.`, 'success');
+      showToast(translate('Saved — {0}\'s next ticket and mission step will carry it.', { 0: project.name }), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Save failed', 'error');
+      showToast(err?.message || translate('Save failed'), 'error');
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading && !projects.length) return <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>Loading projects…</div>;
+  if (loading && !projects.length) return <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>{translate('Loading projects…')}</div>;
   if (!projects.length) {
-    return <Card><span style={{ color: tokens.colors.textMuted, fontSize: 13 }}>No projects yet. Register a repository under Knowledge → Projects first.</span></Card>;
+    return <Card><span style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('No projects yet. Register a repository under Knowledge → Projects first.')}</span></Card>;
   }
   const dirty = !!project && draft !== (project.instructions || '');
 
@@ -375,7 +377,7 @@ export function ProjectMemoryPanel() {
             }}
           >
             <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>{p.name}</div>
-            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{(p.instructions || '').trim() ? `≈${estimateTokens(p.instructions).toLocaleString()} tokens` : 'empty'}</div>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{(p.instructions || '').trim() ? translate('≈{0} tokens', { 0: estimateTokens(p.instructions).toLocaleString(getLocaleTag()) }) : translate('empty')}</div>
           </button>
         ))}
       </div>
@@ -385,26 +387,24 @@ export function ProjectMemoryPanel() {
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
               <strong style={{ color: tokens.colors.textPrimary, fontSize: 15 }}>{project.name}</strong>
               <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{project.repo_url}</span>
-              <span style={{ marginLeft: 'auto', fontSize: 11.5, color: tokens.colors.textMuted }}>≈{estimateTokens(draft).toLocaleString()} tokens</span>
+              <span style={{ marginLeft: 'auto', fontSize: 11.5, color: tokens.colors.textMuted }}>≈{estimateTokens(draft).toLocaleString(getLocaleTag())} {translate('tokens')}</span>
             </div>
             <div style={{ fontSize: 12.5, color: tokens.colors.textSecondary }}>
-              What agents need for this project only — build and test commands, conventions, where things live. The repository's own
-              CLAUDE.md / AGENTS.md still apply; use this for what is not in the repo.
-              <WhereItApplies items={[
+              {translate('What agents need for this project only — build and test commands, conventions, where things live. The repository\'s own CLAUDE.md / AGENTS.md still apply; use this for what is not in the repo.')}<WhereItApplies items={[
                 'Every ticket of this project (work order → Project instructions)',
                 'Every mission step that works on this project',
                 'Any agent via get_knowledge with this project',
               ]} />
             </div>
-            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} style={textareaStyle} placeholder={'Build: npm run build\nTest: npm test (server suites need dist)\nNever commit generated files.'} />
+            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} style={textareaStyle} placeholder={translate('Build: npm run build\nTest: npm test (server suites need dist)\nNever commit generated files.')} />
             <div style={{ display: 'flex', gap: 8 }}>
-              <Button size="sm" variant="secondary" disabled={!dirty || saving} onClick={() => setDraft(project.instructions || '')} style={{ marginLeft: 'auto' }}>Revert</Button>
-              <Button size="sm" variant="primary" disabled={!dirty || saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save'}</Button>
+              <Button size="sm" variant="secondary" disabled={!dirty || saving} onClick={() => setDraft(project.instructions || '')} style={{ marginLeft: 'auto' }}>{translate('Revert')}</Button>
+              <Button size="sm" variant="primary" disabled={!dirty || saving} onClick={() => void save()}>{saving ? translate('Saving…') : translate('Save')}</Button>
             </div>
             {dirty && <MemoryDiffView before={project.instructions || ''} after={draft} maxHeight={220} />}
           </Card>
           <Card style={{ display: 'grid', gap: 8 }}>
-            <strong style={{ color: tokens.colors.textPrimary }}>Project skills</strong>
+            <strong style={{ color: tokens.colors.textPrimary }}>{translate('Project skills')}</strong>
             <SkillChips items={assignments} empty="No skill is assigned to this project yet." onManage={() => navigate('/skills')} />
           </Card>
         </div>

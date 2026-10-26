@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { sessionModelChoices } from '../../cli/hostModels';
 import { tokens } from '../../tokens';
@@ -11,10 +13,11 @@ export default function SessionModelSelect({ models, labels, value, onChange, la
   label?: string;
   defaultDisabled?: boolean;
 } & Omit<React.SelectHTMLAttributes<HTMLSelectElement>, 'value' | 'onChange'>) {
+  useLocale();
   const choices = sessionModelChoices(models, labels);
   const selected = value || (models.includes('default') ? 'default' : '');
   const select = (
-    <select aria-label="Model" data-config-category="model" {...props}
+    <select aria-label={translate('Model')} data-config-category="model" {...props}
       value={selected} onChange={(e) => onChange(e.target.value)}
       style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`,
         background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, ...props.style }}>

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import { tokens } from '../../tokens';
 import type { TicketPrerequisiteRow, TicketStatus } from '../../types';
@@ -25,6 +27,7 @@ interface PrerequisitesFieldProps {
 export default function PrerequisitesField({
   rows, busy, error, candidates, onAdd, onRemove, onOpen, labelStyle,
 }: PrerequisitesFieldProps) {
+  useLocale();
   const [pickId, setPickId] = useState('');
   const [reason, setReason] = useState('');
   const open = openPrerequisiteCount(rows);
@@ -40,8 +43,7 @@ export default function PrerequisitesField({
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={labelStyle}>
-        선행 티켓
-        {rows.length > 0 && (open > 0 ? ` · ${open}개 대기 — 모두 끝나면 자동 재개` : ' · 모두 완료')}
+        {translate('선행 티켓')}{rows.length > 0 && (open > 0 ? translate(' · {0}개 대기 — 모두 끝나면 자동 재개', { 0: open }) : translate(' · 모두 완료'))}
       </label>
 
       {rows.length > 0 && (
@@ -51,12 +53,12 @@ export default function PrerequisitesField({
             const archived = !!p?.archived_at;
             const satisfied = !!p?.is_done && !archived;
             const pill = !p
-              ? { label: 'MISSING', bg: tokens.colors.warningBg, fg: tokens.colors.warningLight }
+              ? { label: translate('MISSING'), bg: tokens.colors.warningBg, fg: tokens.colors.warningLight }
               : archived
-                ? { label: 'ARCHIVED', bg: tokens.colors.surface, fg: tokens.colors.textMuted }
+                ? { label: translate('ARCHIVED'), bg: tokens.colors.surface, fg: tokens.colors.textMuted }
                 : satisfied
-                  ? { label: 'SATISFIED', bg: tokens.colors.successBg, fg: tokens.colors.successLight }
-                  : { label: p.status ? ticketStatusLabel(p.status) : 'BLOCKING', bg: tokens.colors.surface, fg: tokens.colors.info };
+                  ? { label: translate('SATISFIED'), bg: tokens.colors.successBg, fg: tokens.colors.successLight }
+                  : { label: p.status ? ticketStatusLabel(p.status) : translate('BLOCKING'), bg: tokens.colors.surface, fg: tokens.colors.info };
             return (
               <div key={row.prerequisite_ticket_id} style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -71,19 +73,19 @@ export default function PrerequisitesField({
                 <button
                   type="button"
                   onClick={() => onOpen && p && onOpen(p.id)}
-                  title={p ? 'Open prerequisite ticket' : undefined}
+                  title={p ? translate('Open prerequisite ticket') : undefined}
                   disabled={!p || !onOpen}
                   style={{
                     flex: 1, minWidth: 0, textAlign: 'left', background: 'transparent', border: 'none', padding: 0,
                     color: tokens.colors.textStrong, fontSize: '12px', cursor: (p && onOpen) ? 'pointer' : 'default',
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}
-                >{p ? p.title : `(deleted) ${row.prerequisite_ticket_id}`}</button>
+                >{p ? p.title : translate('(deleted) {0}', { 0: row.prerequisite_ticket_id })}</button>
                 <button
                   type="button"
                   onClick={() => onRemove(row.prerequisite_ticket_id)}
                   disabled={busy}
-                  title="Remove this prerequisite"
+                  title={translate('Remove this prerequisite')}
                   style={{
                     flexShrink: 0, background: 'transparent', border: 'none', color: tokens.colors.textMuted,
                     fontSize: '14px', cursor: busy ? 'not-allowed' : 'pointer', lineHeight: 1, padding: '0 2px',
@@ -104,7 +106,7 @@ export default function PrerequisitesField({
             borderRadius: tokens.radii.md, padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', cursor: 'pointer',
           }}
         >
-          <option value="">— Add a prerequisite ticket —</option>
+          <option value="">{translate('— Add a prerequisite ticket —')}</option>
           {candidates.map(t => (
             <option key={t.id} value={t.id}>{t.title} · {ticketStatusLabel(t.status)}</option>
           ))}
@@ -118,14 +120,14 @@ export default function PrerequisitesField({
             borderRadius: tokens.radii.md, padding: '5px 12px', fontSize: '12px', fontWeight: 600,
             cursor: (busy || !pickId) ? 'not-allowed' : 'pointer', opacity: (busy || !pickId) ? 0.5 : 1,
           }}
-        >Add</button>
+        >{translate('Add')}</button>
       </div>
       {pickId && (
         <input
           type="text"
           value={reason}
           onChange={e => setReason(e.target.value)}
-          placeholder="Optional: why is this a prerequisite?"
+          placeholder={translate('Optional: why is this a prerequisite?')}
           style={{
             width: '100%', marginTop: 6, boxSizing: 'border-box',
             background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,

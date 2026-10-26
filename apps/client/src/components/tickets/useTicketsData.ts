@@ -1,3 +1,4 @@
+import { t as translate, getLocale } from '../../i18n/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import type { TicketCreateInput, TicketPatch } from '../../api';
@@ -31,7 +32,7 @@ export function useTicketsData(accountId: string, filters: TicketFilters) {
   ticketsRef.current = tickets;
 
   const queryKey = filtersToSearch(filters).toString();
-  const query = useMemo(() => filtersToQuery(filters), [queryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const query = useMemo(() => filtersToQuery(filters), [queryKey, getLocale()]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refresh = useCallback(async () => {
     if (!accountId) { setTickets([]); setLoading(false); return; }
@@ -44,7 +45,7 @@ export function useTicketsData(accountId: string, filters: TicketFilters) {
       setError(null);
     } catch (err: any) {
       if (seq !== requestSeq.current) return;
-      setError(err?.message || '티켓 목록을 불러오지 못했습니다');
+      setError(err?.message || translate('티켓 목록을 불러오지 못했습니다'));
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }

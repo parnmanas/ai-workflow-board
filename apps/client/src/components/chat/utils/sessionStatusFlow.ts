@@ -1,3 +1,4 @@
+import { t as translate } from '../../../i18n/core';
 // Keep-alive / background-task badge glue (ticket e18be8ff review round 1).
 // Extracted out of ChatPage.tsx so the prune-on-expiry and
 // restore-on-room-entry logic can be exercised without a full React/jsdom
@@ -51,7 +52,7 @@ export function restoreSessionStatusSnapshot(rows: SessionStatusSnapshotRow[]): 
   const next: SessionStatusByAgent = {};
   for (const row of rows) {
     next[row.agent_id] = {
-      name: row.agent_name || 'Agent',
+      name: row.agent_name || translate('Agent'),
       keepAliveUntilMs: row.keep_alive_until_ms,
       backgroundTaskCount: row.background_task_count,
     };

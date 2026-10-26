@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
 import type { Skill, SkillSyncSummary, SkillTap } from '../../types';
@@ -23,6 +26,7 @@ import { Badge, Button, Card, Input } from '../common';
  * running exactly what it pinned.
  */
 export default function SkillRegistryPage() {
+  useLocale();
   const { showToast } = useToast();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [taps, setTaps] = useState<SkillTap[]>([]);
@@ -43,7 +47,7 @@ export default function SkillRegistryPage() {
       setSkills(skillRows);
       setTaps(tapRows);
     } catch (error: any) {
-      showToast(error?.message || 'Failed to load the skill registry', 'error');
+      showToast(error?.message || translate('Failed to load the skill registry'), 'error');
     } finally {
       setLoading(false);
     }
@@ -52,7 +56,7 @@ export default function SkillRegistryPage() {
   useEffect(() => { void load(); }, [load]);
 
   const describe = (summary: SkillSyncSummary) =>
-    `created ${summary.created} · updated ${summary.updated} · already current ${summary.alreadyCurrent}`
+    translate('created {0} · updated {1} · already current {2}', { 0: summary.created, 1: summary.updated, 2: summary.alreadyCurrent })
     + ` · quarantined ${summary.quarantined} · conflicts ${summary.conflicted} · skipped ${summary.skipped}`;
 
   const reseed = async () => {
@@ -60,12 +64,12 @@ export default function SkillRegistryPage() {
     try {
       const result = await api.reseedBuiltinSkills();
       showToast(
-        result.dir ? `Built-in pack: ${describe(result)}` : 'No built-in pack directory found',
+        result.dir ? translate('Built-in pack: {0}', { 0: describe(result) }) : translate('No built-in pack directory found'),
         result.dir ? 'success' : 'error',
       );
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Re-seed failed', 'error');
+      showToast(error?.message || translate('Re-seed failed'), 'error');
     } finally {
       setBusy(null);
     }
@@ -82,11 +86,11 @@ export default function SkillRegistryPage() {
         path: path.trim(),
         allowed_licenses: licenses.split(',').map((v) => v.trim()).filter(Boolean),
       });
-      showToast('Tap registered — run a dry run before enabling it', 'success');
+      showToast(translate('Tap registered — run a dry run before enabling it'), 'success');
       setName(''); setRepoUrl(''); setRef('');
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Failed to register the tap', 'error');
+      showToast(error?.message || translate('Failed to register the tap'), 'error');
     } finally {
       setBusy(null);
     }
@@ -109,7 +113,7 @@ export default function SkillRegistryPage() {
       });
       if (!dryRun) await load();
     } catch (error: any) {
-      showToast(error?.message || 'Sync failed', 'error');
+      showToast(error?.message || translate('Sync failed'), 'error');
     } finally {
       setBusy(null);
     }
@@ -118,44 +122,35 @@ export default function SkillRegistryPage() {
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <Card>
-        <strong style={{ color: tokens.colors.textPrimary }}>Global skills are inherited by every account</strong>
+        <strong style={{ color: tokens.colors.textPrimary }}>{translate('Global skills are inherited by every account')}</strong>
         <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>
-          A account can fork any of these; the fork shadows the global by slug while the global keeps
-          receiving upstream updates. Syncing is append-only and never changes what an already-assigned
-          agent runs — assignments pin a specific version.
-        </div>
+          {translate('A account can fork any of these; the fork shadows the global by slug while the global keeps receiving upstream updates. Syncing is append-only and never changes what an already-assigned agent runs — assignments pin a specific version.')}</div>
       </Card>
 
       <Card style={{ display: 'grid', gap: 10 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
           <div>
-            <strong style={{ color: tokens.colors.textPrimary }}>Built-in pack</strong>
+            <strong style={{ color: tokens.colors.textPrimary }}>{translate('Built-in pack')}</strong>
             <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>
-              Ships in the AWB repo under <code>skills/</code> and is seeded at every boot. Upgrading the
-              server is what updates it. Point <code>AWB_BUILTIN_SKILLS_DIR</code> at your own git checkout
-              to manage it yourself.
-            </div>
+              {translate('Ships in the AWB repo under')} <code>skills/</code> {translate('and is seeded at every boot. Upgrading the server is what updates it. Point')} <code>AWB_BUILTIN_SKILLS_DIR</code> {translate('at your own git checkout to manage it yourself.')}</div>
           </div>
-          <Button onClick={reseed} loading={busy === 'builtin'}>Re-seed now</Button>
+          <Button onClick={reseed} loading={busy === 'builtin'}>{translate('Re-seed now')}</Button>
         </div>
       </Card>
 
       <Card style={{ display: 'grid', gap: 10 }}>
-        <strong style={{ color: tokens.colors.textPrimary }}>Add a tap</strong>
+        <strong style={{ color: tokens.colors.textPrimary }}>{translate('Add a tap')}</strong>
         <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
-          An https git repository laid out as <code>&lt;path&gt;/&lt;category&gt;/&lt;slug&gt;/SKILL.md</code>.
-          Only listed licenses are accepted — a repo mixing permissive and proprietary skills syncs just the
-          permissive ones. New taps start <strong>disabled</strong>; dry-run first.
-        </div>
-        <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Community skills" />
-        <Input label="Repository URL (https)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/org/skills" />
-        <Input label="Ref (branch/tag, blank = default)" value={ref} onChange={(e) => setRef(e.target.value)} />
-        <Input label="Path inside the repo" value={path} onChange={(e) => setPath(e.target.value)} placeholder="skills" />
-        <Input label="Allowed licenses (comma separated, blank = all)" value={licenses} onChange={(e) => setLicenses(e.target.value)} />
-        <Button onClick={addTap} loading={busy === 'add'}>Register tap</Button>
+          {translate('An https git repository laid out as')} <code>&lt;path&gt;/&lt;category&gt;/&lt;slug&gt;/SKILL.md</code>{translate('. Only listed licenses are accepted — a repo mixing permissive and proprietary skills syncs just the permissive ones. New taps start')} <strong>{translate('disabled')}</strong>{translate('; dry-run first.')}</div>
+        <Input label={translate('Name')} value={name} onChange={(e) => setName(e.target.value)} placeholder={translate('Community skills')} />
+        <Input label={translate('Repository URL (https)')} value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/org/skills" />
+        <Input label={translate('Ref (branch/tag, blank = default)')} value={ref} onChange={(e) => setRef(e.target.value)} />
+        <Input label={translate('Path inside the repo')} value={path} onChange={(e) => setPath(e.target.value)} placeholder={translate('skills')} />
+        <Input label={translate('Allowed licenses (comma separated, blank = all)')} value={licenses} onChange={(e) => setLicenses(e.target.value)} />
+        <Button onClick={addTap} loading={busy === 'add'}>{translate('Register tap')}</Button>
       </Card>
 
-      {loading && <div style={{ color: tokens.colors.textMuted }}>Loading…</div>}
+      {loading && <div style={{ color: tokens.colors.textMuted }}>{translate('Loading…')}</div>}
 
       {taps.map((tap) => (
         <Card key={tap.id} style={{ display: 'grid', gap: 8 }}>
@@ -168,7 +163,7 @@ export default function SkillRegistryPage() {
             </div>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <Badge variant={tap.enabled ? 'success' : 'neutral'} size="sm">
-                {tap.enabled ? 'enabled' : 'disabled'}
+                {tap.enabled ? translate('enabled') : translate('disabled')}
               </Badge>
               {tap.last_sync_status && (
                 <Badge variant={tap.last_sync_status === 'ok' ? 'success' : 'danger'} size="sm">
@@ -183,16 +178,14 @@ export default function SkillRegistryPage() {
           {tap.last_synced_commit && (
             <div style={{ color: tokens.colors.textMuted, fontSize: 11, fontFamily: 'ui-monospace, monospace' }}>
               {tap.last_synced_commit.slice(0, 12)}
-              {tap.last_synced_at ? ` · ${new Date(tap.last_synced_at).toLocaleString()}` : ''}
+              {tap.last_synced_at ? ` · ${new Date(tap.last_synced_at).toLocaleString(getLocaleTag())}` : ''}
             </div>
           )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Button size="sm" variant="secondary" loading={busy === tap.id} onClick={() => void sync(tap, true)}>
-              Dry run
-            </Button>
+              {translate('Dry run')}</Button>
             <Button size="sm" loading={busy === tap.id} onClick={() => void sync(tap, false)}>
-              Sync now
-            </Button>
+              {translate('Sync now')}</Button>
             <Button
               size="sm"
               variant="secondary"
@@ -201,7 +194,7 @@ export default function SkillRegistryPage() {
                 await load();
               }}
             >
-              {tap.enabled ? 'Disable' : 'Enable'}
+              {tap.enabled ? translate('Disable') : translate('Enable')}
             </Button>
             <Button
               size="sm"
@@ -210,12 +203,11 @@ export default function SkillRegistryPage() {
                 await api.deleteSkillTap(tap.id);
                 // Skills already synced from this tap are intentionally kept —
                 // deleting them would pull definitions out from under agents.
-                showToast('Tap removed. Skills it already synced were kept.', 'success');
+                showToast(translate('Tap removed. Skills it already synced were kept.'), 'success');
                 await load();
               }}
             >
-              Remove
-            </Button>
+              {translate('Remove')}</Button>
           </div>
           {preview?.tapId === tap.id && (
             <pre style={{
@@ -234,8 +226,8 @@ export default function SkillRegistryPage() {
       ))}
 
       <Card style={{ display: 'grid', gap: 8 }}>
-        <strong style={{ color: tokens.colors.textPrimary }}>Global skills ({skills.length})</strong>
-        {skills.length === 0 && <span style={{ color: tokens.colors.textMuted }}>None yet.</span>}
+        <strong style={{ color: tokens.colors.textPrimary }}>{translate('Global skills (')}{skills.length})</strong>
+        {skills.length === 0 && <span style={{ color: tokens.colors.textMuted }}>{translate('None yet.')}</span>}
         {skills.map((skill) => (
           <div key={skill.id} style={{
             display: 'flex', justifyContent: 'space-between', gap: 8,
@@ -251,7 +243,7 @@ export default function SkillRegistryPage() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-              <Badge variant="neutral" size="sm">{skill.source_kind || 'local'}</Badge>
+              <Badge variant="neutral" size="sm">{skill.source_kind || translate('local')}</Badge>
               <Badge variant={skill.status === 'active' ? 'success' : 'danger'} size="sm">{skill.status}</Badge>
               {skill.status === 'active' && (
                 <Button
@@ -261,12 +253,11 @@ export default function SkillRegistryPage() {
                     await api.quarantineGlobalSkill(skill.id);
                     // Quarantine is an operator veto: a later sync skips this
                     // slug rather than reviving it.
-                    showToast('Quarantined — future syncs will skip this slug', 'success');
+                    showToast(translate('Quarantined — future syncs will skip this slug'), 'success');
                     await load();
                   }}
                 >
-                  Quarantine
-                </Button>
+                  {translate('Quarantine')}</Button>
               )}
             </div>
           </div>

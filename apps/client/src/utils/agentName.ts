@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 // ─── Agent display name (ST-7) ───────────────────────────────────────
 //
 // CONTRACT + CHECKLIST: docs/runbooks/agent-display-name.md — read it
@@ -87,7 +88,7 @@ export function agentIdentityLabel(
   agent: AgentLike | null | undefined,
   agentId?: string | null,
 ): { text: string; title: string | undefined } {
-  const title = agentId ? `agent id: ${agentId}` : undefined;
-  if (!agent || !(agent.name ?? '').trim()) return { text: AGENT_NAME_UNRESOLVED, title };
+  const title = agentId ? translate('agent id: {0}', { 0: agentId }) : undefined;
+  if (!agent || !(agent.name ?? '').trim()) return { text: translate(AGENT_NAME_UNRESOLVED), title };
   return { text: formatAgentDisplayName(agent), title };
 }

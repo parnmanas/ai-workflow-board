@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 초대(참여자 추가) UI 회귀 테스트 — 티켓 70e62a9d.
 //
 // 소스 문자열 검사가 아니라 **실제 컴포넌트를 마운트**해서 본다. 이 티켓이 고치는
@@ -225,7 +226,7 @@ function setNativeValue(el, value) {
 
 /** "+ Agent 추가" → Host/CLI/폴더(+label) 입력 → "Agent 추가". 편집기 안의 결과 텍스트를 돌려준다. */
 async function declareAgent(container, { dir, label = '' }) {
-  const open = findButton(container, /^\+ Agent 추가$/);
+  const open = findButton(container, uiPattern('+ Agent 추가'));
   assert.ok(open, "'+ Agent 추가' 버튼이 없다");
   click(open);
   await flush();
@@ -238,19 +239,19 @@ async function declareAgent(container, { dir, label = '' }) {
   await flush();
   const cliSelect = [...editor.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'claude'));
   const inputs = [...editor.querySelectorAll('input')];
-  const dirInput = inputs.find((i) => i.type === 'text' && i.placeholder && /\/home\/user\/work|채팅 전용 폴더/.test(i.placeholder));
+  const dirInput = inputs.find((i) => i.type === 'text' && i.placeholder && (/\/home\/user\/work/.test(i.placeholder) || uiPattern('비워 두면 채팅 전용 폴더').test(i.placeholder)));
   assert.ok(cliSelect && dirInput, 'runtime 선언 입력(CLI/dir)이 없다');
   await act(async () => {
     setNativeValue(cliSelect, 'claude');
     setNativeValue(dirInput, dir);
   });
   if (label) {
-    const labelInput = [...editor.querySelectorAll('input')].find((i) => i.placeholder && i.placeholder.includes('자동 표시'));
+    const labelInput = [...editor.querySelectorAll('input')].find((i) => i.placeholder && i.placeholder.includes(ui('비워두면 폴더/CLI 로 자동 표시')));
     assert.ok(labelInput, 'Label 입력이 없다');
     await act(async () => { setNativeValue(labelInput, label); });
   }
   await flush();
-  click(findButton(editor, /^Agent 추가$/));
+  click(findButton(editor, uiPattern('Agent 추가')));
   await flush();
   return container.querySelector('[data-testid="new-chat-agent-editor"]');
 }
@@ -261,10 +262,10 @@ test('DM 초대 시 되돌릴 수 없는 승격을 확정 전에 알린다', asy
     await flush();
     const notice = picker.container.querySelector('[data-testid="dm-promotion-notice"]');
     assert.ok(notice, 'DM 초대인데 승격 경고가 없다');
-    assert.match(notice.textContent, /되돌릴 수\s*없습니다/);
-    assert.match(notice.textContent, /그룹 대화/);
+    assert.match(notice.textContent, uiPattern("그룹 대화로 바뀌며 되돌릴 수 없습니다."));
+    assert.match(notice.textContent, uiPattern("그룹 대화로 바뀌며 되돌릴 수 없습니다."));
     // 이전 대화가 초대된 사람에게 보인다는 사실도 함께 알려야 한다(승격의 의도된 성질).
-    assert.match(notice.textContent, /이전 내용/);
+    assert.match(notice.textContent, uiPattern("지금까지의 대화 기록은 그대로 남고, 초대된 사람도 스크롤하면 이전 내용을 볼 수 있습니다."));
     assert.ok(findButton(picker.container, /Convert to Group/), '확인 버튼 라벨이 승격을 드러내야 한다');
   } finally {
     picker.unmount();
@@ -380,7 +381,7 @@ test('새 채팅: Agent 여럿을 선언해 이름 붙인 그룹 방을 만든�
     await flush();
     await declareAgent(picker.container, { dir: '/repo/app', label: 'writer' });
     // 한 Agent 면 DM — 모든 메시지에 답한다고 알린다.
-    assert.match(picker.container.querySelector('[data-testid="new-chat-shape"]').textContent, /1:1 대화/);
+    assert.match(picker.container.querySelector('[data-testid="new-chat-shape"]').textContent, uiPattern("1:1 대화"));
     assert.ok(findButton(picker.container, /^Start Chat$/));
 
     await declareAgent(picker.container, { dir: '/repo/review', label: 'reviewer' });
@@ -389,9 +390,9 @@ test('새 채팅: Agent 여럿을 선언해 이름 붙인 그룹 방을 만든�
     assert.match(names[0], /host-one\/writer/);
     assert.match(names[1], /host-one\/reviewer/);
     // 둘 이상이면 그룹 — Agent 는 @멘션에 답한다는 규칙을 만들기 전에 알린다.
-    assert.match(picker.container.querySelector('[data-testid="new-chat-shape"]').textContent, /그룹 대화.*@멘션/);
+    assert.match(picker.container.querySelector('[data-testid="new-chat-shape"]').textContent, uiPattern("그룹 대화 · Agent {0} · 사람 {1} — Agent 는 @멘션을 받으면 답합니다."));
 
-    const roomName = [...picker.container.querySelectorAll('input')].find((i) => i.placeholder?.includes('자동 지정'));
+    const roomName = [...picker.container.querySelectorAll('input')].find((i) => i.placeholder?.includes(ui('비워두면 참여자 이름으로 자동 지정')));
     assert.ok(roomName, '방 이름 입력이 없다');
     await act(async () => { setNativeValue(roomName, '설계 회의'); });
 
@@ -470,10 +471,10 @@ test('새 채팅: 폴더를 비우면 채팅 전용 폴더를 쓰고, 같은 CLI
   };
   try {
     await flush();
-    click(findButton(picker.container, /^\+ Agent 추가$/));
+    click(findButton(picker.container, uiPattern('+ Agent 추가')));
     await flush();
     assert.ok(picker.container.querySelector('[data-testid="runtime-folder-optional-hint"]'), '폴더가 선택이라는 안내가 보여야 한다');
-    click(findButton(picker.container, /^취소$/));
+    click(findButton(picker.container, uiPattern('취소')));
     await flush();
 
     await declareAgent(picker.container, { dir: '' });
@@ -482,7 +483,7 @@ test('새 채팅: 폴더를 비우면 채팅 전용 폴더를 쓰고, 같은 CLI
     assert.equal(cards.length, 2, '같은 CLI 를 둘 넣어도 신원이 갈라져 둘 다 들어간다');
     assert.match(cards[0], /host-one\/Claude Code/);
     assert.match(cards[1], /host-one\/Claude Code 2/);
-    assert.match(cards[0], /채팅 전용 폴더/, '긴 기본 경로 대신 짧게 보인다');
+    assert.match(cards[0], uiPattern("채팅 전용 폴더"), '긴 기본 경로 대신 짧게 보인다');
 
     click(findButton(picker.container, /^Create Group$/));
     await flush();
@@ -501,7 +502,7 @@ test('새 채팅: 채팅 전용 폴더를 모르는 Host(구버전·꺼짐)는 �
     await flush();
     const editor = await declareAgent(picker.container, { dir: '' });
     assert.ok(editor, '편집기가 그대로 열려 있어야 한다');
-    assert.match(editor.querySelector('[role="alert"]').textContent, /채팅 전용 폴더를 알리지 않았습니다/);
+    assert.match(editor.querySelector('[role="alert"]').textContent, uiPattern("이 Runtime Host 는 채팅 전용 폴더를 알리지 않았습니다(꺼져 있거나 매니저가 오래됨) — 작업 폴더를 직접 입력하세요."));
     assert.equal(picker.container.querySelectorAll('[data-testid="new-chat-agent"]').length, 0);
   } finally {
     picker.unmount();

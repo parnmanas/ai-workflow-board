@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Action, Ticket, TicketCard, TicketPrerequisiteRow, TicketStatus } from '../../types';
 import { api } from '../../api';
@@ -51,6 +54,7 @@ export interface TicketOverviewProps {
 
 /** Prerequisite links: seeded from the ticket, then read fresh (the list endpoint is authoritative). */
 function usePrerequisites(ticket: Ticket) {
+  useLocale();
   const [rows, setRows] = useState<TicketPrerequisiteRow[]>(ticket.prerequisites || []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,15 +86,16 @@ function usePrerequisites(ticket: Ticket) {
   }, []);
 
   const add = useCallback((id: string, reason: string) =>
-    change(() => api.addPrerequisites(ticket.id, [id], reason || undefined), '선행 티켓을 추가하지 못했습니다'), [change, ticket.id]);
+    change(() => api.addPrerequisites(ticket.id, [id], reason || undefined), translate('선행 티켓을 추가하지 못했습니다')), [change, ticket.id]);
   const remove = useCallback(async (id: string) => {
-    await change(() => api.removePrerequisite(ticket.id, id), '선행 티켓을 빼지 못했습니다');
+    await change(() => api.removePrerequisite(ticket.id, id), translate('선행 티켓을 빼지 못했습니다'));
   }, [change, ticket.id]);
 
   return { rows, busy, error, add, remove };
 }
 
 function useAccountActions(accountId: string) {
+  useLocale();
   const [actions, setActions] = useState<Action[]>([]);
   useEffect(() => {
     if (!accountId) { setActions([]); return; }
@@ -104,6 +109,7 @@ function useAccountActions(accountId: string) {
 }
 
 export default function TicketOverview(props: TicketOverviewProps) {
+  useLocale();
   const {
     ticket, draft, setDraft, isRoot, accountId, accountTickets, savingDraft, runNote,
     pendingStatus, onStatusChange, parkRequested, onParkDone, onAddComment,
@@ -118,12 +124,12 @@ export default function TicketOverview(props: TicketOverviewProps) {
   const draftProject = useMemo(
     () => projects.find(p => p.id === draft.projectId)
       || (ticket.project && ticket.project.id === draft.projectId ? ticket.project : null),
-    [projects, draft.projectId, ticket.project],
+    [projects, draft.projectId, ticket.project, getLocale()],
   );
   const accountTags = useTicketTags(accountId || null);
   const tagPool = useMemo(
     () => mergeTagSuggestions(collectTagPool(accountTickets), accountTags),
-    [accountTickets, accountTags],
+    [accountTickets, accountTags, getLocale()],
   );
   const prerequisites = usePrerequisites(ticket);
   const actions = useAccountActions(accountId);
@@ -144,7 +150,7 @@ export default function TicketOverview(props: TicketOverviewProps) {
 
       <div style={{ ...fieldGrid, ...section }}>
         <div>
-          <label style={fieldLabel}>상태{pendingStatus ? ' · 옮기는 중' : ''}</label>
+          <label style={fieldLabel}>{translate('상태')}{pendingStatus ? translate(' · 옮기는 중') : ''}</label>
           <select
             value={status}
             disabled={!!pendingStatus}
@@ -158,7 +164,7 @@ export default function TicketOverview(props: TicketOverviewProps) {
           </select>
         </div>
         <div>
-          <label style={fieldLabel}>우선순위</label>
+          <label style={fieldLabel}>{translate('우선순위')}</label>
           <select
             value={draft.priority}
             onChange={e => setField('priority', e.target.value as TicketDraft['priority'])}
@@ -202,13 +208,13 @@ export default function TicketOverview(props: TicketOverviewProps) {
         </>
       ) : (
         <div style={section}>
-          <span style={fieldLabel}>담당</span>
-          <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>상위 티켓의 담당자가 함께 처리합니다</div>
+          <span style={fieldLabel}>{translate('담당')}</span>
+          <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>{translate('상위 티켓의 담당자가 함께 처리합니다')}</div>
         </div>
       )}
 
       <div style={section}>
-        <span style={fieldLabel}>태그</span>
+        <span style={fieldLabel}>{translate('태그')}</span>
         <TagInput
           key={`tags-${ticket.id}`}
           value={effectiveTags(draft, ticket)}
@@ -246,7 +252,7 @@ export default function TicketOverview(props: TicketOverviewProps) {
 
       <details open={linksInUse} style={{ ...section, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
         <summary style={{ ...fieldLabel, cursor: 'pointer', marginBottom: 10 }}>
-          연결·자동화{linksInUse ? '' : ' (없음)'}
+          {translate('연결·자동화')}{linksInUse ? '' : translate(' (없음)')}
         </summary>
         <PrerequisitesField
           key={`prereq-${ticket.id}`}
@@ -261,22 +267,21 @@ export default function TicketOverview(props: TicketOverviewProps) {
         />
         <div style={section}>
           <label style={fieldLabel}>
-            다음 티켓{ticket.next_ticket?.status ? ` · 지금 ${ticketStatusLabel(ticket.next_ticket.status)}` : ''}
+            {translate('다음 티켓')}{ticket.next_ticket?.status ? translate(' · 지금 {0}', { 0: ticketStatusLabel(ticket.next_ticket.status) }) : ''}
           </label>
           <select
             value={draft.nextTicketId}
             onChange={e => setField('nextTicketId', e.target.value)}
             style={{ ...controlStyle, cursor: 'pointer' }}
           >
-            <option value="">— 없음 —</option>
+            <option value="">{translate('— 없음 —')}</option>
             {ticket.next_ticket && !otherTickets.some(t => t.id === ticket.next_ticket!.id) && (
               <option value={ticket.next_ticket.id}>{ticket.next_ticket.title} · {ticketStatusLabel(ticket.next_ticket.status)}</option>
             )}
             {otherTickets.map(t => <option key={t.id} value={t.id}>{t.title} · {ticketStatusLabel(t.status)}</option>)}
           </select>
           <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-            이 티켓이 완료되면 다음 티켓을 대기열(To Do)로 올립니다.
-          </div>
+            {translate('이 티켓이 완료되면 다음 티켓을 대기열(To Do)로 올립니다.')}</div>
         </div>
         <OnDoneActionsField
           value={draft.onDoneActionIds}
@@ -287,9 +292,9 @@ export default function TicketOverview(props: TicketOverviewProps) {
       </details>
 
       <div style={{ fontSize: '11px', color: tokens.colors.textMuted, lineHeight: 1.6, ...wrapText }}>
-        {ticket.created_by && <>만든 사람 {ticket.created_by} · </>}
-        만듦 {new Date(ticket.created_at).toLocaleString()}
-        {ticket.updated_at && <> · 수정 {new Date(ticket.updated_at).toLocaleString()}</>}
+        {ticket.created_by && <>{translate('만든 사람')} {ticket.created_by} · </>}
+        {translate('만듦')} {new Date(ticket.created_at).toLocaleString(getLocaleTag())}
+        {ticket.updated_at && <> {translate('· 수정')} {new Date(ticket.updated_at).toLocaleString(getLocaleTag())}</>}
       </div>
     </div>
   );

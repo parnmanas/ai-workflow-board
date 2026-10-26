@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveAccountId, rawResourceUrl } from '../../api';
 import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope, QaPhase, QaPhasesConfig, Deployment } from '../../types';
@@ -47,6 +49,7 @@ function statusVariant(s: string) {
  * with per-step pass/fail badges + screenshot thumbnails, plus run history.
  */
 export default function QaManager({ accountId, allScopes = false }: QaManagerProps) {
+  useLocale();
   const { showToast } = useToast();
   const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
@@ -85,7 +88,7 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       setSchedules(scheduleList || []);
       setDeployments(deploymentList || []);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load QA scenarios', 'error');
+      showToast(err?.message || translate('Failed to load QA scenarios'), 'error');
     }
   }, [effectiveAccountId, allScopes, showToast]);
 
@@ -116,11 +119,11 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
     setRunning(s.id);
     try {
       const result = await api.runQaScenario(s.id);
-      showToast(`QA run started (room ${result.room_id.slice(0, 8)})`, 'success');
+      showToast(translate('QA run started (room {0})', { 0: result.room_id.slice(0, 8) }), 'success');
       // Keep the selected scenario in sync so the detail view can refresh runs.
       setSelected(s);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to start QA run', 'error');
+      showToast(err?.message || translate('Failed to start QA run'), 'error');
     } finally {
       setRunning(null);
     }
@@ -146,9 +149,9 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
         ...payload,
       });
       setActiveBatch(batch);
-      showToast(`QA batch started — ${batch.total} scenario(s) in sequence`, 'success');
+      showToast(translate('QA batch started — {0} scenario(s) in sequence', { 0: batch.total }), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to start QA batch', 'error');
+      showToast(err?.message || translate('Failed to start QA batch'), 'error');
     } finally {
       setBatchStarting(false);
     }
@@ -174,12 +177,12 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
   const handleDelete = async (s: QaScenario) => {
     try {
       await api.deleteQaScenario(s.id, effectiveAccountId);
-      showToast('QA scenario deleted', 'success');
+      showToast(translate('QA scenario deleted'), 'success');
       setConfirmDelete(null);
       if (selected?.id === s.id) setSelected(null);
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete scenario', 'error');
+      showToast(err?.message || translate('Failed to delete scenario'), 'error');
     }
   };
 
@@ -187,10 +190,10 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
     try {
       const { batch } = await api.runQaScheduleNow(s.id, effectiveAccountId);
       setActiveBatch(batch);
-      showToast(`스케줄 "${s.name}" 즉시 실행 — ${batch.total} 시나리오`, 'success');
+      showToast(translate('스케줄 "{0}" 즉시 실행 — {1} 시나리오', { 0: s.name, 1: batch.total }), 'success');
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to run schedule', 'error');
+      showToast(err?.message || translate('Failed to run schedule'), 'error');
     }
   };
 
@@ -199,23 +202,23 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       await api.updateQaSchedule(s.id, { account_id: effectiveAccountId, enabled: !s.enabled });
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to toggle schedule', 'error');
+      showToast(err?.message || translate('Failed to toggle schedule'), 'error');
     }
   };
 
   const handleScheduleDelete = async (s: QaSchedule) => {
     try {
       await api.deleteQaSchedule(s.id, effectiveAccountId);
-      showToast('스케줄 삭제됨', 'success');
+      showToast(translate('스케줄 삭제됨'), 'success');
       setConfirmDeleteSchedule(null);
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete schedule', 'error');
+      showToast(err?.message || translate('Failed to delete schedule'), 'error');
     }
   };
 
   if (!effectiveAccountId) {
-    return <div style={{ color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>;
+    return <div style={{ color: tokens.colors.textSecondary }}>{translate('Ownership defaults are unavailable.')}</div>;
   }
 
   // Editor + delete-confirm modals are rendered once at the end so they are
@@ -239,9 +242,9 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       {confirmDelete && (
         <ConfirmDialog
           isOpen={true}
-          title="Delete QA scenario"
-          message={`Delete "${confirmDelete.name}" and all its runs? This cannot be undone.`}
-          confirmLabel="Delete"
+          title={translate('Delete QA scenario')}
+          message={translate('Delete "{0}" and all its runs? This cannot be undone.', { 0: confirmDelete.name })}
+          confirmLabel={translate('Delete')}
           onConfirm={() => handleDelete(confirmDelete)}
           onCancel={() => setConfirmDelete(null)}
         />
@@ -258,9 +261,9 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       {confirmDeleteSchedule && (
         <ConfirmDialog
           isOpen={true}
-          title="스케줄 삭제"
-          message={`스케줄 "${confirmDeleteSchedule.name}" 을 삭제할까요? 이미 시작된 batch 는 영향받지 않습니다.`}
-          confirmLabel="Delete"
+          title={translate('스케줄 삭제')}
+          message={translate('스케줄 "{0}" 을 삭제할까요? 이미 시작된 batch 는 영향받지 않습니다.', { 0: confirmDeleteSchedule.name })}
+          confirmLabel={translate('Delete')}
           onConfirm={() => handleScheduleDelete(confirmDeleteSchedule)}
           onCancel={() => setConfirmDeleteSchedule(null)}
         />
@@ -291,8 +294,7 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-          Scenario-based QA — run a scenario, accumulate step pass/fail + screenshots, re-run to compare.
-        </div>
+          {translate('Scenario-based QA — run a scenario, accumulate step pass/fail + screenshots, re-run to compare.')}</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {/* 순차 batch 실행: 한 번에 하나씩, 끝나야 다음. */}
           <Button
@@ -300,20 +302,19 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
             size="md"
             disabled={scenarios.length === 0 || batchStarting || batchRunning}
             onClick={() => startBatch({ all: true })}
-            title="현재 scope 의 enabled 시나리오를 이름순으로 순차 실행"
+            title={translate('현재 scope 의 enabled 시나리오를 이름순으로 순차 실행')}
           >
-            ▶ 전체 순차 실행
-          </Button>
+            {translate('▶ 전체 순차 실행')}</Button>
           <Button
             variant="secondary"
             size="md"
             disabled={orderedSelected.length === 0 || batchStarting || batchRunning}
             onClick={() => startBatch({ scenario_ids: orderedSelected.map((s) => s.id) })}
-            title="체크한 시나리오를 위→아래 순서대로 순차 실행"
+            title={translate('체크한 시나리오를 위→아래 순서대로 순차 실행')}
           >
-            ▶ 선택 순차 실행{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
+            {translate('▶ 선택 순차 실행')}{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
           </Button>
-          <Button variant="primary" size="md" onClick={() => setEditing('new')}>+ New Scenario</Button>
+          <Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ New Scenario')}</Button>
         </div>
       </div>
 
@@ -331,8 +332,7 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       {scenarios.length === 0 ? (
         <Card padding="20px">
           <div style={{ color: tokens.colors.textSecondary }}>
-            No QA scenarios yet. Create one and point it at a QA driver (browser / game-client / http-api).
-            See <code>docs/qa-driver-guide.md</code>.
+            {translate('No QA scenarios yet. Create one and point it at a QA driver (browser / game-client / http-api). See')} <code>docs/qa-driver-guide.md</code>.
           </div>
         </Card>
       ) : (
@@ -378,6 +378,7 @@ function BatchProgressBanner({ batch, scenarioName, onDismiss }: {
   scenarioName: (id: string) => string;
   onDismiss: () => void;
 }) {
+  useLocale();
   const done = batch.status !== 'running';
   // While running, current_index points at the in-flight scenario; once done it
   // points at the last one touched, so the "N / total" reads as completed count.
@@ -386,25 +387,25 @@ function BatchProgressBanner({ batch, scenarioName, onDismiss }: {
   return (
     <Card padding="14px">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-        <Badge variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'} size="md">batch {batch.status}</Badge>
+        <Badge variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'} size="md">{translate('batch')} {batch.status}</Badge>
         <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
           {position} / {batch.total}
         </span>
         {!done && currentId && (
           <span style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-            현재: <strong style={{ color: tokens.colors.textPrimary }}>{scenarioName(currentId)}</strong>
+            {translate('현재:')} <strong style={{ color: tokens.colors.textPrimary }}>{scenarioName(currentId)}</strong>
           </span>
         )}
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          <Badge variant="success" size="sm">pass {batch.passed}</Badge>
-          <Badge variant="danger" size="sm">fail {batch.failed}</Badge>
-          {batch.errored > 0 && <Badge variant="warning" size="sm">err {batch.errored}</Badge>}
+          <Badge variant="success" size="sm">{translate('pass')} {batch.passed}</Badge>
+          <Badge variant="danger" size="sm">{translate('fail')} {batch.failed}</Badge>
+          {batch.errored > 0 && <Badge variant="warning" size="sm">{translate('err')} {batch.errored}</Badge>}
         </span>
         {done && (
           <button
             onClick={onDismiss}
             style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 13, padding: '2px 6px' }}
-            title="배너 닫기"
+            title={translate('배너 닫기')}
           >
             ✕
           </button>
@@ -421,8 +422,7 @@ function BatchProgressBanner({ batch, scenarioName, onDismiss }: {
       </div>
       {!done && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-          한 시나리오가 끝나야(passed/failed/error) 다음이 시작됩니다 — 동시에 뜨지 않습니다.
-        </div>
+          {translate('한 시나리오가 끝나야(passed/failed/error) 다음이 시작됩니다 — 동시에 뜨지 않습니다.')}</div>
       )}
     </Card>
   );
@@ -435,10 +435,10 @@ function formatCadence(s: Pick<QaSchedule, 'cron' | 'interval_ms'>): string {
   if (s.cron) return `cron: ${s.cron} (UTC)`;
   if (s.interval_ms && s.interval_ms > 0) {
     const ms = s.interval_ms;
-    if (ms % 3_600_000 === 0) return `매 ${ms / 3_600_000}시간`;
-    if (ms % 60_000 === 0) return `매 ${ms / 60_000}분`;
-    if (ms % 1_000 === 0) return `매 ${ms / 1_000}초`;
-    return `매 ${ms}ms`;
+    if (ms % 3_600_000 === 0) return translate('매 {0}시간', { 0: ms / 3_600_000 });
+    if (ms % 60_000 === 0) return translate('매 {0}분', { 0: ms / 60_000 });
+    if (ms % 1_000 === 0) return translate('매 {0}초', { 0: ms / 1_000 });
+    return translate('매 {0}ms', { 0: ms });
   }
   return '—';
 }
@@ -461,38 +461,36 @@ interface SchedulesSectionProps {
  * batch orchestrator, so a fired schedule surfaces in the same progress banner.
  */
 function SchedulesSection({ schedules, scenarios, disabled, onNew, onEdit, onToggle, onRunNow, onDelete }: SchedulesSectionProps) {
+  useLocale();
   return (
     <div style={{ marginTop: 28 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div>
-          <SectionLabel>스케줄 — 자동 순차 실행</SectionLabel>
+          <SectionLabel>{translate('스케줄 — 자동 순차 실행')}</SectionLabel>
           <div style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-            예약된 시각이 되면 순차 batch 를 자동으로 시작합니다 (전체 또는 선택 시나리오). 순차-batch 와 같은 오케스트레이터를 재사용 — 진행 상황은 위 배너에 표시됩니다.
-          </div>
+            {translate('예약된 시각이 되면 순차 batch 를 자동으로 시작합니다 (전체 또는 선택 시나리오). 순차-batch 와 같은 오케스트레이터를 재사용 — 진행 상황은 위 배너에 표시됩니다.')}</div>
         </div>
-        <Button variant="primary" size="md" disabled={disabled} onClick={onNew} title={disabled ? '먼저 시나리오를 만드세요' : undefined}>
-          + 새 스케줄
-        </Button>
+        <Button variant="primary" size="md" disabled={disabled} onClick={onNew} title={disabled ? translate('먼저 시나리오를 만드세요') : undefined}>
+          {translate('+ 새 스케줄')}</Button>
       </div>
 
       {schedules.length === 0 ? (
         <Card padding="16px">
           <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-            스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 실행을 추가하세요.
-          </div>
+            {translate('스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 실행을 추가하세요.')}</div>
         </Card>
       ) : (
         <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
             <thead>
               <tr>
-                <th style={TH}>Name</th>
-                <th style={TH}>Scope</th>
-                <th style={TH}>Cadence</th>
-                <th style={TH}>Enabled</th>
-                <th style={TH}>Next run (UTC)</th>
-                <th style={TH}>Last run</th>
-                <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+                <th style={TH}>{translate('Name')}</th>
+                <th style={TH}>{translate('Scope')}</th>
+                <th style={TH}>{translate('Cadence')}</th>
+                <th style={TH}>{translate('Enabled')}</th>
+                <th style={TH}>{translate('Next run (UTC)')}</th>
+                <th style={TH}>{translate('Last run')}</th>
+                <th style={{ ...TH, textAlign: 'right' }}>{translate('Actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -523,8 +521,9 @@ function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }:
   onRunNow: () => void;
   onDelete: () => void;
 }) {
+  useLocale();
   const [hover, setHover] = useState(false);
-  const scopeLabel = s.scope === 'all' ? `전체 (${scenarioCount})` : `선택 ${s.scenario_ids.length}`;
+  const scopeLabel = s.scope === 'all' ? translate('전체 ({0})', { 0: scenarioCount }) : translate('선택 {0}', { 0: s.scenario_ids.length });
   // next_run_at as a compact UTC wall-clock (cron is interpreted in UTC).
   const nextUtc = s.next_run_at ? new Date(s.next_run_at).toISOString().replace('T', ' ').slice(0, 16) : '—';
   return (
@@ -543,20 +542,20 @@ function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }:
       <td style={TD}>
         <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
           <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
-          {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+          {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
         </label>
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
         {s.enabled ? nextUtc : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
-        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never</span>}
+        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never')}</span>}
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }}>
-          <Button variant="primary" size="sm" onClick={onRunNow} title="지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)">▶ Run now</Button>
-          <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
-          <Button variant="danger" size="sm" onClick={onDelete}>Delete</Button>
+          <Button variant="primary" size="sm" onClick={onRunNow} title={translate('지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)')}>{translate('▶ Run now')}</Button>
+          <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
+          <Button variant="danger" size="sm" onClick={onDelete}>{translate('Delete')}</Button>
         </div>
       </td>
     </tr>
@@ -593,6 +592,7 @@ const TD: React.CSSProperties = {
  * card grid (prompt/description bodies live in the detail view, not here).
  */
 function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioTableProps) {
+  useLocale();
   // Header checkbox = select/clear all currently listed scenarios.
   const allSelected = scenarios.length > 0 && scenarios.every((s) => selectedIds.has(s.id));
   const toggleAll = () => {
@@ -607,14 +607,14 @@ function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSel
         <thead>
           <tr>
             <th style={{ ...TH, width: 36, textAlign: 'center' }}>
-              <input type="checkbox" checked={allSelected} onChange={toggleAll} title="전체 선택/해제" />
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} />
             </th>
-            <th style={TH}>Name</th>
-            <th style={TH}>Driver</th>
-            <th style={TH}>Agent</th>
-            <th style={TH}>Last run</th>
-            <th style={TH}>Result</th>
-            <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+            <th style={TH}>{translate('Name')}</th>
+            <th style={TH}>{translate('Driver')}</th>
+            <th style={TH}>{translate('Agent')}</th>
+            <th style={TH}>{translate('Last run')}</th>
+            <th style={TH}>{translate('Result')}</th>
+            <th style={{ ...TH, textAlign: 'right' }}>{translate('Actions')}</th>
           </tr>
         </thead>
         <tbody>
@@ -651,6 +651,7 @@ interface ScenarioRowProps {
 }
 
 function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioRowProps) {
+  useLocale();
   const [hover, setHover] = useState(false);
   // Buttons must not bubble to the row's open handler.
   const stop = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); };
@@ -663,12 +664,12 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       style={{ cursor: 'pointer', background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
       <td style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
-        <input type="checkbox" checked={selected} onChange={onToggleSelect} title="순차 실행에 포함" />
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} title={translate('순차 실행에 포함')} />
       </td>
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
-          {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+          {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
         </div>
       </td>
       <td style={TD}>
@@ -676,7 +677,7 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id, (s as any).target_runtime)}</td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
-        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never run</span>}
+        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never run')}</span>}
       </td>
       <td style={TD}>
         {s.last_run_status
@@ -686,10 +687,10 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
           <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running}>
-            {running ? 'Starting…' : '▶ Run'}
+            {running ? translate('Starting…') : translate('▶ Run')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={stop(onEdit)}>Edit</Button>
-          <Button variant="danger" size="sm" onClick={stop(onDelete)}>Delete</Button>
+          <Button variant="ghost" size="sm" onClick={stop(onEdit)}>{translate('Edit')}</Button>
+          <Button variant="danger" size="sm" onClick={stop(onDelete)}>{translate('Delete')}</Button>
         </div>
       </td>
     </tr>
@@ -709,6 +710,7 @@ interface ScenarioDetailProps {
 }
 
 function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running, onEdit }: ScenarioDetailProps) {
+  useLocale();
   const { showToast } = useToast();
   const [runs, setRuns] = useState<QaRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -723,7 +725,7 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
       setRuns(list);
       setActiveRunId((cur) => cur ?? (list[0]?.id ?? null));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load runs', 'error');
+      showToast(err?.message || translate('Failed to load runs'), 'error');
     }
   }, [scenario.id, accountId, showToast]);
 
@@ -750,26 +752,26 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-        <Button variant="ghost" size="sm" onClick={onBack}>← Back</Button>
+        <Button variant="ghost" size="sm" onClick={onBack}>{translate('← Back')}</Button>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.colors.textPrimary }}>{scenario.name}</div>
           <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
             {scenario.qa_driver && <Badge variant="info" size="sm">{scenario.qa_driver}</Badge>}
-            <Badge variant="neutral" size="sm">agent: {agentName(scenario.target_agent_id, (scenario as any).target_runtime)}</Badge>
+            <Badge variant="neutral" size="sm">{translate('agent:')} {agentName(scenario.target_agent_id, (scenario as any).target_runtime)}</Badge>
           </div>
         </div>
-        <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
+        <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
         <Button variant="primary" size="md" onClick={() => { onRun(); setTimeout(loadRuns, 800); }} disabled={running}>
-          {running ? 'Starting…' : '▶ Run / Re-run'}
+          {running ? translate('Starting…') : translate('▶ Run / Re-run')}
         </Button>
       </div>
 
       {/* Step visualizer */}
       <div style={{ marginBottom: 24 }}>
-        <SectionLabel>Scenario steps {latestRun ? '(badges = latest run)' : ''}</SectionLabel>
+        <SectionLabel>{translate('Scenario steps')} {latestRun ? translate('(badges = latest run)') : ''}</SectionLabel>
         <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
           {(scenario.steps ?? []).length === 0 && (
-            <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>No steps defined. Edit the scenario to add steps.</div>
+            <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('No steps defined. Edit the scenario to add steps.')}</div>
           )}
           {(scenario.steps ?? []).map((step) => {
             const sr = stepResultFor(latestRun, step.idx);
@@ -781,12 +783,12 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
                 background: tokens.colors.surfaceCard, padding: 12,
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textMuted }}>STEP {step.idx}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textMuted }}>{translate('STEP')} {step.idx}</span>
                   {sr && <Badge variant={statusVariant(sr.status)} size="sm">{sr.status}</Badge>}
                 </div>
                 <div style={{ fontSize: 13, color: tokens.colors.textPrimary, marginBottom: 4 }}>{step.action}</div>
                 {step.expect && (
-                  <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>expect: {step.expect}</div>
+                  <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>{translate('expect:')} {step.expect}</div>
                 )}
                 {step.mcp_tool && (
                   <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, fontFamily: 'monospace' }}>{step.mcp_tool}</div>
@@ -794,7 +796,7 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
                 {thumbId && (
                   <img
                     src={rawResourceUrl(thumbId)}
-                    alt={`step ${step.idx}`}
+                    alt={translate('step {0}', { 0: step.idx })}
                     onClick={() => {
                       // 시나리오 썸네일 갤러리 — 전 step 썸네일을 prev/next 로 넘긴다.
                       const gallery = (scenario.steps ?? [])
@@ -816,8 +818,8 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
       {/* Run history + detail */}
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
         <div style={{ width: 230, flexShrink: 0 }}>
-          <SectionLabel>Run history</SectionLabel>
-          {runs.length === 0 && <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>No runs yet.</div>}
+          <SectionLabel>{translate('Run history')}</SectionLabel>
+          {runs.length === 0 && <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('No runs yet.')}</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {runs.map((r) => (
               <button
@@ -839,9 +841,9 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <SectionLabel>Run detail</SectionLabel>
+          <SectionLabel>{translate('Run detail')}</SectionLabel>
           {!activeRun ? (
-            <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>Select a run.</div>
+            <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('Select a run.')}</div>
           ) : (
             <RunDetail run={activeRun} phases={resolvedPhases} onPreview={(src, kind) => setLightbox({ src, kind })} />
           )}
@@ -856,6 +858,7 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
 }
 
 function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesConfig | null; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  useLocale();
   // Run-level artifacts (attach_qa_artifact) that aren't already shown in a
   // per-step gallery. recordStep folds step artifacts into artifact_resource_ids,
   // so subtract them here to render only the run-level extras (and avoid dupes).
@@ -872,27 +875,26 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
         <Badge variant={statusVariant(run.status)} size="md">{run.status}</Badge>
         {run.current_phase && (
-          <span title="현재 진행 중인 QA phase" style={{ display: 'inline-flex' }}>
+          <span title={translate('현재 진행 중인 QA phase')} style={{ display: 'inline-flex' }}>
             <Badge variant={run.status === 'running' || run.status === 'pending' ? 'warning' : 'info'} size="md">
-              phase: {phases?.phases.find((p) => p.id === run.current_phase)?.label || run.current_phase}
+              {translate('phase:')} {phases?.phases.find((p) => p.id === run.current_phase)?.label || run.current_phase}
             </Badge>
           </span>
         )}
         <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-          {(run.step_results?.length ?? 0)} step results · {(run.artifact_resource_ids?.length ?? 0)} artifacts
-        </span>
+          {(run.step_results?.length ?? 0)} {translate('step results ·')} {(run.artifact_resource_ids?.length ?? 0)} {translate('artifacts')}</span>
         {run.rerun_generation > 0 && (
-          <span title="QA→fix→QA 자동 재실행 세대 (수정 티켓 Done 시 트리거)" style={{ display: 'inline-flex' }}>
-            <Badge variant="info" size="md">🔁 재실행 #{run.rerun_generation}</Badge>
+          <span title={translate('QA→fix→QA 자동 재실행 세대 (수정 티켓 Done 시 트리거)')} style={{ display: 'inline-flex' }}>
+            <Badge variant="info" size="md">{translate('🔁 재실행 #')}{run.rerun_generation}</Badge>
           </span>
         )}
         {run.tested_commit && (
           <span
-            title={`서버권위 — dispatch 시점 ${run.tested_environment || 'env'} 의 live 배포 commit (배포 인지)`}
+            title={translate('서버권위 — dispatch 시점 {0} 의 live 배포 commit (배포 인지)', { 0: run.tested_environment || 'env' })}
             style={{ display: 'inline-flex' }}
           >
             <Badge variant="neutral" size="md">
-              🚀 tested @ {run.tested_environment || 'env'}: <code>{run.tested_commit.slice(0, 8)}</code>
+              {translate('🚀 tested @')} {run.tested_environment || translate('env')}: <code>{run.tested_commit.slice(0, 8)}</code>
             </Badge>
           </span>
         )}
@@ -901,16 +903,16 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
             <a
               href={ticketPath(ticketRef.account_id, ticketRef.id)}
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
+              title={translate('이 실패 run 이 자동 생성한 수정 티켓으로 이동')}
             >
-              → 생성된 티켓 #{ticketRef.id.slice(0, 8)}
+              {translate('→ 생성된 티켓 #')}{ticketRef.id.slice(0, 8)}
             </a>
           ) : (
             <span
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="티켓 정보를 확인할 수 없습니다"
+              title={translate('티켓 정보를 확인할 수 없습니다')}
             >
-              생성된 티켓 #{ticketRef.id.slice(0, 8)}
+              {translate('생성된 티켓 #')}{ticketRef.id.slice(0, 8)}
             </span>
           )
         )}
@@ -922,8 +924,7 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
       {runLevelArtifactIds.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 6 }}>
-            Run artifacts
-          </div>
+            {translate('Run artifacts')}</div>
           <Gallery ids={runLevelArtifactIds} onPreview={onPreview} />
         </div>
       )}
@@ -931,7 +932,7 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
         {(run.step_results ?? []).map((sr) => (
           <div key={sr.idx} style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 10, background: tokens.colors.surfaceCard }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: sr.log || sr.artifact_resource_ids?.length ? 6 : 0 }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textMuted }}>STEP {sr.idx}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textMuted }}>{translate('STEP')} {sr.idx}</span>
               <Badge variant={statusVariant(sr.status)} size="sm">{sr.status}</Badge>
             </div>
             {sr.log && <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 6 }}>{sr.log}</div>}
@@ -955,6 +956,7 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
  * phase timeout, the server prepends the reason to run.summary (shown below this).
  */
 function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | null }) {
+  useLocale();
   const history = run.phase_history ?? [];
   if (history.length === 0) return null;
 
@@ -965,8 +967,7 @@ function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | n
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 6 }}>
-        Phase timeline
-      </div>
+        {translate('Phase timeline')}</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {history.map((h, idx) => {
           const def = findPhase(h.phase);
@@ -995,11 +996,11 @@ function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | n
                 <span style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textMuted }}>#{idx + 1}</span>
                 <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>{def?.label || h.phase}</span>
                 {active && (
-                  <Badge variant={runActive ? 'warning' : 'neutral'} size="sm">{runActive ? 'active' : 'open'}</Badge>
+                  <Badge variant={runActive ? 'warning' : 'neutral'} size="sm">{runActive ? translate('active') : translate('open')}</Badge>
                 )}
                 <span style={{ marginLeft: 'auto', fontSize: 11, color: tokens.colors.textMuted }}>
                   {formatDuration(elapsedSec)}{timeout != null && ` / ${formatDuration(timeout)}`}
-                  {over && timeout != null && <span style={{ color: tokens.colors.danger, fontWeight: 600 }}> · over</span>}
+                  {over && timeout != null && <span style={{ color: tokens.colors.danger, fontWeight: 600 }}> {translate('· over')}</span>}
                 </span>
               </div>
               {timeout != null ? (
@@ -1008,8 +1009,7 @@ function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | n
                 </div>
               ) : (
                 <div style={{ fontSize: 11, color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-                  no timeout defined for this phase (not in the resolved config)
-                </div>
+                  {translate('no timeout defined for this phase (not in the resolved config)')}</div>
               )}
             </div>
           );
@@ -1020,6 +1020,7 @@ function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | n
 }
 
 function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  useLocale();
   // 갤러리 내 prev/next — 클릭은 다운로드가 아니라 팝업. kind 는 썸네일 probe 가 채운다.
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [kinds, setKinds] = useState<Record<string, 'image' | 'video'>>({});
@@ -1064,6 +1065,7 @@ function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, k
 }
 
 function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | 'video') => void }) {
+  useLocale();
   // Resolve the real mimetype before choosing the element. The previous version
   // always rendered an <img> and relied on its onError to swap to <video> — but
   // a video/* resource streams back HTTP 200, so the <img> just shows a broken
@@ -1095,13 +1097,14 @@ function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | '
       src={src}
       onClick={() => onClick('image')}
       onError={() => setKind('video')}
-      alt="artifact"
+      alt={translate('artifact')}
       style={{ width: 76, height: 76, objectFit: 'cover', borderRadius: tokens.radii.sm, cursor: 'pointer', border: `1px solid ${tokens.colors.border}` }}
     />
   );
 }
 
 function ScenarioLightbox({ lightbox, onClose }: { lightbox: { src: string; kind: 'image' | 'video'; gallery?: Array<{ src: string; kind: 'image' | 'video' }> }; onClose: () => void }) {
+  useLocale();
   const gallery = lightbox.gallery && lightbox.gallery.length > 1 ? lightbox.gallery : [{ src: lightbox.src, kind: lightbox.kind }];
   const initial = Math.max(0, gallery.findIndex((g) => g.src === lightbox.src));
   const [index, setIndex] = useState(initial);
@@ -1116,6 +1119,7 @@ function ScenarioLightbox({ lightbox, onClose }: { lightbox: { src: string; kind
 }
 
 function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'; onClose: () => void }) {
+  useLocale();
   return (
     <MediaLightbox
       items={[{ src, kind, caption: src }]}
@@ -1127,6 +1131,7 @@ function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
+  useLocale();
   return <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 8 }}>{children}</div>;
 }
 
@@ -1134,13 +1139,13 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 // One badge per environment showing the commit currently LIVE there, so an
 // operator can see at a glance "merged ≠ deployed" — which env is on which commit.
 function DeploymentBadges({ deployments }: { deployments: Deployment[] }) {
+  useLocale();
   if (!deployments || deployments.length === 0) return null;
   const sorted = [...deployments].sort((a, b) => a.environment.localeCompare(b.environment));
   return (
     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: tokens.spacing.md }}>
       <span style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted }}>
-        🚀 Live commits
-      </span>
+        {translate('🚀 Live commits')}</span>
       {sorted.map((d) => {
         const short = (d.deployed_commit_sha || '').slice(0, 8) || '—';
         const when = d.deployed_at ? relativeTime(d.deployed_at) : '';
@@ -1175,6 +1180,7 @@ interface ScenarioEditorProps {
 }
 
 function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: ScenarioEditorProps) {
+  useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(scenario?.name ?? '');
   const [description, setDescription] = useState(scenario?.description ?? '');
@@ -1214,11 +1220,11 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
   const [qaPhases, setQaPhases] = useState<QaPhase[]>(initialPhases?.phases ?? []);
 
   const handleSave = async () => {
-    if (!name.trim()) { showToast('Name is required', 'error'); return; }
-    if (!pendingSpec) { showToast('Target agent is required', 'error'); return; }
+    if (!name.trim()) { showToast(translate('Name is required'), 'error'); return; }
+    if (!pendingSpec) { showToast(translate('Target agent is required'), 'error'); return; }
     let steps: any; let config: any;
-    try { steps = stepsText.trim() ? JSON.parse(stepsText) : []; } catch { showToast('Steps must be valid JSON array', 'error'); return; }
-    try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast('Driver config must be valid JSON', 'error'); return; }
+    try { steps = stepsText.trim() ? JSON.parse(stepsText) : []; } catch { showToast(translate('Steps must be valid JSON array'), 'error'); return; }
+    try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast(translate('Driver config must be valid JSON'), 'error'); return; }
     const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
     // Build the on-failure policy. Disabled → send an explicit { enabled:false }
     // so an existing policy is turned off (rather than left untouched).
@@ -1263,10 +1269,10 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       }
-      showToast(`Scenario ${scenario ? 'updated' : 'created'}`, 'success');
+      showToast(translate('Scenario {0}', { 0: scenario ? 'updated' : 'created' }), 'success');
       onSaved(saved);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save scenario', 'error');
+      showToast(err?.message || translate('Failed to save scenario'), 'error');
     } finally {
       setSaving(false);
     }
@@ -1283,18 +1289,18 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
     <Modal
       isOpen={true}
       onClose={onClose}
-      title={scenario ? 'Edit QA scenario' : 'New QA scenario'}
+      title={scenario ? translate('Edit QA scenario') : translate('New QA scenario')}
       maxWidth={640}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button variant="ghost" onClick={onClose}>{translate('Cancel')}</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? translate('Saving…') : translate('Save')}</Button>
         </div>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <Input label="Name" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
-        <Input label="Description" value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
+        <Input label={translate('Name')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+        <Input label={translate('Description')} value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
         <DeclareRuntimeSection
           initialValue={pendingSpec}
           accountId={accountId}
@@ -1302,36 +1308,33 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
           onResolved={(spec) => {
             setPendingSpec(spec);
             showToast(
-              '실행 설정을 적용했습니다',
+              translate('실행 설정을 적용했습니다'),
               'success',
             );
           }}
         />
-        <Input label="QA driver (browser / game-client / http-api)" value={qaDriver} onChange={(e) => setQaDriver((e.target as HTMLInputElement).value)} />
+        <Input label={translate('QA driver (browser / game-client / http-api)')} value={qaDriver} onChange={(e) => setQaDriver((e.target as HTMLInputElement).value)} />
         <div>
           <Input
-            label="Target environment (배포 인지 — Deployment.environment)"
-            placeholder="예: awb-server, production, staging (비우면 env 미연결)"
+            label={translate('Target environment (배포 인지 — Deployment.environment)')}
+            placeholder={translate('예: awb-server, production, staging (비우면 env 미연결)')}
             value={targetEnvironment}
             onChange={(e) => setTargetEnvironment((e.target as HTMLInputElement).value)}
           />
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 4 }}>
-            설정 시 각 run 이 이 환경의 live 배포 commit 을 <code>tested_commit</code> 으로 기록하고,
-            아래 배포 게이트가 이 환경에 fix 가 배포될 때까지 재실행을 대기시킵니다.
-          </div>
+            {translate('설정 시 각 run 이 이 환경의 live 배포 commit 을')} <code>tested_commit</code> {translate('으로 기록하고, 아래 배포 게이트가 이 환경에 fix 가 배포될 때까지 재실행을 대기시킵니다.')}</div>
         </div>
         <div>
-          <label style={fieldLabel}>Steps (JSON array of {'{ idx, action, expect?, mcp_tool?, params? }'})</label>
+          <label style={fieldLabel}>{translate('Steps (JSON array of')} {'{ idx, action, expect?, mcp_tool?, params? }'})</label>
           <textarea style={textareaStyle} value={stepsText} onChange={(e) => setStepsText(e.target.value)} />
         </div>
         <div>
-          <label style={fieldLabel}>Driver config (JSON)</label>
+          <label style={fieldLabel}>{translate('Driver config (JSON)')}</label>
           <textarea style={{ ...textareaStyle, minHeight: 80 }} value={configText} onChange={(e) => setConfigText(e.target.value)} />
         </div>
-        <Input label="Tags (comma separated)" value={tagsText} onChange={(e) => setTagsText((e.target as HTMLInputElement).value)} />
+        <Input label={translate('Tags (comma separated)')} value={tagsText} onChange={(e) => setTagsText((e.target as HTMLInputElement).value)} />
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
-        </label>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> {translate('Enabled')}</label>
 
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
         <WorkspaceFolderOptions kind="qa" state={wf} onChange={patchWf} accountId={accountId} />
@@ -1344,12 +1347,11 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
               checked={phasesEnabled}
               onChange={(e) => setPhasesEnabled(e.target.checked)}
             />
-            QA phases 사용
-          </label>
+            {translate('QA phases 사용')}</label>
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
             {phasesEnabled
-              ? 'run 이 아래 phase 순서대로 진행되고, phase 마다 자기 timeout 으로 감시됩니다.'
-              : 'phase 없이 단일 timeout(legacy) 으로 실행합니다. 체크하면 이 시나리오의 phase 를 정의할 수 있습니다.'}
+              ? translate('run 이 아래 phase 순서대로 진행되고, phase 마다 자기 timeout 으로 감시됩니다.')
+              : translate('phase 없이 단일 timeout(legacy) 으로 실행합니다. 체크하면 이 시나리오의 phase 를 정의할 수 있습니다.')}
           </div>
 
           {phasesEnabled && (
@@ -1357,8 +1359,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
               <QaPhaseRowsEditor phases={qaPhases} onChange={setQaPhases} />
               {qaPhases.length === 0 && (
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
-                  phase 가 없으면 저장 시 비워져 단일 timeout(legacy) 으로 실행됩니다.
-                </div>
+                  {translate('phase 가 없으면 저장 시 비워져 단일 timeout(legacy) 으로 실행됩니다.')}</div>
               )}
               {qaPhases.length > 0 && qaPhasesError(qaPhases) && (
                 <div style={{ fontSize: 12, color: tokens.colors.danger, marginTop: 8 }}>
@@ -1373,39 +1374,33 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
             <input type="checkbox" checked={oftForm.enabled} onChange={(e) => patchOft({ enabled: e.target.checked })} />
-            실패 시 → 수정 티켓 자동 생성
-          </label>
+            {translate('실패 시 → 수정 티켓 자동 생성')}</label>
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
-            run 이 failed/error 로 끝나면 실패 증거(스텝 로그 + 스크린샷 링크)를 담은 수정 티켓을 자동 생성합니다.
-          </div>
+            {translate('run 이 failed/error 로 끝나면 실패 증거(스텝 로그 + 스크린샷 링크)를 담은 수정 티켓을 자동 생성합니다.')}</div>
           {oftForm.enabled && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10, paddingLeft: 24 }}>
               <OnFailureTicketTargetFields
                 accountId={accountId}
                 form={oftForm}
                 onChange={patchOft}
-                defaultTagsHint="비우면 qa-failure, auto 태그로 생성됩니다."
+                defaultTagsHint={translate('비우면 qa-failure, auto 태그로 생성됩니다.')}
               />
-              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)</div>
+              <div style={{ fontSize: 12 }}>{translate('수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)')}</div>
               <DeclareRuntimeSection accountId={accountId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
-              {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>초기화</button></div>}
+              {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>{translate('초기화')}</button></div>}
 
               {/* QA → fix → QA 닫힌 루프 (재실행) */}
               <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10, marginTop: 2 }}>
                 <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
                   <input type="checkbox" checked={oftRerunOnFix} onChange={(e) => setOftRerunOnFix(e.target.checked)} />
-                  수정 티켓 Done 시 → 시나리오 자동 재실행
-                </label>
+                  {translate('수정 티켓 Done 시 → 시나리오 자동 재실행')}</label>
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
-                  자동 생성된 수정 티켓이 Done 이 되면 서버가 같은 시나리오를 결정적으로 재실행합니다.
-                  pass 면 종료(새 티켓 없음), 재실패면 새 수정 티켓 + 세대 카운터 증가, max 도달 시 중단 코멘트.
-                  {' '}⚠️ QA 는 <b>돌고 있는 서버</b>를 검증합니다 — main→prod auto-deploy 지연이 있으면 재실행 지연(초)을 배포 시간만큼 주세요.
-                </div>
+                  {translate('자동 생성된 수정 티켓이 Done 이 되면 서버가 같은 시나리오를 결정적으로 재실행합니다. pass 면 종료(새 티켓 없음), 재실패면 새 수정 티켓 + 세대 카운터 증가, max 도달 시 중단 코멘트.')}{' '}{translate('⚠️ QA 는')} <b>{translate('돌고 있는 서버')}</b>{translate('를 검증합니다 — main→prod auto-deploy 지연이 있으면 재실행 지연(초)을 배포 시간만큼 주세요.')}</div>
                 {oftRerunOnFix && (
                   <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
                     <div style={{ flex: 1 }}>
                       <Input
-                        label="최대 재실행 횟수 (max_rerun_attempts)"
+                        label={translate('최대 재실행 횟수 (max_rerun_attempts)')}
                         type="number"
                         value={oftMaxRerun}
                         onChange={(e) => setOftMaxRerun((e.target as HTMLInputElement).value)}
@@ -1413,7 +1408,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
                     </div>
                     <div style={{ flex: 1 }}>
                       <Input
-                        label="재실행 지연 (초 — fallback cap)"
+                        label={translate('재실행 지연 (초 — fallback cap)')}
                         type="number"
                         value={oftRerunDelay}
                         onChange={(e) => setOftRerunDelay((e.target as HTMLInputElement).value)}
@@ -1425,11 +1420,8 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
                   <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: tokens.colors.textSecondary, marginTop: 6 }}>
                     <input type="checkbox" checked={oftDeploymentGate} onChange={(e) => setOftDeploymentGate(e.target.checked)} style={{ marginTop: 3 }} />
                     <span>
-                      배포 사실에 게이팅 (deployment_gate)
-                      <span style={{ display: 'block', fontSize: 12, color: tokens.colors.textMuted }}>
-                        시간 지연 대신, 위 <b>Target environment</b> 에 fix commit 이 실제로 배포되는 순간 재실행합니다
-                        (fix-commit 라벨 ancestry / 없으면 배포시각 &ge; Done). 재실행 지연은 fallback cap 으로만 사용.
-                        {!targetEnvironment.trim() && <span style={{ color: tokens.colors.danger }}> ⚠ Target environment 미설정 시 게이트 미작동(즉시/지연 경로).</span>}
+                      {translate('배포 사실에 게이팅 (deployment_gate)')}<span style={{ display: 'block', fontSize: 12, color: tokens.colors.textMuted }}>
+                        {translate('시간 지연 대신, 위')} <b>{translate('Target environment')}</b> {translate('에 fix commit 이 실제로 배포되는 순간 재실행합니다 (fix-commit 라벨 ancestry / 없으면 배포시각 ≥ Done). 재실행 지연은 fallback cap 으로만 사용.')}{!targetEnvironment.trim() && <span style={{ color: tokens.colors.danger }}> {translate('⚠ Target environment 미설정 시 게이트 미작동(즉시/지연 경로).')}</span>}
                       </span>
                     </span>
                   </label>
@@ -1454,6 +1446,7 @@ interface ScheduleEditorProps {
 }
 
 function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: ScheduleEditorProps) {
+  useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   const [scope, setScope] = useState<QaScheduleScope>(schedule?.scope ?? 'all');
@@ -1489,16 +1482,16 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
   })();
 
   const handleSave = async () => {
-    if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
+    if (!name.trim()) { showToast(translate('이름을 입력하세요'), 'error'); return; }
     // scope='selected' 는 시나리오 순서를 화면 목록 순서로 보존.
     const orderedIds = scenarios.filter((s) => selectedIds.has(s.id)).map((s) => s.id);
     if (scope === 'selected' && orderedIds.length === 0) {
-      showToast("scope='selected' 는 시나리오를 1개 이상 선택해야 합니다", 'error'); return;
+      showToast(translate('scope=\'selected\' 는 시나리오를 1개 이상 선택해야 합니다'), 'error'); return;
     }
     if (cadenceKind === 'cron') {
-      if (cron.trim().split(/\s+/).length !== 5) { showToast('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")', 'error'); return; }
+      if (cron.trim().split(/\s+/).length !== 5) { showToast(translate('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")'), 'error'); return; }
     } else if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
-      showToast('주기는 1초 이상이어야 합니다', 'error'); return;
+      showToast(translate('주기는 1초 이상이어야 합니다'), 'error'); return;
     }
 
     const base = {
@@ -1520,10 +1513,10 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
       } else {
         await api.createQaSchedule(base);
       }
-      showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
+      showToast(translate('스케줄 {0}됨', { 0: schedule ? translate('수정') : translate('생성') }), 'success');
       onSaved();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save schedule', 'error');
+      showToast(err?.message || translate('Failed to save schedule'), 'error');
     } finally {
       setSaving(false);
     }
@@ -1535,39 +1528,37 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
     <Modal
       isOpen={true}
       onClose={onClose}
-      title={schedule ? 'QA 스케줄 수정' : '새 QA 스케줄'}
+      title={schedule ? translate('QA 스케줄 수정') : translate('새 QA 스케줄')}
       maxWidth={620}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button variant="ghost" onClick={onClose}>{translate('Cancel')}</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? translate('Saving…') : translate('Save')}</Button>
         </div>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <Input label="이름" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+        <Input label={translate('이름')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
 
         {/* Scope: 전체 vs 선택 시나리오 토글 */}
         <div>
-          <label style={fieldLabel}>대상 시나리오</label>
+          <label style={fieldLabel}>{translate('대상 시나리오')}</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="qa-sched-scope" checked={scope === 'all'} onChange={() => setScope('all')} />
-              전체 (실행 시점 enabled 시나리오로 자동 확장)
-            </label>
+              {translate('전체 (실행 시점 enabled 시나리오로 자동 확장)')}</label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="qa-sched-scope" checked={scope === 'selected'} onChange={() => setScope('selected')} />
-              선택
-            </label>
+              {translate('선택')}</label>
           </div>
           {scope === 'selected' && (
             <div style={{ maxHeight: 180, overflowY: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {scenarios.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>시나리오가 없습니다.</div>}
+              {scenarios.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('시나리오가 없습니다.')}</div>}
               {scenarios.map((s) => (
                 <label key={s.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
                   <input type="checkbox" checked={selectedIds.has(s.id)} onChange={() => toggleScenario(s.id)} />
                   {s.name}
-                  {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+                  {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
                 </label>
               ))}
             </div>
@@ -1576,52 +1567,47 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
 
         {/* Cadence: interval vs cron */}
         <div>
-          <label style={fieldLabel}>실행 주기</label>
+          <label style={fieldLabel}>{translate('실행 주기')}</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="qa-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
-              주기 (interval)
-            </label>
+              {translate('주기 (interval)')}</label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="qa-sched-cadence" checked={cadenceKind === 'cron'} onChange={() => setCadenceKind('cron')} />
-              cron
-            </label>
+              {translate('cron')}</label>
           </div>
           {cadenceKind === 'interval' ? (
             <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
               <div style={{ width: 120 }}>
-                <Input label="값" type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
+                <Input label={translate('값')} type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
               </div>
               <div style={{ flex: 1 }}>
                 <Select
-                  label="단위"
+                  label={translate('단위')}
                   value={intervalUnit}
                   options={[
-                    { value: 'seconds', label: '초' },
-                    { value: 'minutes', label: '분' },
-                    { value: 'hours', label: '시간' },
+                    { value: 'seconds', label: translate('초') },
+                    { value: 'minutes', label: translate('분') },
+                    { value: 'hours', label: translate('시간') },
                   ]}
                   onChange={(e) => setIntervalUnit((e.target as HTMLSelectElement).value as 'seconds' | 'minutes' | 'hours')}
                 />
               </div>
             </div>
           ) : (
-            <Input label='cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)' value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
+            <Input label={translate('cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)')} value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
           )}
         </div>
 
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={stopOnFail} onChange={(e) => setStopOnFail(e.target.checked)} />
-          첫 실패에서 batch 중단 (stop on fail)
-        </label>
+          {translate('첫 실패에서 batch 중단 (stop on fail)')}</label>
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          Enabled
-        </label>
+          {translate('Enabled')}</label>
 
         <div style={{ fontSize: 12, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
-          ⚠️ 자동 실행은 <b>돌고 있는 서버</b>를 검증합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나(혹은 고정 시각 cron) 옛 코드를 검증하지 않도록 운영상 주의하세요. cron 은 모두 <b>UTC</b> 기준입니다.
-        </div>
+          {translate('⚠️ 자동 실행은')} <b>{translate('돌고 있는 서버')}</b>{translate('를 검증합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나(혹은 고정 시각 cron) 옛 코드를 검증하지 않도록 운영상 주의하세요. cron 은 모두')} <b>UTC</b> {translate('기준입니다.')}</div>
       </div>
     </Modal>
   );

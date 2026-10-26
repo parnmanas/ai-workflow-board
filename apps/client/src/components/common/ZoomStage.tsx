@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   IDENTITY,
@@ -106,6 +108,7 @@ const toolButton: React.CSSProperties = {
 };
 
 export default function ZoomStage({ kind, src, alt, onError, onPrev, onNext, onDismiss }: ZoomStageProps) {
+  useLocale();
   const stageRef = useRef<HTMLDivElement | null>(null);
   const mediaRef = useRef<HTMLImageElement & HTMLVideoElement>(null);
   const [state, setState] = useState<{ view: ZoomView; animate: boolean }>({ view: IDENTITY, animate: false });
@@ -426,20 +429,20 @@ export default function ZoomStage({ kind, src, alt, onError, onPrev, onNext, onD
           background: 'rgba(0,0,0,0.55)',
         }}
       >
-        <button type="button" aria-label="Zoom out" title="축소 (−)" onClick={() => zoomBy(1 / ZOOM_STEP)} disabled={!zoomed} style={{ ...toolButton, opacity: zoomed ? 1 : 0.4 }}>
+        <button type="button" aria-label={translate('Zoom out')} title={translate('축소 (−)')} onClick={() => zoomBy(1 / ZOOM_STEP)} disabled={!zoomed} style={{ ...toolButton, opacity: zoomed ? 1 : 0.4 }}>
           −
         </button>
         <button
           type="button"
-          aria-label="Reset zoom"
-          title="맞춤 (0)"
+          aria-label={translate('Reset zoom')}
+          title={translate('맞춤 (0)')}
           data-testid="zoom-stage-level"
           onClick={reset}
           style={{ ...toolButton, fontSize: 12, minWidth: 52, fontVariantNumeric: 'tabular-nums' }}
         >
           {Math.round(view.scale * 100)}%
         </button>
-        <button type="button" aria-label="Zoom in" title="확대 (+)" onClick={() => zoomBy(ZOOM_STEP)} style={toolButton}>
+        <button type="button" aria-label={translate('Zoom in')} title={translate('확대 (+)')} onClick={() => zoomBy(ZOOM_STEP)} style={toolButton}>
           +
         </button>
       </div>

@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 // Mission projects ↔ roster slots (docs/orchestration.md → "미션 프로젝트").
 //
 // A team names no folders; a mission names Projects, and each slot works in a
@@ -59,15 +60,15 @@ export function missionStartProblems(args: {
 }): string[] {
   const { projects, selected, orchestrator, members } = args;
   if (selected.length === 0) {
-    return ['Pick at least one project — members work in its folder on their own host.'];
+    return [translate('Pick at least one project — members work in its folder on their own host.')];
   }
   const problems: string[] = [];
   if (orchestrator && !slotCoverage(projects, selected, orchestrator).workable) {
-    problems.push(`The orchestrator (${orchestrator.label}) has no folder for any selected project on its host.`);
+    problems.push(translate('The orchestrator ({0}) has no folder for any selected project on its host.', { 0: orchestrator.label }));
   }
   for (const member of members) {
     if (!slotCoverage(projects, selected, member).workable) {
-      problems.push(`${member.label} has no folder for any selected project on its host — set one, or leave it out.`);
+      problems.push(translate('{0} has no folder for any selected project on its host — set one, or leave it out.', { 0: member.label }));
     }
   }
   return problems;

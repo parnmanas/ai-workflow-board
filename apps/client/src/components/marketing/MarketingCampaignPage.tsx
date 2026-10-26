@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
@@ -45,14 +47,14 @@ import MarketingAuditTab from './MarketingAuditTab';
 const TAB_IDS = ['overview', 'inbox', 'channels', 'content', 'budget', 'analytics', 'feedback', 'audit'] as const;
 type TabId = (typeof TAB_IDS)[number];
 const TAB_LABELS: Record<TabId, string> = {
-  overview: '개요',
-  inbox: '승인함',
-  channels: '채널',
-  content: '콘텐츠',
-  budget: '예산·결제',
-  analytics: '분석',
-  feedback: '피드백',
-  audit: '감사 로그',
+  get overview() { return translate('개요'); },
+  get inbox() { return translate('승인함'); },
+  get channels() { return translate('채널'); },
+  get content() { return translate('콘텐츠'); },
+  get budget() { return translate('예산·결제'); },
+  get analytics() { return translate('분석'); },
+  get feedback() { return translate('피드백'); },
+  get audit() { return translate('감사 로그'); },
 };
 /**
  * 지출 승인 권한만 있는 사람(marketing.manage 없음)의 탭 — 돈 항목만 모인 승인함 · 예산 · 결제, 그리고 읽기 전용
@@ -93,6 +95,7 @@ const PART_LABELS = ['캠페인', '채널', '초안', '승인된 글', '예산 �
  * 읽을 수 있고, 게시물은 운영 권한(manage)에만 묻는다 — 그 사람이 부를 수 없는 경로는 아예 부르지 않는다.
  */
 function useCampaignData(campaignId: string, canManage: boolean, canViewMoney: boolean, refreshKey: number): CampaignData {
+  useLocale();
   const [data, setData] = useState<CampaignData>(EMPTY);
   const seq = useRef(0);
   const identity = useRef('');
@@ -125,10 +128,10 @@ function useCampaignData(campaignId: string, canManage: boolean, canViewMoney: b
       let campaignError: CampaignData['campaignError'] = null;
       if (campaignResult.status === 'rejected') {
         const err = campaignResult.reason as { status?: number; message?: string };
-        campaignError = { status: err?.status, message: err?.message || '캠페인을 불러오지 못했습니다' };
+        campaignError = { status: err?.status, message: err?.message || translate('캠페인을 불러오지 못했습니다') };
       }
       const partialErrors = results
-        .map((r, i) => (i > 0 && r.status === 'rejected' ? `${PART_LABELS[i]}: ${(r.reason as Error)?.message || '불러오지 못함'}` : null))
+        .map((r, i) => (i > 0 && r.status === 'rejected' ? `${translate(PART_LABELS[i])}: ${(r.reason as Error)?.message || translate('불러오지 못함')}` : null))
         .filter((m): m is string => !!m);
       setData({
         loaded: true,
@@ -147,6 +150,7 @@ function useCampaignData(campaignId: string, canManage: boolean, canViewMoney: b
 }
 
 export default function MarketingCampaignPage() {
+  useLocale();
   const { campaignId = '' } = useParams<{ campaignId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -173,13 +177,13 @@ export default function MarketingCampaignPage() {
     if (isCampaignEvent(event, campaignId)) scheduleRefresh();
   });
 
-  const viewer = useMemo(() => ({ canManage, canApproveSpend }), [canManage, canApproveSpend]);
+  const viewer = useMemo(() => ({ canManage, canApproveSpend }), [canManage, canApproveSpend, getLocale()]);
   const inbox = useMemo(
     () => inboxForViewer(
       buildInbox({ channels: data.channels, posts: data.posts, allocations: data.allocations, spendRequests: data.spend }),
       viewer,
     ),
-    [data.channels, data.posts, data.allocations, data.spend, viewer],
+    [data.channels, data.posts, data.allocations, data.spend, viewer, getLocale()],
   );
   // 탭 · 개요의 수는 사이드바 배지와 같은 규칙(이 사람이 처리할 수 있는 것만) — 서버 /marketing/inbox 의 actionable.
   const pendingForMe = actionableInboxCount(inbox, viewer);
@@ -202,7 +206,7 @@ export default function MarketingCampaignPage() {
       });
     }
     return map;
-  }, [data.channels, budget]);
+  }, [data.channels, budget, getLocale()]);
 
   const ctx: MarketingCtx = useMemo(() => ({
     campaign,
@@ -217,7 +221,7 @@ export default function MarketingCampaignPage() {
     userId: user?.id || '',
     refresh,
     notify: (message, type = 'success') => showToast(message, type),
-  }), [campaign, campaignId, budget, channelRefs, canManage, canApproveSpend, user?.id, refresh, showToast]);
+  }), [campaign, campaignId, budget, channelRefs, canManage, canApproveSpend, user?.id, refresh, showToast, getLocale()]);
 
   const [editing, setEditing] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<StatusAction | null>(null);
@@ -231,22 +235,22 @@ export default function MarketingCampaignPage() {
   if (!canViewMoney) {
     return (
       <div style={{ padding: 24 }}>
-        <PermissionNotice title="마케팅 권한이 필요합니다" message="캠페인을 보려면 marketing.manage 또는 marketing.approve_spend 권한이 있어야 합니다." />
+        <PermissionNotice title={translate('마케팅 권한이 필요합니다')} message={translate('캠페인을 보려면 marketing.manage 또는 marketing.approve_spend 권한이 있어야 합니다.')} />
       </div>
     );
   }
   if (!data.loaded) {
-    return <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>캠페인을 불러오는 중…</div>;
+    return <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>{translate('캠페인을 불러오는 중…')}</div>;
   }
   if (data.campaignError) {
     return (
       <div style={{ padding: 24 }}>
         <ErrorState
-          title={data.campaignError.status === 404 ? '캠페인을 찾을 수 없습니다' : '캠페인을 열 수 없습니다'}
+          title={data.campaignError.status === 404 ? translate('캠페인을 찾을 수 없습니다') : translate('캠페인을 열 수 없습니다')}
           message={data.campaignError.message}
           onRetry={refresh}
         />
-        <div style={{ textAlign: 'center' }}><Link to="/marketing" style={{ color: tokens.colors.accentLight, fontSize: 13 }}>← 캠페인 목록</Link></div>
+        <div style={{ textAlign: 'center' }}><Link to="/marketing" style={{ color: tokens.colors.accentLight, fontSize: 13 }}>{translate('← 캠페인 목록')}</Link></div>
       </div>
     );
   }
@@ -256,11 +260,11 @@ export default function MarketingCampaignPage() {
     setBusy(true);
     try {
       await api.setMarketingCampaignStatus(campaign.id, action.to);
-      showToast(`캠페인을 ${campaignStatusView(action.to).label} 상태로 바꿨습니다`, 'success');
+      showToast(translate('캠페인을 {0} 상태로 바꿨습니다', { 0: campaignStatusView(action.to).label }), 'success');
       setPendingStatus(null);
       refresh();
     } catch (err) {
-      showToast((err as Error)?.message || '상태를 바꾸지 못했습니다', 'error');
+      showToast((err as Error)?.message || translate('상태를 바꾸지 못했습니다'), 'error');
     } finally {
       setBusy(false);
     }
@@ -271,10 +275,10 @@ export default function MarketingCampaignPage() {
     setBusy(true);
     try {
       const cycle = await api.runMarketingCycle(campaign.id);
-      showToast(`사이클 #${cycle.cycle_no} 을 시작했습니다`, 'success');
+      showToast(translate('사이클 #{0} 을 시작했습니다', { 0: cycle.cycle_no }), 'success');
       refresh();
     } catch (err) {
-      showToast((err as Error)?.message || '사이클을 시작하지 못했습니다', 'error');
+      showToast((err as Error)?.message || translate('사이클을 시작하지 못했습니다'), 'error');
     } finally {
       setBusy(false);
     }
@@ -285,14 +289,14 @@ export default function MarketingCampaignPage() {
     setBusy(true);
     try {
       await api.deleteMarketingCampaign(campaign.id);
-      showToast(`캠페인 "${campaign.name}" 을 삭제했습니다`, 'success');
+      showToast(translate('캠페인 "{0}" 을 삭제했습니다', { 0: campaign.name }), 'success');
       navigate('/marketing');
     } catch (err) {
       const e = err as Error & { status?: number };
       setDeleting(false);
       showToast(e.status === 409
-        ? `${e.message} — 돈이 오간 캠페인은 지울 수 없습니다. 보관하세요.`
-        : e.message || '삭제하지 못했습니다', 'error');
+        ? translate('{0} — 돈이 오간 캠페인은 지울 수 없습니다. 보관하세요.', { 0: e.message })
+        : e.message || translate('삭제하지 못했습니다'), 'error');
     } finally {
       setBusy(false);
     }
@@ -310,27 +314,27 @@ export default function MarketingCampaignPage() {
   const hasEmail = canManage && !!campaign && (campaign.capabilities.includes('email') || data.channels.some((c) => c.kind === 'email'));
 
   const statusConfirmMessage = (action: StatusAction): string => {
-    if (action.to === 'paused') return '일시정지하면 사이클이 멈추고, 승인 대기 중인 지출 요청은 취소됩니다. 다시 시작하면 다음 주기부터 돕니다.';
-    if (action.to === 'archived') return '보관하면 사이클이 멈추고 승인 대기 중인 지출 요청은 취소됩니다. 기록(원장 · 감사)은 남고, 보관 해제하면 일시정지 상태로 돌아옵니다.';
-    if (action.to === 'active') return '시작하면 캠페인 에이전트가 주기마다 깨어나 일합니다. 돈 · 외부 발신 · 채널 개설은 여전히 사람이 승인합니다.';
-    return `${action.label} 합니다.`;
+    if (action.to === 'paused') return translate('일시정지하면 사이클이 멈추고, 승인 대기 중인 지출 요청은 취소됩니다. 다시 시작하면 다음 주기부터 돕니다.');
+    if (action.to === 'archived') return translate('보관하면 사이클이 멈추고 승인 대기 중인 지출 요청은 취소됩니다. 기록(원장 · 감사)은 남고, 보관 해제하면 일시정지 상태로 돌아옵니다.');
+    if (action.to === 'active') return translate('시작하면 캠페인 에이전트가 주기마다 깨어나 일합니다. 돈 · 외부 발신 · 채널 개설은 여전히 사람이 승인합니다.');
+    return translate('{0} 합니다.', { 0: action.label });
   };
 
   return (
     <MarketingCtxProvider value={ctx}>
       <div className="business-marketing-page">
         <BusinessPageHeader
-          title={campaign ? campaign.name : 'Marketing'}
+          title={campaign ? campaign.name : translate('Marketing')}
           description={campaign
-            ? `${describeCadence(campaign)}${campaign.status === 'active' && campaign.next_cycle_at ? ` · 다음 사이클 ${formatDateTime(campaign.next_cycle_at)}` : ''} · 사이클 ${campaign.cycle_count}회${spendOnly ? ' · 지출 승인 권한으로 열었습니다(돈 항목만)' : ''}`
+            ? translate('{0}{1} · 사이클 {2}회{3}', { 0: describeCadence(campaign), 1: campaign.status === 'active' && campaign.next_cycle_at ? translate(' · 다음 사이클 {0}', { 0: formatDateTime(campaign.next_cycle_at) }) : '', 2: campaign.cycle_count, 3: spendOnly ? translate(' · 지출 승인 권한으로 열었습니다(돈 항목만)') : '' })
             : undefined}
           status={campaign && <StatusPill testId="marketing-campaign-status" view={campaignStatusView(campaign.status)} />}
-          actions={campaign && canManage && <Button variant="secondary" disabled={busy || campaign.status !== 'active'} title={campaign.status !== 'active' ? '진행 중인 캠페인만 실행할 수 있습니다' : '예약과 같은 경로로 사이클을 지금 시작합니다'} onClick={() => void runNow()}>지금 실행</Button>}
+          actions={campaign && canManage && <Button variant="secondary" disabled={busy || campaign.status !== 'active'} title={campaign.status !== 'active' ? translate('진행 중인 캠페인만 실행할 수 있습니다') : translate('예약과 같은 경로로 사이클을 지금 시작합니다')} onClick={() => void runNow()}>{translate('지금 실행')}</Button>}
           moreActions={close => (
             <>
-              <Link to="/marketing" onClick={close}>← 목록</Link>
+              <Link to="/marketing" onClick={close}>{translate('← 목록')}</Link>
               {hasEmail && campaign && (
-                <Link to={contactsPath(campaign.account_id, { campaignId: campaign.id })} onClick={close}>연락처</Link>
+                <Link to={contactsPath(campaign.account_id, { campaignId: campaign.id })} onClick={close}>{translate('연락처')}</Link>
               )}
               {statusActions.map((action) => {
                 const blocked = action.to === 'active' ? blocker : null;
@@ -347,8 +351,8 @@ export default function MarketingCampaignPage() {
                   </Button>
                 );
               })}
-              {campaign && canManage && <Button size="sm" variant="secondary" disabled={busy} onClick={() => { close(); setEditing(true); }}>설정</Button>}
-              {campaign && canManage && <Button size="sm" variant="danger" disabled={busy} onClick={() => { close(); setDeleting(true); }}>삭제</Button>}
+              {campaign && canManage && <Button size="sm" variant="secondary" disabled={busy} onClick={() => { close(); setEditing(true); }}>{translate('설정')}</Button>}
+              {campaign && canManage && <Button size="sm" variant="danger" disabled={busy} onClick={() => { close(); setDeleting(true); }}>{translate('삭제')}</Button>}
             </>
           )}
         />
@@ -356,8 +360,8 @@ export default function MarketingCampaignPage() {
         <div role="tabpanel" aria-label={TAB_LABELS[tab]} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 24 }}>
           {data.partialErrors.length > 0 && (
             <div role="alert" data-testid="marketing-partial-errors" style={{ marginBottom: 14, fontSize: 12, color: tokens.colors.warningLight, lineHeight: 1.5 }}>
-              일부를 불러오지 못해 승인함이 완전하지 않을 수 있습니다 — {data.partialErrors.join(' · ')}
-              {' '}<Button size="sm" variant="ghost" onClick={refresh}>다시 시도</Button>
+              {translate('일부를 불러오지 못해 승인함이 완전하지 않을 수 있습니다 —')} {data.partialErrors.join(' · ')}
+              {' '}<Button size="sm" variant="ghost" onClick={refresh}>{translate('다시 시도')}</Button>
             </div>
           )}
           {tab === 'overview' && campaign && (
@@ -392,20 +396,20 @@ export default function MarketingCampaignPage() {
       )}
       <ConfirmDialog
         isOpen={!!pendingStatus}
-        title={pendingStatus ? `캠페인 ${pendingStatus.label}` : ''}
+        title={pendingStatus ? translate('캠페인 {0}', { 0: pendingStatus.label }) : ''}
         message={pendingStatus ? statusConfirmMessage(pendingStatus) : undefined}
-        confirmLabel={busy ? '처리 중…' : pendingStatus?.label || '확인'}
-        cancelLabel="취소"
+        confirmLabel={busy ? translate('처리 중…') : pendingStatus?.label || translate('확인')}
+        cancelLabel={translate('취소')}
         danger={!!pendingStatus?.danger}
         onConfirm={() => { if (pendingStatus && !busy) void runStatus(pendingStatus); }}
         onCancel={() => setPendingStatus(null)}
       />
       <ConfirmDialog
         isOpen={deleting}
-        title="캠페인을 삭제할까요?"
-        message={campaign ? `"${campaign.name}" 과 그 채널 · 콘텐츠 · 편성을 지웁니다. 지출 요청이나 원장이 있으면 지울 수 없고 보관해야 합니다. 감사 로그는 남습니다.` : undefined}
-        confirmLabel={busy ? '삭제 중…' : '삭제'}
-        cancelLabel="취소"
+        title={translate('캠페인을 삭제할까요?')}
+        message={campaign ? translate('"{0}" 과 그 채널 · 콘텐츠 · 편성을 지웁니다. 지출 요청이나 원장이 있으면 지울 수 없고 보관해야 합니다. 감사 로그는 남습니다.', { 0: campaign.name }) : undefined}
+        confirmLabel={busy ? translate('삭제 중…') : translate('삭제')}
+        cancelLabel={translate('취소')}
         danger
         onConfirm={() => { if (!busy) void runDelete(); }}
         onCancel={() => setDeleting(false)}

@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 // "Use project folder" helper — React-free option logic for
 // `components/runtime/ProjectFolderHelper.tsx` (docs/tickets.md → "Main clone
 // folder per host"). Picking a project fills the runtime's working_dir with that
@@ -43,14 +44,14 @@ export function projectFolderHelperView(
   const ids = (Array.isArray(hostIds) ? hostIds : [hostIds]).filter((v): v is string => !!v);
   const placeholder: ProjectFolderHelperOption = {
     value: '',
-    label: '프로젝트 폴더 사용…',
+    label: translate('프로젝트 폴더 사용…'),
     disabled: false,
     path: null,
   };
   if (!ids.length) {
     return {
       disabled: true,
-      hint: NO_HOST_HINT,
+      hint: translate(NO_HOST_HINT),
       options: [placeholder, ...projects.map((p) => ({
         value: p.id, label: p.name || p.id, disabled: true, path: null,
       }))],
@@ -60,13 +61,13 @@ export function projectFolderHelperView(
   const options = projects.map((p) => {
     const path = projectFolderForHost(p, ids);
     const name = p.name || p.id;
-    if (!path) return { value: p.id, label: `${name} — ${NO_FOLDER_HINT}`, disabled: true, path: null };
-    return { value: p.id, label: `${name} — ${path}${path === dir ? ' (사용 중)' : ''}`, disabled: false, path };
+    if (!path) return { value: p.id, label: `${name} — ${translate(NO_FOLDER_HINT)}`, disabled: true, path: null };
+    return { value: p.id, label: `${name} — ${path}${path === dir ? translate(' (사용 중)') : ''}`, disabled: false, path };
   });
   const anyUsable = options.some((o) => !o.disabled);
   return {
     disabled: false,
-    hint: anyUsable ? null : `${NO_FOLDER_HINT} — Projects 화면에서 이 Host 의 폴더를 지정하세요.`,
+    hint: anyUsable ? null : translate('{0} — Projects 화면에서 이 Host 의 폴더를 지정하세요.', { 0: translate(NO_FOLDER_HINT) }),
     options: [placeholder, ...options],
   };
 }

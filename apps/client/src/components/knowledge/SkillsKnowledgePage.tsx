@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
@@ -11,15 +13,16 @@ import SkillsPage from '../admin/SkillsPage';
  * Skill Registry 에 그대로 있다.
  */
 export default function SkillsKnowledgePage() {
+  useLocale();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Skills"
-        description="Reusable instructions agents load when they need them — shared by every agent, per project, or for one runtime."
+        title={translate('Skills')}
+        description={translate('Reusable instructions agents load when they need them — shared by every agent, per project, or for one runtime.')}
         actions={hasPermission('admin.access')
-          ? <Button size="sm" variant="ghost" onClick={() => navigate('/admin/skill-registry')}>Skill Registry</Button>
+          ? <Button size="sm" variant="ghost" onClick={() => navigate('/admin/skill-registry')}>{translate('Skill Registry')}</Button>
           : undefined}
       />
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>

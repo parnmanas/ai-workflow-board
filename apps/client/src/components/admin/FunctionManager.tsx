@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
 import type { WorkflowFunction, WorkflowFunctionExecutor, WorkflowFunctionRisk, WorkflowFunctionRun } from '../../types';
@@ -94,6 +97,7 @@ export default function FunctionManager({
   allScopes = false,
   canManageGlobal = false,
 }: Props) {
+  useLocale();
   const { showToast } = useToast();
   const { currentAccountId } = useAuth();
   const [rows, setRows] = useState<WorkflowFunction[]>([]);
@@ -121,7 +125,7 @@ export default function FunctionManager({
       setRows(functions);
       setRuns(history);
     } catch (error: any) {
-      showToast(error?.message || 'Failed to load Functions', 'error');
+      showToast(error?.message || translate('Failed to load Functions'), 'error');
     } finally {
       setLoading(false);
     }
@@ -145,7 +149,7 @@ export default function FunctionManager({
     setEditing(null);
     setCreating(true);
     if (source) {
-      setDraft({ ...draftFrom(source), key: source.key, name: `${source.name} (copy)` });
+      setDraft({ ...draftFrom(source), key: source.key, name: translate('{0} (copy)', { 0: source.name }) });
     } else {
       setDraft({ ...emptyDraft });
     }
@@ -164,7 +168,7 @@ export default function FunctionManager({
 
   const save = async () => {
     if (!draft.key.trim() || !draft.name.trim()) {
-      showToast('Key and name are required', 'error');
+      showToast(translate('Key and name are required'), 'error');
       return;
     }
     let inputSchema: any;
@@ -175,7 +179,7 @@ export default function FunctionManager({
       outputSchema = JSON.parse(draft.output_schema);
       config = JSON.parse(draft.config);
     } catch {
-      showToast('Schema and config fields must contain valid JSON', 'error');
+      showToast(translate('Schema and config fields must contain valid JSON'), 'error');
       return;
     }
     setSaving(true);
@@ -192,24 +196,24 @@ export default function FunctionManager({
     try {
       if (editing) await api.updateFunction(editing.id, payload as any);
       else await api.createFunction(payload as any);
-      showToast(editing ? 'Function updated' : 'Function created', 'success');
+      showToast(editing ? translate('Function updated') : translate('Function created'), 'success');
       closeEditor();
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Failed to save Function', 'error');
+      showToast(error?.message || translate('Failed to save Function'), 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const remove = async (row: WorkflowFunction) => {
-    if (!window.confirm(`Delete Function "${row.key}"? Run history is retained for audit.`)) return;
+    if (!window.confirm(translate('Delete Function "{0}"? Run history is retained for audit.', { 0: row.key }))) return;
     try {
       await api.deleteFunction(row.id);
-      showToast('Function deleted', 'success');
+      showToast(translate('Function deleted'), 'success');
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Failed to delete Function', 'error');
+      showToast(error?.message || translate('Failed to delete Function'), 'error');
     }
   };
 
@@ -218,7 +222,7 @@ export default function FunctionManager({
     try {
       inputs = JSON.parse(runInputs || '{}');
     } catch {
-      showToast('Run inputs must contain valid JSON', 'error');
+      showToast(translate('Run inputs must contain valid JSON'), 'error');
       return;
     }
     setRunningId(row.id);
@@ -228,17 +232,17 @@ export default function FunctionManager({
       const runAccountId = row.account_id ?? (ticketId.trim()
         ? (await api.getTicket(ticketId.trim())).account_id
         : currentAccountId);
-      if (!runAccountId) throw new Error('No execution context is available for this Function');
+      if (!runAccountId) throw new Error(translate('No execution context is available for this Function'));
       const result = await api.runFunction(row.id, {
         account_id: runAccountId,
         ticket_id: ticketId.trim() || undefined,
         inputs,
         idempotency_key: idempotencyKey || undefined,
       });
-      showToast(`Function ${result.status}${result.deduplicated ? ' (deduplicated)' : ''}`, result.status === 'succeeded' ? 'success' : 'error');
+      showToast(translate('Function {0}{1}', { 0: result.status, 1: result.deduplicated ? translate(' (deduplicated)') : '' }), result.status === 'succeeded' ? 'success' : 'error');
       await load();
     } catch (error: any) {
-      showToast(error?.message || 'Function execution failed', 'error');
+      showToast(error?.message || translate('Function execution failed'), 'error');
       await load();
     } finally {
       setRunningId('');
@@ -249,46 +253,42 @@ export default function FunctionManager({
     <div style={{ display: 'grid', gap: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-          Define and run reusable automation.
-        </div>
-        <button style={button(true)} onClick={() => startCreate()}>New Function</button>
+          {translate('Define and run reusable automation.')}</div>
+        <button style={button(true)} onClick={() => startCreate()}>{translate('New Function')}</button>
       </div>
 
       {!globalMode && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 10, background: tokens.colors.surfaceCard, padding: 14, borderRadius: 8 }}>
           <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-            Ticket ID (optional)
-            <input style={{ ...control, marginTop: 5 }} value={ticketId} onChange={event => setTicketId(event.target.value)} />
+            {translate('Ticket ID (optional)')}<input style={{ ...control, marginTop: 5 }} value={ticketId} onChange={event => setTicketId(event.target.value)} />
           </label>
           <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-            Idempotency key (when required)
-            <input style={{ ...control, marginTop: 5 }} value={idempotencyKey} onChange={event => setIdempotencyKey(event.target.value)} />
+            {translate('Idempotency key (when required)')}<input style={{ ...control, marginTop: 5 }} value={idempotencyKey} onChange={event => setIdempotencyKey(event.target.value)} />
           </label>
           <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-            Run inputs (JSON)
-            <input style={{ ...control, marginTop: 5, fontFamily: 'monospace' }} value={runInputs} onChange={event => setRunInputs(event.target.value)} />
+            {translate('Run inputs (JSON)')}<input style={{ ...control, marginTop: 5, fontFamily: 'monospace' }} value={runInputs} onChange={event => setRunInputs(event.target.value)} />
           </label>
         </div>
       )}
 
       {(creating || editing) && (
         <div style={{ background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.borderStrong}`, borderRadius: 10, padding: 18, display: 'grid', gap: 12 }}>
-          <div style={{ fontWeight: 700, color: tokens.colors.textPrimary }}>{editing ? `Edit ${editing.key}` : 'Create Function'}</div>
+          <div style={{ fontWeight: 700, color: tokens.colors.textPrimary }}>{editing ? translate('Edit {0}', { 0: editing.key }) : translate('Create Function')}</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Key<input style={{ ...control, marginTop: 5 }} value={draft.key} onChange={e => setDraft({ ...draft, key: e.target.value })} /></label>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Name<input style={{ ...control, marginTop: 5 }} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Key')}<input style={{ ...control, marginTop: 5 }} value={draft.key} onChange={e => setDraft({ ...draft, key: e.target.value })} /></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Name')}<input style={{ ...control, marginTop: 5 }} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
           </div>
-          <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Description<input style={{ ...control, marginTop: 5 }} value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} /></label>
+          <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Description')}<input style={{ ...control, marginTop: 5 }} value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} /></label>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Executor<select style={{ ...control, marginTop: 5 }} value={draft.executor_type} onChange={e => setDraft({ ...draft, executor_type: e.target.value as WorkflowFunctionExecutor })}><option>builtin</option><option>pipeline</option><option>http</option><option>agent_action</option></select></label>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Risk<select style={{ ...control, marginTop: 5 }} value={draft.risk_level} onChange={e => setDraft({ ...draft, risk_level: e.target.value as WorkflowFunctionRisk })}><option>read</option><option>write</option><option>destructive</option><option>high_impact</option></select></label>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Idempotency<select style={{ ...control, marginTop: 5 }} value={draft.idempotency_mode} onChange={e => setDraft({ ...draft, idempotency_mode: e.target.value as any })}><option>none</option><option>key</option></select></label>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Approval<select style={{ ...control, marginTop: 5 }} value={draft.approval_policy} onChange={e => setDraft({ ...draft, approval_policy: e.target.value as any })}><option>none</option><option>admin</option></select></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Executor')}<select style={{ ...control, marginTop: 5 }} value={draft.executor_type} onChange={e => setDraft({ ...draft, executor_type: e.target.value as WorkflowFunctionExecutor })}><option>{translate('builtin')}</option><option>{translate('pipeline')}</option><option>{translate('http')}</option><option>agent_action</option></select></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Risk')}<select style={{ ...control, marginTop: 5 }} value={draft.risk_level} onChange={e => setDraft({ ...draft, risk_level: e.target.value as WorkflowFunctionRisk })}><option>{translate('read')}</option><option>{translate('write')}</option><option>{translate('destructive')}</option><option>high_impact</option></select></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Idempotency')}<select style={{ ...control, marginTop: 5 }} value={draft.idempotency_mode} onChange={e => setDraft({ ...draft, idempotency_mode: e.target.value as any })}><option>{translate('none')}</option><option>{translate('key')}</option></select></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Approval')}<select style={{ ...control, marginTop: 5 }} value={draft.approval_policy} onChange={e => setDraft({ ...draft, approval_policy: e.target.value as any })}><option>{translate('none')}</option><option>{translate('admin')}</option></select></label>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 10, alignItems: 'end' }}>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Timeout (ms)<input type="number" style={{ ...control, marginTop: 5 }} value={draft.timeout_ms} onChange={e => setDraft({ ...draft, timeout_ms: Number(e.target.value) })} /></label>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>Max attempts<input type="number" style={{ ...control, marginTop: 5 }} value={draft.max_attempts} onChange={e => setDraft({ ...draft, max_attempts: Number(e.target.value) })} /></label>
-            <label style={{ color: tokens.colors.textSecondary, fontSize: 12, paddingBottom: 9 }}><input type="checkbox" checked={draft.enabled} onChange={e => setDraft({ ...draft, enabled: e.target.checked })} /> Enabled</label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Timeout (ms)')}<input type="number" style={{ ...control, marginTop: 5 }} value={draft.timeout_ms} onChange={e => setDraft({ ...draft, timeout_ms: Number(e.target.value) })} /></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>{translate('Max attempts')}<input type="number" style={{ ...control, marginTop: 5 }} value={draft.max_attempts} onChange={e => setDraft({ ...draft, max_attempts: Number(e.target.value) })} /></label>
+            <label style={{ color: tokens.colors.textSecondary, fontSize: 12, paddingBottom: 9 }}><input type="checkbox" checked={draft.enabled} onChange={e => setDraft({ ...draft, enabled: e.target.checked })} /> {translate('Enabled')}</label>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
             {(['input_schema', 'output_schema', 'config'] as const).map(field => (
@@ -299,17 +299,17 @@ export default function FunctionManager({
             ))}
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-            <button style={button()} onClick={closeEditor}>Cancel</button>
-            <button style={button(true)} disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save'}</button>
+            <button style={button()} onClick={closeEditor}>{translate('Cancel')}</button>
+            <button style={button(true)} disabled={saving} onClick={save}>{saving ? translate('Saving…') : translate('Save')}</button>
           </div>
         </div>
       )}
 
       <div style={{ display: 'grid', gap: 8 }}>
         {loading ? (
-          <div style={{ color: tokens.colors.textMuted }}>Loading…</div>
+          <div style={{ color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
         ) : rows.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted }}>No Functions defined.</div>
+          <div style={{ color: tokens.colors.textMuted }}>{translate('No Functions defined.')}</div>
         ) : rows.map(row => {
           const inherited = !globalMode && row.account_id === null && !canManageGlobal;
           return (
@@ -317,23 +317,23 @@ export default function FunctionManager({
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: tokens.colors.textPrimary, fontWeight: 700 }}>
                   <code>{row.key}</code>
-                  <span style={{ color: tokens.colors.textMuted, fontSize: 11 }}>v{row.version}</span>
-                  {!row.enabled && <span style={{ color: tokens.colors.warning, fontSize: 11 }}>DISABLED</span>}
+                  <span style={{ color: tokens.colors.textMuted, fontSize: 11 }}>{translate('v')}{row.version}</span>
+                  {!row.enabled && <span style={{ color: tokens.colors.warning, fontSize: 11 }}>{translate('DISABLED')}</span>}
                 </div>
                 <div style={{ color: tokens.colors.textStrong, marginTop: 5 }}>{row.name}</div>
-                <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>{row.description || 'No description'}</div>
+                <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 4 }}>{row.description || translate('No description')}</div>
                 <div style={{ color: tokens.colors.textSecondary, fontSize: 11, marginTop: 7 }}>
-                  {row.executor_type} · {row.risk_level} · idempotency: {row.idempotency_mode} · approval: {row.approval_policy}
+                  {row.executor_type} · {row.risk_level} {translate('· idempotency:')} {row.idempotency_mode} {translate('· approval:')} {row.approval_policy}
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                {!globalMode && <button style={button(true)} disabled={!!runningId} onClick={() => run(row)}>{runningId === row.id ? 'Running…' : 'Run'}</button>}
+                {!globalMode && <button style={button(true)} disabled={!!runningId} onClick={() => run(row)}>{runningId === row.id ? translate('Running…') : translate('Run')}</button>}
                 {inherited ? (
-                  <button style={button()} onClick={() => startCreate(row)}>Override</button>
+                  <button style={button()} onClick={() => startCreate(row)}>{translate('Override')}</button>
                 ) : (
                   <>
-                    <button style={button()} onClick={() => startEdit(row)}>Edit</button>
-                    {!row.builtin && <button style={button()} onClick={() => remove(row)}>Delete</button>}
+                    <button style={button()} onClick={() => startEdit(row)}>{translate('Edit')}</button>
+                    {!row.builtin && <button style={button()} onClick={() => remove(row)}>{translate('Delete')}</button>}
                   </>
                 )}
               </div>
@@ -344,13 +344,13 @@ export default function FunctionManager({
 
       {!globalMode && (
         <div>
-          <div style={{ color: tokens.colors.textPrimary, fontWeight: 700, marginBottom: 8 }}>Recent runs</div>
+          <div style={{ color: tokens.colors.textPrimary, fontWeight: 700, marginBottom: 8 }}>{translate('Recent runs')}</div>
           <div style={{ display: 'grid', gap: 5 }}>
-            {runs.length === 0 ? <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>No Function runs yet.</div> : runs.map(runRow => (
+            {runs.length === 0 ? <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>{translate('No Function runs yet.')}</div> : runs.map(runRow => (
               <div key={runRow.id} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 180px', gap: 10, padding: '8px 10px', background: tokens.colors.surfaceSubtle, borderRadius: 6, fontSize: 12 }}>
                 <code style={{ color: tokens.colors.textStrong }}>{runRow.function_key}</code>
                 <span style={{ color: runRow.status === 'succeeded' ? tokens.colors.successLight : runRow.status === 'failed' ? tokens.colors.dangerLight : tokens.colors.warningLight }}>{runRow.status}</span>
-                <span style={{ color: tokens.colors.textMuted }}>{new Date(runRow.created_at).toLocaleString()}</span>
+                <span style={{ color: tokens.colors.textMuted }}>{new Date(runRow.created_at).toLocaleString(getLocaleTag())}</span>
               </div>
             ))}
           </div>

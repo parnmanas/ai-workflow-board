@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -8,6 +10,7 @@ import { speechPlayer } from '../../voice/speechPlayer';
 import { Button, Card } from '../common';
 
 export default function VoiceSpeakerCard() {
+  useLocale();
   const [profile, setProfile] = useState<VoiceSpeakerProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,7 +43,7 @@ export default function VoiceSpeakerCard() {
         if (alive.current) setResult(next);
       }
     } catch (e: any) {
-      if (alive.current) setError(e.message || 'Could not process your voice.');
+      if (alive.current) setError(e.message || translate('Could not process your voice.'));
     } finally {
       releaseMic.current?.(); releaseMic.current = null;
       if (alive.current) setBusy(false);
@@ -67,7 +70,7 @@ export default function VoiceSpeakerCard() {
       active.current = recording; setElapsed(0); setMode(kind);
     } catch (e: any) {
       releaseMic.current?.(); releaseMic.current = null;
-      setError(e.message || 'Could not open the microphone.');
+      setError(e.message || translate('Could not open the microphone.'));
     } finally { if (alive.current) setBusy(false); }
   };
 
@@ -77,38 +80,31 @@ export default function VoiceSpeakerCard() {
   };
 
   return <Card padding="20px">
-    <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>My voice</div>
+    <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>{translate('My voice')}</div>
     <p style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
-      Sample your voice in a quiet room. Only matching speech is sent to recognition, including calling an operator by name.
-      Record 2–3 samples in Korean and English using your usual microphone. Changes apply immediately to your account.
-      Recordings are discarded; encrypted voice features are stored until you delete them.
-    </p>
+      {translate('Sample your voice in a quiet room. Only matching speech is sent to recognition, including calling an operator by name. Record 2–3 samples in Korean and English using your usual microphone. Changes apply immediately to your account. Recordings are discarded; encrypted voice features are stored until you delete them.')}</p>
     <blockquote style={{ fontSize: 13, lineHeight: 1.7, margin: '12px 0', color: tokens.colors.textSecondary }}>
-      안녕하세요. 내 목소리로 작업 상태를 확인하고 싶어요. 헤이 자비스, 라그나르의 작업 결과를 알려줘.
-      Please check the agent manager and explain the workflow board status.
-    </blockquote>
+      {translate('안녕하세요. 내 목소리로 작업 상태를 확인하고 싶어요. 헤이 자비스, 라그나르의 작업 결과를 알려줘. Please check the agent manager and explain the workflow board status.')}</blockquote>
     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
       <Button size="sm" variant={mode ? 'danger' : 'primary'} disabled={busy || !voiceRecordingSupported()} onClick={() => void (mode ? finish(mode) : record('enroll'))}>
-        {mode ? `Stop (${elapsed}s)` : profile?.enrolled ? 'Add voice sample' : 'Sample my voice'}
+        {mode ? translate('Stop ({0}s)', { 0: elapsed }) : profile?.enrolled ? translate('Add voice sample') : translate('Sample my voice')}
       </Button>
-      <span style={{ fontSize: 12 }}>{profile ? `${profile.samples}/5 samples · ${profile.enabled ? 'filter enabled' : 'filter off'}` : 'Loading…'}</span>
+      <span style={{ fontSize: 12 }}>{profile ? translate('{0}/5 samples · {1}', { 0: profile.samples, 1: profile.enabled ? translate('filter enabled') : translate('filter off') }) : translate('Loading…')}</span>
       {profile?.enrolled && <>
-        <Button size="sm" variant="ghost" disabled={busy || !!mode} onClick={() => void change(() => api.updateVoiceSpeaker({ enabled: !profile.enabled }))}>{profile.enabled ? 'Disable filter' : 'Enable filter'}</Button>
-        <Button size="sm" variant="ghost" disabled={busy || !!mode || !profile.enabled} onClick={() => void record('test')}>Test recognition</Button>
-        <Button size="sm" variant="danger" disabled={busy || !!mode} onClick={() => void change(() => api.removeVoiceSpeaker())}>Delete my samples</Button>
+        <Button size="sm" variant="ghost" disabled={busy || !!mode} onClick={() => void change(() => api.updateVoiceSpeaker({ enabled: !profile.enabled }))}>{profile.enabled ? translate('Disable filter') : translate('Enable filter')}</Button>
+        <Button size="sm" variant="ghost" disabled={busy || !!mode || !profile.enabled} onClick={() => void record('test')}>{translate('Test recognition')}</Button>
+        <Button size="sm" variant="danger" disabled={busy || !!mode} onClick={() => void change(() => api.removeVoiceSpeaker())}>{translate('Delete my samples')}</Button>
       </>}
     </div>
     {profile?.enrolled && <label style={{ display: 'block', fontSize: 12, marginTop: 16 }}>
-      Voice match threshold
-      <select style={{ marginLeft: 12 }} value={profile.threshold} disabled={busy || !!mode} onChange={(e) => void change(() => api.updateVoiceSpeaker({ threshold: Number(e.target.value) }))}>
-        {[...new Set([0.45, 0.6, 0.75, profile.threshold])].sort().map((t) => <option key={t} value={t}>{t === 0.45 ? 'Forgiving (0.45)' : t === 0.6 ? 'Balanced (0.60)' : t === 0.75 ? 'Strict (0.75)' : t}</option>)}
+      {translate('Voice match threshold')}<select style={{ marginLeft: 12 }} value={profile.threshold} disabled={busy || !!mode} onChange={(e) => void change(() => api.updateVoiceSpeaker({ threshold: Number(e.target.value) }))}>
+        {[...new Set([0.45, 0.6, 0.75, profile.threshold])].sort().map((t) => <option key={t} value={t}>{t === 0.45 ? translate('Forgiving (0.45)') : t === 0.6 ? translate('Balanced (0.60)') : t === 0.75 ? translate('Strict (0.75)') : t}</option>)}
       </select>
     </label>}
-    <p style={{ fontSize: 12, color: tokens.colors.textMuted }}>If your voice is missed, add a sample or lower the threshold. Simultaneous voices and very short words can be difficult to distinguish.</p>
+    <p style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('If your voice is missed, add a sample or lower the threshold. Simultaneous voices and very short words can be difficult to distinguish.')}</p>
     {result && <div style={{ fontSize: 13 }}>
-      {result.ignored ? `Ignored: ${result.ignored}` : result.text || 'No words recognized.'}
-      {result.speaker_score !== undefined && ` · voice match ${result.speaker_score.toFixed(2)}`} · {result.latency_ms} ms
-    </div>}
+      {result.ignored ? translate('Ignored: {0}', { 0: result.ignored }) : result.text || translate('No words recognized.')}
+      {result.speaker_score !== undefined && translate(' · voice match {0}', { 0: result.speaker_score.toFixed(2) })} · {result.latency_ms} {translate('ms')}</div>}
     {error && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: tokens.colors.warning }}>{error}</div>}
   </Card>;
 }

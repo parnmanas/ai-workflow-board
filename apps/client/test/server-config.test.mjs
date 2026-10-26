@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 회귀 테스트 — PWA 서버 주소 설정 순수 규칙 (serverConfig.ts).
 //
 // 외딴 서버를 가리키는 PWA의 전제 세 가지:
@@ -35,7 +36,7 @@ test('subpath 배포의 경로는 유지한다', () => {
 
 test('http 외 스킴은 거부한다', () => {
   for (const bad of ['javascript:alert(1)', 'ftp://host/x', 'awb.example.com', '://x']) {
-    assert.throws(() => normalizeServerUrl(bad), /올바르지|입력할 수/, `${bad} 가 거부되지 않았다`);
+    assert.throws(() => normalizeServerUrl(bad), new RegExp(ui('http:// 또는 https:// 주소만 입력할 수 있습니다') + '|' + ui('주소가 올바르지 않습니다. 예: https://awb.example.com 또는 http://192.168.1.10:7701').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${bad} 가 거부되지 않았다`);
   }
 });
 

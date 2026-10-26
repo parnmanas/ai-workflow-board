@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { createContext, useCallback, useContext, useMemo, useReducer } from 'react';
 import {
   ArtifactRef,
@@ -29,6 +31,7 @@ interface ArtifactPanelContextValue {
 const ArtifactPanelContext = createContext<ArtifactPanelContextValue | undefined>(undefined);
 
 export function ArtifactPanelProvider({ children }: { children: React.ReactNode }) {
+  useLocale();
   const [state, dispatch] = useReducer(artifactPanelReducer, initialArtifactPanelState);
 
   const openArtifact = useCallback((artifact: ArtifactRef) => dispatch({ type: 'open', artifact }), []);
@@ -37,15 +40,16 @@ export function ArtifactPanelProvider({ children }: { children: React.ReactNode 
 
   const value = useMemo(
     () => ({ open: state.open, artifact: state.artifact, openArtifact, closeArtifact, toggleArtifact }),
-    [state.open, state.artifact, openArtifact, closeArtifact, toggleArtifact],
+    [state.open, state.artifact, openArtifact, closeArtifact, toggleArtifact, getLocale()],
   );
 
   return <ArtifactPanelContext.Provider value={value}>{children}</ArtifactPanelContext.Provider>;
 }
 
 export function useArtifactPanel(): ArtifactPanelContextValue {
+  useLocale();
   const ctx = useContext(ArtifactPanelContext);
-  if (!ctx) throw new Error('useArtifactPanel must be used within an ArtifactPanelProvider');
+  if (!ctx) throw new Error(translate('useArtifactPanel must be used within an ArtifactPanelProvider'));
   return ctx;
 }
 
@@ -60,6 +64,7 @@ const noopCloseArtifact: ArtifactPanelContextValue['closeArtifact'] = () => {};
  * 부재가 곧 배선 오류이므로 계속 useArtifactPanel() 의 throw 를 쓴다.
  */
 export function useOpenArtifactPanel(): ArtifactPanelContextValue['openArtifact'] {
+  useLocale();
   const ctx = useContext(ArtifactPanelContext);
   return ctx ? ctx.openArtifact : noopOpenArtifact;
 }
@@ -75,6 +80,7 @@ export function useOpenArtifactPanel(): ArtifactPanelContextValue['openArtifact'
  * 방금 떠나온 내용이 본문을 덮은 채 남는다.
  */
 export function useCloseArtifactPanel(): ArtifactPanelContextValue['closeArtifact'] {
+  useLocale();
   const ctx = useContext(ArtifactPanelContext);
   return ctx ? ctx.closeArtifact : noopCloseArtifact;
 }

@@ -1,4 +1,6 @@
+import { t as translate } from './i18n/core';
 import type { MailConnections, MailConnection, MailConnectionInput, MailList, MailReply, BusinessMailMessage } from './business-mail.types';
+import { localizeBusinessConnector, localizeMailConnector, localizeSelfServiceAssessment, localizeTrademarkConnector } from './i18n/catalog';
 import type { AgentTemplate } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
 import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
@@ -221,8 +223,8 @@ export function apiErrorMessage(status: number, body: any): string {
   const detail = body?.message || body?.error;
   if (typeof detail === 'string' && detail.trim() && !/<[!/?a-z][^>]*>/i.test(detail)) return detail;
   return status === 504 || status === 524
-    ? `서버 응답 시간이 초과되었습니다 (HTTP ${status}). 잠시 후 다시 시도해 주세요.`
-    : `요청에 실패했습니다 (HTTP ${status}). 잠시 후 다시 시도해 주세요.`;
+    ? translate('서버 응답 시간이 초과되었습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', { 0: status })
+    : translate('요청에 실패했습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', { 0: status });
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -725,7 +727,7 @@ export const api = {
         window.dispatchEvent(new Event('auth-expired'));
       }
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || 'Upload failed');
+      throw new Error(err.error || translate('Upload failed'));
     }
     return res.json();
   },
@@ -2109,9 +2111,9 @@ export const api = {
         }
         if (xhr.status >= 200 && xhr.status < 300) {
           try { resolve(JSON.parse(xhr.responseText)); }
-          catch (e) { reject(new Error('Invalid upload response')); }
+          catch (e) { reject(new Error(translate('Invalid upload response'))); }
         } else {
-          let msg = `Upload failed (${xhr.status})`;
+          let msg = translate('Upload failed ({0})', { 0: xhr.status });
           try {
             const body = JSON.parse(xhr.responseText);
             if (body?.error) msg = body.error;
@@ -2119,8 +2121,8 @@ export const api = {
           reject(new Error(msg));
         }
       };
-      xhr.onerror = () => reject(new Error('Upload network error'));
-      xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+      xhr.onerror = () => reject(new Error(translate('Upload network error')));
+      xhr.onabort = () => reject(new DOMException(translate('Aborted'), "AbortError"));
       if (signal) {
         if (signal.aborted) { xhr.abort(); return; }
         signal.addEventListener('abort', () => xhr.abort(), { once: true });
@@ -2583,7 +2585,8 @@ export const api = {
 
   // ─── Business (docs/business.md) ───────────────────────
   listBusinessCompanies: () => request<BusinessCompany[]>('/business/companies'),
-  listTrademarkIntegrations: (companyId: string, id: string) => request<TrademarkIntegrationsView>(integrationPath(companyId, id)),
+  listTrademarkIntegrations: (companyId: string, id: string) => request<TrademarkIntegrationsView>(integrationPath(companyId, id))
+    .then(view => ({ ...view, connectors: view.connectors.map(localizeTrademarkConnector) })),
   configureTrademarkIntegration: (companyId: string, id: string, input: TrademarkIntegrationInput) => request<TrademarkIntegration>(integrationPath(companyId, id), { method: 'POST', body: JSON.stringify(input) }),
   disconnectTrademarkIntegration: (companyId: string, id: string, connection: TrademarkIntegration) => request<{ success: boolean }>(integrationPath(companyId, id, connection.id), { method: 'DELETE', body: JSON.stringify({ revision: connection.revision }) }),
   authorizeTrademarkIntegration: (companyId: string, id: string, connectionId: string) => request<{ url: string }>(integrationPath(companyId, id, connectionId, 'authorize'), { method: 'POST', credentials: 'include' }),
@@ -2609,7 +2612,8 @@ export const api = {
   createBusinessCompany: (input: BusinessCompanyInput) => request<BusinessCompany>('/business/companies', { method: 'POST', body: JSON.stringify(input) }),
   updateBusinessCompany: (id: string, input: Partial<BusinessCompanyInput> & { revision: number }) => request<BusinessCompany>(`/business/companies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) }),
   chooseBusinessService: (id: string, stage: BusinessStage, input: { provider: string; plan: string; revision: number; self_service_answers?: Record<string, boolean> }) => request<BusinessCompany>(`/business/companies/${encodeURIComponent(id)}/services/${stage}`, { method: 'POST', body: JSON.stringify(input) }),
-  assessBusinessSelfService: (id: string, provider: string, plan: string, answers?: Record<string, boolean>) => request<SelfServiceAssessment>(`/business/companies/${encodeURIComponent(id)}/self-service/assess`, { method: 'POST', body: JSON.stringify({ provider, plan, answers }) }),
+  assessBusinessSelfService: (id: string, provider: string, plan: string, answers?: Record<string, boolean>) => request<SelfServiceAssessment>(`/business/companies/${encodeURIComponent(id)}/self-service/assess`, { method: 'POST', body: JSON.stringify({ provider, plan, answers }) })
+    .then(localizeSelfServiceAssessment),
   getBusinessCashbook: (id: string, month: string) => request<Cashbook>(`/business/companies/${encodeURIComponent(id)}/cashbook/months/${encodeURIComponent(month)}`),
   addBusinessCashEntry: (id: string, input: CashEntryInput & { revision: number }) => request<CashEntry>(`/business/companies/${encodeURIComponent(id)}/cashbook/entries`, { method: 'POST', body: JSON.stringify(input) }),
   reconcileBusinessCashEntry: (id: string, entryId: string, input: { revision: number; evidence: string; reconciled: boolean }) => request<CashEntry>(`/business/companies/${encodeURIComponent(id)}/cashbook/entries/${encodeURIComponent(entryId)}/reconcile`, { method: 'POST', body: JSON.stringify(input) }),
@@ -2622,7 +2626,8 @@ export const api = {
   submitBusinessFormation: (id: string, action: BusinessFormation) => request<BusinessFormation>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(action.id)}/submit`, { method: 'POST', body: JSON.stringify({ payload_digest: action.payload_digest, revision: action.revision, confirm: true }) }),
   discardBusinessFormation: (id: string, action: BusinessFormation) => request<{ success: boolean }>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(action.id)}`, { method: 'DELETE', body: JSON.stringify({ payload_digest: action.payload_digest }) }),
   signBusinessFormation: (id: string, actionId: string, document_type: 'SS4' | 'FORM8821') => request<{ url: string; expires_at: string }>(`/business/companies/${encodeURIComponent(id)}/formations/${encodeURIComponent(actionId)}/signature`, { method: 'POST', body: JSON.stringify({ document_type }) }),
-  listBusinessMailConnections: () => request<MailConnections>('/business/mail/connections'),
+  listBusinessMailConnections: () => request<MailConnections>('/business/mail/connections')
+    .then(view => ({ ...view, connectors: view.connectors.map(localizeMailConnector) })),
   configureBusinessMail: (input: MailConnectionInput) => request<MailConnection>('/business/mail/connections', { method: 'POST', body: JSON.stringify(input) }),
   syncBusinessMail: (id: string) => request<{ collected: number; has_more: boolean }>(`/business/mail/connections/${encodeURIComponent(id)}/sync`, { method: 'POST' }),
   listBusinessMail: (filters: Record<string, string> = {}) => request<MailList>(`/business/mail/messages?${new URLSearchParams(filters)}`),
@@ -2632,7 +2637,7 @@ export const api = {
   startBusinessMailReply: (id: string) => request<MailReply>(`/business/mail/messages/${encodeURIComponent(id)}/reply`, { method: 'POST' }),
   editBusinessMailReply: (id: string, input: { revision: number; subject: string; text: string; decision: 'review'; note: string }) => request<MailReply>(`/business/mail/replies/${encodeURIComponent(id)}/draft`, { method: 'POST', body: JSON.stringify(input) }),
   decideBusinessMailReply: (id: string, input: { revision: number; action: 'approve' | 'reject' }) => request<MailReply>(`/business/mail/replies/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify(input) }),
-  listBusinessConnectors: () => request<BusinessConnector[]>('/business/connectors'),
+  listBusinessConnectors: () => request<BusinessConnector[]>('/business/connectors').then(rows => rows.map(localizeBusinessConnector)),
   listBusinessCredentials: (accountId: string) => request<Array<{ id: string; name: string; provider: string }>>(`/business/credentials?account_id=${encodeURIComponent(accountId)}`),
   saveBusinessTask: (companyId: string, taskId: string | null, input: BusinessTaskInput & { revision: number }) => request<BusinessTask>(`/business/companies/${encodeURIComponent(companyId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ''}`, { method: taskId ? 'PATCH' : 'POST', body: JSON.stringify(input) }),
   createBusinessTaskTicket: (companyId: string, taskId: string, revision: number) => request<{ ticket: NonNullable<BusinessTask['ticket']> }>(`/business/companies/${encodeURIComponent(companyId)}/tasks/${encodeURIComponent(taskId)}/ticket`, { method: 'POST', body: JSON.stringify({ revision }) }),

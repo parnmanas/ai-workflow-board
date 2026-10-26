@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -27,6 +29,7 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /** 터미널 상태 pill — 세션/미션과 같은 진행 어휘(src/activity.ts). */
 function StatusPill({ status }: { status: string | null | undefined }) {
+  useLocale();
   return (
     <ActivityPill
       view={describeTerminalStatus(status)}
@@ -40,11 +43,11 @@ function relativeTime(iso: string | null | undefined): string {
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return '';
   const min = Math.round((Date.now() - t) / 60_000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min}m ago`;
+  if (min < 1) return translate('just now');
+  if (min < 60) return translate('{0}m ago', { 0: min });
   const h = Math.round(min / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+  if (h < 24) return translate('{0}h ago', { 0: h });
+  return translate('{0}d ago', { 0: Math.round(h / 24) });
 }
 
 // ─── Runtime Host 목록 ──────────────────────────────────────────────────────
@@ -52,23 +55,24 @@ function relativeTime(iso: string | null | undefined): string {
 function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
   accountId: string; hosts: TerminalHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   return (
     <>
       <PageHeader
-        title="Terminals"
-        description="Open a shell on one of your Runtime Hosts. A terminal lives only while it runs — nothing is recorded."
-        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={hosts.length === 0}>New terminal</Button>}
+        title={translate('Terminals')}
+        description={translate('Open a shell on one of your Runtime Hosts. A terminal lives only while it runs — nothing is recorded.')}
+        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={hosts.length === 0}>{translate('New terminal')}</Button>}
       />
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {error ? (
           <ErrorState message={error} onRetry={onReload} />
         ) : loading && hosts.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading Runtime Hosts…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading Runtime Hosts…')}</div>
         ) : hosts.length === 0 ? (
           <EmptyState
-            title="No Runtime Host can open terminals"
-            description="Terminals run on a machine with awb-agent-manager. Pair one from the AI Agents page and make sure its PTY support is installed (the optional @lydell/node-pty package)."
+            title={translate('No Runtime Host can open terminals')}
+            description={translate('Terminals run on a machine with awb-agent-manager. Pair one from the AI Agents page and make sure its PTY support is installed (the optional @lydell/node-pty package).')}
           />
         ) : (
           <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
@@ -80,7 +84,7 @@ function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                   <span style={{ fontSize: 14, fontWeight: 600, color: tokens.colors.textPrimary }}>{host.name}</span>
                   <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: MONO }}>{host.hostname}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>seen {relativeTime(host.last_seen_at)}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>{translate('seen')} {relativeTime(host.last_seen_at)}</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
                   {host.shells.map((s) => (
@@ -105,10 +109,9 @@ function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
                       borderRadius: tokens.radii.md, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
                     }}
                   >
-                    Open terminals →
-                  </button>
+                    {translate('Open terminals →')}</button>
                   <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-                    {host.live_count > 0 ? `${host.live_count} live` : 'none running'}
+                    {host.live_count > 0 ? translate('{0} live', { 0: host.live_count }) : translate('none running')}
                   </span>
                 </div>
               </div>
@@ -132,23 +135,24 @@ function HostTerminals({ accountId, host, terminals, loading, error, onReload, o
   onNew: () => void;
   onClose: (terminal: TerminalSummary) => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   return (
     <>
       <PageHeader
-        title={host?.name || 'Runtime Host'}
-        description={host ? `Live shells on ${host.hostname}${host.platform ? ` · ${host.platform}` : ''}. Closing one ends its process.` : 'This Runtime Host is not connected right now.'}
-        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={!host}>New terminal</Button>}
+        title={host?.name || "Runtime Host"}
+        description={host ? translate('Live shells on {0}{1}. Closing one ends its process.', { 0: host.hostname, 1: host.platform ? ` · ${host.platform}` : '' }) : translate('This Runtime Host is not connected right now.')}
+        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={!host}>{translate('New terminal')}</Button>}
       />
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {error ? (
           <ErrorState message={error} onRetry={onReload} />
         ) : loading && terminals.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading terminals…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading terminals…')}</div>
         ) : terminals.length === 0 ? (
           <EmptyState
-            title="No terminal is running here"
-            description="Terminals are not saved — the list shows only live shells. Start one to get going."
+            title={translate('No terminal is running here')}
+            description={translate('Terminals are not saved — the list shows only live shells. Start one to get going.')}
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -167,11 +171,11 @@ function HostTerminals({ accountId, host, terminals, loading, error, onReload, o
                     {terminalDisplayTitle(terminal)}
                   </div>
                   <div style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {terminal.cwd || '~'}{terminal.pid ? ` · pid ${terminal.pid}` : ''} · started {relativeTime(terminal.created_at)}
+                    {terminal.cwd || '~'}{terminal.pid ? translate(' · pid {0}', { 0: terminal.pid }) : ''} {translate('· started')} {relativeTime(terminal.created_at)}
                   </div>
                 </button>
                 <StatusPill status={terminal.status} />
-                <Button variant="secondary" size="sm" onClick={() => onClose(terminal)}>Close</Button>
+                <Button variant="secondary" size="sm" onClick={() => onClose(terminal)}>{translate('Close')}</Button>
               </div>
             ))}
           </div>
@@ -184,6 +188,7 @@ function HostTerminals({ accountId, host, terminals, loading, error, onReload, o
 // ─── 페이지 ────────────────────────────────────────────────────────────────
 
 export default function TerminalsPage() {
+  useLocale();
   const { managerId = '', terminalId = '' } = useParams();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
@@ -202,7 +207,7 @@ export default function TerminalsPage() {
   const [current, setCurrent] = useState<TerminalSummary | null>(null);
   const generation = useRef(0);
 
-  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
+  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId, getLocale()]);
 
   const loadHosts = useCallback(async () => {
     if (!accountId) return;
@@ -212,7 +217,7 @@ export default function TerminalsPage() {
       setHosts(Array.isArray(list) ? list : []);
       setHostsError(null);
     } catch (err: any) {
-      setHostsError(err?.message || 'Failed to load Runtime Hosts');
+      setHostsError(err?.message || translate('Failed to load Runtime Hosts'));
     } finally {
       setHostsLoading(false);
     }
@@ -231,7 +236,7 @@ export default function TerminalsPage() {
     } catch (err: any) {
       if (generation.current !== gen) return;
       setTerminals([]);
-      setListError(err?.message || 'Failed to load terminals');
+      setListError(err?.message || translate('Failed to load terminals'));
     } finally {
       if (generation.current === gen) setListLoading(false);
     }
@@ -272,9 +277,9 @@ export default function TerminalsPage() {
 
   const closeTerminal = useCallback(async (terminal: TerminalSummary) => {
     const ok = await confirm({
-      title: 'Close terminal?',
-      message: `This ends the shell process on ${terminal.manager_name || 'the Runtime Host'}. Anything running in it stops.`,
-      confirmLabel: 'Close terminal',
+      title: translate('Close terminal?'),
+      message: translate('This ends the shell process on {0}. Anything running in it stops.', { 0: terminal.manager_name || translate('the Runtime Host') }),
+      confirmLabel: translate('Close terminal'),
       danger: true,
     });
     if (!ok) return;
@@ -283,7 +288,7 @@ export default function TerminalsPage() {
       setTerminals((prev) => prev.filter((t) => t.terminal_id !== terminal.terminal_id));
       if (terminalId === terminal.terminal_id) navigate(`/terminals/${terminal.manager_id}`);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to close the terminal', 'error');
+      showToast(err?.message || translate('Failed to close the terminal'), 'error');
     }
   }, [confirm, navigate, showToast, terminalId, accountId]);
 
@@ -298,7 +303,7 @@ export default function TerminalsPage() {
   );
 
   if (managerId && terminalId) {
-    const title = current ? terminalDisplayTitle(current) : 'Terminal';
+    const title = current ? terminalDisplayTitle(current) : translate('Terminal');
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         <PageHeader
@@ -307,9 +312,9 @@ export default function TerminalsPage() {
           actions={(
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {current && <StatusPill status={current.status} />}
-              <Button variant="secondary" size="sm" onClick={() => navigate(`/terminals/${managerId}`)}>All terminals</Button>
+              <Button variant="secondary" size="sm" onClick={() => navigate(`/terminals/${managerId}`)}>{translate('All terminals')}</Button>
               {current && isLiveTerminal(current) && (
-                <Button variant="secondary" size="sm" onClick={() => void closeTerminal(current)}>Close</Button>
+                <Button variant="secondary" size="sm" onClick={() => void closeTerminal(current)}>{translate('Close')}</Button>
               )}
             </div>
           )}

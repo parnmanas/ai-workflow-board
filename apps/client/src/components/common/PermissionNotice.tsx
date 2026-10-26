@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 
@@ -9,12 +11,13 @@ import { tokens } from '../../tokens';
  * 접근 제어 결과이므로 `role="note"` 로 알린다(경보 아님).
  */
 export function PermissionNotice({
-  title = '접근 권한이 없습니다',
+  title = translate('접근 권한이 없습니다'),
   message,
 }: {
   title?: string;
   message?: string;
 }) {
+  useLocale();
   return (
     <div
       role="note"

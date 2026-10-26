@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
@@ -19,6 +21,7 @@ export default function SessionProposalCards({ proposals, showTarget }: {
   /** operator 세션 화면 — 어느 세션에 보낼 것인지 같이 보인다. */
   showTarget: (p: SessionProposal) => boolean;
 }) {
+  useLocale();
   const { showToast } = useToast();
   // 진행 중 표시는 제안 id 로 — 카드가 바뀌어도 다른 제안의 버튼이 잠기지 않게.
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -28,10 +31,10 @@ export default function SessionProposalCards({ proposals, showTarget }: {
       const { proposal } = action === 'send' ? await api.sendSessionProposal(p.id) : await api.dismissSessionProposal(p.id);
       sessionProposalStore.apply(proposal);
       if (action === 'send') {
-        showToast(proposal.status === 'queued' ? 'Approved — it goes to the session when its current turn ends.' : 'Sent to the session.', 'info');
+        showToast(proposal.status === 'queued' ? translate('Approved — it goes to the session when its current turn ends.') : translate('Sent to the session.'), 'info');
       }
     } catch (err: any) {
-      showToast(err?.message || 'Failed to update the proposal', 'error');
+      showToast(err?.message || translate('Failed to update the proposal'), 'error');
       void sessionProposalStore.load();
     } finally {
       setBusy((b) => {
@@ -49,24 +52,24 @@ export default function SessionProposalCards({ proposals, showTarget }: {
         const working = !!busy[p.id];
         const target = `${p.target.manager_name} / ${p.target.cli_label}${p.target.title ? ` · ${p.target.title}` : ''}`;
         return (
-          <section key={p.id} className="awb-session-proposal" data-proposal-status={p.status} aria-label={`Proposal from ${p.operator.name}`}>
+          <section key={p.id} className="awb-session-proposal" data-proposal-status={p.status} aria-label={translate('Proposal from {0}', { 0: p.operator.name })}>
             <div className="awb-session-proposal-head">
-              <span style={{ color: tokens.colors.textPrimary, fontWeight: 600 }}>🧭 {p.operator.name} proposes</span>
-              {showTarget(p) && <span className="awb-session-proposal-target" style={{ color: tokens.colors.textSecondary }} title={target}>→ {target}{p.target_is_operator ? ' · operator' : ''}</span>}
+              <span style={{ color: tokens.colors.textPrimary, fontWeight: 600 }}>🧭 {p.operator.name} {translate('proposes')}</span>
+              {showTarget(p) && <span className="awb-session-proposal-target" style={{ color: tokens.colors.textSecondary }} title={target}>→ {target}{p.target_is_operator ? translate(' · operator') : ''}</span>}
               <span className="awb-session-proposal-actions">
                 {p.status === 'pending' && (
                   <>
-                    <Button variant="primary" size="sm" disabled={working} onClick={() => void act(p, 'send')}>Send</Button>
-                    <Button variant="ghost" size="sm" disabled={working} onClick={() => void act(p, 'dismiss')}>Dismiss</Button>
+                    <Button variant="primary" size="sm" disabled={working} onClick={() => void act(p, 'send')}>{translate('Send')}</Button>
+                    <Button variant="ghost" size="sm" disabled={working} onClick={() => void act(p, 'dismiss')}>{translate('Dismiss')}</Button>
                   </>
                 )}
                 {p.status === 'queued' && (
-                  <Button variant="ghost" size="sm" disabled={working} onClick={() => void act(p, 'dismiss')} title="Do not send it after all">Cancel</Button>
+                  <Button variant="ghost" size="sm" disabled={working} onClick={() => void act(p, 'dismiss')} title={translate('Do not send it after all')}>{translate('Cancel')}</Button>
                 )}
                 {p.status === 'failed' && (
                   <>
-                    <Button variant="secondary" size="sm" disabled={working} onClick={() => void act(p, 'send')}>Retry</Button>
-                    <Button variant="ghost" size="sm" disabled={working} onClick={() => void act(p, 'dismiss')}>Dismiss</Button>
+                    <Button variant="secondary" size="sm" disabled={working} onClick={() => void act(p, 'send')}>{translate('Retry')}</Button>
+                    <Button variant="ghost" size="sm" disabled={working} onClick={() => void act(p, 'dismiss')}>{translate('Dismiss')}</Button>
                   </>
                 )}
               </span>
@@ -74,10 +77,10 @@ export default function SessionProposalCards({ proposals, showTarget }: {
             {p.reason && <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>{p.reason}</div>}
             <pre className="awb-session-proposal-text" style={{ color: tokens.colors.textPrimary, background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>{p.text}</pre>
             {p.status === 'queued' && (
-              <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>Approved — it goes to the session when its current turn ends.</div>
+              <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>{translate('Approved — it goes to the session when its current turn ends.')}</div>
             )}
             {p.status === 'failed' && (
-              <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>Not sent: {p.error || 'unknown error'}</div>
+              <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{translate('Not sent:')} {p.error || translate('unknown error')}</div>
             )}
           </section>
         );
@@ -91,6 +94,7 @@ export default function SessionProposalCards({ proposals, showTarget }: {
  * 목록 상태도 여기서 따라간다(세션 화면이 열려 있지 않아도).
  */
 export function SessionProposalNotifier() {
+  useLocale();
   const { showToast } = useToast();
   const navigate = useNavigate();
   useBoardStreamEvent('agent_session_proposal', useCallback((data: SessionProposalEvent) => {
@@ -99,7 +103,7 @@ export function SessionProposalNotifier() {
     if (data.reason !== 'proposed') return;
     const p = data.proposal;
     const target = `${p.target.manager_name} / ${p.target.cli_label}${p.target.title ? ` · ${p.target.title}` : ''}`;
-    showToast(`🧭 ${p.operator.name} proposes work for ${target} — open to review`, 'info', {
+    showToast(translate('🧭 {0} proposes work for {1} — open to review', { 0: p.operator.name, 1: target }), 'info', {
       durationMs: 10_000,
       onClick: () => navigate(sessionPath('', p.target.manager_id, p.target.cli, p.target.session_id)),
     });

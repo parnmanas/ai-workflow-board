@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * Agent Session 트랜스크립트 순수 로직 — 서버의 append-only 이벤트 행을 화면
  * 블록으로 접는다. 컴포넌트/컨텍스트에서 분리해 node:test 로 직접 구동한다
@@ -441,7 +442,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           seq: ev.seq,
           turnId,
           toolCallId,
-          title: str(p.title) || toolCallId || 'tool',
+          title: str(p.title) || toolCallId || translate('tool'),
           toolKind: str(p.kind),
           input: p.input,
           // codex-acp 의 `mcp_startup.<server>` 처럼 update 없이 처음부터 completed/failed 인 호출이 있다
@@ -466,7 +467,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
             seq: ev.seq,
             turnId,
             toolCallId,
-            title: toolCallId || 'tool',
+            title: toolCallId || translate('tool'),
             toolKind: '',
             input: undefined,
             status: str(p.status) || 'completed',
@@ -489,7 +490,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           turnId,
           requestId,
           toolCallId: str(p.tool_call_id),
-          title: str(p.title) || 'Permission requested',
+          title: str(p.title) || translate('Permission requested'),
           description: str(p.description),
           toolKind: str(p.kind),
           options,
@@ -528,7 +529,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         if (idx !== undefined && blocks[idx]?.kind === 'elicitation') {
           (blocks[idx] as Extract<TranscriptBlock, { kind: 'elicitation' }>).decision = decision;
         } else {
-          blocks.push({ kind: 'system', key: ev.id, seq: ev.seq, text: `Input ${decision.action === 'accept' ? 'submitted' : decision.action === 'decline' ? 'declined' : 'cancelled'} (${decision.decided_by})` });
+          blocks.push({ kind: 'system', key: ev.id, seq: ev.seq, text: translate('Input {0} ({1})', { 0: decision.action === 'accept' ? 'submitted' : decision.action === 'decline' ? 'declined' : 'cancelled', 1: decision.decided_by }) });
         }
         break;
       }
@@ -559,7 +560,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         if (idx !== undefined && blocks[idx]?.kind === 'permission') {
           (blocks[idx] as Extract<TranscriptBlock, { kind: 'permission' }>).decision = decision;
         } else {
-          blocks.push({ kind: 'system', key: ev.id, seq: ev.seq, text: `Permission ${decision.outcome} (${decision.decided_by})` });
+          blocks.push({ kind: 'system', key: ev.id, seq: ev.seq, text: translate('Permission {0} ({1})', { 0: decision.outcome, 1: decision.decided_by }) });
         }
         break;
       }
@@ -617,7 +618,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         break;
       }
       case 'error':
-        blocks.push({ kind: 'error', key: ev.id, seq: ev.seq, turnId, message: str(p.message) || 'Unknown error', code: p.code ? str(p.code) : null });
+        blocks.push({ kind: 'error', key: ev.id, seq: ev.seq, turnId, message: str(p.message) || translate('Unknown error'), code: p.code ? str(p.code) : null });
         break;
       case 'system':
         blocks.push({ kind: 'system', key: ev.id, seq: ev.seq, text: str(p.text) });
@@ -674,7 +675,7 @@ function trimMarker(dropped: number, firstKept: AgentSessionEventRecord | undefi
     seq: 0,
     turn_id: '',
     type: 'system',
-    payload: { text: `Earlier messages trimmed (${dropped} events).`, dropped },
+    payload: { text: translate('Earlier messages trimmed ({0} events).', { 0: dropped }), dropped },
     created_at: firstKept?.created_at ?? new Date().toISOString(),
   };
 }
@@ -833,14 +834,14 @@ export interface SessionAuthView {
  */
 export function describeSessionAuth(auth: AgentSessionAuth | null | undefined, credentialName?: string | null): SessionAuthView | null {
   if (!auth) return null;
-  const primary = auth.label || auth.kind || 'Unknown account';
+  const primary = auth.label || auth.kind || translate('Unknown account');
   const secondary = auth.detail || auth.account?.email || '';
   const org = auth.account?.organization;
   return {
     text: [primary, secondary].filter(Boolean).join(' · '),
     title: auth.source === 'credential'
-      ? `Signed in with the account credential${credentialName ? ` "${credentialName}"` : ''}${org ? ` (${org})` : ''}`
-      : `Uses the Runtime Host's own CLI login${org ? ` (${org})` : ''}`,
+      ? translate('Signed in with the account credential{0}{1}', { 0: credentialName ? ` "${credentialName}"` : '', 1: org ? ` (${org})` : '' })
+      : translate('Uses the Runtime Host\'s own CLI login{0}', { 0: org ? ` (${org})` : '' }),
     tone: auth.kind === 'none' ? 'danger' : 'muted',
   };
 }
@@ -864,9 +865,9 @@ export function parseOperatorTaskPrompt(text: string): { operator: string; text:
  */
 export const SESSION_HEADER_CATEGORIES = ['mode', 'model', 'thought_level'] as const;
 const SESSION_HEADER_LABELS: Record<(typeof SESSION_HEADER_CATEGORIES)[number], string> = {
-  mode: 'Mode',
-  model: 'Model',
-  thought_level: 'Effort',
+  get mode() { return translate('Mode'); },
+  get model() { return translate('Model'); },
+  get thought_level() { return translate('Effort'); },
 };
 
 export function splitHeaderConfigOptions(options: readonly AgentSessionConfigOption[]): {

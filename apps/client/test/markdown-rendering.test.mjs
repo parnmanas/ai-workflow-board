@@ -70,6 +70,7 @@ test('headings, nested lists, tables, tasks, quotes, strike and named links have
   assert.equal(doc.querySelectorAll('input[type=checkbox][disabled]').length, 2);
   assert.equal(doc.querySelectorAll('table tbody tr').length, 1);
   assert.equal(doc.querySelectorAll('td .katex').length, 1);
+  // Message content is authored text, not a translated UI label.
   assert.equal(doc.querySelector('del').textContent, '취소');
   assert.equal(doc.querySelector('blockquote').textContent.trim(), '인용');
   assert.equal(doc.querySelector('a').textContent, '사이트');

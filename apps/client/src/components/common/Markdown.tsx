@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,7 +32,7 @@ function markdownComponents(participants?: MentionParticipant[]): Components {
         : <div>{children}</div>;
     },
     pre: ({ children }) => <>{children}</>,
-    table: ({ children }) => <div className="awb-markdown-table" tabIndex={0} role="region" aria-label="표"><table>{children}</table></div>,
+    table: ({ children }) => <div className="awb-markdown-table" tabIndex={0} role="region" aria-label={translate('표')}><table>{children}</table></div>,
     // Images/files use the authenticated preview path in SessionTranscript.
     img: ({ alt }) => <span>{alt}</span>,
   };
@@ -126,8 +128,9 @@ function prepareMarkdown(text: string) {
  * never executed; KaTeX also keeps trust disabled for agent-authored formulas.
  */
 export default function Markdown({ text, participants }: { text: string; participants?: MentionParticipant[] }) {
-  const { source, remarkContent } = useMemo(() => prepareMarkdown(text), [text]);
-  const components = useMemo(() => markdownComponents(participants), [participants]);
+  useLocale();
+  const { source, remarkContent } = useMemo(() => prepareMarkdown(text), [text, getLocale()]);
+  const components = useMemo(() => markdownComponents(participants), [participants, getLocale()]);
   return <div className="awb-markdown">
     <ReactMarkdown remarkPlugins={[remarkGfm, remarkContent]}
       rehypePlugins={[[rehypeKatex, { trust: false, strict: false, maxExpand: 1000, maxSize: 20 }]]}

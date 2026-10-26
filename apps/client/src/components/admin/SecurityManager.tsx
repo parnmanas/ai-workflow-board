@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveAccountId, rawResourceUrl } from '../../api';
 import type {
@@ -79,6 +81,7 @@ const PILL_COLORS: Record<'success' | 'danger' | 'warning' | 'info' | 'neutral',
 };
 
 function Pill({ variant = 'neutral', children }: { variant?: keyof typeof PILL_COLORS; children: React.ReactNode }) {
+  useLocale();
   const c = PILL_COLORS[variant];
   return (
     <span style={{
@@ -91,6 +94,7 @@ function Pill({ variant = 'neutral', children }: { variant?: keyof typeof PILL_C
 }
 
 function SeverityBadge({ severity, size = 'sm' }: { severity: SecuritySeverity; size?: 'sm' | 'md' }) {
+  useLocale();
   const c = SEVERITY_COLOR[severity];
   return (
     <span style={{
@@ -107,9 +111,10 @@ function SeverityBadge({ severity, size = 'sm' }: { severity: SecuritySeverity; 
 
 /** 'self' (AWB own codebase) vs 'repo' (a Project — same id as the old repo Resource). */
 function TargetBadge({ resourceId }: { resourceId: string | null }) {
+  useLocale();
   return resourceId
-    ? <span title={`project ${resourceId}`} style={{ display: 'inline-flex' }}><Pill variant="info">repo</Pill></span>
-    : <span title="AWB 자체 코드베이스 (agent worktree)" style={{ display: 'inline-flex' }}><Pill variant="neutral">self</Pill></span>;
+    ? <span title={translate('project {0}', { 0: resourceId })} style={{ display: 'inline-flex' }}><Pill variant="info">{translate('repo')}</Pill></span>
+    : <span title={translate('AWB 자체 코드베이스 (agent worktree)')} style={{ display: 'inline-flex' }}><Pill variant="neutral">{translate('self')}</Pill></span>;
 }
 
 // 화면용 view-model — list projection 에 없는 pass_rate / highest_severity 를
@@ -126,6 +131,7 @@ interface ProfileRow extends SecurityProfileListItem {
  * findings grouped by severity with evidence galleries + auto-fix-ticket links.
  */
 export default function SecurityManager({ accountId, allScopes = false }: SecurityManagerProps) {
+  useLocale();
   const { showToast } = useToast();
   const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
@@ -176,7 +182,7 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
       // P4b: runtime 선언 → 매칭용 full 행 보관.
       setSchedules(scheduleList || []);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load security profiles', 'error');
+      showToast(err?.message || translate('Failed to load security profiles'), 'error');
     }
   }, [effectiveAccountId, allScopes, showToast]);
 
@@ -206,10 +212,10 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
     setRunning(p.id);
     try {
       const result = await api.runSecurityProfile(p.id);
-      showToast(`보안 점검 시작 (room ${result.room_id.slice(0, 8)})`, 'success');
+      showToast(translate('보안 점검 시작 (room {0})', { 0: result.room_id.slice(0, 8) }), 'success');
       setSelected(p);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to start security run', 'error');
+      showToast(err?.message || translate('Failed to start security run'), 'error');
     } finally {
       setRunning(null);
     }
@@ -219,9 +225,9 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
     setRefreshing(p.id);
     try {
       await api.refreshSecurityChecklist(p.id);
-      showToast('체크리스트 갱신 작업을 에이전트에 디스패치했습니다 (WebSearch → checklist 갱신)', 'success');
+      showToast(translate('체크리스트 갱신 작업을 에이전트에 디스패치했습니다 (WebSearch → checklist 갱신)'), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to refresh checklist', 'error');
+      showToast(err?.message || translate('Failed to refresh checklist'), 'error');
     } finally {
       setRefreshing(null);
     }
@@ -247,9 +253,9 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
         ...payload,
       });
       setActiveBatch(batch);
-      showToast(`보안 점검 batch 시작 — ${batch.total}개 프로파일 순차 실행`, 'success');
+      showToast(translate('보안 점검 batch 시작 — {0}개 프로파일 순차 실행', { 0: batch.total }), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to start security batch', 'error');
+      showToast(err?.message || translate('Failed to start security batch'), 'error');
     } finally {
       setBatchStarting(false);
     }
@@ -275,12 +281,12 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
   const handleDelete = async (p: SecurityProfile) => {
     try {
       await api.deleteSecurityProfile(p.id, effectiveAccountId);
-      showToast('보안 프로파일 삭제됨', 'success');
+      showToast(translate('보안 프로파일 삭제됨'), 'success');
       setConfirmDelete(null);
       if (selected?.id === p.id) setSelected(null);
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete profile', 'error');
+      showToast(err?.message || translate('Failed to delete profile'), 'error');
     }
   };
 
@@ -291,14 +297,14 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
         // No batch — a refresh updates checklists, not findings. Surface how many
         // profiles got a refresh dispatched.
         const n = refreshes?.length ?? 0;
-        showToast(`스케줄 "${s.name}" 즉시 실행 — 체크리스트 갱신 ${n}개 프로파일에 디스패치`, 'success');
+        showToast(translate('스케줄 "{0}" 즉시 실행 — 체크리스트 갱신 {1}개 프로파일에 디스패치', { 0: s.name, 1: n }), 'success');
       } else if (batch) {
         setActiveBatch(batch);
-        showToast(`스케줄 "${s.name}" 즉시 실행 — ${batch.total}개 프로파일`, 'success');
+        showToast(translate('스케줄 "{0}" 즉시 실행 — {1}개 프로파일', { 0: s.name, 1: batch.total }), 'success');
       }
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to run schedule', 'error');
+      showToast(err?.message || translate('Failed to run schedule'), 'error');
     }
   };
 
@@ -307,23 +313,23 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
       await api.updateSecuritySchedule(s.id, { account_id: effectiveAccountId, enabled: !s.enabled });
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to toggle schedule', 'error');
+      showToast(err?.message || translate('Failed to toggle schedule'), 'error');
     }
   };
 
   const handleScheduleDelete = async (s: SecuritySchedule) => {
     try {
       await api.deleteSecuritySchedule(s.id, effectiveAccountId);
-      showToast('스케줄 삭제됨', 'success');
+      showToast(translate('스케줄 삭제됨'), 'success');
       setConfirmDeleteSchedule(null);
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete schedule', 'error');
+      showToast(err?.message || translate('Failed to delete schedule'), 'error');
     }
   };
 
   if (!effectiveAccountId) {
-    return <div style={{ color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>;
+    return <div style={{ color: tokens.colors.textSecondary }}>{translate('Ownership defaults are unavailable.')}</div>;
   }
 
   // Editor + delete-confirm modals are rendered once so they are reachable from
@@ -347,9 +353,9 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
       {confirmDelete && (
         <ConfirmDialog
           isOpen={true}
-          title="보안 프로파일 삭제"
-          message={`"${confirmDelete.name}" 과(와) 모든 run 을 삭제할까요? 되돌릴 수 없습니다.`}
-          confirmLabel="Delete"
+          title={translate('보안 프로파일 삭제')}
+          message={translate('"{0}" 과(와) 모든 run 을 삭제할까요? 되돌릴 수 없습니다.', { 0: confirmDelete.name })}
+          confirmLabel={translate('Delete')}
           onConfirm={() => handleDelete(confirmDelete)}
           onCancel={() => setConfirmDelete(null)}
         />
@@ -366,9 +372,9 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
       {confirmDeleteSchedule && (
         <ConfirmDialog
           isOpen={true}
-          title="스케줄 삭제"
-          message={`스케줄 "${confirmDeleteSchedule.name}" 을 삭제할까요? 이미 시작된 batch 는 영향받지 않습니다.`}
-          confirmLabel="Delete"
+          title={translate('스케줄 삭제')}
+          message={translate('스케줄 "{0}" 을 삭제할까요? 이미 시작된 batch 는 영향받지 않습니다.', { 0: confirmDeleteSchedule.name })}
+          confirmLabel={translate('Delete')}
           onConfirm={() => handleScheduleDelete(confirmDeleteSchedule)}
           onCancel={() => setConfirmDeleteSchedule(null)}
         />
@@ -399,8 +405,7 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-          보안 점검 — 체크리스트로 코드를 검사하고 severity 별 finding 을 누적, 증분(변경분) diff 로 재실행해 비교합니다.
-        </div>
+          {translate('보안 점검 — 체크리스트로 코드를 검사하고 severity 별 finding 을 누적, 증분(변경분) diff 로 재실행해 비교합니다.')}</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {/* 순차 batch 실행: 한 번에 하나씩, 끝나야 다음. */}
           <Button
@@ -408,20 +413,19 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
             size="md"
             disabled={profiles.length === 0 || batchStarting || batchRunning}
             onClick={() => startBatch({ all: true })}
-            title="현재 scope 의 enabled 프로파일을 순차 실행"
+            title={translate('현재 scope 의 enabled 프로파일을 순차 실행')}
           >
-            ▶ 전체 순차 실행
-          </Button>
+            {translate('▶ 전체 순차 실행')}</Button>
           <Button
             variant="secondary"
             size="md"
             disabled={orderedSelected.length === 0 || batchStarting || batchRunning}
             onClick={() => startBatch({ profile_ids: orderedSelected.map((p) => p.id) })}
-            title="체크한 프로파일을 위→아래 순서대로 순차 실행"
+            title={translate('체크한 프로파일을 위→아래 순서대로 순차 실행')}
           >
-            ▶ 선택 순차 실행{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
+            {translate('▶ 선택 순차 실행')}{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
           </Button>
-          <Button variant="primary" size="md" onClick={() => setEditing('new')}>+ 새 프로파일</Button>
+          <Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ 새 프로파일')}</Button>
         </div>
       </div>
 
@@ -436,8 +440,7 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
       {profiles.length === 0 ? (
         <Card padding="20px">
           <div style={{ color: tokens.colors.textSecondary }}>
-            아직 보안 프로파일이 없습니다. "+ 새 프로파일" 로 체크리스트와 scan driver(code-review / dependency / secrets)를 가리키는 프로파일을 만드세요.
-          </div>
+            {translate('아직 보안 프로파일이 없습니다. "+ 새 프로파일" 로 체크리스트와 scan driver(code-review / dependency / secrets)를 가리키는 프로파일을 만드세요.')}</div>
         </Card>
       ) : (
         <ProfileTable
@@ -484,31 +487,32 @@ function BatchProgressBanner({ batch, profileName, onDismiss }: {
   profileName: (id: string) => string;
   onDismiss: () => void;
 }) {
+  useLocale();
   const done = batch.status !== 'running';
   const position = done ? batch.total : Math.min(batch.current_index + 1, batch.total);
   const currentId = batch.profile_ids[batch.current_index];
   return (
     <Card padding="14px">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-        <Pill variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'}>batch {batch.status}</Pill>
+        <Pill variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'}>{translate('batch')} {batch.status}</Pill>
         <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
           {position} / {batch.total}
         </span>
         {!done && currentId && (
           <span style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-            현재: <strong style={{ color: tokens.colors.textPrimary }}>{profileName(currentId)}</strong>
+            {translate('현재:')} <strong style={{ color: tokens.colors.textPrimary }}>{profileName(currentId)}</strong>
           </span>
         )}
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          <Pill variant="success">pass {batch.passed}</Pill>
-          <Pill variant="danger">fail {batch.failed}</Pill>
-          {batch.errored > 0 && <Pill variant="warning">err {batch.errored}</Pill>}
+          <Pill variant="success">{translate('pass')} {batch.passed}</Pill>
+          <Pill variant="danger">{translate('fail')} {batch.failed}</Pill>
+          {batch.errored > 0 && <Pill variant="warning">{translate('err')} {batch.errored}</Pill>}
         </span>
         {done && (
           <button
             onClick={onDismiss}
             style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 13, padding: '2px 6px' }}
-            title="배너 닫기"
+            title={translate('배너 닫기')}
           >
             ✕
           </button>
@@ -524,8 +528,7 @@ function BatchProgressBanner({ batch, profileName, onDismiss }: {
       </div>
       {!done && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-          한 프로파일이 끝나야(passed/failed/error) 다음이 시작됩니다 — 동시에 뜨지 않습니다.
-        </div>
+          {translate('한 프로파일이 끝나야(passed/failed/error) 다음이 시작됩니다 — 동시에 뜨지 않습니다.')}</div>
       )}
     </Card>
   );
@@ -538,10 +541,10 @@ function formatCadence(s: Pick<SecuritySchedule, 'cron' | 'interval_ms'>): strin
   if (s.cron) return `cron: ${s.cron} (UTC)`;
   if (s.interval_ms && s.interval_ms > 0) {
     const ms = s.interval_ms;
-    if (ms % 3_600_000 === 0) return `매 ${ms / 3_600_000}시간`;
-    if (ms % 60_000 === 0) return `매 ${ms / 60_000}분`;
-    if (ms % 1_000 === 0) return `매 ${ms / 1_000}초`;
-    return `매 ${ms}ms`;
+    if (ms % 3_600_000 === 0) return translate('매 {0}시간', { 0: ms / 3_600_000 });
+    if (ms % 60_000 === 0) return translate('매 {0}분', { 0: ms / 60_000 });
+    if (ms % 1_000 === 0) return translate('매 {0}초', { 0: ms / 1_000 });
+    return translate('매 {0}ms', { 0: ms });
   }
   return '—';
 }
@@ -558,39 +561,37 @@ interface SchedulesSectionProps {
 }
 
 function SchedulesSection({ schedules, profiles, disabled, onNew, onEdit, onToggle, onRunNow, onDelete }: SchedulesSectionProps) {
+  useLocale();
   return (
     <div style={{ marginTop: 28 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div>
-          <SectionLabel>스케줄 — 자동 순차 실행</SectionLabel>
+          <SectionLabel>{translate('스케줄 — 자동 순차 실행')}</SectionLabel>
           <div style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-            예약된 시각이 되면 순차 batch 를 자동으로 시작합니다 (전체 또는 선택 프로파일). 순차-batch 와 같은 오케스트레이터를 재사용 — 진행 상황은 위 배너에 표시됩니다.
-          </div>
+            {translate('예약된 시각이 되면 순차 batch 를 자동으로 시작합니다 (전체 또는 선택 프로파일). 순차-batch 와 같은 오케스트레이터를 재사용 — 진행 상황은 위 배너에 표시됩니다.')}</div>
         </div>
-        <Button variant="primary" size="md" disabled={disabled} onClick={onNew} title={disabled ? '먼저 프로파일을 만드세요' : undefined}>
-          + 새 스케줄
-        </Button>
+        <Button variant="primary" size="md" disabled={disabled} onClick={onNew} title={disabled ? translate('먼저 프로파일을 만드세요') : undefined}>
+          {translate('+ 새 스케줄')}</Button>
       </div>
 
       {schedules.length === 0 ? (
         <Card padding="16px">
           <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-            스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 실행을 추가하세요.
-          </div>
+            {translate('스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 실행을 추가하세요.')}</div>
         </Card>
       ) : (
         <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
             <thead>
               <tr>
-                <th style={TH}>Name</th>
-                <th style={TH}>Kind</th>
-                <th style={TH}>Scope</th>
-                <th style={TH}>Cadence</th>
-                <th style={TH}>Enabled</th>
-                <th style={TH}>Next run (UTC)</th>
-                <th style={TH}>Last run</th>
-                <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+                <th style={TH}>{translate('Name')}</th>
+                <th style={TH}>{translate('Kind')}</th>
+                <th style={TH}>{translate('Scope')}</th>
+                <th style={TH}>{translate('Cadence')}</th>
+                <th style={TH}>{translate('Enabled')}</th>
+                <th style={TH}>{translate('Next run (UTC)')}</th>
+                <th style={TH}>{translate('Last run')}</th>
+                <th style={{ ...TH, textAlign: 'right' }}>{translate('Actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -621,8 +622,9 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
   onRunNow: () => void;
   onDelete: () => void;
 }) {
+  useLocale();
   const [hover, setHover] = useState(false);
-  const scopeLabel = s.scope === 'all' ? `전체 (${profileCount})` : `선택 ${s.profile_ids.length}`;
+  const scopeLabel = s.scope === 'all' ? translate('전체 ({0})', { 0: profileCount }) : translate('선택 {0}', { 0: s.profile_ids.length });
   const nextUtc = s.next_run_at ? new Date(s.next_run_at).toISOString().replace('T', ' ').slice(0, 16) : '—';
   const isRefresh = s.kind === 'checklist_refresh';
   return (
@@ -635,9 +637,9 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
       </td>
       <td style={TD}>
-        <span title={isRefresh ? '체크리스트 갱신 (run 미생성)' : '보안 점검 batch'}>
+        <span title={isRefresh ? translate('체크리스트 갱신 (run 미생성)') : translate('보안 점검 batch')}>
           <Pill variant={isRefresh ? 'warning' : 'success'}>
-            {isRefresh ? 'checklist refresh' : 'scan'}
+            {isRefresh ? translate('checklist refresh') : translate('scan')}
           </Pill>
         </span>
       </td>
@@ -648,20 +650,20 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
       <td style={TD}>
         <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
           <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
-          {!s.enabled && <Pill variant="warning">disabled</Pill>}
+          {!s.enabled && <Pill variant="warning">{translate('disabled')}</Pill>}
         </label>
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
         {s.enabled ? nextUtc : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
-        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never</span>}
+        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never')}</span>}
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }}>
-          <Button variant="primary" size="sm" onClick={onRunNow} title="지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)">▶ Run now</Button>
-          <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
-          <Button variant="danger" size="sm" onClick={onDelete}>Delete</Button>
+          <Button variant="primary" size="sm" onClick={onRunNow} title={translate('지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)')}>{translate('▶ Run now')}</Button>
+          <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
+          <Button variant="danger" size="sm" onClick={onDelete}>{translate('Delete')}</Button>
         </div>
       </td>
     </tr>
@@ -695,6 +697,7 @@ const TD: React.CSSProperties = {
 };
 
 function ProfileTable({ profiles, agentName, running, refreshing, selectedIds, onToggleSelect, onOpen, onRun, onRefreshChecklist, onEdit, onDelete }: ProfileTableProps) {
+  useLocale();
   const allSelected = profiles.length > 0 && profiles.every((p) => selectedIds.has(p.id));
   const toggleAll = () => {
     const target = !allSelected;
@@ -708,17 +711,17 @@ function ProfileTable({ profiles, agentName, running, refreshing, selectedIds, o
         <thead>
           <tr>
             <th style={{ ...TH, width: 36, textAlign: 'center' }}>
-              <input type="checkbox" checked={allSelected} onChange={toggleAll} title="전체 선택/해제" />
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} />
             </th>
-            <th style={TH}>Name</th>
-            <th style={TH}>Driver</th>
-            <th style={TH}>Target</th>
-            <th style={TH}>Scope</th>
-            <th style={TH}>Last run</th>
-            <th style={TH}>Result</th>
-            <th style={TH}>Worst</th>
-            <th style={{ ...TH, textAlign: 'right' }}>Pass</th>
-            <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+            <th style={TH}>{translate('Name')}</th>
+            <th style={TH}>{translate('Driver')}</th>
+            <th style={TH}>{translate('Target')}</th>
+            <th style={TH}>{translate('Scope')}</th>
+            <th style={TH}>{translate('Last run')}</th>
+            <th style={TH}>{translate('Result')}</th>
+            <th style={TH}>{translate('Worst')}</th>
+            <th style={{ ...TH, textAlign: 'right' }}>{translate('Pass')}</th>
+            <th style={{ ...TH, textAlign: 'right' }}>{translate('Actions')}</th>
           </tr>
         </thead>
         <tbody>
@@ -759,6 +762,7 @@ interface ProfileRowProps {
 }
 
 function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleSelect, onOpen, onRun, onRefreshChecklist, onEdit, onDelete }: ProfileRowProps) {
+  useLocale();
   const [hover, setHover] = useState(false);
   const stop = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); };
 
@@ -770,12 +774,12 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
       style={{ cursor: 'pointer', background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
       <td style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
-        <input type="checkbox" checked={selected} onChange={onToggleSelect} title="순차 실행에 포함" />
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} title={translate('순차 실행에 포함')} />
       </td>
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{p.name}</span>
-          {!p.enabled && <Pill variant="warning">disabled</Pill>}
+          {!p.enabled && <Pill variant="warning">{translate('disabled')}</Pill>}
         </div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{agentName(p.target_agent_id, (p as any).target_runtime)}</div>
       </td>
@@ -787,7 +791,7 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
         <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{p.scope_mode}</span>
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
-        {p.last_run_at ? relativeTime(p.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never run</span>}
+        {p.last_run_at ? relativeTime(p.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never run')}</span>}
       </td>
       <td style={TD}>
         {p.last_run_status
@@ -801,19 +805,19 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         {p.pass_rate !== null
-          ? <span title={`${p.run_count} run${p.run_count === 1 ? '' : 's'}`} style={{ color: p.pass_rate === 100 ? tokens.colors.success : tokens.colors.textSecondary, fontVariantNumeric: 'tabular-nums' }}>{p.pass_rate}%</span>
+          ? <span title={translate('{0} run{1}', { 0: p.run_count, 1: p.run_count === 1 ? '' : translate('s') })} style={{ color: p.pass_rate === 100 ? tokens.colors.success : tokens.colors.textSecondary, fontVariantNumeric: 'tabular-nums' }}>{p.pass_rate}%</span>
           : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
           <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running}>
-            {running ? 'Starting…' : '▶ Run'}
+            {running ? translate('Starting…') : translate('▶ Run')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={stop(onRefreshChecklist)} disabled={refreshing} title="체크리스트를 최신 보안 정보로 갱신 (WebSearch)">
-            {refreshing ? '…' : '↻ Checklist'}
+          <Button variant="ghost" size="sm" onClick={stop(onRefreshChecklist)} disabled={refreshing} title={translate('체크리스트를 최신 보안 정보로 갱신 (WebSearch)')}>
+            {refreshing ? '…' : translate('↻ Checklist')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={stop(onEdit)}>Edit</Button>
-          <Button variant="danger" size="sm" onClick={stop(onDelete)}>Delete</Button>
+          <Button variant="ghost" size="sm" onClick={stop(onEdit)}>{translate('Edit')}</Button>
+          <Button variant="danger" size="sm" onClick={stop(onDelete)}>{translate('Delete')}</Button>
         </div>
       </td>
     </tr>
@@ -833,6 +837,7 @@ interface ProfileDetailProps {
 }
 
 function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, onEdit }: ProfileDetailProps) {
+  useLocale();
   const { showToast } = useToast();
   const [runs, setRuns] = useState<SecurityRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -844,7 +849,7 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
       setRuns(list);
       setActiveRunId((cur) => cur ?? (list[0]?.id ?? null));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load runs', 'error');
+      showToast(err?.message || translate('Failed to load runs'), 'error');
     }
   }, [profile.id, accountId, showToast]);
 
@@ -871,25 +876,25 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-        <Button variant="ghost" size="sm" onClick={onBack}>← Back</Button>
+        <Button variant="ghost" size="sm" onClick={onBack}>{translate('← Back')}</Button>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.colors.textPrimary }}>{profile.name}</div>
           <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
             {profile.scan_driver && <Pill variant="info">{profile.scan_driver}</Pill>}
             <TargetBadge resourceId={profile.target_resource_id} />
-            <Pill variant="neutral">scope: {profile.scope_mode}</Pill>
-            <Pill variant="neutral">agent: {agentName(profile.target_agent_id, (profile as any).target_runtime)}</Pill>
-            {passRate !== null && <Pill variant={passRate === 100 ? 'success' : 'warning'}>{passRate}% pass</Pill>}
+            <Pill variant="neutral">{translate('scope:')} {profile.scope_mode}</Pill>
+            <Pill variant="neutral">{translate('agent:')} {agentName(profile.target_agent_id, (profile as any).target_runtime)}</Pill>
+            {passRate !== null && <Pill variant={passRate === 100 ? 'success' : 'warning'}>{passRate}{translate('% pass')}</Pill>}
             {profile.last_passed_commit && (
               <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
-                baseline {profile.last_passed_commit.slice(0, 10)}
+                {translate('baseline')} {profile.last_passed_commit.slice(0, 10)}
               </span>
             )}
           </div>
         </div>
-        <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
+        <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
         <Button variant="primary" size="md" onClick={() => { onRun(); setTimeout(loadRuns, 800); }} disabled={running}>
-          {running ? 'Starting…' : '▶ Run / Re-run'}
+          {running ? translate('Starting…') : translate('▶ Run / Re-run')}
         </Button>
       </div>
 
@@ -899,9 +904,9 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
 
       {/* Checklist */}
       <div style={{ marginBottom: 24 }}>
-        <SectionLabel>체크리스트 ({checklist.length})</SectionLabel>
+        <SectionLabel>{translate('체크리스트 (')}{checklist.length})</SectionLabel>
         {checklist.length === 0 ? (
-          <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>체크리스트 항목이 없습니다. Edit 에서 추가하거나 "↻ Checklist" 로 갱신하세요.</div>
+          <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('체크리스트 항목이 없습니다. Edit 에서 추가하거나 "↻ Checklist" 로 갱신하세요.')}</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {checklist.map((item) => <ChecklistItemRow key={item.id} item={item} />)}
@@ -912,8 +917,8 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
       {/* Run history + detail */}
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
         <div style={{ width: 230, flexShrink: 0 }}>
-          <SectionLabel>Run history</SectionLabel>
-          {runs.length === 0 && <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>No runs yet.</div>}
+          <SectionLabel>{translate('Run history')}</SectionLabel>
+          {runs.length === 0 && <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('No runs yet.')}</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {runs.map((r) => {
               const worst = highestSeverity(r.findings);
@@ -941,9 +946,9 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <SectionLabel>Run detail</SectionLabel>
+          <SectionLabel>{translate('Run detail')}</SectionLabel>
           {!activeRun ? (
-            <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>Select a run.</div>
+            <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('Select a run.')}</div>
           ) : (
             <RunDetail run={activeRun} onPreview={(src, kind) => setLightbox({ src, kind })} />
           )}
@@ -956,6 +961,7 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
 }
 
 function ChecklistItemRow({ item }: { item: SecurityChecklistItem }) {
+  useLocale();
   return (
     <div style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 10, background: tokens.colors.surfaceCard }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -965,7 +971,7 @@ function ChecklistItemRow({ item }: { item: SecurityChecklistItem }) {
         {item.source && <SourceLink source={item.source} />}
         {item.added_at && (
           <span style={{ marginLeft: 'auto', fontSize: 11, color: tokens.colors.textMuted }} title={item.added_at}>
-            added {relativeTime(item.added_at)}
+            {translate('added')} {relativeTime(item.added_at)}
           </span>
         )}
       </div>
@@ -978,6 +984,7 @@ function ChecklistItemRow({ item }: { item: SecurityChecklistItem }) {
 
 /** A checklist item's source: a full URL renders as a link, a bare id as text. */
 function SourceLink({ source }: { source: string }) {
+  useLocale();
   const isUrl = /^https?:\/\//i.test(source);
   if (isUrl) {
     return (
@@ -985,14 +992,14 @@ function SourceLink({ source }: { source: string }) {
         style={{ fontSize: 11, color: tokens.colors.info, textDecoration: 'none', fontFamily: 'monospace' }}
         title={source}
       >
-        🔗 source
-      </a>
+        {translate('🔗 source')}</a>
     );
   }
-  return <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }} title="source">{source}</span>;
+  return <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }} title={translate('source')}>{source}</span>;
 }
 
 function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  useLocale();
   const findings = run.findings ?? [];
   const artifacts = run.artifact_resource_ids ?? [];
   // Group findings by severity, ordered critical → info.
@@ -1006,25 +1013,25 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
         <Pill variant={statusVariant(run.status)}>{run.status}</Pill>
-        <Pill variant="neutral">scope: {run.scope_used}</Pill>
+        <Pill variant="neutral">{translate('scope:')} {run.scope_used}</Pill>
         <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-          {findings.length} finding{findings.length === 1 ? '' : 's'} · {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}
+          {findings.length} {translate('finding')}{findings.length === 1 ? '' : translate('s')} · {artifacts.length} {translate('artifact')}{artifacts.length === 1 ? '' : translate('s')}
         </span>
         {ticketRef && (
           canOpenTicket(ticketRef) ? (
             <a
               href={ticketPath(ticketRef.account_id, ticketRef.id)}
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
+              title={translate('이 실패 run 이 자동 생성한 수정 티켓으로 이동')}
             >
-              → 티켓 #{ticketRef.id.slice(0, 8)}
+              {translate('→ 티켓 #')}{ticketRef.id.slice(0, 8)}
             </a>
           ) : (
             <span
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="티켓 정보를 확인할 수 없습니다"
+              title={translate('티켓 정보를 확인할 수 없습니다')}
             >
-              티켓 #{ticketRef.id.slice(0, 8)}
+              {translate('티켓 #')}{ticketRef.id.slice(0, 8)}
             </span>
           )
         )}
@@ -1032,8 +1039,8 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
 
       {/* Commit / scope bookkeeping */}
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace', marginBottom: 12 }}>
-        <span>scanned: {run.scanned_commit ? run.scanned_commit.slice(0, 12) : '—'}</span>
-        <span>baseline: {run.baseline_commit ? run.baseline_commit.slice(0, 12) : '— (full)'}</span>
+        <span>{translate('scanned:')} {run.scanned_commit ? run.scanned_commit.slice(0, 12) : '—'}</span>
+        <span>{translate('baseline:')} {run.baseline_commit ? run.baseline_commit.slice(0, 12) : translate('— (full)')}</span>
       </div>
 
       {run.summary && (
@@ -1043,7 +1050,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
       {/* Findings grouped by severity */}
       {findings.length === 0 ? (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, marginBottom: 12 }}>
-          {run.status === 'passed' ? '✅ finding 없음 — 통과.' : 'finding 이 기록되지 않았습니다.'}
+          {run.status === 'passed' ? translate('✅ finding 없음 — 통과.') : translate('finding 이 기록되지 않았습니다.')}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1064,7 +1071,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
       {/* Evidence gallery (run-level artifacts: reports / SBOM / screenshots) */}
       {artifacts.length > 0 && (
         <div style={{ marginTop: 16 }}>
-          <SectionLabel>증거 (artifacts)</SectionLabel>
+          <SectionLabel>{translate('증거 (artifacts)')}</SectionLabel>
           <Gallery ids={artifacts} onPreview={onPreview} />
         </div>
       )}
@@ -1073,6 +1080,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
 }
 
 function FindingCard({ f }: { f: SecurityFinding }) {
+  useLocale();
   const c = SEVERITY_COLOR[f.severity];
   return (
     <div style={{ border: `1px solid ${tokens.colors.border}`, borderLeft: `3px solid ${c.border}`, borderRadius: tokens.radii.sm, padding: 10, background: tokens.colors.surfaceCard }}>
@@ -1091,17 +1099,18 @@ function FindingCard({ f }: { f: SecurityFinding }) {
       )}
       {f.remediation && (
         <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginTop: 6 }}>
-          <span style={{ color: tokens.colors.success, fontWeight: 600 }}>remediation: </span>{f.remediation}
+          <span style={{ color: tokens.colors.success, fontWeight: 600 }}>{translate('remediation:')} </span>{f.remediation}
         </div>
       )}
       {f.checklist_item_id && (
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, fontFamily: 'monospace' }}>↳ checklist: {f.checklist_item_id}</div>
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, fontFamily: 'monospace' }}>{translate('↳ checklist:')} {f.checklist_item_id}</div>
       )}
     </div>
   );
 }
 
 function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  useLocale();
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [kinds, setKinds] = useState<Record<string, 'image' | 'video'>>({});
   const srcs = ids.map((id) => rawResourceUrl(id));
@@ -1142,6 +1151,7 @@ function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, k
 }
 
 function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | 'video') => void }) {
+  useLocale();
   // Resolve the real mimetype before choosing the element. The previous version
   // always rendered an <img> and relied on its onError to swap to <video> — but
   // a video/* resource streams back HTTP 200, so the <img> just shows a broken
@@ -1173,13 +1183,14 @@ function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | '
       src={src}
       onClick={() => onClick('image')}
       onError={() => setKind('video')}
-      alt="artifact"
+      alt={translate('artifact')}
       style={{ width: 76, height: 76, objectFit: 'cover', borderRadius: tokens.radii.sm, cursor: 'pointer', border: `1px solid ${tokens.colors.border}` }}
     />
   );
 }
 
 function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'; onClose: () => void }) {
+  useLocale();
   return (
     <MediaLightbox
       items={[{ src, kind, caption: src }]}
@@ -1191,6 +1202,7 @@ function Lightbox({ src, kind, onClose }: { src: string; kind: 'image' | 'video'
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
+  useLocale();
   return <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 8 }}>{children}</div>;
 }
 
@@ -1207,6 +1219,7 @@ interface ProfileEditorProps {
 }
 
 function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: ProfileEditorProps) {
+  useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(profile?.name ?? '');
   const [description, setDescription] = useState(profile?.description ?? '');
@@ -1237,12 +1250,12 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
   const [oftMinSeverity, setOftMinSeverity] = useState<SecuritySeverity>(oft?.min_severity ?? 'high');
 
   const handleSave = async () => {
-    if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
-    if (!pendingSpec) { showToast('Target agent 를 선택하세요', 'error'); return; }
+    if (!name.trim()) { showToast(translate('이름을 입력하세요'), 'error'); return; }
+    if (!pendingSpec) { showToast(translate('Target agent 를 선택하세요'), 'error'); return; }
     let checklist: any; let config: any;
-    try { checklist = checklistText.trim() ? JSON.parse(checklistText) : []; } catch { showToast('체크리스트는 유효한 JSON 배열이어야 합니다', 'error'); return; }
-    if (!Array.isArray(checklist)) { showToast('체크리스트는 JSON 배열이어야 합니다', 'error'); return; }
-    try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast('Driver config 는 유효한 JSON 이어야 합니다', 'error'); return; }
+    try { checklist = checklistText.trim() ? JSON.parse(checklistText) : []; } catch { showToast(translate('체크리스트는 유효한 JSON 배열이어야 합니다'), 'error'); return; }
+    if (!Array.isArray(checklist)) { showToast(translate('체크리스트는 JSON 배열이어야 합니다'), 'error'); return; }
+    try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast(translate('Driver config 는 유효한 JSON 이어야 합니다'), 'error'); return; }
     const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
     // Disabled → explicit { enabled:false } so an existing policy is turned off.
     const baseOft = onFailureTicketFromForm(oftForm, oft);
@@ -1267,10 +1280,10 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
       } else {
         saved = await api.createSecurityProfile({ account_id: accountId, ...common });
       }
-      showToast(`프로파일 ${profile ? '수정' : '생성'}됨`, 'success');
+      showToast(translate('프로파일 {0}됨', { 0: profile ? translate('수정') : translate('생성') }), 'success');
       onSaved(saved);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save profile', 'error');
+      showToast(err?.message || translate('Failed to save profile'), 'error');
     } finally {
       setSaving(false);
     }
@@ -1287,18 +1300,18 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
     <Modal
       isOpen={true}
       onClose={onClose}
-      title={profile ? '보안 프로파일 수정' : '새 보안 프로파일'}
+      title={profile ? translate('보안 프로파일 수정') : translate('새 보안 프로파일')}
       maxWidth={640}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button variant="ghost" onClick={onClose}>{translate('Cancel')}</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? translate('Saving…') : translate('Save')}</Button>
         </div>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <Input label="Name" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
-        <Input label="Description" value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
+        <Input label={translate('Name')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+        <Input label={translate('Description')} value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
         <DeclareRuntimeSection
           initialValue={pendingSpec}
           accountId={accountId}
@@ -1306,56 +1319,55 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
           onResolved={(spec) => {
             setPendingSpec(spec);
             showToast(
-              '실행 설정을 적용했습니다',
+              translate('실행 설정을 적용했습니다'),
               'success',
             );
           }}
         />
         <Select
-          label="점검 대상 (Target)"
+          label={translate('점검 대상 (Target)')}
           value={targetResourceId}
           options={projectSelectOptions(
             projects,
             targetResourceId,
-            projectsLoading ? 'AWB 자체 코드베이스 (self) — 프로젝트 불러오는 중…' : 'AWB 자체 코드베이스 (self)',
+            projectsLoading ? translate('AWB 자체 코드베이스 (self) — 프로젝트 불러오는 중…') : translate('AWB 자체 코드베이스 (self)'),
           )}
           onChange={(e) => setTargetResourceId((e.target as HTMLSelectElement).value)}
         />
         <div style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}>
-            <Input label="Scan driver (code-review / dependency / secrets)" value={scanDriver} onChange={(e) => setScanDriver((e.target as HTMLInputElement).value)} />
+            <Input label={translate('Scan driver (code-review / dependency / secrets)')} value={scanDriver} onChange={(e) => setScanDriver((e.target as HTMLInputElement).value)} />
           </div>
           <div style={{ flex: 1 }}>
             <Select
-              label="Scope mode"
+              label={translate('Scope mode')}
               value={scopeMode}
               options={[
-                { value: 'incremental', label: 'incremental (변경분 diff)' },
-                { value: 'full', label: 'full (전체)' },
+                { value: 'incremental', label: translate('incremental (변경분 diff)') },
+                { value: 'full', label: translate('full (전체)') },
               ]}
               onChange={(e) => setScopeMode((e.target as HTMLSelectElement).value as SecurityScopeMode)}
             />
           </div>
         </div>
         <div>
-          <label style={fieldLabel}>체크리스트 (JSON 배열 — {'{ id, title, category?, severity_hint?, guidance?, source? }'})</label>
+          <label style={fieldLabel}>{translate('체크리스트 (JSON 배열 —')} {translate('{ id, title, category?, severity_hint?, guidance?, source? }')})</label>
           <textarea style={textareaStyle} value={checklistText} onChange={(e) => setChecklistText(e.target.value)} />
         </div>
         <div>
-          <label style={fieldLabel}>Driver config (JSON)</label>
+          <label style={fieldLabel}>{translate('Driver config (JSON)')}</label>
           <textarea style={{ ...textareaStyle, minHeight: 80 }} value={configText} onChange={(e) => setConfigText(e.target.value)} />
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 2 }}>
-            <Input label="Tags (comma separated)" value={tagsText} onChange={(e) => setTagsText((e.target as HTMLInputElement).value)} />
+            <Input label={translate('Tags (comma separated)')} value={tagsText} onChange={(e) => setTagsText((e.target as HTMLInputElement).value)} />
           </div>
           <div style={{ flex: 1 }}>
-            <Input label="Max runs (FIFO)" type="number" value={maxRuns} onChange={(e) => setMaxRuns((e.target as HTMLInputElement).value)} />
+            <Input label={translate('Max runs (FIFO)')} type="number" value={maxRuns} onChange={(e) => setMaxRuns((e.target as HTMLInputElement).value)} />
           </div>
         </div>
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
-        </label>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> {translate('Enabled')}</label>
 
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
         <WorkspaceFolderOptions kind="security" state={wf} onChange={patchWf} accountId={accountId} />
@@ -1364,15 +1376,13 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
             <input type="checkbox" checked={oftForm.enabled} onChange={(e) => patchOft({ enabled: e.target.checked })} />
-            실패 시 → 수정 티켓 자동 생성 (severity gate)
-          </label>
+            {translate('실패 시 → 수정 티켓 자동 생성 (severity gate)')}</label>
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
-            run 이 failed/error 로 끝나고 <b>min_severity 이상</b>의 finding 이 있으면 수정 티켓을 자동 생성합니다. 그 미만이면 run 요약만 남기고 티켓은 만들지 않습니다.
-          </div>
+            {translate('run 이 failed/error 로 끝나고')} <b>{translate('min_severity 이상')}</b>{translate('의 finding 이 있으면 수정 티켓을 자동 생성합니다. 그 미만이면 run 요약만 남기고 티켓은 만들지 않습니다.')}</div>
           {oftForm.enabled && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10, paddingLeft: 24 }}>
               <Select
-                label="최소 severity (gate)"
+                label={translate('최소 severity (gate)')}
                 value={oftMinSeverity}
                 options={SEVERITY_ORDER.map((s) => ({ value: s, label: s }))}
                 onChange={(e) => setOftMinSeverity((e.target as HTMLSelectElement).value as SecuritySeverity)}
@@ -1381,11 +1391,11 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
                 accountId={accountId}
                 form={oftForm}
                 onChange={patchOft}
-                defaultTagsHint="비우면 서버 기본 태그로 생성됩니다."
+                defaultTagsHint={translate('비우면 서버 기본 태그로 생성됩니다.')}
               />
-              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)</div>
+              <div style={{ fontSize: 12 }}>{translate('수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)')}</div>
               <DeclareRuntimeSection accountId={accountId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
-              {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>초기화</button></div>}
+              {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>{translate('초기화')}</button></div>}
             </div>
           )}
         </div>
@@ -1405,6 +1415,7 @@ interface ScheduleEditorProps {
 }
 
 function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: ScheduleEditorProps) {
+  useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   const [kind, setKind] = useState<SecurityScheduleKind>(schedule?.kind ?? 'scan');
@@ -1440,15 +1451,15 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
   })();
 
   const handleSave = async () => {
-    if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
+    if (!name.trim()) { showToast(translate('이름을 입력하세요'), 'error'); return; }
     const orderedIds = profiles.filter((p) => selectedIds.has(p.id)).map((p) => p.id);
     if (scope === 'selected' && orderedIds.length === 0) {
-      showToast("scope='selected' 는 프로파일을 1개 이상 선택해야 합니다", 'error'); return;
+      showToast(translate('scope=\'selected\' 는 프로파일을 1개 이상 선택해야 합니다'), 'error'); return;
     }
     if (cadenceKind === 'cron') {
-      if (cron.trim().split(/\s+/).length !== 5) { showToast('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")', 'error'); return; }
+      if (cron.trim().split(/\s+/).length !== 5) { showToast(translate('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")'), 'error'); return; }
     } else if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
-      showToast('주기는 1초 이상이어야 합니다', 'error'); return;
+      showToast(translate('주기는 1초 이상이어야 합니다'), 'error'); return;
     }
 
     const base = {
@@ -1472,10 +1483,10 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
       } else {
         await api.createSecuritySchedule(base);
       }
-      showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
+      showToast(translate('스케줄 {0}됨', { 0: schedule ? translate('수정') : translate('생성') }), 'success');
       onSaved();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save schedule', 'error');
+      showToast(err?.message || translate('Failed to save schedule'), 'error');
     } finally {
       setSaving(false);
     }
@@ -1487,57 +1498,55 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
     <Modal
       isOpen={true}
       onClose={onClose}
-      title={schedule ? '보안 스케줄 수정' : '새 보안 스케줄'}
+      title={schedule ? translate('보안 스케줄 수정') : translate('새 보안 스케줄')}
       maxWidth={620}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button variant="ghost" onClick={onClose}>{translate('Cancel')}</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? translate('Saving…') : translate('Save')}</Button>
         </div>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <Input label="이름" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+        <Input label={translate('이름')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
 
         {/* Kind: 점검(scan) vs 체크리스트 갱신(checklist refresh) */}
         <div>
           <Select
-            label="종류"
+            label={translate('종류')}
             value={kind}
             options={[
-              { value: 'scan', label: '점검 (scan — 순차 batch 실행)' },
-              { value: 'checklist_refresh', label: '체크리스트 갱신 (checklist refresh — 항목 update, run 미생성)' },
+              { value: 'scan', label: translate('점검 (scan — 순차 batch 실행)') },
+              { value: 'checklist_refresh', label: translate('체크리스트 갱신 (checklist refresh — 항목 update, run 미생성)') },
             ]}
             onChange={(e) => setKind((e.target as HTMLSelectElement).value as SecurityScheduleKind)}
           />
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 4 }}>
             {kind === 'checklist_refresh'
-              ? '대상 프로파일의 체크리스트를 최신 보안 지식(OWASP/CVE 등)으로 갱신합니다. 점검 run/배치를 만들지 않으므로 점검 히스토리를 더럽히지 않고 자주 돌려도 안전합니다.'
-              : '대상 프로파일을 순차 점검하는 batch 를 실행합니다 (수동 "순차 실행" 과 동일).'}
+              ? translate('대상 프로파일의 체크리스트를 최신 보안 지식(OWASP/CVE 등)으로 갱신합니다. 점검 run/배치를 만들지 않으므로 점검 히스토리를 더럽히지 않고 자주 돌려도 안전합니다.')
+              : translate('대상 프로파일을 순차 점검하는 batch 를 실행합니다 (수동 "순차 실행" 과 동일).')}
           </div>
         </div>
 
         {/* Scope: 전체 vs 선택 프로파일 토글 */}
         <div>
-          <label style={fieldLabel}>대상 프로파일</label>
+          <label style={fieldLabel}>{translate('대상 프로파일')}</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="sec-sched-scope" checked={scope === 'all'} onChange={() => setScope('all')} />
-              전체 (실행 시점 enabled 프로파일로 자동 확장)
-            </label>
+              {translate('전체 (실행 시점 enabled 프로파일로 자동 확장)')}</label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="sec-sched-scope" checked={scope === 'selected'} onChange={() => setScope('selected')} />
-              선택
-            </label>
+              {translate('선택')}</label>
           </div>
           {scope === 'selected' && (
             <div style={{ maxHeight: 180, overflowY: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {profiles.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>프로파일이 없습니다.</div>}
+              {profiles.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('프로파일이 없습니다.')}</div>}
               {profiles.map((p) => (
                 <label key={p.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
                   <input type="checkbox" checked={selectedIds.has(p.id)} onChange={() => toggleProfile(p.id)} />
                   {p.name}
-                  {!p.enabled && <Pill variant="warning">disabled</Pill>}
+                  {!p.enabled && <Pill variant="warning">{translate('disabled')}</Pill>}
                 </label>
               ))}
             </div>
@@ -1546,37 +1555,35 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
 
         {/* Cadence: interval vs cron */}
         <div>
-          <label style={fieldLabel}>실행 주기</label>
+          <label style={fieldLabel}>{translate('실행 주기')}</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="sec-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
-              주기 (interval)
-            </label>
+              {translate('주기 (interval)')}</label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="sec-sched-cadence" checked={cadenceKind === 'cron'} onChange={() => setCadenceKind('cron')} />
-              cron
-            </label>
+              {translate('cron')}</label>
           </div>
           {cadenceKind === 'interval' ? (
             <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
               <div style={{ width: 120 }}>
-                <Input label="값" type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
+                <Input label={translate('값')} type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
               </div>
               <div style={{ flex: 1 }}>
                 <Select
-                  label="단위"
+                  label={translate('단위')}
                   value={intervalUnit}
                   options={[
-                    { value: 'seconds', label: '초' },
-                    { value: 'minutes', label: '분' },
-                    { value: 'hours', label: '시간' },
+                    { value: 'seconds', label: translate('초') },
+                    { value: 'minutes', label: translate('분') },
+                    { value: 'hours', label: translate('시간') },
                   ]}
                   onChange={(e) => setIntervalUnit((e.target as HTMLSelectElement).value as 'seconds' | 'minutes' | 'hours')}
                 />
               </div>
             </div>
           ) : (
-            <Input label='cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)' value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
+            <Input label={translate('cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)')} value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
           )}
         </div>
 
@@ -1584,19 +1591,17 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
         {kind === 'scan' && (
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
             <input type="checkbox" checked={stopOnFail} onChange={(e) => setStopOnFail(e.target.checked)} />
-            첫 실패에서 batch 중단 (stop on fail)
-          </label>
+            {translate('첫 실패에서 batch 중단 (stop on fail)')}</label>
         )}
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          Enabled
-        </label>
+          {translate('Enabled')}</label>
 
         <div style={{ fontSize: 12, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
           {kind === 'checklist_refresh' ? (
-            <>체크리스트 갱신은 코드를 점검하지 않고 <b>항목만 update</b> 하므로 배포 타이밍 함정(옛 코드 통과)이 없어 자유롭게 자주 돌려도 됩니다. 갱신은 WebSearch 외부 의존이라 실패/레이트리밋 시 기존 체크리스트는 <b>비파괴적으로 유지</b>됩니다. cron 은 모두 <b>UTC</b> 기준입니다.</>
+            <>{translate('체크리스트 갱신은 코드를 점검하지 않고')} <b>{translate('항목만 update')}</b> {translate('하므로 배포 타이밍 함정(옛 코드 통과)이 없어 자유롭게 자주 돌려도 됩니다. 갱신은 WebSearch 외부 의존이라 실패/레이트리밋 시 기존 체크리스트는')} <b>{translate('비파괴적으로 유지')}</b>{translate('됩니다. cron 은 모두')} <b>UTC</b> {translate('기준입니다.')}</>
           ) : (
-            <>⚠️ 자동 실행은 <b>돌고 있는 서버/코드</b>를 검사합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나 고정 시각 cron 으로 배포 후에 실행되게 하세요. 각 run 은 <b>scanned_commit</b> 을 기록하므로 어떤 커밋을 검사했는지는 항상 추적 가능합니다. cron 은 모두 <b>UTC</b> 기준입니다.</>
+            <>{translate('⚠️ 자동 실행은')} <b>{translate('돌고 있는 서버/코드')}</b>{translate('를 검사합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나 고정 시각 cron 으로 배포 후에 실행되게 하세요. 각 run 은')} <b>scanned_commit</b> {translate('을 기록하므로 어떤 커밋을 검사했는지는 항상 추적 가능합니다. cron 은 모두')} <b>UTC</b> {translate('기준입니다.')}</>
           )}
         </div>
       </div>

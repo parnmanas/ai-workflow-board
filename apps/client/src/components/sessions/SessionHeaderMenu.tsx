@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 
@@ -11,11 +13,12 @@ import { tokens } from '../../tokens';
  * HeaderOverflowMenu 와 달리 안에 설정 컨트롤이 있어서 항목을 누를 때마다 닫지 않는다.
  * 동작 항목은 넘겨받은 `close` 로 스스로 닫는다. 바깥 클릭 · Esc 로 닫힌다.
  */
-export default function SessionHeaderMenu({ children, label = 'Session menu', icon = '☰' }: {
+export default function SessionHeaderMenu({ children, label = translate('Session menu'), icon = '☰' }: {
   children: (close: () => void) => React.ReactNode;
   label?: string;
   icon?: React.ReactNode;
 }) {
+  useLocale();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -86,6 +89,7 @@ export default function SessionHeaderMenu({ children, label = 'Session menu', ic
 
 /** 메뉴 안의 구획 — 제목 한 줄 + 내용. */
 export function SessionMenuSection({ title, children }: { title: string; children: React.ReactNode }) {
+  useLocale();
   return (
     <section className="awb-session-menu-section" style={{ borderBottom: `1px solid ${tokens.colors.border}` }}>
       <h3 style={{ color: tokens.colors.textMuted }}>{title}</h3>
@@ -103,6 +107,7 @@ export function SessionMenuItem({ icon, label, title, disabled, pressed, onSelec
   pressed?: boolean;
   onSelect(): void;
 }) {
+  useLocale();
   return (
     <button
       type="button"

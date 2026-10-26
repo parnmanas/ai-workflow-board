@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import type { HostEffortReport } from './hostEfforts';
 // Runtime Host 별 CLI 모델 목록 — 모델이 보이는 모든 화면이 쓰는 하나의 스토어.
 //
@@ -156,7 +157,7 @@ export function noteHostSessionModels(managerAgentId: string, cli: string, optio
 /** Sessions preserve every ACP choice, including `default`, with one shared placeholder. */
 export function sessionModelChoices(models: readonly string[], labels: Record<string, string>): Array<{ value: string; label: string }> {
   return [
-    ...(models.includes('default') ? [] : [{ value: '', label: 'CLI default' }]),
+    ...(models.includes('default') ? [] : [{ value: '', label: translate('CLI default') }]),
     ...models.map((model) => ({ value: model, label: labels[model] ?? model })),
   ];
 }
@@ -303,8 +304,8 @@ export function withHostModelOption(
       ...options,
       {
         config_id: 'model',
-        name: 'Model',
-        description: 'Models reported by this Runtime Host’s session adapter.',
+        name: translate('Model'),
+        description: translate('Models reported by this Runtime Host’s session adapter.'),
         category: 'model',
         type: 'select',
         current_value: null,

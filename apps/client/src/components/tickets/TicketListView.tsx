@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo, useState } from 'react';
 import type { TicketCard } from '../../types';
 import { tokens } from '../../tokens';
@@ -24,13 +27,13 @@ interface TicketListViewProps {
 }
 
 const COLUMNS: Array<{ key: TicketSortKey; label: string; width?: string | number }> = [
-  { key: 'title', label: 'Title' },
-  { key: 'status', label: 'Status', width: 120 },
-  { key: 'priority', label: 'Priority', width: 90 },
-  { key: 'tags', label: 'Tags', width: '18%' },
-  { key: 'project', label: 'Project', width: 140 },
-  { key: 'assignee', label: 'Assignee', width: 180 },
-  { key: 'updated', label: 'Updated', width: 100 },
+  { key: 'title', get label() { return translate('Title'); } },
+  { key: 'status', get label() { return translate('Status'); }, width: 120 },
+  { key: 'priority', get label() { return translate('Priority'); }, width: 90 },
+  { key: 'tags', get label() { return translate('Tags'); }, width: '18%' },
+  { key: 'project', get label() { return translate('Project'); }, width: 140 },
+  { key: 'assignee', get label() { return translate('Assignee'); }, width: 180 },
+  { key: 'updated', get label() { return translate('Updated'); }, width: 100 },
 ];
 
 const cell: React.CSSProperties = {
@@ -55,10 +58,11 @@ export default function TicketListView({
   hostNames,
   onTagClick,
 }: TicketListViewProps) {
+  useLocale();
   const [sort, setSort] = useState<TicketSort>(DEFAULT_TICKET_SORT);
   const rows = useMemo(
     () => sortTickets(tickets, sort, { projectNames, hostNames }),
-    [tickets, sort, projectNames, hostNames],
+    [tickets, sort, projectNames, hostNames, getLocale()],
   );
 
   return (
@@ -108,10 +112,10 @@ export default function TicketListView({
                 <td style={{ ...cell, color: tokens.colors.textStrong, fontWeight: 600 }} title={t.title}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: '100%' }}>
                     {(t.pending_user_action || t.pending_on_tickets || t.pending_ci_wait) && (
-                      <span title="Pending — not dispatched" aria-label="Pending" style={{ color: tokens.colors.warningLight }}>⏸</span>
+                      <span title={translate('Pending — not dispatched')} aria-label={translate('Pending')} style={{ color: tokens.colors.warningLight }}>⏸</span>
                     )}
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
-                    {unread > 0 && <NavBadge count={unread} size="sm" label={`읽지 않은 코멘트 ${unread}건`} />}
+                    {unread > 0 && <NavBadge count={unread} size="sm" label={translate('읽지 않은 코멘트 {0}건', { 0: unread })} />}
                     {t.children?.length > 0 && (
                       <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>
                         {t.children.filter((c) => c.status === 'done').length}/{t.children.length}
@@ -138,10 +142,10 @@ export default function TicketListView({
                 <td style={cell} title={t.project_id ? projectNames[t.project_id] || t.project_id : ''}>
                   {t.project_id ? projectNames[t.project_id] || '—' : '—'}
                 </td>
-                <td style={{ ...cell, fontStyle: assignee ? 'normal' : 'italic', color: assignee ? tokens.colors.textSecondary : tokens.colors.textMuted }} title={assignee || '미지정'}>
-                  {assignee || '미지정'}
+                <td style={{ ...cell, fontStyle: assignee ? 'normal' : 'italic', color: assignee ? tokens.colors.textSecondary : tokens.colors.textMuted }} title={assignee || translate('미지정')}>
+                  {assignee || translate('미지정')}
                 </td>
-                <td style={cell} title={t.updated_at ? new Date(t.updated_at).toLocaleString() : ''}>
+                <td style={cell} title={t.updated_at ? new Date(t.updated_at).toLocaleString(getLocaleTag()) : ''}>
                   {t.updated_at ? relativeTime(t.updated_at) : ''}
                 </td>
               </tr>

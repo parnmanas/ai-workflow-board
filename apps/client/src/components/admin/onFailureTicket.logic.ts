@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 // On-failure auto-ticket policy ⇄ editor form (docs/tickets.md → QA / Security
 // failure tickets). Shared by the QA scenario editor and the Security profile
 // editor. React-free so `node --test` imports it directly
@@ -170,7 +171,7 @@ export function projectSelectOptions(
   const options: ProjectOption[] = [{ value: '', label: noneLabel }];
   for (const p of projects) options.push({ value: p.id, label: p.name || p.id });
   if (currentId && !projects.some((p) => p.id === currentId)) {
-    options.push({ value: currentId, label: `알 수 없는 프로젝트 (${currentId.slice(0, 8)}…)` });
+    options.push({ value: currentId, label: translate('알 수 없는 프로젝트 ({0}…)', { 0: currentId.slice(0, 8) }) });
   }
   return options;
 }

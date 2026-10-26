@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useArtifactPanel } from '../contexts/ArtifactPanelContext';
 import type { ArtifactRef } from '../contexts/artifactPanel';
@@ -56,9 +58,10 @@ export function ArtifactPanelView({
   onResizeHandleDoubleClick,
   onResizeHandleKeyDown,
 }: ArtifactPanelViewProps) {
+  useLocale();
   if (!open) return null;
 
-  const ariaLabel = artifact?.title ? `${artifact.title} 상세` : 'Artifact 패널';
+  const ariaLabel = artifact?.title ? translate('{0} 상세', { 0: artifact.title }) : translate('Artifact 패널');
 
   const header = (
     <div
@@ -83,13 +86,13 @@ export function ArtifactPanelView({
           whiteSpace: 'nowrap',
         }}
       >
-        {artifact?.title ?? 'Artifact'}
+        {artifact?.title ?? translate('Artifact')}
       </div>
       <button
         ref={closeButtonRef}
         type="button"
         onClick={onClose}
-        aria-label="Artifact 패널 닫기"
+        aria-label={translate('Artifact 패널 닫기')}
         style={{
           width: 28,
           height: 28,
@@ -144,8 +147,7 @@ export function ArtifactPanelView({
             {'◫'}
           </div>
           <div style={{ fontSize: tokens.typography.fontSizeLg, fontWeight: 600, color: tokens.colors.textSecondary }}>
-            선택된 항목이 없습니다
-          </div>
+            {translate('선택된 항목이 없습니다')}</div>
           <div
             style={{
               fontSize: tokens.typography.fontSizeMd,
@@ -154,8 +156,7 @@ export function ArtifactPanelView({
               maxWidth: 260,
             }}
           >
-            채팅에서 티켓이나 결과물을 선택하면 여기에서 상세를 확인·처리할 수 있습니다.
-          </div>
+            {translate('채팅에서 티켓이나 결과물을 선택하면 여기에서 상세를 확인·처리할 수 있습니다.')}</div>
         </div>
       )}
     </div>
@@ -221,7 +222,7 @@ export function ArtifactPanelView({
         <div
           role="separator"
           aria-orientation="vertical"
-          aria-label="Artifact 패널 폭 조절"
+          aria-label={translate('Artifact 패널 폭 조절')}
           aria-valuenow={Math.round(width)}
           tabIndex={0}
           onMouseDown={onResizeHandleMouseDown}
@@ -268,6 +269,7 @@ function saveStoredWidth(width: number) {
 
 /** 컨텍스트 연결 + 부수효과(포커스 이동·Esc·리사이즈). 실제 셸에 마운트되는 컴포넌트. */
 export default function ArtifactPanel({ isMobile }: { isMobile: boolean }) {
+  useLocale();
   const { open, artifact, closeArtifact } = useArtifactPanel();
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -365,14 +367,15 @@ export default function ArtifactPanel({ isMobile }: { isMobile: boolean }) {
  * 반드시 <ArtifactPanelProvider> 하위에서 렌더된다.
  */
 export function ArtifactToggleButton() {
+  useLocale();
   const { open, toggleArtifact } = useArtifactPanel();
   return (
     <button
       type="button"
       onClick={toggleArtifact}
       aria-pressed={open}
-      aria-label="Artifact 패널 열기/닫기"
-      title="Artifact 패널"
+      aria-label={translate('Artifact 패널 열기/닫기')}
+      title={translate('Artifact 패널')}
       style={{
         display: 'inline-flex',
         alignItems: 'center',

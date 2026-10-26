@@ -1,3 +1,4 @@
+import { t as translate } from '../../../i18n/core';
 // Pure / dependency-injected helpers for ChatMessageInput's send flow.
 //
 // The send orchestration and its two race / accessibility decisions live here
@@ -124,7 +125,7 @@ export async function completeComposerSend<A extends { localId: string; previewU
     });
     onSent(msg);
   } catch (err: any) {
-    setSendError(err?.message || 'Message not sent. Check your connection.');
+    setSendError(err?.message || translate('Message not sent. Check your connection.'));
     // Restore the failed draft — but only if the composer is still empty. With
     // the textarea kept editable during send, a fast typist may have already
     // started the next message; don't clobber it. Attachments are preserved.

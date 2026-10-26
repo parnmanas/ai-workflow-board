@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -53,6 +55,7 @@ function broadcastTeamsChanged() {
 }
 
 export default function OrchestrationTeamsPage() {
+  useLocale();
   const { currentAccountId, availableAccounts } = useAuth();
   const accountId = currentAccountId || '';
   const { showToast } = useToast();
@@ -90,7 +93,7 @@ export default function OrchestrationTeamsPage() {
       setCredentials(credentialList);
       setBackendProfiles(profileList);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to load teams', 'error');
+      showToast(e?.message || translate('Failed to load teams'), 'error');
     } finally {
       setLoading(false);
     }
@@ -131,7 +134,7 @@ export default function OrchestrationTeamsPage() {
     try {
       replaceTeam(await api.removeOrchestrationTeamMember(team.id, memberId, accountId));
     } catch (e: any) {
-      showToast(e?.message || 'Failed to remove member', 'error');
+      showToast(e?.message || translate('Failed to remove member'), 'error');
     }
   };
 
@@ -140,9 +143,9 @@ export default function OrchestrationTeamsPage() {
     try {
       await api.deleteOrchestrationTeam(deleteTarget.id, accountId);
       commitTeams((prev) => prev.filter((t) => t.id !== deleteTarget.id));
-      showToast('Team deleted', 'success');
+      showToast(translate('Team deleted'), 'success');
     } catch (e: any) {
-      showToast(e?.message || 'Failed to delete team', 'error');
+      showToast(e?.message || translate('Failed to delete team'), 'error');
     } finally {
       setDeleteTarget(null);
     }
@@ -151,8 +154,8 @@ export default function OrchestrationTeamsPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Teams"
-        description="One orchestrator agent that plans and delegates, plus the members that execute. Missions run on teams."
+        title={translate('Teams')}
+        description={translate('One orchestrator agent that plans and delegates, plus the members that execute. Missions run on teams.')}
         actions={
           <Button
             variant="primary"
@@ -161,22 +164,20 @@ export default function OrchestrationTeamsPage() {
               setShowForm(true);
             }}
           >
-            New team
-          </Button>
+            {translate('New team')}</Button>
         }
       />
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {loading ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading teams...</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading teams...')}</div>
         ) : teams.length === 0 ? (
           <EmptyState
-            title="No teams yet"
-            description="A team pairs one orchestrator with the agents it can delegate to. Missions run on teams."
+            title={translate('No teams yet')}
+            description={translate('A team pairs one orchestrator with the agents it can delegate to. Missions run on teams.')}
             action={
               <Button variant="primary" onClick={() => { setEditing(null); setShowForm(true); }}>
-                Create a team
-              </Button>
+                {translate('Create a team')}</Button>
             }
           />
         ) : (
@@ -203,13 +204,11 @@ export default function OrchestrationTeamsPage() {
                       <span style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}>{team.name}</span>
                       {!team.enabled && (
                         <span style={{ fontSize: 10, color: tokens.colors.textMuted, textTransform: 'uppercase' }}>
-                          disabled
-                        </span>
+                          {translate('disabled')}</span>
                       )}
                       {team.active_mission_count > 0 && (
                         <span style={{ fontSize: 11, color: tokens.colors.infoLight }}>
-                          {team.active_mission_count} active mission(s)
-                        </span>
+                          {team.active_mission_count} {translate('active mission(s)')}</span>
                       )}
                     </div>
                     {team.description && (
@@ -220,29 +219,26 @@ export default function OrchestrationTeamsPage() {
                     variant="secondary"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'You do not have permission to edit this team'}
+                    title={canWrite(team) ? undefined : translate('You do not have permission to edit this team')}
                     onClick={() => { setEditing(team); setShowForm(true); }}
                   >
-                    Edit
-                  </Button>
+                    {translate('Edit')}</Button>
                   <Button
                     variant="secondary"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'You do not have permission to edit this roster'}
+                    title={canWrite(team) ? undefined : translate('You do not have permission to edit this roster')}
                     onClick={() => setMemberTarget(team)}
                   >
-                    Add member
-                  </Button>
+                    {translate('Add member')}</Button>
                   <Button
                     variant="danger"
                     size="sm"
                     disabled={!canWrite(team)}
-                    title={canWrite(team) ? undefined : 'You do not have permission to delete this team'}
+                    title={canWrite(team) ? undefined : translate('You do not have permission to delete this team')}
                     onClick={() => setDeleteTarget(team)}
                   >
-                    Delete
-                  </Button>
+                    {translate('Delete')}</Button>
                 </div>
 
                 <div
@@ -255,17 +251,16 @@ export default function OrchestrationTeamsPage() {
                   }}
                 >
                   <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: tokens.colors.accentLight, textTransform: 'uppercase' }}>
-                    Orchestrator
-                  </div>
+                    {translate('Orchestrator')}</div>
                   <div style={{ marginTop: 3, fontSize: 13, color: tokens.colors.textPrimary, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <OnlineDot online={team.orchestrator_online} />
-                    {team.orchestrator_name || '(agent missing)'}
+                    {team.orchestrator_name || translate('(agent missing)')}
                     <RuntimeChip runtime={team.orchestrator_runtime} />
                     <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                      · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel ·{' '}
+                      {translate('· plans and delegates · up to')} {team.max_parallel_steps} {translate('step(s) in parallel ·')}{' '}
                       {team.max_open_missions > 0
-                        ? `up to ${team.max_open_missions} self-created mission(s) open at once`
-                        : 'agent-created missions disabled'}
+                        ? translate('up to {0} self-created mission(s) open at once', { 0: team.max_open_missions })
+                        : translate('agent-created missions disabled')}
                     </span>
                   </div>
                   {team.orchestrator_prompt && (
@@ -277,12 +272,11 @@ export default function OrchestrationTeamsPage() {
 
                 <div style={{ marginTop: 12 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: tokens.colors.textMuted, textTransform: 'uppercase' }}>
-                    Members ({team.members.length})
+                    {translate('Members (')}{team.members.length})
                   </div>
                   {team.members.length === 0 ? (
                     <div style={{ marginTop: 6, fontSize: 12, color: tokens.colors.warningLight }}>
-                      No members — this team cannot run a mission until it has at least one.
-                    </div>
+                      {translate('No members — this team cannot run a mission until it has at least one.')}</div>
                   ) : (
                     <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {team.members.map((m) => (
@@ -306,15 +300,14 @@ export default function OrchestrationTeamsPage() {
                                 <span style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.accentSubtle }}>{m.role_label}</span>
                               )}
                               <span style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}>
-                                max {m.max_concurrent} concurrent
-                              </span>
+                                {translate('max')} {m.max_concurrent} {translate('concurrent')}</span>
                             </div>
                             <div style={{ marginTop: 4 }}>
                               <RuntimeChip runtime={m.runtime} />
                             </div>
                             <div style={{ marginTop: 2, fontSize: 11, color: m.capabilities ? tokens.colors.textSecondary : tokens.colors.warningLight, lineHeight: 1.45 }}>
                               {m.capabilities ||
-                                'No capability description — the orchestrator has nothing to match work against. Edit this member.'}
+                                translate('No capability description — the orchestrator has nothing to match work against. Edit this member.')}
                             </div>
                           </div>
                           <MemberEditButton
@@ -332,11 +325,10 @@ export default function OrchestrationTeamsPage() {
                             variant="ghost"
                             size="sm"
                             disabled={!canWrite(team)}
-                            title={canWrite(team) ? undefined : 'You do not have permission to edit this roster'}
+                            title={canWrite(team) ? undefined : translate('You do not have permission to edit this roster')}
                             onClick={() => removeMember(team, m.id)}
                           >
-                            Remove
-                          </Button>
+                            {translate('Remove')}</Button>
                         </div>
                       ))}
                     </div>
@@ -380,8 +372,8 @@ export default function OrchestrationTeamsPage() {
 
       <ConfirmDialog
         isOpen={!!deleteTarget}
-        title="Delete team?"
-        message={`"${deleteTarget?.name}" and its roster will be removed. Missions that already ran keep their history.`}
+        title={translate('Delete team?')}
+        message={translate('"{0}" and its roster will be removed. Missions that already ran keep their history.', { 0: deleteTarget?.name })}
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
@@ -395,16 +387,16 @@ export default function OrchestrationTeamsPage() {
  * member — with several hosts in play, two rows are otherwise indistinguishable.
  */
 function RuntimeChip({ runtime }: { runtime: OrchestrationSlotRuntime | null }) {
+  useLocale();
   if (!runtime) {
     return (
       <span style={{ fontSize: 11, color: tokens.colors.warningLight }}>
-        No runtime recorded — open Edit and save to set the host and CLI.
-      </span>
+        {translate('No runtime recorded — open Edit and save to set the host and CLI.')}</span>
     );
   }
   return (
     <span style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
-      <span title={runtime.manager_online ? 'Runtime Host online' : 'Runtime Host offline'}>
+      <span title={runtime.manager_online ? translate('Runtime Host online') : translate('Runtime Host offline')}>
         {runtime.manager_online ? '🟢' : '⚪'} {runtime.manager_name}
       </span>
       <span>·</span>
@@ -423,9 +415,10 @@ function sameSlot(a: OrchestrationSlotRuntime | null, b: OrchestrationSlotRuntim
 }
 
 function OnlineDot({ online }: { online: boolean }) {
+  useLocale();
   return (
     <span
-      title={online ? 'online' : 'offline'}
+      title={online ? translate('online') : translate('offline')}
       style={{
         width: 8,
         height: 8,
@@ -459,6 +452,7 @@ export function TeamFormModal({
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -484,7 +478,7 @@ export function TeamFormModal({
 
   const submit = async () => {
     if (!name.trim()) {
-      showToast('Team name is required', 'error');
+      showToast(translate('Team name is required'), 'error');
       return;
     }
     if (orchestratorProblem) {
@@ -514,10 +508,10 @@ export function TeamFormModal({
             max_open_missions: openMissionsCap,
             is_global: false,
           });
-      showToast(team ? 'Team updated' : 'Team created', 'success');
+      showToast(team ? translate('Team updated') : translate('Team created'), 'success');
       onSaved(saved);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to save team', 'error');
+      showToast(e?.message || translate('Failed to save team'), 'error');
     } finally {
       setSaving(false);
     }
@@ -527,25 +521,23 @@ export function TeamFormModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title={team ? 'Edit team' : 'New team'}
+      title={team ? translate('Edit team') : translate('New team')}
       maxWidth={600}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
+            {translate('Cancel')}</Button>
           <Button variant="primary" onClick={submit} loading={saving}>
-            Save
-          </Button>
+            {translate('Save')}</Button>
         </>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <Input label="Team name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Platform squad" />
-        <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
+        <Input label={translate('Team name')} value={name} onChange={(e) => setName(e.target.value)} placeholder={translate('Platform squad')} />
+        <Input label={translate('Description')} value={description} onChange={(e) => setDescription(e.target.value)} />
         <SlotSection
-          title="Orchestrator"
-          subtitle="The agent that plans the mission and delegates its steps. It is created from this configuration — you do not have to make an agent first."
+          title={translate('Orchestrator')}
+          subtitle={translate('The agent that plans the mission and delegates its steps. It is created from this configuration — you do not have to make an agent first.')}
           problem={orchestratorProblem}
         >
           <TeamSlotRuntimeFields
@@ -557,14 +549,14 @@ export function TeamFormModal({
           />
         </SlotSection>
         <LabeledTextarea
-          label="Standing instructions (optional)"
-          hint="Appended to every mission brief for this team — house rules, review policy, tech constraints."
+          label={translate('Standing instructions (optional)')}
+          hint={translate('Appended to every mission brief for this team — house rules, review policy, tech constraints.')}
           value={prompt}
           onChange={setPrompt}
           rows={4}
         />
         <Input
-          label="Max steps in parallel"
+          label={translate('Max steps in parallel')}
           type="number"
           min={1}
           max={12}
@@ -572,7 +564,7 @@ export function TeamFormModal({
           onChange={(e) => setParallel(Number(e.target.value))}
         />
         <Input
-          label="Max open self-created missions"
+          label={translate('Max open self-created missions')}
           type="number"
           min={0}
           max={20}
@@ -580,14 +572,11 @@ export function TeamFormModal({
           onChange={(e) => setOpenMissionsCap(Number(e.target.value))}
         />
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -8 }}>
-          How many missions this team&apos;s orchestrator may keep open at once. Set to 0 to forbid the orchestrator from self-creating missions for this
-          team entirely.
-        </div>
+          {translate('How many missions this team\'s orchestrator may keep open at once. Set to 0 to forbid the orchestrator from self-creating missions for this team entirely.')}</div>
         {team && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            Enabled (a disabled team cannot start new missions)
-          </label>
+            {translate('Enabled (a disabled team cannot start new missions)')}</label>
         )}
       </div>
     </Modal>
@@ -610,6 +599,7 @@ function SlotSection({
   problem: string | null;
   children: React.ReactNode;
 }) {
+  useLocale();
   return (
     <div
       style={{
@@ -650,6 +640,7 @@ function AddMemberModal({
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [draft, setDraft] = useState<SlotDraft>(emptySlotDraft);
   const [roleLabel, setRoleLabel] = useState('');
@@ -691,10 +682,10 @@ function AddMemberModal({
         capabilities: capabilities.trim(),
         max_concurrent: maxConcurrent,
       });
-      showToast('Member added', 'success');
+      showToast(translate('Member added'), 'success');
       onSaved(saved);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to add member', 'error');
+      showToast(e?.message || translate('Failed to add member'), 'error');
     } finally {
       setSaving(false);
     }
@@ -704,36 +695,34 @@ function AddMemberModal({
     <Modal
       isOpen={!!team}
       onClose={onClose}
-      title={`Add member to ${team?.name ?? ''}`}
+      title={translate('Add member to {0}', { 0: team?.name ?? '' })}
       maxWidth={620}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
+            {translate('Cancel')}</Button>
           <Button variant="primary" onClick={submit} loading={saving} disabled={!!problem}>
-            Add
-          </Button>
+            {translate('Add')}</Button>
         </>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Input
-          label="Role label"
+          label={translate('Role label')}
           value={roleLabel}
           onChange={(e) => setRoleLabel(e.target.value)}
-          placeholder="backend / frontend / reviewer / researcher"
+          placeholder={translate('backend / frontend / reviewer / researcher')}
         />
         <LabeledTextarea
-          label="Capabilities"
-          hint="What this member is good at, what it has access to, what it should not be given. The orchestrator reads this verbatim when deciding who gets which step."
+          label={translate('Capabilities')}
+          hint={translate('What this member is good at, what it has access to, what it should not be given. The orchestrator reads this verbatim when deciding who gets which step.')}
           value={capabilities}
           onChange={setCapabilities}
           rows={4}
-          placeholder="Server-side NestJS + TypeORM. Owns apps/server. Can run migrations locally. Do not assign UI work."
+          placeholder={translate('Server-side NestJS + TypeORM. Owns apps/server. Can run migrations locally. Do not assign UI work.')}
         />
         <Input
-          label="Max concurrent steps"
+          label={translate('Max concurrent steps')}
           type="number"
           min={1}
           max={12}
@@ -748,17 +737,14 @@ function AddMemberModal({
             disabled={!team?.orchestrator_runtime}
           />
           <span>
-            This member is the orchestrator itself
-            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
-              Lets the agent that plans the mission also execute steps, on its own runtime. Re-entering its
-              settings below would create a second, separate agent instead.
-            </div>
+            {translate('This member is the orchestrator itself')}<div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
+              {translate('Lets the agent that plans the mission also execute steps, on its own runtime. Re-entering its settings below would create a second, separate agent instead.')}</div>
           </span>
         </label>
         {!asOrchestrator && (
           <SlotSection
-            title="Runtime"
-            subtitle="Which machine, CLI and model this member runs on. Where it works is decided per mission: each mission's projects, in their folder on this host."
+            title={translate('Runtime')}
+            subtitle={translate('Which machine, CLI and model this member runs on. Where it works is decided per mission: each mission\'s projects, in their folder on this host.')}
             problem={problem}
           >
             <TeamSlotRuntimeFields
@@ -796,6 +782,7 @@ function MemberEditButton({
   onSaved: (team: OrchestrationTeam) => void;
   disabled?: boolean;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
   const [roleLabel, setRoleLabel] = useState(member.role_label);
@@ -834,7 +821,7 @@ function MemberEditButton({
       onSaved(saved);
       setOpen(false);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to update member', 'error');
+      showToast(e?.message || translate('Failed to update member'), 'error');
     } finally {
       setSaving(false);
     }
@@ -846,38 +833,35 @@ function MemberEditButton({
         variant="ghost"
         size="sm"
         disabled={disabled}
-        title={disabled ? 'You do not have permission to edit this roster' : undefined}
+        title={disabled ? translate('You do not have permission to edit this roster') : undefined}
         onClick={() => setOpen(true)}
       >
-        Edit
-      </Button>
+        {translate('Edit')}</Button>
       <Modal
         isOpen={open}
         onClose={() => setOpen(false)}
-        title="Edit member"
+        title={translate('Edit member')}
         maxWidth={620}
         footer={
           <>
             <Button variant="secondary" onClick={() => setOpen(false)} disabled={saving}>
-              Cancel
-            </Button>
+              {translate('Cancel')}</Button>
             <Button variant="primary" onClick={submit} loading={saving} disabled={!!problem}>
-              Save
-            </Button>
+              {translate('Save')}</Button>
           </>
         }
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input label="Role label" value={roleLabel} onChange={(e) => setRoleLabel(e.target.value)} />
+          <Input label={translate('Role label')} value={roleLabel} onChange={(e) => setRoleLabel(e.target.value)} />
           <LabeledTextarea
-            label="Capabilities"
-            hint="Read verbatim by the orchestrator when assigning steps."
+            label={translate('Capabilities')}
+            hint={translate('Read verbatim by the orchestrator when assigning steps.')}
             value={capabilities}
             onChange={setCapabilities}
             rows={4}
           />
           <Input
-            label="Max concurrent steps"
+            label={translate('Max concurrent steps')}
             type="number"
             min={1}
             max={12}
@@ -886,14 +870,11 @@ function MemberEditButton({
           />
           {isOrchestratorRow ? (
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-              This member is the team&apos;s orchestrator. Its runtime is edited on the team itself — the server
-              rejects a runtime change from here, because applying one would split it into a second agent that
-              merely looked like the orchestrator.
-            </div>
+              {translate('This member is the team\'s orchestrator. Its runtime is edited on the team itself — the server rejects a runtime change from here, because applying one would split it into a second agent that merely looked like the orchestrator.')}</div>
           ) : (
             <SlotSection
-              title="Runtime"
-              subtitle="Missions already running keep the runtime they started with; the next mission (or reopening one) uses this."
+              title={translate('Runtime')}
+              subtitle={translate('Missions already running keep the runtime they started with; the next mission (or reopening one) uses this.')}
               problem={problem}
             >
               <TeamSlotRuntimeFields

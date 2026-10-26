@@ -1,3 +1,5 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
 /**
  * CLI 메모리 분석 — 순수 함수(docs/cli-memory.md "분석").
  *
@@ -101,15 +103,15 @@ export const BUDGET_CRITICAL_TOKENS = 20_000;
 export const STALE_DAYS = 120;
 
 const SECRET_PATTERNS: Array<{ name: string; re: RegExp }> = [
-  { name: 'Anthropic API key', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
-  { name: 'OpenAI API key', re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}/ },
-  { name: 'GitHub token', re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{40,}/ },
-  { name: 'AWS access key', re: /\bAKIA[0-9A-Z]{16}\b/ },
-  { name: 'Slack token', re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/ },
-  { name: 'Google API key', re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
-  { name: 'private key', re: /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----/ },
+  { get name() { return translate('Anthropic API key'); }, re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
+  { get name() { return translate('OpenAI API key'); }, re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}/ },
+  { get name() { return translate('GitHub token'); }, re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{40,}/ },
+  { get name() { return translate('AWS access key'); }, re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { get name() { return translate('Slack token'); }, re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/ },
+  { get name() { return translate('Google API key'); }, re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { get name() { return translate('private key'); }, re: /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----/ },
   { name: 'password', re: /\b(?:password|passwd|pwd|비밀번호)\s*[:=]\s*["']?[^\s"'`]{6,}/i },
-  { name: 'bearer token', re: /\bBearer\s+[A-Za-z0-9._~+/-]{24,}=*/ },
+  { get name() { return translate('bearer token'); }, re: /\bBearer\s+[A-Za-z0-9._~+/-]{24,}=*/ },
 ];
 
 const RELATIVE_DATE_RE = /\b(?:yesterday|today|tomorrow|last (?:week|month|night)|next (?:week|month)|this (?:week|month)|recently)\b|어제|오늘|내일|그제|지난주|지난 주|이번 주|다음 주|지난달|최근에/i;
@@ -229,9 +231,9 @@ function daysSince(iso: string | null, now: number): number | null {
 function homeLabel(cli: CliMemorySnapshot, homeId: string): string {
   const home = cli.homes.find((h) => h.id === homeId);
   if (!home) return homeId;
-  if (home.kind === 'session') return `AWB session home (${home.credential_name || home.credential_id?.slice(0, 8) || 'credential'})`;
+  if (home.kind === 'session') return translate('AWB session home ({0})', { 0: home.credential_name || home.credential_id?.slice(0, 8) || 'credential' });
   if (home.kind === 'profile') return `profile ${home.profile}`;
-  return 'operator home';
+  return translate('operator home');
 }
 
 /** 전역 지침 파일(사람이 쓰는 것) — CLI 간 비교·세션 홈 비교의 단위. */
@@ -254,8 +256,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
         id: `secret:${file.path}:${p.name}`,
         severity: 'critical',
         category: 'secret',
-        title: `Possible ${p.name} in ${file.label}`,
-        detail: `Found "${mask(m[0])}". Memory is pasted into agent prompts${file.loaded === 'always' ? ' on every session' : ''}; keep secrets in AWB credentials instead.`,
+        title: translate('Possible {0} in {1}', { 0: p.name, 1: file.label }),
+        detail: translate('Found "{0}". Memory is pasted into agent prompts{1}; keep secrets in AWB credentials instead.', { 0: mask(m[0]), 1: file.loaded === 'always' ? translate(' on every session') : '' }),
         paths: [file.path],
       });
       break;
@@ -263,7 +265,7 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
     if (!text.trim() && file.content !== null) {
       add({
         id: `empty:${file.path}`, severity: 'info', category: 'empty',
-        title: `${file.label} is empty`, detail: `${file.display_path} exists but holds nothing.`, paths: [file.path],
+        title: translate('{0} is empty', { 0: file.label }), detail: translate('{0} exists but holds nothing.', { 0: file.display_path }), paths: [file.path],
         ...(file.editable ? { fix: { kind: 'delete_empty' as const, cli: cli.cli, path: file.path } } : {}),
       });
       continue;
@@ -274,8 +276,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (dups.length) {
         add({
           id: `dupline:${file.path}`, severity: 'warning', category: 'duplicate',
-          title: `${dups.length} repeated line(s) in ${file.label}`,
-          detail: `e.g. "${dups[0].slice(0, 90)}${dups[0].length > 90 ? '…' : ''}" — every repeat costs tokens${file.loaded === 'always' ? ' on every session' : ''}.`,
+          title: translate('{0} repeated line(s) in {1}', { 0: dups.length, 1: file.label }),
+          detail: translate('e.g. "{0}{1}" — every repeat costs tokens{2}.', { 0: dups[0].slice(0, 90), 1: dups[0].length > 90 ? '…' : '', 2: file.loaded === 'always' ? translate(' on every session') : '' }),
           paths: [file.path],
           ...(file.editable ? { fix: { kind: 'dedupe_lines' as const, cli: cli.cli, path: file.path } } : {}),
         });
@@ -286,8 +288,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       const shown = file.missing_paths.slice(0, 4).join(', ');
       add({
         id: `stale:${file.path}`, severity: 'info', category: 'stale_path',
-        title: `${file.missing_paths.length} referenced path(s) not found on this host`,
-        detail: `${file.label}: ${shown}${file.missing_paths.length > 4 ? ' …' : ''}. Renamed or deleted paths mislead the agent — unless they refer to another machine or are examples.`,
+        title: translate('{0} referenced path(s) not found on this host', { 0: file.missing_paths.length }),
+        detail: translate('{0}: {1}{2}. Renamed or deleted paths mislead the agent — unless they refer to another machine or are examples.', { 0: file.label, 1: shown, 2: file.missing_paths.length > 4 ? ' …' : '' }),
         paths: [file.path],
       });
     }
@@ -296,8 +298,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       const m = RELATIVE_DATE_RE.exec(text);
       add({
         id: `reldate:${file.path}`, severity: 'info', category: 'relative_date',
-        title: `Relative date in ${file.label}`,
-        detail: `"${m?.[0]}" — memory is read weeks later; write absolute dates (e.g. 2026-10-21).`,
+        title: translate('Relative date in {0}', { 0: file.label }),
+        detail: translate('"{0}" — memory is read weeks later; write absolute dates (e.g. 2026-10-21).', { 0: m?.[0] }),
         paths: [file.path],
       });
     }
@@ -307,8 +309,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (days !== null && days >= STALE_DAYS) {
         add({
           id: `old:${file.path}`, severity: 'info', category: 'staleness',
-          title: `${file.label} untouched for ${days} days`,
-          detail: 'Facts in auto memory decay — confirm it still holds or delete it.',
+          title: translate('{0} untouched for {1} days', { 0: file.label, 1: days }),
+          detail: translate('Facts in auto memory decay — confirm it still holds or delete it.'),
           paths: [file.path],
         });
       }
@@ -332,8 +334,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (index.load_limit_lines && lines > index.load_limit_lines) {
         add({
           id: `indexcap:${index.path}`, severity: 'warning', category: 'truncation',
-          title: `Auto memory index is ${lines} lines — only ${index.load_limit_lines} are loaded`,
-          detail: `Claude reads the first ${index.load_limit_lines} lines of ${index.display_path}; everything after is invisible at session start. Shorten entries or move detail into topic files.`,
+          title: translate('Auto memory index is {0} lines — only {1} are loaded', { 0: lines, 1: index.load_limit_lines }),
+          detail: translate('Claude reads the first {0} lines of {1}; everything after is invisible at session start. Shorten entries or move detail into topic files.', { 0: index.load_limit_lines, 1: index.display_path }),
           paths: [index.path],
         });
       }
@@ -343,11 +345,11 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       const orphans = topics.filter((t) => !linked.has(basenameOf(t.path)));
       if (dangling.length || orphans.length) {
         const parts: string[] = [];
-        if (dangling.length) parts.push(`${dangling.length} link(s) to missing files (${dangling.slice(0, 3).map((d) => d.file).join(', ')})`);
-        if (orphans.length) parts.push(`${orphans.length} topic file(s) not in the index (${orphans.slice(0, 3).map((o) => basenameOf(o.path)).join(', ')}) — Claude never learns they exist`);
+        if (dangling.length) parts.push(translate('{0} link(s) to missing files ({1})', { 0: dangling.length, 1: dangling.slice(0, 3).map((d) => d.file).join(', ') }));
+        if (orphans.length) parts.push(translate('{0} topic file(s) not in the index ({1}) — Claude never learns they exist', { 0: orphans.length, 1: orphans.slice(0, 3).map((o) => basenameOf(o.path)).join(', ') }));
         add({
           id: `index:${index.path}`, severity: 'warning', category: 'index',
-          title: 'Auto memory index is out of sync',
+          title: translate('Auto memory index is out of sync'),
           detail: `${parts.join('; ')}.`,
           paths: [index.path, ...orphans.map((o) => o.path)],
           ...(index.editable ? { fix: { kind: 'rebuild_index' as const, cli: cli.cli, path: index.path } } : {}),
@@ -356,8 +358,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
     } else if (topics.length) {
       add({
         id: `index:${index.path}`, severity: 'warning', category: 'index',
-        title: 'Auto memory has topic files but no index',
-        detail: `${topics.length} topic file(s) in ${dirnameOf(index.display_path)} are never loaded because MEMORY.md is missing.`,
+        title: translate('Auto memory has topic files but no index'),
+        detail: translate('{0} topic file(s) in {1} are never loaded because MEMORY.md is missing.', { 0: topics.length, 1: dirnameOf(index.display_path) }),
         paths: [index.path],
         fix: { kind: 'rebuild_index', cli: cli.cli, path: index.path },
       });
@@ -372,19 +374,19 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (t.content === null) continue;
       const fm = parseFrontmatter(t.content);
       const problems: string[] = [];
-      if (!fm.present) problems.push('no frontmatter');
+      if (!fm.present) problems.push(translate('no frontmatter'));
       else {
-        if (!fm.fields.name) problems.push('no name');
-        if (!fm.fields.description) problems.push('no description');
+        if (!fm.fields.name) problems.push(translate('no name'));
+        if (!fm.fields.description) problems.push(translate('no description'));
         const type = memoryType(fm);
-        if (!type) problems.push('no type');
-        else if (!(AUTO_MEMORY_TYPES as readonly string[]).includes(type)) problems.push(`unknown type "${type}"`);
+        if (!type) problems.push(translate('no type'));
+        else if (!(AUTO_MEMORY_TYPES as readonly string[]).includes(type)) problems.push(translate('unknown type "{0}"', { 0: type }));
       }
       if (problems.length) {
         add({
           id: `fm:${t.path}`, severity: 'info', category: 'frontmatter',
           title: `${t.label}: ${problems.join(', ')}`,
-          detail: 'name / description / type let the agent judge relevance without opening the file.',
+          detail: translate('name / description / type let the agent judge relevance without opening the file.'),
           paths: [t.path],
         });
       }
@@ -392,8 +394,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (broken.length) {
         add({
           id: `wiki:${t.path}`, severity: 'info', category: 'link',
-          title: `${t.label} links to ${broken.length} unwritten memory`,
-          detail: `[[${broken.slice(0, 3).join(']], [[')}]]${broken.length > 3 ? ' …' : ''} — fine as a to-do, otherwise fix the name.`,
+          title: translate('{0} links to {1} unwritten memory', { 0: t.label, 1: broken.length }),
+          detail: translate('[[{0}]]{1} — fine as a to-do, otherwise fix the name.', { 0: broken.slice(0, 3).join(']], [['), 1: broken.length > 3 ? ' …' : '' }),
           paths: [t.path],
         });
       }
@@ -406,8 +408,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
     if (!entriesRoundTrip(text)) {
       add({
         id: `drift:${file.path}`, severity: 'critical', category: 'format',
-        title: `${file.label} is not a clean §-separated list`,
-        detail: 'Hermes refuses to write a memory file that does not round-trip through its parser (drift guard) — new memories are silently not saved until it is normalized.',
+        title: translate('{0} is not a clean §-separated list', { 0: file.label }),
+        detail: translate('Hermes refuses to write a memory file that does not round-trip through its parser (drift guard) — new memories are silently not saved until it is normalized.'),
         paths: [file.path],
         ...(file.editable ? { fix: { kind: 'normalize_entries' as const, cli: cli.cli, path: file.path } } : {}),
       });
@@ -419,15 +421,15 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (used > file.char_limit || longest > file.char_limit) {
         add({
           id: `limit:${file.path}`, severity: 'critical', category: 'limit',
-          title: `${file.label} is over its ${file.char_limit}-character cap (${used})`,
-          detail: 'Hermes rejects new entries while the store is over its cap. Merge or trim entries.',
+          title: translate('{0} is over its {1}-character cap ({2})', { 0: file.label, 1: file.char_limit, 2: used }),
+          detail: translate('Hermes rejects new entries while the store is over its cap. Merge or trim entries.'),
           paths: [file.path],
         });
       } else if (used >= file.char_limit * 0.9) {
         add({
           id: `limit:${file.path}`, severity: 'warning', category: 'limit',
-          title: `${file.label} is ${Math.round((used / file.char_limit) * 100)}% full (${used}/${file.char_limit})`,
-          detail: 'Hermes will start refusing new memories soon. Consolidate overlapping entries.',
+          title: translate('{0} is {1}% full ({2}/{3})', { 0: file.label, 1: Math.round((used / file.char_limit) * 100), 2: used, 3: file.char_limit }),
+          detail: translate('Hermes will start refusing new memories soon. Consolidate overlapping entries.'),
           paths: [file.path],
         });
       }
@@ -448,8 +450,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (bytes > docMax) {
         add({
           id: `doccap:${cli.cli}:${dir}`, severity: 'critical', category: 'truncation',
-          title: `${cli.label} drops ${((bytes - docMax) / 1024).toFixed(1)} KiB of project instructions`,
-          detail: `${list.map((f) => f.display_path).join(' + ')} is ${(bytes / 1024).toFixed(1)} KiB but project_doc_max_bytes is ${(docMax / 1024).toFixed(0)} KiB — the rest is silently cut. Trim it or raise project_doc_max_bytes in config.toml.`,
+          title: translate('{0} drops {1} KiB of project instructions', { 0: cli.label, 1: ((bytes - docMax) / 1024).toFixed(1) }),
+          detail: translate('{0} is {1} KiB but project_doc_max_bytes is {2} KiB — the rest is silently cut. Trim it or raise project_doc_max_bytes in config.toml.', { 0: list.map((f) => f.display_path).join(' + '), 1: (bytes / 1024).toFixed(1), 2: (docMax / 1024).toFixed(0) }),
           paths: list.map((f) => f.path),
         });
       }
@@ -458,8 +460,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
   for (const f of files.filter((f) => /AGENTS\.override\.md$/.test(f.path))) {
     add({
       id: `override:${f.path}`, severity: 'info', category: 'override',
-      title: `${f.label} replaces AGENTS.md`,
-      detail: `While ${f.display_path} exists, the AGENTS.md next to it is ignored.`,
+      title: translate('{0} replaces AGENTS.md', { 0: f.label }),
+      detail: translate('While {0} exists, the AGENTS.md next to it is ignored.', { 0: f.display_path }),
       paths: [f.path],
     });
   }
@@ -468,11 +470,11 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
   const budgets = loadBudgets(cli);
   const worst = budgets.reduce((a, b) => (b.tokens > a.tokens ? b : a), budgets[0]);
   if (worst && worst.tokens >= BUDGET_WARN_TOKENS) {
-    const top = worst.files.slice(0, 3).map((f) => `${f.label} ≈${f.tokens.toLocaleString()}`).join(', ');
+    const top = worst.files.slice(0, 3).map((f) => `${f.label} ≈${f.tokens.toLocaleString(getLocaleTag())}`).join(', ');
     add({
       id: `budget:${cli.cli}`, severity: worst.tokens >= BUDGET_CRITICAL_TOKENS ? 'critical' : 'warning', category: 'budget',
-      title: `≈${worst.tokens.toLocaleString()} tokens of memory load into every ${cli.label} session`,
-      detail: `Largest: ${top}. Always-loaded memory costs context and attention on every turn — move reference detail into on-demand files.`,
+      title: translate('≈{0} tokens of memory load into every {1} session', { 0: worst.tokens.toLocaleString(getLocaleTag()), 1: cli.label }),
+      detail: translate('Largest: {0}. Always-loaded memory costs context and attention on every turn — move reference detail into on-demand files.', { 0: top }),
       paths: worst.files.map((f) => f.path),
     });
   }
@@ -493,8 +495,8 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
         reported.add(key);
         add({
           id: `dup:${key}`, severity: 'warning', category: 'duplicate',
-          title: `Same note in ${paras[i].file.label} and ${paras[j].file.label}`,
-          detail: `"${paras[i].text.slice(0, 100).replace(/\s+/g, ' ')}…" — duplicates drift apart; keep one.`,
+          title: translate('Same note in {0} and {1}', { 0: paras[i].file.label, 1: paras[j].file.label }),
+          detail: translate('"{0}…" — duplicates drift apart; keep one.', { 0: paras[i].text.slice(0, 100).replace(/\s+/g, ' ') }),
           paths: [paras[i].file.path, paras[j].file.path],
         });
       }
@@ -511,16 +513,16 @@ function analyzeCli(cli: CliMemorySnapshot, now: number): MemoryFinding[] {
       if (!slot.exists) {
         add({
           id: `home:${slot.path}`, severity: 'warning', category: 'session_home',
-          title: `AWB sessions on ${home.credential_name || 'a credential'} don't see your ${name}`,
-          detail: `Sessions bound to this credential use ${home.display_path} as their ${cli.label} home, which has no ${name} — your global instructions (${source.display_path}) never load there. Link it so both stay in sync.`,
+          title: translate('AWB sessions on {0} don\'t see your {1}', { 0: home.credential_name || translate('a credential'), 1: name }),
+          detail: translate('Sessions bound to this credential use {0} as their {1} home, which has no {2} — your global instructions ({3}) never load there. Link it so both stay in sync.', { 0: home.display_path, 1: cli.label, 2: name, 3: source.display_path }),
           paths: [slot.path, source.path],
           fix: { kind: 'link_home', cli: cli.cli, path: slot.path, target: source.path },
         });
       } else if (!slot.link_target && slot.hash && source.hash && slot.hash !== source.hash) {
         add({
           id: `homediff:${slot.path}`, severity: 'info', category: 'session_home',
-          title: `${homeLabel(cli, home.id)} has its own ${name}`,
-          detail: `It differs from ${source.display_path}. Intentional per-credential instructions are fine; otherwise link it to the operator copy.`,
+          title: translate('{0} has its own {1}', { 0: homeLabel(cli, home.id), 1: name }),
+          detail: translate('It differs from {0}. Intentional per-credential instructions are fine; otherwise link it to the operator copy.', { 0: source.display_path }),
           paths: [slot.path, source.path],
         });
       }
@@ -557,8 +559,8 @@ function analyzeAcrossClis(clis: CliMemorySnapshot[]): MemoryFinding[] {
       severity: 'info',
       category: 'sync',
       cli: other.cli,
-      title: `${best.missing} note(s) from ${best.src.cli.label} are missing in ${other.label}`,
-      detail: `${best.src.file.display_path} has guidance that ${target.display_path} lacks. If both CLIs work here, apply it as a managed block — re-applying later updates only that block.`,
+      title: translate('{0} note(s) from {1} are missing in {2}', { 0: best.missing, 1: best.src.cli.label, 2: other.label }),
+      detail: translate('{0} has guidance that {1} lacks. If both CLIs work here, apply it as a managed block — re-applying later updates only that block.', { 0: best.src.file.display_path, 1: target.display_path }),
       paths: [target.path, best.src.file.path],
       fix: { kind: 'apply', cli: best.src.cli.cli, path: best.src.file.path, target_cli: other.cli, target_path: target.path },
     });

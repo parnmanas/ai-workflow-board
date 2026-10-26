@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React from 'react';
 import { Draggable } from '@hello-pangea/dnd';
 import type { TicketCard as TicketCardRow } from '../types';
@@ -51,6 +53,7 @@ export function SubtaskBoardRows({ children, onChildClick }: {
   children: TicketCardRow[];
   onChildClick?: (ticket: TicketCardRow) => void;
 }) {
+  useLocale();
   return (
     <div data-testid="subtask-board-rows" style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
       {children.map(child => {
@@ -78,6 +81,7 @@ export function SubtaskBoardRows({ children, onChildClick }: {
 }
 
 export default function TicketCard({ ticket, index, onClick, onChildClick, assigneeLabel, projectName, unreadCount, onTagClick }: TicketCardProps) {
+  useLocale();
   const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
   const totalChildren = (ticket.children || []).length;
   const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
@@ -139,7 +143,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                  styles/global.css (@keyframes awb-pending-pulse). */}
               {isPending && (
                 <span
-                  title={`Pending user action${ticket.pending_reason ? `: ${ticket.pending_reason}` : ''}`}
+                  title={translate('Pending user action{0}', { 0: ticket.pending_reason ? `: ${ticket.pending_reason}` : '' })}
                   className="awb-pending-pulse"
                   style={{
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -151,8 +155,8 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                     textTransform: 'uppercase',
                     letterSpacing: '0.5px',
                   }}
-                  aria-label="Pending user action"
-                >⏸ USER</span>
+                  aria-label={translate('Pending user action')}
+                >{translate('⏸ USER')}</span>
               )}
               {/* Blocked-by-tickets badge (ticket 48d14fff). Info-coloured
                  chain link so it reads as "waiting, auto-resumes" rather than
@@ -160,7 +164,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                  comes from the list row's prerequisite_count. */}
               {isBlockedByTickets && (
                 <span
-                  title={`Blocked by ${prereqCount || 'prerequisite'} ticket${prereqCount === 1 ? '' : 's'} — resumes automatically when they finish`}
+                  title={translate('Blocked by {0} ticket{1} — resumes automatically when they finish', { 0: prereqCount || 'prerequisite', 1: prereqCount === 1 ? '' : translate('s') })}
                   style={{
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 2,
                     padding: '1px 6px',
@@ -171,7 +175,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                     textTransform: 'uppercase',
                     letterSpacing: '0.5px',
                   }}
-                  aria-label="Blocked by prerequisite tickets"
+                  aria-label={translate('Blocked by prerequisite tickets')}
                 >⛓{prereqCount > 0 ? ` ${prereqCount}` : ''}</span>
               )}
               {/* Tier-1 G stale-question badge — surfaces tickets blocked
@@ -181,7 +185,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                  badge isn't a mystery. */}
               {hasStaleOpenQuestion(ticket.comments) && (
                 <span
-                  title="An open question on this ticket has been waiting >24h"
+                  title={translate('An open question on this ticket has been waiting >24h')}
                   style={{
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                     width: 18, height: 18, borderRadius: '50%',
@@ -189,12 +193,12 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                     fontSize: '11px', fontWeight: 700,
                     border: `1px solid ${tokens.colors.warning}`,
                   }}
-                  aria-label="Stale open question"
+                  aria-label={translate('Stale open question')}
                 >?</span>
               )}
               {ticket.pending_ci_wait && (
                 <span
-                  title="Waiting on a CI run — resumes automatically"
+                  title={translate('Waiting on a CI run — resumes automatically')}
                   style={{
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                     padding: '1px 6px',
@@ -206,8 +210,8 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                     textTransform: 'uppercase',
                     letterSpacing: '0.5px',
                   }}
-                  aria-label="Waiting on CI"
-                >CI</span>
+                  aria-label={translate('Waiting on CI')}
+                >{translate('CI')}</span>
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -215,7 +219,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                 <NavBadge
                   count={unreadCount}
                   size="sm"
-                  label={`읽지 않은 코멘트 ${unreadCount}건`}
+                  label={translate('읽지 않은 코멘트 {0}건', { 0: unreadCount })}
                 />
               )}
               <span title={ticket.id} style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id.slice(0, 8)}</span>
@@ -236,7 +240,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
               {projectName && (
                 <span
-                  title={`Project: ${projectName}`}
+                  title={translate('Project: {0}', { 0: projectName })}
                   style={{
                     fontSize: '10px', padding: '1px 6px', borderRadius: tokens.radii.sm,
                     background: tokens.colors.surface, color: tokens.colors.textSecondary,
@@ -250,7 +254,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                   key={tag}
                   role={onTagClick ? 'button' : undefined}
                   tabIndex={onTagClick ? 0 : undefined}
-                  title={onTagClick ? `#${tag} 로 필터` : `#${tag}`}
+                  title={onTagClick ? translate('#{0} 로 필터', { 0: tag }) : `#${tag}`}
                   onClick={onTagClick ? (e) => { e.stopPropagation(); onTagClick(tag); } : undefined}
                   onKeyDown={onTagClick ? (e) => {
                     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onTagClick(tag); }
@@ -300,7 +304,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
             {/* Assignee — the one RuntimeSpec that does the ticket, rendered
                 `<Host>/<label>` (docs/runbooks/agent-display-name.md). */}
             <span
-              title={assigneeLabel ? `Assignee: ${assigneeLabel}` : '미지정 — 디스패치되지 않음'}
+              title={assigneeLabel ? translate('Assignee: {0}', { 0: assigneeLabel }) : translate('미지정 — 디스패치되지 않음')}
               style={{
                 marginLeft: 'auto',
                 fontSize: '10px',
@@ -315,14 +319,14 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, assig
                 fontStyle: assigneeLabel ? 'normal' : 'italic',
               }}
             >
-              {assigneeLabel || '미지정'}
+              {assigneeLabel || translate('미지정')}
             </span>
           </div>
 
           {/* Comments indicator */}
           {ticket.comments && ticket.comments.length > 0 && (
             <div style={{ marginTop: 6, fontSize: '10px', color: tokens.colors.textMuted }}>
-              {ticket.comments.length} comment{ticket.comments.length > 1 ? 's' : ''}
+              {ticket.comments.length} {translate('comment')}{ticket.comments.length > 1 ? translate('s') : ''}
             </div>
           )}
           {totalChildren > 0 && (

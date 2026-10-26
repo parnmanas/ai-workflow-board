@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Credentials 화면의 마케팅 결제 공급자 — 고르면 발급 방법이 사이트 안에 보인다(docs/marketing.md "직접 결제 어댑터" → "credential 발급").
 //
 // 고정하는 것:
@@ -64,8 +65,8 @@ test('choosing a marketing payment provider shows how to get its credential, in 
   assert.ok(guide, 'the Stripe guide is shown');
   assert.equal(guide.open, true, 'open by default for a new credential');
   assert.match(guide.textContent, /Create restricted key/);
-  assert.match(guide.textContent, /issuing_card_write · issuing_cardholder_read/);
-  assert.match(guide.textContent, /secret_key — 제한된 API 키/);
+  assert.match(guide.textContent, /issuing_card_write[\s\S]*issuing_cardholder_read/);
+  assert.match(guide.textContent, new RegExp('secret_key — ' + ui('제한된 API 키')));
   assert.ok([...guide.querySelectorAll('a')].some((a) => a.getAttribute('href') === 'https://docs.stripe.com/keys/restricted-api-keys'));
   assert.match(document.body.textContent, /Restricted API key/, 'the form asks for the Stripe key');
 
@@ -74,7 +75,7 @@ test('choosing a marketing payment provider shows how to get its credential, in 
   const google = document.querySelector('[data-testid="payment-credential-guide-google_ads"]');
   assert.ok(google);
   assert.match(google.textContent, /gcloud auth application-default login/);
-  assert.match(google.textContent, /서비스 계정/);
+  assert.match(google.textContent, uiPattern("서비스 계정 인증"));
   assert.ok(document.querySelector('textarea[placeholder*="PEM private_key"]'));
   assert.ok(document.querySelector('input[placeholder*="gserviceaccount.com"]'));
   assert.equal(Boolean(document.querySelector('[data-testid="payment-credential-guide-stripe_issuing"]')), false);

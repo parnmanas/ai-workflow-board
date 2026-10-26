@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 // ─── Manager-host directory picker (ST-7) ────────────────────────────
 // Modal that browses the manager process's filesystem via the existing
 // /api/agents/:id/fs/{roots,list} reverse-RPC. Used by the
@@ -96,6 +98,7 @@ export default function DirectoryPicker({
   initialPath,
   onPick,
 }: DirectoryPickerProps) {
+  useLocale();
   const [path, setPath] = useState('');
   const [listing, setListing] = useState<FsListResult | null>(null);
   const [roots, setRoots] = useState<FsRootsResult | null>(null);
@@ -115,10 +118,10 @@ export default function DirectoryPicker({
   const [mkdirError, setMkdirError] = useState<string | null>(null);
 
   const isWindowsManager = roots?.platform === 'win32' || (path && /^[A-Za-z]:[\\/]/.test(path));
-  const crumbs = useMemo(() => (path ? splitCrumbs(path) : []), [path]);
+  const crumbs = useMemo(() => (path ? splitCrumbs(path) : []), [path, getLocale()]);
   const directories = useMemo(
     () => (listing?.entries || []).filter((e) => e.type === 'directory'),
-    [listing],
+    [listing, getLocale()],
   );
 
   const loadDrives = useCallback(async () => {
@@ -129,7 +132,7 @@ export default function DirectoryPicker({
       setDrives(result.drives || []);
       setMode('drives');
     } catch (err: any) {
-      setError(err?.message || 'Failed to enumerate drives');
+      setError(err?.message || translate('Failed to enumerate drives'));
     } finally {
       setLoading(false);
     }
@@ -158,7 +161,7 @@ export default function DirectoryPicker({
         setMode('browse');
       } catch (err: any) {
         setListing(null);
-        setError(err?.message || 'Failed to list directory');
+        setError(err?.message || translate('Failed to list directory'));
       } finally {
         setLoading(false);
       }
@@ -173,7 +176,7 @@ export default function DirectoryPicker({
     // a round-trip when the user types `foo/bar` etc. Server is still the
     // source of truth — this is just nicer feedback.
     if (name === '.' || name === '..' || /[\\/\0]/.test(name)) {
-      setMkdirError('Folder name must be a single segment without "/" or "\\"');
+      setMkdirError(translate('Folder name must be a single segment without "/" or "\\"'));
       return;
     }
     setMkdirBusy(true);
@@ -184,7 +187,7 @@ export default function DirectoryPicker({
       // the input. loadPath resets mkdirOpen/Name/Error itself.
       await loadPath(path);
     } catch (err: any) {
-      setMkdirError(err?.message || 'Failed to create folder');
+      setMkdirError(err?.message || translate('Failed to create folder'));
     } finally {
       setMkdirBusy(false);
     }
@@ -215,7 +218,7 @@ export default function DirectoryPicker({
           if (fallbackStart) {
             await loadPath(fallbackStart);
           } else {
-            setError('Manager returned no starting directories.');
+            setError(translate('Manager returned no starting directories.'));
           }
           return;
         }
@@ -226,7 +229,7 @@ export default function DirectoryPicker({
         if (start) await loadPath(start);
       } catch (err: any) {
         if (!cancelled) {
-          setError(err?.message || 'Failed to query manager filesystem');
+          setError(err?.message || translate('Failed to query manager filesystem'));
         }
       }
     })();
@@ -254,14 +257,13 @@ export default function DirectoryPicker({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Pick working directory on manager host"
+      title={translate('Pick working directory on manager host')}
       maxWidth={680}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose}>{translate('Cancel')}</Button>
           <Button variant="primary" onClick={handleUseHere} disabled={!path || mode === 'drives'}>
-            Use this directory
-          </Button>
+            {translate('Use this directory')}</Button>
         </>
       }
     >
@@ -270,8 +272,7 @@ export default function DirectoryPicker({
         {roots && roots.enabled && roots.roots.length > 0 && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontWeight: 700 }}>
-              Roots:
-            </span>
+              {translate('Roots:')}</span>
             {roots.roots.map((r) => (
               <button
                 key={r}
@@ -311,7 +312,7 @@ export default function DirectoryPicker({
                 cursor: mode === 'drives' || !parent ? 'not-allowed' : 'pointer',
                 color: tokens.colors.textSecondary,
               }}
-              title={mode === 'drives' ? 'Already at the volume list' : 'Up one level'}
+              title={mode === 'drives' ? translate('Already at the volume list') : translate('Up one level')}
             >
               ↑
             </button>
@@ -333,10 +334,9 @@ export default function DirectoryPicker({
                   fontSize: 12,
                   cursor: 'pointer',
                 }}
-                title="Show drive list"
+                title={translate('Show drive list')}
               >
-                💻 Drives
-              </button>
+                {translate('💻 Drives')}</button>
             )}
             {mode === 'browse' && crumbs.map((c, i) => (
               <React.Fragment key={c.path}>
@@ -380,10 +380,9 @@ export default function DirectoryPicker({
                   cursor: 'pointer',
                   color: tokens.colors.textSecondary,
                 }}
-                title="Create a new folder in this directory"
+                title={translate('Create a new folder in this directory')}
               >
-                + New folder
-              </button>
+                {translate('+ New folder')}</button>
             )}
           </div>
         )}
@@ -403,8 +402,7 @@ export default function DirectoryPicker({
             }}
           >
             <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontWeight: 700 }}>
-              New folder in:
-            </span>
+              {translate('New folder in:')}</span>
             <code style={{ fontFamily: 'monospace', fontSize: 11, color: tokens.colors.textSecondary }}>
               {path}
             </code>
@@ -423,7 +421,7 @@ export default function DirectoryPicker({
                   setMkdirError(null);
                 }
               }}
-              placeholder="folder name"
+              placeholder={translate('folder name')}
               disabled={mkdirBusy}
               style={{
                 flex: 1,
@@ -443,7 +441,7 @@ export default function DirectoryPicker({
               onClick={handleMkdirSubmit}
               disabled={mkdirBusy || !mkdirName.trim()}
             >
-              {mkdirBusy ? 'Creating…' : 'Create'}
+              {mkdirBusy ? translate('Creating…') : translate('Create')}
             </Button>
             <Button
               size="sm"
@@ -451,8 +449,7 @@ export default function DirectoryPicker({
               onClick={() => { setMkdirOpen(false); setMkdirName(''); setMkdirError(null); }}
               disabled={mkdirBusy}
             >
-              Cancel
-            </Button>
+              {translate('Cancel')}</Button>
             {mkdirError && (
               <div style={{ width: '100%', fontSize: 11, color: tokens.colors.danger }}>
                 {mkdirError}
@@ -472,7 +469,7 @@ export default function DirectoryPicker({
             overflow: 'auto',
           }}
         >
-          {loading && <div style={{ padding: 12, fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>}
+          {loading && <div style={{ padding: 12, fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>}
           {!loading && error && (
             <div style={{ padding: 12, fontSize: 12, color: tokens.colors.danger, lineHeight: 1.5 }}>
               {error}
@@ -480,8 +477,7 @@ export default function DirectoryPicker({
           )}
           {!loading && !error && mode === 'drives' && drives && drives.length === 0 && (
             <div style={{ padding: 12, fontSize: 12, color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-              Manager reported no accessible volume roots.
-            </div>
+              {translate('Manager reported no accessible volume roots.')}</div>
           )}
           {!loading && !error && mode === 'drives' && drives && drives.map((d) => (
             <button
@@ -513,9 +509,7 @@ export default function DirectoryPicker({
           ))}
           {!loading && !error && mode === 'browse' && directories.length === 0 && listing && (
             <div style={{ padding: 12, fontSize: 12, color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-              No subdirectories here. Use the "Use this directory" button below to pick the
-              current path, or navigate up.
-            </div>
+              {translate('No subdirectories here. Use the "Use this directory" button below to pick the current path, or navigate up.')}</div>
           )}
           {!loading && !error && mode === 'browse' && directories.map((d) => {
             const sep = /^[A-Za-z]:[\\/]/.test(path) ? '\\' : '/';
@@ -553,19 +547,17 @@ export default function DirectoryPicker({
         {/* Selected path summary */}
         {mode === 'browse' && path && (
           <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
-            <strong style={{ color: tokens.colors.textPrimary }}>Selected:</strong>{' '}
+            <strong style={{ color: tokens.colors.textPrimary }}>{translate('Selected:')}</strong>{' '}
             <code style={{ fontFamily: 'monospace', fontSize: 11 }}>{path}</code>
             {outsideExplicitRoots && (
               <span style={{ color: tokens.colors.warning, marginLeft: 8 }}>
-                (outside the manager's configured fs_browser.roots — pick anyway if intentional)
-              </span>
+                {translate('(outside the manager\'s configured fs_browser.roots — pick anyway if intentional)')}</span>
             )}
           </div>
         )}
         {mode === 'drives' && (
           <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
-            Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.
-          </div>
+            {translate('Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.')}</div>
         )}
       </div>
     </Modal>

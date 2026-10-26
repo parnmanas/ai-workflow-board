@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { tokens } from '../tokens';
 import { api } from '../api';
@@ -64,6 +66,7 @@ export default function CreateTicketForm({
   onSubmit,
   onCancel,
 }: CreateTicketFormProps) {
+  useLocale();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<TicketStatus>(DEFAULT_TICKET_STATUS);
@@ -82,10 +85,10 @@ export default function CreateTicketForm({
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<{ title?: string; description?: string; assignee?: string }>({});
 
-  const project = useMemo(() => projects.find((p) => p.id === projectId) || null, [projects, projectId]);
+  const project = useMemo(() => projects.find((p) => p.id === projectId) || null, [projects, projectId, getLocale()]);
   // Whole-account tags (not just the current filter's facet).
   const accountTags = useTicketTags(accountId, isOpen);
-  const tagSuggestions = useMemo(() => mergeTagSuggestions(accountTags, knownTags), [accountTags, knownTags]);
+  const tagSuggestions = useMemo(() => mergeTagSuggestions(accountTags, knownTags), [accountTags, knownTags, getLocale()]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -150,11 +153,11 @@ export default function CreateTicketForm({
   const handleSubmit = async () => {
     if (submitting) return;
     const nextErrors: { title?: string; description?: string; assignee?: string } = {};
-    if (!title.trim()) nextErrors.title = 'Title is required.';
-    if (!description.trim()) nextErrors.description = 'Description is required — the assignee starts work as soon as the ticket is queued, so the brief needs to be complete.';
+    if (!title.trim()) nextErrors.title = translate('Title is required.');
+    if (!description.trim()) nextErrors.description = translate('Description is required — the assignee starts work as soon as the ticket is queued, so the brief needs to be complete.');
     const wantsAssignee = assigneeOn && !!(assignee.manager_agent_id || assignee.cli || assignee.working_dir.trim());
     if (wantsAssignee && !isRuntimeSpecComplete(assignee)) {
-      nextErrors.assignee = 'Host·CLI·절대경로 working dir 를 모두 입력하거나 담당자를 비우세요.';
+      nextErrors.assignee = translate('Host·CLI·절대경로 working dir 를 모두 입력하거나 담당자를 비우세요.');
     }
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors);
@@ -166,7 +169,7 @@ export default function CreateTicketForm({
       if (wantsAssignee) {
         const result = await api.validateRuntimeSpec(accountId, assignee);
         if (!result.ok || !result.spec) {
-          setErrors({ assignee: result.error || '담당자 설정이 올바르지 않습니다.' });
+          setErrors({ assignee: result.error || translate('담당자 설정이 올바르지 않습니다.') });
           return;
         }
         spec = result.spec;
@@ -203,7 +206,7 @@ export default function CreateTicketForm({
   };
 
   const branchOptions = [
-    { value: '', label: `Project default (${project?.default_branch || 'origin/HEAD'})` },
+    { value: '', label: translate('Project default ({0})', { 0: project?.default_branch || 'origin/HEAD' }) },
     ...(baseBranch && !branches.some((b) => b.name === baseBranch) ? [{ value: baseBranch, label: baseBranch }] : []),
     ...branches.map((b) => ({ value: b.name, label: b.name })),
   ];
@@ -212,13 +215,13 @@ export default function CreateTicketForm({
     <Modal
       isOpen={isOpen}
       onClose={onCancel}
-      title="New Ticket"
+      title={translate('New Ticket')}
       maxWidth={640}
       footer={
         <>
-          <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+          <Button variant="secondary" onClick={onCancel}>{translate('Cancel')}</Button>
           <Button variant="primary" onClick={() => void handleSubmit()} disabled={submitting}>
-            {submitting ? 'Creating…' : 'Create Ticket'}
+            {submitting ? translate('Creating…') : translate('Create Ticket')}
           </Button>
         </>
       }
@@ -230,18 +233,18 @@ export default function CreateTicketForm({
       >
         <Input
           autoFocus
-          label="Title"
+          label={translate('Title')}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="Short, action-oriented summary"
+          placeholder={translate('Short, action-oriented summary')}
           error={errors.title}
         />
         <div style={{ display: 'flex', flexDirection: 'column' }}>
-          <label style={labelStyle}>Description</label>
+          <label style={labelStyle}>{translate('Description')}</label>
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="What needs to happen, why it matters, acceptance criteria. Markdown supported."
+            placeholder={translate('What needs to happen, why it matters, acceptance criteria. Markdown supported.')}
             rows={6}
             style={{
               background: tokens.colors.surface,
@@ -266,43 +269,43 @@ export default function CreateTicketForm({
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Select
-            label="Status"
+            label={translate('Status')}
             value={status}
             onChange={(e) => setStatus(e.target.value as TicketStatus)}
             options={TICKET_STATUSES.map((s) => ({ value: s, label: TICKET_STATUS_LABELS[s] }))}
           />
           <Select
-            label="Priority"
+            label={translate('Priority')}
             value={priority}
             onChange={(e) => setPriority(e.target.value as TicketPriority)}
             options={TICKET_PRIORITIES.map((p) => ({ value: p, label: TICKET_PRIORITY_LABELS[p] }))}
           />
         </div>
-        <TagInput label="Tags" value={tags} onChange={setTags} suggestions={tagSuggestions} />
+        <TagInput label={translate('Tags')} value={tags} onChange={setTags} suggestions={tagSuggestions} />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Select
-            label="Project"
+            label={translate('Project')}
             value={projectId}
             onChange={(e) => selectProject(e.target.value, { touched: assigneeTouched, open: assigneeOn, draft: assignee })}
             options={[
-              { value: '', label: '— 없음 —' },
+              { value: '', label: translate('— 없음 —') },
               ...projects.map((p) => ({ value: p.id, label: p.name })),
             ]}
           />
           {projectId && branchesState === 'error' ? (
             <Input
-              label="Base branch"
+              label={translate('Base branch')}
               value={baseBranch}
               onChange={(e) => setBaseBranch(e.target.value)}
-              placeholder={`비우면 ${project?.default_branch || 'origin/HEAD'}`}
+              placeholder={translate('비우면 {0}', { 0: project?.default_branch || 'origin/HEAD' })}
             />
           ) : (
             <Select
-              label="Base branch"
+              label={translate('Base branch')}
               value={baseBranch}
               disabled={!projectId || branchesState === 'loading'}
               onChange={(e) => setBaseBranch(e.target.value)}
-              options={branchesState === 'loading' ? [{ value: baseBranch, label: 'Loading branches…' }] : branchOptions}
+              options={branchesState === 'loading' ? [{ value: baseBranch, label: translate('Loading branches…') }] : branchOptions}
             />
           )}
         </div>
@@ -314,13 +317,12 @@ export default function CreateTicketForm({
               checked={assigneeOn}
               onChange={(e) => { setAssigneeOn(e.target.checked); setAssigneeTouched(true); }}
             />
-            Assignee (담당 에이전트)
-          </label>
+            {translate('Assignee (담당 에이전트)')}</label>
           {!assigneeOn && (
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
               {project?.default_assignee
-                ? '비워 두면 프로젝트의 기본 담당자가 적용됩니다.'
-                : '담당자가 없으면 티켓은 디스패치되지 않습니다.'}
+                ? translate('비워 두면 프로젝트의 기본 담당자가 적용됩니다.')
+                : translate('담당자가 없으면 티켓은 디스패치되지 않습니다.')}
             </div>
           )}
           {assigneeOn && (
@@ -334,8 +336,7 @@ export default function CreateTicketForm({
         </div>
 
         <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-          Ctrl/Cmd + Enter to submit
-        </div>
+          {translate('Ctrl/Cmd + Enter to submit')}</div>
       </form>
     </Modal>
   );

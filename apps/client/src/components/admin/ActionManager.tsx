@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveAccountId } from '../../api';
 import type { Action, ActionRun, ChatRoomMessageItem } from '../../types';
@@ -101,6 +103,7 @@ interface ActionManagerProps {
 }
 
 export default function ActionManager({ accountId }: ActionManagerProps) {
+  useLocale();
   const { showToast } = useToast();
   const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
@@ -140,7 +143,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
       const list = await api.listActions(effectiveAccountId);
       setActions(list);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load actions', 'error');
+      showToast(err?.message || translate('Failed to load actions'), 'error');
     } finally {
       setLoading(false);
     }
@@ -206,8 +209,8 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
 
   const handleSave = async () => {
     const errs: { name?: string; agent?: string } = {};
-    if (!formName.trim()) errs.name = 'Name is required';
-    if (formAgentIds.length === 0 && pendingSpecs.length === 0) errs.agent = '대상 에이전트를 1개 이상 선택하세요';
+    if (!formName.trim()) errs.name = translate('Name is required');
+    if (formAgentIds.length === 0 && pendingSpecs.length === 0) errs.agent = translate('대상 에이전트를 1개 이상 선택하세요');
     setFormErrors(errs);
     if (errs.name || errs.agent) return;
     setSaving(true);
@@ -233,7 +236,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
           max_runs: formMaxRuns,
           ...folderPayload,
         });
-        showToast('Action updated', 'success');
+        showToast(translate('Action updated'), 'success');
         if (selected?.id === updated.id) setSelected(updated);
       } else {
         await api.createAction({
@@ -249,12 +252,12 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
           max_runs: formMaxRuns,
           ...folderPayload,
         });
-        showToast('Action created', 'success');
+        showToast(translate('Action created'), 'success');
       }
       closeForm();
       await loadActions();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save action', 'error');
+      showToast(err?.message || translate('Failed to save action'), 'error');
     } finally {
       setSaving(false);
     }
@@ -264,12 +267,12 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
     if (!deleteTarget) return;
     try {
       await api.deleteAction(deleteTarget.id, effectiveAccountId);
-      showToast('Action deleted', 'success');
+      showToast(translate('Action deleted'), 'success');
       if (selected?.id === deleteTarget.id) setSelected(null);
       setDeleteTarget(null);
       await loadActions();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete action', 'error');
+      showToast(err?.message || translate('Failed to delete action'), 'error');
     }
   };
 
@@ -282,17 +285,17 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
       const dispatched = result.runs?.length ?? 1;
       const failed = result.failures?.length ?? 0;
       if (failed > 0) {
-        showToast(`${dispatched}개 대상 실행, ${failed}개 실패 — 실행 이력에서 확인하세요`, 'error');
+        showToast(translate('{0}개 대상 실행, {1}개 실패 — 실행 이력에서 확인하세요', { 0: dispatched, 1: failed }), 'error');
       } else if (dispatched > 1) {
-        showToast(`${dispatched}개 대상에 실행을 디스패치했습니다`, 'success');
+        showToast(translate('{0}개 대상에 실행을 디스패치했습니다', { 0: dispatched }), 'success');
       } else {
-        showToast(`Run dispatched (room ${result.room_id.slice(0, 8)})`, 'success');
+        showToast(translate('Run dispatched (room {0})', { 0: result.room_id.slice(0, 8) }), 'success');
       }
       await loadActions();
       // Select the action so the user sees the new run appear in history.
       setSelected(a);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to run action', 'error');
+      showToast(err?.message || translate('Failed to run action'), 'error');
     } finally {
       setRunning(null);
     }
@@ -301,7 +304,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
   // `<Manager>/<Agent>` — never the bare name, so two managers running an
   // P4c-4: Agent 목록 없음 — id 앞자리로 표시한다.
   const agentName = (id: string): string => {
-    if (!id) return '(대상 없음)';
+    if (!id) return translate('(대상 없음)');
     return id.slice(0, 8);
   };
 
@@ -322,18 +325,17 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{actions.length} actions</span>
-        <Button variant="primary" size="md" onClick={startCreate}>+ New Action</Button>
+        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{actions.length} {translate('actions')}</span>
+        <Button variant="primary" size="md" onClick={startCreate}>{translate('+ New Action')}</Button>
       </div>
 
       {loading ? (
-        <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>
+        <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: 24 }}>{translate('Loading…')}</div>
       ) : actions.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No actions yet</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>{translate('No actions yet')}</div>
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-            Define a prompt and pick a target agent. Each Run opens a chat room with the agent.
-          </div>
+            {translate('Define a prompt and pick a target agent. Each Run opens a chat room with the agent.')}</div>
         </div>
       ) : (
         <div style={{
@@ -356,7 +358,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
                   fontSize: 12,
                   fontWeight: 700,
                   flexShrink: 0,
-                }}>A</div>
+                }}>{translate('A')}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                     <button
@@ -379,7 +381,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
                     >
                       {a.name}
                     </button>
-                    {a.enabled ? <Badge variant="success">on</Badge> : <Badge variant="neutral">off</Badge>}
+                    {a.enabled ? <Badge variant="success">{translate('on')}</Badge> : <Badge variant="neutral">{translate('off')}</Badge>}
                   </div>
                   {a.description && (
                     <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginTop: 2, lineHeight: 1.4 }}>
@@ -390,63 +392,61 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
               </div>
 
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
-                Target: <span
+                {translate('Target:')} <span
                   style={{ color: tokens.colors.textSecondary }}
                   title={actionTargets(a).map(agentName).join('\n')}
                 >
                   {/* 대상이 여럿이면 요약 + 툴팁으로 전체 목록 (티켓 fc3906c5). */}
                   {actionTargets(a).length > 1
-                    ? `${actionTargets(a).length}개 에이전트`
+                    ? translate('{0}개 에이전트', { 0: actionTargets(a).length })
                     : agentName(actionTargets(a)[0] || '')}
                 </span>
                 {a.trigger === 'on_ticket_done' ? (
                   <> · <Badge variant="info">on_ticket_done</Badge>
-                    {a.trigger_label && <> · label: <span style={{ color: tokens.colors.textSecondary }}>{a.trigger_label}</span></>}
+                    {a.trigger_label && <> {translate('· label:')} <span style={{ color: tokens.colors.textSecondary }}>{a.trigger_label}</span></>}
                   </>
                 ) : null}
               </div>
               {a.last_run_at && (
                 <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
-                  Last run: {relativeTime(a.last_run_at)}
+                  {translate('Last run:')} {relativeTime(a.last_run_at)}
                 </div>
               )}
 
               <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                 <Button variant="primary" size="sm" disabled={running === a.id} onClick={() => handleRun(a)}>
-                  {running === a.id ? 'Running…' : 'Run'}
+                  {running === a.id ? translate('Running…') : translate('Run')}
                 </Button>
-                <Button variant="secondary" size="sm" onClick={() => setSelected(a)}>History</Button>
-                <Button variant="secondary" size="sm" onClick={() => startEdit(a)}>Edit</Button>
-                <Button variant="danger" size="sm" onClick={() => setDeleteTarget(a)}>Delete</Button>
+                <Button variant="secondary" size="sm" onClick={() => setSelected(a)}>{translate('History')}</Button>
+                <Button variant="secondary" size="sm" onClick={() => startEdit(a)}>{translate('Edit')}</Button>
+                <Button variant="danger" size="sm" onClick={() => setDeleteTarget(a)}>{translate('Delete')}</Button>
               </div>
             </Card>
           ))}
         </div>
       )}
 
-      <Modal isOpen={showForm} onClose={closeForm} title={editAction ? 'Edit Action' : 'New Action'}>
+      <Modal isOpen={showForm} onClose={closeForm} title={editAction ? translate('Edit Action') : translate('New Action')}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <Input
-            label="Name"
+            label={translate('Name')}
             value={formName}
             onChange={(e) => setFormName(e.target.value)}
             error={formErrors.name}
             autoFocus
           />
           <Input
-            label="Description"
+            label={translate('Description')}
             value={formDescription}
             onChange={(e) => setFormDescription(e.target.value)}
-            placeholder="Optional"
+            placeholder={translate('Optional')}
           />
           <div>
             <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
-              대상 에이전트 {formErrors.agent && <span style={{ color: tokens.colors.danger }}>· {formErrors.agent}</span>}
+              {translate('대상 에이전트')} {formErrors.agent && <span style={{ color: tokens.colors.danger }}>· {formErrors.agent}</span>}
             </label>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
-              여러 개를 고르면 실행 1회가 대상마다 독립적인 run 을 만들어 각자의 방에서 병렬로 돕니다.
-              한 대상이 실패해도 나머지는 그대로 진행됩니다.
-            </div>
+              {translate('여러 개를 고르면 실행 1회가 대상마다 독립적인 run 을 만들어 각자의 방에서 병렬로 돕니다. 한 대상이 실패해도 나머지는 그대로 진행됩니다.')}</div>
             {/* P4c-4: Agent 체크박스 제거 — 대상은 아래 runtime 선언으로만 추가한다. */}
             <div
               data-testid="action-target-agents"
@@ -461,32 +461,29 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
             >
               {formAgentIds.length === 0 && pendingSpecs.length === 0 && (
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '6px 2px' }}>
-                  아래 runtime 선언으로 실행 대상을 추가하세요.
-                </div>
+                  {translate('아래 runtime 선언으로 실행 대상을 추가하세요.')}</div>
               )}
               {formAgentIds.map((id) => (
                 <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 2px', fontSize: 13, color: tokens.colors.textStrong }}>
-                  <span>{id.slice(0, 8)} (legacy id)</span>
+                  <span>{id.slice(0, 8)} {translate('(legacy id)')}</span>
                   <button
                     type="button"
                     onClick={() => setFormAgentIds((prev) => prev.filter((x) => x !== id))}
                     style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: tokens.colors.danger, fontSize: 11 }}
                   >
-                    제거
-                  </button>
+                    {translate('제거')}</button>
                 </div>
               ))}
             </div>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-              선택됨: {formAgentIds.length}개{pendingSpecs.length > 0 ? ` + runtime ${pendingSpecs.length}개` : ''}
+              {translate('선택됨:')} {formAgentIds.length}{translate('개')}{pendingSpecs.length > 0 ? translate(' + runtime {0}개', { 0: pendingSpecs.length }) : ''}
               {pendingSpecs.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setPendingSpecs([])}
                   style={{ marginLeft: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: tokens.colors.danger, fontSize: 11 }}
                 >
-                  runtime 초기화
-                </button>
+                  {translate('runtime 초기화')}</button>
               )}
             </div>
             {/* P4c-4: runtime 선언 → spec 보관 후 저장 시 동봉. */}
@@ -499,7 +496,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
                       if (prev.some((s) => JSON.stringify(s) === JSON.stringify(spec))) return prev;
                       return [...prev, spec];
                     });
-                    showToast('Runtime spec이 대상에 추가됩니다 (저장 시 반영)', 'success');
+                    showToast(translate('Runtime spec이 대상에 추가됩니다 (저장 시 반영)'), 'success');
                   }
                 }}
               />
@@ -507,8 +504,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
           </div>
           <div>
             <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
-              Trigger
-            </label>
+              {translate('Trigger')}</label>
             <select
               value={formTrigger}
               onChange={(e) => setFormTrigger(e.target.value)}
@@ -523,29 +519,28 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
                 fontFamily: 'inherit',
               }}
             >
-              <option value="">Manual (예약은 Account Schedules)</option>
-              <option value="on_ticket_done">On Ticket Done</option>
+              <option value="">{translate('Manual (예약은 Account Schedules)')}</option>
+              <option value="on_ticket_done">{translate('On Ticket Done')}</option>
             </select>
           </div>
           {formTrigger === 'on_ticket_done' && (
             <>
               <Input
-                label="Trigger label (optional)"
+                label={translate('Trigger label (optional)')}
                 value={formTriggerLabel}
                 onChange={(e) => setFormTriggerLabel(e.target.value)}
-                placeholder="Only fire when the done ticket has this label"
+                placeholder={translate('Only fire when the done ticket has this label')}
               />
             </>
           )}
           <div>
             <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
-              Prompt template
-            </label>
+              {translate('Prompt template')}</label>
             <textarea
               value={formPrompt}
               onChange={(e) => setFormPrompt(e.target.value)}
               rows={6}
-              placeholder="git commit & push the current changes in {{account.name}}"
+              placeholder={translate('git commit & push the current changes in {{account.name}}')}
               style={{
                 width: '100%',
                 resize: 'vertical',
@@ -560,7 +555,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
               }}
             />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4 }}>
-              Variables: <code>{`{{action.name}}`}</code> <code>{`{{run.id}}`}</code> <code>{`{{account.name}}`}</code> <code>{`{{user.name}}`}</code> <code>{`{{agent.name}}`}</code> <code>{`{{date}}`}</code> <code>{`{{time}}`}</code> <code>{`{{datetime}}`}</code>
+              {translate('Variables:')} <code>{'{{action.name}}'}</code> <code>{'{{run.id}}'}</code> <code>{'{{account.name}}'}</code> <code>{'{{user.name}}'}</code> <code>{'{{agent.name}}'}</code> <code>{'{{date}}'}</code> <code>{'{{time}}'}</code> <code>{'{{datetime}}'}</code>
             </div>
           </div>
           <WorkspaceFolderOptions
@@ -572,7 +567,7 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
           />
           <div style={{ display: 'flex', gap: 12 }}>
             <Input
-              label="Max runs"
+              label={translate('Max runs')}
               type="number"
               value={String(formMaxRuns)}
               onChange={(e) => setFormMaxRuns(Math.max(1, parseInt(e.target.value, 10) || 10))}
@@ -585,14 +580,13 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
                   checked={formEnabled}
                   onChange={(e) => setFormEnabled(e.target.checked)}
                 />
-                Enabled
-              </label>
+                {translate('Enabled')}</label>
             </div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
-            <Button variant="secondary" onClick={closeForm}>Cancel</Button>
+            <Button variant="secondary" onClick={closeForm}>{translate('Cancel')}</Button>
             <Button variant="primary" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving…' : editAction ? 'Save Changes' : 'Create Action'}
+              {saving ? translate('Saving…') : editAction ? translate('Save Changes') : translate('Create Action')}
             </Button>
           </div>
         </div>
@@ -600,8 +594,8 @@ export default function ActionManager({ accountId }: ActionManagerProps) {
 
       <ConfirmDialog
         isOpen={!!deleteTarget}
-        title="Delete Action?"
-        message={<>Delete <strong>{deleteTarget?.name}</strong>? All run history (rooms + messages) for this action will be removed.</>}
+        title={translate('Delete Action?')}
+        message={<>{translate('Delete')} <strong>{deleteTarget?.name}</strong>{translate('? All run history (rooms + messages) for this action will be removed.')}</>}
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />
@@ -622,6 +616,7 @@ interface ActionDetailProps {
 }
 
 function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, running }: ActionDetailProps) {
+  useLocale();
   const { user } = useAuth();
   const [runs, setRuns] = useState<ActionRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -730,7 +725,7 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
   // 존재할 수 있어, fan-out 이력에서 어느 호스트가 실행했는지 구분하려면
   // 접두사가 반드시 있어야 한다.
   const agentName = (id: string): string => {
-    if (!id) return '(에이전트 기록 없음)';
+    if (!id) return translate('(에이전트 기록 없음)');
     return id.slice(0, 8);
   };
 
@@ -740,15 +735,15 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <Button variant="secondary" size="sm" onClick={onBack}>← Back</Button>
+        <Button variant="secondary" size="sm" onClick={onBack}>{translate('← Back')}</Button>
         <div style={{ flex: 1, fontSize: 16, fontWeight: 700, color: tokens.colors.textPrimary }}>
           {action.name}
         </div>
         <Button variant="primary" size="sm" disabled={running} onClick={handleRunNow}>
-          {running ? 'Running…' : 'Run now'}
+          {running ? translate('Running…') : translate('Run now')}
         </Button>
-        <Button variant="secondary" size="sm" onClick={onEdit}>Edit</Button>
-        <Button variant="danger" size="sm" onClick={onDelete}>Delete</Button>
+        <Button variant="secondary" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
+        <Button variant="danger" size="sm" onClick={onDelete}>{translate('Delete')}</Button>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 12, flex: 1, minHeight: 0 }}>
@@ -762,7 +757,7 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
           minHeight: 0,
         }}>
           <div style={{ padding: '8px 12px', borderBottom: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted }}>
-            Recent runs ({runs.length}/{action.max_runs})
+            {translate('Recent runs (')}{runs.length}/{action.max_runs})
           </div>
           {/* 실행 이력은 배치(트리거 1회) 단위로 묶어 보여준다 (티켓 fc3906c5) —
               fan-out 이면 한 번의 실행이 run 을 여러 건 만들기 때문에, 평평한
@@ -770,17 +765,16 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
           <div data-testid="action-run-history" style={{ flex: 1, overflow: 'auto', padding: 4 }}>
             {runs.length === 0 ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: 12 }}>
-                No runs yet. Click <strong>Run now</strong> to dispatch one.
-              </div>
+                {translate('No runs yet. Click')} <strong>{translate('Run now')}</strong> {translate('to dispatch one.')}</div>
             ) : batches.map((batch) => {
               const multi = batch.total > 1;
               const verdictLabel = batch.verdict === 'running'
-                ? '진행 중'
+                ? translate('진행 중')
                 : batch.verdict === 'succeeded'
-                  ? '전체 성공'
+                  ? translate('전체 성공')
                   : batch.verdict === 'failed'
-                    ? '전체 실패'
-                    : `부분 실패 (${batch.succeeded}/${batch.total})`;
+                    ? translate('전체 실패')
+                    : translate('부분 실패 ({0}/{1})', { 0: batch.succeeded, 1: batch.total });
               const verdictVariant: 'success' | 'danger' | 'warning' | 'neutral' = batch.verdict === 'succeeded'
                 ? 'success'
                 : batch.verdict === 'failed'
@@ -803,7 +797,7 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
                         color: tokens.colors.textMuted,
                       }}
                     >
-                      <span>{relativeTime(batch.latestAt)} · {head.triggered_by_type === 'system' ? 'scheduler' : head.triggered_by_type === 'agent' ? 'agent' : 'manual'}</span>
+                      <span>{relativeTime(batch.latestAt)} · {head.triggered_by_type === 'system' ? translate('scheduler') : head.triggered_by_type === 'agent' ? translate('agent') : translate('manual')}</span>
                       <Badge variant={verdictVariant}>{verdictLabel}</Badge>
                     </div>
                   )}
@@ -835,9 +829,9 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
                           {icon} {agentName(r.agent_id || '')}
                         </div>
                         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-                          Run {r.id.slice(0, 8)}
-                          {(r.attempt ?? 1) > 1 && <> · {r.attempt}회 시도</>}
-                          {!multi && <> · {relativeTime(r.created_at)} · {r.triggered_by_type === 'system' ? 'scheduler' : r.triggered_by_type === 'agent' ? 'agent' : 'manual'}</>}
+                          {translate('Run')} {r.id.slice(0, 8)}
+                          {(r.attempt ?? 1) > 1 && <> · {r.attempt}{translate('회 시도')}</>}
+                          {!multi && <> · {relativeTime(r.created_at)} · {r.triggered_by_type === 'system' ? translate('scheduler') : r.triggered_by_type === 'agent' ? translate('agent') : translate('manual')}</>}
                         </div>
                       </button>
                     );
@@ -865,22 +859,21 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
               {/* 선택된 run 의 담당 에이전트를 우선 보여준다 — 대상이 여럿인
                   Action 에서 action 의 대표 대상만 박아두면 지금 보고 있는
                   대화의 상대와 어긋난다 (티켓 fc3906c5). */}
-              Conversation with <strong>{
+              {translate('Conversation with')} <strong>{
                 activeRun?.agent_id
                   ? agentName(activeRun.agent_id)
                   : targetLabels.length > 1
-                    ? `${targetLabels.length}개 에이전트`
-                    : targetLabels[0] || '(대상 없음)'
+                    ? translate('{0}개 에이전트', { 0: targetLabels.length })
+                    : targetLabels[0] || translate('(대상 없음)')
               }</strong>
             </span>
-            <Button variant="secondary" size="sm" onClick={() => loadMessages()}>Refresh</Button>
+            <Button variant="secondary" size="sm" onClick={() => loadMessages()}>{translate('Refresh')}</Button>
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
             {!activeRun ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
-                Pick a run on the left to view its conversation.
-              </div>
+                {translate('Pick a run on the left to view its conversation.')}</div>
             ) : !activeRun.room_id ? (
               /* 디스패치 자체가 실패한 대상 — 방이 만들어지기 전에 끝나서 볼
                  대화가 없다. 빈 목록으로 두면 "아직 응답 없음" 과 구분되지 않아
@@ -889,19 +882,16 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
                 data-testid="action-run-dispatch-failed"
                 style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24, maxWidth: 420, textAlign: 'center', lineHeight: 1.6 }}
               >
-                이 대상은 <strong>실행이 시작되지 못했습니다</strong> — 방이 만들어지기 전에 디스패치가 실패했습니다.
-                {activeRun.result_summary && (
+                {translate('이 대상은')} <strong>{translate('실행이 시작되지 못했습니다')}</strong> {translate('— 방이 만들어지기 전에 디스패치가 실패했습니다.')}{activeRun.result_summary && (
                   <div style={{ marginTop: 8, color: tokens.colors.danger }}>{activeRun.result_summary}</div>
                 )}
               </div>
             ) : loadingMessages && messages.length === 0 ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
-                Loading…
-              </div>
+                {translate('Loading…')}</div>
             ) : messages.length === 0 ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
-                No messages yet — agent is processing the prompt.
-              </div>
+                {translate('No messages yet — agent is processing the prompt.')}</div>
             ) : (
               <MessageList
                 messages={messages}
@@ -926,8 +916,7 @@ function ActionDetail({ action, accountId, onBack, onEdit, onDelete, onRun, runn
               // participant gate. Surface the read-only state instead of
               // letting the user type into a dead box.
               <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, textAlign: 'center', flexShrink: 0 }}>
-                {activeRun.triggered_by_type === 'system' ? 'Scheduled run' : 'Agent-triggered run'} · read-only
-              </div>
+                {activeRun.triggered_by_type === 'system' ? translate('Scheduled run') : translate('Agent-triggered run')} {translate('· read-only')}</div>
             )
           )}
         </div>

@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 // Account "Ticket dispatch" settings ⇄ form (docs/tickets.md → Account
 // settings). These used to live on each board; with boards gone they are
 // account-wide: output language, per-agent concurrency, done-ticket
@@ -62,12 +63,12 @@ export function validateDispatchSettings(form: DispatchSettingsForm): DispatchSe
   const errors: DispatchSettingsErrors = {};
   const max = parseWholeNumber(form.maxConcurrent);
   if (max === null || max < 1 || max > MAX_CONCURRENT_TICKETS_PER_AGENT_MAX) {
-    errors.maxConcurrent = `Enter a whole number from 1 to ${MAX_CONCURRENT_TICKETS_PER_AGENT_MAX}.`;
+    errors.maxConcurrent = translate('Enter a whole number from 1 to {0}.', { 0: MAX_CONCURRENT_TICKETS_PER_AGENT_MAX });
   }
   if (form.autoArchiveDays.trim() !== '') {
     const days = parseWholeNumber(form.autoArchiveDays);
     if (days === null || days < AUTO_ARCHIVE_DAYS_MIN || days > AUTO_ARCHIVE_DAYS_MAX) {
-      errors.autoArchiveDays = `Enter ${AUTO_ARCHIVE_DAYS_MIN}–${AUTO_ARCHIVE_DAYS_MAX} days, or leave blank to disable.`;
+      errors.autoArchiveDays = translate('Enter {0}–{1} days, or leave blank to disable.', { 0: AUTO_ARCHIVE_DAYS_MIN, 1: AUTO_ARCHIVE_DAYS_MAX });
     }
   }
   return errors;

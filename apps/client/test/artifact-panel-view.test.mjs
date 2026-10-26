@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Artifact 패널 표현 계약 렌더 테스트 (에픽 bf65ca00 · Phase 1 · S1 공통 셸).
 //
 // react-dom/server(renderToStaticMarkup)로 jsdom 없이 상태별 렌더를 고정한다.
@@ -23,8 +24,8 @@ test('닫힘: 아무것도 렌더하지 않는다(레이아웃 영향 0)', () =>
 test('데스크톱·열림·대상 없음: role=complementary + 빈 상태 + 닫기 버튼', () => {
   const html = render({ open: true, artifact: null, isMobile: false, onClose() {} });
   assert.match(html, /role="complementary"/);
-  assert.match(html, /선택된 항목이 없습니다/);
-  assert.match(html, /Artifact 패널 닫기/); // 닫기 버튼 aria-label
+  assert.match(html, uiPattern("선택된 항목이 없습니다"));
+  assert.match(html, uiPattern("Artifact 패널 닫기")); // 닫기 버튼 aria-label
   assert.doesNotMatch(html, /role="dialog"/); // 데스크톱은 비모달
 });
 
@@ -44,13 +45,13 @@ test('열림·node 주입(S3 경로): 빈 상태 대신 주입된 내용을 렌�
     onClose() {},
   });
   assert.match(html, /티켓 상세 본문 XYZ/);
-  assert.doesNotMatch(html, /선택된 항목이 없습니다/); // node 가 있으면 빈 상태 미표시
+  assert.doesNotMatch(html, uiPattern("선택된 항목이 없습니다")); // node 가 있으면 빈 상태 미표시
   assert.match(html, /카드 제목/); // 헤더 제목 표시
 });
 
 test('열림·제목 없는 대상: aria-label 이 기본값으로 폴백', () => {
   const html = render({ open: true, artifact: { key: 'x', title: '' }, isMobile: false, onClose() {} });
-  assert.match(html, /aria-label="Artifact 패널"/);
+  assert.match(html, uiPattern('Artifact 패널'));
 });
 
 // ─── 창 크기 조절 (티켓 7815a958) ─────────────────────────────────────────────

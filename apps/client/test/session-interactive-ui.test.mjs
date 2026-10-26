@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Agent Session 의 상호작용 UI — jsdom 실렌더 단언.
 //   1. 컴포저: `/` 를 치면 어댑터가 준 slash command 목록이 뜨고, Enter/Tab 은 전송이 아니라 선택이다.
 //      이름 뒤에 인자를 치면 팝업이 닫히고 Enter 가 그대로 전송한다. Esc 는 팝업만 닫는다.
@@ -357,12 +358,12 @@ test('automatic continuation is a labelled note with a distinct appearance and e
     assert.equal(document.querySelectorAll('[data-block="prompt"]').length, 1);
     assert.match(user.textContent, /Continue my task/);
     assert.equal(automatic.getAttribute('role'), 'note');
-    assert.equal(automatic.getAttribute('aria-label'), '자동 이어쓰기');
-    assert.match(automatic.textContent, /표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다/);
+    assert.equal(automatic.getAttribute('aria-label'), ui("자동 이어쓰기"));
+    assert.match(automatic.textContent, uiPattern("표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다."));
     assert.notEqual(automatic.style.background, user.style.background);
     const details = automatic.querySelector('details');
     assert.equal(details.open, false);
-    assert.equal(details.querySelector('summary').textContent, '전송된 원문 보기');
+    assert.equal(details.querySelector('summary').textContent, ui("전송된 원문 보기"));
     click(details.querySelector('summary'));
     assert.equal(details.open, true);
     assert.ok(details.textContent.includes(notice), 'the sent prompt remains inspectable');
@@ -386,24 +387,24 @@ test('transcript: 직접 입력과 시스템·다른 세션·이미지 발신자
     const view = mount(h(SessionTranscript, { blocks, decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {} }));
     const user = document.querySelector('[data-block="prompt"][data-origin="user"]');
     assert.ok(user, '직접 입력은 data-origin=user 파란 말풍선이다');
-    assert.match(user.parentElement.parentElement.textContent, /직접 입력/);
+    assert.match(user.parentElement.parentElement.textContent, uiPattern("👤 직접 입력"));
 
     const report = document.querySelector('[data-block="operator-report"]');
     assert.ok(report, '다른 세션 보고는 별도 블록이다');
-    assert.match(report.parentElement.textContent, /다른 세션 소식/);
+    assert.match(report.parentElement.textContent, uiPattern("📋 다른 세션 소식 · AWB 자동"));
     assert.notEqual(report.style.background, user.style.background, '직접 입력과 배경이 다르다');
 
     const task = document.querySelector('[data-block="operator-task"]');
     assert.ok(task, 'operator 작업은 별도 블록이다');
-    assert.match(task.parentElement.textContent, /제안 · 사용자 승인/);
+    assert.match(task.parentElement.textContent, uiPattern("제안 · 사용자 승인 — 내가 쓴 말이 아닙니다"));
 
     const async = document.querySelector('[data-block="async-answer"]');
     assert.ok(async, '비동기 답변 전달은 별도 블록이다');
-    assert.match(async.parentElement.textContent, /자동 전달/);
+    assert.match(async.parentElement.textContent, uiPattern("💬 질문 답변 자동 전달 · 시스템"));
 
     const resume = document.querySelector('[data-block="restart-resume"]');
     assert.ok(resume, '재시작으로 끊긴 턴의 재개는 사용자 말풍선이 아니라 시스템 블록이다');
-    assert.match(resume.parentElement.textContent, /재시작으로 끊긴 턴 이어서/);
+    assert.match(resume.parentElement.textContent, uiPattern("🔄 재시작으로 끊긴 턴 이어서 · AWB"));
     assert.match(resume.textContent, /^\[AWB 재개\]/, '재개 문구는 그대로 보인다');
 
     // 직접 입력 말풍선은 오른쪽, 시스템·다른 세션은 왼쪽이다
@@ -413,8 +414,8 @@ test('transcript: 직접 입력과 시스템·다른 세션·이미지 발신자
 
     const images = [...document.querySelectorAll('[data-block="image"]')];
     assert.deepEqual(images.map((el) => el.getAttribute('data-from')), ['user', 'agent'], '보낸 그림과 받은 그림을 구분한다');
-    assert.match(images[0].parentElement.textContent, /보낸 이미지/);
-    assert.match(images[1].parentElement.textContent, /에이전트 이미지/);
+    assert.match(images[0].parentElement.textContent, uiPattern("🖼 보낸 이미지 · 내가 첨부"));
+    assert.match(images[1].parentElement.textContent, uiPattern("🖼 에이전트 이미지"));
     view.unmount();
   } finally { dom.cleanup(); }
 });

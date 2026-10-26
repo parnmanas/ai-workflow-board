@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -81,7 +84,7 @@ export function buildStepSessionRows(
 export function systemBlockTitle(text: string): string {
   const firstLine = String(text ?? '').split('\n').find((l) => l.trim()) ?? '';
   const stripped = firstLine.replace(/^#{1,6}\s*/, '').trim();
-  return stripped || 'AWB message';
+  return stripped || translate('AWB message');
 }
 
 export default function StepSessionPanel({
@@ -98,6 +101,7 @@ export default function StepSessionPanel({
   stepTimeoutMinutes: number;
   onClose: () => void;
 }) {
+  useLocale();
   const [items, setItems] = useState<OrchestrationStepSessionItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -131,7 +135,7 @@ export default function StepSessionPanel({
         setNextBefore(res.next_before_id);
         setFailed(null);
       } catch (e: any) {
-        setFailed(e?.message || 'Failed to read this step session');
+        setFailed(e?.message || translate('Failed to read this step session'));
       } finally {
         setLoading(false);
       }
@@ -166,8 +170,8 @@ export default function StepSessionPanel({
     }
   };
 
-  const stepEvents = useMemo(() => events.filter((e) => e.step_id === step.id), [events, step.id]);
-  const rows = useMemo(() => buildStepSessionRows(items, stepEvents), [items, stepEvents]);
+  const stepEvents = useMemo(() => events.filter((e) => e.step_id === step.id), [events, step.id, getLocale()]);
+  const rows = useMemo(() => buildStepSessionRows(items, stepEvents), [items, stepEvents, getLocale()]);
   // step 전체 미디어 갤러리 — 썸네일 클릭은 다운로드가 아니라 팝업 + prev/next.
   const flatMedia = useMemo(() => {
     const out: EvidenceMediaMeta[] = [];
@@ -178,7 +182,7 @@ export default function StepSessionPanel({
       }
     }
     return out;
-  }, [rows]);
+  }, [rows, getLocale()]);
 
   // 스크롤 규칙은 chat 방·미션 대화·세션 전사와 같은 훅이 맡는다. step 을 바꾸면
   // 새 전사를 다시 바닥에서 열어야 하므로 resetKey 가 step.id 다.
@@ -225,7 +229,7 @@ export default function StepSessionPanel({
           <button
             type="button"
             onClick={onClose}
-            title="선택을 풀고 미션 대화로 돌아갑니다"
+            title={translate('선택을 풀고 미션 대화로 돌아갑니다')}
             style={{
               marginLeft: 'auto',
               border: `1px solid ${tokens.colors.border}`,
@@ -238,8 +242,7 @@ export default function StepSessionPanel({
               fontFamily: 'inherit',
             }}
           >
-            Back to mission
-          </button>
+            {translate('Back to mission')}</button>
         </div>
 
         <div
@@ -263,14 +266,14 @@ export default function StepSessionPanel({
                 background: step.assignee_online ? tokens.colors.successLight : tokens.colors.textMuted,
               }}
             />
-            {step.assignee_name || 'unassigned'}
+            {step.assignee_name || translate('unassigned')}
           </span>
           <span>
-            attempt {step.attempt}/{step.max_attempts}
+            {translate('attempt')} {step.attempt}/{step.max_attempts}
           </span>
           {step.verdict && (
             <span>
-              verdict <strong style={{ color: tokens.colors.accent }}>{step.verdict}</strong>
+              {translate('verdict')} <strong style={{ color: tokens.colors.accent }}>{step.verdict}</strong>
             </span>
           )}
           {step.retry_policy === 'manual' && (
@@ -278,13 +281,12 @@ export default function StepSessionPanel({
               data-testid="step-retry-policy-manual"
               style={{ color: tokens.colors.warningLight, fontWeight: 700, textTransform: 'uppercase', fontSize: 10 }}
             >
-              manual recovery only
-            </span>
+              {translate('manual recovery only')}</span>
           )}
           {(step.project_name || step.working_dir) && (
             <span
               style={{ fontFamily: 'monospace', fontSize: 10, color: tokens.colors.textMuted }}
-              title="The step's project, and the folder it runs in on the assignee's host"
+              title={translate('The step\'s project, and the folder it runs in on the assignee\'s host')}
             >
               {[step.project_name, [step.working_dir, step.workspace_folder].filter(Boolean).join('/')].filter(Boolean).join(' · ')}
             </span>
@@ -326,8 +328,7 @@ export default function StepSessionPanel({
             }}
           >
             <div style={{ fontWeight: 700, color: tokens.colors.dangerLight, marginBottom: 3 }}>
-              자동 복구 불가 — 사람의 확인이 필요합니다
-            </div>
+              {translate('자동 복구 불가 — 사람의 확인이 필요합니다')}</div>
             {step.recovery_reason}
           </div>
         )}
@@ -348,16 +349,15 @@ export default function StepSessionPanel({
             fontFamily: 'inherit',
           }}
         >
-          {showOrder ? '▾' : '▸'} Work order · done when · result
-        </button>
+          {showOrder ? '▾' : '▸'} {translate('Work order · done when · result')}</button>
         {showOrder && (
           <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Block title="Work order" text={step.instructions || '(no instructions recorded)'} />
-            {step.acceptance_criteria && <Block title="Done when" text={step.acceptance_criteria} muted />}
-            {step.result_summary && <Block title="Reported result" text={step.result_summary} />}
+            <Block title={translate('Work order')} text={step.instructions || translate('(no instructions recorded)')} />
+            {step.acceptance_criteria && <Block title={translate('Done when')} text={step.acceptance_criteria} muted />}
+            {step.result_summary && <Block title={translate('Reported result')} text={step.result_summary} />}
             {step.artifacts.length > 0 && (
               <div>
-                <Label>Artifacts</Label>
+                <Label>{translate('Artifacts')}</Label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                   {step.artifacts.map((a, i) => (
                     <div key={`${a.ref}-${i}`} style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
@@ -391,8 +391,7 @@ export default function StepSessionPanel({
             color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
           }}
         >
-          ↓ 최신으로
-        </button>
+          {translate('↓ 최신으로')}</button>
       )}
 
       {/* ── 전사 ───────────────────────────────────────────────────────────── */}
@@ -417,18 +416,17 @@ export default function StepSessionPanel({
               fontFamily: 'inherit',
             }}
           >
-            Load earlier
-          </button>
+            {translate('Load earlier')}</button>
         )}
         {loading && rows.length === 0 ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading session…</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading session…')}</div>
         ) : failed ? (
           <div style={{ fontSize: 12, color: tokens.colors.dangerLight, lineHeight: 1.6 }}>{failed}</div>
         ) : rows.length === 0 ? (
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.7 }}>
             {step.room_id
-              ? '이 step 의 방에 아직 아무 기록이 없습니다.'
-              : '아직 디스패치되지 않았습니다 — 작업 방은 디스패치 시점에 만들어집니다.'}
+              ? translate('이 step 의 방에 아직 아무 기록이 없습니다.')
+              : translate('아직 디스패치되지 않았습니다 — 작업 방은 디스패치 시점에 만들어집니다.')}
           </div>
         ) : (
           <div ref={contentRef} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -462,9 +460,7 @@ export default function StepSessionPanel({
           lineHeight: 1.5,
         }}
       >
-        읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지
-        않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.
-      </div>
+        {translate('읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지 않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.')}</div>
 
       {(() => {
         if (!lightboxId) return null;
@@ -513,6 +509,7 @@ function ItemRow({
   onOpenMedia: (meta: EvidenceMediaMeta, url: string) => void;
   onDownload: (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
 }) {
+  useLocale();
   const [open, setOpen] = useState(false);
   const attachments = item.attachments ?? [];
 
@@ -556,7 +553,7 @@ function ItemRow({
           <span style={{ color: tokens.colors.textMuted }}>{open ? '▾' : '▸'}</span>
           <span style={{ fontWeight: 600, flex: 1, minWidth: 0 }}>{systemBlockTitle(item.text)}</span>
           <span style={{ fontSize: 10, color: tokens.colors.textMuted, flexShrink: 0 }}>
-            AWB · {timeOf(item.at)}
+            {translate('AWB ·')} {timeOf(item.at)}
           </span>
         </button>
         {open && (
@@ -581,7 +578,7 @@ function ItemRow({
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 11 }}>
         <span style={{ fontWeight: 700, color: tokens.colors.textPrimary }}>
-          {item.sender_name || (item.kind === 'agent' ? 'agent' : 'user')}
+          {item.sender_name || (item.kind === 'agent' ? translate('agent') : translate('user'))}
         </span>
         <span style={{ color: tokens.colors.textMuted, fontSize: 10 }}>{timeOf(item.at)}</span>
       </div>
@@ -633,6 +630,7 @@ function AttachmentStrip({
   onOpenMedia: (meta: EvidenceMediaMeta, url: string) => void;
   onDownload: (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
 }) {
+  useLocale();
   const media = attachments.filter((a) => isEvidenceMedia(a));
   const files = attachments.filter((a) => !isEvidenceMedia(a));
   return (
@@ -688,8 +686,7 @@ function AttachmentStrip({
               fontFamily: 'inherit',
             }}
           >
-            Download
-          </button>
+            {translate('Download')}</button>
         </div>
       ))}
     </div>
@@ -698,6 +695,7 @@ function AttachmentStrip({
 
 /** 이 step 의 실행 이벤트 한 줄 — 미션 대화 패널의 이벤트 행과 같은 시각 언어를 쓴다. */
 function EventRow({ event }: { event: OrchestrationTimelineEvent }) {
+  useLocale();
   return (
     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 11.5 }}>
       <span
@@ -725,6 +723,7 @@ function EventRow({ event }: { event: OrchestrationTimelineEvent }) {
 }
 
 function Block({ title, text, muted }: { title: string; text: string; muted?: boolean }) {
+  useLocale();
   return (
     <div>
       <Label>{title}</Label>
@@ -744,6 +743,7 @@ function Block({ title, text, muted }: { title: string; text: string; muted?: bo
 }
 
 function Label({ children }: { children: React.ReactNode }) {
+  useLocale();
   return (
     <div
       style={{
@@ -762,5 +762,5 @@ function Label({ children }: { children: React.ReactNode }) {
 
 function timeOf(iso: string): string {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString(getLocaleTag());
 }

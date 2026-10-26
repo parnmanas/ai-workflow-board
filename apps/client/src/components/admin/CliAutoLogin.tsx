@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
 import type { Credential, CatalogScope, CliLoginInstanceOption, CliLoginSession } from '../../types';
@@ -50,31 +52,31 @@ export function instanceLabel(inst: CliLoginInstanceOption, cli: string): string
   const { installed, healthy } = cliHealthOf(inst, cli);
   const label = cliLabel(cli).toLowerCase();
   if (installed && healthy) return inst.hostname;
-  if (installed) return `${inst.hostname} (${label} installed, health unknown)`;
-  return `${inst.hostname} (${label} not detected — may still work)`;
+  if (installed) return translate('{0} ({1} installed, health unknown)', { 0: inst.hostname, 1: label });
+  return translate('{0} ({1} not detected — may still work)', { 0: inst.hostname, 1: label });
 }
 
 function statusMessage(session: CliLoginSession): string {
   const label = cliLabel(session.cli);
   switch (session.status) {
     case 'starting':
-      return `Starting ${label} login on the Runtime Host…`;
+      return translate('Starting {0} login on the Runtime Host…', { 0: label });
     case 'awaiting_user':
       // claude의 device-auth 흐름은 codex와 달리 사용자가 입력할 one-time
       // code가 없다 — 링크를 여는 것 자체가 승인의 전부다.
       return session.user_code
-        ? 'Open the link below and enter the code to approve.'
-        : 'Open the link below in your browser to approve.';
+        ? translate('Open the link below and enter the code to approve.')
+        : translate('Open the link below in your browser to approve.');
     case 'completing':
-      return 'Approved — finishing up…';
+      return translate('Approved — finishing up…');
     case 'succeeded':
       return `${label} credential ${session.target_credential_id ? 'updated' : 'created'}.`;
     case 'failed':
-      return session.error_detail || 'Login failed.';
+      return session.error_detail || translate('Login failed.');
     case 'timed_out':
-      return session.error_detail || 'Login timed out before it was approved.';
+      return session.error_detail || translate('Login timed out before it was approved.');
     case 'cancelled':
-      return session.error_detail || 'Login cancelled.';
+      return session.error_detail || translate('Login cancelled.');
     default:
       return '';
   }
@@ -95,6 +97,7 @@ export default function CliAutoLogin({
   credentials?: Credential[];
   onCreated?: () => void | Promise<void>;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const catalog = useCliCatalog();
   const loginClis = loginCapableClis(catalog);
@@ -131,7 +134,7 @@ export default function CliAutoLogin({
       setInstances(list);
       if (list.length > 0 && !instanceId) setInstanceId(list[0].instance_id);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load Runtime Host instances.');
+      setError(err?.message || translate('Failed to load Runtime Host instances.'));
     } finally {
       setInstancesLoading(false);
     }
@@ -172,21 +175,21 @@ export default function CliAutoLogin({
 
   const start = async () => {
     if (targetId && !target) {
-      setError('The selected credential is no longer available. Select another credential.');
+      setError(translate('The selected credential is no longer available. Select another credential.'));
       return;
     }
     if (!target && !credentialName.trim()) {
-      setError('Credential name is required.');
+      setError(translate('Credential name is required.'));
       return;
     }
     if (!instanceId) {
-      setError('Select a Runtime Host instance first.');
+      setError(translate('Select a Runtime Host instance first.'));
       return;
     }
     if (providerScoped && (!scopedProvider || !scopedMethod)) {
       // 빈 채로 보내면 CLI 가 선택 UI 를 띄우려다 파이프 뒤에서 멎는다 — 서버도
       // 막지만, 여기서 막으면 왕복 없이 바로 알려줄 수 있다.
-      setError(`Enter both the ${cliLabel(provider)} provider and the login method.`);
+      setError(translate('Enter both the {0} provider and the login method.', { 0: cliLabel(provider) }));
       return;
     }
     setStarting(true);
@@ -203,7 +206,7 @@ export default function CliAutoLogin({
       });
       setSession(started);
     } catch (err: any) {
-      setError(err?.message || 'Failed to start login.');
+      setError(err?.message || translate('Failed to start login.'));
     } finally {
       setStarting(false);
     }
@@ -215,7 +218,7 @@ export default function CliAutoLogin({
       const cancelled = await api.cancelCliLogin(session.id, isGlobal ? undefined : loginAccountId);
       setSession(cancelled);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to cancel login.', 'error');
+      showToast(err?.message || translate('Failed to cancel login.'), 'error');
     }
   };
 
@@ -265,47 +268,40 @@ export default function CliAutoLogin({
   return (
     <>
       <Button variant="primary" size="md" onClick={() => setOpen(true)}>
-        Log in with CLI
-      </Button>
+        {translate('Log in with CLI')}</Button>
       <Modal
         isOpen={open}
         onClose={close}
-        title={`${cliLabel(session?.cli ?? provider)} Login`}
+        title={translate('{0} Login', { 0: cliLabel(session?.cli ?? provider) })}
         maxWidth={520}
         footer={
           !session ? (
             <>
               <Button variant="secondary" onClick={close} disabled={starting}>
-                Cancel
-              </Button>
+                {translate('Cancel')}</Button>
               <Button variant="primary" onClick={start} disabled={starting} loading={starting}>
-                {target ? 'Update Credential' : 'Start Login'}
+                {target ? translate('Update Credential') : translate('Start Login')}
               </Button>
             </>
           ) : TERMINAL_STATUSES.has(session.status) ? (
             <>
               {session.status !== 'succeeded' && (
                 <Button variant="secondary" onClick={() => reset()}>
-                  Try Again
-                </Button>
+                  {translate('Try Again')}</Button>
               )}
               <Button variant="primary" onClick={close}>
-                Close
-              </Button>
+                {translate('Close')}</Button>
             </>
           ) : (
             <Button variant="danger" onClick={cancel}>
-              Cancel Login
-            </Button>
+              {translate('Cancel Login')}</Button>
           )
         }
       >
         {!session ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-              AWB runs <code>{cliLoginCommand(provider, scopedProvider, scopedMethod)}</code> on a Runtime
-              Host for you — no terminal or file upload needed. You'll just approve the login in your browser.
-            </div>
+              {translate('AWB runs')} <code>{cliLoginCommand(provider, scopedProvider, scopedMethod)}</code> {translate('on a Runtime Host for you — no terminal or file upload needed. You\'ll just approve the login in your browser.')}</div>
             <Select
               label="CLI"
               value={provider}
@@ -313,7 +309,7 @@ export default function CliAutoLogin({
               options={loginClis.map((d) => ({ value: d.id, label: d.label }))}
             />
             <Select
-              label="Save login to"
+              label={translate('Save login to')}
               value={targetId}
               onChange={(e) => {
                 setTargetId(e.target.value);
@@ -321,67 +317,60 @@ export default function CliAutoLogin({
                 setError('');
               }}
               options={[
-                { value: '', label: 'Create a new credential' },
+                { value: '', label: translate('Create a new credential') },
                 ...credentials.filter((c) => c.provider === login?.harvest_provider)
-                  .map((c) => ({ value: c.id, label: `Update ${c.name}` })),
+                  .map((c) => ({ value: c.id, label: translate('Update {0}', { 0: c.name }) })),
               ]}
             />
             {target && (
               <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-                Updates “{target.name}” in place. Existing session and runtime settings keep using it.
-              </div>
+                {translate('Updates “')}{target.name}{translate('” in place. Existing session and runtime settings keep using it.')}</div>
             )}
             {providerScoped && (
               <>
                 <Select
-                  label={`${cliLabel(provider)} Provider`}
+                  label={translate('{0} Provider', { 0: cliLabel(provider) })}
                   value={providerPreset}
                   onChange={(e) => setProviderPreset(e.target.value)}
                   options={[
                     ...presets.map((p, index) => ({ value: presetId(index), label: p.label })),
-                    { value: PROVIDER_CUSTOM, label: 'Other (enter manually)…' },
+                    { value: PROVIDER_CUSTOM, label: translate('Other (enter manually)…') },
                   ]}
                 />
                 {!preset && (
                   <>
                     <Input
-                      label="Provider id"
-                      placeholder="e.g. openai"
+                      label={translate('Provider id')}
+                      placeholder={translate('e.g. openai')}
                       value={customProvider}
                       onChange={(e) => setCustomProvider(e.target.value)}
                     />
                     <Input
-                      label="Login method"
-                      placeholder='exact label, e.g. ChatGPT Pro/Plus (headless)'
+                      label={translate('Login method')}
+                      placeholder={translate('exact label, e.g. ChatGPT Pro/Plus (headless)')}
                       value={customMethod}
                       onChange={(e) => setCustomMethod(e.target.value)}
                     />
                   </>
                 )}
                 <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-                  {cliLabel(provider)} logs in per provider. Only methods that finish in a browser work here —
-                  providers that just want an API key pasted are quicker to add with "Import from File".
-                  Run <code>{cliLoginCommand(provider, '<provider>', '?')}</code> on the host to see the
-                  exact method labels it accepts.
-                </div>
+                  {cliLabel(provider)} {translate('logs in per provider. Only methods that finish in a browser work here — providers that just want an API key pasted are quicker to add with "Import from File". Run')} <code>{cliLoginCommand(provider, "<provider>", '?')}</code> {translate('on the host to see the exact method labels it accepts.')}</div>
               </>
             )}
             <Select
-              label="Runtime Host"
+              label={"Runtime Host"}
               value={instanceId}
               onChange={(e) => setInstanceId(e.target.value)}
               disabled={instancesLoading || instances.length === 0}
-              placeholder={instancesLoading ? 'Loading…' : instances.length === 0 ? 'No Runtime Host online' : undefined}
+              placeholder={instancesLoading ? translate('Loading…') : instances.length === 0 ? translate('No Runtime Host online') : undefined}
               options={instances.map((i) => ({ value: i.instance_id, label: instanceLabel(i, provider) }))}
             />
             {!instancesLoading && instances.length === 0 && (
               <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-                No Runtime Host instance is currently online. Use "Import from File" instead, or start a
-                Runtime Host and reopen this dialog.
-              </div>
+                {translate('No Runtime Host instance is currently online. Use "Import from File" instead, or start a Runtime Host and reopen this dialog.')}</div>
             )}
             <Input
-              label="Credential Name"
+              label={translate('Credential Name')}
               value={target?.name || credentialName}
               disabled={!!target}
               onChange={(e) => setCredentialName(e.target.value)}
@@ -436,9 +425,7 @@ export default function CliAutoLogin({
                 }}
               >
                 <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-                  Couldn't recognize the login prompt automatically — here's what {cliLabel(session.cli)} printed.
-                  Look for a URL (and a one-time code, if shown) below.
-                </div>
+                  {translate('Couldn\'t recognize the login prompt automatically — here\'s what')} {cliLabel(session.cli)} {translate('printed. Look for a URL (and a one-time code, if shown) below.')}</div>
                 <pre
                   style={{
                     margin: 0,
@@ -455,8 +442,7 @@ export default function CliAutoLogin({
             )}
             {(session.status === 'starting' || session.status === 'awaiting_user' || session.status === 'completing') && (
               <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-                Waiting for approval — this dialog updates automatically.
-              </div>
+                {translate('Waiting for approval — this dialog updates automatically.')}</div>
             )}
           </div>
         )}

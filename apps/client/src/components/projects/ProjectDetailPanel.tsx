@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import type { Credential, Project } from '../../types';
 import { tokens } from '../../tokens';
@@ -14,11 +16,11 @@ import ProjectRepoTabs, { type ProjectRepoTab } from './ProjectRepoTabs';
 type DetailTab = 'settings' | 'folders' | ProjectRepoTab;
 
 const TABS: Array<{ key: DetailTab; label: string; needsSaved: boolean }> = [
-  { key: 'settings', label: '설정', needsSaved: false },
-  { key: 'folders', label: 'Host 폴더', needsSaved: true },
-  { key: 'branches', label: 'Branches', needsSaved: true },
-  { key: 'history', label: 'History', needsSaved: true },
-  { key: 'files', label: 'Files', needsSaved: true },
+  { key: 'settings', get label() { return translate('설정'); }, needsSaved: false },
+  { key: 'folders', get label() { return translate('Host 폴더'); }, needsSaved: true },
+  { key: 'branches', get label() { return translate('Branches'); }, needsSaved: true },
+  { key: 'history', get label() { return translate('History'); }, needsSaved: true },
+  { key: 'files', get label() { return translate('Files'); }, needsSaved: true },
 ];
 
 interface ProjectDetailPanelProps {
@@ -48,6 +50,7 @@ export default function ProjectDetailPanel({
   onClose,
   showToast,
 }: ProjectDetailPanelProps) {
+  useLocale();
   const [tab, setTab] = useState<DetailTab>('settings');
   const folderCount = (project?.host_folders || []).filter((f) => (f.path || '').trim()).length;
 
@@ -57,11 +60,11 @@ export default function ProjectDetailPanel({
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {project ? project.name : '새 프로젝트'}
+              {project ? project.name : translate('새 프로젝트')}
             </h2>
-            {project?.default_branch && <Badge variant="info">default: {project.default_branch}</Badge>}
-            {project?.use_pr && <Badge variant="neutral">PR</Badge>}
-            {project && <Badge variant={folderCount ? 'success' : 'neutral'}>Host 폴더 {folderCount}</Badge>}
+            {project?.default_branch && <Badge variant="info">{translate('default:')} {project.default_branch}</Badge>}
+            {project?.use_pr && <Badge variant="neutral">{translate('PR')}</Badge>}
+            {project && <Badge variant={folderCount ? 'success' : 'neutral'}>{translate('Host 폴더')} {folderCount}</Badge>}
           </div>
           {project?.repo_url && (
             <div
@@ -77,13 +80,13 @@ export default function ProjectDetailPanel({
           )}
           {project && (
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4 }}>
-              수정 {relativeTime(project.updated_at || project.created_at)}
+              {translate('수정')} {relativeTime(project.updated_at || project.created_at)}
             </div>
           )}
         </div>
         <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-          {onClose && <Button variant="secondary" size="sm" onClick={onClose}>← 목록</Button>}
-          {project && <Button variant="danger" size="sm" onClick={() => onDelete(project)}>삭제</Button>}
+          {onClose && <Button variant="secondary" size="sm" onClick={onClose}>{translate('← 목록')}</Button>}
+          {project && <Button variant="danger" size="sm" onClick={() => onDelete(project)}>{translate('삭제')}</Button>}
         </div>
       </div>
 
@@ -129,8 +132,7 @@ export default function ProjectDetailPanel({
       </div>
       {!project && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 12 }}>
-          Host 폴더와 브랜치/히스토리/파일 탭은 프로젝트를 만든 뒤 쓸 수 있습니다.
-        </div>
+          {translate('Host 폴더와 브랜치/히스토리/파일 탭은 프로젝트를 만든 뒤 쓸 수 있습니다.')}</div>
       )}
       {project && tab === 'folders' && (
         <ProjectHostFolders

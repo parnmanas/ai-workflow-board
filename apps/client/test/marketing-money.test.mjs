@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
 // Marketing 금액 규칙(docs/marketing.md "예산 편성 · 집행 · 결제") — 화면의 formatMinor / parseMajorToMinor.
 //
 // 고정하는 계약:

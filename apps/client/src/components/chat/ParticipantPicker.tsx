@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, getActiveAccountId } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
@@ -68,6 +70,7 @@ const hintStyle: React.CSSProperties = {
  * (chatAgents.defaultChatWorkdir). 사람은 계정 사용자 목록에서 고른다.
  */
 export default function NewChatModal({ open, onClose, onCreated, addToRoomId, existingParticipantIds = [], promotesDmToGroup = false }: NewChatModalProps) {
+  useLocale();
   const { user: currentUser } = useAuth();
   const accountId = getActiveAccountId() || '';
   const [people, setPeople] = useState<PickerParticipant[]>([]);
@@ -117,14 +120,14 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
     return () => { cancelled = true; };
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const hostNames = useMemo(() => Object.fromEntries(hosts.map((h) => [h.id, h.name])), [hosts]);
-  const agentName = (spec: Record<string, any>) => assigneeDisplayName(spec, hostNames) || 'Agent';
+  const hostNames = useMemo(() => Object.fromEntries(hosts.map((h) => [h.id, h.name])), [hosts, getLocale()]);
+  const agentName = (spec: Record<string, any>) => assigneeDisplayName(spec, hostNames) || translate('Agent');
 
   const filteredPeople = useMemo(() => {
     if (!searchQuery.trim()) return people;
     const q = searchQuery.toLowerCase();
     return people.filter((p) => p.name.toLowerCase().includes(q));
-  }, [people, searchQuery]);
+  }, [people, searchQuery, getLocale()]);
 
   // 표시 이름이 겹치면 @멘션 후보에서 구별할 수 없다 — 막지는 않고 알린다.
   const duplicateNames = useMemo(() => {
@@ -134,7 +137,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       seen.set(name, (seen.get(name) || 0) + 1);
     }
     return new Set([...seen].filter(([, n]) => n > 1).map(([name]) => name));
-  }, [agents, hostNames]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agents, hostNames, getLocale()]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function togglePerson(p: PickerParticipant) {
     setSelectedPeople((prev) => (
@@ -178,7 +181,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       const label = (draft.label || '').trim();
       const picked = defaultChatWorkdir(root, label || draft.cli, (dir) => !!findSameRuntimeAgent(agents, { ...draft, working_dir: dir }, editingKey));
       if (!picked) {
-        setDraftError('이 Runtime Host 는 채팅 전용 폴더를 알리지 않았습니다(꺼져 있거나 매니저가 오래됨) — 작업 폴더를 직접 입력하세요.');
+        setDraftError(translate('이 Runtime Host 는 채팅 전용 폴더를 알리지 않았습니다(꺼져 있거나 매니저가 오래됨) — 작업 폴더를 직접 입력하세요.'));
         return;
       }
       candidate = {
@@ -188,19 +191,19 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       };
     }
     if (!isRuntimeSpecComplete(candidate)) {
-      setDraftError('Runtime Host 와 CLI 를 고르세요. 작업 폴더를 적었다면 Host 절대 경로여야 합니다.');
+      setDraftError(translate('Runtime Host 와 CLI 를 고르세요. 작업 폴더를 적었다면 Host 절대 경로여야 합니다.'));
       return;
     }
     setResolving(true);
     setDraftError(null);
     try {
       const result = await api.validateRuntimeSpec(accountId, candidate);
-      if (!result.ok || !result.spec) throw new Error(result.error || 'Runtime 설정이 올바르지 않습니다.');
+      if (!result.ok || !result.spec) throw new Error(result.error || translate('Runtime 설정이 올바르지 않습니다.'));
       const spec = result.spec;
       const same = findSameRuntimeAgent(agents, spec, editingKey);
       if (same) {
         setDraftError(
-          `‘${agentName(same.spec)}’와 CLI·작업 폴더·credential 이 같습니다. 같은 실행 신원은 방에서 한 참여자로 합쳐지므로 작업 폴더나 credential 을 다르게 지정하세요.`,
+          translate('‘{0}’와 CLI·작업 폴더·credential 이 같습니다. 같은 실행 신원은 방에서 한 참여자로 합쳐지므로 작업 폴더나 credential 을 다르게 지정하세요.', { 0: agentName(same.spec) }),
         );
         return;
       }
@@ -213,7 +216,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       setEditingKey(null);
       setError(null);
     } catch (err: any) {
-      setDraftError(err?.message || 'Runtime 설정을 확인하지 못했습니다.');
+      setDraftError(err?.message || translate('Runtime 설정을 확인하지 못했습니다.'));
     } finally {
       setResolving(false);
     }
@@ -222,9 +225,9 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
   // 작업 폴더 안내 — 고른 Host 가 채팅 전용 폴더를 알렸을 때만 "비워도 된다" 고 말한다.
   const draftRoot = hosts.find((h) => h.id === draft.manager_agent_id)?.chat_workdir_root ?? null;
   const chatFolderHint = !draft.manager_agent_id
-    ? '비워 두면 그 Host 의 채팅 전용 폴더를 씁니다. 프로젝트 파일을 다룰 Agent 만 폴더를 고르세요.'
+    ? translate('비워 두면 그 Host 의 채팅 전용 폴더를 씁니다. 프로젝트 파일을 다룰 Agent 만 폴더를 고르세요.')
     : draftRoot
-    ? `비워 두면 ${draftRoot} 아래 전용 폴더를 씁니다. 프로젝트 파일을 다룰 Agent 만 폴더를 고르세요.`
+    ? translate('비워 두면 {0} 아래 전용 폴더를 씁니다. 프로젝트 파일을 다룰 Agent 만 폴더를 고르세요.', { 0: draftRoot })
     // 그 Host 가 지원하지 않으면 폴더는 필수다 — "선택" 표시를 내지 않는다(저장할 때 사유를 알린다).
     : null;
 
@@ -251,9 +254,9 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
         onCreated(room);
       }
     } catch (err: any) {
-      const msg = err?.message || 'Failed to create room.';
+      const msg = err?.message || translate('Failed to create room.');
       if (msg.includes('50') || msg.includes('full') || msg.includes('limit')) {
-        setError('This room is full (50 participant limit).');
+        setError(translate('This room is full (50 participant limit).'));
       } else {
         setError(msg);
       }
@@ -264,20 +267,20 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
 
   // 승격 경고는 "Add People" 모드에서 DM 방일 때만 의미가 있다.
   const showPromotionNotice = isAddMode && promotesDmToGroup;
-  const title = isAddMode ? 'Add People' : 'New Chat';
+  const title = isAddMode ? translate('Add People') : translate('New Chat');
   const createBtnLabel = isAddMode
-    ? (creating ? 'Adding…' : showPromotionNotice ? 'Convert to Group & Add' : 'Add to Room')
+    ? (creating ? translate('Adding…') : showPromotionNotice ? translate('Convert to Group & Add') : translate('Add to Room'))
     : shape === 'dm'
-    ? (creating ? 'Creating…' : 'Start Chat')
-    : (creating ? 'Creating…' : 'Create Group');
+    ? (creating ? translate('Creating…') : translate('Start Chat'))
+    : (creating ? translate('Creating…') : translate('Create Group'));
 
   const shapeHint = isAddMode
-    ? (shape === 'empty' ? '추가할 Agent 나 사람을 고르세요.' : `Agent ${agents.length} · 사람 ${selectedPeople.length} 추가`)
+    ? (shape === 'empty' ? translate('추가할 Agent 나 사람을 고르세요.') : translate('Agent {0} · 사람 {1} 추가', { 0: agents.length, 1: selectedPeople.length }))
     : shape === 'empty'
-    ? 'Agent 를 추가하거나 사람을 고르세요.'
+    ? translate('Agent 를 추가하거나 사람을 고르세요.')
     : shape === 'dm'
-    ? (agents.length ? '1:1 대화 — 보내는 모든 메시지에 Agent 가 답합니다.' : '1:1 대화')
-    : `그룹 대화 · Agent ${agents.length} · 사람 ${selectedPeople.length} — Agent 는 @멘션을 받으면 답합니다.`;
+    ? (agents.length ? translate('1:1 대화 — 보내는 모든 메시지에 Agent 가 답합니다.') : translate('1:1 대화'))
+    : translate('그룹 대화 · Agent {0} · 사람 {1} — Agent 는 @멘션을 받으면 답합니다.', { 0: agents.length, 1: selectedPeople.length });
 
   return (
     <Modal
@@ -290,7 +293,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
           <span data-testid="new-chat-shape" style={{ flex: 1, minWidth: 0, fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>
             {shapeHint}
           </span>
-          <Button variant="secondary" onClick={onClose} disabled={creating}>Cancel</Button>
+          <Button variant="secondary" onClick={onClose} disabled={creating}>{translate('Cancel')}</Button>
           <Button variant="primary" onClick={() => void handleCreate()} disabled={!canCreate}>
             {createBtnLabel}
           </Button>
@@ -312,38 +315,32 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
               lineHeight: 1.5,
             }}
           >
-            이 대화는 1:1 DM 입니다. 사람을 추가하면 <strong>그룹 대화로 바뀌며 되돌릴 수
-            없습니다.</strong> 지금까지의 대화 기록은 그대로 남고, 초대된 사람도 스크롤하면
-            이전 내용을 볼 수 있습니다.
-          </div>
+            {translate('이 대화는 1:1 DM 입니다. 사람을 추가하면')} <strong>{translate('그룹 대화로 바뀌며 되돌릴 수 없습니다.')}</strong> {translate('지금까지의 대화 기록은 그대로 남고, 초대된 사람도 스크롤하면 이전 내용을 볼 수 있습니다.')}</div>
         )}
 
         {!isAddMode && (
           <Input
-            label="Room name (optional)"
+            label={translate('Room name (optional)')}
             value={roomName}
             disabled={creating}
-            placeholder="비워두면 참여자 이름으로 자동 지정"
+            placeholder={translate('비워두면 참여자 이름으로 자동 지정')}
             onChange={(e) => setRoomName(e.target.value)}
           />
         )}
 
         {/* Agents — 실행 선언을 하나씩 추가한다. */}
-        <section aria-label="Agents">
+        <section aria-label={translate('Agents')}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: tokens.spacing.sm }}>
-            <span style={sectionTitleStyle}>Agents · {agents.length}</span>
+            <span style={sectionTitleStyle}>{translate('Agents ·')} {agents.length}</span>
             <Button variant="secondary" size="sm" onClick={() => openAgentEditor()} disabled={editorOpen || creating}>
-              + Agent 추가
-            </Button>
+              {translate('+ Agent 추가')}</Button>
           </div>
           <p style={hintStyle}>
-            각 Agent 는 Runtime Host 의 CLI 로 이 방에 참여합니다. Label 은 방에서 보이는 이름이자 @멘션 대상입니다.
-          </p>
+            {translate('각 Agent 는 Runtime Host 의 CLI 로 이 방에 참여합니다. Label 은 방에서 보이는 이름이자 @멘션 대상입니다.')}</p>
 
           {agents.length === 0 && !editorOpen && (
             <div style={{ marginTop: tokens.spacing.sm, padding: '12px', border: `1px dashed ${tokens.colors.border}`, borderRadius: tokens.radii.md, fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, textAlign: 'center' }}>
-              아직 추가한 Agent 가 없습니다.
-            </div>
+              {translate('아직 추가한 Agent 가 없습니다.')}</div>
           )}
 
           {agents.length > 0 && (
@@ -351,8 +348,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
               {agents.map((a) => {
                 const name = agentName(a.spec);
                 const root = hosts.find((h) => h.id === a.spec.manager_agent_id)?.chat_workdir_root;
-                const folder = isChatWorkdir(a.spec.working_dir, root) ? '채팅 전용 폴더' : a.spec.working_dir;
-                const meta = [a.spec.cli, a.spec.model || 'CLI 기본 모델', folder].filter(Boolean).join(' · ');
+                const folder = isChatWorkdir(a.spec.working_dir, root) ? translate('채팅 전용 폴더') : a.spec.working_dir;
+                const meta = [a.spec.cli, a.spec.model || translate('CLI 기본 모델'), folder].filter(Boolean).join(' · ');
                 const isEditing = editingKey === a.key;
                 return (
                   <li
@@ -373,25 +370,23 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                       <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, overflowWrap: 'anywhere' }}>{meta}</div>
                       {a.spec.role_prompt && (
                         <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          역할: {a.spec.role_prompt}
+                          {translate('역할:')} {a.spec.role_prompt}
                         </div>
                       )}
                       {duplicateNames.has(name) && (
                         <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.warning }}>
-                          같은 이름의 Agent 가 있습니다 — Label 로 구분하세요.
-                        </div>
+                          {translate('같은 이름의 Agent 가 있습니다 — Label 로 구분하세요.')}</div>
                       )}
                     </div>
-                    <Button variant="ghost" size="sm" disabled={editorOpen || creating} onClick={() => openAgentEditor(a)}>편집</Button>
+                    <Button variant="ghost" size="sm" disabled={editorOpen || creating} onClick={() => openAgentEditor(a)}>{translate('편집')}</Button>
                     <Button
                       variant="ghost"
                       size="sm"
                       disabled={editorOpen || creating}
-                      aria-label={`Remove ${name}`}
+                      aria-label={translate('Remove {0}', { 0: name })}
                       onClick={() => setAgents((prev) => prev.filter((x) => x.key !== a.key))}
                     >
-                      제거
-                    </Button>
+                      {translate('제거')}</Button>
                   </li>
                 );
               })}
@@ -404,12 +399,11 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
               style={{ marginTop: tokens.spacing.sm, padding: tokens.spacing.md, border: `1px solid ${tokens.colors.accent}`, borderRadius: tokens.radii.md }}
             >
               <div style={{ ...sectionTitleStyle, marginBottom: tokens.spacing.sm }}>
-                {editingKey ? 'Agent 편집' : '새 Agent'}
+                {editingKey ? translate('Agent 편집') : translate('새 Agent')}
               </div>
               {!hosts.length && (
                 <p style={{ ...hintStyle, marginTop: 0, marginBottom: tokens.spacing.sm }}>
-                  연결된 Runtime Host 가 없습니다. Hosts 에서 Agent Manager 를 먼저 연결하세요.
-                </p>
+                  {translate('연결된 Runtime Host 가 없습니다. Hosts 에서 Agent Manager 를 먼저 연결하세요.')}</p>
               )}
               <RuntimeSpecEditor
                 value={draft}
@@ -425,9 +419,9 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                 </div>
               )}
               <div style={{ marginTop: tokens.spacing.md, display: 'flex', justifyContent: 'flex-end', gap: tokens.spacing.sm }}>
-                <Button variant="ghost" size="sm" onClick={closeAgentEditor} disabled={resolving}>취소</Button>
+                <Button variant="ghost" size="sm" onClick={closeAgentEditor} disabled={resolving}>{translate('취소')}</Button>
                 <Button variant="primary" size="sm" onClick={() => void saveAgent()} disabled={resolving}>
-                  {resolving ? '확인 중…' : editingKey ? '변경 저장' : 'Agent 추가'}
+                  {resolving ? translate('확인 중…') : editingKey ? translate('변경 저장') : translate('Agent 추가')}
                 </Button>
               </div>
             </div>
@@ -435,8 +429,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
         </section>
 
         {/* People — 계정 사용자 중에서 고른다. */}
-        <section aria-label="People">
-          <span style={sectionTitleStyle}>People · {selectedPeople.length}</span>
+        <section aria-label={translate('People')}>
+          <span style={sectionTitleStyle}>{translate('People ·')} {selectedPeople.length}</span>
 
           {selectedPeople.length > 0 && (
             <div style={{ marginTop: tokens.spacing.sm, display: 'flex', flexWrap: 'wrap', gap: tokens.spacing.xs }}>
@@ -459,7 +453,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                   <button
                     onClick={() => togglePerson(p)}
                     style={{ background: 'transparent', border: 'none', color: 'white', cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: 0 }}
-                    aria-label={`Remove ${p.name}`}
+                    aria-label={translate('Remove {0}', { 0: p.name })}
                   >
                     ×
                   </button>
@@ -470,8 +464,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
 
           <input
             type="text"
-            aria-label="Search people"
-            placeholder="Search people…"
+            aria-label={translate('Search people')}
+            placeholder={translate('Search people…')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
@@ -491,7 +485,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
           <div style={{ marginTop: tokens.spacing.xs, overflowY: 'auto', maxHeight: 220, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
             {filteredPeople.length === 0 ? (
               <div style={{ padding: 16, fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textMuted, textAlign: 'center' }}>
-                {people.length ? 'No matches. Try a different name.' : '추가할 수 있는 사람이 없습니다.'}
+                {people.length ? translate('No matches. Try a different name.') : translate('추가할 수 있는 사람이 없습니다.')}
               </div>
             ) : (
               filteredPeople.map((p) => {

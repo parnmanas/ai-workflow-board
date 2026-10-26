@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
@@ -38,6 +40,7 @@ export type TicketArtifactState =
   | { status: 'loaded'; ticket: any };
 
 function Chip({ children, tone = 'default' }: { children: React.ReactNode; tone?: 'default' | 'accent' | 'danger' | 'muted' }) {
+  useLocale();
   const palette: Record<string, { bg: string; fg: string }> = {
     default: { bg: tokens.colors.surfaceCard, fg: tokens.colors.textSecondary },
     accent: { bg: tokens.overlays.accentSoft, fg: tokens.colors.accentSubtle },
@@ -66,6 +69,7 @@ function Chip({ children, tone = 'default' }: { children: React.ReactNode; tone?
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  useLocale();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div
@@ -110,18 +114,18 @@ export function TicketArtifactView({
   onOpen?: () => void;
   hostNames?: Record<string, string>;
 }) {
+  useLocale();
   if (state.status === 'loading') {
     return (
       <div style={{ padding: tokens.spacing.lg, color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeMd }}>
-        티켓을 불러오는 중…
-      </div>
+        {translate('티켓을 불러오는 중…')}</div>
     );
   }
 
   if (state.status === 'error') {
     // 공통 오류 표현(F2-3). title 은 티켓 문맥으로 좁혀 회귀 계약(role=alert +
     // "불러오지 못했습니다" + 원문 message) 을 유지한다.
-    return <ErrorState title="티켓을 불러오지 못했습니다" message={state.message} onRetry={onRetry} />;
+    return <ErrorState title={translate('티켓을 불러오지 못했습니다')} message={state.message} onRetry={onRetry} />;
   }
 
   const t = state.ticket || {};
@@ -138,7 +142,7 @@ export function TicketArtifactView({
   // "티켓 열기" 활성/비활성 — 티켓의 account 를 모르면(구 응답·고아 행) 주소를 만들 수
   // 없으므로 비활성 + 안내 문구로 대체한다(완료기준 #4).
   const canOpen = canOpenTicket(t);
-  const openHint = canOpen ? undefined : '이 티켓이 속한 티켓을 찾을 수 없습니다.';
+  const openHint = canOpen ? undefined : translate('이 티켓이 속한 티켓을 찾을 수 없습니다.');
 
   return (
     <div style={{ padding: tokens.spacing.lg, display: 'flex', flexDirection: 'column', gap: tokens.spacing.lg }}>
@@ -158,8 +162,7 @@ export function TicketArtifactView({
           }}
         >
           <span aria-hidden="true">●</span>
-          연결이 끊겨 실시간 갱신이 일시중단됐습니다. 재연결되면 자동으로 최신 내용을 불러옵니다.
-        </div>
+          {translate('연결이 끊겨 실시간 갱신이 일시중단됐습니다. 재연결되면 자동으로 최신 내용을 불러옵니다.')}</div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <h2
@@ -171,12 +174,12 @@ export function TicketArtifactView({
             lineHeight: tokens.typography.lineHeightHeading,
           }}
         >
-          {t.title || '(제목 없음)'}
+          {t.title || translate('(제목 없음)')}
         </h2>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
           {t.priority && <Chip tone={PRIORITY_TONE[String(t.priority)] || 'default'}>{String(t.priority)}</Chip>}
           {t.status && <Chip tone="muted">{ticketStatusLabel(String(t.status))}</Chip>}
-          {t.archived_at && <Chip tone="muted">보관됨</Chip>}
+          {t.archived_at && <Chip tone="muted">{translate('보관됨')}</Chip>}
           {projectName && <Chip>{projectName}</Chip>}
           {tags.map((tag) => (
             <Chip key={tag} tone="accent">#{tag}</Chip>
@@ -193,7 +196,7 @@ export function TicketArtifactView({
             type="button"
             onClick={canOpen ? onOpen : undefined}
             disabled={!canOpen}
-            aria-label={openHint ? `티켓 열기 — ${openHint}` : '티켓 열기'}
+            aria-label={openHint ? translate('티켓 열기 — {0}', { 0: openHint }) : translate('티켓 열기')}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -210,20 +213,19 @@ export function TicketArtifactView({
             }}
           >
             <span aria-hidden="true">↗</span>
-            티켓 열기
-          </button>
+            {translate('티켓 열기')}</button>
         </span>
       )}
 
-      <Section title="담당">
+      <Section title={translate('담당')}>
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-          <span style={{ color: tokens.colors.textMuted }}>담당자 </span>
-          {assignee || '미지정 — 디스패치되지 않음'}
+          <span style={{ color: tokens.colors.textMuted }}>{translate('담당자')} </span>
+          {assignee || translate('미지정 — 디스패치되지 않음')}
         </div>
       </Section>
 
       {t.description && (
-        <Section title="설명">
+        <Section title={translate('설명')}>
           <div
             style={{
               fontSize: 14,
@@ -239,7 +241,7 @@ export function TicketArtifactView({
       )}
 
       {children.length > 0 && (
-        <Section title={`하위 작업 (${children.length})`}>
+        <Section title={translate('하위 작업 ({0})', { 0: children.length })}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {children.map((c) => (
               <div
@@ -261,11 +263,11 @@ export function TicketArtifactView({
       )}
 
       {visibleComments.length > 0 && (
-        <Section title="최근 코멘트">
+        <Section title={translate('최근 코멘트')}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {visibleComments.map((c) => (
               <div key={c.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textPrimary }}>{c.author || '알 수 없음'}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textPrimary }}>{c.author || translate('알 수 없음')}</div>
                 <div style={{ fontSize: 13, color: tokens.colors.textSecondary, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                   {renderMarkdown(String(c.content || ''))}
                 </div>
@@ -288,6 +290,7 @@ export function TicketArtifactView({
  * (다중 태스크 전환) 즉시 로딩으로 초기화해 이전 티켓 내용이 남지 않게 한다.
  */
 export default function TicketArtifact({ ticketId }: { ticketId: string }) {
+  useLocale();
   const [state, setState] = useState<TicketArtifactState>({ status: 'loading' });
   const { isConnected } = useBoardStream();
   const navigate = useNavigate();
@@ -307,7 +310,7 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
         })
         .catch((err: any) => {
           if (cancelled) return;
-          if (showLoading) setState({ status: 'error', message: err?.message || '네트워크 오류' });
+          if (showLoading) setState({ status: 'error', message: err?.message || translate('네트워크 오류') });
         });
       return () => {
         cancelled = true;

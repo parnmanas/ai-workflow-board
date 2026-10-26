@@ -1,3 +1,6 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
+import { setLocale } from '../src/i18n/core.ts';
+await setLocale('ko', false);
 // 사이드바 "Marketing" 배지(docs/marketing.md) — GET /api/marketing/inbox 의 total 을 그대로 쓴다.
 //
 // 진짜 Sidebar 를 프로덕션과 같은 provider 스택(Router > Toast > Auth > BoardStream > Notification) 위에 띄우고
@@ -83,7 +86,7 @@ function marketingRow(view) {
   if (!section) return null;
   return [...section.querySelectorAll('button')].find((b) => {
     const span = [...b.querySelectorAll('span')].find((s) => s.getAttribute('aria-hidden') !== 'true');
-    return span?.textContent?.trim() === 'Marketing';
+    return span?.textContent?.trim() === ui('Marketing');
   }) || null;
 }
 

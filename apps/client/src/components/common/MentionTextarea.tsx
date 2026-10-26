@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { tokens } from '../../tokens';
@@ -97,6 +99,7 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
   ariaLabel,
   style,
 }: MentionTextareaProps, ref) {
+  useLocale();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // Expose focus() to the parent (see MentionTextareaHandle). preventScroll
   // defaults to true so focusing the composer never yanks the message list.
@@ -121,7 +124,7 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
   // fired between renders need the latest log synchronously.
   const { display: displayValue, log: derivedLog } = useMemo(
     () => parseRawToDisplay(value || ''),
-    [value],
+    [value, getLocale()],
   );
   const mentionLogRef = useRef<MentionCandidate[]>(derivedLog);
   mentionLogRef.current = derivedLog;
@@ -132,7 +135,7 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
     return candidates
       .filter(c => !q || c.name.toLowerCase().includes(q) || (c.sublabel || '').toLowerCase().includes(q))
       .slice(0, 8);
-  }, [candidates, query, open]);
+  }, [candidates, query, open, getLocale()]);
 
   // Keep activeIdx in bounds whenever filtered changes.
   useEffect(() => {
@@ -309,7 +312,7 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
       {shouldRenderDropdown && createPortal(
         <div
           role="listbox"
-          aria-label="Mention suggestions"
+          aria-label={translate('Mention suggestions')}
           style={{
             position: 'fixed',
             top: dropdownTop,
@@ -327,7 +330,7 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
         >
           {filtered.length === 0 && (
             <div style={{ padding: '8px 10px', fontSize: 12, color: tokens.colors.textMuted }}>
-              {candidates.length === 0 ? 'Loading candidates…' : 'No matches'}
+              {candidates.length === 0 ? translate('Loading candidates…') : translate('No matches')}
             </div>
           )}
           {filtered.map((c, i) => {

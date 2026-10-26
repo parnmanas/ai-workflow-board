@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { tokens } from '../../tokens';
 import ZoomStage from './ZoomStage';
@@ -31,6 +33,7 @@ interface MediaLightboxProps {
 }
 
 export default function MediaLightbox({ items, index, onIndexChange, onClose }: MediaLightboxProps) {
+  useLocale();
   const [broken, setBroken] = useState(false);
   const total = items.length;
   const safeIndex = total === 0 ? 0 : ((index % total) + total) % total;
@@ -68,7 +71,7 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
 
   if (total === 0 || !current) return null;
   const isVideo = current.kind === 'video';
-  const label = current.caption || current.filename || (isVideo ? 'Video' : 'Image');
+  const label = current.caption || current.filename || (isVideo ? translate('Video') : translate('Image'));
   const loading = !current.src;
 
   return (
@@ -93,7 +96,7 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         {loading ? (
           <div style={centered}>
-            <div style={{ color: '#bbb', fontSize: 13 }}>불러오는 중…</div>
+            <div style={{ color: '#bbb', fontSize: 13 }}>{translate('불러오는 중…')}</div>
           </div>
         ) : broken ? (
           <div style={centered}>
@@ -112,10 +115,8 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
               }}
             >
               <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
-                ⚠ 이 파일은 열 수 없습니다
-              </div>
-              바이트는 저장돼 있지만 이미지/영상으로 해석되지 않습니다.
-            </div>
+                {translate('⚠ 이 파일은 열 수 없습니다')}</div>
+              {translate('바이트는 저장돼 있지만 이미지/영상으로 해석되지 않습니다.')}</div>
           </div>
         ) : (
           <ZoomStage
@@ -132,7 +133,7 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
         {total > 1 && (
           <button
             type="button"
-            aria-label="Previous"
+            aria-label={translate('Previous')}
             data-testid="media-lightbox-prev"
             onClick={(e) => {
               e.stopPropagation();
@@ -146,7 +147,7 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
         {total > 1 && (
           <button
             type="button"
-            aria-label="Next"
+            aria-label={translate('Next')}
             data-testid="media-lightbox-next"
             onClick={(e) => {
               e.stopPropagation();
@@ -189,8 +190,7 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
           onClick={(e) => e.stopPropagation()}
           style={{ color: '#bbb', fontSize: 11, border: '1px solid #666', borderRadius: 5, padding: '3px 10px', textDecoration: 'none' }}
         >
-          Download
-        </a>
+          {translate('Download')}</a>
         <button
           type="button"
           onClick={onClose}
@@ -205,8 +205,7 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
             fontFamily: 'inherit',
           }}
         >
-          Close (Esc)
-        </button>
+          {translate('Close (Esc)')}</button>
       </div>
     </div>
   );

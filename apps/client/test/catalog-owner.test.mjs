@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // Catalogs default to account ownership; sharing requires an explicit Global choice.
 
 import test from 'node:test';
@@ -39,7 +40,7 @@ test('a Resource binds Global credentials and its own account’s only', () => {
 // ─── wiring ─────────────────────────────────────────────
 
 function buttonsByText(container, label) {
-  return [...container.querySelectorAll('button')].filter((b) => b.textContent?.trim() === label);
+  return [...container.querySelectorAll('button')].filter((b) => b.textContent?.trim() === ui(label));
 }
 
 async function flush() {

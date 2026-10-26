@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 // Ontology Graph 프레시니스 배지 순수 로직 (ticket d22b83b4, DESIGN.md 축 5).
 //
 // research-ontology.md §8.6 point 6: "Track dirty_ratio per graph; the UI
@@ -44,26 +45,26 @@ export function dirtyRatioToFreshPercent(dirtyRatio: number): number {
 
 export function freshnessBadge(input: FreshnessInput): FreshnessBadge {
   if (input.status === 'error') {
-    return { tone: 'error', headline: 'Graph build failed', detail: null };
+    return { tone: 'error', headline: translate('Graph build failed'), detail: null };
   }
   if (input.status === 'building' || !input.commit) {
-    return { tone: 'building', headline: 'Building graph…', detail: null };
+    return { tone: 'building', headline: translate('Building graph…'), detail: null };
   }
 
   const sha = shortSha(input.commit);
   const driftDetail = input.freshnessError
-    ? `Unable to check current HEAD (${input.freshnessError})`
+    ? translate('Unable to check current HEAD ({0})', { 0: input.freshnessError })
     : input.behind == null
     ? null
     : input.behind === 0
-    ? 'Up to date with current HEAD'
-    : `${input.behind} commit${input.behind === 1 ? '' : 's'} behind current HEAD`;
+    ? translate('Up to date with current HEAD')
+    : translate('{0} commit{1} behind current HEAD', { 0: input.behind, 1: input.behind === 1 ? '' : translate('s') });
 
   if (input.dirtyRatio != null) {
     const pct = dirtyRatioToFreshPercent(input.dirtyRatio);
     return {
       tone: input.dirtyRatio > 0 || (input.behind ?? 0) > 0 ? 'stale' : 'fresh',
-      headline: `Graph is ${pct}% fresh as of ${sha}`,
+      headline: translate('Graph is {0}% fresh as of {1}', { 0: pct, 1: sha }),
       detail: driftDetail,
     };
   }
@@ -71,14 +72,14 @@ export function freshnessBadge(input: FreshnessInput): FreshnessBadge {
   // dirty_ratio를 아직 측정할 수 없다(엣지가 없거나 스케줄러 미배선) —
   // 커밋 드리프트만으로 헤드라인을 구성한다.
   if (input.behind == null) {
-    return { tone: 'unknown', headline: `Indexed at ${sha}`, detail: driftDetail };
+    return { tone: 'unknown', headline: translate('Indexed at {0}', { 0: sha }), detail: driftDetail };
   }
   if (input.behind === 0) {
-    return { tone: 'fresh', headline: `Graph is up to date as of ${sha}`, detail: null };
+    return { tone: 'fresh', headline: translate('Graph is up to date as of {0}', { 0: sha }), detail: null };
   }
   return {
     tone: 'stale',
-    headline: `Graph is ${input.behind} commit${input.behind === 1 ? '' : 's'} behind HEAD (indexed at ${sha})`,
+    headline: translate('Graph is {0} commit{1} behind HEAD (indexed at {2})', { 0: input.behind, 1: input.behind === 1 ? '' : translate('s'), 2: sha }),
     detail: null,
   };
 }

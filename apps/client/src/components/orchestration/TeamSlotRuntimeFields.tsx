@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import RuntimeSelectionFields from '../runtime/RuntimeSelectionFields';
 import React from 'react';
 import { tokens } from '../../tokens';
@@ -75,10 +77,10 @@ export function slotDraftFromRuntime(rt: OrchestrationSlotRuntime | null): SlotD
  * its submit button and explain why in the same place.
  */
 export function slotDraftProblem(draft: SlotDraft): string | null {
-  if (!draft.manager_agent_id) return 'Pick a Runtime Host — the machine this member runs on.';
-  if (!draft.runtime.runtime) return 'Pick a CLI.';
+  if (!draft.manager_agent_id) return translate('Pick a Runtime Host — the machine this member runs on.');
+  if (!draft.runtime.runtime) return translate('Pick a CLI.');
   if (!draft.runtime.strategy || !draft.runtime.permissionMode) {
-    return 'Pick an execution strategy and a permission tier.';
+    return translate('Pick an execution strategy and a permission tier.');
   }
   return null;
 }
@@ -109,6 +111,7 @@ export default function TeamSlotRuntimeFields({
   backendProfiles: ClaudeBackendProfile[];
   disabled?: boolean;
 }) {
+  useLocale();
   const cli = value.runtime.runtime || '';
   const patch = (next: Partial<SlotDraft>) => onChange({ ...value, ...next });
 
@@ -137,14 +140,12 @@ export default function TeamSlotRuntimeFields({
         }}
       />
       <Hint>
-        No folder here — each mission picks its projects, and this member works in a project&apos;s folder on this
-        host (Projects → host folders).
-      </Hint>
+        {translate('No folder here — each mission picks its projects, and this member works in a project\'s folder on this host (Projects → host folders).')}</Hint>
 
       {/* ── Optional auth / backend ─────────────────────────────────────── */}
       {cli && (
         <Select
-          label="CLI credential (optional)"
+          label={translate('CLI credential (optional)')}
           value={value.credential_id}
           disabled={disabled}
           options={[
@@ -156,12 +157,12 @@ export default function TeamSlotRuntimeFields({
       )}
       {showBackendProfile && (
         <Select
-          label="Claude backend profile (optional)"
+          label={translate('Claude backend profile (optional)')}
           value={value.cli_runtime_profile}
           disabled={disabled}
           options={[
-            { value: '', label: 'Anthropic (default)' },
-            { value: 'none', label: 'Anthropic (no custom backend)' },
+            { value: '', label: translate('Anthropic (default)') },
+            { value: 'none', label: translate('Anthropic (no custom backend)') },
             ...backendProfiles.map((p) => ({ value: p.id, label: p.name })),
           ]}
           onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ cli_runtime_profile: e.target.value })}
@@ -172,5 +173,6 @@ export default function TeamSlotRuntimeFields({
 }
 
 function Hint({ children }: { children: React.ReactNode }) {
+  useLocale();
   return <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -8, lineHeight: 1.5 }}>{children}</div>;
 }

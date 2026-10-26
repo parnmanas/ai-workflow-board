@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import { Droppable } from '@hello-pangea/dnd';
 import type { TicketCard as TicketCardRow } from '../../types';
@@ -31,6 +33,7 @@ export default function StatusLane({
   projectNameFor,
   onTagClick,
 }: StatusLaneProps) {
+  useLocale();
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
@@ -54,7 +57,7 @@ export default function StatusLane({
 
   return (
     <section
-      aria-label={`${label} lane`}
+      aria-label={translate('{0} lane', { 0: label })}
       data-status-lane={status}
       style={{
         minWidth: 270,
@@ -92,7 +95,7 @@ export default function StatusLane({
         {onQuickAdd && (
           <button
             type="button"
-            aria-label={`${label} 에 티켓 빠르게 추가`}
+            aria-label={translate('{0} 에 티켓 빠르게 추가', { 0: label })}
             aria-expanded={adding}
             onClick={() => setAdding((v) => !v)}
             style={{
@@ -115,10 +118,10 @@ export default function StatusLane({
         >
           <input
             autoFocus
-            aria-label={`${label} 새 티켓 제목`}
+            aria-label={translate('{0} 새 티켓 제목', { 0: label })}
             value={title}
             disabled={busy}
-            placeholder="제목 입력 후 Enter"
+            placeholder={translate('제목 입력 후 Enter')}
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Escape') { setAdding(false); setTitle(''); } }}
             style={{
@@ -147,7 +150,7 @@ export default function StatusLane({
               cursor: busy || !title.trim() ? 'default' : 'pointer',
               opacity: busy || !title.trim() ? 0.6 : 1,
             }}
-          >추가</button>
+          >{translate('추가')}</button>
         </form>
       )}
 

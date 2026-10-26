@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
 // 수신 동의 재확인 안내 화면의 규칙(docs/marketing.md "동의 재확인 안내").
 //
 // 서버가 정본이다(apps/server/src/common/marketing/consent-notice.ts · marketing-constants.ts). 화면이 저장 전에 보여 주는 판정

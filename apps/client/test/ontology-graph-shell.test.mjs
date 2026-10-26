@@ -38,7 +38,7 @@ test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨
   assert.match(canvasSource, /allowInvalidContainer: true/);
   assert.match(canvasSource, /hideEdgesOnMove: snapshot\.edges\.length > 2_000/);
   assert.match(canvasSource, /getState\(\)\.ratio > 1\.7/);
-  assert.match(canvasSource, /연결 \{selected\.degree\}개/);
+  assert.match(canvasSource, /translate\(["\x27]연결["\x27]\)\} \{selected\.degree\}/);
   assert.match(canvasSource, /type: ontologyType, \.\.\.nodeData/);
   assert.match(canvasSource, /type: ontologyType, \.\.\.edgeData/);
   assert.doesNotMatch(canvasSource, /\.\.\.node,\s*\n\s*cluster/);

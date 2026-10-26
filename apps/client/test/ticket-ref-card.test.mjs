@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 티켓 참조 카드 렌더 계약 테스트 (에픽 bf65ca00 · Phase 1 · S2).
 //
 // renderMarkdown 이 `@[ticket:<id>|title]` 토큰을 인터랙티브 TicketRefCard 로
@@ -46,7 +47,7 @@ test('티켓 토큰 → 인터랙티브 카드(제목·클릭 버튼·aria)', ()
   assert.match(html, /로그인 버튼 버그/); // 제목 라벨
   assert.match(html, /data-ticket-ref="abc-123"/); // id 를 실어 클릭 대상 식별
   assert.match(html, /<button/); // 포커스 가능한 인터랙티브 요소
-  assert.match(html, /aria-label="티켓 열기: 로그인 버튼 버그"/);
+  assert.match(html, uiPattern('{0}티켓 열기: {1}', {0: '', 1: '로그인 버튼 버그'}));
   assert.match(html, /확인해줘/); // 앞뒤 본문 보존
   assert.match(html, /방금 만들었어/);
 });
@@ -54,7 +55,7 @@ test('티켓 토큰 → 인터랙티브 카드(제목·클릭 버튼·aria)', ()
 test('title 없는 티켓 토큰 → id 를 라벨로 폴백', () => {
   const html = render('@[ticket:ffffffff-1111-2222-3333-444444444444]');
   assert.match(html, /data-ticket-ref="ffffffff-1111-2222-3333-444444444444"/);
-  assert.match(html, /aria-label="티켓 열기: ffffffff-1111-2222-3333-444444444444"/);
+  assert.match(html, uiPattern('{0}티켓 열기: {1}', {0: '', 1: 'ffffffff-1111-2222-3333-444444444444'}));
 });
 
 test('기존 멘션 pill 은 회귀 없음(카드로 바뀌지 않음)', () => {
@@ -89,10 +90,10 @@ test('티켓 토큰 없는 plain 텍스트는 카드 0', () => {
 
 test('F-1: action prop → 한글 배지 + aria 에 액션·제목', () => {
   const html = renderCard({ id: 'T-1', title: '로그인 버그', action: 'move' });
-  assert.match(html, /이동/); // '이동' 한글 배지
+  assert.match(html, uiPattern("이동")); // '이동' 한글 배지
   assert.match(html, /로그인 버그/); // 제목 라벨
   assert.match(html, /data-ticket-ref="T-1"/); // 클릭 대상 식별
-  assert.match(html, /aria-label="티켓 이동 — 티켓 열기: 로그인 버그"/);
+  assert.match(html, uiPattern('{0}티켓 열기: {1}', {0: ui('티켓 {0} — ', {0: ui('이동')}), 1: '로그인 버그'}));
 });
 
 test('F-1: 알 수 없는 action → 코드 문자열 그대로 배지 노출', () => {
@@ -112,8 +113,8 @@ test('F-1: 확장 action 코드 → 한글 배지 (agent-manager 라벨과 일�
     ['propose', '이동 제안'],
   ]) {
     const html = renderCard({ id: 'T-x', title: '작업', action });
-    assert.match(html, new RegExp(label), `${action} → ${label} 배지`);
-    assert.match(html, new RegExp(`aria-label="티켓 ${label} — 티켓 열기: 작업"`));
+    assert.match(html, uiPattern(label), `${action} → ${label} 배지`);
+    assert.match(html, uiPattern("{0}티켓 열기: {1}", {0: ui("티켓 {0} — ", {0: ui(label)}), 1: "작업"}));
   }
 });
 
@@ -127,15 +128,15 @@ test('F-1: comment/reject action 코드 → 한글 배지 (agent-manager 라벨�
     ['reject', '반려'],
   ]) {
     const html = renderCard({ id: 'T-x', title: '작업', action });
-    assert.match(html, new RegExp(label), `${action} → ${label} 배지`);
-    assert.match(html, new RegExp(`aria-label="티켓 ${label} — 티켓 열기: 작업"`));
+    assert.match(html, uiPattern(label), `${action} → ${label} 배지`);
+    assert.match(html, uiPattern("{0}티켓 열기: {1}", {0: ui("티켓 {0} — ", {0: ui(label)}), 1: "작업"}));
   }
 });
 
 test('F-1: action 미지정(content-token 경로) → 배지 없음, 기존 인라인 카드 유지', () => {
   const html = renderCard({ id: 'T-2', title: '순수제목' });
-  assert.doesNotMatch(html, /이동|생성|수정|코멘트/); // 액션 배지 없음
-  assert.match(html, /aria-label="티켓 열기: 순수제목"/); // 기존 aria 그대로
+  assert.doesNotMatch(html, uiPattern("수정")); // 액션 배지 없음
+  assert.match(html, uiPattern('{0}티켓 열기: {1}', {0: '', 1: '순수제목'})); // 기존 aria 그대로
   assert.match(html, /data-ticket-ref="T-2"/);
 });
 
@@ -146,7 +147,7 @@ test('F2-4 ⓑ: propose → 승인 변형(🗳️ + data-ticket-approval) + deta
   const html = renderCard({ id: 'T-p', title: '제안 티켓', action: 'propose', detail: 'Review' });
   assert.match(html, /data-ticket-approval=""/); // 승인 변형 표식
   assert.match(html, /🗳️/); // 투표 아이콘(일반 🎫 아님)
-  assert.match(html, /이동 제안/); // action 배지
+  assert.match(html, uiPattern("이동 제안")); // action 배지
   assert.match(html, /→ Review/); // detail 배지(제안 대상 컬럼)
   assert.match(html, /data-ticket-ref="T-p"/);
 });
@@ -154,7 +155,7 @@ test('F2-4 ⓑ: propose → 승인 변형(🗳️ + data-ticket-approval) + deta
 test('F2-4 ⓑ: consensus → 승인 변형이되 detail 없으면 detail 배지 없음', () => {
   const html = renderCard({ id: 'T-c', title: '합의 티켓', action: 'consensus' });
   assert.match(html, /data-ticket-approval=""/);
-  assert.match(html, /합의/);
+  assert.match(html, uiPattern("합의"));
   assert.doesNotMatch(html, /→\s/); // detail 미지정 → 화살표 배지 없음
 });
 

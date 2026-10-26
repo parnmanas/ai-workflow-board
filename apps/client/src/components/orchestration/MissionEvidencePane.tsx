@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -30,6 +32,7 @@ export default function MissionEvidencePane({
   refreshKey: string | number;
   onSelectStep: (stepId: string) => void;
 }) {
+  useLocale();
   const [items, setItems] = useState<OrchestrationEvidenceItem[] | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [lightboxId, setLightboxId] = useState<string | null>(null);
@@ -45,14 +48,14 @@ export default function MissionEvidencePane({
         }
       })
       .catch((e: any) => {
-        if (alive) setFailed(e?.message || 'Failed to load evidence');
+        if (alive) setFailed(e?.message || translate('Failed to load evidence'));
       });
     return () => {
       alive = false;
     };
   }, [missionId, accountId, refreshKey]);
 
-  const byId = useMemo(() => new Map((items ?? []).map((i) => [i.id, i])), [items]);
+  const byId = useMemo(() => new Map((items ?? []).map((i) => [i.id, i])), [items, getLocale()]);
   const load = useCallback(
     async (meta: EvidenceMediaMeta) => {
       const item = byId.get(meta.id);
@@ -69,15 +72,12 @@ export default function MissionEvidencePane({
     return <div style={{ fontSize: 12, color: tokens.colors.dangerLight, padding: 16 }}>{failed}</div>;
   }
   if (items === null) {
-    return <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: 16 }}>Loading evidence…</div>;
+    return <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: 16 }}>{translate('Loading evidence…')}</div>;
   }
   if (items.length === 0) {
     return (
       <div data-testid="evidence-empty" style={{ fontSize: 12.5, color: tokens.colors.textMuted, padding: 16, lineHeight: 1.7, maxWidth: 640 }}>
-        아직 올라온 검증 증거가 없습니다. 담당 agent 는 work order 의 안내대로 자기 step 방에
-        스크린샷이나 짧은 녹화를 올리고, 사람은 미션 대화에 첨부할 수 있습니다. 이미지와
-        동영상이 여기에 step 별로 모입니다.
-      </div>
+        {translate('아직 올라온 검증 증거가 없습니다. 담당 agent 는 work order 의 안내대로 자기 step 방에 스크린샷이나 짧은 녹화를 올리고, 사람은 미션 대화에 첨부할 수 있습니다. 이미지와 동영상이 여기에 step 별로 모입니다.')}</div>
     );
   }
 
@@ -88,7 +88,7 @@ export default function MissionEvidencePane({
     const key = item.step_id ?? '__mission__';
     if (!groups.has(key)) {
       groups.set(key, {
-        title: item.step_id ? `${item.step_title || item.step_key}` : 'Mission conversation',
+        title: item.step_id ? `${item.step_title || item.step_key}` : translate('Mission conversation'),
         stepId: item.step_id,
         items: [],
       });
@@ -110,7 +110,7 @@ export default function MissionEvidencePane({
               <button
                 type="button"
                 onClick={() => onSelectStep(group.stepId!)}
-                title="이 step 의 작업 세션으로 이동"
+                title={translate('이 step 의 작업 세션으로 이동')}
                 style={{
                   border: 'none',
                   background: 'transparent',
@@ -123,7 +123,7 @@ export default function MissionEvidencePane({
                   textAlign: 'left',
                 }}
               >
-                {group.title} <span style={{ color: tokens.colors.accentSubtle, fontSize: 11 }}>→ session</span>
+                {group.title} <span style={{ color: tokens.colors.accentSubtle, fontSize: 11 }}>{translate('→ session')}</span>
               </button>
             ) : (
               <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>{group.title}</span>

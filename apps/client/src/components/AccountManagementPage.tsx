@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import PageHeader from './PageHeader';
@@ -23,17 +25,18 @@ export type AccountManagementKind =
   | 'claude-backend-profiles';
 
 const PAGE_INFO: Record<AccountManagementKind, { title: string; description: string }> = {
-  functions: { title: 'Functions', description: 'Reusable functions and execution history.' },
-  credentials: { title: 'Credentials', description: 'Manage API tokens and CLI logins.' },
-  resources: { title: 'Resources', description: 'Documents, files and links.' },
-  actions: { title: 'Actions', description: 'Manage automated actions.' },
-  qa: { title: 'QA', description: 'Manage QA scenarios and schedules.' },
-  security: { title: 'Security', description: 'Manage security profiles and schedules.' },
-  schedules: { title: 'Schedules', description: 'Manage scheduled agent tasks.' },
-  'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Profiles are global. Manage CLI backend settings.' },
+  functions: { get title() { return translate('Functions'); }, get description() { return translate('Reusable functions and execution history.'); } },
+  credentials: { get title() { return translate('Credentials'); }, get description() { return translate('Manage API tokens and CLI logins.'); } },
+  resources: { get title() { return translate('Resources'); }, get description() { return translate('Documents, files and links.'); } },
+  actions: { get title() { return translate('Actions'); }, get description() { return translate('Manage automated actions.'); } },
+  qa: { get title() { return translate('QA'); }, get description() { return translate('Manage QA scenarios and schedules.'); } },
+  security: { get title() { return translate('Security'); }, get description() { return translate('Manage security profiles and schedules.'); } },
+  schedules: { get title() { return translate('Schedules'); }, get description() { return translate('Manage scheduled agent tasks.'); } },
+  'claude-backend-profiles': { get title() { return translate('Claude Backend Profiles'); }, get description() { return translate('Profiles are global. Manage CLI backend settings.'); } },
 };
 
 export default function AccountManagementPage({ kind }: { kind: AccountManagementKind }) {
+  useLocale();
   const { currentAccountId, availableAccounts, hasPermission } = useAuth();
   const accountId = currentAccountId || '';
   const info = PAGE_INFO[kind];
@@ -80,8 +83,8 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
           ? <ClaudeBackendProfilesManager accountId={accountId} />
           : (
             <PermissionNotice
-              title="관리자 권한이 필요합니다"
-              message="Claude backend 프로필은 인스턴스 전역 설정이라 관리자만 편집할 수 있습니다."
+              title={translate('관리자 권한이 필요합니다')}
+              message={translate('Claude backend 프로필은 인스턴스 전역 설정이라 관리자만 편집할 수 있습니다.')}
             />
           );
     }
@@ -97,8 +100,7 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
         {canManageGlobalHere && ['functions', 'credentials', 'resources'].includes(kind) && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
             <input type="checkbox" checked={createGlobal} onChange={event => setCreateGlobal(event.target.checked)} />
-            Create new items as Global (shared with all accounts)
-          </label>
+            {translate('Create new items as Global (shared with all accounts)')}</label>
         )}
         {manager}
       </div>

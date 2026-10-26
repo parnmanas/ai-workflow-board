@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useState } from 'react';
 import { tokens } from '../tokens';
 import {
@@ -17,12 +19,14 @@ import { changeNativeServer, isAndroidApp } from '../native/androidBridge';
  * https 페이지에서 http 서버는 브라우저가 차단한다(경고 표시).
  */
 export default function ServerConfigField({ compact = false }: { compact?: boolean }) {
+  useLocale();
   // Android 앱은 서버 주소를 앱이 쥔다(이 화면은 그 서버가 서빙한 것이다) — 바꾸기는 앱의 연결 화면에서.
   if (isAndroidApp()) return <NativeServerButton />;
   return <WebServerConfigField compact={compact} />;
 }
 
 function NativeServerButton() {
+  useLocale();
   return (
     <button
       type="button"
@@ -33,12 +37,13 @@ function NativeServerButton() {
         borderRadius: tokens.radii.md, fontSize: 12, fontWeight: 600, cursor: 'pointer',
       }}
     >
-      다른 서버에 연결 (현재 {typeof window !== 'undefined' ? window.location.host : ''})
+      {translate('다른 서버에 연결 (현재 {0})', { 0: typeof window !== 'undefined' ? window.location.host : '' })}
     </button>
   );
 }
 
 function WebServerConfigField({ compact = false }: { compact?: boolean }) {
+  useLocale();
   const [value, setValue] = useState(() => getServerBaseUrl());
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -59,15 +64,15 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
     const r = await checkServerHealth(value);
     setChecking(false);
     setResult(r.ok
-      ? { ok: true, message: `연결됨 (db: ${r.status || 'ok'}) — 저장하면 이 서버로 전환됩니다` }
-      : { ok: false, message: r.error || '연결 실패' });
+      ? { ok: true, message: translate('연결됨 (db: {0}) — 저장하면 이 서버로 전환됩니다', { 0: r.status || 'ok' }) }
+      : { ok: false, message: r.error || translate('연결 실패') });
   };
 
   const onSave = () => {
     try {
       setServerBaseUrl(value);
     } catch (err: any) {
-      setResult({ ok: false, message: err?.message || '주소가 올바르지 않습니다' });
+      setResult({ ok: false, message: err?.message || translate('주소가 올바르지 않습니다') });
       return;
     }
     window.location.reload();
@@ -81,8 +86,7 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
         fontSize: 11, color: tokens.colors.textMuted, fontWeight: 600,
         textTransform: 'uppercase', display: 'block',
       }}>
-        Server
-      </label>
+        {translate('Server')}</label>
       <div style={{ display: 'flex', gap: 8 }}>
         <input
           type="url"
@@ -91,8 +95,8 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
           spellCheck={false}
           value={value}
           onChange={(e) => { setValue(e.target.value); setResult(null); }}
-          placeholder="비우면 이 서버 (예: https://awb.example.com)"
-          aria-label="AWB 서버 주소"
+          placeholder={translate('비우면 이 서버 (예: https://awb.example.com)')}
+          aria-label={translate('AWB 서버 주소')}
           style={{
             flex: 1, minWidth: 0, padding: '10px 14px', background: tokens.colors.surface,
             border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
@@ -102,10 +106,8 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
       </div>
       {!compact && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-          현재: {effective || '이 서버 (same-origin)'}
-          {' · '}다른 서버로 바꾸면 다시 로그인합니다.
-          크로스오리진은 그 서버의 CORS_ORIGIN에 이 앱 주소를 등록해야 합니다.
-        </div>
+          {translate('현재:')} {effective || translate('이 서버 (same-origin)')}
+          {' · '}{translate('다른 서버로 바꾸면 다시 로그인합니다. 크로스오리진은 그 서버의 CORS_ORIGIN에 이 앱 주소를 등록해야 합니다.')}</div>
       )}
       {mixedRisk && (
         <div style={{
@@ -113,8 +115,7 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
           background: `${tokens.colors.warning}15`, border: `1px solid ${tokens.colors.warning}40`,
           borderRadius: tokens.radii.sm, padding: '6px 8px',
         }}>
-          https 페이지에서 http 서버는 브라우저가 차단합니다 — 서버도 https로 열어주세요.
-        </div>
+          {translate('https 페이지에서 http 서버는 브라우저가 차단합니다 — 서버도 https로 열어주세요.')}</div>
       )}
       <div style={{ display: 'flex', gap: 8 }}>
         <button
@@ -129,7 +130,7 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
             opacity: checking || !value.trim() ? 0.6 : 1,
           }}
         >
-          {checking ? '확인 중…' : '연결 테스트'}
+          {checking ? translate('확인 중…') : translate('연결 테스트')}
         </button>
         <button
           type="button"
@@ -143,8 +144,7 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
             opacity: !dirty ? 0.6 : 1,
           }}
         >
-          서버 전환
-        </button>
+          {translate('서버 전환')}</button>
       </div>
       {result && (
         <div style={{
@@ -163,6 +163,7 @@ function WebServerConfigField({ compact = false }: { compact?: boolean }) {
 
 /** PWA 설치 버튼 — 브라우저가 beforeinstallprompt를 쏠 때만 보인다. */
 export function PwaInstallButton() {
+  useLocale();
   const [deferred, setDeferred] = useState<any>(null);
   const [installed, setInstalled] = useState(
     () => typeof window !== 'undefined' && window.matchMedia?.('(display-mode: standalone)').matches,
@@ -188,8 +189,7 @@ export function PwaInstallButton() {
   if (installed) {
     return (
       <div style={{ fontSize: 11, color: tokens.colors.successLight }}>
-        앱으로 설치되어 실행 중입니다.
-      </div>
+        {translate('앱으로 설치되어 실행 중입니다.')}</div>
     );
   }
   if (!deferred) return null;
@@ -209,7 +209,6 @@ export function PwaInstallButton() {
         cursor: 'pointer',
       }}
     >
-      앱으로 설치
-    </button>
+      {translate('앱으로 설치')}</button>
   );
 }

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import type { OrchestrationGraphSpec, OrchestrationGraphEdge, OrchestrationStep } from '../../types';
 import { tokens } from '../../tokens';
@@ -88,6 +90,7 @@ export default function PlanGraph({
   /** 미션의 step 무신호 허용 시간(분). 0 = 모름 → 카드에 리퍼 시계를 그리지 않는다. */
   stepTimeoutMinutes?: number;
 }) {
+  useLocale();
   const depths = computeDepths(steps, graph);
   const maxDepth = steps.reduce((max, s) => Math.max(max, depths.get(s.step_key) ?? 0), 0);
   const columns: OrchestrationStep[][] = Array.from({ length: maxDepth + 1 }, () => []);
@@ -110,11 +113,11 @@ export default function PlanGraph({
           >
             {graph
               ? index === 0
-                ? 'Entry · starts immediately'
-                : `Stage ${index + 1}`
+                ? translate('Entry · starts immediately')
+                : translate('Stage {0}', { 0: index + 1 })
               : index === 0
-                ? 'Wave 1 · starts immediately'
-                : `Wave ${index + 1} · after wave ${index}`}
+                ? translate('Wave 1 · starts immediately')
+                : translate('Wave {0} · after wave {1}', { 0: index + 1, 1: index })}
           </div>
           {col.map((step) => (
             <StepCard
@@ -145,6 +148,7 @@ function StepCard({
   selected: boolean;
   onClick: () => void;
 }) {
+  useLocale();
   const style = stepStyle(step.status);
   const node = graph?.nodes.find((n) => n.key === step.step_key) ?? null;
   const incoming = graph ? graph.edges.filter((e) => e.to === step.step_key && e.kind !== 'loop_back') : [];
@@ -195,7 +199,7 @@ function StepCard({
           />
         )}
         {step.attempt > 1 && (
-          <span style={{ fontSize: 9, color: tokens.colors.warningLight }}>retry {step.attempt}/{step.max_attempts}</span>
+          <span style={{ fontSize: 9, color: tokens.colors.warningLight }}>{translate('retry')} {step.attempt}/{step.max_attempts}</span>
         )}
         {node && node.kind !== 'task' && (
           <span
@@ -211,21 +215,21 @@ function StepCard({
             }}
             title={
               node.kind === 'evaluator'
-                ? 'Judges upstream work and reports a verdict that selects the next branch'
+                ? translate('Judges upstream work and reports a verdict that selects the next branch')
                 : node.kind === 'confirm'
-                  ? 'A person answers Pass/Fail here — the mission pauses until they do'
-                  : 'Only picks a branch — every edge out of it is conditional'
+                  ? translate('A person answers Pass/Fail here — the mission pauses until they do')
+                  : translate('Only picks a branch — every edge out of it is conditional')
             }
           >
-            {node.kind === 'confirm' ? 'user confirm' : node.kind}
+            {node.kind === 'confirm' ? translate('user confirm') : node.kind}
           </span>
         )}
         {node && node.max_visits > 1 && (
           <span
             style={{ fontSize: 9, color: tokens.colors.textMuted }}
-            title={`This node may run up to ${node.max_visits} times (bounded loop)`}
+            title={translate('This node may run up to {0} times (bounded loop)', { 0: node.max_visits })}
           >
-            pass {Math.max(step.visit, 1)}/{node.max_visits}
+            {translate('pass')} {Math.max(step.visit, 1)}/{node.max_visits}
           </span>
         )}
       </div>
@@ -245,7 +249,7 @@ function StepCard({
             flexShrink: 0,
           }}
         />
-        {step.assignee_name || 'unassigned'}
+        {step.assignee_name || translate('unassigned')}
       </div>
 
       {/* 어느 project 의 어느 폴더에서 도는가 — 멤버는 step 의 project 폴더(자기 Host)에서
@@ -271,7 +275,7 @@ function StepCard({
 
       {step.verdict && (
         <div style={{ marginTop: 6, fontSize: 10, color: tokens.colors.textSecondary }}>
-          verdict:{' '}
+          {translate('verdict:')}{' '}
           <span style={{ fontFamily: 'monospace', fontWeight: 700, color: tokens.colors.accent }}>{step.verdict}</span>
         </div>
       )}
@@ -341,6 +345,7 @@ function LiveActivity({
   step: OrchestrationStep;
   stepTimeoutMinutes: number;
 }) {
+  useLocale();
   const now = Date.now();
   const view = describeStepActivity(step, now);
   const quiet = describeStepQuiet(step, stepTimeoutMinutes, now);
@@ -375,11 +380,11 @@ function LiveActivity({
               style={{ color: tokens.colors.textMuted, fontWeight: 700, marginRight: 4 }}
               title={
                 view.source === 'cli'
-                  ? 'CLI 가 실제로 실행한 도구 — 에이전트의 보고와 무관하게 찍힌다'
-                  : '에이전트가 직접 남긴 진행 보고'
+                  ? translate('CLI 가 실제로 실행한 도구 — 에이전트의 보고와 무관하게 찍힌다')
+                  : translate('에이전트가 직접 남긴 진행 보고')
               }
             >
-              {view.source === 'cli' ? 'CLI' : 'REPORT'}
+              {view.source === 'cli' ? 'CLI' : translate('REPORT')}
             </span>
             {view.text}
           </div>
@@ -397,8 +402,8 @@ function LiveActivity({
           }}
           title={
             view.stalled
-              ? '디스패치된 뒤 CLI 활동이 한 번도 없습니다 — 원격 CLI 가 뜨지 못했을 수 있습니다(Runtime Host 의 매니저 로그를 확인하세요).'
-              : 'CLI 가 첫 도구를 실행하면 여기에 표시됩니다'
+              ? translate('디스패치된 뒤 CLI 활동이 한 번도 없습니다 — 원격 CLI 가 뜨지 못했을 수 있습니다(Runtime Host 의 매니저 로그를 확인하세요).')
+              : translate('CLI 가 첫 도구를 실행하면 여기에 표시됩니다')
           }
         >
           {compactActivityLabel(view)}
@@ -413,13 +418,12 @@ function LiveActivity({
             color: quiet.overdue ? tokens.colors.dangerLight : tokens.colors.textMuted,
           }}
           title={
-            `AWB 는 에이전트의 진행 보고가 ${quiet.timeoutMinutes}분간 없으면 재접속을 요청하고, ` +
-            '유예 안에 답이 없으면 이 시도를 실패로 처리합니다. CLI 활동은 이 시계를 되돌리지 않습니다 — ' +
-            'report_orchestration_progress 호출만 되돌립니다.'
+            translate('AWB 는 에이전트의 진행 보고가 {0}분간 없으면 재접속을 요청하고, ', { 0: quiet.timeoutMinutes }) +
+            translate('유예 안에 답이 없으면 이 시도를 실패로 처리합니다. CLI 활동은 이 시계를 되돌리지 않습니다 — ') +
+            translate('report_orchestration_progress 호출만 되돌립니다.')
           }
         >
-          {quiet.label} to reconnect check
-        </div>
+          {quiet.label} {translate('to reconnect check')}</div>
       )}
     </div>
   );
@@ -430,6 +434,7 @@ function LiveActivity({
  * "이 node가 무엇을 기다리는지"와 "여기서 어디로 갈라지는지"가 카드에서 바로 읽힌다.
  */
 function EdgeChip({ edge, direction }: { edge: OrchestrationGraphEdge; direction: 'in' | 'out' }) {
+  useLocale();
   const condition = describeEdgeCondition(edge);
   const color =
     edge.kind === 'loop_back'
@@ -442,8 +447,8 @@ function EdgeChip({ edge, direction }: { edge: OrchestrationGraphEdge; direction
   return (
     <span
       title={
-        `${edge.kind} edge ${edge.from} → ${edge.to}` +
-        (condition ? ` · taken when ${condition}` : ' · always taken once the source finishes')
+        translate('{0} edge {1} → {2}', { 0: edge.kind, 1: edge.from, 2: edge.to }) +
+        (condition ? translate(' · taken when {0}', { 0: condition }) : translate(' · always taken once the source finishes'))
       }
       style={{
         fontSize: 9,

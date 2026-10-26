@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, click, typeInto, React, act } from './helpers/jsdom.mjs';
@@ -6,7 +7,7 @@ import { api } from '../src/api.ts';
 import CredentialManager from '../src/components/admin/CredentialManager.tsx';
 
 function buttonsByText(container, label) {
-  return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === label);
+  return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === ui(label));
 }
 
 async function flush() {

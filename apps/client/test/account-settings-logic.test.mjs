@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // Account "Ticket dispatch" settings (docs/tickets.md → Account settings).
 // The settings moved here from boards: language, max concurrent tickets per
 // agent, done-ticket auto-archive and the dispatch pause switch.
@@ -104,7 +105,7 @@ test('pause stamps an ISO "now"; resume clears it', () => {
 const flush = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
 function inputByLabel(root, text) {
-  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === text);
+  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(text));
   assert.ok(label, `"${text}" label missing`);
   return label.parentElement.querySelector('input');
 }

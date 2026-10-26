@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, act, click, typeInto, React } from './helpers/jsdom.mjs';
@@ -19,7 +20,7 @@ const host = {
   working_dirs: ['/legacy/agent-folder'], agent_ids: ['retired-agent'],
 };
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
-const button = label => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === label);
+const button = label => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === ui(label));
 
 async function renderHosts(t, { width = 1280, admin = true, entry = '/hosts' } = {}) {
   const dom = setupDom({ width });
@@ -60,12 +61,12 @@ test('Hosts separates connection management from templates and ignores retired A
   }
   assert.equal(legacy.mock.callCount(), 0);
   for (const label of ['Host 연결', 'Refresh models', '매니저 재시작']) assert.equal(Boolean(button(label)), true, label);
-  click([...document.querySelectorAll('[role="tab"]')].find(node => node.textContent === 'Agent 템플릿'));
+  click([...document.querySelectorAll('[role="tab"]')].find(node => node.textContent === ui("Agent 템플릿")));
   await flush();
   assert.equal(document.querySelector('[role="tabpanel"]').style.overflow, 'auto');
-  assert.equal(Boolean(button('Host 연결')), false);
-  click(button('템플릿 등록'));
-  assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 등록');
+  assert.equal(Boolean(button(ui("Host 연결"))), false);
+  click(button(ui("템플릿 등록")));
+  assert.equal(document.querySelector('[role="dialog"] h2').textContent, ui("Agent 템플릿 등록"));
 });
 
 for (const width of [390, 768, 1024]) {
@@ -74,12 +75,12 @@ test(`narrow Hosts (${width}px) returns from details to the Host list and pairin
   assert.equal(document.querySelector('[data-testid="runtime-hosts-list"]').parentElement.style.display, 'flex');
   click([...document.querySelectorAll('button')].find(node => node.textContent.includes('Build host')));
   assert.equal(document.querySelector('[data-testid="runtime-hosts-list"]').parentElement.style.display, 'none');
-  click(button('← Host 목록'));
+  click(button(ui("← Host 목록")));
   assert.equal(document.querySelector('[data-testid="runtime-hosts-list"]').parentElement.style.display, 'flex');
-  click(button('Host 연결'));
+  click(button(ui("Host 연결")));
   await flush();
-  assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Runtime Host 연결');
-  assert.ok(document.querySelector('[role="dialog"]').textContent.includes('Host 이름 (선택 사항)'));
+  assert.equal(document.querySelector('[role="dialog"] h2').textContent, ui("Runtime Host 연결"));
+  assert.ok(document.querySelector('[role="dialog"]').textContent.includes(ui("Host 이름 (선택 사항)")));
 });
 
 }
@@ -87,14 +88,14 @@ test(`narrow Hosts (${width}px) returns from details to the Host list and pairin
 test('Hosts retains its admin permission boundary even on the template URL', async (t) => {
   const { list } = await renderHosts(t, { admin: false, entry: '/hosts?tab=templates' });
   assert.equal(document.querySelectorAll('[role="tab"]').length, 0);
-  assert.ok(document.body.textContent.includes('관리자 권한이 필요합니다'));
+  assert.ok(document.body.textContent.includes(ui("관리자 권한이 필요합니다")));
   assert.equal(list.mock.callCount(), 0);
 });
 
 test('template tab can be opened directly without mounting the Runtime Hosts console', async (t) => {
   const { list } = await renderHosts(t, { entry: '/hosts?tab=templates' });
-  assert.equal(document.querySelector('[role="tab"][aria-selected="true"]').textContent, 'Agent 템플릿');
-  assert.equal(Boolean(button('템플릿 등록')), true);
+  assert.equal(document.querySelector('[role="tab"][aria-selected="true"]').textContent, ui("Agent 템플릿"));
+  assert.equal(Boolean(button(ui("템플릿 등록"))), true);
   assert.equal(list.mock.callCount(), 0);
 });
 
@@ -112,15 +113,15 @@ test('renaming a Host updates the list and details using host_id without restart
   try {
     await flush();
     assert.equal(document.querySelector('[data-testid="cached-host-name"]').textContent, 'Build host');
-    click(button('이름 변경'));
-    typeInto(document.querySelector('input[aria-label="Host 이름"]'), '  Ralf  ');
-    click(button('저장'));
+    click(button(ui("이름 변경")));
+    typeInto(document.querySelector(`input[aria-label="${ui("Host 이름")}"]`), '  Ralf  ');
+    click(button(ui("저장")));
     await flush();
     assert.deepEqual(rename.mock.calls[0].arguments, ['runtime-host', 'Ralf']);
     assert.equal(document.querySelector('h2').textContent, 'Ralf');
     assert.ok(document.querySelector('[data-testid="runtime-hosts-list"]').textContent.includes('Ralf'));
     assert.equal(document.querySelector('[data-testid="cached-host-name"]').textContent, 'Ralf');
-    assert.equal(Boolean(document.querySelector('input[aria-label="Host 이름"]')), false,
+    assert.equal(Boolean(document.querySelector(`input[aria-label="${ui("Host 이름")}"]`)), false,
       [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent).join('\n'));
     assert.equal(restart.mock.callCount(), 0);
   } finally { labelView.unmount(); }
@@ -129,16 +130,16 @@ test('renaming a Host updates the list and details using host_id without restart
 test('Host rename can be cancelled and keeps the draft visible when saving fails', async (t) => {
   const rename = t.mock.method(api, 'renameRuntimeHost', async () => { throw new Error('Host rename failed'); });
   await renderHosts(t);
-  click(button('이름 변경'));
-  typeInto(document.querySelector('input[aria-label="Host 이름"]'), 'cancelled');
-  click(button('취소'));
+  click(button(ui("이름 변경")));
+  typeInto(document.querySelector(`input[aria-label="${ui("Host 이름")}"]`), 'cancelled');
+  click(button(ui("취소")));
   assert.equal(rename.mock.callCount(), 0);
   assert.equal(document.querySelector('h2').textContent, 'Build host');
-  click(button('이름 변경'));
-  typeInto(document.querySelector('input[aria-label="Host 이름"]'), 'retry me');
-  click(button('저장'));
+  click(button(ui("이름 변경")));
+  typeInto(document.querySelector(`input[aria-label="${ui("Host 이름")}"]`), 'retry me');
+  click(button(ui("저장")));
   await flush();
-  assert.equal(document.querySelector('input[aria-label="Host 이름"]').value, 'retry me');
+  assert.equal(document.querySelector(`input[aria-label="${ui("Host 이름")}"]`).value, 'retry me');
   assert.ok(document.querySelector('[role="alert"]').textContent.includes('Host rename failed'));
   assert.equal(document.querySelector('h2').textContent, 'Build host');
 });

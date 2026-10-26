@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
@@ -44,6 +47,7 @@ interface FixPreview {
  * URL `?cli=&file=` 이 선택을 들고 있어 새로고침·공유해도 같은 파일이 열린다.
  */
 export default function MemoryHostView({ managerId, hosts }: { managerId: string; hosts: MemoryHostInfo[] }) {
+  useLocale();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   const { showToast } = useToast();
@@ -74,7 +78,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
     try {
       setSnapshot(await api.getMemorySnapshot(managerId, { checkPaths: true }));
     } catch (err: any) {
-      setError(err?.message || 'Failed to read memory from this host.');
+      setError(err?.message || translate('Failed to read memory from this host.'));
     } finally {
       setLoading(false);
     }
@@ -82,8 +86,8 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
 
   useEffect(() => { void load(); }, [load]);
 
-  const analysis = useMemo(() => (snapshot ? analyzeSnapshot(snapshot) : null), [snapshot]);
-  const detected = useMemo(() => snapshot?.clis.filter((c) => c.detected) ?? [], [snapshot]);
+  const analysis = useMemo(() => (snapshot ? analyzeSnapshot(snapshot) : null), [snapshot, getLocale()]);
+  const detected = useMemo(() => snapshot?.clis.filter((c) => c.detected) ?? [], [snapshot, getLocale()]);
   const cli: CliMemorySnapshot | null = detected.find((c) => c.cli === cliId) ?? detected[0] ?? null;
   const selectedFile = cli
     ? cli.files.find((f) => f.path === selectedPath && !f.shared_with) ?? cli.files.find((f) => f.path === selectedPath) ?? null
@@ -95,7 +99,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
 
   const guardLeave = useCallback(async () => {
     if (!dirtyRef.current) return true;
-    const ok = await confirm({ title: 'Discard unsaved changes?', message: 'The file you are editing has changes that are not saved on the host.', confirmLabel: 'Discard' });
+    const ok = await confirm({ title: translate('Discard unsaved changes?'), message: translate('The file you are editing has changes that are not saved on the host.'), confirmLabel: translate('Discard') });
     if (ok) dirtyRef.current = false;
     return ok;
   }, [confirm]);
@@ -139,13 +143,13 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
         .map(async (t) => ({ file: basenameOf(t.path), content: (await fullContent(fix.cli, t)).content ?? '' })));
       const before = index.exists ? index.content ?? '' : '';
       const { content } = rebuildIndex(before, topics);
-      return { title: `Rebuild ${target.label}`, cli: fix.cli, path: fix.path, before, after: content, baseHash: index.exists ? index.hash : null };
+      return { title: translate('Rebuild {0}', { 0: target.label }), cli: fix.cli, path: fix.path, before, after: content, baseHash: index.exists ? index.hash : null };
     }
     if ((fix.kind === 'dedupe_lines' || fix.kind === 'normalize_entries') && target) {
       const full = await fullContent(fix.cli, target);
       const before = full.content ?? '';
       const after = fix.kind === 'dedupe_lines' ? dedupeLines(before) : serializeEntries(parseEntries(before));
-      return { title: `${fix.kind === 'dedupe_lines' ? 'Remove repeated lines in' : 'Normalize'} ${target.label}`, cli: fix.cli, path: fix.path, before, after, baseHash: full.hash };
+      return { title: `${fix.kind === 'dedupe_lines' ? translate('Remove repeated lines in') : translate('Normalize')} ${target.label}`, cli: fix.cli, path: fix.path, before, after, baseHash: full.hash };
     }
     return null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -165,30 +169,30 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
       if (fix.kind === 'link_home') {
         const slot = fileOf(fix.cli, fix.path);
         const ok = await confirm({
-          title: 'Link to the operator copy?',
-          message: `${slot?.display_path ?? fix.path} will become a link to ${fix.target}, so sessions using that credential load the same instructions and stay in sync.`,
-          confirmLabel: 'Link',
+          title: translate('Link to the operator copy?'),
+          message: translate('{0} will become a link to {1}, so sessions using that credential load the same instructions and stay in sync.', { 0: slot?.display_path ?? fix.path, 1: fix.target }),
+          confirmLabel: translate('Link'),
           danger: false,
         });
         if (!ok) return;
         const res = await api.linkMemoryFile(managerId, { cli: fix.cli, path: fix.path, target: fix.target, base_hash: slot?.exists ? slot.hash : null });
-        showToast(res.linked ? 'Linked.' : 'Symbolic links are not available here — copied instead (re-link after edits).', res.linked ? 'success' : 'info');
+        showToast(res.linked ? translate('Linked.') : translate('Symbolic links are not available here — copied instead (re-link after edits).'), res.linked ? 'success' : 'info');
         await load();
         return;
       }
       if (fix.kind === 'delete_empty') {
         const target = fileOf(fix.cli, fix.path);
-        const ok = await confirm({ title: `Delete ${target?.label ?? 'file'}?`, message: `${target?.display_path ?? fix.path} is empty. A backup is kept in History.`, confirmLabel: 'Delete' });
+        const ok = await confirm({ title: translate('Delete {0}?', { 0: target?.label ?? 'file' }), message: translate('{0} is empty. A backup is kept in History.', { 0: target?.display_path ?? fix.path }), confirmLabel: translate('Delete') });
         if (!ok) return;
         await api.deleteMemoryFile(managerId, { cli: fix.cli, path: fix.path, ...(target?.hash ? { base_hash: target.hash } : {}) });
         setSnapshot((prev) => (prev ? markSnapshotFileDeleted(prev, fix.cli, fix.path) : prev));
-        showToast('Deleted.', 'success');
+        showToast(translate('Deleted.'), 'success');
         return;
       }
       const preview = await computeFix(fix);
       if (preview) setFixPreview(preview);
     } catch (err: any) {
-      showToast(err?.message || 'Could not prepare the fix.', 'error');
+      showToast(err?.message || translate('Could not prepare the fix.'), 'error');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot, managerId, confirm, showToast, load, computeFix, fullContent]);
@@ -200,10 +204,10 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
       const info = await api.writeMemoryFile(managerId, { cli: fixPreview.cli, path: fixPreview.path, content: fixPreview.after, base_hash: fixPreview.baseHash, reason: 'fix' });
       setSnapshot((prev) => (prev ? patchSnapshotFile(prev, fixPreview.cli, info) : prev));
       setEditorNonce((n) => n + 1);
-      showToast('Fixed — the previous version is in History.', 'success');
+      showToast(translate('Fixed — the previous version is in History.'), 'success');
       setFixPreview(null);
     } catch (err: any) {
-      showToast(err?.message || 'Fix failed.', 'error');
+      showToast(err?.message || translate('Fix failed.'), 'error');
     } finally {
       setFixing(false);
     }
@@ -214,14 +218,14 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
     const safe = findings.filter((f) => isSafeFix(f.fix));
     if (!safe.length) return;
     const ok = await confirm({
-      title: `Fix ${safe.length} issue${safe.length === 1 ? '' : 's'}?`,
+      title: translate('Fix {0} issue{1}?', { 0: safe.length, 1: safe.length === 1 ? '' : translate('s') }),
       message: (
         <div>
-          <div style={{ marginBottom: 6 }}>These changes keep every fact; each file is backed up first.</div>
+          <div style={{ marginBottom: 6 }}>{translate('These changes keep every fact; each file is backed up first.')}</div>
           <ul style={{ margin: 0, paddingLeft: 18 }}>{safe.map((f) => <li key={f.id}>{f.title}</li>)}</ul>
         </div>
       ),
-      confirmLabel: 'Fix all',
+      confirmLabel: translate('Fix all'),
       danger: false,
     });
     if (!ok) return;
@@ -246,7 +250,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
       }
     }
     setFixing(false);
-    showToast(failed.length ? `Fixed ${done}; ${failed.length} failed — ${failed[0]}` : `Fixed ${done} issue${done === 1 ? '' : 's'}.`, failed.length ? 'error' : 'success');
+    showToast(failed.length ? translate('Fixed {0}; {1} failed — {2}', { 0: done, 1: failed.length, 2: failed[0] }) : translate('Fixed {0} issue{1}.', { 0: done, 1: done === 1 ? '' : translate('s') }), failed.length ? 'error' : 'success');
     setEditorNonce((n) => n + 1);
     await load();
   };
@@ -255,7 +259,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
     if (modal?.kind !== 'new' || !snapshot || !cli) return;
     const name = /\.md$/i.test(newName.trim()) ? newName.trim() : `${newName.trim()}.md`;
     if (!isSafeMemoryFileName(name)) {
-      showToast('Use letters, numbers, dashes or underscores, ending in .md.', 'error');
+      showToast(translate('Use letters, numbers, dashes or underscores, ending in .md.'), 'error');
       return;
     }
     const info = newFileInDir(snapshot.platform, modal.dir, name);
@@ -277,7 +281,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
   if (error && !snapshot) {
     return (
       <>
-        <PageHeader title="Memory" description="LLM CLI memory on this Runtime Host." />
+        <PageHeader title={translate('Memory')} description={translate('LLM CLI memory on this Runtime Host.')} />
         <div style={{ padding: 20 }}><ErrorState message={error} onRetry={() => void load()} /></div>
       </>
     );
@@ -285,18 +289,18 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
 
   const header = (
     <PageHeader
-      title={`${snapshot?.manager_name || 'Runtime Host'} · Memory`}
+      title={translate('{0} · Memory', { 0: snapshot?.manager_name || "Runtime Host" })}
       description={snapshot
-        ? `${detected.length} CLI${detected.length === 1 ? '' : 's'} on ${snapshot.hostname}${snapshot.platform ? ` · ${snapshot.platform}` : ''} · scanned ${new Date(snapshot.generated_at).toLocaleTimeString()}${snapshot.content_budget_exhausted ? ' · some large files load on open' : ''}`
-        : 'Scanning memory files on this host…'}
+        ? translate('{0} CLI{1} on {2}{3} · scanned {4}{5}', { 0: detected.length, 1: detected.length === 1 ? '' : translate('s'), 2: snapshot.hostname, 3: snapshot.platform ? ` · ${snapshot.platform}` : '', 4: new Date(snapshot.generated_at).toLocaleTimeString(getLocaleTag()), 5: snapshot.content_budget_exhausted ? translate(' · some large files load on open') : '' })
+        : translate('Scanning memory files on this host…')}
       actions={(
         <div style={{ display: 'flex', gap: 6 }}>
-          <Button size="sm" variant="ghost" onClick={() => navigate('/memory?tab=hosts')}>Hosts</Button>
+          <Button size="sm" variant="ghost" onClick={() => navigate('/memory?tab=hosts')}>{translate('Hosts')}</Button>
           <Button size="sm" variant="secondary" disabled={loading} onClick={() => void (async () => { if (await guardLeave()) { setEditorNonce((n) => n + 1); await load(); } })()}>
-            {loading ? 'Scanning…' : 'Refresh'}
+            {loading ? translate('Scanning…') : translate('Refresh')}
           </Button>
-          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => setModal({ kind: 'import' })}>Import</Button>
-          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => setModal({ kind: 'export' })}>Export</Button>
+          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => setModal({ kind: 'import' })}>{translate('Import')}</Button>
+          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => setModal({ kind: 'export' })}>{translate('Export')}</Button>
         </div>
       )}
     />
@@ -306,7 +310,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
     return (
       <>
         {header}
-        <div style={{ padding: 20, color: tokens.colors.textMuted, fontSize: 13 }}>Reading memory files from the host…</div>
+        <div style={{ padding: 20, color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Reading memory files from the host…')}</div>
       </>
     );
   }
@@ -315,7 +319,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
     return (
       <>
         {header}
-        <div style={{ padding: 20, color: tokens.colors.textMuted, fontSize: 13 }}>No supported LLM CLI has a home on this host yet.</div>
+        <div style={{ padding: 20, color: tokens.colors.textMuted, fontSize: 13 }}>{translate('No supported LLM CLI has a home on this host yet.')}</div>
       </>
     );
   }
@@ -343,7 +347,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
         );
       })}
       <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>
-        host health <ScoreBadge score={analysis.score} />
+        {translate('host health')} <ScoreBadge score={analysis.score} />
       </span>
     </div>
   );
@@ -430,7 +434,7 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
                   color: pane === p ? tokens.colors.accentSubtle : tokens.colors.textSecondary,
                 }}
               >
-                {p === 'files' ? 'Files' : p === 'editor' ? (selectedFile ? 'Editor' : 'Overview') : `Analysis (${cliFindings.length})`}
+                {p === 'files' ? translate('Files') : p === 'editor' ? (selectedFile ? translate('Editor') : translate('Overview')) : translate('Analysis ({0})', { 0: cliFindings.length })}
               </button>
             ))}
           </div>
@@ -454,12 +458,12 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
           maxWidth={900}
           footer={(
             <>
-              <Button variant="secondary" onClick={() => setFixPreview(null)}>Cancel</Button>
-              <Button variant="primary" disabled={fixing || fixPreview.before === fixPreview.after} onClick={applyPreview}>{fixing ? 'Writing…' : 'Apply fix'}</Button>
+              <Button variant="secondary" onClick={() => setFixPreview(null)}>{translate('Cancel')}</Button>
+              <Button variant="primary" disabled={fixing || fixPreview.before === fixPreview.after} onClick={applyPreview}>{fixing ? translate('Writing…') : translate('Apply fix')}</Button>
             </>
           )}
         >
-          <MemoryDiffView before={fixPreview.before} after={fixPreview.after} maxHeight={480} emptyLabel="Already fine — nothing to change." />
+          <MemoryDiffView before={fixPreview.before} after={fixPreview.after} maxHeight={480} emptyLabel={translate('Already fine — nothing to change.')} />
         </Modal>
       )}
 
@@ -467,19 +471,19 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
         <Modal
           isOpen
           onClose={() => setModal(null)}
-          title={`New file in ${modal.dir.label}`}
+          title={translate('New file in {0}', { 0: modal.dir.label })}
           maxWidth={520}
           footer={(
             <>
-              <Button variant="secondary" onClick={() => setModal(null)}>Cancel</Button>
-              <Button variant="primary" disabled={!newName.trim()} onClick={createNew}>Continue</Button>
+              <Button variant="secondary" onClick={() => setModal(null)}>{translate('Cancel')}</Button>
+              <Button variant="primary" disabled={!newName.trim()} onClick={createNew}>{translate('Continue')}</Button>
             </>
           )}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, color: tokens.colors.textPrimary }}>
             <div style={{ color: tokens.colors.textSecondary }}>
-              In <span style={{ fontFamily: 'ui-monospace, Menlo, monospace' }}>{modal.dir.display_path}</span>.
-              {modal.dir.kind === 'auto_topic' ? ' Remember to add a line for it in MEMORY.md — or run "Rebuild index" afterwards.' : ''}
+              {translate('In')} <span style={{ fontFamily: 'ui-monospace, Menlo, monospace' }}>{modal.dir.display_path}</span>.
+              {modal.dir.kind === 'auto_topic' ? translate(' Remember to add a line for it in MEMORY.md — or run "Rebuild index" afterwards.') : ''}
             </div>
             <input
               autoFocus

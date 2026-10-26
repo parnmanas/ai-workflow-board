@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 회귀 테스트 — approve 등급을 승인 요청이 불가능한 런타임에 고를 때 운영자에게
 // 경고가 보이는지 (ticket 5851e435, 리뷰 라운드2).
 //
@@ -56,7 +57,7 @@ test('approve + 승인 브리지 없는 런타임 → 경고가 보인다', asyn
     const warning = h.warning();
     assert.ok(warning, 'approve 를 골랐는데 경고가 렌더되지 않았다');
     assert.match(warning.textContent, /claude/, '어느 런타임이 문제인지 밝혀야 한다');
-    assert.match(warning.textContent, /차단/, '저장 후 디스패치가 막힌다는 결과를 알려야 한다');
+    assert.match(warning.textContent, uiPattern('이 조합으로 저장하면 디스패치가 실행되지 않고 차단됩니다 — 승인 대신 조용히 '), '저장 후 디스패치가 막힌다는 결과를 알려야 한다');
     // 세 출구를 모두 제시해야 운영자가 한 번에 결정할 수 있다.
     assert.match(warning.textContent, /Trusted/);
     assert.match(warning.textContent, /Strict/);

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import type { Ticket } from '../../types';
 import { tokens } from '../../tokens';
@@ -34,6 +36,7 @@ export default function TicketPanelHeader({
   ticket, title, isRoot, canGoBack, running, archiveBusy,
   onBack, onCopyId, onRun, onPark, onToggleArchive, onDelete, onClose, onShowOverview,
 }: TicketPanelHeaderProps) {
+  useLocale();
   const archived = !!ticket.archived_at;
   const runBlocked = running || !ticket.assignee || archived;
   return (
@@ -42,7 +45,7 @@ export default function TicketPanelHeader({
       padding: '10px 14px', borderBottom: `1px solid ${tokens.colors.border}`, flexShrink: 0,
     }}>
       {canGoBack && (
-        <button type="button" onClick={onBack} style={{ ...panelButton('plain'), padding: '5px 10px', flexShrink: 0 }} aria-label="상위 티켓으로" title="상위 티켓으로">←</button>
+        <button type="button" onClick={onBack} style={{ ...panelButton('plain'), padding: '5px 10px', flexShrink: 0 }} aria-label={translate('상위 티켓으로')} title={translate('상위 티켓으로')}>←</button>
       )}
       <div className="awb-ticket-heading">
         <h2 className="awb-ticket-heading-title" title={title} style={{ color: tokens.colors.textPrimary }}>{title}</h2>
@@ -50,8 +53,8 @@ export default function TicketPanelHeader({
           <button
             type="button"
             onClick={onCopyId}
-            title={`클릭하여 Ticket ID 복사 (${ticket.id})`}
-            aria-label={`Ticket ID ${ticket.id}, 클릭하여 클립보드에 복사`}
+            title={translate('클릭하여 Ticket ID 복사 ({0})', { 0: ticket.id })}
+            aria-label={translate('Ticket ID {0}, 클릭하여 클립보드에 복사', { 0: ticket.id })}
             style={{
               background: tokens.colors.surfaceCard, border: 'none', borderRadius: tokens.radii.sm,
               color: tokens.colors.textMuted, fontSize: '11px', fontFamily: 'monospace',
@@ -63,21 +66,21 @@ export default function TicketPanelHeader({
             <span style={{
               fontSize: '10px', fontWeight: 700, padding: '2px 6px', borderRadius: tokens.radii.sm,
               textTransform: 'uppercase', background: tokens.colors.surfaceSubtle, color: tokens.colors.textMuted,
-            }}>보관됨</span>
+            }}>{translate('보관됨')}</span>
           )}
         </div>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
-        <SessionHeaderMenu label="Ticket menu">
+        <SessionHeaderMenu label={translate('Ticket menu')}>
           {(close) => (
             <>
-              <SessionMenuSection title="Actions">
+              <SessionMenuSection title={translate('Actions')}>
                 {isRoot && (
                   <SessionMenuItem
                     icon="▶"
-                    label={running ? 'Running…' : 'Run'}
-                    title={ticket.assignee ? '지금 담당자에게 보냅니다' : '담당자를 지정하고 저장해야 실행할 수 있습니다'}
+                    label={running ? translate('Running…') : translate('Run')}
+                    title={ticket.assignee ? translate('지금 담당자에게 보냅니다') : translate('담당자를 지정하고 저장해야 실행할 수 있습니다')}
                     disabled={runBlocked}
                     onSelect={() => { close(); onRun(); }}
                   />
@@ -85,38 +88,38 @@ export default function TicketPanelHeader({
                 {!ticket.pending_user_action && !archived && (
                   <SessionMenuItem
                     icon="⏸"
-                    label="사람 확인 요청(보류)"
-                    title="담당자를 멈추고 사람의 확인을 기다립니다"
+                    label={translate('사람 확인 요청(보류)')}
+                    title={translate('담당자를 멈추고 사람의 확인을 기다립니다')}
                     onSelect={() => { close(); onPark(); }}
                   />
                 )}
                 {isRoot && (
                   <SessionMenuItem
                     icon="🗄"
-                    label={archived ? 'Unarchive' : 'Archive'}
-                    title={archived ? '보관을 해제해 목록으로 되돌립니다' : '이 티켓(과 하위 작업)을 보관합니다'}
+                    label={archived ? translate('Unarchive') : translate('Archive')}
+                    title={archived ? translate('보관을 해제해 목록으로 되돌립니다') : translate('이 티켓(과 하위 작업)을 보관합니다')}
                     disabled={archiveBusy}
                     onSelect={() => { close(); onToggleArchive(); }}
                   />
                 )}
                 <SessionMenuItem
                   icon="🗑"
-                  label="Delete"
-                  title="이 티켓을 삭제합니다"
+                  label={translate('Delete')}
+                  title={translate('이 티켓을 삭제합니다')}
                   onSelect={() => { close(); onDelete(); }}
                 />
               </SessionMenuSection>
-              <SessionMenuSection title="Ticket">
+              <SessionMenuSection title={translate('Ticket')}>
                 <div style={{ padding: '2px 8px 8px', fontSize: 13, lineHeight: 1.5, color: tokens.colors.textPrimary }}>{title}</div>
                 <SessionMenuItem
                   icon="⚙"
-                  label="상세 정보·설정"
+                  label={translate('상세 정보·설정')}
                   onSelect={() => { close(); onShowOverview(); }}
                 />
                 <SessionMenuItem
                   icon="#"
                   label={ticket.id}
-                  title="전체 ID 복사"
+                  title={translate('전체 ID 복사')}
                   onSelect={() => { close(); onCopyId(); }}
                 />
               </SessionMenuSection>
@@ -126,8 +129,8 @@ export default function TicketPanelHeader({
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close ticket"
-          title="닫기 (Esc)"
+          aria-label={translate('Close ticket')}
+          title={translate('닫기 (Esc)')}
           style={{ ...panelButton('plain'), padding: '5px 10px', fontSize: '14px', lineHeight: 1 }}
         >✕</button>
       </div>

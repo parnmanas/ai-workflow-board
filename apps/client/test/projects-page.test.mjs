@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Projects 화면 렌더링 회귀 (docs/tickets.md → Project). jsdom 으로 실제 페이지를
 // 띄워 클릭·입력을 태우고, 나가는 REST 호출과 화면 상태를 단언한다.
 //
@@ -31,13 +32,13 @@ function project(overrides = {}) {
 }
 
 function buttonByText(container, label) {
-  const found = [...container.ownerDocument.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+  const found = [...container.ownerDocument.querySelectorAll('button')].find((b) => b.textContent?.trim() === ui(label));
   assert.ok(found, `"${label}" 버튼이 없습니다.`);
   return found;
 }
 
 function fieldByLabel(container, labelText, tag = 'input') {
-  const label = [...container.querySelectorAll('label')].find((l) => l.textContent?.trim() === labelText);
+  const label = [...container.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(labelText));
   assert.ok(label, `"${labelText}" 라벨이 없습니다.`);
   const field = label.parentElement?.querySelector(tag);
   assert.ok(field, `"${labelText}" 의 <${tag}> 가 없습니다.`);
@@ -84,21 +85,21 @@ test('새 프로젝트 — 연결 테스트가 기본 브랜치를 채우고, �
     },
   });
 
-  assert.match(container.textContent, /아직 프로젝트가 없습니다/);
-  click(buttonByText(container, '+ 새 프로젝트'));
+  assert.match(container.textContent, uiPattern("아직 프로젝트가 없습니다. \"+ 새 프로젝트\" 로 저장소를 등록하세요."));
+  click(buttonByText(container, ui("+ 새 프로젝트")));
   await flush();
 
-  typeInto(fieldByLabel(container, '이름'), 'Game');
-  typeInto(fieldByLabel(container, '저장소 URL'), 'https://github.com/o/game.git');
-  click(buttonByText(container, '연결 테스트'));
+  typeInto(fieldByLabel(container, ui("이름")), 'Game');
+  typeInto(fieldByLabel(container, ui("저장소 URL")), 'https://github.com/o/game.git');
+  click(buttonByText(container, ui("연결 테스트")));
   await flush();
 
   const testCall = calls.find((c) => c[0] === 'testProjectConnection');
   assert.deepEqual(testCall[1], { repo_url: 'https://github.com/o/game.git', credential_id: null, account_id: 'ws-create' });
-  assert.match(container.querySelector('[data-testid="project-test-success"]').textContent, /브랜치 2개/);
-  assert.equal(container.querySelector('input[aria-label="기본 브랜치"]').value, 'develop', '비어 있던 기본 브랜치를 원격 기본으로 채운다');
+  assert.match(container.querySelector('[data-testid="project-test-success"]').textContent, uiPattern('연결 성공 — 브랜치 {0}개{1}', {0: 2, 1: ui(' (기본: {0})', {0: 'develop'})}));
+  assert.equal(container.querySelector(`input[aria-label="${ui("기본 브랜치")}"]`).value, 'develop', '비어 있던 기본 브랜치를 원격 기본으로 채운다');
 
-  click(buttonByText(container, '프로젝트 만들기'));
+  click(buttonByText(container, ui("프로젝트 만들기")));
   await flush();
   await flush();
 
@@ -112,7 +113,7 @@ test('새 프로젝트 — 연결 테스트가 기본 브랜치를 채우고, �
   assert.equal(createCall[2].default_branch, 'develop');
   assert.equal(createCall[2].default_assignee, null);
   // 만든 프로젝트가 선택되어 Host 폴더 탭이 열린다.
-  assert.ok([...container.querySelectorAll('[role="tab"]')].some((b) => b.textContent === 'Host 폴더'));
+  assert.ok([...container.querySelectorAll('[role="tab"]')].some((b) => b.textContent === ui("Host 폴더")));
 });
 
 test('Host 폴더 — 상대 경로는 막고, 절대 경로는 PUT 으로 저장, 목록에 없는 Host 폴더도 지운다', async (t) => {
@@ -128,19 +129,19 @@ test('Host 폴더 — 상대 경로는 막고, 절대 경로는 PUT 으로 저�
 
   click(container.querySelector('[data-testid="project-row-p-1"]'));
   await flush();
-  click([...container.querySelectorAll('[role="tab"]')].find((b) => b.textContent === 'Host 폴더'));
+  click([...container.querySelectorAll('[role="tab"]')].find((b) => b.textContent === ui("Host 폴더")));
   await flush();
 
   const rolf = container.querySelector('[data-testid="project-host-folder-host-rolf"]');
   const gone = container.querySelector('[data-testid="project-host-folder-host-gone"]');
   assert.ok(rolf, '연결된 Host 행');
   assert.ok(gone, '목록에 없는 Host 의 폴더도 행으로 남는다');
-  assert.match(gone.textContent, /알 수 없는 Host/);
+  assert.match(gone.textContent, uiPattern("알 수 없는 Host"));
 
   const input = rolf.querySelector('input');
   typeInto(input, 'repos/awb');
-  assert.match(rolf.textContent, /절대 경로/);
-  const rowSave = () => [...rolf.querySelectorAll('button')].find((b) => b.textContent.trim() === '저장');
+  assert.match(rolf.textContent, uiPattern('Host 절대 경로여야 합니다 (예: /home/user/repo, C:\\repo).'));
+  const rowSave = () => [...rolf.querySelectorAll('button')].find((b) => b.textContent.trim() === ui("저장"));
   assert.equal(rowSave().disabled, false, '저장을 누르면 이유를 보여줄 수 있게 버튼은 살아 있다');
   click(rowSave());
   await flush();
@@ -152,7 +153,7 @@ test('Host 폴더 — 상대 경로는 막고, 절대 경로는 PUT 으로 저�
   assert.deepEqual(calls.find((c) => c[0] === 'setProjectHostFolder').slice(1), ['p-1', 'host-rolf', '/srv/awb']);
 
   const goneRow = container.querySelector('[data-testid="project-host-folder-host-gone"]');
-  click([...goneRow.querySelectorAll('button')].find((b) => b.textContent.trim() === '지우기'));
+  click([...goneRow.querySelectorAll('button')].find((b) => b.textContent.trim() === ui("지우기")));
   await flush();
   assert.deepEqual(calls.find((c) => c[0] === 'clearProjectHostFolder').slice(1), ['p-1', 'host-gone']);
 });
@@ -179,17 +180,17 @@ test('삭제 — 409 project_in_use 면 참조 수를 보여주고 "강제 삭�
 
   click(container.querySelector('[data-testid="project-row-p-1"]'));
   await flush();
-  click(buttonByText(container, '삭제'));
+  click(buttonByText(container, ui("삭제")));
   await flush();
-  click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === '삭제'));
+  click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === ui("삭제")));
   await flush();
 
   const inUse = document.querySelector('[data-testid="project-in-use"]');
   assert.ok(inUse, '참조 수 안내가 뜬다');
-  assert.match(inUse.textContent, /티켓 4/);
+  assert.match(inUse.textContent, new RegExp(ui('티켓') + ' 4'));
   assert.match(inUse.textContent, /Action 1/);
 
-  click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === '강제 삭제'));
+  click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === ui("강제 삭제")));
   await flush();
   assert.deepEqual(deletes, [['p-1', undefined], ['p-1', { force: true }]]);
 });
@@ -211,7 +212,7 @@ test('opening another account project uses its credentials without changing the 
   click(container.querySelector('[data-testid="project-row-p-1"]'));
   await flush();
   assert.equal(calls.filter((call) => call[0] === 'listCredentials').at(-1)[1], 'organization');
-  click(buttonByText(container, '연결 테스트'));
+  click(buttonByText(container, ui("연결 테스트")));
   await flush();
   assert.equal(calls.find((call) => call[0] === 'testProjectConnection')[1].account_id, 'organization');
   assert.equal(getActiveAccountId(), 'personal');

@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
 // Marketing 화면의 규칙 — 상태 라벨 · 캠페인 전이 · 주기 · 설정 PATCH · 돈 설정 키 · 채널 승인 본문,
 // 그리고 서버 원천(apps/server/src/common/marketing/*, modules/marketing/*.logic.ts)과의 일치.
 //

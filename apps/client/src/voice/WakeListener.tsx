@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
@@ -35,6 +37,7 @@ function hasUserActivation(): boolean {
  * 쉰다 — 스피커 소리에서 이름을 듣지 않게.
  */
 export default function WakeListener() {
+  useLocale();
   const config = useVoiceConfig();
   const wake = useWakeState();
   const operators = useVoiceOperators(!!config);
@@ -178,7 +181,7 @@ export default function WakeListener() {
           wakeStore.wake(operator.id, text);
           go(sessionPath(``, operator.manager_id, operator.cli, operator.session_id));
         })
-        .catch((err: any) => { failure = err?.message || '이름을 확인하지 못했습니다'; })
+        .catch((err: any) => { failure = err?.message || translate('이름을 확인하지 못했습니다'); })
         .finally(() => {
           followUp?.release();
           checking -= 1;
@@ -214,8 +217,8 @@ export default function WakeListener() {
       } catch (err: any) {
         if (run.cancelled) return;
         wakeStore.setListener('error', err?.name === 'NotAllowedError'
-          ? '마이크 권한이 없습니다 — 브라우저 설정에서 허용해 주세요.'
-          : (err?.message || '마이크를 열지 못했습니다'));
+          ? translate('마이크 권한이 없습니다 — 브라우저 설정에서 허용해 주세요.')
+          : (err?.message || translate('마이크를 열지 못했습니다')));
       }
     })();
 
@@ -237,7 +240,7 @@ export default function WakeListener() {
     else void session.resume().then(() => {
       if (sessionRef.current === session && wakeStore.state.mode === 'sleeping') wakeStore.setListener('listening');
     }).catch((err) => {
-      if (sessionRef.current === session) wakeStore.setListener('error', err?.message || '마이크를 다시 열지 못했습니다');
+      if (sessionRef.current === session) wakeStore.setListener('error', err?.message || translate('마이크를 다시 열지 못했습니다'));
     });
   }, [speech.speaking]);
 

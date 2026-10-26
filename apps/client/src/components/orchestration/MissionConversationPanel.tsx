@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -126,6 +128,7 @@ export default function MissionConversationPanel({
   userChatMode = 'open',
   currentUserId,
 }: MissionConversationPanelProps) {
+  useLocale();
   const { user, hasPermission } = useAuth();
   // 프롭이 있으면 그걸 쓰고, 없으면 로그인 사용자를 쓴다 — "내 메시지" 정렬/스타일이
   // 이 값으로 갈린다.
@@ -256,7 +259,7 @@ export default function MissionConversationPanel({
       if (!asObserver) api.markChatRoomRead(roomId).catch(() => {});
     } catch (e: any) {
       if (!stillCurrent()) return;
-      setError(e?.message || '대화를 불러오지 못했습니다');
+      setError(e?.message || translate('대화를 불러오지 못했습니다'));
       setMessages([]);
     } finally {
       if (stillCurrent()) setLoading(false);
@@ -415,7 +418,7 @@ export default function MissionConversationPanel({
       await api.joinOrchestrationMissionConversation(missionId, accountId);
       await load();
     } catch (e: any) {
-      setJoinError(e?.message || '대화에 참여하지 못했습니다');
+      setJoinError(e?.message || translate('대화에 참여하지 못했습니다'));
     } finally {
       setJoining(false);
     }
@@ -441,8 +444,8 @@ export default function MissionConversationPanel({
     if (userChatMode === 'off') {
       return {
         reason:
-          '이 미션은 대화 옵션이 꺼져 있어 읽기 전용입니다. 미션 화면 위쪽의 User chat 을 ' +
-          'Open 또는 Participants only 로 바꾸면 다시 대화할 수 있습니다.',
+          translate('이 미션은 대화 옵션이 꺼져 있어 읽기 전용입니다. 미션 화면 위쪽의 User chat 을 ') +
+          translate('Open 또는 Participants only 로 바꾸면 다시 대화할 수 있습니다.'),
         testId: 'mission-conversation-chat-off-notice',
         canJoin: false,
       };
@@ -457,15 +460,15 @@ export default function MissionConversationPanel({
     if (user && !hasPermission(MANAGE_ACTIONS)) {
       return {
         reason:
-          'orchestration 대화에 발화하려면 Manage Actions 권한이 필요합니다. 참여자 등록 여부와는 ' +
-          '무관하며, 계정 관리자에게 권한을 요청해야 합니다. 읽기는 그대로 가능합니다.',
+          translate('orchestration 대화에 발화하려면 Manage Actions 권한이 필요합니다. 참여자 등록 여부와는 ') +
+          translate('무관하며, 계정 관리자에게 권한을 요청해야 합니다. 읽기는 그대로 가능합니다.'),
         testId: 'mission-conversation-permission-notice',
         canJoin: false,
       };
     }
     if (observer) {
       return {
-        reason: '이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다.',
+        reason: translate('이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다.'),
         testId: 'mission-conversation-observer-notice',
         canJoin: true,
       };
@@ -486,8 +489,7 @@ export default function MissionConversationPanel({
   if (!roomId) {
     return (
       <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>
-        미션이 아직 시작되지 않아 orchestrator 대화방이 없습니다. 미션을 시작하면 여기에서 대화할 수 있습니다.
-      </div>
+        {translate('미션이 아직 시작되지 않아 orchestrator 대화방이 없습니다. 미션을 시작하면 여기에서 대화할 수 있습니다.')}</div>
     );
   }
 
@@ -519,11 +521,10 @@ export default function MissionConversationPanel({
         <div ref={contentRef}>
         {loadingOlder && (
           <div style={{ padding: 8, textAlign: 'center', fontSize: 11, color: tokens.colors.textMuted }}>
-            이전 대화 불러오는 중...
-          </div>
+            {translate('이전 대화 불러오는 중...')}</div>
         )}
         {loading && messages.length === 0 && (
-          <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>대화를 불러오는 중...</div>
+          <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>{translate('대화를 불러오는 중...')}</div>
         )}
         {error && (
           <div style={{ padding: 16, fontSize: 12, color: tokens.colors.danger }} data-testid="mission-conversation-error">
@@ -532,8 +533,7 @@ export default function MissionConversationPanel({
         )}
         {!loading && !error && tracks.length === 0 && (
           <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>
-            아직 대화가 없습니다. orchestrator 에게 질문하거나 방향을 지시해 보세요.
-          </div>
+            {translate('아직 대화가 없습니다. orchestrator 에게 질문하거나 방향을 지시해 보세요.')}</div>
         )}
         {tracks.map((track, index) =>
           track.kind === 'messages' ? (
@@ -564,8 +564,7 @@ export default function MissionConversationPanel({
             color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
           }}
         >
-          ↓ 최신으로
-        </button>
+          {translate('↓ 최신으로')}</button>
       )}
 
       {speakBlock ? (
@@ -604,7 +603,7 @@ export default function MissionConversationPanel({
                   flexShrink: 0,
                 }}
               >
-                {joining ? '참여하는 중...' : '대화에 참여'}
+                {joining ? translate('참여하는 중...') : translate('대화에 참여')}
               </button>
             )}
           </div>
@@ -633,9 +632,7 @@ export default function MissionConversationPanel({
               }}
             >
               <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5, flex: 1, minWidth: 180 }}>
-                이 미션은 종료됐습니다. 지난 결과를 물어보면 orchestrator 가 답하고, 이어서 진행해
-                달라고 하면 미션을 다시 열고 계속합니다.
-              </span>
+                {translate('이 미션은 종료됐습니다. 지난 결과를 물어보면 orchestrator 가 답하고, 이어서 진행해 달라고 하면 미션을 다시 열고 계속합니다.')}</span>
               {onReopen && (
                 <button
                   type="button"
@@ -653,8 +650,7 @@ export default function MissionConversationPanel({
                     fontFamily: 'inherit',
                   }}
                 >
-                  지금 다시 열기
-                </button>
+                  {translate('지금 다시 열기')}</button>
               )}
             </div>
           )}
@@ -670,6 +666,7 @@ export default function MissionConversationPanel({
  * compact 행으로 그린다. 여기서 "구분해 렌더링"이 실제로 눈에 보이는 지점이다.
  */
 function ExecutionEventRun({ events }: { events: OrchestrationTimelineEvent[] }) {
+  useLocale();
   return (
     <div
       data-testid="mission-execution-run"

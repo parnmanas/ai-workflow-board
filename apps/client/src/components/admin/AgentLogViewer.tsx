@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -42,13 +44,13 @@ function formatRelative(ts: string): string {
     const then = new Date(ts).getTime();
     const now = Date.now();
     const diffSec = Math.max(0, Math.round((now - then) / 1000));
-    if (diffSec < 60) return `${diffSec}s ago`;
+    if (diffSec < 60) return translate('{0}s ago', { 0: diffSec });
     const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffMin < 60) return translate('{0}m ago', { 0: diffMin });
     const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
+    if (diffHr < 24) return translate('{0}h ago', { 0: diffHr });
     const diffDay = Math.floor(diffHr / 24);
-    if (diffDay < 7) return `${diffDay}d ago`;
+    if (diffDay < 7) return translate('{0}d ago', { 0: diffDay });
     const d = new Date(ts);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   } catch {
@@ -57,6 +59,7 @@ function formatRelative(ts: string): string {
 }
 
 export default function AgentLogViewer() {
+  useLocale();
   const [logs, setLogs] = useState<AgentErrorLog[]>([]);
   const [agents, setAgents] = useState<AgentErrorLogAgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -190,8 +193,7 @@ export default function AgentLogViewer() {
             margin: 0,
           }}
         >
-          Agent Logs
-        </h2>
+          {translate('Agent Logs')}</h2>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <label
             style={{
@@ -209,8 +211,7 @@ export default function AgentLogViewer() {
               onChange={e => setAutoRefresh(e.target.checked)}
               style={{ accentColor: tokens.colors.accent }}
             />
-            Auto-refresh (15s)
-          </label>
+            {translate('Auto-refresh (15s)')}</label>
           <button
             onClick={handleRefresh}
             disabled={loading}
@@ -226,7 +227,7 @@ export default function AgentLogViewer() {
               opacity: loading ? 0.6 : 1,
             }}
           >
-            {loading ? 'Loading...' : 'Refresh'}
+            {loading ? translate('Loading...') : translate('Refresh')}
           </button>
         </div>
       </div>
@@ -238,7 +239,7 @@ export default function AgentLogViewer() {
           onChange={e => setAgentFilter(e.target.value)}
           style={{ ...selectStyle, minWidth: 200 }}
         >
-          <option value="">(all agents)</option>
+          <option value="">{translate('(all agents)')}</option>
           {agents.map(a => (
             <option key={a.agent_id} value={a.agent_id}>
               {a.agent_name} ({a.error_count})
@@ -251,7 +252,7 @@ export default function AgentLogViewer() {
           onChange={e => setLevelFilter(e.target.value)}
           style={{ ...selectStyle, minWidth: 100 }}
         >
-          <option value="">(all levels)</option>
+          <option value="">{translate('(all levels)')}</option>
           {LEVELS.map(l => (
             <option key={l} value={l}>
               {l}
@@ -264,7 +265,7 @@ export default function AgentLogViewer() {
           onChange={e => setCategoryFilter(e.target.value)}
           style={{ ...selectStyle, minWidth: 140 }}
         >
-          <option value="">(all categories)</option>
+          <option value="">{translate('(all categories)')}</option>
           {CATEGORIES.map(c => (
             <option key={c} value={c}>
               {c}
@@ -277,11 +278,11 @@ export default function AgentLogViewer() {
           onChange={e => setSinceFilter(e.target.value)}
           style={{ ...selectStyle, minWidth: 140 }}
         >
-          <option value={isoHoursAgo(1)}>Last 1h</option>
-          <option value={isoHoursAgo(6)}>Last 6h</option>
-          <option value={isoHoursAgo(24)}>Last 24h</option>
-          <option value={isoHoursAgo(24 * 7)}>Last 7d</option>
-          <option value="">All time</option>
+          <option value={isoHoursAgo(1)}>{translate('Last 1h')}</option>
+          <option value={isoHoursAgo(6)}>{translate('Last 6h')}</option>
+          <option value={isoHoursAgo(24)}>{translate('Last 24h')}</option>
+          <option value={isoHoursAgo(24 * 7)}>{translate('Last 7d')}</option>
+          <option value="">{translate('All time')}</option>
         </select>
       </div>
 
@@ -304,11 +305,9 @@ export default function AgentLogViewer() {
                 marginBottom: 8,
               }}
             >
-              No logs recorded
-            </div>
+              {translate('No logs recorded')}</div>
             <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-              Agent plugins upload proxy.log errors and received SSE events here.
-            </div>
+              {translate('Agent plugins upload proxy.log errors and received SSE events here.')}</div>
           </div>
         ) : (
           <div style={{ maxHeight: 'calc(100vh - 280px)', overflowY: 'auto' }}>
@@ -328,11 +327,11 @@ export default function AgentLogViewer() {
                 letterSpacing: '0.05em',
               }}
             >
-              <span style={{ minWidth: 90, flexShrink: 0 }}>Time</span>
-              <span style={{ minWidth: 120, flexShrink: 0 }}>Agent</span>
-              <span style={{ minWidth: 50, flexShrink: 0 }}>Level</span>
-              <span style={{ minWidth: 90, flexShrink: 0 }}>Category</span>
-              <span style={{ flex: 1 }}>Message</span>
+              <span style={{ minWidth: 90, flexShrink: 0 }}>{translate('Time')}</span>
+              <span style={{ minWidth: 120, flexShrink: 0 }}>{translate('Agent')}</span>
+              <span style={{ minWidth: 50, flexShrink: 0 }}>{translate('Level')}</span>
+              <span style={{ minWidth: 90, flexShrink: 0 }}>{translate('Category')}</span>
+              <span style={{ flex: 1 }}>{translate('Message')}</span>
             </div>
 
             {logs.map((log, index) => {
@@ -482,9 +481,9 @@ export default function AgentLogViewer() {
                           marginBottom: 6,
                         }}
                       >
-                        <span>pid: {log.pid ?? '—'}</span>
-                        <span>plugin: {log.plugin_version ?? '—'}</span>
-                        <span>occurred_at: {log.occurred_at}</span>
+                        <span>{translate('pid:')} {log.pid ?? '—'}</span>
+                        <span>{translate('plugin:')} {log.plugin_version ?? '—'}</span>
+                        <span>{translate('occurred_at:')} {log.occurred_at}</span>
                       </div>
                       <pre
                         style={{

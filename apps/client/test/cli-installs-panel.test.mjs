@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // InstalledCliVersions — Runtime Host 화면의 "설치본 단위" CLI 목록.
 //
 // 한 호스트에 같은 CLI 가 여러 벌 깔려 있는 것은 정상 구성이다: ragnar 는 vLLM
@@ -92,7 +93,7 @@ test('같은 CLI 의 설치본마다 한 줄씩 나오고 Update 는 그 경로�
   assert.ok(text.includes(STALE), '여러 벌이면 경로를 짚어 준다');
   assert.ok(text.includes(FRESH));
   assert.ok(text.includes('npm --prefix /home/parn/.local'), '설치 방법이 보인다');
-  assert.ok(text.includes('활성'), '지정 없이 spawn 되는 설치본이 표시된다');
+  assert.ok(text.includes(ui('· 활성')), '지정 없이 spawn 되는 설치본이 표시된다');
 
   const enabled = buttons(view).filter((b) => !b.disabled);
   assert.equal(enabled.length, 1, '구버전 한 줄만 누를 수 있다');
@@ -133,7 +134,7 @@ test('이미 최신인 설치본만 잠긴다 — 최신을 모르는 설치본�
   });
   await act(async () => {});
 
-  assert.ok(view.container.textContent.includes('최신'), '최신 표시가 붙는다');
+  assert.ok(view.container.textContent.includes(ui("최신")), '최신 표시가 붙는다');
   const [claudeBtn, codexBtn] = buttons(view);
   assert.equal(claudeBtn.disabled, true, '이미 최신이면 잠근다');
   assert.equal(codexBtn.disabled, false, '모른다는 이유로 잠그면 올릴 길이 사라진다');
@@ -286,7 +287,7 @@ test('다른 배포 채널의 설치본은 CLI 단위 npm latest 로 판정하�
     false,
     `snap 행에 다른 채널의 목표 버전이 뜨면 안 된다 — 실제: ${text}`,
   );
-  assert.ok(text.includes('최신'), 'npm 설치본은 최신으로 잠긴다');
+  assert.ok(text.includes(ui("최신")), 'npm 설치본은 최신으로 잠긴다');
 
   const enabled = buttons(view).filter((b) => !b.disabled);
   assert.equal(enabled.length, 1, '최신을 모르는 snap 행만 누를 수 있다');
@@ -327,7 +328,7 @@ test('같은 호스트에 더 새 설치본이 있으면 "최신" 이라고 쓰�
   await act(async () => {});
 
   const text = view.container.textContent;
-  assert.ok(text.includes('뒤처짐'), `더 새 설치본이 있음을 드러내야 한다 — 실제: ${text}`);
+  assert.ok(text.includes(ui("뒤처짐")), `더 새 설치본이 있음을 드러내야 한다 — 실제: ${text}`);
 
   // 두 행 모두 자기 채널로는 최신이라 누를 것이 없다.
   assert.equal(buttons(view).filter((b) => !b.disabled).length, 0);
@@ -335,11 +336,11 @@ test('같은 호스트에 더 새 설치본이 있으면 "최신" 이라고 쓰�
   // 뒤처진 행의 설명에 더 새 설치본의 경로·버전이 들어 있어야 운영자가 다음 행동을
   // 정할 수 있다.
   const titles = [...view.container.querySelectorAll('[title]')].map((el) => el.getAttribute('title'));
-  const hint = titles.find((t) => t && t.includes('더 새롭습니다'));
+  const hint = titles.find((t) => t && uiPattern('{0} 이 {1} 으로 더 새롭습니다').test(t));
   assert.ok(hint, `더 새 설치본을 짚어 줘야 한다 — 실제 title 들: ${JSON.stringify(titles)}`);
   assert.ok(hint.includes('/home/parn/.npm-global/bin/codex'), hint);
   assert.ok(hint.includes('0.156.1'), hint);
-  assert.ok(hint.includes('AWB 는 그쪽을 실행합니다'), `활성 설치본이라는 사실도 알려야 한다 — ${hint}`);
+  assert.ok(hint.includes(ui(" (AWB 는 그쪽을 실행합니다)")), `활성 설치본이라는 사실도 알려야 한다 — ${hint}`);
 });
 
 test('더 새 설치본이 없으면 그냥 최신이다 — 경고가 번지지 않는다', async (t) => {
@@ -362,8 +363,8 @@ test('더 새 설치본이 없으면 그냥 최신이다 — 경고가 번지지
   });
   await act(async () => {});
   const text = view.container.textContent;
-  assert.ok(text.includes('최신'));
-  assert.equal(text.includes('뒤처짐'), false);
+  assert.ok(text.includes(ui("최신")));
+  assert.equal(text.includes(ui("뒤처짐")), false);
 });
 
 
@@ -392,8 +393,8 @@ test('한 설치본을 올리는 동안 다른 설치본의 Update 는 눌린 �
   // claude 만 진행 중.
   const view = render(t, TWO_INSTALLS, () => {}, new Set(['/home/parn/.npm-global/bin/claude']));
   await act(async () => {});
-  const updateButtons = buttons(view).filter((b) => /Update|업데이트 중/.test(b.textContent));
-  const busy = updateButtons.find((b) => b.textContent.includes('업데이트 중'));
+  const updateButtons = buttons(view).filter((b) => [ui('Update'), ui('업데이트 중…')].some(label => b.textContent.includes(label)));
+  const busy = updateButtons.find((b) => b.textContent.includes(ui("업데이트 중…")));
   const other = updateButtons.find((b) => b.textContent === 'Update');
   assert.ok(busy, '진행 중인 행은 진행 중이라고 말한다');
   assert.equal(busy.disabled, true, '같은 설치본 중복 클릭은 막는다');
@@ -407,7 +408,7 @@ test('"전부 업데이트" 는 올릴 것이 있을 때만 뜨고, 개수는 �
   const calls = [];
   const view = render(t, TWO_INSTALLS, () => {}, new Set(), { onUpdateAll: () => calls.push(1) });
   await act(async () => {});
-  const all = buttons(view).find((b) => b.textContent.includes('전부 업데이트'));
+  const all = buttons(view).find((b) => b.textContent.includes(ui("전부 업데이트")));
   assert.ok(all, '올릴 수 있는 설치본이 있으면 버튼이 뜬다');
   assert.match(all.textContent, /\(2\)/, '올릴 수 있는 설치본 수를 그대로 쓴다');
   click(all);
@@ -429,7 +430,7 @@ test('전부 최신이면 "전부 업데이트" 를 내놓지 않는다 — 누�
   );
   await act(async () => {});
   assert.equal(
-    buttons(view).some((b) => b.textContent.includes('전부 업데이트')),
+    buttons(view).some((b) => b.textContent.includes(ui("전부 업데이트"))),
     false,
   );
 });
@@ -463,7 +464,7 @@ test('뒤처진 어댑터는 Update 가 열려 있고, 누르면 그 CLI 로 요
   await act(async () => {});
   const row = view.container.querySelector('[data-acp-adapter="claude"]');
   assert.match(row.textContent, /0\.84\.0/);
-  assert.match(row.textContent, /0\.85\.0 뒤처짐/);
+  assert.match(row.textContent, new RegExp('0\\.85\\.0 ' + ui('뒤처짐')));
   const button = adapterButton(view);
   assert.ok(button, '어댑터 줄에 Update 가 있어야 한다 — 없던 것이 이번 수정의 전부다');
   assert.equal(button.disabled, false);
@@ -487,7 +488,7 @@ test('최신인 어댑터의 Update 는 잠기고, 진행 중이면 진행 중�
     adapterPending: new Set(['claude']),
   });
   await act(async () => {});
-  assert.equal(adapterButton(busy).textContent.trim(), '업데이트 중…');
+  assert.equal(adapterButton(busy).textContent.trim(), ui("업데이트 중…"));
   assert.equal(adapterButton(busy).disabled, true);
 });
 
@@ -496,7 +497,7 @@ test('"전부 업데이트" 는 뒤처진 어댑터도 센다 — CLI 가 전부
   t.after(() => dom.cleanup());
   const view = render(t, WITH_ADAPTERS('0.84.0', '0.85.0'), () => {}, new Set(), { onUpdateAll: () => {} });
   await act(async () => {});
-  const all = buttons(view).find((b) => b.textContent.includes('전부 업데이트'));
+  const all = buttons(view).find((b) => b.textContent.includes(ui("전부 업데이트")));
   assert.ok(all, 'CLI 설치본은 없어도 뒤처진 어댑터가 있으면 버튼이 뜬다');
   assert.match(all.textContent, /\(1\)/);
 });
@@ -517,9 +518,9 @@ test('어댑터 업데이트를 광고하지 않는 매니저에는 Update 대�
   const hint = view.container.querySelector('[data-acp-adapter-unsupported]');
   assert.ok(hint, '왜 버튼이 없는지 말한다');
   assert.match(hint.textContent, /1\.6\.257/);
-  assert.match(hint.textContent, /매니저를 먼저 업데이트/);
+  assert.match(hint.textContent, uiPattern(")는 어댑터 업데이트를 지원하지 않습니다 — 매니저를 먼저 업데이트하세요."));
   // "전부 업데이트" 도 올릴 수 없는 어댑터를 세지 않는다.
-  assert.equal(buttons(view).some((b) => b.textContent.includes('전부 업데이트')), false);
+  assert.equal(buttons(view).some((b) => b.textContent.includes(ui("전부 업데이트"))), false);
 });
 
 test('manager_capabilities 를 아예 안 보내는 구버전도 지원 안 함으로 본다', async (t) => {

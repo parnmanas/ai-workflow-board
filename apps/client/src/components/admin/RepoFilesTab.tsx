@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
 import type { RepoTreeEntry, RepoFileContent } from '../../types';
@@ -24,6 +26,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFilesTabProps) {
+  useLocale();
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<RepoTreeEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -45,7 +48,7 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
       const res = await api.getProjectTree(projectId, accountId, { ref: refKey, path: p });
       setEntries(res.entries);
     } catch (err: any) {
-      setError(err?.message || '파일 트리를 불러오지 못했습니다.');
+      setError(err?.message || translate('파일 트리를 불러오지 못했습니다.'));
       setEntries([]);
     } finally {
       setLoading(false);
@@ -63,7 +66,7 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
       const res = await api.getProjectFile(projectId, accountId, entry.path, refKey);
       setFile(res);
     } catch (err: any) {
-      setFileError(err?.message || '파일을 불러오지 못했습니다.');
+      setFileError(err?.message || translate('파일을 불러오지 못했습니다.'));
     } finally {
       setFileLoading(false);
     }
@@ -77,8 +80,7 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
     return (
       <div data-testid="repo-file-preview">
         <Button variant="secondary" size="sm" onClick={() => { setFilePath(null); setFile(null); }}>
-          ← 파일 트리
-        </Button>
+          {translate('← 파일 트리')}</Button>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0' }}>
           <span
             style={{
@@ -99,8 +101,7 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
         </div>
         {fileLoading && (
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>
-            파일 불러오는 중…
-          </div>
+            {translate('파일 불러오는 중…')}</div>
         )}
         {!fileLoading && fileError && <ErrorBox message={fileError} />}
         {!fileLoading && file && <FilePreview file={file} />}
@@ -127,14 +128,12 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
 
       {loading && (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>
-          파일 트리 불러오는 중…
-        </div>
+          {translate('파일 트리 불러오는 중…')}</div>
       )}
       {!loading && error && <ErrorBox message={error} />}
       {!loading && !error && entries.length === 0 && (
         <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: '16px 4px' }}>
-          빈 디렉토리입니다.
-        </div>
+          {translate('빈 디렉토리입니다.')}</div>
       )}
       {!loading && !error && entries.length > 0 && (
         <div
@@ -186,7 +185,7 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
                     {formatBytes(entry.size)}
                   </span>
                 )}
-                {isSub && <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>submodule</span>}
+                {isSub && <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>{translate('submodule')}</span>}
               </button>
             );
           })}
@@ -197,17 +196,18 @@ export default function RepoFilesTab({ projectId, accountId, refKey }: RepoFiles
 }
 
 function FilePreview({ file }: { file: RepoFileContent }) {
+  useLocale();
   if (file.too_large) {
     return (
       <div style={noteStyle}>
-        파일이 너무 커서 미리보기를 제공하지 않습니다 ({formatBytes(file.size)}).
+        {translate('파일이 너무 커서 미리보기를 제공하지 않습니다 (')}{formatBytes(file.size)}).
       </div>
     );
   }
   if (file.binary) {
     return (
       <div style={noteStyle}>
-        바이너리 파일이라 미리보기를 표시할 수 없습니다 ({formatBytes(file.size)}).
+        {translate('바이너리 파일이라 미리보기를 표시할 수 없습니다 (')}{formatBytes(file.size)}).
       </div>
     );
   }
@@ -230,12 +230,11 @@ function FilePreview({ file }: { file: RepoFileContent }) {
           lineHeight: 1.5,
         }}
       >
-        {file.content || '(빈 파일)'}
+        {file.content || translate('(빈 파일)')}
       </pre>
       {file.truncated && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-          파일이 커서 일부만 표시했습니다.
-        </div>
+          {translate('파일이 커서 일부만 표시했습니다.')}</div>
       )}
     </div>
   );
@@ -267,6 +266,7 @@ function rowButtonStyle(first: boolean): React.CSSProperties {
 }
 
 function BreadcrumbButton({ label, onClick, active }: { label: string; onClick: () => void; active: boolean }) {
+  useLocale();
   return (
     <button
       type="button"

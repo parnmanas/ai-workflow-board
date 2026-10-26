@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
@@ -18,6 +21,7 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
   onClose: () => void;
   onRestored: (info: MemoryFileInfo) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [versions, setVersions] = useState<MemoryVersionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +42,7 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
         setVersions(list);
         setCurrent({ content: full?.exists ? full.content ?? '' : '', hash: full?.exists ? full.hash : null });
       } catch (err: any) {
-        if (!cancelled) setError(err?.message || 'Failed to load history.');
+        if (!cancelled) setError(err?.message || translate('Failed to load history.'));
       }
     })();
     return () => { cancelled = true; };
@@ -50,7 +54,7 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
     setSelectedContent(null);
     api.readMemoryVersion(managerId, cli, file.path, selected)
       .then((v) => { if (!cancelled) setSelectedContent(v.content); })
-      .catch((err: any) => { if (!cancelled) showToast(err?.message || 'Failed to read that version.', 'error'); });
+      .catch((err: any) => { if (!cancelled) showToast(err?.message || translate('Failed to read that version.'), 'error'); });
     return () => { cancelled = true; };
   }, [selected, managerId, cli, file.path, showToast]);
 
@@ -59,11 +63,11 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
     setRestoring(true);
     try {
       const info = await api.restoreMemoryVersion(managerId, { cli, path: file.path, version_id: selected, base_hash: current.hash });
-      showToast('Restored — the version you replaced is now in History too.', 'success');
+      showToast(translate('Restored — the version you replaced is now in History too.'), 'success');
       onRestored(info);
       onClose();
     } catch (err: any) {
-      showToast(err?.message || 'Restore failed.', 'error');
+      showToast(err?.message || translate('Restore failed.'), 'error');
     } finally {
       setRestoring(false);
     }
@@ -73,13 +77,13 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
     <Modal
       isOpen
       onClose={onClose}
-      title={`History · ${file.label}`}
+      title={translate('History · {0}', { 0: file.label })}
       maxWidth={980}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>Close</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('Close')}</Button>
           <Button variant="primary" disabled={!selected || selectedContent === null || restoring} onClick={restore}>
-            {restoring ? 'Restoring…' : 'Restore this version'}
+            {restoring ? translate('Restoring…') : translate('Restore this version')}
           </Button>
         </>
       )}
@@ -87,11 +91,10 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
       {error ? (
         <div style={{ color: tokens.colors.danger, fontSize: 13 }}>{error}</div>
       ) : !versions ? (
-        <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading…</div>
+        <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading…')}</div>
       ) : versions.length === 0 ? (
         <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>
-          No backups yet. AWB keeps a copy every time it changes this file — edits made directly by the CLI are not versioned.
-        </div>
+          {translate('No backups yet. AWB keeps a copy every time it changes this file — edits made directly by the CLI are not versioned.')}</div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 240px) 1fr', gap: 12, minHeight: 320 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 460, overflowY: 'auto' }}>
@@ -106,23 +109,23 @@ export default function MemoryHistoryModal({ managerId, cli, file, onClose, onRe
                   background: selected === v.version_id ? tokens.colors.badgeAgentBg : 'transparent',
                 }}
               >
-                <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textPrimary }}>{new Date(v.created_at).toLocaleString()}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textPrimary }}>{new Date(v.created_at).toLocaleString(getLocaleTag())}</div>
                 <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                  before {v.reason} · {formatBytes(v.size)} · {relativeTime(v.created_at)}
-                  {current?.hash === v.hash ? ' · same as now' : ''}
+                  {translate('before')} {v.reason} · {formatBytes(v.size)} · {relativeTime(v.created_at)}
+                  {current?.hash === v.hash ? translate(' · same as now') : ''}
                 </div>
               </button>
             ))}
           </div>
           <div style={{ minWidth: 0 }}>
             {!selected ? (
-              <div style={{ color: tokens.colors.textMuted, fontSize: 12.5 }}>Pick a version to compare it with the current file.</div>
+              <div style={{ color: tokens.colors.textMuted, fontSize: 12.5 }}>{translate('Pick a version to compare it with the current file.')}</div>
             ) : selectedContent === null ? (
-              <div style={{ color: tokens.colors.textMuted, fontSize: 12.5 }}>Loading version…</div>
+              <div style={{ color: tokens.colors.textMuted, fontSize: 12.5 }}>{translate('Loading version…')}</div>
             ) : (
               <>
-                <div style={{ fontSize: 11.5, color: tokens.colors.textSecondary, marginBottom: 6 }}>Changes if you restore (current → this version):</div>
-                <MemoryDiffView before={current?.content ?? ''} after={selectedContent} maxHeight={420} emptyLabel="Identical to the current file." />
+                <div style={{ fontSize: 11.5, color: tokens.colors.textSecondary, marginBottom: 6 }}>{translate('Changes if you restore (current → this version):')}</div>
+                <MemoryDiffView before={current?.content ?? ''} after={selectedContent} maxHeight={420} emptyLabel={translate('Identical to the current file.')} />
               </>
             )}
           </div>

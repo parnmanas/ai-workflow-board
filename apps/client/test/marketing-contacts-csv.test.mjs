@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
 // 메일 연락처 CSV 가져오기의 순수 규칙(docs/marketing.md "메일").
 //
 // 고정하는 계약:

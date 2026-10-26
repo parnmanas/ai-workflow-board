@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 사이드바 WORK 계층 실렌더 회귀 테스트 (티켓 03ca8b5b → board-less, docs/tickets.md).
 //
 // 소스 정규식이나 모델 단위 테스트(work-navigation.test.mjs)만으로는 "실제로 그려지고
@@ -277,7 +278,7 @@ function groupRow(view, label) {
 }
 
 function subList(view, label) {
-  const list = workSection(view).querySelector(`div[aria-label="${label} list"]`);
+  const list = workSection(view).querySelector(`div[aria-label="${ui(label)} list"]`);
   return list;
 }
 
@@ -286,7 +287,7 @@ function subItemLabels(view, label) {
   if (!list) return null;
   return buttonsIn(list)
     .map(labelOf)
-    .filter((text) => !text.startsWith('더보기') && text !== '접기');
+    .filter((text) => !text.startsWith(ui("더보기")) && text !== ui('접기'));
 }
 
 test('① WORK 에 Tickets / Teams / Missions 가 그 순서로 보이고 단수 표기도 Boards 도 없다', async (t) => {
@@ -313,7 +314,7 @@ test('②-b Tickets 줄은 계정 전체 읽지 않은 티켓 코멘트 수를 �
   const { view } = await mountSidebar(t, { ticketUnread: 4 });
   const row = groupRow(view, 'Tickets');
   assert.match(row.textContent, /4/);
-  assert.ok(row.querySelector('[aria-label*="4건"], [title*="4건"]') || /4건/.test(row.innerHTML), '배지 라벨에 건수가 실린다');
+  assert.ok(row.querySelector(`[aria-label="${ui('읽지 않은 티켓 코멘트 {0}건', {0: 4})}"]`), '배지 라벨에 건수가 실린다');
 });
 
 test('③ 서브 항목을 누르면 기존 상세 화면 경로로 이동한다', async (t) => {
@@ -373,7 +374,7 @@ test('⑦ 접기/펼치기가 두 계층 메뉴 모두에서 같게 동작한다
   const { view } = await mountSidebar(t);
 
   for (const label of ['Teams', 'Missions']) {
-    const toggle = workSection(view).querySelector(`button[aria-label="Collapse ${label} list"]`);
+    const toggle = workSection(view).querySelector(`button[aria-label="Collapse ${ui(label)} list"]`);
     assert.ok(toggle, `${label} 에 접기 토글이 없다`);
     assert.equal(toggle.getAttribute('aria-expanded'), 'true');
     assert.ok(subList(view, label), `${label} 서브메뉴가 처음부터 접혀 있다`);
@@ -381,7 +382,7 @@ test('⑦ 접기/펼치기가 두 계층 메뉴 모두에서 같게 동작한다
     click(toggle);
     assert.equal(Boolean(subList(view, label)), false, `${label} 서브메뉴가 접히지 않았다`);
 
-    const expand = workSection(view).querySelector(`button[aria-label="Expand ${label} list"]`);
+    const expand = workSection(view).querySelector(`button[aria-label="Expand ${ui(label)} list"]`);
     assert.ok(expand, `${label} 에 펼치기 토글이 없다`);
     assert.equal(expand.getAttribute('aria-expanded'), 'false');
 
@@ -415,12 +416,12 @@ test('⑩ 목록이 길면 더보기/접기로 점진 노출한다', async (t) =
   const { view } = await mountSidebar(t, { missions: many });
 
   assert.equal(subItemLabels(view, 'Missions').length, 5);
-  const more = findByText(subList(view, 'Missions'), '더보기 (4)');
+  const more = findByText(subList(view, 'Missions'), ui('더보기 ({0})', {0: 4}));
   assert.ok(more, '더보기 버튼이 없다');
 
   click(more);
   assert.equal(subItemLabels(view, 'Missions').length, 9);
-  assert.ok(findByText(subList(view, 'Missions'), '접기'), '접기 버튼이 없다');
+  assert.ok(findByText(subList(view, 'Missions'), ui("접기")), '접기 버튼이 없다');
 });
 
 test('⑪ 축소(드로어) 사이드바에서도 같은 탐색이 되고 이동 후 드로어가 닫힌다', async (t) => {

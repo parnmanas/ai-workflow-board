@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { api, setActiveAccountId, bootstrapActiveAccountId } from '../api';
 import {
@@ -38,8 +40,9 @@ interface AuthContextValue extends AuthState {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function useAuth(): AuthContextValue {
+  useLocale();
   const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  if (!ctx) throw new Error(translate('useAuth must be used within AuthProvider'));
   return ctx;
 }
 
@@ -62,6 +65,7 @@ export function resolveAccountState(accounts: AccountEntry[], userStatus: string
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  useLocale();
   const [state, setState] = useState<AuthState>({
     user: null,
     token: localStorage.getItem('auth_token'),

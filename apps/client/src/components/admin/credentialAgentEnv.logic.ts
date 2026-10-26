@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * Credential → agent env var naming and the Google OAuth JSON import, kept
  * out of CredentialManager.tsx so they can be tested without rendering.
@@ -89,17 +90,17 @@ export function parseGoogleOAuthJson(text: string): GoogleOAuthImport {
   try {
     data = JSON.parse(String(text ?? '').trim());
   } catch {
-    return { ok: false, error: 'Not valid JSON.' };
+    return { ok: false, error: translate('Not valid JSON.') };
   }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ok: false, error: 'Expected a JSON object.' };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ok: false, error: translate('Expected a JSON object.') };
   if (data.type === 'service_account') {
-    return { ok: false, error: 'This is a service-account key, not an OAuth client. Store it as a Custom credential instead.' };
+    return { ok: false, error: translate('This is a service-account key, not an OAuth client. Store it as a Custom credential instead.') };
   }
   const inner = data.installed ?? data.web;
   const source = inner && typeof inner === 'object' ? inner : data;
   const clientId = typeof source.client_id === 'string' ? source.client_id.trim() : '';
   const clientSecret = typeof source.client_secret === 'string' ? source.client_secret.trim() : '';
-  if (!clientId || !clientSecret) return { ok: false, error: 'client_id and client_secret were not found in this JSON.' };
+  if (!clientId || !clientSecret) return { ok: false, error: translate('client_id and client_secret were not found in this JSON.') };
   const refresh = typeof data.refresh_token === 'string' ? data.refresh_token.trim() : '';
   return {
     ok: true,
@@ -119,10 +120,10 @@ export function customRowsProblem(rows: readonly CustomRow[], existingKeys: read
   for (const row of rows) {
     const key = row.key.trim();
     if (!key && !row.value) continue;
-    if (!key) return 'Every value needs a key.';
-    if (!CUSTOM_FIELD_KEY_RE.test(key)) return `Key ${key} must start with a letter or _ and use only letters, digits and _.`;
-    if (seen.has(key)) return `Key ${key} is used twice.`;
-    if (!row.value) return `Key ${key} has no value.`;
+    if (!key) return translate('Every value needs a key.');
+    if (!CUSTOM_FIELD_KEY_RE.test(key)) return translate('Key {0} must start with a letter or _ and use only letters, digits and _.', { 0: key });
+    if (seen.has(key)) return translate('Key {0} is used twice.', { 0: key });
+    if (!row.value) return translate('Key {0} has no value.', { 0: key });
     seen.add(key);
   }
   return null;

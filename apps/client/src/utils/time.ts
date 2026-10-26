@@ -1,20 +1,21 @@
+import { t as translate } from '../i18n/core';
 export function relativeTime(iso: string): string {
   if (!iso) return '';
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return '';
   const diff = Math.max(0, Date.now() - then);
   const sec = Math.floor(diff / 1000);
-  if (sec < 45) return 'just now';
+  if (sec < 45) return translate('just now');
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
+  if (min < 60) return translate('{0}m ago', { 0: min });
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
+  if (hr < 24) return translate('{0}h ago', { 0: hr });
   const day = Math.floor(hr / 24);
-  if (day < 30) return `${day}d ago`;
+  if (day < 30) return translate('{0}d ago', { 0: day });
   const mo = Math.floor(day / 30);
-  if (mo < 12) return `${mo}mo ago`;
+  if (mo < 12) return translate('{0}mo ago', { 0: mo });
   const yr = Math.floor(mo / 12);
-  return `${yr}y ago`;
+  return translate('{0}y ago', { 0: yr });
 }
 
 /**
@@ -24,9 +25,9 @@ export function relativeTime(iso: string): string {
  */
 export function shortDuration(ms: number): string {
   const total = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
-  if (total < 60) return `${total}s`;
+  if (total < 60) return translate('{0}s', { 0: total });
   const min = Math.floor(total / 60);
-  if (min < 60) return `${min}m`;
+  if (min < 60) return translate('{0}m', { 0: min });
   const hr = Math.floor(min / 60);
-  return `${hr}h ${min % 60}m`;
+  return translate('{0}h {1}m', { 0: hr, 1: min % 60 });
 }

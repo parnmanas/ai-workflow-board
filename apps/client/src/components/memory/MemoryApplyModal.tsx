@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
@@ -23,9 +25,9 @@ interface TargetState {
 }
 
 const MODE_LABEL: Record<ApplyMode, string> = {
-  block: 'Managed block (re-apply updates it)',
-  replace: 'Replace whole file',
-  entries: 'Add as entries (skip duplicates)',
+  get block() { return translate('Managed block (re-apply updates it)'); },
+  get replace() { return translate('Replace whole file'); },
+  get entries() { return translate('Add as entries (skip duplicates)'); },
 };
 
 /**
@@ -41,6 +43,7 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
   onClose: () => void;
   onApplied: (managerId: string) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [hostId, setHostId] = useState(snapshot.manager_id);
   const [target, setTarget] = useState<MemoryHostSnapshot | null>(snapshot);
@@ -70,14 +73,14 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
     setTarget(null);
     api.getMemorySnapshot(hostId)
       .then((s) => { if (!cancelled) setTarget(s); })
-      .catch((err: any) => { if (!cancelled) showToast(err?.message || 'Failed to load that host.', 'error'); })
+      .catch((err: any) => { if (!cancelled) showToast(err?.message || translate('Failed to load that host.'), 'error'); })
       .finally(() => { if (!cancelled) setLoadingHost(false); });
     return () => { cancelled = true; };
   }, [hostId, snapshot, showToast]);
 
   const candidates = useMemo(() => (target
     ? applyCandidates(target, { cli: source.cli, file: source.file, sameHost: target.manager_id === snapshot.manager_id, projectId: sourceProjectId })
-    : []), [target, source.cli, source.file, snapshot.manager_id, sourceProjectId]);
+    : []), [target, source.cli, source.file, snapshot.manager_id, sourceProjectId, getLocale()]);
 
   useEffect(() => {
     const next: Record<string, TargetState> = {};
@@ -114,17 +117,17 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
         ops.push({ op: 'write', cli: c.cli.cli, path: file.path, content, base_hash: file.exists ? file.hash : null, reason: 'apply' });
       }
       if (!ops.length) {
-        showToast('Every target already has this content.', 'info');
+        showToast(translate('Every target already has this content.'), 'info');
         setRunning(false);
         return;
       }
       const { results: out } = await api.memoryBatch(hostId, ops);
       setResults(out);
       const ok = out.filter((r) => r.ok).length;
-      showToast(`Applied to ${ok} of ${out.length} file(s).`, ok === out.length ? 'success' : 'error');
+      showToast(translate('Applied to {0} of {1} file(s).', { 0: ok, 1: out.length }), ok === out.length ? 'success' : 'error');
       if (ok) appliedHosts.current.add(hostId);
     } catch (err: any) {
-      showToast(err?.message || 'Apply failed.', 'error');
+      showToast(err?.message || translate('Apply failed.'), 'error');
     } finally {
       setRunning(false);
     }
@@ -136,14 +139,14 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
     <Modal
       isOpen
       onClose={close}
-      title={`Apply ${source.file.label}`}
+      title={translate('Apply {0}', { 0: source.file.label })}
       maxWidth={980}
       footer={(
         <>
-          <Button variant="secondary" onClick={close}>{results ? 'Done' : 'Cancel'}</Button>
+          <Button variant="secondary" onClick={close}>{results ? translate('Done') : translate('Cancel')}</Button>
           {!results && (
             <Button variant="primary" disabled={!chosen.length || running || loadingHost} onClick={run}>
-              {running ? 'Applying…' : `Apply to ${chosen.length} file${chosen.length === 1 ? '' : 's'}`}
+              {running ? translate('Applying…') : translate('Apply to {0} file{1}', { 0: chosen.length, 1: chosen.length === 1 ? '' : translate('s') })}
             </Button>
           )}
         </>
@@ -151,27 +154,25 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12.5, color: tokens.colors.textSecondary }}>
-          From <span style={{ fontFamily: MONO }}>{source.file.display_path}</span> ({source.cli}). Each write keeps a backup on the target host.
-        </div>
+          {translate('From')} <span style={{ fontFamily: MONO }}>{source.file.display_path}</span> ({source.cli}{translate('). Each write keeps a backup on the target host.')}</div>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: tokens.colors.textPrimary }}>
-          Target host
-          <select
+          {translate('Target host')}<select
             value={hostId}
             onChange={(e) => setHostId(e.target.value)}
             style={{ fontSize: 12.5, padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary }}
           >
-            {supported.map((h) => <option key={h.manager_id} value={h.manager_id}>{h.name}{h.manager_id === snapshot.manager_id ? ' (this host)' : ''}</option>)}
+            {supported.map((h) => <option key={h.manager_id} value={h.manager_id}>{h.name}{h.manager_id === snapshot.manager_id ? translate(' (this host)') : ''}</option>)}
           </select>
           {source.file.scope === 'project' && (
-            <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>Project files go to the same project's folder on the target host.</span>
+            <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Project files go to the same project\'s folder on the target host.')}</span>
           )}
         </label>
 
         {loadingHost ? (
-          <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>Scanning that host…</div>
+          <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>{translate('Scanning that host…')}</div>
         ) : !candidates.length ? (
           <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>
-            No matching memory file on that host{source.file.scope === 'project' ? ' for this project (does it have a folder there?)' : ''}.
+            {translate('No matching memory file on that host')}{source.file.scope === 'project' ? translate(' for this project (does it have a folder there?)') : ''}.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 520, overflowY: 'auto' }}>
@@ -193,11 +194,11 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
                     />
                     <span style={{ fontSize: 12.5, fontWeight: 600, color: tokens.colors.textPrimary }}>{c.cli.label} · {c.file.label}</span>
                     <span style={{ fontSize: 11, fontFamily: MONO, color: tokens.colors.textMuted }}>{c.file.display_path}</span>
-                    {!c.file.exists && <span style={{ fontSize: 10.5, color: tokens.colors.accentSubtle }}>new</span>}
-                    {again && <span style={{ fontSize: 10.5, color: tokens.colors.accentSubtle }}>applied before — will update</span>}
+                    {!c.file.exists && <span style={{ fontSize: 10.5, color: tokens.colors.accentSubtle }}>{translate('new')}</span>}
+                    {again && <span style={{ fontSize: 10.5, color: tokens.colors.accentSubtle }}>{translate('applied before — will update')}</span>}
                     {result && (
                       <span style={{ fontSize: 11, fontWeight: 600, color: result.ok ? tokens.colors.success : tokens.colors.danger }}>
-                        {result.ok ? '✓ written' : `✗ ${result.error}`}
+                        {result.ok ? translate('✓ written') : `✗ ${result.error}`}
                       </span>
                     )}
                     <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -214,15 +215,15 @@ export default function MemoryApplyModal({ snapshot, hosts, source, preselect, o
                         onClick={() => setState((prev) => ({ ...prev, [key]: { ...prev[key], open: !prev[key].open } }))}
                         style={{ border: 'none', background: 'none', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 11.5 }}
                       >
-                        {st.open ? 'Hide preview' : 'Preview'}
+                        {st.open ? translate('Hide preview') : translate('Preview')}
                       </button>
                     </div>
                   </div>
                   {st.open && (
                     <div style={{ marginTop: 8 }}>
                       {c.file.truncated || c.file.omitted
-                        ? <div style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>The target is large; the full file is read when you apply.</div>
-                        : <MemoryDiffView before={c.file.exists ? c.file.content ?? '' : ''} after={applyContent(applySource, c.file, st.mode)} maxHeight={280} emptyLabel="Already up to date." />}
+                        ? <div style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('The target is large; the full file is read when you apply.')}</div>
+                        : <MemoryDiffView before={c.file.exists ? c.file.content ?? '' : ''} after={applyContent(applySource, c.file, st.mode)} maxHeight={280} emptyLabel={translate('Already up to date.')} />}
                     </div>
                   )}
                 </div>

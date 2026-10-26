@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
@@ -20,6 +22,7 @@ export default function MemoryOptimizeModal({ snapshot, cli, findings, onClose }
   findings: MemoryFinding[];
   onClose: () => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const [canRun, setCanRun] = useState<boolean | null>(null);
@@ -28,12 +31,12 @@ export default function MemoryOptimizeModal({ snapshot, cli, findings, onClose }
     const dirs = snapshot.project_dirs.filter((p) => cli.files.some((f) => f.exists && f.project_dir === p.path));
     return [
       ...dirs.map((p) => ({ value: p.path, label: `${p.project_name} — ${p.path}`, projectDir: p.path as string | null })),
-      ...(operatorHome ? [{ value: operatorHome.path, label: `Global only — ${operatorHome.display_path}`, projectDir: null as string | null }] : []),
+      ...(operatorHome ? [{ value: operatorHome.path, label: translate('Global only — {0}', { 0: operatorHome.display_path }), projectDir: null as string | null }] : []),
     ];
-  }, [snapshot.project_dirs, cli.files, operatorHome]);
+  }, [snapshot.project_dirs, cli.files, operatorHome, getLocale()]);
   const [cwd, setCwd] = useState(options[0]?.value ?? '');
   const projectDir = options.find((o) => o.value === cwd)?.projectDir ?? null;
-  const generated = useMemo(() => optimizationPrompt(cli, findings, { projectDir }), [cli, findings, projectDir]);
+  const generated = useMemo(() => optimizationPrompt(cli, findings, { projectDir }), [cli, findings, projectDir, getLocale()]);
   const [prompt, setPrompt] = useState(generated);
   const [edited, setEdited] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -52,12 +55,12 @@ export default function MemoryOptimizeModal({ snapshot, cli, findings, onClose }
     if (!cwd || !prompt.trim()) return;
     setStarting(true);
     try {
-      const session = await api.openHostSession(snapshot.manager_id, cli.cli, { cwd, title: `Memory optimization · ${cli.label}` });
+      const session = await api.openHostSession(snapshot.manager_id, cli.cli, { cwd, title: translate('Memory optimization · {0}', { 0: cli.label }) });
       await api.promptHostSession(snapshot.manager_id, cli.cli, session.session_id, prompt);
-      showToast('Session started — Refresh the memory page when it finishes.', 'success');
+      showToast(translate('Session started — Refresh the memory page when it finishes.'), 'success');
       navigate(`/sessions/${encodeURIComponent(snapshot.manager_id)}/${encodeURIComponent(cli.cli)}/${encodeURIComponent(session.session_id)}`);
     } catch (err: any) {
-      showToast(err?.message || 'Could not start the session.', 'error');
+      showToast(err?.message || translate('Could not start the session.'), 'error');
       setStarting(false);
     }
   };
@@ -66,30 +69,26 @@ export default function MemoryOptimizeModal({ snapshot, cli, findings, onClose }
     <Modal
       isOpen
       onClose={onClose}
-      title={`Optimize ${cli.label} memory with an agent`}
+      title={translate('Optimize {0} memory with an agent', { 0: cli.label })}
       maxWidth={860}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('Cancel')}</Button>
           <Button variant="primary" disabled={!canRun || !cwd || !prompt.trim() || starting} onClick={start}>
-            {starting ? 'Starting…' : 'Start session'}
+            {starting ? translate('Starting…') : translate('Start session')}
           </Button>
         </>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12.5, color: tokens.colors.textPrimary }}>
         <div style={{ color: tokens.colors.textSecondary }}>
-          Opens a new {cli.label} session on {snapshot.manager_name} and asks it to clean up its own memory using the findings below.
-          Every file it touches is still the CLI's own — AWB's History only covers edits made from this page.
-        </div>
+          {translate('Opens a new')} {cli.label} {translate('session on')} {snapshot.manager_name} {translate('and asks it to clean up its own memory using the findings below. Every file it touches is still the CLI\'s own — AWB\'s History only covers edits made from this page.')}</div>
         {canRun === false && (
           <div style={{ color: tokens.colors.danger }}>
-            Agent Sessions cannot run {cli.label} on this host (no ACP session adapter, or you lack the Agent Sessions permission).
-          </div>
+            {translate('Agent Sessions cannot run')} {cli.label} {translate('on this host (no ACP session adapter, or you lack the Agent Sessions permission).')}</div>
         )}
         <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          Working folder
-          <select
+          {translate('Working folder')}<select
             value={cwd}
             onChange={(e) => setCwd(e.target.value)}
             style={{ flex: 1, minWidth: 0, fontSize: 12.5, padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary }}
@@ -98,11 +97,10 @@ export default function MemoryOptimizeModal({ snapshot, cli, findings, onClose }
           </select>
         </label>
         <div style={{ display: 'flex', alignItems: 'center' }}>
-          <span style={{ fontWeight: 600 }}>Instructions</span>
+          <span style={{ fontWeight: 600 }}>{translate('Instructions')}</span>
           {edited && (
             <button type="button" onClick={() => { setEdited(false); setPrompt(generated); }} style={{ marginLeft: 'auto', border: 'none', background: 'none', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 11.5 }}>
-              Reset to generated
-            </button>
+              {translate('Reset to generated')}</button>
           )}
         </div>
         <textarea

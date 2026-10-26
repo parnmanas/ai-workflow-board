@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import { tokens } from '../../tokens';
 import type { CliMemorySnapshot, MemoryHostSnapshot } from '../../types';
@@ -21,12 +24,12 @@ const SEVERITY_ICON: Record<FindingSeverity, string> = { critical: '●', warnin
 
 export function fixLabel(fix: MemoryFix): string {
   switch (fix.kind) {
-    case 'rebuild_index': return 'Rebuild index';
-    case 'link_home': return 'Link to operator copy';
-    case 'dedupe_lines': return 'Remove repeats';
-    case 'normalize_entries': return 'Normalize';
-    case 'delete_empty': return 'Delete';
-    case 'apply': return 'Apply…';
+    case 'rebuild_index': return translate('Rebuild index');
+    case 'link_home': return translate('Link to operator copy');
+    case 'dedupe_lines': return translate('Remove repeats');
+    case 'normalize_entries': return translate('Normalize');
+    case 'delete_empty': return translate('Delete');
+    case 'apply': return translate('Apply…');
   }
 }
 
@@ -36,11 +39,12 @@ export function isSafeFix(fix: MemoryFix | undefined): fix is MemoryFix {
 }
 
 export function ScoreBadge({ score, size = 'sm' }: { score: number; size?: 'sm' | 'lg' }) {
+  useLocale();
   const color = score >= 85 ? tokens.colors.success : score >= 60 ? tokens.colors.warning : tokens.colors.danger;
   const dim = size === 'lg' ? 44 : 22;
   return (
     <span
-      title="Memory health — 100 minus 15 per critical, 5 per warning, 1 per info finding"
+      title={translate('Memory health — 100 minus 15 per critical, 5 per warning, 1 per info finding')}
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: dim, height: dim, borderRadius: '50%',
         border: `2px solid ${color}`, color, fontSize: size === 'lg' ? 15 : 10, fontWeight: 700, flexShrink: 0,
@@ -62,6 +66,7 @@ export function FindingsPanel({ cli, analysis, selectedPath, onOpenPath, onFix, 
   onOptimize: () => void;
   canOptimize: boolean;
 }) {
+  useLocale();
   const [filter, setFilter] = useState<'all' | FindingSeverity | 'file'>('all');
   const mine = analysis.findings.filter((f) => findingAppliesTo(f, cli.cli));
   const shown = mine.filter((f) => (filter === 'all' ? true : filter === 'file' ? f.paths.includes(selectedPath) : f.severity === filter));
@@ -88,27 +93,26 @@ export function FindingsPanel({ cli, analysis, selectedPath, onOpenPath, onFix, 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <ScoreBadge score={stats?.score ?? 100} size="lg" />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>Analysis</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>{translate('Analysis')}</div>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-              {counts.critical} critical · {counts.warning} warning · {counts.info} info
-            </div>
+              {counts.critical} {translate('critical ·')} {counts.warning} {translate('warning ·')} {counts.info} {translate('info')}</div>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {safe.length > 0 && <Button size="sm" variant="secondary" onClick={() => onFixAll(safe)}>Fix {safe.length} safe issue{safe.length === 1 ? '' : 's'}</Button>}
-          {canOptimize && <Button size="sm" variant="primary" onClick={onOptimize}>Optimize with agent</Button>}
+          {safe.length > 0 && <Button size="sm" variant="secondary" onClick={() => onFixAll(safe)}>{translate('Fix')} {safe.length} {translate('safe issue')}{safe.length === 1 ? '' : translate('s')}</Button>}
+          {canOptimize && <Button size="sm" variant="primary" onClick={onOptimize}>{translate('Optimize with agent')}</Button>}
         </div>
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {chip('all', `All ${mine.length}`)}
-          {counts.critical > 0 && chip('critical', `Critical ${counts.critical}`)}
-          {counts.warning > 0 && chip('warning', `Warning ${counts.warning}`)}
-          {counts.info > 0 && chip('info', `Info ${counts.info}`)}
-          {selectedPath && chip('file', 'This file')}
+          {chip('all', translate('All {0}', { 0: mine.length }))}
+          {counts.critical > 0 && chip('critical', translate('Critical {0}', { 0: counts.critical }))}
+          {counts.warning > 0 && chip('warning', translate('Warning {0}', { 0: counts.warning }))}
+          {counts.info > 0 && chip('info', translate('Info {0}', { 0: counts.info }))}
+          {selectedPath && chip('file', translate('This file'))}
         </div>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 14px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         {shown.length === 0 && (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{mine.length ? 'Nothing in this filter.' : 'No issues found. Nice and tidy.'}</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{mine.length ? translate('Nothing in this filter.') : translate('No issues found. Nice and tidy.')}</div>
         )}
         {shown.map((f) => (
           <div key={f.id} style={{ borderLeft: `3px solid ${SEVERITY_COLOR[f.severity]}`, padding: '4px 0 4px 9px' }}>
@@ -118,7 +122,7 @@ export function FindingsPanel({ cli, analysis, selectedPath, onOpenPath, onFix, 
             </div>
             <div style={{ fontSize: 11.5, color: tokens.colors.textSecondary, marginTop: 2, lineHeight: 1.45, wordBreak: 'break-word' }}>{f.detail}</div>
             {f.also_clis?.length ? (
-              <div style={{ fontSize: 10.5, color: tokens.colors.textMuted, marginTop: 2 }}>Shared file — also read by {[f.cli, ...f.also_clis].filter((c) => c !== cli.cli).join(', ')}</div>
+              <div style={{ fontSize: 10.5, color: tokens.colors.textMuted, marginTop: 2 }}>{translate('Shared file — also read by')} {[f.cli, ...f.also_clis].filter((c) => c !== cli.cli).join(', ')}</div>
             ) : null}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 4 }}>
               {f.paths.slice(0, 3).map((p) => (
@@ -144,13 +148,14 @@ export function FindingsPanel({ cli, analysis, selectedPath, onOpenPath, onFix, 
 }
 
 function BudgetBar({ tokens: value, label, sub }: { tokens: number; label: string; sub?: string }) {
+  useLocale();
   const pct = Math.min(100, (value / BUDGET_CRITICAL_TOKENS) * 100);
   const color = value >= BUDGET_CRITICAL_TOKENS ? tokens.colors.danger : value >= BUDGET_WARN_TOKENS ? tokens.colors.warning : tokens.colors.accent;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
       <div style={{ display: 'flex', fontSize: 12, color: tokens.colors.textPrimary, gap: 8 }}>
         <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-        <span style={{ marginLeft: 'auto', color, fontWeight: 700 }}>≈{value.toLocaleString()} tokens</span>
+        <span style={{ marginLeft: 'auto', color, fontWeight: 700 }}>≈{value.toLocaleString(getLocaleTag())} {translate('tokens')}</span>
       </div>
       <div style={{ height: 6, borderRadius: 3, background: tokens.colors.surfaceSubtle, overflow: 'hidden', position: 'relative' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: color }} />
@@ -170,7 +175,8 @@ export function CliOverview({ snapshot, cli, stats, allStats, onPickCli, onOpenP
   onPickCli: (cli: string) => void;
   onOpenPath: (path: string) => void;
 }) {
-  const projectName = (dir: string | null) => (dir ? snapshot.project_dirs.find((p) => p.path === dir)?.project_name || basenameOf(dir) : 'Global only');
+  useLocale();
+  const projectName = (dir: string | null) => (dir ? snapshot.project_dirs.find((p) => p.path === dir)?.project_name || basenameOf(dir) : translate('Global only'));
   const settings = Object.entries(cli.settings);
   return (
     <div style={{ padding: '16px 20px', overflowY: 'auto', height: '100%', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -182,10 +188,10 @@ export function CliOverview({ snapshot, cli, stats, allStats, onPickCli, onOpenP
       {stats && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
           {[
-            ['Files', `${stats.existing}`],
-            ['Size', formatBytes(stats.bytes)],
-            ['Every session', `≈${stats.worst_budget.tokens.toLocaleString()} tok`],
-            ['On demand', `≈${stats.on_demand_tokens.toLocaleString()} tok`],
+            [translate('Files'), `${stats.existing}`],
+            [translate('Size'), formatBytes(stats.bytes)],
+            [translate('Every session'), translate('≈{0} tok', { 0: stats.worst_budget.tokens.toLocaleString(getLocaleTag()) })],
+            [translate('On demand'), translate('≈{0} tok', { 0: stats.on_demand_tokens.toLocaleString(getLocaleTag()) })],
           ].map(([k, v]) => (
             <div key={k} style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg, padding: '8px 12px', background: tokens.colors.surfaceCard }}>
               <div style={{ fontSize: 10.5, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>{k}</div>
@@ -197,10 +203,10 @@ export function CliOverview({ snapshot, cli, stats, allStats, onPickCli, onOpenP
 
       {stats && stats.budgets.some((b) => b.tokens > 0) && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>Loaded into every session</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>{translate('Loaded into every session')}</div>
           {stats.budgets.filter((b) => b.tokens > 0).map((b) => (
             <div key={b.project_dir ?? 'global'}>
-              <BudgetBar tokens={b.tokens} label={projectName(b.project_dir)} sub={b.files.slice(0, 4).map((f) => `${f.label} ≈${f.tokens.toLocaleString()}`).join(' · ')} />
+              <BudgetBar tokens={b.tokens} label={projectName(b.project_dir)} sub={b.files.slice(0, 4).map((f) => `${f.label} ≈${f.tokens.toLocaleString(getLocaleTag())}`).join(' · ')} />
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
                 {b.files.slice(0, 4).map((f) => (
                   <button key={f.path} type="button" onClick={() => onOpenPath(f.path)} style={{ border: 'none', background: 'none', padding: 0, color: tokens.colors.accentSubtle, fontSize: 11, cursor: 'pointer', fontFamily: MONO }}>
@@ -210,26 +216,25 @@ export function CliOverview({ snapshot, cli, stats, allStats, onPickCli, onOpenP
               </div>
             </div>
           ))}
-          <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Token counts are estimates. The line marks {BUDGET_WARN_TOKENS.toLocaleString()} tokens — beyond it memory starts crowding the task.</div>
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('Token counts are estimates. The line marks')} {BUDGET_WARN_TOKENS.toLocaleString(getLocaleTag())} {translate('tokens — beyond it memory starts crowding the task.')}</div>
         </div>
       )}
 
       {cli.homes.length > 1 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>Homes</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>{translate('Homes')}</div>
           {cli.homes.map((h) => (
             <div key={h.id} style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
               <b style={{ color: tokens.colors.textPrimary }}>{homeTitle(h)}</b> <span style={{ fontFamily: MONO, fontSize: 11 }}>{h.display_path}</span>
-              {' — '}{cli.files.filter((f) => f.home_id === h.id && f.exists && !f.shared_with).length} own file(s)
-            </div>
+              {' — '}{cli.files.filter((f) => f.home_id === h.id && f.exists && !f.shared_with).length} {translate('own file(s)')}</div>
           ))}
-          <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>AWB sessions bound to a credential run with their own CLI home; only the history folder is linked to the operator home.</div>
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('AWB sessions bound to a credential run with their own CLI home; only the history folder is linked to the operator home.')}</div>
         </div>
       )}
 
       {settings.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>Settings that affect memory</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>{translate('Settings that affect memory')}</div>
           {settings.map(([k, v]) => (
             <div key={k} style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: MONO }}>{k} = {String(v)}</div>
           ))}
@@ -237,7 +242,7 @@ export function CliOverview({ snapshot, cli, stats, allStats, onPickCli, onOpenP
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>All CLIs on {snapshot.manager_name}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>{translate('All CLIs on')} {snapshot.manager_name}</div>
         <div style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden' }}>
           {allStats.map((s) => (
             <button
@@ -252,15 +257,15 @@ export function CliOverview({ snapshot, cli, stats, allStats, onPickCli, onOpenP
             >
               <ScoreBadge score={s.score} />
               <span style={{ fontWeight: 600 }}>{s.label}</span>
-              <span style={{ color: tokens.colors.textSecondary }}>{s.existing} files</span>
-              <span style={{ color: tokens.colors.textSecondary }}>≈{s.worst_budget.tokens.toLocaleString()} tok</span>
+              <span style={{ color: tokens.colors.textSecondary }}>{s.existing} {translate('files')}</span>
+              <span style={{ color: tokens.colors.textSecondary }}>≈{s.worst_budget.tokens.toLocaleString(getLocaleTag())} {translate('tok')}</span>
               <span style={{ color: s.counts.critical ? tokens.colors.danger : s.counts.warning ? tokens.colors.warning : tokens.colors.textMuted }}>
                 {s.counts.critical} / {s.counts.warning} / {s.counts.info}
               </span>
             </button>
           ))}
         </div>
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Issues: critical / warning / info.</div>
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('Issues: critical / warning / info.')}</div>
       </div>
     </div>
   );

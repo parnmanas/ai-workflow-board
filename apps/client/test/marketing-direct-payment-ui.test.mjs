@@ -1,3 +1,7 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 직접 결제 어댑터(docs/marketing.md "직접 결제 어댑터")의 화면 회귀. jsdom 위에 실제 캠페인 페이지를 띄워 클릭 · 입력을 태운다.
 //
 // 고정하는 계약:
@@ -155,16 +159,16 @@ function within(root, testId) {
 }
 
 function buttonIn(root, label) {
-  const found = [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+  const found = [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === ui(label));
   assert.ok(found, `"${label}" 버튼이 없습니다`);
   return found;
 }
 
-const hasButton = (root, label) => [...root.querySelectorAll('button')].some((b) => b.textContent?.trim() === label);
+const hasButton = (root, label) => [...root.querySelectorAll('button')].some((b) => b.textContent?.trim() === ui(label));
 const dialogs = () => [...document.querySelectorAll('[role="dialog"]')];
 
 function fieldIn(root, labelText, tag = 'input') {
-  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === labelText);
+  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(labelText));
   assert.ok(label, `"${labelText}" 라벨이 없습니다`);
   const field = label.parentElement?.querySelector(tag);
   assert.ok(field, `"${labelText}" 의 <${tag}> 가 없습니다`);
@@ -192,20 +196,20 @@ test('직접 공급자 지출 — 계획 문장을 보여 주고, 승인 확인 
   });
   const card = within(container, 'marketing-spend-sp-pending');
   assert.equal(within(container, 'marketing-spend-plan-sp-pending').textContent, PLAN_TEXT);
-  assert.match(card.textContent, /Meta Ads — 승인하면 서버가 광고 캠페인 지출 한도\(spend_cap\)를 올림/, '결제 방식');
-  assert.match(card.textContent, /실행 계획 — 서버가 공급자를 읽어 만들었고/);
+  assert.match(card.textContent, uiPattern("Meta Ads — 승인하면 서버가 광고 캠페인 지출 한도(spend_cap)를 올림"), '결제 방식');
+  assert.match(card.textContent, uiPattern("실행 계획 — 서버가 공급자를 읽어 만들었고, 승인하면 이 내용 그대로 실행됩니다"));
 
-  click(buttonIn(card, '승인…'));
+  click(buttonIn(card, ui("승인…")));
   await flush();
   const dialog = within(document, 'marketing-spend-approve-dialog');
   assert.equal(within(dialog, 'marketing-spend-approve-plan').textContent, PLAN_TEXT);
-  assert.match(dialog.textContent, /Meta 광고 캠페인의 지출 한도\(spend_cap\)를 위 계획대로 바꿉니다/);
+  assert.match(dialog.textContent, uiPattern("승인하면 서버가 곧바로 Meta 광고 캠페인의 지출 한도(spend_cap)를 위 계획대로 바꿉니다. 그 사이 한도가 바뀌었으면 보내지 않습니다. 자동 재시도는 없습니다. 올린 만큼 광고비가 쓰일 수 있습니다."));
   click(within(document, 'marketing-spend-approve-check'));
   click(within(document, 'marketing-spend-approve-confirm'));
   await flush();
   await flush();
   assert.deepEqual(approvals, [['sp-pending', HASH, '']]);
-  assert.ok(document.body.textContent.includes('승인했고 광고 플랫폼에 상한을 반영했습니다'));
+  assert.ok(document.body.textContent.includes(ui("승인했고 광고 플랫폼에 상한을 반영했습니다")));
 });
 
 test('결과 불명 — 어디를 볼지 알려 주고, 공급자에서 지금 상한을 읽어 오며, 결제 기록은 기록용 ref 로 채운다', async (t) => {
@@ -223,7 +227,7 @@ test('결과 불명 — 어디를 볼지 알려 주고, 공급자에서 지금 �
   const alert = within(container, 'marketing-spend-unknown-sp-unknown');
   assert.match(alert.textContent, /Ads Manager 에서 캠페인 77 의 지출 한도가 1,300\.00 USD\(목표\)인지 1,000\.00 USD\(이전\)인지/);
   assert.equal(hasButton(card, '환불 기록…'), false);
-  click(buttonIn(card, '공급자에서 확인'));
+  click(buttonIn(card, ui("공급자에서 확인")));
   await flush();
   await flush();
   assert.ok(calls.some((c) => c[0] === 'inspectMarketingSpend' && c[1] === 'sp-unknown'));
@@ -232,12 +236,12 @@ test('결과 불명 — 어디를 볼지 알려 주고, 공급자에서 지금 �
     '지금 상한 1,300.00 USD: 목표값입니다 — 반영된 것으로 보입니다. (1,000.00 USD → 1,300.00 USD 계획)',
   );
 
-  click(buttonIn(card, '결제 완료 기록…'));
+  click(buttonIn(card, ui("결제 완료 기록…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("결제 완료 기록")));
   assert.ok(dialog, '결제 기록 창');
-  assert.equal(fieldIn(dialog, '거래 id (필수)').value, 'meta_ads:act_9/77:spend_cap=130000', '서버가 준 기록용 ref');
-  click(buttonIn(dialog, '기록'));
+  assert.equal(fieldIn(dialog, ui("거래 id (필수)")).value, 'meta_ads:act_9/77:spend_cap=130000', '서버가 준 기록용 ref');
+  click(buttonIn(dialog, ui("기록")));
   await flush();
   await flush();
   assert.deepEqual(paid, [['sp-unknown', { provider_ref: 'meta_ads:act_9/77:spend_cap=130000' }]]);
@@ -246,9 +250,9 @@ test('결과 불명 — 어디를 볼지 알려 주고, 공급자에서 지금 �
 test('상한 공급자의 결제 완료는 "한도 반영됨" 이고 환불 기록이 없다', async (t) => {
   const { container } = await renderPage(t, { entry: '/marketing/c-1?tab=budget' });
   const card = within(container, 'marketing-spend-sp-paid');
-  assert.match(card.textContent, /한도 반영됨/);
+  assert.match(card.textContent, uiPattern("한도 반영됨"));
   assert.equal(hasButton(card, '환불 기록…'), false);
-  assert.match(card.textContent, /덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로/);
+  assert.match(card.textContent, uiPattern("광고 플랫폼의 상한을 올린 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로 낮춘 뒤에만 가능합니다. 아래에서 지출 보고서와 남은 상한을 확인하세요."));
 });
 
 test('수취인 편집 — 직접 결제 경로는 그 공급자의 이 계정 credential 만, ref 형식이 맞아야 보낸다', async (t) => {
@@ -259,9 +263,9 @@ test('수취인 편집 — 직접 결제 경로는 그 공급자의 이 계정 c
   });
   assert.match(within(container, 'marketing-payee-Meta fall').textContent, /직접 결제: Meta Ads · act_9\/77/);
 
-  click(buttonIn(container, '예산 설정…'));
+  click(buttonIn(container, ui("예산 설정…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("예산 설정")));
   assert.ok(dialog, '예산 설정 창');
   const metaRow = within(dialog, 'marketing-payee-row-0');
   const credSelect = metaRow.querySelector('select[aria-label="수취인 1 credential"]');
@@ -277,13 +281,13 @@ test('수취인 편집 — 직접 결제 경로는 그 공급자의 이 계정 c
   assert.ok(googleCred);
   assert.deepEqual([...googleCred.querySelectorAll('option')].map((o) => o.value).filter(Boolean), ['cred-google']);
   choose(googleCred, 'cred-google');
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   assert.equal(patches.length, 0, 'ref 가 Google 형식이 아니면 보내지 않는다');
   assert.match(dialog.textContent, /수취인 "Newsletter": Google Ads 대상은 <고객 id>\/<캠페인 id>/);
 
   typeInto(row.querySelector('input[aria-label="수취인 2 참조"]'), '111-222-3333/5');
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   await flush();
   assert.deepEqual(patches, [['c-1', {
@@ -318,7 +322,7 @@ test('연결 확인 — 공급자를 읽은 결과를 수취인마다 보여 준
     },
   });
   const panel = within(container, 'marketing-payment-check');
-  click(buttonIn(panel, '연결 확인'));
+  click(buttonIn(panel, ui("연결 확인")));
   await flush();
   await flush();
   assert.ok(calls.some((c) => c[0] === 'checkMarketingPayments' && c[1] === 'c-1'));
@@ -332,7 +336,7 @@ test('연결 확인 — 공급자를 읽은 결과를 수취인마다 보여 준
   assert.match(denied.textContent, /공급자 메시지 “Unsupported get request\. Object with ID 80 does not exist or missing permissions”/, 'the person sees why');
   const google = within(container, 'marketing-payment-check-Google total');
   assert.match(google.textContent, /^정상 · Google total \(Google Ads 1112223333\/5\) · 지금 상한 1,000\.00 USD/);
-  assert.match(google.textContent, /다른 계정에 열린 요청 있음/, 'another account\'s request shows without its id or state');
+  assert.match(google.textContent, uiPattern("다른 계정에 열린 요청 있음"), 'another account\'s request shows without its id or state');
   assert.doesNotMatch(google.textContent, /other_account/);
 });
 
@@ -364,38 +368,38 @@ test('Stripe 카드 결과 불명 — 공급자에서 이 요청의 카드를 �
   });
   const card = within(container, 'marketing-spend-sp-card');
   assert.match(within(container, 'marketing-spend-unknown-sp-card').textContent, /"공급자에서 확인" 이 카드 소지자 ich_1 의 카드 중 이 요청의 카드를 찾습니다/);
-  click(buttonIn(card, '공급자에서 확인'));
+  click(buttonIn(card, ui("공급자에서 확인")));
   await flush();
   await flush();
   assert.match(within(container, 'marketing-spend-inspection-sp-card').textContent, /이 요청의 카드: ic_77\(inactive, 한도 300.00 USD\) — AWB 가 활성화하지 않은 카드입니다/);
 
   const paidRef = async () => {
-    click(buttonIn(card, '결제 완료 기록…'));
+    click(buttonIn(card, ui("결제 완료 기록…")));
     await flush();
-    const paidDialog = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
+    const paidDialog = dialogs().find((d) => d.textContent.includes(ui("결제 완료 기록")));
     assert.ok(paidDialog);
     const value = paidDialog.querySelector('input').value;
-    click(buttonIn(paidDialog, '취소'));
+    click(buttonIn(paidDialog, ui("취소")));
     await flush();
     return value;
   };
   assert.equal(await paidRef(), '', 'a card AWB never activated is not offered as paid');
   cardStatus = 'active';
-  click(buttonIn(card, '공급자에서 확인'));
+  click(buttonIn(card, ui("공급자에서 확인")));
   await flush();
   await flush();
   assert.match(within(container, 'marketing-spend-inspection-sp-card').textContent, /ic_77\(active, 한도 300.00 USD\) — 활성 카드의 id 로 결제 완료를 기록하세요/);
   assert.equal(await paidRef(), 'ic_77', 'the active card the inspection found');
 
-  click(buttonIn(card, '실패로 기록…'));
+  click(buttonIn(card, ui("실패로 기록…")));
   await flush();
-  const failDialog = dialogs().find((d) => d.textContent.includes('결제 실패로 기록'));
-  assert.match(failDialog.textContent, /이 요청의 카드가 Stripe 에 없음을 확인했을 때만/);
+  const failDialog = dialogs().find((d) => d.textContent.includes(ui("결제 실패로 기록")));
+  assert.match(failDialog.textContent, uiPattern("이 요청의 카드가 Stripe 에 없음을 확인했을 때만 실패로 기록하세요(서버도 카드를 찾아 봅니다 — 해지되지 않은 카드가 있으면 거부합니다). 보류한 예산이 풀립니다."));
   typeInto(failDialog.querySelector('textarea'), 'canceled in the dashboard, nothing spent');
   const confirmBox = failDialog.querySelector('input[type="checkbox"]');
   assert.ok(confirmBox, 'a card request asks for the no-spend confirmation');
   click(confirmBox);
-  click(buttonIn(failDialog, '실패로 기록'));
+  click(buttonIn(failDialog, ui("실패로 기록")));
   await flush();
   assert.deepEqual(failed, [['sp-card', 'canceled in the dashboard, nothing spent', true]]);
 });
@@ -408,18 +412,18 @@ test('Stripe 카드 발급됨 — 상태 표시와 대시보드 링크, 승인 �
     stubs: { listMarketingSpendRequests: async (_id, opts = {}) => (opts.status === 'paid' ? [issued] : opts.status === 'pending' ? [pendingBig] : !opts.status ? [issued, pendingBig] : []) },
   });
   const card = within(container, 'marketing-spend-sp-issued');
-  assert.match(card.textContent, /카드 발급됨/);
-  assert.match(card.textContent, /AWB 는 카드 번호를\s*보여 주지 않습니다/);
-  const link = [...card.querySelectorAll('a')].find((a) => a.textContent === 'Stripe 에서 카드 보기');
+  assert.match(card.textContent, uiPattern("카드 발급됨"));
+  assert.match(card.textContent, uiPattern("그 한도의 카드를 만든 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 카드 정보는 Stripe 대시보드에서 봅니다(AWB 는 카드 번호를 보여 주지 않습니다)"));
+  const link = [...card.querySelectorAll('a')].find((a) => a.textContent === ui("Stripe 에서 카드 보기"));
   assert.ok(link, 'a link to the card in the Stripe Dashboard');
   assert.equal(link.getAttribute('href'), 'https://dashboard.stripe.com/test/issuing/cards/ic_9');
   assert.equal(hasButton(card, '환불 기록…'), false);
 
   const big = within(container, 'marketing-spend-sp-big');
-  click(buttonIn(big, '승인…'));
+  click(buttonIn(big, ui("승인…")));
   await flush();
   const dialog = within(document, 'marketing-spend-approve-dialog');
-  assert.match(dialog.textContent, /가상 카드를 만듭니다\(비활성으로 만들어 계획과 대조한 뒤 활성화\)/);
+  assert.match(dialog.textContent, uiPattern("승인하면 서버가 곧바로 위 계획대로 Stripe Issuing 가상 카드를 만듭니다(비활성으로 만들어 계획과 대조한 뒤 활성화). 카드 번호는 Stripe 대시보드에서 봅니다. 자동 재시도는 없습니다. 이 금액은 사용으로 셉니다."));
   assert.match(dialog.textContent, /일회용 카드의 한도가 500.00 USD 를 넘습니다/);
 });
 
@@ -429,9 +433,9 @@ test('수취인 편집 — Stripe Issuing 경로는 카드 통제와 발급 안�
     entry: '/marketing/c-1?tab=budget',
     stubs: { updateMarketingCampaign: async (id, patch) => { patches.push([id, patch]); return { ...campaign(), ...patch }; } },
   });
-  click(buttonIn(container, '예산 설정…'));
+  click(buttonIn(container, ui("예산 설정…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("예산 설정")));
   const row = within(dialog, 'marketing-payee-row-1');
   const route = row.querySelector('select[aria-label="수취인 2 결제 경로"]');
   assert.ok([...route.querySelectorAll('option')].some((o) => o.textContent === 'Stripe Issuing — 승인 금액 한도의 가상 카드 발급'));
@@ -441,14 +445,14 @@ test('수취인 편집 — Stripe Issuing 경로는 카드 통제와 발급 안�
   assert.equal(controls.querySelector('input[type="checkbox"]').checked, true, 'single-use by default');
   const guide = within(row, 'payment-credential-guide-stripe_issuing');
   assert.match(guide.textContent, /credential 발급 방법 — Stripe Issuing/);
-  assert.match(guide.textContent, /Create restricted key/);
+  assert.match(guide.textContent, uiPattern('Create restricted key'));
   const credSelect = row.querySelector('select[aria-label="수취인 2 credential"]');
   assert.deepEqual([...credSelect.querySelectorAll('option')].map((o) => o.value).filter(Boolean), ['cred-stripe']);
   choose(credSelect, 'cred-stripe');
   typeInto(row.querySelector('input[aria-label="수취인 2 참조"]'), 'ich_9');
   typeInto(row.querySelector('input[aria-label="수취인 2 허용 업종"]'), 'software, Advertising_Services');
   typeInto(row.querySelector('input[aria-label="수취인 2 카드당 최대"]'), '500');
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   await flush();
   assert.deepEqual(patches, [['c-1', {
@@ -469,23 +473,23 @@ test('예산 설정 — 통화를 바꾸면 카드당 최대도 비우고, 새 �
       updateMarketingCampaign: async (id, patch) => { patches.push(patch); return { ...campaign(), ...patch }; },
     },
   });
-  click(buttonIn(container, '예산 설정…'));
+  click(buttonIn(container, ui("예산 설정…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("예산 설정")));
   const cardMax = () => dialog.querySelector('input[aria-label="수취인 1 카드당 최대"]');
   assert.equal(cardMax().value, '500.00');
-  typeInto(fieldIn(dialog, '통화'), 'eur');
+  typeInto(fieldIn(dialog, ui("통화")), 'eur');
   assert.equal(cardMax().value, '', '500 USD 가 500 EUR 로 읽히지 않게 비운다');
   assert.match(cardMax().getAttribute('placeholder'), /새 통화\(EUR\)로 다시 적으세요/);
   for (const [label, value] of [['총 예산 (0 = 지출 불가)', '1000'], ['기간 상한 (0 = 없음)', '500'], ['건당 상한 (0 = 없음)', '0'], ['2인 승인 기준 (0 = 끔)', '0']]) {
     typeInto(fieldIn(dialog, label), value);
   }
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   assert.equal(patches.length, 0, '카드당 최대를 다시 적기 전에는 보내지 않는다(지운 채로 두면 한도가 사라진다)');
   assert.match(dialog.textContent, /통화를 바꿨으니 수취인 "Sponsor card" 의 카드당 최대를 새 통화\(EUR\)로 다시 적으세요/);
   typeInto(cardMax(), '450');
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   await flush();
   assert.equal(patches.length, 1, JSON.stringify(patches));
@@ -504,18 +508,18 @@ test('재사용 Stripe 카드 — 기존 카드 id 를 고쳐 저장하고 잘�
       updateMarketingCampaign: async (id, patch) => { patches.push(patch); return campaign({ ...patch }); },
     },
   });
-  click(buttonIn(container, '예산 설정…'));
+  click(buttonIn(container, ui("예산 설정…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("예산 설정")));
   const input = dialog.querySelector('input[aria-label="수취인 1 재사용 카드 id"]');
   assert.equal(input.value, 'ic_old');
   typeInto(input, 'ich_wrong');
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   assert.equal(patches.length, 0);
-  assert.match(dialog.textContent, /카드 id 는 ic_… 형식/);
+  assert.match(dialog.textContent, uiPattern("수취인 \"{0}\": 카드 id 는 ic_… 형식입니다"));
   typeInto(input, 'ic_replacement');
-  click(buttonIn(dialog, '저장'));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   assert.equal(patches[0].payees[0].card_id, 'ic_replacement');
   assert.equal(patches[0].payees[0].card_single_use, false);
@@ -537,15 +541,15 @@ test('지출 대조 — 종료 대상의 미사용 상한과 추정치를 보여
     },
   });
   const panel = within(container, 'marketing-spending-reconciliation-sp-paid');
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
   assert.match(panel.textContent, /종료·중지 대상의 반납 가능 상한/);
-  assert.match(panel.textContent, /Meta Insights spend는 추정치/);
+  assert.match(panel.textContent, uiPattern("Meta Insights spend는 추정치입니다. 나중에 정정될 수 있습니다."));
   assert.match(panel.textContent, /200.00 USD/);
-  click(buttonIn(panel, '미사용 상한 반납…'));
+  click(buttonIn(panel, ui("미사용 상한 반납…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('미사용 상한 반납 승인'));
-  const approve = buttonIn(dialog, '반납 승인');
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("미사용 상한 반납 승인")));
+  const approve = buttonIn(dialog, ui("반납 승인"));
   assert.equal(approve.disabled, true);
   typeInto(dialog.querySelector('textarea'), 'Campaign paused; return unused cap');
   click(dialog.querySelector('input[type="checkbox"]'));
@@ -571,23 +575,23 @@ test('카드 반납 — 해지의 비가역성과 미확정 승인·초과 지�
     },
   });
   const panel = within(container, 'marketing-spending-reconciliation-sp-issued');
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
-  assert.match(panel.textContent, /미확정 승인/);
+  assert.match(panel.textContent, uiPattern("카드 지출·미확정 승인이 이 계정의 카드 원장 순사용 합계를 초과:"));
   assert.match(panel.textContent, /플랫폼 상한 초과 지출: 15.00 USD/);
   assert.match(panel.textContent, /카드 원장 순사용 합계를 초과: 25.00 USD/);
-  assert.match(panel.textContent, /반납 뒤 늦게 매입된 금액/);
-  click(buttonIn(panel, '카드 해지 후 미사용분 반납…'));
+  assert.match(panel.textContent, uiPattern(". 반납 뒤 늦게 매입된 금액 등을 확인하세요. 플랫폼 상한 초과와는 별도입니다."));
+  click(buttonIn(panel, ui("카드 해지 후 미사용분 반납…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('미사용 상한 반납 승인'));
-  assert.match(dialog.textContent, /해지는 되돌릴 수 없고/);
-  assert.match(dialog.textContent, /다른 결제도 중단/);
-  click(buttonIn(dialog, '취소'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("미사용 상한 반납 승인")));
+  assert.match(dialog.textContent, uiPattern("카드를 먼저 해지합니다. 해지는 되돌릴 수 없고 이 카드를 쓰는 다른 결제도 중단됩니다. 해지 후 거래와 미확정 승인을 다시 읽어 확인된 미사용분만 반납합니다."));
+  assert.match(dialog.textContent, uiPattern("카드를 먼저 해지합니다. 해지는 되돌릴 수 없고 이 카드를 쓰는 다른 결제도 중단됩니다. 해지 후 거래와 미확정 승인을 다시 읽어 확인된 미사용분만 반납합니다."));
+  click(buttonIn(dialog, ui("취소")));
   complete = false;
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
-  assert.match(panel.textContent, /완전히 확인하지 못해 반납할 수 없습니다/);
-  assert.doesNotMatch(panel.textContent, /플랫폼 상한 초과 지출:/);
+  assert.match(panel.textContent, uiPattern("지출 보고서를 완전히 확인하지 못해 반납할 수 없습니다."));
+  assert.doesNotMatch(panel.textContent, uiPattern("플랫폼 상한 초과 지출:"));
   assert.match(panel.textContent, /카드 원장 순사용 합계를 초과: 25.00 USD/, 'ledger shortfall remains visible even below the platform cap');
   assert.equal(hasButton(panel, '카드 해지 후 미사용분 반납…'), false);
 });
@@ -605,16 +609,16 @@ test('반납 결과 불명 — 상한 변경을 다시 보내지 않고 기존 �
     },
   });
   const panel = within(container, 'marketing-spending-reconciliation-sp-return');
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
   assert.equal(hasButton(panel, '미사용 상한 반납…'), false);
-  click(buttonIn(panel, '반납 결과 대조…'));
+  click(buttonIn(panel, ui("반납 결과 대조…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('반납 결과 대조 확인'));
-  assert.match(dialog.textContent, /카드 해지를 다시 보내지 않습니다/);
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("반납 결과 대조 확인")));
+  assert.match(dialog.textContent, uiPattern("의 공급자 결과를 읽고 확인된 금액만 기록합니다. 상한 변경이나 카드 해지를 다시 보내지 않습니다."));
   typeInto(dialog.querySelector('textarea'), 'Reconcile saved operation');
   click([...dialog.querySelectorAll('input[type="checkbox"]')].at(-1));
-  click(buttonIn(dialog, '결과 대조'));
+  click(buttonIn(dialog, ui("결과 대조")));
   await flush();
   assert.deepEqual(recovered, [['sp-return', { note: 'Reconcile saved operation', confirm: true }]]);
 });
@@ -629,9 +633,9 @@ test('Google 비용은 청구액과 구별하고 원본 micros를 보여 준다'
     },
   });
   const panel = within(container, 'marketing-spending-reconciliation-sp-google');
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
-  assert.match(panel.textContent, /metrics.cost_micros는 서비스 비용으로, 실제 청구액과 다를 수 있습니다/);
+  assert.match(panel.textContent, uiPattern("Google metrics.cost_micros는 서비스 비용으로, 실제 청구액과 다를 수 있습니다."));
   assert.match(panel.textContent, /1100000000 micros/);
 });
 
@@ -645,7 +649,7 @@ test('승인 권한 없는 관리자는 대조·반납 버튼을 받지 않는�
   const card = within(container, 'marketing-spend-sp-paid');
   assert.equal(hasButton(card, '플랫폼 지출 대조'), false);
   assert.equal(hasButton(card, '미사용 상한 반납…'), false);
-  assert.match(card.textContent, /지출 승인 권한이 있는 사람이 확인/);
+  assert.match(card.textContent, uiPattern("플랫폼 지출 대조 · 미사용 상한 반납은 지출 승인 권한이 있는 사람이 확인합니다."));
 });
 
 test('카드 반납은 변하지 않는 카드 상한뿐 아니라 확인한 원장 순사용도 함께 보내 재전송을 구분한다', async (t) => {
@@ -660,14 +664,14 @@ test('카드 반납은 변하지 않는 카드 상한뿐 아니라 확인한 원
     },
   });
   const panel = within(container, 'marketing-spending-reconciliation-sp-card-return');
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
-  click(buttonIn(panel, '카드 해지 후 미사용분 반납…'));
+  click(buttonIn(panel, ui("카드 해지 후 미사용분 반납…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('미사용 상한 반납 승인'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("미사용 상한 반납 승인")));
   typeInto(dialog.querySelector('textarea'), 'Canceled card remaining budget');
   click(dialog.querySelector('input[type="checkbox"]'));
-  click(buttonIn(dialog, '반납 승인'));
+  click(buttonIn(dialog, ui("반납 승인")));
   await flush();
   assert.deepEqual(returned, [['sp-card-return', { amount_minor: 15000, expected_ceiling: '30000', expected_net_capture_minor: 25000, note: 'Canceled card remaining budget', confirm: true }]]);
 });
@@ -684,21 +688,21 @@ test('반납 결과 불명 — 변경 없음은 별도 확인하고 환불 없�
     },
   });
   const panel = within(container, 'marketing-spending-reconciliation-sp-return');
-  click(buttonIn(panel, '플랫폼 지출 대조'));
+  click(buttonIn(panel, ui("플랫폼 지출 대조")));
   await flush();
-  click(buttonIn(panel, '반납 결과 대조…'));
+  click(buttonIn(panel, ui("반납 결과 대조…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('반납 결과 대조 확인'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("반납 결과 대조 확인")));
   const [noChange, confirm] = dialog.querySelectorAll('input[type="checkbox"]');
   typeInto(dialog.querySelector('textarea'), 'Provider confirms request never applied');
   click(confirm);
-  assert.equal(buttonIn(dialog, '결과 대조').disabled, false);
+  assert.equal(buttonIn(dialog, ui("결과 대조")).disabled, false);
   click(noChange);
-  assert.equal(buttonIn(dialog, '결과 대조').disabled, true, 'switching resolution requires renewed confirmation');
-  assert.match(dialog.textContent, /요청 후 15분이 지나고/);
-  assert.match(dialog.textContent, /환불 없이 실패로 닫는 것을 승인/);
+  assert.equal(buttonIn(dialog, ui("결과 대조")).disabled, true, 'switching resolution requires renewed confirmation');
+  assert.match(dialog.textContent, uiPattern("요청 후 15분이 지나고 서버도 공급자 상태가 바뀌지 않았음을 확인해야 실패로 닫습니다. 대기 중인 작업이 뒤늦게 반영될 가능성까지 공급자에서 확인하세요."));
+  assert.match(dialog.textContent, uiPattern("반영되지 않은 반납을 환불 없이 실패로 닫는 것을 승인합니다"));
   click(confirm);
-  click(buttonIn(dialog, '결과 대조'));
+  click(buttonIn(dialog, ui("결과 대조")));
   await flush();
   assert.deepEqual(recovered, [['sp-return', { note: 'Provider confirms request never applied', confirm: true, outcome: 'failed', confirm_no_change: true }]]);
 });

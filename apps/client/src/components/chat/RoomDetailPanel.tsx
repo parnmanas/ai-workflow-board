@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -53,6 +55,7 @@ export function RoomHeaderActions({
   onToggleOpenJoin,
   openJoinPending,
 }: RoomHeaderActionsProps) {
+  useLocale();
   const [renameValue, setRenameValue] = useState(room.name || '');
   const renameInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -98,7 +101,7 @@ export function RoomHeaderActions({
         <input
           ref={renameInputRef}
           type="text"
-          placeholder="Room name"
+          placeholder={translate('Room name')}
           value={renameValue}
           onChange={(e) => setRenameValue(e.target.value)}
           onKeyDown={handleRenameKeyDown}
@@ -117,11 +120,9 @@ export function RoomHeaderActions({
           onClick={() => { const v = renameValue.trim(); if (v) onRenameConfirm(v); }}
           style={{ ...ghostButton, borderColor: tokens.colors.accent, color: tokens.colors.accent }}
         >
-          Rename Room
-        </button>
+          {translate('Rename Room')}</button>
         <button onClick={onRenameCancel} style={ghostButton}>
-          Cancel
-        </button>
+          {translate('Cancel')}</button>
       </div>
     );
   }
@@ -136,8 +137,7 @@ export function RoomHeaderActions({
         data-testid="room-open-join-hint"
         style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}
       >
-        Open room — send a message to join
-      </span>
+        {translate('Open room — send a message to join')}</span>
     );
   }
 
@@ -147,8 +147,7 @@ export function RoomHeaderActions({
           group 으로 승격시키며, 되돌릴 수 없다는 경고는 피커 모달이 보여준다 — 여기서
           버튼을 감추면 사용자가 실제로 대화하는 DM 에서는 초대 자체가 불가능해진다. */}
       <button onClick={onAddPeople} data-testid="room-add-people" style={ghostButton}>
-        Add People
-      </button>
+        {translate('Add People')}</button>
       {/* 자유 참여(open join, ticket 995a9519) — group 전용. DM 은 정확히 2인
           불변식이라 서버가 이 옵션을 거부하므로 토글 자체를 걸지 않는다. 켜면 같은
           계정의 모든 유저에게 방이 보이고, 참여자가 아니어도 첫 발언 시점에
@@ -161,8 +160,8 @@ export function RoomHeaderActions({
           data-testid="room-open-join-toggle"
           title={
             room.open_join
-              ? 'Anyone in this account can see and join this room. Click to close it to participants only.'
-              : 'Only participants can see this room. Click to let anyone in this account see and join it.'
+              ? translate('Anyone in this account can see and join this room. Click to close it to participants only.')
+              : translate('Only participants can see this room. Click to let anyone in this account see and join it.')
           }
           style={{
             ...ghostButton,
@@ -173,29 +172,26 @@ export function RoomHeaderActions({
               : null),
           }}
         >
-          {room.open_join ? 'Open Join: On' : 'Open Join: Off'}
+          {room.open_join ? translate('Open Join: On') : translate('Open Join: Off')}
         </button>
       )}
       {/* Rename is allowed for DMs too so users can tag multi-rooms with
           the same partner ("Roadmap" / "Casual" / "On-call"). */}
       <button onClick={onRenameStart} style={ghostButton}>
-        Rename
-      </button>
+        {translate('Rename')}</button>
       <button
         onClick={onClear}
-        aria-label="Clear conversation"
-        title="Clear conversation history from your view only (other participants are unaffected)"
+        aria-label={translate('Clear conversation')}
+        title={translate('Clear conversation history from your view only (other participants are unaffected)')}
         style={ghostButton}
       >
-        Clear
-      </button>
+        {translate('Clear')}</button>
       <button
         onClick={onLeave}
-        aria-label="Leave room"
+        aria-label={translate('Leave room')}
         style={destructiveButton}
       >
-        Leave
-      </button>
+        {translate('Leave')}</button>
     </div>
   );
 }
@@ -263,6 +259,7 @@ export default function ChatRoomView({
   activeTasks = [],
   onSelectTask = () => {},
 }: ChatRoomViewProps) {
+  useLocale();
   const confirm = useConfirm();
   const { showToast } = useToast();
   const { noteMentionsCleared } = useNotifications();
@@ -315,9 +312,9 @@ export default function ChatRoomView({
   async function handleLeave() {
     if (!room) return;
     const confirmed = await confirm({
-      title: 'Leave room',
-      message: "Leave this room? You'll need to be re-added to rejoin.",
-      confirmLabel: 'Leave',
+      title: translate('Leave room'),
+      message: translate('Leave this room? You\'ll need to be re-added to rejoin.'),
+      confirmLabel: translate('Leave'),
     });
     if (!confirmed) return;
     await api.leaveChatRoom(room.id).catch(() => {});
@@ -342,7 +339,7 @@ export default function ChatRoomView({
     } catch (e: any) {
       // 서버가 거부하는 경우(시스템 소유 방 등)를 조용히 삼키면 버튼이 죽은 것처럼
       // 보인다. 사유를 그대로 띄우고 상태는 건드리지 않는다.
-      showToast(e?.message || 'Could not change the open-join setting', 'error');
+      showToast(e?.message || translate('Could not change the open-join setting'), 'error');
     } finally {
       setOpenJoinPending(false);
     }
@@ -351,9 +348,9 @@ export default function ChatRoomView({
   async function handleClear() {
     if (!room) return;
     const confirmed = await confirm({
-      title: 'Clear conversation',
-      message: "Clear this conversation's history from your view? Other participants are unaffected.",
-      confirmLabel: 'Clear',
+      title: translate('Clear conversation'),
+      message: translate('Clear this conversation\'s history from your view? Other participants are unaffected.'),
+      confirmLabel: translate('Clear'),
     });
     if (!confirmed) return;
     try {
@@ -379,11 +376,9 @@ export default function ChatRoomView({
       >
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: tokens.typography.fontSizeXl, fontWeight: 600, color: tokens.colors.textPrimary, marginBottom: tokens.spacing.sm }}>
-            Select a room
-          </div>
+            {translate('Select a room')}</div>
           <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-            Choose a chat from the sidebar to view messages.
-          </div>
+            {translate('Choose a chat from the sidebar to view messages.')}</div>
         </div>
       </div>
     );
@@ -393,8 +388,8 @@ export default function ChatRoomView({
   // rely on the custom name to disambiguate.
   const roomDisplayName =
     room.type === 'dm'
-      ? (room.name || room.dm_partner_name || 'Direct Message')
-      : (room.name || 'Unnamed Group');
+      ? (room.name || room.dm_partner_name || translate('Direct Message'))
+      : (room.name || translate('Unnamed Group'));
 
   const headerActions = isRenaming ? null : (
     <RoomHeaderActions
@@ -472,7 +467,7 @@ export default function ChatRoomView({
                 <button
                   onClick={onBack}
                   style={{ background: 'transparent', border: 'none', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 18 }}
-                  aria-label="Back to room list"
+                  aria-label={translate('Back to room list')}
                 >
                   ←
                 </button>
@@ -500,7 +495,7 @@ export default function ChatRoomView({
           }}
         >
           <span style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: 600, color: tokens.colors.textSecondary, marginRight: 2 }}>
-            Participants · {participants.length}
+            {translate('Participants ·')} {participants.length}
           </span>
           {participants.slice(0, MAX_VISIBLE_PARTICIPANT_CHIPS).map((p) => (
             <span
@@ -517,7 +512,7 @@ export default function ChatRoomView({
             >
               {p.name}
               {p.type === 'agent' && (
-                <span style={{ color: tokens.colors.textSecondary, marginLeft: 4, fontSize: 10 }}>agent</span>
+                <span style={{ color: tokens.colors.textSecondary, marginLeft: 4, fontSize: 10 }}>{translate('agent')}</span>
               )}
             </span>
           ))}
@@ -526,8 +521,7 @@ export default function ChatRoomView({
               title={participants.map((p) => p.name).join(', ')}
               style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap' }}
             >
-              +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} more
-            </span>
+              +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} {translate('more')}</span>
           )}
           {/* 대화 도중 참여자 추가 진입점 — 헤더의 "Add People" 과 같은 모달을 연다.
               DM 을 포함한 모든 방에서 보인다(티켓 70e62a9d). 아직 참여하지 않은 자유
@@ -536,7 +530,7 @@ export default function ChatRoomView({
           {canInviteToRoom(room) && (
             <button
               onClick={() => setShowAddPeople(true)}
-              aria-label="Add participant"
+              aria-label={translate('Add participant')}
               style={{
                 fontSize: tokens.typography.fontSizeXs,
                 fontWeight: 600,
@@ -549,8 +543,7 @@ export default function ChatRoomView({
                 whiteSpace: 'nowrap',
               }}
             >
-              + Add
-            </button>
+              {translate('+ Add')}</button>
           )}
         </div>
       )}
@@ -572,8 +565,7 @@ export default function ChatRoomView({
             flexShrink: 0,
           }}
         >
-          Loading older messages…
-        </div>
+          {translate('Loading older messages…')}</div>
       )}
 
       {/* Message scroll area */}
@@ -605,8 +597,7 @@ export default function ChatRoomView({
             }}
           >
             <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-              No messages yet. Send one to get started.
-            </div>
+              {translate('No messages yet. Send one to get started.')}</div>
           </div>
         ) : (
           // contentRef wraps only the rendered messages so the ResizeObserver
@@ -630,8 +621,7 @@ export default function ChatRoomView({
             color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
           }}
         >
-          ↓ 최신으로
-        </button>
+          {translate('↓ 최신으로')}</button>
       )}
 
       {/* Typing indicator */}
@@ -651,7 +641,7 @@ export default function ChatRoomView({
             if (statuses.length > 0) {
               return `${names.join(', ')} — ${statuses[0]}`;
             }
-            return `${names.join(', ')}${entries.length === 1 ? ' is typing' : ' are typing'}`;
+            return `${names.join(', ')}${entries.length === 1 ? translate(' is typing') : translate(' are typing')}`;
           })()}
           <span style={{ display: 'inline-block', width: 20 }}>...</span>
         </div>
@@ -667,7 +657,7 @@ export default function ChatRoomView({
         }}>
           {Object.entries(sessionStatusByAgent).map(([agentId, s]) => {
             const parts: string[] = [];
-            if (s.backgroundTaskCount > 0) parts.push(`백그라운드 작업 ${s.backgroundTaskCount}개 실행 중`);
+            if (s.backgroundTaskCount > 0) parts.push(translate('백그라운드 작업 {0}개 실행 중', { 0: s.backgroundTaskCount }));
             // Only render a still-future deadline — a stale/expired one (SSE
             // exit push lost or delayed) must not surface as "잔여 0분"
             // (ticket e18be8ff review round 1, P1 #1). The countdown-tick
@@ -675,7 +665,7 @@ export default function ChatRoomView({
             // covers the gap before the next prune runs.
             if (s.keepAliveUntilMs && s.keepAliveUntilMs > Date.now()) {
               const remainMin = Math.max(1, Math.round((s.keepAliveUntilMs - Date.now()) / 60_000));
-              parts.push(`keep-alive 잔여 ${remainMin}분`);
+              parts.push(translate('keep-alive 잔여 {0}분', { 0: remainMin }));
             }
             if (parts.length === 0) return null;
             const namePrefix = Object.keys(sessionStatusByAgent).length > 1 ? `${s.name} — ` : '';

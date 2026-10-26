@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 실브라우저(jsdom) 스모크: ChunkLoadErrorBoundary — 흰 화면 대신 안내 배너
 // (ticket 2cae7314).
 //
@@ -36,9 +37,9 @@ test('청크 로드 실패 모양의 오류는 "새 버전이 배포되었습니
 
     const alert = document.querySelector('[role="alert"]');
     assert.ok(alert, '흰 화면 대신 role=alert 배너가 떠야 한다');
-    assert.match(alert.textContent, /새 버전이 배포되었습니다/);
+    assert.match(alert.textContent, uiPattern("새 버전이 배포되었습니다"));
 
-    const retryButton = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === '새로고침');
+    const retryButton = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === ui("새로고침"));
     assert.ok(retryButton, '새로고침 버튼이 노출돼야 한다');
   } finally {
     dom.cleanup();
@@ -58,8 +59,8 @@ test('청크 로드 실패가 아닌 일반 렌더 오류는 일반 안내로 �
 
     const alert = document.querySelector('[role="alert"]');
     assert.ok(alert, '이 경우도 흰 화면 대신 배너가 떠야 한다');
-    assert.match(alert.textContent, /문제가 발생했습니다/);
-    assert.doesNotMatch(alert.textContent, /새 버전이 배포되었습니다/, '무관한 오류를 배포 안내로 오분류하면 안 된다');
+    assert.match(alert.textContent, uiPattern("문제가 발생했습니다"));
+    assert.doesNotMatch(alert.textContent, uiPattern("새 버전이 배포되었습니다"), '무관한 오류를 배포 안내로 오분류하면 안 된다');
   } finally {
     dom.cleanup();
   }

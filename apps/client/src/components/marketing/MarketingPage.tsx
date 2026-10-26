@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../api';
@@ -20,6 +22,7 @@ import { Chip, StatusPill, tableStyles } from './MarketingUi';
  * 소유 선택기는 없다(docs/ownership.md). 사람이 하는 일은 캠페인 안의 승인함에 모인다.
  */
 export default function MarketingPage() {
+  useLocale();
   const { hasPermission } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
@@ -40,7 +43,7 @@ export default function MarketingPage() {
       setCampaigns(await api.listMarketingCampaigns());
       setError(null);
     } catch (err) {
-      setError((err as Error)?.message || '캠페인 목록을 불러오지 못했습니다');
+      setError((err as Error)?.message || translate('캠페인 목록을 불러오지 못했습니다'));
     }
   }, [canView]);
 
@@ -58,11 +61,11 @@ export default function MarketingPage() {
   if (!canView) {
     return (
       <div className="business-marketing-page">
-        <BusinessPageHeader title="Marketing" description="에이전트가 돌리는 제품 마케팅 — 돈 · 외부 발신 · 채널 개설은 사람이 정합니다." />
+        <BusinessPageHeader title={translate('Marketing')} description={translate('에이전트가 돌리는 제품 마케팅 — 돈 · 외부 발신 · 채널 개설은 사람이 정합니다.')} />
         <div style={{ padding: 24 }}>
           <PermissionNotice
-            title="마케팅 권한이 필요합니다"
-            message="캠페인을 보려면 marketing.manage 또는 marketing.approve_spend 권한이 필요합니다."
+            title={translate('마케팅 권한이 필요합니다')}
+            message={translate('캠페인을 보려면 marketing.manage 또는 marketing.approve_spend 권한이 필요합니다.')}
           />
         </div>
       </div>
@@ -72,37 +75,37 @@ export default function MarketingPage() {
   return (
     <div className="business-marketing-page">
       <BusinessPageHeader
-        title="Marketing"
-        description="캠페인 에이전트가 주기마다 채널을 찾고 글 · 메일 · 예산을 제안합니다. 돈 · 외부 발신 · 채널 개설은 사람이 승인합니다."
-        actions={canManage ? <Button variant="primary" aria-label="+ 새 캠페인" title="새 캠페인" onClick={() => setCreating(true)}><BusinessIcon name="plus" size={18} /><span className="business-header-action-label">새 캠페인</span></Button> : undefined}
-        moreActions={canManage ? close => <Link to="/marketing/contacts" onClick={close}>메일 연락처</Link> : undefined}
+        title={translate('Marketing')}
+        description={translate('캠페인 에이전트가 주기마다 채널을 찾고 글 · 메일 · 예산을 제안합니다. 돈 · 외부 발신 · 채널 개설은 사람이 승인합니다.')}
+        actions={canManage ? <Button variant="primary" aria-label={translate('+ 새 캠페인')} title={translate('새 캠페인')} onClick={() => setCreating(true)}><BusinessIcon name="plus" size={18} /><span className="business-header-action-label">{translate('새 캠페인')}</span></Button> : undefined}
+        moreActions={canManage ? close => <Link to="/marketing/contacts" onClick={close}>{translate('메일 연락처')}</Link> : undefined}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         {campaigns === null && !error ? (
-          <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>불러오는 중…</div>
+          <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>{translate('불러오는 중…')}</div>
         ) : error && campaigns === null ? (
           <ErrorState message={error} onRetry={() => void load()} />
         ) : !campaigns || campaigns.length === 0 ? (
           <EmptyState
-            title="아직 캠페인이 없습니다"
+            title={translate('아직 캠페인이 없습니다')}
             description={canManage
-              ? '제품 브리프와 목표를 적고, 켤 기능과 캠페인 에이전트를 고르세요. 만든 캠페인은 초안 상태로 시작합니다.'
-              : '캠페인은 운영 권한(marketing.manage)이 있는 사람이 만듭니다. 지출 요청이 생기면 여기와 사이드바에 표시됩니다.'}
-            action={canManage ? <Button variant="primary" onClick={() => setCreating(true)}>+ 새 캠페인</Button> : undefined}
+              ? translate('제품 브리프와 목표를 적고, 켤 기능과 캠페인 에이전트를 고르세요. 만든 캠페인은 초안 상태로 시작합니다.')
+              : translate('캠페인은 운영 권한(marketing.manage)이 있는 사람이 만듭니다. 지출 요청이 생기면 여기와 사이드바에 표시됩니다.')}
+            action={canManage ? <Button variant="primary" onClick={() => setCreating(true)}>{translate('+ 새 캠페인')}</Button> : undefined}
           />
         ) : (
           <div style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'auto', background: tokens.colors.surfaceCard }}>
             <table style={tableStyles.table} data-testid="marketing-campaign-list">
               <thead>
                 <tr>
-                  <th style={tableStyles.th}>캠페인</th>
-                  <th style={tableStyles.th}>승인 대기</th>
-                  <th style={tableStyles.th}>상태</th>
-                  <th style={tableStyles.th}>기능</th>
-                  <th style={tableStyles.th}>주기</th>
-                  <th style={tableStyles.th}>다음 사이클</th>
-                  <th style={{ ...tableStyles.th, ...tableStyles.num }}>사이클</th>
-                  <th style={tableStyles.th}>수정</th>
+                  <th style={tableStyles.th}>{translate('캠페인')}</th>
+                  <th style={tableStyles.th}>{translate('승인 대기')}</th>
+                  <th style={tableStyles.th}>{translate('상태')}</th>
+                  <th style={tableStyles.th}>{translate('기능')}</th>
+                  <th style={tableStyles.th}>{translate('주기')}</th>
+                  <th style={tableStyles.th}>{translate('다음 사이클')}</th>
+                  <th style={{ ...tableStyles.th, ...tableStyles.num }}>{translate('사이클')}</th>
+                  <th style={tableStyles.th}>{translate('수정')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -125,7 +128,7 @@ export default function MarketingPage() {
                     </td>
                     <td style={tableStyles.td} data-testid={`marketing-campaign-pending-${c.id}`}>
                       {pendingByCampaign.get(c.id)
-                        ? <StatusPill view={{ label: `승인 대기 ${pendingByCampaign.get(c.id)}`, tone: 'attention' }} />
+                        ? <StatusPill view={{ label: translate('승인 대기 {0}', { 0: pendingByCampaign.get(c.id) }), tone: 'attention' }} />
                         : <span style={{ color: tokens.colors.textMuted }}>—</span>}
                     </td>
                     <td style={tableStyles.td}><StatusPill view={campaignStatusView(c.status)} /></td>
@@ -133,7 +136,7 @@ export default function MarketingPage() {
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 360 }}>
                         {c.capabilities.length
                           ? c.capabilities.map((cap) => <Chip key={cap}>{CAPABILITY_LABELS[cap] || cap}</Chip>)
-                          : <span style={{ color: tokens.colors.textMuted }}>없음</span>}
+                          : <span style={{ color: tokens.colors.textMuted }}>{translate('없음')}</span>}
                       </div>
                     </td>
                     <td style={tableStyles.td}>{describeCadence(c)}</td>

@@ -1,3 +1,6 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
+import LanguageSelect from './LanguageSelect';
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -22,6 +25,7 @@ interface SettingsGroup {
 }
 
 export default function SettingsOverviewPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const { hasPermission } = useAuth();
@@ -31,17 +35,17 @@ export default function SettingsOverviewPage() {
   const groups: SettingsGroup[] = [
     {
       title: 'Account',
-      description: 'Your work defaults and login-user administration.',
+      description: translate('Your work defaults and login-user administration.'),
       items: [
         {
-          title: 'Work defaults',
-          description: 'Ticket dispatch, language, agent harness and clone policy defaults.',
+          title: translate('Work defaults'),
+          description: translate('Ticket dispatch, agent response language, harness and clone policy defaults.'),
           path: `/settings/defaults`,
           icon: 'W',
         },
         {
-          title: 'Login users',
-          description: 'Approve or disable login users. Each user has a personal account.',
+          title: translate('Login users'),
+          description: translate('Approve or disable login users. Each user has a personal account.'),
           path: `/settings/users`,
           icon: 'M',
           adminOnly: true,
@@ -50,29 +54,29 @@ export default function SettingsOverviewPage() {
     },
     {
       title: 'Connections & secrets',
-      description: 'Credentials and external connections used by agents and notifications.',
+      description: translate('Credentials and external connections used by agents and notifications.'),
       items: [
         {
-          title: 'Credentials',
-          description: 'Global and account credentials used by resources and agents.',
+          title: translate('Credentials'),
+          description: translate('Global and account credentials used by resources and agents.'),
           path: `/settings/credentials`,
           icon: 'C',
         },
         {
-          title: 'Channels',
-          description: 'Notification channels connected to this account.',
+          title: translate('Channels'),
+          description: translate('Notification channels connected to this account.'),
           path: `/settings/channels`,
           icon: 'N',
         },
         {
-          title: 'API Keys',
-          description: 'MCP API keys for agents and external clients.',
+          title: translate('API Keys'),
+          description: translate('MCP API keys for agents and external clients.'),
           path: `/settings/api-keys`,
           icon: 'K',
         },
         {
-          title: 'Claude Profiles',
-          description: 'Claude backend definitions and account settings.',
+          title: translate('Claude Profiles'),
+          description: translate('Claude backend definitions and account settings.'),
           path: `/settings/claude-profiles`,
           icon: 'C',
         },
@@ -80,25 +84,25 @@ export default function SettingsOverviewPage() {
     },
     {
       title: 'Administration',
-      description: 'Instance-wide accounts and platform configuration.',
+      description: translate('Instance-wide accounts and platform configuration.'),
       items: [
         {
-          title: 'User Administration',
-          description: 'Approve and manage user accounts across the instance.',
+          title: translate('User Administration'),
+          description: translate('Approve and manage user accounts across the instance.'),
           path: '/admin/users',
           icon: 'U',
           adminOnly: true,
         },
         {
-          title: 'System Settings',
-          description: 'Embedding, MCP session, and self-improvement configuration.',
+          title: translate('System Settings'),
+          description: translate('Embedding, MCP session, and self-improvement configuration.'),
           path: '/admin/settings',
           icon: 'S',
           adminOnly: true,
         },
         {
-          title: 'Live Import',
-          description: 'Pull this instance\'s data from a live source AWB server.',
+          title: translate('Live Import'),
+          description: translate('Pull this instance\'s data from a live source AWB server.'),
           path: '/admin/migration',
           icon: 'M',
           adminOnly: true,
@@ -117,8 +121,8 @@ export default function SettingsOverviewPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Settings"
-        description="Account access, connections, agent defaults, and system administration"
+        title={translate('Settings')}
+        description={translate('Account access, connections, agent defaults, and system administration')}
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         <div style={{ maxWidth: 1040, display: 'flex', flexDirection: 'column', gap: 28 }}>
@@ -128,11 +132,9 @@ export default function SettingsOverviewPage() {
               id="settings-device"
               style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
             >
-              Device
-            </h2>
+              {translate('Device')}</h2>
             <p style={{ margin: '4px 0 12px', fontSize: 12, color: tokens.colors.textMuted }}>
-              이 기기에서 여는 AWB 서버와 앱 설치 — 계정이 아니라 단말 설정이라 다른 탭·기기에 영향이 없습니다.
-            </p>
+              {translate('Language, server connection and app installation for this browser. Language changes also apply to other tabs on this site.')}</p>
             <div style={{
               background: tokens.colors.surfaceCard,
               border: `1px solid ${tokens.colors.border}`,
@@ -141,6 +143,7 @@ export default function SettingsOverviewPage() {
               display: 'flex', flexDirection: 'column', gap: 12,
               maxWidth: 560,
             }}>
+              <LanguageSelect />
               <ServerConfigField />
               <div style={{
                 borderTop: `1px solid ${tokens.colors.border}`,
@@ -148,9 +151,7 @@ export default function SettingsOverviewPage() {
               }}>
                 <PwaInstallButton />
                 <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                  알림은 사이드바 🔔에서, 음성 지원은 OPERATORS 👂에서 켭니다.
-                  화면이 꺼지면 마이크도 멈추니 웨이크용 단말은 충전기에 꽂아 두세요.
-                </span>
+                  {translate('알림은 사이드바 🔔에서, 음성 지원은 OPERATORS 👂에서 켭니다. 화면이 꺼지면 마이크도 멈추니 웨이크용 단말은 충전기에 꽂아 두세요.')}</span>
               </div>
               <div style={{
                 borderTop: `1px solid ${tokens.colors.border}`,
@@ -167,7 +168,7 @@ export default function SettingsOverviewPage() {
                 id={`settings-${group.title.replace(/\W+/g, '-').toLowerCase()}`}
                 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
               >
-                {group.title}
+                {translate(group.title)}
               </h2>
               <p style={{ margin: '4px 0 12px', fontSize: 12, color: tokens.colors.textMuted }}>
                 {group.description}

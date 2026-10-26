@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Repo clone 정책 에디터 폼 로직 (ticket bddb63ee).
 //
 // 이 폼이 결정하는 것은 단 하나 — **무엇이 저장 payload 에 들어가는가** 다. 빈 칸은
@@ -102,11 +103,11 @@ test('save: 범위를 벗어나거나 정수가 아닌 값은 어느 칸인지 �
   const rejected = [
     [{ timeout: '30' }, /Clone timeout/],
     [{ timeout: '90000' }, /Clone timeout/],
-    [{ timeout: '1.5' }, /정수/],
-    [{ timeout: '-60' }, /정수/],
+    [{ timeout: '1.5' }, uiPattern('{0}: 정수만 입력하세요')],
+    [{ timeout: '-60' }, uiPattern('{0}: 정수만 입력하세요')],
     [{ idleTimeout: '99999999' }, /Idle timeout/],
     [{ depth: '0' }, /Depth/],
-    [{ depth: 'abc' }, /정수/],
+    [{ depth: 'abc' }, uiPattern('{0}: 정수만 입력하세요')],
   ];
   for (const [patch, pattern] of rejected) {
     const r = formToClonePolicy({ ...EMPTY_CLONE_POLICY_FORM, ...patch });

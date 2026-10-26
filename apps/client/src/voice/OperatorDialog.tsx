@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { Button, Input, Modal } from '../components/common';
@@ -45,6 +47,7 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
   /** 세션 화면에서만 — 지침을 다시 보낸다(이름을 바꿨거나, 긴 세션에서 지침이 흐려졌을 때). */
   onSendBrief?: (name: string) => void;
 }) {
+  useLocale();
   const [name, setName] = useState('');
   const [aliases, setAliases] = useState('');
   const [sendBrief, setSendBrief] = useState(true);
@@ -98,17 +101,17 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
               const text = (t.text || '').trim();
               setTest({ phase: 'done', text, heard: heardName(text), matched: !!matchWake(text, [draftRef.current]) });
             })
-            .catch((err: any) => setTest({ phase: 'error', message: err?.message || '받아 적지 못했습니다' }));
+            .catch((err: any) => setTest({ phase: 'error', message: err?.message || translate('받아 적지 못했습니다') }));
         },
       });
       testSessionRef.current = s;
       testTimerRef.current = setTimeout(() => {
         stopTest();
-        setTest({ phase: 'error', message: '아무 말도 듣지 못했습니다 — 다시 눌러 "헤이 이름" 하고 불러 보세요.' });
+        setTest({ phase: 'error', message: translate('아무 말도 듣지 못했습니다 — 다시 눌러 "헤이 이름" 하고 불러 보세요.') });
       }, TEST_LISTEN_MS);
     } catch (err: any) {
       stopTest();
-      setTest({ phase: 'error', message: err?.name === 'NotAllowedError' ? '마이크 권한이 없습니다.' : (err?.message || '마이크를 열지 못했습니다') });
+      setTest({ phase: 'error', message: err?.name === 'NotAllowedError' ? translate('마이크 권한이 없습니다.') : (err?.message || translate('마이크를 열지 못했습니다')) });
     }
   }, [stopTest]);
 
@@ -119,7 +122,7 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
   };
 
   const save = async () => {
-    if (!draft.name) { setError('이름을 정해 주세요 — 부르는 말입니다.'); return; }
+    if (!draft.name) { setError(translate('이름을 정해 주세요 — 부르는 말입니다.')); return; }
     setSaving(true);
     setError(null);
     try {
@@ -133,7 +136,7 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
       onSaved?.(saved, { sendBrief: !operator && sendBrief, created: !operator });
       onClose();
     } catch (err: any) {
-      setError(err?.message || '저장하지 못했습니다');
+      setError(err?.message || translate('저장하지 못했습니다'));
     } finally {
       setSaving(false);
     }
@@ -149,52 +152,49 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
       onRemoved?.();
       onClose();
     } catch (err: any) {
-      setError(err?.message || '해제하지 못했습니다');
+      setError(err?.message || translate('해제하지 못했습니다'));
     } finally {
       setSaving(false);
     }
   };
 
-  const testLabel = test.phase === 'listening' ? '듣는 중… "헤이 이름" 하고 불러 보세요'
-    : test.phase === 'checking' ? '받아 적는 중…'
-      : '🎙 불러 보기';
+  const testLabel = test.phase === 'listening' ? translate('듣는 중… "헤이 이름" 하고 불러 보세요')
+    : test.phase === 'checking' ? translate('받아 적는 중…')
+      : translate('🎙 불러 보기');
 
   return (
     <Modal
       isOpen={open}
       onClose={onClose}
-      title={operator ? `Operator — ${operator.name}` : '이 세션을 Operator 로 등록'}
+      title={operator ? translate('Operator — {0}', { 0: operator.name }) : translate('이 세션을 Operator 로 등록')}
       maxWidth={520}
       footer={(
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
           {operator && (
             <Button variant={confirmRemove ? 'danger' : 'ghost'} size="sm" onClick={() => void remove()} disabled={saving} style={{ marginRight: 'auto' }}>
-              {confirmRemove ? '정말 해제' : '해제'}
+              {confirmRemove ? translate('정말 해제') : translate('해제')}
             </Button>
           )}
           {operator && onSendBrief && (
-            <Button variant="ghost" size="sm" onClick={() => { onSendBrief(operator.name); onClose(); }} title="operator 지침을 이 세션의 다음 프롬프트로 다시 보냅니다">
-              지침 다시 보내기
-            </Button>
+            <Button variant="ghost" size="sm" onClick={() => { onSendBrief(operator.name); onClose(); }} title={translate('operator 지침을 이 세션의 다음 프롬프트로 다시 보냅니다')}>
+              {translate('지침 다시 보내기')}</Button>
           )}
-          <Button variant="secondary" size="sm" onClick={onClose}>취소</Button>
+          <Button variant="secondary" size="sm" onClick={onClose}>{translate('취소')}</Button>
           <Button variant="primary" size="sm" onClick={() => void save()} loading={saving} disabled={!draft.name}>
-            {operator ? '저장' : sendBrief ? '등록하고 지침 보내기' : '등록'}
+            {operator ? translate('저장') : sendBrief ? translate('등록하고 지침 보내기') : translate('등록')}
           </Button>
         </div>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 13, color: tokens.colors.textSecondary }}>
         <div>
-          이름을 부르면 깨어납니다 — <b>"헤이 {draft.name || '이름'}"</b>, <b>"{withVocative(draft.name || '이름')}"</b>. 깨어난 뒤에는 이름 없이
-          이어서 말하면 되고, 대화를 마치는 말을 하면 operator 가 알아듣고 다시 잠듭니다.
-        </div>
-        <Input label="이름" aria-label="Operator name" value={name} maxLength={32} placeholder="예: 자비스" onChange={(e) => setName(e.target.value)} autoFocus />
+          {translate('이름을 부르면 깨어납니다 —')} <b>{translate('"헤이')} {draft.name || translate('이름')}"</b>, <b>"{withVocative(draft.name || translate('이름'))}"</b>{translate('. 깨어난 뒤에는 이름 없이 이어서 말하면 되고, 대화를 마치는 말을 하면 operator 가 알아듣고 다시 잠듭니다.')}</div>
+        <Input label={translate('이름')} aria-label={translate('Operator name')} value={name} maxLength={32} placeholder={translate('예: 자비스')} onChange={(e) => setName(e.target.value)} autoFocus />
         <Input
-          label="별칭 (쉼표로 구분)"
-          aria-label="Operator aliases"
+          label={translate('별칭 (쉼표로 구분)')}
+          aria-label={translate('Operator aliases')}
           value={aliases}
-          placeholder="음성 인식이 이름을 다르게 적을 때 — 예: Jarvis, 쟈비스"
+          placeholder={translate('음성 인식이 이름을 다르게 적을 때 — 예: Jarvis, 쟈비스')}
           onChange={(e) => setAliases(e.target.value)}
         />
         {voiceRecordingSupported() && (
@@ -203,17 +203,16 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
               <Button variant="secondary" size="sm" onClick={() => void runTest()} disabled={!draft.name || test.phase === 'listening' || test.phase === 'checking'}>
                 {testLabel}
               </Button>
-              <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>엔진이 이름을 어떻게 적는지 확인합니다</span>
+              <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('엔진이 이름을 어떻게 적는지 확인합니다')}</span>
             </div>
             {test.phase === 'done' && (
               <div role="status" style={{ fontSize: 12, padding: '6px 10px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}` }}>
-                들은 말: <i>{test.text || '(없음)'}</i>
+                {translate('들은 말:')} <i>{test.text || translate('(없음)')}</i>
                 <div style={{ marginTop: 4, color: test.matched ? tokens.colors.successLight : tokens.colors.warningLight }}>
-                  {test.matched ? '✓ 이 이름으로 깨어납니다.' : '이 말로는 깨어나지 않습니다.'}
+                  {test.matched ? translate('✓ 이 이름으로 깨어납니다.') : translate('이 말로는 깨어나지 않습니다.')}
                   {!test.matched && test.heard && (
                     <Button variant="ghost" size="sm" onClick={() => addHeardAsAlias(test.heard)} style={{ marginLeft: 6 }}>
-                      "{test.heard}" 를 별칭으로 추가
-                    </Button>
+                      "{test.heard}{translate('" 를 별칭으로 추가')}</Button>
                   )}
                 </div>
               </div>
@@ -225,9 +224,7 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
             <input type="checkbox" checked={sendBrief} onChange={(e) => setSendBrief(e.target.checked)} style={{ marginTop: 3 }} />
             <span>
-              operator 지침을 이 세션의 다음 프롬프트로 보냅니다 — 말로 듣기 좋은 답, 되돌리기 어려운 일의 복창 확인,
-              대화를 마칠 때 잠드는 규칙.
-            </span>
+              {translate('operator 지침을 이 세션의 다음 프롬프트로 보냅니다 — 말로 듣기 좋은 답, 되돌리기 어려운 일의 복창 확인, 대화를 마칠 때 잠드는 규칙.')}</span>
           </label>
         )}
         {error && <div role="alert" style={{ color: tokens.colors.dangerLight, fontSize: 12 }}>{error}</div>}

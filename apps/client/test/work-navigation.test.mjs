@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // WORK 계층 내비게이션 모델 단위 테스트 (티켓 03ca8b5b → board-less, docs/tickets.md).
 //
 // 여기서 고정하는 계약:
@@ -117,7 +118,7 @@ test('Tickets 메뉴: /tickets 경로, 그 화면에서 active, 계정 전체 �
   assert.equal(item.path, `${BASE}/tickets`);
   assert.equal(item.active, true);
   assert.equal(item.badge, 3);
-  assert.match(item.badgeLabel, /3건/);
+  assert.match(item.badgeLabel, uiPattern('읽지 않은 티켓 코멘트 {0}건', {0: 3}));
 
   assert.equal(buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/teams` }).active, false);
   assert.equal(buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/tickets-archive` }).active, false, '접두사만 겹치는 경로는 아니다');

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api';
@@ -18,10 +20,10 @@ const NARROW_BREAKPOINT = 720;
 // Git 저장소는 더 이상 Resource 가 아니다 — Projects 화면(docs/tickets.md → Project)
 // 이 같은 id 로 이어받았다. 여기서는 문서/이미지/링크만 다룬다.
 const RESOURCE_TYPES = [
-  { value: 'document', label: 'Document', icon: 'D' },
-  { value: 'image', label: 'Image', icon: 'I' },
-  { value: 'link', label: 'Link', icon: 'L' },
-  { value: 'comment_attachment', label: 'Comment Attachment', icon: 'A' },
+  { value: 'document', get label() { return translate('Document'); }, icon: 'D' },
+  { value: 'image', get label() { return translate('Image'); }, icon: 'I' },
+  { value: 'link', get label() { return translate('Link'); }, icon: 'L' },
+  { value: 'comment_attachment', get label() { return translate('Comment Attachment'); }, icon: 'A' },
 ] as const;
 
 // Types that the resource UI treats as "system-managed" — excluded from the
@@ -52,6 +54,7 @@ export default function ResourceManager({
   allScopes = false,
   canManageGlobal = false,
 }: ResourceManagerProps) {
+  useLocale();
   const { showToast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [editResource, setEditResource] = useState<Resource | null>(null);
@@ -113,7 +116,7 @@ export default function ResourceManager({
       setResources(list);
       setCredentials(creds);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load resources', 'error');
+      showToast(err?.message || translate('Failed to load resources'), 'error');
     } finally {
       setLoading(false);
     }
@@ -175,7 +178,7 @@ export default function ResourceManager({
           a.remove();
         }
       } catch (err: any) {
-        showToast(err?.message || 'Failed to open file', 'error');
+        showToast(err?.message || translate('Failed to open file'), 'error');
       }
       return;
     }
@@ -238,7 +241,7 @@ export default function ResourceManager({
 
   const handleSave = async () => {
     const errors: { name?: string } = {};
-    if (!formName.trim()) errors.name = 'Name is required.';
+    if (!formName.trim()) errors.name = translate('Name is required.');
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
       return;
@@ -266,7 +269,7 @@ export default function ResourceManager({
           tags: parsedTags,
           credential_id: formCredentialId || null,
         });
-        showToast('Resource updated.', 'success');
+        showToast(translate('Resource updated.'), 'success');
       } else {
         await api.createResource({
           scope: createAccountId === null ? 'global' : 'account',
@@ -282,13 +285,13 @@ export default function ResourceManager({
           file_mimetype: formFileMimetype,
           tags: parsedTags,
         });
-        showToast('Resource created.', 'success');
+        showToast(translate('Resource created.'), 'success');
       }
       setShowForm(false);
       setEditResource(null);
       await loadResources();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save resource', 'error');
+      showToast(err?.message || translate('Failed to save resource'), 'error');
     } finally {
       setSaving(false);
     }
@@ -299,12 +302,12 @@ export default function ResourceManager({
     try {
       // The row's own owner — never the page's owner for new items.
       await api.deleteResource(deleteTarget.id, deleteTarget.account_id);
-      showToast('Resource deleted.', 'success');
+      showToast(translate('Resource deleted.'), 'success');
       if (selectedId === deleteTarget.id) setSelectedId(null);
       setDeleteTarget(null);
       await loadResources();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete resource', 'error');
+      showToast(err?.message || translate('Failed to delete resource'), 'error');
     }
   };
 
@@ -426,9 +429,8 @@ export default function ResourceManager({
       }}
     >
       <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textSecondary, marginBottom: 6 }}>
-        리소스를 선택하세요
-      </div>
-      <div style={{ fontSize: 12 }}>왼쪽 목록에서 리소스를 클릭하면 상세 정보가 여기에 표시됩니다.</div>
+        {translate('리소스를 선택하세요')}</div>
+      <div style={{ fontSize: 12 }}>{translate('왼쪽 목록에서 리소스를 클릭하면 상세 정보가 여기에 표시됩니다.')}</div>
     </div>
   );
 
@@ -459,14 +461,14 @@ export default function ResourceManager({
     <div ref={containerRef}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{resources.length} resources</span>
+          <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{resources.length} {translate('resources')}</span>
           <select
             value={filterType}
             onChange={(e) => setFilterType(e.target.value)}
             style={filterSelectStyle}
-            aria-label="Filter by type"
+            aria-label={translate('Filter by type')}
           >
-            <option value="">All types</option>
+            <option value="">{translate('All types')}</option>
             {RESOURCE_TYPES.map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
             ))}
@@ -475,39 +477,36 @@ export default function ResourceManager({
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
             style={filterSelectStyle}
-            aria-label="Sort by"
+            aria-label={translate('Sort by')}
           >
-            <option value="created_at">Sort: Uploaded</option>
-            <option value="updated_at">Sort: Updated</option>
-            <option value="name">Sort: Name</option>
-            <option value="type">Sort: Type</option>
+            <option value="created_at">{translate('Sort: Uploaded')}</option>
+            <option value="updated_at">{translate('Sort: Updated')}</option>
+            <option value="name">{translate('Sort: Name')}</option>
+            <option value="type">{translate('Sort: Type')}</option>
           </select>
           <select
             value={sortOrder}
             onChange={(e) => setSortOrder(e.target.value as typeof sortOrder)}
             style={filterSelectStyle}
-            aria-label="Sort order"
+            aria-label={translate('Sort order')}
           >
-            <option value="desc">{sortBy === 'name' || sortBy === 'type' ? 'Z → A' : 'Newest first'}</option>
-            <option value="asc">{sortBy === 'name' || sortBy === 'type' ? 'A → Z' : 'Oldest first'}</option>
+            <option value="desc">{sortBy === 'name' || sortBy === 'type' ? translate('Z → A') : translate('Newest first')}</option>
+            <option value="asc">{sortBy === 'name' || sortBy === 'type' ? translate('A → Z') : translate('Oldest first')}</option>
           </select>
         </div>
-        <Button variant="primary" size="md" onClick={startCreate}>+ New Resource</Button>
+        <Button variant="primary" size="md" onClick={startCreate}>{translate('+ New Resource')}</Button>
       </div>
 
       <div data-testid="resource-projects-hint" style={{ fontSize: 12, color: tokens.colors.textMuted, marginBottom: 12 }}>
-        Git 저장소는 Resource 가 아니라 <Link to="/projects" style={{ color: tokens.colors.accent }}>Projects</Link> 에서
-        관리합니다 (브랜치·히스토리·파일, Host 별 클론 폴더 포함).
-      </div>
+        {translate('Git 저장소는 Resource 가 아니라')} <Link to="/projects" style={{ color: tokens.colors.accent }}>{translate('Projects')}</Link> {translate('에서 관리합니다 (브랜치·히스토리·파일, Host 별 클론 폴더 포함).')}</div>
 
       {loading ? (
-        <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>
+        <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>{translate('Loading…')}</div>
       ) : resources.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No resources yet</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>{translate('No resources yet')}</div>
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-            Add references like documents, images, or links.
-          </div>
+            {translate('Add references like documents, images, or links.')}</div>
         </div>
       ) : (
         // master/detail 2-pane. 좁은 폭에서는 detail 을 풀폭 오버레이로 띄우고
@@ -566,24 +565,23 @@ export default function ResourceManager({
       <Modal
         isOpen={showForm}
         onClose={cancelForm}
-        title={editResource ? 'Edit Resource' : 'New Resource'}
+        title={editResource ? translate('Edit Resource') : translate('New Resource')}
         maxWidth={560}
         footer={
           <>
-            <Button variant="secondary" onClick={cancelForm} disabled={saving}>Cancel</Button>
+            <Button variant="secondary" onClick={cancelForm} disabled={saving}>{translate('Cancel')}</Button>
             <Button variant="primary" onClick={handleSave} disabled={saving} loading={saving}>
-              Save Resource
-            </Button>
+              {translate('Save Resource')}</Button>
           </>
         }
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
             <Input
-              label="Name"
+              label={translate('Name')}
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
-              placeholder="e.g. Design spec"
+              placeholder={translate('e.g. Design spec')}
               error={formErrors.name}
             />
             <div>
@@ -594,7 +592,7 @@ export default function ResourceManager({
                 textTransform: 'uppercase',
                 display: 'block',
                 marginBottom: tokens.spacing.xs,
-              }}>Type</label>
+              }}>{translate('Type')}</label>
               <select
                 value={formType}
                 onChange={(e) => setFormType(e.target.value)}
@@ -618,10 +616,10 @@ export default function ResourceManager({
           </div>
 
           <Input
-            label="Description"
+            label={translate('Description')}
             value={formDescription}
             onChange={(e) => setFormDescription(e.target.value)}
-            placeholder="One-line summary"
+            placeholder={translate('One-line summary')}
           />
 
           {formType === 'link' && (
@@ -642,11 +640,11 @@ export default function ResourceManager({
                 textTransform: 'uppercase',
                 display: 'block',
                 marginBottom: tokens.spacing.xs,
-              }}>Content</label>
+              }}>{translate('Content')}</label>
               <textarea
                 value={formContent}
                 onChange={(e) => setFormContent(e.target.value)}
-                placeholder="Text content or notes..."
+                placeholder={translate('Text content or notes...')}
                 style={{
                   width: '100%',
                   background: tokens.colors.surface,
@@ -675,7 +673,7 @@ export default function ResourceManager({
                 textTransform: 'uppercase',
                 display: 'block',
                 marginBottom: tokens.spacing.xs,
-              }}>File Upload</label>
+              }}>{translate('File Upload')}</label>
               <input
                 type="file"
                 accept="image/*"
@@ -693,13 +691,13 @@ export default function ResourceManager({
               {formFileData && (
                 <img
                   src={`data:${formFileMimetype || 'image/png'};base64,${formFileData}`}
-                  alt="Preview"
+                  alt={translate('Preview')}
                   style={{ maxWidth: '100%', maxHeight: 160, marginTop: 8, borderRadius: tokens.radii.sm, objectFit: 'contain' }}
                 />
               )}
               <div style={{ marginTop: 8 }}>
                 <Input
-                  label="Or paste image URL"
+                  label={translate('Or paste image URL')}
                   value={formUrl}
                   onChange={(e) => setFormUrl(e.target.value)}
                   placeholder="https://example.com/image.png"
@@ -717,10 +715,9 @@ export default function ResourceManager({
                 textTransform: 'uppercase',
                 display: 'block',
                 marginBottom: tokens.spacing.xs,
-              }}>Credential</label>
+              }}>{translate('Credential')}</label>
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>
-                Optional — used for authenticated access (e.g. GitHub sync)
-              </div>
+                {translate('Optional — used for authenticated access (e.g. GitHub sync)')}</div>
               <select
                 value={formCredentialId}
                 onChange={(e) => setFormCredentialId(e.target.value)}
@@ -736,7 +733,7 @@ export default function ResourceManager({
                   boxSizing: 'border-box',
                 }}
               >
-                <option value="">None</option>
+                <option value="">{translate('None')}</option>
                 {availableCredentials.map((c) => (
                   <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
                 ))}
@@ -745,10 +742,10 @@ export default function ResourceManager({
           )}
 
           <Input
-            label="Tags"
+            label={translate('Tags')}
             value={formTags}
             onChange={(e) => setFormTags(e.target.value)}
-            placeholder="Comma-separated, e.g. frontend, design"
+            placeholder={translate('Comma-separated, e.g. frontend, design')}
           />
         </div>
       </Modal>
@@ -756,9 +753,9 @@ export default function ResourceManager({
       {/* Delete confirmation */}
       <ConfirmDialog
         isOpen={!!deleteTarget}
-        title="Delete resource?"
-        confirmLabel="Delete Resource"
-        message={deleteTarget ? `${deleteTarget.name} will be permanently removed.` : undefined}
+        title={translate('Delete resource?')}
+        confirmLabel={translate('Delete Resource')}
+        message={deleteTarget ? translate('{0} will be permanently removed.', { 0: deleteTarget.name }) : undefined}
         onConfirm={handleConfirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />

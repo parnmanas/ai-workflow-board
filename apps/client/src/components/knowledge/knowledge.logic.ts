@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * Knowledge 화면 — 순수 함수(docs/skills.md "Knowledge").
  *
@@ -28,8 +29,8 @@ export function groupAssignments(assignments: readonly SkillAssignment[], projec
   const groups: AssignmentGroup[] = [{
     key: 'account',
     scope: 'account',
-    title: 'Shared',
-    subtitle: 'Every agent in this account',
+    title: translate('Shared'),
+    subtitle: translate('Every agent in this account'),
     project_id: null,
     items: sortItems(assignments.filter((a) => a.scope === 'account')),
   }];
@@ -41,7 +42,7 @@ export function groupAssignments(assignments: readonly SkillAssignment[], projec
       key: `project:${id}`,
       scope: 'project',
       title: nameOf(id),
-      subtitle: 'Tickets and mission steps of this project',
+      subtitle: translate('Tickets and mission steps of this project'),
       project_id: id,
       items: sortItems(assignments.filter((a) => a.scope === 'project' && a.project_id === id)),
     });
@@ -51,8 +52,8 @@ export function groupAssignments(assignments: readonly SkillAssignment[], projec
     groups.push({
       key: 'runtime',
       scope: 'runtime',
-      title: 'Specific runtime',
-      subtitle: 'One runtime identity only (host · CLI · folder · credential)',
+      title: translate('Specific runtime'),
+      subtitle: translate('One runtime identity only (host · CLI · folder · credential)'),
       project_id: null,
       items: sortItems(runtime),
     });
@@ -61,9 +62,9 @@ export function groupAssignments(assignments: readonly SkillAssignment[], projec
 }
 
 export function assignmentTargetLabel(a: SkillAssignment): string {
-  if (a.scope === 'account') return 'Shared';
-  if (a.scope === 'project') return a.project_name || a.project_id?.slice(0, 8) || 'Project';
-  return a.target_label || a.runtime_key?.slice(0, 15) || 'Runtime';
+  if (a.scope === 'account') return translate('Shared');
+  if (a.scope === 'project') return a.project_name || a.project_id?.slice(0, 8) || translate('Project');
+  return a.target_label || a.runtime_key?.slice(0, 15) || translate('Runtime');
 }
 
 // ─── 호스트 동기화(사람이 여는 CLI 세션용) ─────────────────────────────────

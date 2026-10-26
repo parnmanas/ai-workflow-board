@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+await setLocale('ko', false);
+import { ui } from './helpers/i18n.mjs';
 // QA scenario / Security profile editors — board-less on-failure ticket section
 // (docs/tickets.md → QA / Security failure tickets).
 //
@@ -46,14 +49,14 @@ function change(element, value) {
 }
 
 function button(container, label) {
-  const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+  const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === ui(label));
   assert.ok(found, `"${label}" 버튼을 찾을 수 없습니다.`);
   return found;
 }
 
 /** 공용 Input/Select 는 label 에 htmlFor 가 없어서 래퍼 div 를 거쳐 찾는다. */
 function fieldByLabel(root, labelText, tag) {
-  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === labelText);
+  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(labelText));
   assert.ok(label, `"${labelText}" 라벨을 찾을 수 없습니다.`);
   const field = label.parentElement?.querySelector(tag);
   assert.ok(field, `"${labelText}" 라벨에 대응하는 <${tag}> 가 없습니다.`);
@@ -106,16 +109,16 @@ test('QA: legacy board row opens with labels as tags and saves project/status/ta
   assert.equal(modal.textContent.includes('board 기본값'), false, 'QA phases must not mention board inheritance');
 
   // Tags use the shared <TagInput>: legacy labels show up as chips.
-  const tagLabel = [...modal.querySelectorAll('label')].find((l) => l.textContent?.trim() === '티켓 태그');
+  const tagLabel = [...modal.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui("티켓 태그"));
   assert.ok(tagLabel, 'on-failure tag input missing');
   const tagInput = document.getElementById(tagLabel.htmlFor);
   const chips = () => [...modal.querySelectorAll('button[aria-label^="태그 "]')].map((b) => b.getAttribute('aria-label'));
   assert.deepEqual(chips(), ['태그 qa-failure 제거', '태그 login 제거'], 'legacy labels are read as tags');
 
-  const projectSelect = fieldByLabel(modal, '프로젝트 (선택)', 'select');
+  const projectSelect = fieldByLabel(modal, ui("프로젝트 (선택)"), 'select');
   assert.deepEqual([...projectSelect.options].map((o) => o.value), ['', 'proj-awb', 'proj-game']);
   change(projectSelect, 'proj-game');
-  change(fieldByLabel(modal, '생성 상태 (status)', 'select'), 'backlog');
+  change(fieldByLabel(modal, ui("생성 상태 (status)"), 'select'), 'backlog');
   // Comma commits a chip (TagInput); remove one legacy chip, add a new one.
   typeInto(tagInput, 'regression,');
   await flush();
@@ -163,12 +166,12 @@ test('Security: target picks a project (or self) and on-failure ticket drops boa
   await flush();
   const modal = document.body;
 
-  const target = fieldByLabel(modal, '점검 대상 (Target)', 'select');
+  const target = fieldByLabel(modal, ui("점검 대상 (Target)"), 'select');
   assert.equal(target.value, '', 'null target = AWB itself');
   assert.deepEqual([...target.options].map((o) => o.value), ['', 'proj-awb', 'proj-game']);
   change(target, 'proj-awb');
 
-  change(fieldByLabel(modal, '프로젝트 (선택)', 'select'), 'proj-awb');
+  change(fieldByLabel(modal, ui("프로젝트 (선택)"), 'select'), 'proj-awb');
   await flush();
 
   click(button(view.container, 'Save'));

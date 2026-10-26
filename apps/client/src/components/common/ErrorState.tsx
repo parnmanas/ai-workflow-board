@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 import { Button } from './Button';
@@ -10,16 +12,17 @@ import { Button } from './Button';
  * 노출한다. 상세 message 는 원문 유지(스크린리더가 읽되 시각적으론 약하게).
  */
 export function ErrorState({
-  title = '문제가 발생했습니다',
+  title = translate('문제가 발생했습니다'),
   message,
   onRetry,
-  retryLabel = '다시 시도',
+  retryLabel = translate('다시 시도'),
 }: {
   title?: string;
   message?: string;
   onRetry?: () => void;
   retryLabel?: string;
 }) {
+  useLocale();
   return (
     <div
       role="alert"

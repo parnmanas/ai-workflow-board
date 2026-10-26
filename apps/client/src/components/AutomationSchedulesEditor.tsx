@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
@@ -26,10 +28,10 @@ function formatCadence(s: Pick<AutomationSchedule, 'cron' | 'interval_ms'>): str
   if (s.cron) return `cron: ${s.cron} (UTC)`;
   if (s.interval_ms && s.interval_ms > 0) {
     const ms = s.interval_ms;
-    if (ms % 3_600_000 === 0) return `매 ${ms / 3_600_000}시간`;
-    if (ms % 60_000 === 0) return `매 ${ms / 60_000}분`;
-    if (ms % 1_000 === 0) return `매 ${ms / 1_000}초`;
-    return `매 ${ms}ms`;
+    if (ms % 3_600_000 === 0) return translate('매 {0}시간', { 0: ms / 3_600_000 });
+    if (ms % 60_000 === 0) return translate('매 {0}분', { 0: ms / 60_000 });
+    if (ms % 1_000 === 0) return translate('매 {0}초', { 0: ms / 1_000 });
+    return translate('매 {0}ms', { 0: ms });
   }
   return '—';
 }
@@ -50,6 +52,7 @@ interface AutomationSchedulesEditorProps {
 }
 
 export default function AutomationSchedulesEditor({ accountId }: AutomationSchedulesEditorProps) {
+  useLocale();
   const { showToast } = useToast();
   const [schedules, setSchedules] = useState<AutomationSchedule[]>([]);
   const [agents, setAgents] = useState<ScheduleAgent[]>([]);
@@ -73,7 +76,7 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
       setActions(actionList || []);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load schedules', 'error');
+      showToast(err?.message || translate('Failed to load schedules'), 'error');
     } finally {
       setLoading(false);
     }
@@ -102,7 +105,7 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
   const targetLabel = useCallback((s: AutomationSchedule) => {
     if (!s.action_id) return agentName(s.target_agent_id);
     const a = actions.find((x) => x.id === s.action_id);
-    return `Action: ${a ? a.name : s.action_id.slice(0, 8)}`;
+    return translate('Action: {0}', { 0: a ? a.name : s.action_id.slice(0, 8) });
   }, [actions, agentName]);
 
   const handleToggle = async (s: AutomationSchedule) => {
@@ -110,17 +113,17 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
       await api.updateAutomationSchedule(s.id, { account_id: accountId, enabled: !s.enabled });
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to toggle schedule', 'error');
+      showToast(err?.message || translate('Failed to toggle schedule'), 'error');
     }
   };
 
   const handleRunNow = async (s: AutomationSchedule) => {
     try {
       const { dispatch } = await api.runAutomationScheduleNow(s.id, accountId);
-      showToast(`실행됨 — 방 ${dispatch.room_id.slice(0, 8)} 열림`, 'success');
+      showToast(translate('실행됨 — 방 {0} 열림', { 0: dispatch.room_id.slice(0, 8) }), 'success');
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to run schedule', 'error');
+      showToast(err?.message || translate('Failed to run schedule'), 'error');
     }
   };
 
@@ -130,7 +133,7 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
       setConfirmDelete(null);
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete schedule', 'error');
+      showToast(err?.message || translate('Failed to delete schedule'), 'error');
     }
   };
 
@@ -139,38 +142,34 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
-            Account Schedules — 예약된 에이전트 작업
-          </div>
+            {translate('Account Schedules — 예약된 에이전트 작업')}</div>
           <div style={{ color: tokens.colors.textSecondary, fontSize: 12, maxWidth: 720 }}>
-            예약된 시각이 되면 지정 에이전트에게 새 채팅 방을 열고 작업 프롬프트를 보냅니다 (cron 또는 주기).
-            QA/보안 스케줄러와 동일한 dispatch 경로를 재사용합니다 — 매 실행마다 새 방이 열립니다.
-          </div>
+            {translate('예약된 시각이 되면 지정 에이전트에게 새 채팅 방을 열고 작업 프롬프트를 보냅니다 (cron 또는 주기). QA/보안 스케줄러와 동일한 dispatch 경로를 재사용합니다 — 매 실행마다 새 방이 열립니다.')}</div>
         </div>
-        <Button variant="primary" size="md" onClick={() => setEditing('new')}>+ 새 스케줄</Button>
+        <Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ 새 스케줄')}</Button>
       </div>
 
       {loading ? (
         <Card padding="16px">
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading…')}</div>
         </Card>
       ) : schedules.length === 0 ? (
         <Card padding="16px">
           <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-            스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 작업을 추가하세요.
-          </div>
+            {translate('스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 작업을 추가하세요.')}</div>
         </Card>
       ) : (
         <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 820 }}>
             <thead>
               <tr>
-                <th style={TH}>Name</th>
-                <th style={TH}>Agent</th>
-                <th style={TH}>Cadence</th>
-                <th style={TH}>Enabled</th>
-                <th style={TH}>Next run (UTC)</th>
-                <th style={TH}>Last run</th>
-                <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+                <th style={TH}>{translate('Name')}</th>
+                <th style={TH}>{translate('Agent')}</th>
+                <th style={TH}>{translate('Cadence')}</th>
+                <th style={TH}>{translate('Enabled')}</th>
+                <th style={TH}>{translate('Next run (UTC)')}</th>
+                <th style={TH}>{translate('Last run')}</th>
+                <th style={{ ...TH, textAlign: 'right' }}>{translate('Actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -206,9 +205,9 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
       {confirmDelete && (
         <ConfirmDialog
           isOpen={true}
-          title="스케줄 삭제"
-          message={`스케줄 "${confirmDelete.name}" 을 삭제할까요? 이미 열린 방/진행 중 작업은 영향받지 않습니다.`}
-          confirmLabel="삭제"
+          title={translate('스케줄 삭제')}
+          message={translate('스케줄 "{0}" 을 삭제할까요? 이미 열린 방/진행 중 작업은 영향받지 않습니다.', { 0: confirmDelete.name })}
+          confirmLabel={translate('삭제')}
           onConfirm={() => handleDelete(confirmDelete)}
           onCancel={() => setConfirmDelete(null)}
         />
@@ -226,6 +225,7 @@ function ScheduleRow({ s, accountId, agentLabel, onEdit, onToggle, onRunNow, onD
   onRunNow: () => void;
   onDelete: () => void;
 }) {
+  useLocale();
   const [hover, setHover] = useState(false);
   // next_run_at as a compact UTC wall-clock (cron is interpreted in UTC).
   const nextUtc = s.next_run_at ? new Date(s.next_run_at).toISOString().replace('T', ' ').slice(0, 16) : '—';
@@ -243,7 +243,7 @@ function ScheduleRow({ s, accountId, agentLabel, onEdit, onToggle, onRunNow, onD
       <td style={TD}>
         <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
           <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
-          {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+          {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
         </label>
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
@@ -254,7 +254,7 @@ function ScheduleRow({ s, accountId, agentLabel, onEdit, onToggle, onRunNow, onD
           s.last_room_id ? (
             <Link
               to={`/chat/${s.last_room_id}`}
-              title="마지막으로 열린 방으로 이동"
+              title={translate('마지막으로 열린 방으로 이동')}
               style={{ color: tokens.colors.accent, textDecoration: 'none' }}
             >
               {relativeTime(s.last_run_at)} ↗
@@ -263,14 +263,14 @@ function ScheduleRow({ s, accountId, agentLabel, onEdit, onToggle, onRunNow, onD
             relativeTime(s.last_run_at)
           )
         ) : (
-          <span style={{ color: tokens.colors.textMuted }}>never</span>
+          <span style={{ color: tokens.colors.textMuted }}>{translate('never')}</span>
         )}
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }}>
-          <Button variant="primary" size="sm" onClick={onRunNow} title="지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)">▶ Run now</Button>
-          <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
-          <Button variant="danger" size="sm" onClick={onDelete}>Delete</Button>
+          <Button variant="primary" size="sm" onClick={onRunNow} title={translate('지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)')}>{translate('▶ Run now')}</Button>
+          <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
+          <Button variant="danger" size="sm" onClick={onDelete}>{translate('Delete')}</Button>
         </div>
       </td>
     </tr>
@@ -289,6 +289,7 @@ interface ScheduleEditorProps {
 }
 
 function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved }: ScheduleEditorProps) {
+  useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   // 무엇을 할지 — 프롬프트를 직접 쓰거나, 등록된 Action 을 고른다. 서버가 택일을 강제한다.
@@ -319,17 +320,17 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
   })();
 
   const handleSave = async () => {
-    if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
+    if (!name.trim()) { showToast(translate('이름을 입력하세요'), 'error'); return; }
     if (targetKind === 'action') {
-      if (!actionId) { showToast('실행할 Action 을 선택하세요', 'error'); return; }
+      if (!actionId) { showToast(translate('실행할 Action 을 선택하세요'), 'error'); return; }
     } else {
-      if (!pendingSpec) { showToast('대상 에이전트를 선택하세요', 'error'); return; }
-      if (!taskPrompt.trim()) { showToast('작업 프롬프트를 입력하세요', 'error'); return; }
+      if (!pendingSpec) { showToast(translate('대상 에이전트를 선택하세요'), 'error'); return; }
+      if (!taskPrompt.trim()) { showToast(translate('작업 프롬프트를 입력하세요'), 'error'); return; }
     }
     if (cadenceKind === 'cron') {
-      if (cron.trim().split(/\s+/).length !== 5) { showToast('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")', 'error'); return; }
+      if (cron.trim().split(/\s+/).length !== 5) { showToast(translate('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")'), 'error'); return; }
     } else if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
-      showToast('주기는 1초 이상이어야 합니다', 'error'); return;
+      showToast(translate('주기는 1초 이상이어야 합니다'), 'error'); return;
     }
 
     const base = {
@@ -355,10 +356,10 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
       } else {
         await api.createAutomationSchedule(base);
       }
-      showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
+      showToast(translate('스케줄 {0}됨', { 0: schedule ? translate('수정') : translate('생성') }), 'success');
       onSaved();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save schedule', 'error');
+      showToast(err?.message || translate('Failed to save schedule'), 'error');
     } finally {
       setSaving(false);
     }
@@ -375,44 +376,41 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
     <Modal
       isOpen={true}
       onClose={onClose}
-      title={schedule ? 'Account 스케줄 수정' : '새 Account 스케줄'}
+      title={schedule ? translate('Account 스케줄 수정') : translate('새 Account 스케줄')}
       maxWidth={620}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button variant="ghost" onClick={onClose}>{translate('Cancel')}</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? translate('Saving…') : translate('Save')}</Button>
         </div>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <Input label="이름" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+        <Input label={translate('이름')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
 
         <div>
-          <label style={fieldLabel}>무엇을 실행할까요</label>
+          <label style={fieldLabel}>{translate('무엇을 실행할까요')}</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="account-sched-target" checked={targetKind === 'prompt'} onChange={() => setTargetKind('prompt')} />
-              프롬프트 직접 입력
-            </label>
+              {translate('프롬프트 직접 입력')}</label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="account-sched-target" checked={targetKind === 'action'} onChange={() => setTargetKind('action')} />
-              등록된 Action 실행
-            </label>
+              {translate('등록된 Action 실행')}</label>
           </div>
         </div>
 
         {targetKind === 'action' ? (
           <>
             <Select
-              label="실행할 Action"
-              placeholder="— Action 선택 —"
+              label={translate('실행할 Action')}
+              placeholder={translate('— Action 선택 —')}
               value={actionId}
               options={actions.map((a) => ({ value: a.id, label: a.name }))}
               onChange={(e) => setActionId((e.target as HTMLSelectElement).value)}
             />
             <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: -6 }}>
-              대상 에이전트 · 작업 폴더 · 승인 여부는 그 Action 이 정의합니다. 여기서는 실행 시각만 정합니다.
-            </div>
+              {translate('대상 에이전트 · 작업 폴더 · 승인 여부는 그 Action 이 정의합니다. 여기서는 실행 시각만 정합니다.')}</div>
           </>
         ) : (
           <>
@@ -423,18 +421,18 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
               onResolved={(spec) => {
                     setPendingSpec(spec);
                 showToast(
-                  '실행 설정을 적용했습니다',
+                  translate('실행 설정을 적용했습니다'),
                   'success',
                 );
               }}
             />
 
             <div>
-              <label style={fieldLabel}>작업 프롬프트 (실행 시 에이전트에게 보낼 메시지)</label>
+              <label style={fieldLabel}>{translate('작업 프롬프트 (실행 시 에이전트에게 보낼 메시지)')}</label>
               <textarea
                 style={textareaStyle}
                 value={taskPrompt}
-                placeholder="예: 어제자 빌드 로그를 점검하고 실패 항목을 요약해 주세요."
+                placeholder={translate('예: 어제자 빌드 로그를 점검하고 실패 항목을 요약해 주세요.')}
                 onChange={(e) => setTaskPrompt(e.target.value)}
               />
             </div>
@@ -443,48 +441,44 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
 
         {/* Cadence: interval vs cron */}
         <div>
-          <label style={fieldLabel}>실행 주기</label>
+          <label style={fieldLabel}>{translate('실행 주기')}</label>
           <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="account-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
-              주기 (interval)
-            </label>
+              {translate('주기 (interval)')}</label>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="account-sched-cadence" checked={cadenceKind === 'cron'} onChange={() => setCadenceKind('cron')} />
-              cron
-            </label>
+              {translate('cron')}</label>
           </div>
           {cadenceKind === 'interval' ? (
             <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
               <div style={{ width: 120 }}>
-                <Input label="값" type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
+                <Input label={translate('값')} type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
               </div>
               <div style={{ flex: 1 }}>
                 <Select
-                  label="단위"
+                  label={translate('단위')}
                   value={intervalUnit}
                   options={[
-                    { value: 'seconds', label: '초' },
-                    { value: 'minutes', label: '분' },
-                    { value: 'hours', label: '시간' },
+                    { value: 'seconds', label: translate('초') },
+                    { value: 'minutes', label: translate('분') },
+                    { value: 'hours', label: translate('시간') },
                   ]}
                   onChange={(e) => setIntervalUnit((e.target as HTMLSelectElement).value as 'seconds' | 'minutes' | 'hours')}
                 />
               </div>
             </div>
           ) : (
-            <Input label='cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)' value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
+            <Input label={translate('cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)')} value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
           )}
         </div>
 
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          Enabled
-        </label>
+          {translate('Enabled')}</label>
 
         <div style={{ fontSize: 12, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
-          ⚠️ 자동 실행은 <b>돌고 있는 서버</b>에서 발생합니다. main→prod auto-deploy 지연이 있으면 주기를 배포 지연보다 넉넉히 잡으세요. cron 은 모두 <b>UTC</b> 기준이며, 매 실행마다 <b>새 채팅 방</b>이 열립니다.
-        </div>
+          {translate('⚠️ 자동 실행은')} <b>{translate('돌고 있는 서버')}</b>{translate('에서 발생합니다. main→prod auto-deploy 지연이 있으면 주기를 배포 지연보다 넉넉히 잡으세요. cron 은 모두')} <b>UTC</b> {translate('기준이며, 매 실행마다')} <b>{translate('새 채팅 방')}</b>{translate('이 열립니다.')}</div>
       </div>
     </Modal>
   );

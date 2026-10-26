@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import type {
   AgentRuntimeConfig,
@@ -80,16 +82,16 @@ export function buildRuntimeConfig(selection: RuntimeSelection): AgentRuntimeCon
 }
 
 const STRATEGY_COPY: Record<CliCollaboration, (label: string) => string> = {
-  single: (label) => `Single — one ${label} session`,
-  delegated: (label) => `Delegated — ${label} creates child workers`,
-  swarm: (label) => `Swarm — coordinated ${label} workers`,
+  single: (label) => translate('Single — one {0} session', { 0: label }),
+  delegated: (label) => translate('Delegated — {0} creates child workers', { 0: label }),
+  swarm: (label) => translate('Swarm — coordinated {0} workers', { 0: label }),
 };
 
 /** Strategy options for a runtime, from its catalog `collaboration` list. A
  *  runtime that only ever runs single gets the plain "Single" label. */
 export function strategyOptionsFor(runtime: string): Array<{ value: ExecutionStrategy; label: string }> {
   const modes = cliCollaboration(runtime);
-  if (modes.length <= 1) return [{ value: 'single', label: 'Single' }];
+  if (modes.length <= 1) return [{ value: 'single', label: translate('Single') }];
   const label = cliLabel(runtime);
   return modes.map((mode) => ({ value: mode, label: STRATEGY_COPY[mode](label) }));
 }
@@ -129,6 +131,7 @@ export default function RuntimeConfigFields({
   namedProfiles,
   permissionTiers,
 }: RuntimeConfigFieldsProps) {
+  useLocale();
   const catalog = useCliCatalog();
   // ticket 5851e435 — approve 를 골랐는데 그 런타임이 승인 요청을 실제로
   // 만들지 못하면(native 가 아니면) 경고한다. 매니저는 이 조합의 spawn 을
@@ -147,17 +150,17 @@ export default function RuntimeConfigFields({
   const knobs = cliRuntimeConfig(value.runtime);
   const showKnobs = knobs.profiles || knobs.child_limits;
   const knobCount = (knobs.profiles ? 1 : 0) + (knobs.child_limits ? 2 : 0);
-  const runtimeName = value.runtime ? cliLabel(value.runtime) : 'Runtime';
+  const runtimeName = value.runtime ? cliLabel(value.runtime) : translate('Runtime');
 
   return (
     <>
       {showRuntime && (
         <Select
-          label="Runtime *"
+          label={translate('Runtime *')}
           value={value.runtime}
           disabled={disabled}
           options={[
-            { value: '', label: options.length ? 'Select a runtime' : 'No healthy runtime reported by this Host' },
+            { value: '', label: options.length ? translate('Select a runtime') : translate('No healthy runtime reported by this Host') },
             ...options,
           ]}
           onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -169,11 +172,11 @@ export default function RuntimeConfigFields({
         />
       )}
       <Select
-        label="Strategy *"
+        label={translate('Strategy *')}
         value={value.strategy}
         disabled={disabled || !value.runtime}
         options={[
-          { value: '', label: value.runtime ? 'Select a strategy' : 'Select a runtime first' },
+          { value: '', label: value.runtime ? translate('Select a strategy') : translate('Select a runtime first') },
           ...strategyOptions,
         ]}
         onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -181,14 +184,14 @@ export default function RuntimeConfigFields({
         }}
       />
       <Select
-        label="Permission mode *"
+        label={translate('Permission mode *')}
         value={value.permissionMode}
         disabled={disabled || !value.runtime}
         options={[
-          { value: '', label: value.runtime ? 'Select a permission mode' : 'Select a runtime first' },
-          { value: 'strict', label: 'Strict — deny unapproved actions' },
-          { value: 'approve', label: 'Approve — ask through AWB' },
-          { value: 'trusted', label: 'Trusted — pre-authorized scope' },
+          { value: '', label: value.runtime ? translate('Select a permission mode') : translate('Select a runtime first') },
+          { value: 'strict', label: translate('Strict — deny unapproved actions') },
+          { value: 'approve', label: translate('Approve — ask through AWB') },
+          { value: 'trusted', label: translate('Trusted — pre-authorized scope') },
         ]}
         onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
           onChange({ ...value, permissionMode: event.target.value as RuntimePermissionMode | '' });
@@ -205,11 +208,11 @@ export default function RuntimeConfigFields({
             lineHeight: 1.5,
           }}
         >
-          {`⚠️ 런타임 "${value.runtime}" 는 실행 중 권한 요청을 AWB 승인 경로로 올릴 수 없습니다. `
-            + `이 조합으로 저장하면 디스패치가 실행되지 않고 차단됩니다 — 승인 대신 조용히 `
-            + `제한 모드로 도는 일을 막기 위해서입니다. 명시적으로 허용하려면 Trusted, `
-            + `거부하려면 Strict 를 고르거나, 승인 요청을 지원하는 런타임(Hermes ACP)으로 `
-            + `옮기세요.`}
+          {translate('⚠️ 런타임 "{0}" 는 실행 중 권한 요청을 AWB 승인 경로로 올릴 수 없습니다. ', { 0: value.runtime })
+            + translate('이 조합으로 저장하면 디스패치가 실행되지 않고 차단됩니다 — 승인 대신 조용히 ')
+            + translate('제한 모드로 도는 일을 막기 위해서입니다. 명시적으로 허용하려면 Trusted, ')
+            + translate('거부하려면 Strict 를 고르거나, 승인 요청을 지원하는 런타임(Hermes ACP)으로 ')
+            + translate('옮기세요.')}
         </div>
       )}
       {showKnobs && (
@@ -225,13 +228,13 @@ export default function RuntimeConfigFields({
             namedProfiles && namedProfiles.length > 0 ? (
               <div>
                 <Select
-                  label={`${runtimeName} profile`}
+                  label={translate('{0} profile', { 0: runtimeName })}
                   value={value.profile}
                   options={[
-                    { value: '', label: 'Default — no explicit profile' },
+                    { value: '', label: translate('Default — no explicit profile') },
                     ...namedProfiles.map((profile) => ({ value: profile, label: profile })),
                     ...(value.profile && !namedProfiles.includes(value.profile)
-                      ? [{ value: value.profile, label: `${value.profile} (Host에 없음)`, disabled: true }]
+                      ? [{ value: value.profile, label: translate('{0} (Host에 없음)', { 0: value.profile }), disabled: true }]
                       : []),
                   ]}
                   onChange={(event: React.ChangeEvent<HTMLSelectElement>) =>
@@ -240,15 +243,14 @@ export default function RuntimeConfigFields({
                 />
                 {value.profile && !namedProfiles.includes(value.profile) && (
                   <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 2, lineHeight: 1.5 }}>
-                    저장된 프로파일 "{value.profile}"이(가) 이 Host에 더 이상 없습니다. 목록에서 다시 선택하거나 그대로 두면 값은 유지됩니다.
-                  </div>
+                    {translate('저장된 프로파일 "')}{value.profile}{translate('"이(가) 이 Host에 더 이상 없습니다. 목록에서 다시 선택하거나 그대로 두면 값은 유지됩니다.')}</div>
                 )}
               </div>
             ) : (
               <Input
-                label={`${runtimeName} profile`}
+                label={translate('{0} profile', { 0: runtimeName })}
                 value={value.profile}
-                placeholder={namedProfiles ? 'optional — Host에 등록된 프로파일 없음' : 'optional'}
+                placeholder={namedProfiles ? translate('optional — Host에 등록된 프로파일 없음') : translate('optional')}
                 onChange={(event) => onChange({ ...value, profile: event.target.value })}
               />
             )
@@ -256,21 +258,21 @@ export default function RuntimeConfigFields({
           {knobs.child_limits && (
             <>
               <Input
-                label="Max children"
+                label={translate('Max children')}
                 type="number"
                 min={1}
                 max={1000}
                 value={value.maxChildren}
-                placeholder="optional"
+                placeholder={translate('optional')}
                 onChange={(event) => onChange({ ...value, maxChildren: event.target.value })}
               />
               <Input
-                label="Max iterations"
+                label={translate('Max iterations')}
                 type="number"
                 min={1}
                 max={1000}
                 value={value.maxIterations}
-                placeholder="optional"
+                placeholder={translate('optional')}
                 onChange={(event) => onChange({ ...value, maxIterations: event.target.value })}
               />
             </>

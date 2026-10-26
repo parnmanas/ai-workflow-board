@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
@@ -59,19 +60,19 @@ async function renderManager(t, { profiles = [], listCredentials = async () => c
 }
 
 function credentialSelect(container) {
-  const select = container.querySelector('select[aria-label="Credential 선택"]');
+  const select = container.querySelector(`select[aria-label="${ui("Credential 선택")}"]`);
   assert.ok(select);
   return select;
 }
 
 function button(container, label) {
-  const found = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(label));
+  const found = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(ui(label)));
   assert.ok(found, `${label} 버튼을 찾을 수 없습니다.`);
   return found;
 }
 
 function checkbox(container, label) {
-  const owner = [...container.querySelectorAll('label')].find(item => item.textContent?.includes(label));
+  const owner = [...container.querySelectorAll('label')].find(item => item.textContent?.includes(ui(label)));
   const input = owner?.querySelector('input[type="checkbox"]');
   assert.ok(input, `${label} 체크박스를 찾을 수 없습니다.`);
   return input;
@@ -85,9 +86,9 @@ test('신규 Credential을 이름으로 검색·선택하고 create payload에�
   const search = container.querySelector('input[type="search"]');
   assert.ok(search);
   typeInto(search, '개발');
-  assert.deepEqual([...credentialSelect(container).options].map(option => option.textContent), ['선택하지 않음', '개발 API · anthropic']);
+  assert.deepEqual([...credentialSelect(container).options].map(option => option.textContent), [ui('선택하지 않음'), '개발 API · anthropic']);
   change(credentialSelect(container), 'credential-b');
-  click(button(container, '프로필 저장'));
+  click(button(container, ui("프로필 저장")));
   await flush();
 
   assert.equal(calls.length, 1);
@@ -103,7 +104,7 @@ test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 
   click(button(container, '기존 프로필'));
   assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
   change(credentialSelect(container), 'credential-b');
-  click(button(container, '프로필 저장'));
+  click(button(container, ui("프로필 저장")));
   await flush();
   assert.equal(calls[0].id, 'profile-1');
   assert.equal(calls[0].payload.credential_ref, 'credential-b');
@@ -111,7 +112,7 @@ test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 
 
   click(button(container, '기존 프로필'));
   change(credentialSelect(container), '');
-  click(button(container, '프로필 저장'));
+  click(button(container, ui("프로필 저장")));
   await flush();
   assert.equal(calls[1].payload.credential_ref, null);
 });
@@ -121,15 +122,15 @@ test('Claude 고유 필드와 adapter JSON을 create payload에 손실 없이 �
   const calls = [];
   api.createClaudeBackendProfile = async payload => { calls.push(payload); };
 
-  typeInto(container.querySelector('input[aria-label="고정 ID"]'), 'new-profile');
-  typeInto(container.querySelector('input[aria-label="이름"]'), '신규 프로필');
-  typeInto(container.querySelector('input[aria-label="모델"]'), 'claude-new');
+  typeInto(container.querySelector(`input[aria-label="${ui("고정 ID")}"]`), 'new-profile');
+  typeInto(container.querySelector(`input[aria-label="${ui("이름")}"]`), '신규 프로필');
+  typeInto(container.querySelector(`input[aria-label="${ui("모델")}"]`), 'claude-new');
   typeInto(container.querySelector('input[aria-label="Base URL"]'), 'https://new.example.test');
-  typeInto(container.querySelector('input[aria-label="인증 환경 변수"]'), 'CUSTOM_CLAUDE_TOKEN');
+  typeInto(container.querySelector(`input[aria-label="${ui("인증 환경 변수")}"]`), 'CUSTOM_CLAUDE_TOKEN');
   click(checkbox(container, 'Credential 필수'));
   click(checkbox(container, 'effort 미전달'));
   typeInto(container.querySelector('textarea'), '{"request":{"model_field":"deployment"}}');
-  click(button(container, '프로필 저장'));
+  click(button(container, ui("프로필 저장")));
   await flush();
 
   assert.equal(calls.length, 1);
@@ -153,7 +154,7 @@ test('Claude 고유 필드와 adapter JSON을 update payload에 손실 없이 �
   api.updateClaudeBackendProfile = async (id, payload) => { calls.push({ id, payload }); };
 
   click(button(container, '기존 프로필'));
-  click(button(container, '프로필 저장'));
+  click(button(container, ui("프로필 저장")));
   await flush();
 
   assert.equal(calls.length, 1);
@@ -174,7 +175,7 @@ test('저장 중 버튼을 잠그고 실패 후 다시 저장할 수 있게 복�
     return pending.promise;
   };
 
-  const save = button(container, '프로필 저장');
+  const save = button(container, ui("프로필 저장"));
   click(save);
   assert.equal(calls, 1);
   assert.equal(save.disabled, true);
@@ -197,8 +198,8 @@ test('유효하지 않은 기존 참조를 명시하고 다른 Credential 선택
   click(button(container, '기존 프로필'));
 
   assert.equal(credentialSelect(container).value, 'deleted-credential');
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '삭제되었거나 접근할 수 없는 Credential');
-  assert.match(container.textContent, /다른 Credential을 선택하거나 해제하세요/);
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, ui("삭제되었거나 접근할 수 없는 Credential"));
+  assert.match(container.textContent, uiPattern("저장된 Credential을 현재 소유 계정에서 찾을 수 없습니다. 다른 Credential을 선택하거나 해제하세요."));
 });
 
 test('목록 로딩 실패 중 기존 참조를 보존 표시하고 재시도 후 이름을 복구한다', async (t) => {
@@ -213,10 +214,10 @@ test('목록 로딩 실패 중 기존 참조를 보존 표시하고 재시도 �
 
   assert.equal(credentialSelect(container).disabled, true);
   assert.equal(credentialSelect(container).value, 'credential-a');
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '기존 선택 유지 (Credential 목록 로드 실패)');
-  assert.match(container.textContent, /기존 선택값은 변경되지 않습니다/);
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, ui("기존 선택 유지 (Credential 목록 로드 실패)"));
+  assert.match(container.textContent, uiPattern("Credential 목록을 불러오지 못했습니다. 기존 선택값은 변경되지 않습니다."));
 
-  click(button(container, '다시 시도'));
+  click(button(container, ui("다시 시도")));
   await flush();
   assert.equal(attempts, 2);
   assert.equal(credentialSelect(container).disabled, false);
@@ -233,7 +234,7 @@ test('목록 로딩 중에도 기존 참조가 빈 선택으로 보이지 않는
 
   assert.equal(credentialSelect(container).disabled, true);
   assert.equal(credentialSelect(container).value, 'credential-a');
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '기존 선택 유지 (Credential 목록 확인 중)');
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, ui("기존 선택 유지 (Credential 목록 확인 중)"));
 
   await act(async () => {
     pending.resolve(credentials);
@@ -251,14 +252,14 @@ test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 �
   assert.ok(columns);
   assert.equal(columns.style.display, 'flex');
   assert.equal(columns.style.flexWrap, 'wrap');
-  assert.ok(container.querySelector('input[aria-label="고정 ID"]'));
+  assert.ok(container.querySelector(`input[aria-label="${ui("고정 ID")}"]`));
   assert.ok(container.querySelector('select[aria-label="Protocol"]'));
 
   click(button(container, '기존 프로필'));
-  assert.match(container.textContent, /기존 프로필 편집/);
-  click(button(container, '취소'));
-  assert.match(container.textContent, /프로필 만들기/);
-  assert.equal(container.querySelector('input[aria-label="고정 ID"]').value, '');
+  assert.match(container.textContent, uiPattern('{0} 편집', {0: '기존 프로필'}));
+  click(button(container, ui("취소")));
+  assert.match(container.textContent, uiPattern("프로필 만들기"));
+  assert.equal(container.querySelector(`input[aria-label="${ui("고정 ID")}"]`).value, '');
 });
 
 // ── UI 표준화 회귀 (티켓 e616dbfc) ─────────────────────────────────────────
@@ -283,21 +284,21 @@ test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범
     api.deleteClaudeBackendProfile = originalDelete;
   });
 
-  click(button(container, '삭제'));
+  click(button(container, ui("삭제")));
   await flush();
 
   // 브라우저 네이티브 확인창은 더 이상 쓰지 않는다.
   assert.equal(confirmCalls, 0, 'window.confirm 을 호출하면 안 됩니다.');
   // 다이얼로그 본문에 프로필 이름과 참조 요약이 함께 있어야 한다.
-  assert.match(document.body.textContent, /프로필을 삭제할까요\?/);
-  assert.match(document.body.textContent, /계정 1개/);
-  assert.match(document.body.textContent, /티켓 재정의 1건/);
+  assert.match(document.body.textContent, uiPattern("프로필을 삭제할까요?"));
+  assert.match(document.body.textContent, uiPattern('계정 {0}개', {0: 1}));
+  assert.match(document.body.textContent, uiPattern('티켓 재정의 {0}건', {0: 1}));
   // 보드는 사라졌다 — 참조 요약이 보드 수를 세면 안 된다.
   assert.doesNotMatch(document.body.textContent, /보드 \d+개/);
   assert.equal(deleted.length, 0, '확인 전에는 삭제하지 않아야 합니다.');
 
   const confirmButton = [...document.body.querySelectorAll('button')]
-    .find(item => item.textContent?.trim() === '프로필 삭제');
+    .find(item => item.textContent?.trim() === ui("프로필 삭제"));
   assert.ok(confirmButton, '확인 버튼을 찾을 수 없습니다.');
   click(confirmButton);
   await flush();
@@ -307,7 +308,7 @@ test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범
 
 test('프로필이 0건이면 EmptyState 를, 목록 로드가 실패하면 ErrorState 를 렌더한다', async (t) => {
   const { container } = await renderManager(t, { profiles: [] });
-  assert.match(container.textContent, /등록된 프로필이 없습니다/);
+  assert.match(container.textContent, uiPattern("등록된 프로필이 없습니다"));
   // EmptyState 는 경보 시맨틱이 없다 — role="alert" 가 붙으면 안 된다.
   assert.equal(
     Boolean(container.querySelector('[role="alert"]')),
@@ -327,7 +328,7 @@ test('Adapter 설정은 공통 Textarea 로 렌더되어 가로 리사이즈를 
   const { container } = await renderManager(t);
   const textarea = container.querySelector('textarea');
   assert.ok(textarea);
-  assert.equal(textarea.getAttribute('aria-label'), 'Adapter 설정 (JSON)');
+  assert.equal(textarea.getAttribute('aria-label'), ui("Adapter 설정 (JSON)"));
   // 가로 리사이즈를 열어두면 좁은 폭에서 컨테이너를 밀어내 가로 스크롤이 생긴다.
   assert.equal(textarea.style.resize, 'vertical');
   assert.equal(textarea.style.width, '100%');

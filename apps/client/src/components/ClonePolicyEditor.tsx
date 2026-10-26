@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { ClonePolicy } from '../types';
 import { tokens } from '../tokens';
@@ -47,16 +49,17 @@ interface ClonePolicyFieldsProps {
 
 /** 필드 그리드만 렌더한다 — 자체 저장 버튼이 없는 폼(Project 설정)에 끼워 쓴다. */
 export function ClonePolicyFields({ value, onChange, error }: ClonePolicyFieldsProps) {
+  useLocale();
   const fields = [
-    { key: 'timeout' as const, label: 'Clone timeout (s)', placeholder: '3600' },
-    { key: 'idleTimeout' as const, label: 'Idle timeout (s)', placeholder: 'off (0 = off)' },
-    { key: 'depth' as const, label: 'Depth', placeholder: 'full history' },
-    { key: 'filter' as const, label: 'Filter', placeholder: 'e.g. blob:none' },
+    { key: 'timeout' as const, label: translate('Clone timeout (s)'), placeholder: '3600' },
+    { key: 'idleTimeout' as const, label: translate('Idle timeout (s)'), placeholder: translate('off (0 = off)') },
+    { key: 'depth' as const, label: translate('Depth'), placeholder: translate('full history') },
+    { key: 'filter' as const, label: translate('Filter'), placeholder: translate('e.g. blob:none') },
   ];
   return (
     <div>
       <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: tokens.spacing.sm }}>
-        {`비워두면 상위 기본값으로 흘러내립니다 (Project → Account → 시스템 기본값: clone timeout 3600초, idle 감시 없음, 전체 clone). 대형 저장소는 timeout을 늘리거나 depth/filter/single-branch로 clone 자체를 줄이세요. idle timeout은 값을 넣었을 때만 켜집니다 — 진행 출력이 그 시간만큼 완전히 끊긴 clone을 정지로 보고 회수합니다.`}
+        {translate('비워두면 상위 기본값으로 흘러내립니다 (Project → Account → 시스템 기본값: clone timeout 3600초, idle 감시 없음, 전체 clone). 대형 저장소는 timeout을 늘리거나 depth/filter/single-branch로 clone 자체를 줄이세요. idle timeout은 값을 넣었을 때만 켜집니다 — 진행 출력이 그 시간만큼 완전히 끊긴 clone을 정지로 보고 회수합니다.')}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: tokens.spacing.sm }}>
         {fields.map((field) => (
@@ -84,7 +87,7 @@ export function ClonePolicyFields({ value, onChange, error }: ClonePolicyFieldsP
           checked={value.singleBranch}
           onChange={(e) => onChange({ ...value, singleBranch: e.target.checked })}
         />
-        {`single-branch clone (대상 브랜치만 가져옴 — 다른 브랜치를 base로 쓰는 티켓은 이 저장소에서 체크아웃할 수 없게 됩니다)`}
+        {translate('single-branch clone (대상 브랜치만 가져옴 — 다른 브랜치를 base로 쓰는 티켓은 이 저장소에서 체크아웃할 수 없게 됩니다)')}
       </label>
       {error && (
         <div style={{ fontSize: '11px', color: tokens.colors.danger, marginTop: 4 }}>{error}</div>
@@ -103,6 +106,7 @@ interface ClonePolicyEditorProps {
 
 /** 자체 저장 버튼을 가진 독립 섹션 — Account Settings 용(HarnessConfigEditor 와 같은 모양). */
 export default function ClonePolicyEditor({ raw, title, description, onSave }: ClonePolicyEditorProps) {
+  useLocale();
   const [form, setForm] = useState<ClonePolicyFormState>(() => clonePolicyFormFromRaw(raw));
   const [error, setError] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
@@ -139,7 +143,7 @@ export default function ClonePolicyEditor({ raw, title, description, onSave }: C
       <ClonePolicyFields value={form} onChange={setForm} error={error} />
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <Button variant="primary" size="sm" onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? translate('Saving…') : translate('Save')}
         </Button>
         <Button
           variant="secondary"
@@ -147,8 +151,7 @@ export default function ClonePolicyEditor({ raw, title, description, onSave }: C
           disabled={saving}
           onClick={() => setForm(EMPTY_CLONE_POLICY_FORM)}
         >
-          Clear fields
-        </Button>
+          {translate('Clear fields')}</Button>
       </div>
     </section>
   );

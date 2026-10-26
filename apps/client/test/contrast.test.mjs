@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 디자인 토큰 명도 대비 순수 테스트 — F2-5 (ticket 10987a81) 접근성 심화 (e).
 //
 // jsdom/axe 의 color-contrast 룰은 실제 레이어링/알파 합성을 못 봐 신뢰 불가하므로,
@@ -37,7 +38,7 @@ test('parseHex: 3자리 shorthand 확장 + 불투명 hex 만 허용(rgba 거부)
   assert.deepEqual(parseHex('#fff'), [255, 255, 255]);
   assert.deepEqual(parseHex('#000'), [0, 0, 0]);
   assert.deepEqual(parseHex('#6366f1'), [99, 102, 241]);
-  assert.throws(() => parseHex('rgba(0,0,0,0.6)'), /불투명/);
+  assert.throws(() => parseHex('rgba(0,0,0,0.6)'), /대비 계산: 불투명 6자리 hex/);
   assert.throws(() => parseHex('#12'), /hex/);
 });
 

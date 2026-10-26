@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -40,6 +42,7 @@ export default function ChatRoomListPanel({
   onToggleShowAllRooms,
   currentUserId,
 }: ChatRoomListPanelProps) {
+  useLocale();
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -121,7 +124,7 @@ export default function ChatRoomListPanel({
       }
       return false;
     });
-  }, [rooms, filterQuery]);
+  }, [rooms, filterQuery, getLocale()]);
 
   // Escape key closes search
   useEffect(() => {
@@ -178,13 +181,13 @@ export default function ChatRoomListPanel({
     >
       {!isSearching ? (
         <PageHeader
-          title="Chat"
-          description="Conversations"
+          title={translate('Chat')}
+          description={translate('Conversations')}
           actions={
             <div style={{ display: 'flex', gap: tokens.spacing.xs, alignItems: 'center' }}>
               <button
                 onClick={openSearch}
-                aria-label="Search messages"
+                aria-label={translate('Search messages')}
                 style={{
                   background: 'transparent',
                   border: 'none',
@@ -200,7 +203,7 @@ export default function ChatRoomListPanel({
               {onToggleShowAllRooms && (
                 <button
                   onClick={() => onToggleShowAllRooms(!showAllRooms)}
-                  title={showAllRooms ? 'Showing every accessible room (incl. agent-to-agent). Click for "my rooms" only.' : 'Click to also show rooms you are not a participant in.'}
+                  title={showAllRooms ? translate('Showing every accessible room (incl. agent-to-agent). Click for "my rooms" only.') : translate('Click to also show rooms you are not a participant in.')}
                   style={{
                     background: showAllRooms ? tokens.colors.accent : 'transparent',
                     color: showAllRooms ? 'white' : tokens.colors.textSecondary,
@@ -213,7 +216,7 @@ export default function ChatRoomListPanel({
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {showAllRooms ? 'All rooms' : 'My rooms'}
+                  {showAllRooms ? translate('All rooms') : translate('My rooms')}
                 </button>
               )}
               <button
@@ -230,8 +233,7 @@ export default function ChatRoomListPanel({
                   whiteSpace: 'nowrap',
                 }}
               >
-                + New Chat
-              </button>
+                {translate('+ New Chat')}</button>
             </div>
           }
         />
@@ -240,7 +242,7 @@ export default function ChatRoomListPanel({
           <input
             ref={searchInputRef}
             type="text"
-            placeholder="Search messages..."
+            placeholder={translate('Search messages...')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
@@ -258,7 +260,7 @@ export default function ChatRoomListPanel({
           />
           <button
             onClick={closeSearch}
-            aria-label="Cancel search"
+            aria-label={translate('Cancel search')}
             style={{
               background: 'transparent',
               border: 'none',
@@ -290,10 +292,10 @@ export default function ChatRoomListPanel({
         >
           <input
             type="text"
-            placeholder="Filter by member or message…"
+            placeholder={translate('Filter by member or message…')}
             value={filterQuery}
             onChange={(e) => setFilterQuery(e.target.value)}
-            aria-label="Filter rooms by member name or message content"
+            aria-label={translate('Filter rooms by member name or message content')}
             style={{
               flex: 1,
               background: tokens.colors.surface,
@@ -310,7 +312,7 @@ export default function ChatRoomListPanel({
           {filterQuery && (
             <button
               onClick={() => setFilterQuery('')}
-              aria-label="Clear filter"
+              aria-label={translate('Clear filter')}
               style={{
                 background: 'transparent',
                 border: 'none',
@@ -332,8 +334,7 @@ export default function ChatRoomListPanel({
         {isSearching ? (
           searchQuery.length < 2 ? (
             <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-              Type at least 2 characters to search
-            </div>
+              {translate('Type at least 2 characters to search')}</div>
           ) : searchLoading ? (
             <div style={{ padding: '8px 0' }}>
               {[1, 2, 3].map((i) => (
@@ -342,8 +343,7 @@ export default function ChatRoomListPanel({
             </div>
           ) : searchResults.length === 0 ? (
             <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: tokens.typography.fontSizeLg, color: tokens.colors.textSecondary }}>
-              No messages match '{searchQuery}'. Try shorter keywords or check your spelling.
-            </div>
+              {translate('No messages match \'')}{searchQuery}{translate('\'. Try shorter keywords or check your spelling.')}</div>
           ) : (
             <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {searchResults.map((result) => (
@@ -373,8 +373,7 @@ export default function ChatRoomListPanel({
               fontSize: tokens.typography.fontSizeMd,
             }}
           >
-            Could not load chats. Check your connection and retry.
-          </div>
+            {translate('Could not load chats. Check your connection and retry.')}</div>
         ) : rooms.length === 0 ? (
           <div
             style={{
@@ -383,18 +382,15 @@ export default function ChatRoomListPanel({
             }}
           >
             <div style={{ fontSize: tokens.typography.fontSizeLg, fontWeight: 600, color: tokens.colors.textPrimary, marginBottom: tokens.spacing.sm }}>
-              No chats yet
-            </div>
+              {translate('No chats yet')}</div>
             <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-              Start a conversation with your team or agents. Click 'New Chat' to begin.
-            </div>
+              {translate('Start a conversation with your team or agents. Click \'New Chat\' to begin.')}</div>
           </div>
         ) : (
           <>
             {filteredRooms.length === 0 ? (
               <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-                No rooms match this filter.
-              </div>
+                {translate('No rooms match this filter.')}</div>
             ) : (
               <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
                 {filteredRooms.map((room) => (
@@ -424,8 +420,7 @@ export default function ChatRoomListPanel({
                     color: tokens.colors.textMuted,
                   }}
                 >
-                  Messages
-                </div>
+                  {translate('Messages')}</div>
                 {messageHitsLoading ? (
                   <div style={{ padding: '8px 0' }}>
                     {[1, 2].map((i) => (
@@ -434,7 +429,7 @@ export default function ChatRoomListPanel({
                   </div>
                 ) : messageHits.length === 0 ? (
                   <div style={{ padding: '8px 16px 16px', fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-                    No messages match '{filterQuery.trim()}'.
+                    {translate('No messages match \'')}{filterQuery.trim()}'.
                   </div>
                 ) : (
                   <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
@@ -468,6 +463,7 @@ interface SearchResultRowProps {
 }
 
 function SearchResultRow({ result, query, highlightMatch, onClick }: SearchResultRowProps) {
+  useLocale();
   const [hovered, setHovered] = useState(false);
   const snippet = result.content.length > 120 ? result.content.slice(0, 117) + '...' : result.content;
 
@@ -506,6 +502,7 @@ function SearchResultRow({ result, query, highlightMatch, onClick }: SearchResul
 }
 
 function RoomListSkeleton() {
+  useLocale();
   return (
     <div style={{ padding: '8px 0' }}>
       {[1, 2, 3].map((i) => (
@@ -581,6 +578,7 @@ function buildParticipantSummary(
 }
 
 function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProps) {
+  useLocale();
   const [hovered, setHovered] = useState(false);
 
   // Custom room name wins (DMs may be renamed now too — see ticket 1ae77f55);
@@ -588,8 +586,8 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
   // "Unnamed Group" placeholder for groups.
   const displayName =
     room.type === 'dm'
-      ? (room.name || room.dm_partner_name || 'Direct Message')
-      : (room.name || 'Unnamed Group');
+      ? (room.name || room.dm_partner_name || translate('Direct Message'))
+      : (room.name || translate('Unnamed Group'));
 
   // 참여자 요약 라인. 그룹은 항상 노출한다(제목이 자동 조합/커스텀 이름이라 "누가 있는지"를
   // 따로 보여줄 가치가 있다). DM 은 요약이 제목과 다를 때만 노출한다 — 미변경 DM 은 제목=상대라
@@ -683,7 +681,7 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
               않는다. 참여 중인 방은 이미 내 대화이므로 굳이 라벨을 달지 않는다. */}
           {room.open_join && room.is_participant === false && (
             <span
-              aria-label="Open room you have not joined"
+              aria-label={translate('Open room you have not joined')}
               data-testid="room-open-join-badge"
               style={{
                 flexShrink: 0,
@@ -697,13 +695,12 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
                 lineHeight: '16px',
               }}
             >
-              Open
-            </span>
+              {translate('Open')}</span>
           )}
           {/* 그룹 방 참여자 수 뱃지 — 한눈에 인원 규모를 보여준다 */}
           {room.type === 'group' && memberCount > 0 && (
             <span
-              aria-label={`${memberCount} participants`}
+              aria-label={translate('{0} participants', { 0: memberCount })}
               style={{
                 flexShrink: 0,
                 fontSize: 10,
@@ -767,7 +764,7 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
         </span>
         {showBadge && (
           <span
-            aria-label={`${unreadCount} unread messages`}
+            aria-label={translate('{0} unread messages', { 0: unreadCount })}
             style={{
               background: tokens.colors.accent,
               color: 'white',

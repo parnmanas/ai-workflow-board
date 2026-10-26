@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd';
@@ -45,6 +48,7 @@ function storage(): Storage | null {
  * filters hide it.
  */
 export default function TicketsPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const compact = useMediaQuery('(max-width: 1100px)');
@@ -55,7 +59,7 @@ export default function TicketsPage() {
   const { hasPermission } = useAuth();
   const { counts, markAllTicketsReadLocal } = useNotifications();
 
-  const filters = useMemo(() => filtersFromSearch(searchParams), [searchParams]);
+  const filters = useMemo(() => filtersFromSearch(searchParams), [searchParams, getLocale()]);
   const openTicketId = searchParams.get('ticket');
   const scrollToCommentId = searchParams.get('comment');
 
@@ -68,7 +72,7 @@ export default function TicketsPage() {
   const data = useTicketsData(accountId, filters);
   const { projects } = useProjects(accountId);
   const hostNames = useHostNames();
-  const projectNames = useMemo(() => Object.fromEntries(projects.map((p) => [p.id, p.name])), [projects]);
+  const projectNames = useMemo(() => Object.fromEntries(projects.map((p) => [p.id, p.name])), [projects, getLocale()]);
 
   // ── Account (dispatch pause banner) ──────────────────────────────
   const [account, setAccount] = useState<Account | null>(null);
@@ -100,7 +104,7 @@ export default function TicketsPage() {
 
   const facet = useMemo(
     () => tagFacet(data.tagCounts, data.tickets, filters.tags),
-    [data.tagCounts, data.tickets, filters.tags],
+    [data.tagCounts, data.tickets, filters.tags, getLocale()],
   );
 
   // ── Panel ⇄ `?ticket=` ─────────────────────────────────────────────
@@ -134,7 +138,7 @@ export default function TicketsPage() {
 
   const [panelTicket, setPanelTicket] = useState<Ticket | null>(null);
   const [panelNonce, setPanelNonce] = useState(0);
-  const openRow = useMemo(() => findTicketInTree(data.tickets, openTicketId), [data.tickets, openTicketId]);
+  const openRow = useMemo(() => findTicketInTree(data.tickets, openTicketId), [data.tickets, openTicketId, getLocale()]);
   // Primitive change signal from the list row so the refetch compares by value.
   const rowSignal = openRow
     ? `${openRow.updated_at}|${(openRow.comments || []).map((c) => `${c.id}:${c.status ?? ''}`).join(',')}`
@@ -157,8 +161,8 @@ export default function TicketsPage() {
         if (cancelled || panelErrorNotified.current === openTicketId) return;
         panelErrorNotified.current = openTicketId;
         showToast(err?.status === 404
-          ? '링크된 티켓을 찾을 수 없습니다 (삭제되었거나 접근 권한이 없습니다)'
-          : `티켓을 열 수 없습니다: ${err?.message || '네트워크 오류'}`, 'error');
+          ? translate('링크된 티켓을 찾을 수 없습니다 (삭제되었거나 접근 권한이 없습니다)')
+          : translate('티켓을 열 수 없습니다: {0}', { 0: err?.message || translate('네트워크 오류') }), 'error');
         if (err?.status === 404 || err?.status === 403) closeTicketRef.current();
       });
     return () => { cancelled = true; };
@@ -183,7 +187,7 @@ export default function TicketsPage() {
       await withLoading(action);
       if (successMsg) showToast(successMsg, 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Operation failed', 'error');
+      showToast(err?.message || translate('Operation failed'), 'error');
     }
   }, [showToast, withLoading]);
 
@@ -191,11 +195,11 @@ export default function TicketsPage() {
   const handleCreate = useCallback(async (body: TicketCreateInput) => {
     try {
       const created = await withLoading(() => data.createTicket(body));
-      showToast('티켓을 만들었습니다', 'success');
+      showToast(translate('티켓을 만들었습니다'), 'success');
       setCreateOpen(false);
       if (created?.id) openTicket(created.id);
     } catch (err: any) {
-      showToast(err?.message || '티켓을 만들지 못했습니다', 'error');
+      showToast(err?.message || translate('티켓을 만들지 못했습니다'), 'error');
       throw err;
     }
   }, [data, withLoading, showToast, openTicket]);
@@ -209,7 +213,7 @@ export default function TicketsPage() {
         ...(filters.tags.length ? { tags: filters.tags } : {}),
       });
     } catch (err: any) {
-      showToast(err?.message || '티켓을 만들지 못했습니다', 'error');
+      showToast(err?.message || translate('티켓을 만들지 못했습니다'), 'error');
       throw err;
     }
   }, [data, filters.projectId, filters.tags, showToast]);
@@ -222,35 +226,35 @@ export default function TicketsPage() {
 
   const handleDelete = useCallback(async (ticketId: string) => {
     const ok = await confirm({
-      title: 'Delete ticket',
-      message: 'Delete this ticket? This also removes its subtasks and comments. This cannot be undone.',
+      title: translate('Delete ticket'),
+      message: translate('Delete this ticket? This also removes its subtasks and comments. This cannot be undone.'),
     });
     if (!ok) return;
     // Close first: the post-delete refresh would otherwise refetch the open
     // ticket and report the (expected) 404 as an error.
     if (ticketId === openTicketId) closeTicket();
-    await wrapAction(() => data.deleteTicket(ticketId), 'Ticket deleted');
+    await wrapAction(() => data.deleteTicket(ticketId), translate('Ticket deleted'));
   }, [confirm, wrapAction, data, closeTicket, openTicketId]);
 
   const handleDeleteChild = useCallback(async (childId: string) => {
-    const ok = await confirm({ title: 'Delete subtask', message: 'Delete this subtask? This cannot be undone.' });
+    const ok = await confirm({ title: translate('Delete subtask'), message: translate('Delete this subtask? This cannot be undone.') });
     if (!ok) return;
-    await wrapAction(() => data.deleteTicket(childId), 'Subtask deleted');
+    await wrapAction(() => data.deleteTicket(childId), translate('Subtask deleted'));
   }, [confirm, wrapAction, data]);
 
   const handleMarkAllRead = useCallback(() => wrapAction(async () => {
     await api.markAllTicketsRead();
     markAllTicketsReadLocal();
-  }, '읽지 않은 티켓 코멘트를 모두 읽음으로 표시했습니다'), [wrapAction, markAllTicketsReadLocal]);
+  }, translate('읽지 않은 티켓 코멘트를 모두 읽음으로 표시했습니다')), [wrapAction, markAllTicketsReadLocal]);
 
   const canAdmin = hasPermission('admin.access');
   const handleResumeDispatch = useCallback(() => wrapAction(async () => {
     await api.updateAccount(accountId, { dispatch_paused_at: null });
     loadAccount();
-  }, '티켓 디스패치를 재개했습니다'), [wrapAction, accountId, loadAccount]);
+  }, translate('티켓 디스패치를 재개했습니다')), [wrapAction, accountId, loadAccount]);
 
   // ── Kanban drag & drop ─────────────────────────────────────────────
-  const lanes = useMemo(() => groupByStatus(data.tickets), [data.tickets]);
+  const lanes = useMemo(() => groupByStatus(data.tickets), [data.tickets, getLocale()]);
   const visibleStatuses = filters.statuses.length ? filters.statuses : [...TICKET_STATUSES];
 
   const handleDragEnd = useCallback(async (result: DropResult) => {
@@ -263,7 +267,7 @@ export default function TicketsPage() {
     const status = destination.droppableId.slice(LANE_DROPPABLE_PREFIX.length);
     if (!isTicketStatus(status)) return;
     if (filters.archived) {
-      showToast('보관된 티켓은 이동할 수 없습니다 — 먼저 보관을 해제하세요', 'error');
+      showToast(translate('보관된 티켓은 이동할 수 없습니다 — 먼저 보관을 해제하세요'), 'error');
       return;
     }
     const moved = data.tickets.find((t) => t.id === ticketId);
@@ -272,7 +276,7 @@ export default function TicketsPage() {
     try {
       await data.moveTicket(ticketId, status, position);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to move ticket', 'error');
+      showToast(err?.message || translate('Failed to move ticket'), 'error');
     }
   }, [data, lanes, filters.archived, showToast]);
 
@@ -283,11 +287,11 @@ export default function TicketsPage() {
   const kanbanScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'x' });
 
   const body = data.loading && data.tickets.length === 0 ? (
-    <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>Loading tickets…</div>
+    <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading tickets…')}</div>
   ) : data.error && data.tickets.length === 0 ? (
     <div role="alert" style={{ padding: 24, color: tokens.colors.danger, fontSize: 13 }}>
       {data.error}{' '}
-      <button type="button" onClick={() => void data.refresh()} style={{ marginLeft: 8, background: 'none', border: 'none', color: tokens.colors.accent, cursor: 'pointer' }}>다시 시도</button>
+      <button type="button" onClick={() => void data.refresh()} style={{ marginLeft: 8, background: 'none', border: 'none', color: tokens.colors.accent, cursor: 'pointer' }}>{translate('다시 시도')}</button>
     </div>
   ) : view === 'kanban' ? (
     <div
@@ -331,9 +335,9 @@ export default function TicketsPage() {
         onClose={closeTicket}
         onMove={handleMove}
         onDelete={(id) => { void handleDelete(id); }}
-        onCreateChild={(parentId, childData) => { void wrapAction(() => data.createChildTicket(parentId, childData), '하위 작업을 추가했습니다'); }}
+        onCreateChild={(parentId, childData) => { void wrapAction(() => data.createChildTicket(parentId, childData), translate('하위 작업을 추가했습니다')); }}
         onDeleteChild={(childId) => { void handleDeleteChild(childId); }}
-        onReparentChild={(parentId, childId) => { void wrapAction(() => data.reparentTicket(childId, parentId), '하위 작업으로 연결했습니다'); }}
+        onReparentChild={(parentId, childId) => { void wrapAction(() => data.reparentTicket(childId, parentId), translate('하위 작업으로 연결했습니다')); }}
         // Must reject on failure — the panel keeps its edits visible.
         onSaveDraft={async (ticketId, fields) => {
           if (Object.keys(fields).length === 0) return;
@@ -347,7 +351,7 @@ export default function TicketsPage() {
           await withLoading(() => data.addComment(ticketId, content, [], options));
         }}
         onSetCommentStatus={(ticketId, commentId, status) => {
-          void wrapAction(() => data.setCommentStatus(ticketId, commentId, status), status === 'resolved' ? '질문을 해결로 표시했습니다' : '질문을 다시 열었습니다');
+          void wrapAction(() => data.setCommentStatus(ticketId, commentId, status), status === 'resolved' ? translate('질문을 해결로 표시했습니다') : translate('질문을 다시 열었습니다'));
         }}
         onSelectTicket={openTicket}
         scrollToCommentId={scrollToCommentId}
@@ -355,8 +359,7 @@ export default function TicketsPage() {
       />
     ) : (
       <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13, background: tokens.colors.surface, height: '100%' }}>
-        티켓을 불러오는 중…
-        <button type="button" onClick={closeTicket} style={{ marginLeft: 12, background: 'none', border: 'none', color: tokens.colors.accent, cursor: 'pointer' }}>닫기</button>
+        {translate('티켓을 불러오는 중…')}<button type="button" onClick={closeTicket} style={{ marginLeft: 12, background: 'none', border: 'none', color: tokens.colors.accent, cursor: 'pointer' }}>{translate('닫기')}</button>
       </div>
     )
   ) : null;
@@ -378,9 +381,7 @@ export default function TicketsPage() {
         >
           <span aria-hidden="true" style={{ fontSize: 16 }}>⏸</span>
           <span style={{ flex: 1 }}>
-            <strong>{account.name}의 티켓 디스패치가 일시정지되어 있습니다</strong> ({new Date(account.dispatch_paused_at).toLocaleString()} 부터).
-            이 소유 계정의 새 작업이 에이전트에게 전달되지 않습니다 — 편집·코멘트·이동은 그대로 가능합니다.
-          </span>
+            <strong>{account.name}{translate('의 티켓 디스패치가 일시정지되어 있습니다')}</strong> ({new Date(account.dispatch_paused_at).toLocaleString(getLocaleTag())} {translate('부터). 이 소유 계정의 새 작업이 에이전트에게 전달되지 않습니다 — 편집·코멘트·이동은 그대로 가능합니다.')}</span>
           {canAdmin && (
             <button
               type="button"
@@ -389,7 +390,7 @@ export default function TicketsPage() {
                 background: 'transparent', border: `1px solid ${tokens.colors.warning}`, borderRadius: tokens.radii.sm,
                 color: tokens.colors.warningLight, fontSize: 12, fontWeight: 600, padding: '3px 10px', cursor: 'pointer',
               }}
-            >재개</button>
+            >{translate('재개')}</button>
           )}
         </div>
       )}
@@ -427,7 +428,7 @@ export default function TicketsPage() {
       </DragDropContext>
       </div>
       {compact && panel && (
-        <div className="awb-ticket-detail" role="region" aria-label="Ticket detail" style={{ position: 'absolute', inset: 0, minWidth: 0, overflow: 'hidden', background: tokens.colors.surface }}>
+        <div className="awb-ticket-detail" role="region" aria-label={translate('Ticket detail')} style={{ position: 'absolute', inset: 0, minWidth: 0, overflow: 'hidden', background: tokens.colors.surface }}>
           {panel}
         </div>
       )}

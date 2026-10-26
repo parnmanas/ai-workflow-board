@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { VoiceConfigView } from '../types';
@@ -172,7 +173,7 @@ export function useHandsFreeConversation(
               if (text) { setError(null); onTextRef.current(text); }
               else setError(transcriptionFeedback(t));
             })
-            .catch((err: any) => { if (!startup.signal.aborted) setError(err?.message || '전사에 실패했습니다'); })
+            .catch((err: any) => { if (!startup.signal.aborted) setError(err?.message || translate('전사에 실패했습니다')); })
             .finally(() => {
               pendingRef.current -= 1;
               if (startup.signal.aborted) return;
@@ -194,8 +195,8 @@ export function useHandsFreeConversation(
       releaseMic();
       setPhase('off');
       setError(err?.name === 'NotAllowedError'
-        ? '마이크 권한이 없습니다 — 브라우저 설정에서 허용해 주세요.'
-        : (err?.message || '대화 모드를 시작하지 못했습니다'));
+        ? translate('마이크 권한이 없습니다 — 브라우저 설정에서 허용해 주세요.')
+        : (err?.message || translate('대화 모드를 시작하지 못했습니다')));
     }
   }, [setPhase]);
 
@@ -209,7 +210,7 @@ export function useHandsFreeConversation(
       if (sessionRef.current !== session || speechPlayer.state.speaking) return;
       if (['paused-for-reply', 'waiting-gesture'].includes(phaseRef.current)) setPhase('listening');
     }).catch((err) => {
-      if (sessionRef.current === session) setError(err?.message || '마이크를 다시 열지 못했습니다');
+      if (sessionRef.current === session) setError(err?.message || translate('마이크를 다시 열지 못했습니다'));
     });
   }, [setPhase]);
 

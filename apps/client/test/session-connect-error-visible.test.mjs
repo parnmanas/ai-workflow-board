@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 세션 Connect 가 실패하면 **왜 실패했는지가 화면에 남아야 한다**.
 //
 // 실측 증상(ralf/codex): 터미널이나 Codex 앱에서 이미 열려 있는 스레드를 Connect 하면
@@ -31,7 +32,7 @@ test('연결 실패 사유를 상태로 들고 있는다 — 토스트만으로 
   // 실패 경로가 토스트와 **같은 문구**를 상태에도 남긴다.
   assert.match(
     source,
-    /const message = err\?\.message \|\| 'Failed to connect to the session on the Runtime Host';[\s\S]*?setConnectError\(message\);[\s\S]*?showToast\(message, 'error'\)/,
+    /const message = err\?\.message \|\| translate\(["\x27]Failed to connect to the session on the Runtime Host["\x27]\);[\s\S]*?setConnectError\(message\);[\s\S]*?showToast\(message, 'error'\)/,
   );
   // 다시 시도할 때는 지운다 — 고쳐서 붙은 뒤에도 옛 사유가 남아 있으면 그게 또 거짓말이다.
   assert.match(source, /setConnecting\(true\);\s*\n\s*setConnectError\(null\);/);
@@ -139,19 +140,19 @@ test('매니저가 답한 사유(422 JSON)는 그대로 화면 문구가 된다'
 test('프록시가 HTML 로 가린 오류도 "Request failed" 가 아니라 상태를 말한다 — 본문은 내보이지 않는다', async (t) => {
   const html = '<!DOCTYPE html><html><head><title>awb.parnmanas.com | 502: Bad gateway</title></head><body>Cloudflare Ray ID: 8d1f</body></html>';
   const err = await openWith(t, new Response(html, { status: 502, headers: { 'Content-Type': 'text/html' } }));
-  assert.equal(err.message, '요청에 실패했습니다 (HTTP 502). 잠시 후 다시 시도해 주세요.');
-  assert.doesNotMatch(err.message, /Request failed|DOCTYPE|Cloudflare|Ray ID/);
+  assert.equal(err.message, ui('요청에 실패했습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', {0: 502}));
+  assert.doesNotMatch(err.message, /^Request failed$|DOCTYPE|Cloudflare|Ray ID/);
   assert.equal(err.status, 502);
 });
 
 test('Cloudflare 시간 초과(524)는 시간 초과라고 말한다', async (t) => {
   const err = await openWith(t, new Response('<html>timeout</html>', { status: 524, headers: { 'Content-Type': 'text/html' } }));
-  assert.match(err.message, /서버 응답 시간이 초과되었습니다 \(HTTP 524\)/);
+  assert.match(err.message, uiPattern('서버 응답 시간이 초과되었습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', {0: 524}));
 });
 
 test('apiErrorMessage: message 가 slug 보다 먼저고, 마크업이 든 문구는 쓰지 않는다', () => {
   assert.equal(apiErrorMessage(409, { error: 'conflict', message: '이미 열려 있습니다' }), '이미 열려 있습니다');
   assert.equal(apiErrorMessage(400, { error: 'bad_request' }), 'bad_request');
-  assert.equal(apiErrorMessage(502, { error: '<html>gateway</html>' }), '요청에 실패했습니다 (HTTP 502). 잠시 후 다시 시도해 주세요.');
-  assert.equal(apiErrorMessage(500, null), '요청에 실패했습니다 (HTTP 500). 잠시 후 다시 시도해 주세요.');
+  assert.equal(apiErrorMessage(502, { error: '<html>gateway</html>' }), ui('요청에 실패했습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', {0: 502}));
+  assert.equal(apiErrorMessage(500, null), ui('요청에 실패했습니다 (HTTP {0}). 잠시 후 다시 시도해 주세요.', {0: 500}));
 });

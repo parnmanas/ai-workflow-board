@@ -13,16 +13,18 @@
  * The token grammar mirrors STRUCTURED_REF in common/markdownRefs.tsx.
  */
 
+import { t } from '../i18n/core';
+
 const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;
 
 // Fallback label per token type, used when the token carries no display name
 // (older rows, or a programmatic mention). Showing the bare id would just be
 // the UUID again, which is the thing we are removing.
 const FALLBACK_LABEL: Record<string, string> = {
-  user: '사용자',
-  agent: '에이전트',
-  role: '역할',
-  ticket: '티켓',
+  get user() { return t('User'); },
+  get agent() { return t('Agent'); },
+  get role() { return t('Role'); },
+  get ticket() { return t('Ticket'); },
 };
 
 export function renderMentionPreview(text: string | null | undefined): string {

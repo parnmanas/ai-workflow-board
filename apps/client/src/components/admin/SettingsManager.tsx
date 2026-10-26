@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
@@ -13,11 +15,12 @@ interface SettingRow {
 }
 
 const PROVIDER_OPTIONS = [
-  { value: 'none', label: 'None (disabled)' },
+  { value: 'none', get label() { return translate('None (disabled)'); } },
   { value: 'openai', label: 'OpenAI' },
 ];
 
 export default function SettingsManager() {
+  useLocale();
   const { showToast } = useToast();
   const [settings, setSettings] = useState<SettingRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,7 +38,7 @@ export default function SettingsManager() {
       setFormValues(vals);
       setDirty(false);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load settings', 'error');
+      showToast(err?.message || translate('Failed to load settings'), 'error');
     } finally {
       setLoading(false);
     }
@@ -54,17 +57,17 @@ export default function SettingsManager() {
     setSaving(true);
     try {
       await api.updateSettings(formValues);
-      showToast('Settings saved.', 'success');
+      showToast(translate('Settings saved.'), 'success');
       await loadSettings();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save settings', 'error');
+      showToast(err?.message || translate('Failed to save settings'), 'error');
     } finally {
       setSaving(false);
     }
   };
 
   if (loading) {
-    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>;
+    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>{translate('Loading…')}</div>;
   }
 
   const embeddingEnabled = formValues['embedding.provider'] === 'openai';
@@ -110,6 +113,7 @@ export default function SettingsManager() {
   };
 
   function StatusDot({ enabled, enabledText, disabledText }: { enabled: boolean; enabledText: string; disabledText: string }) {
+  useLocale();
     return (
       <div style={{
         marginTop: 16,
@@ -137,17 +141,14 @@ export default function SettingsManager() {
       {/* ─── Embedding Configuration ─── */}
       <Card padding="20px">
         <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
-          Embedding Configuration
-        </div>
+          {translate('Embedding Configuration')}</div>
         <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
-          Configure vector embedding for semantic resource search. When enabled, resources are automatically
-          embedded and searchable via natural language queries through MCP.
-        </div>
+          {translate('Configure vector embedding for semantic resource search. When enabled, resources are automatically embedded and searchable via natural language queries through MCP.')}</div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
-            <label style={labelStyle}>Provider</label>
-            <div style={hintStyle}>Embedding provider (openai or none)</div>
+            <label style={labelStyle}>{translate('Provider')}</label>
+            <div style={hintStyle}>{translate('Embedding provider (openai or none)')}</div>
             <select
               value={formValues['embedding.provider'] || 'none'}
               onChange={(e) => handleChange('embedding.provider', e.target.value)}
@@ -162,8 +163,8 @@ export default function SettingsManager() {
           {embeddingEnabled && (
             <>
               <div>
-                <label style={labelStyle}>API Key</label>
-                <div style={hintStyle}>API key for the embedding provider</div>
+                <label style={labelStyle}>{translate('API Key')}</label>
+                <div style={hintStyle}>{translate('API key for the embedding provider')}</div>
                 <input
                   type="password"
                   value={formValues['embedding.api_key'] || ''}
@@ -173,7 +174,7 @@ export default function SettingsManager() {
                 />
               </div>
               <Input
-                label="Model"
+                label={translate('Model')}
                 value={formValues['embedding.model'] || 'text-embedding-3-small'}
                 onChange={(e) => handleChange('embedding.model', e.target.value)}
                 placeholder="text-embedding-3-small"
@@ -192,16 +193,12 @@ export default function SettingsManager() {
       {/* ─── MCP Configuration ─── */}
       <Card padding="20px">
         <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
-          MCP Configuration
-        </div>
+          {translate('MCP Configuration')}</div>
         <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
-          Limits the active MCP session count. Once the cap is reached the oldest-idle session is
-          evicted (LRU) so subagent fanout can't grow the in-memory store without bound. Idle
-          sessions still expire after 10 minutes regardless of this setting.
-        </div>
+          {translate('Limits the active MCP session count. Once the cap is reached the oldest-idle session is evicted (LRU) so subagent fanout can\'t grow the in-memory store without bound. Idle sessions still expire after 10 minutes regardless of this setting.')}</div>
 
         <div>
-          <label style={labelStyle}>Max concurrent sessions</label>
+          <label style={labelStyle}>{translate('Max concurrent sessions')}</label>
           <div style={hintStyle}>{settings.find((s) => s.key === 'mcp.max_sessions')?.description || ''}</div>
           <Input
             type="number"
@@ -216,43 +213,38 @@ export default function SettingsManager() {
       {/* ─── Google OAuth ─── */}
       <Card padding="20px">
         <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
-          Google OAuth
-        </div>
+          {"Google OAuth"}</div>
         <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
-          Adds a "Continue with Google" button to the login page alongside the existing
-          email/password form. Create an OAuth 2.0 Client ID in Google Cloud Console and set the
-          authorised redirect URI to{' '}
-          <code style={{ fontSize: 11 }}>{window.location.origin}/api/auth/oauth/google/callback</code>.
-          The client secret is stored encrypted.
-        </div>
+          {translate('Adds a "Continue with Google" button to the login page alongside the existing email/password form. Create an OAuth 2.0 Client ID in Google Cloud Console and set the authorised redirect URI to')}{' '}
+          <code style={{ fontSize: 11 }}>{window.location.origin}/api/auth/oauth/google/callback</code>{translate('. The client secret is stored encrypted.')}</div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
-            <label style={labelStyle}>Enable Google Login</label>
-            <div style={hintStyle}>Show "Continue with Google" on the sign-in page</div>
+            <label style={labelStyle}>{translate('Enable Google Login')}</label>
+            <div style={hintStyle}>{translate('Show "Continue with Google" on the sign-in page')}</div>
             <select
               value={formValues['oauth.google.enabled'] || 'false'}
               onChange={(e) => handleChange('oauth.google.enabled', e.target.value)}
               style={selectStyle}
             >
-              <option value="false">Disabled</option>
-              <option value="true">Enabled</option>
+              <option value="false">{translate('Disabled')}</option>
+              <option value="true">{translate('Enabled')}</option>
             </select>
           </div>
 
           <div>
-            <label style={labelStyle}>Client ID</label>
-            <div style={hintStyle}>Google OAuth 2.0 client ID (from Google Cloud Console)</div>
+            <label style={labelStyle}>{translate('Client ID')}</label>
+            <div style={hintStyle}>{translate('Google OAuth 2.0 client ID (from Google Cloud Console)')}</div>
             <Input
               value={formValues['oauth.google.client_id'] || ''}
               onChange={(e) => handleChange('oauth.google.client_id', e.target.value)}
-              placeholder="123456789-abc.apps.googleusercontent.com"
+              placeholder={translate('123456789-abc.apps.googleusercontent.com')}
             />
           </div>
 
           <div>
-            <label style={labelStyle}>Client Secret</label>
-            <div style={hintStyle}>Stored encrypted. Re-enter to rotate; masked on read.</div>
+            <label style={labelStyle}>{translate('Client Secret')}</label>
+            <div style={hintStyle}>{translate('Stored encrypted. Re-enter to rotate; masked on read.')}</div>
             <input
               type="password"
               value={formValues['oauth.google.client_secret'] || ''}
@@ -278,8 +270,7 @@ export default function SettingsManager() {
           disabled={!dirty || saving}
           loading={saving}
         >
-          Save Settings
-        </Button>
+          {translate('Save Settings')}</Button>
       </div>
     </div>
   );

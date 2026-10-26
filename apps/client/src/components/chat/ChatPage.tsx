@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import {
   useState,
   useEffect,
@@ -48,6 +50,7 @@ const MESSAGE_PAGE_SIZE = 50;
 // ─── ProtocolUpgradeBanner ────────────────────────────────────────────────────
 
 function ProtocolUpgradeBanner() {
+  useLocale();
   return (
     <div
       role="alert"
@@ -67,8 +70,7 @@ function ProtocolUpgradeBanner() {
       }}
     >
       <span style={{ fontSize: tokens.typography.fontSizeLg, fontWeight: 600, color: tokens.colors.danger }}>
-        채팅 시스템이 업그레이드되었습니다.
-      </span>
+        {translate('채팅 시스템이 업그레이드되었습니다.')}</span>
       <button
         onClick={() => window.location.reload()}
         style={{
@@ -81,13 +83,13 @@ function ProtocolUpgradeBanner() {
           cursor: 'pointer',
         }}
       >
-        새로고침
-      </button>
+        {translate('새로고침')}</button>
     </div>
   );
 }
 
 export default function ChatPage() {
+  useLocale();
   const { roomId: routeRoomId } = useParams<{ roomId?: string }>();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
@@ -173,7 +175,7 @@ export default function ChatPage() {
         setRoomParticipants,
         setParticipantCount,
       }),
-    [],
+    [getLocale()],
   );
 
   // The work surface lists the signed-in user's rooms across accessible accounts.
@@ -454,7 +456,7 @@ export default function ChatPage() {
     if (data.room_id !== activeRoomIdRef.current) return;
     setTypingAgents((prev) => {
       if (data.is_typing) {
-        return { ...prev, [data.agent_id]: { name: data.agent_name || 'Agent', status: data.status || undefined } };
+        return { ...prev, [data.agent_id]: { name: data.agent_name || translate('Agent'), status: data.status || undefined } };
       }
       const next = { ...prev };
       delete next[data.agent_id];
@@ -479,7 +481,7 @@ export default function ChatPage() {
     setSessionStatusByAgent((prev) => {
       const keepAliveUntilMs = typeof data.keep_alive_until_ms === 'number' ? data.keep_alive_until_ms : null;
       const backgroundTaskCount = data.background_task_count || 0;
-      const entry = { name: data.agent_name || 'Agent', keepAliveUntilMs, backgroundTaskCount };
+      const entry = { name: data.agent_name || translate('Agent'), keepAliveUntilMs, backgroundTaskCount };
       if (!isSessionStatusLive(entry, Date.now())) {
         if (!prev[data.agent_id]) return prev;
         const next = { ...prev };
@@ -699,7 +701,7 @@ export default function ChatPage() {
 
   const activeRoom = useMemo(
     () => rooms.find((r) => r.id === activeRoomId) || null,
-    [rooms, activeRoomId],
+    [rooms, activeRoomId, getLocale()],
   );
 
   useEffect(() => {

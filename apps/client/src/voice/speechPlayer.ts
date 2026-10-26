@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { api } from '../api';
 import { playPcmStream } from './pcmPlayback';
 
@@ -127,7 +128,7 @@ class SpeechPlayer {
         el.onended = null;
         el.onerror = null;
         this.#endCurrent = null;
-        reject(new Error('audio playback failed'));
+        reject(new Error(translate('audio playback failed')));
       };
       el.src = this.#objectUrl;
       el.play().catch((err) => {
@@ -305,8 +306,8 @@ class SpeechPlayer {
 
 function playbackError(err: any): string {
   return err?.name === 'NotAllowedError'
-    ? '브라우저가 자동 재생을 막았습니다 — 화면을 한 번 누른 뒤 다시 시도하세요.'
-    : (err?.message || '읽기에 실패했습니다');
+    ? translate('브라우저가 자동 재생을 막았습니다 — 화면을 한 번 누른 뒤 다시 시도하세요.')
+    : (err?.message || translate('읽기에 실패했습니다'));
 }
 
 export const speechPlayer = new SpeechPlayer();

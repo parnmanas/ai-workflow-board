@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import ZoomStage from '../common/ZoomStage';
@@ -39,6 +41,7 @@ export type EvidenceLoader = (
  * 실패한 id 는 `failed` 에 남겨 무한 재시도를 막는다(썸네일이 "…" 로 남는다).
  */
 export function useEvidenceUrls(load: EvidenceLoader) {
+  useLocale();
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [partial, setPartial] = useState<Record<string, boolean>>({});
   const urlsRef = useRef<Record<string, string>>({});
@@ -117,6 +120,7 @@ export function EvidenceThumb({
   onOpen: (meta: EvidenceMediaMeta, url: string) => void;
   size?: number;
 }) {
+  useLocale();
   useEffect(() => {
     onEnsure(meta);
   }, [meta, onEnsure]);
@@ -169,9 +173,8 @@ export function EvidenceThumb({
             color: tokens.colors.warningLight,
           }}
         >
-          ⚠ 깨진 파일
-          <br />
-          <span style={{ color: tokens.colors.textMuted }}>열 수 없습니다</span>
+          {translate('⚠ 깨진 파일')}<br />
+          <span style={{ color: tokens.colors.textMuted }}>{translate('열 수 없습니다')}</span>
         </span>
       ) : url ? (
         /*
@@ -204,8 +207,8 @@ export function EvidenceThumb({
         <span
           data-testid="evidence-thumb-partial"
           title={
-            '이 파일은 끝까지 도착하지 않아 아래쪽이 비어 있습니다. 보이는 부분은 실제로 찍힌 내용이지만, ' +
-            '나머지는 존재하지 않습니다 — 온전한 증거가 필요하면 담당 agent 에게 다시 올려 달라고 하세요.'
+            translate('이 파일은 끝까지 도착하지 않아 아래쪽이 비어 있습니다. 보이는 부분은 실제로 찍힌 내용이지만, ') +
+            translate('나머지는 존재하지 않습니다 — 온전한 증거가 필요하면 담당 agent 에게 다시 올려 달라고 하세요.')
           }
           style={{
             position: 'absolute',
@@ -219,8 +222,7 @@ export function EvidenceThumb({
             color: tokens.colors.warningLight,
           }}
         >
-          일부만
-        </span>
+          {translate('일부만')}</span>
       )}
       {video && !broken && (
         <span
@@ -236,8 +238,7 @@ export function EvidenceThumb({
             color: '#fff',
           }}
         >
-          ▶ video
-        </span>
+          {translate('▶ video')}</span>
       )}
     </button>
   );
@@ -266,6 +267,7 @@ export function EvidenceLightbox({
   onNext?: () => void;
   counter?: string;
 }) {
+  useLocale();
   const [broken, setBroken] = useState(false);
   useEffect(() => {
     setBroken(false);
@@ -294,7 +296,7 @@ export function EvidenceLightbox({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={video ? 'Video preview' : 'Image preview'}
+      aria-label={video ? translate('Video preview') : translate('Image preview')}
       data-testid="evidence-lightbox"
       onClick={onClose}
       style={{
@@ -325,12 +327,8 @@ export function EvidenceLightbox({
               }}
             >
               <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
-                ⚠ 이 파일은 열 수 없습니다
-              </div>
-              바이트는 서버에 저장돼 있지만 이미지로 해석되지 않습니다. 파일이 끝까지 오지 않았거나
-              형식이 맞지 않는 경우이고, 어느 쪽이든 화면에서 복구할 방법은 없습니다 — 담당 agent 에게
-              다시 올려 달라고 하세요. 아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.
-            </div>
+                {translate('⚠ 이 파일은 열 수 없습니다')}</div>
+              {translate('바이트는 서버에 저장돼 있지만 이미지로 해석되지 않습니다. 파일이 끝까지 오지 않았거나 형식이 맞지 않는 경우이고, 어느 쪽이든 화면에서 복구할 방법은 없습니다 — 담당 agent 에게 다시 올려 달라고 하세요. 아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.')}</div>
           </div>
         ) : (
           <ZoomStage
@@ -347,7 +345,7 @@ export function EvidenceLightbox({
         {canNav && (
           <button
             type="button"
-            aria-label="Previous"
+            aria-label={translate('Previous')}
             onClick={(e) => {
               e.stopPropagation();
               onPrev?.();
@@ -360,7 +358,7 @@ export function EvidenceLightbox({
         {canNav && (
           <button
             type="button"
-            aria-label="Next"
+            aria-label={translate('Next')}
             onClick={(e) => {
               e.stopPropagation();
               onNext?.();
@@ -394,10 +392,7 @@ export function EvidenceLightbox({
         )}
         {partial && (
           <span data-testid="evidence-lightbox-partial" style={{ color: tokens.colors.warningLight }}>
-            ⚠ 끝까지 도착하지 않은 파일입니다 — 아래쪽 빈 부분은 처음부터 오지 않았습니다.
-            대개 캡처가 저장을 마치기 전에 읽혀서 생깁니다. 온전한 증거가 필요하면 담당 agent 에게
-            다시 올려 달라고 하세요(지금은 이런 파일이 업로드 단계에서 걸러집니다).
-          </span>
+            {translate('⚠ 끝까지 도착하지 않은 파일입니다 — 아래쪽 빈 부분은 처음부터 오지 않았습니다. 대개 캡처가 저장을 마치기 전에 읽혀서 생깁니다. 온전한 증거가 필요하면 담당 agent 에게 다시 올려 달라고 하세요(지금은 이런 파일이 업로드 단계에서 걸러집니다).')}</span>
         )}
         <span style={{ color: '#999' }}>{formatBytes(meta.size_bytes)}</span>
         <button
@@ -417,8 +412,7 @@ export function EvidenceLightbox({
             fontFamily: 'inherit',
           }}
         >
-          Download
-        </button>
+          {translate('Download')}</button>
       </div>
     </div>
   );

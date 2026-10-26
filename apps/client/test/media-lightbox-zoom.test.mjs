@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 첨부 미디어 라이트박스의 확대 · 이동 (2026-10-17).
 //
 // 안드로이드 앱의 WebView 는 페이지 확대가 꺼져 있어, 채팅 · 세션에서 사진을 열어도 두 손가락으로
@@ -268,7 +269,7 @@ test('영상: 맞춤 상태의 한 손가락은 네이티브 컨트롤 몫, 핀�
 test('−/+ 버튼과 % 버튼(맞춤)으로도 확대를 조절한다', (t) => {
   const { view } = setup(t);
   layout(view.container);
-  const button = (label) => view.container.querySelector(`button[aria-label="${label}"]`);
+  const button = (label) => view.container.querySelector(`button[aria-label="${ui(label)}"]`);
   act(() => { button('Zoom in').click(); });
   assert.equal(scaleOf(view.container), 1.5);
   assert.equal(view.container.querySelector('[data-testid="zoom-stage-level"]').textContent, '150%');

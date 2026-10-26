@@ -1,3 +1,7 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Marketing 캠페인 화면의 승인 흐름 렌더 회귀(docs/marketing.md "원칙"). jsdom 위에 실제 페이지를
 // 띄워 클릭 · 입력을 태우고, 나가는 REST 호출과 화면 상태를 단언한다.
 //
@@ -166,12 +170,12 @@ function within(container, testId) {
 }
 
 function buttonIn(root, label) {
-  const found = [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+  const found = [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === ui(label));
   assert.ok(found, `"${label}" 버튼이 없습니다`);
   return found;
 }
 
-const hasButton = (root, label) => [...root.querySelectorAll('button')].some((b) => b.textContent?.trim() === label);
+const hasButton = (root, label) => [...root.querySelectorAll('button')].some((b) => b.textContent?.trim() === ui(label));
 const dialogs = () => [...document.querySelectorAll('[role="dialog"]')];
 
 test('승인함 — 결과 불명 결제 · 2인 승인 · 채널 근거와 규칙 · 나갈 본문 · 편성 제안을 보여 준다', async (t) => {
@@ -179,7 +183,7 @@ test('승인함 — 결과 불명 결제 · 2인 승인 · 채널 근거와 규�
 
   const inboxTab = [...container.querySelectorAll('[role="tab"]')].find((el) => el.getAttribute('aria-selected') === 'true');
   assert.ok(inboxTab, '선택된 탭이 있다');
-  assert.equal(inboxTab.textContent, '승인함 (8)', '결정 대기 7 + 마무리 1(승인된 수동 지출)');
+  assert.equal(inboxTab.textContent, `${ui('승인함')} (8)`, '결정 대기 7 + 마무리 1(승인된 수동 지출)');
 
   // 상태별 조회로 채운다 — 최근 목록만 보면 오래 기다린 건이 빠진다.
   const spendStatuses = calls.filter((c) => c[0] === 'listMarketingSpendRequests').map((c) => c[2]?.status).sort();
@@ -193,7 +197,7 @@ test('승인함 — 결과 불명 결제 · 2인 승인 · 채널 근거와 규�
   assert.ok(hasButton(unknownCard, '결제 완료 기록…') && hasButton(unknownCard, '실패로 기록…'), '사람이 대조해 기록한다');
   assert.equal(hasButton(unknownCard, '승인…'), false);
 
-  assert.equal(within(container, 'marketing-spend-dual-sp-1').textContent, '2인 승인 필요');
+  assert.equal(within(container, 'marketing-spend-dual-sp-1').textContent, ui("2인 승인 필요"));
   assert.equal(within(container, 'marketing-spend-dual-sp-other').textContent, '1/2 승인');
   assert.equal(within(container, 'marketing-spend-amount-sp-1').textContent, '150,000 KRW');
   assert.equal(within(container, 'marketing-spend-hash-sp-1').textContent, HASH.slice(0, 12));
@@ -230,13 +234,13 @@ test('지출 승인 — 확인 단계를 거쳐야만 나가고, 화면이 보�
     },
   });
 
-  click(buttonIn(within(container, 'marketing-spend-sp-1'), '승인…'));
+  click(buttonIn(within(container, 'marketing-spend-sp-1'), ui("승인…")));
   await flush();
   const dialog = within(document, 'marketing-spend-approve-dialog');
   assert.match(dialog.textContent, /150,000 KRW/);
   assert.match(dialog.textContent, /Reddit Ads \(acct-77\)/);
   assert.ok(dialog.textContent.includes(HASH.slice(0, 12)), '해시 앞 12자');
-  assert.match(dialog.textContent, /이 금액의 결제를 승인합니다/);
+  assert.match(dialog.textContent, uiPattern("이 금액의 결제를 승인합니다"));
 
   const confirm = within(document, 'marketing-spend-approve-confirm');
   assert.equal(confirm.disabled, true, '확인을 체크하기 전에는 승인 버튼이 꺼져 있다');
@@ -271,14 +275,14 @@ test('게시 초안 거부 — 사유를 적어야 나가고, 그 사유를 그�
       rejectMarketingPost: async (id, note) => { rejects.push([id, note]); return { ...draftPost, status: 'rejected', decision_note: note }; },
     },
   });
-  click(buttonIn(within(container, 'marketing-post-post-1'), '거부'));
+  click(buttonIn(within(container, 'marketing-post-post-1'), ui("거부")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('게시 초안 거부'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("게시 초안 거부")));
   assert.ok(dialog, '거부 사유 창이 열린다');
-  const confirm = buttonIn(dialog, '거부');
+  const confirm = buttonIn(dialog, ui("거부"));
   assert.equal(confirm.disabled, true, '사유 없이 거부할 수 없다');
 
-  typeInto(dialog.querySelector('textarea[aria-label="거부 사유"]'), '  톤이 너무 홍보성입니다 — 사용 사례부터 쓰세요  ');
+  typeInto(dialog.querySelector(`textarea[aria-label="${ui("거부 사유")}"]`), '  톤이 너무 홍보성입니다 — 사용 사례부터 쓰세요  ');
   assert.equal(confirm.disabled, false);
   click(confirm);
   await flush();
@@ -293,13 +297,13 @@ test('승인된(보내기 전) 지출은 취소할 수 있다 — 보류한 예�
   });
   const approved = within(container, 'marketing-spend-sp-approved');
   assert.ok(hasButton(approved, '결제 완료 기록…'), '수동 결제는 결과를 기록한다');
-  click(buttonIn(approved, '취소(보내기 전)'));
+  click(buttonIn(approved, ui("취소(보내기 전)")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('승인된 지출 취소(보내기 전)'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("승인된 지출 취소(보내기 전)")));
   assert.ok(dialog, '취소 확인 창');
-  assert.match(dialog.textContent, /보류한 예산을 풉니다/);
+  assert.match(dialog.textContent, uiPattern("승인했지만 아직 보내지 않은 요청을 닫고 보류한 예산을 풉니다. 이미 AWB 밖에서 결제했다면 취소하지 말고 결제 완료를 기록하세요."));
   typeInto(dialog.querySelector('textarea'), '배너 자리가 없어졌다');
-  click(buttonIn(dialog, '요청 취소'));
+  click(buttonIn(dialog, ui("요청 취소")));
   await flush();
   await flush();
   assert.deepEqual(cancels, [['sp-approved', '배너 자리가 없어졌다']]);
@@ -351,7 +355,7 @@ test('메일 채널 카드의 "연락처 관리" 는 캠페인의 실행 키 · 
     },
   });
   const link = within(container, 'marketing-channel-contacts-ch-mail');
-  assert.equal(link.textContent, '연락처 관리');
+  assert.equal(link.textContent, ui("연락처 관리"));
   const href = new URL(link.getAttribute('href'), 'http://localhost');
   assert.equal(href.pathname, '/marketing/contacts');
   assert.equal(href.searchParams.get('account'), 'acc-org', '캠페인의 실행 키');
@@ -385,17 +389,17 @@ test('메일 채널 카드 — 스팸 신고율로 멈춘 목록을 알리고 �
   });
   const card = within(container, 'marketing-channel-ch-mail');
   within(container, 'marketing-channel-hold-ch-mail');
-  assert.match(within(container, 'marketing-list-hold-hold-1').textContent, /스팸 신고율 0\.50% — 신고 2 \/ 닿은 메일 400/);
+  assert.match(within(container, 'marketing-list-hold-hold-1').textContent, uiPattern('스팸 신고율 {0} — 신고 {1} / 닿은 메일 {2}', {0: '0.50%', 1: 2, 2: 400}));
   const setup = within(container, 'marketing-channel-webhooks-ch-mail');
   assert.equal(setup.hasAttribute('open'), true, '서명 키가 없으면 설정 안내를 펼쳐 둔다');
   assert.match(setup.textContent, /https:\/\/awb\.example\.com\/api\/m\/email\/cred-mail\/events/);
   assert.match(setup.textContent, /webhook_secret 칸을 넣기 전까지/);
 
-  click(buttonIn(card, '발송 재개…'));
+  click(buttonIn(card, ui("발송 재개…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('메일 발송 재개'));
+  const dialog = dialogs().find((d) => uiPattern('메일 발송 재개 — "{0}" 목록').test(d.textContent));
   assert.ok(dialog, '해제 창이 열린다');
-  const confirm = buttonIn(dialog, '발송 재개');
+  const confirm = buttonIn(dialog, ui("발송 재개"));
   assert.equal(confirm.disabled, true, '사유 없이 해제할 수 없다');
   typeInto(dialog.querySelector('textarea'), '  가입 폼 밖에서 가져온 묶음을 지웠다  ');
   click(confirm);
@@ -429,11 +433,11 @@ test('답글 승인 카드 — 서버가 확인한 스레드(r/<대상> — 제�
 
   const card = within(container, 'marketing-post-reply-unverified');
   assert.equal(Boolean(card.querySelector('[data-testid="marketing-post-reply-context-reply-unverified"]')), false, '빈 reply_context({})는 대상으로 그리지 않는다');
-  assert.match(card.textContent, /확인되지 않았습니다 — 승인해도 서버가 게시하지 않습니다/);
+  assert.match(card.textContent, uiPattern("답글이 달릴 스레드가 이 채널 안인지 확인되지 않았습니다 — 승인해도 서버가 게시하지 않습니다. 거부하고 에이전트가 다시 쓰게 하세요."));
 });
 
 function fieldIn(root, labelText, tag = 'input') {
-  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === labelText);
+  const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.trim() === ui(labelText));
   assert.ok(label, `"${labelText}" 라벨이 없습니다`);
   const field = label.parentElement?.querySelector(tag);
   assert.ok(field, `"${labelText}" 의 <${tag}> 가 없습니다`);
@@ -452,11 +456,11 @@ test('예산 설정 — 열려 있는 동안 다른 승인자가 바꾼 값을, 
       listCredentials: async () => [],
     },
   });
-  click(buttonIn(container, '예산 설정…'));
+  click(buttonIn(container, ui("예산 설정…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("예산 설정")));
   assert.ok(dialog, '예산 설정 창');
-  assert.equal(fieldIn(dialog, '2인 승인 기준 (0 = 끔)').value, '100000');
+  assert.equal(fieldIn(dialog, ui("2인 승인 기준 (0 = 끔)")).value, '100000');
 
   // 다른 승인자가 그사이 2인 승인 기준을 낮추고 수취인을 더했다 — marketing_update 로 화면이 다시 읽는다.
   current = campaign({ dual_approval_threshold_minor: 50_000, payees: [{ name: 'Reddit Ads' }, { name: 'Google Ads' }] });
@@ -464,8 +468,8 @@ test('예산 설정 — 열려 있는 동안 다른 승인자가 바꾼 값을, 
   await flush(MARKETING_REFRESH_DEBOUNCE_MS + 50);
   await flush();
 
-  typeInto(fieldIn(dialog, '총 예산 (0 = 지출 불가)'), '2000000');
-  click(buttonIn(dialog, '저장'));
+  typeInto(fieldIn(dialog, ui("총 예산 (0 = 지출 불가)")), '2000000');
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   await flush();
   assert.deepEqual(patches, [['c-1', { budget_total_minor: 2_000_000 }]], '바꾼 칸만 — 남이 바꾼 임계값 · 수취인을 예전 값으로 보내지 않는다');
@@ -481,22 +485,22 @@ test('예산 설정 — 통화를 바꾸면 금액 칸을 비우고, 새 통화�
       listCredentials: async () => [],
     },
   });
-  click(buttonIn(container, '예산 설정…'));
+  click(buttonIn(container, ui("예산 설정…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('예산 설정'));
-  typeInto(fieldIn(dialog, '통화'), 'usd');
-  assert.equal(fieldIn(dialog, '총 예산 (0 = 지출 불가)').value, '', '500000 KRW 가 500000 USD 로 읽히지 않게 비운다');
-  assert.match(dialog.textContent, /통화를 바꿔 금액 칸을 비웠습니다/);
-  click(buttonIn(dialog, '저장'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("예산 설정")));
+  typeInto(fieldIn(dialog, ui("통화")), 'usd');
+  assert.equal(fieldIn(dialog, ui("총 예산 (0 = 지출 불가)")).value, '', '500000 KRW 가 500000 USD 로 읽히지 않게 비운다');
+  assert.match(dialog.textContent, uiPattern("통화를 바꿔 금액 칸을 비웠습니다 — 모든 금액을"));
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   assert.equal(patches.length, 0, '금액을 다시 적기 전에는 보내지 않는다');
-  assert.match(dialog.textContent, /금액을 모두 새 통화\(USD\)로 다시 적으세요/);
+  assert.match(dialog.textContent, uiPattern('통화를 바꿨으니 금액을 모두 새 통화({0})로 다시 적으세요 — 상한이 없으면 0 을 적습니다', {0: 'USD'}));
 
-  typeInto(fieldIn(dialog, '총 예산 (0 = 지출 불가)'), '1000.50');
-  typeInto(fieldIn(dialog, '기간 상한 (0 = 없음)'), '500');
-  typeInto(fieldIn(dialog, '건당 상한 (0 = 없음)'), '0');
-  typeInto(fieldIn(dialog, '2인 승인 기준 (0 = 끔)'), '250');
-  click(buttonIn(dialog, '저장'));
+  typeInto(fieldIn(dialog, ui("총 예산 (0 = 지출 불가)")), '1000.50');
+  typeInto(fieldIn(dialog, ui("기간 상한 (0 = 없음)")), '500');
+  typeInto(fieldIn(dialog, ui("건당 상한 (0 = 없음)")), '0');
+  typeInto(fieldIn(dialog, ui("2인 승인 기준 (0 = 끔)")), '250');
+  click(buttonIn(dialog, ui("저장")));
   await flush();
   await flush();
   // 건당 상한은 0 → 0(통화와 무관하게 "없음")이라 바뀐 것이 아니다 — 싣지 않는다.
@@ -510,14 +514,14 @@ test('결제 완료 기록 — 검사한 영수증 주소를 정규화해서 보
   const { container } = await renderPage(t, {
     stubs: { markMarketingSpendPaid: async (id, body) => { paid.push([id, body]); return spend(id, { status: 'paid' }); } },
   });
-  click(buttonIn(within(container, 'marketing-spend-sp-approved'), '결제 완료 기록…'));
+  click(buttonIn(within(container, 'marketing-spend-sp-approved'), ui("결제 완료 기록…")));
   await flush();
-  const dialog = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
+  const dialog = dialogs().find((d) => d.textContent.includes(ui("결제 완료 기록")));
   assert.ok(dialog, '결제 기록 창');
-  const save = buttonIn(dialog, '기록');
+  const save = buttonIn(dialog, ui("기록"));
   assert.equal(save.disabled, true, '거래 id 없이는 기록하지 않는다');
-  typeInto(fieldIn(dialog, '거래 id (필수)'), ' txn-9 ');
-  typeInto(fieldIn(dialog, '영수증 주소 (선택, http/https)'), 'HTTPS://Pay.example/receipts/r 1');
+  typeInto(fieldIn(dialog, ui("거래 id (필수)")), ' txn-9 ');
+  typeInto(fieldIn(dialog, ui("영수증 주소 (선택, http/https)")), 'HTTPS://Pay.example/receipts/r 1');
   click(save);
   await flush();
   await flush();
@@ -541,7 +545,7 @@ test('지출 승인 권한만 — 캠페인 · 채널을 읽고, 돈 탭만 보�
   assert.ok(calls.some((c) => c[0] === 'listMarketingChannels'), '채널을 읽는다(이름 · 상태)');
 
   const tabs = [...container.querySelectorAll('[role="tab"]')].map((el) => el.textContent);
-  assert.deepEqual(tabs, ['개요', '승인함 (6)', '예산·결제', '감사 로그'], '편성 1 + 대기 지출 3 + 결과 불명 1 + 수동 결제 기록 1');
+  assert.deepEqual(tabs, [ui('개요'), `${ui('승인함')} (6)`, ui('예산·결제'), ui('감사 로그')], '편성 1 + 대기 지출 3 + 결과 불명 1 + 수동 결제 기록 1');
 
   const inbox = within(container, 'marketing-inbox');
   assert.equal(Boolean(inbox.querySelector('[data-testid="marketing-channel-ch-proposed"]')), false, '채널 제안은 지출 승인자의 일이 아니다');
@@ -550,18 +554,18 @@ test('지출 승인 권한만 — 캠페인 · 채널을 읽고, 돈 탭만 보�
   assert.ok(hasButton(within(container, 'marketing-allocation-al-1'), '승인…'), '편성은 승인할 수 있다');
   assert.equal(hasButton(container, '지금 실행') || hasButton(container, '설정') || hasButton(container, '삭제'), false, '캠페인 운영 버튼이 없다');
 
-  click([...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '개요'));
+  click([...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === ui("개요")));
   await flush();
   await flush();
   assert.ok(calls.some((c) => c[0] === 'listMarketingCycles'), '개요는 읽기 전용으로 열린다');
   assert.equal(/시작하려면/.test(container.textContent), false, '고칠 수 없는 시작 조건은 말하지 않는다');
 
-  click([...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '감사 로그'));
+  click([...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === ui("감사 로그")));
   await flush();
   await flush();
   assert.equal(within(container, 'marketing-audit-ev-1').getAttribute('data-tone'), 'warning', 'spend.late_result 는 경고로 칠한다');
 
-  click([...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '예산·결제'));
+  click([...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === ui("예산·결제")));
   await flush();
   await flush();
   assert.equal(hasButton(container, '예산 설정…'), false, '예산 설정 저장은 운영 권한도 필요하다');
@@ -575,7 +579,7 @@ test('지출 승인 권한만 — 캠페인 · 채널을 읽고, 돈 탭만 보�
 test('운영 권한만 — 승인함 수는 처리할 수 있는 채널 · 게시물만 센다(돈 항목은 읽기 전용으로 보인다)', async (t) => {
   const { container } = await renderPage(t, { permissions: ['marketing.manage'] });
   const selected = [...container.querySelectorAll('[role="tab"]')].find((el) => el.getAttribute('aria-selected') === 'true');
-  assert.equal(selected.textContent, '승인함 (2)', '채널 제안 1 + 초안 1 — 사이드바 배지와 같은 규칙');
+  assert.equal(selected.textContent, `${ui('승인함')} (2)`, '채널 제안 1 + 초안 1 — 사이드바 배지와 같은 규칙');
   assert.ok(container.querySelector('[data-testid="marketing-spend-sp-1"]'), '지출은 읽기 전용으로 보인다');
 });
 
@@ -624,8 +628,8 @@ test('참여 자동 수집 — 게시물 카드가 읽은 값 · 다음 읽기 �
   for (const [availability, label] of Object.entries({ removed: '커뮤니티에서 제거됨', deleted: '삭제됨', locked: '잠김', unavailable: '접근할 수 없음' })) {
     const text = within(container, `marketing-post-engagement-pub-${availability}`).textContent;
     assert.ok(text.startsWith(`${label} · 참여 수집 중단 · `));
-    assert.match(text, /확인/);
-    assert.doesNotMatch(text, /다음|플랫폼이 값을 아직 감춤/);
+    assert.match(text, uiPattern("확인"));
+    assert.doesNotMatch(text, uiPattern("다음"));
   }
   assert.match(within(container, 'marketing-post-engagement-pub-removed').textContent, /마지막 수집: 점수 57$/);
 });
@@ -657,27 +661,27 @@ test('지표 표 — 자동 수집 행은 부호 붙은 변화량으로 보이�
   });
   const rows = [...container.querySelectorAll('tbody tr')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent));
   const byNote = (note) => rows.find((r) => r.includes(note));
-  assert.deepEqual(byNote('reddit score 45 → 57').slice(2, 5), ['+12', 'r/selfhosted', '자동 수집']);
+  assert.deepEqual(byNote('reddit score 45 → 57').slice(2, 5), ['+12', 'r/selfhosted', ui('자동 수집')]);
   assert.deepEqual(byNote('reddit comments 13 → 12').slice(2, 5), ['-1', 'r/selfhosted', '자동 수집']);
   assert.deepEqual(byNote('forum stats').slice(2, 5), ['900', 'Dev forum', 'marketer'], '사람 · 에이전트 관측치는 그대로');
 
   const recordCalls = () => calls.filter(([name]) => name === 'recordMarketingMetrics');
-  choose(fieldIn(container, '지표', 'select'), 'engagements');
-  choose(fieldIn(container, '채널 (선택)', 'select'), 'ch-reddit');
-  typeInto(fieldIn(container, '값'), '5');
-  await act(async () => { click(buttonIn(container, '기록')); });
+  choose(fieldIn(container, ui("지표"), 'select'), 'engagements');
+  choose(fieldIn(container, ui("채널 (선택)"), 'select'), 'ch-reddit');
+  typeInto(fieldIn(container, ui("값")), '5');
+  await act(async () => { click(buttonIn(container, ui("기록"))); });
   await flush();
   assert.equal(recordCalls().length, 0, '서버가 읽는 채널의 참여는 보내지 않는다');
-  assert.match(container.querySelector('[role="alert"]')?.textContent || '', /서버가 게시물에서 직접 읽습니다/);
+  assert.match(container.querySelector('[role="alert"]')?.textContent || '', uiPattern("reddit · GitHub 채널의 참여 · 답글은 서버가 게시물에서 직접 읽습니다 — 기록하지 않습니다"));
 
-  choose(fieldIn(container, '채널 (선택)', 'select'), '');
-  await act(async () => { click(buttonIn(container, '기록')); });
+  choose(fieldIn(container, ui("채널 (선택)"), 'select'), '');
+  await act(async () => { click(buttonIn(container, ui("기록"))); });
   await flush();
   assert.equal(recordCalls().length, 0, '그런 채널이 있는 캠페인의 캠페인 전체 참여도 보내지 않는다');
-  assert.match(container.querySelector('[role="alert"]')?.textContent || '', /채널을 고르세요/);
+  assert.match(container.querySelector('[role="alert"]')?.textContent || '', uiPattern("채널을 고르세요"));
 
-  choose(fieldIn(container, '채널 (선택)', 'select'), 'ch-forum');
-  await act(async () => { click(buttonIn(container, '기록')); });
+  choose(fieldIn(container, ui("채널 (선택)"), 'select'), 'ch-forum');
+  await act(async () => { click(buttonIn(container, ui("기록"))); });
   await flush();
   assert.equal(recordCalls().length, 1);
   assert.deepEqual(recordCalls()[0][2], [{ metric: 'engagements', value: 5, channel_id: 'ch-forum' }]);
@@ -701,9 +705,9 @@ test('지표 기록 — 제안 단계 reddit 채널뿐이면 캠페인 전체 �
       recordMarketingMetrics: async () => [],
     },
   });
-  choose(fieldIn(container, '지표', 'select'), 'replies');
-  typeInto(fieldIn(container, '값'), '2');
-  await act(async () => { click(buttonIn(container, '기록')); });
+  choose(fieldIn(container, ui("지표"), 'select'), 'replies');
+  typeInto(fieldIn(container, ui("값")), '2');
+  await act(async () => { click(buttonIn(container, ui("기록"))); });
   await flush();
   const sent = calls.filter(([name]) => name === 'recordMarketingMetrics');
   assert.equal(sent.length, 1, 'ch-proposed 는 제안 단계라 서버가 읽지 않는다');
@@ -722,19 +726,19 @@ test('보관된 캠페인의 승인함에서도 수동 결제 기록과 결과 �
       markMarketingSpendFailed: async (id) => spend(id, { status: 'failed' }),
     },
   });
-  click(buttonIn(within(container, 'marketing-spend-sp-approved'), '결제 완료 기록…'));
+  click(buttonIn(within(container, 'marketing-spend-sp-approved'), ui("결제 완료 기록…")));
   await flush();
-  const paid = dialogs().find((d) => d.textContent.includes('결제 완료 기록'));
-  typeInto(fieldIn(paid, '거래 id (필수)'), 'archived-receipt');
-  click(buttonIn(paid, '기록'));
+  const paid = dialogs().find((d) => d.textContent.includes(ui("결제 완료 기록")));
+  typeInto(fieldIn(paid, ui("거래 id (필수)")), 'archived-receipt');
+  click(buttonIn(paid, ui("기록")));
   await flush();
   await flush();
   assert.deepEqual(calls.find((c) => c[0] === 'markMarketingSpendPaid'), ['markMarketingSpendPaid', 'sp-approved', { provider_ref: 'archived-receipt' }]);
-  click(buttonIn(within(container, 'marketing-spend-sp-unknown'), '실패로 기록…'));
+  click(buttonIn(within(container, 'marketing-spend-sp-unknown'), ui("실패로 기록…")));
   await flush();
-  const failed = dialogs().find((d) => d.textContent.includes('결제 실패로 기록'));
-  typeInto(failed.querySelector('textarea[aria-label="확인한 내용"]'), '결제 시스템에서 미결제 확인');
-  click(buttonIn(failed, '실패로 기록'));
+  const failed = dialogs().find((d) => d.textContent.includes(ui("결제 실패로 기록")));
+  typeInto(failed.querySelector(`textarea[aria-label="${ui("확인한 내용")}"]`), '결제 시스템에서 미결제 확인');
+  click(buttonIn(failed, ui("실패로 기록")));
   await flush();
   assert.deepEqual(calls.find((c) => c[0] === 'markMarketingSpendFailed'), ['markMarketingSpendFailed', 'sp-unknown', '결제 시스템에서 미결제 확인', false]);
 });

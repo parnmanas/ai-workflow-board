@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api';
@@ -39,6 +41,7 @@ export default function MarketingOverviewTab({
   refreshKey: number;
   onOpenInbox(): void;
 }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const [cycles, setCycles] = useState<MarketingCycle[] | null>(null);
 
@@ -60,55 +63,54 @@ export default function MarketingOverviewTab({
         <Panel tone="attention" testId="marketing-overview-inbox">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 13, color: tokens.colors.textStrong, flex: '1 1 auto' }}>
-              처리할 승인 대기가 {pending}건 있습니다
-              {ctx.canApproveSpend && inbox.counts.spend_unknown ? ` — 결과 불명 결제 ${inbox.counts.spend_unknown}건 포함` : ''}.
+              {translate('처리할 승인 대기가')} {pending}{translate('건 있습니다')}{ctx.canApproveSpend && inbox.counts.spend_unknown ? translate(' — 결과 불명 결제 {0}건 포함', { 0: inbox.counts.spend_unknown }) : ''}.
             </div>
-            <Button size="sm" variant="primary" onClick={onOpenInbox}>승인함 열기</Button>
+            <Button size="sm" variant="primary" onClick={onOpenInbox}>{translate('승인함 열기')}</Button>
           </div>
         </Panel>
       )}
       {blocker && (
         <Panel tone="attention">
-          <div style={{ fontSize: 13, color: tokens.colors.warningLight }}>시작하려면: {blocker}</div>
+          <div style={{ fontSize: 13, color: tokens.colors.warningLight }}>{translate('시작하려면:')} {blocker}</div>
         </Panel>
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-        <Panel title="제품">
+        <Panel title={translate('제품')}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <Prose text={campaign.product_brief} empty="(브리프 없음 — 에이전트가 추측해서 홍보하지 않도록 제품 설명을 적으세요)" />
+            <Prose text={campaign.product_brief} empty={translate('(브리프 없음 — 에이전트가 추측해서 홍보하지 않도록 제품 설명을 적으세요)')} />
             <KeyValue
               items={[
-                ['목표', campaign.goal ? <Prose text={campaign.goal} /> : ''],
-                ['대상 청중', campaign.target_audience ? <Prose text={campaign.target_audience} /> : ''],
-                ['제품 Project', project
+                [translate('목표'), campaign.goal ? <Prose text={campaign.goal} /> : ''],
+                [translate('대상 청중'), campaign.target_audience ? <Prose text={campaign.target_audience} /> : ''],
+                [translate('제품 Project'), project
                   ? <Link to={`/projects?project=${encodeURIComponent(project.id)}`} style={{ color: tokens.colors.accentLight }}>{project.name}</Link>
-                  : campaign.project_id ? campaign.project_id.slice(0, 8) : '없음'],
+                  : campaign.project_id ? campaign.project_id.slice(0, 8) : translate('없음')],
               ]}
             />
           </div>
         </Panel>
 
-        <Panel title="실행">
+        <Panel title={translate('실행')}>
           <KeyValue
             items={[
-              ['캠페인 에이전트', <RuntimeSpecLabel key="agent" spec={campaign.agent_runtime} empty="지정 안 함" />],
-              ['주기', describeCadence(campaign)],
-              ['다음 사이클', campaign.status === 'active' ? formatDateTime(campaign.next_cycle_at) : '—(진행 중일 때만)'],
-              ['마지막 사이클', formatDateTime(campaign.last_cycle_at)],
-              ['사이클 수', String(campaign.cycle_count)],
-              ['피드백 티켓', `${campaign.feedback_ticket_status} 상태로`],
-              ['개선 담당', <RuntimeSpecLabel key="improvement" spec={campaign.improvement_assignee} empty="Project 기본 담당" />],
+              [translate('캠페인 에이전트'), <RuntimeSpecLabel key="agent" spec={campaign.agent_runtime} empty={translate('지정 안 함')} />],
+              [translate('주기'), describeCadence(campaign)],
+              [translate('다음 사이클'), campaign.status === 'active' ? formatDateTime(campaign.next_cycle_at) : translate('—(진행 중일 때만)')],
+              [translate('마지막 사이클'), formatDateTime(campaign.last_cycle_at)],
+              [translate('사이클 수'), String(campaign.cycle_count)],
+              [translate('피드백 티켓'), `${campaign.feedback_ticket_status} 상태로`],
+              [translate('개선 담당'), <RuntimeSpecLabel key="improvement" spec={campaign.improvement_assignee} empty={translate('Project 기본 담당')} />],
             ]}
           />
         </Panel>
       </div>
 
-      <Panel title="기능">
+      <Panel title={translate('기능')}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {MARKETING_CAPABILITIES.map((cap) => (
             <div key={cap} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-              <Chip muted={!caps.has(cap)}>{caps.has(cap) ? '켜짐' : '꺼짐'} · {CAPABILITY_LABELS[cap]}</Chip>
+              <Chip muted={!caps.has(cap)}>{caps.has(cap) ? translate('켜짐') : translate('꺼짐')} · {CAPABILITY_LABELS[cap]}</Chip>
               <span style={{ fontSize: 11.5, color: caps.has(cap) ? tokens.colors.textSecondary : tokens.colors.textMuted }}>{CAPABILITY_DESCRIPTIONS[cap]}</span>
             </div>
           ))}
@@ -116,46 +118,46 @@ export default function MarketingOverviewTab({
       </Panel>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-        <Panel title="규칙">
+        <Panel title={translate('규칙')}>
           <KeyValue
             items={[
-              ['공개 문구', campaign.disclosure],
-              ['추적 링크 도메인', campaign.allowed_domains.length ? campaign.allowed_domains.join(', ') : '없음 — 추적 링크를 만들 수 없습니다'],
+              [translate('공개 문구'), campaign.disclosure],
+              [translate('추적 링크 도메인'), campaign.allowed_domains.length ? campaign.allowed_domains.join(', ') : translate('없음 — 추적 링크를 만들 수 없습니다')],
               ...LIMIT_KEYS.map((key): [string, React.ReactNode] => [
                 LIMIT_LABELS[key],
-                `${campaign.limits?.[key] ?? '—'}${campaign.limit_overrides?.[key] !== undefined ? ' (캠페인 설정)' : ''}`,
+                `${campaign.limits?.[key] ?? '—'}${campaign.limit_overrides?.[key] !== undefined ? translate(' (캠페인 설정)') : ''}`,
               ]),
             ]}
           />
         </Panel>
-        <Panel title="돈">
+        <Panel title={translate('돈')}>
           <KeyValue
             items={[
-              ['통화', campaign.currency],
-              ['총 예산', campaign.budget_total_minor > 0 ? formatMinor(campaign.budget_total_minor, campaign.currency) : '0 — 지출 불가'],
-              ['예산 기간', BUDGET_PERIOD_LABELS[campaign.budget_period] || campaign.budget_period],
-              ['기간 상한', campaign.budget_period !== 'none' && campaign.budget_period_minor > 0 ? formatMinor(campaign.budget_period_minor, campaign.currency) : '없음'],
-              ['건당 상한', campaign.max_transaction_minor > 0 ? formatMinor(campaign.max_transaction_minor, campaign.currency) : '없음'],
-              ['2인 승인', campaign.dual_approval_threshold_minor > 0 ? `${formatMinor(campaign.dual_approval_threshold_minor, campaign.currency)} 이상` : '끔'],
-              ['수취인', campaign.payees.length ? campaign.payees.map((p) => p.name).join(', ') : '없음'],
-              ['결제 방식', PAYMENT_PROVIDER_LABELS[campaign.payment_provider] || campaign.payment_provider],
+              [translate('통화'), campaign.currency],
+              [translate('총 예산'), campaign.budget_total_minor > 0 ? formatMinor(campaign.budget_total_minor, campaign.currency) : translate('0 — 지출 불가')],
+              [translate('예산 기간'), BUDGET_PERIOD_LABELS[campaign.budget_period] || campaign.budget_period],
+              [translate('기간 상한'), campaign.budget_period !== 'none' && campaign.budget_period_minor > 0 ? formatMinor(campaign.budget_period_minor, campaign.currency) : translate('없음')],
+              [translate('건당 상한'), campaign.max_transaction_minor > 0 ? formatMinor(campaign.max_transaction_minor, campaign.currency) : translate('없음')],
+              [translate('2인 승인'), campaign.dual_approval_threshold_minor > 0 ? `${formatMinor(campaign.dual_approval_threshold_minor, campaign.currency)} 이상` : translate('끔')],
+              [translate('수취인'), campaign.payees.length ? campaign.payees.map((p) => p.name).join(', ') : translate('없음')],
+              [translate('결제 방식'), PAYMENT_PROVIDER_LABELS[campaign.payment_provider] || campaign.payment_provider],
             ]}
           />
           <Hint>
             {ctx.canApproveSpend && ctx.canManage
-              ? '바꾸려면 예산·결제 탭의 “예산 설정” 을 쓰세요.'
+              ? translate('바꾸려면 예산·결제 탭의 “예산 설정” 을 쓰세요.')
               : ctx.canApproveSpend
-                ? '돈 설정을 바꾸려면 캠페인 운영 권한(marketing.manage)도 필요합니다.'
-                : '돈 설정은 marketing.approve_spend 권한이 있는 사람이 바꿉니다.'}
+                ? translate('돈 설정을 바꾸려면 캠페인 운영 권한(marketing.manage)도 필요합니다.')
+                : translate('돈 설정은 marketing.approve_spend 권한이 있는 사람이 바꿉니다.')}
           </Hint>
         </Panel>
       </div>
 
-      <Panel title="사이클 기록" testId="marketing-cycles">
+      <Panel title={translate('사이클 기록')} testId="marketing-cycles">
         {cycles === null ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>불러오는 중…</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('불러오는 중…')}</div>
         ) : cycles.length === 0 ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>아직 사이클이 없습니다. 진행 중인 캠페인은 주기마다, 또는 “지금 실행” 으로 돕니다.</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('아직 사이클이 없습니다. 진행 중인 캠페인은 주기마다, 또는 “지금 실행” 으로 돕니다.')}</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {cycles.map((cycle) => (
@@ -164,14 +166,14 @@ export default function MarketingOverviewTab({
                   <strong style={{ color: tokens.colors.textPrimary }}>#{cycle.cycle_no}</strong>
                   <StatusPill view={cycleStatusView(cycle.status)} />
                   <span style={{ color: tokens.colors.textMuted }}>
-                    {cycle.trigger === 'manual' ? '수동' : '예약'} · {formatDateTime(cycle.started_at)}
+                    {cycle.trigger === 'manual' ? translate('수동') : translate('예약')} · {formatDateTime(cycle.started_at)}
                     {cycle.completed_at ? ` → ${formatDateTime(cycle.completed_at)}` : ''}
                   </span>
                   {cycle.untrusted_items > 0 && (
-                    <span title="지시문에 비신뢰 블록으로 격리돼 실린 외부 글 수" style={{ color: tokens.colors.textMuted }}>· 외부 글 {cycle.untrusted_items}건(격리)</span>
+                    <span title={translate('지시문에 비신뢰 블록으로 격리돼 실린 외부 글 수')} style={{ color: tokens.colors.textMuted }}>{translate('· 외부 글')} {cycle.untrusted_items}{translate('건(격리)')}</span>
                   )}
                   {cycle.room_id && (
-                    <Link to={`/chat/${encodeURIComponent(cycle.room_id)}`} style={{ color: tokens.colors.accentLight, marginLeft: 'auto' }}>방 열기</Link>
+                    <Link to={`/chat/${encodeURIComponent(cycle.room_id)}`} style={{ color: tokens.colors.accentLight, marginLeft: 'auto' }}>{translate('방 열기')}</Link>
                   )}
                 </div>
                 {cycle.summary && <div style={{ marginTop: 4 }}><Prose text={cycle.summary} /></div>}

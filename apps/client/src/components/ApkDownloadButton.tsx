@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { tokens } from '../tokens';
@@ -15,6 +17,7 @@ import {
  * unknown(API 실패 — 받기는 그대로) / no(릴리즈가 정말 없음 — 자료실 안내).
  */
 export default function ApkDownloadButton() {
+  useLocale();
   const [label, setLabel] = useState<string | null>(null);
   const [ready, setReady] = useState<'loading' | 'yes' | 'unknown' | 'no'>('loading');
 
@@ -24,10 +27,10 @@ export default function ApkDownloadButton() {
       if (ctrl.signal.aborted) return;
       if (checked.status === 'ready') {
         const size = formatApkSize(checked.app.size);
-        setLabel(`Android 앱 받기${checked.app.tag ? ` (${checked.app.tag})` : ''}${size ? ` · ${size}` : ''}`);
+        setLabel(translate('Android 앱 받기{0}{1}', { 0: checked.app.tag ? ` (${checked.app.tag})` : '', 1: size ? ` · ${size}` : '' }));
         setReady('yes');
       } else if (checked.status === 'unreachable') {
-        setLabel('Android 앱 받기');
+        setLabel(translate('Android 앱 받기'));
         setReady('unknown');
       } else {
         setReady('no');
@@ -37,14 +40,13 @@ export default function ApkDownloadButton() {
   }, []);
 
   if (ready === 'loading') {
-    return <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>앱 확인 중…</span>;
+    return <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('앱 확인 중…')}</span>;
   }
   if (ready === 'no') {
     return (
       <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-        게시된 Android 릴리즈가 아직 없습니다.{' '}
-        <Link to="/library" style={{ color: tokens.colors.accentMid }}>자료실</Link>에서 소식을 확인하세요.
-      </span>
+        {translate('게시된 Android 릴리즈가 아직 없습니다.')}{' '}
+        <Link to="/library" style={{ color: tokens.colors.accentMid }}>{translate('자료실')}</Link>{translate('에서 소식을 확인하세요.')}</span>
     );
   }
   return (
@@ -57,12 +59,11 @@ export default function ApkDownloadButton() {
           textDecoration: 'none',
         }}
       >
-        {label || 'Android 앱 받기'}
+        {label || translate('Android 앱 받기')}
       </a>
       <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-        {ready === 'unknown' && '버전 확인 실패 — 고정 링크로 받습니다. '}
-        처음 한 번은 폰에서 “출처 미확인 앱 설치”를 허용해야 합니다.
-        {' '}<Link to="/library" style={{ color: tokens.colors.accentMid }}>옛 버전은 자료실</Link>
+        {ready === 'unknown' && translate('버전 확인 실패 — 고정 링크로 받습니다. ')}
+        {translate('처음 한 번은 폰에서 “출처 미확인 앱 설치”를 허용해야 합니다.')}{' '}<Link to="/library" style={{ color: tokens.colors.accentMid }}>{translate('옛 버전은 자료실')}</Link>
       </span>
     </span>
   );

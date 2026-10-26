@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo, useState } from 'react';
 import { api } from '../../api';
 import type { Project } from '../../types';
@@ -24,23 +26,20 @@ interface ProjectHostFoldersProps {
 }
 
 export default function ProjectHostFolders({ project, hosts, hostsLoading, onSaved, showToast }: ProjectHostFoldersProps) {
-  const rows = useMemo(() => hostFolderRows(hosts, project.host_folders), [hosts, project.host_folders]);
+  useLocale();
+  const rows = useMemo(() => hostFolderRows(hosts, project.host_folders), [hosts, project.host_folders, getLocale()]);
 
   if (hostsLoading && rows.length === 0) {
-    return <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '12px 0' }}>Runtime Host 목록을 불러오는 중…</div>;
+    return <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '12px 0' }}>{translate('Runtime Host 목록을 불러오는 중…')}</div>;
   }
 
   return (
     <div>
       <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.5, marginBottom: 12 }}>
-        각 Runtime Host 에서 이 프로젝트가 체크아웃돼 있는 <b>메인 클론 폴더</b>(절대 경로)입니다. 티켓 작업은 이
-        폴더에서 worktree 를 잘라 진행하고, 미션 step·팀 슬롯은 이 경로를 작업 폴더로 씁니다. 폴더가 없는 Host 에서는
-        에이전트가 프로젝트 위치를 추측하지 않도록 비워 두세요.
-      </div>
+        {translate('각 Runtime Host 에서 이 프로젝트가 체크아웃돼 있는')} <b>{translate('메인 클론 폴더')}</b>{translate('(절대 경로)입니다. 티켓 작업은 이 폴더에서 worktree 를 잘라 진행하고, 미션 step·팀 슬롯은 이 경로를 작업 폴더로 씁니다. 폴더가 없는 Host 에서는 에이전트가 프로젝트 위치를 추측하지 않도록 비워 두세요.')}</div>
       {rows.length === 0 ? (
         <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: '12px 0' }}>
-          연결된 Runtime Host 가 없습니다. Hosts 화면에서 Agent Manager 를 페어링하면 여기에 나타납니다.
-        </div>
+          {translate('연결된 Runtime Host 가 없습니다. Hosts 화면에서 Agent Manager 를 페어링하면 여기에 나타납니다.')}</div>
       ) : (
         <div
           data-testid="project-host-folders"
@@ -76,6 +75,7 @@ function HostFolderRowEditor({
   onSaved(project: Project): void;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }) {
+  useLocale();
   const [draft, setDraft] = useState(row.saved_path);
   const [busy, setBusy] = useState<'save' | 'clear' | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -91,10 +91,10 @@ function HostFolderRowEditor({
     setBusy('save');
     try {
       const updated = await api.setProjectHostFolder(projectId, row.host_id, trimmed);
-      showToast(`${row.host_name} 폴더를 저장했습니다.`, 'success');
+      showToast(translate('{0} 폴더를 저장했습니다.', { 0: row.host_name }), 'success');
       onSaved(updated);
     } catch (err: any) {
-      showToast(err?.message || '폴더를 저장하지 못했습니다.', 'error');
+      showToast(err?.message || translate('폴더를 저장하지 못했습니다.'), 'error');
     } finally {
       setBusy(null);
     }
@@ -104,10 +104,10 @@ function HostFolderRowEditor({
     setBusy('clear');
     try {
       const updated = await api.clearProjectHostFolder(projectId, row.host_id);
-      showToast(`${row.host_name} 폴더 지정을 지웠습니다.`, 'success');
+      showToast(translate('{0} 폴더 지정을 지웠습니다.', { 0: row.host_name }), 'success');
       onSaved(updated);
     } catch (err: any) {
-      showToast(err?.message || '폴더를 지우지 못했습니다.', 'error');
+      showToast(err?.message || translate('폴더를 지우지 못했습니다.'), 'error');
     } finally {
       setBusy(null);
     }
@@ -126,17 +126,17 @@ function HostFolderRowEditor({
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textStrong }}>{row.host_name}</span>
-        {!row.known && <Badge variant="warning">알 수 없는 Host</Badge>}
+        {!row.known && <Badge variant="warning">{translate('알 수 없는 Host')}</Badge>}
         {row.saved_path
-          ? <Badge variant="success" dot>지정됨</Badge>
-          : <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>폴더 없음</span>}
+          ? <Badge variant="success" dot>{translate('지정됨')}</Badge>
+          : <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('폴더 없음')}</span>}
       </div>
       <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 220 }}>
           <Input
-            aria-label={`${row.host_name} 메인 클론 폴더`}
+            aria-label={translate('{0} 메인 클론 폴더', { 0: row.host_name })}
             value={draft}
-            placeholder="/home/user/repos/project"
+            placeholder={"/home/user/repos/project"}
             error={error || undefined}
             onChange={(e) => { setDraft(e.target.value); setTouched(true); }}
             onKeyDown={(e) => { if (e.key === 'Enter' && dirty) { e.preventDefault(); void save(); } }}
@@ -146,11 +146,10 @@ function HostFolderRowEditor({
           variant="secondary"
           size="sm"
           disabled={!row.known || busy !== null}
-          title={row.known ? undefined : '목록에 없는 Host 는 폴더를 탐색할 수 없습니다'}
+          title={row.known ? undefined : translate('목록에 없는 Host 는 폴더를 탐색할 수 없습니다')}
           onClick={() => setPickerOpen(true)}
         >
-          찾아보기
-        </Button>
+          {translate('찾아보기')}</Button>
         <Button
           variant="primary"
           size="sm"
@@ -158,8 +157,7 @@ function HostFolderRowEditor({
           loading={busy === 'save'}
           onClick={() => void save()}
         >
-          저장
-        </Button>
+          {translate('저장')}</Button>
         <Button
           variant="ghost"
           size="sm"
@@ -167,8 +165,7 @@ function HostFolderRowEditor({
           loading={busy === 'clear'}
           onClick={() => void clear()}
         >
-          지우기
-        </Button>
+          {translate('지우기')}</Button>
       </div>
       {row.known && (
         <DirectoryPicker

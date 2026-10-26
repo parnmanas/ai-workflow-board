@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // Orchestration Mission 모달의 project 선택 회귀 테스트 (docs/orchestration.md → "미션 프로젝트").
 //
 // 팀은 여러 미션에 재사용되므로 작업 폴더가 팀 slot 에서 미션의 PROJECT 로 옮겨 갔다. 예전엔
@@ -200,14 +201,14 @@ function change(element, value) {
 
 /** 글자가 정확히 `text` 인 첫 버튼(Button 은 형제 <style> 을 그리므로 버튼 자신의 글자만 본다). */
 function buttonIn(root, text) {
-  const found = [...root.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === text);
+  const found = [...root.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === ui(text));
   assert.ok(found, `"${text}" 버튼을 찾을 수 없습니다.`);
   return found;
 }
 
 /** <Input label>/<Select label> 은 <div><label>라벨</label><input|select/></div> 로 그린다. */
 function field(root, labelText, tag) {
-  const label = [...root.querySelectorAll('label')].find((l) => (l.textContent || '').trim() === labelText);
+  const label = [...root.querySelectorAll('label')].find((l) => (l.textContent || '').trim() === ui(labelText));
   return label?.parentElement?.querySelector(tag) ?? null;
 }
 
@@ -249,7 +250,7 @@ function projectRows(root) {
 }
 
 function branchInput(root, name) {
-  const input = section(root).querySelector(`input[aria-label="Branch for ${name}"]`);
+  const input = section(root).querySelector(`input[aria-label="Branch for ${ui(name)}"]`);
   assert.ok(input, `${name} 의 브랜치 입력이 없습니다.`);
   return input;
 }
@@ -391,8 +392,8 @@ test('새 미션 — id 를 타이핑하지 않고 드롭다운만으로 project
   const { container, created } = await mountModal(t);
 
   // 예전 단일 저장소 피커(검색형 드롭다운 + project_id 수동 입력)는 없다.
-  assert.equal(Boolean(container.querySelector('select[aria-label="프로젝트 선택"]')), false, '구 RepoRefPicker 가 남아 있으면 안 된다');
-  assert.equal(Boolean(container.querySelector('input[aria-label="project_id 직접 입력"]')), false, '원시 id 를 타이핑할 자리가 없다');
+  assert.equal(Boolean(container.querySelector(`select[aria-label="${ui("프로젝트 선택")}"]`)), false, '구 RepoRefPicker 가 남아 있으면 안 된다');
+  assert.equal(Boolean(container.querySelector(`input[aria-label="${ui("project_id 직접 입력")}"]`)), false, '원시 id 를 타이핑할 자리가 없다');
 
   assert.match(section(container).textContent, /No project selected\./, '아무것도 고르지 않은 상태가 보인다');
   assert.deepEqual(

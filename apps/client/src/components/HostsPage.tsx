@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AgentTemplatesPanel from './runtime/AgentTemplatesPanel';
@@ -10,6 +12,7 @@ import { PermissionNotice } from './common';
 import AgentManagerPage from './admin/AgentManagerPage';
 
 export default function HostsPage() {
+  useLocale();
   const { hasPermission } = useAuth();
   const canManage = hasPermission('admin.access');
   const [searchParams] = useSearchParams();
@@ -19,19 +22,19 @@ export default function HostsPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="HOSTS"
-        description="Agent 템플릿 등록과 Runtime Host 연결, 매니저 버전, CLI와 ACP 어댑터를 관리합니다."
+        title={translate('HOSTS')}
+        description={translate('Agent 템플릿 등록과 Runtime Host 연결, 매니저 버전, CLI와 ACP 어댑터를 관리합니다.')}
       />
       {canManage && <PageTabs activeId={activeTab} tabs={[
-        { id: 'hosts', label: 'Runtime Hosts', to: '?tab=hosts' },
-        { id: 'templates', label: 'Agent 템플릿', to: '?tab=templates' },
+        { id: 'hosts', label: translate('Runtime Hosts'), to: '?tab=hosts' },
+        { id: 'templates', label: translate('Agent 템플릿'), to: '?tab=templates' },
       ]} />}
-      <div role={canManage ? 'tabpanel' : undefined} aria-label={canManage ? (activeTab === 'hosts' ? 'Runtime Hosts' : 'Agent 템플릿') : undefined}
+      <div role={canManage ? 'tabpanel' : undefined} aria-label={canManage ? (activeTab === 'hosts' ? translate('Runtime Hosts') : translate('Agent 템플릿')) : undefined}
         style={{ flex: 1, minHeight: 0, overflow: activeTab === 'hosts' && canManage ? 'hidden' : 'auto', padding: isMobile ? 12 : 24, background: tokens.colors.surface }}>
         {canManage ? (
           activeTab === 'templates' ? <AgentTemplatesPanel /> : <AgentManagerPage />
         ) : (
-          <PermissionNotice title="관리자 권한이 필요합니다" message="Runtime Host 관리에는 관리자 권한이 필요합니다." />
+          <PermissionNotice title={translate('관리자 권한이 필요합니다')} message={translate('Runtime Host 관리에는 관리자 권한이 필요합니다.')} />
         )}
       </div>
     </div>

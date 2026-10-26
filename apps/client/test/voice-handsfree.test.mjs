@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 대화 모드의 순수 부분 회귀 테스트 — docs/voice-operator.md "대화 모드".
 // 실행: node --import tsx --test apps/client/test/voice-handsfree.test.mjs
 //
@@ -126,7 +127,7 @@ test('hands-free owns its context, unlocks before cold VAD loading and stops a l
 });
 
 test('filtered utterances explain why a working microphone did not send a prompt', () => {
-  assert.match(transcriptionFeedback({ ignored: 'speaker_mismatch' }), /VOICE.*샘플/);
-  assert.match(transcriptionFeedback({ ignored: 'insufficient_speech' }), /너무 짧/);
-  assert.match(transcriptionFeedback({ ignored: 'no_speech' }), /인식하지 못/);
+  assert.match(transcriptionFeedback({ ignored: 'speaker_mismatch' }), uiPattern("등록한 내 목소리와 일치하지 않아 제외했습니다. VOICE에서 목소리 테스트나 추가 샘플 등록을 해 주세요."));
+  assert.match(transcriptionFeedback({ ignored: 'insufficient_speech' }), uiPattern("목소리를 확인하기에 말이 너무 짧았습니다. 조금 길게 다시 말해 주세요."));
+  assert.match(transcriptionFeedback({ ignored: 'no_speech' }), uiPattern("말을 인식하지 못했습니다. 다시 말해 주세요."));
 });

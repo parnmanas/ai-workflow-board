@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 import type { Action, RuntimeParticipant } from '../../types';
@@ -32,6 +34,7 @@ const iconBtnStyle = (disabled: boolean): React.CSSProperties => ({
  * dispatch, so they are flagged.
  */
 export default function OnDoneActionsField({ value, onChange, actions, agents = [], labelStyle }: OnDoneActionsFieldProps) {
+  useLocale();
   const actionById = new Map(actions.map(a => [a.id, a]));
   const candidates = actions.filter(a => !value.includes(a.id));
 
@@ -42,13 +45,13 @@ export default function OnDoneActionsField({ value, onChange, actions, agents = 
     ) : null;
   };
   const enabledNote = (act: Action) => !act.enabled && (
-    <span style={{ fontSize: '10px', color: tokens.colors.warningLight, marginLeft: 'auto' }}>disabled — won’t fire</span>
+    <span style={{ fontSize: '10px', color: tokens.colors.warningLight, marginLeft: 'auto' }}>{translate('disabled — won’t fire')}</span>
   );
 
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ ...labelStyle, marginBottom: 6 }}>
-        완료 시 실행{value.length > 0 ? ` · ${value.length}개` : ''}
+        {translate('완료 시 실행')}{value.length > 0 ? translate(' · {0}개', { 0: value.length }) : ''}
       </label>
       <div style={{
         background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
@@ -74,14 +77,13 @@ export default function OnDoneActionsField({ value, onChange, actions, agents = 
                     </>
                   ) : (
                     <span style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic', marginRight: 'auto' }}>
-                      {id.slice(0, 8)}… (removed action)
-                    </span>
+                      {id.slice(0, 8)}{translate('… (removed action)')}</span>
                   )}
-                  <button type="button" title="Move up (earlier in dispatch order)" disabled={idx === 0}
+                  <button type="button" title={translate('Move up (earlier in dispatch order)')} disabled={idx === 0}
                     onClick={() => onChange(prev => moveItem(prev, idx, idx - 1))} style={iconBtnStyle(idx === 0)}>↑</button>
-                  <button type="button" title="Move down (later in dispatch order)" disabled={idx === value.length - 1}
+                  <button type="button" title={translate('Move down (later in dispatch order)')} disabled={idx === value.length - 1}
                     onClick={() => onChange(prev => moveItem(prev, idx, idx + 1))} style={iconBtnStyle(idx === value.length - 1)}>↓</button>
-                  <button type="button" title="Unbind this action"
+                  <button type="button" title={translate('Unbind this action')}
                     onClick={() => onChange(prev => prev.filter(x => x !== id))} style={{ ...iconBtnStyle(false), fontSize: '14px' }}>×</button>
                 </div>
               );
@@ -92,7 +94,7 @@ export default function OnDoneActionsField({ value, onChange, actions, agents = 
         {candidates.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: value.length > 0 ? 6 : 0 }}>
             {value.length > 0 && (
-              <div style={{ fontSize: '10px', color: tokens.colors.textMuted, fontWeight: 600, padding: '0 4px' }}>Add an action</div>
+              <div style={{ fontSize: '10px', color: tokens.colors.textMuted, fontWeight: 600, padding: '0 4px' }}>{translate('Add an action')}</div>
             )}
             {candidates.map(act => (
               <button
@@ -116,8 +118,7 @@ export default function OnDoneActionsField({ value, onChange, actions, agents = 
 
         {value.length === 0 && candidates.length === 0 && (
           <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
-            No actions in this account yet — create one from the Actions menu to bind it here.
-          </div>
+            {translate('No actions in this account yet — create one from the Actions menu to bind it here.')}</div>
         )}
       </div>
     </div>

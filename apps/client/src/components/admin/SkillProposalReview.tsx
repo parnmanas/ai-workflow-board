@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState } from 'react';
 import type { Skill, SkillProposal } from '../../types';
 import { api } from '../../api';
@@ -18,6 +20,7 @@ export default function SkillProposalReview({
   skills,
   onReviewed,
 }: Props) {
+  useLocale();
   const { showToast } = useToast();
   const [targetSkillId, setTargetSkillId] = useState(proposal.skill_id || '');
   const [note, setNote] = useState('');
@@ -25,7 +28,7 @@ export default function SkillProposalReview({
 
   const review = async (decision: 'approve' | 'reject') => {
     if (decision === 'approve' && !targetSkillId) {
-      showToast('Choose a target skill before approval', 'error');
+      showToast(translate('Choose a target skill before approval'), 'error');
       return;
     }
     setBusy(decision);
@@ -36,13 +39,13 @@ export default function SkillProposalReview({
       });
       showToast(
         decision === 'approve'
-          ? 'Proposal approved as a new immutable version'
-          : 'Proposal rejected',
+          ? translate('Proposal approved as a new immutable version')
+          : translate('Proposal rejected'),
         'success',
       );
       onReviewed();
     } catch (error: any) {
-      showToast(error?.message || 'Proposal review failed', 'error');
+      showToast(error?.message || translate('Proposal review failed'), 'error');
     } finally {
       setBusy(null);
     }
@@ -57,7 +60,7 @@ export default function SkillProposalReview({
         </Badge>
       </div>
       <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-        Agent {proposal.source_agent_id || 'human'} · Run {proposal.source_run_id || 'manual'}
+        {translate('Agent')} {proposal.source_agent_id || translate('human')} {translate('· Run')} {proposal.source_run_id || translate('manual')}
       </div>
       <pre style={{
         margin: 0,
@@ -83,8 +86,7 @@ export default function SkillProposalReview({
       {proposal.status === 'pending' && (
         <>
           <label style={{ display: 'grid', gap: 4, color: tokens.colors.textSecondary, fontSize: 12 }}>
-            Target skill
-            <select
+            {translate('Target skill')}<select
               value={targetSkillId}
               onChange={(event) => setTargetSkillId(event.target.value)}
               style={{
@@ -95,7 +97,7 @@ export default function SkillProposalReview({
                 padding: '8px 10px',
               }}
             >
-              <option value="">Select a governed skill</option>
+              <option value="">{translate('Select a governed skill')}</option>
               {skills.filter((skill) => skill.status === 'active').map((skill) => (
                 <option key={skill.id} value={skill.id}>{skill.name} ({skill.slug})</option>
               ))}
@@ -104,7 +106,7 @@ export default function SkillProposalReview({
           <textarea
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            placeholder="Review note"
+            placeholder={translate('Review note')}
             rows={2}
             style={{
               background: tokens.colors.surface,
@@ -118,11 +120,9 @@ export default function SkillProposalReview({
           />
           <div style={{ display: 'flex', gap: 8 }}>
             <Button onClick={() => review('approve')} loading={busy === 'approve'}>
-              Approve new version
-            </Button>
+              {translate('Approve new version')}</Button>
             <Button variant="danger" onClick={() => review('reject')} loading={busy === 'reject'}>
-              Reject
-            </Button>
+              {translate('Reject')}</Button>
           </div>
         </>
       )}

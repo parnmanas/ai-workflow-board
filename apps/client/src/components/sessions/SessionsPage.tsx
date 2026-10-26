@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
@@ -76,6 +78,7 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
  * `data-session-status` 는 이 표면의 테스트 훅이라 유지한다.
  */
 function StatusPill({ status }: { status: string | null | undefined }) {
+  useLocale();
   return (
     <ActivityPill
       view={describeSessionStatus(status)}
@@ -85,6 +88,7 @@ function StatusPill({ status }: { status: string | null | undefined }) {
 }
 
 function CliBadge({ cli }: { cli: string }) {
+  useLocale();
   return (
     <span
       style={{
@@ -101,6 +105,7 @@ function CliBadge({ cli }: { cli: string }) {
 function MenuFact({ term, mono, tone, title, children, ...rest }: {
   term: string; mono?: boolean; tone?: 'muted' | 'danger'; title?: string; children: React.ReactNode; 'data-session-auth'?: string;
 }) {
+  useLocale();
   return (
     <>
       <dt style={{ color: tokens.colors.textMuted }}>{term}</dt>
@@ -120,11 +125,11 @@ function relativeTime(iso: string | null | undefined): string {
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return '';
   const min = Math.round((Date.now() - t) / 60_000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min}m ago`;
+  if (min < 1) return translate('just now');
+  if (min < 60) return translate('{0}m ago', { 0: min });
   const h = Math.round(min / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+  if (h < 24) return translate('{0}h ago', { 0: h });
+  return translate('{0}d ago', { 0: Math.round(h / 24) });
 }
 
 // ─── Runtime Host 목록 ──────────────────────────────────────────────────────
@@ -132,25 +137,26 @@ function relativeTime(iso: string | null | undefined): string {
 function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
   accountId: string; hosts: AgentSessionHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   const catalog = useCliCatalog();
   const sessionCliNames = acpSessionClis(catalog).map((d) => d.label).join(', ');
   return (
     <>
       <PageHeader
-        title="Sessions"
-        description={`Drive a CLI on one of your Runtime Hosts — ${sessionCliNames} — including the sessions already on that machine.`}
-        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={hosts.length === 0}>New session</Button>}
+        title={translate('Sessions')}
+        description={translate('Drive a CLI on one of your Runtime Hosts — {0} — including the sessions already on that machine.', { 0: sessionCliNames })}
+        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={hosts.length === 0}>{translate('New session')}</Button>}
       />
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {error ? (
           <ErrorState message={error} onRetry={onReload} />
         ) : loading && hosts.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading Runtime Hosts…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading Runtime Hosts…')}</div>
         ) : hosts.length === 0 ? (
           <EmptyState
-            title="No Runtime Host is connected"
-            description="Sessions run on a machine with awb-agent-manager. Pair one from the AI Agents page, and install claude-agent-acp or codex-acp there."
+            title={translate('No Runtime Host is connected')}
+            description={translate('Sessions run on a machine with awb-agent-manager. Pair one from the AI Agents page, and install claude-agent-acp or codex-acp there.')}
           />
         ) : (
           <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
@@ -162,17 +168,17 @@ function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                   <span style={{ fontSize: 14, fontWeight: 600, color: tokens.colors.textPrimary }}>{host.name}</span>
                   <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: MONO }}>{host.hostname}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>seen {relativeTime(host.last_seen_at)}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>{translate('seen')} {relativeTime(host.last_seen_at)}</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
                   {host.clis.length === 0
-                    ? <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>No ACP-capable CLI reported</span>
+                    ? <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('No ACP-capable CLI reported')}</span>
                     : host.clis.map((cli) => {
                         const bound = host.cli_settings?.[cli] ?? null;
                         return (
                           <span
                             key={cli}
-                            title={bound ? `Signs in with "${bound.name}"` : "Uses the host's own login"}
+                            title={bound ? translate('Signs in with "{0}"', { 0: bound.name }) : translate('Uses the host\'s own login')}
                             style={{
                               border: `1px solid ${tokens.colors.accent}55`, background: tokens.colors.badgeAgentBg, color: tokens.colors.accentSubtle,
                               borderRadius: 999, padding: '3px 10px', fontSize: 11.5, fontWeight: 600,
@@ -193,8 +199,7 @@ function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
                       borderRadius: tokens.radii.md, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
                     }}
                   >
-                    Open sessions →
-                  </button>
+                    {translate('Open sessions →')}</button>
                 </div>
               </div>
             ))}
@@ -210,6 +215,7 @@ function HostsIndex({ accountId, hosts, loading, error, onReload, onNew }: {
 function CwdGroupCard({ group, accountId, managerId, operators, onNew }: {
   group: CwdGroup; accountId: string; managerId: string; operators: readonly VoiceOperator[]; onNew: (cwd: string) => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   const [showOlder, setShowOlder] = useState(false);
   const latestTime = group.sessions[0]?.updated_at;
@@ -229,7 +235,7 @@ function CwdGroupCard({ group, accountId, managerId, operators, onNew }: {
           style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary, fontFamily: MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           title={group.cwd}
         >
-          {group.cwd || '(unknown directory)'}
+          {group.cwd || translate('(unknown directory)')}
         </span>
         <span style={{ fontSize: 11, color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>{relativeTime(latestTime)}</span>
         <button
@@ -240,8 +246,7 @@ function CwdGroupCard({ group, accountId, managerId, operators, onNew }: {
             borderRadius: tokens.radii.md, padding: '2px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
           }}
         >
-          + New
-        </button>
+          {translate('+ New')}</button>
       </div>
       {/* 세션 행 */}
       {displayed.map((s, i) => (
@@ -279,7 +284,7 @@ function CwdGroupCard({ group, accountId, managerId, operators, onNew }: {
             color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 11.5, fontFamily: 'inherit',
           }}
         >
-          {showOlder ? '접기 ↑' : `${hiddenSessions.length}개 더 보기 ↓`}
+          {showOlder ? translate('접기 ↑') : translate('{0}개 더 보기 ↓', { 0: hiddenSessions.length })}
         </button>
       )}
     </div>
@@ -289,6 +294,7 @@ function CwdGroupCard({ group, accountId, managerId, operators, onNew }: {
 function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
   accountId: string; managerId: string; host: AgentSessionHost | null; onNew: () => void; onNewWithCwd: (cwd: string) => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   const operators = useVoiceOperators(hasPermission('voice.use'));
@@ -307,7 +313,7 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
         const list = await api.listHostSessions(managerId, cli);
         results[cli] = Array.isArray(list) ? list : [];
       } catch (err: any) {
-        errs.push(`${runtimeLabel(cli)}: ${err?.message || 'fetch failed'}`);
+        errs.push(`${runtimeLabel(cli)}: ${err?.message || translate('fetch failed')}`);
         results[cli] = [];
       }
     }));
@@ -336,7 +342,7 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
     void load();
   }, [managerId, load]));
 
-  const groups = useMemo(() => groupSessionsByCwd(sessionsByCli), [sessionsByCli]);
+  const groups = useMemo(() => groupSessionsByCwd(sessionsByCli), [sessionsByCli, getLocale()]);
   const hostName = host?.name || managerId.slice(0, 8);
   const totalSessions = groups.reduce((n, g) => n + g.sessions.length, 0);
 
@@ -344,11 +350,11 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
     <>
       <PageHeader
         title={hostName}
-        description={host ? `${host.hostname} — sessions grouped by working directory` : 'This Runtime Host is not connected right now.'}
+        description={host ? translate('{0} — sessions grouped by working directory', { 0: host.hostname }) : translate('This Runtime Host is not connected right now.')}
         actions={(
           <>
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/sessions`)}>All hosts</Button>
-            <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>Reload</Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate(`/sessions`)}>{translate('All hosts')}</Button>
+            <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>{translate('Reload')}</Button>
             {host && host.clis.map((cli) => {
               const bound = host.cli_settings?.[cli] ?? null;
               return (
@@ -357,13 +363,13 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
                   variant={showSettings === cli ? 'secondary' : 'ghost'}
                   size="sm"
                   onClick={() => setShowSettings((v) => (v === cli ? null : cli))}
-                  title={bound ? `Signs in with "${bound.name}"` : "Uses the host's own login"}
+                  title={bound ? translate('Signs in with "{0}"', { 0: bound.name }) : translate('Uses the host\'s own login')}
                 >
                   {bound ? `🔑 ${runtimeLabel(cli)}` : runtimeLabel(cli)}
                 </Button>
               );
             })}
-            <Button variant="primary" size="sm" onClick={onNew}>New session</Button>
+            <Button variant="primary" size="sm" onClick={onNew}>{translate('New session')}</Button>
           </>
         )}
       />
@@ -379,12 +385,12 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
           </div>
         )}
         {loading && totalSessions === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Asking the Runtime Host for sessions…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Asking the Runtime Host for sessions…')}</div>
         ) : groups.length === 0 ? (
           <EmptyState
-            title="No sessions on this host yet"
-            description={`${hostName} has no saved sessions. Start one and it will show up here — and in the CLI's own history.`}
-            action={<Button variant="primary" onClick={onNew}>Start a session</Button>}
+            title={translate('No sessions on this host yet')}
+            description={translate('{0} has no saved sessions. Start one and it will show up here — and in the CLI\'s own history.', { 0: hostName })}
+            action={<Button variant="primary" onClick={onNew}>{translate('Start a session')}</Button>}
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 960 }}>
@@ -403,6 +409,7 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
 function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   accountId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
 }) {
+  useLocale();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const confirm = useConfirm();
@@ -447,7 +454,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   const allProposals = useSessionProposals();
   const proposals = useMemo(
     () => proposalsForSession(allProposals, { manager_id: managerId, cli, session_id: sessionId }, thisOperator?.id ?? null),
-    [allProposals, managerId, cli, sessionId, thisOperator?.id],
+    [allProposals, managerId, cli, sessionId, thisOperator?.id, getLocale()],
   );
   const [operatorDialogOpen, setOperatorDialogOpen] = useState(false);
   const wake = useWakeState();
@@ -509,7 +516,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       setEvents(Array.isArray(detail.events) ? detail.events : []);
       setError(null);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load the session from the Runtime Host');
+      setError(err?.message || translate('Failed to load the session from the Runtime Host'));
     } finally {
       setLoading(false);
     }
@@ -592,8 +599,8 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     if (reconnected) void load();
   }, [isConnected, load]);
 
-  const blocks = useMemo(() => buildTranscript(events), [events]);
-  const pending = useMemo(() => pendingInteraction(blocks), [blocks]);
+  const blocks = useMemo(() => buildTranscript(events), [events, getLocale()]);
+  const pending = useMemo(() => pendingInteraction(blocks), [blocks, getLocale()]);
 
   // 상태는 "승인/입력 대기" 인데 트랜스크립트에 미결 카드가 없다 — permission/elicitation 행을
   // SSE 로 못 받은 경우(다른 화면에 있었거나 새로고침)다. history RPC 가 미결 요청을 다시
@@ -635,7 +642,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     try {
       setLive(await api.openHostSession(managerId, cli, { session_id: sessionId, ...(force ? { force: true } : {}) }));
     } catch (err: any) {
-      const message = err?.message || 'Failed to connect to the session on the Runtime Host';
+      const message = err?.message || translate('Failed to connect to the session on the Runtime Host');
       setConnectError(message);
       setConnectErrorCode(err?.code ?? null);
       if (err?.code === 'resume_locked_external') setLockedByExternal(message);
@@ -655,16 +662,15 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       || (live?.last_error_code === 'resume_locked_external' ? live.last_error : null);
     if (!reason) return;
     const ok = await confirm({
-      title: '잠금을 쥔 프로세스를 종료하고 열까요?',
+      title: translate('잠금을 쥔 프로세스를 종료하고 열까요?'),
       message: (
         <span>
           {reason}
           <br /><br />
-          그 프로세스가 이 세션 말고 다른 작업도 하고 있었다면 그것까지 함께 중단됩니다.
-        </span>
+          {translate('그 프로세스가 이 세션 말고 다른 작업도 하고 있었다면 그것까지 함께 중단됩니다.')}</span>
       ),
       danger: true,
-      confirmLabel: '종료하고 열기',
+      confirmLabel: translate('종료하고 열기'),
     });
     if (!ok) return;
     await connect(true);
@@ -694,7 +700,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   // 계정 표시 — Credential 이름은 서버가 id 만 주므로 호스트의 CLI 설정에서 합친다.
   const authView = useMemo(
     () => describeSessionAuth(live?.auth, host?.cli_settings?.[cli]?.name),
-    [live?.auth, host, cli],
+    [live?.auth, host, cli, getLocale()],
   );
   // The live adapter is authoritative. Publish its exact choices to the shared catalog
   // so New session immediately uses the same list, without widening this control.
@@ -719,8 +725,8 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     const images = prompt.images.map(({ base64, mime_type }) => ({ base64, mime_type }));
     // 낙관적 에코는 텍스트만 싣는다 — 이미지는 턴이 열리면 매니저가 image 이벤트로 되돌려 준다.
     // 텍스트와 함께 보냈을 때 이미지가 있다는 사실이 사라지면 "보냈는데 안 보인다"가 되므로 장수를 함께 적는다.
-    const imageNote = images.length ? `🖼 ${images.length}장 첨부` : '';
-    const optimisticText = text && imageNote ? `${text}\n${imageNote}` : text || (imageNote ? `${imageNote} 전송` : '');
+    const imageNote = images.length ? translate('🖼 {0}장 첨부', { 0: images.length }) : '';
+    const optimisticText = text && imageNote ? `${text}\n${imageNote}` : text || (imageNote ? translate('{0} 전송', { 0: imageNote }) : '');
     try {
       const result = await api.promptHostSession(managerId, cli, sessionId, text, images);
       ownTurnIdsRef.current.add(result.turn_id);
@@ -732,7 +738,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       // 보낸 것이므로. 새 항목 추종(근접할 때만)과는 다른 축이다.
       scrollToBottom('auto');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to send the prompt', 'error');
+      showToast(err?.message || translate('Failed to send the prompt'), 'error');
       throw err;
     }
   }, [managerId, cli, sessionId, showToast]);
@@ -769,14 +775,14 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
         wakeStore.sleep(id);
       },
     };
-  }, [thisOperator, awakeHere, wake.wokeAt, navigate, accountId]);
+  }, [thisOperator, awakeHere, wake.wokeAt, navigate, accountId, getLocale()]);
 
   const decide = useCallback(async (requestId: string, optionId: string | null) => {
     setDecidingRequestId(requestId);
     try {
       setLive(await api.decideHostSessionPermission(managerId, cli, sessionId, requestId, optionId));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to answer the permission request', 'error');
+      showToast(err?.message || translate('Failed to answer the permission request'), 'error');
     } finally {
       setDecidingRequestId(null);
     }
@@ -787,7 +793,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     try {
       setLive(await api.answerHostSessionElicitation(managerId, cli, sessionId, elicitationId, action, content));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to send your answer', 'error');
+      showToast(err?.message || translate('Failed to send your answer'), 'error');
     } finally {
       setDecidingRequestId(null);
     }
@@ -810,16 +816,16 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     try {
       await api.setHostSessionConfigOption(managerId, cli, sessionId, configId, value);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to change the setting', 'error');
+      showToast(err?.message || translate('Failed to change the setting'), 'error');
     }
   }, [managerId, cli, sessionId, showToast]);
 
   const cancel = useCallback(async () => {
     try {
       await api.cancelHostSession(managerId, cli, sessionId);
-      showToast('Cancel requested', 'info');
+      showToast(translate('Cancel requested'), 'info');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to cancel', 'error');
+      showToast(err?.message || translate('Failed to cancel'), 'error');
     }
   }, [managerId, cli, sessionId, showToast]);
 
@@ -833,9 +839,9 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   const restart = useCallback(async () => {
     try {
       await api.restartHostSession(managerId, cli, sessionId);
-      showToast('Restarting the session process…', 'info');
+      showToast(translate('Restarting the session process…'), 'info');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to restart', 'error');
+      showToast(err?.message || translate('Failed to restart'), 'error');
     }
   }, [managerId, cli, sessionId, showToast]);
 
@@ -847,9 +853,9 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       setLive(await api.repairHostSessionCredential(managerId, cli, sessionId));
       setConnectError(null);
       setConnectErrorCode(null);
-      showToast('Reconnecting with the current CLI login settings…', 'info');
+      showToast(translate('Reconnecting with the current CLI login settings…'), 'info');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to replace the missing credential', 'error');
+      showToast(err?.message || translate('Failed to replace the missing credential'), 'error');
     } finally {
       setConnecting(false);
     }
@@ -859,23 +865,23 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     try {
       await api.setHostSessionMode(managerId, cli, sessionId, modeId);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to change mode', 'error');
+      showToast(err?.message || translate('Failed to change mode'), 'error');
     }
   }, [managerId, cli, sessionId, showToast]);
 
   const close = useCallback(async () => {
-    if (!(await confirm({ title: 'Stop the agent process?', message: 'The CLI process on the Runtime Host stops. The session stays in the CLI\'s history and reopens on your next prompt.', danger: false, confirmLabel: 'Stop' }))) return;
+    if (!(await confirm({ title: translate('Stop the agent process?'), message: translate('The CLI process on the Runtime Host stops. The session stays in the CLI\'s history and reopens on your next prompt.'), danger: false, confirmLabel: translate('Stop') }))) return;
     try {
       setLive(await api.closeHostSession(managerId, cli, sessionId));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to stop', 'error');
+      showToast(err?.message || translate('Failed to stop'), 'error');
     }
   }, [confirm, managerId, cli, sessionId, showToast]);
 
   if (error && !live && !summary) {
     return (
       <>
-        <PageHeader title="Session" actions={<Button variant="secondary" size="sm" onClick={() => navigate(`/sessions/${managerId}`)}>Back to list</Button>} />
+        <PageHeader title={translate('Session')} actions={<Button variant="secondary" size="sm" onClick={() => navigate(`/sessions/${managerId}`)}>{translate('Back to list')}</Button>} />
         <div style={{ padding: 20 }}><ErrorState message={error} onRetry={() => void load()} /></div>
       </>
     );
@@ -884,16 +890,16 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   const authProblem = !!live?.last_error && /auth|login|credential/i.test(live.last_error);
   const composerHint = isWaitingStatus(status)
     ? (pending
-      ? (pending.kind === 'elicitation' ? 'The agent is asking you something above — answer it to continue.' : 'The agent is waiting for your decision on the permission request above.')
-      : 'The Runtime Host reports a pending request — fetching it… If it does not appear, Stop the agent process and prompt again.')
+      ? (pending.kind === 'elicitation' ? translate('The agent is asking you something above — answer it to continue.') : translate('The agent is waiting for your decision on the permission request above.'))
+      : translate('The Runtime Host reports a pending request — fetching it… If it does not appear, Stop the agent process and prompt again.'))
     : status === 'error' && authProblem
-      ? `${runtimeLabel(cli)} on ${host?.name || 'the host'} is not signed in. Log in on the host, or bind a credential in this CLI's settings (list page → CLI settings).`
+      ? translate('{0} on {1} is not signed in. Log in on the host, or bind a credential in this CLI\'s settings (list page → CLI settings).', { 0: runtimeLabel(cli), 1: host?.name || translate('the host') })
     : connecting || status === 'starting'
-      ? `Connecting to ${runtimeLabel(cli)} on ${host?.name || 'the host'}… settings appear once the session is open.`
+      ? translate('Connecting to {0} on {1}… settings appear once the session is open.', { 0: runtimeLabel(cli), 1: host?.name || translate('the host') })
     : status === 'idle' || status === 'closed'
-      ? `No live process — Connect, or send a prompt, to start ${runtimeLabel(cli)} on ${host?.name || 'the host'} and resume this session.`
+      ? translate('No live process — Connect, or send a prompt, to start {0} on {1} and resume this session.', { 0: runtimeLabel(cli), 1: host?.name || translate('the host') })
       : status === 'error' && live?.last_error
-        ? `Last error: ${live.last_error}`
+        ? translate('Last error: {0}', { 0: live.last_error })
         : null;
 
   const displayTitle = thisOperator?.name ?? sessionDisplayTitle({ title, cli, session_id: sessionId });
@@ -972,8 +978,8 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             <button
               type="button"
               onClick={() => navigate(`/sessions/${managerId}`)}
-              aria-label="Back to sessions"
-              title="Back to sessions"
+              aria-label={translate('Back to sessions')}
+              title={translate('Back to sessions')}
               style={{ border: 'none', background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 16, padding: '0 4px' }}
             >
               ←
@@ -991,15 +997,15 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             <div className="awb-session-controls">
               {showLegacyModeSelect && live && (
                 <label className="awb-session-control" data-category="mode">
-                  <span style={{ color: tokens.colors.textMuted }}>Mode</span>
+                  <span style={{ color: tokens.colors.textMuted }}>{translate('Mode')}</span>
                   <select
-                    aria-label="Session mode"
+                    aria-label={translate('Session mode')}
                     value={live.current_mode || ''}
                     disabled={controlsDisabled}
                     onChange={(e) => void setMode(e.target.value)}
                     style={selectStyle}
                   >
-                    {!live.current_mode && <option value="">mode…</option>}
+                    {!live.current_mode && <option value="">{translate('mode…')}</option>}
                     {live.available_modes.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.name}</option>)}
                   </select>
                 </label>
@@ -1014,23 +1020,23 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
           )}
           <div className="awb-session-actions">
             {speakingHere && (
-              <Button variant="secondary" size="sm" onClick={() => speechPlayer.stop()} title="지금 읽는 것을 멈춥니다">■ Stop reading</Button>
+              <Button variant="secondary" size="sm" onClick={() => speechPlayer.stop()} title={translate('지금 읽는 것을 멈춥니다')}>{translate('■ Stop reading')}</Button>
             )}
             {canConnect(status) && !connecting && (
-              <Button variant="primary" size="sm" onClick={() => void connect(false)} title="Start the CLI process for this session on the Runtime Host and load its settings">
-                {status === 'error' ? 'Reconnect' : 'Connect'}
+              <Button variant="primary" size="sm" onClick={() => void connect(false)} title={translate('Start the CLI process for this session on the Runtime Host and load its settings')}>
+                {status === 'error' ? translate('Reconnect') : translate('Connect')}
               </Button>
             )}
-            {(connecting || status === 'starting') && <Button variant="secondary" size="sm" disabled loading>Connecting…</Button>}
-            {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>Stop</Button>}
+            {(connecting || status === 'starting') && <Button variant="secondary" size="sm" disabled loading>{translate('Connecting…')}</Button>}
+            {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>{translate('Stop')}</Button>}
             <SessionHeaderMenu>
               {(closeMenu) => (
                 <>
-                  <SessionMenuSection title="Session">
+                  <SessionMenuSection title={translate('Session')}>
                     <dl className="awb-session-menu-facts">
                       <MenuFact term="Host">{hostName}</MenuFact>
                       <MenuFact term="CLI">{runtimeLabel(cli)}</MenuFact>
-                      <MenuFact term="Folder" mono>{cwd || '(cwd unknown)'}</MenuFact>
+                      <MenuFact term="Folder" mono>{cwd || translate('(cwd unknown)')}</MenuFact>
                       <MenuFact term="Session" mono>{sessionId}</MenuFact>
                       {/* 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 줄 때만 나온다(모르면 아무것도 그리지 않는다) */}
                       {authView && (
@@ -1042,7 +1048,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
                     </dl>
                   </SessionMenuSection>
                   {menuOptions.length > 0 && (
-                    <SessionMenuSection title="Settings">
+                    <SessionMenuSection title={translate('Settings')}>
                       {menuOptions.map((option) => (option.type === 'boolean'
                         ? <div key={option.config_id} className="awb-session-menu-field">{renderConfigControl(option)}</div>
                         : (
@@ -1053,35 +1059,35 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
                         )))}
                     </SessionMenuSection>
                   )}
-                  <SessionMenuSection title="Actions">
+                  <SessionMenuSection title={translate('Actions')}>
                     {/* 프로세스만 다시 띄운다. CLI 를 올린 뒤 새 모델·기능이 보이지 않을 때 쓰는
                         정식 경로다 — 살아 있는 프로세스는 기동 시점의 CLI 를 계속 물고 있다.
                         여는 중(starting)에만 잠근다: 턴 중이라도 운영자가 일부러 죽이려는 것일 수
                         있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다. */}
                     <SessionMenuItem
                       icon="⟳"
-                      label="Restart process"
+                      label={translate('Restart process')}
                       disabled={status === 'starting'}
                       title={
                         status === 'starting'
-                          ? '이미 프로세스를 여는 중입니다.'
-                          : '세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ' +
-                            '새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ' +
-                            '인증은 지금 CLI 설정에 고른 credential 로 다시 묶입니다 — usage limit 에 걸렸으면 CLI 설정에서 바꾼 뒤 누르세요. ' +
-                            '진행 중인 턴이 있으면 끊깁니다.'
+                          ? translate('이미 프로세스를 여는 중입니다.')
+                          : translate('세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ') +
+                            translate('새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ') +
+                            translate('인증은 지금 CLI 설정에 고른 credential 로 다시 묶입니다 — usage limit 에 걸렸으면 CLI 설정에서 바꾼 뒤 누르세요. ') +
+                            translate('진행 중인 턴이 있으면 끊깁니다.')
                       }
                       onSelect={() => { closeMenu(); void restart(); }}
                     />
-                    <SessionMenuItem icon="↻" label="Reload transcript" title="Reload the transcript from the Runtime Host" onSelect={() => { closeMenu(); void load(); }} />
-                    <SessionMenuItem icon="＋" label="New session" onSelect={() => { closeMenu(); onNew(); }} />
+                    <SessionMenuItem icon="↻" label={translate('Reload transcript')} title={translate('Reload the transcript from the Runtime Host')} onSelect={() => { closeMenu(); void load(); }} />
+                    <SessionMenuItem icon="＋" label={translate('New session')} onSelect={() => { closeMenu(); onNew(); }} />
                     {ttsReady && (
                       <SessionMenuItem
                         icon={readReplies ? '🔊' : '🔈'}
-                        label={readReplies ? 'Read replies aloud: on' : 'Read replies aloud: off'}
+                        label={readReplies ? translate('Read replies aloud: on') : translate('Read replies aloud: off')}
                         pressed={readReplies}
                         title={readReplies
-                          ? '턴이 끝나면 답을 소리로 읽습니다 — 누르면 끕니다'
-                          : '턴이 끝나면 답을 소리로 읽게 합니다 — 꺼져 있어도 🎙 로 물은 답은 읽습니다'}
+                          ? translate('턴이 끝나면 답을 소리로 읽습니다 — 누르면 끕니다')
+                          : translate('턴이 끝나면 답을 소리로 읽게 합니다 — 꺼져 있어도 🎙 로 물은 답은 읽습니다')}
                         onSelect={() => {
                           const next = !readReplies;
                           setReadReplies(next);
@@ -1093,12 +1099,12 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
                     {canManageOperators && (
                       <SessionMenuItem
                         icon={thisOperator ? '★' : '☆'}
-                        label={thisOperator ? `Operator "${thisOperator.name}"…` : 'Make operator…'}
+                        label={thisOperator ? translate('Operator "{0}"…', { 0: thisOperator.name }) : translate('Make operator…')}
                         pressed={!!thisOperator}
                         disabled={!thisOperator && busy}
                         title={thisOperator
-                          ? `이 세션은 operator "${thisOperator.name}" 입니다 — 이름·별칭을 고치거나 해제합니다`
-                          : busy ? '턴이 끝난 뒤에 등록할 수 있습니다(지침을 다음 프롬프트로 보냅니다)' : '이 세션에 이름을 붙여 operator 로 등록합니다 — "헤이 <이름>" 으로 부르면 깨어납니다'}
+                          ? translate('이 세션은 operator "{0}" 입니다 — 이름·별칭을 고치거나 해제합니다', { 0: thisOperator.name })
+                          : busy ? translate('턴이 끝난 뒤에 등록할 수 있습니다(지침을 다음 프롬프트로 보냅니다)') : translate('이 세션에 이름을 붙여 operator 로 등록합니다 — "헤이 <이름>" 으로 부르면 깨어납니다')}
                         onSelect={() => { closeMenu(); setOperatorDialogOpen(true); }}
                       />
                     )}
@@ -1115,17 +1121,15 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       {((status === 'error' && live?.last_error) || connectError) && (
         <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}`, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <span style={{ flex: 1, minWidth: 0 }}>{missingCredential
-            ? 'This session\'s saved credential no longer exists. Choose a login in CLI settings, then reconnect using those settings.'
+            ? translate('This session\'s saved credential no longer exists. Choose a login in CLI settings, then reconnect using those settings.')
             : (status === 'error' && live?.last_error) || connectError}</span>
           {missingCredential && (
             <Button variant="secondary" size="sm" disabled={connecting || !canPrompt(status)} onClick={() => void repairCredential()}>
-              Reconnect using CLI settings
-            </Button>
+              {translate('Reconnect using CLI settings')}</Button>
           )}
           {canForceOpen && !connecting && (
-            <Button variant="secondary" size="sm" onClick={() => void forceConnect()} title="잠금을 쥔 프로세스를 종료하고 이 세션을 엽니다">
-              강제로 열기…
-            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void forceConnect()} title={translate('잠금을 쥔 프로세스를 종료하고 이 세션을 엽니다')}>
+              {translate('강제로 열기…')}</Button>
           )}
         </div>
       )}
@@ -1137,9 +1141,9 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
 
       <div className="awb-session-transcript" ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
         {loading && events.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Reading the session from the Runtime Host…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Reading the session from the Runtime Host…')}</div>
         ) : blocks.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>No transcript yet. Send your first prompt.</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('No transcript yet. Send your first prompt.')}</div>
         ) : (
           <div ref={contentRef}>
           <SessionTranscript
@@ -1164,14 +1168,13 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard, color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
           }}
         >
-          ↓ 최신으로
-        </button>
+          {translate('↓ 최신으로')}</button>
       )}
 
       <SessionComposer
         disabled={false}
         busy={busy}
-        placeholder={pending ? (pending.kind === 'elicitation' ? 'Answer the question above…' : 'Answer the permission request above…') : canPrompt(status) ? `Send a prompt to ${runtimeLabel(cli)}…` : `${runtimeLabel(cli)} is working — type to add to the current turn…`}
+        placeholder={pending ? (pending.kind === 'elicitation' ? translate('Answer the question above…') : translate('Answer the permission request above…')) : canPrompt(status) ? translate('Send a prompt to {0}…', { 0: runtimeLabel(cli) }) : translate('{0} is working — type to add to the current turn…', { 0: runtimeLabel(cli) })}
         hint={composerHint}
         commands={commands}
         onSend={send}
@@ -1186,9 +1189,9 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
           session={{ manager_id: managerId, cli, session_id: sessionId, cwd, title }}
           onSaved={(saved, { created, sendBrief: brief }) => {
             if (brief) sendBrief(saved.name);
-            showToast(created ? `"${saved.name}" 을(를) operator 로 등록했습니다 — "헤이 ${saved.name}" 으로 부르세요.` : 'Operator 를 고쳤습니다.', 'success');
+            showToast(created ? translate('"{0}" 을(를) operator 로 등록했습니다 — "헤이 {1}" 으로 부르세요.', { 0: saved.name, 1: saved.name }) : translate('Operator 를 고쳤습니다.'), 'success');
           }}
-          onRemoved={() => showToast('Operator 등록을 해제했습니다 — 세션은 그대로 남습니다.', 'info')}
+          onRemoved={() => showToast(translate('Operator 등록을 해제했습니다 — 세션은 그대로 남습니다.'), 'info')}
           onSendBrief={sendBrief}
         />
       )}
@@ -1199,6 +1202,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
 // ─── 라우트 컨테이너 ────────────────────────────────────────────────────────
 
 export default function SessionsPage() {
+  useLocale();
   const { managerId, cli, sessionId } = useParams<{ managerId?: string; cli?: string; sessionId?: string }>();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';

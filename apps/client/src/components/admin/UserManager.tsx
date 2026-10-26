@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect } from 'react';
 import { api } from '../../api';
 import { User, PermissionMeta } from '../../types';
@@ -20,6 +23,7 @@ interface PendingUser {
 }
 
 export default function UserManager({ accountId }: { accountId?: string } = {}) {
+  useLocale();
   const confirm = useConfirm();
   const [users, setUsers] = useState<User[]>([]);
   const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
@@ -91,7 +95,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
   };
 
   const handleDelete = async (id: string) => {
-    const ok = await confirm({ title: 'Delete user', message: 'Delete this user?' });
+    const ok = await confirm({ title: translate('Delete user'), message: translate('Delete this user?') });
     if (!ok) return;
     await api.deleteUser(id);
     await load();
@@ -146,7 +150,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong }}>{user.name}</div>
           <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-            {user.email || 'No email'} &middot; {new Date(user.created_at).toLocaleDateString()}
+            {user.email || translate('No email')} {translate('·')} {new Date(user.created_at).toLocaleDateString(getLocaleTag())}
           </div>
         </div>
         <Badge variant="warning">{user.status}</Badge>
@@ -154,8 +158,8 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
           variant="primary"
           size="sm"
           onClick={() => handleApprove(user.id)}
-        >Approve</Button>
-        <Button variant="danger" size="sm" onClick={() => handleReject(user.id)}>Reject</Button>
+        >{translate('Approve')}</Button>
+        <Button variant="danger" size="sm" onClick={() => handleReject(user.id)}>{translate('Reject')}</Button>
       </div>
     </Card>
   );
@@ -172,7 +176,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textStrong }}>{user.name}</div>
           <div style={{ fontSize: 11, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {user.email || 'No email'}
+            {user.email || translate('No email')}
           </div>
         </div>
       </div>
@@ -181,8 +185,8 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
         <Badge variant={user.status === 'active' ? 'success' : user.status === 'pending' ? 'warning' : 'danger'}>{user.status}</Badge>
       </div>
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-        <Button variant="secondary" size="sm" onClick={() => handleEdit(user)}>Edit</Button>
-        <Button variant="danger" size="sm" onClick={() => handleDelete(user.id)}>Delete</Button>
+        <Button variant="secondary" size="sm" onClick={() => handleEdit(user)}>{translate('Edit')}</Button>
+        <Button variant="danger" size="sm" onClick={() => handleDelete(user.id)}>{translate('Delete')}</Button>
       </div>
     </Card>
   );
@@ -190,8 +194,8 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{users.length} users</span>
-        <Button variant="primary" size="md" onClick={() => { resetForm(); setShowForm(true); }}>+ Add User</Button>
+        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{users.length} {translate('users')}</span>
+        <Button variant="primary" size="md" onClick={() => { resetForm(); setShowForm(true); }}>{translate('+ Add User')}</Button>
       </div>
 
       {/* Pending Users Section */}
@@ -202,7 +206,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
             display: 'flex', alignItems: 'center', gap: 6,
           }}>
             <Badge variant="warning" dot />
-            Pending Approval ({pendingUsers.length})
+            {translate('Pending Approval (')}{pendingUsers.length})
           </h4>
           <div style={{
             display: 'grid',
@@ -223,8 +227,8 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
         {activeUsers.map(user => renderUserRow(user))}
         {users.length === 0 && pendingUsers.length === 0 && (
           <div style={{ textAlign: 'center', padding: '48px 24px', gridColumn: '1 / -1' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No users yet</div>
-            <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Add your first user to get started.</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>{translate('No users yet')}</div>
+            <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>{translate('Add your first user to get started.')}</div>
           </div>
         )}
       </div>
@@ -233,44 +237,44 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
       <Modal
         isOpen={showForm}
         onClose={resetForm}
-        title={editingId ? 'Edit User' : 'Create User'}
+        title={editingId ? translate('Edit User') : translate('Create User')}
         maxWidth={560}
         footer={
           <>
-            <Button variant="secondary" onClick={resetForm}>Cancel</Button>
-            <Button variant="primary" onClick={handleSave}>{editingId ? 'Update' : 'Create'}</Button>
+            <Button variant="secondary" onClick={resetForm}>{translate('Cancel')}</Button>
+            <Button variant="primary" onClick={handleSave}>{editingId ? translate('Update') : translate('Create')}</Button>
           </>
         }
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.spacing.sm }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input
-              label="Name *"
+              label={translate('Name *')}
               value={form.name}
               onChange={e => setForm({ ...form, name: e.target.value })}
-              placeholder="User name"
+              placeholder={translate('User name')}
             />
             <Input
-              label="Email"
+              label={translate('Email')}
               value={form.email}
               onChange={e => setForm({ ...form, email: e.target.value })}
               placeholder="email@example.com"
             />
             <Input
-              label={`Password${editingId ? ' (leave empty to keep)' : ''}`}
+              label={translate('Password{0}', { 0: editingId ? translate(' (leave empty to keep)') : '' })}
               type="password"
               value={form.password}
               onChange={e => setForm({ ...form, password: e.target.value })}
-              placeholder={editingId ? 'Unchanged' : 'Set password'}
+              placeholder={editingId ? translate('Unchanged') : translate('Set password')}
             />
             <Select
-              label="Role"
+              label={translate('Role')}
               value={form.role}
               onChange={e => setForm({ ...form, role: (e.target as HTMLSelectElement).value })}
-              options={[{ value: 'user', label: 'User' }, { value: 'admin', label: 'Admin' }]}
+              options={[{ value: 'user', label: translate('User') }, { value: 'admin', label: translate('Admin') }]}
             />
             <Input
-              label="Discord User ID"
+              label={translate('Discord User ID')}
               value={form.discord_user_id}
               onChange={e => setForm({ ...form, discord_user_id: e.target.value })}
               placeholder="123456789"
@@ -280,8 +284,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
           {/* Permissions Section */}
           <div>
             <Button variant="ghost" size="sm" onClick={() => setShowPerms(!showPerms)}>
-              {showPerms ? 'Hide' : 'Show'} Custom Permissions
-              {form.permissions.length > 0 && ` (${form.permissions.length} custom)`}
+              {showPerms ? translate('Hide') : translate('Show')} {translate('Custom Permissions')}{form.permissions.length > 0 && translate(' ({0} custom)', { 0: form.permissions.length })}
             </Button>
 
             {showPerms && permInfo && (
@@ -290,9 +293,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
                 border: `1px solid ${tokens.colors.border}`, padding: 12,
               }}>
                 <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 10 }}>
-                  Role "{form.role}" includes {roleDefaults.length} default permissions.
-                  Add custom permissions below to extend access.
-                </div>
+                  {translate('Role "')}{form.role}{translate('" includes')} {roleDefaults.length} {translate('default permissions. Add custom permissions below to extend access.')}</div>
                 {Object.entries(permGroups).map(([group, perms]) => (
                   <div key={group} style={{ marginBottom: 10 }}>
                     <div style={{ fontSize: '10px', fontWeight: 700, color: tokens.colors.borderStrong, textTransform: 'uppercase', marginBottom: 4 }}>{group}</div>
@@ -314,7 +315,7 @@ export default function UserManager({ accountId }: { accountId?: string } = {}) 
                           />
                           <span style={{ fontSize: '12px', color: isActive ? tokens.colors.textStrong : tokens.colors.textMuted }}>
                             {meta.label}
-                            {isRoleDefault && <span style={{ fontSize: '10px', color: tokens.colors.borderStrong, marginLeft: 4 }}>(role default)</span>}
+                            {isRoleDefault && <span style={{ fontSize: '10px', color: tokens.colors.borderStrong, marginLeft: 4 }}>{translate('(role default)')}</span>}
                           </span>
                         </label>
                       );

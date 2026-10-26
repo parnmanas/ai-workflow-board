@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -41,6 +43,7 @@ import { missionStyle, progressPercent } from './status';
  * the mission is non-terminal, to cover a dropped SSE frame.
  */
 export default function MissionDetailPage() {
+  useLocale();
   const { missionId = '' } = useParams<{ missionId: string }>();
   const { currentAccountId } = useAuth();
   const navigate = useNavigate();
@@ -126,22 +129,22 @@ export default function MissionDetailPage() {
       setMission(await fn());
       showToast(successMessage, 'success');
     } catch (e: any) {
-      showToast(e?.message || 'Action failed', 'error');
+      showToast(e?.message || translate('Action failed'), 'error');
     } finally {
       setBusy(false);
     }
   };
 
   if (loading) {
-    return <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>Loading mission...</div>;
+    return <div style={{ padding: 24, color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading mission...')}</div>;
   }
   if (notFound || !mission) {
     return (
       <div style={{ padding: 24 }}>
         <EmptyState
-          title="Mission not found"
-          description="It may have been deleted, or you may no longer have access."
-          action={<Button variant="secondary" onClick={() => navigate('/missions')}>Back to missions</Button>}
+          title={translate('Mission not found')}
+          description={translate('It may have been deleted, or you may no longer have access.')}
+          action={<Button variant="secondary" onClick={() => navigate('/missions')}>{translate('Back to missions')}</Button>}
         />
       </div>
     );
@@ -150,7 +153,7 @@ export default function MissionDetailPage() {
   const selectedStep = mission.steps.find((s) => s.id === selectedStepId) || null;
   const copyMissionId = async () => {
     const copied = await copyPlainText(mission.id);
-    showToast(copied ? 'Mission ID copied' : 'Could not copy mission ID', copied ? 'success' : 'error');
+    showToast(copied ? translate('Mission ID copied') : translate('Could not copy mission ID'), copied ? 'success' : 'error');
   };
   const deleteMission = async () => {
     if (deleting.current || busy) return;
@@ -159,10 +162,10 @@ export default function MissionDetailPage() {
     try {
       await api.deleteOrchestrationMission(mission.id, mission.account_id);
       setShowDelete(false);
-      showToast('Mission deleted', 'success');
+      showToast(translate('Mission deleted'), 'success');
       navigate('/missions');
     } catch (e: any) {
-      showToast(e?.message || 'Could not delete mission', 'error');
+      showToast(e?.message || translate('Could not delete mission'), 'error');
     } finally {
       deleting.current = false;
       setBusy(false);
@@ -173,7 +176,7 @@ export default function MissionDetailPage() {
    * 깨어나므로, 화면은 곧 대화가 이어지는 상태가 된다.
    */
   const reopen = () =>
-    act(() => api.reopenOrchestrationMission(mission.id, accountId), '미션을 다시 열었습니다 — orchestrator 를 깨웠습니다');
+    act(() => api.reopenOrchestrationMission(mission.id, accountId), translate('미션을 다시 열었습니다 — orchestrator 를 깨웠습니다'));
   const evidenceTotal =
     mission.steps.reduce((n, s) => n + (s.evidence_count ?? 0), 0) + (mission.mission_evidence_count ?? 0);
 
@@ -182,37 +185,33 @@ export default function MissionDetailPage() {
 
       <PageHeader
         title={mission.title}
-        description={`${mission.team_name}${mission.orchestrator_name ? ` · orchestrated by ${mission.orchestrator_name}` : ''}`}
+        description={`${mission.team_name}${mission.orchestrator_name ? translate(' · orchestrated by {0}', { 0: mission.orchestrator_name }) : ''}`}
         actions={
           <>
             <Button variant="ghost" size="sm" onClick={() => navigate('/missions')}>
-              All missions
-            </Button>
+              {translate('All missions')}</Button>
             {mission.status === 'draft' && (
               <>
                 <Button
                   variant="primary"
                   size="sm"
                   loading={busy}
-                  onClick={() => act(() => api.startOrchestrationMission(mission.id, accountId), 'Orchestrator briefed')}
+                  onClick={() => act(() => api.startOrchestrationMission(mission.id, accountId), translate('Orchestrator briefed'))}
                 >
-                  Start
-                </Button>
+                  {translate('Start')}</Button>
               </>
             )}
             {(mission.status === 'planning' || mission.status === 'running') && (
               <>
                 <Button variant="secondary" size="sm" loading={busy} onClick={() => setShowNudge(true)}>
-                  Nudge orchestrator
-                </Button>
+                  {translate('Nudge orchestrator')}</Button>
                 <Button
                   variant="secondary"
                   size="sm"
                   loading={busy}
-                  onClick={() => act(() => api.pauseOrchestrationMission(mission.id, accountId), 'Mission paused')}
+                  onClick={() => act(() => api.pauseOrchestrationMission(mission.id, accountId), translate('Mission paused'))}
                 >
-                  Pause
-                </Button>
+                  {translate('Pause')}</Button>
               </>
             )}
             {mission.status === 'paused' && (
@@ -220,15 +219,13 @@ export default function MissionDetailPage() {
                 variant="primary"
                 size="sm"
                 loading={busy}
-                onClick={() => act(() => api.resumeOrchestrationMission(mission.id, accountId), 'Mission resumed')}
+                onClick={() => act(() => api.resumeOrchestrationMission(mission.id, accountId), translate('Mission resumed'))}
               >
-                Resume
-              </Button>
+                {translate('Resume')}</Button>
             )}
             {!['completed', 'failed', 'cancelled'].includes(mission.status) && (
               <Button variant="danger" size="sm" onClick={() => setShowCancel(true)}>
-                Cancel
-              </Button>
+                {translate('Cancel')}</Button>
             )}
             {/*
               종료된 미션을 되살린다. 새 미션을 만드는 것보다 이 버튼이 나은 이유는 계획·step
@@ -237,8 +234,7 @@ export default function MissionDetailPage() {
             */}
             {['completed', 'failed', 'cancelled'].includes(mission.status) && (
               <Button variant="secondary" size="sm" loading={busy} onClick={() => void reopen()}>
-                Reopen
-              </Button>
+                {translate('Reopen')}</Button>
             )}
             <MissionHeaderMenu
               mission={mission}
@@ -268,7 +264,7 @@ export default function MissionDetailPage() {
         읽다가 step 상태를 보려면 화면을 잃어버렸다.
       */}
       <div className="awb-mission-body" style={{ flex: 1, minHeight: 0, display: 'flex', marginTop: 10, borderTop: `1px solid ${tokens.colors.border}` }}>
-        {compact && <Button variant="secondary" size="sm" aria-expanded={stepsOpen} aria-controls="mission-steps" onClick={() => setStepsOpen((open) => !open)}>Steps ({mission.steps.length}) {stepsOpen ? '▴' : '▾'}</Button>}
+        {compact && <Button variant="secondary" size="sm" aria-expanded={stepsOpen} aria-controls="mission-steps" onClick={() => setStepsOpen((open) => !open)}>{translate('Steps (')}{mission.steps.length}) {stepsOpen ? '▴' : '▾'}</Button>}
         <div id="mission-steps" className="awb-mission-rail" hidden={compact && !stepsOpen}>
         <MissionStepRail
           steps={mission.steps}
@@ -304,24 +300,21 @@ export default function MissionDetailPage() {
             }}
           >
             <Tab active={tab === 'session'} onClick={() => setTab('session')}>
-              {selectedStep ? 'Step session' : 'Mission conversation'}
+              {selectedStep ? translate('Step session') : translate('Mission conversation')}
             </Tab>
             <Tab active={tab === 'graph'} onClick={() => setTab('graph')}>
-              Plan graph
-            </Tab>
+              {translate('Plan graph')}</Tab>
             <Tab active={tab === 'evidence'} onClick={() => setTab('evidence')}>
-              Evidence{evidenceTotal > 0 ? ` (${evidenceTotal})` : ''}
+              {translate('Evidence')}{evidenceTotal > 0 ? ` (${evidenceTotal})` : ''}
             </Tab>
             <Tab active={tab === 'brief'} onClick={() => setTab('brief')}>
-              Brief
-            </Tab>
+              {translate('Brief')}</Tab>
             {/* 종료된 미션에서도 대화가 되므로(되살리기 입구) 이 옵션은 방이 있으면 보인다. */}
             {tab === 'session' && !selectedStep && !!mission.room_id && (
               <label
                 style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted }}
               >
-                User chat
-                <select
+                {translate('User chat')}<select
                   value={mission.user_chat_mode}
                   disabled={busy}
                   data-testid="mission-user-chat-mode"
@@ -334,7 +327,7 @@ export default function MissionDetailPage() {
                           // 미션에서 서버의 draft 잠금이 409 를 낸다.
                           user_chat_mode: e.target.value as OrchestrationUserChatMode,
                         }),
-                      'User chat updated',
+                      translate('User chat updated'),
                     )
                   }
                   style={{
@@ -346,9 +339,9 @@ export default function MissionDetailPage() {
                     color: tokens.colors.textPrimary,
                   }}
                 >
-                  <option value="open">Open</option>
-                  <option value="participants_only">Participants only</option>
-                  <option value="off">Off (read-only)</option>
+                  <option value="open">{translate('Open')}</option>
+                  <option value="participants_only">{translate('Participants only')}</option>
+                  <option value="off">{translate('Off (read-only)')}</option>
                 </select>
               </label>
             )}
@@ -384,17 +377,16 @@ export default function MissionDetailPage() {
             ) : tab === 'graph' ? (
               <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
                 {mission.steps.length === 0 ? (
-                  <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No steps to draw yet.</div>
+                  <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No steps to draw yet.')}</div>
                 ) : (
                   <>
                     <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 10 }}>
-                      {mission.counts.done}/{mission.counts.total} done · up to {mission.max_parallel_steps} in parallel
-                      {mission.graph_spec
-                        ? ` · graph: ${mission.graph_spec.nodes.length} nodes, ${mission.graph_spec.edges.length} edges` +
+                      {mission.counts.done}/{mission.counts.total} {translate('done · up to')} {mission.max_parallel_steps} {translate('in parallel')}{mission.graph_spec
+                        ? translate(' · graph: {0} nodes, {1} edges', { 0: mission.graph_spec.nodes.length, 1: mission.graph_spec.edges.length }) +
                           (mission.graph_spec.edges.some((e) => e.kind === 'loop_back')
-                            ? `, ${mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length} loop`
+                            ? translate(', {0} loop', { 0: mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length })
                             : '') +
-                          ` · budget ${mission.total_visits}/${mission.graph_spec.max_total_visits} runs`
+                          translate(' · budget {0}/{1} runs', { 0: mission.total_visits, 1: mission.graph_spec.max_total_visits })
                         : ''}
                     </div>
                     <PlanGraph
@@ -461,21 +453,21 @@ export default function MissionDetailPage() {
 
       <ConfirmDialog
         isOpen={showDelete}
-        title="Delete mission?"
-        message={`Delete "${mission.title}" and its steps? This cannot be undone.\nMission ID: ${mission.id}`}
-        confirmLabel={busy ? 'Deleting…' : 'Delete mission'}
+        title={translate('Delete mission?')}
+        message={translate('Delete "{0}" and its steps? This cannot be undone.\nMission ID: {1}', { 0: mission.title, 1: mission.id })}
+        confirmLabel={busy ? translate('Deleting…') : translate('Delete mission')}
         onConfirm={() => void deleteMission()}
         onCancel={() => { if (!deleting.current) setShowDelete(false); }}
       />
 
       <ConfirmDialog
         isOpen={showCancel}
-        title="Cancel mission?"
-        message="Open steps are marked cancelled and no further work is dispatched. Subagents already running are not killed — their late reports are simply rejected."
-        confirmLabel="Cancel mission"
+        title={translate('Cancel mission?')}
+        message={translate('Open steps are marked cancelled and no further work is dispatched. Subagents already running are not killed — their late reports are simply rejected.')}
+        confirmLabel={translate('Cancel mission')}
         onConfirm={async () => {
           setShowCancel(false);
-          await act(() => api.cancelOrchestrationMission(mission.id, accountId, 'cancelled from the mission view'), 'Mission cancelled');
+          await act(() => api.cancelOrchestrationMission(mission.id, accountId, translate('cancelled from the mission view')), translate('Mission cancelled'));
         }}
         onCancel={() => setShowCancel(false)}
       />
@@ -485,6 +477,7 @@ export default function MissionDetailPage() {
 
 /** 오른쪽 패널의 탭 하나. */
 function Tab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  useLocale();
   return (
     <button
       type="button"
@@ -520,6 +513,7 @@ function NudgeModal({
   onClose: () => void;
   onDone: (m: OrchestrationMissionDetail) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
@@ -532,9 +526,9 @@ function NudgeModal({
     setSaving(true);
     try {
       onDone(await api.nudgeOrchestrationMission(missionId, accountId, note.trim()));
-      showToast('Orchestrator woken', 'success');
+      showToast(translate('Orchestrator woken'), 'success');
     } catch (e: any) {
-      showToast(e?.message || 'Failed to nudge', 'error');
+      showToast(e?.message || translate('Failed to nudge'), 'error');
     } finally {
       setSaving(false);
     }
@@ -544,28 +538,24 @@ function NudgeModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Nudge the orchestrator"
+      title={translate('Nudge the orchestrator')}
       maxWidth={520}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
+            {translate('Cancel')}</Button>
           <Button variant="primary" onClick={submit} loading={saving}>
-            Send
-          </Button>
+            {translate('Send')}</Button>
         </>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
-          Posts a message into the mission room and wakes the orchestrator so it re-reads the mission state and takes
-          the next action. Use it when a mission looks stalled, or to redirect the plan without cancelling it.
-        </div>
+          {translate('Posts a message into the mission room and wakes the orchestrator so it re-reads the mission state and takes the next action. Use it when a mission looks stalled, or to redirect the plan without cancelling it.')}</div>
         <textarea
           value={note}
           rows={4}
-          placeholder="Optional note (e.g. drop the migration step and ship the API first)"
+          placeholder={translate('Optional note (e.g. drop the migration step and ship the API first)')}
           onChange={(e) => setNote(e.target.value)}
           style={{
             width: '100%',
@@ -594,6 +584,7 @@ function NudgeModal({
  * planning 안내는 남긴다 — 둘 다 "왜 아무 일도 일어나지 않는가"의 답이라 접으면 안 된다.
  */
 function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
+  useLocale();
   const style = missionStyle(mission.status);
   const pct = progressPercent(mission.counts);
   return (
@@ -627,10 +618,10 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
         )}
         <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
           {mission.counts.total > 0
-            ? `${mission.counts.done} done · ${mission.counts.inFlight} working · ${mission.counts.pending} waiting` +
-              `${mission.counts.awaitingUser ? ` · ${mission.counts.awaitingUser} needs your decision` : ''}` +
-              `${mission.counts.failed ? ` · ${mission.counts.failed} failed` : ''}`
-            : 'No steps yet'}
+            ? translate('{0} done · {1} working · {2} waiting', { 0: mission.counts.done, 1: mission.counts.inFlight, 2: mission.counts.pending }) +
+              `${mission.counts.awaitingUser ? translate(' · {0} needs your decision', { 0: mission.counts.awaitingUser }) : ''}` +
+              `${mission.counts.failed ? translate(' · {0} failed', { 0: mission.counts.failed }) : ''}`
+            : translate('No steps yet')}
         </span>
         <div
           style={{
@@ -646,10 +637,10 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
         </div>
         <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
           {mission.finished_at
-            ? `finished ${relativeTime(mission.finished_at)}`
+            ? translate('finished {0}', { 0: relativeTime(mission.finished_at) })
             : mission.started_at
-              ? `started ${relativeTime(mission.started_at)}`
-              : `created ${relativeTime(mission.created_at)}`}
+              ? translate('started {0}', { 0: relativeTime(mission.started_at) })
+              : translate('created {0}', { 0: relativeTime(mission.created_at) })}
         </span>
       </div>
 
@@ -660,10 +651,7 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
       )}
       {mission.status === 'planning' && (
         <div style={{ marginTop: 7, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-          The orchestrator has been briefed in its mission room and is deciding how to break the work up. If nothing
-          appears for a while, check that the orchestrator agent is online — the server re-briefs it automatically
-          before giving up.
-        </div>
+          {translate('The orchestrator has been briefed in its mission room and is deciding how to break the work up. If nothing appears for a while, check that the orchestrator agent is online — the server re-briefs it automatically before giving up.')}</div>
       )}
     </div>
   );
@@ -677,6 +665,7 @@ function postActionStyle(status: string): { color: string; background: string } 
 }
 
 function Section({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
+  useLocale();
   return (
     <section>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
@@ -691,6 +680,7 @@ function Section({ title, right, children }: { title: string; right?: React.Reac
 }
 
 function SubHeading({ children }: { children: React.ReactNode }) {
+  useLocale();
   return (
     <div style={{ marginTop: 12, marginBottom: 4, fontSize: 11, fontWeight: 700, color: tokens.colors.textSecondary }}>
       {children}
@@ -699,6 +689,7 @@ function SubHeading({ children }: { children: React.ReactNode }) {
 }
 
 function Prose({ text, muted }: { text: string; muted?: boolean }) {
+  useLocale();
   return (
     <div
       style={{
@@ -726,6 +717,7 @@ function BriefPane({ mission, teams, onCopyId }: {
   teams: OrchestrationTeam[];
   onCopyId: () => void;
 }) {
+  useLocale();
   const excluded = mission.excluded_member_ids ?? [];
   const extras = mission.extra_members ?? [];
   const team = teams.find((t) => t.id === mission.team_id) || null;
@@ -734,42 +726,39 @@ function BriefPane({ mission, teams, onCopyId }: {
   const projectName = (id: string) => projects.find((p) => p.project_id === id)?.name || id.slice(0, 8);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820 }}>
-      <Section title="Mission information">
+      <Section title={translate('Mission information')}>
         <MissionIdentity id={mission.id} onCopy={onCopyId} />
       </Section>
-      <Section title="Projects">
+      <Section title={translate('Projects')}>
         {projects.length === 0 ? (
           <div style={{ fontSize: 12, color: tokens.colors.warningLight }}>
-            No project — a mission needs at least one before it can start (members work in a project&apos;s folder on
-            their own host).
-          </div>
+            {translate('No project — a mission needs at least one before it can start (members work in a project\'s folder on their own host).')}</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tokens.colors.textSecondary }}>
             {projects.map((p, i) => (
               <div key={p.project_id}>
                 <span style={{ color: tokens.colors.textStrong }}>{p.name || p.project_id}</span>
-                {p.branch && <span> · branch <code>{p.branch}</code></span>}
-                {i === 0 && <span style={{ color: tokens.colors.textMuted }}> · primary</span>}
+                {p.branch && <span> {translate('· branch')} <code>{p.branch}</code></span>}
+                {i === 0 && <span style={{ color: tokens.colors.textMuted }}> {translate('· primary')}</span>}
               </div>
             ))}
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
               {(mission.folder_scope ?? 'shared') === 'shared'
-                ? 'Shared folders — each step runs directly in its project\'s folder on its host.'
-                : `Isolated folders — each step gets its own checkout under its project's folder (${mission.resolved_workspace_folder}/<step>).`}
+                ? translate('Shared folders — each step runs directly in its project\'s folder on its host.')
+                : translate('Isolated folders — each step gets its own checkout under its project\'s folder ({0}/<step>).', { 0: mission.resolved_workspace_folder })}
             </div>
           </div>
         )}
       </Section>
       {mission.roster && (
-        <Section title="Who works where">
+        <Section title={translate('Who works where')}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
-              Fixed when the mission started — editing the team later does not change it (reopening does).
-            </div>
+              {translate('Fixed when the mission started — editing the team later does not change it (reopening does).')}</div>
             {mission.roster.orchestrator && (
               <div>
                 <span style={{ color: tokens.colors.textStrong }}>{mission.roster.orchestrator.name}</span>
-                <span style={{ color: tokens.colors.textMuted }}> · orchestrator · </span>
+                <span style={{ color: tokens.colors.textMuted }}> {translate('· orchestrator ·')} </span>
                 {projectName(mission.roster.orchestrator.project_id)} — <code style={{ fontSize: 11 }}>{mission.roster.orchestrator.working_dir}</code>
               </div>
             )}
@@ -777,7 +766,7 @@ function BriefPane({ mission, teams, onCopyId }: {
               <div key={m.slot_id}>
                 <span style={{ color: tokens.colors.textStrong }}>{m.name}</span>
                 <span style={{ color: tokens.colors.textMuted }}>
-                  {' · '}{m.cli}{m.model ? ` (${m.model})` : ''}{m.kind === 'extra' ? ' · ad-hoc' : ''}
+                  {' · '}{m.cli}{m.model ? ` (${m.model})` : ''}{m.kind === 'extra' ? translate(' · ad-hoc') : ''}
                 </span>
                 {m.projects.map((p) => (
                   <div key={p.project_id} style={{ fontSize: 11, marginLeft: 12 }}>
@@ -790,43 +779,42 @@ function BriefPane({ mission, teams, onCopyId }: {
         </Section>
       )}
       {(excluded.length > 0 || extras.length > 0) && (
-        <Section title={`Team roster for this mission — ${team?.name ?? mission.team_name}`}>
+        <Section title={translate('Team roster for this mission — {0}', { 0: team?.name ?? mission.team_name })}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
-              Adjusted for this mission only — the team itself is unchanged.
-            </div>
+              {translate('Adjusted for this mission only — the team itself is unchanged.')}</div>
             {excluded.length > 0 && (
               <div>
-                <span style={{ color: tokens.colors.textStrong }}>Excluded ({excluded.length}): </span>
+                <span style={{ color: tokens.colors.textStrong }}>{translate('Excluded (')}{excluded.length}): </span>
                 {excludedNames.join(', ')}
               </div>
             )}
             {extras.length > 0 && (
               <div>
-                <span style={{ color: tokens.colors.textStrong }}>Ad-hoc ({extras.length}): </span>
+                <span style={{ color: tokens.colors.textStrong }}>{translate('Ad-hoc (')}{extras.length}): </span>
                 {extras.map((e) => `${e.role_label || e.spec.cli}${e.spec.model ? ` (${e.spec.model})` : ''}`).join(', ')}
               </div>
             )}
           </div>
         </Section>
       )}
-      <Section title="Objective">
+      <Section title={translate('Objective')}>
         <Prose text={mission.objective} />
         {mission.context && (
           <>
-            <SubHeading>Context</SubHeading>
+            <SubHeading>{translate('Context')}</SubHeading>
             <Prose text={mission.context} muted />
           </>
         )}
         {mission.method && (
           <>
-            <SubHeading>Method</SubHeading>
+            <SubHeading>{translate('Method')}</SubHeading>
             <Prose text={mission.method} muted />
           </>
         )}
         {mission.acceptance_criteria && (
           <>
-            <SubHeading>Acceptance criteria</SubHeading>
+            <SubHeading>{translate('Acceptance criteria')}</SubHeading>
             <Prose text={mission.acceptance_criteria} muted />
           </>
         )}
@@ -834,11 +822,10 @@ function BriefPane({ mission, teams, onCopyId }: {
 
       {mission.completion_criteria.length > 0 && (
         <Section
-          title="Completion criteria"
+          title={translate('Completion criteria')}
           right={
             <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-              {mission.completion_criteria.filter((c) => c.met).length}/{mission.completion_criteria.length} met
-            </span>
+              {mission.completion_criteria.filter((c) => c.met).length}/{mission.completion_criteria.length} {translate('met')}</span>
           }
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -859,19 +846,19 @@ function BriefPane({ mission, teams, onCopyId }: {
       )}
 
       {mission.plan_summary && (
-        <Section title={`Orchestrator's plan (v${mission.plan_version})`}>
+        <Section title={translate('Orchestrator\'s plan (v{0})', { 0: mission.plan_version })}>
           <Prose text={mission.plan_summary} />
         </Section>
       )}
 
       {mission.result_summary && (
-        <Section title={mission.status === 'completed' ? 'Result' : 'Final report'}>
+        <Section title={mission.status === 'completed' ? translate('Result') : translate('Final report')}>
           <Prose text={mission.result_summary} />
         </Section>
       )}
 
       {mission.post_actions.length > 0 && (
-        <Section title="Post-completion actions">
+        <Section title={translate('Post-completion actions')}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {[...mission.post_actions]
               .sort((a, b) => a.order - b.order)

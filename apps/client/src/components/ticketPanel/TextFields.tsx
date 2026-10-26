@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
 import { renderMarkdown, handleMentionAwareCopy } from '../common/Markdown';
@@ -5,6 +7,7 @@ import { controlStyle, fieldLabel, panelButton, section, wrapText } from './pane
 
 /** Grows with its content so nothing is cut off or hidden behind a scrollbar. */
 function useAutoHeight(value: string, minHeight: number) {
+  useLocale();
   const ref = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -17,11 +20,12 @@ function useAutoHeight(value: string, minHeight: number) {
 
 /** The ticket title: wraps over as many lines as it needs. Enter commits (no newlines). */
 export function TitleField({ value, onChange }: { value: string; onChange(next: string): void }) {
+  useLocale();
   const ref = useAutoHeight(value, 28);
   return (
     <textarea
       ref={ref}
-      aria-label="제목"
+      aria-label={translate('제목')}
       rows={1}
       value={value}
       onChange={e => onChange(e.target.value.replace(/\n/g, ' '))}
@@ -47,6 +51,7 @@ interface DescriptionFieldProps {
 
 /** Rendered markdown to read; a growing textarea to edit. */
 export function DescriptionField({ value, dirty, onChange }: DescriptionFieldProps) {
+  useLocale();
   const [editing, setEditing] = useState(false);
   const open = editing || dirty;
   const ref = useAutoHeight(open ? value : '', 120);
@@ -54,10 +59,10 @@ export function DescriptionField({ value, dirty, onChange }: DescriptionFieldPro
   return (
     <div style={section}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
-        <span style={{ ...fieldLabel, marginBottom: 0 }}>설명</span>
+        <span style={{ ...fieldLabel, marginBottom: 0 }}>{translate('설명')}</span>
         {value && (
           <button type="button" onClick={() => setEditing(v => !v)} style={{ ...panelButton('plain'), padding: '2px 8px', fontSize: '11px' }}>
-            {open ? '미리보기' : '편집'}
+            {open ? translate('미리보기') : translate('편집')}
           </button>
         )}
       </div>
@@ -67,7 +72,7 @@ export function DescriptionField({ value, dirty, onChange }: DescriptionFieldPro
           value={value}
           onChange={e => onChange(e.target.value)}
           onFocus={() => setEditing(true)}
-          placeholder="무엇을, 왜 해야 하는지 적어 주세요 (마크다운)"
+          placeholder={translate('무엇을, 왜 해야 하는지 적어 주세요 (마크다운)')}
           style={{
             ...controlStyle, fontSize: '13px', lineHeight: 1.6, padding: '8px 10px',
             resize: 'vertical', overflow: 'hidden', minHeight: value ? 120 : 64,
@@ -77,7 +82,7 @@ export function DescriptionField({ value, dirty, onChange }: DescriptionFieldPro
         <div
           onCopy={handleMentionAwareCopy}
           onDoubleClick={() => setEditing(true)}
-          title="두 번 클릭해서 편집"
+          title={translate('두 번 클릭해서 편집')}
           style={{
             background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
             borderRadius: tokens.radii.lg, padding: '8px 10px',

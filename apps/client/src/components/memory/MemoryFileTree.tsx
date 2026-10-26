@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import { tokens } from '../../tokens';
 import type { CliMemorySnapshot, MemoryDirInfo, MemoryFileInfo, MemoryHostSnapshot } from '../../types';
@@ -19,6 +22,7 @@ export default function MemoryFileTree({ snapshot, cli, homeId, onHomeChange, qu
   onSelect: (file: MemoryFileInfo) => void;
   onNewFile: (dir: MemoryDirInfo) => void;
 }) {
+  useLocale();
   const groups = treeGroups(snapshot, cli, homeId, query);
   const worstFor = (path: string) => {
     const hits = findings.filter((f) => findingAppliesTo(f, cli.cli) && f.paths[0] === path);
@@ -34,7 +38,7 @@ export default function MemoryFileTree({ snapshot, cli, homeId, onHomeChange, qu
           <select
             value={homeId}
             onChange={(e) => onHomeChange(e.target.value)}
-            aria-label="CLI home"
+            aria-label={translate('CLI home')}
             style={{ fontSize: 12, padding: '4px 6px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary }}
           >
             {cli.homes.map((h) => <option key={h.id} value={h.id}>{homeTitle(h)}</option>)}
@@ -43,14 +47,14 @@ export default function MemoryFileTree({ snapshot, cli, homeId, onHomeChange, qu
         <input
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
-          placeholder="Search names and content…"
-          aria-label="Search memory"
+          placeholder={translate('Search names and content…')}
+          aria-label={translate('Search memory')}
           style={{ fontSize: 12, padding: '5px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary }}
         />
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 6px 12px' }}>
         {groups.length === 0 && (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '8px 6px' }}>{query ? 'Nothing matches.' : 'No memory files here.'}</div>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '8px 6px' }}>{query ? translate('Nothing matches.') : translate('No memory files here.')}</div>
         )}
         {groups.map((g) => (
           <div key={g.key} style={{ marginTop: 8 }}>
@@ -80,8 +84,8 @@ export default function MemoryFileTree({ snapshot, cli, homeId, onHomeChange, qu
                     </span>
                     <span style={{ display: 'block', fontSize: 10.5, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {f.exists
-                        ? `${formatBytes(f.size)} · ≈${fileTokenCount(f).toLocaleString()} tok${f.loaded === 'always' || f.loaded === 'index_head' ? ' · loaded' : ''}${f.link_target ? ' · link' : ''}`
-                        : 'not created'}
+                        ? translate('{0} · ≈{1} tok{2}{3}', { 0: formatBytes(f.size), 1: fileTokenCount(f).toLocaleString(getLocaleTag()), 2: f.loaded === 'always' || f.loaded === 'index_head' ? translate(' · loaded') : '', 3: f.link_target ? translate(' · link') : '' })
+                        : translate('not created')}
                     </span>
                   </span>
                 </button>
@@ -95,15 +99,14 @@ export default function MemoryFileTree({ snapshot, cli, homeId, onHomeChange, qu
                 title={d.display_path}
                 style={{ display: 'block', width: '100%', textAlign: 'left', padding: '4px 8px 4px 20px', border: 'none', background: 'transparent', color: tokens.colors.accentSubtle, fontSize: 11.5, cursor: 'pointer', fontFamily: 'inherit' }}
               >
-                + New {d.kind === 'auto_topic' ? 'memory' : 'rule'} file{d.exists ? '' : ' (creates the folder)'}
+                {translate('+ New')} {d.kind === 'auto_topic' ? translate('memory') : translate('rule')} {translate('file')}{d.exists ? '' : translate(' (creates the folder)')}
               </button>
             ))}
           </div>
         ))}
         {sharedCount > 0 && (
           <div style={{ fontSize: 11, color: tokens.colors.textMuted, padding: '10px 6px 0' }}>
-            {sharedCount} file(s) here are the same files as the operator home (linked) and are listed there.
-          </div>
+            {sharedCount} {translate('file(s) here are the same files as the operator home (linked) and are listed there.')}</div>
         )}
       </div>
     </div>

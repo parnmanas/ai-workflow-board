@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -31,6 +33,7 @@ function fileToBase64(file: File): Promise<string> {
  * ticket id so busy/error state never bleeds across tickets.
  */
 export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview, labelStyle }: TicketAttachmentsSectionProps) {
+  useLocale();
   void _onPreview;
   const confirm = useConfirm();
   // Ticket-level attachments — file_data is fetched on demand (download/preview)
@@ -53,8 +56,8 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
         return mt.startsWith('image/') || mt.startsWith('video/');
       })
       .map((att) => att.id);
-  }, [ticketAttachments]);
-  const mediaById = useMemo(() => new Map(ticketAttachments.map((a) => [a.id, a])), [ticketAttachments]);
+  }, [ticketAttachments, getLocale()]);
+  const mediaById = useMemo(() => new Map(ticketAttachments.map((a) => [a.id, a])), [ticketAttachments, getLocale()]);
 
   const ensureLightboxSrc = useCallback(async (id: string) => {
     if (!id) return;
@@ -99,7 +102,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
         filename: att?.file_name,
       };
     });
-  }, [mediaOrder, mediaById, lightboxSrcs]);
+  }, [mediaOrder, mediaById, lightboxSrcs, getLocale()]);
   const lightboxIndex = lightboxId ? mediaOrder.indexOf(lightboxId) : -1;
 
   // The attachment list is an authoritative server-side fact with no draft
@@ -142,7 +145,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
       if (!files || files.length === 0) return;
       const remaining = TICKET_ATTACHMENT_MAX - ticketAttachments.length;
       if (remaining <= 0) {
-        setAttachmentError(`Maximum ${TICKET_ATTACHMENT_MAX} attachments per ticket`);
+        setAttachmentError(translate('Maximum {0} attachments per ticket', { 0: TICKET_ATTACHMENT_MAX }));
         return;
       }
       const payload: { file_name: string; file_mimetype: string; file_data: string }[] = [];
@@ -162,7 +165,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
       }
       if (payload.length === 0) {
         if (oversized.length > 0) {
-          setAttachmentError(`Skipped — exceeds 10MB: ${oversized.join(', ')}`);
+          setAttachmentError(translate('Skipped — exceeds 10MB: {0}', { 0: oversized.join(', ') }));
         }
         return;
       }
@@ -171,10 +174,10 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
         const saved = await api.addTicketAttachments(ticket.id, payload);
         setTicketAttachments(prev => [...saved, ...prev]);
         if (oversized.length > 0) {
-          setAttachmentError(`Skipped — exceeds 10MB: ${oversized.join(', ')}`);
+          setAttachmentError(translate('Skipped — exceeds 10MB: {0}', { 0: oversized.join(', ') }));
         }
       } catch (err: any) {
-        setAttachmentError(err?.message || 'Upload failed');
+        setAttachmentError(err?.message || translate('Upload failed'));
       } finally {
         setAttachmentBusy(false);
       }
@@ -183,7 +186,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
   }, [ticket.id, ticketAttachments.length]);
 
   const handleDeleteTicketAttachment = useCallback(async (attachmentId: string, fileName: string) => {
-    const ok = await confirm({ title: 'Delete attachment', message: `Delete attachment "${fileName}"?` });
+    const ok = await confirm({ title: translate('Delete attachment'), message: translate('Delete attachment "{0}"?', { 0: fileName }) });
     if (!ok) return;
     setAttachmentBusy(true);
     setAttachmentError(null);
@@ -193,7 +196,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
       await api.deleteTicketAttachment(ticket.id, attachmentId);
     } catch (err: any) {
       setTicketAttachments(prev);
-      setAttachmentError(err?.message || 'Delete failed');
+      setAttachmentError(err?.message || translate('Delete failed'));
     } finally {
       setAttachmentBusy(false);
     }
@@ -204,7 +207,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
     try {
       const full = await api.getTicketAttachment(ticket.id, attachment.id);
       if (!full?.file_data) {
-        setAttachmentError('Attachment has no data');
+        setAttachmentError(translate('Attachment has no data'));
         return;
       }
       const link = document.createElement('a');
@@ -214,7 +217,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
       link.click();
       document.body.removeChild(link);
     } catch (err: any) {
-      setAttachmentError(err?.message || 'Download failed');
+      setAttachmentError(err?.message || translate('Download failed'));
     }
   }, [ticket.id]);
 
@@ -237,8 +240,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
         <label style={{ ...labelStyle, marginBottom: 0 }}>
-          첨부
-          {ticketAttachments.length > 0 && (
+          {translate('첨부')}{ticketAttachments.length > 0 && (
             <span style={{ marginLeft: 6, color: tokens.colors.textDisabled, fontWeight: 500 }}>
               ({ticketAttachments.length}/{TICKET_ATTACHMENT_MAX})
             </span>
@@ -258,10 +260,9 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
             cursor: (attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX) ? 'not-allowed' : 'pointer',
             opacity: (attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX) ? 0.5 : 1,
           }}
-          title="Attach files (10MB each, max 20 per ticket)"
+          title={translate('Attach files (10MB each, max 20 per ticket)')}
         >
-          + Attach files
-        </button>
+          {translate('+ Attach files')}</button>
       </div>
       {attachmentError && (
         <div style={{
@@ -277,8 +278,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
           padding: '6px 10px', background: tokens.colors.surfaceCard,
           border: `1px dashed ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
         }}>
-          No files attached.
-        </div>
+          {translate('No files attached.')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           {ticketAttachments.map(att => {
@@ -306,18 +306,18 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
                     textAlign: 'left', flex: 1, minWidth: 0,
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}
-                  title={isImage || isVideo ? 'Click to preview' : 'Click to download'}
+                  title={isImage || isVideo ? translate('Click to preview') : translate('Click to download')}
                 >
                   {isImage ? '🖼️' : isVideo ? '🎬' : '📎'} {att.file_name}
                 </button>
                 <span style={{ fontSize: '10px', color: tokens.colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
-                  {sizeKb !== null ? `${sizeKb} KB` : ''}
+                  {sizeKb !== null ? translate('{0} KB', { 0: sizeKb }) : ''}
                   {att.uploaded_by ? ` · ${att.uploaded_by}` : ''}
                 </span>
                 <button
                   type="button"
                   onClick={() => handleDownloadTicketAttachment(att)}
-                  title="Download"
+                  title={translate('Download')}
                   style={{
                     background: 'transparent', border: 'none', cursor: 'pointer',
                     color: tokens.colors.textSecondary, fontSize: '12px', padding: '0 4px',
@@ -327,7 +327,7 @@ export default function TicketAttachmentsSection({ ticket, onPreview: _onPreview
                   type="button"
                   onClick={() => handleDeleteTicketAttachment(att.id, att.file_name)}
                   disabled={attachmentBusy}
-                  title="Delete"
+                  title={translate('Delete')}
                   style={{
                     background: 'transparent', border: 'none', cursor: attachmentBusy ? 'not-allowed' : 'pointer',
                     color: tokens.colors.dangerLight, fontSize: '12px', padding: '0 4px',

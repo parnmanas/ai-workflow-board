@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
@@ -61,11 +63,12 @@ function buildGraph(snapshot: OntologyGraphSnapshotResponse): Graph {
 }
 
 export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGraphSnapshotResponse }) {
+  useLocale();
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<Sigma | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedRef = useRef<string | null>(null);
-  const graph = useMemo(() => buildGraph(snapshot), [snapshot]);
+  const graph = useMemo(() => buildGraph(snapshot), [snapshot, getLocale()]);
   const selected = selectedId ? snapshot.nodes.find((node) => node.id === selectedId) || null : null;
 
   selectedRef.current = selectedId;
@@ -132,7 +135,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
     <div style={{ display: 'grid', gridTemplateColumns: selected ? 'minmax(0, 1fr) 280px' : '1fr', width: '100%', minHeight: 520, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden', background: tokens.colors.surface }}>
       <div
         ref={containerRef}
-        aria-label="Ontology graph canvas"
+        aria-label={translate('Ontology graph canvas')}
         role="application"
         tabIndex={0}
         onKeyDown={(event) => {
@@ -147,7 +150,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
           <div style={{ fontWeight: tokens.typography.fontWeightSemibold }}>{selected.name}</div>
           <div style={{ color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs, marginTop: 8 }}>{selected.type} · {selected.kind || selected.layer}</div>
           <div style={{ marginTop: 12, fontSize: tokens.typography.fontSizeMd }}>{selected.path}{selected.start_line ? `:${selected.start_line}` : ''}</div>
-          <div style={{ marginTop: 12, color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs }}>연결 {selected.degree}개 · {clusterOf(selected)} 클러스터</div>
+          <div style={{ marginTop: 12, color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs }}>{translate('연결')} {selected.degree}{translate('개 ·')} {clusterOf(selected)} {translate('클러스터')}</div>
         </aside>
       )}
     </div>

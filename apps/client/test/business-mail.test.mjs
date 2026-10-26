@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, typeInto, run, React, act } from './helpers/jsdom.mjs';
@@ -13,7 +14,7 @@ import BusinessLayout from '../src/components/business/BusinessLayout.tsx';
 
 const h = React.createElement;
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
-const button = (container, label) => { const node = [...container.querySelectorAll('button')].find(b => b.textContent.trim() === label); if (!node) throw new Error(`Missing button ${label}`); return node; };
+const button = (container, label) => { const node = [...container.querySelectorAll('button')].find(b => b.textContent.trim() === ui(label)); if (!node) throw new Error(`Missing button ${label}`); return node; };
 const connection = { id: 'c1', account_id: 'a1', company_id: null, name: 'Operations NAS', purpose: 'operations', provider: 'smtp_imap', credential_id: 'key', revision: 0, enabled: true, interval_minutes: 5, status: 'connected', synced_at: '', last_error: '', busy: false, config: { addresses: ['ops@example.com'], smtp: { host: 'smtp.example.com', port: 587, tls: 'starttls', username: 'ops' }, imap: { host: 'imap.example.com', port: 993, tls: 'implicit', username: 'ops', folder: 'INBOX' } } };
 const message = { id: 'm1', connection_id: 'c1', direction: 'inbound', status: 'received', from: 'vendor@example.com', to: ['ops@example.com'], subject: 'Invoice', preview: 'Private mail', text: '<img src="https://tracker.example.com/x">Untrusted message', date: '2026-01-01T00:00:00Z', created_at: '2026-01-01T00:00:00Z', confirmed: false, note: '', revision: 0, attachments: [], last_error: '' };
 async function render(t, { entry = '/business/mail', permissions = ['business.manage'], stubs = {}, notifications = false } = {}) {
@@ -53,15 +54,15 @@ async function render(t, { entry = '/business/mail', permissions = ['business.ma
 test('Business mail opens a unified list and preserves other filters while selecting a company or purpose', async t => {
   const { container, calls } = await render(t);
   assert.equal(Boolean(container.querySelector('.business-company-picker')), false);
-  assert.match(container.textContent, /비즈니스 메일/);
+  assert.match(container.textContent, uiPattern("비즈니스 메일"));
   assert.deepEqual(calls.find(c => c[0] === 'listBusinessMail')[1], {});
-  click(button(container, '필터')); await flush();
-  const company = container.querySelector('[aria-label="모든 회사"]');
+  click(button(container, ui("필터"))); await flush();
+  const company = container.querySelector(`[aria-label="${ui("모든 회사")}"]`);
   run(() => { company.value = 'co1'; company.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush(); await flush();
-  const purpose = container.querySelector('[aria-label="모든 업무 용도"]');
+  const purpose = container.querySelector(`[aria-label="${ui("모든 업무 용도")}"]`);
   run(() => { purpose.value = 'accounting'; purpose.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush(); await flush();
   assert.deepEqual(calls.filter(c => c[0] === 'listBusinessMail').at(-1)[1], { company_id: 'co1', purpose: 'accounting' });
-  click(button(container, '필터 초기화')); await flush(); await flush();
+  click(button(container, ui("필터 초기화"))); await flush(); await flush();
   assert.deepEqual(calls.filter(c => c[0] === 'listBusinessMail').at(-1)[1], {});
 });
 
@@ -72,41 +73,41 @@ test('reading mail renders text safely and does not confirm until the processing
   assert.equal(container.querySelectorAll('.business-mail-body img').length, 0);
   assert.match(container.querySelector('.business-mail-body').textContent, /Untrusted message/);
   typeInto(container.querySelector('textarea'), 'Invoice recorded');
-  click(button(container, '확인 완료')); await flush(); await flush();
+  click(button(container, ui("확인 완료"))); await flush(); await flush();
   assert.deepEqual(calls.find(c => c[0] === 'confirmBusinessMail').slice(1), ['m1', { revision: 0, confirmed: true, note: 'Invoice recorded' }]);
-  assert.match(container.textContent, /미확인으로 되돌리기/);
+  assert.match(container.textContent, uiPattern("미확인으로 되돌리기"));
 });
 
 test('connection settings preserve the cursor-bound server and let the user pause collection', async t => {
   const { container, calls } = await render(t, { entry: '/business/mail?connections=1' });
-  click(button(container, '설정')); await flush();
+  click(button(container, ui("설정"))); await flush();
   const dialog = container.querySelector('[role="dialog"]');
   assert.equal(Boolean(dialog), true);
   assert.equal([...dialog.querySelectorAll('input')].find(n => n.value === 'imap.example.com').disabled, true);
   const enabled = [...dialog.querySelectorAll('input[type="checkbox"]')].at(-1);
-  click(enabled); click(button(container, '연결 저장')); await flush(); await flush();
+  click(enabled); click(button(container, ui("연결 저장"))); await flush(); await flush();
   const saved = calls.find(c => c[0] === 'configureBusinessMail')[1]; assert.equal(saved.enabled, false); assert.equal(saved.id, 'c1'); assert.equal(saved.revision, 0);
 });
 
 test('missing business permission does not fetch private mail', async t => {
   const { container, calls } = await render(t, { permissions: [] });
-  assert.match(container.textContent, /business.manage 권한/);
+  assert.match(container.textContent, uiPattern("비즈니스 메일을 보려면 business.manage 권한이 필요합니다."));
   assert.equal(calls.some(c => c[0] === 'listBusinessMail'), false);
 });
 
 test('review mode saves the entered runtime and objective with one connection save', async t => {
   const { container, calls } = await render(t, { entry: '/business/mail?connections=1' });
-  click(button(container, '설정')); await flush();
+  click(button(container, ui("설정"))); await flush();
   const dialog = container.querySelector('[role="dialog"]');
-  const mode = dialog.querySelector('[aria-label="답장 모드"]');
+  const mode = dialog.querySelector(`[aria-label="${ui("답장 모드")}"]`);
   run(() => { mode.value = 'review'; mode.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
-  const template = dialog.querySelector('[aria-label="Agent 템플릿 (선택 사항)"]');
+  const template = dialog.querySelector(`[aria-label="${ui("Agent 템플릿 (선택 사항)")}"]`);
   assert.ok(template, 'runtime fields are immediately available in review mode');
   run(() => { template.value = 'mail-template'; template.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
   const workingDir = dialog.querySelector('input[placeholder="/home/user/work"]'); assert.ok(workingDir);
   typeInto(workingDir, '/srv/mail');
-  typeInto(dialog.querySelector('[aria-label="업무 목적 · 답장 기준"]'), '제품 문의에 답장 초안 작성');
-  click(button(container, '연결 저장')); await flush(); await flush();
+  typeInto(dialog.querySelector(`[aria-label="${ui("업무 목적 · 답장 기준")}"]`), '제품 문의에 답장 초안 작성');
+  click(button(container, ui("연결 저장"))); await flush(); await flush();
   const validated = calls.find(c => c[0] === 'validateRuntimeSpec'); assert.ok(validated);
   assert.equal(validated[1], 'a1');
   const saved = calls.find(c => c[0] === 'configureBusinessMail')?.[1]; assert.ok(saved);
@@ -115,24 +116,24 @@ test('review mode saves the entered runtime and objective with one connection sa
   assert.equal(saved.automation.agent_runtime.manager_agent_id, 'mail-host');
   assert.equal(saved.automation.agent_runtime.cli, 'codex');
   assert.equal(saved.automation.agent_runtime.working_dir, '/srv/mail');
-  assert.equal(container.querySelector('[role="dialog"]'), null);
+  assert.equal(Boolean(container.querySelector('[role="dialog"]')), false);
 });
 
 test('missing reply requirements remain visible next to save without discarding edits', async t => {
   const { container, calls } = await render(t, { entry: '/business/mail?connections=1' });
-  click(button(container, '설정')); await flush();
+  click(button(container, ui("설정"))); await flush();
   const dialog = container.querySelector('[role="dialog"]');
-  const mode = dialog.querySelector('[aria-label="답장 모드"]');
+  const mode = dialog.querySelector(`[aria-label="${ui("답장 모드")}"]`);
   run(() => { mode.value = 'review'; mode.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
-  click(button(container, '연결 저장')); await flush();
+  click(button(container, ui("연결 저장"))); await flush();
   let alert = dialog.querySelector('[role="alert"]'); assert.ok(alert);
-  assert.match(alert.textContent, /업무 목적/);
+  assert.match(alert.textContent, uiPattern("업무 목적 · 답장 기준을 입력하세요."));
   assert.ok(alert.closest('[data-testid="mail-connection-save"]'), 'save errors stay beside the action, outside the scrolled form');
-  typeInto(dialog.querySelector('[aria-label="업무 목적 · 답장 기준"]'), '문의 초안');
-  click(button(container, '연결 저장')); await flush();
+  typeInto(dialog.querySelector(`[aria-label="${ui("업무 목적 · 답장 기준")}"]`), '문의 초안');
+  click(button(container, ui("연결 저장"))); await flush();
   alert = dialog.querySelector('[role="alert"]');
-  assert.match(alert.textContent, /담당 에이전트/);
-  assert.equal(dialog.querySelector('[aria-label="업무 목적 · 답장 기준"]').value, '문의 초안');
+  assert.match(alert.textContent, uiPattern("담당 에이전트의 Host·CLI·작업 폴더를 설정하세요."));
+  assert.equal(dialog.querySelector(`[aria-label="${ui("업무 목적 · 답장 기준")}"]`).value, '문의 초안');
   assert.equal(calls.some(c => c[0] === 'configureBusinessMail'), false);
 });
 
@@ -159,10 +160,10 @@ test('review drafts must be saved before approval; approval sends the exact disp
   } });
   const textarea = container.querySelector('.business-mail-reply textarea'); assert.ok(textarea);
   typeInto(textarea, '검토하고 수정한 답장');
-  assert.equal(button(container, '승인하고 발송').disabled, true);
-  click(button(container, '초안 저장')); await flush(); await flush();
-  assert.equal(button(container, '승인하고 발송').disabled, false);
-  click(button(container, '승인하고 발송')); await flush(); await flush();
+  assert.equal(button(container, ui("승인하고 발송")).disabled, true);
+  click(button(container, ui("초안 저장"))); await flush(); await flush();
+  assert.equal(button(container, ui("승인하고 발송")).disabled, false);
+  click(button(container, ui("승인하고 발송"))); await flush(); await flush();
   assert.deepEqual(calls.find(c => c[0] === 'decideBusinessMailReply').slice(1), ['reply1', { revision: 4, action: 'approve' }]);
-  assert.match(container.querySelector('.business-mail-reply').textContent, /발송 접수/);
+  assert.match(container.querySelector('.business-mail-reply').textContent, uiPattern("발송 접수"));
 });

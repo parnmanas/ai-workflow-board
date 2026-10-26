@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -22,6 +25,7 @@ function formatTokens(n: number): string {
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  useLocale();
   return (
     <div style={{ marginBottom: 24 }}>
       <h3 style={{ fontSize: '13px', fontWeight: 700, color: tokens.colors.textStrong, margin: '0 0 8px 0' }}>
@@ -38,6 +42,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function Row({ children }: { children: React.ReactNode }) {
+  useLocale();
   return (
     <div style={{ padding: '10px 14px', borderBottom: `1px solid ${tokens.colors.border}` }}>
       {children}
@@ -48,6 +53,7 @@ function Row({ children }: { children: React.ReactNode }) {
 const metaRowStyle: React.CSSProperties = { fontSize: '11px', color: tokens.colors.textMuted, marginTop: 2 };
 
 export default function WorkflowHealthDashboard() {
+  useLocale();
   const [rollup, setRollup] = useState<WorkflowHealthRollup | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +71,7 @@ export default function WorkflowHealthDashboard() {
       setRollup(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message || '워크플로 헬스 데이터를 불러오지 못했습니다.');
+      setError(err?.message || translate('워크플로 헬스 데이터를 불러오지 못했습니다.'));
     } finally {
       setLoading(false);
     }
@@ -77,7 +83,7 @@ export default function WorkflowHealthDashboard() {
       setLongTerm(data);
       setLongTermError(null);
     } catch (err: any) {
-      setLongTermError(err?.message || '전체 기간 사용량을 불러오지 못했습니다.');
+      setLongTermError(err?.message || translate('전체 기간 사용량을 불러오지 못했습니다.'));
     }
   }, []);
 
@@ -107,7 +113,7 @@ export default function WorkflowHealthDashboard() {
   };
 
   if (loading && !rollup) {
-    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>불러오는 중…</div>;
+    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>{translate('불러오는 중…')}</div>;
   }
 
   if (error && !rollup) {
@@ -123,8 +129,7 @@ export default function WorkflowHealthDashboard() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <div style={{ fontSize: '12px', color: tokens.colors.textMuted }}>
-          갱신: {new Date(rollup.generated_at).toLocaleTimeString()} · 관측 window {rollup.window_minutes}분
-        </div>
+          {translate('갱신:')} {new Date(rollup.generated_at).toLocaleTimeString(getLocaleTag())} {translate('· 관측 window')} {rollup.window_minutes}{translate('분')}</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <label style={{
             display: 'flex', alignItems: 'center', gap: 6,
@@ -136,8 +141,7 @@ export default function WorkflowHealthDashboard() {
               onChange={e => setAutoRefresh(e.target.checked)}
               style={{ accentColor: tokens.colors.accent }}
             />
-            자동 새로고침
-          </label>
+            {translate('자동 새로고침')}</label>
           <button
             onClick={handleRefresh}
             disabled={loading}
@@ -149,32 +153,32 @@ export default function WorkflowHealthDashboard() {
               opacity: loading ? 0.6 : 1,
             }}
           >
-            {loading ? '불러오는 중...' : '새로고침'}
+            {loading ? translate('불러오는 중...') : translate('새로고침')}
           </button>
         </div>
       </div>
 
       {/* Token/cost usage — 실측 토큰·비용 (ticket 6dd3f968) */}
-      <Section title="토큰/비용 사용량 (추정)">
+      <Section title={translate('토큰/비용 사용량 (추정)')}>
         {!token_usage ? (
-          <EmptyState title="사용량 데이터를 불러올 수 없음" description="집계 쿼리가 실패했습니다. 새로고침 후에도 반복되면 서버 로그를 확인하세요." />
+          <EmptyState title={translate('사용량 데이터를 불러올 수 없음')} description={translate('집계 쿼리가 실패했습니다. 새로고침 후에도 반복되면 서버 로그를 확인하세요.')} />
         ) : (
           <div>
             <div style={{ padding: '12px 14px', display: 'flex', gap: 32, flexWrap: 'wrap' }}>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>입력 토큰 ({token_usage.window_minutes}분)</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('입력 토큰 (')}{token_usage.window_minutes}{translate('분)')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatTokens(token_usage.totals.input_tokens)}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>출력 토큰 ({token_usage.window_minutes}분)</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('출력 토큰 (')}{token_usage.window_minutes}{translate('분)')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatTokens(token_usage.totals.output_tokens)}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>비용 — CLI 보고 기준</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('비용 — CLI 보고 기준')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatUsd(token_usage.totals.total_cost_usd)}
                 </div>
@@ -184,10 +188,9 @@ export default function WorkflowHealthDashboard() {
               padding: '4px 14px 14px 14px', fontSize: '11px', color: tokens.colors.textMuted,
               borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8,
             }}>
-              계측된 run: {token_usage.coverage.runs_with_usage}/{token_usage.coverage.runs_total}
-              {' · '}비용 계측 run(avg {formatUsd(token_usage.avg_cost_per_run_usd_priced_only)}/run): {token_usage.priced_runs}
-              {' · '}Codex/Antigravity/DeepSeek 등 미계측·비계측 CLI는 위 비용에서 제외됨(하한 추정)
-            </div>
+              {translate('계측된 run:')} {token_usage.coverage.runs_with_usage}/{token_usage.coverage.runs_total}
+              {' · '}{translate('비용 계측 run(avg')} {formatUsd(token_usage.avg_cost_per_run_usd_priced_only)}{translate('/run):')} {token_usage.priced_runs}
+              {' · '}{translate('Codex/Antigravity/DeepSeek 등 미계측·비계측 CLI는 위 비용에서 제외됨(하한 추정)')}</div>
             {token_usage.top_tickets.length > 0 && (
               <div style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
                 {token_usage.top_tickets.map(t => (
@@ -195,10 +198,9 @@ export default function WorkflowHealthDashboard() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                       <div style={{ fontWeight: 600, color: tokens.colors.textPrimary, fontSize: '13px' }}>{t.ticket_title}</div>
                       <div style={{ color: tokens.colors.textStrong, fontWeight: 700, fontSize: '13px' }}>
-                        {formatTokens(t.input_tokens + t.output_tokens)} 토큰
-                      </div>
+                        {formatTokens(t.input_tokens + t.output_tokens)} {translate('토큰')}</div>
                     </div>
-                    <div style={metaRowStyle}>run {t.runs}회 · {formatUsd(t.total_cost_usd)}</div>
+                    <div style={metaRowStyle}>{translate('run')} {t.runs}{translate('회 ·')} {formatUsd(t.total_cost_usd)}</div>
                   </Row>
                 ))}
               </div>
@@ -210,34 +212,34 @@ export default function WorkflowHealthDashboard() {
       {/* All-time 누적 사용량 (ticket 8d5c6f5d 설계 → 090abc77 노출) — rollup+live
           merge, 마진/gap 없음. 15초 autoRefresh 폴링과 무관하게 mount 시/수동
           새로고침 시에만 갱신된다(위 fetchLongTerm 참고). */}
-      <Section title="전체 기간 누적 사용량 (all-time)">
+      <Section title={translate('전체 기간 누적 사용량 (all-time)')}>
         {longTermError ? (
-          <EmptyState title="전체 기간 사용량을 불러올 수 없음" description={longTermError} />
+          <EmptyState title={translate('전체 기간 사용량을 불러올 수 없음')} description={longTermError} />
         ) : !longTerm ? (
-          <div style={{ padding: '12px 14px', fontSize: '13px', color: tokens.colors.textSecondary }}>불러오는 중…</div>
+          <div style={{ padding: '12px 14px', fontSize: '13px', color: tokens.colors.textSecondary }}>{translate('불러오는 중…')}</div>
         ) : (
           <div>
             <div style={{ padding: '12px 14px', display: 'flex', gap: 32, flexWrap: 'wrap' }}>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>입력 토큰 (전체 기간)</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('입력 토큰 (전체 기간)')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatTokens(longTerm.totals.input_tokens)}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>출력 토큰 (전체 기간)</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('출력 토큰 (전체 기간)')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatTokens(longTerm.totals.output_tokens)}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>비용 — CLI 보고 기준 (전체 기간)</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('비용 — CLI 보고 기준 (전체 기간)')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatUsd(longTerm.totals.total_cost_usd)}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>run당 평균 비용(비용 계측분)</div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('run당 평균 비용(비용 계측분)')}</div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
                   {formatUsd(longTerm.avg_cost_per_run_usd_priced_only)}
                 </div>
@@ -247,11 +249,10 @@ export default function WorkflowHealthDashboard() {
               padding: '4px 14px 14px 14px', fontSize: '11px', color: tokens.colors.textMuted,
               borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8,
             }}>
-              구간: {longTerm.from ? `${longTerm.from} ~ ${longTerm.to}` : `전체 ~ ${longTerm.to}`}
-              {' · '}계측된 run: {longTerm.coverage.runs_with_usage}/{longTerm.coverage.runs_total}
-              {' · '}비용 계측 run: {longTerm.priced_runs}
-              {' · '}영속 롤업(rollup) + 아직 reap 안 된 최근 run(live)을 합산한 값 — 위 윈도우 타일과 달리 마진 없이 정확함
-            </div>
+              {translate('구간:')} {longTerm.from ? `${longTerm.from} ~ ${longTerm.to}` : translate('전체 ~ {0}', { 0: longTerm.to })}
+              {' · '}{translate('계측된 run:')} {longTerm.coverage.runs_with_usage}/{longTerm.coverage.runs_total}
+              {' · '}{translate('비용 계측 run:')} {longTerm.priced_runs}
+              {' · '}{translate('영속 롤업(rollup) + 아직 reap 안 된 최근 run(live)을 합산한 값 — 위 윈도우 타일과 달리 마진 없이 정확함')}</div>
           </div>
         )}
       </Section>

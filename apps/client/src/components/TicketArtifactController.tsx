@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useCallback, useEffect } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useArtifactPanel } from '../contexts/ArtifactPanelContext';
@@ -13,13 +15,14 @@ import TicketArtifact from './TicketArtifact';
  * 패널을 연다. 노드 생성 로직을 한 곳에 모아 카드·딥링크가 동일하게 동작하게 한다.
  */
 export default function TicketArtifactController({ children }: { children: React.ReactNode }) {
+  useLocale();
   const { openArtifact } = useArtifactPanel();
 
   const openTicket = useCallback(
     (ticketId: string, title?: string) => {
       openArtifact({
         key: `ticket:${ticketId}`,
-        title: title || '티켓',
+        title: title || translate('티켓'),
         node: <TicketArtifact ticketId={ticketId} />,
       });
     },

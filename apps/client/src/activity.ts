@@ -1,3 +1,4 @@
+import { t as translate } from './i18n/core';
 import { tokens } from './tokens';
 
 /**
@@ -63,24 +64,24 @@ export function isNoteworthy(tone: ActivityTone): boolean {
 export function sessionActivity(status: string | null | undefined): ActivityView {
   switch (status) {
     case 'starting':
-      return { label: 'Starting', tone: 'queued', live: true };
+      return { label: translate('Starting'), tone: 'queued', live: true };
     // 프로세스는 살아 있고 프롬프트를 기다린다 — 돌고 있는 것이 아니다.
     case 'ready':
-      return { label: 'Ready', tone: 'queued', live: false };
+      return { label: translate('Ready'), tone: 'queued', live: false };
     case 'busy':
-      return { label: 'Working', tone: 'live', live: true };
+      return { label: translate('Working'), tone: 'live', live: true };
     case 'awaiting_permission':
-      return { label: 'Needs your approval', tone: 'attention', live: false };
+      return { label: translate('Needs your approval'), tone: 'attention', live: false };
     case 'awaiting_input':
-      return { label: 'Needs your input', tone: 'attention', live: false };
+      return { label: translate('Needs your input'), tone: 'attention', live: false };
     case 'error':
-      return { label: 'Error', tone: 'failed', live: false };
+      return { label: translate('Error'), tone: 'failed', live: false };
     case 'closed':
-      return { label: 'Closed', tone: 'idle', live: false };
+      return { label: translate('Closed'), tone: 'idle', live: false };
     case 'idle':
-      return { label: 'Idle', tone: 'idle', live: false };
+      return { label: translate('Idle'), tone: 'idle', live: false };
     default:
-      return { label: String(status || 'Unknown'), tone: 'idle', live: false };
+      return { label: String(status || translate('Unknown')), tone: 'idle', live: false };
   }
 }
 
@@ -92,15 +93,15 @@ export function sessionActivity(status: string | null | undefined): ActivityView
 export function terminalActivity(status: string | null | undefined): ActivityView {
   switch (status) {
     case 'starting':
-      return { label: 'Starting', tone: 'queued', live: true };
+      return { label: translate('Starting'), tone: 'queued', live: true };
     case 'live':
-      return { label: 'Live', tone: 'live', live: true };
+      return { label: translate('Live'), tone: 'live', live: true };
     case 'exited':
-      return { label: 'Exited', tone: 'idle', live: false };
+      return { label: translate('Exited'), tone: 'idle', live: false };
     case 'error':
-      return { label: 'Failed', tone: 'failed', live: false };
+      return { label: translate('Failed'), tone: 'failed', live: false };
     default:
-      return { label: status ? String(status) : 'Unknown', tone: 'idle', live: false };
+      return { label: status ? String(status) : translate('Unknown'), tone: 'idle', live: false };
   }
 }
 
@@ -114,10 +115,10 @@ export function roomActivity(input: {
   unread?: number;
 }): ActivityView {
   const names = (input.workingNames || []).filter(Boolean);
-  if (names.length === 1) return { label: `${names[0]} is working`, tone: 'live', live: true };
-  if (names.length > 1) return { label: `${names.length} agents working`, tone: 'live', live: true };
-  if (input.unread) return { label: `${input.unread} unread`, tone: 'queued', live: false };
-  return { label: 'Idle', tone: 'idle', live: false };
+  if (names.length === 1) return { label: translate('{0} is working', { 0: names[0] }), tone: 'live', live: true };
+  if (names.length > 1) return { label: translate('{0} agents working', { 0: names.length }), tone: 'live', live: true };
+  if (input.unread) return { label: translate('{0} unread', { 0: input.unread }), tone: 'queued', live: false };
+  return { label: translate('Idle'), tone: 'idle', live: false };
 }
 
 /**
@@ -129,14 +130,14 @@ export function ticketActivity(ticket: {
   pending_user_action?: boolean;
   blocked_by_count?: number;
 }): ActivityView {
-  if (ticket.pending_user_action) return { label: 'Needs your decision', tone: 'attention', live: false };
-  if (ticket.blocked_by_count) return { label: 'Blocked', tone: 'stalled', live: false };
+  if (ticket.pending_user_action) return { label: translate('Needs your decision'), tone: 'attention', live: false };
+  if (ticket.blocked_by_count) return { label: translate('Blocked'), tone: 'stalled', live: false };
   switch (ticket.status) {
     case 'in_progress':
-      return { label: 'Working', tone: 'live', live: true };
+      return { label: translate('Working'), tone: 'live', live: true };
     case 'done':
-      return { label: 'Done', tone: 'done', live: false };
+      return { label: translate('Done'), tone: 'done', live: false };
     default:
-      return { label: 'Waiting', tone: 'idle', live: false };
+      return { label: translate('Waiting'), tone: 'idle', live: false };
   }
 }

@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo, useState } from 'react';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
@@ -44,6 +47,7 @@ const selectStyle: React.CSSProperties = {
  * 스냅샷에서 내용이 생략·잘린 파일은 내보내기 전에 전문을 다시 읽는다.
  */
 export function MemoryExportModal({ snapshot, currentCli, onClose }: { snapshot: MemoryHostSnapshot; currentCli: string; onClose: () => void }) {
+  useLocale();
   const { showToast } = useToast();
   const detected = snapshot.clis.filter((c) => c.detected);
   const [clis, setClis] = useState<Set<string>>(() => new Set([currentCli]));
@@ -76,10 +80,10 @@ export function MemoryExportModal({ snapshot, currentCli, onClose }: { snapshot:
       const base = `awb-memory-${(snapshot.hostname || 'host').replace(/[^A-Za-z0-9-]+/g, '-')}-${stamp()}`;
       if (format === 'json') download(`${base}.json`, JSON.stringify(bundle, null, 2), 'application/json');
       else download(`${base}.md`, bundleToMarkdown(bundle), 'text/markdown');
-      showToast(`Exported ${bundle.files.length} file(s)${skipped.length ? ` — ${skipped.length} skipped (too large or outside known locations)` : ''}.`, skipped.length ? 'info' : 'success');
+      showToast(translate('Exported {0} file(s){1}.', { 0: bundle.files.length, 1: skipped.length ? translate(' — {0} skipped (too large or outside known locations)', { 0: skipped.length }) : '' }), skipped.length ? 'info' : 'success');
       onClose();
     } catch (err: any) {
-      showToast(err?.message || 'Export failed.', 'error');
+      showToast(err?.message || translate('Export failed.'), 'error');
     } finally {
       setBusy(false);
     }
@@ -89,18 +93,18 @@ export function MemoryExportModal({ snapshot, currentCli, onClose }: { snapshot:
     <Modal
       isOpen
       onClose={onClose}
-      title="Export memory"
+      title={translate('Export memory')}
       maxWidth={560}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" disabled={!clis.size || !count || busy} onClick={run}>{busy ? 'Exporting…' : `Export ${count} file${count === 1 ? '' : 's'}`}</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('Cancel')}</Button>
+          <Button variant="primary" disabled={!clis.size || !count || busy} onClick={run}>{busy ? translate('Exporting…') : translate('Export {0} file{1}', { 0: count, 1: count === 1 ? '' : translate('s') })}</Button>
         </>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 12.5, color: tokens.colors.textPrimary }}>
         <div>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>CLIs</div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>{translate('CLIs')}</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
             {detected.map((c) => (
               <label key={c.cli} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -119,22 +123,19 @@ export function MemoryExportModal({ snapshot, currentCli, onClose }: { snapshot:
           </div>
         </div>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          Homes
-          <select value={homes} onChange={(e) => setHomes(e.target.value as 'operator' | 'all')} style={selectStyle}>
-            <option value="operator">Operator home only</option>
-            <option value="all">Also AWB session homes and profiles</option>
+          {translate('Homes')}<select value={homes} onChange={(e) => setHomes(e.target.value as 'operator' | 'all')} style={selectStyle}>
+            <option value="operator">{translate('Operator home only')}</option>
+            <option value="all">{translate('Also AWB session homes and profiles')}</option>
           </select>
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          Format
-          <select value={format} onChange={(e) => setFormat(e.target.value as 'json' | 'markdown')} style={selectStyle}>
-            <option value="json">JSON bundle — can be imported on any host</option>
-            <option value="markdown">Markdown — one readable document</option>
+          {translate('Format')}<select value={format} onChange={(e) => setFormat(e.target.value as 'json' | 'markdown')} style={selectStyle}>
+            <option value="json">{translate('JSON bundle — can be imported on any host')}</option>
+            <option value="markdown">{translate('Markdown — one readable document')}</option>
           </select>
         </label>
         <div style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-          Memory can hold private notes — treat the exported file like the originals.
-        </div>
+          {translate('Memory can hold private notes — treat the exported file like the originals.')}</div>
       </div>
     </Modal>
   );
@@ -153,6 +154,7 @@ const ACTION_COLOR: Record<ImportAction, string> = {
  * 매니저가 백업한다.
  */
 export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot: MemoryHostSnapshot; onClose: () => void; onImported: () => void }) {
+  useLocale();
   const { showToast } = useToast();
   const [bundle, setBundle] = useState<MemoryBundle | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -162,9 +164,9 @@ export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot:
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<MemoryBatchResultItem[] | null>(null);
 
-  const plan = useMemo(() => (bundle ? planImport(snapshot, bundle, { homeMode }) : []), [bundle, snapshot, homeMode]);
+  const plan = useMemo(() => (bundle ? planImport(snapshot, bundle, { homeMode }) : []), [bundle, snapshot, homeMode, getLocale()]);
   const included = plan.filter((_, i) => !excluded.has(i));
-  const ops = useMemo(() => (bundle ? importOps(included, strategy, bundle) : []), [bundle, included, strategy]);
+  const ops = useMemo(() => (bundle ? importOps(included, strategy, bundle) : []), [bundle, included, strategy, getLocale()]);
 
   const readFile = async (file: File) => {
     setParseError(null);
@@ -175,7 +177,7 @@ export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot:
       setExcluded(new Set());
     } catch (err: any) {
       setBundle(null);
-      setParseError(err?.message || 'Could not read the bundle.');
+      setParseError(err?.message || translate('Could not read the bundle.'));
     }
   };
 
@@ -201,10 +203,10 @@ export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot:
       }
       setResults(out);
       const ok = out.filter((r) => r.ok).length;
-      showToast(`Imported ${ok} of ${out.length} file(s).`, ok === out.length ? 'success' : 'error');
+      showToast(translate('Imported {0} of {1} file(s).', { 0: ok, 1: out.length }), ok === out.length ? 'success' : 'error');
     } catch (err: any) {
       setResults(out);
-      showToast(err?.message || 'Import failed.', 'error');
+      showToast(err?.message || translate('Import failed.'), 'error');
     } finally {
       setRunning(false);
     }
@@ -221,14 +223,14 @@ export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot:
     <Modal
       isOpen
       onClose={close}
-      title={`Import memory into ${snapshot.manager_name}`}
+      title={translate('Import memory into {0}', { 0: snapshot.manager_name })}
       maxWidth={1040}
       footer={(
         <>
-          <Button variant="secondary" onClick={close}>{results ? 'Done' : 'Cancel'}</Button>
+          <Button variant="secondary" onClick={close}>{results ? translate('Done') : translate('Cancel')}</Button>
           {!results && (
             <Button variant="primary" disabled={!ops.length || running} onClick={run}>
-              {running ? 'Importing…' : `Write ${ops.length} file${ops.length === 1 ? '' : 's'}`}
+              {running ? translate('Importing…') : translate('Write {0} file{1}', { 0: ops.length, 1: ops.length === 1 ? '' : translate('s') })}
             </Button>
           )}
         </>
@@ -240,24 +242,22 @@ export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot:
         {bundle && (
           <>
             <div style={{ color: tokens.colors.textSecondary }}>
-              {bundle.files.length} file(s) from <b>{bundle.source.manager_name || bundle.source.hostname || 'unknown host'}</b>
-              {bundle.exported_at ? `, exported ${new Date(bundle.exported_at).toLocaleString()}` : ''}.
+              {bundle.files.length} {translate('file(s) from')} <b>{bundle.source.manager_name || bundle.source.hostname || translate('unknown host')}</b>
+              {bundle.exported_at ? translate(', exported {0}', { 0: new Date(bundle.exported_at).toLocaleString(getLocaleTag()) }) : ''}.
               {' '}{Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ')}
             </div>
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                Session-home files
-                <select value={homeMode} onChange={(e) => setHomeMode(e.target.value as 'same' | 'operator')} style={selectStyle}>
-                  <option value="operator">Write into the operator home</option>
-                  <option value="same">Keep their session home (if it exists here)</option>
+                {translate('Session-home files')}<select value={homeMode} onChange={(e) => setHomeMode(e.target.value as 'same' | 'operator')} style={selectStyle}>
+                  <option value="operator">{translate('Write into the operator home')}</option>
+                  <option value="same">{translate('Keep their session home (if it exists here)')}</option>
                 </select>
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                Existing files
-                <select value={strategy} onChange={(e) => setStrategy(e.target.value as ConflictStrategy)} style={selectStyle}>
-                  <option value="skip">Skip — only create missing files</option>
-                  <option value="merge">Merge — add as a managed block / new entries</option>
-                  <option value="overwrite">Overwrite — previous content goes to History</option>
+                {translate('Existing files')}<select value={strategy} onChange={(e) => setStrategy(e.target.value as ConflictStrategy)} style={selectStyle}>
+                  <option value="skip">{translate('Skip — only create missing files')}</option>
+                  <option value="merge">{translate('Merge — add as a managed block / new entries')}</option>
+                  <option value="overwrite">{translate('Overwrite — previous content goes to History')}</option>
                 </select>
               </label>
             </div>
@@ -289,7 +289,7 @@ export function MemoryImportModal({ snapshot, onClose, onImported }: { snapshot:
                       {item.target_path && item.reason ? ` — ${item.reason}` : ''}
                     </span>
                     <span style={{ fontSize: 11, color: result ? (result.ok ? tokens.colors.success : tokens.colors.danger) : tokens.colors.textMuted }}>
-                      {result ? (result.ok ? '✓ written' : `✗ ${result.code || result.error}`) : item.action === 'update' ? strategy : ''}
+                      {result ? (result.ok ? translate('✓ written') : `✗ ${result.code || result.error}`) : item.action === 'update' ? strategy : ''}
                     </span>
                   </div>
                 );

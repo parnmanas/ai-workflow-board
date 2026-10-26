@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React from 'react';
 import SessionHeaderMenu from '../sessions/SessionHeaderMenu';
 
@@ -11,6 +13,7 @@ export function BusinessPageHeader({ title, description, context, status, action
   actions?: React.ReactNode;
   moreActions?: (close: () => void) => React.ReactNode;
 }) {
+  useLocale();
   const showMenu = !!moreActions || !!description;
   return <header className="business-page-heading">
     <div className="business-heading-copy">
@@ -21,7 +24,7 @@ export function BusinessPageHeader({ title, description, context, status, action
     {context && <div className="business-heading-context">{context}</div>}
     {(actions || showMenu) && <div className="business-heading-actions">
       {actions}
-      {showMenu && <SessionHeaderMenu label={`${title} 메뉴`} icon="⋯">
+      {showMenu && <SessionHeaderMenu label={translate('{0} 메뉴', { 0: title })} icon="⋯">
         {close => <>
           <div className="business-heading-menu-info"><strong>{title}</strong>{description && <p>{description}</p>}</div>
           {moreActions && <div className="business-heading-menu-actions">{moreActions(close)}</div>}

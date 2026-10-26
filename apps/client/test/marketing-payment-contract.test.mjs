@@ -1,3 +1,6 @@
+import { setLocale } from '../src/i18n/core.ts';
+// These fixtures check Korean copy while API identifiers remain unchanged.
+await setLocale('ko', false);
 // 직접 결제 어댑터(docs/marketing.md "직접 결제 어댑터")의 화면 규칙과 서버 정본(apps/server/src/common/marketing/payment-routes.ts)의
 // 대조, 그리고 화면 쪽 순수 판정.
 //
@@ -66,7 +69,7 @@ test('the Credentials screen has typed, server-only entries for the payment prov
     const start = source.indexOf(`value: '${provider}'`);
     assert.ok(start > 0, `CredentialManager offers ${provider}`);
     const block = source.slice(start, source.indexOf('},\n  },', start));
-    const fields = [...block.matchAll(/^\s{6}([a-z_]+): \{ label:/gm)].map((m) => m[1]);
+    const fields = [...block.matchAll(/^\s{6}([a-z_]+): \{ (?:get )?label/gm)].map((m) => m[1]);
     const expected = [...DIRECT_PROVIDER_CREDENTIAL_FIELDS[provider].required, ...DIRECT_PROVIDER_CREDENTIAL_FIELDS[provider].optional];
     assert.deepEqual(fields, expected, `${provider} fields`);
     assert.equal(AGENT_ENV_PROVIDERS.has(provider), false, `${provider} can never be exposed to agents`);
@@ -200,7 +203,7 @@ test('Google credentials offer two complete alternative authentication sets', ()
     ['client_id', 'client_secret', 'refresh_token'], ['client_email', 'private_key'],
   ]);
   const source = fs.readFileSync(CREDENTIAL_MANAGER, 'utf8');
-  assert.match(source, /private_key: \{ label:.*multiline: true/);
+  assert.match(source, /private_key: \{ get label\(\).*multiline: true/);
   assert.equal(directCredentialFieldsHint('google_ads'), 'client_id + client_secret + refresh_token 또는 client_email + private_key(한 방식 필수), login_customer_id(선택), developer_token(선택)');
   const guide = PAYMENT_CREDENTIAL_GUIDES.google_ads.steps.join(' ');
   assert.match(guide, /20계정/);

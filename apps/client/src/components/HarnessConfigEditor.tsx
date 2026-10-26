@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { HarnessConfig } from '../types';
 import { tokens } from '../tokens';
@@ -23,13 +25,13 @@ interface HarnessConfigEditorProps {
 // unknown stored value selectable (forward-compat — the server stores free
 // text) by appending it to the options at render time.
 const PERMISSION_MODE_OPTIONS = [
-  { value: '', label: '(inherit / unset)' },
-  { value: 'auto', label: 'auto — Claude autonomous / Codex account write' },
-  { value: 'dontAsk', label: 'dontAsk — no clarification prompts' },
-  { value: 'acceptEdits', label: 'acceptEdits — allow account edits' },
-  { value: 'plan', label: 'plan — read-only' },
-  { value: 'bypassPermissions', label: 'bypassPermissions — unrestricted' },
-  { value: 'manual', label: 'manual — Claude manual / Codex account write' },
+  { value: '', get label() { return translate('(inherit / unset)'); } },
+  { value: 'auto', get label() { return translate('auto — Claude autonomous / Codex account write'); } },
+  { value: 'dontAsk', get label() { return translate('dontAsk — no clarification prompts'); } },
+  { value: 'acceptEdits', get label() { return translate('acceptEdits — allow account edits'); } },
+  { value: 'plan', get label() { return translate('plan — read-only'); } },
+  { value: 'bypassPermissions', get label() { return translate('bypassPermissions — unrestricted'); } },
+  { value: 'manual', get label() { return translate('manual — Claude manual / Codex account write'); } },
 ];
 
 export function parseHarnessConfigRaw(raw: string | null | undefined): HarnessConfig {
@@ -65,6 +67,7 @@ const textToModels = (text: string): string[] | undefined => {
 };
 
 export default function HarnessConfigEditor({ raw, title, description, onSave }: HarnessConfigEditorProps) {
+  useLocale();
   const initial = parseHarnessConfigRaw(raw);
   const [systemPrompt, setSystemPrompt] = useState(initial.system_prompt_append ?? '');
   const [allowedTools, setAllowedTools] = useState(toolsToText(initial.allowed_tools));
@@ -105,7 +108,7 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
 
   const permissionOptions = PERMISSION_MODE_OPTIONS.some(o => o.value === permissionMode)
     ? PERMISSION_MODE_OPTIONS
-    : [...PERMISSION_MODE_OPTIONS, { value: permissionMode, label: `${permissionMode} (custom)` }];
+    : [...PERMISSION_MODE_OPTIONS, { value: permissionMode, label: translate('{0} (custom)', { 0: permissionMode }) }];
 
   const textareaStyle: React.CSSProperties = {
     width: '100%',
@@ -148,49 +151,49 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
-          <label style={fieldLabelStyle}>System prompt append · Claude + Codex</label>
+          <label style={fieldLabelStyle}>{translate('System prompt append · Claude + Codex')}</label>
           <textarea
             rows={4}
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder="Managed policy added to every subagent prompt"
+            placeholder={translate('Managed policy added to every subagent prompt')}
             style={textareaStyle}
           />
         </div>
 
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 240 }}>
-            <label style={fieldLabelStyle}>Allowed tools · Claude only</label>
+            <label style={fieldLabelStyle}>{translate('Allowed tools · Claude only')}</label>
             <textarea
               rows={3}
               value={allowedTools}
               onChange={(e) => setAllowedTools(e.target.value)}
-              placeholder={'One per line (or comma-separated)\ne.g. Read\nBash(npm run build)'}
+              placeholder={translate('One per line (or comma-separated)\ne.g. Read\nBash(npm run build)')}
               style={textareaStyle}
             />
           </div>
           <div style={{ flex: 1, minWidth: 240 }}>
-            <label style={fieldLabelStyle}>Disallowed tools · Claude only</label>
+            <label style={fieldLabelStyle}>{translate('Disallowed tools · Claude only')}</label>
             <textarea
               rows={3}
               value={disallowedTools}
               onChange={(e) => setDisallowedTools(e.target.value)}
-              placeholder={'One per line (or comma-separated)\ne.g. WebSearch'}
+              placeholder={translate('One per line (or comma-separated)\ne.g. WebSearch')}
               style={textareaStyle}
             />
           </div>
         </div>
 
         <div>
-          <label style={fieldLabelStyle}>Fallback models</label>
+          <label style={fieldLabelStyle}>{translate('Fallback models')}</label>
           <textarea
             rows={3}
             value={fallbackModels}
             onChange={(e) => setFallbackModels(e.target.value)}
             placeholder={
-              'One model id per line — order = priority (top tried first).\n' +
-              'Used when the main model errors (usage cap / model unavailable)\n' +
-              'before producing any deliverable.\ne.g. claude-opus-4-6\nclaude-sonnet-4-6'
+              translate('One model id per line — order = priority (top tried first).\n') +
+              translate('Used when the main model errors (usage cap / model unavailable)\n') +
+              translate('before producing any deliverable.\ne.g. claude-opus-4-6\nclaude-sonnet-4-6')
             }
             style={textareaStyle}
           />
@@ -199,15 +202,15 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div style={{ width: 260 }}>
             <Input
-              label="Model · Claude + Codex"
+              label={translate('Model · Claude + Codex')}
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              placeholder="e.g. claude-sonnet-4-6 (empty = inherit)"
+              placeholder={translate('e.g. claude-sonnet-4-6 (empty = inherit)')}
             />
           </div>
           <div style={{ width: 220 }}>
             <Select
-              label="Permission mode · Claude + Codex"
+              label={translate('Permission mode · Claude + Codex')}
               value={permissionMode}
               options={permissionOptions}
               onChange={(e) => setPermissionMode(e.target.value)}
@@ -227,7 +230,7 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
               }
             }}
           >
-            {busy ? 'Saving…' : 'Save'}
+            {busy ? translate('Saving…') : translate('Save')}
           </Button>
         </div>
       </div>

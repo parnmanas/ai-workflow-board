@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
@@ -36,6 +38,7 @@ import type { ChatRoomListItem } from '../types';
  * See .planning/phases/01-foundation/01-UI-SPEC.md §"SSE Reconnect Contract".
  */
 export default function AppLayout() {
+  useLocale();
   const isMobile = useMediaQuery('(max-width: 767px)');
   // Desktop keeps the Hermes-style navigation visible. Only narrow mobile
   // viewports use the off-canvas drawer.
@@ -168,7 +171,7 @@ export default function AppLayout() {
           <div className="awb-topbar" data-testid="app-header">
             <button
               onClick={() => setDrawerOpen(true)}
-              aria-label="Open navigation"
+              aria-label={translate('Open navigation')}
               aria-expanded={drawerOpen}
               style={{
                 width: 44,

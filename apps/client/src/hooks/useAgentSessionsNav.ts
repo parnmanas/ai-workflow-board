@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
@@ -34,7 +35,7 @@ export function useAgentSessionsNav(accountId: string | null): AgentSessionsNav 
     } catch (err: any) {
       if (generationRef.current !== generation) return;
       setHosts([]);
-      setError(err?.message || 'Failed to load Runtime Hosts');
+      setError(err?.message || translate('Failed to load Runtime Hosts'));
     } finally {
       if (generationRef.current === generation) setLoading(false);
     }

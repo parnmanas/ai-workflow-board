@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { useConfirm } from '../../contexts/ConfirmContext';
@@ -24,6 +26,7 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
   /** 프로젝트 메모리 화면에서 들어오면 그 프로젝트 그룹만 보인다. */
   focusProjectId?: string | null;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [assignments, setAssignments] = useState<SkillAssignment[]>([]);
@@ -47,7 +50,7 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
       setAssignments(rows);
       setProjects(projectRows.filter((p) => p.account_id === accountId));
     } catch (err: any) {
-      setError(err?.message || 'Failed to load assignments');
+      setError(err?.message || translate('Failed to load assignments'));
     } finally {
       setLoading(false);
     }
@@ -68,14 +71,14 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
         setPickDetail(detail);
         setPickVersion(detail.versions[0]?.id || '');
       })
-      .catch((err: any) => { if (!cancelled) showToast(err?.message || 'Failed to load skill', 'error'); });
+      .catch((err: any) => { if (!cancelled) showToast(err?.message || translate('Failed to load skill'), 'error'); });
     return () => { cancelled = true; };
   }, [pickSkill, accountId, showToast]);
 
   const groups = useMemo(() => {
     const all = groupAssignments(assignments, projects);
     return focusProjectId ? all.filter((g) => g.project_id === focusProjectId) : all;
-  }, [assignments, projects, focusProjectId]);
+  }, [assignments, projects, focusProjectId, getLocale()]);
 
   const activeSkills = skills.filter((s) => s.status === 'active' && !s.shadowed);
 
@@ -87,12 +90,12 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
         skill_version_id: pickVersion,
         target: group.scope === 'project' && group.project_id ? { scope: 'project', project_id: group.project_id } : { scope: 'account' },
       });
-      showToast(`Assigned to ${group.title}`, 'success');
+      showToast(translate('Assigned to {0}', { 0: group.title }), 'success');
       setAdding(null);
       setPickSkill('');
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Assign failed', 'error');
+      showToast(err?.message || translate('Assign failed'), 'error');
     } finally {
       setBusy(false);
     }
@@ -103,12 +106,12 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
     try {
       const detail = await api.getSkill(accountId, a.skill_id);
       const latest = detail.versions[0];
-      if (!latest) throw new Error('This skill has no versions');
+      if (!latest) throw new Error(translate('This skill has no versions'));
       await api.repinSkillAssignment(accountId, a.id, latest.id);
-      showToast(`Now pinned to v${latest.version}`, 'success');
+      showToast(translate('Now pinned to v{0}', { 0: latest.version }), 'success');
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Re-pin failed', 'error');
+      showToast(err?.message || translate('Re-pin failed'), 'error');
     } finally {
       setBusy(false);
     }
@@ -116,59 +119,56 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
 
   const remove = async (a: SkillAssignment) => {
     const ok = await confirm({
-      title: `Unassign ${a.skill_slug}?`,
-      message: 'New runs stop receiving it. Tickets that already started keep the version they pinned.',
-      confirmLabel: 'Unassign',
+      title: translate('Unassign {0}?', { 0: a.skill_slug }),
+      message: translate('New runs stop receiving it. Tickets that already started keep the version they pinned.'),
+      confirmLabel: translate('Unassign'),
     });
     if (!ok) return;
     try {
       await api.unassignSkill(accountId, a.id);
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Unassign failed', 'error');
+      showToast(err?.message || translate('Unassign failed'), 'error');
     }
   };
 
   if (error) return <Card><span style={{ color: tokens.colors.danger }}>{error}</span></Card>;
-  if (loading && !assignments.length) return <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading assignments…</div>;
+  if (loading && !assignments.length) return <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading assignments…')}</div>;
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       {!focusProjectId && (
         <div style={{ fontSize: 12.5, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          A run gets every skill assigned to its account (<b>Shared</b>), to the project it works on, and to its own runtime — when the
-          same skill is assigned more than once, the narrowest scope wins. Ticket and mission prompts list them; agents load the text
-          with the AWB MCP tool <code>get_skill</code>. Ticket runs pin the versions when they start.
-        </div>
+          {translate('A run gets every skill assigned to its account (')}<b>{translate('Shared')}</b>{translate('), to the project it works on, and to its own runtime — when the same skill is assigned more than once, the narrowest scope wins. Ticket and mission prompts list them; agents load the text with the AWB MCP tool')} <code>get_skill</code>{translate('. Ticket runs pin the versions when they start.')}</div>
       )}
       {groups.map((group) => (
         <Card key={group.key} style={{ display: 'grid', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
             <strong style={{ color: tokens.colors.textPrimary }}>{group.title}</strong>
             <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>{group.subtitle}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 12, color: tokens.colors.textMuted }}>{group.items.length} skill{group.items.length === 1 ? '' : 's'}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 12, color: tokens.colors.textMuted }}>{group.items.length} {translate('skill')}{group.items.length === 1 ? '' : translate('s')}</span>
             {group.scope !== 'runtime' && (
               <Button size="sm" variant="secondary" onClick={() => { setAdding(adding === group.key ? null : group.key); setPickSkill(''); }}>
-                {adding === group.key ? 'Cancel' : '+ Assign skill'}
+                {adding === group.key ? translate('Cancel') : translate('+ Assign skill')}
               </Button>
             )}
           </div>
           {adding === group.key && (
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', padding: '6px 0' }}>
-              <select value={pickSkill} onChange={(e) => setPickSkill(e.target.value)} style={selectStyle} aria-label="Skill">
-                <option value="">Choose a skill…</option>
-                {activeSkills.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.slug}){s.account_id ? '' : ' · global'}</option>)}
+              <select value={pickSkill} onChange={(e) => setPickSkill(e.target.value)} style={selectStyle} aria-label={translate('Skill')}>
+                <option value="">{translate('Choose a skill…')}</option>
+                {activeSkills.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.slug}){s.account_id ? '' : translate(' · global')}</option>)}
               </select>
               {pickDetail && (
-                <select value={pickVersion} onChange={(e) => setPickVersion(e.target.value)} style={selectStyle} aria-label="Version">
-                  {pickDetail.versions.map((v) => <option key={v.id} value={v.id}>v{v.version}</option>)}
+                <select value={pickVersion} onChange={(e) => setPickVersion(e.target.value)} style={selectStyle} aria-label={translate('Version')}>
+                  {pickDetail.versions.map((v) => <option key={v.id} value={v.id}>{translate('v')}{v.version}</option>)}
                 </select>
               )}
-              <Button size="sm" variant="primary" disabled={!pickSkill || !pickVersion || busy} onClick={() => void add(group)}>Assign</Button>
+              <Button size="sm" variant="primary" disabled={!pickSkill || !pickVersion || busy} onClick={() => void add(group)}>{translate('Assign')}</Button>
             </div>
           )}
           {group.items.length === 0 ? (
-            <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No skills yet.</div>
+            <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No skills yet.')}</div>
           ) : (
             <div style={{ display: 'grid', gap: 4 }}>
               {group.items.map((a) => {
@@ -185,15 +185,15 @@ export default function SkillAssignmentsPanel({ accountId, skills, onOpenSkill, 
                       <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.accentSubtle }}>{a.skill_name || a.skill_slug}</span>
                       <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}> {a.skill_slug}</span>
                     </button>
-                    <Badge variant="neutral" size="sm">v{a.version ?? '?'}</Badge>
-                    {behind && <Badge variant="warning" size="sm">v{a.latest_version} available</Badge>}
+                    <Badge variant="neutral" size="sm">{translate('v')}{a.version ?? '?'}</Badge>
+                    {behind && <Badge variant="warning" size="sm">{translate('v')}{a.latest_version} {translate('available')}</Badge>}
                     {a.skill_status !== 'active' && <Badge variant="danger" size="sm">{a.skill_status}</Badge>}
                     {group.scope === 'runtime' && (
                       <span title={a.runtime_key || ''} style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>{a.target_label || a.runtime_key}</span>
                     )}
                     <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-                      {behind && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void repinLatest(a)}>Pin latest</Button>}
-                      <Button size="sm" variant="ghost" onClick={() => void remove(a)}>Unassign</Button>
+                      {behind && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void repinLatest(a)}>{translate('Pin latest')}</Button>}
+                      <Button size="sm" variant="ghost" onClick={() => void remove(a)}>{translate('Unassign')}</Button>
                     </div>
                   </div>
                 );

@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -118,7 +119,7 @@ async function mountCredentialManager(t) {
 }
 
 function buttonsByText(container, label) {
-  return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === label);
+  return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === ui(label));
 }
 
 function enterRevealPassword(container, password = 'admin-password') {

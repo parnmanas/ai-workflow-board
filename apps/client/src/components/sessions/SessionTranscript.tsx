@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import CodeBlock from '../common/CodeBlock';
@@ -70,13 +73,13 @@ function toolGlyph(kind: string, delegated: boolean): string {
 function statusChip(status: string): { text: string; color: string; bg: string } {
   switch (status) {
     case 'completed':
-      return { text: 'done', color: tokens.colors.successLight, bg: tokens.colors.successBg };
+      return { text: translate('done'), color: tokens.colors.successLight, bg: tokens.colors.successBg };
     case 'failed':
-      return { text: 'failed', color: tokens.colors.dangerLight, bg: tokens.colors.dangerBg };
+      return { text: translate('failed'), color: tokens.colors.dangerLight, bg: tokens.colors.dangerBg };
     case 'cancelled':
-      return { text: 'cancelled', color: tokens.colors.warningLight, bg: tokens.colors.warningBg };
+      return { text: translate('cancelled'), color: tokens.colors.warningLight, bg: tokens.colors.warningBg };
     default:
-      return { text: 'running', color: tokens.colors.accentSubtle, bg: tokens.colors.badgeAgentBg };
+      return { text: translate('running'), color: tokens.colors.accentSubtle, bg: tokens.colors.badgeAgentBg };
   }
 }
 
@@ -106,6 +109,7 @@ function promptTime(iso: string): string {
 
 /** 말풍선 위에 붙는 출처 한 줄 — 누가 보낸 말인지(직접 입력 · 음성 · 다른 세션 · 시스템)를 글자로 못 박는다. */
 function SenderLabel({ align, children }: { align: 'left' | 'right'; children: React.ReactNode }) {
+  useLocale();
   return (
     <span
       data-sender-label={align}
@@ -121,11 +125,12 @@ function SenderLabel({ align, children }: { align: 'left' | 'right'; children: R
 
 /** AWB 가 operator 에게 보낸 작업 보고 — 사람이 쓴 말이 아니라서 접어 두고, 펼치면 원문을 보여 준다. */
 function ReportPromptBlock({ text, createdAt }: { text: string; createdAt?: string }) {
+  useLocale();
   const count = (text.match(/^\d+\. /gm) || []).length;
   const time = createdAt ? promptTime(createdAt) : '';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
-      <SenderLabel align="left">📋 다른 세션 소식 · AWB 자동{time ? ` · ${time}` : ''}</SenderLabel>
+      <SenderLabel align="left">{translate('📋 다른 세션 소식 · AWB 자동')}{time ? ` · ${time}` : ''}</SenderLabel>
       <details
         data-block="operator-report"
         data-origin="operator-report"
@@ -136,7 +141,7 @@ function ReportPromptBlock({ text, createdAt }: { text: string; createdAt?: stri
           color: tokens.colors.textSecondary, alignSelf: 'flex-start',
         }}
       >
-        <summary style={{ cursor: 'pointer' }}>다른 세션에서 받은 자동 보고{count ? ` · ${count}건` : ''} — 내가 쓴 말이 아닙니다</summary>
+        <summary style={{ cursor: 'pointer' }}>{translate('다른 세션에서 받은 자동 보고')}{count ? translate(' · {0}건', { 0: count }) : ''} {translate('— 내가 쓴 말이 아닙니다')}</summary>
         <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, color: tokens.colors.textMuted }}>{text}</div>
       </details>
     </div>
@@ -145,10 +150,11 @@ function ReportPromptBlock({ text, createdAt }: { text: string; createdAt?: stri
 
 /** operator 가 제안하고 사용자가 승인한 작업 — 왼쪽 주황 카드로 그려 사용자 직접 입력과 구분한다. */
 function OperatorTaskPromptBlock({ text, operator, createdAt }: { text: string; operator: string; createdAt?: string }) {
+  useLocale();
   const time = createdAt ? promptTime(createdAt) : '';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
-      <SenderLabel align="left">🧭 {operator} 제안 · 사용자 승인 — 내가 쓴 말이 아닙니다{time ? ` · ${time}` : ''}</SenderLabel>
+      <SenderLabel align="left">🧭 {operator} {translate('제안 · 사용자 승인 — 내가 쓴 말이 아닙니다')}{time ? ` · ${time}` : ''}</SenderLabel>
       <div
         data-block="operator-task"
         data-origin="operator-task"
@@ -179,6 +185,7 @@ function SystemPromptBlock({ origin, label, text, createdAt, dropFirstLine }: {
   createdAt?: string;
   dropFirstLine?: boolean;
 }) {
+  useLocale();
   const time = createdAt ? promptTime(createdAt) : '';
   const lines = text.split('\n');
   const body = dropFirstLine && lines.length > 1 ? lines.slice(1).join('\n').trim() : text;
@@ -205,10 +212,11 @@ function SystemPromptBlock({ origin, label, text, createdAt, dropFirstLine }: {
 }
 
 function PromptBlock({ text, voice, createdAt }: { text: string; voice?: boolean; createdAt?: string }) {
+  useLocale();
   const time = createdAt ? promptTime(createdAt) : '';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
-      <SenderLabel align="right">{voice ? '🎙 음성으로 입력' : '👤 직접 입력'}{time ? ` · ${time}` : ''}</SenderLabel>
+      <SenderLabel align="right">{voice ? translate('🎙 음성으로 입력') : translate('👤 직접 입력')}{time ? ` · ${time}` : ''}</SenderLabel>
       <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
       <div
         data-block="prompt"
@@ -227,9 +235,8 @@ function PromptBlock({ text, voice, createdAt }: { text: string; voice?: boolean
         }}
       >
         {voice && (
-          <div data-prompt-voice="wake" style={{ fontSize: 10.5, color: tokens.colors.textMuted, marginBottom: 3 }} title="이름을 불러 깨운 뒤의 첫 요청 — 음성 대화 안내 한 줄이 함께 갔습니다">
-            🎙 불러서 시작
-          </div>
+          <div data-prompt-voice="wake" style={{ fontSize: 10.5, color: tokens.colors.textMuted, marginBottom: 3 }} title={translate('이름을 불러 깨운 뒤의 첫 요청 — 음성 대화 안내 한 줄이 함께 갔습니다')}>
+            {translate('🎙 불러서 시작')}</div>
         )}
         {text}
       </div>
@@ -239,11 +246,12 @@ function PromptBlock({ text, voice, createdAt }: { text: string; voice?: boolean
 }
 
 function AutomaticPromptBlock({ text }: { text: string }) {
+  useLocale();
   return (
     <aside
       data-block="automatic-prompt"
       role="note"
-      aria-label="자동 이어쓰기"
+      aria-label={translate('자동 이어쓰기')}
       style={{
         maxWidth: 860,
         alignSelf: 'flex-start',
@@ -257,11 +265,10 @@ function AutomaticPromptBlock({ text }: { text: string }) {
       }}
     >
       <div style={{ color: tokens.colors.warningLight, fontWeight: 600 }}>
-        <span aria-hidden="true">↻ </span>자동 이어쓰기
-      </div>
-      <div>표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다.</div>
+        <span aria-hidden="true">↻ </span>{translate('자동 이어쓰기')}</div>
+      <div>{translate('표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다.')}</div>
       <details style={{ marginTop: 4 }}>
-        <summary style={{ cursor: 'pointer' }}>전송된 원문 보기</summary>
+        <summary style={{ cursor: 'pointer' }}>{translate('전송된 원문 보기')}</summary>
         <div style={{ marginTop: 4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</div>
       </details>
     </aside>
@@ -269,6 +276,7 @@ function AutomaticPromptBlock({ text }: { text: string }) {
 }
 
 function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string) => Promise<Blob>; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
+  useLocale();
   // 인증된 이미지·파일 미리보기 자리를 먼저 떼고, 나머지는 세션 Markdown으로 그린다.
   // 이미지와 로컬 html/md 는 같은 통(`local_image` RPC)으로 받으므로 로더도 하나를 공유한다.
   const nodes = useMemo(
@@ -279,11 +287,11 @@ function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { te
       }
       return <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} registerMedia={registerMedia} openMedia={openMedia} />;
     }),
-    [text, loadLocalImage, registerMedia, openMedia],
+    [text, loadLocalImage, registerMedia, openMedia, getLocale()],
   );
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
-      <SenderLabel align="left">🤖 에이전트</SenderLabel>
+      <SenderLabel align="left">{translate('🤖 에이전트')}</SenderLabel>
       <div
         data-block="assistant"
         style={{
@@ -304,9 +312,10 @@ function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { te
 }
 
 function ReasoningBlock({ text }: { text: string }) {
+  useLocale();
   return (
     <details data-block="reasoning" style={{ ...cardStyle, background: 'transparent', borderStyle: 'dashed' }}>
-      <summary style={summaryStyle}>💭 Thinking ({text.length.toLocaleString()} chars)</summary>
+      <summary style={summaryStyle}>{translate('💭 Thinking (')}{text.length.toLocaleString(getLocaleTag())} {translate('chars)')}</summary>
       <div style={{ marginTop: 6, color: tokens.colors.textMuted, fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
         {clip(text)}
       </div>
@@ -315,6 +324,7 @@ function ReasoningBlock({ text }: { text: string }) {
 }
 
 function ToolBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'tool' }> }) {
+  useLocale();
   const chip = statusChip(block.status);
   const input = stringify(block.input);
   const output = stringify(block.output);
@@ -323,7 +333,7 @@ function ToolBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'tool' }
       <summary style={{ ...summaryStyle, display: 'flex', alignItems: 'center', gap: 8, color: tokens.colors.textStrong }}>
         <span aria-hidden="true">{toolGlyph(block.toolKind, block.delegated)}</span>
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {block.delegated ? `Delegated: ${block.title}` : block.title}
+          {block.delegated ? translate('Delegated: {0}', { 0: block.title }) : block.title}
         </span>
         {block.toolKind && (
           <span style={{ fontFamily: MONO, fontSize: 10.5, color: tokens.colors.textMuted }}>{block.toolKind}</span>
@@ -370,6 +380,7 @@ function PermissionBlock({
   enabled: boolean;
   onDecide: (requestId: string, optionId: string | null) => void;
 }) {
+  useLocale();
   const decided = block.decision;
   const rawInput = stringify(block.rawInput);
   const decidedOption = decided?.option_id ? block.options.find((o) => o.option_id === decided.option_id) : null;
@@ -377,7 +388,7 @@ function PermissionBlock({
     <div
       data-block="permission"
       role="group"
-      aria-label="Permission request"
+      aria-label={translate('Permission request')}
       style={{
         ...cardStyle,
         borderColor: decided ? tokens.colors.border : tokens.colors.warning,
@@ -394,16 +405,16 @@ function PermissionBlock({
       )}
       {rawInput && (
         <details style={{ marginTop: 4 }}>
-          <summary style={summaryStyle}>Details</summary>
+          <summary style={summaryStyle}>{translate('Details')}</summary>
           <CodeBlock code={rawInput} displayCode={clip(rawInput)} language="Input" maxHeight={320} />
         </details>
       )}
       {decided ? (
         <div style={{ marginTop: 8, fontSize: 12, color: decided.outcome === 'selected' && optionTone(decidedOption ?? { option_id: '', name: '', kind: 'reject' }) === 'allow' ? tokens.colors.successLight : tokens.colors.textSecondary }}>
           {decided.outcome === 'selected'
-            ? `${decidedOption?.name || decided.option_id || 'Selected'}`
-            : 'Denied'}
-          <span style={{ color: tokens.colors.textMuted }}> · {decided.decided_by === 'user' ? 'by you' : decided.decided_by === 'policy' ? 'by session policy' : decided.decided_by === 'timeout' ? 'timed out' : decided.decided_by === 'system' ? 'agent process stopped' : decided.decided_by}</span>
+            ? `${decidedOption?.name || decided.option_id || translate('Selected')}`
+            : translate('Denied')}
+          <span style={{ color: tokens.colors.textMuted }}> · {decided.decided_by === 'user' ? translate('by you') : decided.decided_by === 'policy' ? translate('by session policy') : decided.decided_by === 'timeout' ? translate('timed out') : decided.decided_by === 'system' ? translate('agent process stopped') : decided.decided_by}</span>
         </div>
       ) : (
         <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -446,12 +457,10 @@ function PermissionBlock({
               opacity: deciding || !enabled ? 0.6 : 1,
             }}
           >
-            Cancel request
-          </button>
+            {translate('Cancel request')}</button>
           {!enabled && (
             <span style={{ alignSelf: 'center', fontSize: 11.5, color: tokens.colors.textMuted }}>
-              Session is not live — send a prompt to reopen it.
-            </span>
+              {translate('Session is not live — send a prompt to reopen it.')}</span>
           )}
         </div>
       )}
@@ -511,6 +520,7 @@ export function coerceElicitationContent(fields: ElicitationFieldView[], values:
 function ElicitationField({ field, value, onChange, disabled }: {
   field: ElicitationFieldView; value: unknown; onChange: (next: unknown) => void; disabled: boolean;
 }) {
+  useLocale();
   const label = (
     <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
       {field.title}{field.required && <span style={{ color: tokens.colors.dangerLight }}> *</span>}
@@ -551,7 +561,7 @@ function ElicitationField({ field, value, onChange, disabled }: {
       <div>
         {label}
         <select aria-label={field.title} style={fieldInputStyle} value={typeof value === 'string' ? value : ''} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
-          <option value="">{field.required ? 'Choose…' : '(none)'}</option>
+          <option value="">{field.required ? translate('Choose…') : translate('(none)')}</option>
           {field.choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
         </select>
       </div>
@@ -595,17 +605,18 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
   enabled: boolean;
   onAnswer?: (elicitationId: string, action: ElicitationAction, content: Record<string, unknown> | null) => void;
 }) {
+  useLocale();
   const fields = block.schema?.fields ?? [];
   const [values, setValues] = useState<Record<string, unknown>>(() => initialElicitationValues(fields));
   const decided = block.decision;
   const locked = deciding || !enabled || !onAnswer;
   const missing = fields.filter((f) => f.required && elicitationValueMissing(f, values[f.name]));
-  const decidedByLabel = decided?.decided_by === 'user' ? 'by you' : decided?.decided_by === 'agent' ? 'by the agent' : decided?.decided_by === 'timeout' ? 'timed out' : decided?.decided_by === 'system' ? 'agent process stopped' : decided?.decided_by;
+  const decidedByLabel = decided?.decided_by === 'user' ? translate('by you') : decided?.decided_by === 'agent' ? translate('by the agent') : decided?.decided_by === 'timeout' ? translate('timed out') : decided?.decided_by === 'system' ? translate('agent process stopped') : decided?.decided_by;
   return (
     <div
       data-block="elicitation"
       role="group"
-      aria-label="Agent question"
+      aria-label={translate('Agent question')}
       style={{
         ...cardStyle,
         borderColor: decided ? tokens.colors.border : tokens.colors.accent,
@@ -614,7 +625,7 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: tokens.colors.textPrimary, fontWeight: 600 }}>
         <span aria-hidden="true">❓</span>
-        <span style={{ flex: 1, minWidth: 0 }}>{block.schema?.title || (block.mode === 'url' ? 'Continue in your browser' : 'The agent needs your input')}</span>
+        <span style={{ flex: 1, minWidth: 0 }}>{block.schema?.title || (block.mode === 'url' ? translate('Continue in your browser') : translate('The agent needs your input'))}</span>
       </div>
       {block.message && (
         <div style={{ marginTop: 6, fontSize: 13, color: tokens.colors.textPrimary, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{block.message}</div>
@@ -628,7 +639,7 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
             <a href={block.url} target="_blank" rel="noopener noreferrer" style={{ color: tokens.colors.accentLight, fontSize: 12.5, wordBreak: 'break-all' }}>{block.url}</a>
           )}
           <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-            {decided ? `Completed · ${decidedByLabel}` : 'Waiting for you to finish there…'}
+            {decided ? translate('Completed · {0}', { 0: decidedByLabel }) : translate('Waiting for you to finish there…')}
           </span>
         </div>
       ) : decided ? (
@@ -636,8 +647,8 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
           {decided.action === 'accept'
             ? (decided.content && Object.keys(decided.content).length
               ? Object.entries(decided.content).map(([k, v]) => `${fields.find((f) => f.name === k)?.title || k}: ${Array.isArray(v) ? v.join(', ') : String(v)}`).join(' · ')
-              : 'Submitted')
-            : decided.action === 'decline' ? 'Declined' : 'Cancelled'}
+              : translate('Submitted'))
+            : decided.action === 'decline' ? translate('Declined') : translate('Cancelled')}
           <span style={{ color: tokens.colors.textMuted }}> · {decidedByLabel}</span>
         </div>
       ) : (
@@ -662,26 +673,23 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
                 cursor: locked || missing.length ? 'not-allowed' : 'pointer', opacity: locked || missing.length ? 0.6 : 1,
               }}
             >
-              Submit
-            </button>
+              {translate('Submit')}</button>
             <button
               type="button"
               disabled={locked}
               onClick={() => onAnswer?.(block.elicitationId, 'decline', null)}
               style={{ padding: '6px 12px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.borderStrong}`, background: 'transparent', color: tokens.colors.textSecondary, fontSize: 12.5, cursor: locked ? 'not-allowed' : 'pointer', opacity: locked ? 0.6 : 1 }}
             >
-              Decline
-            </button>
+              {translate('Decline')}</button>
             <button
               type="button"
               disabled={locked}
               onClick={() => onAnswer?.(block.elicitationId, 'cancel', null)}
               style={{ padding: '6px 12px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.borderStrong}`, background: 'transparent', color: tokens.colors.textMuted, fontSize: 12.5, cursor: locked ? 'not-allowed' : 'pointer', opacity: locked ? 0.6 : 1 }}
             >
-              Cancel
-            </button>
-            {missing.length > 0 && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>Fill in {missing.map((f) => f.title).join(', ')}</span>}
-            {!enabled && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>Session is not live — send a prompt to reopen it.</span>}
+              {translate('Cancel')}</button>
+            {missing.length > 0 && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Fill in')} {missing.map((f) => f.title).join(', ')}</span>}
+            {!enabled && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Session is not live — send a prompt to reopen it.')}</span>}
           </div>
         </form>
       )}
@@ -699,18 +707,18 @@ function planGlyph(status: string): string {
 
 /** 에이전트의 작업 계획(ACP plan) — 같은 turn 의 최신 목록만 남는다. */
 function PlanBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'plan' }> }) {
+  useLocale();
   const done = block.entries.filter((e) => e.status === 'completed').length;
   return (
     <details data-block="plan" open style={cardStyle}>
       <summary style={{ ...summaryStyle, color: tokens.colors.textStrong }}>
-        📋 Plan · {done}/{block.entries.length} done
-      </summary>
+        {translate('📋 Plan ·')} {done}/{block.entries.length} {translate('done')}</summary>
       <ul style={{ margin: '6px 0 0', padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
         {block.entries.map((e, i) => (
           <li key={i} style={{ display: 'flex', gap: 8, fontSize: 12.5, color: e.status === 'completed' ? tokens.colors.textMuted : tokens.colors.textPrimary, textDecoration: e.status === 'completed' ? 'line-through' : 'none' }}>
             <span aria-hidden="true" style={{ color: e.status === 'in_progress' ? tokens.colors.accentLight : tokens.colors.textMuted }}>{planGlyph(e.status)}</span>
             <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{e.content}</span>
-            {e.priority === 'high' && <span style={{ fontSize: 10.5, color: tokens.colors.warningLight }}>high</span>}
+            {e.priority === 'high' && <span style={{ fontSize: 10.5, color: tokens.colors.warningLight }}>{translate('high')}</span>}
           </li>
         ))}
       </ul>
@@ -719,6 +727,7 @@ function PlanBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'plan' }
 }
 
 function Note({ children, tone, multiline = false }: { children: React.ReactNode; tone: 'muted' | 'danger' | 'warning'; multiline?: boolean }) {
+  useLocale();
   const color = tone === 'danger' ? tokens.colors.dangerLight : tone === 'warning' ? tokens.colors.warningLight : tokens.colors.textMuted;
   return (
     <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -761,6 +770,7 @@ function ImageBlock({
   registerMedia?: (key: string, item: MediaLightboxItem) => void;
   openMedia?: (key: string) => void;
 }) {
+  useLocale();
   const fromUser = (block as { from?: string }).from === 'user';
   const [url, setUrl] = useState<string>(block.uri || '');
   const [error, setError] = useState<string | null>(null);
@@ -783,7 +793,7 @@ function ImageBlock({
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
       } catch (err: any) {
-        if (!revoked) setError(err?.message || '이미지를 가져오지 못했습니다');
+        if (!revoked) setError(err?.message || translate('이미지를 가져오지 못했습니다'));
       }
     })();
     return () => {
@@ -797,7 +807,7 @@ function ImageBlock({
       registerMedia(mediaKey, {
         src: url,
         kind: isVideo ? 'video' : 'image',
-        caption: `${fromUser ? 'sent' : 'agent'} ${isVideo ? 'video' : 'image'} (${block.mimeType || ''})`,
+        caption: `${fromUser ? translate('sent') : translate('agent')} ${isVideo ? translate('video') : translate('image')} (${block.mimeType || ''})`,
         filename: isVideo ? 'video' : 'image',
       });
     }
@@ -805,15 +815,15 @@ function ImageBlock({
 
   const sizeLabel = block.size ? `, ${Math.round(block.size / 1024)}KB` : '';
   const align = fromUser ? 'flex-end' : 'flex-start';
-  const label = fromUser ? '🖼 보낸 이미지 · 내가 첨부' : '🖼 에이전트 이미지';
+  const label = fromUser ? translate('🖼 보낸 이미지 · 내가 첨부') : translate('🖼 에이전트 이미지');
   if (error) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
         <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
         <div data-block="image" data-from={fromUser ? 'user' : 'agent'} style={{ fontSize: 11.5, color: tokens.colors.warning }}>
-          이미지를 가져오지 못했습니다 — {error}
+          {translate('이미지를 가져오지 못했습니다 —')} {error}
           {loadImage && block.imageRef && !block.uri && (
-            <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>다시 시도</button>
+            <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>{translate('다시 시도')}</button>
           )}
         </div>
       </div>
@@ -824,7 +834,7 @@ function ImageBlock({
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
         <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
         <div data-block="image" data-from={fromUser ? 'user' : 'agent'} style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-          이미지 불러오는 중… ({block.mimeType}{sizeLabel})
+          {translate('이미지 불러오는 중… (')}{block.mimeType}{sizeLabel})
         </div>
       </div>
     );
@@ -850,8 +860,8 @@ function ImageBlock({
         {openMedia && (
           <button
             type="button"
-            title="크게 보기 (갤러리)"
-            aria-label="Expand video"
+            title={translate('크게 보기 (갤러리)')}
+            aria-label={translate('Expand video')}
             onClick={() => openMedia(mediaKey)}
             style={{
               position: 'absolute', top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
@@ -874,12 +884,12 @@ function ImageBlock({
         data-block="image"
         data-from={fromUser ? 'user' : 'agent'}
         onClick={() => openMedia?.(mediaKey)}
-        title="클릭하면 크게 보기 (← → 로 넘기기)"
+        title={translate('클릭하면 크게 보기 (← → 로 넘기기)')}
         style={{ display: 'block', maxWidth: '100%', padding: 0, border: 'none', background: 'transparent', cursor: openMedia ? 'zoom-in' : 'default', alignSelf: align }}
       >
         <img
           src={url}
-          alt={`${fromUser ? 'sent' : 'agent'} image (${block.mimeType})`}
+          alt={translate('{0} image ({1})', { 0: fromUser ? 'sent' : 'agent', 1: block.mimeType })}
           // 전사 폭을 넘지 않게만 제한한다 — 원본은 팝업 갤러리에서 본다(새 탭·다운로드 아님).
           style={{
             maxWidth: '100%',
@@ -918,6 +928,7 @@ function MarkdownImage({
   registerMedia?: (key: string, item: MediaLightboxItem) => void;
   openMedia?: (key: string) => void;
 }) {
+  useLocale();
   const [url, setUrl] = useState<string>(source === 'remote' ? target : '');
   const [error, setError] = useState<string | null>(null);
 
@@ -937,7 +948,7 @@ function MarkdownImage({
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
       } catch (err: any) {
-        if (!revoked) setError(err?.message || '이미지를 가져오지 못했습니다');
+        if (!revoked) setError(err?.message || translate('이미지를 가져오지 못했습니다'));
       }
     })();
     return () => {
@@ -968,9 +979,9 @@ function MarkdownImage({
   if (error) {
     return (
       <div data-block="markdown-image" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
-        이미지를 가져오지 못했습니다 — {error}
+        {translate('이미지를 가져오지 못했습니다 —')} {error}
         {source === 'local' && loadLocalImage && (
-          <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>다시 시도</button>
+          <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>{translate('다시 시도')}</button>
         )}
         <div>{caption}</div>
       </div>
@@ -979,7 +990,7 @@ function MarkdownImage({
   if (!url) {
     return (
       <div data-block="markdown-image" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
-        이미지 불러오는 중… {caption}
+        {translate('이미지 불러오는 중…')} {caption}
       </div>
     );
   }
@@ -988,14 +999,14 @@ function MarkdownImage({
       <button
         type="button"
         onClick={() => openMedia?.(mediaKey)}
-        title="클릭하면 크게 보기 (← → 로 넘기기)"
+        title={translate('클릭하면 크게 보기 (← → 로 넘기기)')}
         style={{ display: 'inline-block', maxWidth: '100%', padding: 0, border: 'none', background: 'transparent', cursor: openMedia ? 'zoom-in' : 'default' }}
       >
         <img
           src={url}
           alt={alt || target}
           referrerPolicy="no-referrer"
-          onError={() => setError('브라우저가 이 이미지를 그리지 못했습니다')}
+          onError={() => setError(translate('브라우저가 이 이미지를 그리지 못했습니다'))}
           style={{
             display: 'block',
             maxWidth: '100%',
@@ -1041,6 +1052,7 @@ function MarkdownFile({
   fileKind: 'html' | 'markdown';
   loadLocalFile?: (path: string) => Promise<Blob>;
 }) {
+  useLocale();
   const [url, setUrl] = useState<string>('');
   const [mdText, setMdText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1063,7 +1075,7 @@ function MarkdownFile({
           setMdText(await blob.text());
         }
       } catch (err: any) {
-        if (!revoked) setError(err?.message || '파일을 가져오지 못했습니다');
+        if (!revoked) setError(err?.message || translate('파일을 가져오지 못했습니다'));
       }
     })();
     return () => {
@@ -1072,7 +1084,7 @@ function MarkdownFile({
     };
   }, [target, fileKind, loadLocalFile]);
 
-  const label = fileKind === 'html' ? 'HTML' : 'Markdown';
+  const label = fileKind === 'html' ? 'HTML' : translate('Markdown');
   const caption = (
     <span style={{ fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' }} title={target}>
       {alt ? `${alt} — ` : ''}{target}
@@ -1084,7 +1096,7 @@ function MarkdownFile({
   if (error) {
     return (
       <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
-        {label} 파일을 가져오지 못했습니다 — {error}
+        {label} {translate('파일을 가져오지 못했습니다 —')} {error}
         <div>{caption}</div>
       </div>
     );
@@ -1093,7 +1105,7 @@ function MarkdownFile({
     if (!url) {
       return (
         <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
-          {label} 불러오는 중… {caption}
+          {label} {translate('불러오는 중…')} {caption}
         </div>
       );
     }
@@ -1115,8 +1127,7 @@ function MarkdownFile({
         <figcaption style={{ marginTop: 2, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
           <span style={{ flex: 1, minWidth: 0 }}>{caption}</span>
           <a href={url} download={downloadName(target, 'html')} style={{ fontSize: 11, color: tokens.colors.accent }}>
-            다운로드
-          </a>
+            {translate('다운로드')}</a>
         </figcaption>
       </figure>
     );
@@ -1124,7 +1135,7 @@ function MarkdownFile({
   if (mdText === null) {
     return (
       <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
-        {label} 불러오는 중… {caption}
+        {label} {translate('불러오는 중…')} {caption}
       </div>
     );
   }
@@ -1150,6 +1161,7 @@ function MarkdownFile({
 }
 
 export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage }: SessionTranscriptProps) {
+  useLocale();
   // 전사 전체 이미지 갤러리 — 새 탭/다운로드 대신 팝업 + prev/next.
   // 각 이미지 블록이 URL 을 resolve 한 뒤 registerMedia 로 등록한다.
   const [galleryMap, setGalleryMap] = useState<Record<string, MediaLightboxItem>>({});
@@ -1162,8 +1174,8 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
     });
   }, []);
   const openMedia = useCallback((key: string) => setLightboxKey(key), []);
-  const galleryKeys = useMemo(() => Object.keys(galleryMap), [galleryMap]);
-  const galleryItems = useMemo(() => galleryKeys.map((k) => galleryMap[k]), [galleryKeys, galleryMap]);
+  const galleryKeys = useMemo(() => Object.keys(galleryMap), [galleryMap, getLocale()]);
+  const galleryItems = useMemo(() => galleryKeys.map((k) => galleryMap[k]), [galleryKeys, galleryMap, getLocale()]);
   const lightboxIndex = lightboxKey ? galleryKeys.indexOf(lightboxKey) : -1;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1179,10 +1191,10 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
               return <OperatorTaskPromptBlock key={block.key} text={block.text} operator={block.operatorTask || ''} createdAt={block.createdAt} />;
             }
             if (origin === 'async-answer') {
-              return <SystemPromptBlock key={block.key} origin="async-answer" label="💬 질문 답변 자동 전달 · 시스템" text={block.text} createdAt={block.createdAt} dropFirstLine />;
+              return <SystemPromptBlock key={block.key} origin="async-answer" label={translate('💬 질문 답변 자동 전달 · 시스템')} text={block.text} createdAt={block.createdAt} dropFirstLine />;
             }
             if (origin === 'restart-resume') {
-              return <SystemPromptBlock key={block.key} origin="restart-resume" label="🔄 재시작으로 끊긴 턴 이어서 · AWB" text={block.text} createdAt={block.createdAt} />;
+              return <SystemPromptBlock key={block.key} origin="restart-resume" label={translate('🔄 재시작으로 끊긴 턴 이어서 · AWB')} text={block.text} createdAt={block.createdAt} />;
             }
             return <PromptBlock key={block.key} text={block.text} voice={block.voice || origin === 'voice'} createdAt={block.createdAt} />;
           }
@@ -1225,16 +1237,16 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             if (parts.length === 0) return null;
             // 언제 받은 응답인지 — 같은 줄 끝에 붙인다(토큰 줄이 곧 턴의 끝이다).
             const receivedAt = formatReceivedAt(block.receivedAt);
-            const receivedFull = block.receivedAt ? new Date(block.receivedAt).toLocaleString() : '';
+            const receivedFull = block.receivedAt ? new Date(block.receivedAt).toLocaleString(getLocaleTag()) : '';
             return (
               <div
                 key={block.key}
                 data-block="usage"
                 title={
-                  `input ${block.inputTokens.toLocaleString()} · output ${block.outputTokens.toLocaleString()}`
-                  + ` · cache read ${block.cachedReadTokens.toLocaleString()} · cache write ${block.cacheWriteTokens.toLocaleString()}`
-                  + ` · total ${block.totalTokens.toLocaleString()}`
-                  + (receivedFull ? ` · received ${receivedFull}` : '')
+                  translate('input {0} · output {1}', { 0: block.inputTokens.toLocaleString(getLocaleTag()), 1: block.outputTokens.toLocaleString(getLocaleTag()) })
+                  + translate(' · cache read {0} · cache write {1}', { 0: block.cachedReadTokens.toLocaleString(getLocaleTag()), 1: block.cacheWriteTokens.toLocaleString(getLocaleTag()) })
+                  + translate(' · total {0}', { 0: block.totalTokens.toLocaleString(getLocaleTag()) })
+                  + (receivedFull ? translate(' · received {0}', { 0: receivedFull }) : '')
                 }
                 style={{ fontSize: 10.5, color: tokens.colors.textMuted, fontFamily: MONO }}
               >
@@ -1246,7 +1258,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'turn':
             return (
               <Note key={block.key} tone={block.stopReason === 'error' ? 'danger' : 'warning'}>
-                Turn ended: {block.stopReason}
+                {translate('Turn ended:')} {block.stopReason}
               </Note>
             );
           case 'error':

@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 음성 지원 스위치(사이드바 OPERATORS 의 👂) → 서버 — docs/voice-operator.md "음성 지원 · 잠들기".
 // 스위치는 단말마다 따로라 화면이 이 단말의 고정 id 와 함께 켜짐/꺼짐을 서버에 알린다. 서버는 사용자의 단말이
 // 모두 꺼져 있으면 세션 완료를 operator 에게 보고하지 않는다(서버 test/voice-support-switch.test.mjs).
@@ -27,5 +28,5 @@ test('flipping the switch tells the server, with a device id that stays the same
 test('the toggle explains that off also stops session reports to the operator', async () => {
   const { describeWake } = await import('../src/voice/WakeToggle.tsx');
   const text = describeWake({ enabled: false, mode: 'off', operatorId: null, listener: 'idle', micClaims: 0, followUp: null }, [], null, null);
-  assert.match(text, /세션 완료 소식도 operator 에게 가지 않습니다/);
+  assert.match(text, uiPattern("음성 지원 꺼짐 — 누르면 켜집니다 (\"헤이 <이름>\" 듣기 + 답 낭독). 꺼져 있으면 세션 완료 소식도 operator 에게 가지 않습니다(다른 단말이 켜져 있으면 갑니다)"));
 });

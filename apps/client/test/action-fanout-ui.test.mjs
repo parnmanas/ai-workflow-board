@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Action fan-out UI (티켓 fc3906c5).
 //
 // 두 가지를 검증한다:
@@ -112,7 +113,7 @@ test('목록이 target_agent_ids 를 JSON 문자열로 받아도 화면이 터�
     await flush();
     // 문자열에 .filter 를 부르면 렌더가 통째로 죽어 이름조차 안 보인다.
     assert.match(container.textContent, /CLI 최신화/);
-    assert.match(container.textContent, /2개 에이전트/, '문자열도 대상 2개로 해석돼야 한다');
+    assert.match(container.textContent, uiPattern('{0}개 에이전트', { 0: 2 }), '문자열도 대상 2개로 해석돼야 한다');
     unmount();
   } finally {
     Object.assign(api, originals);
@@ -169,7 +170,7 @@ test('디스패치 실패 run(room_id=null)은 빈 대화가 아니라 실패로
     // 배치가 부분 실패로 집계되어야 한다 — 실패 run 이 이력에 있어야만 가능하다.
     const history = container.querySelector('[data-testid="action-run-history"]');
     assert.ok(history, '실행 이력이 없다');
-    assert.match(history.textContent, /부분 실패 \(1\/2\)/);
+    assert.match(history.textContent, uiPattern('부분 실패 ({0}/{1})', { 0: 1, 1: 2 }));
 
     // 실패 run 을 선택하면 "빈 대화" 가 아니라 실패 사유가 보여야 한다.
     const failedRow = [...history.querySelectorAll('button')].find((b) => b.textContent.includes('failed-a'.slice(0, 8)));
@@ -232,7 +233,7 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
     assert.equal(picker.querySelectorAll('input[type="checkbox"]').length, 0, 'Agent 체크박스가 남아 있으면 안 된다');
 
     // runtime 선언 섹션을 열고 Host/CLI/dir 을 채운다.
-    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes('실행 설정'));
+    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes(ui("실행 설정")));
     assert.ok(toggle, 'runtime 선언 토글이 없다');
     click(toggle.querySelector('input[type="checkbox"]'));
     await flush();
@@ -252,12 +253,12 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
         setNativeValue(dirInput(), dir, window.Event);
       });
       await flush();
-      const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('이 설정 사용'));
+      const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes(ui("이 설정 사용")));
       assert.ok(resolveBtn, 'Resolve 버튼이 없다');
       click(resolveBtn);
       await flush();
     }
-    assert.match(container.textContent, /runtime 2개/, 'pending spec 2개가 표시되어야 한다');
+    assert.match(container.textContent, uiPattern(' + runtime {0}개', { 0: 2 }), 'pending spec 2개가 표시되어야 한다');
 
     // Name 필드는 폼의 첫 text input 이다.
     const nameInput = [...container.querySelectorAll('input')].find((i) => i.type === 'text');

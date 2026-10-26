@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useId, useState } from 'react';
 import { api } from '../../api';
 import type { AgentTemplate } from '../../types';
@@ -39,6 +41,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   idPrefix?: string;
   modelConfigId?: string;
 }) {
+  useLocale();
   const generatedId = useId();
   const controlId = idPrefix || `runtime-${generatedId}`;
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
@@ -61,7 +64,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
     setTemplatesLoading(true);
     setError('');
     api.listAgentTemplates().then((rows) => { if (!disposed) setTemplates(rows); })
-      .catch((e) => { if (!disposed) setError(e.message || 'Agent 템플릿을 불러오지 못했습니다.'); })
+      .catch((e) => { if (!disposed) setError(e.message || translate('Agent 템플릿을 불러오지 못했습니다.')); })
       .finally(() => { if (!disposed) setTemplatesLoading(false); });
     return () => { disposed = true; };
   }, [showTemplates]);
@@ -72,9 +75,9 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {showTemplates && <div>
-        <Select id={`${controlId}-template`} aria-label="Agent 템플릿 (선택 사항)" label="Agent 템플릿 (선택 사항)"
+        <Select id={`${controlId}-template`} aria-label={translate('Agent 템플릿 (선택 사항)')} label={translate('Agent 템플릿 (선택 사항)')}
           aria-describedby={`${controlId}-template-help`} value={selectedTemplate?.id || ''} disabled={disabled || templatesLoading} options={[
-            { value: '', label: '사용 안 함' },
+            { value: '', label: translate('사용 안 함') },
             ...(selectedTemplate && !availableTemplates.some((t) => t.id === selectedTemplate.id)
               ? [{ value: selectedTemplate.id, label: selectedTemplate.name, disabled: true }] : []),
             ...availableTemplates.map((t) => ({ value: t.id, label: t.name })),
@@ -86,18 +89,17 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
           }} />
         <p id={`${controlId}-template-help`} style={{ fontSize: 12, margin: '6px 0 0' }}>
           {selectedTemplate
-            ? `‘${selectedTemplate.name}’에서 불러온 설정입니다. 아래 값을 수정해도 저장된 템플릿은 바뀌지 않습니다.`
-            : '아래에서 직접 설정하거나, 템플릿을 선택해 저장된 설정을 불러온 뒤 수정할 수 있습니다.'}
+            ? translate('‘{0}’에서 불러온 설정입니다. 아래 값을 수정해도 저장된 템플릿은 바뀌지 않습니다.', { 0: selectedTemplate.name })
+            : translate('아래에서 직접 설정하거나, 템플릿을 선택해 저장된 설정을 불러온 뒤 수정할 수 있습니다.')}
         </p>
         {!templatesLoading && !error && !availableTemplates.length && <p style={{ fontSize: 12, margin: '6px 0 0' }}>
-          {templates.length ? '현재 사용할 수 있는 Host·CLI에 맞는 Agent 템플릿이 없습니다.' : '등록된 Agent 템플릿이 없습니다.'}
-          {' '}관리자는 Hosts → Agent 템플릿에서 템플릿을 등록할 수 있습니다.
-        </p>}
+          {templates.length ? translate('현재 사용할 수 있는 Host·CLI에 맞는 Agent 템플릿이 없습니다.') : translate('등록된 Agent 템플릿이 없습니다.')}
+          {' '}{translate('관리자는 Hosts → Agent 템플릿에서 템플릿을 등록할 수 있습니다.')}</p>}
       </div>}
       {error && <div role="alert">{error}</div>}
-      <Select id={`${controlId}-host`} label="Runtime Host" value={value.host_id} disabled={disabled} options={[
-        { value: '', label: '선택…' },
-        ...(value.host_id && !host ? [{ value: value.host_id, label: `${value.host_id} (unavailable)` }] : []),
+      <Select id={`${controlId}-host`} label={"Runtime Host"} value={value.host_id} disabled={disabled} options={[
+        { value: '', label: translate('선택…') },
+        ...(value.host_id && !host ? [{ value: value.host_id, label: translate('{0} (unavailable)', { 0: value.host_id }) }] : []),
         ...hosts.map((h) => ({ value: h.id, label: h.name })),
       ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
         const nextHost = hosts.find((h) => h.id === e.target.value);
@@ -105,7 +107,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
         onChange({ ...emptyRuntimeSelection(), host_id: e.target.value, cli }, 'host');
       }} />
       {session ? <Select id={`${controlId}-cli`} label="CLI" value={value.cli} disabled={disabled || !host} options={[
-        { value: '', label: '선택…' }, ...(!host && value.cli ? [{ value: value.cli, label: value.cli }] : []), ...(host?.clis || []).map((c) => ({ value: c, label: c })),
+        { value: '', label: translate('선택…') }, ...(!host && value.cli ? [{ value: value.cli, label: value.cli }] : []), ...(host?.clis || []).map((c) => ({ value: c, label: c })),
       ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange({ ...value, cli: e.target.value, model: null, effort: null }, 'cli')} /> :
         <RuntimeConfigFields value={runtimeSelectionFromAgent(value.cli, value.runtime_config as any)} disabled={disabled || !value.host_id}
           availableRuntimeIds={host?.clis?.length ? host.clis : undefined} onChange={(selection) => {
@@ -116,32 +118,32 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
         <div style={{ flex: 1 }}>
           {session ? <SessionModelSelect models={hostModels.models} labels={hostModels.labels}
-            label="Model" data-config-id={modelConfigId} value={value.model} disabled={disabled || !value.cli}
+            label={translate('Model')} data-config-id={modelConfigId} value={value.model} disabled={disabled || !value.cli}
             style={{ width: '100%', padding: '8px 10px' }}
             onChange={(model) => set({ model: model || null, effort: null })} /> :
-            hostModels.models.length ? <Select data-config-id={modelConfigId} label="Model" value={value.model || ''} disabled={disabled || !value.cli} options={[
-            { value: '', label: 'Default — CLI' }, ...cliModelChoices(hostModels.models, hostModels.labels, value.model),
-            ...(value.model && !hostModels.models.includes(value.model) ? [{ value: value.model, label: `${value.model} (not listed by this host)` }] : []),
+            hostModels.models.length ? <Select data-config-id={modelConfigId} label={translate('Model')} value={value.model || ''} disabled={disabled || !value.cli} options={[
+            { value: '', label: translate('Default — CLI') }, ...cliModelChoices(hostModels.models, hostModels.labels, value.model),
+            ...(value.model && !hostModels.models.includes(value.model) ? [{ value: value.model, label: translate('{0} (not listed by this host)', { 0: value.model }) }] : []),
           ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ model: e.target.value || null, effort: null })} /> :
-            <Input label="Model" value={value.model || ''} disabled={disabled || !value.cli} placeholder="CLI default"
+            <Input label={translate('Model')} value={value.model || ''} disabled={disabled || !value.cli} placeholder={translate('CLI default')}
               onChange={(e) => set({ model: e.target.value || null, effort: null })} />}
         </div>
         <Button variant="ghost" size="sm" disabled={disabled || !value.cli || !value.host_id || hostModels.refreshing} onClick={() => void hostModels.refresh()}>
-          {hostModels.refreshing ? '새로고침 중…' : '새로고침'}
+          {hostModels.refreshing ? translate('새로고침 중…') : translate('새로고침')}
         </Button>
       </div>
-      <Select id={`${controlId}-effort`} aria-label="Effort" label="Effort" value={value.effort || ''}
+      <Select id={`${controlId}-effort`} aria-label={translate('Effort')} label={translate('Effort')} value={value.effort || ''}
         disabled={disabled || !value.cli || !value.host_id} options={[
-          { value: '', label: 'CLI 기본값' }, ...effortOptions,
+          { value: '', label: translate('CLI 기본값') }, ...effortOptions,
           ...(value.effort && !effortOptions.some((o) => o.value === value.effort)
-            ? [{ value: value.effort, label: `${value.effort} (지원 여부 미확인)`, disabled: true }] : []),
+            ? [{ value: value.effort, label: translate('{0} (지원 여부 미확인)', { 0: value.effort }), disabled: true }] : []),
         ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ effort: e.target.value || null })} />
       {!effortOptions.length && value.cli && <div role="status" style={{ fontSize: 12 }}>
-        {hostModels.loading ? 'Effort 선택지를 불러오는 중…'
-          : !supportsLaunchEffort ? '이 CLI는 실행 설정의 Effort 지정을 지원하지 않습니다. CLI 기본값을 사용하세요.'
-          : effortReport ? '이 모델의 ACP 보고에 Effort 선택지가 없습니다. CLI 기본값을 사용하세요.'
-          : !value.model ? '모델을 선택하면 해당 모델의 Effort 선택지를 표시합니다.'
-          : '이 Host·CLI·모델의 Effort 선택지가 아직 보고되지 않았습니다. 해당 모델로 세션을 연결한 뒤 새로고침하세요.'}
+        {hostModels.loading ? translate('Effort 선택지를 불러오는 중…')
+          : !supportsLaunchEffort ? translate('이 CLI는 실행 설정의 Effort 지정을 지원하지 않습니다. CLI 기본값을 사용하세요.')
+          : effortReport ? translate('이 모델의 ACP 보고에 Effort 선택지가 없습니다. CLI 기본값을 사용하세요.')
+          : !value.model ? translate('모델을 선택하면 해당 모델의 Effort 선택지를 표시합니다.')
+          : translate('이 Host·CLI·모델의 Effort 선택지가 아직 보고되지 않았습니다. 해당 모델로 세션을 연결한 뒤 새로고침하세요.')}
       </div>}
       {hostModels.error && <div role="status">{hostModels.error}</div>}
     </div>

@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, { useMemo, useState } from 'react';
 import { Ticket, TicketStatus } from '../types';
 import { tokens } from '../tokens';
@@ -49,6 +51,7 @@ const EMPTY_FORM = { title: '', description: '', tags: [] as string[] };
 export default function ChildTicketList({
   parentTicket, maxDepth, accountTickets, tagPool, onCreateChild, onMoveChild, onDeleteChild, onReparentChild, onSelectChild,
 }: ChildTicketListProps) {
+  useLocale();
   const children = parentTicket.children || [];
   const [addMode, setAddMode] = useState<AddMode>(null);
   const [createForm, setCreateForm] = useState(EMPTY_FORM);
@@ -89,7 +92,7 @@ export default function ChildTicketList({
       .filter(t => !containsParent(t))
       .filter(t => !q || t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
       .slice(0, 20);
-  }, [accountTickets, children, parentTicket, linkQuery, onReparentChild]);
+  }, [accountTickets, children, parentTicket, linkQuery, onReparentChild, getLocale()]);
 
   const doneCount = children.filter(c => c.status === DONE_STATUS).length;
   const progress = children.length > 0 ? (doneCount / children.length) * 100 : 0;
@@ -110,8 +113,8 @@ export default function ChildTicketList({
   // the parent's assignee never picks up a half-written subtask.
   const handleCreate = () => {
     const errs: { title?: string; description?: string } = {};
-    if (!createForm.title.trim()) errs.title = 'Title is required.';
-    if (!createForm.description.trim()) errs.description = 'Description is required.';
+    if (!createForm.title.trim()) errs.title = translate('Title is required.');
+    if (!createForm.description.trim()) errs.description = translate('Description is required.');
     if (Object.keys(errs).length > 0) {
       setCreateErrors(errs);
       return;
@@ -153,15 +156,15 @@ export default function ChildTicketList({
     <div style={{ minWidth: 0 }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
         <h4 style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textDisabled, margin: 0 }}>
-          하위 작업 ({doneCount}/{children.length})
+          {translate('하위 작업 (')}{doneCount}/{children.length})
         </h4>
         {canCreateChildren && addMode === null && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
-            <button onClick={() => setAddMode('new')} style={actionBtnStyle}>+ 새 하위 작업</button>
+            <button onClick={() => setAddMode('new')} style={actionBtnStyle}>{translate('+ 새 하위 작업')}</button>
             {canLinkExisting && (
               <>
                 <span style={{ color: tokens.colors.borderStrong, fontSize: '11px' }}>·</span>
-                <button onClick={() => setAddMode('link')} style={actionBtnStyle}>+ 기존 티켓 연결</button>
+                <button onClick={() => setAddMode('link')} style={actionBtnStyle}>{translate('+ 기존 티켓 연결')}</button>
               </>
             )}
           </div>
@@ -215,7 +218,7 @@ export default function ChildTicketList({
                     onMoveChild(child.id, e.target.value as TicketStatus);
                   }}
                   onClick={e => e.stopPropagation()}
-                  title="Status"
+                  title={translate('Status')}
                   style={{
                     background: 'transparent', border: 'none', fontSize: '10px', fontWeight: 600,
                     color: ticketStatusColor(child.status), cursor: 'pointer', outline: 'none',
@@ -226,7 +229,7 @@ export default function ChildTicketList({
                 <button onClick={(e) => { e.stopPropagation(); onDeleteChild(child.id); }} style={{
                   background: 'none', border: 'none', color: tokens.colors.borderStrong, cursor: 'pointer',
                   fontSize: '14px', padding: '0 4px',
-                }}>x</button>
+                }}>{translate('x')}</button>
               </div>
             </div>
           );
@@ -246,7 +249,7 @@ export default function ChildTicketList({
             autoFocus
             value={linkQuery}
             onChange={e => setLinkQuery(e.target.value)}
-            placeholder="Search ticket by title or id..."
+            placeholder={translate('Search ticket by title or id...')}
             style={inputStyle}
           />
           <div style={{
@@ -255,7 +258,7 @@ export default function ChildTicketList({
           }}>
             {linkCandidates.length === 0 ? (
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, padding: '6px 8px', fontStyle: 'italic' }}>
-                {linkQuery.trim() ? 'No matching tickets' : 'No tickets available to link'}
+                {linkQuery.trim() ? translate('No matching tickets') : translate('No tickets available to link')}
               </div>
             ) : linkCandidates.map(t => (
               <button
@@ -281,7 +284,7 @@ export default function ChildTicketList({
                 background: 'transparent', color: tokens.colors.textSecondary, border: `1px solid ${tokens.colors.border}`,
                 borderRadius: tokens.radii.md, padding: '4px 10px', fontSize: '12px', cursor: 'pointer',
               }}
-            >Cancel</button>
+            >{translate('Cancel')}</button>
           </div>
         </div>
       )}
@@ -300,7 +303,7 @@ export default function ChildTicketList({
               autoFocus
               value={createForm.title}
               onChange={e => { setCreateForm({ ...createForm, title: e.target.value }); if (createErrors.title) setCreateErrors({ ...createErrors, title: undefined }); }}
-              placeholder="Subtask title"
+              placeholder={translate('Subtask title')}
               style={{ ...inputStyle, borderColor: createErrors.title ? tokens.colors.danger : tokens.colors.border }}
             />
             {createErrors.title && (
@@ -311,7 +314,7 @@ export default function ChildTicketList({
             <textarea
               value={createForm.description}
               onChange={e => { setCreateForm({ ...createForm, description: e.target.value }); if (createErrors.description) setCreateErrors({ ...createErrors, description: undefined }); }}
-              placeholder="Description (required) — what the assignee needs to know before starting"
+              placeholder={translate('Description (required) — what the assignee needs to know before starting')}
               rows={3}
               style={{
                 ...inputStyle,
@@ -327,7 +330,7 @@ export default function ChildTicketList({
             value={createForm.tags}
             suggestions={tagPool || []}
             onChange={tags => setCreateForm(prev => ({ ...prev, tags }))}
-            placeholder="Tags (선택 — Enter / 쉼표)"
+            placeholder={translate('Tags (선택 — Enter / 쉼표)')}
           />
           <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
             <button
@@ -336,11 +339,11 @@ export default function ChildTicketList({
                 background: 'transparent', color: tokens.colors.textSecondary, border: `1px solid ${tokens.colors.border}`,
                 borderRadius: tokens.radii.md, padding: '4px 10px', fontSize: '12px', cursor: 'pointer',
               }}
-            >Cancel</button>
+            >{translate('Cancel')}</button>
             <button onClick={handleCreate} style={{
               background: tokens.colors.accent, color: 'white', border: 'none', borderRadius: tokens.radii.md,
               padding: '4px 12px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
-            }}>Add Subtask</button>
+            }}>{translate('Add Subtask')}</button>
           </div>
         </div>
       )}

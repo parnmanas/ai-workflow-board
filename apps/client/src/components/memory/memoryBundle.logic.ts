@@ -1,3 +1,4 @@
+import { t as translate } from '../../i18n/core';
 /**
  * CLI 메모리 내보내기·가져오기·적용 — 순수 함수(docs/cli-memory.md "Import / Export", "적용").
  *
@@ -138,14 +139,14 @@ export function buildBundle(
 
 /** 사람이 읽는 한 장짜리 markdown — 검토·공유용(가져오기는 JSON 번들로). */
 export function bundleToMarkdown(bundle: MemoryBundle): string {
-  const out: string[] = [`# CLI memory — ${bundle.source.manager_name} (${bundle.source.hostname})`, '', `Exported ${bundle.exported_at}`, ''];
+  const out: string[] = [translate('# CLI memory — {0} ({1})', { 0: bundle.source.manager_name, 1: bundle.source.hostname }), '', translate('Exported {0}', { 0: bundle.exported_at }), ''];
   let cli = '';
   for (const f of bundle.files) {
     if (f.cli !== cli) {
       cli = f.cli;
       out.push(`## ${cli}`, '');
     }
-    const where = f.anchor === 'home' ? `${f.home}/${f.rel}` : f.anchor === 'project' ? `${f.project_name}/${f.rel}` : `${f.project_name} auto memory/${f.rel}`;
+    const where = f.anchor === 'home' ? `${f.home}/${f.rel}` : f.anchor === 'project' ? `${f.project_name}/${f.rel}` : translate('{0} auto memory/{1}', { 0: f.project_name, 1: f.rel });
     out.push(`### ${f.label} — \`${where}\``, '', '````markdown', f.content.replace(/\s+$/, ''), '````', '');
   }
   return out.join('\n');
@@ -156,11 +157,11 @@ export function parseBundle(text: string): MemoryBundle {
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error('Not a JSON file.');
+    throw new Error(translate('Not a JSON file.'));
   }
-  if (!data || data.format !== BUNDLE_FORMAT) throw new Error('Not an AWB CLI memory bundle.');
-  if (typeof data.version !== 'number' || data.version > BUNDLE_VERSION) throw new Error(`Unsupported bundle version ${data.version}.`);
-  if (!Array.isArray(data.files)) throw new Error('The bundle has no files.');
+  if (!data || data.format !== BUNDLE_FORMAT) throw new Error(translate('Not an AWB CLI memory bundle.'));
+  if (typeof data.version !== 'number' || data.version > BUNDLE_VERSION) throw new Error(translate('Unsupported bundle version {0}.', { 0: data.version }));
+  if (!Array.isArray(data.files)) throw new Error(translate('The bundle has no files.'));
   const files: BundleFile[] = [];
   for (const f of data.files) {
     if (!f || typeof f.cli !== 'string' || typeof f.rel !== 'string' || typeof f.content !== 'string') continue;
@@ -222,17 +223,17 @@ function projectDirOn(target: MemoryHostSnapshot, projectId: string | null, proj
 /** 번들 파일 하나가 대상 장비에서 갈 경로. `homeMode: 'operator'` 면 세션 홈 파일도 운영자 홈으로 모은다. */
 export function resolveTargetPath(target: MemoryHostSnapshot, file: BundleFile, opts: { homeMode?: 'same' | 'operator'; cli?: string } = {}): { path: string | null; reason?: string } {
   const cli = target.clis.find((c) => c.cli === (opts.cli ?? file.cli));
-  if (!cli || !cli.detected) return { path: null, reason: `${opts.cli ?? file.cli} is not on this host` };
+  if (!cli || !cli.detected) return { path: null, reason: translate('{0} is not on this host', { 0: opts.cli ?? file.cli }) };
   const homeId = opts.homeMode === 'operator' ? 'operator' : file.home;
   const home = cli.homes.find((h) => h.id === homeId);
   if (file.anchor === 'home') {
-    if (!home) return { path: null, reason: `home ${homeId} does not exist here` };
+    if (!home) return { path: null, reason: translate('home {0} does not exist here', { 0: homeId }) };
     return { path: joinHostPath(target.platform, home.path, file.rel) };
   }
   const dir = projectDirOn(target, file.project_id, file.project_name);
-  if (!dir) return { path: null, reason: `project ${file.project_name || file.project_id} has no folder on this host` };
+  if (!dir) return { path: null, reason: translate('project {0} has no folder on this host', { 0: file.project_name || file.project_id }) };
   if (file.anchor === 'project') return { path: joinHostPath(target.platform, dir, file.rel) };
-  if (!home) return { path: null, reason: `home ${homeId} does not exist here` };
+  if (!home) return { path: null, reason: translate('home {0} does not exist here', { 0: homeId }) };
   return { path: joinHostPath(target.platform, home.path, `projects/${claudeProjectKey(dir)}/memory/${file.rel}`) };
 }
 
@@ -256,7 +257,7 @@ export function planImport(target: MemoryHostSnapshot, bundle: MemoryBundle, opt
     const cli = target.clis.find((c) => c.cli === file.cli) as CliMemorySnapshot;
     const slot = targetSlot(cli, resolved.path);
     if (!slot.allowed) {
-      return { file, action: 'unmapped' as const, target_path: resolved.path, target: slot.file, reason: 'not a memory location on this host' };
+      return { file, action: 'unmapped' as const, target_path: resolved.path, target: slot.file, reason: translate('not a memory location on this host') };
     }
     if (!slot.file || !slot.file.exists) return { file, action: 'create' as const, target_path: resolved.path, target: slot.file };
     const same = slot.file.content !== null ? slot.file.content === file.content : slot.file.hash === file.hash;

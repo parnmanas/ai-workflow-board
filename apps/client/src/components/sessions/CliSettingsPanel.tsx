@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
@@ -36,6 +38,7 @@ function defaultsOf(settings: AgentSessionCliSettings | null): Record<string, st
 }
 
 export default function CliSettingsPanel({ accountId, managerId, cli, hostName, onChanged }: CliSettingsPanelProps) {
+  useLocale();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
@@ -56,7 +59,7 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
       setBackend(data.backend?.id || '');
       setError(null);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load CLI settings');
+      setError(err?.message || translate('Failed to load CLI settings'));
     } finally {
       setLoading(false);
     }
@@ -110,9 +113,9 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
       setDefaults(defaultsOf(next));
       setBackend(next.backend?.id || '');
       onChanged?.(next);
-      showToast(next.credential ? `${runtimeLabel(cli)} on ${hostName} now signs in with "${next.credential.name}"` : `${runtimeLabel(cli)} on ${hostName} uses the host's own login`, 'success');
+      showToast(next.credential ? translate('{0} on {1} now signs in with "{2}"', { 0: runtimeLabel(cli), 1: hostName, 2: next.credential.name }) : translate('{0} on {1} uses the host\'s own login', { 0: runtimeLabel(cli), 1: hostName }), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save CLI settings', 'error');
+      showToast(err?.message || translate('Failed to save CLI settings'), 'error');
     } finally {
       setSaving(false);
     }
@@ -130,7 +133,7 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
 
   return (
     <section
-      aria-label="CLI settings"
+      aria-label={translate('CLI settings')}
       data-cli-settings={cli}
       style={{
         margin: '0 20px',
@@ -144,71 +147,66 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: tokens.colors.textPrimary }}>CLI settings</span>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: tokens.colors.textPrimary }}>{translate('CLI settings')}</span>
         <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
-          Credential used when {runtimeLabel(cli)} runs on {hostName}
+          {translate('Credential used when')} {runtimeLabel(cli)} {translate('runs on')} {hostName}
         </span>
       </div>
       {error ? (
         <div style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>
       ) : loading || !settings ? (
-        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
       ) : !settings.supports_credential ? (
         <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-          {runtimeLabel(cli)} sessions use the host&apos;s own login. AWB credentials cannot be applied to this CLI yet.
-        </div>
+          {runtimeLabel(cli)} {translate('sessions use the host\'s own login. AWB credentials cannot be applied to this CLI yet.')}</div>
       ) : (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <select
-            aria-label="Session credential"
+            aria-label={translate('Session credential')}
             style={selectStyle}
             value={selected}
             disabled={saving}
             onChange={(e) => setSelected(e.target.value)}
           >
-            <option value="">Host&apos;s own login (no AWB credential)</option>
+            <option value="">{translate('Host\'s own login (no AWB credential)')}</option>
             {missingCredential && (
-              <option value={settings.credential_id!} disabled>Unavailable credential · {settings.credential_id!.slice(0, 8)}</option>
+              <option value={settings.credential_id!} disabled>{translate('Unavailable credential ·')} {settings.credential_id!.slice(0, 8)}</option>
             )}
             {settings.candidates.map((c) => (
-              <option key={c.id} value={c.id}>{c.name} · {c.provider}{c.scope === 'global' ? ' · global' : ''}</option>
+              <option key={c.id} value={c.id}>{c.name} · {c.provider}{c.scope === 'global' ? translate(' · global') : ''}</option>
             ))}
           </select>
           {missingCredential && (
             <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
-              The saved credential is unavailable. Select a login and save. For an existing session, use Reconnect using CLI settings in its error message.
-            </span>
+              {translate('The saved credential is unavailable. Select a login and save. For an existing session, use Reconnect using CLI settings in its error message.')}</span>
           )}
           {settings.candidates.length === 0 && (
             <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
-              No {runtimeLabel(cli)} credential in this account yet. Add one in Settings → Credentials, or log in on the host itself.
-            </span>
+              {translate('No')} {runtimeLabel(cli)} {translate('credential in this account yet. Add one in Settings → Credentials, or log in on the host itself.')}</span>
           )}
         </div>
       )}
       {settings && !error && !loading && settings.supports_backend && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
           <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
-            Backend that {runtimeLabel(cli)} talks to on {hostName} — leave it on the CLI default to use Anthropic directly.
-          </span>
+            {translate('Backend that')} {runtimeLabel(cli)} {translate('talks to on')} {hostName} {translate('— leave it on the CLI default to use Anthropic directly.')}</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <select
-              aria-label="Session backend"
+              aria-label={translate('Session backend')}
               data-session-backend
               style={selectStyle}
               value={backend}
               disabled={saving}
               onChange={(e) => setBackend(e.target.value)}
             >
-              <option value="">{runtimeLabel(cli)} default endpoint</option>
+              <option value="">{runtimeLabel(cli)} {translate('default endpoint')}</option>
               {settings.backend_candidates.map((b) => (
                 <option key={b.id} value={b.id} title={b.base_url}>{b.name} · {b.model}</option>
               ))}
             </select>
             {settings.backend_candidates.length === 0 && (
               <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-                No Claude backend profile is defined on this instance yet (Admin → Claude backends).
-              </span>
+                {translate('No Claude backend profile is defined on this instance yet (Admin → Claude backends).')}</span>
             )}
           </div>
         </div>
@@ -217,21 +215,20 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
         defaultOptions.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
             <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
-              Defaults for new {runtimeLabel(cli)} sessions on {hostName}. Existing sessions keep their saved options.
-            </span>
+              {translate('Defaults for new')} {runtimeLabel(cli)} {translate('sessions on')} {hostName}{translate('. Existing sessions keep their saved options.')}</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {defaultOptions.map((option) => (
                 <label key={option.config_id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
                   {option.name}
                   <select
-                    aria-label={`Default ${option.name}`}
+                    aria-label={translate('Default {0}', { 0: option.name })}
                     data-default-config-id={option.config_id}
                     style={{ ...selectStyle, minWidth: 180 }}
                     value={defaults[option.config_id] || ''}
                     disabled={saving}
                     onChange={(e) => setDefaults((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
                   >
-                    <option value="">{option.config_id === '__git_workflow' ? 'Main / master (default)' : `${runtimeLabel(cli)} default`}</option>
+                    <option value="">{option.config_id === '__git_workflow' ? translate('Main / master (default)') : translate('{0} default', { 0: runtimeLabel(cli) })}</option>
                     {option.options.map((choice) => (
                       <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
                     ))}
@@ -245,10 +242,10 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
                 variant="ghost"
                 size="sm"
                 disabled={saving || hostModels.refreshing || !(hostModels.view?.is_online ?? true)}
-                title="Ask the host to re-list the models its CLI accepts"
+                title={translate('Ask the host to re-list the models its CLI accepts')}
                 onClick={() => void hostModels.refresh()}
               >
-                {hostModels.refreshing ? 'Refreshing models…' : 'Refresh models'}
+                {hostModels.refreshing ? translate('Refreshing models…') : translate('Refresh models')}
               </Button>
             </div>
           </div>
@@ -256,21 +253,20 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
           <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span>
               {hostModels.refreshing
-                ? `Asking ${hostName} to list the models ${runtimeLabel(cli)} accepts…`
-                : `Approval mode and model defaults appear here once ${hostName} reports what ${runtimeLabel(cli)} offers.`}
+                ? translate('Asking {0} to list the models {1} accepts…', { 0: hostName, 1: runtimeLabel(cli) })
+                : translate('Approval mode and model defaults appear here once {0} reports what {1} offers.', { 0: hostName, 1: runtimeLabel(cli) })}
             </span>
             <Button variant="ghost" size="sm" disabled={saving || hostModels.refreshing} onClick={() => void hostModels.refresh()}>
-              Refresh models
-            </Button>
+              {translate('Refresh models')}</Button>
           </div>
         )
       )}
       {/* 저장은 한 곳에만 둔다 — credential 을 못 받는 CLI(hermes) 도 기본 설정은 저장할 수 있어야 한다. */}
       {settings && !error && !loading && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving} loading={saving}>Save</Button>
+          <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving} loading={saving}>{translate('Save')}</Button>
           {settings.supports_credential && (
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/settings/credentials`)}>Manage credentials</Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate(`/settings/credentials`)}>{translate('Manage credentials')}</Button>
           )}
         </div>
       )}

@@ -104,7 +104,7 @@ export function Button({
 
   return (
     <>
-      <style>{`@keyframes button-spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{'@keyframes button-spin { to { transform: rotate(360deg); } }'}</style>
       <button
         disabled={isDisabled}
         style={baseStyle}

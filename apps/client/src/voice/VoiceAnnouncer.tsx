@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import { useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
@@ -23,6 +25,7 @@ const KEY_PREFIX = 'announcement:';
  * Mounted once in AppLayout, with cross-tab claims, viewing suppression and a shared audio queue.
  */
 export default function VoiceAnnouncer() {
+  useLocale();
   const config = useVoiceConfig();
   const { prefs } = useNotifications();
   const { showToast } = useToast();
@@ -93,7 +96,7 @@ export default function VoiceAnnouncer() {
         const now = latest.current;
         if (!now.enabled || !now.audio || !now.listen) return;
         if (!operator || !now.accountId || !voiceConfig?.stt.ready) {
-          showToast('오퍼레이터의 마이크를 켜지 못했습니다 — 오퍼레이터 등록과 음성 입력 설정을 확인해 주세요.', 'error');
+          showToast(translate('오퍼레이터의 마이크를 켜지 못했습니다 — 오퍼레이터 등록과 음성 입력 설정을 확인해 주세요.'), 'error');
           return;
         }
         // Open the actual composer before the user speaks. Cue playback can be blocked;
@@ -108,7 +111,7 @@ export default function VoiceAnnouncer() {
   const shownErrorRef = useRef<string | null>(null);
   useEffect(() => {
     const err = speech.key?.startsWith(KEY_PREFIX) ? speech.error : null;
-    if (err && err !== shownErrorRef.current) showToast(`음성 알림을 재생하지 못했습니다: ${err}`, 'error');
+    if (err && err !== shownErrorRef.current) showToast(translate('음성 알림을 재생하지 못했습니다: {0}', { 0: err }), 'error');
     shownErrorRef.current = err;
   }, [speech.error, speech.key, showToast]);
 

@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { tokens } from '../../tokens';
 import { Button } from './Button';
@@ -34,15 +36,16 @@ export interface ConfirmDialogProps {
  */
 export default function ConfirmDialog({
   isOpen,
-  title = 'Are you sure?',
+  title = translate('Are you sure?'),
   message,
-  confirmLabel = 'Delete',
-  cancelLabel = 'Cancel',
+  confirmLabel = translate('Delete'),
+  cancelLabel = translate('Cancel'),
   danger = true,
   requireName,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  useLocale();
   const [inputValue, setInputValue] = useState('');
   const needsName = !!requireName;
   const isMatch = !needsName || inputValue === requireName;

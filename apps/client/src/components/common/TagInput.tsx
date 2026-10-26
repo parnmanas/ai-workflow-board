@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useId, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import { addTags, removeTag, suggestTags } from '../../tickets/tagInput';
@@ -19,14 +21,15 @@ interface TagInputProps {
  * empty input removes the last chip, and a suggestion list of known tags.
  * Logic lives in `tickets/tagInput.ts`.
  */
-export function TagInput({ value, onChange, suggestions = [], label, placeholder = '태그 입력 후 Enter', disabled, id }: TagInputProps) {
+export function TagInput({ value, onChange, suggestions = [], label, placeholder = translate('태그 입력 후 Enter'), disabled, id }: TagInputProps) {
+  useLocale();
   const generated = useId();
   const inputId = id || `tag-input-${generated}`;
   const [draft, setDraft] = useState('');
   const [focused, setFocused] = useState(false);
   const shown = useMemo(
     () => (focused ? suggestTags(suggestions, value, draft) : []),
-    [focused, suggestions, value, draft],
+    [focused, suggestions, value, draft, getLocale()],
   );
 
   const commit = (raw: string) => {
@@ -74,7 +77,7 @@ export function TagInput({ value, onChange, suggestions = [], label, placeholder
             #{tag}
             <button
               type="button"
-              aria-label={`태그 ${tag} 제거`}
+              aria-label={translate('태그 {0} 제거', { 0: tag })}
               disabled={disabled}
               onClick={() => onChange(removeTag(value, tag))}
               style={{
@@ -121,7 +124,7 @@ export function TagInput({ value, onChange, suggestions = [], label, placeholder
       {shown.length > 0 && (
         <div
           role="listbox"
-          aria-label="태그 제안"
+          aria-label={translate('태그 제안')}
           style={{
             position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 2, zIndex: 20,
             background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,

@@ -1,14 +1,15 @@
+import { t as translate } from '../i18n/core';
 /** Play raw 24 kHz mono PCM as bytes arrive, without waiting for a complete file. */
 export async function playPcmStream(response: Response, context: AudioContext, signal: AbortSignal): Promise<void> {
   if (!response.body || !response.headers.get('content-type')?.startsWith('audio/pcm')
     || response.headers.get('x-audio-sample-rate') !== '24000'
     || response.headers.get('x-audio-channels') !== '1') {
     await response.body?.cancel();
-    throw new Error('Unsupported streaming audio format');
+    throw new Error(translate('Unsupported streaming audio format'));
   }
   if (context.state !== 'running') {
     await response.body.cancel();
-    throw new DOMException('Audio needs a user gesture', 'NotAllowedError');
+    throw new DOMException(translate('Audio needs a user gesture'), 'NotAllowedError');
   }
   const reader = response.body.getReader();
   const playing = new Map<AudioBufferSourceNode, Promise<void>>();
@@ -58,7 +59,7 @@ export async function playPcmStream(response: Response, context: AudioContext, s
       }
       pending = bytes.slice(offset);
     }
-    if (!total || pending.length % 2) throw new Error('Empty or truncated PCM audio');
+    if (!total || pending.length % 2) throw new Error(translate('Empty or truncated PCM audio'));
     if (pending.length) await schedule(pending);
     await Promise.all(playing.values());
     signal.throwIfAborted();

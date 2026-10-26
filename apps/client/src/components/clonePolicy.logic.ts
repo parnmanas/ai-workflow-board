@@ -1,3 +1,4 @@
+import { t as translate } from '../i18n/core';
 import type { ClonePolicy } from '../types';
 
 // Repo clone 정책 폼 로직 (ticket bddb63ee).
@@ -61,9 +62,9 @@ function parseIntField(raw: string, label: string, min: number, max: number):
   { kind: 'absent' } | { kind: 'error'; error: string } | { kind: 'value'; value: number } {
   const t = raw.trim();
   if (!t) return { kind: 'absent' };
-  if (!/^\d+$/.test(t)) return { kind: 'error', error: `${label}: 정수만 입력하세요` };
+  if (!/^\d+$/.test(t)) return { kind: 'error', error: translate('{0}: 정수만 입력하세요', { 0: label }) };
   const n = Number(t);
-  if (n < min || n > max) return { kind: 'error', error: `${label}: ${min}~${max} 범위여야 합니다` };
+  if (n < min || n > max) return { kind: 'error', error: translate('{0}: {1}~{2} 범위여야 합니다', { 0: label, 1: min, 2: max }) };
   return { kind: 'value', value: n };
 }
 
@@ -75,16 +76,16 @@ function parseIntField(raw: string, label: string, min: number, max: number):
 export function formToClonePolicy(
   form: ClonePolicyFormState,
 ): { ok: true; value: ClonePolicy | null } | { ok: false; error: string } {
-  const timeout = parseIntField(form.timeout, 'Clone timeout (s)', 60, 86400);
-  const idle = parseIntField(form.idleTimeout, 'Idle timeout (s)', 0, 86400);
-  const depth = parseIntField(form.depth, 'Depth', 1, 1000000);
+  const timeout = parseIntField(form.timeout, translate('Clone timeout (s)'), 60, 86400);
+  const idle = parseIntField(form.idleTimeout, translate('Idle timeout (s)'), 0, 86400);
+  const depth = parseIntField(form.depth, translate('Depth'), 1, 1000000);
   for (const field of [timeout, idle, depth]) {
     if (field.kind === 'error') return { ok: false, error: field.error };
   }
   const filter = form.filter.trim();
-  if (filter.length > 64) return { ok: false, error: 'Filter: 64자 이하여야 합니다' };
+  if (filter.length > 64) return { ok: false, error: translate('Filter: 64자 이하여야 합니다') };
   if (filter && !FILTER_PATTERN.test(filter)) {
-    return { ok: false, error: 'Filter: blob:none / tree:0 같은 형태만 허용됩니다' };
+    return { ok: false, error: translate('Filter: blob:none / tree:0 같은 형태만 허용됩니다') };
   }
   const value: ClonePolicy = {};
   if (timeout.kind === 'value') value.clone_timeout_seconds = timeout.value;

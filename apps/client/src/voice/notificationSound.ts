@@ -1,8 +1,9 @@
+import { t as translate } from '../i18n/core';
 /** Short work-update cues, played through the speech queue so the microphone pauses. */
 export const NOTIFICATION_SOUNDS = [
-  { value: 'chime', label: 'Chime', tones: [659, 880, 1047] },
-  { value: 'bell', label: 'Bell', tones: [1047] },
-  { value: 'soft', label: 'Soft', tones: [440, 554] },
+  { value: 'chime', get label() { return translate('Chime'); }, tones: [659, 880, 1047] },
+  { value: 'bell', get label() { return translate('Bell'); }, tones: [1047] },
+  { value: 'soft', get label() { return translate('Soft'); }, tones: [440, 554] },
 ] as const;
 export type NotificationSound = typeof NOTIFICATION_SOUNDS[number]['value'];
 

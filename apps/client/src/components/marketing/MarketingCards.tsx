@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { MarketingSpendReconciliation } from './MarketingSpendReconciliation';
 import { Link } from 'react-router-dom';
@@ -83,7 +85,7 @@ import {
  * 승인 화면은 실제로 나갈 것 · 실제로 실행될 것을 그대로 보여 주고, 그 내용 그대로 서버가 집행한다.
  */
 
-const actorKind = (type: string) => (type === 'agent' ? '에이전트' : type === 'user' ? '사람' : type || '');
+const actorKind = (type: string) => (type === 'agent' ? translate('에이전트') : type === 'user' ? translate('사람') : type || '');
 
 /** 연락처 화면 — 캠페인의 실행 키(account_id)를 실어 연다. 사용자가 고르는 소유 구분은 없다(docs/ownership.md). */
 export function contactsPath(accountId: string, opts: { campaignId?: string; list?: string } = {}): string {
@@ -98,6 +100,7 @@ export function contactsPath(accountId: string, opts: { campaignId?: string; lis
 // ── 채널 ────────────────────────────────────────────────────────────────────
 
 export function ChannelCard({ channel }: { channel: MarketingChannel }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const [approveMode, setApproveMode] = useState<'approve' | 'connect' | null>(null);
@@ -113,27 +116,25 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
     <>
       {(channel.status === 'proposed' || channel.status === 'rejected') && (
         <Button size="sm" variant="primary" disabled={busy} onClick={() => setApproveMode('approve')}>
-          {channel.status === 'rejected' ? '다시 승인…' : '승인…'}
+          {channel.status === 'rejected' ? translate('다시 승인…') : translate('승인…')}
         </Button>
       )}
       {channel.status === 'awaiting_credential' && (
-        <Button size="sm" variant="primary" disabled={busy} onClick={() => setApproveMode('connect')}>연결…</Button>
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => setApproveMode('connect')}>{translate('연결…')}</Button>
       )}
       {proposed && (
-        <Button size="sm" variant="danger" disabled={busy} onClick={() => setRejecting(true)}>거부</Button>
+        <Button size="sm" variant="danger" disabled={busy} onClick={() => setRejecting(true)}>{translate('거부')}</Button>
       )}
       {channel.status === 'active' && (
-        <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(() => api.pauseMarketingChannel(channel.id), '채널을 일시정지했습니다')}>
-          일시정지
-        </Button>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(() => api.pauseMarketingChannel(channel.id), translate('채널을 일시정지했습니다'))}>
+          {translate('일시정지')}</Button>
       )}
       {channel.status === 'paused' && (
-        <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(() => api.resumeMarketingChannel(channel.id), '채널을 다시 열었습니다')}>
-          재개
-        </Button>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(() => api.resumeMarketingChannel(channel.id), translate('채널을 다시 열었습니다'))}>
+          {translate('재개')}</Button>
       )}
       {channel.status !== 'rejected' && (
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(true)}>편집</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(true)}>{translate('편집')}</Button>
       )}
     </>
   ) : null;
@@ -147,45 +148,45 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
           <Chip>{platformLabel(channel.platform)}</Chip>
           <span>{channel.name}</span>
           <StatusPill view={channelStatusView(channel.status)} />
-          {hold && <StatusPill view={{ label: '발송 중지', tone: 'failed' }} testId={`marketing-channel-hold-${channel.id}`} />}
+          {hold && <StatusPill view={{ label: translate('발송 중지'), tone: 'failed' }} testId={`marketing-channel-hold-${channel.id}`} />}
         </span>
       )}
       actions={actions}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Meta>
-          <span>대상: {targetUrl ? <ExternalLink href={targetUrl}>{channel.target}</ExternalLink> : <code>{channel.target}</code>}</span>
+          <span>{translate('대상:')} {targetUrl ? <ExternalLink href={targetUrl}>{channel.target}</ExternalLink> : <code>{channel.target}</code>}</span>
           {channel.status !== 'proposed' && <span>· {CHANNEL_KIND_LABELS[channel.kind] || channel.kind}</span>}
-          <span>· 제안 {actorKind(channel.proposed_by_type)} {channel.proposed_by_name} · {relativeTime(channel.created_at)}</span>
+          <span>{translate('· 제안')} {actorKind(channel.proposed_by_type)} {channel.proposed_by_name} · {relativeTime(channel.created_at)}</span>
         </Meta>
 
         {(channel.rules_summary || channel.rules_url) ? (
-          <Quote label="홍보 규칙(커뮤니티 원문 인용)" tone="warning">
-            {channel.rules_summary || '(인용 없음 — 원문을 확인하세요)'}
+          <Quote label={translate('홍보 규칙(커뮤니티 원문 인용)')} tone="warning">
+            {channel.rules_summary || translate('(인용 없음 — 원문을 확인하세요)')}
             {channel.rules_url && (
-              <div style={{ marginTop: 4 }}><ExternalLink href={channel.rules_url}>규칙 원문 열기</ExternalLink></div>
+              <div style={{ marginTop: 4 }}><ExternalLink href={channel.rules_url}>{translate('규칙 원문 열기')}</ExternalLink></div>
             )}
           </Quote>
         ) : proposed ? (
-          <Hint tone="warning">홍보 규칙 인용이 없습니다 — 승인 전에 그 커뮤니티의 규칙을 직접 확인하세요.</Hint>
+          <Hint tone="warning">{translate('홍보 규칙 인용이 없습니다 — 승인 전에 그 커뮤니티의 규칙을 직접 확인하세요.')}</Hint>
         ) : null}
 
         <KeyValue
           items={[
-            ['적합 이유', channel.rationale ? <Prose text={channel.rationale} /> : ''],
-            ['청중 적합도', channel.audience_fit ? <Prose text={channel.audience_fit} /> : ''],
-            ['청중 규모', channel.audience_size !== null && channel.audience_size !== undefined
+            [translate('적합 이유'), channel.rationale ? <Prose text={channel.rationale} /> : ''],
+            [translate('청중 적합도'), channel.audience_fit ? <Prose text={channel.audience_fit} /> : ''],
+            [translate('청중 규모'), channel.audience_size !== null && channel.audience_size !== undefined
               ? `${formatCount(channel.audience_size)}${channel.audience_observed_at ? ` (관측 ${formatDateTime(channel.audience_observed_at).slice(0, 10)})` : ''}`
               : ''],
-            ['게시 가이드', channel.guidelines ? <Prose text={channel.guidelines} /> : ''],
-            ['결정', channel.decided_by_name ? `${channel.decided_by_name} · ${formatDateTime(channel.decided_at)}` : ''],
-            ['결정 메모', channel.decision_note],
+            [translate('게시 가이드'), channel.guidelines ? <Prose text={channel.guidelines} /> : ''],
+            [translate('결정'), channel.decided_by_name ? `${channel.decided_by_name} · ${formatDateTime(channel.decided_at)}` : ''],
+            [translate('결정 메모'), channel.decision_note],
           ]}
         />
 
         {evidence.length > 0 && (
           <div>
-            <FieldLabel>근거 — 에이전트가 실제로 연 페이지</FieldLabel>
+            <FieldLabel>{translate('근거 — 에이전트가 실제로 연 페이지')}</FieldLabel>
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.6 }}>
               {evidence.map((url) => <li key={url}><ExternalLink href={url} /></li>)}
             </ul>
@@ -196,12 +197,12 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
           <div>
             <KeyValue
               items={[
-                ['발신자', `${channel.email.from_name} <${channel.email.from_address}>`],
-                ['회신 주소', channel.email.reply_to],
-                ['연락처', channel.email.contact_email],
-                ['발신자 주소', channel.email.postal_address],
-                ['수신 목록', channel.email.list_name],
-                ['광고 표기', channel.email.ad_label],
+                [translate('발신자'), `${channel.email.from_name} <${channel.email.from_address}>`],
+                [translate('회신 주소'), channel.email.reply_to],
+                [translate('연락처'), channel.email.contact_email],
+                [translate('발신자 주소'), channel.email.postal_address],
+                [translate('수신 목록'), channel.email.list_name],
+                [translate('광고 표기'), channel.email.ad_label],
               ]}
             />
             <div style={{ marginTop: 6 }}>
@@ -210,62 +211,58 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
                 to={contactsPath(ctx.accountId, { campaignId: ctx.campaignId, list: channel.email.list_name })}
                 style={{ fontSize: 12, color: tokens.colors.accentLight }}
               >
-                연락처 관리
-              </Link>
+                {translate('연락처 관리')}</Link>
             </div>
           </div>
         )}
         {hold && (
-          <Quote label={`발송 중지 — "${hold.list_name}" 목록 · ${formatDateTime(hold.held_at)}`} tone="warning">
+          <Quote label={translate('발송 중지 — "{0}" 목록 · {1}', { 0: hold.list_name, 1: formatDateTime(hold.held_at) })} tone="warning">
             <div data-testid={`marketing-list-hold-${hold.id}`}>
-              {listHoldSummary(hold)}. 받는 사람이 스팸으로 신고한 비율이 기준({typeof hold.stats?.threshold === 'number' ? `${(hold.stats.threshold * 100).toFixed(1)}%` : '0.3%'})을 넘어, 사람이 확인할 때까지 이 목록으로 메일이 나가지
-              않습니다. 큐의 메일은 버리지 않고 보류했고, 새 메일은 승인되지 않습니다. 이 목록을 쓰는 다른 캠페인도 같이 멈춥니다.
-            </div>
+              {listHoldSummary(hold)}{translate('. 받는 사람이 스팸으로 신고한 비율이 기준(')}{typeof hold.stats?.threshold === 'number' ? `${(hold.stats.threshold * 100).toFixed(1)}%` : '0.3%'}{translate(')을 넘어, 사람이 확인할 때까지 이 목록으로 메일이 나가지 않습니다. 큐의 메일은 버리지 않고 보류했고, 새 메일은 승인되지 않습니다. 이 목록을 쓰는 다른 캠페인도 같이 멈춥니다.')}</div>
             <div style={{ marginTop: 6 }}>
-              가져온 연락처의 동의 출처, 메일 내용 · 빈도를 확인한 뒤 해제하세요 — 해제하면 보류된 메일이 바로 나가고, 신고율 · 하드 바운스율은 해제 이후 것만 다시 셉니다.
-            </div>
+              {translate('가져온 연락처의 동의 출처, 메일 내용 · 빈도를 확인한 뒤 해제하세요 — 해제하면 보류된 메일이 바로 나가고, 신고율 · 하드 바운스율은 해제 이후 것만 다시 셉니다.')}</div>
             {ctx.canManage && (
               <div style={{ marginTop: 8 }}>
-                <Button size="sm" variant="secondary" disabled={busy} onClick={() => setReleasing(true)}>발송 재개…</Button>
+                <Button size="sm" variant="secondary" disabled={busy} onClick={() => setReleasing(true)}>{translate('발송 재개…')}</Button>
               </div>
             )}
           </Quote>
         )}
         {channel.kind === 'email' && channel.email_webhooks && <EmailWebhookSetup webhooks={channel.email_webhooks} channelId={channel.id} />}
         {channel.kind === 'outreach' && channel.outreach_channel_id && (
-          <Meta><span>Outreach 채널에 연결됨 — 승인한 글은 서버가 커넥터로 게시합니다.</span></Meta>
+          <Meta><span>{translate('Outreach 채널에 연결됨 — 승인한 글은 서버가 커넥터로 게시합니다.')}</span></Meta>
         )}
       </div>
 
       {approveMode && <ChannelApproveModal channel={channel} mode={approveMode} onClose={() => setApproveMode(null)} />}
       <NoteModal
         isOpen={releasing}
-        title={`메일 발송 재개 — "${hold?.list_name || ''}" 목록`}
-        message="무엇을 확인하고 고쳤는지 적어 주세요(감사 기록에 남습니다). 해제하면 보류된 메일이 바로 나갑니다."
-        label="확인한 내용 · 조치"
+        title={translate('메일 발송 재개 — "{0}" 목록', { 0: hold?.list_name || '' })}
+        message={translate('무엇을 확인하고 고쳤는지 적어 주세요(감사 기록에 남습니다). 해제하면 보류된 메일이 바로 나갑니다.')}
+        label={translate('확인한 내용 · 조치')}
         required
         busy={busy}
-        confirmLabel="발송 재개"
+        confirmLabel={translate('발송 재개')}
         onClose={() => setReleasing(false)}
         onSubmit={async (note) => {
           if (!hold) return;
-          const done = await run(() => api.releaseMarketingListHold(hold.id, note, ctx.accountId), '목록 발송을 다시 열었습니다');
+          const done = await run(() => api.releaseMarketingListHold(hold.id, note, ctx.accountId), translate('목록 발송을 다시 열었습니다'));
           if (done) setReleasing(false);
         }}
       />
       {editing && <ChannelEditModal channel={channel} onClose={() => setEditing(false)} />}
       <NoteModal
         isOpen={rejecting}
-        title="채널 제안 거부"
-        message="거부 사유는 다음 사이클 지시문에 실려 에이전트가 배웁니다. 무엇이 맞지 않았는지 적어 주세요."
-        label="거부 사유"
+        title={translate('채널 제안 거부')}
+        message={translate('거부 사유는 다음 사이클 지시문에 실려 에이전트가 배웁니다. 무엇이 맞지 않았는지 적어 주세요.')}
+        label={translate('거부 사유')}
         required
         danger
         busy={busy}
-        confirmLabel="거부"
+        confirmLabel={translate('거부')}
         onClose={() => setRejecting(false)}
         onSubmit={async (note) => {
-          const done = await run(() => api.rejectMarketingChannel(channel.id, note), '채널 제안을 거부했습니다');
+          const done = await run(() => api.rejectMarketingChannel(channel.id, note), translate('채널 제안을 거부했습니다'));
           if (done) setRejecting(false);
         }}
       />
@@ -275,35 +272,35 @@ export function ChannelCard({ channel }: { channel: MarketingChannel }) {
 
 /** 메일 공급자 webhook 설정 — 공급자 화면에 붙여 넣을 주소와 서명 키가 들어 있는지(docs/marketing.md "공급자 이벤트"). */
 function EmailWebhookSetup({ webhooks, channelId }: { webhooks: NonNullable<MarketingChannel['email_webhooks']>; channelId: string }) {
+  useLocale();
   const setup = emailWebhookSetup(webhooks);
   const unsigned = setup.items.some((i) => !i.signing);
   return (
     <details data-testid={`marketing-channel-webhooks-${channelId}`} open={unsigned || undefined}>
       <summary style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
-        바운스 · 스팸 신고 · 답장 수신(webhook){unsigned ? ' — 설정 필요' : ''}
+        {translate('바운스 · 스팸 신고 · 답장 수신(webhook)')}{unsigned ? translate(' — 설정 필요') : ''}
       </summary>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-        {setup.missingUrl && <Hint tone="warning">AWB_PUBLIC_URL 이 없어 공급자가 부를 주소를 만들 수 없습니다.</Hint>}
+        {setup.missingUrl && <Hint tone="warning">{translate('AWB_PUBLIC_URL 이 없어 공급자가 부를 주소를 만들 수 없습니다.')}</Hint>}
         {setup.items.map((item) => (
           <div key={item.label} style={{ fontSize: 12, lineHeight: 1.6, color: tokens.colors.textSecondary }}>
             <div style={{ fontWeight: 700, color: tokens.colors.textStrong }}>{item.label}</div>
             {item.url && <code style={{ overflowWrap: 'anywhere', userSelect: 'all' }}>{item.url}</code>}
-            <div>공급자에서 켤 것: {item.events}</div>
+            <div>{translate('공급자에서 켤 것:')} {item.events}</div>
             <div style={{ color: item.signing ? tokens.colors.successLight : tokens.colors.warningLight }}>
-              서명 키: {item.signing ? '설정됨' : `없음 — 메일 credential 에 ${item.keyField} 칸을 넣기 전까지 이 주소로 온 것은 모두 거부됩니다`}
+              {translate('서명 키:')} {item.signing ? translate('설정됨') : translate('없음 — 메일 credential 에 {0} 칸을 넣기 전까지 이 주소로 온 것은 모두 거부됩니다', { 0: item.keyField })}
             </div>
           </div>
         ))}
         <Hint>
-          서명이 맞는 것만 처리하고, 그 credential 로 보낸 메일에만 반영합니다. 하드 바운스 · 스팸 신고 · 공급자 수신거부는 연락처를 발송 대상에서
-          빼고, 답장은 인용 · 서명 · 메일 주소를 지운 본문만 피드백으로 남깁니다(외부 글이라 에이전트에게는 데이터로만 갑니다).
-        </Hint>
+          {translate('서명이 맞는 것만 처리하고, 그 credential 로 보낸 메일에만 반영합니다. 하드 바운스 · 스팸 신고 · 공급자 수신거부는 연락처를 발송 대상에서 빼고, 답장은 인용 · 서명 · 메일 주소를 지운 본문만 피드백으로 남깁니다(외부 글이라 에이전트에게는 데이터로만 갑니다).')}</Hint>
       </div>
     </details>
   );
 }
 
 function useAccountCredentials(accountId: string): Credential[] | null {
+  useLocale();
   const [rows, setRows] = useState<Credential[] | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -321,6 +318,7 @@ function EmailConfigFields({ value, onChange, credentials }: {
   onChange(next: EmailConfigDraft): void;
   credentials: Credential[] | null;
 }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const [brands, setBrands] = useState<MarketingBrand[]>([]);
   const [brandError, setBrandError] = useState('');
@@ -334,32 +332,31 @@ function EmailConfigFields({ value, onChange, credentials }: {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
       <Select
-        label="메일 credential"
+        label={translate('메일 credential')}
         value={value.credential_id}
-        placeholder={credentials === null ? '불러오는 중…' : '— credential 선택 —'}
+        placeholder={credentials === null ? translate('불러오는 중…') : translate('— credential 선택 —')}
         options={(credentials || []).map((c) => ({ value: c.id, label: c.name }))}
         onChange={(e) => set({ credential_id: e.target.value })}
       />
-      <Select label="동의 발신자(브랜드)" value={value.brand_id} options={[{ value: '', label: '— 브랜드 선택 —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} onChange={(e) => set({ brand_id: e.target.value, from_name: brands.find((b) => b.id === e.target.value)?.name || '' })} />
-      <div style={{ gridColumn: '1 / -1' }}><Link to={contactsPath(ctx.accountId)}>연락처에서 브랜드 만들기</Link>{brandError && <div role="alert">{brandError}</div>}</div>
-      <Input label="발신자 이름 (선택한 브랜드)" value={brands.find((b) => b.id === value.brand_id)?.name || value.from_name} readOnly />
-      <Input label="발신 주소" value={value.from_address} placeholder="news@example.com" onChange={(e) => set({ from_address: e.target.value })} />
-      <Input label="회신 주소 (선택)" value={value.reply_to} onChange={(e) => set({ reply_to: e.target.value })} />
-      <Input label="연락처 메일 (선택)" value={value.contact_email} placeholder="비우면 회신/발신 주소" onChange={(e) => set({ contact_email: e.target.value })} />
-      <Input label="발신자 주소(우편)" value={value.postal_address} onChange={(e) => set({ postal_address: e.target.value })} />
-      <Input label="수신 목록" value={value.list_name} placeholder="newsletter" onChange={(e) => set({ list_name: e.target.value })} />
-      <Input label="광고 표기" value={value.ad_label} onChange={(e) => set({ ad_label: e.target.value })} />
+      <Select label={translate('동의 발신자(브랜드)')} value={value.brand_id} options={[{ value: '', label: translate('— 브랜드 선택 —') }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} onChange={(e) => set({ brand_id: e.target.value, from_name: brands.find((b) => b.id === e.target.value)?.name || '' })} />
+      <div style={{ gridColumn: '1 / -1' }}><Link to={contactsPath(ctx.accountId)}>{translate('연락처에서 브랜드 만들기')}</Link>{brandError && <div role="alert">{brandError}</div>}</div>
+      <Input label={translate('발신자 이름 (선택한 브랜드)')} value={brands.find((b) => b.id === value.brand_id)?.name || value.from_name} readOnly />
+      <Input label={translate('발신 주소')} value={value.from_address} placeholder="news@example.com" onChange={(e) => set({ from_address: e.target.value })} />
+      <Input label={translate('회신 주소 (선택)')} value={value.reply_to} onChange={(e) => set({ reply_to: e.target.value })} />
+      <Input label={translate('연락처 메일 (선택)')} value={value.contact_email} placeholder={translate('비우면 회신/발신 주소')} onChange={(e) => set({ contact_email: e.target.value })} />
+      <Input label={translate('발신자 주소(우편)')} value={value.postal_address} onChange={(e) => set({ postal_address: e.target.value })} />
+      <Input label={translate('수신 목록')} value={value.list_name} placeholder={translate('newsletter')} onChange={(e) => set({ list_name: e.target.value })} />
+      <Input label={translate('광고 표기')} value={value.ad_label} onChange={(e) => set({ ad_label: e.target.value })} />
       <div style={{ gridColumn: '1 / -1' }}>
         <Hint>
-          발신자 이름 · 주소 · 연락처와 수신거부 링크, 제목 앞 광고 표기는 정보통신망법 §50 · CAN-SPAM 이 요구하는 법정 표기라
-          서버가 모든 메일에 강제로 붙입니다(한국 수신자에게는 항상 “(광고)”). 수신자는 이 목록에 속하면서 선택한 브랜드에 동의한 연락처뿐입니다.
-        </Hint>
+          {translate('발신자 이름 · 주소 · 연락처와 수신거부 링크, 제목 앞 광고 표기는 정보통신망법 §50 · CAN-SPAM 이 요구하는 법정 표기라 서버가 모든 메일에 강제로 붙입니다(한국 수신자에게는 항상 “(광고)”). 수신자는 이 목록에 속하면서 선택한 브랜드에 동의한 연락처뿐입니다.')}</Hint>
       </div>
     </div>
   );
 }
 
 function ChannelApproveModal({ channel, mode, onClose }: { channel: MarketingChannel; mode: 'approve' | 'connect'; onClose(): void }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const connect = mode === 'connect';
@@ -386,8 +383,8 @@ function ChannelApproveModal({ channel, mode, onClose }: { channel: MarketingCha
         if (cancelled) return;
         setOutreach([]);
         setOutreachError(err?.status === 403
-          ? '기존 Outreach 채널 목록을 볼 권한(admin.resources)이 없습니다 — credential 로 새로 만드세요.'
-          : (err?.message || 'Outreach 채널 목록을 불러오지 못했습니다'));
+          ? translate('기존 Outreach 채널 목록을 볼 권한(admin.resources)이 없습니다 — credential 로 새로 만드세요.')
+          : (err?.message || translate('Outreach 채널 목록을 불러오지 못했습니다')));
       });
     return () => { cancelled = true; };
   }, [kind, ctx.accountId, channel.platform]);
@@ -402,7 +399,7 @@ function ChannelApproveModal({ channel, mode, onClose }: { channel: MarketingCha
     setError('');
     const saved = await run(
       () => (connect ? api.connectMarketingChannel(channel.id, built.body) : api.approveMarketingChannel(channel.id, built.body)),
-      (row) => (row.status === 'awaiting_credential' ? '승인했습니다 — 연결할 credential 을 기다립니다' : '채널을 열었습니다'),
+      (row) => (row.status === 'awaiting_credential' ? translate('승인했습니다 — 연결할 credential 을 기다립니다') : translate('채널을 열었습니다')),
     );
     if (saved) onClose();
   };
@@ -418,22 +415,22 @@ function ChannelApproveModal({ channel, mode, onClose }: { channel: MarketingCha
     <Modal
       isOpen
       onClose={onClose}
-      title={connect ? `채널 연결 — ${channel.name}` : `채널 승인 — ${channel.name}`}
+      title={connect ? translate('채널 연결 — {0}', { 0: channel.name }) : translate('채널 승인 — {0}', { 0: channel.name })}
       maxWidth={680}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>취소</Button>
-          <Button variant="primary" disabled={busy} onClick={() => void submit()}>{busy ? '처리 중…' : connect ? '연결' : '승인'}</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('취소')}</Button>
+          <Button variant="primary" disabled={busy} onClick={() => void submit()}>{busy ? translate('처리 중…') : connect ? translate('연결') : translate('승인')}</Button>
         </>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <Meta><span>{platformLabel(channel.platform)} · {channel.target}</span></Meta>
-        {channel.rules_summary && <Quote label="홍보 규칙" tone="warning">{channel.rules_summary}</Quote>}
+        {channel.rules_summary && <Quote label={translate('홍보 규칙')} tone="warning">{channel.rules_summary}</Quote>}
 
         {modes.length > 1 && (
           <div>
-            <FieldLabel>방식</FieldLabel>
+            <FieldLabel>{translate('방식')}</FieldLabel>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {modes.map((m) => radio('marketing-channel-mode', kind === m, () => setKind(m), CHANNEL_KIND_LABELS[m], `marketing-mode-${m}`))}
             </div>
@@ -441,56 +438,54 @@ function ChannelApproveModal({ channel, mode, onClose }: { channel: MarketingCha
         )}
 
         {kind === 'manual' && (
-          <Hint>사람이 그 채널에 직접 올리고, 올린 글의 주소를 기록합니다. 서버는 아무것도 게시하지 않습니다.</Hint>
+          <Hint>{translate('사람이 그 채널에 직접 올리고, 올린 글의 주소를 기록합니다. 서버는 아무것도 게시하지 않습니다.')}</Hint>
         )}
 
         {kind === 'outreach' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {radio('marketing-outreach', choice === 'existing', () => setChoice('existing'), '기존 Outreach 채널에 연결')}
+            {radio('marketing-outreach', choice === 'existing', () => setChoice('existing'), translate('기존 Outreach 채널에 연결'))}
             {choice === 'existing' && (
               <div style={{ paddingLeft: 22 }}>
                 <Select
-                  label="Outreach 채널"
+                  label={translate('Outreach 채널')}
                   value={outreachChannelId}
-                  placeholder={outreach === null ? '불러오는 중…' : outreach.length ? '— 선택 —' : '연결할 채널이 없습니다'}
+                  placeholder={outreach === null ? translate('불러오는 중…') : outreach.length ? translate('— 선택 —') : translate('연결할 채널이 없습니다')}
                   options={(outreach || []).map((o) => {
                     const listed = (o.targets || []).map((t) => t.trim().toLowerCase()).includes(targetKey);
-                    return { value: o.id, label: `${o.name}${listed ? '' : ' — 대상 미등록'}${o.has_credential ? '' : ' — credential 없음'}` };
+                    return { value: o.id, label: `${o.name}${listed ? '' : translate(' — 대상 미등록')}${o.has_credential ? '' : translate(' — credential 없음')}` };
                   })}
                   onChange={(e) => setOutreachChannelId(e.target.value)}
                 />
-                <Hint>그 Outreach 채널의 대상(targets)에 {channel.target} 이 등록돼 있어야 합니다.</Hint>
+                <Hint>{translate('그 Outreach 채널의 대상(targets)에')} {channel.target} {translate('이 등록돼 있어야 합니다.')}</Hint>
                 {outreachError && <Hint tone="warning">{outreachError}</Hint>}
               </div>
             )}
-            {radio('marketing-outreach', choice === 'create', () => setChoice('create'), 'credential 로 새 Outreach 채널 만들기')}
+            {radio('marketing-outreach', choice === 'create', () => setChoice('create'), translate('credential 로 새 Outreach 채널 만들기'))}
             {choice === 'create' && (
               <div style={{ paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <Select
-                  label="게시 credential"
+                  label={translate('게시 credential')}
                   value={credentialId}
-                  placeholder={credentials === null ? '불러오는 중…' : '— credential 선택 —'}
+                  placeholder={credentials === null ? translate('불러오는 중…') : translate('— credential 선택 —')}
                   options={(credentials || []).map((c) => ({ value: c.id, label: c.name }))}
                   onChange={(e) => setCredentialId(e.target.value)}
                 />
-                <Input label="시간당 게시 상한" value={rate} inputMode="numeric" onChange={(e) => setRate(e.target.value)} />
+                <Input label={translate('시간당 게시 상한')} value={rate} inputMode="numeric" onChange={(e) => setRate(e.target.value)} />
                 <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
                   <input type="checkbox" checked={collect} onChange={(e) => setCollect(e.target.checked)} />
-                  <span>이 커뮤니티의 글을 수집해 피드백 티켓으로 만들기</span>
+                  <span>{translate('이 커뮤니티의 글을 수집해 피드백 티켓으로 만들기')}</span>
                 </label>
                 <Hint tone="warning">
-                  수집을 켜면 이 커뮤니티를 주기적으로 읽어 글을 분류하고 티켓을 만듭니다. 제품 전용 커뮤니티에서만 켜세요 —
-                  일반 커뮤니티를 폴링하면 제품과 무관한 글이 티켓이 됩니다.
-                </Hint>
+                  {translate('수집을 켜면 이 커뮤니티를 주기적으로 읽어 글을 분류하고 티켓을 만듭니다. 제품 전용 커뮤니티에서만 켜세요 — 일반 커뮤니티를 폴링하면 제품과 무관한 글이 티켓이 됩니다.')}</Hint>
               </div>
             )}
-            {!connect && radio('marketing-outreach', choice === 'later', () => setChoice('later'), '승인만 하고 연결은 나중에(연결 대기)')}
+            {!connect && radio('marketing-outreach', choice === 'later', () => setChoice('later'), translate('승인만 하고 연결은 나중에(연결 대기)'))}
           </div>
         )}
 
         {kind === 'email' && <EmailConfigFields value={email} onChange={setEmail} credentials={credentials} />}
 
-        <Textarea label="결정 메모 (선택)" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        <Textarea label={translate('결정 메모 (선택)')} rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
         {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>}
       </div>
     </Modal>
@@ -498,6 +493,7 @@ function ChannelApproveModal({ channel, mode, onClose }: { channel: MarketingCha
 }
 
 function ChannelEditModal({ channel: channelProp, onClose }: { channel: MarketingChannel; onClose(): void }) {
+  useLocale();
   const ctx = useMarketingCtx();
   // 연 순간의 채널과 비교한다 — 그사이 다른 사람이 고친 칸을 예전 값으로 되돌리지 않게.
   const [channel] = useState(() => channelProp);
@@ -524,9 +520,9 @@ function ChannelEditModal({ channel: channelProp, onClose }: { channel: Marketin
       if (invalid) { setError(invalid); return; }
       patch.email = emailConfigBody(email);
     }
-    if (!name.trim()) { setError('이름을 비울 수 없습니다'); return; }
+    if (!name.trim()) { setError(translate('이름을 비울 수 없습니다')); return; }
     if (!Object.keys(patch).length) { onClose(); return; }
-    const saved = await run(() => api.updateMarketingChannel(channel.id, patch), '채널을 고쳤습니다');
+    const saved = await run(() => api.updateMarketingChannel(channel.id, patch), translate('채널을 고쳤습니다'));
     if (saved) onClose();
   };
 
@@ -534,22 +530,22 @@ function ChannelEditModal({ channel: channelProp, onClose }: { channel: Marketin
     <Modal
       isOpen
       onClose={onClose}
-      title={`채널 편집 — ${channel.name}`}
+      title={translate('채널 편집 — {0}', { 0: channel.name })}
       maxWidth={640}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>취소</Button>
-          <Button variant="primary" disabled={busy} onClick={() => void submit()}>{busy ? '저장 중…' : '저장'}</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('취소')}</Button>
+          <Button variant="primary" disabled={busy} onClick={() => void submit()}>{busy ? translate('저장 중…') : translate('저장')}</Button>
         </>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <Hint>대상({channel.target})은 바꾸지 않습니다 — 다른 채널이 됩니다. 새 대상은 채널을 추가하세요.</Hint>
-        <Input label="이름" value={name} onChange={(e) => setName(e.target.value)} />
-        <Textarea label="게시 가이드(에이전트가 따른다)" rows={3} value={guidelines} onChange={(e) => setGuidelines(e.target.value)} />
-        <Textarea label="홍보 규칙 요약" rows={3} value={rules} onChange={(e) => setRules(e.target.value)} />
-        <Textarea label="청중 적합도" rows={2} value={fit} onChange={(e) => setFit(e.target.value)} />
-        <Textarea label="적합 이유" rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} />
+        <Hint>{translate('대상(')}{channel.target}{translate(')은 바꾸지 않습니다 — 다른 채널이 됩니다. 새 대상은 채널을 추가하세요.')}</Hint>
+        <Input label={translate('이름')} value={name} onChange={(e) => setName(e.target.value)} />
+        <Textarea label={translate('게시 가이드(에이전트가 따른다)')} rows={3} value={guidelines} onChange={(e) => setGuidelines(e.target.value)} />
+        <Textarea label={translate('홍보 규칙 요약')} rows={3} value={rules} onChange={(e) => setRules(e.target.value)} />
+        <Textarea label={translate('청중 적합도')} rows={2} value={fit} onChange={(e) => setFit(e.target.value)} />
+        <Textarea label={translate('적합 이유')} rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} />
         {channel.kind === 'email' && <EmailConfigFields value={email} onChange={setEmail} credentials={credentials} />}
         {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>}
       </div>
@@ -559,7 +555,7 @@ function ChannelEditModal({ channel: channelProp, onClose }: { channel: Marketin
 
 // ── 게시물 · 메일 ───────────────────────────────────────────────────────────
 
-const POST_KIND_LABELS: Record<string, string> = { post: '게시글', reply: '댓글', email: '메일' };
+const POST_KIND_LABELS: Record<string, string> = { get post() { return translate('게시글'); }, get reply() { return translate('댓글'); }, get email() { return translate('메일'); } };
 
 /** 답글이 달릴 곳 — reddit 은 r/<subreddit>, github 는 owner/repo 그대로. */
 function replyTargetLabel(platform: string | undefined, target: string): string {
@@ -569,36 +565,38 @@ function replyTargetLabel(platform: string | undefined, target: string): string 
 }
 
 function approveLabel(channelKind: string | undefined, postKind: string): string {
-  if (postKind === 'email' || channelKind === 'email') return '승인하고 발송';
-  if (channelKind === 'outreach') return '승인하고 게시';
-  return '승인';
+  if (postKind === 'email' || channelKind === 'email') return translate('승인하고 발송');
+  if (channelKind === 'outreach') return translate('승인하고 게시');
+  return translate('승인');
 }
 
 /** 서버가 읽은 참여(docs/marketing.md "참여 지표 자동 수집") — 읽은 값 · 읽은 시각 · 다음 읽기(또는 끝) · 실패 이유. */
 function EngagementLine({ post, platform }: { post: MarketingPost; platform: string | undefined }) {
+  useLocale();
   const summary = engagementSummary(platform, post.engagement);
   const availability = post.engagement?.availability;
   if (availability) {
-    const label = { removed: '커뮤니티에서 제거됨', deleted: '삭제됨', locked: '잠김', unavailable: '접근할 수 없음' }[availability];
+    const label = { removed: translate('커뮤니티에서 제거됨'), deleted: translate('삭제됨'), locked: translate('잠김'), unavailable: translate('접근할 수 없음') }[availability];
     return (
       <span data-testid={`marketing-post-engagement-${post.id}`}>
-        <span style={{ color: tokens.colors.dangerLight }}>{label} · 참여 수집 중단</span>
-        {post.engagement?.availability_checked_at ? ` · ${formatDateTime(post.engagement.availability_checked_at)} 확인` : ''}
-        {summary ? ` · 마지막 수집: ${summary}` : ''}
+        <span style={{ color: tokens.colors.dangerLight }}>{label} {translate('· 참여 수집 중단')}</span>
+        {post.engagement?.availability_checked_at ? translate(' · {0} 확인', { 0: formatDateTime(post.engagement.availability_checked_at) }) : ''}
+        {summary ? translate(' · 마지막 수집: {0}', { 0: summary }) : ''}
       </span>
     );
   }
   return (
-    <span data-testid={`marketing-post-engagement-${post.id}`} title="서버가 게시 후 14일 동안 플랫폼에서 읽습니다">
-      {summary || (post.engagement ? '플랫폼이 값을 아직 감춤' : '아직 읽지 않음')}
-      {post.engagement?.read_at ? ` · ${formatDateTime(post.engagement.read_at)} 읽음` : ''}
-      {post.engagement_next_at ? ` · 다음 ${formatDateTime(post.engagement_next_at)}` : post.engagement ? ' · 수집 끝' : ''}
+    <span data-testid={`marketing-post-engagement-${post.id}`} title={translate('서버가 게시 후 14일 동안 플랫폼에서 읽습니다')}>
+      {summary || (post.engagement ? translate('플랫폼이 값을 아직 감춤') : translate('아직 읽지 않음'))}
+      {post.engagement?.read_at ? translate(' · {0} 읽음', { 0: formatDateTime(post.engagement.read_at) }) : ''}
+      {post.engagement_next_at ? translate(' · 다음 {0}', { 0: formatDateTime(post.engagement_next_at) }) : post.engagement ? translate(' · 수집 끝') : ''}
       {post.engagement_error ? <span style={{ color: tokens.colors.dangerLight }}> · {post.engagement_error}</span> : null}
     </span>
   );
 }
 
 export function PostCard({ post }: { post: MarketingPost }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const channel = ctx.channels.get(post.channel_id);
@@ -637,38 +635,38 @@ export function PostCard({ post }: { post: MarketingPost }) {
     if (!saved) return;
     setConfirming(false);
     setEditing(false);
-    if (saved.status === 'failed') ctx.notify(`승인했지만 보내지 못했습니다: ${saved.error || '알 수 없는 오류'}`, 'error');
-    else if (saved.status === 'published') ctx.notify('게시했습니다', 'success');
-    else if (saved.status === 'sending') ctx.notify('발송 큐에 넣었습니다 — 동의 연락처에게 차례로 보냅니다', 'success');
-    else ctx.notify('승인했습니다 — 직접 게시한 뒤 글 주소를 기록하세요', 'success');
+    if (saved.status === 'failed') ctx.notify(translate('승인했지만 보내지 못했습니다: {0}', { 0: saved.error || translate('알 수 없는 오류') }), 'error');
+    else if (saved.status === 'published') ctx.notify(translate('게시했습니다'), 'success');
+    else if (saved.status === 'sending') ctx.notify(translate('발송 큐에 넣었습니다 — 동의 연락처에게 차례로 보냅니다'), 'success');
+    else ctx.notify(translate('승인했습니다 — 직접 게시한 뒤 글 주소를 기록하세요'), 'success');
   };
 
   const loadSends = async () => {
     try {
       setSends(await api.listMarketingPostSends(post.id));
     } catch (err) {
-      ctx.notify((err as Error)?.message || '발송 현황을 불러오지 못했습니다', 'error');
+      ctx.notify((err as Error)?.message || translate('발송 현황을 불러오지 못했습니다'), 'error');
     }
   };
 
   const actions = ctx.canManage ? (
     <>
-      {draft && !editing && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(true)}>수정</Button>}
-      {draft && editing && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(false)}>수정 취소</Button>}
+      {draft && !editing && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(true)}>{translate('수정')}</Button>}
+      {draft && editing && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(false)}>{translate('수정 취소')}</Button>}
       {draft && (
         <Button size="sm" variant="primary" disabled={busy} onClick={() => { setApproveNote(''); setConfirming(true); }}>
           {approveLabel(channel?.kind, post.kind)}…
         </Button>
       )}
-      {draft && <Button size="sm" variant="danger" disabled={busy} onClick={() => setRejecting(true)}>거부</Button>}
+      {draft && <Button size="sm" variant="danger" disabled={busy} onClick={() => setRejecting(true)}>{translate('거부')}</Button>}
       {post.status === 'approved' && channel?.kind !== 'outreach' && channel?.kind !== 'email' && (
-        <Button size="sm" variant="primary" disabled={busy} onClick={() => { setPermalink(''); setRecording(true); }}>게시 완료 기록…</Button>
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => { setPermalink(''); setRecording(true); }}>{translate('게시 완료 기록…')}</Button>
       )}
       {post.status === 'failed' && channel?.kind === 'outreach' && (
-        <Button size="sm" variant="secondary" disabled={busy} onClick={() => setRetrying(true)}>다시 시도…</Button>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => setRetrying(true)}>{translate('다시 시도…')}</Button>
       )}
       {isEmail && post.status !== 'draft' && post.status !== 'rejected' && (
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void loadSends()}>발송 현황</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void loadSends()}>{translate('발송 현황')}</Button>
       )}
     </>
   ) : null;
@@ -680,9 +678,9 @@ export function PostCard({ post }: { post: MarketingPost }) {
       title={(
         <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <Chip>{POST_KIND_LABELS[post.kind] || post.kind}</Chip>
-          <span>{channel ? `${channel.name}` : '(알 수 없는 채널)'}</span>
+          <span>{channel ? `${channel.name}` : translate('(알 수 없는 채널)')}</span>
           <StatusPill view={postStatusView(post.status, channel?.kind)} />
-          {post.edited && <Chip muted>사람이 수정함</Chip>}
+          {post.edited && <Chip muted>{translate('사람이 수정함')}</Chip>}
         </span>
       )}
       actions={actions}
@@ -690,40 +688,39 @@ export function PostCard({ post }: { post: MarketingPost }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Meta>
           {channel && <span>{platformLabel(channel.platform)}{channel.target ? ` · ${channel.target}` : ''}</span>}
-          <span>· 작성 {actorKind(post.created_by_type)} {post.created_by_name} · {relativeTime(post.created_at)}</span>
-          {post.reply_to && !replyContext && <span>· 답글 대상 <code>{post.reply_to}</code></span>}
+          <span>{translate('· 작성')} {actorKind(post.created_by_type)} {post.created_by_name} · {relativeTime(post.created_at)}</span>
+          {post.reply_to && !replyContext && <span>{translate('· 답글 대상')} <code>{post.reply_to}</code></span>}
         </Meta>
 
         {post.kind === 'reply' && replyContext && (
           <div data-testid={`marketing-post-reply-context-${post.id}`} style={{ fontSize: 12.5, color: tokens.colors.textStrong, lineHeight: 1.5 }}>
             {/* 제목은 외부인이 쓴 글 — 글자로만(링크 · 마크업으로 만들지 않는다). */}
-            답글 대상: {replyTargetLabel(channel?.platform, replyContext.target || '')}
+            {translate('답글 대상:')} {replyTargetLabel(channel?.platform, replyContext.target || '')}
             {replyContext.title ? ` — ${replyContext.title}` : ''}
             {replyContext.permalink && (
               <>
                 {' '}
-                <ExternalLink href={replyContext.permalink}>스레드 열기</ExternalLink>
+                <ExternalLink href={replyContext.permalink}>{translate('스레드 열기')}</ExternalLink>
               </>
             )}
           </div>
         )}
         {post.kind === 'reply' && !replyContext && channel?.kind === 'outreach' && draft && (
           <Hint tone="warning">
-            답글이 달릴 스레드가 이 채널 안인지 확인되지 않았습니다 — 승인해도 서버가 게시하지 않습니다. 거부하고 에이전트가 다시 쓰게 하세요.
-          </Hint>
+            {translate('답글이 달릴 스레드가 이 채널 안인지 확인되지 않았습니다 — 승인해도 서버가 게시하지 않습니다. 거부하고 에이전트가 다시 쓰게 하세요.')}</Hint>
         )}
 
         {editing ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Input label={isEmail ? '메일 제목' : '제목'} aria-label="게시물 제목" value={title} onChange={(e) => setTitle(e.target.value)} />
-            <Textarea label="본문" aria-label="게시물 본문" rows={8} value={body} onChange={(e) => setBody(e.target.value)} />
+            <Input label={isEmail ? translate('메일 제목') : translate('제목')} aria-label={translate('게시물 제목')} value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Textarea label={translate('본문')} aria-label={translate('게시물 본문')} rows={8} value={body} onChange={(e) => setBody(e.target.value)} />
           </div>
         ) : (
           post.title ? <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>{post.title}</div> : null
         )}
 
         <div>
-          <FieldLabel>{draft ? '승인하면 실제로 나갈 내용' : '나간 내용'}{bodyChanged ? ' (수정 반영)' : ''}</FieldLabel>
+          <FieldLabel>{draft ? translate('승인하면 실제로 나갈 내용') : translate('나간 내용')}{bodyChanged ? translate(' (수정 반영)') : ''}</FieldLabel>
           <div
             data-testid={`marketing-post-preview-${post.id}`}
             style={{
@@ -745,44 +742,44 @@ export function PostCard({ post }: { post: MarketingPost }) {
           {draft && (
             <Hint>
               {isEmail
-                ? '제목 앞 광고 표기 · 발신자 이름과 주소 · 연락처 · 수신거부 링크는 서버가 발송할 때 붙입니다(뺄 수 없습니다).'
-                : '끝의 공개 문구는 캠페인 설정에 따라 서버가 붙입니다(뺄 수 없습니다). 승인한 글과 나가는 글은 같습니다.'}
+                ? translate('제목 앞 광고 표기 · 발신자 이름과 주소 · 연락처 · 수신거부 링크는 서버가 발송할 때 붙입니다(뺄 수 없습니다).')
+                : translate('끝의 공개 문구는 캠페인 설정에 따라 서버가 붙입니다(뺄 수 없습니다). 승인한 글과 나가는 글은 같습니다.')}
             </Hint>
           )}
         </div>
 
         {draft && channel && (channel.guidelines || channel.rules_summary) && (
-          <Quote label="채널 가이드 · 홍보 규칙" tone="warning">
+          <Quote label={translate('채널 가이드 · 홍보 규칙')} tone="warning">
             {[channel.guidelines, channel.rules_summary].filter(Boolean).join('\n\n')}
           </Quote>
         )}
 
         <KeyValue
           items={[
-            ['쓴 이유', post.rationale ? <Prose text={post.rationale} /> : ''],
-            ['추적 링크', post.link_codes?.length ? post.link_codes.join(', ') : ''],
-            ['결정', post.decided_by_name ? `${post.decided_by_name} · ${formatDateTime(post.decided_at)}` : ''],
-            ['결정 메모', post.decision_note],
-            ['게시 주소', post.permalink ? <ExternalLink href={post.permalink} /> : ''],
-            ['게시 시각', post.published_at ? formatDateTime(post.published_at) : ''],
+            [translate('쓴 이유'), post.rationale ? <Prose text={post.rationale} /> : ''],
+            [translate('추적 링크'), post.link_codes?.length ? post.link_codes.join(', ') : ''],
+            [translate('결정'), post.decided_by_name ? `${post.decided_by_name} · ${formatDateTime(post.decided_at)}` : ''],
+            [translate('결정 메모'), post.decision_note],
+            [translate('게시 주소'), post.permalink ? <ExternalLink href={post.permalink} /> : ''],
+            [translate('게시 시각'), post.published_at ? formatDateTime(post.published_at) : ''],
             // 수집기가 맡은 글만(이 기능 전 · 기간 밖에 게시된 글은 읽은 적도 읽을 일도 없다).
-            ['참여', post.status === 'published' && engagementTrackedChannel(channel) && (post.engagement || post.engagement_next_at || post.engagement_error)
+            [translate('참여'), post.status === 'published' && engagementTrackedChannel(channel) && (post.engagement || post.engagement_next_at || post.engagement_error)
               ? <EngagementLine post={post} platform={channel?.platform} />
               : ''],
-            ['오류', post.error ? <span style={{ color: tokens.colors.dangerLight }}>{post.error}</span> : ''],
+            [translate('오류'), post.error ? <span style={{ color: tokens.colors.dangerLight }}>{post.error}</span> : ''],
           ]}
         />
 
         {sends && (
           <div data-testid={`marketing-post-sends-${post.id}`}>
-            <FieldLabel>발송 현황</FieldLabel>
+            <FieldLabel>{translate('발송 현황')}</FieldLabel>
             <Meta>
               {Object.keys(sends.counts).length
                 ? Object.entries(sends.counts).map(([status, n]) => <span key={status}>{status} {formatCount(n)}</span>)
-                : <span>아직 발송 기록이 없습니다</span>}
+                : <span>{translate('아직 발송 기록이 없습니다')}</span>}
             </Meta>
             {sendOutcomeLine(sends.outcomes) && (
-              <Meta><span>공급자가 알려 온 결과: {sendOutcomeLine(sends.outcomes)}</span></Meta>
+              <Meta><span>{translate('공급자가 알려 온 결과:')} {sendOutcomeLine(sends.outcomes)}</span></Meta>
             )}
           </div>
         )}
@@ -791,13 +788,13 @@ export function PostCard({ post }: { post: MarketingPost }) {
       <Modal
         isOpen={confirming}
         onClose={() => setConfirming(false)}
-        title={isEmail ? '메일 발송 승인' : '게시 승인'}
+        title={isEmail ? translate('메일 발송 승인') : translate('게시 승인')}
         maxWidth={600}
         footer={(
           <>
-            <Button variant="secondary" onClick={() => setConfirming(false)}>취소</Button>
+            <Button variant="secondary" onClick={() => setConfirming(false)}>{translate('취소')}</Button>
             <Button variant="primary" disabled={busy} onClick={() => void approve()}>
-              {busy ? '처리 중…' : approveLabel(channel?.kind, post.kind)}
+              {busy ? translate('처리 중…') : approveLabel(channel?.kind, post.kind)}
             </Button>
           </>
         )}
@@ -805,10 +802,10 @@ export function PostCard({ post }: { post: MarketingPost }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
             {isEmail
-              ? `"${channel?.list_name || '수신 목록'}" 목록의 동의 연락처에게 보냅니다. 승인하면 발송 큐가 만들어지고 되돌릴 수 없습니다.`
+              ? translate('"{0}" 목록의 동의 연락처에게 보냅니다. 승인하면 발송 큐가 만들어지고 되돌릴 수 없습니다.', { 0: channel?.list_name || translate('수신 목록') })
               : channel?.kind === 'outreach'
-                ? `${channel.name} 에 서버가 바로 게시합니다. 회사 이름으로 외부에 나가는 글입니다.`
-                : '승인하면 이 글이 확정됩니다. 직접 게시한 뒤 글 주소를 기록하세요.'}
+                ? translate('{0} 에 서버가 바로 게시합니다. 회사 이름으로 외부에 나가는 글입니다.', { 0: channel.name })
+                : translate('승인하면 이 글이 확정됩니다. 직접 게시한 뒤 글 주소를 기록하세요.')}
           </div>
           {(titleChanged ? title : post.title) && (
             <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary }}>{titleChanged ? title : post.title}</div>
@@ -816,22 +813,22 @@ export function PostCard({ post }: { post: MarketingPost }) {
           <div style={{ fontSize: 12.5, whiteSpace: 'pre-wrap', color: tokens.colors.textStrong, maxHeight: 240, overflow: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 8 }}>
             {preview}
           </div>
-          <Textarea label="승인 메모 (선택)" rows={2} value={approveNote} onChange={(e) => setApproveNote(e.target.value)} />
+          <Textarea label={translate('승인 메모 (선택)')} rows={2} value={approveNote} onChange={(e) => setApproveNote(e.target.value)} />
         </div>
       </Modal>
 
       <NoteModal
         isOpen={rejecting}
-        title={isEmail ? '메일 초안 거부' : '게시 초안 거부'}
-        message="거부 사유는 다음 사이클 지시문에 실려 에이전트가 배웁니다 — 무엇이 문제였는지(톤 · 사실 · 규칙 위반 …) 적어 주세요."
-        label="거부 사유"
+        title={isEmail ? translate('메일 초안 거부') : translate('게시 초안 거부')}
+        message={translate('거부 사유는 다음 사이클 지시문에 실려 에이전트가 배웁니다 — 무엇이 문제였는지(톤 · 사실 · 규칙 위반 …) 적어 주세요.')}
+        label={translate('거부 사유')}
         required
         danger
         busy={busy}
-        confirmLabel="거부"
+        confirmLabel={translate('거부')}
         onClose={() => setRejecting(false)}
         onSubmit={async (note) => {
-          const done = await run(() => api.rejectMarketingPost(post.id, note), '초안을 거부했습니다');
+          const done = await run(() => api.rejectMarketingPost(post.id, note), translate('초안을 거부했습니다'));
           if (done) setRejecting(false);
         }}
       />
@@ -839,11 +836,11 @@ export function PostCard({ post }: { post: MarketingPost }) {
       <Modal
         isOpen={recording}
         onClose={() => setRecording(false)}
-        title="게시 완료 기록"
+        title={translate('게시 완료 기록')}
         maxWidth={520}
         footer={(
           <>
-            <Button variant="secondary" onClick={() => setRecording(false)}>취소</Button>
+            <Button variant="secondary" onClick={() => setRecording(false)}>{translate('취소')}</Button>
             <Button
               variant="primary"
               disabled={busy || !safeHttpUrl(permalink)}
@@ -851,27 +848,26 @@ export function PostCard({ post }: { post: MarketingPost }) {
                 // 검사한 주소를 정규화해서 보낸다(대문자 스킴 · 공백) — 서버는 /^https?:\/\/\S+$/ 로 본다.
                 const url = safeHttpUrl(permalink);
                 if (!url) return;
-                const done = await run(() => api.markMarketingPostPublished(post.id, url), '게시를 기록했습니다');
+                const done = await run(() => api.markMarketingPostPublished(post.id, url), translate('게시를 기록했습니다'));
                 if (done) setRecording(false);
               }}
             >
-              기록
-            </Button>
+              {translate('기록')}</Button>
           </>
         )}
       >
-        <Input label="올린 글의 주소(http/https)" value={permalink} placeholder="https://…" onChange={(e) => setPermalink(e.target.value)} />
-        <Hint>수동 채널은 사람이 직접 올립니다. 올린 뒤 그 글의 주소를 남기면 성과 리포트가 이 글을 셉니다.</Hint>
+        <Input label={translate('올린 글의 주소(http/https)')} value={permalink} placeholder="https://…" onChange={(e) => setPermalink(e.target.value)} />
+        <Hint>{translate('수동 채널은 사람이 직접 올립니다. 올린 뒤 그 글의 주소를 남기면 성과 리포트가 이 글을 셉니다.')}</Hint>
       </Modal>
 
       <Modal
         isOpen={retrying}
         onClose={() => setRetrying(false)}
-        title="게시 다시 시도"
+        title={translate('게시 다시 시도')}
         maxWidth={480}
         footer={(
           <>
-            <Button variant="secondary" onClick={() => setRetrying(false)}>취소</Button>
+            <Button variant="secondary" onClick={() => setRetrying(false)}>{translate('취소')}</Button>
             <Button
               variant="primary"
               disabled={busy}
@@ -879,20 +875,17 @@ export function PostCard({ post }: { post: MarketingPost }) {
                 const saved = await run(() => api.retryMarketingPost(post.id));
                 if (!saved) return;
                 setRetrying(false);
-                if (saved.status === 'failed') ctx.notify(`다시 실패했습니다: ${saved.error || '알 수 없는 오류'}`, 'error');
-                else ctx.notify('게시했습니다', 'success');
+                if (saved.status === 'failed') ctx.notify(translate('다시 실패했습니다: {0}', { 0: saved.error || translate('알 수 없는 오류') }), 'error');
+                else ctx.notify(translate('게시했습니다'), 'success');
               }}
             >
-              다시 게시
-            </Button>
+              {translate('다시 게시')}</Button>
           </>
         )}
       >
         <div style={{ fontSize: 13, color: tokens.colors.warningLight, lineHeight: 1.5 }}>
-          앞의 시도가 실제로는 올라갔을 수 있습니다. {channel?.target ? `${channel.target} 에서 ` : ''}이 글이 이미 있는지 먼저 확인하세요 —
-          같은 글이 두 번 올라가면 커뮤니티 규칙 위반이 될 수 있습니다.
-        </div>
-        {post.error && <Hint tone="danger">지난 오류: {post.error}</Hint>}
+          {translate('앞의 시도가 실제로는 올라갔을 수 있습니다.')} {channel?.target ? translate('{0} 에서 ', { 0: channel.target }) : ''}{translate('이 글이 이미 있는지 먼저 확인하세요 — 같은 글이 두 번 올라가면 커뮤니티 규칙 위반이 될 수 있습니다.')}</div>
+        {post.error && <Hint tone="danger">{translate('지난 오류:')} {post.error}</Hint>}
       </Modal>
     </Panel>
   );
@@ -901,6 +894,7 @@ export function PostCard({ post }: { post: MarketingPost }) {
 // ── 예산 편성 ───────────────────────────────────────────────────────────────
 
 export function AllocationCard({ allocation, currentMinor }: { allocation: MarketingAllocation; currentMinor?: number | null }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const [approving, setApproving] = useState(false);
@@ -914,58 +908,58 @@ export function AllocationCard({ allocation, currentMinor }: { allocation: Marke
       tone={proposed ? 'attention' : undefined}
       title={(
         <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span>예산 편성 · {channel?.name || '(알 수 없는 채널)'}</span>
+          <span>{translate('예산 편성 ·')} {channel?.name || translate('(알 수 없는 채널)')}</span>
           <StatusPill view={allocationStatusView(allocation.status)} />
         </span>
       )}
       actions={proposed && ctx.canApproveSpend ? (
         <>
-          <Button size="sm" variant="primary" disabled={busy} onClick={() => setApproving(true)}>승인…</Button>
-          <Button size="sm" variant="danger" disabled={busy} onClick={() => setRejecting(true)}>거부</Button>
+          <Button size="sm" variant="primary" disabled={busy} onClick={() => setApproving(true)}>{translate('승인…')}</Button>
+          <Button size="sm" variant="danger" disabled={busy} onClick={() => setRejecting(true)}>{translate('거부')}</Button>
         </>
       ) : null}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
           {formatMinor(allocation.amount_minor, currency)}
-          <span style={{ fontSize: 12, fontWeight: 500, color: tokens.colors.textMuted, marginLeft: 8 }}>기간 편성액</span>
+          <span style={{ fontSize: 12, fontWeight: 500, color: tokens.colors.textMuted, marginLeft: 8 }}>{translate('기간 편성액')}</span>
         </div>
         <KeyValue
           items={[
-            ['현재 편성', proposed ? (currentMinor === null || currentMinor === undefined ? '없음(이 채널에는 아직 지출할 수 없음)' : formatMinor(currentMinor, currency)) : ''],
-            ['근거', allocation.rationale ? <Prose text={allocation.rationale} /> : ''],
-            ['제안', `${actorKind(allocation.proposed_by_type)} ${allocation.proposed_by_name} · ${relativeTime(allocation.created_at)}`],
-            ['결정', allocation.decided_by_name ? `${allocation.decided_by_name} · ${formatDateTime(allocation.decided_at)}` : ''],
-            ['결정 메모', allocation.decision_note],
+            [translate('현재 편성'), proposed ? (currentMinor === null || currentMinor === undefined ? translate('없음(이 채널에는 아직 지출할 수 없음)') : formatMinor(currentMinor, currency)) : ''],
+            [translate('근거'), allocation.rationale ? <Prose text={allocation.rationale} /> : ''],
+            [translate('제안'), `${actorKind(allocation.proposed_by_type)} ${allocation.proposed_by_name} · ${relativeTime(allocation.created_at)}`],
+            [translate('결정'), allocation.decided_by_name ? `${allocation.decided_by_name} · ${formatDateTime(allocation.decided_at)}` : ''],
+            [translate('결정 메모'), allocation.decision_note],
           ]}
         />
-        {proposed && !ctx.canApproveSpend && <Hint>예산 편성은 지출 승인 권한(marketing.approve_spend)이 있는 사람이 정합니다.</Hint>}
+        {proposed && !ctx.canApproveSpend && <Hint>{translate('예산 편성은 지출 승인 권한(marketing.approve_spend)이 있는 사람이 정합니다.')}</Hint>}
       </div>
       <NoteModal
         isOpen={approving}
-        title="예산 편성 승인"
-        message={`${channel?.name || '이 채널'} 의 기간 편성액을 ${formatMinor(allocation.amount_minor, currency)} 로 정합니다. 승인하면 이 채널의 이전 편성을 대체합니다(지출은 따로 승인합니다).`}
-        label="승인 메모"
+        title={translate('예산 편성 승인')}
+        message={translate('{0} 의 기간 편성액을 {1} 로 정합니다. 승인하면 이 채널의 이전 편성을 대체합니다(지출은 따로 승인합니다).', { 0: channel?.name || translate('이 채널'), 1: formatMinor(allocation.amount_minor, currency) })}
+        label={translate('승인 메모')}
         busy={busy}
-        confirmLabel="편성 승인"
+        confirmLabel={translate('편성 승인')}
         onClose={() => setApproving(false)}
         onSubmit={async (note) => {
-          const done = await run(() => api.approveMarketingAllocation(allocation.id, note), '예산 편성을 승인했습니다');
+          const done = await run(() => api.approveMarketingAllocation(allocation.id, note), translate('예산 편성을 승인했습니다'));
           if (done) setApproving(false);
         }}
       />
       <NoteModal
         isOpen={rejecting}
-        title="예산 편성 거부"
-        message="거부 사유는 에이전트가 다음 제안에서 배웁니다."
-        label="거부 사유"
+        title={translate('예산 편성 거부')}
+        message={translate('거부 사유는 에이전트가 다음 제안에서 배웁니다.')}
+        label={translate('거부 사유')}
         required
         danger
         busy={busy}
-        confirmLabel="거부"
+        confirmLabel={translate('거부')}
         onClose={() => setRejecting(false)}
         onSubmit={async (note) => {
-          const done = await run(() => api.rejectMarketingAllocation(allocation.id, note), '예산 편성을 거부했습니다');
+          const done = await run(() => api.rejectMarketingAllocation(allocation.id, note), translate('예산 편성을 거부했습니다'));
           if (done) setRejecting(false);
         }}
       />
@@ -978,6 +972,7 @@ export function AllocationCard({ allocation, currentMinor }: { allocation: Marke
 type SpendDialog = 'approve' | 'deny' | 'cancel' | 'paid' | 'failed' | 'refund' | null;
 
 export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const [dialog, setDialog] = useState<SpendDialog>(null);
@@ -999,21 +994,21 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
   const actions = ctx.canApproveSpend ? (
     <>
       {pending && !expired && !approval.mine && (
-        <Button size="sm" variant="primary" disabled={busy} onClick={() => setDialog('approve')}>승인…</Button>
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => setDialog('approve')}>{translate('승인…')}</Button>
       )}
-      {pending && <Button size="sm" variant="danger" disabled={busy} onClick={() => setDialog('deny')}>거부</Button>}
-      {pending && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setDialog('cancel')}>요청 취소</Button>}
+      {pending && <Button size="sm" variant="danger" disabled={busy} onClick={() => setDialog('deny')}>{translate('거부')}</Button>}
+      {pending && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setDialog('cancel')}>{translate('요청 취소')}</Button>}
       {spend.status === 'approved' && canCancelSpend(spend) && (
-        <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog('cancel')}>취소(보내기 전)</Button>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog('cancel')}>{translate('취소(보내기 전)')}</Button>
       )}
       {canReconcileSpend(spend) && (
-        <Button size="sm" variant="primary" disabled={busy} onClick={() => setDialog('paid')}>결제 완료 기록…</Button>
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => setDialog('paid')}>{translate('결제 완료 기록…')}</Button>
       )}
       {canReconcileSpend(spend) && (
-        <Button size="sm" variant="danger" disabled={busy} onClick={() => setDialog('failed')}>실패로 기록…</Button>
+        <Button size="sm" variant="danger" disabled={busy} onClick={() => setDialog('failed')}>{translate('실패로 기록…')}</Button>
       )}
-      {direct && unknown && <Button size="sm" variant="secondary" disabled={busy} onClick={() => void inspect()}>공급자에서 확인</Button>}
-      {canRecordRefund(spend) && <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog('refund')}>환불 기록…</Button>}
+      {direct && unknown && <Button size="sm" variant="secondary" disabled={busy} onClick={() => void inspect()}>{translate('공급자에서 확인')}</Button>}
+      {canRecordRefund(spend) && <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog('refund')}>{translate('환불 기록…')}</Button>}
     </>
   ) : null;
 
@@ -1023,7 +1018,7 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
       tone={unknown ? 'danger' : pending ? 'attention' : undefined}
       title={(
         <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span>지출 요청 · {spend.payee}</span>
+          <span>{translate('지출 요청 ·')} {spend.payee}</span>
           <StatusPill view={spendStatusViewFor(spend)} />
           {pending && approval.label && <span data-testid={`marketing-spend-dual-${spend.id}`}><StatusPill view={{ label: approval.label, tone: 'queued' }} /></span>}
         </span>
@@ -1046,8 +1041,8 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
               lineHeight: 1.5,
             }}
           >
-            ⚠ {UNKNOWN_SPEND_MESSAGE}
-            {spend.error && <div style={{ fontWeight: 400, marginTop: 4 }}>사유: {spend.error}</div>}
+            ⚠ {translate(UNKNOWN_SPEND_MESSAGE)}
+            {spend.error && <div style={{ fontWeight: 400, marginTop: 4 }}>{translate('사유:')} {spend.error}</div>}
             {direct && <div style={{ fontWeight: 400, marginTop: 4 }}>{unknownReconcileHint(spend)}</div>}
             {inspection && (
               <div data-testid={`marketing-spend-inspection-${spend.id}`} style={{ fontWeight: 600, marginTop: 6 }}>
@@ -1067,125 +1062,118 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
           <span data-testid={`marketing-spend-amount-${spend.id}`} style={{ fontSize: 22, fontWeight: 800, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
             {formatMinor(spend.amount_minor, currency)}
           </span>
-          <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>통화 {currency}</span>
+          <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('통화')} {currency}</span>
         </div>
 
         <KeyValue
           items={[
-            ['수취인', `${spend.payee}${spend.payee_ref ? ` (${spend.payee_ref})` : ''}`],
-            ['채널', channel ? `${channel.name} · ${platformLabel(channel.platform)}` : spend.channel_id],
-            ['목적', <Prose key="purpose" text={spend.purpose} />],
-            ['기대 효과', <Prose key="outcome" text={spend.expected_outcome} empty="(없음)" />],
-            ['결제 방식', PAYMENT_PROVIDER_LABELS[spend.provider] || spend.provider],
-            ['요청', `${actorKind(spend.requested_by_type)} ${spend.requested_by_name} · ${formatDateTime(spend.created_at)}`],
-            ['만료', pending ? `${formatDateTime(spend.expires_at)}${expired ? ' — 만료됨(승인 불가)' : ''}` : ''],
-            ['예산 기간', spend.period_key],
-            ['승인', spend.approvals?.length ? spend.approvals.map((a) => `${a.name} · ${formatDateTime(a.at)}`).join(', ') : ''],
-            ['결정', spend.decided_by_name ? `${spend.decided_by_name} · ${formatDateTime(spend.decided_at)}` : ''],
-            ['결정 메모', spend.decision_note],
-            ['결제 시각', spend.paid_at ? formatDateTime(spend.paid_at) : ''],
-            ['거래 id', spend.provider_ref],
-            ['영수증', spend.receipt_url ? <ExternalLink href={spend.receipt_url} /> : ''],
-            ['오류', !unknown && spend.error ? <span style={{ color: tokens.colors.dangerLight }}>{spend.error}</span> : ''],
+            [translate('수취인'), `${spend.payee}${spend.payee_ref ? ` (${spend.payee_ref})` : ''}`],
+            [translate('채널'), channel ? `${channel.name} · ${platformLabel(channel.platform)}` : spend.channel_id],
+            [translate('목적'), <Prose key="purpose" text={spend.purpose} />],
+            [translate('기대 효과'), <Prose key="outcome" text={spend.expected_outcome} empty={translate('(없음)')} />],
+            [translate('결제 방식'), PAYMENT_PROVIDER_LABELS[spend.provider] || spend.provider],
+            [translate('요청'), `${actorKind(spend.requested_by_type)} ${spend.requested_by_name} · ${formatDateTime(spend.created_at)}`],
+            [translate('만료'), pending ? `${formatDateTime(spend.expires_at)}${expired ? translate(' — 만료됨(승인 불가)') : ''}` : ''],
+            [translate('예산 기간'), spend.period_key],
+            [translate('승인'), spend.approvals?.length ? spend.approvals.map((a) => `${a.name} · ${formatDateTime(a.at)}`).join(', ') : ''],
+            [translate('결정'), spend.decided_by_name ? `${spend.decided_by_name} · ${formatDateTime(spend.decided_at)}` : ''],
+            [translate('결정 메모'), spend.decision_note],
+            [translate('결제 시각'), spend.paid_at ? formatDateTime(spend.paid_at) : ''],
+            [translate('거래 id'), spend.provider_ref],
+            [translate('영수증'), spend.receipt_url ? <ExternalLink href={spend.receipt_url} /> : ''],
+            [translate('오류'), !unknown && spend.error ? <span style={{ color: tokens.colors.dangerLight }}>{spend.error}</span> : ''],
           ]}
         />
 
         <div>
-          <FieldLabel>{direct ? '실행 계획 — 서버가 공급자를 읽어 만들었고, 승인하면 이 내용 그대로 실행됩니다' : '실행 payload — 승인하면 이 내용 그대로 실행됩니다'}</FieldLabel>
+          <FieldLabel>{direct ? translate('실행 계획 — 서버가 공급자를 읽어 만들었고, 승인하면 이 내용 그대로 실행됩니다') : translate('실행 payload — 승인하면 이 내용 그대로 실행됩니다')}</FieldLabel>
           <JsonBlock value={spend.payload} testId={`marketing-spend-payload-${spend.id}`} />
           <Hint>
-            payload sha256 <code data-testid={`marketing-spend-hash-${spend.id}`}>{shortHash(spend.payload_sha256)}</code>… — 승인할 때 이 해시를 함께 보내
-            서버가 실행 직전에 다시 대조합니다.
-          </Hint>
+            {translate('payload sha256')} <code data-testid={`marketing-spend-hash-${spend.id}`}>{shortHash(spend.payload_sha256)}</code>{translate('… — 승인할 때 이 해시를 함께 보내 서버가 실행 직전에 다시 대조합니다.')}</Hint>
         </div>
 
         {spend.provider_response && Object.keys(spend.provider_response).length > 0 && (
           <details>
-            <summary style={{ fontSize: 12, color: tokens.colors.textSecondary, cursor: 'pointer' }}>결제 시스템 응답</summary>
+            <summary style={{ fontSize: 12, color: tokens.colors.textSecondary, cursor: 'pointer' }}>{translate('결제 시스템 응답')}</summary>
             <JsonBlock value={spend.provider_response} />
           </details>
         )}
 
-        {pending && approval.mine && <Hint tone="warning">{SECOND_APPROVAL_MESSAGE}</Hint>}
+        {pending && approval.mine && <Hint tone="warning">{translate(SECOND_APPROVAL_MESSAGE)}</Hint>}
         {pending && approval.required === 2 && !approval.mine && approval.given === 0 && (
-          <Hint>2인 승인 대상입니다 — 서로 다른 승인자 두 명이 각각 승인해야 실행됩니다.</Hint>
+          <Hint>{translate('2인 승인 대상입니다 — 서로 다른 승인자 두 명이 각각 승인해야 실행됩니다.')}</Hint>
         )}
         {pending && approval.required === 2 && !approval.mine && approval.given === 1 && (
-          <Hint>첫 승인이 기록됐습니다 — 다른 승인자의 두 번째 승인을 기다립니다.</Hint>
+          <Hint>{translate('첫 승인이 기록됐습니다 — 다른 승인자의 두 번째 승인을 기다립니다.')}</Hint>
         )}
         {!ctx.canApproveSpend && (pending || canReconcileSpend(spend)) && (
-          <Hint>지출 승인 · 결제 기록은 marketing.approve_spend 권한이 있는 사람만 할 수 있습니다.</Hint>
+          <Hint>{translate('지출 승인 · 결제 기록은 marketing.approve_spend 권한이 있는 사람만 할 수 있습니다.')}</Hint>
         )}
-        {spend.status === 'executing' && <Hint>결제 시스템의 응답을 기다리는 중입니다 — 다시 보내지 않습니다.</Hint>}
+        {spend.status === 'executing' && <Hint>{translate('결제 시스템의 응답을 기다리는 중입니다 — 다시 보내지 않습니다.')}</Hint>}
         {direct && spend.status === 'paid' && <MarketingSpendReconciliation spend={spend} />}
         {direct && spend.status === 'paid' && (cardProvider ? (
           <Hint>
-            그 한도의 카드를 만든 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 카드 정보는 Stripe 대시보드에서 봅니다(AWB 는 카드 번호를
-            보여 주지 않습니다){spend.receipt_url ? <> — <ExternalLink href={spend.receipt_url}>Stripe 에서 카드 보기</ExternalLink></> : ''}. 덜 쓴 금액을 환불로 기록하는 것은
-            카드를 해지하고 거래·미확정 승인을 대조한 뒤에만 가능합니다.
-          </Hint>
+            {translate('그 한도의 카드를 만든 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 카드 정보는 Stripe 대시보드에서 봅니다(AWB 는 카드 번호를 보여 주지 않습니다)')}{spend.receipt_url ? <> — <ExternalLink href={spend.receipt_url}>{translate('Stripe 에서 카드 보기')}</ExternalLink></> : ''}{translate('. 덜 쓴 금액을 환불로 기록하는 것은 카드를 해지하고 거래·미확정 승인을 대조한 뒤에만 가능합니다.')}</Hint>
         ) : (
           <Hint>
-            광고 플랫폼의 상한을 올린 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로
-            낮춘 뒤에만 가능합니다. 아래에서 지출 보고서와 남은 상한을 확인하세요.
-          </Hint>
+            {translate('광고 플랫폼의 상한을 올린 것이라 원장은 승인 금액 전체를 사용으로 셉니다. 덜 쓰인 금액을 환불로 기록하는 것은 상한을 실제로 낮춘 뒤에만 가능합니다. 아래에서 지출 보고서와 남은 상한을 확인하세요.')}</Hint>
         ))}
       </div>
 
       {dialog === 'approve' && <SpendApproveModal spend={spend} channelName={channel?.name || ''} onClose={close} />}
       <NoteModal
         isOpen={dialog === 'deny'}
-        title="지출 거부"
-        message="거부 사유는 에이전트에게 전달됩니다. 예산은 묶이지 않습니다."
-        label="거부 사유"
+        title={translate('지출 거부')}
+        message={translate('거부 사유는 에이전트에게 전달됩니다. 예산은 묶이지 않습니다.')}
+        label={translate('거부 사유')}
         required
         danger
         busy={busy}
-        confirmLabel="거부"
+        confirmLabel={translate('거부')}
         onClose={close}
         onSubmit={async (note) => {
-          const done = await run(() => api.denyMarketingSpend(spend.id, note), '지출을 거부했습니다');
+          const done = await run(() => api.denyMarketingSpend(spend.id, note), translate('지출을 거부했습니다'));
           if (done) close();
         }}
       />
       <NoteModal
         isOpen={dialog === 'cancel'}
-        title={spend.status === 'approved' ? '승인된 지출 취소(보내기 전)' : '지출 요청 취소'}
+        title={spend.status === 'approved' ? translate('승인된 지출 취소(보내기 전)') : translate('지출 요청 취소')}
         message={spend.status === 'approved'
-          ? '승인했지만 아직 보내지 않은 요청을 닫고 보류한 예산을 풉니다. 이미 AWB 밖에서 결제했다면 취소하지 말고 결제 완료를 기록하세요.'
-          : '결정과 별개로, 더 이상 필요 없는 요청을 닫습니다.'}
-        label="취소 사유"
+          ? translate('승인했지만 아직 보내지 않은 요청을 닫고 보류한 예산을 풉니다. 이미 AWB 밖에서 결제했다면 취소하지 말고 결제 완료를 기록하세요.')
+          : translate('결정과 별개로, 더 이상 필요 없는 요청을 닫습니다.')}
+        label={translate('취소 사유')}
         busy={busy}
-        confirmLabel="요청 취소"
+        confirmLabel={translate('요청 취소')}
         onClose={close}
         onSubmit={async (note) => {
-          const done = await run(() => api.cancelMarketingSpend(spend.id, note), '지출 요청을 취소했습니다');
+          const done = await run(() => api.cancelMarketingSpend(spend.id, note), translate('지출 요청을 취소했습니다'));
           if (done) close();
         }}
       />
       <NoteModal
         isOpen={dialog === 'failed'}
-        title="결제 실패로 기록"
+        title={translate('결제 실패로 기록')}
         message={unknown
           ? (cardProvider
             ? spend.payload?.card_id
-              ? '공급자에서 카드의 이전 한도가 그대로이고 이번 증액으로 쓴 돈이 없음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.'
-              : '이 요청의 카드가 Stripe 에 없음을 확인했을 때만 실패로 기록하세요(서버도 카드를 찾아 봅니다 — 해지되지 않은 카드가 있으면 거부합니다). 보류한 예산이 풀립니다.'
-            : '결제 시스템에서 실제로 결제되지 않았음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.')
-          : 'AWB 밖 결제가 이루어지지 않았을 때 기록합니다. 보류한 예산이 풀립니다.'}
-        label="확인한 내용"
+              ? translate('공급자에서 카드의 이전 한도가 그대로이고 이번 증액으로 쓴 돈이 없음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.')
+              : translate('이 요청의 카드가 Stripe 에 없음을 확인했을 때만 실패로 기록하세요(서버도 카드를 찾아 봅니다 — 해지되지 않은 카드가 있으면 거부합니다). 보류한 예산이 풀립니다.')
+            : translate('결제 시스템에서 실제로 결제되지 않았음을 확인했을 때만 실패로 기록하세요. 보류한 예산이 풀립니다.'))
+          : translate('AWB 밖 결제가 이루어지지 않았을 때 기록합니다. 보류한 예산이 풀립니다.')}
+        label={translate('확인한 내용')}
         required
         danger
         busy={busy}
-        confirmLabel="실패로 기록"
+        confirmLabel={translate('실패로 기록')}
         checkboxLabel={cardProvider && unknown
           ? spend.payload?.card_id
-            ? '이번 한도 증가가 반영되지 않았고 이번 증액으로 쓴 돈이 없음을 확인했습니다(감사에 남습니다)'
-            : 'Stripe 대시보드에서 이 요청의 카드로 쓴 돈이 없음을 확인했습니다(카드가 해지됐거나 서버가 카드를 다 확인하지 못한 경우에 필요 — 감사에 남습니다)'
+            ? translate('이번 한도 증가가 반영되지 않았고 이번 증액으로 쓴 돈이 없음을 확인했습니다(감사에 남습니다)')
+            : translate('Stripe 대시보드에서 이 요청의 카드로 쓴 돈이 없음을 확인했습니다(카드가 해지됐거나 서버가 카드를 다 확인하지 못한 경우에 필요 — 감사에 남습니다)')
           : undefined}
         onClose={close}
         onSubmit={async (note, confirmNoSpend) => {
-          const done = await run(() => api.markMarketingSpendFailed(spend.id, note, cardProvider && confirmNoSpend), '결제 실패를 기록했습니다');
+          const done = await run(() => api.markMarketingSpendFailed(spend.id, note, cardProvider && confirmNoSpend), translate('결제 실패를 기록했습니다'));
           if (done) close();
         }}
       />
@@ -1200,6 +1188,7 @@ export function SpendCard({ spend }: { spend: MarketingSpendRequest }) {
  * 승인합니다" 를 직접 체크해야 버튼이 켜진다. 보내는 해시는 이 화면이 보여 준 요청의 것이다.
  */
 function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSpendRequest; channelName: string; onClose(): void }) {
+  useLocale();
   const ctx = useMarketingCtx();
   const { busy, run } = useAction();
   const [confirmed, setConfirmed] = useState(false);
@@ -1214,31 +1203,31 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
     const result = await run(() => api.approveMarketingSpend(spend.id, shownHash, note.trim()));
     if (!result) return;
     onClose();
-    if (!result.final) ctx.notify(SECOND_APPROVAL_MESSAGE, 'info');
+    if (!result.final) ctx.notify(translate(SECOND_APPROVAL_MESSAGE), 'info');
     else if (result.status === 'paid') {
       ctx.notify(!isDirectPaymentProvider(result.provider)
-        ? '승인했고 결제 시스템이 결제를 완료했습니다'
+        ? translate('승인했고 결제 시스템이 결제를 완료했습니다')
         : DIRECT_PROVIDER_SPECS[result.provider].kind === 'card'
-          ? '승인했고 Stripe 카드를 발급했습니다 — 카드 정보는 Stripe 대시보드에서 봅니다'
-          : '승인했고 광고 플랫폼에 상한을 반영했습니다', 'success');
+          ? translate('승인했고 Stripe 카드를 발급했습니다 — 카드 정보는 Stripe 대시보드에서 봅니다')
+          : translate('승인했고 광고 플랫폼에 상한을 반영했습니다'), 'success');
     }
-    else if (result.status === 'unknown') ctx.notify(UNKNOWN_SPEND_MESSAGE, 'error');
-    else if (result.status === 'failed') ctx.notify(`승인했지만 결제가 거절됐습니다: ${result.error || ''}`, 'error');
-    else if (result.provider === 'manual') ctx.notify('승인했습니다 — AWB 밖에서 결제한 뒤 결제 완료를 기록하세요', 'success');
-    else ctx.notify('결제를 승인했습니다', 'success');
+    else if (result.status === 'unknown') ctx.notify(translate(UNKNOWN_SPEND_MESSAGE), 'error');
+    else if (result.status === 'failed') ctx.notify(translate('승인했지만 결제가 거절됐습니다: {0}', { 0: result.error || '' }), 'error');
+    else if (result.provider === 'manual') ctx.notify(translate('승인했습니다 — AWB 밖에서 결제한 뒤 결제 완료를 기록하세요'), 'success');
+    else ctx.notify(translate('결제를 승인했습니다'), 'success');
   };
 
   return (
     <Modal
       isOpen
       onClose={onClose}
-      title="결제 승인 확인"
+      title={translate('결제 승인 확인')}
       maxWidth={620}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>취소</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('취소')}</Button>
           <Button variant="primary" data-testid="marketing-spend-approve-confirm" disabled={!confirmed || busy} onClick={() => void submit()}>
-            {busy ? '처리 중…' : '결제 승인'}
+            {busy ? translate('처리 중…') : translate('결제 승인')}
           </Button>
         </>
       )}
@@ -1249,11 +1238,11 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
         </div>
         <KeyValue
           items={[
-            ['수취인', `${spend.payee}${spend.payee_ref ? ` (${spend.payee_ref})` : ''}`],
-            ['채널', channelName || spend.channel_id],
-            ['목적', spend.purpose],
-            ['기대 효과', spend.expected_outcome],
-            ['결제 방식', PAYMENT_PROVIDER_LABELS[spend.provider] || spend.provider],
+            [translate('수취인'), `${spend.payee}${spend.payee_ref ? ` (${spend.payee_ref})` : ''}`],
+            [translate('채널'), channelName || spend.channel_id],
+            [translate('목적'), spend.purpose],
+            [translate('기대 효과'), spend.expected_outcome],
+            [translate('결제 방식'), PAYMENT_PROVIDER_LABELS[spend.provider] || spend.provider],
             ['payload sha256', <code key="hash">{shortHash(shownHash)}…</code>],
           ]}
         />
@@ -1265,7 +1254,7 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
         <JsonBlock value={spend.payload} maxHeight={180} />
         <Hint tone="warning">
           {spendApproveHint(spend)}
-          {approval.required === 2 && ' 2인 승인 대상이라 다른 승인자 한 명이 더 승인해야 실행됩니다.'}
+          {approval.required === 2 && translate(' 2인 승인 대상이라 다른 승인자 한 명이 더 승인해야 실행됩니다.')}
         </Hint>
         {cardLimitWarning(spend) && <Hint tone="danger">{cardLimitWarning(spend)}</Hint>}
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
@@ -1275,15 +1264,16 @@ function SpendApproveModal({ spend, channelName, onClose }: { spend: MarketingSp
             checked={confirmed}
             onChange={(e) => setConfirmed(e.target.checked)}
           />
-          {SPEND_CONFIRM_PHRASE}
+          {translate(SPEND_CONFIRM_PHRASE)}
         </label>
-        <Textarea label="승인 메모 (선택)" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        <Textarea label={translate('승인 메모 (선택)')} rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
       </div>
     </Modal>
   );
 }
 
 function MarkPaidModal({ spend, prefillRef = '', onClose }: { spend: MarketingSpendRequest; prefillRef?: string; onClose(): void }) {
+  useLocale();
   const { busy, run } = useAction();
   // 광고 플랫폼 상한 변경에는 거래 id 가 없다 — 서버가 계획에서 만든 기록용 값을 미리 채운다(사람이 확인하고 고칠 수 있다). 카드는
   // "공급자에서 확인" 이 찾은 활성 카드만 채운다(prefillRef) — 실행이 받아 둔 카드 id 는 활성화되지 않은 카드일 수 있다.
@@ -1296,11 +1286,11 @@ function MarkPaidModal({ spend, prefillRef = '', onClose }: { spend: MarketingSp
     <Modal
       isOpen
       onClose={onClose}
-      title="결제 완료 기록"
+      title={translate('결제 완료 기록')}
       maxWidth={520}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>취소</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('취소')}</Button>
           <Button
             variant="primary"
             disabled={busy || !ref.trim() || !receiptOk}
@@ -1314,13 +1304,12 @@ function MarkPaidModal({ spend, prefillRef = '', onClose }: { spend: MarketingSp
                     ...(note.trim() ? { note: note.trim() } : {}),
                   });
                 },
-                '결제 완료를 기록했습니다',
+                translate('결제 완료를 기록했습니다'),
               );
               if (done) onClose();
             }}
           >
-            기록
-          </Button>
+            {translate('기록')}</Button>
         </>
       )}
     >
@@ -1328,17 +1317,18 @@ function MarkPaidModal({ spend, prefillRef = '', onClose }: { spend: MarketingSp
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
           {formatMinor(spend.amount_minor, spend.currency)} → {spend.payee}
         </div>
-        {spend.status === 'unknown' && <Hint tone="danger">{UNKNOWN_SPEND_MESSAGE}</Hint>}
-        <Input label="거래 id (필수)" value={ref} onChange={(e) => setRef(e.target.value)} />
-        <Input label="영수증 주소 (선택, http/https)" value={receipt} onChange={(e) => setReceipt(e.target.value)} error={receiptOk ? undefined : 'http(s) 주소여야 합니다'} />
-        <Textarea label="메모 (선택)" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
-        <Hint>나중에 대조할 수 없는 “결제 완료” 는 기록이 아닙니다 — 결제 시스템의 거래 id 를 그대로 적으세요.</Hint>
+        {spend.status === 'unknown' && <Hint tone="danger">{translate(UNKNOWN_SPEND_MESSAGE)}</Hint>}
+        <Input label={translate('거래 id (필수)')} value={ref} onChange={(e) => setRef(e.target.value)} />
+        <Input label={translate('영수증 주소 (선택, http/https)')} value={receipt} onChange={(e) => setReceipt(e.target.value)} error={receiptOk ? undefined : translate('http(s) 주소여야 합니다')} />
+        <Textarea label={translate('메모 (선택)')} rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        <Hint>{translate('나중에 대조할 수 없는 “결제 완료” 는 기록이 아닙니다 — 결제 시스템의 거래 id 를 그대로 적으세요.')}</Hint>
       </div>
     </Modal>
   );
 }
 
 function RefundModal({ spend, onClose }: { spend: MarketingSpendRequest; onClose(): void }) {
+  useLocale();
   const { busy, run } = useAction();
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
@@ -1366,11 +1356,11 @@ function RefundModal({ spend, onClose }: { spend: MarketingSpendRequest; onClose
     <Modal
       isOpen
       onClose={onClose}
-      title="환불 기록"
+      title={translate('환불 기록')}
       maxWidth={520}
       footer={(
         <>
-          <Button variant="secondary" onClick={onClose}>취소</Button>
+          <Button variant="secondary" onClick={onClose}>{translate('취소')}</Button>
           <Button
             variant="primary"
             disabled={busy || !parsed?.ok || !!over || !note.trim()}
@@ -1378,31 +1368,30 @@ function RefundModal({ spend, onClose }: { spend: MarketingSpendRequest; onClose
               if (!parsed?.ok) return;
               const done = await run(
                 () => api.refundMarketingSpend(spend.id, { amount_minor: parsed.minor, note: note.trim(), ...(ref.trim() ? { provider_ref: ref.trim() } : {}) }),
-                '환불을 기록했습니다',
+                translate('환불을 기록했습니다'),
               );
               if (done) onClose();
             }}
           >
-            환불 기록
-          </Button>
+            {translate('환불 기록')}</Button>
         </>
       )}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-          결제 {formatMinor(spend.amount_minor, spend.currency)} → {spend.payee}
-          {refundable !== null && ` · 환불 가능 ${formatMinor(refundable, spend.currency)}`}
+          {translate('결제')} {formatMinor(spend.amount_minor, spend.currency)} → {spend.payee}
+          {refundable !== null && translate(' · 환불 가능 {0}', { 0: formatMinor(refundable, spend.currency) })}
         </div>
         <Input
-          label={`환불 금액 (${spend.currency})`}
+          label={translate('환불 금액 ({0})', { 0: spend.currency })}
           value={amount}
           inputMode="decimal"
           onChange={(e) => setAmount(e.target.value)}
-          error={parsed && !parsed.ok ? parsed.error : over ? '환불 가능 금액보다 큽니다' : undefined}
+          error={parsed && !parsed.ok ? parsed.error : over ? translate('환불 가능 금액보다 큽니다') : undefined}
         />
-        <Input label="거래 id (선택)" value={ref} onChange={(e) => setRef(e.target.value)} />
-        <Textarea label="사유 (필수)" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
-        <Hint>환불은 결제 기록에 묶여 원장에 남고, 요청을 다시 열지 않습니다. 환불액은 원래 결제한 기간의 예산으로 돌아갑니다.</Hint>
+        <Input label={translate('거래 id (선택)')} value={ref} onChange={(e) => setRef(e.target.value)} />
+        <Textarea label={translate('사유 (필수)')} rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        <Hint>{translate('환불은 결제 기록에 묶여 원장에 남고, 요청을 다시 열지 않습니다. 환불액은 원래 결제한 기간의 예산으로 돌아갑니다.')}</Hint>
       </div>
     </Modal>
   );

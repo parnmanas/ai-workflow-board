@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // 한 Runtime Host 의 작업이 **다른 호스트를 잠그지 않는다** (실측 2026-10-01).
 //
 // 증상: 한 매니저의 CLI 를 올리는 동안 다른 매니저의 CLI 를 올릴 수 없었다.
@@ -69,7 +70,7 @@ function render(inst) {
 }
 
 const cliRowButton = (container) =>
-  [...container.querySelectorAll('button')].find((b) => /^(Update|업데이트 중…)$/.test(b.textContent.trim()));
+  [...container.querySelectorAll('button')].find((b) => [ui('Update'), ui('업데이트 중…')].includes(b.textContent.trim()));
 
 function silenceAudio(t) {
   const previous = globalThis.Audio;
@@ -107,7 +108,7 @@ test('호스트 A 의 CLI 업데이트가 진행 중이어도, 같은 패널을 
 
   click(cliRowButton(view.container));
   await act(async () => {});
-  assert.equal(cliRowButton(view.container).textContent.trim(), '업데이트 중…', 'A 는 진행 중으로 보인다');
+  assert.equal(cliRowButton(view.container).textContent.trim(), ui("업데이트 중…"), 'A 는 진행 중으로 보인다');
   assert.equal(cliRowButton(view.container).disabled, true);
 
   // **같은 컴포넌트에 호스트만 바꾼다** — Runtime Hosts 화면이 실제로 하는 일이다.
@@ -125,7 +126,7 @@ test('호스트 A 의 CLI 업데이트가 진행 중이어도, 같은 패널을 
   // A 로 돌아오면 A 는 **여전히 진행 중**이다 — key 로 재생성했다면 여기서 추적을 잃었다.
   view.rerender(render(A));
   await act(async () => {});
-  assert.equal(cliRowButton(view.container).textContent.trim(), '업데이트 중…', 'A 의 진행 상태는 화면 전환 뒤에도 남는다');
+  assert.equal(cliRowButton(view.container).textContent.trim(), ui("업데이트 중…"), 'A 의 진행 상태는 화면 전환 뒤에도 남는다');
   assert.equal(cliRowButton(view.container).disabled, true, '진행 중인 A 를 다시 보낼 수 없다');
 
   releaseA();

@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // 결과물 카드 렌더 계약 테스트 — F2-4 ⓒ (ticket d21b28fc).
 //
 // 빌드/배포 결과물 ref(metadata.artifact_refs)를 MessageList 가 ArtifactRefCard 로
@@ -22,25 +23,25 @@ test('배포(url 있음) → 새 탭 링크 + 종류/상태/짧은 커밋', () =
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noopener noreferrer"/);
   assert.match(html, /data-artifact-ref="deploy"/);
-  assert.match(html, /배포/); // 종류 배지(한글)
+  assert.match(html, uiPattern("배포")); // 종류 배지(한글)
   assert.match(html, /🚀/); // 배포 아이콘
   assert.match(html, /production/); // title
   assert.match(html, /data-artifact-status="deployed"/); // 상태 배지
   assert.match(html, /abcdef1/); // 7자 짧은 커밋
   assert.doesNotMatch(html, /abcdef1234567/); // 전체 커밋은 노출 안 함
-  assert.match(html, /aria-label="배포 결과물: production \(deployed\) — 열기"/);
+  assert.match(html, uiPattern('{0} 결과물: {1}{2} — 열기', { 0: ui('배포'), 1: 'production', 2: ' (deployed)' }));
 });
 
 test('빌드(url 없음) → 비인터랙티브 배지(span, 링크 아님)', () => {
   const html = render({ kind: 'build', title: 'server', status: 'ok', commit: 'deadbeef99' });
   assert.doesNotMatch(html, /<a /); // 링크 아님
   assert.match(html, /data-artifact-ref="build"/);
-  assert.match(html, /빌드/); // 종류 배지
+  assert.match(html, uiPattern("빌드")); // 종류 배지
   assert.match(html, /🔨/); // 빌드 아이콘
   assert.match(html, /server/);
   assert.match(html, /data-artifact-status="ok"/);
   assert.match(html, /deadbee/); // 짧은 커밋 7자
-  assert.match(html, /aria-label="빌드 결과물: server \(ok\)"/); // "열기" 없음(링크 아님)
+  assert.match(html, uiPattern('{0} 결과물: {1}{2}', { 0: ui('빌드'), 1: 'server', 2: ' (ok)' })); // "열기" 없음(링크 아님)
 });
 
 test('실패 빌드 → status 배지 노출(위험 톤 대상)', () => {
@@ -54,7 +55,7 @@ test('status/commit/url 없어도 종류·title 로 렌더된다', () => {
   assert.doesNotMatch(html, /<a /);
   assert.doesNotMatch(html, /data-artifact-status/); // 상태 배지 없음
   assert.match(html, /server/);
-  assert.match(html, /aria-label="빌드 결과물: server"/); // 상태 괄호 없음
+  assert.match(html, uiPattern('{0} 결과물: {1}{2}', { 0: ui('빌드'), 1: 'server', 2: '' })); // 상태 괄호 없음
 });
 
 test('미매핑 종류 → 코드 그대로 + 기본 아이콘', () => {

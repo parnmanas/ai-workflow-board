@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Comment, Ticket } from '../../types';
 import { api } from '../../api';
@@ -42,6 +44,7 @@ const byNewest = (a: Comment, b: Comment) => {
  * lose the comments at the boundary.
  */
 function useTicketComments(ticket: Ticket) {
+  useLocale();
   const [accumulated, setAccumulated] = useState<Comment[] | null>(null);
   const [hasMore, setHasMore] = useState<boolean | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -59,7 +62,7 @@ function useTicketComments(ticket: Ticket) {
     for (const c of accumulated) map.set(c.id, c);
     for (const c of fresh) map.set(c.id, c as Comment);
     return Array.from(map.values()).sort(byNewest);
-  }, [accumulated, fresh]);
+  }, [accumulated, fresh, getLocale()]);
 
   const loadOlder = useCallback(async () => {
     if (loadingOlder) return;
@@ -91,6 +94,7 @@ function useTicketComments(ticket: Ticket) {
 }
 
 function useMentionCandidates(accountId: string, ticketId: string): MentionCandidate[] {
+  useLocale();
   const [candidates, setCandidates] = useState<MentionCandidate[]>([]);
   useEffect(() => {
     if (!accountId) return;
@@ -117,6 +121,7 @@ export default function TicketConversation({
   ticket, accountId, lastReadAt, scrollToCommentId, onScrollToCommentConsumed,
   onAddComment, onSetCommentStatus, onPreview,
 }: TicketConversationProps) {
+  useLocale();
   const { user } = useAuth();
   const { showToast } = useToast();
   const { comments, hasMore, loadingOlder, loadOlder } = useTicketComments(ticket);
@@ -139,7 +144,7 @@ export default function TicketConversation({
   // Operational failures remain visible; only routine system history is optional.
   const visible = useMemo(
     () => (showSystem ? comments : comments.filter(c => !isRoutineSystemComment(c))),
-    [comments, showSystem],
+    [comments, showSystem, getLocale()],
   );
   const systemCount = comments.filter(isRoutineSystemComment).length;
 
@@ -153,13 +158,13 @@ export default function TicketConversation({
       const next: Staged[] = [];
       let room = MAX_ATTACHMENTS - staged.length;
       for (const file of files) {
-        if (room <= 0) { rejected.push(`${file.name} (최대 ${MAX_ATTACHMENTS}개)`); continue; }
-        if (file.size > MAX_ATTACHMENT_BYTES) { rejected.push(`${file.name} (200MB 초과)`); continue; }
+        if (room <= 0) { rejected.push(translate('{0} (최대 {1}개)', { 0: file.name, 1: MAX_ATTACHMENTS })); continue; }
+        if (file.size > MAX_ATTACHMENT_BYTES) { rejected.push(translate('{0} (200MB 초과)', { 0: file.name })); continue; }
         next.push({ key: `${Date.now()}-${file.name}-${next.length}`, file, previewUrl: URL.createObjectURL(file) });
         room -= 1;
       }
       if (next.length) setStaged(prev => [...prev, ...next]);
-      if (rejected.length) showToast(`첨부할 수 없습니다: ${rejected.join(', ')}`, 'error');
+      if (rejected.length) showToast(translate('첨부할 수 없습니다: {0}', { 0: rejected.join(', ') }), 'error');
     };
     input.click();
   };
@@ -192,7 +197,7 @@ export default function TicketConversation({
       setReplyingTo(null);
     } catch (err: any) {
       // Keep the text and the files so nothing typed is lost.
-      showToast(`보내지 못했습니다: ${err?.message || 'unknown error'}`, 'error');
+      showToast(translate('보내지 못했습니다: {0}', { 0: err?.message || translate('unknown error') }), 'error');
     } finally {
       setSending(false);
     }
@@ -208,8 +213,7 @@ export default function TicketConversation({
       {systemCount > 0 && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 8, cursor: 'pointer', alignSelf: 'flex-end' }}>
           <input type="checkbox" checked={showSystem} onChange={e => setShowSystem(e.target.checked)} />
-          일반 시스템 기록 {systemCount}개 보기
-        </label>
+          {translate('일반 시스템 기록')} {systemCount}{translate('개 보기')}</label>
       )}
 
       {/* Constrain the virtualized list so only comments scroll, not the composer. */}
@@ -240,7 +244,7 @@ export default function TicketConversation({
             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               ↪ {replyingTo.author}: {replyingTo.preview}
             </span>
-            <button type="button" onClick={() => setReplyingTo(null)} aria-label="답변 취소" style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer' }}>✕</button>
+            <button type="button" onClick={() => setReplyingTo(null)} aria-label={translate('답변 취소')} style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer' }}>✕</button>
           </div>
         )}
         {staged.length > 0 && (
@@ -255,13 +259,13 @@ export default function TicketConversation({
                   ? <img src={s.previewUrl} alt="" style={{ width: 24, height: 24, objectFit: 'cover', borderRadius: tokens.radii.sm }} />
                   : <span aria-hidden="true">📎</span>}
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{s.file.name}</span>
-                <button type="button" onClick={() => unstage(s.key)} aria-label={`${s.file.name} 빼기`} style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', padding: 0 }}>✕</button>
+                <button type="button" onClick={() => unstage(s.key)} aria-label={translate('{0} 빼기', { 0: s.file.name })} style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', padding: 0 }}>✕</button>
               </span>
             ))}
           </div>
         )}
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end', minWidth: 0 }}>
-          <button type="button" onClick={pickFiles} disabled={sending} title="파일 첨부" aria-label="파일 첨부" style={{ ...panelButton('plain', sending), padding: '6px 9px' }}>📎</button>
+          <button type="button" onClick={pickFiles} disabled={sending} title={translate('파일 첨부')} aria-label={translate('파일 첨부')} style={{ ...panelButton('plain', sending), padding: '6px 9px' }}>📎</button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <MentionTextarea
               rows={2}
@@ -269,8 +273,8 @@ export default function TicketConversation({
               onChange={setContent}
               candidates={candidates}
               onSubmit={() => void send()}
-              placeholder={replyingTo ? '답변을 적으세요…' : `${user?.name ? `${user.name}(으)로 ` : ''}코멘트 작성… (@로 멘션)`}
-              ariaLabel="코멘트"
+              placeholder={replyingTo ? translate('답변을 적으세요…') : translate('{0}코멘트 작성… (@로 멘션)', { 0: user?.name ? translate('{0}(으)로 ', { 0: user.name }) : '' })}
+              ariaLabel={translate('코멘트')}
               style={{
                 width: '100%', boxSizing: 'border-box', background: tokens.colors.surfaceCard,
                 border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
@@ -280,7 +284,7 @@ export default function TicketConversation({
             />
           </div>
           <button type="button" onClick={() => void send()} disabled={!content.trim() || sending} style={panelButton('primary', !content.trim() || sending)}>
-            {sending ? '보내는 중…' : '보내기'}
+            {sending ? translate('보내는 중…') : translate('보내기')}
           </button>
         </div>
       </div>

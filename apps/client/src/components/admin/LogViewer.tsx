@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -30,6 +32,7 @@ const LEVEL_COLORS: Record<string, string> = {
 const POLL_INTERVAL = 3000;
 
 export default function LogViewer() {
+  useLocale();
   const { showToast } = useToast();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
@@ -169,7 +172,7 @@ export default function LogViewer() {
 
   const handleCopy = useCallback(async () => {
     if (logs.length === 0) {
-      showToast('No logs to copy', 'info');
+      showToast(translate('No logs to copy'), 'info');
       return;
     }
     const lines = logs.map(log => {
@@ -184,9 +187,9 @@ export default function LogViewer() {
     const text = lines.join('\n');
     try {
       await navigator.clipboard.writeText(text);
-      showToast(`Copied ${logs.length} log${logs.length === 1 ? '' : 's'} to clipboard`, 'success');
+      showToast(translate('Copied {0} log{1} to clipboard', { 0: logs.length, 1: logs.length === 1 ? '' : translate('s') }), 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Copy failed — clipboard permission denied?', 'error');
+      showToast(err?.message || translate('Copy failed — clipboard permission denied?'), 'error');
     }
   }, [logs, showToast]);
 
@@ -211,8 +214,7 @@ export default function LogViewer() {
         marginBottom: 16,
       }}>
         <h2 style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary, margin: 0 }}>
-          Server Logs
-        </h2>
+          {translate('Server Logs')}</h2>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <label style={{
             display: 'flex', alignItems: 'center', gap: 6,
@@ -229,7 +231,7 @@ export default function LogViewer() {
           <button
             onClick={handleCopy}
             disabled={logs.length === 0}
-            title="Copy all currently shown logs (with details) to clipboard"
+            title={translate('Copy all currently shown logs (with details) to clipboard')}
             style={{
               padding: '6px 14px', borderRadius: tokens.radii.md,
               background: tokens.colors.border, border: 'none',
@@ -238,7 +240,7 @@ export default function LogViewer() {
               opacity: logs.length === 0 ? 0.5 : 1,
             }}
           >
-            Copy ({logs.length})
+            {translate('Copy (')}{logs.length})
           </button>
           <button
             onClick={handleRefresh}
@@ -251,7 +253,7 @@ export default function LogViewer() {
               opacity: loading ? 0.6 : 1,
             }}
           >
-            {loading ? 'Loading...' : 'Refresh'}
+            {loading ? translate('Loading...') : translate('Refresh')}
           </button>
         </div>
       </div>
@@ -270,7 +272,7 @@ export default function LogViewer() {
             minWidth: 140,
           }}
         >
-          <option value="">All Categories</option>
+          <option value="">{translate('All Categories')}</option>
           {categories.map(cat => (
             <option key={cat} value={cat}>{cat}</option>
           ))}
@@ -286,16 +288,16 @@ export default function LogViewer() {
             minWidth: 100,
           }}
         >
-          <option value="">All Levels</option>
-          <option value="info">info</option>
-          <option value="warn">warn</option>
-          <option value="error">error</option>
-          <option value="debug">debug</option>
+          <option value="">{translate('All Levels')}</option>
+          <option value="info">{translate('info')}</option>
+          <option value="warn">{translate('warn')}</option>
+          <option value="error">{translate('error')}</option>
+          <option value="debug">{translate('debug')}</option>
         </select>
 
         <input
           type="text"
-          placeholder="Search logs..."
+          placeholder={translate('Search logs...')}
           value={searchFilter}
           onChange={e => setSearchFilter(e.target.value)}
           style={{
@@ -311,7 +313,7 @@ export default function LogViewer() {
       <div style={{
         display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center',
       }}>
-        <span style={{ fontSize: '11px', color: tokens.colors.textSecondary, minWidth: 56 }}>From</span>
+        <span style={{ fontSize: '11px', color: tokens.colors.textSecondary, minWidth: 56 }}>{translate('From')}</span>
         <input
           type="datetime-local"
           value={startTime}
@@ -324,7 +326,7 @@ export default function LogViewer() {
             colorScheme: 'dark',
           }}
         />
-        <span style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>To</span>
+        <span style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>{translate('To')}</span>
         <input
           type="datetime-local"
           value={endTime}
@@ -347,13 +349,11 @@ export default function LogViewer() {
               cursor: 'pointer',
             }}
           >
-            Clear range
-          </button>
+            {translate('Clear range')}</button>
         )}
         {(startTime || endTime) && (
           <span style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-            (auto-refresh refetches the full window)
-          </span>
+            {translate('(auto-refresh refetches the full window)')}</span>
         )}
       </div>
 
@@ -387,8 +387,8 @@ export default function LogViewer() {
       }}>
         {logs.length === 0 && !loading ? (
           <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No logs found</div>
-            <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Logs will appear here as the system processes requests.</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>{translate('No logs found')}</div>
+            <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>{translate('Logs will appear here as the system processes requests.')}</div>
           </div>
         ) : (
           <div style={{ maxHeight: 'calc(100vh - 280px)', overflowY: 'auto' }}>

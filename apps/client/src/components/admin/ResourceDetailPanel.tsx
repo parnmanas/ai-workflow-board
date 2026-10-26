@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo } from 'react';
 import type { Resource, Credential } from '../../types';
 import { tokens } from '../../tokens';
@@ -32,10 +34,10 @@ const LABEL_STYLE: React.CSSProperties = {
 
 function typeBadgeLabel(type: string): string {
   const map: Record<string, string> = {
-    document: 'Document',
-    image: 'Image',
-    link: 'Link',
-    comment_attachment: 'Comment Attachment',
+    document: translate('Document'),
+    image: translate('Image'),
+    link: translate('Link'),
+    comment_attachment: translate('Comment Attachment'),
   };
   return map[type] || type;
 }
@@ -66,18 +68,19 @@ export default function ResourceDetailPanel({
   onClose,
   showToast,
 }: ResourceDetailPanelProps) {
+  useLocale();
   const linkedCredential = useMemo(
     () => credentials.find((c) => c.id === resource.credential_id) || null,
-    [credentials, resource.credential_id],
+    [credentials, resource.credential_id, getLocale()],
   );
 
   const copyUrl = async () => {
     if (!resource.url) return;
     try {
       await navigator.clipboard.writeText(resource.url);
-      showToast('URL을 복사했습니다.', 'success');
+      showToast(translate('URL을 복사했습니다.'), 'success');
     } catch {
-      showToast('복사에 실패했습니다.', 'error');
+      showToast(translate('복사에 실패했습니다.'), 'error');
     }
   };
 
@@ -109,15 +112,15 @@ export default function ResourceDetailPanel({
         </div>
         <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
           {onClose && (
-            <Button variant="secondary" size="sm" onClick={onClose}>← 목록</Button>
+            <Button variant="secondary" size="sm" onClick={onClose}>{translate('← 목록')}</Button>
           )}
           {canManage ? (
             <>
-              <Button variant="secondary" size="sm" onClick={() => onEdit(resource)}>Edit</Button>
-              <Button variant="danger" size="sm" onClick={() => onDelete(resource)}>Delete</Button>
+              <Button variant="secondary" size="sm" onClick={() => onEdit(resource)}>{translate('Edit')}</Button>
+              <Button variant="danger" size="sm" onClick={() => onDelete(resource)}>{translate('Delete')}</Button>
             </>
           ) : (
-            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>Inherited (read-only)</span>
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('Inherited (read-only)')}</span>
           )}
         </div>
       </div>
@@ -151,14 +154,13 @@ export default function ResourceDetailPanel({
           >
             {resource.url}
           </span>
-          <Button variant="secondary" size="sm" onClick={copyUrl}>복사</Button>
+          <Button variant="secondary" size="sm" onClick={copyUrl}>{translate('복사')}</Button>
           <Button
             variant="secondary"
             size="sm"
             onClick={() => window.open(resource.url, '_blank', 'noopener,noreferrer')}
           >
-            열기
-          </Button>
+            {translate('열기')}</Button>
         </div>
       )}
 
@@ -166,20 +168,20 @@ export default function ResourceDetailPanel({
       <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginTop: 12 }}>
         {linkedCredential && (
           <div>
-            <div style={LABEL_STYLE}>Credential</div>
+            <div style={LABEL_STYLE}>{translate('Credential')}</div>
             <div style={{ fontSize: 13, color: tokens.colors.textStrong, marginTop: 2 }}>
               <Badge variant="success" dot>{linkedCredential.name}</Badge>
             </div>
           </div>
         )}
         <div>
-          <div style={LABEL_STYLE}>Created</div>
+          <div style={LABEL_STYLE}>{translate('Created')}</div>
           <div style={{ fontSize: 13, color: tokens.colors.textStrong, marginTop: 2 }}>
             {relativeTime(resource.created_at)}
           </div>
         </div>
         <div>
-          <div style={LABEL_STYLE}>Updated</div>
+          <div style={LABEL_STYLE}>{translate('Updated')}</div>
           <div style={{ fontSize: 13, color: tokens.colors.textStrong, marginTop: 2 }}>
             {relativeTime(resource.updated_at || resource.created_at)}
           </div>
@@ -221,7 +223,7 @@ export default function ResourceDetailPanel({
             src={`data:${mime || 'image/png'};base64,${resource.file_data}`}
             alt={resource.name}
             onClick={() => onPreview(resource)}
-            title="클릭하여 원본 보기"
+            title={translate('클릭하여 원본 보기')}
             style={{
               maxWidth: '100%',
               maxHeight: 360,
@@ -255,7 +257,7 @@ export default function ResourceDetailPanel({
         {/* 문서/링크 텍스트 컨텐츠 */}
         {resource.content && (
           <div>
-            <div style={{ ...LABEL_STYLE, marginBottom: 4 }}>Content</div>
+            <div style={{ ...LABEL_STYLE, marginBottom: 4 }}>{translate('Content')}</div>
             <pre
               style={{
                 margin: 0,
@@ -309,15 +311,14 @@ export default function ResourceDetailPanel({
               </div>
             </div>
             <Button variant="secondary" size="sm" onClick={() => onPreview(resource)}>
-              {isImage || isVideo ? '보기' : '열기 / 다운로드'}
+              {isImage || isVideo ? translate('보기') : translate('열기 / 다운로드')}
             </Button>
           </div>
         )}
 
         {!resource.url && !resource.content && !resource.file_data && (
           <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: '12px 0' }}>
-            표시할 추가 정보가 없습니다.
-          </div>
+            {translate('표시할 추가 정보가 없습니다.')}</div>
         )}
       </div>
     );

@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
@@ -35,32 +37,32 @@ import {
  */
 
 const STT_OPTIONS = [
-  { value: 'none', label: 'Off' },
-  { value: 'soniox', label: 'Soniox' },
-  { value: 'elevenlabs', label: 'ElevenLabs Scribe' },
-  { value: 'openai', label: 'OpenAI / OpenAI-compatible' },
-  { value: 'local', label: 'Self-hosted (ragnar)' },
+  { value: 'none', get label() { return translate('Off'); } },
+  { value: 'soniox', get label() { return translate('Soniox'); } },
+  { value: 'elevenlabs', get label() { return translate('ElevenLabs Scribe'); } },
+  { value: 'openai', get label() { return translate('OpenAI / OpenAI-compatible'); } },
+  { value: 'local', get label() { return translate('Self-hosted (ragnar)'); } },
 ];
 const TTS_OPTIONS = [
-  { value: 'none', label: 'Off' },
-  { value: 'elevenlabs', label: 'ElevenLabs' },
-  { value: 'typecast', label: 'Typecast' },
-  { value: 'azure', label: 'Azure Speech' },
-  { value: 'google', label: 'Google Cloud TTS' },
-  { value: 'openai', label: 'OpenAI / OpenAI-compatible' },
-  { value: 'local', label: 'Self-hosted (ragnar)' },
+  { value: 'none', get label() { return translate('Off'); } },
+  { value: 'elevenlabs', get label() { return translate('ElevenLabs'); } },
+  { value: 'typecast', get label() { return translate('Typecast'); } },
+  { value: 'azure', get label() { return translate('Azure Speech'); } },
+  { value: 'google', get label() { return translate('Google Cloud TTS'); } },
+  { value: 'openai', get label() { return translate('OpenAI / OpenAI-compatible'); } },
+  { value: 'local', get label() { return translate('Self-hosted (ragnar)'); } },
 ];
 const PROVIDER_KEYS: Array<{ key: string; label: string }> = [
-  { key: 'voice.soniox.api_key', label: 'Soniox API key' },
-  { key: 'voice.elevenlabs.api_key', label: 'ElevenLabs API key' },
-  { key: 'voice.typecast.api_key', label: 'Typecast API key' },
-  { key: 'voice.azure.api_key', label: 'Azure Speech key' },
-  { key: 'voice.azure.region', label: 'Azure region' },
-  { key: 'voice.google.api_key', label: 'Google Cloud API key' },
-  { key: 'voice.openai.api_key', label: 'OpenAI API key' },
-  { key: 'voice.openai.base_url', label: 'OpenAI base URL' },
-  { key: 'voice.local.base_url', label: 'Self-hosted server URL' },
-  { key: 'voice.local.api_key', label: 'Self-hosted server key' },
+  { key: 'voice.soniox.api_key', get label() { return translate('Soniox API key'); } },
+  { key: 'voice.elevenlabs.api_key', get label() { return translate('ElevenLabs API key'); } },
+  { key: 'voice.typecast.api_key', get label() { return translate('Typecast API key'); } },
+  { key: 'voice.azure.api_key', get label() { return translate('Azure Speech key'); } },
+  { key: 'voice.azure.region', get label() { return translate('Azure region'); } },
+  { key: 'voice.google.api_key', get label() { return translate('Google Cloud API key'); } },
+  { key: 'voice.openai.api_key', get label() { return translate('OpenAI API key'); } },
+  { key: 'voice.openai.base_url', get label() { return translate('OpenAI base URL'); } },
+  { key: 'voice.local.base_url', get label() { return translate('Self-hosted server URL'); } },
+  { key: 'voice.local.api_key', get label() { return translate('Self-hosted server key'); } },
 ];
 
 const sectionTitle: React.CSSProperties = { fontSize: 15, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 };
@@ -68,6 +70,7 @@ const sectionHint: React.CSSProperties = { fontSize: 12, color: tokens.colors.te
 const grid2: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 };
 
 function EngineBadge({ label, status }: { label: string; status: { provider: string; ready: boolean; error: string | null } | undefined }) {
+  useLocale();
   const ready = !!status?.ready;
   const off = !status || status.provider === 'none';
   const color = ready ? tokens.colors.success : off ? tokens.colors.textMuted : tokens.colors.warning;
@@ -76,7 +79,7 @@ function EngineBadge({ label, status }: { label: string; status: { provider: str
       <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, marginTop: 5, flexShrink: 0 }} />
       <span>
         <strong style={{ color: tokens.colors.textPrimary }}>{label}</strong>{' '}
-        {ready ? `${status!.provider} — ready` : off ? 'off' : `${status!.provider} — ${status!.error || 'not ready'}`}
+        {ready ? translate('{0} — ready', { 0: status!.provider }) : off ? translate('off') : `${status!.provider} — ${status!.error || translate('not ready')}`}
       </span>
     </div>
   );
@@ -94,6 +97,7 @@ interface SttResult {
 }
 
 function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provider: string, model: string) => void }) {
+  useLocale();
   const [localModels, setLocalModels] = useState<Array<{ id: string; name: string }>>([]);
   const [reference, setReference] = useState('');
   const [recording, setRecording] = useState<ActiveRecording | null>(null);
@@ -111,7 +115,7 @@ function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provide
   }, [providers]);
   const candidates = useMemo(() => providers.flatMap((provider) => provider === 'local' && localModels.length
     ? localModels.map((m) => ({ key: `local:${m.id}`, provider, model: m.id, label: m.name }))
-    : [{ key: provider, provider, model: '', label: provider }]), [providers, localModels]);
+    : [{ key: provider, provider, model: '', label: provider }]), [providers, localModels, getLocale()]);
 
   useEffect(() => () => { if (audio) URL.revokeObjectURL(audio.url); }, [audio]);
   useEffect(() => () => recordingRef.current?.cancel(), []);
@@ -141,7 +145,7 @@ function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provide
         setAudio({ blob: out.blob, url: URL.createObjectURL(out.blob) });
         await run(out.blob);
       } catch (err: any) {
-        setError(err?.message || 'Recording failed');
+        setError(err?.message || translate('Recording failed'));
       }
       return;
     }
@@ -150,31 +154,28 @@ function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provide
       recordingRef.current = next;
       setRecording(next);
     } catch (err: any) {
-      setError(err?.name === 'NotAllowedError' ? 'Microphone permission denied.' : (err?.message || 'Could not open the microphone'));
+      setError(err?.name === 'NotAllowedError' ? translate('Microphone permission denied.') : (err?.message || translate('Could not open the microphone')));
     }
   }, [recording, audio, run]);
 
   return (
     <Card padding="20px">
-      <div style={sectionTitle}>Speech-to-text comparison</div>
+      <div style={sectionTitle}>{translate('Speech-to-text comparison')}</div>
       <div style={sectionHint}>
-        Record one utterance the way you will really talk — Korean with English terms and host names mixed in — and it
-        goes to every provider that has a key. Type what you actually said to get a character error rate; spacing and
-        punctuation are ignored, an English term written in Hangul counts as wrong.
-      </div>
+        {translate('Record one utterance the way you will really talk — Korean with English terms and host names mixed in — and it goes to every provider that has a key. Type what you actually said to get a character error rate; spacing and punctuation are ignored, an English term written in Hangul counts as wrong.')}</div>
       {providers.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>Add at least one speech-to-text API key above, save, and come back.</div>
+        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>{translate('Add at least one speech-to-text API key above, save, and come back.')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <Input label="What you said (optional — enables CER)" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="롤프의 agent-manager 상태 알려줘" />
+          <Input label={translate('What you said (optional — enables CER)')} value={reference} onChange={(e) => setReference(e.target.value)} placeholder={translate('롤프의 agent-manager 상태 알려줘')} />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Button variant={recording ? 'danger' : 'primary'} size="sm" onClick={() => void toggle()} disabled={running || !voiceRecordingSupported()}>
-              {recording ? '■ Stop and transcribe' : '🎙 Record'}
+              {recording ? translate('■ Stop and transcribe') : translate('🎙 Record')}
             </Button>
             {audio && !recording && (
               <>
                 <audio src={audio.url} controls style={{ height: 32 }} />
-                <Button variant="ghost" size="sm" onClick={() => void run(audio.blob)} disabled={running}>Run again</Button>
+                <Button variant="ghost" size="sm" onClick={() => void run(audio.blob)} disabled={running}>{translate('Run again')}</Button>
               </>
             )}
             <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>{providers.join(' · ')}</span>
@@ -184,10 +185,10 @@ function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provide
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
               <thead>
                 <tr style={{ color: tokens.colors.textMuted, textAlign: 'left' }}>
-                  <th style={{ padding: '6px 8px' }}>Provider</th>
-                  <th style={{ padding: '6px 8px' }}>Transcript</th>
-                  <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>CER</th>
-                  <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>Latency</th>
+                  <th style={{ padding: '6px 8px' }}>{translate('Provider')}</th>
+                  <th style={{ padding: '6px 8px' }}>{translate('Transcript')}</th>
+                  <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{translate('CER')}</th>
+                  <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{translate('Latency')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -197,14 +198,14 @@ function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provide
                     <tr key={r.key} style={{ borderTop: `1px solid ${tokens.colors.border}`, verticalAlign: 'top' }}>
                       <td style={{ padding: '6px 8px', whiteSpace: 'nowrap', color: tokens.colors.textPrimary }}>
                         {r.label}
-                        {r.transcript && <Button size="sm" variant="ghost" onClick={() => onAdopt(r.provider, r.model || '')}>Use this engine</Button>}
+                        {r.transcript && <Button size="sm" variant="ghost" onClick={() => onAdopt(r.provider, r.model || '')}>{translate('Use this engine')}</Button>}
                         {r.transcript?.model && <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{r.transcript.model}</div>}
                       </td>
                       <td style={{ padding: '6px 8px', color: r.error ? tokens.colors.warning : tokens.colors.textPrimary }}>
-                        {r.error ? r.error : r.transcript ? (r.transcript.text || '(nothing recognised)') : 'Transcribing…'}
+                        {r.error ? r.error : r.transcript ? (r.transcript.text || translate('(nothing recognised)')) : translate('Transcribing…')}
                       </td>
                       <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{cer === null ? '—' : `${(cer * 100).toFixed(1)}%`}</td>
-                      <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{r.transcript ? `${r.transcript.latency_ms} ms` : '—'}</td>
+                      <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{r.transcript ? translate('{0} ms', { 0: r.transcript.latency_ms }) : '—'}</td>
                     </tr>
                   );
                 })}
@@ -228,6 +229,7 @@ function CandidateRow({ candidate, providers, onChange, onRemove }: {
   onChange: (next: TtsCandidate) => void;
   onRemove: () => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [voices, setVoices] = useState<VoiceOptionView[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -237,9 +239,9 @@ function CandidateRow({ candidate, providers, onChange, onRemove }: {
     try {
       const { voices: list } = await api.voiceLabVoices(candidate.provider);
       setVoices(list);
-      if (list.length === 0) showToast(`${candidate.provider} does not list voices — type the voice id.`, 'info');
+      if (list.length === 0) showToast(translate('{0} does not list voices — type the voice id.', { 0: candidate.provider }), 'info');
     } catch (err: any) {
-      showToast(err?.message || 'Failed to list voices', 'error');
+      showToast(err?.message || translate('Failed to list voices'), 'error');
     } finally {
       setLoading(false);
     }
@@ -248,25 +250,25 @@ function CandidateRow({ candidate, providers, onChange, onRemove }: {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr 140px auto auto', gap: 8, alignItems: 'end' }}>
       <Select
-        label="Provider"
+        label={translate('Provider')}
         value={candidate.provider}
         options={providers.map((p) => ({ value: p, label: p }))}
         onChange={(e) => { setVoices(null); onChange({ ...candidate, provider: e.target.value, voice: '' }); }}
       />
       {voices && voices.length > 0 ? (
         <Select
-          label="Voice"
+          label={translate('Voice')}
           value={candidate.voice}
-          placeholder="Pick a voice…"
+          placeholder={translate('Pick a voice…')}
           options={voices.map((v) => ({ value: v.id, label: [v.name, v.language, v.gender].filter(Boolean).join(' · ') }))}
           onChange={(e) => onChange({ ...candidate, voice: e.target.value })}
         />
       ) : (
-        <Input label="Voice" value={candidate.voice} onChange={(e) => onChange({ ...candidate, voice: e.target.value })} placeholder="voice id / name" />
+        <Input label={translate('Voice')} value={candidate.voice} onChange={(e) => onChange({ ...candidate, voice: e.target.value })} placeholder={translate('voice id / name')} />
       )}
-      <Input label="Model" value={candidate.model} onChange={(e) => onChange({ ...candidate, model: e.target.value })} placeholder="default" />
-      <Button variant="ghost" size="sm" onClick={() => void loadVoices()} disabled={loading}>{loading ? 'Loading…' : 'Voices'}</Button>
-      <Button variant="ghost" size="sm" onClick={onRemove} aria-label="Remove candidate">×</Button>
+      <Input label={translate('Model')} value={candidate.model} onChange={(e) => onChange({ ...candidate, model: e.target.value })} placeholder={translate('default')} />
+      <Button variant="ghost" size="sm" onClick={() => void loadVoices()} disabled={loading}>{loading ? translate('Loading…') : translate('Voices')}</Button>
+      <Button variant="ghost" size="sm" onClick={onRemove} aria-label={translate('Remove candidate')}>×</Button>
     </div>
   );
 }
@@ -276,6 +278,7 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
   configured: { provider: string; voice: string; model: string };
   onAdopt: (candidate: TtsCandidate) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [candidates, setCandidates] = useState<TtsCandidate[]>([]);
   const [sentences, setSentences] = useState(DEFAULT_BLIND_SENTENCES);
@@ -299,7 +302,7 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
     for (const clip of clips) if (clip.url) URL.revokeObjectURL(clip.url);
   }, [clips]);
 
-  const lines = useMemo(() => sentences.split('\n').map((s) => s.trim()).filter(Boolean), [sentences]);
+  const lines = useMemo(() => sentences.split('\n').map((s) => s.trim()).filter(Boolean), [sentences, getLocale()]);
 
   const generate = async () => {
     const usable = candidates.filter((c) => c.provider);
@@ -332,11 +335,11 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
     playingRef.current?.pause();
     const el = new Audio(url);
     playingRef.current = el;
-    el.play().catch((err) => showToast(err?.message || 'Playback failed', 'error'));
+    el.play().catch((err) => showToast(err?.message || translate('Playback failed'), 'error'));
   };
 
   const rate = (index: number, rating: number | null) => setClips((prev) => prev.map((c, i) => (i === index ? { ...c, rating } : c)));
-  const summary = useMemo(() => summarizeBlindTest(clips, candidates), [clips, candidates]);
+  const summary = useMemo(() => summarizeBlindTest(clips, candidates), [clips, candidates, getLocale()]);
   const describe = (key: string) => {
     const c = candidates.find((x) => x.key === key);
     return c ? `${c.provider}${c.voice ? ` · ${c.voice}` : ''}${c.model ? ` · ${c.model}` : ''}` : key;
@@ -344,14 +347,11 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
 
   return (
     <Card padding="20px">
-      <div style={sectionTitle}>Text-to-speech blind test</div>
+      <div style={sectionTitle}>{translate('Text-to-speech blind test')}</div>
       <div style={sectionHint}>
-        Every sentence is synthesised by every candidate, then shown only as A / B / C — shuffled again for each
-        sentence, so position gives nothing away. Rate what you hear, then reveal. There is no independent Korean
-        naturalness benchmark, so this is the deciding test.
-      </div>
+        {translate('Every sentence is synthesised by every candidate, then shown only as A / B / C — shuffled again for each sentence, so position gives nothing away. Rate what you hear, then reveal. There is no independent Korean naturalness benchmark, so this is the deciding test.')}</div>
       {providers.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>Add at least one text-to-speech API key above, save, and come back.</div>
+        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>{translate('Add at least one text-to-speech API key above, save, and come back.')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {candidates.map((c) => (
@@ -365,16 +365,15 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
           ))}
           <div>
             <Button variant="ghost" size="sm" onClick={() => setCandidates((prev) => [...prev, { key: newCandidateKey(), provider: providers[0], voice: '', model: '' }])}>
-              + Candidate
-            </Button>
+              {translate('+ Candidate')}</Button>
           </div>
-          <Textarea label="Sentences (one per line)" value={sentences} onChange={(e) => setSentences(e.target.value)} rows={5} />
+          <Textarea label={translate('Sentences (one per line)')} value={sentences} onChange={(e) => setSentences(e.target.value)} rows={5} />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Button variant="primary" size="sm" onClick={() => void generate()} disabled={running || !candidates.length || !lines.length}>
-              {running ? 'Synthesising…' : 'Generate clips'}
+              {running ? translate('Synthesising…') : translate('Generate clips')}
             </Button>
             {clips.length > 0 && (
-              <Button variant="secondary" size="sm" onClick={() => setRevealed((r) => !r)}>{revealed ? 'Hide' : 'Reveal'}</Button>
+              <Button variant="secondary" size="sm" onClick={() => setRevealed((r) => !r)}>{revealed ? translate('Hide') : translate('Reveal')}</Button>
             )}
           </div>
 
@@ -391,7 +390,7 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
                         ▶ {c.label}{c.error ? ' ⚠' : !c.url ? ' …' : ''}
                       </Button>
                       <select
-                        aria-label={`Rating for ${c.label}`}
+                        aria-label={translate('Rating for {0}', { 0: c.label })}
                         value={c.rating ?? ''}
                         onChange={(e) => rate(i, e.target.value ? Number(e.target.value) : null)}
                         style={{ padding: '3px 6px', borderRadius: tokens.radii.sm, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12 }}
@@ -399,7 +398,7 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
                         <option value="">–</option>
                         {[5, 4, 3, 2, 1].map((n) => <option key={n} value={n}>{n}</option>)}
                       </select>
-                      {revealed && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{describe(c.candidateKey)}{c.latencyMs ? ` · ${c.latencyMs} ms` : ''}</span>}
+                      {revealed && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{describe(c.candidateKey)}{c.latencyMs ? translate(' · {0} ms', { 0: c.latencyMs }) : ''}</span>}
                     </div>
                   ))}
                 </div>
@@ -411,10 +410,10 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, marginTop: 6 }}>
               <thead>
                 <tr style={{ color: tokens.colors.textMuted, textAlign: 'left' }}>
-                  <th style={{ padding: '6px 8px' }}>Candidate</th>
-                  <th style={{ padding: '6px 8px' }}>Avg rating</th>
-                  <th style={{ padding: '6px 8px' }}>Avg latency</th>
-                  <th style={{ padding: '6px 8px' }}>Failures</th>
+                  <th style={{ padding: '6px 8px' }}>{translate('Candidate')}</th>
+                  <th style={{ padding: '6px 8px' }}>{translate('Avg rating')}</th>
+                  <th style={{ padding: '6px 8px' }}>{translate('Avg latency')}</th>
+                  <th style={{ padding: '6px 8px' }}>{translate('Failures')}</th>
                   <th />
                 </tr>
               </thead>
@@ -423,13 +422,13 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
                   <tr key={row.candidateKey} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
                     <td style={{ padding: '6px 8px', color: tokens.colors.textPrimary }}>{describe(row.candidateKey)}</td>
                     <td style={{ padding: '6px 8px' }}>{row.averageRating === null ? '—' : `${row.averageRating.toFixed(2)} (${row.rated})`}</td>
-                    <td style={{ padding: '6px 8px' }}>{row.averageLatencyMs === null ? '—' : `${Math.round(row.averageLatencyMs)} ms`}</td>
+                    <td style={{ padding: '6px 8px' }}>{row.averageLatencyMs === null ? '—' : translate('{0} ms', { 0: Math.round(row.averageLatencyMs) })}</td>
                     <td style={{ padding: '6px 8px' }}>{row.failures}</td>
                     <td style={{ padding: '6px 8px', textAlign: 'right' }}>
                       <Button variant="ghost" size="sm" onClick={() => {
                         const c = candidates.find((x) => x.key === row.candidateKey);
                         if (c) onAdopt(c);
-                      }}>Use this voice</Button>
+                      }}>{translate('Use this voice')}</Button>
                     </td>
                   </tr>
                 ))}
@@ -449,6 +448,7 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
  * (그 세션에 지침을 보내야 해서). 여기서는 이름·별칭을 고치고, 장비에서 사라진 세션의 등록을 푼다.
  */
 function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) {
+  useLocale();
   const operators = useVoiceOperators(true);
   const { currentAccountId } = useAuth();
   const { hosts } = useAgentSessionsNav(currentAccountId ?? null);
@@ -457,15 +457,12 @@ function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) 
   const hostName = (id: string) => hosts.find((h) => h.manager_id === id)?.name || id.slice(0, 8);
   return (
     <Card padding="20px">
-      <div style={sectionTitle}>Operators</div>
+      <div style={sectionTitle}>{translate('Operators')}</div>
       <div style={sectionHint}>
-        Agent sessions with a name. Switch on name calling in the sidebar (OPERATORS → 👂) and say "헤이 &lt;name&gt;" or
-        "&lt;name&gt;야" — the operator wakes, keeps listening without its name, and goes back to sleep when it decides the
-        conversation is over. Register one from a session's header (☆ Operator).
-        {wake && !wake.ready && wake.error ? <><br /><span style={{ color: tokens.colors.warningLight }}>{wake.error}</span></> : null}
+        {translate('Agent sessions with a name. Switch on name calling in the sidebar (OPERATORS → 👂) and say "헤이 <name>" or "<name>야" — the operator wakes, keeps listening without its name, and goes back to sleep when it decides the conversation is over. Register one from a session\'s header (☆ Operator).')}{wake && !wake.ready && wake.error ? <><br /><span style={{ color: tokens.colors.warningLight }}>{wake.error}</span></> : null}
       </div>
       {operators.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>No operator yet — open a session and press ☆ Operator.</div>
+        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>{translate('No operator yet — open a session and press ☆ Operator.')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {operators.map((op) => (
@@ -473,13 +470,13 @@ function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) 
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 700, color: tokens.colors.textPrimary }}>🎙 {op.name}</div>
                 <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {op.aliases.length ? `also: ${op.aliases.join(', ')} · ` : ''}{hostName(op.manager_id)} · {runtimeLabel(op.cli)}{op.title ? ` · ${op.title}` : ''}
+                  {op.aliases.length ? translate('also: {0} · ', { 0: op.aliases.join(', ') }) : ''}{hostName(op.manager_id)} · {runtimeLabel(op.cli)}{op.title ? ` · ${op.title}` : ''}
                 </div>
               </div>
               {currentAccountId && (
-                <Button variant="ghost" size="sm" onClick={() => navigate(sessionPath(``, op.manager_id, op.cli, op.session_id))}>Open</Button>
+                <Button variant="ghost" size="sm" onClick={() => navigate(sessionPath(``, op.manager_id, op.cli, op.session_id))}>{translate('Open')}</Button>
               )}
-              <Button variant="secondary" size="sm" onClick={() => setEditing(op)}>Edit</Button>
+              <Button variant="secondary" size="sm" onClick={() => setEditing(op)}>{translate('Edit')}</Button>
             </div>
           ))}
         </div>
@@ -490,6 +487,7 @@ function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) 
 }
 
 export default function VoicePage() {
+  useLocale();
   const { showToast } = useToast();
   const { prefs, setPref } = useNotifications();
   const [values, setValues] = useState<Record<string, string>>({});
@@ -515,7 +513,7 @@ export default function VoicePage() {
       setStatus(config);
       setDirty(false);
     } catch (err: any) {
-      showToast(err?.message || 'Failed to load voice settings', 'error');
+      showToast(err?.message || translate('Failed to load voice settings'), 'error');
     } finally {
       setLoading(false);
     }
@@ -532,16 +530,16 @@ export default function VoicePage() {
     setSaving(true);
     try {
       await api.updateSettings(values);
-      showToast('Voice settings saved.', 'success');
+      showToast(translate('Voice settings saved.'), 'success');
       await load();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to save', 'error');
+      showToast(err?.message || translate('Failed to save'), 'error');
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) return <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Loading…</div>;
+  if (loading) return <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>{translate('Loading…')}</div>;
 
   const field = (key: string, label: string, opts: { secret?: boolean; placeholder?: string } = {}) => (
     <div key={key}>
@@ -560,44 +558,42 @@ export default function VoicePage() {
   return (
     <div style={{ maxWidth: 900, display: 'flex', flexDirection: 'column', gap: 20 }}>
       <Card padding="20px">
-        <div style={sectionTitle}>Engines</div>
+        <div style={sectionTitle}>{translate('Engines')}</div>
         <div style={sectionHint}>
-          Voice input sends your recording to the speech-to-text provider; spoken replies and announcements come from the
-          text-to-speech provider. Keys stay on the server. Pick the providers with the lab below — quality first.
-        </div>
+          {translate('Voice input sends your recording to the speech-to-text provider; spoken replies and announcements come from the text-to-speech provider. Keys stay on the server. Pick the providers with the lab below — quality first.')}</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-          <EngineBadge label="Speech-to-text:" status={status?.stt} />
-          <EngineBadge label="Text-to-speech:" status={status?.tts} />
+          <EngineBadge label={translate('Speech-to-text:')} status={status?.stt} />
+          <EngineBadge label={translate('Text-to-speech:')} status={status?.tts} />
         </div>
         <div style={grid2}>
-          <Select label="Speech-to-text provider" value={values['voice.stt.provider'] || 'none'} options={STT_OPTIONS} onChange={(e) => set('voice.stt.provider', e.target.value)} />
-          {field('voice.stt.model', 'STT model', { placeholder: 'provider default' })}
-          <Select label="Text-to-speech provider" value={values['voice.tts.provider'] || 'none'} options={TTS_OPTIONS} onChange={(e) => set('voice.tts.provider', e.target.value)} />
-          {field('voice.tts.voice', 'TTS voice')}
-          {field('voice.tts.model', 'TTS model', { placeholder: 'provider default' })}
-          {field('voice.stt.languages', 'Languages')}
+          <Select label={translate('Speech-to-text provider')} value={values['voice.stt.provider'] || 'none'} options={STT_OPTIONS} onChange={(e) => set('voice.stt.provider', e.target.value)} />
+          {field('voice.stt.model', translate('STT model'), { placeholder: translate('provider default') })}
+          <Select label={translate('Text-to-speech provider')} value={values['voice.tts.provider'] || 'none'} options={TTS_OPTIONS} onChange={(e) => set('voice.tts.provider', e.target.value)} />
+          {field('voice.tts.voice', translate('TTS voice'))}
+          {field('voice.tts.model', translate('TTS model'), { placeholder: translate('provider default') })}
+          {field('voice.stt.languages', translate('Languages'))}
         </div>
-        <div style={{ marginTop: 12 }}>{field('voice.stt.terms', 'Vocabulary (comma-separated)')}</div>
-        <div style={{ ...sectionTitle, fontSize: 13, marginTop: 20 }}>Provider keys</div>
+        <div style={{ marginTop: 12 }}>{field('voice.stt.terms', translate('Vocabulary (comma-separated)'))}</div>
+        <div style={{ ...sectionTitle, fontSize: 13, marginTop: 20 }}>{translate('Provider keys')}</div>
         <div style={grid2}>
           {PROVIDER_KEYS.map(({ key, label }) => field(key, label, { secret: key.endsWith('.api_key') }))}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-          <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving}>{saving ? 'Saving…' : 'Save'}</Button>
+          <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving}>{saving ? translate('Saving…') : translate('Save')}</Button>
         </div>
       </Card>
 
       <OperatorsCard wake={status?.wake} />
 
       <Card padding="20px">
-        <div style={sectionTitle}>Work update sound</div>
-        <div style={sectionHint}>After the cue, the operator listens for 15 seconds. Say "보고해" or "Tell me what happened" without its name. Requires microphone permission; persistent name calling can stay off. These choices apply to this browser.</div>
+        <div style={sectionTitle}>{translate('Work update sound')}</div>
+        <div style={sectionHint}>{translate('After the cue, the operator listens for 15 seconds. Say "보고해" or "Tell me what happened" without its name. Requires microphone permission; persistent name calling can stay off. These choices apply to this browser.')}</div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
-          <Select label="Notification sound" value={prefs.workSound} options={NOTIFICATION_SOUNDS.map((s) => ({ value: s.value, label: s.label }))} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)} />
-          <Button size="sm" variant="ghost" onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>Preview</Button>
-          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.voice} onChange={(e) => setPref('voice', e.target.checked)} /> Work updates</label>
-          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.audio} onChange={(e) => setPref('audio', e.target.checked)} /> Audio cues</label>
-          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.listenAfterWorkSound} onChange={(e) => setPref('listenAfterWorkSound', e.target.checked)} /> Open operator and microphone on notification</label>
+          <Select label={translate('Notification sound')} value={prefs.workSound} options={NOTIFICATION_SOUNDS.map((s) => ({ value: s.value, label: s.label }))} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)} />
+          <Button size="sm" variant="ghost" onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>{translate('Preview')}</Button>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.voice} onChange={(e) => setPref('voice', e.target.checked)} /> {translate('Work updates')}</label>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.audio} onChange={(e) => setPref('audio', e.target.checked)} /> {translate('Audio cues')}</label>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.listenAfterWorkSound} onChange={(e) => setPref('listenAfterWorkSound', e.target.checked)} /> {translate('Open operator and microphone on notification')}</label>
         </div>
       </Card>
 
@@ -605,7 +601,7 @@ export default function VoicePage() {
 
       <SttLab providers={status?.lab?.stt ?? []} onAdopt={(provider, model) => {
         set('voice.stt.provider', provider); set('voice.stt.model', model);
-        showToast('Filled in the speech-to-text settings — Save to apply.', 'info');
+        showToast(translate('Filled in the speech-to-text settings — Save to apply.'), 'info');
       }} />
 
       <TtsBlindTest
@@ -615,7 +611,7 @@ export default function VoicePage() {
           set('voice.tts.provider', c.provider);
           set('voice.tts.voice', c.voice);
           set('voice.tts.model', c.model);
-          showToast('Filled in the engine settings — Save to apply.', 'info');
+          showToast(translate('Filled in the engine settings — Save to apply.'), 'info');
         }}
       />
     </div>

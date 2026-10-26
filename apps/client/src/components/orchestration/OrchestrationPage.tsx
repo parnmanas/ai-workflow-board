@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -53,6 +55,7 @@ import TeamSlotRuntimeFields, {
  * the detail view, which refetches on the same signal.
  */
 export default function OrchestrationPage() {
+  useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
   const navigate = useNavigate();
@@ -75,7 +78,7 @@ export default function OrchestrationPage() {
       setMissions(missionList);
       setTeams(teamList);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to load missions', 'error');
+      showToast(e?.message || translate('Failed to load missions'), 'error');
     } finally {
       setLoading(false);
     }
@@ -121,7 +124,7 @@ export default function OrchestrationPage() {
       filter === 'active'
         ? missions.filter((m) => !['completed', 'failed', 'cancelled'].includes(m.status))
         : missions,
-    [missions, filter],
+    [missions, filter, getLocale()],
   );
 
   return (
@@ -129,40 +132,39 @@ export default function OrchestrationPage() {
       {/* 진행 중 step 점의 맥박. MissionDetailPage 와 같은 이름/정의를 쓴다 — 여기에
           없으면 목록 카드의 점만 조용히 정적으로 굳는다(애니메이션은 실패해도 조용하다). */}
       <PageHeader
-        title="Missions"
-        description="Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back."
+        title={translate('Missions')}
+        description={translate('Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back.')}
         actions={
           <>
             <Select
-              aria-label="Filter missions"
+              aria-label={translate('Filter missions')}
               options={[
-                { value: 'all', label: 'All missions' },
-                { value: 'active', label: 'Active only' },
+                { value: 'all', label: translate('All missions') },
+                { value: 'active', label: translate('Active only') },
               ]}
               value={filter}
               onChange={(e) => setFilter(e.target.value as 'all' | 'active')}
             />
             <Button variant="primary" onClick={() => setShowCreate(true)} disabled={teams.length === 0}>
-              New mission
-            </Button>
+              {translate('New mission')}</Button>
           </>
         }
       />
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {loading ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading missions...</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Loading missions...')}</div>
         ) : teams.length === 0 ? (
           <EmptyState
-            title="No teams yet"
-            description="A mission runs on a team: one orchestrator agent that plans, plus the members it delegates to. Create a team first."
-            action={<Button variant="primary" onClick={() => navigate(`/teams`)}>Create a team</Button>}
+            title={translate('No teams yet')}
+            description={translate('A mission runs on a team: one orchestrator agent that plans, plus the members it delegates to. Create a team first.')}
+            action={<Button variant="primary" onClick={() => navigate(`/teams`)}>{translate('Create a team')}</Button>}
           />
         ) : visible.length === 0 ? (
           <EmptyState
-            title={filter === 'active' ? 'No active missions' : 'No missions yet'}
-            description="Describe a task and pick a team — the orchestrator breaks it into steps and assigns them itself."
-            action={<Button variant="primary" onClick={() => setShowCreate(true)}>New mission</Button>}
+            title={filter === 'active' ? translate('No active missions') : translate('No missions yet')}
+            description={translate('Describe a task and pick a team — the orchestrator breaks it into steps and assigns them itself.')}
+            action={<Button variant="primary" onClick={() => setShowCreate(true)}>{translate('New mission')}</Button>}
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -203,6 +205,7 @@ export function MissionRow({
   mission: OrchestrationMissionListItem;
   onOpen: () => void;
 }) {
+  useLocale();
   const style = missionStyle(mission.status);
   const pct = progressPercent(mission.counts);
   // 구 서버 응답(필드 없음)에서는 조용히 빈 목록 — 카드가 깨지지 않는다.
@@ -244,30 +247,29 @@ export function MissionRow({
         <span style={{ fontSize: 14, fontWeight: 600, flex: 1, minWidth: 0 }}>{mission.title}</span>
         <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
           {mission.finished_at
-            ? `finished ${relativeTime(mission.finished_at)}`
+            ? translate('finished {0}', { 0: relativeTime(mission.finished_at) })
             : mission.started_at
-              ? `started ${relativeTime(mission.started_at)}`
-              : `created ${relativeTime(mission.created_at)}`}
+              ? translate('started {0}', { 0: relativeTime(mission.started_at) })
+              : translate('created {0}', { 0: relativeTime(mission.created_at) })}
         </span>
       </div>
 
       <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, fontSize: 11, color: tokens.colors.textSecondary }}>
         <span>
-          Team <strong style={{ color: tokens.colors.textStrong }}>{mission.team_name}</strong>
+          {translate('Team')} <strong style={{ color: tokens.colors.textStrong }}>{mission.team_name}</strong>
         </span>
-        {mission.orchestrator_name && <span>Orchestrator {mission.orchestrator_name}</span>}
-        {mission.plan_version > 0 && <span>Plan v{mission.plan_version}</span>}
+        {mission.orchestrator_name && <span>{translate('Orchestrator')} {mission.orchestrator_name}</span>}
+        {mission.plan_version > 0 && <span>{translate('Plan v')}{mission.plan_version}</span>}
         <span style={{ marginLeft: 'auto' }}>
-          {mission.counts.done}/{mission.counts.total} steps
-          {mission.counts.inFlight > 0 && ` · ${mission.counts.inFlight} working`}
+          {mission.counts.done}/{mission.counts.total} {translate('steps')}{mission.counts.inFlight > 0 && translate(' · {0} working', { 0: mission.counts.inFlight })}
           {/* 목록에서도 보여야 한다 — 이 미션은 사람이 열어서 답하기 전에는 절대
               스스로 진행되지 않으므로, 카드가 조용한 것과 구분되지 않으면 방치된다. */}
           {mission.counts.awaitingUser > 0 && (
             <span style={{ color: tokens.colors.warningLight }}>
-              {` · ${mission.counts.awaitingUser} needs your decision`}
+              {translate(' · {0} needs your decision', { 0: mission.counts.awaitingUser })}
             </span>
           )}
-          {mission.counts.failed > 0 && ` · ${mission.counts.failed} failed`}
+          {mission.counts.failed > 0 && translate(' · {0} failed', { 0: mission.counts.failed })}
         </span>
       </div>
 
@@ -319,9 +321,9 @@ export function MissionRow({
                 {quietFor !== null && (
                   <span
                     style={{ marginLeft: 'auto', flexShrink: 0, color: tokens.colors.textMuted }}
-                    title="이 step 의 마지막 생존 신호 이후 경과 시간 (에이전트의 진행 보고 기준)"
+                    title={translate('이 step 의 마지막 생존 신호 이후 경과 시간 (에이전트의 진행 보고 기준)')}
                   >
-                    quiet {shortDuration(quietFor)}
+                    {translate('quiet')} {shortDuration(quietFor)}
                   </span>
                 )}
               </div>
@@ -354,6 +356,7 @@ export function MissionFormModal({
   onClose: () => void;
   onSaved: (mission: OrchestrationMissionDetail) => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [title, setTitle] = useState('');
   const [teamId, setTeamId] = useState('');
@@ -442,7 +445,7 @@ export function MissionFormModal({
   // 남긴다(다른 계정의 project 는 서버가 "not found in this mission's account" 로 거부한다).
   const accountProjects = useMemo(
     () => listedProjects.filter((p) => p.account_id === projectAccountId),
-    [listedProjects, projectAccountId],
+    [listedProjects, projectAccountId, getLocale()],
   );
 
   // 팀이 바뀌면 제외 목록에서 더 이상 그 팀에 없는 id 는 걷어낸다 — 다른 팀의
@@ -488,15 +491,15 @@ export function MissionFormModal({
     const orchestrator: CoverageSlot | null = selectedTeam?.orchestrator_runtime
       ? {
           key: 'orchestrator',
-          label: selectedTeam.orchestrator_name || 'orchestrator',
+          label: selectedTeam.orchestrator_name || translate('orchestrator'),
           host_ids: [selectedTeam.orchestrator_runtime.manager_agent_id],
         }
       : null;
     return { orchestrator, members };
-  }, [selectedTeam, excludedIds, extraMembers]);
+  }, [selectedTeam, excludedIds, extraMembers, getLocale()]);
   const startProblems = useMemo(
     () => missionStartProblems({ projects: accountProjects, selected: projectDrafts, ...coverageSlots }),
-    [accountProjects, projectDrafts, coverageSlots],
+    [accountProjects, projectDrafts, coverageSlots, getLocale()],
   );
 
   // 폼 안에서 바로 "이 Host 의 이 project 폴더" 를 등록한다 — 등록은 Projects 화면과 같은
@@ -509,9 +512,9 @@ export function MissionFormModal({
     try {
       await api.setProjectHostFolder(target.project.id, target.hostId, path);
       notifyProjectsChanged();
-      showToast(`${target.project.name}: folder set on this host`, 'success');
+      showToast(translate('{0}: folder set on this host', { 0: target.project.name }), 'success');
     } catch (e: any) {
-      showToast(e?.message || 'Failed to set the project folder', 'error');
+      showToast(e?.message || translate('Failed to set the project folder'), 'error');
     }
   };
 
@@ -538,11 +541,11 @@ export function MissionFormModal({
 
   const submit = async () => {
     if (!title.trim() || !objective.trim() || !teamId) {
-      showToast('Title, objective and team are required', 'error');
+      showToast(translate('Title, objective and team are required'), 'error');
       return;
     }
     if (selectedTeam && selectedTeam.members.length > 0 && includedCount === 0) {
-      showToast('All members are excluded — include at least one member or add an ad-hoc member', 'error');
+      showToast(translate('All members are excluded — include at least one member or add an ad-hoc member'), 'error');
       return;
     }
     // 시작까지 하는 생성만 막는다 — draft 저장은 project 를 나중에 채워도 된다.
@@ -604,16 +607,16 @@ export function MissionFormModal({
             start: startNow,
           });
       if (!mission && saved.start_error) {
-        showToast(`Mission created but not started: ${saved.start_error}`, 'error');
+        showToast(translate('Mission created but not started: {0}', { 0: saved.start_error }), 'error');
       } else {
-        showToast(mission ? 'Mission updated' : startNow ? 'Mission briefed to the orchestrator' : 'Mission saved as a draft', 'success');
+        showToast(mission ? translate('Mission updated') : startNow ? translate('Mission briefed to the orchestrator') : translate('Mission saved as a draft'), 'success');
       }
       // 사이드바 WORK > Orchestrations 서브메뉴가 같은 목록을 그린다(티켓 03ca8b5b).
       // 생성/이름변경 모두 이 한 곳을 지나므로 여기서 방송한다.
       window.dispatchEvent(new CustomEvent(MISSIONS_CHANGED_EVENT));
       onSaved(saved);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to save mission', 'error');
+      showToast(e?.message || translate('Failed to save mission'), 'error');
     } finally {
       setSaving(false);
     }
@@ -623,38 +626,36 @@ export function MissionFormModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title={mission ? 'Edit mission' : 'New mission'}
+      title={mission ? translate('Edit mission') : translate('New mission')}
       maxWidth={640}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
+            {translate('Cancel')}</Button>
           <Button variant="primary" onClick={submit} loading={saving}>
-            {mission ? 'Save' : startNow ? 'Create & brief orchestrator' : 'Save draft'}
+            {mission ? translate('Save') : startNow ? translate('Create & brief orchestrator') : translate('Save draft')}
           </Button>
         </>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <Input label="Title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ship the billing export" />
+        <Input label={translate('Title')} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={translate('Ship the billing export')} />
 
         <Select
-          label="Team"
+          label={translate('Team')}
           disabled={!!mission}
           options={teams.map((t) => ({
             value: t.id,
             label:
-              `${t.name} — ${t.orchestrator_name || 'no orchestrator'} + ${t.members.length} member(s)` +
-              (t.enabled ? '' : ' (disabled)'),
+              translate('{0} — {1} + {2} member(s)', { 0: t.name, 1: t.orchestrator_name || translate('no orchestrator'), 2: t.members.length }) +
+              (t.enabled ? '' : translate(' (disabled)')),
           }))}
           value={teamId}
           onChange={(e) => handleTeamChange(e.target.value)}
         />
         {selectedTeam && selectedTeam.members.length === 0 && extraMembers.length === 0 && (
           <div style={{ fontSize: 11, color: tokens.colors.warningLight }}>
-            This team has no members — add an ad-hoc member below so the orchestrator has somebody to delegate to.
-          </div>
+            {translate('This team has no members — add an ad-hoc member below so the orchestrator has somebody to delegate to.')}</div>
         )}
 
         <MissionProjectsSection
@@ -730,23 +731,23 @@ export function MissionFormModal({
         )}
 
         <LabeledTextarea
-          label="Objective"
-          hint="What must be achieved. The orchestrator plans directly from this, so be concrete about scope."
+          label={translate('Objective')}
+          hint={translate('What must be achieved. The orchestrator plans directly from this, so be concrete about scope.')}
           value={objective}
           onChange={setObjective}
           rows={5}
-          placeholder="Add a CSV export of monthly invoices to the billing page, behind the existing feature flag."
+          placeholder={translate('Add a CSV export of monthly invoices to the billing page, behind the existing feature flag.')}
         />
         <LabeledTextarea
-          label="Context (optional)"
-          hint="Background, links, prior art, constraints."
+          label={translate('Context (optional)')}
+          hint={translate('Background, links, prior art, constraints.')}
           value={context}
           onChange={setContext}
           rows={3}
         />
         <LabeledTextarea
-          label="Acceptance criteria (optional)"
-          hint="How the orchestrator decides the mission is finished. It is told to verify these before completing."
+          label={translate('Acceptance criteria (optional)')}
+          hint={translate('How the orchestrator decides the mission is finished. It is told to verify these before completing.')}
           value={criteria}
           onChange={setCriteria}
           rows={3}
@@ -766,14 +767,13 @@ export function MissionFormModal({
             padding: 0,
           }}
         >
-          {showAdvanced ? '▾' : '▸'} Advanced — execution contract
-        </button>
+          {showAdvanced ? '▾' : '▸'} {translate('Advanced — execution contract')}</button>
 
         {showAdvanced && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingLeft: 4, borderLeft: `2px solid ${tokens.colors.border}` }}>
             <LabeledTextarea
-              label="Method (optional)"
-              hint="How the team should approach it — constraints, non-negotiables, preferred approach. Separate from the objective (what)."
+              label={translate('Method (optional)')}
+              hint={translate('How the team should approach it — constraints, non-negotiables, preferred approach. Separate from the objective (what).')}
               value={method}
               onChange={setMethod}
               rows={2}
@@ -790,29 +790,27 @@ export function MissionFormModal({
                   checked={graphEnabled}
                   onChange={(e) => setGraphEnabled(e.target.checked)}
                 />
-                Execution graph — let the orchestrator use conditional branches, join policies and bounded loops
-              </label>
+                {translate('Execution graph — let the orchestrator use conditional branches, join policies and bounded loops')}</label>
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
-                Off (default) runs the plain dependency plan. Required for user confirmation gates.
-              </div>
+                {translate('Off (default) runs the plain dependency plan. Required for user confirmation gates.')}</div>
             </div>
 
             <div>
               <Select
-                label="User confirmation"
+                label={translate('User confirmation')}
                 options={[
-                  { value: 'none', label: 'None — never ask, run straight through' },
-                  { value: 'auto', label: 'Auto — the orchestrator decides where a person should look' },
-                  { value: 'key_steps', label: 'Key steps — before each deliverable and anything outward-facing' },
-                  { value: 'every_step', label: 'Every step — ask after each reviewable result' },
+                  { value: 'none', label: translate('None — never ask, run straight through') },
+                  { value: 'auto', label: translate('Auto — the orchestrator decides where a person should look') },
+                  { value: 'key_steps', label: translate('Key steps — before each deliverable and anything outward-facing') },
+                  { value: 'every_step', label: translate('Every step — ask after each reviewable result') },
                 ]}
                 value={confirmPolicy}
                 onChange={(e) => setConfirmPolicy(e.target.value as OrchestrationConfirmPolicy)}
               />
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
                 {graphEnabled
-                  ? 'The mission pauses at each gate until you answer Pass or Fail in the mission page. It does not time out.'
-                  : 'Turn on the execution graph above for this to have any effect — confirmation gates only exist in graph mode.'}
+                  ? translate('The mission pauses at each gate until you answer Pass or Fail in the mission page. It does not time out.')
+                  : translate('Turn on the execution graph above for this to have any effect — confirmation gates only exist in graph mode.')}
               </div>
             </div>
 
@@ -827,35 +825,29 @@ export function MissionFormModal({
             */}
             <div>
               <Select
-                label="User chat"
+                label={translate('User chat')}
                 options={[
-                  { value: 'open', label: 'Open — any operator here can join the conversation and speak' },
-                  { value: 'participants_only', label: 'Participants only — only people added to the room can speak' },
-                  { value: 'off', label: 'Off — read-only, nobody can send messages' },
+                  { value: 'open', label: translate('Open — any operator here can join the conversation and speak') },
+                  { value: 'participants_only', label: translate('Participants only — only people added to the room can speak') },
+                  { value: 'off', label: translate('Off — read-only, nobody can send messages') },
                 ]}
                 value={userChatMode}
                 onChange={(e) => setUserChatMode(e.target.value as OrchestrationUserChatMode)}
               />
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
-                Controls who can talk to the orchestrator in the mission conversation. Reading the transcript
-                is always allowed. Speaking also requires the Manage Actions permission — this option does not
-                grant it. You can change this later while the mission runs.
-              </div>
+                {translate('Controls who can talk to the orchestrator in the mission conversation. Reading the transcript is always allowed. Speaking also requires the Manage Actions permission — this option does not grant it. You can change this later while the mission runs.')}</div>
             </div>
             <div>
               <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
-                Structured completion criteria (optional)
-              </span>
+                {translate('Structured completion criteria (optional)')}</span>
               <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
-                On top of the acceptance-criteria prose above — when set, the mission cannot be marked "completed"
-                until the orchestrator has flipped every one of these to met.
-              </span>
+                {translate('On top of the acceptance-criteria prose above — when set, the mission cannot be marked "completed" until the orchestrator has flipped every one of these to met.')}</span>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {completionCriteria.map((c, i) => (
                   <div key={i} style={{ display: 'flex', gap: 6 }}>
                     <input
                       value={c.key}
-                      placeholder="key, e.g. tests-pass"
+                      placeholder={translate('key, e.g. tests-pass')}
                       onChange={(e) => {
                         const next = [...completionCriteria];
                         next[i] = { ...next[i], key: e.target.value };
@@ -865,7 +857,7 @@ export function MissionFormModal({
                     />
                     <input
                       value={c.description}
-                      placeholder="Description — how it's verified"
+                      placeholder={translate('Description — how it\'s verified')}
                       onChange={(e) => {
                         const next = [...completionCriteria];
                         next[i] = { ...next[i], description: e.target.value };
@@ -874,8 +866,7 @@ export function MissionFormModal({
                       style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
                     />
                     <Button variant="ghost" size="sm" onClick={() => setCompletionCriteria(completionCriteria.filter((_, j) => j !== i))}>
-                      Remove
-                    </Button>
+                      {translate('Remove')}</Button>
                   </div>
                 ))}
                 <Button
@@ -883,18 +874,14 @@ export function MissionFormModal({
                   size="sm"
                   onClick={() => setCompletionCriteria([...completionCriteria, { key: '', description: '' }])}
                 >
-                  + Add criterion
-                </Button>
+                  {translate('+ Add criterion')}</Button>
               </div>
             </div>
             <div>
               <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
-                Post-completion actions (optional)
-              </span>
+                {translate('Post-completion actions (optional)')}</span>
               <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
-                Actions to dispatch once the mission ends. Fire-and-forget — a dispatch failure is recorded but never
-                changes the mission's own outcome.
-              </span>
+                {translate('Actions to dispatch once the mission ends. Fire-and-forget — a dispatch failure is recorded but never changes the mission\'s own outcome.')}</span>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {postActions.map((p, i) => (
                   <div key={i} style={{ display: 'flex', gap: 6 }}>
@@ -907,7 +894,7 @@ export function MissionFormModal({
                       }}
                       style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
                     >
-                      <option value="">Select an action…</option>
+                      <option value="">{translate('Select an action…')}</option>
                       {actions.map((a) => (
                         <option key={a.id} value={a.id}>
                           {a.name}
@@ -923,13 +910,12 @@ export function MissionFormModal({
                       }}
                       style={{ width: 130, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
                     >
-                      <option value="always">always</option>
+                      <option value="always">{translate('always')}</option>
                       <option value="on_success">on_success</option>
                       <option value="on_failure">on_failure</option>
                     </select>
                     <Button variant="ghost" size="sm" onClick={() => setPostActions(postActions.filter((_, j) => j !== i))}>
-                      Remove
-                    </Button>
+                      {translate('Remove')}</Button>
                   </div>
                 ))}
                 <Button
@@ -937,8 +923,7 @@ export function MissionFormModal({
                   size="sm"
                   onClick={() => setPostActions([...postActions, { action_id: '', order: postActions.length, condition: 'always' }])}
                 >
-                  + Add post-action
-                </Button>
+                  {translate('+ Add post-action')}</Button>
               </div>
             </div>
           </div>
@@ -947,8 +932,7 @@ export function MissionFormModal({
         {!mission && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
             <input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} />
-            Brief the orchestrator immediately
-          </label>
+            {translate('Brief the orchestrator immediately')}</label>
         )}
         {!mission && startNow && startProblems.length > 0 && (
           <div data-testid="mission-start-problems" style={{ fontSize: 11, color: tokens.colors.warningLight, lineHeight: 1.5 }}>
@@ -996,6 +980,7 @@ function MissionProjectsSection({
   checkoutMode: 'reuse' | 'fresh';
   onCheckoutModeChange(next: 'reuse' | 'fresh'): void;
 }) {
+  useLocale();
   const byId = new Map(projects.map((p) => [p.id, p]));
   const addable = projects.filter((p) => !selected.some((s) => s.project_id === p.id));
   return (
@@ -1004,17 +989,15 @@ function MissionProjectsSection({
       style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}
     >
       <div>
-        <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}>Projects</span>
+        <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}>{translate('Projects')}</span>
         <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.4 }}>
-          Where this mission works. Each member works in a project&apos;s folder on its own host; the orchestrator
-          assigns every step to one project. The first one is the primary.
-        </span>
+          {translate('Where this mission works. Each member works in a project\'s folder on its own host; the orchestrator assigns every step to one project. The first one is the primary.')}</span>
       </div>
       {selected.length === 0 && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-          {loading ? 'Loading projects…' : projects.length === 0
-            ? 'This account has no projects yet — create one on the Projects page first.'
-            : 'No project selected.'}
+          {loading ? translate('Loading projects…') : projects.length === 0
+            ? translate('This account has no projects yet — create one on the Projects page first.')
+            : translate('No project selected.')}
         </div>
       )}
       {selected.map((p, i) => {
@@ -1024,73 +1007,66 @@ function MissionProjectsSection({
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={{ display: 'block', color: tokens.colors.textStrong }}>
                 {project?.name ?? p.project_id}
-                {i === 0 && <span style={{ color: tokens.colors.textMuted }}> · primary</span>}
+                {i === 0 && <span style={{ color: tokens.colors.textMuted }}> {translate('· primary')}</span>}
               </span>
               {project?.repo_url && (
                 <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>{project.repo_url}</span>
               )}
             </span>
             <input
-              aria-label={`Branch for ${project?.name ?? p.project_id}`}
+              aria-label={translate('Branch for {0}', { 0: project?.name ?? p.project_id })}
               value={p.branch}
-              placeholder={project?.default_branch ? `branch (${project.default_branch})` : 'branch (default)'}
+              placeholder={project?.default_branch ? translate('branch ({0})', { 0: project.default_branch }) : translate('branch (default)')}
               onChange={(e) => onChange(selected.map((x) => (x.project_id === p.project_id ? { ...x, branch: e.target.value } : x)))}
               style={{ width: 150, padding: '6px 8px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
             />
             {i > 0 && (
               <Button variant="ghost" size="sm" onClick={() => onChange(makePrimaryProject(selected, p.project_id))}>
-                Make primary
-              </Button>
+                {translate('Make primary')}</Button>
             )}
             <Button variant="ghost" size="sm" onClick={() => onChange(selected.filter((x) => x.project_id !== p.project_id))}>
-              Remove
-            </Button>
+              {translate('Remove')}</Button>
           </div>
         );
       })}
       {addable.length > 0 && (
         <Select
-          aria-label="Add a project"
+          aria-label={translate('Add a project')}
           value=""
           options={[
-            { value: '', label: selected.length ? '+ Add another project' : 'Select a project' },
+            { value: '', label: selected.length ? translate('+ Add another project') : translate('Select a project') },
             ...addable.map((p) => ({ value: p.id, label: p.repo_url ? `${p.name} · ${p.repo_url}` : p.name })),
           ]}
           onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange(addMissionProject(selected, e.target.value))}
         />
       )}
       <Select
-        label="Folders"
+        label={translate('Folders')}
         value={folderScope}
         options={[
-          { value: 'shared', label: 'Shared — steps run directly in the project folder' },
-          { value: 'isolated', label: 'Isolated — each step gets its own checkout' },
+          { value: 'shared', label: translate('Shared — steps run directly in the project folder') },
+          { value: 'isolated', label: translate('Isolated — each step gets its own checkout') },
         ]}
         onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onFolderScopeChange(e.target.value as OrchestrationFolderScope)}
       />
       {folderScope === 'shared' ? (
         <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
-          Members on one host share the project&apos;s checkout and can hand files to each other. Nothing is cloned
-          or wiped — the folder must already hold the checkout. Another shared mission already working in the same
-          folder blocks this one from starting.
-        </span>
+          {translate('Members on one host share the project\'s checkout and can hand files to each other. Nothing is cloned or wiped — the folder must already hold the checkout. Another shared mission already working in the same folder blocks this one from starting.')}</span>
       ) : (
         <>
           <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
-            Each step gets a fresh <code>.awb/orch/&lt;mission&gt;/&lt;step&gt;</code> checkout of its project under the
-            project folder. Steps cannot see each other&apos;s files — results travel through reports and artifacts.
-          </span>
+            {translate('Each step gets a fresh')} <code>.awb/orch/&lt;mission&gt;/&lt;step&gt;</code> {translate('checkout of its project under the project folder. Steps cannot see each other\'s files — results travel through reports and artifacts.')}</span>
           <Input
-            label="Checkout root (optional)"
+            label={translate('Checkout root (optional)')}
             value={workspaceFolder}
             onChange={(e) => onWorkspaceFolderChange(e.target.value)}
-            placeholder=".awb/orch/<mission id> (default)"
+            placeholder={translate('.awb/orch/<mission id> (default)')}
           />
           <Select
-            label="Checkout mode"
+            label={translate('Checkout mode')}
             options={[
-              { value: 'reuse', label: 'Reuse — fetch + fast-forward before each step' },
-              { value: 'fresh', label: 'Fresh — wipe + re-checkout before each step' },
+              { value: 'reuse', label: translate('Reuse — fetch + fast-forward before each step') },
+              { value: 'fresh', label: translate('Fresh — wipe + re-checkout before each step') },
             ]}
             value={checkoutMode}
             onChange={(e) => onCheckoutModeChange(e.target.value as 'reuse' | 'fresh')}
@@ -1116,6 +1092,7 @@ function SlotProjectFolders({
   slot: CoverageSlot;
   onSetFolder(project: Project, hostId: string): void;
 }) {
+  useLocale();
   if (selectedProjects.length === 0) return null;
   const coverage = slotCoverage(projects, selectedProjects, slot);
   return (
@@ -1129,8 +1106,7 @@ function SlotProjectFolders({
           </span>
         ) : (
           <span key={f.project_id} style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'flex', alignItems: 'center', gap: 6 }}>
-            ✗ {name} — no folder on this host
-            {project && (
+            ✗ {name} {translate('— no folder on this host')}{project && (
               <button
                 type="button"
                 onClick={(e) => {
@@ -1139,16 +1115,14 @@ function SlotProjectFolders({
                 }}
                 style={{ border: 'none', background: 'transparent', color: tokens.colors.accentSubtle, cursor: 'pointer', fontSize: 11, padding: 0, fontFamily: 'inherit' }}
               >
-                Set folder…
-              </button>
+                {translate('Set folder…')}</button>
             )}
           </span>
         );
       })}
       {!coverage.workable && (
         <span style={{ fontSize: 11, color: tokens.colors.warningLight }}>
-          Cannot work on any selected project — set a folder, or leave this member out.
-        </span>
+          {translate('Cannot work on any selected project — set a folder, or leave this member out.')}</span>
       )}
     </span>
   );
@@ -1213,6 +1187,7 @@ function MissionRosterAdjust({
   onAdHocMaxConcurrentChange(v: number): void;
   onAddAdHoc(): void;
 }) {
+  useLocale();
   const included = team.members.filter((m) => !excludedIds.includes(m.id));
   const adHocProblem = showAdHocForm ? slotDraftProblem(adHocDraft) : null;
   const slotFor = (key: string) => coverage.members.find((c) => c.key === key) ?? null;
@@ -1229,25 +1204,21 @@ function MissionRosterAdjust({
     >
       <div>
         <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}>
-          Members for this mission — {included.length + extraMembers.length} of {team.members.length + extraMembers.length} participating
-        </span>
+          {translate('Members for this mission —')} {included.length + extraMembers.length} {translate('of')} {team.members.length + extraMembers.length} {translate('participating')}</span>
         <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.4 }}>
-          Uncheck a member to exclude it from this mission only (e.g. a model on usage limit).
-          The team itself is unchanged — the next mission still sees everybody.
-        </span>
+          {translate('Uncheck a member to exclude it from this mission only (e.g. a model on usage limit). The team itself is unchanged — the next mission still sees everybody.')}</span>
       </div>
       {coverage.orchestrator && (
         <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
           <span style={{ display: 'block', color: tokens.colors.textStrong }}>
-            {coverage.orchestrator.label} <span style={{ color: tokens.colors.textMuted }}>· orchestrator</span>
+            {coverage.orchestrator.label} <span style={{ color: tokens.colors.textMuted }}>{translate('· orchestrator')}</span>
           </span>
           <SlotProjectFolders projects={projects} selectedProjects={selectedProjects} slot={coverage.orchestrator} onSetFolder={onSetFolder} />
         </div>
       )}
       {team.members.length === 0 && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-          No team members to choose from.
-        </div>
+          {translate('No team members to choose from.')}</div>
       )}
       {team.members.map((m) => {
         const excluded = excludedIds.includes(m.id);
@@ -1279,7 +1250,7 @@ function MissionRosterAdjust({
             <span style={{ minWidth: 0 }}>
               <span style={{ display: 'block', color: tokens.colors.textStrong, textDecoration: excluded ? 'line-through' : 'none' }}>
                 {m.agent_name}
-                {!m.is_online && <span style={{ color: tokens.colors.textMuted }}> (offline)</span>}
+                {!m.is_online && <span style={{ color: tokens.colors.textMuted }}> {translate('(offline)')}</span>}
               </span>
               {detail && (
                 <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted }}>{detail}</span>
@@ -1294,7 +1265,7 @@ function MissionRosterAdjust({
       {extraMembers.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textStrong }}>
-            Ad-hoc members for this mission ({extraMembers.length})
+            {translate('Ad-hoc members for this mission (')}{extraMembers.length})
           </span>
           {extraMembers.map((e, i) => {
             const slot = slotFor(`extra:${i}`);
@@ -1324,8 +1295,7 @@ function MissionRosterAdjust({
                   )}
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => onRemoveExtra(i)}>
-                  Remove
-                </Button>
+                  {translate('Remove')}</Button>
               </div>
             );
           })}
@@ -1333,29 +1303,26 @@ function MissionRosterAdjust({
       )}
       {!showAdHocForm ? (
         <Button variant="secondary" size="sm" onClick={onToggleAdHocForm}>
-          + Add ad-hoc member for this mission
-        </Button>
+          {translate('+ Add ad-hoc member for this mission')}</Button>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
           <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.4 }}>
-            A slot used only by this mission — it is not added to the team.
-            Seed from the orchestrator; usually only the model needs changing.
-          </span>
+            {translate('A slot used only by this mission — it is not added to the team. Seed from the orchestrator; usually only the model needs changing.')}</span>
           <Input
-            label="Role label"
+            label={translate('Role label')}
             value={adHocRole}
             onChange={(e) => onAdHocRoleChange(e.target.value)}
-            placeholder="backend / reviewer / researcher"
+            placeholder={translate('backend / reviewer / researcher')}
           />
           <LabeledTextarea
-            label="Capabilities"
-            hint="The orchestrator reads this verbatim when deciding who gets which step."
+            label={translate('Capabilities')}
+            hint={translate('The orchestrator reads this verbatim when deciding who gets which step.')}
             value={adHocCapabilities}
             onChange={onAdHocCapabilitiesChange}
             rows={2}
           />
           <Input
-            label="Max concurrent steps"
+            label={translate('Max concurrent steps')}
             type="number"
             min={1}
             max={12}
@@ -1363,7 +1330,7 @@ function MissionRosterAdjust({
             onChange={(e) => onAdHocMaxConcurrentChange(Number(e.target.value))}
           />
           {hostsLoading ? (
-            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading Runtime Hosts…</div>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{translate('Loading Runtime Hosts…')}</div>
           ) : (
             <TeamSlotRuntimeFields
               value={adHocDraft}
@@ -1375,11 +1342,9 @@ function MissionRosterAdjust({
           )}
           <div style={{ display: 'flex', gap: 8 }}>
             <Button variant="secondary" size="sm" onClick={onToggleAdHocForm}>
-              Cancel
-            </Button>
+              {translate('Cancel')}</Button>
             <Button variant="primary" size="sm" onClick={onAddAdHoc} disabled={!!adHocProblem}>
-              Add to this mission
-            </Button>
+              {translate('Add to this mission')}</Button>
           </div>
           {adHocProblem && (
             <div style={{ fontSize: 11, color: tokens.colors.warningLight }}>{adHocProblem}</div>
@@ -1405,6 +1370,7 @@ export function LabeledTextarea({
   rows?: number;
   placeholder?: string;
 }) {
+  useLocale();
   return (
     <label style={{ display: 'block' }}>
       <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>

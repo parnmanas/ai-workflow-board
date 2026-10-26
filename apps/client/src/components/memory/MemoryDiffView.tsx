@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import { diffStats, lineDiff, type DiffLine } from './memoryFormat.logic';
@@ -42,16 +44,17 @@ function toRows(diff: DiffLine[], expanded: ReadonlySet<number>): Row[] {
 }
 
 /** 줄 단위 diff — 바뀐 곳 앞뒤 3줄만 보이고 나머지는 눌러서 편다. */
-export default function MemoryDiffView({ before, after, maxHeight = 420, emptyLabel = 'No changes.' }: {
+export default function MemoryDiffView({ before, after, maxHeight = 420, emptyLabel = translate('No changes.') }: {
   before: string;
   after: string;
   maxHeight?: number | string;
   emptyLabel?: string;
 }) {
-  const diff = useMemo(() => lineDiff(before, after), [before, after]);
-  const stats = useMemo(() => diffStats(diff), [diff]);
+  useLocale();
+  const diff = useMemo(() => lineDiff(before, after), [before, after, getLocale()]);
+  const stats = useMemo(() => diffStats(diff), [diff, getLocale()]);
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
-  const rows = useMemo(() => toRows(diff, expanded), [diff, expanded]);
+  const rows = useMemo(() => toRows(diff, expanded), [diff, expanded, getLocale()]);
   if (!stats.added && !stats.removed) {
     return <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '8px 0' }}>{emptyLabel}</div>;
   }
@@ -61,7 +64,7 @@ export default function MemoryDiffView({ before, after, maxHeight = 420, emptyLa
         <span style={{ color: tokens.colors.success, fontWeight: 600 }}>+{stats.added}</span>
         {'  '}
         <span style={{ color: tokens.colors.danger, fontWeight: 600 }}>−{stats.removed}</span>
-        {' lines'}
+        {translate(' lines')}
       </div>
       <div style={{ maxHeight, overflow: 'auto', fontFamily: MONO, fontSize: 11.5, lineHeight: 1.55 }}>
         {rows.map((row, i) => {
@@ -73,7 +76,7 @@ export default function MemoryDiffView({ before, after, maxHeight = 420, emptyLa
                 onClick={() => setExpanded((prev) => new Set(prev).add(row.id))}
                 style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', background: tokens.colors.surfaceSubtle, color: tokens.colors.textMuted, padding: '2px 10px', cursor: 'pointer', fontFamily: MONO, fontSize: 11 }}
               >
-                ⋯ {row.count} unchanged line{row.count === 1 ? '' : 's'}
+                ⋯ {row.count} {translate('unchanged line')}{row.count === 1 ? '' : translate('s')}
               </button>
             );
           }

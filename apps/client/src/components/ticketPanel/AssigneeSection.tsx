@@ -1,3 +1,5 @@
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
@@ -40,6 +42,7 @@ const btn = (variant: 'primary' | 'plain' | 'danger', disabled = false): React.C
 export default function AssigneeSection({
   assignee, unsaved, project, accountId, disabled, onChange, runNote, labelStyle,
 }: AssigneeSectionProps) {
+  useLocale();
   const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -52,7 +55,7 @@ export default function AssigneeSection({
     api.listTemplateHosts()
       .then(rows => {
         if (cancelled) return;
-        setHosts((rows || []).map(h => ({ id: h.id, name: h.name || '(이름 없는 호스트)' })));
+        setHosts((rows || []).map(h => ({ id: h.id, name: h.name || translate('(이름 없는 호스트)') })));
       })
       .catch(() => { if (!cancelled) setHosts([]); })
       .finally(() => { if (!cancelled) setHostsLoaded(true); });
@@ -63,7 +66,7 @@ export default function AssigneeSection({
   // unknown host renders the bare spec label / a placeholder, not its id.
   const hostNames = Object.fromEntries(hosts.map(h => [h.id, h.name]));
   const hostNameOf = (id: string | undefined) =>
-    hosts.find(h => h.id === id)?.name || (hostsLoaded ? '알 수 없는 호스트' : '…');
+    hosts.find(h => h.id === id)?.name || (hostsLoaded ? translate('알 수 없는 호스트') : '…');
 
   const openEditor = () => {
     setEditorDraft(applyProjectFolder(toEditableSpec(assignee), project));
@@ -80,18 +83,18 @@ export default function AssigneeSection({
 
   const handleApply = async () => {
     if (!isRuntimeSpecComplete(editorDraft)) {
-      setError('Host·CLI·절대경로를 모두 입력하세요');
+      setError(translate('Host·CLI·절대경로를 모두 입력하세요'));
       return;
     }
     setValidating(true);
     setError(null);
     try {
       const result = await api.validateRuntimeSpec(accountId || null, editorDraft);
-      if (!result.ok || !result.spec) throw new Error(result.error || 'Invalid runtime');
+      if (!result.ok || !result.spec) throw new Error(result.error || translate('Invalid runtime'));
       onChange(toEditableSpec(result.spec));
       setEditing(false);
     } catch (err: any) {
-      setError(err?.message || 'Runtime 검증에 실패했습니다');
+      setError(err?.message || translate('Runtime 검증에 실패했습니다'));
     } finally {
       setValidating(false);
     }
@@ -102,8 +105,7 @@ export default function AssigneeSection({
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={labelStyle}>
-        담당
-        {unsaved && <span style={{ marginLeft: 6, color: tokens.colors.warningLight, textTransform: 'none' }}>· 저장 전</span>}
+        {translate('담당')}{unsaved && <span style={{ marginLeft: 6, color: tokens.colors.warningLight, textTransform: 'none' }}>{translate('· 저장 전')}</span>}
       </label>
       <div style={{
         background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
@@ -125,26 +127,24 @@ export default function AssigneeSection({
               </>
             ) : (
               <span style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-                미지정 — 디스패치되지 않음
-              </span>
+                {translate('미지정 — 디스패치되지 않음')}</span>
             )}
           </div>
           {!editing && (
             <>
               <button type="button" disabled={disabled} onClick={openEditor} style={btn('plain', disabled)}>
-                {assignee ? '변경' : '지정'}
+                {assignee ? translate('변경') : translate('지정')}
               </button>
               {assignee && (
                 <button type="button" disabled={disabled} onClick={() => onChange(null)} style={btn('danger', disabled)}>
-                  해제
-                </button>
+                  {translate('해제')}</button>
               )}
             </>
           )}
         </div>
         {runNote && (
           <div style={{ marginTop: 6, fontSize: '11px', color: tokens.colors.warningLight }}>
-            마지막 실행 요청: {runNote}
+            {translate('마지막 실행 요청:')} {runNote}
           </div>
         )}
         {editing && (
@@ -161,15 +161,13 @@ export default function AssigneeSection({
             )}
             <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 8 }}>
               <button type="button" onClick={() => { setEditing(false); setError(null); }} disabled={validating} style={btn('plain', validating)}>
-                취소
-              </button>
+                {translate('취소')}</button>
               <button type="button" onClick={handleApply} disabled={validating || disabled} style={btn('primary', validating || disabled)}>
-                {validating ? '검증 중…' : '적용'}
+                {validating ? translate('검증 중…') : translate('적용')}
               </button>
             </div>
             <div style={{ fontSize: '10px', color: tokens.colors.textMuted, marginTop: 4, textAlign: 'right' }}>
-              적용한 담당자는 아래 ‘저장’ 을 눌러야 반영됩니다.
-            </div>
+              {translate('적용한 담당자는 아래 ‘저장’ 을 눌러야 반영됩니다.')}</div>
           </div>
         )}
       </div>

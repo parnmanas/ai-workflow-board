@@ -1,3 +1,6 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
+import LanguageSelect from './LanguageSelect';
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api';
@@ -7,14 +10,14 @@ import { tokens } from '../tokens';
 import ServerConfigField from './ServerConfigField';
 
 function ServerConnectDetails() {
+  useLocale();
   return (
     <details style={{ marginTop: 20 }}>
       <summary style={{
         fontSize: 12, color: tokens.colors.textMuted, cursor: 'pointer',
         fontWeight: 600,
       }}>
-        다른 서버에 연결
-      </summary>
+        {translate('다른 서버에 연결')}</summary>
       <div style={{ marginTop: 10 }}>
         <ServerConfigField />
       </div>
@@ -25,6 +28,7 @@ function ServerConnectDetails() {
 type Mode = 'login' | 'setup' | 'register';
 
 export default function LoginPage() {
+  useLocale();
   const { login, setup, needsSetup, userStatus, availableAccounts } = useAuth();
   const [mode, setMode] = useState<Mode>(needsSetup ? 'setup' : 'login');
   const [form, setForm] = useState({ name: '', email: '', password: '' });
@@ -80,11 +84,9 @@ export default function LoginPage() {
             fontSize: '28px', fontWeight: 700, color: 'white', marginBottom: 16,
           }}>?</div>
           <h1 style={{ fontSize: '20px', fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>
-            Awaiting Approval
-          </h1>
+            {translate('Awaiting Approval')}</h1>
           <p style={{ fontSize: '14px', color: tokens.colors.textSecondary, lineHeight: 1.6, marginBottom: 24 }}>
-            Your account is awaiting admin approval. Please refresh to check status.
-          </p>
+            {translate('Your account is awaiting admin approval. Please refresh to check status.')}</p>
           <button
             onClick={() => window.location.reload()}
             style={{
@@ -93,8 +95,7 @@ export default function LoginPage() {
               cursor: 'pointer',
             }}
           >
-            Refresh
-          </button>
+            {translate('Refresh')}</button>
         </div>
       </div>
     );
@@ -118,13 +119,11 @@ export default function LoginPage() {
             background: tokens.gradients.accent,
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             fontSize: '28px', fontWeight: 700, color: 'white', marginBottom: 16,
-          }}>W</div>
+          }}>{translate('W')}</div>
           <h1 style={{ fontSize: '20px', fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>
-            Account Approved
-          </h1>
+            {translate('Account Approved')}</h1>
           <p style={{ fontSize: '14px', color: tokens.colors.textSecondary, lineHeight: 1.6, marginBottom: 24 }}>
-            Your sign-in is approved. Access is being prepared. Please refresh to continue.
-          </p>
+            {translate('Your sign-in is approved. Access is being prepared. Please refresh to continue.')}</p>
           <button
             onClick={() => window.location.reload()}
             style={{
@@ -133,8 +132,7 @@ export default function LoginPage() {
               cursor: 'pointer',
             }}
           >
-            Refresh
-          </button>
+            {translate('Refresh')}</button>
         </div>
       </div>
     );
@@ -149,19 +147,19 @@ export default function LoginPage() {
     try {
       if (mode === 'setup') {
         if (!form.name.trim() || !form.email.trim() || !form.password.trim()) {
-          setError('All fields are required');
+          setError(translate('All fields are required'));
           setLoading(false);
           return;
         }
         await setup(form.name, form.email, form.password);
       } else if (mode === 'register') {
         if (!form.name.trim() || !form.email.trim() || !form.password.trim()) {
-          setError('All fields are required');
+          setError(translate('All fields are required'));
           setLoading(false);
           return;
         }
         if (form.password.length < 4) {
-          setError('Password must be at least 4 characters');
+          setError(translate('Password must be at least 4 characters'));
           setLoading(false);
           return;
         }
@@ -170,14 +168,14 @@ export default function LoginPage() {
         setForm({ name: '', email: '', password: '' });
       } else {
         if (!form.email.trim() || !form.password.trim()) {
-          setError('Email and password are required');
+          setError(translate('Email and password are required'));
           setLoading(false);
           return;
         }
         await login(form.email, form.password);
       }
     } catch (err: any) {
-      setError(err.message || 'Authentication failed');
+      setError(err.message || translate('Authentication failed'));
     } finally {
       setLoading(false);
     }
@@ -210,6 +208,7 @@ export default function LoginPage() {
         boxShadow: tokens.shadows.overlay,
         padding: 32,
       }}>
+        <div style={{ marginBottom: 24 }}><LanguageSelect /></div>
         {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{
@@ -218,16 +217,16 @@ export default function LoginPage() {
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             fontSize: '28px', fontWeight: 700, color: 'white',
             marginBottom: 16,
-          }}>W</div>
+          }}>{translate('W')}</div>
           <h1 style={{ fontSize: '22px', fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 4 }}>
-            {mode === 'setup' ? 'Initial Setup' : mode === 'register' ? 'Create Account' : 'Welcome Back'}
+            {mode === 'setup' ? translate('Initial Setup') : mode === 'register' ? translate('Create Account') : translate('Welcome Back')}
           </h1>
           <p style={{ fontSize: '13px', color: tokens.colors.textMuted }}>
             {mode === 'setup'
-              ? 'Create your admin account to get started'
+              ? translate('Create your admin account to get started')
               : mode === 'register'
-                ? 'Register and wait for admin approval'
-                : 'Sign in to continue'}
+                ? translate('Register and wait for admin approval')
+                : translate('Sign in to continue')}
           </p>
         </div>
 
@@ -243,8 +242,7 @@ export default function LoginPage() {
             color: tokens.colors.accentSubtle,
             lineHeight: 1.5,
           }}>
-            First time setup. Create an admin account with full access to manage the system.
-          </div>
+            {translate('First time setup. Create an admin account with full access to manage the system.')}</div>
         )}
 
         {/* Success */}
@@ -283,12 +281,12 @@ export default function LoginPage() {
               <label style={{
                 fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600,
                 textTransform: 'uppercase', display: 'block', marginBottom: 6,
-              }}>Name</label>
+              }}>{translate('Name')}</label>
               <input
                 type="text"
                 value={form.name}
                 onChange={e => setForm({ ...form, name: e.target.value })}
-                placeholder={mode === 'setup' ? 'Admin Name' : 'Your Name'}
+                placeholder={mode === 'setup' ? translate('Admin Name') : translate('Your Name')}
                 autoComplete="name"
                 style={{
                   width: '100%', padding: '10px 14px', background: tokens.colors.surface,
@@ -303,7 +301,7 @@ export default function LoginPage() {
             <label style={{
               fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600,
               textTransform: 'uppercase', display: 'block', marginBottom: 6,
-            }}>Email</label>
+            }}>{translate('Email')}</label>
             <input
               type="email"
               value={form.email}
@@ -323,12 +321,12 @@ export default function LoginPage() {
             <label style={{
               fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600,
               textTransform: 'uppercase', display: 'block', marginBottom: 6,
-            }}>Password</label>
+            }}>{translate('Password')}</label>
             <input
               type="password"
               value={form.password}
               onChange={e => setForm({ ...form, password: e.target.value })}
-              placeholder={mode === 'login' ? 'Enter password' : 'Min 4 characters'}
+              placeholder={mode === 'login' ? translate('Enter password') : translate('Min 4 characters')}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               style={{
                 width: '100%', padding: '10px 14px', background: tokens.colors.surface,
@@ -351,12 +349,12 @@ export default function LoginPage() {
             }}
           >
             {loading
-              ? 'Please wait...'
+              ? translate('Please wait...')
               : mode === 'setup'
-                ? 'Create Admin Account'
+                ? translate('Create Admin Account')
                 : mode === 'register'
-                  ? 'Register'
-                  : 'Sign In'}
+                  ? translate('Register')
+                  : translate('Sign In')}
           </button>
         </form>
 
@@ -367,7 +365,7 @@ export default function LoginPage() {
               display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12,
             }}>
               <div style={{ flex: 1, height: 1, background: tokens.colors.border }} />
-              <span style={{ fontSize: 11, color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>or</span>
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>{translate('or')}</span>
               <div style={{ flex: 1, height: 1, background: tokens.colors.border }} />
             </div>
             <a
@@ -399,8 +397,7 @@ export default function LoginPage() {
                 <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
                 <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
               </svg>
-              Continue with Google
-            </a>
+              {translate('Continue with Google')}</a>
           </div>
         )}
 
@@ -408,7 +405,7 @@ export default function LoginPage() {
         {mode !== 'setup' && (
           <div style={{ textAlign: 'center', marginTop: 20 }}>
             <span style={{ fontSize: '13px', color: tokens.colors.textMuted }}>
-              {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+              {mode === 'login' ? translate('Don\'t have an account? ') : translate('Already have an account? ')}
             </span>
             <button
               onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
@@ -418,7 +415,7 @@ export default function LoginPage() {
                 textDecoration: 'underline', padding: 0,
               }}
             >
-              {mode === 'login' ? 'Register' : 'Sign In'}
+              {mode === 'login' ? translate('Register') : translate('Sign In')}
             </button>
           </div>
         )}

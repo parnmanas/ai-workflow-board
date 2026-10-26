@@ -1,3 +1,5 @@
+import { t as translate, getLocale } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useMemo, useState } from 'react';
 import { api } from '../../api';
 import type { OrchestrationStep, OrchestrationStepArtifact } from '../../types';
@@ -41,6 +43,7 @@ function mediaKindOf(artifact: OrchestrationStepArtifact): 'image' | 'video' | '
 }
 
 function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
+  useLocale();
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const gallery = useMemo(() => {
     return artifacts
@@ -52,13 +55,11 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
         caption: artifact.label || String(artifact.ref || ''),
       }))
       .filter((g) => !!g.src);
-  }, [artifacts]);
+  }, [artifacts, getLocale()]);
   if (artifacts.length === 0) {
     return (
       <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
-        The upstream steps did not attach anything to look at. Decide from the question above and the mission
-        timeline.
-      </div>
+        {translate('The upstream steps did not attach anything to look at. Decide from the question above and the mission timeline.')}</div>
     );
   }
   return (
@@ -77,7 +78,7 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
               <button
                 type="button"
                 onClick={() => galleryIndex >= 0 && setLightboxIndex(galleryIndex)}
-                title="클릭하면 크게 보기 (← → 로 넘기기)"
+                title={translate('클릭하면 크게 보기 (← → 로 넘기기)')}
                 style={{ padding: 0, border: 'none', background: 'transparent', cursor: galleryIndex >= 0 ? 'zoom-in' : 'default', display: 'block', maxWidth: '100%' }}
               >
                 <img
@@ -109,8 +110,8 @@ function Evidence({ artifacts }: { artifacts: OrchestrationStepArtifact[] }) {
                 {galleryIndex >= 0 && (
                   <button
                     type="button"
-                    title="크게 보기 (갤러리)"
-                    aria-label="Expand video"
+                    title={translate('크게 보기 (갤러리)')}
+                    aria-label={translate('Expand video')}
                     onClick={() => setLightboxIndex(galleryIndex)}
                     style={{
                       position: 'absolute', top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
@@ -162,6 +163,7 @@ function ConfirmCard({
   accountId: string;
   onDecided: () => void;
 }) {
+  useLocale();
   const { showToast } = useToast();
   const [feedback, setFeedback] = useState('');
   // 어느 버튼이 진행 중인지까지 담는다 — 단순 boolean 이면 두 버튼이 똑같이 죽어서
@@ -179,15 +181,15 @@ function ConfirmCard({
       });
       showToast(
         result.already_decided
-          ? 'This decision was already recorded — the mission is carrying on from it.'
+          ? translate('This decision was already recorded — the mission is carrying on from it.')
           : verdict === 'pass'
-            ? 'Passed — the mission is continuing.'
-            : 'Sent back with your feedback.',
+            ? translate('Passed — the mission is continuing.')
+            : translate('Sent back with your feedback.'),
         'success',
       );
       onDecided();
     } catch (e: any) {
-      showToast(e?.message || 'Failed to submit the decision', 'error');
+      showToast(e?.message || translate('Failed to submit the decision'), 'error');
     } finally {
       setSubmitting(null);
     }
@@ -211,7 +213,7 @@ function ConfirmCard({
         <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textStrong }}>{step.title}</div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
           <code>{step.step_key}</code>
-          {step.visit > 1 ? ` · pass ${step.visit}` : ''}
+          {step.visit > 1 ? translate(' · pass {0}', { 0: step.visit }) : ''}
         </div>
       </div>
 
@@ -225,14 +227,11 @@ function ConfirmCard({
 
       <label style={{ display: 'block' }}>
         <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
-          Reason / feedback (optional)
-        </span>
+          {translate('Reason / feedback (optional)')}</span>
         <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
-          If you send this back, whatever you write here is handed to the agent that has to redo the work — be
-          specific about what is wrong.
-        </span>
+          {translate('If you send this back, whatever you write here is handed to the agent that has to redo the work — be specific about what is wrong.')}</span>
         <textarea
-          aria-label="Reason / feedback (optional)"
+          aria-label={translate('Reason / feedback (optional)')}
           value={feedback}
           rows={3}
           onChange={(e) => setFeedback(e.target.value)}
@@ -257,16 +256,14 @@ function ConfirmCard({
           loading={submitting === 'pass'}
           disabled={submitting !== null}
         >
-          Pass
-        </Button>
+          {translate('Pass')}</Button>
         <Button
           variant="danger"
           onClick={() => submit('fail')}
           loading={submitting === 'fail'}
           disabled={submitting !== null}
         >
-          Fail
-        </Button>
+          {translate('Fail')}</Button>
       </div>
     </div>
   );
@@ -281,6 +278,7 @@ export default function ConfirmRequestPanel({
   accountId: string;
   onDecided: () => void;
 }) {
+  useLocale();
   const waiting = steps.filter((s) => s.status === 'awaiting_user');
   if (waiting.length === 0) return null;
 
@@ -297,11 +295,9 @@ export default function ConfirmRequestPanel({
             color: tokens.colors.warningLight,
           }}
         >
-          Waiting for your decision
-        </h2>
+          {translate('Waiting for your decision')}</h2>
         <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-          The mission is paused here until you answer. It will not time out.
-        </span>
+          {translate('The mission is paused here until you answer. It will not time out.')}</span>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {waiting.map((s) => (

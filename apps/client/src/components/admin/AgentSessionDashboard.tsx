@@ -1,3 +1,6 @@
+import { getLocaleTag } from '../../i18n/core';
+import { t as translate } from '../../i18n/core';
+import { useLocale } from '../../i18n/react';
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
@@ -16,6 +19,7 @@ interface AgentSessionRow {
 }
 
 export default function AgentSessionDashboard() {
+  useLocale();
   const { user } = useAuth();
   const [rows, setRows] = useState<AgentSessionRow[]>([]);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -54,7 +58,7 @@ export default function AgentSessionDashboard() {
   const formatTime = (iso: string | null): string => {
     if (!iso) return '—';
     const d = new Date(iso);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return d.toLocaleTimeString(getLocaleTag(), { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
   return (
@@ -62,25 +66,25 @@ export default function AgentSessionDashboard() {
       {/* Header row */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h3 style={{ fontSize: '15px', fontWeight: 600, color: tokens.colors.textDisabled }}>
-          Agent Sessions ({rows.length})
+          {translate('Agent Sessions (')}{rows.length})
         </h3>
         {lastRefresh && (
           <span style={{ fontSize: '11px', color: tokens.colors.borderStrong }}>
-            Last refresh: {formatTime(lastRefresh.toISOString())}
+            {translate('Last refresh:')} {formatTime(lastRefresh.toISOString())}
           </span>
         )}
       </div>
 
       {rows.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 24px' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No sessions yet</div>
-          <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Agent sessions will appear here once agents connect.</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>{translate('No sessions yet')}</div>
+          <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>{translate('Agent sessions will appear here once agents connect.')}</div>
         </div>
       ) : (
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
           <thead>
             <tr>
-              {['Agent', 'Status', 'Last Seen', 'Pending Triggers'].map(h => (
+              {[translate('Agent'), translate('Status'), translate('Last Seen'), translate('Pending Triggers')].map(h => (
                 <th key={h} style={{
                   textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${tokens.colors.border}`,
                   color: tokens.colors.textMuted, fontSize: '11px', fontWeight: 600, textTransform: 'uppercase',
@@ -106,7 +110,7 @@ export default function AgentSessionDashboard() {
                       flexShrink: 0,
                     }} />
                     <span style={{ color: row.is_online ? tokens.colors.successPale : tokens.colors.textSecondary, fontSize: '12px' }}>
-                      {row.is_online ? 'Online' : 'Offline'}
+                      {row.is_online ? translate('Online') : translate('Offline')}
                     </span>
                   </div>
                 </td>

@@ -1,3 +1,4 @@
+import { ui } from './helpers/i18n.mjs';
 // operator 의 작업 제안 — 화면 쪽(docs/voice-operator.md "작업 제안").
 //   - 목록은 아직 정할 것(pending · queued)과 다시 보낼 수 있는 실패만 든다. 정해지면 빠진다.
 //   - 세션 화면은 그 세션에 시키자는 것과, 그 세션이 operator 면 그 operator 가 낸 것을 보인다.
@@ -63,7 +64,7 @@ test('Send and Dismiss decide one proposal and update the list at once', async (
   assert.equal(cards().length, 2);
   assert.match(cards()[0].textContent, /Jarvis proposes.*→ rolf \/ Codex · Build/);
   assert.match(cards()[0].textContent, /테스트 돌려 줘/, 'the exact text is shown before sending');
-  const buttonIn = (card, label) => [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+  const buttonIn = (card, label) => [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === ui(label));
   click(buttonIn(cards()[0], 'Send'));
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   assert.deepEqual(sent.mock.calls.map((c) => c.arguments[0]), ['p1']);

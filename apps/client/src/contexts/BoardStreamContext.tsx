@@ -1,3 +1,5 @@
+import { t as translate } from '../i18n/core';
+import { useLocale } from '../i18n/react';
 import React, {
   createContext,
   useContext,
@@ -70,9 +72,10 @@ interface BoardStreamContextValue {
 const BoardStreamContext = createContext<BoardStreamContextValue | null>(null);
 
 export function useBoardStream(): BoardStreamContextValue {
+  useLocale();
   const ctx = useContext(BoardStreamContext);
   if (!ctx) {
-    throw new Error('useBoardStream must be used within <BoardStreamProvider>');
+    throw new Error(translate('useBoardStream must be used within <BoardStreamProvider>'));
   }
   return ctx;
 }
@@ -86,6 +89,7 @@ export function useBoardStreamEvent(
   eventType: StreamNamedEventType,
   handler: (data: any) => void,
 ) {
+  useLocale();
   const { subscribe } = useBoardStream();
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
@@ -103,6 +107,7 @@ interface ProviderProps {
 }
 
 export function BoardStreamProvider({ children }: ProviderProps) {
+  useLocale();
   const [isConnected, setIsConnected] = useState(false);
 
   // Internal pub/sub bus — using EventTarget avoids re-rendering the provider

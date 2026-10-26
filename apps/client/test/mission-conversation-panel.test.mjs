@@ -1,3 +1,4 @@
+import { ui, uiPattern } from './helpers/i18n.mjs';
 // Mission 대화 패널 렌더링 회귀 테스트 (티켓 4d065f82).
 //
 // 보드 교훈 1번을 따른다: 사용자 동작 뒤의 화면 상태가 완료 기준이므로 소스 문자열
@@ -459,7 +460,7 @@ test('아직 시작되지 않은 미션은 조회를 시도하지 않고 안내�
     },
     async ({ view }) => {
       assert.equal(called, 0, 'room 이 없는데 조회하면 매번 404 를 두드린다');
-      assert.ok(textOf(view.container).includes('아직 시작되지 않아'));
+      assert.ok(textOf(view.container).includes(ui('미션이 아직 시작되지 않아 orchestrator 대화방이 없습니다. 미션을 시작하면 여기에서 대화할 수 있습니다.')));
     },
   );
 });
@@ -894,7 +895,7 @@ test('chat 옵션이 off 면 권한이 있어도 읽기 전용이고, 사유가 
         false,
         'off 에서 입력창이 열려 있으면 전송 순간에만 403 이 뜬다',
       );
-      assert.ok(textOf(view.container).includes('읽기 전용'), '읽기는 계속 가능하다는 사실이 문구에 있어야 한다');
+      assert.ok(textOf(view.container).includes(ui('이 미션은 대화 옵션이 꺼져 있어 읽기 전용입니다. 미션 화면 위쪽의 User chat 을 ')), '읽기는 계속 가능하다는 사실이 문구에 있어야 한다');
     },
   );
 });
