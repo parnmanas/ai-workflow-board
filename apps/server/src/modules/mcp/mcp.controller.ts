@@ -63,6 +63,7 @@ import { OntologyLifecycleService } from '../ontology/ontology-lifecycle.service
 import { OntologyQueryService } from '../ontology/ontology-query.service';
 import { OperatorDecisionService } from '../voice/operator-decision.service';
 import { OperatorProposalService } from '../voice/operator-proposal.service';
+import { SessionMessagesService } from '../agent-sessions/session-messages.service';
 import { InterruptedSessionsService } from '../voice/interrupted-sessions.service';
 
 // Module-level log reference, set from McpController.onModuleInit
@@ -186,6 +187,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // 작업 제안 — operator 가 다른 세션에 시킬 일을 제안하고, 사용자 승인 뒤 보낸다(VoiceModule).
     private readonly operatorProposalService: OperatorProposalService,
     private readonly interruptedSessionsService: InterruptedSessionsService,
+    private readonly sessionMessagesService: SessionMessagesService,
     // Shared lifecycle services keep REST and MCP ownership/review checks aligned.
     private readonly businessMailService: BusinessMailService,
     private readonly businessMailWorkflowService: BusinessMailWorkflowService,
@@ -300,6 +302,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       ontologyQueryService: this.ontologyQueryService,
       operatorDecisionService: this.operatorDecisionService,
       operatorProposalService: this.operatorProposalService,
+      sessionMessagesService: this.sessionMessagesService,
       interruptedSessionsService: this.interruptedSessionsService,
       businessMailService: this.businessMailService,
       businessMailWorkflowService: this.businessMailWorkflowService,

@@ -21,6 +21,7 @@ import { VoiceModule } from '../voice/voice.module';
 import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
 import { BusinessModule } from '../business/business.module';
 import { MarketingModule } from '../marketing/marketing.module';
+import { SessionMessagesService } from '../agent-sessions/session-messages.service';
 
 @Module({
   imports: [
@@ -65,5 +66,6 @@ import { MarketingModule } from '../marketing/marketing.module';
     BusinessModule,
   ],
   controllers: [McpController],
+  providers: [SessionMessagesService],
 })
 export class McpModule {}

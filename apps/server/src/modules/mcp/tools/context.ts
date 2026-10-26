@@ -85,6 +85,7 @@ import type { OntologyQueryService } from '../../ontology/ontology-query.service
 import type { OperatorDecisionService } from '../../voice/operator-decision.service';
 import type { OperatorProposalService } from '../../voice/operator-proposal.service';
 import type { InterruptedSessionsService } from '../../voice/interrupted-sessions.service';
+import type { SessionMessagesService } from '../../agent-sessions/session-messages.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -241,6 +242,7 @@ export interface ToolContext {
   // 재시작으로 끊긴 작업(docs/voice-operator.md) — operator 가 끊긴 세션을 고정 문구로 잇는다. 같은 이유로
   // standalone context 에는 없다.
   interruptedSessionsService?: InterruptedSessionsService;
+  sessionMessagesService?: SessionMessagesService;
   // Marketing(docs/marketing.md) — 캠페인 에이전트의 MCP 표면(marketing-tools.ts). 사이클 · 승인 · 외부 발신이
   // NestJS 프로세스의 서비스에 있으므로 standalone context 에는 없다 — 도구가 그 사유로 거절한다.
   businessMailService?: BusinessMailService;

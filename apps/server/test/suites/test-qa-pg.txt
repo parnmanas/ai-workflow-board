@@ -44,4 +44,5 @@ test/qa-flows/silent-exit-activity-commit.test.mjs
 test/qa-flows/silent-exit-dedupe.test.mjs
 test/qa-flows/skill-global-scope-pg.test.mjs
 test/qa-flows/ticket-lifecycle.test.mjs
+test/session-messages.test.mjs
 test/ticket-create-assignee-inheritance.test.mjs

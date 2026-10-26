@@ -26,6 +26,6 @@ import { VoiceService } from './voice.service';
   controllers: [VoiceController, VoiceLabController, VoiceOperatorsController, VoiceProposalsController],
   providers: [VoiceService, VoiceAnnouncerService, OperatorReportService, OperatorDecisionService, OperatorProposalService, InterruptedSessionsService, VoicePresenceService, VoiceSupportService, AuthGuard, AdminGuard, PermissionGuard],
   // OperatorDecisionService · OperatorProposalService — MCP 의 operator 도구(말로 받은 답 전하기 · 작업 제안)가 쓴다.
-  exports: [VoiceService, VoiceAnnouncerService, OperatorDecisionService, OperatorProposalService, InterruptedSessionsService],
+  exports: [VoiceService, VoiceAnnouncerService, OperatorDecisionService, OperatorProposalService, InterruptedSessionsService, OperatorReportService],
 })
 export class VoiceModule {}

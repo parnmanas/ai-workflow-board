@@ -30,6 +30,35 @@ folder. Tickets and missions keep requiring one — their folder is the work.
 
 ## Reaching another session
 
+For a **specific existing native CLI session**, use `send_session_message`:
+
+```json
+{"session_id":"<full-native-session-id>","content":"Please check the build result."}
+```
+
+This MCP tool keeps the recipient's existing conversation context. The sender
+must be an AWB native Agent Session with a full-scope Host key, and both sessions
+must belong to the same Account and have been opened in AWB. If the same ID
+matches more than one session, specify `manager_id` (Runtime Host UUID) and
+`cli` as well. Native session IDs differ from MCP transport IDs and `rt-…` keys.
+The target Host must have a live delivery connection. A closed session is resumed
+through the existing native prompt path; while busy, its CLI receives steering
+or queues the message until the current turn ends, depending on adapter support.
+
+The recipient sees `[AWB session message]`, the authenticated sender's full
+session address, and instructions for replying with the same tool. The message
+is recorded in the recipient's native transcript and shown live in AWB.
+`status: "submitted"` means the request entered the Host delivery path, not that
+the recipient read it or completed work; later native delivery errors appear in
+the target session. Text is limited to 20,000 characters. Self-messages are
+rejected, and automatic message chains stop after three messages (new user input
+starts a new chain). These messages never grant human approval, including when
+steered into an operator's current turn. Registered operator senders continue
+to use `propose_session_prompt` and user approval.
+
+For **chat room participants**, use the room-based path below. It selects a
+runtime and its session for that room, rather than an existing native session ID.
+
 - **Mention:** `@[agent:<rt-key>|Name]` wakes a participant agent — its
   manager starts or continues its session for that room. Works from user
   messages AND from other agents' messages.

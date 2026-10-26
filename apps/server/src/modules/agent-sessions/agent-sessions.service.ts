@@ -57,6 +57,13 @@ export class AgentSessionError extends Error {
   }
 }
 
+/** Server-only provenance; never accepted from the REST prompt body. */
+export interface SessionPromptOptions {
+  duringTurn?: boolean;
+  messageChainDepth?: number;
+  beforeDispatch?: (turnId: string) => void;
+}
+
 /** CLI 설정에 묶인 credential 의 공개 투영(비밀 없음). */
 export interface AgentSessionCredentialRef {
   id: string;
@@ -160,6 +167,8 @@ interface LiveState {
   last_error: string | null;
   last_error_code: string | null;
   driver_user_id: string | null;
+  messageChainDepth?: number;
+  currentTurnId?: string;
   updated_at: number;
 }
 
@@ -1299,6 +1308,7 @@ export class AgentSessionsService implements OnModuleDestroy {
    * Claude Code/Codex 데스크탑처럼 매니저가 그 턴에 끼워 넣고(`_session/steering`), 못 하는 CLI 면 매니저가
    * 들고 있다가 턴이 끝나는 즉시 보낸다(docs/agent-sessions.md "턴 중 입력"). 서버가 사용자 대신 보내는
    * 프롬프트(작업 보고·작업 제안)는 끼어들지 않는다 — 진행 중이면 409 를 받고 턴이 끝난 뒤 보낸다.
+   * 세션 간 직접 메시지만 duringTurn 을 명시하며, 발신 출처와 승인 권한은 SessionMessagesService 가 처리한다.
    */
   async prompt(
     accountId: string,
@@ -1308,7 +1318,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     sessionId: string,
     textInput: unknown,
     imagesInput?: unknown,
-    options: { duringTurn?: boolean } = {},
+    options: SessionPromptOptions = {},
   ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
     const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
@@ -1347,9 +1357,12 @@ export class AgentSessionsService implements OnModuleDestroy {
     const execution = await this.executionFor(accountId, managerId, cli, sessionId);
     accountId = execution.account_id;
     const turnId = randomUUID();
+    options.beforeDispatch?.(turnId);
+    state.messageChainDepth = options.messageChainDepth ?? 0;
     state.driver_user_id = userId;
     // 턴 중 입력은 새 턴을 열지 않는다 — 진행 중 상태(권한 대기 포함)는 매니저가 계속 알린다.
     if (opensTurn) {
+      state.currentTurnId = turnId;
       state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
       state.last_error = null;
       state.last_error_code = null;
@@ -1390,8 +1403,9 @@ export class AgentSessionsService implements OnModuleDestroy {
     cli: string,
     sessionId: string,
     text: string,
+    options: SessionPromptOptions = {},
   ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
-    const result = await this.prompt(accountId, userId, managerId, cli, sessionId, text);
+    const result = await this.prompt(accountId, userId, managerId, cli, sessionId, text, undefined, options);
     const createdAt = new Date().toISOString();
     activityEvents.emit('agent_session_event', {
       manager_id: managerId,
@@ -1657,6 +1671,10 @@ export class AgentSessionsService implements OnModuleDestroy {
     // (voice-announcer)가 듣는다. 사용자 SSE 는 event-registry 가 driver 에게만 보내므로 driver 가 없으면 아무에게도
     // 가지 않는다. 예전에는 여기서 막혀서, 배포 직후의 세션 소식이 operator 에게 보고되지 않았다(2026-10-04 실측).
     for (const event of events) {
+      if (event.type === 'turn' && event.payload?.phase === 'started') state.currentTurnId = event.turn_id;
+      if (event.type === 'turn' && event.payload?.phase === 'finished' && state.currentTurnId === event.turn_id) {
+        state.currentTurnId = undefined;
+      }
       activityEvents.emit('agent_session_event', {
         manager_id: managerId,
         cli,
@@ -1750,6 +1768,14 @@ export class AgentSessionsService implements OnModuleDestroy {
   liveSnapshot(managerId: string, cli: string, sessionId: string): AgentSessionLiveSnapshot | null {
     const state = this.live.get(liveKey(managerId, cli, sessionId));
     return state ? this.snapshot(state) : null;
+  }
+
+  messageChainDepth(managerId: string, cli: string, sessionId: string): number {
+    return this.live.get(liveKey(managerId, cli, sessionId))?.messageChainDepth ?? 0;
+  }
+
+  currentTurnId(managerId: string, cli: string, sessionId: string): string | undefined {
+    return this.live.get(liveKey(managerId, cli, sessionId))?.currentTurnId;
   }
 
   applyState(managerId: string, cli: string, sessionId: string, patch: ManagerStatePatch): AgentSessionLiveSnapshot {
