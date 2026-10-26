@@ -1,3 +1,4 @@
+import { stripDirectWorkPolicy } from '../../ticket-creation-policy.js';
 // opencode 세션 기록 스캐너.
 //
 // opencode 는 파일이 아니라 SQLite(`~/.local/share/opencode/opencode.db`, WAL)에 세션을
@@ -273,7 +274,8 @@ export const opencodeSessionStore: CliSessionStoreDriver = {
       const role = typeof message?.role === 'string' ? message.role : 'assistant';
       switch (part.type) {
         case 'text': {
-          const text = typeof part.text === 'string' ? part.text : '';
+          const rawText = typeof part.text === 'string' ? part.text : '';
+          const text = role === 'user' ? stripDirectWorkPolicy(rawText) : rawText;
           if (!text.trim()) break;
           // 사용자 턴에 CLI 가 끼워 넣는 컨텍스트(지침·환경 블록)는 프롬프트가 아니다.
           if (role === 'user') {

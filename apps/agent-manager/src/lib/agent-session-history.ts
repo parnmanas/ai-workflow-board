@@ -1,3 +1,4 @@
+import { stripDirectWorkPolicy } from './ticket-creation-policy.js';
 // Agent Session 기록 스캐너들이 공유하는 순수 헬퍼 — CLI 이름을 모른다.
 //
 // `agent-session-store.ts` 가 CLI 별 스캐너(`clis/<id>/sessions.ts`)를 레지스트리로
@@ -44,8 +45,8 @@ export function cleanTitle(text: string): string {
 
 /** 프롬프트 텍스트로 쓸 수 없는 CLI 내부 마크업(명령 XML, 환경 컨텍스트, 지침 주입). */
 export function isSyntheticPrompt(text: string): boolean {
-  const t = text.trimStart();
-  return t.startsWith('<') || t.startsWith('# AGENTS.md') || t.startsWith('[Request interrupted');
+  const t = stripDirectWorkPolicy(text).trimStart();
+  return !t || t.startsWith('<') || t.startsWith('# AGENTS.md') || t.startsWith('[Request interrupted');
 }
 
 export function textOfBlocks(content: unknown): string {

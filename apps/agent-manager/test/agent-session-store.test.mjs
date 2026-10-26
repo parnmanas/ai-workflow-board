@@ -373,3 +373,20 @@ test('concurrent title updates, turn touches and session creation preserve all i
   const histories = await Promise.all(ids.map((id) => store.readHistory('hermes', id)));
   assert.deepEqual(histories.map((h) => h.session?.title), ids.map((id) => `CLI title ${id}`));
 });
+
+test('codex policy records do not become the title or visible prompts', async (t) => {
+  const { DIRECT_WORK_POLICY } = await import('../dist/lib/ticket-creation-policy.js');
+  const home = await seedHome(t);
+  const path = join(home.codexHome, 'sessions', '2026', '09', '17', `rollout-2026-09-17T10-00-00-${CODEX_ID}.jsonl`);
+  const policy = `${DIRECT_WORK_POLICY}\n\nSession Git workflow: main. Working directory: /tmp/work/codex. Base branch: main.`;
+  await writeFile(path, jsonl([
+    { type: 'session_meta', payload: { id: CODEX_ID, cwd: '/tmp/work/codex' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: policy }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: policy }, { type: 'input_text', text: 'Original task' }] } },
+  ]));
+  const store = new AgentSessionStore(home);
+  assert.equal((await store.listSessions('codex'))[0].title, 'Original task');
+  const history = await store.readHistory('codex', CODEX_ID);
+  assert.equal(history.session.title, 'Original task');
+  assert.deepEqual(history.events.filter((e) => e.type === 'user_prompt').map((e) => e.payload.text), ['Original task']);
+});

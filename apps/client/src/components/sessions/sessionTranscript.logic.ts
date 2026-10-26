@@ -403,7 +403,18 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     const last = blocks[blocks.length - 1];
     switch (ev.type) {
       case 'user_prompt': {
-        const { text: stripped, noted } = stripWakeNote(str(p.text));
+        // Old native histories can contain the manager's policy as a user record.
+        let promptText = str(p.text);
+        if (!ev.id.startsWith('local:') && promptText.trimStart().startsWith('AWB work policy:\n- Perform requested work directly')) {
+          const end = '- If the user asks you to work on an existing ticket, use that ticket; do not create another one.';
+          const at = promptText.indexOf(end);
+          if (at >= 0) {
+            promptText = promptText.slice(at + end.length).trimStart();
+            if (promptText.startsWith('Session Git workflow: ')) promptText = promptText.replace(/^Session Git workflow: [^\n]*(?:\n|$)/, '').trimStart();
+            if (!promptText) break;
+          }
+        }
+        const { text: stripped, noted } = stripWakeNote(promptText);
         // Local echoes and voice wake requests are known user input.
         const automatic = !noted && !ev.id.startsWith('local:') && isAutomaticContinuation(stripped);
         if (automatic) {

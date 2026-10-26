@@ -1531,3 +1531,19 @@ test('session worktree is used by ACP, preserved on restart and cleaned on expli
   assert.ok(server.events(sid).some(e => e.payload.text?.includes('Merged session worktree and local branch removed')));
   assert.equal(runner._snapshot().length, 0);
 });
+
+for (const stage of ['LOAD', 'PROMPT']) {
+  test(`injected policy title during ${stage} preserves the existing title`, async (t) => {
+    const { cwd, store, server, runner } = await harness(t, {}, {
+      FAKE_ACP_FAST_PROMPT: '1', [`FAKE_ACP_${stage}_TITLE`]: 'AWB work policy: - Perform requested work directly',
+    });
+    const sid = 'policy-title-session';
+    await store.recordAwbSession({ cli: 'claude', session_id: sid, cwd, title: 'Original task' });
+    await runner.handle(request('open', { request_id: 'policy-open', session_id: sid, cwd }));
+    await runner.handle(request('prompt', { session_id: sid, turn_id: 'policy-turn', text: 'Follow-up' }));
+    await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'policy turn');
+    assert.equal((await store.readHistory('claude', sid)).session.title, 'Original task');
+    await runner.handle(request('history', { request_id: 'policy-history', session_id: sid }));
+    assert.equal(server.rpc('policy-history').result.live.title, 'Original task');
+  });
+}

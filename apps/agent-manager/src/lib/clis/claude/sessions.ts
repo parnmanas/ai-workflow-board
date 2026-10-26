@@ -1,3 +1,4 @@
+import { stripDirectWorkPolicy } from '../../ticket-creation-policy.js';
 // Claude Code 세션 기록 스캐너 — `$CLAUDE_CONFIG_DIR/projects/<cwd>/<id>.jsonl`.
 
 import { readdir, stat } from 'node:fs/promises';
@@ -74,7 +75,7 @@ async function claudeMeta(path: string, size: number): Promise<{ sessionId: stri
     if (rec.type === 'custom-title' && typeof rec.customTitle === 'string') customTitle = rec.customTitle;
     if (rec.type === 'summary' && typeof rec.summary === 'string' && !customTitle) customTitle = rec.summary;
     if (!firstPrompt && rec.type === 'user' && !rec.isSidechain && isRecord(rec.message)) {
-      const text = textOfBlocks(rec.message.content);
+      const text = stripDirectWorkPolicy(textOfBlocks(rec.message.content));
       if (text && !isSyntheticPrompt(text)) firstPrompt = text;
     }
   };
@@ -231,7 +232,7 @@ export const claudeSessionStore: CliSessionStoreDriver = {
       if (!message) continue;
       const ts = typeof rec.timestamp === 'string' ? rec.timestamp : undefined;
       if (rec.type === 'user') {
-        const content = message.content;
+        const content = typeof message.content === 'string' ? stripDirectWorkPolicy(message.content) : message.content;
         if (typeof content === 'string') {
           if (isSyntheticPrompt(content)) continue;
           flushUsage(); // 이전 턴의 합계를 새 프롬프트 앞에 남긴다
@@ -244,11 +245,12 @@ export const claudeSessionStore: CliSessionStoreDriver = {
         for (const block of content) {
           if (!isRecord(block)) continue;
           if (block.type === 'text' && typeof block.text === 'string') {
-            if (isSyntheticPrompt(block.text)) continue;
+            const text = stripDirectWorkPolicy(block.text);
+            if (isSyntheticPrompt(text)) continue;
             flushUsage();
             turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
-            if (!firstPrompt) firstPrompt = block.text;
-            push('user_prompt', { text: block.text }, ts);
+            if (!firstPrompt) firstPrompt = text;
+            push('user_prompt', { text }, ts);
           } else if (block.type === 'image') {
             // 사용자가 붙여 넣은 이미지.
             await pushImage(block, '', ts);

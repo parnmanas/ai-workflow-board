@@ -1,3 +1,4 @@
+import { stripDirectWorkPolicy } from '../../ticket-creation-policy.js';
 // Codex 세션 기록 스캐너 — `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`.
 
 import { stat } from 'node:fs/promises';
@@ -100,10 +101,11 @@ async function codexMeta(path: string, size: number): Promise<{ sessionId: strin
       cwd = typeof payload.cwd === 'string' ? payload.cwd : cwd;
       createdAt = typeof payload.timestamp === 'string' ? payload.timestamp : createdAt;
     } else if (!firstPrompt && rec.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
-      const text = textOfBlocks(payload.content);
+      const text = payload.role === 'user' ? stripDirectWorkPolicy(textOfBlocks(payload.content)) : textOfBlocks(payload.content);
       if (text && !isSyntheticPrompt(text)) firstPrompt = text;
     } else if (!firstPrompt && rec.type === 'event_msg' && payload.type === 'user_message' && typeof payload.message === 'string') {
-      if (!isSyntheticPrompt(payload.message)) firstPrompt = payload.message;
+      const text = stripDirectWorkPolicy(payload.message);
+      if (text && !isSyntheticPrompt(text)) firstPrompt = text;
     }
   }
   if (!sessionId) {
@@ -199,7 +201,7 @@ export const codexSessionStore: CliSessionStoreDriver = {
       if (rec.type === 'response_item') {
         switch (payload.type) {
           case 'message': {
-            const text = textOfBlocks(payload.content);
+            const text = payload.role === 'user' ? stripDirectWorkPolicy(textOfBlocks(payload.content)) : textOfBlocks(payload.content);
             if (!text) break;
             if (payload.role === 'user') {
               if (isSyntheticPrompt(text)) break;

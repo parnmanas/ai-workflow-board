@@ -1,6 +1,6 @@
 import { SESSION_PERMISSION_KEY, SESSION_WORKFLOW_KEY, validateSessionLaunchOptions } from './session-launch-options.js';
 import { SessionWorkspaces, sessionWorkflowInstruction, type SessionWorkspace } from './session-workspace.js';
-import { DIRECT_WORK_POLICY } from './ticket-creation-policy.js';
+import { DIRECT_WORK_POLICY, isDirectWorkPolicyTitle } from './ticket-creation-policy.js';
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
 // 세션의 단위는 **(이 Runtime Host, CLI, CLI 네이티브 세션 id)** 다. AWB 서버는
@@ -1899,7 +1899,7 @@ export class AgentSessionRunner {
       const update = data.sessionUpdate ?? data.session_update;
       if (update === 'session_info_update') {
         const title = typeof data.title === 'string' ? data.title.trim().slice(0, 200) : '';
-        if (title && title !== live.title) {
+        if (title && !isDirectWorkPolicyTitle(title) && title !== live.title) {
           live.title = title;
           if (!live.loading && live.sessionId) {
             this.#enqueue(live, [], { title, reason: 'title' });
