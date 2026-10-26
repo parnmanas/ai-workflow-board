@@ -3,7 +3,7 @@ import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatAttachment, ChatRoomMessageItem } from '../../types';
 import { formatClockTime, daySeparatorLabel, sameDay } from './utils/time';
-import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from './utils/markdown';
+import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from '../common/Markdown';
 import { base64ToBlob, formatBytes, isImageMime, isVideoMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';

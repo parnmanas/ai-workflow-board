@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+<body style="margin:16px;background:#14171e;color:#e5e7eb;--awb-border:#566070">
+<div id="root"></div>
+<script type="module">
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import SessionTranscript from '../../src/components/sessions/SessionTranscript.tsx';
+import MessageList from '../../src/components/chat/MessageList.tsx';
+import { DescriptionField } from '../../src/components/ticketPanel/TextFields.tsx';
+import { TicketArtifactView } from '../../src/components/TicketArtifact.tsx';
+import 'katex/dist/katex.min.css';
+import '../../src/components/common/markdown.css';
+const root = createRoot(document.getElementById('root'));
+const surface = new URLSearchParams(location.search).get('surface');
+window.renderTranscript = text => {
+  let element;
+  if (surface === 'chat') element = React.createElement(MessageList, {
+    participantCount: 1, messages: [{ id: 'm1', content: text, sender_type: 'agent', sender_name: 'Host/Agent', created_at: '2026-10-26T00:00:00Z' }],
+  });
+  else if (surface === 'ticket') element = React.createElement(DescriptionField, { value: text, dirty: false, onChange() {} });
+  else if (surface === 'artifact') element = React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket: { id: 't1', title: '중력', description: text } } });
+  else element = React.createElement(SessionTranscript, {
+  blocks: [{ kind: 'assistant', key: 'answer', text }], decidingRequestId: null,
+  permissionsEnabled: true, onDecidePermission() {},
+});
+  root.render(element);
+};
+</script></body></html>

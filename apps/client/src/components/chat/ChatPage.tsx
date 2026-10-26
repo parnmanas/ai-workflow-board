@@ -14,7 +14,7 @@ import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
 import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem, DashboardAgent } from '../../types';
 import { useOpenTicketArtifact } from '../../contexts/ticketArtifactOpener';
-import { type MentionParticipant } from './utils/markdown';
+import { type MentionParticipant } from '../common/Markdown';
 import {
   projectParticipants,
   countUserParticipants,

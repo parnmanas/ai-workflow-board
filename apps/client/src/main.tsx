@@ -4,6 +4,8 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import './responsive.css';
+import 'katex/dist/katex.min.css';
+import './components/common/markdown.css';
 import { tokens } from './tokens';
 import { shouldReloadForChunkError } from './utils/chunkReload';
 

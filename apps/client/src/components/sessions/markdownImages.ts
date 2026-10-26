@@ -1,4 +1,4 @@
-import { splitMarkdownFences } from '../../utils/markdownFences';
+import { markdownCodeRanges, markdownMathRanges } from '../../utils/markdownMath';
 
 /**
  * 에이전트 답 속의 미리보기 참조(`![alt](target)` 이미지, `[보고서](./report.html)` 같은
@@ -83,22 +83,10 @@ function fileKindOf(target: string): 'html' | 'markdown' | null {
   return null;
 }
 
-/** 코드 펜스(```)와 인라인 코드 안의 `![…](…)` 는 예시이지 그림이 아니다 — 그 구간을 건너뛴다. */
-function codeRanges(text: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = splitMarkdownFences(text)
-    .filter((segment) => segment.kind === 'code').map((segment) => [segment.start, segment.end]);
-  let m: RegExpExecArray | null;
-  const inline = /`[^`\n]+`/g;
-  while ((m = inline.exec(text)) !== null) {
-    const at = m.index;
-    if (!ranges.some(([s, e]) => at >= s && at < e)) ranges.push([at, at + m[0].length]);
-  }
-  return ranges;
-}
-
+/** 코드 예시와 수식 안의 이미지 문법은 미리보기로 읽지 않는다. */
 export function splitMarkdownImages(text: string): MarkdownImageSegment[] {
   if (!text || !text.includes('[')) return text ? [{ kind: 'text', text }] : [];
-  const code = codeRanges(text);
+  const code = [...markdownCodeRanges(text), ...markdownMathRanges(text).map(({ start, end }) => [start, end])];
   const inCode = (at: number) => code.some(([s, e]) => at >= s && at < e);
   const out: MarkdownImageSegment[] = [];
   let cursor = 0;

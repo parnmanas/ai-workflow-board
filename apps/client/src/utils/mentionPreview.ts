@@ -10,7 +10,7 @@
  *
  * This is deliberately a text transform, not a React renderer: two of the
  * three call sites (Notification body, toast string) can only take a string.
- * The token grammar mirrors STRUCTURED_TOKEN_RE in chat/utils/markdown.tsx.
+ * The token grammar mirrors STRUCTURED_REF in common/markdownRefs.tsx.
  */
 
 const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;

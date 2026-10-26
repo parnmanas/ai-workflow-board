@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { tokens } from '../tokens';
-import { renderMarkdown } from './chat/utils/markdown';
+import { renderMarkdown } from './common/Markdown';
 import { ErrorState } from './common';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useCloseArtifactPanel } from '../contexts/ArtifactPanelContext';

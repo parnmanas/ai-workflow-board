@@ -7,7 +7,7 @@ import type {
   OrchestrationStepSessionItem,
   OrchestrationTimelineEvent,
 } from '../../types';
-import { renderMarkdown } from '../chat/utils/markdown';
+import { renderMarkdown } from '../common/Markdown';
 import { base64ToBlob, formatBytes, triggerBlobDownload } from '../chat/utils/attachments';
 import {
   EvidenceLightbox,

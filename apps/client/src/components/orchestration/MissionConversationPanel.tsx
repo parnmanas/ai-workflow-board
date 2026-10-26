@@ -8,7 +8,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
 import { projectParticipants, countUserParticipants } from '../chat/utils/participantFlow';
-import type { MentionParticipant } from '../chat/utils/markdown';
+import type { MentionParticipant } from '../common/Markdown';
 import { eventColor } from './status';
 import { relativeTime } from '../../utils/time';
 

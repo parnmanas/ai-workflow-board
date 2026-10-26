@@ -1,5 +1,5 @@
 import type { AgentCurrentTask, DashboardAgent } from '../../../types';
-import type { MentionParticipant } from './markdown';
+import type { MentionParticipant } from '../../common/Markdown';
 
 export function normalizeAgentTasks(agent?: Pick<DashboardAgent, 'active_tasks' | 'current_task'> | null): AgentCurrentTask[] {
   if (!agent) return [];

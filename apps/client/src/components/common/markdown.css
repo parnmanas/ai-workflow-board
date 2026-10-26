@@ -1,0 +1,32 @@
+.awb-markdown {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.awb-markdown p { margin: 0 0 .75em; white-space: pre-wrap; }
+.awb-markdown > :last-child { margin-bottom: 0; }
+.awb-markdown h1, .awb-markdown h2, .awb-markdown h3,
+.awb-markdown h4, .awb-markdown h5, .awb-markdown h6 {
+  margin: 1em 0 .5em; line-height: 1.4; font-weight: 650;
+}
+.awb-markdown > :first-child { margin-top: 0; }
+.awb-markdown h1 { font-size: 1.5em; }
+.awb-markdown h2 { font-size: 1.3em; }
+.awb-markdown h3 { font-size: 1.15em; }
+.awb-markdown h4, .awb-markdown h5, .awb-markdown h6 { font-size: 1em; }
+.awb-markdown ul, .awb-markdown ol { margin: .5em 0; padding-left: 1.8em; }
+.awb-markdown li { margin: .25em 0; }
+.awb-markdown li > p { margin-bottom: .25em; }
+.awb-markdown blockquote { margin: .75em 0; padding-left: 1em; border-left: 3px solid var(--awb-border); }
+.awb-markdown hr { border: 0; border-top: 1px solid var(--awb-border); margin: 1em 0; }
+.awb-markdown :not(pre) > code { font-size: .93em; background: #8882; border-radius: 3px; padding: 1px 4px; }
+.awb-markdown-table { max-width: 100%; overflow-x: auto; margin: .75em 0; }
+.awb-markdown table { border-collapse: collapse; }
+.awb-markdown th, .awb-markdown td { border: 1px solid var(--awb-border); padding: .4em .7em; }
+.awb-markdown th { background: #8881; }
+.awb-markdown .katex-display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .5em 0; margin: .5em 0; }
+.awb-markdown .katex { white-space: nowrap; overflow-wrap: normal; word-break: normal; font-size: 1.1em; }
+.awb-markdown .katex-display > .katex { text-align: left; }
+.awb-markdown .katex-error, .awb-markdown .math-pending { white-space: pre-wrap; overflow-wrap: anywhere; }

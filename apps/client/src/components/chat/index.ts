@@ -6,4 +6,4 @@ export { default as MessageList } from './MessageList';
 export { default as ChatMessageInput } from './ChatMessageInput';
 export { default as NewChatModal } from './ParticipantPicker';
 export * from './utils/time';
-export * from './utils/markdown';
+export * from '../common/Markdown';

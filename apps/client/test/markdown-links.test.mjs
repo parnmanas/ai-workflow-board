@@ -3,19 +3,19 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { JSDOM } from 'jsdom';
-import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
+import { renderMarkdown } from '../src/components/common/Markdown.tsx';
 import SessionTranscript from '../src/components/sessions/SessionTranscript.tsx';
 import { buildTranscript } from '../src/components/sessions/sessionTranscript.logic.ts';
 
 const h = React.createElement;
 
-function checkLinks(element, hrefs, originalText) {
+function checkLinks(element, hrefs, originalText, labels = hrefs) {
   const dom = new JSDOM(renderToStaticMarkup(h('main', null, element)));
   try {
     const main = dom.window.document.querySelector('main');
     const links = [...main.querySelectorAll('a')];
-    assert.deepEqual(links.map(link => link.getAttribute('href')), hrefs);
-    assert.deepEqual(links.map(link => link.textContent), hrefs);
+    assert.deepEqual(links.map(link => link.href), hrefs.map(href => new URL(href).href));
+    assert.deepEqual(links.map(link => link.textContent), labels);
     for (const link of links) {
       assert.equal(link.target, '_blank');
       assert.equal(link.rel, 'noopener noreferrer');
@@ -30,11 +30,9 @@ test('shared chat renderer excludes closing prose brackets and punctuation witho
   for (const text of [
     '(https://example.com/path)',
     '((https://example.com/path)).',
-    '[자료](https://example.com/path)',
     '참고 [https://example.com/path],',
     '참고 {https://example.com/path}.',
     'https://example.com/path!',
-    '<https://example.com/path>',
     '"https://example.com/path"',
     "'https://example.com/path'",
   ]) {
@@ -58,10 +56,9 @@ test('balanced and encoded URL parentheses, queries, fragments and IPv6 hosts st
 const clubText = '[클럽 사이트 만들기](https://divekin.parnmanas.com/clubs/new)에서 시작하세요. 기존 클럽은 클럽 관리 → 사이트 설정에서 변경할 수 있습니다.';
 
 test('a closing URL delimiter ends the link even when Korean prose follows without whitespace', () => {
-  checkLinks(renderMarkdown(clubText), ['https://divekin.parnmanas.com/clubs/new'], clubText);
+  checkLinks(renderMarkdown(clubText), ['https://divekin.parnmanas.com/clubs/new'], '클럽 사이트 만들기에서 시작하세요. 기존 클럽은 클럽 관리 → 사이트 설정에서 변경할 수 있습니다.', ['클럽 사이트 만들기']);
   for (const text of [
     '(https://example.com/path)에서)',
-    '[설명](https://example.com/path)에서',
     '[https://example.com/path]에서',
     '{https://example.com/path}에서',
   ]) {
@@ -77,13 +74,13 @@ test('delimiter scanning preserves Korean URL paths and balanced parentheses bef
     'http://[::1]:7701/클럽',
   ]) {
     const text = `[설명](${url})에서 시작하세요.`;
-    checkLinks(renderMarkdown(text), [url], text);
+    checkLinks(renderMarkdown(text), [url], '설명에서 시작하세요.', ['설명']);
   }
 });
 
 test('a second URL after an unmatched closing delimiter is still linked', () => {
   const text = '[첫째](https://example.com/one)와[둘째](https://example.com/two)에서';
-  checkLinks(renderMarkdown(text), ['https://example.com/one', 'https://example.com/two'], text);
+  checkLinks(renderMarkdown(text), ['https://example.com/one', 'https://example.com/two'], '첫째와둘째에서', ['첫째', '둘째']);
 });
 
 test('multiple links keep their own destinations and code remains literal', () => {
@@ -100,5 +97,11 @@ test('session transcript uses the same corrected link destinations', () => {
   }]);
   checkLinks(h(SessionTranscript, {
     blocks, decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {},
-  }), ['https://divekin.parnmanas.com/clubs/new', 'https://example.com/result', 'https://example.com/a_(b)']);
+  }), ['https://divekin.parnmanas.com/clubs/new', 'https://example.com/result', 'https://example.com/a_(b)'], undefined, ['클럽 사이트 만들기', 'https://example.com/result', '설명']);
+});
+
+
+test('named links and angle autolinks use standard Markdown labels on every surface', () => {
+  checkLinks(renderMarkdown('[자료](https://example.com/path)'), ['https://example.com/path'], '자료', ['자료']);
+  checkLinks(renderMarkdown('<https://example.com/path>'), ['https://example.com/path'], 'https://example.com/path');
 });

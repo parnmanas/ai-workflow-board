@@ -3,7 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment, CommentType } from '../types';
 import { rawResourceUrl } from '../api';
 import { tokens } from '../tokens';
-import { renderMarkdown, handleMentionAwareCopy } from './chat/utils/markdown';
+import { renderMarkdown, handleMentionAwareCopy } from './common/Markdown';
 import { effectiveMime } from './chat/utils/attachments';
 import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
 import { useMentionViewportReader } from '../hooks/useMentionViewportReader';

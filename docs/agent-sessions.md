@@ -548,9 +548,9 @@ html/md 보고서(`[결과](./report.html)`, `![결과](./notes.md)` — `!` 유
 이 갈래는 특정 CLI 분기가 아니라 assistant 텍스트 공통 처리라 codex·claude·opencode 모두에 적용된다.
 
 1. 클라이언트 `sessions/markdownImages.ts` 가 assistant 답에서 미리보기 참조를 떼어 낸다
-   (공통 `renderMarkdown` 은 이미지·파일 문법을 모른다 — 채팅방은 건드리지 않으려고 세션 전사에서만).
+   (인증된 로컬 미리보기 경로를 유지하고, 나머지 텍스트는 `Markdown`으로 그린다).
    이미지(`![alt](target)`)는 기존대로, html/md 로컬 경로는 `file` 세그먼트로 떼어 낸다.
-   코드 펜스·인라인 코드 안은 예시라 건너뛰고, 닫히지 않은(스트리밍 중) 문법은 아직 글이다.
+   코드 펜스·인라인 코드·수식 안은 건너뛰고, 닫히지 않은(스트리밍 중) 문법은 아직 글이다.
    에이전트가 실제로 쓰는 모양을 다 받는다 — 드라이브 문자, `\`, 공백(그대로/`%20`/`<…>`),
    `"title"`, 괄호 든 파일명, `file://`, `/E:/`. http(s) 는 그대로 `<img>`, 그 밖의 스킴은 글로 둔다.
    원격 http(s) 의 html/md 는 떼지 않는다(브라우저 직접 fetch 의 CORS·프레이밍 문제로 세션 전사 범위 밖).
@@ -568,8 +568,25 @@ html/md 보고서(`[결과](./report.html)`, `![결과](./notes.md)` — `!` 유
    다시 그려질 수 있고, Codex 앱은 경로로 캐시해 덮어쓴 스크린샷을 옛 그림으로 보여 준 버그가 있었다.
 5. 화면(`SessionTranscript`): html 은 `sandbox=""` iframe(높이 480, 스크립트·같은-origin 전부 차단) +
    다운로드 링크(새 탭 Blob URL 은 샌드박스가 안 걸리므로 "새 탭에서 열기"를 두지 않는다). md 는 텍스트로
-   받아 기존 XSS-safe `renderMarkdown` 으로 카드에 그린다(새 마크다운 파서 없음). 서버는 `text/html`
+   받아 `Markdown`으로 카드에 그린다. 서버는 `text/html`
    응답에 `Content-Security-Policy: sandbox` 를 덧붙여 URL 직접 열기까지 막는다.
+
+### 세션 답의 Markdown과 수식
+
+`components/common/Markdown.tsx`가 세션 답·로컬 Markdown 미리보기·채팅·티켓 설명/댓글·미션 대화·메모리 미리보기를 함께 그린다.
+모든 Markdown 표면은 이 컴포넌트 또는 같은 컴포넌트로 이어지는 `renderMarkdown`을 사용한다.
+제목·중첩 목록·인용·표·체크리스트·취소선·이름 붙은 링크는 `react-markdown` + GFM으로 처리한다.
+구조화된 멘션·티켓/아티팩트 참조는 기존 카드 렌더러를 재사용하고, 코드 블록은 원문 복사 버튼을 유지한다.
+
+수식은 `\[...\]` / `$$...$$`(블록), `\(...\)` / `$...$`(인라인)를 받는다.
+`utils/markdownMath.ts`가 Markdown 파싱 전에 구분자를 인식해 수식 내부의 밑줄·별표·줄바꿈을 보존하고,
+`rehype-katex`가 한글 `\text{...}`를 포함한 HTML/MathML을 만든다. 폰트와 CSS는 앱 자산으로 배포한다.
+긴 블록 수식과 표는 본문 폭 안에서 가로 스크롤한다. `$5 and $10` 같은 가격과 코드 예시는 수식으로 바꾸지 않는다.
+명시적 구분자가 아직 닫히지 않은 스트리밍 수식은 원문으로 남기고, 잘못된 TeX도 메시지를 없애지 않고 표시한다.
+원문 HTML은 실행하지 않으며 KaTeX의 `trust`는 끈다. 사용자 프롬프트와 도구 결과는 원문 표시를 유지한다.
+
+회귀: `test/markdown-rendering.test.mjs`, `test/markdown-links.test.mjs`, `test/code-block-copy.test.mjs`.
+실제 브라우저의 폰트·스크롤·스트리밍 검증은 `test/markdown-rendering.e2e.mjs`(세션·채팅·티켓 설명·티켓 상세, 각 360/768/1280px).
 
 ## 프롬프트에 이미지 첨부 (사용자 → 에이전트)
 

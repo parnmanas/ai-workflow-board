@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
-import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
+import { renderMarkdown } from '../src/components/common/Markdown.tsx';
 import { splitMarkdownFences } from '../src/utils/markdownFences.ts';
 import { splitMarkdownImages } from '../src/components/sessions/markdownImages.ts';
 import CodeBlock from '../src/components/common/CodeBlock.tsx';

@@ -12,7 +12,7 @@ import { useNotifications } from '../../contexts/NotificationContext';
 import NewChatModal from './ParticipantPicker';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
-import { type MentionParticipant } from './utils/markdown';
+import { type MentionParticipant } from '../common/Markdown';
 import ChatMessageInput from './ChatMessageInput';
 import { canInviteToRoom } from './utils/participantFlow';
 import ActiveTaskStrip from './ActiveTaskStrip';

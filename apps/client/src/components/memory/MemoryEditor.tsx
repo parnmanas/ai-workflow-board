@@ -5,7 +5,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import type { CliMemorySnapshot, MemoryFileInfo } from '../../types';
 import { Button } from '../common';
-import { renderMarkdown } from '../chat/utils/markdown';
+import { renderMarkdown } from '../common/Markdown';
 import MemoryDiffView from './MemoryDiffView';
 import type { MemoryFinding } from './memoryAnalysis.logic';
 import {

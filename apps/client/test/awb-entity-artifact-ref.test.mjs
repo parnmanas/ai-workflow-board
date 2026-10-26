@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom';
 import {
   parseArtifactRefs,
 } from '../src/utils/artifactRef.ts';
-import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
+import { renderMarkdown } from '../src/components/common/Markdown.tsx';
 
 const ids = {
   ticket: '11111111-1111-4111-8111-111111111111',

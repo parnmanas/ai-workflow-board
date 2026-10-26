@@ -1,6 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { tokens } from '../../tokens';
-import { renderMarkdown, handleMentionAwareCopy } from '../chat/utils/markdown';
+import { renderMarkdown, handleMentionAwareCopy } from '../common/Markdown';
 import { controlStyle, fieldLabel, panelButton, section, wrapText } from './panelStyles';
 
 /** Grows with its content so nothing is cut off or hidden behind a scrollbar. */

@@ -10,7 +10,7 @@
 // 옮긴 것이다. 동작을 바꾸려면 컴포넌트가 아니라 이 모듈을 고치고 테스트를 갱신할 것.
 
 import type { ChatRoomListItem } from '../../../types';
-import type { MentionParticipant } from './markdown';
+import type { MentionParticipant } from '../../common/Markdown';
 
 // 방 상세(getChatRoom) 응답의 참여자 행 — wire 는 participant_id / participant_type
 // 를 쓰고, (ChatRoomParticipantInfo 타입 선언과 달리) 평평한 `name` 을 내려준다.

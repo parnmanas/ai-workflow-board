@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import CodeBlock from '../common/CodeBlock';
-import { renderMarkdown } from '../chat/utils/markdown';
+import Markdown from '../common/Markdown';
 import { formatReceivedAt, usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
 import { splitMarkdownImages } from './markdownImages';
@@ -269,11 +269,11 @@ function AutomaticPromptBlock({ text }: { text: string }) {
 }
 
 function AssistantBlock({ text, loadLocalImage, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string) => Promise<Blob>; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
-  // 공통 렌더러는 이미지·파일 문법을 모른다 — 미리보기 자리만 먼저 떼어 내고 나머지 글은 그대로 그린다.
+  // 인증된 이미지·파일 미리보기 자리를 먼저 떼고, 나머지는 세션 Markdown으로 그린다.
   // 이미지와 로컬 html/md 는 같은 통(`local_image` RPC)으로 받으므로 로더도 하나를 공유한다.
   const nodes = useMemo(
     () => splitMarkdownImages(text).map((seg, i) => {
-      if (seg.kind === 'text') return <React.Fragment key={i}>{renderMarkdown(seg.text)}</React.Fragment>;
+      if (seg.kind === 'text') return <Markdown key={i} text={seg.text} />;
       if (seg.kind === 'file') {
         return <MarkdownFile key={i} alt={seg.alt} target={seg.target} fileKind={seg.fileKind} loadLocalFile={loadLocalImage} />;
       }
@@ -1026,7 +1026,7 @@ function downloadName(target: string, fallbackExt: string): string {
  * - html: `sandbox=""` iframe — 스크립트·같은-origin 취급을 전부 막아 AWB origin 으로
  *   돌 수 없게 한다. 새 탭 열기 대신 다운로드 링크를 둔다(새 탭 Blob URL 은 샌드박스가
  *   안 걸려 스크립트가 AWB origin 으로 돌 수 있다).
- * - md: 텍스트로 받아 기존 XSS-safe `renderMarkdown` 으로 그린다(새 마크다운 파서 없음).
+ * - md: 텍스트로 받아 세션 Markdown 렌더러로 그린다(원문 HTML 실행 없음).
  *
  * 못 읽으면 이미지와 똑같이 경로와 사유를 그 자리에 보인다.
  */
@@ -1143,7 +1143,7 @@ function MarkdownFile({
     >
       <div style={{ marginBottom: 4 }}>{caption}</div>
       <div style={{ maxHeight: 480, overflow: 'auto', fontSize: 13, lineHeight: 1.6, color: tokens.colors.textPrimary, wordBreak: 'break-word' }}>
-        {renderMarkdown(mdText)}
+        <Markdown text={mdText} />
       </div>
     </div>
   );

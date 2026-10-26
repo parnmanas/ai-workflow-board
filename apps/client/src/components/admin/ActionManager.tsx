@@ -8,7 +8,7 @@ import { Button, Input, Modal, Card, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
-import type { MentionParticipant } from '../chat/utils/markdown';
+import type { MentionParticipant } from '../common/Markdown';
 import { WorkspaceFolderOptions, initWorkspaceFolderState, buildWorkspaceFolderPayload, type WorkspaceFolderFormState } from './WorkspaceFolderOptions';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 

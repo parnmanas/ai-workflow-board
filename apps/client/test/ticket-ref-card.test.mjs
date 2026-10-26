@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
+import { renderMarkdown } from '../src/components/common/Markdown.tsx';
 import TicketRefCard from '../src/components/chat/TicketRefCard.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { TicketMetaProvider } from '../src/contexts/TicketMetaContext.tsx';
