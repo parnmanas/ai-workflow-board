@@ -84,6 +84,7 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
     CODEX_HOME: process.env.CODEX_HOME ?? null,
+    DISABLE_MCP_CONFIG_FILTERING: process.env.DISABLE_MCP_CONFIG_FILTERING ?? null,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
     // opencode credential 적용 검증용 — 키는 env 로 주입되고 설정 홈은 XDG 로 고정된다.
     OPENCODE_API_KEY: process.env.OPENCODE_API_KEY ?? null,
@@ -273,6 +274,9 @@ rl.on('line', (line) => {
       if (invalid) {
         invalidParams(message.id, invalid);
         break;
+      }
+      if (process.env.FAKE_ACP_SESSION_CAPTURE_FILE) {
+        writeFileSync(process.env.FAKE_ACP_SESSION_CAPTURE_FILE, JSON.stringify(message.params));
       }
       if (process.env.FAKE_ACP_LOAD_TITLE) send({
         jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {

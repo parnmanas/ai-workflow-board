@@ -101,6 +101,11 @@ export const codexModule = defineCliModule({
       // codex-acp: 매니저 프로세스에는 브라우저가 없다 — ChatGPT 브라우저 로그인 auth
       // method 를 숨겨 어댑터가 장비의 codex 로그인(auth.json)이나 API 키만 쓰게 한다.
       if (env.NO_BROWSER === undefined) env.NO_BROWSER = '1';
+      // codex-acp otherwise discards ACP MCP entries already present in config.toml.
+      // The shared credential home contains an `awb` entry for managed runtimes;
+      // each native session must override it with its own X-AWB-Session-Id headers.
+      // Keep attribution in the process/session config, never in the shared home.
+      env.DISABLE_MCP_CONFIG_FILTERING = 'true';
     },
     store: codexSessionStore,
     // codex 는 스레드마다 writer 잠금을 건다. 파일은 0바이트라 안에 주인 정보가 없고,

@@ -56,6 +56,12 @@ starts a new chain). These messages never grant human approval, including when
 steered into an operator's current turn. Registered operator senders continue
 to use `propose_session_prompt` and user approval.
 
+If a native session gets `native_session_required`, update its Runtime Host's
+Agent Manager and restart the session to reconnect MCP. Codex ACP must apply the
+session-specific MCP headers even when the shared CLI home already defines `awb`;
+the manager sets `DISABLE_MCP_CONFIG_FILTERING=true` for native Codex sessions.
+Updating only the server does not refresh an already-open MCP connection.
+
 For **chat room participants**, use the room-based path below. It selects a
 runtime and its session for that room, rather than an existing native session ID.
 

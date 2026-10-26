@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseToml } from 'smol-toml';
 
 import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
 import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
@@ -569,6 +570,7 @@ import { lstat, readFile, stat as statFile } from 'node:fs/promises';
 async function credentialHarness(t, provider, fields, cli = 'claude') {
   const base = await harness(t);
   const captureFile = join(base.root, 'capture.json');
+  const sessionCaptureFile = join(base.root, 'session-capture.json');
   const sessionHomesDir = join(base.root, 'session-homes');
   const codexHome = join(base.root, 'codex');
   await mkdir(join(codexHome, 'sessions'), { recursive: true });
@@ -586,7 +588,7 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
       // 흘러들어오면 "credential 없는 operator-login" 케이스가 오염된다 — 명시적으로 덮는다.
       // 러너 셸의 ANTHROPIC_BASE_URL/ANTHROPIC_MODEL(예: Claude Code 세션 안에서 테스트를 돌릴 때)이
       // 픽스처로 새면 "프로파일 없음 → 기본 엔드포인트" 단언이 환경에 따라 흔들린다 — 걷어낸다.
-      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: undefined, ANTHROPIC_MODEL: undefined, CLAUDE_CODE_MAX_CONTEXT_TOKENS: undefined },
+      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, FAKE_ACP_SESSION_CAPTURE_FILE: sessionCaptureFile, DISABLE_MCP_CONFIG_FILTERING: 'false', ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: undefined, ANTHROPIC_MODEL: undefined, CLAUDE_CODE_MAX_CONTEXT_TOKENS: undefined },
       credentialFetcher: async (id, ws) => {
         fetches.push({ id, ws });
         return provider ? { credential_id: id, provider, fields } : null;
@@ -596,7 +598,8 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
   );
   base.holdsRoot(runner);
   const capture = async () => JSON.parse(await readFile(captureFile, 'utf8'));
-  return { ...base, runner, sessionHomesDir, captureFile, capture, fetches, cli, server: base.server };
+  const captureSession = async () => JSON.parse(await readFile(sessionCaptureFile, 'utf8'));
+  return { ...base, runner, sessionHomesDir, captureFile, capture, captureSession, fetches, cli, server: base.server };
 }
 
 test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKEN, operator key stripped, projects linked back', async (t) => {
@@ -644,6 +647,40 @@ test('credential (codex_subscription): auth.json in the session home with sessio
   assert.equal(cap.CODEX_HOME, home);
   assert.equal(cap.OPENAI_API_KEY, null, 'operator OPENAI_API_KEY stripped');
   assert.ok((await lstat(join(home, 'sessions'))).isSymbolicLink());
+});
+
+test('Codex native MCP attribution overrides shared config for new and resumed sessions', async (t) => {
+  const h = await credentialHarness(t, 'codex_api_key', { api_key: 'test-key' }, 'codex');
+  const open = async (rpc, sessionId) => {
+    await h.runner.handle(request('open', {
+      cli: 'codex', request_id: rpc, session_id: sessionId, cwd: h.cwd,
+      account_id: 'ws-1', credential_id: 'shared-credential',
+    }));
+    assert.equal(h.server.rpc(rpc).ok, true, JSON.stringify(h.server.rpc(rpc)));
+    const env = await h.capture();
+    assert.equal(env.DISABLE_MCP_CONFIG_FILTERING, 'true', 'ACP headers must win even when the parent env disables overrides');
+    const params = await h.captureSession();
+    const awb = params.mcpServers.find((server) => server.name === 'awb');
+    const headers = Object.fromEntries(awb.headers.map(({ name, value }) => [name, value]));
+    assert.equal(headers.Authorization, 'Bearer manager-key');
+    assert.equal(headers['X-AWB-Client-Type'], 'agent-session');
+    return { id: h.server.rpc(rpc).result.session_id, ref: headers['X-AWB-Session-Id'], home: env.CODEX_HOME };
+  };
+  const first = await open('rpc-native-first', null);
+  assert.match(first.ref, /^pending-/);
+  assert.equal(h.runner.liveStates().find((state) => state.session_id === first.id).mcp_session_ref, first.ref);
+  const second = await open('rpc-native-second', 'other-native-session');
+  assert.equal(second.ref, second.id);
+  assert.notEqual(first.ref, second.ref);
+  assert.equal(first.home, second.home, 'sessions share credentials but must not share MCP attribution');
+  assert.equal(h.runner.liveStates().find((state) => state.session_id === first.id).mcp_session_ref, first.ref);
+  const config = parseToml(await readFile(join(first.home, 'config.toml'), 'utf8'));
+  assert.equal(config.mcp_servers.awb.http_headers['X-AWB-Client-Type'], 'managed-subagent');
+  assert.equal(config.mcp_servers.awb.http_headers['X-AWB-Session-Id'], undefined, 'no session ID leaks into a shared home');
+
+  await h.runner.handle(request('close', { cli: 'codex', session_id: first.id }));
+  const resumed = await open('rpc-native-resume', first.id);
+  assert.equal(resumed.ref, first.id, 'resume uses the native ID, not the old pending alias');
 });
 
 test('credential errors: provider mismatch, unsupported cli, and missing material fail the open RPC without spawning', async (t) => {
