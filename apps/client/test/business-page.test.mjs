@@ -442,7 +442,7 @@ test('a task server failure explains the failed read and retry recovers without 
   assert.doesNotMatch(container.textContent, /operator does not exist|character varying/);
   failed = false;
   click(container.querySelector('[role="alert"] button')); await flush(); await flush();
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.equal(Boolean(container.querySelector('[role="alert"]')), false, 'retry clears the failed-read alert');
   assert.equal(button(container, '에이전트에게 보내기').disabled, true, 'the recovered composer waits for content');
   typeInto(field(container, '업무 기록 내용'), 'Continue the formation work');
   assert.equal(button(container, '에이전트에게 보내기').disabled, false);
