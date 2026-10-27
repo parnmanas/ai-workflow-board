@@ -18,6 +18,8 @@ import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
 import { QaRunBatchReaperService } from './qa-run-batch-reaper.service';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
+import { QaResultDeliveryService } from './qa-result-delivery.service';
+import { BusinessModule } from '../business/business.module';
 import { QaRerunOnFixService } from './qa-rerun-on-fix.service';
 import { QaScheduleService } from './qa-schedule.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
@@ -39,9 +41,10 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     ChatRoomsModule,
     AgentsModule,
     SharedServicesModule,
+    BusinessModule,
   ],
   controllers: [QaScenarioController],
-  providers: [QaService, QaRunService, QaRunReaperService, QaRunBatchReaperService, QaFailureTicketService, QaRerunOnFixService, QaScheduleService, AuthGuard, PermissionGuard],
+  providers: [QaService, QaRunService, QaRunReaperService, QaRunBatchReaperService, QaFailureTicketService, QaResultDeliveryService, QaRerunOnFixService, QaScheduleService, AuthGuard, PermissionGuard],
   exports: [QaService, QaRunService, QaRunReaperService, QaRunBatchReaperService, QaFailureTicketService, QaScheduleService],
 })
 export class QaScenarioModule {}

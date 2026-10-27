@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { QaScenario } from '../../entities/QaScenario';
 import { QaRun, QaRunStatus, QaStepResult, QaPhaseHistoryEntry, TERMINAL_QA_RUN_STATUSES } from '../../entities/QaRun';
@@ -16,6 +16,8 @@ import { activityEvents } from '../../services/activity.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderQaRunPrompt } from './qa-prompt';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
+import { QaResultDeliveryService } from './qa-result-delivery.service';
+import { isQaFailure, validateQaProject } from './qa-result-policy';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { Deployment } from '../../entities/Deployment';
 import { findLatestDeployment } from '../../common/deployment-options';
@@ -73,6 +75,7 @@ export interface StartQaRunResult {
 
 export interface StartBatchArgs {
   accountId: string;
+  projectId?: string;
   // Explicit ordered scenario ids, OR `all: true` to expand to every enabled
   // scenario in the account. Exactly one is used —
   // scenarioIds wins if both are given.
@@ -142,6 +145,7 @@ export class QaRunService {
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     private readonly failureTicketService: QaFailureTicketService,
+    private readonly resultDeliveryService: QaResultDeliveryService,
   ) {}
 
   // ── Reads ─────────────────────────────────────────────────────────────────
@@ -174,6 +178,7 @@ export class QaRunService {
     );
     if (!scenario.target_agent_id) throw makeError(400, 'QA scenario has no target agent set');
     if (scenario.enabled === false) throw makeError(400, 'QA scenario is disabled');
+    await validateQaProject(this.dataSource, scenario.account_id, scenario.project_id);
 
     // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음). rt- 는 스냅샷이 해소.
     const agent = await resolveCallerIdentityRow(this.dataSource, scenario.target_agent_id);
@@ -184,6 +189,8 @@ export class QaRunService {
     // Pre-allocate the run id so the prompt can reference {{run.id}} and we can
     // write a complete row in one INSERT (same rationale as ActionsService).
     const runId = randomUUID();
+    // A project supplies the default checkout; an explicit repo_ref may target a component.
+    scenario.repo_ref ??= scenario.project_id ? { project_id: scenario.project_id } : null;
     const prompt = renderQaRunPrompt(scenario, runId);
 
     const room = await this.roomRepo.save(this.roomRepo.create({
@@ -221,6 +228,10 @@ export class QaRunService {
       id: runId,
       scenario_id: scenario.id,
       account_id: scenario.account_id,
+      result_policy_snapshot: {
+        name: scenario.name, project_id: scenario.project_id ?? null,
+        on_failure_ticket: scenario.on_failure_ticket, result_delivery: scenario.result_delivery ?? null,
+      },
       status: 'running',
       room_id: room.id,
       step_results: [],
@@ -316,7 +327,8 @@ export class QaRunService {
       run.status = 'error';
       run.summary = run.summary ? `${reason}\n\n${run.summary}` : reason;
       run.finished_at = new Date();
-      await this.runRepo.save(run);
+      await this.runRepo.save({ id: run.id, status: run.status, summary: run.summary, finished_at: run.finished_at });
+      await this.processRunResult(run).catch(() => {});
       throw makeError(e?.status ?? 502, reason);
     }
 
@@ -366,7 +378,8 @@ export class QaRunService {
       const all = new Set([...(run.artifact_resource_ids || []), ...artifacts]);
       run.artifact_resource_ids = Array.from(all);
     }
-    return this.runRepo.save(run);
+    await this.runRepo.save({ id: run.id, step_results: run.step_results, artifact_resource_ids: run.artifact_resource_ids });
+    return run;
   }
 
   /**
@@ -398,7 +411,8 @@ export class QaRunService {
     }
     // else: a repeat/stale token — keep the high-water mark and its advance time
     // untouched so the deadline is NOT extended.
-    return this.runRepo.save(run);
+    await this.runRepo.save({ id: run.id, liveness_token: run.liveness_token, liveness_token_at: run.liveness_token_at });
+    return run;
   }
 
   /**
@@ -433,7 +447,8 @@ export class QaRunService {
     run.current_phase = phaseId;
     run.current_phase_at = now;
     run.phase_history = history;
-    return this.runRepo.save(run);
+    await this.runRepo.save({ id: run.id, current_phase: run.current_phase, current_phase_at: run.current_phase_at, phase_history: run.phase_history });
+    return run;
   }
 
   async attachArtifact(runId: string, accountId: string, resourceIds: string[]): Promise<QaRun> {
@@ -443,7 +458,8 @@ export class QaRunService {
       const all = new Set([...(run.artifact_resource_ids || []), ...add]);
       run.artifact_resource_ids = Array.from(all);
     }
-    return this.runRepo.save(run);
+    await this.runRepo.save({ id: run.id, artifact_resource_ids: run.artifact_resource_ids });
+    return run;
   }
 
   async completeRun(runId: string, accountId: string, status: QaRunStatus, summary?: string, builtCommit?: string): Promise<QaRun> {
@@ -497,7 +513,11 @@ export class QaRunService {
     if (finalSummary !== undefined) run.summary = finalSummary;
     if (builtCommit) run.built_commit = builtCommit;
     run.finished_at = new Date();
-    const saved = await this.runRepo.save(run);
+    // Do not overwrite delivery claims made concurrently by another completion.
+    await this.runRepo.update({ id: run.id }, {
+      status: run.status, summary: run.summary, built_commit: run.built_commit, finished_at: run.finished_at,
+    });
+    const saved = await this.getRun(run.id, accountId);
 
     // Warm-build advance (ticket be2f998a) — the QA mirror of the security
     // last_passed_commit advance (security-run.service.ts). On a genuine PASS with
@@ -513,47 +533,14 @@ export class QaRunService {
     // poison the next run into skipping a needed cold rebuild. Skip silently when
     // no commit was reported (can't warm to an unknown SHA; staying cold is safe).
     if (saved.status === 'passed' && saved.built_commit) {
-      await this.scenarioRepo.update(
-        { id: saved.scenario_id },
+      const warmed = await this.scenarioRepo.update(
+        { id: saved.scenario_id, ...(saved.result_policy_snapshot ? { project_id: saved.result_policy_snapshot.project_id || IsNull() } : {}) },
         { last_built_commit: saved.built_commit, built_at: saved.finished_at ?? new Date() },
       );
-      this.logService.info(
+      if (warmed.affected) this.logService.info(
         'QA',
         `run ${runId} passed → scenario ${saved.scenario_id} last_built_commit advanced to ${saved.built_commit} (next run warm)`,
       );
-    }
-
-    // On-pass sibling auto-close (ticket 64b9cbaf) — a green run is the SSOT that
-    // resolves the scenario's open QA-failure fix tickets. Gate on `saved.status`
-    // (the POST-gate verdict) so a self-reported pass the gates downgraded to
-    // failed does NOT close anything. When THIS run genuinely passed, close every
-    // open sibling auto ticket for the scenario so one pass clears the whole
-    // duplicate/flaky cluster instead of leaving each to manual closure. No-op
-    // unless the scenario opts into on_failure_ticket; never throws (self-guarded).
-    if (saved.status === 'passed') {
-      const scenario = await this.scenarioRepo.findOne({ where: { id: saved.scenario_id } });
-      if (scenario) {
-        await this.failureTicketService.maybeCloseSiblingsOnPass(saved, scenario);
-      }
-    }
-
-    // On-failure auto-ticket hook. completeRun is the single QaRun finalization
-    // choke point, so the side-effect is called here directly (synchronous,
-    // deterministic) rather than via the activity-event indirection. The
-    // service is a no-op unless the scenario opts in AND the run failed/errored,
-    // and it self-guards against double-filing via run.auto_ticket_id. It never
-    // throws, so a side-effect failure can't abort the finalization above.
-    // `build_failed` (ticket 80d52250) is a genuine failure and files a fix
-    // ticket exactly like failed/error — report_build_failure packs the build
-    // log tail into `summary`, so the filed ticket carries the build evidence
-    // (DoD #4). maybeCreateOnFailure has no status filter of its own, and
-    // _buildBody handles run-level failures with no per-step rows.
-    if (saved.status === 'failed' || saved.status === 'error' || saved.status === 'build_failed') {
-      const scenario = await this.scenarioRepo.findOne({ where: { id: saved.scenario_id } });
-      if (scenario) {
-        const ticketId = await this.failureTicketService.maybeCreateOnFailure(saved, scenario);
-        if (ticketId) saved.auto_ticket_id = ticketId;
-      }
     }
 
     // Single terminal point for agent-driven completion → advance the batch
@@ -707,6 +694,24 @@ export class QaRunService {
     await this._dispatchBatchIndex(batch, batch.current_index);
   }
 
+  /** Shared by agent completion, timeout reaping and dispatch failure. */
+  private async processRunResult(run: QaRun): Promise<void> {
+    if (!TERMINAL_QA_RUN_STATUSES.includes(run.status)) return;
+    if (this.failureTicketService) {
+      const scenario = await this.scenarioRepo.findOne({ where: { id: run.scenario_id, account_id: run.account_id } });
+      if (scenario) {
+        Object.assign(scenario, run.result_policy_snapshot ?? {});
+        if (run.status === 'passed') {
+          await this.failureTicketService.maybeCloseSiblingsOnPass(run, scenario);
+        } else if (isQaFailure(run.status)) {
+          const ticketId = await this.failureTicketService.maybeCreateOnFailure(run, scenario);
+          if (ticketId) run.auto_ticket_id = ticketId;
+        }
+      }
+    }
+    await this.resultDeliveryService?.deliver(run);
+  }
+
   /**
    * Called when a run reaches a terminal status — from completeRun (agent-
    * driven) or the reaper (dead run). If the run belongs to a still-running
@@ -717,6 +722,8 @@ export class QaRunService {
    * double-dispatched.
    */
   async onRunFinalized(run: QaRun): Promise<void> {
+    await this.processRunResult(run).catch(e =>
+      this.logService.warn('QA', `Result processing failed for run ${run.id}: ${e?.message || e}`));
     // Live QA task removal (ticket 09ed8def): this run reached a terminal status
     // — via completeRun (agent-driven) or the reaper (dead run) — so drop its
     // live kind:'qa' entry from the executor agent's active_tasks. agent_id is
@@ -769,10 +776,10 @@ export class QaRunService {
     // scenarios in this account so a stale/foreign id can't wedge the batch.
     if (Array.isArray(args.scenarioIds) && args.scenarioIds.length > 0) {
       const found = await this.scenarioRepo.find({
-        where: { id: In(args.scenarioIds), account_id: args.accountId },
+        where: { id: In(args.scenarioIds), account_id: args.accountId, ...(args.projectId ? { project_id: args.projectId } : {}) },
       });
       const byId = new Map(found.map((s) => [s.id, s]));
-      return args.scenarioIds.filter((id) => {
+      return [...new Set(args.scenarioIds)].filter((id) => {
         const s = byId.get(id);
         return !!s && s.enabled !== false;
       });
@@ -781,6 +788,7 @@ export class QaRunService {
       const qb = this.scenarioRepo.createQueryBuilder('s')
         .where('s.account_id = :account', { account: args.accountId })
         .andWhere('s.enabled = :en', { en: true });
+      if (args.projectId) qb.andWhere('s.project_id = :projectId', { projectId: args.projectId });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return rows.map((s) => s.id);
     }

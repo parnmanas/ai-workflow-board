@@ -1,5 +1,6 @@
 import { runtimeIdentityKey, parseRuntimeSpec } from '../common/runtime-spec';
-import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import type { QaResultDelivery } from '../modules/qa/qa-result-policy';
 import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 
 /**
@@ -17,6 +18,7 @@ import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/works
  * projection (qaScenarioToJson) so older rows render cleanly.
  */
 @Entity('qa_scenarios')
+@Index(['account_id', 'project_id'])
 export class QaScenario {
   @AfterLoad()
   @BeforeInsert()
@@ -31,6 +33,13 @@ export class QaScenario {
 
   @Column({ type: 'varchar' })
   account_id: string;
+
+  /** Account-owned project under test. */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  project_id: string | null;
+
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  result_delivery: QaResultDelivery | null;
 
   @Column({ type: 'varchar' })
   name: string;
@@ -87,7 +96,7 @@ export class QaScenario {
   workspace_folder: string;
 
   // Repo to run against (`project_id` or a raw `url`). null = no repo — the
-  // run folder is only created, nothing is cloned. simple-json (serializes
+  // project is used when set; otherwise nothing is cloned. simple-json (serializes
   // automatically); the create/update/projection paths still pass it through
   // explicitly.
   @Column({ type: 'simple-json', nullable: true, default: null })

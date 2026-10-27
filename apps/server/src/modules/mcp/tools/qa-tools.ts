@@ -41,6 +41,7 @@ import {
   buildModeSchema,
 } from '../../../common/workspace-folder-options';
 import type { ToolContext } from './context';
+import { qaResultDeliverySchema } from '../../qa/qa-result-policy';
 
 function scenarioToJson(s: QaScenario) {
   return {
@@ -55,6 +56,8 @@ function scenarioToJson(s: QaScenario) {
     enabled: s.enabled,
     tags: s.tags ?? [],
     on_failure_ticket: s.on_failure_ticket ?? null,
+    project_id: s.project_id ?? null,
+    result_delivery: s.result_delivery ?? null,
     created_by: s.created_by,
     max_runs: s.max_runs,
     // Working-folder options (shared with security profiles, ticket 4c49f567).
@@ -96,6 +99,9 @@ function runToJson(r: QaRun) {
     tested_commit: r.tested_commit ?? '',
     tested_environment: r.tested_environment ?? '',
     auto_ticket_id: r.auto_ticket_id ?? null,
+    result_policy_snapshot: r.result_policy_snapshot ?? null,
+    delivery_status: r.delivery_status ?? null,
+    delivery_results: r.delivery_results ?? [],
     rerun_generation: r.rerun_generation ?? 0,
     triggered_by_type: r.triggered_by_type,
     triggered_by_id: r.triggered_by_id,
@@ -177,11 +183,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'List reusable QA scenarios in a account.',
     {
       account_id: z.string().describe('Account ID (required)'),
+      project_id: z.string().nullable().optional().describe('Project ID; must belong to this Account'),
     },
-    async ({ account_id }) => {
+    async ({ account_id, project_id }) => {
       const repo = dataSource.getRepository(QaScenario);
       const qb = repo.createQueryBuilder('s')
         .where('s.account_id = :account', { account: account_id });
+      if (project_id) qb.andWhere('s.project_id = :projectId', { projectId: project_id });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return ok(rows.map(scenarioToJson));
     },
@@ -201,12 +209,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'create_qa_scenario',
-    'Create a QA scenario. `steps` is the ordered list the visualizer renders and the run ' +
-    'prompt is built from. `qa_driver` selects which QA driver MCP validates the feature ' +
-    '(e.g. "browser", "game-client", "http-api"); `qa_driver_config` holds driver settings ' +
-    '(start URL, window title, base endpoint…). See docs/qa-driver-guide.md.',
+    'Create a QA scenario. Ordered steps drive the visualizer and run prompt. ' +
+    'qa_driver selects the validating MCP driver; qa_driver_config supplies its settings. ' +
+    'See docs/qa-driver-guide.md.',
     {
       account_id: z.string().describe('Account ID (required)'),
+      project_id: z.string().nullable().optional().describe('Project ID; must belong to this Account'),
       name: z.string().describe('Scenario name (required)'),
       description: z.string().optional(),
       steps: z.array(stepSchema).optional().describe('Ordered step definitions'),
@@ -216,6 +224,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       qa_driver_config: z.record(z.string(), z.any()).optional().describe('Driver-specific config object'),
       enabled: z.boolean().optional(),
       tags: z.array(z.string()).optional(),
+      result_delivery: qaResultDeliverySchema.nullable().optional().describe('Optional result sharing channels and email; independent of failure tickets'),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see schema). Omit/null to disable.'),
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder. Omit/"" → deterministic default qa/<scenario_id>.'),
@@ -250,6 +259,8 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           enabled: args.enabled,
           tags: args.tags,
           on_failure_ticket: args.on_failure_ticket,
+          project_id: args.project_id,
+          result_delivery: args.result_delivery,
           created_by: caller?.agentId ?? '',
           max_runs: args.max_runs,
           workspace_folder: args.workspace_folder,
@@ -274,6 +285,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     {
       scenario_id: z.string().describe('QaScenario ID'),
       account_id: z.string().describe('Account ID (required, scope guard)'),
+      project_id: z.string().nullable().optional(),
       name: z.string().optional(),
       description: z.string().optional(),
       steps: z.array(stepSchema).optional(),
@@ -283,12 +295,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       qa_driver_config: z.record(z.string(), z.any()).optional(),
       enabled: z.boolean().optional(),
       tags: z.array(z.string()).optional(),
+      result_delivery: qaResultDeliverySchema.nullable().optional().describe('Optional result sharing channels and email; independent of failure tickets'),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see create_qa_scenario). Pass null to clear, omit to leave unchanged.'),
       max_runs: z.number().optional(),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_qa_scenario). "" resets to the qa/<scenario_id> default.'),
       build_target: z.string().optional().describe('Build & Artifact Registry target (see create_qa_scenario). "" resets to the qa_driver fallback.'),
       target_environment: z.string().optional().describe('Deployment-awareness target environment (see create_qa_scenario). "" clears the env binding.'),
-      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear (no repo).'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear the override (uses the scenario project when set).'),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),
       liveness_policy: LivenessPolicySchema.nullable().optional()
@@ -541,17 +554,19 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'get_qa_batch for progress.',
     {
       account_id: z.string().describe('Account ID (required)'),
+      project_id: z.string().nullable().optional().describe('Project ID; must belong to this Account'),
       scenario_ids: z.array(z.string()).optional().describe('Ordered scenario ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled scenario in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
     },
-    async ({ account_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+    async ({ account_id, project_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const batch = await qaRunService.startBatch({
           accountId: account_id,
           scenarioIds: scenario_ids,
+          projectId: project_id || undefined,
           all: !!all,
           stopOnFail: !!stop_on_fail,
           triggeredByType: caller?.agentId ? 'agent' : 'system',

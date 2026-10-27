@@ -30,6 +30,7 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
 
   return [
     `# QA Run: ${scenario.name}`,
+    scenario.project_id ? `**Project:** \`${scenario.project_id}\`` : ``,
     ``,
     `You are executing a QA scenario against the **${scenario.qa_driver || 'unspecified'}** driver.`,
     scenario.description ? `\n${scenario.description}\n` : ``,
@@ -70,6 +71,7 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
     stepLines,
     ``,
     `## How to run`,
+    `Report results through complete_qa_run. The server handles configured fix tickets, sharing and email; do not create additional fix tickets or send result reports yourself.`,
     `1. Use the QA driver MCP (the "${scenario.qa_driver}" driver) to perform each step **in order**.`,
     `2. After each step, capture evidence (screenshot / video / state dump) by uploading it as a Resource (\`save_resource\`), then call \`record_qa_step\` with:`,
     `   - \`run_id\`: \`${runId}\``,

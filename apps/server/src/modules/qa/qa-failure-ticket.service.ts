@@ -193,14 +193,16 @@ export class QaFailureTicketService {
     const marker = `${SCENARIO_TAG_PREFIX}${scenario.id}`;
     // Match the JSON-string tag list (`tags` is a JSON string column). LIKE
     // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
-    return this.dataSource.getRepository(Ticket).createQueryBuilder('t')
+    const query = this.dataSource.getRepository(Ticket).createQueryBuilder('t')
       .where('t.account_id = :account', { account: accountId })
       .andWhere('t.depth = 0')
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.status <> :done', { done: DONE_STATUS })
       .andWhere('t.tags LIKE :marker', { marker: `%${marker}%` })
-      .orderBy('t.created_at', order)
-      .getMany();
+      .orderBy('t.created_at', order);
+    const projectId = scenario.on_failure_ticket?.project_id || scenario.project_id;
+    if (projectId) query.andWhere('t.project_id = :projectId', { projectId });
+    return query.getMany();
   }
 
   private async _findOpenFailureTicket(scenario: QaScenario, accountId: string): Promise<Ticket | null> {
@@ -267,13 +269,17 @@ export class QaFailureTicketService {
   ): Promise<string> {
     // A project id that no longer resolves in this account must not swallow
     // the failure report — file it without a project and say so in the log.
-    let projectId: string | null = (cfg.project_id || '').trim() || null;
+    let projectId: string | null = (cfg.project_id || scenario.project_id || '').trim() || null;
     if (projectId && !(await this.projects.getInAccount(projectId, accountId))) {
       this.logService.warn('QA', `on_failure_ticket: project ${projectId} not found in account ${accountId} (scenario ${scenario.id}) — filing without a project`);
       projectId = null;
     }
-    // assignee_runtime → scenario target_runtime → (omitted) project default_assignee.
-    const assignee = parseRuntimeSpec(cfg.assignee_runtime) || parseRuntimeSpec(scenario.target_runtime);
+    // Explicit assignee → selected project default → QA runtime. Legacy scenarios
+    // without project_id retain their original QA-runtime fallback.
+    const project = projectId ? await this.projects.getInAccount(projectId, accountId) : null;
+    const assignee = parseRuntimeSpec(cfg.assignee_runtime)
+      || (scenario.project_id ? parseRuntimeSpec(project?.default_assignee) : null)
+      || parseRuntimeSpec(scenario.target_runtime);
 
     const { ticket } = await this.ticketService.create(accountId, {
       title: this._buildTitle(cfg, scenario),

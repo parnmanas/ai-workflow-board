@@ -12,8 +12,11 @@ import { formatAgentDisplayName } from '../../utils/agentName';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 import MediaLightbox from '../common/MediaLightbox';
 import { canOpenTicket, ticketPath } from '../../utils/ticketPath';
+import { useProjects } from '../../projects/useProjects';
+import QaResultDeliveryFields from './QaResultDeliveryFields';
+import { filterQaScenarios, qaBatchIds, qaDeliveryForm, qaDeliveryPayload } from './qaScenario.logic';
 import OnFailureTicketTargetFields from './OnFailureTicketTargetFields';
-import { onFailureTicketFromForm, onFailureTicketToForm, type OnFailureTicketForm } from './onFailureTicket.logic';
+import { onFailureTicketFromForm, onFailureTicketToForm, projectSelectOptions, type OnFailureTicketForm } from './onFailureTicket.logic';
 import {
   WorkspaceFolderOptions,
   initWorkspaceFolderState,
@@ -53,6 +56,10 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
   const { showToast } = useToast();
   const effectiveAccountId = accountId || (getActiveAccountId() || '');
 
+  const { projects } = useProjects(effectiveAccountId);
+  const [projectFilter, setProjectFilter] = useState('');
+  const [query, setQuery] = useState('');
+  const [enabledFilter, setEnabledFilter] = useState('all');
   const [scenarios, setScenarios] = useState<QaScenarioListItem[]>([]);
   const [agents, setAgents] = useState<QaAgent[]>([]);
   // P4b: runtime 선언 → Agent 매칭용 full 행 (표시용 agents 와 별도 보관).
@@ -139,7 +146,9 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
 
   // Scenarios in display order whose id is checked — preserves the table order
   // so the sequential batch runs top-to-bottom.
-  const orderedSelected = scenarios.filter((s) => selectedIds.has(s.id));
+  const visibleScenarios = filterQaScenarios(scenarios, projectFilter, query, enabledFilter);
+  const visibleRunIds = qaBatchIds(visibleScenarios);
+  const orderedSelected = visibleScenarios.filter(s => s.enabled && selectedIds.has(s.id));
 
   const startBatch = useCallback(async (payload: { all?: boolean; scenario_ids?: string[] }) => {
     setBatchStarting(true);
@@ -295,16 +304,16 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
           {translate('Scenario-based QA — run a scenario, accumulate step pass/fail + screenshots, re-run to compare.')}</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {/* 순차 batch 실행: 한 번에 하나씩, 끝나야 다음. */}
           <Button
             variant="secondary"
             size="md"
-            disabled={scenarios.length === 0 || batchStarting || batchRunning}
-            onClick={() => startBatch({ all: true })}
-            title={translate('현재 scope 의 enabled 시나리오를 이름순으로 순차 실행')}
+            disabled={visibleRunIds.length === 0 || batchStarting || batchRunning}
+            onClick={() => startBatch({ scenario_ids: visibleRunIds })}
+            title={translate('현재 필터에 맞는 활성 시나리오만 순차 실행')}
           >
-            {translate('▶ 전체 순차 실행')}</Button>
+            {translate('▶ 필터 결과 실행')} ({visibleRunIds.length})</Button>
           <Button
             variant="secondary"
             size="md"
@@ -318,6 +327,15 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
         </div>
       </div>
 
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+        <Select aria-label={translate('프로젝트')} label={translate('프로젝트')} value={projectFilter}
+          options={[...projectSelectOptions(projects, projectFilter === 'unassigned' ? '' : projectFilter, translate('모든 프로젝트')), { value: 'unassigned', label: translate('프로젝트 미지정') }]}
+          onChange={e => { setProjectFilter(e.target.value); setSelectedIds(new Set()); }} />
+        <Input aria-label={translate('시나리오 검색')} label={translate('시나리오 검색')} value={query} placeholder={translate('이름·설명·태그')} onChange={e => setQuery(e.target.value)} />
+        <Select aria-label={translate('활성 상태')} label={translate('활성 상태')} value={enabledFilter} options={[
+          { value: 'all', label: translate('모두') }, { value: 'enabled', label: translate('활성') }, { value: 'disabled', label: translate('비활성') },
+        ]} onChange={e => setEnabledFilter(e.target.value)} />
+      </div>
       {/* 환경별 live commit 배지 (배포 인지 — ticket 8ce72b18) */}
       <DeploymentBadges deployments={deployments} />
 
@@ -335,9 +353,12 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
             {translate('No QA scenarios yet. Create one and point it at a QA driver (browser / game-client / http-api). See')} <code>docs/qa-driver-guide.md</code>.
           </div>
         </Card>
+      ) : visibleScenarios.length === 0 ? (
+        <Card padding="20px">{translate('필터에 맞는 시나리오가 없습니다.')}</Card>
       ) : (
         <ScenarioTable
-          scenarios={scenarios}
+          projectName={id => projects.find(p => p.id === id)?.name || (id ? id.slice(0, 8) : translate('미지정'))}
+          scenarios={visibleScenarios}
           agentName={agentName}
           running={running}
           selectedIds={selectedIds}
@@ -350,6 +371,7 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
       )}
 
       <SchedulesSection
+        projectName={id => projects.find(p => p.id === id)?.name || (id ? id.slice(0, 8) : translate('모든 프로젝트'))}
         schedules={schedules}
         scenarios={scenarios}
         disabled={scenarios.length === 0}
@@ -444,6 +466,7 @@ function formatCadence(s: Pick<QaSchedule, 'cron' | 'interval_ms'>): string {
 }
 
 interface SchedulesSectionProps {
+  projectName: (id: string | null) => string;
   schedules: QaSchedule[];
   scenarios: QaScenarioListItem[];
   disabled: boolean;
@@ -460,7 +483,7 @@ interface SchedulesSectionProps {
  * batch result, plus run-now / edit / delete. Scheduling reuses the sequential
  * batch orchestrator, so a fired schedule surfaces in the same progress banner.
  */
-function SchedulesSection({ schedules, scenarios, disabled, onNew, onEdit, onToggle, onRunNow, onDelete }: SchedulesSectionProps) {
+function SchedulesSection({ projectName, schedules, scenarios, disabled, onNew, onEdit, onToggle, onRunNow, onDelete }: SchedulesSectionProps) {
   useLocale();
   return (
     <div style={{ marginTop: 28 }}>
@@ -498,7 +521,8 @@ function SchedulesSection({ schedules, scenarios, disabled, onNew, onEdit, onTog
                 <ScheduleRow
                   key={s.id}
                   s={s}
-                  scenarioCount={scenarios.length}
+                  projectName={projectName(s.project_id || null)}
+                  scenarioCount={scenarios.filter(row => row.enabled && (!s.project_id || row.project_id === s.project_id) && (s.scope === 'all' || s.scenario_ids.includes(row.id))).length}
                   onEdit={() => onEdit(s)}
                   onToggle={() => onToggle(s)}
                   onRunNow={() => onRunNow(s)}
@@ -513,8 +537,9 @@ function SchedulesSection({ schedules, scenarios, disabled, onNew, onEdit, onTog
   );
 }
 
-function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }: {
+function ScheduleRow({ s, projectName, scenarioCount, onEdit, onToggle, onRunNow, onDelete }: {
   s: QaSchedule;
+  projectName: string;
   scenarioCount: number;
   onEdit: () => void;
   onToggle: () => void;
@@ -523,7 +548,7 @@ function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }:
 }) {
   useLocale();
   const [hover, setHover] = useState(false);
-  const scopeLabel = s.scope === 'all' ? translate('전체 ({0})', { 0: scenarioCount }) : translate('선택 {0}', { 0: s.scenario_ids.length });
+  const scopeLabel = s.scope === 'all' ? translate('전체 ({0})', { 0: scenarioCount }) : translate('선택 {0}', { 0: scenarioCount });
   // next_run_at as a compact UTC wall-clock (cron is interpreted in UTC).
   const nextUtc = s.next_run_at ? new Date(s.next_run_at).toISOString().replace('T', ' ').slice(0, 16) : '—';
   return (
@@ -534,6 +559,7 @@ function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }:
     >
       <td style={TD}>
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{projectName}</div>
       </td>
       <td style={TD}>
         <Badge variant={s.scope === 'all' ? 'info' : 'neutral'} size="sm">{scopeLabel}</Badge>
@@ -565,6 +591,7 @@ function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }:
 // ── Scenario list table (status-dashboard view) ──────────────────────────────
 
 interface ScenarioTableProps {
+  projectName: (id: string | null) => string;
   scenarios: QaScenarioListItem[];
   agentName: (id: string, spec?: any) => string;
   running: string | null;
@@ -591,7 +618,7 @@ const TD: React.CSSProperties = {
  * scenario, last-run time + result scannable down a column. Replaces the old
  * card grid (prompt/description bodies live in the detail view, not here).
  */
-function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioTableProps) {
+function ScenarioTable({ projectName, scenarios, agentName, running, selectedIds, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioTableProps) {
   useLocale();
   // Header checkbox = select/clear all currently listed scenarios.
   const allSelected = scenarios.length > 0 && scenarios.every((s) => selectedIds.has(s.id));
@@ -610,6 +637,7 @@ function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSel
               <input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} />
             </th>
             <th style={TH}>{translate('Name')}</th>
+            <th style={TH}>{translate('프로젝트 / 결과 처리')}</th>
             <th style={TH}>{translate('Driver')}</th>
             <th style={TH}>{translate('Agent')}</th>
             <th style={TH}>{translate('Last run')}</th>
@@ -622,6 +650,7 @@ function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSel
             <ScenarioRow
               key={s.id}
               s={s}
+              projectName={projectName(s.project_id)}
               agentName={agentName}
               running={running === s.id}
               selected={selectedIds.has(s.id)}
@@ -639,6 +668,7 @@ function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSel
 }
 
 interface ScenarioRowProps {
+  projectName: string;
   s: QaScenarioListItem;
   agentName: (id: string, spec?: any) => string;
   running: boolean;
@@ -650,7 +680,7 @@ interface ScenarioRowProps {
   onDelete: () => void;
 }
 
-function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioRowProps) {
+function ScenarioRow({ projectName, s, agentName, running, selected, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioRowProps) {
   useLocale();
   const [hover, setHover] = useState(false);
   // Buttons must not bubble to the row's open handler.
@@ -673,6 +703,14 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
         </div>
       </td>
       <td style={TD}>
+        <div>{projectName}</div>
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{[
+          s.on_failure_ticket?.enabled ? translate('실패 티켓') : '',
+          s.result_delivery?.channel_ids.length ? translate('채널 공유') : '',
+          s.result_delivery?.email ? translate('메일') : '',
+        ].filter(Boolean).join(' · ') || translate('기록만')}</div>
+      </td>
+      <td style={TD}>
         {s.qa_driver ? <Badge variant="info" size="sm">{s.qa_driver}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id, (s as any).target_runtime)}</td>
@@ -686,7 +724,7 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
-          <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running}>
+          <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running || !s.enabled}>
             {running ? translate('Starting…') : translate('▶ Run')}
           </Button>
           <Button variant="ghost" size="sm" onClick={stop(onEdit)}>{translate('Edit')}</Button>
@@ -918,6 +956,12 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
         )}
       </div>
       <PhaseTimeline run={run} phases={phases} />
+      {run.delivery_status && <div style={{ fontSize: 12, marginBottom: 12 }}>
+        <strong>{translate('결과 전달')}: </strong>{({ sending: translate('전송 중 / 결과 확인 필요'), sent: translate('전송 완료'), partial: translate('일부 전송 실패'), failed: translate('전송 실패') })[run.delivery_status]}
+        {(run.delivery_results || []).map(result => <div key={result.target}>
+          {result.target}: {result.status === 'sent' ? translate('전송 완료') : result.error || translate('전송 실패')}
+        </div>)}
+      </div>}
       {run.summary && (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, marginBottom: 12, whiteSpace: 'pre-wrap' }}>{run.summary}</div>
       )}
@@ -1180,6 +1224,9 @@ interface ScenarioEditorProps {
 }
 
 function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: ScenarioEditorProps) {
+  const { projects, error: projectsError } = useProjects(accountId);
+  const [projectId, setProjectId] = useState(scenario?.project_id || '');
+  const [deliveryForm, setDeliveryForm] = useState(() => qaDeliveryForm(scenario?.result_delivery));
   useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(scenario?.name ?? '');
@@ -1240,6 +1287,9 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
           } : {}),
         }
       : baseOft) as QaOnFailureTicketConfig;
+    let resultDelivery;
+    try { resultDelivery = qaDeliveryPayload(deliveryForm); }
+    catch (e: any) { showToast(translate(e.message), 'error'); return; }
     const wfPayload = buildWorkspaceFolderPayload(wf);
     // QA phases: off OR empty → null (legacy single timeout); on with rows →
     // validate against the WRITE contract before sending.
@@ -1259,6 +1309,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
           account_id: accountId, name, description, ...targetPayload,
           qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
           target_environment: targetEnvironment.trim(),
+          project_id: projectId || null, result_delivery: resultDelivery,
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       } else {
@@ -1266,6 +1317,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
           account_id: accountId, name, description,
           ...targetPayload, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
           target_environment: targetEnvironment.trim(),
+          project_id: projectId || null, result_delivery: resultDelivery,
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       }
@@ -1301,6 +1353,10 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <Input label={translate('Name')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
         <Input label={translate('Description')} value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
+        <Select aria-label={translate('프로젝트')} label={translate('프로젝트')} value={projectId}
+          options={projectSelectOptions(projects, projectId, translate('프로젝트 미지정'))}
+          onChange={e => setProjectId(e.target.value)} />
+        <div style={{ fontSize: 12 }}>{projectsError || translate('검증할 프로젝트입니다. 별도 저장소·티켓 프로젝트를 지정하지 않으면 이 프로젝트를 사용합니다.')}</div>
         <DeclareRuntimeSection
           initialValue={pendingSpec}
           accountId={accountId}
@@ -1370,6 +1426,11 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
           )}
         </div>
 
+        <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12 }}>
+          <SectionLabel>{translate('결과 전달')}</SectionLabel>
+          <QaResultDeliveryFields accountId={accountId} form={deliveryForm} onChange={patch => setDeliveryForm(prev => ({ ...prev, ...patch }))} />
+        </div>
+
         {/* 실패 시 → 티켓 생성 (on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
@@ -1385,7 +1446,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
                 onChange={patchOft}
                 defaultTagsHint={translate('비우면 qa-failure, auto 태그로 생성됩니다.')}
               />
-              <div style={{ fontSize: 12 }}>{translate('수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)')}</div>
+              <div style={{ fontSize: 12 }}>{translate('수정 티켓 담당자 (비우면 프로젝트 기본 담당자 → QA 실행 담당자)')}</div>
               <DeclareRuntimeSection accountId={accountId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
               {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>{translate('초기화')}</button></div>}
 
@@ -1446,6 +1507,9 @@ interface ScheduleEditorProps {
 }
 
 function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: ScheduleEditorProps) {
+  const { projects } = useProjects(accountId);
+  const [projectId, setProjectId] = useState(schedule?.project_id || '');
+  const projectScenarios = scenarios.filter(s => !projectId || s.project_id === projectId);
   useLocale();
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
@@ -1484,7 +1548,7 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
   const handleSave = async () => {
     if (!name.trim()) { showToast(translate('이름을 입력하세요'), 'error'); return; }
     // scope='selected' 는 시나리오 순서를 화면 목록 순서로 보존.
-    const orderedIds = scenarios.filter((s) => selectedIds.has(s.id)).map((s) => s.id);
+    const orderedIds = projectScenarios.filter((s) => selectedIds.has(s.id)).map((s) => s.id);
     if (scope === 'selected' && orderedIds.length === 0) {
       showToast(translate('scope=\'selected\' 는 시나리오를 1개 이상 선택해야 합니다'), 'error'); return;
     }
@@ -1498,6 +1562,7 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
       account_id: accountId,
       name: name.trim(),
       scope,
+      project_id: projectId || null,
       scenario_ids: scope === 'selected' ? orderedIds : [],
       enabled,
       stop_on_fail: stopOnFail,
@@ -1540,6 +1605,10 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Input label={translate('이름')} value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
 
+        <Select aria-label={translate('프로젝트')} label={translate('프로젝트')} value={projectId}
+          options={projectSelectOptions(projects, projectId, translate('모든 프로젝트'))}
+          onChange={e => setProjectId(e.target.value)} />
+
         {/* Scope: 전체 vs 선택 시나리오 토글 */}
         <div>
           <label style={fieldLabel}>{translate('대상 시나리오')}</label>
@@ -1553,8 +1622,8 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
           </div>
           {scope === 'selected' && (
             <div style={{ maxHeight: 180, overflowY: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {scenarios.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('시나리오가 없습니다.')}</div>}
-              {scenarios.map((s) => (
+              {projectScenarios.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('시나리오가 없습니다.')}</div>}
+              {projectScenarios.map((s) => (
                 <label key={s.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
                   <input type="checkbox" checked={selectedIds.has(s.id)} onChange={() => toggleScenario(s.id)} />
                   {s.name}

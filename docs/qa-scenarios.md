@@ -84,6 +84,60 @@ The `steps`, `tags`, and `qa_driver*` values come straight from
 
 ## Running a scenario
 
+### 프로젝트와 결과 처리
+
+QA 시나리오의 `project_id`는 같은 Account의 기존 Project를 가리킨다. QA 화면에서
+프로젝트·이름/설명/태그·활성 여부로 필터링하고 **필터 결과 실행** 또는 **선택 순차 실행**을
+누르면 현재 보이는 활성 시나리오만 실행한다. 숨겨진 선택 항목과 비활성 시나리오는 실행하지 않는다.
+기존 시나리오는 프로젝트 미지정으로 유지되며 편집 화면에서 연결할 수 있다.
+
+별도 `repo_ref`가 없으면 선택한 프로젝트의 저장소와 기본 브랜치를 검증에 사용한다.
+실패 티켓의 프로젝트는 `on_failure_ticket.project_id` → 시나리오 `project_id` 순서로 정한다.
+프로젝트를 연결한 시나리오의 수정 담당자는 명시한 `assignee_runtime` → 티켓 프로젝트의
+`default_assignee` → QA 실행 담당자 순서다. 프로젝트 미지정 시나리오는 기존 배정 순서를 유지한다.
+프로젝트를 바꾸면 이전 빌드의 warm 상태를 초기화한다.
+
+결과는 항상 실행 기록에 저장된다. 시나리오마다 다음 옵션을 독립적으로 선택할 수 있다.
+
+- **실패 티켓 자동 생성**: 기존 `on_failure_ticket.enabled`. 생성 상태(todo/backlog),
+  우선순위, 태그, 프로젝트 재정의, 담당자, 중복 방지와 수정 후 재실행을 설정한다.
+  `failed`, `error`, `build_failed` 결과를 처리한다.
+- **내용을 채널에 공유**: `result_delivery.channel_ids`로 같은 Account의 활성 Discord 채널을 선택한다.
+  채널 설정에 봇 토큰과 대상 채널이 등록되어 있어야 한다.
+- **결과를 메일로 보내기**: `result_delivery.email`에 기존 비즈니스 메일의
+  `connection_id`, 등록된 발신 주소 `from`, 최대 10개의 수신 주소 `to`를 지정한다.
+  발신 가능한 활성 SMTP/JMAP 연결과 같은 Account의 서버 전용 Mail credential,
+  소유자의 비즈니스 권한이 필요하다. 인증 정보를 시나리오에 복사하지 않는다.
+- 공유·메일 전달 시점은 `result_delivery.when`의 `failure`(실패만, 기본값) 또는 `always`(모든 종료 결과)다.
+  티켓을 끄고 공유나 메일만 선택할 수 있고, 전부 끄면 실행 기록만 남긴다.
+
+예시 (REST와 MCP 생성/수정에서 같은 필드를 사용):
+
+```json
+{
+  "project_id": "<project-id>",
+  "on_failure_ticket": { "enabled": false },
+  "result_delivery": {
+    "when": "always",
+    "channel_ids": ["<channel-id>"],
+    "email": { "connection_id": "<mail-connection-id>", "from": "qa@example.com", "to": ["owner@example.com"] }
+  }
+}
+```
+
+`result_delivery: null`로 전송을 끈다. 시작 시 프로젝트·티켓·공유·메일 설정을
+`QaRun.result_policy_snapshot`에 고정하므로 실행 도중 편집해도 이미 시작한 결과의 수신처는 바뀌지 않는다.
+전송 직전에도 소유권과 연결 상태를 재확인한다. 결과의 `delivery_status`와 `delivery_results`에서
+완료·실패·일부 실패를 확인할 수 있다. 같은 run을 다시 완료해도 재전송하지 않으며,
+SMTP 응답 불명이나 프로세스 중단으로 전송이 불확실하면 발신 기록을 확인한다(자동 재시도 없음).
+공유·메일 오류는 QA 판정이나 다음 시나리오 실행을 실패시키지 않는다.
+
+`GET /api/qa/scenarios?project_id=...` 및 `list_qa_scenarios`는 프로젝트 필터를 지원한다.
+`POST /api/qa/batches`와 `start_qa_batch`도 `project_id`를 받으며, 명시적 `scenario_ids`와 함께
+보내면 같은 프로젝트의 활성 시나리오만 실행한다. 프로젝트별 예약 실행은 [QA 스케줄러](./qa-scheduler.md)를 따른다.
+
+### 실행 흐름
+
 `start_qa_run(scenario_id)` creates a `QaRun` + a `ChatRoom`, adds the scenario's
 target agent (`target_runtime`), and posts the rendered step prompt (`qa-prompt.ts`). The agent
 then, per step: drives the `awb-mcp` driver, uploads evidence with `save_resource`,

@@ -974,7 +974,7 @@ export const api = {
   },
 
   // ─── Scenario-based QA (ticket 3c655d20) ──────────────
-  listQaScenarios: (_accountId: string) => request<QaScenarioListItem[]>('/qa/scenarios'),
+  listQaScenarios: (_accountId: string, projectId?: string) => request<QaScenarioListItem[]>(`/qa/scenarios${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
   getQaScenario: (id: string) => request<QaScenario>(`/qa/scenarios/${id}`),
   createQaScenario: (data: {
     account_id: string;
@@ -988,6 +988,8 @@ export const api = {
     qa_driver_config?: Record<string, any> | null;
     enabled?: boolean;
     tags?: string[];
+    project_id?: string | null;
+    result_delivery?: QaScenario['result_delivery'];
     on_failure_ticket?: QaScenario['on_failure_ticket'];
     max_runs?: number;
     workspace_folder?: string;
@@ -1013,6 +1015,8 @@ export const api = {
       qa_driver_config?: Record<string, any> | null;
       enabled?: boolean;
       tags?: string[];
+      project_id?: string | null;
+      result_delivery?: QaScenario['result_delivery'];
       on_failure_ticket?: QaScenario['on_failure_ticket'];
       max_runs?: number;
       workspace_folder?: string;
@@ -1051,6 +1055,7 @@ export const api = {
   // scenario dispatches now; the rest run one-at-a-time as each finalizes.
   startQaBatch: (data: {
     account_id: string;
+    project_id?: string | null;
     scenario_ids?: string[];
     all?: boolean;
     stop_on_fail?: boolean;
@@ -1068,6 +1073,7 @@ export const api = {
     account_id: string;
     name: string;
     scope?: QaScheduleScope;
+    project_id?: string | null;
     scenario_ids?: string[];
     cron?: string | null;
     interval_ms?: number | null;
@@ -1080,6 +1086,7 @@ export const api = {
       account_id: string;
       name?: string;
       scope?: QaScheduleScope;
+      project_id?: string | null;
       scenario_ids?: string[];
       cron?: string | null;
       interval_ms?: number | null;

@@ -181,7 +181,8 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
         run.finished_at = now;
         const marker = `[auto-reaped by QaRunReaperService] ${reason}`;
         run.summary = run.summary ? `${marker}\n\n${run.summary}` : marker;
-        await this.runRepo.save(run);
+        // Preserve a concurrent result-delivery claim; only persist the reaper's fields.
+        await this.runRepo.save({ id: run.id, status: run.status, summary: run.summary, finished_at: run.finished_at });
         reaped.push(run.id);
         details.push({ id: run.id, reason, age_min: ageMin });
         // If this dead run belonged to a sequential batch, advance the batch

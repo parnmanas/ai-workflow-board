@@ -495,7 +495,15 @@ export interface QaPhaseHistoryEntry {
   left_at: string | null;
 }
 
+export interface QaResultDelivery {
+  when: 'always' | 'failure';
+  channel_ids: string[];
+  email: { connection_id: string; from: string; to: string[] } | null;
+}
+
 export interface QaScenario {
+  project_id: string | null;
+  result_delivery: QaResultDelivery | null;
   id: string;
   account_id: string;
   name: string;
@@ -570,6 +578,9 @@ export interface QaStepResult {
 }
 
 export interface QaRun {
+  result_policy_snapshot?: Pick<QaScenario, 'name' | 'project_id' | 'on_failure_ticket' | 'result_delivery'> | null;
+  delivery_status?: 'sending' | 'sent' | 'partial' | 'failed' | null;
+  delivery_results?: Array<{ target: string; status: 'sent' | 'failed'; error?: string }> | null;
   id: string;
   scenario_id: string;
   account_id: string;
@@ -641,6 +652,7 @@ export type QaScheduleScope = 'all' | 'selected';
  * or `interval_ms`. `next_run_at`/`last_run_at`/`last_batch_id` track firing.
  */
 export interface QaSchedule {
+  project_id?: string | null;
   id: string;
   account_id: string;
   name: string;

@@ -38,6 +38,9 @@ export class QaSchedule {
   @Column({ type: 'varchar' })
   account_id: string;
 
+  @Column({ type: 'varchar', nullable: true, default: null })
+  project_id: string | null;
+
   @Column({ type: 'varchar' })
   name: string;
 

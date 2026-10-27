@@ -18,6 +18,7 @@ import {
 import { normalizeBuildTarget } from '../../common/build-artifact-options';
 import { normalizeTags as normalizeTicketTags } from '../tickets/ticket.service';
 import { QaRunService } from './qa-run.service';
+import { normalizeResultDelivery, validateQaProject, validateResultDelivery } from './qa-result-policy';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -91,6 +92,8 @@ export interface QaScenarioListItem extends Omit<QaScenario, 'refreshRuntimeIden
 
 export interface CreateScenarioInput {
   account_id: string;
+  project_id?: string | null;
+  result_delivery?: unknown;
   name: string;
   description?: string;
   steps?: any;
@@ -143,10 +146,11 @@ export class QaService {
     private readonly runService: QaRunService,
   ) {}
 
-  async list(accountId: string): Promise<QaScenarioListItem[]> {
+  async list(accountId: string, projectId?: string): Promise<QaScenarioListItem[]> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scenarioRepo.createQueryBuilder('s')
       .where('s.account_id = :account', { account: accountId });
+    if (projectId) qb.andWhere('s.project_id = :projectId', { projectId });
     const scenarios = await qb.orderBy('s.name', 'ASC').getMany();
     return this._attachLastRun(scenarios);
   }
@@ -226,9 +230,15 @@ export class QaService {
     if (!input.account_id) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     const target = await this.resolveTarget(input.account_id, input.target_agent_id, input.target_runtime);
+    const projectId = input.project_id?.trim() || null;
+    const resultDelivery = normalizeResultDelivery(input.result_delivery);
+    const failureTicket = normalizeOnFailureTicket(input.on_failure_ticket);
+    await this.validateSettings(input.account_id, projectId, resultDelivery, failureTicket);
 
     const created = this.scenarioRepo.create({
       account_id: input.account_id,
+      project_id: projectId,
+      result_delivery: resultDelivery,
       name: input.name.trim(),
       description: input.description ?? '',
       steps: normalizeSteps(input.steps),
@@ -238,7 +248,7 @@ export class QaService {
       qa_driver_config: input.qa_driver_config ?? null,
       enabled: input.enabled !== false,
       tags: normalizeTags(input.tags),
-      on_failure_ticket: normalizeOnFailureTicket(input.on_failure_ticket),
+      on_failure_ticket: failureTicket,
       created_by: input.created_by ?? '',
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
       workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
@@ -259,6 +269,12 @@ export class QaService {
   async update(id: string, accountId: string, patch: Partial<CreateScenarioInput>): Promise<QaScenario> {
     if (!accountId) throw makeError(400, 'account_id is required');
     const existing = await findOrFail(this.scenarioRepo, { where: { id, account_id: accountId } }, 'QA scenario not found in account');
+    if (patch.project_id !== undefined) {
+      const projectId = patch.project_id?.trim() || null;
+      if (existing.project_id !== projectId) { existing.last_built_commit = null; existing.built_at = null; }
+      existing.project_id = projectId;
+    }
+    if (patch.result_delivery !== undefined) existing.result_delivery = normalizeResultDelivery(patch.result_delivery);
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -297,7 +313,17 @@ export class QaService {
     if (patch.liveness_policy !== undefined) existing.liveness_policy = patch.liveness_policy ?? null;
     // qa_phases arrives pre-validated + serialized (string) or null to clear.
     if (patch.qa_phases !== undefined) existing.qa_phases = patch.qa_phases ?? null;
+    await this.validateSettings(accountId, existing.project_id, existing.result_delivery, existing.on_failure_ticket);
     return this.scenarioRepo.save(existing);
+  }
+
+  private async validateSettings(accountId: string, projectId: string | null, delivery: QaScenario['result_delivery'], ticket: QaOnFailureTicketConfig | null) {
+    await validateQaProject(this.dataSource, accountId, projectId);
+    if (ticket?.enabled) {
+      await validateQaProject(this.dataSource, accountId, ticket.project_id);
+      if (ticket.assignee_runtime) await this.resolveTarget(accountId, undefined, ticket.assignee_runtime);
+    }
+    await validateResultDelivery(this.dataSource, accountId, delivery);
   }
 
   async remove(id: string, accountId: string): Promise<void> {

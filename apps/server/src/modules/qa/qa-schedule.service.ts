@@ -8,6 +8,7 @@ import { InstanceQuiesceService } from '../../services/instance-quiesce.service'
 import { findOrFail } from '../../common/find-or-fail';
 import { QaRunService } from './qa-run.service';
 import { isValidCron, nextCronAfter } from './qa-cron';
+import { validateQaProject } from './qa-result-policy';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -29,6 +30,7 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
 
 export interface CreateScheduleInput {
   accountId: string;
+  projectId?: string | null;
   name: string;
   scope?: QaScheduleScope;
   scenarioIds?: string[] | null;
@@ -132,6 +134,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     if (!input.accountId) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
 
+    if (input.projectId) await validateQaProject(this.scheduleRepo.manager.connection, input.accountId, input.projectId);
     const scope: QaScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
     const scenarioIds = this._validateScope(scope, input.scenarioIds);
     const { cron, intervalMs } = this._validateCadence(input.cron, input.intervalMs);
@@ -139,6 +142,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
 
     const draft = this.scheduleRepo.create({
       account_id: input.accountId,
+      project_id: input.projectId?.trim() || null,
       name: input.name.trim(),
       scope,
       scenario_ids: scenarioIds,
@@ -158,6 +162,10 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
 
   async update(id: string, accountId: string, patch: UpdateScheduleInput): Promise<QaSchedule> {
     const schedule = await this.get(id, accountId);
+    if (patch.projectId !== undefined) {
+      if (patch.projectId) await validateQaProject(this.scheduleRepo.manager.connection, accountId, patch.projectId);
+      schedule.project_id = patch.projectId?.trim() || null;
+    }
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -333,6 +341,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
       if (ids.length === 0) throw makeError(400, 'selected schedule has no scenario_ids');
       return this.qaRunService.startBatch({
         accountId: schedule.account_id,
+        projectId: schedule.project_id || undefined,
         scenarioIds: ids,
         stopOnFail: schedule.stop_on_fail,
         triggeredByType: 'system',
@@ -343,6 +352,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     // TIME (no id snapshot), so scenario add/remove is reflected automatically.
     return this.qaRunService.startBatch({
       accountId: schedule.account_id,
+      projectId: schedule.project_id || undefined,
       all: true,
       stopOnFail: schedule.stop_on_fail,
       triggeredByType: 'system',

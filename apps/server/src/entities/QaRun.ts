@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
+import type { QaScenario } from './QaScenario';
 
 /**
  * QaRun — one execution of a QaScenario.
@@ -21,6 +22,16 @@ export class QaRun {
 
   @Column({ type: 'varchar' })
   account_id: string;
+
+  // Freeze routing at dispatch so edits cannot redirect an in-flight report.
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  result_policy_snapshot: Pick<QaScenario, 'name' | 'project_id' | 'on_failure_ticket' | 'result_delivery'> | null;
+
+  @Column({ type: 'varchar', nullable: true, default: null })
+  delivery_status: 'sending' | 'sent' | 'partial' | 'failed' | null;
+
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  delivery_results: Array<{ target: string; status: 'sent' | 'failed'; error?: string }> | null;
 
   // pending → running → passed | failed | error | build_failed
   // `build_failed` is a first-class build death (ticket 80d52250): the build step

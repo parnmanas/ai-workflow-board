@@ -245,6 +245,7 @@ test/qa-live-agent-status.test.mjs
 test/qa-liveness-policy.test.mjs
 test/qa-phases-e2e.test.mjs
 test/qa-phases.test.mjs
+test/qa-project-results.test.mjs
 test/qa-rerun-on-fix-timer.test.mjs
 test/qa-run-batch-reaper-behavior.test.mjs
 test/qa-run-batch-reaper-presence.test.mjs

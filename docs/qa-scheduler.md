@@ -19,6 +19,12 @@
 agent prompt 파싱은 없다. 트리거는 순수하게 시간 기반이고, batch 실행은 직접
 `QaRunService.startBatch` 호출이다.
 
+스케줄의 `project_id`를 설정하면 해당 Account의 프로젝트에 속한 활성 시나리오만 실행한다.
+`scope='all'`은 실행 시점에 그 프로젝트의 시나리오를 다시 조회하고,
+`scope='selected'`는 선택 목록과 프로젝트 필터의 교집합을 실행한다. `project_id: null`이면
+프로젝트 제한을 해제한다. REST·MCP 생성/수정 및 QA 스케줄 편집기에서 동일하게 설정하며,
+즉시 실행과 예약 실행 모두 같은 필터를 적용한다. 결과 처리 방식은 각 시나리오의 설정을 따른다.
+
 ## Moving parts
 
 | Piece | Where | Role |

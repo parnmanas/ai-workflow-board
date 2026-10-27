@@ -67,6 +67,7 @@ function scheduleToJson(s: QaSchedule) {
     account_id: s.account_id,
     name: s.name,
     scope: s.scope,
+    project_id: s.project_id ?? null,
     scenario_ids: s.scenario_ids ?? [],
     cron: s.cron,
     interval_ms: s.interval_ms,
@@ -117,7 +118,8 @@ export class QaScenarioController {
   ) {
     if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
     const ids: string[] = (req as any)?.accessibleAccountIds || [accountId];
-    const rows = (await Promise.all(ids.map(id => this.qaService.list(id)))).flat();
+    const projectId = typeof req.query.project_id === 'string' ? req.query.project_id : undefined;
+    const rows = (await Promise.all(ids.map(id => this.qaService.list(id, projectId)))).flat();
     const unique = Array.from(new Map(rows.map(row => [row.id, row])).values());
     return res.json(unique);
   }
@@ -261,6 +263,7 @@ export class QaScenarioController {
       const batch = await this.qaRunService.startBatch({
         accountId: body?.account_id,
         scenarioIds: Array.isArray(body?.scenario_ids) ? body.scenario_ids : undefined,
+        projectId: typeof body?.project_id === 'string' ? body.project_id : undefined,
         all: !!body?.all,
         stopOnFail: !!body?.stop_on_fail,
         triggeredByType: 'user',
@@ -317,6 +320,7 @@ export class QaScenarioController {
         name: body?.name,
         scope: body?.scope,
         scenarioIds: body?.scenario_ids,
+        projectId: body?.project_id,
         cron: body?.cron,
         intervalMs: body?.interval_ms,
         enabled: body?.enabled,
@@ -336,6 +340,7 @@ export class QaScenarioController {
         name: body?.name,
         scope: body?.scope,
         scenarioIds: body?.scenario_ids,
+        projectId: body?.project_id,
         cron: body?.cron,
         intervalMs: body?.interval_ms,
         enabled: body?.enabled,
